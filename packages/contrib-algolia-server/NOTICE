@@ -1,0 +1,12 @@
+DocSlurp
+Copyright 2025-2026 DocSlurp, Inc. and contributors
+
+Earlier versions were distributed under the Apache License, Version 2.0.
+Existing license grants remain in effect for those versions. Retain applicable
+upstream copyright, patent, license and attribution notices when redistributing
+code from those versions. The accompanying Apache-2.0 text preserves the
+previous repository notice and supplies the future license for SSPL versions.
+
+Third-party components retain their own licenses. DocSlurp's license does not
+relicense dependencies, models, fonts, assets or separately licensed files.
+See THIRD_PARTY_NOTICES.md in the repository for the compatibility review.

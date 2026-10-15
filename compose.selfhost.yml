@@ -1,0 +1,198 @@
+# Standalone single-host install. Run with:
+# docker compose --env-file .env.selfhost -f compose.selfhost.yml up -d --build
+# Never combine with docker-compose.yml; that file is for development.
+name: docslurp-selfhost
+
+x-server-environment: &server-environment
+  NODE_ENV: production
+  DATABASE_URL: ${DATABASE_URL:?Run node scripts/selfhost-init.mjs first}
+  APP_URL: ${SELFHOST_URL:?Set SELFHOST_URL}
+  API_URL: ${SELFHOST_URL:?Set SELFHOST_URL}
+  PUBLIC_API_URL: ${SELFHOST_URL:?Set SELFHOST_URL}
+  PORT: "8787"
+  HOST: 0.0.0.0
+  BETTER_AUTH_URL: ${SELFHOST_URL:?Set SELFHOST_URL}
+  # Only honoured for a plain http://localhost origin; scripts/selfhost-init.mjs leaves it false.
+  DOCSLURP_ALLOW_INSECURE_LOCAL_AUTH_ORIGIN: ${DOCSLURP_ALLOW_INSECURE_LOCAL_AUTH_ORIGIN:-false}
+  BETTER_AUTH_SECRET: ${BETTER_AUTH_SECRET:?Missing auth secret}
+  OAUTH_TOKEN_ENCRYPTION_KEY: ${OAUTH_TOKEN_ENCRYPTION_KEY:?Missing OAuth encryption key}
+  CREDENTIALS_ENCRYPTION_KEY: ${CREDENTIALS_ENCRYPTION_KEY:?Missing credential encryption key}
+  SECRETS_ENCRYPTION_KEY: ${SECRETS_ENCRYPTION_KEY:?Missing workspace secret encryption key}
+  METRICS_SECRET: ${METRICS_SECRET:?Missing metrics secret}
+  # Bucket name must match the createbucket service below.
+  STORAGE_URI: s3://docslurp-files?endpoint=http://minio:9000&region=us-east-1
+  # Also the MinIO root credentials.
+  AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:?Missing storage key}
+  AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:?Missing storage secret}
+  VECTOR_BACKENDS: lancedb
+  LANCEDB_URI: s3://docslurp-files/lancedb
+  API_RATE_LIMIT_REDIS_URL: redis://redis:6379
+  TEMPORAL_ADDRESS: temporal:7233
+  # Production mode refuses the default namespace; the temporal service creates this one.
+  TEMPORAL_NAMESPACE: docslurp
+  RUN_STARTUP_MIGRATIONS: "false"
+  WORKER_DOC_CONCURRENCY: ${WORKER_DOC_CONCURRENCY:-1}
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg17
+    environment:
+      POSTGRES_DB: docslurp
+      POSTGRES_USER: docslurp
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Missing database password}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U docslurp -d docslurp"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+
+  redis:
+    image: redis:7.4-alpine
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  minio:
+    image: cgr.dev/chainguard/minio@sha256:e7ca559d9f7c0b5f24f5f669bb92f40f3ca88d56273b808bf3a7c116c17d2ffa
+    command: server /data
+    environment:
+      MINIO_ROOT_USER: ${AWS_ACCESS_KEY_ID:?Missing storage key}
+      MINIO_ROOT_PASSWORD: ${AWS_SECRET_ACCESS_KEY:?Missing storage secret}
+    volumes:
+      - minio_data:/data
+    restart: unless-stopped
+
+  createbucket:
+    image: cgr.dev/chainguard/minio-client@sha256:603a402c2cd1543109c39eb5d1f731bd83b3c8f6ee8299b3785c8519fad0f5b5
+    depends_on:
+      minio:
+        condition: service_started
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - >-
+        until mc alias set local http://minio:9000 "$${AWS_ACCESS_KEY_ID}" "$${AWS_SECRET_ACCESS_KEY}"; do sleep 2; done;
+        mc mb --ignore-existing local/docslurp-files
+    environment:
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:?Missing storage key}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:?Missing storage secret}
+    restart: "no"
+
+  temporal:
+    image: temporalio/auto-setup:1.29.7@sha256:f14912b699cf73015ad5c4fc18d522d4b014db90e794039214dfb7c022c2644f
+    environment:
+      DB: postgres12
+      DB_PORT: "5432"
+      POSTGRES_USER: docslurp
+      POSTGRES_PWD: ${POSTGRES_PASSWORD:?Missing database password}
+      POSTGRES_SEEDS: postgres
+      DEFAULT_NAMESPACE: docslurp
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+  migrate:
+    build:
+      context: .
+      dockerfile: server/Dockerfile
+    image: docslurp-selfhost-server:local
+    command: ["node", "server/db/migrate.mjs"]
+    environment:
+      DATABASE_URL: ${DATABASE_URL:?Missing database URL}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  server:
+    image: docslurp-selfhost-server:local
+    env_file:
+      - path: ${SELFHOST_ENV_FILE:-.env.selfhost}
+        required: false
+    environment: *server-environment
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+      createbucket:
+        condition: service_completed_successfully
+      temporal:
+        condition: service_started
+    ports:
+      - "${SERVER_BIND_ADDRESS:-127.0.0.1}:${SERVER_PORT:-8787}:8787"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8787/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      start_period: 60s
+      retries: 5
+    restart: unless-stopped
+
+  worker:
+    build:
+      context: .
+      dockerfile: worker/Dockerfile.lean
+    env_file:
+      - path: ${SELFHOST_ENV_FILE:-.env.selfhost}
+        required: false
+    environment: *server-environment
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      createbucket:
+        condition: service_completed_successfully
+      temporal:
+        condition: service_started
+    cap_drop: [ALL]
+    pids_limit: 256
+    security_opt:
+      - no-new-privileges:true
+      - seccomp:./worker/security/seccomp-doc-extract.json
+      # bubblewrap (parser isolation) must mount a fresh /proc; Docker's masked /proc paths forbid that.
+      # Capabilities stay dropped and the parser still runs inside the bubblewrap namespaces.
+      - systempaths=unconfined
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=2048m
+      - /var/tmp:rw,noexec,nosuid,nodev,size=512m
+    restart: unless-stopped
+
+  worker-full:
+    profiles: [full]
+    build:
+      context: .
+      dockerfile: worker/Dockerfile.full
+    env_file:
+      - path: ${SELFHOST_ENV_FILE:-.env.selfhost}
+        required: false
+    environment: *server-environment
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      createbucket:
+        condition: service_completed_successfully
+      temporal:
+        condition: service_started
+    cap_drop: [ALL]
+    pids_limit: 256
+    security_opt:
+      - no-new-privileges:true
+      - seccomp:./worker/security/seccomp-doc-extract.json
+      # bubblewrap (parser isolation) must mount a fresh /proc; Docker's masked /proc paths forbid that.
+      # Capabilities stay dropped and the parser still runs inside the bubblewrap namespaces.
+      - systempaths=unconfined
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=4096m
+      - /var/tmp:rw,noexec,nosuid,nodev,size=1024m
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  minio_data:

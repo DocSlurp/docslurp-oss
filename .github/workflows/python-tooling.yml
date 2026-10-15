@@ -1,0 +1,45 @@
+name: Python Tooling Compatibility
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/python-tooling.yml'
+      - 'worker/requirements*.txt'
+      - 'worker/scripts/*.py'
+      - 'scripts/check-python-dependencies.py'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: python-tooling-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  UV_TORCH_BACKEND: cpu
+  HF_HUB_OFFLINE: '1'
+  TRANSFORMERS_OFFLINE: '1'
+  OMP_NUM_THREADS: '1'
+  MKL_NUM_THREADS: '1'
+  DO_NOT_TRACK: '1'
+  ANONYMIZED_TELEMETRY: 'False'
+
+jobs:
+  parsers:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          python-version: '3.11'
+          version: '0.13.0'
+      - run: uv venv
+      - name: Install supported parser stack with CPU wheels
+        run: uv pip install -c worker/requirements.lock.txt -r worker/requirements-base.txt docling 'unstructured[pdf]' sentence-transformers
+      - name: Exercise PDF and HTML adapters without downloading models
+        run: uv run --no-project scripts/check-python-dependencies.py --optional

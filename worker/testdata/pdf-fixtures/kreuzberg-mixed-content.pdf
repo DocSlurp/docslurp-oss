@@ -1,0 +1,97 @@
+%PDF-1.4
+%ÿÿÿÿ
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [8 0 R] /Count 1 >>
+endobj
+3 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>
+endobj
+4 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold >>
+endobj
+5 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Courier >>
+endobj
+6 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Times-Italic >>
+endobj
+7 0 obj
+<<  /Length 3143 >>
+stream
+BT /F2 18 Tf 1 0 0 1 48 744 Tm (Mixed Content Evaluation Document) Tj ET
+BT /F2 13 Tf 1 0 0 1 48 714 Tm (Abstract) Tj ET
+BT /F1 11 Tf 1 0 0 1 48 696 Tm (This document combines tables, equations, figures, and bibliographic references) Tj ET
+BT /F1 11 Tf 1 0 0 1 48 680 Tm (in a single page to stress-test multi-element extraction. Section 1 presents a) Tj ET
+BT /F1 11 Tf 1 0 0 1 48 664 Tm (results table. Section 2 introduces Equation 1. The conclusion references Figure) Tj ET
+BT /F1 11 Tf 1 0 0 1 48 648 Tm (1.) Tj ET
+BT /F2 12 Tf 1 0 0 1 48 616 Tm (Table 1. Extraction Results by Strategy) Tj ET
+BT /F2 10 Tf 1 0 0 1 48 602 Tm (Extractor) Tj ET
+BT /F2 10 Tf 1 0 0 1 190 602 Tm (Recall) Tj ET
+BT /F2 10 Tf 1 0 0 1 300 602 Tm (Precision) Tj ET
+BT /F2 10 Tf 1 0 0 1 400 602 Tm (F1) Tj ET
+BT /F2 10 Tf 1 0 0 1 490 602 Tm (Latency) Tj ET
+1 w 48 598 m 564 598 l S
+BT /F1 10 Tf 1 0 0 1 48 584 Tm (kreuzberg) Tj ET
+BT /F1 10 Tf 1 0 0 1 190 584 Tm (0.91) Tj ET
+BT /F1 10 Tf 1 0 0 1 300 584 Tm (0.88) Tj ET
+BT /F1 10 Tf 1 0 0 1 400 584 Tm (0.895) Tj ET
+BT /F1 10 Tf 1 0 0 1 490 584 Tm (120ms) Tj ET
+0.5 w 48 580 m 564 580 l S
+BT /F1 10 Tf 1 0 0 1 48 566 Tm (docling) Tj ET
+BT /F1 10 Tf 1 0 0 1 190 566 Tm (0.86) Tj ET
+BT /F1 10 Tf 1 0 0 1 300 566 Tm (0.84) Tj ET
+BT /F1 10 Tf 1 0 0 1 400 566 Tm (0.850) Tj ET
+BT /F1 10 Tf 1 0 0 1 490 566 Tm (380ms) Tj ET
+0.5 w 48 562 m 564 562 l S
+BT /F1 10 Tf 1 0 0 1 48 548 Tm (pymupdf4llm) Tj ET
+BT /F1 10 Tf 1 0 0 1 190 548 Tm (0.79) Tj ET
+BT /F1 10 Tf 1 0 0 1 300 548 Tm (0.82) Tj ET
+BT /F1 10 Tf 1 0 0 1 400 548 Tm (0.805) Tj ET
+BT /F1 10 Tf 1 0 0 1 490 548 Tm (90ms) Tj ET
+0.5 w 48 544 m 564 544 l S
+BT /F1 10 Tf 1 0 0 1 48 530 Tm (pdftotext) Tj ET
+BT /F1 10 Tf 1 0 0 1 190 530 Tm (0.70) Tj ET
+BT /F1 10 Tf 1 0 0 1 300 530 Tm (0.75) Tj ET
+BT /F1 10 Tf 1 0 0 1 400 530 Tm (0.724) Tj ET
+BT /F1 10 Tf 1 0 0 1 490 530 Tm (40ms) Tj ET
+0.5 w 48 526 m 564 526 l S
+BT /F2 13 Tf 1 0 0 1 48 500 Tm (Section 2: Evaluation Metric) Tj ET
+BT /F3 10.5 Tf 1 0 0 1 68 482 Tm (Equation 1: F1 = 2 * \(precision * recall\) / \(precision + recall\)) Tj ET
+BT /F1 11 Tf 1 0 0 1 48 464 Tm (The F1 score is the harmonic mean of precision and recall, providing a balanced) Tj ET
+BT /F1 11 Tf 1 0 0 1 48 448 Tm (assessment when the class distribution is uneven. See reference [1] for) Tj ET
+BT /F1 11 Tf 1 0 0 1 48 432 Tm (derivation.) Tj ET
+BT /F2 13 Tf 1 0 0 1 48 400 Tm (Conclusion) Tj ET
+BT /F1 11 Tf 1 0 0 1 48 382 Tm (Figure 1 and Table 1 together demonstrate that kreuzberg achieves the best F1) Tj ET
+BT /F1 11 Tf 1 0 0 1 48 366 Tm (score while maintaining competitive latency. Future work will extend Eq. 1 to a) Tj ET
+BT /F1 11 Tf 1 0 0 1 48 350 Tm (weighted variant. See reference [2] for the full dataset.) Tj ET
+BT /F2 12 Tf 1 0 0 1 48 318 Tm (References) Tj ET
+BT /F1 10 Tf 1 0 0 1 58 302 Tm ([1] Manning et al. \(2008\). Introduction to Information Retrieval.) Tj ET
+BT /F1 10 Tf 1 0 0 1 58 288 Tm ([2] DocSlurp Team \(2025\). Kreuzberg Eval Dataset. https://data.docslurp.io/evals) Tj ET
+0.8 w 48 32 m 564 32 l S
+BT /F4 9 Tf 1 0 0 1 48 18 Tm (DocSlurp synthetic fixture) Tj ET
+BT /F4 9 Tf 1 0 0 1 520 18 Tm (1/1) Tj ET
+
+endstream
+endobj
+8 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R /F2 4 0 R /F3 5 0 R /F4 6 0 R >> >> /Contents 7 0 R >>
+endobj
+xref
+0 9
+0000000000 65535 f 
+0000000015 00000 n 
+0000000064 00000 n 
+0000000121 00000 n 
+0000000191 00000 n 
+0000000266 00000 n 
+0000000334 00000 n 
+0000000407 00000 n 
+0000003603 00000 n 
+trailer
+<< /Size 9 /Root 1 0 R >>
+startxref
+3759
+%%EOF

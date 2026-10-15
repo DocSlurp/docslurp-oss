@@ -1,0 +1,100 @@
+%PDF-1.4
+%ÿÿÿÿ
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [8 0 R] /Count 1 >>
+endobj
+3 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>
+endobj
+4 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold >>
+endobj
+5 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Courier >>
+endobj
+6 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Times-Italic >>
+endobj
+7 0 obj
+<<  /Length 2712 >>
+stream
+BT /F2 18 Tf 1 0 0 1 48 744 Tm (Invoice #INV-2025-0892) Tj ET
+BT /F1 11 Tf 1 0 0 1 48 716 Tm (Issued by: DocSlurp Billing Co.   Date: 2025-10-01) Tj ET
+BT /F1 11 Tf 1 0 0 1 48 698 Tm (Bill To: Acme Extractors Ltd.   Payment Terms: Net 30) Tj ET
+BT /F2 10.5 Tf 1 0 0 1 48 670 Tm (Item Description) Tj ET
+BT /F2 10.5 Tf 1 0 0 1 240 670 Tm (Unit Price) Tj ET
+BT /F2 10.5 Tf 1 0 0 1 340 670 Tm (Quantity) Tj ET
+BT /F2 10.5 Tf 1 0 0 1 430 670 Tm (Subtotal) Tj ET
+BT /F2 10.5 Tf 1 0 0 1 510 670 Tm (Notes) Tj ET
+1 w 48 666 m 564 666 l S
+BT /F1 10 Tf 1 0 0 1 48 648 Tm (PDF extraction \(basic\)) Tj ET
+BT /F1 10 Tf 1 0 0 1 240 648 Tm ($12.00) Tj ET
+BT /F1 10 Tf 1 0 0 1 340 648 Tm (50) Tj ET
+BT /F1 10 Tf 1 0 0 1 430 648 Tm ($600.00) Tj ET
+BT /F1 10 Tf 1 0 0 1 510 648 Tm (Text layer) Tj ET
+0.5 w 48 644 m 564 644 l S
+BT /F1 10 Tf 1 0 0 1 48 628 Tm (PDF extraction \(OCR\)) Tj ET
+BT /F1 10 Tf 1 0 0 1 240 628 Tm ($28.00) Tj ET
+BT /F1 10 Tf 1 0 0 1 340 628 Tm (30) Tj ET
+BT /F1 10 Tf 1 0 0 1 430 628 Tm ($840.00) Tj ET
+BT /F1 10 Tf 1 0 0 1 510 628 Tm (With OCR) Tj ET
+0.5 w 48 624 m 564 624 l S
+BT /F1 10 Tf 1 0 0 1 48 608 Tm (Table normalization) Tj ET
+BT /F1 10 Tf 1 0 0 1 240 608 Tm ($18.00) Tj ET
+BT /F1 10 Tf 1 0 0 1 340 608 Tm (25) Tj ET
+BT /F1 10 Tf 1 0 0 1 430 608 Tm ($450.00) Tj ET
+BT /F1 10 Tf 1 0 0 1 510 608 Tm (Structured) Tj ET
+0.5 w 48 604 m 564 604 l S
+BT /F1 10 Tf 1 0 0 1 48 588 Tm (Embedding generation) Tj ET
+BT /F1 10 Tf 1 0 0 1 240 588 Tm ($4.00) Tj ET
+BT /F1 10 Tf 1 0 0 1 340 588 Tm (200) Tj ET
+BT /F1 10 Tf 1 0 0 1 430 588 Tm ($800.00) Tj ET
+BT /F1 10 Tf 1 0 0 1 510 588 Tm (1536-dim) Tj ET
+0.5 w 48 584 m 564 584 l S
+BT /F1 10 Tf 1 0 0 1 48 568 Tm (Vector indexing) Tj ET
+BT /F1 10 Tf 1 0 0 1 240 568 Tm ($6.00) Tj ET
+BT /F1 10 Tf 1 0 0 1 340 568 Tm (100) Tj ET
+BT /F1 10 Tf 1 0 0 1 430 568 Tm ($600.00) Tj ET
+BT /F1 10 Tf 1 0 0 1 510 568 Tm (LanceDB) Tj ET
+0.5 w 48 564 m 564 564 l S
+BT /F1 10 Tf 1 0 0 1 48 548 Tm (Summary generation) Tj ET
+BT /F1 10 Tf 1 0 0 1 240 548 Tm ($22.00) Tj ET
+BT /F1 10 Tf 1 0 0 1 340 548 Tm (20) Tj ET
+BT /F1 10 Tf 1 0 0 1 430 548 Tm ($440.00) Tj ET
+BT /F1 10 Tf 1 0 0 1 510 548 Tm (Anthropic) Tj ET
+0.5 w 48 544 m 564 544 l S
+1.5 w 48 524 m 564 524 l S
+BT /F2 10.5 Tf 1 0 0 1 430 512 Tm (Tax \(8%\):) Tj ET
+BT /F2 10.5 Tf 1 0 0 1 480 512 Tm ($265.60) Tj ET
+BT /F2 12 Tf 1 0 0 1 430 494 Tm (Total Due:) Tj ET
+BT /F2 12 Tf 1 0 0 1 480 494 Tm ($3,995.60) Tj ET
+BT /F1 10 Tf 1 0 0 1 48 454 Tm (Bank Transfer: IBAN DE89 3704 0044 0532 0130 00) Tj ET
+BT /F1 10 Tf 1 0 0 1 48 438 Tm (Payment Terms: Net 30 days from invoice date.) Tj ET
+0.8 w 48 32 m 564 32 l S
+BT /F4 9 Tf 1 0 0 1 48 18 Tm (DocSlurp synthetic fixture) Tj ET
+BT /F4 9 Tf 1 0 0 1 520 18 Tm (1/1) Tj ET
+
+endstream
+endobj
+8 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R /F2 4 0 R /F3 5 0 R /F4 6 0 R >> >> /Contents 7 0 R >>
+endobj
+xref
+0 9
+0000000000 65535 f 
+0000000015 00000 n 
+0000000064 00000 n 
+0000000121 00000 n 
+0000000191 00000 n 
+0000000266 00000 n 
+0000000334 00000 n 
+0000000407 00000 n 
+0000003172 00000 n 
+trailer
+<< /Size 9 /Root 1 0 R >>
+startxref
+3328
+%%EOF

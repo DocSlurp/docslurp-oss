@@ -1,0 +1,108 @@
+{
+  "fixtures": [
+    {
+      "id": "tables-multipage-financials",
+      "path": "tables-multipage-financials.pdf",
+      "tags": ["tables", "multipage-tables", "complex-layout"],
+      "extractors": ["pdftotext", "pymupdf-text", "pymupdf4llm-markdown", "unpdf"],
+      "expectedSignals": ["revenue", "gross margin", "continued on next page"],
+      "expectedRegex": ["Q[1-4]\\s+2025"],
+      "minimumSignalCoverage": 0.6
+    },
+    {
+      "id": "academic-latex-ligatures",
+      "path": "academic-latex-ligatures.pdf",
+      "tags": ["latex", "ligatures", "formulas"],
+      "extractors": ["pdftotext", "pymupdf-text", "pymupdf4llm-markdown"],
+      "expectedSignals": ["\\int_0^\\infty", "affine", "office", "efficient"],
+      "expectedRegex": ["\\\\frac\\{d\\}\\{dx\\}"],
+      "minimumSignalCoverage": 0.5
+    },
+    {
+      "id": "image-heavy-ocr",
+      "path": "image-heavy-ocr.pdf",
+      "tags": ["images", "text-in-images", "handwriting"],
+      "extractors": ["pymupdf-ocr-text"],
+      "expectedSignals": ["invoice", "total due", "signature"],
+      "expectedRegex": [],
+      "minimumSignalCoverage": 0.4
+    },
+    {
+      "id": "multicolumn-figures-report",
+      "path": "multicolumn-figures-report.pdf",
+      "tags": ["complex-layout", "multicolumn", "images", "charts"],
+      "extractors": ["pdftotext", "pymupdf-text", "pymupdf4llm-markdown", "unpdf"],
+      "expectedSignals": ["figure 2", "latency histogram", "cache hit rate", "throughput"],
+      "expectedRegex": ["Figure\\s+2"],
+      "minimumSignalCoverage": 0.6
+    },
+    {
+      "id": "form-rotated-notes",
+      "path": "form-rotated-notes.pdf",
+      "tags": ["forms", "rotated-text", "annotations"],
+      "extractors": ["pdftotext", "pymupdf-text", "pymupdf4llm-markdown"],
+      "expectedSignals": ["confidential intake form", "preferred contact method", "reviewed by ops"],
+      "expectedRegex": ["24\\s+hours"],
+      "minimumSignalCoverage": 0.5
+    },
+    {
+      "id": "kreuzberg-tables-invoice",
+      "path": "kreuzberg-tables-invoice.pdf",
+      "tags": ["tables", "kreuzberg"],
+      "extractors": ["kreuzberg", "pymupdf-text", "pymupdf4llm-markdown"],
+      "expectedSignals": ["item description", "unit price", "quantity", "subtotal", "tax", "total due", "payment terms", "net 30"],
+      "expectedRegex": ["\\$[0-9,]+\\.[0-9]{2}", "Invoice\\s+#?[A-Z0-9-]+"],
+      "minimumSignalCoverage": 0.7,
+      "dimensions": {
+        "tableRows": 6,
+        "tableColumns": 4
+      }
+    },
+    {
+      "id": "kreuzberg-links-references",
+      "path": "kreuzberg-links-references.pdf",
+      "tags": ["links", "urls", "references", "kreuzberg"],
+      "extractors": ["kreuzberg", "pymupdf-text", "pymupdf4llm-markdown"],
+      "expectedSignals": ["https://", "see also", "references", "bibliography", "doi:", "further reading"],
+      "expectedRegex": ["https?://[a-z0-9./_-]+", "\\[\\d+\\]"],
+      "minimumSignalCoverage": 0.6
+    },
+    {
+      "id": "kreuzberg-formulas-math",
+      "path": "kreuzberg-formulas-math.pdf",
+      "tags": ["formulas", "math", "equations", "kreuzberg"],
+      "extractors": ["kreuzberg", "pymupdf-text", "pymupdf4llm-markdown"],
+      "expectedSignals": ["equation", "theorem", "proof", "definition", "corollary", "integral", "derivative", "matrix"],
+      "expectedRegex": ["f\\(x\\)", "x\\^[0-9n]", "=\\s*[0-9a-z\\(\\)\\+\\-\\*\\/]+"],
+      "minimumSignalCoverage": 0.5
+    },
+    {
+      "id": "kreuzberg-handwriting-notes",
+      "path": "kreuzberg-handwriting-notes.pdf",
+      "tags": ["handwriting", "annotations", "scanned", "kreuzberg"],
+      "extractors": ["kreuzberg", "pymupdf-ocr-text"],
+      "expectedSignals": ["meeting notes", "action items", "follow up", "assigned to", "deadline"],
+      "expectedRegex": ["[A-Z][a-z]+ [0-9]{1,2},? [0-9]{4}", "TODO|DONE|\\[ \\]|\\[x\\]"],
+      "minimumSignalCoverage": 0.4
+    },
+    {
+      "id": "kreuzberg-metadata-document",
+      "path": "kreuzberg-metadata-document.pdf",
+      "tags": ["metadata", "document-properties", "kreuzberg"],
+      "extractors": ["kreuzberg"],
+      "expectedSignals": ["title:", "author:", "subject:", "keywords:", "created:", "version"],
+      "expectedRegex": ["[0-9]{4}-[0-9]{2}-[0-9]{2}", "v[0-9]+\\.[0-9]+"],
+      "minimumSignalCoverage": 0.6,
+      "checkMetadata": true
+    },
+    {
+      "id": "kreuzberg-mixed-content",
+      "path": "kreuzberg-mixed-content.pdf",
+      "tags": ["tables", "images", "links", "formulas", "kreuzberg"],
+      "extractors": ["kreuzberg", "pymupdf4llm-markdown", "docling"],
+      "expectedSignals": ["figure", "table", "equation", "reference", "abstract", "conclusion", "section"],
+      "expectedRegex": ["Fig\\.?\\s+[0-9]+", "Table\\s+[0-9]+", "Eq\\.?\\s+[0-9]+"],
+      "minimumSignalCoverage": 0.6
+    }
+  ]
+}

@@ -1,0 +1,301 @@
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+const sqlMock = Object.assign(vi.fn(), {
+  unsafe: vi.fn(),
+  array: vi.fn((value: unknown) => value),
+});
+
+vi.mock("../db.js", () => ({
+  sql: sqlMock,
+}));
+
+const { defaultAiUsagePricingCatalog } = await import("@docslurp/shared");
+const { clearOrgPlanCache, createUsageLedger, recordUsageEvent } = await import(
+  "../lib/ai-usage.js"
+);
+
+const originalInputCostRate = process.env.COST_PER_1K_INPUT_TOKENS;
+const originalOutputCostRate = process.env.COST_PER_1K_OUTPUT_TOKENS;
+
+function usageInserts() {
+  return sqlMock.mock.calls.filter(([strings]) =>
+    Array.isArray(strings) && strings.join(" ").includes("insert into usage_events"),
+  );
+}
+
+function insertedMetadata(call: unknown[] | undefined): Record<string, unknown> {
+  return JSON.parse(String(call?.[12] ?? "{}")) as Record<string, unknown>;
+}
+
+describe("Usage Event ledger", () => {
+  beforeEach(() => {
+    sqlMock.mockReset();
+    sqlMock.mockResolvedValue([]);
+    vi.restoreAllMocks();
+    process.env.COST_PER_1K_INPUT_TOKENS = "0.01";
+    process.env.COST_PER_1K_OUTPUT_TOKENS = "0.03";
+  });
+
+  afterEach(() => {
+    if (originalInputCostRate === undefined) {
+      delete process.env.COST_PER_1K_INPUT_TOKENS;
+    } else {
+      process.env.COST_PER_1K_INPUT_TOKENS = originalInputCostRate;
+    }
+    if (originalOutputCostRate === undefined) {
+      delete process.env.COST_PER_1K_OUTPUT_TOKENS;
+    } else {
+      process.env.COST_PER_1K_OUTPUT_TOKENS = originalOutputCostRate;
+    }
+  });
+
+  it("logs, prices and persists one event with its scope stamped", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
+
+    const event = await recordUsageEvent({
+      userId: "user-1",
+      scope: { orgId: "org-1", workspaceId: "ws-1", runId: "run-1" },
+      usage: {
+        provider: "openai",
+        model: "text-embedding-3-small",
+        metric: "embed-query",
+        inputTokens: 42,
+        logOutputTokens: false,
+      },
+    });
+
+    expect(event).toMatchObject({
+      metric: "embed-query",
+      amount: 42,
+      costCents: (42 / 1000) * 0.002 * 1.2,
+      inputTokens: 42,
+      outputTokens: 0,
+    });
+    expect(log).toHaveBeenCalledWith(
+      "[ai-usage] embed-query model=text-embedding-3-small input_tokens=42",
+    );
+    const [insert] = usageInserts();
+    expect(insert).toContain("user-1");
+    expect(insert).toContain("run-1");
+    expect(insertedMetadata(insert)).toMatchObject({
+      orgId: "org-1",
+      workspaceId: "ws-1",
+      costSource: "estimate",
+    });
+    expect(insert?.[0].join(" ")).toContain("enqueue_org_credit_debit");
+  });
+
+  it("charges bonus plans the plan-neutral AI factor and persists the repriced receipt once", async () => {
+    vi.spyOn(console, "log").mockImplementation(() => undefined);
+    clearOrgPlanCache();
+    sqlMock.mockImplementation(async (strings: TemplateStringsArray) =>
+      strings.join(" ").includes("select o.plan_id") ? [{ plan_id: "platinum" }] : []);
+
+    const event = await recordUsageEvent({
+      userId: "user-1",
+      scope: { orgId: "org-plat" },
+      usage: { provider: "anthropic", model: "model-1", metric: "chat", inputTokens: 2, outputTokens: 3, costCents: 10 },
+    });
+
+    expect(event?.costCents).toBeCloseTo(14.4);
+    const [insert] = usageInserts();
+    expect(insert).toContain(event?.costCents);
+    expect(insertedMetadata(insert)).toMatchObject({ providerCostCents: 10, aiPlanCreditFactor: 1.2 });
+    clearOrgPlanCache();
+  });
+
+  it("attributes usage to the API key authenticating the request", async () => {
+    vi.spyOn(console, "log").mockImplementation(() => undefined);
+    const { Hono } = await import("hono");
+    const { requestContextMiddleware, setCurrentRequestApiKeyId } = await import("../lib/request-context.js");
+    const usage = { provider: "openai", model: "gpt-x", metric: "chat", inputTokens: 5, outputTokens: 5 };
+    const app = new Hono();
+    app.use("*", requestContextMiddleware);
+    app.get("/", async (c) => {
+      setCurrentRequestApiKeyId("key-1");
+      await recordUsageEvent({ userId: "user-1", scope: { orgId: "org-1" }, usage });
+      // An explicit scope wins, including an explicit null.
+      await recordUsageEvent({ userId: "user-1", scope: { orgId: "org-1", apiKeyId: null }, usage });
+      return c.text("ok");
+    });
+
+    await app.request("/");
+
+    const [withKey, withoutKey] = usageInserts();
+    expect(insertedMetadata(withKey)).toMatchObject({ apiKeyId: "key-1" });
+    expect(insertedMetadata(withoutKey)).not.toHaveProperty("apiKeyId");
+  });
+
+  it("marks up provider cost once and stamps cross-workspace scope", async () => {
+    vi.spyOn(console, "log").mockImplementation(() => undefined);
+
+    await recordUsageEvent({
+      userId: "user-1",
+      scope: { orgId: "org-1", workspaceIds: ["ws-1", "ws-2", "ws-1"] },
+      usage: {
+        provider: "openrouter",
+        model: "model-1",
+        metric: "aggregate-rag-answer",
+        inputTokens: 2,
+        outputTokens: 3,
+        costCents: 7,
+        metadata: { feature: "chat" },
+      },
+    });
+
+    const [insert] = usageInserts();
+    expect(insert).toContain(8.4);
+    expect(insert).toContain(null); // run_id
+    expect(insertedMetadata(insert)).toEqual({
+      feature: "chat",
+      orgId: "org-1",
+      workspaceIds: ["ws-1", "ws-2"],
+      providerCostCents: 7,
+      aiMarkupPercent: 20,
+      creditRateCard: "2026-10.3",
+    });
+  });
+
+  it("logs but never persists empty usage", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
+
+    const event = await recordUsageEvent({
+      userId: "user-1",
+      scope: {},
+      usage: { provider: "openrouter", model: "model-1", metric: "noop" },
+    });
+
+    expect(event).toBeNull();
+    expect(log).toHaveBeenCalledTimes(1);
+    expect(sqlMock).not.toHaveBeenCalled();
+  });
+
+  it("persists duration-priced transcription even when no tokens are reported", async () => {
+    vi.spyOn(console, "log").mockImplementation(() => undefined);
+    const event = await recordUsageEvent({
+      userId: "user-1",
+      scope: { orgId: "org-1", workspaceId: "ws-1" },
+      usage: {
+        provider: "openrouter", model: "microsoft/mai-transcribe-2", metric: "chat.transcription",
+        amount: 12.5, unit: "second", costCents: 0.03472222,
+        metadata: { costSource: "provider", tokenUsageReported: false },
+      },
+    });
+    expect(event).toMatchObject({ inputTokens: 0, outputTokens: 0, amount: 12.5, unit: "second", costCents: 0.03472222 * 1.2 });
+    expect(usageInserts()).toHaveLength(1);
+    expect(insertedMetadata(usageInserts()[0])).toMatchObject({ orgId: "org-1", workspaceId: "ws-1", tokenUsageReported: false, providerCostCents: 0.03472222, aiMarkupPercent: 20 });
+  });
+
+  it("buffers on record, adopts child events without logging, persists on flush", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    const ledger = createUsageLedger({
+      userId: "user-1",
+      scope: { orgId: "org-1" },
+    });
+
+    ledger.record({ provider: "openrouter", model: "model-1", metric: "noop" });
+    ledger.record({
+      provider: "openrouter",
+      model: "model-1",
+      metric: "hyde",
+      inputTokens: 9,
+      outputTokens: 3,
+    });
+    ledger.adopt([
+      {
+        provider: "openrouter",
+        model: "model-1",
+        metric: "stepback",
+        amount: 2,
+        unit: "token",
+        costCents: 0,
+        inputTokens: 1,
+        outputTokens: 1,
+        metadata: {},
+      },
+      undefined,
+    ]);
+
+    expect(log).toHaveBeenCalledTimes(2);
+    expect(ledger.events().map((event) => event.metric)).toEqual(["hyde", "stepback"]);
+    expect(sqlMock).not.toHaveBeenCalled();
+
+    const flushed = await ledger.flush({ scope: { sessionId: "session-1" } });
+    expect(flushed).toHaveLength(2);
+    expect(usageInserts().map(insertedMetadata)).toEqual([
+      expect.objectContaining({ orgId: "org-1", sessionId: "session-1" }),
+      expect.objectContaining({ orgId: "org-1", sessionId: "session-1" }),
+    ]);
+
+    // A second flush only writes what was recorded since.
+    expect(await ledger.flush()).toEqual([]);
+    expect(usageInserts()).toHaveLength(2);
+  });
+
+  it("keeps a transactional batch retryable until commit()", async () => {
+    vi.spyOn(console, "log").mockImplementation(() => undefined);
+    const ledger = createUsageLedger({});
+    ledger.record({ provider: "local", model: "m", metric: "embed-query", inputTokens: 5 });
+
+    const first = await ledger.flushWithin(sqlMock as never, { userId: "user-1" });
+    expect(first.events).toHaveLength(1);
+    // Transaction rolled back: no commit(), so the next attempt rewrites it.
+    const second = await ledger.flushWithin(sqlMock as never, { userId: "user-1" });
+    expect(second.events).toHaveLength(1);
+    // A flush retry keeps the same usage id even after an ambiguous commit.
+    expect(usageInserts()[0]?.[1]).toBe(usageInserts()[1]?.[1]);
+    second.commit();
+    const third = await ledger.flushWithin(sqlMock as never, { userId: "user-1" });
+    expect(third.events).toEqual([]);
+  });
+
+  it("refuses to persist without a user", async () => {
+    vi.spyOn(console, "log").mockImplementation(() => undefined);
+    const ledger = createUsageLedger({});
+    ledger.record({ provider: "local", model: "m", metric: "embed-query", inputTokens: 5 });
+    await expect(ledger.flush()).rejects.toThrow("userId");
+    expect(ledger.events()).toHaveLength(1);
+  });
+
+  it("never records a priced model's tokens at zero cost", async () => {
+    vi.spyOn(console, "log").mockImplementation(() => undefined);
+    const { SEARCH_OPENROUTER_MODEL } = await import("../lib/ai.js");
+    const priced = [
+      ...defaultAiUsagePricingCatalog.filter((entry) => entry.costPer1kInputTokens > 0 && entry.costPer1kOutputTokens > 0),
+      // Unlisted models fall back to the configured rates, which are positive.
+      { provider: "openrouter", model: SEARCH_OPENROUTER_MODEL },
+      { provider: "openrouter", model: "unlisted/model" },
+    ];
+    for (const entry of priced) {
+      await recordUsageEvent({
+        userId: "user-1",
+        scope: { orgId: "org-1", workspaceId: "ws-1" },
+        usage: { provider: entry.provider ?? "openrouter", model: entry.model, metric: "invariant", inputTokens: 1_000, outputTokens: 200 },
+      });
+    }
+    const inserts = usageInserts();
+    expect(inserts).toHaveLength(priced.length);
+    for (const call of inserts) {
+      expect(Number(call[10]) + Number(call[11]), String(call[5])).toBeGreaterThan(0);
+      expect(Number(call[9]), String(call[5])).toBeGreaterThan(0);
+    }
+  });
+
+  it("prices automation LLM calls from tokens in the operation's scope", async () => {
+    vi.spyOn(console, "log").mockImplementation(() => undefined);
+    const { recordAutomationAiUsage } = await import("../services/automation.js");
+    await recordAutomationAiUsage({
+      operation: {
+        id: "op-1", userId: "user-1", orgId: "org-1", workspaceId: "ws-1", apiKeyId: "key-1", kind: "advanced",
+      } as never,
+      metric: "automation-structured-output",
+      model: "unlisted/model",
+      usage: { inputTokens: 900, outputTokens: 100 },
+    });
+    const [call] = usageInserts();
+    expect(call?.[1]).toBe("aiop:op-1:automation-structured-output");
+    expect(Number(call?.[9])).toBeGreaterThan(0);
+    expect(insertedMetadata(call)).toMatchObject({ operationId: "op-1", orgId: "org-1", workspaceId: "ws-1", apiKeyId: "key-1" });
+    expect(console.log).toHaveBeenCalledWith(expect.stringContaining("[ai-usage] automation-structured-output"));
+  }, 60_000);
+});

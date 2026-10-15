@@ -1,0 +1,34 @@
+{
+  "defaultAction": "SCMP_ACT_ALLOW",
+  "syscalls": [
+    {
+      "names": [
+        "add_key",
+        "bpf",
+        "fanotify_init",
+        "fsconfig",
+        "fsmount",
+        "fsopen",
+        "fspick",
+        "keyctl",
+        "kexec_file_load",
+        "kexec_load",
+        "move_mount",
+        "name_to_handle_at",
+        "open_by_handle_at",
+        "perf_event_open",
+        "request_key",
+        "syslog",
+        "userfaultfd"
+      ],
+      "action": "SCMP_ACT_ERRNO"
+    },
+    {
+      "names": [
+        "clone3"
+      ],
+      "action": "SCMP_ACT_ERRNO",
+      "errnoRet": 38
+    }
+  ]
+}

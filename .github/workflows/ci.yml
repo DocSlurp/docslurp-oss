@@ -1,0 +1,128 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+# Public CI: no deploys, no hosted evals, no paid provider keys, no secrets.
+jobs:
+  typecheck:
+    name: Typecheck and build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+          cache: 'pnpm'
+      - run: pnpm install --frozen-lockfile
+      - name: Check migrations are expand/contract safe
+        run: node scripts/check-migration-safety.mjs
+      - run: pnpm typecheck
+      - run: pnpm build
+
+  test:
+    name: Server, worker and package tests
+    timeout-minutes: 20
+    # Native Kreuzberg requires newer glibc; enable unprivileged namespaces only
+    # on this disposable CI runner so the real parser sandbox remains exercised.
+    runs-on: ubuntu-24.04
+    env:
+      UV_NO_CACHE: '0'
+      PYTHON_VENV: ${{ github.workspace }}/.venv
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          python-version: '3.11'
+          enable-cache: true
+          cache-dependency-glob: worker/requirements-base.lock.txt
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+          cache: 'pnpm'
+      - run: pnpm install --frozen-lockfile
+      - name: Install worker test tools
+        run: |
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends bubblewrap poppler-utils pandoc tesseract-ocr tesseract-ocr-eng ffmpeg
+      - name: Set up worker Python test dependencies
+        run: |
+          DOCSLURP_WORKER_VENV="${PYTHON_VENV}" \
+          DOCSLURP_WORKER_REQUIREMENTS_MODE=locked \
+          DOCSLURP_WORKER_REQUIREMENTS_FILE=worker/requirements-base.lock.txt \
+          DOCSLURP_WORKER_FALLBACK_REQUIREMENTS_FILE=worker/requirements-base.lock.txt \
+          DOCSLURP_WORKER_SKIP_FALLBACK=1 \
+          bash scripts/setup-worker-python-venv.sh
+      - name: Verify worker test prerequisites
+        run: pnpm worker:check --profile=test --sandbox
+      - run: pnpm test
+
+  # The public packages promise engines >=20 while the repo runs Node 24:
+  # build on 24, then test and import them on each older supported Node.
+  packages-node-floor:
+    name: Public packages on Node ${{ matrix.node }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: true
+      matrix:
+        node: ['20', '22']
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+          cache: 'pnpm'
+      - run: pnpm install --frozen-lockfile
+      - name: Build public packages
+        run: |
+          for package in packages/*; do
+            [ -f "$package/package.json" ] && pnpm --dir "$package" run --if-present build
+          done
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ matrix.node }}
+          package-manager-cache: false
+      - name: Test and import public packages on Node ${{ matrix.node }}
+        run: |
+          node --version
+          (cd packages/sdk && node --test test/*.test.mjs)
+          (cd packages/cli && node --test test/*.test.mjs)
+          (cd packages/contrib-search-compat && node --test test/*.test.mjs)
+          (cd packages/contrib-astro && node --test index-docs.test.mjs)
+          node scripts/check-package-imports.mjs
+
+  ci-success:
+    # A stable required check. Never mask failures.
+    needs: [typecheck, test, packages-node-floor]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 1
+    steps:
+      - name: Require every gate
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: |
+          node -e 'const jobs = JSON.parse(process.env.RESULTS); if (Object.values(jobs).some(job => job.result !== "success")) process.exit(1)'

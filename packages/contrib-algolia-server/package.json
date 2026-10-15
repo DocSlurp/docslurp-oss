@@ -1,0 +1,40 @@
+{
+  "name": "@docslurp/contrib-algolia-server",
+  "version": "0.3.0",
+  "description": "Server-side Algolia-style wrapper for syncing settings, synonyms, rules and imports into DocSlurp.",
+  "license": "SEE LICENSE IN LICENSE",
+  "homepage": "https://docslurp.io/docs/packages/contrib-algolia-server",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/DocSlurp/docslurp-oss.git",
+    "directory": "packages/contrib-algolia-server"
+  },
+  "bugs": {
+    "url": "https://github.com/DocSlurp/docslurp-oss/issues"
+  },
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE",
+    "NOTICE",
+    "LICENSES"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "prepack": "pnpm build"
+  },
+  "dependencies": {
+    "@docslurp/contrib-search-compat": "workspace:^"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.5",
+    "typescript": "^6.0.3"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

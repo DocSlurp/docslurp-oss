@@ -1,0 +1,10 @@
+beautifulsoup4
+ebooklib
+openpyxl
+Pillow>=12.3.0,<13
+pymupdf>=1.28.2,<2
+# 1.x changes the default layout engine and adds an ML runtime; evaluate separately.
+pymupdf4llm>=0.3.4,<1
+python-pptx
+trafilatura
+xlsx2csv==0.8.6

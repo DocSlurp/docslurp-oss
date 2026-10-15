@@ -1,0 +1,160 @@
+import { Hono } from "hono";
+import { appDbPool } from "../lib/auth.js";
+import { resolveBetterAuthSessionActor } from "../lib/request-actor.js";
+import { getConsentRequest, MCP_SCOPES, mcpOrigin, mcpResource, validRedirect, parseScopes, transaction, oauthHash, pkceChallenge, issueTokens, secret, randomUUID, cleanupExpiredOAuthRequests } from "../services/mcp-oauth.js";
+export const mcpOAuthMetadataRoutes = new Hono();
+const resourceMetadata = (url: string) => ({ resource: mcpResource(url), authorization_servers: [mcpOrigin(url)], scopes_supported: MCP_SCOPES, bearer_methods_supported: ["header"], resource_name: "DocSlurp MCP" });
+for (const path of ["/.well-known/oauth-protected-resource", "/.well-known/oauth-protected-resource/v1/mcp"])
+  mcpOAuthMetadataRoutes.get(path, c => c.json(resourceMetadata(c.req.url)));
+mcpOAuthMetadataRoutes.get("/.well-known/oauth-authorization-server", c => {
+  const origin = mcpOrigin(c.req.url);
+  return c.json({ issuer: origin, authorization_endpoint: `${origin}/oauth/mcp/authorize`, token_endpoint: `${origin}/oauth/mcp/token`, registration_endpoint: `${origin}/oauth/mcp/register`, revocation_endpoint: `${origin}/oauth/mcp/revoke`, response_types_supported: ["code"], grant_types_supported: ["authorization_code", "refresh_token"], code_challenge_methods_supported: ["S256"], token_endpoint_auth_methods_supported: ["none"], scopes_supported: MCP_SCOPES, authorization_response_iss_parameter_supported: true });
+});
+export const mcpOAuthRoutes = new Hono();
+mcpOAuthRoutes.use("*", async (c, next) => { c.header("Cache-Control", "no-store"); c.header("Pragma", "no-cache"); await next(); });
+mcpOAuthRoutes.post("/register", async (c) => {
+  if (Number(c.req.header("content-length") ?? 0) > 16384)
+    return c.json({ error: "invalid_client_metadata" }, 400);
+  let body: Record<string, unknown>;
+  try {
+    body = await c.req.json();
+  }
+  catch {
+    return c.json({ error: "invalid_client_metadata" }, 400);
+  }
+  if (!body || typeof body !== "object" || !Array.isArray(body.redirect_uris) || !body.redirect_uris.length || body.redirect_uris.length > 5 || !body.redirect_uris.every(validRedirect) || (body.token_endpoint_auth_method !== undefined && body.token_endpoint_auth_method !== "none") || (body.grant_types !== undefined && (!Array.isArray(body.grant_types) || body.grant_types.some(x => !["authorization_code", "refresh_token"].includes(String(x))))) || (body.response_types !== undefined && (!Array.isArray(body.response_types) || body.response_types.some(x => x !== "code"))))
+    return c.json({ error: "invalid_client_metadata" }, 400);
+  await cleanupExpiredOAuthRequests();
+  const id = randomUUID(), name = typeof body.client_name === "string" ? body.client_name.slice(0, 120) : "MCP client";
+  await appDbPool.query("INSERT INTO mcp_oauth_clients(id,name,redirect_uris) VALUES($1,$2,$3::jsonb)", [id, name, JSON.stringify(body.redirect_uris)]);
+  return c.json({ client_id: id, client_id_issued_at: Math.floor(Date.now() / 1000), client_name: name, redirect_uris: body.redirect_uris, token_endpoint_auth_method: "none", grant_types: ["authorization_code", "refresh_token"], response_types: ["code"] }, 201);
+});
+mcpOAuthRoutes.get("/authorize", async (c) => {
+  const params = new URL(c.req.url).searchParams;
+  const client = (await appDbPool.query("SELECT * FROM mcp_oauth_clients WHERE id=$1", [params.get("client_id")])).rows[0];
+  const redirect = params.get("redirect_uri"), challenge = params.get("code_challenge");
+  if (!client || !redirect || !client.redirect_uris.includes(redirect))
+    return c.json({ error: "invalid_request" }, 400);
+  if (params.get("response_type") !== "code" || params.get("code_challenge_method") !== "S256" || !challenge || !/^[A-Za-z0-9_-]{43}$/.test(challenge) || params.get("resource") !== mcpResource(c.req.url) || (params.get("state")?.length ?? 0) > 2048)
+    return c.json({ error: "invalid_request" }, 400);
+  let scopes: string[];
+  try {
+    scopes = parseScopes(params.get("scope"));
+  }
+  catch {
+    return c.json({ error: "invalid_scope" }, 400);
+  }
+  const actor = await resolveBetterAuthSessionActor(c.req.raw.headers);
+  if (!actor)
+    return c.redirect(`/app/mcp/authorize?authorize=${encodeURIComponent(new URL(c.req.url).pathname + new URL(c.req.url).search)}`);
+  const id = secret("consent");
+  await appDbPool.query(`INSERT INTO mcp_oauth_requests(id,client_id,user_id,session_id,redirect_uri,resource,scopes,challenge,state,expires_at) VALUES($1,$2,$3,$4,$5,$6,$7::jsonb,$8,$9,now()+interval '10 minutes')`, [id, client.id, actor.userId, actor.sessionId, redirect, mcpResource(c.req.url), JSON.stringify(scopes), challenge, params.get("state")]);
+  return c.redirect(`/app/mcp/authorize?request=${encodeURIComponent(id)}`);
+});
+// The consent page's view of a pending request. Only the signed-in user's own,
+// session-bound, unexpired, unconsumed request is returned (never the PKCE challenge).
+mcpOAuthRoutes.get("/consent/:id", async (c) => {
+  const actor = await resolveBetterAuthSessionActor(c.req.raw.headers);
+  if (!actor)
+    return c.json({ error: "Unauthorized" }, 401);
+  c.header("Cache-Control", "no-store");
+  const request = await getConsentRequest(c.req.param("id"), actor.userId, actor.sessionId);
+  if (!request)
+    return c.json({ error: "Not found" }, 404);
+  return c.json({ id: request.id, client_name: request.client_name, redirect_uri: request.redirect_uri, scopes: request.scopes });
+});
+mcpOAuthRoutes.post("/authorize", async (c) => {
+  if (c.req.header("origin") !== mcpOrigin(c.req.url))
+    return c.json({ error: "Forbidden" }, 403);
+  const actor = await resolveBetterAuthSessionActor(c.req.raw.headers);
+  if (!actor)
+    return c.json({ error: "Unauthorized" }, 401);
+  const body = await c.req.parseBody();
+  const result = await transaction(async (db) => {
+    const { rows } = await db.query(`SELECT * FROM mcp_oauth_requests WHERE id=$1 AND user_id=$2 AND session_id=$3 AND expires_at>now() AND consumed_at IS NULL FOR UPDATE`, [body.request, actor.userId, actor.sessionId]);
+    const request = rows[0];
+    if (!request)
+      return null;
+    await db.query("UPDATE mcp_oauth_requests SET consumed_at=now() WHERE id=$1", [request.id]);
+    const redirect = new URL(request.redirect_uri);
+    if (request.state !== null)
+      redirect.searchParams.set("state", request.state);
+    redirect.searchParams.set("iss", mcpOrigin(c.req.url));
+    if (body.decision !== "allow") {
+      redirect.searchParams.set("error", "access_denied");
+      return redirect.href;
+    }
+    const membership = await db.query("SELECT 1 FROM org_memberships WHERE org_id=$1 AND user_id=$2", [typeof body.orgId === "string" && body.orgId.length <= 200 ? body.orgId : null, actor.userId]);
+    if (!membership.rowCount)
+      return null;
+    const grant = randomUUID(), code = secret("dsmcpc"), keyId = randomUUID();
+    // This unexported identity lets existing usage/operation foreign keys stay valid.
+    // No raw server key is returned or persisted; only a random unguessable hash.
+    const clientName = (await db.query("SELECT name FROM mcp_oauth_clients WHERE id=$1", [request.client_id])).rows[0]?.name ?? "MCP client";
+    await db.query(`INSERT INTO api_keys(id,user_id,org_id,key_hash,name,key_type,allowed_domains,scopes,rate_limit_rpm,rate_limit_ppd)
+      VALUES($1,$2,$3,$4,$5,'server',ARRAY[]::text[],$6::text[],120,10000)`,
+      [keyId, actor.userId, body.orgId, oauthHash(secret("internal")), `OAuth: ${clientName}`, request.scopes]);
+    await db.query(`INSERT INTO mcp_oauth_grants(id,client_id,user_id,org_id,resource,scopes,api_key_id) VALUES($1,$2,$3,$4,$5,$6::jsonb,$7)`, [grant, request.client_id, actor.userId, body.orgId, request.resource, JSON.stringify(request.scopes), keyId]);
+    await db.query(`INSERT INTO mcp_oauth_tokens(hash,grant_id,kind,redirect_uri,challenge,expires_at) VALUES($1,$2,'code',$3,$4,now()+interval '2 minutes')`, [oauthHash(code), grant, request.redirect_uri, request.challenge]);
+    redirect.searchParams.set("code", code);
+    return redirect.href;
+  });
+  return result ? c.redirect(result, 303) : c.json({ error: "invalid_request" }, 400);
+});
+mcpOAuthRoutes.post("/token", async (c) => {
+  const body = await c.req.parseBody();
+  if (body.grant_type !== "authorization_code" && body.grant_type !== "refresh_token")
+    return c.json({ error: "unsupported_grant_type" }, 400);
+  if (body.resource !== mcpResource(c.req.url) || typeof body.client_id !== "string")
+    return c.json({ error: "invalid_target" }, 400);
+  const raw = body.grant_type === "authorization_code" ? body.code : body.refresh_token;
+  if (typeof raw !== "string" || raw.length > 200)
+    return c.json({ error: "invalid_grant" }, 400);
+  const result = await transaction(async (db) => {
+    const { rows } = await db.query(`SELECT t.*, g.client_id,g.user_id,g.org_id,g.resource,g.scopes,g.revoked_at,g.api_key_id FROM mcp_oauth_tokens t JOIN mcp_oauth_grants g ON g.id=t.grant_id WHERE t.hash=$1 FOR UPDATE OF t,g`, [oauthHash(raw)]);
+    const token = rows[0];
+    if (!token || token.client_id !== body.client_id || token.resource !== body.resource || token.revoked_at || new Date(token.expires_at).getTime() <= Date.now())
+      return null;
+    if (!(await db.query("SELECT 1 FROM api_keys WHERE id=$1 AND user_id=$2 AND org_id=$3 AND revoked_at IS NULL AND key_type='server'", [token.api_key_id, token.user_id, token.org_id])).rowCount) return null;
+    const kind = body.grant_type === "authorization_code" ? "code" : "refresh";
+    if (token.kind !== kind)
+      return null;
+    if (token.consumed_at) {
+      await db.query("UPDATE mcp_oauth_grants SET revoked_at=now() WHERE id=$1", [token.grant_id]);
+      await db.query("UPDATE api_keys SET revoked_at=now() WHERE id=$1", [token.api_key_id]);
+      return null;
+    }
+    if (kind === "code" && (token.redirect_uri !== body.redirect_uri || typeof body.code_verifier !== "string" || !/^[A-Za-z0-9._~-]{43,128}$/.test(body.code_verifier) || token.challenge !== pkceChallenge(body.code_verifier)))
+      return null;
+    if (body.scope !== undefined && body.scope !== token.scopes.join(" "))
+      return null;
+    if (!(await db.query("SELECT 1 FROM org_memberships WHERE org_id=$1 AND user_id=$2", [token.org_id, token.user_id])).rowCount)
+      return null;
+    await db.query("UPDATE mcp_oauth_tokens SET consumed_at=now() WHERE hash=$1", [token.hash]);
+    return { ...await issueTokens(db, token.grant_id), scope: token.scopes.join(" ") };
+  });
+  return result ? c.json(result) : c.json({ error: "invalid_grant" }, 400);
+});
+mcpOAuthRoutes.post("/revoke", async (c) => {
+  const body = await c.req.parseBody();
+  if (typeof body.token === "string" && typeof body.client_id === "string")
+    await appDbPool.query(`UPDATE mcp_oauth_grants SET revoked_at=now() WHERE id IN (SELECT g.id FROM mcp_oauth_grants g JOIN mcp_oauth_tokens t ON t.grant_id=g.id WHERE t.hash=$1 AND g.client_id=$2)`, [oauthHash(body.token), body.client_id]);
+  if (typeof body.token === "string" && typeof body.client_id === "string") await appDbPool.query(`UPDATE api_keys SET revoked_at=now() WHERE id IN (SELECT g.api_key_id FROM mcp_oauth_grants g JOIN mcp_oauth_tokens t ON t.grant_id=g.id WHERE t.hash=$1 AND g.client_id=$2 AND g.revoked_at IS NOT NULL)`, [oauthHash(body.token), body.client_id]);
+  return c.body(null, 200);
+});
+mcpOAuthRoutes.get("/grants", async (c) => {
+  const actor = await resolveBetterAuthSessionActor(c.req.raw.headers);
+  if (!actor)
+    return c.json({ error: "Unauthorized" }, 401);
+  return c.json({ grants: (await appDbPool.query(`SELECT g.id,g.org_id,g.scopes,g.created_at,c.name AS client_name FROM mcp_oauth_grants g JOIN mcp_oauth_clients c ON c.id=g.client_id WHERE g.user_id=$1 AND g.revoked_at IS NULL ORDER BY g.created_at DESC`, [actor.userId])).rows });
+});
+mcpOAuthRoutes.post("/grants/:id/revoke", async (c) => {
+  if (c.req.header("origin") !== mcpOrigin(c.req.url))
+    return c.json({ error: "Forbidden" }, 403);
+  const actor = await resolveBetterAuthSessionActor(c.req.raw.headers);
+  if (!actor)
+    return c.json({ error: "Unauthorized" }, 401);
+  await appDbPool.query("UPDATE mcp_oauth_grants SET revoked_at=now() WHERE id=$1 AND user_id=$2", [c.req.param("id"), actor.userId]);
+  await appDbPool.query("UPDATE api_keys SET revoked_at=now() WHERE id IN (SELECT api_key_id FROM mcp_oauth_grants WHERE id=$1 AND user_id=$2 AND revoked_at IS NOT NULL)", [c.req.param("id"), actor.userId]);
+  return c.json({ revoked: true });
+});

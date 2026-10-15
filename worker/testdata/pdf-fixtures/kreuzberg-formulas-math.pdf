@@ -1,0 +1,67 @@
+%PDF-1.4
+%ÿÿÿÿ
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [8 0 R] /Count 1 >>
+endobj
+3 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>
+endobj
+4 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold >>
+endobj
+5 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Courier >>
+endobj
+6 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Times-Italic >>
+endobj
+7 0 obj
+<<  /Length 1808 >>
+stream
+BT /F2 18 Tf 1 0 0 1 48 744 Tm (Mathematical Formulas and Equations) Tj ET
+BT /F2 12 Tf 1 0 0 1 48 714 Tm (Definition 1 \(Integral\):) Tj ET
+BT /F1 11 Tf 1 0 0 1 68 696 Tm (The definite integral from a to b of f\(x\) dx equals F\(b\) - F\(a\).) Tj ET
+BT /F3 10.5 Tf 1 0 0 1 68 680 Tm (Formal: integral from 0 to infinity of e^\(-x^2\) dx = sqrt\(pi\)/2) Tj ET
+BT /F2 12 Tf 1 0 0 1 48 656 Tm (Theorem 1 \(Derivative Chain Rule\):) Tj ET
+BT /F1 11 Tf 1 0 0 1 68 638 Tm (If h\(x\) = f\(g\(x\)\), then h'\(x\) = f'\(g\(x\)\) * g'\(x\).) Tj ET
+BT /F3 10.5 Tf 1 0 0 1 68 622 Tm (Equation: d/dx [f\(g\(x\)\)] = f'\(g\(x\)\) * g'\(x\)) Tj ET
+BT /F2 12 Tf 1 0 0 1 48 598 Tm (Proof:) Tj ET
+BT /F1 11 Tf 1 0 0 1 68 580 Tm (Apply the definition of the derivative to the composed function. The limit) Tj ET
+BT /F1 11 Tf 1 0 0 1 68 564 Tm (definition gives us h'\(x\) = lim_{h->0} \(f\(g\(x+h\)\) - f\(g\(x\)\)\) / h. Factoring) Tj ET
+BT /F1 11 Tf 1 0 0 1 68 548 Tm (yields the result.) Tj ET
+BT /F2 12 Tf 1 0 0 1 48 512 Tm (Corollary 1:) Tj ET
+BT /F1 11 Tf 1 0 0 1 68 494 Tm (For f\(x\) = x^n, the derivative is f'\(x\) = n * x^\(n-1\).) Tj ET
+BT /F2 12 Tf 1 0 0 1 48 470 Tm (Definition 2 \(Matrix Multiplication\):) Tj ET
+BT /F1 11 Tf 1 0 0 1 68 452 Tm (Given matrices A of shape m x k and B of shape k x n, their product C = A * B) Tj ET
+BT /F1 11 Tf 1 0 0 1 68 436 Tm (has entry C[i,j] = sum over r of A[i,r] * B[r,j]. This is the fundamental) Tj ET
+BT /F1 11 Tf 1 0 0 1 68 420 Tm (matrix product for linear algebra and neural network computations.) Tj ET
+BT /F2 12 Tf 1 0 0 1 48 384 Tm (Equation 3:) Tj ET
+BT /F3 10.5 Tf 1 0 0 1 68 366 Tm (C[i,j] = sum_{r=1}^{k} A[i,r] * B[r,j]) Tj ET
+0.8 w 48 32 m 564 32 l S
+BT /F4 9 Tf 1 0 0 1 48 18 Tm (DocSlurp synthetic fixture) Tj ET
+BT /F4 9 Tf 1 0 0 1 520 18 Tm (1/1) Tj ET
+
+endstream
+endobj
+8 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R /F2 4 0 R /F3 5 0 R /F4 6 0 R >> >> /Contents 7 0 R >>
+endobj
+xref
+0 9
+0000000000 65535 f 
+0000000015 00000 n 
+0000000064 00000 n 
+0000000121 00000 n 
+0000000191 00000 n 
+0000000266 00000 n 
+0000000334 00000 n 
+0000000407 00000 n 
+0000002268 00000 n 
+trailer
+<< /Size 9 /Root 1 0 R >>
+startxref
+2424
+%%EOF

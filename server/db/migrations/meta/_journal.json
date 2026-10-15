@@ -1,0 +1,405 @@
+{
+  "version": "7",
+  "dialect": "postgresql",
+  "entries": [
+    {
+      "idx": 0,
+      "version": "7",
+      "when": 1773379277532,
+      "tag": "0000_current_schema",
+      "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1773379768914,
+      "tag": "0001_bumpy_mojo",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1773379885264,
+      "tag": "0002_wise_scarlet_witch",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1774606040000,
+      "tag": "0003_waitlist",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1774606100000,
+      "tag": "0004_api_key_origin_allowlist",
+      "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1774606160000,
+      "tag": "0005_billing_retry_safety",
+      "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1775415247000,
+      "tag": "0006_workspace_prompt_bootstrap_fix",
+      "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1775415300000,
+      "tag": "0007_search_document_id_idx",
+      "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1775415360000,
+      "tag": "0008_lancedb_object_storage_vectors",
+      "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1776396362152,
+      "tag": "0009_billing_rate_limits_subscriptions",
+      "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1777669850919,
+      "tag": "0010_security_secret_cleanup",
+      "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "7",
+      "when": 1782410259965,
+      "tag": "0011_user_settings_mcp_services",
+      "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "7",
+      "when": 1790797140115,
+      "tag": "0012_new_account_starter_credit",
+      "breakpoints": true
+    },
+    {
+      "idx": 13,
+      "version": "7",
+      "when": 1790801331730,
+      "tag": "0013_fractional_usage_costs",
+      "breakpoints": true
+    },
+    {
+      "idx": 14,
+      "version": "7",
+      "when": 1790816000000,
+      "tag": "0014_distributed_page_tasks",
+      "breakpoints": true
+    },
+    {
+      "idx": 15,
+      "version": "7",
+      "when": 1790930000000,
+      "tag": "0015_mcp_oauth",
+      "breakpoints": true
+    },
+    {
+      "idx": 16,
+      "version": "7",
+      "when": 1790930000001,
+      "tag": "0016_mcp_oauth_key_identity",
+      "breakpoints": true
+    },
+    {
+      "idx": 17,
+      "version": "7",
+      "when": 1790930000002,
+      "tag": "0017_chat_message_feedback",
+      "breakpoints": true
+    },
+    {
+      "idx": 18,
+      "version": "7",
+      "when": 1790930000003,
+      "tag": "0018_default_workspaces",
+      "breakpoints": true
+    },
+    {
+      "idx": 19,
+      "version": "7",
+      "when": 1790930000004,
+      "tag": "0019_document_canonical_ids",
+      "breakpoints": true
+    },
+    {
+      "idx": 20,
+      "version": "7",
+      "when": 1790930000005,
+      "tag": "0020_corpus_stats_and_purge",
+      "breakpoints": true
+    },
+    {
+      "idx": 21,
+      "version": "7",
+      "when": 1790930000006,
+      "tag": "0021_retire_failed_versions_and_cleanup_queue",
+      "breakpoints": true
+    },
+    {
+      "idx": 22,
+      "version": "7",
+      "when": 1790930000007,
+      "tag": "0022_workspace_graph_jobs",
+      "breakpoints": true
+    },
+    {
+      "idx": 23,
+      "version": "7",
+      "when": 1790930000008,
+      "tag": "0023_api_key_rate_limits",
+      "breakpoints": true
+    },
+    {
+      "idx": 24,
+      "version": "7",
+      "when": 1790930000009,
+      "tag": "0024_service_plans_and_credits",
+      "breakpoints": true
+    },
+    {
+      "idx": 25,
+      "version": "7",
+      "when": 1790930000010,
+      "tag": "0025_worker_slot_leases",
+      "breakpoints": true
+    },
+    {
+      "idx": 26,
+      "version": "7",
+      "when": 1790930000011,
+      "tag": "0026_billing_runtime",
+      "breakpoints": true
+    },
+    {
+      "idx": 27,
+      "version": "7",
+      "when": 1790930000012,
+      "tag": "0027_vector_index_write_queue",
+      "breakpoints": true
+    },
+    {
+      "idx": 28,
+      "version": "7",
+      "when": 1790930000013,
+      "tag": "0028_debit_org_credits_no_key_lock",
+      "breakpoints": true
+    },
+    {
+      "idx": 29,
+      "version": "7",
+      "when": 1790930000014,
+      "tag": "0029_run_workflow_start_tracking",
+      "breakpoints": true
+    },
+    {
+      "idx": 30,
+      "version": "7",
+      "when": 1790930000015,
+      "tag": "0030_pending_credit_debits",
+      "breakpoints": true
+    },
+    {
+      "idx": 31,
+      "version": "7",
+      "when": 1790930000016,
+      "tag": "0031_worker_slot_tokens",
+      "breakpoints": true
+    },
+    {
+      "idx": 32,
+      "version": "7",
+      "when": 1790930000017,
+      "tag": "0032_sso_domain_verification",
+      "breakpoints": true
+    },
+    {
+      "idx": 33,
+      "version": "7",
+      "when": 1790930000018,
+      "tag": "0033_document_reused_from",
+      "breakpoints": true
+    },
+    {
+      "idx": 34,
+      "version": "7",
+      "when": 1790930000019,
+      "tag": "0034_embedding_reuse_refs",
+      "breakpoints": true
+    },
+    {
+      "idx": 35,
+      "version": "7",
+      "when": 1790930000020,
+      "tag": "0035_data_lifecycle_cleanup",
+      "breakpoints": true
+    },
+    {
+      "idx": 36,
+      "version": "7",
+      "when": 1790930000021,
+      "tag": "0036_tenant_offboarding",
+      "breakpoints": true
+    },
+    {
+      "idx": 37,
+      "version": "7",
+      "when": 1790930060021,
+      "tag": "0037_chat_session_search_overrides",
+      "breakpoints": true
+    },
+    {
+      "idx": 38,
+      "version": "7",
+      "when": 1790930060022,
+      "tag": "0038_better_auth_rate_limit",
+      "breakpoints": true
+    },
+    {
+      "idx": 39,
+      "version": "7",
+      "when": 1790930060023,
+      "tag": "0039_api_key_workspace_allowlist",
+      "breakpoints": true
+    },
+    {
+      "idx": 40,
+      "version": "7",
+      "when": 1790930060024,
+      "tag": "0040_org_invites",
+      "breakpoints": true
+    },
+    {
+      "idx": 41,
+      "version": "7",
+      "when": 1790930060025,
+      "tag": "0041_embedding_reuse_refs_artifact_uri",
+      "breakpoints": true
+    },
+    {
+      "idx": 42,
+      "version": "7",
+      "when": 1790930120025,
+      "tag": "0042_usage_event_tenant_columns",
+      "breakpoints": true
+    },
+    {
+      "idx": 43,
+      "version": "7",
+      "when": 1790930180025,
+      "tag": "0043_usage_attribution_view",
+      "breakpoints": true
+    },
+    {
+      "idx": 44,
+      "version": "7",
+      "when": 1790930240025,
+      "tag": "0044_spend_admission",
+      "breakpoints": true
+    },
+    {
+      "idx": 45,
+      "version": "7",
+      "when": 1791775393930,
+      "tag": "0045_starter_credit_25",
+      "breakpoints": true
+    },
+    {
+      "idx": 46,
+      "version": "7",
+      "when": 1791790000000,
+      "tag": "0046_run_shard_demand",
+      "breakpoints": true
+    },
+    {
+      "idx": 47,
+      "version": "7",
+      "when": 1791790060000,
+      "tag": "0047_worker_slot_floor",
+      "breakpoints": true
+    },
+    {
+      "idx": 48,
+      "version": "7",
+      "when": 1791900000000,
+      "tag": "0048_remote_media_jobs",
+      "breakpoints": true
+    },
+    {
+      "idx": 49,
+      "version": "7",
+      "when": 1791900000001,
+      "tag": "0049_remote_capacity_leases",
+      "breakpoints": true
+    },
+    {
+      "idx": 50,
+      "version": "7",
+      "when": 1791900000002,
+      "tag": "0050_media_video_accounting",
+      "breakpoints": true
+    },
+    {
+      "idx": 51,
+      "version": "7",
+      "when": 1791900000003,
+      "tag": "0051_document_lexical_searchable",
+      "breakpoints": true
+    },
+    {
+      "idx": 52,
+      "version": "7",
+      "when": 1791900000004,
+      "tag": "0052_credit_leases",
+      "breakpoints": true
+    },
+    {
+      "idx": 53,
+      "version": "7",
+      "when": 1791900000005,
+      "tag": "0053_chat_credit_reserve",
+      "breakpoints": true
+    },
+    {
+      "idx": 54,
+      "version": "7",
+      "when": 1791900000006,
+      "tag": "0054_document_page_facts",
+      "breakpoints": true
+    },
+    {
+      "idx": 55,
+      "version": "7",
+      "when": 1791900000007,
+      "tag": "0055_worker_capabilities",
+      "breakpoints": true
+    },
+    {
+      "idx": 56,
+      "version": "7",
+      "when": 1791900000008,
+      "tag": "0056_run_spent_cents",
+      "breakpoints": true
+    }
+  ]
+}

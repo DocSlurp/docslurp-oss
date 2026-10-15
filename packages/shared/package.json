@@ -1,0 +1,90 @@
+{
+  "name": "@docslurp/shared",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./auth-security": {
+      "types": "./dist/auth-security.d.ts",
+      "import": "./dist/auth-security.js"
+    },
+    "./temporal-security": {
+      "types": "./dist/temporal-security.d.ts",
+      "import": "./dist/temporal-security.js"
+    },
+    "./temporal-connection": {
+      "types": "./dist/temporal-connection.d.ts",
+      "import": "./dist/temporal-connection.js"
+    },
+    "./observability": {
+      "types": "./dist/observability.d.ts",
+      "import": "./dist/observability.js"
+    },
+    "./error-reporting": {
+      "types": "./dist/error-reporting.d.ts",
+      "import": "./dist/error-reporting.js"
+    },
+    "./error-response": {
+      "types": "./dist/error-response.d.ts",
+      "import": "./dist/error-response.js"
+    },
+    "./file-token-path": {
+      "types": "./dist/file-token-path.d.ts",
+      "import": "./dist/file-token-path.js"
+    },
+    "./workspace-chat-models": {
+      "types": "./dist/workspace-chat-models.d.ts",
+      "import": "./dist/workspace-chat-models.js"
+    },
+    "./chat-voice": {
+      "types": "./dist/chat-voice.d.ts",
+      "import": "./dist/chat-voice.js"
+    },
+    "./workspace-chat-ui": {
+      "types": "./dist/workspace-chat-ui.d.ts",
+      "import": "./dist/workspace-chat-ui.js"
+    }
+  },
+  "files": [
+    "dist",
+    "LICENSE",
+    "NOTICE",
+    "LICENSES"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "@langfuse/otel": "^5.13.1",
+    "@langfuse/tracing": "^5.13.1",
+    "@opentelemetry/api": "^1.9.1",
+    "@opentelemetry/api-logs": "^0.223.0",
+    "@opentelemetry/context-async-hooks": "^2.12.0",
+    "@opentelemetry/core": "^2.12.0",
+    "@opentelemetry/exporter-logs-otlp-proto": "^0.223.0",
+    "@opentelemetry/exporter-metrics-otlp-proto": "^0.223.0",
+    "@opentelemetry/exporter-trace-otlp-proto": "^0.223.0",
+    "@opentelemetry/resources": "^2.12.0",
+    "@opentelemetry/sdk-logs": "^0.223.0",
+    "@opentelemetry/sdk-metrics": "^2.12.0",
+    "@opentelemetry/sdk-trace-base": "^2.12.0",
+    "@opentelemetry/sdk-trace-node": "^2.12.0",
+    "zod": "^4.6.7",
+    "@opentelemetry/exporter-logs-otlp-http": "^0.223.0"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.5",
+    "ai": "7.0.138",
+    "vitest": "^5.0.4"
+  },
+  "license": "MIT"
+}

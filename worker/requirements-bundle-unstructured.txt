@@ -1,0 +1,13 @@
+# Vendor bundle "unstructured" (worker/vendor-bundles.json, docs/worker-image.md).
+# Document extras only: [all-docs] also pulls the audio stack (openai-whisper ->
+# triton, ~0.9 GB unpacked), which no worker path uses.
+# opencv-python (GUI) is swapped for the headless build after install.
+# Floors stop the resolver from silently backtracking to an ancient release.
+# langdetect (pure Python) publishes only an sdist; everything else must be a wheel.
+# docslurp: allow-sdist langdetect
+unstructured[pdf,docx,pptx,xlsx,doc,odt,epub,md,rtf]>=0.27
+torch
+torchvision
+# unstructured downloads this spaCy model at runtime when it is missing; the parser
+# sandbox has no network, so bake it in (URL and sha256 are unstructured's own pin).
+en_core_web_sm @ https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl#sha256=1932429db727d4bff3deed6b34cfc05df17794f4a52eeb26cf8928f7c1a0fb85

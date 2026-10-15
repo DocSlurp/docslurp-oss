@@ -1,0 +1,112 @@
+{
+  "fixtures": [
+    {
+      "id": "academic-latex-ligatures",
+      "path": "academic-latex-ligatures.pdf",
+      "tags": ["latex", "ligatures", "math", "vector-text"],
+      "notes": "Academic PDF with ligatures and formula-heavy text."
+    },
+    {
+      "id": "kreuzberg-formulas-math",
+      "path": "kreuzberg-formulas-math.pdf",
+      "tags": ["math", "latex", "equations", "vector-text"],
+      "notes": "Formula-heavy benchmark with theorem/proof style structure."
+    },
+    {
+      "id": "multicolumn-figures-report",
+      "path": "multicolumn-figures-report.pdf",
+      "tags": ["multicolumn", "figures", "captioning", "scientific-layout"],
+      "notes": "Dense report with figures, captions, and multi-column reading order."
+    },
+    {
+      "id": "image-heavy-ocr",
+      "path": "image-heavy-ocr.pdf",
+      "tags": ["ocr", "image-heavy", "scanned", "captioning"],
+      "notes": "Image-heavy OCR case with limited native text."
+    },
+    {
+      "id": "kreuzberg-handwriting-notes",
+      "path": "kreuzberg-handwriting-notes.pdf",
+      "tags": ["handwriting", "notes", "ocr", "annotations"],
+      "notes": "Handwritten meeting-note style document."
+    },
+    {
+      "id": "handwritten-invoice",
+      "path": "mixed-media-and-langs/handwritten-invoice.pdf",
+      "tags": ["handwriting", "invoice", "ocr", "forms"],
+      "notes": "Handwritten invoice with mixed printed and handwritten content."
+    },
+    {
+      "id": "homework-replacement-photo-form",
+      "path": "mixed-media-and-langs/homework_replacement-photo-form_68.69.1_sausages-29e7haj-e1566262168485.pdf",
+      "tags": ["forms", "photos", "mixed-media", "ocr"],
+      "notes": "Form-like scanned document with embedded imagery and handwriting."
+    },
+    {
+      "id": "japanese-graphic-designer-eizin-suzuki",
+      "path": "mixed-media-and-langs/japanese-graphic-designer-eizin-suzuki.pdf",
+      "tags": ["japanese", "multilingual", "design", "image-heavy"],
+      "notes": "Japanese design-oriented document with complex visual treatment."
+    },
+    {
+      "id": "computer-japan",
+      "path": "mixed-media-and-langs/computer_japan.pdf",
+      "tags": ["japanese", "multilingual", "technical", "vector-text"],
+      "notes": "Japanese technical PDF with dense text blocks."
+    },
+    {
+      "id": "computer-japan-wizard",
+      "path": "mixed-media-and-langs/computer_japan_wizard.pdf",
+      "tags": ["japanese", "multilingual", "technical", "wizard-layout"],
+      "notes": "Japanese technical pages with irregular layout and UI-like structure."
+    },
+    {
+      "id": "historical-1878-miller-greiner",
+      "path": "mixed-media-and-langs/historical_1878_miller-greiner-14307855.pdf",
+      "tags": ["historical-scan", "ocr", "degraded", "old-print"],
+      "notes": "Historical degraded scan with archaic print and OCR difficulty."
+    },
+    {
+      "id": "glue-stick",
+      "path": "mixed-media-and-langs/glue+stick.pdf",
+      "tags": ["mixed-media", "product-doc", "layout", "graphics"],
+      "notes": "Mixed media product-style PDF with non-trivial graphics and layout."
+    },
+    {
+      "id": "emp-app-textract-test",
+      "path": "mixed-media-and-langs/emp-app-textract-test-ML-1955-2.pdf",
+      "tags": ["forms", "application", "ocr", "mixed-layout"],
+      "notes": "Application-style document with form fields and structured regions."
+    },
+    {
+      "id": "tables-multipage-financials",
+      "path": "tables-multipage-financials.pdf",
+      "tags": ["tables", "financials", "multipage", "structured-data"],
+      "notes": "Multipage financial tables and continuation rows."
+    },
+    {
+      "id": "kreuzberg-tables-invoice",
+      "path": "kreuzberg-tables-invoice.pdf",
+      "tags": ["tables", "invoice", "structured-data", "forms"],
+      "notes": "Invoice with compact tables and field labels."
+    },
+    {
+      "id": "form-rotated-notes",
+      "path": "form-rotated-notes.pdf",
+      "tags": ["rotated-text", "forms", "annotations", "ocr"],
+      "notes": "Rotated notes and form elements."
+    },
+    {
+      "id": "us-census-1790-sample",
+      "path": "us-census-1790-sample.pdf",
+      "tags": ["historical-scan", "tables", "handwriting", "ocr"],
+      "notes": "Historical census sample with handwritten tabular content."
+    },
+    {
+      "id": "cu-course-catalog-page-50",
+      "path": "CU-Course-Catalog-2025__pg50.pdf",
+      "tags": ["catalog", "multicolumn", "dense-text", "academic"],
+      "notes": "Dense catalog page with multi-column academic text."
+    }
+  ]
+}

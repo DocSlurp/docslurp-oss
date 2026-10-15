@@ -1,0 +1,5 @@
+# Default gitleaks rules plus nothing else: add path allowlists here only with a reason.
+title = "DocSlurp public tree"
+
+[extend]
+useDefault = true

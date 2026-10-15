@@ -1,0 +1,73 @@
+{
+  "name": "@docslurp/worker",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "dist/temporal/worker.js",
+  "types": "dist/temporal/worker.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/temporal/worker.d.ts",
+      "default": "./dist/temporal/worker.js"
+    },
+    "./testing": {
+      "types": "./src/testing.ts",
+      "default": "./src/testing.ts"
+    }
+  },
+  "scripts": {
+    "dev": "tsx watch src/temporal/worker.ts",
+    "start": "node dist/temporal/worker.js",
+    "build": "pnpm --filter @docslurp/shared build && tsc -p tsconfig.json && node scripts/copy-routing-assets.mjs",
+    "typecheck": "pnpm --filter @docslurp/shared build && tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:temporal-replay": "vitest run src/__tests__/temporal-replay.test.ts",
+    "temporal:record-histories": "tsx src/test/temporal-replay/record-histories.ts",
+    "fixtures:pdf": "node testdata/pdf-fixtures/generate-fixtures.mjs",
+    "benchmark:vision": "tsx src/benchmarks/vision-benchmark-cli.ts",
+    "benchmark:kreuzberg": "tsx src/benchmarks/kreuzberg-benchmark-cli.ts",
+    "benchmark:parsebench": "tsx src/benchmarks/parsebench-benchmark-cli.ts",
+    "benchmark:pdf-fixtures": "tsx src/benchmarks/pdf-fixture-benchmark-cli.ts",
+    "benchmark:extractors": "tsx src/benchmarks/extractor-benchmark-cli.ts",
+    "benchmark:parser-policy-eval": "tsx src/benchmarks/parser-policy-eval-cli.ts",
+    "eval:document-routing": "pnpm --filter @docslurp/shared build && tsx src/benchmarks/document-routing-eval-cli.ts",
+    "eval:local-vision": "tsx src/benchmarks/local-vision-model-eval-cli.ts",
+    "media:watchdog": "node dist/media/capacity/watchdog.js",
+    "media:reconcile": "node dist/media/reconcile-cli.js"
+  },
+  "dependencies": {
+    "@ai-sdk/anthropic": "4.0.79",
+    "@ai-sdk/openai": "4.0.92",
+    "@aws-sdk/client-s3": "^3.1150.0",
+    "@docslurp/shared": "workspace:*",
+    "@huggingface/transformers": "^4.3.1",
+    "@kreuzberg/node": "^4.10.2",
+    "@lancedb/lancedb": "^0.40.0",
+    "@llamaindex/liteparse": "2.15.1",
+    "@temporalio/activity": "^1.24.0",
+    "@temporalio/client": "^1.24.0",
+    "@temporalio/common": "^1.24.0",
+    "@temporalio/worker": "^1.24.0",
+    "@temporalio/workflow": "^1.24.0",
+    "ai": "7.0.138",
+    "dotenv": "^18.0.7",
+    "mammoth": "^1.13.0",
+    "postgres": "^3.4.9",
+    "redis": "^5.12.1",
+    "sharp": "0.35.5"
+  },
+  "optionalDependencies": {
+    "@kreuzberg/node-linux-arm64-gnu": "4.10.2",
+    "@kreuzberg/node-linux-x64-gnu": "4.10.2"
+  },
+  "devDependencies": {
+    "@electric-sql/pglite": "0.5.9",
+    "@electric-sql/pglite-pgvector": "0.0.10",
+    "@electric-sql/pglite-socket": "0.2.12",
+    "@temporalio/testing": "1.24.0",
+    "@types/node": "^26.6.5",
+    "vitest": "^5.0.4"
+  },
+  "license": "SEE LICENSE IN LICENSE"
+}

@@ -1,0 +1,421 @@
+import type { PrivacyMode } from "@docslurp/shared";
+import type { SearchResult } from "@docslurp/shared";
+
+import { sql } from "../db.js";
+import { calibrateSearchConfidence } from "./confidence.js";
+import { compressChunks } from "./contextual-compression.js";
+import { mmrSelect } from "./mmr.js";
+import { lostInTheMiddleReorder } from "./position-reorder.js";
+import { rerankBM25, type RankedChunk } from "./rerank.js";
+import { reciprocalRankFusion } from "./rrf.js";
+import {
+  toSearchMetadataRecord,
+  type SearchSessionJournal,
+} from "./session.js";
+import type {
+  SearchAvailability,
+  SearchChunk,
+  SearchOptions,
+  SearchResponse,
+} from "../services/search.js";
+import {
+  applySearchControls,
+  recordZeroResultDiagnostics,
+} from "../services/search-controls.js";
+
+export interface SearchSessionExecutionInput {
+  query: string;
+  userId: string;
+  session: SearchSessionJournal;
+  options: SearchOptions;
+  workspaceId: string;
+  availability: SearchAvailability;
+  chunks: SearchChunk[];
+  effectiveQuery: string;
+  filters: SearchOptions["filters"];
+  selfQueryReasons: string[];
+  variant?: string;
+  workspaceSettings?: Parameters<typeof applySearchControls>[0]["settings"];
+  retrievalChain?: unknown;
+  wholeCorpusFallback?: () => Promise<SearchResult[]>;
+}
+
+export interface SearchPostRetrievalInput {
+  query: string;
+  chunks: SearchChunk[];
+  limit: number;
+  options: Pick<
+    SearchOptions,
+    "useRerank" | "useMmr" | "mmrLambda" | "useContextualCompression"
+  >;
+  openRouterApiKey?: string | null;
+  privacyMode: PrivacyMode;
+  session: SearchSessionJournal;
+}
+
+export interface SearchSessionRetrievalInput
+  extends Omit<SearchSessionExecutionInput, "availability" | "chunks"> {
+  limit: number;
+  retrieveCandidateLists(): Promise<SearchChunk[][]>;
+  buildAvailability(chunks: SearchChunk[]): SearchAvailability;
+  openRouterApiKey?: string | null;
+  privacyMode: PrivacyMode;
+}
+
+export function searchChunkToResult(chunk: SearchChunk): SearchResult {
+  return {
+    text: chunk.text,
+    score: chunk.score,
+    citation: {
+      source: chunk.source,
+      documentId: chunk.documentId,
+      filename: chunk.filename,
+      pageNumber: chunk.pageNumber,
+      pageNumbers: chunk.pageNumbers,
+      headingPath: chunk.headingPath,
+      chunkIndex: chunk.chunkIndex,
+      blockIds: chunk.blockIds,
+      blockTypes: chunk.blockTypes,
+      evidenceType: chunk.evidenceType,
+      canonicalDocumentUri: chunk.canonicalDocumentUri,
+      tableGranularity: chunk.tableGranularity,
+      tableRowIndex: chunk.tableRowIndex,
+      tableRowCount: chunk.tableRowCount,
+      tableColumnNames: chunk.tableColumnNames,
+      tableColumnTypes: chunk.tableColumnTypes,
+      tableCells: chunk.tableCells,
+      tableCell: chunk.tableCell,
+      regionBoxes: chunk.regionBoxes,
+      regions: chunk.regions,
+      regionCoordinateSpace: chunk.regionCoordinateSpace,
+      sourceTrace: chunk.sourceTrace ?? undefined,
+      locator: chunk.locator ?? null,
+    },
+  };
+}
+
+export function searchResultsToChunks(results: SearchResult[]): SearchChunk[] {
+  return results.map((result) => ({
+    id: `${result.citation.documentId}:${result.citation.chunkIndex}`,
+    documentId: result.citation.documentId,
+    runId: "",
+    chunkIndex: result.citation.chunkIndex,
+    text: result.text,
+    headingPath: result.citation.headingPath,
+    pageNumber: result.citation.pageNumber ?? null,
+    pageNumbers: result.citation.pageNumbers ?? [],
+    tokenEstimate: 0,
+    filename: result.citation.filename,
+    score: result.score,
+    blockIds: result.citation.blockIds ?? [],
+    blockTypes: result.citation.blockTypes ?? [],
+    evidenceType: result.citation.evidenceType ?? null,
+    canonicalDocumentUri: result.citation.canonicalDocumentUri ?? null,
+    tableGranularity: result.citation.tableGranularity ?? null,
+    tableRowIndex: result.citation.tableRowIndex ?? null,
+    tableRowCount: result.citation.tableRowCount ?? null,
+    tableColumnNames: result.citation.tableColumnNames ?? [],
+    tableColumnTypes: result.citation.tableColumnTypes ?? [],
+    tableCells: result.citation.tableCells ?? [],
+    tableCell: result.citation.tableCell ?? null,
+    regionBoxes: result.citation.regionBoxes ?? [],
+    regions: result.citation.regions ?? result.citation.regionBoxes ?? [],
+    regionCoordinateSpace: result.citation.regionCoordinateSpace ?? null,
+    sourceTrace: result.citation.sourceTrace ?? null,
+    locator: result.citation.locator ?? null,
+    source: result.citation.source ?? "document",
+    retrievalStage:
+      result.citation.sourceTrace?.extractor === "page-index"
+        ? "page-index"
+        : "full-index",
+  }));
+}
+
+export function fuseSearchResponses(
+  responses: SearchResponse[],
+  limit: number,
+): SearchChunk[] {
+  return fuseSearchChunkLists(
+    responses.map((response) => searchResultsToChunks(response.results)),
+    limit,
+  );
+}
+
+export function fuseSearchChunkLists(
+  chunkLists: SearchChunk[][],
+  limit: number,
+): SearchChunk[] {
+  const fused = reciprocalRankFusion(chunkLists) ?? [];
+  return fused.slice(0, limit).map((chunk, index) => ({
+    ...chunk,
+    score: 1 / (1 + index),
+  }));
+}
+
+export async function applySearchPostRetrievalProcessing(
+  input: SearchPostRetrievalInput,
+): Promise<SearchChunk[]> {
+  const candidates = input.chunks.slice(0, input.options.useRerank ? 200 : input.limit * 2);
+  if (candidates.length === 0) {
+    return [];
+  }
+
+  let ranked: RankedChunk[] = candidates.map((chunk) => ({
+    id: chunk.id,
+    text: chunk.text,
+    score: chunk.score,
+  }));
+
+  if (input.options.useRerank) {
+    ranked = rerankBM25(input.query, ranked);
+  } else {
+    ranked = [...ranked].sort((a, b) => b.score - a.score);
+  }
+
+  if (input.options.useContextualCompression) {
+    const compressed = await compressChunks(
+      input.query,
+      ranked.map((chunk) => ({
+        id: chunk.id,
+        text: chunk.text,
+        score: chunk.crossScore ?? chunk.score,
+      })),
+      input.openRouterApiKey ?? "",
+      input.session,
+      input.privacyMode,
+    );
+
+    const compressedById = new Map(
+      compressed.map((chunk) => [chunk.id, chunk.text]),
+    );
+    ranked = ranked.map((chunk) => ({
+      ...chunk,
+      text: compressedById.get(chunk.id) ?? chunk.text,
+    }));
+  }
+
+  const selected = input.options.useMmr
+    ? mmrSelect(
+        ranked.map((chunk) => ({
+          id: chunk.id,
+          text: chunk.text,
+          score: chunk.crossScore ?? chunk.score,
+        })),
+        input.limit,
+        input.options.mmrLambda,
+      )
+    : ranked.slice(0, input.limit);
+
+  const reordered = lostInTheMiddleReorder(
+    selected.map((chunk) => ({
+      id: chunk.id,
+      score: chunk.score,
+    })),
+  );
+  const rankById = new Map(ranked.map((chunk) => [chunk.id, chunk]));
+  const chunkById = new Map(candidates.map((chunk) => [chunk.id, chunk]));
+
+  return reordered
+    .map((result, index) => {
+      const chunk = chunkById.get(result.id);
+      if (!chunk) {
+        return null;
+      }
+      return {
+        ...chunk,
+        text: rankById.get(result.id)?.text ?? chunk.text,
+        score: 1 / (1 + index),
+      };
+    })
+    .filter((chunk): chunk is SearchChunk => chunk !== null);
+}
+
+export async function executeSearchSessionRetrieval(
+  input: SearchSessionRetrievalInput,
+): Promise<SearchResponse> {
+  const fused = reciprocalRankFusion(await input.retrieveCandidateLists()) ?? [];
+  const shouldPostProcess =
+    fused.length > 0 &&
+    (input.options.useRerank ||
+      input.options.useMmr ||
+      input.options.useContextualCompression);
+  const chunks = shouldPostProcess
+    ? await applySearchPostRetrievalProcessing({
+        query: input.query,
+        chunks: fused,
+        limit: input.limit,
+        options: input.options,
+        openRouterApiKey: input.openRouterApiKey,
+        privacyMode: input.privacyMode,
+        session: input.session,
+      })
+    : fused
+        .slice(0, input.limit)
+        .map((chunk, index) => ({ ...chunk, score: 1 / (1 + index) }));
+
+  return finalizeSearchSessionExecution({
+    query: input.query,
+    userId: input.userId,
+    session: input.session,
+    options: input.options,
+    workspaceId: input.workspaceId,
+    availability: input.buildAvailability(chunks),
+    chunks,
+    effectiveQuery: input.effectiveQuery,
+    filters: input.filters,
+    selfQueryReasons: input.selfQueryReasons,
+    variant: input.variant,
+    workspaceSettings: input.workspaceSettings,
+    retrievalChain: input.retrievalChain,
+    wholeCorpusFallback: input.wholeCorpusFallback,
+  });
+}
+
+export async function finalizeSearchSessionExecution(
+  input: SearchSessionExecutionInput,
+): Promise<SearchResponse> {
+  let results = input.chunks.map((chunk) => searchChunkToResult(chunk));
+  if (input.workspaceSettings) {
+    results = applySearchControls({
+      query: input.query,
+      results,
+      settings: input.workspaceSettings,
+    });
+  }
+
+  if (input.options.parentRetrieval) {
+    await attachParentText(results);
+  }
+
+  let calibratedResults = calibrateSearchConfidence(results);
+  let finalResultSource: "retrieval" | "whole-corpus" | "none" =
+    calibratedResults.length > 0 ? "retrieval" : "none";
+  let usedWholeCorpusFallback = false;
+
+  if (
+    calibratedResults.length === 0 &&
+    !input.options.suppressSessionLog &&
+    input.wholeCorpusFallback
+  ) {
+    try {
+      const fallbackResults = await input.wholeCorpusFallback();
+      if (fallbackResults.length > 0) {
+        calibratedResults = calibrateSearchConfidence(fallbackResults);
+        usedWholeCorpusFallback = calibratedResults.length > 0;
+        finalResultSource = usedWholeCorpusFallback ? "whole-corpus" : "none";
+      }
+    } catch {
+      // Search should still return zero-result diagnostics if fallback fails.
+    }
+  }
+
+  const recordedZeroResultDiagnostics = calibratedResults.length === 0;
+  if (recordedZeroResultDiagnostics) {
+    await recordZeroResultDiagnostics({
+      sessionId: input.session.sessionId,
+      userId: input.userId,
+      workspaceId: input.workspaceId,
+      query: input.query,
+      filtersJson: toSearchMetadataRecord(input.filters),
+    }).catch(() => undefined);
+  }
+
+  if (!input.options.suppressSessionLog) {
+    await input.session.persist({
+      userId: input.userId,
+      query: input.query,
+      variant: input.variant,
+      results: calibratedResults,
+      chunks: input.chunks,
+      metadata: {
+        originalQuery: input.query,
+        effectiveQuery: input.effectiveQuery,
+        filters: input.filters,
+        options: input.options,
+        workspaceId: input.workspaceId,
+        selfQueryReasons: input.selfQueryReasons,
+        availability: input.availability,
+        retrievalChain: input.retrievalChain,
+        finalization: {
+          resultSource: finalResultSource,
+          usedWholeCorpusFallback,
+          recordedZeroResultDiagnostics,
+          parentRetrieval: input.options.parentRetrieval ?? false,
+          persistedUsageEventCount: input.session.usageEvents().length,
+        },
+        diagnostics: input.session.diagnostics(),
+      },
+    });
+  }
+
+  return {
+    results: calibratedResults,
+    sessionId: input.session.sessionId,
+    availability: input.availability,
+    usageEvents: input.session.usageEvents(),
+  };
+}
+
+async function attachParentText(results: SearchResult[]): Promise<void> {
+  const keyMap = new Map<string, { documentId: string; pageNumber: number }>();
+  for (const result of results) {
+    const documentId = result.citation.documentId;
+    const pageNumber = result.citation.pageNumber;
+    if (!documentId || pageNumber == null) continue;
+    keyMap.set(`${documentId}:${pageNumber}`, { documentId, pageNumber });
+  }
+
+  if (results.length === 0) return;
+
+  const documentIds: string[] = [];
+  const pageNumbers: number[] = [];
+  for (const key of keyMap.values()) {
+    documentIds.push(key.documentId);
+    pageNumbers.push(key.pageNumber);
+  }
+
+  const rows = await sql<
+    { document_id: string; page_number: number; text: string }[]
+  >`
+    select document_id, page_number, text
+    from document_pages
+    where document_id = any(${sql.array(documentIds, 25)})
+      and page_number = any(${sql.array(pageNumbers, 23)})
+  `;
+
+  const lookup = new Map(
+    rows.map((row) => [`${row.document_id}:${row.page_number}`, row.text]),
+  );
+  const missing = results.filter(result => !lookup.has(`${result.citation.documentId}:${result.citation.pageNumber}`));
+  const neighborRows = missing.length ? await sql<{ document_id: string; chunk_index: number; text: string; page_numbers: number[] }[]>`
+    select hit.document_id, hit.chunk_index, left(string_agg(neighbor.text, E'\n\n' order by neighbor.chunk_index), 30000) as text, array_agg(distinct neighbor.page_number) filter (where neighbor.page_number is not null) as page_numbers
+    from jsonb_to_recordset(${sql.json(missing.map(result => ({ document_id: result.citation.documentId, chunk_index: result.citation.chunkIndex, page_number: result.citation.pageNumber })))}::jsonb)
+      as hit(document_id text, chunk_index int, page_number int)
+    join lateral (
+      select c.text, c.chunk_index, c.page_number from document_chunks c
+      where c.document_id = hit.document_id and (case when hit.page_number is not null then c.chunk_index between
+        (select min(bound.chunk_index) from document_chunks bound where bound.document_id = hit.document_id and bound.page_number between hit.page_number and hit.page_number + 1)
+        and (select max(bound.chunk_index) from document_chunks bound where bound.document_id = hit.document_id and bound.page_number between hit.page_number and hit.page_number + 1)
+        else c.chunk_index between hit.chunk_index - 1 and hit.chunk_index + 1 end)
+      order by c.chunk_index limit 24
+    ) neighbor on true
+    group by hit.document_id, hit.chunk_index
+  ` : [];
+  const neighbors = new Map(neighborRows.map(row => [`${row.document_id}:${row.chunk_index}`, row]));
+  for (const result of missing) {
+    const parent = neighbors.get(`${result.citation.documentId}:${result.citation.chunkIndex}`);
+    if (!parent) continue;
+    result.parentText = parent.text;
+    result.citation.pageNumbers = [...new Set([...(result.citation.pageNumbers ?? []), ...(parent.page_numbers ?? [])])].sort((a, b) => a - b);
+  }
+
+  for (const result of results) {
+    if (result.citation.pageNumber != null) {
+      const key = `${result.citation.documentId}:${result.citation.pageNumber}`;
+      const parentText = lookup.get(key);
+      if (parentText) {
+        result.parentText = parentText;
+      }
+    }
+  }
+}

@@ -1,0 +1,40 @@
+{
+  "name": "@docslurp/contrib-astro",
+  "version": "0.3.0",
+  "description": "Astro search component for DocSlurp cited search, with a framework-free browser widget.",
+  "license": "MIT",
+  "homepage": "https://docslurp.io/docs/packages/contrib-astro",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/DocSlurp/docslurp-oss.git",
+    "directory": "packages/contrib-astro"
+  },
+  "bugs": {
+    "url": "https://github.com/DocSlurp/docslurp-oss/issues"
+  },
+  "type": "module",
+  "exports": {
+    ".": "./DocSlurpSearch.astro",
+    "./build": "./build.mjs"
+  },
+  "files": [
+    "DocSlurpSearch.astro",
+    "README.md",
+    "LICENSE",
+    "NOTICE",
+    "LICENSES",
+    "build.mjs",
+    "index-docs.mjs"
+  ],
+  "scripts": {
+    "build": "pnpm --filter @docslurp/sdk build",
+    "typecheck": "pnpm --filter @docslurp/sdk typecheck",
+    "test": "node --test index-docs.test.mjs"
+  },
+  "dependencies": {
+    "@docslurp/sdk": "workspace:^"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

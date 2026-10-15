@@ -1,0 +1,8 @@
+-r requirements-base.txt
+unstructured[pdf]
+# Marker/Surya require vulnerable Pillow <11; not part of the managed stack.
+
+# Optional vector backends are installed at startup, not baked into images.
+lancedb>=0.10.0
+pymilvus>=2.5.0
+chromadb>=0.5.0

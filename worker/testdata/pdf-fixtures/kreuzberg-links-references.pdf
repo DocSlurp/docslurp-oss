@@ -1,0 +1,68 @@
+%PDF-1.4
+%ÿÿÿÿ
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [8 0 R] /Count 1 >>
+endobj
+3 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>
+endobj
+4 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold >>
+endobj
+5 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Courier >>
+endobj
+6 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Times-Italic >>
+endobj
+7 0 obj
+<<  /Length 1997 >>
+stream
+BT /F2 18 Tf 1 0 0 1 48 744 Tm (References and Further Reading) Tj ET
+BT /F2 13 Tf 1 0 0 1 48 714 Tm (Abstract) Tj ET
+BT /F1 11 Tf 1 0 0 1 48 696 Tm (This document tests link extraction from bibliographic references, inline) Tj ET
+BT /F1 11 Tf 1 0 0 1 48 680 Tm (citations, and hyperlinks. See also the companion dataset at) Tj ET
+BT /F1 11 Tf 1 0 0 1 48 664 Tm (https://data.docslurp.io/evals/v1. Further reading is available in the) Tj ET
+BT /F1 11 Tf 1 0 0 1 48 648 Tm (bibliography section below.) Tj ET
+BT /F2 13 Tf 1 0 0 1 48 612 Tm (Section 1: Background) Tj ET
+BT /F1 11 Tf 1 0 0 1 48 594 Tm (Prior work [1] established baseline metrics. The dataset from Smith et al. [2]) Tj ET
+BT /F1 11 Tf 1 0 0 1 48 578 Tm (is available at https://arxiv.org/abs/2501.12345. A related DOI: 10.1145/3592608) Tj ET
+BT /F1 11 Tf 1 0 0 1 48 562 Tm (covers structured extraction. Implementation details follow the specification at) Tj ET
+BT /F1 11 Tf 1 0 0 1 48 546 Tm (https://github.com/docslurp/spec/blob/main/README.md.) Tj ET
+BT /F2 13 Tf 1 0 0 1 48 510 Tm (Bibliography) Tj ET
+BT /F1 10.5 Tf 1 0 0 1 48 492 Tm ([1] Johnson, A. et al. \(2024\). "Table Extraction at Scale". VLDB 2024.) Tj ET
+BT /F1 10.5 Tf 1 0 0 1 48 477 Tm (https://doi.org/10.14778/1234567890) Tj ET
+BT /F1 10.5 Tf 1 0 0 1 48 454 Tm ([2] Smith, K., Lee, R. \(2025\). "Benchmark for Document Understanding".) Tj ET
+BT /F1 10.5 Tf 1 0 0 1 48 439 Tm (https://arxiv.org/abs/2501.12345) Tj ET
+BT /F1 10.5 Tf 1 0 0 1 48 416 Tm ([3] DocSlurp Team \(2025\). "Extraction Pipeline Reference".) Tj ET
+BT /F1 10.5 Tf 1 0 0 1 48 401 Tm (https://docs.docslurp.io/pipeline) Tj ET
+BT /F1 10.5 Tf 1 0 0 1 48 378 Tm ([4] OpenAI \(2024\). "GPT-4V Technical Report". https://openai.com/research/gpt-4v) Tj ET
+BT /F1 10.5 Tf 1 0 0 1 48 355 Tm ([5] Anthropic \(2025\). "Claude 3.5: Multimodal Document Understanding".) Tj ET
+0.8 w 48 32 m 564 32 l S
+BT /F4 9 Tf 1 0 0 1 48 18 Tm (DocSlurp synthetic fixture) Tj ET
+BT /F4 9 Tf 1 0 0 1 520 18 Tm (1/1) Tj ET
+
+endstream
+endobj
+8 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R /F2 4 0 R /F3 5 0 R /F4 6 0 R >> >> /Contents 7 0 R >>
+endobj
+xref
+0 9
+0000000000 65535 f 
+0000000015 00000 n 
+0000000064 00000 n 
+0000000121 00000 n 
+0000000191 00000 n 
+0000000266 00000 n 
+0000000334 00000 n 
+0000000407 00000 n 
+0000002457 00000 n 
+trailer
+<< /Size 9 /Root 1 0 R >>
+startxref
+2613
+%%EOF

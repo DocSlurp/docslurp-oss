@@ -1,0 +1,136 @@
+{
+  "schemaVersion": "document-routing-eval@v1",
+  "description": "Deterministic local routing contracts for synthetic scans, handwriting, forms, tables, formulas, and born-digital prose. Expectations are eval-only and must never be copied into production routing rules.",
+  "gates": {
+    "minimumQualityScore": 1,
+    "minimumFixturePassRate": 1,
+    "maximumP95LatencyMs": 5000,
+    "maximumHostedAiCalls": 0,
+    "maximumEstimatedCostUsd": 0
+  },
+  "fixtures": [
+    {
+      "id": "handwriting-with-native-context",
+      "path": "kreuzberg-handwriting-notes.pdf",
+      "tags": ["handwriting", "scanned", "mixed-raster-text"],
+      "expected": {
+        "suggestedPlaybook": "review-grade",
+        "visionPolicy": "aggressive",
+        "pages": [
+          {
+            "pageNumber": 1,
+            "route": "handwriting-or-degraded",
+            "extractorHint": "vision-rescue",
+            "ocrAuthorized": true
+          }
+        ]
+      }
+    },
+    {
+      "id": "image-only-multipage-scan",
+      "path": "image-heavy-ocr.pdf",
+      "tags": ["handwriting", "scanned", "image-only", "multipage"],
+      "expected": {
+        "suggestedPlaybook": "review-grade",
+        "visionPolicy": "aggressive",
+        "pages": [
+          {
+            "pageNumber": 1,
+            "route": "handwriting-or-degraded",
+            "extractorHint": "vision-rescue",
+            "ocrAuthorized": true
+          },
+          {
+            "pageNumber": 2,
+            "route": "handwriting-or-degraded",
+            "extractorHint": "vision-rescue",
+            "ocrAuthorized": true
+          }
+        ]
+      }
+    },
+    {
+      "id": "structured-form-with-annotations",
+      "path": "form-rotated-notes.pdf",
+      "tags": ["forms", "annotations", "rotated-text"],
+      "expected": {
+        "suggestedPlaybook": "layout-aware",
+        "pages": [
+          {
+            "pageNumber": 1,
+            "route": "form",
+            "extractorHint": "layout-aware",
+            "ocrAuthorized": false
+          }
+        ]
+      }
+    },
+    {
+      "id": "contiguous-multipage-table",
+      "path": "tables-multipage-financials.pdf",
+      "tags": ["tables", "multipage", "structured-data"],
+      "expected": {
+        "suggestedPlaybook": "layout-aware",
+        "pages": [
+          {
+            "pageNumber": 1,
+            "route": "table-heavy",
+            "extractorHint": "layout-aware",
+            "ocrAuthorized": false
+          },
+          {
+            "pageNumber": 2,
+            "route": "table-heavy",
+            "extractorHint": "layout-aware",
+            "ocrAuthorized": false
+          },
+          {
+            "pageNumber": 3,
+            "route": "table-heavy",
+            "extractorHint": "layout-aware",
+            "ocrAuthorized": false
+          }
+        ]
+      }
+    },
+    {
+      "id": "formula-heavy-academic-document",
+      "path": "academic-latex-ligatures.pdf",
+      "tags": ["formulas", "latex", "born-digital"],
+      "expected": {
+        "suggestedPlaybook": "agentic",
+        "pages": [
+          {
+            "pageNumber": 1,
+            "route": "formula-heavy",
+            "extractorHint": "syntax-preserving",
+            "ocrAuthorized": false
+          },
+          {
+            "pageNumber": 2,
+            "route": "formula-heavy",
+            "extractorHint": "syntax-preserving",
+            "ocrAuthorized": false
+          }
+        ]
+      }
+    },
+    {
+      "id": "born-digital-metadata-prose",
+      "path": "kreuzberg-metadata-document.pdf",
+      "tags": ["born-digital", "metadata", "negative-control"],
+      "expected": {
+        "suggestedPlaybook": "fast",
+        "visionPolicy": "skip",
+        "pages": [
+          {
+            "pageNumber": 1,
+            "route": "straightforward-text",
+            "extractorHint": "cheap-text",
+            "ocrAuthorized": false
+          }
+        ]
+      }
+    }
+  ]
+}

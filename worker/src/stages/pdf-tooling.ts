@@ -1,0 +1,401 @@
+import type { PerformanceEvent } from "../models.js";
+import type { Stage } from "../pipeline/pipeline.js";
+import { runDocumentStage, runDocuments } from "../pipeline/checkpoints.js";
+import type { CommandRunner, CommandPlan } from "../tools/runner.js";
+import type { ArtifactStore } from "../tools/storage.js";
+import { maxInt } from "./utils.js";
+
+export class PdfToolingStage implements Stage {
+  readonly name = "pdf-tooling";
+
+  constructor(
+    private readonly runner: CommandRunner,
+    private readonly storage: ArtifactStore
+  ) {}
+
+  async run(state: import("../pipeline/pipeline.js").WorkflowState, signal?: AbortSignal): Promise<void> {
+    await runDocuments(state.documents, state.docConcurrency, async (document) => {
+      const key = `${document.userId}/${state.run.id}/pdf-tooling/${document.id}.json`;
+      const artifactSlot = `${document.id}:pdf-tooling`;
+
+      await runDocumentStage(
+        state,
+        document,
+        this.name,
+        artifactSlot,
+        "pdf tooling manifest ready",
+        async () => {
+          if (signal?.aborted) {
+            throw signal.reason instanceof Error ? signal.reason : new Error("aborted");
+          }
+
+          const startedAt = Date.now();
+          const toolchains = await this.buildToolchains(document, state.run.id);
+          const { availableCommands, totalCommands } = commandAvailability(toolchains);
+          const pageCount = maxInt(1, document.pageCount);
+
+          // Table policy is decided after extraction evidence exists. Running
+          // pdftohtml here used to force an unconditional full-document pass.
+          const tableDetection = {
+            status: "deferred-to-page-triage",
+            hasTablePages: null,
+            tablePageCount: null,
+          } as const;
+          const recommendedExtractor = "policy-selected";
+
+          await this.storage.putJson(key, {
+            documentId: document.id,
+            source: {
+              mimeType: document.mimeType,
+              sourceKey: document.sourceKey,
+              pageCount,
+              pageImagesKey: `${document.userId}/${state.run.id}/images/${document.id}/manifest.json`,
+              pageManifestKey: `${document.userId}/${state.run.id}/pages/${document.id}/manifest.json`
+            },
+            tableDetection: {
+              hasTablePages: tableDetection.hasTablePages,
+              tablePageCount: tableDetection.tablePageCount,
+              recommendedExtractor
+            },
+            profiles: [
+              {
+                id: "fast-text-layer",
+                summary: "Prefer native PDF text-layer tools for born-digital files.",
+                tools: ["pdfinfo", "pdftotext", "pdftohtml", "pymupdf"]
+              },
+              {
+                id: "layout-aware-markdown",
+                summary: "Use layout-preserving extractors when markdown fidelity matters.",
+                tools: ["pymupdf4llm", "docling", "unstructured"]
+              },
+              {
+                id: "ocr-rescue",
+                summary: "Escalate to OCR only for scans, faxed pages, or broken text layers.",
+                tools: ["ocrmypdf", "pymupdf-ocr", "unstructured-hi-res", "florence-2"]
+              },
+              {
+                id: "cheap-local-multimodal",
+                summary: "Use rendered page images plus local models for triage before hosted vision LLMs.",
+                tools: ["transformers.js-clip", "florence-2", "vision-llm"]
+              }
+            ],
+            toolchains,
+            availableCommands,
+            totalCommands
+          });
+
+          const durationMs = Date.now() - startedAt;
+          pushPerformanceEvents(state.pendingPerformance, {
+            documentId: document.id,
+            scope: "document",
+            stageName: this.name,
+            metric: "pdf-command-availability",
+            value: availableCommands,
+            unit: "command",
+            tags: ["document", "pdf", "availability"],
+            metadata: {
+              totalCommands,
+              artifact: this.storage.uri(key)
+            }
+          });
+          pushPerformanceEvents(state.pendingPerformance, {
+            documentId: document.id,
+            scope: "document",
+            stageName: this.name,
+            metric: "pdf-toolchain-count",
+            value: toolchains.length,
+            unit: "toolchain",
+            tags: ["document", "pdf", "inventory"],
+            metadata: {
+              availableCommands
+            }
+          });
+          pushPerformanceEvents(state.pendingPerformance, {
+            documentId: document.id,
+            scope: "document",
+            stageName: this.name,
+            metric: "manifest-build-duration",
+            value: durationMs,
+            unit: "ms",
+            tags: ["document", "pdf", "latency"],
+            metadata: {
+              availableCommands,
+              totalCommands
+            }
+          });
+
+          pushPerformanceEvents(state.pendingPerformance, {
+            documentId: document.id,
+            scope: "document",
+            stageName: this.name,
+            metric: "table-page-count",
+            value: tableDetection.tablePageCount ?? 0,
+            unit: "page",
+            tags: ["document", "table", "detection"],
+            metadata: {
+              status: tableDetection.status,
+              hasTablePages: tableDetection.hasTablePages,
+              recommendedExtractor,
+            }
+          });
+
+          const perPageDuration = durationMs / pageCount;
+          for (let pageNumber = 1; pageNumber <= pageCount; pageNumber += 1) {
+            pushPerformanceEvents(state.pendingPerformance, {
+              documentId: document.id,
+              scope: "page",
+              stageName: this.name,
+              metric: "manifest-build-duration-share",
+              pageNumber,
+              value: perPageDuration,
+              unit: "ms",
+              tags: ["page", "pdf", "latency"],
+              metadata: {
+                availableCommands,
+                totalCommands,
+                pageCount
+              }
+            });
+            pushPerformanceEvents(state.pendingPerformance, {
+              documentId: document.id,
+              scope: "page",
+              stageName: this.name,
+              metric: "page-command-availability",
+              pageNumber,
+              value: availableCommands,
+              unit: "command",
+              tags: ["page", "pdf", "availability"],
+              metadata: {
+                totalCommands,
+                pageCount
+              }
+            });
+          }
+
+          return {
+            artifactUri: this.storage.uri(key),
+            stats: {
+              availableCommands,
+              totalCommands,
+              pageCount
+            }
+          };
+        },
+        signal
+      );
+    });
+  }
+
+  private async buildToolchains(document: import("../models.js").Document, runId: string): Promise<ToolchainManifest[]> {
+    const [
+      pdfInfo,
+      extractText,
+      extractHtml,
+      extractImages,
+      splitPages,
+      renderImages,
+      muToolText,
+      ocrPdf,
+      unstructuredFast,
+      unstructuredHiRes,
+      markerMarkdown,
+      markerJson,
+      doclingMarkdown,
+      doclingJson,
+      doclingVlm,
+      pyMuPdfText,
+      pyMuPdfHtml,
+      pyMuPdfJson,
+      pyMuPdfOcrText,
+      pyMuPdf4llmMarkdown,
+      pyMuPdf4llmJson,
+      unpdfExtract,
+      transformersJsClip,
+      florence2
+    ] = await Promise.all([
+      this.runner.pdfInfo(document.sourceKey),
+      this.runner.extractText(document.sourceKey),
+      this.runner.extractHtml(document.sourceKey),
+      this.runner.extractImages(document.sourceKey, "page"),
+      this.runner.splitPages(document.sourceKey, "page-%d.pdf"),
+      this.runner.renderPageImages(document.sourceKey, "page"),
+      this.runner.muToolText(document.sourceKey, "output.txt"),
+      this.runner.ocrPdf(document.sourceKey, "ocr-output.pdf"),
+      this.runner.unstructuredPartition(document.sourceKey, "unstructured-fast.json", "fast"),
+      this.runner.unstructuredPartition(document.sourceKey, "unstructured-hi-res.json", "hi_res"),
+      this.runner.markerMarkdown(document.sourceKey, "marker"),
+      this.runner.markerJson(document.sourceKey, "marker"),
+      this.runner.doclingMarkdown(document.sourceKey, "docling"),
+      this.runner.doclingJson(document.sourceKey, "docling"),
+      this.runner.doclingVlm(document.sourceKey, "docling-vlm"),
+      this.runner.pyMuPdfText(document.sourceKey, "pymupdf.txt"),
+      this.runner.pyMuPdfHtml(document.sourceKey, "pymupdf.html"),
+      this.runner.pyMuPdfJson(document.sourceKey, "pymupdf.json"),
+      this.runner.pyMuPdfOcrText(document.sourceKey, "pymupdf-ocr.txt"),
+      this.runner.pyMuPdf4llmMarkdown(document.sourceKey, "pymupdf4llm.md"),
+      this.runner.pyMuPdf4llmJson(document.sourceKey, "pymupdf4llm.json"),
+      this.runner.unpdfExtract(document.sourceKey, "unpdf.json"),
+      this.runner.transformersJsClip(
+        "page-1.png",
+        "clip.json",
+        "document,text-heavy,table-heavy,form,photo,scan"
+      ),
+      this.runner.florence2("page-1.png", "florence2.json", "<OCR>")
+    ]);
+
+    return [
+      {
+        id: "poppler-utils",
+        tier: "cheap-fast",
+        kind: "native-cli",
+        bestFor: ["born-digital PDFs", "page splitting", "text-layer extraction", "page rendering"],
+        tradeoffs: ["weak OCR", "limited semantic markdown"],
+        commands: {
+          pdfinfo: pdfInfo,
+          pdftotext: extractText,
+          pdftohtml: extractHtml,
+          pdfimages: extractImages,
+          pdfseparate: splitPages,
+          pdftoppm: renderImages
+        }
+      },
+      {
+        id: "mupdf-tools",
+        tier: "cheap-fast",
+        kind: "native-cli",
+        bestFor: ["fallback text extraction", "lightweight local conversion"],
+        tradeoffs: ["less structured output than marker/docling", "not installed in the default image yet"],
+        commands: {
+          "mutool-draw-text": muToolText
+        }
+      },
+      {
+        id: "ocrmypdf",
+        tier: "scan-rescue",
+        kind: "native-cli",
+        bestFor: ["repairing scanned PDFs", "adding searchable text layers"],
+        tradeoffs: ["slower than text-layer extraction", "depends on OCR runtime and language packs"],
+        commands: {
+          ocrmypdf: ocrPdf
+        }
+      },
+      {
+        id: "unstructured",
+        tier: "layout-ocr",
+        kind: "python-wrapper",
+        bestFor: ["element-level extraction", "tables", "OCR-aware partitioning"],
+        tradeoffs: ["heavier dependency set", "slower than poppler on clean PDFs"],
+        commands: {
+          "partition-fast": unstructuredFast,
+          "partition-hi-res": unstructuredHiRes
+        }
+      },
+      {
+        id: "marker-pdf",
+        tier: "layout-markdown",
+        kind: "python-cli",
+        bestFor: ["markdown with tables", "academic PDFs", "mixed text and figures"],
+        tradeoffs: ["not installed in managed environments: upstream requires vulnerable Pillow <11", "GPU can help a lot", "heavier than pure text-layer tools"],
+        commands: {
+          markdown: markerMarkdown,
+          json: markerJson
+        }
+      },
+      {
+        id: "docling",
+        tier: "layout-markdown",
+        kind: "python-cli",
+        bestFor: ["document structure", "markdown/json export", "optional VLM path"],
+        tradeoffs: ["larger dependency footprint", "VLM mode is slower than the standard pipeline"],
+        commands: {
+          markdown: doclingMarkdown,
+          json: doclingJson,
+          vlm: doclingVlm
+        }
+      },
+      {
+        id: "pymupdf",
+        tier: "cheap-layout",
+        kind: "python-wrapper",
+        bestFor: ["fast local text/html/json extraction", "OCR-on-demand"],
+        tradeoffs: ["markdown quality is better via pymupdf4llm", "OCR path still depends on Tesseract"],
+        commands: {
+          text: pyMuPdfText,
+          html: pyMuPdfHtml,
+          json: pyMuPdfJson,
+          "ocr-text": pyMuPdfOcrText
+        }
+      },
+      {
+        id: "pymupdf4llm",
+        tier: "cheap-markdown",
+        kind: "python-wrapper",
+        bestFor: ["markdown for RAG", "reading order", "table-aware text extraction"],
+        tradeoffs: ["less mature CLI surface than marker/docling", "Python dependency required"],
+        commands: {
+          markdown: pyMuPdf4llmMarkdown,
+          json: pyMuPdf4llmJson
+        }
+      },
+      {
+        id: "unpdf",
+        tier: "cheap-js",
+        kind: "node-wrapper",
+        bestFor: ["JS-only deployments", "quick text extraction without Python"],
+        tradeoffs: ["smaller ecosystem than Python PDF stacks", "less capable on scans without extra OCR"],
+        commands: {
+          extract: unpdfExtract
+        }
+      },
+      {
+        id: "transformers.js-clip",
+        tier: "cheap-vision-triage",
+        kind: "node-wrapper",
+        bestFor: ["local page-image triage", "document routing", "figure detection heuristics"],
+        tradeoffs: ["works on rendered page images, not PDFs directly", "classification only unless paired with another extractor"],
+        commands: {
+          classify: transformersJsClip
+        }
+      },
+      {
+        id: "florence-2",
+        tier: "local-vlm",
+        kind: "python-wrapper",
+        bestFor: ["OCR-style prompting", "captioning", "page-level vision extraction"],
+        tradeoffs: ["slower and heavier than CLIP", "best used on rendered pages after cheap extraction fails"],
+        commands: {
+          "ocr-prompt": florence2
+        }
+      }
+    ];
+  }
+}
+
+interface ToolchainManifest {
+  id: string;
+  tier: string;
+  kind: string;
+  bestFor: string[];
+  tradeoffs: string[];
+  commands: Record<string, CommandPlan>;
+}
+
+function commandAvailability(toolchains: ToolchainManifest[]) {
+  let availableCommands = 0;
+  let totalCommands = 0;
+
+  for (const toolchain of toolchains) {
+    for (const plan of Object.values(toolchain.commands)) {
+      totalCommands += 1;
+      if (plan.available) {
+        availableCommands += 1;
+      }
+    }
+  }
+
+  return { availableCommands, totalCommands };
+}
+
+function pushPerformanceEvents(events: PerformanceEvent[], event: PerformanceEvent) {
+  events.push(event);
+}

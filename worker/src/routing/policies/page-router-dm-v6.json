@@ -1,0 +1,3642 @@
+{
+ "schemaVersion": "policy-pack@v1",
+ "metadata": {
+  "policyVersion": "page-router-dm-v6",
+  "trainingDataSha256": "210794fb441b63220db4c0ba721890764ad20a883fc9a02a22c4f527296b0c0a",
+  "fitDate": "2026-10-12",
+  "splitPolicy": "fit=development+calibration splits of eval-suite (W11 tolerant-markdown@v1 labels/outcomes) and eval-suite (generator gold); the test split is held out and used only to report calibration brier/auroc; split by sourceFamily; decision questions are plain_ocr_sufficient/needs_math_extraction/needs_table_structure only (no whole-page trust question); per-target pass mappings are fit on the primary model's calibrated answers; the native accept-text-layer mapping is fit only on pages the production trust cascade accepts (status, OCR-layer agreement >= 0.4, provisional math gate 0.01, inset crop gate); no case ids, filenames or content in this pack; v3 adds Claude Haiku 5.5 and Claude Sonnet 5.5 targets and refits DeepSeek V4.1 Flash (effort none) and GLM-5.3 Flash (effort minimal) from fresh runs of the lowest accepted reasoning effort; page-router-dm-v5 = page-router-dm-v3 unchanged plus native-pdf targets: native:pdf-markdown and native:pdf-text pass mappings fit on the primary model's calibrated answers over development+calibration text-layer pages (probe textLayerStatus ok) of the preservation suite (suite inputs and born-digital source pages) and eval-suite, scored with tolerant-markdown@v1 at the W11 thresholds (text .90, math .70, tables .70, overall .85); the test split was never extracted; ocr:pdf-ocr-fill and ocr:pdf-ocr alias the ocr:tesseract mapping until the engine OCR is measured; latency from the native-pdf engine bench; page-router-dm-v5 merges v3 (E2 transcription targets) with v4 (native-pdf targets) in one fit on the v3 base and adds Platt calibrations for liquid/d1 (text state, same three questions, fit on development+calibration); target pass mappings stay fit on the primary calibrated answers (Platt calibration makes the mapping inputs comparable across the chain models); page-router-dm-v6 keeps the v5 mappings (fit on cloudflare/clef-flash answers) as the default and adds per-serving-model target mappings fit the same way on each model's own calibrated development+calibration answers: openai/gpt-6-luna-decisions (19 targets), typesafe/jev-1.13 (19 targets), liquid/d1 (19 targets)",
+  "passThreshold": 0.85
+ },
+ "decisionModels": [
+  "cloudflare/clef-flash",
+  "openai/gpt-6-luna-decisions",
+  "typesafe/jev-1.13",
+  "liquid/d1"
+ ],
+ "questions": [
+  "plain_ocr_sufficient",
+  "needs_math_extraction",
+  "needs_table_structure"
+ ],
+ "calibrations": [
+  {
+   "decisionModel": "cloudflare/clef-flash",
+   "questionId": "plain_ocr_sufficient",
+   "method": "platt",
+   "params": {
+    "a": 1.115035,
+    "b": 2.361605
+   },
+   "n": 152,
+   "brier": 0.1473,
+   "auroc": 0.8207
+  },
+  {
+   "decisionModel": "cloudflare/clef-flash",
+   "questionId": "needs_math_extraction",
+   "method": "platt",
+   "params": {
+    "a": 2.65301,
+    "b": -2.774478
+   },
+   "n": 152,
+   "brier": 0.078,
+   "auroc": 0.9708
+  },
+  {
+   "decisionModel": "cloudflare/clef-flash",
+   "questionId": "needs_table_structure",
+   "method": "platt",
+   "params": {
+    "a": 1.679449,
+    "b": 0.847694
+   },
+   "n": 152,
+   "brier": 0.0084,
+   "auroc": 1.0
+  },
+  {
+   "decisionModel": "openai/gpt-6-luna-decisions",
+   "questionId": "plain_ocr_sufficient",
+   "method": "platt",
+   "params": {
+    "a": 0.644037,
+    "b": 3.16615
+   },
+   "n": 152,
+   "brier": 0.1592,
+   "auroc": 0.7666
+  },
+  {
+   "decisionModel": "openai/gpt-6-luna-decisions",
+   "questionId": "needs_math_extraction",
+   "method": "platt",
+   "params": {
+    "a": 1.170642,
+    "b": -1.653331
+   },
+   "n": 152,
+   "brier": 0.0736,
+   "auroc": 0.9502
+  },
+  {
+   "decisionModel": "openai/gpt-6-luna-decisions",
+   "questionId": "needs_table_structure",
+   "method": "platt",
+   "params": {
+    "a": 0.702137,
+    "b": -1.207975
+   },
+   "n": 152,
+   "brier": 0.0008,
+   "auroc": 1.0
+  },
+  {
+   "decisionModel": "typesafe/jev-1.13",
+   "questionId": "plain_ocr_sufficient",
+   "method": "platt",
+   "params": {
+    "a": 2.065463,
+    "b": 3.526112
+   },
+   "n": 152,
+   "brier": 0.1407,
+   "auroc": 0.6919
+  },
+  {
+   "decisionModel": "typesafe/jev-1.13",
+   "questionId": "needs_math_extraction",
+   "method": "platt",
+   "params": {
+    "a": 3.403516,
+    "b": 4.43679
+   },
+   "n": 152,
+   "brier": 0.069,
+   "auroc": 0.8466
+  },
+  {
+   "decisionModel": "typesafe/jev-1.13",
+   "questionId": "needs_table_structure",
+   "method": "platt",
+   "params": {
+    "a": 2.727467,
+    "b": 3.3184
+   },
+   "n": 152,
+   "brier": 0.1065,
+   "auroc": 0.7961
+  },
+  {
+   "decisionModel": "liquid/d1",
+   "questionId": "plain_ocr_sufficient",
+   "method": "platt",
+   "params": {
+    "a": 0.397856,
+    "b": 1.351568
+   },
+   "n": 152,
+   "brier": 0.212,
+   "auroc": 0.5152
+  },
+  {
+   "decisionModel": "liquid/d1",
+   "questionId": "needs_math_extraction",
+   "method": "platt",
+   "params": {
+    "a": 1.251252,
+    "b": 3.554126
+   },
+   "n": 152,
+   "brier": 0.0671,
+   "auroc": 0.8094
+  },
+  {
+   "decisionModel": "liquid/d1",
+   "questionId": "needs_table_structure",
+   "method": "platt",
+   "params": {
+    "a": 0.602272,
+    "b": 0.596646
+   },
+   "n": 152,
+   "brier": 0.118,
+   "auroc": 0.5018
+  }
+ ],
+ "targets": [
+  {
+   "targetId": "native:accept-text-layer",
+   "pass": {
+    "text": {
+     "intercept": 3.3987,
+     "weights": {
+      "plain_ocr_sufficient": 0.0852,
+      "needs_math_extraction": 0.0554,
+      "needs_table_structure": -0.4699
+     },
+     "baseRate": 0.9677
+    },
+    "math": {
+     "intercept": 0.0,
+     "weights": {},
+     "baseRate": 0.5
+    },
+    "tables": {
+     "intercept": -4.5951,
+     "weights": {},
+     "baseRate": 0.01
+    },
+    "overall": {
+     "intercept": 0.9607,
+     "weights": {
+      "plain_ocr_sufficient": 1.1453,
+      "needs_math_extraction": -0.8,
+      "needs_table_structure": -1.9498
+     },
+     "baseRate": 0.8172
+    }
+   },
+   "cost": {
+    "meanUsd": 0.0,
+    "p90Usd": 0.0
+   },
+   "latency": {
+    "p50Ms": 33.0,
+    "p95Ms": 90.4
+   },
+   "n": 93
+  },
+  {
+   "targetId": "ocr:tesseract",
+   "pass": {
+    "text": {
+     "intercept": -0.4228,
+     "weights": {
+      "plain_ocr_sufficient": 0.7345,
+      "needs_math_extraction": -1.2874,
+      "needs_table_structure": -0.6643
+     },
+     "baseRate": 0.3556
+    },
+    "math": {
+     "intercept": -4.5951,
+     "weights": {},
+     "baseRate": 0.01
+    },
+    "tables": {
+     "intercept": -4.5951,
+     "weights": {},
+     "baseRate": 0.01
+    },
+    "overall": {
+     "intercept": -0.7533,
+     "weights": {
+      "plain_ocr_sufficient": 0.5673,
+      "needs_math_extraction": -1.4011,
+      "needs_table_structure": -0.8307
+     },
+     "baseRate": 0.2321
+    }
+   },
+   "cost": {
+    "meanUsd": 0.0,
+    "p90Usd": 0.0
+   },
+   "latency": {
+    "p50Ms": 2032.8,
+    "p95Ms": 6330.4
+   },
+   "n": 56
+  },
+  {
+   "targetId": "vlm:openrouter/anthropic/claude-haiku-5.5",
+   "pass": {
+    "text": {
+     "intercept": 1.8339,
+     "weights": {
+      "plain_ocr_sufficient": -0.1984,
+      "needs_math_extraction": 0.7079,
+      "needs_table_structure": -0.7766
+     },
+     "baseRate": 0.8444
+    },
+    "math": {
+     "intercept": -0.1228,
+     "weights": {
+      "plain_ocr_sufficient": 0.1478,
+      "needs_math_extraction": 0.0562,
+      "needs_table_structure": 0.0832
+     },
+     "baseRate": 0.5
+    },
+    "tables": {
+     "intercept": -0.4055,
+     "weights": {},
+     "baseRate": 0.4
+    },
+    "overall": {
+     "intercept": 0.5621,
+     "weights": {
+      "plain_ocr_sufficient": 0.3698,
+      "needs_math_extraction": -0.5088,
+      "needs_table_structure": -0.3703
+     },
+     "baseRate": 0.6071
+    }
+   },
+   "cost": {
+    "meanUsd": 0.0007498,
+    "p90Usd": 0.0013961
+   },
+   "latency": {
+    "p50Ms": 4877.4,
+    "p95Ms": 11856.8
+   },
+   "n": 56
+  },
+  {
+   "targetId": "vlm:openrouter/anthropic/claude-sonnet-5.5",
+   "pass": {
+    "text": {
+     "intercept": 1.7997,
+     "weights": {
+      "plain_ocr_sufficient": -0.2902,
+      "needs_math_extraction": 0.7366,
+      "needs_table_structure": -0.533
+     },
+     "baseRate": 0.8444
+    },
+    "math": {
+     "intercept": 2.5714,
+     "weights": {
+      "plain_ocr_sufficient": -0.0496,
+      "needs_math_extraction": 0.016,
+      "needs_table_structure": 0.0125
+     },
+     "baseRate": 0.9286
+    },
+    "tables": {
+     "intercept": 0.4055,
+     "weights": {},
+     "baseRate": 0.6
+    },
+    "overall": {
+     "intercept": 1.6694,
+     "weights": {
+      "plain_ocr_sufficient": -0.2932,
+      "needs_math_extraction": 0.587,
+      "needs_table_structure": -0.4114
+     },
+     "baseRate": 0.8393
+    }
+   },
+   "cost": {
+    "meanUsd": 0.0150757,
+    "p90Usd": 0.028086
+   },
+   "latency": {
+    "p50Ms": 6647.0,
+    "p95Ms": 15630.1
+   },
+   "n": 56
+  },
+  {
+   "targetId": "vlm:openrouter/deepseek/deepseek-v4.1-flash",
+   "pass": {
+    "text": {
+     "intercept": 1.5405,
+     "weights": {
+      "plain_ocr_sufficient": -0.1003,
+      "needs_math_extraction": 0.0682,
+      "needs_table_structure": -0.4462
+     },
+     "baseRate": 0.8
+    },
+    "math": {
+     "intercept": 0.0308,
+     "weights": {
+      "plain_ocr_sufficient": 0.1614,
+      "needs_math_extraction": 0.0392,
+      "needs_table_structure": 0.0763
+     },
+     "baseRate": 0.5357
+    },
+    "tables": {
+     "intercept": 0.4055,
+     "weights": {},
+     "baseRate": 0.6
+    },
+    "overall": {
+     "intercept": 0.7452,
+     "weights": {
+      "plain_ocr_sufficient": 0.1518,
+      "needs_math_extraction": -0.4714,
+      "needs_table_structure": 0.0071
+     },
+     "baseRate": 0.6429
+    }
+   },
+   "cost": {
+    "meanUsd": 0.0001954,
+    "p90Usd": 0.0004102
+   },
+   "latency": {
+    "p50Ms": 9328.5,
+    "p95Ms": 24520.2
+   },
+   "n": 56
+  },
+  {
+   "targetId": "vlm:openrouter/google/gemini-2.5-flash-lite",
+   "pass": {
+    "text": {
+     "intercept": 2.0247,
+     "weights": {
+      "plain_ocr_sufficient": -0.0779,
+      "needs_math_extraction": 0.3139,
+      "needs_table_structure": -0.718
+     },
+     "baseRate": 0.8667
+    },
+    "math": {
+     "intercept": 2.1191,
+     "weights": {
+      "plain_ocr_sufficient": -0.0218,
+      "needs_math_extraction": 0.0112,
+      "needs_table_structure": 0.0181
+     },
+     "baseRate": 0.8929
+    },
+    "tables": {
+     "intercept": -0.4055,
+     "weights": {},
+     "baseRate": 0.4
+    },
+    "overall": {
+     "intercept": 1.2999,
+     "weights": {
+      "plain_ocr_sufficient": -0.0728,
+      "needs_math_extraction": 0.2154,
+      "needs_table_structure": -0.7009
+     },
+     "baseRate": 0.7679
+    }
+   },
+   "cost": {
+    "meanUsd": 0.0013747,
+    "p90Usd": 0.0019833
+   },
+   "latency": {
+    "p50Ms": 13676.2,
+    "p95Ms": 80158.7
+   },
+   "n": 56
+  },
+  {
+   "targetId": "vlm:openrouter/google/gemini-3.1-flash-lite",
+   "pass": {
+    "text": {
+     "intercept": 1.8298,
+     "weights": {
+      "plain_ocr_sufficient": -0.0094,
+      "needs_math_extraction": 0.1323,
+      "needs_table_structure": -0.6387
+     },
+     "baseRate": 0.8444
+    },
+    "math": {
+     "intercept": 1.2532,
+     "weights": {
+      "plain_ocr_sufficient": 0.0819,
+      "needs_math_extraction": 0.0085,
+      "needs_table_structure": 0.0351
+     },
+     "baseRate": 0.7857
+    },
+    "tables": {
+     "intercept": 0.4055,
+     "weights": {},
+     "baseRate": 0.6
+    },
+    "overall": {
+     "intercept": 1.1873,
+     "weights": {
+      "plain_ocr_sufficient": 0.1038,
+      "needs_math_extraction": -0.1863,
+      "needs_table_structure": -0.2548
+     },
+     "baseRate": 0.75
+    }
+   },
+   "cost": {
+    "meanUsd": 0.0014298,
+    "p90Usd": 0.0025492
+   },
+   "latency": {
+    "p50Ms": 2709.6,
+    "p95Ms": 13074.3
+   },
+   "n": 56
+  },
+  {
+   "targetId": "vlm:openrouter/google/gemini-3.5-flash",
+   "pass": {
+    "text": {
+     "intercept": 2.2576,
+     "weights": {
+      "plain_ocr_sufficient": -0.1544,
+      "needs_math_extraction": 0.5441,
+      "needs_table_structure": -0.8125
+     },
+     "baseRate": 0.8889
+    },
+    "math": {
+     "intercept": 0.8331,
+     "weights": {
+      "plain_ocr_sufficient": 0.1111,
+      "needs_math_extraction": 0.0329,
+      "needs_table_structure": 0.0481
+     },
+     "baseRate": 0.7143
+    },
+    "tables": {
+     "intercept": 0.4055,
+     "weights": {},
+     "baseRate": 0.6
+    },
+    "overall": {
+     "intercept": 1.302,
+     "weights": {
+      "plain_ocr_sufficient": 0.1892,
+      "needs_math_extraction": -0.303,
+      "needs_table_structure": -0.2737
+     },
+     "baseRate": 0.7679
+    }
+   },
+   "cost": {
+    "meanUsd": 0.029441,
+    "p90Usd": 0.0609075
+   },
+   "latency": {
+    "p50Ms": 14848.7,
+    "p95Ms": 39836.0
+   },
+   "n": 56
+  },
+  {
+   "targetId": "vlm:openrouter/google/gemini-3.5-flash-lite",
+   "pass": {
+    "text": {
+     "intercept": 1.8032,
+     "weights": {
+      "plain_ocr_sufficient": 0.0226,
+      "needs_math_extraction": 0.6807,
+      "needs_table_structure": -1.0513
+     },
+     "baseRate": 0.8444
+    },
+    "math": {
+     "intercept": -0.598,
+     "weights": {
+      "plain_ocr_sufficient": 0.2408,
+      "needs_math_extraction": 0.0534,
+      "needs_table_structure": 0.0998
+     },
+     "baseRate": 0.3929
+    },
+    "tables": {
+     "intercept": 0.0,
+     "weights": {},
+     "baseRate": 0.5
+    },
+    "overall": {
+     "intercept": 0.369,
+     "weights": {
+      "plain_ocr_sufficient": 0.6733,
+      "needs_math_extraction": -0.7974,
+      "needs_table_structure": -0.2583
+     },
+     "baseRate": 0.5714
+    }
+   },
+   "cost": {
+    "meanUsd": 0.0018868,
+    "p90Usd": 0.003702
+   },
+   "latency": {
+    "p50Ms": 2163.1,
+    "p95Ms": 9437.1
+   },
+   "n": 56
+  },
+  {
+   "targetId": "vlm:openrouter/openai/gpt-4.1-mini",
+   "pass": {
+    "text": {
+     "intercept": 2.0986,
+     "weights": {
+      "plain_ocr_sufficient": -0.2252,
+      "needs_math_extraction": 0.609,
+      "needs_table_structure": -0.8796
+     },
+     "baseRate": 0.8667
+    },
+    "math": {
+     "intercept": 0.9087,
+     "weights": {
+      "plain_ocr_sufficient": 0.0181,
+      "needs_math_extraction": -0.0014,
+      "needs_table_structure": 0.0472
+     },
+     "baseRate": 0.7143
+    },
+    "tables": {
+     "intercept": 0.0,
+     "weights": {},
+     "baseRate": 0.5
+    },
+    "overall": {
+     "intercept": 1.1652,
+     "weights": {
+      "plain_ocr_sufficient": -0.0291,
+      "needs_math_extraction": -0.137,
+      "needs_table_structure": -0.3481
+     },
+     "baseRate": 0.7321
+    }
+   },
+   "cost": {
+    "meanUsd": 0.0018064,
+    "p90Usd": 0.0032124
+   },
+   "latency": {
+    "p50Ms": 4034.1,
+    "p95Ms": 12192.1
+   },
+   "n": 56
+  },
+  {
+   "targetId": "vlm:openrouter/openai/gpt-6-luna",
+   "pass": {
+    "text": {
+     "intercept": 1.9125,
+     "weights": {
+      "plain_ocr_sufficient": -0.2809,
+      "needs_math_extraction": 0.6886,
+      "needs_table_structure": -0.836
+     },
+     "baseRate": 0.8444
+    },
+    "math": {
+     "intercept": -0.7526,
+     "weights": {
+      "plain_ocr_sufficient": 0.2605,
+      "needs_math_extraction": 0.0464,
+      "needs_table_structure": 0.1048
+     },
+     "baseRate": 0.3571
+    },
+    "tables": {
+     "intercept": 0.0,
+     "weights": {},
+     "baseRate": 0.5
+    },
+    "overall": {
+     "intercept": 0.331,
+     "weights": {
+      "plain_ocr_sufficient": 0.3679,
+      "needs_math_extraction": -0.7717,
+      "needs_table_structure": -0.0227
+     },
+     "baseRate": 0.5357
+    }
+   },
+   "cost": {
+    "meanUsd": 0.0006129,
+    "p90Usd": 0.0010847
+   },
+   "latency": {
+    "p50Ms": 5429.8,
+    "p95Ms": 12855.3
+   },
+   "n": 56
+  },
+  {
+   "targetId": "vlm:openrouter/z-ai/glm-5.3-flash",
+   "pass": {
+    "text": {
+     "intercept": 2.5116,
+     "weights": {
+      "plain_ocr_sufficient": -0.0922,
+      "needs_math_extraction": 0.4533,
+      "needs_table_structure": -0.8613
+     },
+     "baseRate": 0.9111
+    },
+    "math": {
+     "intercept": 0.352,
+     "weights": {
+      "plain_ocr_sufficient": 0.1477,
+      "needs_math_extraction": 0.0159,
+      "needs_table_structure": 0.0661
+     },
+     "baseRate": 0.6071
+    },
+    "tables": {
+     "intercept": 0.4055,
+     "weights": {},
+     "baseRate": 0.6
+    },
+    "overall": {
+     "intercept": 1.0829,
+     "weights": {
+      "plain_ocr_sufficient": 0.2895,
+      "needs_math_extraction": -0.5575,
+      "needs_table_structure": -0.1755
+     },
+     "baseRate": 0.7143
+    }
+   },
+   "cost": {
+    "meanUsd": 0.000733,
+    "p90Usd": 0.0011436
+   },
+   "latency": {
+    "p50Ms": 2673.2,
+    "p95Ms": 7411.9
+   },
+   "n": 56
+  },
+  {
+   "targetId": "vlm:private/infinity-parser2",
+   "pass": {
+    "text": {
+     "intercept": 1.2341,
+     "weights": {
+      "plain_ocr_sufficient": -0.1972,
+      "needs_math_extraction": 0.2644,
+      "needs_table_structure": -0.72
+     },
+     "baseRate": 0.7333
+    },
+    "math": {
+     "intercept": 0.8948,
+     "weights": {
+      "plain_ocr_sufficient": 0.0414,
+      "needs_math_extraction": 0.0022,
+      "needs_table_structure": 0.0451
+     },
+     "baseRate": 0.7143
+    },
+    "tables": {
+     "intercept": -1.3863,
+     "weights": {},
+     "baseRate": 0.2
+    },
+    "overall": {
+     "intercept": 0.656,
+     "weights": {
+      "plain_ocr_sufficient": 0.0368,
+      "needs_math_extraction": -0.0126,
+      "needs_table_structure": -0.746
+     },
+     "baseRate": 0.625
+    }
+   },
+   "cost": {
+    "meanUsd": 0.0002,
+    "p90Usd": 0.0002
+   },
+   "latency": {
+    "p50Ms": 3949.1,
+    "p95Ms": 7762.8
+   },
+   "n": 56
+  },
+  {
+   "targetId": "vlm:private/lightonocr-3",
+   "pass": {
+    "text": {
+     "intercept": 2.2576,
+     "weights": {
+      "plain_ocr_sufficient": -0.1544,
+      "needs_math_extraction": 0.5441,
+      "needs_table_structure": -0.8125
+     },
+     "baseRate": 0.8889
+    },
+    "math": {
+     "intercept": -0.2734,
+     "weights": {
+      "plain_ocr_sufficient": 0.1633,
+      "needs_math_extraction": 0.0568,
+      "needs_table_structure": 0.0911
+     },
+     "baseRate": 0.4643
+    },
+    "tables": {
+     "intercept": 0.4055,
+     "weights": {},
+     "baseRate": 0.6
+    },
+    "overall": {
+     "intercept": 0.7102,
+     "weights": {
+      "plain_ocr_sufficient": 0.3369,
+      "needs_math_extraction": -0.7284,
+      "needs_table_structure": -0.0352
+     },
+     "baseRate": 0.625
+    }
+   },
+   "cost": {
+    "meanUsd": 0.000132,
+    "p90Usd": 0.000132
+   },
+   "latency": {
+    "p50Ms": 4115.6,
+    "p95Ms": 11620.9
+   },
+   "n": 56
+  },
+  {
+   "targetId": "vlm:private/mineru2.5",
+   "pass": {
+    "text": {
+     "intercept": 2.2576,
+     "weights": {
+      "plain_ocr_sufficient": -0.1544,
+      "needs_math_extraction": 0.5441,
+      "needs_table_structure": -0.8125
+     },
+     "baseRate": 0.8889
+    },
+    "math": {
+     "intercept": -0.7526,
+     "weights": {
+      "plain_ocr_sufficient": 0.2605,
+      "needs_math_extraction": 0.0464,
+      "needs_table_structure": 0.1048
+     },
+     "baseRate": 0.3571
+    },
+    "tables": {
+     "intercept": 0.0,
+     "weights": {},
+     "baseRate": 0.5
+    },
+    "overall": {
+     "intercept": 0.4056,
+     "weights": {
+      "plain_ocr_sufficient": 0.5208,
+      "needs_math_extraction": -0.8834,
+      "needs_table_structure": -0.1584
+     },
+     "baseRate": 0.5536
+    }
+   },
+   "cost": {
+    "meanUsd": 0.000233,
+    "p90Usd": 0.000233
+   },
+   "latency": {
+    "p50Ms": 2466.7,
+    "p95Ms": 5728.4
+   },
+   "n": 56
+  },
+  {
+   "targetId": "native:pdf-markdown",
+   "pass": {
+    "text": {
+     "intercept": 1.6179,
+     "weights": {
+      "plain_ocr_sufficient": 0.7908,
+      "needs_math_extraction": -1.0767,
+      "needs_table_structure": -0.6679
+     },
+     "baseRate": 0.8679
+    },
+    "math": {
+     "intercept": -4.5951,
+     "weights": {},
+     "baseRate": 0.01
+    },
+    "tables": {
+     "intercept": 0.1359,
+     "weights": {
+      "plain_ocr_sufficient": -0.0841,
+      "needs_math_extraction": 0.0007,
+      "needs_table_structure": 0.3568
+     },
+     "baseRate": 0.5833
+    },
+    "overall": {
+     "intercept": 0.8674,
+     "weights": {
+      "plain_ocr_sufficient": 1.3159,
+      "needs_math_extraction": -2.2268,
+      "needs_table_structure": -0.4378
+     },
+     "baseRate": 0.783
+    }
+   },
+   "cost": {
+    "meanUsd": 0.0,
+    "p90Usd": 0.0
+   },
+   "latency": {
+    "p50Ms": 10.6,
+    "p95Ms": 20.6
+   },
+   "n": 106
+  },
+  {
+   "targetId": "native:pdf-text",
+   "pass": {
+    "text": {
+     "intercept": 1.8661,
+     "weights": {
+      "plain_ocr_sufficient": 0.8992,
+      "needs_math_extraction": -1.2639,
+      "needs_table_structure": -0.5064
+     },
+     "baseRate": 0.8962
+    },
+    "math": {
+     "intercept": -4.5951,
+     "weights": {},
+     "baseRate": 0.01
+    },
+    "tables": {
+     "intercept": -4.5951,
+     "weights": {},
+     "baseRate": 0.01
+    },
+    "overall": {
+     "intercept": 0.3795,
+     "weights": {
+      "plain_ocr_sufficient": 1.6111,
+      "needs_math_extraction": -1.9879,
+      "needs_table_structure": -1.5186
+     },
+     "baseRate": 0.7264
+    }
+   },
+   "cost": {
+    "meanUsd": 0.0,
+    "p90Usd": 0.0
+   },
+   "latency": {
+    "p50Ms": 11.6,
+    "p95Ms": 47.9
+   },
+   "n": 106
+  },
+  {
+   "targetId": "ocr:pdf-ocr-fill",
+   "pass": {
+    "text": {
+     "intercept": -0.4228,
+     "weights": {
+      "plain_ocr_sufficient": 0.7345,
+      "needs_math_extraction": -1.2874,
+      "needs_table_structure": -0.6643
+     },
+     "baseRate": 0.3556
+    },
+    "math": {
+     "intercept": -4.5951,
+     "weights": {},
+     "baseRate": 0.01
+    },
+    "tables": {
+     "intercept": -4.5951,
+     "weights": {},
+     "baseRate": 0.01
+    },
+    "overall": {
+     "intercept": -0.7533,
+     "weights": {
+      "plain_ocr_sufficient": 0.5673,
+      "needs_math_extraction": -1.4011,
+      "needs_table_structure": -0.8307
+     },
+     "baseRate": 0.2321
+    }
+   },
+   "cost": {
+    "meanUsd": 0.0,
+    "p90Usd": 0.0
+   },
+   "latency": {
+    "p50Ms": 2032.8,
+    "p95Ms": 6330.4
+   },
+   "n": 56
+  },
+  {
+   "targetId": "ocr:pdf-ocr",
+   "pass": {
+    "text": {
+     "intercept": -0.4228,
+     "weights": {
+      "plain_ocr_sufficient": 0.7345,
+      "needs_math_extraction": -1.2874,
+      "needs_table_structure": -0.6643
+     },
+     "baseRate": 0.3556
+    },
+    "math": {
+     "intercept": -4.5951,
+     "weights": {},
+     "baseRate": 0.01
+    },
+    "tables": {
+     "intercept": -4.5951,
+     "weights": {},
+     "baseRate": 0.01
+    },
+    "overall": {
+     "intercept": -0.7533,
+     "weights": {
+      "plain_ocr_sufficient": 0.5673,
+      "needs_math_extraction": -1.4011,
+      "needs_table_structure": -0.8307
+     },
+     "baseRate": 0.2321
+    }
+   },
+   "cost": {
+    "meanUsd": 0.0,
+    "p90Usd": 0.0
+   },
+   "latency": {
+    "p50Ms": 2032.8,
+    "p95Ms": 6330.4
+   },
+   "n": 56
+  },
+  {
+   "targetId": "native:accept-text-layer",
+   "decisionModel": "openai/gpt-6-luna-decisions",
+   "pass": {
+    "text": {
+     "intercept": 3.4185,
+     "weights": {
+      "plain_ocr_sufficient": 0.0811,
+      "needs_math_extraction": 0.057,
+      "needs_table_structure": -0.5329
+     },
+     "baseRate": 0.9677
+    },
+    "math": {
+     "intercept": 0.0,
+     "weights": {},
+     "baseRate": 0.5
+    },
+    "tables": {
+     "intercept": -4.5951,
+     "weights": {},
+     "baseRate": 0.01
+    },
+    "overall": {
+     "intercept": 0.9474,
+     "weights": {
+      "plain_ocr_sufficient": 1.2616,
+      "needs_math_extraction": -0.8235,
+      "needs_table_structure": -2.0127
+     },
+     "baseRate": 0.8172
+    }
+   },
+   "cost": {
+    "meanUsd": 0.0,
+    "p90Usd": 0.0
+   },
+   "latency": {
+    "p50Ms": 33.0,
+    "p95Ms": 90.4
+   },
+   "n": 93
+  },
+  {
+   "targetId": "ocr:tesseract",
+   "decisionModel": "openai/gpt-6-luna-decisions",
+   "pass": {
+    "text": {
+     "intercept": -0.2109,
+     "weights": {
+      "plain_ocr_sufficient": 0.4026,
+      "needs_math_extraction": -1.3457,
+      "needs_table_structure": -0.5799
+     },
+     "baseRate": 0.3556
+    },
+    "math": {
+     "intercept": -4.5951,
+     "weights": {},
+     "baseRate": 0.01
+    },
+    "tables": {
+     "intercept": -4.5951,
+     "weights": {},
+     "baseRate": 0.01
+    },
+    "overall": {
+     "intercept": -0.7081,
+     "weights": {
+      "plain_ocr_sufficient": 0.4923,
+      "needs_math_extraction": -1.4143,
+      "needs_table_structure": -0.7259
+     },
+     "baseRate": 0.2321
+    }
+   },
+   "cost": {
+    "meanUsd": 0.0,
+    "p90Usd": 0.0
+   },
+   "latency": {
+    "p50Ms": 2032.8,
+    "p95Ms": 6330.4
+   },
+   "n": 56
+  },
+  {
+   "targetId": "vlm:openrouter/anthropic/claude-haiku-5.5",
+   "decisionModel": "openai/gpt-6-luna-decisions",
+   "pass": {
+    "text": {
+     "intercept": 1.6086,
+     "weights": {
+      "plain_ocr_sufficient": 0.1322,
+      "needs_math_extraction": 0.7459,
+      "needs_table_structure": -0.7389
+     },
+     "baseRate": 0.8444
+    },
+    "math": {
+     "intercept": -0.043,
+     "weights": {
+      "plain_ocr_sufficient": -0.0681,
+      "needs_math_extraction": 0.0776,
+      "needs_table_structure": 0.0
+     },
+     "baseRate": 0.5
+    },
+    "tables": {
+     "intercept": -0.4055,
+     "weights": {},
+     "baseRate": 0.4
+    },
+    "overall": {
+     "intercept": 0.6246,
+     "weights": {
+      "plain_ocr_sufficient": 0.3248,
+      "needs_math_extraction": -0.5267,
+      "needs_table_structure": -0.4494
+     },
+     "baseRate": 0.6071
+    }
+   },
+   "cost": {
+    "meanUsd": 0.0007498,
+    "p90Usd": 0.0013961
+   },
+   "latency": {
+    "p50Ms": 4877.4,
+    "p95Ms": 11856.8
+   },
+   "n": 56
+  },
+  {
+   "targetId": "vlm:openrouter/anthropic/claude-sonnet-5.5",
+   "decisionModel": "openai/gpt-6-luna-decisions",
+   "pass": {
+    "text": {
+     "intercept": 1.5792,
+     "weights": {
+      "plain_ocr_sufficient": -0.0002,
+      "needs_math_extraction": 0.7822,
+      "needs_table_structure": -0.4688
+     },
+     "baseRate": 0.8444
+    },
+    "math": {
+     "intercept": 2.5496,
+     "weights": {
+      "plain_ocr_sufficient": 0.0094,
+      "needs_math_extraction": 0.0121,
+      "needs_table_structure": -0.0
+     },
+     "baseRate": 0.9286
+    },
+    "tables": {
+     "intercept": 0.4055,
+     "weights": {},
+     "baseRate": 0.6
+    },
+    "overall": {
+     "intercept": 1.4482,
+     "weights": {
+      "plain_ocr_sufficient": 0.0342,
+      "needs_math_extraction": 0.6367,
+      "needs_table_structure": -0.4055
+     },
+     "baseRate": 0.8393
+    }
+   },
+   "cost": {
+    "meanUsd": 0.0150757,
+    "p90Usd": 0.028086
+   },
+   "latency": {
+    "p50Ms": 6647.0,
+    "p95Ms": 15630.1
+   },
+   "n": 56
+  },
+  {
+   "targetId": "vlm:openrouter/deepseek/deepseek-v4.1-flash",
+   "decisionModel": "openai/gpt-6-luna-decisions",
+   "pass": {
+    "text": {
+     "intercept": 1.4512,
+     "weights": {
+      "plain_ocr_sufficient": -0.0168,
+      "needs_math_extraction": 0.1219,
+      "needs_table_structure": -0.3888
+     },
+     "baseRate": 0.8
+    },
+    "math": {
+     "intercept": 0.0287,
+     "weights": {
+      "plain_ocr_sufficient": -0.0733,
+      "needs_math_extraction": 0.1549,
+      "needs_table_structure": 0.0
+     },
+     "baseRate": 0.5357
+    },
+    "tables": {
+     "intercept": 0.4055,
+     "weights": {},
+     "baseRate": 0.6
+    },
+    "overall": {
+     "intercept": 0.8333,
+     "weights": {
+      "plain_ocr_sufficient": -0.0256,
+      "needs_math_extraction": -0.4396,
+      "needs_table_structure": -0.037
+     },
+     "baseRate": 0.6429
+    }
+   },
+   "cost": {
+    "meanUsd": 0.0001954,
+    "p90Usd": 0.0004102
+   },
+   "latency": {
+    "p50Ms": 9328.5,
+    "p95Ms": 24520.2
+   },
+   "n": 56
+  },
+  {
+   "targetId": "vlm:openrouter/google/gemini-2.5-flash-lite",
+   "decisionModel": "openai/gpt-6-luna-decisions",
+   "pass": {
+    "text": {
+     "intercept": 1.874,
+     "weights": {
+      "plain_ocr_sufficient": 0.0982,
+      "needs_math_extraction": 0.3732,
+      "needs_table_structure": -0.6321
+     },
+     "baseRate": 0.8667
+    },
+    "math": {
+     "intercept": 2.0719,
+     "weights": {
+      "plain_ocr_sufficient": 0.0149,
+      "needs_math_extraction": 0.0439,
+      "needs_table_structure": 0.0
+     },
+     "baseRate": 0.8929
+    },
+    "tables": {
+     "intercept": -0.4055,
+     "weights": {},
+     "baseRate": 0.4
+    },
+    "overall": {
+     "intercept": 1.1313,
+     "weights": {
+      "plain_ocr_sufficient": 0.1693,
+      "needs_math_extraction": 0.2713,
+      "needs_table_structure": -0.6793
+     },
+     "baseRate": 0.7679
+    }
+   },
+   "cost": {
+    "meanUsd": 0.0013747,
+    "p90Usd": 0.0019833
+   },
+   "latency": {
+    "p50Ms": 13676.2,
+    "p95Ms": 80158.7
+   },
+   "n": 56
+  },
+  {
+   "targetId": "vlm:openrouter/google/gemini-3.1-flash-lite",
+   "decisionModel": "openai/gpt-6-luna-decisions",
+   "pass": {
+    "text": {
+     "intercept": 1.7009,
+     "weights": {
+      "plain_ocr_sufficient": 0.1362,
+      "needs_math_extraction": 0.1945,
+      "needs_table_structure": -0.5529
+     },
+     "baseRate": 0.8444
+    },
+    "math": {
+     "intercept": 1.2584,
+     "weights": {
+      "plain_ocr_sufficient": 0.0292,
+      "needs_math_extraction": 0.0296,
+      "needs_table_structure": 0.0
+     },
+     "baseRate": 0.7857
+    },
+    "tables": {
+     "intercept": 0.4055,
+     "weights": {},
+     "baseRate": 0.6
+    },
+    "overall": {
+     "intercept": 1.2057,
+     "weights": {
+      "plain_ocr_sufficient": 0.048,
+      "needs_math_extraction": -0.1569,
+      "needs_table_structure": -0.2679
+     },
+     "baseRate": 0.75
+    }
+   },
+   "cost": {
+    "meanUsd": 0.0014298,
+    "p90Usd": 0.0025492
+   },
+   "latency": {
+    "p50Ms": 2709.6,
+    "p95Ms": 13074.3
+   },
+   "n": 56
+  },
+  {
+   "targetId": "vlm:openrouter/google/gemini-3.5-flash",
+   "decisionModel": "openai/gpt-6-luna-decisions",
+   "pass": {
+    "text": {
+     "intercept": 2.0845,
+     "weights": {
+      "plain_ocr_sufficient": 0.0575,
+      "needs_math_extraction": 0.5792,
+      "needs_table_structure": -0.7265
+     },
+     "baseRate": 0.8889
+    },
+    "math": {
+     "intercept": 0.8585,
+     "weights": {
+      "plain_ocr_sufficient": 0.0394,
+      "needs_math_extraction": 0.0422,
+      "needs_table_structure": 0.0
+     },
+     "baseRate": 0.7143
+    },
+    "tables": {
+     "intercept": 0.4055,
+     "weights": {},
+     "baseRate": 0.6
+    },
+    "overall": {
+     "intercept": 1.2881,
+     "weights": {
+      "plain_ocr_sufficient": 0.2674,
+      "needs_math_extraction": -0.3069,
+      "needs_table_structure": -0.363
+     },
+     "baseRate": 0.7679
+    }
+   },
+   "cost": {
+    "meanUsd": 0.029441,
+    "p90Usd": 0.0609075
+   },
+   "latency": {
+    "p50Ms": 14848.7,
+    "p95Ms": 39836.0
+   },
+   "n": 56
+  },
+  {
+   "targetId": "vlm:openrouter/google/gemini-3.5-flash-lite",
+   "decisionModel": "openai/gpt-6-luna-decisions",
+   "pass": {
+    "text": {
+     "intercept": 1.7489,
+     "weights": {
+      "plain_ocr_sufficient": 0.1223,
+      "needs_math_extraction": 0.7002,
+      "needs_table_structure": -1.0725
+     },
+     "baseRate": 0.8444
+    },
+    "math": {
+     "intercept": -0.6096,
+     "weights": {
+      "plain_ocr_sufficient": -0.0536,
+      "needs_math_extraction": 0.2084,
+      "needs_table_structure": 0.0
+     },
+     "baseRate": 0.3929
+    },
+    "tables": {
+     "intercept": 0.0,
+     "weights": {},
+     "baseRate": 0.5
+    },
+    "overall": {
+     "intercept": 0.6051,
+     "weights": {
+      "plain_ocr_sufficient": 0.3781,
+      "needs_math_extraction": -0.8308,
+      "needs_table_structure": -0.4467
+     },
+     "baseRate": 0.5714
+    }
+   },
+   "cost": {
+    "meanUsd": 0.0018868,
+    "p90Usd": 0.003702
+   },
+   "latency": {
+    "p50Ms": 2163.1,
+    "p95Ms": 9437.1
+   },
+   "n": 56
+  },
+  {
+   "targetId": "vlm:openrouter/openai/gpt-4.1-mini",
+   "decisionModel": "openai/gpt-6-luna-decisions",
+   "pass": {
+    "text": {
+     "intercept": 1.9414,
+     "weights": {
+      "plain_ocr_sufficient": 0.0035,
+      "needs_math_extraction": 0.6428,
+      "needs_table_structure": -0.8814
+     },
+     "baseRate": 0.8667
+    },
+    "math": {
+     "intercept": 0.845,
+     "weights": {
+      "plain_ocr_sufficient": 0.0394,
+      "needs_math_extraction": 0.0563,
+      "needs_table_structure": 0.0
+     },
+     "baseRate": 0.7143
+    },
+    "tables": {
+     "intercept": 0.0,
+     "weights": {},
+     "baseRate": 0.5
+    },
+    "overall": {
+     "intercept": 1.0769,
+     "weights": {
+      "plain_ocr_sufficient": 0.1182,
+      "needs_math_extraction": -0.0921,
+      "needs_table_structure": -0.4268
+     },
+     "baseRate": 0.7321
+    }
+   },
+   "cost": {
+    "meanUsd": 0.0018064,
+    "p90Usd": 0.0032124
+   },
+   "latency": {
+    "p50Ms": 4034.1,
+    "p95Ms": 12192.1
+   },
+   "n": 56
+  },
+  {
+   "targetId": "vlm:openrouter/openai/gpt-6-luna",
+   "decisionModel": "openai/gpt-6-luna-decisions",
+   "pass": {
+    "text": {
+     "intercept": 1.7373,
+     "weights": {
+      "plain_ocr_sufficient": -0.0945,
+      "needs_math_extraction": 0.7415,
+      "needs_table_structure": -0.7538
+     },
+     "baseRate": 0.8444
+    },
+    "math": {
+     "intercept": -0.7461,
+     "weights": {
+      "plain_ocr_sufficient": -0.048,
+      "needs_math_extraction": 0.1889,
+      "needs_table_structure": 0.0
+     },
+     "baseRate": 0.3571
+    },
+    "tables": {
+     "intercept": 0.0,
+     "weights": {},
+     "baseRate": 0.5
+    },
+    "overall": {
+     "intercept": 0.4789,
+     "weights": {
+      "plain_ocr_sufficient": 0.1058,
+      "needs_math_extraction": -0.7495,
+      "needs_table_structure": -0.0613
+     },
+     "baseRate": 0.5357
+    }
+   },
+   "cost": {
+    "meanUsd": 0.0006129,
+    "p90Usd": 0.0010847
+   },
+   "latency": {
+    "p50Ms": 5429.8,
+    "p95Ms": 12855.3
+   },
+   "n": 56
+  },
+  {
+   "targetId": "vlm:openrouter/z-ai/glm-5.3-flash",
+   "decisionModel": "openai/gpt-6-luna-decisions",
+   "pass": {
+    "text": {
+     "intercept": 2.3622,
+     "weights": {
+      "plain_ocr_sufficient": 0.1642,
+      "needs_math_extraction": 0.4707,
+      "needs_table_structure": -0.8704
+     },
+     "baseRate": 0.9111
+    },
+    "math": {
+     "intercept": 0.3094,
+     "weights": {
+      "plain_ocr_sufficient": 0.0533,
+      "needs_math_extraction": 0.1073,
+      "needs_table_structure": 0.0002
+     },
+     "baseRate": 0.6071
+    },
+    "tables": {
+     "intercept": 0.4055,
+     "weights": {},
+     "baseRate": 0.6
+    },
+    "overall": {
+     "intercept": 1.0766,
+     "weights": {
+      "plain_ocr_sufficient": 0.3291,
+      "needs_math_extraction": -0.5342,
+      "needs_table_structure": -0.2597
+     },
+     "baseRate": 0.7143
+    }
+   },
+   "cost": {
+    "meanUsd": 0.000733,
+    "p90Usd": 0.0011436
+   },
+   "latency": {
+    "p50Ms": 2673.2,
+    "p95Ms": 7411.9
+   },
+   "n": 56
+  },
+  {
+   "targetId": "vlm:private/infinity-parser2",
+   "decisionModel": "openai/gpt-6-luna-decisions",
+   "pass": {
+    "text": {
+     "intercept": 0.9771,
+     "weights": {
+      "plain_ocr_sufficient": 0.1167,
+      "needs_math_extraction": 0.3522,
+      "needs_table_structure": -0.5791
+     },
+     "baseRate": 0.7333
+    },
+    "math": {
+     "intercept": 0.9064,
+     "weights": {
+      "plain_ocr_sufficient": 0.0392,
+      "needs_math_extraction": -0.008,
+      "needs_table_structure": 0.0
+     },
+     "baseRate": 0.7143
+    },
+    "tables": {
+     "intercept": -1.3863,
+     "weights": {},
+     "baseRate": 0.2
+    },
+    "overall": {
+     "intercept": 0.4956,
+     "weights": {
+      "plain_ocr_sufficient": 0.2944,
+      "needs_math_extraction": 0.0265,
+      "needs_table_structure": -0.7421
+     },
+     "baseRate": 0.625
+    }
+   },
+   "cost": {
+    "meanUsd": 0.0002,
+    "p90Usd": 0.0002
+   },
+   "latency": {
+    "p50Ms": 3949.1,
+    "p95Ms": 7762.8
+   },
+   "n": 56
+  },
+  {
+   "targetId": "vlm:private/lightonocr-3",
+   "decisionModel": "openai/gpt-6-luna-decisions",
+   "pass": {
+    "text": {
+     "intercept": 2.0845,
+     "weights": {
+      "plain_ocr_sufficient": 0.0575,
+      "needs_math_extraction": 0.5792,
+      "needs_table_structure": -0.7265
+     },
+     "baseRate": 0.8889
+    },
+    "math": {
+     "intercept": -0.3088,
+     "weights": {
+      "plain_ocr_sufficient": -0.0634,
+      "needs_math_extraction": 0.2043,
+      "needs_table_structure": 0.0
+     },
+     "baseRate": 0.4643
+    },
+    "tables": {
+     "intercept": 0.4055,
+     "weights": {},
+     "baseRate": 0.6
+    },
+    "overall": {
+     "intercept": 0.7811,
+     "weights": {
+      "plain_ocr_sufficient": 0.1913,
+      "needs_math_extraction": -0.6889,
+      "needs_table_structure": -0.0577
+     },
+     "baseRate": 0.625
+    }
+   },
+   "cost": {
+    "meanUsd": 0.000132,
+    "p90Usd": 0.000132
+   },
+   "latency": {
+    "p50Ms": 4115.6,
+    "p95Ms": 11620.9
+   },
+   "n": 56
+  },
+  {
+   "targetId": "vlm:private/mineru2.5",
+   "decisionModel": "openai/gpt-6-luna-decisions",
+   "pass": {
+    "text": {
+     "intercept": 2.0845,
+     "weights": {
+      "plain_ocr_sufficient": 0.0575,
+      "needs_math_extraction": 0.5792,
+      "needs_table_structure": -0.7265
+     },
+     "baseRate": 0.8889
+    },
+    "math": {
+     "intercept": -0.7461,
+     "weights": {
+      "plain_ocr_sufficient": -0.048,
+      "needs_math_extraction": 0.1889,
+      "needs_table_structure": 0.0
+     },
+     "baseRate": 0.3571
+    },
+    "tables": {
+     "intercept": 0.0,
+     "weights": {},
+     "baseRate": 0.5
+    },
+    "overall": {
+     "intercept": 0.5353,
+     "weights": {
+      "plain_ocr_sufficient": 0.2777,
+      "needs_math_extraction": -0.8566,
+      "needs_table_structure": -0.1384
+     },
+     "baseRate": 0.5536
+    }
+   },
+   "cost": {
+    "meanUsd": 0.000233,
+    "p90Usd": 0.000233
+   },
+   "latency": {
+    "p50Ms": 2466.7,
+    "p95Ms": 5728.4
+   },
+   "n": 56
+  },
+  {
+   "targetId": "native:pdf-markdown",
+   "decisionModel": "openai/gpt-6-luna-decisions",
+   "pass": {
+    "text": {
+     "intercept": 1.6479,
+     "weights": {
+      "plain_ocr_sufficient": 0.6963,
+      "needs_math_extraction": -1.0173,
+      "needs_table_structure": -0.5388
+     },
+     "baseRate": 0.8679
+    },
+    "math": {
+     "intercept": -4.5951,
+     "weights": {},
+     "baseRate": 0.01
+    },
+    "tables": {
+     "intercept": 0.2441,
+     "weights": {
+      "plain_ocr_sufficient": -0.0067,
+      "needs_math_extraction": 0.0029,
+      "needs_table_structure": 0.1219
+     },
+     "baseRate": 0.5833
+    },
+    "overall": {
+     "intercept": 0.8453,
+     "weights": {
+      "plain_ocr_sufficient": 1.366,
+      "needs_math_extraction": -2.2496,
+      "needs_table_structure": -0.5301
+     },
+     "baseRate": 0.783
+    }
+   },
+   "cost": {
+    "meanUsd": 0.0,
+    "p90Usd": 0.0
+   },
+   "latency": {
+    "p50Ms": 10.6,
+    "p95Ms": 20.6
+   },
+   "n": 106
+  },
+  {
+   "targetId": "native:pdf-text",
+   "decisionModel": "openai/gpt-6-luna-decisions",
+   "pass": {
+    "text": {
+     "intercept": 1.9604,
+     "weights": {
+      "plain_ocr_sufficient": 0.7184,
+      "needs_math_extraction": -1.2192,
+      "needs_table_structure": -0.4469
+     },
+     "baseRate": 0.8962
+    },
+    "math": {
+     "intercept": -4.5951,
+     "weights": {},
+     "baseRate": 0.01
+    },
+    "tables": {
+     "intercept": -4.5951,
+     "weights": {},
+     "baseRate": 0.01
+    },
+    "overall": {
+     "intercept": 0.4148,
+     "weights": {
+      "plain_ocr_sufficient": 1.606,
+      "needs_math_extraction": -2.0341,
+      "needs_table_structure": -1.5085
+     },
+     "baseRate": 0.7264
+    }
+   },
+   "cost": {
+    "meanUsd": 0.0,
+    "p90Usd": 0.0
+   },
+   "latency": {
+    "p50Ms": 11.6,
+    "p95Ms": 47.9
+   },
+   "n": 106
+  },
+  {
+   "targetId": "ocr:pdf-ocr-fill",
+   "decisionModel": "openai/gpt-6-luna-decisions",
+   "pass": {
+    "text": {
+     "intercept": -0.2109,
+     "weights": {
+      "plain_ocr_sufficient": 0.4026,
+      "needs_math_extraction": -1.3457,
+      "needs_table_structure": -0.5799
+     },
+     "baseRate": 0.3556
+    },
+    "math": {
+     "intercept": -4.5951,
+     "weights": {},
+     "baseRate": 0.01
+    },
+    "tables": {
+     "intercept": -4.5951,
+     "weights": {},
+     "baseRate": 0.01
+    },
+    "overall": {
+     "intercept": -0.7081,
+     "weights": {
+      "plain_ocr_sufficient": 0.4923,
+      "needs_math_extraction": -1.4143,
+      "needs_table_structure": -0.7259
+     },
+     "baseRate": 0.2321
+    }
+   },
+   "cost": {
+    "meanUsd": 0.0,
+    "p90Usd": 0.0
+   },
+   "latency": {
+    "p50Ms": 2032.8,
+    "p95Ms": 6330.4
+   },
+   "n": 56
+  },
+  {
+   "targetId": "ocr:pdf-ocr",
+   "decisionModel": "openai/gpt-6-luna-decisions",
+   "pass": {
+    "text": {
+     "intercept": -0.2109,
+     "weights": {
+      "plain_ocr_sufficient": 0.4026,
+      "needs_math_extraction": -1.3457,
+      "needs_table_structure": -0.5799
+     },
+     "baseRate": 0.3556
+    },
+    "math": {
+     "intercept": -4.5951,
+     "weights": {},
+     "baseRate": 0.01
+    },
+    "tables": {
+     "intercept": -4.5951,
+     "weights": {},
+     "baseRate": 0.01
+    },
+    "overall": {
+     "intercept": -0.7081,
+     "weights": {
+      "plain_ocr_sufficient": 0.4923,
+      "needs_math_extraction": -1.4143,
+      "needs_table_structure": -0.7259
+     },
+     "baseRate": 0.2321
+    }
+   },
+   "cost": {
+    "meanUsd": 0.0,
+    "p90Usd": 0.0
+   },
+   "latency": {
+    "p50Ms": 2032.8,
+    "p95Ms": 6330.4
+   },
+   "n": 56
+  },
+  {
+   "targetId": "native:accept-text-layer",
+   "decisionModel": "typesafe/jev-1.13",
+   "pass": {
+    "text": {
+     "intercept": 3.3684,
+     "weights": {
+      "plain_ocr_sufficient": 0.2231,
+      "needs_math_extraction": 0.0551,
+      "needs_table_structure": -0.5704
+     },
+     "baseRate": 0.9677
+    },
+    "math": {
+     "intercept": 0.0,
+     "weights": {},
+     "baseRate": 0.5
+    },
+    "tables": {
+     "intercept": -4.5951,
+     "weights": {},
+     "baseRate": 0.01
+    },
+    "overall": {
+     "intercept": 0.9225,
+     "weights": {
+      "plain_ocr_sufficient": 1.6018,
+      "needs_math_extraction": -0.6538,
+      "needs_table_structure": -1.7108
+     },
+     "baseRate": 0.8172
+    }
+   },
+   "cost": {
+    "meanUsd": 0.0,
+    "p90Usd": 0.0
+   },
+   "latency": {
+    "p50Ms": 33.0,
+    "p95Ms": 90.4
+   },
+   "n": 93
+  },
+  {
+   "targetId": "ocr:tesseract",
+   "decisionModel": "typesafe/jev-1.13",
+   "pass": {
+    "text": {
+     "intercept": -0.7117,
+     "weights": {
+      "plain_ocr_sufficient": 0.8092,
+      "needs_math_extraction": -0.8696,
+      "needs_table_structure": 0.0935
+     },
+     "baseRate": 0.3556
+    },
+    "math": {
+     "intercept": -4.5951,
+     "weights": {},
+     "baseRate": 0.01
+    },
+    "tables": {
+     "intercept": -4.5951,
+     "weights": {},
+     "baseRate": 0.01
+    },
+    "overall": {
+     "intercept": -1.4586,
+     "weights": {
+      "plain_ocr_sufficient": 0.7346,
+      "needs_math_extraction": -0.4967,
+      "needs_table_structure": -0.0128
+     },
+     "baseRate": 0.2321
+    }
+   },
+   "cost": {
+    "meanUsd": 0.0,
+    "p90Usd": 0.0
+   },
+   "latency": {
+    "p50Ms": 2032.8,
+    "p95Ms": 6330.4
+   },
+   "n": 56
+  },
+  {
+   "targetId": "vlm:openrouter/anthropic/claude-haiku-5.5",
+   "decisionModel": "typesafe/jev-1.13",
+   "pass": {
+    "text": {
+     "intercept": 1.625,
+     "weights": {
+      "plain_ocr_sufficient": -0.3085,
+      "needs_math_extraction": 0.5589,
+      "needs_table_structure": 0.0223
+     },
+     "baseRate": 0.8444
+    },
+    "math": {
+     "intercept": 0.2292,
+     "weights": {
+      "plain_ocr_sufficient": 0.2004,
+      "needs_math_extraction": -0.5347,
+      "needs_table_structure": 0.1034
+     },
+     "baseRate": 0.5
+    },
+    "tables": {
+     "intercept": -0.4055,
+     "weights": {},
+     "baseRate": 0.4
+    },
+    "overall": {
+     "intercept": 0.4555,
+     "weights": {
+      "plain_ocr_sufficient": 0.4329,
+      "needs_math_extraction": -0.6688,
+      "needs_table_structure": 0.1555
+     },
+     "baseRate": 0.6071
+    }
+   },
+   "cost": {
+    "meanUsd": 0.0007498,
+    "p90Usd": 0.0013961
+   },
+   "latency": {
+    "p50Ms": 4877.4,
+    "p95Ms": 11856.8
+   },
+   "n": 56
+  },
+  {
+   "targetId": "vlm:openrouter/anthropic/claude-sonnet-5.5",
+   "decisionModel": "typesafe/jev-1.13",
+   "pass": {
+    "text": {
+     "intercept": 1.5952,
+     "weights": {
+      "plain_ocr_sufficient": -0.3016,
+      "needs_math_extraction": 0.6326,
+      "needs_table_structure": -0.0232
+     },
+     "baseRate": 0.8444
+    },
+    "math": {
+     "intercept": 2.5211,
+     "weights": {
+      "plain_ocr_sufficient": 0.0616,
+      "needs_math_extraction": 0.0187,
+      "needs_table_structure": 0.0255
+     },
+     "baseRate": 0.9286
+    },
+    "tables": {
+     "intercept": 0.4055,
+     "weights": {},
+     "baseRate": 0.6
+    },
+    "overall": {
+     "intercept": 1.5534,
+     "weights": {
+      "plain_ocr_sufficient": -0.1515,
+      "needs_math_extraction": 0.4432,
+      "needs_table_structure": 0.0229
+     },
+     "baseRate": 0.8393
+    }
+   },
+   "cost": {
+    "meanUsd": 0.0150757,
+    "p90Usd": 0.028086
+   },
+   "latency": {
+    "p50Ms": 6647.0,
+    "p95Ms": 15630.1
+   },
+   "n": 56
+  },
+  {
+   "targetId": "vlm:openrouter/deepseek/deepseek-v4.1-flash",
+   "decisionModel": "typesafe/jev-1.13",
+   "pass": {
+    "text": {
+     "intercept": 1.3431,
+     "weights": {
+      "plain_ocr_sufficient": 0.0781,
+      "needs_math_extraction": -0.0256,
+      "needs_table_structure": 0.0723
+     },
+     "baseRate": 0.8
+    },
+    "math": {
+     "intercept": 0.1472,
+     "weights": {
+      "plain_ocr_sufficient": 0.7551,
+      "needs_math_extraction": -0.5801,
+      "needs_table_structure": 0.0388
+     },
+     "baseRate": 0.5357
+    },
+    "tables": {
+     "intercept": 0.4055,
+     "weights": {},
+     "baseRate": 0.6
+    },
+    "overall": {
+     "intercept": 0.3155,
+     "weights": {
+      "plain_ocr_sufficient": 0.9126,
+      "needs_math_extraction": -0.6367,
+      "needs_table_structure": 0.068
+     },
+     "baseRate": 0.6429
+    }
+   },
+   "cost": {
+    "meanUsd": 0.0001954,
+    "p90Usd": 0.0004102
+   },
+   "latency": {
+    "p50Ms": 9328.5,
+    "p95Ms": 24520.2
+   },
+   "n": 56
+  },
+  {
+   "targetId": "vlm:openrouter/google/gemini-2.5-flash-lite",
+   "decisionModel": "typesafe/jev-1.13",
+   "pass": {
+    "text": {
+     "intercept": 1.7836,
+     "weights": {
+      "plain_ocr_sufficient": -0.0544,
+      "needs_math_extraction": 0.2559,
+      "needs_table_structure": -0.0041
+     },
+     "baseRate": 0.8667
+    },
+    "math": {
+     "intercept": 2.0833,
+     "weights": {
+      "plain_ocr_sufficient": 0.2295,
+      "needs_math_extraction": -0.1203,
+      "needs_table_structure": 0.0673
+     },
+     "baseRate": 0.8929
+    },
+    "tables": {
+     "intercept": -0.4055,
+     "weights": {},
+     "baseRate": 0.4
+    },
+    "overall": {
+     "intercept": 1.0581,
+     "weights": {
+      "plain_ocr_sufficient": -0.0555,
+      "needs_math_extraction": 0.3949,
+      "needs_table_structure": -0.0088
+     },
+     "baseRate": 0.7679
+    }
+   },
+   "cost": {
+    "meanUsd": 0.0013747,
+    "p90Usd": 0.0019833
+   },
+   "latency": {
+    "p50Ms": 13676.2,
+    "p95Ms": 80158.7
+   },
+   "n": 56
+  },
+  {
+   "targetId": "vlm:openrouter/google/gemini-3.1-flash-lite",
+   "decisionModel": "typesafe/jev-1.13",
+   "pass": {
+    "text": {
+     "intercept": 1.56,
+     "weights": {
+      "plain_ocr_sufficient": 0.1382,
+      "needs_math_extraction": 0.0912,
+      "needs_table_structure": 0.027
+     },
+     "baseRate": 0.8444
+    },
+    "math": {
+     "intercept": 1.3136,
+     "weights": {
+      "plain_ocr_sufficient": 0.2734,
+      "needs_math_extraction": -0.233,
+      "needs_table_structure": 0.0766
+     },
+     "baseRate": 0.7857
+    },
+    "tables": {
+     "intercept": 0.4055,
+     "weights": {},
+     "baseRate": 0.6
+    },
+    "overall": {
+     "intercept": 0.8898,
+     "weights": {
+      "plain_ocr_sufficient": 0.5876,
+      "needs_math_extraction": -0.3586,
+      "needs_table_structure": 0.1476
+     },
+     "baseRate": 0.75
+    }
+   },
+   "cost": {
+    "meanUsd": 0.0014298,
+    "p90Usd": 0.0025492
+   },
+   "latency": {
+    "p50Ms": 2709.6,
+    "p95Ms": 13074.3
+   },
+   "n": 56
+  },
+  {
+   "targetId": "vlm:openrouter/google/gemini-3.5-flash",
+   "decisionModel": "typesafe/jev-1.13",
+   "pass": {
+    "text": {
+     "intercept": 2.0485,
+     "weights": {
+      "plain_ocr_sufficient": -0.2683,
+      "needs_math_extraction": 0.4454,
+      "needs_table_structure": -0.0525
+     },
+     "baseRate": 0.8889
+    },
+    "math": {
+     "intercept": 0.9398,
+     "weights": {
+      "plain_ocr_sufficient": 0.1652,
+      "needs_math_extraction": -0.1878,
+      "needs_table_structure": 0.1722
+     },
+     "baseRate": 0.7143
+    },
+    "tables": {
+     "intercept": 0.4055,
+     "weights": {},
+     "baseRate": 0.6
+    },
+    "overall": {
+     "intercept": 1.1098,
+     "weights": {
+      "plain_ocr_sufficient": 0.3064,
+      "needs_math_extraction": -0.2798,
+      "needs_table_structure": 0.2207
+     },
+     "baseRate": 0.7679
+    }
+   },
+   "cost": {
+    "meanUsd": 0.029441,
+    "p90Usd": 0.0609075
+   },
+   "latency": {
+    "p50Ms": 14848.7,
+    "p95Ms": 39836.0
+   },
+   "n": 56
+  },
+  {
+   "targetId": "vlm:openrouter/google/gemini-3.5-flash-lite",
+   "decisionModel": "typesafe/jev-1.13",
+   "pass": {
+    "text": {
+     "intercept": 1.6924,
+     "weights": {
+      "plain_ocr_sufficient": -0.3621,
+      "needs_math_extraction": 0.5149,
+      "needs_table_structure": -0.0803
+     },
+     "baseRate": 0.8444
+    },
+    "math": {
+     "intercept": -0.1856,
+     "weights": {
+      "plain_ocr_sufficient": 0.8161,
+      "needs_math_extraction": -1.1084,
+      "needs_table_structure": 0.1417
+     },
+     "baseRate": 0.3929
+    },
+    "tables": {
+     "intercept": 0.0,
+     "weights": {},
+     "baseRate": 0.5
+    },
+    "overall": {
+     "intercept": 0.2101,
+     "weights": {
+      "plain_ocr_sufficient": 1.0581,
+      "needs_math_extraction": -1.3355,
+      "needs_table_structure": 0.197
+     },
+     "baseRate": 0.5714
+    }
+   },
+   "cost": {
+    "meanUsd": 0.0018868,
+    "p90Usd": 0.003702
+   },
+   "latency": {
+    "p50Ms": 2163.1,
+    "p95Ms": 9437.1
+   },
+   "n": 56
+  },
+  {
+   "targetId": "vlm:openrouter/openai/gpt-4.1-mini",
+   "decisionModel": "typesafe/jev-1.13",
+   "pass": {
+    "text": {
+     "intercept": 1.8317,
+     "weights": {
+      "plain_ocr_sufficient": -0.2786,
+      "needs_math_extraction": 0.4683,
+      "needs_table_structure": -0.0194
+     },
+     "baseRate": 0.8667
+    },
+    "math": {
+     "intercept": 0.8078,
+     "weights": {
+      "plain_ocr_sufficient": 0.3761,
+      "needs_math_extraction": -0.085,
+      "needs_table_structure": -0.1359
+     },
+     "baseRate": 0.7143
+    },
+    "tables": {
+     "intercept": 0.0,
+     "weights": {},
+     "baseRate": 0.5
+    },
+    "overall": {
+     "intercept": 0.7607,
+     "weights": {
+      "plain_ocr_sufficient": 0.4435,
+      "needs_math_extraction": -0.038,
+      "needs_table_structure": -0.0935
+     },
+     "baseRate": 0.7321
+    }
+   },
+   "cost": {
+    "meanUsd": 0.0018064,
+    "p90Usd": 0.0032124
+   },
+   "latency": {
+    "p50Ms": 4034.1,
+    "p95Ms": 12192.1
+   },
+   "n": 56
+  },
+  {
+   "targetId": "vlm:openrouter/openai/gpt-6-luna",
+   "decisionModel": "typesafe/jev-1.13",
+   "pass": {
+    "text": {
+     "intercept": 1.6432,
+     "weights": {
+      "plain_ocr_sufficient": -0.3412,
+      "needs_math_extraction": 0.5926,
+      "needs_table_structure": -0.0625
+     },
+     "baseRate": 0.8444
+    },
+    "math": {
+     "intercept": -0.3825,
+     "weights": {
+      "plain_ocr_sufficient": 0.7296,
+      "needs_math_extraction": -0.9812,
+      "needs_table_structure": 0.175
+     },
+     "baseRate": 0.3571
+    },
+    "tables": {
+     "intercept": 0.0,
+     "weights": {},
+     "baseRate": 0.5
+    },
+    "overall": {
+     "intercept": -0.0205,
+     "weights": {
+      "plain_ocr_sufficient": 0.9999,
+      "needs_math_extraction": -1.0972,
+      "needs_table_structure": 0.218
+     },
+     "baseRate": 0.5357
+    }
+   },
+   "cost": {
+    "meanUsd": 0.0006129,
+    "p90Usd": 0.0010847
+   },
+   "latency": {
+    "p50Ms": 5429.8,
+    "p95Ms": 12855.3
+   },
+   "n": 56
+  },
+  {
+   "targetId": "vlm:openrouter/z-ai/glm-5.3-flash",
+   "decisionModel": "typesafe/jev-1.13",
+   "pass": {
+    "text": {
+     "intercept": 2.3056,
+     "weights": {
+      "plain_ocr_sufficient": -0.1956,
+      "needs_math_extraction": 0.3075,
+      "needs_table_structure": -0.0083
+     },
+     "baseRate": 0.9111
+    },
+    "math": {
+     "intercept": 0.4445,
+     "weights": {
+      "plain_ocr_sufficient": 0.5075,
+      "needs_math_extraction": -0.3954,
+      "needs_table_structure": 0.0398
+     },
+     "baseRate": 0.6071
+    },
+    "tables": {
+     "intercept": 0.4055,
+     "weights": {},
+     "baseRate": 0.6
+    },
+    "overall": {
+     "intercept": 0.735,
+     "weights": {
+      "plain_ocr_sufficient": 0.7207,
+      "needs_math_extraction": -0.5705,
+      "needs_table_structure": 0.1003
+     },
+     "baseRate": 0.7143
+    }
+   },
+   "cost": {
+    "meanUsd": 0.000733,
+    "p90Usd": 0.0011436
+   },
+   "latency": {
+    "p50Ms": 2673.2,
+    "p95Ms": 7411.9
+   },
+   "n": 56
+  },
+  {
+   "targetId": "vlm:private/infinity-parser2",
+   "decisionModel": "typesafe/jev-1.13",
+   "pass": {
+    "text": {
+     "intercept": 0.9878,
+     "weights": {
+      "plain_ocr_sufficient": -0.2394,
+      "needs_math_extraction": 0.4175,
+      "needs_table_structure": -0.201
+     },
+     "baseRate": 0.7333
+    },
+    "math": {
+     "intercept": 0.894,
+     "weights": {
+      "plain_ocr_sufficient": -0.0057,
+      "needs_math_extraction": 0.0285,
+      "needs_table_structure": 0.0645
+     },
+     "baseRate": 0.7143
+    },
+    "tables": {
+     "intercept": -1.3863,
+     "weights": {},
+     "baseRate": 0.2
+    },
+    "overall": {
+     "intercept": 0.4872,
+     "weights": {
+      "plain_ocr_sufficient": -0.0143,
+      "needs_math_extraction": 0.1275,
+      "needs_table_structure": -0.1869
+     },
+     "baseRate": 0.625
+    }
+   },
+   "cost": {
+    "meanUsd": 0.0002,
+    "p90Usd": 0.0002
+   },
+   "latency": {
+    "p50Ms": 3949.1,
+    "p95Ms": 7762.8
+   },
+   "n": 56
+  },
+  {
+   "targetId": "vlm:private/lightonocr-3",
+   "decisionModel": "typesafe/jev-1.13",
+   "pass": {
+    "text": {
+     "intercept": 2.0485,
+     "weights": {
+      "plain_ocr_sufficient": -0.2683,
+      "needs_math_extraction": 0.4454,
+      "needs_table_structure": -0.0525
+     },
+     "baseRate": 0.8889
+    },
+    "math": {
+     "intercept": 0.0396,
+     "weights": {
+      "plain_ocr_sufficient": 0.6795,
+      "needs_math_extraction": -0.85,
+      "needs_table_structure": 0.1626
+     },
+     "baseRate": 0.4643
+    },
+    "tables": {
+     "intercept": 0.4055,
+     "weights": {},
+     "baseRate": 0.6
+    },
+    "overall": {
+     "intercept": 0.3839,
+     "weights": {
+      "plain_ocr_sufficient": 0.925,
+      "needs_math_extraction": -1.004,
+      "needs_table_structure": 0.1977
+     },
+     "baseRate": 0.625
+    }
+   },
+   "cost": {
+    "meanUsd": 0.000132,
+    "p90Usd": 0.000132
+   },
+   "latency": {
+    "p50Ms": 4115.6,
+    "p95Ms": 11620.9
+   },
+   "n": 56
+  },
+  {
+   "targetId": "vlm:private/mineru2.5",
+   "decisionModel": "typesafe/jev-1.13",
+   "pass": {
+    "text": {
+     "intercept": 2.0485,
+     "weights": {
+      "plain_ocr_sufficient": -0.2683,
+      "needs_math_extraction": 0.4454,
+      "needs_table_structure": -0.0525
+     },
+     "baseRate": 0.8889
+    },
+    "math": {
+     "intercept": -0.3825,
+     "weights": {
+      "plain_ocr_sufficient": 0.7296,
+      "needs_math_extraction": -0.9812,
+      "needs_table_structure": 0.175
+     },
+     "baseRate": 0.3571
+    },
+    "tables": {
+     "intercept": 0.0,
+     "weights": {},
+     "baseRate": 0.5
+    },
+    "overall": {
+     "intercept": 0.0975,
+     "weights": {
+      "plain_ocr_sufficient": 0.993,
+      "needs_math_extraction": -1.1786,
+      "needs_table_structure": 0.2262
+     },
+     "baseRate": 0.5536
+    }
+   },
+   "cost": {
+    "meanUsd": 0.000233,
+    "p90Usd": 0.000233
+   },
+   "latency": {
+    "p50Ms": 2466.7,
+    "p95Ms": 5728.4
+   },
+   "n": 56
+  },
+  {
+   "targetId": "native:pdf-markdown",
+   "decisionModel": "typesafe/jev-1.13",
+   "pass": {
+    "text": {
+     "intercept": 1.3935,
+     "weights": {
+      "plain_ocr_sufficient": 1.3248,
+      "needs_math_extraction": -0.899,
+      "needs_table_structure": -0.3542
+     },
+     "baseRate": 0.8679
+    },
+    "math": {
+     "intercept": -4.5951,
+     "weights": {},
+     "baseRate": 0.01
+    },
+    "tables": {
+     "intercept": 0.1931,
+     "weights": {
+      "plain_ocr_sufficient": -0.3038,
+      "needs_math_extraction": 0.0645,
+      "needs_table_structure": 0.2579
+     },
+     "baseRate": 0.5833
+    },
+    "overall": {
+     "intercept": 0.9491,
+     "weights": {
+      "plain_ocr_sufficient": 1.491,
+      "needs_math_extraction": -2.0306,
+      "needs_table_structure": -0.2242
+     },
+     "baseRate": 0.783
+    }
+   },
+   "cost": {
+    "meanUsd": 0.0,
+    "p90Usd": 0.0
+   },
+   "latency": {
+    "p50Ms": 10.6,
+    "p95Ms": 20.6
+   },
+   "n": 106
+  },
+  {
+   "targetId": "native:pdf-text",
+   "decisionModel": "typesafe/jev-1.13",
+   "pass": {
+    "text": {
+     "intercept": 1.6781,
+     "weights": {
+      "plain_ocr_sufficient": 1.453,
+      "needs_math_extraction": -1.0907,
+      "needs_table_structure": -0.2538
+     },
+     "baseRate": 0.8962
+    },
+    "math": {
+     "intercept": -4.5951,
+     "weights": {},
+     "baseRate": 0.01
+    },
+    "tables": {
+     "intercept": -4.5951,
+     "weights": {},
+     "baseRate": 0.01
+    },
+    "overall": {
+     "intercept": 0.4566,
+     "weights": {
+      "plain_ocr_sufficient": 1.8933,
+      "needs_math_extraction": -1.753,
+      "needs_table_structure": -1.0891
+     },
+     "baseRate": 0.7264
+    }
+   },
+   "cost": {
+    "meanUsd": 0.0,
+    "p90Usd": 0.0
+   },
+   "latency": {
+    "p50Ms": 11.6,
+    "p95Ms": 47.9
+   },
+   "n": 106
+  },
+  {
+   "targetId": "ocr:pdf-ocr-fill",
+   "decisionModel": "typesafe/jev-1.13",
+   "pass": {
+    "text": {
+     "intercept": -0.7117,
+     "weights": {
+      "plain_ocr_sufficient": 0.8092,
+      "needs_math_extraction": -0.8696,
+      "needs_table_structure": 0.0935
+     },
+     "baseRate": 0.3556
+    },
+    "math": {
+     "intercept": -4.5951,
+     "weights": {},
+     "baseRate": 0.01
+    },
+    "tables": {
+     "intercept": -4.5951,
+     "weights": {},
+     "baseRate": 0.01
+    },
+    "overall": {
+     "intercept": -1.4586,
+     "weights": {
+      "plain_ocr_sufficient": 0.7346,
+      "needs_math_extraction": -0.4967,
+      "needs_table_structure": -0.0128
+     },
+     "baseRate": 0.2321
+    }
+   },
+   "cost": {
+    "meanUsd": 0.0,
+    "p90Usd": 0.0
+   },
+   "latency": {
+    "p50Ms": 2032.8,
+    "p95Ms": 6330.4
+   },
+   "n": 56
+  },
+  {
+   "targetId": "ocr:pdf-ocr",
+   "decisionModel": "typesafe/jev-1.13",
+   "pass": {
+    "text": {
+     "intercept": -0.7117,
+     "weights": {
+      "plain_ocr_sufficient": 0.8092,
+      "needs_math_extraction": -0.8696,
+      "needs_table_structure": 0.0935
+     },
+     "baseRate": 0.3556
+    },
+    "math": {
+     "intercept": -4.5951,
+     "weights": {},
+     "baseRate": 0.01
+    },
+    "tables": {
+     "intercept": -4.5951,
+     "weights": {},
+     "baseRate": 0.01
+    },
+    "overall": {
+     "intercept": -1.4586,
+     "weights": {
+      "plain_ocr_sufficient": 0.7346,
+      "needs_math_extraction": -0.4967,
+      "needs_table_structure": -0.0128
+     },
+     "baseRate": 0.2321
+    }
+   },
+   "cost": {
+    "meanUsd": 0.0,
+    "p90Usd": 0.0
+   },
+   "latency": {
+    "p50Ms": 2032.8,
+    "p95Ms": 6330.4
+   },
+   "n": 56
+  },
+  {
+   "targetId": "native:accept-text-layer",
+   "decisionModel": "liquid/d1",
+   "pass": {
+    "text": {
+     "intercept": 3.4555,
+     "weights": {
+      "plain_ocr_sufficient": 0.0659,
+      "needs_math_extraction": -0.1103,
+      "needs_table_structure": -0.4174
+     },
+     "baseRate": 0.9677
+    },
+    "math": {
+     "intercept": 0.0,
+     "weights": {},
+     "baseRate": 0.5
+    },
+    "tables": {
+     "intercept": -4.5951,
+     "weights": {},
+     "baseRate": 0.01
+    },
+    "overall": {
+     "intercept": 1.3027,
+     "weights": {
+      "plain_ocr_sufficient": 0.9935,
+      "needs_math_extraction": -0.8581,
+      "needs_table_structure": -1.9251
+     },
+     "baseRate": 0.8172
+    }
+   },
+   "cost": {
+    "meanUsd": 0.0,
+    "p90Usd": 0.0
+   },
+   "latency": {
+    "p50Ms": 33.0,
+    "p95Ms": 90.4
+   },
+   "n": 93
+  },
+  {
+   "targetId": "ocr:tesseract",
+   "decisionModel": "liquid/d1",
+   "pass": {
+    "text": {
+     "intercept": -0.0748,
+     "weights": {
+      "plain_ocr_sufficient": -0.0764,
+      "needs_math_extraction": -1.1371,
+      "needs_table_structure": -0.097
+     },
+     "baseRate": 0.3556
+    },
+    "math": {
+     "intercept": -4.5951,
+     "weights": {},
+     "baseRate": 0.01
+    },
+    "tables": {
+     "intercept": -4.5951,
+     "weights": {},
+     "baseRate": 0.01
+    },
+    "overall": {
+     "intercept": -0.9317,
+     "weights": {
+      "plain_ocr_sufficient": 0.0118,
+      "needs_math_extraction": -0.7471,
+      "needs_table_structure": -0.0619
+     },
+     "baseRate": 0.2321
+    }
+   },
+   "cost": {
+    "meanUsd": 0.0,
+    "p90Usd": 0.0
+   },
+   "latency": {
+    "p50Ms": 2032.8,
+    "p95Ms": 6330.4
+   },
+   "n": 56
+  },
+  {
+   "targetId": "vlm:openrouter/anthropic/claude-haiku-5.5",
+   "decisionModel": "liquid/d1",
+   "pass": {
+    "text": {
+     "intercept": 1.5003,
+     "weights": {
+      "plain_ocr_sufficient": -0.0624,
+      "needs_math_extraction": 0.5476,
+      "needs_table_structure": 0.0583
+     },
+     "baseRate": 0.8444
+    },
+    "math": {
+     "intercept": 0.481,
+     "weights": {
+      "plain_ocr_sufficient": -0.2268,
+      "needs_math_extraction": -0.6388,
+      "needs_table_structure": 0.0384
+     },
+     "baseRate": 0.5
+    },
+    "tables": {
+     "intercept": -0.4055,
+     "weights": {},
+     "baseRate": 0.4
+    },
+    "overall": {
+     "intercept": 0.9285,
+     "weights": {
+      "plain_ocr_sufficient": -0.2854,
+      "needs_math_extraction": -0.8336,
+      "needs_table_structure": 0.0167
+     },
+     "baseRate": 0.6071
+    }
+   },
+   "cost": {
+    "meanUsd": 0.0007498,
+    "p90Usd": 0.0013961
+   },
+   "latency": {
+    "p50Ms": 4877.4,
+    "p95Ms": 11856.8
+   },
+   "n": 56
+  },
+  {
+   "targetId": "vlm:openrouter/anthropic/claude-sonnet-5.5",
+   "decisionModel": "liquid/d1",
+   "pass": {
+    "text": {
+     "intercept": 1.4931,
+     "weights": {
+      "plain_ocr_sufficient": -0.0424,
+      "needs_math_extraction": 0.5346,
+      "needs_table_structure": 0.0586
+     },
+     "baseRate": 0.8444
+    },
+    "math": {
+     "intercept": 2.556,
+     "weights": {
+      "plain_ocr_sufficient": 0.0381,
+      "needs_math_extraction": -0.0121,
+      "needs_table_structure": -0.0619
+     },
+     "baseRate": 0.9286
+    },
+    "tables": {
+     "intercept": 0.4055,
+     "weights": {},
+     "baseRate": 0.6
+    },
+    "overall": {
+     "intercept": 1.5339,
+     "weights": {
+      "plain_ocr_sufficient": -0.0313,
+      "needs_math_extraction": 0.3831,
+      "needs_table_structure": -0.0306
+     },
+     "baseRate": 0.8393
+    }
+   },
+   "cost": {
+    "meanUsd": 0.0150757,
+    "p90Usd": 0.028086
+   },
+   "latency": {
+    "p50Ms": 6647.0,
+    "p95Ms": 15630.1
+   },
+   "n": 56
+  },
+  {
+   "targetId": "vlm:openrouter/deepseek/deepseek-v4.1-flash",
+   "decisionModel": "liquid/d1",
+   "pass": {
+    "text": {
+     "intercept": 1.543,
+     "weights": {
+      "plain_ocr_sufficient": -0.1256,
+      "needs_math_extraction": -0.1932,
+      "needs_table_structure": 0.0477
+     },
+     "baseRate": 0.8
+    },
+    "math": {
+     "intercept": 0.6075,
+     "weights": {
+      "plain_ocr_sufficient": -0.0218,
+      "needs_math_extraction": -0.8042,
+      "needs_table_structure": -0.0612
+     },
+     "baseRate": 0.5357
+    },
+    "tables": {
+     "intercept": 0.4055,
+     "weights": {},
+     "baseRate": 0.6
+    },
+    "overall": {
+     "intercept": 1.017,
+     "weights": {
+      "plain_ocr_sufficient": -0.0695,
+      "needs_math_extraction": -0.9667,
+      "needs_table_structure": -0.0773
+     },
+     "baseRate": 0.6429
+    }
+   },
+   "cost": {
+    "meanUsd": 0.0001954,
+    "p90Usd": 0.0004102
+   },
+   "latency": {
+    "p50Ms": 9328.5,
+    "p95Ms": 24520.2
+   },
+   "n": 56
+  },
+  {
+   "targetId": "vlm:openrouter/google/gemini-2.5-flash-lite",
+   "decisionModel": "liquid/d1",
+   "pass": {
+    "text": {
+     "intercept": 1.7614,
+     "weights": {
+      "plain_ocr_sufficient": 0.0648,
+      "needs_math_extraction": 0.1542,
+      "needs_table_structure": 0.0571
+     },
+     "baseRate": 0.8667
+    },
+    "math": {
+     "intercept": 2.1759,
+     "weights": {
+      "plain_ocr_sufficient": 0.1016,
+      "needs_math_extraction": -0.1962,
+      "needs_table_structure": -0.0432
+     },
+     "baseRate": 0.8929
+    },
+    "tables": {
+     "intercept": -0.4055,
+     "weights": {},
+     "baseRate": 0.4
+    },
+    "overall": {
+     "intercept": 0.9932,
+     "weights": {
+      "plain_ocr_sufficient": 0.1583,
+      "needs_math_extraction": 0.2926,
+      "needs_table_structure": 0.0014
+     },
+     "baseRate": 0.7679
+    }
+   },
+   "cost": {
+    "meanUsd": 0.0013747,
+    "p90Usd": 0.0019833
+   },
+   "latency": {
+    "p50Ms": 13676.2,
+    "p95Ms": 80158.7
+   },
+   "n": 56
+  },
+  {
+   "targetId": "vlm:openrouter/google/gemini-3.1-flash-lite",
+   "decisionModel": "liquid/d1",
+   "pass": {
+    "text": {
+     "intercept": 1.66,
+     "weights": {
+      "plain_ocr_sufficient": 0.0981,
+      "needs_math_extraction": -0.0568,
+      "needs_table_structure": -0.0207
+     },
+     "baseRate": 0.8444
+    },
+    "math": {
+     "intercept": 1.4725,
+     "weights": {
+      "plain_ocr_sufficient": 0.0814,
+      "needs_math_extraction": -0.3697,
+      "needs_table_structure": -0.1084
+     },
+     "baseRate": 0.7857
+    },
+    "tables": {
+     "intercept": 0.4055,
+     "weights": {},
+     "baseRate": 0.6
+    },
+    "overall": {
+     "intercept": 1.282,
+     "weights": {
+      "plain_ocr_sufficient": 0.1186,
+      "needs_math_extraction": -0.6224,
+      "needs_table_structure": -0.0684
+     },
+     "baseRate": 0.75
+    }
+   },
+   "cost": {
+    "meanUsd": 0.0014298,
+    "p90Usd": 0.0025492
+   },
+   "latency": {
+    "p50Ms": 2709.6,
+    "p95Ms": 13074.3
+   },
+   "n": 56
+  },
+  {
+   "targetId": "vlm:openrouter/google/gemini-3.5-flash",
+   "decisionModel": "liquid/d1",
+   "pass": {
+    "text": {
+     "intercept": 1.9187,
+     "weights": {
+      "plain_ocr_sufficient": -0.0017,
+      "needs_math_extraction": 0.38,
+      "needs_table_structure": 0.0434
+     },
+     "baseRate": 0.8889
+    },
+    "math": {
+     "intercept": 1.2281,
+     "weights": {
+      "plain_ocr_sufficient": -0.2128,
+      "needs_math_extraction": -0.329,
+      "needs_table_structure": -0.0089
+     },
+     "baseRate": 0.7143
+    },
+    "tables": {
+     "intercept": 0.4055,
+     "weights": {},
+     "baseRate": 0.6
+    },
+    "overall": {
+     "intercept": 1.4966,
+     "weights": {
+      "plain_ocr_sufficient": -0.2383,
+      "needs_math_extraction": -0.397,
+      "needs_table_structure": -0.0198
+     },
+     "baseRate": 0.7679
+    }
+   },
+   "cost": {
+    "meanUsd": 0.029441,
+    "p90Usd": 0.0609075
+   },
+   "latency": {
+    "p50Ms": 14848.7,
+    "p95Ms": 39836.0
+   },
+   "n": 56
+  },
+  {
+   "targetId": "vlm:openrouter/google/gemini-3.5-flash-lite",
+   "decisionModel": "liquid/d1",
+   "pass": {
+    "text": {
+     "intercept": 1.5046,
+     "weights": {
+      "plain_ocr_sufficient": -0.0138,
+      "needs_math_extraction": 0.4602,
+      "needs_table_structure": 0.0581
+     },
+     "baseRate": 0.8444
+    },
+    "math": {
+     "intercept": 0.3804,
+     "weights": {
+      "plain_ocr_sufficient": -0.1414,
+      "needs_math_extraction": -1.3783,
+      "needs_table_structure": -0.1136
+     },
+     "baseRate": 0.3929
+    },
+    "tables": {
+     "intercept": 0.0,
+     "weights": {},
+     "baseRate": 0.5
+    },
+    "overall": {
+     "intercept": 1.0312,
+     "weights": {
+      "plain_ocr_sufficient": -0.1709,
+      "needs_math_extraction": -1.6347,
+      "needs_table_structure": -0.1419
+     },
+     "baseRate": 0.5714
+    }
+   },
+   "cost": {
+    "meanUsd": 0.0018868,
+    "p90Usd": 0.003702
+   },
+   "latency": {
+    "p50Ms": 2163.1,
+    "p95Ms": 9437.1
+   },
+   "n": 56
+  },
+  {
+   "targetId": "vlm:openrouter/openai/gpt-4.1-mini",
+   "decisionModel": "liquid/d1",
+   "pass": {
+    "text": {
+     "intercept": 1.7306,
+     "weights": {
+      "plain_ocr_sufficient": -0.0207,
+      "needs_math_extraction": 0.3569,
+      "needs_table_structure": 0.053
+     },
+     "baseRate": 0.8667
+    },
+    "math": {
+     "intercept": 0.8929,
+     "weights": {
+      "plain_ocr_sufficient": 0.2013,
+      "needs_math_extraction": -0.1513,
+      "needs_table_structure": -0.1138
+     },
+     "baseRate": 0.7143
+    },
+    "tables": {
+     "intercept": 0.0,
+     "weights": {},
+     "baseRate": 0.5
+    },
+    "overall": {
+     "intercept": 1.0016,
+     "weights": {
+      "plain_ocr_sufficient": 0.1486,
+      "needs_math_extraction": -0.1939,
+      "needs_table_structure": -0.1118
+     },
+     "baseRate": 0.7321
+    }
+   },
+   "cost": {
+    "meanUsd": 0.0018064,
+    "p90Usd": 0.0032124
+   },
+   "latency": {
+    "p50Ms": 4034.1,
+    "p95Ms": 12192.1
+   },
+   "n": 56
+  },
+  {
+   "targetId": "vlm:openrouter/openai/gpt-6-luna",
+   "decisionModel": "liquid/d1",
+   "pass": {
+    "text": {
+     "intercept": 1.5215,
+     "weights": {
+      "plain_ocr_sufficient": -0.0222,
+      "needs_math_extraction": 0.4293,
+      "needs_table_structure": 0.0608
+     },
+     "baseRate": 0.8444
+    },
+    "math": {
+     "intercept": 0.1421,
+     "weights": {
+      "plain_ocr_sufficient": -0.1188,
+      "needs_math_extraction": -1.2541,
+      "needs_table_structure": -0.1059
+     },
+     "baseRate": 0.3571
+    },
+    "tables": {
+     "intercept": 0.0,
+     "weights": {},
+     "baseRate": 0.5
+    },
+    "overall": {
+     "intercept": 0.829,
+     "weights": {
+      "plain_ocr_sufficient": -0.1572,
+      "needs_math_extraction": -1.5356,
+      "needs_table_structure": -0.1303
+     },
+     "baseRate": 0.5357
+    }
+   },
+   "cost": {
+    "meanUsd": 0.0006129,
+    "p90Usd": 0.0010847
+   },
+   "latency": {
+    "p50Ms": 5429.8,
+    "p95Ms": 12855.3
+   },
+   "n": 56
+  },
+  {
+   "targetId": "vlm:openrouter/z-ai/glm-5.3-flash",
+   "decisionModel": "liquid/d1",
+   "pass": {
+    "text": {
+     "intercept": 2.1981,
+     "weights": {
+      "plain_ocr_sufficient": 0.0001,
+      "needs_math_extraction": 0.3011,
+      "needs_table_structure": 0.0353
+     },
+     "baseRate": 0.9111
+    },
+    "math": {
+     "intercept": 0.7648,
+     "weights": {
+      "plain_ocr_sufficient": -0.0445,
+      "needs_math_extraction": -0.541,
+      "needs_table_structure": -0.0057
+     },
+     "baseRate": 0.6071
+    },
+    "tables": {
+     "intercept": 0.4055,
+     "weights": {},
+     "baseRate": 0.6
+    },
+    "overall": {
+     "intercept": 1.2492,
+     "weights": {
+      "plain_ocr_sufficient": -0.0656,
+      "needs_math_extraction": -0.7312,
+      "needs_table_structure": -0.0291
+     },
+     "baseRate": 0.7143
+    }
+   },
+   "cost": {
+    "meanUsd": 0.000733,
+    "p90Usd": 0.0011436
+   },
+   "latency": {
+    "p50Ms": 2673.2,
+    "p95Ms": 7411.9
+   },
+   "n": 56
+  },
+  {
+   "targetId": "vlm:private/infinity-parser2",
+   "decisionModel": "liquid/d1",
+   "pass": {
+    "text": {
+     "intercept": 0.8053,
+     "weights": {
+      "plain_ocr_sufficient": 0.0482,
+      "needs_math_extraction": 0.4311,
+      "needs_table_structure": -0.0411
+     },
+     "baseRate": 0.7333
+    },
+    "math": {
+     "intercept": 0.9173,
+     "weights": {
+      "plain_ocr_sufficient": 0.1015,
+      "needs_math_extraction": -0.0763,
+      "needs_table_structure": -0.1845
+     },
+     "baseRate": 0.7143
+    },
+    "tables": {
+     "intercept": -1.3863,
+     "weights": {},
+     "baseRate": 0.2
+    },
+    "overall": {
+     "intercept": 0.4236,
+     "weights": {
+      "plain_ocr_sufficient": 0.1277,
+      "needs_math_extraction": 0.0735,
+      "needs_table_structure": -0.1933
+     },
+     "baseRate": 0.625
+    }
+   },
+   "cost": {
+    "meanUsd": 0.0002,
+    "p90Usd": 0.0002
+   },
+   "latency": {
+    "p50Ms": 3949.1,
+    "p95Ms": 7762.8
+   },
+   "n": 56
+  },
+  {
+   "targetId": "vlm:private/lightonocr-3",
+   "decisionModel": "liquid/d1",
+   "pass": {
+    "text": {
+     "intercept": 1.9187,
+     "weights": {
+      "plain_ocr_sufficient": -0.0017,
+      "needs_math_extraction": 0.38,
+      "needs_table_structure": 0.0434
+     },
+     "baseRate": 0.8889
+    },
+    "math": {
+     "intercept": 0.5228,
+     "weights": {
+      "plain_ocr_sufficient": -0.1566,
+      "needs_math_extraction": -1.0693,
+      "needs_table_structure": 0.0621
+     },
+     "baseRate": 0.4643
+    },
+    "tables": {
+     "intercept": 0.4055,
+     "weights": {},
+     "baseRate": 0.6
+    },
+    "overall": {
+     "intercept": 1.1278,
+     "weights": {
+      "plain_ocr_sufficient": -0.1762,
+      "needs_math_extraction": -1.3043,
+      "needs_table_structure": 0.0329
+     },
+     "baseRate": 0.625
+    }
+   },
+   "cost": {
+    "meanUsd": 0.000132,
+    "p90Usd": 0.000132
+   },
+   "latency": {
+    "p50Ms": 4115.6,
+    "p95Ms": 11620.9
+   },
+   "n": 56
+  },
+  {
+   "targetId": "vlm:private/mineru2.5",
+   "decisionModel": "liquid/d1",
+   "pass": {
+    "text": {
+     "intercept": 1.9187,
+     "weights": {
+      "plain_ocr_sufficient": -0.0017,
+      "needs_math_extraction": 0.38,
+      "needs_table_structure": 0.0434
+     },
+     "baseRate": 0.8889
+    },
+    "math": {
+     "intercept": 0.1421,
+     "weights": {
+      "plain_ocr_sufficient": -0.1188,
+      "needs_math_extraction": -1.2541,
+      "needs_table_structure": -0.1059
+     },
+     "baseRate": 0.3571
+    },
+    "tables": {
+     "intercept": 0.0,
+     "weights": {},
+     "baseRate": 0.5
+    },
+    "overall": {
+     "intercept": 0.8932,
+     "weights": {
+      "plain_ocr_sufficient": -0.1554,
+      "needs_math_extraction": -1.5007,
+      "needs_table_structure": -0.1403
+     },
+     "baseRate": 0.5536
+    }
+   },
+   "cost": {
+    "meanUsd": 0.000233,
+    "p90Usd": 0.000233
+   },
+   "latency": {
+    "p50Ms": 2466.7,
+    "p95Ms": 5728.4
+   },
+   "n": 56
+  },
+  {
+   "targetId": "native:pdf-markdown",
+   "decisionModel": "liquid/d1",
+   "pass": {
+    "text": {
+     "intercept": 1.8442,
+     "weights": {
+      "plain_ocr_sufficient": 0.7886,
+      "needs_math_extraction": -1.2815,
+      "needs_table_structure": -0.7186
+     },
+     "baseRate": 0.8679
+    },
+    "math": {
+     "intercept": -4.5951,
+     "weights": {},
+     "baseRate": 0.01
+    },
+    "tables": {
+     "intercept": 0.2159,
+     "weights": {
+      "plain_ocr_sufficient": -0.2307,
+      "needs_math_extraction": 0.162,
+      "needs_table_structure": 0.3458
+     },
+     "baseRate": 0.5833
+    },
+    "overall": {
+     "intercept": 1.383,
+     "weights": {
+      "plain_ocr_sufficient": 0.8899,
+      "needs_math_extraction": -2.2374,
+      "needs_table_structure": -0.2836
+     },
+     "baseRate": 0.783
+    }
+   },
+   "cost": {
+    "meanUsd": 0.0,
+    "p90Usd": 0.0
+   },
+   "latency": {
+    "p50Ms": 10.6,
+    "p95Ms": 20.6
+   },
+   "n": 106
+  },
+  {
+   "targetId": "native:pdf-text",
+   "decisionModel": "liquid/d1",
+   "pass": {
+    "text": {
+     "intercept": 2.0797,
+     "weights": {
+      "plain_ocr_sufficient": 0.8663,
+      "needs_math_extraction": -1.4248,
+      "needs_table_structure": -0.4875
+     },
+     "baseRate": 0.8962
+    },
+    "math": {
+     "intercept": -4.5951,
+     "weights": {},
+     "baseRate": 0.01
+    },
+    "tables": {
+     "intercept": -4.5951,
+     "weights": {},
+     "baseRate": 0.01
+    },
+    "overall": {
+     "intercept": 0.9284,
+     "weights": {
+      "plain_ocr_sufficient": 1.2457,
+      "needs_math_extraction": -2.0313,
+      "needs_table_structure": -1.4003
+     },
+     "baseRate": 0.7264
+    }
+   },
+   "cost": {
+    "meanUsd": 0.0,
+    "p90Usd": 0.0
+   },
+   "latency": {
+    "p50Ms": 11.6,
+    "p95Ms": 47.9
+   },
+   "n": 106
+  },
+  {
+   "targetId": "ocr:pdf-ocr-fill",
+   "decisionModel": "liquid/d1",
+   "pass": {
+    "text": {
+     "intercept": -0.0748,
+     "weights": {
+      "plain_ocr_sufficient": -0.0764,
+      "needs_math_extraction": -1.1371,
+      "needs_table_structure": -0.097
+     },
+     "baseRate": 0.3556
+    },
+    "math": {
+     "intercept": -4.5951,
+     "weights": {},
+     "baseRate": 0.01
+    },
+    "tables": {
+     "intercept": -4.5951,
+     "weights": {},
+     "baseRate": 0.01
+    },
+    "overall": {
+     "intercept": -0.9317,
+     "weights": {
+      "plain_ocr_sufficient": 0.0118,
+      "needs_math_extraction": -0.7471,
+      "needs_table_structure": -0.0619
+     },
+     "baseRate": 0.2321
+    }
+   },
+   "cost": {
+    "meanUsd": 0.0,
+    "p90Usd": 0.0
+   },
+   "latency": {
+    "p50Ms": 2032.8,
+    "p95Ms": 6330.4
+   },
+   "n": 56
+  },
+  {
+   "targetId": "ocr:pdf-ocr",
+   "decisionModel": "liquid/d1",
+   "pass": {
+    "text": {
+     "intercept": -0.0748,
+     "weights": {
+      "plain_ocr_sufficient": -0.0764,
+      "needs_math_extraction": -1.1371,
+      "needs_table_structure": -0.097
+     },
+     "baseRate": 0.3556
+    },
+    "math": {
+     "intercept": -4.5951,
+     "weights": {},
+     "baseRate": 0.01
+    },
+    "tables": {
+     "intercept": -4.5951,
+     "weights": {},
+     "baseRate": 0.01
+    },
+    "overall": {
+     "intercept": -0.9317,
+     "weights": {
+      "plain_ocr_sufficient": 0.0118,
+      "needs_math_extraction": -0.7471,
+      "needs_table_structure": -0.0619
+     },
+     "baseRate": 0.2321
+    }
+   },
+   "cost": {
+    "meanUsd": 0.0,
+    "p90Usd": 0.0
+   },
+   "latency": {
+    "p50Ms": 2032.8,
+    "p95Ms": 6330.4
+   },
+   "n": 56
+  }
+ ]
+}

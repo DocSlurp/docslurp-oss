@@ -1,0 +1,161 @@
+{
+  "asOf": "2026-09-22",
+  "currency": "usd",
+  "unit": "per-million-tokens",
+  "note": "List prices used to estimate evaluation cost from measured token counts. Provider-reported cost, when a gateway returns it, always wins over these numbers. Re-check before quoting a cost in any report.",
+  "models": {
+    "openai/gpt-5.6-luna": {
+      "input": 0.19999999999999998,
+      "output": 1.2,
+      "vision": true,
+      "source": "https://openrouter.ai/api/v1/models",
+      "checked": "2026-09-22"
+    },
+    "openai/gpt-4.1-mini": {
+      "input": 0.4,
+      "output": 1.6,
+      "vision": true,
+      "source": "https://developers.openai.com/api/docs/models/gpt-4.1-mini",
+      "checked": "2026-09-21"
+    },
+    "google/gemini-3.1-flash-lite": {
+      "input": 0.25,
+      "output": 1.5,
+      "vision": true,
+      "source": "https://openrouter.ai/api/v1/models",
+      "checked": "2026-09-22"
+    },
+    "google/gemini-3.7-flash": {
+      "input": 0.375,
+      "output": 1.875,
+      "vision": true,
+      "source": "repository research/form-extraction/README.md applied rates; confirm against provider pricing before quoting",
+      "checked": "2026-08-18"
+    },
+    "openai/gpt-5.6-luna:batch": {
+      "input": 0.1,
+      "output": 0.6,
+      "vision": true,
+      "contextWindow": 1050000,
+      "source": "OpenRouter model catalogue; half-price asynchronous batch lane",
+      "checked": "2026-09-21",
+      "note": "Latency-insensitive work such as eval runs and backfills can use this lane."
+    },
+    "openai/gpt-5.6-luna-pro": {
+      "input": 0.2,
+      "output": 1.2,
+      "vision": true,
+      "contextWindow": 1050000,
+      "source": "OpenRouter model catalogue",
+      "checked": "2026-09-21"
+    },
+    "openai/gpt-6-luna": {
+      "input": 0.09999999999999999,
+      "output": 0.5,
+      "vision": true,
+      "source": "https://openrouter.ai/api/v1/models",
+      "checked": "2026-09-22"
+    },
+    "z-ai/glm-5.3-flashx": {
+      "input": 0.37,
+      "output": 1.25,
+      "vision": true,
+      "source": "https://openrouter.ai/api/v1/models",
+      "checked": "2026-09-22"
+    },
+    "deepseek/deepseek-v4.1-flash": {
+      "input": 0.3,
+      "output": 1.2,
+      "vision": true,
+      "source": "https://openrouter.ai/api/v1/models",
+      "checked": "2026-10-12",
+      "note": "Peak-window list price (weekday UTC 01:00-04:00 and 06:00-10:00); off-peak and weekends are $0.15/$0.60. Estimates use the peak price so spend is never under-reported."
+    },
+    "google/gemini-3.8-flash": {
+      "input": 0.75,
+      "output": 3.75,
+      "vision": true,
+      "source": "https://openrouter.ai/api/v1/models",
+      "checked": "2026-09-22"
+    },
+    "z-ai/glm-5.3-flash": {
+      "input": 0.15,
+      "output": 0.5,
+      "vision": true,
+      "source": "https://openrouter.ai/api/v1/models",
+      "checked": "2026-09-22"
+    },
+    "google/gemini-3.5-flash-lite": {
+      "input": 0.3,
+      "output": 2.5,
+      "vision": true,
+      "source": "https://openrouter.ai/api/v1/models",
+      "checked": "2026-09-22"
+    },
+    "openai/gpt-6-luna-pro": {
+      "input": 0.09999999999999999,
+      "output": 0.5,
+      "vision": true,
+      "source": "https://openrouter.ai/api/v1/models",
+      "checked": "2026-09-22"
+    },
+    "openai/gpt-6-sol-pro": {
+      "input": 2.0,
+      "output": 10.0,
+      "vision": true,
+      "source": "https://openrouter.ai/api/v1/models",
+      "checked": "2026-09-22"
+    },
+    "openai/gpt-6-sol": {
+      "input": 2.0,
+      "output": 10.0,
+      "vision": true,
+      "source": "https://openrouter.ai/api/v1/models",
+      "checked": "2026-09-22"
+    },
+    "openai/gpt-6-astra": {
+      "input": 10.0,
+      "output": 50.0,
+      "vision": true,
+      "source": "https://openrouter.ai/api/v1/models",
+      "checked": "2026-09-22"
+    },
+    "openai/gpt-6-astra-pro": {
+      "input": 10.0,
+      "output": 50.0,
+      "vision": true,
+      "source": "https://openrouter.ai/api/v1/models",
+      "checked": "2026-09-22"
+    },
+    "anthropic/claude-opus-5.5": {
+      "input": 4.0,
+      "output": 20.0,
+      "vision": true,
+      "source": "https://openrouter.ai/api/v1/models",
+      "checked": "2026-09-23"
+    },
+    "anthropic/claude-fable-5.1": {
+      "input": 10.0,
+      "output": 50.0,
+      "vision": true,
+      "source": "https://openrouter.ai/api/v1/models",
+      "checked": "2026-09-23",
+      "deprecated": "Anthropic models below 5.5 are deprecated (2026-10-09); output price is also >= $50/MTok"
+    },
+    "anthropic/claude-sonnet-5.5": {
+      "input": 2.0,
+      "output": 10.0,
+      "vision": true,
+      "source": "https://openrouter.ai/api/v1/models",
+      "checked": "2026-10-09"
+    },
+    "anthropic/claude-haiku-5.5": {
+      "input": 0.1,
+      "output": 0.5,
+      "vision": true,
+      "source": "https://openrouter.ai/api/v1/models",
+      "checked": "2026-10-09",
+      "note": "$0.50/$2.50 above 100K prompt tokens"
+    }
+  }
+}

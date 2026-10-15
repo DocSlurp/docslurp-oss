@@ -1,0 +1,85 @@
+%PDF-1.4
+%ÿÿÿÿ
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [8 0 R 10 0 R] /Count 2 >>
+endobj
+3 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>
+endobj
+4 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold >>
+endobj
+5 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Courier >>
+endobj
+6 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Times-Italic >>
+endobj
+7 0 obj
+<<  /Length 1482 >>
+stream
+BT /F2 20 Tf 1 0 0 1 48 744 Tm (Affine Operators for Efficient Office Inference) Tj ET
+BT /F1 12 Tf 1 0 0 1 48 714 Tm (Abstract. We study affine profile operators for efficient office workflow inference. The) Tj ET
+BT /F1 12 Tf 1 0 0 1 48 697 Tm (document is intentionally saturated with ligature-prone tokens such as office,) Tj ET
+BT /F1 12 Tf 1 0 0 1 48 680 Tm (efficient, profile, offline, and coefficient to expose parser failures in born-digital) Tj ET
+BT /F1 12 Tf 1 0 0 1 48 663 Tm (academic PDFs.) Tj ET
+BT /F2 15 Tf 1 0 0 1 48 626 Tm (1. Method) Tj ET
+BT /F1 11.5 Tf 1 0 0 1 48 604 Tm (Let f\(x\) denote the normalized office traffic profile. The affine update is written in) Tj ET
+BT /F1 11.5 Tf 1 0 0 1 48 587 Tm (LaTeX-style text so engines that preserve literal formula strings can be scored directly.) Tj ET
+BT /F3 12 Tf 1 0 0 1 64 556 Tm (E[f\(X\)] = \\int_0^\\infty x^2 e^{-x} dx) Tj ET
+BT /F3 12 Tf 1 0 0 1 64 532 Tm (\\frac{d}{dx} \\log\(1 + e^x\) = \\frac{e^x}{1 + e^x}) Tj ET
+BT /F1 11.5 Tf 1 0 0 1 48 504 Tm (The affine coefficient remains stable when the profile vector is projected onto a low-rank) Tj ET
+BT /F1 11.5 Tf 1 0 0 1 48 487 Tm (office manifold. In practice, this efficient approximation preserves sufficient signal for) Tj ET
+BT /F1 11.5 Tf 1 0 0 1 48 470 Tm (retrieval while keeping the pipeline economical.) Tj ET
+0.8 w 48 32 m 564 32 l S
+BT /F4 9 Tf 1 0 0 1 48 18 Tm (DocSlurp synthetic fixture) Tj ET
+BT /F4 9 Tf 1 0 0 1 520 18 Tm (1/2) Tj ET
+
+endstream
+endobj
+8 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R /F2 4 0 R /F3 5 0 R /F4 6 0 R >> >> /Contents 7 0 R >>
+endobj
+9 0 obj
+<<  /Length 1103 >>
+stream
+BT /F2 15 Tf 1 0 0 1 48 744 Tm (2. Appendix) Tj ET
+BT /F1 11.5 Tf 1 0 0 1 48 720 Tm (For completeness, we restate the affine profile objective and the coefficient update in) Tj ET
+BT /F1 11.5 Tf 1 0 0 1 48 703 Tm (code-style math text. This page adds reading-order pressure with a narrow sidebar note and) Tj ET
+BT /F1 11.5 Tf 1 0 0 1 48 686 Tm (a footer citation.) Tj ET
+BT /F3 12 Tf 1 0 0 1 66 657 Tm (A\(\\theta\) = \\sum_i \\alpha_i x_i + \\beta) Tj ET
+BT /F3 12 Tf 1 0 0 1 66 635 Tm (\\nabla_x L = \\frac{\\partial L}{\\partial x}) Tj ET
+BT /F1 11.5 Tf 1 0 0 1 48 607 Tm (The office benchmark profile is intentionally repetitive: efficient, office, affine,) Tj ET
+BT /F1 11.5 Tf 1 0 0 1 48 590 Tm (profile, coefficient, offline. These tokens are enough to catch broken ligature expansion) Tj ET
+BT /F1 11.5 Tf 1 0 0 1 48 573 Tm (while staying readable in plain text exports.) Tj ET
+BT /F2 9 Tf 0 1 -1 0 594 220 Tm (supplementary note: preserve inline formulas) Tj ET
+0.8 w 48 32 m 564 32 l S
+BT /F4 9 Tf 1 0 0 1 48 18 Tm (DocSlurp synthetic fixture) Tj ET
+BT /F4 9 Tf 1 0 0 1 520 18 Tm (2/2) Tj ET
+
+endstream
+endobj
+10 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R /F2 4 0 R /F3 5 0 R /F4 6 0 R >> >> /Contents 9 0 R >>
+endobj
+xref
+0 11
+0000000000 65535 f 
+0000000015 00000 n 
+0000000064 00000 n 
+0000000128 00000 n 
+0000000198 00000 n 
+0000000273 00000 n 
+0000000341 00000 n 
+0000000414 00000 n 
+0000001949 00000 n 
+0000002105 00000 n 
+0000003261 00000 n 
+trailer
+<< /Size 11 /Root 1 0 R >>
+startxref
+3418
+%%EOF

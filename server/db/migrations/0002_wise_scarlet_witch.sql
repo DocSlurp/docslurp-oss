@@ -1,0 +1,1 @@
+ALTER TABLE "kg_communities" ALTER COLUMN "vector" SET DATA TYPE vector(1024);

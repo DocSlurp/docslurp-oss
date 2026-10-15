@@ -1,0 +1,15 @@
+---
+/**
+ * Browser key only: restrict it to this site's origin and the search scope.
+ * workspaceId takes a slug, UUID or "default" (the key organization's default
+ * workspace) and defaults to "default"; apiUrl defaults to https://docslurp.io.
+ */
+interface Props { clientKey: string; workspaceId?: string; apiUrl?: string; placeholder?: string; }
+const { clientKey, workspaceId = 'default', apiUrl = 'https://docslurp.io', placeholder = 'Search documents…' } = Astro.props;
+---
+<docslurp-search-box api-url={apiUrl} workspace-id={workspaceId} client-key={clientKey} placeholder={placeholder}></docslurp-search-box>
+<noscript><p>Enable JavaScript to search the document collection.</p></noscript>
+<script>
+  import { defineDocSlurpSearch } from '@docslurp/sdk/widget';
+  defineDocSlurpSearch();
+</script>

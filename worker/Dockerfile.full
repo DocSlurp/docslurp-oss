@@ -1,0 +1,163 @@
+# Dockerfile.full - Full worker image with deferred heavy Python toolchains
+#
+# Tradeoffs:
+# - Smaller shipped image, slower first startup on a fresh machine
+# - Includes everything from lean plus:
+#   - Tesseract OCR with language packs (eng, fra, deu, spa)
+#   - LibreOffice headless for office format conversion
+#   - Wheel-only Python venv with the base parsers (pymupdf, pymupdf4llm, trafilatura,
+#     ebooklib, python-pptx, openpyxl, xlsx2csv) baked in
+#   - Docling / Unstructured: from vendor bundles (DOCSLURP_VENDOR_BUNDLE_BASE_URL,
+#     docs/worker-image.md) or, without a bundle source, the legacy first-boot pip
+#     install (DOCSLURP_WORKER_INSTALL_HEAVY_DEPS_ON_STARTUP, default true here)
+# - Suitable for all document types including scanned PDFs, images, spreadsheets
+
+# Build stage: compile TypeScript
+FROM node:24-trixie-slim@sha256:173f125896c3b47ddf056734c7ea789d04595a6a08769a8f78e0df642781fb66 AS builder
+WORKDIR /app
+RUN corepack enable
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml tsconfig.base.json ./
+COPY packages ./packages
+COPY worker/package.json worker/tsconfig.json worker/LICENSE ./worker/
+RUN pnpm install --frozen-lockfile
+COPY worker/src ./worker/src
+COPY worker/scripts/copy-routing-assets.mjs ./worker/scripts/copy-routing-assets.mjs
+COPY scripts/lib/model-prices.json ./scripts/lib/model-prices.json
+RUN pnpm --filter @docslurp/worker build
+COPY scripts/prune-worker-node-modules.mjs ./scripts/prune-worker-node-modules.mjs
+RUN pnpm --filter @docslurp/worker deploy --prod --legacy /prod/worker \
+    && node scripts/prune-worker-node-modules.mjs --dir /prod/worker --arch "$(node -p process.arch)"
+
+# Base Python parsers: wheel-only venv built against the runtime image's python3.
+# pip stays in this venv so the optional first-boot install can still extend it.
+FROM node:24-trixie-slim@sha256:173f125896c3b47ddf056734c7ea789d04595a6a08769a8f78e0df642781fb66 AS python-venv
+RUN apt-get update \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends python3 python3-venv \
+    && rm -rf /var/lib/apt/lists/*
+COPY worker/requirements-base.txt worker/requirements-base.lock.txt /tmp/req/
+COPY scripts/build-worker-venv.sh /tmp/build-worker-venv.sh
+RUN DOCSLURP_VENV_KEEP_PIP=1 bash /tmp/build-worker-venv.sh /app/.venv /tmp/req/requirements-base.lock.txt /tmp/req/requirements-base.txt
+
+# Optional private native PDF engine (see Dockerfile.lean); the tarball never lands in a layer.
+FROM node:24-trixie-slim@sha256:173f125896c3b47ddf056734c7ea789d04595a6a08769a8f78e0df642781fb66 AS native-pdf
+ARG DOCSLURP_NATIVE_PDF=
+WORKDIR /app
+COPY scripts/install-native-pdf.mjs ./scripts/install-native-pdf.mjs
+COPY vendor-artifact[s]/native-pdf/ ./vendor-artifacts/native-pdf/
+RUN mkdir -p vendor-artifacts/native-pdf \
+    && node scripts/install-native-pdf.mjs --optional \
+    && rm -f vendor-artifacts/native-pdf/*.tgz
+
+# Optional native-pdf runtime assets, default off. With neither flag set this stage
+# leaves /opt/native-pdf empty, so the default image does not grow. Sources and
+# every file are sha256-pinned in scripts/fetch-native-pdf-assets.mjs.
+#   DOCSLURP_NATIVE_PDF_OCR_MODELS=1  PP-OCRv6 small OCR models (~30 MB, Apache-2.0)
+#   DOCSLURP_NATIVE_PDF_CJK_FONTS=1   Noto CJK fallback fonts (~54 MB, OFL-1.1)
+FROM node:24-trixie-slim@sha256:173f125896c3b47ddf056734c7ea789d04595a6a08769a8f78e0df642781fb66 AS native-pdf-assets
+ARG DOCSLURP_NATIVE_PDF_OCR_MODELS=
+ARG DOCSLURP_NATIVE_PDF_CJK_FONTS=
+COPY scripts/fetch-native-pdf-assets.mjs /tmp/fetch-native-pdf-assets.mjs
+RUN node /tmp/fetch-native-pdf-assets.mjs --out /opt/native-pdf \
+      --ocr-models="${DOCSLURP_NATIVE_PDF_OCR_MODELS}" --cjk-fonts="${DOCSLURP_NATIVE_PDF_CJK_FONTS}"
+
+# Production stage: runtime only (no TypeScript toolchain, pnpm store or devDeps)
+FROM node:24-trixie-slim@sha256:173f125896c3b47ddf056734c7ea789d04595a6a08769a8f78e0df642781fb66
+WORKDIR /app
+ARG TARGETARCH
+
+# Install all system dependencies (first: changes least often)
+RUN apt-get update \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+       bash \
+       bubblewrap \
+       ca-certificates \
+       catdoc \
+       clamav \
+       clamav-daemon \
+       clamav-freshclam \
+       clamdscan \
+       ffmpeg \
+       ghostscript \
+       imagemagick \
+       libtiff-tools \
+       libgl1 \
+       libglib2.0-0 \
+       libreoffice \
+       mupdf-tools \
+       ocrmypdf \
+       pandoc \
+       poppler-utils \
+       python3 \
+       python3-venv \
+       qpdf \
+       tesseract-ocr \
+       tesseract-ocr-eng \
+       tesseract-ocr-fra \
+       tesseract-ocr-deu \
+       tesseract-ocr-spa \
+       unrtf \
+    && rm -rf /var/lib/apt/lists/* /usr/share/doc/* /usr/share/man/* /usr/share/info/* \
+    && rm -rf /opt/yarn-* /usr/local/bin/yarn /usr/local/bin/yarnpkg
+
+RUN groupadd --system --gid 10001 docslurp \
+    && useradd --system --uid 10001 --gid docslurp --home-dir /home/docslurp --create-home --shell /usr/sbin/nologin docslurp \
+    && usermod -a -G clamav docslurp \
+    && sed -ri 's/^#?User .*/User docslurp/' /etc/clamav/clamd.conf \
+    && sed -ri 's|^#?LocalSocket .*|LocalSocket /tmp/clamav/clamd.ctl|' /etc/clamav/clamd.conf \
+    && sed -ri 's/^#?LocalSocketGroup .*/LocalSocketGroup docslurp/' /etc/clamav/clamd.conf \
+    && sed -ri 's|^#?PidFile .*|PidFile /tmp/clamav/clamd.pid|' /etc/clamav/clamd.conf \
+    && sed -ri 's/^#?DatabaseOwner .*/DatabaseOwner docslurp/' /etc/clamav/freshclam.conf \
+    && mkdir -p /tmp/docslurp-parser-sandbox /tmp/clamav /var/log/clamav /var/lib/clamav /home/docslurp/.cache/docslurp/vendor-bundles \
+    && chown -R docslurp:docslurp /home/docslurp /tmp/docslurp-parser-sandbox /tmp/clamav /var/log/clamav /var/lib/clamav
+
+COPY LICENSE THIRD_PARTY_NOTICES.md ./
+COPY LICENSES ./LICENSES
+# Owned by the worker user so the optional first-boot install can extend it.
+COPY --from=python-venv --chown=10001:10001 /app/.venv /app/.venv
+COPY --from=builder /prod/worker/package.json ./worker/package.json
+COPY --from=builder /prod/worker/node_modules ./worker/node_modules
+COPY --from=native-pdf /app/vendor-artifacts ./vendor-artifacts
+COPY --from=native-pdf-assets /opt/native-pdf /opt/native-pdf
+RUN cd worker && node -e "require('@kreuzberg/node'); console.log('kreuzberg native binding ok')"
+
+COPY worker/LICENSE ./worker/LICENSE
+COPY worker/scripts ./worker/scripts
+COPY worker/security ./worker/security
+COPY worker/requirements*.txt worker/vendor-bundles.json ./worker/
+COPY scripts/check-worker-prerequisites.mjs ./scripts/check-worker-prerequisites.mjs
+COPY scripts/setup-worker-python-venv.sh ./scripts/setup-worker-python-venv.sh
+COPY scripts/start-worker.sh ./scripts/start-worker.sh
+COPY --from=builder /app/worker/dist ./worker/dist
+RUN rm -rf ./worker/scripts/__pycache__ \
+    && chmod +x ./scripts/start-worker.sh ./worker/scripts/parser-sandbox.sh \
+    && PYTHON_VENV=/app/.venv node scripts/check-worker-prerequisites.mjs --profile=full
+
+ENV HOME=/home/docslurp
+ENV DOCSLURP_CLAMAV_RUN_DIR=/tmp/clamav
+ENV DOCSLURP_PARSER_SANDBOX_ENABLED=true
+ENV DOCSLURP_PARSER_SANDBOX_NETWORK=none
+ENV DOCSLURP_PARSER_SANDBOX_MODE=isolated
+ENV DOCSLURP_PARSER_SANDBOX_WRITABLE_PATHS=
+ENV DOCSLURP_DEPLOYMENT_PROFILE=heavy
+ENV DOCSLURP_WORKER_IMAGE=worker-full
+ENV DOCSLURP_ALLOCATED_VCPU=2
+ENV DOCSLURP_ALLOCATED_MEMORY_GB=4
+ENV PYTHON_VENV=/app/.venv
+ENV DOCSLURP_VENDOR_BUNDLE_DIR=/home/docslurp/.cache/docslurp/vendor-bundles
+
+# Empty unless the matching build flag above was set (the worker ignores empty values).
+ARG DOCSLURP_NATIVE_PDF=
+ARG DOCSLURP_NATIVE_PDF_OCR_MODELS=
+ARG DOCSLURP_NATIVE_PDF_CJK_FONTS=
+ENV DOCSLURP_NATIVE_PDF_INSTALLED=${DOCSLURP_NATIVE_PDF:+1}
+ENV NATIVE_PDF_OCR_MODEL_DIR=${DOCSLURP_NATIVE_PDF_OCR_MODELS:+/opt/native-pdf/ocr-models}
+ENV NATIVE_PDF_FONTS_DIR=${DOCSLURP_NATIVE_PDF_CJK_FONTS:+/opt/native-pdf/fonts}
+
+# Temporal Build ID for this image (worker/src/temporal/worker-versioning.ts).
+# Last, so a new SHA does not invalidate earlier layers.
+ARG DOCSLURP_GIT_SHA=
+ENV DOCSLURP_GIT_SHA=${DOCSLURP_GIT_SHA}
+
+USER docslurp
+
+CMD ["bash", "/app/scripts/start-worker.sh"]

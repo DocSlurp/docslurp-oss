@@ -1,0 +1,6 @@
+# Vendor bundle "docling" (worker/vendor-bundles.json, docs/worker-image.md).
+# Built with --torch-backend cpu: CPU-only torch/torchvision wheels, no CUDA/nvidia/triton.
+# Floor stops the resolver from silently backtracking to an ancient release.
+docling>=2.138
+torch
+torchvision

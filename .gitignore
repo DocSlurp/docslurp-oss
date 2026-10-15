@@ -1,0 +1,25 @@
+node_modules
+.pnpm-store
+.env*
+!.env.example
+!.env.selfhost.example
+.DS_Store
+coverage
+dist
+.tmp
+.scratch/
+__pycache__
+.venv
+venv
+.pytest_cache
+.mypy_cache
+.cache
+.benchmarks
+.pnp.*
+.terraform
+terraform.tfstate
+terraform.tfstate.*
+*.tfplan
+
+# Native PDF engine artifact (fetched at image build time, never committed)
+vendor-artifacts/

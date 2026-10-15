@@ -1,0 +1,22 @@
+# Dockerfile.bundles - build vendor bundle archives (docs/worker-image.md#vendor-bundles)
+#
+#   docker buildx build -f worker/Dockerfile.bundles --build-arg BUNDLE=docling \
+#     --target export --output type=local,dest=.scratch/bundles .
+#
+# Same pinned base image as worker/Dockerfile.lean, so bundles target the exact
+# python3 + glibc the worker runs. The base venv is rebuilt here with the same
+# script and lock so the bundle can drop packages the image already ships.
+FROM node:24-trixie-slim@sha256:173f125896c3b47ddf056734c7ea789d04595a6a08769a8f78e0df642781fb66 AS bundle-build
+RUN apt-get update \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ca-certificates pandoc python3 python3-venv zstd \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /src
+COPY worker/requirements-base.txt worker/requirements-base.lock.txt worker/requirements-bundle-*.txt worker/vendor-bundles.json ./worker/
+COPY scripts/build-worker-venv.sh ./scripts/build-worker-venv.sh
+COPY scripts/vendor-bundles/build.sh ./scripts/vendor-bundles/build.sh
+RUN bash scripts/build-worker-venv.sh /app/.venv worker/requirements-base.lock.txt worker/requirements-base.txt
+ARG BUNDLE
+RUN test -n "${BUNDLE}" && bash scripts/vendor-bundles/build.sh "${BUNDLE}" /out /src
+
+FROM scratch AS export
+COPY --from=bundle-build /out/ /

@@ -1,0 +1,57 @@
+{
+  "name": "@docslurp/contrib-search-compat",
+  "version": "0.3.0",
+  "description": "Drop-in Algolia, Meilisearch, Typesense and Pagefind search clients backed by DocSlurp retrieval, one package with a subpath per client.",
+  "license": "MIT",
+  "homepage": "https://docslurp.io/docs/packages/contrib-search-compat",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/DocSlurp/docslurp-oss.git",
+    "directory": "packages/contrib-search-compat"
+  },
+  "bugs": {
+    "url": "https://github.com/DocSlurp/docslurp-oss/issues"
+  },
+  "type": "module",
+  "exports": {
+    "./algolia": {
+      "types": "./dist/algolia.d.ts",
+      "import": "./dist/algolia.js"
+    },
+    "./meilisearch": {
+      "types": "./dist/meilisearch.d.ts",
+      "import": "./dist/meilisearch.js"
+    },
+    "./typesense": {
+      "types": "./dist/typesense.d.ts",
+      "import": "./dist/typesense.js"
+    },
+    "./pagefind": {
+      "types": "./dist/pagefind.d.ts",
+      "import": "./dist/pagefind.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE",
+    "NOTICE",
+    "LICENSES"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "prepack": "pnpm build",
+    "test": "pnpm build && node --test test/*.test.mjs"
+  },
+  "dependencies": {
+    "@docslurp/sdk": "workspace:^"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.5",
+    "typescript": "^6.0.3"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

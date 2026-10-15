@@ -1,0 +1,1006 @@
+{
+  "schemaVersion": "policy-pack@v1",
+  "metadata": {
+    "policyVersion": "page-router-dm-v0-prior",
+    "trainingDataSha256": "0000000000000000000000000000000000000000000000000000000000000000",
+    "fitDate": "2026-10-12",
+    "splitPolicy": "none: hand-set v0 PRIOR (n=0 everywhere, no training data, no fixture content); replaced by the fitted pack from the decision-model bench",
+    "passThreshold": 0.8
+  },
+  "decisionModels": [
+    "perplexity/pplx-decider-v1.1-27b",
+    "typesafe/jev-1.13",
+    "liquid/d1",
+    "liquid/d1:direct",
+    "local/LiquidAI/d1-omni-600M"
+  ],
+  "questions": [
+    "has_math",
+    "has_table",
+    "degraded",
+    "low_resolution",
+    "handwriting",
+    "multi_column",
+    "figure_heavy",
+    "text_layer_ok",
+    "native_text_faithful",
+    "plain_ocr_sufficient",
+    "needs_math_extraction",
+    "needs_table_structure",
+    "trust_text_layer"
+  ],
+  "calibrations": [],
+  "targets": [
+    {
+      "targetId": "native:accept-text-layer",
+      "pass": {
+        "text": {
+          "intercept": 2.5472,
+          "weights": {
+            "trust_text_layer": 2.5,
+            "native_text_faithful": 1.5,
+            "text_layer_ok": 1,
+            "degraded": -2,
+            "handwriting": -2.5,
+            "has_math": -1.2
+          },
+          "baseRate": 0.9
+        },
+        "math": {
+          "intercept": 2.3327,
+          "weights": {
+            "needs_math_extraction": -3,
+            "has_math": -1.2,
+            "low_resolution": -0.96,
+            "degraded": -1.2
+          },
+          "baseRate": 0.3
+        },
+        "tables": {
+          "intercept": 2.021,
+          "weights": {
+            "needs_table_structure": -2.64,
+            "has_table": -1.2,
+            "multi_column": -0.48,
+            "degraded": -0.96
+          },
+          "baseRate": 0.35
+        },
+        "overall": {
+          "intercept": 0.8863,
+          "weights": {
+            "trust_text_layer": 2,
+            "native_text_faithful": 1,
+            "degraded": -1.5,
+            "figure_heavy": -0.5
+          },
+          "baseRate": 0.8
+        }
+      },
+      "cost": {
+        "meanUsd": 0,
+        "p90Usd": 0
+      },
+      "latency": {
+        "p50Ms": 15,
+        "p95Ms": 33
+      },
+      "n": 0
+    },
+    {
+      "targetId": "native:kreuzberg",
+      "pass": {
+        "text": {
+          "intercept": 3.6972,
+          "weights": {
+            "text_layer_ok": 1.2,
+            "degraded": -1.8,
+            "handwriting": -2.4
+          },
+          "baseRate": 0.9
+        },
+        "math": {
+          "intercept": 2.4493,
+          "weights": {
+            "needs_math_extraction": -2.5,
+            "has_math": -1,
+            "low_resolution": -0.8,
+            "degraded": -1
+          },
+          "baseRate": 0.45
+        },
+        "tables": {
+          "intercept": 1.0973,
+          "weights": {
+            "needs_table_structure": -1,
+            "text_layer_ok": 0.5
+          },
+          "baseRate": 0.7
+        },
+        "overall": {
+          "intercept": 1.7663,
+          "weights": {
+            "text_layer_ok": 1,
+            "degraded": -1.5
+          },
+          "baseRate": 0.82
+        }
+      },
+      "cost": {
+        "meanUsd": 0,
+        "p90Usd": 0
+      },
+      "latency": {
+        "p50Ms": 60,
+        "p95Ms": 132
+      },
+      "n": 0
+    },
+    {
+      "targetId": "native:pymupdf",
+      "pass": {
+        "text": {
+          "intercept": 3.4924,
+          "weights": {
+            "text_layer_ok": 1.2,
+            "degraded": -1.8,
+            "handwriting": -2.4
+          },
+          "baseRate": 0.88
+        },
+        "math": {
+          "intercept": 2.561,
+          "weights": {
+            "needs_math_extraction": -3,
+            "has_math": -1.2,
+            "low_resolution": -0.96,
+            "degraded": -1.2
+          },
+          "baseRate": 0.35
+        },
+        "tables": {
+          "intercept": 1.9993,
+          "weights": {
+            "needs_table_structure": -2.2,
+            "has_table": -1,
+            "multi_column": -0.4,
+            "degraded": -0.8
+          },
+          "baseRate": 0.45
+        },
+        "overall": {
+          "intercept": 1.5157,
+          "weights": {
+            "text_layer_ok": 1,
+            "degraded": -1.5
+          },
+          "baseRate": 0.78
+        }
+      },
+      "cost": {
+        "meanUsd": 0,
+        "p90Usd": 0
+      },
+      "latency": {
+        "p50Ms": 30,
+        "p95Ms": 66
+      },
+      "n": 0
+    },
+    {
+      "targetId": "ocr:tesseract",
+      "pass": {
+        "text": {
+          "intercept": 2.4445,
+          "weights": {
+            "degraded": -1.2,
+            "handwriting": -2.2,
+            "low_resolution": -1.4,
+            "plain_ocr_sufficient": 1.8
+          },
+          "baseRate": 0.72
+        },
+        "math": {
+          "intercept": 1.7104,
+          "weights": {
+            "needs_math_extraction": -3.25,
+            "has_math": -1.3,
+            "low_resolution": -1.04,
+            "degraded": -1.3
+          },
+          "baseRate": 0.15
+        },
+        "tables": {
+          "intercept": 2.0145,
+          "weights": {
+            "needs_table_structure": -2.4200000000000004,
+            "has_table": -1.1,
+            "multi_column": -0.44000000000000006,
+            "degraded": -0.8800000000000001
+          },
+          "baseRate": 0.4
+        },
+        "overall": {
+          "intercept": 0.7055,
+          "weights": {
+            "plain_ocr_sufficient": 1.4,
+            "handwriting": -2
+          },
+          "baseRate": 0.6
+        }
+      },
+      "cost": {
+        "meanUsd": 0,
+        "p90Usd": 0
+      },
+      "latency": {
+        "p50Ms": 900,
+        "p95Ms": 1980.0000000000002
+      },
+      "n": 0
+    },
+    {
+      "targetId": "local:florence-2-small",
+      "pass": {
+        "text": {
+          "intercept": 0.4055,
+          "weights": {},
+          "baseRate": 0.6
+        },
+        "math": {
+          "intercept": -2.1972,
+          "weights": {},
+          "baseRate": 0.1
+        },
+        "tables": {
+          "intercept": -2.1972,
+          "weights": {},
+          "baseRate": 0.1
+        },
+        "overall": {
+          "intercept": 1.6486,
+          "weights": {
+            "figure_heavy": -0.3,
+            "low_resolution": -0.8
+          },
+          "baseRate": 0.75
+        }
+      },
+      "cost": {
+        "meanUsd": 0,
+        "p90Usd": 0
+      },
+      "latency": {
+        "p50Ms": 600,
+        "p95Ms": 1320
+      },
+      "n": 0
+    },
+    {
+      "targetId": "vlm:openrouter/google/gemini-2.5-flash-lite",
+      "pass": {
+        "text": {
+          "intercept": 3.8136,
+          "weights": {
+            "degraded": -0.72,
+            "handwriting": -0.96,
+            "low_resolution": -0.48,
+            "has_math": -0.48,
+            "has_table": -0.36
+          },
+          "baseRate": 0.91
+        },
+        "math": {
+          "intercept": 1.9955,
+          "weights": {
+            "needs_math_extraction": -1.5,
+            "has_math": -0.6,
+            "low_resolution": -0.48,
+            "degraded": -0.6
+          },
+          "baseRate": 0.6
+        },
+        "tables": {
+          "intercept": 2.5857,
+          "weights": {
+            "needs_table_structure": -1.32,
+            "has_table": -0.6,
+            "multi_column": -0.24,
+            "degraded": -0.48
+          },
+          "baseRate": 0.78
+        },
+        "overall": {
+          "intercept": 2.5282,
+          "weights": {
+            "degraded": -0.72,
+            "handwriting": -0.84,
+            "figure_heavy": -0.18
+          },
+          "baseRate": 0.84
+        }
+      },
+      "cost": {
+        "meanUsd": 0,
+        "p90Usd": 0
+      },
+      "latency": {
+        "p50Ms": 2500,
+        "p95Ms": 5500
+      },
+      "n": 0
+    },
+    {
+      "targetId": "vlm:openrouter/google/gemini-3.1-flash-lite",
+      "pass": {
+        "text": {
+          "intercept": 3.8173,
+          "weights": {
+            "degraded": -0.66,
+            "handwriting": -0.8800000000000001,
+            "low_resolution": -0.44000000000000006,
+            "has_math": -0.44000000000000006,
+            "has_table": -0.33
+          },
+          "baseRate": 0.92
+        },
+        "math": {
+          "intercept": 2.0765,
+          "weights": {
+            "needs_math_extraction": -1.375,
+            "has_math": -0.55,
+            "low_resolution": -0.44000000000000006,
+            "degraded": -0.55
+          },
+          "baseRate": 0.65
+        },
+        "tables": {
+          "intercept": 2.5963,
+          "weights": {
+            "needs_table_structure": -1.2100000000000002,
+            "has_table": -0.55,
+            "multi_column": -0.22000000000000003,
+            "degraded": -0.44000000000000006
+          },
+          "baseRate": 0.8
+        },
+        "overall": {
+          "intercept": 2.5321,
+          "weights": {
+            "degraded": -0.66,
+            "handwriting": -0.77,
+            "figure_heavy": -0.165
+          },
+          "baseRate": 0.85
+        }
+      },
+      "cost": {
+        "meanUsd": 0,
+        "p90Usd": 0
+      },
+      "latency": {
+        "p50Ms": 2500,
+        "p95Ms": 5500
+      },
+      "n": 0
+    },
+    {
+      "targetId": "vlm:openrouter/google/gemini-3.5-flash-lite",
+      "pass": {
+        "text": {
+          "intercept": 3.8367,
+          "weights": {
+            "degraded": -0.6,
+            "handwriting": -0.8,
+            "low_resolution": -0.4,
+            "has_math": -0.4,
+            "has_table": -0.3
+          },
+          "baseRate": 0.93
+        },
+        "math": {
+          "intercept": 2.1723,
+          "weights": {
+            "needs_math_extraction": -1.25,
+            "has_math": -0.5,
+            "low_resolution": -0.4,
+            "degraded": -0.5
+          },
+          "baseRate": 0.7
+        },
+        "tables": {
+          "intercept": 2.6163,
+          "weights": {
+            "needs_table_structure": -1.1,
+            "has_table": -0.5,
+            "multi_column": -0.2,
+            "degraded": -0.4
+          },
+          "baseRate": 0.82
+        },
+        "overall": {
+          "intercept": 2.626,
+          "weights": {
+            "degraded": -0.6,
+            "handwriting": -0.7,
+            "figure_heavy": -0.15
+          },
+          "baseRate": 0.87
+        }
+      },
+      "cost": {
+        "meanUsd": 0,
+        "p90Usd": 0
+      },
+      "latency": {
+        "p50Ms": 2500,
+        "p95Ms": 5500
+      },
+      "n": 0
+    },
+    {
+      "targetId": "vlm:openrouter/z-ai/glm-5.3-flash",
+      "pass": {
+        "text": {
+          "intercept": 3.9423,
+          "weights": {
+            "degraded": -0.72,
+            "handwriting": -0.96,
+            "low_resolution": -0.48,
+            "has_math": -0.48,
+            "has_table": -0.36
+          },
+          "baseRate": 0.92
+        },
+        "math": {
+          "intercept": 2.0795,
+          "weights": {
+            "needs_math_extraction": -1.5,
+            "has_math": -0.6,
+            "low_resolution": -0.48,
+            "degraded": -0.6
+          },
+          "baseRate": 0.62
+        },
+        "tables": {
+          "intercept": 2.5857,
+          "weights": {
+            "needs_table_structure": -1.32,
+            "has_table": -0.6,
+            "multi_column": -0.24,
+            "degraded": -0.48
+          },
+          "baseRate": 0.78
+        },
+        "overall": {
+          "intercept": 2.5282,
+          "weights": {
+            "degraded": -0.72,
+            "handwriting": -0.84,
+            "figure_heavy": -0.18
+          },
+          "baseRate": 0.84
+        }
+      },
+      "cost": {
+        "meanUsd": 0,
+        "p90Usd": 0
+      },
+      "latency": {
+        "p50Ms": 3500,
+        "p95Ms": 7700.000000000001
+      },
+      "n": 0
+    },
+    {
+      "targetId": "vlm:openrouter/google/gemini-3.5-flash",
+      "pass": {
+        "text": {
+          "intercept": 3.8031,
+          "weights": {
+            "degraded": -0.3,
+            "handwriting": -0.4,
+            "low_resolution": -0.2,
+            "has_math": -0.2,
+            "has_table": -0.15
+          },
+          "baseRate": 0.96
+        },
+        "math": {
+          "intercept": 2.6549,
+          "weights": {
+            "needs_math_extraction": -0.625,
+            "has_math": -0.25,
+            "low_resolution": -0.2,
+            "degraded": -0.25
+          },
+          "baseRate": 0.88
+        },
+        "tables": {
+          "intercept": 2.7472,
+          "weights": {
+            "needs_table_structure": -0.55,
+            "has_table": -0.25,
+            "multi_column": -0.1,
+            "degraded": -0.2
+          },
+          "baseRate": 0.9
+        },
+        "overall": {
+          "intercept": 2.9492,
+          "weights": {
+            "degraded": -0.3,
+            "handwriting": -0.35,
+            "figure_heavy": -0.075
+          },
+          "baseRate": 0.93
+        }
+      },
+      "cost": {
+        "meanUsd": 0,
+        "p90Usd": 0
+      },
+      "latency": {
+        "p50Ms": 4500,
+        "p95Ms": 9900
+      },
+      "n": 0
+    },
+    {
+      "targetId": "vlm:openrouter/openai/gpt-6-luna",
+      "pass": {
+        "text": {
+          "intercept": 3.8031,
+          "weights": {
+            "degraded": -0.3,
+            "handwriting": -0.4,
+            "low_resolution": -0.2,
+            "has_math": -0.2,
+            "has_table": -0.15
+          },
+          "baseRate": 0.96
+        },
+        "math": {
+          "intercept": 2.5635,
+          "weights": {
+            "needs_math_extraction": -0.625,
+            "has_math": -0.25,
+            "low_resolution": -0.2,
+            "degraded": -0.25
+          },
+          "baseRate": 0.87
+        },
+        "tables": {
+          "intercept": 2.7472,
+          "weights": {
+            "needs_table_structure": -0.55,
+            "has_table": -0.25,
+            "multi_column": -0.1,
+            "degraded": -0.2
+          },
+          "baseRate": 0.9
+        },
+        "overall": {
+          "intercept": 2.9492,
+          "weights": {
+            "degraded": -0.3,
+            "handwriting": -0.35,
+            "figure_heavy": -0.075
+          },
+          "baseRate": 0.93
+        }
+      },
+      "cost": {
+        "meanUsd": 0,
+        "p90Usd": 0
+      },
+      "latency": {
+        "p50Ms": 4500,
+        "p95Ms": 9900
+      },
+      "n": 0
+    },
+    {
+      "targetId": "vlm:private/lightonocr-3",
+      "pass": {
+        "text": {
+          "intercept": 3.5015,
+          "weights": {
+            "degraded": -0.36,
+            "handwriting": -0.48,
+            "low_resolution": -0.24,
+            "has_math": -0.24,
+            "has_table": -0.18
+          },
+          "baseRate": 0.94
+        },
+        "math": {
+          "intercept": 2.5296,
+          "weights": {
+            "needs_math_extraction": -0.75,
+            "has_math": -0.3,
+            "low_resolution": -0.24,
+            "degraded": -0.3
+          },
+          "baseRate": 0.85
+        },
+        "tables": {
+          "intercept": 2.6524,
+          "weights": {
+            "needs_table_structure": -0.66,
+            "has_table": -0.3,
+            "multi_column": -0.12,
+            "degraded": -0.24
+          },
+          "baseRate": 0.88
+        },
+        "overall": {
+          "intercept": 2.6322,
+          "weights": {
+            "degraded": -0.36,
+            "handwriting": -0.42,
+            "figure_heavy": -0.09
+          },
+          "baseRate": 0.9
+        }
+      },
+      "cost": {
+        "meanUsd": 0,
+        "p90Usd": 0
+      },
+      "latency": {
+        "p50Ms": 1800,
+        "p95Ms": 3960.0000000000005
+      },
+      "n": 0
+    },
+    {
+      "targetId": "vlm:private/mineru2.5",
+      "pass": {
+        "text": {
+          "intercept": 3.5015,
+          "weights": {
+            "degraded": -0.36,
+            "handwriting": -0.48,
+            "low_resolution": -0.24,
+            "has_math": -0.24,
+            "has_table": -0.18
+          },
+          "baseRate": 0.94
+        },
+        "math": {
+          "intercept": 2.7874,
+          "weights": {
+            "needs_math_extraction": -0.75,
+            "has_math": -0.3,
+            "low_resolution": -0.24,
+            "degraded": -0.3
+          },
+          "baseRate": 0.88
+        },
+        "tables": {
+          "intercept": 2.8572,
+          "weights": {
+            "needs_table_structure": -0.66,
+            "has_table": -0.3,
+            "multi_column": -0.12,
+            "degraded": -0.24
+          },
+          "baseRate": 0.9
+        },
+        "overall": {
+          "intercept": 2.8773,
+          "weights": {
+            "degraded": -0.36,
+            "handwriting": -0.42,
+            "figure_heavy": -0.09
+          },
+          "baseRate": 0.92
+        }
+      },
+      "cost": {
+        "meanUsd": 0,
+        "p90Usd": 0
+      },
+      "latency": {
+        "p50Ms": 2200,
+        "p95Ms": 4840
+      },
+      "n": 0
+    },
+    {
+      "targetId": "vlm:private/infinity-parser2",
+      "pass": {
+        "text": {
+          "intercept": 3.5867,
+          "weights": {
+            "degraded": -0.48,
+            "handwriting": -0.6400000000000001,
+            "low_resolution": -0.32000000000000006,
+            "has_math": -0.32000000000000006,
+            "has_table": -0.24
+          },
+          "baseRate": 0.93
+        },
+        "math": {
+          "intercept": 1.2607,
+          "weights": {
+            "needs_math_extraction": -1,
+            "has_math": -0.4,
+            "low_resolution": -0.32000000000000006,
+            "degraded": -0.4
+          },
+          "baseRate": 0.55
+        },
+        "tables": {
+          "intercept": 2.6146,
+          "weights": {
+            "needs_table_structure": -0.8800000000000001,
+            "has_table": -0.4,
+            "multi_column": -0.16000000000000003,
+            "degraded": -0.32000000000000006
+          },
+          "baseRate": 0.85
+        },
+        "overall": {
+          "intercept": 2.5724,
+          "weights": {
+            "degraded": -0.48,
+            "handwriting": -0.5599999999999999,
+            "figure_heavy": -0.12
+          },
+          "baseRate": 0.88
+        }
+      },
+      "cost": {
+        "meanUsd": 0,
+        "p90Usd": 0
+      },
+      "latency": {
+        "p50Ms": 2200,
+        "p95Ms": 4840
+      },
+      "n": 0
+    },
+    {
+      "targetId": "skip",
+      "pass": {
+        "text": {
+          "intercept": 6.9068,
+          "weights": {},
+          "baseRate": 1
+        },
+        "math": {
+          "intercept": 6.9068,
+          "weights": {},
+          "baseRate": 1
+        },
+        "tables": {
+          "intercept": 6.9068,
+          "weights": {},
+          "baseRate": 1
+        },
+        "overall": {
+          "intercept": 6.9068,
+          "weights": {},
+          "baseRate": 1
+        }
+      },
+      "cost": {
+        "meanUsd": 0,
+        "p90Usd": 0
+      },
+      "latency": {
+        "p50Ms": 0,
+        "p95Ms": 0
+      },
+      "n": 0
+    },
+    {
+      "targetId": "native:pdf-markdown",
+      "pass": {
+        "text": {
+          "intercept": 3.4924,
+          "weights": {
+            "text_layer_ok": 1.2,
+            "degraded": -1.8,
+            "handwriting": -2.4
+          },
+          "baseRate": 0.88
+        },
+        "math": {
+          "intercept": 2.561,
+          "weights": {
+            "needs_math_extraction": -3,
+            "has_math": -1.2,
+            "low_resolution": -0.96,
+            "degraded": -1.2
+          },
+          "baseRate": 0.35
+        },
+        "tables": {
+          "intercept": 1.9993,
+          "weights": {
+            "needs_table_structure": -2.2,
+            "has_table": -1,
+            "multi_column": -0.4,
+            "degraded": -0.8
+          },
+          "baseRate": 0.45
+        },
+        "overall": {
+          "intercept": 1.5157,
+          "weights": {
+            "text_layer_ok": 1,
+            "degraded": -1.5
+          },
+          "baseRate": 0.78
+        }
+      },
+      "cost": {
+        "meanUsd": 0,
+        "p90Usd": 0
+      },
+      "latency": {
+        "p50Ms": 30,
+        "p95Ms": 66
+      },
+      "n": 0
+    },
+    {
+      "targetId": "native:pdf-text",
+      "pass": {
+        "text": {
+          "intercept": 3.4924,
+          "weights": {
+            "text_layer_ok": 1.2,
+            "degraded": -1.8,
+            "handwriting": -2.4
+          },
+          "baseRate": 0.88
+        },
+        "math": {
+          "intercept": 2.561,
+          "weights": {
+            "needs_math_extraction": -3,
+            "has_math": -1.2,
+            "low_resolution": -0.96,
+            "degraded": -1.2
+          },
+          "baseRate": 0.35
+        },
+        "tables": {
+          "intercept": 1.9993,
+          "weights": {
+            "needs_table_structure": -2.2,
+            "has_table": -1,
+            "multi_column": -0.4,
+            "degraded": -0.8
+          },
+          "baseRate": 0.45
+        },
+        "overall": {
+          "intercept": 1.5157,
+          "weights": {
+            "text_layer_ok": 1,
+            "degraded": -1.5
+          },
+          "baseRate": 0.78
+        }
+      },
+      "cost": {
+        "meanUsd": 0,
+        "p90Usd": 0
+      },
+      "latency": {
+        "p50Ms": 30,
+        "p95Ms": 66
+      },
+      "n": 0
+    },
+    {
+      "targetId": "ocr:pdf-ocr-fill",
+      "pass": {
+        "text": {
+          "intercept": 2.4445,
+          "weights": {
+            "degraded": -1.2,
+            "handwriting": -2.2,
+            "low_resolution": -1.4,
+            "plain_ocr_sufficient": 1.8
+          },
+          "baseRate": 0.72
+        },
+        "math": {
+          "intercept": 1.7104,
+          "weights": {
+            "needs_math_extraction": -3.25,
+            "has_math": -1.3,
+            "low_resolution": -1.04,
+            "degraded": -1.3
+          },
+          "baseRate": 0.15
+        },
+        "tables": {
+          "intercept": 2.0145,
+          "weights": {
+            "needs_table_structure": -2.4200000000000004,
+            "has_table": -1.1,
+            "multi_column": -0.44000000000000006,
+            "degraded": -0.8800000000000001
+          },
+          "baseRate": 0.4
+        },
+        "overall": {
+          "intercept": 0.7055,
+          "weights": {
+            "plain_ocr_sufficient": 1.4,
+            "handwriting": -2
+          },
+          "baseRate": 0.6
+        }
+      },
+      "cost": {
+        "meanUsd": 0,
+        "p90Usd": 0
+      },
+      "latency": {
+        "p50Ms": 900,
+        "p95Ms": 1980.0000000000002
+      },
+      "n": 0
+    },
+    {
+      "targetId": "ocr:pdf-ocr",
+      "pass": {
+        "text": {
+          "intercept": 2.4445,
+          "weights": {
+            "degraded": -1.2,
+            "handwriting": -2.2,
+            "low_resolution": -1.4,
+            "plain_ocr_sufficient": 1.8
+          },
+          "baseRate": 0.72
+        },
+        "math": {
+          "intercept": 1.7104,
+          "weights": {
+            "needs_math_extraction": -3.25,
+            "has_math": -1.3,
+            "low_resolution": -1.04,
+            "degraded": -1.3
+          },
+          "baseRate": 0.15
+        },
+        "tables": {
+          "intercept": 2.0145,
+          "weights": {
+            "needs_table_structure": -2.4200000000000004,
+            "has_table": -1.1,
+            "multi_column": -0.44000000000000006,
+            "degraded": -0.8800000000000001
+          },
+          "baseRate": 0.4
+        },
+        "overall": {
+          "intercept": 0.7055,
+          "weights": {
+            "plain_ocr_sufficient": 1.4,
+            "handwriting": -2
+          },
+          "baseRate": 0.6
+        }
+      },
+      "cost": {
+        "meanUsd": 0,
+        "p90Usd": 0
+      },
+      "latency": {
+        "p50Ms": 900,
+        "p95Ms": 1980.0000000000002
+      },
+      "n": 0
+    }
+  ]
+}

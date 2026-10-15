@@ -1,0 +1,74 @@
+%PDF-1.4
+%ÿÿÿÿ
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [8 0 R] /Count 1 >>
+endobj
+3 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>
+endobj
+4 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold >>
+endobj
+5 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Courier >>
+endobj
+6 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Times-Italic >>
+endobj
+7 0 obj
+<<  /Length 1898 >>
+stream
+0.12 0.24 0.42 rg 48 652 516 100 re f 0 0 0 rg
+BT /F2 22 Tf 1 0 0 1 68 732 Tm (DocSlurp Extraction Report) Tj ET
+BT /F2 13 Tf 1 0 0 1 48 622 Tm (Title: Kreuzberg Extraction Evaluation  v2.1) Tj ET
+BT /F1 12 Tf 1 0 0 1 48 600 Tm (Author: DocSlurp Engineering Team) Tj ET
+BT /F1 12 Tf 1 0 0 1 48 582 Tm (Subject: Parser quality benchmarking for multi-format documents) Tj ET
+BT /F1 12 Tf 1 0 0 1 48 564 Tm (Keywords: extraction, kreuzberg, benchmark, tables, OCR, links) Tj ET
+BT /F1 12 Tf 1 0 0 1 48 546 Tm (Created: 2025-10-01) Tj ET
+BT /F1 12 Tf 1 0 0 1 48 528 Tm (Version: v2.1) Tj ET
+0.8 w 48 504 m 564 504 l S
+BT /F2 13 Tf 1 0 0 1 48 478 Tm (Document Scope) Tj ET
+BT /F1 11 Tf 1 0 0 1 48 460 Tm (This document serves as a metadata-rich test fixture. Parsers that expose) Tj ET
+BT /F1 11 Tf 1 0 0 1 48 444 Tm (document property extraction \(title, author, subject, keywords, creation date,) Tj ET
+BT /F1 11 Tf 1 0 0 1 48 428 Tm (version\) should surface these fields separately from body text content.) Tj ET
+BT /F2 13 Tf 1 0 0 1 48 392 Tm (Revision History) Tj ET
+BT /F2 10.5 Tf 1 0 0 1 58 374 Tm (v2.1) Tj ET
+BT /F1 10.5 Tf 1 0 0 1 108 374 Tm (2025-10-01) Tj ET
+BT /F1 10.5 Tf 1 0 0 1 208 374 Tm (Added metadata extraction fixtures) Tj ET
+BT /F2 10.5 Tf 1 0 0 1 58 356 Tm (v2.0) Tj ET
+BT /F1 10.5 Tf 1 0 0 1 108 356 Tm (2025-08-15) Tj ET
+BT /F1 10.5 Tf 1 0 0 1 208 356 Tm (Extended kreuzberg eval coverage) Tj ET
+BT /F2 10.5 Tf 1 0 0 1 58 338 Tm (v1.5) Tj ET
+BT /F1 10.5 Tf 1 0 0 1 108 338 Tm (2025-06-01) Tj ET
+BT /F1 10.5 Tf 1 0 0 1 208 338 Tm (Initial multi-extractor benchmarks) Tj ET
+BT /F2 10.5 Tf 1 0 0 1 58 320 Tm (v1.0) Tj ET
+BT /F1 10.5 Tf 1 0 0 1 108 320 Tm (2025-03-10) Tj ET
+BT /F1 10.5 Tf 1 0 0 1 208 320 Tm (First release of fixture suite) Tj ET
+0.8 w 48 32 m 564 32 l S
+BT /F4 9 Tf 1 0 0 1 48 18 Tm (DocSlurp synthetic fixture) Tj ET
+BT /F4 9 Tf 1 0 0 1 520 18 Tm (1/1) Tj ET
+
+endstream
+endobj
+8 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R /F2 4 0 R /F3 5 0 R /F4 6 0 R >> >> /Contents 7 0 R >>
+endobj
+xref
+0 9
+0000000000 65535 f 
+0000000015 00000 n 
+0000000064 00000 n 
+0000000121 00000 n 
+0000000191 00000 n 
+0000000266 00000 n 
+0000000334 00000 n 
+0000000407 00000 n 
+0000002358 00000 n 
+trailer
+<< /Size 9 /Root 1 0 R >>
+startxref
+2514
+%%EOF

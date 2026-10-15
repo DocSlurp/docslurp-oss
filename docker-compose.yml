@@ -1,0 +1,96 @@
+# Backing services for local development (`pnpm db:up`). Run the API and worker on the host:
+# `pnpm dev:api` and `pnpm dev:worker`. For a full containerised stack use compose.selfhost.yml.
+# Object storage is one URI (see docs/self-host.md#storage-configuration). The
+# MinIO root credentials double as AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY.
+x-storage-uri: &storage-uri ${STORAGE_URI:-s3://docslurp-files?endpoint=http://minio:9000&region=us-west-2}
+# Containers don't share /tmp, so app and workers share one LanceDB store in the
+# bucket (endpoint, region and credentials come from STORAGE_URI).
+x-lancedb-uri: &lancedb-uri s3://docslurp-files/lancedb
+
+services:
+  postgres:
+    # Drizzle owns schema initialization; its baseline requires pgvector.
+    image: ${POSTGRES_IMAGE:-pgvector/pgvector:pg17}
+    environment:
+      POSTGRES_DB: docslurp
+      POSTGRES_USER: docslurp
+      POSTGRES_PASSWORD: docslurp
+    ports:
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U docslurp -d docslurp"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7.4-alpine
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    ports:
+      - "127.0.0.1:${REDIS_PORT:-6379}:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  minio:
+    image: ${MINIO_IMAGE:-cgr.dev/chainguard/minio@sha256:e7ca559d9f7c0b5f24f5f669bb92f40f3ca88d56273b808bf3a7c116c17d2ffa}
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${AWS_ACCESS_KEY_ID:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${AWS_SECRET_ACCESS_KEY:-minioadmin}
+    ports:
+      - "127.0.0.1:${MINIO_PORT:-9000}:9000"
+      - "127.0.0.1:${MINIO_CONSOLE_PORT:-9001}:9001"
+    volumes:
+      - minio_data:/data
+
+  createbucket:
+    # MinIO no longer serves anonymous pulls (Docker Hub, quay.io) and is not on
+    # ghcr.io. Chainguard's signed builds are pinned by digest (minio:latest and
+    # minio-client:latest-dev, the variant with the shell this step needs). Verify with:
+    #   cosign verify <image@digest> --certificate-oidc-issuer=https://token.actions.githubusercontent.com \
+    #     --certificate-identity=https://github.com/chainguard-images/images/.github/workflows/release.yaml@refs/heads/main
+    image: ${MINIO_MC_IMAGE:-cgr.dev/chainguard/minio-client@sha256:603a402c2cd1543109c39eb5d1f731bd83b3c8f6ee8299b3785c8519fad0f5b5}
+    depends_on:
+      - minio
+    environment:
+      STORAGE_URI: *storage-uri
+    # Bucket = STORAGE_URI host: strip scheme, query, userinfo, and path.
+    entrypoint: >
+      /bin/sh -c "
+      bucket=$${STORAGE_URI#s3://}; bucket=$${bucket%%[?]*}; bucket=$${bucket##*@}; bucket=$${bucket%%/*};
+      until mc alias set docslurp http://minio:9000 ${AWS_ACCESS_KEY_ID:-minioadmin} ${AWS_SECRET_ACCESS_KEY:-minioadmin}; do sleep 1; done &&
+      mc mb --ignore-existing docslurp/$$bucket
+      "
+
+  temporal:
+    image: temporalio/auto-setup:1.29.7@sha256:f14912b699cf73015ad5c4fc18d522d4b014db90e794039214dfb7c022c2644f
+    environment:
+      - DB=postgres12
+      - DB_PORT=5432
+      - POSTGRES_USER=docslurp
+      - POSTGRES_PWD=docslurp
+      - POSTGRES_SEEDS=postgres
+      - DEFAULT_NAMESPACE=${TEMPORAL_NAMESPACE:-docslurp}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:${TEMPORAL_PORT:-7233}:7233"
+
+  temporal-ui:
+    image: temporalio/ui:2.55.0@sha256:3899d5cf749b5555c9f798d46f2423b1d6190ea391ca713db5d1bba961759e58
+    environment:
+      - TEMPORAL_ADDRESS=temporal:7233
+    depends_on:
+      - temporal
+    ports:
+      - "127.0.0.1:${TEMPORAL_UI_PORT:-8233}:8080"
+
+volumes:
+  postgres_data:
+  minio_data:

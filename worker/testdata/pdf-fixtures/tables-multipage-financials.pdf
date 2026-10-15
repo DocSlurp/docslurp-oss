@@ -1,0 +1,619 @@
+%PDF-1.4
+%ÿÿÿÿ
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [8 0 R 10 0 R 12 0 R] /Count 3 >>
+endobj
+3 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>
+endobj
+4 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold >>
+endobj
+5 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Courier >>
+endobj
+6 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Times-Italic >>
+endobj
+7 0 obj
+<<  /Length 6821 >>
+stream
+BT /F2 18 Tf 1 0 0 1 48 744 Tm (Northwind Components FY2025 Regional Revenue) Tj ET
+BT /F1 11 Tf 1 0 0 1 48 722 Tm (Regional revenue snapshot used to test page-spanning tables, repeated headers, and row) Tj ET
+BT /F1 11 Tf 1 0 0 1 48 706 Tm (continuation markers. Revenue is reported in USD millions.) Tj ET
+0.92 0.94 0.98 rg 48 664 564 24 re f 0 0 0 rg
+48 664 564 24 re S
+BT /F2 9 Tf 1 0 0 1 52 670 Tm (Region) Tj ET
+0.6 w 48 664 m 48 688 l S
+BT /F2 9 Tf 1 0 0 1 134 670 Tm (Product) Tj ET
+0.6 w 130 664 m 130 688 l S
+BT /F2 9 Tf 1 0 0 1 252 670 Tm (Q1 2025) Tj ET
+0.6 w 248 664 m 248 688 l S
+BT /F2 9 Tf 1 0 0 1 322 670 Tm (Q2 2025) Tj ET
+0.6 w 318 664 m 318 688 l S
+BT /F2 9 Tf 1 0 0 1 392 670 Tm (Q3 2025) Tj ET
+0.6 w 388 664 m 388 688 l S
+BT /F2 9 Tf 1 0 0 1 462 670 Tm (Q4 2025) Tj ET
+0.6 w 458 664 m 458 688 l S
+BT /F2 9 Tf 1 0 0 1 532 670 Tm (Gross Margin) Tj ET
+0.6 w 528 664 m 528 688 l S
+0.6 w 612 664 m 612 688 l S
+48 640 564 24 re S
+0.4 w 48 640 m 48 664 l S
+BT /F1 8.5 Tf 1 0 0 1 52 648 Tm (North) Tj ET
+0.4 w 130 640 m 130 664 l S
+BT /F1 8.5 Tf 1 0 0 1 134 648 Tm (Crawler) Tj ET
+0.4 w 248 640 m 248 664 l S
+BT /F1 8.5 Tf 1 0 0 1 252 648 Tm (120.0) Tj ET
+0.4 w 318 640 m 318 664 l S
+BT /F1 8.5 Tf 1 0 0 1 322 648 Tm (124.5) Tj ET
+0.4 w 388 640 m 388 664 l S
+BT /F1 8.5 Tf 1 0 0 1 392 648 Tm (131.1) Tj ET
+0.4 w 458 640 m 458 664 l S
+BT /F1 8.5 Tf 1 0 0 1 462 648 Tm (139.8) Tj ET
+0.4 w 528 640 m 528 664 l S
+BT /F1 8.5 Tf 1 0 0 1 532 648 Tm (41%) Tj ET
+0.4 w 612 640 m 612 664 l S
+48 616 564 24 re S
+0.4 w 48 616 m 48 640 l S
+BT /F1 8.5 Tf 1 0 0 1 52 624 Tm (South) Tj ET
+0.4 w 130 616 m 130 640 l S
+BT /F1 8.5 Tf 1 0 0 1 134 624 Tm (Indexer) Tj ET
+0.4 w 248 616 m 248 640 l S
+BT /F1 8.5 Tf 1 0 0 1 252 624 Tm (123.0) Tj ET
+0.4 w 318 616 m 318 640 l S
+BT /F1 8.5 Tf 1 0 0 1 322 624 Tm (127.5) Tj ET
+0.4 w 388 616 m 388 640 l S
+BT /F1 8.5 Tf 1 0 0 1 392 624 Tm (134.1) Tj ET
+0.4 w 458 616 m 458 640 l S
+BT /F1 8.5 Tf 1 0 0 1 462 624 Tm (142.8) Tj ET
+0.4 w 528 616 m 528 640 l S
+BT /F1 8.5 Tf 1 0 0 1 532 624 Tm (42%) Tj ET
+0.4 w 612 616 m 612 640 l S
+48 592 564 24 re S
+0.4 w 48 592 m 48 616 l S
+BT /F1 8.5 Tf 1 0 0 1 52 600 Tm (West) Tj ET
+0.4 w 130 592 m 130 616 l S
+BT /F1 8.5 Tf 1 0 0 1 134 600 Tm (OCR Kit) Tj ET
+0.4 w 248 592 m 248 616 l S
+BT /F1 8.5 Tf 1 0 0 1 252 600 Tm (126.0) Tj ET
+0.4 w 318 592 m 318 616 l S
+BT /F1 8.5 Tf 1 0 0 1 322 600 Tm (130.5) Tj ET
+0.4 w 388 592 m 388 616 l S
+BT /F1 8.5 Tf 1 0 0 1 392 600 Tm (137.1) Tj ET
+0.4 w 458 592 m 458 616 l S
+BT /F1 8.5 Tf 1 0 0 1 462 600 Tm (145.8) Tj ET
+0.4 w 528 592 m 528 616 l S
+BT /F1 8.5 Tf 1 0 0 1 532 600 Tm (43%) Tj ET
+0.4 w 612 592 m 612 616 l S
+48 568 564 24 re S
+0.4 w 48 568 m 48 592 l S
+BT /F1 8.5 Tf 1 0 0 1 52 576 Tm (East) Tj ET
+0.4 w 130 568 m 130 592 l S
+BT /F1 8.5 Tf 1 0 0 1 134 576 Tm (Vision QA) Tj ET
+0.4 w 248 568 m 248 592 l S
+BT /F1 8.5 Tf 1 0 0 1 252 576 Tm (129.0) Tj ET
+0.4 w 318 568 m 318 592 l S
+BT /F1 8.5 Tf 1 0 0 1 322 576 Tm (133.5) Tj ET
+0.4 w 388 568 m 388 592 l S
+BT /F1 8.5 Tf 1 0 0 1 392 576 Tm (140.1) Tj ET
+0.4 w 458 568 m 458 592 l S
+BT /F1 8.5 Tf 1 0 0 1 462 576 Tm (148.8) Tj ET
+0.4 w 528 568 m 528 592 l S
+BT /F1 8.5 Tf 1 0 0 1 532 576 Tm (44%) Tj ET
+0.4 w 612 568 m 612 592 l S
+48 544 564 24 re S
+0.4 w 48 544 m 48 568 l S
+BT /F1 8.5 Tf 1 0 0 1 52 552 Tm (Central) Tj ET
+0.4 w 130 544 m 130 568 l S
+BT /F1 8.5 Tf 1 0 0 1 134 552 Tm (Archive Sync) Tj ET
+0.4 w 248 544 m 248 568 l S
+BT /F1 8.5 Tf 1 0 0 1 252 552 Tm (132.0) Tj ET
+0.4 w 318 544 m 318 568 l S
+BT /F1 8.5 Tf 1 0 0 1 322 552 Tm (136.5) Tj ET
+0.4 w 388 544 m 388 568 l S
+BT /F1 8.5 Tf 1 0 0 1 392 552 Tm (143.1) Tj ET
+0.4 w 458 544 m 458 568 l S
+BT /F1 8.5 Tf 1 0 0 1 462 552 Tm (151.8) Tj ET
+0.4 w 528 544 m 528 568 l S
+BT /F1 8.5 Tf 1 0 0 1 532 552 Tm (45%) Tj ET
+0.4 w 612 544 m 612 568 l S
+48 520 564 24 re S
+0.4 w 48 520 m 48 544 l S
+BT /F1 8.5 Tf 1 0 0 1 52 528 Tm (North) Tj ET
+0.4 w 130 520 m 130 544 l S
+BT /F1 8.5 Tf 1 0 0 1 134 528 Tm (Search API) Tj ET
+0.4 w 248 520 m 248 544 l S
+BT /F1 8.5 Tf 1 0 0 1 252 528 Tm (135.0) Tj ET
+0.4 w 318 520 m 318 544 l S
+BT /F1 8.5 Tf 1 0 0 1 322 528 Tm (139.5) Tj ET
+0.4 w 388 520 m 388 544 l S
+BT /F1 8.5 Tf 1 0 0 1 392 528 Tm (146.1) Tj ET
+0.4 w 458 520 m 458 544 l S
+BT /F1 8.5 Tf 1 0 0 1 462 528 Tm (154.8) Tj ET
+0.4 w 528 520 m 528 544 l S
+BT /F1 8.5 Tf 1 0 0 1 532 528 Tm (46%) Tj ET
+0.4 w 612 520 m 612 544 l S
+48 496 564 24 re S
+0.4 w 48 496 m 48 520 l S
+BT /F1 8.5 Tf 1 0 0 1 52 504 Tm (South) Tj ET
+0.4 w 130 496 m 130 520 l S
+BT /F1 8.5 Tf 1 0 0 1 134 504 Tm (Crawler) Tj ET
+0.4 w 248 496 m 248 520 l S
+BT /F1 8.5 Tf 1 0 0 1 252 504 Tm (138.0) Tj ET
+0.4 w 318 496 m 318 520 l S
+BT /F1 8.5 Tf 1 0 0 1 322 504 Tm (142.5) Tj ET
+0.4 w 388 496 m 388 520 l S
+BT /F1 8.5 Tf 1 0 0 1 392 504 Tm (149.1) Tj ET
+0.4 w 458 496 m 458 520 l S
+BT /F1 8.5 Tf 1 0 0 1 462 504 Tm (157.8) Tj ET
+0.4 w 528 496 m 528 520 l S
+BT /F1 8.5 Tf 1 0 0 1 532 504 Tm (47%) Tj ET
+0.4 w 612 496 m 612 520 l S
+48 472 564 24 re S
+0.4 w 48 472 m 48 496 l S
+BT /F1 8.5 Tf 1 0 0 1 52 480 Tm (West) Tj ET
+0.4 w 130 472 m 130 496 l S
+BT /F1 8.5 Tf 1 0 0 1 134 480 Tm (Indexer) Tj ET
+0.4 w 248 472 m 248 496 l S
+BT /F1 8.5 Tf 1 0 0 1 252 480 Tm (141.0) Tj ET
+0.4 w 318 472 m 318 496 l S
+BT /F1 8.5 Tf 1 0 0 1 322 480 Tm (145.5) Tj ET
+0.4 w 388 472 m 388 496 l S
+BT /F1 8.5 Tf 1 0 0 1 392 480 Tm (152.1) Tj ET
+0.4 w 458 472 m 458 496 l S
+BT /F1 8.5 Tf 1 0 0 1 462 480 Tm (160.8) Tj ET
+0.4 w 528 472 m 528 496 l S
+BT /F1 8.5 Tf 1 0 0 1 532 480 Tm (41%) Tj ET
+0.4 w 612 472 m 612 496 l S
+48 448 564 24 re S
+0.4 w 48 448 m 48 472 l S
+BT /F1 8.5 Tf 1 0 0 1 52 456 Tm (East) Tj ET
+0.4 w 130 448 m 130 472 l S
+BT /F1 8.5 Tf 1 0 0 1 134 456 Tm (OCR Kit) Tj ET
+0.4 w 248 448 m 248 472 l S
+BT /F1 8.5 Tf 1 0 0 1 252 456 Tm (144.0) Tj ET
+0.4 w 318 448 m 318 472 l S
+BT /F1 8.5 Tf 1 0 0 1 322 456 Tm (148.5) Tj ET
+0.4 w 388 448 m 388 472 l S
+BT /F1 8.5 Tf 1 0 0 1 392 456 Tm (155.1) Tj ET
+0.4 w 458 448 m 458 472 l S
+BT /F1 8.5 Tf 1 0 0 1 462 456 Tm (163.8) Tj ET
+0.4 w 528 448 m 528 472 l S
+BT /F1 8.5 Tf 1 0 0 1 532 456 Tm (42%) Tj ET
+0.4 w 612 448 m 612 472 l S
+48 424 564 24 re S
+0.4 w 48 424 m 48 448 l S
+BT /F1 8.5 Tf 1 0 0 1 52 432 Tm (Central) Tj ET
+0.4 w 130 424 m 130 448 l S
+BT /F1 8.5 Tf 1 0 0 1 134 432 Tm (Vision QA) Tj ET
+0.4 w 248 424 m 248 448 l S
+BT /F1 8.5 Tf 1 0 0 1 252 432 Tm (147.0) Tj ET
+0.4 w 318 424 m 318 448 l S
+BT /F1 8.5 Tf 1 0 0 1 322 432 Tm (151.5) Tj ET
+0.4 w 388 424 m 388 448 l S
+BT /F1 8.5 Tf 1 0 0 1 392 432 Tm (158.1) Tj ET
+0.4 w 458 424 m 458 448 l S
+BT /F1 8.5 Tf 1 0 0 1 462 432 Tm (166.8) Tj ET
+0.4 w 528 424 m 528 448 l S
+BT /F1 8.5 Tf 1 0 0 1 532 432 Tm (43%) Tj ET
+0.4 w 612 424 m 612 448 l S
+BT /F2 11 Tf 1 0 0 1 48 78 Tm (continued on next page) Tj ET
+0.8 w 48 32 m 564 32 l S
+BT /F4 9 Tf 1 0 0 1 48 18 Tm (DocSlurp synthetic fixture) Tj ET
+BT /F4 9 Tf 1 0 0 1 520 18 Tm (1/3) Tj ET
+
+endstream
+endobj
+8 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R /F2 4 0 R /F3 5 0 R /F4 6 0 R >> >> /Contents 7 0 R >>
+endobj
+9 0 obj
+<<  /Length 6827 >>
+stream
+BT /F2 18 Tf 1 0 0 1 48 744 Tm (Northwind Components FY2025 Regional Revenue) Tj ET
+BT /F1 11 Tf 1 0 0 1 48 722 Tm (Regional revenue snapshot used to test page-spanning tables, repeated headers, and row) Tj ET
+BT /F1 11 Tf 1 0 0 1 48 706 Tm (continuation markers. Revenue is reported in USD millions.) Tj ET
+0.92 0.94 0.98 rg 48 664 564 24 re f 0 0 0 rg
+48 664 564 24 re S
+BT /F2 9 Tf 1 0 0 1 52 670 Tm (Region) Tj ET
+0.6 w 48 664 m 48 688 l S
+BT /F2 9 Tf 1 0 0 1 134 670 Tm (Product) Tj ET
+0.6 w 130 664 m 130 688 l S
+BT /F2 9 Tf 1 0 0 1 252 670 Tm (Q1 2025) Tj ET
+0.6 w 248 664 m 248 688 l S
+BT /F2 9 Tf 1 0 0 1 322 670 Tm (Q2 2025) Tj ET
+0.6 w 318 664 m 318 688 l S
+BT /F2 9 Tf 1 0 0 1 392 670 Tm (Q3 2025) Tj ET
+0.6 w 388 664 m 388 688 l S
+BT /F2 9 Tf 1 0 0 1 462 670 Tm (Q4 2025) Tj ET
+0.6 w 458 664 m 458 688 l S
+BT /F2 9 Tf 1 0 0 1 532 670 Tm (Gross Margin) Tj ET
+0.6 w 528 664 m 528 688 l S
+0.6 w 612 664 m 612 688 l S
+48 640 564 24 re S
+0.4 w 48 640 m 48 664 l S
+BT /F1 8.5 Tf 1 0 0 1 52 648 Tm (North) Tj ET
+0.4 w 130 640 m 130 664 l S
+BT /F1 8.5 Tf 1 0 0 1 134 648 Tm (Archive Sync) Tj ET
+0.4 w 248 640 m 248 664 l S
+BT /F1 8.5 Tf 1 0 0 1 252 648 Tm (150.0) Tj ET
+0.4 w 318 640 m 318 664 l S
+BT /F1 8.5 Tf 1 0 0 1 322 648 Tm (154.5) Tj ET
+0.4 w 388 640 m 388 664 l S
+BT /F1 8.5 Tf 1 0 0 1 392 648 Tm (161.1) Tj ET
+0.4 w 458 640 m 458 664 l S
+BT /F1 8.5 Tf 1 0 0 1 462 648 Tm (169.8) Tj ET
+0.4 w 528 640 m 528 664 l S
+BT /F1 8.5 Tf 1 0 0 1 532 648 Tm (44%) Tj ET
+0.4 w 612 640 m 612 664 l S
+48 616 564 24 re S
+0.4 w 48 616 m 48 640 l S
+BT /F1 8.5 Tf 1 0 0 1 52 624 Tm (South) Tj ET
+0.4 w 130 616 m 130 640 l S
+BT /F1 8.5 Tf 1 0 0 1 134 624 Tm (Search API) Tj ET
+0.4 w 248 616 m 248 640 l S
+BT /F1 8.5 Tf 1 0 0 1 252 624 Tm (153.0) Tj ET
+0.4 w 318 616 m 318 640 l S
+BT /F1 8.5 Tf 1 0 0 1 322 624 Tm (157.5) Tj ET
+0.4 w 388 616 m 388 640 l S
+BT /F1 8.5 Tf 1 0 0 1 392 624 Tm (164.1) Tj ET
+0.4 w 458 616 m 458 640 l S
+BT /F1 8.5 Tf 1 0 0 1 462 624 Tm (172.8) Tj ET
+0.4 w 528 616 m 528 640 l S
+BT /F1 8.5 Tf 1 0 0 1 532 624 Tm (45%) Tj ET
+0.4 w 612 616 m 612 640 l S
+48 592 564 24 re S
+0.4 w 48 592 m 48 616 l S
+BT /F1 8.5 Tf 1 0 0 1 52 600 Tm (West) Tj ET
+0.4 w 130 592 m 130 616 l S
+BT /F1 8.5 Tf 1 0 0 1 134 600 Tm (Crawler) Tj ET
+0.4 w 248 592 m 248 616 l S
+BT /F1 8.5 Tf 1 0 0 1 252 600 Tm (156.0) Tj ET
+0.4 w 318 592 m 318 616 l S
+BT /F1 8.5 Tf 1 0 0 1 322 600 Tm (160.5) Tj ET
+0.4 w 388 592 m 388 616 l S
+BT /F1 8.5 Tf 1 0 0 1 392 600 Tm (167.1) Tj ET
+0.4 w 458 592 m 458 616 l S
+BT /F1 8.5 Tf 1 0 0 1 462 600 Tm (175.8) Tj ET
+0.4 w 528 592 m 528 616 l S
+BT /F1 8.5 Tf 1 0 0 1 532 600 Tm (46%) Tj ET
+0.4 w 612 592 m 612 616 l S
+48 568 564 24 re S
+0.4 w 48 568 m 48 592 l S
+BT /F1 8.5 Tf 1 0 0 1 52 576 Tm (East) Tj ET
+0.4 w 130 568 m 130 592 l S
+BT /F1 8.5 Tf 1 0 0 1 134 576 Tm (Indexer) Tj ET
+0.4 w 248 568 m 248 592 l S
+BT /F1 8.5 Tf 1 0 0 1 252 576 Tm (159.0) Tj ET
+0.4 w 318 568 m 318 592 l S
+BT /F1 8.5 Tf 1 0 0 1 322 576 Tm (163.5) Tj ET
+0.4 w 388 568 m 388 592 l S
+BT /F1 8.5 Tf 1 0 0 1 392 576 Tm (170.1) Tj ET
+0.4 w 458 568 m 458 592 l S
+BT /F1 8.5 Tf 1 0 0 1 462 576 Tm (178.8) Tj ET
+0.4 w 528 568 m 528 592 l S
+BT /F1 8.5 Tf 1 0 0 1 532 576 Tm (47%) Tj ET
+0.4 w 612 568 m 612 592 l S
+48 544 564 24 re S
+0.4 w 48 544 m 48 568 l S
+BT /F1 8.5 Tf 1 0 0 1 52 552 Tm (Central) Tj ET
+0.4 w 130 544 m 130 568 l S
+BT /F1 8.5 Tf 1 0 0 1 134 552 Tm (OCR Kit) Tj ET
+0.4 w 248 544 m 248 568 l S
+BT /F1 8.5 Tf 1 0 0 1 252 552 Tm (162.0) Tj ET
+0.4 w 318 544 m 318 568 l S
+BT /F1 8.5 Tf 1 0 0 1 322 552 Tm (166.5) Tj ET
+0.4 w 388 544 m 388 568 l S
+BT /F1 8.5 Tf 1 0 0 1 392 552 Tm (173.1) Tj ET
+0.4 w 458 544 m 458 568 l S
+BT /F1 8.5 Tf 1 0 0 1 462 552 Tm (181.8) Tj ET
+0.4 w 528 544 m 528 568 l S
+BT /F1 8.5 Tf 1 0 0 1 532 552 Tm (41%) Tj ET
+0.4 w 612 544 m 612 568 l S
+48 520 564 24 re S
+0.4 w 48 520 m 48 544 l S
+BT /F1 8.5 Tf 1 0 0 1 52 528 Tm (North) Tj ET
+0.4 w 130 520 m 130 544 l S
+BT /F1 8.5 Tf 1 0 0 1 134 528 Tm (Vision QA) Tj ET
+0.4 w 248 520 m 248 544 l S
+BT /F1 8.5 Tf 1 0 0 1 252 528 Tm (165.0) Tj ET
+0.4 w 318 520 m 318 544 l S
+BT /F1 8.5 Tf 1 0 0 1 322 528 Tm (169.5) Tj ET
+0.4 w 388 520 m 388 544 l S
+BT /F1 8.5 Tf 1 0 0 1 392 528 Tm (176.1) Tj ET
+0.4 w 458 520 m 458 544 l S
+BT /F1 8.5 Tf 1 0 0 1 462 528 Tm (184.8) Tj ET
+0.4 w 528 520 m 528 544 l S
+BT /F1 8.5 Tf 1 0 0 1 532 528 Tm (42%) Tj ET
+0.4 w 612 520 m 612 544 l S
+48 496 564 24 re S
+0.4 w 48 496 m 48 520 l S
+BT /F1 8.5 Tf 1 0 0 1 52 504 Tm (South) Tj ET
+0.4 w 130 496 m 130 520 l S
+BT /F1 8.5 Tf 1 0 0 1 134 504 Tm (Archive Sync) Tj ET
+0.4 w 248 496 m 248 520 l S
+BT /F1 8.5 Tf 1 0 0 1 252 504 Tm (168.0) Tj ET
+0.4 w 318 496 m 318 520 l S
+BT /F1 8.5 Tf 1 0 0 1 322 504 Tm (172.5) Tj ET
+0.4 w 388 496 m 388 520 l S
+BT /F1 8.5 Tf 1 0 0 1 392 504 Tm (179.1) Tj ET
+0.4 w 458 496 m 458 520 l S
+BT /F1 8.5 Tf 1 0 0 1 462 504 Tm (187.8) Tj ET
+0.4 w 528 496 m 528 520 l S
+BT /F1 8.5 Tf 1 0 0 1 532 504 Tm (43%) Tj ET
+0.4 w 612 496 m 612 520 l S
+48 472 564 24 re S
+0.4 w 48 472 m 48 496 l S
+BT /F1 8.5 Tf 1 0 0 1 52 480 Tm (West) Tj ET
+0.4 w 130 472 m 130 496 l S
+BT /F1 8.5 Tf 1 0 0 1 134 480 Tm (Search API) Tj ET
+0.4 w 248 472 m 248 496 l S
+BT /F1 8.5 Tf 1 0 0 1 252 480 Tm (171.0) Tj ET
+0.4 w 318 472 m 318 496 l S
+BT /F1 8.5 Tf 1 0 0 1 322 480 Tm (175.5) Tj ET
+0.4 w 388 472 m 388 496 l S
+BT /F1 8.5 Tf 1 0 0 1 392 480 Tm (182.1) Tj ET
+0.4 w 458 472 m 458 496 l S
+BT /F1 8.5 Tf 1 0 0 1 462 480 Tm (190.8) Tj ET
+0.4 w 528 472 m 528 496 l S
+BT /F1 8.5 Tf 1 0 0 1 532 480 Tm (44%) Tj ET
+0.4 w 612 472 m 612 496 l S
+48 448 564 24 re S
+0.4 w 48 448 m 48 472 l S
+BT /F1 8.5 Tf 1 0 0 1 52 456 Tm (East) Tj ET
+0.4 w 130 448 m 130 472 l S
+BT /F1 8.5 Tf 1 0 0 1 134 456 Tm (Crawler) Tj ET
+0.4 w 248 448 m 248 472 l S
+BT /F1 8.5 Tf 1 0 0 1 252 456 Tm (174.0) Tj ET
+0.4 w 318 448 m 318 472 l S
+BT /F1 8.5 Tf 1 0 0 1 322 456 Tm (178.5) Tj ET
+0.4 w 388 448 m 388 472 l S
+BT /F1 8.5 Tf 1 0 0 1 392 456 Tm (185.1) Tj ET
+0.4 w 458 448 m 458 472 l S
+BT /F1 8.5 Tf 1 0 0 1 462 456 Tm (193.8) Tj ET
+0.4 w 528 448 m 528 472 l S
+BT /F1 8.5 Tf 1 0 0 1 532 456 Tm (45%) Tj ET
+0.4 w 612 448 m 612 472 l S
+48 424 564 24 re S
+0.4 w 48 424 m 48 448 l S
+BT /F1 8.5 Tf 1 0 0 1 52 432 Tm (Central) Tj ET
+0.4 w 130 424 m 130 448 l S
+BT /F1 8.5 Tf 1 0 0 1 134 432 Tm (Indexer) Tj ET
+0.4 w 248 424 m 248 448 l S
+BT /F1 8.5 Tf 1 0 0 1 252 432 Tm (177.0) Tj ET
+0.4 w 318 424 m 318 448 l S
+BT /F1 8.5 Tf 1 0 0 1 322 432 Tm (181.5) Tj ET
+0.4 w 388 424 m 388 448 l S
+BT /F1 8.5 Tf 1 0 0 1 392 432 Tm (188.1) Tj ET
+0.4 w 458 424 m 458 448 l S
+BT /F1 8.5 Tf 1 0 0 1 462 432 Tm (196.8) Tj ET
+0.4 w 528 424 m 528 448 l S
+BT /F1 8.5 Tf 1 0 0 1 532 432 Tm (46%) Tj ET
+0.4 w 612 424 m 612 448 l S
+BT /F2 11 Tf 1 0 0 1 48 78 Tm (continued on next page) Tj ET
+0.8 w 48 32 m 564 32 l S
+BT /F4 9 Tf 1 0 0 1 48 18 Tm (DocSlurp synthetic fixture) Tj ET
+BT /F4 9 Tf 1 0 0 1 520 18 Tm (2/3) Tj ET
+
+endstream
+endobj
+10 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R /F2 4 0 R /F3 5 0 R /F4 6 0 R >> >> /Contents 9 0 R >>
+endobj
+11 0 obj
+<<  /Length 6816 >>
+stream
+BT /F2 18 Tf 1 0 0 1 48 744 Tm (Northwind Components FY2025 Regional Revenue) Tj ET
+BT /F1 11 Tf 1 0 0 1 48 722 Tm (Regional revenue snapshot used to test page-spanning tables, repeated headers, and row) Tj ET
+BT /F1 11 Tf 1 0 0 1 48 706 Tm (continuation markers. Revenue is reported in USD millions.) Tj ET
+0.92 0.94 0.98 rg 48 664 564 24 re f 0 0 0 rg
+48 664 564 24 re S
+BT /F2 9 Tf 1 0 0 1 52 670 Tm (Region) Tj ET
+0.6 w 48 664 m 48 688 l S
+BT /F2 9 Tf 1 0 0 1 134 670 Tm (Product) Tj ET
+0.6 w 130 664 m 130 688 l S
+BT /F2 9 Tf 1 0 0 1 252 670 Tm (Q1 2025) Tj ET
+0.6 w 248 664 m 248 688 l S
+BT /F2 9 Tf 1 0 0 1 322 670 Tm (Q2 2025) Tj ET
+0.6 w 318 664 m 318 688 l S
+BT /F2 9 Tf 1 0 0 1 392 670 Tm (Q3 2025) Tj ET
+0.6 w 388 664 m 388 688 l S
+BT /F2 9 Tf 1 0 0 1 462 670 Tm (Q4 2025) Tj ET
+0.6 w 458 664 m 458 688 l S
+BT /F2 9 Tf 1 0 0 1 532 670 Tm (Gross Margin) Tj ET
+0.6 w 528 664 m 528 688 l S
+0.6 w 612 664 m 612 688 l S
+48 640 564 24 re S
+0.4 w 48 640 m 48 664 l S
+BT /F1 8.5 Tf 1 0 0 1 52 648 Tm (North) Tj ET
+0.4 w 130 640 m 130 664 l S
+BT /F1 8.5 Tf 1 0 0 1 134 648 Tm (OCR Kit) Tj ET
+0.4 w 248 640 m 248 664 l S
+BT /F1 8.5 Tf 1 0 0 1 252 648 Tm (180.0) Tj ET
+0.4 w 318 640 m 318 664 l S
+BT /F1 8.5 Tf 1 0 0 1 322 648 Tm (184.5) Tj ET
+0.4 w 388 640 m 388 664 l S
+BT /F1 8.5 Tf 1 0 0 1 392 648 Tm (191.1) Tj ET
+0.4 w 458 640 m 458 664 l S
+BT /F1 8.5 Tf 1 0 0 1 462 648 Tm (199.8) Tj ET
+0.4 w 528 640 m 528 664 l S
+BT /F1 8.5 Tf 1 0 0 1 532 648 Tm (47%) Tj ET
+0.4 w 612 640 m 612 664 l S
+48 616 564 24 re S
+0.4 w 48 616 m 48 640 l S
+BT /F1 8.5 Tf 1 0 0 1 52 624 Tm (South) Tj ET
+0.4 w 130 616 m 130 640 l S
+BT /F1 8.5 Tf 1 0 0 1 134 624 Tm (Vision QA) Tj ET
+0.4 w 248 616 m 248 640 l S
+BT /F1 8.5 Tf 1 0 0 1 252 624 Tm (183.0) Tj ET
+0.4 w 318 616 m 318 640 l S
+BT /F1 8.5 Tf 1 0 0 1 322 624 Tm (187.5) Tj ET
+0.4 w 388 616 m 388 640 l S
+BT /F1 8.5 Tf 1 0 0 1 392 624 Tm (194.1) Tj ET
+0.4 w 458 616 m 458 640 l S
+BT /F1 8.5 Tf 1 0 0 1 462 624 Tm (202.8) Tj ET
+0.4 w 528 616 m 528 640 l S
+BT /F1 8.5 Tf 1 0 0 1 532 624 Tm (41%) Tj ET
+0.4 w 612 616 m 612 640 l S
+48 592 564 24 re S
+0.4 w 48 592 m 48 616 l S
+BT /F1 8.5 Tf 1 0 0 1 52 600 Tm (West) Tj ET
+0.4 w 130 592 m 130 616 l S
+BT /F1 8.5 Tf 1 0 0 1 134 600 Tm (Archive Sync) Tj ET
+0.4 w 248 592 m 248 616 l S
+BT /F1 8.5 Tf 1 0 0 1 252 600 Tm (186.0) Tj ET
+0.4 w 318 592 m 318 616 l S
+BT /F1 8.5 Tf 1 0 0 1 322 600 Tm (190.5) Tj ET
+0.4 w 388 592 m 388 616 l S
+BT /F1 8.5 Tf 1 0 0 1 392 600 Tm (197.1) Tj ET
+0.4 w 458 592 m 458 616 l S
+BT /F1 8.5 Tf 1 0 0 1 462 600 Tm (205.8) Tj ET
+0.4 w 528 592 m 528 616 l S
+BT /F1 8.5 Tf 1 0 0 1 532 600 Tm (42%) Tj ET
+0.4 w 612 592 m 612 616 l S
+48 568 564 24 re S
+0.4 w 48 568 m 48 592 l S
+BT /F1 8.5 Tf 1 0 0 1 52 576 Tm (East) Tj ET
+0.4 w 130 568 m 130 592 l S
+BT /F1 8.5 Tf 1 0 0 1 134 576 Tm (Search API) Tj ET
+0.4 w 248 568 m 248 592 l S
+BT /F1 8.5 Tf 1 0 0 1 252 576 Tm (189.0) Tj ET
+0.4 w 318 568 m 318 592 l S
+BT /F1 8.5 Tf 1 0 0 1 322 576 Tm (193.5) Tj ET
+0.4 w 388 568 m 388 592 l S
+BT /F1 8.5 Tf 1 0 0 1 392 576 Tm (200.1) Tj ET
+0.4 w 458 568 m 458 592 l S
+BT /F1 8.5 Tf 1 0 0 1 462 576 Tm (208.8) Tj ET
+0.4 w 528 568 m 528 592 l S
+BT /F1 8.5 Tf 1 0 0 1 532 576 Tm (43%) Tj ET
+0.4 w 612 568 m 612 592 l S
+48 544 564 24 re S
+0.4 w 48 544 m 48 568 l S
+BT /F1 8.5 Tf 1 0 0 1 52 552 Tm (Central) Tj ET
+0.4 w 130 544 m 130 568 l S
+BT /F1 8.5 Tf 1 0 0 1 134 552 Tm (Crawler) Tj ET
+0.4 w 248 544 m 248 568 l S
+BT /F1 8.5 Tf 1 0 0 1 252 552 Tm (192.0) Tj ET
+0.4 w 318 544 m 318 568 l S
+BT /F1 8.5 Tf 1 0 0 1 322 552 Tm (196.5) Tj ET
+0.4 w 388 544 m 388 568 l S
+BT /F1 8.5 Tf 1 0 0 1 392 552 Tm (203.1) Tj ET
+0.4 w 458 544 m 458 568 l S
+BT /F1 8.5 Tf 1 0 0 1 462 552 Tm (211.8) Tj ET
+0.4 w 528 544 m 528 568 l S
+BT /F1 8.5 Tf 1 0 0 1 532 552 Tm (44%) Tj ET
+0.4 w 612 544 m 612 568 l S
+48 520 564 24 re S
+0.4 w 48 520 m 48 544 l S
+BT /F1 8.5 Tf 1 0 0 1 52 528 Tm (North) Tj ET
+0.4 w 130 520 m 130 544 l S
+BT /F1 8.5 Tf 1 0 0 1 134 528 Tm (Indexer) Tj ET
+0.4 w 248 520 m 248 544 l S
+BT /F1 8.5 Tf 1 0 0 1 252 528 Tm (195.0) Tj ET
+0.4 w 318 520 m 318 544 l S
+BT /F1 8.5 Tf 1 0 0 1 322 528 Tm (199.5) Tj ET
+0.4 w 388 520 m 388 544 l S
+BT /F1 8.5 Tf 1 0 0 1 392 528 Tm (206.1) Tj ET
+0.4 w 458 520 m 458 544 l S
+BT /F1 8.5 Tf 1 0 0 1 462 528 Tm (214.8) Tj ET
+0.4 w 528 520 m 528 544 l S
+BT /F1 8.5 Tf 1 0 0 1 532 528 Tm (45%) Tj ET
+0.4 w 612 520 m 612 544 l S
+48 496 564 24 re S
+0.4 w 48 496 m 48 520 l S
+BT /F1 8.5 Tf 1 0 0 1 52 504 Tm (South) Tj ET
+0.4 w 130 496 m 130 520 l S
+BT /F1 8.5 Tf 1 0 0 1 134 504 Tm (OCR Kit) Tj ET
+0.4 w 248 496 m 248 520 l S
+BT /F1 8.5 Tf 1 0 0 1 252 504 Tm (198.0) Tj ET
+0.4 w 318 496 m 318 520 l S
+BT /F1 8.5 Tf 1 0 0 1 322 504 Tm (202.5) Tj ET
+0.4 w 388 496 m 388 520 l S
+BT /F1 8.5 Tf 1 0 0 1 392 504 Tm (209.1) Tj ET
+0.4 w 458 496 m 458 520 l S
+BT /F1 8.5 Tf 1 0 0 1 462 504 Tm (217.8) Tj ET
+0.4 w 528 496 m 528 520 l S
+BT /F1 8.5 Tf 1 0 0 1 532 504 Tm (46%) Tj ET
+0.4 w 612 496 m 612 520 l S
+48 472 564 24 re S
+0.4 w 48 472 m 48 496 l S
+BT /F1 8.5 Tf 1 0 0 1 52 480 Tm (West) Tj ET
+0.4 w 130 472 m 130 496 l S
+BT /F1 8.5 Tf 1 0 0 1 134 480 Tm (Vision QA) Tj ET
+0.4 w 248 472 m 248 496 l S
+BT /F1 8.5 Tf 1 0 0 1 252 480 Tm (201.0) Tj ET
+0.4 w 318 472 m 318 496 l S
+BT /F1 8.5 Tf 1 0 0 1 322 480 Tm (205.5) Tj ET
+0.4 w 388 472 m 388 496 l S
+BT /F1 8.5 Tf 1 0 0 1 392 480 Tm (212.1) Tj ET
+0.4 w 458 472 m 458 496 l S
+BT /F1 8.5 Tf 1 0 0 1 462 480 Tm (220.8) Tj ET
+0.4 w 528 472 m 528 496 l S
+BT /F1 8.5 Tf 1 0 0 1 532 480 Tm (47%) Tj ET
+0.4 w 612 472 m 612 496 l S
+48 448 564 24 re S
+0.4 w 48 448 m 48 472 l S
+BT /F1 8.5 Tf 1 0 0 1 52 456 Tm (East) Tj ET
+0.4 w 130 448 m 130 472 l S
+BT /F1 8.5 Tf 1 0 0 1 134 456 Tm (Archive Sync) Tj ET
+0.4 w 248 448 m 248 472 l S
+BT /F1 8.5 Tf 1 0 0 1 252 456 Tm (204.0) Tj ET
+0.4 w 318 448 m 318 472 l S
+BT /F1 8.5 Tf 1 0 0 1 322 456 Tm (208.5) Tj ET
+0.4 w 388 448 m 388 472 l S
+BT /F1 8.5 Tf 1 0 0 1 392 456 Tm (215.1) Tj ET
+0.4 w 458 448 m 458 472 l S
+BT /F1 8.5 Tf 1 0 0 1 462 456 Tm (223.8) Tj ET
+0.4 w 528 448 m 528 472 l S
+BT /F1 8.5 Tf 1 0 0 1 532 456 Tm (41%) Tj ET
+0.4 w 612 448 m 612 472 l S
+48 424 564 24 re S
+0.4 w 48 424 m 48 448 l S
+BT /F1 8.5 Tf 1 0 0 1 52 432 Tm (Central) Tj ET
+0.4 w 130 424 m 130 448 l S
+BT /F1 8.5 Tf 1 0 0 1 134 432 Tm (Search API) Tj ET
+0.4 w 248 424 m 248 448 l S
+BT /F1 8.5 Tf 1 0 0 1 252 432 Tm (207.0) Tj ET
+0.4 w 318 424 m 318 448 l S
+BT /F1 8.5 Tf 1 0 0 1 322 432 Tm (211.5) Tj ET
+0.4 w 388 424 m 388 448 l S
+BT /F1 8.5 Tf 1 0 0 1 392 432 Tm (218.1) Tj ET
+0.4 w 458 424 m 458 448 l S
+BT /F1 8.5 Tf 1 0 0 1 462 432 Tm (226.8) Tj ET
+0.4 w 528 424 m 528 448 l S
+BT /F1 8.5 Tf 1 0 0 1 532 432 Tm (42%) Tj ET
+0.4 w 612 424 m 612 448 l S
+BT /F2 11 Tf 1 0 0 1 48 78 Tm (table end) Tj ET
+0.8 w 48 32 m 564 32 l S
+BT /F4 9 Tf 1 0 0 1 48 18 Tm (DocSlurp synthetic fixture) Tj ET
+BT /F4 9 Tf 1 0 0 1 520 18 Tm (3/3) Tj ET
+
+endstream
+endobj
+12 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R /F2 4 0 R /F3 5 0 R /F4 6 0 R >> >> /Contents 11 0 R >>
+endobj
+xref
+0 13
+0000000000 65535 f 
+0000000015 00000 n 
+0000000064 00000 n 
+0000000135 00000 n 
+0000000205 00000 n 
+0000000280 00000 n 
+0000000348 00000 n 
+0000000421 00000 n 
+0000007295 00000 n 
+0000007451 00000 n 
+0000014331 00000 n 
+0000014488 00000 n 
+0000021358 00000 n 
+trailer
+<< /Size 13 /Root 1 0 R >>
+startxref
+21516
+%%EOF

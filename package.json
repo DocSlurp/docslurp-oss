@@ -1,0 +1,77 @@
+{
+  "name": "docslurp-oss",
+  "private": true,
+  "packageManager": "pnpm@10.34.7+sha512.ba98abc585539933375b5971f4bc6d6c73a1b4b7edc4a879e7d102fe5423d1e02309d67c60a11f04955093a96e521ad9c3b138cdd654ca5be563f378b3ae48bd",
+  "engines": {
+    "node": ">=24"
+  },
+  "license": "SEE LICENSE IN LICENSE",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/DocSlurp/docslurp-oss.git"
+  },
+  "bugs": {
+    "url": "https://github.com/DocSlurp/docslurp-oss/issues"
+  },
+  "homepage": "https://docslurp.io",
+  "scripts": {
+    "test": "pnpm -r --filter @docslurp/cli --filter @docslurp/contrib-astro --filter @docslurp/contrib-search-compat --filter @docslurp/sdk --filter @docslurp/shared --filter @docslurp/server --filter @docslurp/worker test && pnpm test:scripts",
+    "test:scripts": "node --test scripts/*.test.mjs scripts/lib/*.test.mjs packages/contrib-astro/*.test.mjs",
+    "dev:api": "pnpm --filter @docslurp/server dev",
+    "start:api": "pnpm --filter @docslurp/server start",
+    "dev": "pnpm dev:api",
+    "dev:worker": "pnpm --filter @docslurp/worker dev",
+    "worker:python:setup": "bash scripts/setup-worker-python-venv.sh",
+    "worker:check": "node scripts/check-worker-prerequisites.mjs",
+    "build": "pnpm -r build",
+    "typecheck": "pnpm --filter @docslurp/shared build && pnpm --filter @docslurp/sdk build && pnpm --filter @docslurp/contrib-search-compat build && pnpm -r typecheck",
+    "env:check": "node scripts/check-env.mjs",
+    "db:generate": "drizzle-kit generate --config=drizzle.config.ts",
+    "db:introspect": "drizzle-kit introspect --config=drizzle.config.ts",
+    "db:migrate": "node server/db/migrate.mjs",
+    "db:seed": "pnpm --filter @docslurp/server db:seed",
+    "db:up": "docker compose up -d postgres redis minio createbucket temporal temporal-ui"
+  },
+  "pnpm": {
+    "overrides": {
+      "@hono/node-server": "^2.1.1",
+      "fast-xml-parser": "^5.5.11",
+      "hono": "^4.13.10",
+      "vite": "^8.3.1",
+      "@esbuild-kit/core-utils>esbuild": "^0.28.2",
+      "@prisma/config>effect": "^3.22.2",
+      "@prisma/config>deepmerge-ts": "^8.0.0",
+      "lodash": "^4.18.1",
+      "mysql2": "^3.24.4",
+      "sharp": "0.35.5",
+      "@prisma/dev>valibot": "^1.5.0",
+      "@modelcontextprotocol/sdk": "^1.31.0",
+      "source-map-js": "^1.2.2",
+      "smol-toml": "^1.9.0",
+      "katex": "^0.19.0"
+    },
+    "onlyBuiltDependencies": [
+      "@prisma/engines",
+      "@swc/core",
+      "esbuild",
+      "msw",
+      "onnxruntime-node",
+      "prisma",
+      "protobufjs",
+      "sharp"
+    ]
+  },
+  "devDependencies": {
+    "dotenv": "^18.0.7",
+    "drizzle-kit": "^0.31.11",
+    "drizzle-orm": "^0.45.4",
+    "pg": "^8.23.1",
+    "tsx": "^4.23.15",
+    "typescript": "^6.0.3",
+    "vite": "^8.3.4"
+  },
+  "dependencies": {
+    "better-auth": "^1.7.7",
+    "postgres": "^3.4.9"
+  }
+}
