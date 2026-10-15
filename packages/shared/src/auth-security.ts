@@ -143,8 +143,9 @@ export function createBetterAuthSecurityOptions(env: NodeJS.ProcessEnv) {
       useSecureCookies: isHttpsOrigin(baseURL),
       trustedProxyHeaders: env.BETTER_AUTH_TRUST_PROXY_HEADERS === "true",
       ipAddress: {
-        // Only a header the app sets itself (from Fly-Client-IP or the
-        // right-hand X-Forwarded-For hop) after deleting any client-supplied
+        // Only a header the app sets itself (resolved by
+        // @docslurp/shared/client-ip: Fly-Client-IP, CF-Connecting-IP from a
+        // trusted Cloudflare peer, or the X-Forwarded-For walk) after deleting any client-supplied
         // copy. cf-connecting-ip / x-real-ip / x-forwarded-for are all
         // client-controlled on Fly and let an attacker rotate rate-limit keys.
         ipAddressHeaders: [BETTER_AUTH_CLIENT_IP_HEADER],

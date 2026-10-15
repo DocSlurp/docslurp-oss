@@ -1,10 +1,9 @@
 export const parseBenchDocSlurpExtractors = [
   "hybrid",
   "kreuzberg",
-  "pymupdf-text",
-  "pymupdf4llm-markdown",
+  "native-pdf-text",
+  "native-pdf-markdown",
   "pdftotext",
-  "pymupdf-ocr-text",
   "unpdf",
   "docling",
   "liteparse",

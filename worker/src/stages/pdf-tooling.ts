@@ -1,6 +1,7 @@
 import type { PerformanceEvent } from "../models.js";
 import type { Stage } from "../pipeline/pipeline.js";
 import { runDocumentStage, runDocuments } from "../pipeline/checkpoints.js";
+import { resolveNativePdfEngine } from "../native-pdf/engine.js";
 import type { CommandRunner, CommandPlan } from "../tools/runner.js";
 import type { ArtifactStore } from "../tools/storage.js";
 import { maxInt } from "./utils.js";
@@ -61,17 +62,17 @@ export class PdfToolingStage implements Stage {
               {
                 id: "fast-text-layer",
                 summary: "Prefer native PDF text-layer tools for born-digital files.",
-                tools: ["pdfinfo", "pdftotext", "pdftohtml", "pymupdf"]
+                tools: ["pdfinfo", "pdftotext", "pdftohtml", "native-pdf"]
               },
               {
                 id: "layout-aware-markdown",
                 summary: "Use layout-preserving extractors when markdown fidelity matters.",
-                tools: ["pymupdf4llm", "docling", "unstructured"]
+                tools: ["native-pdf", "docling", "unstructured"]
               },
               {
                 id: "ocr-rescue",
                 summary: "Escalate to OCR only for scans, faxed pages, or broken text layers.",
-                tools: ["ocrmypdf", "pymupdf-ocr", "unstructured-hi-res", "florence-2"]
+                tools: ["ocrmypdf", "native-pdf-ocr", "unstructured-hi-res", "florence-2"]
               },
               {
                 id: "cheap-local-multimodal",
@@ -186,6 +187,12 @@ export class PdfToolingStage implements Stage {
     });
   }
 
+  /** The in-process native-pdf engine as a command plan: available when the private binding loads. */
+  private async nativePdfPlan(): Promise<CommandPlan> {
+    const engine = await resolveNativePdfEngine(this.runner);
+    return { binary: "in-process:native-pdf", args: [], available: engine !== null };
+  }
+
   private async buildToolchains(document: import("../models.js").Document, runId: string): Promise<ToolchainManifest[]> {
     const [
       pdfInfo,
@@ -194,21 +201,13 @@ export class PdfToolingStage implements Stage {
       extractImages,
       splitPages,
       renderImages,
-      muToolText,
       ocrPdf,
       unstructuredFast,
       unstructuredHiRes,
-      markerMarkdown,
-      markerJson,
       doclingMarkdown,
       doclingJson,
       doclingVlm,
-      pyMuPdfText,
-      pyMuPdfHtml,
-      pyMuPdfJson,
-      pyMuPdfOcrText,
-      pyMuPdf4llmMarkdown,
-      pyMuPdf4llmJson,
+      nativePdf,
       unpdfExtract,
       transformersJsClip,
       florence2
@@ -219,21 +218,13 @@ export class PdfToolingStage implements Stage {
       this.runner.extractImages(document.sourceKey, "page"),
       this.runner.splitPages(document.sourceKey, "page-%d.pdf"),
       this.runner.renderPageImages(document.sourceKey, "page"),
-      this.runner.muToolText(document.sourceKey, "output.txt"),
       this.runner.ocrPdf(document.sourceKey, "ocr-output.pdf"),
       this.runner.unstructuredPartition(document.sourceKey, "unstructured-fast.json", "fast"),
       this.runner.unstructuredPartition(document.sourceKey, "unstructured-hi-res.json", "hi_res"),
-      this.runner.markerMarkdown(document.sourceKey, "marker"),
-      this.runner.markerJson(document.sourceKey, "marker"),
       this.runner.doclingMarkdown(document.sourceKey, "docling"),
       this.runner.doclingJson(document.sourceKey, "docling"),
       this.runner.doclingVlm(document.sourceKey, "docling-vlm"),
-      this.runner.pyMuPdfText(document.sourceKey, "pymupdf.txt"),
-      this.runner.pyMuPdfHtml(document.sourceKey, "pymupdf.html"),
-      this.runner.pyMuPdfJson(document.sourceKey, "pymupdf.json"),
-      this.runner.pyMuPdfOcrText(document.sourceKey, "pymupdf-ocr.txt"),
-      this.runner.pyMuPdf4llmMarkdown(document.sourceKey, "pymupdf4llm.md"),
-      this.runner.pyMuPdf4llmJson(document.sourceKey, "pymupdf4llm.json"),
+      this.nativePdfPlan(),
       this.runner.unpdfExtract(document.sourceKey, "unpdf.json"),
       this.runner.transformersJsClip(
         "page-1.png",
@@ -260,16 +251,6 @@ export class PdfToolingStage implements Stage {
         }
       },
       {
-        id: "mupdf-tools",
-        tier: "cheap-fast",
-        kind: "native-cli",
-        bestFor: ["fallback text extraction", "lightweight local conversion"],
-        tradeoffs: ["less structured output than marker/docling", "not installed in the default image yet"],
-        commands: {
-          "mutool-draw-text": muToolText
-        }
-      },
-      {
         id: "ocrmypdf",
         tier: "scan-rescue",
         kind: "native-cli",
@@ -291,17 +272,6 @@ export class PdfToolingStage implements Stage {
         }
       },
       {
-        id: "marker-pdf",
-        tier: "layout-markdown",
-        kind: "python-cli",
-        bestFor: ["markdown with tables", "academic PDFs", "mixed text and figures"],
-        tradeoffs: ["not installed in managed environments: upstream requires vulnerable Pillow <11", "GPU can help a lot", "heavier than pure text-layer tools"],
-        commands: {
-          markdown: markerMarkdown,
-          json: markerJson
-        }
-      },
-      {
         id: "docling",
         tier: "layout-markdown",
         kind: "python-cli",
@@ -314,27 +284,15 @@ export class PdfToolingStage implements Stage {
         }
       },
       {
-        id: "pymupdf",
+        id: "native-pdf",
         tier: "cheap-layout",
-        kind: "python-wrapper",
-        bestFor: ["fast local text/html/json extraction", "OCR-on-demand"],
-        tradeoffs: ["markdown quality is better via pymupdf4llm", "OCR path still depends on Tesseract"],
+        kind: "in-process",
+        bestFor: ["per-page Markdown with tables, links and image placements", "reading-order repair on multi-column pages", "in-process page rendering and OCR fill"],
+        tradeoffs: ["private optional engine (DOCSLURP_NATIVE_PDF=1 images); unavailable in the public tree, which falls back to Kreuzberg and Poppler", "documents past its page limit fall back to Kreuzberg"],
         commands: {
-          text: pyMuPdfText,
-          html: pyMuPdfHtml,
-          json: pyMuPdfJson,
-          "ocr-text": pyMuPdfOcrText
-        }
-      },
-      {
-        id: "pymupdf4llm",
-        tier: "cheap-markdown",
-        kind: "python-wrapper",
-        bestFor: ["markdown for RAG", "reading order", "table-aware text extraction"],
-        tradeoffs: ["less mature CLI surface than marker/docling", "Python dependency required"],
-        commands: {
-          markdown: pyMuPdf4llmMarkdown,
-          json: pyMuPdf4llmJson
+          markdown: nativePdf,
+          text: nativePdf,
+          render: nativePdf
         }
       },
       {

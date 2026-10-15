@@ -15,6 +15,7 @@ import {
   signedSessionCookie,
   type AuthFallbackContextShape
 } from "../lib/auth-fallback.js";
+import { isInProcessEnv } from "../lib/client-ip.js";
 import { isDevSeedRequestAllowed } from "../lib/dev-auth-access.js";
 import { resolveSsoRedirect, ssoBaseUrl } from "../lib/sso-lookup.js";
 
@@ -27,7 +28,7 @@ import { resolveSsoRedirect, ssoBaseUrl } from "../lib/sso-lookup.js";
 export const authRoutes = new Hono();
 
 // Better Auth's router: sign-in/up, OAuth callbacks, sessions, OTP, password reset...
-authRoutes.all("/api/auth/*", (c) => handleAuthRequest(c.req.raw));
+authRoutes.all("/api/auth/*", (c) => handleAuthRequest(c.req.raw, { trustedInternal: isInProcessEnv(c.env) }));
 
 /** GET /api/sso-lookup?email=...  ->  { ssoUrl: string | null } */
 authRoutes.get("/api/sso-lookup", async (c) => {

@@ -1,7 +1,7 @@
 /**
  * Executors for the neutral native-pdf targets (`native:pdf-markdown`, `native:pdf-text`,
  * `ocr:pdf-ocr-fill`, `ocr:pdf-ocr`) plus the generic per-page native extractor shared with
- * `native:pymupdf` / `native:kreuzberg`. The engine behind them is a swappable adapter
+ * `native:kreuzberg`. The engine behind them is a swappable adapter
  * (worker/src/native-pdf); nothing here names it.
  */
 

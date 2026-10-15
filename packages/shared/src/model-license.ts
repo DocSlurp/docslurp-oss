@@ -92,7 +92,6 @@ export const MODEL_LICENSES: Readonly<Record<string, ModelLicenseEntry>> = {
   "ocr:pdf-ocr-fill": { licenseClass: "free", id: "internal", source: "DocSlurp native-pdf engine" },
   "ocr:pdf-ocr": { licenseClass: "free", id: "internal", source: "DocSlurp native-pdf engine" },
   "native:kreuzberg": { licenseClass: "free", id: "mit", source: `pypi.org/project/kreuzberg, ${VERIFIED}` },
-  "native:pymupdf": { licenseClass: "free", id: "agpl-3.0", source: "pymupdf.readthedocs.io licence (AGPL-3.0, OSI-approved)", note: "Copyleft; commercial licence exists" },
   "ocr:tesseract": { licenseClass: "free", id: "apache-2.0", source: "github.com/tesseract-ocr/tesseract" },
   skip: { licenseClass: "free", id: "internal", source: "no model" },
   // ---- closed hosted decision APIs

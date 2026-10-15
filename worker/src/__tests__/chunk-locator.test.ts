@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { citationLocatorSchema, formatCitationLocator } from "@docslurp/shared";
 import { buildCanonicalChunksFromDocument, buildCanonicalDocumentFromMarkdown } from "../lib/canonical-document.js";
 import { buildMediaCanonicalDocument } from "../media/canonical.js";
-import { enrichCanonicalDocumentWithPyMuPdf } from "../lib/parser-canonical.js";
+import { enrichCanonicalDocumentWithNativePdf } from "../lib/parser-canonical.js";
 import { a1, columnLetters } from "../lib/chunk-locator.js";
 import type { TimedSegment } from "../media/segments.js";
 
@@ -80,10 +80,10 @@ describe("page chunk locators", () => {
   it("normalizes parser boxes by page size and drops them without one", () => {
     const base = buildCanonicalDocumentFromMarkdown({ documentId: "d", text: "Hello world paragraph.", pageCount: 1, extractor: "x" });
     const payload = (extra: object) => ({ pages: [{ ...extra, blocks: [{ type: 0, bbox: [60, 80, 300, 120], lines: [{ spans: [{ text: "Hello world paragraph.", size: 10, font: "f" }] }] }] }] });
-    const withSize = enrichCanonicalDocumentWithPyMuPdf(base, payload({ width: 600, height: 800 }));
+    const withSize = enrichCanonicalDocumentWithNativePdf(base, payload({ width: 600, height: 800 }));
     const [chunk] = buildCanonicalChunksFromDocument(withSize, "d");
     expect(chunk.locator).toMatchObject({ kind: "page", boxes: [{ x: 0.1, y: 0.1, width: 0.4, height: 0.05 }] });
-    const noSize = enrichCanonicalDocumentWithPyMuPdf(base, payload({}));
+    const noSize = enrichCanonicalDocumentWithNativePdf(base, payload({}));
     expect(buildCanonicalChunksFromDocument(noSize, "d")[0].locator).toMatchObject({ kind: "page", boxes: [] });
   });
   it("uses an image locator for image sources", () => {

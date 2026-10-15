@@ -15,7 +15,7 @@ function make(overrides: Record<string, unknown> = {}) {
     document: { id: "d", mimeType: "image/png", userId: "u", sourceKey: "k", pageCount: 1 } as never,
     storage: { bucket: "b", getJson, downloadToTempFile: vi.fn() } as never,
     rasters: { renderSelectedPages: vi.fn(async () => []), sourcePath: vi.fn(async () => "/tmp/x.pdf") },
-    runner: { tesseractOcr: vi.fn(), florence2: vi.fn(), pyMuPdfPageText: vi.fn(), run: vi.fn() } as never,
+    runner: { tesseractOcr: vi.fn(), florence2: vi.fn(), run: vi.fn() } as never,
     canonicalUri: () => null,
     selection: {} as never,
     allow: async () => true,
@@ -80,11 +80,11 @@ describe("production executor deps", () => {
         run,
         tesseractOcr: vi.fn(async (src: string, base: string) => ({ binary: "tesseract", args: [src, base], available: true })),
         florence2: vi.fn(async (src: string, out: string, prompt: string, model: string) => ({ binary: "python3", args: ["--input", src, "--output", out, "--prompt", prompt, "--model", model], available: true })),
-        pyMuPdfPageText: vi.fn(),
+       
       },
     });
     expect(await deps.pageText(1)).toBeNull();
-    expect(await deps.nativePageText("pymupdf", 1)).toBeNull();
+    expect(await deps.nativePageText("kreuzberg", 1)).toBeNull();
     expect((await deps.ocr({ path: image, mimeType: "image/png" }, { pageNumber: 1 })).text).toBe("scanned words");
     const label = await deps.label({ path: image, mimeType: "image/png" }, { pageNumber: 3 });
     expect(label.text).toBe("a red bridge");

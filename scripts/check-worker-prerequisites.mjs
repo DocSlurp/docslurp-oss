@@ -13,7 +13,7 @@ const profiles = {
   routing: ['node'],
   lean: ['node', 'python3', 'pandoc', 'pdfinfo', 'pdftotext', 'pdftohtml', 'pdftoppm', 'pdfimages', 'clamscan', 'clamdscan'],
   test: ['node', 'pandoc', 'pdfinfo', 'pdftotext', 'pdftohtml', 'pdftoppm', 'pdfimages', 'tesseract'],
-  full: ['node', 'pandoc', 'pdfinfo', 'pdftotext', 'pdftohtml', 'pdftoppm', 'pdfimages', 'tesseract', 'soffice', 'mutool', 'qpdf', 'gs', 'ocrmypdf', ...(process.platform === 'linux' ? ['catdoc'] : []), 'unrtf', 'tiffcp', 'xlsx2csv', 'clamscan', 'clamdscan'],
+  full: ['node', 'pandoc', 'pdfinfo', 'pdftotext', 'pdftohtml', 'pdftoppm', 'pdfimages', 'tesseract', 'soffice', 'qpdf', 'gs', 'ocrmypdf', ...(process.platform === 'linux' ? ['catdoc'] : []), 'unrtf', 'tiffcp', 'xlsx2csv', 'clamscan', 'clamdscan'],
 };
 if (!Object.hasOwn(profiles, profile) || args.some((arg) => arg !== `--profile=${profile}` && arg !== '--sandbox')) {
   console.error('Usage: node scripts/check-worker-prerequisites.mjs --profile=lean|full|test|routing [--sandbox]');
@@ -48,7 +48,7 @@ if (profile === 'full' || profile === 'test' || profile === 'lean') {
   const python = existsSync(path.join(venv, 'bin/python3')) ? path.join(venv, 'bin/python3') : await binaryPath('python3');
   if (!python) failures.push('missing Python interpreter');
   else {
-    const result = spawnSync(python, ['-c', 'import fitz, pymupdf4llm, PIL, ebooklib, pptx, openpyxl, trafilatura'], { encoding: 'utf8', timeout: 30000 });
+    const result = spawnSync(python, ['-c', 'import PIL, ebooklib, pptx, openpyxl, trafilatura'], { encoding: 'utf8', timeout: 30000 });
     if (result.status !== 0) failures.push(`Python parser imports failed (${python}): ${result.error?.message || result.stderr.trim()}`);
   }
   const tesseract = await binaryPath('tesseract');

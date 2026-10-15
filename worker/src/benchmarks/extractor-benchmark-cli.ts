@@ -7,12 +7,9 @@ import { fileURLToPath } from "node:url";
 
 type ExtractorId =
   | "pdftotext"
-  | "pymupdf-text"
-  | "pymupdf-json"
-  | "pymupdf4llm"
+  | "native-pdf"
   | "kreuzberg"
   | "docling"
-  | "marker"
   | "unstructured-fast"
   | "unstructured-hi-res";
 
@@ -91,7 +88,7 @@ Options:
   --input <pdf>              PDF to benchmark. Defaults to the generated pdf-smoke fixture.
   --timeout-ms <n>           Per-extractor timeout. Default 60000.
   --output-dir <dir>         Keep outputs in this directory instead of a temp directory.
-  --extractors <csv>         Restrict extractors, e.g. kreuzberg,pymupdf4llm,docling.
+  --extractors <csv>         Restrict extractors, e.g. kreuzberg,native-pdf,docling.
   --json                     Emit JSON only.
 `);
 }
@@ -99,12 +96,9 @@ Options:
 function extractorIds(): ExtractorId[] {
   return [
     "pdftotext",
-    "pymupdf-text",
-    "pymupdf-json",
-    "pymupdf4llm",
+    "native-pdf",
     "kreuzberg",
     "docling",
-    "marker",
     "unstructured-fast",
     "unstructured-hi-res",
   ];
@@ -118,45 +112,19 @@ function commandFor(extractor: ExtractorId, input: string, outputDir: string) {
         args: [input, path.join(outputDir, "pdftotext.txt")],
         outputPath: path.join(outputDir, "pdftotext.txt"),
       };
-    case "pymupdf-text":
+    case "native-pdf":
       return {
-        binary: "python3",
+        binary: "node",
         args: [
-          path.join(scriptsDir, "pymupdf_extract.py"),
+          "--import",
+          "tsx",
+          path.join(workerRoot, "src/native-pdf/extract-cli.ts"),
           "--input",
           input,
           "--output",
-          path.join(outputDir, "pymupdf.txt"),
-          "--format",
-          "text",
+          path.join(outputDir, "native-pdf.md"),
         ],
-        outputPath: path.join(outputDir, "pymupdf.txt"),
-      };
-    case "pymupdf-json":
-      return {
-        binary: "python3",
-        args: [
-          path.join(scriptsDir, "pymupdf_extract.py"),
-          "--input",
-          input,
-          "--output",
-          path.join(outputDir, "pymupdf.json"),
-          "--format",
-          "json",
-        ],
-        outputPath: path.join(outputDir, "pymupdf.json"),
-      };
-    case "pymupdf4llm":
-      return {
-        binary: "python3",
-        args: [
-          path.join(scriptsDir, "pymupdf4llm_extract.py"),
-          "--input",
-          input,
-          "--output",
-          path.join(outputDir, "pymupdf4llm.md"),
-        ],
-        outputPath: path.join(outputDir, "pymupdf4llm.md"),
+        outputPath: path.join(outputDir, "native-pdf.md"),
       };
     case "kreuzberg":
       return {
@@ -175,19 +143,6 @@ function commandFor(extractor: ExtractorId, input: string, outputDir: string) {
         binary: "docling",
         args: ["--from", "pdf", "--to", "md", "--output", path.join(outputDir, "docling"), input],
         outputPath: path.join(outputDir, "docling"),
-      };
-    case "marker":
-      return {
-        binary: "marker_single",
-        args: [
-          input,
-          "--output_format",
-          "markdown",
-          "--paginate_output",
-          "--output_dir",
-          path.join(outputDir, "marker"),
-        ],
-        outputPath: path.join(outputDir, "marker"),
       };
     case "unstructured-fast":
       return {

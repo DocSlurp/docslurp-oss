@@ -48,38 +48,6 @@
   "stats": [
    {
     "cellId": "cell-0",
-    "targetId": "native:pymupdf",
-    "pass": {
-     "text": {
-      "alpha": 29.0,
-      "beta": 43.0
-     },
-     "math": {
-      "alpha": 1.0,
-      "beta": 29.0
-     },
-     "tables": {
-      "alpha": 1.0,
-      "beta": 25.0
-     },
-     "overall": {
-      "alpha": 15.0,
-      "beta": 68.0
-     }
-    },
-    "cost": {
-     "meanUsd": 0.0,
-     "p90Usd": 0.0
-    },
-    "latency": {
-     "p50Ms": 6.2,
-     "p95Ms": 156.4
-    },
-    "n": 81,
-    "qualityMean": 0.2958
-   },
-   {
-    "cellId": "cell-0",
     "targetId": "ocr:tesseract",
     "pass": {
      "text": {
@@ -304,38 +272,6 @@
    },
    {
     "cellId": "cell-1",
-    "targetId": "native:pymupdf",
-    "pass": {
-     "text": {
-      "alpha": 9.80556,
-      "beta": 31.19444
-     },
-     "math": {
-      "alpha": 0.06667,
-      "beta": 23.93333
-     },
-     "tables": {
-      "alpha": 0.07692,
-      "beta": 19.92308
-     },
-     "overall": {
-      "alpha": 1.36145,
-      "beta": 50.63855
-     }
-    },
-    "cost": {
-     "meanUsd": 0.0,
-     "p90Usd": 0.0
-    },
-    "latency": {
-     "p50Ms": 3.2,
-     "p95Ms": 102.4
-    },
-    "n": 50,
-    "qualityMean": 0.1347
-   },
-   {
-    "cellId": "cell-1",
     "targetId": "ocr:tesseract",
     "pass": {
      "text": {
@@ -557,38 +493,6 @@
     },
     "n": 50,
     "qualityMean": 0.7631
-   },
-   {
-    "cellId": "cell-2",
-    "targetId": "native:pymupdf",
-    "pass": {
-     "text": {
-      "alpha": 19.80556,
-      "beta": 13.19444
-     },
-     "math": {
-      "alpha": 0.06667,
-      "beta": 7.93333
-     },
-     "tables": {
-      "alpha": 0.07692,
-      "beta": 7.92308
-     },
-     "overall": {
-      "alpha": 13.36145,
-      "beta": 19.63855
-     }
-    },
-    "cost": {
-     "meanUsd": 0.0,
-     "p90Usd": 0.0
-    },
-    "latency": {
-     "p50Ms": 57.5,
-     "p95Ms": 374.0
-    },
-    "n": 31,
-    "qualityMean": 0.5558
    },
    {
     "cellId": "cell-2",

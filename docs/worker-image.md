@@ -19,11 +19,11 @@ and from the deploy error text. The CI image budget (below) is set well under it
 | | `Dockerfile.lean` (production, `fly.worker.toml`) | `Dockerfile.full` (self-host `--profile full`) |
 | --- | --- | --- |
 | Node | worker-only production `node_modules` from `pnpm deploy`, pruned | same |
-| System tools | poppler-utils, pandoc, ffmpeg, ClamAV, bubblewrap | adds LibreOffice, Tesseract (eng/fra/deu/spa), ocrmypdf, ghostscript, ImageMagick, mupdf-tools, qpdf, catdoc, unrtf |
-| Python venv `/app/.venv` | base parsers: pymupdf, pymupdf4llm, trafilatura, ebooklib, python-pptx, openpyxl, xlsx2csv, Pillow (wheel-only, read-only) | same, plus pip for the legacy first-boot install |
+| System tools | poppler-utils, pandoc, ffmpeg, ClamAV, bubblewrap | adds LibreOffice, Tesseract (eng/fra/deu/spa), ocrmypdf, ghostscript, ImageMagick, qpdf, catdoc, unrtf |
+| Python venv `/app/.venv` | base parsers: trafilatura, ebooklib, python-pptx, openpyxl, xlsx2csv, Pillow (wheel-only, read-only) | same, plus pip for the legacy first-boot install |
 | Docling, Unstructured | vendor bundles, fetched on first use | vendor bundles, or the legacy first-boot pip install when no bundle source is configured |
 | Kreuzberg, LiteParse, mammoth, LanceDB, transformers.js | in `node_modules` | same |
-| Native PDF engine | optional, `DOCSLURP_NATIVE_PDF=1` | same |
+| Native PDF engine | optional, `DOCSLURP_NATIVE_PDF=1`; PDFs otherwise use Kreuzberg and Poppler (PyMuPDF/pymupdf4llm and the MuPDF `mupdf-tools` apt package were removed 2026-10-15: AGPL) | same |
 | Runtime pip installs | off (`DOCSLURP_PYTHON_LAZY_INSTALL=false`) | on for the first-boot path only |
 
 ### Measured sizes (local builds, 2026-10-14, linux/amd64)
@@ -35,6 +35,7 @@ and from the deploy error text. The CI image budget (below) is set well under it
 | --- | --- | --- |
 | lean, before (origin/main) | 4,935 MiB | 1,516 MiB |
 | **lean, after** | **1,884 MiB** | **615 MiB** |
+| lean with PyMuPDF removed (2026-10-15, `DOCSLURP_NATIVE_PDF=1`, measured against the same build with PyMuPDF: 1,897 to 1,832 MiB) | 1,832 MiB | 629 MB registry content (656 MB before) |
 | production `docslurp-worker` today (measured on a machine) | ~4,280 MiB | 1,082 MiB (registry manifest) |
 | full, before (origin/main) | 7,196 MiB, plus about 3.8 GB pip-installed onto the rootfs at first boot | 2,563 MiB |
 | **full, after** (now also includes ffmpeg) | **2,552 MiB** | **873 MiB** |

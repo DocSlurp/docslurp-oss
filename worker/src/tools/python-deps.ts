@@ -20,8 +20,6 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 
 /** Import names that differ from their PyPI distribution names. */
 const IMPORT_TO_DISTRIBUTION: Record<string, string> = {
-  fitz: "pymupdf",
-  pymupdf: "pymupdf",
   docx: "python-docx",
   pptx: "python-pptx",
   PIL: "pillow",

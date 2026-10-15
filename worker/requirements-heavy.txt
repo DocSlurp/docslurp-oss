@@ -1,7 +1,7 @@
 accelerate
 docling
 huggingface_hub>=0.32.0
-# Marker/Surya require vulnerable Pillow <11; not part of the managed stack.
+# Marker/Surya are not part of the stack (GPLv3 code, restricted weights); see THIRD_PARTY_NOTICES.md.
 sentence-transformers>=3.0.0
 torch
 transformers

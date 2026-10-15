@@ -2,6 +2,17 @@
 
 This document captures architecture decisions that are cross-cutting enough to matter outside a single package.
 
+## Layout and hosting
+
+- `server/` (`@docslurp/server`) is the Hono API: ingest, search, chat, MCP, webhooks and auth routes, plus services and startup tasks. The Drizzle schema, migrations, `migrate.mjs` and seed live in `server/db/`. `pnpm dev:api` runs it alone on port 8787.
+- `app/` is the private Astro frontend. By default it mounts the server in the same process, so API calls from the dashboard make no network hop. Set `DOCSLURP_SERVER_URL` to call a separately hosted server over HTTP instead.
+- `worker/` runs the ingestion pipeline as Temporal activities (stages in `worker/src/stages/`). It shares Postgres, object storage and LanceDB with the server.
+- `packages/` holds the SDK (with `/embed`), CLI, `shared` contracts and the `contrib-*` integrations.
+
+A run flows from upload to object storage and a run record, through the worker stages (normalize, detect, split and render, extract, embed, index, then summarize and structure), and becomes searchable, chat-ready and visible in the dashboard. PDFs use Kreuzberg by default with Poppler as the fallback; a private native-pdf engine is used when installed, and Docling and Unstructured are optional vendor bundles ([worker image](worker-image.md)). Scanned pages go to vision models within a per-document page budget.
+
+Deploys run migrate, then worker, then app. A worker capability handshake keeps flags that need both sides off until every live worker supports them; see releases.
+
 ## Product tentpoles
 
 DocSlurp is organized around three jobs. Each one reads and writes the same workspaces.
@@ -9,7 +20,7 @@ DocSlurp is organized around three jobs. Each one reads and writes the same work
 | Tentpole | What it delivers | Where it lives |
 | --- | --- | --- |
 | Ingest and extraction | Any file (PDF, Office, EPUB, HTML, images, audio, video) becomes page-by-page Markdown, page images, chunks and, with a workspace JSON schema, structured fields | `worker/src/stages/`, ingest routes in `server/src/routes/` |
-| RAG search | Hybrid search and RAG context with document and page citations, over REST, SDK, CLI, MCP and drop-in search clients | `server/src/services/search.ts`, `server/src/routes/search.ts`, `packages/sdk`, `packages/compat-*` |
+| RAG search | Hybrid search and RAG context with document and page citations, over REST, SDK, CLI, MCP and drop-in search clients | `server/src/services/search.ts`, `server/src/routes/search.ts`, `packages/sdk`, `packages/contrib-search-compat` |
 | Configurable chat endpoint | Cited answers from `/v1/chat` and the OpenAI-compatible `/v1/chat/completions`, with streaming, per-workspace chat settings and per-request model, retrieval and filter overrides on `/v1/chat` | `server/src/services/workspace-chat.ts`, `server/src/routes/chat-completions.ts` |
 
 ## Multi-Tenant Vector Storage

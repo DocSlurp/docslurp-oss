@@ -87,7 +87,7 @@ export const canonicalDocumentSchema = z.object({
   documentId: z.string(),
   generator: z.string(),
   source: z.object({
-    format: z.enum(["markdown", "plain-text", "pymupdf-json", "native-pdf-json"]),
+    format: z.enum(["markdown", "plain-text", "native-pdf-json"]),
     artifactUri: z.string().nullable().default(null),
     extractor: z.string(),
     parser: z.string().nullable().default(null),

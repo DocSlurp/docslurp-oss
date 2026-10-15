@@ -313,11 +313,11 @@ describe("runDocumentStage", () => {
       "markdown extracted",
       run,
       undefined,
-      { retryStrategies: ["pymupdf"] },
+      { retryStrategies: ["poppler-text"] },
     );
 
     expect(run).toHaveBeenNthCalledWith(1, undefined);
-    expect(run).toHaveBeenNthCalledWith(2, "pymupdf");
+    expect(run).toHaveBeenNthCalledWith(2, "poppler-text");
     expect(state.artifacts["doc-1:markdown"]).toBe("s3://docslurp/doc-1/high-plausibility.md");
     expect(state.artifacts["doc-1:retryCount"]).toBe("2");
     expect(state.pendingPerformance).toEqual(

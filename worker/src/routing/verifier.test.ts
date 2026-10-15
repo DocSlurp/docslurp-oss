@@ -316,7 +316,7 @@ const GOLDEN: Array<{
     "pFail": 0.27563
   },
   {
-    "targetId": "native:pymupdf",
+    "targetId": "native:pdf-text",
     "textLength": 2409,
     "omni": {
       "all_text_present": {
@@ -487,7 +487,7 @@ describe("fitted head parity with the offline pipeline", () => {
   });
 
   it("classifies targets like the offline fit", () => {
-    expect(targetClass("native:pymupdf")).toBe("native");
+    expect(targetClass("native:pdf-text")).toBe("native");
     expect(targetClass("ocr:tesseract")).toBe("ocr");
     expect(targetClass("vlm:private/mineru2.5")).toBe("parser");
     expect(targetClass("vlm:openrouter/z-ai/glm-5.3-flash")).toBe("vlm");
@@ -644,7 +644,7 @@ describe("createDecisionVerifier usage recording", () => {
       loadImage: async () => PNG,
       documentId: "doc-1",
     });
-    const verdict = await v.verify({ pageNumber: 1, targetId: "native:pymupdf", text: "x".repeat(answers.textLength), imagePath: "/p.png" });
+    const verdict = await v.verify({ pageNumber: 1, targetId: "native:pdf-text", text: "x".repeat(answers.textLength), imagePath: "/p.png" });
     expect(verdict).not.toBeNull();
     // 2 canaries + 2 verifier calls, all priced from the catalog (omni 0.15, flash 0.038 USD/MTok)
     expect(fetchImpl).toHaveBeenCalledTimes(4);
@@ -663,7 +663,7 @@ describe("createDecisionVerifier usage recording", () => {
       health: new DecisionModelHealthRegistry(),
       loadImage: async () => PNG,
     });
-    expect(await v.verify({ pageNumber: 1, targetId: "native:pymupdf", text: "hello", imagePath: "/p.png" })).toBeNull();
+    expect(await v.verify({ pageNumber: 1, targetId: "native:pdf-text", text: "hello", imagePath: "/p.png" })).toBeNull();
     expect(fetchImpl).not.toHaveBeenCalled();
   });
 });

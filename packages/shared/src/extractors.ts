@@ -117,18 +117,6 @@ export const builtInDocumentExtractorDescriptors: ExtractorDescriptor[] = [
     capabilities: { formats: ["pdf"], produces: ["markdown"], costClass: "local-cpu" },
   },
   {
-    id: "pymupdf4llm", kind: "document", label: "PyMuPDF4LLM",
-    description: "PyMuPDF layout-aware Markdown extraction.",
-    transforms: [{ accepts: ["source/pdf"], emits: ["document/markdown"], scope: "document" }],
-    capabilities: { formats: ["pdf"], produces: ["markdown"], costClass: "local-cpu" },
-  },
-  {
-    id: "pymupdf", kind: "document", label: "PyMuPDF text",
-    description: "PyMuPDF text extraction.",
-    transforms: [{ accepts: ["source/pdf"], emits: ["document/text"], scope: "document" }],
-    capabilities: { formats: ["pdf"], produces: ["text"], costClass: "local-cpu" },
-  },
-  {
     id: "poppler-text", kind: "document", label: "Poppler text",
     description: "Local PDF text extraction with Poppler.",
     transforms: [{ accepts: ["source/pdf"], emits: ["document/text"], scope: "document" }],

@@ -9,7 +9,7 @@ import type { MiddlewareHandler } from "hono";
 import { sql } from "../db.js";
 import { emitPostHogApiLog } from "./posthog-ai-observability.js";
 import { httpResponseStats } from "./http-response-stats.js";
-import { clientIpFromHeaders } from "./client-ip.js";
+import { clientIpFromHeaders, isInProcessEnv } from "./client-ip.js";
 import { redactFileTokenPath } from "./file-token-path.js";
 
 const REQUEST_ID_HEADER = "X-Request-ID";
@@ -186,7 +186,7 @@ export function pushRequestPerformanceEvent(event: {
 
 /** The edge-derived client address (see `clientIpFromHeaders`). */
 export function requestIp(c: Context): string | null {
-  return clientIpFromHeaders((name) => c.req.header(name));
+  return clientIpFromHeaders((name) => c.req.header(name), { trustedInternal: isInProcessEnv(c.env) });
 }
 
 export function requestUserAgent(c: Context): string | null {

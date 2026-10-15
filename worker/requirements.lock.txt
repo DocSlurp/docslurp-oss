@@ -526,12 +526,6 @@ pylatexenc==2.11
     # via docling-slim
 pymilvus==3.0.2
     # via -r worker/requirements-heavy.txt
-pymupdf==1.28.2
-    # via
-    #   -r worker/requirements-base.txt
-    #   pymupdf4llm
-pymupdf4llm==0.3.4
-    # via -r worker/requirements-base.txt
 pypandoc-binary==1.17
     # via unstructured
 pyparsing==3.3.3
@@ -692,9 +686,7 @@ srsly==2.5.4
 sympy==1.14.0
     # via torch
 tabulate==0.10.0
-    # via
-    #   docling-core
-    #   pymupdf4llm
+    # via docling-core
 tenacity==9.2.1
     # via chromadb
 thinc==8.3.13

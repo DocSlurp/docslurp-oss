@@ -12,7 +12,6 @@ if command -v apk >/dev/null 2>&1; then
     ghostscript \
     imagemagick \
     libreoffice \
-    mupdf-tools \
     nodejs \
     npm \
     ocrmypdf \
@@ -40,7 +39,6 @@ elif command -v apt-get >/dev/null 2>&1; then
     imagemagick \
     libtiff-tools \
     libreoffice \
-    mupdf-tools \
     npm \
     ocrmypdf \
     pandoc \

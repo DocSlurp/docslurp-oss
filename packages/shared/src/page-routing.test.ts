@@ -83,7 +83,7 @@ const features = {
     },
     source,
   },
-  provenance: { probe: "pymupdf-probe", probeMs: 4 },
+  provenance: { probe: "native-pdf-probe", probeMs: 4 },
 };
 const estimateA = { costUsd: 0.001, latencyMs: 300, pPass: 0.9 };
 const assignments = [

@@ -19,7 +19,7 @@ const strong = hosted[0] as RoutingTarget;
 const cheap = catalog.find((t) => t.kind === "hosted-vlm" && !t.roles.includes("chart-data")) as RoutingTarget;
 const florence = byId("local:florence-2-small");
 const tesseract = byId("ocr:tesseract");
-const pymupdf = byId("native:pymupdf");
+const nativeText = byId("native:pdf-text");
 const kreuzberg = byId("native:kreuzberg");
 const accept = byId("native:accept-text-layer");
 
@@ -49,7 +49,7 @@ function fakeDeps(over: Partial<ExecutorDeps> = {}) {
   const calls: string[] = [];
   const deps: ExecutorDeps = {
     pageText: vi.fn(async (p) => (p === 9 ? null : `Paragraph one of page ${p}.\n\nParagraph two.\n\nParagraph three.\n\nParagraph four.`)),
-    nativePageText: vi.fn(async (id, p) => (id === "pymupdf" ? `pymupdf page ${p} text` : null)),
+    nativePageText: vi.fn(async (id, p) => (id === "native-pdf-text" ? `native page ${p} text` : null)),
     withRaster: vi.fn(async (p, fn) => (p === 8 ? null : await fn({ path: `/tmp/page-${p}.png`, mimeType: "image/png" }))),
     withCrop: vi.fn(async (r, box, fn) => {
       calls.push(`crop:${r.path}:${box.x},${box.y}`);
@@ -65,7 +65,7 @@ function fakeDeps(over: Partial<ExecutorDeps> = {}) {
 
 describe("executor registry", () => {
   it("maps every seeded target kind to an executor and leaves unknown ids unexecutable", () => {
-    for (const t of [accept, pymupdf, kreuzberg, tesseract, florence, strong, cheap, byId("skip")]) {
+    for (const t of [accept, nativeText, kreuzberg, tesseract, florence, strong, cheap, byId("skip")]) {
       expect(executorFor(t), t.id).not.toBeNull();
     }
     expect(executorFor({ ...tesseract, id: "ocr:mystery", kind: "local-ocr" })).toBeNull();
@@ -76,13 +76,13 @@ describe("executor registry", () => {
     const { deps } = fakeDeps();
     const res = await executeAssignments([
       { assignment: asg(1, accept.id, "accept-text"), index: 0, target: accept },
-      { assignment: asg(2, pymupdf.id, "extract-text"), index: 1, target: pymupdf },
+      { assignment: asg(2, nativeText.id, "extract-text"), index: 1, target: nativeText },
       { assignment: asg(3, kreuzberg.id, "table"), index: 2, target: kreuzberg },
     ], deps);
     expect(deps.withRaster).not.toHaveBeenCalled();
     const text = (i: number) => res.outputs.find((o) => o.assignmentIndex === i)!;
     expect(text(0).text).toContain("Paragraph one of page 1");
-    expect(text(1).text).toBe("pymupdf page 2 text");
+    expect(text(1).text).toBe("native page 2 text");
     expect(text(2)).toMatchObject({ fallback: "canonical-page-slice", model: "kreuzberg" });
     expect(text(2).text).toContain("page 3");
   });
@@ -186,13 +186,13 @@ describe("runRoutedVision with executors", () => {
   it("uses native extractors and OCR as page prose, and falls back to the workspace model when an executor fails", async () => {
     const { deps } = fakeDeps({ ocr: vi.fn(async () => { throw new Error("boom"); }) });
     const { result, extract } = await run([
-      asg(1, pymupdf.id, "extract-text"),
+      asg(1, nativeText.id, "extract-text"),
       asg(2, tesseract.id, "ocr"),
     ], { deps });
     expect(extract).toHaveBeenCalledTimes(1);
     expect(vi.mocked(extract).mock.calls[0]![1]).toEqual([2]);
     expect(result.executorFailures).toHaveLength(1);
-    expect(result.outputs.map((o) => [o.pageNumber, o.text.startsWith("pymupdf page 1") || o.text.startsWith("vlm page 2")])).toEqual([[1, true], [2, true]]);
+    expect(result.outputs.map((o) => [o.pageNumber, o.text.startsWith("native page 1") || o.text.startsWith("vlm page 2")])).toEqual([[1, true], [2, true]]);
     expect(result.actuals.find((a) => a.servesTargetId === tesseract.id)?.costUsd).toBe(0.005);
   });
 
@@ -242,7 +242,7 @@ describe("runRoutedVision with executors", () => {
   });
 
   it("assigns pixels only to model-or-image assignments", async () => {
-    const plan = await planOf([asg(1, accept.id, "accept-text"), asg(2, pymupdf.id, "extract-text"), asg(3, tesseract.id, "ocr"), asg(4, florence.id, "image-label", { kind: "image", imageIndex: 0 })]);
+    const plan = await planOf([asg(1, accept.id, "accept-text"), asg(2, nativeText.id, "extract-text"), asg(3, tesseract.id, "ocr"), asg(4, florence.id, "image-label", { kind: "image", imageIndex: 0 })]);
     expect(pagesNeedingPixels(plan)).toEqual([3, 4]);
   });
 });

@@ -15,8 +15,6 @@ import { readDisableNonFreeSoftware } from "@docslurp/shared";
 
 /** Table candidate gate: `shadow` logs ruled-grid-or-crop decisions and estimates; extraction is unchanged. */
 export type TableGateMode = "off" | "shadow";
-/** Page probe implementation: the Python probe (default) or the in-process native-pdf probe. */
-export type PageProbeEngine = "python" | "native-pdf";
 /**
  * Page OCR from the native-pdf engine: `scripts` (default) only when tesseract's output is not words in its languages
  * and the engine reads another script; `prefer` engine first (guarded); `off` tesseract only. See executors/ocr-policy.ts.
@@ -34,8 +32,6 @@ export interface RoutingFlags {
   tableGate: TableGateMode;
   /** PAGE_ROUTER_PREFER_NATIVE_MARKDOWN=1|true (default off): accept-text pages take native-pdf Markdown. */
   preferNativeMarkdown: boolean;
-  /** PAGE_PROBE_ENGINE=python|native-pdf (default python until the probe parity gate passes). */
-  probeEngine: PageProbeEngine;
   /** NATIVE_PDF_OCR=off|scripts|prefer (default scripts). */
   nativeOcr: NativeOcrPolicy;
   /** PAGE_ROUTER_LABELER_MODEL: local image labeler checkpoint (default Florence-2-small-ft). */
@@ -80,7 +76,6 @@ export function readRoutingFlags(env: NodeJS.ProcessEnv = process.env): RoutingF
     disableNonFreeSoftware: readDisableNonFreeSoftware(env),
     tableGate: choice(env, "PAGE_ROUTER_TABLE_GATE", ["off", "shadow"] as const, "off"),
     preferNativeMarkdown: flag(env, "PAGE_ROUTER_PREFER_NATIVE_MARKDOWN"),
-    probeEngine: choice(env, "PAGE_PROBE_ENGINE", ["python", "native-pdf"] as const, "python"),
     nativeOcr: choice(env, "NATIVE_PDF_OCR", ["off", "scripts", "prefer"] as const, "scripts"),
     labelerModel: text(env, "PAGE_ROUTER_LABELER_MODEL") ?? DEFAULT_LABELER_MODEL,
     modelPricesPath: text(env, "PAGE_ROUTER_MODEL_PRICES_PATH"),

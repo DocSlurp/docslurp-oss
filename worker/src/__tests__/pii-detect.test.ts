@@ -94,7 +94,7 @@ function setup(action: "flag_for_review" | "block_indexing" | "redact_artifacts"
     artifacts[`${documentId}:html`] = storage.uri(`${prefix}/html/${documentId}.html`);
     artifacts[`${documentId}:extraction-contract`] = storage.uri(`${prefix}/extraction/${documentId}.contract.json`);
     // Debug artifacts written before pii-detect that it does not rewrite.
-    artifacts[`${documentId}:pymupdf-json`] = storage.uri(`${prefix}/parsers/${documentId}.pymupdf.json`);
+    artifacts[`${documentId}:native-pdf-json`] = storage.uri(`${prefix}/parsers/${documentId}.native-pdf.json`);
     artifacts[`${documentId}:vision`] = storage.uri(`${prefix}/vision/${documentId}.json`);
     artifacts[`${documentId}:images`] = storage.uri(`${prefix}/images/${documentId}/manifest.json`);
     artifacts[`${documentId}:retryCount`] = "1";
@@ -265,7 +265,7 @@ describe("piiPolicy allowlistPatterns", () => {
 describe("piiPolicy withheld debug artifacts", () => {
   const debugUris = [
     "s3://test-bucket/u1/run-1/images/doc-1/manifest.json",
-    "s3://test-bucket/u1/run-1/parsers/doc-1.pymupdf.json",
+    "s3://test-bucket/u1/run-1/parsers/doc-1.native-pdf.json",
     "s3://test-bucket/u1/run-1/source/doc-1",
     "s3://test-bucket/u1/run-1/vision/doc-1.json",
   ];

@@ -15,10 +15,10 @@ function packWithBaseline(): PolicyPack {
         { id: "wordy", parentId: "global", predicates: [{ feature: "native.wordCount", op: "gte", value: 100 }] },
       ],
       stats: [
-        // pymupdf is great in "wordy", cheapest-capable; kreuzberg is bad there
-        { cellId: "wordy", targetId: "native:pymupdf", pass: passes(95, 5), cost: { meanUsd: 0, p90Usd: 0 }, latency: { p50Ms: 30, p95Ms: 60 }, n: 100 },
+        // the native text layer is great in "wordy", cheapest-capable; kreuzberg is bad there
+        { cellId: "wordy", targetId: "native:pdf-text", pass: passes(95, 5), cost: { meanUsd: 0, p90Usd: 0 }, latency: { p50Ms: 30, p95Ms: 60 }, n: 100 },
         { cellId: "wordy", targetId: "native:kreuzberg", pass: passes(2, 20), cost: { meanUsd: 0, p90Usd: 0 }, latency: { p50Ms: 60, p95Ms: 120 }, n: 22 },
-        { cellId: "global", targetId: "native:pymupdf", pass: passes(5, 5), cost: { meanUsd: 0, p90Usd: 0 }, latency: { p50Ms: 30, p95Ms: 60 }, n: 10 },
+        { cellId: "global", targetId: "native:pdf-text", pass: passes(5, 5), cost: { meanUsd: 0, p90Usd: 0 }, latency: { p50Ms: 30, p95Ms: 60 }, n: 10 },
       ],
     },
   };
@@ -44,7 +44,7 @@ describe("baseline cells", () => {
   });
   it("uses Beta means and lower bounds from the matching cell", () => {
     const est = createBaselineEstimator(packWithBaseline());
-    const e = est({ page: makePage(), role: "extract-text", scope: { kind: "page" }, target: testCatalog().find((t) => t.id === "native:pymupdf")!, probs: {} })!;
+    const e = est({ page: makePage(), role: "extract-text", scope: { kind: "page" }, target: testCatalog().find((t) => t.id === "native:pdf-text")!, probs: {} })!;
     expect(e.pPass.text).toBeCloseTo(0.95);
     expect(e.pPassLowerBound!.text).toBeLessThan(0.95);
     expect(e.calibrationBucket).toBe("cell:wordy");

@@ -83,7 +83,6 @@ const skip: TargetExecutor = {
 
 const BY_ID = new Map<string, TargetExecutor>([
   [acceptTextLayer.id, acceptTextLayer],
-  ["native:pymupdf", nativeExtractor("native:pymupdf", "pymupdf")],
   ["native:kreuzberg", nativeExtractor("native:kreuzberg", "kreuzberg")],
   ...nativePdfExecutors.map((e): [string, TargetExecutor] => [e.id, e]),
   [tesseract.id, tesseract],

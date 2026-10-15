@@ -418,12 +418,6 @@ pygments==2.21.0
     # via rich
 pymilvus==3.0.2
     # via -r worker/requirements-fallback.txt
-pymupdf==1.28.2
-    # via
-    #   -r worker/requirements-base.txt
-    #   pymupdf4llm
-pymupdf4llm==0.3.4
-    # via -r worker/requirements-base.txt
 pyparsing==3.3.3
     # via matplotlib
 pypdf==6.20.1
@@ -541,8 +535,6 @@ srsly==2.5.4
     #   weasel
 sympy==1.14.0
     # via torch
-tabulate==0.10.0
-    # via pymupdf4llm
 tenacity==9.2.1
     # via chromadb
 thinc==8.3.13

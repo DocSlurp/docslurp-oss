@@ -33,7 +33,7 @@ export function makePage(pageNumber: number, overrides: { facts?: Partial<TextFa
       geometry: { widthPt: 612, heightPt: 792, rotation: 0 },
       heuristic: { route: "straightforward-text", extractorHint: null, specializedKinds: [], ocrAuthorized: null, textDensityScore: 0.5 },
       decisions: null,
-      provenance: { probe: "pymupdf-probe", probeMs: 3 },
+      provenance: { probe: "native-pdf-probe", probeMs: 3 },
     },
     textFacts: { wordCount: 412, imageCount, imageCoverage: imageCount ? 0.4 : 0, textLayerStatus: "ok", ...overrides.facts },
     images: Array.from({ length: imageCount }, (_, index) => ({

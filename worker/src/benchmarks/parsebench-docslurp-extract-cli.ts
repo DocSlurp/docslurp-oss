@@ -11,6 +11,9 @@ import {
 import { evaluateParserPolicy } from "../lib/parser-policy.js";
 import { LiteParseDocumentExtractionAdapter } from "../lib/document-extraction-adapter.js";
 import { defaultDocumentExtractorOrder } from "../extractors/registry.js";
+import { resolveNativePdfEngine } from "../native-pdf/engine.js";
+import { buildNativeParserPayload } from "../native-pdf/parser-payload.js";
+import { runNativePdfArm } from "./native-pdf-arm.js";
 import {
   parseBenchDocSlurpExtractors,
   type ParseBenchDocSlurpExtractor,
@@ -110,10 +113,10 @@ function selectBenchmarkHybridExtractors(): Array<
         return ["kreuzberg"] as const;
       case "docling":
         return ["docling"] as const;
-      case "pymupdf4llm":
-        return ["pymupdf4llm-markdown"] as const;
-      case "pymupdf":
-        return ["pymupdf-text"] as const;
+      case "native-pdf":
+        return ["native-pdf-markdown"] as const;
+      case "poppler-text":
+        return ["pdftotext"] as const;
       default:
         return [];
     }
@@ -155,21 +158,9 @@ async function runSingleExtractor(args: {
       break;
     }
 
-    case "pymupdf-text": {
-      const outPath = path.join(args.tempDir, "pymupdf.txt");
-      const plan = await args.runner.pyMuPdfText(args.inputPath, outPath);
-      if (!plan.available) throw new Error("PyMuPDF unavailable");
-      await args.runner.run(plan);
-      markdown = await readFile(outPath, "utf8");
-      break;
-    }
-
-    case "pymupdf4llm-markdown": {
-      const outPath = path.join(args.tempDir, "pymupdf4llm.md");
-      const plan = await args.runner.pyMuPdf4llmMarkdown(args.inputPath, outPath);
-      if (!plan.available) throw new Error("pymupdf4llm unavailable");
-      await args.runner.run(plan);
-      markdown = await readFile(outPath, "utf8");
+    case "native-pdf-text":
+    case "native-pdf-markdown": {
+      markdown = await runNativePdfArm(args.inputPath, args.extractor === "native-pdf-text" ? "text" : "markdown");
       break;
     }
 
@@ -178,15 +169,6 @@ async function runSingleExtractor(args: {
       if (!plan.available) throw new Error("pdftotext unavailable");
       const result = await args.runner.run(plan);
       markdown = result.stdout;
-      break;
-    }
-
-    case "pymupdf-ocr-text": {
-      const outPath = path.join(args.tempDir, "pymupdf-ocr.txt");
-      const plan = await args.runner.pyMuPdfOcrText(args.inputPath, outPath);
-      if (!plan.available) throw new Error("PyMuPDF OCR unavailable");
-      await args.runner.run(plan);
-      markdown = await readFile(outPath, "utf8");
       break;
     }
 
@@ -229,15 +211,17 @@ async function loadLayoutPages(
   tempDir: string,
 ): Promise<LayoutPagePayload[]> {
   try {
-    const outPath = path.join(tempDir, "pymupdf-layout.json");
-    const plan = await runner.pyMuPdfJson(inputPath, outPath);
-    if (!plan.available) {
+    const engine = await resolveNativePdfEngine(runner);
+    if (!engine) {
       return [];
     }
-    await runner.run(plan);
-    const payload = JSON.parse(await readFile(outPath, "utf8")) as {
-      pages?: LayoutPagePayload[];
-    };
+    const doc = await engine.openPath(inputPath);
+    let payload: { pages?: LayoutPagePayload[] };
+    try {
+      payload = (await buildNativeParserPayload(doc)) as { pages?: LayoutPagePayload[] };
+    } finally {
+      await doc.close().catch(() => undefined);
+    }
     return Array.isArray(payload.pages) ? payload.pages : [];
   } catch {
     return [];

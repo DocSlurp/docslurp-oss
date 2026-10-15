@@ -23,6 +23,7 @@ export default defineConfig({
       "@docslurp/shared/temporal-connection": shared("temporal-connection"),
       "@docslurp/shared/temporal-security": shared("temporal-security"),
       "@docslurp/shared/auth-security": shared("auth-security"),
+      "@docslurp/shared/client-ip": shared("client-ip"),
       "@docslurp/shared/workspace-chat-models": shared("workspace-chat-models"),
       "@docslurp/shared/chat-voice": shared("chat-voice"),
       "@docslurp/shared/workspace-chat-ui": shared("workspace-chat-ui"),

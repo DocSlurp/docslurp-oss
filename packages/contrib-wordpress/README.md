@@ -1,4 +1,10 @@
-# WordPress search integration
+# DocSlurp Search for WordPress
+
+[Plugin docs](https://docslurp.io/docs/search-integrations/wordpress) · [GitHub](https://github.com/DocSlurp/docslurp-oss/tree/main/packages/contrib-wordpress) · npm: not an npm package
+
+A WordPress plugin that adds a `[docslurp_search]` shortcode backed by DocSlurp search. It is built from the [`@docslurp/sdk`](https://docslurp.io/docs/packages/sdk) widget and is MIT licensed.
+
+## Install
 
 1. Build the SDK and run `node scripts/package-wordpress-search.mjs` from the repository root.
 2. Zip the `docslurp-search` directory (not its parent tests directory), upload it in WordPress Plugins, and activate it.

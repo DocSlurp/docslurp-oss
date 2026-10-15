@@ -1,5 +1,8 @@
 # Benchmark-Informed Coverage
 
+Provenance of the third-party fixtures that are fetched rather than tracked (CU Boulder catalogs, census scan,
+mixed-media samples) lives in `worker/testdata/third-party-fixtures.manifest.json`.
+
 This fixture set is synthetic, but the cases were selected to mirror the failure modes that show up repeatedly in popular document parsing and multimodal RAG benchmarks.
 
 - [DocLayNet](https://github.com/DS4SD/DocLayNet): layout diversity across titles, paragraphs, lists, tables, figures, and marginal content.

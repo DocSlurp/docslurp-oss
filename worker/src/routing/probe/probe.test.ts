@@ -4,7 +4,7 @@ import path from "node:path";
 import sharp from "sharp";
 import { afterEach, describe, expect, it } from "vitest";
 
-import { createProbeRunner, parseProbeOutput, pageProbeEngine } from "../page-input.js";
+import { createProbeRunner, parseProbeOutput } from "../page-input.js";
 import { setProbeBindingForTesting, type Box, type ProbeBinding, type ProbeBindingPage } from "./binding.js";
 import { laplacianVariance, parsePages, percentiles, textLayerStatus } from "./features.js";
 import { probeNativePdf, type NativeProbeRow } from "./probe.js";
@@ -178,28 +178,20 @@ describe("probe helpers", () => {
   });
 });
 
-describe("PAGE_PROBE_ENGINE", () => {
-  it("defaults to python and falls back to it when the native probe cannot open a document", async () => {
-    expect(pageProbeEngine({})).toBe("python");
-    expect(pageProbeEngine({ PAGE_PROBE_ENGINE: "native-pdf" })).toBe("native-pdf");
+describe("default probe runner", () => {
+  it("probes in-process and reports encrypted files it cannot open as locked", async () => {
     setProbeBindingForTesting(fakeBinding([{ spans: [{ text: PROSE.repeat(4), bbox: [50, 50, 550, 700] }] }]));
-    const rows = parseProbeOutput(await createProbeRunner(undefined, { PAGE_PROBE_ENGINE: "native-pdf" })({ pdfPath: "/tmp/x.pdf" }));
+    const rows = parseProbeOutput(await createProbeRunner()({ pdfPath: "/tmp/x.pdf" }));
     expect(rows[0]).toMatchObject({ pageNumber: 1, probeEngine: expect.stringMatching(/^native-pdf@/) });
 
     setProbeBindingForTesting(fakeBinding([], { openError: "PDF_ERROR" }));
-    const fakePython = { plan: async () => ({ available: true }), run: async () => ({ stdout: '{"pageNumber":1,"from":"python"}\n' }) };
-    const fallback = await createProbeRunner(fakePython as never, { PAGE_PROBE_ENGINE: "native-pdf" })({ pdfPath: "/tmp/x.pdf" });
-    expect(fallback).toContain('"from":"python"');
-
-    // No python either: an encrypted file the engine cannot open is reported as locked instead of failing the run.
     const dir = await mkdtemp(path.join(os.tmpdir(), "probe-enc-"));
     const encrypted = path.join(dir, "e.pdf");
     await writeFile(encrypted, "%PDF-1.7\n1 0 obj<</Type/Catalog>>endobj\ntrailer<</Root 1 0 R/Encrypt<</Filter/Standard>>>>\n%%EOF");
     const plain = path.join(dir, "p.pdf");
     await writeFile(plain, "%PDF-1.7\n1 0 obj<</Type/Catalog>>endobj\ntrailer<</Root 1 0 R>>\n%%EOF");
-    const noPython = { plan: async () => ({ available: false }), run: async () => ({ stdout: "" }) };
-    const runner = createProbeRunner(noPython as never, { PAGE_PROBE_ENGINE: "native-pdf" });
+    const runner = createProbeRunner();
     expect(parseProbeOutput(await runner({ pdfPath: encrypted }))[0]).toMatchObject({ locked: true, unusualFeatures: ["encrypted-user-password"] });
-    await expect(runner({ pdfPath: plain })).rejects.toThrow(/page probe failed: native-pdf boom/);
+    await expect(runner({ pdfPath: plain })).rejects.toThrow(/page probe failed: .*boom/);
   });
 });

@@ -56,7 +56,7 @@ export async function ocrLayerAgreement(
   const wall0 = performance.now();
   const cpu0 = process.cpuUsage();
   const out: OcrLayerCheck = { agreement: null, tokens: 0, cpuMs: 0, wallMs: 0 };
-  // Words with a vertical position (span centre), like PyMuPDF `get_text("words")`.
+  // Words with a vertical position (span centre), like the original Python probe's word list.
   const words: Array<{ text: string; y: number }> = [];
   for (const span of page.spans()) {
     const y = (span.bbox[1] + span.bbox[3]) / 2;

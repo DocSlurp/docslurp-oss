@@ -38,12 +38,6 @@ pillow==12.3.0
     # via
     #   -r worker/requirements-base.txt
     #   python-pptx
-pymupdf==1.28.2
-    # via
-    #   -r worker/requirements-base.txt
-    #   pymupdf4llm
-pymupdf4llm==0.3.4
-    # via -r worker/requirements-base.txt
 python-dateutil==2.9.0.post0
     # via
     #   dateparser
@@ -60,8 +54,6 @@ six==1.17.0
     #   python-dateutil
 soupsieve==2.10
     # via beautifulsoup4
-tabulate==0.10.0
-    # via pymupdf4llm
 tld==0.13.2
     # via courlan
 trafilatura==2.3.1

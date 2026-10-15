@@ -452,8 +452,8 @@ async function assertSafeOidcEndpoints(metadata: OidcMetadata, metadataUrl: stri
 }
 
 function ssoRateLimitKey(c: any): string {
-  // Same edge-derived address as the API limiter (Fly-Client-IP, or the
-  // right-hand X-Forwarded-For hop); never a client-controlled header.
+  // Same edge-derived address as the API limiter (trusted-proxy resolution, see
+  // lib/client-ip.ts); never a client-controlled header.
   const trustedIp = requestIp(c);
   const userAgent = c.req.header("user-agent") ?? "unknown";
   const principal = trustedIp ?? createHash("sha256").update(userAgent).digest("hex").slice(0, 16);

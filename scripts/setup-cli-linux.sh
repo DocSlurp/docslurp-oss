@@ -28,7 +28,6 @@ ${SUDO} apt-get install -y \
   imagemagick \
   libtiff-tools \
   libreoffice \
-  mupdf-tools \
   nodejs \
   npm \
   ocrmypdf \

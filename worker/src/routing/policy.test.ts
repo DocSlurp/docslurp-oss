@@ -57,7 +57,7 @@ describe("pass mapping and estimates", () => {
   it("uses the serving model's own mapping and falls back to the default for other models and targets", () => {
     const base = testPack();
     const model = base.decisionModels[0]!;
-    const target = testCatalog().find((t) => t.id === "native:pymupdf")!;
+    const target = testCatalog().find((t) => t.id === "native:pdf-text")!;
     const other = testCatalog().find((t) => t.id === "vlm:openrouter/google/gemini-3.5-flash")!;
     const always = { intercept: 0, weights: {}, baseRate: 0.99 };
     const own = { ...base.targets.find((t) => t.targetId === target.id)!, decisionModel: model, pass: { text: always, math: always, tables: always, overall: always } };
@@ -81,14 +81,14 @@ describe("pass mapping and estimates", () => {
     expect(lowerBound(0.9, 5)).toBeLessThan(lowerBound(0.9, 500));
     expect(lowerBound(0.9, 5)).toBeLessThanOrEqual(0.9);
   });
-  it("estimator: strong VLM beats pymupdf on math; costs come from catalog", () => {
+  it("estimator: strong VLM beats native text on math; costs come from catalog", () => {
     const est = createPolicyEstimator(testPack());
     const catalog = testCatalog();
     const page = makePage();
     const get = (id: string) => est({ page, role: "math", scope: { kind: "page" }, target: catalog.find((t) => t.id === id)!, probs: { needs_math_extraction: 0.95 } })!;
-    expect(get("vlm:openrouter/google/gemini-3.5-flash").pPass.math).toBeGreaterThan(get("native:pymupdf").pPass.math);
+    expect(get("vlm:openrouter/google/gemini-3.5-flash").pPass.math).toBeGreaterThan(get("native:pdf-text").pPass.math);
     expect(get("vlm:openrouter/google/gemini-3.5-flash").expectedCostUsd).toBeGreaterThan(0);
-    expect(get("native:pymupdf").pPassLowerBound!.math).toBeLessThanOrEqual(get("native:pymupdf").pPass.math);
+    expect(get("native:pdf-text").pPassLowerBound!.math).toBeLessThanOrEqual(get("native:pdf-text").pPass.math);
     expect(est({ page, role: "math", scope: { kind: "page" }, target: { ...catalog[0]!, id: "unknown:x" }, probs: {} })).toBeNull();
   });
 });

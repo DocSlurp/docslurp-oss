@@ -533,15 +533,6 @@ export class CommandRunner {
     });
   }
 
-  async muToolText(source: string, output: string): Promise<CommandPlan> {
-    return await this.planDocumentTool({
-      binary: "mutool",
-      args: ["draw", "-F", "txt", "-o", output, source],
-      fileArgIndexes: [4, 5],
-      supportsDoubleDash: false,
-    });
-  }
-
   async unstructuredPartition(
     source: string,
     output: string,
@@ -556,29 +547,6 @@ export class CommandRunner {
       output,
       "--strategy",
       strategy,
-    );
-  }
-
-  async markerMarkdown(source: string, outdir: string): Promise<CommandPlan> {
-    return await this.plan(
-      "marker_single",
-      source,
-      "--output_format",
-      "markdown",
-      "--paginate_output",
-      "--output_dir",
-      outdir,
-    );
-  }
-
-  async markerJson(source: string, outdir: string): Promise<CommandPlan> {
-    return await this.plan(
-      "marker_single",
-      source,
-      "--output_format",
-      "json",
-      "--output_dir",
-      outdir,
     );
   }
 
@@ -622,113 +590,6 @@ export class CommandRunner {
       "--output",
       outdir,
       source,
-    );
-  }
-
-  async pyMuPdfText(source: string, output: string): Promise<CommandPlan> {
-    return await this.planScript(
-      "python3",
-      "pymupdf_extract.py",
-      "--input",
-      source,
-      "--output",
-      output,
-      "--format",
-      "text",
-    );
-  }
-
-  async pyMuPdfHtml(source: string, output: string): Promise<CommandPlan> {
-    return await this.planScript(
-      "python3",
-      "pymupdf_extract.py",
-      "--input",
-      source,
-      "--output",
-      output,
-      "--format",
-      "html",
-    );
-  }
-
-  async pyMuPdfJson(source: string, output: string): Promise<CommandPlan> {
-    return await this.planScript(
-      "python3",
-      "pymupdf_extract.py",
-      "--input",
-      source,
-      "--output",
-      output,
-      "--format",
-      "json",
-    );
-  }
-
-  /** Plain text per page as `{"pages": [...]}` (index = page number - 1). */
-  async pyMuPdfPageText(source: string, output: string): Promise<CommandPlan> {
-    return await this.planScript(
-      "python3",
-      "pymupdf_extract.py",
-      "--input",
-      source,
-      "--output",
-      output,
-      "--format",
-      "pages",
-    );
-  }
-
-  async pyMuPdfRegions(source: string, output: string): Promise<CommandPlan> {
-    return await this.planScript(
-      "python3",
-      "pymupdf_regions.py",
-      "--input",
-      source,
-      "--output",
-      output,
-    );
-  }
-
-  async pyMuPdfOcrText(source: string, output: string): Promise<CommandPlan> {
-    return await this.planScript(
-      "python3",
-      "pymupdf_extract.py",
-      "--input",
-      source,
-      "--output",
-      output,
-      "--format",
-      "text",
-      "--ocr",
-    );
-  }
-
-  async pyMuPdf4llmMarkdown(
-    source: string,
-    output: string,
-  ): Promise<CommandPlan> {
-    return await this.planScript(
-      "python3",
-      "pymupdf4llm_extract.py",
-      "--input",
-      source,
-      "--output",
-      output,
-      "--format",
-      "markdown",
-    );
-  }
-
-  async pyMuPdf4llmJson(source: string, output: string): Promise<CommandPlan> {
-    return await this.planScript(
-      "python3",
-      "pymupdf4llm_extract.py",
-      "--input",
-      source,
-      "--output",
-      output,
-      "--format",
-      "json",
     );
   }
 

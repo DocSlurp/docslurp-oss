@@ -48,7 +48,7 @@ describe("buildRoutingTargetCatalog", () => {
     expect(ids).toEqual(
       expect.arrayContaining([
         "native:kreuzberg",
-        "native:pymupdf",
+        "native:pdf-markdown",
         "ocr:tesseract",
         "vlm:openrouter/google/gemini-3.5-flash",
         "vlm:openrouter/openai/gpt-6-luna",

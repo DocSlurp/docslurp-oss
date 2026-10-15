@@ -1,31 +1,31 @@
 import { normalizePageNumber, type CanonicalBlock, type CanonicalDocument } from "@docslurp/shared";
 
-type PyMuPdfSpan = {
+type NativePdfSpan = {
   text?: string;
   bbox?: [number, number, number, number];
   size?: number;
   font?: string;
 };
 
-type PyMuPdfLine = {
-  spans?: PyMuPdfSpan[];
+type NativePdfLine = {
+  spans?: NativePdfSpan[];
   bbox?: [number, number, number, number];
 };
 
-type PyMuPdfBlock = {
+type NativePdfBlock = {
   type?: number;
   bbox?: [number, number, number, number];
-  lines?: PyMuPdfLine[];
+  lines?: NativePdfLine[];
 };
 
-type PyMuPdfPage = {
-  blocks?: PyMuPdfBlock[];
+type NativePdfPage = {
+  blocks?: NativePdfBlock[];
   width?: number;
   height?: number;
 };
 
-type PyMuPdfDocument = {
-  pages?: PyMuPdfPage[];
+type NativePdfDocument = {
+  pages?: NativePdfPage[];
 };
 
 type UnstructuredElement = {
@@ -57,7 +57,7 @@ type ParserBlock = {
 };
 
 type ParserAdapter = {
-  id: "pymupdf" | "native-pdf" | "unstructured";
+  id: "native-pdf" | "unstructured";
   extractBlocks: (payload: unknown) => ParserBlock[];
 };
 
@@ -82,13 +82,9 @@ export type ParserEnrichmentSummary = {
 
 const parserAdapters: ParserAdapter[] = [
   {
-    id: "pymupdf",
-    extractBlocks: extractPyMuPdfBlocks
-  },
-  {
-    // In-process native engine payload: the same block/line/span shape as the PyMuPDF dict.
+    // In-process native engine payload (parser-payload.ts): page -> block -> line -> span with bbox, size and font.
     id: "native-pdf",
-    extractBlocks: extractPyMuPdfBlocks
+    extractBlocks: extractNativePdfBlocks
   },
   {
     id: "unstructured",
@@ -96,12 +92,12 @@ const parserAdapters: ParserAdapter[] = [
   }
 ];
 
-export function enrichCanonicalDocumentWithPyMuPdf(
+export function enrichCanonicalDocumentWithNativePdf(
   document: CanonicalDocument,
   payload: unknown,
   parserArtifactUri?: string | null
 ): CanonicalDocument {
-  return enrichCanonicalDocumentWithParser(document, payload, "pymupdf", parserArtifactUri);
+  return enrichCanonicalDocumentWithParser(document, payload, "native-pdf", parserArtifactUri);
 }
 
 export function enrichCanonicalDocumentWithParser(
@@ -166,7 +162,7 @@ export function enrichCanonicalDocumentWithParser(
     generator: `${document.generator}+${parser}-aligned@v1`,
     source: {
       ...document.source,
-      format: parser === "pymupdf" ? "pymupdf-json" : parser === "native-pdf" ? "native-pdf-json" : document.source.format,
+      format: parser === "native-pdf" ? "native-pdf-json" : document.source.format,
       parser,
       parserArtifactUri: parserArtifactUri ?? null
     },
@@ -235,8 +231,8 @@ export function scoreParserEnrichments(
   }));
 }
 
-function extractPyMuPdfBlocks(payload: unknown): ParserBlock[] {
-  const doc = payload as PyMuPdfDocument | null;
+function extractNativePdfBlocks(payload: unknown): ParserBlock[] {
+  const doc = payload as NativePdfDocument | null;
   if (!doc?.pages || !Array.isArray(doc.pages)) {
     return [];
   }
@@ -295,7 +291,7 @@ function positiveNumber(value: unknown): number | null {
   return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : null;
 }
 
-function extractTextFromBlock(block: PyMuPdfBlock): string {
+function extractTextFromBlock(block: NativePdfBlock): string {
   const lines = Array.isArray(block.lines) ? block.lines : [];
   return lines
     .map((line) =>
@@ -308,7 +304,7 @@ function extractTextFromBlock(block: PyMuPdfBlock): string {
     .join("\n");
 }
 
-function dominantFontSize(block: PyMuPdfBlock): number | null {
+function dominantFontSize(block: NativePdfBlock): number | null {
   const sizes = new Map<number, number>();
   for (const line of block.lines ?? []) {
     for (const span of line.spans ?? []) {
@@ -328,7 +324,7 @@ function dominantFontSize(block: PyMuPdfBlock): number | null {
   return winner;
 }
 
-function dominantFontName(block: PyMuPdfBlock): string | null {
+function dominantFontName(block: NativePdfBlock): string | null {
   const fonts = new Map<string, number>();
   for (const line of block.lines ?? []) {
     for (const span of line.spans ?? []) {

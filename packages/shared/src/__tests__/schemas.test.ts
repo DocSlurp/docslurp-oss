@@ -244,7 +244,7 @@ describe("pipelineFeaturesSchema", () => {
   it("accepts an ordered extraction policy a router can fill", () => {
     const result = pipelineFeaturesSchema.safeParse({
       documentExtraction: {
-        order: { pdf: ["pymupdf-text", "kreuzberg"] },
+        order: { pdf: ["native-pdf", "kreuzberg"] },
         components: { tables: [], formulas: [], images: [] },
         pages: [],
         voting: { enabled: true, secondary: "next-in-order" },
@@ -496,11 +496,11 @@ describe("canonicalDocumentSchema", () => {
       documentId: "doc-1",
       generator: "heuristic-markdown-block-tree@v1",
       source: {
-        format: "pymupdf-json",
+        format: "native-pdf-json",
         artifactUri: "s3://bucket/doc-1.md",
         extractor: "docling",
-        parser: "pymupdf",
-        parserArtifactUri: "s3://bucket/doc-1.pymupdf.json"
+        parser: "native-pdf",
+        parserArtifactUri: "s3://bucket/doc-1.native-pdf.json"
       },
       stats: {
         blockCount: 2,

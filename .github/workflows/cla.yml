@@ -1,0 +1,62 @@
+# CLA gate for external pull requests. Signatures are stored in a separate private repository so the
+# public tree carries no contributor data. Setup (secrets, signatures repo): docs/open-source-cla-setup.md
+# in the private monorepo. The CLA text is CLA.md; changing it bumps its version and requires new signatures.
+name: CLA
+
+on:
+  issue_comment:
+    types: [created]
+  pull_request_target:
+    types: [opened, closed, synchronize]
+
+# pull_request_target runs with repository secrets: this workflow never checks out or runs PR code.
+permissions:
+  actions: write
+  contents: read
+  pull-requests: write
+  statuses: write
+
+jobs:
+  cla:
+    name: CLA signature
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    if: >-
+      github.event_name == 'pull_request_target' ||
+      (github.event.issue.pull_request &&
+        (github.event.comment.body == 'recheck' ||
+         github.event.comment.body == 'I have read the CLA Document and I hereby sign the CLA'))
+    steps:
+      # Organization members are exempt: their rights come from employment/contribution terms with
+      # DocSlurp, Inc. Needs a token with read:org (CLA_BOT_TOKEN below).
+      - name: List organization members
+        id: members
+        env:
+          GH_TOKEN: ${{ secrets.CLA_BOT_TOKEN }}
+        run: |
+          members="$(gh api "orgs/${GITHUB_REPOSITORY_OWNER}/members" --paginate --jq '.[].login' | paste -sd, -)"
+          if [ -z "$members" ]; then
+            echo "::error::Could not list organization members; check CLA_BOT_TOKEN has read:org"
+            exit 1
+          fi
+          echo "list=$members" >> "$GITHUB_OUTPUT"
+      # contributor-assistant/github-action v2.6.1, pinned by commit SHA.
+      - name: CLA Assistant
+        uses: contributor-assistant/github-action@ca4a40a7d1004f18d9960b404b97e5f30a505a08 # v2.6.1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Fine-grained token with Contents: read and write on the private signatures repository only.
+          PERSONAL_ACCESS_TOKEN: ${{ secrets.CLA_SIGNATURES_TOKEN }}
+        with:
+          path-to-signatures: signatures/v1/cla.json
+          path-to-document: https://github.com/DocSlurp/docslurp-oss/blob/main/CLA.md
+          branch: main
+          # Bots and organization members never need to sign.
+          allowlist: dependabot*,renovate*,github-actions*,copilot*,*[bot],${{ steps.members.outputs.list }}
+          remote-organization-name: DocSlurp
+          remote-repository-name: docslurp-cla-signatures
+          lock-pullrequest-aftermerge: false
+          custom-notsigned-prcomment: >-
+            Thank you for your contribution. Before we can review it, we need you to sign the
+            [DocSlurp Contributor License Agreement](https://github.com/DocSlurp/docslurp-oss/blob/main/CLA.md)
+            (Part A for individuals; your employer signs Part B if it may own your work). Questions: legal@docslurp.io.

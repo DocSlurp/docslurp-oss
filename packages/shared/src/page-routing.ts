@@ -300,7 +300,7 @@ export const pageFeaturesSchema = z.object({
   /** Decision-model answers; null = triage not run. */
   decisions: decisionAnswersSchema.nullable(),
   provenance: z.object({
-    probe: z.enum(["pymupdf-probe", "native-pdf-probe", "liteparse"]),
+    probe: z.enum(["native-pdf-probe", "liteparse"]),
     probeMs: nonNegative,
   }),
 });

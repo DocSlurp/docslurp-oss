@@ -1,15 +1,19 @@
 # Extraction Adapter Feature Matrix
 
+> **PyMuPDF replaced (2026-10-15).** The former `pymupdf-text`, `pymupdf4llm`, `pymupdf-ocr` and `pymupdf-regions` columns are now the private in-process `native-pdf` engine (MIT, optional; the public tree falls back to kreuzberg and Poppler). Ratings carried over from the PyMuPDF columns were re-checked for markdown, tables, reading order and speed in evals/native-pdf-vs-pymupdf-2026-10-15.md; the rest are unchanged estimates.
+
 > Living reference for choosing the right extraction tool per document type and feature requirement. Update this when adding new adapters or benchmarks.
+>
+> **Marker/Surya were removed** (GPLv3 code, CC-BY-NC-SA weights with competitor exclusions; see `THIRD_PARTY_NOTICES.md`). No runner, benchmark CLI, lockfile or weights reference them any more, so the `marker` columns and rows below are historical and describe no supported adapter.
 
 ## Quick-Reference: Tool → Best For
 
 | Tool | Best For | Avoid For | Relative Speed | Min RAM |
 |------|----------|-----------|----------------|---------|
-| **pymupdf-text** | Fast bulk text, large files (>100 pg) | Tables, math, images, layout | Fastest | **128 MB** |
-| **pymupdf4llm** | Born-digital PDFs → markdown | Scanned pages, complex tables, math | Fast | **256 MB** |
-| **pymupdf-ocr** | Scanned pages when tesseract is available | Born-digital (wastes time), poor handwriting | Medium | **512 MB** |
-| **pymupdf-regions** | Layout analysis, header/footer/sidebar/body bboxes | Content extraction alone | Fast | **256 MB** |
+| **native-pdf-text** | Fast bulk text, large files (>100 pg; >2000 pages fall back to kreuzberg) | Tables, math, images, layout | Fastest | **128 MB** |
+| **native-pdf** | Born-digital PDFs → markdown with pipe tables, links, reading-order repair | Scanned pages without OCR models, math | Fast | **256 MB** |
+| **native-pdf-ocr** | Scanned pages when the OCR models are shipped (`DOCSLURP_NATIVE_PDF_OCR_MODELS=1`), else tesseract | Born-digital (wastes time), poor handwriting | Medium | **512 MB** |
+| **native-pdf-regions** | Layout analysis, header/footer/sidebar/body bboxes | Content extraction alone | Fast | **256 MB** |
 | **docling** | Tables, figures, structured academic docs | Very large files (>50 MB), speed-critical | Medium | **2 GB** |
 | **docling-vlm** | Math, formulas, complex figures, mixed content | Cost-sensitive, batch jobs, simple text | Slow | **4 GB** |
 | **kreuzberg** | General-purpose markdown, links, metadata | Complex tables, heavy academic math | Fast-Medium | **512 MB** |
@@ -27,12 +31,12 @@
 
 | Tier | RAM | Tools | Typical Use Case |
 |------|-----|-------|------------------|
-| **Lightweight** | 128–512 MB | pymupdf-text, pymupdf4llm, kreuzberg, pandoc | Batch processing, large files, simple text |
+| **Lightweight** | 128–512 MB | native-pdf-text, native-pdf, kreuzberg, pandoc | Batch processing, large files, simple text |
 | **Standard** | 1–2 GB | unstructured-fast/hi_res, docling, TableExtractor, ImageExtractor | Most production docs with tables/images |
 | **Heavy** | 3–4 GB | marker, docling-vlm, MathExtractor | Academic papers, math-heavy, quality-first |
 | **GPU** | 1 GB+ VRAM | vision-runtime | Handwriting, charts, degraded scans |
 
-> **Note**: These are *minimum* estimates for single-document processing. Concurrent processing scales roughly linearly — 4 parallel docs with docling needs ~8 GB. Use `pymupdf-text` for high-concurrency services.
+> **Note**: These are *minimum* estimates for single-document processing. Concurrent processing scales roughly linearly — 4 parallel docs with docling needs ~8 GB. Use `native-pdf-text` for high-concurrency services.
 
 ---
 
@@ -46,7 +50,7 @@
 
 ### 1. Content Type Support
 
-| Feature | pymupdf-text | pymupdf4llm | pymupdf-ocr | docling | docling-vlm | kreuzberg | unstructured-hi_res | marker | vision |
+| Feature | native-pdf-text | native-pdf | native-pdf-ocr | docling | docling-vlm | kreuzberg | unstructured-hi_res | marker | vision |
 |---------|:----------:|:-----------:|:-----------:|:-------:|:-----------:|:---------:|:-------------------:|:------:|:------:|
 | Plain text | ✓ | ✓ | ~ | ✓ | ✓ | ✓ | ✓ | ✓ | ~ |
 | Markdown output | ✗ | ✓ | ✗ | ✓ | ✓ | ✓ | ~ | ✓ | ~ |
@@ -58,7 +62,7 @@
 
 ### 2. Table Support
 
-| Feature | pymupdf-text | pymupdf4llm | docling | docling-vlm | kreuzberg | unstructured-hi_res | marker | TableExtractor |
+| Feature | native-pdf-text | native-pdf | docling | docling-vlm | kreuzberg | unstructured-hi_res | marker | TableExtractor |
 |---------|:----------:|:-----------:|:-------:|:-----------:|:---------:|:-------------------:|:------:|:--------------:|
 | Markdown tables | ✗ | ✓ | ✓ | ✓ | ~ | ~ | ✓ | ✓ |
 | Multi-page tables | ✗ | ~ | ~ | ~ | ~ | ✗ | ~ | ~ |
@@ -71,7 +75,7 @@
 
 ### 3. Image & Visual Support
 
-| Feature | pymupdf-text | pymupdf4llm | docling | ImageExtractor | vision | marker |
+| Feature | native-pdf-text | native-pdf | docling | ImageExtractor | vision | marker |
 |---------|:----------:|:-----------:|:-------:|:--------------:|:------:|:------:|
 | Embedded raster extraction | ✗ | ✗ | ✗ | ✓ | N/A | ✗ |
 | Image bbox in page | ✗ | ✗ | ~ | ~ | N/A | ✗ |
@@ -85,7 +89,7 @@
 
 ### 4. Math & Specialized Content
 
-| Feature | pymupdf-text | pymupdf4llm | docling | docling-vlm | MathExtractor | marker | kreuzberg |
+| Feature | native-pdf-text | native-pdf | docling | docling-vlm | MathExtractor | marker | kreuzberg |
 |---------|:----------:|:-----------:|:-------:|:-----------:|:-------------:|:------:|:---------:|
 | Inline math ($...$) | ✗ | ~ | ✓ | ✓ | ✓ | ~ | ~ |
 | Display math ($$...$$) | ✗ | ~ | ✓ | ✓ | ✓ | ~ | ~ |
@@ -98,7 +102,7 @@
 
 ### 5. Layout & Structure
 
-| Feature | pymupdf-text | pymupdf4llm | pymupdf-regions | docling | unstructured-hi_res | marker | kreuzberg |
+| Feature | native-pdf-text | native-pdf | native-pdf-regions | docling | unstructured-hi_res | marker | kreuzberg |
 |---------|:----------:|:-----------:|:---------------:|:-------:|:-------------------:|:------:|:---------:|
 | Header detection | ✗ | ~ | ✓ | ✓ | ~ | ~ | ~ |
 | Footer detection | ✗ | ~ | ✓ | ✓ | ~ | ~ | ~ |
@@ -112,7 +116,7 @@
 
 ### 6. Performance & Operational
 
-| Metric | pymupdf-text | pymupdf4llm | docling | docling-vlm | kreuzberg | unstructured-hi_res | marker | vision |
+| Metric | native-pdf-text | native-pdf | docling | docling-vlm | kreuzberg | unstructured-hi_res | marker | vision |
 |--------|:----------:|:-----------:|:-------:|:-----------:|:---------:|:-------------------:|:------:|:------:|
 | Pages/sec (approx) | 50-100 | 20-40 | 5-15 | 0.5-2 | 10-25 | 3-10 | 5-15 | 0.1-0.5 |
 | Memory footprint | Low | Low-Med | Medium | High | Low | Medium | Medium | Very High |
@@ -134,7 +138,7 @@
 |----------|------|------|
 | 1 | **unstructured-hi_res** | Primary: table bboxes + cell structure |
 | 2 | **docling** | Fallback: markdown tables + figures |
-| 3 | **pymupdf4llm** | Fast fallback: markdown + raw text |
+| 3 | **native-pdf** | Fast fallback: markdown + raw text |
 | 4 | **TableExtractor** | Structured output: row/col counts + markdown |
 
 **Routing rule**: `table-heavy` route → `unstructured` primary, `docling` fallback
@@ -161,10 +165,10 @@
 | Priority | Tool | Role |
 |----------|------|------|
 | 1 | **vision-runtime** | Primary: VLM page analysis for handwriting/degraded |
-| 2 | **pymupdf-ocr** | Fallback: tesseract OCR on rendered pages |
+| 2 | **native-pdf-ocr** | Fallback: tesseract OCR on rendered pages |
 | 3 | **ImageExtractor** | Extract embedded scan images for re-OCR |
 
-**Routing rule**: `handwriting-or-degraded` → `vision` primary, `pymupdf-ocr` fallback
+**Routing rule**: `handwriting-or-degraded` → `vision` primary, `native-pdf-ocr` fallback
 
 ---
 
@@ -175,8 +179,8 @@
 |----------|------|------|
 | 1 | **marker** | Primary: best multi-column reading order |
 | 2 | **docling** | Fallback: figures + structured layout |
-| 3 | **pymupdf4llm** | Fast fallback: basic markdown |
-| 4 | **pymupdf-regions** | Layout analysis: detect column boundaries |
+| 3 | **native-pdf** | Fast fallback: basic markdown |
+| 4 | **native-pdf-regions** | Layout analysis: detect column boundaries |
 
 **Routing rule**: `complex-layout` or `multicolumn` → `marker` primary, `docling` fallback
 
@@ -189,7 +193,7 @@
 |----------|------|------|
 | 1 | **kreuzberg** | Primary: excellent code block preservation |
 | 2 | **docling** | Fallback: structured sections + code |
-| 3 | **pymupdf4llm** | Fast fallback: basic markdown |
+| 3 | **native-pdf** | Fast fallback: basic markdown |
 
 **Routing rule**: `code-heavy` → `kreuzberg` primary, `docling` fallback
 
@@ -215,7 +219,7 @@
 |----------|------|------|
 | 1 | **ImageExtractor** | Primary: extract all embedded images |
 | 2 | **vision-runtime** | Generate descriptions per image/page |
-| 3 | **pymupdf-text** | Extract captions and surrounding text |
+| 3 | **native-pdf-text** | Extract captions and surrounding text |
 
 **Routing rule**: `image-heavy` → `ImageExtractor` + `vision` for descriptions
 
@@ -226,11 +230,11 @@
 
 | Priority | Tool | Role |
 |----------|------|------|
-| 1 | **pymupdf-text** | Primary: fast text for all pages |
-| 2 | **pymupdf4llm** | Upgrade: select pages with tables/layout |
+| 1 | **native-pdf-text** | Primary: fast text for all pages |
+| 2 | **native-pdf** | Upgrade: select pages with tables/layout |
 | 3 | **vision-runtime** | Rescue: only flagged degraded pages |
 
-**Routing rule**: Large files → `pymupdf-text` default, selective heavy-tool rerun
+**Routing rule**: Large files → `native-pdf-text` default, selective heavy-tool rerun
 
 ---
 
@@ -238,16 +242,16 @@
 
 | Pain Point | Affected Tools | Mitigation |
 |------------|---------------|------------|
-| Tables split across page breaks | pymupdf4llm, kreuzberg, marker | Use `TableExtractor` + heuristic stitching |
-| LaTeX ligatures (fi, fl, ff) | pymupdf-text, pymupdf4llm | Use `docling-vlm` or post-process normalization |
+| Tables split across page breaks | native-pdf, kreuzberg, marker | Use `TableExtractor` + heuristic stitching |
+| LaTeX ligatures (fi, fl, ff) | native-pdf-text, native-pdf | Use `docling-vlm` or post-process normalization |
 | Inline images with captions | All text extractors | Use `ImageExtractor` + `vision` for captioning |
-| Handwriting mixed with print | pymupdf-ocr, tesseract | Use `vision-runtime` with handwriting prompt |
-| Watermarks / stamps | All extractors | `pymupdf-regions` helps identify non-body text |
+| Handwriting mixed with print | native-pdf-ocr, tesseract | Use `vision-runtime` with handwriting prompt |
+| Watermarks / stamps | All extractors | `native-pdf-regions` helps identify non-body text |
 | QR codes | All extractors | Not yet supported; needs dedicated detector |
 | Vector diagrams (flowcharts) | All extractors | Not yet supported; needs SVG converter |
 | Nested tables | unstructured, docling | Flatten or use `TableExtractor` recursive parser |
 | Multi-page table continuation | All | `TableExtractor` needs multi-page stitching logic |
-| OCR on rotated pages | tesseract, pymupdf-ocr | Pre-deskew with `pymupdf-regions` rotation detection |
+| OCR on rotated pages | tesseract, native-pdf-ocr | Pre-deskew with `native-pdf-regions` rotation detection |
 
 ---
 
@@ -255,10 +259,10 @@
 
 | Adapter | Status | Next Milestone |
 |---------|--------|----------------|
-| pymupdf-text | Production | Stable |
-| pymupdf4llm | Production | Stable |
-| pymupdf-ocr | Production | Add deskew pre-processing |
-| pymupdf-regions | Production | Add rotation detection |
+| native-pdf-text | Production | Stable |
+| native-pdf | Production | Stable |
+| native-pdf-ocr | Production | Add deskew pre-processing |
+| native-pdf-regions | Production | Add rotation detection |
 | docling | Production | Reduce memory footprint |
 | docling-vlm | Beta | Add batching for multi-page |
 | kreuzberg | Production | Add table bbox support |

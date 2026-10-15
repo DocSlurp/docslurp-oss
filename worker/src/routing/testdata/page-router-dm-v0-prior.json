@@ -137,57 +137,6 @@
       "n": 0
     },
     {
-      "targetId": "native:pymupdf",
-      "pass": {
-        "text": {
-          "intercept": 3.4924,
-          "weights": {
-            "text_layer_ok": 1.2,
-            "degraded": -1.8,
-            "handwriting": -2.4
-          },
-          "baseRate": 0.88
-        },
-        "math": {
-          "intercept": 2.561,
-          "weights": {
-            "needs_math_extraction": -3,
-            "has_math": -1.2,
-            "low_resolution": -0.96,
-            "degraded": -1.2
-          },
-          "baseRate": 0.35
-        },
-        "tables": {
-          "intercept": 1.9993,
-          "weights": {
-            "needs_table_structure": -2.2,
-            "has_table": -1,
-            "multi_column": -0.4,
-            "degraded": -0.8
-          },
-          "baseRate": 0.45
-        },
-        "overall": {
-          "intercept": 1.5157,
-          "weights": {
-            "text_layer_ok": 1,
-            "degraded": -1.5
-          },
-          "baseRate": 0.78
-        }
-      },
-      "cost": {
-        "meanUsd": 0,
-        "p90Usd": 0
-      },
-      "latency": {
-        "p50Ms": 30,
-        "p95Ms": 66
-      },
-      "n": 0
-    },
-    {
       "targetId": "ocr:tesseract",
       "pass": {
         "text": {

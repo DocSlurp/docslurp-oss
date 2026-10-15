@@ -216,7 +216,7 @@ export class RoutePagesStage implements Stage {
         documentFormat: "pdf",
         // TL1: OCR-layer pages are verified against a band re-OCR (about 1 s CPU, OCR-layer pages only).
         verifyOcrLayer: true,
-        probe: this.deps.probe ?? (this.runner ? createProbeRunner(this.runner) : undefined),
+        probe: this.deps.probe ?? createProbeRunner(),
         signal,
       });
 
@@ -316,7 +316,7 @@ export class RoutePagesStage implements Stage {
     clip?: (pageNumber: number, box: BBox) => Promise<Uint8Array | null>;
     dispose: () => Promise<void>;
   } {
-    const probe = this.deps.probe ?? (this.runner ? createProbeRunner(this.runner) : createProbeRunner());
+    const probe = this.deps.probe ?? createProbeRunner();
     let dir: string | undefined;
     const cache = new Map<number, Promise<string | null>>();
     const clip = readRasterEngine() === "native-pdf" || this.deps.renderClip

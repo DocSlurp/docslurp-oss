@@ -79,6 +79,8 @@ function findRepoRoot(start: string): string {
 }
 const repoRoot = findRepoRoot(dirname(fileURLToPath(import.meta.url)));
 
+export { IN_PROCESS_ENV_KEY } from "./lib/client-ip.js";
+
 export function createApiApp(): Hono {
   const app = new Hono();
   // Spend blocked by credits, budget caps or entitlement is a 402, not a 500.

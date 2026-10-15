@@ -2,7 +2,11 @@
 
 Send DocSlurp any file. Get back page-by-page Markdown and structured fields, hybrid search and RAG context, and a chat endpoint whose answers cite the page they came from.
 
-This repository holds the **DocSlurp server** (API and worker), the **database migrations**, the **CLI** and the **client SDKs**. The hosted product and its web dashboard are developed separately at <https://docslurp.io>.
+1. **Ingest and extraction:** PDFs, Office files, EPUBs, HTML, images, audio and video become page-by-page Markdown, page images, chunks and, against a JSON schema, structured fields.
+2. **RAG search:** hybrid search and RAG context with page citations, over REST, the SDK, the CLI, MCP and drop-in Algolia, Meilisearch, Typesense and Pagefind clients.
+3. **Configurable chat endpoint:** cited answers from `/v1/chat` and the OpenAI-compatible `/v1/chat/completions`, with streaming and per-workspace settings.
+
+This repository holds the **DocSlurp server** (API and worker), the **database migrations**, the **CLI**, the **client SDKs** and the search integrations. The hosted product and its web dashboard are developed separately at <https://docslurp.io>.
 
 > **Status: pre-release.** APIs and data models change without notice until v1.
 
@@ -52,14 +56,15 @@ Every package has an official docs page, a source folder in this repository and 
 ## Develop
 
 ```sh
+cp .env.example .env
 pnpm install
 pnpm db:up && pnpm db:migrate && pnpm db:seed
-pnpm dev:api        # the Hono API, standalone
-pnpm dev:worker     # the ingestion worker
+pnpm dev:api        # the Hono API on http://localhost:8787
+pnpm dev:worker     # the ingestion worker (second terminal)
 pnpm typecheck && pnpm test
 ```
 
-See [CONTRIBUTING.md](CONTRIBUTING.md), [SECURITY.md](SECURITY.md) and [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md).
+See [CONTRIBUTING.md](CONTRIBUTING.md), [SECURITY.md](SECURITY.md) and [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md). Contributions require signing the [CLA](CLA.md). Security, conduct, licensing and trademark questions: **legal@docslurp.io**.
 
 ## License
 
@@ -69,4 +74,4 @@ DocSlurp is **source-available, not OSI-approved open source**.
 - **SDKs, clients, shared contracts and the WordPress plugin**: MIT. Using them to talk to a DocSlurp server over HTTP does not make your application SSPL.
 - Third-party components keep their own licenses. See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) and [docs/licensing.md](docs/licensing.md).
 
-"DocSlurp" is a trademark of its owner; see [TRADEMARK.md](TRADEMARK.md).
+"DocSlurp" and the DocSlurp logo are trademarks of DocSlurp, Inc. (unregistered, registration pending); the licenses above do not grant rights to them. See [TRADEMARK.md](TRADEMARK.md).

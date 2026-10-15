@@ -1,6 +1,8 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import path from "node:path";
+
+import { resolveFixturePath } from "./fixture-paths.js";
 import { homedir } from "node:os";
 import { spawn } from "node:child_process";
 
@@ -102,10 +104,9 @@ function parseExtractor(value: string | undefined): ParseBenchDocSlurpExtractor 
     case "hybrid":
     case "docling":
     case "kreuzberg":
-    case "pymupdf-text":
-    case "pymupdf4llm-markdown":
+    case "native-pdf-text":
+    case "native-pdf-markdown":
     case "pdftotext":
-    case "pymupdf-ocr-text":
     case "unpdf":
       return (value ?? "hybrid") as ParseBenchDocSlurpExtractor;
     default:
@@ -376,7 +377,13 @@ async function main(): Promise<void> {
   const results: FixtureBenchmarkResult[] = [];
   try {
     for (const fixture of fixtures) {
-      const inputPath = path.resolve(path.dirname(manifestPath), fixture.path);
+      const inputPath = resolveFixturePath(path.dirname(manifestPath), fixture.path, root);
+      if (!inputPath) {
+        console.warn(
+          `[fixture-benchmark] skipping ${fixture.id}: ${fixture.path} is not present; run \`pnpm fixtures:fetch\` for third-party fixtures`,
+        );
+        continue;
+      }
       const outputPath = path.join(
         root,
         ".benchmarks",
@@ -428,6 +435,9 @@ async function main(): Promise<void> {
     await runner.close();
   }
 
+  if (results.length === 0) {
+    throw new Error("No selected fixtures are present; run `pnpm fixtures:fetch` for the third-party set");
+  }
   const tagSummaries = buildTagSummaries(results);
   const archivedAt = new Date();
   const runId = formatTimestampForPath(archivedAt);

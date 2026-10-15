@@ -1,5 +1,5 @@
 import { Hono } from "hono";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { RequestActor } from "../lib/request-actor.js";
 import type { RateLimitStore } from "../middleware/rate-limit.js";
@@ -435,5 +435,32 @@ describe("deferred route authentication", () => {
     app.post("/v1/chat/completions", (c) => c.json({ ok: true }));
     expect((await app.request("/v1/chat/completions", { method: "POST" })).status).toBe(200);
     expect((await app.request("/v1/chat/completions", { method: "POST" })).status).toBe(429);
+  });
+});
+
+describe("IP limiter behind Cloudflare on Fly", () => {
+  beforeEach(() => {
+    resetApiRateLimitBuckets();
+    vi.stubEnv("FLY_APP_NAME", "docslurp-app");
+    vi.stubEnv("TRUSTED_PROXIES", "cloudflare");
+  });
+  afterEach(() => vi.unstubAllEnvs());
+
+  const edge = (visitor: string, extra: Record<string, string> = {}) => ({ "fly-client-ip": "104.16.1.1", "cf-connecting-ip": visitor, ...extra });
+
+  it("keys on the visitor behind a shared Cloudflare edge, so one busy edge does not throttle others", async () => {
+    const app = buildIpLimitedApp(() => 1_000);
+    expect((await app.request("/ok", { headers: edge("203.0.113.1") })).status).toBe(200);
+    expect((await app.request("/ok", { headers: edge("203.0.113.1") })).status).toBe(200);
+    expect((await app.request("/ok", { headers: edge("203.0.113.1") })).status).toBe(429);
+    expect((await app.request("/ok", { headers: edge("203.0.113.2") })).status).toBe(200);
+  });
+
+  it("cannot be evaded by rotating a spoofed CF-Connecting-IP on a direct request", async () => {
+    const app = buildIpLimitedApp(() => 1_000);
+    const direct = (spoof: string) => ({ "fly-client-ip": "198.51.100.7", "cf-connecting-ip": spoof });
+    expect((await app.request("/ok", { headers: direct("1.1.1.1") })).status).toBe(200);
+    expect((await app.request("/ok", { headers: direct("1.1.1.2") })).status).toBe(200);
+    expect((await app.request("/ok", { headers: direct("1.1.1.3") })).status).toBe(429);
   });
 });

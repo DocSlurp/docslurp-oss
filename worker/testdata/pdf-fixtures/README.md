@@ -1,5 +1,13 @@
 Opt-in PDF evaluation corpus for difficult extraction cases.
 
+Tracked here: only the synthetic PDFs written by `generate-fixtures.mjs` (they regenerate byte-identically, so
+they are ours and licence-clean). Third-party PDFs (course catalogs, a census scan, mixed-media samples) are
+**not** in git: `edge-fixtures.json` references them by relative path and `pnpm fixtures:fetch` downloads them
+into the gitignored `.cache/fixtures/pdf/` from `../third-party-fixtures.manifest.json` (url, sha256, licence,
+attribution per file). `pnpm fixtures:fetch --check` verifies the cache offline, `--remote` HEADs every url.
+Files with no recorded upstream (`source: "private-mirror"`) need the private mirror (`DOCSLURP_ASSET_MIRROR` + `DOCSLURP_ASSET_S3_*`, read-only team key; see docs/licensing.md); the benchmark CLIs
+skip fixtures that are absent and say so. Never copy fetched files into this directory or commit them.
+
 Add fixture PDFs matching the entries in `fixtures.json` here. The TypeScript benchmark harness can be run with:
 
 ```bash

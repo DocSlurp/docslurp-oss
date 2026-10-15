@@ -78,7 +78,7 @@ describe("verifyProfileAgainstMetadata", () => {
   });
 
   it("fails closed for gated repositories", () => {
-    const profile = localVisionModelProfilesById["surya-ocr2-mlx-8bit-g64"];
+    const profile = localVisionModelProfilesById["glm-ocr-q8-0"];
     const metadata: HuggingFaceModelMetadata = {
       id: profile.repo,
       gated: "manual",

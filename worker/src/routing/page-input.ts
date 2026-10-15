@@ -1,12 +1,9 @@
 /**
- * Builds `PageInput[]` for the router from a PDF: runs the deterministic
- * `worker/scripts/page_probe.py` (JSON lines: features, text facts, images,
- * optional thumbnails) through the worker's command runner and merges the
+ * Builds `PageInput[]` for the router from a PDF: runs the deterministic in-process native-pdf probe
+ * (`worker/src/routing/probe/`; JSON lines: features, text facts, images, optional thumbnails) and merges the
  * classify-route heuristic (when available) into each page's `heuristic`.
  */
 
-import { existsSync } from "node:fs";
-import path from "node:path";
 import sharp from "sharp";
 import {
   PAGE_FEATURES_SCHEMA_VERSION,
@@ -17,10 +14,8 @@ import {
   type TextLayerStatus,
 } from "@docslurp/shared";
 
-import { CommandRunner, resolveScriptsDir, resolveVenvBin } from "../tools/runner.js";
 import { loadProbeBinding } from "./probe/binding.js";
 import { NativeProbeOpenError, looksEncrypted, lockedRow, probeNativePdf } from "./probe/probe.js";
-import { readRoutingFlags, type PageProbeEngine } from "./flags.js";
 
 export interface ProbeRow {
   pageNumber: number;
@@ -79,29 +74,6 @@ export type ProbeRunner = (args: {
   signal?: AbortSignal;
 }) => Promise<string>;
 
-export type { PageProbeEngine } from "./flags.js";
-
-/** `PAGE_PROBE_ENGINE=python|native-pdf` (flags.ts); python stays the default until the parity gate passes. */
-export function pageProbeEngine(env: NodeJS.ProcessEnv = process.env): PageProbeEngine {
-  return readRoutingFlags(env).probeEngine;
-}
-
-/** Python runner: the venv python via the worker's CommandRunner. */
-export function createPythonProbeRunner(runner: CommandRunner = new CommandRunner()): ProbeRunner {
-  return async ({ pdfPath, pages, thumbDir, thumbPx, verifyOcrLayer, signal }) => {
-    const venvPython = path.join(resolveVenvBin(process.env.PYTHON_VENV), "python3");
-    const python = existsSync(venvPython) ? venvPython : "python3";
-    const script = path.join(resolveScriptsDir(), "page_probe.py");
-    const args = [script, pdfPath];
-    if (pages) args.push("--pages", pages);
-    if (thumbDir) args.push("--thumb-dir", thumbDir, "--thumb-px", String(thumbPx ?? 384));
-    if (verifyOcrLayer) args.push("--verify-ocr-layer");
-    const plan = await runner.plan(python, ...args);
-    if (!plan.available) throw new Error("page probe python runtime is not available");
-    return (await runner.run(plan, signal)).stdout;
-  };
-}
-
 /** Native runner: probes in-process through the native-pdf binding and emits the same JSON lines. Throws when the binding is absent. */
 export function createNativeProbeRunner(): ProbeRunner {
   return async ({ pdfPath, pages, thumbDir, thumbPx, verifyOcrLayer, signal }) => {
@@ -114,27 +86,19 @@ export function createNativeProbeRunner(): ProbeRunner {
 }
 
 /**
- * Default runner. Honours `PAGE_PROBE_ENGINE`: with `native-pdf` the probe runs in-process and falls back to the Python
- * probe (logged) when the binding is missing or cannot open the document, so a page is never left unprobed.
+ * Default runner: the in-process native-pdf probe (the only probe; the Python probe was removed). A document the
+ * engine cannot open is reported as locked when it looks encrypted (needs attention) rather than failing the run; without
+ * the private binding the error says so and the page router stays off for that document (PAGE_ROUTER_MODE is off by default).
  */
-export function createProbeRunner(runner: CommandRunner = new CommandRunner(), env: NodeJS.ProcessEnv = process.env): ProbeRunner {
-  const python = createPythonProbeRunner(runner);
-  if (pageProbeEngine(env) !== "native-pdf") return python;
+export function createProbeRunner(): ProbeRunner {
   const native = createNativeProbeRunner();
   return async (args) => {
     try {
       return await native(args);
     } catch (error) {
       if (!(error instanceof NativeProbeOpenError)) throw error;
-      console.log(`[native-pdf] probe fell back to python code=${error.code} reason=${error.message.split("\n")[0]}`);
-      try {
-        return await python(args);
-      } catch (pythonError) {
-        // No Python (lean image) and the binding cannot read this document: an encrypted file the engine cannot open is
-        // reported as locked (needs attention) rather than failing the run; anything else surfaces the engine error.
-        if (await looksEncrypted(args.pdfPath).catch(() => false)) return JSON.stringify(lockedRow()) + "\n";
-        throw new Error(`page probe failed: native-pdf ${error.message}; python ${pythonError instanceof Error ? pythonError.message : String(pythonError)}`);
-      }
+      if (await looksEncrypted(args.pdfPath).catch(() => false)) return JSON.stringify(lockedRow()) + "\n";
+      throw new Error(`page probe failed: ${error.message}`);
     }
   };
 }
@@ -235,7 +199,7 @@ export async function pageInputFromProbeRow(
         textDensityScore: entry?.textDensityScore ?? row.textCoverage,
       },
       decisions: null,
-      provenance: { probe: row.probeEngine ? "native-pdf-probe" : "pymupdf-probe", probeMs: row.probeMs },
+      provenance: { probe: "native-pdf-probe", probeMs: row.probeMs },
     },
     textFacts: {
       wordCount: row.textFacts.wordCount,

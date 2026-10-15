@@ -3,11 +3,11 @@ import { describe, expect, it } from "vitest";
 import { buildCanonicalDocumentFromMarkdown } from "../lib/canonical-document.js";
 import {
   enrichCanonicalDocumentWithBestParser,
-  enrichCanonicalDocumentWithPyMuPdf,
+  enrichCanonicalDocumentWithNativePdf,
   scoreParserEnrichments
 } from "../lib/parser-canonical.js";
 
-describe("enrichCanonicalDocumentWithPyMuPdf", () => {
+describe("enrichCanonicalDocumentWithNativePdf", () => {
   it("adds parser page numbers and bounding boxes to aligned canonical blocks", () => {
     const base = buildCanonicalDocumentFromMarkdown({
       documentId: "doc-1",
@@ -16,7 +16,7 @@ describe("enrichCanonicalDocumentWithPyMuPdf", () => {
       extractor: "pandoc"
     });
 
-    const enriched = enrichCanonicalDocumentWithPyMuPdf(base, {
+    const enriched = enrichCanonicalDocumentWithNativePdf(base, {
       pages: [
         {
           blocks: [
@@ -47,10 +47,10 @@ describe("enrichCanonicalDocumentWithPyMuPdf", () => {
           ]
         }
       ]
-    }, "s3://bucket/doc-1.pymupdf.json");
+    }, "s3://bucket/doc-1.native-pdf.json");
 
-    expect(enriched.source.parser).toBe("pymupdf");
-    expect(enriched.source.parserArtifactUri).toBe("s3://bucket/doc-1.pymupdf.json");
+    expect(enriched.source.parser).toBe("native-pdf");
+    expect(enriched.source.parserArtifactUri).toBe("s3://bucket/doc-1.native-pdf.json");
     expect(enriched.blocks[0]?.bbox).toEqual({ x: 10, y: 20, width: 100, height: 20 });
     expect(enriched.blocks[1]?.pageNumber).toBe(1);
     expect(enriched.blocks[0]?.metadata.bboxCoordinateSpace).toBe("page-top-left-points");
@@ -65,7 +65,7 @@ describe("enrichCanonicalDocumentWithPyMuPdf", () => {
       extractor: "pandoc"
     });
 
-    const enriched = enrichCanonicalDocumentWithPyMuPdf(base, {
+    const enriched = enrichCanonicalDocumentWithNativePdf(base, {
       pages: [{ blocks: [{ bbox: [0, 0, 10, 10], lines: [{ spans: [{ text: "Different text" }] }] }] }]
     });
 
@@ -96,8 +96,8 @@ describe("enrichCanonicalDocumentWithPyMuPdf", () => {
         ]
       },
       {
-        parser: "pymupdf",
-        artifactUri: "s3://bucket/doc-3.pymupdf.json",
+        parser: "native-pdf",
+        artifactUri: "s3://bucket/doc-3.native-pdf.json",
         payload: {
           pages: [
             {
@@ -117,7 +117,7 @@ describe("enrichCanonicalDocumentWithPyMuPdf", () => {
       }
     ]);
 
-    expect(enriched.source.parser).toBe("pymupdf");
+    expect(enriched.source.parser).toBe("native-pdf");
     expect(enriched.blocks.filter((block) => block.metadata.parserMatched === true)).toHaveLength(2);
   });
 

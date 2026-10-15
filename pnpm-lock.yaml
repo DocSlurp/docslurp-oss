@@ -32,6 +32,9 @@ importers:
         specifier: ^3.4.9
         version: 3.4.9
     devDependencies:
+      '@aws-sdk/client-s3':
+        specifier: ^3.1150.0
+        version: 3.1150.0
       dotenv:
         specifier: ^18.0.7
         version: 18.0.7

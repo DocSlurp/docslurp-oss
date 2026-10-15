@@ -29,8 +29,7 @@ split-pages -> classify-route -> route-pages ------------------------> render-im
                                      v                                      |  routed groups, executors, cascade
   S0 probe (free)        per-page PageFeatures: text-layer status, OCR-layer flag, glyph/unmapped ratios, images,
                          drawings, tables, H9 unusual features (forms, JS, attachments, layers, Type3, rotation,
-                         encryption, links, annotations). Python PyMuPDF probe by default; in-process native-pdf
-                         probe behind PAGE_PROBE_ENGINE.
+                         encryption, links, annotations). In-process native-pdf probe (the only probe; needs the private binding).
   S1 trust (free)        accept the native text layer when status is ok, OCR-layer band re-OCR agreement >= 0.4,
                          math-glyph gate (0.01) and the inset gate allow it (TL1). Never a whole-page model question.
   S1b inset gate         per-image crops of insets covering 2-85% of the page go to the head decision model;
@@ -56,7 +55,7 @@ Code map:
 |---|---|
 | Contracts (zod, schema versions) | `packages/shared/src/page-routing.ts`, `routing-targets.ts`, `pipeline.ts` (`pageRouterConfigSchema`, `resolvePageRouterMode`) |
 | Stage | `worker/src/stages/route-pages.ts` (plan + telemetry), `render-images.ts` / `vision-extract.ts` (execute an active plan via `routing/active-plan.ts`) |
-| Probe and page inputs | `worker/src/routing/probe/`, `page-input.ts`, `worker/scripts/page_probe.py` |
+| Probe and page inputs | `worker/src/routing/probe/`, `page-input.ts` (the research-only Python probe lives in `scripts/legacy-page-probe/`) |
 | Trust, insets, triage | `trust.ts`, `inset-gate.ts`, `inset-triage.ts`, `triage.ts`, `contact-sheet.ts`, `decision-client.ts` |
 | Decision chain health | `routing/health/` (canary, degeneracy, multi-day history, quarantine) |
 | Policy and planner | `policy.ts`, `planner.ts`, `estimate.ts`, `validate.ts`, `routers/` (baseline, decision-model, heuristic), `policies/` |
@@ -112,7 +111,7 @@ document extractors, all `free`. Workspace-configured embedding and vision model
 | EmbeddingGemma 300M ONNX | non-free | Gemma terms | ai.google.dev/gemma/terms |
 | LightOnOCR-3-0.8B, MinerU2.5-Pro, olmOCR-2, DeepSeek-OCR-2, PaddleOCR-VL-1.6, Infinity-Parser2, Qwen3-VL, Qwen2-VL-2B | free | Apache-2.0 | HF cards |
 | Ling-3.0-flash-VL, DeepSeek V4.1 Flash, GLM-5.3-Flash (hosted) | free | MIT | HF cards |
-| Florence-2, Kreuzberg, Tesseract, PyMuPDF (AGPL-3.0), native-pdf | free | MIT / Apache-2.0 / AGPL / internal | project licences |
+| Florence-2, Kreuzberg, Tesseract, native-pdf | free | MIT / Apache-2.0 / internal | project licences |
 | Gemini, Claude, GPT-6 Luna, Jev, Clef, pplx-decider | proprietary-hosted | vendor API terms | vendor docs |
 
 ## Decision models and the health chain
@@ -168,7 +167,6 @@ Keep `DOCSLURP_PDF_ENGINE=off` (or `shadow`) until the gate passes.
 | `DISABLE_NON_FREE_SOFTWARE` | `false` | true, false, 1, 0 | Opt-out of non-free-licensed models and engines; see "Licence classes" below. A typo reads as false with one warning. |
 | `PAGE_ROUTER_TABLE_GATE` | `off` | off, shadow | Ruled-grid-or-crop table rule in shadow (telemetry only). |
 | `PAGE_ROUTER_PREFER_NATIVE_MARKDOWN` | false | 1/true | Accepted text pages take native-pdf Markdown instead of the canonical page slice. |
-| `PAGE_PROBE_ENGINE` | `python` | python, native-pdf | Probe implementation. Stays python until status agreement reaches 99% (97.95% on binding a88a052). |
 | `PAGE_ROUTER_LABELER_MODEL` | `microsoft/Florence-2-small-ft` | model id | Local image labeler. |
 | `PAGE_ROUTER_MODEL_PRICES_PATH` | shipped list | path | Price list override for estimates. |
 | `DOCSLURP_DECISION_HEALTH_HISTORY` | in memory | path | Multi-day canary history for quarantined decision models. |
@@ -258,8 +256,8 @@ Promote the two features independently and only with evidence; each step is a co
    (no systematic `native-pdf-shadow` disagreement classes), adapter speed at or better than kreuzberg on test (open item,
    see above), the internal pricing validation against the latest `internal research notes` with no regression in pages/min or RSS, the
    evaluation integrity judge passing, and quality at parity on a held-out slice. Rollback: set it back to `shadow`.
-2. **Probe, `PAGE_PROBE_ENGINE=native-pdf`**: only after text-layer status agreement reaches 99% (97.95% on a88a052; re-measure
-   on the pinned 8709e8c).
+2. **Probe**: done. The Python/PyMuPDF probe was removed with PyMuPDF (2026-10-15); `internal research notes`
+   holds the last parity run (text-layer status and needs-attention agree on every page of the development slice).
 3. **Page router, workspace `pageRouter.mode=active` under `PAGE_ROUTER_MODE=active`**: raise the worker ceiling to `active`
    in `fly.worker.toml` (the app stamp stays `shadow`, so no workspace changes behaviour until it sets `active`). Gates:
    shadow plans on production pages show estimated cost and quality at or better than the legacy path, decision-model health

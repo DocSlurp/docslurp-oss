@@ -72,6 +72,17 @@ function authorizedMetricsRequest(authorization: string | undefined): boolean {
   return timingSafeEqual(actualBuffer, expectedBuffer);
 }
 
+/**
+ * True when the request came through Fly's public edge. The proxy stamps every
+ * forwarded request with Fly-Client-IP; Fly health checks and the managed
+ * Prometheus scraper reach the machine over the private network and carry
+ * none. Only meaningful on Fly (FLY_APP_NAME), so self-hosted setups behind
+ * their own proxy keep their existing behaviour.
+ */
+export function arrivedThroughPublicEdge(header: (name: string) => string | undefined): boolean {
+  return Boolean(process.env.FLY_APP_NAME) && Boolean(header("fly-client-ip")?.trim());
+}
+
 function appendQueueMetricLines(lines: string[], queue: QueueMetrics): void {
   lines.push(...formatWorkerScalerMetricLines(queue, SCALER, SCALER_QUERY));
 }
@@ -357,7 +368,14 @@ export const healthRoutes = new Hono()
     const { cachedReadiness } = await import("../services/readiness.js");
     const report = await cachedReadiness();
     c.header("Cache-Control", "no-store");
-    return c.json({ ...report, service: "docslurp-app", requestId: getRequestId(c) }, report.serving ? 200 : 503);
+    // The public edge sees pass/fail per dependency, not latencies, the schema
+    // version or error text. Fly checks (private network) and the metrics bearer see everything.
+    const redact = arrivedThroughPublicEdge((name) => c.req.header(name))
+      && !authorizedMetricsRequest(c.req.header("Authorization") ?? undefined);
+    const body = redact
+      ? { ...report, checks: report.checks.map(({ name, ok, critical }) => ({ name, ok, critical })) }
+      : report;
+    return c.json({ ...body, service: "docslurp-app", requestId: getRequestId(c) }, report.serving ? 200 : 503);
   })
   .get("/metrics", async (c) => {
     if (!env.metricsSecret) {
@@ -387,6 +405,16 @@ export const healthRoutes = new Hono()
     return c.json(await workerFleetReport());
   })
   .get("/fly-scaler-metrics", async (c) => {
+    // Queue depth, demand and fleet sizing are scraped over Fly's private network
+    // (fly.app.toml [metrics]). Public requests need the metrics bearer;
+    // FLY_SCALER_METRICS_PUBLIC=true restores the old open behaviour.
+    if (
+      process.env.FLY_SCALER_METRICS_PUBLIC !== "true"
+      && arrivedThroughPublicEdge((name) => c.req.header(name))
+      && !authorizedMetricsRequest(c.req.header("Authorization") ?? undefined)
+    ) {
+      return c.json({ error: "Not found" }, 404);
+    }
     const payload = await cachedFlyScalerMetricsPayload();
     c.header("Content-Type", "text/plain; version=0.0.4; charset=utf-8");
     return c.body(payload);

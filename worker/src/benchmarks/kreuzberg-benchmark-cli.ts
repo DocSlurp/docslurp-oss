@@ -9,14 +9,14 @@
  *   --fixtures <ids>         Comma-separated fixture IDs to run (default: all kreuzberg-tagged)
  *   --extractors <ids>       Comma-separated extractor IDs to compare
  *                            (default: kreuzberg + each fixture's own list)
- *                            Valid: kreuzberg, pymupdf-text, pymupdf4llm-markdown,
- *                                   pdftotext, pymupdf-ocr-text, unpdf, docling
+ *                            Valid: kreuzberg, native-pdf-text, native-pdf-markdown,
+ *                                   pdftotext, unpdf, docling
  *
  * Examples:
  *   pnpm benchmark:kreuzberg
  *   pnpm benchmark:kreuzberg --output /tmp/kz-report.json
  *   pnpm benchmark:kreuzberg --fixtures kreuzberg-tables-invoice,kreuzberg-links-references
- *   pnpm benchmark:kreuzberg --extractors kreuzberg,pymupdf4llm-markdown
+ *   pnpm benchmark:kreuzberg --extractors kreuzberg,native-pdf-markdown
  */
 import { runKreuzbergBenchmarks, writeKreuzbergBenchmarkReport } from "./kreuzberg-benchmark.js";
 import type { ExtractorId } from "./kreuzberg-benchmark.js";

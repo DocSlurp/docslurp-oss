@@ -14,8 +14,8 @@ import {
 
 describe("lazy python dependencies", () => {
   it("finds the missing distribution in script output", () => {
-    expect(parseMissingPythonDependency("python3 (1): missing dependency: pip install pymupdf4llm (No module named 'pymupdf4llm')")).toBe("pymupdf4llm");
-    expect(parseMissingPythonDependency("ModuleNotFoundError: No module named 'fitz'")).toBe("pymupdf");
+    expect(parseMissingPythonDependency("python3 (1): missing dependency: pip install trafilatura (No module named 'trafilatura')")).toBe("trafilatura");
+    expect(parseMissingPythonDependency("ModuleNotFoundError: No module named 'bs4'")).toBe("beautifulsoup4");
     expect(parseMissingPythonDependency("ModuleNotFoundError: No module named 'pptx.util'")).toBe("python-pptx");
     expect(parseMissingPythonDependency("ModuleNotFoundError: No module named 'PIL'")).toBe("pillow");
     expect(parseMissingPythonDependency("Segmentation fault")).toBeNull();
@@ -23,19 +23,19 @@ describe("lazy python dependencies", () => {
 
   it("only allows distributions the worker declares, pinned from the lock", () => {
     const declared = declaredPythonDistributions();
-    expect(declared.has("pymupdf4llm")).toBe(true);
+    expect(declared.has("trafilatura")).toBe(true);
     expect(declared.has("pypandoc-binary")).toBe(true);
     expect(declared.has("left-pad")).toBe(false);
     // Bundle-only direct-URL wheels (spaCy models) never become PyPI-installable names.
     expect(declared.has("en-core-web-sm")).toBe(false);
     expect(declared.has("docling")).toBe(true);
-    expect(lockedPythonPins().get("pymupdf4llm")).toMatch(/^\d/);
+    expect(lockedPythonPins().get("trafilatura")).toMatch(/^\d/);
     expect(normalizeDistribution("Python_PPTX")).toBe("python-pptx");
   });
 
   it("refuses undeclared packages and honors the off switch without installing", async () => {
     await expect(ensurePythonDistributions(["left-pad"], { venvBin: "/nonexistent/bin" })).resolves.toBe(false);
-    await expect(ensurePythonDistributions(["pymupdf4llm"], { venvBin: "/nonexistent/bin", env: { DOCSLURP_PYTHON_LAZY_INSTALL: "false" } })).resolves.toBe(false);
+    await expect(ensurePythonDistributions(["trafilatura"], { venvBin: "/nonexistent/bin", env: { DOCSLURP_PYTHON_LAZY_INSTALL: "false" } })).resolves.toBe(false);
     expect(lazyPythonInstallEnabled({})).toBe(true);
     expect(lazyPythonInstallEnabled({ DOCSLURP_PYTHON_LAZY_INSTALL: "false" })).toBe(false);
   });
@@ -51,7 +51,7 @@ const args = process.argv.slice(2);
 fs.appendFileSync(${JSON.stringify(receipt)}, JSON.stringify(args) + "\\n");
 process.exit(args.some(arg => arg.endsWith("requirements.lock.txt")) ? 1 : 0);
 `, { mode: 0o755 });
-      await expect(ensurePythonDistributions(["pymupdf4llm"], { venvBin: bin })).resolves.toBe(true);
+      await expect(ensurePythonDistributions(["trafilatura"], { venvBin: bin })).resolves.toBe(true);
       const calls: string[][] = (await readFile(receipt, "utf8")).trim().split("\n").map(line => JSON.parse(line));
       expect(calls).toHaveLength(2);
       for (const args of calls) {
@@ -78,7 +78,7 @@ process.exit(args.some(arg => arg.endsWith("requirements.lock.txt")) ? 1 : 0);
       await mkdir(readOnly);
       await chmod(readOnly, 0o555);
       const started = Date.now();
-      await expect(ensurePythonDistributions(["pymupdf"], { venvBin: path.join(readOnly, ".venv", "bin") })).resolves.toBe(false);
+      await expect(ensurePythonDistributions(["trafilatura"], { venvBin: path.join(readOnly, ".venv", "bin") })).resolves.toBe(false);
       expect(Date.now() - started).toBeLessThan(2_000);
     } finally {
       await chmod(readOnly, 0o755).catch(() => undefined);
@@ -94,7 +94,7 @@ process.exit(args.some(arg => arg.endsWith("requirements.lock.txt")) ? 1 : 0);
       await mkdir(`${venv}.install-lock`, { recursive: true });
       const started = Date.now();
       await expect(
-        ensurePythonDistributions(["pymupdf"], { venvBin: path.join(venv, "bin"), signal: AbortSignal.timeout(200) }),
+        ensurePythonDistributions(["trafilatura"], { venvBin: path.join(venv, "bin"), signal: AbortSignal.timeout(200) }),
       ).resolves.toBe(false);
       expect(Date.now() - started).toBeLessThan(2_000);
     } finally {

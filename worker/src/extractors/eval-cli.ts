@@ -67,7 +67,7 @@ async function main(): Promise<void> {
       },
     };
     await prepared.execute(executors, "eval", input);
-    await writeFile(destination, JSON.stringify({ status: "ok", adapter: id, output: { [id === "pymupdf" || id === "poppler-text" ? "text" : "markdown"]: prediction, ...(graphArtifacts ? { artifacts: graphArtifacts } : {}) }, usage: [], diagnostics: { latencyMs: performance.now() - started, warnings: [] } }));
+    await writeFile(destination, JSON.stringify({ status: "ok", adapter: id, output: { [id === "poppler-text" ? "text" : "markdown"]: prediction, ...(graphArtifacts ? { artifacts: graphArtifacts } : {}) }, usage: [], diagnostics: { latencyMs: performance.now() - started, warnings: [] } }));
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     const unavailable = /missing dependency|No module named|command not found/i.test(message);

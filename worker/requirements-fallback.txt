@@ -1,6 +1,6 @@
 -r requirements-base.txt
 unstructured[pdf]
-# Marker/Surya require vulnerable Pillow <11; not part of the managed stack.
+# Marker/Surya are not part of the stack (GPLv3 code, restricted weights); see THIRD_PARTY_NOTICES.md.
 
 # Optional vector backends are installed at startup, not baked into images.
 lancedb>=0.10.0

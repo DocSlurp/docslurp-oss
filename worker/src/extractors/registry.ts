@@ -131,10 +131,6 @@ const registered = [
     prepare: (runner, source) => runner.liteParseExtract(source, `${source}.liteparse.json`, false) }),
   definition({ id: "docling", tableAware: true, execute: docling,
     prepare: (runner, source) => runner.doclingMarkdown(source, path.dirname(source)) }),
-  definition({ id: "pymupdf4llm", outputSuffix: ".pymupdf4llm.md", tableAware: true, execute: file,
-    prepare: (runner, source) => runner.pyMuPdf4llmMarkdown(source, `${source}.pymupdf4llm.md`) }),
-  definition({ id: "pymupdf", outputSuffix: ".pymupdf.txt", execute: file,
-    prepare: (runner, source) => runner.pyMuPdfText(source, `${source}.pymupdf.txt`) }),
   definition({ id: "poppler-text", execute: stream,
     prepare: (runner, source) => runner.extractText(source, true) }),
   definition({ id: "graph-local", execute: graph,
@@ -156,7 +152,7 @@ const registered = [
 ];
 
 export const defaultDocumentExtractorOrder: Record<string, string[]> = {
-  pdf: ["kreuzberg", "pymupdf", "docling", "pymupdf4llm"],
+  pdf: ["kreuzberg", "native-pdf", "poppler-text", "docling"],
   "structured-json": ["json"],
   default: ["kreuzberg", "pandoc"],
 };

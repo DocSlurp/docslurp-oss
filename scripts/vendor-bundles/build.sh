@@ -156,12 +156,27 @@ SMOKE="$(mktemp -d)"
 SMOKE_HOME="$(mktemp -d)"
 touch "${SMOKE}/.before"
 export HTTP_PROXY=http://127.0.0.1:9 HTTPS_PROXY=http://127.0.0.1:9 http_proxy=http://127.0.0.1:9 https_proxy=http://127.0.0.1:9 NO_PROXY= no_proxy=
+# A one-page text PDF written by hand (no PDF library in the base venv).
 "${BASE_VENV}/bin/python" - "${SMOKE}/smoke.pdf" <<'PY'
-import sys, pymupdf
-doc = pymupdf.open(); page = doc.new_page()
-page.insert_text((72, 72), "Vendor bundle smoke test", fontsize=18)
-page.insert_text((72, 110), "Quarter  Revenue\nQ1  10\nQ2  12", fontsize=11)
-doc.save(sys.argv[1])
+import sys
+lines = [(18, 72, 720, "Vendor bundle smoke test"), (11, 72, 682, "Quarter  Revenue"), (11, 72, 668, "Q1  10"), (11, 72, 654, "Q2  12")]
+content = "".join(f"BT /F1 {size} Tf 1 0 0 1 {x} {y} Tm ({text}) Tj ET\n" for size, x, y, text in lines).encode("latin-1")
+objects = [
+    b"<< /Type /Catalog /Pages 2 0 R >>",
+    b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+    b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>",
+    b"<< /Length " + str(len(content)).encode() + b" >>\nstream\n" + content + b"endstream",
+    b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>",
+]
+out, offsets = bytearray(b"%PDF-1.4\n"), []
+for number, body in enumerate(objects, 1):
+    offsets.append(len(out))
+    out += f"{number} 0 obj\n".encode() + body + b"\nendobj\n"
+xref = len(out)
+out += f"xref\n0 {len(objects) + 1}\n0000000000 65535 f \n".encode()
+out += b"".join(f"{offset:010d} 00000 n \n".encode() for offset in offsets)
+out += f"trailer\n<< /Size {len(objects) + 1} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n".encode()
+open(sys.argv[1], "wb").write(out)
 PY
 case "${NAME}" in
   docling)

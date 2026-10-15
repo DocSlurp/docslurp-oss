@@ -2,6 +2,7 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import path from "node:path";
 import { tmpdir } from "node:os";
 import { CommandRunner } from "../tools/runner.js";
+import { runNativePdfArm } from "./native-pdf-arm.js";
 import { buildExtractionContract } from "../lib/extraction-contract.js";
 import { scoreExtractionPlausibility } from "../lib/extracted-markdown.js";
 import type { ExtractionContract } from "@docslurp/shared";
@@ -17,7 +18,7 @@ export interface ExtractionBenchmarkResult {
 export async function benchmarkExtractor(args: {
   fixtureId: string;
   fixturePath: string;
-  method: "docling" | "pymupdf" | "pymupdf4llm" | "kreuzberg" | "pandoc";
+  method: "docling" | "native-pdf" | "kreuzberg" | "pandoc";
   runner: CommandRunner;
 }): Promise<ExtractionBenchmarkResult> {
   const { fixtureId, fixturePath, method, runner } = args;
@@ -38,18 +39,8 @@ export async function benchmarkExtractor(args: {
         markdown = await readFile(path.join(tempDir, `${base}.md`), "utf8");
         break;
       }
-      case "pymupdf": {
-        const outPath = path.join(tempDir, "out.txt");
-        const plan = await runner.pyMuPdfText(fixturePath, outPath);
-        await runner.run(plan);
-        markdown = await readFile(outPath, "utf8");
-        break;
-      }
-      case "pymupdf4llm": {
-        const outPath = path.join(tempDir, "out.md");
-        const plan = await runner.pyMuPdf4llmMarkdown(fixturePath, outPath);
-        await runner.run(plan);
-        markdown = await readFile(outPath, "utf8");
+      case "native-pdf": {
+        markdown = await runNativePdfArm(fixturePath, "markdown");
         break;
       }
       case "kreuzberg": {

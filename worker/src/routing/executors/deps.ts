@@ -1,5 +1,5 @@
 /**
- * Production ExecutorDeps: page text from the canonical document, per-page pymupdf, page
+ * Production ExecutorDeps: page text from the canonical document, per-page native-pdf text/Markdown, page
  * rasters from the shared raster cache, sharp crops, the worker's tesseract and Florence
  * tooling, and the vision stage's own per-image model call (usage ledger, cost, privacy gate).
  */
@@ -35,7 +35,7 @@ export interface ProductionExecutorDepsInput {
   document: Document;
   storage: Pick<ArtifactStore, "bucket" | "getJson" | "downloadToTempFile">;
   rasters: Pick<PdfRasterCache, "renderSelectedPages" | "sourcePath"> & Partial<Pick<PdfRasterCache, "renderClip">>;
-  runner: Pick<CommandRunner, "tesseractOcr" | "florence2" | "pyMuPdfPageText" | "run">;
+  runner: Pick<CommandRunner, "tesseractOcr" | "florence2" | "run">;
   /** Ledger lookup for the document's canonical-document artifact uri. */
   canonicalUri: () => string | null;
   selection: VisionConfig;
@@ -101,7 +101,6 @@ export function createProductionExecutorDeps(input: ProductionExecutorDepsInput)
   }
 
   let pageTexts: Promise<Map<number, string> | null> | null = null;
-  let pymupdfPages: Promise<string[] | null> | null = null;
   let nativePdfDoc: Promise<NativePdfDocument | null> | null = null;
   let nativePdfMarkdownPages: Promise<string[] | null> | null = null;
   const heights = new Map<number, number>();
@@ -121,21 +120,6 @@ export function createProductionExecutorDeps(input: ProductionExecutorDepsInput)
       return new Map([...byPage].map(([page, texts]) => [page, texts.join("\n\n")]));
     })().catch(() => null);
     return pageTexts;
-  };
-
-  const loadPymupdf = (signal?: AbortSignal): Promise<string[] | null> => {
-    pymupdfPages ??= (async () => {
-      if (input.document.mimeType !== "application/pdf") return null;
-      const source = await input.rasters.sourcePath(input.document);
-      const output = `${source}.pages.json`;
-      temp.push(output);
-      const plan = await input.runner.pyMuPdfPageText(source, output);
-      if (!plan.available) return null;
-      await input.runner.run(plan, signal);
-      const parsed = await readJsonFile<{ pages?: unknown }>(output);
-      return Array.isArray(parsed.pages) ? parsed.pages.map((p) => (typeof p === "string" ? p : "")) : null;
-    })().catch(() => null);
-    return pymupdfPages;
   };
 
   /** The native-pdf engine's open document for this run's source, or null when no engine/PDF. */
@@ -179,9 +163,7 @@ export function createProductionExecutorDeps(input: ProductionExecutorDepsInput)
           return null;
         }
       }
-      if (extractorId !== "pymupdf") return null;
-      const pages = await loadPymupdf();
-      return pages?.[pageNumber - 1] ?? null;
+      return null;
     },
 
     nativeOcrPolicy: readRoutingFlags().nativeOcr,

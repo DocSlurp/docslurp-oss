@@ -6,8 +6,7 @@ export type LocalVisionModelId =
   | "glm-ocr-f16"
   | "mineru25-pro-q4-k-m"
   | "mineru25-pro-mlx-fp16"
-  | "infinity-parser2-flash-q6-k"
-  | "surya-ocr2-mlx-8bit-g64";
+  | "infinity-parser2-flash-q6-k";
 
 export interface ExpectedModelFile {
   path: string;
@@ -288,37 +287,6 @@ export const localVisionModelProfiles: LocalVisionModelProfile[] = [
     hardwareNotes: [
       "RTX 3090 is not required for smoke evals; the Q6 model plus projector is still modest.",
       "Use more VRAM for long-context throughput rather than basic compatibility.",
-    ],
-  },
-  {
-    id: "surya-ocr2-mlx-8bit-g64",
-    label: "Surya OCR 2 MLX 8-bit G64",
-    repo: "Reza2kn/surya-ocr-2-mlx-8bit-g64",
-    sourceUrl: "https://huggingface.co/Reza2kn/surya-ocr-2-mlx-8bit-g64",
-    license: "openrail",
-    format: "mlx-safetensors",
-    status: "experimental",
-    defaultPrompt: ocrPrompt,
-    serverModelId: "docslurp-surya-ocr2-mlx-8bit-g64",
-    ollamaRef: null,
-    lmsModelKey: "Reza2kn/surya-ocr-2-mlx-8bit-g64",
-    supportedProviders: ["lms"],
-    expectedRepoSha: "f528e13e6caad90a7e18bfb4b0e315ca4fe2f626",
-    expectedFiles: [
-      {
-        path: "model.safetensors",
-        size: 802186634,
-        sha256: "15b0e986a4bebdc511285bd1d8ce14d866ca731869cc55a587e6114037290de8",
-        role: "model",
-      },
-    ],
-    safetyNotes: [
-      "Uses safetensors and explicitly marked experimental by the publisher.",
-      "The model card reports weak old-scan and long-tiny-text behavior; use eval fixtures before routing traffic.",
-    ],
-    hardwareNotes: [
-      "RTX 3090 is not required; this is an Apple-side MLX quantization target.",
-      "Prefer Apple Silicon or an LM Studio runtime that can serve the model through OpenAI-compatible APIs.",
     ],
   },
 ];

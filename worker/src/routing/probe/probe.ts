@@ -54,7 +54,7 @@ export class NativeProbeOpenError extends Error {
  */
 export const PROBE_LIMITS = NATIVE_PDF_OPEN_LIMITS;
 
-/** PyMuPDF span boxes span the font's ascent-to-descent line box; glyph-tight boxes are shorter, so pad them to match. */
+/** The original Python probe's span boxes span the font's ascent-to-descent line box; glyph-tight boxes are shorter, so pad them to match. */
 const LINE_BOX_PAD = 0.1;
 
 function addPadded(mask: Mask, [x0, y0, x1, y1]: [number, number, number, number]): void {
@@ -163,7 +163,7 @@ export async function probePage(
     t.words += pythonSplitWords(txt);
   }
   // The native engine leaves glyphs without a Unicode mapping out of the text; its glyph stats count them.
-  // PyMuPDF keeps them as U+FFFD/PUA characters, so they count as (unmapped) characters here too.
+  // The original Python probe kept them as U+FFFD/PUA characters, so they count as (unmapped) characters here too.
   const hiddenUnmapped = Math.max(0, stats.unmapped - t.unmappedChars);
   t.chars += hiddenUnmapped;
   t.unmappedChars += hiddenUnmapped;

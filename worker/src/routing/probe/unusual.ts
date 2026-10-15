@@ -10,7 +10,7 @@ const ANNOT_FEATURE: Record<string, string> = {
   FreeText: "annotation-freetext",
 };
 const MOSTLY_UNMAPPED = 0.5;
-// Annotation subtypes that are not annotations in the PyMuPDF `annots()` sense.
+// Annotation subtypes that are not user annotations: widgets, links and popups.
 const NOT_ANNOTATIONS = new Set(["Widget", "Link", "Popup"]);
 
 /** Features whose content is NOT in the native text layer (or cannot be read): a trusted text layer is not the whole page. */

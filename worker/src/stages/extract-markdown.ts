@@ -62,6 +62,7 @@ export { scoreExtractionPlausibility } from "../lib/extracted-markdown.js";
 import type { CommandPlan } from "../tools/runner.js";
 import { resolveNativePdfEngine } from "../native-pdf/engine.js";
 import { buildNativeParserPayload } from "../native-pdf/parser-payload.js";
+import { buildNativePdfRegions } from "../native-pdf/regions.js";
 import { nativePdfEmphasisEnabled, resolveNativePdfMode } from "../native-pdf/mode.js";
 import { runNativePdfShadow } from "../native-pdf/shadow.js";
 import { documentExtractorRegistry, serializeExtractorOptions, type ExtractedCandidate, type PreparedExtractor } from "../extractors/registry.js";
@@ -492,7 +493,7 @@ export class ExtractMarkdownStage implements Stage {
                         document,
                         tempFile,
                         state,
-                        { hasTablePages, nativePdf: winningCandidate.label === "native-pdf" },
+                        { hasTablePages },
                         signal,
                       );
                   const parserEnrichedCanonicalDocument =
@@ -1567,12 +1568,10 @@ export class ExtractMarkdownStage implements Stage {
     state: import("../pipeline/pipeline.js").WorkflowState,
     options: {
       hasTablePages?: boolean;
-      /** Winning extractor was the native PDF engine: build the block payload in-process. */
-      nativePdf?: boolean;
     } = {},
     signal?: AbortSignal,
   ): Promise<
-    Array<{ parser: "pymupdf" | "native-pdf" | "unstructured"; uri: string; payload: unknown }>
+    Array<{ parser: "native-pdf" | "unstructured"; uri: string; payload: unknown }>
   > {
     const isPdf = this.isPdfDocument(document);
     if (!isPdf) {
@@ -1580,37 +1579,27 @@ export class ExtractMarkdownStage implements Stage {
     }
 
     const artifacts: Array<{
-      parser: "pymupdf" | "native-pdf" | "unstructured";
+      parser: "native-pdf" | "unstructured";
       uri: string;
       payload: unknown;
     }> = [];
     const jobs: Array<{
-      parser: "pymupdf" | "native-pdf" | "unstructured";
+      parser: "native-pdf" | "unstructured";
       outputPath: string;
       planFactory: () => Promise<CommandPlan>;
       timeoutMs: number;
-    }> = [
-      {
-        parser: "pymupdf" as const,
-        outputPath: `${sourceTempFile}.pymupdf.json`,
-        planFactory: () =>
-          this.runner.pyMuPdfJson(
-            sourceTempFile,
-            `${sourceTempFile}.pymupdf.json`,
-          ),
-        timeoutMs: Math.min(this.cfg.parserArtifactTimeoutMs, 15_000),
-      },
-    ];
+    }> = [];
 
-    if (options.nativePdf) {
-      // Block payload from the in-process engine replaces the Python PyMuPDF job when it can be built.
-      const nativePayload = await this.buildNativeParserPayloadOrNull(sourceTempFile, signal);
-      if (nativePayload) {
-        const key = `${document.userId}/${document.runId}/parser/${document.id}.native-pdf.json`;
-        await this.storage.putJson(key, nativePayload);
-        artifacts.push({ parser: "native-pdf", uri: this.storage.uri(key), payload: nativePayload });
-        jobs.shift();
-      }
+    // Block payload (bbox, font size) from the in-process engine, whichever extractor won; absent when the private
+    // engine is not installed, in which case the canonical document keeps its Markdown-derived blocks.
+    const nativePayload = await this.buildNativeParserPayloadOrNull(
+      sourceTempFile,
+      withTimeoutSignal(signal, Math.min(this.cfg.parserArtifactTimeoutMs, 15_000)),
+    );
+    if (nativePayload) {
+      const key = `${document.userId}/${document.runId}/parser/${document.id}.native-pdf.json`;
+      await this.storage.putJson(key, nativePayload);
+      artifacts.push({ parser: "native-pdf", uri: this.storage.uri(key), payload: nativePayload });
     }
 
     if (this.shouldBuildUnstructuredParserArtifact(state, options)) {
@@ -1665,40 +1654,23 @@ export class ExtractMarkdownStage implements Stage {
       (state.run.pipeline as { pdfRegionExtraction?: boolean })
         .pdfRegionExtraction
     ) {
-      const regionsOutputPath = `${sourceTempFile}.regions.json`;
       try {
-        const regionsPlan = await this.runner.pyMuPdfRegions(
+        const regionsPayload = await this.buildNativeRegionsOrNull(
           sourceTempFile,
-          regionsOutputPath,
+          withTimeoutSignal(signal, Math.min(this.cfg.parserArtifactTimeoutMs, 20_000)),
         );
-        if (regionsPlan.available) {
-          await this.runner.run(
-            regionsPlan,
-            withTimeoutSignal(
-              signal,
-              Math.min(this.cfg.parserArtifactTimeoutMs, 20_000),
-            ),
-          );
-          const regionsPayload = await readJsonFile(regionsOutputPath);
+        if (regionsPayload) {
           const regionsKey = `${document.userId}/${document.runId}/parser/${document.id}.regions.json`;
           await this.storage.putJson(regionsKey, regionsPayload);
           state.artifactLedger.recordDocument(document.id, "pdf-regions", this.storage.uri(regionsKey));
-          const regionPayloadTyped = regionsPayload as {
-            pageCount?: number;
-            pages?: Array<{ regionCount?: number }>;
-          };
-          const totalRegions =
-            regionPayloadTyped.pages?.reduce(
-              (sum, p) => sum + (p.regionCount ?? 0),
-              0,
-            ) ?? 0;
+          const totalRegions = regionsPayload.pages.reduce((sum, p) => sum + p.regionCount, 0);
           pushPerfMetric({
             metric: "pdf-region-count",
             value: totalRegions,
             unit: "regions",
             metadata: {
               documentId: document.id,
-              pageCount: regionPayloadTyped.pageCount ?? 0,
+              pageCount: regionsPayload.pageCount,
               artifactUri: this.storage.uri(regionsKey),
             },
           });
@@ -1723,6 +1695,19 @@ export class ExtractMarkdownStage implements Stage {
       options.hasTablePages === true ||
       (state.run.pipeline as { pdfRegionExtraction?: boolean }).pdfRegionExtraction === true
     );
+  }
+
+  /** Page regions (header/sidebar/body/footer blocks) from the in-process native engine; null when it cannot serve them. */
+  private async buildNativeRegionsOrNull(sourceTempFile: string, signal?: AbortSignal) {
+    const engine = await resolveNativePdfEngine(this.runner);
+    if (!engine) return null;
+    const doc = await engine.openPath(sourceTempFile, { signal });
+    try {
+      const regions = await buildNativePdfRegions(doc, {}, signal);
+      return regions.pages.length > 0 ? regions : null;
+    } finally {
+      await doc.close().catch(() => undefined);
+    }
   }
 
   /** Block payload from the in-process native engine; null (not an error) when it cannot serve it. */

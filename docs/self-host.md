@@ -77,11 +77,11 @@ docker compose --env-file .env.selfhost -f compose.selfhost.yml --profile full u
 ```
 
 This switches the queue consumer to the full worker. It needs more resources.
-Both workers bake the base Python parsers (pymupdf, pymupdf4llm and the Office/EPUB
-readers). Docling and Unstructured come from prebuilt vendor bundles when
+Both workers bake the base Python parsers (the Office/EPUB/HTML
+readers; PDFs go through Kreuzberg and Poppler). Docling and Unstructured come from prebuilt vendor bundles when
 `DOCSLURP_VENDOR_BUNDLE_BASE_URL` is set: an `https://` mirror or a
 `file:///path` directory of bundle archives, verified against the sha256 pins in
-`worker/vendor-bundles.json`. Without a bundle source, the full worker falls back
+`worker/vendor-bundles.json`. The bucket DocSlurp's own workers read is private, so build the bundles yourself and serve them from your own mirror. Without a bundle source, the full worker falls back
 to pip-installing them on first boot (several GB; set
 `DOCSLURP_WORKER_INSTALL_HEAVY_DEPS_ON_STARTUP=false` to skip that). Watch its
 logs before submitting heavy files. See [Worker image and vendor
@@ -171,6 +171,29 @@ your-domain.example {
   reverse_proxy 127.0.0.1:8787
 }
 ```
+
+### Client IP behind a proxy or CDN
+
+Rate limits, audit logs and sign-in limits key on the client address. With no
+proxy configured the server uses the right-most `X-Forwarded-For` entry
+(`API_TRUSTED_PROXY_HOPS`, default 1) or `X-Real-IP`. Set `TRUSTED_PROXIES` to
+a comma-separated list of the `cloudflare` keyword and/or CIDRs for the proxies
+in front of the app:
+
+| Setup | `TRUSTED_PROXIES` | Client address comes from |
+| --- | --- | --- |
+| Caddy/nginx only | unset (or the proxy's CIDR) | `X-Forwarded-For` the proxy appends |
+| Cloudflare, then your proxy | `cloudflare,127.0.0.1` | `X-Forwarded-For`, skipping trusted hops from the right |
+| Fly.io behind Cloudflare | `cloudflare` | `CF-Connecting-IP`, only if `Fly-Client-IP` is a Cloudflare address |
+
+Forwarded headers are never read from a peer outside this set, so a client that
+reaches the origin directly cannot choose its own address. `CF-Connecting-IP` is
+honoured only for peers in Cloudflare's published ranges (pinned in
+`packages/shared/src/cloudflare-ips.ts`; refresh with
+`node scripts/update-cloudflare-ips.mjs`). Your proxy must overwrite, not
+append to, any client-supplied `X-Forwarded-For`/`X-Real-IP`. To refuse
+requests that skip the proxy, set `REQUIRE_TRUSTED_PROXY=true` (default off;
+health and metrics paths stay open).
 
 Do not publish the Postgres, Redis, MinIO, or Temporal ports. This Compose file
 does not bind them to the host. For public use, configure backups and monitor

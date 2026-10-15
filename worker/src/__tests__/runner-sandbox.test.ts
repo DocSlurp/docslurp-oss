@@ -267,19 +267,18 @@ describe("document tool invocation planning", () => {
 
   it("does not insert a delimiter before option values that are paths", () => {
     const planned = planDocumentToolInvocation({
-      binary: "mutool",
-      args: ["draw", "-F", "txt", "-o", "-out.txt", "-input.pdf"],
-      fileArgIndexes: [4, 5],
+      binary: "pdftoppm",
+      args: ["-png", "-r", "150", "-input.pdf", "-out"],
+      fileArgIndexes: [3, 4],
       supportsDoubleDash: false,
     });
 
     expect(planned.args).toEqual([
-      "draw",
-      "-F",
-      "txt",
-      "-o",
-      "./-out.txt",
+      "-png",
+      "-r",
+      "150",
       "./-input.pdf",
+      "./-out",
     ]);
   });
 

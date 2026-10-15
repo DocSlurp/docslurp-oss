@@ -1,5 +1,6 @@
 import type { Stage } from "../pipeline/pipeline.js";
 import { runDocumentStage, runDocuments } from "../pipeline/checkpoints.js";
+import { resolveNativePdfEngine } from "../native-pdf/engine.js";
 import type { CommandRunner } from "../tools/runner.js";
 import type { ArtifactStore } from "../tools/storage.js";
 
@@ -52,7 +53,7 @@ export class FormatToolingStage implements Stage {
       checks.push(
         { tool: "pdftotext", profile: "fast-text-layer", plan: () => this.runner.extractText(sourceKey) },
         { tool: "pdftohtml", profile: "fast-text-layer", plan: () => this.runner.extractHtml(sourceKey) },
-        { tool: "pymupdf", profile: "layout-aware-markdown", plan: () => this.runner.pyMuPdfText(sourceKey, "out.txt") },
+        { tool: "native-pdf", profile: "layout-aware-markdown", plan: async () => ({ available: (await resolveNativePdfEngine(this.runner)) !== null }) },
         { tool: "docling", profile: "layout-aware-markdown", plan: () => this.runner.doclingMarkdown(sourceKey, ".") },
         { tool: "ocrmypdf", profile: "ocr-rescue", plan: () => this.runner.ocrPdf(sourceKey, "out.pdf") }
       );

@@ -4,9 +4,9 @@ import type { CommandRunner } from "../tools/runner.js";
 
 describe("document extractor registry", () => {
   it("resolves configured IDs in order and rejects unknown or incompatible IDs", () => {
-    expect(documentExtractorRegistry.resolve("pdf", ["pymupdf", "kreuzberg"])).toEqual(["pymupdf", "kreuzberg"]);
+    expect(documentExtractorRegistry.resolve("pdf", ["native-pdf", "kreuzberg"])).toEqual(["native-pdf", "kreuzberg"]);
     expect(() => documentExtractorRegistry.resolve("pdf", ["unknown"])).toThrow(/unknown extractor/);
-    expect(() => documentExtractorRegistry.resolve("office-word", ["pymupdf"])).toThrow(/does not support/);
+    expect(() => documentExtractorRegistry.resolve("office-word", ["native-pdf"])).toThrow(/does not support/);
     expect(documentExtractorRegistry.resolve("office-excel")).toEqual(["kreuzberg"]);
     expect(documentExtractorRegistry.resolve("latex")).toEqual(["pandoc"]);
     expect(documentExtractorRegistry.resolve("structured-json")).toEqual(["json"]);
@@ -16,7 +16,7 @@ describe("document extractor registry", () => {
 
   it("exposes direct methods as distinct graph edges", () => {
     const edges = documentExtractorRegistry.graphAdapters();
-    expect(edges.find((edge) => edge.extractorId === "pymupdf" && edge.accepts.includes("source/pdf"))?.emits).toEqual(["document/text"]);
+    expect(edges.find((edge) => edge.extractorId === "poppler-text" && edge.accepts.includes("source/pdf"))?.emits).toEqual(["document/text"]);
     expect(edges.filter((edge) => edge.extractorId === "kreuzberg").length).toBeGreaterThan(1);
     expect(new Set(edges.map((edge) => edge.id)).size).toBe(edges.length);
   });
@@ -24,7 +24,7 @@ describe("document extractor registry", () => {
   it("serializes only the selected extractor's options", () => {
     const options = { kreuzberg: { outputFormat: "markdown" }, dolphin: { mode: "page" } };
     expect(serializeExtractorOptions(options, "kreuzberg")).toBe('{"outputFormat":"markdown"}');
-    expect(serializeExtractorOptions(options, "pymupdf")).toBeUndefined();
+    expect(serializeExtractorOptions(options, "native-pdf")).toBeUndefined();
   });
 
   it("registers Poppler text and the local graph as selectable PDF methods", async () => {
@@ -49,11 +49,11 @@ describe("document extractor registry", () => {
   });
 
   it("prepares the requested ID without silently falling back to pandoc", async () => {
-    const plan = { binary: "pymupdf", args: [], available: true };
-    const runner = { pyMuPdfText: async () => plan } as unknown as CommandRunner;
-    const prepared = await documentExtractorRegistry.prepare("pymupdf", runner, "/tmp/sample.pdf");
-    expect(prepared.label).toBe("pymupdf");
-    expect(prepared.outputPath).toBe("/tmp/sample.pdf.pymupdf.txt");
+    const plan = { binary: "node", args: [], available: true };
+    const runner = { kreuzbergMarkdown: async () => plan } as unknown as CommandRunner;
+    const prepared = await documentExtractorRegistry.prepare("kreuzberg", runner, "/tmp/sample.pdf");
+    expect(prepared.label).toBe("kreuzberg");
+    expect(prepared.outputPath).toBe("/tmp/sample.pdf.kreuzberg.md");
     expect(prepared.plan).toBe(plan);
     await expect(documentExtractorRegistry.prepare("missing", runner, "/tmp/sample.pdf")).rejects.toThrow(/unknown extractor/);
   });

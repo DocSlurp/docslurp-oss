@@ -116,7 +116,6 @@ function rolesFor(id: string, latex = false): AssignmentRole[] {
   if (id === "skip") return ["skip"];
   if (id === "local:florence-2-small") return ["image-label"];
   if (id === "native:kreuzberg") return ["extract-text", "table"];
-  if (id === "native:pymupdf") return ["extract-text"];
   // Neutral native-pdf engine targets (the engine behind them is an internal detail).
   if (id === NATIVE_PDF_MARKDOWN_TARGET_ID) return ["extract-text", "table"];
   if (id === NATIVE_PDF_TEXT_TARGET_ID) return ["extract-text"];
@@ -231,13 +230,6 @@ function seedTargets(): RoutingTarget[] {
       "native",
       { extractorId: "kreuzberg" },
       { usesNativeTextLayer: true, emitsHtmlTables: true },
-      "local",
-    ),
-    base(
-      "native:pymupdf",
-      "native",
-      { extractorId: "pymupdf" },
-      { usesNativeTextLayer: true },
       "local",
     ),
     nativePdfTarget(NATIVE_PDF_MARKDOWN_TARGET_ID, "markdown", { emitsHtmlTables: false }),

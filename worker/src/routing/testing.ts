@@ -69,7 +69,7 @@ export function makePage(s: PageSpec = {}): PageInput {
         textDensityScore: 0.5,
       },
       decisions: null,
-      provenance: { probe: "pymupdf-probe", probeMs: 1 },
+      provenance: { probe: "native-pdf-probe", probeMs: 1 },
     },
     textFacts: {
       wordCount: words,

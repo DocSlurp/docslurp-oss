@@ -39,7 +39,7 @@ describe("buildPageInputs", () => {
     });
     expect(pages[0]!.images).toEqual([{ index: 0, bbox: { x: 10, y: 20, width: 200, height: 100 }, coverage: 0.3 }]);
     expect(pages[0]!.textFacts).toEqual({ wordCount: 330, imageCount: 1, imageCoverage: 0.3, textLayerStatus: "ok" });
-    expect(pages[0]!.features.provenance).toEqual({ probe: "pymupdf-probe", probeMs: 4.2 });
+    expect(pages[0]!.features.provenance).toEqual({ probe: "native-pdf-probe", probeMs: 4.2 });
     expect(pages[0]!.thumbnail).toBeUndefined();
   });
 

@@ -14,7 +14,6 @@ brew install \
   ghostscript \
   imagemagick \
   libtiff \
-  mupdf-tools \
   node \
   ocrmypdf \
   pandoc \

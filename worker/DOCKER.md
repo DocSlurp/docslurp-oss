@@ -7,8 +7,8 @@ Sizes, contents, Fly limits and vendor bundles are documented in
 
 Production worker (`fly.worker.toml`), about 1.9 GB uncompressed: Node 24 with a pruned, worker-only
 `node_modules` (`pnpm deploy`), poppler-utils, pandoc, ffmpeg, ClamAV, bubblewrap,
-and a wheel-only Python venv with the base parsers (pymupdf, pymupdf4llm,
-trafilatura, ebooklib, python-pptx, openpyxl, xlsx2csv). Docling and Unstructured
+and a wheel-only Python venv with the base parsers (trafilatura,
+ebooklib, python-pptx, openpyxl, xlsx2csv). Docling and Unstructured
 are fetched on demand as sha256-pinned vendor bundles
 (`DOCSLURP_VENDOR_BUNDLE_BASE_URL`). Runtime pip installs are off.
 
@@ -18,7 +18,7 @@ Self-host image for every document type, about 2.6 GB uncompressed. Everything i
 
 - **Tesseract OCR** - with eng, fra, deu, spa language packs
 - **LibreOffice headless** - office format conversion (pptx, xlsx, doc, rtf)
-- **ghostscript, imagemagick, mupdf-tools, qpdf, ocrmypdf, catdoc, unrtf**
+- **ghostscript, imagemagick, qpdf, ocrmypdf, catdoc, unrtf**
 - **Docling / Unstructured** - from vendor bundles, or (without a bundle source)
   the legacy first-boot install of `requirements.lock.txt` into `/app/.venv`
   (`DOCSLURP_WORKER_INSTALL_HEAVY_DEPS_ON_STARTUP`, default true here)

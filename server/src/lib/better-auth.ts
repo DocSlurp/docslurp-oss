@@ -205,6 +205,6 @@ export const auth = betterAuth({
  * client-supplied auth client-IP header with the edge-derived address, so the
  * sign-in, sign-up and password-reset rate limits key on the real client.
  */
-export async function handleAuthRequest(request: Request): Promise<Response> {
-  return safeErrorResponse(await auth.handler(withTrustedAuthClientIp(request)));
+export async function handleAuthRequest(request: Request, options: { trustedInternal?: boolean } = {}): Promise<Response> {
+  return safeErrorResponse(await auth.handler(withTrustedAuthClientIp(request, options)));
 }

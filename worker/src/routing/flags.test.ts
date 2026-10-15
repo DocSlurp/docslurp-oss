@@ -8,7 +8,6 @@ describe("routing flags", () => {
       disableNonFreeSoftware: false,
       tableGate: "off",
       preferNativeMarkdown: false,
-      probeEngine: "python",
       nativeOcr: "scripts",
       labelerModel: DEFAULT_LABELER_MODEL,
       modelPricesPath: null,
@@ -21,14 +20,13 @@ describe("routing flags", () => {
     const flags = readRoutingFlags({
       PAGE_ROUTER_TABLE_GATE: "SHADOW",
       PAGE_ROUTER_PREFER_NATIVE_MARKDOWN: "True",
-      PAGE_PROBE_ENGINE: "Native-PDF",
       NATIVE_PDF_OCR: "Prefer",
       PAGE_ROUTER_LABELER_MODEL: " org/labeler ",
       PAGE_ROUTER_MODEL_PRICES_PATH: "/tmp/prices.json",
       DOCSLURP_DECISION_HEALTH_HISTORY: "/tmp/h.json",
       DECISION_LOCAL_SIDECAR_CMD: "python sidecar.py",
     });
-    expect(flags).toMatchObject({ tableGate: "shadow", preferNativeMarkdown: true, probeEngine: "native-pdf", nativeOcr: "prefer", labelerModel: "org/labeler" });
+    expect(flags).toMatchObject({ tableGate: "shadow", preferNativeMarkdown: true, nativeOcr: "prefer", labelerModel: "org/labeler" });
     expect(flags.modelPricesPath).toBe("/tmp/prices.json");
     expect(flags.healthHistoryPath).toBe("/tmp/h.json");
     expect(flags.localDecisionSidecarCmd).toBe("python sidecar.py");
@@ -38,12 +36,11 @@ describe("routing flags", () => {
     const flags = readRoutingFlags({
       PAGE_ROUTER_TABLE_GATE: "shadwo",
       PAGE_ROUTER_PREFER_NATIVE_MARKDOWN: "yes",
-      PAGE_PROBE_ENGINE: "native",
       NATIVE_PDF_OCR: "always",
       PAGE_ROUTER_LABELER_MODEL: "  ",
       PAGE_ROUTER_MODEL_PRICES_PATH: "",
     });
-    expect(flags).toMatchObject({ tableGate: "off", preferNativeMarkdown: false, probeEngine: "python", nativeOcr: "scripts", labelerModel: DEFAULT_LABELER_MODEL, modelPricesPath: null });
+    expect(flags).toMatchObject({ tableGate: "off", preferNativeMarkdown: false, nativeOcr: "scripts", labelerModel: DEFAULT_LABELER_MODEL, modelPricesPath: null });
   });
 
   it("reads DISABLE_NON_FREE_SOFTWARE: default false, 1/true on, typo false", () => {

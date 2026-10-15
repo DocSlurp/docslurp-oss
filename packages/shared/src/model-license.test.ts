@@ -85,7 +85,7 @@ describe("licence classes in the routing target catalog", () => {
       "vlm:private/nanonets-ocr2",
     ]);
     expect(ids).toEqual(
-      expect.arrayContaining(["vlm:private/lightonocr-3", "vlm:private/olmocr-2", "vlm:openrouter/google/gemini-3.5-flash", "native:pymupdf"]),
+      expect.arrayContaining(["vlm:private/lightonocr-3", "vlm:private/olmocr-2", "vlm:openrouter/google/gemini-3.5-flash", "native:pdf-markdown"]),
     );
     expect(blocked.targets.some((t) => t.licenseClass === "non-free")).toBe(false);
   });

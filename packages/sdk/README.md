@@ -10,7 +10,7 @@ Start with the [quickstart](#from-file-to-search-results). Then see [live progre
 
 *A five-second illustration with sample data and compressed timing. [Watch the 20-second walkthrough](https://docslurp.io/demos/integration.mp4).*
 
-**Versions:** progress, workspace state, organizations, `streamActivity`, canonical IDs and the integration exports need v0.2.0 or newer; v0.1.x has only upload, search, chat, raw streaming and wait methods. `buildDocumentPreviewPages` and the browser key check (`assertBrowserSafeApiKey`, `apiKeyKind`, `UnsafeApiKeyError`) are not in 0.2.0 and ship in the next release. `@docslurp/sdk/embed` (formerly `@docslurp/embed-sdk`) and the `@docslurp/contrib-search-compat` package arrive in 0.3.0.
+**Versions:** progress, workspace state, organizations, `streamActivity`, canonical IDs and the integration exports need v0.2.0 or newer; v0.1.x has only upload, search, chat, raw streaming and wait methods. `buildDocumentPreviewPages` and the browser key check (`assertBrowserSafeApiKey`, `apiKeyKind`, `UnsafeApiKeyError`) are not in the published 0.2.0. `@docslurp/sdk/embed` (formerly `@docslurp/embed-sdk`) and the [`@docslurp/contrib-search-compat`](https://docslurp.io/docs/packages/contrib-search-compat) package arrive with these in 0.3.0, which is not published yet.
 
 ## From file to search results
 
@@ -246,7 +246,7 @@ Organization methods work with a signed-in session or a server key that has the 
 
 ## Search adapters and website integrations
 
-To keep existing Algolia, Pagefind, Meilisearch or Typesense search calls, use `@docslurp/sdk/search-adapters`. To add a search box, mount `@docslurp/sdk/astro` in Astro or register `@docslurp/sdk/widget` in any other framework. The [integration guide](https://docslurp.io/docs/search-integrations) covers which calls are supported, WordPress setup, Next.js examples, migration tips and troubleshooting. On [Integrations](https://docslurp.io/docs/integrations), each platform has a **Copy prompt for an agent** button that hands setup to a coding agent.
+To keep existing Algolia, Pagefind, Meilisearch or Typesense search calls, use [`@docslurp/contrib-search-compat`](https://docslurp.io/docs/packages/contrib-search-compat), or the Meilisearch, Typesense and Pagefind adapters at `@docslurp/sdk/search-adapters`. For an Astro site, [`@docslurp/contrib-astro`](https://docslurp.io/docs/packages/contrib-astro) wraps the search box. To add a search box, mount `@docslurp/sdk/astro` in Astro or register `@docslurp/sdk/widget` in any other framework. The [integration guide](https://docslurp.io/docs/search-integrations) covers which calls are supported, WordPress setup, Next.js examples, migration tips and troubleshooting. On [Integrations](https://docslurp.io/docs/integrations), each platform has a **Copy prompt for an agent** button that hands setup to a coding agent.
 
 The adapters keep the supported search call shapes and return cited results. They don't cover ingestion (use the SDK), advanced provider filters, the stock Pagefind UI loaders or full provider administration, so read the guide before you migrate. The runnable [adapter example](examples/search-adapters.mjs) reads its configuration from environment variables and exercises all four clients.
 

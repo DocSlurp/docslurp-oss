@@ -9,14 +9,14 @@ describe("ExtractorAttemptLedger", () => {
     expect(ledger.snapshot()).toEqual({ attempted: ["kreuzberg"], unavailable: ["docling"] });
     expect(ledger.canAttempt("docling")).toBe(false);
     expect(ledger.canAttempt("kreuzberg")).toBe(false);
-    expect(ledger.canAttempt("pymupdf")).toBe(true);
+    expect(ledger.canAttempt("poppler-text")).toBe(true);
   });
 
   it("admits each method once even when it is revisited by voting or retry", () => {
     const ledger = new ExtractorAttemptLedger();
-    ledger.reserve("pymupdf");
-    expect(() => ledger.reserve("pymupdf")).toThrow(/already attempted/);
-    ledger.markUnavailable("pymupdf");
-    expect(ledger.snapshot()).toEqual({ attempted: ["pymupdf"], unavailable: [] });
+    ledger.reserve("poppler-text");
+    expect(() => ledger.reserve("poppler-text")).toThrow(/already attempted/);
+    ledger.markUnavailable("poppler-text");
+    expect(ledger.snapshot()).toEqual({ attempted: ["poppler-text"], unavailable: [] });
   });
 });

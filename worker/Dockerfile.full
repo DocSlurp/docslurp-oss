@@ -5,7 +5,7 @@
 # - Includes everything from lean plus:
 #   - Tesseract OCR with language packs (eng, fra, deu, spa)
 #   - LibreOffice headless for office format conversion
-#   - Wheel-only Python venv with the base parsers (pymupdf, pymupdf4llm, trafilatura,
+#   - Wheel-only Python venv with the base parsers (trafilatura,
 #     ebooklib, python-pptx, openpyxl, xlsx2csv) baked in
 #   - Docling / Unstructured: from vendor bundles (DOCSLURP_VENDOR_BUNDLE_BASE_URL,
 #     docs/worker-image.md) or, without a bundle source, the legacy first-boot pip
@@ -83,7 +83,6 @@ RUN apt-get update \
        libgl1 \
        libglib2.0-0 \
        libreoffice \
-       mupdf-tools \
        ocrmypdf \
        pandoc \
        poppler-utils \

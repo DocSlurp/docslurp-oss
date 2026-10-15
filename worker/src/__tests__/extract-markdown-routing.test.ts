@@ -3,12 +3,33 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { Writable } from "node:stream";
 
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import type { CommandPlan } from "../tools/runner.js";
 import { ExtractMarkdownStage } from "../stages/extract-markdown.js";
 import { ExtractorAttemptLedger } from "../extractors/attempt-ledger.js";
 import { documentExtractorRegistry } from "../extractors/registry.js";
+import { setNativePdfEngineForTesting } from "../native-pdf/loader.js";
+import type { NativePdfEngine } from "../native-pdf/types.js";
+
+const popplerText = async () => ({ binary: "pdftotext", args: [], available: true });
+
+/** An engine whose single page holds one text span: enough for the block payload and availability checks. */
+function fakeNativeEngine(): NativePdfEngine {
+  const page = {
+    size: async () => ({ widthPt: 612, heightPt: 792, rotation: 0 }),
+    spans: async () => [{ text: "Hello world.", bbox: [50, 50, 200, 62], font: "Helvetica", size: 11, renderMode: 0, invisible: false, unmapped: 0 }],
+  };
+  return {
+    id: "fake",
+    version: () => ({ engine: "native-pdf", version: "0.0.0", gitSha: "", features: [] }),
+    openPath: async () => ({ pageCount: async () => 1, metadata: async () => ({ encrypted: false }), page: () => page, close: async () => undefined }),
+  } as unknown as NativePdfEngine;
+}
+
+// Hermetic: a locally installed private engine must not change which extractors are planned.
+beforeEach(() => setNativePdfEngineForTesting("absent"));
+afterEach(() => setNativePdfEngineForTesting(null));
 
 function createUploadCapture() {
   let data = "";
@@ -41,8 +62,7 @@ describe("extract markdown PDF routing", () => {
       {
         extractMarkdown: async () => ({ binary: "pandoc", args: [], available: true }),
         doclingMarkdown: async () => ({ binary: "docling", args: [], available: true }),
-        pyMuPdf4llmMarkdown: async () => ({ binary: "python3", args: [], available: true }),
-        pyMuPdfText: async () => ({ binary: "python3", args: [], available: true }),
+        extractText: popplerText,
         kreuzbergMarkdown: async () => ({ binary: "node", args: [], available: true })
       } as any,
       {} as any,
@@ -64,13 +84,12 @@ describe("extract markdown PDF routing", () => {
     expect(planned.tableAware).toBe(true);
   });
 
-  it("falls back to PyMuPDF when Kreuzberg is unavailable", async () => {
+  it("falls back to the native-pdf engine, then Poppler, when Kreuzberg is unavailable", async () => {
     const stage = new ExtractMarkdownStage(
       {
         extractMarkdown: async () => ({ binary: "pandoc", args: [], available: true }),
         doclingMarkdown: async () => ({ binary: "docling", args: [], available: true }),
-        pyMuPdf4llmMarkdown: async () => ({ binary: "python3", args: [], available: true }),
-        pyMuPdfText: async () => ({ binary: "python3", args: [], available: true }),
+        extractText: popplerText,
         kreuzbergMarkdown: async () => ({ binary: "node", args: [], available: false })
       } as any,
       {} as any,
@@ -87,9 +106,37 @@ describe("extract markdown PDF routing", () => {
       attemptLedger: new ExtractorAttemptLedger()
     });
 
-    expect(planned.primary.label).toBe("pymupdf");
+    expect(planned.primary.label).toBe("poppler-text");
     expect(planned.secondary).toBeNull();
     expect(planned.tableAware).toBe(false);
+  });
+
+it("prefers the native-pdf engine over Poppler when it is installed", async () => {
+    const stage = new ExtractMarkdownStage(
+      {
+        extractMarkdown: async () => ({ binary: "pandoc", args: [], available: true }),
+        doclingMarkdown: async () => ({ binary: "docling", args: [], available: true }),
+        extractText: popplerText,
+        kreuzbergMarkdown: async () => ({ binary: "node", args: [], available: false })
+      } as any,
+      {} as any,
+      {} as any
+    );
+
+    setNativePdfEngineForTesting(fakeNativeEngine());
+    const planned = await (stage as any).planExtractors({
+      tempFile: "/tmp/sample.pdf",
+      format: "pdf",
+      order: {},
+      options: {},
+      multiStrategyVoting: false,
+      secondaryId: "next-in-order",
+      attemptLedger: new ExtractorAttemptLedger()
+    });
+
+    expect(planned.primary.label).toBe("native-pdf");
+    expect(planned.secondary).toBeNull();
+    expect(planned.tableAware).toBe(true);
   });
 
   it("uses Kreuzberg before Pandoc for non-PDF extraction", async () => {
@@ -122,8 +169,7 @@ describe("extract markdown PDF routing", () => {
       {
         extractMarkdown: async () => ({ binary: "pandoc", args: [], available: true }),
         doclingMarkdown: async () => ({ binary: "docling", args: [], available: true }),
-        pyMuPdf4llmMarkdown: async () => ({ binary: "python3", args: [], available: true }),
-        pyMuPdfText: async () => ({ binary: "python3", args: [], available: true }),
+        extractText: popplerText,
         kreuzbergMarkdown: async () => ({ binary: "node", args: [], available: false })
       } as any,
       {} as any,
@@ -135,7 +181,7 @@ describe("extract markdown PDF routing", () => {
     const planned = await (stage as any).planExtractors({
       tempFile: "/tmp/sample.pdf",
       format: "pdf",
-      order: { pdf: ["kreuzberg", "docling", "pymupdf"] },
+      order: { pdf: ["kreuzberg", "docling", "poppler-text"] },
       options: {},
       multiStrategyVoting: false,
       secondaryId: "next-in-order",
@@ -150,9 +196,8 @@ describe("extract markdown PDF routing", () => {
     const stage = new ExtractMarkdownStage(
       {
         kreuzbergMarkdown: async () => ({ binary: "kreuzberg", args: [], available: false }),
-        pyMuPdfText: async () => ({ binary: "pymupdf", args: [], available: true }),
+        extractText: popplerText,
         doclingMarkdown: async () => ({ binary: "docling", args: [], available: true }),
-        pyMuPdf4llmMarkdown: async () => ({ binary: "pymupdf4llm", args: [], available: true }),
       } as any,
       {} as any,
       {} as any,
@@ -162,13 +207,14 @@ describe("extract markdown PDF routing", () => {
       tempFile: "/tmp/sample.pdf", format: "pdf", order: {}, options: {},
       multiStrategyVoting: true, secondaryId: "next-in-order", attemptLedger,
     };
+    setNativePdfEngineForTesting(fakeNativeEngine());
     const first = await (stage as any).planExtractors(args);
-    expect([first.primary.label, first.secondary.label]).toEqual(["pymupdf", "docling"]);
+    expect([first.primary.label, first.secondary.label]).toEqual(["native-pdf", "poppler-text"]);
     expect(attemptLedger.snapshot()).toEqual({ attempted: [], unavailable: ["kreuzberg"] });
     attemptLedger.reserve(first.primary.label);
     attemptLedger.reserve(first.secondary.label);
     const retry = await (stage as any).planExtractors(args);
-    expect(retry.primary.label).toBe("pymupdf4llm");
+    expect(retry.primary.label).toBe("docling");
     expect(retry.secondary).toBeNull();
     attemptLedger.reserve(retry.primary.label);
     expect(await (stage as any).planExtractors(args)).toBeNull();
@@ -178,7 +224,7 @@ describe("extract markdown PDF routing", () => {
     const stage = new ExtractMarkdownStage(
       {
         kreuzbergMarkdown: async () => ({ binary: "kreuzberg", args: [], available: true }),
-        pyMuPdfText: async () => ({ binary: "pymupdf", args: [], available: true }),
+        extractText: popplerText,
         doclingMarkdown: async () => ({ binary: "docling", args: [], available: true }),
       } as any,
       {} as any,
@@ -187,7 +233,7 @@ describe("extract markdown PDF routing", () => {
     const attemptLedger = new ExtractorAttemptLedger();
     const args = {
       tempFile: "/tmp/sample.pdf", format: "pdf",
-      order: { pdf: ["kreuzberg", "pymupdf"] }, options: {},
+      order: { pdf: ["kreuzberg", "poppler-text"] }, options: {},
       multiStrategyVoting: true, secondaryId: "docling", attemptLedger,
     };
     const first = await (stage as any).planExtractors(args);
@@ -195,21 +241,21 @@ describe("extract markdown PDF routing", () => {
     attemptLedger.reserve(first.primary.label);
     attemptLedger.reserve(first.secondary.label);
     const retry = await (stage as any).planExtractors(args);
-    expect(retry.primary.label).toBe("pymupdf");
+    expect(retry.primary.label).toBe("poppler-text");
     expect(retry.secondary).toBeNull();
   });
 
-  it("uploads file-backed extractor output for PyMuPDF candidates", async () => {
-    const scratch = await mkdtemp(path.join(tmpdir(), "docslurp-pymupdf-test-"));
+  it("uploads file-backed extractor output for Kreuzberg candidates", async () => {
+    const scratch = await mkdtemp(path.join(tmpdir(), "docslurp-kreuzberg-test-"));
     const sourceTemp = path.join(scratch, "source.pdf");
-    const outputPath = `${sourceTemp}.pymupdf.txt`;
+    const outputPath = `${sourceTemp}.kreuzberg.md`;
     await writeFile(sourceTemp, "pdf");
 
     const uploaded = createUploadCapture();
     const stage = new ExtractMarkdownStage(
       {
         run: async (_plan: CommandPlan) => {
-          await writeFile(outputPath, "pymupdf text");
+          await writeFile(outputPath, "kreuzberg text");
           return { stdout: "", stderr: "" };
         }
       } as any,
@@ -221,16 +267,16 @@ describe("extract markdown PDF routing", () => {
     );
 
     const candidate = await (stage as any).extractCandidate(
-      await documentExtractorRegistry.prepare("pymupdf", {
-        pyMuPdfText: async () => ({ binary: "python3", args: [], available: true }),
+      await documentExtractorRegistry.prepare("kreuzberg", {
+        kreuzbergMarkdown: async () => ({ binary: "node", args: [], available: true }),
       } as any, sourceTemp),
-      "demo-user/run-1/markdown/doc-1.pymupdf.md",
+      "demo-user/run-1/markdown/doc-1.kreuzberg.md",
       sourceTemp
     );
 
-    expect(candidate.textUri).toBe("s3://docslurp/demo-user/run-1/markdown/doc-1.pymupdf.md");
+    expect(candidate.textUri).toBe("s3://docslurp/demo-user/run-1/markdown/doc-1.kreuzberg.md");
     expect(candidate.tempTextPath).toBe(outputPath);
-    expect(uploaded.read()).toBe("pymupdf text");
+    expect(uploaded.read()).toBe("kreuzberg text");
     await uploaded.done;
   });
 
@@ -286,19 +332,13 @@ describe("extract markdown PDF routing", () => {
   it("skips optional parser artifacts when an auxiliary parser times out", async () => {
     const scratch = await mkdtemp(path.join(tmpdir(), "docslurp-parser-timeout-"));
     const sourceTemp = path.join(scratch, "source.pdf");
-    const pymupdfOutput = `${sourceTemp}.pymupdf.json`;
     await writeFile(sourceTemp, "pdf");
+    setNativePdfEngineForTesting(fakeNativeEngine());
 
     const stage = new ExtractMarkdownStage(
       {
-        pyMuPdfJson: async () => ({ binary: "python3", args: ["pymupdf"], available: true }),
         unstructuredPartition: async () => ({ binary: "python3", args: ["unstructured"], available: true }),
-        run: async (plan: CommandPlan, signal?: AbortSignal) => {
-          if (plan.args[0] === "pymupdf") {
-            await writeFile(pymupdfOutput, JSON.stringify({ blocks: [] }));
-            return { stdout: "", stderr: "" };
-          }
-
+        run: async (_plan: CommandPlan, signal?: AbortSignal) => {
           await new Promise((_, reject) => {
             signal?.addEventListener(
               "abort",
@@ -335,9 +375,12 @@ describe("extract markdown PDF routing", () => {
 
     expect(artifacts).toEqual([
       {
-        parser: "pymupdf",
-        uri: "s3://docslurp/user-1/run-1/parser/doc-1.pymupdf.json",
-        payload: { blocks: [] }
+        parser: "native-pdf",
+        uri: "s3://docslurp/user-1/run-1/parser/doc-1.native-pdf.json",
+        payload: {
+          engine: "native-pdf",
+          pages: [expect.objectContaining({ number: 1, width: 612, height: 792, blocks: [expect.objectContaining({ type: 0 })] })]
+        }
       }
     ]);
   });
@@ -351,7 +394,6 @@ describe("extract markdown PDF routing", () => {
 
     const stage = new ExtractMarkdownStage(
       {
-        pyMuPdfJson: async () => ({ binary: "python3", args: ["pymupdf"], available: false }),
         extractPdfPageRange: async (_source: string, output: string, range: string) => {
           ranges.push(range);
           return { binary: "qpdf", args: ["qpdf", range, output], available: true };
@@ -428,7 +470,6 @@ describe("extract markdown PDF routing", () => {
 
     const stage = new ExtractMarkdownStage(
       {
-        pyMuPdfJson: async () => ({ binary: "python3", args: ["pymupdf"], available: false }),
         extractPdfPageRange: async (_source: string, output: string, range: string) => {
           ranges.push(range);
           return { binary: "qpdf", args: ["qpdf", range, output], available: true };
@@ -493,21 +534,17 @@ describe("extract markdown PDF routing", () => {
   it("skips the unstructured parser sidecar for ordinary text PDFs", async () => {
     const scratch = await mkdtemp(path.join(tmpdir(), "docslurp-parser-skip-unstructured-"));
     const sourceTemp = path.join(scratch, "source.pdf");
-    const pymupdfOutput = `${sourceTemp}.pymupdf.json`;
     await writeFile(sourceTemp, "pdf");
+    setNativePdfEngineForTesting(fakeNativeEngine());
     let unstructuredPlanned = false;
 
     const stage = new ExtractMarkdownStage(
       {
-        pyMuPdfJson: async () => ({ binary: "python3", args: ["pymupdf"], available: true }),
         unstructuredPartition: async () => {
           unstructuredPlanned = true;
           return { binary: "python3", args: ["unstructured"], available: true };
         },
-        run: async () => {
-          await writeFile(pymupdfOutput, JSON.stringify({ blocks: [] }));
-          return { stdout: "", stderr: "" };
-        }
+        run: async () => ({ stdout: "", stderr: "" })
       } as any,
       {
         putJson: async () => undefined,
@@ -533,7 +570,7 @@ describe("extract markdown PDF routing", () => {
     );
 
     expect(unstructuredPlanned).toBe(false);
-    expect(artifacts.map((artifact: { parser: string }) => artifact.parser)).toEqual(["pymupdf"]);
+    expect(artifacts.map((artifact: { parser: string }) => artifact.parser)).toEqual(["native-pdf"]);
   });
 
   it("serializes candidate extraction when low-memory mode is enabled", async () => {
@@ -567,7 +604,7 @@ describe("extract markdown PDF routing", () => {
     const [resultA, resultB] = await (stage as any).collectCandidateResults({
       primary: { label: "docling", plan: { binary: "docling", args: [], available: true }, mode: "docling" },
       primaryKey: "primary.md",
-      secondary: { label: "pymupdf", plan: { binary: "python3", args: [], available: true }, mode: "file", outputPath: "/tmp/pymupdf.md" },
+      secondary: { label: "kreuzberg", plan: { binary: "node", args: [], available: true }, mode: "file", outputPath: "/tmp/kreuzberg.md" },
       secondaryKey: "secondary.md",
       sourceTempFile: "/tmp/source.pdf"
     });
@@ -578,8 +615,8 @@ describe("extract markdown PDF routing", () => {
     expect(events).toEqual([
       "start:docling",
       "end:docling",
-      "start:pymupdf",
-      "end:pymupdf"
+      "start:kreuzberg",
+      "end:kreuzberg"
     ]);
   });
 });

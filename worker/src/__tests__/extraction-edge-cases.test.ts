@@ -3,6 +3,10 @@ import path from "node:path";
 import { CommandRunner } from "../tools/runner.js";
 import { benchmarkExtractor } from "../benchmarks/extraction-benchmark.js";
 import { buildExtractionContract } from "../lib/extraction-contract.js";
+import { loadNativePdfEngine } from "../native-pdf/loader.js";
+
+// Pipe tables come from the private native-pdf engine; Kreuzberg renders this fixture's tables as aligned text.
+const nativePdfAvailable = (await loadNativePdfEngine()).ok;
 
 describe("Extraction Edge Cases", () => {
   let runner: CommandRunner;
@@ -15,7 +19,7 @@ describe("Extraction Edge Cases", () => {
     await runner.close();
   });
 
-  it("extracts multipage tables correctly", async () => {
+  it.skipIf(!nativePdfAvailable)("extracts multipage tables correctly", async () => {
     const fixturePath = path.resolve(
       process.cwd(),
       "testdata/pdf-fixtures/tables-multipage-financials.pdf",
@@ -24,12 +28,12 @@ describe("Extraction Edge Cases", () => {
       const result = await benchmarkExtractor({
         fixtureId: "tables-multipage",
         fixturePath,
-        method: "pymupdf4llm",
+        method: "native-pdf",
         runner,
       });
 
       expect(result.contract.markdown).toContain("|"); // Check for table syntax
-      expect(result.contract.metadata.extractor).toBe("pymupdf4llm");
+      expect(result.contract.metadata.extractor).toBe("native-pdf");
       expect(result.contract.metadata.plausibilityScore).toBeGreaterThan(0);
 
       // Often financial tables contain numbers like "2025", let's check for it in rawText
@@ -54,12 +58,12 @@ describe("Extraction Edge Cases", () => {
       const result = await benchmarkExtractor({
         fixtureId: "formulas-math",
         fixturePath,
-        method: "pymupdf4llm",
+        method: "kreuzberg",
         runner,
       });
 
-      expect(result.contract.metadata.extractor).toBe("pymupdf4llm");
-      // pymupdf4llm extracts the raw text for these formulas, which include "integral", "derivative"
+      expect(result.contract.metadata.extractor).toBe("kreuzberg");
+      // the extractor keeps the raw text for these formulas, which include "integral", "derivative"
       expect(result.contract.markdown.toLowerCase()).toContain("integral");
       expect(result.contract.markdown.toLowerCase()).toContain("derivative");
 
@@ -82,11 +86,11 @@ describe("Extraction Edge Cases", () => {
       const result = await benchmarkExtractor({
         fixtureId: "multicolumn-report",
         fixturePath,
-        method: "pymupdf4llm",
+        method: "kreuzberg",
         runner,
       });
 
-      expect(result.contract.metadata.extractor).toBe("pymupdf4llm");
+      expect(result.contract.metadata.extractor).toBe("kreuzberg");
       // Multi-column logic might get mangled but should be mostly present
       expect(result.contract.rawText.toLowerCase()).toContain("figure 2");
       expect(result.contract.rawText.toLowerCase()).toContain("latency");
@@ -110,11 +114,11 @@ describe("Extraction Edge Cases", () => {
       const result = await benchmarkExtractor({
         fixtureId: "metadata-doc",
         fixturePath,
-        method: "pymupdf4llm",
+        method: "kreuzberg",
         runner,
       });
 
-      expect(result.contract.metadata.extractor).toBe("pymupdf4llm");
+      expect(result.contract.metadata.extractor).toBe("kreuzberg");
       expect(result.contract.rawText.toLowerCase()).toContain("title");
       expect(result.contract.rawText.toLowerCase()).toContain("author");
 
@@ -201,7 +205,7 @@ print("Hello World")
           format: "markdown",
           extractor: "test-extractor",
           artifactUri: null,
-          parser: "pymupdf",
+          parser: "native-pdf",
           parserArtifactUri: null,
         },
         stats: {

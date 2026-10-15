@@ -570,7 +570,7 @@ except ImportError:
     const block = `
 @register_layout_adapter("docslurp", priority=95)
 class DocSlurpLayoutAdapter(LayoutAdapter):
-    """Adapter for DocSlurp ParseBench runs backed by PyMuPDF page dictionaries."""
+    """Adapter for DocSlurp ParseBench runs backed by block/line/span page payloads (native-pdf parser payload shape)."""
 
     def to_layout_output(
         self,

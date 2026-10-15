@@ -6,13 +6,14 @@
  * presence, latency, and character yield per page.
  *
  * Usage:
- *   pnpm benchmark:kreuzberg [--fixtures id1,id2] [--extractors kreuzberg,pymupdf] [--output report.json]
+ *   pnpm benchmark:kreuzberg [--fixtures id1,id2] [--extractors kreuzberg,native-pdf-markdown] [--output report.json]
  */
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { tmpdir } from "node:os";
 
 import { CommandRunner } from "../tools/runner.js";
+import { runNativePdfArm } from "./native-pdf-arm.js";
 import { scoreExtractionPlausibility } from "../lib/extracted-markdown.js";
 
 // ── Fixture manifest types ───────────────────────────────────────────────────
@@ -37,10 +38,9 @@ interface FixtureManifest {
 
 export type ExtractorId =
   | "kreuzberg"
-  | "pymupdf-text"
-  | "pymupdf4llm-markdown"
+  | "native-pdf-text"
+  | "native-pdf-markdown"
   | "pdftotext"
-  | "pymupdf-ocr-text"
   | "unpdf"
   | "docling";
 
@@ -79,30 +79,9 @@ async function runExtractor(
         return { content, metadata, latencyMs: Date.now() - startedAt, charCount: content.length, error: null };
       }
 
-      case "pymupdf-text": {
-        const outPath = path.join(tempDir, "pymupdf.txt");
-        const plan = await runner.pyMuPdfText(sourcePath, outPath);
-        if (!plan.available) return { content: "", metadata: {}, latencyMs: 0, charCount: 0, error: "pymupdf unavailable" };
-        await runner.run(plan, signal);
-        const content = await readFile(outPath, "utf8");
-        return { content, metadata: {}, latencyMs: Date.now() - startedAt, charCount: content.length, error: null };
-      }
-
-      case "pymupdf4llm-markdown": {
-        const outPath = path.join(tempDir, "pymupdf4llm.md");
-        const plan = await runner.pyMuPdf4llmMarkdown(sourcePath, outPath);
-        if (!plan.available) return { content: "", metadata: {}, latencyMs: 0, charCount: 0, error: "pymupdf4llm unavailable" };
-        await runner.run(plan, signal);
-        const content = await readFile(outPath, "utf8");
-        return { content, metadata: {}, latencyMs: Date.now() - startedAt, charCount: content.length, error: null };
-      }
-
-      case "pymupdf-ocr-text": {
-        const outPath = path.join(tempDir, "pymupdf-ocr.txt");
-        const plan = await runner.pyMuPdfOcrText(sourcePath, outPath);
-        if (!plan.available) return { content: "", metadata: {}, latencyMs: 0, charCount: 0, error: "pymupdf-ocr unavailable" };
-        await runner.run(plan, signal);
-        const content = await readFile(outPath, "utf8");
+      case "native-pdf-text":
+      case "native-pdf-markdown": {
+        const content = await runNativePdfArm(sourcePath, extractorId === "native-pdf-text" ? "text" : "markdown");
         return { content, metadata: {}, latencyMs: Date.now() - startedAt, charCount: content.length, error: null };
       }
 
