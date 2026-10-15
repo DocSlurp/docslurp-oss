@@ -5,7 +5,7 @@ Except for the MIT packages listed below and separately licensed third-party
 material, DocSlurp is licensed under the Server Side Public License, version 1
 (SSPL-1.0), reproduced verbatim below, with the additional future license grant.
 This includes server/ (the extracted API, @docslurp/server), worker/, packages/cli/,
-database code (db/), server tooling, and packages/contrib-algolia-server/.
+database code (server/db/), server tooling, and packages/contrib-algolia-server/.
 
 The web frontend (app/: dashboard, chat home, marketing pages and docs site) is
 not part of the public source tree and is not licensed under this license.

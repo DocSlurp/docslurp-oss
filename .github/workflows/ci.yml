@@ -98,9 +98,8 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - name: Build public packages
         run: |
-          for package in packages/*; do
-            [ -f "$package/package.json" ] && pnpm --dir "$package" run --if-present build
-          done
+          # pnpm -r runs in dependency order (contrib-algolia-server needs contrib-search-compat built).
+          pnpm -r --filter "./packages/**" run --if-present build
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: ${{ matrix.node }}
