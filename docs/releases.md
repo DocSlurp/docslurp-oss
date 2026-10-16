@@ -22,3 +22,9 @@ The repository remains private until a separate visibility decision. The workflo
 ## Production
 
 Merging core or app changes never deploys production. Production deploys are manually dispatched from the app repository. Core migrations run from `server/db/migrations`; every new migration must pass the expand/contract gate before the app adopts its core pin.
+
+## Verify a repository cutover
+
+After moving release configuration, dispatch `npm-auth.yml` on main to verify token authentication, then dispatch `release-npm.yml` with `dry_run=true` to verify the complete non-publishing path. The dry run must succeed before creating a release tag. A repository migration does not authorize package publishing or a production deployment.
+
+The release environment permits only main and v* tags. Organization-owned contributions use the existing CLA exemption; external contributor setup is documented in [cla-setup.md](cla-setup.md).
