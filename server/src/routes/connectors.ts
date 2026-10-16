@@ -151,9 +151,9 @@ export async function runConnectorSync(row: ConnectorRow, syncLogId: string): Pr
 
         // Check if we already have this file (by connector file id or path)
         const existing = await sql`
-          select id, metadata->>'connector_etag' as etag from documents
+          select id, metadata->>'connectorEtag' as etag from documents
           where workspace_id = ${row.workspace_id}
-            and (metadata->>'connector_file_id' = ${file.id} or metadata->>'connector_path' = ${file.path})
+            and (metadata->>'connectorFileId' = ${file.id} or metadata->>'connectorPath' = ${file.path})
           limit 1
         `;
 

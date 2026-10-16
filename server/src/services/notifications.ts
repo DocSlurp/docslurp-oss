@@ -583,7 +583,7 @@ async function logDelivery(args: {
       ${args.recipient},
       ${args.subject},
       ${args.delivered},
-      ${JSON.stringify(args.metadata ?? {})}::jsonb,
+      ${JSON.stringify(args.metadata ?? {})}::text::jsonb,
       now()
     )
   `;

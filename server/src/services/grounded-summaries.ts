@@ -141,9 +141,9 @@ async function persistGroundedSummary(args: {
       ${args.scope},
       ${args.sectionKey ?? null},
       ${args.summary},
-      ${JSON.stringify(args.claims)}::jsonb,
-      ${JSON.stringify(args.citations)}::jsonb,
-      ${JSON.stringify(args.evidenceSpans)}::jsonb,
+      ${JSON.stringify(args.claims)}::text::jsonb,
+      ${JSON.stringify(args.citations)}::text::jsonb,
+      ${JSON.stringify(args.evidenceSpans)}::text::jsonb,
       ${args.sourceFingerprint}
     )
     returning

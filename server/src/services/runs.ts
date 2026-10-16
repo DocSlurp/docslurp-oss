@@ -1157,7 +1157,7 @@ export async function createDocumentBatch(args: {
           ${previousVersionId},
           ${canonicalId},
           ${file.fileSize ?? 0},
-          ${JSON.stringify({ ...file.metadata, sourceSizeMeasured: file.fileSize !== undefined })}::jsonb
+          ${JSON.stringify({ ...file.metadata, sourceSizeMeasured: file.fileSize !== undefined })}::text::jsonb
         )
         returning *
       `;
