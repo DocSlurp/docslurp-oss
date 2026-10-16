@@ -237,6 +237,15 @@ function getSearchQueryEncryptionKey(): string | null {
   return trimmed && trimmed.length >= 32 ? trimmed : null;
 }
 
+/**
+ * True for a `search_sessions.query` that is stored encrypted (`enc:pgp:v1:`)
+ * or hashed (`redacted:sha256:`). Those rows carry no readable query text, so
+ * they must never be shown back as suggestions or history.
+ */
+export function isProtectedStoredQuery(query: string): boolean {
+  return query.startsWith("enc:") || query.startsWith("redacted:");
+}
+
 function redactedSearchQuery(query: string): string {
   return `redacted:sha256:${hashSearchQuery(query)}`;
 }

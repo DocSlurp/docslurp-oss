@@ -15,6 +15,7 @@ import { getApiKey, getRequestActor, loadActorScopedWorkspace, resolveActorWorks
 import { mcpOrigin } from "../lib/mcp-origin.js";
 import { searchRoutes } from "../routes/search.js";
 import { sql } from "../db.js";
+import { isProtectedStoredQuery } from "../search/session.js";
 import { spendAwareErrorHandler } from "./billing/spend-guard.js";
 import { aggregateWorkspaceRagSearch } from "../services/aggregate-rag.js";
 import { loadIngestReport, summarizeIngestReport } from "./ingest-report.js";
@@ -236,13 +237,14 @@ const mcpAdapterRoutes = new Hono()
             and user_id = ${actor.userId} and phrase ilike ${like}
           union all
           select s.query as phrase, 10 as weight, s.created_at from search_sessions s
-            where s.user_id = ${actor.userId} and (s.metadata ->> 'workspaceId') = ${workspace.id} and s.query ilike ${like}
+            where s.user_id = ${actor.userId} and (s.metadata ->> 'workspaceId') = ${workspace.id}
+              and s.query not like 'enc:%' and s.query not like 'redacted:%' and s.query ilike ${like}
         ) x
         group by phrase
         order by max(weight) desc, max(created_at) desc
         limit ${limit}
       `;
-      return c.json({ tool: toolId, suggestions: suggestions.map((r) => r.phrase) });
+      return c.json({ tool: toolId, suggestions: suggestions.map((r) => r.phrase).filter((phrase) => !isProtectedStoredQuery(phrase)) });
     }
 
     return c.json({ error: "Unknown MCP tool" }, 404);

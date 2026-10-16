@@ -70,4 +70,18 @@ describe("suggestRoutes", () => {
     const body = await res.json();
     expect(Array.isArray(body.suggestions)).toBe(true);
   });
+
+  it("never suggests encrypted or hashed stored queries", async () => {
+    sqlMock.mockImplementation(async (strings: TemplateStringsArray) => {
+      const query = strings.join("?");
+      if (query.includes("from search_sessions")) {
+        expect(query).toContain("s.query not like 'enc:%'");
+        return [{ phrase: "enc:pgp:v1:ww0EBwMC", weight: 10 }, { phrase: "redacted:sha256:abc", weight: 10 }];
+      }
+      if (query.includes("from documents d")) return [{ phrase: "catalog.pdf", weight: 5 }];
+      return [];
+    });
+    const body = await (await app.request("/v1/suggest?workspaceId=ws-1")).json();
+    expect(body.suggestions).toEqual(["catalog.pdf"]);
+  });
 });
