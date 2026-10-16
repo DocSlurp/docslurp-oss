@@ -6,7 +6,6 @@ import { defaultPipelineFeatures, getWorkspaceTemplate, normalizePipelineFeature
 import { env } from "../config.js";
 import {
   intakeIntoWorkspace,
-  RUN_START_FAILED_DEFERRED_MESSAGE,
   WorkspaceIntakeError,
   type WorkspaceIntakeItem,
   type WorkspaceIntakeRequest,
@@ -369,17 +368,6 @@ describe("Workspace Intake", () => {
     const result = await intakeIntoWorkspace(request(), fakes.ports);
     expect(result?.deferredReason).toContain("Temporal is currently unavailable");
     expect(fakes.runs).toHaveLength(1);
-    expect(fakes.objects.size).toBe(1);
-    expect(fakes.audit).toHaveLength(1);
-  });
-
-  it("defers instead of failing the request when the workflow start throws after the run is committed", async () => {
-    const fakes = createWorkspaceIntakeFakes();
-    fakes.state.startError = new Error("canceling statement due to user request");
-    const result = await intakeIntoWorkspace(request(), fakes.ports);
-    expect(result?.deferredReason).toBe(RUN_START_FAILED_DEFERRED_MESSAGE);
-    expect(fakes.runs).toHaveLength(1);
-    // The stored source stays with the Run so the deferred start can process it.
     expect(fakes.objects.size).toBe(1);
     expect(fakes.audit).toHaveLength(1);
   });

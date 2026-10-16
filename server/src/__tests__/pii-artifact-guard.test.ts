@@ -31,9 +31,8 @@ vi.mock("../services/organizations.js", () => ({
   listEditableWorkspaceIds: vi.fn(async () => []),
 }));
 
-vi.mock("../services/runs.js", () => ({
-  createRun: vi.fn(),
-  ensureReprocessCanonicalId: vi.fn(),
+vi.mock("../services/run-creation.js", () => ({
+  runCreation: { create: vi.fn() },
 }));
 
 const { withheldArtifactUrisFromMetadata } = await import("../services/pii-artifact-guard.js");

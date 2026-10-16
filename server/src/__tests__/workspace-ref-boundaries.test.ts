@@ -16,7 +16,6 @@ const mocks = vi.hoisted(() => ({
   listDocumentIndexEntries: vi.fn(),
   listLowConfidenceReviewQueue: vi.fn(),
   aggregateWorkspaceRagSearch: vi.fn(),
-  createRun: vi.fn(),
   getRunProcessingPreview: vi.fn(),
   getAutomationUsage: vi.fn(),
   listNotificationInbox: vi.fn(),
@@ -54,7 +53,6 @@ vi.mock("../services/search.js", () => ({ hybridSearch: vi.fn(), MissingWorkspac
 vi.mock("../services/workspace-chat.js", () => ({ chatWorkspace: vi.fn() }));
 vi.mock("../services/aggregate-rag.js", () => ({ aggregateWorkspaceRagSearch: mocks.aggregateWorkspaceRagSearch }));
 vi.mock("../services/runs.js", () => ({
-  createRun: mocks.createRun,
   getRunProcessingPreview: mocks.getRunProcessingPreview,
   isRunCreationBlockedError: () => false,
 }));
@@ -154,12 +152,6 @@ const boundaries: Boundary[] = [
     received: () => mocks.aggregateWorkspaceRagSearch.mock.calls[0]?.[0]?.request.workspaceIds[0],
   },
   {
-    route: "POST /runs",
-    omitted: "default",
-    call: (app, ref) => app.request("/runs", post({ ...withRef(ref), totalDocuments: 1 })),
-    received: () => mocks.createRun.mock.calls[0]?.[0]?.workspaceId,
-  },
-  {
     route: "POST /runs/preview",
     omitted: "default",
     call: (app, ref) => app.request("/runs/preview", post({
@@ -206,7 +198,6 @@ describe("workspace reference boundaries", () => {
     mocks.listDocumentIndexEntries.mockResolvedValue({ entries: [] });
     mocks.listLowConfidenceReviewQueue.mockResolvedValue([]);
     mocks.aggregateWorkspaceRagSearch.mockResolvedValue({ workspaces: [] });
-    mocks.createRun.mockImplementation(async (input: { workspaceId: string }) => ({ id: "run-1", orgId: "org-1", workspaceId: input.workspaceId, kind: "bulk-upload", totalDocuments: 1 }));
     mocks.getRunProcessingPreview.mockResolvedValue({ estimatedPages: 1 });
     mocks.getAutomationUsage.mockResolvedValue({});
     mocks.listNotificationInbox.mockResolvedValue({ deliveries: [], unreadCount: 0 });
@@ -235,7 +226,7 @@ describe("workspace reference boundaries", () => {
       new WorkspaceAccessError(404, "organization_not_found", "Organization not found"),
     );
     const app = buildApp();
-    const runs = await app.request("/runs", post({ totalDocuments: 1 }));
+    const runs = await app.request("/runs/preview", post({ files: [{ filename: "a.pdf", mimeType: "application/pdf", sizeBytes: 10 }] }));
     expect(runs.status).toBe(404);
     await expect(runs.json()).resolves.toMatchObject({ code: "organization_not_found" });
     const direct = await app.request("/ingest/direct/sessions", post({

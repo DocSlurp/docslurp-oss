@@ -24,6 +24,10 @@ beforeAll(async () => {
     types: { numeric: { to: 1700, from: [1700], serialize: (value: unknown) => String(value), parse: (value: string): unknown => Number(value) } },
   }) as unknown as postgres.Sql<Record<string, unknown>>;
   vi.doMock("../db.js", () => ({ sql }));
+  vi.doMock("../lib/temporal.js", () => ({
+    startPipelineWorkflow: vi.fn(async () => {}), signalPipelineCancel: vi.fn(), signalPipelinePause: vi.fn(), signalPipelineResume: vi.fn(),
+    isTemporalClientConnected: () => true, onTemporalClientConnected: vi.fn(), warmTemporalClient: vi.fn(),
+  }));
   await sql`insert into "user"(id, name, email) values ('u1', 'A', 'a@x')`;
   await sql`insert into organizations(id, name, slug, created_by_user_id, credit_balance_cents) values ('o1', 'Org', 'org', 'u1', 1000)`;
   await sql`insert into org_memberships(org_id, user_id, role) values ('o1', 'u1', 'owner')`;
@@ -74,7 +78,7 @@ describe("reprocessRun", () => {
   it("creates a partial run whose documents reuse the source versions", async () => {
     await seedSource();
 
-    const run = await reprocessRun("run-src", "u1", { stageFrom: "embed" });
+    const run = (await reprocessRun("run-src", "u1", { stageFrom: "embed" }))?.run;
 
     expect(run?.pipeline.restartFromStage).toBe("embed");
     const [doc] = await sql<{ reused_from_document_id: string; previous_version_id: string; source_sha256: string }[]>`
@@ -85,7 +89,7 @@ describe("reprocessRun", () => {
 
   it("does not link a source for a full reprocess", async () => {
     await seedSource();
-    const run = await reprocessRun("run-src", "u1");
+    const run = (await reprocessRun("run-src", "u1"))?.run;
     expect(run?.pipeline.restartFromStage).toBeUndefined();
     const [doc] = await sql<{ reused_from_document_id: string | null }[]>`
       select reused_from_document_id from documents where run_id = ${run!.id}
@@ -129,7 +133,7 @@ describe("reprocessRun", () => {
 
   it("restarting from extraction needs no source artifacts", async () => {
     await seedSource({ artifacts: {} });
-    const run = await reprocessRun("run-src", "u1", { stageFrom: "extract-markdown" });
+    const run = (await reprocessRun("run-src", "u1", { stageFrom: "extract-markdown" }))?.run;
     expect(run?.pipeline.restartFromStage).toBe("extract-markdown");
   });
 });
