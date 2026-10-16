@@ -98,6 +98,11 @@ export function jsonRecord<T extends Record<string, unknown>>(value: unknown): T
  * Runs mapped without it (just created) have spent nothing; listed runs go
  * through withRunCosts.
  */
+function failedDocumentsOf(stats: Record<string, unknown>): number {
+  const value = stats.failedDocuments;
+  return typeof value === "number" && Number.isFinite(value) && value > 0 ? Math.floor(value) : 0;
+}
+
 export function mapWorkspaceRun(row: WorkspaceRunRow, cost?: Pick<RunUsageCostSummary, "costCents" | "computeEstimated" | "billedCostCents">): WorkspaceRun {
   return workspaceRunSchema.parse({
     id: row.id,
@@ -116,6 +121,7 @@ export function mapWorkspaceRun(row: WorkspaceRunRow, cost?: Pick<RunUsageCostSu
     processedDocuments: row.processed_documents,
     pagesTotal: row.pages_total,
     pagesProcessed: row.pages_processed,
+    failedDocuments: failedDocumentsOf(jsonRecord(row.stats)),
     costCents: cost?.costCents ?? 0,
     computeEstimated: cost?.computeEstimated ?? false,
     billedCostCents: cost?.billedCostCents ?? 0,

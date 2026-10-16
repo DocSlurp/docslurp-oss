@@ -25,6 +25,12 @@ export const workspaceRunSchema = z.object({
   pagesTotal: z.number(),
   pagesProcessed: z.number(),
   /**
+   * Documents that failed a stage and were skipped. A Run with failed
+   * Documents still completes (the rest were processed); clients show
+   * "N of totalDocuments documents failed". Mirrors `stats.failedDocuments`.
+   */
+  failedDocuments: z.number().int().nonnegative().default(0),
+  /**
    * Run cost, read from the usage ledger (`usage_attribution`): AI/API calls,
    * per-page fees and worker compute, with unbilled compute at its rate-card
    * estimate. The same figure as the progress snapshot's

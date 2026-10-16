@@ -62,7 +62,7 @@ export const simpleServiceSchemas = {
         type: "object",
         properties: Object.fromEntries([
           "totalDocuments", "indexedDocuments", "pageIndexedDocuments", "searchableDocuments", "pageOnlyDocuments",
-          "keywordOnlyDocuments", "inProgressDocuments", "totalPages", "searchablePages", "indexedChunkCount",
+          "keywordOnlyDocuments", "failedDocuments", "inProgressDocuments", "totalPages", "searchablePages", "indexedChunkCount",
           "queuedRuns", "processingRuns",
         ].map((name) => [name, { type: "integer", minimum: 0 }])),
       },

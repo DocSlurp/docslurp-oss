@@ -16,6 +16,7 @@ function run(overrides: Partial<WorkspaceRun> = {}): WorkspaceRun {
     orgId: "org-1",
     workspaceId: "workspace-1",
     workspaceName: "Contracts",
+    failedDocuments: 0,
     kind: "bulk-upload",
     status: "processing",
     priority: 0,

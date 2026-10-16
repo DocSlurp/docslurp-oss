@@ -29,4 +29,10 @@ describe("partialCoverageNote", () => {
       "Searched 3 of 5 files · 1 file still processing. Ask again once they finish for a complete answer.",
     );
   });
+
+  it("names failed files and tells the user to retry them once nothing else is pending", () => {
+    expect(partialCoverageNote(availability({ inProgressDocuments: 0, failedDocuments: 2 }))).toBe(
+      "Searched 31 of 48 pages · 2 files failed. Retry the failed files to include them in answers.",
+    );
+  });
 });
