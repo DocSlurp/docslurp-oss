@@ -135,7 +135,7 @@ describe("listWorkspaceBoardRecords", () => {
     listAccessibleWorkspaceIdsMock.mockReset();
   });
 
-  it("coerces bigint aggregate strings in workspace board summaries", async () => {
+  it.each([{ pages: 18 }, JSON.stringify({ pages: 18 })])("reads board aggregates and stored run records (%s)", async (stats) => {
     listAccessibleWorkspaceIdsMock.mockResolvedValue(["ws-1"]);
     sqlMock
       .mockResolvedValueOnce([
@@ -176,11 +176,19 @@ describe("listWorkspaceBoardRecords", () => {
           total_llm_cost_cents: "5",
         },
       ])
-      .mockResolvedValueOnce([]);
+      .mockResolvedValueOnce([{
+        id: "run-1", org_id: "org-1", user_id: "user-1", workspace_id: "ws-1",
+        workspace_name: "Contracts", kind: "ingest", status: "completed", stage: "completed",
+        total_documents: 2, processed_documents: 2, pages_total: 18, pages_processed: 18,
+        pipeline: null, stats, artifacts: JSON.stringify({}), error: null,
+        created_at: "2026-04-08T17:00:00.000Z", updated_at: "2026-04-08T18:00:00.000Z",
+      }]);
 
     const records = await listWorkspaceBoardRecords("user-1");
 
     expect(records).toHaveLength(1);
+    expect(records[0]?.run?.stats).toEqual({ pages: 18 });
+    expect(records[0]?.run?.artifacts).toEqual({});
     expect(records[0]?.summary).toMatchObject({
       indexedBytes: 8192,
       totalInputTokens: 1200,
