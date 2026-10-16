@@ -42,10 +42,10 @@ class MemoryStore implements StageExecutionStore {
 
   private checkpoints: CheckpointStore = {
     startDocumentStage: async () => undefined,
-    completeDocumentStage: async (state, documentId, stageName) => {
+    completeDocumentStage: async (_state: WorkflowState, documentId: string, stageName: string) => {
       this.docStages.set(`${documentId}:${stageName}`, { documentId, stageName, status: "completed" } as StageState);
     },
-    failDocumentStage: async (state, documentId, stageName, message) => {
+    failDocumentStage: async (state: WorkflowState, documentId: string, stageName: string, message: string) => {
       this.docStages.set(`${documentId}:${stageName}`, { documentId, stageName, status: "failed", error: message } as StageState);
       state.setDocumentStage({ documentId, stageName, status: "failed", error: message } as StageState);
     },
