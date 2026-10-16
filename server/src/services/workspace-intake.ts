@@ -66,11 +66,17 @@ export class WorkspaceIntakeError extends Error {
   }
 }
 
-/** Source bytes an adapter hands over: in memory, streaming, or already stored. */
+/**
+ * Source bytes an adapter hands over: in memory, streaming, or already stored.
+ * An adapter that could not produce one source (a URL that failed to fetch, an
+ * upload that never completed) yields it as `rejected`, so intake reports that
+ * file and carries on with the rest.
+ */
 export type WorkspaceIntakeContent =
   | { bytes: Buffer }
   | { stream: Readable; contentLength?: number }
-  | { storedKey: string };
+  | { storedKey: string }
+  | { rejected: WorkspaceIntakeError };
 
 export interface WorkspaceIntakeItem {
   filename: string;
@@ -113,11 +119,6 @@ export interface WorkspaceIntakeRequest {
   urls?: string[];
   /** Sources that skip files themselves (connectors) may legitimately yield nothing. */
   mayBeEmpty?: boolean;
-  /**
-   * Take the files that pass validation and report the rest in `rejected`, instead of failing the
-   * whole request on the first bad file. The request still fails when no file is accepted.
-   */
-  acceptPartial?: boolean;
   audit?: WorkspaceIntakeAudit;
 }
 
@@ -140,7 +141,7 @@ export interface WorkspaceIntakeResult {
   documents: RunManifest["documents"];
   /** Set when the run exists but processing could not start yet. */
   deferredReason: string | null;
-  /** Files left out of an `acceptPartial` request, with why. Empty otherwise. */
+  /** Files that were not accepted, with why. Empty when every file was taken. */
   rejected: RejectedIntakeFile[];
 }
 
@@ -189,7 +190,6 @@ export interface WorkspaceIntakeRecords {
     pipeline: PipelineFeatures;
     apiKeyId?: string | null;
     files: StoredIntakeFile[];
-    skipUnreadable?: boolean;
   }): Promise<RunManifest>;
   /** Remove a workspace this request created when intake failed before any run existed. */
   discardWorkspace(workspaceId: string): Promise<void>;
@@ -432,6 +432,7 @@ async function storeItem(
   storage: RawSourceStorage,
   written: string[],
 ): Promise<StoredIntakeFile> {
+  if ("rejected" in item.content) throw item.content.rejected;
   const admitted = admitIntakeFile(
     { filename: item.filename, mimeType: item.mimeType, sizeBytes: declaredSize(item) },
     request.kind,
@@ -486,7 +487,7 @@ async function findTargetWorkspace(
   return workspace;
 }
 
-/** Every file of an `acceptPartial` request was rejected: fail it, naming each file. */
+/** Every file was rejected: fail the request, naming each file. */
 function allRejectedError(rejected: RejectedIntakeFile[]): WorkspaceIntakeError {
   const statuses = new Set(rejected.map((file) => file.statusCode));
   const statusCode = (statuses.size === 1 ? rejected[0]!.statusCode : 422) as WorkspaceIntakeStatusCode;
@@ -538,8 +539,10 @@ export async function intakeIntoWorkspace(
       try {
         files.push(await storeItem(item, request, storage, written));
       } catch (error) {
-        if (!request.acceptPartial || !(error instanceof WorkspaceIntakeError)) throw error;
-        rejected.push({ filename: sanitizeUploadFilename(item.filename), statusCode: error.statusCode, code: rejectionCode(error), message: error.message });
+        // One bad file never fails the request: take the rest and report this one.
+        if (!(error instanceof WorkspaceIntakeError)) throw error;
+        const filename = "rejected" in item.content ? item.filename : sanitizeUploadFilename(item.filename);
+        rejected.push({ filename, statusCode: error.statusCode, code: rejectionCode(error), message: error.message });
       }
     }
     if (files.length === 0) {
@@ -577,7 +580,6 @@ export async function intakeIntoWorkspace(
         pipeline,
         apiKeyId: request.apiKeyId,
         files,
-        ...(request.acceptPartial ? { skipUnreadable: true } : {}),
       });
     } catch (error) {
       if (!(error instanceof AllSourcesUnreadableError)) throw error;

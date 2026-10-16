@@ -109,7 +109,6 @@ export function createWorkspaceIntakeFakes(options: { workspaces?: WorkspaceReco
       async createRun(args) {
         if (state.blockRunCreation) throw state.blockRunCreation;
         const unreadable = args.files.filter((file) => state.unreadable.has(file.filename));
-        if (unreadable.length > 0 && !args.skipUnreadable) throw new UnreadableSourceError(unreadable[0]!.filename, "invalid PDF");
         if (unreadable.length === args.files.length) throw new AllSourcesUnreadableError(unreadable.map((file) => new UnreadableSourceError(file.filename, "invalid PDF")));
         const readable = args.files.filter((file) => !state.unreadable.has(file.filename));
         const run: FakeRun = {

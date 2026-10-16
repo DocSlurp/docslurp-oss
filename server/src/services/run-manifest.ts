@@ -21,9 +21,8 @@ export interface CreateRunManifestInput {
   kind: string;
   pipeline: PipelineFeatures;
   apiKeyId?: string | null;
+  /** Files that cannot be read (corrupt PDFs) are left out and reported in `unreadable`. */
   files: RunManifestFile[];
-  /** Skip files that cannot be read (corrupt PDFs) and report them, instead of failing the whole run. */
-  skipUnreadable?: boolean;
 }
 
 export interface UnreadableManifestFile {
@@ -49,9 +48,7 @@ export async function createRunManifest(input: CreateRunManifestInput) {
       workspaceId: input.workspaceId,
       runId: run.id,
       files: input.files,
-      ...(input.skipUnreadable
-        ? { onUnreadable: (file, error) => { unreadable.push({ ...file, error }); } }
-        : {}),
+      onUnreadable: (file, error) => { unreadable.push({ ...file, error }); },
     });
     if (unreadable.length > 0 && documents.length === 0) {
       throw new AllSourcesUnreadableError(unreadable.map((file) => file.error));
