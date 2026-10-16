@@ -20,6 +20,15 @@ export interface RetrievalQueryFlags {
   enableCommunityExpansion?: boolean;
   graphHops?: number;
   mmrLambda?: number;
+  minScore?: number;
+}
+
+/** A retrieval query parameter that cannot be honoured; routes answer it with 400. */
+export class InvalidRetrievalQueryError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "InvalidRetrievalQueryError";
+  }
 }
 
 export function parseRetrievalQueryFlags(read: (name: string) => string | undefined): RetrievalQueryFlags {
@@ -38,6 +47,15 @@ export function parseRetrievalQueryFlags(read: (name: string) => string | undefi
   };
   const graphHops = number("graphHops");
   const mmrLambda = number("mmrLambda");
+  // Like POST /v1/search, a bad relevance floor is a 400, not a silently different floor.
+  const rawMinScore = read("minScore");
+  let minScore: number | undefined;
+  if (rawMinScore !== undefined && rawMinScore.trim() !== "") {
+    minScore = Number(rawMinScore);
+    if (!Number.isFinite(minScore) || minScore < 0 || minScore > 1) {
+      throw new InvalidRetrievalQueryError("minScore must be a number from 0 to 1");
+    }
+  }
   return {
     useHyDE: flag("hyde"),
     useRerank: flag("rerank"),
@@ -54,5 +72,6 @@ export function parseRetrievalQueryFlags(read: (name: string) => string | undefi
     enableCommunityExpansion: flag("communityExpansion"),
     graphHops: graphHops === undefined ? undefined : Math.max(1, Math.min(3, Math.round(graphHops))),
     mmrLambda: mmrLambda === undefined ? undefined : Math.max(0, Math.min(1, mmrLambda)),
+    minScore,
   };
 }

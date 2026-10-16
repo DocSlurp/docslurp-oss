@@ -349,6 +349,8 @@ export function buildFallbackAnswer(
   query: string,
   citations: SearchResult[],
   availability?: SearchAvailability | null,
+  /** The relevance floor removed every retrieved passage: say so instead of citing weak text. */
+  noMatch = false,
 ): string {
   if (citations.length === 0) {
     if (availability?.status === "pending") {
@@ -367,6 +369,10 @@ export function buildFallbackAnswer(
       ]
         .filter(Boolean)
         .join(" ");
+    }
+
+    if (noMatch) {
+      return `I couldn't find anything relevant to "${query}" in this workspace.`;
     }
 
     return `No indexed passages matched "${query}".`;
@@ -1428,6 +1434,7 @@ async function chatWorkspaceTurn(
       args.query,
       citations,
       availability,
+      retrieved.relevanceFloor?.noMatch ?? false,
     );
     const evidenceSpans: WorkspaceChatEvidenceSpan[] = [];
     await appendTurn(sessionId, "user", args.query);

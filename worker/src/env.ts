@@ -6,20 +6,24 @@ import { config as loadEnv } from "dotenv";
 
 let loaded = false;
 
-function findWorkspaceRoot(startDir: string): string {
-  let currentDir = startDir;
+/**
+ * The outermost ancestor holding pnpm-workspace.yaml. When this repository is
+ * checked out as a submodule of a larger workspace (the private app repo pins it
+ * at core/), the shared .env lives at that outer root, not at core/.
+ */
+export function findWorkspaceRoot(startDir: string): string {
+  let root = startDir;
+  let found = false;
 
-  while (true) {
+  for (let currentDir = startDir; ; currentDir = resolve(currentDir, "..")) {
     if (existsSync(resolve(currentDir, "pnpm-workspace.yaml"))) {
-      return currentDir;
+      root = currentDir;
+      found = true;
     }
 
-    const parentDir = resolve(currentDir, "..");
-    if (parentDir === currentDir) {
-      return startDir;
+    if (resolve(currentDir, "..") === currentDir) {
+      return found ? root : startDir;
     }
-
-    currentDir = parentDir;
   }
 }
 

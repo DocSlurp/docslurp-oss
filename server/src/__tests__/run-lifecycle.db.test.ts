@@ -28,6 +28,7 @@ async function withSchema(run: (sql: SqlClient) => Promise<void>): Promise<void>
     await sql.unsafe(`
       create table workspace_runs (
         id text primary key, user_id text not null, status text not null, stage text not null,
+        creation_ready_at timestamptz default now(), creation_expires_at timestamptz,
         control_state text, control_requested_at timestamptz, error text,
         stats jsonb not null default '{}', pipeline jsonb not null default '{}',
         failure_count integer not null default 0, dead_lettered_at timestamptz, dead_letter_reason text,

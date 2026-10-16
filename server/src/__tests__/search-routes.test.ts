@@ -112,6 +112,16 @@ describe("searchRoutes", () => {
     );
   });
 
+  it("rejects an invalid minScore on GET /search with 400, like POST", async () => {
+    hybridSearch.mockClear();
+    for (const bad of ["abc", "7", "-1"]) {
+      const response = await app.request(`/search?q=test&workspaceId=ws-1&minScore=${bad}`);
+      expect(response.status, bad).toBe(400);
+      await expect(response.json()).resolves.toMatchObject({ error: expect.stringContaining("minScore") });
+    }
+    expect(hybridSearch).not.toHaveBeenCalled();
+  });
+
   it("searches the default workspace when GET /search omits workspaceId", async () => {
     hybridSearch.mockResolvedValueOnce({ results: [], sessionId: "session-default" });
     const response = await app.request("/search?q=test");

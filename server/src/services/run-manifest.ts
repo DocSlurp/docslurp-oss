@@ -1,7 +1,10 @@
 import type { PipelineFeatures } from "@docslurp/shared";
 
-import { sql as defaultSql, type SqlClient } from "../db.js";
+import { completeRunCreation } from "./run-creation.js";
 import { createDocumentBatch, createRun } from "./runs.js";
+import { AllSourcesUnreadableError, type UnreadableSourceError } from "./source-metadata.js";
+
+export { discardUnstartedRun } from "./run-creation.js";
 
 export interface RunManifestFile {
   filename: string;
@@ -19,6 +22,14 @@ export interface CreateRunManifestInput {
   pipeline: PipelineFeatures;
   apiKeyId?: string | null;
   files: RunManifestFile[];
+  /** Skip files that cannot be read (corrupt PDFs) and report them, instead of failing the whole run. */
+  skipUnreadable?: boolean;
+}
+
+export interface UnreadableManifestFile {
+  filename: string;
+  sourceKey: string;
+  error: UnreadableSourceError;
 }
 
 export async function createRunManifest(input: CreateRunManifestInput) {
@@ -29,50 +40,31 @@ export async function createRunManifest(input: CreateRunManifestInput) {
     totalDocuments: input.files.length,
     pipeline: input.pipeline,
     apiKeyId: input.apiKeyId ?? null,
-  });
+  }, { sourceKeys: input.files.map((file) => file.sourceKey) });
 
-  let documents: Awaited<ReturnType<typeof createDocumentBatch>>;
-  try {
-    documents = await createDocumentBatch({
+  return await completeRunCreation(run.id, async () => {
+    const unreadable: UnreadableManifestFile[] = [];
+    const documents = await createDocumentBatch({
       userId: input.userId,
       workspaceId: input.workspaceId,
       runId: run.id,
       files: input.files,
+      ...(input.skipUnreadable
+        ? { onUnreadable: (file, error) => { unreadable.push({ ...file, error }); } }
+        : {}),
     });
-  } catch (error) {
-    // The Run row is already committed. Without this, a failed document insert
-    // leaves a queued Run the client never sees, which a sweep would start later.
-    await discardUnstartedRun(run.id).catch((cleanupError: unknown) => {
-      console.error(
-        `[intake] could not discard run=${run.id} after document creation failed:`,
-        cleanupError instanceof Error ? cleanupError.message : String(cleanupError),
-      );
-    });
-    throw error;
-  }
+    if (unreadable.length > 0 && documents.length === 0) {
+      throw new AllSourcesUnreadableError(unreadable.map((file) => file.error));
+    }
 
-  const pagesTotal = documents.reduce(
-    (total, document) => total + Math.max(0, document.pageCount ?? 0),
-    0,
-  );
+    const pagesTotal = documents.reduce(
+      (total, document) => total + Math.max(0, document.pageCount ?? 0),
+      0,
+    );
 
-  return { run: { ...run, pagesTotal }, documents };
-}
-
-/**
- * Remove a Run whose intake failed before its workflow was started, with any
- * Documents already inserted for it (child rows cascade with the Run). Only a
- * still-queued Run is removed, so a Run that something else picked up is kept.
- */
-export async function discardUnstartedRun(runId: string, sql: SqlClient = defaultSql): Promise<boolean> {
-  return await sql.begin(async (tx) => {
-    const client = tx as unknown as SqlClient;
-    const [locked] = await client<{ id: string }[]>`
-      select id from workspace_runs where id = ${runId} and status = 'queued' for update
-    `;
-    if (!locked) return false;
-    await client`delete from documents where run_id = ${runId}`;
-    await client`delete from workspace_runs where id = ${runId}`;
-    return true;
+    return {
+      totalDocuments: documents.length,
+      value: { run: { ...run, pagesTotal, totalDocuments: documents.length }, documents, unreadable },
+    };
   });
 }

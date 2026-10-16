@@ -44,6 +44,33 @@ describe("uploadsRoutes over Workspace Intake", () => {
     expect(fakes.runs[0].workspaceId).toBe("ws-default-org-99");
   });
 
+  it("accepts the good files of a bulk upload and lists the rejected ones in the 201 body", async () => {
+    const { app, fakes } = setup();
+    fakes.state.unreadable.add("broken.pdf");
+    const response = await app.request("/uploads/bulk", bulk([
+      text("notes.txt"),
+      new File(["MZ"], "payload.exe", { type: "application/x-msdownload" }),
+      new File(["%PDF"], "broken.pdf", { type: "application/pdf" }),
+    ]));
+
+    expect(response.status).toBe(201);
+    const body = await response.json();
+    expect(body.documents.map((document: { filename: string }) => document.filename)).toEqual(["notes.txt"]);
+    expect(body.rejected).toEqual([
+      expect.objectContaining({ filename: "payload.exe", statusCode: 415, code: "unsupported_type" }),
+      expect.objectContaining({ filename: "broken.pdf", statusCode: 422, code: "unreadable_source" }),
+    ]);
+    expect(body.warnings).toEqual(["2 of 3 files were not accepted: payload.exe, broken.pdf."]);
+  });
+
+  it("omits rejected when every file was taken, and fails the request when none was", async () => {
+    const { app } = setup();
+    expect((await (await app.request("/uploads/bulk", bulk([text("a.txt")]))).json()).rejected).toBeUndefined();
+
+    const none = await app.request("/uploads/bulk", bulk([new File(["MZ"], "payload.exe", { type: "application/x-msdownload" })]));
+    expect(none.status).toBe(415);
+  });
+
   it("creates a self-titled workspace and returns the run handoff", async () => {
     const { app, fakes } = setup();
     const response = await app.request(

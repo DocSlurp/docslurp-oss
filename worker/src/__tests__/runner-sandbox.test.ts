@@ -1,3 +1,5 @@
+import { spawnSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { tmpdir } from "node:os";
 
@@ -135,6 +137,7 @@ describe("parser sandbox settings", () => {
     expect(spec.env.DOCSLURP_PARSER_SANDBOX_WRITABLE_PATHS).toBe(
       path.join(tmpdir(), "docslurp-test"),
     );
+    expect(spec.env.DOCSLURP_PARSER_SANDBOX_TMP_ROOT).toBe(path.resolve(tmpdir()));
     expect(spec.env.AWS_SECRET_ACCESS_KEY).toBeUndefined();
     expect(spec.env.LANCEDB_URI).toBeUndefined();
     expect(spec.env.STORAGE_URI).toBeUndefined();
@@ -312,6 +315,36 @@ describe("vendor bundle plans", () => {
       expect(withVendorBundle(plan, { name: "docling", sha256: "a".repeat(64), root, binDir: "", sitePackages: path.join(root, "site-packages"), env: {} }).pythonPath).toHaveLength(1);
     } finally {
       await rm(root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("parser sandbox launcher with a custom temp root", () => {
+  const launcher = path.resolve(process.cwd(), "scripts/parser-sandbox.sh");
+  const hasBwrap = spawnSync("bwrap", ["--version"]).status === 0;
+
+  function runLauncher(tmpRoot: string, writable: string, ...command: string[]) {
+    return spawnSync("bash", [launcher, ...command], {
+      encoding: "utf8",
+      env: { PATH: process.env.PATH, DOCSLURP_PARSER_SANDBOX_TMP_ROOT: tmpRoot, DOCSLURP_PARSER_SANDBOX_WRITABLE_PATHS: writable },
+    });
+  }
+
+  it.skipIf(!hasBwrap || process.platform !== "linux")("mounts private workspaces under a non-/tmp temp root and still refuses broad paths", () => {
+    const tmpRoot = mkdtempSync(path.join(process.env.HOME ?? process.cwd(), ".docslurp-sandbox-root-"));
+    try {
+      const workspace = path.join(tmpRoot, "docslurp-work");
+      mkdirSync(workspace);
+      writeFileSync(path.join(workspace, "in.txt"), "hello");
+
+      const ok = runLauncher(tmpRoot, workspace, "cat", path.join(workspace, "in.txt"));
+      expect(ok.stderr).toBe("");
+      expect(ok.stdout).toBe("hello");
+
+      expect(runLauncher(tmpRoot, tmpRoot, "true").status).toBe(70);
+      expect(runLauncher(tmpRoot, `${workspace}/../../escape`, "true").status).toBe(70);
+    } finally {
+      rmSync(tmpRoot, { recursive: true, force: true });
     }
   });
 });

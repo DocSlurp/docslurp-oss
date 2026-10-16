@@ -101,6 +101,8 @@ export type SearchCitation = {
 
 export type SearchResult = JsonObject & {
   score: number;
+  /** Raw match strength, 0..1, independent of the other hits (unlike `score`, which is rank-based). */
+  relevance?: number;
   text: string;
   citation: SearchCitation;
   parentText?: string;
@@ -175,8 +177,18 @@ export type UploadInput = {
   workspaceName?: string;
 };
 
+export type RejectedUpload = {
+  filename: string;
+  /** HTTP status the file would have produced on its own. */
+  statusCode: 413 | 415 | 422;
+  code: "unsupported_type" | "file_too_large" | "unreadable_source" | "rejected";
+  message: string;
+};
+
 export type UploadResponse = {
   documents: DocumentRecord[];
+  /** Files a bulk upload left out while accepting the rest. Absent when every file was taken. */
+  rejected?: RejectedUpload[];
   run: WorkspaceRun;
   warnings?: string[];
   workspace: WorkspaceRecord;
@@ -196,6 +208,8 @@ export type SearchInput = {
   documentId?: string;
   filenameContains?: string;
   limit?: number;
+  /** Relevance floor, 0..1: drop results with a lower raw match strength. 0 disables it; omitted uses the workspace/server default. */
+  minScore?: number;
   q: string;
   tags?: string;
   workspaceId?: string;
@@ -218,6 +232,10 @@ export type SearchUsage = {
 export type SearchResponse = {
   usage: SearchUsage;
   availability: SearchAvailability | null;
+  /** True when the workspace is searchable but search returned nothing: either nothing cleared the relevance floor or nothing was retrieved at all (e.g. a filter that matches nothing); `results` is then empty. */
+  noMatch?: boolean;
+  /** The floor applied and how many retrieved candidates it removed. */
+  relevanceFloor?: { minScore: number; dropped: number };
   results: SearchResult[];
   sessionId: string;
 };

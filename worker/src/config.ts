@@ -1,6 +1,7 @@
 import "./env.js";
 
 import { existsSync } from "node:fs";
+import { defaultDocConcurrency, resolveActivityConcurrency } from "./concurrency.js";
 import {
   inferenceLaneOptions,
   textGenerationProfileSchema,
@@ -150,6 +151,8 @@ export interface Config {
   temporalTlsClientKeyPath: string | null;
 }
 
+export { defaultDocConcurrency };
+
 function readNumber(value: string | undefined, fallback: number): number {
   if (!value) {
     return fallback;
@@ -258,11 +261,8 @@ export function fromEnv(): Config {
     lancedbVectorIndexMinRows: maintenance.vectorIndexMinRows,
     workerLeaseTtlMs: parseDurationMs(process.env.WORKER_LEASE_TTL, 45_000),
     workerMaxRuntimeMs: parseDurationMs(process.env.WORKER_MAX_RUNTIME, 0),
-    workerDocConcurrency: readNumber(process.env.WORKER_DOC_CONCURRENCY, 1),
-    workerActivityConcurrency: Math.max(
-      1,
-      readNumber(process.env.WORKER_ACTIVITY_CONCURRENCY, 1),
-    ),
+    workerDocConcurrency: readNumber(process.env.WORKER_DOC_CONCURRENCY, defaultDocConcurrency()),
+    workerActivityConcurrency: resolveActivityConcurrency(process.env),
     workerAdaptiveTuning: readBoolean(
       process.env.WORKER_ADAPTIVE_TUNING,
       true,

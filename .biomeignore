@@ -6,8 +6,6 @@ coverage
 build
 dist
 .tmp
-app/.astro
-app/dist
 api/dist
 packages/cli/dist
 packages/*/dist

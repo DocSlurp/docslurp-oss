@@ -14,6 +14,7 @@ import {
 import { shouldFailOpenVisionError } from "../stages/vision-extract.js";
 import { toActivityFailure } from "../temporal/activities.js";
 import { PROVIDER_RATE_LIMITED } from "../temporal/shared.js";
+import { resolveActivityConcurrency } from "../concurrency.js";
 import { perSlotShare, resolveWorkerDeploymentProfile } from "../pipeline/local-compute-cost.js";
 
 const response = (status: number, body = "", headers: Record<string, string> = {}) => new Response(body, { status, headers });
@@ -171,5 +172,18 @@ describe("per-slot compute allocation", () => {
     const profile = resolveWorkerDeploymentProfile({ DOCSLURP_MACHINE_VCPU: "8", DOCSLURP_MACHINE_MEMORY_GB: "16", WORKER_ACTIVITY_CONCURRENCY: "8" });
     expect(profile).toMatchObject({ allocatedVcpu: 1, allocatedMemoryGb: 2 });
     expect(resolveWorkerDeploymentProfile({ DOCSLURP_ALLOCATED_VCPU: "0.5", DOCSLURP_MACHINE_VCPU: "8", WORKER_ACTIVITY_CONCURRENCY: "8" }).allocatedVcpu).toBe(0.5);
+  });
+
+  it("divides by the same resolved slot count the worker runs when WORKER_ACTIVITY_CONCURRENCY is unset", () => {
+    const machine = { DOCSLURP_MACHINE_VCPU: "8", DOCSLURP_MACHINE_MEMORY_GB: "16" };
+    // Unset: the default is twice the CPU-derived document concurrency, not 1.
+    const expectedSlots = resolveActivityConcurrency({});
+    const unset = resolveWorkerDeploymentProfile(machine);
+    expect(unset.allocatedVcpu).toBeCloseTo(8 / expectedSlots, 10);
+    expect(unset.allocatedMemoryGb).toBeCloseTo(16 / expectedSlots, 10);
+    // An explicit slot count (the worker's config value) wins.
+    expect(resolveWorkerDeploymentProfile(machine, 4)).toMatchObject({ allocatedVcpu: 2, allocatedMemoryGb: 4 });
+    expect(resolveWorkerDeploymentProfile({ ...machine, WORKER_ACTIVITY_CONCURRENCY: "8" })).toMatchObject({ allocatedVcpu: 1, allocatedMemoryGb: 2 });
+    expect(perSlotShare("16", 4)).toBe(4);
   });
 });

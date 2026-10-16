@@ -38,6 +38,7 @@ import {
   lexicalSearchableDocument,
   servableInProgressVersion,
 } from "../search/eligibility.js";
+import { queryPhraseWindows } from "../search/relevance.js";
 import { collectSearchTimings, timePhase, type SearchTimings } from "../search/timings.js";
 
 export { MissingWorkspaceScopeError } from "../search/session-setup.js";
@@ -52,6 +53,16 @@ export interface SearchChunk {
   pageNumber: number | null;
   tokenEstimate: number;
   score: number;
+  /**
+   * Raw match strength in 0..1, measured before fusion (see search/relevance.ts);
+   * unlike `score` it does not depend on the other hits. Undefined: never measured.
+   */
+  relevance?: number;
+  /**
+   * Lexical rows that need not contain every query term: "partial" came from the
+   * OR backoff (may match on one term), "phrase" from the three-word phrase query.
+   */
+  lexicalMatch?: "partial" | "phrase";
   filename: string;
   pageNumbers: number[];
   blockIds: string[];
@@ -109,12 +120,28 @@ export interface SearchOptions {
   internalAgenticDepth?: number;
   suppressSessionLog?: boolean;
   rootSessionId?: string;
+  /**
+   * Relevance floor, 0..1: results whose raw relevance is lower are dropped.
+   * 0 disables it. Omitted: the workspace default, else SEARCH_MIN_SCORE.
+   */
+  minScore?: number;
+}
+
+/** What the relevance floor did to this search. */
+export interface SearchRelevanceFloor {
+  /** Floor that was applied; 0 means disabled. */
+  minScore: number;
+  /** Retrieved candidates removed for being below the floor. */
+  dropped: number;
+  /** True when nothing relevant was found in a searchable workspace: `results` is empty. */
+  noMatch: boolean;
 }
 
 export interface SearchResponse {
   results: SearchResult[];
   sessionId: string;
   availability: SearchAvailability;
+  relevanceFloor?: SearchRelevanceFloor;
   usageEvents?: SearchUsageEvent[];
   /** Phase durations in ms (setup, embed, vector, text, …, total). */
   timings?: SearchTimings;
@@ -835,8 +862,11 @@ function buildLexicalBackoffTsQuery(query: string): string | null {
   return uniqueTokens.join(" | ");
 }
 
-function mapRankedChunkRows(rows: ChunkRow[]): SearchChunk[] {
-  return rows.map((row) => mapChunk(row, 1 / (60 + row.rank)));
+function mapRankedChunkRows(rows: ChunkRow[], partial = false, phraseIds?: ReadonlySet<string>): SearchChunk[] {
+  return rows.map((row) => ({
+    ...mapChunk(row, 1 / (60 + row.rank)),
+    ...(partial ? { lexicalMatch: phraseIds?.has(row.id) ? "phrase" as const : "partial" as const } : {}),
+  }));
 }
 
 function buildChunkSearchWhere(
@@ -987,8 +1017,7 @@ async function textSearch(
     `;
     // Preserve phrase matches in conversational queries: OR backoff alone lets
     // repeated generic words crowd out the subject of the question.
-    const words = query.match(/[\p{L}\p{N}]+/gu)?.slice(0, 32) ?? [];
-    const phrases = words.slice(2).map((_, index) => `"${words.slice(index, index + 3).join(" ")}"`).join(" OR ");
+    const phrases = queryPhraseWindows(query).map((window) => `"${window}"`).join(" OR ");
     const phraseRows = phrases ? await sql<ChunkRow[]>`
       select c.id, c.document_id, c.run_id, c.chunk_index, c.text, c.heading_path,
         c.page_number, c.token_estimate, c.metadata, d.filename,
@@ -1003,7 +1032,7 @@ async function textSearch(
       if (seen.has(row.id)) return false;
       seen.add(row.id);
       return true;
-    }));
+    }), true, new Set(phraseRows.map((row) => row.id)));
   } catch {
     // websearch_to_tsquery can fail on degenerate inputs (all stop words, lone operators).
     // Fall back to plainto_tsquery which is always safe.
@@ -1038,7 +1067,7 @@ async function textSearch(
          order by ts_rank_cd(c.ts_content, to_tsquery('english', ${lexicalBackoffQuery})) desc
          limit ${limit}
       `;
-      return mapRankedChunkRows(lexicalRows);
+      return mapRankedChunkRows(lexicalRows, true);
     } catch {
       return [];
     }
@@ -1274,7 +1303,14 @@ async function graphNeighborSearch(
   }
 }
 
-export async function hybridSearch(query: string, userId: string, options: SearchOptions = {}): Promise<SearchResponse> {
+/** NUL bytes are valid JSON and UTF-8 but rejected by Postgres text parameters. */
+export function stripNulBytes(value: string): string {
+  return value.replaceAll("\u0000", "");
+}
+
+export async function hybridSearch(rawQuery: string, userId: string, options: SearchOptions = {}): Promise<SearchResponse> {
+  // Postgres text cannot hold NUL, so a query carrying one failed every lexical lookup with a 500.
+  const query = stripNulBytes(rawQuery);
   const activity: SearchActivity = { id: randomUUID(), groupId: options.rootSessionId ?? randomUUID(), query, status: "loading" };
   const started = Date.now();
   activity.aggregate = Boolean(options.queryDecompose || options.stepback || options.iterativeMultiHop);

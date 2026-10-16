@@ -2409,6 +2409,11 @@ export const workspaceRuns = pgTable(
       mode: "string",
     }),
     deadLetterReason: text("dead_letter_reason"),
+    // Creation publishes this only after every Document is durable.
+    creationSourceKeys: text("creation_source_keys").array().default([]).notNull(),
+    creationReadyAt: timestamp("creation_ready_at", { withTimezone: true, mode: "string" }),
+    creationExpiresAt: timestamp("creation_expires_at", { withTimezone: true, mode: "string" })
+      .default(sql`now() + interval '5 minutes'`),
     // Null until a Temporal workflow start is confirmed; run-start recovery
     // retries queued runs without one (0029_run_workflow_start_tracking).
     workflowStartedAt: timestamp("workflow_started_at", {
@@ -2422,6 +2427,8 @@ export const workspaceRuns = pgTable(
     }),
   },
   (table) => [
+    index("workspace_runs_creation_pending_idx").on(table.creationExpiresAt)
+      .where(sql`creation_ready_at IS NULL AND workflow_started_at IS NULL`),
     index("workspace_runs_workflow_start_pending_idx")
       .using("btree", table.createdAt.asc().nullsLast().op("timestamptz_ops"))
       .where(sql`((status = 'queued'::text) AND (workflow_started_at IS NULL))`),

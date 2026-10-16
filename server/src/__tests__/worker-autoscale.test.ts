@@ -74,4 +74,11 @@ describe("worker autoscale formula", () => {
     expect([...resolved.excludedOrgKeys]).toEqual(["lt-1", "lt-2"]);
     expect(resolveWorkerScalerConfig({ WORKER_ACTIVITY_CONCURRENCY: "8" }).slotsPerMachine).toBe(8);
   });
+
+  it("uses the worker's resolved slot count when neither env var is set, and the env still wins", () => {
+    expect(resolveWorkerScalerConfig({}).slotsPerMachine).toBe(1);
+    expect(resolveWorkerScalerConfig({}, 6).slotsPerMachine).toBe(6);
+    expect(resolveWorkerScalerConfig({ WORKER_ACTIVITY_CONCURRENCY: "3" }, 6).slotsPerMachine).toBe(3);
+    expect(resolveWorkerScalerConfig({ DOCSLURP_WORKER_SLOTS_PER_MACHINE: "8" }, 6).slotsPerMachine).toBe(8);
+  });
 });

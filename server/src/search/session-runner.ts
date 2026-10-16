@@ -1,11 +1,11 @@
 import { withObservation } from "@docslurp/shared/observability";
-import type { SearchResult } from "@docslurp/shared";
+import { resolveEmbeddingRoute, type SearchResult } from "@docslurp/shared";
 
 import {
   createEvidenceRetrievalAdapters,
-  flattenEvidenceResults,
   retrieveEvidence,
 } from "./retrieval-adapters.js";
+import { annotateEvidenceRelevance, embeddingPipelineId, resolveMinScore } from "./relevance.js";
 import type { SearchSetup } from "./session-setup.js";
 import {
   executeSearchSessionRetrieval,
@@ -67,6 +67,21 @@ export interface SearchSessionRunnerAdapters {
     options: SearchOptions;
   }): Promise<SearchChunk[]>;
   wholeCorpusFallback(): Promise<SearchResult[]>;
+}
+
+function embeddingPipelineOf(setup: SearchSetup): string | null {
+  try {
+    const embedding = setup.workspacePipeline.embedding;
+    const route = resolveEmbeddingRoute(embedding);
+    return embeddingPipelineId({
+      provider: route.provider,
+      model: route.model,
+      requestedDimensions: route.requestedDimensions,
+      normalize: embedding.normalize,
+    });
+  } catch {
+    return null;
+  }
 }
 
 export async function runSearchSession(args: {
@@ -136,6 +151,10 @@ export async function runSearchSession(args: {
           workspaceSettings,
           retrievalChain: recursivePlan.retrievalChain,
           wholeCorpusFallback: adapters.wholeCorpusFallback,
+          relevanceFloor: {
+            minScore: resolveMinScore(options.minScore),
+            dropped: recursivePlan.relevanceFloorDropped,
+          },
         });
       }
 
@@ -189,7 +208,10 @@ export async function runSearchSession(args: {
                 ? 200 : options.limit ?? 20 },
             },
           ));
-          return flattenEvidenceResults(evidenceResults);
+          return annotateEvidenceRelevance(evidenceResults, {
+            query,
+            embeddingPipeline: embeddingPipelineOf(setup),
+          });
         },
         buildAvailability: (chunks) =>
           adapters.buildAvailability(chunks, effectiveOptions),

@@ -196,6 +196,7 @@ function toSearchOptionsFromAdvancedRequest(
     useRerank: request.rerank,
     useMmr: request.mmr,
     mmrLambda: request.mmrLambda,
+    minScore: request.minScore,
     summarySeed: request.summarySeed,
     queryRewrite: request.queryRewrite,
     queryDecompose: request.queryDecompose,
@@ -990,6 +991,8 @@ async function performOperation(operationId: string): Promise<void> {
       } else {
         const retrieved = await hybridSearch(operation.goal, operation.userId, {
           ...toSearchOptionsFromAdvancedRequest(advanced),
+          // The goal is an instruction, not a user search query: floored only when the request asks.
+          minScore: advanced.minScore ?? 0,
           filters: buildSearchFilters(
             advanced.filters,
             workspaceId,

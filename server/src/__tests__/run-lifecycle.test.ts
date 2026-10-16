@@ -22,7 +22,7 @@ function lifecycle(startWorkflow: (...args: unknown[]) => Promise<void>) {
   queries = [];
   const sql = (async (strings: TemplateStringsArray) => {
     queries.push(strings.join("?").replace(/\s+/g, " ").trim());
-    return [];
+    return strings.join("?").includes("select id from workspace_runs") ? [{ id: "run-1" }] : [];
   }) as unknown as SqlClient;
   return createRunLifecycle({ sql, startWorkflow, failureThreshold: 3 });
 }
@@ -34,18 +34,21 @@ describe("Run Lifecycle start", () => {
     const startWorkflow = vi.fn(async () => {});
     await expect(lifecycle(startWorkflow).start(run)).resolves.toEqual({ status: "started" });
     expect(startWorkflow).toHaveBeenCalledWith("run-1", defaultPipelineFeatures, undefined);
-    expect(queries).toHaveLength(1);
+    expect(queries).toHaveLength(2);
   });
 
   it("defers the Run when Temporal is unavailable and schedules a backed-off recovery", async () => {
     const outcome = await lifecycle(vi.fn(async () => { throw temporalDown; })).start(run);
     expect(outcome).toEqual({ status: "deferred", reason: TEMPORAL_DEFERRED_RUN_MESSAGE });
-    expect(queries).toHaveLength(1);
+    expect(queries).toHaveLength(2);
   });
 
   it("still reports the outcome when the start marker cannot be written", async () => {
     vi.spyOn(console, "warn").mockImplementationOnce(() => {});
-    const sql = (async () => { throw new Error("db down"); }) as unknown as SqlClient;
+    const sql = (async (strings: TemplateStringsArray) => {
+      if (strings.join("?").includes("select id from workspace_runs")) return [{ id: "run-1" }];
+      throw new Error("db down");
+    }) as unknown as SqlClient;
     const outcome = await createRunLifecycle({ sql, startWorkflow: vi.fn(async () => {}), failureThreshold: 3 }).start(run);
     expect(outcome).toEqual({ status: "started" });
   });

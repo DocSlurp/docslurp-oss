@@ -24,6 +24,7 @@ export interface WorkspaceRetrievalOptions {
   enableGraphExpansion?: boolean;
   enableCommunityExpansion?: boolean;
   graphHops?: number;
+  minScore?: number;
 }
 
 export interface ResolvedWorkspaceRetrievalControls<
@@ -136,6 +137,9 @@ export function resolveWorkspaceRetrievalControls<
       defaults.graphHops ?? (graphRag ? 2 : entityIndex ? 1 : 1),
     ) as number,
     filters: withWorkspaceScope(options.filters, args.workspaceId),
+    // Left undefined when neither the request nor the workspace sets it, so the
+    // environment default (SEARCH_MIN_SCORE) decides at search time.
+    minScore: options.minScore ?? defaults.minScore,
   };
 
   return {

@@ -153,4 +153,26 @@ describe("workspace retrieval session options", () => {
     }).options;
     expect(explicit).toMatchObject({ useRerank: false, useHyDE: true });
   });
+
+  it("validates the minScore relevance floor on search input", () => {
+    const parse = (minScore: unknown) => searchInputSchema.safeParse({ q: "support hours", minScore });
+    for (const valid of [0, 0.1, 1]) expect(parse(valid).success).toBe(true);
+    for (const invalid of [-0.01, 1.01, "0.5", Number.NaN]) expect(parse(invalid).success).toBe(false);
+    expect(searchInputSchema.parse({ q: "support hours" }).minScore).toBeUndefined();
+    expect(searchOptions({ ...searchInputSchema.parse({ q: "x", minScore: 0 }), workspaceId: "ws-1" }).minScore).toBe(0);
+  });
+
+  it("resolves minScore as request, then workspace default, else unset for the environment", () => {
+    const base = workspaceSearchSettingsSchema.parse({ workspaceId: "ws-1", userId: "user-1" });
+    const withDefault = {
+      ...base,
+      retrievalDefaults: workspaceSearchSettingsSchema.shape.retrievalDefaults.parse({ ...base.retrievalDefaults, minScore: 0.4 }),
+    };
+    const resolve = (options: { minScore?: number }, settings = base) =>
+      resolveWorkspaceRetrievalControls({ options, workspaceId: "ws-1", settings }).options.minScore;
+    expect(resolve({})).toBeUndefined();
+    expect(resolve({}, withDefault)).toBe(0.4);
+    expect(resolve({ minScore: 0 }, withDefault)).toBe(0);
+    expect(workspaceSearchSettingsSchema.shape.retrievalDefaults.safeParse({ ...base.retrievalDefaults, minScore: 2 }).success).toBe(false);
+  });
 });

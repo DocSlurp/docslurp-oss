@@ -176,6 +176,7 @@ describe("hybridSearch", () => {
       timings: expect.objectContaining({ totalMs: expect.any(Number), setupMs: expect.any(Number) }),
       results: [],
       sessionId: expect.any(String),
+      relevanceFloor: { minScore: 0.1, dropped: 0, noMatch: true },
       availability: {
         status: "partial",
         isPartial: true,
@@ -611,6 +612,73 @@ describe("hybridSearch", () => {
     });
     expect(lanceDbVectorSearch).toHaveBeenCalledWith(expect.objectContaining({ documentIds: ["copy", "owner"] }));
     expect(response.results.map((result) => result.text)).toContain("Copy chunk body");
+  });
+
+  describe("relevance floor", () => {
+    // The vector adapter reports 1 / (1 + squaredL2); unit vectors give squaredL2 = 2 - 2cos.
+    const hitFor = (id: string, cosine: number) => ({ id, documentId: "doc-1", chunkIndex: 0, score: 1 / (3 - 2 * cosine) });
+
+    function mockIndex() {
+      sqlMock.mockReset();
+      sqlMock.mockImplementation(async (strings) => {
+        const text = Array.isArray(strings) ? strings.join(" ") : String(strings);
+        if (text.includes("from workspaces w")) return [{ workspace_id: "ws-1", org_id: "org-1", workspace_owner_user_id: "user-1", org_role: "owner", workspace_role: null }];
+        if (text.includes("join vector_indexes")) return [{ id: "doc-1", owner_id: "doc-1" }];
+        if (text.includes("with scoped_runs as")) {
+          return [{ total_documents: 1, indexed_documents: 1, page_indexed_documents: 0, searchable_documents: 1, in_progress_documents: 0,
+            total_pages: 4, searchable_pages: 0, indexed_chunk_count: 2, queued_runs: 0, processing_runs: 0 }];
+        }
+        if (text.includes("from document_chunks c") && text.includes("hit_id")) {
+          return ["strong", "weak"].map((id, index) => ({ id, document_id: "doc-1", run_id: "run-1", chunk_index: index, text: `${id} chunk`,
+            heading_path: [], page_number: index + 1, token_estimate: 4, rank: 0, filename: "doc.pdf", metadata: {}, hit_id: id }));
+        }
+        return [];
+      });
+    }
+    const search = (query: string, options: Record<string, unknown> = {}) => hybridSearch(query, "user-1", {
+      filters: { workspaceId: "ws-1" }, queryVector: [0.1, 0.2], useRerank: false, useMmr: false,
+      parentRetrieval: false, suppressSessionLog: true, ...options,
+    });
+
+    it("reports no match instead of weak hits for a query nothing in the workspace answers", async () => {
+      mockIndex();
+      lanceDbVectorSearch.mockResolvedValue([hitFor("strong", 0.31), hitFor("weak", 0.12)]);
+      const response = await search("zxqvbn nonsense gibberish");
+      expect(response.results).toEqual([]);
+      expect(response.relevanceFloor).toEqual({ minScore: 0.1, dropped: 2, noMatch: true });
+      expect(response.availability.status).toBe("complete");
+    });
+
+    it("keeps strong matches and drops the weak tail without changing the strong score", async () => {
+      mockIndex();
+      lanceDbVectorSearch.mockResolvedValue([hitFor("strong", 0.95), hitFor("weak", 0.12)]);
+      const response = await search("contract");
+      expect(response.results.map((result) => result.text)).toEqual(["strong chunk"]);
+      expect(response.results[0]?.relevance).toBeGreaterThan(0.7);
+      expect(response.relevanceFloor).toEqual({ minScore: 0.1, dropped: 1, noMatch: false });
+    });
+
+    it("returns the weak hits when the floor is disabled with minScore 0", async () => {
+      mockIndex();
+      lanceDbVectorSearch.mockResolvedValue([hitFor("strong", 0.31), hitFor("weak", 0.12)]);
+      const response = await search("zxqvbn nonsense gibberish", { minScore: 0 });
+      expect(response.results).toHaveLength(2);
+      expect(response.relevanceFloor).toEqual({ minScore: 0, dropped: 0, noMatch: false });
+    });
+
+    it("takes its default from SEARCH_MIN_SCORE unless the request sets one", async () => {
+      mockIndex();
+      lanceDbVectorSearch.mockResolvedValue([hitFor("strong", 0.8), hitFor("weak", 0.75)]);
+      process.env.SEARCH_MIN_SCORE = "0.5";
+      try {
+        const response = await search("contract");
+        expect(response.relevanceFloor?.minScore).toBe(0.5);
+        expect(response.results.map((result) => result.text)).toEqual([]);
+        expect((await search("contract", { minScore: 0.1 })).results).toHaveLength(2);
+      } finally {
+        delete process.env.SEARCH_MIN_SCORE;
+      }
+    });
   });
 
   it("checks workspace access again before LanceDB vector search", async () => {

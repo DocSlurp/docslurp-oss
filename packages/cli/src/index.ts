@@ -41,7 +41,7 @@ function usage(): void {
   docslurp ingest-url <urls...> [--workspace <slug|id> | --new-workspace | --workspace-name <name> | --template <key>] [--watch] [--api-url <url>]
   docslurp status <runId> [--api-url <url>] [--watch] [--timeout <seconds>]
   docslurp runs [--api-url <url>]
-  docslurp search <query> [--workspace <slug|id>] [--json | --context]
+  docslurp search <query> [--workspace <slug|id>] [--min-score <0..1>] [--json | --context]
   docslurp search --queries-file <queries.json> [--workspace <slug|id>] [--concurrency <1..4>] [--json | --context]
   docslurp chat <question> [--workspace <slug|id>] [--session <id>] [--json]
   docslurp mcp-server [--api-url <url>] [--api-key <key>]
@@ -224,7 +224,7 @@ function parseCliArgs(argv: string[]) {
     } else if (arg === "--new-workspace") {
       flags.newWorkspace = true;
       i++;
-    } else if (arg === "--workspace" || arg === "--api-url" || arg === "--run" || arg === "--api-key" || arg === "--source" || arg === "--out" || arg === "--queries-file" || arg === "--concurrency" || arg === "--session" || arg === "--canonical-id" || arg === "--workspace-name" || arg === "--template") {
+    } else if (arg === "--workspace" || arg === "--api-url" || arg === "--run" || arg === "--api-key" || arg === "--source" || arg === "--out" || arg === "--queries-file" || arg === "--concurrency" || arg === "--min-score" || arg === "--session" || arg === "--canonical-id" || arg === "--workspace-name" || arg === "--template") {
       const key = arg.replace(/^--/, "").replace(/-([a-z])/g, (_, c: string) => c.toUpperCase());
       flags[key] = argv[i + 1] ?? "";
       i += 2;
@@ -537,6 +537,7 @@ type CliSearchResponse = {
     citation: { documentId?: string; filename: string; pageNumber?: number | null; pageNumbers?: number[] };
   }>;
   availability?: { message?: string | null };
+  noMatch?: boolean;
 };
 
 function printSearch(data: CliSearchResponse, flags: Record<string, string | boolean>): void {
@@ -549,7 +550,7 @@ function printSearch(data: CliSearchResponse, flags: Record<string, string | boo
     }).join("\n\n"));
     return;
   }
-  if (!data.results.length) { console.log("No results found."); return; }
+  if (!data.results.length) { console.log(data.noMatch ? "No relevant match found. Lower --min-score (0 disables the floor) to see weaker passages." : "No results found."); return; }
   for (const [index, hit] of data.results.entries()) {
     const page = hit.citation.pageNumbers?.length ? hit.citation.pageNumbers.join(", ") : hit.citation.pageNumber ?? "-";
     console.log(`${String(index + 1).padStart(3)}. [${hit.score.toFixed(4)}] ${hit.citation.filename} (p.${page})`);
@@ -586,7 +587,11 @@ async function searchCommand(query: string, flags: Record<string, string | boole
   }
   if (!query) throw new Error("Error: search query required");
   if (flags.concurrency) throw new Error("--concurrency requires --queries-file.");
-  const params = new URLSearchParams({ q: query, ...(workspaceId ? { workspaceId } : {}) });
+  // A missing value arrives as "" and Number("") is 0, which would silently turn the floor off.
+  const rawMinScore = flags.minScore === undefined ? undefined : String(flags.minScore).trim();
+  const minScore = rawMinScore === undefined ? undefined : rawMinScore === "" ? Number.NaN : Number(rawMinScore);
+  if (minScore !== undefined && !(minScore >= 0 && minScore <= 1)) throw new Error("--min-score must be a number from 0 to 1.");
+  const params = new URLSearchParams({ q: query, ...(workspaceId ? { workspaceId } : {}), ...(minScore === undefined ? {} : { minScore: String(minScore) }) });
   const response = await apiFetch(`/v1/search?${params.toString()}`, flags);
   if (!response.ok) throw new Error(publicHttpError(response.status));
   const data = await response.json() as CliSearchResponse;

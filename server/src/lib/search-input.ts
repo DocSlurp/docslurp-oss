@@ -4,7 +4,8 @@ import { parseFilters } from "../search/filters.js";
 
 const id = z.string().trim().min(1).max(256);
 const filter = z.string().max(4096).optional();
-const query = z.string().trim().min(1).max(16000);
+// A query of only NUL bytes is empty once they are stripped before the Postgres lookups.
+const query = z.string().trim().min(1).max(16000).refine((value) => value.replaceAll("\u0000", "").trim().length > 0);
 const workspaceRef = id.optional().describe("Workspace slug, former slug, UUID, or \"default\". Omitted: the organization default workspace.");
 
 export const searchInputSchema = z.object({
@@ -29,6 +30,8 @@ export const searchInputSchema = z.object({
   rerank: z.boolean().optional(),
   mmr: z.boolean().optional(),
   mmrLambda: z.number().min(0).max(1).optional(),
+  /** Relevance floor, 0..1; 0 disables it. Omitted: workspace default, else SEARCH_MIN_SCORE. */
+  minScore: z.number().min(0).max(1).optional(),
   parentRetrieval: z.boolean().optional(),
   summarySeed: z.boolean().optional(),
   compression: z.boolean().optional(),
@@ -87,5 +90,6 @@ export function searchOptions(body: SearchInput & { workspaceId: string }) {
     enableGraphExpansion: body.graphExpansion,
     enableCommunityExpansion: body.communityExpansion,
     graphHops: body.graphHops,
+    minScore: body.minScore,
   };
 }

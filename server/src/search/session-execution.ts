@@ -7,6 +7,11 @@ import { compressChunks } from "./contextual-compression.js";
 import { mmrSelect } from "./mmr.js";
 import { lostInTheMiddleReorder } from "./position-reorder.js";
 import { rerankBM25, type RankedChunk } from "./rerank.js";
+import {
+  applyRelevanceFloor,
+  resolveMinScore,
+  withBestRelevance,
+} from "./relevance.js";
 import { reciprocalRankFusion } from "./rrf.js";
 import {
   toSearchMetadataRecord,
@@ -38,6 +43,8 @@ export interface SearchSessionExecutionInput {
   workspaceSettings?: Parameters<typeof applySearchControls>[0]["settings"];
   retrievalChain?: unknown;
   wholeCorpusFallback?: () => Promise<SearchResult[]>;
+  /** Floor already applied to `chunks`; omitted: resolved from the options with nothing dropped yet. */
+  relevanceFloor?: { minScore: number; dropped: number };
 }
 
 export interface SearchPostRetrievalInput {
@@ -66,6 +73,7 @@ export function searchChunkToResult(chunk: SearchChunk): SearchResult {
   return {
     text: chunk.text,
     score: chunk.score,
+    ...(chunk.relevance === undefined ? {} : { relevance: chunk.relevance }),
     citation: {
       source: chunk.source,
       documentId: chunk.documentId,
@@ -107,6 +115,7 @@ export function searchResultsToChunks(results: SearchResult[]): SearchChunk[] {
     tokenEstimate: 0,
     filename: result.citation.filename,
     score: result.score,
+    ...(result.relevance === undefined ? {} : { relevance: result.relevance }),
     blockIds: result.citation.blockIds ?? [],
     blockTypes: result.citation.blockTypes ?? [],
     evidenceType: result.citation.evidenceType ?? null,
@@ -233,7 +242,14 @@ export async function applySearchPostRetrievalProcessing(
 export async function executeSearchSessionRetrieval(
   input: SearchSessionRetrievalInput,
 ): Promise<SearchResponse> {
-  const fused = reciprocalRankFusion(await input.retrieveCandidateLists()) ?? [];
+  const candidateLists = await input.retrieveCandidateLists();
+  // Fusion keeps one copy per chunk and re-scores by rank, so the raw relevance
+  // measured on each branch is carried over before the floor and rerank run.
+  const floor = applyRelevanceFloor(
+    withBestRelevance(reciprocalRankFusion(candidateLists) ?? [], candidateLists),
+    resolveMinScore(input.options.minScore),
+  );
+  const fused = floor.kept;
   const shouldPostProcess =
     fused.length > 0 &&
     (input.options.useRerank ||
@@ -268,6 +284,7 @@ export async function executeSearchSessionRetrieval(
     workspaceSettings: input.workspaceSettings,
     retrievalChain: input.retrievalChain,
     wholeCorpusFallback: input.wholeCorpusFallback,
+    relevanceFloor: { minScore: floor.minScore, dropped: floor.dropped },
   });
 }
 
@@ -292,8 +309,15 @@ export async function finalizeSearchSessionExecution(
     calibratedResults.length > 0 ? "retrieval" : "none";
   let usedWholeCorpusFallback = false;
 
+  const relevanceFloor = input.relevanceFloor ?? {
+    minScore: resolveMinScore(input.options.minScore),
+    dropped: 0,
+  };
+  // Candidates that the floor rejected mean "nothing relevant", not "nothing
+  // retrieved": handing back the whole corpus would undo the floor.
   if (
     calibratedResults.length === 0 &&
+    relevanceFloor.dropped === 0 &&
     !input.options.suppressSessionLog &&
     input.wholeCorpusFallback
   ) {
@@ -340,6 +364,7 @@ export async function finalizeSearchSessionExecution(
           resultSource: finalResultSource,
           usedWholeCorpusFallback,
           recordedZeroResultDiagnostics,
+          relevanceFloor,
           parentRetrieval: input.options.parentRetrieval ?? false,
           persistedUsageEventCount: input.session.usageEvents().length,
         },
@@ -352,6 +377,14 @@ export async function finalizeSearchSessionExecution(
     results: calibratedResults,
     sessionId: input.session.sessionId,
     availability: input.availability,
+    relevanceFloor: {
+      ...relevanceFloor,
+      // Nothing to match against yet (empty or still indexing) is availability's story.
+      noMatch:
+        calibratedResults.length === 0 &&
+        input.availability.status !== "pending" &&
+        input.availability.status !== "empty",
+    },
     usageEvents: input.session.usageEvents(),
   };
 }

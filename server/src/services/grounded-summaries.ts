@@ -174,6 +174,8 @@ export async function generateGroundedSummary(args: {
   const workspace = await getWorkspace(args.workspaceId, args.userId);
   const retrieved = await hybridSearch(args.query, args.userId, {
     limit: args.limit ?? 8,
+    // Internal retrieval from a generic prompt, not a user-typed query: never floored.
+    minScore: 0,
     useRerank: true,
     useMmr: true,
     parentRetrieval: true,

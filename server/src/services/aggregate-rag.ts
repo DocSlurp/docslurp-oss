@@ -109,6 +109,7 @@ function buildSearchOptions(
     useRerank: request.rerank,
     useMmr: request.mmr,
     mmrLambda: request.mmrLambda,
+    minScore: request.minScore,
     parentRetrieval: request.parentRetrieval,
     useContextualCompression: request.compression,
     queryRewrite: request.queryRewrite,

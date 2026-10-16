@@ -39,6 +39,7 @@ async function withSchema(run: (clients: Clients) => Promise<void>): Promise<voi
     await sql.unsafe(`
       create table workspace_runs (
         id text primary key, user_id text not null, status text not null, stage text not null,
+        creation_ready_at timestamptz default now(), creation_expires_at timestamptz,
         control_state text, control_requested_at timestamptz, error text,
         stats jsonb not null default '{}', pipeline jsonb not null default '{}',
         failure_count integer not null default 0, dead_lettered_at timestamptz, dead_letter_reason text,
@@ -49,6 +50,7 @@ async function withSchema(run: (clients: Clients) => Promise<void>): Promise<voi
     for (const statement of migration.split("--> statement-breakpoint")) {
       await sql.unsafe(statement);
     }
+    await sql.unsafe(`create table documents (id text primary key, run_id text)`);
     await run({ sql: sql as unknown as SqlClient, other: other as unknown as SqlClient });
   } finally {
     await sql.end();
@@ -72,7 +74,7 @@ function fakeTemporal() {
   return { workflows, state, startWorkflow };
 }
 
-const config = { graceMs: 10_000, batchSize: 25, leaseMs: 30_000 };
+const config = { batchSize: 25, leaseMs: 30_000 };
 
 function recovery(sql: SqlClient, temporal: ReturnType<typeof fakeTemporal>) {
   const lifecycle = createRunLifecycle({
@@ -167,8 +169,9 @@ describe.skipIf(!isLocal)("run-start recovery (local Postgres)", () => {
       const { recovery: r } = recovery(sql, temporal);
       // Intake request died after creating the run (no start, no deferral marker).
       await insertRun(sql, "run-orphan", { ageMs: 60_000 });
-      // Intake still in flight: its own start goes first.
-      await insertRun(sql, "run-fresh");
+      // Creation still in flight: never eligible, regardless of its age.
+      await insertRun(sql, "run-fresh", { ageMs: 60_000 });
+      await sql`update workspace_runs set creation_ready_at = null, creation_expires_at = now() + interval '5 minutes' where id = 'run-fresh'`;
       // Started, waiting for worker slots.
       await insertRun(sql, "run-waiting", { ageMs: 60_000, started: true });
       await insertRun(sql, "run-paused", { ageMs: 60_000, controlState: "paused" });

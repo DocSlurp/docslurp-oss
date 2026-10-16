@@ -12,8 +12,8 @@ export interface RankedChunk {
 /**
  * Tokenize text into lowercase terms.
  */
-const stopWords = new Set("a an and are as at be by for from has have how i in is it of on or that the their this to was were what which with you your".split(" "));
-function tokenize(text: string): string[] {
+export const stopWords = new Set("a an and are as at be by for from has have how i in is it of on or that the their this to was were what which with you your".split(" "));
+export function tokenize(text: string): string[] {
   return text.toLowerCase().split(/[^\p{L}\p{N}]+/u).filter(term => term && !stopWords.has(term));
 }
 

@@ -32,6 +32,7 @@ import {
 } from "@docslurp/shared";
 
 import { fileUrlForArtifact } from "../lib/file-urls.js";
+import { completeRunCreation, lockRunCreation } from "./run-creation.js";
 import { sql } from "../db.js";
 import { RUN_EVENTS_CHANNEL, RunEventHub, type RunEventHubRow } from "./run-event-hub.js";
 import { env as apiEnv } from "../config.js";
@@ -43,7 +44,7 @@ import {
   buildRunProcessingPreview,
   getRunProcessingPreview,
 } from "./run-processing-preview.js";
-import { resolveSourceMetadata } from "./source-metadata.js";
+import { resolveSourceMetadata, UnreadableSourceError } from "./source-metadata.js";
 import {
   canEditWorkspace,
   getWorkspaceAccess,
@@ -822,6 +823,7 @@ function platformRunPipeline<T extends PipelineFeatures>(pipeline: T): T {
 
 export async function createRun(
   input: CreateWorkspaceRunInput & { workspaceId: string },
+  options: { sourceKeys?: string[] } = {},
 ): Promise<WorkspaceRun> {
   // Callers resolve the workspace reference first (requireActorWorkspace).
   const parsed = { ...createWorkspaceRunSchema.parse(input), workspaceId: input.workspaceId };
@@ -868,6 +870,7 @@ export async function createRun(
         pages_total,
         pages_processed,
         stats,
+        creation_source_keys,
         pipeline
       )
       values (
@@ -889,6 +892,7 @@ export async function createRun(
           ...(requestId ? { requestId } : {}),
           ...(parsed.apiKeyId ? { apiKeyId: parsed.apiKeyId } : {}),
         })},
+        ${sql.array(options.sourceKeys ?? [])}::text[],
         ${sql.json(JSON.parse(JSON.stringify(platformRunPipeline(withoutStageSelection(parsed.pipeline)))))}
       )
       returning *
@@ -1050,6 +1054,8 @@ export async function createDocumentBatch(args: {
     metadata?: Record<string, unknown>;
     canonicalId?: string | null;
   }>;
+  /** When set, an unreadable file is skipped and reported here instead of failing the batch. */
+  onUnreadable?: (file: { sourceKey: string; filename: string }, error: UnreadableSourceError) => void;
 }): Promise<DocumentRecord[]> {
   const access = await getWorkspaceAccess(args.workspaceId, args.userId);
   if (!access) {
@@ -1065,11 +1071,21 @@ export async function createDocumentBatch(args: {
   for (const file of args.files) {
     const filename = sanitizeUploadFilename(file.filename);
     const documentId = randomUUID();
-    const metadata = await resolveSourceMetadata({ ...file, filename });
+    let metadata: Awaited<ReturnType<typeof resolveSourceMetadata>>;
+    try {
+      metadata = await resolveSourceMetadata({ ...file, filename });
+    } catch (error) {
+      if (error instanceof UnreadableSourceError && args.onUnreadable) {
+        args.onUnreadable({ sourceKey: file.sourceKey, filename }, error);
+        continue;
+      }
+      throw error;
+    }
 
     const row = await sql.begin(async (tx) => {
       const client = tx as unknown as typeof sql;
 
+      await lockRunCreation(args.runId, client);
       const canonicalId = file.canonicalId ?? null;
       if (canonicalId) {
         await client`select pg_advisory_xact_lock(hashtextextended(${`${args.workspaceId}:${canonicalId}`}, 0))`;
@@ -1342,45 +1358,41 @@ export async function reprocessRun(
     join workspaces on workspaces.id = inserted.workspace_id
   `, { leaseRunId: newRunId });
 
-  for (const doc of docs) {
-    const canonicalId = await ensureReprocessCanonicalId(doc);
-    await sql`
-      insert into documents (
-        id, org_id, user_id, workspace_id, run_id, filename, mime_type,
-        source_key, status, extraction_mode, page_count,
-        canonical_id, version_number, previous_version_id, reused_from_document_id, source_sha256
-      )
-      values (
-        ${randomUUID()},
-        ${doc.org_id},
-        ${doc.user_id},
-        ${doc.workspace_id},
-        ${newRunId},
-        ${doc.filename},
-        ${doc.mime_type},
-        ${doc.source_key},
-        'queued',
-        ${doc.extraction_mode},
-        ${doc.page_count},
-        ${canonicalId},
-        ${(doc.version_number ?? 1) + 1},
-        ${doc.id},
-        ${partial ? doc.id : null},
-        ${doc.source_sha256 ?? null}
-      )
-    `;
-  }
+  await completeRunCreation(newRunId, async () => {
+    for (const doc of docs) {
+      const canonicalId = await ensureReprocessCanonicalId(doc);
+      await sql.begin(async (tx) => {
+        await lockRunCreation(newRunId, tx as unknown as typeof sql);
+        await tx`
+          insert into documents (
+            id, org_id, user_id, workspace_id, run_id, filename, mime_type,
+            source_key, status, extraction_mode, page_count,
+            canonical_id, version_number, previous_version_id, reused_from_document_id, source_sha256
+          )
+          values (
+            ${randomUUID()},
+            ${doc.org_id},
+            ${doc.user_id},
+            ${doc.workspace_id},
+            ${newRunId},
+            ${doc.filename},
+            ${doc.mime_type},
+            ${doc.source_key},
+            'queued',
+            ${doc.extraction_mode},
+            ${doc.page_count},
+            ${canonicalId},
+            ${(doc.version_number ?? 1) + 1},
+            ${doc.id},
+            ${partial ? doc.id : null},
+            ${doc.source_sha256 ?? null}
+          )
+        `;
+      });
+    }
 
-  await sql`
-    update workspace_runs
-    set pages_total = (
-          select coalesce(sum(page_count), 0)::int
-          from documents
-          where run_id = ${newRunId}
-        ),
-        updated_at = now()
-    where id = ${newRunId}
-  `;
+    return { value: undefined, totalDocuments: docs.length };
+  });
 
   return mapWorkspaceRun(newRunRow);
 }

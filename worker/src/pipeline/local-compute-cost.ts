@@ -1,5 +1,6 @@
 import { CREDIT_RATE_CARD, priceResources } from "@docslurp/shared";
 
+import { resolveActivityConcurrency } from "../concurrency.js";
 import type { JsonMap, PerformanceEvent, UsageEvent } from "../models.js";
 
 const BYTES_PER_GB = 1024 ** 3;
@@ -94,15 +95,17 @@ export function flySharedComputeRates(at = new Date()): Pick<LocalComputeRates, 
 }
 
 /** Machine capacity divided by concurrent activity slots, when both are configured. */
-export function perSlotShare(machineTotal: string | undefined, slots: string | undefined): number | null {
+export function perSlotShare(machineTotal: string | undefined, slots: string | number | undefined): number | null {
   const total = Number.parseFloat(machineTotal ?? "");
-  const count = Number.parseInt(slots ?? "", 10);
+  const count = typeof slots === "number" ? slots : Number.parseInt(slots ?? "", 10);
   if (!Number.isFinite(total) || total <= 0) return null;
   return total / (Number.isFinite(count) && count > 0 ? count : 1);
 }
 
 export function resolveWorkerDeploymentProfile(
   env: NodeJS.ProcessEnv = process.env,
+  /** The worker's real slot count; defaults to the same resolution `config.workerActivityConcurrency` uses. */
+  activitySlots: number = resolveActivityConcurrency(env),
 ): WorkerDeploymentProfile {
   const lane = resolveDeploymentLane(env.DOCSLURP_DEPLOYMENT_PROFILE, env.NODE_ENV);
   const workerClass = readText(env.DOCSLURP_WORKER_CLASS)
@@ -128,11 +131,11 @@ export function resolveWorkerDeploymentProfile(
     // an 8-slot shared-cpu-8x/16 GB machine is billed 1 vCPU and 2 GB.
     allocatedVcpu: readPositiveNumber(
       env.DOCSLURP_ALLOCATED_VCPU,
-      perSlotShare(env.DOCSLURP_MACHINE_VCPU, env.WORKER_ACTIVITY_CONCURRENCY) ?? (lane === "heavy" ? 2 : 1),
+      perSlotShare(env.DOCSLURP_MACHINE_VCPU, activitySlots) ?? (lane === "heavy" ? 2 : 1),
     ),
     allocatedMemoryGb: readPositiveNumber(
       env.DOCSLURP_ALLOCATED_MEMORY_GB,
-      perSlotShare(env.DOCSLURP_MACHINE_MEMORY_GB, env.WORKER_ACTIVITY_CONCURRENCY) ?? (lane === "heavy" ? 4 : 1),
+      perSlotShare(env.DOCSLURP_MACHINE_MEMORY_GB, activitySlots) ?? (lane === "heavy" ? 4 : 1),
     ),
     rates: {
       cpuCentsPerSecond: readNonNegativeNumber(env.DOCSLURP_CPU_CENTS_PER_SECOND, defaults.cpuCentsPerSecond),

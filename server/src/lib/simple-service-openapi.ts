@@ -9,6 +9,7 @@ const request = (schema: object) => ({ required: true, content: json(schema) });
 const serviceSecurity = [{ bearerAuth: [] }, { sessionAuth: [] }];
 const keySecurity = [{ bearerAuth: [] }];
 const scopedQuery = z.toJSONSchema(searchInputSchema);
+const minScoreDescription = "Relevance floor, 0..1: drop results whose raw match strength is lower, and report noMatch when none remain. 0 disables it. Omitted: the workspace's retrieval default, else SEARCH_MIN_SCORE (0.1).";
 const workspaceRef = { type: "string", description: "Workspace slug, former slug, UUID, or \"default\". Omitted: the organization default workspace." };
 const uploadTarget = {
   workspaceId: { ...workspaceRef, description: "Append to this workspace (slug, former slug, UUID, or \"default\"). Omitted without newWorkspace, workspaceName or templateKey: the organization default workspace." },
@@ -39,6 +40,14 @@ export const simpleServiceSchemas = {
       run: ref("Run"),
       documents: { type: "array", items: { type: "object", required: ["id", "filename", "status"], properties: { id: { type: "string" }, filename: { type: "string" }, status: { type: "string" } } } },
       warnings: { type: "array", items: { type: "string" } },
+      rejected: {
+        type: "array",
+        description: "Bulk uploads only. Files left out of the run while the rest were accepted; the request fails only when no file is accepted, with the matching HTTP status (415, 413, or 422 when the reasons differ) and one issues entry per file whose path is the filename.",
+        items: { type: "object", required: ["filename", "statusCode", "code", "message"], properties: {
+          filename: { type: "string" }, statusCode: { type: "integer", enum: [413, 415, 422] },
+          code: { enum: ["unsupported_type", "file_too_large", "unreadable_source", "rejected"] }, message: { type: "string" },
+        } },
+      },
     },
   },
   SearchAvailability: {
@@ -63,7 +72,13 @@ export const simpleServiceSchemas = {
   },
   SearchResponse: {
     type: "object", required: ["results", "sessionId", "availability"],
-    properties: { results: { type: "array", items: ref("SearchResult") }, sessionId: { type: "string" }, availability: ref("SearchAvailability") },
+    properties: {
+      results: { type: "array", items: ref("SearchResult") }, sessionId: { type: "string" }, availability: ref("SearchAvailability"),
+      noMatch: { type: "boolean", description: "True when the workspace is searchable but search returned no results: either nothing cleared the relevance floor (relevanceFloor.dropped > 0) or nothing was retrieved at all, e.g. a filter that matches nothing (dropped is 0). Say \"no good match\" instead of answering from weak passages; availability explains an empty or still-indexing corpus instead." },
+      relevanceFloor: { type: "object", description: "The relevance floor applied to this search. Each result's relevance (0..1) is a raw match strength that does not depend on the other hits.", properties: {
+        minScore: { type: "number", minimum: 0, maximum: 1, description: "Floor applied; 0 means disabled." }, dropped: { type: "integer", minimum: 0, description: "Retrieved candidates removed for being below the floor." },
+      } },
+    },
   },
   BatchSearchResponse: {
     type: "object", required: ["results"], properties: { results: { type: "array", minItems: 1, maxItems: 20, items: { oneOf: [
@@ -127,6 +142,7 @@ export const simpleServicePaths = {
   "/v1/search": {
     get: { tags: ["search"], summary: "Search a workspace", security: serviceSecurity, parameters: [
       { in: "query", name: "q", required: true, schema: { type: "string" } }, { in: "query", name: "workspaceId", description: workspaceRef.description, schema: { type: "string" } }, { in: "query", name: "limit", schema: { type: "integer", minimum: 1, maximum: 100 } },
+      { in: "query", name: "minScore", description: minScoreDescription, schema: { type: "number", minimum: 0, maximum: 1 } },
     ], responses: { "200": response("Cited passages with corpus availability", ref("SearchResponse")), ...errors } },
     post: { tags: ["search"], summary: "Search a workspace", security: serviceSecurity, requestBody: request(scopedQuery), responses: { "200": response("Cited passages with corpus availability", ref("SearchResponse")), ...errors } },
   },

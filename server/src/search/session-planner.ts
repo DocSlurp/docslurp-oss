@@ -40,6 +40,13 @@ export interface RecursiveSearchModePlan {
   chunks: SearchChunk[];
   effectiveQuery: string;
   retrievalChain?: RetrievalChainStep[];
+  /** Candidates the relevance floor rejected across all sub-searches. */
+  relevanceFloorDropped: number;
+}
+
+/** Sub-searches run without a session log or whole-corpus fallback; their floor rejections must still reach the final response. */
+function totalFloorDropped(responses: SearchResponse[]): number {
+  return responses.reduce((sum, response) => sum + (response.relevanceFloor?.dropped ?? 0), 0);
 }
 
 export interface SearchSessionRetrievalPlan {
@@ -88,6 +95,7 @@ export async function planRecursiveSearchMode(args: {
       return {
         chunks: fuseSearchResponses(subResults, options.limit ?? 20),
         effectiveQuery: query,
+        relevanceFloorDropped: totalFloorDropped(subResults),
       };
     }
   }
@@ -125,6 +133,7 @@ export async function planRecursiveSearchMode(args: {
           options.limit ?? 20,
         ),
         effectiveQuery: generalizedQuery,
+        relevanceFloorDropped: totalFloorDropped([originalResult, stepbackResult]),
       };
     }
   }
@@ -273,6 +282,7 @@ async function planIterativeMultiHop(args: {
 }): Promise<RecursiveSearchModePlan> {
   const { query, userId, options, session, openRouterApiKey, privacyMode, runSearch } = args;
   const hopLists: SearchChunk[][] = [];
+  let relevanceFloorDropped = 0;
   const retrievalChain: RetrievalChainStep[] = [];
   const seenQueries = new Set<string>();
   let hopQuery = query;
@@ -291,6 +301,7 @@ async function planIterativeMultiHop(args: {
       rootSessionId: session.sessionId,
     });
     session.adoptUsage(hopResult.usageEvents ?? []);
+    relevanceFloorDropped += hopResult.relevanceFloor?.dropped ?? 0;
 
     const hopChunks = searchResultsToChunks(hopResult.results);
     hopLists.push(hopChunks);
@@ -352,6 +363,7 @@ async function planIterativeMultiHop(args: {
     chunks: finalChunks,
     effectiveQuery: finalChainStep?.nextQuery ?? finalChainStep?.query ?? query,
     retrievalChain,
+    relevanceFloorDropped,
   };
 }
 

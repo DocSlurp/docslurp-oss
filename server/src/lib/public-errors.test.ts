@@ -41,6 +41,19 @@ describe("public HTTP error boundary", () => {
   });
 });
 
+describe("validation issue paths", () => {
+  it("keeps field paths from array and string issues while redacting messages", async () => {
+    const res = await safeErrorResponse(Response.json({ error: "Invalid search input", issues: [
+      { path: ["filters", 0, "q"], message: "Expected string, received secret-token", code: "invalid_type" },
+      { path: "limit", message: "internal", code: "too_big" },
+      { message: "no path" },
+    ] }, { status: 400 }), "ref-2");
+    const body = await res.json();
+    expect(body.issues.map((issue: { path: string }) => issue.path)).toEqual(["filters.0.q", "limit", ""]);
+    expect(JSON.stringify(body)).not.toMatch(/secret-token|internal/);
+  });
+});
+
 describe("protocol error compatibility", () => {
   it("preserves JSON-RPC request identity and numeric codes", async () => {
     const response = await safeErrorResponse(Response.json({ jsonrpc: "2.0", id: 7, error: { code: -32603, message: "database password=secret" } }, { status: 500 }));

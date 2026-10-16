@@ -17,7 +17,7 @@ This repository holds the **DocSlurp server** (API and worker), the **database m
 | `server/` | The Hono API (`@docslurp/server`): ingestion, search, RAG context, chat, MCP, webhooks, auth | SSPL-1.0 (+ Apache-2.0 future grant) |
 | `worker/` | Temporal-driven ingestion pipeline: parsing, OCR, chunking, embedding, indexing, extraction | SSPL-1.0 (+ Apache-2.0 future grant) |
 | `packages/cli` | `@docslurp/cli`: upload files, watch runs, retrieve cited evidence | SSPL-1.0 (+ Apache-2.0 future grant) |
-| `packages/contrib-algolia-server` | Server-side Algolia-style sync adapter | SSPL-1.0 (+ Apache-2.0 future grant) |
+| `packages/contrib-algolia-server` | Server-side Algolia-style sync adapter | MIT |
 | `packages/sdk` (incl. `@docslurp/sdk/embed`), `contrib-astro`, `contrib-search-compat`, `shared` | TypeScript SDK and embeddable widgets, Astro component, Algolia/Meilisearch/Typesense/Pagefind-compatible clients, shared contracts | MIT |
 | `packages/contrib-wordpress` | WordPress search plugin | MIT |
 
@@ -70,8 +70,12 @@ See [CONTRIBUTING.md](CONTRIBUTING.md), [SECURITY.md](SECURITY.md) and [CODE_OF_
 
 DocSlurp is **source-available, not OSI-approved open source**.
 
-- **Server** (`server/` including `server/db/`, `worker/`, CLI, `contrib-algolia-server`): [SSPL-1.0](LICENSES/SSPL-1.0.txt) with an irrevocable Apache-2.0 grant for each version three years after it is first publicly available under these terms. Self-hosting for your own use is allowed; offering the functionality to third parties as a service triggers SSPL section 13.
+- **Server** (`server/` including `server/db/`, `worker/`, CLI): [SSPL-1.0](LICENSES/SSPL-1.0.txt) with an irrevocable Apache-2.0 grant for each version three years after it is first publicly available under these terms. Self-hosting for your own use is allowed; offering the functionality to third parties as a service triggers SSPL section 13.
 - **SDKs, clients, shared contracts and the WordPress plugin**: MIT. Using them to talk to a DocSlurp server over HTTP does not make your application SSPL.
 - Third-party components keep their own licenses. See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) and [docs/licensing.md](docs/licensing.md).
 
 "DocSlurp" and the DocSlurp logo are trademarks of DocSlurp, Inc. (unregistered, registration pending); the licenses above do not grant rights to them. See [TRADEMARK.md](TRADEMARK.md).
+
+## Repository ownership
+
+Develop the server, worker, SDKs and CLI in this repository. The private web application and production operations live in [DocSlurp/app](https://github.com/DocSlurp/app), which pins this repository as its `core/` submodule. The former private monorepo is retained as a historical archive; new changes and releases belong here.

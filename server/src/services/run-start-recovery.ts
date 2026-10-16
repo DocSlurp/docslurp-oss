@@ -10,6 +10,7 @@ import {
   warmTemporalClient,
 } from "../lib/temporal.js";
 import { isMaintenanceSweepEnabled } from "./maintenance-sweeper.js";
+import { sweepInterruptedRunCreations } from "./run-creation.js";
 import { runLifecycle, type RunLifecycle } from "./run-lifecycle.js";
 import { sweepStaleQueuedRuns } from "./stale-queued-runs.js";
 
@@ -20,7 +21,8 @@ import { sweepStaleQueuedRuns } from "./stale-queued-runs.js";
  *
  * A start goes unconfirmed when Temporal was unreachable at intake (Run
  * Lifecycle defers it and schedules workflow_start_next_at with backoff), or
- * when the intake request died between creating the Run and starting it.
+ * when intake died after publishing a complete Run and before starting it.
+ * Unpublished Runs are never eligible; expired creation leases are cleaned.
  * Runs that are queued while waiting for worker slots have a confirmed start
  * and are never touched here.
  *
@@ -32,8 +34,6 @@ import { sweepStaleQueuedRuns } from "./stale-queued-runs.js";
  */
 
 export interface RunStartRecoveryConfig {
-  /** Leave freshly created Runs to the intake request's own start. */
-  graceMs: number;
   /** Runs claimed per pass. */
   batchSize: number;
   /** How long a claim hides a Run from other instances while it is started. */
@@ -49,7 +49,6 @@ export function resolveRunStartRecoveryConfig(env: NodeJS.ProcessEnv = process.e
   };
   return {
     intervalMs: Math.max(0, num(env.RUN_START_RECOVERY_INTERVAL_MS, 5_000)),
-    graceMs: Math.max(0, num(env.RUN_START_RECOVERY_GRACE_MS, 10_000)),
     batchSize: Math.max(1, Math.min(500, num(env.RUN_START_RECOVERY_BATCH_SIZE, 25))),
     leaseMs: 30_000,
   };
@@ -72,9 +71,6 @@ export function createRunStartRecovery(deps: {
   const { sql, lifecycle, config } = deps;
 
   async function claimDue(ignoreBackoff: boolean): Promise<PendingStartRow[]> {
-    // ignoreBackoff (Temporal just connected): retry known-deferred Runs now
-    // instead of waiting out their backoff. Fresh Runs still get the grace
-    // window so the intake request's own start goes first.
     return await sql<PendingStartRow[]>`
       with due as (
         select id
@@ -82,10 +78,7 @@ export function createRunStartRecovery(deps: {
         where status = 'queued'
           and workflow_started_at is null
           and coalesce(control_state, '') not in ('paused', 'pause_requested', 'cancelled', 'cancel_requested', 'dead-letter')
-          and (
-            workflow_start_attempts > 0
-            or created_at <= now() - (${config.graceMs} * interval '1 millisecond')
-          )
+          and creation_ready_at is not null
           and (
             ${ignoreBackoff}
             or workflow_start_next_at is null
@@ -115,6 +108,7 @@ export function createRunStartRecovery(deps: {
   }
 
   async function sweepOnce(options: { ignoreBackoff?: boolean } = {}): Promise<RunStartRecoveryPass> {
+    await sweepInterruptedRunCreations(sql);
     const rows = await claimDue(options.ignoreBackoff === true);
     const pass: RunStartRecoveryPass = { claimed: rows.length, started: 0, deferred: 0, failed: 0 };
     for (let index = 0; index < rows.length; index += 1) {

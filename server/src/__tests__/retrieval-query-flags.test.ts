@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { parseRetrievalQueryFlags } from "../lib/retrieval-query-flags.js";
+import { InvalidRetrievalQueryError, parseRetrievalQueryFlags } from "../lib/retrieval-query-flags.js";
 
 const parse = (query: string) => {
   const params = new URLSearchParams(query);
@@ -25,5 +25,15 @@ describe("parseRetrievalQueryFlags", () => {
   it("clamps graph hops and MMR lambda", () => {
     expect(parse("graphHops=9&mmrLambda=-1")).toMatchObject({ graphHops: 3, mmrLambda: 0 });
     expect(parse("graphHops=abc").graphHops).toBeUndefined();
+  });
+
+  it("accepts minScore from 0 to 1 and rejects anything else like POST does", () => {
+    expect(parse("minScore=0")).toMatchObject({ minScore: 0 });
+    expect(parse("minScore=0.35")).toMatchObject({ minScore: 0.35 });
+    expect(parse("minScore=1")).toMatchObject({ minScore: 1 });
+    expect(parse("minScore").minScore).toBeUndefined();
+    for (const bad of ["minScore=7", "minScore=-0.1", "minScore=abc", "minScore=NaN", "minScore=Infinity"]) {
+      expect(() => parse(bad), bad).toThrow(InvalidRetrievalQueryError);
+    }
   });
 });

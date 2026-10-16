@@ -58,7 +58,7 @@ import {
   reprocessIngestRecommendation,
 } from "../services/ingest-report.js";
 import { chatWorkspace, workspaceChatDisabledBody, type ChatSearchActivity } from "../services/workspace-chat.js";
-import { parseRetrievalQueryFlags } from "../lib/retrieval-query-flags.js";
+import { InvalidRetrievalQueryError, parseRetrievalQueryFlags } from "../lib/retrieval-query-flags.js";
 import { deleteChatFeedback, upsertChatFeedback } from "../services/chat-feedback.js";
 import {
   acceptWorkspaceInvite,
@@ -761,7 +761,13 @@ export const workspacesRoutes = new Hono()
     const variant = c.req.query("variant");
     // Omitted flags stay undefined so the workspace's retrieval defaults apply
     // (they used to become false); graph and multi-hop flags are honoured too.
-    const flags = parseRetrievalQueryFlags((name) => c.req.query(name));
+    let flags: ReturnType<typeof parseRetrievalQueryFlags>;
+    try {
+      flags = parseRetrievalQueryFlags((name) => c.req.query(name));
+    } catch (error) {
+      if (error instanceof InvalidRetrievalQueryError) return c.json({ error: error.message }, 400);
+      throw error;
+    }
     const rootSessionId = c.req.query("sessionId") ?? randomUUID();
 
     const filters = parseFilters({

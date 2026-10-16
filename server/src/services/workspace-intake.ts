@@ -37,10 +37,12 @@ import { appendAuditLog } from "./audit-log.js";
 import { explainRemoteIngestBlock, isComplexRemoteIngestFormat } from "./remote-parser-surface.js";
 import { runLifecycle } from "./run-lifecycle.js";
 import { createRunManifest } from "./run-manifest.js";
+import { AllSourcesUnreadableError } from "./source-metadata.js";
 import { markWorkspaceAutoNamed } from "./workspace-naming.js";
 import { seedPipelineFromProcessingDefaults, seedSearchSettingsFromProcessingDefaults } from "./processing-defaults.js";
 import { updateWorkspaceSearchSettingsForUser } from "./search-controls.js";
 import { getUserSettings } from "./user-settings.js";
+import { deleteWorkspaceData } from "./data-deletion.js";
 import { createWorkspace, ensureDefaultWorkspace, getWorkspace, resolveWorkspaceRef } from "./workspaces.js";
 
 /** The run kind doubles as the source kind; it picks the validation policy. */
@@ -111,6 +113,11 @@ export interface WorkspaceIntakeRequest {
   urls?: string[];
   /** Sources that skip files themselves (connectors) may legitimately yield nothing. */
   mayBeEmpty?: boolean;
+  /**
+   * Take the files that pass validation and report the rest in `rejected`, instead of failing the
+   * whole request on the first bad file. The request still fails when no file is accepted.
+   */
+  acceptPartial?: boolean;
   audit?: WorkspaceIntakeAudit;
 }
 
@@ -133,6 +140,22 @@ export interface WorkspaceIntakeResult {
   documents: RunManifest["documents"];
   /** Set when the run exists but processing could not start yet. */
   deferredReason: string | null;
+  /** Files left out of an `acceptPartial` request, with why. Empty otherwise. */
+  rejected: RejectedIntakeFile[];
+}
+
+export interface RejectedIntakeFile {
+  filename: string;
+  /** HTTP status the file would have produced on its own. */
+  statusCode: number;
+  code: "unsupported_type" | "file_too_large" | "unreadable_source" | "rejected";
+  message: string;
+}
+
+function rejectionCode(error: WorkspaceIntakeError): RejectedIntakeFile["code"] {
+  if (error.statusCode === 415) return "unsupported_type";
+  if (error.statusCode === 413) return "file_too_large";
+  return "rejected";
 }
 
 // ---------------------------------------------------------------------------
@@ -166,7 +189,10 @@ export interface WorkspaceIntakeRecords {
     pipeline: PipelineFeatures;
     apiKeyId?: string | null;
     files: StoredIntakeFile[];
+    skipUnreadable?: boolean;
   }): Promise<RunManifest>;
+  /** Remove a workspace this request created when intake failed before any run existed. */
+  discardWorkspace(workspaceId: string): Promise<void>;
   appendAudit(entry: Parameters<typeof appendAuditLog>[0]): Promise<void>;
 }
 
@@ -223,6 +249,9 @@ export const postgresIntakeRecords: WorkspaceIntakeRecords = {
     return workspace;
   },
   createRun: createRunManifest,
+  async discardWorkspace(workspaceId) {
+    await deleteWorkspaceData(workspaceId);
+  },
   async appendAudit(entry) {
     await appendAuditLog(entry);
   },
@@ -457,6 +486,16 @@ async function findTargetWorkspace(
   return workspace;
 }
 
+/** Every file of an `acceptPartial` request was rejected: fail it, naming each file. */
+function allRejectedError(rejected: RejectedIntakeFile[]): WorkspaceIntakeError {
+  const statuses = new Set(rejected.map((file) => file.statusCode));
+  const statusCode = (statuses.size === 1 ? rejected[0]!.statusCode : 422) as WorkspaceIntakeStatusCode;
+  const message = rejected.length === 1
+    ? rejected[0]!.message
+    : `None of the ${rejected.length} files could be accepted: ${rejected.map((file) => `${file.filename} (${file.message})`).join("; ")}`;
+  return new WorkspaceIntakeError(message, statusCode, rejected.map((file) => ({ path: file.filename, message: file.message, code: file.code })));
+}
+
 export function wantsNewWorkspace(
   request: Pick<WorkspaceIntakeRequest, "newWorkspace" | "workspaceName" | "templateKey">,
 ): boolean {
@@ -475,6 +514,9 @@ export async function intakeIntoWorkspace(
 ): Promise<WorkspaceIntakeResult | null> {
   const { storage, records } = ports;
   const written: string[] = [];
+  const rejected: RejectedIntakeFile[] = [];
+  // Set only when this request created the workspace, so a failed intake can remove it again.
+  let createdWorkspaceId: string | null = null;
   let workspace: WorkspaceRecord;
   let pipeline: PipelineFeatures;
   let manifest: RunManifest;
@@ -493,10 +535,16 @@ export async function intakeIntoWorkspace(
 
     const files: StoredIntakeFile[] = [];
     for await (const item of request.items) {
-      files.push(await storeItem(item, request, storage, written));
+      try {
+        files.push(await storeItem(item, request, storage, written));
+      } catch (error) {
+        if (!request.acceptPartial || !(error instanceof WorkspaceIntakeError)) throw error;
+        rejected.push({ filename: sanitizeUploadFilename(item.filename), statusCode: error.statusCode, code: rejectionCode(error), message: error.message });
+      }
     }
     if (files.length === 0) {
       if (request.mayBeEmpty) return null;
+      if (rejected.length > 0) throw allRejectedError(rejected);
       throw new WorkspaceIntakeError("Attach at least one file.", 400);
     }
 
@@ -514,22 +562,44 @@ export async function intakeIntoWorkspace(
         pipeline: request.pipeline,
         autoNamed: !request.workspaceName,
       }));
+    if (!existing) createdWorkspaceId = workspace.id;
     // A new workspace already carries the overrides; an existing one merges them.
     pipeline = applyWorkspacePipelineOverrides(
       workspace.pipeline ?? defaultPipelineFeatures,
       existing ? request.pipeline : undefined,
       workspace.templateKey,
     );
-    manifest = await records.createRun({
-      userId: request.userId,
-      workspaceId: workspace.id,
-      kind: request.kind,
-      pipeline,
-      apiKeyId: request.apiKeyId,
-      files,
-    });
+    try {
+      manifest = await records.createRun({
+        userId: request.userId,
+        workspaceId: workspace.id,
+        kind: request.kind,
+        pipeline,
+        apiKeyId: request.apiKeyId,
+        files,
+        ...(request.acceptPartial ? { skipUnreadable: true } : {}),
+      });
+    } catch (error) {
+      if (!(error instanceof AllSourcesUnreadableError)) throw error;
+      // Every remaining file was unreadable: report them together with the files screened out earlier.
+      for (const unreadable of error.errors) {
+        rejected.push({ filename: unreadable.filename, statusCode: 422, code: "unreadable_source", message: unreadable.message });
+      }
+      throw allRejectedError(rejected);
+    }
+    for (const file of manifest.unreadable) {
+      rejected.push({ filename: file.filename, statusCode: 422, code: "unreadable_source", message: file.error.message });
+      // The source object was stored but never became a document.
+      await storage.remove(file.sourceKey).catch(() => undefined);
+    }
   } catch (error) {
     await Promise.all(written.map((key) => storage.remove(key).catch(() => undefined)));
+    // No run was created, so a workspace made for this request would be left empty and titled after rejected files.
+    if (createdWorkspaceId) {
+      await records.discardWorkspace(createdWorkspaceId).catch((cleanupError: unknown) => {
+        console.error(`[intake] could not remove workspace=${createdWorkspaceId} after intake failed:`, cleanupError instanceof Error ? cleanupError.message : String(cleanupError));
+      });
+    }
     throw error;
   }
 
@@ -569,7 +639,7 @@ export async function intakeIntoWorkspace(
     },
   });
 
-  return { workspace, pipeline, run, documents, deferredReason };
+  return { workspace, pipeline, run, documents, deferredReason, rejected };
 }
 
 export const RUN_START_FAILED_DEFERRED_MESSAGE =

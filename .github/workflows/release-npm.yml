@@ -1,0 +1,335 @@
+name: Release npm packages
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing release tag to publish or retry (e.g. v0.3.0). May be empty only with dry_run, which then checks out the dispatched ref'
+        required: false
+        default: ''
+        type: string
+      dry_run:
+        description: 'Build, test, pack and run npm publish --dry-run for every package; publishes nothing'
+        required: false
+        default: false
+        type: boolean
+      publish_shims:
+        description: 'After publishing, release the final shim versions of the retired package names'
+        required: false
+        default: false
+        type: boolean
+      deprecate_retired:
+        description: 'After publishing, npm deprecate the retired package names (needs the NPM_TOKEN secret)'
+        required: false
+        default: false
+        type: boolean
+
+concurrency:
+  group: npm-release
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    timeout-minutes: 15
+    runs-on: ubuntu-latest
+    outputs:
+      sha: ${{ steps.release.outputs.sha }}
+    env:
+      RELEASE_TAG: ${{ inputs.tag || (github.event_name == 'push' && github.ref_name) || '' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.tag || (inputs.dry_run && github.sha) || github.ref_name }}
+          fetch-depth: 0
+          filter: blob:none
+          persist-credentials: false
+      - name: Require a matching release tag on main
+        id: release
+        run: |
+          if [ -z "$RELEASE_TAG" ] && [ "${{ inputs.dry_run }}" = true ]; then
+            # Untagged dry run of the dispatched ref: only the version alignment check applies.
+            node scripts/package-release.mjs check
+            echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          test -n "$RELEASE_TAG"
+          test "$(git rev-parse HEAD)" = "$(git rev-parse "refs/tags/$RELEASE_TAG^{commit}")"
+          git merge-base --is-ancestor HEAD origin/main
+          node scripts/package-release.mjs check "$RELEASE_TAG"
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        # No dependency cache: a poisoned cache entry must never reach a release build.
+        with:
+          node-version-file: .nvmrc
+          package-manager-cache: false
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm typecheck
+        env:
+          # Local builds set this heap too, but releases build the tagged commit,
+          # which can predate script changes (v0.2.0 does).
+          NODE_OPTIONS: --max-old-space-size=4096
+      - run: pnpm --filter @docslurp/sdk --filter @docslurp/cli test
+      - run: node --test scripts/package-release.test.mjs scripts/check-package-contents.test.mjs scripts/retire-packages.test.mjs scripts/deprecated-shims/build.test.mjs
+      # Published packages promise engines >=20; prove it on the tagged build.
+      # CI also covers Node 22 before the commit can be tagged.
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '20'
+          package-manager-cache: false
+      - name: Test and import public packages on Node 20
+        run: |
+          node --version
+          for package in $(node scripts/package-release.mjs list); do
+            pnpm --dir "$package" run --if-present build
+          done
+          (cd packages/sdk && node --test test/*.test.mjs)
+          (cd packages/cli && node --test test/*.test.mjs)
+          (cd packages/contrib-search-compat && node --test test/*.test.mjs)
+          # Tags before the import check existed still release.
+          if [ -f scripts/check-package-imports.mjs ]; then node scripts/check-package-imports.mjs; fi
+      - name: Pack verified packages
+        run: |
+          mkdir -p "$RUNNER_TEMP/npm-packages"
+          for package in $(node scripts/package-release.mjs list); do
+            pnpm --dir "$package" pack --pack-destination "$RUNNER_TEMP/npm-packages"
+          done
+      # Licence, metadata, README line, export/bin targets present, no sources or workspace: ranges.
+      - name: Check packed tarball contents
+        run: node scripts/check-package-contents.mjs "$RUNNER_TEMP"/npm-packages/*.tgz
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: npm-packages
+          path: ${{ runner.temp }}/npm-packages/*.tgz
+          if-no-files-found: error
+          retention-days: 7
+
+  dry-run:
+    if: ${{ inputs.dry_run }}
+    timeout-minutes: 15
+    needs: verify
+    runs-on: ubuntu-latest
+    # No environment and no token: a dry run never authenticates or publishes.
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      RELEASE_TAG: ${{ inputs.tag || (github.event_name == 'push' && github.ref_name) || '' }}
+      # npm only issues provenance for public repositories; forcing it while this
+      # repository is private fails the publish.
+      PROVENANCE: ${{ github.event.repository.private == false && '--provenance' || '' }}
+    steps:
+      # Only .nvmrc is needed (setup-node reads the Node version from it).
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          sparse-checkout: .nvmrc
+          sparse-checkout-cone-mode: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: npm-packages
+          path: npm-packages
+      - name: npm publish --dry-run each verified tarball
+        run: |
+          for tarball in npm-packages/*.tgz; do
+            echo "::group::$tarball"
+            # shellcheck disable=SC2086
+            npm publish "./$tarball" --access public --tag latest --dry-run $PROVENANCE
+            echo "::endgroup::"
+          done
+          echo "Dry run of ${RELEASE_TAG:-$GITHUB_SHA} passed; nothing was published." >> "$GITHUB_STEP_SUMMARY"
+
+  publish:
+    if: ${{ !inputs.dry_run }}
+    timeout-minutes: 45
+    needs: verify
+    runs-on: ubuntu-latest
+    environment: npm
+    permissions:
+      contents: write
+      id-token: write
+    env:
+      RELEASE_TAG: ${{ inputs.tag || (github.event_name == 'push' && github.ref_name) || '' }}
+      # Provenance needs a public repository (see the dry-run job). It is generated
+      # automatically by trusted publishing; the flag also covers token publishes.
+      PROVENANCE: ${{ github.event.repository.private == false && '--provenance' || '' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.verify.outputs.sha }}
+          persist-credentials: false
+      - name: Reject a release tag changed after verification
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERIFIED_SHA: ${{ needs.verify.outputs.sha }}
+        run: test "$(gh api "repos/$GITHUB_REPOSITORY/commits/$RELEASE_TAG" --jq .sha)" = "$VERIFIED_SHA"
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+      # Node 24 bundles npm 11; trusted publishing needs npm 11.5.1 or newer.
+      - name: Require npm with trusted publishing support
+        run: |
+          npm --version
+          node -e 'const [major, minor, patch] = process.argv[1].split(".").map(Number); process.exit(major > 11 || (major === 11 && (minor > 5 || (minor === 5 && patch >= 1))) ? 0 : 1)' "$(npm --version)"
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: npm-packages
+          path: npm-packages
+      - name: Publish verified tarballs (skip versions already published)
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          read_version() {
+            node --input-type=module - "$name" "$version" "${1:-1}" <<'JS'
+          const [name, version, attempts] = process.argv.slice(2);
+          const url = `https://registry.npmjs.org/${encodeURIComponent(name)}/${version}`;
+          for (let attempt = 1; attempt <= Number(attempts); attempt++) {
+            const response = await fetch(url, { signal: AbortSignal.timeout(15000) });
+            if (response.ok) {
+              const record = await response.json();
+              if (record.name !== name || record.version !== version) throw new Error("Unexpected registry version metadata");
+              console.log(JSON.stringify(record));
+              process.exit(0);
+            }
+            if (response.status !== 404) throw new Error(`Registry returned ${response.status}`);
+            if (attempt < Number(attempts)) await new Promise(resolve => setTimeout(resolve, 3000));
+          }
+          console.log(JSON.stringify({ error: { code: "E404" } }));
+          process.exit(1);
+          JS
+          }
+          # Each package checks, publishes and verifies independently, so all run
+          # in parallel. npm does not require dependencies to exist at publish time.
+          installable() {
+            local url="https://registry.npmjs.org/${name/\//%2f}"
+            for ((attempt = 1; attempt <= $1; attempt++)); do
+              curl -fsS -H "Accept: application/vnd.npm.install-v1+json" "$url" 2> /dev/null \
+                | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>process.exit(JSON.parse(s).versions?.[process.argv[1]]?0:1))' "$version" && return 0
+              sleep 3
+            done
+            echo "$name@$version is not installable from the registry yet." >&2
+            return 1
+          }
+          publish_one() {
+            local package=$1 work="$RUNNER_TEMP/release/$(basename "$1")"
+            mkdir -p "$work"
+            name=$(node -p "require('./$package/package.json').name")
+            version=$(node -p "require('./$package/package.json').version")
+            local filename="${name#@}"
+            local tarball="./npm-packages/${filename/\//-}-$version.tgz"
+            if read_version > "$work/view.json" 2> "$work/view.err"; then
+              node scripts/package-release.mjs integrity "$tarball" "$work/view.json" || return 1
+              echo "$name@$version already published with matching integrity; skipping."
+              return 0
+            fi
+            if ! node -e 'const r = require(process.argv[1]); process.exit(r.error?.code === "E404" ? 0 : 1)' "$work/view.json"; then
+              cat "$work/view.err" >&2
+              return 1
+            fi
+            # A retry can reach a version npm accepted but has not exposed yet; that
+            # ("previously published") counts as published and is integrity-checked below.
+            # Retry transient registry/network failures; stop at once on auth,
+            # policy or validation errors, which a retry cannot fix.
+            local attempt published=0
+            for attempt in 1 2 3; do
+              # shellcheck disable=SC2086
+              if npm publish "$tarball" --access public --tag latest $PROVENANCE 2> "$work/publish.err"; then published=1; break; fi
+              cat "$work/publish.err" >&2
+              if grep -qiE "previously published|cannot publish over" "$work/publish.err"; then published=1; break; fi
+              grep -qiE "E401|E402|E403|E404|E422|EOTP|ENEEDAUTH" "$work/publish.err" && return 1
+              [ "$attempt" -lt 3 ] && sleep $((attempt * 20))
+            done
+            [ "$published" = 1 ] || return 1
+            # npm queues new publications, and a package's first version can take
+            # several minutes to appear; allow up to ten minutes before verifying
+            # the immutable tarball.
+            read_version 200 > "$work/view.json" || return 1
+            node scripts/package-release.mjs integrity "$tarball" "$work/view.json" || return 1
+            # npm install resolves through the package document, which can lag the
+            # exact-version document for a brand-new package by several minutes.
+            installable 200 || return 1
+            echo "$name@$version published, verified and installable."
+          }
+          mkdir -p "$RUNNER_TEMP/release"
+          packages=$(node scripts/package-release.mjs list)
+          declare -A pids
+          for package in $packages; do
+            publish_one "$package" > "$RUNNER_TEMP/release/$(basename "$package").log" 2>&1 &
+            pids[$package]=$!
+          done
+          failed=()
+          for package in $packages; do
+            wait "${pids[$package]}" || failed+=("$package")
+            echo "::group::$package"
+            cat "$RUNNER_TEMP/release/$(basename "$package").log"
+            echo "::endgroup::"
+          done
+          if [ ${#failed[@]} -gt 0 ]; then
+            echo "::error::Release failed for: ${failed[*]}. Re-run the workflow; published versions are skipped after an integrity check."
+            exit 1
+          fi
+      - name: Create release with automated changelog
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERIFIED_SHA: ${{ needs.verify.outputs.sha }}
+        run: |
+          test "$(gh api "repos/$GITHUB_REPOSITORY/commits/$RELEASE_TAG" --jq .sha)" = "$VERIFIED_SHA"
+          if ! gh release view "$RELEASE_TAG"; then
+            gh release create "$RELEASE_TAG" --verify-tag --title "npm packages $RELEASE_TAG" --generate-notes npm-packages/*.tgz
+          fi
+
+  retire:
+    # Opt-in follow-up for the 0.3.0 consolidation (docs/releases.md, "Retired package names").
+    # Runs only after every new package is published and verified.
+    if: ${{ !inputs.dry_run && (inputs.publish_shims || inputs.deprecate_retired) }}
+    timeout-minutes: 20
+    needs: [verify, publish]
+    runs-on: ubuntu-latest
+    environment: npm
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      PROVENANCE: ${{ github.event.repository.private == false && '--provenance' || '' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.verify.outputs.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+      - name: Publish final shim versions of the retired names
+        if: ${{ inputs.publish_shims }}
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          version=$(node -p "require('./packages/sdk/package.json').version")
+          node scripts/deprecated-shims/build.mjs "$RUNNER_TEMP/shims" "$version"
+          # shellcheck disable=SC2086
+          node scripts/retire-packages.mjs publish-shims "$RUNNER_TEMP/shims" $PROVENANCE
+      # npm deprecate cannot use trusted publishing; it needs a token that can write the @docslurp packages.
+      - name: Deprecate the retired names (idempotent)
+        if: ${{ inputs.deprecate_retired }}
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          if [ -z "${NODE_AUTH_TOKEN:-}" ]; then
+            echo "::error::npm deprecate needs the NPM_TOKEN secret (OIDC trusted publishing only covers publish)."
+            exit 1
+          fi
+          node scripts/retire-packages.mjs deprecate

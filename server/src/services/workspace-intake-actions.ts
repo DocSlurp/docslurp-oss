@@ -40,6 +40,8 @@ export type WorkspaceIntakePayload = {
   run: WorkspaceIntakeResult["run"];
   documents: WorkspaceIntakeResult["documents"];
   warnings: string[];
+  /** Bulk uploads only: files that were not accepted, with why. Absent when every file was taken. */
+  rejected?: WorkspaceIntakeResult["rejected"];
   pipeline?: PipelineFeatures;
   ingested?: Array<{ filename: string; mimeType: string }>;
 };
@@ -76,7 +78,13 @@ function actionResult(
       workspace: intake.workspace,
       run: intake.run,
       documents: intake.documents,
-      warnings: intake.deferredReason ? [intake.deferredReason] : [],
+      warnings: [
+        ...(intake.deferredReason ? [intake.deferredReason] : []),
+        ...(intake.rejected.length > 0
+          ? [`${intake.rejected.length} of ${intake.rejected.length + intake.documents.length} files were not accepted: ${intake.rejected.map((file) => file.filename).join(", ")}.`]
+          : []),
+      ],
+      ...(intake.rejected.length > 0 ? { rejected: intake.rejected } : {}),
       ...extra,
     },
     status: 201,
@@ -237,6 +245,7 @@ export async function createBulkWorkspaceIntake(
           {
             ...target,
             kind: "bulk-upload",
+            acceptPartial: true,
             items: files.map(({ bytes, ...file }) => ({ ...file, content: { bytes } })),
             audit,
           },

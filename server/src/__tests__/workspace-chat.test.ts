@@ -75,7 +75,7 @@ vi.mock("../lib/ai.js", () => ({
   generateOpenRouterDocumentText: generateAnthropicDocumentText,
 }));
 
-const { buildNativeDocumentInputs, buildSystemInstructions, chatWorkspace } = await import(
+const { buildFallbackAnswer, buildNativeDocumentInputs, buildSystemInstructions, chatWorkspace } = await import(
   "../services/workspace-chat.js"
 );
 const { createSearchSessionJournal } = await import("../search/session.js");
@@ -184,6 +184,33 @@ describe("chatWorkspace", () => {
       expect(hybridSearch).toHaveBeenCalledOnce();
     },
   );
+
+  it("says nothing relevant was found, without calling the model, when the relevance floor removed every passage", async () => {
+    sqlMock.mockResolvedValue([]);
+    getWorkspace.mockResolvedValue({ id: "ws-1", systemPrompt: null });
+    loadWorkspaceWholeCorpusContext.mockResolvedValue({
+      eligible: false, reason: "too-large", results: [],
+      stats: { documentCount: 9, chunkCount: 900, tokenEstimate: 90000, charEstimate: 400000, maxDocuments: 12, maxChunks: 24, maxTokens: 12000, maxChars: 60000 },
+    });
+    hybridSearch.mockResolvedValue({
+      sessionId: "search-1", results: [],
+      availability: { status: "complete", isPartial: false, message: null },
+      relevanceFloor: { minScore: 0.1, dropped: 2, noMatch: true },
+    });
+
+    const response = await chatWorkspace({ workspaceId: "ws-1", userId: "user-1", query: "zxqvbn nonsense gibberish", history: [] });
+
+    expect(response.answer).toBe('I couldn\'t find anything relevant to "zxqvbn nonsense gibberish" in this workspace.');
+    expect(response.citations).toEqual([]);
+    expect(response.debug.fallback).toBe(true);
+    expect(generateAnthropicDocumentText).not.toHaveBeenCalled();
+  });
+
+  it("keeps the plain empty-index wording when retrieval returned nothing at all", () => {
+    expect(buildFallbackAnswer("anything", [])).toBe('No indexed passages matched "anything".');
+    expect(buildFallbackAnswer("anything", [], { status: "complete" } as never, true)).toContain("couldn't find anything relevant");
+    expect(buildFallbackAnswer("anything", [], { status: "pending", message: "Warming up." } as never, true)).toContain("indexing is still warming up");
+  });
 
   it("applies composer filters and thread retrieval overrides without whole-corpus shortcuts", async () => {
     sqlMock.mockResolvedValue([]);
