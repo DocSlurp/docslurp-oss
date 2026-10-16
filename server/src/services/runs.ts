@@ -7,15 +7,11 @@ import {
 } from "./run-lifecycle.js";
 
 import {
-  parseStoredPipelineFeatures,
   compilePipelinePlan,
-  defaultPipelineFeatures,
   findMissingReuseInputs,
   withoutStageSelection,
-  documentSchema,
   workspaceRunEventSchema,
   workspaceRunProgressSnapshotSchema,
-  workspaceRunSchema,
   workspaceRunStageStateSchema,
   type DocumentRecord,
   type PipelineFeatures,
@@ -27,6 +23,15 @@ import {
 
 import { fileUrlForArtifact } from "../lib/file-urls.js";
 import { runCreation } from "./run-creation.js";
+import {
+  jsonRecord,
+  mapDocument,
+  mapWorkspaceRun,
+  serializeOptionalTimestamp,
+  serializeTimestamp,
+  type DocumentRow,
+  type WorkspaceRunRow,
+} from "./run-records.js";
 import { sql } from "../db.js";
 import { RUN_EVENTS_CHANNEL, RunEventHub, type RunEventHubRow } from "./run-event-hub.js";
 import { env as apiEnv } from "../config.js";
@@ -45,185 +50,20 @@ import {
   admitRunSpend,
   assertCanSpend,
   SpendBlockedError,
-  type SpendBlockedCode,
 } from "./billing/spend-guard.js";
 import { resumeSpendPausedRunOutcome } from "./spend-paused-runs.js";
 import {
-  attributedUsage,
   runUsageCostSummaries,
   runUsageCostTotals,
   summarizeRunUsageCost,
-  type RunUsageCostSummary,
 } from "./usage-attribution.js";
 import { loadWithheldArtifactUrisForRun } from "./pii-artifact-guard.js";
 import { processSingleton } from "../lib/process-singleton.js";
 
 export { summarizeRunUsageCost };
-
-const SKIP_RUN_BUDGET_GUARDS_IN_DEV =
-  process.env.SKIP_RUN_BUDGET_GUARDS_IN_DEV !== "false";
+export { isRunCreationBlockedError, RunCreationBlockedError } from "./run-creation.js";
 
 export { buildRunProcessingPreview, getRunProcessingPreview };
-
-/** A run blocked by spend admission (402); see billing/spend-guard.ts. */
-export class RunCreationBlockedError extends SpendBlockedError {
-  constructor(
-    message: string,
-    _statusCode: 402 = 402,
-    code: SpendBlockedCode = "credit_exhausted",
-  ) {
-    super(message, code);
-    this.name = "RunCreationBlockedError";
-  }
-}
-
-export function isRunCreationBlockedError(
-  error: unknown,
-): error is SpendBlockedError {
-  return error instanceof SpendBlockedError;
-}
-
-export async function enforceLiveBudgetCaps(
-  workspaceId: string,
-  orgId: string,
-): Promise<void> {
-  if (
-    process.env.NODE_ENV === "development" &&
-    SKIP_RUN_BUDGET_GUARDS_IN_DEV
-  ) {
-    return;
-  }
-
-  // Credits are checked atomically when the run row is inserted
-  // (admitRunSpend). An admitted run is paused, not failed, once the org
-  // balance goes negative mid-run (docs/pricing-and-credits.md, gotcha 7).
-
-  // Budgets first: summing a month of attributed usage is the most expensive
-  // statement on the ingest path (67% of app-database time at 576 slots in the
-  // 2026-10-09 load-test re-run), so only sum spend for a cap that exists.
-  const [limits] = await sql<
-    { workspace_budget_cents: number | null; org_budget_cents: number | null }[]
-  >`
-    select
-      w.monthly_budget_cents as workspace_budget_cents,
-      o.monthly_budget_cents as org_budget_cents
-    from workspaces w
-    join organizations o on o.id = w.org_id
-    where w.id = ${workspaceId}
-    limit 1
-  `;
-
-  if (!limits) {
-    throw new Error("Workspace not found");
-  }
-
-  const monthSpendCents = async (scope: "workspace" | "org"): Promise<number> => {
-    const [row] = await sql<{ spend_cents: number }[]>`
-      select coalesce(sum(au.cost_cents), 0)::double precision as spend_cents
-      from ${attributedUsage("month")} au
-      where ${scope === "workspace" ? sql`au.workspace_id = ${workspaceId}` : sql`au.org_id = ${orgId}`}
-    `;
-    return Number(row?.spend_cents ?? 0);
-  };
-  const budget = {
-    workspace_budget_cents: limits.workspace_budget_cents,
-    workspace_spend_cents: limits.workspace_budget_cents == null ? 0 : await monthSpendCents("workspace"),
-    org_budget_cents: limits.org_budget_cents,
-    org_spend_cents: limits.org_budget_cents == null ? 0 : await monthSpendCents("org"),
-  };
-
-  const workspacePaused =
-    budget.workspace_budget_cents != null &&
-    budget.workspace_spend_cents >= budget.workspace_budget_cents;
-  const orgPaused =
-    budget.org_budget_cents != null &&
-    budget.org_spend_cents >= budget.org_budget_cents;
-
-  // Write only on a change: every ingest runs this, and the org row is the
-  // one every credit debit in the org locks.
-  await sql`
-    update workspaces
-    set budget_paused = ${workspacePaused}, updated_at = now()
-    where id = ${workspaceId} and budget_paused is distinct from ${workspacePaused}
-  `;
-  await sql`
-    update organizations
-    set budget_paused = ${orgPaused}, updated_at = now()
-    where id = ${orgId} and budget_paused is distinct from ${orgPaused}
-  `;
-
-  if (workspacePaused) {
-    throw new RunCreationBlockedError(
-      "This workspace has reached its monthly budget cap and new runs are paused. " +
-        "Increase the budget in workspace settings to resume processing.",
-      402,
-      "workspace_budget_paused",
-    );
-  }
-
-  if (orgPaused) {
-    throw new RunCreationBlockedError(
-      "This organization has reached its monthly budget cap and new runs are paused. " +
-        "Increase the org budget to resume processing.",
-      402,
-      "org_budget_paused",
-    );
-  }
-}
-
-export type WorkspaceRunRow = {
-  id: string;
-  org_id: string;
-  user_id: string;
-  workspace_id: string;
-  workspace_name: string | null;
-  kind: string;
-  status: string;
-  priority: number;
-  control_state: string | null;
-  pause_reason?: string | null;
-  control_requested_at: string | Date | null;
-  last_heartbeat_at?: string | Date | null;
-  lease_expires_at?: string | Date | null;
-  failure_count?: number | null;
-  dead_lettered_at?: string | Date | null;
-  dead_letter_reason?: string | null;
-  stage: string;
-  total_documents: number;
-  processed_documents: number;
-  pages_total: number;
-  pages_processed: number;
-  pipeline: PipelineFeatures;
-  stats: Record<string, unknown> | null;
-  artifacts: Record<string, string> | null;
-  error: string | null;
-  created_at: string | Date;
-  updated_at: string | Date;
-};
-
-export type DocumentRow = {
-  id: string;
-  org_id: string;
-  user_id: string;
-  workspace_id: string;
-  run_id: string | null;
-  filename: string;
-  mime_type: string;
-  source_key: string;
-  status: string;
-  extraction_mode: string;
-  page_count: number;
-  source_sha256?: string | null;
-  deduped_from_document_id?: string | null;
-  dedup_scope?: "workspace" | "org" | null;
-  version_number: number;
-  previous_version_id: string | null;
-  canonical_id?: string | null;
-  superseded_at?: string | Date | null;
-  superseded_by_document_id?: string | null;
-  created_at: string | Date;
-  updated_at: string | Date;
-};
 
 type StageStateRow = {
   run_id: string;
@@ -445,66 +285,6 @@ async function reconcileTemporalRunState(
   });
 }
 
-function serializeTimestamp(value: string | Date): string {
-  return value instanceof Date ? value.toISOString() : value;
-}
-
-function serializeOptionalTimestamp(
-  value: string | Date | null,
-): string | null {
-  if (value === null) {
-    return null;
-  }
-  return serializeTimestamp(value);
-}
-
-/** Older rows stored some JSON columns as JSON text; read either form, else empty. */
-function jsonRecord<T extends Record<string, unknown>>(value: unknown): T {
-  let parsed = value;
-  if (typeof parsed === "string") {
-    try { parsed = JSON.parse(parsed); } catch { parsed = null; }
-  }
-  return (parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {}) as T;
-}
-
-/**
- * `cost` comes from the usage ledger (usage_attribution). billedCostCents is
- * the figure the worker enforces the run cost cap against (it equals
- * workspace_runs.spent_cents); costCents adds the unbilled compute estimate.
- * Runs mapped without it (just created) have spent nothing; listed runs go
- * through withRunCosts.
- */
-export function mapWorkspaceRun(row: WorkspaceRunRow, cost?: Pick<RunUsageCostSummary, "costCents" | "computeEstimated" | "billedCostCents">): WorkspaceRun {
-  return workspaceRunSchema.parse({
-    id: row.id,
-    userId: row.user_id,
-    orgId: row.org_id,
-    workspaceId: row.workspace_id,
-    workspaceName: row.workspace_name,
-    kind: row.kind,
-    status: row.status,
-    priority: row.priority ?? 0,
-    controlState: row.control_state ?? null,
-    pauseReason: row.pause_reason ? PUBLIC_ERROR_MESSAGES.paused : null,
-    controlRequestedAt: serializeOptionalTimestamp(row.control_requested_at),
-    stage: row.stage,
-    totalDocuments: row.total_documents,
-    processedDocuments: row.processed_documents,
-    pagesTotal: row.pages_total,
-    pagesProcessed: row.pages_processed,
-    costCents: cost?.costCents ?? 0,
-    computeEstimated: cost?.computeEstimated ?? false,
-    billedCostCents: cost?.billedCostCents ?? 0,
-    // Historical snapshots may predate the schema; never fail a run list on one row.
-    pipeline: parseStoredPipelineFeatures(typeof row.pipeline === "string" ? jsonRecord(row.pipeline) : row.pipeline ?? defaultPipelineFeatures),
-    stats: publicDiagnostics(jsonRecord(row.stats)),
-    artifacts: jsonRecord(row.artifacts),
-    error: row.error ? PUBLIC_ERROR_MESSAGES.processing : null,
-    createdAt: serializeTimestamp(row.created_at),
-    updatedAt: serializeTimestamp(row.updated_at),
-  });
-}
-
 /** Fill runs' cost from the usage ledger in one statement. */
 export async function withRunCosts(runs: WorkspaceRun[]): Promise<WorkspaceRun[]> {
   if (runs.length === 0) return runs;
@@ -512,32 +292,6 @@ export async function withRunCosts(runs: WorkspaceRun[]): Promise<WorkspaceRun[]
   return runs.map((run) => {
     const cost = costs.get(run.id);
     return cost ? { ...run, costCents: cost.costCents, computeEstimated: cost.computeEstimated, billedCostCents: cost.billedCostCents } : run;
-  });
-}
-
-export function mapDocument(row: DocumentRow): DocumentRecord {
-  return documentSchema.parse({
-    id: row.id,
-    userId: row.user_id,
-    orgId: row.org_id,
-    workspaceId: row.workspace_id,
-    runId: row.run_id,
-    filename: row.filename,
-    mimeType: row.mime_type,
-    sourceKey: row.source_key,
-    status: row.status,
-    extractionMode: row.extraction_mode,
-    pageCount: row.page_count,
-    sourceSha256: row.source_sha256 ?? null,
-    dedupedFromDocumentId: row.deduped_from_document_id ?? null,
-    dedupScope: row.dedup_scope ?? null,
-    versionNumber: row.version_number ?? 1,
-    previousVersionId: row.previous_version_id ?? null,
-    canonicalId: row.canonical_id ?? null,
-    supersededAt: row.superseded_at ? serializeTimestamp(row.superseded_at) : null,
-    supersededByDocumentId: row.superseded_by_document_id ?? null,
-    createdAt: serializeTimestamp(row.created_at),
-    updatedAt: serializeTimestamp(row.updated_at),
   });
 }
 

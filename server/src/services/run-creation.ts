@@ -14,18 +14,16 @@ import { sql as defaultSql, type SqlClient } from "../db.js";
 import { sanitizeUploadFilename } from "../lib/filenames.js";
 import { currentRequestId } from "../lib/request-context.js";
 import { getAvailableCredits } from "./billing/credits.js";
-import { admitRunSpend } from "./billing/spend-guard.js";
+import {
+  admitRunSpend,
+  SpendBlockedError,
+  type SpendBlockedCode,
+} from "./billing/spend-guard.js";
 import { canEditWorkspace, getWorkspaceAccess } from "./organizations.js";
+import { attributedUsage } from "./usage-attribution.js";
 import { buildRunProcessingPreview } from "./run-processing-preview.js";
 import { runLifecycle, type RunLifecycleRun, type RunStartOutcome } from "./run-lifecycle.js";
-import {
-  enforceLiveBudgetCaps,
-  mapDocument,
-  mapWorkspaceRun,
-  RunCreationBlockedError,
-  type DocumentRow,
-  type WorkspaceRunRow,
-} from "./runs.js";
+import { mapDocument, mapWorkspaceRun, type DocumentRow, type WorkspaceRunRow } from "./run-records.js";
 import {
   AllSourcesUnreadableError,
   resolveSourceMetadata,
@@ -99,6 +97,116 @@ type SourceDocumentRow = DocumentRow & { file_size: number | string | null };
 function platformRunPipeline<T extends PipelineFeatures>(pipeline: T): T {
   const parsed = pageRouterModeSchema.safeParse(process.env.PAGE_ROUTER_MODE?.trim().toLowerCase());
   return withPlatformPageRouterMode(pipeline, parsed.success ? parsed.data : "off");
+}
+
+const SKIP_RUN_BUDGET_GUARDS_IN_DEV =
+  process.env.SKIP_RUN_BUDGET_GUARDS_IN_DEV !== "false";
+
+/** A run blocked by spend admission (402); see billing/spend-guard.ts. */
+export class RunCreationBlockedError extends SpendBlockedError {
+  constructor(
+    message: string,
+    _statusCode: 402 = 402,
+    code: SpendBlockedCode = "credit_exhausted",
+  ) {
+    super(message, code);
+    this.name = "RunCreationBlockedError";
+  }
+}
+
+export function isRunCreationBlockedError(
+  error: unknown,
+): error is SpendBlockedError {
+  return error instanceof SpendBlockedError;
+}
+
+export async function enforceLiveBudgetCaps(
+  workspaceId: string,
+  orgId: string,
+): Promise<void> {
+  const sql = defaultSql;
+  if (
+    process.env.NODE_ENV === "development" &&
+    SKIP_RUN_BUDGET_GUARDS_IN_DEV
+  ) {
+    return;
+  }
+
+  // Credits are checked atomically when the run row is inserted
+  // (admitRunSpend). An admitted run is paused, not failed, once the org
+  // balance goes negative mid-run (docs/pricing-and-credits.md, gotcha 7).
+
+  // Budgets first: summing a month of attributed usage is the most expensive
+  // statement on the ingest path (67% of app-database time at 576 slots in the
+  // 2026-10-09 load-test re-run), so only sum spend for a cap that exists.
+  const [limits] = await sql<
+    { workspace_budget_cents: number | null; org_budget_cents: number | null }[]
+  >`
+    select
+      w.monthly_budget_cents as workspace_budget_cents,
+      o.monthly_budget_cents as org_budget_cents
+    from workspaces w
+    join organizations o on o.id = w.org_id
+    where w.id = ${workspaceId}
+    limit 1
+  `;
+
+  if (!limits) {
+    throw new Error("Workspace not found");
+  }
+
+  const monthSpendCents = async (scope: "workspace" | "org"): Promise<number> => {
+    const [row] = await sql<{ spend_cents: number }[]>`
+      select coalesce(sum(au.cost_cents), 0)::double precision as spend_cents
+      from ${attributedUsage("month")} au
+      where ${scope === "workspace" ? sql`au.workspace_id = ${workspaceId}` : sql`au.org_id = ${orgId}`}
+    `;
+    return Number(row?.spend_cents ?? 0);
+  };
+  const budget = {
+    workspace_budget_cents: limits.workspace_budget_cents,
+    workspace_spend_cents: limits.workspace_budget_cents == null ? 0 : await monthSpendCents("workspace"),
+    org_budget_cents: limits.org_budget_cents,
+    org_spend_cents: limits.org_budget_cents == null ? 0 : await monthSpendCents("org"),
+  };
+
+  const workspacePaused =
+    budget.workspace_budget_cents != null &&
+    budget.workspace_spend_cents >= budget.workspace_budget_cents;
+  const orgPaused =
+    budget.org_budget_cents != null &&
+    budget.org_spend_cents >= budget.org_budget_cents;
+
+  // Write only on a change: every ingest runs this, and the org row is the
+  // one every credit debit in the org locks.
+  await sql`
+    update workspaces
+    set budget_paused = ${workspacePaused}, updated_at = now()
+    where id = ${workspaceId} and budget_paused is distinct from ${workspacePaused}
+  `;
+  await sql`
+    update organizations
+    set budget_paused = ${orgPaused}, updated_at = now()
+    where id = ${orgId} and budget_paused is distinct from ${orgPaused}
+  `;
+
+  if (workspacePaused) {
+    throw new RunCreationBlockedError(
+      "This workspace has reached its monthly budget cap and new runs are paused. " +
+        "Increase the budget in workspace settings to resume processing.",
+      402,
+      "workspace_budget_paused",
+    );
+  }
+
+  if (orgPaused) {
+    throw new RunCreationBlockedError(
+      "This organization has reached its monthly budget cap and new runs are paused. " +
+        "Increase the org budget to resume processing.",
+      402,
+      "org_budget_paused",
+    );
+  }
 }
 
 // Optional floor on available credits (MIN_CREDIT_BALANCE_CENTS, 1 credit = 1
