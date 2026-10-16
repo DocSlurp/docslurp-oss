@@ -114,10 +114,10 @@ describe("Run creation and recovery together", () => {
     expect(await recovery.sweepOnce()).toMatchObject({ claimed: 0 });
   });
 
-  it("publishes final totals when unreadable sources are explicitly skipped", async () => {
+  it("publishes final totals without the unreadable sources", async () => {
     prepare.mockResolvedValueOnce({ pageCount: 3, sourceSha256: "first" })
       .mockRejectedValueOnce(new source.UnreadableSourceError("b.pdf", "bad PDF"));
-    const result = await manifest.createRunManifest({ ...input, skipUnreadable: true });
+    const result = await manifest.createRunManifest(input);
     expect(result.run).toMatchObject({ totalDocuments: 1, pagesTotal: 3 });
     expect(result.unreadable).toHaveLength(1);
     expect(await recovery.sweepOnce()).toMatchObject({ started: 1 });
@@ -125,7 +125,7 @@ describe("Run creation and recovery together", () => {
 
   it("discards a Run if every source is unreadable", async () => {
     prepare.mockRejectedValue(new source.UnreadableSourceError("bad.pdf", "bad PDF"));
-    await expect(manifest.createRunManifest({ ...input, skipUnreadable: true })).rejects.toBeInstanceOf(source.AllSourcesUnreadableError);
+    await expect(manifest.createRunManifest(input)).rejects.toBeInstanceOf(source.AllSourcesUnreadableError);
     expect(await sql`select id from workspace_runs`).toEqual([]);
   });
 

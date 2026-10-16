@@ -412,14 +412,6 @@ export function assertDirectUploadSessionReadyForIntake(
   if (loaded.files.length === 0) {
     throw new WorkspaceIntakeError("Upload session has no files", 400);
   }
-
-  const incomplete = loaded.files.find((file) => file.status !== "completed");
-  if (incomplete) {
-    throw new WorkspaceIntakeError(
-      `File ${incomplete.filename} is not completed yet`,
-      409,
-    );
-  }
 }
 
 export async function prepareDirectUploadWorkspaceIntake(
@@ -454,7 +446,11 @@ export async function markDirectUploadSessionConfirmed(args: {
   `;
 }
 
-/** Completed session files are already in object storage; intake reuses their keys. */
+/**
+ * Completed session files are already in object storage; intake reuses their
+ * keys. A file that never finished uploading is reported as rejected, so the
+ * completed ones are still ingested.
+ */
 export function directUploadIntakeItems(
   loaded: LoadedDirectUploadSession,
 ): WorkspaceIntakeItem[] {
@@ -463,7 +459,9 @@ export function directUploadIntakeItems(
     mimeType: file.mime_type,
     sizeBytes: file.size_bytes,
     canonicalId: file.canonical_id ?? null,
-    content: { storedKey: file.source_key },
+    content: file.status === "completed"
+      ? { storedKey: file.source_key }
+      : { rejected: new WorkspaceIntakeError(`${file.filename} did not finish uploading`, 409) },
   }));
 }
 

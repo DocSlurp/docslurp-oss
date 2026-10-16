@@ -14,11 +14,17 @@ function parseKnownContentLength(raw: string | null): number | undefined {
   return Number.isFinite(parsed) && parsed >= 0 ? parsed : undefined;
 }
 
+function rejectedUrl(url: string, message: string): WorkspaceIntakeItem {
+  return { filename: url, content: { rejected: new WorkspaceIntakeError(message, 400) } };
+}
+
 /**
  * Workspace Intake adapter for remote URLs. Each URL is fetched lazily and
  * yielded as a streaming item; the response stays open until Workspace Intake
  * has validated and stored it, then it is cancelled. Each item's canonical ID
  * defaults to the URL, so re-ingesting a page supersedes its previous version.
+ * A URL that cannot be fetched is yielded as a rejected item, so the other
+ * URLs are still ingested.
  */
 export async function* remoteUrlIntakeItems(
   urls: string[],
@@ -34,12 +40,14 @@ export async function* remoteUrlIntakeItems(
         signal: options.signal ?? AbortSignal.timeout(15_000),
       });
     } catch (error) {
-      throw new WorkspaceIntakeError(error instanceof Error ? error.message : "Invalid URL", 400);
+      yield rejectedUrl(url, error instanceof Error ? error.message : "Invalid URL");
+      continue;
     }
 
     try {
       if (!response.ok) {
-        throw new WorkspaceIntakeError(`Failed to fetch ${url}: ${response.status}`, 400);
+        yield rejectedUrl(url, `Failed to fetch ${url}: ${response.status}`);
+        continue;
       }
       const filename = path.basename(new URL(safeUrl).pathname) || `remote-${randomUUID()}`;
       const mimeType = inferMimeType(url, response.headers.get("content-type"));

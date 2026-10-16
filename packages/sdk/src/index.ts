@@ -180,14 +180,14 @@ export type UploadInput = {
 export type RejectedUpload = {
   filename: string;
   /** HTTP status the file would have produced on its own. */
-  statusCode: 413 | 415 | 422;
+  statusCode: 400 | 409 | 413 | 415 | 422;
   code: "unsupported_type" | "file_too_large" | "unreadable_source" | "rejected";
   message: string;
 };
 
 export type UploadResponse = {
   documents: DocumentRecord[];
-  /** Files a bulk upload left out while accepting the rest. Absent when every file was taken. */
+  /** Files an upload left out while accepting the rest (one bad file never fails the request). Absent when every file was taken. */
   rejected?: RejectedUpload[];
   run: WorkspaceRun;
   warnings?: string[];

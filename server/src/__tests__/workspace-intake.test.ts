@@ -206,11 +206,11 @@ describe("Workspace Intake", () => {
     expect(fakes.runs).toEqual([]);
   });
 
-  it("rejects an unsupported file with 415 and removes raw objects it already stored", async () => {
+  it("rejects a lone unsupported file with 415 and creates nothing", async () => {
     const fakes = createWorkspaceIntakeFakes();
     const error = await rejection(
       intakeIntoWorkspace(
-        request({ items: [bytesItem("ok.txt"), bytesItem("payload.exe", "MZ", "application/x-msdownload")] }),
+        request({ items: [bytesItem("payload.exe", "MZ", "application/x-msdownload")] }),
         fakes.ports,
       ),
     );
@@ -219,14 +219,13 @@ describe("Workspace Intake", () => {
     expect(fakes.createdWorkspaces).toEqual([]);
   });
 
-  describe("acceptPartial (bulk upload)", () => {
+  describe("partial intake (every source)", () => {
     it("takes the valid files and reports unsupported, oversized and unreadable ones", async () => {
       (env as { maxUploadBytes: number }).maxUploadBytes = 8;
       const fakes = createWorkspaceIntakeFakes();
       fakes.state.unreadable.add("broken.pdf");
       const result = await intakeIntoWorkspace(
         request({
-          acceptPartial: true,
           items: [
             bytesItem("ok.txt"),
             bytesItem("payload.exe", "MZ", "application/x-msdownload"),
@@ -252,7 +251,7 @@ describe("Workspace Intake", () => {
     it("still fails, naming every file, when nothing is accepted", async () => {
       const fakes = createWorkspaceIntakeFakes();
       const error = await rejection(intakeIntoWorkspace(
-        request({ acceptPartial: true, items: [bytesItem("a.exe", "MZ", "application/x-msdownload"), bytesItem("b.exe", "MZ", "application/x-msdownload")] }),
+        request({ items: [bytesItem("a.exe", "MZ", "application/x-msdownload"), bytesItem("b.exe", "MZ", "application/x-msdownload")] }),
         fakes.ports,
       ));
       expect(error.statusCode).toBe(415);
@@ -265,7 +264,7 @@ describe("Workspace Intake", () => {
       (env as { maxUploadBytes: number }).maxUploadBytes = 4;
       const fakes = createWorkspaceIntakeFakes();
       const error = await rejection(intakeIntoWorkspace(
-        request({ acceptPartial: true, items: [bytesItem("a.exe", "MZ", "application/x-msdownload"), bytesItem("big.txt", "123456")] }),
+        request({ items: [bytesItem("a.exe", "MZ", "application/x-msdownload"), bytesItem("big.txt", "123456")] }),
         fakes.ports,
       ));
       expect(error.statusCode).toBe(422);
@@ -275,7 +274,7 @@ describe("Workspace Intake", () => {
       const fakes = createWorkspaceIntakeFakes();
       fakes.state.unreadable.add("a.pdf").add("b.pdf");
       const error = await rejection(intakeIntoWorkspace(
-        request({ acceptPartial: true, items: [bytesItem("payload.exe", "MZ", "application/x-msdownload"), bytesItem("a.pdf", "%PDF", "application/pdf"), bytesItem("b.pdf", "%PDF", "application/pdf")] }),
+        request({ items: [bytesItem("payload.exe", "MZ", "application/x-msdownload"), bytesItem("a.pdf", "%PDF", "application/pdf"), bytesItem("b.pdf", "%PDF", "application/pdf")] }),
         fakes.ports,
       ));
       expect(error.statusCode).toBe(422);
@@ -288,21 +287,44 @@ describe("Workspace Intake", () => {
     it("removes the workspace it created when no document survives, but never an existing one", async () => {
       const fresh = createWorkspaceIntakeFakes();
       fresh.state.unreadable.add("broken.pdf");
-      await rejection(intakeIntoWorkspace(request({ acceptPartial: true, items: [bytesItem("broken.pdf", "%PDF", "application/pdf")] }), fresh.ports));
+      await rejection(intakeIntoWorkspace(request({ items: [bytesItem("broken.pdf", "%PDF", "application/pdf")] }), fresh.ports));
       expect(fresh.createdWorkspaces).toHaveLength(1);
       expect(fresh.discardedWorkspaces).toEqual(["ws-1"]);
 
       const existing = createWorkspaceIntakeFakes({ workspaces: [fakeWorkspace({ id: "ws-existing", orgId: "org-1" })] });
       existing.state.unreadable.add("broken.pdf");
-      await rejection(intakeIntoWorkspace(request({ workspaceId: "ws-existing", newWorkspace: undefined, acceptPartial: true, items: [bytesItem("broken.pdf", "%PDF", "application/pdf")] }), existing.ports));
+      await rejection(intakeIntoWorkspace(request({ workspaceId: "ws-existing", newWorkspace: undefined, items: [bytesItem("broken.pdf", "%PDF", "application/pdf")] }), existing.ports));
       expect(existing.discardedWorkspaces).toEqual([]);
     });
 
-    it("keeps other intake kinds strict", async () => {
+    it("never fails the whole request over one bad file, whatever the intake kind", async () => {
+      for (const kind of ["direct-upload", "url-ingest", "bulk-upload", "ai-automation"] as const) {
+        const fakes = createWorkspaceIntakeFakes();
+        fakes.state.unreadable.add("broken.pdf");
+        const result = await intakeIntoWorkspace(
+          request({ kind, items: [bytesItem("ok.txt"), bytesItem("payload.exe", "MZ", "application/x-msdownload"), bytesItem("broken.pdf", "%PDF", "application/pdf")] }),
+          fakes.ports,
+        );
+        expect(result?.documents.map((document) => document.filename), kind).toEqual(["ok.txt"]);
+        expect(result?.rejected.map((file) => file.code), kind).toEqual(["unsupported_type", "unreadable_source"]);
+      }
+    });
+
+    it("reports a source its adapter could not produce, and keeps the rest", async () => {
       const fakes = createWorkspaceIntakeFakes();
-      fakes.state.unreadable.add("broken.pdf");
-      await rejection(intakeIntoWorkspace(request({ items: [bytesItem("ok.txt"), bytesItem("payload.exe", "MZ", "application/x-msdownload")] }), fakes.ports));
-      await expect(intakeIntoWorkspace(request({ items: [bytesItem("broken.pdf", "%PDF", "application/pdf")] }), fakes.ports)).rejects.toThrow(/could not be read as a PDF/);
+      const result = await intakeIntoWorkspace(
+        request({
+          items: [
+            { filename: "https://example.com/gone.pdf", content: { rejected: new WorkspaceIntakeError("Failed to fetch https://example.com/gone.pdf: 404", 400) } },
+            bytesItem("ok.txt"),
+          ],
+        }),
+        fakes.ports,
+      );
+      expect(result?.documents.map((document) => document.filename)).toEqual(["ok.txt"]);
+      expect(result?.rejected).toEqual([
+        { filename: "https://example.com/gone.pdf", statusCode: 400, code: "rejected", message: "Failed to fetch https://example.com/gone.pdf: 404" },
+      ]);
     });
   });
 
@@ -476,6 +498,19 @@ describe("Workspace Intake from remote URLs", () => {
     expect(error).toMatchObject({ statusCode: 400, message: expect.stringContaining("404") });
     expect(cancel).toHaveBeenCalledOnce();
     expect(fakes.objects.size).toBe(0);
+  });
+
+  it("ingests the reachable URLs when another one fails to fetch", async () => {
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request) => String(input).includes("missing")
+      ? new Response("nope", { status: 404 })
+      : new Response("hello", { status: 200, headers: { "content-type": "text/plain" } })));
+    const fakes = createWorkspaceIntakeFakes();
+    const urls = ["https://example.com/missing.txt", "https://example.com/found.txt"];
+    const result = await intakeIntoWorkspace(request({ kind: "url-ingest", items: remoteUrlIntakeItems(urls), urls }), fakes.ports);
+    expect(result?.documents.map((document) => document.filename)).toEqual(["found.txt"]);
+    expect(result?.rejected).toEqual([
+      expect.objectContaining({ filename: "https://example.com/missing.txt", statusCode: 400, message: expect.stringContaining("404") }),
+    ]);
   });
 
   it("surfaces upstream stream failures as a 400 instead of hanging storage", async () => {

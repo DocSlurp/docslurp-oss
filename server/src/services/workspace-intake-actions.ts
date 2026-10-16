@@ -40,7 +40,7 @@ export type WorkspaceIntakePayload = {
   run: WorkspaceIntakeResult["run"];
   documents: WorkspaceIntakeResult["documents"];
   warnings: string[];
-  /** Bulk uploads only: files that were not accepted, with why. Absent when every file was taken. */
+  /** Files that were not accepted, with why. Absent when every file was taken. */
   rejected?: WorkspaceIntakeResult["rejected"];
   pipeline?: PipelineFeatures;
   ingested?: Array<{ filename: string; mimeType: string }>;
@@ -245,7 +245,6 @@ export async function createBulkWorkspaceIntake(
           {
             ...target,
             kind: "bulk-upload",
-            acceptPartial: true,
             items: files.map(({ bytes, ...file }) => ({ ...file, content: { bytes } })),
             audit,
           },

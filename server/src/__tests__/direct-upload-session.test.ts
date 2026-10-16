@@ -90,24 +90,28 @@ describe("Direct Upload Session Module", () => {
       ),
     ).toThrow(WorkspaceIntakeError);
 
-    try {
+    // An unfinished file does not block the session; intake reports it instead.
+    expect(() =>
       assertDirectUploadSessionReadyForIntake(
         directUploadSessionFixture({
-          files: [
-            {
-              ...directUploadSessionFixture().files[0],
-              status: "pending",
-            },
-          ],
+          files: [{ ...directUploadSessionFixture().files[0], status: "pending" }],
         }),
-      );
-      throw new Error("expected readiness assertion to fail");
-    } catch (error) {
-      expect(error).toBeInstanceOf(WorkspaceIntakeError);
-      expect((error as WorkspaceIntakeError).statusCode).toBe(409);
-      expect((error as WorkspaceIntakeError).message).toBe(
-        "File contracts.pdf is not completed yet",
-      );
-    }
+      ),
+    ).not.toThrow();
+  });
+
+  it("reports unfinished session files as rejected intake items", () => {
+    const [completed] = directUploadSessionFixture().files;
+    const [done, unfinished] = directUploadIntakeItems(
+      directUploadSessionFixture({
+        files: [completed, { ...completed, filename: "late.pdf", status: "pending" }],
+      }),
+    );
+    expect(done?.content).toEqual({ storedKey: "user-1/raw/contracts.pdf" });
+    expect(unfinished?.content).toEqual({ rejected: expect.any(WorkspaceIntakeError) });
+    expect((unfinished?.content as { rejected: WorkspaceIntakeError }).rejected).toMatchObject({
+      statusCode: 409,
+      message: "late.pdf did not finish uploading",
+    });
   });
 });
