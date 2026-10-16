@@ -243,14 +243,15 @@ describe("Run creation versions Documents by lineage", () => {
 
   it("carries the source's size, pages, hash, mime type and source key to the new version", async () => {
     const original = await runCreation.create({
-      ...input, sources: { kind: "files", files: [{ ...files[0]!, fileSize: 4321 }] },
+      ...input, sources: { kind: "files", files: [{ ...files[0]!, fileSize: 4321, metadata: { author: "Ada" } }] },
     });
     await runCreation.create({ ...input, sources: { kind: "versionsOf", documentIds: [original.documents[0]!.id] } });
-    const [row] = await sql<Record<string, unknown>[]>`select page_count, file_size, source_sha256, mime_type, source_key, extraction_mode
+    const [row] = await sql<Record<string, unknown>[]>`select page_count, file_size, source_sha256, mime_type, source_key, extraction_mode, metadata
       from documents where version_number = 2`;
     expect({ ...row, file_size: Number(row!.file_size) }).toEqual({
       page_count: 3, file_size: 4321, source_sha256: "abc", mime_type: "application/pdf",
       source_key: "u/raw/a.pdf", extraction_mode: "hybrid",
+      metadata: { author: "Ada", sourceSizeMeasured: true },
     });
   });
 

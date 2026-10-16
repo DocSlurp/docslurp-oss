@@ -92,7 +92,16 @@ export interface RunCreationDeps {
 }
 
 /** Version rows read for `versionsOf` sources. */
-type SourceDocumentRow = DocumentRow & { file_size: number | string | null };
+type SourceDocumentRow = DocumentRow & { file_size: number | string | null; metadata: Record<string, unknown> | null };
+
+// Some drivers hand jsonb back as text; accept both so a copy never double-encodes.
+function sourceMetadata(value: unknown): Record<string, never> {
+  let parsed = value;
+  if (typeof parsed === "string") {
+    try { parsed = JSON.parse(parsed); } catch { parsed = null; }
+  }
+  return (parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {}) as Record<string, never>;
+}
 
 function platformRunPipeline<T extends PipelineFeatures>(pipeline: T): T {
   const parsed = pageRouterModeSchema.safeParse(process.env.PAGE_ROUTER_MODE?.trim().toLowerCase());
@@ -748,7 +757,7 @@ export function createRunCreation(deps: RunCreationDeps) {
           insert into documents (
             id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key,
             status, extraction_mode, page_count, file_size, source_sha256,
-            canonical_id, version_number, previous_version_id, reused_from_document_id
+            canonical_id, version_number, previous_version_id, reused_from_document_id, metadata
           )
           values (
             ${randomUUID()},
@@ -768,7 +777,8 @@ export function createRunCreation(deps: RunCreationDeps) {
             ${canonicalId},
             ${(latest?.version_number ?? source.version_number ?? 1) + 1},
             ${latest?.id ?? source.id},
-            ${reuse ? source.id : null}
+            ${reuse ? source.id : null},
+            ${sql.json(sourceMetadata(source.metadata))}
           )
           returning *
         `;
