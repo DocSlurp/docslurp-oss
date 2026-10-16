@@ -34,7 +34,9 @@ describe("request observation names", () => {
         metadata: { method: "GET", path, route: "/v1/documents/:id" },
       });
       expect(posthogLog.mock.calls.at(-1)?.[0]).toMatchObject({
-        attributes: { http_request_method: "GET", http_route: "/v1/documents/:id" },
+        eventName: "docslurp.api.request_completed",
+        body: expect.stringMatching(new RegExp(`^GET ${path} 200 \\d+ms$`)),
+        attributes: { "http.request.method": "GET", "http.route": "/v1/documents/:id", "url.path": path },
       });
     }
   });
@@ -50,7 +52,7 @@ describe("request observation names", () => {
     }
     expect(observe).not.toHaveBeenCalled();
     expect(posthogLog).toHaveBeenCalledTimes(4);
-    expect(posthogLog.mock.calls[1][0].attributes.http_route).toBe("/v1/runs/:id/progress");
+    expect(posthogLog.mock.calls[1][0].attributes["http.route"]).toBe("/v1/runs/:id/progress");
   });
 
   it("does not create AI observations for infrastructure probes", async () => {
@@ -61,7 +63,13 @@ describe("request observation names", () => {
     app.get("/v1/workspaces/:id/metrics", c => c.text("ok"));
     for (const path of probes) expect((await app.request(path)).status).toBe(200);
     expect(observe).not.toHaveBeenCalled();
-    expect(posthogLog).toHaveBeenCalledTimes(4);
+    // Successful probes are not logged; failing ones still are.
+    expect(posthogLog).not.toHaveBeenCalled();
+    const failingProbe = new Hono();
+    failingProbe.use("*", requestContextMiddleware);
+    failingProbe.get("/ready", c => c.text("down", 503));
+    expect((await failingProbe.request("/ready")).status).toBe(503);
+    expect(posthogLog.mock.calls.at(-1)?.[0]).toMatchObject({ severityText: "error", attributes: { "http.route": "/ready" } });
     // Only the exact probe routes are skipped.
     await app.request("/v1/workspaces/w/metrics");
     expect(observe.mock.calls.at(-1)?.[0]).toMatchObject({ name: "api.GET./v1/workspaces/:id/metrics" });

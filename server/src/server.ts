@@ -265,7 +265,8 @@ export function ensureApiStartup(): Promise<void> {
       console.log(`[api] cors_allowed_origins=${env.corsAllowedOrigins.join(",")}`);
       emitPostHogApiLog({
         severityText: "info",
-        body: "api_startup_complete",
+        eventName: "docslurp.api.startup_completed",
+        body: "API startup complete",
         attributes: {
           startup_migrations_enabled: shouldRunStartupMigrations(),
         },

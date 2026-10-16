@@ -292,21 +292,28 @@ export const requestContextMiddleware: MiddlewareHandler = async (c, next) => {
       const flushDurationMs = Date.now() - flushStartedAt;
       const finalDurationMs = Date.now() - startedAt;
 
-      const level = status >= 500 ? console.error : status >= 400 ? console.warn : console.log;
-      level(`[api] requestId=${requestId} method=${c.req.method} path=${pathname} status=${status} duration_ms=${finalDurationMs} handler_duration_ms=${durationMs} telemetry_flush_ms=${flushDurationMs} telemetry_flush=${flushOutcome}`);
-      emitPostHogApiLog({
-        severityText: status >= 500 ? "error" : status >= 400 ? "warn" : "info",
-        body: "api_request_completed",
-        attributes: {
-          http_request_method: c.req.method,
-          http_route: route,
-          http_response_status_code: status,
-          duration_ms: finalDurationMs,
-          handler_duration_ms: durationMs,
-          telemetry_flush_ms: flushDurationMs,
-          telemetry_flush: flushOutcome,
-        },
-      });
+      // Successful infrastructure probes stay in metrics and spans; logging each
+      // one would bury real traffic under Fly checks and autoscaler scrapes.
+      if (!INFRA_PROBE_ROUTES.has(route) || status >= 400) {
+        const level = status >= 500 ? console.error : status >= 400 ? console.warn : console.log;
+        level(`[api] requestId=${requestId} method=${c.req.method} path=${pathname} status=${status} duration_ms=${finalDurationMs} handler_duration_ms=${durationMs} telemetry_flush_ms=${flushDurationMs} telemetry_flush=${flushOutcome}`);
+        emitPostHogApiLog({
+          severityText: status >= 500 ? "error" : status >= 400 ? "warn" : "info",
+          eventName: "docslurp.api.request_completed",
+          body: `${c.req.method} ${pathname} ${status} ${finalDurationMs}ms`,
+          attributes: {
+            "http.request.method": c.req.method,
+            "http.route": route,
+            "http.response.status_code": status,
+            "url.path": pathname,
+            "docslurp.requestId": requestId,
+            duration_ms: finalDurationMs,
+            handler_duration_ms: durationMs,
+            telemetry_flush_ms: flushDurationMs,
+            telemetry_flush: flushOutcome,
+          },
+        });
+      }
     }
   })));
 };
