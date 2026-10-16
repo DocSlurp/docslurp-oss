@@ -1,5 +1,5 @@
 import { errorContext } from "./error-context.js";
-import { withObservation, addTraceMetadata, withHttpSpan } from "@docslurp/shared/observability";
+import { withObservation, addTraceMetadata, withHttpSpan, exportsOtlpLogs } from "@docslurp/shared/observability";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { randomUUID } from "node:crypto";
 import { routePath } from "hono/route";
@@ -295,8 +295,10 @@ export const requestContextMiddleware: MiddlewareHandler = async (c, next) => {
       // Successful infrastructure probes stay in metrics and spans; logging each
       // one would bury real traffic under Fly checks and autoscaler scrapes.
       if (!INFRA_PROBE_ROUTES.has(route) || status >= 400) {
-        const level = status >= 500 ? console.error : status >= 400 ? console.warn : console.log;
-        level(`[api] requestId=${requestId} method=${c.req.method} path=${pathname} status=${status} duration_ms=${finalDurationMs} handler_duration_ms=${durationMs} telemetry_flush_ms=${flushDurationMs} telemetry_flush=${flushOutcome}`);
+        // SigNoz already receives the structured record below; the Fly log shipper
+        // would ingest a second, uncorrelated copy. Stdout is the fallback only.
+        const level = exportsOtlpLogs() ? undefined : status >= 500 ? console.error : status >= 400 ? console.warn : console.log;
+        level?.(`[api] requestId=${requestId} method=${c.req.method} path=${pathname} status=${status} duration_ms=${finalDurationMs} handler_duration_ms=${durationMs} telemetry_flush_ms=${flushDurationMs} telemetry_flush=${flushOutcome}`);
         emitPostHogApiLog({
           severityText: status >= 500 ? "error" : status >= 400 ? "warn" : "info",
           eventName: "docslurp.api.request_completed",

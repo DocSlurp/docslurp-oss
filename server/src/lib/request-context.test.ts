@@ -2,11 +2,12 @@ import { Hono } from "hono";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { requestContextMiddleware, setCurrentRequestUserId } from "./request-context.js";
 
-const { observe, posthogLog, database } = vi.hoisted(() => ({ observe: vi.fn(), posthogLog: vi.fn(), database: vi.fn() }));
+const { observe, posthogLog, database, otlpLogs } = vi.hoisted(() => ({ observe: vi.fn(), posthogLog: vi.fn(), database: vi.fn(), otlpLogs: vi.fn(() => false) }));
 vi.mock("@docslurp/shared/observability", () => ({
   withObservation: observe,
   withHttpSpan: async (_options: unknown, run: () => Promise<unknown>) => run(),
   addTraceMetadata: vi.fn(),
+  exportsOtlpLogs: otlpLogs,
 }));
 vi.mock("../db.js", () => ({ sql: Object.assign(database, { json: (value: unknown) => value }) }));
 vi.mock("./posthog-ai-observability.js", () => ({ emitPostHogApiLog: posthogLog }));
@@ -15,7 +16,26 @@ beforeEach(() => {
   database.mockReset();
   observe.mockReset();
   posthogLog.mockReset();
+  otlpLogs.mockReturnValue(false);
   observe.mockImplementation(async (_options, run) => run());
+});
+
+describe("request logs", () => {
+  it("writes the stdout line only when no OTLP log exporter carries the structured record", async () => {
+    const app = new Hono();
+    app.use("*", requestContextMiddleware);
+    app.get("/v1/models", c => c.text("ok"));
+    const stdout = vi.spyOn(console, "log").mockImplementation(() => {});
+    try {
+      await app.request("/v1/models");
+      expect(stdout.mock.calls.some(([line]) => String(line).startsWith("[api] requestId="))).toBe(true);
+      stdout.mockClear();
+      otlpLogs.mockReturnValue(true);
+      await app.request("/v1/models");
+      expect(stdout.mock.calls.some(([line]) => String(line).startsWith("[api] requestId="))).toBe(false);
+      expect(posthogLog).toHaveBeenCalledTimes(2);
+    } finally { stdout.mockRestore(); }
+  });
 });
 
 describe("request observation names", () => {

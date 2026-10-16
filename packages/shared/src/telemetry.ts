@@ -26,6 +26,7 @@ export interface ObservabilityOptions {
 
 type Runtime = {
   traces: NodeTracerProvider;
+  otlpLogs?: boolean;
   metrics?: MeterProvider;
   operationDuration?: Histogram;
   httpDuration?: Histogram;
@@ -143,11 +144,14 @@ export function initializeObservability(options: ObservabilityOptions = {}): boo
       console.warn("[observability] OTLP export not configured (OTEL_EXPORTER_OTLP_ENDPOINT unset); SigNoz receives no telemetry from this process");
     }
     if (!processors.length && !logProcessors.length && !metricsOptions) return false;
+    const environment = process.env.OTEL_DEPLOYMENT_ENVIRONMENT ?? process.env.NODE_ENV ?? "development";
     const resource = defaultResource().merge(resourceFromAttributes({
       "service.name": process.env.OTEL_SERVICE_NAME?.trim() || options.serviceName || "docslurp-tools",
       "service.version": process.env.APP_VERSION ?? process.env.GIT_SHA ?? (process.env.NODE_ENV === "production" ? "unknown" : "development"),
       "service.instance.id": process.env.FLY_MACHINE_ID ?? `${hostname()}:${process.pid}`,
-      "deployment.environment.name": process.env.OTEL_DEPLOYMENT_ENVIRONMENT ?? process.env.NODE_ENV ?? "development",
+      "deployment.environment.name": environment,
+      // SigNoz's Services environment filter still reads the pre-1.27 semconv key.
+      "deployment.environment": environment,
       "telemetry.sdk.language": "nodejs",
     }));
 
@@ -164,7 +168,7 @@ export function initializeObservability(options: ObservabilityOptions = {}): boo
     if (logs) logsApi.setGlobalLoggerProvider(logs);
     traces.register({ contextManager: new AsyncLocalStorageContextManager(), propagator: new W3CTraceContextPropagator() });
     setLangfuseTracerProvider(traces);
-    processState[runtimeKey] = { traces, metrics, logs, nativeAiTelemetry: options.nativeAiTelemetry,
+    processState[runtimeKey] = { traces, metrics, logs, otlpLogs: Boolean(logsOptions), nativeAiTelemetry: options.nativeAiTelemetry,
       operationDuration: metrics?.getMeter("docslurp.operations").createHistogram("docslurp.operation.duration", { unit: "s" }),
       httpDuration: metrics?.getMeter("docslurp.http").createHistogram("http.server.request.duration", { unit: "s" }),
     };
@@ -224,6 +228,9 @@ export function installObservabilitySignalHandlers(): void {
     void shutdownObservability().finally(() => process.kill(process.pid, signal));
   });
 }
+
+/** True when application logs reach an OTLP collector (SigNoz), so stdout copies would duplicate them. */
+export const exportsOtlpLogs = () => Boolean(getRuntime()?.otlpLogs && !getRuntime()?.shutdown);
 
 /**
  * `eventName` is the stable, queryable identifier; `body` is the human-readable
