@@ -5,7 +5,7 @@ import { defaultPipelineFeatures } from "@docslurp/shared";
 
 import type { SqlClient } from "../db.js";
 import { createRunLifecycle } from "../services/run-lifecycle.js";
-import { startMigratedPostgres } from "../../../worker/src/test/migrated-postgres.js";
+import { startMigratedPostgres } from "@docslurp/worker/testing";
 
 // Retrying a completed Run with failed Documents, against the real migrated schema
 // (PGlite behind a socket; always runs, unlike run-lifecycle.db.test.ts).
