@@ -39,6 +39,10 @@ The server, worker and CLI are SSPL-1.0 with an Apache-2.0 future grant; the SDK
 
 Small, focused commits with imperative subjects and a "why" in the body. Run typecheck and tests for the packages you touched before opening a pull request. See `CONTRIBUTING.md`.
 
+Never rewrite git history; always move forward with new commits. Do not use `git rebase`, `git commit --amend`, `git reset --hard`, `git push --force`/`--force-with-lease`, `git filter-branch` or similar. To catch a branch up, merge `main` into it and resolve conflicts in the merge commit. To fix a mistake, commit the corrected state on top. To undo a commit, `git revert` it.
+
+Squash-merge pull requests into `main` (`gh pr merge --squash`) so each PR lands as one commit. For a PR stacked on a branch that was just squash-merged, merge the new `main` into it and retarget its base to `main`.
+
 ## Releases
 
 Follow [docs/releases.md](docs/releases.md). All public libraries share a version and release together through release-npm.yml. Do not publish or push release tags without an explicit release request.
