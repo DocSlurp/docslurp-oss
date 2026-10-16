@@ -44,7 +44,7 @@ try {
     }, async () => { calls++; if (failBusiness) throw businessError; return 'ok'; });
     recordMediaTelemetry({ provider: "canary", model: "synthetic", operation: "transcribe", outcome: "succeeded", durationSeconds: 0.01, audioSeconds: 5, costUsd: 0, costSource: "synthetic", candidateFrames: 4, selectedFrames: 2, inputTokens: 10, outputTokens: 2 });
     emitTelemetryLog({ severityText: "info", body: "media.canary.completed", attributes: { "docslurp.runId": marker, "docslurp.media.provider": "canary", "docslurp.media.audioSeconds": 5, "docslurp.media.providerRequestId": "synthetic-provider-request", "docslurp.media.costState": "estimated" } });
-    emitTelemetryLog({ severityText: 'info', body: 'api_request_completed', attributes: {
+    emitTelemetryLog({ severityText: 'info', eventName: 'docslurp.api.request_completed', body: 'GET /__telemetry/canary 200 1ms', attributes: {
       'docslurp.requestId': marker, 'http.request.method': 'GET', 'http.route': '/__telemetry/canary',
       authorization: 'Bearer private-secret-never-export',
     } });

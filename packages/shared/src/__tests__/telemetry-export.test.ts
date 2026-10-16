@@ -62,6 +62,13 @@ it("exports three real protobuf signals, preserves trace correlation and exclude
         expect(bytes.includes(Buffer.from("docslurp.media.frames"))).toBe(true);
         expect(bytes.includes(Buffer.from("docslurp.media.input_tokens"))).toBe(true);
       }
+      if (path === "/v1/logs") {
+        // Stable event name (field and attribute) plus a readable body and per-stage line.
+        expect(bytes.includes(Buffer.from("docslurp.api.request_completed"))).toBe(true);
+        expect(bytes.includes(Buffer.from("GET /__telemetry/canary 200 1ms"))).toBe(true);
+        expect(bytes.includes(Buffer.from("event.name"))).toBe(true);
+        expect(bytes.includes(Buffer.from("worker.stage.telemetry-canary completed in"))).toBe(true);
+      }
     }
   } finally { await sink.close(); }
 }, 20000);

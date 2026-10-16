@@ -39,6 +39,7 @@ const otlpLogsConfigured = Boolean(process.env.OTEL_EXPORTER_OTLP_LOGS_ENDPOINT?
 export function emitPostHogApiLog(args: {
   severityText: "info" | "warn" | "error";
   body: string;
+  eventName?: string;
   attributes?: Record<string, string | number | boolean>;
 }): void {
   emitTelemetryLog(args);

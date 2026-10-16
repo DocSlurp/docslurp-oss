@@ -3,7 +3,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { SpanStatusCode } from "@opentelemetry/api";
 import { performance } from "node:perf_hooks";
 import { initializeObservability, observationTelemetry, mapsObservationAiUsage } from "./telemetry.js";
-export { initializeObservability, flushObservability, shutdownObservability, installObservabilitySignalHandlers, emitTelemetryLog, withHttpSpan, recordMediaTelemetry } from "./telemetry.js";
+export { initializeObservability, flushObservability, shutdownObservability, installObservabilitySignalHandlers, emitTelemetryLog, exportsOtlpLogs, withHttpSpan, recordMediaTelemetry } from "./telemetry.js";
 import {
   LangfuseOtelSpanAttributes,
   startActiveObservation,

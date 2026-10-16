@@ -26,6 +26,7 @@ export interface ObservabilityOptions {
 
 type Runtime = {
   traces: NodeTracerProvider;
+  otlpLogs?: boolean;
   metrics?: MeterProvider;
   operationDuration?: Histogram;
   httpDuration?: Histogram;
@@ -54,7 +55,7 @@ function numberSetting(value: string | undefined, fallback: number, min: number,
 /** Explicit allowlist: Langfuse capture opt-in must not spill content into SigNoz. */
 function safeAttributes(attributes: Attributes): Attributes {
   return Object.fromEntries(Object.entries(attributes).filter(([key, value]) =>
-    value !== undefined && /^(docslurp\.(requestId|runId|documentId|workspaceId|orgId|stageName|scope|media\.(provider|model|mediaJobId|leaseId|resourceId|deadline|durationMs|audioSeconds|costUsd|costSource|costState|providerRequestId|frames|reportedCostUsd|expectedCostUsd|outstanding|overdue)|operation\.(name|type))|http\.(request\.method|route|response\.status_code)|http_request_method|http_route|http_response_status_code|duration_ms|handler_duration_ms|telemetry_flush_ms|telemetry_flush|error\.type|gen_ai\.(request\.model|operation\.name|usage\.(input_tokens|output_tokens)))$/.test(key),
+    value !== undefined && /^(docslurp\.(requestId|runId|documentId|workspaceId|orgId|stageName|scope|media\.(provider|model|mediaJobId|leaseId|resourceId|deadline|durationMs|audioSeconds|costUsd|costSource|costState|providerRequestId|frames|reportedCostUsd|expectedCostUsd|outstanding|overdue)|operation\.(name|type))|http\.(request\.method|route|response\.status_code)|url\.path|event\.name|duration_ms|handler_duration_ms|telemetry_flush_ms|telemetry_flush|error\.type|gen_ai\.(request\.model|operation\.name|usage\.(input_tokens|output_tokens)))$/.test(key),
   ).map(([key, value]) => [key, typeof value === "string" ? value.slice(0, 200) : value]));
 }
 
@@ -143,11 +144,14 @@ export function initializeObservability(options: ObservabilityOptions = {}): boo
       console.warn("[observability] OTLP export not configured (OTEL_EXPORTER_OTLP_ENDPOINT unset); SigNoz receives no telemetry from this process");
     }
     if (!processors.length && !logProcessors.length && !metricsOptions) return false;
+    const environment = process.env.OTEL_DEPLOYMENT_ENVIRONMENT ?? process.env.NODE_ENV ?? "development";
     const resource = defaultResource().merge(resourceFromAttributes({
       "service.name": process.env.OTEL_SERVICE_NAME?.trim() || options.serviceName || "docslurp-tools",
       "service.version": process.env.APP_VERSION ?? process.env.GIT_SHA ?? (process.env.NODE_ENV === "production" ? "unknown" : "development"),
       "service.instance.id": process.env.FLY_MACHINE_ID ?? `${hostname()}:${process.pid}`,
-      "deployment.environment.name": process.env.OTEL_DEPLOYMENT_ENVIRONMENT ?? process.env.NODE_ENV ?? "development",
+      "deployment.environment.name": environment,
+      // SigNoz's Services environment filter still reads the pre-1.27 semconv key.
+      "deployment.environment": environment,
       "telemetry.sdk.language": "nodejs",
     }));
 
@@ -164,7 +168,7 @@ export function initializeObservability(options: ObservabilityOptions = {}): boo
     if (logs) logsApi.setGlobalLoggerProvider(logs);
     traces.register({ contextManager: new AsyncLocalStorageContextManager(), propagator: new W3CTraceContextPropagator() });
     setLangfuseTracerProvider(traces);
-    processState[runtimeKey] = { traces, metrics, logs, nativeAiTelemetry: options.nativeAiTelemetry,
+    processState[runtimeKey] = { traces, metrics, logs, otlpLogs: Boolean(logsOptions), nativeAiTelemetry: options.nativeAiTelemetry,
       operationDuration: metrics?.getMeter("docslurp.operations").createHistogram("docslurp.operation.duration", { unit: "s" }),
       httpDuration: metrics?.getMeter("docslurp.http").createHistogram("http.server.request.duration", { unit: "s" }),
     };
@@ -225,13 +229,23 @@ export function installObservabilitySignalHandlers(): void {
   });
 }
 
-export function emitTelemetryLog(args: { severityText: "info" | "warn" | "error"; body: string; attributes?: Attributes }): void {
+/** True when application logs reach an OTLP collector (SigNoz), so stdout copies would duplicate them. */
+export const exportsOtlpLogs = () => Boolean(getRuntime()?.otlpLogs && !getRuntime()?.shutdown);
+
+/**
+ * `eventName` is the stable, queryable identifier; `body` is the human-readable
+ * line shown in log lists. Without an `eventName`, `body` doubles as both.
+ */
+export function emitTelemetryLog(args: { severityText: "info" | "warn" | "error"; body: string; eventName?: string; attributes?: Attributes }): void {
   const runtime = getRuntime();
   if (!runtime || runtime.shutdown) return;
   bestEffort(() => runtime.logs?.getLogger("docslurp.application").emit({
     severityNumber: args.severityText === "error" ? 17 : args.severityText === "warn" ? 13 : 9,
-    severityText: args.severityText.toUpperCase(), body: args.body,
-    attributes: safeAttributes(args.attributes ?? {}), context: context.active(),
+    severityText: args.severityText.toUpperCase(), body: args.body.slice(0, 1000),
+    ...(args.eventName ? { eventName: args.eventName } : {}),
+    // Mirrored as an attribute: SigNoz filters on attributes, not the LogRecord event_name field.
+    attributes: safeAttributes({ ...(args.attributes ?? {}), ...(args.eventName ? { "event.name": args.eventName } : {}) }),
+    context: context.active(),
   }));
 }
 
@@ -246,7 +260,11 @@ export function observationTelemetry(name: string, type: string, durationSeconds
     .map(([key, value]) => [`docslurp.media.${key}`, value as string]));
   const active = trace.getSpan(context.active());
   for (const [key, value] of Object.entries({ ...correlations, ...media })) bestEffort(() => active?.setAttribute(key, value));
-  if (failed || name.startsWith("worker.stage.")) emitTelemetryLog({ body: "docslurp_operation_completed", severityText: failed ? "error" : "info", attributes: { ...attributes, ...correlations } });
+  if (failed || name.startsWith("worker.stage.")) emitTelemetryLog({
+    eventName: "docslurp.operation.completed", severityText: failed ? "error" : "info",
+    body: `${name.slice(0, 200)} ${failed ? "failed" : "completed"} in ${Math.round(durationSeconds * 1000)}ms`,
+    attributes: { ...attributes, ...correlations, duration_ms: Math.round(durationSeconds * 1000) },
+  });
 }
 
 export function recordHttpTelemetry(method: string, route: string, status: number, durationSeconds: number): void {
