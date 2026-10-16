@@ -27,6 +27,7 @@ import type { NativePdfDocument } from "../native-pdf/types.js";
 import { renderClipNative } from "../native-pdf/render.js";
 import type { Stage, WorkflowState } from "../pipeline/pipeline.js";
 import { isCostCapExceeded, runDocumentStage, runDocuments, runSpentCents } from "../pipeline/checkpoints.js";
+import { healthyDocuments } from "../pipeline/document-health.js";
 import { allowHostedCall } from "../lib/privacy-guard.js";
 import { buildPageInputs, createProbeRunner, parseProbeOutput, type ProbeRunner } from "../routing/page-input.js";
 import { readRoutingFlags, type TableGateMode } from "../routing/flags.js";
@@ -151,7 +152,7 @@ export class RoutePagesStage implements Stage {
     const mode = effectivePageRouterMode(state, this.cfg);
     if (mode === "off") return;
 
-    await runDocuments(state.documents, state.docConcurrency, async (document) => {
+    await runDocuments(healthyDocuments(state), state.docConcurrency, async (document) => {
       const key = `${document.userId}/${state.run.id}/page-route/${document.id}.json`;
       await runDocumentStage(
         state,

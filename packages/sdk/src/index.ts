@@ -49,6 +49,8 @@ export type SearchAvailabilityCoverage = {
   pageOnlyDocuments: number;
   /** Chunks served by keyword search while vector indexing is still running. */
   keywordOnlyDocuments?: number;
+  /** Documents that failed during processing; search still covers the rest. */
+  failedDocuments?: number;
   inProgressDocuments: number;
   totalPages: number;
   searchablePages: number;

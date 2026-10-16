@@ -4,6 +4,7 @@ import {
 } from "@docslurp/shared";
 import type { Stage } from "../pipeline/pipeline.js";
 import { runDocumentStage, runDocuments, skipCompletedPages, completeDocumentPages } from "../pipeline/checkpoints.js";
+import { healthyDocuments } from "../pipeline/document-health.js";
 import { PdfRasterCache, type RasterPageArtifact } from "../pipeline/pdf-asset-cache.js";
 import { type ArtifactStore, keyFromStorageUri } from "../tools/storage.js";
 import type { Config } from "../config.js";
@@ -22,7 +23,7 @@ export class RenderImagesStage implements Stage {
   ) {}
 
   async run(state: import("../pipeline/pipeline.js").WorkflowState, signal?: AbortSignal): Promise<void> {
-    await runDocuments(state.documents, state.docConcurrency, async (document) => {
+    await runDocuments(healthyDocuments(state), state.docConcurrency, async (document) => {
       const key = `${document.userId}/${state.run.id}/images/${document.id}/manifest.json`;
       const artifactSlot = `${document.id}:images`;
 

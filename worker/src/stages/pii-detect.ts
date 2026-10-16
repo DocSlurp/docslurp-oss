@@ -5,7 +5,8 @@ import postgres from "postgres";
 import type { Config } from "../config.js";
 import type { Document } from "../models.js";
 import type { Stage, WorkflowState } from "../pipeline/pipeline.js";
-import { runDocumentStage, runDocuments } from "../pipeline/checkpoints.js";
+import { runDocumentStage, runDocuments, } from "../pipeline/checkpoints.js";
+import { healthyDocuments } from "../pipeline/document-health.js";
 import { isPiiBlockedDocument } from "../pipeline/pii-gate.js";
 import type { CommandRunner } from "../tools/runner.js";
 import { type ArtifactStore, keyFromStorageUri } from "../tools/storage.js";
@@ -183,7 +184,7 @@ export class PiiDetectStage implements Stage {
     }
     const scan = createPiiTextScanner(policy.patterns, policy.allowlistPatterns);
 
-    await runDocuments(state.documents, state.docConcurrency, async (document) => {
+    await runDocuments(healthyDocuments(state), state.docConcurrency, async (document) => {
       const artifactSlot = `${document.id}:pii-detect`;
       const artifactKey = `${document.userId}/${state.run.id}/pii/${document.id}.json`;
 

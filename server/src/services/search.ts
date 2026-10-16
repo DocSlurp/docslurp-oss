@@ -163,6 +163,8 @@ export interface SearchAvailability {
     searchableDocuments: number;
     pageOnlyDocuments: number;
     keywordOnlyDocuments: number;
+    /** Documents that failed (or whose Run stalled); the rest of the scope is still searched. */
+    failedDocuments: number;
     inProgressDocuments: number;
     totalPages: number;
     searchablePages: number;
@@ -566,6 +568,7 @@ export function deriveSearchAvailability(
           (row?.keyword_only_documents ?? 0),
       ),
     keywordOnlyDocuments: row?.keyword_only_documents ?? 0,
+    failedDocuments: row?.failed_documents ?? 0,
     inProgressDocuments: row?.in_progress_documents ?? 0,
     totalPages: row?.total_pages ?? 0,
     searchablePages: row?.searchable_pages ?? 0,
@@ -583,7 +586,7 @@ export function deriveSearchAvailability(
   const hasSearchablePageCoverage = coverage.searchablePages > 0;
   const activeRunCount = coverage.queuedRuns + coverage.processingRuns;
   const activeDocumentCount = coverage.inProgressDocuments;
-  const failedDocumentCount = row?.failed_documents ?? 0;
+  const failedDocumentCount = coverage.failedDocuments;
   const failedRunCount = row?.failed_runs ?? 0;
   const stalledRunCount = row?.stalled_runs ?? 0;
 
@@ -603,7 +606,8 @@ export function deriveSearchAvailability(
       coverage.searchablePages < coverage.totalPages) ||
     coverage.inProgressDocuments > 0 ||
     coverage.queuedRuns > 0 ||
-    coverage.processingRuns > 0
+    coverage.processingRuns > 0 ||
+    coverage.failedDocuments > 0
   ) {
     status = "partial";
   }
@@ -649,7 +653,7 @@ function plural(count: number, singular: string, pluralForm = `${singular}s`): s
   return `${count} ${count === 1 ? singular : pluralForm}`;
 }
 
-/** "Searching 31 of 48 pages (3 of 5 documents); 2 documents still processing, 1 keyword-only so far." */
+/** "Searching 31 of 48 pages (3 of 5 documents); 2 documents still processing, 1 keyword-only so far; 2 documents failed; retry them from the activity panel." */
 export function partialAvailabilityMessage(
   coverage: SearchAvailability["coverage"],
 ): string {
@@ -665,7 +669,12 @@ export function partialAvailabilityMessage(
       ? `${coverage.keywordOnlyDocuments} keyword-only until vector indexing finishes`
       : null,
   ].filter(Boolean);
-  return notes.length > 0 ? `${scope}; ${notes.join(", ")}.` : `${scope}.`;
+  const base = notes.length > 0 ? `${scope}; ${notes.join(", ")}` : scope;
+  if (coverage.failedDocuments > 0) {
+    const retry = coverage.failedDocuments === 1 ? "retry it" : "retry them";
+    return `${base}; ${plural(coverage.failedDocuments, "document")} failed; ${retry} from the activity panel.`;
+  }
+  return `${base}.`;
 }
 
 function buildSearchAvailability(

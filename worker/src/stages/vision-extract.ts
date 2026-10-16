@@ -24,6 +24,7 @@ import {
   runDocumentStage,
   runDocuments,
 } from "../pipeline/checkpoints.js";
+import { healthyDocuments } from "../pipeline/document-health.js";
 import type { CommandRunner } from "../tools/runner.js";
 import {
   type ArtifactStore,
@@ -92,7 +93,7 @@ export class VisionExtractStage implements Stage {
     // Budget-capped runs retain sequential admission, rather than oversubscribing a cap.
     if (!state.run.pipeline.visionFallback || (state.run.pipeline.maxCostCents ?? 0) > 0) return tasks;
     if (!(await this.visionAllowed(state))) return tasks;
-    for (const document of state.documents) {
+    for (const document of healthyDocuments(state)) {
       if (document.mimeType.startsWith("text/") || state.documentStages.get(document.id)?.get(this.name)?.status === "completed") continue;
       const vision = { ...state.run.pipeline.vision, maxPagesPerDocument: this.visionPageBudget(state, document.id) };
       // Active page router: one task per page served by exactly one VLM group, on that group's model
@@ -158,7 +159,7 @@ export class VisionExtractStage implements Stage {
     }
 
     await runDocuments(
-      state.documents,
+      healthyDocuments(state),
       state.docConcurrency,
       async (document) => {
         if (isCostCapExceeded(state)) {

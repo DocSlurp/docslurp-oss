@@ -105,7 +105,7 @@ vi.mock("../services/search-controls.js", () => ({
   recordZeroResultDiagnostics: vi.fn(async () => undefined),
 }));
 
-const { hybridSearch, MissingWorkspaceScopeError, deriveSearchAvailability } =
+const { hybridSearch, MissingWorkspaceScopeError, deriveSearchAvailability, partialAvailabilityMessage } =
   await import("../services/search.js");
 
 describe("hybridSearch", () => {
@@ -192,6 +192,7 @@ describe("hybridSearch", () => {
           searchableDocuments: 2,
           pageOnlyDocuments: 1,
           keywordOnlyDocuments: 0,
+          failedDocuments: 0,
           inProgressDocuments: 1,
           totalPages: 9,
           searchablePages: 5,
@@ -269,6 +270,7 @@ describe("hybridSearch", () => {
         searchableDocuments: 0,
         pageOnlyDocuments: 0,
         keywordOnlyDocuments: 0,
+        failedDocuments: 0,
         inProgressDocuments: 3,
         totalPages: 15,
         searchablePages: 0,
@@ -323,6 +325,7 @@ describe("hybridSearch", () => {
         searchableDocuments: 0,
         pageOnlyDocuments: 0,
         keywordOnlyDocuments: 0,
+        failedDocuments: 1,
         inProgressDocuments: 0,
         totalPages: 12,
         searchablePages: 0,
@@ -373,6 +376,7 @@ describe("hybridSearch", () => {
         searchableDocuments: 1,
         pageOnlyDocuments: 0,
         keywordOnlyDocuments: 0,
+        failedDocuments: 0,
         inProgressDocuments: 0,
         totalPages: 50,
         searchablePages: 0,
@@ -1073,5 +1077,43 @@ describe("hybridSearch", () => {
         outputTokens: 7,
       }),
     ]);
+  });
+  it("names failed documents and downgrades an otherwise complete scope to partial", () => {
+    const availability = deriveSearchAvailability(
+      {
+        total_documents: 5,
+        indexed_documents: 4,
+        page_indexed_documents: 0,
+        searchable_documents: 4,
+        in_progress_documents: 0,
+        failed_documents: 1,
+        total_pages: 48,
+        searchable_pages: 48,
+        indexed_chunk_count: 90,
+        queued_runs: 0,
+        processing_runs: 0,
+      },
+      { workspaceId: "ws-1" },
+    );
+    expect(availability.status).toBe("partial");
+    expect(availability.isPartial).toBe(true);
+    expect(availability.coverage.failedDocuments).toBe(1);
+    expect(availability.message).toBe(
+      "Searching 48 of 48 pages (4 of 5 documents); 1 document failed; retry it from the activity panel.",
+    );
+  });
+
+  it("appends failures after the existing processing and keyword-only notes", () => {
+    const base = {
+      totalDocuments: 48, indexedDocuments: 20, pageIndexedDocuments: 0, searchableDocuments: 31, pageOnlyDocuments: 0,
+      keywordOnlyDocuments: 1, inProgressDocuments: 2, totalPages: 48, searchablePages: 31, indexedChunkCount: 9,
+      queuedRuns: 0, processingRuns: 1,
+    };
+    expect(partialAvailabilityMessage({ ...base, failedDocuments: 0 })).toBe(
+      "Searching 31 of 48 pages (31 of 48 documents); 2 documents still processing, 1 keyword-only until vector indexing finishes.",
+    );
+    expect(partialAvailabilityMessage({ ...base, failedDocuments: 2 })).toBe(
+      "Searching 31 of 48 pages (31 of 48 documents); 2 documents still processing, 1 keyword-only until vector indexing finishes; 2 documents failed; retry them from the activity panel.",
+    );
   });
 });

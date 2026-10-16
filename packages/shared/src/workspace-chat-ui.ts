@@ -47,6 +47,7 @@ export const workspaceChatAvailabilitySchema = z.object({
     searchableDocuments: z.number().int().nonnegative(),
     pageOnlyDocuments: z.number().int().nonnegative(),
     keywordOnlyDocuments: z.number().int().nonnegative().default(0),
+    failedDocuments: z.number().int().nonnegative().default(0),
     inProgressDocuments: z.number().int().nonnegative(),
     totalPages: z.number().int().nonnegative(),
     searchablePages: z.number().int().nonnegative(),
@@ -82,8 +83,13 @@ export function partialCoverageNote(availability: WorkspaceChatAvailability): st
     searched,
     coverage.inProgressDocuments > 0 ? `${countLabel(coverage.inProgressDocuments, "file")} still processing` : null,
     coverage.keywordOnlyDocuments > 0 ? `${coverage.keywordOnlyDocuments} keyword-only so far` : null,
+    coverage.failedDocuments > 0 ? `${countLabel(coverage.failedDocuments, "file")} failed` : null,
   ].filter(Boolean);
-  return `${parts.join(" · ")}. Ask again once they finish for a complete answer.`;
+  const waiting = coverage.inProgressDocuments > 0 || coverage.keywordOnlyDocuments > 0;
+  const advice = waiting
+    ? "Ask again once they finish for a complete answer."
+    : "Retry the failed files to include them in answers.";
+  return `${parts.join(" · ")}. ${advice}`;
 }
 
 export const workspaceChatMetaSchema = z.object({

@@ -5,6 +5,7 @@ import {
   runDocumentStage,
   runDocuments,
 } from "../pipeline/checkpoints.js";
+import { healthyDocuments } from "../pipeline/document-health.js";
 import type { CommandRunner } from "../tools/runner.js";
 import { type ArtifactStore } from "../tools/storage.js";
 import { PdfSourceCache } from "../pipeline/pdf-asset-cache.js";
@@ -29,7 +30,7 @@ export class ExtractHtmlStage implements Stage {
     }
 
     await runDocuments(
-      state.documents,
+      healthyDocuments(state),
       state.docConcurrency,
       async (document) => {
         const htmlKey = `${document.userId}/${state.run.id}/html/${document.id}.html`;

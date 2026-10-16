@@ -21,13 +21,14 @@ export const webhookEventCatalog: WebhookEventDefinition[] = [
   },
   {
     type: "run.completed",
-    description: "Emitted when a workspace run finishes successfully.",
+    description: "Emitted when a workspace run finishes. failedDocuments counts Documents that failed and were skipped; retry the Run to reprocess them.",
     examplePayload: {
       event: "run.completed",
       runId: "run_123",
       workspaceId: "ws_123",
       status: "completed",
       processedDocuments: 14,
+      failedDocuments: 0,
       pagesProcessed: 942,
       costCents: 187,
       deliveredAt: "2026-03-07T15:00:00.000Z"

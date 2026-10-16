@@ -1,4 +1,5 @@
 import { configuredVisionProvider } from "./vision.js";
+import { RunPolicyError } from "../lib/document-failure.js";
 import { videoPolicy } from "./video-policy.js";
 import { scanVideo, prepareVideoFrame, describeVideoChunk } from "./video-processing.js";
 import { LeasedMediaProvider, leasedMediaProvider } from "./capacity/runtime.js";
@@ -43,14 +44,14 @@ export async function extractMedia(args: { state: WorkflowState; document: Docum
   const { state, document, runner, storage, signal } = args;
   await runDocumentStage(state, document, "extract-markdown", `${document.id}:markdown`, "transcribed media", async () => {
     const config = mediaConfig();
-    if (!config.enabled) throw new Error("Remote media processing is disabled; enable MEDIA_REMOTE_ENABLED");
+    if (!config.enabled) throw new RunPolicyError("Remote media processing is disabled; enable MEDIA_REMOTE_ENABLED");
     if (!args.journal || !state.store || !state.run.orgId || !state.run.workspaceId) throw new Error("Media requires durable, tenant-scoped execution");
     const scope = { orgId: state.run.orgId, workspaceId: state.run.workspaceId, runId: state.run.id, documentId: document.id };
     const provider = config.provider === "capacity"
       ? leasedMediaProvider(config.model, scope, args.capacityStore ?? (() => { throw new Error("Capacity store missing"); })(), state.run.pipeline.maxCostCents ?? null)
       : await configuredMediaProvider(config.provider, config.model);
     if (!(await allowHostedCall(state, { provider: provider.id, model: provider.model, operation: "media.transcribe", target: "hosted" }, [document.id]))) {
-      throw new Error("Workspace privacy mode disallows the configured media provider");
+      throw new RunPolicyError("Workspace privacy mode disallows the configured media provider");
     }
     const source = await storage.downloadToTempFile(document.sourceKey, "source.media", { maxBytes: config.maxSourceBytes });
     try {
@@ -66,7 +67,7 @@ export async function extractMedia(args: { state: WorkflowState; document: Docum
       // before any lease or paid call instead of letting host cost bypass the cap.
       if (hasVideo && provider instanceof LeasedMediaProvider) throw new Error("Video document budgets require a managed media provider");
       const vision = hasVideo && visualEnabled ? await configuredVisionProvider() : undefined;
-      if (vision && !(await allowHostedCall(state, { provider: vision.id, model: vision.model, operation: "media.vision", target: "hosted" }, [document.id]))) throw new Error("Workspace privacy mode disallows video vision");
+      if (vision && !(await allowHostedCall(state, { provider: vision.id, model: vision.model, operation: "media.vision", target: "hosted" }, [document.id]))) throw new RunPolicyError("Workspace privacy mode disallows video vision");
       const visualSegments: VisualSegment[] = [];
       let scanStats: { candidateCount: number; selectedCount: number; largestGapSeconds: number } | undefined;
       let costUsd = 0;

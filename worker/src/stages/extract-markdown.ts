@@ -34,6 +34,7 @@ import {
   runDocuments,
   skipCompletedPages,
 } from "../pipeline/checkpoints.js";
+import { healthyDocuments } from "../pipeline/document-health.js";
 import { buildCanonicalDocumentFromMarkdown } from "../lib/canonical-document.js";
 import type { CanonicalDocument } from "@docslurp/shared";
 import { enrichCanonicalDocumentWithPptx, enrichCanonicalDocumentWithXlsx } from "../lib/office-structure.js";
@@ -163,7 +164,7 @@ export class ExtractMarkdownStage implements Stage {
     }
 
     await runDocuments(
-      state.documents,
+      healthyDocuments(state),
       state.docConcurrency,
       async (document) => {
         const manifestKey = `${document.userId}/${state.run.id}/markdown/${document.id}.json`;

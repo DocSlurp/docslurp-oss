@@ -1,5 +1,6 @@
 import type { Stage } from "../pipeline/pipeline.js";
-import { runDocumentStage, runDocuments } from "../pipeline/checkpoints.js";
+import { runDocumentStage, runDocuments, } from "../pipeline/checkpoints.js";
+import { healthyDocuments } from "../pipeline/document-health.js";
 import type { CommandRunner } from "../tools/runner.js";
 
 export class NormalizeStage implements Stage {
@@ -8,7 +9,7 @@ export class NormalizeStage implements Stage {
   constructor(private readonly runner: CommandRunner) {}
 
   async run(state: import("../pipeline/pipeline.js").WorkflowState, signal?: AbortSignal): Promise<void> {
-    await runDocuments(state.documents, state.docConcurrency, async (document) => {
+    await runDocuments(healthyDocuments(state), state.docConcurrency, async (document) => {
       const artifactSlot = `${document.id}:normalize`;
       const normalizedFormat = state.artifactLedger.readDocument(document.id, "normalizedFormat");
 

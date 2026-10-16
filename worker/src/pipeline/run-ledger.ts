@@ -30,6 +30,8 @@ export interface RunProgressLedger {
   failedStages: number;
   completedDocumentStages: number;
   failedDocumentStages: number;
+  /** Documents with at least one failed stage; the Run skips them and carries on. */
+  failedDocuments: number;
   processingDocumentStages: number;
   documents: number;
   totalStages: number;
@@ -267,6 +269,7 @@ export function calculateRunProgressLedger(
   let processingDocumentStages = 0;
 
   const documentStageEntries = Array.from(input.documentStages);
+  const failedDocumentIds = new Set<string>();
   const pageProgress = Array.from(input.pageProgress);
 
   for (const stageState of input.runStages) {
@@ -277,12 +280,13 @@ export function calculateRunProgressLedger(
     }
   }
 
-  for (const [, stages] of documentStageEntries) {
+  for (const [documentId, stages] of documentStageEntries) {
     for (const stageState of stages.values()) {
       if (stageState.status === "completed") {
         completedDocumentStages += 1;
       } else if (stageState.status === "failed") {
         failedDocumentStages += 1;
+        failedDocumentIds.add(documentId);
       } else if (stageState.status === "processing") {
         processingDocumentStages += 1;
       }
@@ -298,6 +302,8 @@ export function calculateRunProgressLedger(
           documentStageEntries,
           documents: input.documents,
           completedDocumentStages,
+          failedDocumentIds,
+          expectedDocStagesPerDoc,
           pageProgress,
           totalDocWorkUnits,
         })
@@ -358,6 +364,7 @@ export function calculateRunProgressLedger(
     failedStages,
     completedDocumentStages,
     failedDocumentStages,
+    failedDocuments: failedDocumentIds.size,
     processingDocumentStages,
     documents: input.documents.length,
     totalStages: input.totalStages,
@@ -384,6 +391,8 @@ function calculatePercentComplete(args: {
   documentStageEntries: Array<[string, Map<string, StageState>]>;
   documents: Document[];
   completedDocumentStages: number;
+  failedDocumentIds: ReadonlySet<string>;
+  expectedDocStagesPerDoc: number;
   pageProgress: PageProgress[];
   totalDocWorkUnits: number;
 }): number {
@@ -392,6 +401,14 @@ function calculatePercentComplete(args: {
   for (const [docId, stages] of args.documentStageEntries) {
     const doc = args.documents.find((candidate) => candidate.id === docId);
     if (!doc) {
+      continue;
+    }
+
+    // A failed Document is finished: later stages skip it, so count its
+    // unfinished stages as done and let the Run reach 100%.
+    if (args.failedDocumentIds.has(docId)) {
+      const completed = Array.from(stages.values()).filter((stage) => stage.status === "completed").length;
+      weightedCompleted += Math.max(0, args.expectedDocStagesPerDoc - completed);
       continue;
     }
 

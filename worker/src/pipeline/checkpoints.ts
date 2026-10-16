@@ -4,6 +4,8 @@ import { createHash } from "node:crypto";
 import type { Document } from "../models.js";
 import { runWithPerfContext } from "../lib/perf-context.js";
 import { noteWorkProgress } from "../lib/work-progress.js";
+import { hasFailedDocumentStage } from "./document-health.js";
+import { isDocumentLevelFailure } from "../lib/document-failure.js";
 import { runWithProviderRateScope } from "../lib/provider-rate-limit.js";
 import type { WorkflowState } from "./pipeline.js";
 import {
@@ -239,6 +241,13 @@ export async function runDocumentStage(
     throw signal.reason instanceof Error ? signal.reason : new Error("aborted");
   }
 
+  if (hasFailedDocumentStage(state, document.id, stageName)) {
+    console.log(
+      `[checkpoint-debug] document=${document.id} stage=${stageName} skipped=document-failed-earlier`,
+    );
+    return;
+  }
+
   const checkpoint = state.documentStage(document.id, stageName);
   if (checkpoint?.status === "completed") {
     console.log(
@@ -333,7 +342,7 @@ export async function runDocumentStage(
       });
       recordRetryCount(state, document.id, attempt.attempt);
 
-      if (!hasRemainingAttempts(attempt)) {
+      if (!hasRemainingAttempts(attempt) || !isDocumentLevelFailure(error, signal)) {
         break;
       }
     }
@@ -351,6 +360,22 @@ export async function runDocumentStage(
       `partialStats=${finalStats ? JSON.stringify(finalStats) : "none"}`,
   );
 
+  // Idempotent with the store's own in-memory update; keeps storeless runs
+  // and test stores skipping the Document too.
+  state.setDocumentStage({
+    runId: state.run.id,
+    documentId: document.id,
+    stageName,
+    status: "failed",
+    attempts: attemptsToTry.length,
+    artifactUri: finalArtifactUri ?? "",
+    stats: finalStats ?? {},
+    error: finalMessage,
+    startedAt: null,
+    completedAt: null,
+    updatedAt: new Date(),
+  });
+  state.refreshStats();
   if (state.store) {
     await state.store.failDocumentStage(
       state,
@@ -376,7 +401,11 @@ export async function runDocumentStage(
       }),
     );
   }
-  throw lastFailure?.error ?? new Error(finalMessage);
+  // The Document is failed and skipped from here on; the stage and Run carry
+  // on without it. Only an infrastructure error (or a Run-wide abort) still
+  // fails the stage, so the retry and Run-failure paths see it.
+  const cause = lastFailure?.error ?? new Error(finalMessage);
+  if (!isDocumentLevelFailure(cause, signal)) throw cause;
 }
 
 export function hashContent(content: string | Buffer): string {

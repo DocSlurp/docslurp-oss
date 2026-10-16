@@ -39,7 +39,7 @@ const availability = (status: SearchAvailability["status"]): SearchAvailability 
   status, isPartial: status === "partial" || status === "pending", keywordOnly: false,
   scope: { workspaceId: "ws-1", runId: null },
   coverage: { totalDocuments: 1, indexedDocuments: 1, pageIndexedDocuments: 0, searchableDocuments: 1, pageOnlyDocuments: 0,
-    keywordOnlyDocuments: 0, inProgressDocuments: 0, totalPages: 1, searchablePages: 1, indexedChunkCount: 1, queuedRuns: 0, processingRuns: 0 },
+    keywordOnlyDocuments: 0, failedDocuments: 0, inProgressDocuments: 0, totalPages: 1, searchablePages: 1, indexedChunkCount: 1, queuedRuns: 0, processingRuns: 0 },
   resultBreakdown: { indexedResultCount: 0, pageResultCount: 0 }, message: null,
 });
 

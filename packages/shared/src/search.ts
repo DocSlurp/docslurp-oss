@@ -63,6 +63,8 @@ export const searchAvailabilityCoverageSchema = z.object({
   pageOnlyDocuments: z.number().int().nonnegative(),
   /** Served by keyword search before vector indexing finishes (SEARCH_EARLY_LEXICAL). */
   keywordOnlyDocuments: z.number().int().nonnegative().default(0),
+  /** Documents that failed during processing; search still covers the rest. */
+  failedDocuments: z.number().int().nonnegative().default(0),
   inProgressDocuments: z.number().int().nonnegative(),
   totalPages: z.number().int().nonnegative(),
   searchablePages: z.number().int().nonnegative(),

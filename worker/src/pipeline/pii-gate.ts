@@ -1,6 +1,7 @@
 import { PII_BLOCKED_DOCUMENT_STATUS } from "@docslurp/shared";
 
 import type { Document } from "../models.js";
+import { hasFailedDocumentStage } from "./document-health.js";
 import type { WorkflowState } from "./pipeline.js";
 
 /**
@@ -17,8 +18,9 @@ export function isPiiBlockedDocument(state: WorkflowState, document: Document): 
 /**
  * Documents that summary, structured extraction, embedding, graph and index
  * stages may process. A PII-blocked document is terminal: nothing after
- * pii-detect reads, sends or indexes its text.
+ * pii-detect reads, sends or indexes its text. A document that failed a stage
+ * has no complete artifacts to read, so it is left out too.
  */
 export function indexableDocuments(state: WorkflowState): Document[] {
-  return state.documents.filter((document) => !isPiiBlockedDocument(state, document));
+  return state.documents.filter((document) => !isPiiBlockedDocument(state, document) && !hasFailedDocumentStage(state, document.id));
 }

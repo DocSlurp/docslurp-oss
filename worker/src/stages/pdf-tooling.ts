@@ -1,6 +1,7 @@
 import type { PerformanceEvent } from "../models.js";
 import type { Stage } from "../pipeline/pipeline.js";
-import { runDocumentStage, runDocuments } from "../pipeline/checkpoints.js";
+import { runDocumentStage, runDocuments, } from "../pipeline/checkpoints.js";
+import { healthyDocuments } from "../pipeline/document-health.js";
 import { resolveNativePdfEngine } from "../native-pdf/engine.js";
 import type { CommandRunner, CommandPlan } from "../tools/runner.js";
 import type { ArtifactStore } from "../tools/storage.js";
@@ -15,7 +16,7 @@ export class PdfToolingStage implements Stage {
   ) {}
 
   async run(state: import("../pipeline/pipeline.js").WorkflowState, signal?: AbortSignal): Promise<void> {
-    await runDocuments(state.documents, state.docConcurrency, async (document) => {
+    await runDocuments(healthyDocuments(state), state.docConcurrency, async (document) => {
       const key = `${document.userId}/${state.run.id}/pdf-tooling/${document.id}.json`;
       const artifactSlot = `${document.id}:pdf-tooling`;
 

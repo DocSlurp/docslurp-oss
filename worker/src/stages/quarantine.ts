@@ -3,7 +3,8 @@ import { readFile } from "node:fs/promises";
 import type { Config } from "../config.js";
 import type { Stage } from "../pipeline/pipeline.js";
 import { buildQuarantineStats, scanDocumentForQuarantine, assertAcceptedQuarantine } from "../lib/quarantine.js";
-import { runDocumentStage, runDocuments } from "../pipeline/checkpoints.js";
+import { runDocumentStage, runDocuments, } from "../pipeline/checkpoints.js";
+import { healthyDocuments } from "../pipeline/document-health.js";
 import {
   type ArtifactStore,
   buildArtifactStorageKey,
@@ -27,7 +28,7 @@ export class QuarantineStage implements Stage {
       return;
     }
 
-    await runDocuments(state.documents, state.docConcurrency, async (document) => {
+    await runDocuments(healthyDocuments(state), state.docConcurrency, async (document) => {
       const key = buildArtifactStorageKey(document.userId, state.run.id, "quarantine", `${document.id}.json`);
       const artifactSlot = `${document.id}:quarantine`;
 
