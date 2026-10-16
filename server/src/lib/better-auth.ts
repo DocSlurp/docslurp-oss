@@ -5,6 +5,7 @@ import { betterAuth } from "better-auth";
 import { createBetterAuthSecurityOptions, resolveBetterAuthBaseUrl, isEmailAuthConfigured } from "@docslurp/shared/auth-security";
 import { Pool } from "pg";
 import { notifySignup } from "./signup-notifications.js";
+import { ensureUserAndOrganization } from "../services/account-provisioning.js";
 import { admitConfiguredAdminUser } from "./admin-emails.js";
 import { createAuthEmailOptions } from "./auth-email.js";
 import { developmentTrustedOrigins } from "./dev-auth-access.js";
@@ -123,6 +124,10 @@ export const auth = betterAuth({
     session: {
       create: {
         before: async (session) => {
+          const result = await pool.query<{ name: string }>('select name from "user" where id = $1 and deleted_at is null', [session.userId]);
+          if (result.rows[0]) {
+            await ensureUserAndOrganization(pool, { id: session.userId, name: result.rows[0].name ?? "" });
+          }
           await admitConfiguredAdminUser(pool, session.userId);
           return { data: session };
         }
@@ -131,6 +136,7 @@ export const auth = betterAuth({
     user: {
       create: {
         after: async (user) => {
+          await ensureUserAndOrganization(pool, { id: user.id, name: user.name ?? "" });
           await notifySignup({ kind: "account", email: user.email, name: user.name });
         }
       }

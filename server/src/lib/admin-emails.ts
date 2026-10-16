@@ -12,7 +12,7 @@ export async function admitConfiguredAdminUser(pool: Pick<Pool, "query">, userId
   const result = await pool.query<{ is_admin: boolean }>(`
     with eligible as (
       select id from "user"
-      where id = $1 and "emailVerified" = true
+      where id = $1 and "emailVerified" = true and deleted_at is null
         and lower(trim(email)) = any($2::text[])
     ), promoted_orgs as (
       update org_memberships set role = 'admin'
@@ -22,6 +22,20 @@ export async function admitConfiguredAdminUser(pool: Pick<Pool, "query">, userId
       where user_id in (select id from eligible) and role <> 'admin'
     )
     select exists(select 1 from eligible) as is_admin
+  `, [userId, emails]);
+  return result.rows[0]?.is_admin === true;
+}
+
+/** Read current admin eligibility without promoting memberships during requests. */
+export async function isConfiguredAdminUser(pool: Pick<Pool, "query">, userId: string): Promise<boolean> {
+  const emails = configuredAdminEmails();
+  if (!emails.length) return false;
+  const result = await pool.query<{ is_admin: boolean }>(`
+    select exists (
+      select 1 from "user"
+      where id = $1 and "emailVerified" = true and deleted_at is null
+        and lower(trim(email)) = any($2::text[])
+    ) as is_admin
   `, [userId, emails]);
   return result.rows[0]?.is_admin === true;
 }

@@ -16,11 +16,11 @@ const mocks = vi.hoisted(() => ({
 }));
 
 vi.mock("../services/workspaces.js", () => ({ listWorkspaces: mocks.listWorkspaces }));
-vi.mock("../services/organizations.js", () => ({ getInvitePreview: mocks.getInvitePreview }));
+vi.mock("../services/organizations.js", () => ({ getInvitePreview: mocks.getInvitePreview, listOrganizations: mocks.listOrganizations }));
 vi.mock("../lib/signup-notifications.js", () => ({ notifySignup: mocks.notifySignup }));
 vi.mock("../db.js", () => ({ sql: (...args: unknown[]) => mocks.insert(...args) }));
 vi.mock("../lib/auth.js", () => ({ appDbPool: { query: mocks.consentQuery } }));
-vi.mock("../services/frontend-shell.js", () => ({ ensureUserAndOrganization: mocks.ensure, listOrganizations: mocks.listOrganizations }));
+vi.mock("../services/account-provisioning.js", () => ({ ensureUserAndOrganization: mocks.ensure }));
 vi.mock("../lib/admin-emails.js", () => ({ admitConfiguredAdminUser: mocks.admit }));
 vi.mock("../lib/sso-lookup.js", () => ({ hasConfiguredSsoProvider: mocks.sso }));
 vi.mock("../lib/better-auth.js", () => ({
@@ -33,7 +33,7 @@ vi.mock("../lib/request-actor.js", async () => {
   return { ...actual, resolveBetterAuthSessionActor: mocks.resolveSession };
 });
 
-const { inviteRoutes, metaRoutes, shellRoutes, waitlistRoutes } = await import("../routes/frontend.js");
+const { inviteRoutes, metaRoutes, dashboardRoutes, waitlistRoutes } = await import("../routes/frontend.js");
 const { mcpOAuthRoutes } = await import("../routes/mcp-oauth.js");
 
 type TestActor = { type: "session"; userId: string; sessionId: string; user: { id: string; isAdmin?: boolean } } | { type: "apiKey"; userId: string };
@@ -41,28 +41,27 @@ type TestActor = { type: "session"; userId: string; sessionId: string; user: { i
 function appAs(actor: TestActor) {
   const app = new Hono();
   app.use("*", async (c, next) => { c.set("requestActor", actor as never); await next(); });
-  app.route("/v1/shell", shellRoutes).route("/v1/invites", inviteRoutes).route("/meta", metaRoutes).route("/v1/waitlist", waitlistRoutes);
+  app.route("/dashboard/bootstrap", dashboardRoutes).route("/v1/invites", inviteRoutes).route("/meta", metaRoutes).route("/v1/waitlist", waitlistRoutes);
   return app;
 }
 const session = (userId: string, isAdmin = false): TestActor => ({ type: "session", userId, sessionId: `s-${userId}`, user: { id: userId, isAdmin } });
 
 beforeEach(() => { vi.resetAllMocks(); });
 
-describe("GET /v1/shell", () => {
-  it("bootstraps, admits, then returns the caller's organizations and workspaces only", async () => {
-    const order: string[] = [];
-    mocks.ensure.mockImplementation(async () => { order.push("ensure"); });
-    mocks.admit.mockImplementation(async () => { order.push("admit"); return true; });
-    mocks.listOrganizations.mockImplementation(async () => { order.push("orgs"); return [{ id: "o1" }]; });
-    mocks.listWorkspaces.mockImplementation(async () => { order.push("workspaces"); return [{ id: "w1", orgId: "o1" }]; });
-    const res = await appAs(session("u1")).request("/v1/shell");
+describe("GET /dashboard/bootstrap", () => {
+  it("reads the caller's organizations and workspaces without provisioning or promotion", async () => {
+    mocks.listOrganizations.mockResolvedValue([{ id: "o1" }]);
+    mocks.listWorkspaces.mockResolvedValue([{ id: "w1", orgId: "o1" }]);
+    const res = await appAs(session("u1", true)).request("/dashboard/bootstrap");
     expect(await res.json()).toEqual({ isAdmin: true, organizations: [{ id: "o1" }], workspaces: [{ id: "w1", orgId: "o1" }] });
-    expect(order.slice(0, 2)).toEqual(["ensure", "admit"]);
-    expect(mocks.listWorkspaces).toHaveBeenCalledExactlyOnceWith("u1");
+    expect(mocks.ensure).not.toHaveBeenCalled();
+    expect(mocks.admit).not.toHaveBeenCalled();
+    expect(res.headers.get("Cache-Control")).toBe("private, no-store");
+    expect(mocks.listWorkspaces).toHaveBeenCalledExactlyOnceWith("u1", { refineNames: false });
     expect(mocks.listOrganizations).toHaveBeenCalledExactlyOnceWith("u1");
   });
   it("is session-only: an API key is refused and nothing is listed", async () => {
-    const res = await appAs({ type: "apiKey", userId: "u1" }).request("/v1/shell");
+    const res = await appAs({ type: "apiKey", userId: "u1" }).request("/dashboard/bootstrap");
     expect(res.status).toBe(403);
     expect(mocks.listWorkspaces).not.toHaveBeenCalled();
   });

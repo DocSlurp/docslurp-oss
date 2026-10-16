@@ -855,8 +855,6 @@ export const apiIpRateLimit = createApiRateLimit({
 });
 
 export const apiActorRateLimit: MiddlewareHandler = async (c, next) => {
-  // The dashboard's per-page shell read must not eat the user's API budget; the IP limit still applies.
-  if (c.req.path === "/v1/shell") return next();
   const limited = await enforceAuthenticatedApiRateLimit(c);
   if (limited) return limited;
   await next();

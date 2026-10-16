@@ -36,7 +36,7 @@ import { searchRoutes, workspaceChatRoutes } from "./routes/search.js";
 import { indexStalenessRoutes } from "./routes/index-staleness.js";
 import { workspaceGraphRoutes } from "./routes/workspace-graph.js";
 import { artifactsRoutes } from "./routes/artifacts.js";
-import { inviteRoutes, metaRoutes, shellRoutes, waitlistRoutes } from "./routes/frontend.js";
+import { inviteRoutes, metaRoutes, dashboardRoutes, waitlistRoutes } from "./routes/frontend.js";
 import { filesRoutes } from "./routes/files.js";
 import { notificationsRoutes } from "./routes/notifications.js";
 import { mcpRoutes } from "./routes/mcp.js";
@@ -123,6 +123,7 @@ export function createApiApp(): Hono {
       maxSize: 1024 * 1024
     })
   );
+  app.use("/dashboard/*", sessionAuth);
   app.use("/v1/*", sessionAuth);
   app.use("/v1/*", apiActorRateLimit);
   // `/v1/workspaces/:slug|default/...` → resolved workspace UUID routes.
@@ -135,7 +136,7 @@ export function createApiApp(): Hono {
   app.route("/", mcpOAuthMetadataRoutes);
   app.route("/oauth/mcp", mcpOAuthRoutes);
   app.route("/meta", metaRoutes);
-  app.route("/v1/shell", shellRoutes);
+  app.route("/dashboard/bootstrap", dashboardRoutes);
   app.route("/v1/invites", inviteRoutes);
   app.route("/v1/waitlist", waitlistRoutes);
   app.route("/v1/ai", aiRoutes);

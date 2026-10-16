@@ -558,13 +558,14 @@ export async function getWorkspace(workspaceId: string, userId: string): Promise
   return row ? mapWorkspace(row) : null;
 }
 
-export async function listWorkspaces(userId: string): Promise<WorkspaceRecord[]> {
+/** Dashboard bootstrap disables lazy title refinement to keep its read side-effect free. */
+export async function listWorkspaces(userId: string, options: { refineNames?: boolean } = {}): Promise<WorkspaceRecord[]> {
   const workspaceIds = await listAccessibleWorkspaceIds(userId);
   if (workspaceIds.length === 0) {
     return [];
   }
 
-  await refineWorkspaceNames(workspaceIds);
+  if (options.refineNames !== false) await refineWorkspaceNames(workspaceIds);
   const rows = await sql<WorkspaceRow[]>`
     select
       w.id,

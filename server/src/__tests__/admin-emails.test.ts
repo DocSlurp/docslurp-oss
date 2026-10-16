@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Pool } from "pg";
-import { admitConfiguredAdminUser, configuredAdminEmails } from "../lib/admin-emails.js";
+import { admitConfiguredAdminUser, isConfiguredAdminUser, configuredAdminEmails } from "../lib/admin-emails.js";
 
 afterEach(() => vi.unstubAllEnvs());
 describe("ADMIN_EMAILS admission", () => {
@@ -27,4 +27,13 @@ describe("ADMIN_EMAILS admission", () => {
     const pool = { query: vi.fn(async () => ({ rows: [{ is_admin: false }] })) };
     expect(await admitConfiguredAdminUser(pool as unknown as Pool, "user-2")).toBe(false);
   });
+});
+
+it("reads admin eligibility without membership writes", async () => {
+  vi.stubEnv("ADMIN_EMAILS", "admin@example.com");
+  const query = vi.fn().mockResolvedValue({ rows: [{ is_admin: true }] });
+  expect(await isConfiguredAdminUser({ query } as unknown as Pool, "u1")).toBe(true);
+  expect(query.mock.calls[0][0]).toContain('"emailVerified" = true');
+  expect(query.mock.calls[0][0]).toContain('deleted_at is null');
+  expect(query.mock.calls[0][0]).not.toMatch(/update|insert|delete\s+from/i);
 });

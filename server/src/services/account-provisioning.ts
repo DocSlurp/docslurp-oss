@@ -1,30 +1,14 @@
 import { randomUUID } from "node:crypto";
 
-import { organizationSchema, type OrganizationRecord } from "@docslurp/shared";
-
-import { appDbPool } from "../lib/auth.js";
+import type { Pool } from "pg";
 
 type SessionUser = { id: string; name: string };
 
 const shortId = (value: string, length = 8) => value.slice(0, Math.max(1, length));
 const slugify = (value: string) => value.trim().toLowerCase().replace(/'/g, "").replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
 
-interface OrganizationRow {
-  id: string;
-  name: string;
-  slug: string | null;
-  is_personal: boolean;
-  personal_owner_user_id: string | null;
-  created_by_user_id: string | null;
-  credit_balance_cents: number | string;
-  member_role: OrganizationRecord["memberRole"];
-  created_at: string;
-  updated_at: string;
-}
-
-
-export async function ensureUserAndOrganization(user: SessionUser) {
-  // Ordinary page reads should not open a transaction or repeat no-op writes.
+export async function ensureUserAndOrganization(appDbPool: Pick<Pool, "query" | "connect">, user: SessionUser) {
+  // Repeated sign-ins should not open a transaction or repeat no-op writes.
   // Keep the original bootstrap/owner-membership repair for incomplete accounts.
   // A deleted account (docs/data-deletion.md) is never re-bootstrapped, even
   // while a cached session cookie is still valid.
@@ -97,43 +81,5 @@ export async function ensureUserAndOrganization(user: SessionUser) {
   } finally {
     client.release();
   }
-}
-
-export async function listOrganizations(userId: string) {
-  const result = await appDbPool.query<OrganizationRow>(
-    `
-      select
-        o.id,
-        o.name,
-        o.slug,
-        o.is_personal,
-        o.personal_owner_user_id,
-        o.created_by_user_id,
-        o.credit_balance_cents,
-        om.role as member_role,
-        o.created_at::text,
-        o.updated_at::text
-      from organizations o
-      join org_memberships om on om.org_id = o.id
-      where om.user_id = $1
-      order by o.is_personal desc, o.created_at asc
-    `,
-    [userId]
-  );
-
-  return result.rows.map((row) =>
-    organizationSchema.parse({
-      id: row.id,
-      name: row.name,
-      slug: row.slug,
-      isPersonal: row.is_personal,
-      personalOwnerUserId: row.personal_owner_user_id,
-      createdByUserId: row.created_by_user_id,
-      creditBalanceCents: Number(row.credit_balance_cents),
-      memberRole: row.member_role,
-      createdAt: row.created_at,
-      updatedAt: row.updated_at
-    })
-  );
 }
 

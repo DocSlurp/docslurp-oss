@@ -13,6 +13,12 @@ A run flows from upload to object storage and a run record, through the worker s
 
 Deploys run migrate, then worker, then app. A worker capability handshake keeps flags that need both sides off until every live worker supports them; see releases.
 
+## Dashboard bootstrap
+
+The Astro app reads signed-in state from `GET /dashboard/bootstrap`, using a session cookie in both hosting modes. It returns the admin flag, organizations and accessible workspaces through the existing domain services. This dashboard contract is separate from the public `/v1` integration API, rejects API keys, uses `Cache-Control: private, no-store`, and retains the global IP limit without consuming the actor's API budget.
+
+Account provisioning runs after signup and before session creation; configured admin membership promotion runs before session creation, after provisioning. Bootstrap reads do not provision organizations, promote memberships, or refine workspace titles. Existing incomplete accounts are repaired on their next sign-in. Admin eligibility is still checked against the verified identity on each authenticated request, while membership promotion waits until the next sign-in.
+
 ## Product tentpoles
 
 DocSlurp is organized around three jobs. Each one reads and writes the same workspaces.

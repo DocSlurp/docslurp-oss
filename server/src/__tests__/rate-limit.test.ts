@@ -276,17 +276,17 @@ describe("api rate limit middleware", () => {
     expect(response.headers.get("X-RateLimit-Remaining")).toBe("0");
   });
 
-  it("does not count the dashboard shell read against the actor's limit", async () => {
+  it("does not count the dashboard bootstrap read against the actor's limit", async () => {
     const app = new Hono();
     app.use("*", async (c, next) => {
       c.set("requestActor", actorForApiKey("shell-exempt-key", 1));
       await next();
     });
-    app.use("*", apiActorRateLimit);
-    app.get("/v1/shell", (c) => c.json({ ok: true }));
+    app.use("/v1/*", apiActorRateLimit);
+    app.get("/dashboard/bootstrap", (c) => c.json({ ok: true }));
     app.get("/v1/search", (c) => c.json({ ok: true }));
 
-    for (let index = 0; index < 3; index += 1) expect((await app.request("/v1/shell")).status).toBe(200);
+    for (let index = 0; index < 3; index += 1) expect((await app.request("/dashboard/bootstrap")).status).toBe(200);
     expect((await app.request("/v1/search")).status).toBe(200);
     expect((await app.request("/v1/search")).status).toBe(429);
   });

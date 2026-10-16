@@ -5,7 +5,7 @@ import { HTTPException } from "hono/http-exception";
 import { isDefaultWorkspaceAlias, isWorkspaceUuid, type WorkspaceRecord } from "@docslurp/shared";
 
 import { auth, appDbPool } from "./auth.js";
-import { admitConfiguredAdminUser } from "./admin-emails.js";
+import { isConfiguredAdminUser } from "./admin-emails.js";
 import { apiKeyAllowsWorkspace, apiKeyCanUseWorkspace } from "./api-key-workspace-scope.js";
 
 export { apiKeyAllowsWorkspace, apiKeyCanUseWorkspace };
@@ -76,7 +76,7 @@ export async function resolveBetterAuthSessionActor(headers: Headers): Promise<S
     return null;
   }
 
-  session.user.isAdmin = await admitConfiguredAdminUser(appDbPool, session.user.id);
+  session.user.isAdmin = await isConfiguredAdminUser(appDbPool, session.user.id);
 
   return {
     type: "session",

@@ -2,8 +2,8 @@ import type { OrganizationRecord, WorkspaceRecord } from "./workspace.js";
 
 /** Wire shapes for the endpoints the dashboard reads over HTTP (server/src/routes/frontend.ts). */
 
-/** GET /v1/shell. The server also bootstraps the account's personal organization on first read. */
-export type ShellResponse = { isAdmin: boolean; organizations: OrganizationRecord[]; workspaces: WorkspaceRecord[] };
+/** GET /dashboard/bootstrap. Read-only dashboard state; account provisioning runs during authentication. */
+export type DashboardBootstrapResponse = { isAdmin: boolean; organizations: OrganizationRecord[]; workspaces: WorkspaceRecord[] };
 
 /** A seeded local account offered as a quick-login button (development only). */
 export type DevSeedAccountDescriptor = { id: "admin" | "member"; label: string; email: string };

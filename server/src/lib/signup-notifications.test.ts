@@ -73,14 +73,23 @@ describe("Telegram signup delivery", () => {
     vi.stubEnv("TELEGRAM_CHAT_ID", "test-chat");
     const transport = vi.fn().mockResolvedValue(new Response('{"ok":true}'));
     vi.stubGlobal("fetch", transport);
+    query.mockResolvedValue({ rows: [{ ready: true, name: "New User" }] });
     await import("./better-auth.js");
     await authOptions.value.databaseHooks.user.create.after({
-      email: "new@example.com", name: "New User"
+      id: "user-1", email: "new@example.com", name: "New User"
     });
+    expect(query).toHaveBeenCalledWith(expect.stringContaining("as ready"), ["user-1"]);
     expect(transport).toHaveBeenCalledTimes(1);
     expect(JSON.parse(transport.mock.calls[0][1].body).text)
       .toContain("new@example.com");
+    query.mockClear();
+    vi.stubEnv("ADMIN_EMAILS", "admin@example.com");
     await authOptions.value.databaseHooks.session.create.before({ userId: "user-1" });
+    expect(query.mock.calls.map(([sql]) => sql)).toEqual([
+      expect.stringContaining('select name from "user"'),
+      expect.stringContaining("as ready"),
+      expect.stringContaining("promoted_orgs"),
+    ]);
     expect(transport).toHaveBeenCalledTimes(1);
   });
 });

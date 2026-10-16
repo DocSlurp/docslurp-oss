@@ -99,6 +99,13 @@ beforeAll(async () => {
 }, 120_000);
 
 describe("API key route declarations (real middleware stack)", () => {
+  it("requires a session for dashboard bootstrap and retires the shell route", async () => {
+    expect(routes).toContainEqual({ method: "GET", path: "/dashboard/bootstrap", mode: "session" });
+    expect(routes.some((route) => route.path === "/v1/shell")).toBe(false);
+    expect((await app.request("/dashboard/bootstrap")).status).toBe(401);
+    expect((await requestWithKey({ method: "GET", path: "/dashboard/bootstrap" })).status).toBe(401);
+  });
+
   it("documents the workspace graph routes as API-key routes", () => {
     const graph = documented.filter((operation) => operation.path.includes("/graph"));
     expect(graph.length).toBeGreaterThanOrEqual(6);

@@ -1,16 +1,13 @@
 import { Hono } from "hono";
 
 import { sql } from "../db.js";
-import { appDbPool } from "../lib/auth.js";
-import { admitConfiguredAdminUser } from "../lib/admin-emails.js";
 import { configuredEmailAuth, configuredSocialProviders, getDevSeedAccountDescriptors } from "../lib/better-auth.js";
 import { hasConfiguredSsoProvider } from "../lib/sso-lookup.js";
-import { ensureUserAndOrganization, listOrganizations } from "../services/frontend-shell.js";
 import { mcpOrigin } from "../lib/mcp-origin.js";
 import { authenticatedByRoute } from "../lib/route-auth.js";
 import { getRequestActor } from "../lib/request-actor.js";
 import { notifySignup } from "../lib/signup-notifications.js";
-import { getInvitePreview } from "../services/organizations.js";
+import { getInvitePreview, listOrganizations } from "../services/organizations.js";
 import { listWorkspaces } from "../services/workspaces.js";
 
 /**
@@ -20,15 +17,13 @@ import { listWorkspaces } from "../services/workspaces.js";
  * for public configuration. API keys are never accepted here (session-only default).
  */
 
-/** GET /v1/shell: the signed-in user's admin flag, organizations and accessible workspaces. */
-export const shellRoutes = new Hono().get("/", async (c) => {
+/** GET /dashboard/bootstrap: the signed-in user's admin flag, organizations and accessible workspaces. */
+export const dashboardRoutes = new Hono().get("/", async (c) => {
   const actor = getRequestActor(c);
   if (actor.type !== "session") return c.json({ error: "Forbidden" }, 403);
-  // Bootstrap first (it creates the membership admin admission promotes), then
-  // admit, then read the inventory: the order the dashboard always used.
-  await ensureUserAndOrganization({ id: actor.userId, name: actor.user.name ?? "" });
-  const isAdmin = await admitConfiguredAdminUser(appDbPool, actor.userId);
-  const [organizations, workspaces] = await Promise.all([listOrganizations(actor.userId), listWorkspaces(actor.userId)]);
+  c.header("Cache-Control", "private, no-store");
+  const isAdmin = actor.user.isAdmin === true;
+  const [organizations, workspaces] = await Promise.all([listOrganizations(actor.userId), listWorkspaces(actor.userId, { refineNames: false })]);
   return c.json({ isAdmin, organizations, workspaces });
 });
 

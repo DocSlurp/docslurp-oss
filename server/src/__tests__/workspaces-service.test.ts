@@ -34,12 +34,22 @@ vi.mock("../services/runs.js", () => ({
   withRunCosts: vi.fn(async (runs: unknown[]) => runs),
 }));
 
+const { refineWorkspaceNames } = await import("../services/workspace-naming.js");
 const { listWorkspaceBoardRecords, listWorkspaces } = await import("../services/workspaces.js");
 
 describe("listWorkspaces", () => {
   beforeEach(() => {
+    vi.mocked(refineWorkspaceNames).mockClear();
     sqlMock.mockReset();
     listAccessibleWorkspaceIdsMock.mockReset();
+  });
+
+  it("does not refine titles during dashboard bootstrap reads", async () => {
+    listAccessibleWorkspaceIdsMock.mockResolvedValue(["ws-1"]);
+    sqlMock.mockResolvedValueOnce([]);
+    expect(await listWorkspaces("user-1", { refineNames: false })).toEqual([]);
+    expect(refineWorkspaceNames).not.toHaveBeenCalled();
+    expect(sqlMock).toHaveBeenCalledOnce();
   });
 
   it("maps the real workspace page total instead of estimating from document count", async () => {
@@ -120,6 +130,7 @@ describe("listWorkspaces", () => {
 
 describe("listWorkspaceBoardRecords", () => {
   beforeEach(() => {
+    vi.mocked(refineWorkspaceNames).mockClear();
     sqlMock.mockReset();
     listAccessibleWorkspaceIdsMock.mockReset();
   });
