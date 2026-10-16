@@ -9,7 +9,7 @@ const mocks = vi.hoisted(() => ({
   maintenanceEnabled: { value: true },
 }));
 
-vi.mock("../db.js", () => ({ sql: mocks.sql }));
+vi.mock("../db.js", () => ({ sql: Object.assign(mocks.sql, { begin: async (fn: (sql: typeof mocks.sql) => unknown) => fn(mocks.sql) }) }));
 vi.mock("../lib/temporal.js", () => ({
   startPipelineWorkflow: vi.fn(),
   signalPipelineCancel: vi.fn(),
@@ -32,8 +32,8 @@ const { startRunStartRecovery, stopRunStartRecovery } = await import("../service
 /** The ignoreBackoff flag interpolated into each claim query. */
 function claimFlags(): boolean[] {
   return mocks.sql.mock.calls
-    .filter(([strings]) => (strings as TemplateStringsArray).join("").includes("for update skip locked"))
-    .map((call) => call[2] as boolean);
+    .filter(([strings]) => (strings as TemplateStringsArray).join("").includes("with due as"))
+    .map((call) => call[1] as boolean);
 }
 
 describe("run-start recovery wiring", () => {

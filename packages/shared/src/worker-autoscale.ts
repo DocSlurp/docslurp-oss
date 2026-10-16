@@ -35,10 +35,18 @@ export function parseOrgList(value: string | undefined): Set<string> {
   return new Set((value ?? "").split(",").map((entry) => entry.trim()).filter(Boolean));
 }
 
-export function resolveWorkerScalerConfig(env: NodeJS.ProcessEnv = process.env): WorkerScalerConfig {
+/**
+ * `fallbackSlotsPerMachine` is used when neither DOCSLURP_WORKER_SLOTS_PER_MACHINE nor
+ * WORKER_ACTIVITY_CONCURRENCY is set. A worker passes its resolved activity concurrency (which defaults
+ * from the host's CPUs), so the scaler plans with the slots the machine really runs.
+ */
+export function resolveWorkerScalerConfig(
+  env: NodeJS.ProcessEnv = process.env,
+  fallbackSlotsPerMachine = 1,
+): WorkerScalerConfig {
   const globalCap = Number.parseInt(env.WORKER_GLOBAL_SLOT_CAP ?? "", 10);
   return {
-    slotsPerMachine: Math.max(1, Math.floor(positiveNumber(env.DOCSLURP_WORKER_SLOTS_PER_MACHINE ?? env.WORKER_ACTIVITY_CONCURRENCY, 1))),
+    slotsPerMachine: Math.max(1, Math.floor(positiveNumber(env.DOCSLURP_WORKER_SLOTS_PER_MACHINE ?? env.WORKER_ACTIVITY_CONCURRENCY, fallbackSlotsPerMachine))),
     globalSlotCap: Number.isFinite(globalCap) && globalCap > 0 ? globalCap : 0,
     headroom: Math.max(1, positiveNumber(env.DOCSLURP_WORKER_SCALE_HEADROOM, 1)),
     maxMachines: Math.max(1, Math.floor(positiveNumber(env.DOCSLURP_WORKER_MAX_AUTOSCALE_MACHINES, 12))),

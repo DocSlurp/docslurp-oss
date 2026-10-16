@@ -63,17 +63,22 @@ import { replaceProcessTask } from "./lib/process-singleton.js";
 import { startDbWatchdog } from "./services/db-watchdog.js";
 import { workspaceRefPath } from "./middleware/workspace-ref-path.js";
 import { spendAwareErrorHandler } from "./services/billing/spend-guard.js";
+import { UnreadableSourceError } from "./services/source-metadata.js";
 import { warmDefaultLocalEmbedding } from "./lib/ai.js";
+import { rejectNulBytes } from "./lib/reject-nul.js";
 
 const execFileAsync = promisify(execFile);
 /**
- * The repository root is the nearest ancestor holding drizzle.config.ts. A fixed
- * relative hop breaks once the server is bundled (dist/server/chunks/... in the
- * image resolves to /app/app, not /app), which silently skipped migrations.
+ * The repository root is the nearest ancestor holding drizzle.config.ts, or a
+ * core/ checkout of it (the private app repo pins this repository as a submodule
+ * there). A fixed relative hop breaks once the server is bundled
+ * (dist/server/chunks/... in the image resolves to /app/app, not /app), which
+ * silently skipped migrations.
  */
 function findRepoRoot(start: string): string {
   for (let dir = start; ; dir = dirname(dir)) {
     if (existsSync(resolve(dir, "drizzle.config.ts"))) return dir;
+    if (existsSync(resolve(dir, "core/drizzle.config.ts"))) return resolve(dir, "core");
     if (dirname(dir) === dir) return resolve(dirname(fileURLToPath(import.meta.url)), "../..");
   }
 }
@@ -84,7 +89,9 @@ export { IN_PROCESS_ENV_KEY } from "./lib/client-ip.js";
 export function createApiApp(): Hono {
   const app = new Hono();
   // Spend blocked by credits, budget caps or entitlement is a 402, not a 500.
-  app.onError(spendAwareErrorHandler);
+  app.onError((error, c) => error instanceof UnreadableSourceError
+    ? c.json({ error: error.message, code: error.code }, error.statusCode)
+    : spendAwareErrorHandler(error, c));
 
   // Authentication is served first, ahead of the global middleware below: these
   // paths never ran the API IP limit, request context or widget CORS.
@@ -93,6 +100,7 @@ export function createApiApp(): Hono {
   app.use("*", requestContextMiddleware);
   app.use("*", publicErrorMiddleware);
   app.use("*", apiIpRateLimit);
+  app.use("*", rejectNulBytes);
   app.use("*", serviceCors(env.corsAllowedOrigins));
   app.use("/v1/mcp", bodyLimit({ maxSize: 1024 * 1024 }));
   app.use("/oauth/mcp/*", bodyLimit({ maxSize: 16 * 1024 }));

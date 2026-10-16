@@ -17,7 +17,7 @@ it.skipIf(process.platform !== "linux" || !existsSync("/usr/bin/bwrap"))("isolat
       'test -r "$1/job/input" && test ! -e "$1/other/secret" && test ! -e "/proc/$2/environ" && printf output > "$1/job/output"',
       "probe", root, String(process.pid)], {
       encoding: "utf8", timeout: 10_000,
-      env: { PATH: process.env.PATH, DOCSLURP_PARSER_SANDBOX_MODE: "isolated", DOCSLURP_PARSER_SANDBOX_WRITABLE_PATHS: path.join(root, "job") },
+      env: { PATH: process.env.PATH, DOCSLURP_PARSER_SANDBOX_MODE: "isolated", DOCSLURP_PARSER_SANDBOX_TMP_ROOT: tmpdir(), DOCSLURP_PARSER_SANDBOX_WRITABLE_PATHS: path.join(root, "job") },
     });
     expect(result.status, result.stderr || result.error?.message).toBe(0);
     expect(readFileSync(path.join(root, "job", "output"), "utf8")).toBe("output");

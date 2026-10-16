@@ -205,6 +205,10 @@ export function createRunLifecycle(deps: RunLifecycleDeps) {
     run: RunLifecycleRun,
     options?: { restartExisting?: boolean },
   ): Promise<RunStartOutcome> {
+    const [ready] = await sql<{ id: string }[]>`
+      select id from workspace_runs where id = ${run.id} and creation_ready_at is not null
+    `;
+    if (!ready) return { status: "deferred", reason: "Run creation has not been published for processing." };
     let outcome: RunStartOutcome;
     try {
       await deps.startWorkflow(run.id, run.pipeline, options);

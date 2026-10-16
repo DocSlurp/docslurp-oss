@@ -3,7 +3,6 @@ packages:
   - worker
   - packages/*
 
-
 onlyBuiltDependencies:
   - '@prisma/engines'
   - esbuild

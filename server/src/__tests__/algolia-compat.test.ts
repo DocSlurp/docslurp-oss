@@ -285,6 +285,21 @@ describe("algolia compat", () => {
     ]);
   });
 
+  it("does not apply the relevance floor to the facet wildcard query, but keeps it for a typed query", async () => {
+    hybridSearchMock.mockResolvedValue({ sessionId: "session-1", results: [makeResult(0, "alpha-report.pdf")] });
+    const post = (payload: Record<string, unknown>) => app.request("/compat/algolia/1/indexes/ws-1/facets/filename/query", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: "Bearer test" },
+      body: JSON.stringify(payload),
+    });
+    await post({ facetQuery: "alpha" });
+    await post({});
+    expect(hybridSearchMock).toHaveBeenNthCalledWith(1, "alpha", "demo-user", expect.objectContaining({ minScore: 0 }));
+    expect(hybridSearchMock).toHaveBeenNthCalledWith(2, "*", "demo-user", expect.objectContaining({ minScore: 0 }));
+    await post({ facetQuery: "alpha", query: "invoice" });
+    expect(hybridSearchMock.mock.calls[2]![2]).not.toHaveProperty("minScore");
+  });
+
   it("applies page semantics in multiple queries responses", async () => {
     hybridSearchMock.mockResolvedValue({
       sessionId: "session-1",

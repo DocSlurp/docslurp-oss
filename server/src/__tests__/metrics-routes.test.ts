@@ -290,7 +290,8 @@ describe("healthRoutes /metrics", () => {
 
     sqlMock
       .mockResolvedValueOnce([staleRun])
-      // Run Lifecycle records the confirmed workflow start.
+      // Lifecycle verifies publication before recording the confirmed start.
+      .mockResolvedValueOnce([{ id: staleRun.id }])
       .mockResolvedValueOnce([])
       .mockResolvedValueOnce([])
       .mockResolvedValueOnce([
@@ -314,8 +315,8 @@ describe("healthRoutes /metrics", () => {
     expect(response.status).toBe(200);
     expect(startPipelineWorkflowMock).toHaveBeenCalledWith("run-stale", defaultPipelineFeatures);
     expect(body).toContain("docslurp_worker_target_machines 1");
-    expect((sqlMock.mock.calls[1][0] as TemplateStringsArray).join("")).toContain("workflow_started_at = now()");
-    const savedStats = sqlMock.mock.calls[2][1];
+    expect((sqlMock.mock.calls[2][0] as TemplateStringsArray).join("")).toContain("workflow_started_at = now()");
+    const savedStats = sqlMock.mock.calls[3][1];
     expect(typeof savedStats).toBe("object");
     expect(Object.keys(savedStats)).toEqual(["staleQueueRecovery"]);
     expect(savedStats.staleQueueRecovery.attempts).toBe(1);

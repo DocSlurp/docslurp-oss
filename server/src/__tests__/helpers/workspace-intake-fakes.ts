@@ -2,6 +2,7 @@ import type { Readable } from "node:stream";
 
 import { defaultPipelineFeatures, mergePipelineFeatures, type PipelineFeatureOverrides, type PipelineFeatures, type WorkspaceRecord } from "@docslurp/shared";
 
+import { AllSourcesUnreadableError, UnreadableSourceError } from "../../services/source-metadata.js";
 import type {
   StoredIntakeFile,
   WorkspaceIntakePorts,
@@ -54,9 +55,12 @@ export function createWorkspaceIntakeFakes(options: { workspaces?: WorkspaceReco
   const runs: FakeRun[] = [];
   const audit: AuditEntry[] = [];
   const started: string[] = [];
+  const discardedWorkspaces: string[] = [];
   const state = {
     temporalDown: false,
     blockRunCreation: null as Error | null,
+    /** Filenames createRun treats as unreadable when asked to skip them (as pdfinfo failures are). */
+    unreadable: new Set<string>(),
     /** Thrown by startRun (a non-Temporal failure after the Run is committed). */
     startError: null as Error | null,
     /** Number of upcoming appendAudit calls that throw. */
@@ -98,20 +102,29 @@ export function createWorkspaceIntakeFakes(options: { workspaces?: WorkspaceReco
         createdWorkspaces.push({ name: args.name, orgId: args.orgId, autoNamed: args.autoNamed, pipeline: args.pipeline });
         return workspace;
       },
+      async discardWorkspace(workspaceId) {
+        discardedWorkspaces.push(workspaceId);
+        workspaces.delete(workspaceId);
+      },
       async createRun(args) {
         if (state.blockRunCreation) throw state.blockRunCreation;
+        const unreadable = args.files.filter((file) => state.unreadable.has(file.filename));
+        if (unreadable.length > 0 && !args.skipUnreadable) throw new UnreadableSourceError(unreadable[0]!.filename, "invalid PDF");
+        if (unreadable.length === args.files.length) throw new AllSourcesUnreadableError(unreadable.map((file) => new UnreadableSourceError(file.filename, "invalid PDF")));
+        const readable = args.files.filter((file) => !state.unreadable.has(file.filename));
         const run: FakeRun = {
           id: `run-${runs.length + 1}`,
           workspaceId: args.workspaceId,
           kind: args.kind,
           pipeline: args.pipeline,
           apiKeyId: args.apiKeyId ?? null,
-          files: args.files,
+          files: readable,
         };
         runs.push(run);
         return {
           run: { id: run.id, orgId: workspaces.get(args.workspaceId)?.orgId, workspaceId: args.workspaceId, kind: args.kind, pagesTotal: 0 },
-          documents: args.files.map((file, index) => ({
+          unreadable: unreadable.map((file) => ({ filename: file.filename, sourceKey: file.sourceKey, error: new UnreadableSourceError(file.filename, "invalid PDF") })),
+          documents: readable.map((file, index) => ({
             id: `${run.id}-doc-${index + 1}`,
             filename: file.filename,
             mimeType: file.mimeType,
@@ -135,5 +148,5 @@ export function createWorkspaceIntakeFakes(options: { workspaces?: WorkspaceReco
     },
   };
 
-  return { ports, objects, workspaces, createdWorkspaces, runs, audit, started, state, defaultPipeline: defaultPipelineFeatures };
+  return { ports, objects, workspaces, createdWorkspaces, discardedWorkspaces, runs, audit, started, state, defaultPipeline: defaultPipelineFeatures };
 }

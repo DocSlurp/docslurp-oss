@@ -44,6 +44,7 @@ const queryInputSchema = {
     workspaceId: { type: "string", minLength: 1, maxLength: 256, description: WORKSPACE_REF_DESCRIPTION },
     q: { type: "string", minLength: 1, maxLength: 16_000 },
     limit: { type: "integer", minimum: 1, maximum: 100 },
+    minScore: { type: "number", minimum: 0, maximum: 1, description: "Relevance floor: drop weaker matches (0 disables). The response reports noMatch when nothing relevant remains." },
     documentId: { type: "string", minLength: 1, maxLength: 256 },
     filenameContains: { type: "string" },
     tags: { type: "string", description: "Comma-separated tags." },

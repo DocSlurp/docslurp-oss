@@ -424,7 +424,7 @@ Environment variables are read once, when the client is created, and only on the
 | `formatSearchContext(searchResponse)` | Numbered source excerpts as a string | None (no request) |
 | `buildDocumentPreviewPages({ documentId, artifacts, manifest })` | Page images for a document viewer, by page number (after 0.2.0) | None (no request) |
 
-- **`SearchInput`:** `q` (required); optional `workspaceId` (slug, former slug, UUID or `default`), `limit` (1 to 100), `documentId`, `filenameContains` and `tags` (a string).
+- **`SearchInput`:** `q` (required); optional `workspaceId` (slug, former slug, UUID or `default`), `limit` (1 to 100), `minScore` (relevance floor from 0 to 1; 0 disables it), `documentId`, `filenameContains` and `tags` (a string). The response has `noMatch: true` when the workspace is searchable but search returns nothing (nothing cleared the floor, or nothing was retrieved at all).
 - **Upload metadata:** `workspaceId`, `newWorkspace`, `workspaceName`, `orgId`, `templateKey`, `idempotencyKey`, and `canonicalId` (in upload options for one file, or on each `{ data, filename, canonicalId }` entry). URL ingestion takes the same metadata except `idempotencyKey`; set canonical IDs per URL.
 - **Template keys:** `legal-contracts`, `medical-records`, `financial-reports`, `engineering-docs`, `meeting-notes`.
 - **Citations:** `documentId`, `filename`, `pageNumber`, `pageNumbers`, `headingPath`, `chunkIndex`, `blockIds` and `source`. Some formats have no meaningful page numbers; when the list is empty, don't invent a page.

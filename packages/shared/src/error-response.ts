@@ -40,8 +40,9 @@ export async function safeErrorResponse(response: Response, requestId?: string, 
           body = { error: original.error, error_description: message };
         }
         if (Array.isArray(original.issues)) {
+          // Zod reports `path` as an array; keep the field names (never the messages) so clients can fix the request.
           body.issues = original.issues.map((issue: { path?: unknown }) => ({
-            path: typeof issue.path === "string" ? issue.path : "",
+            path: Array.isArray(issue.path) ? issue.path.map(String).join(".") : typeof issue.path === "string" ? issue.path : "",
             message: PUBLIC_ERROR_MESSAGES.invalid,
             code: "invalid_value",
           }));

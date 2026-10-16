@@ -29,7 +29,7 @@ Keep new code in the package that owns it. `server/` must not import from outsid
 
 ## Licensing
 
-The server, worker, CLI and `contrib-algolia-server` are SSPL-1.0 with an Apache-2.0 future grant; the SDKs, clients and `packages/shared` are MIT. New files inherit the license of the package they live in. Do not copy code from incompatibly licensed projects (for example AGPL or GPL sources) into any package.
+The server, worker and CLI are SSPL-1.0 with an Apache-2.0 future grant; the SDKs, clients (including `contrib-algolia-server`) and `packages/shared` are MIT. New files inherit the license of the package they live in. Do not copy code from incompatibly licensed projects (for example AGPL or GPL sources) into any package.
 
 ## Pull requests
 

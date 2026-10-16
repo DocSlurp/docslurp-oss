@@ -11,6 +11,8 @@ import { ingestReportSchema } from "./ingest-report.js";
 export const searchResultSchema = z.object({
   text: z.string(),
   score: z.number(),
+  /** Raw match strength, 0..1, independent of the other hits (the relevance floor compares against it). */
+  relevance: z.number().min(0).max(1).optional(),
   citation: searchCitationSchema,
   parentText: z.string().optional(),
   confidence: z
@@ -293,6 +295,8 @@ export const aiAdvancedRequestSchema = aiSimpleRequestSchema.extend({
   rerank: z.boolean().default(true),
   mmr: z.boolean().default(false),
   mmrLambda: z.number().min(0).max(1).optional(),
+  /** Relevance floor, 0..1; 0 disables it. Omitted: workspace default, else SEARCH_MIN_SCORE. */
+  minScore: z.number().min(0).max(1).optional(),
   compression: z.boolean().default(false),
   queryRewrite: z.boolean().default(true),
   queryDecompose: z.boolean().default(false),
@@ -321,6 +325,8 @@ export const aggregateWorkspaceRagSearchRequestSchema = z
     rerank: z.boolean().default(true),
     mmr: z.boolean().default(false),
     mmrLambda: z.number().min(0).max(1).optional(),
+    /** Relevance floor, 0..1; 0 disables it. Omitted: workspace default, else SEARCH_MIN_SCORE. */
+    minScore: z.number().min(0).max(1).optional(),
     compression: z.boolean().default(false),
     queryRewrite: z.boolean().default(true),
     queryDecompose: z.boolean().default(false),

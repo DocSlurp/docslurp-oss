@@ -583,7 +583,8 @@ export const algoliaCompatRoutes = new Hono()
     const facetName = c.req.param("facetName");
     const body = c.req.valid("json");
     const maxFacetHits = Math.max(1, Math.min(100, body.maxFacetHits ?? 10));
-    const query = body.query?.trim() || body.facetQuery?.trim() || "*";
+    const typedQuery = body.query?.trim();
+    const query = typedQuery || body.facetQuery?.trim() || "*";
     const filters = parseCompatFilters({
       filtersText: body.filters,
       facetFilters: body.facetFilters,
@@ -596,6 +597,8 @@ export const algoliaCompatRoutes = new Hono()
       filters,
       variant: "algolia-compat",
       ...compatRetrievalOptions,
+      // A facet-value prefix or the "*" wildcard is not a relevance query: only a typed query is floored.
+      ...(typedQuery ? {} : { minScore: 0 }),
     });
 
     return c.json(buildFacetHits({

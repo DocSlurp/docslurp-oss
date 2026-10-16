@@ -14,7 +14,7 @@ DocSlurp intentionally uses MIT for its SDKs and client integrations.
 
 | Option | Hosted-service consequence | Fit for this change |
 | --- | --- | --- |
-| SSPL-1.0 | Offering the program's functionality to third parties as a service triggers section 13's Service Source Code requirement, including service infrastructure | Matches Inngest's model; chosen for the server, worker, CLI and Algolia server adapter |
+| SSPL-1.0 | Offering the program's functionality to third parties as a service triggers section 13's Service Source Code requirement, including service infrastructure | Matches Inngest's model; chosen for the server, worker and CLI |
 | Business Source License 1.1 (BUSL-1.1) | Production permissions depend on a custom Additional Use Grant; requires change-license/date parameters | Alternative if we want a targeted competing-service restriction instead of service-wide source disclosure |
 | AGPLv3 | Modified network services must offer corresponding source; compliant competing services remain permitted | Appropriate for an open-source network copyleft strategy, but does not reproduce SSPL's service-wide requirement |
 
@@ -33,12 +33,11 @@ References: [SSPL section 13](https://www.mongodb.com/legal/licensing/server-sid
   they communicate with DocSlurp over HTTP.
 - Shared contracts are MIT because both server and client integrations may
   need them. They do not import dashboard or worker implementation code.
-- `packages/contrib-algolia-server` implements the service adapter and is SSPL.
-  Until 2026-10-15 its `package.json` and package `LICENSE` said MIT while the
-  root `LICENSE` said SSPL; both package files now say SSPL, matching the root.
-  `0.2.0` is already on npm under MIT and that grant stands, so SSPL applies
-  from the next release. Owner decision: keep SSPL (server-side adapter) or move
-  the package to the MIT list in the root `LICENSE` instead.
+- `packages/contrib-algolia-server` is MIT (owner decision, 2026-10-15). It is
+  a client-side wrapper that syncs Algolia-style settings, synonyms, rules and
+  imports into DocSlurp over HTTP, so it sits with the other client packages in
+  the root `LICENSE` MIT list. `0.2.0` was already published as MIT, so the
+  licence never changed on npm.
   `packages/contrib-wordpress` is an MIT client integration, including its website
   proxy; it talks to the service rather than implementing the ingestion service.
 - `docslurp --license` prints the CLI's license. SDK npm packages include MIT

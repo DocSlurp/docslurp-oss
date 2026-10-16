@@ -36,6 +36,7 @@ import { IndexStage } from "../stages/index-vectors.js";
 import { drainLanceMaintenancePool, lanceMaintenanceSweepIntervalMs } from "../stages/lancedb-maintenance-pool.js";
 import { resolveWorkerScalerConfig, resolveWorkerScalerQueryParams } from "@docslurp/shared";
 import { warmLocalEmbedding } from "../stages/embedding-runtime.js";
+import { closeSharedLocalEmbeddingPool } from "../stages/local-embedding-thread.js";
 import { resolveEmbeddingModel } from "../embeddings/resolver.js";
 import { defaultPipelineFeatures } from "@docslurp/shared";
 import { purgeConfig } from "../db/superseded-purge.js";
@@ -195,7 +196,7 @@ async function main(): Promise<void> {
   const scaler = new ScalerPublisher({
     isLeader: () => maintenanceLeader,
     read: () => store.readWorkerScalerSnapshot(scalerParams),
-    config: resolveWorkerScalerConfig(),
+    config: resolveWorkerScalerConfig(process.env, cfg.workerActivityConcurrency),
     params: scalerParams,
     keepAliveUrl: readOptionalEnv("WORKER_APP_KEEPALIVE_URL"),
   });
@@ -203,7 +204,7 @@ async function main(): Promise<void> {
   // activities per machine. A Fly secret silently overrides fly.worker.toml, and
   // a stale WORKER_ACTIVITY_CONCURRENCY=1 secret once left every machine running
   // one activity while the scaler counted eight.
-  const assumedSlots = resolveWorkerScalerConfig().slotsPerMachine;
+  const assumedSlots = resolveWorkerScalerConfig(process.env, cfg.workerActivityConcurrency).slotsPerMachine;
   if (assumedSlots !== slotTuning.nominalSlots) {
     console.error(
       `[temporal-worker] WORKER_ACTIVITY_CONCURRENCY=${slotTuning.nominalSlots} but the autoscaler assumes ` +
@@ -506,6 +507,10 @@ async function main(): Promise<void> {
         "runner shutdown failed:",
         err instanceof Error ? err.message : String(err)
       );
+    });
+    // Activities have drained, so no embedding batch is in flight; stop the model threads.
+    await closeSharedLocalEmbeddingPool().catch((err) => {
+      console.error("local embedding pool shutdown failed:", err instanceof Error ? err.message : String(err));
     });
     await shutdownObservability();
     await flushErrorReporting();

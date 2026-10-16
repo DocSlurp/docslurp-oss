@@ -1654,6 +1654,7 @@ export function buildSpawnCommandSpec(args: {
       DOCSLURP_PARSER_SANDBOX_MODE: args.sandbox.mode,
       DOCSLURP_PARSER_SANDBOX_READABLE_PATHS: resolveSandboxReadablePaths(args).join(","),
       DOCSLURP_PARSER_SANDBOX_ROOT: args.sandbox.scratchRoot,
+      DOCSLURP_PARSER_SANDBOX_TMP_ROOT: path.resolve(tmpdir()),
       DOCSLURP_PARSER_SANDBOX_WRITABLE_PATHS:
         resolveSandboxWritablePaths({
           configuredPaths: args.sandbox.writablePaths,

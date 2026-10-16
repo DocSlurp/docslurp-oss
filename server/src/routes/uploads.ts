@@ -24,6 +24,7 @@ import {
   directUploadSessionBelongsToOrganization,
 } from "../services/direct-upload-session.js";
 import { isRunCreationBlockedError } from "../services/runs.js";
+import { UnreadableSourceError } from "../services/source-metadata.js";
 import { WorkspaceAccessError } from "../services/default-workspace.js";
 import {
   confirmDirectUploadWorkspaceIntake,
@@ -150,6 +151,9 @@ function workspaceIntakeErrorResponse(
 ): Response | null {
   if (error instanceof WorkspaceAccessError) {
     return c.json({ error: error.message, code: error.code }, error.status);
+  }
+  if (error instanceof UnreadableSourceError) {
+    return c.json({ error: error.message, code: error.code }, error.statusCode);
   }
   if (!(error instanceof WorkspaceIntakeError)) {
     return null;

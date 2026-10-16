@@ -135,6 +135,7 @@ async function sweepOnce(): Promise<void> {
     select id, user_id, pipeline, stage, total_documents, created_at, updated_at, stats
     from workspace_runs
     where status = 'queued'
+      and creation_ready_at is not null
       and coalesce(control_state, '') not in ('paused', 'cancelled', 'dead-letter')
       and created_at < now() - (${STALE_QUEUED_RUN_COLD_START_GRACE_MS} * interval '1 millisecond')
     order by created_at asc

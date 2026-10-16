@@ -23,7 +23,7 @@ import { trustedTempDownloadPattern } from "../lib/temp-file-names.js";
 import type { Document, EmbeddingProfile } from "../models.js";
 import { chunkTextWithMeta } from "../pipeline/chunking.js";
 import type { CommandRunner } from "../tools/runner.js";
-import { localEmbeddingThreadEnabled, sharedLocalEmbeddingThread } from "./local-embedding-thread.js";
+import { localEmbeddingThreadEnabled, sharedLocalEmbeddingPool } from "./local-embedding-thread.js";
 import {
   type ArtifactStore,
   cleanupTempFile,
@@ -779,9 +779,8 @@ async function embedLocalChunks(args: {
           : new Error("aborted");
       }
 
-      const loadStartedAt = Date.now();
       const runner = await localEmbeddingBatchRunner(args.profile.model, args.profile.normalize, args.signal);
-      const modelLoadMs = Date.now() - loadStartedAt;
+      let runMsTotal = 0;
       const inferenceStartedAt = Date.now();
       const minBatchSize = Math.max(
         1,
@@ -805,9 +804,9 @@ async function embedLocalChunks(args: {
             : new Error("aborted");
         }
 
-        const startedAt = Date.now();
         const batch = args.chunks.slice(index, index + batchSize);
         const output = await runner.run(batch);
+        runMsTotal += output.runMs;
         vectors.push(
           ...readEmbeddingVectors(output, batch.length).map((vector) =>
             fitEmbeddingDimensions(vector, args.profile.dimensions, args.profile.normalize),
@@ -815,7 +814,9 @@ async function embedLocalChunks(args: {
         );
         index += batch.length;
 
-        const durationMs = Date.now() - startedAt;
+        // The thread's own inference time: wall time here would also count queueing behind
+        // other documents and model loads, and make the tuner shrink batches for no reason.
+        const durationMs = output.runMs;
         const rssBytes = process.memoryUsage().rss;
         await args.onBatchComplete?.({
           completed: index,
@@ -846,8 +847,9 @@ async function embedLocalChunks(args: {
           provider: "transformers.js",
           model: args.profile.model,
           cache_hit: runner.cacheHit,
-          model_load_ms: modelLoadMs,
+          model_load_ms: runner.stats.loadMs,
           inference_ms: Date.now() - inferenceStartedAt,
+          inference_run_ms: runMsTotal,
           dtype: runner.dtype(),
           inference_thread: runner.thread,
           estimated_tokens: estimatedTokens,
@@ -893,14 +895,37 @@ function tuneLocalEmbeddingBatchSize(args: {
  * first embed stage on a just-started worker does not wait for it.
  */
 export async function warmLocalEmbedding(model: string): Promise<void> {
+  const pool = localEmbeddingThreadEnabled() ? sharedLocalEmbeddingPool() : null;
+  if (pool && !pool.unusable) {
+    // Every pool thread loads its own copy now, so no first batch pays for it.
+    const { dtypes, cacheDir } = localEmbeddingThreadSettings();
+    try {
+      await pool.preload({ model, dtypes, cacheDir, normalize: true });
+    } catch (error) {
+      if (!pool.unusable) throw error;
+    }
+  }
   const runner = await localEmbeddingBatchRunner(model, true);
   await runner.run(["warm up"]);
 }
 
+function localEmbeddingThreadSettings(): { dtypes: string[]; cacheDir: string } {
+  const preferred = resolveLocalTransformersJsDtype();
+  return {
+    dtypes: preferred === "fp32" ? ["fp32"] : [preferred, "fp32"],
+    cacheDir: join(homedir(), ".cache", "docslurp", "transformers"),
+  };
+}
+
 type EmbeddingOutput = { tolist?: () => unknown; data?: ArrayLike<number>; dims?: number[] };
 
+/** A batch result plus the time spent computing it (not queued, not loading the model). */
+type TimedEmbeddingOutput = EmbeddingOutput & { runMs: number };
+
 interface LocalEmbeddingBatchRunner {
-  run(batch: string[]): Promise<EmbeddingOutput>;
+  run(batch: string[]): Promise<TimedEmbeddingOutput>;
+  /** Model load time measured on the thread/in-process (queue wait excluded), including loads a batch triggered. */
+  stats: { loadMs: number };
   dtype(): string;
   cacheHit: boolean;
   /** True when inference runs on the embedding thread, off the event loop. */
@@ -910,23 +935,22 @@ interface LocalEmbeddingBatchRunner {
 let localEmbeddingThreadFallbackLogged = false;
 
 /**
- * Runs local batches on the embedding thread (local-embedding-thread.ts) so a
- * CPU-bound batch never blocks the event loop; in-process when
- * DOCSLURP_LOCAL_EMBED_THREAD=off or the thread could not start.
+ * Runs local batches on the embedding thread pool (local-embedding-thread.ts)
+ * so a CPU-bound batch never blocks the event loop and concurrent documents
+ * queue for a bounded number of model copies; in-process when
+ * DOCSLURP_LOCAL_EMBED_THREAD=off or no thread could start.
  */
 async function localEmbeddingBatchRunner(
   model: string,
   normalize: boolean,
   signal?: AbortSignal,
 ): Promise<LocalEmbeddingBatchRunner> {
-  const thread = localEmbeddingThreadEnabled() ? sharedLocalEmbeddingThread() : null;
+  const thread = localEmbeddingThreadEnabled() ? sharedLocalEmbeddingPool() : null;
   if (thread && !thread.unusable) {
-    const cacheDir = join(homedir(), ".cache", "docslurp", "transformers");
-    const preferred = resolveLocalTransformersJsDtype();
-    const dtypes = preferred === "fp32" ? ["fp32"] : [preferred, "fp32"];
+    const { dtypes, cacheDir } = localEmbeddingThreadSettings();
     // Load first, so model load time stays out of the first batch's timing
     // (which drives batch-size tuning) and cache_hit is known up front.
-    let loaded: { dtype: string; cacheHit: boolean };
+    let loaded: { dtype: string; cacheHit: boolean; loadMs: number };
     try {
       loaded = await thread.embed({ model, dtypes, cacheDir, texts: [], normalize }, signal);
     } catch (error) {
@@ -939,13 +963,17 @@ async function localEmbeddingBatchRunner(
       }
       return await inProcessBatchRunner(model, normalize);
     }
+    const stats = { loadMs: loaded.loadMs };
     return {
       thread: true,
       cacheHit: loaded.cacheHit,
       dtype: () => loaded.dtype,
+      stats,
       run: async (batch) => {
         const result = await thread.embed({ model, dtypes, cacheDir, texts: batch, normalize }, signal);
-        return { data: result.data, dims: result.dims };
+        // A batch routed to a thread without the model loads it there; count that as load, not inference.
+        stats.loadMs += result.loadMs;
+        return { data: result.data, dims: result.dims, runMs: result.runMs };
       },
     };
   }
@@ -953,12 +981,18 @@ async function localEmbeddingBatchRunner(
 }
 
 async function inProcessBatchRunner(model: string, normalize: boolean): Promise<LocalEmbeddingBatchRunner> {
+  const loadStartedAt = Date.now();
   const { pipeline, cacheHit, dtype } = await getLocalEmbeddingPipeline(model);
   return {
     thread: false,
     cacheHit,
     dtype: () => dtype,
-    run: async (batch) => await pipeline(batch, { pooling: "mean", normalize }),
+    stats: { loadMs: Date.now() - loadStartedAt },
+    run: async (batch) => {
+      const startedAt = Date.now();
+      const output = await pipeline(batch, { pooling: "mean", normalize });
+      return Object.assign(output, { runMs: Date.now() - startedAt });
+    },
   };
 }
 
@@ -1232,10 +1266,7 @@ async function buildDocumentContextSummary(args: {
     });
     const inputTokens = result.usage.inputTokens;
     const outputTokens = result.usage.outputTokens;
-    console.log(
-      `[ai-usage] contextual-chunk-preamble model=${model} input_tokens=${inputTokens} output_tokens=${outputTokens}`,
-    );
-
+    // The caller records `usage` through the pipeline ledger, which logs `[ai-usage]`.
     const summary = normalizeWhitespace(result.text);
     // Do not index a truncated analysis or an unfinished answer as document
     // context. Fall back to source text when the one-sentence contract fails.

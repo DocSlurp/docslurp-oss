@@ -17,7 +17,7 @@ import { WorkspaceAccessError } from "../services/default-workspace.js";
 import { hybridSearch, MissingWorkspaceScopeError } from "../services/search.js";
 import { chatWorkspace, workspaceChatDisabledBody } from "../services/workspace-chat.js";
 import { parseFilters } from "../search/filters.js";
-import { parseRetrievalQueryFlags } from "../lib/retrieval-query-flags.js";
+import { InvalidRetrievalQueryError, parseRetrievalQueryFlags } from "../lib/retrieval-query-flags.js";
 import { publicSearchResponse } from "../lib/search-usage.js";
 import { sql } from "../db.js";
 import { acceptApiKeys } from "../lib/route-auth.js";
@@ -213,7 +213,13 @@ export const searchRoutes = new Hono()
 
     // Retrieval flags are tri-state: omitted flags fall back to the workspace's
     // Retrieval Controls (provider-backed enhancements default off there).
-    const flags = parseRetrievalQueryFlags((name) => c.req.query(name));
+    let flags: ReturnType<typeof parseRetrievalQueryFlags>;
+    try {
+      flags = parseRetrievalQueryFlags((name) => c.req.query(name));
+    } catch (error) {
+      if (error instanceof InvalidRetrievalQueryError) return c.json({ error: error.message }, 400);
+      throw error;
+    }
 
     const filters = parseFilters({
       documentId: c.req.query("documentId") ?? "",

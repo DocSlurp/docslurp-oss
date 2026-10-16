@@ -13,6 +13,8 @@ export function publicSearchResponse(response: SearchResponse) {
     results: response.results,
     sessionId: response.sessionId,
     availability: response.availability,
+    noMatch: response.relevanceFloor?.noMatch ?? false,
+    ...(response.relevanceFloor ? { relevanceFloor: { minScore: response.relevanceFloor.minScore, dropped: response.relevanceFloor.dropped } } : {}),
     ...(response.timings ? { timings: response.timings } : {}),
     usage: {
       inputTokens, outputTokens, totalTokens: inputTokens + outputTokens,

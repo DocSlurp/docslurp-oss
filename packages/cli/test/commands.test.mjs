@@ -60,6 +60,18 @@ test("search scopes to workspace and authenticates", async () => {
   assert.equal(url.searchParams.get("q"), "termination policy");
 });
 
+test("search --min-score validates its value instead of silently disabling the floor", async () => {
+  const ok = await invoke(["search", "question", "--min-score", "0.3"], () => ({ body: { results: [] } }), { workspaceId: "workspace" });
+  assert.equal(ok.code, 0, ok.stderr);
+  assert.equal(new URL(ok.requests[0].url, "http://localhost").searchParams.get("minScore"), "0.3");
+  for (const args of [["--min-score"], ["--min-score", ""], ["--min-score", "abc"], ["--min-score", "2"]]) {
+    const bad = await invoke(["search", "question", ...args], () => ({ body: { results: [] } }), { workspaceId: "workspace" });
+    assert.notEqual(bad.code, 0, JSON.stringify(args));
+    assert.match(bad.stderr, /--min-score must be a number from 0 to 1/);
+    assert.deepEqual(bad.requests, []);
+  }
+});
+
 test("search without a workspace uses the default workspace; API commands require a key before network access", async () => {
   let result = await invoke(["search", "question"], () => ({ body: { results: [] } }));
   assert.equal(result.code, 0, result.stderr);

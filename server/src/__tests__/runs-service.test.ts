@@ -304,6 +304,8 @@ describe("createRun", () => {
       const text = strings.join(" ");
       statements.push(text);
 
+      if (text.includes("creation_ready_at")) return [{ id: "run-1" }];
+
       if (text.includes("select id, version_number from documents")) {
         return [];
       }
@@ -383,6 +385,8 @@ describe("createRun", () => {
     sqlMock.mockImplementation(async (strings: TemplateStringsArray, ...values: unknown[]) => {
       const text = strings.join(" ");
       statements.push(text);
+
+      if (text.includes("creation_ready_at")) return [{ id: "run-1" }];
 
       if (text.includes("select id, version_number from documents")) {
         return [];

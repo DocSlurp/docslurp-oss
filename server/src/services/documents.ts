@@ -20,6 +20,7 @@ import { fileUrlForArtifact } from "../lib/file-urls.js";
 import { documentWithholdsUri, withheldArtifactUrisFromMetadata } from "./pii-artifact-guard.js";
 import { andSqlFragments, type SqlFragment } from "../lib/sql-fragments.js";
 import { getWorkspaceAccess, listAccessibleWorkspaceIds, listEditableWorkspaceIds } from "./organizations.js";
+import { completeRunCreation, lockRunCreation } from "./run-creation.js";
 import { createRun, ensureReprocessCanonicalId } from "./runs.js";
 import {
   documentUsageTotals,
@@ -1409,53 +1410,51 @@ export async function bulkReprocessDocuments(
       pipeline: first.pipeline ?? defaultPipelineFeatures
     });
 
-    const inserts = [];
-    for (const doc of group) {
-      doc.canonical_id = await ensureReprocessCanonicalId(doc);
-      const [existing] = doc.canonical_id
-        ? await sql<{ id: string; version_number: number }[]>`
-            select id, version_number from documents
-            where workspace_id = ${doc.workspace_id} and canonical_id = ${doc.canonical_id}
-            order by version_number desc, created_at desc
-            limit 1
-          `
-        : await sql<{ id: string; version_number: number }[]>`
-            select id, version_number from documents
-            where org_id = ${doc.org_id} and filename = ${doc.filename}
-            order by version_number desc
-            limit 1
-          `;
+    await completeRunCreation(run.id, async () => {
+      const inserts: Array<Record<string, string | number | null>> = [];
+      for (const doc of group) {
+        doc.canonical_id = await ensureReprocessCanonicalId(doc);
+        const [existing] = doc.canonical_id
+          ? await sql<{ id: string; version_number: number }[]>`
+              select id, version_number from documents
+              where workspace_id = ${doc.workspace_id} and canonical_id = ${doc.canonical_id}
+              order by version_number desc, created_at desc
+              limit 1
+            `
+          : await sql<{ id: string; version_number: number }[]>`
+              select id, version_number from documents
+              where org_id = ${doc.org_id} and filename = ${doc.filename}
+              order by version_number desc
+              limit 1
+            `;
 
-      inserts.push({
-        id: randomUUID(),
-        org_id: doc.org_id,
-        user_id: userId,
-        workspace_id: doc.workspace_id,
-        run_id: run.id,
-        filename: doc.filename,
-        mime_type: doc.mime_type,
-        source_key: doc.source_key,
-        status: "queued",
-        extraction_mode: doc.extraction_mode,
-        // Stages size their work from page_count (the worker never rewrites it), so keep the source's.
-        page_count: doc.page_count ?? 0,
-        file_size: Number(doc.file_size ?? 0) || 0,
-        version_number: (existing?.version_number ?? 0) + 1,
-        previous_version_id: existing?.id ?? null,
-        // Reprocessing keeps the logical source, so the new version supersedes on completion.
-        canonical_id: doc.canonical_id
+        inserts.push({
+          id: randomUUID(),
+          org_id: doc.org_id,
+          user_id: userId,
+          workspace_id: doc.workspace_id,
+          run_id: run.id,
+          filename: doc.filename,
+          mime_type: doc.mime_type,
+          source_key: doc.source_key,
+          status: "queued",
+          extraction_mode: doc.extraction_mode,
+          // Stages size their work from page_count (the worker never rewrites it), so keep the source's.
+          page_count: doc.page_count ?? 0,
+          file_size: Number(doc.file_size ?? 0) || 0,
+          version_number: (existing?.version_number ?? 0) + 1,
+          previous_version_id: existing?.id ?? null,
+          // Reprocessing keeps the logical source, so the new version supersedes on completion.
+          canonical_id: doc.canonical_id
+        });
+      }
+
+      await sql.begin(async (tx) => {
+        await lockRunCreation(run.id, tx as unknown as typeof sql);
+        if (inserts.length > 0) await tx`insert into documents ${tx(inserts)}`;
       });
-    }
-
-    if (inserts.length > 0) {
-      await sql`insert into documents ${sql(inserts)}`;
-      await sql`
-        update workspace_runs
-        set pages_total = (select coalesce(sum(page_count), 0)::int from documents where run_id = ${run.id}),
-            updated_at = now()
-        where id = ${run.id}
-      `;
-    }
+      return { value: undefined, totalDocuments: inserts.length };
+    });
 
     createdRuns.push(run);
   }

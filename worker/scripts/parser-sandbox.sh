@@ -9,6 +9,11 @@ fi
 umask 077
 
 SANDBOX_ROOT="${DOCSLURP_PARSER_SANDBOX_ROOT:-/tmp/docslurp-parser-sandbox}"
+# The worker creates its private scratch workspaces under the host temp root,
+# which follows TMPDIR and is not always /tmp. TMPDIR is rewritten below.
+HOST_TMP_ROOT="${DOCSLURP_PARSER_SANDBOX_TMP_ROOT:-${TMPDIR:-/tmp}}"
+HOST_TMP_ROOT="${HOST_TMP_ROOT%/}"
+[[ -n "${HOST_TMP_ROOT}" ]] || HOST_TMP_ROOT=/tmp
 SANDBOX_MODE="${DOCSLURP_PARSER_SANDBOX_MODE:-isolated}"
 WRITABLE_PATHS_RAW="${DOCSLURP_PARSER_SANDBOX_WRITABLE_PATHS:-}"
 mkdir -p "${SANDBOX_ROOT}"
@@ -84,6 +89,7 @@ for raw_path in "${writable_paths[@]}"; do
   fi
   case "${writable_path}" in
     /tmp/docslurp-*|/tmp/docslurp-*/*) ;;
+    "${HOST_TMP_ROOT}"/docslurp-*) ;;
     *) echo "[parser-sandbox] refusing broad writable mount" >&2; exit 70 ;;
   esac
   if [[ "${writable_path}" == *"/../"* || "${writable_path}" == */.. ]]; then
@@ -91,7 +97,7 @@ for raw_path in "${writable_paths[@]}"; do
   fi
   if [[ ! -e "${writable_path}" ]]; then
     case "${writable_path}" in
-      /tmp/docslurp-*|/tmp/docslurp-*/*)
+      /tmp/docslurp-*|/tmp/docslurp-*/*|"${HOST_TMP_ROOT}"/docslurp-*)
         mkdir -p "${writable_path}"
         ;;
       *)

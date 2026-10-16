@@ -15,6 +15,38 @@ export type SourceMetadata = {
   sourceSha256: string;
 };
 
+/** The uploaded file cannot be read as the format it claims (corrupt, truncated or password-protected). A client error, not a server fault. */
+export class UnreadableSourceError extends Error {
+  readonly code = "unreadable_source";
+  readonly statusCode = 422;
+  constructor(readonly filename: string, readonly detail: string) {
+    super(`${filename} could not be read as a PDF: ${detail}`);
+    this.name = "UnreadableSourceError";
+  }
+}
+
+/** Every file of a request that skips unreadable files was unreadable; carries each one. */
+export class AllSourcesUnreadableError extends UnreadableSourceError {
+  constructor(readonly errors: readonly UnreadableSourceError[]) {
+    super(errors[0]!.filename, errors[0]!.detail);
+    if (errors.length > 1) this.message = `None of the ${errors.length} files could be read: ${errors.map((error) => error.filename).join(", ")}`;
+    this.name = "AllSourcesUnreadableError";
+  }
+}
+
+/**
+ * pdfinfo exit codes for a file it could not open (1) or decrypt (3). A null code means the process was
+ * killed (our 30 s timeout or a crash on a malformed file), which is also this file's fault. Only a failure
+ * to start pdfinfo at all (spawn error) is ours.
+ */
+const PDFINFO_UNREADABLE_EXIT_CODES = new Set<number | null>([1, 3, null]);
+
+class PdfInfoExitError extends Error {
+  constructor(readonly exitCode: number | null, detail: string) {
+    super(`pdfinfo exited with ${exitCode ?? "unknown"}: ${detail}`.trim());
+  }
+}
+
 const pageCountS3Client = new S3Client(s3ClientConfig(apiEnv.storage));
 
 function sha256Hex(bytes: Uint8Array): string {
@@ -87,11 +119,7 @@ async function runPdfInfo(filePath: string): Promise<string> {
         return;
       }
 
-      reject(
-        new Error(
-          `pdfinfo exited with ${code ?? "unknown"}: ${stderr || stdout}`.trim(),
-        ),
-      );
+      reject(new PdfInfoExitError(code, stderr || stdout));
     });
   });
 }
@@ -124,9 +152,17 @@ export async function resolveSourceMetadata(file: {
 
     try {
       await writeFile(tempFile, bytes);
-      const output = await runPdfInfo(tempFile);
+      let output: string;
+      try {
+        output = await runPdfInfo(tempFile);
+      } catch (error) {
+        if (error instanceof PdfInfoExitError && PDFINFO_UNREADABLE_EXIT_CODES.has(error.exitCode)) {
+          throw new UnreadableSourceError(file.filename, (error.message.replace(/^pdfinfo exited with (?:\d+|unknown):\s*/, "").split("\n")[0] || "invalid PDF").slice(0, 200));
+        }
+        throw error;
+      }
       const pageCount = parsePdfInfoPageCount(output);
-      if (pageCount === null) throw new Error("PDF page count unavailable; refusing to ingest an incomplete document");
+      if (pageCount === null) throw new UnreadableSourceError(file.filename, "page count unavailable; refusing to ingest an incomplete document");
       return { pageCount, sourceSha256 };
     } finally {
       await rm(directory, { force: true, recursive: true });

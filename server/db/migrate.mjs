@@ -6,7 +6,7 @@
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
@@ -41,6 +41,14 @@ const repoRoot = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "
 // its predecessor (e.g. from a long-lived branch) would be skipped silently on
 // existing databases. Refuse to migrate instead. Same rule as
 // worker/src/test/migrated-db.ts, which tests the journal in CI.
+function findBin(start, name) {
+  for (let dir = start; ; dir = path.dirname(dir)) {
+    const bin = path.join(dir, "node_modules", ".bin", name);
+    if (existsSync(bin)) return bin;
+    if (path.dirname(dir) === dir) throw new Error(`${name} is not installed in any node_modules/.bin at or above ${start}`);
+  }
+}
+
 const journal = JSON.parse(readFileSync(path.join(repoRoot, "server/db/migrations/meta/_journal.json"), "utf8"));
 const journalProblems = journal.entries.flatMap((entry, position) => {
   const previous = journal.entries[position - 1];
@@ -78,7 +86,9 @@ try {
   }
   console.log(`[migrate] lock acquired after ${Date.now() - started}ms; applying server/db/migrations`);
   // Call the installed binary directly: images and hosts may not have pnpm on PATH.
-  const drizzleKit = path.join(repoRoot, "node_modules", ".bin", "drizzle-kit");
+  // It is a root devDependency, so it sits in the nearest node_modules/.bin at or
+  // above this repo: /app/core/... in the private app image installs it at /app.
+  const drizzleKit = findBin(repoRoot, "drizzle-kit");
   const { stdout, stderr } = await execFileAsync(
     drizzleKit,
     ["migrate", "--config", "drizzle.config.ts"],

@@ -26,4 +26,4 @@ The index name is a DocSlurp workspace slug, UUID or `default`. For browser sear
 
 ## License
 
-SSPL-1.0 with an Apache-2.0 grant for each version three years after release (see [LICENSE](LICENSE)). Unlike the client packages (`@docslurp/contrib-search-compat`, MIT), this server-side adapter follows the DocSlurp server license.
+MIT (see [LICENSE](LICENSE)), like the client packages such as `@docslurp/contrib-search-compat`.

@@ -219,6 +219,93 @@ describe("Workspace Intake", () => {
     expect(fakes.createdWorkspaces).toEqual([]);
   });
 
+  describe("acceptPartial (bulk upload)", () => {
+    it("takes the valid files and reports unsupported, oversized and unreadable ones", async () => {
+      (env as { maxUploadBytes: number }).maxUploadBytes = 8;
+      const fakes = createWorkspaceIntakeFakes();
+      fakes.state.unreadable.add("broken.pdf");
+      const result = await intakeIntoWorkspace(
+        request({
+          acceptPartial: true,
+          items: [
+            bytesItem("ok.txt"),
+            bytesItem("payload.exe", "MZ", "application/x-msdownload"),
+            bytesItem("big.txt", "123456789"),
+            bytesItem("broken.pdf", "%PDF", "application/pdf"),
+            bytesItem("also-ok.md", "# hi", "text/markdown"),
+          ],
+        }),
+        fakes.ports,
+      );
+
+      expect(result?.documents.map((document) => document.filename)).toEqual(["ok.txt", "also-ok.md"]);
+      expect(result?.rejected).toEqual([
+        { filename: "payload.exe", statusCode: 415, code: "unsupported_type", message: "Unsupported file type for payload.exe" },
+        expect.objectContaining({ filename: "big.txt", statusCode: 413, code: "file_too_large" }),
+        expect.objectContaining({ filename: "broken.pdf", statusCode: 422, code: "unreadable_source" }),
+      ]);
+      expect(fakes.runs[0]!.files.map((file) => file.filename)).toEqual(["ok.txt", "also-ok.md"]);
+      // The unreadable file's raw object is removed; only accepted files stay in storage.
+      expect([...fakes.objects.keys()].sort()).toEqual(fakes.runs[0]!.files.map((file) => file.sourceKey).sort());
+    });
+
+    it("still fails, naming every file, when nothing is accepted", async () => {
+      const fakes = createWorkspaceIntakeFakes();
+      const error = await rejection(intakeIntoWorkspace(
+        request({ acceptPartial: true, items: [bytesItem("a.exe", "MZ", "application/x-msdownload"), bytesItem("b.exe", "MZ", "application/x-msdownload")] }),
+        fakes.ports,
+      ));
+      expect(error.statusCode).toBe(415);
+      expect(error.issues?.map((issue) => issue.path)).toEqual(["a.exe", "b.exe"]);
+      expect(fakes.createdWorkspaces).toEqual([]);
+      expect(fakes.runs).toEqual([]);
+    });
+
+    it("fails with 422 when every file is rejected for different reasons", async () => {
+      (env as { maxUploadBytes: number }).maxUploadBytes = 4;
+      const fakes = createWorkspaceIntakeFakes();
+      const error = await rejection(intakeIntoWorkspace(
+        request({ acceptPartial: true, items: [bytesItem("a.exe", "MZ", "application/x-msdownload"), bytesItem("big.txt", "123456")] }),
+        fakes.ports,
+      ));
+      expect(error.statusCode).toBe(422);
+    });
+
+    it("names the unreadable files together with the ones screened out earlier when nothing is accepted", async () => {
+      const fakes = createWorkspaceIntakeFakes();
+      fakes.state.unreadable.add("a.pdf").add("b.pdf");
+      const error = await rejection(intakeIntoWorkspace(
+        request({ acceptPartial: true, items: [bytesItem("payload.exe", "MZ", "application/x-msdownload"), bytesItem("a.pdf", "%PDF", "application/pdf"), bytesItem("b.pdf", "%PDF", "application/pdf")] }),
+        fakes.ports,
+      ));
+      expect(error.statusCode).toBe(422);
+      expect(error.issues?.map((issue) => [issue.path, issue.code])).toEqual([
+        ["payload.exe", "unsupported_type"], ["a.pdf", "unreadable_source"], ["b.pdf", "unreadable_source"],
+      ]);
+      expect(fakes.objects.size).toBe(0);
+    });
+
+    it("removes the workspace it created when no document survives, but never an existing one", async () => {
+      const fresh = createWorkspaceIntakeFakes();
+      fresh.state.unreadable.add("broken.pdf");
+      await rejection(intakeIntoWorkspace(request({ acceptPartial: true, items: [bytesItem("broken.pdf", "%PDF", "application/pdf")] }), fresh.ports));
+      expect(fresh.createdWorkspaces).toHaveLength(1);
+      expect(fresh.discardedWorkspaces).toEqual(["ws-1"]);
+
+      const existing = createWorkspaceIntakeFakes({ workspaces: [fakeWorkspace({ id: "ws-existing", orgId: "org-1" })] });
+      existing.state.unreadable.add("broken.pdf");
+      await rejection(intakeIntoWorkspace(request({ workspaceId: "ws-existing", newWorkspace: undefined, acceptPartial: true, items: [bytesItem("broken.pdf", "%PDF", "application/pdf")] }), existing.ports));
+      expect(existing.discardedWorkspaces).toEqual([]);
+    });
+
+    it("keeps other intake kinds strict", async () => {
+      const fakes = createWorkspaceIntakeFakes();
+      fakes.state.unreadable.add("broken.pdf");
+      await rejection(intakeIntoWorkspace(request({ items: [bytesItem("ok.txt"), bytesItem("payload.exe", "MZ", "application/x-msdownload")] }), fakes.ports));
+      await expect(intakeIntoWorkspace(request({ items: [bytesItem("broken.pdf", "%PDF", "application/pdf")] }), fakes.ports)).rejects.toThrow(/could not be read as a PDF/);
+    });
+  });
+
   it("rejects oversized files with 413, including streams that outgrow the cap", async () => {
     (env as { maxUploadBytes: number }).maxUploadBytes = 4;
     const fakes = createWorkspaceIntakeFakes();

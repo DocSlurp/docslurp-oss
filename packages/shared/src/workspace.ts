@@ -330,6 +330,8 @@ export const workspaceSearchRetrievalDefaultsSchema = z.object({
   enableGraphExpansion: z.boolean().optional(),
   enableCommunityExpansion: z.boolean().optional(),
   graphHops: z.number().int().min(1).max(3).optional(),
+  // Relevance floor (0..1, 0 = off). Unset: the SEARCH_MIN_SCORE environment default applies.
+  minScore: z.number().min(0).max(1).optional(),
 });
 export type WorkspaceSearchRetrievalDefaults = z.infer<
   typeof workspaceSearchRetrievalDefaultsSchema
@@ -401,6 +403,8 @@ export const updateWorkspaceSearchRetrievalDefaultsSchema = z.object({
   enableGraphExpansion: z.boolean().nullable().optional(),
   enableCommunityExpansion: z.boolean().nullable().optional(),
   graphHops: z.number().int().min(1).max(3).nullable().optional(),
+  // null clears the workspace choice so the environment default applies again.
+  minScore: z.number().min(0).max(1).nullable().optional(),
 });
 
 export const updateWorkspaceSearchChatSettingsSchema = z.object({

@@ -1,10 +1,13 @@
 # Search and chat API
 
-`POST /v1/search` (or `GET /v1/search` with query parameters) returns ranked passages with citations. It doesn't generate an answer. The response is `{results, sessionId, availability, usage}`.
+`POST /v1/search` (or `GET /v1/search` with query parameters) returns ranked passages with citations. It doesn't generate an answer. The response is `{results, sessionId, availability, noMatch, relevanceFloor, usage}`.
+
+Each result has a `score` (rank-based, so the top hit is always near 1) and a `relevance` from 0 to 1: the strength of the match itself, the best of the embedding similarity (rescaled above the embedding model's unrelated-text baseline) and the share of query terms found in the passage. Unlike `score`, `relevance` does not depend on the other hits, so it is comparable across queries.
 
 - `q` (required): the query, up to 16,000 characters.
 - `workspaceId`: omit it, or pass `default`, for your organization's default workspace. Otherwise pass a slug such as `legal-contracts`; UUIDs and former slugs also work ([Workspaces](https://docslurp.io/docs/http#workspaces)).
 - `limit`: an integer from 1 to 100.
+- `minScore`: the relevance floor, 0 to 1 (default 0.1, or the workspace's retrieval default; `SEARCH_MIN_SCORE` sets the server default; 0 turns it off). Results with a lower raw `relevance` are dropped. When the workspace is searchable but search returns nothing, `results` is empty and the response carries `noMatch: true` with `relevanceFloor: {minScore, dropped}`. That is either because nothing cleared the floor (`dropped` > 0) or because nothing was retrieved at all, for example a filter that matches nothing (`dropped` is 0). A caller can use it to say "no good match" instead of answering from weak passages. `/v1/chat` does this automatically.
 - Filters: `documentId`, `runId`, `filenameContains`, `pageFrom`, `pageTo`, and comma-separated `tags` or `mimeTypes`.
 - Retrieval flags such as `rerank`, `hyde` or `graphExpansion`: anything you omit (including `limit`) uses the workspace's retrieval defaults, and anything you pass wins.
 

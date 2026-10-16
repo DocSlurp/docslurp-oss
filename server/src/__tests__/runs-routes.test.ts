@@ -71,6 +71,13 @@ vi.mock("../services/run-forensics.js", () => ({
   getRunForensics: vi.fn()
 }));
 
+vi.mock("../services/run-lifecycle.js", () => ({
+  runLifecycle: { start: async (run: { id: string; pipeline: unknown }) => {
+    await startPipelineWorkflowMock(run.id, run.pipeline);
+    return { status: "started" };
+  } },
+}));
+
 vi.mock("../lib/temporal.js", () => ({
   startPipelineWorkflow: startPipelineWorkflowMock
 }));
