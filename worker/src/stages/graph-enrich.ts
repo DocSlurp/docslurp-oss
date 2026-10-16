@@ -26,6 +26,8 @@ export interface KnowledgeGraphStore {
     runId: string | null;
     context: CommunitySummaryContext;
   }): Promise<CommunityRefreshResult>;
+  /** Documents already extracted with this config; a re-run (e.g. retrying failed Documents) skips them. */
+  documentsWithGraph?(workspaceId: string, configHash: string, documentIds: readonly string[]): Promise<Set<string>>;
   /** The workspace's own definition, used as scope when no domain is set. */
   workspaceGraphScope(workspaceId: string): Promise<string>;
 }
@@ -85,7 +87,11 @@ export class GraphEnrichStage implements Stage {
     let nodes = 0;
     let edges = 0;
 
+    const alreadyExtracted = graphStore?.documentsWithGraph
+      ? await graphStore.documentsWithGraph(state.run.workspaceId, configHash, documentIds)
+      : new Set<string>();
     for (const document of indexableDocuments(state)) {
+      if (alreadyExtracted.has(document.id)) continue;
       const artifactUri = state.artifactLedger.readDocument(document.id, "embeddings");
       const key = artifactUri ? keyFromStorageUri(artifactUri, this.storage.bucket) : null;
       if (!key) continue;

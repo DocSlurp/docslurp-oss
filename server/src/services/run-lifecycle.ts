@@ -1,4 +1,5 @@
 import {
+  getPipelineStageOrder,
   isTemporalConnectionUnavailable,
   planRunFailure,
   resolvePoisonRunFailureThreshold,
@@ -263,14 +264,75 @@ export function createRunLifecycle(deps: RunLifecycleDeps) {
   }
 
   /**
+   * Atomically move a completed Run that skipped failed Documents back to
+   * queued. Only the failed Documents (and their non-completed checkpoints)
+   * reset; completed Documents keep their completed checkpoints, so the re-run
+   * skips them and completed work is not billed again. Run-level stage
+   * checkpoints from the earliest failed stage onward are cleared so stage
+   * groups do not skip that work; earlier stages stay completed.
+   */
+  async function resumeCompletedWithFailures(run: RunLifecycleRun): Promise<boolean> {
+    const stageOrder: readonly string[] = getPipelineStageOrder(run.pipeline);
+    const [row] = await sql.begin(async (tx) => {
+      const [locked] = await tx<{ status: string; failed: number }[]>`
+        select status,
+               (select count(*)::int from documents d where d.run_id = ${run.id} and d.status = 'failed') as failed
+        from workspace_runs where id = ${run.id} for update
+      `;
+      if (locked?.status !== "completed" || !(locked.failed > 0)) return [];
+      const failedStages = await tx<{ stage_name: string }[]>`
+        select distinct stage_name from document_run_stage_states
+        where run_id = ${run.id} and status = 'failed'
+      `;
+      const earliest = Math.min(
+        ...failedStages.map((stage) => stageOrder.indexOf(stage.stage_name)).filter((index) => index >= 0),
+        stageOrder.length,
+      );
+      await tx`
+        delete from document_run_stage_states
+        where run_id = ${run.id} and status <> 'completed'
+      `;
+      const rerunStages = stageOrder.slice(earliest);
+      if (rerunStages.length > 0) {
+        await tx`
+          delete from workspace_run_stage_states
+          where run_id = ${run.id} and stage_name = any(${sql.array([...rerunStages])})
+        `;
+      }
+      await tx`
+        update documents set status = 'queued', updated_at = now()
+        where run_id = ${run.id} and status = 'failed'
+      `;
+      return await tx<{ id: string }[]>`
+        update workspace_runs
+        set status = 'queued', control_state = null, control_requested_at = null,
+            stage = 'queued', error = null, failure_count = 0,
+            processed_documents = greatest(0, total_documents - ${locked.failed}),
+            stats = coalesce(stats, '{}'::jsonb) - 'failedDocuments' - 'failedDocumentStages',
+            dead_lettered_at = null, dead_letter_reason = null,
+            lease_expires_at = null, last_heartbeat_at = null, updated_at = now()
+        where id = ${run.id} and status = 'completed'
+        returning id
+      `;
+    });
+    return Boolean(row);
+  }
+
+  /**
    * Retry a Run. Failed Runs resume from durable checkpoints (provider usage
    * and credit debits are historical facts and are never re-charged); queued
-   * Runs whose start was deferred get their workflow (re)started. Processing
-   * and completed Runs are left alone.
+   * Runs whose start was deferred get their workflow (re)started. Completed
+   * Runs retry only their failed Documents; a clean completed Run, and a
+   * processing Run, are left alone.
    */
   async function retry(run: RunLifecycleRun & { status: RunStatus }): Promise<RunRetryOutcome> {
     if (run.status === "failed") {
       const resumed = await resumeFailed(run.id);
+      if (!resumed) return { status: "not-retryable" };
+      return { status: "resumed", start: await start(run, { restartExisting: true }) };
+    }
+    if (run.status === "completed") {
+      const resumed = await resumeCompletedWithFailures(run);
       if (!resumed) return { status: "not-retryable" };
       return { status: "resumed", start: await start(run, { restartExisting: true }) };
     }

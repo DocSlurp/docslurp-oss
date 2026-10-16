@@ -30,6 +30,7 @@ beforeAll(async () => {
     insert into "user"(id, name, email) values ('u1', 'A', 'a@x');
     insert into organizations(id, name, slug, created_by_user_id) values ('o1', 'Org', 'org', 'u1');
     insert into workspaces(id, org_id, user_id, name) values ('w', 'o1', 'u1', 'W');
+    insert into webhooks(id, user_id, url, secret) values ('wh', 'u1', 'https://example.test/hook', 's');
   `);
   await seedRun("run-fail");
   await seedRun("run-ok");
@@ -90,5 +91,11 @@ describe("partial Document failure in the store", () => {
       `select status, processed_documents, stats from workspace_runs where id = 'run-ok'`)).rows;
     expect(run).toMatchObject({ status: "completed", processed_documents: 3 });
     expect(run!.stats).toMatchObject({ failedDocuments: 1, failedDocumentStages: 1 });
+
+    // The run.completed webhook carries the failure count.
+    await withStore(async (store) => { await store.triggerWebhooks("run-ok", "run.completed"); });
+    const outbox = await db.query<{ payload: Record<string, unknown> }>(
+      `select payload from webhook_outbox where event_type = 'run.completed'`);
+    expect(outbox.rows[0]!.payload).toMatchObject({ runId: "run-ok", status: "completed", failedDocuments: 1 });
   });
 });

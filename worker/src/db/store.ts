@@ -1636,6 +1636,7 @@ export class Store {
         'stage', r.stage,
         'processedDocuments', r.processed_documents,
         'pagesProcessed', r.pages_processed,
+        'failedDocuments', coalesce((r.stats->>'failedDocuments')::int, 0),
         'error', r.error
       ) as payload
       from workspace_runs r
@@ -2543,6 +2544,17 @@ export class Store {
 
   async replaceDocumentGraph(input: ReplaceDocumentGraphInput): Promise<{ nodes: number; edges: number }> {
     return await replaceDocumentGraph(this.sql, input);
+  }
+
+  /** Documents whose graph was already extracted with this config (a re-run skips them). */
+  async documentsWithGraph(workspaceId: string, configHash: string, documentIds: readonly string[]): Promise<Set<string>> {
+    if (documentIds.length === 0) return new Set();
+    const rows = await this.sql<{ document_id: string }[]>`
+      select document_id from kg_document_state
+      where workspace_id = ${workspaceId} and config_hash = ${configHash}
+        and document_id = any(${this.sql.array([...documentIds])})
+    `;
+    return new Set(rows.map((row) => row.document_id));
   }
 
   async refreshWorkspaceCommunities(args: {

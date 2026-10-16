@@ -77,7 +77,7 @@ describe("Run Lifecycle retry", () => {
     expect(outcome).toEqual({ status: "restarted", start: { status: "deferred", reason: TEMPORAL_DEFERRED_RUN_MESSAGE } });
   });
 
-  it.each(["processing", "completed"] as const)("leaves a %s Run alone", async (status) => {
+  it.each(["processing"] as const)("leaves a %s Run alone", async (status) => {
     const startWorkflow = vi.fn(async () => {});
     await expect(lifecycle(startWorkflow).retry({ ...run, status })).resolves.toEqual({ status: "not-retryable" });
     expect(startWorkflow).not.toHaveBeenCalled();
