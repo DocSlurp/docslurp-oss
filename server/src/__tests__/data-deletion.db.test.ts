@@ -13,7 +13,7 @@ const cancelWorkflow = vi.fn(async (_runId: string) => {});
 let stop: () => Promise<void>;
 let sql: postgres.Sql<Record<string, postgres.PostgresType>>;
 let workspaces: typeof import("../services/workspaces.js");
-let runManifest: typeof import("../services/run-manifest.js");
+let runManifest: typeof import("../services/run-creation.js");
 
 beforeAll(async () => {
   const pg = await startMigratedPostgres();
@@ -29,7 +29,7 @@ beforeAll(async () => {
   }));
   vi.doMock("../services/workspace-naming.js", () => ({ refineWorkspaceNames: async () => {} }));
   workspaces = await import("../services/workspaces.js");
-  runManifest = await import("../services/run-manifest.js");
+  runManifest = await import("../services/run-creation.js");
 
   await sql`insert into "user"(id, name, email) values ('owner', 'Owner', 'owner@example.test')`;
   await sql`insert into organizations(id, name, slug, created_by_user_id) values ('org', 'Org', 'org', 'owner')`;

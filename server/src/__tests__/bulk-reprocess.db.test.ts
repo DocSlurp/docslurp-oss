@@ -23,15 +23,17 @@ beforeAll(async () => {
     startPipelineWorkflow: startWorkflow, signalPipelineCancel: vi.fn(), signalPipelinePause: vi.fn(), signalPipelineResume: vi.fn(),
     isTemporalClientConnected: () => true, onTemporalClientConnected: vi.fn(), warmTemporalClient: vi.fn(),
   }));
-  vi.doMock("../services/runs.js", async (importOriginal) => {
-    const original = await importOriginal<typeof import("../services/runs.js")>();
+  vi.doMock("../services/run-creation.js", async (importOriginal) => {
+    const original = await importOriginal<typeof import("../services/run-creation.js")>();
     return {
       ...original,
-      createRun: (args: Parameters<typeof original.createRun>[0]) => {
-        if (failAll || args.pipeline.summarize === failingPipeline.summarize) {
-          return Promise.reject(Object.assign(new Error("Insufficient credits"), { code: "credit_exhausted" }));
-        }
-        return original.createRun(args);
+      runCreation: {
+        create: (input: Parameters<typeof original.runCreation.create>[0]) => {
+          if (failAll || input.pipeline.summarize === failingPipeline.summarize) {
+            return Promise.reject(Object.assign(new Error("Insufficient credits"), { code: "credit_exhausted" }));
+          }
+          return original.runCreation.create(input);
+        },
       },
     };
   });

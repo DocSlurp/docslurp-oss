@@ -57,7 +57,7 @@ sweep deletes them.
 | Workspace | `DELETE /v1/workspaces/:id` (`services/workspaces.ts` → `services/data-deletion.ts`) | In-flight runs are cancelled in Temporal and marked `cancelled`. Documents are then deleted in batches of 500, and finally the workspace row is deleted, which cascades to runs and per-workspace rows. If Temporal is unreachable, the delete still proceeds and the grace period covers late writes. |
 | Run retention | worker `deleteExpiredRuns` | When a run is older than `run_retention_days`, its documents and the run row are deleted together, whether or not artifact retention already ran. A deleted run takes its artifacts with it. Newer versions that pointed at a deleted predecessor get `previous_version_id = null`. |
 | Artifact retention | worker `purgeExpiredArtifacts` | Deletes artifacts and derived rows but keeps the document rows. Before `vector_indexes` is dropped, the document's LanceDB targets are queued (`delete_source = false`). |
-| Discarded intake | `discardUnstartedRun` (`services/run-manifest.ts`) | When a queued run's intake failed, its documents and run are deleted and the triggers enqueue its raw uploads. |
+| Discarded intake | `discardUnstartedRun` (`services/run-creation.ts`) | When a queued run's intake failed, its documents and run are deleted and the triggers enqueue its raw uploads. |
 | Organization | `DELETE /v1/organizations/:orgId` | See below. |
 | Account | `DELETE /v1/account` | See below. |
 

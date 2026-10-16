@@ -35,8 +35,7 @@ import { deleteUploadedObject, uploadFile, uploadFileStream } from "../lib/stora
 import { isSupportedUploadMimeType, resolveUploadMimeType } from "../lib/upload-policy.js";
 import { appendAuditLog } from "./audit-log.js";
 import { explainRemoteIngestBlock, isComplexRemoteIngestFormat } from "./remote-parser-surface.js";
-import { runLifecycle } from "./run-lifecycle.js";
-import { createRunManifest } from "./run-manifest.js";
+import { runCreation, type CreatedRun } from "./run-creation.js";
 import { AllSourcesUnreadableError } from "./source-metadata.js";
 import { markWorkspaceAutoNamed } from "./workspace-naming.js";
 import { seedPipelineFromProcessingDefaults, seedSearchSettingsFromProcessingDefaults } from "./processing-defaults.js";
@@ -132,13 +131,11 @@ export interface StoredIntakeFile {
   canonicalId?: string | null;
 }
 
-type RunManifest = Awaited<ReturnType<typeof createRunManifest>>;
-
 export interface WorkspaceIntakeResult {
   workspace: WorkspaceRecord;
   pipeline: PipelineFeatures;
-  run: RunManifest["run"];
-  documents: RunManifest["documents"];
+  run: CreatedRun["run"];
+  documents: CreatedRun["documents"];
   /** Set when the run exists but processing could not start yet. */
   deferredReason: string | null;
   /** Files that were not accepted, with why. Empty when every file was taken. */
@@ -190,19 +187,15 @@ export interface WorkspaceIntakeRecords {
     pipeline: PipelineFeatures;
     apiKeyId?: string | null;
     files: StoredIntakeFile[];
-  }): Promise<RunManifest>;
+  }): Promise<CreatedRun>;
   /** Remove a workspace this request created when intake failed before any run existed. */
   discardWorkspace(workspaceId: string): Promise<void>;
   appendAudit(entry: Parameters<typeof appendAuditLog>[0]): Promise<void>;
 }
 
-/** Starts processing, or returns the reason it was deferred. */
-export type StartOrDeferRun = (runId: string, pipeline: PipelineFeatures) => Promise<string | null>;
-
 export interface WorkspaceIntakePorts {
   storage: RawSourceStorage;
   records: WorkspaceIntakeRecords;
-  startRun: StartOrDeferRun;
 }
 
 export const objectStorage: RawSourceStorage = {
@@ -248,7 +241,9 @@ export const postgresIntakeRecords: WorkspaceIntakeRecords = {
     if (autoNamed) await markWorkspaceAutoNamed(workspace.id, args.userId, workspace.name);
     return workspace;
   },
-  createRun: createRunManifest,
+  async createRun({ files, ...args }) {
+    return await runCreation.create({ ...args, sources: { kind: "files", files } });
+  },
   async discardWorkspace(workspaceId) {
     await deleteWorkspaceData(workspaceId);
   },
@@ -257,16 +252,9 @@ export const postgresIntakeRecords: WorkspaceIntakeRecords = {
   },
 };
 
-/** Start-or-defer is owned by Run Lifecycle. */
-export const startOrDeferPipelineRun: StartOrDeferRun = async (runId, pipeline) => {
-  const start = await runLifecycle.start({ id: runId, pipeline });
-  return start.status === "deferred" ? start.reason : null;
-};
-
 export const workspaceIntakePorts: WorkspaceIntakePorts = {
   storage: objectStorage,
   records: postgresIntakeRecords,
-  startRun: startOrDeferPipelineRun,
 };
 
 // ---------------------------------------------------------------------------
@@ -520,7 +508,7 @@ export async function intakeIntoWorkspace(
   let createdWorkspaceId: string | null = null;
   let workspace: WorkspaceRecord;
   let pipeline: PipelineFeatures;
-  let manifest: RunManifest;
+  let created: CreatedRun;
 
   try {
     // An explicit target is checked before any bytes are read or stored. The
@@ -573,7 +561,7 @@ export async function intakeIntoWorkspace(
       workspace.templateKey,
     );
     try {
-      manifest = await records.createRun({
+      created = await records.createRun({
         userId: request.userId,
         workspaceId: workspace.id,
         kind: request.kind,
@@ -589,7 +577,7 @@ export async function intakeIntoWorkspace(
       }
       throw allRejectedError(rejected);
     }
-    for (const file of manifest.unreadable) {
+    for (const file of created.unreadable) {
       rejected.push({ filename: file.filename, statusCode: 422, code: "unreadable_source", message: file.error.message });
       // The source object was stored but never became a document.
       await storage.remove(file.sourceKey).catch(() => undefined);
@@ -605,19 +593,9 @@ export async function intakeIntoWorkspace(
     throw error;
   }
 
-  // The Run and its Documents are committed from here on. Failing the request
-  // now would leave a Run the client never learns about (and a retry would
-  // process the same files twice), so later steps degrade instead of throwing.
-  const { run, documents } = manifest;
-  let deferredReason: string | null;
-  try {
-    deferredReason = await ports.startRun(run.id, pipeline);
-  } catch (error) {
-    // The Run stays queued with an unconfirmed start; run-start recovery (or
-    // the stale-queued sweep) starts it, exactly as for a Temporal outage.
-    console.error(`[intake] workflow start failed for run=${run.id}; deferring:`, error instanceof Error ? error.message : String(error));
-    deferredReason = RUN_START_FAILED_DEFERRED_MESSAGE;
-  }
+  // The Run and its Documents are committed (and started or deferred) from
+  // here on, so later steps degrade instead of throwing.
+  const { run, documents, deferredReason } = created;
 
   const audit = request.audit;
   await appendIntakeAudit(records, {
@@ -643,9 +621,6 @@ export async function intakeIntoWorkspace(
 
   return { workspace, pipeline, run, documents, deferredReason, rejected };
 }
-
-export const RUN_START_FAILED_DEFERRED_MESSAGE =
-  "Run created, but processing could not start yet. It will start automatically; no need to upload again.";
 
 /**
  * The upload audit entry is written after the Run is committed and started.

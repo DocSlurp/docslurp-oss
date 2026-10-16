@@ -3,7 +3,6 @@ import { describe, expect, it } from "vitest";
 import {
   applyWorkspaceTemplateLocks,
   canonicalDocumentSchema,
-  createWorkspaceRunSchema,
   createWorkspaceSchema,
   defaultDocumentExtractionConfig,
   defaultEmbeddingConfig,
@@ -754,49 +753,6 @@ describe("uploadRequestSchema", () => {
     if (result.success) {
       expect(result.data.pipeline.embed).toBe(true);
     }
-  });
-});
-
-// ---------------------------------------------------------------------------
-// createWorkspaceRunSchema
-// ---------------------------------------------------------------------------
-
-describe("createWorkspaceRunSchema", () => {
-  it("accepts a valid run creation input", () => {
-    const result = createWorkspaceRunSchema.safeParse({
-      workspaceId: "ws-1",
-      totalDocuments: 5,
-    });
-    expect(result.success).toBe(true);
-  });
-
-  it("accepts a missing workspaceId so the org default workspace applies", () => {
-    const result = createWorkspaceRunSchema.safeParse({ totalDocuments: 1 });
-    expect(result.success).toBe(true);
-  });
-
-  it("rejects empty workspaceId string", () => {
-    const result = createWorkspaceRunSchema.safeParse({
-      workspaceId: "",
-      totalDocuments: 1,
-    });
-    expect(result.success).toBe(false);
-  });
-
-  it("rejects negative totalDocuments", () => {
-    const result = createWorkspaceRunSchema.safeParse({
-      workspaceId: "ws-1",
-      totalDocuments: -1,
-    });
-    expect(result.success).toBe(false);
-  });
-
-  it("accepts 0 totalDocuments", () => {
-    const result = createWorkspaceRunSchema.safeParse({
-      workspaceId: "ws-1",
-      totalDocuments: 0,
-    });
-    expect(result.success).toBe(true);
   });
 });
 

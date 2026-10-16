@@ -5,7 +5,6 @@ import { streamSSE } from "hono/streaming";
 import { z } from "zod";
 
 import {
-  createWorkspaceRunSchema,
   reprocessRunSchema,
   runProcessingPreviewRequestSchema
 } from "@docslurp/shared";
@@ -13,16 +12,14 @@ import {
 import { actorHasAnyApiKeyScope, getRequestActor, loadActorScopedWorkspace, requireActorWorkspace } from "../lib/request-actor.js";
 import { WorkspaceAccessError } from "../services/default-workspace.js";
 import { validationErrorResponse, type ValidationErrorSource } from "../lib/validation.js";
-import { getCachedIdempotentResponse, hashIdempotencyPayload, storeIdempotentResponse } from "../services/idempotency.js";
 import { requestIp, requestUserAgent } from "../lib/request-context.js";
 import { appendAuditLog } from "../services/audit-log.js";
 import { isApiKeyLive } from "../services/api-key-liveness.js";
 import { streamRunProgressSnapshots } from "../services/run-progress-stream.js";
 import { getRunForensics } from "../services/run-forensics.js";
-import { runLifecycle, type RunStartOutcome } from "../services/run-lifecycle.js";
+import { type RunStartOutcome } from "../services/run-lifecycle.js";
 import {
   controlRun,
-  createRun,
   exportRun,
   getRun,
   getRunProcessingPreview,
@@ -282,100 +279,27 @@ export const runsRoutes = new Hono()
       return workspaceErrorResponse(c, error);
     }
   })
-  .post("/", zValidator("json", createWorkspaceRunSchema, runValidationHook), async (c) => {
-    const input = c.req.valid("json");
-    const userId = c.get("sessionUser").id;
-    // Override userId from session regardless of what was sent in the body,
-    // and resolve the workspace reference (omitted means the org default).
-    let runInput;
-    try {
-      const workspace = await requireActorWorkspace(getRequestActor(c), input.workspaceId);
-      runInput = { ...input, userId, workspaceId: workspace.id };
-    } catch (error) {
-      return workspaceErrorResponse(c, error);
-    }
-    const idempotencyKey = c.req.header("Idempotency-Key")?.trim();
-    const requestHash = hashIdempotencyPayload(runInput);
-
-    if (idempotencyKey) {
-      try {
-        const cached = await getCachedIdempotentResponse({
-          idempotencyKey,
-          routeKey: "runs.create",
-          requestHash
-        });
-
-        if (cached) {
-          c.header("Idempotency-Replayed", "true");
-          return c.json(cached.body, cached.status as 200 | 201);
-        }
-      } catch (error) {
-        return c.json({ error: reportPublicError(error) }, 409);
-      }
-    }
-
-    let run;
-    try {
-      run = await createRun(runInput);
-    } catch (error) {
-      if (isRunCreationBlockedError(error)) {
-        return c.json(
-          {
-            error: error.message,
-            code: error.code
-          },
-          error.statusCode
-        );
-      }
-      return workspaceErrorResponse(c, error);
-    }
-    await appendAuditLog({
-      orgId: run.orgId,
-      userId,
-      workspaceId: run.workspaceId,
-      runId: run.id,
-      action: "run.created",
-      resourceType: "run",
-      resourceId: run.id,
-      ipAddress: requestIp(c),
-      metadata: {
-        kind: run.kind,
-        totalDocuments: run.totalDocuments,
-        userAgent: requestUserAgent(c)
-      }
-    });
-
-    if (idempotencyKey) {
-      await storeIdempotentResponse({
-        idempotencyKey,
-        routeKey: "runs.create",
-        requestHash,
-        userId,
-        status: 201,
-        body: run as unknown as Record<string, unknown>
-      });
-    }
-
-    return c.json(run, 201);
-  })
   .post("/:runId/reprocess", zValidator("json", reprocessRunSchema), async (c) => {
     const userId = c.get("sessionUser").id;
     const body = c.req.valid("json");
-    let run: Awaited<ReturnType<typeof reprocessRun>>;
+    let reprocessed: Awaited<ReturnType<typeof reprocessRun>>;
     try {
-      run = await reprocessRun(c.req.param("runId"), userId, body);
+      reprocessed = await reprocessRun(c.req.param("runId"), userId, body);
     } catch (error) {
       if (isReprocessRejectedError(error)) {
         return c.json({ error: error.message, code: error.code, details: error.details }, error.statusCode);
       }
+      if (isRunCreationBlockedError(error)) {
+        return c.json({ error: error.message, code: error.code }, error.statusCode);
+      }
       throw error;
     }
 
-    if (!run) {
+    if (!reprocessed) {
       return c.json({ error: "Run not found" }, 404);
     }
 
-    const deferred = deferredReason(await runLifecycle.start(run));
+    const { run, deferredReason: deferred } = reprocessed;
 
     await appendAuditLog({
       orgId: run.orgId,

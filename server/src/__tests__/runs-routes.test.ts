@@ -3,7 +3,6 @@ import { serve } from "@hono/node-server";
 import { createDocSlurpClient } from "@docslurp/sdk";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const createRunMock = vi.fn();
 const getRunMock = vi.fn();
 const getRunProgressMock = vi.fn();
 const listRunsMock = vi.fn();
@@ -41,7 +40,6 @@ class MockRunCreationBlockedError extends Error {
 
 vi.mock("../services/runs.js", () => ({
   controlRun: vi.fn(),
-  createRun: createRunMock,
   exportRun: vi.fn(),
   getRun: getRunMock,
   getRunProcessingPreview: getRunProcessingPreviewMock,
@@ -110,70 +108,12 @@ describe("runsRoutes validation", () => {
 
   beforeEach(() => {
     app = buildApp();
-    createRunMock.mockReset();
     getWorkspaceMock.mockReset();
     getWorkspaceMock.mockResolvedValue({ id: "ws-1", orgId: "org-1", userId: "user-1" });
     getRunProcessingPreviewMock.mockReset();
     reprocessRunMock.mockReset();
     retryRunMock.mockReset();
     startPipelineWorkflowMock.mockReset();
-  });
-
-  it("returns field-level issues for invalid pipeline config before run creation", async () => {
-    const response = await app.request("/runs", {
-      method: "POST",
-      headers: {
-        "content-type": "application/json"
-      },
-      body: JSON.stringify({
-        userId: "user-1",
-        workspaceId: "ws-1",
-        totalDocuments: 1,
-        pipeline: {
-          embed: false,
-          indexVectors: true
-        }
-      })
-    });
-
-    expect(response.status).toBe(422);
-    await expect(response.json()).resolves.toMatchObject({
-      error: "Invalid run payload",
-      issues: expect.arrayContaining([
-        expect.objectContaining({
-          path: "pipeline.indexVectors"
-        })
-      ])
-    });
-    expect(createRunMock).not.toHaveBeenCalled();
-  });
-
-  it("returns a billing error response when run creation is blocked", async () => {
-    createRunMock.mockRejectedValue(
-      new MockRunCreationBlockedError(
-        "Credit balance exhausted. Please top up to continue."
-      )
-    );
-
-    const response = await app.request("/runs", {
-      method: "POST",
-      headers: {
-        "content-type": "application/json"
-      },
-      body: JSON.stringify({
-        userId: "user-1",
-        workspaceId: "ws-1",
-        kind: "bulk-upload",
-        totalDocuments: 1,
-        pipeline: {}
-      })
-    });
-
-    expect(response.status).toBe(402);
-    await expect(response.json()).resolves.toMatchObject({
-      error: "Credit balance exhausted. Please top up to continue.",
-      code: "credit_exhausted"
-    });
   });
 
   it("returns preview validation issues before querying preview estimates", async () => {
@@ -196,27 +136,32 @@ describe("runsRoutes validation", () => {
     expect(getRunProcessingPreviewMock).not.toHaveBeenCalled();
   });
 
-  it("starts a Temporal workflow when reprocessing a run", async () => {
-    reprocessRunMock.mockResolvedValue({
-      id: "run-2",
-      orgId: "org-1",
-      workspaceId: "ws-1",
-      pipeline: { embed: true }
+  it("returns the reprocessed run and warns when Run creation deferred its start", async () => {
+    const run = { id: "run-2", orgId: "org-1", workspaceId: "ws-1", pipeline: { embed: true } };
+    reprocessRunMock.mockResolvedValueOnce({ run, deferredReason: null });
+    const ok = await app.request("/runs/run-1/reprocess", {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({}),
     });
+    expect(ok.status).toBe(201);
+    await expect(ok.json()).resolves.toMatchObject({ id: "run-2" });
+    expect(ok.headers.get("X-Temporal-Deferred")).toBeNull();
 
+    reprocessRunMock.mockResolvedValueOnce({ run, deferredReason: "Temporal unavailable" });
+    const deferred = await app.request("/runs/run-1/reprocess", {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({}),
+    });
+    expect(deferred.status).toBe(201);
+    expect(deferred.headers.get("X-Temporal-Deferred")).toBe("true");
+    await expect(deferred.json()).resolves.toMatchObject({ run: { id: "run-2" }, warnings: ["Temporal unavailable"] });
+  });
+
+  it("answers 402 when reprocessing is blocked by spend admission", async () => {
+    reprocessRunMock.mockRejectedValue(new MockRunCreationBlockedError("Insufficient credits.", 402, "minimum_credit_required"));
     const response = await app.request("/runs/run-1/reprocess", {
-      method: "POST",
-      headers: {
-        "content-type": "application/json"
-      },
-      body: JSON.stringify({})
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({}),
     });
-
-    expect(response.status).toBe(201);
-    expect(startPipelineWorkflowMock).toHaveBeenCalledWith(
-      "run-2",
-      { embed: true }
-    );
+    expect(response.status).toBe(402);
+    await expect(response.json()).resolves.toMatchObject({ code: "minimum_credit_required" });
   });
 
   it("passes a stage selection through and rejects restarts the source cannot satisfy", async () => {
@@ -235,7 +180,6 @@ describe("runsRoutes validation", () => {
     expect(response.status).toBe(409);
     await expect(response.json()).resolves.toMatchObject({ code: "missing_stage_artifacts" });
     expect(reprocessRunMock).toHaveBeenCalledWith("run-1", "user-1", { stageFrom: "embed" });
-    expect(startPipelineWorkflowMock).not.toHaveBeenCalled();
   });
 
   it("rejects unknown reprocess stages before creating a run", async () => {

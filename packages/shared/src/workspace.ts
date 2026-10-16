@@ -569,17 +569,6 @@ export const reprocessRunSchema = z
   });
 export type ReprocessRunInput = z.infer<typeof reprocessRunSchema>;
 
-export const createWorkspaceRunSchema = z.object({
-  userId: z.string().default("demo-user"),
-  /** UUID, slug, former slug or `default`; omitted means the org's default workspace. */
-  workspaceId: z.string().min(1).optional(),
-  kind: z.string().default("bulk-upload"),
-  totalDocuments: z.number().int().nonnegative(),
-  apiKeyId: z.string().nullable().optional(),
-  pipeline: pipelineFeaturesSchema.default(defaultPipelineFeatures),
-});
-export type CreateWorkspaceRunInput = z.infer<typeof createWorkspaceRunSchema>;
-
 export const createWorkspaceSchema = z.object({
   userId: z.string().default("demo-user"),
   orgId: z.string().optional(),

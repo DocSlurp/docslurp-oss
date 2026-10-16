@@ -3,7 +3,6 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const getRunMock = vi.fn();
 const reprocessRunMock = vi.fn();
-const startMock = vi.fn();
 const sqlCalls: string[] = [];
 
 class MockReprocessRejectedError extends Error {
@@ -27,11 +26,8 @@ vi.mock("../db.js", () => ({
 vi.mock("../services/runs.js", () => ({
   getRun: getRunMock,
   reprocessRun: reprocessRunMock,
-  isReprocessRejectedError: (error: unknown) => error instanceof MockReprocessRejectedError
-}));
-
-vi.mock("../services/run-lifecycle.js", () => ({
-  runLifecycle: { start: startMock }
+  isReprocessRejectedError: (error: unknown) => error instanceof MockReprocessRejectedError,
+  isRunCreationBlockedError: () => false
 }));
 
 const { indexStalenessRoutes } = await import("../routes/index-staleness.js");
@@ -50,22 +46,19 @@ describe("POST /runs/:runId/reindex", () => {
   beforeEach(() => {
     getRunMock.mockReset();
     reprocessRunMock.mockReset();
-    startMock.mockReset();
     sqlCalls.length = 0;
     getRunMock.mockResolvedValue({ id: "run-1", pipeline: { embed: true } });
   });
 
   it("reprocesses only embed and index and starts the new run", async () => {
     const newRun = { id: "run-2", orgId: "org-1", workspaceId: "ws-1", pipeline: { embed: true, stageSubset: ["embed", "index"] } };
-    reprocessRunMock.mockResolvedValue(newRun);
-    startMock.mockResolvedValue({ status: "started" });
+    reprocessRunMock.mockResolvedValue({ run: newRun, deferredReason: null });
 
     const response = await buildApp().request("/runs/run-1/reindex", { method: "POST" });
 
     expect(response.status).toBe(201);
     await expect(response.json()).resolves.toEqual({ runId: "run-2" });
     expect(reprocessRunMock).toHaveBeenCalledWith("run-1", "user-1", { stages: ["embed", "index"] });
-    expect(startMock).toHaveBeenCalledWith(newRun);
     expect(sqlCalls.some((query) => query.includes("set reindex_queued_at = now()"))).toBe(true);
   });
 
@@ -78,13 +71,11 @@ describe("POST /runs/:runId/reindex", () => {
 
     expect(response.status).toBe(409);
     await expect(response.json()).resolves.toMatchObject({ code: "missing_stage_artifacts" });
-    expect(startMock).not.toHaveBeenCalled();
     expect(sqlCalls).toEqual([]);
   });
 
   it("reports a deferred start when Temporal is unavailable", async () => {
-    reprocessRunMock.mockResolvedValue({ id: "run-2", orgId: "org-1", workspaceId: "ws-1", pipeline: {} });
-    startMock.mockResolvedValue({ status: "deferred", reason: "Temporal unavailable" });
+    reprocessRunMock.mockResolvedValue({ run: { id: "run-2", orgId: "org-1", workspaceId: "ws-1", pipeline: {} }, deferredReason: "Temporal unavailable" });
 
     const response = await buildApp().request("/runs/run-1/reindex", { method: "POST" });
 

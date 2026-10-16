@@ -3,6 +3,7 @@ import type { Readable } from "node:stream";
 import { defaultPipelineFeatures, mergePipelineFeatures, type PipelineFeatureOverrides, type PipelineFeatures, type WorkspaceRecord } from "@docslurp/shared";
 
 import { AllSourcesUnreadableError, UnreadableSourceError } from "../../services/source-metadata.js";
+import { RUN_START_FAILED_DEFERRED_MESSAGE } from "../../services/run-creation.js";
 import type {
   StoredIntakeFile,
   WorkspaceIntakePorts,
@@ -10,7 +11,7 @@ import type {
 } from "../../services/workspace-intake.js";
 
 type AuditEntry = Parameters<WorkspaceIntakeRecords["appendAudit"]>[0];
-type RunManifest = Awaited<ReturnType<WorkspaceIntakeRecords["createRun"]>>;
+type CreatedRun = Awaited<ReturnType<WorkspaceIntakeRecords["createRun"]>>;
 
 export type FakeStoredObject = {
   body: Buffer;
@@ -61,7 +62,7 @@ export function createWorkspaceIntakeFakes(options: { workspaces?: WorkspaceReco
     blockRunCreation: null as Error | null,
     /** Filenames createRun treats as unreadable when asked to skip them (as pdfinfo failures are). */
     unreadable: new Set<string>(),
-    /** Thrown by startRun (a non-Temporal failure after the Run is committed). */
+    /** A non-Temporal start failure after the Run is committed (surfaces as a deferred start). */
     startError: null as Error | null,
     /** Number of upcoming appendAudit calls that throw. */
     auditFailures: 0,
@@ -120,7 +121,13 @@ export function createWorkspaceIntakeFakes(options: { workspaces?: WorkspaceReco
           files: readable,
         };
         runs.push(run);
+        // The merged port also starts the Run; a start error defers, never throws.
+        let deferredReason: string | null = null;
+        if (state.startError) deferredReason = RUN_START_FAILED_DEFERRED_MESSAGE;
+        else if (state.temporalDown) deferredReason = "Run created, but processing has not started yet because Temporal is currently unavailable.";
+        else started.push(run.id);
         return {
+          deferredReason,
           run: { id: run.id, orgId: workspaces.get(args.workspaceId)?.orgId, workspaceId: args.workspaceId, kind: args.kind, pagesTotal: 0 },
           unreadable: unreadable.map((file) => ({ filename: file.filename, sourceKey: file.sourceKey, error: new UnreadableSourceError(file.filename, "invalid PDF") })),
           documents: readable.map((file, index) => ({
@@ -129,7 +136,7 @@ export function createWorkspaceIntakeFakes(options: { workspaces?: WorkspaceReco
             mimeType: file.mimeType,
             sourceKey: file.sourceKey,
           })),
-        } as unknown as RunManifest;
+        } as unknown as CreatedRun;
       },
       async appendAudit(entry) {
         if (state.auditFailures > 0) {
@@ -138,12 +145,6 @@ export function createWorkspaceIntakeFakes(options: { workspaces?: WorkspaceReco
         }
         audit.push(entry);
       },
-    },
-    async startRun(runId) {
-      if (state.startError) throw state.startError;
-      if (state.temporalDown) return "Run created, but processing has not started yet because Temporal is currently unavailable.";
-      started.push(runId);
-      return null;
     },
   };
 

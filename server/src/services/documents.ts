@@ -1,5 +1,4 @@
 import { mediaSummarySchema, PUBLIC_ERROR_MESSAGES, publicDiagnostics, type MediaSummary } from "@docslurp/shared";
-import { randomUUID } from "node:crypto";
 import path from "node:path";
 
 import {
@@ -7,6 +6,7 @@ import {
   PII_BLOCKED_DOCUMENT_STATUS,
   documentIndexEntrySchema,
   documentSchema,
+  withoutStageSelection,
   type DocumentIndexEntry,
   type DocumentRecord,
   type PipelineFeatures,
@@ -20,9 +20,7 @@ import { fileUrlForArtifact } from "../lib/file-urls.js";
 import { documentWithholdsUri, withheldArtifactUrisFromMetadata } from "./pii-artifact-guard.js";
 import { andSqlFragments, type SqlFragment } from "../lib/sql-fragments.js";
 import { getWorkspaceAccess, listAccessibleWorkspaceIds, listEditableWorkspaceIds } from "./organizations.js";
-import { completeRunCreation, lockRunCreation } from "./run-creation.js";
-import { runLifecycle } from "./run-lifecycle.js";
-import { createRun, ensureReprocessCanonicalId } from "./runs.js";
+import { runCreation } from "./run-creation.js";
 import {
   documentUsageTotals,
   runUsageCostTotals,
@@ -1361,7 +1359,7 @@ export async function exportDocumentArtifacts(documentIds: string[], userId: str
  * Each (workspace, pipeline) group is independent: a group that cannot be
  * created is reported in `failed` and the rest still run. Only when every
  * group fails does this throw (the first error, so spend blocks keep their
- * status code). Created Runs are started here; a start that cannot happen
+ * status code). Run creation starts each Run; a start that cannot happen
  * leaves the Run queued for run-start recovery and adds a warning.
  */
 export async function bulkReprocessDocuments(
@@ -1410,61 +1408,17 @@ export async function bulkReprocessDocuments(
       continue;
     }
 
-    let run: WorkspaceRun;
     try {
-      run = await createRun({
+      const created = await runCreation.create({
         userId,
         workspaceId: first.workspace_id,
         kind: "bulk-reprocess",
-        totalDocuments: group.length,
-        pipeline: first.pipeline ?? defaultPipelineFeatures
+        // A partial source run's stage selection must not carry into a full re-run.
+        pipeline: withoutStageSelection(first.pipeline ?? defaultPipelineFeatures),
+        sources: { kind: "versionsOf", documentIds: group.map((doc) => doc.id) },
       });
-
-      await completeRunCreation(run.id, async () => {
-        const inserts: Array<Record<string, string | number | null>> = [];
-        for (const doc of group) {
-          doc.canonical_id = await ensureReprocessCanonicalId(doc);
-          const [existing] = doc.canonical_id
-            ? await sql<{ id: string; version_number: number }[]>`
-                select id, version_number from documents
-                where workspace_id = ${doc.workspace_id} and canonical_id = ${doc.canonical_id}
-                order by version_number desc, created_at desc
-                limit 1
-              `
-            : await sql<{ id: string; version_number: number }[]>`
-                select id, version_number from documents
-                where org_id = ${doc.org_id} and filename = ${doc.filename}
-                order by version_number desc
-                limit 1
-              `;
-
-          inserts.push({
-            id: randomUUID(),
-            org_id: doc.org_id,
-            user_id: userId,
-            workspace_id: doc.workspace_id,
-            run_id: run.id,
-            filename: doc.filename,
-            mime_type: doc.mime_type,
-            source_key: doc.source_key,
-            status: "queued",
-            extraction_mode: doc.extraction_mode,
-            // Stages size their work from page_count (the worker never rewrites it), so keep the source's.
-            page_count: doc.page_count ?? 0,
-            file_size: Number(doc.file_size ?? 0) || 0,
-            version_number: (existing?.version_number ?? 0) + 1,
-            previous_version_id: existing?.id ?? null,
-            // Reprocessing keeps the logical source, so the new version supersedes on completion.
-            canonical_id: doc.canonical_id
-          });
-        }
-
-        await sql.begin(async (tx) => {
-          await lockRunCreation(run.id, tx as unknown as typeof sql);
-          if (inserts.length > 0) await tx`insert into documents ${tx(inserts)}`;
-        });
-        return { value: undefined, totalDocuments: inserts.length };
-      });
+      result.runs.push(created.run);
+      if (created.deferredReason) result.warnings.push(created.deferredReason);
     } catch (error) {
       firstError ??= error;
       const message = error instanceof Error ? error.message : String(error);
@@ -1478,18 +1432,6 @@ export async function bulkReprocessDocuments(
       result.warnings.push(
         `${group.length} ${group.length === 1 ? "document" : "documents"} in ${first.workspace_id} ${group.length === 1 ? "was" : "were"} not reprocessed: ${message}`,
       );
-      continue;
-    }
-
-    result.runs.push(run);
-    // The Run is committed, so a start error is not a failure: recovery starts it later.
-    try {
-      const start = await runLifecycle.start({ id: run.id, pipeline: first.pipeline ?? defaultPipelineFeatures });
-      if (start.status === "deferred") result.warnings.push(start.reason);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      console.warn(`[bulk-reprocess] start deferred run=${run.id}: ${message}`);
-      result.warnings.push(`Run ${run.id} is queued but has not started yet: ${message}`);
     }
   }
 

@@ -4,8 +4,7 @@ import { withoutStageSelection } from "@docslurp/shared";
 import { Hono } from "hono";
 
 import { sql } from "../db.js";
-import { runLifecycle } from "../services/run-lifecycle.js";
-import { getRun, isReprocessRejectedError, reprocessRun } from "../services/runs.js";
+import { getRun, isReprocessRejectedError, isRunCreationBlockedError, reprocessRun } from "../services/runs.js";
 
 export const indexStalenessRoutes = new Hono()
   .get("/:runId/index-staleness", async (c) => {
@@ -83,18 +82,22 @@ export const indexStalenessRoutes = new Hono()
     }
 
     // Re-embed and re-index only: extraction is reused from the source run.
-    let newRun: Awaited<ReturnType<typeof reprocessRun>>;
+    let reprocessed: Awaited<ReturnType<typeof reprocessRun>>;
     try {
-      newRun = await reprocessRun(runId, userId, { stages: ["embed", "index"] });
+      reprocessed = await reprocessRun(runId, userId, { stages: ["embed", "index"] });
     } catch (error) {
       if (isReprocessRejectedError(error)) {
         return c.json({ error: error.message, code: error.code, details: error.details }, error.statusCode);
       }
+      if (isRunCreationBlockedError(error)) {
+        return c.json({ error: error.message, code: error.code }, error.statusCode);
+      }
       throw error;
     }
-    if (!newRun) {
+    if (!reprocessed) {
       return c.json({ error: "Failed to create reindex run" }, 500);
     }
+    const { run: newRun, deferredReason } = reprocessed;
 
     await sql`
       update search_index_staleness
@@ -103,10 +106,9 @@ export const indexStalenessRoutes = new Hono()
         and reindex_queued_at is null
     `;
 
-    const start = await runLifecycle.start(newRun);
-    if (start.status === "deferred") {
+    if (deferredReason) {
       c.header("X-Temporal-Deferred", "true");
-      return c.json({ runId: newRun.id, warnings: [start.reason] }, 201);
+      return c.json({ runId: newRun.id, warnings: [deferredReason] }, 201);
     }
 
     return c.json({ runId: newRun.id }, 201);

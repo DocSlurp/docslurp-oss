@@ -42,14 +42,21 @@ vi.mock("@aws-sdk/client-s3", () => ({
 
 const {
   buildRunProcessingPreview,
-  createRun,
-  createDocumentBatch,
   shouldFailStaleProcessingRun,
   listRuns,
   summarizeRunUsageCost,
   summarizeStageResources,
 } = await import("../services/runs.js");
 const { defaultPipelineFeatures } = await import("@docslurp/shared");
+const { createRunCreation } = await import("../services/run-creation.js");
+
+// Spend admission is exercised through Run creation with no files: it fails or
+// stops at the insert, before any Document is written.
+const runCreationStart = vi.fn();
+function createRun(input: { userId: string; workspaceId: string; kind: string; totalDocuments?: number; pipeline: typeof defaultPipelineFeatures }) {
+  const { totalDocuments: _total, ...rest } = input;
+  return createRunCreation({ sql: sqlMock as never, start: runCreationStart }).create({ ...rest, sources: { kind: "files", files: [] } });
+}
 
 describe("createRun", () => {
   beforeEach(() => {
@@ -162,91 +169,9 @@ describe("createRun", () => {
     expect(texts.filter((text) => text.includes("as spend_cents"))).toHaveLength(1);
   });
 
-  it("serializes Date timestamps returned by the database", async () => {
-    const createdAt = new Date("2026-03-08T18:19:40.000Z");
-    const updatedAt = new Date("2026-03-08T18:20:00.000Z");
-    getWorkspaceAccessMock.mockResolvedValue({ orgId: "org-1" });
-    sqlMock.mockImplementation((strings: TemplateStringsArray | string) => {
-      const text = Array.isArray(strings) ? strings.join("?") : String(strings);
-      return Promise.resolve(text.includes("org_spend_status") ? [spendStatus()] : runRows);
-    });
-    const runRows = [
-      {
-        id: "run-1",
-        org_id: "org-1",
-        user_id: "user-1",
-        workspace_id: "ws-1",
-        workspace_name: "Contracts",
-        kind: "bulk-upload",
-        status: "queued",
-        priority: 0,
-        control_state: null,
-        control_requested_at: null,
-        stage: "queued",
-        total_documents: 2,
-        processed_documents: 0,
-        pages_total: 0,
-        pages_processed: 0,
-        spent_cents: 0,
-        pipeline: {
-          inferenceLane: "standard",
-          visionFallback: true,
-          htmlExtraction: true,
-          markdownExtraction: true,
-          embed: true,
-          indexVectors: true,
-          embedding: {
-            profile: "good-fast-local",
-            target: "local",
-            modelUri: "llm://transformers.js/Xenova/bge-m3",
-            task: "document",
-            normalize: true,
-            lateChunking: false,
-            lateChunkingWindow: 2
-          },
-          vectorBackends: ["lancedb"],
-          preserveTables: true,
-          preserveCode: true,
-          preserveImages: true,
-          maxCostCents: null,
-          pageIndex: false,
-          summarize: false,
-          chunkOverlap: false,
-          propositionIndex: false
-        },
-        stats: {},
-        artifacts: {},
-        error: null,
-        created_at: createdAt,
-        updated_at: updatedAt
-      }
-    ];
+});
 
-    const run = await createRun({
-      userId: "user-1",
-      workspaceId: "ws-1",
-      kind: "bulk-upload",
-      totalDocuments: 2,
-      pipeline: {
-        ...defaultPipelineFeatures,
-        inferenceLane: "standard",
-        embedding: {
-          profile: "good-fast-local",
-          target: "local",
-          modelUri: "llm://transformers.js/Xenova/bge-m3",
-          task: "document",
-          normalize: true,
-          lateChunking: false,
-          lateChunkingWindow: 2
-        },
-        vectorBackends: ["lancedb"]
-      }
-    });
-
-    expect(run.createdAt).toBe(createdAt.toISOString());
-    expect(run.updatedAt).toBe(updatedAt.toISOString());
-  });
-
+describe("run preview", () => {
   it("builds a recommended preview profile from file metadata and workspace history", () => {
     const preview = buildRunProcessingPreview({
       request: {
@@ -289,159 +214,6 @@ describe("createRun", () => {
     expect(preview.recommended.parserPlaybook).toBe("layout-aware");
     expect(preview.options.some((option) => option.recommended)).toBe(true);
     expect(preview.topSignals).toContain("table-heavy inputs favor layout-aware extraction");
-  });
-
-  it("reuses completed document outputs for exact-source duplicates", async () => {
-    const statements: string[] = [];
-    getWorkspaceAccessMock.mockResolvedValue({ orgId: "org-1" });
-    s3SendMock.mockResolvedValue({
-      Body: {
-        transformToByteArray: async () => new TextEncoder().encode("duplicate content")
-      }
-    });
-
-    sqlMock.mockImplementation(async (strings: TemplateStringsArray, ...values: unknown[]) => {
-      const text = strings.join(" ");
-      statements.push(text);
-
-      if (text.includes("creation_ready_at")) return [{ id: "run-1" }];
-
-      if (text.includes("select id, version_number from documents")) {
-        return [];
-      }
-
-      if (text.includes("case") && text.includes("dedup_scope")) {
-        return [{ id: "doc-source", dedup_scope: "workspace" }];
-      }
-
-      if (text.includes("insert into documents")) {
-        const sourceSha256 = values.find(
-          (value): value is string => typeof value === "string" && /^[a-f0-9]{64}$/.test(value)
-        ) ?? null;
-        return [{
-          id: values[0],
-          org_id: "org-1",
-          user_id: "user-1",
-          workspace_id: "ws-1",
-          run_id: "run-1",
-          filename: "notes.txt",
-          mime_type: "text/plain",
-          source_key: "uploads/notes.txt",
-          status: "queued",
-          extraction_mode: "hybrid",
-          page_count: 1,
-          source_sha256: sourceSha256,
-          deduped_from_document_id: "doc-source",
-          dedup_scope: "workspace",
-          version_number: 1,
-          previous_version_id: null,
-          created_at: "2026-03-11T00:00:00.000Z",
-          updated_at: "2026-03-11T00:00:00.000Z"
-        }];
-      }
-
-      return [];
-    });
-
-    const [document] = await createDocumentBatch({
-      userId: "user-1",
-      workspaceId: "ws-1",
-      runId: "run-1",
-      files: [
-        {
-          filename: "notes.txt",
-          mimeType: "text/plain",
-          sourceKey: "uploads/notes.txt"
-        }
-      ]
-    });
-
-    expect(document?.dedupedFromDocumentId).toBe("doc-source");
-    expect(document?.dedupScope).toBe("workspace");
-    expect(document?.sourceSha256).toMatch(/^[a-f0-9]{64}$/);
-    expect(statements.some((text) => text.includes("insert into document_run_stage_states"))).toBe(true);
-    expect(
-      statements.some(
-        (text) =>
-          text.includes("'dedupScope',") && text.includes("::text") && text.includes("'dedupedFromDocumentId',")
-      )
-    ).toBe(true);
-    expect(statements.some((text) => text.includes("insert into document_pages"))).toBe(true);
-    expect(statements.some((text) => text.includes("insert into document_chunks"))).toBe(true);
-    expect(statements.some((text) => text.includes("insert into document_summaries"))).toBe(true);
-    expect(statements.some((text) => text.includes("insert into document_propositions"))).toBe(true);
-    expect(statements.some((text) => text.includes("insert into vector_indexes"))).toBe(true);
-  });
-
-  it("skips dedup cloning when no completed hash match exists", async () => {
-    const statements: string[] = [];
-    getWorkspaceAccessMock.mockResolvedValue({ orgId: "org-1" });
-    s3SendMock.mockResolvedValue({
-      Body: {
-        transformToByteArray: async () => new TextEncoder().encode("fresh content")
-      }
-    });
-
-    sqlMock.mockImplementation(async (strings: TemplateStringsArray, ...values: unknown[]) => {
-      const text = strings.join(" ");
-      statements.push(text);
-
-      if (text.includes("creation_ready_at")) return [{ id: "run-1" }];
-
-      if (text.includes("select id, version_number from documents")) {
-        return [];
-      }
-
-      if (text.includes("case") && text.includes("dedup_scope")) {
-        return [];
-      }
-
-      if (text.includes("insert into documents")) {
-        const sourceSha256 = values.find(
-          (value): value is string => typeof value === "string" && /^[a-f0-9]{64}$/.test(value)
-        ) ?? null;
-        return [{
-          id: values[0],
-          org_id: "org-1",
-          user_id: "user-1",
-          workspace_id: "ws-1",
-          run_id: "run-1",
-          filename: "fresh.txt",
-          mime_type: "text/plain",
-          source_key: "uploads/fresh.txt",
-          status: "queued",
-          extraction_mode: "hybrid",
-          page_count: 1,
-          source_sha256: sourceSha256,
-          deduped_from_document_id: null,
-          dedup_scope: null,
-          version_number: 1,
-          previous_version_id: null,
-          created_at: "2026-03-11T00:00:00.000Z",
-          updated_at: "2026-03-11T00:00:00.000Z"
-        }];
-      }
-
-      return [];
-    });
-
-    const [document] = await createDocumentBatch({
-      userId: "user-1",
-      workspaceId: "ws-1",
-      runId: "run-1",
-      files: [
-        {
-          filename: "fresh.txt",
-          mimeType: "text/plain",
-          sourceKey: "uploads/fresh.txt"
-        }
-      ]
-    });
-
-    expect(document?.dedupedFromDocumentId).toBeNull();
-    expect(document?.dedupScope).toBeNull();
-    expect(statements.some((text) => text.includes("insert into document_run_stage_states"))).toBe(false);
-    expect(statements.some((text) => text.includes("insert into document_pages"))).toBe(false);
   });
 });
 
