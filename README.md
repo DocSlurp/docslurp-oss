@@ -75,3 +75,7 @@ DocSlurp is **source-available, not OSI-approved open source**.
 - Third-party components keep their own licenses. See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) and [docs/licensing.md](docs/licensing.md).
 
 "DocSlurp" and the DocSlurp logo are trademarks of DocSlurp, Inc. (unregistered, registration pending); the licenses above do not grant rights to them. See [TRADEMARK.md](TRADEMARK.md).
+
+## Repository ownership
+
+Develop the server, worker, SDKs and CLI in this repository. The private web application and production operations live in [DocSlurp/app](https://github.com/DocSlurp/app), which pins this repository as its `core/` submodule. The former private monorepo is retained as a historical archive; new changes and releases belong here.

@@ -30,7 +30,11 @@
     "db:introspect": "drizzle-kit introspect --config=drizzle.config.ts",
     "db:migrate": "node server/db/migrate.mjs",
     "db:seed": "pnpm --filter @docslurp/server db:seed",
-    "db:up": "docker compose up -d postgres redis minio createbucket temporal temporal-ui"
+    "db:up": "docker compose up -d postgres redis minio createbucket temporal temporal-ui",
+    "fixtures:fetch": "node scripts/fetch-fixtures.mjs",
+    "release:prepare": "node scripts/package-release.mjs prepare",
+    "release:check": "node scripts/package-release.mjs check",
+    "release:tag": "node scripts/package-release.mjs tag"
   },
   "pnpm": {
     "overrides": {

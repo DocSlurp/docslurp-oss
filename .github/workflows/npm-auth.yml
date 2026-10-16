@@ -1,0 +1,31 @@
+name: Check npm authentication
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [release/sdk-cli-publishing]
+    paths: ['.github/workflows/npm-auth.yml']
+
+permissions:
+  contents: read
+
+jobs:
+  authenticate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24'
+          package-manager-cache: false
+          registry-url: https://registry.npmjs.org
+      - name: Verify bootstrap token authentication
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          if [ -z "${NODE_AUTH_TOKEN:-}" ]; then
+            echo "Configure the repository NPM_TOKEN secret before checking authentication." >&2
+            exit 1
+          fi
+          npm whoami --registry=https://registry.npmjs.org
+          echo "Token authenticates successfully. Publishing permissions are verified by the release workflow."
