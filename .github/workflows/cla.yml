@@ -3,6 +3,12 @@
 name: CLA
 
 on:
+  workflow_dispatch:
+    inputs:
+      pull_request_number:
+        description: 'Verify the CLA gate for an existing pull request using trusted repository code'
+        required: true
+        type: string
   issue_comment:
     types: [created]
   pull_request_target:
@@ -21,6 +27,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     if: >-
+      github.event_name == 'workflow_dispatch' ||
       github.event_name == 'pull_request_target' ||
       (github.event.issue.pull_request &&
         (github.event.comment.body == 'recheck' ||
@@ -33,13 +40,26 @@ jobs:
         id: trusted
         env:
           GH_TOKEN: ${{ github.token }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_NUMBER: ${{ github.event.pull_request.number || inputs.pull_request_number }}
           PR_AUTHOR: ${{ github.event.pull_request.user.login }}
           ASSOCIATION: ${{ github.event.pull_request.author_association }}
+          ORG_MEMBERS: ${{ vars.CLA_ORG_MEMBERS }}
         run: |
           echo "exempt=false" >> "$GITHUB_OUTPUT"
-          if [ "$GITHUB_EVENT_NAME" != pull_request_target ]; then exit 0; fi
-          case "$ASSOCIATION" in MEMBER|OWNER) ;; *) exit 0 ;; esac
+          if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ]; then
+            case "$PR_NUMBER" in ''|*[!0-9]*) echo "Invalid pull request number" >&2; exit 1 ;; esac
+            PR_AUTHOR="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" --jq '.user.login')"
+            ASSOCIATION="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" --jq '.author_association')"
+            export PR_AUTHOR
+          elif [ "$GITHUB_EVENT_NAME" != pull_request_target ]; then
+            exit 0
+          fi
+          # Private organization membership can be hidden in webhook payloads.
+          # Repository admins maintain this list from the organization API.
+          case "$ASSOCIATION" in
+            MEMBER|OWNER) ;;
+            *) case ",${ORG_MEMBERS:-}," in *",$PR_AUTHOR,"*) ;; *) exit 0 ;; esac ;;
+          esac
           foreign="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/commits" --paginate \
             --jq '[.[] | select(.author.login != env.PR_AUTHOR and ((.author.login // "") | endswith("[bot]") | not))] | length')"
           if ! printf '%s\n' "$foreign" | grep -qE '^[1-9][0-9]*$'; then
