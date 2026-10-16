@@ -175,7 +175,7 @@ describe("Run creation and recovery together", () => {
     const original = await manifest.createRunManifest(input);
     const reprocessed = await runs.reprocessRun(original.run.id, "u");
     const { bulkReprocessDocuments } = await import("../services/documents.js");
-    const bulk = await bulkReprocessDocuments(original.documents.map((doc) => doc.id), "u");
+    const bulk = (await bulkReprocessDocuments(original.documents.map((doc) => doc.id), "u")).runs;
     expect(reprocessed).not.toBeNull();
     expect(bulk).toHaveLength(1);
     expect(await sql`select total_documents, pages_total, creation_ready_at is not null as ready, creation_source_keys from workspace_runs`)

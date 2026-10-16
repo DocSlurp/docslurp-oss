@@ -21,6 +21,7 @@ import { documentWithholdsUri, withheldArtifactUrisFromMetadata } from "./pii-ar
 import { andSqlFragments, type SqlFragment } from "../lib/sql-fragments.js";
 import { getWorkspaceAccess, listAccessibleWorkspaceIds, listEditableWorkspaceIds } from "./organizations.js";
 import { completeRunCreation, lockRunCreation } from "./run-creation.js";
+import { runLifecycle } from "./run-lifecycle.js";
 import { createRun, ensureReprocessCanonicalId } from "./runs.js";
 import {
   documentUsageTotals,
@@ -1356,19 +1357,26 @@ export async function exportDocumentArtifacts(documentIds: string[], userId: str
  * with its original run's pipeline; `useWorkspacePipeline` uses the
  * workspace's current settings instead (ingest report "reprocess affected
  * files" after a settings change).
+ *
+ * Each (workspace, pipeline) group is independent: a group that cannot be
+ * created is reported in `failed` and the rest still run. Only when every
+ * group fails does this throw (the first error, so spend blocks keep their
+ * status code). Created Runs are started here; a start that cannot happen
+ * leaves the Run queued for run-start recovery and adds a warning.
  */
 export async function bulkReprocessDocuments(
   documentIds: string[],
   userId: string,
   options: { useWorkspacePipeline?: boolean } = {},
-): Promise<WorkspaceRun[]> {
+): Promise<BulkReprocessResult> {
+  const result: BulkReprocessResult = { runs: [], failed: [], warnings: [] };
   if (documentIds.length === 0) {
-    return [];
+    return result;
   }
 
   const workspaceIds = await listEditableWorkspaceIds(userId);
   if (workspaceIds.length === 0) {
-    return [];
+    return result;
   }
 
   const rows = await sql<(DocumentRow & { pipeline: PipelineFeatures | null })[]>`
@@ -1394,7 +1402,7 @@ export async function bulkReprocessDocuments(
     groups.set(key, existing);
   }
 
-  const createdRuns: WorkspaceRun[] = [];
+  let firstError: unknown;
 
   for (const group of groups.values()) {
     const first = group[0];
@@ -1402,65 +1410,98 @@ export async function bulkReprocessDocuments(
       continue;
     }
 
-    const run = await createRun({
-      userId,
-      workspaceId: first.workspace_id,
-      kind: "bulk-reprocess",
-      totalDocuments: group.length,
-      pipeline: first.pipeline ?? defaultPipelineFeatures
-    });
-
-    await completeRunCreation(run.id, async () => {
-      const inserts: Array<Record<string, string | number | null>> = [];
-      for (const doc of group) {
-        doc.canonical_id = await ensureReprocessCanonicalId(doc);
-        const [existing] = doc.canonical_id
-          ? await sql<{ id: string; version_number: number }[]>`
-              select id, version_number from documents
-              where workspace_id = ${doc.workspace_id} and canonical_id = ${doc.canonical_id}
-              order by version_number desc, created_at desc
-              limit 1
-            `
-          : await sql<{ id: string; version_number: number }[]>`
-              select id, version_number from documents
-              where org_id = ${doc.org_id} and filename = ${doc.filename}
-              order by version_number desc
-              limit 1
-            `;
-
-        inserts.push({
-          id: randomUUID(),
-          org_id: doc.org_id,
-          user_id: userId,
-          workspace_id: doc.workspace_id,
-          run_id: run.id,
-          filename: doc.filename,
-          mime_type: doc.mime_type,
-          source_key: doc.source_key,
-          status: "queued",
-          extraction_mode: doc.extraction_mode,
-          // Stages size their work from page_count (the worker never rewrites it), so keep the source's.
-          page_count: doc.page_count ?? 0,
-          file_size: Number(doc.file_size ?? 0) || 0,
-          version_number: (existing?.version_number ?? 0) + 1,
-          previous_version_id: existing?.id ?? null,
-          // Reprocessing keeps the logical source, so the new version supersedes on completion.
-          canonical_id: doc.canonical_id
-        });
-      }
-
-      await sql.begin(async (tx) => {
-        await lockRunCreation(run.id, tx as unknown as typeof sql);
-        if (inserts.length > 0) await tx`insert into documents ${tx(inserts)}`;
+    let run: WorkspaceRun;
+    try {
+      run = await createRun({
+        userId,
+        workspaceId: first.workspace_id,
+        kind: "bulk-reprocess",
+        totalDocuments: group.length,
+        pipeline: first.pipeline ?? defaultPipelineFeatures
       });
-      return { value: undefined, totalDocuments: inserts.length };
-    });
 
-    createdRuns.push(run);
+      await completeRunCreation(run.id, async () => {
+        const inserts: Array<Record<string, string | number | null>> = [];
+        for (const doc of group) {
+          doc.canonical_id = await ensureReprocessCanonicalId(doc);
+          const [existing] = doc.canonical_id
+            ? await sql<{ id: string; version_number: number }[]>`
+                select id, version_number from documents
+                where workspace_id = ${doc.workspace_id} and canonical_id = ${doc.canonical_id}
+                order by version_number desc, created_at desc
+                limit 1
+              `
+            : await sql<{ id: string; version_number: number }[]>`
+                select id, version_number from documents
+                where org_id = ${doc.org_id} and filename = ${doc.filename}
+                order by version_number desc
+                limit 1
+              `;
+
+          inserts.push({
+            id: randomUUID(),
+            org_id: doc.org_id,
+            user_id: userId,
+            workspace_id: doc.workspace_id,
+            run_id: run.id,
+            filename: doc.filename,
+            mime_type: doc.mime_type,
+            source_key: doc.source_key,
+            status: "queued",
+            extraction_mode: doc.extraction_mode,
+            // Stages size their work from page_count (the worker never rewrites it), so keep the source's.
+            page_count: doc.page_count ?? 0,
+            file_size: Number(doc.file_size ?? 0) || 0,
+            version_number: (existing?.version_number ?? 0) + 1,
+            previous_version_id: existing?.id ?? null,
+            // Reprocessing keeps the logical source, so the new version supersedes on completion.
+            canonical_id: doc.canonical_id
+          });
+        }
+
+        await sql.begin(async (tx) => {
+          await lockRunCreation(run.id, tx as unknown as typeof sql);
+          if (inserts.length > 0) await tx`insert into documents ${tx(inserts)}`;
+        });
+        return { value: undefined, totalDocuments: inserts.length };
+      });
+    } catch (error) {
+      firstError ??= error;
+      const message = error instanceof Error ? error.message : String(error);
+      const code = (error as { code?: unknown } | null)?.code;
+      result.failed.push({
+        workspaceId: first.workspace_id,
+        documentIds: group.map((doc) => doc.id),
+        message,
+        ...(typeof code === "string" ? { code } : {}),
+      });
+      result.warnings.push(
+        `${group.length} ${group.length === 1 ? "document" : "documents"} in ${first.workspace_id} ${group.length === 1 ? "was" : "were"} not reprocessed: ${message}`,
+      );
+      continue;
+    }
+
+    result.runs.push(run);
+    // The Run is committed, so a start error is not a failure: recovery starts it later.
+    try {
+      const start = await runLifecycle.start({ id: run.id, pipeline: first.pipeline ?? defaultPipelineFeatures });
+      if (start.status === "deferred") result.warnings.push(start.reason);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.warn(`[bulk-reprocess] start deferred run=${run.id}: ${message}`);
+      result.warnings.push(`Run ${run.id} is queued but has not started yet: ${message}`);
+    }
   }
 
-  return createdRuns;
+  if (result.runs.length === 0 && firstError !== undefined) throw firstError;
+  return result;
 }
+
+export type BulkReprocessResult = {
+  runs: WorkspaceRun[];
+  failed: Array<{ workspaceId: string; documentIds: string[]; message: string; code?: string }>;
+  warnings: string[];
+};
 
 export function inferMimeType(url: string, headerValue: string | null): string {
   if (headerValue && headerValue.trim()) {
