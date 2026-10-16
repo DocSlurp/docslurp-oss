@@ -46,6 +46,7 @@ import {
 import { attributedUsage, sessionTokenUsage } from "./usage-attribution.js";
 import { cancelWorkspaceRuns, deleteWorkspaceData } from "./data-deletion.js";
 import { insertDefaultWorkspace, WorkspaceAccessError } from "./default-workspace.js";
+import { isProtectedStoredQuery } from "../search/session.js";
 
 type WorkspaceRow = {
   id: string;
@@ -1362,7 +1363,7 @@ export async function getWorkspaceTraceFeed(
       return {
         id: row.id,
         kind: "search",
-        query: row.query.startsWith("enc:pgp:v1:") ? "Encrypted query" : row.query,
+        query: isProtectedStoredQuery(row.query) ? "Private query" : row.query,
         variant: row.variant,
         resultCount: row.result_count,
         filters,

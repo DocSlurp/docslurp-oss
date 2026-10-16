@@ -1,6 +1,7 @@
 import { Hono } from "hono";
 
 import { sql } from "../db.js";
+import { isProtectedStoredQuery } from "../search/session.js";
 import { actorHasAnyApiKeyScope, getRequestActor, loadActorScopedWorkspace, resolveActorWorkspaceId } from "../lib/request-actor.js";
 import { acceptApiKeys } from "../lib/route-auth.js";
 
@@ -21,12 +22,14 @@ export const suggestRoutes = new Hono()
 
     const like = q ? `${q}%` : "%";
 
-    // 1) Recent queries for this workspace starting with prefix
+    // 1) Recent queries for this workspace starting with prefix. Stored queries
+    // are encrypted or hashed at rest; those rows have no text to suggest.
     const recentQueries = await sql<{ phrase: string; weight: number }[]>`
       select s.query as phrase, 10 as weight
       from search_sessions s
       where s.user_id = ${userId}
         and (s.metadata ->> 'workspaceId') = ${workspaceId}
+        and s.query not like 'enc:%' and s.query not like 'redacted:%'
         and s.query ilike ${like}
       order by s.created_at desc
       limit ${limit}
@@ -63,6 +66,7 @@ export const suggestRoutes = new Hono()
     const suggestions = combined
       .sort((a, b) => b.weight - a.weight)
       .filter((r) => {
+        if (isProtectedStoredQuery(r.phrase)) return false;
         const key = r.phrase.toLowerCase();
         if (seen.has(key)) return false;
         seen.add(key);
