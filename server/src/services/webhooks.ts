@@ -147,7 +147,7 @@ async function recordWebhookDelivery(args: {
       ${args.webhook.user_id},
       ${args.eventType},
       ${args.webhook.url},
-      ${JSON.stringify(args.payload)}::jsonb,
+      ${JSON.stringify(args.payload)}::text::jsonb,
       ${args.responseStatus},
       ${args.responseBody},
       ${args.delivered},

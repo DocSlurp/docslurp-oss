@@ -120,7 +120,7 @@ export async function appendAuditLog(args: {
       ${args.resourceType},
       ${args.resourceId ?? null},
       ${args.ipAddress ?? null},
-      ${JSON.stringify(metadata)}::jsonb,
+      ${JSON.stringify(metadata)}::text::jsonb,
       now()
     )
     returning

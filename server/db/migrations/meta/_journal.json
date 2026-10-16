@@ -407,6 +407,13 @@
       "when": 1791900000009,
       "tag": "0057_run_creation_readiness",
       "breakpoints": true
+    },
+    {
+      "idx": 58,
+      "version": "7",
+      "when": 1791900000010,
+      "tag": "0058_jsonb_unwrap_string_objects",
+      "breakpoints": true
     }
   ]
 }

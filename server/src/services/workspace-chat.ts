@@ -901,7 +901,7 @@ async function persistEvidenceSpans(args: {
           ${span.sourceText},
           ${span.sourceStart},
           ${span.sourceEnd},
-          ${JSON.stringify(span.citation)}::jsonb,
+          ${JSON.stringify(span.citation)}::text::jsonb,
           now()
         )
       `;
