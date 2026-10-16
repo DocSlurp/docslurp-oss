@@ -1,6 +1,7 @@
 import path from "node:path";
 import type { Stage } from "../pipeline/pipeline.js";
 import { runDocumentStage } from "../pipeline/checkpoints.js";
+import { healthyDocuments } from "../pipeline/document-health.js";
 import type { CommandRunner } from "../tools/runner.js";
 import type { ArtifactStore } from "../tools/storage.js";
 
@@ -64,7 +65,7 @@ export class ToCanonicalStage implements Stage {
   ) {}
 
   async run(state: import("../pipeline/pipeline.js").WorkflowState, signal?: AbortSignal): Promise<void> {
-    for (const document of state.documents) {
+    for (const document of healthyDocuments(state)) {
       const key = `${document.userId}/${state.run.id}/to-canonical/${document.id}.json`;
       const artifactSlot = `${document.id}:to-canonical`;
 

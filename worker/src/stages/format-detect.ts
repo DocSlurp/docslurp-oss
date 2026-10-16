@@ -1,6 +1,7 @@
 import type { Document } from "../models.js";
 import type { Stage } from "../pipeline/pipeline.js";
 import { runDocumentStage } from "../pipeline/checkpoints.js";
+import { healthyDocuments } from "../pipeline/document-health.js";
 import type { ArtifactStore } from "../tools/storage.js";
 
 type NormalizedFormat =
@@ -100,7 +101,7 @@ export class FormatDetectStage implements Stage {
   constructor(private readonly storage: ArtifactStore) {}
 
   async run(state: import("../pipeline/pipeline.js").WorkflowState, signal?: AbortSignal): Promise<void> {
-    for (const document of state.documents) {
+    for (const document of healthyDocuments(state)) {
       const key = `${document.userId}/${state.run.id}/format-detect/${document.id}.json`;
       const artifactSlot = `${document.id}:format-detect`;
 

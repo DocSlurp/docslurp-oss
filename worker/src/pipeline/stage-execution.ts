@@ -27,6 +27,7 @@ import {
   buildAllocatedResourceObservation,
   resolveWorkerDeploymentProfile,
 } from "./local-compute-cost.js";
+import { hasFailedDocumentStage } from "./document-health.js";
 import { WorkflowState, type Stage } from "./pipeline.js";
 import { HungWorkError } from "../lib/hung-work.js";
 import { runWithPrivacyAuditScope } from "../lib/privacy-guard.js";
@@ -600,7 +601,25 @@ export function createStageExecution(deps: {
     state.totalStages = getPipelineStageOrder(state.run.pipeline).length;
     await store.hydrateState(state);
 
-    console.log(`[temporal] run=${input.runId} status=completed`);
+    // A Run with some failed Documents still completes (the count is in its
+    // stats). It fails only when no Document could succeed.
+    const failed = state.documents.filter((document) => hasFailedDocumentStage(state, document.id));
+    if (failed.length > 0 && failed.length === state.documents.length) {
+      const first = failed
+        .flatMap((document) => Array.from(state.documentStages.get(document.id)?.entries() ?? []))
+        .find(([, stage]) => stage.status === "failed");
+      const detail = first ? ` (${first[0]}: ${first[1].error})` : "";
+      const noun = failed.length === 1 ? "document" : "documents";
+      const message = `All ${failed.length} ${noun} failed${detail}`;
+      console.error(`[temporal] run=${input.runId} status=failed message=${message}`);
+      await store.failRun(input.runId, first?.[0] ?? state.stage, message);
+      await notifyTerminal(input.runId, "run.failed");
+      return;
+    }
+
+    console.log(
+      `[temporal] run=${input.runId} status=completed failedDocuments=${failed.length}`,
+    );
     await store.completeRun(state);
 
     await store.appendEvent(

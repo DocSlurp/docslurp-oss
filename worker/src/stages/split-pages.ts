@@ -1,5 +1,6 @@
 import type { Stage } from "../pipeline/pipeline.js";
 import { runDocumentStage, runDocuments, skipCompletedPages, completeDocumentPages } from "../pipeline/checkpoints.js";
+import { healthyDocuments } from "../pipeline/document-health.js";
 import { PdfSourceCache } from "../pipeline/pdf-asset-cache.js";
 import type { ArtifactStore } from "../tools/storage.js";
 import { maxInt } from "./utils.js";
@@ -19,7 +20,7 @@ export class SplitPagesStage implements Stage {
   async run(state: import("../pipeline/pipeline.js").WorkflowState, signal?: AbortSignal): Promise<void> {
     let pagesTotal = 0;
 
-    await runDocuments(state.documents, state.docConcurrency, async (document) => {
+    await runDocuments(healthyDocuments(state), state.docConcurrency, async (document) => {
       const pageCount = maxInt(1, document.pageCount);
       pagesTotal += pageCount;
       const key = `${document.userId}/${state.run.id}/pages/${document.id}/manifest.json`;

@@ -9,6 +9,9 @@ import {
   runDocumentStage,
   skipCompletedPages,
 } from "../pipeline/checkpoints.js";
+import { RunPolicyError } from "../lib/document-failure.js";
+import { HungWorkError } from "../lib/hung-work.js";
+import { hasFailedDocumentStage } from "../pipeline/document-health.js";
 import { WorkflowState, type CheckpointStore } from "../pipeline/pipeline.js";
 import { defaultPipelineFeatures } from "@docslurp/shared";
 import type { Document, StageState, WorkspaceRun } from "../models.js";
@@ -222,21 +225,20 @@ describe("runDocumentStage", () => {
     const failDocumentStage = vi.fn(async () => undefined);
     state.store = makeCheckpointStore({ failDocumentStage });
 
-    await expect(
-      runDocumentStage(
-        state,
-        document,
-        "quarantine",
-        "doc-1:quarantine",
-        "quarantine failed",
-        async () => {
-          throw new DocumentStageError("quarantined: mime mismatch", {
-            artifactUri: "s3://docslurp/quarantine/doc-1.json",
-            stats: { decision: "quarantined", reasonCodes: ["mime-mismatch"] }
-          });
-        }
-      )
-    ).rejects.toThrow("quarantined: mime mismatch");
+    // The Document is failed and recorded; the stage does not throw.
+    await runDocumentStage(
+      state,
+      document,
+      "quarantine",
+      "doc-1:quarantine",
+      "quarantine failed",
+      async () => {
+        throw new DocumentStageError("quarantined: mime mismatch", {
+          artifactUri: "s3://docslurp/quarantine/doc-1.json",
+          stats: { decision: "quarantined", reasonCodes: ["mime-mismatch"] }
+        });
+      }
+    );
 
     expect(state.artifacts["doc-1:quarantine"]).toBe("s3://docslurp/quarantine/doc-1.json");
     expect(failDocumentStage).toHaveBeenCalledWith(
@@ -434,5 +436,52 @@ describe("completed page batches", () => {
     await expect(completeDocumentPages(state, makeDocument(), "extract-markdown", [1], 1)).rejects.toThrow("database unavailable");
     expect(state.run.pagesProcessed).toBe(0);
     expect(state.store.appendEvent).not.toHaveBeenCalled();
+  });
+});
+
+describe("runDocumentStage keeps the Run going when one Document fails", () => {
+  const failing = async () => {
+    throw new Error("corrupt pdf");
+  };
+
+  it("records the failure, does not throw, and skips the Document in later stages", async () => {
+    const state = makeState();
+    const document = makeDocument();
+    state.store = makeCheckpointStore();
+    const later = vi.fn(async () => ({ artifactUri: "s3://x" }));
+
+    await runDocumentStage(state, document, "extract", "doc-1:extract", "x", failing);
+    expect(hasFailedDocumentStage(state, document.id)).toBe(true);
+    expect(state.store.failDocumentStage).toHaveBeenCalledTimes(1);
+
+    await runDocumentStage(state, document, "embed", "doc-1:embed", "x", later);
+    expect(later).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["a run policy stop", () => new RunPolicyError("Embedding cost cap reached")],
+    ["a stalled stage", () => new HungWorkError("stage-stalled", "no progress")],
+    ["a database outage", () => Object.assign(new Error("connect ECONNREFUSED"), { code: "ECONNREFUSED" })],
+    ["a worker shutdown", () => new Error("WORKER_SHUTDOWN")],
+  ])("still fails the stage on %s", async (_name, makeError) => {
+    const state = makeState();
+    state.store = makeCheckpointStore();
+    await expect(
+      runDocumentStage(state, makeDocument(), "extract", "doc-1:extract", "x", async () => {
+        throw makeError();
+      }),
+    ).rejects.toThrow();
+  });
+
+  it("still fails the stage when the Run was aborted", async () => {
+    const state = makeState();
+    state.store = makeCheckpointStore();
+    const controller = new AbortController();
+    await expect(
+      runDocumentStage(state, makeDocument(), "extract", "doc-1:extract", "x", async () => {
+        controller.abort(new Error("cancelled"));
+        throw new Error("aborted mid-flight");
+      }, controller.signal),
+    ).rejects.toThrow("aborted mid-flight");
   });
 });

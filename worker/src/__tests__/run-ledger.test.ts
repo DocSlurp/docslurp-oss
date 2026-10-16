@@ -121,7 +121,8 @@ describe("run progress ledger", () => {
     expect(ledger.failedDocumentStages).toBe(1);
     expect(ledger.processingDocumentStages).toBe(1);
     expect(ledger.stageCompletionRatio).toBe(0.5);
-    expect(ledger.percentComplete).toBe(31);
+    expect(ledger.percentComplete).toBe(81);
+    expect(ledger.failedDocuments).toBe(1);
     expect(ledger.currentStagePageProgress).toEqual({
       stage: "embed",
       totalPages: 4,

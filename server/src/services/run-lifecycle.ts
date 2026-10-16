@@ -342,9 +342,16 @@ export function createRunLifecycle(deps: RunLifecycleDeps) {
       where run_id = ${runId} and stage_name = ${input.stage} and status = 'processing'
     `;
     await sql`
-      update documents
-      set status = 'failed', updated_at = now()
-      where run_id = ${runId} and status not in ('completed', 'failed', 'pii_blocked')
+      update documents d
+      set status = case
+            when exists (
+              select 1 from document_run_stage_states s
+              where s.document_id = d.id and s.run_id = d.run_id and s.status = 'failed'
+            ) then 'failed'
+            else 'queued'
+          end,
+          updated_at = now()
+      where d.run_id = ${runId} and d.status not in ('completed', 'failed', 'pii_blocked')
     `;
 
     const payload = sql.json(JSON.parse(JSON.stringify({ ...(input.payload ?? {}), ...plan.eventPayload })));

@@ -1019,13 +1019,24 @@ export class Store {
     `;
   }
 
+  /**
+   * A failed Run fails only the Documents that have a failed stage (the one in
+   * the breaking stage was marked just before). Untouched Documents go back to
+   * queued so "Retry failed documents" resumes them from their checkpoints.
+   */
   private async failUnfinishedDocumentsForRun(runId: string): Promise<void> {
     await this.sql`
-      update documents
-      set status = 'failed',
+      update documents d
+      set status = case
+            when exists (
+              select 1 from document_run_stage_states s
+              where s.document_id = d.id and s.run_id = d.run_id and s.status = 'failed'
+            ) then 'failed'
+            else 'queued'
+          end,
           updated_at = now()
-      where run_id = ${runId}
-        and status not in ('completed', 'failed', 'pii_blocked')
+      where d.run_id = ${runId}
+        and d.status not in ('completed', 'failed', 'pii_blocked')
     `;
   }
 

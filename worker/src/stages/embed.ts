@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 
+import { RunPolicyError } from "../lib/document-failure.js";
 import { calculateAiUsageCostCents, buildPricedAiUsageLedgerEvent, resolvePipelineTextModel, withoutStageSelection } from "@docslurp/shared";
 
 import type { Config } from "../config.js";
@@ -377,7 +378,7 @@ export class EmbedStage implements Stage {
           const beforeBatch = async () => {
             if (stopped) throw stopError;
             progress?.check();
-            if (isCostCapExceeded(state)) throw new Error("Embedding cost cap reached before sending an embedding batch");
+            if (isCostCapExceeded(state)) throw new RunPolicyError("Embedding cost cap reached before sending an embedding batch");
             if (progress && state.store?.creditLeaseWouldExhaust?.(state)) {
               leaseFlush ??= progress.flush().finally(() => { leaseFlush = null; });
               await leaseFlush;
@@ -443,7 +444,7 @@ export class EmbedStage implements Stage {
                   });
                   // Throws a refused spend check from an earlier background write.
                   progress?.request();
-                  if (isCostCapExceeded(state)) throw new Error("Embedding cost cap reached after recording provider usage");
+                  if (isCostCapExceeded(state)) throw new RunPolicyError("Embedding cost cap reached after recording provider usage");
                 },
                 onBatchComplete: async (batchProgress) => {
                   await emitDocumentPageProgress(
