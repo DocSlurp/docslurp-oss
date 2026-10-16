@@ -1,6 +1,5 @@
 # CLA gate for external pull requests. Signatures are stored in a separate private repository so the
-# public tree carries no contributor data. Setup (secrets, signatures repo): docs/open-source-cla-setup.md
-# in the private monorepo. The CLA text is CLA.md; changing it bumps its version and requires new signatures.
+# public tree carries no contributor data. Setup: docs/cla-setup.md. The CLA text is CLA.md; changing it bumps its version and requires new signatures.
 name: CLA
 
 on:
@@ -27,9 +26,29 @@ jobs:
         (github.event.comment.body == 'recheck' ||
          github.event.comment.body == 'I have read the CLA Document and I hereby sign the CLA'))
     steps:
+      # Preserve the existing org-member exemption without a personal token for
+      # a PR authored entirely by that member (or the already-exempt bots).
+      # Metadata comes from GitHub; no PR checkout/code is executed.
+      - name: Classify organization-owned contributions
+        id: trusted
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+          ASSOCIATION: ${{ github.event.pull_request.author_association }}
+        run: |
+          echo "exempt=false" >> "$GITHUB_OUTPUT"
+          if [ "$GITHUB_EVENT_NAME" != pull_request_target ]; then exit 0; fi
+          case "$ASSOCIATION" in MEMBER|OWNER) ;; *) exit 0 ;; esac
+          foreign="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/commits" --paginate \
+            --jq '[.[] | select(.author.login != env.PR_AUTHOR and ((.author.login // "") | endswith("[bot]") | not))] | length')"
+          if ! printf '%s\n' "$foreign" | grep -qE '^[1-9][0-9]*$'; then
+            echo "exempt=true" >> "$GITHUB_OUTPUT"
+          fi
       # Organization members are exempt: their rights come from employment/contribution terms with
       # DocSlurp, Inc. Needs a token with read:org (CLA_BOT_TOKEN below).
       - name: List organization members
+        if: steps.trusted.outputs.exempt != 'true'
         id: members
         env:
           GH_TOKEN: ${{ secrets.CLA_BOT_TOKEN }}
@@ -42,6 +61,7 @@ jobs:
           echo "list=$members" >> "$GITHUB_OUTPUT"
       # contributor-assistant/github-action v2.6.1, pinned by commit SHA.
       - name: CLA Assistant
+        if: steps.trusted.outputs.exempt != 'true'
         uses: contributor-assistant/github-action@ca4a40a7d1004f18d9960b404b97e5f30a505a08 # v2.6.1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
