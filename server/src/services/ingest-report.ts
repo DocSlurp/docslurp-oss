@@ -19,6 +19,7 @@ import {
   type PipelineFeatures,
   type WorkspaceRecord,
 } from "@docslurp/shared";
+import type { BulkReprocessResult } from "./documents.js";
 import { sql, type SqlClient } from "../db.js";
 import { workspaceRunsUsageCost } from "./usage-attribution.js";
 
@@ -1084,16 +1085,18 @@ export async function applyIngestRecommendation(args: RecommendationAction): Pro
 export const INGEST_REPORT_REPROCESS_LIMIT = 100;
 
 /** Reprocesses a recommendation's affected files (at most 100) with the workspace's current settings. */
-export async function reprocessIngestRecommendation(args: RecommendationAction): Promise<{ runs: Array<{ id: string }>; documentIds: string[]; skippedDocuments: number; estimatedCents: number | null }> {
+export async function reprocessIngestRecommendation(args: RecommendationAction): Promise<{ runs: Array<{ id: string }>; documentIds: string[]; skippedDocuments: number; estimatedCents: number | null; failed: BulkReprocessResult["failed"]; warnings: string[] }> {
   const recommendation = await editableRecommendation(args);
   const ids = recommendation.reprocessDocumentIds.slice(0, INGEST_REPORT_REPROCESS_LIMIT);
   if (ids.length === 0) throw new IngestReportActionError("No files to reprocess for this recommendation.", 409);
   const { bulkReprocessDocuments } = await import("./documents.js");
-  const runs = await bulkReprocessDocuments(ids, args.userId, { useWorkspacePipeline: true });
+  const { runs, failed, warnings } = await bulkReprocessDocuments(ids, args.userId, { useWorkspacePipeline: true });
   return {
     runs: runs.map((run) => ({ id: run.id })),
     documentIds: ids,
     skippedDocuments: recommendation.reprocessDocumentIds.length - ids.length,
     estimatedCents: recommendation.cost.reprocessCents,
+    failed,
+    warnings,
   };
 }

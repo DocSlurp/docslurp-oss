@@ -368,7 +368,7 @@ export const documentsRoutes = new Hono()
       return c.json({ artifacts });
     }
 
-    const runs = await bulkReprocessDocuments(body.documentIds, userId);
+    const { runs, failed, warnings } = await bulkReprocessDocuments(body.documentIds, userId);
     await appendAuditLog({
       userId,
       action: "documents.bulk_reprocessed",
@@ -378,10 +378,11 @@ export const documentsRoutes = new Hono()
       metadata: {
         count: body.documentIds.length,
         runs: runs.map((run) => run.id),
+        failedDocuments: failed.reduce((total, group) => total + group.documentIds.length, 0),
         userAgent: requestUserAgent(c)
       }
     });
-    return c.json({ runs }, 201);
+    return c.json({ runs, failed, warnings }, 201);
   });
 
 // Reads only: the router's guard above rejects non-GET API key requests.
