@@ -5,24 +5,18 @@ import {
   type RunControlAction,
   type RunRetryOutcome,
 } from "./run-lifecycle.js";
-import { randomUUID } from "node:crypto";
 
 import {
   parseStoredPipelineFeatures,
-  createWorkspaceRunSchema,
   compilePipelinePlan,
   defaultPipelineFeatures,
-  pageRouterModeSchema,
-  withPlatformPageRouterMode,
   findMissingReuseInputs,
-  stageSelectionKeys,
   withoutStageSelection,
   documentSchema,
   workspaceRunEventSchema,
   workspaceRunProgressSnapshotSchema,
   workspaceRunSchema,
   workspaceRunStageStateSchema,
-  type CreateWorkspaceRunInput,
   type DocumentRecord,
   type PipelineFeatures,
   type WorkspaceRun,
@@ -32,25 +26,21 @@ import {
 } from "@docslurp/shared";
 
 import { fileUrlForArtifact } from "../lib/file-urls.js";
-import { completeRunCreation, lockRunCreation } from "./run-creation.js";
+import { runCreation } from "./run-creation.js";
 import { sql } from "../db.js";
 import { RUN_EVENTS_CHANNEL, RunEventHub, type RunEventHubRow } from "./run-event-hub.js";
 import { env as apiEnv } from "../config.js";
 import { getPipelineTemporalSnapshot } from "../lib/temporal.js";
-import { sanitizeUploadFilename } from "../lib/filenames.js";
-import { currentRequestId } from "../lib/request-context.js";
 import { buildProgressModule } from "./progress-snapshot.js";
 import {
   buildRunProcessingPreview,
   getRunProcessingPreview,
 } from "./run-processing-preview.js";
-import { resolveSourceMetadata, UnreadableSourceError } from "./source-metadata.js";
 import {
   canEditWorkspace,
   getWorkspaceAccess,
   listAccessibleWorkspaceIds,
 } from "./organizations.js";
-import { getAvailableCredits } from "./billing/credits.js";
 import {
   admitRunSpend,
   assertCanSpend,
@@ -70,11 +60,6 @@ import { processSingleton } from "../lib/process-singleton.js";
 
 export { summarizeRunUsageCost };
 
-// Minimum available credits (1 credit = 1 cent) required to start a run, on top
-// of the always-on "must be positive" gate. Zero means no extra floor.
-const MIN_CREDIT_BALANCE_CENTS = Number(
-  process.env.MIN_CREDIT_BALANCE_CENTS ?? "0",
-);
 const SKIP_RUN_BUDGET_GUARDS_IN_DEV =
   process.env.SKIP_RUN_BUDGET_GUARDS_IN_DEV !== "false";
 
@@ -98,7 +83,7 @@ export function isRunCreationBlockedError(
   return error instanceof SpendBlockedError;
 }
 
-async function enforceLiveBudgetCaps(
+export async function enforceLiveBudgetCaps(
   workspaceId: string,
   orgId: string,
 ): Promise<void> {
@@ -186,7 +171,7 @@ async function enforceLiveBudgetCaps(
   }
 }
 
-type WorkspaceRunRow = {
+export type WorkspaceRunRow = {
   id: string;
   org_id: string;
   user_id: string;
@@ -216,7 +201,7 @@ type WorkspaceRunRow = {
   updated_at: string | Date;
 };
 
-type DocumentRow = {
+export type DocumentRow = {
   id: string;
   org_id: string;
   user_id: string;
@@ -238,15 +223,6 @@ type DocumentRow = {
   superseded_by_document_id?: string | null;
   created_at: string | Date;
   updated_at: string | Date;
-};
-
-type DedupScope = "workspace" | "org";
-
-type DedupCandidateRow = {
-  id: string;
-  /** The document whose LanceDB rows the candidate's vectors are (itself unless it is a copy). */
-  vector_owner_id: string;
-  dedup_scope: DedupScope;
 };
 
 type StageStateRow = {
@@ -498,7 +474,7 @@ function jsonRecord<T extends Record<string, unknown>>(value: unknown): T {
  * Runs mapped without it (just created) have spent nothing; listed runs go
  * through withRunCosts.
  */
-function mapWorkspaceRun(row: WorkspaceRunRow, cost?: Pick<RunUsageCostSummary, "costCents" | "computeEstimated" | "billedCostCents">): WorkspaceRun {
+export function mapWorkspaceRun(row: WorkspaceRunRow, cost?: Pick<RunUsageCostSummary, "costCents" | "computeEstimated" | "billedCostCents">): WorkspaceRun {
   return workspaceRunSchema.parse({
     id: row.id,
     userId: row.user_id,
@@ -539,7 +515,7 @@ export async function withRunCosts(runs: WorkspaceRun[]): Promise<WorkspaceRun[]
   });
 }
 
-function mapDocument(row: DocumentRow): DocumentRecord {
+export function mapDocument(row: DocumentRow): DocumentRecord {
   return documentSchema.parse({
     id: row.id,
     userId: row.user_id,
@@ -596,331 +572,6 @@ function mapWorkspaceRunEvent(row: WorkspaceRunEventRow): WorkspaceRunEvent {
     payload: publicDiagnostics(row.payload ?? {}),
     createdAt: serializeTimestamp(row.created_at),
   });
-}
-
-async function findDedupCandidate(
-  client: typeof sql,
-  args: {
-    orgId: string;
-    workspaceId: string;
-    sourceSha256: string;
-    runId: string;
-  },
-): Promise<DedupCandidateRow | null> {
-  const [row] = await client<DedupCandidateRow[]>`
-    select
-      d.id,
-      coalesce(d.deduped_from_document_id, d.id) as vector_owner_id,
-      case
-        when d.workspace_id = ${args.workspaceId} then 'workspace'
-        else 'org'
-      end as dedup_scope
-    from documents d
-    join workspace_runs runs on runs.id = d.run_id
-    join workspace_runs target_run on target_run.id = ${args.runId}
-    where d.org_id = ${args.orgId}
-      and d.source_sha256 = ${args.sourceSha256}
-      and d.status = 'completed'
-      and d.superseded_at is null
-      and d.purged_at is null
-      and runs.status = 'completed'
-      -- Partial-run documents carry full output; compare features, not stage selection.
-      and (runs.pipeline - ${client.array([...stageSelectionKeys])}::text[])
-        = (target_run.pipeline - ${client.array([...stageSelectionKeys])}::text[])
-      and (
-        d.workspace_id = ${args.workspaceId}
-        or d.org_id = ${args.orgId}
-      )
-    order by
-      case when d.workspace_id = ${args.workspaceId} then 0 else 1 end,
-      d.updated_at desc,
-      d.created_at desc
-    limit 1
-  `;
-
-  return row ?? null;
-}
-
-async function seedDeduplicatedDocument(
-  client: typeof sql,
-  args: {
-    sourceDocumentId: string;
-    dedupScope: DedupScope;
-    targetDocumentId: string;
-    targetRunId: string;
-    targetUserId: string;
-  },
-): Promise<void> {
-  await client`
-    insert into document_run_stage_states (
-      run_id,
-      document_id,
-      stage_name,
-      status,
-      attempts,
-      artifact_uri,
-      stats,
-      error,
-      started_at,
-      completed_at,
-      updated_at
-    )
-    select
-      ${args.targetRunId},
-      ${args.targetDocumentId},
-      drss.stage_name,
-      'completed',
-      greatest(drss.attempts, 1),
-      drss.artifact_uri,
-      coalesce(drss.stats, '{}'::jsonb) || jsonb_build_object(
-        'deduplicated', true,
-        'dedupScope', ${args.dedupScope}::text,
-        'dedupedFromDocumentId', ${args.sourceDocumentId}::text
-      ),
-      null,
-      now(),
-      now(),
-      now()
-    from document_run_stage_states drss
-    where drss.document_id = ${args.sourceDocumentId}
-      and drss.status = 'completed'
-      and drss.stage_name <> 'quarantine'
-  `;
-
-  await client`
-    insert into document_pages (
-      id,
-      document_id,
-      run_id,
-      user_id,
-      page_number,
-      text,
-      token_estimate
-    )
-    select
-      gen_random_uuid()::text,
-      ${args.targetDocumentId},
-      ${args.targetRunId},
-      ${args.targetUserId},
-      page_number,
-      text,
-      token_estimate
-    from document_pages
-    where document_id = ${args.sourceDocumentId}
-  `;
-
-  await client`
-    insert into document_chunks (
-      id,
-      document_id,
-      run_id,
-      user_id,
-      chunk_index,
-      text,
-      heading_path,
-      page_number,
-      token_estimate,
-      metadata,
-      content_hash,
-      pipeline_version,
-      parent_page_id
-    )
-    select
-      gen_random_uuid()::text,
-      ${args.targetDocumentId},
-      ${args.targetRunId},
-      ${args.targetUserId},
-      chunks.chunk_index,
-      chunks.text,
-      chunks.heading_path,
-      chunks.page_number,
-      chunks.token_estimate,
-      chunks.metadata,
-      chunks.content_hash,
-      chunks.pipeline_version,
-      target_pages.id
-    from document_chunks chunks
-    left join document_pages source_pages on source_pages.id = chunks.parent_page_id
-    left join document_pages target_pages
-      on target_pages.document_id = ${args.targetDocumentId}
-     and target_pages.page_number = source_pages.page_number
-    where chunks.document_id = ${args.sourceDocumentId}
-  `;
-
-  await client`
-    insert into document_summaries (
-      id,
-      document_id,
-      run_id,
-      user_id,
-      summary
-    )
-    select
-      gen_random_uuid()::text,
-      ${args.targetDocumentId},
-      ${args.targetRunId},
-      ${args.targetUserId},
-      summary
-    from document_summaries
-    where document_id = ${args.sourceDocumentId}
-  `;
-
-  await client`
-    insert into document_propositions (
-      id,
-      document_id,
-      run_id,
-      user_id,
-      chunk_index,
-      text,
-      source_paragraph,
-      token_estimate
-    )
-    select
-      gen_random_uuid()::text,
-      ${args.targetDocumentId},
-      ${args.targetRunId},
-      ${args.targetUserId},
-      chunk_index,
-      text,
-      source_paragraph,
-      token_estimate
-    from document_propositions
-    where document_id = ${args.sourceDocumentId}
-  `;
-
-  await client`
-    insert into vector_indexes (
-      id,
-      document_id,
-      backend,
-      bucket,
-      path,
-      embedding_model,
-      dimension
-    )
-    select
-      gen_random_uuid()::text,
-      ${args.targetDocumentId},
-      backend,
-      bucket,
-      path,
-      embedding_model,
-      dimension
-    from vector_indexes
-    where document_id = ${args.sourceDocumentId}
-  `;
-}
-
-/**
- * Stamps the deployment's PAGE_ROUTER_MODE default (shadow) onto a run snapshot whose workspace left
- * `pageRouter.mode` unset, so the stage plan every service compiles includes route-pages without per-workspace setup.
- */
-function platformRunPipeline<T extends PipelineFeatures>(pipeline: T): T {
-  const parsed = pageRouterModeSchema.safeParse(process.env.PAGE_ROUTER_MODE?.trim().toLowerCase());
-  return withPlatformPageRouterMode(pipeline, parsed.success ? parsed.data : "off");
-}
-
-export async function createRun(
-  input: CreateWorkspaceRunInput & { workspaceId: string },
-  options: { sourceKeys?: string[] } = {},
-): Promise<WorkspaceRun> {
-  // Callers resolve the workspace reference first (requireActorWorkspace).
-  const parsed = { ...createWorkspaceRunSchema.parse(input), workspaceId: input.workspaceId };
-  const id = randomUUID();
-  const requestId = currentRequestId();
-  const access = await getWorkspaceAccess(parsed.workspaceId, parsed.userId);
-  if (!access) {
-    throw new Error("Workspace not found");
-  }
-  if (!canEditWorkspace(access, parsed.userId)) {
-    throw new Error("Forbidden");
-  }
-
-  // Optional floor on available credits (MIN_CREDIT_BALANCE_CENTS).
-  if (MIN_CREDIT_BALANCE_CENTS > 0) {
-    const { available } = await getAvailableCredits(access.orgId);
-    if (available < MIN_CREDIT_BALANCE_CENTS) {
-      throw new RunCreationBlockedError(
-        `Insufficient credits. Available: ${available.toFixed(2)} credits ($${(available / 100).toFixed(2)}). ` +
-          "Buy credits at /app/billing to continue processing.",
-        402,
-        "minimum_credit_required",
-      );
-    }
-  }
-
-  await enforceLiveBudgetCaps(parsed.workspaceId, access.orgId);
-
-  const [row] = await admitRunSpend(access.orgId, parsed.workspaceId, (tx) => tx<WorkspaceRunRow[]>`
-    with inserted as (
-      insert into workspace_runs (
-        id,
-        org_id,
-        user_id,
-        workspace_id,
-        kind,
-        status,
-        priority,
-        control_state,
-        control_requested_at,
-        stage,
-        total_documents,
-        processed_documents,
-        pages_total,
-        pages_processed,
-        stats,
-        creation_source_keys,
-        pipeline
-      )
-      values (
-        ${id},
-        ${access.orgId},
-        ${parsed.userId},
-        ${parsed.workspaceId},
-        ${parsed.kind},
-        'queued',
-        0,
-        null,
-        null,
-        'queued',
-        ${parsed.totalDocuments},
-        0,
-        0,
-        0,
-        ${sql.json({
-          ...(requestId ? { requestId } : {}),
-          ...(parsed.apiKeyId ? { apiKeyId: parsed.apiKeyId } : {}),
-        })},
-        ${sql.array(options.sourceKeys ?? [])}::text[],
-        ${sql.json(JSON.parse(JSON.stringify(platformRunPipeline(withoutStageSelection(parsed.pipeline)))))}
-      )
-      returning *
-    )
-    select
-      inserted.*,
-      workspaces.name as workspace_name
-    from inserted
-    join workspaces on workspaces.id = inserted.workspace_id
-  `, { leaseRunId: id });
-
-  const run = mapWorkspaceRun(row);
-
-  const preview = buildRunProcessingPreview({
-    request: {
-      workspaceId: parsed.workspaceId,
-      pipeline: parsed.pipeline,
-      files: Array.from({ length: parsed.totalDocuments }, (_, index) => ({
-        filename: `document-${index + 1}.pdf`,
-        mimeType: "application/pdf",
-        sizeBytes: 900_000,
-      })),
-      urls: [],
-    },
-  });
-  run.costForecast = preview.current.estimatedCost;
-
-  return run;
 }
 
 export async function listRuns(userId: string, activityOnly = false): Promise<WorkspaceRun[]> {
@@ -1042,169 +693,6 @@ export async function getDocumentVersions(
   return versions;
 }
 
-export async function createDocumentBatch(args: {
-  userId: string;
-  workspaceId: string;
-  runId: string;
-  files: Array<{
-    filename: string;
-    mimeType: string;
-    sourceKey: string;
-    fileSize?: number;
-    metadata?: Record<string, unknown>;
-    canonicalId?: string | null;
-  }>;
-  /** When set, an unreadable file is skipped and reported here instead of failing the batch. */
-  onUnreadable?: (file: { sourceKey: string; filename: string }, error: UnreadableSourceError) => void;
-}): Promise<DocumentRecord[]> {
-  const access = await getWorkspaceAccess(args.workspaceId, args.userId);
-  if (!access) {
-    throw new Error("Workspace not found");
-  }
-  if (!canEditWorkspace(access, args.userId)) {
-    throw new Error("Forbidden");
-  }
-
-  const rows: DocumentRecord[] = [];
-  let pagesTotal = 0;
-
-  for (const file of args.files) {
-    const filename = sanitizeUploadFilename(file.filename);
-    const documentId = randomUUID();
-    let metadata: Awaited<ReturnType<typeof resolveSourceMetadata>>;
-    try {
-      metadata = await resolveSourceMetadata({ ...file, filename });
-    } catch (error) {
-      if (error instanceof UnreadableSourceError && args.onUnreadable) {
-        args.onUnreadable({ sourceKey: file.sourceKey, filename }, error);
-        continue;
-      }
-      throw error;
-    }
-
-    const row = await sql.begin(async (tx) => {
-      const client = tx as unknown as typeof sql;
-
-      await lockRunCreation(args.runId, client);
-      const canonicalId = file.canonicalId ?? null;
-      if (canonicalId) {
-        await client`select pg_advisory_xact_lock(hashtextextended(${`${args.workspaceId}:${canonicalId}`}, 0))`;
-      }
-      // Canonical documents version per workspace by logical source; others by filename.
-      const [existing] = canonicalId
-        ? await client<{ id: string; version_number: number }[]>`
-            select id, version_number from documents
-            where workspace_id = ${args.workspaceId} and canonical_id = ${canonicalId}
-            order by version_number desc, created_at desc
-            limit 1
-          `
-        : await client<{ id: string; version_number: number }[]>`
-            select id, version_number from documents
-            where org_id = ${access.orgId} and filename = ${filename}
-            order by version_number desc
-            limit 1
-          `;
-
-      const versionNumber = existing ? existing.version_number + 1 : 1;
-      const previousVersionId = existing?.id ?? null;
-      const dedupCandidate = await findDedupCandidate(client, {
-        orgId: access.orgId,
-        workspaceId: args.workspaceId,
-        sourceSha256: metadata.sourceSha256,
-        runId: args.runId,
-      });
-
-      const [inserted] = await client<DocumentRow[]>`
-        insert into documents (
-          id,
-          org_id,
-          user_id,
-          workspace_id,
-          run_id,
-          filename,
-          mime_type,
-          source_key,
-          status,
-          extraction_mode,
-          page_count,
-          source_sha256,
-          deduped_from_document_id,
-          dedup_scope,
-          version_number,
-          previous_version_id,
-          canonical_id,
-          file_size,
-          metadata
-        )
-        values (
-          ${documentId},
-          ${access.orgId},
-          ${args.userId},
-          ${args.workspaceId},
-          ${args.runId},
-          ${filename},
-          ${file.mimeType},
-          ${file.sourceKey},
-          'queued',
-          'hybrid',
-          ${metadata.pageCount},
-          ${metadata.sourceSha256},
-          -- Point at the vector owner, not an intermediate copy, so purge keeps
-          -- the owner's vectors while any copy still uses them.
-          ${dedupCandidate?.vector_owner_id ?? null},
-          ${dedupCandidate?.dedup_scope ?? null},
-          ${versionNumber},
-          ${previousVersionId},
-          ${canonicalId},
-          ${file.fileSize ?? 0},
-          ${JSON.stringify({ ...file.metadata, sourceSizeMeasured: file.fileSize !== undefined })}::text::jsonb
-        )
-        returning *
-      `;
-
-      if (dedupCandidate) {
-        await seedDeduplicatedDocument(client, {
-          sourceDocumentId: dedupCandidate.id,
-          dedupScope: dedupCandidate.dedup_scope,
-          targetDocumentId: documentId,
-          targetRunId: args.runId,
-          targetUserId: args.userId,
-        });
-      }
-
-      return inserted;
-    });
-
-    rows.push(mapDocument(row));
-    pagesTotal += metadata.pageCount;
-  }
-
-  await sql`
-    update workspace_runs
-    set pages_total = ${pagesTotal},
-        updated_at = now()
-    where id = ${args.runId}
-  `;
-
-  return rows;
-}
-
-/**
- * A reprocessed document is a new version of the same source, so it must
- * replace the old one on completion. Documents uploaded without a canonical ID
- * get one derived from their own ID.
- */
-export async function ensureReprocessCanonicalId(doc: { id: string; canonical_id?: string | null }): Promise<string> {
-  if (doc.canonical_id) return doc.canonical_id;
-  const canonicalId = `docslurp:document:${doc.id}`;
-  const [row] = await sql<{ canonical_id: string }[]>`
-    update documents set canonical_id = coalesce(canonical_id, ${canonicalId})
-    where id = ${doc.id}
-    returning canonical_id
-  `;
-  return row?.canonical_id ?? canonicalId;
-}
-
 /** A reprocess request the source run cannot satisfy (4xx, nothing created). */
 export class ReprocessRejectedError extends Error {
   constructor(
@@ -1282,18 +770,20 @@ async function assertReusableSource(
   }
 }
 
+
 /**
  * Reprocess a run into a new run with new document versions. Without a stage
  * selection every enabled stage runs again. With `stageFrom` / `stages`
  * the new run executes only the planned stages (see compilePipelinePlan) and
  * the worker seeds the others from the source documents, which are validated
  * here so an impossible restart fails with a 4xx instead of a broken run.
+ * The new Run is created, started or deferred by Run creation.
  */
 export async function reprocessRun(
   runId: string,
   userId: string,
   options?: { stages?: string[]; stageFrom?: string },
-): Promise<WorkspaceRun | null> {
+): Promise<{ run: WorkspaceRun; deferredReason: string | null } | null> {
   const original = await getRun(runId, userId);
   if (!original) return null;
   const access = await getWorkspaceAccess(original.workspaceId, userId);
@@ -1319,82 +809,19 @@ export async function reprocessRun(
   const partial = plan.reusedStages.length > 0;
   if (partial) await assertReusableSource(original, plan);
 
-  const docs = await sql<DocumentRow[]>`
-    select * from documents where run_id = ${runId}
+  const docs = await sql<{ id: string }[]>`
+    select id from documents where run_id = ${runId} order by created_at, id
   `;
 
-  const newRunId = randomUUID();
-
-  // Reprocessing spends like a new run: same admission and budget caps.
-  await enforceLiveBudgetCaps(original.workspaceId, original.orgId);
-  const [newRunRow] = await admitRunSpend(original.orgId, original.workspaceId, (tx) => tx<WorkspaceRunRow[]>`
-    with inserted as (
-      insert into workspace_runs (
-        id, org_id, user_id, workspace_id, kind, status, priority, control_state, control_requested_at, stage,
-        total_documents, processed_documents,
-        pages_total, pages_processed, pipeline
-      )
-      values (
-        ${newRunId},
-        ${original.orgId},
-        ${original.userId},
-        ${original.workspaceId},
-        ${original.kind},
-        'queued',
-        ${original.priority ?? 0},
-        null,
-        null,
-        'queued',
-        ${original.totalDocuments},
-        0, 0, 0,
-        ${sql.json(JSON.parse(JSON.stringify(pipelineConfig)))}
-      )
-      returning *
-    )
-    select
-      inserted.*,
-      workspaces.name as workspace_name
-    from inserted
-    join workspaces on workspaces.id = inserted.workspace_id
-  `, { leaseRunId: newRunId });
-
-  await completeRunCreation(newRunId, async () => {
-    for (const doc of docs) {
-      const canonicalId = await ensureReprocessCanonicalId(doc);
-      await sql.begin(async (tx) => {
-        await lockRunCreation(newRunId, tx as unknown as typeof sql);
-        await tx`
-          insert into documents (
-            id, org_id, user_id, workspace_id, run_id, filename, mime_type,
-            source_key, status, extraction_mode, page_count,
-            canonical_id, version_number, previous_version_id, reused_from_document_id, source_sha256
-          )
-          values (
-            ${randomUUID()},
-            ${doc.org_id},
-            ${doc.user_id},
-            ${doc.workspace_id},
-            ${newRunId},
-            ${doc.filename},
-            ${doc.mime_type},
-            ${doc.source_key},
-            'queued',
-            ${doc.extraction_mode},
-            ${doc.page_count},
-            ${canonicalId},
-            ${(doc.version_number ?? 1) + 1},
-            ${doc.id},
-            ${partial ? doc.id : null},
-            ${doc.source_sha256 ?? null}
-          )
-        `;
-      });
-    }
-
-    return { value: undefined, totalDocuments: docs.length };
+  const created = await runCreation.create({
+    userId,
+    workspaceId: original.workspaceId,
+    kind: original.kind,
+    priority: original.priority ?? 0,
+    pipeline: pipelineConfig,
+    sources: { kind: "versionsOf", documentIds: docs.map((doc) => doc.id), reuse: partial },
   });
-
-  return mapWorkspaceRun(newRunRow);
+  return { run: created.run, deferredReason: created.deferredReason };
 }
 
 type RunEventHubRowSql = Omit<WorkspaceRunEventRow, "stats" | "payload"> & { cursor: string };
