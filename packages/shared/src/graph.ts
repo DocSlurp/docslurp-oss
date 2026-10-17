@@ -50,7 +50,9 @@ export function graphConfigFingerprint(config: GraphConfig, model: string): stri
     hash ^= canonical.charCodeAt(index);
     hash = Math.imul(hash, 0x01000193) >>> 0;
   }
-  return `g1-${hash.toString(16).padStart(8, "0")}`;
+  // g2 preserves directed relationship endpoints; g1 graphs may contain
+  // reversed edges. Mark them stale without scheduling a rebuild.
+  return `g2-${hash.toString(16).padStart(8, "0")}`;
 }
 
 /** Observed per-window figures from earlier builds, used in place of defaults. */

@@ -11,6 +11,12 @@ import {
 const pricing = { costPer1kInputTokens: 0.01, costPer1kOutputTokens: 0.03 };
 
 describe("graph config fingerprint", () => {
+  it("marks graphs from the undirected endpoint implementation stale", () => {
+    const previousFingerprint = "g1-30b2cf43";
+    expect(graphConfigFingerprint({ domain: null, entityTypes: [], depth: "standard" }, "example-model"))
+      .not.toBe(previousFingerprint);
+  });
+
   it("ignores entity type order and domain whitespace but not depth or model", () => {
     const base = graphConfigFingerprint({ domain: "Contracts", entityTypes: ["party", "clause"], depth: "standard" }, "m");
     expect(graphConfigFingerprint({ domain: " Contracts ", entityTypes: ["clause", "party"], depth: "standard" }, "m")).toBe(base);
