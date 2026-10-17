@@ -161,13 +161,21 @@ export async function lanceDbVectorSearch(args: {
     const table = await getTable(uri, name);
     if (!table) return [];
     try {
-      const tableLimit = documentIds?.length
-        ? Math.min(Math.max(args.limit * 10, documentIds.length * args.limit), 1_000)
-        : args.limit;
-      // Only the fields we use: fetching vectors and text for up to 1,000 rows
-      // dominated search time on object storage.
+      // Filter before nearest-neighbor selection. Overfetching a global top-k
+      // and filtering afterward can miss every scoped document when another
+      // workspace occupies the first 1,000 neighbors in this org's table.
       const query = table.vectorSearch(args.queryVector).column("vector")
-        .select(await resultColumns(table)).limit(tableLimit);
+        .select(await resultColumns(table)).limit(args.limit);
+      if (documentIds?.length) {
+        const literals = [...new Set(documentIds)].map(id => `'${id.replace(/'/g, "''")}'`);
+        query.where(`"documentId" IN (${literals.join(", ")})`);
+        // HNSW defaults ef to 1.5 * limit. Preserve the former exploration
+        // budget when reducing materialized rows, rather than trading recall
+        // for fewer returned rows. Ignored for tables without an HNSW index.
+        const previousLimit = Math.min(Math.max(args.limit * 10, documentIds.length * args.limit), 1_000);
+        query.ef(Math.ceil(previousLimit * 1.5));
+      }
+      // Retain an independent scope check at the storage boundary.
       return filterLanceDbRowsByDocumentIds((await query.toArray()) as LanceDbRow[], documentIds);
     } catch {
       dropTable(uri, name);

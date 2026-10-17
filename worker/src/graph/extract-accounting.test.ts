@@ -43,3 +43,26 @@ it("does not turn recorder failures into an unbilled heuristic success", async (
     context: { config: defaultGraphConfig, scope: "Synthetic", model: "test-model", apiKey: "mock", useLlm: true, privacyMode: "standard", onUsage: () => { throw new Error("recorder unavailable"); } },
   })).rejects.toThrow("recorder unavailable");
 });
+
+it("preserves asymmetric subject/object order and distinct reciprocal relationships", async () => {
+  vi.mocked(generateOpenRouterText).mockResolvedValue({
+    text: JSON.stringify({ entities: [
+      { name: "Zulu Team", type: "organization", confidence: 1 },
+      { name: "Alpha Team", type: "organization", confidence: 1 },
+    ], relationships: [
+      { subject: "Zulu Team", predicate: "delegates to", object: "Alpha Team", confidence: 1 },
+      { subject: "Alpha Team", predicate: "delegates to", object: "Zulu Team", confidence: 1 },
+    ] }), finishReason: "stop", usage: { inputTokens: 10, outputTokens: 20 },
+  });
+  const graph = await extractDocumentGraph({ filename: "teams.txt", chunks: [
+    { id: "one", text: "Zulu Team delegates to Alpha Team." },
+    { id: "two", text: "Alpha Team delegates to Zulu Team." },
+  ], context: { config: defaultGraphConfig, scope: "Workspace documents", model: "test-model", apiKey: "mock", useLlm: true, privacyMode: "standard", onUsage: () => {} } });
+  expect(graph.edges.filter((edge) => edge.normalizedPredicate === "delegates_to").map((edge) => [edge.sourceKey.split("\0")[0], edge.targetKey.split("\0")[0]])).toEqual([
+    ["zulu team", "alpha team"], ["alpha team", "zulu team"],
+  ]);
+  const coMentions = graph.edges.filter((edge) => edge.predicate === "co_mentions");
+  expect(coMentions).toHaveLength(1);
+  expect(coMentions[0]).toMatchObject({ weight: 2 });
+  expect(coMentions[0]!.sourceKey < coMentions[0]!.targetKey).toBe(true);
+});

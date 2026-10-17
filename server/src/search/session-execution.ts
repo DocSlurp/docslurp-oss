@@ -215,13 +215,14 @@ export async function applySearchPostRetrievalProcessing(
       )
     : ranked.slice(0, input.limit);
 
+  const rankById = new Map(ranked.map((chunk) => [chunk.id, chunk]));
   const reordered = lostInTheMiddleReorder(
     selected.map((chunk) => ({
       id: chunk.id,
-      score: chunk.score,
+      // Position context using the reranker score, not the earlier fusion rank.
+      score: rankById.get(chunk.id)?.crossScore ?? chunk.score,
     })),
   );
-  const rankById = new Map(ranked.map((chunk) => [chunk.id, chunk]));
   const chunkById = new Map(candidates.map((chunk) => [chunk.id, chunk]));
 
   return reordered

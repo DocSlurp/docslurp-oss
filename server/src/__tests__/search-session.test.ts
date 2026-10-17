@@ -18,9 +18,11 @@ vi.mock("../db.js", () => ({
 vi.mock("../search/query-rewrite.js", () => queryRewriteMock);
 
 const { createSearchSessionJournal } = await import("../search/session.js");
-const { fuseSearchResponses, searchResultsToChunks } = await import(
-  "../search/session-execution.js"
-);
+const {
+  applySearchPostRetrievalProcessing,
+  fuseSearchResponses,
+  searchResultsToChunks,
+} = await import("../search/session-execution.js");
 const { planRecursiveSearchMode } = await import(
   "../search/session-planner.js"
 );
@@ -293,6 +295,33 @@ describe("Search Session execution helpers", () => {
       regionCoordinateSpace: null,
     },
   };
+
+  it.each([false, true])("preserves the reranker winner through context positioning (MMR=%s)", async (useMmr) => {
+    const chunks = searchResultsToChunks([
+      { ...result, text: "Routine maintenance checklist for the plant.", score: 1 },
+      {
+        ...result, text: "General equipment safety procedures.", score: 0.8,
+        citation: { ...result.citation, chunkIndex: 3 },
+      },
+      {
+        ...result, text: "The cobalt pump calibration interval is eighteen months.", score: 0.1,
+        citation: { ...result.citation, chunkIndex: 4 },
+      },
+    ]);
+    const processed = await applySearchPostRetrievalProcessing({
+      query: "cobalt pump calibration interval",
+      chunks,
+      limit: 3,
+      options: { useRerank: true, useMmr, mmrLambda: 1 },
+      privacyMode: "standard",
+      session: createSearchSessionJournal({ rootSessionId: "ranking-test" }),
+    });
+
+    expect(processed[0]?.id).toBe(chunks[2]?.id);
+    expect(new Set(processed.map((chunk) => chunk.id))).toEqual(
+      new Set(chunks.map((chunk) => chunk.id)),
+    );
+  });
 
   it("converts Search Session results back into retrieval chunks", () => {
     expect(searchResultsToChunks([result])).toEqual([

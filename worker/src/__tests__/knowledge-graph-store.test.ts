@@ -125,6 +125,31 @@ const nodes = () =>
   `;
 
 describe("workspace knowledge graph persistence", () => {
+  it("persists reciprocal directed edges separately and merges reversed co-mentions", async () => {
+    await seedDocument("d1", "Zulu supplies Alpha and Alpha supplies Zulu");
+    await seedDocument("d2", "Alpha and Zulu appear together");
+    const first = documentGraph("d1", "Zulu", ["Alpha"]);
+    const edge = first.edges[0]!;
+    first.edges.push({ ...edge, sourceKey: edge.targetKey, targetKey: edge.sourceKey });
+    first.edges.push({ ...edge, predicate: "co_mentions", normalizedPredicate: "co_mentions" });
+    await write("d1", first);
+    const second = documentGraph("d2", "Zulu", ["Alpha"]);
+    second.edges = [{ ...edge, sourceKey: edge.targetKey, targetKey: edge.sourceKey, predicate: "co_mentions", normalizedPredicate: "co_mentions" }];
+    await write("d2", second);
+    const edges = await sql`
+      select s.canonical_name as source, t.canonical_name as target, e.predicate, e.weight
+      from kg_edges e join kg_nodes s on s.id = e.source_node_id join kg_nodes t on t.id = e.target_node_id
+      order by e.predicate, s.canonical_name
+    `;
+    expect(edges.filter((row) => row.predicate === "supplies")).toEqual([
+      { source: "Alpha", target: "Zulu", predicate: "supplies", weight: 1 },
+      { source: "Zulu", target: "Alpha", predicate: "supplies", weight: 1 },
+    ]);
+    expect(edges.filter((row) => row.predicate === "co_mentions")).toHaveLength(1);
+    expect(edges.find((row) => row.predicate === "co_mentions")!.weight).toBe(2);
+    expect(await sql`select count(*)::int as count from kg_edge_evidence`).toEqual([{ count: 4 }]);
+  });
+
   it("merges documents from separate runs into one workspace graph", async () => {
     await seedDocument("d1", "Acme supplies Globex");
     await seedDocument("d2", "Acme supplies Globex");

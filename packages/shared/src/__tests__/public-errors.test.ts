@@ -24,6 +24,29 @@ describe("public error policy", () => {
 
 it("sanitizes string arrays inside error and warning fields", () => {
   expect(publicDiagnostics({ warnings: ["provider credits exhausted"], nested: { errors: ["SQL failed"] } })).toEqual({
-    warnings: [PUBLIC_ERROR_MESSAGES.processing], nested: { errors: [PUBLIC_ERROR_MESSAGES.processing] },
+    warnings: ["Diagnostic details withheld."], nested: { errors: [PUBLIC_ERROR_MESSAGES.processing] },
   });
+});
+
+
+it("does not label successful routing diagnostics as processing failures", () => {
+  const raw = {
+    status: "completed",
+    error: null,
+    stats: {
+      adaptiveTuning: { reasons: ["private adaptive tuning decision"], docConcurrency: 4 },
+      decisionChain: [{ reason: "private provider routing decision", confidence: 0.9 }],
+      message: "postgres://user:secret@internal/db",
+    },
+  };
+  expect(publicDiagnostics(raw)).toEqual({
+    status: "completed",
+    error: null,
+    stats: {
+      adaptiveTuning: { reasons: ["Diagnostic details withheld."], docConcurrency: 4 },
+      decisionChain: [{ reason: "Diagnostic details withheld.", confidence: 0.9 }],
+      message: "Diagnostic details withheld.",
+    },
+  });
+  expect(raw.stats.message).toContain("secret");
 });

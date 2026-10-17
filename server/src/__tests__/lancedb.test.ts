@@ -157,6 +157,62 @@ describe("lanceDbVectorSearch tenant isolation", () => {
     expect(second).toEqual(first);
   });
 
+  it("finds the nearest scoped documents beyond the global 1,000-row cutoff", async () => {
+    const documentIds = Array.from({ length: 400 }, (_, i) => `scoped-doc-${i}`);
+    await createLanceDbTable(VectorNamespaceManager.getTableName("org-a"), [
+      ...Array.from({ length: 2_000 }, (_, i) => ({
+        id: `outside-${i}`, documentId: `outside-doc-${i}`, text: "another workspace", vector: [0, i / 100_000],
+      })),
+      ...documentIds.map((documentId, i) => ({
+        id: `scoped-${i}`, documentId, text: "requested workspace", vector: [1 + i / 400, 0],
+      })),
+    ]);
+
+    const hits = await lanceDbVectorSearch({ orgId: "org-a", documentIds, queryVector: [0, 0], limit: 3 });
+    expect(hits.map(hit => hit.id)).toEqual(["scoped-0", "scoped-1", "scoped-2"]);
+  });
+
+  it("preserves HNSW search breadth when a scope includes the whole table", async () => {
+    let seed = 8128;
+    const random = () => {
+      seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
+      return seed / 4294967296;
+    };
+    const records = Array.from({ length: 12_000 }, (_, i) => ({
+      id: `chunk-${i}`, documentId: `doc-${i % 200}`, vector: Array.from({ length: 64 }, random),
+    }));
+    const queryVector = Array.from({ length: 64 }, random);
+    const db = await lancedb.connect(lancedbDir!);
+    const table = await db.createTable(VectorNamespaceManager.getTableName("org-a"), records);
+    try {
+      await table.createIndex("vector", { config: lancedb.Index.hnswSq({ distanceType: "l2", numPartitions: 1 }) });
+      // The previous adapter requested 1,000 rows. An all-document scope must
+      // not lose its nearest results just because fewer rows cross the boundary.
+      const previous = await table.vectorSearch(queryVector).select(["id", "_distance"]).limit(1_000).toArray();
+      const hits = await lanceDbVectorSearch({
+        orgId: "org-a", queryVector, documentIds: Array.from({ length: 200 }, (_, i) => `doc-${i}`), limit: 10,
+      });
+      expect(hits.map(hit => hit.id)).toEqual(previous.slice(0, 10).map(row => row.id));
+    } finally {
+      table.close();
+      db.close();
+    }
+  });
+
+  it("treats quoted document IDs as literals without widening the scope", async () => {
+    const quotedId = "doc' OR '1'='1";
+    await createLanceDbTable(VectorNamespaceManager.getTableName("org-a"), [
+      { id: "other", documentId: "other-doc", text: "outside scope", vector: [1, 0] },
+      { id: "quoted", documentId: quotedId, text: "inside scope", vector: [0.9, 0.1] },
+    ]);
+
+    const hits = await lanceDbVectorSearch({ orgId: "org-a", documentIds: [quotedId], queryVector: [1, 0], limit: 3 });
+    expect(hits.map(hit => hit.id)).toEqual(["quoted"]);
+    expect(await lanceDbVectorSearch({
+      orgId: "org-a", documentIds: ["missing' OR TRUE --"], queryVector: [1, 0], limit: 3,
+    })).toEqual([]);
+  });
+
   it("fails closed when the org namespace is missing", async () => {
     await createLanceDbTable(VectorNamespaceManager.getTableName("org-a"), [
       {
@@ -178,7 +234,7 @@ describe("lanceDbVectorSearch tenant isolation", () => {
 });
 
 describe("filterLanceDbRowsByDocumentIds", () => {
-  it("applies document scoping in process instead of constructing a LanceDB WHERE string", () => {
+  it("independently rejects rows outside the requested document scope", () => {
     const rows = [
       { id: "chunk-1", documentId: "doc-1", _distance: 0.1 },
       { id: "chunk-2", documentId: "doc-2", _distance: 0.2 },
