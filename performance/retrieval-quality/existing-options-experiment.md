@@ -86,3 +86,46 @@ cases with raw failure observations.
 A separate approved screen compares baseline and BM25 at result limit 20. Its
 recall at 10, 12 (chat cap), and 20 must be reported separately; larger result
 counts cannot be represented as a top-10 improvement.
+
+
+## Depth-20 experiment and offline order diagnostic
+
+The separate depth experiment completed 32/32 HTTP 200 responses with the same
+questions and flags except result limit and local rerank toggle. Source-trace
+page support agrees with union support in the reported cases.
+
+| Configuration | Explicit @10 | Explicit @12 | Explicit @20 | Inferred @10 / @12 / @20 |
+| --- | --- | --- | --- | --- |
+| Baseline, limit 20 | 11/13 | 12/13 | 12/13 | No / No / No |
+| BM25, limit 20, returned presentation order | 11/13 | 11/13 | 13/13 | No / No / Yes |
+| BM25, limit 20, reconstructed relevance order | 12/13 | 12/13 | 13/13 | Yes / Yes / Yes |
+
+The final row is an **offline diagnostic inverse**, not a new live experiment.
+It assumes a complete response with no subsequent filtering/pinning. All 16
+responses have 20 entries and exact reciprocal presentation scores; these checks
+support that assumption but do not replace server-side trace verification.
+Generic inverse code is tested for odd/even result counts. Raw traces remain
+unchanged; the derived artifact is
+`options-bm2520-reconstructed-order-v1.json`.
+
+At limit 20, BM25 places the `asu-04` and `asu-05` supporting passages last in
+presentation order (rank 20). The inferred premises appear at presentation ranks
+19 and 20 but reconstruct to relevance ranks 4 and 2. Taking only the first 12
+presentation items loses strong evidence. Conversely, `st083-04` appears at
+presentation rank 8 but reconstructs to relevance rank 15: removing presentation
+reordering alone does not solve the no-regression gate at 10 or 12.
+
+Recommended next step: retain semantic relevance order through public search and
+perform any prompt-specific ordering only after downstream truncation. Preserve
+this as a separate tested change. Keep MMR off. Existing BM25 plus 20 retained
+results is a development-set candidate, not a default recommendation or promotion:
+it has not passed the frozen top-10 gate, answer-negative tests, or untouched
+confirmation. Do not change embeddings based on this evidence; intact indexed
+support already appears within the candidate results.
+
+The 32 depth calls add 0.0019296 API-estimated cents. Across both option
+experiments, 79 successful calls total 0.004776 estimated cents (USD 0.00004776),
+plus unresolved failed/interrupted-call usage. Deployment overlapped this work;
+no comparative latency claim is made. Raw paths and session IDs were handed to
+the Langfuse/ledger owner for reconciliation. New misses are registered against
+the existing development cases; no case is silently removed.
