@@ -9,6 +9,7 @@ import {
   contextualizeChunksForEmbedding,
   embedTextChunks,
   remoteEmbeddingProviderOptions,
+  packEmbeddingBatches,
 } from "../stages/embedding-runtime.js";
 import {
   MemoryProviderRateStore,
@@ -70,6 +71,16 @@ describe("embedTextChunks", () => {
     } else {
       process.env.DOCSLURP_LOCAL_TRANSFORMERSJS_DTYPE = originalDtype;
     }
+  });
+
+  it("packs hosted requests by count and UTF-8 upper bound without dropping inputs", () => {
+    const chunks = ["a".repeat(60_000), "b".repeat(60_000), "é".repeat(20_000), "last"];
+    const batches = packEmbeddingBatches(chunks, 128, 120_000);
+    expect(batches.flat()).toEqual(chunks);
+    expect(batches).toHaveLength(2);
+    for (const batch of batches) expect(batch.reduce((sum, text) => sum + new TextEncoder().encode(text).byteLength + 8, 0)).toBeLessThanOrEqual(120_000);
+    expect(packEmbeddingBatches(["a", "b", "c"], 2)).toEqual([["a", "b"], ["c"]]);
+    expect(() => packEmbeddingBatches(["a".repeat(120_000)], 128, 120_000)).toThrow("reduce chunk size");
   });
 
   it("uses registered OpenRouter embeddings with exact vectors and actual usage", async () => {

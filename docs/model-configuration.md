@@ -331,6 +331,8 @@ For example, use this embedding configuration in the workspace pipeline:
 ```
 
 These routes preserve the native embedding width and require actual token usage.
+The worker splits requests by input count and a conservative UTF-8 token upper
+bound so the provider's 120,000-token aggregate request limit cannot drop content.
 They do not support dimension overrides. Reindex existing documents when changing
 embedding models so document and query vectors use the same space. Provider errors
 remain errors rather than silently switching retrieval to keywords. Existing

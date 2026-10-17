@@ -625,8 +625,12 @@ async function embedRemoteChunks(args: {
   let privateCostCents = 0;
   const providerOptions = remoteEmbeddingProviderOptions(args.profile);
 
-  const batchSize = clampBatchSize(args.profile.batchSize ?? 32, 1, 256);
-  const batchCount = Math.ceil(args.chunks.length / batchSize);
+  const registeredRoute = args.profile.provider === "openrouter" ? openRouterEmbeddingRoute(args.profile.model) : null;
+  const batchSize = clampBatchSize(args.profile.batchSize ?? 32, 1, registeredRoute?.batchSize ?? 256);
+  // The hosted endpoint caps the sum at 120,000 tokens. UTF-8 bytes plus
+  // tokenizer overhead are a conservative admission bound, never billed usage.
+  const batches = packEmbeddingBatches(args.chunks, batchSize, registeredRoute ? 120_000 : undefined);
+  const batchCount = batches.length;
   const batchEmbeddings: number[][][] = new Array(batchCount);
   const usageBatches: Record<string, unknown>[] = new Array(batchCount);
   let actualTokens = 0;
@@ -642,7 +646,7 @@ async function embedRemoteChunks(args: {
     }
     await args.beforeBatch?.();
 
-    const batch = args.chunks.slice(batchIndex * batchSize, (batchIndex + 1) * batchSize);
+    const batch = batches[batchIndex]!;
     // Private routes authorize (and, under strict-privacy, audit) every request.
     const privateCall = isPrivate
       ? await authorizePrivateModelCall({ privacyMode: args.privacyMode, modelUri: args.profile.modelUri, capability: "embedding", operation: "worker.embedding" })
@@ -1145,6 +1149,27 @@ function meanPoolTokenVectors(rows: number[][]): number[] {
   }
 
   return totals.map((total) => total / rows.length);
+}
+
+/** Preserve every input in order while bounding request count and conservative token size. */
+export function packEmbeddingBatches(chunks: readonly string[], maxInputs: number, maxTokenUpperBound = Infinity): string[][] {
+  const batches: string[][] = [];
+  const encoder = new TextEncoder();
+  let batch: string[] = [];
+  let bound = 0;
+  for (const chunk of chunks) {
+    const next = encoder.encode(chunk).byteLength + 8;
+    if (next > maxTokenUpperBound) throw new Error("Embedding input exceeds the hosted request budget; reduce chunk size");
+    if (batch.length && (batch.length >= maxInputs || bound + next > maxTokenUpperBound)) {
+      batches.push(batch);
+      batch = [];
+      bound = 0;
+    }
+    batch.push(chunk);
+    bound += next;
+  }
+  if (batch.length) batches.push(batch);
+  return batches;
 }
 
 function createRemoteEmbeddingModel(profile: EmbeddingProfile, config: Config) {
