@@ -174,7 +174,9 @@ test("idleTimeoutMs stops a stream whose snapshots stop changing, even with hear
 
 test("overall timeout retains the last run; bounds are validated", async () => {
   await http((_, response) => json(response, snapshot(3)), async client => {
-    await assert.rejects(async () => { for await (const _ of client.streamProgress("run/id", { transport: "poll", pollIntervalMs: 5, timeoutMs: 400 })) {} },
+    // Leave time for the first real HTTP snapshot on a busy shared CI runner;
+    // this checks retention at the overall deadline, not subsecond latency.
+    await assert.rejects(async () => { for await (const _ of client.streamProgress("run/id", { transport: "poll", pollIntervalMs: 5, timeoutMs: 2000 })) {} },
       error => error instanceof DocSlurpTimeoutError && error.run?.pagesProcessed === 3);
     for (const options of [{ timeoutMs: 0 }, { idleTimeoutMs: -1 }, { pollIntervalMs: NaN }, { heartbeatMs: 0 }, { transport: "carrier-pigeon" }]) {
       await assert.rejects(async () => { for await (const _ of client.streamProgress("run/id", options)) {} }, RangeError);

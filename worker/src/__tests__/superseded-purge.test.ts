@@ -287,6 +287,9 @@ describe("superseded version purge", () => {
     await seedVersion({ id: "next", runId: "run-3", createdAt: "2026-01-03" });
     await sql`update documents set status = 'completed' where id = 'next'`;
 
+    // This tests artifact ownership, independent of the millisecond clock's
+    // strict grace-period boundary (superseded_at < now()).
+    await sql`update documents set superseded_at = now() - interval '1 second' where superseded_at is not null`;
     const { storage, deleted } = fakeStorage(["u1/run-1/markdown/source.md", "u1/run-2/markdown/copy.md"]);
     await purgeSupersededDocuments(sql, storage, options(async () => {}));
     expect(deleted).toEqual(["u1/run-2/markdown/copy.md"]);
