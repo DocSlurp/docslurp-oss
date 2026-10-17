@@ -87,6 +87,14 @@ describe("embedTextChunks", () => {
     expect(onRemoteUsage).toHaveBeenLastCalledWith(expect.objectContaining({ inputTokens: 19 }));
   });
 
+  it("refuses to silently truncate a hosted OpenAI response that ignored requested dimensions", async () => {
+    const profile: EmbeddingProfile = { profile: "cheapest-hosted", target: "hosted", modelUri: "llm://openai/text-embedding-3-small", runtime: "remote", provider: "openai", model: "text-embedding-3-small", baseUrl: null, dimensions: 4, task: "document", normalize: true, batchSize: 1, lateChunking: false, lateChunkingWindow: 2, supportsCustomDimensions: true };
+    const onRemoteUsage = vi.fn();
+    aiMock.embedMany.mockResolvedValueOnce({ embeddings: [Array(8).fill(1)], usage: { tokens: 9 } });
+    await expect(embedTextChunks({ chunks: ["generic text"], profile, config: fromEnv(), privacyMode: "standard", onRemoteUsage })).rejects.toThrow("match requested dimensions");
+    expect(onRemoteUsage).toHaveBeenCalledWith(expect.objectContaining({ inputTokens: 9 }));
+  });
+
   it("uses the cached JS transformers pipeline for local embeddings", async () => {
     const profile: EmbeddingProfile = {
       profile: "good-fast-local",

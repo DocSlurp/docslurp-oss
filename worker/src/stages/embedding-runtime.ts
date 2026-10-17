@@ -698,6 +698,11 @@ async function embedRemoteChunks(args: {
         ...(privateCost ? { costCents: privateCost.costCents, costMetadata: privateCost.metadata } : {}) }));
     }
     if (args.profile.provider === "deepinfra" && result.embeddings.length !== batch.length) throw new Error("DeepInfra embedding response count mismatch");
+    if (args.profile.provider === "openai" && args.profile.supportsCustomDimensions) {
+      if (result.embeddings.length !== batch.length || result.embeddings.some((vector) => vector.length !== args.profile.dimensions || vector.some((value) => !Number.isFinite(value)) || Math.hypot(...vector) === 0)) {
+        throw new Error("OpenAI embedding response must match requested dimensions with finite nonzero vectors");
+      }
+    }
     batchEmbeddings[batchIndex] = args.profile.provider === "deepinfra"
       ? result.embeddings.map((vector) => validateDeepInfraEmbedding(vector, args.profile.dimensions, args.profile.normalize))
       : result.embeddings;
