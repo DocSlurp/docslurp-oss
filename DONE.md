@@ -5,3 +5,5 @@
 - Add explicit native Perplexity embedding routes for ingestion and search with signed INT8 decoding, full-width validation, bounded requests, privacy enforcement and actual usage recording.
 
 - Preserve terminal run status, stage and lease timestamps when late activity checkpoints settle paid usage; explicit retries still resume through queued state.
+
+- Honor the resolved workspace chat retrieval budget (up to 12 passages) when forwarding evidence to answer generation instead of silently capping it at six.
