@@ -30,6 +30,9 @@ const rules = (report) => report.findings.map((finding) => finding.rule);
 test('allows generic document logic and runtime workspace schemas without printing answers', (t) => {
   const f = fixture(t), report = f.run();
   assert.equal(report.passed, true); assert.equal(report.cases, 1); assert.equal(report.scannedProductionFiles, 1);
+  assert.match(report.productionHash, /^[a-f0-9]{64}$/);
+  writeFileSync(join(f.repo, 'worker.ts'), 'export const generic = 2;');
+  assert.notEqual(f.run().productionHash, report.productionHash);
   assert.ok(!JSON.stringify(report).includes('Distinctive Example Supplier'));
 });
 test('detects fixture identifiers, copied answers, clustered labels and source hashes in production full files and edits', (t) => {

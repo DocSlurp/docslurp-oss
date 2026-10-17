@@ -21,7 +21,7 @@ const pattern = (term) => new RegExp(`(?<![\\p{L}\\p{N}_])${term.replace(/[.*+?^
 export function judgeIntegrity({ dataset, repo = process.cwd(), base = 'HEAD' }) {
   const findings = [];
   const add = (rule, detail = {}) => findings.push({ rule, ...detail });
-  const result = { schema: 'docslurp-evaluation-integrity@v1', passed: false, datasetHash: null, base, scannedFiles: 0, scannedProductionFiles: 0, cases: 0, findings };
+  const result = { schema: 'docslurp-evaluation-integrity@v1', passed: false, datasetHash: null, productionHash: null, gitHead: null, base, scannedFiles: 0, scannedProductionFiles: 0, cases: 0, findings };
   try {
     repo = realpathSync(repo);
     dataset = realpathSync(dataset);
@@ -67,7 +67,9 @@ export function judgeIntegrity({ dataset, repo = process.cwd(), base = 'HEAD' })
     }
     const git = (...args) => execFileSync('git', ['-C', repo, ...args], { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
     git('rev-parse', '--verify', `${base}^{commit}`);
-    const files = [...new Set(git('ls-files', '-z', '--cached', '--others', '--exclude-standard').split('\0').filter(Boolean))];
+    result.gitHead = git('rev-parse', 'HEAD').trim();
+    const productionDigest = createHash('sha256');
+    const files = [...new Set(git('ls-files', '-z', '--cached', '--others', '--exclude-standard').split('\0').filter(Boolean))].sort();
     const changed = new Set(git('diff', '--name-only', '-z', base, '--').split('\0'));
     const terms = [...identifiers].map((value) => ({ rule: 'fixture-identifier', value }));
     for (const value of sourceHashes) terms.push({ rule: 'source-recognition-hash', value });
@@ -98,6 +100,7 @@ export function judgeIntegrity({ dataset, repo = process.cwd(), base = 'HEAD' })
       if (sourceHashes.has(hash(bytes))) add('copied-source-artifact', { file, evidenceHash: hash(bytes) });
       if (!productFile(file)) continue;
       result.scannedProductionFiles++;
+      productionDigest.update(file).update('\0').update(hash(bytes)).update('\0');
       if (!bytes.includes(0)) match(file, bytes.toString('utf8'), 'working-tree');
       // Inspect additions only: removed leaked logic must not prevent a clean repair.
       if (!changed.has(file)) continue;
@@ -105,6 +108,7 @@ export function judgeIntegrity({ dataset, repo = process.cwd(), base = 'HEAD' })
       const additions = diff.split('\n').filter((line) => line.startsWith('+') && !line.startsWith('+++')).map((line) => line.slice(1)).join('\n');
       match(file, additions, 'diff-additions');
     }
+    result.productionHash = productionDigest.digest('hex');
     if (!result.scannedProductionFiles) throw new Error('no-production-files-scanned');
   } catch (error) {
     // Do not echo dataset content, git stderr, absolute paths or labeled answers.
