@@ -35,3 +35,12 @@ E2 screening completed all 12 graph generations in 36.753 seconds with zero fall
 ## E4 screening treatment: existing grounded profile
 
 Independent source review confirmed four unsupported baseline graph edges and two unsupported prose units, while finding the automated contradiction flags unreliable. Before changing prompts, screen the existing `grounded-low` workspace profile on GLM Flash across all three operations. It adds a general source-faithfulness instruction and requests low reasoning; this is a bundled configuration treatment, not an isolated prompt-effect claim. Keep all original operation output budgets. Prediction: fewer unsupported assertions without losing supported facts. Reject if critical unsupported claims remain or the frozen quality/latency/cost gates fail. Use the same repaired scorer and independent adjudication on both baseline and treatment; no fixture-specific production instructions are added. Identity fix E2 remains in this treatment, so graph comparisons also use the E2 screen. No production configuration is changed by this experiment.
+
+
+## Frozen v2 labels and strict review (03:58 UTC)
+
+The independent label audit corrected the gold for all 20 cases. Every automatic quality score against v1 gold is invalid; retain those files only as superseded evidence. All source texts are unchanged, so previously captured model outputs, latency and usage remain usable without another generation call. Frozen v2 combined manifest SHA-256: `59969bcb10907ef8d206d3ade8efb95592a3f5bc1dd3cadff991a7f4000d32d5`. The source mapping is in the external dataset's `supersedes.json`. The independent integrity gate passed with zero findings.
+
+The strict scorer now requires independent, hash-bound semantic judgments for every output unit, edge, gold fact and relation; deterministic term matches alone earn no quality credit. B0 and E4 are undergoing blinded review of 468 and 477 items respectively. No candidate is promoted. Held-out sources and labels remain unavailable to the tuning coordinator.
+
+E4 completed 12 cases / 36 calls in 74.819 seconds with no fallback, costing 0.844722 ledger cents (0.703935 provider cents). These are execution measurements, not evidence of quality improvement. Total recorded quality-generation spend including smoke, B0, E2 and E4 is 2.1828975 cents ($0.021828975); coding-agent and infrastructure costs are excluded.
