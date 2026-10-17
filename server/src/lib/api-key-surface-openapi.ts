@@ -53,13 +53,13 @@ const entries: Array<[path: string, method: Method, tag: string, summary: string
   ["/v1/documents/{docId}/versions", "get", "documents", "List a document's versions and tags", "artifacts", "Document versions"],
   ["/v1/documents/{docId}/changelog", "get", "documents", "Get the changelog between document versions", "artifacts", "Version changelog"],
   ["/v1/documents/{docId}/correction-workbench", "get", "documents", "Get the correction workbench for a document", "artifacts", "Correction workbench"],
-  ["/v1/ingest/direct/sessions", "post", "ingest", "Start a direct-to-storage upload session", "ingest", "Upload session with presigned targets", jsonBody],
-  ["/v1/ingest/direct/sessions/{sessionId}", "get", "ingest", "Get a direct upload session", "ingest", "Upload session"],
-  ["/v1/ingest/direct/sessions/{sessionId}/files/complete", "post", "ingest", "Mark files in a direct upload session as uploaded", "ingest", "Files recorded", jsonBody],
-  ["/v1/ingest/direct/sessions/{sessionId}/abort", "post", "ingest", "Abort a direct upload session", "ingest", "Session aborted"],
-  ["/v1/ingest/direct/sessions/{sessionId}/confirm", "post", "ingest", "Confirm a direct upload session and start its run", "ingest", "Run started"],
+  ["/v1/uploads/direct/sessions", "post", "ingest", "Start a direct-to-storage upload session", "ingest", "Upload session with presigned targets", jsonBody],
+  ["/v1/uploads/direct/sessions/{sessionId}", "get", "ingest", "Get a direct upload session", "ingest", "Upload session"],
+  ["/v1/uploads/direct/sessions/{sessionId}/files/complete", "post", "ingest", "Mark files in a direct upload session as uploaded", "ingest", "Files recorded", jsonBody],
+  ["/v1/uploads/direct/sessions/{sessionId}/abort", "post", "ingest", "Abort a direct upload session", "ingest", "Session aborted"],
+  ["/v1/uploads/direct/sessions/{sessionId}/confirm", "post", "ingest", "Confirm a direct upload session and start its run", "ingest", "Run started"],
   ["/v1/artifacts/preview", "get", "artifacts", "Preview an artifact's content", "artifacts", "Artifact preview"],
-  ["/v1/search/chat/stream", "get", "search", "Stream a grounded workspace chat answer over SSE", "search", "Server-sent event stream"],
+  ["/v1/search/chat/stream", "get", "search", "Legacy chat stream; use POST /v1/chat/completions with stream: true", "search", "Server-sent event stream", { deprecated: true }],
   ["/v1/search/aggregate", "post", "search", "Search several workspaces and merge the results", "search", "Aggregated results", jsonBody],
   ["/v1/search/{sessionId}/feedback", "post", "search", "Record click or relevance feedback for a search session", "search", "Feedback recorded", jsonBody],
   ["/v1/search/diagnostics", "get", "search", "Zero-result diagnostics for a search session in a workspace you can read", "search", "Diagnostics or null", {
@@ -73,5 +73,11 @@ for (const [path, method, tag, summary, scope, success, extra] of entries) {
 }
 
 for (const [path, operations] of Object.entries(apiKeySurfacePaths)) {
-  if (path.startsWith("/v1/ingest/")) apiKeySurfacePaths[path.replace("/v1/ingest/", "/v1/uploads/")] = operations;
+  if (path.startsWith("/v1/uploads/")) {
+    apiKeySurfacePaths[path.replace("/v1/uploads/", "/v1/ingest/")] = Object.fromEntries(
+      Object.entries(operations).map(([method, operation]) => [method, {
+        ...operation, deprecated: true, summary: `Deprecated alias; use ${method.toUpperCase()} ${path}`,
+      }]),
+    );
+  }
 }

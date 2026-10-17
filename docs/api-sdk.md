@@ -1,6 +1,6 @@
 # HTTP API
 
-Use the HTTP API to upload documents from any language, follow their processing, and retrieve passages that cite the document and page they came from. Every endpoint is JSON over HTTPS under `https://docslurp.io/v1`, authenticated with `Authorization: Bearer <key>`.
+Use the HTTP API to upload documents from any language, follow their processing, and retrieve passages that cite the document and page they came from. Requests use HTTPS under `https://docslurp.io/v1`, authenticated with `Authorization: Bearer <key>`. Most requests use JSON; file uploads use multipart form data or signed storage PUTs.
 
 Use search when you already have an LLM or a search UI. Use chat when you want DocSlurp to write a cited answer.
 
@@ -20,7 +20,7 @@ Each result has `text`, a `score` and a `citation` with the `filename`, `pageNum
 | [Runnable Node examples](https://docslurp.io/docs/sdk#quickstart) | Upload, wait and search, progress with polling fallback, and LLM context |
 | [20-second demo](https://docslurp.io/demos/integration.mp4) | Seeing the workflow before you build it |
 
-> **Versions:** the SDK progress, workspace-state and organization methods shown below need `@docslurp/sdk` 0.2.0 or newer. A self-hosted deployment must also run an API version that has these routes.
+> **Versions:** SDK examples target `@docslurp/sdk` 0.3.0 or newer. This includes URL uploads through `upload`, batch search, workspace discovery and upload-session methods. Self-hosted deployments must run an API version with these routes.
 
 ## The contract in one minute
 
@@ -65,7 +65,7 @@ api_url="${DOCSLURP_URL:-https://docslurp.io}"
 api_url="${api_url%/}"
 
 curl --fail-with-body --silent --show-error --max-time 120 \
-  "$api_url/v1/ingest/bulk" \
+  "$api_url/v1/uploads/bulk" \
   -H "Authorization: Bearer $DOCSLURP_API_KEY" \
   -F 'files=@handbook.pdf' > accepted.json
 
@@ -144,7 +144,7 @@ Workspaces are optional. Every organization has a **default workspace**, created
 - SDK: a per-call `workspaceId`, then `createDocSlurpClient({ workspaceId })`, then `DOCSLURP_WORKSPACE_ID` (server runtimes only; browser builds never read environment variables), then `"default"` (exported as `DEFAULT_WORKSPACE_ID`).
 - CLI: `--workspace`, then `DOCSLURP_WORKSPACE_ID`, then `default`.
 
-So `client.search()`, `client.getWorkspaceState()` and `docslurp search` work with no workspace configuration.
+So `client.search({ q: "question" })`, `client.getWorkspaceState()` and `docslurp search` work with no workspace configuration.
 
 **New workspaces:** uploads only create a workspace when asked: `newWorkspace: true` (multipart `newWorkspace=true`, CLI `--new-workspace`, SDK `newWorkspace`), a `workspaceName` (CLI `--workspace-name`), or a `templateKey` (CLI `--template`). The SDK and CLI send no `workspaceId` in those cases, so a configured default workspace does not swallow the request. Without a name the new workspace titles itself from the uploaded content. An explicit `workspaceId` (including `default`) wins over these. The upload response's `workspace` record includes `id` and `slug`.
 
@@ -167,18 +167,20 @@ curl -X PATCH "$api_url/v1/workspaces/amber-falcon-ridge" \
 
 | Operation | HTTP endpoint | SDK | CLI |
 | --- | --- | --- | --- |
-| Upload files | `POST /v1/ingest/bulk` (multipart `files`, up to `MAX_MULTIPART_UPLOAD_BYTES`, 25 MB by default) or a direct upload session (`POST /v1/ingest/direct/sessions`, presigned PUTs, `.../confirm`) for larger files | `upload` (direct session above 20 MB) | `upload` (direct session above 20 MB) |
-| Ingest URLs | `POST /v1/ingest/url` | `ingestUrls` | Use SDK/HTTP |
+| Upload files | `POST /v1/uploads/bulk` (multipart `files`, up to `MAX_MULTIPART_UPLOAD_BYTES`, 25 MB by default) or a direct upload session (`POST /v1/uploads/direct/sessions`, presigned PUTs, `.../confirm`) for larger files | `upload` (direct session above 20 MB) | `upload` (direct session above 20 MB) |
+| Ingest URLs | `POST /v1/uploads/url` | `upload({ urls })` | Use SDK/HTTP |
 | Full run progress | `GET /v1/runs/:runId/progress` | `getRunProgress`; `getRun` returns only `run` | `status`, `status --watch` |
 | Live progress snapshots | `GET /v1/runs/:runId/progress/stream` | `streamProgress` | Watch uses polling |
 | Raw run/stage/document events | `GET /v1/runs/:runId/events/stream` | `streamRun` | Use SDK/HTTP |
 | Wait for successful run | Poll `GET /v1/runs/:runId/progress` | `waitForRun` | `status --watch` |
 | List runs | `GET /v1/runs` | Use HTTP | `runs` |
 | Workspace state | `GET /v1/workspaces/:workspace/state` | `getWorkspaceState` | Use SDK/HTTP |
-| Ingest report | `GET /v1/workspaces/:workspace/ingest-report` (also MCP `workspace.ingest-report`, chat `/status`) | `getIngestReport` | Use SDK/HTTP |
-| Read / rename workspace | `GET` / `PATCH /v1/workspaces/:workspace` (PATCH: session or `workspaces:manage` key) | Use HTTP | Use HTTP |
+| Ingest report | `GET /v1/workspaces/:workspace/ingest-report` (also MCP `getUploadStatus`, chat `/status`) | `getIngestReport` | Use SDK/HTTP |
+| List workspaces | `GET /v1/workspaces` | `listWorkspaces()` | Use HTTP |
+| Read workspace | `GET /v1/workspaces/:workspace` | `getWorkspace(id)` | Use HTTP |
+| Rename workspace | `PATCH /v1/workspaces/:workspace` (session or `workspaces:manage` key) | Use HTTP | Use HTTP |
 | Retrieve passages | `POST /v1/search` or `GET /v1/search` | `search` | `search` |
-| Batch retrieval | `POST /v1/search/batch` | `searchMany` | `search --queries-file` |
+| Batch retrieval | `POST /v1/search` with `{ queries }` | `search({ queries })` | `search --queries-file` |
 | Grounded chat | `POST /v1/chat` | `chat` | `chat` |
 | Read a document | `GET /v1/documents/:id` | `getDocument` | Use SDK/HTTP |
 | List / create organizations | `GET` / `POST /v1/organizations` | `listOrganizations` / `createOrganization` | Use SDK/HTTP |
@@ -190,7 +192,7 @@ curl -X PATCH "$api_url/v1/workspaces/amber-falcon-ridge" \
 | Leave organization | `POST /v1/organizations/:orgId/leave` | `leaveOrganization` | Use SDK/HTTP |
 | List / revoke organization keys | `GET` / `DELETE /v1/organizations/:orgId/api-keys` | `listOrganizationApiKeys` / `revokeOrganizationApiKeys` | Use SDK/HTTP |
 
-`/v1/search/chat` also works; the SDK and CLI use `/v1/chat`. For streamed answers, use the separate [OpenAI-compatible chat API](https://docslurp.io/docs/chat). See [search contracts](https://docslurp.io/docs/search-reference) for retrieval controls and [OpenAPI](https://docslurp.io/openapi.json) for machine-readable request and response schemas. Each deployment's OpenAPI describes that deployment.
+The SDK and CLI use `/v1/chat`. For streamed answers, use the separate [OpenAI-compatible chat API](https://docslurp.io/docs/chat). See [search contracts](https://docslurp.io/docs/search-reference) for retrieval controls and [OpenAPI](https://docslurp.io/openapi.json) for machine-readable request and response schemas. Each deployment's OpenAPI describes that deployment.
 
 ## Live ingestion progress
 
@@ -444,7 +446,7 @@ Bearer requests need a server key with the `ingest`, `search`, `artifacts` or `w
 
 Recommendation rules: read every page with vision when scanned-looking pages have no searchable text or vision stopped at the per-file page limit (`turn-on-vision` when vision is off, `vision-all-pages` otherwise; the patch sets `vision.forceAllPages` and a page limit of up to 32); retry pages where vision failed; raise the run cost cap when it stopped vision; keep tables when table-heavy pages were flattened (`preserveTables`); turn on embeddings; read video frames (`mediaVideo.enabled`); flag audio or video without a transcript (a platform setting); reprocess pages that have text but no chunks; retry failed files; and suggest a multilingual embedding profile for non-English files. Vision cost uses this workspace's observed vision spend per page when at least three pages were read, otherwise the model's catalog price.
 
-In the dashboard, ask "how did my files process?", "why can't it find page 4?" or type `/status` in chat, or use the Report button in the composer. Only the signed-in dashboard chat answers this way (`CHAT_INGEST_REPORT_NATURAL=false` keeps just `/status`); `/v1/chat`, MCP `workspace.chat` and `/v1/chat/completions` treat these as ordinary questions, so API clients read the endpoint above. Workspace editors can apply a recommendation (`POST /v1/workspaces/:workspace/ingest-report/apply` with `recommendationId` and the report's `runId`/`documentIds`, session only) after a confirmation that shows the cost; the server recomputes the report and merges the recommendation's own patch onto the stored pipeline through the regular workspace update and audit log, so a request cannot carry arbitrary settings. `POST …/ingest-report/reprocess` re-runs up to 100 affected files with the workspace's current settings.
+In the dashboard, ask "how did my files process?", "why can't it find page 4?" or type `/status` in chat, or use the Report button in the composer. Only the signed-in dashboard chat answers this way (`CHAT_INGEST_REPORT_NATURAL=false` keeps just `/status`); `/v1/chat`, MCP `chat` and `/v1/chat/completions` treat these as ordinary questions, so API clients read the endpoint above. Workspace editors can apply a recommendation (`POST /v1/workspaces/:workspace/ingest-report/apply` with `recommendationId` and the report's `runId`/`documentIds`, session only) after a confirmation that shows the cost; the server recomputes the report and merges the recommendation's own patch onto the stored pipeline through the regular workspace update and audit log, so a request cannot carry arbitrary settings. `POST …/ingest-report/reprocess` re-runs up to 100 affected files with the workspace's current settings.
 
 ## Organization access and management
 
