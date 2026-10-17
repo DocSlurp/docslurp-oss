@@ -500,7 +500,7 @@ export function classifyRateLimitCategory(method: string, path: string): RateLim
   const normalizedMethod = method.toUpperCase();
 
   if (normalizedPath.startsWith("/webhooks/")) return "webhook";
-  if (normalizedPath.startsWith("/v1/ingest")) return "upload";
+  if ((normalizedPath.startsWith("/v1/ingest") || normalizedPath === "/v1/uploads" || normalizedPath.startsWith("/v1/uploads/"))) return "upload";
   if (
     normalizedPath.startsWith("/v1/search/chat")
     || normalizedPath === "/v1/chat"

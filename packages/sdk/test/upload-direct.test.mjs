@@ -12,7 +12,7 @@ function fakeApi({ mode = "single", partSize = 4 } = {}) {
     const href = String(url);
     const headers = new Headers(init.headers);
     calls.push({ url: href, method: init.method ?? "GET", auth: headers.get("authorization"), contentType: headers.get("content-type"), body: init.body });
-    if (href.endsWith("/v1/ingest/direct/sessions")) {
+    if (href.endsWith("/v1/uploads/direct/sessions")) {
       const request = JSON.parse(init.body);
       return json({
         sessionId: "s1",
@@ -26,7 +26,7 @@ function fakeApi({ mode = "single", partSize = 4 } = {}) {
     if (href.endsWith("/files/complete")) return json({ ok: true });
     if (href.endsWith("/confirm")) return json(uploadResult, 201);
     if (href.endsWith("/abort")) return json({ ok: true });
-    if (href.endsWith("/v1/ingest/bulk")) return json(uploadResult, 201);
+    if (href.endsWith("/v1/uploads/bulk")) return json(uploadResult, 201);
     return json({ error: "unexpected" }, 500);
   };
   return { fetch, calls };
@@ -40,10 +40,10 @@ test("uploads above the threshold go through a direct session, never multipart /
   assert.equal(result.run.id, "run");
   const urls = api.calls.map((call) => `${call.method} ${call.url}`);
   assert.deepEqual(urls, [
-    "POST https://api.invalid/v1/ingest/direct/sessions",
+    "POST https://api.invalid/v1/uploads/direct/sessions",
     "PUT https://storage.invalid/put/0",
-    "POST https://api.invalid/v1/ingest/direct/sessions/s1/files/complete",
-    "POST https://api.invalid/v1/ingest/direct/sessions/s1/confirm",
+    "POST https://api.invalid/v1/uploads/direct/sessions/s1/files/complete",
+    "POST https://api.invalid/v1/uploads/direct/sessions/s1/confirm",
   ]);
   const session = JSON.parse(api.calls[0].body);
   assert.deepEqual(session.files, [{ filename: "big.pdf", mimeType: "application/pdf", sizeBytes: big.size, canonicalId: "/manual" }]);
@@ -58,7 +58,7 @@ test("small uploads keep the single multipart request", async () => {
   const api = fakeApi();
   const client = createDocSlurpClient({ apiUrl: "https://api.invalid", apiKey: "key", fetch: api.fetch });
   await client.upload(new Blob(["hello"], { type: "text/plain" }));
-  assert.deepEqual(api.calls.map((call) => call.url), ["https://api.invalid/v1/ingest/bulk"]);
+  assert.deepEqual(api.calls.map((call) => call.url), ["https://api.invalid/v1/uploads/bulk"]);
 });
 
 test("multipart sessions upload each part slice and complete with their ETags", async () => {
@@ -82,5 +82,5 @@ test("a failed storage PUT aborts the session and surfaces the error", async () 
     assert.match(error.message, /don’t have access/);
     return true;
   });
-  assert.ok(api.calls.some((call) => call.url.endsWith("/v1/ingest/direct/sessions/s1/abort")));
+  assert.ok(api.calls.some((call) => call.url.endsWith("/v1/uploads/direct/sessions/s1/abort")));
 });

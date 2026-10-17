@@ -49,7 +49,7 @@ export function createChatMcpTools(args: {
     for (const key of ["results", "citations", "data", "response", "operation"]) collectEvidence(object[key]);
   }
 
-  for (const definition of args.manifest.capabilities.filter(item => item.category === "tool" && !item.id.startsWith(CHAT_EXCLUDED_TOOL_PREFIX))) {
+  for (const definition of args.manifest.capabilities.filter(item => item.category === "tool" && !item.id.startsWith(CHAT_EXCLUDED_TOOL_PREFIX) && !["upload", "completeUpload", "listWorkspaces"].includes(item.id))) {
     // OpenAI-compatible providers restrict function names to letters, numbers, _ and -.
     const name = definition.id.replace(/[^a-zA-Z0-9_-]/g, "_");
     if (tools[name]) throw new Error("Duplicate model tool name");
@@ -64,7 +64,7 @@ export function createChatMcpTools(args: {
         // G-04: the user-selected workspace is the only scope. It is applied
         // after the model's arguments, so a prompt-injected workspaceId can't
         // send a search into another workspace the user happens to reach.
-        const body = definition.id === "workspace.search-many"
+        const body = (["workspace.search-many", "searchMany"].includes(definition.id) || (definition.id === "search" && Array.isArray(supplied.queries)))
           ? { ...supplied, queries: Array.isArray(supplied.queries)
             ? supplied.queries.map(q => ({ ...(q && typeof q === "object" && !Array.isArray(q) ? q : {}), workspaceId: args.workspaceId }))
             : supplied.queries }

@@ -62,7 +62,7 @@ URL ingestion uses each URL as its canonical ID unless you set one.
 
 ```js
 await client.upload([{ data: productsMdx, filename: "products.mdx", canonicalId: "/products" }]);
-await client.ingestUrls({ urls: [{ url: "https://example.com/products.mdx", canonicalId: "/products" }] });
+await client.upload({ urls: [{ url: "https://example.com/products.mdx", canonicalId: "/products" }] });
 ```
 
 To react when a replacement goes live, for example to refresh a cache, listen for `document.replaced`:
@@ -158,21 +158,21 @@ A `createReadStream()` upload streams with backpressure and is sent once, so it 
 ### Ingest public URLs
 
 ```js
-const accepted = await client.ingestUrls({
+const accepted = await client.upload({
   urls: ["https://your-public-host.example/handbook.pdf"], // Replace with your URL.
 });
 await client.waitForRun(accepted.run.id);
 ```
 
-DocSlurp must be able to reach the URLs. URL ingestion isn't retried automatically. For local files, use `upload()`.
+DocSlurp must be able to reach the URLs. URL ingestion is retried only when you supply an `idempotencyKey`. Use the same `upload()` method for local files or public URLs.
 
 ### Search several questions in one request
 
 ```js
-const batch = await client.searchMany([
+const batch = await client.search({ queries: [
   { q: "leave eligibility" },
   { workspaceId: "legal-contracts", q: "notice requirements", filenameContains: "handbook" },
-], { concurrency: 2 }, { signal: AbortSignal.timeout(30_000) });
+], concurrency: 2 }, { signal: AbortSignal.timeout(30_000) });
 
 for (const [index, result] of batch.results.entries()) {
   if (result.ok) console.log(index, result.data.results, result.data.availability);
@@ -180,7 +180,7 @@ for (const [index, result] of batch.results.entries()) {
 }
 ```
 
-`searchMany` takes **1 to 20 queries** and runs **1 to 4 at a time** (default 4). Results stay in input order. A successful batch can still contain failed queries, so check each `ok`. Every query can incur retrieval charges; batching doesn't make them free.
+`search({ queries })` takes **1 to 20 queries** and runs **1 to 4 at a time** (default 4). Results stay in input order. A successful batch can still contain failed queries, so check each `ok`. Every query can incur retrieval charges; batching doesn't make them free.
 
 ### Live counts and performance
 
@@ -387,7 +387,7 @@ const client = createDocSlurpClient({
 | Polling interval | `pollIntervalMs`, then 1 second |
 | HTTP transport | The `fetch` option, then the global `fetch` |
 
-Environment variables are read once, when the client is created, and only on the server. An empty or blank `workspaceId` falls through to the next setting. For uploads and `ingestUrls`, `newWorkspace: true`, a `workspaceName` or a `templateKey` creates a new workspace instead of using the configured one, unless you also pass a per-call `workspaceId` (which then wins, and the name and template are ignored).
+Environment variables are read once, when the client is created, and only on the server. An empty or blank `workspaceId` falls through to the next setting. For file and URL uploads, `newWorkspace: true`, a `workspaceName` or a `templateKey` creates a new workspace instead of using the configured one, unless you also pass a per-call `workspaceId` (which then wins, and the name and template are ignored).
 
 **In the browser:** never put a server key in public code; call DocSlurp through your backend instead. Inside a signed-in DocSlurp dashboard session, `createDocSlurpClient({ apiUrl: "" })` uses same-origin cookies. Browser clients don't read environment variables. On the server, `apiKey: ""` turns off the environment key. You can pass browser `File` objects straight to `upload()`. Releases after 0.2.0 throw `UnsafeApiKeyError` if a `dslp_priv_` server key is used in a browser.
 
@@ -397,7 +397,7 @@ Environment variables are read once, when the client is created, and only on the
 | --- | --- | --- |
 | `upload(fileOrStream, options?)` | `{ workspace, run, documents, warnings? }` | `ingest` |
 | `upload({ files, ...metadata }, options?)` | Same accepted ingestion response | `ingest` |
-| `ingestUrls({ urls, ...metadata }, request?)` | Same accepted ingestion response | `ingest` |
+| `upload({ urls, ...metadata }, options?)` | Same accepted ingestion response | `ingest` |
 | `getRun(runId, request?)` | Run record (not the progress envelope) | Any of `ingest`, `search`, `artifacts` |
 | `getRunProgress(runId, request?)` | Full typed progress snapshot | Same as `getRun` |
 | `streamProgress(runId, options?)` | Async iterable of full snapshots with polling fallback | Same as `getRun` |
@@ -407,7 +407,7 @@ Environment variables are read once, when the client is created, and only on the
 | `streamRun(runId, options?)` | Async iterable of `{ event, id?, data }` | Same as `getRun` |
 | `streamActivity(options?)` | Async iterable of account activity events, filtered by `types` and workspace UUID | Same as `getRun` |
 | `search(input, request?)` | Async iterable of hits; await for `{ results, availability, sessionId, usage }` | `search` |
-| `searchMany(inputs, batch?, request?)` | `{ results: [{ ok, data?, error? }] }` | `search` |
+| `search({ queries, concurrency? }, options?)` | `{ results: [{ ok, data?, error? }] }` | `search` |
 | `chat({ q, workspaceId?, sessionId? }, request?)` | Answer, citations, availability, session IDs, usage, runtime | `search` |
 | `getDocument(documentId, request?)` | Typed document viewer envelope (`viewer.document`) | `artifacts` |
 | `listOrganizations(request?)` / `getOrganization(id, request?)` | Organization records | `organizations:read` or `organizations:manage` |
@@ -444,7 +444,7 @@ All outputs below are **illustrative**, not measurements or IDs from a real acco
 const accepted = await client.upload(new Blob(["Policy text"]), { filename: "policy.txt" }); // Default workspace.
 // The same upload as a file list, into the "policies" workspace:
 await client.upload({ files: [{ data: new Blob(["Policy text"]), filename: "policy.txt" }], workspaceId: "policies" });
-const remote = await client.ingestUrls({ urls: ["https://files.example/policy.pdf"], workspaceId: "policies" });
+const remote = await client.upload({ urls: ["https://files.example/policy.pdf"], workspaceId: "policies" });
 ```
 
 Both methods return the same shape. Illustrative **excerpt**:
@@ -473,7 +473,7 @@ Both methods return the same shape. Illustrative **excerpt**:
 }
 ```
 
-`upload` also takes a single `File`, a `{ data, filename? }` object, a Node byte stream, any async byte iterable, or an array of files. Metadata is optional (see the [reference above](#method-reference)); options in the second argument override metadata in the upload object. Put `filename`, `signal` and `timeoutMs` in the second argument. `ingestUrls` requires `urls` and takes the same metadata except `idempotencyKey`. A PDF's page count can still be zero when the upload is accepted.
+`upload` also takes a single `File`, a `{ data, filename? }` object, a Node byte stream, any async byte iterable, or an array of files. Metadata is optional (see the [reference above](#method-reference)); options in the second argument override metadata in the upload object. Put `filename`, `signal` and `timeoutMs` in the second argument. URL uploads require `urls` and accept workspace metadata and an optional `idempotencyKey`. A PDF's page count can still be zero when the upload is accepted.
 
 ### Run reads, waits and both streams
 
@@ -743,7 +743,7 @@ Illustrative full search response with one hit (every hit field shown):
 Pass `documentId` to search a single document. A search with no hits still returns `sessionId`, `usage` and `availability`, with `results: []`, and iterating it yields nothing. Hits can include `parentText`, and `availability` can be `null`.
 
 ```js
-const batch = await client.searchMany([{ q: "leave notice" }, { q: "eligibility", workspaceId: "policies" }], { concurrency: 2 });
+const batch = await client.search({ queries: [{ q: "leave notice" }, { q: "eligibility", workspaceId: "policies" }], concurrency: 2 });
 ```
 
 Illustrative **excerpt**. Each successful `data` is a full search response like the one above:
@@ -1090,7 +1090,7 @@ Organization scopes are opt-in and never part of the default `ingest`, `search` 
 
 ## Timeouts, cancellation, and errors
 
-Every network method takes `{ signal, timeoutMs }`; for `searchMany` it's the **third** argument. A timeout or abort stops your request or wait, not processing on the server. To resume, check the saved run ID instead of uploading again.
+Network methods accept request options with `{ signal, timeoutMs }`; both forms of `search` take these as the second argument. A timeout or abort stops your request or wait, not processing on the server. To resume, check the saved run ID instead of uploading again.
 
 ```js
 import { DocSlurpApiError, DocSlurpRunError, DocSlurpTimeoutError } from "@docslurp/sdk";
@@ -1133,3 +1133,26 @@ Pre-release: APIs may change, so pin the version you validate in production. MIT
 [![17th Street Labs logo](https://docslurp.io/sponsors/17th-street-labs-readme.svg)](https://17thstreetlabs.com)
 
 [17th Street Labs](https://17thstreetlabs.com) is DocSlurp’s primary sponsor.
+
+### Workspace discovery and signed uploads
+
+`listWorkspaces()` returns the accessible workspace records. Pass a returned ID to `getWorkspace(id)` for details. Upload, search and chat use the default workspace when none is supplied. `upload({ files, workspaceName: "Product manuals" })` or `upload({ urls, workspaceName: "Product manuals" })` explicitly creates a named workspace.
+
+For normal file uploads, `upload()` handles storage transfer and ingestion automatically. Agents that transfer bytes separately can use:
+
+```js
+const session = await client.createUploadSession({
+  workspaceName: "Product manuals",
+  files: [{ filename: "manual.pdf", mimeType: "application/pdf", sizeBytes: bytes.byteLength, singlePart: true }],
+});
+const file = session.files[0];
+const stored = await fetch(file.putUrl, { method: "PUT", headers: file.headers, body: bytes });
+if (!stored.ok) throw new Error("Storage upload failed");
+await client.completeUploadFile(session.sessionId, { fileId: file.id });
+const accepted = await client.completeUploadSession(session.sessionId);
+await client.waitForRun(accepted.run.id);
+```
+
+Signed URLs expire after 15 minutes. Treat them as credentials and never attach the DocSlurp API key to a storage request. `getUploadSession(sessionId)` refreshes pending transfer URLs. Complete every file before completing the session; the server checks stored sizes before starting ingestion. Use `abortUploadSession(sessionId)` to clean up an abandoned session. Session completion is not retry-idempotent.
+
+The canonical HTTP upload prefix is `/v1/uploads`; `/v1/ingest` remains an alias with the same access, size and rate limits. `POST /v1/search` accepts either `{ q, ...filters }` or `{ queries, concurrency? }`. The older `/v1/search/batch`, SDK `searchMany` and `ingestUrls` remain compatibility aliases; new integrations should use `search` and `upload`.

@@ -5,7 +5,7 @@ const release = vi.hoisted(() => vi.fn());
 vi.mock("../lib/auth.js", () => ({ appDbPool: { query, connect: async () => ({ query, release }) } }));
 vi.mock("../lib/request-actor.js", () => ({ resolveBetterAuthSessionActor: vi.fn(async () => null) }));
 import { mcpOAuthRoutes, mcpOAuthMetadataRoutes } from "../routes/mcp-oauth.js";
-import { pkceChallenge, validRedirect, validateMcpToken } from "../services/mcp-oauth.js";
+import { parseScopes, pkceChallenge, validRedirect, validateMcpToken } from "../services/mcp-oauth.js";
 const app = new Hono().route("/oauth/mcp", mcpOAuthRoutes).route("/", mcpOAuthMetadataRoutes);
 const url = "http://localhost:4321";
 const verifier = "x".repeat(43);
@@ -16,6 +16,10 @@ function token(values: Record<string, string | undefined>) {
 }
 beforeEach(() => { vi.stubEnv("NODE_ENV", "test"); vi.stubEnv("MCP_PUBLIC_URL", url); query.mockReset(); query.mockResolvedValue({ rows: [], rowCount: 1 }); });
 describe("MCP OAuth", () => {
+  it("requests upload access in new default consent while respecting explicit read-only scopes", () => {
+    expect(parseScopes(null)).toEqual(["search", "read", "ingest"]);
+    expect(parseScopes("search read")).toEqual(["search", "read"]);
+  });
   it("advertises PKCE and path-specific protected resource metadata", async () => { const res = await app.request(`${url}/.well-known/oauth-authorization-server`); expect((await res.json()).code_challenge_methods_supported).toEqual(["S256"]); expect((await (await app.request(`${url}/.well-known/oauth-protected-resource/v1/mcp`)).json()).resource).toBe(`${url}/v1/mcp`); });
   it("rejects unsafe redirect URIs", () => { expect(validRedirect("https://client.example/cb")).toBe(true); expect(validRedirect("http://127.0.0.1:1234/cb")).toBe(true); for (const uri of ["javascript:alert(1)", "https://user:pass@example.com", "https://example.com/#token", "http://remote.example/cb"])
     expect(validRedirect(uri)).toBe(false); });

@@ -26,6 +26,12 @@ describe("chat MCP tools", () => {
     expect(JSON.parse(t.dispatch.mock.calls[3]![1]!.body as string).workspaceId).toBe("selected");
   });
 
+  it("pins the product search alias to the selected workspace", async () => {
+    const t = setup(["search"]);
+    await t.execute("search", { queries: [{ q: "a", workspaceId: "foreign" }] });
+    expect(JSON.parse(t.dispatch.mock.calls[0]![1]!.body as string).queries[0].workspaceId).toBe("selected");
+  });
+
   it("has no cost approval argument to pass through (schemas define none)", async () => {
     const { aiAdvancedRequestSchema, aiSimpleRequestSchema } = await import("@docslurp/shared");
     for (const schema of [aiSimpleRequestSchema, aiAdvancedRequestSchema]) {
@@ -35,7 +41,7 @@ describe("chat MCP tools", () => {
   });
 
   it("does not offer automation tools that fetch sourceUrls or start paid work (G-04)", () => {
-    const t = setup(["workspace.search", "ai.simple", "ai.advanced", "ai.operation.get"]);
+    const t = setup(["workspace.search", "ai.simple", "ai.advanced", "ai.operation.get", "upload", "completeUpload", "listWorkspaces"]);
     expect(Object.keys(t.tools)).toEqual(["workspace_search"]);
   });
 

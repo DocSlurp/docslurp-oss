@@ -119,7 +119,7 @@ export const simpleServiceSchemas = {
   },
 };
 
-export const simpleServicePaths = {
+const legacyServicePaths = {
   "/v1/ingest/bulk": { post: {
     tags: ["ingest"], summary: "Upload files into the default workspace, a chosen workspace, or a new one", security: serviceSecurity,
     description: "One buffered multipart request, capped at MAX_MULTIPART_UPLOAD_BYTES (25 MB by default; 413 code multipart_upload_too_large above it). Upload larger files with a direct upload session: POST /v1/ingest/direct/sessions, PUT to the returned URLs, then confirm.",
@@ -144,7 +144,7 @@ export const simpleServicePaths = {
       { in: "query", name: "q", required: true, schema: { type: "string" } }, { in: "query", name: "workspaceId", description: workspaceRef.description, schema: { type: "string" } }, { in: "query", name: "limit", schema: { type: "integer", minimum: 1, maximum: 100 } },
       { in: "query", name: "minScore", description: minScoreDescription, schema: { type: "number", minimum: 0, maximum: 1 } },
     ], responses: { "200": response("Cited passages with corpus availability", ref("SearchResponse")), ...errors } },
-    post: { tags: ["search"], summary: "Search a workspace", security: serviceSecurity, requestBody: request(scopedQuery), responses: { "200": response("Cited passages with corpus availability", ref("SearchResponse")), ...errors } },
+    post: { tags: ["search"], summary: "Search a workspace", security: serviceSecurity, requestBody: request({ oneOf: [scopedQuery, z.toJSONSchema(batchSearchInputSchema)] }), responses: { "200": response("Single-query passages or ordered batch outcomes", { oneOf: [ref("SearchResponse"), ref("BatchSearchResponse")] }), ...errors } },
   },
   "/v1/search/batch": { post: {
     tags: ["search"], summary: "Retrieve cited passages for up to 20 independent queries", security: serviceSecurity,
@@ -172,4 +172,9 @@ export const simpleServicePaths = {
     requestBody: request(ref("ChatCompletionRequest")),
     responses: { "200": { description: "Completion JSON, or data-only SSE chunks ending with [DONE]. include_usage adds a final usage chunk. Usage covers answer generation; retrieval is logged separately.", content: { ...json(ref("ChatCompletion")), "text/event-stream": { schema: { type: "string" } } } }, ...errors, "500": { description: "Workspace answer failed" } },
   } },
+};
+
+export const simpleServicePaths = { ...legacyServicePaths,
+  "/v1/uploads/bulk": legacyServicePaths["/v1/ingest/bulk"],
+  "/v1/uploads/url": legacyServicePaths["/v1/ingest/url"],
 };

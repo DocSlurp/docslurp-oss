@@ -116,6 +116,16 @@ export function createApiApp(): Hono {
       maxSize: env.maxUploadBytes
     })
   );
+  app.use(
+    "/v1/uploads/bulk",
+    multipartBodyLimit(env.maxMultipartUploadBytes)
+  );
+  app.use(
+    "/v1/uploads/*",
+    bodyLimit({
+      maxSize: env.maxUploadBytes
+    })
+  );
 
   app.use(
     "/webhooks/stripe",
@@ -147,6 +157,7 @@ export function createApiApp(): Hono {
   app.route("/v1/documents", documentsRoutes);
   app.route("/v1/extractors", extractorRoutes);
   app.route("/v1/ingest", uploadsRoutes);
+  app.route("/v1/uploads", uploadsRoutes);
   app.route("/v1/webhooks", webhooksRoutes);
   app.route("/v1/artifacts", artifactsRoutes);
   app.route("/v1/files", filesRoutes);

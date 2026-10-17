@@ -152,7 +152,7 @@ export type UploadOptions = RequestOptions & {
    * How files reach storage. "auto" (default) sends uploads larger than
    * DIRECT_UPLOAD_THRESHOLD_BYTES through a direct upload session (presigned
    * PUTs straight to object storage); smaller ones use one multipart request
-   * to /v1/ingest/bulk, which the server caps at MAX_MULTIPART_UPLOAD_BYTES
+   * to /v1/uploads/bulk, which the server caps at MAX_MULTIPART_UPLOAD_BYTES
    * (25 MB by default). Streams always use multipart. Direct sessions ignore
    * idempotencyKey.
    */
@@ -196,7 +196,8 @@ export type UploadResponse = {
   workspace: WorkspaceRecord;
 };
 
-export type IngestUrlInput = {
+export type UploadUrlsInput = {
+  idempotencyKey?: string;
   newWorkspace?: boolean;
   orgId?: string;
   templateKey?: WorkspaceTemplateKey;
@@ -205,6 +206,9 @@ export type IngestUrlInput = {
   workspaceId?: string;
   workspaceName?: string;
 };
+
+/** @deprecated Use UploadUrlsInput. */
+export type IngestUrlInput = UploadUrlsInput;
 
 export type SearchInput = {
   documentId?: string;
@@ -246,6 +250,8 @@ export type SearchBatchOptions = {
   /** Maximum simultaneous searches. Defaults to 4; allowed range: 1–4. */
   concurrency?: number;
 };
+
+export type SearchBatchInput = SearchBatchOptions & { queries: SearchInput[] };
 
 export type SearchBatchResponse = {
   /** One outcome per input query, in input order. */
@@ -410,20 +416,29 @@ export class DocSlurpApiError extends Error {
 
 /**
  * Uploads above this total size go through a direct upload session instead of
- * multipart /v1/ingest/bulk (server cap: MAX_MULTIPART_UPLOAD_BYTES, 25 MB).
+ * multipart /v1/uploads/bulk (server cap: MAX_MULTIPART_UPLOAD_BYTES, 25 MB).
  */
 export const DIRECT_UPLOAD_THRESHOLD_BYTES = 20 * 1024 * 1024;
 
-type DirectUploadDescriptor = {
+export type DirectUploadDescriptor = {
   id: string;
   filename: string;
   mimeType: string;
   sizeBytes: number;
   mode: "single" | "multipart";
   putUrl?: string;
+  method?: "PUT";
+  headers?: Record<string, string>;
+  expiresInSeconds?: number;
   partSize?: number;
   pendingParts?: Array<{ partNumber: number; sizeBytes: number; url: string }>;
 };
+
+export type UploadSessionInput = Omit<UploadInput, "files" | "idempotencyKey"> & {
+  files: Array<{ filename: string; mimeType: string; sizeBytes: number; canonicalId?: string; singlePart?: boolean }>;
+};
+export type UploadSession = { sessionId: string; status: string; files: DirectUploadDescriptor[] };
+export type CompleteUploadFileInput = { fileId: string; etag?: string; parts?: Array<{ partNumber: number; etag: string }> };
 
 function normalizeApiUrl(apiUrl: string): string {
   return apiUrl.replace(/\/+$/, "");
@@ -797,10 +812,34 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
     return { ...input, workspaceId: input.workspaceId?.trim() || workspaceId };
   }
 
+  function uploadUrls(input: UploadUrlsInput, options?: RequestOptions): Promise<UploadResponse> {
+    const { idempotencyKey, urls, workspaceName, orgId, templateKey } = input;
+    const body = { urls, workspaceName, orgId, templateKey, ...intakeTarget(input) };
+    return request("/v1/uploads/url", {
+      ...jsonRequest("POST", body),
+      headers: { "Content-Type": "application/json", ...(idempotencyKey ? { "Idempotency-Key": idempotencyKey } : {}) },
+    }, options, Boolean(idempotencyKey));
+  }
+
+  function search(input: SearchInput, options?: RequestOptions): SearchRequest;
+  function search(input: SearchBatchInput, options?: RequestOptions): Promise<SearchBatchResponse>;
+  function search(input: SearchInput | SearchBatchInput, options?: RequestOptions): SearchRequest | Promise<SearchBatchResponse> {
+    if ("queries" in input) {
+      if (input.queries.length < 1 || input.queries.length > 20) throw new RangeError("search accepts 1–20 queries.");
+      const concurrency = input.concurrency ?? 4;
+      if (!Number.isInteger(concurrency) || concurrency < 1 || concurrency > 4) throw new RangeError("Search concurrency must be an integer from 1 to 4.");
+      return request<SearchBatchResponse>("/v1/search", jsonRequest("POST", { queries: input.queries.map(inWorkspace), concurrency }), options);
+    }
+    const response = request<SearchResponse>("/v1/search", jsonRequest("POST", inWorkspace(input)), options);
+    return Object.assign(response, { async *[Symbol.asyncIterator]() { yield* (await response).results; } });
+  }
+
   function upload(input: Array<Blob | File | UploadFileInput>, options?: UploadOptions): Promise<UploadResponse>;
+  function upload(input: UploadUrlsInput, options?: UploadOptions): Promise<UploadResponse>;
   function upload(input: UploadInput, options?: UploadOptions): Promise<UploadResponse>;
   function upload(input: Blob | UploadFileInput | UploadByteStream, options?: UploadOptions): Promise<UploadResponse>;
-  async function upload(input: UploadInput | Blob | UploadFileInput | UploadByteStream | Array<Blob | File | UploadFileInput>, options: UploadOptions = {}): Promise<UploadResponse> {
+  async function upload(input: UploadUrlsInput | UploadInput | Blob | UploadFileInput | UploadByteStream | Array<Blob | File | UploadFileInput>, options: UploadOptions = {}): Promise<UploadResponse> {
+    if ("urls" in input) return uploadUrls({ ...input, ...options }, options);
     if (Array.isArray(input)) input = { files: input };
     const metadata = "files" in input ? { ...input, ...options } : options;
     const fields: Record<string, string> = {};
@@ -819,7 +858,7 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
         headers.set("Content-Type", `multipart/form-data; boundary=${stream.boundary}`);
         const init: RequestInit & { duplex: "half" } = { body: stream.body, headers, method: "POST", duplex: "half" };
         // A consumed source cannot be replayed, even with an idempotency key.
-        return await request<UploadResponse>("/v1/ingest/bulk", init, options, false, stream.dispose);
+        return await request<UploadResponse>("/v1/uploads/bulk", init, options, false, stream.dispose);
       } finally { stream.dispose(); }
     }
     const files = "files" in input ? input.files : [input];
@@ -835,7 +874,7 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
     for (const [index, blob] of blobs.entries()) form.append("files", blob, names[index]);
     if (!fields.canonicalId && canonicalIds.some(Boolean)) fields.canonicalIds = JSON.stringify(canonicalIds);
     for (const [name, value] of Object.entries(fields)) form.set(name, value);
-    return request<UploadResponse>("/v1/ingest/bulk", { body: form, headers, method: "POST" }, options, Boolean(metadata.idempotencyKey));
+    return request<UploadResponse>("/v1/uploads/bulk", { body: form, headers, method: "POST" }, options, Boolean(metadata.idempotencyKey));
   }
 
   /** PUT to a presigned storage URL: no API credentials, its own long deadline. */
@@ -869,7 +908,7 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
     target: { newWorkspace: boolean; workspaceId?: string };
   }, options: UploadOptions): Promise<UploadResponse> {
     const { metadata } = args;
-    const session = await request<{ sessionId: string; files: DirectUploadDescriptor[] }>("/v1/ingest/direct/sessions", jsonRequest("POST", {
+    const session = await request<{ sessionId: string; files: DirectUploadDescriptor[] }>("/v1/uploads/direct/sessions", jsonRequest("POST", {
       ...(metadata.orgId ? { orgId: metadata.orgId } : {}),
       ...(args.target.workspaceId ? { workspaceId: args.target.workspaceId } : {}),
       ...(args.target.newWorkspace ? { newWorkspace: true } : {}),
@@ -882,7 +921,7 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
         ...(args.canonicalIds[index] ? { canonicalId: args.canonicalIds[index] } : {}),
       })),
     }), options);
-    const sessionPath = `/v1/ingest/direct/sessions/${encodeURIComponent(session.sessionId)}`;
+    const sessionPath = `/v1/uploads/direct/sessions/${encodeURIComponent(session.sessionId)}`;
     const remaining = args.blobs.map((blob, index) => ({ blob, name: args.names[index] }));
     try {
       for (const descriptor of session.files) {
@@ -1000,36 +1039,35 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
       return request<DocumentViewerPayload>(`/v1/documents/${encodeURIComponent(documentId)}`, {}, requestOptions, true);
     },
 
-    ingestUrls(input: IngestUrlInput, requestOptions?: RequestOptions): Promise<UploadResponse> {
-      return request<UploadResponse>("/v1/ingest/url", {
-        body: JSON.stringify({ ...input, ...intakeTarget(input) }),
-        headers: { "Content-Type": "application/json" },
-        method: "POST",
-      }, requestOptions);
+    uploadUrls,
+    /** @deprecated Use upload({ urls }) or uploadUrls(). */
+    ingestUrls: uploadUrls,
+    async listWorkspaces(options?: RequestOptions): Promise<WorkspaceRecord[]> {
+      return (await request<{ workspaces: WorkspaceRecord[] }>("/v1/workspaces", {}, options, true)).workspaces;
+    },
+    getWorkspace(id: string, options?: RequestOptions): Promise<WorkspaceRecord> {
+      return request(`/v1/workspaces/${encodeURIComponent(id)}`, {}, options, true);
+    },
+    createUploadSession(input: UploadSessionInput, options?: RequestOptions): Promise<UploadSession> {
+      return request("/v1/uploads/direct/sessions", jsonRequest("POST", { ...input, ...intakeTarget(input) }), options);
+    },
+    getUploadSession(sessionId: string, options?: RequestOptions): Promise<UploadSession> {
+      return request(`/v1/uploads/direct/sessions/${encodeURIComponent(sessionId)}`, {}, options, true);
+    },
+    completeUploadFile(sessionId: string, input: CompleteUploadFileInput, options?: RequestOptions): Promise<{ ok: boolean }> {
+      return request(`/v1/uploads/direct/sessions/${encodeURIComponent(sessionId)}/files/complete`, jsonRequest("POST", input), options);
+    },
+    completeUploadSession(sessionId: string, options?: RequestOptions): Promise<UploadResponse> {
+      return request(`/v1/uploads/direct/sessions/${encodeURIComponent(sessionId)}/confirm`, { method: "POST" }, options);
+    },
+    abortUploadSession(sessionId: string, options?: RequestOptions): Promise<{ ok: boolean }> {
+      return request(`/v1/uploads/direct/sessions/${encodeURIComponent(sessionId)}/abort`, { method: "POST" }, options);
     },
 
-    search(input: SearchInput, requestOptions?: RequestOptions): SearchRequest {
-      const response = request<SearchResponse>("/v1/search", {
-        body: JSON.stringify(inWorkspace(input)),
-        headers: { "Content-Type": "application/json" },
-        method: "POST",
-      }, requestOptions);
-      return Object.assign(response, {
-        async *[Symbol.asyncIterator]() {
-          yield* (await response).results;
-        },
-      });
-    },
-
+    search,
+    /** @deprecated Use search({ queries, concurrency }) instead. */
     searchMany(inputs: SearchInput[], batchOptions: SearchBatchOptions = {}, requestOptions?: RequestOptions): Promise<SearchBatchResponse> {
-      if (inputs.length < 1 || inputs.length > 20) throw new RangeError("searchMany accepts 1–20 queries.");
-      const concurrency = batchOptions.concurrency ?? 4;
-      if (!Number.isInteger(concurrency) || concurrency < 1 || concurrency > 4) throw new RangeError("Search concurrency must be an integer from 1 to 4.");
-      return request<SearchBatchResponse>("/v1/search/batch", {
-        body: JSON.stringify({ queries: inputs.map(inWorkspace), concurrency }),
-        headers: { "Content-Type": "application/json" },
-        method: "POST",
-      }, requestOptions);
+      return search({ queries: inputs, ...batchOptions }, requestOptions);
     },
 
     upload,

@@ -61,6 +61,7 @@ const ingestUrlSchema = z.object({
 });
 
 const directUploadFileSchema = z.object({
+  singlePart: z.boolean().optional(),
   filename: z.string().min(1).max(512),
   mimeType: z.string().min(1).max(256),
   sizeBytes: z.number().int().nonnegative(),

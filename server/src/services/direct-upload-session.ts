@@ -19,6 +19,7 @@ import {
   type WorkspaceIntakeItem,
 } from "./workspace-intake.js";
 
+const SIGNED_UPLOAD_TTL_SECONDS = 900;
 const MULTIPART_THRESHOLD_BYTES = 32 * 1024 * 1024;
 const MULTIPART_PART_SIZE_BYTES = 8 * 1024 * 1024;
 
@@ -28,6 +29,8 @@ export interface DirectUploadSessionFileInput {
   sizeBytes: number;
   sha256?: string;
   canonicalId?: string | null;
+  /** Request one signed PUT instead of multipart (maximum 5 GiB). */
+  singlePart?: boolean;
 }
 
 export interface CreateDirectUploadSessionInput {
@@ -148,9 +151,13 @@ export async function buildDirectUploadFileDescriptor(file: UploadSessionFileRow
       sizeBytes: file.size_bytes,
       mode: "single" as const,
       status: file.status,
+      method: "PUT" as const,
+      headers: { "Content-Type": file.mime_type },
+      expiresInSeconds: SIGNED_UPLOAD_TTL_SECONDS,
       putUrl: await signSingleUploadPut({
         key: file.source_key,
         contentType: file.mime_type,
+        expiresInSeconds: SIGNED_UPLOAD_TTL_SECONDS,
       }),
     };
   }
@@ -203,6 +210,9 @@ export async function buildDirectUploadFileDescriptor(file: UploadSessionFileRow
 }
 
 export async function createDirectUploadSession(input: CreateDirectUploadSessionInput) {
+  if (input.files.some(file => file.singlePart && file.sizeBytes > 5 * 1024 ** 3)) {
+    throw new WorkspaceIntakeError("Single-part uploads cannot exceed 5 GiB", 400);
+  }
   // Workspace Intake's policy screens declared files before any upload target exists.
   const files = input.files.map((file) => ({
     ...file,
@@ -238,7 +248,7 @@ export async function createDirectUploadSession(input: CreateDirectUploadSession
 
   for (const file of files) {
     const sourceKey = rawSourceKey(input.userId, file.filename);
-    const isMultipart = file.sizeBytes >= MULTIPART_THRESHOLD_BYTES;
+    const isMultipart = !file.singlePart && file.sizeBytes >= MULTIPART_THRESHOLD_BYTES;
     const partSize = isMultipart ? MULTIPART_PART_SIZE_BYTES : null;
     const uploadId = isMultipart
       ? await createMultipartUpload(sourceKey, file.mimeType)
