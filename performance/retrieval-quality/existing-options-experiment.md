@@ -190,3 +190,48 @@ observed over baseline. Total response usage is 1,440 input and 503 output token
 comparison. Both negative answers remain unassessed. Preserve baseline defaults
 rather than enabling rewrite on this evidence. The summary with raw paths,
 hashes and session IDs is `options-rewrite-summary-v1.json`.
+
+
+## Scoped reassessment: iterative retrieval
+
+The coordinator explicitly reassessed the six-configuration checkpoint after
+rewrite showed no gain and authorized one seventh existing-option screen for the
+separate missing-premise capability: iterative retrieval alone on the same 16
+cases. The original ten-cent enhancement bound is unchanged. Stop after this
+arm; no further optional-strategy screens without reassessment.
+
+Before this arm, `helper-smoke-ledger-v1.json` confirmed actual scoped attribution:
+OpenRouter `z-ai/glm-5.3-flash`, metric `query-rewrite`, 57 input/24 output tokens,
+provider-sourced cost and 0.002466 customer-ledger cents. The embedding event adds
+22 input tokens and 0.0000528 estimated cents, exactly matching the public mixed
+usage total. The receipt confirms organization and workspace scope. This is
+actual helper-model proof, not inference from the workspace ingestion setting.
+
+Iterative evidence is retained at `options-iterative-v1/`, with a nine-cent local
+stop bound leaving headroom for the prior rewrite arm. The planner allows at most
+three searches and two bridge-entity calls per question. Query rewrite, BM25,
+MMR and all other optional enhancements remain disabled. Raw `retrievalChain`
+and scoped sessions are required to distinguish real multi-search behavior from
+a requested flag that did not execute multiple searches.
+
+
+Iterative completed 16/16 HTTP 200 requests: 11/13 explicit passages (new
+`asu-05` miss plus persistent `asu-08`) and missing inferred support. It consumes
+70,362 input/2,116 output tokens and 1.3528068 mixed API cents. Observed p50/p95
+were 9,330/11,202 ms. Combined rewrite/iterative response charges are 1.4022144
+cents (USD 0.014022144), within the unchanged ten-cent bound. No quality gain
+justifies this cost and latency increase; leave iterative retrieval off by default.
+
+The independent DB receipt `iterative-ledger-chain-v1.json` contains 16 retained
+retrieval chains: 15 have three steps, one has two (47 actual retrieval steps).
+It also retains 79 canonical usage events with actual model IDs
+`text-embedding-3-small` and `z-ai/glm-5.3-flash`. Thus multi-search executed; the
+failure is not merely an ignored flag. Both negative answer cases remain
+unassessed. All optional strategy screening is stopped.
+
+The current integrity judge cannot yet represent source-derived PDF cases
+honestly. An external `docslurp-source-derived-eval@v1` manifest was prepared at
+`source-derived-integrity-v1/` and the unmodified judge correctly rejected it as
+unsupported; receipt `source-derived-integrity-unsupported-v1.json`. Do not report
+this dataset as passing until the separately reviewed schema extension and
+unchanged leakage detectors have run.
