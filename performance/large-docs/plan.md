@@ -1,6 +1,6 @@
 # Large-PDF production ingestion benchmark: contract
 
-Prepared 2026-10-17 ~03:25 UTC, reviewed and revised ~03:50 UTC against the real corpus files and the server code. Baseline: production app `a1d1af5`, core `5972781` (app machine 4 GB, worker 16 GB, no new capacity). **Nothing in this plan has been run against production except read-only `login`, `preflight` and `prepare` (root, label `e1-rag-asu`, workspace `9501ddc8-3d8f-4ec9-9b44-b250fc72c394`, effective config confirmed). No upload has happened.** Root controls every run, every production source change and the model eval runner.
+Prepared 2026-10-17 ~03:25 UTC, reviewed and revised ~03:50 UTC against the real corpus files and the server code. Baseline: production app `a1d1af5`, core `5972781` (app machine 4 GB, worker 16 GB, no new capacity). **Run so far against production: read-only `login`, `preflight` and `prepare` (root, label `e1-rag-asu`, workspace `9501ddc8-3d8f-4ec9-9b44-b250fc72c394`, effective config confirmed), then the E1 upload and watch, which root cancelled at ~710 s (see "Hosted-embedding comparison arm"). The hosted-embedding arm is prepared only; no upload.** Root controls every run, every production source change and the model eval runner.
 
 ## Objective and workload
 
@@ -109,6 +109,68 @@ Spend order is chosen because cold samples are consumable.
 | E6 | `enriched` on a file whose rag-only baseline exists | enriched stage costs; never compared with rag-only |
 
 Stop when the budget ceiling, the cold files, or the hypothesis queue is exhausted. A minimal arm (parse+chunk+embed only, everything optional off) is a diagnostic, not a product win. Cost forecast (replace with E1 actuals): GLM 5.3 Flash is $0.049/$0.65 per 1M tokens, embeddings are local; contextual preambles over thousands of pages and any vision calls on scanned pages are the plausible spend, which is why the 250c cap and gates exist.
+
+## Hosted-embedding comparison arm (E7, prepared 2026-10-17, nothing uploaded)
+
+**Status.** E1 (`e1-rag-asu`, local `good-fast-local`/bge-m3) was cancelled by root at ~710 s: `state.json` `finalState=cancelled`, run `status=failed`, `controlState=cancel_requested`, 351 of 7,188 pages embedded, 0 searchable, billed 0.97c (AI 0.65c: 24,423 in / 3,526 out tokens). The worker was CPU-constrained (84.5% steal, 9.66 GB available). E1 is therefore **not a completed baseline**: no `quality.jsonl`, no total time, and a restarted E1 would not be cold either. Everything below is prepared, not run. Root decides when to start it; one ingestion at a time.
+
+**What the arm is.** A model-and-runtime bundle swap, not a same-model optimisation: embeddings move from local `transformers.js` bge-m3 (1024-d, CPU on the worker) to hosted OpenAI `text-embedding-3-small` (1536-d, remote, batch 64 in the shared catalog), which also moves query embedding in `/v1/search` from the app's local model to a hosted call. Quality and speed can both change because of the model, not only because of where it runs. Nothing else differs: same ASU file, `rag-only`, GLM 5.3 Flash text and vision pinned, `maxCostCents: 250`, a new workspace.
+
+### The option (opt-in, no global default change)
+
+`bench.mjs prepare --embedding-profile good-fast-local|cheapest-hosted`.
+
+- Omitted: the request carries no `embedding` key and the workspace default (`good-fast-local`) applies, identical to E1. `check` asserts the omitted flag resolves to `good-fast-local`.
+- Given: the harness sends the **full catalog config** (`profile`, `target`, `modelUri`, `task`, `normalize` from `embeddingProfileCatalog`) on workspace create and on the upload session, never `{ profile }` alone. Verified offline against `core/packages/shared/dist`: `mergePipelineFeatures(defaultWorkspace, { embedding: { profile: "cheapest-hosted" } })` keeps the base `modelUri`/`target`, so it yields `profile=cheapest-hosted` but route `local/transformers.js/Xenova/bge-m3/1024d`. A profile-only override on a default workspace would silently run the local model under a hosted label (product bug for root, not fixed here; `check` records it under `embeddingProfiles.profileOnlyOverrideOnDefaultWorkspace`).
+- `check` (offline, existing command; the only validation added) now validates each profile against both shared schemas with GLM text and vision still pinned, and requires the same route on all three paths a run takes: workspace create, upload override onto a default workspace, upload override onto a same-profile workspace. Result today: no problems; `cheapest-hosted` -> `remote/openai/text-embedding-3-small/1536d`, `good-fast-local` -> `local/transformers.js/Xenova/bge-m3/1024d`.
+- Effective config recording: `prepare` fails closed (exit 3, "do not upload") if the stored workspace embedding differs from the request, and writes it to `workspace.json`; `upload` writes requested and effective run config to `upload.json` (`requestedEmbedding`, `effectiveRunConfig`, `embeddingConfigOk`; exit 6 if the accepted run's embedding differs, run already created, root cancels); `report` adds `embedding` (requested, upload-effective, progress-effective) and `reuseDetail`.
+- Language fallback: for the profile defaults without a model override, the worker switches to `multilingual-local` when the first 2,000 extracted characters are >15% non-ASCII (`worker/src/embeddings/resolver.ts`). That would silently turn the hosted arm into a local MiniLM run. The actual-model log check below must therefore show `text-embedding-3-small` and no multilingual local embedding.
+
+### Price and cost (verified live 2026-10-17)
+
+- OpenAI official pricing page (`developers.openai.com/api/docs/pricing`, redirect from `platform.openai.com/docs/pricing`): `text-embedding-3-small` **$0.02 per 1M input tokens**, no batch price listed. Matches the repo rate card (`packages/shared/src/billing.ts`, `inputUsdPerMTok: 0.02`, checked 2026-10-13). Official model page: Build tier 1,000,000 TPM, Launch 5,000,000, Grow 10,000,000; the key's tier is not known, and the worker limiter assumes about 2.5M TPM (`provider-rate-limit.ts`), so throttling at a low tier is possible and shows as slower embed, not cost. This is the only price used here; it is not a pricing-policy change (`pnpm pricing:validate` is not required).
+- Volume: the ASU full text is 15.19M characters raw (13.20M whitespace-normalised). Chunks are 1,800 characters (`embedding-runtime.ts`), about 7.3k chunks. Chunk text is roughly 3.3-4.4M tokens at 3-4 characters per token; each chunk's embedding input also carries the contextual preamble (document context plus a chunk summary of at most 240 characters), taken as 1.6-2.2M tokens. Estimate **about 5-6.6M embedding tokens, planning ceiling 10M**.
+- Embedding spend: 5-6.6M x $0.02/M = **$0.10-0.13**, ceiling 10M = **$0.20**. The worker prices an event from the model price table and falls back to `COST_PER_1K_INPUT_TOKENS` (default 0.01c per 1k, i.e. $0.10/M, five times higher). I did not verify which applies to a recorded embedding event; at the fallback the same volume reads $0.50-0.66, ceiling $1.00. So the watcher's number can exceed the provider's bill by up to 5x.
+- Other spend: GLM document context, chunk preambles and vision are paid the same way as in E1 (E1: 0.65c AI at 710 s). Document-context reuse does not depend on the embedding model (its key is model, text-generation config, title, text), so it may be reused from E1's context; this is a measurement (`reuseDetail.documentContext`), not an assumption. Worker compute is an estimate included in `usageTotals.costCents`.
+- **Arm reserve: $1.00 (100c)**, which covers the fallback-priced ceiling. Watcher gate `--max-cost-cents 100` with `--auto-cancel`. The server cap stays `maxCostCents: 250` (max for any run, identical to E1 so the pipelines differ only in embedding). API budget: $10 cumulative cap, about $0.154 used, so about $9.85 remains; with the $1.00 reserve this leaves about $8.85, inside this benchmark's $5.00 ceiling (E1 spent about $0.01). No new capacity: worker 16 GB and app 4 GB as before, no scale-up.
+
+### Reuse is separated, and nothing is called end-to-end causal
+
+The new arm is a different embedding fingerprint (provider, model, dimensions, task, normalisation), so chunk vectors **cannot** be reused from E1 (`embeddingVectorFingerprint`, `embedding_reuse_refs`): the embedding side is cold by construction. Content dedup is blocked too: `findDedupCandidate` requires the same stage-independent `pipeline` JSON and a completed source run, and E1 neither completed nor has the same embedding. What may be warm is not assumed:
+
+| layer | expected | recorded in `report.json` |
+|---|---|---|
+| chunk vectors | cold (new fingerprint) | `reuseDetail.embeddingVectors`, embed `reuseHits/reuseMisses/providerInputs` |
+| LLM document context | may be reused from E1 | `reuseDetail.documentContext` (`reused`/`fresh`) |
+| extraction (split, render, markdown) | recomputed; the process-local source cache is keyed by each upload's `sourceKey`, so E1's entry is not shared | `reuseDetail.extractionSourceCache` (`cacheHit`/`sourceCacheHit`) |
+| content dedup | none | `reuseDetail.dedup`, `upload.json` `dedupedFromDocumentId` |
+
+`classification` still comes from embed stats alone; for this arm read `reuseDetail`, and do not report the run as plain cold or warm. A faster or cheaper hosted run is a **diagnostic**: it differs from any local run in model, runtime, query embedding, file reuse state and CPU contention at the time, so no end-to-end causal claim is made, and the causality rules above still apply (no matched pair, so "unconfirmed").
+
+### Quality comparison protocol (frozen before any candidate result)
+
+- `bench.mjs quality --label <arm> --go` after the run completes (refuses otherwise, and refuses to append to an existing `quality.jsonl`): the first query, then the other 8 queries of the ASU file, once each, `limit=10`, with identical pinned flags in every arm (`QUALITY_FLAGS`: hyde, rerank, mmr, summarySeed, compression, queryRewrite, queryDecompose, stepback, selfQuery, iterativeMultiHop, graph and community expansion all `false`; `minScore=0`, because score scales differ between embedding models and the default floor would cut the arms unequally). The first query's latency includes cold query-embedding setup in the app process (local model load vs one hosted call).
+- Retrieval is **hybrid, not vector-only**: neither `GET /v1/search` nor `SearchOptions` has a vector-only or lexical-off switch (checked `retrieval-query-flags.ts`, `search.ts`). Lexical (Postgres full-text) retrieval is identical in both arms and can mask an embedding difference, so equal results do not show equal embeddings; a difference is informative. `quality.jsonl` records `lexicalRanks` (rows flagged `lexicalMatch`, which only the lexical-backoff path sets) and `availability`. A true vector-only comparison needs a server flag, a production source change for root. Probes made during ingestion can be answered by early keyword search and never count toward this comparison.
+- `bench.mjs compare --label <candidate> --against <baseline>` (offline) prints per-query ranks, hit count, MRR, first-query and p50 latency, and the verdict. **`not-pass` unless** both runs have `finalState=completed`, the same source file, query set and flags, and the candidate answers every query (document id + page + text oracle, top 10), including all the baseline answered. Any other case is `not-pass` with reasons. n is the ASU query count (9), so this screens for regressions only.
+- **Current verdict: not-pass.** `compare` on today's state reports "run did not complete (finalState=cancelled)" and "no quality.jsonl" for E1. A pass needs a completed local baseline (a rerun that is itself not cold and takes hours at current CPU steal; root's call whether to buy it) or, failing that, the candidate is judged only against the absolute correctness gate (every query correct, no failed documents) and labelled "no baseline".
+
+### Recipe for root (not executed)
+
+```
+H="node /tmp/docslurp-large-docs/harness/bench.mjs"; C="--label e7-hosted-asu"
+$H check   $C                                    # offline; includes embedding profile validation
+$H login   $C --go
+$H preflight $C --go                             # lists E1's failed document as same-bytes: expected, recorded, not a dedup source
+$H prepare $C --go --embedding-profile cheapest-hosted     # exit 3 = effective config differs; do not upload
+$H upload  $C --go --file asu-2025-26-academic-catalog-archive   # exit 6 = run embedding differs; cancel
+$H watch   $C --go --auto-cancel --max-cost-cents 100 --max-probes 180 \
+  --sampler-cmd 'node --env-file=/home/dan/code/17th-street-labs/docslurp-app/.env.production /tmp/docslurp-large-docs/resource-sample.mjs'
+$H quality $C --go; $H report $C --go; $H compare $C --against e1-rag-asu   # compare is not-pass until a completed baseline exists
+```
+
+No new cancel command: `watch --auto-cancel` and `POST /v1/runs/:id/control {"action":"cancel"}` (root) already exist. The watch code is unchanged by this work; the arm only adds prepare/upload/report/quality/compare behaviour and config, and the already-running `e1` watcher process was not touched (it had exited when checked). Start one watcher per run and only after the previous run is terminal.
+
+Model check for this arm, root, read-only, after the run: `[ai-usage]` text and vision lines must all say `z-ai/glm-5.3-flash`; embedding lines must say `text-embedding-3-small` with 1536 dimensions in the embed stage, and no local embedding model. Any other model, or a fallback to `multilingual-local`, invalidates the arm. Abort and do not rerun if the run's effective embedding is not hosted.
 
 ## Runnable recipe (root)
 
