@@ -9,6 +9,7 @@ import {
 
 import { generateOpenRouterText, type TextGenerationUsage } from "../lib/ai.js";
 import { buildTrustedDocumentTaskPrompt } from "../lib/trusted-llm-task.js";
+import { GRAPH_FIDELITY_RULES, MAX_GRAPH_PREDICATE_CHARS, SOURCE_FIDELITY_RULES } from "../lib/source-fidelity.js";
 
 const MAX_KNOWN_ENTITY_HINTS = 40;
 const CO_MENTION_CONFIDENCE = 0.45;
@@ -342,7 +343,9 @@ async function extractWindowWithLlm(args: {
       "Return strict JSON with keys `entities` and `relationships`.",
       `\`entities\` must be an array of objects: {"name": string, "type": ${typeUnion}|"concept", "confidence": number, "aliases": string[]}. Use "concept" only when no listed type fits.`,
       '`relationships` must be an array of objects: {"subject": string, "predicate": string, "object": string, "confidence": number}. Subjects and objects must be names from `entities`.',
-      "Prefer canonical names, keep predicates short verb phrases, and only include relationships directly supported by the text.",
+      "Prefer canonical names and only include relationships directly supported by the text.",
+      SOURCE_FIDELITY_RULES,
+      GRAPH_FIDELITY_RULES,
     ].join(" "),
     trustedContext,
     untrustedContent: args.text,
@@ -431,10 +434,13 @@ function sanitizeRelationship(value: unknown): ExtractedRelationship[] {
   ) {
     return [];
   }
+  const predicate = candidate.predicate.replace(/\s+/g, " ").trim();
+  // A sentence-length predicate is a restated claim, not a relation; keep qualifiers whole or drop the edge.
+  if (predicate.length > MAX_GRAPH_PREDICATE_CHARS) return [];
   return [
     {
       subject: candidate.subject.trim(),
-      predicate: candidate.predicate.trim(),
+      predicate,
       object: candidate.object.trim(),
       confidence: clamp(typeof candidate.confidence === "number" ? candidate.confidence : 0.55),
     },

@@ -10,6 +10,7 @@ import type { CommandRunner } from "../tools/runner.js";
 import type { ArtifactStore } from "../tools/storage.js";
 import { measureOp } from "../lib/perf-context.js";
 import { buildTrustedDocumentTaskPrompt } from "../lib/trusted-llm-task.js";
+import { SOURCE_FIDELITY_RULES } from "../lib/source-fidelity.js";
 import {
   extractTextForEmbedding,
   embedTextChunks,
@@ -190,7 +191,7 @@ export class DocumentSummaryStage implements Stage {
       instruction:
         "Generate a one-paragraph summary of this document for use in a search index.",
       outputContract:
-        "Return only the summary paragraph. Be concise and capture the main topics, entities, and purpose.",
+        `Return only the summary paragraph. Be concise and capture the main topics, entities, and purpose, plus the key facts with their qualifiers. ${SOURCE_FIDELITY_RULES}`,
       untrustedContent: text,
       untrustedContentLabel: "document text",
     });
