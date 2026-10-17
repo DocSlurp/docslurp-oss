@@ -699,7 +699,7 @@ async function embedRemoteChunks(args: {
     }
     if (args.profile.provider === "deepinfra" && result.embeddings.length !== batch.length) throw new Error("DeepInfra embedding response count mismatch");
     if (args.profile.provider === "openai" && args.profile.supportsCustomDimensions) {
-      if (result.embeddings.length !== batch.length || result.embeddings.some((vector) => vector.length !== args.profile.dimensions || vector.some((value) => !Number.isFinite(value)) || Math.hypot(...vector) === 0)) {
+      if (result.embeddings.length !== batch.length || result.embeddings.some((vector) => vector.length !== args.profile.dimensions || vector.some((value) => !Number.isFinite(value)) || Math.hypot(...vector) === 0 || !Number.isFinite(Math.hypot(...vector)))) {
         throw new Error("OpenAI embedding response must match requested dimensions with finite nonzero vectors");
       }
     }

@@ -93,6 +93,9 @@ describe("embedTextChunks", () => {
     aiMock.embedMany.mockResolvedValueOnce({ embeddings: [Array(8).fill(1)], usage: { tokens: 9 } });
     await expect(embedTextChunks({ chunks: ["generic text"], profile, config: fromEnv(), privacyMode: "standard", onRemoteUsage })).rejects.toThrow("match requested dimensions");
     expect(onRemoteUsage).toHaveBeenCalledWith(expect.objectContaining({ inputTokens: 9 }));
+    aiMock.embedMany.mockResolvedValueOnce({ embeddings: [Array(4).fill(Number.MAX_VALUE)], usage: { tokens: 11 } });
+    await expect(embedTextChunks({ chunks: ["generic text"], profile, config: fromEnv(), privacyMode: "standard", onRemoteUsage })).rejects.toThrow("finite nonzero vectors");
+    expect(onRemoteUsage).toHaveBeenLastCalledWith(expect.objectContaining({ inputTokens: 11 }));
   });
 
   it("uses the cached JS transformers pipeline for local embeddings", async () => {
