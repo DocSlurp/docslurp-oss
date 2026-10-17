@@ -6,7 +6,7 @@ import { isUtf8 } from "node:buffer";
 import path from "node:path";
 
 import type { CanonicalDocument } from "@docslurp/shared";
-import { assertProviderAllowed, authorizePrivateModelCall, textModelCallDescriptor, canonicalDocumentSchema, fitEmbeddingDimensions, PRIVATE_MODEL_PROVIDER, isProviderCallAllowed, resolvePipelineTextModel, type PrivacyMode, type TextGenerationConfig } from "@docslurp/shared";
+import { assertProviderAllowed, authorizePrivateModelCall, textModelCallDescriptor, canonicalDocumentSchema, fitEmbeddingDimensions, openRouterEmbeddingRoute, validateHostedEmbeddingVector, OPENROUTER_BASE_URL, PRIVATE_MODEL_PROVIDER, isProviderCallAllowed, resolvePipelineTextModel, type PrivacyMode, type TextGenerationConfig } from "@docslurp/shared";
 import { embedMany } from "ai";
 import { noteWorkProgress, withRequestTimeout } from "../lib/work-progress.js";
 import { runWithProviderRateLimit } from "../lib/provider-rate-limit.js";
@@ -696,7 +696,14 @@ async function embedRemoteChunks(args: {
       await serialUsage(async () => args.onRemoteUsage?.({ inputTokens: tokens, chunks: batch.length,
         ...(privateCost ? { costCents: privateCost.costCents, costMetadata: privateCost.metadata } : {}) }));
     }
-    batchEmbeddings[batchIndex] = result.embeddings;
+    if (args.profile.provider === "openrouter") {
+      if (!Number.isSafeInteger(result.usage.tokens) || !(result.usage.tokens! > 0)) throw new Error("OpenRouter embedding response omitted actual usage");
+      if (result.embeddings.length !== batch.length) throw new Error("OpenRouter embedding response omitted vectors");
+      const route = openRouterEmbeddingRoute(args.profile.model);
+      batchEmbeddings[batchIndex] = result.embeddings.map(vector => validateHostedEmbeddingVector(vector, route.dimensions, args.profile.normalize));
+    } else {
+      batchEmbeddings[batchIndex] = result.embeddings;
+    }
 
     const usage = serializeJson(result.usage);
     usageBatches[batchIndex] = {
@@ -719,7 +726,7 @@ async function embedRemoteChunks(args: {
   const embeddings = batchEmbeddings.flat();
 
   return {
-    vectors: embeddings.map((vector) =>
+    vectors: args.profile.provider === "openrouter" ? embeddings : embeddings.map((vector) =>
       fitEmbeddingDimensions(vector, args.profile.dimensions, args.profile.normalize),
     ),
     usage: {
@@ -1142,6 +1149,11 @@ function meanPoolTokenVectors(rows: number[][]): number[] {
 
 function createRemoteEmbeddingModel(profile: EmbeddingProfile, config: Config) {
   switch (profile.provider) {
+    case "openrouter": {
+      const route = openRouterEmbeddingRoute(profile.model);
+      if (profile.dimensions !== route.dimensions) throw new Error("OpenRouter embedding dimensions do not match the registered model");
+      return createOpenAI({ apiKey: requiredKey(config.openRouterApiKey, "OPENROUTER_API_KEY"), baseURL: OPENROUTER_BASE_URL }).embedding(profile.model) as any;
+    }
     case "openai":
       return (
         config.openAiBaseUrl &&
