@@ -6,7 +6,7 @@ import { isUtf8 } from "node:buffer";
 import path from "node:path";
 
 import type { CanonicalDocument } from "@docslurp/shared";
-import { assertProviderAllowed, authorizePrivateModelCall, textModelCallDescriptor, canonicalDocumentSchema, fitEmbeddingDimensions, PRIVATE_MODEL_PROVIDER, isProviderCallAllowed, resolvePipelineTextModel, type PrivacyMode, type TextGenerationConfig } from "@docslurp/shared";
+import { assertProviderAllowed, authorizePrivateModelCall, textModelCallDescriptor, canonicalDocumentSchema, DEEPINFRA_EMBEDDING_BASE_URL, validateDeepInfraEmbedding, fitEmbeddingDimensions, PRIVATE_MODEL_PROVIDER, isProviderCallAllowed, resolvePipelineTextModel, type PrivacyMode, type TextGenerationConfig } from "@docslurp/shared";
 import { embedMany } from "ai";
 import { noteWorkProgress, withRequestTimeout } from "../lib/work-progress.js";
 import { runWithProviderRateLimit } from "../lib/provider-rate-limit.js";
@@ -690,13 +690,17 @@ async function embedRemoteChunks(args: {
       ? privateCall.cost({ inputTokens: result.usage.tokens ?? 0, durationMs: Date.now() - batchStartedAt })
       : null;
     if (privateCost) privateCostCents += privateCost.costCents;
+    if (args.profile.provider === "deepinfra" && (!Number.isSafeInteger(result.usage.tokens) || result.usage.tokens! < 0)) throw new Error("DeepInfra embeddings require actual provider token usage");
     // Persist actual paid usage before retaining vectors or starting another request.
     if (typeof result.usage.tokens === "number") {
       const tokens = result.usage.tokens;
       await serialUsage(async () => args.onRemoteUsage?.({ inputTokens: tokens, chunks: batch.length,
         ...(privateCost ? { costCents: privateCost.costCents, costMetadata: privateCost.metadata } : {}) }));
     }
-    batchEmbeddings[batchIndex] = result.embeddings;
+    if (args.profile.provider === "deepinfra" && result.embeddings.length !== batch.length) throw new Error("DeepInfra embedding response count mismatch");
+    batchEmbeddings[batchIndex] = args.profile.provider === "deepinfra"
+      ? result.embeddings.map((vector) => validateDeepInfraEmbedding(vector, args.profile.dimensions, args.profile.normalize))
+      : result.embeddings;
 
     const usage = serializeJson(result.usage);
     usageBatches[batchIndex] = {
@@ -1142,6 +1146,9 @@ function meanPoolTokenVectors(rows: number[][]): number[] {
 
 function createRemoteEmbeddingModel(profile: EmbeddingProfile, config: Config) {
   switch (profile.provider) {
+    case "deepinfra":
+      if (profile.model !== "BAAI/bge-m3" || profile.dimensions !== 1024) throw new Error("DeepInfra BGE-M3 requires its native 1024 dimensions");
+      return createOpenAI({ apiKey: requiredKey(config.deepInfraApiKey ?? "", "DEEPINFRA_API_KEY"), baseURL: DEEPINFRA_EMBEDDING_BASE_URL }).embedding(profile.model) as any;
     case "openai":
       return (
         config.openAiBaseUrl &&

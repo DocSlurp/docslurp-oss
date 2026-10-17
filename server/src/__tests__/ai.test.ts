@@ -52,6 +52,29 @@ describe("embedConfiguredText", () => {
     createOpenAIMock.mockClear();
   });
 
+  it("uses isolated DeepInfra credentials, fixed vectors and actual usage before validation", async () => {
+    const onUsage = vi.fn();
+    embedMock.mockResolvedValueOnce({ embedding: Array(1024).fill(1), usage: { tokens: 12 } });
+    const args = { value: "generic query", runtime: "remote", provider: "deepinfra", model: "BAAI/bge-m3", dimensions: 1024, normalize: true, apiKey: "deepinfra-test-only", privacyMode: "standard" as const, onUsage };
+    const result = await embedConfiguredText(args);
+    expect(createOpenAIMock).toHaveBeenCalledWith({ apiKey: "deepinfra-test-only", baseURL: "https://api.deepinfra.com/v1/openai" });
+    expect(embedMock.mock.calls.at(-1)?.[0].providerOptions).toBeUndefined();
+    expect(result.usage.inputTokens).toBe(12);
+    expect(Math.hypot(...result.embedding)).toBeCloseTo(1, 12);
+    embedMock.mockResolvedValueOnce({ embedding: Array(1536).fill(1), usage: { tokens: 9 } });
+    await expect(embedConfiguredText(args)).rejects.toThrow("exactly 1024");
+    expect(onUsage).toHaveBeenLastCalledWith({ inputTokens: 9 });
+    await expect(embedConfiguredText({ ...args, dimensions: 512 })).rejects.toThrow("native 1024");
+    await expect(embedConfiguredText({ ...args, apiKey: undefined })).rejects.toThrow("DEEPINFRA_API_KEY");
+  });
+
+  it("refuses DeepInfra responses without actual token usage", async () => {
+    const onUsage = vi.fn();
+    embedMock.mockResolvedValueOnce({ embedding: Array(1024).fill(1), usage: {} });
+    await expect(embedConfiguredText({ value: "generic query", runtime: "remote", provider: "deepinfra", model: "BAAI/bge-m3", apiKey: "test", privacyMode: "standard", onUsage })).rejects.toThrow("actual provider token usage");
+    expect(onUsage).not.toHaveBeenCalled();
+  });
+
   it("uses a cached local transformers pipeline for query embeddings", async () => {
     extractorMock.mockResolvedValue({ tolist: () => [[0.1, 0.2, 0.3, 0.4]] });
     pipelineMock.mockResolvedValue(extractorMock);

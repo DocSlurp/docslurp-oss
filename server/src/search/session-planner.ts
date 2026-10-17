@@ -381,7 +381,7 @@ async function embedQuery(
   const apiKey =
     runtime === "remote" && provider === "openai"
       ? process.env.OPENAI_API_KEY
-      : undefined;
+      : provider === "deepinfra" ? process.env.DEEPINFRA_API_KEY : undefined;
   if (runtime === "remote" && provider === "openai" && !apiKey) {
     return null;
   }
@@ -394,15 +394,24 @@ async function embedQuery(
       model,
       dimensions,
       requestedDimensions,
-      normalize: true,
+      normalize: provider === "deepinfra" ? embedding.normalize : true,
       apiKey,
       baseURL: baseUrl ?? process.env.OPENAI_BASE_URL,
       privacyMode,
       modelUri: route.modelUri,
       auditScope: { workspaceId: auditWorkspaceId ?? null },
+      ...(provider === "deepinfra" ? {
+        onUsage: (paid: { inputTokens: number }) => {
+          usage.record({
+            provider, model, metric: "embed-query", inputTokens: paid.inputTokens,
+            metadata: { usageSource: "provider", costSource: "catalog" },
+            logOutputTokens: false,
+          });
+        },
+      } : {}),
     });
 
-    usage.record({
+    if (provider !== "deepinfra") usage.record({
       provider,
       model,
       metric: "embed-query",
@@ -414,7 +423,8 @@ async function embedQuery(
       logOutputTokens: false,
     });
     return result.embedding;
-  } catch {
+  } catch (error) {
+    if (provider === "deepinfra") throw error;
     return null;
   }
 }

@@ -3,7 +3,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { withObservation, aiResultDetails } from "@docslurp/shared/observability";
 import { createOpenAI } from "@ai-sdk/openai";
-import { defaultEmbeddingConfig, defaultPipelineFeatures, fitEmbeddingDimensions, parseLlmModelUri } from "@docslurp/shared";
+import { defaultEmbeddingConfig, defaultPipelineFeatures, DEEPINFRA_EMBEDDING_BASE_URL, validateDeepInfraEmbedding, fitEmbeddingDimensions, parseLlmModelUri } from "@docslurp/shared";
 import { embed, generateText, streamText } from "ai";
 
 import {
@@ -465,6 +465,8 @@ export async function embedConfiguredText(args: {
   modelUri?: string;
   /** Workspace attribution for strict-privacy audit rows on private endpoint calls. */
   auditScope?: PrivateCallAuditScope;
+  /** Persist paid hosted usage before validating or retaining response vectors. */
+  onUsage?: (usage: EmbeddingUsage) => void | Promise<void>;
 }): Promise<{ embedding: number[]; usage: EmbeddingUsage }> {
   if (args.provider === PRIVATE_MODEL_PROVIDER) {
     return await embedPrivateEndpointText({ ...args, modelUri: args.modelUri ?? "" });
@@ -476,6 +478,19 @@ export async function embedConfiguredText(args: {
   });
   if (args.runtime === "local") {
     return await embedLocalText(args);
+  }
+
+  if (args.provider === "deepinfra") {
+    if (!args.apiKey) throw new Error("DEEPINFRA_API_KEY is required for DeepInfra embeddings");
+    if (args.model !== "BAAI/bge-m3" || (args.dimensions !== undefined && args.dimensions !== 1024) || args.requestedDimensions !== undefined) throw new Error("DeepInfra BGE-M3 requires its native 1024 dimensions");
+    return withObservation({ name: "api.embedding.deepinfra", type: "embedding", model: args.model, input: args.value, result: aiResultDetails }, async () => {
+      const provider = createOpenAI({ apiKey: args.apiKey, baseURL: DEEPINFRA_EMBEDDING_BASE_URL });
+      const result = await embed({ model: provider.embedding(args.model!), value: args.value, abortSignal: args.signal, maxRetries: 0 });
+      if (!Number.isSafeInteger(result.usage.tokens) || result.usage.tokens! < 0) throw new Error("DeepInfra embeddings require actual provider token usage");
+      const usage = { inputTokens: result.usage.tokens! };
+      await args.onUsage?.(usage);
+      return { embedding: validateDeepInfraEmbedding(result.embedding, 1024, args.normalize ?? true), usage };
+    });
   }
 
   if (args.provider === "openai") {

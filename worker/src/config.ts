@@ -74,6 +74,7 @@ export interface Config {
   /** LanceDB root, storage options and query tuning from LANCEDB_URI. */
   lancedb: LanceDbConfig;
   openAiApiKey: string;
+  deepInfraApiKey?: string;
   openAiBaseUrl: string;
   defaultInferenceLane: InferenceLane;
   vectorBackends: string[];
@@ -248,6 +249,7 @@ export function fromEnv(): Config {
     s3Bucket: storage.bucket,
     lancedb,
     openAiApiKey: process.env.OPENAI_API_KEY ?? "",
+    deepInfraApiKey: process.env.DEEPINFRA_API_KEY ?? "",
     openAiBaseUrl: process.env.OPENAI_BASE_URL ?? "https://api.openai.com/v1",
     defaultInferenceLane: readEnumOption(
       process.env.DEFAULT_INFERENCE_LANE ?? process.env.INFERENCE_LANE,

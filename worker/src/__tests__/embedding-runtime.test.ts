@@ -72,6 +72,21 @@ describe("embedTextChunks", () => {
     }
   });
 
+  it("uses isolated DeepInfra credentials and journals usage before rejecting malformed vectors", async () => {
+    const profile: EmbeddingProfile = { profile: "cheapest-hosted", target: "hosted", modelUri: "llm://deepinfra/BAAI/bge-m3", runtime: "remote", provider: "deepinfra", model: "BAAI/bge-m3", baseUrl: "https://api.deepinfra.com/v1/openai", dimensions: 1024, task: "document", normalize: true, batchSize: 2, lateChunking: false, lateChunkingWindow: 2 };
+    const onRemoteUsage = vi.fn();
+    aiMock.embedMany.mockResolvedValueOnce({ embeddings: [Array(1024).fill(1)], usage: { tokens: 17 } });
+    const args = { privacyMode: "standard" as const, chunks: ["generic document passage"], profile, config: { ...fromEnv(), deepInfraApiKey: "deepinfra-test-only" }, onRemoteUsage };
+    const result = await embedTextChunks(args);
+    expect(openAiMock.createOpenAI).toHaveBeenCalledWith({ apiKey: "deepinfra-test-only", baseURL: "https://api.deepinfra.com/v1/openai" });
+    expect(remoteEmbeddingProviderOptions(profile)).toBeUndefined();
+    expect(result.totalTokens).toBe(17);
+    expect(Math.hypot(...result.vectors[0]!)).toBeCloseTo(1, 12);
+    aiMock.embedMany.mockResolvedValueOnce({ embeddings: [Array(768).fill(1)], usage: { tokens: 19 } });
+    await expect(embedTextChunks(args)).rejects.toThrow("exactly 1024");
+    expect(onRemoteUsage).toHaveBeenLastCalledWith(expect.objectContaining({ inputTokens: 19 }));
+  });
+
   it("uses the cached JS transformers pipeline for local embeddings", async () => {
     const profile: EmbeddingProfile = {
       profile: "good-fast-local",
