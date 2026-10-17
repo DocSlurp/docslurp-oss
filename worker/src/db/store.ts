@@ -2542,6 +2542,17 @@ export class Store {
     await insertPrivacyAuditRows(this.sql, entries);
   }
 
+  /** Read graph evidence from current document rows, never reused artifact identities. */
+  async loadDocumentGraphChunks(workspaceId: string, documentId: string) {
+    const rows = await this.sql<{ id: string; text: string; page_number: number | null }[]>`
+      select c.id, c.text, c.page_number
+      from document_chunks c join documents d on d.id = c.document_id
+      where c.document_id = ${documentId} and d.workspace_id = ${workspaceId}
+      order by c.chunk_index
+    `;
+    return rows.map((row) => ({ id: row.id, text: row.text, pageNumber: row.page_number }));
+  }
+
   async replaceDocumentGraph(input: ReplaceDocumentGraphInput): Promise<{ nodes: number; edges: number }> {
     return await replaceDocumentGraph(this.sql, input);
   }

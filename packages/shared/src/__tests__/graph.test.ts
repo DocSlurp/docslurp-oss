@@ -11,8 +11,7 @@ import {
 const pricing = { costPer1kInputTokens: 0.01, costPer1kOutputTokens: 0.03 };
 
 describe("graph config fingerprint", () => {
-  it("marks graphs from the undirected endpoint implementation stale", () => {
-    const previousFingerprint = "g1-30b2cf43";
+  it.each(["g1-30b2cf43", "g2-30b2cf43"])("marks graphs with old edge or chunk identities stale (%s)", (previousFingerprint) => {
     expect(graphConfigFingerprint({ domain: null, entityTypes: [], depth: "standard" }, "example-model"))
       .not.toBe(previousFingerprint);
   });
