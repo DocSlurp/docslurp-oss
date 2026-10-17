@@ -81,6 +81,8 @@ describe("Direct Upload Session Module", () => {
     expect(result.files).toHaveLength(10);
     expect(result.files.every(file => file.mode === "single" && "putUrl" in file)).toBe(true);
     expect(signSingleUploadPut).toHaveBeenCalledTimes(10);
+    expect(result.files[0]).toMatchObject({ method: "PUT", headers: { "Content-Type": "application/pdf" }, expiresInSeconds: 900 });
+    expect(signSingleUploadPut).toHaveBeenCalledWith(expect.objectContaining({ expiresInSeconds: 900 }));
     expect(createMultipartUpload).not.toHaveBeenCalled();
     const insertedFiles = sqlMock.mock.calls.filter(([strings]) => strings.join("?").includes("insert into upload_session_files"));
     expect(insertedFiles).toHaveLength(10);

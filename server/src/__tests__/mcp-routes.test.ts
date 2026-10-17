@@ -274,6 +274,27 @@ describe("mcpRoutes", () => {
     expect(response.status).toBe(403);
   });
 
+  it("advertises safe names, explicit upload alternatives and mutation annotations", async () => {
+    validateApiKey.mockResolvedValue({ ...validatedKey, scopes: ["search", "ingest"] });
+    const client = new Client({ name: "catalog-contract", version: "1" });
+    await client.connect(new StreamableHTTPClientTransport(new URL("http://localhost:4321/mcp"), { requestInit: { headers: { Authorization: "Bearer key" } }, fetch: async (url, init) => app.request(new Request(url, init)) }));
+    const tools = (await client.listTools()).tools;
+    expect(tools).toHaveLength(8);
+    expect(new Set(tools.map(tool => tool.name)).size).toBe(8);
+    expect(tools.every(tool => /^[A-Za-z0-9_.-]{1,128}$/.test(tool.name))).toBe(true);
+    for (const name of ["upload", "completeUpload", "chat"]) {
+      expect(tools.find(tool => tool.name === name)?.annotations).toMatchObject({ readOnlyHint: false, idempotentHint: false });
+    }
+    const upload = tools.find(tool => tool.name === "upload")!;
+    expect(upload.inputSchema.oneOf).toHaveLength(2);
+    expect(upload.inputSchema.additionalProperties).toBe(false);
+    expect(upload.annotations?.openWorldHint).toBe(true);
+    const result = await client.callTool({ name: "upload", arguments: { files: [] } });
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toHaveProperty("error");
+    await client.close();
+  });
+
   it("offers a real HTTP MCP endpoint and preserves scoped actor on tool dispatch", async () => {
     aggregateWorkspaceRagSearch.mockResolvedValueOnce({ answer: "safe evidence" });
     getAutomationCapabilityManifest.mockReturnValue({ server: {}, capabilities: [{

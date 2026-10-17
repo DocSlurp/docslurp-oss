@@ -19,6 +19,7 @@ import {
   type WorkspaceIntakeItem,
 } from "./workspace-intake.js";
 
+const SIGNED_UPLOAD_TTL_SECONDS = 900;
 const MULTIPART_THRESHOLD_BYTES = 32 * 1024 * 1024;
 const MULTIPART_PART_SIZE_BYTES = 8 * 1024 * 1024;
 
@@ -150,9 +151,13 @@ export async function buildDirectUploadFileDescriptor(file: UploadSessionFileRow
       sizeBytes: file.size_bytes,
       mode: "single" as const,
       status: file.status,
+      method: "PUT" as const,
+      headers: { "Content-Type": file.mime_type },
+      expiresInSeconds: SIGNED_UPLOAD_TTL_SECONDS,
       putUrl: await signSingleUploadPut({
         key: file.source_key,
         contentType: file.mime_type,
+        expiresInSeconds: SIGNED_UPLOAD_TTL_SECONDS,
       }),
     };
   }

@@ -57,7 +57,7 @@ Discover schemas with `tools/list`. `upload` and `completeUpload` require `inges
    {"files":[{"filename":"manual.pdf","mimeType":"application/pdf","sizeBytes":123456}]}
    ```
 
-2. The response contains `sessionId` and `files`, each with an `id` and a `putUrl`. PUT each file's raw bytes to its URL with its declared `Content-Type`. URLs expire after 15 minutes. Each file gets one URL, including large files (up to 5 GiB, subject to account limits). Keep signed URLs private. Local file paths and base64 are not tool arguments.
+2. The response contains `sessionId` and `files`, each with an `id`, `putUrl`, `method`, required `headers`, and `expiresInSeconds`. PUT each file's raw bytes to its URL with its declared `Content-Type`. URLs expire after 15 minutes. Each file gets one URL, including large files (up to 5 GiB, subject to account limits). Keep signed URLs private. Local file paths and base64 are not tool arguments.
 3. After every PUT succeeds, call `completeUpload` with `sessionId` and `fileIds`. The server verifies object sizes and starts ingestion only after all files complete. Use the returned workspace/run IDs with `getUploadStatus`, then `search` or `chat`. An already confirmed session cannot be submitted again.
 
 For files already hosted online, call `upload` with `{"urls":["https://example.com/manual.pdf"]}`. This starts ingestion directly. An optional `idempotencyKey` deduplicates URL-ingestion retries; it does not apply to signed-upload session creation.
@@ -112,3 +112,11 @@ bearer-authenticated.
 
 See the integration notes and remaining tool gaps
 for authentication boundaries, feature flags and the API parity roadmap.
+
+## Protocol and file-handling conventions
+
+These are application tools over standard MCP, not a custom transport or a proposed MCP file-upload method. Metadata stays in bounded JSON tool arguments; file bytes go directly to storage. Signed PUT URLs are short-lived, per-object write credentials, not readable MCP resource links. Do not log or share them. Native intake sanitizes filenames, applies file-type and size policy, isolates storage keys and verifies stored size before ingestion. A completion call verifies the whole batch; it does not trust an agent's claim that PUT succeeded.
+
+The catalog uses valid case-sensitive tool names, deterministic scope-filtered discovery, JSON Schema inputs, mutation annotations, structured results with text fallback, and `isError` for execution failures. Authorization remains enforced server-side independently of annotations; OAuth tokens are not forwarded to storage.
+
+References: [MCP tools](https://modelcontextprotocol.io/specification/2026-07-28/server/tools), [MCP security](https://modelcontextprotocol.io/docs/2025-11-25/tutorials/security/security_best_practices), [presigned URL guidance](https://docs.aws.amazon.com/prescriptive-guidance/latest/presigned-url-best-practices/overview.html).
