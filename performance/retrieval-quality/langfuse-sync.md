@@ -18,7 +18,22 @@ Evidence outside git: `/tmp/docslurp-retrieval-quality-evidence/langfuse-develop
 
 ## Precise outstanding work
 
-- **Heldout export blocked:** automatic approval review rejected exporting heldout questions/gold to the external Langfuse destination because general sync authorization was insufficiently specific. Heldout payloads were excluded, remained local, and were not printed. Obtain specific destination/payload approval before exporting them.
+- **Heldout export completed after explicit approval:** the earlier automatic-review rejection applied before the user specifically approved the six heldout questions and answer keys for the same existing private Langfuse project. That exact export and verified repeat are recorded below; no broader destination or inference authority was inferred.
 - **Experiment runs and result linking pending:** zero experiment runs/traces were fabricated. Current official Langfuse has no public REST endpoint for creating experiments and deprecates dataset-run-items. Existing historical summaries cannot honestly become fresh execution traces. A supported OTLP evidence import (preserving original execution times/IDs and distinguishing actual/estimated costs) or actual SDK-run experiment is a separate step. Current retrieval option/replay raw evidence and search session IDs remain in external files for that work. Synced historical summaries are metadata, not scores or claimed experiment results.
 
 Official references: [Dataset API OpenAPI](https://raw.githubusercontent.com/langfuse/langfuse/main/web/public/generated/api/openapi.yml), [experiment data model](https://langfuse.com/docs/evaluation/experiments/data-model), [deprecation migration](https://langfuse.com/faq/all/deprecated-api-migration), [historical migration limitations](https://langfuse.com/guides/cookbook/example_data_migration).
+
+
+## Explicitly authorized heldout export
+
+Verified 2026-10-17 05:49:04 UTC. The user explicitly approved exporting **the six heldout questions and answer keys to the same existing private Langfuse project**. This superseded the earlier insufficient-authorization blocker for that precise payload and destination. The sync processed sealed payloads programmatically; heldout answers were not printed, supplied to tuning agents or used to change product code. No heldout inference was performed.
+
+| Dataset | Remote items | First-pass creates | Second-pass creates | Second-pass updates | Second-pass unchanged |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| docslurp-multisearch-heldout-v1 | 6 | 6 | 0 | 0 | 6 |
+
+Both passes verified individual full input/expected-output equality and item content hashes, then confirmed item identities through paginated dataset readback. The external sanitized receipt records six verified content hashes, manifest/outbox SHA-256 hashes, both actual verification timestamps and the explicit authorization scope. Import checkout commit is frozen as `04f567a`; this is import provenance, not a fabricated execution commit. Existing development versions remain separate.
+
+Evidence outside Git: `langfuse-heldout-manifest.json`, private `langfuse-heldout-outbox.json`, `langfuse-heldout-first.json`, `langfuse-heldout-second.json`, and sanitized `langfuse-heldout-export-receipt.json`, all under `/tmp/docslurp-retrieval-quality-evidence/`. The existing temporary localhost SSH tunnel targeted the same service and was closed after verification. No service/credential/firewall changes or new infrastructure were needed. Coordinator reran the focused sync tests successfully.
+
+**Actual run-result sync remains unsupported by this uploader.** Inspection confirms it writes dataset definitions/items and historical-summary metadata only. It creates zero experiment runs, traces or scores and cannot attach the retained real production answers/search outcomes as supported experiment results. No traces, timestamps, costs or executions were invented to fill that gap. Existing raw production evidence and real session identifiers remain available separately for a supported, evidence-preserving run import or future actual experiment integration.
