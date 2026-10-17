@@ -119,7 +119,7 @@ export class IndexStage implements Stage {
     this.queue = new LanceDbWriteQueue({
       sql: this.queueSql,
       loadRecords: async (row) => {
-        const artifact = await this.storage.getJson<EmbeddingArtifact>(row.artifactKey);
+        const artifact = await this.storage.getJson<EmbeddingArtifact>(row.artifactKey, { streamJson: true });
         return buildVectorRecords(artifact, row.documentId, row.metadata);
       },
       maintenance: {
@@ -161,7 +161,7 @@ export class IndexStage implements Stage {
         "vector index manifests ready",
         async () => {
           const embeddingKey = `${document.userId}/${state.run.id}/embeddings/${document.id}.json`;
-          const artifact = await this.storage.getJson<EmbeddingArtifact>(embeddingKey);
+          const artifact = await this.storage.getJson<EmbeddingArtifact>(embeddingKey, { streamJson: true });
           const records = buildVectorRecords(artifact, document.id, {
             sourceKey: document.sourceKey,
             filename: document.filename
