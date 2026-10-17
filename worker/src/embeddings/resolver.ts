@@ -41,7 +41,7 @@ export function resolveEmbeddingModel(cfg: Config, pipeline: PipelineFeatures, d
   const modelUri = firstNonEmpty(
     pipelineModelOverride,
     effectiveProfileDefaults.modelUri,
-    "llm://openai/text-embedding-3-small",
+    "llm://openrouter/perplexity/pplx-embed-v1-0.6b",
   );
   const target = pipelineModelOverride
     ? pipeline.embedding.target
@@ -135,7 +135,7 @@ function shouldUseMultilingualProfile(
   return detectedLanguage === "mul"
     && !pipelineModelOverride
     && !configModelOverride
-    && (profileKey === "good-fast-local" || profileKey === "cheapest-hosted");
+    && profileKey === "good-fast-local";
 }
 
 function defaultBatchSizeForLane(lane: InferenceLane, profileBatchSize: number): number {

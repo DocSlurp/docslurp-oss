@@ -93,6 +93,24 @@ describe("embedConfiguredText", () => {
     expect(second.embedding).toEqual(first.embedding);
   });
 
+  it("uses the official OpenRouter route and records actual usage before rejecting malformed vectors", async () => {
+    const onUsage = vi.fn();
+    const args = { value: "How many batteries are required?", runtime: "remote", provider: "openrouter", model: "perplexity/pplx-embed-v1-0.6b", dimensions: 1024, normalize: true, apiKey: "router-key", baseURL: "https://ignored.invalid", privacyMode: "standard" as const, onUsage };
+    embedMock.mockResolvedValueOnce({ embedding: Array.from({ length: 1024 }, () => 1), usage: { tokens: 9 } });
+    const result = await embedConfiguredText(args);
+    expect(createOpenAIMock).toHaveBeenCalledWith({ apiKey: "router-key", baseURL: "https://openrouter.ai/api/v1" });
+    expect(result.usage.inputTokens).toBe(9);
+    expect(Math.hypot(...result.embedding)).toBeCloseTo(1);
+    expect(onUsage).toHaveBeenCalledWith({ inputTokens: 9 });
+    embedMock.mockResolvedValueOnce({ embedding: [1, 2], usage: { tokens: 11 } });
+    await expect(embedConfiguredText(args)).rejects.toThrow("invalid dimensions");
+    expect(onUsage).toHaveBeenLastCalledWith({ inputTokens: 11 });
+    embedMock.mockResolvedValueOnce({ embedding: Array.from({ length: 1024 }, () => 1), usage: {} });
+    await expect(embedConfiguredText(args)).rejects.toThrow("actual usage");
+    await expect(embedConfiguredText({ ...args, apiKey: undefined })).rejects.toThrow("OPENROUTER_API_KEY");
+    await expect(embedConfiguredText({ ...args, privacyMode: "local-only" })).rejects.toThrow();
+  });
+
   it("uses the URI-selected local OpenAI-compatible service", async () => {
     embedMock.mockResolvedValue({
       embedding: [0.1, 0.2, 0.3],

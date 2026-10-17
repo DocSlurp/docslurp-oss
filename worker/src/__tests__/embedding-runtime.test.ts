@@ -9,6 +9,7 @@ import {
   contextualizeChunksForEmbedding,
   embedTextChunks,
   remoteEmbeddingProviderOptions,
+  packEmbeddingBatches,
 } from "../stages/embedding-runtime.js";
 import {
   MemoryProviderRateStore,
@@ -70,6 +71,32 @@ describe("embedTextChunks", () => {
     } else {
       process.env.DOCSLURP_LOCAL_TRANSFORMERSJS_DTYPE = originalDtype;
     }
+  });
+
+  it("packs hosted requests by count and UTF-8 upper bound without dropping inputs", () => {
+    const chunks = ["a".repeat(60_000), "b".repeat(60_000), "é".repeat(20_000), "last"];
+    const batches = packEmbeddingBatches(chunks, 128, 120_000);
+    expect(batches.flat()).toEqual(chunks);
+    expect(batches).toHaveLength(2);
+    for (const batch of batches) expect(batch.reduce((sum, text) => sum + new TextEncoder().encode(text).byteLength + 8, 0)).toBeLessThanOrEqual(120_000);
+    expect(packEmbeddingBatches(["a", "b", "c"], 2)).toEqual([["a", "b"], ["c"]]);
+    expect(() => packEmbeddingBatches(["a".repeat(120_000)], 128, 120_000)).toThrow("reduce chunk size");
+  });
+
+  it("uses registered OpenRouter embeddings with exact vectors and actual usage", async () => {
+    const profile: EmbeddingProfile = { profile: "cheapest-hosted", target: "hosted", modelUri: "llm://openrouter/perplexity/pplx-embed-v1-0.6b", runtime: "remote", provider: "openrouter", model: "perplexity/pplx-embed-v1-0.6b", baseUrl: null, dimensions: 1024, task: "document", normalize: true, batchSize: 32, lateChunking: false, lateChunkingWindow: 2 };
+    const onRemoteUsage = vi.fn();
+    const args = { chunks: ["A guide requires two replaceable batteries."], profile, privacyMode: "standard" as const, config: { ...fromEnv(), openRouterApiKey: "router-key" }, onRemoteUsage };
+    aiMock.embedMany.mockResolvedValueOnce({ embeddings: [Array.from({ length: 1024 }, () => 1)], usage: { tokens: 12 } });
+    const result = await embedTextChunks(args);
+    expect(openAiMock.createOpenAI).toHaveBeenCalledWith({ apiKey: "router-key", baseURL: "https://openrouter.ai/api/v1" });
+    expect(result.vectors[0]).toHaveLength(1024);
+    expect(Math.hypot(...result.vectors[0]!)).toBeCloseTo(1);
+    expect(onRemoteUsage).toHaveBeenCalledWith(expect.objectContaining({ inputTokens: 12, chunks: 1 }));
+    aiMock.embedMany.mockResolvedValueOnce({ embeddings: [[1, 2]], usage: { tokens: 14 } });
+    await expect(embedTextChunks(args)).rejects.toThrow("invalid dimensions");
+    expect(onRemoteUsage).toHaveBeenLastCalledWith(expect.objectContaining({ inputTokens: 14 }));
+    await expect(embedTextChunks({ ...args, config: { ...args.config, openRouterApiKey: "" } })).rejects.toThrow("OPENROUTER_API_KEY");
   });
 
   it("uses the cached JS transformers pipeline for local embeddings", async () => {

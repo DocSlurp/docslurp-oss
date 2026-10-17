@@ -3,7 +3,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { withObservation, aiResultDetails } from "@docslurp/shared/observability";
 import { createOpenAI } from "@ai-sdk/openai";
-import { defaultEmbeddingConfig, defaultPipelineFeatures, fitEmbeddingDimensions, parseLlmModelUri } from "@docslurp/shared";
+import { defaultEmbeddingConfig, defaultPipelineFeatures, fitEmbeddingDimensions, parseLlmModelUri, openRouterEmbeddingRoute, validateHostedEmbeddingVector } from "@docslurp/shared";
 import { embed, generateText, streamText } from "ai";
 
 import {
@@ -461,6 +461,8 @@ export async function embedConfiguredText(args: {
   privacyMode: PrivacyMode;
   signal?: AbortSignal;
   observability?: AiObservabilityContext;
+  /** Receives actual usage before hosted vector validation, including malformed paid responses. */
+  onUsage?: (usage: EmbeddingUsage) => Promise<void> | void;
   /** `llm://private/...` route; required when `provider` is `private`. */
   modelUri?: string;
   /** Workspace attribution for strict-privacy audit rows on private endpoint calls. */
@@ -476,6 +478,22 @@ export async function embedConfiguredText(args: {
   });
   if (args.runtime === "local") {
     return await embedLocalText(args);
+  }
+
+  if (args.provider === "openrouter") {
+    const route = openRouterEmbeddingRoute(args.model ?? "");
+    if (args.dimensions !== undefined && args.dimensions !== route.dimensions) throw new Error("OpenRouter embedding dimensions do not match the registered model");
+    if (!args.apiKey) throw new Error("OPENROUTER_API_KEY is required for remote OpenRouter embeddings");
+    const provider = createOpenAI({ apiKey: args.apiKey, baseURL: OPENROUTER_BASE_URL });
+    const result = await withObservation({ name: "api.embedding.openrouter", type: "embedding", model: route.model, input: args.value, result: aiResultDetails }, () => embed({
+      model: provider.embedding(route.model), value: args.value, abortSignal: args.signal, maxRetries: 0,
+      ...posthogAiTelemetry({ functionId: "api.embedding.openrouter", provider: "openrouter", context: args.observability }),
+    }));
+    const inputTokens = result.usage.tokens;
+    if (!Number.isSafeInteger(inputTokens) || !(inputTokens! > 0)) throw new Error("OpenRouter embedding response omitted actual usage");
+    const usage = { inputTokens: inputTokens! };
+    await args.onUsage?.(usage);
+    return { embedding: validateHostedEmbeddingVector(result.embedding, route.dimensions, args.normalize), usage };
   }
 
   if (args.provider === "openai") {

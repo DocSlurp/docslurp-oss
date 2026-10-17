@@ -8,6 +8,7 @@ const sqlMock = Object.assign(vi.fn(), {
 });
 const lanceDbVectorSearch = vi.fn();
 const generateOpenRouterText = vi.fn();
+const embedConfiguredText = vi.fn();
 const compressChunks = vi.fn();
 
 // Spend admission has its own tests (spend-guard.test.ts); allow spend here.
@@ -23,7 +24,7 @@ vi.mock("../db.js", () => ({
 
 vi.mock("../lib/ai.js", () => ({
   SEARCH_OPENROUTER_MODEL: "openrouter-test",
-  embedConfiguredText: vi.fn(),
+  embedConfiguredText,
   generateOpenRouterText,
   resolveOpenRouterApiKey: vi.fn(() => process.env.OPENROUTER_API_KEY ?? process.env.OPENROUTER_KEY ?? process.env.ANTHROPIC_API_KEY),
 }));
@@ -120,7 +121,8 @@ describe("hybridSearch", () => {
       }), { array: sqlMock.array });
       return run(client);
     });
-    lanceDbVectorSearch.mockReset();
+    lanceDbVectorSearch.mockReset().mockResolvedValue([]);
+    embedConfiguredText.mockReset().mockResolvedValue({ embedding: [0.1, 0.2], usage: { inputTokens: 1 } });
     generateOpenRouterText.mockReset();
     compressChunks.mockReset();
     delete process.env.SEARCH_QUERY_ENCRYPTION_KEY;
@@ -207,12 +209,12 @@ describe("hybridSearch", () => {
         message:
           "Searching 5 of 9 pages (2 of 2 documents); 1 document still processing.",
       },
-      usageEvents: [],
+      usageEvents: [expect.objectContaining({ metric: "embed-query", provider: "openrouter", model: "perplexity/pplx-embed-v1-0.6b", inputTokens: 1 })],
     });
     expect(onSearchActivity).toHaveBeenCalledTimes(2);
     const [started, finished] = onSearchActivity.mock.calls.map(call => call[0]);
     expect(started).toMatchObject({ query: "test", status: "loading" });
-    expect(finished).toMatchObject({ id: started.id, groupId: started.groupId, status: "success", resultCount: 0, inputTokens: 0, outputTokens: 0 });
+    expect(finished).toMatchObject({ id: started.id, groupId: started.groupId, status: "success", resultCount: 0, inputTokens: 1, outputTokens: 0 });
     expect(finished.runtimeMs).toBeGreaterThanOrEqual(0);
   });
 
@@ -626,6 +628,7 @@ describe("hybridSearch", () => {
       sqlMock.mockReset();
       sqlMock.mockImplementation(async (strings) => {
         const text = Array.isArray(strings) ? strings.join(" ") : String(strings);
+        if (text.includes("select pipeline")) return [{ pipeline: { embedding: { profile: "good-fast-local" } } }];
         if (text.includes("from workspaces w")) return [{ workspace_id: "ws-1", org_id: "org-1", workspace_owner_user_id: "user-1", org_role: "owner", workspace_role: null }];
         if (text.includes("join vector_indexes")) return [{ id: "doc-1", owner_id: "doc-1" }];
         if (text.includes("with scoped_runs as")) {
@@ -1069,6 +1072,7 @@ describe("hybridSearch", () => {
 
     expect(response.results[0]?.text).toBe("Compressed acquisition terms.");
     expect(response.usageEvents).toEqual([
+      expect.objectContaining({ metric: "embed-query", model: "perplexity/pplx-embed-v1-0.6b", inputTokens: 1 }),
       expect.objectContaining({
         provider: "openrouter",
         model: "openrouter-test",
