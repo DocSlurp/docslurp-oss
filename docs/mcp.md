@@ -6,10 +6,14 @@ Choose a tool based on the result you need:
 
 | Tool | Result | AI generation |
 | --- | --- | --- |
-| `workspace.search` | Portable text passages with document/page citation metadata | None |
-| `workspace.search-many` | Ordered results for up to 20 retrieval queries, with per-query errors | None |
-| `workspace.chat` | Grounded answer, citations, conversation session and usage | Workspace-configured model |
-| `workspace.ingest-report` | How the workspace's files processed: pages, text and images per page, vision, searchable pages with reasons, settings and recommendations | None |
+| `listWorkspaces` | Authorized workspaces, slugs, default, document/page counts and processing status | None |
+| `upload` | Up to 10 presigned file PUT URLs, or start ingestion from remote URLs | Workspace ingestion settings |
+| `completeUpload` | Verify uploaded files and start ingestion | Workspace ingestion settings |
+| `suggestQueries` | Prior queries and suggestions | None |
+| `search` | Portable text passages with document/page citation metadata | None |
+| `searchMany` | Ordered results for up to 20 retrieval queries, with per-query errors | None |
+| `chat` | Grounded answer, citations, conversation session and usage | Workspace-configured model |
+| `getUploadStatus` | How the workspace's files processed: pages, text and images per page, vision, searchable pages with reasons, settings and recommendations | None |
 
 Search and chat need only a question:
 
@@ -43,7 +47,20 @@ Parallel retrieval defaults to at most four in-flight queries; set `concurrency`
 }
 ```
 
-The server also offers query suggestions, cross-workspace aggregate retrieval, and asynchronous automation tools. Discover their schemas with `tools/list`; tools outside your credential's scopes are omitted. Automation tools return operation handles for polling, while `workspace.chat` directly returns its answer.
+Discover schemas with `tools/list`. `upload` and `completeUpload` require `ingest` scope; `listWorkspaces` and `getUploadStatus` accept `ingest` or `search`; retrieval, chat and suggestions require `search`. New default OAuth consent requests include ingest access; existing read-only connections must reauthorize with ingest scope to discover upload tools. Explicitly requested read-only scopes stay read-only. Internal automation tools are not advertised.
+
+## Upload files from an agent
+
+1. Call `upload` with `files` metadata (1–10 files). Omit `workspaceId` for the default workspace, or explicitly request a new one with `workspaceName`:
+
+   ```json
+   {"files":[{"filename":"manual.pdf","mimeType":"application/pdf","sizeBytes":123456}]}
+   ```
+
+2. The response contains `sessionId` and `files`, each with an `id` and a `putUrl`. PUT each file's raw bytes to its URL with its declared `Content-Type`. URLs expire after 15 minutes. Each file gets one URL, including large files (up to 5 GiB, subject to account limits). Keep signed URLs private. Local file paths and base64 are not tool arguments.
+3. After every PUT succeeds, call `completeUpload` with `sessionId` and `fileIds`. The server verifies object sizes and starts ingestion only after all files complete. Use the returned workspace/run IDs with `getUploadStatus`, then `search` or `chat`. An already confirmed session cannot be submitted again.
+
+For files already hosted online, call `upload` with `{"urls":["https://example.com/manual.pdf"]}`. This starts ingestion directly. An optional `idempotencyKey` deduplicates URL-ingestion retries; it does not apply to signed-upload session creation.
 
 The remote endpoint supports modern per-request MCP and stateless legacy Streamable HTTP clients. Stdio-only clients can use `docslurp mcp-server` from `@docslurp/cli`; its native REST adapters expose the same tools. Transport and adapter calls share the same authorization and search/chat implementation, without an internal network hop or forwarding credentials.
 
@@ -91,10 +108,7 @@ permissions. Supported browsers also receive WebMCP tools through
 Neither path requires creating a server API key. Remote `/v1/mcp` remains
 bearer-authenticated.
 
-`ai.operation.get` accepts `{ "operationId": "<uuid>" }` and returns the current
-operation snapshot, including pending approval or the final result. Use it to
-poll automation submissions from tool-only clients. Automation schemas now expose
-source URLs, dry runs, cost limits and advanced output controls through discovery.
+
 
 See the integration notes and remaining tool gaps
 for authentication boundaries, feature flags and the API parity roadmap.

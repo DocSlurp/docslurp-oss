@@ -25,13 +25,13 @@ function createServer(manifest: McpManifest, adapterDispatch: McpDispatch, signa
   };
   const server = new Server({ name: "docslurp", version: "0.1.0" }, {
     capabilities: { tools: {}, resources: {}, prompts: {} },
-    instructions: "Use workspace.search or workspace.search-many for portable cited context for any LLM. Use workspace.chat for a generated grounded answer; it incurs AI usage. Automation tools submit asynchronous operations; poll ai.operation.get or the operation resource for progress. Respect the user's workspace and cost constraints.",
+    instructions: "Use listWorkspaces to discover authorized workspaces. Use upload for URLs or up to 10 presigned file PUT URLs. PUT the bytes then call completeUpload before getUploadStatus. Workspace selection is optional: omitted workspaceId uses the organization default. Use search or searchMany for cited passages to answer with your own model, or chat for a generated grounded answer that incurs AI usage. Respect workspace and cost constraints.",
   });
   const tools = manifest.capabilities.filter((item) => item.category === "tool");
   server.setRequestHandler("tools/list", () => ({ tools: tools.map((item) => ({
     name: item.id, title: item.title, description: item.description,
     inputSchema: item.inputSchema as { type: "object"; [key: string]: unknown },
-    annotations: { readOnlyHint: (item.id.startsWith("workspace.") && item.id !== "workspace.chat") || item.id === "ai.operation.get", destructiveHint: false, idempotentHint: (item.id.startsWith("workspace.") && item.id !== "workspace.chat") || item.id === "ai.operation.get", openWorldHint: ["ai.simple", "ai.advanced"].includes(item.id) },
+    annotations: { readOnlyHint: !["upload", "completeUpload", "chat", "workspace.chat", "ai.simple", "ai.advanced"].includes(item.id), destructiveHint: false, idempotentHint: !["upload", "completeUpload", "chat", "workspace.chat", "ai.simple", "ai.advanced"].includes(item.id), openWorldHint: ["upload", "ai.simple", "ai.advanced"].includes(item.id) },
   })) }));
   server.setRequestHandler("tools/call", async (request, ctx) => {
     if (!tools.some((item) => item.id === request.params.name)) throw new ProtocolError(ProtocolErrorCode.InvalidParams, "Unknown tool");

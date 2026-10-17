@@ -12,6 +12,9 @@ import {
   apiKeyHasAnyScope,
 } from "../lib/api-key-authorization.js";
 import { getApiKey, getRequestActor, loadActorScopedWorkspace, resolveActorWorkspaceId, setRequestActor, type RequestActor } from "../lib/request-actor.js";
+import { listWorkspaces } from "./workspaces.js";
+import { apiKeyCanUseWorkspace } from "../lib/api-key-workspace-scope.js";
+import { listWorkspacesInput, uploadInput, completeUploadInput, productToolAliases, productToolDefinitions } from "./mcp-product-tools.js";
 import { mcpOrigin } from "../lib/mcp-origin.js";
 import { searchRoutes } from "../routes/search.js";
 import { sql } from "../db.js";
@@ -63,7 +66,7 @@ const workspaceSuggestSchema = z.object({
   limit: z.number().int().min(1).max(25).optional(),
 });
 
-export function mcpManifest(baseUrl: string, scopes?: string[]) {
+function legacyManifest(baseUrl: string, scopes?: string[]) {
   const manifest = getAutomationCapabilityManifest(baseUrl);
   return {
     ...manifest,
@@ -106,6 +109,24 @@ export function mcpManifest(baseUrl: string, scopes?: string[]) {
   };
 }
 
+/** The public MCP catalog follows the product's upload → search → chat flow. */
+export function mcpManifest(baseUrl: string, scopes?: string[]) {
+  const manifest = legacyManifest(baseUrl);
+  const tools = Object.entries(productToolAliases).map(([name, legacyId]) => {
+    const tool = manifest.capabilities.find(item => item.id === legacyId)!;
+    return { ...tool, id: name, endpoint: `${baseUrl}/v1/mcp/tools/${name}`,
+      description: tool.description.replaceAll("workspace.search", "search"),
+      ...(name === "getUploadStatus" ? { title: "Get upload status", description: "Check uploaded files and ingestion progress in a workspace, optionally for a runId returned by upload. Reports searchable pages, failures, costs and processing speed without AI calls. Use before search or chat when files are still processing." } : {}),
+    };
+  });
+  return { ...manifest, capabilities: [...productToolDefinitions(baseUrl), ...tools].filter(tool => {
+    if (!scopes) return true;
+    if (["upload", "completeUpload"].includes(tool.id)) return scopes.includes("ingest");
+    if (["listWorkspaces", "getUploadStatus"].includes(tool.id)) return scopes.some(scope => ["ingest", "search"].includes(scope));
+    return scopes.includes("search");
+  }) };
+}
+
 function routeBaseUrl(_url: string): string {
   return mcpOrigin(_url);
 }
@@ -125,13 +146,84 @@ const mcpAdapterRoutes = new Hono()
   .post("/tools/:id", async (c) => {
     const actor = getRequestActor(c);
     const apiKey = getApiKey(c);
-    const toolId = c.req.param("id");
+    const requestedTool = c.req.param("id");
+    const toolId = productToolAliases[requestedTool] ?? requestedTool;
     let body: Record<string, unknown>;
     try {
       body = await c.req.json();
       if (!body || Array.isArray(body) || typeof body !== "object") throw new Error("Expected object");
     } catch {
       return c.json({ error: "Expected a JSON object" }, 400);
+    }
+
+    if (toolId === "listWorkspaces") {
+      if (apiKey && !apiKeyHasAnyScope(apiKey, ["search", "ingest"])) return c.json({ error: "Forbidden" }, 403);
+      const parsed = listWorkspacesInput.safeParse(body);
+      if (!parsed.success) return c.json({ error: { issues: parsed.error.issues } }, 400);
+      const accessible = (await listWorkspaces(actor.userId, { refineNames: false }))
+        .filter(workspace => !apiKey || apiKeyCanUseWorkspace(apiKey, workspace));
+      const { offset, limit } = parsed.data;
+      return c.json({ workspaces: accessible.slice(offset, offset + limit).map(workspace => ({
+        id: workspace.id, slug: workspace.slug, name: workspace.name, isDefault: workspace.isDefault,
+        documentCount: workspace.documentCount, totalPageCount: workspace.totalPageCount,
+        pendingDocumentCount: workspace.pendingDocumentCount, latestRunId: workspace.latestRunId,
+        latestRunStatus: workspace.latestRunStatus,
+      })), total: accessible.length, nextOffset: offset + limit < accessible.length ? offset + limit : null });
+    }
+
+    if (toolId === "upload") {
+      if (apiKey && !apiKeyHasAnyScope(apiKey, ["ingest"])) return c.json({ error: "Forbidden" }, 403);
+      const parsed = uploadInput.safeParse(body);
+      if (!parsed.success) return c.json({ error: { issues: parsed.error.issues } }, 400);
+      const input = parsed.data;
+      if (input.workspaceName && apiKey?.workspaceIds?.length) return c.json({ error: "This key cannot create workspaces outside its allowlist" }, 403);
+      const workspaceId = input.workspaceName ? undefined : await resolveActorWorkspaceId(actor, input.workspaceId);
+      if (workspaceId && !await loadActorScopedWorkspace(workspaceId, actor)) return c.json({ error: "Workspace not found" }, 404);
+      // Reuse upload authorization, URL validation, admission, spend checks and idempotency.
+      const { uploadsRoutes } = await import("../routes/uploads.js");
+      const native = new Hono().use("*", publicErrorMiddleware).use("*", async (inner, next) => {
+        setRequestActor(inner, actor);
+        await next();
+      }).route("/", uploadsRoutes);
+      native.onError(spendAwareErrorHandler);
+      const headers = new Headers();
+      if (input.idempotencyKey) headers.set("Idempotency-Key", input.idempotencyKey);
+      headers.set("Content-Type", "application/json");
+      return native.request(`http://mcp.internal/${input.urls ? "url" : "direct/sessions"}`, {
+        method: "POST", headers, body: JSON.stringify({ workspaceId, workspaceName: input.workspaceName,
+          ...(input.urls ? { urls: input.urls } : { files: input.files!.map(file => ({ ...file, singlePart: true })) }),
+        }), signal: c.req.raw.signal,
+      });
+    }
+
+    if (toolId === "completeUpload") {
+      if (apiKey && !apiKeyHasAnyScope(apiKey, ["ingest"])) return c.json({ error: "Forbidden" }, 403);
+      const parsed = completeUploadInput.safeParse(body);
+      if (!parsed.success) return c.json({ error: { issues: parsed.error.issues } }, 400);
+      const { loadDirectUploadSession } = await import("./direct-upload-session.js");
+      const loaded = await loadDirectUploadSession(parsed.data.sessionId, actor.userId);
+      if (!loaded || (apiKey && (loaded.session.org_id !== apiKey.orgId ||
+        (loaded.session.workspace_id ? !await loadActorScopedWorkspace(loaded.session.workspace_id, actor) : Boolean(apiKey.workspaceIds?.length))))) {
+        return c.json({ error: "Upload session not found" }, 404);
+      }
+      if (!["pending", "uploading"].includes(loaded.session.status)) return c.json({ error: "Upload session is already confirmed or closed" }, 409);
+      if (loaded.files.length > 10 || loaded.files.some(file => file.upload_mode !== "single") ||
+        new Set(parsed.data.fileIds).size !== loaded.files.length || loaded.files.some(file => !parsed.data.fileIds.includes(file.id))) {
+        return c.json({ error: "Provide all file IDs from this upload session" }, 400);
+      }
+      const { uploadsRoutes } = await import("../routes/uploads.js");
+      const native = new Hono().use("*", publicErrorMiddleware).use("*", async (inner, next) => {
+        setRequestActor(inner, actor); await next();
+      }).route("/", uploadsRoutes);
+      native.onError(spendAwareErrorHandler);
+      const sessionPath = `/direct/sessions/${parsed.data.sessionId}`;
+      for (const fileId of parsed.data.fileIds) {
+        const result = await native.request(`http://mcp.internal${sessionPath}/files/complete`, {
+          method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ fileId }), signal: c.req.raw.signal,
+        });
+        if (!result.ok) return result;
+      }
+      return native.request(`http://mcp.internal${sessionPath}/confirm`, { method: "POST", signal: c.req.raw.signal });
     }
 
     if (toolId === "ai.operation.get") {
@@ -204,7 +296,7 @@ const mcpAdapterRoutes = new Hono()
     }
 
     if (toolId === "workspace.ingest-report") {
-      if (apiKey && !apiKeyHasAnyScope(apiKey, ["search"])) return c.json({ error: "Forbidden" }, 403);
+      if (apiKey && !apiKeyHasAnyScope(apiKey, ["search", "ingest"])) return c.json({ error: "Forbidden" }, 403);
       const parsed = workspaceIngestReportSchema.safeParse(body);
       if (!parsed.success) return c.json({ error: { issues: parsed.error.issues } }, 400);
       const workspace = await loadActorScopedWorkspace(

@@ -23,7 +23,7 @@ export function validRedirect(value: unknown): value is string {
 }
 
 export function parseScopes(value: string | null): string[] {
-  const scopes = [...new Set((value ?? "search read").split(/\s+/).filter(Boolean))];
+  const scopes = [...new Set((value ?? MCP_SCOPES.join(" ")).split(/\s+/).filter(Boolean))];
   if (!scopes.length || scopes.some(scope => !MCP_SCOPES.includes(scope as typeof MCP_SCOPES[number]))) {
     throw new Error("invalid_scope");
   }

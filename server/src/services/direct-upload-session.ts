@@ -28,6 +28,8 @@ export interface DirectUploadSessionFileInput {
   sizeBytes: number;
   sha256?: string;
   canonicalId?: string | null;
+  /** Request one signed PUT instead of multipart (maximum 5 GiB). */
+  singlePart?: boolean;
 }
 
 export interface CreateDirectUploadSessionInput {
@@ -203,6 +205,9 @@ export async function buildDirectUploadFileDescriptor(file: UploadSessionFileRow
 }
 
 export async function createDirectUploadSession(input: CreateDirectUploadSessionInput) {
+  if (input.files.some(file => file.singlePart && file.sizeBytes > 5 * 1024 ** 3)) {
+    throw new WorkspaceIntakeError("Single-part uploads cannot exceed 5 GiB", 400);
+  }
   // Workspace Intake's policy screens declared files before any upload target exists.
   const files = input.files.map((file) => ({
     ...file,
@@ -238,7 +243,7 @@ export async function createDirectUploadSession(input: CreateDirectUploadSession
 
   for (const file of files) {
     const sourceKey = rawSourceKey(input.userId, file.filename);
-    const isMultipart = file.sizeBytes >= MULTIPART_THRESHOLD_BYTES;
+    const isMultipart = !file.singlePart && file.sizeBytes >= MULTIPART_THRESHOLD_BYTES;
     const partSize = isMultipart ? MULTIPART_PART_SIZE_BYTES : null;
     const uploadId = isMultipart
       ? await createMultipartUpload(sourceKey, file.mimeType)
