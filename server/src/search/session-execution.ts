@@ -5,7 +5,6 @@ import { sql } from "../db.js";
 import { calibrateSearchConfidence } from "./confidence.js";
 import { compressChunks } from "./contextual-compression.js";
 import { mmrSelect } from "./mmr.js";
-import { lostInTheMiddleReorder } from "./position-reorder.js";
 import { rerankBM25, type RankedChunk } from "./rerank.js";
 import {
   applyRelevanceFloor,
@@ -216,16 +215,12 @@ export async function applySearchPostRetrievalProcessing(
     : ranked.slice(0, input.limit);
 
   const rankById = new Map(ranked.map((chunk) => [chunk.id, chunk]));
-  const reordered = lostInTheMiddleReorder(
-    selected.map((chunk) => ({
-      id: chunk.id,
-      // Position context using the reranker score, not the earlier fusion rank.
-      score: rankById.get(chunk.id)?.crossScore ?? chunk.score,
-    })),
-  );
+  // Search consumers may take a shorter prefix (for example, chat citations).
+  // Preserve retrieval order here; moving the second-best passage to the end
+  // before that cap can discard it. Prompt positioning belongs after selection.
   const chunkById = new Map(candidates.map((chunk) => [chunk.id, chunk]));
 
-  return reordered
+  return selected
     .map((result, index) => {
       const chunk = chunkById.get(result.id);
       if (!chunk) {

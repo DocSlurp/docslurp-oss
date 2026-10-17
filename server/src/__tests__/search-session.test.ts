@@ -296,11 +296,11 @@ describe("Search Session execution helpers", () => {
     },
   };
 
-  it.each([false, true])("preserves the reranker winner through context positioning (MMR=%s)", async (useMmr) => {
+  it.each([false, true])("preserves strongest passages when a consumer takes a result prefix (MMR=%s)", async (useMmr) => {
     const chunks = searchResultsToChunks([
       { ...result, text: "Routine maintenance checklist for the plant.", score: 1 },
       {
-        ...result, text: "General equipment safety procedures.", score: 0.8,
+        ...result, text: "Cobalt pump maintenance procedures.", score: 0.8,
         citation: { ...result.citation, chunkIndex: 3 },
       },
       {
@@ -317,7 +317,7 @@ describe("Search Session execution helpers", () => {
       session: createSearchSessionJournal({ rootSessionId: "ranking-test" }),
     });
 
-    expect(processed[0]?.id).toBe(chunks[2]?.id);
+    expect(processed.slice(0, 2).map((chunk) => chunk.id)).toEqual([chunks[2]?.id, chunks[1]?.id]);
     expect(new Set(processed.map((chunk) => chunk.id))).toEqual(
       new Set(chunks.map((chunk) => chunk.id)),
     );
