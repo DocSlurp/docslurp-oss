@@ -1,0 +1,25 @@
+# Metered DeepInfra embedding smoke
+
+Succeeded 2026-10-17 05:35:52 UTC through the new worker `embedTextChunks` and query `embedConfiguredText` application functions. `assertCanSpend` ran before each call, active spend protection was checked explicitly, and a scoped `createUsageLedger` flushed actual usage before retaining vectors. The canonical `attributedUsage` reader confirmed both DB events under the verified existing test user/org/workspace. No existing corpus or index changed.
+
+| Application path | Actual input tokens | Returned dimensions | Vector L2 norm | Provider USD | Customer ledger USD |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Worker, synthetic generic document | 18 | 1024 | 1 | 0.00000018 | 0.000000216 |
+| Query, synthetic generic question | 12 | 1024 | 1 | 0.00000012 | 0.000000144 |
+| Total | 30 | — | — | **0.00000030** | **0.000000360** |
+
+Both vectors contain finite values. The exact route was DeepInfra `BAAI/bge-m3` at `https://api.deepinfra.com/v1/openai`, using the separate DeepInfra credential; no dimensions request or task prefix was sent. No OpenAI route or lexical fallback was used. Provider cost is actual returned tokens multiplied by the checked $0.010/M price; it is not a provider invoice receipt. Customer ledger charges include the application pricing policy and are reported separately. Provider limit was $0.02 with a combined synthetic input bound of 512 characters, one document batch, one query and zero retries.
+
+The preceding four attempts failed during local prerequisites before any provider call; their reports preserve zero attempts and zero observed spend. Production-mode import required an unrelated missing `CREDENTIALS_ENCRYPTION_KEY`. The successful local harness used normal development startup with `SKIP_RUN_BUDGET_GUARDS_IN_DEV=false` and asserted guards were active; it did not invent a credential or bypass spend protection. Temporary TypeScript mappings selected this checkout's new shared source while reusing existing installed dependencies.
+
+Sanitized result: `embedding-smoke-v1.json`. External raw reports: `/tmp/docslurp-retrieval-quality-evidence/embedding-smoke-v{1,2,3,4,5}.json`. A source hash in the sanitized result binds it to the successful external report. The committed reusable runner is `scripts/retrieval-quality/embedding-smoke.mjs`; it prints only sanitized errors and evidence, never credential values. Run under tsx with a source-mapped shared package, providing `--env-file`, verified `--workspace`/`--user`, and external `--output`. This check proves route operation/accounting, not retrieval quality.
+
+## Next matched-corpus screen (design only; no further spend authorized here)
+
+Freeze one corpus and one query set before embedding. Use complete development documents already extracted by the existing pipeline, with unchanged canonical chunk text/IDs/page provenance and a fixed independent distractor document set. Bound the total provider input to **1 million tokens per fresh model arm**, measured conservatively before calls. If the complete selected documents exceed that bound, select a smaller set of complete documents before looking at candidate results; do not drop passages or distractors after ranking. Include direct, multi-premise, ambiguity and unsupported controls. Keep heldout questions sealed for finalist confirmation.
+
+Six configurations: retained OpenAI small full 1536; OpenAI small 256, 512 and 768; DeepInfra BGE-M3 native 1024; lexical-only control. The OpenAI sizes use its actual provider-supported dimensionality parameter; BGE never truncates. Reuse the retained OpenAI full index only if its corpus/chunk hashes match exactly; otherwise rebuild it within the same token bound. Use distinct candidate index roots/organizations and include provider/model/dimensions/tasks/normalization in experiment identities. Keep retrieval depth, hybrid weighting and reranking settings fixed across embedding arms.
+
+At 1M document-plus-query tokens for every embedding arm, all five freshly embedded arms cost at most $0.09 at current verified/configured prices ($0.02/M each OpenAI arm and $0.01/M BGE); with the existing native baseline reused, at most $0.07. This is a conservative price-times-token scenario, not a measured corpus forecast. Include actual returned tokens, failures, query calls and customer-ledger charges in the remaining prior $10 allowance; reserve at least 20% of the remaining $3 provider phase cap. Stop on any missing usage, wrong dimensions, persistence failure, spend refusal, or exhausted precomputed token/cost limit. Require metering before every next batch. No automatic retries or paid infrastructure.
+
+Report passage recall@10/MRR/citation validity, matched query latency distributions and separate actual-token provider cost versus customer ledger charge. A tiny synthetic smoke or small development slice cannot establish a universal quality advantage; confirmation must use separately authored untouched questions with the finalist and corpus/config frozen.
