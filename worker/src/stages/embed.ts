@@ -53,6 +53,8 @@ type ChunkInsertStore = {
     contentHash?: string;
     pipelineVersion?: string;
   }>) => Promise<void>;
+  /** Drops the document's chunk rows outside the replacement set (a retry that produced fewer chunks). */
+  deleteStaleDocumentChunks?: (documentId: string, keepChunkIds: readonly string[]) => Promise<void>;
   markDocumentLexicalSearchable?: (documentId: string) => Promise<void>;
 };
 
@@ -823,6 +825,12 @@ export class EmbedStage implements Stage {
     }
   }
 
+  // TODO(chunk-id ownership, pre-existing, flag-independent): a deduplicated artifact
+  // carries the chunk ids of the document that first produced it (`<sourceDoc>-NNN`),
+  // and materializeChunks upserts them `on conflict (id) do update set document_id`,
+  // so this document's rows take over (steal) the source document's chunk rows
+  // instead of getting `<thisDoc>-NNN` ids. Fix by rewriting the id prefix (as the
+  // embedding-reuse path does for artifact.chunks) before materializing.
   private async materializeChunksFromArtifact(args: {
     state: WorkflowState;
     document: WorkflowState["documents"][number];
@@ -876,8 +884,13 @@ export class EmbedStage implements Stage {
     }));
     const store = args.state.store as ChunkInsertStore;
     await store.insertChunks(dbChunks);
-    // Keyword search can serve the chunks from here on, ahead of the index stage.
-    if (dbChunks.length > 0) await store.markDocumentLexicalSearchable?.(args.document.id);
+    if (dbChunks.length > 0) {
+      // Ids are `<document>-<index>`, so a retry with fewer chunks leaves the old
+      // tail behind; drop it before the marker makes the set servable.
+      await store.deleteStaleDocumentChunks?.(args.document.id, dbChunks.map((chunk) => chunk.id));
+      // Keyword search can serve the chunks from here on, ahead of the index stage.
+      await store.markDocumentLexicalSearchable?.(args.document.id);
+    }
   }
 }
 

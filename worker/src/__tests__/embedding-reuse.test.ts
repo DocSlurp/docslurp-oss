@@ -382,6 +382,24 @@ describe("EmbedStage chunk materialization", () => {
     expect(retried.rows).toEqual(early.rows);
   });
 
+  it("prunes stale chunk rows after the replacement is written and before the document is marked searchable", async () => {
+    const calls: string[] = [];
+    let writtenIds: string[] = [];
+    const result = await embedDocument({
+      storage: new MemoryStorage(), reuse: new MemoryReuseStore(), runId: "run-prune", documentId: "prune",
+      storeExtras: {
+        insertChunks: async (chunks: Array<{ id: string }>) => { writtenIds = chunks.map((chunk) => chunk.id); calls.push("insert"); },
+        deleteStaleDocumentChunks: async (documentId: string, keep: readonly string[]) => {
+          expect([documentId, keep]).toEqual(["prune", writtenIds]);
+          calls.push("prune");
+        },
+        markDocumentLexicalSearchable: async () => { calls.push("mark"); },
+      },
+    });
+    expect(calls).toEqual(["insert", "prune", "mark"]);
+    expect(writtenIds).toEqual(result.artifact.chunks.map((chunk) => chunk.id));
+  });
+
   it("marks the document keyword-searchable only after every chunk row is written", async () => {
     const calls: string[] = [];
     const storeExtras = {

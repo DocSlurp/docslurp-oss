@@ -1277,8 +1277,11 @@ export class Store {
           end,
           -- A PII (re)scan briefly lifts pii_blocked to 'processing'; chunks
           -- written before it must not serve early keyword search until embed
-          -- rewrites them after the scan (server/src/search/eligibility.ts).
-          lexical_searchable_at = case when ${stage} = 'pii-detect' then null else lexical_searchable_at end,
+          -- rewrites them after the scan. Embed itself replaces the chunk set
+          -- (a retry after failure, or a restart), so the previous attempt's
+          -- marker is lifted until the replacement is complete
+          -- (server/src/search/eligibility.ts).
+          lexical_searchable_at = case when ${stage} in ('pii-detect', 'embed') then null else lexical_searchable_at end,
           updated_at = now()
       where id = ${documentId}
     `.then(() => undefined));
@@ -2300,6 +2303,17 @@ export class Store {
             token_estimate = excluded.token_estimate
       `;
     }
+  }
+
+  /**
+   * The document's chunks are replaced by `keepChunkIds`; rows an earlier attempt
+   * wrote beyond them are stale. Scoped to this document only.
+   */
+  async deleteStaleDocumentChunks(documentId: string, keepChunkIds: readonly string[]): Promise<void> {
+    await this.sql`
+      delete from document_chunks
+      where document_id = ${documentId} and id <> all(${this.sql.array([...keepChunkIds])}::text[])
+    `;
   }
 
   /**

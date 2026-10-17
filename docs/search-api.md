@@ -46,6 +46,8 @@ Search starts serving a document before its processing finishes. Once its text i
 
 A replacement version (reprocess or re-upload) never serves early: the previous version keeps answering until the new one completes and replaces it in one step. Failed, cancelled and PII-blocked documents are never served. Responses with partial coverage aren't cached. Self-hosters can turn early keyword search off with `SEARCH_EARLY_LEXICAL=0`; it is on by default outside production.
 
+Chunks reach keyword search once the embed stage has written every chunk row of a document and stamped it keyword-searchable. By default the worker does this after the embedding calls finish; set the worker variable `DOCSLURP_EARLY_LEXICAL_CHUNKS=on` (exact value, default off) to write the chunks before embedding starts, so a document is keyword-searchable for the duration of embedding. Serving is governed separately by the server's `SEARCH_EARLY_LEXICAL`, so both must allow it. When a failed document is retried, or embed re-runs, its previous marker is lifted until the replacement chunks are complete, and chunk rows left over from an attempt that produced more chunks are removed.
+
 ## Batch retrieval
 
 `POST /v1/search/batch` accepts the same search input objects:
