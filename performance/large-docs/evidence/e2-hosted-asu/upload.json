@@ -1,0 +1,40 @@
+{
+  "file": "asu-2025-26-academic-catalog-archive",
+  "sizeBytes": 98982516,
+  "sha256": "9677375a87b6eb4f5e8c54d9056438f3651fb1c064064f15565125c97b94722b",
+  "mode": "multipart",
+  "parts": 12,
+  "startedAt": 1792209482027,
+  "sessionMs": 1012,
+  "uploadMs": 6667,
+  "uploadMBps": 14.16,
+  "acceptedAt": 1792209496293,
+  "confirmMs": 6587,
+  "runId": "60d446ca-aff3-4f50-a2d8-172663c01a0c",
+  "documentId": "26b495d4-9703-4a2a-83c4-e920592e13ee",
+  "rejected": [],
+  "dedupedFromDocumentId": null,
+  "dedupScope": null,
+  "workspaceMatches": true,
+  "warnings": [],
+  "temporalDeferred": false,
+  "requestedEmbedding": {
+    "profile": "cheapest-hosted",
+    "target": "hosted",
+    "modelUri": "llm://openai/text-embedding-3-small",
+    "task": "document",
+    "normalize": true
+  },
+  "effectiveRunConfig": {
+    "embedding": {
+      "profile": "cheapest-hosted",
+      "modelUri": "llm://openai/text-embedding-3-small",
+      "target": "hosted"
+    },
+    "textModel": "z-ai/glm-5.3-flash",
+    "perOpModels": [],
+    "visionModelUri": "llm://openrouter/z-ai/glm-5.3-flash",
+    "maxCostCents": 250
+  },
+  "embeddingConfigOk": true
+}

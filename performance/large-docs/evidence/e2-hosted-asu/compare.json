@@ -1,0 +1,87 @@
+{
+  "candidate": {
+    "label": "e2-hosted-asu",
+    "embedding": "cheapest-hosted",
+    "n": 9,
+    "correct": 8,
+    "mrr": 0.641,
+    "firstQueryMs": 3077,
+    "p50Ms": 2786
+  },
+  "baseline": {
+    "label": "e1-rag-asu",
+    "embedding": "default (good-fast-local)",
+    "n": 0,
+    "correct": 0,
+    "mrr": null,
+    "firstQueryMs": null,
+    "p50Ms": null
+  },
+  "perQuery": [
+    {
+      "query": "asu-01",
+      "position": "beginning",
+      "baselineRank": null,
+      "candidateRank": 1
+    },
+    {
+      "query": "asu-02",
+      "position": "beginning",
+      "baselineRank": null,
+      "candidateRank": 1
+    },
+    {
+      "query": "asu-03",
+      "position": "beginning",
+      "baselineRank": null,
+      "candidateRank": 1
+    },
+    {
+      "query": "asu-04",
+      "position": "middle",
+      "baselineRank": null,
+      "candidateRank": 1
+    },
+    {
+      "query": "asu-05",
+      "position": "middle",
+      "baselineRank": null,
+      "candidateRank": 10
+    },
+    {
+      "query": "asu-06",
+      "position": "middle",
+      "baselineRank": null,
+      "candidateRank": 3
+    },
+    {
+      "query": "asu-07",
+      "position": "end",
+      "baselineRank": null,
+      "candidateRank": 3
+    },
+    {
+      "query": "asu-08",
+      "position": "end",
+      "baselineRank": null,
+      "candidateRank": null
+    },
+    {
+      "query": "asu-09",
+      "position": "end",
+      "baselineRank": null,
+      "candidateRank": 1
+    }
+  ],
+  "caveats": [
+    "embedding model and runtime change together (local bge-m3 vs hosted OpenAI): a quality or speed difference is not attributable to the model alone",
+    "retrieval stays hybrid (no vector-only API switch): lexical matches can mask embedding differences, so equal results do not prove equal embeddings",
+    "small n: this screens for regressions, it does not rank models",
+    "no end-to-end causal claim: arms differ in file reuse state and cost accounting; see report.json reuseDetail"
+  ],
+  "verdict": "not-pass",
+  "reasons": [
+    "e1-rag-asu: run did not complete (finalState=cancelled)",
+    "e1-rag-asu: no quality.jsonl"
+  ]
+}

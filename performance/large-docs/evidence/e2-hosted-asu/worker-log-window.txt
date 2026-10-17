@@ -1,0 +1,43 @@
+2026-10-17T04:02:30Z app[185406db691e38] lax [info][ai-rate-limit] waited provider=openai model=text-embedding-3-small wait_ms=2337 factor=1.000 active_orgs=1 store=memory
+2026-10-17T04:02:30Z app[185406db691e38] lax [info][ai-usage] embedding-tokens model=text-embedding-3-small input_tokens=27318 output_tokens=0
+2026-10-17T04:02:30Z app[185406db691e38] lax [info][ai-usage] embedding-tokens model=text-embedding-3-small input_tokens=27759 output_tokens=0
+2026-10-17T04:02:30Z app[185406db691e38] lax [info][ai-usage] embedding-tokens model=text-embedding-3-small input_tokens=25823 output_tokens=0
+2026-10-17T04:02:31Z app[185406db691e38] lax [info][ai-usage] embedding-tokens model=text-embedding-3-small input_tokens=25425 output_tokens=0
+2026-10-17T04:02:32Z app[185406db691e38] lax [info][ai-usage] embedding-tokens model=text-embedding-3-small input_tokens=25540 output_tokens=0
+2026-10-17T04:02:32Z app[185406db691e38] lax [info][ai-usage] embedding-tokens model=text-embedding-3-small input_tokens=25130 output_tokens=0
+2026-10-17T04:02:33Z app[185406db691e38] lax [info][ai-usage] embedding-tokens model=text-embedding-3-small input_tokens=25421 output_tokens=0
+2026-10-17T04:02:33Z app[185406db691e38] lax [info][ai-usage] embedding-tokens model=text-embedding-3-small input_tokens=26840 output_tokens=0
+2026-10-17T04:02:34Z app[185406db691e38] lax [info][ai-usage] embedding-tokens model=text-embedding-3-small input_tokens=24950 output_tokens=0
+2026-10-17T04:02:34Z app[185406db691e38] lax [info][ai-rate-limit] waited provider=openai model=text-embedding-3-small wait_ms=2071 factor=1.000 active_orgs=1 store=memory
+2026-10-17T04:02:35Z app[185406db691e38] lax [info][ai-rate-limit] waited provider=openai model=text-embedding-3-small wait_ms=2195 factor=1.000 active_orgs=1 store=memory
+2026-10-17T04:02:35Z app[185406db691e38] lax [info][ai-usage] embedding-tokens model=text-embedding-3-small input_tokens=26315 output_tokens=0
+2026-10-17T04:02:36Z app[185406db691e38] lax [info][ai-rate-limit] waited provider=openai model=text-embedding-3-small wait_ms=2043 factor=1.000 active_orgs=1 store=memory
+2026-10-17T04:02:36Z app[185406db691e38] lax [info][ai-usage] embedding-tokens model=text-embedding-3-small input_tokens=27108 output_tokens=0
+2026-10-17T04:02:36Z app[185406db691e38] lax [info][ai-usage] embedding-tokens model=text-embedding-3-small input_tokens=26420 output_tokens=0
+2026-10-17T04:02:37Z app[185406db691e38] lax [info][ai-usage] embedding-tokens model=text-embedding-3-small input_tokens=29521 output_tokens=0
+2026-10-17T04:02:38Z app[185406db691e38] lax [info][ai-usage] embedding-tokens model=text-embedding-3-small input_tokens=27026 output_tokens=0
+2026-10-17T04:02:38Z app[185406db691e38] lax [info][ai-usage] embedding-tokens model=text-embedding-3-small input_tokens=25599 output_tokens=0
+2026-10-17T04:02:39Z app[185406db691e38] lax [info][ai-usage] embedding-tokens model=text-embedding-3-small input_tokens=26982 output_tokens=0
+2026-10-17T04:02:39Z app[185406db691e38] lax [info][ai-usage] embedding-tokens model=text-embedding-3-small input_tokens=28134 output_tokens=0
+2026-10-17T04:02:40Z app[185406db691e38] lax [info][ai-usage] embedding-tokens model=text-embedding-3-small input_tokens=29773 output_tokens=0
+2026-10-17T04:02:40Z app[185406db691e38] lax [info][ai-rate-limit] waited provider=openai model=text-embedding-3-small wait_ms=2048 factor=1.000 active_orgs=1 store=memory
+2026-10-17T04:02:41Z app[185406db691e38] lax [info][ai-usage] embedding-tokens model=text-embedding-3-small input_tokens=28320 output_tokens=0
+2026-10-17T04:02:41Z app[185406db691e38] lax [info][ai-usage] embedding-tokens model=text-embedding-3-small input_tokens=27441 output_tokens=0
+2026-10-17T04:02:42Z app[185406db691e38] lax [info][ai-rate-limit] waited provider=openai model=text-embedding-3-small wait_ms=2253 factor=1.000 active_orgs=1 store=memory
+2026-10-17T04:02:42Z app[185406db691e38] lax [info][ai-usage] embedding-tokens model=text-embedding-3-small input_tokens=29277 output_tokens=0
+2026-10-17T04:02:42Z app[185406db691e38] lax [info][ai-rate-limit] waited provider=openai model=text-embedding-3-small wait_ms=2121 factor=1.000 active_orgs=1 store=memory
+2026-10-17T04:02:43Z app[185406db691e38] lax [info][ai-rate-limit] waited provider=openai model=text-embedding-3-small wait_ms=2106 factor=1.000 active_orgs=1 store=memory
+2026-10-17T04:02:43Z app[185406db691e38] lax [info][ai-usage] embedding-tokens model=text-embedding-3-small input_tokens=28442 output_tokens=0
+2026-10-17T04:02:43Z app[185406db691e38] lax [info][ai-usage] embedding-tokens model=text-embedding-3-small input_tokens=28611 output_tokens=0
+2026-10-17T04:02:44Z app[185406db691e38] lax [info][ai-rate-limit] waited provider=openai model=text-embedding-3-small wait_ms=2290 factor=1.000 active_orgs=1 store=memory
+2026-10-17T04:02:44Z app[185406db691e38] lax [info][ai-usage] embedding-tokens model=text-embedding-3-small input_tokens=28797 output_tokens=0
+2026-10-17T04:02:44Z app[185406db691e38] lax [info][ai-rate-limit] waited provider=openai model=text-embedding-3-small wait_ms=2153 factor=1.000 active_orgs=1 store=memory
+2026-10-17T04:02:45Z app[185406db691e38] lax [info][ai-usage] embedding-tokens model=text-embedding-3-small input_tokens=29059 output_tokens=0
+2026-10-17T04:02:45Z app[185406db691e38] lax [info][ai-usage] embedding-tokens model=text-embedding-3-small input_tokens=27132 output_tokens=0
+2026-10-17T04:02:46Z app[185406db691e38] lax [info][ai-usage] embedding-tokens model=text-embedding-3-small input_tokens=27227 output_tokens=0
+2026-10-17T04:02:47Z app[185406db691e38] lax [info][ai-usage] embedding-tokens model=text-embedding-3-small input_tokens=28875 output_tokens=0
+2026-10-17T04:02:47Z app[185406db691e38] lax [info][ai-rate-limit] waited provider=openai model=text-embedding-3-small wait_ms=2026 factor=1.000 active_orgs=1 store=memory
+2026-10-17T04:02:48Z app[185406db691e38] lax [info][ai-usage] embedding-tokens model=text-embedding-3-small input_tokens=26169 output_tokens=0
+2026-10-17T04:02:48Z app[185406db691e38] lax [info][ai-rate-limit] waited provider=openai model=text-embedding-3-small wait_ms=2168 factor=1.000 active_orgs=1 store=memory
+2026-10-17T04:02:48Z app[185406db691e38] lax [info][ai-usage] embedding-tokens model=text-embedding-3-small input_tokens=26647 output_tokens=0
+2026-10-17T04:02:49Z app[185406db691e38] lax [info][ai-usage] embedding-tokens model=text-embedding-3-small input_tokens=16681 output_tokens=0

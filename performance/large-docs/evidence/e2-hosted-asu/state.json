@@ -1,0 +1,148 @@
+{
+  "loggedInAt": "2026-10-17T03:57:43.231Z",
+  "workspaceId": "d5b03a34-c0dc-4ed8-9cdb-f59b7a6fc92a",
+  "profile": "rag-only",
+  "textModel": "z-ai/glm-5.3-flash",
+  "embeddingProfile": "cheapest-hosted",
+  "embedding": {
+    "profile": "cheapest-hosted",
+    "target": "hosted",
+    "modelUri": "llm://openai/text-embedding-3-small",
+    "task": "document",
+    "normalize": true
+  },
+  "runId": "60d446ca-aff3-4f50-a2d8-172663c01a0c",
+  "documentId": "26b495d4-9703-4a2a-83c4-e920592e13ee",
+  "fileId": "asu-2025-26-academic-catalog-archive",
+  "uploadStartedAt": 1792209482027,
+  "acceptedAt": 1792209496293,
+  "milestones": {
+    "uploadAccepted": {
+      "atMs": 14266,
+      "at": "2026-10-17T03:58:19.373Z",
+      "note": "confirm returned a run"
+    },
+    "firstPageProcessed": {
+      "atMs": 147226,
+      "at": "2026-10-17T04:00:29.253Z",
+      "pages": {
+        "completed": 100,
+        "total": 7188,
+        "byStage": {
+          "split-pages": 7188,
+          "extract-markdown": 6200
+        },
+        "byDocument": {
+          "26b495d4-9703-4a2a-83c4-e920592e13ee": {
+            "split-pages": 7188,
+            "extract-markdown": 6200
+          }
+        }
+      }
+    },
+    "firstCorrectResult": {
+      "atMs": 330027,
+      "at": "2026-10-17T04:03:32.054Z",
+      "query": "asu-02",
+      "position": "beginning",
+      "rank": 1,
+      "pagesProcessedAtThatTime": {
+        "completed": 7188,
+        "total": 7188,
+        "byStage": {
+          "split-pages": 7188,
+          "render-images": 7188,
+          "extract-markdown": 7188,
+          "embed": 7188,
+          "vision-extract": 8
+        },
+        "byDocument": {
+          "26b495d4-9703-4a2a-83c4-e920592e13ee": {
+            "split-pages": 7188,
+            "render-images": 7188,
+            "extract-markdown": 7188,
+            "embed": 7188,
+            "vision-extract": 8
+          }
+        }
+      }
+    },
+    "queryable_beginning": {
+      "atMs": 330027,
+      "at": "2026-10-17T04:03:32.054Z",
+      "query": "asu-02"
+    },
+    "runCompleted": {
+      "atMs": 350924,
+      "at": "2026-10-17T04:03:52.951Z",
+      "status": "completed",
+      "controlState": null,
+      "stage": "completed",
+      "pct": 100,
+      "pages": {
+        "completed": 7188,
+        "total": 7188,
+        "byStage": {
+          "split-pages": 7188,
+          "render-images": 7188,
+          "extract-markdown": 7188,
+          "embed": 7188,
+          "vision-extract": 8
+        },
+        "byDocument": {
+          "26b495d4-9703-4a2a-83c4-e920592e13ee": {
+            "split-pages": 7188,
+            "render-images": 7188,
+            "extract-markdown": 7188,
+            "embed": 7188,
+            "vision-extract": 8
+          }
+        }
+      },
+      "cost": 225.415605188889,
+      "billed": 225.415605188889,
+      "ai": 9.1711338,
+      "inTok": 3565045,
+      "outTok": 3556,
+      "res": {
+        "elapsedMs": 335531,
+        "cpuUserMs": 0,
+        "cpuSystemMs": 0,
+        "cpuTotalMs": 0,
+        "rssDeltaBytes": 0,
+        "peakRssBytes": 0
+      },
+      "failedDocs": 0,
+      "embed": {
+        "reuseHits": 0,
+        "reuseMisses": 8816,
+        "providerInputs": 8816,
+        "documentContextReused": false
+      }
+    },
+    "queryable_middle": {
+      "atMs": 356976,
+      "at": "2026-10-17T04:03:59.003Z",
+      "query": "asu-04",
+      "postCompletion": true
+    },
+    "queryable_end": {
+      "atMs": 366823,
+      "at": "2026-10-17T04:04:08.850Z",
+      "query": "asu-07",
+      "postCompletion": true
+    },
+    "allPositionsQueryable": {
+      "atMs": 373442,
+      "at": "2026-10-17T04:04:15.469Z",
+      "postCompletion": true
+    }
+  },
+  "modelsSeenInProgress": {
+    "z-ai/glm-5.3-flash": 1,
+    "llm://openrouter/z-ai/glm-5.3-flash": 1,
+    "llm://openai/text-embedding-3-small": 1
+  },
+  "probes": 17,
+  "finalState": "completed"
+}
