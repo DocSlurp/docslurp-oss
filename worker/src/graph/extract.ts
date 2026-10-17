@@ -244,9 +244,9 @@ function assembleDocumentGraph(args: {
   for (const entity of args.extraction.entities) ensureNode(entity);
 
   for (const chunk of args.chunks) {
-    const chunkText = chunk.text.toLowerCase();
+    const chunkText = chunk.text.normalize("NFKC").toLowerCase();
     const documentEntitiesInChunk = args.extraction.entities.filter((entity) =>
-      [entity.name, ...(entity.aliases ?? [])].some((name) => chunkText.includes(name.toLowerCase())),
+      [entity.name, ...(entity.aliases ?? [])].some((name) => containsEntityMention(chunkText, name)),
     );
     const chunkLevel = args.chunkHeuristics
       ? mergeEntities(extractEntitiesFromText(chunk.text, args.allowedTypes), documentEntitiesInChunk)
@@ -541,10 +541,27 @@ function findNode<T extends GraphNodeDraft>(nodes: Map<GraphNodeKey, T>, name: s
 
 export function normalizeName(value: string): string {
   return value
+    .normalize("NFKC")
     .trim()
     .toLowerCase()
-    .replace(/[^a-z0-9\s-]/g, "")
+    .replace(/[^\p{L}\p{M}\p{N}\s-]/gu, "")
     .replace(/\s+/g, " ");
+}
+
+/** Latin names need word boundaries; scripts without spaces retain substring matching. */
+function containsEntityMention(text: string, value: string): boolean {
+  const name = value.normalize("NFKC").trim().toLowerCase();
+  if (!name) return false;
+  const characters = Array.from(name);
+  const boundedStart = /[\p{Script=Latin}\p{N}]/u.test(characters[0]!);
+  const boundedEnd = /[\p{Script=Latin}\p{N}]/u.test(characters.at(-1)!);
+  const wordCharacter = /[\p{L}\p{M}\p{N}_]/u;
+  for (let at = text.indexOf(name); at !== -1; at = text.indexOf(name, at + 1)) {
+    const before = Array.from(text.slice(Math.max(0, at - 2), at)).at(-1) ?? "";
+    const after = Array.from(text.slice(at + name.length, at + name.length + 2))[0] ?? "";
+    if ((!boundedStart || !wordCharacter.test(before)) && (!boundedEnd || !wordCharacter.test(after))) return true;
+  }
+  return false;
 }
 
 function normalizePredicate(value: string): string {
