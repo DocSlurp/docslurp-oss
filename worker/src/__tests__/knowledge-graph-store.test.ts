@@ -1,8 +1,11 @@
 import type { PGlite } from "@electric-sql/pglite";
 import type { PGLiteSocketServer } from "@electric-sql/pglite-socket";
 import postgres from "postgres";
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { defaultGraphConfig, graphConfigFingerprint } from "@docslurp/shared";
+
+import { generateOpenRouterText } from "../lib/ai.js";
+vi.mock("../lib/ai.js", () => ({ generateOpenRouterText: vi.fn() }));
 
 import type { Config } from "../config.js";
 import { Store } from "../db/store.js";
@@ -42,6 +45,8 @@ afterAll(async () => {
 });
 
 beforeEach(async () => {
+  vi.mocked(generateOpenRouterText).mockReset();
+  await sql`update workspaces set pipeline = ${sql.json({ entityIndex: true })} where id = 'w'`;
   await sql`delete from graph_jobs`;
   await sql`delete from kg_communities`;
   await sql`delete from kg_nodes`;
@@ -281,6 +286,27 @@ describe("workspace graph rebuild jobs", () => {
     await runGraphJobs(sql, { workerId: "test", config, concurrency: 1 });
     expect(await sql`select documents_processed from graph_jobs where id = 'job-2'`).toEqual([{ documents_processed: 2 }]);
     expect(await runGraphJobs(sql, { workerId: "test", config, concurrency: 1 })).toBe(0);
+  });
+
+  it("persists billed graph tokens when a generated response cannot be parsed", async () => {
+    await seedDocument("d1", "Example System handles documents.");
+    await sql`update workspaces set pipeline = ${sql.json({ graphRag: true })} where id = 'w'`;
+    vi.mocked(generateOpenRouterText).mockResolvedValue({
+      text: '{"entities":[{"name":"Example"}', finishReason: "length",
+      usage: { inputTokens: 100, outputTokens: 1600, costCents: 0.25 },
+    });
+    await queueJob("job-usage", "full");
+    await runGraphJobs(sql, { workerId: "test", config: { ...config, openRouterApiKey: "mock-only" }, concurrency: 1 });
+    const events = await sql`
+      select input_tokens, output_tokens, cost_cents, metadata->>'finishReason' as finish_reason
+      from usage_attribution where metric = 'graphrag-extract' and metadata->>'graphJobId' = 'job-usage'
+    `;
+    expect(events).toHaveLength(1);
+    expect(Number(events[0]!.input_tokens)).toBe(100);
+    expect(Number(events[0]!.output_tokens)).toBe(1600);
+    expect(Number(events[0]!.cost_cents)).toBe(0.25);
+    expect(events[0]!.finish_reason).toBe("length");
+    expect(await sql`select source from kg_document_state where document_id = 'd1'`).toEqual([{ source: "heuristic" }]);
   });
 
   it("stops between batches when cancellation is requested", async () => {

@@ -176,6 +176,29 @@ async function runClaimedJob(sql: Client, job: GraphJobRow, options: GraphJobRun
               privacyMode: pipeline.privacyMode,
               textGeneration: pipeline.textGeneration,
               deploymentProfile: config.textGenerationProfile,
+              onUsage: (eventUsage, details) => {
+                console.log(`[ai-usage] graphrag-extract model=${job.model} input_tokens=${eventUsage.inputTokens} output_tokens=${eventUsage.outputTokens}`);
+                const costCents = eventUsage.costCents ?? textFallbackCost({
+                  model: job.model,
+                  inputTokens: eventUsage.inputTokens,
+                  outputTokens: eventUsage.outputTokens,
+                  costPer1kInputTokens: config.costPer1kInputTokens,
+                  costPer1kOutputTokens: config.costPer1kOutputTokens,
+                }).costCents;
+                progress.inputTokens += eventUsage.inputTokens;
+                progress.outputTokens += eventUsage.outputTokens;
+                progress.costCents += costCents;
+                if (eventUsage.inputTokens > 0 || eventUsage.outputTokens > 0) {
+                  usage.push({
+                    ...textUsageLabels(job.model),
+                    metric: "graphrag-extract",
+                    inputTokens: eventUsage.inputTokens,
+                    outputTokens: eventUsage.outputTokens,
+                    costCents,
+                    metadata: { ...eventUsage.metadata, documentId: document.id, depth: graphConfig.depth, ...details },
+                  });
+                }
+              },
             },
           });
           await replaceDocumentGraph(sql, {
@@ -186,28 +209,8 @@ async function runClaimedJob(sql: Client, job: GraphJobRow, options: GraphJobRun
             configHash: job.config_hash,
             graph,
           });
-          const costCents = textFallbackCost({
-            model: job.model,
-            inputTokens: graph.inputTokens,
-            outputTokens: graph.outputTokens,
-            costPer1kInputTokens: config.costPer1kInputTokens,
-            costPer1kOutputTokens: config.costPer1kOutputTokens,
-          }).costCents;
           progress.processed += 1;
           progress.windows += graph.windows;
-          progress.inputTokens += graph.inputTokens;
-          progress.outputTokens += graph.outputTokens;
-          progress.costCents += costCents;
-          if (graph.inputTokens > 0 || graph.outputTokens > 0) {
-            usage.push({
-              ...textUsageLabels(job.model),
-              metric: "graphrag-extract",
-              inputTokens: graph.inputTokens,
-              outputTokens: graph.outputTokens,
-              costCents,
-              metadata: { documentId: document.id, depth: graphConfig.depth, windows: graph.windows },
-            });
-          }
         } catch (error) {
           progress.failed += 1;
           console.warn(`[graph-job] document failed job=${job.id} document=${document.id} error=${error instanceof Error ? error.message : String(error)}`);

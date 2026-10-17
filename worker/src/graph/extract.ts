@@ -7,7 +7,7 @@ import {
   type TextGenerationProfile,
 } from "@docslurp/shared";
 
-import { generateOpenRouterText } from "../lib/ai.js";
+import { generateOpenRouterText, type TextGenerationUsage } from "../lib/ai.js";
 import { buildTrustedDocumentTaskPrompt } from "../lib/trusted-llm-task.js";
 
 const MAX_KNOWN_ENTITY_HINTS = 40;
@@ -32,6 +32,8 @@ export interface GraphExtractionContext {
   textGeneration?: TextGenerationConfig;
   deploymentProfile?: TextGenerationProfile;
   signal?: AbortSignal;
+  /** Record each completed provider call before parsing, fallback, or cancellation can discard usage. */
+  onUsage?: (usage: TextGenerationUsage, details: { window: number; finishReason: string }) => void;
 }
 
 /** Workspace natural key of a node: `kg_nodes (normalized_name, entity_type)`. */
@@ -115,40 +117,42 @@ export async function extractDocumentGraph(args: {
     let llmGraph: DocumentGraphExtraction = { entities: [], relationships: [] };
     let succeeded = false;
     for (const [index, window] of windows.entries()) {
+      let result: Awaited<ReturnType<typeof extractWindowWithLlm>>;
       try {
-        const result = await extractWindowWithLlm({
+        result = await extractWindowWithLlm({
           context,
           apiKey: context.apiKey,
           filename: args.filename,
           text: window,
           part: windows.length > 1 ? { index: index + 1, total: windows.length } : undefined,
           entityTypes,
-          allowedTypes,
           knownEntities: llmGraph.entities
             .slice(0, MAX_KNOWN_ENTITY_HINTS)
             .map((entity) => `${entity.name} (${entity.type})`),
           maxOutputTokens: profile.maxOutputTokens,
         });
+      } catch (error) {
+        if (context.signal?.aborted) throw error;
+        // Do not log provider error bodies: they may contain document content.
+        console.warn(`[graph-extract] model=${context.model} window=${index + 1}/${windows.length} outcome=provider-error`);
+        continue;
+      }
+      inputTokens += result.usage.inputTokens;
+      outputTokens += result.usage.outputTokens;
+      // Outside either catch: a recorder failure must fail the stage, not silently lose billing.
+      context.onUsage?.(result.usage, { window: index + 1, finishReason: result.finishReason });
+      if (!context.onUsage) console.log(`[ai-usage] graphrag-extract model=${context.model} input_tokens=${result.usage.inputTokens} output_tokens=${result.usage.outputTokens}`);
+      try {
+        const graph = parseGraphExtraction(result.text, allowedTypes);
         windowsRead += 1;
-        inputTokens += result.usage.inputTokens;
-        outputTokens += result.usage.outputTokens;
-        console.log(
-          `[ai-usage] graphrag-extract model=${context.model} input_tokens=${result.usage.inputTokens} output_tokens=${result.usage.outputTokens}`,
-        );
         llmGraph = {
-          entities: mergeEntities(
-            llmGraph.entities,
-            result.graph.entities.filter((entity) => entity.confidence >= profile.minConfidence),
-          ),
-          relationships: mergeRelationships(
-            llmGraph.relationships,
-            result.graph.relationships.filter((relationship) => relationship.confidence >= profile.minConfidence),
-          ),
+          entities: mergeEntities(llmGraph.entities, graph.entities.filter((entity) => entity.confidence >= profile.minConfidence)),
+          relationships: mergeRelationships(llmGraph.relationships, graph.relationships.filter((relationship) => relationship.confidence >= profile.minConfidence)),
         };
         succeeded = true;
       } catch (error) {
         if (context.signal?.aborted) throw error;
-        // A failed window falls back to what other windows (or heuristics) found.
+        console.warn(`[graph-extract] model=${context.model} window=${index + 1}/${windows.length} outcome=invalid-json finishReason=${result.finishReason} outputTokens=${result.usage.outputTokens}`);
       }
     }
     if (succeeded) extraction = llmGraph;
@@ -302,10 +306,9 @@ async function extractWindowWithLlm(args: {
   text: string;
   part?: { index: number; total: number };
   entityTypes: string[];
-  allowedTypes: ReadonlySet<string>;
   knownEntities: string[];
   maxOutputTokens: number;
-}): Promise<{ graph: DocumentGraphExtraction; usage: { inputTokens: number; outputTokens: number } }> {
+}): ReturnType<typeof generateOpenRouterText> {
   const typeUnion = args.entityTypes.map((type) => JSON.stringify(type)).join("|");
   const trustedContext = [
     { label: "Filename", value: args.filename },
@@ -340,7 +343,7 @@ async function extractWindowWithLlm(args: {
     maxContentChars: -1,
   });
 
-  const result = await generateOpenRouterText({
+  return await generateOpenRouterText({
     operation: "graph-extraction",
     apiKey: args.apiKey,
     privacyMode: args.context.privacyMode,
@@ -352,7 +355,6 @@ async function extractWindowWithLlm(args: {
     deploymentProfile: args.context.deploymentProfile,
     signal: args.context.signal,
   });
-  return { graph: parseGraphExtraction(result.text, args.allowedTypes), usage: result.usage };
 }
 
 /**

@@ -115,35 +115,34 @@ export class GraphEnrichStage implements Stage {
           textGeneration: pipeline.textGeneration,
           deploymentProfile: this.config.textGenerationProfile,
           signal,
+          onUsage: (usage, details) => {
+            state.usageLedger.record({
+              ...textUsageLabels(graphModel),
+              metric: "graphrag-extract",
+              amount: usage.inputTokens + usage.outputTokens,
+              unit: "token",
+              costCents: usage.costCents ?? textFallbackCost({
+                model: graphModel,
+                inputTokens: usage.inputTokens,
+                outputTokens: usage.outputTokens,
+                costPer1kInputTokens: this.config.costPer1kInputTokens,
+                costPer1kOutputTokens: this.config.costPer1kOutputTokens,
+              }).costCents,
+              inputTokens: usage.inputTokens,
+              outputTokens: usage.outputTokens,
+              metadata: {
+                ...usage.metadata,
+                workspaceId: state.run.workspaceId,
+                documentId: document.id,
+                depth: graphConfig.depth,
+                ...details,
+              },
+            });
+          },
         },
       });
       windows += graph.windows;
       if (graph.source === "llm") llmDocuments += 1;
-
-      if (graph.inputTokens > 0 || graph.outputTokens > 0) {
-        state.usageLedger.record({
-            ...textUsageLabels(graphModel),
-            metric: "graphrag-extract",
-            amount: graph.inputTokens + graph.outputTokens,
-            unit: "token",
-            costCents: textFallbackCost({
-              model: graphModel,
-              inputTokens: graph.inputTokens,
-              outputTokens: graph.outputTokens,
-              costPer1kInputTokens: this.config.costPer1kInputTokens,
-              costPer1kOutputTokens: this.config.costPer1kOutputTokens,
-            }).costCents,
-            inputTokens: graph.inputTokens,
-            outputTokens: graph.outputTokens,
-            metadata: {
-              workspaceId: state.run.workspaceId,
-              documentId: document.id,
-              depth: graphConfig.depth,
-              windows: graph.windows,
-            },
-          },
-        );
-      }
 
       // Persist per document: search sees the graph grow during long runs.
       const written = graphStore

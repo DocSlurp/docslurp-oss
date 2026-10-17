@@ -16,7 +16,7 @@ import { generateAnthropicText, generateOpenRouterText } from "../lib/ai.js";
 beforeEach(() => {
   vi.clearAllMocks();
   mocks.observe.mockImplementation(async (_options, run) => run());
-  mocks.generate.mockResolvedValue({ text: "answer", usage: { inputTokens: 10, outputTokens: 2 }, response: { id: "generation-a" } });
+  mocks.generate.mockResolvedValue({ text: "answer", usage: { inputTokens: 10, outputTokens: 2 }, response: { id: "generation-a" }, finishReason: "length" });
   mocks.usage.mockResolvedValue({ inputTokens: 10, outputTokens: 2, metadata: { providerName: "upstream-provider", generationId: "generation-a" } });
 });
 
@@ -45,7 +45,7 @@ describe("worker text observation identity", () => {
       expect(options.name).toBe("worker.text.document-summary");
       expect(options.model).toBe(model);
       expect(options.metadata).toMatchObject({ provider: "openrouter", modelId: model, operation: "document-summary", modelDetailsSource: "requested-model-id" });
-      expect(options.result(result)).toMatchObject({ metadata: { routedProvider: "upstream-provider", generationId: "generation-a" }, usageDetails: { input: 10, output: 2 } });
+      expect(options.result(result)).toMatchObject({ metadata: { routedProvider: "upstream-provider", generationId: "generation-a", finishReason: "length" }, usageDetails: { input: 10, output: 2 } });
     }
     expect(mocks.observe.mock.calls[0][0].metadata).toMatchObject({ modelVendor: "qwen", modelFamily: "qwen", modelVersion: "3.5", modelSuffix: "flash-02-23" });
     expect(mocks.observe.mock.calls[1][0].metadata).toMatchObject({ modelVendor: "openai", modelFamily: "gpt", modelVersion: "6.1", modelSuffix: "sol" });
