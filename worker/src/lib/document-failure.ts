@@ -23,6 +23,7 @@ export class RunPolicyError extends Error {
 }
 
 const INFRASTRUCTURE_ERROR_CODES = new Set([
+  "STORAGE_READ_FAILED",
   "ECONNREFUSED",
   "ECONNRESET",
   "ETIMEDOUT",

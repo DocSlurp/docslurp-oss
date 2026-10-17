@@ -1,9 +1,15 @@
 import { describe, expect, it, vi } from "vitest";
+import { Readable } from "node:stream";
+import { randomUUID } from "node:crypto";
+import { readFile, access } from "node:fs/promises";
+import { isDocumentLevelFailure } from "../lib/document-failure.js";
 
 import {
   ArtifactStore,
   streamJsonObject,
   StorageObjectTooLargeError,
+  StorageReadError,
+  cleanupTempFile,
   buildArtifactStorageKey,
   collectOrphanedStorageKeys,
   keyFromStorageUri,
@@ -191,6 +197,89 @@ describe("ArtifactStore object inspection", () => {
       sizeBytes: 11,
       maxBytes: 10,
     });
+  });
+
+  it("streams source bytes to disk without collecting the response in memory", async () => {
+    const store = createStore();
+    const source = Readable.from([Buffer.from("first"), Buffer.from("second")]);
+    const collect = vi.fn(() => { throw new Error("must not buffer"); });
+    const send = vi.fn().mockResolvedValue({ ContentLength: 11, Body: {
+      transformToWebStream: () => Readable.toWeb(source), transformToByteArray: collect,
+    } });
+    (store as unknown as { client: { send: typeof send } }).client = { send };
+    const file = await store.downloadSourceToTempFile(sourceStorageKey("raw/large.pdf"), "source-*.pdf");
+    try {
+      expect((await readFile(file)).toString()).toBe("firstsecond");
+      expect(collect).not.toHaveBeenCalled();
+    } finally {
+      await cleanupTempFile(file);
+    }
+  });
+
+  it.each(["size-limit", "interrupted", "short-body"])("removes partial downloads on %s", async (failure) => {
+    const store = createStore();
+    let destination: string | undefined;
+    // Observe the private directory without replacing filesystem behavior.
+    const { readdir } = await import("node:fs/promises");
+    const { tmpdir } = await import("node:os");
+    const before = new Set(await readdir(tmpdir()));
+    const filename = `storage-failure-${randomUUID()}.pdf`;
+    const source = Readable.from((async function* () {
+      yield Buffer.from("first");
+      // Wait for the file to open so the failure exercises partial-file cleanup.
+      await new Promise(resolve => setTimeout(resolve, 30));
+      const added = (await readdir(tmpdir())).filter(name => !before.has(name) && name.startsWith("docslurp-"));
+      for (const name of added) {
+        if (await access(`${tmpdir()}/${name}/${filename}`).then(() => true, () => false)) destination = name;
+      }
+      if (failure === "interrupted") throw new Error("aborted");
+      if (failure === "size-limit") yield Buffer.from("second");
+    })());
+    const send = vi.fn().mockResolvedValue({
+      ContentLength: failure === "short-body" ? 9 : undefined,
+      Body: { transformToWebStream: () => Readable.toWeb(source) },
+    });
+    (store as unknown as { client: { send: typeof send } }).client = { send };
+    const result = store.downloadToTempFile("raw/large.pdf", filename, { maxBytes: 10 });
+    const error = await result.catch(error => error);
+    expect(error).toBeInstanceOf(failure === "size-limit" ? StorageObjectTooLargeError : StorageReadError);
+    if (failure !== "size-limit") expect(isDocumentLevelFailure(error)).toBe(false);
+    expect(destination).toBeDefined();
+    await expect(access(`${tmpdir()}/${destination}`)).rejects.toThrow();
+  });
+
+  it("treats an interrupted in-memory artifact body as retryable infrastructure", async () => {
+    const store = createStore();
+    const cause = new Error("aborted");
+    const send = vi.fn().mockResolvedValue({ Body: { transformToByteArray: vi.fn().mockRejectedValue(cause) } });
+    (store as unknown as { client: { send: typeof send } }).client = { send };
+    const error = await store.getBytes("artifacts/chunks.json").catch(error => error);
+    expect(error).toBeInstanceOf(StorageReadError);
+    expect(error.cause).toBe(cause);
+    expect(isDocumentLevelFailure(error)).toBe(false);
+  });
+
+  it("stream-parses nested JSON across byte boundaries without collecting its body", async () => {
+    const store = createStore();
+    const text = JSON.stringify({ text: 'quoted " λ 🦆', chunks: [{ vector: [1, -0.125, 3e-20], metadata: null }], empty: [], enabled: false });
+    const bytes = Buffer.from(text);
+    const collect = vi.fn(() => { throw new Error("must not buffer"); });
+    const send = vi.fn().mockResolvedValue({ ContentLength: bytes.length, Body: {
+      transformToWebStream: () => Readable.toWeb(Readable.from(Array.from(bytes, byte => Buffer.from([byte])))),
+      transformToByteArray: collect,
+    } });
+    (store as unknown as { client: { send: typeof send } }).client = { send };
+    expect(await store.getJson("artifacts/embeddings.json", { streamJson: true })).toEqual(JSON.parse(text));
+    expect(collect).not.toHaveBeenCalled();
+  });
+
+  it.each(['{"chunks":[1', '{"chunks":[]} {"extra":true}', ""])("rejects incomplete or multiple streaming JSON values: %s", async (text) => {
+    const store = createStore();
+    const send = vi.fn().mockResolvedValue({ Body: {
+      transformToWebStream: () => Readable.toWeb(Readable.from([Buffer.from(text)])),
+    } });
+    (store as unknown as { client: { send: typeof send } }).client = { send };
+    await expect(store.getJson("artifacts/embeddings.json", { streamJson: true })).rejects.toBeInstanceOf(StorageReadError);
   });
 });
 
