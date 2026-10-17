@@ -37,3 +37,10 @@ test('a cited chunk spanning multiple verified physical pages supports each page
   r.citations[0].citation.pageNumbers.push(3);
   assert.equal(scoreCase(gold, r, docs).pass, false);
 });
+
+test('valid multi-page metadata does not require a fabricated scalar page anchor', () => {
+  const r = response(); r.answer = '42 [1]'; r.citations = [{ citation: { documentId: 'a', pageNumber: null, pageNumbers: [1, 2] } }];
+  assert.equal(scoreCase(gold, r, docs).pass, true);
+  r.citations[0].citation.pageNumbers = [];
+  assert.equal(scoreCase(gold, r, docs).pass, false);
+});
