@@ -140,6 +140,8 @@ export async function generateOpenRouterText(args: {
       result: (result) => ({
         ...aiResultDetails(result),
         metadata: {
+          finishReason: result.finishReason,
+          reasoningTokens: result.usage.metadata?.reasoningTokens,
           routedProvider: result.usage.metadata?.providerName,
           generationId: result.usage.metadata?.generationId,
         },
@@ -163,11 +165,9 @@ export async function generateOpenRouterText(args: {
       });
 
       noteWorkProgress(`ai:${args.operation}`);
-      return {
-        text: result.text,
-        finishReason: result.finishReason,
-        usage: await resolveOpenRouterUsage({ apiKey: args.apiKey, model: args.model, providerName: accounting.providerName(), generationId: result.response.id, usage: { ...result.usage, raw: accounting.usage() ?? result.usage.raw } }),
-      };
+      const usage = await resolveOpenRouterUsage({ apiKey: args.apiKey, model: args.model, providerName: accounting.providerName(), generationId: result.response.id, usage: { ...result.usage, raw: accounting.usage() ?? result.usage.raw } });
+      const recordedUsage: TextGenerationUsage = { ...usage, metadata: { ...usage.metadata, reasoningTokens: result.usage.outputTokenDetails?.reasoningTokens ?? usage.metadata?.reasoningTokens } };
+      return { text: result.text, finishReason: result.finishReason, usage: recordedUsage };
     },
   );
 }
