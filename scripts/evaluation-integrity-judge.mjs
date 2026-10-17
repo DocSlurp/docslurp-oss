@@ -1,0 +1,133 @@
+#!/usr/bin/env node
+/** Deterministic leakage screening; independent from extraction quality scoring.
+ * Supported external manifest: integrity-manifest.json, schema docslurp-authored-eval@v1.
+ * Each case has id, source:{path,sha256}, labels:{path,sha256}, and
+ * provenance:{kind:"authored",author,description,createdAt}. Label files contain
+ * {labels:[{name:string,expected:JSON}]}. Unsupported catalogs fail closed.
+ */
+import { createHash } from 'node:crypto';
+import { execFileSync } from 'node:child_process';
+import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
+import { basename, dirname, isAbsolute, relative, resolve, sep } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const hash = (value) => createHash('sha256').update(value).digest('hex');
+const within = (root, path) => { const rel = relative(root, path); return rel === '' || (!rel.startsWith(`..${sep}`) && rel !== '..' && !isAbsolute(rel)); };
+const nonempty = (value) => typeof value === 'string' && value.trim().length > 0;
+const productFile = (path) => !/(^|\/)(docs|research|__tests__|__fixtures__|fixtures|test|tests|gold|goldens)(\/|$)|\.(test|spec)\.[^/]+$|(^|\/)(README|AGENTS|CLAUDE)\.md$/i.test(path);
+const strings = (value) => typeof value === 'string' ? [value] : Array.isArray(value) ? value.flatMap(strings) : value && typeof value === 'object' ? Object.values(value).flatMap(strings) : typeof value === 'number' ? [String(value)] : [];
+const pattern = (term) => new RegExp(`(?<![\\p{L}\\p{N}_])${term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![\\p{L}\\p{N}_])`, 'iu');
+
+export function judgeIntegrity({ dataset, repo = process.cwd(), base = 'HEAD' }) {
+  const findings = [];
+  const add = (rule, detail = {}) => findings.push({ rule, ...detail });
+  const result = { schema: 'docslurp-evaluation-integrity@v1', passed: false, datasetHash: null, base, scannedFiles: 0, scannedProductionFiles: 0, cases: 0, findings };
+  try {
+    repo = realpathSync(repo);
+    dataset = realpathSync(dataset);
+    if (within(repo, dataset)) throw new Error('dataset-must-be-external');
+    if (existsSync(resolve(dataset, 'catalog.json'))) throw new Error('unsupported-catalog-schema');
+    const manifestPath = resolve(dataset, 'integrity-manifest.json');
+    if (!within(dataset, realpathSync(manifestPath))) throw new Error('manifest-outside-dataset');
+    const manifestBytes = readFileSync(manifestPath);
+    result.datasetHash = hash(manifestBytes);
+    const manifest = JSON.parse(manifestBytes);
+    if (manifest.schema !== 'docslurp-authored-eval@v1' || !Array.isArray(manifest.cases) || !manifest.cases.length) throw new Error('unsupported-or-empty-manifest');
+    const identifiers = new Set(), labelNames = new Set(), expected = new Set(), sourceHashes = new Set();
+    const load = (entry) => {
+      if (!entry || !nonempty(entry.path) || isAbsolute(entry.path) || !/^[a-f0-9]{64}$/.test(entry.sha256 ?? '')) throw new Error('missing-artifact-provenance');
+      const path = realpathSync(resolve(dataset, entry.path));
+      if (!within(dataset, path)) throw new Error('artifact-outside-dataset');
+      const bytes = readFileSync(path);
+      if (!bytes.length || hash(bytes) !== entry.sha256) throw new Error('artifact-hash-mismatch');
+      return bytes;
+    };
+    for (const entry of manifest.cases) {
+      if (!nonempty(entry.id) || entry.id.length < 12 || identifiers.has(entry.id)) throw new Error('invalid-or-duplicate-case-id');
+      const provenance = entry.provenance;
+      if (provenance?.kind !== 'authored' || !nonempty(provenance.author) || !nonempty(provenance.description) || !nonempty(provenance.createdAt) || !Number.isFinite(Date.parse(provenance.createdAt))) throw new Error('missing-authored-provenance');
+      const source = load(entry.source), labelsBytes = load(entry.labels);
+      const labels = JSON.parse(labelsBytes);
+      if (!Array.isArray(labels.labels) || !labels.labels.length) throw new Error('missing-labels');
+      identifiers.add(entry.id);
+      identifiers.add(entry.source.path);
+      identifiers.add(basename(entry.source.path));
+      sourceHashes.add(hash(source));
+      // Label artifacts also carry answers and must not be copied into product files.
+      const localNames = new Set();
+      for (const label of labels.labels) {
+        if (!nonempty(label.name) || localNames.has(label.name) || !Object.hasOwn(label, 'expected')) throw new Error('missing-or-duplicate-label');
+        const values = strings(label.expected).map((value) => value.trim()).filter(Boolean);
+        if (!values.length) throw new Error('missing-expected-values');
+        localNames.add(label.name); labelNames.add(label.name);
+        // Short common values are not distinctive enough to establish answer leakage.
+        for (const value of values) if (value.length >= 8) expected.add(value);
+      }
+      result.cases++;
+    }
+    const git = (...args) => execFileSync('git', ['-C', repo, ...args], { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
+    git('rev-parse', '--verify', `${base}^{commit}`);
+    const files = [...new Set(git('ls-files', '-z', '--cached', '--others', '--exclude-standard').split('\0').filter(Boolean))];
+    const changed = new Set(git('diff', '--name-only', '-z', base, '--').split('\0'));
+    const terms = [...identifiers].map((value) => ({ rule: 'fixture-identifier', value }));
+    for (const value of sourceHashes) terms.push({ rule: 'source-recognition-hash', value });
+    for (const value of expected) terms.push({ rule: 'labeled-answer', value });
+    const seen = new Set();
+    const match = (file, text, origin) => {
+      for (const { rule, value } of terms) {
+        const found = pattern(value).exec(text);
+        if (!found) continue;
+        const key = `${file}:${rule}:${hash(value)}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        add(rule, { file, origin, line: text.slice(0, found.index).split('\n').length, evidenceHash: hash(value) });
+      }
+      const labels = [...labelNames].filter((value) => pattern(value).test(text));
+      if (labels.length >= 3 && !seen.has(`${file}:labels`)) {
+        seen.add(`${file}:labels`);
+        add('benchmark-label-cluster', { file, origin, count: labels.length, evidenceHash: hash(labels.sort().join('\0')) });
+      }
+    };
+    for (const file of files) {
+      const path = resolve(repo, file);
+      if (!existsSync(path)) continue; // Deleted tracked files are still inspected in the diff.
+      const actual = realpathSync(path);
+      if (!within(repo, actual)) { add('repository-symlink-escape', { file }); continue; }
+      const bytes = readFileSync(actual);
+      result.scannedFiles++;
+      if (sourceHashes.has(hash(bytes))) add('copied-source-artifact', { file, evidenceHash: hash(bytes) });
+      if (!productFile(file)) continue;
+      result.scannedProductionFiles++;
+      if (!bytes.includes(0)) match(file, bytes.toString('utf8'), 'working-tree');
+      // Inspect additions only: removed leaked logic must not prevent a clean repair.
+      if (!changed.has(file)) continue;
+      const diff = git('diff', '--no-ext-diff', '--no-textconv', '--unified=0', base, '--', file);
+      const additions = diff.split('\n').filter((line) => line.startsWith('+') && !line.startsWith('+++')).map((line) => line.slice(1)).join('\n');
+      match(file, additions, 'diff-additions');
+    }
+    if (!result.scannedProductionFiles) throw new Error('no-production-files-scanned');
+  } catch (error) {
+    // Do not echo dataset content, git stderr, absolute paths or labeled answers.
+    const known = /^[a-z][a-z-]+$/.test(error.message ?? '') ? error.message : 'unreadable-or-invalid-input';
+    add(known);
+  }
+  result.passed = findings.length === 0;
+  return result;
+}
+
+export function main(argv = process.argv.slice(2)) {
+  const options = {};
+  for (let i = 0; i < argv.length; i += 2) {
+    if (!['--dataset', '--repo', '--base', '--output'].includes(argv[i]) || !argv[i + 1] || argv[i + 1].startsWith('--')) throw new Error('Expected --dataset <path> [--repo <path>] [--base <commit>] [--output <path>]');
+    options[argv[i].slice(2)] = argv[i + 1];
+  }
+  if (!options.dataset) throw new Error('--dataset is required');
+  const report = judgeIntegrity(options);
+  const json = `${JSON.stringify(report, null, 2)}\n`;
+  if (options.output) { mkdirSync(dirname(resolve(options.output)), { recursive: true }); writeFileSync(options.output, json); }
+  else process.stdout.write(json);
+  return report.passed ? 0 : 1;
+}
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  try { process.exitCode = main(); } catch (error) { console.error(error.message); process.exitCode = 2; }
+}
