@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import type { JSONValue, Sql } from "postgres";
 
 import type { DocumentGraph, GraphNodeKey } from "./extract.js";
-import { graphNodeKey } from "./extract.js";
+import { graphEdgeEndpoints, graphNodeKey } from "./extract.js";
 
 type Client = Sql<Record<string, unknown>>;
 
@@ -210,7 +210,7 @@ async function upsertNodes(client: Client, input: ReplaceDocumentGraphInput): Pr
 }
 
 function edgeKey(nodeIds: Map<GraphNodeKey, string>, sourceKey: GraphNodeKey, targetKey: GraphNodeKey, predicate: string) {
-  const [left, right] = [nodeIds.get(sourceKey) ?? "", nodeIds.get(targetKey) ?? ""].sort();
+  const [left, right] = graphEdgeEndpoints(nodeIds.get(sourceKey) ?? "", nodeIds.get(targetKey) ?? "", predicate);
   return `${left}\u0001${right}\u0001${predicate}`;
 }
 
@@ -225,8 +225,8 @@ async function upsertEdges(
       const source = nodeIds.get(edge.sourceKey);
       const target = nodeIds.get(edge.targetKey);
       if (!source || !target || source === target) return [];
-      // Stored undirected with sorted endpoints, keyed on persisted node ids.
-      const [left, right] = [source, target].sort() as [string, string];
+      // Only co-mentions canonicalize persisted ids; directed predicates keep their meaning.
+      const [left, right] = graphEdgeEndpoints(source, target, edge.normalizedPredicate);
       return [{
         id: randomUUID(),
         workspace_id: input.workspaceId,

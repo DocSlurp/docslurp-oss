@@ -82,6 +82,13 @@ type ExtractedEntity = { name: string; type: string; confidence: number; aliases
 type ExtractedRelationship = { subject: string; predicate: string; object: string; confidence: number };
 type DocumentGraphExtraction = { entities: ExtractedEntity[]; relationships: ExtractedRelationship[] };
 
+/** Only co-mentions are symmetric; explicit model triples retain subject/object direction. */
+export function graphEdgeEndpoints<T extends string>(source: T, target: T, normalizedPredicate: string): [T, T] {
+  // Existing normalization removes underscores from the reserved co_mentions predicate.
+  const symmetric = normalizedPredicate === "comentions" || normalizedPredicate === "co_mentions";
+  return symmetric && source > target ? [target, source] : [source, target];
+}
+
 export function graphNodeKey(normalizedName: string, entityType: string): GraphNodeKey {
   return `${normalizedName}\u0000${entityType}`;
 }
@@ -222,8 +229,8 @@ function assembleDocumentGraph(args: {
 
   const addEdge = (sourceKey: GraphNodeKey, targetKey: GraphNodeKey, predicate: string, confidence: number) => {
     if (sourceKey === targetKey) return;
-    const [left, right] = [sourceKey, targetKey].sort() as [GraphNodeKey, GraphNodeKey];
     const normalizedPredicate = normalizePredicate(predicate);
+    const [left, right] = graphEdgeEndpoints(sourceKey, targetKey, normalizedPredicate);
     const key = `${left}\u0001${right}\u0001${normalizedPredicate}`;
     let edge = edges.get(key);
     if (!edge) {
