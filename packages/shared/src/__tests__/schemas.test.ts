@@ -422,6 +422,13 @@ describe("embeddingConfigSchema", () => {
     }).success).toBe(false);
   });
 
+  it("keeps privacy-only configuration local and rejects an explicit hosted route", () => {
+    for (const privacyMode of ["local-only", "strict-privacy"] as const) {
+      expect(resolveEmbeddingRoute(normalizePipelineFeatures({ privacyMode }).embedding).target).toBe("local");
+      expect(() => normalizePipelineFeatures({ privacyMode, embedding: { profile: "cheapest-hosted" } })).toThrow();
+    }
+  });
+
   it("defaults new workspaces to hosted Perplexity while preserving explicit model URIs", () => {
     const defaults = normalizePipelineFeatures();
     expect(defaults.embedding.profile).toBe("cheapest-hosted");

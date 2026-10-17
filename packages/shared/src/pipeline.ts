@@ -835,6 +835,11 @@ export function normalizePipelineFeatures(
   source?: PipelineFeatureOverrides | PipelineFeatures | null,
 ): PipelineFeatures {
   source = migrateStoredModelSettings(source);
+  // Privacy-only configuration must never opt into a hosted embedding call.
+  // Explicit model/profile selections still pass through the privacy validator.
+  const fallbackEmbedding = source?.privacyMode && source.privacyMode !== "standard"
+    ? { ...defaultPipelineFeatures.embedding, ...embeddingProfileCatalog["good-fast-local"].config }
+    : defaultPipelineFeatures.embedding;
   const embeddingBase =
     source?.embedding?.profile &&
     source.embedding.profile in embeddingProfileCatalog
@@ -844,7 +849,7 @@ export function normalizePipelineFeatures(
           lateChunkingWindow:
             defaultPipelineFeatures.embedding.lateChunkingWindow,
         }
-      : defaultPipelineFeatures.embedding;
+      : fallbackEmbedding;
   const visionBase =
     source?.vision?.profile && source.vision.profile in visionProfileCatalog
       ? {
