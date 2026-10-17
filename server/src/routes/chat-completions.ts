@@ -146,6 +146,7 @@ export const chatCompletionsRoutes = new Hono()
     const args = {
       workspaceId,
       userId: actor.userId,
+      actor, allowAgentTools: true, signal: c.req.raw.signal,
       query: contentText(input.messages.at(-1)!.content),
       history,
       maxOutputTokens: input.max_completion_tokens ?? input.max_tokens,

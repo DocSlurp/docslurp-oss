@@ -76,7 +76,7 @@ describe("OpenAI-compatible workspace chat", () => {
     expect(response.status).toBe(200);
     const body = await response.json();
     expect(body).toMatchObject({ object: "chat.completion", usage: { prompt_tokens: 19, completion_tokens: 7, total_tokens: 26 }, choices: [{ message: { role: "assistant", content: "Renewal is annual [1].\n\nSources:\n[1] contract.pdf, page 2" }, finish_reason: "stop" }] });
-    expect(chatWorkspace).toHaveBeenCalledWith(expect.objectContaining({ history: [{ role: "system", content: "Keep it short" }, { role: "user", content: "Which contract?" }, { role: "assistant", content: "The main contract" }], maxOutputTokens: 100, allowConfiguration: false }));
+    expect(chatWorkspace).toHaveBeenCalledWith(expect.objectContaining({ history: [{ role: "system", content: "Keep it short" }, { role: "user", content: "Which contract?" }, { role: "assistant", content: "The main contract" }], maxOutputTokens: 100, allowConfiguration: false, actor: { type: "apiKey", userId: "user-1", apiKey: key }, allowAgentTools: true, signal: expect.any(AbortSignal) }));
   });
   it("refuses workspaces that turned chat off with an OpenAI-shaped 403", async () => {
     workspaceChatDisabledBody.mockResolvedValueOnce({ error: "Chat is turned off for this workspace.", code: "chat_disabled" });

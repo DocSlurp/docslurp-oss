@@ -258,6 +258,7 @@ describe("mcpRoutes", () => {
     expect(batch.structuredContent).toMatchObject({ results: [{ ok: true, data: { results: [{ text: "Support hours" }] } }] });
     const chat = await client.callTool({ name: "workspace.chat", arguments: { q: "Support?", workspaceId: "ws-1" } });
     expect(chat.structuredContent).toMatchObject({ answer: "Weekdays [1]", usage: { outputTokens: 3 } });
+    expect(chatWorkspace).toHaveBeenCalledWith(expect.objectContaining({ actor: expect.objectContaining({ type: "apiKey", apiKey: validatedKey }), allowAgentTools: false, allowConfiguration: false }));
     await client.close();
   });
 

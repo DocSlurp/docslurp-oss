@@ -13,7 +13,7 @@ import {
 } from "../lib/api-key-authorization.js";
 import { getApiKey, getRequestActor, loadActorScopedWorkspace, resolveActorWorkspaceId, setRequestActor, type RequestActor } from "../lib/request-actor.js";
 import { mcpOrigin } from "../lib/mcp-origin.js";
-import { searchRoutes } from "../routes/search.js";
+import { groundedWorkspaceChatRoutes, searchRoutes } from "../routes/search.js";
 import { sql } from "../db.js";
 import { isProtectedStoredQuery } from "../search/session.js";
 import { spendAwareErrorHandler } from "./billing/spend-guard.js";
@@ -180,9 +180,9 @@ const mcpAdapterRoutes = new Hono()
       const native = new Hono().use("*", publicErrorMiddleware).use("*", async (inner, next) => {
         setRequestActor(inner, actor);
         await next();
-      }).route("/", searchRoutes);
+      }).route("/", toolId === "workspace.chat" ? groundedWorkspaceChatRoutes : searchRoutes);
       native.onError(spendAwareErrorHandler);
-      const path = toolId === "workspace.chat" ? "/chat" : toolId === "workspace.search-many" ? "/batch" : "/";
+      const path = toolId === "workspace.chat" ? "/" : toolId === "workspace.search-many" ? "/batch" : "/";
       return native.request(`http://mcp.internal${path}`, {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body), signal: c.req.raw.signal,

@@ -30,7 +30,7 @@ function clampSearchLimit(value: number | undefined): number | undefined {
   return Math.max(1, Math.min(100, Math.floor(value)));
 }
 
-async function workspaceChatHandler(c: Context) {
+async function handleWorkspaceChat(c: Context, allowAgentTools: boolean) {
   const parsed = workspaceChatInputSchema.safeParse(await c.req.json().catch(() => null));
   if (!parsed.success) return c.json({ error: "Invalid chat input", issues: parsed.error.issues }, 400);
   const body = parsed.data;
@@ -43,12 +43,18 @@ async function workspaceChatHandler(c: Context) {
   if (chatDisabled) return c.json(chatDisabled, 403);
   const response = await chatWorkspace({ workspaceId, userId,
     query: body.q, sessionId: body.sessionId, model: body.model,
+    actor: getRequestActor(c), allowAgentTools, signal: c.req.raw.signal,
+    ...(allowAgentTools ? {} : { allowConfiguration: false }),
     ...(body.retrieval ? { retrieval: body.retrieval } : {}),
     ...(body.filters ? { filters: body.filters } : {}) });
   return c.json(response);
 }
 
+const workspaceChatHandler = (c: Context) => handleWorkspaceChat(c, true);
+
 export const workspaceChatRoutes = new Hono().post("/", workspaceChatHandler);
+/** Internal tool target only. Never mount this router as a public agent entrypoint. */
+export const groundedWorkspaceChatRoutes = new Hono().post("/", (c: Context) => handleWorkspaceChat(c, false));
 
 type SearchData = ReturnType<typeof publicSearchResponse>;
 type BatchResult = { ok: true; data: SearchData } | { ok: false; error: { code: string; message: string; status: number } };
@@ -138,6 +144,7 @@ export const searchRoutes = new Hono()
         workspaceId,
         userId,
         query,
+        actor: getRequestActor(c), allowAgentTools: true, signal: c.req.raw.signal,
         sessionId,
         model
       });
