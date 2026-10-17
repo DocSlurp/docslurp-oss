@@ -69,6 +69,8 @@ export interface SearchSessionJournal extends UsageRecorder {
   recordDiagnostic(key: string, value: unknown): void;
   diagnostics(): Record<string, unknown>;
   persist(input: PersistSearchSessionInput): Promise<void>;
+  /** Flush paid usage even when search fails or suppresses result-session logging. */
+  flushUsage(userId: string): Promise<void>;
 }
 
 export interface SearchSessionScope {
@@ -132,6 +134,14 @@ class SqlSearchSessionJournal implements SearchSessionJournal {
 
   persist(input: PersistSearchSessionInput): Promise<void> {
     const pending = this.persistenceTail.then(() => this.persistSnapshot(input));
+    this.persistenceTail = pending.catch(() => undefined);
+    return pending;
+  }
+
+  flushUsage(userId: string): Promise<void> {
+    const pending = this.persistenceTail.then(async () => {
+      await this.usage.flush({ userId, scope: { ...this.scope, sessionId: this.sessionId } });
+    });
     this.persistenceTail = pending.catch(() => undefined);
     return pending;
   }

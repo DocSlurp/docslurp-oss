@@ -1,3 +1,4 @@
+import { reportPublicError } from "../lib/public-errors.js";
 import { withObservation } from "@docslurp/shared/observability";
 import { resolveEmbeddingRoute, type SearchResult } from "@docslurp/shared";
 
@@ -91,6 +92,23 @@ export async function runSearchSession(args: {
   setup: SearchSetup;
   adapters: SearchSessionRunnerAdapters;
 }): Promise<SearchResponse> {
+  try {
+    const response = await executeSearchSession(args);
+    // Child searches suppress result-session rows, but their paid usage must
+    // survive even when a sibling later fails before the parent can adopt it.
+    await args.setup.session.flushUsage(args.userId);
+    return response;
+  } catch (error) {
+    try {
+      await args.setup.session.flushUsage(args.userId);
+    } catch (persistenceError) {
+      reportPublicError(persistenceError, { operation: "search-failed-usage", sessionId: args.setup.session.sessionId });
+    }
+    throw error;
+  }
+}
+
+async function executeSearchSession(args: Parameters<typeof runSearchSession>[0]): Promise<SearchResponse> {
   return withObservation(
     {
       name: "api.search",
