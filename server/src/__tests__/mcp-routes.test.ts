@@ -241,8 +241,8 @@ describe("mcpRoutes", () => {
     ["ai.simple", {}],
     ["ai.advanced", {}],
     ["workspace.chat", { workspaceId: "ws-1", q: " " }],
-    ["workspace.search-many", { queries: [] }],
-    ["workspace.search-many", { queries: [{ workspaceId: "ws-1", q: "query" }], concurrency: 5 }],
+    ["workspace.search", { queries: [] }],
+    ["workspace.search", { queries: [{ workspaceId: "ws-1", q: "query" }], concurrency: 5 }],
   ])("rejects invalid %s arguments before running the tool", async (tool, body) => {
     const response = await app.request(`/mcp/tools/${tool}`, {
       method: "POST", headers: { Authorization: "Bearer dslp_test", "Content-Type": "application/json" }, body: JSON.stringify(body),
@@ -339,7 +339,7 @@ describe("mcpRoutes", () => {
   });
 
   it("keeps parallel retrieval results ordered and denies foreign workspaces before retrieval", async () => {
-    const response = await app.request("/mcp/tools/workspace.search-many", {
+    const response = await app.request("/mcp/tools/workspace.search", {
       method: "POST", headers: { Authorization: "Bearer dslp_test", "Content-Type": "application/json" }, body: JSON.stringify({ queries: [{ q: "first", workspaceId: "ws-1" }, { q: "private", workspaceId: "foreign" }] }),
     });
     expect(response.status).toBe(200);
@@ -353,14 +353,14 @@ describe("mcpRoutes", () => {
     validateApiKey.mockResolvedValue({ ...validatedKey, scopes: ["ingest"] });
     const listed = await app.request("/mcp/tools", { headers: { Authorization: "Bearer dslp_test" } });
     expect((await listed.json()).tools.map((tool: { id: string }) => tool.id)).toEqual(["listWorkspaces", "upload", "completeUpload", "getUploadStatus"]);
-    for (const name of ["search", "search-many", "chat"]) {
+    for (const name of ["search", "chat"]) {
       expect((await app.request(`/mcp/tools/workspace.${name}`, { method: "POST", headers: { Authorization: "Bearer dslp_test", "Content-Type": "application/json" }, body: "{}" })).status).toBe(403);
     }
     expect(chatWorkspace).not.toHaveBeenCalled();
     expect(hybridSearch).not.toHaveBeenCalled();
   });
 
-  it("discovers and calls search-many and chat through the official HTTP client", async () => {
+  it("discovers and calls search and chat through the official HTTP client", async () => {
     chatWorkspace.mockResolvedValue({ answer: "Weekdays [1]", citations: [], sessionId: "chat-1", usage: { inputTokens: 10, outputTokens: 3 } });
     const client = new Client({ name: "rag-chat-test", version: "1" });
     await client.connect(new StreamableHTTPClientTransport(new URL("http://localhost:4321/mcp"), { requestInit: { headers: { Authorization: "Bearer dslp_test" } }, fetch: async (url, init) => app.request(new Request(url, init)) }));

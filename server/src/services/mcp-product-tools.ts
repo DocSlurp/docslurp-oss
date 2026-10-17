@@ -25,7 +25,6 @@ export const completeUploadInput = z.object({
 
 export const productToolAliases: Record<string, string> = {
   search: "workspace.search",
-  searchMany: "workspace.search-many",
   chat: "workspace.chat",
   getUploadStatus: "workspace.ingest-report",
   suggestQueries: "workspace.suggest",

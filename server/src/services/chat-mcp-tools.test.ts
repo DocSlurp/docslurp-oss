@@ -15,15 +15,13 @@ function setup(ids = ["workspace.search"]) {
 
 describe("chat MCP tools", () => {
   it("pins every tool to the selected workspace, overriding model-supplied scope (G-04)", async () => {
-    const t = setup(["workspace.search", "workspace.search-many", "workspace.aggregate-rag-search", "workspace.chat"]);
+    const t = setup(["workspace.search", "workspace.aggregate-rag-search", "workspace.chat"]);
     await t.execute("workspace_search", { q: "question", workspaceId: "injected" });
     expect(JSON.parse(t.dispatch.mock.calls[0]![1]!.body as string)).toEqual({ q: "question", workspaceId: "selected" });
-    await t.execute("workspace_search-many", { queries: [{ q: "a" }, { q: "b", workspaceId: "injected" }] });
-    expect(JSON.parse(t.dispatch.mock.calls[1]![1]!.body as string).queries.map((q: { workspaceId: string }) => q.workspaceId)).toEqual(["selected", "selected"]);
     await t.execute("workspace_aggregate-rag-search", { q: "all", workspaceIds: ["injected", "other"] });
-    expect(JSON.parse(t.dispatch.mock.calls[2]![1]!.body as string).workspaceIds).toEqual(["selected"]);
+    expect(JSON.parse(t.dispatch.mock.calls[1]![1]!.body as string).workspaceIds).toEqual(["selected"]);
     await t.execute("workspace_chat", { q: "x", workspaceId: "injected" });
-    expect(JSON.parse(t.dispatch.mock.calls[3]![1]!.body as string).workspaceId).toBe("selected");
+    expect(JSON.parse(t.dispatch.mock.calls[2]![1]!.body as string).workspaceId).toBe("selected");
   });
 
   it("pins the product search alias to the selected workspace", async () => {

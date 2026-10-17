@@ -28,10 +28,8 @@ describe("batch retrieval and canonical chat", () => {
     expect((await app().request("/v1/search", json(body))).status).toBe(400);
     expect(mocks.search).not.toHaveBeenCalled(); expect(mocks.access).not.toHaveBeenCalled();
   });
-  it("keeps the legacy batch route callable", async () => {
-    const result = await app().request("/v1/search/batch", json({ queries: [{ q: "one" }] }));
-    expect(result.status).toBe(200);
-    expect(await result.json()).toMatchObject({ results: [{ ok: true }] });
+  it("no longer exposes a separate batch route", async () => {
+    expect((await app().request("/v1/search/batch", json({ queries: [{ q: "one" }] }))).status).toBe(404);
   });
   it("rejects mixed single and batch inputs before retrieval", async () => {
     expect((await app().request("/v1/search", json({ q: "one", queries: [{ q: "two" }] }))).status).toBe(400);

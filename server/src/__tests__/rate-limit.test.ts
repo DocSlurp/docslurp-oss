@@ -411,7 +411,6 @@ describe("api rate limit middleware", () => {
     expect(classifyRateLimitCategory("POST", "/v1/uploads/direct/sessions")).toBe("upload");
     expect(classifyRateLimitCategory("GET", "/v1/search")).toBe("search");
     expect(classifyRateLimitCategory("POST", "/v1/search/chat")).toBe("chat-ai");
-    expect(classifyRateLimitCategory("POST", "/v1/search/batch")).toBe("search");
     expect(classifyRateLimitCategory("POST", "/v1/chat")).toBe("chat-ai");
     expect(classifyRateLimitCategory("POST", "/v1/chat/completions")).toBe("chat-ai");
     expect(classifyRateLimitCategory("POST", "/v1/workspaces/ws-1/chat")).toBe("chat-ai");

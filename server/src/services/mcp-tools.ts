@@ -85,9 +85,6 @@ function legacyManifest(baseUrl: string, scopes?: string[]) {
       },
       ...[
         { name: "search", title: "Search Workspace", description: "Retrieve portable text passages with source citations. Use these as context for any LLM; this tool does not generate an answer.", inputSchema: queryInputSchema },
-        { name: "search-many", title: "Search Multiple Queries", description: "Run up to 20 scoped retrieval queries with bounded parallelism. Results stay in input order; each contains cited context or its own error. No answer generation.", inputSchema: {
-          type: "object", properties: { queries: { type: "array", minItems: 1, maxItems: 20, items: queryInputSchema }, concurrency: { type: "integer", minimum: 1, maximum: 4, default: 4 } }, required: ["queries"],
-        } },
         { name: "chat", title: "Chat With Workspace", description: "Generate a grounded answer with citations and token usage using the workspace's configured model. This calls AI and can incur cost; use workspace.search for your own LLM.", inputSchema: {
           type: "object", properties: { workspaceId: { type: "string", minLength: 1, maxLength: 256, description: WORKSPACE_REF_DESCRIPTION }, q: { type: "string", minLength: 1, maxLength: 16_000 }, sessionId: { type: "string", minLength: 1, maxLength: 256 } }, required: ["q"],
         } },
@@ -112,7 +109,7 @@ function legacyManifest(baseUrl: string, scopes?: string[]) {
 /** The public MCP catalog follows the product's upload → search → chat flow. */
 export function mcpManifest(baseUrl: string, scopes?: string[]) {
   const manifest = legacyManifest(baseUrl);
-  const tools = Object.entries(productToolAliases).filter(([name]) => name !== "searchMany").map(([name, legacyId]) => {
+  const tools = Object.entries(productToolAliases).map(([name, legacyId]) => {
     const tool = manifest.capabilities.find(item => item.id === legacyId)!;
     return { ...tool, id: name, endpoint: `${baseUrl}/v1/mcp/tools/${name}`,
       description: tool.description.replaceAll("workspace.search", "search"),
@@ -281,7 +278,7 @@ const mcpAdapterRoutes = new Hono()
       }, 202);
     }
 
-    if (["workspace.search", "workspace.search-many", "workspace.chat"].includes(toolId)) {
+    if (["workspace.search", "workspace.chat"].includes(toolId)) {
       if (apiKey && !apiKeyHasAnyScope(apiKey, ["search"])) return c.json({ error: "Forbidden" }, 403);
       const actor = c.get("requestActor");
       const native = new Hono().use("*", publicErrorMiddleware).use("*", async (inner, next) => {
@@ -289,7 +286,7 @@ const mcpAdapterRoutes = new Hono()
         await next();
       }).route("/", searchRoutes);
       native.onError(spendAwareErrorHandler);
-      const path = toolId === "workspace.chat" ? "/chat" : toolId === "workspace.search-many" ? "/batch" : "/";
+      const path = toolId === "workspace.chat" ? "/chat" : "/";
       return native.request(`http://mcp.internal${path}`, {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body), signal: c.req.raw.signal,

@@ -23,13 +23,9 @@ import { sql } from "../db.js";
 import { acceptApiKeys } from "../lib/route-auth.js";
 import { currentRequestApiKeyId } from "../lib/request-context.js";
 
-async function batchSearchHandler(c: Context) {
-  // Validate every item before authentication checks can reach retrieval.
-  const parsed = batchSearchInputSchema.safeParse(await c.req.json().catch(() => null));
-  if (!parsed.success) return c.json({ error: "Invalid batch search input", issues: parsed.error.issues }, 400);
-  const userId = c.get("sessionUser")?.id;
-  if (!userId) return c.json({ error: "Missing session" }, 401);
-  const { queries, concurrency } = parsed.data;
+/** Runs each validated query, preserving input order and per-item errors. */
+async function runSearchBatch(c: Context, parsed: { queries: SearchInput[]; concurrency: number }, userId: string): Promise<BatchResult[]> {
+  const { queries, concurrency } = parsed;
   const signal = c.req.raw.signal;
   const results: BatchResult[] = queries.map(() => ({ ok: false,
     error: { code: "REQUEST_ABORTED", message: "Request aborted before search started", status: 499 } }));
@@ -46,7 +42,7 @@ async function batchSearchHandler(c: Context) {
             code: forbidden.status === 403 ? "FORBIDDEN" : "WORKSPACE_NOT_FOUND",
             message: forbidden.status === 403 ? "Forbidden" : "Workspace not found", status: forbidden.status } };
         } else if (!signal.aborted) {
-          results[index] = { ok: true, data: await retrieve(input, userId!) };
+          results[index] = { ok: true, data: await retrieve(input, userId) };
         }
       } catch (error) {
         results[index] = { ok: false, error: searchError(error) };
@@ -54,7 +50,7 @@ async function batchSearchHandler(c: Context) {
     }
   }
   await Promise.all(Array.from({ length: Math.min(concurrency, queries.length) }, () => worker()));
-  return c.json({ results });
+  return results;
 }
 
 function clampSearchLimit(value: number | undefined): number | undefined {
@@ -191,7 +187,6 @@ export const searchRoutes = new Hono()
     });
   })
   .post("/chat", workspaceChatHandler)
-  .post("/batch", batchSearchHandler)
   .get("/", async (c) => {
     const query = c.req.query("q");
     if (!query) {
@@ -262,7 +257,14 @@ export const searchRoutes = new Hono()
   })
   .post("/", async (c) => {
     const input = await c.req.json().catch(() => null);
-    if (input && typeof input === "object" && "queries" in input) return batchSearchHandler(c);
+    // One query (`q`) or up to 20 (`queries`): the same endpoint serves both.
+    if (input && typeof input === "object" && "queries" in input) {
+      const batch = batchSearchInputSchema.safeParse(input);
+      if (!batch.success) return c.json({ error: "Invalid search input", issues: batch.error.issues }, 400);
+      const userId = c.get("sessionUser")?.id;
+      if (!userId) return c.json({ error: "Missing session" }, 401);
+      return c.json({ results: await runSearchBatch(c, batch.data, userId) });
+    }
     const parsed = searchInputSchema.safeParse(input);
     if (!parsed.success) {
       return c.json({ error: "Invalid search input", issues: parsed.error.issues }, 400);

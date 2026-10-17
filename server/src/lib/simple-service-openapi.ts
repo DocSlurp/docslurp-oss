@@ -146,13 +146,6 @@ const canonicalServicePaths = {
     ], responses: { "200": response("Cited passages with corpus availability", ref("SearchResponse")), ...errors } },
     post: { tags: ["search"], summary: "Search a workspace", security: serviceSecurity, requestBody: request({ oneOf: [scopedQuery, z.toJSONSchema(batchSearchInputSchema)] }), responses: { "200": response("Single-query passages or ordered batch outcomes", { oneOf: [ref("SearchResponse"), ref("BatchSearchResponse")] }), ...errors } },
   },
-  "/v1/search/batch": { post: {
-    deprecated: true,
-    tags: ["search"], summary: "Retrieve cited passages for up to 20 independent queries", security: serviceSecurity,
-    description: "Ordered results; per-item authorization and errors. Default concurrency 4, maximum 4. No answer generation; retrieval enhancements are opt-in. Disconnect stops queued work; already running retrieval may finish.",
-    requestBody: request(z.toJSONSchema(batchSearchInputSchema)),
-    responses: { "200": response("One ordered outcome per query", ref("BatchSearchResponse")), ...errors },
-  } },
   "/v1/chat": { post: {
     tags: ["chat"], summary: "Ask a grounded workspace question", security: serviceSecurity,
     description: "Parallel requests may use independent conversations. Await each reply before sending the next turn with the same sessionId; concurrent turns in one conversation have no ordering guarantee.",
