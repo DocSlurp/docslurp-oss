@@ -47,3 +47,7 @@ OpenAI small price should be rechecked by the coordinator before execution; shar
 If English chunks all fit 512 tokens, replace E with BGE large to address that specific larger-BGE request; do not silently compare truncation of long chunks. Otherwise BGE large is a seventh follow-up requiring reassessment after the six-arm gate. Jina/Omni cannot safely be included on DeepInfra until official route and price are available. A verified direct Jina route could replace a deferred arm only after price/credential/task wiring checks, without expanding six arms.
 
 Decision: perform A–D with supported existing wiring and isolated indexes first; implement E/F only if the first screen and exact cost forecast justify them. If the coordinator chooses to prioritize cross-model differences instead, freeze and publish a replacement six-arm matrix before spending. No quality winner can be selected from documentation or vector dimension alone.
+
+## Historical runtime check
+
+The retained completed ASU run's embed-stage statistics (`/tmp/docslurp-large-docs/runs/e2-hosted-asu/final-progress.json`, run `60d446ca-aff3-4f50-a2d8-172663c01a0c`) report `dimensions: 1536`, 8,816 provider inputs and zero reuse hits. This establishes the pipeline-reported runtime baseline, rather than inferring it from a schema default. A direct vector-artifact length check remains desirable for candidate-index validation; the original run was not a 256-dimensional experiment.
