@@ -6,8 +6,10 @@ is made anywhere in this directory. Evaluation integrity rules from `AGENTS.md` 
 sources and gold live **outside** the repository, the generator and scorer are generic,
 and `scripts/evaluation-integrity-judge.mjs` runs as a separate gate.
 
-Files: `build-dataset.mjs` (compile authored spec to a frozen dataset), `score.mjs`
+Files: `build-dataset.mjs` (compile authored specs to a frozen dataset), `score.mjs`
 (scorer, review queue, CLI), `score.test.mjs` (sentinel tests on synthetic data only).
+The runner may read each split's `integrity-manifest.json` (source paths and hashes) and
+`<id>.txt`; both manifest forms stay stable.
 
 ## Decision this supports
 
@@ -75,7 +77,10 @@ Each page is the text between form feeds. Ingest the file as a multi-page text d
 ```
 
 `source`/`target` resolve first as an entity `id` from the same output, then as a name.
-A missing case scores zero. Extra fields are ignored. Envelope problems are diagnostics only.
+A key point may be a string or `{ "text": "...", ...extra }` (for example a paragraph id).
+A case value may be an **array of outputs** (independent generations of the same case);
+each generation is scored separately and pooled. A missing case scores zero. Extra fields
+are ignored. Envelope problems are diagnostics only.
 
 ## Rubric
 
@@ -85,8 +90,8 @@ A missing case scores zero. Extra fields are ignored. Envelope problems are diag
 | --- | --- |
 | Graph precision / recall / F1 | Edges are `(source, predicate, target)` after entity-alias resolution. Predicted edges are de-duplicated. Recall counts gold relations covered by any frozen predicate alias, an inverse predicate with endpoints swapped, or either orientation for `symmetric` relations. Reciprocal relations are two gold edges. A reversed edge never matches a directed relation. |
 | Contradicted edges (gate) | Reversed directed edges, forbidden (outdated, negated, false) relations. Any count above zero fails the case. |
-| Unsupported edges | Every unmatched edge, classed `contradicted`, `unresolved-endpoint` or `unmatched`. Unmatched edges are not proven false; they are queued for blind review. In `noRelations` control cases every edge is unsupported. |
-| Fact coverage | Fraction of gold atomic facts asserted correctly by a sentence of the key points or summary. A fact matches when its subject/predicate/object term groups co-occur in one sentence (ordered when the fact requires order), required numbers are present, and polarity agrees. |
+| Unsupported edges | Every unmatched edge, classed `contradicted` or `unmatched` (reason `unresolved-endpoint` when an endpoint is not a gold entity). Unmatched edges are not proven false; they are queued for blind review. In `noRelations` control cases every edge is unsupported. Pooled and macro precision and recall are both reported. |
+| Fact coverage | Gold atomic facts are **exhaustive** for key points. The summary is scored only on the facts flagged `salient` (a short, distinct subset: the document's purpose and its decisive facts), so long documents are not forced to exceed the `summaryWordLimit`. A fact matches when its subject/predicate/object term groups co-occur in one sentence (ordered when the fact requires order), required numbers are present, and polarity agrees. |
 | Contradictions (gate) | Wrong or missing-for-anchor numbers, negation/polarity flips, authored contradiction signatures (reversed roles, outdated-as-current, wrong qualifier), forbidden claims. Any count above zero fails the case. |
 | Unsupported / unverified units | A sentence is `supported` only if it matches a fact **and** every content word and number in it lies in the lexicon of the facts it matched (their authored evidence quotes, statement, extras) or in the case entity names. Matching a fact does not hide an appended claim: leftover terms or numbers make the sentence `unverified`. A sentence matching no fact is `unverified` (listing `novelTerms` that appear nowhere in the case). |
 | Soundness | supported units divided by scored units. Unverified units count against it. |
@@ -98,13 +103,18 @@ duplicate key points.
 
 ### Verdict ladder (deterministic matching cannot prove arbitrary claim support)
 
-1. `fail`: any contradiction, contradicted edge, or missing case. Reviews cannot clear a
+1. `fail`: any contradiction or contradicted edge, a missing case, an empty key-point or
+   summary artifact, or a reviewer-confirmed unsupported item. Reviews cannot clear a
    contradiction; fix the oracle in a new dataset version instead.
-2. `needs-review`: no contradiction, but unverified units, unmatched edges, missed facts
-   or no review supplied. Nothing is called supported by default.
-3. `pass`: no contradiction, full coverage after review, and a review file that is
-   blind (reviewer saw no candidate identity or deterministic verdict), declares
-   independence from the dataset author, and resolves every queued item as supported.
+2. `needs-review`: no failure, but unverified units, unmatched edges, missed facts or no
+   valid review. Nothing is called supported by default.
+3. `pass`: no failure and a valid review file (blind: reviewer saw no candidate identity
+   or deterministic verdict; independent of the dataset author) that gives a verdict for
+   every queued item. `pass` attests that the evidence is valid, not that the targets are
+   met: `aggregate.targets` reports the frozen plan thresholds separately (graph
+   precision ≥ 0.95 and recall ≥ 0.90; key-point and summary coverage ≥ 0.90; zero
+   contradictions; zero unsupported units), computed on reviewed numbers when a review
+   is supplied. `deterministic` repeats the aggregate without any review.
 
 `score.mjs --review-queue <path>` writes the queue (items shuffled, no scores, no
 candidate labels); `--review <file>` applies verdicts:
