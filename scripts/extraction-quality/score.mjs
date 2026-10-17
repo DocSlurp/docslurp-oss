@@ -172,13 +172,20 @@ function evalFact(fact, text, nums) {
     const missing = required.filter((n) => !hasNumber(nums, n.value) && !(n.forms ?? []).some((f) => formHit(f, text)));
     if (missing.length) {
       // Anchors present with a different number: a wrong value, not merely an incomplete statement.
-      return nums.some((v) => !hasNumber(required.map((n) => n.value), v)) ? { status: 'contradiction', kind: 'numeric' } : { status: 'partial' };
+      const extras = nums.filter((v) => !hasNumber(required.map((n) => n.value), v));
+      return extras.length ? { status: 'contradiction', kind: 'numeric', extras } : { status: 'partial' };
     }
     return { status: 'covered', terms: span.terms };
   }
   return null;
 }
-const signatureHit = (sig, text) => (sig.variants ?? []).some((v) => matchVariant(v, text));
+/** A contradiction signature describes a false positive claim, so a negated rendering of it is not a hit. */
+function signatureHit(sig, text) {
+  return (sig.variants ?? []).some((v) => {
+    const span = matchVariant(v, text);
+    return span && (v.ignoreNegation || !(Number(negated(text, span)) ^ Number(Boolean(v.inherentNegation))));
+  });
+}
 
 /** Score a prose artifact: key points (array) or summary (string). Summary coverage counts salient facts only. */
 export function scoreProse(gold, input, field = 'keyPoints') {
@@ -186,7 +193,10 @@ export function scoreProse(gold, input, field = 'keyPoints') {
   const units = [], covered = new Set();
   for (const text of splitUnits(input)) {
     const t = fold(text), nums = parseNumbers(t);
-    const hits = p.facts.map((entry) => ({ entry, r: evalFact(entry.fact, t, nums) })).filter((h) => h.r);
+    let hits = p.facts.map((entry) => ({ entry, r: evalFact(entry.fact, t, nums) })).filter((h) => h.r);
+    // A "wrong" number that is another covered fact's own value in this sentence is not a substitution.
+    const explained = hits.filter((h) => h.r.status === 'covered').flatMap((h) => (h.entry.fact.numbers ?? []).map((n) => n.value));
+    hits = hits.map((h) => (h.r.kind === 'numeric' && h.r.extras.every((v) => hasNumber(explained, v)) ? { ...h, r: { status: 'partial' } } : h));
     const contradictions = hits.filter((h) => h.r.status === 'contradiction').map((h) => ({ factId: h.entry.fact.id, kind: h.r.kind }));
     for (const { fact } of p.facts) for (const sig of fact.contradictions ?? []) if (signatureHit(sig, t)) contradictions.push({ factId: fact.id, kind: sig.id ?? 'contradiction', reason: sig.reason });
     for (const sig of gold.forbiddenClaims ?? []) if (signatureHit(sig, t)) contradictions.push({ kind: sig.id ?? 'forbidden', reason: sig.reason });

@@ -106,6 +106,20 @@ test('wrong numbers contradict; right number words and separators match', () => 
   assert.equal(unitsOf(run({ ...reference, keyPoints: ['The Institute employs at most 40 researchers.'] }), 'keyPoints')[0].status, 'contradicted', 'wrong qualifier with the right number');
 });
 
+test('a number explained by another covered fact in the same sentence is not a wrong number', () => {
+  const g = { ...gold, facts: [
+    { id: 'cap', statement: 'The ceiling was 3.2 million.', evidence: [q(1, 'x')], variants: [{ groups: ['ceiling'] }], numbers: [{ value: 3200000 }], lexicon: ['above', 'original'] },
+    { id: 'cost', statement: 'The final cost was 3.45 million.', evidence: [q(1, 'x')], variants: [{ groups: ['final cost'] }], numbers: [{ value: 3450000 }] },
+  ] };
+  const both = scoreProse(g, ['The final cost was 3.45 million, above the original ceiling of 3.2 million.']);
+  assert.equal(both.units[0].status, 'supported');
+  const wrong = scoreProse(g, ['The ceiling was 3.45 million.']);
+  assert.equal(wrong.units[0].status, 'contradicted');
+  const onlyOne = scoreProse(g, ['The final cost was 3.45 million, above the original ceiling.']);
+  assert.deepEqual(onlyOne.covered, ['cost']);
+  assert.notEqual(onlyOne.units[0].status, 'contradicted');
+});
+
 test('negation: lost or added negation contradicts, bounds like "no more than" are not negation', () => {
   assert.equal(unitsOf(run({ ...reference, keyPoints: ['The board approved the relocation.'] }), 'keyPoints')[0].status, 'contradicted');
   assert.equal(unitsOf(run({ ...reference, keyPoints: ['The board did not reject the relocation.'] }), 'keyPoints')[0].status, 'contradicted');
@@ -113,6 +127,12 @@ test('negation: lost or added negation contradicts, bounds like "no more than" a
   assert.equal(unitsOf(run({ ...reference, keyPoints: ['Hale Voss did not found the Tarn Institute in 1961.'] }), 'keyPoints')[0].status, 'contradicted');
   const bound = { ...gold, facts: [{ id: 'cap', statement: 'The Institute employs no more than 40 researchers.', evidence: [q(1, 'The Institute employs at least 40 researchers.')], salient: true, variants: [{ groups: ['institute', 'employ', 'researchers'] }], numbers: [{ value: 40 }] }] };
   assert.equal(scoreProse(bound, ['The Institute employs no more than 40 researchers.']).units[0].status, 'supported');
+});
+
+test('a negated rendering of a contradiction signature is not itself a contradiction', () => {
+  const g = { ...gold, facts: [{ id: 'denied', polarity: 'negative', statement: 'Marlow did not report to Voss.', evidence: [q(1, 'x')], variants: [{ groups: ['marlow', 'report', 'voss'], ordered: true }] }, { id: 'line', statement: 'Voss reports to Marlow.', evidence: [q(1, 'x')], variants: [{ groups: ['voss', 'report', 'marlow'], ordered: true }], contradictions: [{ id: 'swap', variants: [{ groups: ['marlow', 'reports? to', 'voss'], ordered: true }] }] }] };
+  assert.equal(scoreProse(g, ['Marlow did not report to Voss.']).units[0].status, 'supported');
+  assert.equal(scoreProse(g, ['Marlow reports to Voss.']).units[0].status, 'contradicted');
 });
 
 test('roles reversed in prose contradict even though every term is present', () => {
