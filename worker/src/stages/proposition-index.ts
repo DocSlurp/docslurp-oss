@@ -9,7 +9,6 @@ import { runDocumentStage, runDocuments } from "../pipeline/checkpoints.js";
 import type { CommandRunner } from "../tools/runner.js";
 import type { ArtifactStore } from "../tools/storage.js";
 import { buildTrustedDocumentTaskPrompt } from "../lib/trusted-llm-task.js";
-import { SOURCE_FIDELITY_RULES } from "../lib/source-fidelity.js";
 import {
   extractTextForEmbedding,
   embedTextChunks,
@@ -258,8 +257,8 @@ export class PropositionIndexStage implements Stage {
           : "Convert each supplied paragraph into concise, self-contained declarative sentences.",
       outputContract:
         paragraphs.length === 1
-          ? `Each proposition should be a complete statement of what the paragraph says, keeping its qualifiers. Return one proposition per line, no bullets or numbering. ${SOURCE_FIDELITY_RULES}`
-          : `Each proposition should be a complete statement of what its paragraph says, keeping its qualifiers. Return one proposition per line, no bullets or numbering. Separate each paragraph's propositions with a blank line. Maintain the same order as the input paragraphs. ${SOURCE_FIDELITY_RULES}`,
+          ? "Each proposition should be a complete statement of fact or claim. Return one proposition per line, no bullets or numbering."
+          : "Each proposition should be a complete statement of fact or claim. Return one proposition per line, no bullets or numbering. Separate each paragraph's propositions with a blank line. Maintain the same order as the input paragraphs.",
       untrustedContent: paragraphs.length === 1 ? paragraphs[0]! : combined,
       untrustedContentLabel:
         paragraphs.length === 1 ? "paragraph" : "paragraph batch",

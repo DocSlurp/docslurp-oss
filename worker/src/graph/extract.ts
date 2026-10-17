@@ -9,7 +9,6 @@ import {
 
 import { generateOpenRouterText, type TextGenerationUsage } from "../lib/ai.js";
 import { buildTrustedDocumentTaskPrompt } from "../lib/trusted-llm-task.js";
-import { GRAPH_FIDELITY_RULES, SOURCE_FIDELITY_RULES } from "../lib/source-fidelity.js";
 
 const MAX_KNOWN_ENTITY_HINTS = 40;
 const CO_MENTION_CONFIDENCE = 0.45;
@@ -343,9 +342,7 @@ async function extractWindowWithLlm(args: {
       "Return strict JSON with keys `entities` and `relationships`.",
       `\`entities\` must be an array of objects: {"name": string, "type": ${typeUnion}|"concept", "confidence": number, "aliases": string[]}. Use "concept" only when no listed type fits.`,
       '`relationships` must be an array of objects: {"subject": string, "predicate": string, "object": string, "confidence": number}. Subjects and objects must be names from `entities`.',
-      "Prefer canonical names and only include relationships directly supported by the text.",
-      SOURCE_FIDELITY_RULES,
-      GRAPH_FIDELITY_RULES,
+      "Prefer canonical names, keep predicates short verb phrases, and only include relationships directly supported by the text.",
     ].join(" "),
     trustedContext,
     untrustedContent: args.text,
@@ -434,11 +431,10 @@ function sanitizeRelationship(value: unknown): ExtractedRelationship[] {
   ) {
     return [];
   }
-  const predicate = candidate.predicate.replace(/\s+/g, " ").trim();
   return [
     {
       subject: candidate.subject.trim(),
-      predicate,
+      predicate: candidate.predicate.trim(),
       object: candidate.object.trim(),
       confidence: clamp(typeof candidate.confidence === "number" ? candidate.confidence : 0.55),
     },

@@ -86,3 +86,12 @@ The 120-character predicate drop is removed. An arbitrary length cut can discard
 ### E5 development screen executed (04:13 UTC)
 
 Runtime HEAD `67c567a` (worker tree `6bed53c`). Integrity gate passed with zero findings against base `5972781` (`/tmp/docslurp-extraction-quality/e5-integrity.json`; the runner's own `integrity.json` also passed). GLM `z-ai/glm-5.3-flash`, default profile, no generation override, 12 development cases, all three operations, one repetition: 36 of 36 generations ok, wall time 63.110 s, graph fallback rate 0, 0 failed attempts, 0 orphan receipts, 0 estimated receipts, all 36 ledger events persisted (unpersisted ledger cents 0). Tokens: 14,493 input, 10,499 output, 49 reasoning. Provider cost 0.76384 cents; ledger cost 0.916608 cents (B0: 0.785034 ledger, 0.654195 provider; the graph-only E2 screen is not comparable). Evidence: `runs/e5-glm-fidelity/`. These are execution measurements only; no output or review was read by the implementation worker, and quality awaits independent blind review.
+
+
+## E5 disposition: reject bundle and restore preceding production code
+
+All 459 independent review judgments were accepted with no open items. The review reported graph precision 94/99 (94.9%), recall 43/50 (86.0%), key-point coverage 110/112 (98.2%) with 100% soundness, and summary coverage 40/41 (97.6%) with 93.2% soundness. Eight items were judged unsupported; no contradictions were reported. The bundle fails the frozen graph and zero-unsupported gates and is not promoted. External review: `blind-v2/sample-c-review.json`; report: `/tmp/review-work-c/sample-c-validated.json`.
+
+Reviewer limitations include differing treatment of paraphrases, an additional endpoint interpretation, and supported edges in the no-relations control. Consequently these aggregates are screening evidence rather than a precise cross-reviewer improvement estimate. Those limitations do not support overriding the failed gate. The held-out set remains unconsumed.
+
+Restore the five E5 source/test files to their pre-experiment state in a forward commit, retaining E2 identity fixes, every experiment commit and all evidence. No production deployment contained E5. Key-point-only confirmation could be a future experiment, but this failed bundle is not retained merely because one operation scored well.
