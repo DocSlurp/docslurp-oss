@@ -1,4 +1,7 @@
 import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
+import { Hono } from "hono";
+import { bodyLimit } from "hono/body-limit";
+import { rejectNulBytes } from "./reject-nul.js";
 import { describe, expect, it, vi } from "vitest";
 
 import { handleMcpHttp, type McpDispatch } from "./mcp-http.js";
@@ -22,6 +25,29 @@ function transport() {
 }
 
 describe("hosted MCP transport", () => {
+  it.each([true, false])("initializes and discovers tools through production body middleware (content-length: %s)", async (withLength) => {
+    const app = new Hono();
+    app.use("*", rejectNulBytes);
+    app.use("/v1/mcp", bodyLimit({ maxSize: 1024 * 1024 }));
+    app.all("/v1/mcp", (c) => handleMcpHttp(c.req.raw, manifest, dispatch));
+    const http = new StreamableHTTPClientTransport(new URL("http://localhost/v1/mcp"), {
+      fetch: async (url, init) => {
+        const headers = new Headers(init?.headers);
+        if (withLength && typeof init?.body === "string") {
+          headers.set("content-length", String(Buffer.byteLength(init.body)));
+        }
+        return app.fetch(new Request(url, { ...init, headers }));
+      },
+    });
+    const client = new Client({ name: "middleware-regression", version: "1" });
+    try {
+      await client.connect(http);
+      expect((await client.listTools()).tools.map((tool) => tool.name)).toEqual(["workspace.suggest"]);
+    } finally {
+      await client.close();
+    }
+  });
+
   it("does not advertise stateful workspace chat as read-only or idempotent", async () => {
     const chatManifest = { capabilities: [...manifest.capabilities, { ...manifest.capabilities[0]!, id: "workspace.chat" }] };
     const response = await handleMcpHttp(new Request("http://localhost/v1/mcp", {

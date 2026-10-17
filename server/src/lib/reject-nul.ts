@@ -21,8 +21,9 @@ export const rejectNulBytes: MiddlewareHandler = async (c, next) => {
   const contentType = c.req.header("content-type") ?? "";
   const length = Number(c.req.header("content-length") ?? "0");
   if (/\bjson\b/i.test(contentType) && length <= MAX_SCANNED_BODY_BYTES && ["POST", "PUT", "PATCH"].includes(c.req.method)) {
-    // Hono caches the body, so handlers can still read it as JSON afterwards.
-    const body = await c.req.text().catch(() => "");
+    // Inspect a clone: Hono caches c.req.text(), but raw Request consumers
+    // (MCP transport and body-limit middleware) cannot use that cache.
+    const body = await c.req.raw.clone().text().catch(() => "");
     if (JSON_NUL_ESCAPE.test(body)) return reject();
   }
   await next();

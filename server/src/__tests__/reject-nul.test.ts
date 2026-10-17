@@ -1,4 +1,5 @@
 import { Hono } from "hono";
+import { bodyLimit } from "hono/body-limit";
 import { describe, expect, it } from "vitest";
 
 import { rejectNulBytes } from "../lib/reject-nul.js";
@@ -31,6 +32,24 @@ describe("rejectNulBytes", () => {
     const response = await post('{"q":"tls handshake"}');
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual({ body: { q: "tls handshake" } });
+  });
+
+  it.each([true, false])("preserves raw bodies and downstream size limits (content-length: %s)", async (withLength) => {
+    const hono = new Hono();
+    hono.use("*", rejectNulBytes);
+    hono.use("*", bodyLimit({ maxSize: 64 }));
+    hono.post("/raw", async (c) => c.text(await c.req.raw.text()));
+    const request = (body: string) => hono.request("/raw", {
+      method: "POST",
+      headers: { "content-type": "application/json", ...(withLength ? { "content-length": String(Buffer.byteLength(body)) } : {}) },
+      body,
+    });
+    const clean = '{"q":"hello"}';
+    const response = await request(clean);
+    expect(response.status).toBe(200);
+    expect(await response.text()).toBe(clean);
+    expect((await request(JSON.stringify({ q: "x".repeat(65) }))).status).toBe(413);
+    expect((await request(JSON.stringify({ q: String.fromCharCode(0) }))).status).toBe(400);
   });
 
   it("does not mistake an escaped backslash followed by text for a NUL escape", async () => {
