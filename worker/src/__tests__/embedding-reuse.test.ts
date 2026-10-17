@@ -287,6 +287,32 @@ describe("EmbeddingReuseLookup", () => {
 });
 
 describe("EmbedStage chunk materialization", () => {
+  it("publishes complete keyword chunks before embedding when early publication is enabled", async () => {
+    vi.stubEnv("DOCSLURP_EARLY_LEXICAL_CHUNKS", "on");
+    const calls: string[] = [];
+    try {
+      const result = await embedDocument({
+        storage: new MemoryStorage(), reuse: new MemoryReuseStore(), runId: "run-early", documentId: "early",
+        storeExtras: {
+          insertChunks: async (chunks: Array<{ text: string }>) => {
+            expect(chunks.length).toBeGreaterThan(0);
+            expect(chunks.every(chunk => chunk.text.length > 0)).toBe(true);
+            expect(providerCalls.embed).toHaveLength(0);
+            calls.push("written");
+          },
+          markDocumentLexicalSearchable: async () => {
+            expect(calls).toEqual(["written"]);
+            expect(providerCalls.embed).toHaveLength(0);
+            calls.push("searchable");
+          },
+        },
+      });
+      expect(calls).toEqual(["written", "searchable"]);
+      expect(providerCalls.embed.length).toBeGreaterThan(0);
+      expect(result.artifact.chunks.every(chunk => chunk.vector.length > 0)).toBe(true);
+    } finally { vi.unstubAllEnvs(); }
+  });
+
   it("marks the document keyword-searchable only after every chunk row is written", async () => {
     const calls: string[] = [];
     const storeExtras = {

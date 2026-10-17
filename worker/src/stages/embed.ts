@@ -330,6 +330,85 @@ export class EmbedStage implements Stage {
           });
           const embeddingKeys = embeddingInputs.map((input) => embeddingInputKey(input, vectorFingerprint));
           const reusedVectors = await reuseLookup.findVectors(embeddingKeys);
+          const pipelineVersion = createHash("sha256")
+            .update(JSON.stringify(withoutStageSelection(state.run.pipeline)))
+            .digest("hex")
+            .slice(0, 8);
+          const publishBeforeEmbedding = process.env.DOCSLURP_EARLY_LEXICAL_CHUNKS === "on";
+          const chunks = chunkDrafts.map((chunk, index) => {
+            const contextualizedChunk = contextualized.chunks[index];
+            const rawText = contextualizedChunk?.rawText ?? chunk.text;
+            const text = contextualizedChunk?.text ?? rawText;
+            const tokenEstimate = estimateTokens(text);
+            return {
+              id: `${document.id}-${index.toString().padStart(3, "0")}`,
+              index,
+              text,
+              tokenEstimate,
+              vector: [] as number[],
+              headingPath: chunk.headingPath,
+              pageNumber: chunk.pageNumber,
+              pageNumbers: chunk.pageNumbers,
+              blockIds: chunk.blockIds,
+              blockTypes: chunk.blockTypes,
+              evidenceType: chunk.evidenceType,
+              canonicalDocumentUri: state.artifactLedger.readDocument(document.id, "canonical-document") ?? null,
+              tableGranularity: chunk.tableGranularity ?? null,
+              tableRowIndex: chunk.tableRowIndex ?? null,
+              tableRowCount: chunk.tableRowCount ?? null,
+              tableColumnNames: chunk.tableColumnNames ?? [],
+              tableColumnTypes: chunk.tableColumnTypes ?? [],
+              tableCells: chunk.tableCells ?? [],
+              tableCell: chunk.tableCell ?? null,
+              regionBoxes: chunk.regionBoxes ?? [],
+              regions: chunk.regions ?? chunk.regionBoxes ?? [],
+              regionCoordinateSpace: chunk.regionCoordinateSpace ?? null,
+              sourceTrace: chunk.sourceTrace ?? null,
+              metadata: {
+                documentId: document.id,
+                source: extracted.extractor,
+                headingPath: chunk.headingPath,
+                pageNumber: chunk.pageNumber,
+                pageNumbers: chunk.pageNumbers,
+                blockIds: chunk.blockIds,
+                blockTypes: chunk.blockTypes,
+                evidenceType: chunk.evidenceType,
+                tableGranularity: chunk.tableGranularity ?? null,
+                tableRowIndex: chunk.tableRowIndex ?? null,
+                tableRowCount: chunk.tableRowCount ?? null,
+                tableColumnNames: chunk.tableColumnNames ?? [],
+                tableColumnTypes: chunk.tableColumnTypes ?? [],
+                tableCells: chunk.tableCells ?? [],
+                tableCell: chunk.tableCell ?? null,
+                regionBoxes: chunk.regionBoxes ?? [],
+                regions: chunk.regions ?? chunk.regionBoxes ?? [],
+                regionCoordinateSpace: chunk.regionCoordinateSpace ?? null,
+                locator: chunk.locator ?? null,
+                sourceTrace: chunk.sourceTrace ?? {
+                  canonicalDocumentUri: state.artifactLedger.readDocument(document.id, "canonical-document") ?? null,
+                  parserArtifactUri: extracted.canonicalDocument?.source.parserArtifactUri ?? null,
+                  sourceArtifactUri: extracted.canonicalDocument?.source.artifactUri ?? null,
+                  blockIds: chunk.blockIds,
+                  pageNumbers: chunk.pageNumbers,
+                  extractor: extracted.extractor
+                },
+                overlapIndex: chunk.overlapIndex ?? 0,
+                canonicalDocumentUri: state.artifactLedger.readDocument(document.id, "canonical-document") ?? null,
+                rawText,
+                contextPreamble: contextualizedChunk?.contextPreamble ?? "",
+                contextualized: text !== rawText,
+                contextualizationSource: contextualized.usage?.source ?? "heuristic",
+                embeddingInputKey: embeddingKeys[index],
+                embeddingReused: reusedVectors.has(embeddingKeys[index] ?? "")
+              }
+            };
+          });
+
+          if (publishBeforeEmbedding) {
+            // All source chunks are durable before the readiness marker. Vector
+            // availability remains governed by the later index stage.
+            await this.materializeChunks({ state, document, chunks, contentHash, pipelineVersion });
+          }
           const freshVectors = new Map<string, number[]>();
           const embeddedVectors: number[][] = Array.from({ length: embeddingInputs.length });
           const providerUsage: Record<string, unknown>[] = new Array(embedWindows.length);
@@ -543,74 +622,7 @@ export class EmbedStage implements Stage {
             throw new Error(`embedding vector window assembly failed for ${document.id}`);
           }
 
-          const chunks = chunkDrafts.map((chunk, index) => {
-            const contextualizedChunk = contextualized.chunks[index];
-            const rawText = contextualizedChunk?.rawText ?? chunk.text;
-            const text = contextualizedChunk?.text ?? rawText;
-            const tokenEstimate = estimateTokens(text);
-            return {
-              id: `${document.id}-${index.toString().padStart(3, "0")}`,
-              index,
-              text,
-              tokenEstimate,
-              vector: embedded.vectors[index] ?? [],
-              headingPath: chunk.headingPath,
-              pageNumber: chunk.pageNumber,
-              pageNumbers: chunk.pageNumbers,
-              blockIds: chunk.blockIds,
-              blockTypes: chunk.blockTypes,
-              evidenceType: chunk.evidenceType,
-              canonicalDocumentUri: state.artifactLedger.readDocument(document.id, "canonical-document") ?? null,
-              tableGranularity: chunk.tableGranularity ?? null,
-              tableRowIndex: chunk.tableRowIndex ?? null,
-              tableRowCount: chunk.tableRowCount ?? null,
-              tableColumnNames: chunk.tableColumnNames ?? [],
-              tableColumnTypes: chunk.tableColumnTypes ?? [],
-              tableCells: chunk.tableCells ?? [],
-              tableCell: chunk.tableCell ?? null,
-              regionBoxes: chunk.regionBoxes ?? [],
-              regions: chunk.regions ?? chunk.regionBoxes ?? [],
-              regionCoordinateSpace: chunk.regionCoordinateSpace ?? null,
-              sourceTrace: chunk.sourceTrace ?? null,
-              metadata: {
-                documentId: document.id,
-                source: extracted.extractor,
-                headingPath: chunk.headingPath,
-                pageNumber: chunk.pageNumber,
-                pageNumbers: chunk.pageNumbers,
-                blockIds: chunk.blockIds,
-                blockTypes: chunk.blockTypes,
-                evidenceType: chunk.evidenceType,
-                tableGranularity: chunk.tableGranularity ?? null,
-                tableRowIndex: chunk.tableRowIndex ?? null,
-                tableRowCount: chunk.tableRowCount ?? null,
-                tableColumnNames: chunk.tableColumnNames ?? [],
-                tableColumnTypes: chunk.tableColumnTypes ?? [],
-                tableCells: chunk.tableCells ?? [],
-                tableCell: chunk.tableCell ?? null,
-                regionBoxes: chunk.regionBoxes ?? [],
-                regions: chunk.regions ?? chunk.regionBoxes ?? [],
-                regionCoordinateSpace: chunk.regionCoordinateSpace ?? null,
-                locator: chunk.locator ?? null,
-                sourceTrace: chunk.sourceTrace ?? {
-                  canonicalDocumentUri: state.artifactLedger.readDocument(document.id, "canonical-document") ?? null,
-                  parserArtifactUri: extracted.canonicalDocument?.source.parserArtifactUri ?? null,
-                  sourceArtifactUri: extracted.canonicalDocument?.source.artifactUri ?? null,
-                  blockIds: chunk.blockIds,
-                  pageNumbers: chunk.pageNumbers,
-                  extractor: extracted.extractor
-                },
-                overlapIndex: chunk.overlapIndex ?? 0,
-                canonicalDocumentUri: state.artifactLedger.readDocument(document.id, "canonical-document") ?? null,
-                rawText,
-                contextPreamble: contextualizedChunk?.contextPreamble ?? "",
-                contextualized: text !== rawText,
-                contextualizationSource: contextualized.usage?.source ?? "heuristic",
-                embeddingInputKey: embeddingKeys[index],
-                embeddingReused: reusedVectors.has(embeddingKeys[index] ?? "")
-              }
-            };
-          });
+          chunks.forEach((chunk, index) => { chunk.vector = embedded.vectors[index] ?? []; });
 
           const estimatedTokens = chunks.reduce((sum, c) => sum + c.tokenEstimate, 0);
           const totalTokens = embedded.totalTokens ?? estimatedTokens;
@@ -654,18 +666,9 @@ export class EmbedStage implements Stage {
           registerHash(state, contentHash, this.storage.uri(key));
           await this.recordReuseRefs(state, this.storage.uri(key), chunks, artifact.documentContext?.key);
 
-          const pipelineVersion = createHash("sha256")
-            .update(JSON.stringify(withoutStageSelection(state.run.pipeline)))
-            .digest("hex")
-            .slice(0, 8);
-
-          await this.materializeChunks({
-            state,
-            document,
-            chunks,
-            contentHash,
-            pipelineVersion
-          });
+          if (!publishBeforeEmbedding) {
+            await this.materializeChunks({ state, document, chunks, contentHash, pipelineVersion });
+          }
 
           if (lateChunkingEnabled) {
             state.pendingPerformance.push({
