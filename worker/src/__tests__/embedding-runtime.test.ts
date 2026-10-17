@@ -89,7 +89,7 @@ describe("embedTextChunks", () => {
     const args = { chunks: ["A guide requires two replaceable batteries."], profile, privacyMode: "standard" as const, config: { ...fromEnv(), openRouterApiKey: "router-key" }, onRemoteUsage };
     aiMock.embedMany.mockResolvedValueOnce({ embeddings: [Array.from({ length: 1024 }, () => 1)], usage: { tokens: 12 } });
     const result = await embedTextChunks(args);
-    expect(openAiMock.createOpenAI).toHaveBeenCalledWith({ apiKey: "router-key", baseURL: "https://openrouter.ai/api/v1" });
+    expect(openAiMock.createOpenAI).toHaveBeenCalledWith({ apiKey: "router-key", baseURL: "https://openrouter.ai/api/v1", fetch: expect.any(Function) });
     expect(result.vectors[0]).toHaveLength(1024);
     expect(Math.hypot(...result.vectors[0]!)).toBeCloseTo(1);
     expect(onRemoteUsage).toHaveBeenCalledWith(expect.objectContaining({ inputTokens: 12, chunks: 1 }));
@@ -354,6 +354,7 @@ describe("embedTextChunks", () => {
     expect(openAiMock.createOpenAI).toHaveBeenCalledWith({
       apiKey: "local",
       baseURL: "http://127.0.0.1:11434/v1",
+      fetch: expect.any(Function),
     });
     expect(aiMock.embedMany).toHaveBeenCalledOnce();
     expect(aiMock.embedMany.mock.calls[0]?.[0]).toMatchObject({ providerOptions: undefined });

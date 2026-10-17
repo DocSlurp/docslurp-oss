@@ -1,3 +1,4 @@
+import { instrumentS3Client } from "@docslurp/shared/observability";
 import {
   AbortMultipartUploadCommand,
   CompleteMultipartUploadCommand,
@@ -16,7 +17,7 @@ import type { Readable } from "node:stream";
 import { env } from "../config.js";
 import { s3ClientConfig } from "@docslurp/shared";
 
-const s3Client = new S3Client(s3ClientConfig(env.storage));
+const s3Client = instrumentS3Client(new S3Client(s3ClientConfig(env.storage)), env.storage.endpoint);
 
 let bucketReadyPromise: Promise<void> | null = null;
 

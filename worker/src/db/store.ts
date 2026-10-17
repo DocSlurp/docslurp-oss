@@ -1,3 +1,4 @@
+import { instrumentPostgres } from "@docslurp/shared/observability";
 import { PostgresCapacityLeaseStore } from "../media/capacity/store.js";
 import { PostgresMediaJournal } from "../media/journal.js";
 import { PUBLIC_ERROR_MESSAGES } from "@docslurp/shared";
@@ -382,14 +383,14 @@ export class Store {
       runEvents?: RunEventPublisherOptions;
     },
   ) {
-    this.sql = postgres<Record<string, postgres.PostgresType>>(databaseUrl, {
+    this.sql = instrumentPostgres(postgres<Record<string, postgres.PostgresType>>(databaseUrl, {
       max: Math.max(1, options?.poolMax ?? 10),
       // Avoid stale result types in pooled statements after schema deployments.
       prepare: false,
       types: { numeric: { to: 1700, from: [1700], serialize: (value: unknown) => String(value), parse: (value: string): unknown => Number(value) } },
       idle_timeout: 20,
       connect_timeout: 10,
-    });
+    }), databaseUrl);
     this.plausibilityWarningThreshold =
       options?.plausibilityWarningThreshold ?? 0.3;
     this.apiKeyUsageRetentionDays = Math.max(

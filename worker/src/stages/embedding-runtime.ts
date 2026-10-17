@@ -1,7 +1,7 @@
 import { delimitedTableMarkdown } from "../lib/delimited-table.js";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { withObservation, aiResultDetails } from "@docslurp/shared/observability";
+import { withObservation, aiResultDetails, instrumentFetch } from "@docslurp/shared/observability";
 import { isUtf8 } from "node:buffer";
 import path from "node:path";
 
@@ -654,7 +654,7 @@ async function embedRemoteChunks(args: {
       ? await authorizePrivateModelCall({ privacyMode: args.privacyMode, modelUri: args.profile.modelUri, capability: "embedding", operation: "worker.embedding" })
       : null;
     const model = privateCall
-      ? createOpenAI({ apiKey: "private-endpoint", baseURL: privateCall.baseUrl, fetch: privateCall.fetch }).embedding(privateCall.model) as any
+      ? createOpenAI({ apiKey: "private-endpoint", baseURL: privateCall.baseUrl, fetch: instrumentFetch("private", "embedding", privateCall.fetch) }).embedding(privateCall.model) as any
       : sharedModel;
     const batchStartedAt = Date.now();
     const result = await withObservation(
@@ -682,6 +682,7 @@ async function embedRemoteChunks(args: {
         }, () =>
           providerLimiter.run(`embeddings:${args.profile.provider}`, () =>
             isNativePerplexity ? embedPerplexity({
+              fetch: instrumentFetch("perplexity", "embedding"),
               model: args.profile.model,
               dimensions: args.profile.dimensions,
               apiKey: args.config.perplexityApiKey ?? "",
@@ -1187,7 +1188,7 @@ function createRemoteEmbeddingModel(profile: EmbeddingProfile, config: Config) {
     case "openrouter": {
       const route = openRouterEmbeddingRoute(profile.model);
       if (profile.dimensions !== route.dimensions) throw new Error("OpenRouter embedding dimensions do not match the registered model");
-      return createOpenAI({ apiKey: requiredKey(config.openRouterApiKey, "OPENROUTER_API_KEY"), baseURL: OPENROUTER_BASE_URL }).embedding(profile.model) as any;
+      return createOpenAI({ apiKey: requiredKey(config.openRouterApiKey, "OPENROUTER_API_KEY"), baseURL: OPENROUTER_BASE_URL, fetch: instrumentFetch("openrouter", "embedding") }).embedding(profile.model) as any;
     }
     case "openai":
       return (
@@ -1196,8 +1197,9 @@ function createRemoteEmbeddingModel(profile: EmbeddingProfile, config: Config) {
           ? createOpenAI({
               apiKey: requiredKey(config.openAiApiKey, "OPENAI_API_KEY"),
               baseURL: config.openAiBaseUrl,
+              fetch: instrumentFetch("openai", "embedding"),
             }).embedding(profile.model)
-          : openai.embedding(profile.model)
+          : createOpenAI({ apiKey: config.openAiApiKey || undefined, fetch: instrumentFetch("openai", "embedding") }).embedding(profile.model)
       ) as any;
     case "ollama":
     case "vllm":
@@ -1208,6 +1210,7 @@ function createRemoteEmbeddingModel(profile: EmbeddingProfile, config: Config) {
       return createOpenAI({
         apiKey: "local",
         baseURL: profile.baseUrl,
+        fetch: instrumentFetch(profile.provider, "embedding"),
       }).embedding(profile.model) as any;
     case "jina":
     case "nomic":

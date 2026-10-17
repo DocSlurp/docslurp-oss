@@ -1,5 +1,5 @@
 import { assertProviderAllowed, authorizePrivateModelCall, isPrivateModelUri, type PrivacyMode, createOpenRouterUsageCapture, createOpenRouterReasoningFetch, resolveOpenRouterUsage, resolvePipelineTextGenerationOptions, resolveSupportedModelIdWithWarning, type TextGenerationConfig, type TextGenerationProfile, type ProviderTextUsage, type PipelineTextOperation } from "@docslurp/shared";
-import { withObservation, aiResultDetails } from "@docslurp/shared/observability";
+import { withObservation, aiResultDetails, instrumentFetch } from "@docslurp/shared/observability";
 import { createAnthropic } from "@ai-sdk/anthropic";
 import { createOpenAI } from "@ai-sdk/openai";
 import { generateText, type OutputInterface } from "ai";
@@ -80,7 +80,7 @@ async function generatePrivateText(args: {
       result: aiResultDetails,
     },
     async () => {
-      const provider = createOpenAI({ apiKey: PRIVATE_ENDPOINT_API_KEY, baseURL: call.baseUrl, fetch: call.fetch });
+      const provider = createOpenAI({ apiKey: PRIVATE_ENDPOINT_API_KEY, baseURL: call.baseUrl, fetch: instrumentFetch("private", "inference", call.fetch) });
       const startedAt = Date.now();
       // Chat Completions is the OpenAI-compatible surface vLLM/SGLang/TGI all serve.
       const result = await generateText({
@@ -150,7 +150,7 @@ export async function generateOpenRouterText(args: {
     async () => {
       const accounting = createOpenRouterUsageCapture();
       const provider = createOpenAI({
-        fetch: createOpenRouterReasoningFetch(accounting.fetch, settings.reasoningEffort),
+        fetch: instrumentFetch("openrouter", "chat", createOpenRouterReasoningFetch(accounting.fetch, settings.reasoningEffort)),
         apiKey: args.apiKey,
         baseURL: OPENROUTER_BASE_URL,
       });
@@ -195,6 +195,7 @@ export async function generateAnthropicText(args: {
     },
     async () => {
       const provider = createAnthropic({
+        fetch: instrumentFetch("anthropic", "chat"),
         apiKey: args.apiKey,
       });
       const result = await generateText({

@@ -98,7 +98,7 @@ describe("embedConfiguredText", () => {
     const args = { value: "How many batteries are required?", runtime: "remote", provider: "openrouter", model: "perplexity/pplx-embed-v1-0.6b", dimensions: 1024, normalize: true, apiKey: "router-key", baseURL: "https://ignored.invalid", privacyMode: "standard" as const, onUsage };
     embedMock.mockResolvedValueOnce({ embedding: Array.from({ length: 1024 }, () => 1), usage: { tokens: 9 } });
     const result = await embedConfiguredText(args);
-    expect(createOpenAIMock).toHaveBeenCalledWith({ apiKey: "router-key", baseURL: "https://openrouter.ai/api/v1" });
+    expect(createOpenAIMock).toHaveBeenCalledWith({ apiKey: "router-key", baseURL: "https://openrouter.ai/api/v1", fetch: expect.any(Function) });
     expect(result.usage.inputTokens).toBe(9);
     expect(Math.hypot(...result.embedding)).toBeCloseTo(1);
     expect(onUsage).toHaveBeenCalledWith({ inputTokens: 9 });
@@ -147,6 +147,7 @@ describe("embedConfiguredText", () => {
     });
 
     expect(createOpenAIMock).toHaveBeenCalledWith({
+      fetch: expect.any(Function),
       apiKey: "local",
       baseURL: "http://127.0.0.1:11434/v1",
     });
