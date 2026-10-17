@@ -27,11 +27,20 @@ test("remote sync verifies readback and a repeated sync creates no writes", asyn
   const before = writes;
   assert.equal((await syncDataset(api, input)).unchanged, 1);
   assert.equal(writes, before);
-  items.get(input.items[0].id).metadata.syncContentSha256 = "different";
+  // A manually edited label can retain stale sync metadata. Repair it too.
+  items.get(input.items[0].id).expectedOutput = { expectedAnswer: "Corrupted label" };
   assert.equal((await syncDataset(api, input)).updated, 1);
 });
 test("HTTP failures never expose provider bodies or credentials", async () => {
   const api = createClient({ baseUrl: "https://example.com", publicKey: "secret-user", secretKey: "secret-password", fetchImpl: async () => ({ status: 401, ok: false, text: async () => "secret-password" }) });
   await assert.rejects(api("/v2/datasets"), { message: "Langfuse HTTP 401 (response body redacted)" });
   assert.throws(() => createClient({ baseUrl: "https://user:secret@example.com", publicKey: "x", secretKey: "y" }), /HTTPS/);
+});
+
+test("separate gold fails closed on missing, empty or mismatched labels", () => {
+  for (const gold of [[], [{ id: "other", answer: "value" }]]) {
+    assert.throws(() => buildItems({ ...spec, gold }), /label every case/);
+  }
+  const labeled = buildItems({ ...spec, gold: [{ id: "one", answer: "value" }] });
+  assert.deepEqual(labeled[0].expectedOutput, { id: "one", answer: "value" });
 });

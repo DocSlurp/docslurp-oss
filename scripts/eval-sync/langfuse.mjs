@@ -9,11 +9,12 @@ export function stableJson(value) {
   if (value && typeof value === "object") return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${stableJson(value[key])}`).join(",")}}`;
   return JSON.stringify(value);
 }
-export function buildItems({ name, split, cases, gold = [], provenance = null, sourceHashes, commit, config = {} }) {
+export function buildItems({ name, split, cases, gold = null, provenance = null, sourceHashes, commit, config = {} }) {
   if (!["development", "heldout"].includes(split) || !name.includes(split)) throw new Error("Dataset name must explicitly include its valid split");
   const seen = new Set();
-  const goldById = new Map(gold.map((item) => [item.id, item]));
-  if (goldById.size !== gold.length) throw new Error("Duplicate gold identity");
+  const goldById = new Map((gold ?? []).map((item) => [item.id, item]));
+  if (gold !== null && goldById.size !== gold.length) throw new Error("Duplicate gold identity");
+  if (gold !== null && (gold.length !== cases.length || cases.some((item) => !goldById.has(item.id)))) throw new Error("Separate gold must label every case exactly once");
   return cases.map((item) => {
     if (typeof item.id !== "string" || !item.id || seen.has(item.id)) throw new Error("Missing or duplicate case identity");
     seen.add(item.id);
@@ -58,7 +59,7 @@ export async function syncDataset(api, { name, split, items, sourceHashes, commi
   for (const item of items) {
     const remote = await api(`/dataset-items/${item.id}`);
     if (remote && remote.datasetId !== dataset.id) throw new Error("Stable item ID belongs to a different dataset");
-    if (remote?.metadata?.syncContentSha256 === item.metadata.syncContentSha256) { unchanged++; continue; }
+    if (remote?.metadata?.syncContentSha256 === item.metadata.syncContentSha256 && stableJson(remote.input) === stableJson(item.input) && stableJson(remote.expectedOutput) === stableJson(item.expectedOutput)) { unchanged++; continue; }
     await api("/dataset-items", item);
     const readback = await api(`/dataset-items/${item.id}`);
     if (readback?.metadata?.syncContentSha256 !== item.metadata.syncContentSha256 || stableJson(readback.input) !== stableJson(item.input) || stableJson(readback.expectedOutput) !== stableJson(item.expectedOutput)) throw new Error("Dataset item readback mismatch");
@@ -99,7 +100,7 @@ async function main() {
     const goldRaw = spec.gold ? await readFile(spec.gold, "utf8") : null;
     const provenanceRaw = spec.provenance ? await readFile(spec.provenance, "utf8") : null;
     const sourceHashes = { cases: hash(raw), ...(goldRaw ? { gold: hash(goldRaw) } : {}), ...(provenanceRaw ? { provenance: hash(provenanceRaw) } : {}), ...(spec.source ? { source: hash(await readFile(spec.source)) } : {}) };
-    const items = buildItems({ ...spec, cases: Array.isArray(parsed) ? parsed : parsed.cases, gold: goldRaw ? JSON.parse(goldRaw) : [], provenance: provenanceRaw ? JSON.parse(provenanceRaw) : null, sourceHashes, commit, config: manifest.config ?? {} });
+    const items = buildItems({ ...spec, cases: Array.isArray(parsed) ? parsed : parsed.cases, gold: goldRaw ? JSON.parse(goldRaw) : null, provenance: provenanceRaw ? JSON.parse(provenanceRaw) : null, sourceHashes, commit, config: manifest.config ?? {} });
     loaded.push({ ...spec, items, sourceHashes, commit });
   }
   if (args.includes("--outbox")) await writeFile(option("--outbox"), JSON.stringify({ sourceCommit: commit, datasets: loaded.map(({ name, split, items, sourceHashes }) => ({ name, split, items, sourceHashes })) }, null, 2) + "\n", { mode: 0o600 });
