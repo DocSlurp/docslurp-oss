@@ -235,3 +235,28 @@ honestly. An external `docslurp-source-derived-eval@v1` manifest was prepared at
 unsupported; receipt `source-derived-integrity-unsupported-v1.json`. Do not report
 this dataset as passing until the separately reviewed schema extension and
 unchanged leakage detectors have run.
+
+
+## Source-derived integrity gate reconciliation
+
+The reviewed extension was committed separately as `6b2aee2`. It validates
+source-derived question provenance, publisher/HTTPS source URLs without embedded
+credentials, unique PDF hashes, unique positive 1-based page indexes and excerpt
+hashes, while retaining existing artifact hashes and leakage checks. Original
+case IDs remain scanned alongside namespaced IDs. The 13 synthetic judge tests
+pass, including provenance failures, tampered artifacts and production leakage.
+
+The first supported run found ten fixture-identifier occurrences in diagnostic
+files, not runtime implementation: the former
+`performance/retrieval-quality/existing-options-experiment.md` and
+`scripts/retrieval-quality/development-evidence-v1.json`. Independent review
+confirmed no runtime imports. These two files were moved forward in git to
+`docs/evals/retrieval-quality/existing-options-experiment.md` and
+`docs/evals/retrieval-quality/development-evidence-v1.json`. This uses the existing
+document classification; scan filters and broader performance paths were not
+excluded. Earlier failing reports remain retained.
+
+The rerun on `source-derived-integrity-v3/` passes all 16 cases with zero findings.
+`source-derived-integrity-reconciled-v3-report.json` records the exact old/new
+paths, rationale, raw report hash and prior failing report hash. This is the
+integrity gate only, not proof of retrieval quality or confirmation success.
