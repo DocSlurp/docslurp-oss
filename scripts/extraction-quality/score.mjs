@@ -5,20 +5,31 @@
  *
  * Deterministic matching cannot prove arbitrary claim support. Anything it cannot
  * verify is labelled `unverified` and queued for independent blind review; only a
- * valid review file can move a run from `needs-review` to `pass`.
+ * valid review file can move a run from `needs-review` to `pass`. Review schema v2 also
+ * lets an independent reviewer overrule heuristic contradiction flags and credit graph
+ * relations the frozen predicate lists miss, but only through verdicts bound to the exact
+ * source, artifact and queue item, with verbatim source evidence (README: Adjudication).
  */
 import { createHash } from 'node:crypto';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
-export const REPORT_SCHEMA = 'docslurp-extraction-quality-report@v1';
+export const REPORT_SCHEMA = 'docslurp-extraction-quality-report@v2';
+export const SCORER_VERSION = 'extraction-quality-scorer@v2';
 export const OUTPUT_SCHEMA = 'docslurp-extraction-quality-outputs@v1';
+/** Legacy review: plain string verdicts for units, edges and facts only. Still accepted. */
 export const REVIEW_SCHEMA = 'docslurp-quality-review@v1';
+export const REVIEW_SCHEMA_V2 = 'docslurp-quality-review@v2';
+export const QUEUE_SCHEMA = 'docslurp-quality-review-queue@v2';
 /** Frozen acceptance targets from the experiment plan; reported, never applied per case. */
 export const TARGETS = { graphPrecision: 0.95, graphRecall: 0.9, keyPointCoverage: 0.9, summaryCoverage: 0.9, contradictions: 0, unsupportedUnits: 0 };
 
 const sha = (value) => createHash('sha256').update(value).digest('hex');
+/** Key-order independent JSON, so hashes bind to content and not to serialisation. */
+const canon = (value) => JSON.stringify(value, (_key, x) => (x && typeof x === 'object' && !Array.isArray(x) ? Object.fromEntries(Object.entries(x).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))) : x)) ?? 'null';
+/** Whitespace- and case-insensitive form used to check that evidence quotes occur in the source. */
+const squash = (value) => fold(value).replace(/\s+/gu, ' ').trim();
 /** NFKD, strip combining marks, lower-case. Gold patterns are written against this form. */
 export const fold = (value) => String(value ?? '').normalize('NFKD').replace(/\p{M}+/gu, '').toLocaleLowerCase();
 const f1 = (a, b) => (a + b ? (2 * a * b) / (a + b) : 0);
@@ -216,14 +227,16 @@ export function scoreProse(gold, input, field = 'keyPoints') {
     // A "wrong" number that is another covered fact's own value in this sentence is not a substitution.
     const explained = hits.filter((h) => h.r.status === 'covered').flatMap((h) => (h.entry.fact.numbers ?? []).map((n) => n.value));
     hits = hits.map((h) => (h.r.kind === 'numeric' && h.r.extras.every((v) => hasNumber(explained, v)) ? { ...h, r: { status: 'partial' } } : h));
-    const contradictions = hits.filter((h) => h.r.status === 'contradiction').map((h) => ({ factId: h.entry.fact.id, kind: h.r.kind }));
-    for (const { fact } of p.facts) for (const sig of fact.contradictions ?? []) if (signatureHit(sig, t)) contradictions.push({ factId: fact.id, kind: sig.id ?? 'contradiction', reason: sig.reason });
-    for (const sig of gold.forbiddenClaims ?? []) if (signatureHit(sig, t)) contradictions.push({ kind: sig.id ?? 'forbidden', reason: sig.reason });
+    // `origin` separates scorer heuristics (negation cues, number matching), which a reviewer may overrule, from
+    // authored signatures and forbidden claims, which are label facts that only a new dataset version can change.
+    const contradictions = hits.filter((h) => h.r.status === 'contradiction').map((h) => ({ factId: h.entry.fact.id, kind: h.r.kind, origin: 'heuristic' }));
+    for (const { fact } of p.facts) for (const sig of fact.contradictions ?? []) if (signatureHit(sig, t)) contradictions.push({ factId: fact.id, kind: sig.id ?? 'contradiction', reason: sig.reason, origin: 'authored' });
+    for (const sig of gold.forbiddenClaims ?? []) if (signatureHit(sig, t)) contradictions.push({ kind: sig.id ?? 'forbidden', reason: sig.reason, origin: 'authored' });
     const coveredHits = hits.filter((h) => h.r.status === 'covered');
     const matched = coveredHits.map((h) => h.entry);
     const unit = { id: sha(`unit|${field}|${text}`).slice(0, 16), text, status: 'neutral', reason: null, facts: matched.map((e) => e.fact.id), contradictions };
     units.push(unit);
-    if (contradictions.length) { unit.status = 'contradicted'; continue; }
+    if (contradictions.length) { unit.status = 'contradicted'; unit.adjudicable = contradictions.every((c) => c.origin === 'heuristic'); continue; }
     const content = contentTokens(text);
     // Words the author's own patterns matched are vetted paraphrases of the fact, so they are allowed too.
     const lexicon = new Lexicon([...matched.flatMap((e) => e.lexicon), ...coveredHits.flatMap((h) => contentTokens(h.r.terms))]);
@@ -302,11 +315,16 @@ export function scoreGraph(gold, graph = {}) {
     const reason = e.source.id === e.target.id ? 'self-loop' : relations.some((x) => x.reversed.has(e.k)) ? 'reversed' : forbidden.some((set) => set.has(e.k)) ? 'forbidden' : null;
     unsupported.push({ ...base, class: reason ? 'contradicted' : 'unmatched', reason: reason ?? undefined });
   }
+  const entityName = new Map((gold.entities ?? []).map((e) => [e.id, e.name]));
+  const missingRelations = relations.filter((_, i) => !supportedBy.has(i)).map(({ r }) => ({
+    id: r.id, source: entityName.get(r.source) ?? r.source, target: entityName.get(r.target) ?? r.target,
+    predicates: r.predicates ?? [], inversePredicates: r.inversePredicates ?? [], symmetric: Boolean(r.symmetric), evidence: (r.evidence ?? []).map((e) => e.quote).filter(Boolean),
+  }));
   const outEntityIds = new Set((graph?.entities ?? []).filter((e) => e && typeof e === 'object').map((e) => resolveEndpoint(e.name).id).filter(Boolean));
   const goldIds = (gold.entities ?? []).map((e) => e.id);
   return {
     expected: relations.length, covered: relations.filter((_, i) => supportedBy.has(i)).map((x) => x.r.id), missing: relations.filter((_, i) => !supportedBy.has(i)).map((x) => x.r.id),
-    supportedEdges: supportedBy.size, redundantEdges, unsupported,
+    supportedEdges: supportedBy.size, redundantEdges, unsupported, missingRelations, artifactSha256: sha(canon(graph ?? null)),
     diagnostics: { entityRecall: goldIds.length ? goldIds.filter((id) => outEntityIds.has(id)).length / goldIds.length : 1, noRelationsControl: relations.length === 0 },
   };
 }
@@ -316,14 +334,24 @@ const hashKey = (...parts) => sha(parts.join('|')).slice(0, 16);
 const unitKey = (caseId, u) => hashKey(caseId, u.id);
 const edgeKey = (caseId, e) => hashKey(caseId, e.id);
 const factKey = (caseId, r, factId) => hashKey(caseId, 'fact', r.field, factId, r.artifactSha256);
+/** A flagged unit is keyed to its exact artifact: a verdict that overrules a flag must not survive a changed output. */
+const flagKey = (caseId, r, u) => hashKey(caseId, 'flag', r.field, u.id, r.artifactSha256);
+const relationKey = (caseId, g, relationId) => hashKey(caseId, 'relation', relationId, g.artifactSha256);
 
 function proseView(r, verdicts, caseId) {
-  const c = { supported: 0, openUnverified: 0, confirmedUnsupported: 0, contradicted: 0 };
+  const c = { supported: 0, openUnverified: 0, confirmedUnsupported: 0, contradicted: 0, flagsRaised: 0, flagsOverruled: 0, openFlags: 0 };
   for (const u of r.units) {
+    if (u.status === 'contradicted') {
+      // Only a reviewer's explicit verdict on a heuristic flag changes it; no verdict, or any other verdict, leaves it a contradiction.
+      const v = u.adjudicable ? verdicts[flagKey(caseId, r, u)] : undefined;
+      c.flagsRaised++;
+      if (v === 'supported') { c.supported++; c.flagsOverruled++; } else if (v === 'unsupported') c.confirmedUnsupported++;
+      else { c.contradicted++; if (u.adjudicable && v === undefined) c.openFlags++; }
+      continue;
+    }
     const v = verdicts[unitKey(caseId, u)];
-    if (u.status === 'contradicted') c.contradicted++;
-    else if (u.status === 'supported' || (u.status === 'unverified' && v === 'supported')) c.supported++;
-    else if (u.status === 'unverified') c[v === 'unsupported' ? 'confirmedUnsupported' : 'openUnverified']++;
+    if (u.status === 'supported' || (u.status === 'unverified' && v === 'supported')) c.supported++;
+    else if (u.status === 'unverified') c[v === 'unsupported' ? 'confirmedUnsupported' : v === 'contradicted' ? 'contradicted' : 'openUnverified']++;
   }
   const askable = r.artifactText.trim() ? r.missing : [];
   const reviewedCovered = askable.filter((id) => verdicts[factKey(caseId, r, id)] === 'covered').length;
@@ -332,21 +360,31 @@ function proseView(r, verdicts, caseId) {
   const scored = c.supported + c.openUnverified + c.confirmedUnsupported + c.contradicted;
   const coverage = r.expected.length ? covered / r.expected.length : 1;
   const soundness = scored ? c.supported / scored : 0;
-  return { ...c, expected: r.expected.length, covered, coverage, soundness, score: f1(coverage, soundness), empty: scored === 0, openItems: c.openUnverified + openFacts, diagnostics: r.diagnostics };
+  return { ...c, expected: r.expected.length, covered, coverage, soundness, score: f1(coverage, soundness), empty: scored === 0, openItems: c.openUnverified + c.openFlags + openFacts, diagnostics: r.diagnostics };
 }
 function graphView(g, verdicts, caseId) {
   const n = { open: 0, confirmed: 0, reviewedSupported: 0, contradicted: 0 };
   for (const e of g.unsupported) {
     const v = verdicts[edgeKey(caseId, e)];
+    // Structural contradictions (reversed, forbidden, self-loop) are deterministic and never reviewable.
     if (e.class === 'contradicted') n.contradicted++;
-    else if (e.class === 'unmatched' && v === 'supported') n.reviewedSupported++;
-    else if (e.class === 'unmatched' && v === 'unsupported') n.confirmed++;
+    else if (v === 'supported') n.reviewedSupported++;
+    else if (v === 'unsupported') n.confirmed++;
+    else if (v === 'contradicted') n.contradicted++;
     else n.open++;
+  }
+  // A missed relation can only be covered by an unmatched edge, so it is reviewable only when one exists.
+  const reviewable = g.unsupported.some((e) => e.class === 'unmatched');
+  let reviewedCovered = 0, openRelations = 0;
+  for (const rel of g.missingRelations) {
+    const v = verdicts[relationKey(caseId, g, rel.id)];
+    if (v === 'covered') reviewedCovered++;
+    else if (reviewable && v === undefined) openRelations++;
   }
   const predicted = g.supportedEdges + g.unsupported.length;
   const precision = predicted ? (g.supportedEdges + n.reviewedSupported) / predicted : 1;
-  const recall = g.expected ? g.supportedEdges / g.expected : 1;
-  return { tp: g.supportedEdges, predicted, expected: g.expected, precision, recall, f1: f1(precision, recall), contradicted: n.contradicted, openItems: g.unsupported.filter((e) => e.class === 'unmatched' && verdicts[edgeKey(caseId, e)] === undefined).length, confirmedUnsupported: n.confirmed, reviewedSupported: n.reviewedSupported, unsupportedEdges: n.open + n.confirmed, diagnostics: g.diagnostics };
+  const recall = g.expected ? (g.supportedEdges + reviewedCovered) / g.expected : 1;
+  return { tp: g.supportedEdges, reviewedCovered, openRelations, predicted, expected: g.expected, precision, recall, f1: f1(precision, recall), contradicted: n.contradicted, openItems: g.unsupported.filter((e) => e.class === 'unmatched' && verdicts[edgeKey(caseId, e)] === undefined).length + openRelations, confirmedUnsupported: n.confirmed, reviewedSupported: n.reviewedSupported, unsupportedEdges: n.open + n.confirmed, diagnostics: g.diagnostics };
 }
 
 export function envelopeDiagnostics(output) {
@@ -394,13 +432,17 @@ function aggregateViews(views, reviewValid) {
     cases: new Set(views.map((v) => v.caseId)).size, generations: views.length, missingCases: sum((v) => Number(v.missing)),
     primary: mean(views.map((v) => v.score)),
     graph: {
-      pooled: { precision: ratio(sum((v) => v.graph.tp + v.graph.reviewedSupported), sum((v) => v.graph.predicted)), recall: ratio(sum((v) => v.graph.tp), sum((v) => v.graph.expected)), tp: sum((v) => v.graph.tp), predicted: sum((v) => v.graph.predicted), expected: sum((v) => v.graph.expected) },
+      pooled: { precision: ratio(sum((v) => v.graph.tp + v.graph.reviewedSupported), sum((v) => v.graph.predicted)), recall: ratio(sum((v) => v.graph.tp + v.graph.reviewedCovered), sum((v) => v.graph.expected)), tp: sum((v) => v.graph.tp), reviewedCovered: sum((v) => v.graph.reviewedCovered), predicted: sum((v) => v.graph.predicted), expected: sum((v) => v.graph.expected) },
       macro: { precision: mean(views.map((v) => v.graph.precision)), recall: mean(views.map((v) => v.graph.recall)), f1: mean(views.map((v) => v.graph.f1)) },
       contradictedEdges: sum((v) => v.graph.contradicted), unsupportedEdges: sum((v) => v.graph.unsupportedEdges),
       controls: { cases: views.filter((v) => v.graph.diagnostics.noRelationsControl).length, withEdges: views.filter((v) => v.graph.diagnostics.noRelationsControl && v.graph.predicted > 0).length },
     },
     keyPoints: proseAggregate(views, 'keyPoints'),
     summary: { ...proseAggregate(views, 'summary'), oneParagraphRate: mean(views.map((v) => Number(v.summary.diagnostics.oneParagraph))), withinWordLimitRate: mean(views.map((v) => Number(v.summary.diagnostics.withinWordLimit))) },
+    adjudication: {
+      flagsRaised: sum((v) => v.keyPoints.flagsRaised + v.summary.flagsRaised), flagsOverruled: sum((v) => v.keyPoints.flagsOverruled + v.summary.flagsOverruled),
+      openFlags: sum((v) => v.keyPoints.openFlags + v.summary.openFlags), relationsReviewedCovered: sum((v) => v.graph.reviewedCovered), openRelations: sum((v) => v.graph.openRelations),
+    },
     emptyArtifacts: sum((v) => Number(v.keyPoints.empty) + Number(v.summary.empty)),
     contradictions: sum((v) => v.contradictions), confirmedUnsupported: sum((v) => v.confirmedUnsupported), openReviewItems: sum((v) => v.openItems),
     envelopeValidRate: mean(views.map((v) => Number(v.envelope.valid))),
@@ -418,60 +460,144 @@ function aggregateViews(views, reviewValid) {
 // ---- blind review ---------------------------------------------------------------------
 export function validateReview(review) {
   const problems = [];
-  if (review?.schema !== REVIEW_SCHEMA) problems.push('schema');
+  if (review?.schema !== REVIEW_SCHEMA && review?.schema !== REVIEW_SCHEMA_V2) problems.push('schema');
   if (typeof review?.reviewer !== 'string' || !review.reviewer.trim()) problems.push('reviewer');
   if (review?.blind !== true) problems.push('blind');
   if (review?.independentOfAuthor !== true) problems.push('independentOfAuthor');
   if (!review?.items || typeof review.items !== 'object') problems.push('items');
   return { valid: !problems.length, problems };
 }
-const VERDICTS = { unit: ['supported', 'unsupported'], edge: ['supported', 'unsupported'], fact: ['covered', 'not-covered'] };
+const VERDICTS = {
+  unit: ['supported', 'unsupported', 'contradicted'], edge: ['supported', 'unsupported', 'contradicted'],
+  fact: ['covered', 'not-covered'], relation: ['covered', 'not-covered'],
+};
+/** Verdicts that can only improve a score: the ones that need a bound, evidenced, v2 entry when they overrule the scorer. */
+const IMPROVING = new Set(['supported', 'covered']);
+/** Shortest evidence quote (after case/whitespace folding) accepted as a source citation. */
+const MIN_QUOTE = 15;
+const PROTOCOL = [
+  'Judge every item against the source document only. Nothing here says what any scorer or candidate decided.',
+  'v2 entry: {"verdict", "itemSha256" (copied from the item), "evidence": [verbatim source quotes], "rationale"?, "coveredBy"? (relation items: the itemId of the candidate edge that covers it)}.',
+  'Give evidence for every supported/covered verdict. Items the scorer cannot accept without evidence and the exact binding are reported back under review.rejected.',
+  'A relation is covered only by a candidate edge that you also judge supported; one edge covers at most one relation.',
+];
 
-/** Deduplicated items (identical text across candidates shares one verdict), in a stable pseudo-random order. */
-export function reviewQueue(results) {
-  const byId = new Map();
+/**
+ * Deduplicated items (identical text across candidates shares one verdict), in a stable pseudo-random order.
+ * Every item carries the source hash and an `itemSha256` over its full content (and, where a verdict could overrule a
+ * scorer decision, the exact artifact), which a v2 review echoes back. Returns `{ queue, meta }`; `meta` is internal.
+ */
+function buildQueue(results, sources = {}) {
+  const byId = new Map(), meta = new Map();
+  const add = (itemId, item, info, bound = {}) => {
+    const sourceSha256 = sources[item.caseId]?.sha256 ?? null;
+    const body = { itemId, ...item, sourceSha256 };
+    const itemSha256 = sha(canon({ schema: 'item@v2', ...body, ...bound }));
+    byId.set(itemId, { ...body, itemSha256 });
+    meta.set(itemId, { type: item.type, caseId: item.caseId, itemSha256, override: null, candidates: null, ...info, sourceText: sources[item.caseId]?.text ?? null });
+  };
   for (const { id: caseId, result } of results) {
     for (const field of ['keyPoints', 'summary']) {
       const r = result[field];
-      for (const u of r.units) if (u.status === 'unverified') byId.set(unitKey(caseId, u), { type: 'unit', caseId, field, text: u.text });
-      if (r.artifactText.trim()) for (const factId of r.missing) byId.set(factKey(caseId, r, factId), { type: 'fact', caseId, field, factId, artifactText: r.artifactText });
+      for (const u of r.units) {
+        if (u.status === 'unverified') add(unitKey(caseId, u), { type: 'unit', caseId, field, text: u.text }, {});
+        // Flagged units look like any other unit to the reviewer; only heuristic flags are reviewable.
+        else if (u.status === 'contradicted' && u.adjudicable) add(flagKey(caseId, r, u), { type: 'unit', caseId, field, text: u.text }, { override: 'flag' }, { artifactSha256: r.artifactSha256 });
+      }
+      if (r.artifactText.trim()) for (const factId of r.missing) add(factKey(caseId, r, factId), { type: 'fact', caseId, field, factId, artifactText: r.artifactText }, {}, { artifactSha256: r.artifactSha256 });
     }
-    for (const e of result.graph.unsupported) if (e.class === 'unmatched') byId.set(edgeKey(caseId, e), { type: 'edge', caseId, source: e.source, predicate: e.predicate, target: e.target });
+    const unmatched = result.graph.unsupported.filter((e) => e.class === 'unmatched');
+    for (const e of unmatched) add(edgeKey(caseId, e), { type: 'edge', caseId, source: e.source, predicate: e.predicate, target: e.target }, {});
+    const candidates = unmatched.map((e) => ({ edgeId: edgeKey(caseId, e), source: e.source, predicate: e.predicate, target: e.target })).sort((a, b) => (a.edgeId < b.edgeId ? -1 : 1));
+    if (candidates.length) {
+      for (const rel of result.graph.missingRelations) {
+        const { id: relationId, ...relation } = rel;
+        add(relationKey(caseId, result.graph, relationId), { type: 'relation', caseId, relation, candidates }, { override: 'relation', candidates: new Set(candidates.map((c) => c.edgeId)) }, { artifactSha256: result.graph.artifactSha256 });
+      }
+    }
   }
-  const items = [...byId].map(([itemId, item]) => ({ itemId, ...item })).sort((a, b) => sha(`${a.itemId}order`).localeCompare(sha(`${b.itemId}order`)));
-  return { schema: 'docslurp-quality-review-queue@v1', verdicts: VERDICTS, items };
+  const items = [...byId.values()].sort((a, b) => sha(`${a.itemId}order`).localeCompare(sha(`${b.itemId}order`)));
+  return { queue: { schema: QUEUE_SCHEMA, verdicts: VERDICTS, protocol: PROTOCOL, items }, meta };
+}
+export const reviewQueue = (results, sources = {}) => buildQueue(results, sources).queue;
+
+/**
+ * Turn a review into accepted verdicts. A verdict that could only raise a score by overruling the scorer (a heuristic
+ * contradiction flag, a missed graph relation) is accepted from a v2 entry only when it is bound to the exact queue item
+ * (itemSha256), cites verbatim source evidence and, for relations, names a supported covering edge. Anything else is
+ * recorded under `rejected` with its reason and leaves the scorer's decision standing.
+ */
+function applyReview(review, check, meta) {
+  const verdicts = {}, rejected = [], adjudications = [];
+  if (!check.valid) return { verdicts, rejected, adjudications, bound: 0 };
+  const v2 = review.schema === REVIEW_SCHEMA_V2, accepted = new Map();
+  for (const [itemId, raw] of Object.entries(review.items)) {
+    const m = meta.get(itemId);
+    const reject = (reason) => rejected.push({ itemId, reason });
+    if (!m) { reject('unknown-item'); continue; }
+    const entry = typeof raw === 'string' ? { verdict: raw } : v2 && raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : null;
+    if (!entry || typeof entry.verdict !== 'string' || !VERDICTS[m.type].includes(entry.verdict)) { reject('invalid-verdict'); continue; }
+    if (entry.itemSha256 !== undefined && entry.itemSha256 !== m.itemSha256) { reject('stale-binding'); continue; }
+    if (m.override && IMPROVING.has(entry.verdict)) {
+      const quotes = Array.isArray(entry.evidence) ? entry.evidence.filter((q) => typeof q === 'string' && q.trim()) : [];
+      if (entry.itemSha256 === undefined) { reject('missing-binding'); continue; }
+      if (m.sourceText == null) { reject('source-unavailable'); continue; }
+      if (!quotes.length) { reject('missing-evidence'); continue; }
+      const haystack = squash(m.sourceText);
+      if (!quotes.every((q) => squash(q).length >= MIN_QUOTE && haystack.includes(squash(q)))) { reject('evidence-not-in-source'); continue; }
+      if (m.type === 'relation' && (typeof entry.coveredBy !== 'string' || !m.candidates.has(entry.coveredBy))) { reject('bad-covered-by'); continue; }
+    }
+    accepted.set(itemId, { entry, m });
+  }
+  // Coverage is a claim about an output edge, so that edge must itself be judged supported, and cover one relation only.
+  const used = new Set();
+  for (const [itemId, { entry, m }] of [...accepted].sort(([a], [b]) => (a < b ? -1 : 1))) {
+    if (m.type !== 'relation' || entry.verdict !== 'covered') continue;
+    const via = accepted.get(entry.coveredBy);
+    if (via?.entry.verdict !== 'supported' || via.m.type !== 'edge' || via.m.caseId !== m.caseId) { rejected.push({ itemId, reason: 'covering-edge-not-supported' }); accepted.delete(itemId); } else if (used.has(entry.coveredBy)) { rejected.push({ itemId, reason: 'edge-already-covers-another-relation' }); accepted.delete(itemId); } else used.add(entry.coveredBy);
+  }
+  let bound = 0;
+  for (const [itemId, { entry, m }] of accepted) {
+    verdicts[itemId] = entry.verdict;
+    if (entry.itemSha256 !== undefined) bound++;
+    if (m.override) adjudications.push({ itemId, type: m.type, caseId: m.caseId, overrides: m.override, verdict: entry.verdict, reviewer: review.reviewer, itemSha256: entry.itemSha256 ?? null, evidence: entry.evidence ?? [], rationale: entry.rationale ?? null, coveredBy: entry.coveredBy ?? null });
+  }
+  adjudications.sort((a, b) => (a.itemId < b.itemId ? -1 : 1));
+  return { verdicts, rejected, adjudications, bound };
 }
 
 /**
- * Score a run. `cases`: [{id, gold}]; `outputs`: {runId?, cases:{id: output | output[]}}.
- * An array value is a list of independent generations of that case.
+ * Score a run. `cases`: [{id, gold, sourceText?, sourceSha256?}]; `outputs`: {runId?, cases:{id: output | output[]}}.
+ * An array value is a list of independent generations of that case. Without a case's source text, verdicts that would
+ * overrule the scorer cannot be bound or checked and are rejected.
  */
 export function scoreRun({ cases, outputs, review = null }) {
   const check = review ? validateReview(review) : { valid: false, problems: ['no-review'] };
-  const results = [];
-  for (const { id, gold } of cases) {
+  const results = [], sources = {};
+  for (const { id, gold, sourceText = null, sourceSha256 = null } of cases) {
+    sources[id] = { text: sourceText, sha256: sourceSha256 ?? (sourceText == null ? null : sha(sourceText)) };
     const raw = outputs?.cases?.[id];
     for (const [index, output] of (Array.isArray(raw) ? raw : [raw]).entries()) results.push({ id, index, result: scoreCase(gold, output) });
   }
-  const queue = reviewQueue(results);
-  const kinds = new Map(queue.items.map((i) => [i.itemId, i.type]));
-  const verdicts = {};
-  let invalidVerdicts = 0;
-  if (check.valid) for (const [k, v] of Object.entries(review.items)) { if (kinds.has(k) && VERDICTS[kinds.get(k)].includes(v)) verdicts[k] = v; else invalidVerdicts++; }
+  const { queue, meta } = buildQueue(results, sources);
+  const { verdicts, rejected, adjudications, bound } = applyReview(review, check, meta);
   const views = results.map((r) => caseView(r.id, r.result, verdicts));
   return {
     schema: REPORT_SCHEMA, runId: outputs?.runId ?? null,
     aggregate: aggregateViews(views, check.valid),
     deterministic: check.valid ? aggregateViews(results.map((r) => caseView(r.id, r.result, {})), false) : undefined,
-    review: { supplied: Boolean(review), valid: check.valid, problems: check.problems, queued: queue.items.length, ignoredVerdicts: invalidVerdicts },
+    review: { supplied: Boolean(review), valid: check.valid, schema: review?.schema ?? null, problems: check.problems, queued: queue.items.length, ignoredVerdicts: rejected.length, boundVerdicts: bound, rejected, adjudications },
     cases: views.map((v, i) => ({ ...v, generation: results[i].index, details: results[i].result })),
     queue,
   };
 }
 
-/** Pooled numbers only: the form used for every held-out report. */
+/** Pooled numbers only: the form used for every held-out report. Review detail names cases, claims and quotes, so only counts survive. */
 export function aggregateOnly(report) {
-  return { schema: report.schema, runId: report.runId, dataset: report.dataset, scorer: report.scorer, aggregate: report.aggregate, deterministic: report.deterministic, review: report.review, aggregateOnly: true };
+  const { rejected = [], adjudications = [], ...counts } = report.review ?? {};
+  const rejectedByReason = {};
+  for (const x of rejected) rejectedByReason[x.reason] = (rejectedByReason[x.reason] ?? 0) + 1;
+  return { schema: report.schema, runId: report.runId, dataset: report.dataset, scorer: report.scorer, aggregate: report.aggregate, deterministic: report.deterministic, review: { ...counts, adjudicated: adjudications.length, rejectedByReason }, aggregateOnly: true };
 }
 
 // ---- dataset loading and CLI ----------------------------------------------------------
@@ -479,10 +605,10 @@ export function loadSplit(datasetDir, split) {
   const dir = resolve(datasetDir, split);
   const manifestBytes = readFileSync(join(dir, 'integrity-manifest.json'));
   const cases = JSON.parse(manifestBytes).cases.map((entry) => {
-    const labels = readFileSync(join(dir, entry.labels.path));
+    const labels = readFileSync(join(dir, entry.labels.path)), source = readFileSync(join(dir, entry.source.path));
     if (sha(labels) !== entry.labels.sha256) throw new Error(`label hash mismatch for case ${entry.id}`);
-    if (sha(readFileSync(join(dir, entry.source.path))) !== entry.source.sha256) throw new Error(`source hash mismatch for case ${entry.id}`);
-    return { id: entry.id, gold: JSON.parse(labels).labels[0].expected };
+    if (sha(source) !== entry.source.sha256) throw new Error(`source hash mismatch for case ${entry.id}`);
+    return { id: entry.id, gold: JSON.parse(labels).labels[0].expected, sourceSha256: entry.source.sha256, sourceText: source.toString('utf8') };
   });
   return { cases, manifestSha256: sha(manifestBytes) };
 }
@@ -492,7 +618,7 @@ export function main(argv = process.argv.slice(2)) {
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--aggregate-only') o.aggregateOnly = true;
-    else if (['--dataset', '--split', '--outputs', '--review', '--review-queue', '--out', '--gold', '--output'].includes(a) && argv[i + 1]) o[a.slice(2)] = argv[++i];
+    else if (['--dataset', '--split', '--outputs', '--review', '--review-queue', '--out', '--gold', '--output', '--source'].includes(a) && argv[i + 1]) o[a.slice(2)] = argv[++i];
     else throw new Error(`Unknown or incomplete option ${a}`);
   }
   const read = (p) => JSON.parse(readFileSync(p, 'utf8'));
@@ -501,7 +627,8 @@ export function main(argv = process.argv.slice(2)) {
   let report;
   if (o.gold) {
     const labels = read(o.gold);
-    report = scoreRun({ cases: [{ id: 'single', gold: labels.labels?.[0]?.expected ?? labels }], outputs: { cases: { single: read(o.output) } }, review });
+    const sourceText = o.source ? readFileSync(o.source, 'utf8') : null;
+    report = scoreRun({ cases: [{ id: 'single', gold: labels.labels?.[0]?.expected ?? labels, sourceText }], outputs: { cases: { single: read(o.output) } }, review });
   } else {
     if (!o.dataset || !o.split || !o.outputs) throw new Error('Expected --dataset <dir> --split development|heldout --outputs <file> (or --gold <file> --output <file>)');
     const { cases, manifestSha256 } = loadSplit(o.dataset, o.split);
@@ -510,7 +637,7 @@ export function main(argv = process.argv.slice(2)) {
     report = scoreRun({ cases, outputs, review });
     report.dataset = { split: o.split, manifestSha256 };
   }
-  report.scorer = { sha256: sha(readFileSync(fileURLToPath(import.meta.url))) };
+  report.scorer = { version: SCORER_VERSION, sha256: sha(readFileSync(fileURLToPath(import.meta.url))) };
   if (o['review-queue']) write(o['review-queue'], report.queue);
   const { queue: _queue, ...rest } = report;
   const printed = o.aggregateOnly ? aggregateOnly(rest) : rest;

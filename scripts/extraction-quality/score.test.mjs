@@ -43,7 +43,7 @@ const reference = {
   keyPoints: ['Hale Voss founded the Tarn Institute in 1961.', 'The Institute employs at least 40 researchers.', 'Ines Marlow succeeded Voss as director in 1998.', 'The board rejected the relocation.'],
   summary: 'Hale Voss founded the Tarn Institute in 1961 and Ines Marlow succeeded Voss in 1998, but the board did not approve the relocation.',
 };
-const run = (output, review = null) => scoreRun({ cases: [{ id: gold.id, gold }], outputs: { cases: { [gold.id]: output } }, review });
+const run = (output, review = null, sourceText = SOURCE) => scoreRun({ cases: [{ id: gold.id, gold, sourceText }], outputs: { cases: { [gold.id]: output } }, review });
 const blind = (items) => ({ schema: 'docslurp-quality-review@v1', reviewer: 'reviewer', blind: true, independentOfAuthor: true, items });
 const only = (r) => r.cases[0];
 const unitsOf = (r, field) => r.cases[0].details[field].units;
@@ -216,7 +216,7 @@ test('review queue is deduplicated, carries no scores, and is ordered independen
   const b = ids(['Tarn grows lemons.', 'The Institute runs a telescope.']);
   assert.deepEqual(a, b);
   const item = run({ ...reference, keyPoints: ['Tarn grows lemons.'] }).queue.items.find((i) => i.type === 'unit');
-  assert.deepEqual(Object.keys(item).sort(), ['caseId', 'field', 'itemId', 'text', 'type']);
+  assert.deepEqual(Object.keys(item).sort(), ['caseId', 'field', 'itemId', 'itemSha256', 'sourceSha256', 'text', 'type']);
 });
 
 test('aggregate-only output drops case ids, units and review text', () => {
@@ -246,6 +246,209 @@ test('units: abbreviations, decimals, list markers and CJK are handled', () => {
   assert.deepEqual(splitUnits('It runs between 7 a.m. and 7 p.m. daily. Done.'), ['It runs between 7 a.m. and 7 p.m. daily.', 'Done.']);
   assert.deepEqual(splitUnits(['- first item', '2) second item']), ['first item', 'second item']);
   assert.deepEqual(tokens('東京は首都'), ['東', '京', 'は', '首', '都'].map((t) => t));
+});
+
+// ---- reviewer-backed adjudication (review schema v2) ------------------------------------
+const QUOTE = 'Hale Voss founded the Tarn Institute in 1961.';
+const POSITIVE = { unit: 'supported', edge: 'supported', fact: 'covered', relation: 'covered' };
+/** A v2 review that answers every queued item; `pick` overrides entries (or the whole entry) by item id or predicate. */
+const reviewV2 = (queue, pick = () => ({}), header = {}) => ({
+  schema: 'docslurp-quality-review@v2', reviewer: 'independent-reviewer', blind: true, independentOfAuthor: true, ...header,
+  items: Object.fromEntries(queue.items.map((i) => [i.itemId, {
+    verdict: POSITIVE[i.type], itemSha256: i.itemSha256, evidence: [QUOTE],
+    ...(i.type === 'relation' ? { coveredBy: i.candidates[0]?.edgeId } : {}), ...pick(i),
+  }])),
+});
+// True to the source ("did not approve"), but without any negation cue the heuristic can see.
+const PARAPHRASE = 'The board withheld consent for the relocation.';
+const flaggedOutput = { ...reference, keyPoints: [...reference.keyPoints.slice(0, 3), PARAPHRASE] };
+const flaggedItem = (r) => r.queue.items.find((i) => i.type === 'unit' && i.text === PARAPHRASE);
+const reasons = (r) => r.review.rejected.map((x) => x.reason);
+
+test('a heuristic contradiction flag fails unreviewed and is queued blind, indistinguishable from other units', () => {
+  const r = run(flaggedOutput);
+  assert.equal(unitsOf(r, 'keyPoints')[3].status, 'contradicted');
+  assert.equal(r.aggregate.verdict, 'fail');
+  assert.equal(r.aggregate.contradictions, 1);
+  const item = flaggedItem(r);
+  assert.ok(item, 'the flagged unit is queued for independent judgement');
+  assert.deepEqual(Object.keys(item).sort(), Object.keys(r.queue.items.find((i) => i.type === 'unit' && i !== item) ?? item).sort());
+  assert.ok(!('flags' in item) && !('contradictions' in item) && !('status' in item), 'no flag detail leaks into the queue');
+  assert.equal(r.queue.items.length > 0 && r.queue.items.every((i) => i.itemSha256 && /^[0-9a-f]{64}$/u.test(i.itemSha256)), true);
+});
+
+test('an explicit, bound, evidenced independent verdict overrules a heuristic flag; the override is itemised in the report', () => {
+  const first = run(flaggedOutput);
+  const review = reviewV2(first.queue, (i) => (i.text === PARAPHRASE ? { rationale: 'withheld consent = did not approve' } : {}));
+  const r = run(flaggedOutput, review);
+  assert.deepEqual(r.review.rejected, []);
+  assert.equal(r.aggregate.contradictions, 0);
+  assert.equal(r.aggregate.adjudication.flagsOverruled, 1);
+  assert.equal(r.aggregate.verdict, 'pass');
+  assert.equal(r.deterministic.contradictions, 1, 'the unreviewed numbers stay beside the reviewed ones');
+  assert.equal(r.deterministic.verdict, 'fail');
+  const [a] = r.review.adjudications.filter((x) => x.overrides === 'flag');
+  assert.equal(a.verdict, 'supported');
+  assert.equal(a.reviewer, 'independent-reviewer');
+  assert.equal(a.itemSha256, flaggedItem(first).itemSha256);
+  assert.deepEqual(a.evidence, [QUOTE]);
+});
+
+test('overrides never count silently: legacy, unbound, unevidenced, stale, misquoted, unsourced or non-independent verdicts leave the flag standing', () => {
+  const first = run(flaggedOutput), id = flaggedItem(first).itemId;
+  const standing = (r) => r.aggregate.verdict === 'fail' && r.aggregate.contradictions === 1;
+  const entry = (patch) => reviewV2(first.queue, (i) => (i.itemId === id ? patch : {}));
+  const cases = [
+    ['legacy string verdict', blind(Object.fromEntries(first.queue.items.map((i) => [i.itemId, POSITIVE[i.type]]))), 'invalid-verdict', false],
+    ['legacy string inside v2', { ...entry({}), items: { ...entry({}).items, [id]: 'supported' } }, 'missing-binding', true],
+    ['no binding', entry({ itemSha256: undefined }), 'missing-binding', true],
+    ['stale binding', entry({ itemSha256: 'f'.repeat(64) }), 'stale-binding', true],
+    ['no evidence', entry({ evidence: [] }), 'missing-evidence', true],
+    ['quote not in source', entry({ evidence: ['The board unanimously approved the relocation in 1961.'] }), 'evidence-not-in-source', true],
+    ['trivial quote', entry({ evidence: ['the board'] }), 'evidence-not-in-source', true],
+  ];
+  for (const [name, review, reason, isV2] of cases) {
+    const r = run(flaggedOutput, review);
+    assert.ok(standing(r), name);
+    if (isV2) assert.ok(reasons(r).includes(reason), `${name}: ${reasons(r)}`);
+  }
+  assert.ok(standing(run(flaggedOutput, { ...entry({}), blind: false })), 'non-blind');
+  assert.ok(standing(run(flaggedOutput, { ...entry({}), independentOfAuthor: false })), 'author-reviewed');
+  assert.equal(standing(run(flaggedOutput, entry({}))), false, 'sanity: the same entry clears the flag when the source is available');
+  const noSource = { cases: [{ id: gold.id, gold }], outputs: { cases: { [gold.id]: flaggedOutput } } };
+  assert.ok(reasons(scoreRun({ ...noSource, review: entry({}) })).includes('stale-binding'), 'bindings include the source hash');
+  const unsourced = scoreRun({ ...noSource, review: reviewV2(scoreRun(noSource).queue) });
+  assert.equal(unsourced.aggregate.contradictions, 1, 'without a source nothing can be bound or quoted');
+  assert.ok(reasons(unsourced).includes('source-unavailable'));
+});
+
+test('a stale review is rejected when the artifact changes: bindings follow the exact output', () => {
+  const review = reviewV2(run(flaggedOutput).queue);
+  const changed = { ...flaggedOutput, keyPoints: [...flaggedOutput.keyPoints, 'The Institute also employs 12 gardeners.'] };
+  const r = run(changed, review);
+  assert.equal(r.aggregate.contradictions, 1, 'the flag stands: its item id no longer exists for the new artifact');
+  assert.ok(r.review.ignoredVerdicts > 0);
+});
+
+test('reviewer disagreement is honoured: contradicted or unsupported fail, and a reviewer can contradict an unflagged unit', () => {
+  const first = run(flaggedOutput), id = flaggedItem(first).itemId;
+  const confirmed = run(flaggedOutput, reviewV2(first.queue, (i) => (i.itemId === id ? { verdict: 'contradicted', evidence: undefined } : {})));
+  assert.equal(confirmed.aggregate.verdict, 'fail');
+  assert.equal(confirmed.aggregate.contradictions, 1);
+  const unsupported = run(flaggedOutput, reviewV2(first.queue, (i) => (i.itemId === id ? { verdict: 'unsupported', evidence: undefined } : {})));
+  assert.equal(unsupported.aggregate.verdict, 'fail');
+  assert.equal(unsupported.aggregate.confirmedUnsupported, 1);
+  const extra = { ...reference, keyPoints: [...reference.keyPoints, 'The Institute runs a telescope.'] };
+  const q = run(extra).queue, telescope = q.items.find((i) => i.type === 'unit').itemId;
+  const caught = run(extra, reviewV2(q, (i) => (i.itemId === telescope ? { verdict: 'contradicted', evidence: undefined } : {})));
+  assert.equal(caught.aggregate.verdict, 'fail');
+  assert.equal(caught.aggregate.contradictions, 1);
+});
+
+test('sentinels: reversed edge, wrong number, lost negation and unsupported additions fail or stay unreviewed; reviews cannot launder them', () => {
+  const laundered = (out) => {
+    const first = run(out);
+    return run(out, reviewV2(first.queue));
+  };
+  const reversedEdge = { ...reference, graph: { entities: reference.graph.entities, relationships: [edge('b', 'founded', 'a')] } };
+  assert.equal(run(reversedEdge).aggregate.verdict, 'fail');
+  assert.equal(laundered(reversedEdge).aggregate.verdict, 'fail', 'structural graph contradictions are not adjudicable');
+  assert.equal(laundered(reversedEdge).aggregate.graph.contradictedEdges, 1);
+  const signature = { ...reference, keyPoints: ['Voss succeeded Ines Marlow as director in 1998.'] };
+  assert.equal(run(signature).queue.items.some((i) => i.type === 'unit'), false, 'authored-signature flags are label matters, not reviewable');
+  assert.equal(laundered(signature).aggregate.verdict, 'fail');
+  const wrongNumber = { ...reference, keyPoints: ['Hale Voss founded the Tarn Institute in 1951.'] };
+  assert.equal(run(wrongNumber).aggregate.verdict, 'fail');
+  assert.equal(run(wrongNumber, blind({})).aggregate.verdict, 'fail');
+  const lostNegation = { ...reference, keyPoints: ['The board approved the relocation.'] };
+  assert.equal(run(lostNegation).aggregate.verdict, 'fail');
+  assert.equal(run(lostNegation, reviewV2({ items: [] })).aggregate.verdict, 'fail');
+  const addition = { ...reference, keyPoints: [`${reference.keyPoints[0].replace(/\.$/u, '')} and a visiting zeppelin delivered marmalade.`] };
+  const unreviewed = run(addition);
+  assert.notEqual(unreviewed.aggregate.verdict, 'pass');
+  assert.equal(unreviewed.aggregate.targets.unsupportedUnits, false);
+  assert.equal(only(unreviewed).keyPoints.soundness, 0);
+  const rejected = run(addition, reviewV2(unreviewed.queue, (i) => (i.type === 'unit' ? { verdict: 'unsupported', evidence: undefined } : {})));
+  assert.equal(rejected.aggregate.verdict, 'fail');
+});
+
+// A paraphrase graph: correct edges the frozen predicate list does not name.
+const paraphrased = { entities: [{ id: 'a', name: 'Hale Voss' }, { id: 'c', name: 'Marlow' }, { id: 'b', name: 'the Institute' }], relationships: [edge('a', 'established', 'b'), edge('c', 'took over from', 'a'), edge('a', 'worked with', 'c')] };
+const missingOut = { ...reference, graph: paraphrased };
+const relationItems = (r) => r.queue.items.filter((i) => i.type === 'relation');
+const edgeItem = (r, predicate) => r.queue.items.find((i) => i.type === 'edge' && i.predicate === predicate);
+
+test('missing graph relations are queued with candidate edges and evidence, only when there is something that could cover them', () => {
+  const r = run(missingOut);
+  assert.deepEqual(only(r).details.graph.missing.sort(), ['r-founded', 'r-succeeded']);
+  const items = relationItems(r);
+  assert.equal(items.length, 2);
+  const founded = items.find((i) => i.relation.predicates.includes('founded'));
+  assert.equal(founded.relation.source, 'Hale Voss');
+  assert.equal(founded.relation.target, 'Tarn Institute');
+  assert.deepEqual(founded.relation.evidence, [QUOTE]);
+  assert.deepEqual(founded.candidates.map((c) => c.predicate).sort(), ['established', 'took over from']);
+  assert.equal(founded.candidates[0].edgeId, r.queue.items.find((i) => i.type === 'edge' && i.predicate === founded.candidates[0].predicate).itemId);
+  assert.equal(relationItems(run({ ...reference, graph: { entities: [], relationships: [] } })).length, 0, 'an empty graph has no candidate to review');
+  const reversedOnly = run({ ...reference, graph: { entities: reference.graph.entities, relationships: [edge('b', 'founded', 'a')] } });
+  assert.equal(relationItems(reversedOnly).length, 0, 'a contradicted edge is never a candidate cover');
+});
+
+test('reviewer-covered relations raise recall (never precision) only through a supported covering edge; deterministic recall is kept', () => {
+  const first = run(missingOut), covers = (pred) => edgeItem(first, pred).itemId;
+  const pick = (i) => (i.type === 'relation' ? { coveredBy: covers(i.relation.predicates.includes('founded') ? 'established' : 'took over from') } : {});
+  const r = run(missingOut, reviewV2(first.queue, pick));
+  assert.deepEqual(r.review.rejected, []);
+  assert.equal(only(first).graph.recall, 1 / 3);
+  assert.equal(only(r).graph.recall, 1);
+  assert.equal(only(r).graph.precision, 1);
+  assert.equal(r.aggregate.graph.pooled.recall, 1);
+  assert.equal(r.aggregate.adjudication.relationsReviewedCovered, 2);
+  assert.equal(r.deterministic.graph.pooled.recall, 1 / 3);
+  assert.equal(r.aggregate.verdict, 'pass');
+  assert.equal(r.review.adjudications.filter((a) => a.overrides === 'relation').length, 2);
+  const neg = run(missingOut, reviewV2(first.queue, (i) => (i.type === 'relation' ? { verdict: 'not-covered', coveredBy: undefined, evidence: undefined } : {})));
+  assert.equal(only(neg).graph.recall, 1 / 3);
+  assert.equal(neg.aggregate.verdict, 'pass', 'an explicit not-covered closes the item without credit');
+});
+
+test('relation coverage needs an exact, supported, unshared covering edge plus a verbatim source quote', () => {
+  const first = run(missingOut);
+  const foundedId = relationItems(first).find((i) => i.relation.predicates.includes('founded')).itemId;
+  const est = edgeItem(first, 'established').itemId, took = edgeItem(first, 'took over from').itemId;
+  const attempt = (patch, edgeVerdicts = {}) => run(missingOut, reviewV2(first.queue, (i) => (i.itemId === foundedId ? { coveredBy: est, ...patch } : i.type === 'edge' && edgeVerdicts[i.itemId] ? { verdict: edgeVerdicts[i.itemId], evidence: undefined } : i.type === 'relation' ? { coveredBy: took } : {})));
+  const unchanged = (r) => assert.equal(only(r).graph.recall < 1, true);
+  let r = attempt({ coveredBy: undefined }); unchanged(r); assert.ok(reasons(r).includes('bad-covered-by'));
+  r = attempt({ coveredBy: 'nonexistent' }); unchanged(r); assert.ok(reasons(r).includes('bad-covered-by'));
+  r = attempt({ evidence: undefined }); unchanged(r); assert.ok(reasons(r).includes('missing-evidence'));
+  r = attempt({ evidence: ['Hale Voss abolished the Tarn Institute.'] }); unchanged(r); assert.ok(reasons(r).includes('evidence-not-in-source'));
+  r = attempt({ itemSha256: undefined }); unchanged(r); assert.ok(reasons(r).includes('missing-binding'));
+  r = attempt({}, { [est]: 'unsupported' }); unchanged(r); assert.ok(reasons(r).includes('covering-edge-not-supported'));
+  r = attempt({ coveredBy: took }); unchanged(r); assert.ok(reasons(r).includes('edge-already-covers-another-relation'), 'one edge cannot cover two gold relations');
+  const stringVerdict = { ...reviewV2(first.queue), items: { ...reviewV2(first.queue).items, [foundedId]: 'covered' } };
+  assert.ok(reasons(run(missingOut, stringVerdict)).includes('missing-binding'));
+});
+
+test('review reports carry itemised adjudications and rejections; aggregate-only drops them', () => {
+  const first = run(flaggedOutput);
+  const r = run(flaggedOutput, reviewV2(first.queue, (i) => (i.text === PARAPHRASE ? {} : i.type === 'fact' ? { itemSha256: 'bad' } : {})));
+  assert.ok(r.review.rejected.every((x) => typeof x.itemId === 'string' && typeof x.reason === 'string'));
+  assert.equal(r.review.ignoredVerdicts, r.review.rejected.length);
+  const text = JSON.stringify(aggregateOnly({ ...r, dataset: {}, scorer: {} }));
+  assert.ok(!text.includes(PARAPHRASE) && !text.includes('independent-reviewer') && !text.includes(first.queue.items[0].itemId));
+  assert.ok(text.includes('"adjudicated"'));
+});
+
+test('legacy v1 reviews keep working for units, edges and facts, with the new item types left open', () => {
+  const out = { ...flaggedOutput, keyPoints: [...flaggedOutput.keyPoints, 'The Institute runs a telescope.'] };
+  const first = run(out);
+  const legacy = blind(Object.fromEntries(first.queue.items.filter((i) => i.text !== PARAPHRASE).map((i) => [i.itemId, POSITIVE[i.type]])));
+  const r = run(out, legacy);
+  assert.equal(r.review.valid, true);
+  assert.equal(r.review.ignoredVerdicts, 0);
+  assert.equal(r.aggregate.openReviewItems, 1, 'only the flagged unit still needs a v2 verdict');
+  assert.equal(r.aggregate.verdict, 'fail');
+  assert.equal(r.schema, 'docslurp-extraction-quality-report@v2');
 });
 
 // ---- builder -------------------------------------------------------------------------
