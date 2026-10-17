@@ -29,3 +29,11 @@ Initial extension: six screening configurations and 90 minutes of active tuning,
 Raw evidence: /tmp/docslurp-retrieval-quality-evidence/. Prior corpus and retained runs: /tmp/docslurp-large-docs/. Prior extraction-quality held-out cases remain sealed and are not this task's training material.
 
 Parallel responsibilities: missing-passage diagnosis; embedding/provider capabilities; multi-search and inferred-answer behavior. Coordinator integrates fixes, arranges independent review and keeps deployment separate from measurements.
+
+## Experiment history and growing regression coverage
+
+Every experiment has its own commit recording hypothesis, exact source/configuration, results and disposition. Push the experiment branch to preserve its full commit history even when production PRs are squash-merged. Reject changes through forward revert commits; never rewrite or erase failed experiments. Keep durable evidence paths and hashes with each result.
+
+Every discovered miss becomes a versioned development regression case: source provenance/hash, question, expected supporting passage/page, expected answer or explicit abstention, retrieval flags, observed rank/citation and retained raw trace. When original traces were not retained, mark that gap and label fresh replay evidence explicitly. A correction to a faulty oracle creates a new dataset version; it must not silently improve the old score. Newly discovered cases do not enter an already-used confirmation set.
+
+Model allocation: GPT-6 Astra for retrieval diagnosis/regressions; GPT-6.1 Sol for embedding-provider comparisons and multi-search evals. Runtime allows three children plus coordinator; no more than four active agents total.
