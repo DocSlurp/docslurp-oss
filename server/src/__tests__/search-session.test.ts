@@ -18,7 +18,7 @@ vi.mock("../db.js", () => ({
 vi.mock("../search/query-rewrite.js", () => queryRewriteMock);
 
 const { createSearchSessionJournal } = await import("../search/session.js");
-const { fuseSearchResponses, searchResultsToChunks } = await import(
+const { applySearchPostRetrievalProcessing, fuseSearchResponses, searchResultsToChunks } = await import(
   "../search/session-execution.js"
 );
 const { planRecursiveSearchMode } = await import(
@@ -293,6 +293,37 @@ describe("Search Session execution helpers", () => {
       regionCoordinateSpace: null,
     },
   };
+
+  it("preserves top relevance without vectors and reports MMR unavailable", async () => {
+    const chunks = searchResultsToChunks([0.9, 0.8, 0.7, 0.6].map((score, index) => ({
+      ...result, score, citation: { ...result.citation, chunkIndex: index },
+    })));
+    const session = createSearchSessionJournal({ rootSessionId: "mmr-test" });
+    const selected = await applySearchPostRetrievalProcessing({
+      query: "A", chunks, limit: 2, options: { useMmr: true, mmrLambda: 1 },
+      privacyMode: "standard", session,
+    });
+    expect(selected.map(chunk => chunk.chunkIndex)).toEqual([0, 1]);
+    expect(session.diagnostics()).toMatchObject({ mmr: {
+      requested: true, applied: false, reason: "candidate-vectors-unavailable", selection: "relevance",
+    } });
+  });
+
+  it("positions by reranker relevance instead of restoring original fused scores", async () => {
+    const chunks = searchResultsToChunks([
+      { text: "unrelated background", score: 0.9 },
+      { text: "hydraulic valve repair", score: 0.2 },
+      { text: "valve", score: 0.1 },
+    ].map((item, index) => ({
+      ...result, ...item, citation: { ...result.citation, chunkIndex: index },
+    })));
+    const selected = await applySearchPostRetrievalProcessing({
+      query: "hydraulic valve repair", chunks, limit: 3, options: { useRerank: true },
+      privacyMode: "standard", session: createSearchSessionJournal({}),
+    });
+    // Best first, next best last: positioning must consume the reranked order.
+    expect(selected.map(chunk => chunk.chunkIndex)).toEqual([1, 0, 2]);
+  });
 
   it("converts Search Session results back into retrieval chunks", () => {
     expect(searchResultsToChunks([result])).toEqual([

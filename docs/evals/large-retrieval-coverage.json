@@ -1,0 +1,63 @@
+{
+  "datasetSha256": "67fefa218c750d0a4bc8214f7d915892e5e05373db116da09ff7ebd9ae58fb39",
+  "pages": 58378,
+  "documents": 27,
+  "queries": {
+    "developmentSourceDerived": 31,
+    "mechanicalNegative": 1,
+    "provisionalStudentGoal": 28,
+    "provisionalAbbreviation": 6,
+    "heldOutGold": 0
+  },
+  "scenarios": [
+    {
+      "targetPages": 10000,
+      "actualPages": 12824,
+      "documents": 3,
+      "queries": 13,
+      "split": "development",
+      "versionSha256": "9d5cbcd99ced6a35b289a524e524a090d09a1983a99fedc70780d06e1cf37aea"
+    },
+    {
+      "targetPages": 10000,
+      "actualPages": 12824,
+      "documents": 3,
+      "queries": 31,
+      "split": "validation-provisional",
+      "versionSha256": "3f9a23394128e83bb9754d3bee3714b46078933fd73facba891b9f4eda487035"
+    },
+    {
+      "targetPages": 25000,
+      "actualPages": 26895,
+      "documents": 12,
+      "queries": 32,
+      "split": "development",
+      "versionSha256": "03858e309c01001d5c623e718d76b1f4c0eabf53aa2dbb21fd1244a5a2188bf0"
+    },
+    {
+      "targetPages": 25000,
+      "actualPages": 26895,
+      "documents": 12,
+      "queries": 31,
+      "split": "validation-provisional",
+      "versionSha256": "29989e0b99c9c679fa83896b6dde66a153a71111bf487828429d3d00d39305b0"
+    },
+    {
+      "targetPages": 50000,
+      "actualPages": 50722,
+      "documents": 23,
+      "queries": 32,
+      "split": "development",
+      "versionSha256": "ea7991a2d6da460965f3670c99727de74eafb332c0ede5a563b75f5ee5a54fa9"
+    },
+    {
+      "targetPages": 50000,
+      "actualPages": 50722,
+      "documents": 23,
+      "queries": 34,
+      "split": "validation-provisional",
+      "versionSha256": "4200657d01589d352b814a1cc909d19e70e97989abf928b06646b9e644466ca5"
+    }
+  ],
+  "status": "Corpus/source labels verified locally; no indexed 50k retrieval score claimed."
+}

@@ -71,19 +71,18 @@ describe("mmrSelect", () => {
     expect(result[1]!.id).toBe("b"); // diverse pick preferred over near-duplicate
   });
 
-  it("falls back to position-based diversity when no vectors are present", () => {
+  it("preserves relevance when no vectors are present", () => {
     const candidates = [
       chunk("a", 0.9),
       chunk("b", 0.8),
       chunk("c", 0.7),
       chunk("d", 0.6),
     ];
-    // Should not throw and should return topK items
     const result = mmrSelect(candidates, 2);
-    expect(result).toHaveLength(2);
+    expect(result.map(item => item.id)).toEqual(["a", "b"]);
   });
 
-  it("falls back to position diversity when only some candidates have vectors", () => {
+  it("preserves relevance when only some candidates have vectors", () => {
     const candidates = [
       chunk("a", 0.9, V_A),
       chunk("b", 0.8),         // no vector
@@ -92,7 +91,7 @@ describe("mmrSelect", () => {
     expect(result).toHaveLength(2);
   });
 
-  it("position-diversity fallback returns highest-score item first", () => {
+  it("relevance fallback returns highest-score item first", () => {
     const candidates = [
       chunk("low", 0.2),
       chunk("high", 0.9),
@@ -117,5 +116,24 @@ describe("mmrSelect", () => {
     const originalIds = candidates.map((c) => c.id);
     mmrSelect(candidates, 2);
     expect(candidates.map((c) => c.id)).toEqual(originalIds);
+  });
+});
+
+describe("MMR relevance contract", () => {
+  it("honors lambda=1 without vectors or with more requested slots than candidates", () => {
+    const candidates = [chunk("low", 0.1), chunk("high", 0.9), chunk("mid", 0.5)];
+    expect(mmrSelect(candidates, 2, 1).map(item => item.id)).toEqual(["high", "mid"]);
+    expect(mmrSelect(candidates, 9, 1).map(item => item.id)).toEqual(["high", "mid", "low"]);
+  });
+  it.each([
+    [[1, 0], [1]],
+    [[1, 0], [Number.NaN, 0]],
+    [[1, 0], [0, 0]],
+  ])("falls back to relevance for incomparable vectors", (first, second) => {
+    const candidates = [chunk("low", 0.1, first), chunk("high", 0.9, second), chunk("mid", 0.5, first)];
+    expect(mmrSelect(candidates, 2, 0).map(item => item.id)).toEqual(["high", "mid"]);
+  });
+  it("returns no results when zero are requested", () => {
+    expect(mmrSelect([chunk("a", 1, V_A)], 0)).toEqual([]);
   });
 });

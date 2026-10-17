@@ -61,10 +61,6 @@ vi.mock("../search/stepback.js", () => ({
   stepbackPrompt: vi.fn(),
 }));
 
-vi.mock("../search/synonym.js", () => ({
-  expandQuery: (query: string) => query,
-}));
-
 vi.mock("../services/search-controls.js", () => ({
   applySearchControls: ({ results }: { results: unknown }) => results,
   getWorkspaceSearchSettings: vi.fn(

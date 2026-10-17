@@ -203,6 +203,16 @@ export async function applySearchPostRetrievalProcessing(
     }));
   }
 
+  if (input.options.useMmr) {
+    // SearchChunk currently carries no candidate embeddings. Be explicit that
+    // selection can preserve relevance but cannot measure semantic diversity.
+    input.session.recordDiagnostic("mmr", {
+      requested: true,
+      applied: false,
+      reason: "candidate-vectors-unavailable",
+      selection: "relevance",
+    });
+  }
   const selected = input.options.useMmr
     ? mmrSelect(
         ranked.map((chunk) => ({
@@ -216,9 +226,11 @@ export async function applySearchPostRetrievalProcessing(
     : ranked.slice(0, input.limit);
 
   const reordered = lostInTheMiddleReorder(
-    selected.map((chunk) => ({
+    selected.map((chunk, index) => ({
       id: chunk.id,
-      score: chunk.score,
+      // Preserve the selected relevance/diversity order when positioning it.
+      // The original fused score may disagree with the reranker's ordering.
+      score: 1 / (1 + index),
     })),
   );
   const rankById = new Map(ranked.map((chunk) => [chunk.id, chunk]));

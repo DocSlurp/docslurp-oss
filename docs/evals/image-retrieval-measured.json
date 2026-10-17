@@ -1,0 +1,122 @@
+{
+  "date": "2026-10-17",
+  "gateway": "OpenRouter",
+  "scope": "64 selected course-catalog pages, 3 exposed questions, one vector per page. Image inputs rendered at 1536-pixel longest edge. Answer generation, extraction/rendering, indexing and storage excluded. Not held-out or full-corpus accuracy.",
+  "models": [
+    {
+      "model": "google/gemini-embedding-2",
+      "modality": "image",
+      "pages": 64,
+      "embeddingUsd": 0.0074304,
+      "embeddingUsdPer1000": 0.11610000000000001,
+      "totalIncludingThreeQueriesUsd": 0.007448000000000003,
+      "strictSemesterRanks": [
+        1,
+        2,
+        3
+      ],
+      "top5Passed": 3,
+      "questions": 3,
+      "completedAt": "2026-10-17T22:02:22.380Z",
+      "recordedCalls": 17,
+      "persistedCalls": 17,
+      "failedAttempts": 0,
+      "rawReportSha256": "d742337cd1ad7de66424e5602694c0721f136c970b78b28ad690534b849c61ff"
+    },
+    {
+      "model": "google/gemini-embedding-2",
+      "modality": "text",
+      "pages": 64,
+      "embeddingUsd": 0.0249268,
+      "embeddingUsdPer1000": 0.38948125,
+      "totalIncludingThreeQueriesUsd": 0.024944400000000002,
+      "strictSemesterRanks": [
+        1,
+        2,
+        2
+      ],
+      "top5Passed": 3,
+      "questions": 3,
+      "completedAt": "2026-10-17T22:04:21.291Z",
+      "recordedCalls": 17,
+      "persistedCalls": 17,
+      "failedAttempts": 0,
+      "rawReportSha256": "95d09d8a86d9d9c5a128df48c207f05281a7074e8faacb2f8b98429318f962f3"
+    },
+    {
+      "model": "nvidia/llama-nemotron-embed-vl-1b-v2:free",
+      "modality": "image",
+      "pages": 64,
+      "embeddingUsd": 0,
+      "embeddingUsdPer1000": 0.0,
+      "totalIncludingThreeQueriesUsd": 0,
+      "strictSemesterRanks": [
+        1,
+        3,
+        3
+      ],
+      "top5Passed": 3,
+      "questions": 3,
+      "completedAt": "2026-10-17T22:11:19.073Z",
+      "recordedCalls": 17,
+      "persistedCalls": 17,
+      "failedAttempts": 1,
+      "rawReportSha256": "66daaecdb822b79377c9b5b0d6bb380edaca71e2698fec020b2ef7d56b25f530"
+    },
+    {
+      "model": "perplexity/pplx-embed-v1-0.6b",
+      "modality": "text",
+      "pages": 64,
+      "embeddingUsd": 0.000438784,
+      "embeddingUsdPer1000": 0.006856,
+      "totalIncludingThreeQueriesUsd": 0.000439052,
+      "strictSemesterRanks": [
+        1,
+        3,
+        5
+      ],
+      "top5Passed": 3,
+      "questions": 3,
+      "completedAt": "2026-10-17T22:04:18.049Z",
+      "recordedCalls": 17,
+      "persistedCalls": 17,
+      "failedAttempts": 0,
+      "rawReportSha256": "ef45a98c11e9914dff79615daa04e08cc9fd7a0364e6e3cf4246ba797f1722aa"
+    },
+    {
+      "model": "voyageai/voyage-multimodal-3.5",
+      "modality": "image",
+      "pages": 64,
+      "embeddingUsd": 0.0700121088,
+      "embeddingUsdPer1000": 1.0939392000000001,
+      "totalIncludingThreeQueriesUsd": 0.07001978879999998,
+      "strictSemesterRanks": [
+        1,
+        2,
+        1
+      ],
+      "top5Passed": 3,
+      "questions": 3,
+      "completedAt": "2026-10-17T22:02:31.425Z",
+      "recordedCalls": 17,
+      "persistedCalls": 17,
+      "failedAttempts": 0,
+      "rawReportSha256": "68aff2f2705cc130e96b4cff3dd9b08f1dddd9d94e48d3a398439f86ad29b8dd"
+    }
+  ],
+  "providerUsd": 0.1028512408,
+  "retrievalOptionsProviderUsd": 0.014474866,
+  "retrievalOptionsCustomerUsd": 0.0173698392,
+  "dataset": {
+    "documents": 27,
+    "pages": 58378,
+    "questions": 66,
+    "studentComparisons": 28,
+    "scenarioPages": [
+      12824,
+      26895,
+      50722
+    ],
+    "indexed": false
+  }
+}

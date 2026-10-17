@@ -29,24 +29,6 @@ function cosineSimilarity(a: number[], b: number[]): number {
 }
 
 /**
- * Position-based diversity fallback: alternate between top and bottom ranks.
- * Picks rank 0, 2, 4, ..., then 5, 3, 1 (for 6 items).
- */
-function positionDiversity<T>(sorted: T[], topK: number): T[] {
-  const result: T[] = [];
-  const evens: T[] = [];
-  const odds: T[] = [];
-
-  for (let i = 0; i < sorted.length; i++) {
-    if (i % 2 === 0) evens.push(sorted[i]);
-    else odds.push(sorted[i]);
-  }
-
-  result.push(...evens, ...odds.reverse());
-  return result.slice(0, topK);
-}
-
-/**
  * MMR selection: pick top-K results balancing relevance and diversity.
  *
  * @param candidates - Candidate chunks with scores and optional vectors
@@ -58,15 +40,18 @@ export function mmrSelect(
   topK: number,
   lambda = 0.5
 ): VectorizedChunk[] {
-  if (candidates.length === 0) return [];
-  if (topK >= candidates.length) return [...candidates];
+  topK = Math.max(0, Math.min(candidates.length, Math.floor(topK)));
+  if (candidates.length === 0 || !topK) return [];
+  lambda = Number.isFinite(lambda) ? Math.max(0, Math.min(1, lambda)) : 0.5;
+  const dimensions = candidates[0].vector?.length ?? 0;
+  const hasVectors = dimensions > 0 && candidates.every(({ vector }) =>
+    vector?.length === dimensions && vector.every(Number.isFinite) && vector.some(value => value !== 0),
+  );
 
-  const hasVectors = candidates.every((c) => c.vector && c.vector.length > 0);
-
-  if (!hasVectors) {
-    // Fall back to position-based diversity
-    const sorted = [...candidates].sort((a, b) => b.score - a.score);
-    return positionDiversity(sorted, topK);
+  if (!hasVectors || lambda === 1) {
+    // Missing/invalid vectors cannot measure diversity. Never discard a more
+    // relevant result merely because its rank has the wrong parity.
+    return [...candidates].sort((a, b) => b.score - a.score).slice(0, topK);
   }
 
   const selected: VectorizedChunk[] = [];

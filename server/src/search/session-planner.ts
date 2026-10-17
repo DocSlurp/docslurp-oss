@@ -10,7 +10,7 @@ import { lanceDbVectorSearch } from "./lancedb.js";
 import { hydeExpand } from "./hyde.js";
 import { decomposeQuery, rewriteQuery } from "./query-rewrite.js";
 import { deriveSelfQueryFilters } from "./self-query.js";
-import { expandQuery } from "./synonym.js";
+import { expandEmbeddingQuery, expandQuery, mergeGlossaries } from "./synonym.js";
 import { stepbackPrompt } from "./stepback.js";
 import type {
   SearchChunk,
@@ -215,6 +215,9 @@ export async function prepareSearchSessionRetrievalPlan(args: {
     effectiveQuery = expandedQuery || effectiveQuery;
   }
 
+  const mergedGlossary = mergeGlossaries(workspaceSettings.synonyms, options.glossary);
+  effectiveQuery = expandEmbeddingQuery(effectiveQuery, mergedGlossary);
+
   let queryVector = options.queryVector ?? null;
   if (!queryVector) {
     queryVector = await timePhase("embed", () => embedQuery(effectiveQuery, embedding, session, privacyMode, workspaceId));
@@ -253,14 +256,7 @@ export async function prepareSearchSessionRetrievalPlan(args: {
     }
   }
 
-  const mergedGlossary = {
-    ...(workspaceSettings.synonyms ?? {}),
-    ...(options.glossary ?? {}),
-  };
-  const textQuery =
-    Object.keys(mergedGlossary).length > 0
-      ? expandQuery(query, mergedGlossary)
-      : query;
+  const textQuery = expandQuery(query, mergedGlossary);
 
   return {
     effectiveQuery,

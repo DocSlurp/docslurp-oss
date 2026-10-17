@@ -1,0 +1,281 @@
+{
+  "schema": "docslurp-large-retrieval-sources-v1",
+  "verifiedDate": "2026-10-17",
+  "notes": [
+    "Public download is not a redistribution licence. Media and labels remain external.",
+    "Adjacent academic editions are intentional near-duplicate distractors, not independent subject diversity.",
+    "SHA256, PDF page counts and text page counts were locally verified; extraction may contain OCR/font errors."
+  ],
+  "documents": [
+    {
+      "id": "asu-2025-26-academic-catalog-archive",
+      "title": "Arizona State University Academic Catalog Archive 2025-2026 (General and Graduate Catalog, large file)",
+      "url": "https://catalog.asu.edu/sites/g/files/litvpz4586/files/2025-09/2025-26_Academic%20Catalog%20Archive.pdf",
+      "source_page": "https://catalog.asu.edu/archives/2025-2026/general_and_graduate",
+      "usage": "Copyright Arizona Board of Regents (https://www.asu.edu/about/copyright-trademark). No open licence found. Publisher states the archive is a printable record for accreditation bodies/agencies/university offices; public download, no login. Kept private, not redistributed.",
+      "sha256": "9677375a87b6eb4f5e8c54d9056438f3651fb1c064064f15565125c97b94722b",
+      "bytes": 98982516,
+      "pages": 7188
+    },
+    {
+      "id": "uta-2026-2027",
+      "title": "The University of Texas at Arlington University Catalog 2026-2027 (entire catalog)",
+      "url": "https://catalog.uta.edu/pdf/2026-2027.pdf",
+      "source_page": "https://catalog.uta.edu/",
+      "usage": "No explicit licence found on the catalog page; public download link \"Download PDF of Entire 2026-2027 Catalog\". Kept private, not redistributed.",
+      "sha256": "da9423657ec58801c690d1a34afce7596dcf951f0b34e2ffc49f311466457792",
+      "bytes": 20201438,
+      "pages": 2456
+    },
+    {
+      "id": "illinois-archive-8",
+      "title": "University of Illinois Urbana-Champaign 2026-2027",
+      "url": "https://catalog.illinois.edu/pdf/University%20of%20Illinois%20Urbana-Champaign%202026-2027.pdf",
+      "source_page": "https://catalog.illinois.edu/archivedacademiccatalogs/",
+      "usage": "Public publisher download; no redistribution licence verified; private evaluation only. Adjacent editions are near-duplicate distractors.",
+      "sha256": "8639986d79681b14bae1355b5bad7eb28d0c346ef6a6ed6d2cdd20bb998d08c2",
+      "bytes": 53052999,
+      "pages": 3180
+    },
+    {
+      "id": "asu-2025-26-course-catalog-archive",
+      "title": "Arizona State University Course Catalog Archive 2025-2026",
+      "url": "https://catalog.asu.edu/sites/g/files/litvpz4586/files/2026-05/2025-26_Course_Catalog_Archive_0.pdf",
+      "source_page": "https://catalog.asu.edu/archives/2025-2026/general_and_graduate",
+      "usage": "Same as above.",
+      "sha256": "12eb860ff7f83024cbd88bee2b35dc143fad5aec8699ca0258342956687a2462",
+      "bytes": 83947316,
+      "pages": 3246
+    },
+    {
+      "id": "statutes-at-large-vol-83",
+      "title": "United States Statutes at Large, Volume 83 (91st Congress, 1st Session, 1969)",
+      "url": "https://www.govinfo.gov/content/pkg/STATUTE-83/pdf/STATUTE-83.pdf",
+      "source_page": "https://www.govinfo.gov/app/details/STATUTE-83",
+      "usage": "U.S. Government Publishing Office (govinfo.gov); US government work, public domain in the United States. Public download, plain HTTP GET, no challenge or login.",
+      "sha256": "b1d704e5d8be75dba16ed95a004915a350d067827e01f0650d926d5573ac4321",
+      "bytes": 184012284,
+      "pages": 1114
+    },
+    {
+      "id": "statutes-at-large-vol-109",
+      "title": "United States Statutes at Large, Volume 109 (104th Congress, 1st Session, 1995), full volume",
+      "url": "https://www.govinfo.gov/content/pkg/STATUTE-109/pdf/STATUTE-109.pdf",
+      "source_page": "https://www.govinfo.gov/app/details/STATUTE-109",
+      "usage": "U.S. Government Publishing Office (govinfo.gov); US government work, public domain in the United States. Public download, plain HTTP GET, no challenge or login.",
+      "sha256": "bbf36a8ea8ef713ec7954a1c8b2f1d9d91e53e956af0d94607b064fd59c5b571",
+      "bytes": 226884591,
+      "pages": 2122
+    },
+    {
+      "id": "statutes-at-large-vol-85",
+      "title": "United States Statutes at Large, Volume 85 (1971)",
+      "url": "https://www.govinfo.gov/content/pkg/STATUTE-85/pdf/STATUTE-85.pdf",
+      "source_page": "https://www.govinfo.gov/app/details/STATUTE-85",
+      "usage": "US federal government work, public domain in US",
+      "sha256": "dd2bba41e41837fb1e9ec6693f793638ceebb66f4d9d6d97c0d728de98a569eb",
+      "bytes": 186307943,
+      "pages": 1110
+    },
+    {
+      "id": "uta-2015-2016",
+      "title": "University of Texas at Arlington Catalog 2015-2016",
+      "url": "https://catalog.uta.edu/pdf/2015-2016.pdf",
+      "source_page": "https://catalog.uta.edu/archives/",
+      "usage": "Public publisher download; no redistribution licence verified; private evaluation only. Adjacent editions are near-duplicate distractors.",
+      "sha256": "b56842be6ff7beb02f403ade8be0da266010e6369098b9799449c11eff82db9e",
+      "bytes": 4030798,
+      "pages": 1103
+    },
+    {
+      "id": "uta-2016-2017",
+      "title": "University of Texas at Arlington Catalog 2016-2017",
+      "url": "https://catalog.uta.edu/pdf/2016-2017.pdf",
+      "source_page": "https://catalog.uta.edu/archives/",
+      "usage": "Public publisher download; no redistribution licence verified; private evaluation only. Adjacent editions are near-duplicate distractors.",
+      "sha256": "be73f413b39114549b39e6472c0639de7c9078eed20b1a47add401bf37dd03bc",
+      "bytes": 4106278,
+      "pages": 1128
+    },
+    {
+      "id": "uta-2018-2019",
+      "title": "University of Texas at Arlington Catalog 2018-2019",
+      "url": "https://catalog.uta.edu/pdf/2018-2019.pdf",
+      "source_page": "https://catalog.uta.edu/archives/",
+      "usage": "Public publisher download; no redistribution licence verified; private evaluation only. Adjacent editions are near-duplicate distractors.",
+      "sha256": "a1f3fae0d60b78a6a56a2a80a6f7f15e5cfdc6b9f4e6e7bab6ef4f6c765287bb",
+      "bytes": 4249235,
+      "pages": 1160
+    },
+    {
+      "id": "uta-2019-2020",
+      "title": "University of Texas at Arlington Catalog 2019-2020",
+      "url": "https://catalog.uta.edu/pdf/2019-2020.pdf",
+      "source_page": "https://catalog.uta.edu/archives/",
+      "usage": "Public publisher download; no redistribution licence verified; private evaluation only. Adjacent editions are near-duplicate distractors.",
+      "sha256": "7006021d0a082624cacd24e5c15aad08d67fde856e70f7a167fe29d7d84f7a3d",
+      "bytes": 8383201,
+      "pages": 1135
+    },
+    {
+      "id": "uta-2021-2022",
+      "title": "University of Texas at Arlington Catalog 2021-2022",
+      "url": "https://catalog.uta.edu/pdf/2021-2022.pdf",
+      "source_page": "https://catalog.uta.edu/archives/",
+      "usage": "Public publisher download; no redistribution licence verified; private evaluation only. Adjacent editions are near-duplicate distractors.",
+      "sha256": "aab2a4a3fdd8b3b17f3c3816a02db47e1b74991280a62d7a633d662245489d46",
+      "bytes": 12965252,
+      "pages": 1953
+    },
+    {
+      "id": "uta-2023-2024",
+      "title": "University of Texas at Arlington Catalog 2023-2024",
+      "url": "https://catalog.uta.edu/pdf/2023-2024.pdf",
+      "source_page": "https://catalog.uta.edu/archives/",
+      "usage": "Public publisher download; no redistribution licence verified; private evaluation only. Adjacent editions are near-duplicate distractors.",
+      "sha256": "d66381b3e0381f9aede9c954310e4d6e5f6842d2b41155dd32ccf77a7d1a2ab0",
+      "bytes": 13872736,
+      "pages": 2086
+    },
+    {
+      "id": "uta-2024-2025",
+      "title": "University of Texas at Arlington Catalog 2024-2025",
+      "url": "https://catalog.uta.edu/pdf/2024-2025.pdf",
+      "source_page": "https://catalog.uta.edu/archives/",
+      "usage": "Public publisher download; no redistribution licence verified; private evaluation only. Adjacent editions are near-duplicate distractors.",
+      "sha256": "99454fbc3c4041fb6003eafd66930a4da5128c737daabfb4edd5447c4495e0b4",
+      "bytes": 14709903,
+      "pages": 2221
+    },
+    {
+      "id": "uta-2025-2026",
+      "title": "University of Texas at Arlington Catalog 2025-2026",
+      "url": "https://catalog.uta.edu/pdf/2025-2026.pdf",
+      "source_page": "https://catalog.uta.edu/archives/",
+      "usage": "Public publisher download; no redistribution licence verified; private evaluation only. Adjacent editions are near-duplicate distractors.",
+      "sha256": "71c044642feb7397f7a345889f9ca0837258fa353cc3f5e2b2014f59965ae3d8",
+      "bytes": 18770465,
+      "pages": 2410
+    },
+    {
+      "id": "uta-2014-2015",
+      "title": "2014-2015",
+      "url": "https://catalog.uta.edu/archives/2014-2015/pdf/2014-2015.pdf",
+      "source_page": "https://catalog.uta.edu/archives/",
+      "usage": "Public publisher download; no redistribution licence verified; private evaluation only. Adjacent editions are near-duplicate distractors.",
+      "sha256": "0b5d334a1325bb5c16496ac176dc7966dda93dd488045d74dd4227b05b6d0d09",
+      "bytes": 3106100,
+      "pages": 1090
+    },
+    {
+      "id": "uta-2017-2018",
+      "title": "2017-2018",
+      "url": "https://catalog.uta.edu/archives/2017-2018/pdf/2017-2018.pdf",
+      "source_page": "https://catalog.uta.edu/archives/",
+      "usage": "Public publisher download; no redistribution licence verified; private evaluation only. Adjacent editions are near-duplicate distractors.",
+      "sha256": "619b6808ccd1120cfa5b209ad6c94a4ff09825df60a351b90916331fd4ceb612",
+      "bytes": 3314613,
+      "pages": 1149
+    },
+    {
+      "id": "uta-2020-2021",
+      "title": "2020-2021",
+      "url": "https://catalog.uta.edu/archives/2020-2021/pdf/2020-2021.pdf",
+      "source_page": "https://catalog.uta.edu/archives/",
+      "usage": "Public publisher download; no redistribution licence verified; private evaluation only. Adjacent editions are near-duplicate distractors.",
+      "sha256": "58996699f0000de72b426dd2c19476473c3f795b861ff38ba4be70af7206d0bf",
+      "bytes": 12026410,
+      "pages": 1689
+    },
+    {
+      "id": "uta-2022-2023",
+      "title": "2022-2023",
+      "url": "https://catalog.uta.edu/archives/2022-2023/pdf/2022-2023.pdf",
+      "source_page": "https://catalog.uta.edu/archives/",
+      "usage": "Public publisher download; no redistribution licence verified; private evaluation only. Adjacent editions are near-duplicate distractors.",
+      "sha256": "519423c9db5cea40a38191f6ebba8a0dd6e22875b1692c87383e98940e218115",
+      "bytes": 13520476,
+      "pages": 1875
+    },
+    {
+      "id": "illinois-archive-0",
+      "title": "2025-2026",
+      "url": "https://catalog.illinois.edu/archivedacademiccatalogs/2025-2026.pdf",
+      "source_page": "https://catalog.illinois.edu/archivedacademiccatalogs/",
+      "usage": "Public publisher download; no redistribution licence verified; private evaluation only. Adjacent editions are near-duplicate distractors.",
+      "sha256": "8c881df7f9700bc1ec2ca12afc0c3188211d97ef3b2beead3b3ba1c831ee1ca6",
+      "bytes": 51566249,
+      "pages": 3066
+    },
+    {
+      "id": "illinois-archive-1",
+      "title": "2024-2025",
+      "url": "https://catalog.illinois.edu/archivedacademiccatalogs/2024-2025.pdf",
+      "source_page": "https://catalog.illinois.edu/archivedacademiccatalogs/",
+      "usage": "Public publisher download; no redistribution licence verified; private evaluation only. Adjacent editions are near-duplicate distractors.",
+      "sha256": "f6f1936ae566f2cf505459e1a29213cf252e9c5f3708ac1543270ee56e2f1d5d",
+      "bytes": 54612292,
+      "pages": 2780
+    },
+    {
+      "id": "illinois-archive-2",
+      "title": "2023-2024",
+      "url": "https://catalog.illinois.edu/archivedacademiccatalogs/2023-2024.pdf",
+      "source_page": "https://catalog.illinois.edu/archivedacademiccatalogs/",
+      "usage": "Public publisher download; no redistribution licence verified; private evaluation only. Adjacent editions are near-duplicate distractors.",
+      "sha256": "b142c5dd2d6848928b9ad53dd200b43163f1b9aa530a40805dc8f4b92a83e02c",
+      "bytes": 54550583,
+      "pages": 2738
+    },
+    {
+      "id": "illinois-archive-3",
+      "title": "2022-2023",
+      "url": "https://catalog.illinois.edu/archivedacademiccatalogs/2022-2023.pdf",
+      "source_page": "https://catalog.illinois.edu/archivedacademiccatalogs/",
+      "usage": "Public publisher download; no redistribution licence verified; private evaluation only. Adjacent editions are near-duplicate distractors.",
+      "sha256": "141cbc99e8af934fb069c32eec3134e2e3a43bd175a62a8bc7bd337ce6afec0a",
+      "bytes": 54937677,
+      "pages": 2723
+    },
+    {
+      "id": "illinois-archive-4",
+      "title": "2021-2022",
+      "url": "https://catalog.illinois.edu/archivedacademiccatalogs/2021-2022.pdf",
+      "source_page": "https://catalog.illinois.edu/archivedacademiccatalogs/",
+      "usage": "Public publisher download; no redistribution licence verified; private evaluation only. Adjacent editions are near-duplicate distractors.",
+      "sha256": "69fa005edf10d2907cdf4f4c2a5668bd92973977a922647ba76dc14e7709570a",
+      "bytes": 46301761,
+      "pages": 2981
+    },
+    {
+      "id": "illinois-archive-5",
+      "title": "2020-2021",
+      "url": "https://catalog.illinois.edu/archivedacademiccatalogs/2020-2021.pdf",
+      "source_page": "https://catalog.illinois.edu/archivedacademiccatalogs/",
+      "usage": "Public publisher download; no redistribution licence verified; private evaluation only. Adjacent editions are near-duplicate distractors.",
+      "sha256": "94a41cee508609f21b1ca32fc5dc9ff5ca07497d744bbb19d2533a2228f06515",
+      "bytes": 32371582,
+      "pages": 1932
+    },
+    {
+      "id": "illinois-archive-6",
+      "title": "2019-20",
+      "url": "https://catalog.illinois.edu/archivedacademiccatalogs/2019-20.pdf",
+      "source_page": "https://catalog.illinois.edu/archivedacademiccatalogs/",
+      "usage": "Public publisher download; no redistribution licence verified; private evaluation only. Adjacent editions are near-duplicate distractors.",
+      "sha256": "8047581bcac011ca60af39497244f65ae11f8ad6e986606118dc1ddef5dd87bd",
+      "bytes": 18040425,
+      "pages": 1479
+    },
+    {
+      "id": "illinois-archive-7",
+      "title": "2018-19",
+      "url": "https://catalog.illinois.edu/archivedacademiccatalogs/2018-19.pdf",
+      "source_page": "https://catalog.illinois.edu/archivedacademiccatalogs/",
+      "usage": "Public publisher download; no redistribution licence verified; private evaluation only. Adjacent editions are near-duplicate distractors.",
+      "sha256": "cad17d5ac4f9fa51edce74402b420209a7240107dac5b96d02ea68266c83d588",
+      "bytes": 11366127,
+      "pages": 1264
+    }
+  ]
+}
