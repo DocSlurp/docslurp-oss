@@ -13,6 +13,7 @@ import type { CommunityRefreshResult, CommunitySummaryContext } from "../graph/c
 import { extractDocumentGraph, type GraphChunk } from "../graph/extract.js";
 import type { ReplaceDocumentGraphInput } from "../graph/graph-store.js";
 import type { EmbeddingArtifact } from "./embedding-runtime.js";
+import { runBounded } from "../lib/bounded-concurrency.js";
 import { indexableDocuments } from "../pipeline/pii-gate.js";
 import { allowHostedCall, openRouterTextCall } from "../lib/privacy-guard.js";
 import { textFallbackCost, textModelApiKey, textUsageLabels } from "../lib/text-model-route.js";
@@ -57,7 +58,8 @@ export class GraphEnrichStage implements Stage {
   async run(state: WorkflowState, signal?: AbortSignal): Promise<void> {
     const pipeline = state.run.pipeline;
     if (!pipeline.graphRag && !pipeline.entityIndex && !pipeline.graphCommunitySummaries) return;
-    if (!state.run.workspaceId) return;
+    const workspaceId = state.run.workspaceId;
+    if (!workspaceId) return;
 
     const graphStore = graphStoreOf(state);
     const graphModel = resolvePipelineTextModel(pipeline, "graph-extraction", this.config.textGenerationModel);
@@ -79,7 +81,7 @@ export class GraphEnrichStage implements Stage {
       ? textModelApiKey(this.config.openRouterApiKey, communityModel)
       : undefined;
     const scope = graphConfig.domain
-      ?? (graphStore ? await graphStore.workspaceGraphScope(state.run.workspaceId) : "Workspace documents");
+      ?? (graphStore ? await graphStore.workspaceGraphScope(workspaceId) : "Workspace documents");
 
     const documents: Array<Record<string, unknown>> = [];
     let windows = 0;
@@ -88,13 +90,15 @@ export class GraphEnrichStage implements Stage {
     let edges = 0;
 
     const alreadyExtracted = graphStore?.documentsWithGraph
-      ? await graphStore.documentsWithGraph(state.run.workspaceId, configHash, documentIds)
+      ? await graphStore.documentsWithGraph(workspaceId, configHash, documentIds)
       : new Set<string>();
-    for (const document of indexableDocuments(state)) {
-      if (alreadyExtracted.has(document.id)) continue;
+    const pendingDocuments = indexableDocuments(state).filter((document) => !alreadyExtracted.has(document.id));
+    const extractedDocuments = await runBounded(pendingDocuments.length, Math.min(4, state.docConcurrency), async (index) => {
+      signal?.throwIfAborted();
+      const document = pendingDocuments[index]!;
       const artifactUri = state.artifactLedger.readDocument(document.id, "embeddings");
       const key = artifactUri ? keyFromStorageUri(artifactUri, this.storage.bucket) : null;
-      if (!key) continue;
+      if (!key) return null;
       const artifact = await this.storage.getJson<EmbeddingArtifact>(key);
       const chunks: GraphChunk[] = (artifact.chunks ?? []).map((chunk) => ({
         id: chunk.id,
@@ -132,7 +136,7 @@ export class GraphEnrichStage implements Stage {
               outputTokens: usage.outputTokens,
               metadata: {
                 ...usage.metadata,
-                workspaceId: state.run.workspaceId,
+                workspaceId: workspaceId,
                 documentId: document.id,
                 depth: graphConfig.depth,
                 ...details,
@@ -147,7 +151,7 @@ export class GraphEnrichStage implements Stage {
       // Persist per document: search sees the graph grow during long runs.
       const written = graphStore
         ? await graphStore.replaceDocumentGraph({
-            workspaceId: state.run.workspaceId,
+            workspaceId: workspaceId,
             userId: state.run.userId,
             runId: state.run.id,
             documentId: document.id,
@@ -157,7 +161,7 @@ export class GraphEnrichStage implements Stage {
         : { nodes: graph.nodes.length, edges: graph.edges.length };
       nodes += written.nodes;
       edges += written.edges;
-      documents.push({
+      return {
         documentId: document.id,
         filename: document.filename,
         entities: graph.nodes.length,
@@ -166,13 +170,14 @@ export class GraphEnrichStage implements Stage {
         windows: graph.windows,
         source: graph.source,
         durationMs: graph.durationMs,
-      });
-    }
+      };
+    });
+    for (const document of extractedDocuments) if (document) documents.push(document);
 
     const includeCommunities = pipeline.graphRag || pipeline.graphCommunitySummaries;
     const communities = includeCommunities && graphStore
       ? await graphStore.refreshWorkspaceCommunities({
-          workspaceId: state.run.workspaceId,
+          workspaceId: workspaceId,
           userId: state.run.userId,
           runId: state.run.id,
           context: {
@@ -202,7 +207,7 @@ export class GraphEnrichStage implements Stage {
           inputTokens: communities.inputTokens,
           outputTokens: communities.outputTokens,
           metadata: {
-            workspaceId: state.run.workspaceId,
+            workspaceId: workspaceId,
             communities: communities.communities,
             summarized: communities.summarized,
             reused: communities.reused,
@@ -222,7 +227,7 @@ export class GraphEnrichStage implements Stage {
     state.artifacts["knowledge-graph"] = this.storage.uri(artifactKey);
     state.run.artifacts["knowledge-graph"] = this.storage.uri(artifactKey);
 
-    const metadata = { workspaceId: state.run.workspaceId };
+    const metadata = { workspaceId: workspaceId };
     state.pendingPerformance.push(
       { scope: "run", stageName: this.name, metric: "graph-node-count", value: nodes, unit: "node", tags: ["graph", "entity"], metadata },
       { scope: "run", stageName: this.name, metric: "graph-edge-count", value: edges, unit: "edge", tags: ["graph", "relationship"], metadata },
