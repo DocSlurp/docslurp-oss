@@ -4,8 +4,9 @@ export function scoreCase(gold, response, documents) {
   const citations = response.citations ?? [];
   const markers = [...answer.matchAll(/\[(\d+)\]/g)].map(m => Number(m[1]));
   const cited = markers.map(n => citations[n - 1]);
-  const validCitation = c => c && documents[c.citation?.documentId]?.pages?.includes(c.citation.pageNumber);
-  const citedKeys = new Set(cited.filter(validCitation).map(c => `${documents[c.citation.documentId].sourceId}:${c.citation.pageNumber}`));
+  const pages = c => [...new Set([c.citation.pageNumber, ...(c.citation.pageNumbers ?? [])])];
+  const validCitation = c => c && documents[c.citation?.documentId]?.pages && pages(c).every(page => documents[c.citation.documentId].pages.includes(page));
+  const citedKeys = new Set(cited.filter(validCitation).flatMap(c => pages(c).map(page => `${documents[c.citation.documentId].sourceId}:${page}`)));
   const calls = response.debug?.toolCalls ?? [];
   const searches = calls.filter(c => c.name === 'workspace.search' && c.status === 'success');
   const checks = {

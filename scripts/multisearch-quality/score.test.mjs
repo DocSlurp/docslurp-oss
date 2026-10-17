@@ -30,3 +30,10 @@ test('runner sends question only, records failures, and never retries', async ()
 test('runner requires explicit bounds before network access', async () => {
   await assert.rejects(runCases({ cases: [{}], maxCases: 0 }), /cap/);
 });
+
+test('a cited chunk spanning multiple verified physical pages supports each page, but invented span pages fail', () => {
+  const r = response(); r.answer = '42 [1]'; r.citations = [{ citation: { documentId: 'a', pageNumber: 1, pageNumbers: [1, 2] } }];
+  assert.equal(scoreCase(gold, r, docs).pass, true);
+  r.citations[0].citation.pageNumbers.push(3);
+  assert.equal(scoreCase(gold, r, docs).pass, false);
+});
