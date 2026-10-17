@@ -44,3 +44,18 @@ The independent label audit corrected the gold for all 20 cases. Every automatic
 The strict scorer now requires independent, hash-bound semantic judgments for every output unit, edge, gold fact and relation; deterministic term matches alone earn no quality credit. B0 and E4 are undergoing blinded review of 468 and 477 items respectively. No candidate is promoted. Held-out sources and labels remain unavailable to the tuning coordinator.
 
 E4 completed 12 cases / 36 calls in 74.819 seconds with no fallback, costing 0.844722 ledger cents (0.703935 provider cents). These are execution measurements, not evidence of quality improvement. Total recorded quality-generation spend including smoke, B0, E2 and E4 is 2.1828975 cents ($0.021828975); coding-agent and infrastructure costs are excluded.
+
+
+## Complete blind v2 development review: B0 and E4
+
+An independent reviewer adjudicated all 468 B0 items and 477 E4 items before running the scorer. Every binding was accepted, with no remaining review items. External evidence: `blind-v2/sample-b-review.json` (B0) and `blind-v2/sample-a-review.json` (E4).
+
+| Strict reviewed measure | B0 | E4 grounded-low + E2 |
+| --- | --- | --- |
+| Graph precision / recall | 0.940 / 0.840 | 0.941 / 0.940 |
+| Key-point coverage / soundness | 0.902 / 0.984 | 0.920 / 0.983 |
+| Summary coverage / soundness | 0.878 / 0.895 | 0.976 / 0.941 |
+| Contradictions | 0 | 1 |
+| Confirmed unsupported items | 12 | 10 |
+
+Both candidates fail the frozen grounding gates. E4 is rejected as a production-default change despite higher coverage; its configuration screen remains archived. No production default was changed, so no code revert is required. General failure classes are modality loss (proposals and estimates stated as outcomes), omitted conditions, inferred attribution and reversed graph direction. Reviewer judgement remains a limitation: some paraphrases were accepted liberally, and split facts required one supporting unit. These limitations do not erase confirmed failures; do not relax the gates to promote either candidate. Held-out confirmation has not been consumed.
