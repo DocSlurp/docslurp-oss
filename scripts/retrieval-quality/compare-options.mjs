@@ -14,7 +14,7 @@ fs.writeFileSync(join(output, "config.json"), JSON.stringify({ datasetSha256: ha
 let estimatedCostCents = 0;
 for (const arm of config.arms) {
  const rows = [];
- for (const test of dataset.cases) {
+ for (const test of dataset.cases.filter(test => !arm.caseIds || arm.caseIds.includes(test.id))) {
   const reference = test.retrieval ? test : dataset.cases.find(c => c.id === test.provenance.parents[0]);
   const target = config.targets.find(t => t.workspaceId === reference.retrieval.workspaceId);
   if (!target) throw new Error("No authorized target for case");
@@ -24,6 +24,7 @@ for (const arm of config.arms) {
   const url = new URL("/v1/search", config.base); url.search = params.toString();
   if (estimatedCostCents >= config.maxEstimatedCostCents) throw new Error("Cost bound reached");
   const started = Date.now();
+  fs.writeFileSync(join(output, `${arm.id}-${test.id}-started.json`), JSON.stringify({ id: test.id, arm: arm.id, timestamp: new Date(started).toISOString(), request: { url: url.href }, status: "started", usage: "unknown until response or ledger reconciliation" }, null, 2), { flag: "wx" });
   const response = await fetch(url, { redirect: "error", headers: { Origin: config.base, Cookie: cookie }, signal: AbortSignal.timeout(60000) });
   const raw = await response.text();
   const record = { id: test.id, arm: arm.id, timestamp: new Date().toISOString(), request: { url: url.href }, status: response.status, ms: Date.now()-started, raw };
