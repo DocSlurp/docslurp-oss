@@ -247,8 +247,17 @@ export function createRunLifecycle(deps: RunLifecycleDeps) {
         where run_id = ${runId} and status <> 'completed'
       `;
       await tx`
-        update documents set status = 'queued', updated_at = now()
-        where run_id = ${runId} and status <> 'completed'
+        update documents d
+        set status = 'queued', updated_at = now(),
+            lexical_searchable_at = case
+              when exists (
+                select 1 from document_run_stage_states embed_state
+                where embed_state.run_id = d.run_id and embed_state.document_id = d.id
+                  and embed_state.stage_name = 'embed' and embed_state.status = 'completed'
+              ) then d.lexical_searchable_at
+              else null
+            end
+        where d.run_id = ${runId} and d.status <> 'completed'
       `;
       return await tx<{ id: string }[]>`
         update workspace_runs
@@ -300,8 +309,17 @@ export function createRunLifecycle(deps: RunLifecycleDeps) {
         `;
       }
       await tx`
-        update documents set status = 'queued', updated_at = now()
-        where run_id = ${run.id} and status = 'failed'
+        update documents d
+        set status = 'queued', updated_at = now(),
+            lexical_searchable_at = case
+              when exists (
+                select 1 from document_run_stage_states embed_state
+                where embed_state.run_id = d.run_id and embed_state.document_id = d.id
+                  and embed_state.stage_name = 'embed' and embed_state.status = 'completed'
+              ) then d.lexical_searchable_at
+              else null
+            end
+        where d.run_id = ${run.id} and d.status = 'failed'
       `;
       return await tx<{ id: string }[]>`
         update workspace_runs
