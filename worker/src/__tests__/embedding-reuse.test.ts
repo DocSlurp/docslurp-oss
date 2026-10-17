@@ -313,6 +313,75 @@ describe("EmbedStage chunk materialization", () => {
     } finally { vi.unstubAllEnvs(); }
   });
 
+  it("never stamps the early marker, or calls the embedding provider, when the chunk insert fails", async () => {
+    vi.stubEnv("DOCSLURP_EARLY_LEXICAL_CHUNKS", "on");
+    const marked: string[] = [];
+    try {
+      const result = await runEmbed({
+        storage: new MemoryStorage(), reuse: new MemoryReuseStore(), runId: "run-insert-fails", documentId: "insert-fails",
+        allowFailure: true,
+        storeExtras: {
+          insertChunks: async () => { throw new Error("chunk insert failed"); },
+          markDocumentLexicalSearchable: async (documentId: string) => { marked.push(documentId); },
+        },
+      });
+      expect(marked).toEqual([]);
+      expect(result.embedInputs).toEqual([]);
+      expect(embeddingUsage(result.state)).toEqual([]);
+      expect(result.status).toBe("failed");
+    } finally { vi.unstubAllEnvs(); }
+  });
+
+  it("fails the document in the store when embedding fails after the early publish", async () => {
+    // The marker is already stamped by then; search excludes the document only
+    // because the store flips it to failed (server/src/search/eligibility.ts).
+    vi.stubEnv("DOCSLURP_EARLY_LEXICAL_CHUNKS", "on");
+    const calls: string[] = [];
+    try {
+      const result = await runEmbed({
+        storage: new MemoryStorage(), reuse: new MemoryReuseStore(), runId: "run-embed-fails", documentId: "embed-fails",
+        privacyMode: "local-only", allowFailure: true,
+        storeExtras: {
+          insertChunks: async () => { calls.push("written"); },
+          markDocumentLexicalSearchable: async () => { calls.push("searchable"); },
+          failDocumentStage: async (_state: unknown, documentId: string, stage: string) => { calls.push(`failed:${documentId}:${stage}`); },
+        },
+      });
+      expect(result.embedInputs).toEqual([]);
+      expect(calls).toEqual(["written", "searchable", "failed:embed-fails:embed"]);
+    } finally { vi.unstubAllEnvs(); }
+  });
+
+  it("writes identical chunk rows and an identical artifact whether or not early publication is on", async () => {
+    const run = async (mode: "off" | "on") => {
+      vi.stubEnv("DOCSLURP_EARLY_LEXICAL_CHUNKS", mode);
+      const rows: Array<Record<string, unknown>> = [];
+      try {
+        const result = await embedDocument({
+          storage: new MemoryStorage(), reuse: new MemoryReuseStore(), runId: "run-parity", documentId: "parity",
+          storeExtras: {
+            insertChunks: async (chunks: Array<Record<string, unknown>>) => { rows.push(...structuredClone(chunks)); },
+            markDocumentLexicalSearchable: async () => {},
+          },
+        });
+        return { rows, artifact: result.artifact, usage: result.state.usageLedger.snapshot().map(({ id: _id, ...event }) => event) };
+      } finally { vi.unstubAllEnvs(); }
+    };
+
+    const off = await run("off");
+    const early = await run("on");
+    expect(early.rows).toEqual(off.rows);
+    expect(early.rows.some((row) => "vector" in row)).toBe(false);
+    expect(JSON.stringify(early.artifact)).toBe(JSON.stringify(off.artifact));
+    expect(early.artifact.chunks.every((chunk) => chunk.vector.length > 0)).toBe(true);
+    expect(early.usage).toEqual(off.usage);
+
+    // A retried activity upserts the same ids with the same rows.
+    const retried = await run("on");
+    expect(retried.rows.map((row) => row.id)).toEqual(early.rows.map((row) => row.id));
+    expect(retried.rows).toEqual(early.rows);
+  });
+
   it("marks the document keyword-searchable only after every chunk row is written", async () => {
     const calls: string[] = [];
     const storeExtras = {
