@@ -53,9 +53,14 @@ export function publicDiagnostics(value: unknown): unknown {
     if (/error|failure|warning|reason|message|detail/i.test(key)) {
       if (item == null || item === false || item === "") return [[key, item]];
       if (typeof item === "number" || typeof item === "boolean") return [[key, item]];
+      // Reasons and warnings also describe successful routing/tuning decisions.
+      // Redact their private text without inventing a processing failure.
+      const replacement = /error|failure/i.test(key)
+        ? PUBLIC_ERROR_MESSAGES.processing
+        : "Diagnostic details withheld.";
       return [[key, Array.isArray(item)
-        ? item.map(entry => typeof entry === "string" ? PUBLIC_ERROR_MESSAGES.processing : publicDiagnostics(entry))
-        : typeof item === "object" ? publicDiagnostics(item) : PUBLIC_ERROR_MESSAGES.processing]];
+        ? item.map(entry => typeof entry === "string" ? replacement : publicDiagnostics(entry))
+        : typeof item === "object" ? publicDiagnostics(item) : replacement]];
     }
     return [[key, publicDiagnostics(item)]];
   }));
