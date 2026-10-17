@@ -119,17 +119,17 @@ export const simpleServiceSchemas = {
   },
 };
 
-const legacyServicePaths = {
-  "/v1/ingest/bulk": { post: {
+const canonicalServicePaths = {
+  "/v1/uploads/bulk": { post: {
     tags: ["ingest"], summary: "Upload files into the default workspace, a chosen workspace, or a new one", security: serviceSecurity,
-    description: "One buffered multipart request, capped at MAX_MULTIPART_UPLOAD_BYTES (25 MB by default; 413 code multipart_upload_too_large above it). Upload larger files with a direct upload session: POST /v1/ingest/direct/sessions, PUT to the returned URLs, then confirm.",
+    description: "One buffered multipart request, capped at MAX_MULTIPART_UPLOAD_BYTES (25 MB by default; 413 code multipart_upload_too_large above it). Upload larger files with a direct upload session: POST /v1/uploads/direct/sessions, PUT to the returned URLs, then confirm.",
     parameters: [{ in: "header", name: "Idempotency-Key", schema: { type: "string" }, description: "Reuse only for identical uploads" }],
     requestBody: { required: true, content: { "multipart/form-data": { schema: { type: "object", required: ["files"], properties: {
       files: { type: "array", minItems: 1, items: { type: "string", format: "binary" } }, ...uploadTarget, newWorkspace: { type: "string", enum: ["true"], description: uploadTarget.newWorkspace.description },
     } } } } },
     responses: { "201": response("Accepted for asynchronous processing. Poll run progress before searching.", ref("UploadResponse")), ...errors },
   } },
-  "/v1/ingest/url": { post: {
+  "/v1/uploads/url": { post: {
     tags: ["ingest"], summary: "Ingest remote documents into a workspace", security: serviceSecurity,
     requestBody: request({ type: "object", required: ["urls"], properties: { urls: { type: "array", minItems: 1, items: { type: "string", format: "uri" } }, ...uploadTarget } }),
     responses: { "201": response("Ingestion accepted", ref("UploadResponse")), ...errors },
@@ -147,6 +147,7 @@ const legacyServicePaths = {
     post: { tags: ["search"], summary: "Search a workspace", security: serviceSecurity, requestBody: request({ oneOf: [scopedQuery, z.toJSONSchema(batchSearchInputSchema)] }), responses: { "200": response("Single-query passages or ordered batch outcomes", { oneOf: [ref("SearchResponse"), ref("BatchSearchResponse")] }), ...errors } },
   },
   "/v1/search/batch": { post: {
+    deprecated: true,
     tags: ["search"], summary: "Retrieve cited passages for up to 20 independent queries", security: serviceSecurity,
     description: "Ordered results; per-item authorization and errors. Default concurrency 4, maximum 4. No answer generation; retrieval enhancements are opt-in. Disconnect stops queued work; already running retrieval may finish.",
     requestBody: request(z.toJSONSchema(batchSearchInputSchema)),
@@ -159,6 +160,7 @@ const legacyServicePaths = {
     responses: { "200": response("Grounded answer, citations and actual usage", ref("WorkspaceChatResponse")), ...errors },
   } },
   "/v1/search/chat": { post: {
+    deprecated: true,
     tags: ["search"], summary: "Compatibility alias for POST /v1/chat", security: serviceSecurity,
     requestBody: request(z.toJSONSchema(workspaceChatInputSchema)),
     responses: { "200": response("Grounded answer, citations and actual usage", ref("WorkspaceChatResponse")), ...errors },
@@ -174,7 +176,7 @@ const legacyServicePaths = {
   } },
 };
 
-export const simpleServicePaths = { ...legacyServicePaths,
-  "/v1/uploads/bulk": legacyServicePaths["/v1/ingest/bulk"],
-  "/v1/uploads/url": legacyServicePaths["/v1/ingest/url"],
+export const simpleServicePaths = { ...canonicalServicePaths,
+  "/v1/ingest/bulk": { post: { ...canonicalServicePaths["/v1/uploads/bulk"].post, deprecated: true, summary: "Deprecated alias; use POST /v1/uploads/bulk" } },
+  "/v1/ingest/url": { post: { ...canonicalServicePaths["/v1/uploads/url"].post, deprecated: true, summary: "Deprecated alias; use POST /v1/uploads/url" } },
 };

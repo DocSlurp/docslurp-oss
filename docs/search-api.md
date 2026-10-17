@@ -50,7 +50,7 @@ Chunks reach keyword search once the embed stage has written every chunk row of 
 
 ## Batch retrieval
 
-`POST /v1/search/batch` accepts the same search input objects:
+`POST /v1/search` accepts either a single `{ q, ...filters }` input or a batch of search input objects. Supply exactly one form; batch workspace and filter options belong inside each query:
 
 ```json
 {
@@ -68,7 +68,7 @@ Every item independently checks the API key's `search` scope and organization/wo
 
 ## Grounded chat
 
-`POST /v1/chat` is the canonical workspace chat endpoint. `POST /v1/search/chat` remains a compatibility alias with the same validated request and response. Send `{q, workspaceId?, sessionId?, model?}`; an omitted `workspaceId` means your organization's default workspace. `sessionId` and `model` are nonempty strings of at most 256 characters; all fields are checked before model calls. The response includes an answer, citations, and the chat session ID. Native clients can keep using `GET /v1/search/chat/stream`; OpenAI-compatible clients retain `/v1/chat/completions` and its JSON/SSE fallback.
+`POST /v1/chat` is the canonical workspace chat endpoint. Send `{q, workspaceId?, sessionId?, model?}`; an omitted `workspaceId` means your organization's default workspace. `sessionId` and `model` are nonempty strings of at most 256 characters; all fields are checked before model calls. The response includes an answer, citations, and the chat session ID. For streaming, use `/v1/chat/completions` with `stream: true`; omit it for the JSON fallback.
 
 Independent conversations can run concurrently. Await each reply before reusing its `sessionId` for the next turn. Simultaneous turns in the same conversation have no ordering guarantee. Session ownership must be verified before a caller-provided session can be reused; a database failure fails closed.
 
@@ -76,7 +76,7 @@ All routes use the existing authenticated request actor. API keys remain scoped 
 
 ## Retrieval usage and cost
 
-Successful GET/POST `/v1/search` responses include `usage`. Batch responses expose it in each successful item's `data.usage`; MCP `workspace.search` and `workspace.search-many` return the same fields.
+Successful GET/POST `/v1/search` responses include `usage`. Batch responses expose it in each successful item's `data.usage`; MCP `search` accepts the same single or batch forms and returns the same fields.
 
 | Field | Meaning |
 | --- | --- |

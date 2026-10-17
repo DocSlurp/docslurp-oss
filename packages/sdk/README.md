@@ -2,6 +2,8 @@
 
 [Package docs](https://docslurp.io/docs/packages/sdk) · [GitHub](https://github.com/DocSlurp/docslurp-oss/tree/main/packages/sdk) · [npm](https://www.npmjs.com/package/@docslurp/sdk)
 
+> **Version:** These examples target `@docslurp/sdk` 0.3.0 or newer, including URL uploads through `upload`, batch `search({ queries })`, workspace discovery and upload-session methods. Upgrade the SDK separately when updating a self-hosted API.
+
 The SDK covers DocSlurp's three jobs from Node.js: upload documents and follow their extraction, search them for passages that cite their document and page, and ask the workspace chat endpoint for a cited answer. You keep your own application and LLM: use the results as evidence for your model, or let DocSlurp write the answer. The SDK has no runtime npm dependencies and ships TypeScript declarations.
 
 Start with the [quickstart](#from-file-to-search-results). Then see [live progress](#live-counts-and-performance), the [method reference](#method-reference), [response examples](#request-and-response-examples) (including [workspace state](#workspace-state-response) and [organizations](#organization-response-examples)), and [failure handling](#timeouts-cancellation-and-errors). Prefer the terminal? Use the [CLI](https://docslurp.io/docs/cli).
@@ -17,7 +19,7 @@ Start with the [quickstart](#from-file-to-search-results). Then see [live progre
 You need **Node.js 20+** and ESM (`.mjs` files, or `"type": "module"`); TypeScript works the same way. Create a [server key](https://docslurp.io/app/api-keys) with the **ingest** and **search** scopes.
 
 ```bash
-npm install @docslurp/sdk
+npm install @docslurp/sdk@^0.3.0
 export DOCSLURP_API_KEY='your-server-key'
 ```
 
@@ -259,7 +261,7 @@ Add DocSlurp search, chat and a document viewer to your site as React components
 | Export | What it does |
 | --- | --- |
 | `SearchEmbed` | Search box with cited results. Calls `GET /v1/search`. |
-| `ChatEmbed` | Chat over a workspace. Calls `POST /v1/search/chat`. |
+| `ChatEmbed` | Chat over a workspace. Calls `POST /v1/chat`. |
 | `ViewerEmbed` | Shows one document. Calls `GET /v1/documents/:id`, which needs a key with the `artifacts` scope. |
 | `defineDocSlurpElements()` | Registers `<docslurp-search>`, `<docslurp-chat>` and `<docslurp-viewer>`. |
 | `createOfflineSearchBundle()` | Builds a JSON bundle (and optionally a LanceDB table) for offline search. |
@@ -398,6 +400,13 @@ Environment variables are read once, when the client is created, and only on the
 | `upload(fileOrStream, options?)` | `{ workspace, run, documents, warnings? }` | `ingest` |
 | `upload({ files, ...metadata }, options?)` | Same accepted ingestion response | `ingest` |
 | `upload({ urls, ...metadata }, options?)` | Same accepted ingestion response | `ingest` |
+| `listWorkspaces(options?)` | Accessible workspace records | `ingest`, `search`, `artifacts` or `workspaces:manage` |
+| `getWorkspace(id, options?)` | Workspace record | Same as listing |
+| `createUploadSession(input, options?)` | Session ID, status and signed transfer descriptors | `ingest` |
+| `getUploadSession(id, options?)` | Session status and refreshed transfer URLs | `ingest` |
+| `completeUploadFile(id, input, options?)` | Stored-file verification result | `ingest` |
+| `completeUploadSession(id, options?)` | Accepted ingestion response | `ingest` |
+| `abortUploadSession(id, options?)` | Cleanup confirmation | `ingest` |
 | `getRun(runId, request?)` | Run record (not the progress envelope) | Any of `ingest`, `search`, `artifacts` |
 | `getRunProgress(runId, request?)` | Full typed progress snapshot | Same as `getRun` |
 | `streamProgress(runId, options?)` | Async iterable of full snapshots with polling fallback | Same as `getRun` |
@@ -1155,4 +1164,4 @@ await client.waitForRun(accepted.run.id);
 
 Signed URLs expire after 15 minutes. Treat them as credentials and never attach the DocSlurp API key to a storage request. `getUploadSession(sessionId)` refreshes pending transfer URLs. Complete every file before completing the session; the server checks stored sizes before starting ingestion. Use `abortUploadSession(sessionId)` to clean up an abandoned session. Session completion is not retry-idempotent.
 
-The canonical HTTP upload prefix is `/v1/uploads`; `/v1/ingest` remains an alias with the same access, size and rate limits. `POST /v1/search` accepts either `{ q, ...filters }` or `{ queries, concurrency? }`. The older `/v1/search/batch`, SDK `searchMany` and `ingestUrls` remain compatibility aliases; new integrations should use `search` and `upload`.
+The HTTP upload prefix is `/v1/uploads`. `POST /v1/search` accepts either `{ q, ...filters }` or `{ queries, concurrency? }`. Use `search` for retrieval and `upload` for files or public URLs.
