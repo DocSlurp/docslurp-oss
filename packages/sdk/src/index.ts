@@ -288,6 +288,28 @@ export type ChatResponse = {
   runtime: { startedAt: string; completedAt: string; totalMs: number };
 };
 
+/** SSE events from {@link DocSlurpClient.chatStream}: retrieval status, the answer, then the done envelope. */
+export type ChatStreamEvent =
+  | { event: "status"; data: { stage: string; message: string } }
+  | { event: "message"; data: ChatResponse }
+  | { event: "done"; data: { id: string; sessionId: string; searchSessionId: string | null } };
+
+export type ListDocumentsInput = {
+  workspaceId?: string;
+  runId?: string;
+  /** Comma-separated tags. */
+  tags?: string;
+};
+
+/** Result of {@link DocSlurpClient.deleteDocument}: the identities of the removed document. */
+export type DeletedDocument = JsonObject & {
+  documentId: string;
+  filename: string;
+  workspaceId?: string | null;
+  runId?: string | null;
+  sourceKey?: string;
+};
+
 export type RequestOptions = {
   signal?: AbortSignal;
   timeoutMs?: number;
@@ -957,6 +979,11 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
     streamActivity,
     waitForRun,
 
+    /** Recent runs across the caller's organization, newest first. */
+    async listRuns(options?: RequestOptions): Promise<WorkspaceRun[]> {
+      return (await request<{ runs: WorkspaceRun[] }>("/v1/runs", {}, options, true)).runs;
+    },
+
     getWorkspaceState(id: string | undefined = workspaceId, options: WorkspaceStateOptions = {}): Promise<WorkspaceState> {
       if (!id?.trim()) throw new Error("Set DOCSLURP_WORKSPACE_ID or pass workspaceId for workspace state.");
       const hours = options.recentWindowHours ?? 24;
@@ -1035,8 +1062,37 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
       }, requestOptions);
     },
 
+    /**
+     * Streamed grounded answer over SSE: a retrieval `status`, then the `message`
+     * (the full ChatResponse) and a `done` envelope. Callers that cannot hold a
+     * stream open should use chat() instead.
+     */
+    async *chatStream(input: ChatInput, requestOptions: RequestOptions = {}): AsyncGenerator<ChatStreamEvent> {
+      const target = inWorkspace(input);
+      const params = new URLSearchParams({ q: target.q, workspaceId: target.workspaceId ?? workspaceId });
+      if (target.sessionId) params.set("sessionId", target.sessionId);
+      for await (const frame of streamEventsAt(`/v1/chat/stream?${params.toString()}`, requestOptions)) {
+        if (frame.event === "status" || frame.event === "message" || frame.event === "done") {
+          yield { event: frame.event, data: frame.data } as ChatStreamEvent;
+        }
+      }
+    },
+
     getDocument(documentId: string, requestOptions?: RequestOptions): Promise<DocumentViewerPayload> {
       return request<DocumentViewerPayload>(`/v1/documents/${encodeURIComponent(documentId)}`, {}, requestOptions, true);
+    },
+
+    /** Documents in a workspace (the client default unless one is passed), newest first. */
+    async listDocuments(input: ListDocumentsInput = {}, requestOptions?: RequestOptions): Promise<DocumentRecord[]> {
+      const params = new URLSearchParams({ workspaceId: input.workspaceId?.trim() || workspaceId });
+      if (input.runId) params.set("runId", input.runId);
+      if (input.tags) params.set("tags", input.tags);
+      return (await request<{ documents: DocumentRecord[] }>(`/v1/documents?${params.toString()}`, {}, requestOptions, true)).documents;
+    },
+
+    /** Delete a document and return the identities of the removed record. */
+    deleteDocument(documentId: string, requestOptions?: RequestOptions): Promise<DeletedDocument> {
+      return request<DeletedDocument>(`/v1/documents/${encodeURIComponent(documentId)}`, { method: "DELETE" }, requestOptions);
     },
 
     uploadUrls,
