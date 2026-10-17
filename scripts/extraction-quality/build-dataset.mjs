@@ -10,7 +10,7 @@ import { createHash } from 'node:crypto';
 import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { fold, parseNumbers, scoreRun, tokens } from './score.mjs';
+import { fold, parseNumbers, scoreRun, splitUnits, tokens } from './score.mjs';
 
 export const SPEC_SCHEMA = 'docslurp-quality-authored@v1';
 export const INPUT_SCHEMA = 'docslurp-extraction-quality-inputs@v1';
@@ -130,10 +130,33 @@ function selfCheck(split, c, id, gold) {
   if (failed.length) fail(where, `oracle failed to flag: ${failed.join('; ')}`);
 }
 
+/**
+ * Independent faithful-text controls. Source sentences, gold evidence quotes and any externally
+ * authored paraphrases are true by construction, so none may be scored as contradicted.
+ */
+function faithfulControls(split, c, id, gold, extra = []) {
+  const where = `${split}:${c.id}`;
+  const quotes = [...(c.facts ?? []), ...(c.relations ?? [])].flatMap((x) => (x.evidence ?? []).map((e) => e.quote));
+  const groups = { 'source sentence': splitUnits(c.source.replaceAll('\f', ' ')), 'evidence quote': quotes, 'independent paraphrase': extra };
+  const bad = [];
+  for (const [kind, texts] of Object.entries(groups)) {
+    for (const text of texts) {
+      const r = scoreRun({ cases: [{ id, gold }], outputs: { cases: { [id]: { graph: { entities: [], relationships: [] }, keyPoints: [text], summary: text } } } });
+      const d = r.cases[0].details;
+      const flagged = [...d.keyPoints.units, ...d.summary.units].filter((u) => u.status === 'contradicted');
+      if (flagged.length) bad.push(`${kind}: ${text.slice(0, 90)} -> ${JSON.stringify(flagged[0].contradictions.map((x) => x.kind))}`);
+    }
+  }
+  if (bad.length) fail(where, `faithful text scored as contradicted (${bad.length}): ${bad.join(' | ')}`);
+  return Object.fromEntries(Object.entries(groups).map(([k, v]) => [k, v.length]));
+}
+
 /** Build both splits into `destination`. Returns a summary without case content. */
-export function buildDataset({ development, heldout }, destination) {
+export function buildDataset({ development, heldout }, destination, { controls = {}, supersedes = null } = {}) {
   const specs = { development, heldout };
   const requiredTags = development?.requiredTags;
+  const version = development?.version ?? 'v1';
+  if ((heldout?.version ?? 'v1') !== version) fail('spec', 'both splits must declare the same version');
   for (const split of SPLITS) {
     const s = specs[split];
     if (s?.schema !== SPEC_SCHEMA || s.split !== split || !nonempty(s.author) || !nonempty(s.method) || !Number.isFinite(Date.parse(s.createdAt)) || !s.cases?.length) fail(split, 'spec needs schema, split, author, method, createdAt and cases');
@@ -152,7 +175,8 @@ export function buildDataset({ development, heldout }, destination) {
       const { source, oracleChecks, ...rest } = c;
       const gold = { ...rest, id, split, pages, relations: c.relations, forbiddenRelations: c.forbiddenRelations ?? [], forbiddenClaims: c.forbiddenClaims ?? [], allowedTerms: c.allowedTerms ?? [], allowedNumbers: c.allowedNumbers ?? [] };
       selfCheck(split, c, id, gold);
-      return { id, gold, source: source.endsWith('\n') ? source : `${source}\n`, oracleChecks, pages, spec: c };
+      const controlCounts = faithfulControls(split, c, id, gold, controls[id] ?? controls[c.id] ?? []);
+      return { id, gold, source: source.endsWith('\n') ? source : `${source}\n`, oracleChecks: { ...oracleChecks, faithfulControls: { counts: controlCounts, independentParaphrases: controls[id] ?? controls[c.id] ?? [] } }, pages, spec: c };
     });
     for (const t of requiredTags) if (!prepared[split].some((x) => x.spec.tags.includes(t))) fail(split, `missing required tag ${t}`);
   }
@@ -160,7 +184,7 @@ export function buildDataset({ development, heldout }, destination) {
   for (const split of SPLITS) {
     const dir = join(destination, split);
     mkdirSync(join(dir, 'oracle-checks'), { recursive: true });
-    const manifest = { schema: 'docslurp-authored-eval@v1', cases: [] }, inputs = { schema: INPUT_SCHEMA, version: 'v1', split, cases: [] };
+    const manifest = { schema: 'docslurp-authored-eval@v1', cases: [] }, inputs = { schema: INPUT_SCHEMA, version, split, cases: [] };
     for (const c of prepared[split]) {
       const labels = json({ schema: GOLD_SCHEMA, labels: [{ name: `quality_gold_${c.id.replaceAll('-', '_')}`, expected: c.gold }] });
       writeFileSync(join(dir, `${c.id}.txt`), c.source);
@@ -183,11 +207,12 @@ export function buildDataset({ development, heldout }, destination) {
   writeFileSync(join(destination, 'integrity-manifest.json'), json(combined));
   const here = (name) => sha(readFileSync(join(dirname(fileURLToPath(import.meta.url)), name)));
   writeFileSync(join(destination, 'version.json'), json({
-    schema: 'docslurp-extraction-quality-dataset@v1', version: 'v1', frozen: true, createdAt: specs.development.createdAt,
+    schema: 'docslurp-extraction-quality-dataset@v1', version, frozen: true, supersedes: supersedes ? { version: supersedes.version, path: 'supersedes.json' } : undefined, specNotes: specs.development.notes, createdAt: specs.development.createdAt,
     author: specs.development.author, method: specs.development.method, requiredTags, counts,
     specSha256: Object.fromEntries(SPLITS.map((s) => [s, sha(out[s])])), splitManifestSha256: manifestHashes, combinedManifestSha256: sha(json(combined)),
     tools: { 'build-dataset.mjs': here('build-dataset.mjs'), 'score.mjs': here('score.mjs') },
   }));
+  if (supersedes) writeFileSync(join(destination, 'supersedes.json'), json(supersedes.build(prepared)));
   freeze(destination);
   return { destination, counts, manifestHashes, combinedManifestSha256: sha(json(combined)) };
 }
@@ -197,10 +222,33 @@ function freeze(path) {
   if (stat.isDirectory()) { for (const name of readdirSync(path)) freeze(join(path, name)); chmodSync(path, 0o555); } else chmodSync(path, 0o444);
 }
 
+/** Describe an earlier dataset so the new one can map sources and declare which prior scores its gold invalidates. */
+function supersedesFrom(dir) {
+  const earlier = JSON.parse(readFileSync(join(dir, 'version.json'), 'utf8'));
+  const old = new Map();
+  for (const split of SPLITS) for (const e of JSON.parse(readFileSync(join(dir, split, 'integrity-manifest.json'), 'utf8')).cases) old.set(e.id, { split, source: e.source.sha256, labels: e.labels.sha256 });
+  return {
+    version: earlier.version,
+    build(prepared) {
+      const rows = [];
+      for (const split of SPLITS) for (const c of prepared[split]) {
+        const o = old.get(c.id), source = sha(c.source), labels = sha(json({ schema: GOLD_SCHEMA, labels: [{ name: `quality_gold_${c.id.replaceAll('-', '_')}`, expected: c.gold }] }));
+        rows.push({ id: c.id, split, earlierSplit: o?.split ?? null, sourceSha256Earlier: o?.source ?? null, sourceSha256: source, sourceUnchanged: o?.source === source, goldSha256Earlier: o?.labels ?? null, goldSha256: labels, goldChanged: o?.labels !== labels });
+      }
+      return {
+        schema: 'docslurp-dataset-supersedes@v1', supersedes: earlier.version, earlierCombinedManifestSha256: earlier.combinedManifestSha256,
+        allSourcesUnchanged: rows.every((r) => r.sourceUnchanged), casesWithChangedGold: rows.filter((r) => r.goldChanged).length,
+        rescoring: 'Stored generations for a case with sourceUnchanged can be rescored against this dataset without new model calls. Every automatic score computed against the earlier gold is invalid for this dataset and must be recomputed.',
+        cases: rows,
+      };
+    },
+  };
+}
+
 export function main(argv = process.argv.slice(2)) {
   const o = {};
   for (let i = 0; i < argv.length; i += 2) {
-    if (!['--development', '--heldout', '--out'].includes(argv[i]) || !argv[i + 1]) throw new Error('Expected --development <spec.json> --heldout <spec.json> --out <new directory>');
+    if (!['--development', '--heldout', '--out', '--controls', '--supersedes'].includes(argv[i]) || !argv[i + 1]) throw new Error('Expected --development <spec.json> --heldout <spec.json> --out <new directory> [--controls <paraphrases.json>] [--supersedes <earlier dataset dir>]');
     o[argv[i].slice(2)] = argv[i + 1];
   }
   if (!o.development || !o.heldout || !o.out) throw new Error('Expected --development <spec.json> --heldout <spec.json> --out <new directory>');
@@ -208,7 +256,9 @@ export function main(argv = process.argv.slice(2)) {
   const repo = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
   const parent = existsSync(dirname(destination)) ? realpathSync(dirname(destination)) : dirname(destination);
   if (`${parent}${sep}`.startsWith(`${repo}${sep}`)) throw new Error('The dataset must live outside the repository');
-  const summary = buildDataset({ development: JSON.parse(readFileSync(o.development, 'utf8')), heldout: JSON.parse(readFileSync(o.heldout, 'utf8')) }, destination);
+  const controls = o.controls ? JSON.parse(readFileSync(o.controls, 'utf8')) : {};
+  const supersedes = o.supersedes ? supersedesFrom(resolve(o.supersedes)) : null;
+  const summary = buildDataset({ development: JSON.parse(readFileSync(o.development, 'utf8')), heldout: JSON.parse(readFileSync(o.heldout, 'utf8')) }, destination, { controls, supersedes });
   process.stdout.write(json(summary));
   return 0;
 }
