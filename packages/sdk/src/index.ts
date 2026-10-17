@@ -251,6 +251,8 @@ export type SearchBatchOptions = {
   concurrency?: number;
 };
 
+export type SearchBatchInput = SearchBatchOptions & { queries: SearchInput[] };
+
 export type SearchBatchResponse = {
   /** One outcome per input query, in input order. */
   results: Array<
@@ -820,8 +822,8 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
   }
 
   function search(input: SearchInput, options?: RequestOptions): SearchRequest;
-  function search(input: SearchBatchOptions & { queries: SearchInput[] }, options?: RequestOptions): Promise<SearchBatchResponse>;
-  function search(input: SearchInput | (SearchBatchOptions & { queries: SearchInput[] }), options?: RequestOptions): SearchRequest | Promise<SearchBatchResponse> {
+  function search(input: SearchBatchInput, options?: RequestOptions): Promise<SearchBatchResponse>;
+  function search(input: SearchInput | SearchBatchInput, options?: RequestOptions): SearchRequest | Promise<SearchBatchResponse> {
     if ("queries" in input) {
       if (input.queries.length < 1 || input.queries.length > 20) throw new RangeError("search accepts 1–20 queries.");
       const concurrency = input.concurrency ?? 4;
