@@ -19,6 +19,8 @@ import { textFallbackCost, textModelApiKey, textUsageLabels } from "../lib/text-
 
 /** Store surface graph enrichment writes through (the Postgres `Store`). */
 export interface KnowledgeGraphStore {
+  /** Current relational chunks; reused embedding artifacts can contain old document IDs. */
+  loadDocumentGraphChunks(workspaceId: string, documentId: string): Promise<GraphChunk[]>;
   replaceDocumentGraph(input: ReplaceDocumentGraphInput): Promise<{ nodes: number; edges: number }>;
   refreshWorkspaceCommunities(args: {
     workspaceId: string;
@@ -95,12 +97,16 @@ export class GraphEnrichStage implements Stage {
       const artifactUri = state.artifactLedger.readDocument(document.id, "embeddings");
       const key = artifactUri ? keyFromStorageUri(artifactUri, this.storage.bucket) : null;
       if (!key) continue;
-      const artifact = await this.storage.getJson<EmbeddingArtifact>(key);
-      const chunks: GraphChunk[] = (artifact.chunks ?? []).map((chunk) => ({
-        id: chunk.id,
-        text: chunk.text,
-        pageNumber: chunk.pageNumber,
-      }));
+      // Reused embedding artifacts keep the source document's chunk IDs, while
+      // reuse materializes new relational IDs. Graph mentions must point at the
+      // current document's rows, just as workspace graph rebuilds do.
+      const chunks: GraphChunk[] = graphStore
+        ? await graphStore.loadDocumentGraphChunks(state.run.workspaceId, document.id)
+        : ((await this.storage.getJson<EmbeddingArtifact>(key)).chunks ?? []).map((chunk) => ({
+            id: chunk.id,
+            text: chunk.text,
+            pageNumber: chunk.pageNumber,
+          }));
 
       const graph = await extractDocumentGraph({
         filename: document.filename,

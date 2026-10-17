@@ -2,7 +2,7 @@ import type { PGlite } from "@electric-sql/pglite";
 import type { PGLiteSocketServer } from "@electric-sql/pglite-socket";
 import postgres from "postgres";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { defaultGraphConfig, graphConfigFingerprint } from "@docslurp/shared";
+import { defaultGraphConfig, graphConfigFingerprint, normalizePipelineFeatures } from "@docslurp/shared";
 
 import { replaceDocumentGraph } from "../graph/graph-store.js";
 vi.mock("../graph/graph-store.js", async (original) => {
@@ -14,6 +14,9 @@ import { generateOpenRouterText } from "../lib/ai.js";
 vi.mock("../lib/ai.js", () => ({ generateOpenRouterText: vi.fn() }));
 
 import type { Config } from "../config.js";
+import { WorkflowState } from "../pipeline/pipeline.js";
+import { GraphEnrichStage } from "../stages/graph-enrich.js";
+import type { CommandRunner } from "../tools/runner.js";
 import { Store } from "../db/store.js";
 import { refreshKnowledgeGraphNodes } from "../db/superseded-purge.js";
 import { refreshWorkspaceCommunities } from "../graph/communities.js";
@@ -125,6 +128,41 @@ const nodes = () =>
   `;
 
 describe("workspace knowledge graph persistence", () => {
+  it.each([false, true])("links reused embeddings to current document chunks (source purged=%s)", async (purgeSource) => {
+    const text = "Copper Works supplies Silver Labs.";
+    await seedDocument("source", text);
+    await seedDocument("copy", text);
+    const artifactUri = "s3://test/old-run/embeddings/source.json";
+    await sql`update workspace_runs set artifacts = ${sql.json({ "source:embeddings": artifactUri })} where id = 'run-source'`;
+    await sql`update documents set reused_from_document_id = 'source' where id = 'copy'`;
+    await sql`delete from document_chunks where document_id = 'copy'`;
+    expect(await store.seedReusedStageOutputs("run-copy", ["embed"]))
+      .toEqual({ seededDocuments: 1, unavailable: [] });
+    if (purgeSource) await sql`delete from document_chunks where document_id = 'source'`;
+
+    const run = await store.loadRun("run-copy");
+    run.pipeline = normalizePipelineFeatures({ entityIndex: true });
+    const state = WorkflowState.create(run, await store.loadDocumentsForRun(run.id));
+    state.store = store;
+    const storage = {
+      bucket: "test",
+      getJson: vi.fn(async () => ({ chunks: [{ id: "source-c0", text, pageNumber: 1 }] })),
+      putJson: vi.fn(async () => {}),
+      uri: (key: string) => `s3://test/${key}`,
+    };
+    const config = { textGenerationModel: "test-model", openRouterApiKey: "" } as Config;
+    await new GraphEnrichStage({} as CommandRunner, storage as unknown as ArtifactStore, config).run(state);
+
+    const mentions = await sql<{ document_id: string; chunk_id: string }[]>`
+      select c.document_id, ce.chunk_id from chunk_entities ce
+      join document_chunks c on c.id = ce.chunk_id
+    `;
+    expect(mentions.length).toBeGreaterThan(0);
+    expect(mentions.every((mention) => mention.document_id === "copy" && mention.chunk_id !== "source-c0")).toBe(true);
+    expect(await sql`select document_id from kg_document_state`).toEqual([{ document_id: "copy" }]);
+    expect(generateOpenRouterText).not.toHaveBeenCalled();
+  });
+
   it("persists reciprocal directed edges separately and merges reversed co-mentions", async () => {
     await seedDocument("d1", "Zulu supplies Alpha and Alpha supplies Zulu");
     await seedDocument("d2", "Alpha and Zulu appear together");
