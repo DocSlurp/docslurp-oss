@@ -7,10 +7,17 @@ if (go !== "--go") throw new Error("Network disabled: explicit --go required");
 const dataset = JSON.parse(fs.readFileSync(datasetPath));
 const config = JSON.parse(fs.readFileSync(configPath));
 const allowed = new Set(["rerank", "mmr", "parentRetrieval", "limit", "minScore"]);
+if (config.helperModelProof) {
+  const proof = JSON.parse(fs.readFileSync(config.helperModelProof));
+  const outputPrice = Number(proof.model?.pricing?.completion) * 1_000_000;
+  if (proof.model?.id !== config.expectedHelperModel || /(?:^|[-/])(?:pro|ultra)(?:$|[-/])/i.test(proof.model?.id ?? "") || !Number.isFinite(outputPrice) || outputPrice >= 50 || !config.runtimeModelEvidence) throw new Error("Unverified helper model or prohibited price");
+  allowed.add("queryRewrite");
+  allowed.add("iterativeMultiHop");
+}
 for (const arm of config.arms) for (const key of Object.keys(arm.overrides)) if (!allowed.has(key)) throw new Error(`Not a local option: ${key}`);
 if (!(config.maxEstimatedCostCents > 0 && config.maxEstimatedCostCents <= 10)) throw new Error("Expected capped cost <= 10 cents");
 fs.mkdirSync(output, { recursive: true });
-fs.writeFileSync(join(output, "config.json"), JSON.stringify({ datasetSha256: hash(fs.readFileSync(datasetPath)), arms: config.arms, maxEstimatedCostCents: config.maxEstimatedCostCents }, null, 2), { flag: "wx" });
+fs.writeFileSync(join(output, "config.json"), JSON.stringify({ datasetSha256: hash(fs.readFileSync(datasetPath)), arms: config.arms, expectedHelperModel: config.expectedHelperModel, runtimeModelEvidence: config.runtimeModelEvidence, helperModelProof: config.helperModelProof, maxEstimatedCostCents: config.maxEstimatedCostCents }, null, 2), { flag: "wx" });
 let estimatedCostCents = 0;
 for (const arm of config.arms) {
  const rows = [];

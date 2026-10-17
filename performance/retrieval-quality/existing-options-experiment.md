@@ -32,6 +32,7 @@ reconciliation; the runner stops when its cumulative estimated bound is reached.
   attribution and removal of an unnecessary in-chunk heading requirement are
   oracle corrections, not gains from retrieval changes.
 - `rerank=true` invokes local BM25 with adjacent-term bonuses. It also changes the
+  retrieval-adapter candidate limit to 200 (baseline uses requested limit), as well as the
   post-fusion candidate cap from `limit*2` to 200; this is an existing-option
   comparison, not an isolated scoring-formula experiment.
 - Production MMR receives no vectors. It uses positional selection, and
@@ -154,3 +155,38 @@ iterative retrieval permits up to three searches and two bridge calls capped at
 220 output tokens each. Both record response usage through the Search Session
 journal and flush with session/workspace/org scope. No enhancement calls have
 been made pending runtime-route and live-price verification.
+
+
+## Provider-backed route verification
+
+The coordinator checked production `printenv DOCSLURP_SEARCH_MODEL`: exit 1,
+empty output (unset). The deployed `a0f4cc0` shared default is
+`z-ai/glm-5.3-flash`. `resolveApiTextModelDefault` has no other override, and the
+Anthropic alias resolver does not change this GLM ID. Helpers therefore use
+OpenRouter GLM 5.3 Flash, independently of workspace ingestion configuration.
+
+The [official OpenRouter model API](https://openrouter.ai/api/v1/models) was fetched before calls and retained in
+`helper-model-pricing-v1.json`: input USD 0.15/M, output USD 0.50/M tokens. The
+[model marketing page](https://openrouter.ai/z-ai/glm-5.3-flash) displayed a
+different headline (0.06/1.60), so cost reporting uses actual response accounting
+and the captured API catalog; the higher output headline was considered in the
+budget bound. Both are below the prohibited output-price threshold.
+
+A single rewrite probe succeeded and was retained separately at
+`options-rewrite-smoke-v1/`, session
+`21c8d3dd-7be1-4003-ac48-c9b474472fa8`: 79 input, 24 output tokens,
+0.0025188 cents mixed API usage. Actual per-model ledger proof was requested.
+The remaining 15 development questions use rewrite alone, preserving all other
+baseline flags, at `options-rewrite-v1/`. This option changes the embedding query;
+the lexical query remains the original user query in the current planner. No
+provider-backed multi-hop calls have been made yet.
+
+
+Rewrite completed all 16 requests with HTTP 200: 12/13 explicit passages, the
+same remaining `asu-08` miss, and missing inferred support. No retrieval gain was
+observed over baseline. Total response usage is 1,440 input and 503 output tokens,
+0.0494076 mixed API cents (USD 0.000494076). Observed per-query p50/p95 were
+3,338/3,833 ms; these are descriptive single observations, not a causal latency
+comparison. Both negative answers remain unassessed. Preserve baseline defaults
+rather than enabling rewrite on this evidence. The summary with raw paths,
+hashes and session IDs is `options-rewrite-summary-v1.json`.
