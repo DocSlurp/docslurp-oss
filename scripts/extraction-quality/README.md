@@ -103,6 +103,8 @@ duplicate key points.
 
 ### Verdict ladder (deterministic matching cannot prove arbitrary claim support)
 
+This ladder is the `--diagnostic` mode. Promotion uses strict mode, which also queues every matched unit, fact, edge and relation (see Strict review).
+
 1. `fail`: any contradiction or contradicted edge, a missing case, an empty key-point or
    summary artifact, or a reviewer-confirmed unsupported or contradicted item. Without an
    accepted review verdict a flagged contradiction **always fails**, and an unreviewed
@@ -124,7 +126,7 @@ duplicate key points.
 `score.mjs --review-queue <path>` writes the queue (items shuffled, no scores, no
 candidate labels, no flag detail); `--review <file>` applies verdicts.
 
-### Adjudication (review schema v2, scorer `extraction-quality-scorer@v2`)
+### Adjudication (review schema v2, introduced in scorer `extraction-quality-scorer@v2`)
 
 The queue holds four item types. Every item carries `sourceSha256` and `itemSha256`
 (a hash over the item's full content and, for items that can overrule the scorer, the
@@ -144,7 +146,7 @@ exact artifact it was produced from).
                            "coveredBy": "<edge itemId, relation items only>" } } }
 ```
 
-A bare string verdict (the `@v1` format, still accepted) works exactly as before for
+A bare string verdict (the `@v1` format, still accepted outside strict mode, see Strict review) works exactly as before for
 `unit`, `edge` and `fact` items that the scorer did not flag. It can never overrule the
 scorer. A verdict that would overrule the scorer is accepted only when **all** hold,
 and is otherwise listed under `review.rejected` with a reason while the scorer's
@@ -179,6 +181,63 @@ held-out queue as sensitive and never feed it back to a tuner. Heuristic detecti
 itself (negation cues, number matching) is unchanged: this version adds a way to
 adjudicate flags, not a looser gate.
 
+### Strict review (`--require-review-all`, scorer `extraction-quality-scorer@v3`)
+
+A term-group match shows that the right words co-occur in one sentence. It cannot show
+that the sentence says the right thing: a wrong date or month, a swapped subject and
+object, a lost qualifier or a bound stated the other way round all keep every keyword.
+Diagnostic mode therefore cannot support promotion. **Strict mode is the default of the
+CLI**; the term-group-assisted ladder above is kept for development triage behind
+`--diagnostic`. The two flags are mutually exclusive, `--require-review-all` just makes
+the default explicit, and the report carries `mode: "strict" | "diagnostic"`.
+(`scoreRun({ requireReviewAll })` defaults to `false` so library callers such as the dataset builder's
+oracle checks keep the diagnostic behaviour.)
+
+In strict mode nothing is supported or covered by matching alone. The queue contains
+**every** item, and `pass` needs an accepted verdict for each:
+
+| Item | Queued | Covered or supported only by |
+| --- | --- | --- |
+| `unit` | every key-point and summary sentence, matched, unmatched or neutral, bound to the exact artifact. Heuristic flags are queued like any other unit | a `supported` verdict with a verbatim quote |
+| `fact` | every expected fact of a non-empty artifact (summary: the salient subset), with its statement, the gold evidence quotes and `candidates`: every reviewable output unit | `covered` + `coveredBy` (a candidate unit `itemId`) + a verbatim quote; the same review must judge that unit `supported` (`covering-unit-not-supported`) |
+| `edge` | every output edge that is not structurally contradicted, including edges the frozen predicate lists already match, bound to the exact graph | a `supported` verdict with a verbatim quote |
+| `relation` | every gold relation, including automatically matched ones, whenever the graph has at least one reviewable edge | `covered` + `coveredBy` (a candidate edge) + a quote; that edge must be judged `supported` and covers one relation only |
+
+Rules:
+
+- Review `@v2` only. A bare string verdict cannot carry a binding or a quote, so `@v1` reviews are
+  invalid in strict mode (`review.problems` lists `strict-requires-v2-schema`).
+- **Every** verdict, positive or negative, must echo the item's `itemSha256`
+  (`missing-binding`). A stale hash is rejected (`stale-binding`): unit, fact and relation
+  items bind to the artifact they came from, and strict edge ids and hashes include the exact
+  graph, so a changed output never inherits a verdict.
+- Every `supported`/`covered` verdict needs at least one verbatim source quote
+  (`missing-evidence`, `evidence-not-in-source`, `source-unavailable`). The case source text must
+  be supplied (`--source` for single-case runs).
+- Judge meaning. The protocol shipped in the queue tells the reviewer to fail a wrong date,
+  month, year or quantity, or reversed roles, even when every keyword is present. A reviewer
+  `unsupported` or `contradicted` verdict on any item **fails** the run.
+- An earlier or partial review does not count as a full review. A queued item without an accepted verdict keeps the
+  run at `needs-review`; `review.completeness` (`required`, `accepted`, `open`, `byType`) reports how
+  much of the queue is closed, and `pass` requires `open = 0`. Rejected verdicts are listed
+  under `review.rejected`.
+- Automated results are diagnostics, preserved side by side: `deterministic` is the
+  term-group aggregate with no review applied, and the strict aggregate shows reviewed
+  numbers only (coverage, precision, recall and soundness are 0 until verdicts arrive; unreviewed units count
+  as `openUnverified`).
+- Still deterministic and never reviewable: structural graph contradictions (reversed, forbidden,
+  self-loop) and authored contradiction signatures. They fail the run and are not queued.
+- True absence fails. An empty or missing key-point or summary artifact fails, and so does a
+  graph with no edges when the gold has relations (nothing exists for a reviewer to credit). A
+  fact or relation that a reviewer marks `not-covered` is an ordinary miss: it lowers coverage or
+  recall, and `aggregate.targets` still reports the frozen thresholds separately from the
+  evidence verdict.
+
+Strict mode reuses the v2 adjudication machinery (itemised `review.adjudications` for
+flag and relation verdicts, `review.rejected`, aggregate-only reports) rather than adding a second loop. A strict review
+shows that every claim was independently checked against the source, not that the targets are met. Do not tune on a held-out
+queue.
+
 #### Migrating from `@v1` reviews
 
 `@v1` reviews remain valid and every existing item id is unchanged, so a baseline can be
@@ -196,7 +255,8 @@ Never copy verdicts across runs: the hashes will not match and the scorer will s
 
 ```
 node scripts/extraction-quality/build-dataset.mjs --development dev.spec.json --heldout ho.spec.json --out <root>/version-v1
-node scripts/extraction-quality/score.mjs --dataset <root>/version-v1 --split development --outputs outputs.json [--review r.json] [--review-queue q.json] [--out report.json]
+node scripts/extraction-quality/score.mjs --dataset <root>/version-v1 --split development --outputs outputs.json [--review r.json] [--review-queue q.json] [--out report.json]   # strict by default (promotion)
+node scripts/extraction-quality/score.mjs --dataset <root>/version-v1 --split development --outputs outputs.json --diagnostic            # development triage only; never promote on this
 node scripts/extraction-quality/score.mjs --gold <id>.gold.json --output output.json --source <id>.txt [--review r.json]   # single case; --source enables v2 overrides
 node scripts/extraction-quality/score.mjs --dataset <root>/version-v1 --split heldout --outputs outputs.json --aggregate-only
 node scripts/evaluation-integrity-judge.mjs --dataset <root>/version-v1
@@ -208,7 +268,9 @@ held-out report.
 
 ## Known limits
 
-Regex term-group oracles are conservative: a correct paraphrase outside the authored
+Strict mode makes the reviewer, not the oracle, the authority on meaning: its guarantees are only as good as the
+review's independence, which is attested and not verified, and a quote proves the cited text exists rather than that it supports
+the claim. Regex term-group oracles are conservative: a correct paraphrase outside the authored
 alternatives is `unverified`, not wrong, so it needs blind review rather than a silent
 pass. Negation is detected from a cue word list around the matched span, so a true
 lexical negation ("withheld consent") or a cue outside the span raises a heuristic

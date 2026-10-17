@@ -1,11 +1,12 @@
 // Sentinel tests for the extraction-quality scorer and dataset builder.
 // Fixtures are synthetic and invented here; no authored dataset content appears in this file.
 import assert from 'node:assert/strict';
-import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 import { buildDataset } from './build-dataset.mjs';
 import { aggregateOnly, parseNumbers, scoreCase, scoreGraph, scoreProse, scoreRun, splitUnits, tokens } from './score.mjs';
@@ -449,6 +450,213 @@ test('legacy v1 reviews keep working for units, edges and facts, with the new it
   assert.equal(r.aggregate.openReviewItems, 1, 'only the flagged unit still needs a v2 verdict');
   assert.equal(r.aggregate.verdict, 'fail');
   assert.equal(r.schema, 'docslurp-extraction-quality-report@v2');
+});
+
+// ---- strict review: nothing passes on an automatic match (requireReviewAll) ------------------
+const runStrict = (output, review = null, sourceText = SOURCE) => scoreRun({ cases: [{ id: gold.id, gold, sourceText }], outputs: { cases: { [gold.id]: output } }, review, requireReviewAll: true });
+const KEYWORD = { 'f-founded': 'founded', 'f-staff': 'employ', 'f-succeeded': 'succeeded', 'f-board': 'board' };
+/** Answers every strict item: relations name the edge with their first predicate, facts the unit containing their keyword. */
+const strictReview = (queue, pick = () => ({}), header = {}) => reviewV2(queue, (i) => ({
+  ...(i.type === 'relation' ? { coveredBy: i.candidates.find((c) => c.predicate === i.relation.predicates[0])?.edgeId } : {}),
+  ...(i.type === 'fact' ? { coveredBy: i.candidates.find((c) => c.text.toLowerCase().includes(KEYWORD[i.factId]))?.unitId } : {}),
+  ...pick(i),
+}), header);
+const countBy = (r, type) => r.queue.items.filter((i) => i.type === type).length;
+// Every keyword group is present and nothing is negated, yet subject and object are swapped; no authored signature covers it.
+const SWAPPED = 'At least 40 researchers employ the Institute.';
+const swappedOut = { ...reference, keyPoints: [...reference.keyPoints.filter((k) => !k.includes('employs')), SWAPPED] };
+
+test('strict: a fully matched run queues every unit, fact, edge and relation and passes nothing unreviewed', () => {
+  const r = runStrict(reference);
+  assert.equal(r.mode, 'strict');
+  assert.equal(r.queue.mode, 'strict');
+  assert.equal(countBy(r, 'unit'), 4 + 1, 'every key point and the summary, matched or not');
+  assert.equal(countBy(r, 'fact'), 4 + 2, 'every expected fact: all key-point facts and the salient summary facts');
+  assert.equal(countBy(r, 'edge'), 3);
+  assert.equal(countBy(r, 'relation'), 3, 'auto-covered relations are reviewed too');
+  assert.equal(r.aggregate.verdict, 'needs-review');
+  assert.equal(r.review.completeness.accepted, 0);
+  assert.equal(r.review.completeness.open, r.queue.items.length);
+  assert.equal(only(r).keyPoints.coverage, 0, 'a term-group match is a diagnostic and earns no coverage');
+  assert.equal(only(r).graph.recall, 0);
+  assert.equal(only(r).graph.precision, 0);
+  assert.equal(r.aggregate.openReviewItems, r.queue.items.length);
+  assert.equal(r.deterministic.keyPoints.pooledCoverage, 1, 'automated diagnostics stay beside the reviewed numbers');
+  assert.equal(r.deterministic.graph.pooled.recall, 1);
+  assert.equal(run(reference, blind({})).aggregate.verdict, 'pass', 'diagnostic mode still passes this run on matching alone');
+  assert.ok(r.queue.items.filter((i) => i.type === 'fact').every((i) => i.statement && i.evidence.length && i.candidates.length), 'fact items carry the fact, its evidence and the candidate units');
+  assert.ok(runStrict(reference).queue.items.every((i) => /^[0-9a-f]{64}$/u.test(i.itemSha256)));
+});
+
+test('strict: a complete, bound, source-quoted independent review passes and fills the reviewed numbers', () => {
+  const first = runStrict(reference), r = runStrict(reference, strictReview(first.queue));
+  assert.deepEqual(r.review.rejected, []);
+  assert.equal(r.review.completeness.open, 0);
+  assert.equal(r.review.boundVerdicts, first.queue.items.length);
+  assert.equal(r.aggregate.verdict, 'pass');
+  assert.equal(only(r).keyPoints.coverage, 1);
+  assert.equal(only(r).summary.coverage, 1);
+  assert.equal(only(r).keyPoints.soundness, 1);
+  assert.equal(only(r).graph.f1, 1);
+  assert.equal(r.aggregate.openReviewItems, 0);
+  assert.deepEqual(r.review.completeness.byType.fact, { required: 6, accepted: 6 });
+});
+
+test('strict: an earlier or partial review does not count while any matched item is unreviewed', () => {
+  const first = runStrict(reference);
+  for (const type of ['unit', 'fact', 'edge', 'relation']) {
+    const left = first.queue.items.find((i) => i.type === type);
+    const items = strictReview(first.queue).items;
+    delete items[left.itemId];
+    const r = runStrict(reference, { ...strictReview(first.queue), items });
+    assert.equal(r.aggregate.verdict, 'needs-review', `${type} left unreviewed`);
+    assert.ok(r.review.completeness.open >= 1, `${type}: ${r.review.completeness.open} open`);
+  }
+  const legacy = runStrict(reference, blind(Object.fromEntries(first.queue.items.map((i) => [i.itemId, POSITIVE[i.type]]))));
+  assert.equal(legacy.aggregate.verdict, 'needs-review');
+  assert.ok(legacy.review.problems.includes('strict-requires-v2-schema'));
+  const unbound = runStrict(reference, strictReview(first.queue, () => ({ itemSha256: undefined })));
+  assert.equal(unbound.aggregate.verdict, 'needs-review');
+  assert.equal(unbound.review.ignoredVerdicts, first.queue.items.length);
+  assert.ok(reasons(unbound).every((x) => x === 'missing-binding'));
+  assert.equal(runStrict(reference, strictReview(first.queue, undefined, { blind: false })).aggregate.verdict, 'needs-review');
+  assert.equal(runStrict(reference, strictReview(first.queue, undefined, { independentOfAuthor: false })).aggregate.verdict, 'needs-review');
+});
+
+test('strict: keyword matches with reversed subject and object cannot pass without review, and a reviewer can fail them', () => {
+  const diag = run(swappedOut, blind({}));
+  assert.equal(unitsOf(diag, 'keyPoints').find((u) => u.text === SWAPPED).status, 'supported', 'the term-group match accepts reversed roles');
+  assert.equal(diag.aggregate.verdict, 'pass', 'diagnostic mode would let it through');
+  const first = runStrict(swappedOut);
+  assert.equal(first.aggregate.verdict, 'needs-review');
+  assert.ok(first.queue.items.some((i) => i.type === 'unit' && i.text === SWAPPED));
+  const unit = first.queue.items.find((i) => i.type === 'unit' && i.text === SWAPPED);
+  const failed = runStrict(swappedOut, strictReview(first.queue, (i) => (i.itemId === unit.itemId ? { verdict: 'unsupported', evidence: undefined } : {})));
+  assert.equal(failed.aggregate.verdict, 'fail');
+  assert.equal(failed.aggregate.confirmedUnsupported, 1);
+  const contradicted = runStrict(swappedOut, strictReview(first.queue, (i) => (i.itemId === unit.itemId ? { verdict: 'contradicted', evidence: undefined } : {})));
+  assert.equal(contradicted.aggregate.verdict, 'fail');
+  assert.equal(contradicted.aggregate.contradictions, 1);
+});
+
+test('strict: supported and covered verdicts need verbatim source evidence on every item type', () => {
+  const first = runStrict(reference);
+  for (const [name, patch] of [['missing', { evidence: undefined }], ['misquoted', { evidence: ['Hale Voss abolished the Tarn Institute.'] }], ['too short', { evidence: ['Hale Voss'] }]]) {
+    const r = runStrict(reference, strictReview(first.queue, () => patch));
+    assert.equal(r.aggregate.verdict, 'needs-review', name);
+    assert.equal(r.review.ignoredVerdicts, first.queue.items.length, name);
+    assert.equal(only(r).keyPoints.coverage, 0, name);
+  }
+  assert.ok(reasons(runStrict(reference, strictReview(first.queue, () => ({ evidence: undefined })))).every((x) => x === 'missing-evidence'));
+  const blindSource = runStrict(reference, null, null), noSource = runStrict(reference, strictReview(blindSource.queue), null);
+  assert.ok(reasons(noSource).length > 0 && reasons(noSource).every((x) => x === 'source-unavailable'), 'without the source text nothing can be quoted');
+  assert.equal(noSource.aggregate.verdict, 'needs-review');
+});
+
+test('strict: a stale hash is rejected when the artifact changes, and a bound verdict cannot be moved to another item', () => {
+  const first = runStrict(reference), review = strictReview(first.queue);
+  const changed = { ...reference, keyPoints: [...reference.keyPoints.slice(0, 3), 'The board rejected the relocation entirely.'] };
+  const r = runStrict(changed, review);
+  assert.equal(r.aggregate.verdict, 'needs-review');
+  assert.ok(r.review.ignoredVerdicts > 0 && reasons(r).every((x) => ['stale-binding', 'unknown-item'].includes(x)));
+  const [a, b] = first.queue.items.filter((i) => i.type === 'edge');
+  const swapped = strictReview(first.queue, (i) => (i.itemId === a.itemId ? { itemSha256: b.itemSha256 } : {}));
+  assert.ok(reasons(runStrict(reference, swapped)).includes('stale-binding'));
+  const otherGraph = { ...reference, graph: { ...reference.graph, relationships: [...reference.graph.relationships, edge('c', 'admires', 'a')] } };
+  const foundedEdge = (r) => r.queue.items.find((i) => i.type === 'edge' && i.predicate === 'founded');
+  assert.notEqual(foundedEdge(runStrict(otherGraph)).itemSha256, foundedEdge(first).itemSha256, 'edge bindings follow the exact graph');
+  assert.notEqual(foundedEdge(runStrict(otherGraph)).itemId, foundedEdge(first).itemId);
+});
+
+test('strict: fact coverage names an explicit output unit that the same review judges supported', () => {
+  const first = runStrict(reference), staff = first.queue.items.find((i) => i.type === 'fact' && i.factId === 'f-staff');
+  const covering = staff.candidates.find((c) => c.text.includes('employs')).unitId;
+  const attempt = (patch, units = {}) => runStrict(reference, strictReview(first.queue, (i) => (i.itemId === staff.itemId ? patch : i.type === 'unit' && units[i.itemId] ? { verdict: units[i.itemId], evidence: undefined } : {})));
+  let r = attempt({ coveredBy: undefined }); assert.ok(reasons(r).includes('bad-covered-by')); assert.equal(r.aggregate.verdict, 'needs-review');
+  r = attempt({ coveredBy: 'nonexistent' }); assert.ok(reasons(r).includes('bad-covered-by'));
+  r = attempt({ coveredBy: first.queue.items.find((i) => i.type === 'edge').itemId }); assert.ok(reasons(r).includes('bad-covered-by'), 'an edge cannot cover a prose fact');
+  r = attempt({}, { [covering]: 'unsupported' }); assert.ok(reasons(r).includes('covering-unit-not-supported')); assert.equal(r.aggregate.verdict, 'fail', 'the unsupported unit fails the run');
+  assert.ok(only(r).keyPoints.coverage < 1);
+  r = attempt({ verdict: 'not-covered', coveredBy: undefined, evidence: undefined });
+  assert.deepEqual(r.review.rejected, []);
+  assert.equal(r.aggregate.verdict, 'pass', 'a bound not-covered closes the item without credit');
+  assert.equal(only(r).keyPoints.coverage, 0.75);
+  const other = first.queue.items.find((i) => i.type === 'fact' && i.field === 'summary').candidates[0].unitId;
+  assert.ok(reasons(attempt({ coveredBy: other })).includes('bad-covered-by'), 'a unit from another artifact is not a candidate');
+});
+
+test('strict: graph edges and relations need bound evidence; a covering edge must be supported and covers one relation', () => {
+  const first = runStrict(reference);
+  const founded = first.queue.items.find((i) => i.type === 'relation' && i.relation.predicates.includes('founded'));
+  const edgeOf = (predicate) => founded.candidates.find((c) => c.predicate === predicate).edgeId;
+  const attempt = (pick) => runStrict(reference, strictReview(first.queue, pick));
+  let r = attempt((i) => (i.itemId === founded.itemId ? { coveredBy: edgeOf('succeeded') } : {}));
+  assert.ok(reasons(r).includes('edge-already-covers-another-relation'), 'one edge cannot cover two relations');
+  assert.equal(r.aggregate.verdict, 'needs-review');
+  r = attempt((i) => (i.itemId === edgeOf('founded') ? { verdict: 'unsupported', evidence: undefined } : {}));
+  assert.ok(reasons(r).includes('covering-edge-not-supported'));
+  assert.equal(r.aggregate.verdict, 'fail');
+  assert.equal(only(r).graph.precision, 2 / 3);
+  r = attempt((i) => (i.type === 'edge' && i.predicate === 'worked with' ? { verdict: 'contradicted', evidence: undefined } : {}));
+  assert.equal(r.aggregate.verdict, 'fail');
+  assert.equal(r.aggregate.graph.contradictedEdges, 1);
+  r = attempt((i) => (i.type === 'relation' && i.relation.predicates.includes('worked with') ? { verdict: 'not-covered', coveredBy: undefined, evidence: undefined } : {}));
+  assert.equal(only(r).graph.recall, 2 / 3);
+  assert.equal(r.aggregate.verdict, 'pass');
+  assert.equal(r.aggregate.targets.graphRecall, false, 'targets are still reported separately from the evidence verdict');
+});
+
+test('strict: structural graph contradictions and authored signatures still fail and are never queued for review', () => {
+  const reversed = runStrict({ ...reference, graph: { ...reference.graph, relationships: [...reference.graph.relationships, edge('b', 'founded', 'a')] } });
+  assert.equal(reversed.aggregate.verdict, 'fail');
+  assert.equal(countBy(reversed, 'edge'), 3, 'the reversed edge is not offered to a reviewer');
+  const authored = runStrict({ ...reference, keyPoints: ['Voss succeeded Marlow as director.'] });
+  assert.equal(authored.aggregate.verdict, 'fail');
+  assert.ok(!authored.queue.items.some((i) => i.text === 'Voss succeeded Marlow as director.'));
+  const reviewed = runStrict({ ...reference, keyPoints: ['Voss succeeded Marlow as director.'] }, strictReview(authored.queue));
+  assert.equal(reviewed.aggregate.verdict, 'fail', 'no review can clear it');
+});
+
+test('strict: true absence and empty artifacts fail instead of passing an empty review', () => {
+  const noGraph = runStrict({ ...reference, graph: { entities: [], relationships: [] } }, strictReview(runStrict({ ...reference, graph: { entities: [], relationships: [] } }).queue));
+  assert.equal(countBy(noGraph, 'relation'), 0, 'nothing exists that a reviewer could credit');
+  assert.equal(noGraph.aggregate.verdict, 'fail');
+  assert.equal(noGraph.aggregate.emptyArtifacts, 1);
+  const noPoints = runStrict({ ...reference, keyPoints: [] });
+  assert.equal(noPoints.aggregate.verdict, 'fail');
+  assert.equal(runStrict({ ...reference, summary: '' }, strictReview(runStrict({ ...reference, summary: '' }).queue)).aggregate.verdict, 'fail');
+  assert.equal(runStrict(null).aggregate.verdict, 'fail');
+  const control = { ...gold, relations: [], forbiddenRelations: [], facts: [] };
+  const empty = scoreRun({ cases: [{ id: gold.id, gold: control, sourceText: SOURCE }], outputs: { cases: { [gold.id]: { graph: { entities: [], relationships: [] }, keyPoints: ['The Institute exists.'], summary: 'The Institute exists.' } } }, requireReviewAll: true });
+  assert.equal(empty.aggregate.emptyArtifacts, 0, 'an empty graph is the correct answer for a no-relations control');
+});
+
+test('strict: aggregate-only keeps counts and the mode but no case text, and diagnostic mode stays the library default', () => {
+  const first = runStrict(reference), r = runStrict(reference, strictReview(first.queue)), text = JSON.stringify(aggregateOnly(r));
+  assert.ok(text.includes('"mode":"strict"') && text.includes('"completeness"'));
+  assert.ok(!text.includes('synthetic-case-01') && !text.includes('Hale Voss') && !text.includes('"queue"') && !text.includes('"details"'));
+  assert.equal(run(reference).mode, 'diagnostic');
+  assert.equal(run(reference).queue.mode, 'diagnostic');
+});
+
+test('strict: the CLI defaults to strict for promotion; --diagnostic opts out and the flags cannot be combined', () => {
+  const dir = tmp(), file = (name, value) => { const path = join(dir, name); writeFileSync(path, typeof value === 'string' ? value : JSON.stringify(value)); return path; };
+  const args = ['--gold', file('gold.json', gold), '--output', file('output.json', reference), '--source', file('source.txt', SOURCE)];
+  const cli = (...extra) => JSON.parse(execFileSync(process.execPath, [fileURLToPath(new URL('./score.mjs', import.meta.url)), ...args, ...extra], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }));
+  try {
+    assert.equal(cli().mode, 'strict');
+    assert.equal(cli('--require-review-all').mode, 'strict');
+    assert.equal(cli().aggregate.verdict, 'needs-review');
+    assert.equal(cli('--diagnostic').mode, 'diagnostic');
+    const queueFile = join(dir, 'queue.json');
+    cli('--review-queue', queueFile);
+    const queue = JSON.parse(readFileSync(queueFile, 'utf8'));
+    assert.equal(queue.mode, 'strict');
+    const reviewFile = file('review.json', strictReview(queue));
+    assert.equal(cli('--review', reviewFile).aggregate.verdict, 'pass');
+    assert.equal(cli('--review', reviewFile, '--aggregate-only').aggregateOnly, true);
+    assert.throws(() => cli('--diagnostic', '--require-review-all'), /mutually exclusive/u);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
 // ---- builder -------------------------------------------------------------------------
