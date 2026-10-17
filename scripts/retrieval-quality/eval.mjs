@@ -16,13 +16,13 @@ export function score(test, results, k = 10) {
       const text = p.quotes.every(q => normalize(r.text).includes(normalize(q)));
       const document = r.citation?.documentId === p.documentId;
       const pages = [r.citation?.pageNumber, ...(r.citation?.pageNumbers ?? [])];
-      return { rank: i + 1, text, document, page: p.pages.some(p => pages.includes(p)) };
+      return { rank: i + 1, text, document, page: p.pages.some(p => pages.includes(p)), primaryPage: p.pages.includes(r.citation?.pageNumber), sourceTracePage: p.pages.some(p => (r.citation?.sourceTrace?.pageNumbers ?? []).includes(p)) };
     });
     const hit = matches.find(m => m.text && m.document && m.page);
-    return { rank: hit?.rank ?? null, textWithInvalidCitation: matches.filter(m => m.text && !(m.document && m.page)).map(m => m.rank), citedPageWithoutText: matches.filter(m => m.document && m.page && !m.text).map(m => m.rank) };
+    return { rank: hit?.rank ?? null, primaryPageRank: matches.find(m => m.text && m.document && m.primaryPage)?.rank ?? null, sourceTracePageRank: matches.find(m => m.text && m.document && m.sourceTracePage)?.rank ?? null, expandedPageUnionRank: hit?.rank ?? null, textWithInvalidCitation: matches.filter(m => m.text && !(m.document && m.page)).map(m => m.rank), citedPageWithoutText: matches.filter(m => m.document && m.page && !m.text).map(m => m.rank) };
   });
   const correct = premises.every(p => p.rank !== null);
-  return { id: test.id, correct, reciprocalRank: correct ? 1 / Math.max(...premises.map(p => p.rank)) : 0, premises, diagnosis: correct ? "support_retrieved" : premises.some(p => p.textWithInvalidCitation.length) ? "citation_metadata" : "unresolved_extraction_chunking_or_ranking" };
+  return { id: test.id, citationMetric: "expanded_page_union_with_matching_chunk_text", correct, primaryPageCorrect: premises.every(p => p.primaryPageRank !== null), sourceTracePageCorrect: premises.every(p => p.sourceTracePageRank !== null), reciprocalRank: correct ? 1 / Math.max(...premises.map(p => p.rank)) : 0, premises, diagnosis: correct ? "support_retrieved" : premises.some(p => p.textWithInvalidCitation.length) ? "citation_metadata" : "unresolved_extraction_chunking_or_ranking" };
 }
 // Build only from explicitly supplied development inputs. Never discover held-out files.
 export function build(manifestPath, queriesPath, runDirs, output) {

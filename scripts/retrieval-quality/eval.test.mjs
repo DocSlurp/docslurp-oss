@@ -25,3 +25,13 @@ test("normalization preserves punctuation and rejects empty oracle", () => {
 test("empty retrieval never proves answer abstention", () => {
  assert.equal(score({ id: "negative", kind: "unanswerable" }, []).status, "requires_answer_abstention_review");
 });
+
+test("expanded parent pages do not masquerade as primary or source-trace page evidence", () => {
+ const result = score(example, [hit]);
+ assert.equal(result.correct, true);
+ assert.equal(result.primaryPageCorrect, false);
+ assert.equal(result.sourceTracePageCorrect, false);
+ const source = score(example, [{ ...hit, citation: { ...hit.citation, sourceTrace: { pageNumbers: [3] } } }]);
+ assert.equal(source.sourceTracePageCorrect, true);
+ assert.equal(source.primaryPageCorrect, false);
+});
