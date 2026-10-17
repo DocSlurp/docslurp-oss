@@ -1,0 +1,443 @@
+{
+  "finalState": "completed",
+  "cancel": null,
+  "pagesExpected": 1114,
+  "pagesMatchManifest": true,
+  "uploadWarnings": [],
+  "label": "e3-hosted-statutes83",
+  "runId": "1d4e9862-29d0-473e-8371-38727aa63fa4",
+  "workspaceId": "98e09efb-6ab6-4574-a0cc-3bd18fba40a4",
+  "profile": "rag-only",
+  "file": {
+    "id": "statutes-at-large-vol-83",
+    "sizeBytes": 184012284,
+    "sha256": "b1d704e5d8be75dba16ed95a004915a350d067827e01f0650d926d5573ac4321"
+  },
+  "classification": "cold",
+  "coldClaimAllowed": true,
+  "upload": {
+    "mode": "multipart",
+    "uploadMs": 7801,
+    "MBps": 22.5,
+    "sessionMs": 973,
+    "confirmMs": 5687
+  },
+  "milestonesSecFromUploadStart": {
+    "uploadAccepted": 14.5,
+    "firstPageProcessed": 88,
+    "firstCorrectResult": 143,
+    "queryable_beginning": 143,
+    "queryable_end": 151.4,
+    "queryable_middle": 161.7,
+    "allPositionsQueryable": 161.7,
+    "runCompleted": 188.8
+  },
+  "abortGate": null,
+  "final": {
+    "status": "completed",
+    "controlState": null,
+    "stage": "completed",
+    "pct": 100,
+    "pages": {
+      "completed": 1114,
+      "total": 1114,
+      "byStage": {
+        "extract-markdown": 1114,
+        "vision-extract": 8,
+        "embed": 1108,
+        "split-pages": 1114,
+        "render-images": 1114
+      },
+      "byDocument": {
+        "a2a9b452-739d-4e35-9789-259df1eb9147": {
+          "extract-markdown": 1114,
+          "vision-extract": 8,
+          "embed": 1108,
+          "split-pages": 1114,
+          "render-images": 1114
+        }
+      }
+    },
+    "cost": 37.299365277778,
+    "billed": 37.299365277778,
+    "ai": 3.58422,
+    "fee": 33.42,
+    "compute": 0.295145277778,
+    "inTok": 1324228,
+    "outTok": 1961,
+    "res": {
+      "elapsedMs": 172785,
+      "cpuUserMs": 0,
+      "cpuSystemMs": 0,
+      "cpuTotalMs": 0,
+      "rssDeltaBytes": 0,
+      "peakRssBytes": 0
+    },
+    "failedDocs": 0,
+    "embed": {
+      "reuseHits": 0,
+      "reuseMisses": 4859,
+      "providerInputs": 4859,
+      "documentContextReused": false
+    }
+  },
+  "stages": [
+    {
+      "stage": "quarantine",
+      "doc": "doc",
+      "status": "completed",
+      "attempts": 1,
+      "ms": 3602,
+      "startedAt": "2026-10-17 04:52:30.22751+00",
+      "error": null
+    },
+    {
+      "stage": "quarantine",
+      "doc": "run",
+      "status": "completed",
+      "attempts": 1,
+      "ms": 4413,
+      "startedAt": "2026-10-17 04:52:29.89206+00",
+      "durationMsStat": 4077,
+      "error": null
+    },
+    {
+      "stage": "format-detect",
+      "doc": "doc",
+      "status": "completed",
+      "attempts": 1,
+      "ms": 127,
+      "startedAt": "2026-10-17 04:52:36.007447+00",
+      "error": null
+    },
+    {
+      "stage": "format-detect",
+      "doc": "run",
+      "status": "completed",
+      "attempts": 1,
+      "ms": 669,
+      "startedAt": "2026-10-17 04:52:35.666088+00",
+      "durationMsStat": 330,
+      "error": null
+    },
+    {
+      "stage": "to-canonical",
+      "doc": "doc",
+      "status": "completed",
+      "attempts": 1,
+      "ms": 118,
+      "startedAt": "2026-10-17 04:52:37.554376+00",
+      "error": null
+    },
+    {
+      "stage": "to-canonical",
+      "doc": "run",
+      "status": "completed",
+      "attempts": 1,
+      "ms": 657,
+      "startedAt": "2026-10-17 04:52:37.219844+00",
+      "durationMsStat": 321,
+      "error": null
+    },
+    {
+      "stage": "format-tooling",
+      "doc": "doc",
+      "status": "completed",
+      "attempts": 1,
+      "ms": 125,
+      "startedAt": "2026-10-17 04:52:39.094229+00",
+      "error": null
+    },
+    {
+      "stage": "format-tooling",
+      "doc": "run",
+      "status": "completed",
+      "attempts": 1,
+      "ms": 664,
+      "startedAt": "2026-10-17 04:52:38.759521+00",
+      "durationMsStat": 331,
+      "error": null
+    },
+    {
+      "stage": "normalize",
+      "doc": "doc",
+      "status": "completed",
+      "attempts": 1,
+      "ms": 70,
+      "startedAt": "2026-10-17 04:52:40.643685+00",
+      "error": null
+    },
+    {
+      "stage": "normalize",
+      "doc": "run",
+      "status": "completed",
+      "attempts": 1,
+      "ms": 611,
+      "startedAt": "2026-10-17 04:52:40.306561+00",
+      "durationMsStat": 274,
+      "error": null
+    },
+    {
+      "stage": "pdf-tooling",
+      "doc": "doc",
+      "status": "completed",
+      "attempts": 1,
+      "ms": 164,
+      "startedAt": "2026-10-17 04:52:42.143469+00",
+      "error": null
+    },
+    {
+      "stage": "pdf-tooling",
+      "doc": "run",
+      "status": "completed",
+      "attempts": 1,
+      "ms": 706,
+      "startedAt": "2026-10-17 04:52:41.803479+00",
+      "durationMsStat": 367,
+      "error": null
+    },
+    {
+      "stage": "split-pages",
+      "doc": "doc",
+      "status": "completed",
+      "attempts": 1,
+      "ms": 4311,
+      "startedAt": "2026-10-17 04:52:44.153614+00",
+      "error": null
+    },
+    {
+      "stage": "split-pages",
+      "doc": "run",
+      "status": "completed",
+      "attempts": 1,
+      "ms": 4986,
+      "startedAt": "2026-10-17 04:52:43.815879+00",
+      "durationMsStat": 4648,
+      "error": null
+    },
+    {
+      "stage": "extract-markdown",
+      "doc": "doc",
+      "status": "completed",
+      "attempts": 1,
+      "ms": 51400,
+      "startedAt": "2026-10-17 04:52:50.030353+00",
+      "error": null
+    },
+    {
+      "stage": "extract-markdown",
+      "doc": "run",
+      "status": "completed",
+      "attempts": 1,
+      "ms": 51946,
+      "startedAt": "2026-10-17 04:52:49.690012+00",
+      "durationMsStat": 51607,
+      "error": null
+    },
+    {
+      "stage": "classify-route",
+      "doc": "doc",
+      "status": "completed",
+      "attempts": 1,
+      "ms": 844,
+      "startedAt": "2026-10-17 04:53:42.899098+00",
+      "error": null
+    },
+    {
+      "stage": "classify-route",
+      "doc": "run",
+      "status": "completed",
+      "attempts": 1,
+      "ms": 1388,
+      "startedAt": "2026-10-17 04:53:42.559482+00",
+      "durationMsStat": 1047,
+      "error": null
+    },
+    {
+      "stage": "route-pages",
+      "doc": "doc",
+      "status": "completed",
+      "attempts": 1,
+      "ms": 407,
+      "startedAt": "2026-10-17 04:53:45.247708+00",
+      "error": null
+    },
+    {
+      "stage": "route-pages",
+      "doc": "run",
+      "status": "completed",
+      "attempts": 1,
+      "ms": 947,
+      "startedAt": "2026-10-17 04:53:44.909105+00",
+      "durationMsStat": 610,
+      "error": null
+    },
+    {
+      "stage": "render-images",
+      "doc": "doc",
+      "status": "completed",
+      "attempts": 1,
+      "ms": 8719,
+      "startedAt": "2026-10-17 04:53:47.156626+00",
+      "error": null
+    },
+    {
+      "stage": "render-images",
+      "doc": "run",
+      "status": "completed",
+      "attempts": 1,
+      "ms": 9554,
+      "startedAt": "2026-10-17 04:53:46.812344+00",
+      "durationMsStat": 9211,
+      "error": null
+    },
+    {
+      "stage": "vision-extract",
+      "doc": "doc",
+      "status": "completed",
+      "attempts": 1,
+      "ms": 19828,
+      "startedAt": "2026-10-17 04:53:58.179859+00",
+      "error": null
+    },
+    {
+      "stage": "vision-extract",
+      "doc": "run",
+      "status": "completed",
+      "attempts": 1,
+      "ms": 20581,
+      "startedAt": "2026-10-17 04:53:57.833013+00",
+      "durationMsStat": 20236,
+      "error": null
+    },
+    {
+      "stage": "embed",
+      "doc": "doc",
+      "status": "completed",
+      "attempts": 1,
+      "ms": 47152,
+      "startedAt": "2026-10-17 04:54:19.731148+00",
+      "error": null
+    },
+    {
+      "stage": "embed",
+      "doc": "run",
+      "status": "completed",
+      "attempts": 1,
+      "ms": 47911,
+      "startedAt": "2026-10-17 04:54:19.386838+00",
+      "durationMsStat": 47568,
+      "error": null
+    },
+    {
+      "stage": "index",
+      "doc": "doc",
+      "status": "completed",
+      "attempts": 1,
+      "ms": 10602,
+      "startedAt": "2026-10-17 04:55:08.588872+00",
+      "error": null
+    },
+    {
+      "stage": "index",
+      "doc": "run",
+      "status": "completed",
+      "attempts": 1,
+      "ms": 11500,
+      "startedAt": "2026-10-17 04:55:08.249759+00",
+      "durationMsStat": 11162,
+      "error": null
+    }
+  ],
+  "pagesPerMin": 383.5,
+  "modelCheck": {
+    "expectedText": "z-ai/glm-5.3-flash",
+    "expectedVisionUri": "llm://openrouter/z-ai/glm-5.3-flash",
+    "modelsSeenInRunPayloads": {
+      "z-ai/glm-5.3-flash": 1,
+      "llm://openrouter/z-ai/glm-5.3-flash": 1,
+      "llm://openai/text-embedding-3-small": 1
+    },
+    "nonExpectedTextLike": [
+      "llm://openrouter/z-ai/glm-5.3-flash",
+      "llm://openai/text-embedding-3-small"
+    ],
+    "note": "progress payloads omit per-call models; authoritative check is usage_events / [ai-usage] logs (see plan.md section 'Model verification')"
+  },
+  "embedding": {
+    "flag": "cheapest-hosted",
+    "requested": {
+      "profile": "cheapest-hosted",
+      "target": "hosted",
+      "modelUri": "llm://openai/text-embedding-3-small",
+      "task": "document",
+      "normalize": true
+    },
+    "uploadEffective": {
+      "profile": "cheapest-hosted",
+      "modelUri": "llm://openai/text-embedding-3-small",
+      "target": "hosted"
+    },
+    "uploadConfigOk": true,
+    "progressEffective": {
+      "profile": "cheapest-hosted",
+      "modelUri": "llm://openai/text-embedding-3-small",
+      "target": "hosted"
+    },
+    "progressMatches": true
+  },
+  "reuseDetail": {
+    "dedup": null,
+    "extractionSourceCache": [
+      {
+        "stage": "split-pages",
+        "sourceCacheHit": false
+      }
+    ],
+    "embeddingVectors": "cold",
+    "documentContext": "fresh"
+  },
+  "earlyPublication": {
+    "firstCorrectSec": 143,
+    "firstCorrectQuery": "st083-01",
+    "firstCorrectAvailability": {
+      "status": "partial",
+      "keywordOnly": true,
+      "indexedDocuments": 0,
+      "searchableDocuments": 1,
+      "keywordOnlyDocuments": 1
+    },
+    "firstCorrectKeywordOnly": true,
+    "embedStartedSec": 124.7,
+    "embedCompletedSec": 171.8,
+    "indexCompletedSec": 184.1,
+    "runCompletedSec": 188.8,
+    "firstCorrectBeforeEmbedComplete": true
+  },
+  "ledger": {
+    "billedCents": 37.299365277778,
+    "feeCents": 33.42,
+    "aiCents": 3.58422,
+    "computeCents": 0.295145277778,
+    "note": "provider usage = aiCents; customer ledger total = billedCents (fee and compute are internal debits, not API charges)"
+  },
+  "budget": {
+    "budgetCents": 100,
+    "billedCents": 37.299365277778,
+    "feeCents": 33.42,
+    "aiCents": 3.58422,
+    "computeCents": 0.295145277778,
+    "exceeded": false,
+    "overByCents": 0
+  },
+  "resources": {
+    "samplerPolls": 6,
+    "samplerFailures": 0,
+    "lowMemoryPolls": 0,
+    "minWorkerMemAvailableMiB": 11122,
+    "minAppMemAvailableMiB": 1873,
+    "readinessPolls": 7,
+    "readinessFailures": 0,
+    "maxConsecutiveReadinessFailures": 0
+  }
+}

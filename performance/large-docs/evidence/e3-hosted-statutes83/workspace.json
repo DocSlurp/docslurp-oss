@@ -1,0 +1,73 @@
+{
+  "at": "2026-10-17T04:52:07.071Z",
+  "workspaceId": "98e09efb-6ab6-4574-a0cc-3bd18fba40a4",
+  "name": "bench-large-rag-only-e3-hosted-statutes83",
+  "profile": "rag-only",
+  "requestedPipeline": {
+    "vision": {
+      "modelUri": "llm://openrouter/z-ai/glm-5.3-flash"
+    },
+    "maxCostCents": 66,
+    "embedding": {
+      "profile": "cheapest-hosted",
+      "target": "hosted",
+      "modelUri": "llm://openai/text-embedding-3-small",
+      "task": "document",
+      "normalize": true
+    },
+    "textGeneration": {
+      "model": "z-ai/glm-5.3-flash",
+      "models": {}
+    },
+    "summarize": false,
+    "pageIndex": false,
+    "propositionIndex": false,
+    "graphRag": false,
+    "graphCommunitySummaries": false,
+    "entityIndex": false
+  },
+  "effectivePipeline": {
+    "textGeneration": {
+      "model": "z-ai/glm-5.3-flash",
+      "models": {}
+    },
+    "vision": {
+      "profile": "good-fast-hosted",
+      "target": "hosted",
+      "modelUri": "llm://openrouter/z-ai/glm-5.3-flash",
+      "prompt": "<OCR>",
+      "maxPagesPerDocument": 4,
+      "forceAllPages": false,
+      "remoteFallbackModelUri": null,
+      "benchmarkProfile": "difficult-pages"
+    },
+    "embedding": {
+      "profile": "cheapest-hosted",
+      "target": "hosted",
+      "modelUri": "llm://openai/text-embedding-3-small",
+      "task": "document",
+      "normalize": true,
+      "lateChunking": false,
+      "lateChunkingWindow": 2
+    },
+    "contextualChunkPreambles": true,
+    "parserPlaybook": "balanced",
+    "maxCostCents": 66
+  },
+  "checks": {
+    "textModel": true,
+    "perOpOverrides": [],
+    "visionModelUri": true,
+    "maxCostCents": true,
+    "embedding": true,
+    "profileFlags": {
+      "summarize": true,
+      "pageIndex": true,
+      "propositionIndex": true,
+      "graphRag": true,
+      "graphCommunitySummaries": true,
+      "entityIndex": true
+    }
+  },
+  "ok": true
+}

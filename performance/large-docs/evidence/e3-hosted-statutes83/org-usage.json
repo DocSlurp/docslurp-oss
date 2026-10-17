@@ -1,0 +1,26 @@
+{
+ "orgId": "9ceab85b-141a-44f3-bcde-6a1d4e90f037",
+ "lastHour": {
+  "tokens": 4921011,
+  "costCents": 263.634528066667,
+  "eventCount": 250
+ },
+ "last24h": {
+  "tokens": 5192198,
+  "costCents": 275.008049611109,
+  "eventCount": 793
+ },
+ "currentMonth": {
+  "tokens": 5192198,
+  "costCents": 275.008049611109,
+  "eventCount": 793
+ },
+ "dailyBreakdown": [
+  {
+   "date": "2026-10-17T00:00:00.000Z",
+   "tokens": 5192198,
+   "costCents": 275.008049611109,
+   "eventCount": 793
+  }
+ ]
+}

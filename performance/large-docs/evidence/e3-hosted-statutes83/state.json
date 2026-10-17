@@ -1,0 +1,167 @@
+{
+  "loggedInAt": "2026-10-17T04:51:54.007Z",
+  "workspaceId": "98e09efb-6ab6-4574-a0cc-3bd18fba40a4",
+  "profile": "rag-only",
+  "textModel": "z-ai/glm-5.3-flash",
+  "embeddingProfile": "cheapest-hosted",
+  "embedding": {
+    "profile": "cheapest-hosted",
+    "target": "hosted",
+    "modelUri": "llm://openai/text-embedding-3-small",
+    "task": "document",
+    "normalize": true
+  },
+  "runCapCents": 66,
+  "budgetCents": 100,
+  "feeReserveCents": 33.42,
+  "forecastFile": "statutes-at-large-vol-83",
+  "runId": "1d4e9862-29d0-473e-8371-38727aa63fa4",
+  "documentId": "a2a9b452-739d-4e35-9789-259df1eb9147",
+  "fileId": "statutes-at-large-vol-83",
+  "uploadStartedAt": 1792212735072,
+  "acceptedAt": 1792212749533,
+  "milestones": {
+    "uploadAccepted": {
+      "atMs": 14461,
+      "at": "2026-10-17T04:52:29.601Z",
+      "note": "confirm returned a run"
+    },
+    "firstPageProcessed": {
+      "atMs": 87998,
+      "at": "2026-10-17T04:53:43.070Z",
+      "pages": {
+        "completed": 1114,
+        "total": 1114,
+        "byStage": {
+          "extract-markdown": 1114,
+          "split-pages": 1114
+        },
+        "byDocument": {
+          "a2a9b452-739d-4e35-9789-259df1eb9147": {
+            "extract-markdown": 1114,
+            "split-pages": 1114
+          }
+        }
+      }
+    },
+    "firstCorrectResult": {
+      "atMs": 143007,
+      "at": "2026-10-17T04:54:38.079Z",
+      "query": "st083-01",
+      "position": "beginning",
+      "rank": 1,
+      "pagesProcessedAtThatTime": {
+        "completed": 1114,
+        "total": 1114,
+        "byStage": {
+          "extract-markdown": 1114,
+          "vision-extract": 8,
+          "embed": 71,
+          "split-pages": 1114,
+          "render-images": 1114
+        },
+        "byDocument": {
+          "a2a9b452-739d-4e35-9789-259df1eb9147": {
+            "extract-markdown": 1114,
+            "vision-extract": 8,
+            "embed": 71,
+            "split-pages": 1114,
+            "render-images": 1114
+          }
+        }
+      },
+      "availability": {
+        "status": "partial",
+        "keywordOnly": true,
+        "indexedDocuments": 0,
+        "searchableDocuments": 1,
+        "keywordOnlyDocuments": 1
+      }
+    },
+    "queryable_beginning": {
+      "atMs": 143007,
+      "at": "2026-10-17T04:54:38.079Z",
+      "query": "st083-01"
+    },
+    "queryable_end": {
+      "atMs": 151449,
+      "at": "2026-10-17T04:54:46.521Z",
+      "query": "st083-03"
+    },
+    "queryable_middle": {
+      "atMs": 161721,
+      "at": "2026-10-17T04:54:56.793Z",
+      "query": "st083-02"
+    },
+    "allPositionsQueryable": {
+      "atMs": 161722,
+      "at": "2026-10-17T04:54:56.794Z"
+    },
+    "runCompleted": {
+      "atMs": 188754,
+      "at": "2026-10-17T04:55:23.826Z",
+      "status": "completed",
+      "controlState": null,
+      "stage": "completed",
+      "pct": 100,
+      "pages": {
+        "completed": 1114,
+        "total": 1114,
+        "byStage": {
+          "extract-markdown": 1114,
+          "vision-extract": 8,
+          "embed": 1108,
+          "split-pages": 1114,
+          "render-images": 1114
+        },
+        "byDocument": {
+          "a2a9b452-739d-4e35-9789-259df1eb9147": {
+            "extract-markdown": 1114,
+            "vision-extract": 8,
+            "embed": 1108,
+            "split-pages": 1114,
+            "render-images": 1114
+          }
+        }
+      },
+      "cost": 37.299365277778,
+      "billed": 37.299365277778,
+      "ai": 3.58422,
+      "fee": 33.42,
+      "compute": 0.295145277778,
+      "inTok": 1324228,
+      "outTok": 1961,
+      "res": {
+        "elapsedMs": 172785,
+        "cpuUserMs": 0,
+        "cpuSystemMs": 0,
+        "cpuTotalMs": 0,
+        "rssDeltaBytes": 0,
+        "peakRssBytes": 0
+      },
+      "failedDocs": 0,
+      "embed": {
+        "reuseHits": 0,
+        "reuseMisses": 4859,
+        "providerInputs": 4859,
+        "documentContextReused": false
+      }
+    }
+  },
+  "budget": {
+    "budgetCents": 100,
+    "billedCents": 37.299365277778,
+    "feeCents": 33.42,
+    "aiCents": 3.58422,
+    "computeCents": 0.295145277778,
+    "exceeded": false,
+    "overByCents": 0
+  },
+  "modelsSeenInProgress": {
+    "z-ai/glm-5.3-flash": 1,
+    "llm://openrouter/z-ai/glm-5.3-flash": 1,
+    "llm://openai/text-embedding-3-small": 1
+  },
+  "probes": 15,
+  "finalState": "completed"
+}

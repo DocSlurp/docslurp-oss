@@ -1,0 +1,33 @@
+{
+ "totalTokens": 1326189,
+ "totalCostCents": 37.299365277777994,
+ "byStage": [
+  {
+   "stage": "completed",
+   "tokens": 1326189,
+   "costCents": 37.299365277778
+  }
+ ],
+ "byModel": [
+  {
+   "model": "page-base-fee",
+   "tokens": 0,
+   "costCents": 33.42
+  },
+  {
+   "model": "text-embedding-3-small",
+   "tokens": 1305740,
+   "costCents": 3.133776
+  },
+  {
+   "model": "z-ai/glm-5.3-flash",
+   "tokens": 20449,
+   "costCents": 0.450444
+  },
+  {
+   "model": "lean:shared-cpu-8x-16gb-slot:lax",
+   "tokens": 0,
+   "costCents": 0.295145277778
+  }
+ ]
+}

@@ -1,0 +1,40 @@
+{
+  "file": "statutes-at-large-vol-83",
+  "sizeBytes": 184012284,
+  "sha256": "b1d704e5d8be75dba16ed95a004915a350d067827e01f0650d926d5573ac4321",
+  "mode": "multipart",
+  "parts": 22,
+  "startedAt": 1792212735072,
+  "sessionMs": 973,
+  "uploadMs": 7801,
+  "uploadMBps": 22.5,
+  "acceptedAt": 1792212749533,
+  "confirmMs": 5687,
+  "runId": "1d4e9862-29d0-473e-8371-38727aa63fa4",
+  "documentId": "a2a9b452-739d-4e35-9789-259df1eb9147",
+  "rejected": [],
+  "dedupedFromDocumentId": null,
+  "dedupScope": null,
+  "workspaceMatches": true,
+  "warnings": [],
+  "temporalDeferred": false,
+  "requestedEmbedding": {
+    "profile": "cheapest-hosted",
+    "target": "hosted",
+    "modelUri": "llm://openai/text-embedding-3-small",
+    "task": "document",
+    "normalize": true
+  },
+  "effectiveRunConfig": {
+    "embedding": {
+      "profile": "cheapest-hosted",
+      "modelUri": "llm://openai/text-embedding-3-small",
+      "target": "hosted"
+    },
+    "textModel": "z-ai/glm-5.3-flash",
+    "perOpModels": [],
+    "visionModelUri": "llm://openrouter/z-ai/glm-5.3-flash",
+    "maxCostCents": 66
+  },
+  "embeddingConfigOk": true
+}

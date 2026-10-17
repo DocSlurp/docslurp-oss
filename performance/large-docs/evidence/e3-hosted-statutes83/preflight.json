@@ -1,0 +1,73 @@
+{
+  "at": "2026-10-17T04:51:59.164Z",
+  "health": {
+    "ok": true,
+    "service": "docslurp-app",
+    "requestId": "d4d7f342-71b4-48de-9ae9-1e33ef28445b"
+  },
+  "ready": {
+    "ok": true,
+    "serving": true,
+    "checks": [
+      {
+        "name": "database",
+        "ok": true,
+        "critical": true
+      },
+      {
+        "name": "migrations",
+        "ok": true,
+        "critical": true
+      },
+      {
+        "name": "storage",
+        "ok": true,
+        "critical": true
+      },
+      {
+        "name": "temporal",
+        "ok": true,
+        "critical": false
+      }
+    ],
+    "checkedAt": "2026-10-17T04:51:59.697Z",
+    "service": "docslurp-app",
+    "requestId": "a05a29fb-554f-4d8a-8a00-51845792cd09"
+  },
+  "documentsScanned": 27,
+  "sameBytesAlreadyInOrg": [
+    {
+      "file": "asu-2025-26-academic-catalog-archive",
+      "documentId": "26b495d4-9703-4a2a-83c4-e920592e13ee",
+      "workspaceId": "d5b03a34-c0dc-4ed8-9cdb-f59b7a6fc92a",
+      "status": "completed"
+    },
+    {
+      "file": "asu-2025-26-academic-catalog-archive",
+      "documentId": "dfa9ac51-dc82-4e4b-9676-9ceb42a30c46",
+      "workspaceId": "9501ddc8-3d8f-4ec9-9b44-b250fc72c394",
+      "status": "failed"
+    }
+  ],
+  "reuseWarning": "bytes already ingested in this org: content dedup and/or embedding reuse likely; run is WARM, not cold",
+  "forecast": {
+    "file": "statutes-at-large-vol-83",
+    "pages": 1114,
+    "textChars": 3346137,
+    "embedTokens": 1115379,
+    "feeCents": 33.42,
+    "embedCents": 2.6769,
+    "glmReserveCents": 10,
+    "computeReserveCents": 2,
+    "aiCents": 12.6769,
+    "totalCents": 48.0969,
+    "budgetCents": 100,
+    "spentCents": 237.707198733331,
+    "ceilingCents": 500,
+    "remainingCents": 262.2928,
+    "runCapCents": 66,
+    "ok": true,
+    "reasons": [],
+    "basis": "fee = pages x DOCSLURP_PAGE_BASE_FEE_USD (0.03c/page); embeddings = chars/3 tokens x $0.02/M x 1.2 (e2 ledger factor); GLM and compute are flat reserves"
+  }
+}
