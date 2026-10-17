@@ -291,9 +291,9 @@ describe("extraction module barrel", () => {
 // ---------------------------------------------------------------------------
 
 describe("embeddingConfigSchema", () => {
-  it("supports explicit smaller hosted embeddings without changing defaults", () => {
-    expect(resolveEmbeddingRoute(embeddingConfigSchema.parse({ profile: "cheapest-hosted", dimensions: 256 })).dimensions).toBe(256);
-    expect(resolveEmbeddingRoute(embeddingConfigSchema.parse({ profile: "cheapest-hosted" })).dimensions).toBe(1536);
+  it("supports explicitly selected OpenAI dimensions beside the Perplexity default", () => {
+    expect(resolveEmbeddingRoute(embeddingConfigSchema.parse({ profile: "cheapest-hosted", modelUri: "llm://openai/text-embedding-3-small", dimensions: 256 })).dimensions).toBe(256);
+    expect(resolveEmbeddingRoute(embeddingConfigSchema.parse({ profile: "cheapest-hosted" })).dimensions).toBe(1024);
     expect(embeddingConfigSchema.safeParse({ profile: "good-fast-local", dimensions: 2048 }).success).toBe(false);
     expect(embeddingConfigSchema.safeParse({ profile: "cheapest-hosted", dimensions: 2048 }).success).toBe(false);
     expect(embeddingConfigSchema.safeParse({ profile: "good-fast-local", modelUri: "llm://openai/some-future-embedding", dimensions: 256 }).success).toBe(false);
@@ -420,6 +420,17 @@ describe("embeddingConfigSchema", () => {
       modelUri: "llm://ollama/nomic-embed-text?baseUrl=https%3A%2F%2Fexample.com%2Fv1",
       target: "local",
     }).success).toBe(false);
+  });
+
+  it("defaults new workspaces to hosted Perplexity while preserving explicit model URIs", () => {
+    const defaults = normalizePipelineFeatures();
+    expect(defaults.embedding.profile).toBe("cheapest-hosted");
+    expect(resolveEmbeddingRoute(defaults.embedding)).toMatchObject({ provider: "openrouter", model: "perplexity/pplx-embed-v1-0.6b", dimensions: 1024 });
+    expect(embeddingConfigSchema.parse({}).modelUri).toBe(defaults.embedding.modelUri);
+    const existing = normalizePipelineFeatures({ embedding: { profile: "cheapest-hosted", modelUri: "llm://openai/text-embedding-3-small", target: "hosted" } });
+    expect(resolveEmbeddingRoute(existing.embedding)).toMatchObject({ provider: "openai", model: "text-embedding-3-small", dimensions: 1536 });
+    const local = normalizePipelineFeatures({ embedding: { profile: "good-fast-local" } });
+    expect(resolveEmbeddingRoute(local.embedding).runtime).toBe("local");
   });
 
   it("hydrates named embedding profiles into their preset defaults", () => {

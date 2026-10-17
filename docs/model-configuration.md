@@ -314,8 +314,8 @@ Every older Claude id (Haiku 4.5, Sonnet 4.x/5, Opus 4.x/5, Fable 5/5.1, Claude 
 
 ### Hosted Perplexity embeddings through OpenRouter
 
-A workspace can opt into `llm://openrouter/perplexity/pplx-embed-v1-0.6b`
-(native 1024 dimensions) or `llm://openrouter/perplexity/pplx-embed-v1-4b`
+New workspaces default to `llm://openrouter/perplexity/pplx-embed-v1-0.6b`
+(native 1024 dimensions). Workspaces can also select `llm://openrouter/perplexity/pplx-embed-v1-4b`
 (native 2560 dimensions). Set the embedding target to `hosted`; both ingestion
 and search use `OPENROUTER_API_KEY` and the fixed official OpenRouter endpoint.
 For example, use this embedding configuration in the workspace pipeline:
@@ -336,7 +336,10 @@ bound so the provider's 120,000-token aggregate request limit cannot drop conten
 They do not support dimension overrides. Reindex existing documents when changing
 embedding models so document and query vectors use the same space. Provider errors
 remain errors rather than silently switching retrieval to keywords. Existing
-workspace and profile defaults are unchanged.
+explicit workspace model URIs remain selected. The `cheapest-hosted` profile
+and the default embedding configuration now select Perplexity 0.6B. Self-hosted
+operators need `OPENROUTER_API_KEY` for this default or must explicitly choose a
+local/private embedding route.
 
 Verified OpenRouter list prices on 2026-10-17 are $0.004 and $0.03 per million
 input tokens respectively, before DocSlurp's applicable AI markup. The shared

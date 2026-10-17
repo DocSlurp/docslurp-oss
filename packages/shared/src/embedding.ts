@@ -249,12 +249,12 @@ export const embeddingProfileCatalog: Record<
   "cheapest-hosted": {
     label: "Cheapest hosted",
     description:
-      "Managed OpenAI embeddings for workers that should not load a local model.",
+      "Fast, low-cost Perplexity 0.6B embeddings through OpenRouter.",
     tags: ["cost", "hosted", "managed"],
     config: {
       profile: "cheapest-hosted",
       target: "hosted",
-      modelUri: "llm://openai/text-embedding-3-small",
+      modelUri: "llm://openrouter/perplexity/pplx-embed-v1-0.6b",
       task: "document",
       normalize: true,
     },
@@ -867,7 +867,7 @@ export const parserPlaybookCatalog: Record<
 
 export const embeddingConfigSchema = z
   .object({
-    profile: embeddingProfileKeySchema.default("good-fast-local"),
+    profile: embeddingProfileKeySchema.default("cheapest-hosted"),
     dimensions: z.number().int().min(128).max(3072).optional(),
     target: modelTargetSchema.optional(),
     modelUri: llmModelUriSchema.optional(),
@@ -929,7 +929,7 @@ export const embeddingConfigSchema = z
 export type EmbeddingConfig = z.infer<typeof embeddingConfigSchema>;
 
 export const defaultEmbeddingConfig: EmbeddingConfig = {
-  ...embeddingProfileCatalog["good-fast-local"].config,
+  ...embeddingProfileCatalog["cheapest-hosted"].config,
   lateChunking: false,
   lateChunkingWindow: 2,
 };

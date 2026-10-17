@@ -76,9 +76,16 @@ describe("resolveEmbeddingModel", () => {
     );
 
     expect(result.modelUri).toBe(defaultPipelineFeatures.embedding.modelUri);
-    expect(result.model).toBe("Xenova/bge-m3");
-    expect(result.provider).toBe("transformers.js");
-    expect(result.runtime).toBe("local");
+    expect(result.model).toBe("perplexity/pplx-embed-v1-0.6b");
+    expect(result.provider).toBe("openrouter");
+    expect(result.runtime).toBe("remote");
+    expect(result.dimensions).toBe(1024);
+  });
+
+  it("keeps the hosted default for multilingual content without loading local weights", () => {
+    const result = resolveEmbeddingModel(baseConfig, defaultPipelineFeatures, "mul");
+    expect(result.provider).toBe("openrouter");
+    expect(result.model).toBe("perplexity/pplx-embed-v1-0.6b");
     expect(result.dimensions).toBe(1024);
   });
 

@@ -3,12 +3,12 @@ import { defaultEmbeddingConfig, embeddingConfigSchema, openRouterEmbeddingRoute
 import { estimateAiUsageCostCents } from "../usage.js";
 
 describe("registered hosted embedding spaces", () => {
-  it.each([["0.6b", 1024, 0.4], ["4b", 2560, 3]])("resolves and prices Perplexity %s without changing defaults", (size, dimensions, costCents) => {
+  it.each([["0.6b", 1024, 0.4], ["4b", 2560, 3]])("resolves and prices Perplexity %s with the Perplexity 0.6B default", (size, dimensions, costCents) => {
     const model = `perplexity/pplx-embed-v1-${size}`;
     const route = resolveEmbeddingRoute(embeddingConfigSchema.parse({ profile: "cheapest-hosted", target: "hosted", modelUri: `llm://openrouter/${model}` }));
     expect(route).toMatchObject({ provider: "openrouter", runtime: "remote", model, dimensions, baseUrl: "https://openrouter.ai/api/v1", supportsCustomDimensions: false });
     expect(estimateAiUsageCostCents({ provider: "openrouter", model, inputTokens: 1_000_000, outputTokens: 0 })).toBeCloseTo(costCents);
-    expect(defaultEmbeddingConfig.modelUri).not.toContain("perplexity");
+    expect(defaultEmbeddingConfig.modelUri).toBe("llm://openrouter/perplexity/pplx-embed-v1-0.6b");
   });
   it("rejects alternate endpoints, dimension changes and unregistered models", () => {
     const modelUri = "llm://openrouter/perplexity/pplx-embed-v1-0.6b";
