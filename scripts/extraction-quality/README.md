@@ -27,7 +27,7 @@ development/  heldout/       12 and 8 cases
   integrity-manifest.json    per-split manifest (sha256 of every source and label file)
   runner-inputs.json         GOLD-FREE input list: the only file a runner needs
   <id>.txt                   source document; pages separated by form feed (U+000C)
-  <id>.gold.json             {labels:[{name,expected}]}: oracle. Scorer only.
+  <id>.gold.json             {schema, labels:[{name,expected}]}: oracle. Scorer only.
   oracle-checks/<id>.json    authored reference answer + defect controls (builder self-test)
 authored/<split>.spec.json   the authored spec each split was compiled from
 ```

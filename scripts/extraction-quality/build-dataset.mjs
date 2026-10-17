@@ -150,7 +150,7 @@ export function buildDataset({ development, heldout }, destination) {
       if (ids.has(id)) fail(split, 'duplicate case id or source');
       ids.add(id);
       const { source, oracleChecks, ...rest } = c;
-      const gold = { schema: GOLD_SCHEMA, ...rest, id, split, pages, relations: c.relations, forbiddenRelations: c.forbiddenRelations ?? [], forbiddenClaims: c.forbiddenClaims ?? [], allowedTerms: c.allowedTerms ?? [], allowedNumbers: c.allowedNumbers ?? [] };
+      const gold = { ...rest, id, split, pages, relations: c.relations, forbiddenRelations: c.forbiddenRelations ?? [], forbiddenClaims: c.forbiddenClaims ?? [], allowedTerms: c.allowedTerms ?? [], allowedNumbers: c.allowedNumbers ?? [] };
       selfCheck(split, c, id, gold);
       return { id, gold, source: source.endsWith('\n') ? source : `${source}\n`, oracleChecks, pages, spec: c };
     });
@@ -162,7 +162,7 @@ export function buildDataset({ development, heldout }, destination) {
     mkdirSync(join(dir, 'oracle-checks'), { recursive: true });
     const manifest = { schema: 'docslurp-authored-eval@v1', cases: [] }, inputs = { schema: INPUT_SCHEMA, version: 'v1', split, cases: [] };
     for (const c of prepared[split]) {
-      const labels = json({ labels: [{ name: `quality_gold_${c.id.replaceAll('-', '_')}`, expected: c.gold }] });
+      const labels = json({ schema: GOLD_SCHEMA, labels: [{ name: `quality_gold_${c.id.replaceAll('-', '_')}`, expected: c.gold }] });
       writeFileSync(join(dir, `${c.id}.txt`), c.source);
       writeFileSync(join(dir, `${c.id}.gold.json`), labels);
       writeFileSync(join(dir, 'oracle-checks', `${c.id}.json`), json(c.oracleChecks));

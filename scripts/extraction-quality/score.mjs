@@ -105,7 +105,7 @@ const ABBREVIATION = /\b(Dr|Mr|Mrs|Ms|Prof|St|Mt|Jr|Sr|vs|Inc|Ltd|Co|No|approx|c
 export function splitUnits(input) {
   const units = [];
   for (const part of Array.isArray(input) ? input : [input]) {
-    const text = String(part && typeof part === 'object' ? part.text ?? '' : part ?? '').normalize('NFKC').replace(ABBREVIATION, '$1\u0001');
+    const text = String(part && typeof part === 'object' ? part.text ?? '' : part ?? '').normalize('NFKC').replace(ABBREVIATION, '$1\u0001').replace(/\b([ap])\.m\./giu, '$1\u0001m\u0001');
     for (const raw of text.split(/(?<=[.!?。！？])\s+|(?<=[。！？])|[;\n]+/u)) {
       const unit = raw.replaceAll('\u0001', '.').replace(/^\s*(?:[-*•–]|\d{1,2}[.)])\s+/u, '').trim();
       if (/\p{L}/u.test(unit)) units.push(unit);

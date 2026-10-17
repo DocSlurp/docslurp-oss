@@ -243,6 +243,7 @@ test('envelope and paragraph checks are diagnostics, not correctness', () => {
 
 test('units: abbreviations, decimals, list markers and CJK are handled', () => {
   assert.deepEqual(splitUnits('Dr. Marlow measured 3.5 metres. She left; later returned.'), ['Dr. Marlow measured 3.5 metres.', 'She left', 'later returned.']);
+  assert.deepEqual(splitUnits('It runs between 7 a.m. and 7 p.m. daily. Done.'), ['It runs between 7 a.m. and 7 p.m. daily.', 'Done.']);
   assert.deepEqual(splitUnits(['- first item', '2) second item']), ['first item', 'second item']);
   assert.deepEqual(tokens('東京は首都'), ['東', '京', 'は', '首', '都'].map((t) => t));
 });
