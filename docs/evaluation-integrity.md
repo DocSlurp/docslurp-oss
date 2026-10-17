@@ -47,7 +47,30 @@ node scripts/evaluation-integrity-judge.mjs \
 
 The judge derives fixture identifiers, label names, distinctive expected values, and source-file hashes from the external dataset at runtime. It fails if source media has been copied into the repository or if production files recognize fixtures, embed labeled answers, or encode several benchmark labels together. It intentionally allows generic document capabilities and schemas supplied as runtime workspace configuration.
 
-Corpora with an `extract-eval-catalog@v1` `catalog.json` are checked per entry by `source.kind`:
+The current deterministic tool supports an external `integrity-manifest.json` with
+schema `docslurp-authored-eval@v1`. Each case supplies a distinctive `id`, hashed
+`source` and `labels` artifacts (`path`, `sha256`), and authored provenance
+(`kind: "authored"`, `author`, `description`, `createdAt`). Label files contain
+`{"labels":[{"name":"label_name","expected":"labeled value"}]}`; expected values may
+also be arrays or objects. Missing labels, provenance or hash matches fail.
+
+The tool scans production files and additions for fixture IDs, source hashes,
+distinctive answers, and groups of benchmark labels. Ordinary single-word answers
+alone are insufficient evidence: they require at least two benchmark labels in
+the same file. Proper multiword values and structured identifiers can trigger an
+individual finding. This deterministic screen does not detect every possible
+obfuscation or replace independent review. Test gold and documentation are excluded
+from textual product checks, but copied source bytes are checked across all tracked
+and non-ignored untracked repository files. Reports bind the verdict to the dataset
+manifest hash, Git head and scanned production content hash.
+
+**Catalog limitation:** the restored tool currently rejects every `catalog.json`
+with `unsupported-catalog-schema`. It does not yet implement or claim to validate
+the catalog contract below. Do not convert a generated or licensed corpus into an
+authored manifest to bypass these requirements. Catalog support must implement and
+test the following rules before such a dataset can receive a passing verdict.
+
+The required contract for an `extract-eval-catalog@v1` `catalog.json` checks each entry by `source.kind`:
 
 - `synthetic` / `generated`: the generator must exist in the repository and the asset must match its catalog sha256
   (and the `manifest.json` artifact sha256 when listed). If the bytes changed, the asset passes only when the dataset

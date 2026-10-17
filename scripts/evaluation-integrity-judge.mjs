@@ -18,6 +18,17 @@ const productFile = (path) => !/(^|\/)(docs|research|__tests__|__fixtures__|fixt
 const strings = (value) => typeof value === 'string' ? [value] : Array.isArray(value) ? value.flatMap(strings) : value && typeof value === 'object' ? Object.values(value).flatMap(strings) : typeof value === 'number' ? [String(value)] : [];
 const pattern = (term) => new RegExp(`(?<![\\p{L}\\p{N}_])${term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![\\p{L}\\p{N}_])`, 'iu');
 
+// A length threshold alone confuses ordinary predicates with held-out answers.
+// Require a proper multiword value or an identifier-shaped value for a standalone finding.
+function distinctiveAnswer(value) {
+  if (value.length < 8) return false;
+  return (/\s/u.test(value) && /\p{Lu}/u.test(value))
+    || /[\p{L}\p{N}][_.:/@-][\p{L}\p{N}]/u.test(value)
+    || /\p{L}.*\p{N}|\p{N}.*\p{L}/u.test(value)
+    || /\p{Ll}\p{Lu}/u.test(value)
+    || /^\d{8,}$/.test(value);
+}
+
 export function judgeIntegrity({ dataset, repo = process.cwd(), base = 'HEAD' }) {
   const findings = [];
   const add = (rule, detail = {}) => findings.push({ rule, ...detail });
@@ -33,7 +44,7 @@ export function judgeIntegrity({ dataset, repo = process.cwd(), base = 'HEAD' })
     result.datasetHash = hash(manifestBytes);
     const manifest = JSON.parse(manifestBytes);
     if (manifest.schema !== 'docslurp-authored-eval@v1' || !Array.isArray(manifest.cases) || !manifest.cases.length) throw new Error('unsupported-or-empty-manifest');
-    const identifiers = new Set(), labelNames = new Set(), expected = new Set(), sourceHashes = new Set();
+    const identifiers = new Set(), labelNames = new Set(), expected = new Set(), weakAnswers = new Set(), sourceHashes = new Set();
     const load = (entry) => {
       if (!entry || !nonempty(entry.path) || isAbsolute(entry.path) || !/^[a-f0-9]{64}$/.test(entry.sha256 ?? '')) throw new Error('missing-artifact-provenance');
       const path = realpathSync(resolve(dataset, entry.path));
@@ -60,8 +71,10 @@ export function judgeIntegrity({ dataset, repo = process.cwd(), base = 'HEAD' })
         const values = strings(label.expected).map((value) => value.trim()).filter(Boolean);
         if (!values.length) throw new Error('missing-expected-values');
         localNames.add(label.name); labelNames.add(label.name);
-        // Short common values are not distinctive enough to establish answer leakage.
-        for (const value of values) if (value.length >= 8) expected.add(value);
+        for (const value of values) {
+          if (distinctiveAnswer(value)) expected.add(value);
+          else if (value.length >= 3) weakAnswers.add(value);
+        }
       }
       result.cases++;
     }
@@ -85,6 +98,11 @@ export function judgeIntegrity({ dataset, repo = process.cwd(), base = 'HEAD' })
         add(rule, { file, origin, line: text.slice(0, found.index).split('\n').length, evidenceHash: hash(value) });
       }
       const labels = [...labelNames].filter((value) => pattern(value).test(text));
+      const weakMatches = labels.length >= 2 ? [...weakAnswers].filter((value) => pattern(value).test(text)) : [];
+      if (weakMatches.length && !seen.has(`${file}:weak-answers`)) {
+        seen.add(`${file}:weak-answers`);
+        add('answer-label-combination', { file, origin, labelCount: labels.length, answerCount: weakMatches.length, evidenceHash: hash([...labels, ...weakMatches].sort().join('\0')) });
+      }
       if (labels.length >= 3 && !seen.has(`${file}:labels`)) {
         seen.add(`${file}:labels`);
         add('benchmark-label-cluster', { file, origin, count: labels.length, evidenceHash: hash(labels.sort().join('\0')) });

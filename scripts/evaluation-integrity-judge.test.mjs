@@ -87,3 +87,23 @@ test('CLI report returns nonzero on failure and writes a standalone JSON artifac
   assert.equal(main(['--dataset', f.dataset, '--repo', f.repo, '--output', output]), 1);
   assert.throws(() => main(['--dataset']), /Expected/);
 });
+
+test('ordinary single-word answers alone do not implicate unrelated production code, but label combinations do', (t) => {
+  const f = fixture(t);
+  const labels = JSON.stringify({ labels: [{ name: 'measured_action', expected: 'organizes' }, { name: 'measured_relation', expected: 'connects' }] });
+  writeFileSync(join(f.dataset, 'labels.json'), labels);
+  f.manifest.cases[0].labels.sha256 = sha(labels); f.save();
+  writeFileSync(join(f.repo, 'worker.ts'), '// This module organizes tasks and connects service clients.');
+  assert.equal(f.run().passed, true);
+  writeFileSync(join(f.repo, 'worker.ts'), 'const output = {measured_action: "organizes", measured_relation: "connects"};');
+  assert.ok(rules(f.run()).includes('answer-label-combination'));
+});
+test('structured identifiers and proper multiword answers remain individual leakage findings', (t) => {
+  for (const expected of ['ZX-923841-A', 'UniqueBusinessName', 'Northwind Research Group']) {
+    const f = fixture(t), labels = JSON.stringify({ labels: [{ name: 'measured_value', expected }] });
+    writeFileSync(join(f.dataset, 'labels.json'), labels);
+    f.manifest.cases[0].labels.sha256 = sha(labels); f.save();
+    writeFileSync(join(f.repo, 'worker.ts'), `const answer = ${JSON.stringify(expected)};`);
+    assert.ok(rules(f.run()).includes('labeled-answer'), expected);
+  }
+});
