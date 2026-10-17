@@ -220,7 +220,7 @@ describe("mcpRoutes", () => {
   it("discovers documented workspace tools and advertises only the implemented MCP transport", async () => {
     const response = await app.request("/mcp/tools", { headers: { Authorization: "Bearer dslp_test" } });
     expect(response.status).toBe(200);
-    expect((await response.json()).tools.map((tool: { id: string }) => tool.id)).toEqual(["listWorkspaces", "search", "searchMany", "chat", "getUploadStatus", "suggestQueries"]);
+    expect((await response.json()).tools.map((tool: { id: string }) => tool.id)).toEqual(["listWorkspaces", "search", "chat", "getUploadStatus", "suggestQueries"]);
     const manifest = await app.request("/mcp/manifest", { headers: { Authorization: "Bearer dslp_test" } });
     expect((await manifest.json()).server.transports).toEqual(["streamable-http", "stdio"]);
   });
@@ -279,8 +279,8 @@ describe("mcpRoutes", () => {
     const client = new Client({ name: "catalog-contract", version: "1" });
     await client.connect(new StreamableHTTPClientTransport(new URL("http://localhost:4321/mcp"), { requestInit: { headers: { Authorization: "Bearer key" } }, fetch: async (url, init) => app.request(new Request(url, init)) }));
     const tools = (await client.listTools()).tools;
-    expect(tools).toHaveLength(8);
-    expect(new Set(tools.map(tool => tool.name)).size).toBe(8);
+    expect(tools).toHaveLength(7);
+    expect(new Set(tools.map(tool => tool.name)).size).toBe(7);
     expect(tools.every(tool => /^[A-Za-z0-9_.-]{1,128}$/.test(tool.name))).toBe(true);
     for (const name of ["upload", "completeUpload", "chat"]) {
       expect(tools.find(tool => tool.name === name)?.annotations).toMatchObject({ readOnlyHint: false, idempotentHint: false });
@@ -368,7 +368,7 @@ describe("mcpRoutes", () => {
     expect(tools.find(tool => tool.name === "chat")?.annotations?.idempotentHint).toBe(false);
     const search = await client.callTool({ name: "search", arguments: { q: "Support?", workspaceId: "ws-1" } });
     expect(search.structuredContent).toMatchObject({ usage: { totalTokens: 7, costCents: 0.001, costSource: "provider" } });
-    const batch = await client.callTool({ name: "searchMany", arguments: { queries: [{ q: "Support?", workspaceId: "ws-1" }] } });
+    const batch = await client.callTool({ name: "search", arguments: { queries: [{ q: "Support?", workspaceId: "ws-1" }] } });
     expect(batch.structuredContent).toMatchObject({ results: [{ ok: true, data: { results: [{ text: "Support hours" }] } }] });
     const chat = await client.callTool({ name: "chat", arguments: { q: "Support?", workspaceId: "ws-1" } });
     expect(chat.structuredContent).toMatchObject({ answer: "Weekdays [1]", usage: { outputTokens: 3 } });

@@ -11,7 +11,6 @@ Choose a tool based on the result you need:
 | `completeUpload` | Verify uploaded files and start ingestion | Workspace ingestion settings |
 | `suggestQueries` | Prior queries and suggestions | None |
 | `search` | Portable text passages with document/page citation metadata | None |
-| `searchMany` | Ordered results for up to 20 retrieval queries, with per-query errors | None |
 | `chat` | Grounded answer, citations, conversation session and usage | Workspace-configured model |
 | `getUploadStatus` | How the workspace's files processed: pages, text and images per page, vision, searchable pages with reasons, settings and recommendations | None |
 
@@ -120,3 +119,7 @@ These are application tools over standard MCP, not a custom transport or a propo
 The catalog uses valid case-sensitive tool names, deterministic scope-filtered discovery, JSON Schema inputs, mutation annotations, structured results with text fallback, and `isError` for execution failures. Authorization remains enforced server-side independently of annotations; OAuth tokens are not forwarded to storage.
 
 References: [MCP tools](https://modelcontextprotocol.io/specification/2026-07-28/server/tools), [MCP security](https://modelcontextprotocol.io/docs/2025-11-25/tutorials/security/security_best_practices), [presigned URL guidance](https://docs.aws.amazon.com/prescriptive-guidance/latest/presigned-url-best-practices/overview.html).
+
+### One search surface
+
+Use `search({ q: "notice period" })` for one query or `search({ queries: [{ q: "notice period" }, { q: "eligibility" }], concurrency: 2 })` for a batch. Batches accept 1–20 queries, preserve input order, and return `{ results: [{ ok, data?, error? }] }`. Put workspace and filters inside each query. The SDK and `POST /v1/search` accept the same two forms.

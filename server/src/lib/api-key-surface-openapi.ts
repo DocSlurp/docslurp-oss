@@ -71,3 +71,7 @@ export const apiKeySurfacePaths: Record<string, Partial<Record<Method, ReturnTyp
 for (const [path, method, tag, summary, scope, success, extra] of entries) {
   (apiKeySurfacePaths[path] ??= {})[method] = operation(path, tag, summary, scope, success, extra);
 }
+
+for (const [path, operations] of Object.entries(apiKeySurfacePaths)) {
+  if (path.startsWith("/v1/ingest/")) apiKeySurfacePaths[path.replace("/v1/ingest/", "/v1/uploads/")] = operations;
+}

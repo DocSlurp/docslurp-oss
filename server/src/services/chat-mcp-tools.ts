@@ -64,7 +64,7 @@ export function createChatMcpTools(args: {
         // G-04: the user-selected workspace is the only scope. It is applied
         // after the model's arguments, so a prompt-injected workspaceId can't
         // send a search into another workspace the user happens to reach.
-        const body = ["workspace.search-many", "searchMany"].includes(definition.id)
+        const body = (["workspace.search-many", "searchMany"].includes(definition.id) || (definition.id === "search" && Array.isArray(supplied.queries)))
           ? { ...supplied, queries: Array.isArray(supplied.queries)
             ? supplied.queries.map(q => ({ ...(q && typeof q === "object" && !Array.isArray(q) ? q : {}), workspaceId: args.workspaceId }))
             : supplied.queries }

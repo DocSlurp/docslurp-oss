@@ -112,10 +112,25 @@ function legacyManifest(baseUrl: string, scopes?: string[]) {
 /** The public MCP catalog follows the product's upload → search → chat flow. */
 export function mcpManifest(baseUrl: string, scopes?: string[]) {
   const manifest = legacyManifest(baseUrl);
-  const tools = Object.entries(productToolAliases).map(([name, legacyId]) => {
+  const tools = Object.entries(productToolAliases).filter(([name]) => name !== "searchMany").map(([name, legacyId]) => {
     const tool = manifest.capabilities.find(item => item.id === legacyId)!;
     return { ...tool, id: name, endpoint: `${baseUrl}/v1/mcp/tools/${name}`,
       description: tool.description.replaceAll("workspace.search", "search"),
+      ...(name === "search" ? {
+        title: "Search documents",
+        description: "Retrieve cited passages for one query (q) or up to 20 independent queries (queries). Supply exactly one form. Batch results stay in input order with per-query errors; each query can select a workspace. Omitted workspace uses the default. Does not generate answers.",
+        inputSchema: {
+          type: "object", additionalProperties: false,
+          properties: { ...queryInputSchema.properties,
+            queries: { type: "array", minItems: 1, maxItems: 20, items: queryInputSchema },
+            concurrency: { type: "integer", minimum: 1, maximum: 4, default: 4 },
+          },
+          oneOf: [
+            { required: ["q"], not: { anyOf: [{ required: ["queries"] }, { required: ["concurrency"] }] } },
+            { required: ["queries"], not: { anyOf: Object.keys(queryInputSchema.properties).map(key => ({ required: [key] })) } },
+          ],
+        },
+      } : {}),
       ...(name === "getUploadStatus" ? { title: "Get upload status", description: "Check uploaded files and ingestion progress in a workspace, optionally for a runId returned by upload. Reports searchable pages, failures, costs and processing speed without AI calls. Use before search or chat when files are still processing." } : {}),
     };
   });
