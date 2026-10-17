@@ -54,6 +54,7 @@ export async function runChatMcpAgent(args: {
       "Chat cannot run automations or ingest URLs. If asked, say that uploads and automations are started from the app, API or MCP clients.",
       "If a needed action is absent from the tool catalog, say so. Keep the answer direct, grounded, and concise.",
       args.workspaceInstructions ?? "",
+      ...args.history.filter(turn => turn.role === "system").map(turn => turn.content),
     ].join("\n"),
     messages: [
       ...args.history.filter(turn => turn.role === "user" || turn.role === "assistant").map(turn => ({ role: turn.role as "user" | "assistant", content: turn.content })),
