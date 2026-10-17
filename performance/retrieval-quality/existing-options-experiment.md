@@ -129,3 +129,28 @@ plus unresolved failed/interrupted-call usage. Deployment overlapped this work;
 no comparative latency claim is made. Raw paths and session IDs were handed to
 the Langfuse/ledger owner for reconciliation. New misses are registered against
 the existing development cases; no case is silently removed.
+
+
+## Complementary-list diagnostic
+
+An additional offline diagnostic fused baseline-20 and reconstructed BM25-20
+lists with equal reciprocal-rank contributions (`k=60`), stable baseline-first
+ties, and identity `documentId:chunkIndex`. No case-dependent weights or query
+recognition were used. This diagnostic retains 13/13 explicit passages and both
+inferred premises at 10, 12, and 20. Artifact:
+`options-offline-equal-rrf-v1.json`; generic implementation:
+`scripts/retrieval-quality/fuse-diagnostic.mjs`.
+
+This is a candidate for a general preservation experiment, not a live result or
+confirmation success. Negatives remain unassessed as answers. Fusion of returned
+lists is not automatically identical to fusion inside the server's candidate
+pipeline; a separate implementation and comparison must establish that.
+
+Before provider-backed options, the helper model must be verified at runtime.
+Rewrite and iterative bridging both use `SEARCH_OPENROUTER_MODEL`, resolved from
+`DOCSLURP_SEARCH_MODEL`, falling back to the shared chat-model default. Workspace
+ingestion settings do not override it. Rewrite caps output at 100 tokens;
+iterative retrieval permits up to three searches and two bridge calls capped at
+220 output tokens each. Both record response usage through the Search Session
+journal and flush with session/workspace/org scope. No enhancement calls have
+been made pending runtime-route and live-price verification.
