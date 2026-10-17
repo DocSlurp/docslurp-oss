@@ -1,5 +1,5 @@
 import { dynamicTool, jsonSchema, type ToolSet } from "ai";
-import { searchResultSchema, type SearchResult } from "@docslurp/shared";
+import { CHAT_MAX_RETRIEVED_PASSAGES, searchResultSchema, type SearchResult, type WorkspaceSearchRetrievalDefaults } from "@docslurp/shared";
 import type { McpDispatch, McpManifest } from "../lib/mcp-http.js";
 
 export interface ChatToolActivity {
@@ -21,6 +21,7 @@ export function createChatMcpTools(args: {
   manifest: McpManifest;
   dispatch: McpDispatch;
   workspaceId: string;
+  retrievalDefaults?: WorkspaceSearchRetrievalDefaults;
   signal: AbortSignal;
   onActivity?: (activity: ChatToolActivity) => void;
   onEvidence?: (citations: SearchResult[]) => void;
@@ -34,6 +35,24 @@ export function createChatMcpTools(args: {
   const activity = new Map<string, ChatToolActivity>();
   let calls = 0;
   const tools: ToolSet = {};
+  const defaults = args.retrievalDefaults;
+  const limit = defaults ? Math.min(defaults.resultCount, CHAT_MAX_RETRIEVED_PASSAGES) : undefined;
+  const searchDefaults = defaults ? {
+    limit, hyde: defaults.useHyDE, rerank: defaults.useRerank, mmr: defaults.useMmr,
+    compression: defaults.useContextualCompression, mmrLambda: defaults.mmrLambda,
+    minScore: defaults.minScore, parentRetrieval: defaults.parentRetrieval,
+    summarySeed: defaults.summarySeed, queryRewrite: defaults.queryRewrite,
+    queryDecompose: defaults.queryDecompose, stepback: defaults.stepback,
+    selfQuery: defaults.selfQuery, iterativeMultiHop: defaults.iterativeMultiHop,
+    graphExpansion: defaults.enableGraphExpansion, communityExpansion: defaults.enableCommunityExpansion,
+    graphHops: defaults.graphHops,
+  } : {};
+  const chatDefaults = defaults ? {
+    resultCount: limit, useHyDE: defaults.useHyDE, useRerank: defaults.useRerank,
+    useMmr: defaults.useMmr, mmrLambda: defaults.mmrLambda,
+    iterativeMultiHop: defaults.iterativeMultiHop, enableGraphExpansion: defaults.enableGraphExpansion,
+    enableCommunityExpansion: defaults.enableCommunityExpansion, graphHops: defaults.graphHops,
+  } : undefined;
 
   function collectEvidence(value: unknown): void {
     if (!value || typeof value !== "object") return;
@@ -66,11 +85,14 @@ export function createChatMcpTools(args: {
         // send a search into another workspace the user happens to reach.
         const body = definition.id === "workspace.search-many"
           ? { ...supplied, queries: Array.isArray(supplied.queries)
-            ? supplied.queries.map(q => ({ ...(q && typeof q === "object" && !Array.isArray(q) ? q : {}), workspaceId: args.workspaceId }))
+            ? supplied.queries.map(q => ({ ...(q && typeof q === "object" && !Array.isArray(q) ? q : {}), ...searchDefaults, workspaceId: args.workspaceId }))
             : supplied.queries }
           : definition.id === "workspace.aggregate-rag-search"
             ? { ...supplied, workspaceIds: [args.workspaceId] }
-            : { ...supplied, workspaceId: args.workspaceId };
+            : { ...supplied,
+              ...(definition.id === "workspace.search" ? searchDefaults : {}),
+              ...(definition.id === "workspace.chat" && chatDefaults ? { retrieval: chatDefaults } : {}),
+              workspaceId: args.workspaceId };
         const started = Date.now();
         const update = (status: ChatToolActivity["status"]) => {
           const event: ChatToolActivity = { id: toolCallId, name: definition.id, status,

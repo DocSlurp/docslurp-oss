@@ -8,13 +8,14 @@ import { recordUsageEvent } from "../lib/ai-usage.js";
 import { posthogAiTelemetry } from "../lib/posthog-ai-observability.js";
 import { createMcpDispatcher, mcpManifest } from "./mcp-tools.js";
 import { createChatMcpTools, type ChatToolActivity } from "./chat-mcp-tools.js";
-import type { SearchResult } from "@docslurp/shared";
+import type { SearchResult, WorkspaceSearchRetrievalDefaults } from "@docslurp/shared";
 
 export async function runChatMcpAgent(args: {
   actor: RequestActor; workspaceId: string; orgId: string; sessionId: string;
   query: string; history: Array<Pick<WorkspaceChatTurn, "role" | "content">>;
   apiKey: string; privacyMode: PrivacyMode; model: string; maxOutputTokens: number; signal?: AbortSignal;
   workspaceInstructions?: string;
+  retrievalDefaults?: WorkspaceSearchRetrievalDefaults;
   onTextDelta?: (delta: string) => void | Promise<void>;
   onToolActivity?: (activity: ChatToolActivity) => void;
   onEvidence?: (citations: SearchResult[]) => void;
@@ -24,6 +25,7 @@ export async function runChatMcpAgent(args: {
   const context = createChatMcpTools({
     manifest: mcpManifest("http://mcp.internal", args.actor.type === "apiKey" ? args.actor.apiKey.scopes : undefined),
     dispatch: createMcpDispatcher(args.actor), workspaceId: args.workspaceId, signal,
+    retrievalDefaults: args.retrievalDefaults,
     onActivity: args.onToolActivity, onEvidence: args.onEvidence,
     allowWorkspace: async (ref) => {
       // Unresolvable references (including aliases) fail closed.
