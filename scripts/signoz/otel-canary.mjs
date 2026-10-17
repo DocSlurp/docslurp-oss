@@ -2,7 +2,7 @@
 // Synthetic SDK canary: no documents, databases or model-provider calls.
 import { randomBytes } from 'node:crypto';
 import { readFile, writeFile } from 'node:fs/promises';
-import { initializeObservability, withObservation, withHttpSpan, emitTelemetryLog, recordMediaTelemetry, flushObservability, shutdownObservability } from '../../packages/shared/dist/observability.js';
+import { initializeObservability, withDependencySpan, recordUsageReceipt, withObservation, withHttpSpan, emitTelemetryLog, recordMediaTelemetry, flushObservability, shutdownObservability } from '../../packages/shared/dist/observability.js';
 
 const live = process.argv.includes('--live');
 if (live) {
@@ -42,6 +42,13 @@ try {
       metadata: { requestId: marker, runId: marker, stageName: 'telemetry-canary', authorization: 'Bearer private-secret-never-export' },
       result: () => ({ output: 'private-output-never-export', metadata: { providerRequestId: 'synthetic-provider-request', costState: 'estimated' } }),
     }, async () => { calls++; if (failBusiness) throw businessError; return 'ok'; });
+    await withDependencySpan('postgres.SELECT', { 'docslurp.dependency.type': 'postgres',
+      'docslurp.dependency.provider': 'postgresql', 'docslurp.dependency.operation': 'SELECT',
+      'db.system.name': 'postgresql', 'server.address': 'synthetic-db.example',
+      'docslurp.requestId': marker }, async () => {
+      recordUsageReceipt({ id: 'synthetic-usage-event', provider: 'deepinfra', model: 'synthetic-embedding',
+        metric: 'embedding', inputTokens: 10, costCents: 0, metadata: { providerCostCents: 0, runId: marker } });
+    });
     recordMediaTelemetry({ provider: "canary", model: "synthetic", operation: "transcribe", outcome: "succeeded", durationSeconds: 0.01, audioSeconds: 5, costUsd: 0, costSource: "synthetic", candidateFrames: 4, selectedFrames: 2, inputTokens: 10, outputTokens: 2 });
     emitTelemetryLog({ severityText: "info", body: "media.canary.completed", attributes: { "docslurp.runId": marker, "docslurp.media.provider": "canary", "docslurp.media.audioSeconds": 5, "docslurp.media.providerRequestId": "synthetic-provider-request", "docslurp.media.costState": "estimated" } });
     emitTelemetryLog({ severityText: 'info', eventName: 'docslurp.api.request_completed', body: 'GET /__telemetry/canary 200 1ms', attributes: {
