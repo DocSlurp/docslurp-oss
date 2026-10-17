@@ -347,3 +347,26 @@ usage catalog prices both routes and the existing usage ledger persists calls.
 See the [OpenRouter model catalog](https://openrouter.ai/api/v1/embeddings/models)
 for current prices and the [Perplexity embedding paper](https://arxiv.org/abs/2602.11151)
 for model details. These prices are not ingestion-throughput guarantees.
+
+
+### Native Perplexity embedding endpoint
+
+To use Perplexity directly, set `PERPLEXITY_API_KEY` in both the server and worker
+(the legacy `PERPLEXITYAI_API_KEY` is accepted) and explicitly select
+`llm://perplexity/pplx-embed-v1-0.6b` or `llm://perplexity/pplx-embed-v1-4b`
+with embedding target `hosted`. The default remains the OpenRouter route above.
+
+Document and query calls use the fixed `https://api.perplexity.ai/v1/embeddings`
+endpoint. The adapter decodes signed INT8 responses into normalized vectors,
+requires actual token usage, and records usage before validating paid responses.
+Native widths are 1024 and 2560 respectively; dimension overrides are rejected.
+Changing the workspace route requires reindexing, including when switching between
+native Perplexity and OpenRouter. Privacy mode still rejects remote requests.
+
+Requests are packed to at most 128 inputs and a conservative 120,000-token upper
+bound without truncating inputs. Existing spend checks, provider admission limits,
+retry handling and usage attribution apply. Verified native input prices on
+2026-10-17 are $0.004 and $0.03 per million tokens, before applicable markup.
+See the [native embedding documentation](https://docs.perplexity.ai/docs/embeddings/quickstart)
+and [rate limits](https://docs.perplexity.ai/docs/admin/rate-limits-usage-tiers).
+Embedding API burst throughput does not establish full ingestion throughput.

@@ -111,6 +111,25 @@ describe("embedConfiguredText", () => {
     await expect(embedConfiguredText({ ...args, privacyMode: "local-only" })).rejects.toThrow();
   });
 
+  it("uses native signed INT8 query vectors and records paid malformed responses", async () => {
+    const onUsage = vi.fn();
+    const fetch = vi.fn().mockResolvedValueOnce(Response.json({ usage: { prompt_tokens: 7 }, data: [{ index: 0, embedding: Buffer.alloc(1024, 1).toString("base64") }] }))
+      .mockResolvedValueOnce(Response.json({ usage: { prompt_tokens: 11 }, data: [] }));
+    vi.stubGlobal("fetch", fetch);
+    const args = { value: "How many batteries?", runtime: "remote", provider: "perplexity", model: "pplx-embed-v1-0.6b", dimensions: 1024,
+      normalize: true, apiKey: "native-key", baseURL: "https://ignored.invalid", privacyMode: "standard" as const, onUsage };
+    try {
+      const result = await embedConfiguredText(args);
+      expect(result.embedding).toHaveLength(1024);
+      expect(Math.hypot(...result.embedding)).toBeCloseTo(1);
+      expect(onUsage).toHaveBeenCalledExactlyOnceWith({ inputTokens: 7 });
+      await expect(embedConfiguredText(args)).rejects.toThrow("omitted vectors");
+      expect(onUsage).toHaveBeenLastCalledWith({ inputTokens: 11 });
+      await expect(embedConfiguredText({ ...args, privacyMode: "local-only" })).rejects.toThrow();
+      expect(fetch).toHaveBeenCalledTimes(2);
+    } finally { vi.unstubAllGlobals(); }
+  });
+
   it("uses the URI-selected local OpenAI-compatible service", async () => {
     embedMock.mockResolvedValue({
       embedding: [0.1, 0.2, 0.3],

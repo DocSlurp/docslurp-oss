@@ -275,6 +275,8 @@ export type EmbeddingModelRouteSpec = {
 };
 
 const embeddingModelEntries = [
+  ["llm://perplexity/pplx-embed-v1-0.6b", "Perplexity Embed 0.6B (native API)", "hosted", "remote", "perplexity", "pplx-embed-v1-0.6b", 1024, 128, false, ["hosted", "open-weights", "cost"]],
+  ["llm://perplexity/pplx-embed-v1-4b", "Perplexity Embed 4B (native API)", "hosted", "remote", "perplexity", "pplx-embed-v1-4b", 2560, 128, false, ["hosted", "open-weights", "quality"]],
   ["llm://openrouter/perplexity/pplx-embed-v1-0.6b", "Perplexity Embed 0.6B (OpenRouter)", "hosted", "remote", "openrouter", "perplexity/pplx-embed-v1-0.6b", 1024, 128, false, ["hosted", "open-weights", "cost"]],
   ["llm://openrouter/perplexity/pplx-embed-v1-4b", "Perplexity Embed 4B (OpenRouter)", "hosted", "remote", "openrouter", "perplexity/pplx-embed-v1-4b", 2560, 128, false, ["hosted", "open-weights", "quality"]],
   ["llm://openai/text-embedding-3-small", "OpenAI text-embedding-3-small", "hosted", "remote", "openai", "text-embedding-3-small", 1536, 64, true, ["hosted", "managed", "cost"]],
