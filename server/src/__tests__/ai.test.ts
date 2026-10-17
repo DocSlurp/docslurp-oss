@@ -75,6 +75,12 @@ describe("embedConfiguredText", () => {
     expect(onUsage).not.toHaveBeenCalled();
   });
 
+  it("allows bounded OpenAI embedding callers to disable SDK retries explicitly", async () => {
+    embedMock.mockResolvedValueOnce({ embedding: [1, 0], usage: { tokens: 2 } });
+    await embedConfiguredText({ value: "generic query", runtime: "remote", provider: "openai", model: "text-embedding-3-small", dimensions: 2, apiKey: "test", privacyMode: "standard", maxRetries: 0 });
+    expect(embedMock.mock.calls.at(-1)?.[0].maxRetries).toBe(0);
+  });
+
   it("uses a cached local transformers pipeline for query embeddings", async () => {
     extractorMock.mockResolvedValue({ tolist: () => [[0.1, 0.2, 0.3, 0.4]] });
     pipelineMock.mockResolvedValue(extractorMock);

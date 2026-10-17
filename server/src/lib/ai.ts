@@ -353,6 +353,7 @@ export async function embedOpenAiText(args: {
   value: string;
   model?: string;
   dimensions?: number;
+  maxRetries?: number;
   baseURL?: string;
   signal?: AbortSignal;
   observability?: AiObservabilityContext;
@@ -382,6 +383,7 @@ export async function embedOpenAiText(args: {
         model: provider.embedding(args.model ?? SEARCH_EMBEDDING_MODEL),
         value: args.value,
         abortSignal: args.signal,
+        ...(args.maxRetries !== undefined ? { maxRetries: args.maxRetries } : {}),
         providerOptions:
           typeof args.dimensions === "number"
             ? { openai: { dimensions: args.dimensions } }
@@ -452,6 +454,7 @@ export async function embedConfiguredText(args: {
   provider: string;
   model?: string;
   dimensions?: number;
+  maxRetries?: number;
   /** Workspace-configured dimensions to request from servers that support them. */
   requestedDimensions?: number;
   normalize?: boolean;
@@ -505,6 +508,7 @@ export async function embedConfiguredText(args: {
       value: args.value,
       model: args.model,
       dimensions: args.dimensions,
+      maxRetries: args.maxRetries,
       baseURL: args.baseURL,
       signal: args.signal,
       observability: args.observability,
