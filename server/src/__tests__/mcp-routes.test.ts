@@ -285,6 +285,9 @@ describe("mcpRoutes", () => {
     for (const name of ["upload", "completeUpload", "chat"]) {
       expect(tools.find(tool => tool.name === name)?.annotations).toMatchObject({ readOnlyHint: false, idempotentHint: false });
     }
+    for (const name of ["listWorkspaces", "search", "getUploadStatus", "suggestQueries"]) {
+      expect(tools.find(tool => tool.name === name)?.annotations).toMatchObject({ readOnlyHint: true, idempotentHint: true, destructiveHint: false });
+    }
     const upload = tools.find(tool => tool.name === "upload")!;
     expect(upload.inputSchema.oneOf).toHaveLength(2);
     expect(upload.inputSchema.additionalProperties).toBe(false);

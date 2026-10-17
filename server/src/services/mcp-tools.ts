@@ -66,10 +66,22 @@ const workspaceSuggestSchema = z.object({
   limit: z.number().int().min(1).max(25).optional(),
 });
 
+// Agent-safety hints live with the tool definition so every surface (remote MCP,
+// WebMCP, chat tools) reads the same values instead of inferring them per surface.
+type ToolAnnotations = { readOnly: boolean; destructive: boolean; idempotent: boolean; openWorld: boolean };
+const READ_ONLY_TOOL: ToolAnnotations = { readOnly: true, destructive: false, idempotent: true, openWorld: false };
+const workspaceToolAnnotations: Record<string, ToolAnnotations> = {
+  search: READ_ONLY_TOOL,
+  chat: { readOnly: false, destructive: false, idempotent: false, openWorld: false },
+  "ingest-report": READ_ONLY_TOOL,
+  suggest: READ_ONLY_TOOL,
+};
+
 function legacyManifest(baseUrl: string, scopes?: string[]) {
   const manifest = getAutomationCapabilityManifest(baseUrl);
   return {
     ...manifest,
+    // The MCP surface knows its own transports; never inherit a stale claim.
     server: { ...manifest.server, transports: ["streamable-http", "stdio"], endpoint: `${baseUrl}/v1/mcp` },
     capabilities: [
       ...manifest.capabilities.map((capability) => {
@@ -82,6 +94,7 @@ function legacyManifest(baseUrl: string, scopes?: string[]) {
         description: "Read an automation operation by ID, including pending approval, progress, errors and final result. Poll on a later turn if still running.",
         category: "tool", endpoint: `${baseUrl}/v1/mcp/tools/ai.operation.get`,
         inputSchema: z.toJSONSchema(operationInputSchema),
+        annotations: READ_ONLY_TOOL,
       },
       ...[
         { name: "search", title: "Search Workspace", description: "Retrieve portable text passages with source citations. Use these as context for any LLM; this tool does not generate an answer.", inputSchema: queryInputSchema },
@@ -99,6 +112,7 @@ function legacyManifest(baseUrl: string, scopes?: string[]) {
         category: "tool",
         endpoint: `${baseUrl}/v1/mcp/tools/workspace.${name}`,
         inputSchema,
+        annotations: workspaceToolAnnotations[name] ?? READ_ONLY_TOOL,
       })),
     ].filter((tool) => !scopes || tool.category !== "tool" || (tool.id.startsWith("ai.")
       ? scopes.some((scope) => scope === "search" || scope === "ingest")

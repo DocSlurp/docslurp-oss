@@ -357,6 +357,18 @@ export const aiSubmitResponseSchema = z.object({
 });
 export type AiSubmitResponse = z.infer<typeof aiSubmitResponseSchema>;
 
+export const capabilityAnnotationsSchema = z.object({
+  /** Does not modify stored data; safe to call without confirmation. */
+  readOnly: z.boolean().default(false),
+  /** Can delete or overwrite data. */
+  destructive: z.boolean().default(false),
+  /** Repeating the same call has the same effect as calling it once. */
+  idempotent: z.boolean().default(false),
+  /** Interacts with resources outside the account. */
+  openWorld: z.boolean().default(false),
+}).default({ readOnly: false, destructive: false, idempotent: false, openWorld: false });
+export type CapabilityAnnotations = z.infer<typeof capabilityAnnotationsSchema>;
+
 export const aiCapabilitySchema = z.object({
   id: z.string(),
   title: z.string(),
@@ -380,6 +392,8 @@ export const aiCapabilitySchema = z.object({
     })
     .default({ baselineCostCents: 0, billableMetrics: [] }),
   featureGates: z.array(z.string()).default([]),
+  /** Agent-safety hints. Declared here once so every surface (MCP, WebMCP, chat) agrees. */
+  annotations: capabilityAnnotationsSchema,
 });
 export type AiCapability = z.infer<typeof aiCapabilitySchema>;
 
@@ -389,7 +403,7 @@ export const aiCapabilityManifestSchema = z.object({
     title: z.string(),
     version: z.string(),
     transports: z
-      .array(z.enum(["http", "sse", "stdio"]))
+      .array(z.enum(["http", "streamable-http", "sse", "stdio"]))
       .default(["http", "sse"]),
     auth: z.object({
       type: z.enum(["apiKey", "session"]),
