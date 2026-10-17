@@ -73,7 +73,7 @@ describe("embedTextChunks", () => {
   });
 
   it("uses registered OpenRouter embeddings with exact vectors and actual usage", async () => {
-    const profile: EmbeddingProfile = { profile: "cheapest-hosted", target: "hosted", modelUri: "llm://openrouter/perplexity/pplx-embed-v1-0.6b", runtime: "remote", provider: "openrouter", model: "perplexity/pplx-embed-v1-0.6b", baseUrl: null, dimensions: 1024, task: "document", normalize: true, batchSize: 32 };
+    const profile: EmbeddingProfile = { profile: "cheapest-hosted", target: "hosted", modelUri: "llm://openrouter/perplexity/pplx-embed-v1-0.6b", runtime: "remote", provider: "openrouter", model: "perplexity/pplx-embed-v1-0.6b", baseUrl: null, dimensions: 1024, task: "document", normalize: true, batchSize: 32, lateChunking: false, lateChunkingWindow: 2 };
     const onRemoteUsage = vi.fn();
     const args = { chunks: ["A guide requires two replaceable batteries."], profile, privacyMode: "standard" as const, config: { ...fromEnv(), openRouterApiKey: "router-key" }, onRemoteUsage };
     aiMock.embedMany.mockResolvedValueOnce({ embeddings: [Array.from({ length: 1024 }, () => 1)], usage: { tokens: 12 } });
