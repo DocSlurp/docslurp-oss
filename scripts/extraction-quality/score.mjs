@@ -119,18 +119,36 @@ const plainText = (input) => (Array.isArray(input) ? input.map((x) => (x && type
 const rxCache = new Map();
 const rx = (source) => { let r = rxCache.get(source); if (!r) { r = new RegExp(source, 'giu'); rxCache.set(source, r); } r.lastIndex = 0; return r; };
 const formHit = (source, text) => rx(source).test(text);
+function matches(source, text) {
+  const r = rx(source), found = [];
+  r.lastIndex = 0;
+  for (let m = r.exec(text); m; m = r.exec(text)) { found.push([m.index, m.index + m[0].length]); if (m[0].length === 0) r.lastIndex++; }
+  return found;
+}
+/** Tightest occurrence of all groups (ordered variants keep their order), so a far-away repeat cannot widen the span. */
 function matchVariant(variant, text) {
-  const spans = [];
-  let from = 0;
-  for (const group of variant.groups) {
-    const r = rx(group);
-    r.lastIndex = variant.ordered ? from : 0;
-    const m = r.exec(text);
-    if (!m) return null;
-    spans.push([m.index, m.index + m[0].length]);
-    if (variant.ordered) from = m.index + Math.max(m[0].length, 1);
+  const lists = variant.groups.map((g) => matches(g, text));
+  if (lists.some((l) => !l.length)) return null;
+  let best = null;
+  const consider = (picks) => {
+    const start = Math.min(...picks.map((p) => p[0])), end = Math.max(...picks.map((p) => p[1]));
+    if (!best || end - start < best.end - best.start) best = { start, end, terms: picks.map(([a, b]) => text.slice(a, b)).join(' ') };
+  };
+  if (variant.ordered) {
+    for (const first of lists[0]) {
+      const picks = [first];
+      for (const list of lists.slice(1)) { const next = list.find(([a]) => a >= picks.at(-1)[1]); if (!next) break; picks.push(next); }
+      if (picks.length === lists.length) consider(picks);
+    }
+  } else {
+    for (const [anchor, list] of lists.entries()) {
+      for (const first of list) {
+        const picks = lists.map((l, i) => (i === anchor ? first : l.reduce((b, c) => (Math.abs(c[0] - first[0]) < Math.abs(b[0] - first[0]) ? c : b))));
+        consider(picks);
+      }
+    }
   }
-  return { start: Math.min(...spans.map((s) => s[0])), end: Math.max(...spans.map((s) => s[1])), terms: spans.map(([a, b]) => text.slice(a, b)).join(' ') };
+  return best;
 }
 /** Negation cue in the same clause as the matched span (cue may precede it by up to 40 characters). */
 function negated(text, span) {
@@ -161,23 +179,24 @@ function prepare(gold) {
 
 /** One fact against one folded unit: covered | contradiction | partial, or null when its anchors are absent. */
 function evalFact(fact, text, nums) {
+  let outcome = null;
+  const rank = { covered: 3, partial: 2, contradiction: 1 };
   for (const variant of fact.variants) {
     const span = matchVariant(variant, text);
     if (!span) continue;
-    if (!variant.ignoreNegation) {
-      const observedNegative = Boolean(Number(negated(text, span)) ^ Number(Boolean(variant.inherentNegation)));
-      if (observedNegative !== (fact.polarity === 'negative')) return { status: 'contradiction', kind: 'polarity' };
-    }
-    const required = fact.numbers ?? [];
-    const missing = required.filter((n) => !hasNumber(nums, n.value) && !(n.forms ?? []).some((f) => formHit(f, text)));
-    if (missing.length) {
-      // Anchors present with a different number: a wrong value, not merely an incomplete statement.
+    let r;
+    const observedNegative = variant.ignoreNegation ? fact.polarity === 'negative' : Boolean(Number(negated(text, span)) ^ Number(Boolean(variant.inherentNegation)));
+    if (observedNegative !== (fact.polarity === 'negative')) r = { status: 'contradiction', kind: 'polarity' };
+    else {
+      const required = fact.numbers ?? [];
+      const missing = required.filter((n) => !hasNumber(nums, n.value) && !(n.forms ?? []).some((f) => formHit(f, text)));
       const extras = nums.filter((v) => !hasNumber(required.map((n) => n.value), v));
-      return extras.length ? { status: 'contradiction', kind: 'numeric', extras } : { status: 'partial' };
+      r = !missing.length ? { status: 'covered', terms: span.terms } : extras.length ? { status: 'contradiction', kind: 'numeric', extras } : { status: 'partial' };
     }
-    return { status: 'covered', terms: span.terms };
+    // Any variant that reads the sentence consistently wins; contradictions only stand when none does.
+    if (!outcome || rank[r.status] > rank[outcome.status]) outcome = r;
   }
-  return null;
+  return outcome;
 }
 /** A contradiction signature describes a false positive claim, so a negated rendering of it is not a hit. */
 function signatureHit(sig, text) {
