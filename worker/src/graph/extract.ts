@@ -9,7 +9,7 @@ import {
 
 import { generateOpenRouterText, type TextGenerationUsage } from "../lib/ai.js";
 import { buildTrustedDocumentTaskPrompt } from "../lib/trusted-llm-task.js";
-import { GRAPH_FIDELITY_RULES, MAX_GRAPH_PREDICATE_CHARS, SOURCE_FIDELITY_RULES } from "../lib/source-fidelity.js";
+import { GRAPH_FIDELITY_RULES, SOURCE_FIDELITY_RULES } from "../lib/source-fidelity.js";
 
 const MAX_KNOWN_ENTITY_HINTS = 40;
 const CO_MENTION_CONFIDENCE = 0.45;
@@ -435,8 +435,6 @@ function sanitizeRelationship(value: unknown): ExtractedRelationship[] {
     return [];
   }
   const predicate = candidate.predicate.replace(/\s+/g, " ").trim();
-  // A sentence-length predicate is a restated claim, not a relation; keep qualifiers whole or drop the edge.
-  if (predicate.length > MAX_GRAPH_PREDICATE_CHARS) return [];
   return [
     {
       subject: candidate.subject.trim(),
