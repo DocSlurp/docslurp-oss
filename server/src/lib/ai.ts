@@ -5,6 +5,7 @@ import { withObservation, aiResultDetails } from "@docslurp/shared/observability
 import { createOpenAI } from "@ai-sdk/openai";
 import { defaultEmbeddingConfig, defaultPipelineFeatures, fitEmbeddingDimensions, parseLlmModelUri, openRouterEmbeddingRoute, validateHostedEmbeddingVector } from "@docslurp/shared";
 import { embed, generateText, streamText } from "ai";
+import { embedPerplexity } from "@docslurp/shared";
 
 import {
   posthogAiTelemetry,
@@ -480,6 +481,18 @@ export async function embedConfiguredText(args: {
     return await embedLocalText(args);
   }
 
+  if (args.provider === "perplexity") {
+    const result = await withObservation({ name: "api.embedding.perplexity", type: "embedding", model: args.model, input: args.value, result: aiResultDetails }, () => embedPerplexity({
+      model: args.model ?? "",
+      dimensions: args.dimensions,
+      apiKey: args.apiKey ?? "",
+      values: [args.value],
+      normalize: args.normalize,
+      signal: args.signal,
+      onUsage: tokens => args.onUsage?.({ inputTokens: tokens }),
+    }));
+    return { embedding: result.embeddings[0]!, usage: { inputTokens: result.usage.tokens } };
+  }
   if (args.provider === "openrouter") {
     const route = openRouterEmbeddingRoute(args.model ?? "");
     if (args.dimensions !== undefined && args.dimensions !== route.dimensions) throw new Error("OpenRouter embedding dimensions do not match the registered model");

@@ -99,6 +99,26 @@ describe("embedTextChunks", () => {
     await expect(embedTextChunks({ ...args, config: { ...args.config, openRouterApiKey: "" } })).rejects.toThrow("OPENROUTER_API_KEY");
   });
 
+  it("meters native Perplexity batches once before validating signed INT8 vectors", async () => {
+    const profile: EmbeddingProfile = { profile: "cheapest-hosted", target: "hosted", modelUri: "llm://perplexity/pplx-embed-v1-0.6b", runtime: "remote",
+      provider: "perplexity", model: "pplx-embed-v1-0.6b", baseUrl: null, dimensions: 1024, task: "document", normalize: true, batchSize: 32,
+      lateChunking: false, lateChunkingWindow: 2 };
+    const onRemoteUsage = vi.fn();
+    const fetch = vi.fn().mockResolvedValueOnce(Response.json({ usage: { prompt_tokens: 12 }, data: [{ index: 0, embedding: Buffer.alloc(1024, 1).toString("base64") }] }))
+      .mockResolvedValueOnce(Response.json({ usage: { prompt_tokens: 14 }, data: [] }));
+    vi.stubGlobal("fetch", fetch);
+    const args = { chunks: ["A guide requires two batteries."], profile, privacyMode: "standard" as const,
+      config: { ...fromEnv(), perplexityApiKey: "native-key" }, onRemoteUsage };
+    try {
+      const result = await embedTextChunks(args);
+      expect(result.vectors[0]).toHaveLength(1024);
+      expect(Math.hypot(...result.vectors[0]!)).toBeCloseTo(1);
+      expect(onRemoteUsage).toHaveBeenCalledExactlyOnceWith({ inputTokens: 12, chunks: 1 });
+      await expect(embedTextChunks(args)).rejects.toThrow("omitted vectors");
+      expect(onRemoteUsage).toHaveBeenLastCalledWith({ inputTokens: 14, chunks: 1 });
+    } finally { vi.unstubAllGlobals(); }
+  });
+
   it("uses the cached JS transformers pipeline for local embeddings", async () => {
     const profile: EmbeddingProfile = {
       profile: "good-fast-local",
