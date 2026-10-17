@@ -4,6 +4,12 @@ import postgres from "postgres";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { defaultGraphConfig, graphConfigFingerprint } from "@docslurp/shared";
 
+import { replaceDocumentGraph } from "../graph/graph-store.js";
+vi.mock("../graph/graph-store.js", async (original) => {
+  const actual = await original<typeof import("../graph/graph-store.js")>();
+  return { ...actual, replaceDocumentGraph: vi.fn(actual.replaceDocumentGraph) };
+});
+
 import { generateOpenRouterText } from "../lib/ai.js";
 vi.mock("../lib/ai.js", () => ({ generateOpenRouterText: vi.fn() }));
 
@@ -307,6 +313,26 @@ describe("workspace graph rebuild jobs", () => {
     expect(Number(events[0]!.cost_cents)).toBe(0.25);
     expect(events[0]!.finish_reason).toBe("length");
     expect(await sql`select source from kg_document_state where document_id = 'd1'`).toEqual([{ source: "heuristic" }]);
+  });
+
+  it("persists graph usage even when storing the resulting graph fails", async () => {
+    await seedDocument("d1", "Example System handles documents.");
+    await sql`update workspaces set pipeline = ${sql.json({ graphRag: true })} where id = 'w'`;
+    vi.mocked(generateOpenRouterText).mockResolvedValue({
+      text: '{"entities":[],"relationships":[]}', finishReason: "stop",
+      usage: { inputTokens: 100, outputTokens: 20, costCents: 0.1 },
+    });
+    vi.mocked(replaceDocumentGraph).mockRejectedValueOnce(new Error("graph persistence unavailable"));
+    await queueJob("job-write-failure", "full");
+    await runGraphJobs(sql, { workerId: "test", config: { ...config, openRouterApiKey: "mock-only" }, concurrency: 1 });
+    const events = await sql`
+      select input_tokens, output_tokens from usage_attribution
+      where metric = 'graphrag-extract' and metadata->>'graphJobId' = 'job-write-failure'
+    `;
+    expect(events).toHaveLength(1);
+    expect(Number(events[0]!.input_tokens)).toBe(100);
+    expect(Number(events[0]!.output_tokens)).toBe(20);
+    expect(await sql`select documents_failed from graph_jobs where id = 'job-write-failure'`).toEqual([{ documents_failed: 1 }]);
   });
 
   it("stops between batches when cancellation is requested", async () => {

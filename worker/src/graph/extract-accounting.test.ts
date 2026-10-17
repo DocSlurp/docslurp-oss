@@ -35,3 +35,11 @@ it("records every generated window once, including usage before later cancellati
   expect(onUsage).toHaveBeenCalledTimes(1);
   expect(onUsage).toHaveBeenCalledWith({ inputTokens: 50, outputTokens: 10 }, expect.objectContaining({ window: 1 }));
 });
+
+it("does not turn recorder failures into an unbilled heuristic success", async () => {
+  vi.mocked(generateOpenRouterText).mockResolvedValue({ text: '{"entities":[],"relationships":[]}', finishReason: "stop", usage: { inputTokens: 100, outputTokens: 20 } });
+  await expect(extractDocumentGraph({
+    filename: "synthetic.html", chunks: [{ id: "chunk", text: "Example System handles documents." }],
+    context: { config: defaultGraphConfig, scope: "Synthetic", model: "test-model", apiKey: "mock", useLlm: true, privacyMode: "standard", onUsage: () => { throw new Error("recorder unavailable"); } },
+  })).rejects.toThrow("recorder unavailable");
+});
