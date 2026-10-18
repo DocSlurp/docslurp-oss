@@ -12,3 +12,5 @@
 
 - Trace PostgreSQL, S3, provider transports and vector-search adapters through the shared SigNoz and Langfuse exporters; retain dependency attributes, request-chain correlation and separately labeled usage costs, with real exporter, SDK and database regressions.
 - Serialize superseded-document graph cleanup with graph extraction to prevent the production graph-refresh deadlock, using a nonblocking workspace lock when document rows are already held.
+
+- Add opt-in LANCEDB_REFINE_FACTOR with ef covering refined candidates; verify authorization, SQL hydration/citations and unindexed tails through migrated local PostgreSQL and real Lance (2026-10-17).
