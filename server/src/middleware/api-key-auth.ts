@@ -1,4 +1,5 @@
 import type { MiddlewareHandler } from "hono";
+import { middlewareErrorResponse } from "../lib/api-error.js";
 
 import { resolveApiKeyActor, setRequestActor } from "../lib/request-actor.js";
 import { enforceAuthenticatedApiRateLimit } from "./rate-limit.js";
@@ -14,7 +15,7 @@ export const apiKeyAuth: MiddlewareHandler = async (c, next) => {
 
   const header = c.req.header("Authorization");
   if (!header?.startsWith("Bearer ")) {
-    return c.json({ error: "Missing or invalid Authorization header" }, 401);
+    return middlewareErrorResponse(c, 401, "unauthorized", "Missing or invalid Authorization header");
   }
 
   const actor = await resolveApiKeyActor(header, {
@@ -22,7 +23,7 @@ export const apiKeyAuth: MiddlewareHandler = async (c, next) => {
     referer: c.req.header("referer") ?? c.req.header("referrer")
   });
   if (!actor) {
-    return c.json({ error: "Invalid API key or rate limit exceeded" }, 403);
+    return middlewareErrorResponse(c, 403, "forbidden", "Invalid API key or rate limit exceeded");
   }
 
   setRequestActor(c, actor);

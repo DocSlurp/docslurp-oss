@@ -1,6 +1,6 @@
 import { friendlyErrorMessage, publicErrorForStatus, PUBLIC_ERROR_MESSAGES } from "./public-errors.js";
 import { reportException } from "./error-reporting.js";
-import { publicApiErrorEnvelope } from "./api-error.js";
+import { API_ERROR_PUBLIC_MESSAGES, apiErrorCodeForStatus, isApiErrorCode, publicApiErrorDetails, publicApiErrorEnvelope } from "./api-error.js";
 
 export type PublicErrorReporter = (error: unknown, context?: Record<string, string | number | boolean>) => string;
 
@@ -10,8 +10,13 @@ export const reportPublicError: PublicErrorReporter = (error, context = {}) => {
   return PUBLIC_ERROR_MESSAGES.unexpected;
 };
 
-/** Last line of defence for handled errors, including third-party auth responses. */
-export async function safeErrorResponse(response: Response, requestId?: string, report: PublicErrorReporter = reportPublicError): Promise<Response> {
+/**
+ * Last line of defence for handled errors, including third-party auth responses.
+ * With `native`, every error body leaves as the native envelope, whatever
+ * shape the handler produced; protocol surfaces pass `native: false` and keep
+ * the shape their clients speak.
+ */
+export async function safeErrorResponse(response: Response, requestId?: string, report: PublicErrorReporter = reportPublicError, native = false): Promise<Response> {
   if (response.status < 400) return response;
   const message = publicErrorForStatus(response.status);
   let body: Record<string, unknown> = { error: message };
@@ -27,6 +32,7 @@ export async function safeErrorResponse(response: Response, requestId?: string, 
         if (diagnostic && !(typeof diagnostic === "string" && Object.values(PUBLIC_ERROR_MESSAGES).some(value => value === diagnostic))) {
           report(new Error(typeof diagnostic === "string" ? diagnostic : JSON.stringify(diagnostic)), { requestId: requestId ?? "", status: response.status, surface: "http-response" });
         }
+        if (native) return jsonErrorResponse(response, nativeEnvelopeFor(original, response.status, requestId));
         const code = typeof original.code === "string" && /^[a-zA-Z0-9_:-]{1,80}$/.test(original.code) ? original.code : undefined;
         if (code) body.code = code;
         if (typeof original.message === "string") body.message = message;
@@ -54,6 +60,7 @@ export async function safeErrorResponse(response: Response, requestId?: string, 
       }
     } catch { /* proxies and malformed response bodies receive safe copy too */ }
   }
+  if (native) return jsonErrorResponse(response, nativeEnvelopeFor(null, response.status, requestId));
   if (requestId) body.requestId = requestId;
   return jsonErrorResponse(response, body);
 }
@@ -65,4 +72,13 @@ function jsonErrorResponse(response: Response, body: unknown): Response {
   headers.delete("content-length");
   headers.delete("content-encoding");
   return new Response(JSON.stringify(body), { status: response.status, headers });
+}
+
+/** A handler body that is not the envelope: keep a closed `code` and field paths, never its text. */
+function nativeEnvelopeFor(original: Record<string, unknown> | null, status: number, requestId?: string) {
+  const nested = original && typeof original.error === "object" && original.error !== null ? original.error as Record<string, unknown> : null;
+  const named = original?.code ?? nested?.code;
+  const code = isApiErrorCode(named) ? named : apiErrorCodeForStatus(status);
+  const details = publicApiErrorDetails(original?.details ?? nested?.details ?? (Array.isArray(original?.issues) ? original : nested));
+  return { error: { code, message: API_ERROR_PUBLIC_MESSAGES[code], ...(details ? { details } : {}), ...(requestId ? { requestId } : {}) } };
 }

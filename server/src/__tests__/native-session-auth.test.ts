@@ -71,7 +71,9 @@ describe("native resource bearer authentication boundary", () => {
   it("rejects invalid bearer tokens without falling back to a cookie session", async () => {
     mocks.apiKey.mockResolvedValue(null);
     mocks.session.mockResolvedValue({ type: "session" });
-    expect((await app().request("/v1/organizations/one", { headers })).status).toBe(401);
+    const response = await app().request("/v1/organizations/one", { headers });
+    expect(response.status).toBe(401);
+    expect(await response.json()).toEqual({ error: { code: "unauthorized", message: "Unauthorized" } });
     expect(mocks.session).not.toHaveBeenCalled();
   });
 

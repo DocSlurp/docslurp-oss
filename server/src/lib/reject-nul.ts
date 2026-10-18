@@ -1,4 +1,5 @@
 import type { MiddlewareHandler } from "hono";
+import { middlewareErrorResponse } from "./api-error.js";
 
 /** JSON bodies larger than this are not scanned (uploads and streams do not go through here). */
 const MAX_SCANNED_BODY_BYTES = 2 * 1024 * 1024;
@@ -14,7 +15,7 @@ const JSON_NUL_ESCAPE = /(?<!\\)(?:\\\\)*\\u0000/i;
  * field. File uploads and non-JSON bodies are not inspected.
  */
 export const rejectNulBytes: MiddlewareHandler = async (c, next) => {
-  const reject = () => c.json({ error: "Request contains a NUL (\\u0000) character, which is not supported.", code: "invalid_characters" }, 400);
+  const reject = () => middlewareErrorResponse(c, 400, "invalid_request", "Request contains a NUL (\\u0000) character, which is not supported.");
 
   if (/%00/i.test(c.req.url)) return reject();
 

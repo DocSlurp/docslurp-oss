@@ -2,7 +2,7 @@ import { addTraceMetadata } from "@docslurp/shared/observability";
 import type { Context } from "hono";
 import { HTTPException } from "hono/http-exception";
 
-import { isDefaultWorkspaceAlias, isWorkspaceUuid, type WorkspaceRecord } from "@docslurp/shared";
+import { apiError, isDefaultWorkspaceAlias, isWorkspaceUuid, type WorkspaceRecord } from "@docslurp/shared";
 
 import { auth, appDbPool } from "./auth.js";
 import { isConfiguredAdminUser } from "./admin-emails.js";
@@ -275,7 +275,7 @@ export class ApiKeyWorkspaceNotAllowedError extends HTTPException {
   /** Same code the workspace-access errors use, so one condition never splits across two codes. */
   readonly code = "workspace_not_found";
   constructor() {
-    super(404, { message: "Workspace not found", res: Response.json({ error: "Workspace not found" }, { status: 404 }) });
+    super(404, { message: "Workspace not found", res: Response.json(apiError("workspace_not_found", "Workspace not found"), { status: 404 }) });
   }
 }
 

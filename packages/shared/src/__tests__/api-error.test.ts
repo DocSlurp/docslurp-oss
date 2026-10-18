@@ -7,6 +7,7 @@ import {
   apiErrorCodeForStatus,
   apiErrorEnvelopeSchema,
   isApiErrorCode,
+  publicApiErrorDetails,
   publicApiErrorEnvelope,
 } from "../api-error.js";
 import { safeErrorResponse } from "../error-response.js";
@@ -78,5 +79,49 @@ describe("safeErrorResponse with the native envelope", () => {
   it("leaves OpenAI-compatible errors in their own shape", async () => {
     const res = await safeErrorResponse(Response.json({ error: { message: "m", type: "permission_error", code: "chat_disabled", param: null } }, { status: 403 }), "req-2");
     expect(await res.json()).toMatchObject({ error: { type: "invalid_request_error", code: null, param: null }, requestId: "req-2" });
+  });
+});
+
+describe("publicApiErrorDetails", () => {
+  it("forwards field paths and server-authored limit metadata, nothing else", () => {
+    expect(publicApiErrorDetails({
+      issues: [{ path: ["a", 1], message: "echoes secret input" }],
+      retryAfterSeconds: 30, limitCents: 500, spentCents: 512.4, maxBytes: 1024, category: "search", policy: "key-spend-1d",
+      directUpload: { createSession: "/v1/ingest/direct/sessions", maxFileBytes: 5, secret: "x" },
+      sql: "select secret", stack: "private",
+    })).toEqual({
+      issues: [{ path: "a.1", message: PUBLIC_ERROR_MESSAGES.invalid, code: "invalid_value" }],
+      retryAfterSeconds: 30, limitCents: 500, spentCents: 512.4, maxBytes: 1024, category: "search", policy: "key-spend-1d",
+      directUpload: { createSession: "/v1/ingest/direct/sessions", maxFileBytes: 5 },
+    });
+  });
+  it("drops labels that are not plain identifiers and non-finite numbers", () => {
+    expect(publicApiErrorDetails({ policy: "a b; drop table", category: { nested: true }, retryAfterSeconds: "3", maxBytes: Number.NaN, directUpload: { createSession: "http://evil", maxFileBytes: 1 } })).toBeUndefined();
+    expect(publicApiErrorDetails(null)).toBeUndefined();
+    expect(publicApiErrorDetails([1])).toBeUndefined();
+  });
+});
+
+describe("safeErrorResponse for the native API", () => {
+  it("rewrites a legacy handler body into the envelope, keeping a closed code, field paths and headers", async () => {
+    const legacy = Response.json({ error: "Tenant acme: document 42 missing", code: "workspace_not_found", issues: [{ path: ["q"], message: "secret" }] },
+      { status: 404, headers: { "retry-after": "5", "x-docslurp-spend": "kept" } });
+    const res = await safeErrorResponse(legacy, "req-n", undefined, true);
+    expect(await res.json()).toEqual({ error: { code: "workspace_not_found", message: API_ERROR_PUBLIC_MESSAGES.workspace_not_found, requestId: "req-n",
+      details: { issues: [{ path: "q", message: PUBLIC_ERROR_MESSAGES.invalid, code: "invalid_value" }] } } });
+    expect(res.headers.get("retry-after")).toBe("5");
+    expect(res.headers.get("x-docslurp-spend")).toBe("kept");
+  });
+  it("falls back to the status code for unknown codes, plain text and nested legacy details", async () => {
+    const unknown = await safeErrorResponse(Response.json({ error: "x", code: "TOTALLY_NEW" }, { status: 409 }), "r", undefined, true);
+    expect((await unknown.json()).error.code).toBe("conflict");
+    const text = await safeErrorResponse(new Response("upstream 10.0.0.1", { status: 429 }), "r", undefined, true);
+    expect(await text.json()).toEqual({ error: { code: "rate_limited", message: PUBLIC_ERROR_MESSAGES.rateLimit, requestId: "r" } });
+    const nested = await safeErrorResponse(Response.json({ success: false, error: { issues: [{ path: ["name"] }] } }, { status: 400 }), "r", undefined, true);
+    expect(await nested.json()).toMatchObject({ error: { code: "invalid_request", details: { issues: [{ path: "name" }] } } });
+  });
+  it("leaves the legacy shape alone when not native", async () => {
+    const res = await safeErrorResponse(Response.json({ error: "x", code: "workspace_not_found" }, { status: 404 }), "r");
+    expect(await res.json()).toMatchObject({ code: "workspace_not_found", requestId: "r" });
   });
 });

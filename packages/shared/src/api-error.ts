@@ -4,8 +4,9 @@ import { PUBLIC_ERROR_MESSAGES } from "./public-errors.js";
 /**
  * The native API error envelope: `{ error: { code, message, details?, requestId } }`.
  * `code` is a closed, machine-readable vocabulary; clients branch on it, never
- * on `message`. The OpenAI-compatible, OAuth and JSON-RPC surfaces keep their
- * own protocol shapes.
+ * on `message`. It is the only error shape of the native JSON API. Protocol
+ * surfaces (OpenAI-compatible chat, OAuth, MCP JSON-RPC, search compat adapters
+ * and the Stripe webhook) keep the shapes their clients already speak.
  */
 export const API_ERROR_CODES = [
   "invalid_request",
@@ -13,9 +14,26 @@ export const API_ERROR_CODES = [
   "forbidden",
   "not_found",
   "workspace_not_found",
+  "organization_not_found",
+  "organization_forbidden",
+  "organization_conflict",
+  "personal_organization",
+  "membership_exists",
+  "membership_forbidden",
+  "membership_not_found",
+  "last_owner",
+  "ownership_transfer_required",
+  "user_not_found",
   "conflict",
   "payload_too_large",
   "rate_limited",
+  "spend_limit_exceeded",
+  "daily_page_limit",
+  "ip_temporarily_blocked",
+  "session_required",
+  "unsupported_type",
+  "file_too_large",
+  "unreadable_source",
   "payment_required",
   "credit_exhausted",
   "workspace_budget_paused",
@@ -61,9 +79,26 @@ export const API_ERROR_PUBLIC_MESSAGES: Record<ApiErrorCode, string> = {
   forbidden: PUBLIC_ERROR_MESSAGES.forbidden,
   not_found: PUBLIC_ERROR_MESSAGES.missing,
   workspace_not_found: PUBLIC_ERROR_MESSAGES.workspaceMissing,
+  organization_not_found: PUBLIC_ERROR_MESSAGES.organizationMissing,
+  organization_forbidden: PUBLIC_ERROR_MESSAGES.forbidden,
+  organization_conflict: PUBLIC_ERROR_MESSAGES.conflict,
+  personal_organization: PUBLIC_ERROR_MESSAGES.personalOrganization,
+  membership_exists: PUBLIC_ERROR_MESSAGES.conflict,
+  membership_forbidden: PUBLIC_ERROR_MESSAGES.forbidden,
+  membership_not_found: PUBLIC_ERROR_MESSAGES.missing,
+  last_owner: PUBLIC_ERROR_MESSAGES.lastOwner,
+  ownership_transfer_required: PUBLIC_ERROR_MESSAGES.ownershipTransfer,
+  user_not_found: PUBLIC_ERROR_MESSAGES.missing,
   conflict: PUBLIC_ERROR_MESSAGES.conflict,
   payload_too_large: PUBLIC_ERROR_MESSAGES.tooLarge,
   rate_limited: PUBLIC_ERROR_MESSAGES.rateLimit,
+  spend_limit_exceeded: PUBLIC_ERROR_MESSAGES.spendLimit,
+  daily_page_limit: PUBLIC_ERROR_MESSAGES.dailyPageLimit,
+  ip_temporarily_blocked: PUBLIC_ERROR_MESSAGES.ipBlocked,
+  session_required: PUBLIC_ERROR_MESSAGES.sessionRequired,
+  unsupported_type: PUBLIC_ERROR_MESSAGES.unsupportedType,
+  file_too_large: PUBLIC_ERROR_MESSAGES.tooLarge,
+  unreadable_source: PUBLIC_ERROR_MESSAGES.unreadableSource,
   payment_required: PUBLIC_ERROR_MESSAGES.unavailable,
   credit_exhausted: PUBLIC_ERROR_MESSAGES.unavailable,
   workspace_budget_paused: PUBLIC_ERROR_MESSAGES.unavailable,
@@ -90,16 +125,38 @@ export function apiErrorCodeForStatus(status: number): ApiErrorCode {
   return "internal";
 }
 
-/** Validation paths only: field names help a client fix the request, issue text may echo input. */
+const SAFE_DETAIL_NUMBERS = ["retryAfterSeconds", "limitCents", "spentCents", "maxBytes"] as const;
+const SAFE_DETAIL_LABELS = ["category", "policy"] as const;
+
+/**
+ * The only details that cross the boundary: validation field paths (issue text
+ * may echo input) and server-authored limit metadata. Anything else is dropped.
+ */
 export function publicApiErrorDetails(details: unknown): ApiErrorDetails | undefined {
-  if (!details || typeof details !== "object" || !("issues" in details) || !Array.isArray(details.issues)) return undefined;
-  return {
-    issues: details.issues.map((issue: { path?: unknown }) => ({
+  if (!details || typeof details !== "object" || Array.isArray(details)) return undefined;
+  const source = details as Record<string, unknown>;
+  const safe: ApiErrorDetails = {};
+  if (Array.isArray(source.issues)) {
+    safe.issues = source.issues.map((issue: { path?: unknown }) => ({
       path: Array.isArray(issue?.path) ? issue.path.map(String).join(".") : typeof issue?.path === "string" ? issue.path : "",
       message: PUBLIC_ERROR_MESSAGES.invalid,
       code: "invalid_value",
-    })),
-  };
+    }));
+  }
+  for (const key of SAFE_DETAIL_NUMBERS) {
+    if (typeof source[key] === "number" && Number.isFinite(source[key])) safe[key] = source[key];
+  }
+  for (const key of SAFE_DETAIL_LABELS) {
+    if (typeof source[key] === "string" && /^[\w:.-]{1,80}$/.test(source[key])) safe[key] = source[key];
+  }
+  const direct = source.directUpload;
+  if (direct && typeof direct === "object" && !Array.isArray(direct)) {
+    const { createSession, maxFileBytes } = direct as Record<string, unknown>;
+    if (typeof createSession === "string" && /^\/[\w/{}.-]{1,120}$/.test(createSession) && typeof maxFileBytes === "number" && Number.isFinite(maxFileBytes)) {
+      safe.directUpload = { createSession, maxFileBytes };
+    }
+  }
+  return Object.keys(safe).length ? safe : undefined;
 }
 
 /**
