@@ -11,6 +11,8 @@ import * as lancedb from "@lancedb/lancedb";
 
 import { resolveLanceDbConfig, VectorNamespaceManager } from "@docslurp/shared";
 
+import { lanceDbQueryTuning } from "./lancedb-query-tuning.js";
+
 /**
  * Connections and table handles are reused across searches. Opening them per
  * search re-read manifests (and, on object storage, index and vector pages)
@@ -144,6 +146,10 @@ export async function lanceDbVectorSearch(args: {
     return [];
   }
 
+  const refineFactor = process.env.LANCEDB_REFINE_FACTOR;
+  // Validate outside the native-query catch: configuration errors must be visible.
+  lanceDbQueryTuning(args.limit, 0, refineFactor);
+
   // Read per search so tests and config reloads see the current LANCEDB_URI.
   const { root } = resolveLanceDbConfig();
   const targets: Array<{ uri: string; name: string; documentIds?: string[] }> = [];
@@ -170,12 +176,10 @@ export async function lanceDbVectorSearch(args: {
       if (documentIds?.length) {
         const literals = [...new Set(documentIds)].map(id => `'${id.replace(/'/g, "''")}'`);
         query.where(`"documentId" IN (${literals.join(", ")})`);
-        // HNSW defaults ef to 1.5 * limit. Preserve the former exploration
-        // budget when reducing materialized rows, rather than trading recall
-        // for fewer returned rows. Ignored for tables without an HNSW index.
-        const previousLimit = Math.min(Math.max(args.limit * 10, documentIds.length * args.limit), 1_000);
-        query.ef(Math.ceil(previousLimit * 1.5));
       }
+      const tuning = lanceDbQueryTuning(args.limit, documentIds?.length ?? 0, refineFactor);
+      if (tuning.ef !== undefined) query.ef(tuning.ef);
+      if (tuning.refineFactor !== undefined) query.refineFactor(tuning.refineFactor);
       // Retain an independent scope check at the storage boundary.
       return filterLanceDbRowsByDocumentIds((await lanceSpan("search", () => query.toArray())) as LanceDbRow[], documentIds);
     } catch {
