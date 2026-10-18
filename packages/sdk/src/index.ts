@@ -1065,10 +1065,6 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
     },
 
     search,
-    /** @deprecated Use search({ queries, concurrency }) instead. */
-    searchMany(inputs: SearchInput[], batchOptions: SearchBatchOptions = {}, requestOptions?: RequestOptions): Promise<SearchBatchResponse> {
-      return search({ queries: inputs, ...batchOptions }, requestOptions);
-    },
 
     upload,
   };
