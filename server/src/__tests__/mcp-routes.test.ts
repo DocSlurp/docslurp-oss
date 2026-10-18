@@ -2,6 +2,7 @@ import { Hono } from "hono";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { ValidatedKey } from "../services/api-keys.js";
 import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
+import { aiSimpleToolSchema, toolInputJsonSchema } from "../services/mcp-tool-schemas.js";
 
 const aggregateWorkspaceRagSearch = vi.fn();
 const getAutomationCapabilityManifest = vi.fn();
@@ -251,7 +252,7 @@ describe("mcpRoutes", () => {
   });
 
   it("never lets a remote MCP caller pre-approve automation spend", async () => {
-    getAutomationCapabilityManifest.mockReturnValue({ server: {}, capabilities: [{ id: "ai.simple", title: "Simple", category: "tool", inputSchema: {} }] });
+    getAutomationCapabilityManifest.mockReturnValue({ server: {}, capabilities: [{ id: "ai.simple", title: "Simple", category: "tool", inputSchema: toolInputJsonSchema(aiSimpleToolSchema) }] });
     submitSimpleAutomation.mockReset();
     submitSimpleAutomation.mockResolvedValueOnce({ operation: { id: "00000000-0000-4000-8000-000000000001" }, events: [] });
     const tools = (await (await app.request("/mcp/tools", { headers: { Authorization: "Bearer dslp_test" } })).json()).tools as Array<{ id: string; inputSchema: unknown }>;
@@ -388,7 +389,7 @@ describe("session MCP tools", () => {
     const { sessionToolRoutes } = await import("../routes/session-tools.js");
     const { setRequestActor } = await import("../lib/request-actor.js");
     app = new Hono().use("*", async (c, next) => { setRequestActor(c, actor); await next(); }).route("/tools", sessionToolRoutes);
-    getAutomationCapabilityManifest.mockReturnValue({ server: {}, capabilities: [{ id: "ai.simple", title: "Simple", category: "tool", inputSchema: {} }] });
+    getAutomationCapabilityManifest.mockReturnValue({ server: {}, capabilities: [{ id: "ai.simple", title: "Simple", category: "tool", inputSchema: toolInputJsonSchema(aiSimpleToolSchema) }] });
     getWorkspace.mockImplementation(async (id: string) => id === "foreign" ? null : { id, orgId: "org-1" });
     hybridSearch.mockClear();
     submitSimpleAutomation.mockReset();

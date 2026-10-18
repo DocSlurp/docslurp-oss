@@ -20,8 +20,8 @@ export type McpDispatch = (path: string, init?: RequestInit) => Promise<Response
 const MAX_BODY_BYTES = 1_048_576;
 const REQUEST_TIMEOUT_MS = 120_000;
 
-/** A capability that declares no hints. Matches the MCP defaults, which assume it may write. */
-const UNKNOWN_ANNOTATIONS = { readOnly: false, destructive: true, idempotent: false, openWorld: true };
+/** A capability that declares no hints. Assume it may write, so agents confirm first. */
+const UNKNOWN_ANNOTATIONS = { readOnly: false, destructive: false, idempotent: false, openWorld: false };
 
 function createServer(manifest: McpManifest, adapterDispatch: McpDispatch, signal: AbortSignal): Server {
   const dispatch: McpDispatch = async (path, init) => {
