@@ -89,7 +89,7 @@ describe("chat feedback routes", () => {
   it("returns 404 when the workspace is not accessible", async () => {
     const put = await putFeedback(app, "someone-elses-workspace", { messageId: "m1", rating: "up" });
     expect(put.status).toBe(404);
-    expect(await put.json()).toEqual({ error: "Workspace not found" });
+    expect(await put.json()).toEqual({ error: { code: "workspace_not_found", message: "Workspace not found" } });
 
     const del = await deleteFeedback(app, "someone-elses-workspace", "m1");
     expect(del.status).toBe(404);

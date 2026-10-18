@@ -10,6 +10,8 @@ import {
   markNotificationRead,
   updateNotificationPreferences,
 } from "../services/notifications.js";
+import { apiStatusError } from "../lib/api-error.js";
+import { validationHook } from "../lib/validation.js";
 
 const updatePreferencesSchema = z.object({
   runCompleted: z.boolean().optional(),
@@ -45,12 +47,12 @@ export const notificationsRoutes = new Hono()
     });
 
     if (!delivery) {
-      return c.json({ error: "Notification not found" }, 404);
+      return apiStatusError(c, 404, "Notification not found");
     }
 
     return c.json({ delivery });
   })
-  .post("/inbox/read-all", zValidator("json", readAllSchema), async (c) => {
+  .post("/inbox/read-all", zValidator("json", readAllSchema, validationHook), async (c) => {
     const userId = c.get("sessionUser").id;
     const body = c.req.valid("json");
     const updatedCount = await markAllNotificationsRead({
@@ -65,7 +67,7 @@ export const notificationsRoutes = new Hono()
     const preferences = await getNotificationPreferences(userId);
     return c.json(preferences);
   })
-  .patch("/preferences", zValidator("json", updatePreferencesSchema), async (c) => {
+  .patch("/preferences", zValidator("json", updatePreferencesSchema, validationHook), async (c) => {
     const userId = c.get("sessionUser").id;
     const preferences = await updateNotificationPreferences(userId, c.req.valid("json"));
     return c.json(preferences);

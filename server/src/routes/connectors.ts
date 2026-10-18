@@ -25,6 +25,7 @@ import {
   type IntakeFileVerdict,
   type WorkspaceIntakeItem,
 } from "../services/workspace-intake.js";
+import { apiErrorResponse, apiStatusError } from "../lib/api-error.js";
 
 function getEncryptionKey(): Buffer {
   return getRequiredEncryptionKey("CREDENTIALS_ENCRYPTION_KEY");
@@ -97,14 +98,14 @@ function rowToConnector(row: ConnectorRow): WorkspaceConnector {
 
 async function requireConnectorAccess(workspaceId: string, userId: string): Promise<
   | { ok: true }
-  | { ok: false; status: 403 | 404; body: { error: string } }
+  | { ok: false; status: 403 | 404; code: "forbidden" | "workspace_not_found"; message: string }
 > {
   const access = await getWorkspaceAccess(workspaceId, userId);
   if (!access) {
-    return { ok: false, status: 404, body: { error: "Workspace not found" } };
+    return { ok: false, status: 404, code: "workspace_not_found", message: "Workspace not found" };
   }
   if (!canManageWorkspace(access, userId)) {
-    return { ok: false, status: 403, body: { error: "Forbidden" } };
+    return { ok: false, status: 403, code: "forbidden", message: "Forbidden" };
   }
   return { ok: true };
 }
@@ -246,7 +247,7 @@ export const connectorsRoutes = new Hono()
     const workspaceId = c.req.param("workspaceId");
     const access = await requireConnectorAccess(workspaceId, userId);
     if (!access.ok) {
-      return c.json(access.body, access.status);
+      return apiErrorResponse(c, access.status, access.code, access.message);
     }
 
     const rows = await sql<ConnectorRow[]>`
@@ -265,7 +266,7 @@ export const connectorsRoutes = new Hono()
     const workspaceId = c.req.param("workspaceId");
     const access = await requireConnectorAccess(workspaceId, userId);
     if (!access.ok) {
-      return c.json(access.body, access.status);
+      return apiErrorResponse(c, access.status, access.code, access.message);
     }
 
     const health = await sql`
@@ -294,7 +295,7 @@ export const connectorsRoutes = new Hono()
     const { workspaceId, connectorId } = c.req.param();
     const access = await requireConnectorAccess(workspaceId, userId);
     if (!access.ok) {
-      return c.json(access.body, access.status);
+      return apiErrorResponse(c, access.status, access.code, access.message);
     }
 
     const rows = await sql<ConnectorRow[]>`
@@ -303,7 +304,7 @@ export const connectorsRoutes = new Hono()
       where id = ${connectorId} and workspace_id = ${workspaceId}
     `;
 
-    if (rows.length === 0) return c.json({ error: "Connector not found" }, 404);
+    if (rows.length === 0) return apiStatusError(c, 404, "Connector not found");
     return c.json({ connector: rowToConnector(rows[0]!) });
   })
 
@@ -314,7 +315,7 @@ export const connectorsRoutes = new Hono()
     const body = c.req.valid("json");
     const access = await requireConnectorAccess(workspaceId, userId);
     if (!access.ok) {
-      return c.json(access.body, access.status);
+      return apiErrorResponse(c, access.status, access.code, access.message);
     }
 
     const credentialsEncrypted = encryptCredentials(body.credentials);
@@ -335,7 +336,7 @@ export const connectorsRoutes = new Hono()
     const body = c.req.valid("json");
     const access = await requireConnectorAccess(workspaceId, userId);
     if (!access.ok) {
-      return c.json(access.body, access.status);
+      return apiErrorResponse(c, access.status, access.code, access.message);
     }
 
     const now = new Date().toISOString();
@@ -359,7 +360,7 @@ export const connectorsRoutes = new Hono()
       where id = ${connectorId} and workspace_id = ${workspaceId}
     `;
 
-    if (rows.length === 0) return c.json({ error: "Connector not found" }, 404);
+    if (rows.length === 0) return apiStatusError(c, 404, "Connector not found");
     return c.json({ connector: rowToConnector(rows[0]!) });
   })
 
@@ -369,7 +370,7 @@ export const connectorsRoutes = new Hono()
     const { workspaceId, connectorId } = c.req.param();
     const access = await requireConnectorAccess(workspaceId, userId);
     if (!access.ok) {
-      return c.json(access.body, access.status);
+      return apiErrorResponse(c, access.status, access.code, access.message);
     }
 
     await sql`delete from workspace_connectors where id = ${connectorId} and workspace_id = ${workspaceId}`;
@@ -382,7 +383,7 @@ export const connectorsRoutes = new Hono()
     const { workspaceId, connectorId } = c.req.param();
     const access = await requireConnectorAccess(workspaceId, userId);
     if (!access.ok) {
-      return c.json(access.body, access.status);
+      return apiErrorResponse(c, access.status, access.code, access.message);
     }
 
     const rows = await sql<ConnectorRow[]>`
@@ -391,9 +392,9 @@ export const connectorsRoutes = new Hono()
       where id = ${connectorId} and workspace_id = ${workspaceId}
     `;
 
-    if (rows.length === 0) return c.json({ error: "Connector not found" }, 404);
+    if (rows.length === 0) return apiStatusError(c, 404, "Connector not found");
     const row = rows[0]!;
-    if (row.status === "paused") return c.json({ error: "Connector is paused" }, 400);
+    if (row.status === "paused") return apiStatusError(c, 400, "Connector is paused");
 
     const syncLogId = randomUUID();
     const inserted = await sql`
@@ -406,7 +407,7 @@ export const connectorsRoutes = new Hono()
       returning id
     `;
     if (inserted.length === 0) {
-      return c.json({ error: "A sync is already running for this connector" }, 409);
+      return apiStatusError(c, 409, "A sync is already running for this connector");
     }
 
     // Kick off sync asynchronously
@@ -423,7 +424,7 @@ export const connectorsRoutes = new Hono()
     const { workspaceId, connectorId } = c.req.param();
     const access = await requireConnectorAccess(workspaceId, userId);
     if (!access.ok) {
-      return c.json(access.body, access.status);
+      return apiErrorResponse(c, access.status, access.code, access.message);
     }
 
     const limit = Math.min(100, parseInt(c.req.query("limit") ?? "20", 10));

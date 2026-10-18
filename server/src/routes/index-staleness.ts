@@ -5,6 +5,7 @@ import { Hono } from "hono";
 
 import { sql } from "../db.js";
 import { getRun, isReprocessRejectedError, isRunCreationBlockedError, reprocessRun } from "../services/runs.js";
+import { apiStatusError } from "../lib/api-error.js";
 
 export const indexStalenessRoutes = new Hono()
   .get("/:runId/index-staleness", async (c) => {
@@ -13,7 +14,7 @@ export const indexStalenessRoutes = new Hono()
 
     const run = await getRun(runId, userId, { cost: false });
     if (!run) {
-      return c.json({ error: "Run not found" }, 404);
+      return apiStatusError(c, 404, "Run not found");
     }
 
     const currentVersion = createHash("sha256")
@@ -78,7 +79,7 @@ export const indexStalenessRoutes = new Hono()
 
     const run = await getRun(runId, userId, { cost: false });
     if (!run) {
-      return c.json({ error: "Run not found" }, 404);
+      return apiStatusError(c, 404, "Run not found");
     }
 
     // Re-embed and re-index only: extraction is reused from the source run.
@@ -87,15 +88,15 @@ export const indexStalenessRoutes = new Hono()
       reprocessed = await reprocessRun(runId, userId, { stages: ["embed", "index"] });
     } catch (error) {
       if (isReprocessRejectedError(error)) {
-        return c.json({ error: error.message, code: error.code, details: error.details }, error.statusCode);
+        return apiStatusError(c, error.statusCode, error.message, { code: error.code, details: error.details });
       }
       if (isRunCreationBlockedError(error)) {
-        return c.json({ error: error.message, code: error.code }, error.statusCode);
+        return apiStatusError(c, error.statusCode, error.message, { code: error.code });
       }
       throw error;
     }
     if (!reprocessed) {
-      return c.json({ error: "Failed to create reindex run" }, 500);
+      return apiStatusError(c, 500, "Failed to create reindex run");
     }
     const { run: newRun, deferredReason } = reprocessed;
 

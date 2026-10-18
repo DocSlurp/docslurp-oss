@@ -16,6 +16,8 @@ import {
   sendTestWebhook,
   updateWebhook
 } from "../services/webhooks.js";
+import { apiStatusError } from "../lib/api-error.js";
+import { validationHook } from "../lib/validation.js";
 
 const createWebhookSchema = z.object({
   url: z.string().url(),
@@ -57,7 +59,7 @@ export const webhooksRoutes = new Hono()
     const webhooks = await listWebhooks(userId);
     return c.json({ webhooks });
   })
-  .post("/", zValidator("json", createWebhookSchema), async (c) => {
+  .post("/", zValidator("json", createWebhookSchema, validationHook), async (c) => {
     const userId = c.get("sessionUser").id;
     const body = c.req.valid("json");
     let webhook;
@@ -69,7 +71,7 @@ export const webhooksRoutes = new Hono()
         events: body.events
       });
     } catch (error) {
-      return c.json({ error: reportPublicError(error) }, 400);
+      return apiStatusError(c, 400, reportPublicError(error));
     }
     await appendAuditLog({
       userId,
@@ -85,14 +87,14 @@ export const webhooksRoutes = new Hono()
     });
     return c.json(webhook, 201);
   })
-  .post("/:id/test", zValidator("json", testWebhookSchema), async (c) => {
+  .post("/:id/test", zValidator("json", testWebhookSchema, validationHook), async (c) => {
     const userId = c.get("sessionUser").id;
     const webhookId = c.req.param("id");
     const body = c.req.valid("json");
     const delivery = await sendTestWebhook(webhookId, userId, body.event);
 
     if (!delivery) {
-      return c.json({ error: "Webhook not found" }, 404);
+      return apiStatusError(c, 404, "Webhook not found");
     }
 
     return c.json({ delivery });
@@ -102,7 +104,7 @@ export const webhooksRoutes = new Hono()
     const deleted = await deleteWebhook(c.req.param("id"), userId);
 
     if (!deleted) {
-      return c.json({ error: "Webhook not found" }, 404);
+      return apiStatusError(c, 404, "Webhook not found");
     }
 
     await appendAuditLog({
@@ -118,7 +120,7 @@ export const webhooksRoutes = new Hono()
 
     return c.json({ ok: true });
   })
-  .patch("/:id", zValidator("json", updateWebhookSchema), async (c) => {
+  .patch("/:id", zValidator("json", updateWebhookSchema, validationHook), async (c) => {
     const userId = c.get("sessionUser").id;
     const body = c.req.valid("json");
     let webhook;
@@ -131,11 +133,11 @@ export const webhooksRoutes = new Hono()
         events: body.events
       });
     } catch (error) {
-      return c.json({ error: reportPublicError(error) }, 400);
+      return apiStatusError(c, 400, reportPublicError(error));
     }
 
     if (!webhook) {
-      return c.json({ error: "Webhook not found" }, 404);
+      return apiStatusError(c, 404, "Webhook not found");
     }
 
     await appendAuditLog({
@@ -159,7 +161,7 @@ export const webhooksRoutes = new Hono()
     const result = await rotateWebhookSecret(c.req.param("id"), userId);
 
     if (!result) {
-      return c.json({ error: "Webhook not found" }, 404);
+      return apiStatusError(c, 404, "Webhook not found");
     }
 
     await appendAuditLog({
@@ -180,7 +182,7 @@ export const webhooksRoutes = new Hono()
     const delivery = await replayWebhookDelivery(c.req.param("deliveryId"), userId);
 
     if (!delivery) {
-      return c.json({ error: "Delivery not found" }, 404);
+      return apiStatusError(c, 404, "Delivery not found");
     }
 
     await appendAuditLog({
@@ -199,13 +201,13 @@ export const webhooksRoutes = new Hono()
 
     return c.json({ delivery });
   })
-  .post("/:id/replay", zValidator("json", replayWebhookSchema), async (c) => {
+  .post("/:id/replay", zValidator("json", replayWebhookSchema, validationHook), async (c) => {
     const userId = c.get("sessionUser").id;
     const body = c.req.valid("json");
     const delivery = await replayWebhookDelivery(body.deliveryId, userId);
 
     if (!delivery || delivery.webhookId !== c.req.param("id")) {
-      return c.json({ error: "Delivery not found" }, 404);
+      return apiStatusError(c, 404, "Delivery not found");
     }
 
     return c.json({ delivery });

@@ -291,13 +291,13 @@ describe("workspacesRoutes validation", () => {
 
     expect(response.status).toBe(400);
     await expect(response.json()).resolves.toMatchObject({
-      success: false,
       error: {
-        issues: expect.arrayContaining([
-          expect.objectContaining({
-            path: ["pipeline", "embedding", "modelUri"],
-          }),
-        ]),
+        code: "invalid_request",
+        details: {
+          issues: expect.arrayContaining([
+            expect.objectContaining({ path: "pipeline.embedding.modelUri" }),
+          ]),
+        },
       },
     });
     expect(createWorkspaceMock).not.toHaveBeenCalled();
@@ -370,13 +370,13 @@ describe("workspacesRoutes validation", () => {
 
     expect(response.status).toBe(400);
     await expect(response.json()).resolves.toMatchObject({
-      success: false,
       error: {
-        issues: expect.arrayContaining([
-          expect.objectContaining({
-            path: ["pipeline", "embedding", "modelUri"],
-          }),
-        ]),
+        code: "invalid_request",
+        details: {
+          issues: expect.arrayContaining([
+            expect.objectContaining({ path: "pipeline.embedding.modelUri" }),
+          ]),
+        },
       },
     });
     expect(updateWorkspaceMock).not.toHaveBeenCalled();
@@ -624,7 +624,7 @@ describe("workspacesRoutes validation", () => {
         body: JSON.stringify({ messages: [{ id: "m1", role: "user", parts: [{ type: "text", text: "Hi" }] }] }),
       });
       expect(agent.status).toBe(403);
-      expect(await agent.json()).toMatchObject({ code: "chat_disabled" });
+      expect(await agent.json()).toMatchObject({ error: { code: "chat_disabled" } });
 
       const plain = await app.request("/workspaces/ws-1/chat", {
         method: "POST",
@@ -913,7 +913,10 @@ describe("workspacesRoutes validation", () => {
         body: JSON.stringify({ confirmationText: "Contracts" }),
       });
       expect(response.status).toBe(status);
-      expect((await response.json()).error).toBe("We couldn’t complete that request. Please try again in a moment.");
+      expect((await response.json()).error).toMatchObject({
+        code: status === 404 ? "workspace_not_found" : "forbidden",
+        message: "We couldn’t complete that request. Please try again in a moment.",
+      });
     }
   });
 

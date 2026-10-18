@@ -131,7 +131,7 @@ describe("runsRoutes validation", () => {
 
     expect(response.status).toBe(422);
     await expect(response.json()).resolves.toMatchObject({
-      error: "Invalid run payload"
+      error: { code: "invalid_request", message: "Invalid run payload" }
     });
     expect(getRunProcessingPreviewMock).not.toHaveBeenCalled();
   });
@@ -161,7 +161,7 @@ describe("runsRoutes validation", () => {
       method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({}),
     });
     expect(response.status).toBe(402);
-    await expect(response.json()).resolves.toMatchObject({ code: "minimum_credit_required" });
+    await expect(response.json()).resolves.toMatchObject({ error: { code: "minimum_credit_required" } });
   });
 
   it("passes a stage selection through and rejects restarts the source cannot satisfy", async () => {
@@ -178,7 +178,7 @@ describe("runsRoutes validation", () => {
     });
 
     expect(response.status).toBe(409);
-    await expect(response.json()).resolves.toMatchObject({ code: "missing_stage_artifacts" });
+    await expect(response.json()).resolves.toMatchObject({ error: { code: "conflict" } });
     expect(reprocessRunMock).toHaveBeenCalledWith("run-1", "user-1", { stageFrom: "embed" });
   });
 
