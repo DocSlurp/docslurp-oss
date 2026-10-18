@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { chatRetrievalOverridesSchema, chatSearchFiltersSchema } from "@docslurp/shared";
+import { chatRetrievalOverridesSchema, chatSearchFiltersSchema, searchCandidateDepthSchema, searchResultOrderSchema } from "@docslurp/shared";
 import { parseFilters } from "../search/filters.js";
 
 const id = z.string().trim().min(1).max(256);
@@ -28,6 +28,8 @@ export const searchInputSchema = z.object({
   dateTo: filter,
   hyde: z.boolean().optional(),
   rerank: z.boolean().optional(),
+  candidateDepth: searchCandidateDepthSchema.optional(),
+  resultOrder: searchResultOrderSchema.optional(),
   mmr: z.boolean().optional(),
   mmrLambda: z.number().min(0).max(1).optional(),
   /** Relevance floor, 0..1; 0 disables it. Omitted: workspace default, else SEARCH_MIN_SCORE. */
@@ -81,6 +83,7 @@ export function searchOptions(body: SearchInput & { workspaceId: string }) {
       dateFrom: body.dateFrom ?? "", dateTo: body.dateTo ?? "",
     }),
     useHyDE: body.hyde, useRerank: body.rerank,
+    candidateDepth: body.candidateDepth, resultOrder: body.resultOrder,
     useMmr: body.mmr, mmrLambda: body.mmrLambda,
     parentRetrieval: body.parentRetrieval, summarySeed: body.summarySeed,
     glossary: body.glossary, useContextualCompression: body.compression,

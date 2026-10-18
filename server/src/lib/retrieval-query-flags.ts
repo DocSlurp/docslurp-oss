@@ -1,3 +1,5 @@
+import { searchCandidateDepthSchema, searchResultOrderSchema } from "@docslurp/shared";
+
 /**
  * Retrieval flags from a query string, shared by GET /v1/search and the
  * workspace search stream. Flags are tri-state: an omitted flag stays
@@ -7,6 +9,8 @@
 export interface RetrievalQueryFlags {
   useHyDE?: boolean;
   useRerank?: boolean;
+  candidateDepth?: number;
+  resultOrder?: "relevance" | "prompt";
   useMmr?: boolean;
   parentRetrieval?: boolean;
   summarySeed?: boolean;
@@ -56,7 +60,19 @@ export function parseRetrievalQueryFlags(read: (name: string) => string | undefi
       throw new InvalidRetrievalQueryError("minScore must be a number from 0 to 1");
     }
   }
+  const rawDepth = read("candidateDepth")?.trim();
+  const candidateDepth = rawDepth ? Number(rawDepth) : undefined;
+  if (candidateDepth !== undefined && !searchCandidateDepthSchema.safeParse(candidateDepth).success) {
+    throw new InvalidRetrievalQueryError("candidateDepth must be an integer from 1 to 200");
+  }
+  const rawOrder = read("resultOrder")?.trim();
+  const resultOrder = rawOrder || undefined;
+  if (resultOrder !== undefined && !searchResultOrderSchema.safeParse(resultOrder).success) {
+    throw new InvalidRetrievalQueryError("resultOrder must be relevance or prompt");
+  }
   return {
+    candidateDepth,
+    resultOrder: resultOrder as RetrievalQueryFlags["resultOrder"],
     useHyDE: flag("hyde"),
     useRerank: flag("rerank"),
     useMmr: flag("mmr"),

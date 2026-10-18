@@ -211,6 +211,10 @@ export type UploadUrlsInput = {
 export type IngestUrlInput = UploadUrlsInput;
 
 export type SearchInput = {
+  /** Independent per-adapter and fused candidate cap, 1..200. Omitted preserves server defaults. */
+  candidateDepth?: number;
+  /** Keep ranked search order, or pack the same selected passages for a prompt. */
+  resultOrder?: "relevance" | "prompt";
   documentId?: string;
   filenameContains?: string;
   limit?: number;

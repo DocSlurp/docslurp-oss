@@ -110,3 +110,28 @@ Successful GET/POST `/v1/search` responses include `usage`. Batch responses expo
 This is request metadata, not an invoice. It excludes ingestion, storage, and calls to your own model. Provider-reported costs and estimates remain distinguishable; zero recorded usage does not mean every service operation is free. Native chat's `usage` describes answer generation.
 
 The TypeScript SDK supports direct `for await (const hit of client.search(input))`. Save the search and await it after iteration to read `usage` and `sessionId` without sending a second request.
+
+
+## Candidate depth and result order
+
+`GET /v1/search` and single or batch `POST /v1/search` accept two optional controls:
+
+- `candidateDepth`: integer from 1 to 200. Bounds each evidence adapter's contribution and the fused candidate window before the relevance floor. This window is independent of `rerank` and the returned `limit`; a depth smaller than the output limit can return fewer hits. Filtering and the relevance floor can reduce the window further; there is no automatic refill.
+- `resultOrder`: `"relevance"` keeps the selected results in ranked order; `"prompt"` places high-ranked passages at the beginning and end for prompt assembly. It changes placement of the selected passages, not membership. This does not measure generated-answer quality.
+
+For an equal-candidate comparison, hold `candidateDepth`, `limit`, filters and floor constant while toggling `rerank`:
+
+```json
+{
+  "q": "pump maintenance interval",
+  "workspaceId": "manuals",
+  "candidateDepth": 100,
+  "limit": 10,
+  "rerank": false,
+  "resultOrder": "relevance"
+}
+```
+
+Both controls are also optional workspace retrieval defaults and per-request/thread chat retrieval overrides. The SDK exposes them on `SearchInput`; MCP schemas derive them from the same request contract. Search Session metadata records the chosen controls and adapter, fused-window, floor and ranking-depth counts.
+
+Omitting both controls preserves existing behavior: rerank-enabled searches acquire and rank up to 200 candidates, while rerank-disabled acquisition follows the result limit. Existing postprocessing packs its selected results; unprocessed fusion returns relevance order. Explicit controls are opt-in so this interface change does not claim a new ranking default based on exposed development evaluations. Scores remain the existing reciprocal output-position scores, and confidence is not a calibrated probability of answer correctness.

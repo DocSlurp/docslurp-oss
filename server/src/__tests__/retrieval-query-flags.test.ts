@@ -37,3 +37,12 @@ describe("parseRetrievalQueryFlags", () => {
     }
   });
 });
+
+
+it("parses bounded candidate depth and explicit result ordering", () => {
+  const parse = (values: Record<string, string>) => parseRetrievalQueryFlags(name => values[name]);
+  expect(parse({ candidateDepth: "50", resultOrder: "relevance", rerank: "false" })).toMatchObject({ candidateDepth: 50, resultOrder: "relevance", useRerank: false });
+  expect(parse({})).toMatchObject({ candidateDepth: undefined, resultOrder: undefined });
+  for (const candidateDepth of ["0", "201", "50.5", "oops"]) expect(() => parse({ candidateDepth })).toThrow();
+  expect(() => parse({ resultOrder: "unknown" })).toThrow();
+});

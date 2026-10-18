@@ -10,6 +10,8 @@ export interface WorkspaceRetrievalOptions {
   limit?: number;
   useHyDE?: boolean;
   useRerank?: boolean;
+  candidateDepth?: number;
+  resultOrder?: "relevance" | "prompt";
   useMmr?: boolean;
   mmrLambda?: number;
   filters?: SearchFilters;
@@ -97,6 +99,8 @@ export function resolveWorkspaceRetrievalControls<
   const resolved = {
     ...options,
     limit: fromDefault("limit", defaults.resultCount) as number,
+    candidateDepth: fromDefault("candidateDepth", defaults.candidateDepth) as number | undefined,
+    resultOrder: fromDefault("resultOrder", defaults.resultOrder) as "relevance" | "prompt" | undefined,
     useHyDE: fromDefault("useHyDE", defaults.useHyDE) as boolean,
     useRerank: fromDefault("useRerank", defaults.useRerank) as boolean,
     useContextualCompression:

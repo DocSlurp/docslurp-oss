@@ -1386,6 +1386,8 @@ async function chatWorkspaceTurn(
     limit: retrievalLimit,
     useHyDE: searchSettings.retrievalDefaults.useHyDE,
     useRerank: searchSettings.retrievalDefaults.useRerank,
+    candidateDepth: searchSettings.retrievalDefaults.candidateDepth,
+    resultOrder: searchSettings.retrievalDefaults.resultOrder,
     useMmr: searchSettings.retrievalDefaults.useMmr,
     useContextualCompression:
       searchSettings.retrievalDefaults.useContextualCompression,

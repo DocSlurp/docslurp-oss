@@ -311,7 +311,16 @@ export type WorkspaceSearchPinnedResult = z.infer<
   typeof workspaceSearchPinnedResultSchema
 >;
 
+/** Explicit retrieval windows are bounded independently of returned result count. */
+export const searchCandidateDepthSchema = z.number().int().min(1).max(200);
+export const searchResultOrderSchema = z.enum(["relevance", "prompt"]);
+export type SearchResultOrder = z.infer<typeof searchResultOrderSchema>;
+
 export const workspaceSearchRetrievalDefaultsSchema = z.object({
+  /** Omitted: retain the historical rerank-dependent candidate window. */
+  candidateDepth: searchCandidateDepthSchema.optional(),
+  /** Omitted: retain historical ordering; prompt packs the selected set. */
+  resultOrder: searchResultOrderSchema.optional(),
   resultCount: z.number().int().min(1).max(50).default(8),
   useHyDE: z.boolean().default(false),
   useRerank: z.boolean().default(true),
@@ -347,6 +356,10 @@ export const CHAT_MAX_RETRIEVED_PASSAGES = 12;
 
 /** Retrieval changes scoped to one chat thread; they never touch workspace defaults. */
 export const chatRetrievalOverridesSchema = z.object({
+  /** Omitted: retain the historical rerank-dependent candidate window. */
+  candidateDepth: searchCandidateDepthSchema.optional(),
+  /** Omitted: retain historical ordering; prompt packs the selected set. */
+  resultOrder: searchResultOrderSchema.optional(),
   resultCount: z.number().int().min(1).max(CHAT_MAX_RETRIEVED_PASSAGES).optional(),
   useHyDE: z.boolean().optional(),
   useRerank: z.boolean().optional(),
@@ -386,6 +399,10 @@ export type WorkspaceSearchChatSettings = z.infer<
 >;
 
 export const updateWorkspaceSearchRetrievalDefaultsSchema = z.object({
+  /** Omitted: retain the historical rerank-dependent candidate window. */
+  candidateDepth: searchCandidateDepthSchema.optional(),
+  /** Omitted: retain historical ordering; prompt packs the selected set. */
+  resultOrder: searchResultOrderSchema.optional(),
   resultCount: z.number().int().min(1).max(50).optional(),
   useHyDE: z.boolean().optional(),
   useRerank: z.boolean().optional(),
