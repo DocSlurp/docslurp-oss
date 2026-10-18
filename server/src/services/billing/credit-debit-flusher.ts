@@ -1,3 +1,4 @@
+import { withBackgroundSpan } from "@docslurp/shared/observability";
 import { flushPendingCreditDebits } from "./credits.js";
 
 /**
@@ -19,7 +20,7 @@ export async function runCreditDebitFlush(): Promise<void> {
   if (running) return;
   running = true;
   try {
-    const result = await flushPendingCreditDebits();
+    const result = await withBackgroundSpan("api.credit-debit-flush", () => flushPendingCreditDebits());
     if (result.debits > 0) {
       console.log(`[billing] credit-debit-flush orgs=${result.orgs} debits=${result.debits} credits=${result.credits.toFixed(6)}`);
     }

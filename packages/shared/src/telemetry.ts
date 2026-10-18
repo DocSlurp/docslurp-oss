@@ -311,6 +311,33 @@ export async function withHttpSpan<T>(options: { method: string; route: string; 
   return outcome.value;
 }
 
+/**
+ * One pass of a background loop (timer tick or LISTEN drain) as its own root
+ * span, so its dependency spans share one named trace instead of each starting
+ * an anonymous one, and never attach to the request that created the timer.
+ */
+export async function withBackgroundSpan<T>(task: string, run: () => Promise<T>): Promise<T> {
+  let span: ReturnType<ReturnType<NodeTracerProvider["getTracer"]>["startSpan"]> | undefined;
+  try {
+    span = getRuntime()?.traces.getTracer("docslurp.background").startSpan(task, {
+      kind: SpanKind.INTERNAL, root: true, attributes: { "docslurp.background.task": task },
+    }, ROOT_CONTEXT);
+  } catch { /* Best effort. */ }
+  if (!span) return run();
+  const active = span;
+  try {
+    return await context.with(trace.setSpan(ROOT_CONTEXT, active), run);
+  } catch (error) {
+    bestEffort(() => {
+      active.setStatus({ code: SpanStatusCode.ERROR });
+      active.setAttribute("error.type", error instanceof Error ? error.name : "Error");
+    });
+    throw error;
+  } finally {
+    bestEffort(() => active.end());
+  }
+}
+
 /** IDs stay on logs/spans; media metric labels are bounded provider/model categories. */
 export function recordMediaTelemetry(args: { provider: string; model: string; operation: string; outcome: string;
   durationSeconds: number; audioSeconds?: number; costUsd?: number; costSource?: string; candidateFrames?: number; selectedFrames?: number; inputTokens?: number; outputTokens?: number }): void {

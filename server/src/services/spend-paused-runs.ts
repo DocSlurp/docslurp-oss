@@ -1,3 +1,4 @@
+import { withBackgroundSpan } from "@docslurp/shared/observability";
 import { sql as defaultSql, type SqlClient } from "../db.js";
 import { signalPipelinePause, signalPipelineResume } from "../lib/temporal.js";
 import { RUN_EVENTS_CHANNEL } from "./run-event-hub.js";
@@ -155,7 +156,7 @@ export function requestOrgSpendSweep(orgId: string, deps: SpendPausedRunsDeps = 
       return;
     }
     runningOrgSweeps.add(orgId);
-    sweepSpendPausedRuns({ ...deps, orgId })
+    withBackgroundSpan("api.spend-paused-runs", () => sweepSpendPausedRuns({ ...deps, orgId }))
       .catch((error: unknown) => {
         console.error(`[spend-paused-runs] org=${orgId} sweep failed: ${error instanceof Error ? error.message : String(error)}`);
       })

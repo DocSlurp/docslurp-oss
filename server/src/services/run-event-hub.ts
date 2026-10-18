@@ -1,3 +1,4 @@
+import { withBackgroundSpan } from "@docslurp/shared/observability";
 import type { WorkspaceRunEvent } from "@docslurp/shared";
 
 /**
@@ -149,7 +150,7 @@ export class RunEventHub {
 
   private async ensureListening(): Promise<void> {
     this.listener ??= this.deps.listen((payload) => {
-      this.wake(parseRunEventHint(payload)).catch((error) => {
+      withBackgroundSpan("api.run-events-notify", () => this.wake(parseRunEventHint(payload))).catch((error) => {
         console.error("run event drain failed:", error instanceof Error ? error.message : String(error));
       });
     }).catch((error) => {
@@ -164,7 +165,7 @@ export class RunEventHub {
     if (polled && !this.pollTimer) {
       this.pollTimer = setInterval(() => {
         const runIds = [...this.subscribers].flatMap((subscriber) => subscriber.runId ? [subscriber.runId] : []);
-        this.wake(runIds).catch((error) => {
+        withBackgroundSpan("api.run-events-poll", () => this.wake(runIds)).catch((error) => {
           console.error("run event poll failed:", error instanceof Error ? error.message : String(error));
         });
       }, this.options.pollMs);
