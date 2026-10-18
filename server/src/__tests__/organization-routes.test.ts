@@ -35,7 +35,7 @@ describe("organization public route contracts", () => {
     mocks.invite.mockRejectedValue(new OrganizationError(409, "membership_exists", "Already exists"));
     const response = await app.request("/v1/organizations/org/invites", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ email: "Target@Example.com" }) });
     expect(response.status).toBe(409);
-    expect(await response.json()).toEqual({ error: "Already exists", code: "membership_exists" });
+    expect(await response.json()).toEqual({ error: { code: "membership_exists", message: "Already exists" } });
     expect(mocks.invite).toHaveBeenCalledWith("org", "actor", { email: "target@example.com", role: "member", expiresInDays: 7 });
   });
   it("invites by email and returns the accept link without user details (G-02)", async () => {

@@ -1,17 +1,18 @@
 import postgres from "postgres";
+import { instrumentPostgres } from "@docslurp/shared/observability";
 
 import { env } from "./config.js";
 import { processSingleton } from "./lib/process-singleton.js";
 
 function createSql(databaseUrl: string) {
-  return postgres<Record<string, postgres.PostgresType>>(databaseUrl, {
+  return instrumentPostgres(postgres<Record<string, postgres.PostgresType>>(databaseUrl, {
     max: 10,
     // Pooler-held named statements can retain result types across schema deployments.
     prepare: false,
     types: { numeric: { to: 1700, from: [1700], serialize: (value: unknown) => String(value), parse: (value: string): unknown => Number(value) } },
     idle_timeout: 20,
     connect_timeout: 10
-  });
+  }), databaseUrl);
 }
 
 /**

@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import type postgres from "postgres";
 import { HTTPException } from "hono/http-exception";
 
-import { defaultPipelineFeatures, normalizePipelineFeatures } from "@docslurp/shared";
+import { apiError, apiErrorCodeForStatus, defaultPipelineFeatures, isApiErrorCode, normalizePipelineFeatures } from "@docslurp/shared";
 
 export const DEFAULT_WORKSPACE_NAME = "Default";
 
@@ -15,7 +15,7 @@ export type WorkspaceAccessErrorCode = "organization_not_found" | "workspace_not
  */
 export class WorkspaceAccessError extends HTTPException {
   constructor(status: 403 | 404, readonly code: WorkspaceAccessErrorCode, message: string) {
-    super(status, { message, res: Response.json({ error: message, code }, { status }) });
+    super(status, { message, res: Response.json(apiError(isApiErrorCode(code) ? code : apiErrorCodeForStatus(status), message), { status }) });
     this.name = "WorkspaceAccessError";
   }
 }

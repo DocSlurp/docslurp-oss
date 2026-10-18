@@ -1,3 +1,4 @@
+import { instrumentPostgres } from "@docslurp/shared/observability";
 import { PostgresCapacityLeaseStore } from "../media/capacity/store.js";
 import { PostgresMediaJournal } from "../media/journal.js";
 import { PUBLIC_ERROR_MESSAGES } from "@docslurp/shared";
@@ -382,14 +383,14 @@ export class Store {
       runEvents?: RunEventPublisherOptions;
     },
   ) {
-    this.sql = postgres<Record<string, postgres.PostgresType>>(databaseUrl, {
+    this.sql = instrumentPostgres(postgres<Record<string, postgres.PostgresType>>(databaseUrl, {
       max: Math.max(1, options?.poolMax ?? 10),
       // Avoid stale result types in pooled statements after schema deployments.
       prepare: false,
       types: { numeric: { to: 1700, from: [1700], serialize: (value: unknown) => String(value), parse: (value: string): unknown => Number(value) } },
       idle_timeout: 20,
       connect_timeout: 10,
-    });
+    }), databaseUrl);
     this.plausibilityWarningThreshold =
       options?.plausibilityWarningThreshold ?? 0.3;
     this.apiKeyUsageRetentionDays = Math.max(
@@ -668,15 +669,18 @@ export class Store {
           shard ? client`0` : client`greatest(0, ${state.run.pagesProcessed}::int - spend_prev.pages_processed)`,
           batchCredits,
         );
+      // A late activity may settle paid usage after another actor terminates
+      // the run. Keep its terminal outcome and lease state while inserting usage.
+      // An explicit retry resets the row to queued before checkpoints resume.
       const runAssignments = shardDelta
         ? client`
-          stage = ${state.stage},
+          stage = case when workspace_runs.status in ('completed', 'failed') then workspace_runs.stage else ${state.stage} end,
           processed_documents = greatest(workspace_runs.processed_documents, ${state.run.processedDocuments}),
           pages_processed = greatest(workspace_runs.pages_processed, ${state.run.pagesProcessed}),
           artifacts = coalesce(workspace_runs.artifacts, '{}'::jsonb) || ${this.toJson(shardDelta.artifacts)}::jsonb`
         : client`
-          status = ${state.run.status},
-          stage = ${state.stage},
+          status = case when workspace_runs.status in ('completed', 'failed') then workspace_runs.status else ${state.run.status} end,
+          stage = case when workspace_runs.status in ('completed', 'failed') then workspace_runs.stage else ${state.stage} end,
           processed_documents = ${state.run.processedDocuments},
           pages_total = ${state.run.pagesTotal},
           pages_processed = ${state.run.pagesProcessed},
@@ -691,8 +695,8 @@ export class Store {
           set
             ${counter.assignments},
             ${runAssignments},
-            last_heartbeat_at = now(),
-            lease_expires_at = now() + (${this.leaseTtlMs} * interval '1 millisecond'),
+            last_heartbeat_at = case when workspace_runs.status in ('completed', 'failed') then workspace_runs.last_heartbeat_at else now() end,
+            lease_expires_at = case when workspace_runs.status in ('completed', 'failed') then workspace_runs.lease_expires_at else now() + (${this.leaseTtlMs} * interval '1 millisecond') end,
             updated_at = now()
           from ${counter.from}
           where workspace_runs.id = spend_prev.id
@@ -708,8 +712,8 @@ export class Store {
           update workspace_runs
           set
             ${runAssignments},
-            last_heartbeat_at = now(),
-            lease_expires_at = now() + (${this.leaseTtlMs} * interval '1 millisecond'),
+            last_heartbeat_at = case when workspace_runs.status in ('completed', 'failed') then workspace_runs.last_heartbeat_at else now() end,
+            lease_expires_at = case when workspace_runs.status in ('completed', 'failed') then workspace_runs.lease_expires_at else now() + (${this.leaseTtlMs} * interval '1 millisecond') end,
             updated_at = now()
           where id = ${state.run.id}
           returning spent_cents

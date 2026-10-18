@@ -1,13 +1,14 @@
 import { delimitedTableMarkdown } from "../lib/delimited-table.js";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { withObservation, aiResultDetails } from "@docslurp/shared/observability";
+import { withObservation, aiResultDetails, instrumentFetch } from "@docslurp/shared/observability";
 import { isUtf8 } from "node:buffer";
 import path from "node:path";
 
 import type { CanonicalDocument } from "@docslurp/shared";
-import { assertProviderAllowed, authorizePrivateModelCall, textModelCallDescriptor, canonicalDocumentSchema, fitEmbeddingDimensions, PRIVATE_MODEL_PROVIDER, isProviderCallAllowed, resolvePipelineTextModel, type PrivacyMode, type TextGenerationConfig } from "@docslurp/shared";
+import { assertProviderAllowed, authorizePrivateModelCall, textModelCallDescriptor, canonicalDocumentSchema, fitEmbeddingDimensions, openRouterEmbeddingRoute, validateHostedEmbeddingVector, OPENROUTER_BASE_URL, PRIVATE_MODEL_PROVIDER, isProviderCallAllowed, resolvePipelineTextModel, type PrivacyMode, type TextGenerationConfig } from "@docslurp/shared";
 import { embedMany } from "ai";
+import { embedPerplexity } from "@docslurp/shared";
 import { noteWorkProgress, withRequestTimeout } from "../lib/work-progress.js";
 import { runWithProviderRateLimit } from "../lib/provider-rate-limit.js";
 import { createSerialQueue, runBounded, type ConcurrencyLimiter } from "../lib/bounded-concurrency.js";
@@ -621,12 +622,17 @@ async function embedRemoteChunks(args: {
   signal?: AbortSignal;
 }) {
   const isPrivate = args.profile.provider === PRIVATE_MODEL_PROVIDER;
-  const sharedModel = isPrivate ? null : createRemoteEmbeddingModel(args.profile, args.config);
+  const isNativePerplexity = args.profile.provider === "perplexity";
+  const sharedModel = isPrivate || isNativePerplexity ? null : createRemoteEmbeddingModel(args.profile, args.config);
   let privateCostCents = 0;
   const providerOptions = remoteEmbeddingProviderOptions(args.profile);
 
-  const batchSize = clampBatchSize(args.profile.batchSize ?? 32, 1, 256);
-  const batchCount = Math.ceil(args.chunks.length / batchSize);
+  const registeredRoute = args.profile.provider === "openrouter" ? openRouterEmbeddingRoute(args.profile.model) : null;
+  const batchSize = clampBatchSize(args.profile.batchSize ?? 32, 1, registeredRoute?.batchSize ?? (isNativePerplexity ? 128 : 256));
+  // The hosted endpoint caps the sum at 120,000 tokens. UTF-8 bytes plus
+  // tokenizer overhead are a conservative admission bound, never billed usage.
+  const batches = packEmbeddingBatches(args.chunks, batchSize, registeredRoute || isNativePerplexity ? 120_000 : undefined);
+  const batchCount = batches.length;
   const batchEmbeddings: number[][][] = new Array(batchCount);
   const usageBatches: Record<string, unknown>[] = new Array(batchCount);
   let actualTokens = 0;
@@ -642,13 +648,13 @@ async function embedRemoteChunks(args: {
     }
     await args.beforeBatch?.();
 
-    const batch = args.chunks.slice(batchIndex * batchSize, (batchIndex + 1) * batchSize);
+    const batch = batches[batchIndex]!;
     // Private routes authorize (and, under strict-privacy, audit) every request.
     const privateCall = isPrivate
       ? await authorizePrivateModelCall({ privacyMode: args.privacyMode, modelUri: args.profile.modelUri, capability: "embedding", operation: "worker.embedding" })
       : null;
     const model = privateCall
-      ? createOpenAI({ apiKey: "private-endpoint", baseURL: privateCall.baseUrl, fetch: privateCall.fetch }).embedding(privateCall.model) as any
+      ? createOpenAI({ apiKey: "private-endpoint", baseURL: privateCall.baseUrl, fetch: instrumentFetch("private", "embedding", privateCall.fetch) }).embedding(privateCall.model) as any
       : sharedModel;
     const batchStartedAt = Date.now();
     const result = await withObservation(
@@ -675,7 +681,16 @@ async function embedRemoteChunks(args: {
           actualTokens: (result) => result.usage.tokens,
         }, () =>
           providerLimiter.run(`embeddings:${args.profile.provider}`, () =>
-            embedMany({
+            isNativePerplexity ? embedPerplexity({
+              fetch: instrumentFetch("perplexity", "embedding"),
+              model: args.profile.model,
+              dimensions: args.profile.dimensions,
+              apiKey: args.config.perplexityApiKey ?? "",
+              values: batch,
+              normalize: args.profile.normalize,
+              signal: withRequestTimeout(args.signal),
+              onUsage: tokens => serialUsage(async () => args.onRemoteUsage?.({ inputTokens: tokens, chunks: batch.length })),
+            }) : embedMany({
               model,
               values: batch,
               maxParallelCalls: 2,
@@ -691,12 +706,19 @@ async function embedRemoteChunks(args: {
       : null;
     if (privateCost) privateCostCents += privateCost.costCents;
     // Persist actual paid usage before retaining vectors or starting another request.
-    if (typeof result.usage.tokens === "number") {
+    if (!isNativePerplexity && typeof result.usage.tokens === "number") {
       const tokens = result.usage.tokens;
       await serialUsage(async () => args.onRemoteUsage?.({ inputTokens: tokens, chunks: batch.length,
         ...(privateCost ? { costCents: privateCost.costCents, costMetadata: privateCost.metadata } : {}) }));
     }
-    batchEmbeddings[batchIndex] = result.embeddings;
+    if (args.profile.provider === "openrouter") {
+      if (!Number.isSafeInteger(result.usage.tokens) || !(result.usage.tokens! > 0)) throw new Error("OpenRouter embedding response omitted actual usage");
+      if (result.embeddings.length !== batch.length) throw new Error("OpenRouter embedding response omitted vectors");
+      const route = openRouterEmbeddingRoute(args.profile.model);
+      batchEmbeddings[batchIndex] = result.embeddings.map(vector => validateHostedEmbeddingVector(vector, route.dimensions, args.profile.normalize));
+    } else {
+      batchEmbeddings[batchIndex] = result.embeddings;
+    }
 
     const usage = serializeJson(result.usage);
     usageBatches[batchIndex] = {
@@ -719,7 +741,7 @@ async function embedRemoteChunks(args: {
   const embeddings = batchEmbeddings.flat();
 
   return {
-    vectors: embeddings.map((vector) =>
+    vectors: args.profile.provider === "openrouter" || isNativePerplexity ? embeddings : embeddings.map((vector) =>
       fitEmbeddingDimensions(vector, args.profile.dimensions, args.profile.normalize),
     ),
     usage: {
@@ -1140,8 +1162,34 @@ function meanPoolTokenVectors(rows: number[][]): number[] {
   return totals.map((total) => total / rows.length);
 }
 
+/** Preserve every input in order while bounding request count and conservative token size. */
+export function packEmbeddingBatches(chunks: readonly string[], maxInputs: number, maxTokenUpperBound = Infinity): string[][] {
+  const batches: string[][] = [];
+  const encoder = new TextEncoder();
+  let batch: string[] = [];
+  let bound = 0;
+  for (const chunk of chunks) {
+    const next = encoder.encode(chunk).byteLength + 8;
+    if (next > maxTokenUpperBound) throw new Error("Embedding input exceeds the hosted request budget; reduce chunk size");
+    if (batch.length && (batch.length >= maxInputs || bound + next > maxTokenUpperBound)) {
+      batches.push(batch);
+      batch = [];
+      bound = 0;
+    }
+    batch.push(chunk);
+    bound += next;
+  }
+  if (batch.length) batches.push(batch);
+  return batches;
+}
+
 function createRemoteEmbeddingModel(profile: EmbeddingProfile, config: Config) {
   switch (profile.provider) {
+    case "openrouter": {
+      const route = openRouterEmbeddingRoute(profile.model);
+      if (profile.dimensions !== route.dimensions) throw new Error("OpenRouter embedding dimensions do not match the registered model");
+      return createOpenAI({ apiKey: requiredKey(config.openRouterApiKey, "OPENROUTER_API_KEY"), baseURL: OPENROUTER_BASE_URL, fetch: instrumentFetch("openrouter", "embedding") }).embedding(profile.model) as any;
+    }
     case "openai":
       return (
         config.openAiBaseUrl &&
@@ -1149,8 +1197,9 @@ function createRemoteEmbeddingModel(profile: EmbeddingProfile, config: Config) {
           ? createOpenAI({
               apiKey: requiredKey(config.openAiApiKey, "OPENAI_API_KEY"),
               baseURL: config.openAiBaseUrl,
+              fetch: instrumentFetch("openai", "embedding"),
             }).embedding(profile.model)
-          : openai.embedding(profile.model)
+          : createOpenAI({ apiKey: config.openAiApiKey || undefined, fetch: instrumentFetch("openai", "embedding") }).embedding(profile.model)
       ) as any;
     case "ollama":
     case "vllm":
@@ -1161,6 +1210,7 @@ function createRemoteEmbeddingModel(profile: EmbeddingProfile, config: Config) {
       return createOpenAI({
         apiKey: "local",
         baseURL: profile.baseUrl,
+        fetch: instrumentFetch(profile.provider, "embedding"),
       }).embedding(profile.model) as any;
     case "jina":
     case "nomic":

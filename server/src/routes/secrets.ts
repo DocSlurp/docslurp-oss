@@ -12,6 +12,8 @@ import {
   rotateWorkspaceSecret
 } from "../services/secrets.js";
 import { requestIp, requestUserAgent } from "../lib/request-context.js";
+import { apiErrorResponse, apiStatusError } from "../lib/api-error.js";
+import { validationHook } from "../lib/validation.js";
 
 const createSecretSchema = z.object({
   name: z.string().trim().min(1).max(120),
@@ -31,20 +33,20 @@ export const secretsRoutes = new Hono()
 
     const authorization = await authorizeWorkspaceSecretAccess({ workspaceId, userId });
     if (!authorization.ok) {
-      return c.json(authorization.body, authorization.status);
+      return apiErrorResponse(c, authorization.status, authorization.code, authorization.message);
     }
 
     const secrets = await listWorkspaceSecrets({ access: authorization.grant });
     return c.json({ secrets });
   })
-  .post("/:workspaceId/secrets", zValidator("json", createSecretSchema), async (c) => {
+  .post("/:workspaceId/secrets", zValidator("json", createSecretSchema, validationHook), async (c) => {
     const userId = c.get("sessionUser").id;
     const workspaceId = c.req.param("workspaceId");
     const body = c.req.valid("json");
 
     const authorization = await authorizeWorkspaceSecretAccess({ workspaceId, userId });
     if (!authorization.ok) {
-      return c.json(authorization.body, authorization.status);
+      return apiErrorResponse(c, authorization.status, authorization.code, authorization.message);
     }
 
     try {
@@ -74,10 +76,10 @@ export const secretsRoutes = new Hono()
 
       return c.json({ secret }, 201);
     } catch (error) {
-      return c.json({ error: reportPublicError(error) }, 400);
+      return apiStatusError(c, 400, reportPublicError(error));
     }
   })
-  .post("/:workspaceId/secrets/:secretId/rotate", zValidator("json", rotateSecretSchema), async (c) => {
+  .post("/:workspaceId/secrets/:secretId/rotate", zValidator("json", rotateSecretSchema, validationHook), async (c) => {
     const userId = c.get("sessionUser").id;
     const workspaceId = c.req.param("workspaceId");
     const secretId = c.req.param("secretId");
@@ -85,7 +87,7 @@ export const secretsRoutes = new Hono()
 
     const authorization = await authorizeWorkspaceSecretAccess({ workspaceId, userId });
     if (!authorization.ok) {
-      return c.json(authorization.body, authorization.status);
+      return apiErrorResponse(c, authorization.status, authorization.code, authorization.message);
     }
 
     const secret = await rotateWorkspaceSecret({
@@ -96,7 +98,7 @@ export const secretsRoutes = new Hono()
     });
 
     if (!secret) {
-      return c.json({ error: "Secret not found" }, 404);
+      return apiStatusError(c, 404, "Secret not found");
     }
 
     await appendAuditLog({
@@ -123,7 +125,7 @@ export const secretsRoutes = new Hono()
 
     const authorization = await authorizeWorkspaceSecretAccess({ workspaceId, userId });
     if (!authorization.ok) {
-      return c.json(authorization.body, authorization.status);
+      return apiErrorResponse(c, authorization.status, authorization.code, authorization.message);
     }
 
     const deleted = await deleteWorkspaceSecret({
@@ -133,7 +135,7 @@ export const secretsRoutes = new Hono()
     });
 
     if (!deleted) {
-      return c.json({ error: "Secret not found" }, 404);
+      return apiStatusError(c, 404, "Secret not found");
     }
 
     await appendAuditLog({

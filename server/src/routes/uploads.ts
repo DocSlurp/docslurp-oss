@@ -15,7 +15,7 @@ import {
   MAX_CANONICAL_ID_LENGTH,
 } from "../lib/canonical-id.js";
 import { actorHasAnyApiKeyScope, getRequestActor, loadActorScopedWorkspace, requireActorWorkspace } from "../lib/request-actor.js";
-import { validationErrorResponse, type ValidationErrorSource } from "../lib/validation.js";
+import { validationErrorResponse, type ValidationErrorSource, validationHook } from "../lib/validation.js";
 import {
   abortDirectUploadSession,
   completeDirectUploadFile,
@@ -41,6 +41,7 @@ import {
   type WorkspaceIntakePorts,
 } from "../services/workspace-intake.js";
 import { acceptApiKeys } from "../lib/route-auth.js";
+import { apiErrorResponse, apiStatusError } from "../lib/api-error.js";
 
 type Uploadable = File | string | Array<File | string> | undefined;
 
@@ -137,13 +138,7 @@ function runCreationErrorResponse(c: Context, error: unknown): Response | null {
     return null;
   }
 
-  return c.json(
-    {
-      error: error.message,
-      code: error.code,
-    },
-    error.statusCode,
-  );
+  return apiStatusError(c, error.statusCode, error.message, { code: error.code });
 }
 
 function workspaceIntakeErrorResponse(
@@ -151,22 +146,16 @@ function workspaceIntakeErrorResponse(
   error: unknown,
 ): Response | null {
   if (error instanceof WorkspaceAccessError) {
-    return c.json({ error: error.message, code: error.code }, error.status);
+    return apiStatusError(c, error.status, error.message, { code: error.code });
   }
   if (error instanceof UnreadableSourceError) {
-    return c.json({ error: error.message, code: error.code }, error.statusCode);
+    return apiStatusError(c, error.statusCode, error.message, { code: error.code });
   }
   if (!(error instanceof WorkspaceIntakeError)) {
     return null;
   }
 
-  return c.json(
-    {
-      error: error.message,
-      ...(error.issues ? { issues: error.issues } : {}),
-    },
-    error.statusCode,
-  );
+  return apiStatusError(c, error.statusCode, error.message, error.issues ? { details: { issues: error.issues } } : {});
 }
 
 /** `ports` lets tests drive the real routes against fake storage, records, and workflow start. */
@@ -174,14 +163,14 @@ export const createUploadsRoutes = (ports: WorkspaceIntakePorts = workspaceIntak
   .use("*", async (c, next) => {
     const actor = getRequestActor(c);
     if (actor.type === "apiKey" && !actorHasAnyApiKeyScope(actor, ["ingest"])) {
-      return c.json({ error: "Forbidden" }, 403);
+      return apiStatusError(c, 403, "Forbidden");
     }
 
     if (actor.type === "apiKey") {
-      if (!actor.apiKey.orgId) return c.json({ error: "Forbidden" }, 403);
+      if (!actor.apiKey.orgId) return apiStatusError(c, 403, "Forbidden");
       const sessionMatch = c.req.path.match(/\/direct\/sessions\/([^/]+)(?:\/|$)/);
       if (sessionMatch && !await directUploadSessionBelongsToOrganization(sessionMatch[1], actor.userId, actor.apiKey.orgId)) {
-        return c.json({ error: "Upload session not found" }, 404);
+        return apiStatusError(c, 404, "Upload session not found");
       }
       if (c.req.method === "POST" && /\/(bulk|url|direct\/sessions)\/?$/.test(c.req.path)) {
         let body: Record<string, unknown>;
@@ -190,16 +179,16 @@ export const createUploadsRoutes = (ports: WorkspaceIntakePorts = workspaceIntak
             ? await c.req.parseBody({ all: true })
             : await c.req.json();
         } catch {
-          return c.json({ error: "Invalid upload payload" }, 400);
+          return apiStatusError(c, 400, "Invalid upload payload");
         }
-        if (!body || typeof body !== "object") return c.json({ error: "Invalid upload payload" }, 400);
+        if (!body || typeof body !== "object") return apiStatusError(c, 400, "Invalid upload payload");
         if (typeof body.orgId === "string" && body.orgId.trim() && body.orgId.trim() !== actor.apiKey.orgId) {
-          return c.json({ error: "Forbidden" }, 403);
+          return apiStatusError(c, 403, "Forbidden");
         }
         if (typeof body.workspaceId === "string" && body.workspaceId
           && !isDefaultWorkspaceAlias(body.workspaceId)
           && !await loadActorScopedWorkspace(body.workspaceId, actor)) {
-          return c.json({ error: "Workspace not found" }, 404);
+          return apiErrorResponse(c, 404, "workspace_not_found", "Workspace not found");
         }
       }
     }
@@ -244,13 +233,13 @@ export const createUploadsRoutes = (ports: WorkspaceIntakePorts = workspaceIntak
     const sessionId = c.req.param("sessionId");
     const session = await getDirectUploadSessionDescription(sessionId, userId);
     if (!session) {
-      return c.json({ error: "Upload session not found" }, 404);
+      return apiStatusError(c, 404, "Upload session not found");
     }
     return c.json(session);
   })
   .post(
     "/direct/sessions/:sessionId/files/complete",
-    zValidator("json", completeDirectFileSchema),
+    zValidator("json", completeDirectFileSchema, validationHook),
     async (c) => {
       const userId = c.get("sessionUser").id;
       const sessionId = c.req.param("sessionId");
@@ -266,13 +255,7 @@ export const createUploadsRoutes = (ports: WorkspaceIntakePorts = workspaceIntak
       } catch (error) {
         return (
           workspaceIntakeErrorResponse(c, error) ??
-          c.json(
-            {
-              error:
-                reportPublicError(error),
-            },
-            400,
-          )
+          apiStatusError(c, 400, reportPublicError(error))
         );
       }
 
@@ -284,7 +267,7 @@ export const createUploadsRoutes = (ports: WorkspaceIntakePorts = workspaceIntak
     const sessionId = c.req.param("sessionId");
     const aborted = await abortDirectUploadSession(sessionId, userId);
     if (!aborted) {
-      return c.json({ error: "Upload session not found" }, 404);
+      return apiStatusError(c, 404, "Upload session not found");
     }
 
     return c.json({ ok: true });
@@ -307,13 +290,7 @@ export const createUploadsRoutes = (ports: WorkspaceIntakePorts = workspaceIntak
       return (
         workspaceIntakeErrorResponse(c, error) ??
         runCreationErrorResponse(c, error) ??
-        c.json(
-          {
-            error:
-              reportPublicError(error),
-          },
-          500,
-        )
+        apiStatusError(c, 500, reportPublicError(error))
       );
     }
 
@@ -370,13 +347,7 @@ export const createUploadsRoutes = (ports: WorkspaceIntakePorts = workspaceIntak
       return (
         workspaceIntakeErrorResponse(c, error) ??
         runCreationErrorResponse(c, error) ??
-        c.json(
-          {
-            error:
-              reportPublicError(error),
-          },
-          500,
-        )
+        apiStatusError(c, 500, reportPublicError(error))
       );
     }
     if (result.idempotencyReplayed) {
@@ -417,13 +388,7 @@ export const createUploadsRoutes = (ports: WorkspaceIntakePorts = workspaceIntak
         return (
           workspaceIntakeErrorResponse(c, error) ??
           runCreationErrorResponse(c, error) ??
-          c.json(
-            {
-              error:
-                reportPublicError(error),
-            },
-            500,
-          )
+          apiStatusError(c, 500, reportPublicError(error))
         );
       }
       if (result.idempotencyReplayed) {

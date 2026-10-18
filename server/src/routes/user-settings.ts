@@ -13,6 +13,8 @@ import {
   updateMcpServiceSchema,
   updateUserSettings,
 } from "../services/user-settings.js";
+import { apiStatusError } from "../lib/api-error.js";
+import { validationHook } from "../lib/validation.js";
 
 export const userSettingsRoutes = new Hono()
   .get("/", async (c) => {
@@ -20,7 +22,7 @@ export const userSettingsRoutes = new Hono()
     const settings = await getUserSettings(userId);
     return c.json(settings);
   })
-  .patch("/", zValidator("json", updateGeneralSettingsSchema), async (c) => {
+  .patch("/", zValidator("json", updateGeneralSettingsSchema, validationHook), async (c) => {
     const userId = c.get("sessionUser").id;
     const settings = await updateUserSettings(userId, c.req.valid("json"));
     return c.json(settings);
@@ -30,12 +32,12 @@ export const userSettingsRoutes = new Hono()
     const services = await listMcpServiceConnections(userId);
     return c.json({ services });
   })
-  .post("/mcp-services", zValidator("json", createMcpServiceSchema), async (c) => {
+  .post("/mcp-services", zValidator("json", createMcpServiceSchema, validationHook), async (c) => {
     const userId = c.get("sessionUser").id;
     const service = await createMcpServiceConnection(userId, c.req.valid("json"));
     return c.json({ service }, 201);
   })
-  .patch("/mcp-services/:id", zValidator("json", updateMcpServiceSchema), async (c) => {
+  .patch("/mcp-services/:id", zValidator("json", updateMcpServiceSchema, validationHook), async (c) => {
     const userId = c.get("sessionUser").id;
     const service = await updateMcpServiceConnection(
       userId,
@@ -44,7 +46,7 @@ export const userSettingsRoutes = new Hono()
     );
 
     if (!service) {
-      return c.json({ error: "MCP service not found" }, 404);
+      return apiStatusError(c, 404, "MCP service not found");
     }
 
     return c.json({ service });
@@ -53,7 +55,7 @@ export const userSettingsRoutes = new Hono()
     const userId = c.get("sessionUser").id;
     const service = await refreshMcpServiceConnection(userId, c.req.param("id"));
     if (!service) {
-      return c.json({ error: "MCP service not found" }, 404);
+      return apiStatusError(c, 404, "MCP service not found");
     }
 
     return c.json({
@@ -70,7 +72,7 @@ export const userSettingsRoutes = new Hono()
       status: "needs_auth",
     });
     if (!service) {
-      return c.json({ error: "MCP service not found" }, 404);
+      return apiStatusError(c, 404, "MCP service not found");
     }
 
     return c.json({
@@ -88,7 +90,7 @@ export const userSettingsRoutes = new Hono()
     const userId = c.get("sessionUser").id;
     const deleted = await deleteMcpServiceConnection(userId, c.req.param("id"));
     if (!deleted) {
-      return c.json({ error: "MCP service not found" }, 404);
+      return apiStatusError(c, 404, "MCP service not found");
     }
 
     return c.json({ deleted: true });

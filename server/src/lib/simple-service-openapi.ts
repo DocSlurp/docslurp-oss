@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { batchSearchInputSchema, searchInputSchema, workspaceChatInputSchema } from "./search-input.js";
+import { apiErrorOpenApiResponse } from "./api-error-openapi.js";
 import { searchResultSchema, workspaceChatResponseSchema } from "@docslurp/shared";
 
 const ref = (name: string) => ({ $ref: `#/components/schemas/${name}` });
@@ -19,7 +20,16 @@ const uploadTarget = {
   orgId: { type: "string", description: "Session callers only: target this organization's default workspace. API keys use their organization." },
 };
 const errors = {
-  "400": { description: "Invalid request" },
+  "400": apiErrorOpenApiResponse("Invalid request"),
+  "401": apiErrorOpenApiResponse("Authentication required"),
+  "403": apiErrorOpenApiResponse("Key scope or browser domain denied"),
+  "404": apiErrorOpenApiResponse("Resource not found in your organization"),
+  "429": apiErrorOpenApiResponse("Rate limit reached"),
+};
+
+/** The OpenAI-compatible endpoints keep OpenAI's own error body, not the native envelope. */
+const openAiErrors = {
+  "400": { description: "Invalid request (OpenAI-style error body)" },
   "401": { description: "Authentication required" },
   "403": { description: "Key scope or browser domain denied" },
   "404": { description: "Resource not found in your organization" },
@@ -119,17 +129,17 @@ export const simpleServiceSchemas = {
   },
 };
 
-const legacyServicePaths = {
-  "/v1/ingest/bulk": { post: {
+const canonicalServicePaths = {
+  "/v1/uploads/bulk": { post: {
     tags: ["ingest"], summary: "Upload files into the default workspace, a chosen workspace, or a new one", security: serviceSecurity,
-    description: "One buffered multipart request, capped at MAX_MULTIPART_UPLOAD_BYTES (25 MB by default; 413 code multipart_upload_too_large above it). Upload larger files with a direct upload session: POST /v1/ingest/direct/sessions, PUT to the returned URLs, then confirm.",
+    description: "One buffered multipart request, capped at MAX_MULTIPART_UPLOAD_BYTES (25 MB by default; 413 code multipart_upload_too_large above it). Upload larger files with a direct upload session: POST /v1/uploads/direct/sessions, PUT to the returned URLs, then confirm.",
     parameters: [{ in: "header", name: "Idempotency-Key", schema: { type: "string" }, description: "Reuse only for identical uploads" }],
     requestBody: { required: true, content: { "multipart/form-data": { schema: { type: "object", required: ["files"], properties: {
       files: { type: "array", minItems: 1, items: { type: "string", format: "binary" } }, ...uploadTarget, newWorkspace: { type: "string", enum: ["true"], description: uploadTarget.newWorkspace.description },
     } } } } },
     responses: { "201": response("Accepted for asynchronous processing. Poll run progress before searching.", ref("UploadResponse")), ...errors },
   } },
-  "/v1/ingest/url": { post: {
+  "/v1/uploads/url": { post: {
     tags: ["ingest"], summary: "Ingest remote documents into a workspace", security: serviceSecurity,
     requestBody: request({ type: "object", required: ["urls"], properties: { urls: { type: "array", minItems: 1, items: { type: "string", format: "uri" } }, ...uploadTarget } }),
     responses: { "201": response("Ingestion accepted", ref("UploadResponse")), ...errors },
@@ -146,12 +156,6 @@ const legacyServicePaths = {
     ], responses: { "200": response("Cited passages with corpus availability", ref("SearchResponse")), ...errors } },
     post: { tags: ["search"], summary: "Search a workspace", security: serviceSecurity, requestBody: request({ oneOf: [scopedQuery, z.toJSONSchema(batchSearchInputSchema)] }), responses: { "200": response("Single-query passages or ordered batch outcomes", { oneOf: [ref("SearchResponse"), ref("BatchSearchResponse")] }), ...errors } },
   },
-  "/v1/search/batch": { post: {
-    tags: ["search"], summary: "Retrieve cited passages for up to 20 independent queries", security: serviceSecurity,
-    description: "Ordered results; per-item authorization and errors. Default concurrency 4, maximum 4. No answer generation; retrieval enhancements are opt-in. Disconnect stops queued work; already running retrieval may finish.",
-    requestBody: request(z.toJSONSchema(batchSearchInputSchema)),
-    responses: { "200": response("One ordered outcome per query", ref("BatchSearchResponse")), ...errors },
-  } },
   "/v1/chat": { post: {
     tags: ["chat"], summary: "Ask a grounded workspace question", security: serviceSecurity,
     description: "Parallel requests may use independent conversations. Await each reply before sending the next turn with the same sessionId; concurrent turns in one conversation have no ordering guarantee.",
@@ -159,22 +163,23 @@ const legacyServicePaths = {
     responses: { "200": response("Grounded answer, citations and actual usage", ref("WorkspaceChatResponse")), ...errors },
   } },
   "/v1/search/chat": { post: {
+    deprecated: true,
     tags: ["search"], summary: "Compatibility alias for POST /v1/chat", security: serviceSecurity,
     requestBody: request(z.toJSONSchema(workspaceChatInputSchema)),
     responses: { "200": response("Grounded answer, citations and actual usage", ref("WorkspaceChatResponse")), ...errors },
   } },
   "/v1/models": { get: {
     tags: ["chat"], summary: "List accessible workspaces as chat models", security: keySecurity,
-    responses: { "200": response("Workspace model list", { type: "object", required: ["object", "data"], properties: { object: { const: "list" }, data: { type: "array", items: ref("WorkspaceModel") } } }), ...errors },
+    responses: { "200": response("Workspace model list", { type: "object", required: ["object", "data"], properties: { object: { const: "list" }, data: { type: "array", items: ref("WorkspaceModel") } } }), ...openAiErrors },
   } },
   "/v1/chat/completions": { post: {
     tags: ["chat"], summary: "OpenAI-compatible workspace chat", security: keySecurity,
     requestBody: request(ref("ChatCompletionRequest")),
-    responses: { "200": { description: "Completion JSON, or data-only SSE chunks ending with [DONE]. include_usage adds a final usage chunk. Usage covers answer generation; retrieval is logged separately.", content: { ...json(ref("ChatCompletion")), "text/event-stream": { schema: { type: "string" } } } }, ...errors, "500": { description: "Workspace answer failed" } },
+    responses: { "200": { description: "Completion JSON, or data-only SSE chunks ending with [DONE]. include_usage adds a final usage chunk. Usage covers answer generation; retrieval is logged separately.", content: { ...json(ref("ChatCompletion")), "text/event-stream": { schema: { type: "string" } } } }, ...openAiErrors, "500": { description: "Workspace answer failed" } },
   } },
 };
 
-export const simpleServicePaths = { ...legacyServicePaths,
-  "/v1/uploads/bulk": legacyServicePaths["/v1/ingest/bulk"],
-  "/v1/uploads/url": legacyServicePaths["/v1/ingest/url"],
+export const simpleServicePaths = { ...canonicalServicePaths,
+  "/v1/ingest/bulk": { post: { ...canonicalServicePaths["/v1/uploads/bulk"].post, deprecated: true, summary: "Deprecated alias; use POST /v1/uploads/bulk" } },
+  "/v1/ingest/url": { post: { ...canonicalServicePaths["/v1/uploads/url"].post, deprecated: true, summary: "Deprecated alias; use POST /v1/uploads/url" } },
 };

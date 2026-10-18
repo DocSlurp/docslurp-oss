@@ -20,7 +20,7 @@ describe("state and organization OpenAPI contracts", () => {
     const stream = document.paths["/v1/runs/{runId}/progress/stream"].get;
     expect(stream.responses["200"].content["text/event-stream"].example).toContain("event: snapshot\ndata: {");
     expect(stream.responses["200"]["x-sse-events"].snapshot).toEqual({ $ref: "#/components/schemas/RunProgressSnapshot" });
-    expect(stream.responses["429"].headers["Retry-After"]).toBeDefined();
+    expect(stream.responses["429"].headers?.["Retry-After"]).toBeDefined();
   });
 
   it("publishes complete organization operations with session-only creation and protected role inputs", () => {

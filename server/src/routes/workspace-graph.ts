@@ -17,6 +17,8 @@ import {
 } from "../services/workspace-graph.js";
 import { getWorkspace } from "../services/workspaces.js";
 import { acceptApiKeys } from "../lib/route-auth.js";
+import { apiErrorResponse, apiStatusError } from "../lib/api-error.js";
+import { validationHook } from "../lib/validation.js";
 
 const JOB_STREAM_POLL_MS = 1_000;
 const JOB_STREAM_MAX_MS = 10 * 60_000;
@@ -33,22 +35,20 @@ async function authorizeApiKey(c: Context, workspaceRef: string, write: boolean)
     ? actor.apiKey.keyType === "server" && actorHasAnyApiKeyScope(actor, ["workspaces:manage"])
     : actorHasAnyApiKeyScope(actor, ["ingest", "search", "artifacts", "workspaces:manage"]);
   if (!allowed) {
-    return c.json({
-      error: write
+    return apiStatusError(c, 403, write
         ? "This endpoint requires a server API key with the workspaces:manage scope"
-        : "Forbidden",
-    }, 403);
+        : "Forbidden");
   }
   const workspace = await getWorkspace(workspaceRef, actor.userId);
   if (!workspace || !apiKeyCanUseWorkspace(actor.apiKey, workspace)) {
-    return c.json({ error: "Workspace not found" }, 404);
+    return apiErrorResponse(c, 404, "workspace_not_found", "Workspace not found");
   }
   return null;
 }
 
 function graphError(c: Context, error: unknown) {
   if (error instanceof WorkspaceGraphError) {
-    return c.json({ error: error.message, ...(error.activeJob ? { activeJob: error.activeJob } : {}) }, error.status);
+    return apiStatusError(c, error.status, error.message, error.activeJob ? { details: { activeJob: error.activeJob } } : {});
   }
   throw error;
 }
@@ -81,7 +81,7 @@ export const workspaceGraphRoutes = new Hono()
     }
   })
   /** Partial update: only the fields sent change. */
-  .patch("/:workspaceId/graph", zValidator("json", updateWorkspaceGraphSchema), async (c) => {
+  .patch("/:workspaceId/graph", zValidator("json", updateWorkspaceGraphSchema, validationHook), async (c) => {
     const workspaceRef = c.req.param("workspaceId");
     const denied = await authorizeApiKey(c, workspaceRef, true);
     if (denied) return denied;
@@ -98,7 +98,7 @@ export const workspaceGraphRoutes = new Hono()
       return graphError(c, error);
     }
   })
-  .post("/:workspaceId/graph/rebuild", zValidator("json", startGraphRebuildSchema), async (c) => {
+  .post("/:workspaceId/graph/rebuild", zValidator("json", startGraphRebuildSchema, validationHook), async (c) => {
     const workspaceRef = c.req.param("workspaceId");
     const denied = await authorizeApiKey(c, workspaceRef, true);
     if (denied) return denied;

@@ -15,8 +15,21 @@ export const PUBLIC_ERROR_MESSAGES = {
   conflict: "Something changed while you were working. Refresh and try again.",
   tooLarge: "This file is too large. Please choose a smaller file and try again.",
   rateLimit: "Please wait a moment before trying again.",
+  spendLimit: "This API key has reached its spending limit for the current window. Try again later or raise the limit.",
+  dailyPageLimit: "This API key has used its page allowance for today. Try again tomorrow or raise the limit.",
+  ipBlocked: "Too many requests from this network. Try again later.",
+  sessionRequired: "Sign in to your account to do this. API keys can’t perform this action.",
+  unsupportedType: "This file type isn’t supported.",
+  unreadableSource: "This file couldn’t be read. It may be corrupt, truncated or password-protected.",
   processing: "We couldn’t finish processing this document. Please try again.",
   paused: "Processing is paused. Your workspace administrator can help you resume it.",
+  workspaceMissing: "We couldn’t find that workspace. It may have been moved or removed.",
+  personalOrganization: "Personal organizations can’t be changed this way.",
+  lastOwner: "An organization must keep at least one owner.",
+  ownershipTransfer: "Make another member an owner before you delete your account.",
+  organizationMissing: "We couldn’t find that organization. It may have been moved or removed.",
+  chatDisabled: "Chat is turned off for this workspace. Enable it in workspace settings.",
+  searchScope: "Search must stay within a single workspace.",
 } as const;
 
 export function publicErrorForStatus(status: number): string {

@@ -91,6 +91,11 @@ export const defaultAiUsagePricingCatalog: AiUsagePricingCatalogEntry[] = [
       { provider: "openrouter", model: model.openRouterId, ...pricing },
     ];
   }),
+  // Official OpenRouter embedding catalog, verified 2026-10-17: $0.004/$0.03 per million input tokens.
+  { provider: "openrouter", model: "perplexity/pplx-embed-v1-0.6b", costPer1kInputTokens: 0.0004, costPer1kOutputTokens: 0 },
+  { provider: "perplexity", model: "pplx-embed-v1-0.6b", costPer1kInputTokens: 0.0004, costPer1kOutputTokens: 0 },
+  { provider: "perplexity", model: "pplx-embed-v1-4b", costPer1kInputTokens: 0.003, costPer1kOutputTokens: 0 },
+  { provider: "openrouter", model: "perplexity/pplx-embed-v1-4b", costPer1kInputTokens: 0.003, costPer1kOutputTokens: 0 },
   // Deprecated models: kept only to reprice historical usage events.
   {
     provider: "anthropic",

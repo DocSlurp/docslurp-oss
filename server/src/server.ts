@@ -1,4 +1,5 @@
-import { publicErrorMiddleware } from "./lib/public-errors.js";
+import { apiPublicErrorMiddleware } from "./lib/public-errors.js";
+import { nativeBodyLimit, nativeErrorHandler } from "./lib/api-error.js";
 import { sessionToolRoutes } from "./routes/session-tools.js";
 import { existsSync } from "node:fs";
 import { initializeObservability } from "@docslurp/shared/observability";
@@ -89,16 +90,17 @@ export { IN_PROCESS_ENV_KEY } from "./lib/client-ip.js";
 export function createApiApp(): Hono {
   const app = new Hono();
   // Spend blocked by credits, budget caps or entitlement is a 402, not a 500.
-  app.onError((error, c) => error instanceof UnreadableSourceError
+  // Native paths answer thrown errors in the error envelope; protocol surfaces keep their shapes.
+  app.onError(nativeErrorHandler((error, c) => error instanceof UnreadableSourceError
     ? c.json({ error: error.message, code: error.code }, error.statusCode)
-    : spendAwareErrorHandler(error, c));
+    : spendAwareErrorHandler(error, c)));
 
   // Authentication is served first, ahead of the global middleware below: these
   // paths never ran the API IP limit, request context or widget CORS.
   app.route("/", authRoutes);
 
   app.use("*", requestContextMiddleware);
-  app.use("*", publicErrorMiddleware);
+  app.use("*", apiPublicErrorMiddleware);
   app.use("*", apiIpRateLimit);
   app.use("*", rejectNulBytes);
   app.use("*", serviceCors(env.corsAllowedOrigins));
@@ -112,9 +114,7 @@ export function createApiApp(): Hono {
   );
   app.use(
     "/v1/ingest/*",
-    bodyLimit({
-      maxSize: env.maxUploadBytes
-    })
+    nativeBodyLimit(env.maxUploadBytes)
   );
   app.use(
     "/v1/uploads/bulk",
@@ -122,9 +122,7 @@ export function createApiApp(): Hono {
   );
   app.use(
     "/v1/uploads/*",
-    bodyLimit({
-      maxSize: env.maxUploadBytes
-    })
+    nativeBodyLimit(env.maxUploadBytes)
   );
 
   app.use(

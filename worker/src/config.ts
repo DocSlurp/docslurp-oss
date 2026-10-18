@@ -105,6 +105,7 @@ export interface Config {
   costPer1kInputTokens: number;
   costPer1kOutputTokens: number;
   openRouterApiKey: string;
+  perplexityApiKey?: string;
   /** Deployment fallback; workspaces and tasks can override it. */
   textGenerationModel?: string;
   textGenerationProfile?: TextGenerationProfile;
@@ -304,6 +305,7 @@ export function fromEnv(): Config {
     ),
     textGenerationModel: readEnv(process.env.DOCSLURP_TEXT_MODEL),
     textGenerationProfile: textGenerationProfileSchema.optional().parse(readEnv(process.env.DOCSLURP_TEXT_PROFILE)),
+    perplexityApiKey: process.env.PERPLEXITY_API_KEY ?? process.env.PERPLEXITYAI_API_KEY,
     openRouterApiKey:
       process.env.OPENROUTER_API_KEY ?? process.env.OPENROUTER_KEY ?? "",
     plausibilityWarningThreshold: Number.parseFloat(

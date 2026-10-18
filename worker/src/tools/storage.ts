@@ -1,3 +1,4 @@
+import { instrumentS3Client } from "@docslurp/shared/observability";
 import {
   AbortMultipartUploadCommand,
   CompleteMultipartUploadCommand,
@@ -12,11 +13,13 @@ import {
   UploadPartCommand
 } from "@aws-sdk/client-s3";
 import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { createWriteStream } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { Readable } from "node:stream";
-import { Writable } from "node:stream";
+import { Transform, Writable } from "node:stream";
 import { pipeline } from "node:stream/promises";
+import { JSONParser } from "@streamparser/json";
 import { s3ClientConfig, artifactUri, keyFromArtifactUri } from "@docslurp/shared";
 
 import type { Config } from "../config.js";
@@ -28,6 +31,18 @@ export type ArtifactStorageKey = string & { readonly [storageKeyBrand]: "artifac
 
 export interface StorageReadOptions {
   maxBytes?: number;
+  /** Parse a large artifact without constructing a document-sized JSON string. */
+  streamJson?: boolean;
+}
+
+/** A failed object transfer is infrastructure failure, not invalid document content. */
+export class StorageReadError extends Error {
+  readonly code = "STORAGE_READ_FAILED";
+
+  constructor(cause: unknown) {
+    super("Storage object transfer failed", { cause });
+    this.name = "StorageReadError";
+  }
 }
 
 export class StorageObjectTooLargeError extends Error {
@@ -73,7 +88,7 @@ export class ArtifactStore {
 
   constructor(cfg: Config) {
     this.bucket = cfg.s3Bucket;
-    this.client = new S3Client(s3ClientConfig(cfg.storage));
+    this.client = instrumentS3Client(new S3Client(s3ClientConfig(cfg.storage)), cfg.storage.endpoint);
   }
 
   async putJson(key: string, value: unknown): Promise<void> {
@@ -164,13 +179,53 @@ export class ArtifactStore {
       assertObjectWithinReadLimit(key, response.ContentLength, options?.maxBytes);
     }
 
-    const bytes = await response.Body?.transformToByteArray();
+    let bytes: Uint8Array | undefined;
+    try {
+      bytes = await response.Body?.transformToByteArray();
+      if (response.ContentLength !== undefined && (bytes?.length ?? 0) !== response.ContentLength) {
+        throw new Error("Incomplete storage object body");
+      }
+    } catch (error) {
+      throw new StorageReadError(error);
+    }
     const data = Buffer.from(bytes ?? []);
     assertObjectWithinReadLimit(key, data.length, options?.maxBytes);
     return data;
   }
 
   async getJson<T>(key: string, options?: StorageReadOptions): Promise<T> {
+    if (options?.streamJson) {
+      validateStorageKey(key);
+      const response = await this.client.send(new GetObjectCommand({ Bucket: this.bucket, Key: key }));
+      const parser = new JSONParser({ paths: ["$"], stringBufferSize: 64 * 1024 });
+      let value: unknown;
+      let received = false;
+      let sizeBytes = 0;
+      parser.onValue = (entry) => { value = entry.value; received = true; };
+      try {
+        if (typeof response.ContentLength === "number") {
+          assertObjectWithinReadLimit(key, response.ContentLength, options.maxBytes);
+        }
+        if (response.Body) {
+          const source = Readable.fromWeb(response.Body.transformToWebStream() as import("node:stream/web").ReadableStream<Uint8Array>);
+          for await (const chunk of source) {
+            sizeBytes += chunk.length;
+            assertObjectWithinReadLimit(key, sizeBytes, options.maxBytes);
+            parser.write(chunk);
+          }
+        }
+        if (response.ContentLength !== undefined && sizeBytes !== response.ContentLength) {
+          throw new Error("Incomplete storage object body");
+        }
+        if (!parser.isEnded) parser.end();
+        if (!received) throw new Error("Empty storage JSON body");
+        return value as T;
+      } catch (error) {
+        (response.Body as { destroy?: () => void } | undefined)?.destroy?.();
+        if (error instanceof StorageObjectTooLargeError) throw error;
+        throw new StorageReadError(error);
+      }
+    }
     const data = await this.getBytes(key, options);
     return JSON.parse(data.toString("utf8")) as T;
   }
@@ -287,12 +342,45 @@ export class ArtifactStore {
   }
 
   async downloadToTempFile(key: string, pattern: string, options?: StorageReadOptions): Promise<string> {
-    const data = await this.getBytes(key, options);
+    validateStorageKey(key);
+    const response = await this.client.send(new GetObjectCommand({ Bucket: this.bucket, Key: key }));
+    try {
+      if (typeof response.ContentLength === "number") {
+        assertObjectWithinReadLimit(key, response.ContentLength, options?.maxBytes);
+      }
+    } catch (error) {
+      (response.Body as { destroy?: () => void } | undefined)?.destroy?.();
+      throw error;
+    }
     const directory = await mkdtemp(path.join(tmpdir(), "docslurp-"));
     const filename = pattern.replace(/\*/g, Math.random().toString(36).slice(2));
     const filePath = path.join(directory, filename);
-    await writeFile(filePath, data);
-    return filePath;
+    let sizeBytes = 0;
+    const limit = new Transform({
+      transform(chunk: Buffer, _encoding, callback) {
+        sizeBytes += chunk.length;
+        try {
+          assertObjectWithinReadLimit(key, sizeBytes, options?.maxBytes);
+          callback(null, chunk);
+        } catch (error) {
+          callback(error as Error);
+        }
+      },
+    });
+    try {
+      const source = response.Body
+        ? Readable.fromWeb(response.Body.transformToWebStream() as import("node:stream/web").ReadableStream<Uint8Array>)
+        : Readable.from([]);
+      await pipeline(source, limit, createWriteStream(filePath, { flags: "wx" }));
+      if (response.ContentLength !== undefined && sizeBytes !== response.ContentLength) {
+        throw new Error("Incomplete storage object body");
+      }
+      return filePath;
+    } catch (error) {
+      await rm(directory, { recursive: true, force: true });
+      if (error instanceof StorageObjectTooLargeError) throw error;
+      throw new StorageReadError(error);
+    }
   }
 
   async downloadSourceToTempFile(

@@ -25,10 +25,15 @@ export const completeUploadInput = z.object({
 
 export const productToolAliases: Record<string, string> = {
   search: "workspace.search",
-  searchMany: "workspace.search-many",
   chat: "workspace.chat",
   getUploadStatus: "workspace.ingest-report",
   suggestQueries: "workspace.suggest",
+};
+
+const productToolAnnotations: Record<string, { readOnly: boolean; destructive: boolean; idempotent: boolean; openWorld: boolean }> = {
+  listWorkspaces: { readOnly: true, destructive: false, idempotent: true, openWorld: false },
+  upload: { readOnly: false, destructive: false, idempotent: false, openWorld: true },
+  completeUpload: { readOnly: false, destructive: false, idempotent: false, openWorld: false },
 };
 
 export function productToolDefinitions(baseUrl: string) {
@@ -40,5 +45,6 @@ export function productToolDefinitions(baseUrl: string) {
       not: { required: ["workspaceId", "workspaceName"] },
     } },
     { id: "completeUpload", title: "Complete upload", description: "After all presigned PUT requests succeed, verify uploaded files and start ingestion. Pass sessionId and fileIds from upload. Returns workspace and run IDs for getUploadStatus. File size is verified before ingestion; do not call before uploading the bytes.", inputSchema: z.toJSONSchema(completeUploadInput) },
-  ].map(tool => ({ ...tool, category: "tool", endpoint: `${baseUrl}/v1/mcp/tools/${tool.id}` }));
+  ].map(tool => ({ ...tool, category: "tool", endpoint: `${baseUrl}/v1/mcp/tools/${tool.id}`,
+    annotations: productToolAnnotations[tool.id] ?? { readOnly: false, destructive: false, idempotent: false, openWorld: false } }));
 }

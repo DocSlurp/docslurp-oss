@@ -381,11 +381,13 @@ async function embedQuery(
   const apiKey =
     runtime === "remote" && provider === "openai"
       ? process.env.OPENAI_API_KEY
-      : undefined;
+      : provider === "openrouter" ? process.env.OPENROUTER_API_KEY ?? process.env.OPENROUTER_KEY
+        : provider === "perplexity" ? process.env.PERPLEXITY_API_KEY ?? process.env.PERPLEXITYAI_API_KEY : undefined;
   if (runtime === "remote" && provider === "openai" && !apiKey) {
     return null;
   }
 
+  let usageRecorded = false;
   try {
     const result = await embedConfiguredText({
       value: query,
@@ -400,9 +402,13 @@ async function embedQuery(
       privacyMode,
       modelUri: route.modelUri,
       auditScope: { workspaceId: auditWorkspaceId ?? null },
+      ...(["openrouter", "perplexity"].includes(provider) ? { onUsage: (actual: { inputTokens: number }) => {
+        usage.record({ provider, model, metric: "embed-query", inputTokens: actual.inputTokens, logOutputTokens: false, metadata: { usageSource: "provider" } });
+        usageRecorded = true;
+      } } : {}),
     });
 
-    usage.record({
+    if (!usageRecorded) usage.record({
       provider,
       model,
       metric: "embed-query",
@@ -414,7 +420,8 @@ async function embedQuery(
       logOutputTokens: false,
     });
     return result.embedding;
-  } catch {
+  } catch (error) {
+    if (["openrouter", "perplexity"].includes(provider)) throw error;
     return null;
   }
 }

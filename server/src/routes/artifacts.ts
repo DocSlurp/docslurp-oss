@@ -9,6 +9,8 @@ import { fileUrlForArtifact } from "../lib/file-urls.js";
 import { buildArtifactPreview } from "../services/artifact-security.js";
 import { userCanAccessArtifactUri } from "../services/documents.js";
 import { acceptApiKeys } from "../lib/route-auth.js";
+import { apiStatusError } from "../lib/api-error.js";
+import { validationHook } from "../lib/validation.js";
 
 const resolveArtifactSchema = z.object({
   uri: z.string().min(1)
@@ -27,18 +29,18 @@ export const artifactsRoutes = new Hono()
   .use("*", async (c, next) => {
     const actor = getRequestActor(c);
     if (actor.type === "apiKey" && !actorHasAnyApiKeyScope(actor, ["artifacts"])) {
-      return c.json({ error: "Forbidden" }, 403);
+      return apiStatusError(c, 403, "Forbidden");
     }
     await next();
   })
-  .get("/preview", zValidator("query", previewArtifactSchema), async (c) => {
+  .get("/preview", zValidator("query", previewArtifactSchema, validationHook), async (c) => {
     const userId = c.get("sessionUser").id;
     const { uri, kind } = c.req.valid("query");
     if (!parseArtifactUri(uri)) {
-      return c.json({ error: "Unsupported artifact URI" }, 400);
+      return apiStatusError(c, 400, "Unsupported artifact URI");
     }
     if (!(await userCanAccessArtifactUri(uri, userId, c.get("apiKey")?.orgId))) {
-      return c.json({ error: "Artifact not found" }, 404);
+      return apiStatusError(c, 404, "Artifact not found");
     }
 
     try {
@@ -46,30 +48,30 @@ export const artifactsRoutes = new Hono()
       return c.json(preview);
     } catch (error) {
       const message = reportPublicError(error);
-      return c.json({ error: message }, 400);
+      return apiStatusError(c, 400, message);
     }
   })
-  .get("/resolve", zValidator("query", resolveArtifactSchema), async (c) => {
+  .get("/resolve", zValidator("query", resolveArtifactSchema, validationHook), async (c) => {
     const userId = c.get("sessionUser").id;
     const { uri } = c.req.valid("query");
     if (!parseArtifactUri(uri)) {
-      return c.json({ error: "Unsupported artifact URI" }, 400);
+      return apiStatusError(c, 400, "Unsupported artifact URI");
     }
     if (!(await userCanAccessArtifactUri(uri, userId, c.get("apiKey")?.orgId))) {
-      return c.json({ error: "Artifact not found" }, 404);
+      return apiStatusError(c, 404, "Artifact not found");
     }
     // A session/key-bound proxy URL, never a storage URL (lib/file-urls.ts).
     return c.json({ uri, ...fileUrlForArtifact(uri) });
   })
-  .post("/resolve", zValidator("json", resolveArtifactsSchema), async (c) => {
+  .post("/resolve", zValidator("json", resolveArtifactsSchema, validationHook), async (c) => {
     const userId = c.get("sessionUser").id;
     const { uris } = c.req.valid("json");
     if (uris.some((uri) => !parseArtifactUri(uri))) {
-      return c.json({ error: "Unsupported artifact URI" }, 400);
+      return apiStatusError(c, 400, "Unsupported artifact URI");
     }
     const authorized = await Promise.all(uris.map(async (uri) => await userCanAccessArtifactUri(uri, userId, c.get("apiKey")?.orgId)));
     if (authorized.some((allowed) => !allowed)) {
-      return c.json({ error: "Artifact not found" }, 404);
+      return apiStatusError(c, 404, "Artifact not found");
     }
     const resolved = uris.map((uri) => ({ uri, ...fileUrlForArtifact(uri) }));
 

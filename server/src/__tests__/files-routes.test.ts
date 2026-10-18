@@ -67,7 +67,7 @@ describe("file proxy", () => {
       const res = await get(path);
       expect(res.status, label).toBe(404);
       expect(res.headers.get("cache-control"), label).toBe("no-store");
-      expect(await res.json(), label).toEqual({ error: "Not found" });
+      expect(await res.json(), label).toEqual({ error: { code: "not_found", message: "Not found" } });
       expect(open, label).not.toHaveBeenCalled();
     }
   });

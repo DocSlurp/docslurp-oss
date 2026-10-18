@@ -2,6 +2,7 @@ import { Hono } from "hono";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { ValidatedKey } from "../services/api-keys.js";
 import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
+import { aiSimpleToolSchema, toolInputJsonSchema } from "../services/mcp-tool-schemas.js";
 
 const aggregateWorkspaceRagSearch = vi.fn();
 const getAutomationCapabilityManifest = vi.fn();
@@ -241,8 +242,8 @@ describe("mcpRoutes", () => {
     ["ai.simple", {}],
     ["ai.advanced", {}],
     ["workspace.chat", { workspaceId: "ws-1", q: " " }],
-    ["workspace.search-many", { queries: [] }],
-    ["workspace.search-many", { queries: [{ workspaceId: "ws-1", q: "query" }], concurrency: 5 }],
+    ["workspace.search", { queries: [] }],
+    ["workspace.search", { queries: [{ workspaceId: "ws-1", q: "query" }], concurrency: 5 }],
   ])("rejects invalid %s arguments before running the tool", async (tool, body) => {
     const response = await app.request(`/mcp/tools/${tool}`, {
       method: "POST", headers: { Authorization: "Bearer dslp_test", "Content-Type": "application/json" }, body: JSON.stringify(body),
@@ -251,7 +252,7 @@ describe("mcpRoutes", () => {
   });
 
   it("never lets a remote MCP caller pre-approve automation spend", async () => {
-    getAutomationCapabilityManifest.mockReturnValue({ server: {}, capabilities: [{ id: "ai.simple", title: "Simple", category: "tool", inputSchema: {} }] });
+    getAutomationCapabilityManifest.mockReturnValue({ server: {}, capabilities: [{ id: "ai.simple", title: "Simple", category: "tool", inputSchema: toolInputJsonSchema(aiSimpleToolSchema) }] });
     submitSimpleAutomation.mockReset();
     submitSimpleAutomation.mockResolvedValueOnce({ operation: { id: "00000000-0000-4000-8000-000000000001" }, events: [] });
     const tools = (await (await app.request("/mcp/tools", { headers: { Authorization: "Bearer dslp_test" } })).json()).tools as Array<{ id: string; inputSchema: unknown }>;
@@ -284,6 +285,9 @@ describe("mcpRoutes", () => {
     expect(tools.every(tool => /^[A-Za-z0-9_.-]{1,128}$/.test(tool.name))).toBe(true);
     for (const name of ["upload", "completeUpload", "chat"]) {
       expect(tools.find(tool => tool.name === name)?.annotations).toMatchObject({ readOnlyHint: false, idempotentHint: false });
+    }
+    for (const name of ["listWorkspaces", "search", "getUploadStatus", "suggestQueries"]) {
+      expect(tools.find(tool => tool.name === name)?.annotations).toMatchObject({ readOnlyHint: true, idempotentHint: true, destructiveHint: false });
     }
     const upload = tools.find(tool => tool.name === "upload")!;
     expect(upload.inputSchema.oneOf).toHaveLength(2);
@@ -339,7 +343,7 @@ describe("mcpRoutes", () => {
   });
 
   it("keeps parallel retrieval results ordered and denies foreign workspaces before retrieval", async () => {
-    const response = await app.request("/mcp/tools/workspace.search-many", {
+    const response = await app.request("/mcp/tools/workspace.search", {
       method: "POST", headers: { Authorization: "Bearer dslp_test", "Content-Type": "application/json" }, body: JSON.stringify({ queries: [{ q: "first", workspaceId: "ws-1" }, { q: "private", workspaceId: "foreign" }] }),
     });
     expect(response.status).toBe(200);
@@ -353,14 +357,14 @@ describe("mcpRoutes", () => {
     validateApiKey.mockResolvedValue({ ...validatedKey, scopes: ["ingest"] });
     const listed = await app.request("/mcp/tools", { headers: { Authorization: "Bearer dslp_test" } });
     expect((await listed.json()).tools.map((tool: { id: string }) => tool.id)).toEqual(["listWorkspaces", "upload", "completeUpload", "getUploadStatus"]);
-    for (const name of ["search", "search-many", "chat"]) {
+    for (const name of ["search", "chat"]) {
       expect((await app.request(`/mcp/tools/workspace.${name}`, { method: "POST", headers: { Authorization: "Bearer dslp_test", "Content-Type": "application/json" }, body: "{}" })).status).toBe(403);
     }
     expect(chatWorkspace).not.toHaveBeenCalled();
     expect(hybridSearch).not.toHaveBeenCalled();
   });
 
-  it("discovers and calls search-many and chat through the official HTTP client", async () => {
+  it("discovers and calls search and chat through the official HTTP client", async () => {
     chatWorkspace.mockResolvedValue({ answer: "Weekdays [1]", citations: [], sessionId: "chat-1", usage: { inputTokens: 10, outputTokens: 3 } });
     const client = new Client({ name: "rag-chat-test", version: "1" });
     await client.connect(new StreamableHTTPClientTransport(new URL("http://localhost:4321/mcp"), { requestInit: { headers: { Authorization: "Bearer dslp_test" } }, fetch: async (url, init) => app.request(new Request(url, init)) }));
@@ -385,7 +389,7 @@ describe("session MCP tools", () => {
     const { sessionToolRoutes } = await import("../routes/session-tools.js");
     const { setRequestActor } = await import("../lib/request-actor.js");
     app = new Hono().use("*", async (c, next) => { setRequestActor(c, actor); await next(); }).route("/tools", sessionToolRoutes);
-    getAutomationCapabilityManifest.mockReturnValue({ server: {}, capabilities: [{ id: "ai.simple", title: "Simple", category: "tool", inputSchema: {} }] });
+    getAutomationCapabilityManifest.mockReturnValue({ server: {}, capabilities: [{ id: "ai.simple", title: "Simple", category: "tool", inputSchema: toolInputJsonSchema(aiSimpleToolSchema) }] });
     getWorkspace.mockImplementation(async (id: string) => id === "foreign" ? null : { id, orgId: "org-1" });
     hybridSearch.mockClear();
     submitSimpleAutomation.mockReset();

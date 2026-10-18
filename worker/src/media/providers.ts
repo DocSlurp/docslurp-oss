@@ -1,3 +1,4 @@
+import { instrumentFetch } from "@docslurp/shared/observability";
 import { jsonResponse } from "./http.js";
 export { jsonResponse } from "./http.js";
 import { verifyDeepInfraRate } from "./rates.js";
@@ -113,7 +114,7 @@ export class DeepInfraMediaProvider implements MediaProvider {
     const mp3 = input.format === "mp3";
     form.set("audio", new Blob([Uint8Array.from(input.bytes)], { type: mp3 ? "audio/mpeg" : "audio/wav" }), mp3 ? "audio.mp3" : "audio.wav");
     if (input.wordTimestamps) form.set("chunk_level", "word");
-    const response = await this.http(`https://api.deepinfra.com/v1/inference/${this.model}`, {
+    const response = await instrumentFetch(this.id, "transcribe", this.http)(`https://api.deepinfra.com/v1/inference/${this.model}`, {
       method: "POST", headers: { Authorization: `Bearer ${this.key}` }, body: form, signal, redirect: "error",
     });
     const expectedCostUsd = input.durationSeconds / 60 * this.priceUsdPerMinute;
@@ -160,7 +161,7 @@ export class HuggingFaceMediaProvider implements MediaProvider {
     if (!key || !finite(priceUsdPerMinute) || priceUsdPerMinute === 0) throw new Error("HF credential and verified price required");
   }
   async transcribe(input: AudioInput, signal: AbortSignal): Promise<Transcription> {
-    const response = await this.http(this.endpoint, { method: "POST", signal, redirect: "error",
+    const response = await instrumentFetch(this.id, "transcribe", this.http)(this.endpoint, { method: "POST", signal, redirect: "error",
       headers: { Authorization: `Bearer ${this.key}`, "Content-Type": "audio/wav" }, body: Uint8Array.from(input.bytes) });
     const expectedCostUsd = input.durationSeconds / 60 * this.priceUsdPerMinute;
     const result = parseBilled(await jsonResponse(response), input.durationSeconds, expectedCostUsd, response);

@@ -10,6 +10,7 @@ import {
   loadActorScopedWorkspace
 } from "./request-actor.js";
 import type { ValidatedKey } from "../services/api-keys.js";
+import { apiErrorResponse } from "./api-error.js";
 
 export function apiKeyHasAnyScope(apiKey: ValidatedKey, scopes: string[]): boolean {
   return actorHasAnyApiKeyScope({ type: "apiKey", userId: apiKey.userId, apiKey }, scopes);
@@ -39,7 +40,7 @@ export function apiKeyScopeMiddleware(scopes: string[]): MiddlewareHandler {
     try {
       assertApiKeyScopes(c.get("apiKey"), scopes);
     } catch (error) {
-      return c.json({ error: error instanceof Error ? error.message : "Forbidden" }, 403);
+      return apiErrorResponse(c, 403, "forbidden", error instanceof Error ? error.message : "Forbidden");
     }
 
     await next();

@@ -1378,11 +1378,12 @@ async function chatWorkspaceTurn(
     }
   }
 
+  const retrievalLimit = Math.max(
+    4,
+    Math.min(searchSettings.retrievalDefaults.resultCount, CHAT_MAX_RETRIEVED_PASSAGES),
+  );
   const searchOptions: SearchOptions = {
-    limit: Math.max(
-      4,
-      Math.min(searchSettings.retrievalDefaults.resultCount, CHAT_MAX_RETRIEVED_PASSAGES),
-    ),
+    limit: retrievalLimit,
     useHyDE: searchSettings.retrievalDefaults.useHyDE,
     useRerank: searchSettings.retrievalDefaults.useRerank,
     candidateDepth: searchSettings.retrievalDefaults.candidateDepth,
@@ -1428,7 +1429,7 @@ async function chatWorkspaceTurn(
 
   const citations = retrieved.results
     .filter(result => !documentIds || documentIds.includes(result.citation.documentId))
-    .slice(0, 6);
+    .slice(0, retrievalLimit);
   args.onEvidence?.(citations);
   const availability = retrieved.availability ?? null;
   if (citations.length === 0) {

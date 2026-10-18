@@ -19,7 +19,7 @@ export const searchInputSchema = z.object({
   variant: id.optional(),
   filenameContains: filter,
   mimeTypes: filter,
-  tags: filter,
+  tags: filter.describe("Comma-separated tags."),
   pageFrom: filter,
   pageTo: filter,
   language: filter,
@@ -33,7 +33,7 @@ export const searchInputSchema = z.object({
   mmr: z.boolean().optional(),
   mmrLambda: z.number().min(0).max(1).optional(),
   /** Relevance floor, 0..1; 0 disables it. Omitted: workspace default, else SEARCH_MIN_SCORE. */
-  minScore: z.number().min(0).max(1).optional(),
+  minScore: z.number().min(0).max(1).optional().describe("Relevance floor: drop weaker matches (0 disables). The response reports noMatch when nothing relevant remains."),
   parentRetrieval: z.boolean().optional(),
   summarySeed: z.boolean().optional(),
   compression: z.boolean().optional(),

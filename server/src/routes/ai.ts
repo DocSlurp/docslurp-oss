@@ -13,6 +13,7 @@ import {
   getAutomationUsage
 } from "../services/automation.js";
 import { acceptApiKeys } from "../lib/route-auth.js";
+import { apiStatusError } from "../lib/api-error.js";
 
 function routeBaseUrl(url: string): string {
   try {
@@ -110,7 +111,7 @@ export const aiRoutes = new Hono()
     });
 
     if (!operation) {
-      return c.json({ error: "Operation not found" }, 404);
+      return apiStatusError(c, 404, "Operation not found");
     }
 
     const events = await getAutomationOperationEvents({
@@ -128,7 +129,7 @@ export const aiRoutes = new Hono()
     });
 
     if (!operation) {
-      return c.json({ error: "Operation not found" }, 404);
+      return apiStatusError(c, 404, "Operation not found");
     }
 
     return await streamOperation(c, {
@@ -146,7 +147,7 @@ export const aiRoutes = new Hono()
     });
 
     if (!operation) {
-      return c.json({ error: "Operation not found" }, 404);
+      return apiStatusError(c, 404, "Operation not found");
     }
 
     return c.json({ operation });

@@ -6,6 +6,7 @@ import {
   updateOrganizationSchema, workspaceRunProgressSnapshotSchema, workspaceStateSchema,
   applyIngestRecommendationSchema, ingestReportSchema,
 } from "@docslurp/shared";
+import { apiErrorOpenApiResponse } from "./api-error-openapi.js";
 
 const ref = (name: string) => ({ $ref: `#/components/schemas/${name}` });
 const json = (schema: object, example?: unknown) => ({ "application/json": { schema, ...(example === undefined ? {} : { example }) } });
@@ -28,18 +29,18 @@ const object = (properties: Record<string, object>) => ({ type: "object", requir
 const array = (name: string) => ({ type: "array", items: ref(name) });
 const ok = object({ ok: { const: true } });
 const authErrors = {
-  "401": { description: "Authentication required" },
-  "403": { description: "Key scope/type or actor role does not authorize this operation" },
-  "404": { description: "Resource not found or not accessible in the actor's organization" },
-  "429": {
-    description: "Request rate limit exceeded. Polling consumes one read request per snapshot; an SSE connection consumes a read request when opened.",
-    headers: { "Retry-After": { description: "Seconds before retrying", schema: { type: "integer", minimum: 0 } } },
-  },
+  "401": apiErrorOpenApiResponse("Authentication required"),
+  "403": apiErrorOpenApiResponse("Key scope/type or actor role does not authorize this operation"),
+  "404": apiErrorOpenApiResponse("Resource not found or not accessible in the actor's organization"),
+  "429": apiErrorOpenApiResponse(
+    "Request rate limit exceeded. Polling consumes one read request per snapshot; an SSE connection consumes a read request when opened.",
+    { "Retry-After": { description: "Seconds before retrying", schema: { type: "integer", minimum: 0 } } },
+  ),
 };
 const mutationErrors = {
   ...authErrors,
-  "400": { description: "Invalid JSON or request fields" },
-  "409": { description: "Duplicate membership/slug, last-owner protection, or immutable personal membership", content: json(ref("OrganizationError")) },
+  "400": apiErrorOpenApiResponse("Invalid JSON or request fields"),
+  "409": apiErrorOpenApiResponse("Duplicate membership/slug, last-owner protection, or immutable personal membership. `error.code` is one of organization_conflict, membership_exists, last_owner, personal_organization."),
 };
 const orgRead = "Session membership or a server API key with organizations:read or organizations:manage, bound to this organization. Key scopes never grant more than the user's role.";
 const orgManage = "Session authentication or an organization-bound server key with organizations:manage. Owners manage owner/admin roles; admins manage member/billing roles. Membership changes serialize authorization and last-owner checks. Personal memberships cannot be changed.";
@@ -67,7 +68,6 @@ export const stateManagementSchemas = {
   OrganizationInvite: schema(organizationInviteSchema),
   UpdateOrganizationMember: inputSchema(z.object({ role: organizationRoleSchema }).strict()),
   OrganizationApiKey: schema(organizationApiKeySchema),
-  OrganizationError: object({ error: { type: "string" }, code: { type: "string", examples: ["last_owner", "personal_organization", "membership_exists", "organization_forbidden"] } }),
 };
 
 export const runProgressExample = workspaceRunProgressSnapshotSchema.parse({
@@ -113,7 +113,7 @@ export const stateManagementPaths = {
     tags: ["workspaces"], summary: "Read current workspace corpus and recent performance",
     description: `${readScopes} Requires a server key for bearer access. documents.total/completed, pages.total, and storage cover the current corpus: completed documents not superseded by a newer version, so a re-ingest never double counts. documents.queued/processing count in-flight documents in any non-terminal status; documents.failed counts failed documents. Pages indexed are unique nonempty text-searchable pages in completed current documents; notIndexed = known total minus indexed. Unknown page counts are counted separately. Source bytes are measured logical document bytes; documentsWithUnknownSize makes missing measurements explicit, so sourceMb can be a lower bound. Text bytes cover persisted page/chunk text, not physical object or index storage. MB = bytes/1,000,000; vector/artifact bytes are unknown (null). Searches include scalar and multi-workspace sessions. Recent search latency and completed-run wall-time distributions use the selected window. Run throughput includes queue time and reruns; corpus coverage never sums run history. Empty latency/throughput samples yield null. Usage is all-time attributed recorded usage, not a complete economic-price estimate.`,
     security: serviceSecurity, parameters: [workspaceRefParameter, { in: "query", name: "recentWindowHours", schema: { type: "integer", minimum: 1, maximum: 720, default: 24 } }],
-    responses: { "200": { ...response("Current counts and storage, recent search/runtime distributions, and all-time usage", ref("WorkspaceState"), workspaceStateExample), headers: workspaceRefHeaders }, "400": { description: "recentWindowHours must be an integer from 1 to 720" }, ...authErrors },
+    responses: { "200": { ...response("Current counts and storage, recent search/runtime distributions, and all-time usage", ref("WorkspaceState"), workspaceStateExample), headers: workspaceRefHeaders }, "400": apiErrorOpenApiResponse("recentWindowHours must be an integer from 1 to 720"), ...authErrors },
   } },
   "/v1/workspaces/{workspaceId}/ingest-report": { get: {
     tags: ["workspaces"], summary: "Read the ingest report: observed content, relevant settings and recommendations",
@@ -122,26 +122,26 @@ export const stateManagementPaths = {
     parameters: [workspaceRefParameter,
       { in: "query", name: "runId", schema: { type: "string", maxLength: 128 }, description: "Only documents of this run (in this workspace)." },
       { in: "query", name: "documentIds", schema: { type: "string" }, description: "Comma-separated document IDs (at most 100) in this workspace." }],
-    responses: { "200": { ...response("Ingest report", ref("IngestReport")), headers: workspaceRefHeaders }, "400": { description: "More than 100 document IDs or an invalid runId" }, ...authErrors },
+    responses: { "200": { ...response("Ingest report", ref("IngestReport")), headers: workspaceRefHeaders }, "400": apiErrorOpenApiResponse("More than 100 document IDs or an invalid runId"), ...authErrors },
   } },
   "/v1/workspaces/{workspaceId}/ingest-report/apply": { post: {
     tags: ["workspaces"], summary: "Apply an ingest report recommendation's setting change",
     description: "Dashboard session only; the caller must be able to edit the workspace (owner, org owner/admin, workspace admin/editor, or any member on the org default workspace). The server recomputes the report and merges the recommendation's own patch onto the stored pipeline through the regular workspace update (audit log workspace.updated with source ingest-report). The request names a recommendation; it cannot carry settings. 409 when the recommendation no longer applies or a workspace template locks the setting.",
     security: [{ sessionAuth: [] }], parameters: [workspaceRefParameter], requestBody: request(ref("IngestRecommendationAction"), { recommendationId: "vision-all-pages" }),
-    responses: { "200": response("Applied patch and the resulting pipeline", object({ recommendationId: { type: "string" }, patch: { type: ["object", "null"] }, pipeline: { type: "object" } })), "400": { description: "Invalid request fields" }, "409": { description: "Recommendation no longer applies or the setting is locked" }, ...authErrors },
+    responses: { "200": response("Applied patch and the resulting pipeline", object({ recommendationId: { type: "string" }, patch: { type: ["object", "null"] }, pipeline: { type: "object" } })), "400": apiErrorOpenApiResponse("Invalid request fields"), "409": apiErrorOpenApiResponse("Recommendation no longer applies or the setting is locked"), ...authErrors },
   } },
   "/v1/workspaces/{workspaceId}/ingest-report/reprocess": { post: {
     tags: ["workspaces"], summary: "Reprocess the files an ingest report recommendation affects",
     description: "Dashboard session only; workspace editors. Re-runs up to 100 of the recommendation's affected files as new versions with the workspace's current settings (budget caps apply). The report shows the estimated cost first (cost.reprocessCents).",
     security: [{ sessionAuth: [] }], parameters: [workspaceRefParameter], requestBody: request(ref("IngestRecommendationAction"), { recommendationId: "vision-all-pages" }),
-    responses: { "201": response("Created runs", object({ runs: { type: "array", items: object({ id: { type: "string" } }) }, documentIds: { type: "array", items: { type: "string" } }, skippedDocuments: { type: "integer" }, estimatedCents: { type: ["number", "null"] } })), "400": { description: "Invalid request fields" }, "409": { description: "Recommendation no longer applies or has no files to reprocess" }, ...authErrors },
+    responses: { "201": response("Created runs", object({ runs: { type: "array", items: object({ id: { type: "string" } }) }, documentIds: { type: "array", items: { type: "string" } }, skippedDocuments: { type: "integer" }, estimatedCents: { type: ["number", "null"] } })), "400": apiErrorOpenApiResponse("Invalid request fields"), "409": apiErrorOpenApiResponse("Recommendation no longer applies or has no files to reprocess"), ...authErrors },
   } },
   "/v1/workspaces/{workspaceId}": {
     get: { tags: ["workspaces"], summary: "Read a workspace", description: `${readScopes} The record includes its slug and isDefault. Bearer keys are limited to their organization.`, security: serviceSecurity, parameters: [workspaceRefParameter],
       responses: { "200": { description: "Workspace record", headers: workspaceRefHeaders }, ...authErrors } },
     patch: { tags: ["workspaces"], summary: "Update a workspace, including renaming its slug", description: "Dashboard session, or a server API key with the opt-in workspaces:manage scope bound to the workspace organization (the key owner's workspace role still applies). slug must be 3-63 characters of lowercase letters, digits and single hyphens, must not look like a UUID, and must not be a reserved word (default, board, templates, invites, new, settings, api, app, admin, workspaces, search, docs). The previous slug keeps resolving to this workspace and can never be claimed by another workspace.", security: serviceSecurity, parameters: [workspaceRefParameter],
       requestBody: request({ type: "object", minProperties: 1, properties: { name: { type: "string", minLength: 1, maxLength: 120 }, slug: { type: "string", minLength: 3, maxLength: 63, pattern: "^[a-z0-9]+(?:-[a-z0-9]+)*$" }, systemPrompt: { type: ["string", "null"], maxLength: 2000 }, monthlyBudgetCents: { type: ["integer", "null"], minimum: 0 } } }, { slug: "legal-contracts" }),
-      responses: { "200": { description: "Updated workspace record", headers: workspaceRefHeaders }, "400": { description: "Invalid fields, malformed slug, or reserved slug" }, "409": { description: "Slug is a current or former slug of another workspace" }, ...authErrors } },
+      responses: { "200": { description: "Updated workspace record", headers: workspaceRefHeaders }, "400": apiErrorOpenApiResponse("Invalid fields, malformed slug, or reserved slug"), "409": apiErrorOpenApiResponse("Slug is a current or former slug of another workspace"), ...authErrors } },
   },
   "/v1/organizations": {
     get: { tags: ["organizations"], summary: "List accessible organizations", description: `${orgRead} Session reads list memberships; a server key returns only its own organization.`, security: serviceSecurity,

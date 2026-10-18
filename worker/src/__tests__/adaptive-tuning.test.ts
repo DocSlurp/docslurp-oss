@@ -111,6 +111,7 @@ function makeState(documents: Document[]): WorkflowState {
     pagesProcessed: 0,
     spentCents: 0,
     pipeline: normalizePipelineFeatures({
+      embedding: { profile: "good-fast-local" },
       markdownExtraction: true,
       embed: true,
       maxCostCents: null,

@@ -1,3 +1,4 @@
+import { recordUsageReceipt, usageTraceContext } from "@docslurp/shared/observability";
 import { randomUUID } from "node:crypto";
 import { priceAiUsageEvent } from "@docslurp/shared";
 
@@ -120,7 +121,8 @@ export class PipelineUsageEventLedger {
 
   private buffer(event: UsageEvent): UsageEvent {
     const priced = (event.inputTokens ?? 0) > 0 || (event.outputTokens ?? 0) > 0 ? priceAiUsageEvent(event, { planId: this.planId }) : event;
-    const stamped = { ...priced, id: event.id ?? randomUUID() };
+    const stamped = { ...priced, id: event.id ?? randomUUID(), metadata: { ...usageTraceContext(), ...priced.metadata } };
+    recordUsageReceipt(stamped);
     this.pending.push(stamped);
     this.pendingBillable += billableCents(stamped);
     this.lifetime.inputTokens += stamped.inputTokens ?? 0;

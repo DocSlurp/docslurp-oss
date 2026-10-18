@@ -1,5 +1,6 @@
 import type { MiddlewareHandler } from "hono";
 import { cors } from "hono/cors";
+import { middlewareErrorResponse } from "../lib/api-error.js";
 
 /** Preflight carries no key. Authorize the actual request against its key's domains. */
 export function serviceCors(trustedOrigins: string[]): MiddlewareHandler {
@@ -18,7 +19,7 @@ export function serviceCors(trustedOrigins: string[]): MiddlewareHandler {
     const widget = !trusted && publicKeyRoute && validOrigin;
     const hasKey = c.req.header("Authorization")?.startsWith("Bearer ") || (compatKeyRoute && Boolean(c.req.header("X-Algolia-API-Key"))) || (searchCompatRoute && c.req.path.startsWith("/compat/typesense/") && Boolean(c.req.header("X-TYPESENSE-API-KEY")));
     if (widget && c.req.method !== "OPTIONS" && !hasKey) {
-      return c.json({ error: "Browser integrations require an API key" }, 403);
+      return middlewareErrorResponse(c, 403, "forbidden", "Browser integrations require an API key");
     }
     return cors({
       origin: widget ? origin : trustedOrigins,

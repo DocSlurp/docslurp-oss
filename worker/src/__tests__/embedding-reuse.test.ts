@@ -127,7 +127,7 @@ const SECTIONS = ["Overview", "Payroll", "Benefits", "Leave"].map((title, index)
   `# ${title}\n\n${`Section ${index + 1} explains ${title.toLowerCase()} policy in detail. `.repeat(12)}`);
 
 const hosted: PipelineFeatureOverrides = {
-  embedding: { profile: "cheapest-hosted" } as PipelineFeatureOverrides["embedding"],
+  embedding: { profile: "cheapest-hosted", modelUri: "llm://openai/text-embedding-3-small", target: "hosted" } as PipelineFeatureOverrides["embedding"],
 };
 
 type EmbedArgs = {
@@ -462,7 +462,7 @@ describe("EmbedStage embedding reuse", () => {
 
     const resized = await embedDocument({
       storage, reuse, runId: "run-2", documentId: "b",
-      pipeline: { embedding: { profile: "cheapest-hosted", dimensions: 512 } as PipelineFeatureOverrides["embedding"] },
+      pipeline: { embedding: { profile: "cheapest-hosted", modelUri: "llm://openai/text-embedding-3-small", target: "hosted", dimensions: 512 } as PipelineFeatureOverrides["embedding"] },
     });
     expect(resized.embedInputs).toHaveLength(first.artifact.chunks.length);
     expect(resized.stats).toMatchObject({ reuseHits: 0 });

@@ -518,7 +518,7 @@ export class EmbedStage implements Stage {
                   }, { fallback: { costPer1kInputTokens: this.config.costPer1kInputTokens, costPer1kOutputTokens: 0 } });
                   state.usageLedger.record({
                     provider: tunedProfile.provider, model: tunedProfile.model,
-                    metric: "embedding-tokens", amount: inputTokens, unit: "token",
+                    metric: "embedding-tokens", amount: inputTokens, unit: "token", logOutputTokens: false,
                     inputTokens, costCents: priced.costCents,
                     metadata: { ...priced.metadata, documentId: document.id, runtime: "remote",
                       dimensions: tunedProfile.dimensions, chunks, tokenSource: "api", windowIndex },
