@@ -274,6 +274,8 @@ export type ChatInput = {
   q: string;
   sessionId?: string;
   workspaceId?: string;
+  /** Override the workspace's configured chat model for this request. */
+  model?: string;
 };
 
 export type ChatResponse = {
@@ -979,7 +981,7 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
     streamActivity,
     waitForRun,
 
-    /** Recent runs across the caller's organization, newest first. */
+    /** The caller's recent runs, newest first. */
     async listRuns(options?: RequestOptions): Promise<WorkspaceRun[]> {
       return (await request<{ runs: WorkspaceRun[] }>("/v1/runs", {}, options, true)).runs;
     },
@@ -1063,19 +1065,25 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
     },
 
     /**
-     * Streamed grounded answer over SSE: a retrieval `status`, then the `message`
-     * (the full ChatResponse) and a `done` envelope. Callers that cannot hold a
-     * stream open should use chat() instead.
+     * Streamed grounded answer, as a streaming companion to chat(). Yields a
+     * retrieval `status`, the `message` (a full ChatResponse) and a final `done`
+     * envelope. Throws if the stream ends before `done`, so a truncated answer
+     * is never mistaken for success. This targets the legacy SSE endpoint; for
+     * the canonical stream use POST /v1/chat/completions with stream: true.
      */
     async *chatStream(input: ChatInput, requestOptions: RequestOptions = {}): AsyncGenerator<ChatStreamEvent> {
       const target = inWorkspace(input);
       const params = new URLSearchParams({ q: target.q, workspaceId: target.workspaceId ?? workspaceId });
       if (target.sessionId) params.set("sessionId", target.sessionId);
-      for await (const frame of streamEventsAt(`/v1/chat/stream?${params.toString()}`, requestOptions)) {
+      if (target.model) params.set("model", target.model);
+      let completed = false;
+      for await (const frame of streamEventsAt(`/v1/search/chat/stream?${params.toString()}`, requestOptions)) {
         if (frame.event === "status" || frame.event === "message" || frame.event === "done") {
+          if (frame.event === "done") completed = true;
           yield { event: frame.event, data: frame.data } as ChatStreamEvent;
         }
       }
+      if (!completed) throw new Error("DocSlurp chat stream ended before completion");
     },
 
     getDocument(documentId: string, requestOptions?: RequestOptions): Promise<DocumentViewerPayload> {
@@ -1090,7 +1098,11 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
       return (await request<{ documents: DocumentRecord[] }>(`/v1/documents?${params.toString()}`, {}, requestOptions, true)).documents;
     },
 
-    /** Delete a document and return the identities of the removed record. */
+    /**
+     * Delete a document and return the identities of the removed record.
+     * Requires a signed-in session: documents accept API-key authentication for
+     * reads only, so key-authenticated calls to this method receive 403.
+     */
     deleteDocument(documentId: string, requestOptions?: RequestOptions): Promise<DeletedDocument> {
       return request<DeletedDocument>(`/v1/documents/${encodeURIComponent(documentId)}`, { method: "DELETE" }, requestOptions);
     },

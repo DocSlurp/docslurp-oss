@@ -2,12 +2,12 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { createDocSlurpClient } from "../dist/index.js";
 
-const json = value => new Response(JSON.stringify(value), { headers: { "Content-Type": "application/json" } });
+const json = (value, status = 200) => new Response(JSON.stringify(value), { status, headers: { "Content-Type": "application/json" } });
 const sse = chunks => new Response(new ReadableStream({
   start(controller) { for (const chunk of chunks) controller.enqueue(new TextEncoder().encode(chunk)); controller.close(); },
 }), { headers: { "content-type": "text/event-stream" } });
 
-test("listRuns lists organization runs", async () => {
+test("listRuns lists the caller's runs", async () => {
   let url;
   const client = createDocSlurpClient({ apiUrl: "https://example.test", fetch: async requestUrl => {
     url = requestUrl;
@@ -40,7 +40,7 @@ test("deleteDocument sends DELETE and returns the removed identities", async () 
   assert.equal(deleted.filename, "a.pdf");
 });
 
-test("chatStream streams status, the answer, then done", async () => {
+test("chatStream streams status, the answer, then done from the legacy SSE route", async () => {
   let url, accept;
   const client = createDocSlurpClient({ apiUrl: "https://example.test", workspaceId: "manuals", fetch: async (requestUrl, init) => {
     url = requestUrl;
@@ -52,10 +52,28 @@ test("chatStream streams status, the answer, then done", async () => {
     ]);
   } });
   const events = [];
-  for await (const event of client.chatStream({ q: "hi", sessionId: "s1" })) events.push(event);
+  for await (const event of client.chatStream({ q: "hi", sessionId: "s1", model: "workspace:manuals" })) events.push(event);
   assert.deepEqual(events.map(event => event.event), ["status", "message", "done"]);
   assert.equal(events[1].data.answer, "Hi");
   assert.equal(events[2].data.sessionId, "s1");
-  assert.equal(url, "https://example.test/v1/chat/stream?q=hi&workspaceId=manuals&sessionId=s1");
+  assert.equal(url, "https://example.test/v1/search/chat/stream?q=hi&workspaceId=manuals&sessionId=s1&model=workspace%3Amanuals");
   assert.equal(accept, "text/event-stream");
+});
+
+test("chatStream throws when the stream ends before done", async () => {
+  const client = createDocSlurpClient({ apiUrl: "https://example.test", workspaceId: "manuals", fetch: async () => sse([
+    'event: status\ndata: {"stage":"retrieval","message":"Retrieving workspace context"}\n\n',
+  ]) });
+  await assert.rejects(
+    async () => { for await (const _event of client.chatStream({ q: "hi" })) {} },
+    /ended before completion/,
+  );
+});
+
+test("chatStream surfaces auth failures instead of finishing quietly", async () => {
+  const client = createDocSlurpClient({ apiUrl: "https://example.test", apiKey: "fixture", fetch: async () => json({ error: "Forbidden" }, 403) });
+  await assert.rejects(
+    async () => { for await (const _event of client.chatStream({ q: "hi" })) {} },
+    error => error.status === 403,
+  );
 });
