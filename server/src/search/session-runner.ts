@@ -23,6 +23,7 @@ import type {
   SearchResponse,
 } from "../services/search.js";
 import { timePhase } from "./timings.js";
+import { acquisitionDepth, validateRetrievalControls } from "./retrieval-controls.js";
 
 export interface SearchSessionRunnerAdapters {
   buildAvailability(
@@ -91,6 +92,7 @@ export async function runSearchSession(args: {
   setup: SearchSetup;
   adapters: SearchSessionRunnerAdapters;
 }): Promise<SearchResponse> {
+  validateRetrievalControls(args.options);
   return withObservation(
     {
       name: "api.search",
@@ -204,11 +206,13 @@ export async function runSearchSession(args: {
               queryVector,
               userId,
               workspaceId: normalizedScope.workspaceId,
-              options: { ...effectiveOptions, limit: effectiveOptions.useRerank
-                ? 200 : options.limit ?? 20 },
+              options: { ...effectiveOptions, limit: acquisitionDepth(effectiveOptions, options.limit ?? 20) },
             },
           ));
-          return annotateEvidenceRelevance(evidenceResults, {
+          const boundedResults = effectiveOptions.candidateDepth === undefined
+            ? evidenceResults
+            : evidenceResults.map((result) => ({ ...result, chunks: result.chunks.slice(0, effectiveOptions.candidateDepth) }));
+          return annotateEvidenceRelevance(boundedResults, {
             query,
             embeddingPipeline: embeddingPipelineOf(setup),
           });

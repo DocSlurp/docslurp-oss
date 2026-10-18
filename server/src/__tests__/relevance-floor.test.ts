@@ -52,11 +52,11 @@ function session() {
 
 async function run(args: {
   lists: SearchChunk[][]; minScore?: number; status?: SearchAvailability["status"];
-  wholeCorpusFallback?: () => Promise<never[]>; limit?: number;
+  wholeCorpusFallback?: () => Promise<never[]>; limit?: number; candidateDepth?: number; resultOrder?: "relevance" | "prompt";
 }) {
   return executeSearchSessionRetrieval({
     query: "q", userId: "user-1", session: session(), workspaceId: "ws-1", limit: args.limit ?? 10,
-    options: { minScore: args.minScore, useRerank: false, useMmr: false },
+    options: { minScore: args.minScore, useRerank: false, useMmr: false, candidateDepth: args.candidateDepth, resultOrder: args.resultOrder },
     retrieveCandidateLists: async () => args.lists,
     buildAvailability: () => availability(args.status ?? "complete"),
     effectiveQuery: "q", filters: undefined, selfQueryReasons: [], privacyMode: "standard" as never,
@@ -289,5 +289,24 @@ describe("relevance floor across recursive search modes", () => {
     } as never);
     expect(wholeCorpusFallback).not.toHaveBeenCalled();
     expect(response.relevanceFloor).toEqual({ minScore: DEFAULT_MIN_SCORE, dropped: plan!.relevanceFloorDropped, noMatch: true });
+  });
+});
+
+
+describe("explicit candidate windows and ordering through session execution", () => {
+  it("caps the fused pool independently of output size and does not refill floor removals", async () => {
+    const xs = [chunk("a", { relevance: 0 }), chunk("b", { relevance: 1 }), chunk("c", { relevance: 1 })];
+    const response = await run({ lists: [xs], candidateDepth: 2, resultOrder: "relevance", minScore: .5, limit: 10 });
+    expect(response.results.map(r => r.citation.documentId)).toEqual(["doc-b"]);
+    expect(response.relevanceFloor.dropped).toBe(1);
+  });
+
+  it("uses fusion relevance rather than incomparable adapter scores and packs without reranking", async () => {
+    const xs = Array.from({ length: 10 }, (_, i) => chunk(String(i), { score: i + 1, relevance: 1 }));
+    const relevance = await run({ lists: [xs], candidateDepth: 10, resultOrder: "relevance", minScore: 0 });
+    const prompt = await run({ lists: [xs], candidateDepth: 10, resultOrder: "prompt", minScore: 0 });
+    expect(relevance.results[0].citation.documentId).toBe("doc-0");
+    expect(prompt.results[9].citation.documentId).toBe("doc-1");
+    expect(new Set(prompt.results.map(r => r.citation.documentId))).toEqual(new Set(relevance.results.map(r => r.citation.documentId)));
   });
 });

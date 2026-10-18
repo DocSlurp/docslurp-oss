@@ -44,6 +44,8 @@ export interface SearchSessionOptions {
   filters?: unknown;
   useHyDE?: boolean;
   useRerank?: boolean;
+  candidateDepth?: number;
+  resultOrder?: "relevance" | "prompt";
   useMmr?: boolean;
   parentRetrieval?: boolean;
   queryRewrite?: boolean;
@@ -210,6 +212,8 @@ function buildSearchSessionMetadata(
     runId: args.options.runId ?? null,
     useHyDE: args.options.useHyDE ?? false,
     useRerank: args.options.useRerank ?? false,
+    candidateDepth: args.options.candidateDepth ?? null,
+    resultOrder: args.options.resultOrder ?? null,
     useMmr: args.options.useMmr ?? false,
     parentRetrieval: args.options.parentRetrieval ?? false,
     queryRewrite: args.options.queryRewrite ?? false,
