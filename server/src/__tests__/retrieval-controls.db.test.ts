@@ -5,7 +5,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import postgres from "postgres";
 import * as lancedb from "@lancedb/lancedb";
 import { normalizePipelineFeatures, resolveEmbeddingRoute, VectorNamespaceManager } from "@docslurp/shared";
-import { startMigratedPostgres } from "../../../worker/src/test/migrated-postgres.js";
+import { startMigratedPostgres } from "@docslurp/worker/testing";
 
 // Bind only the database connection; execute actual SQL, access checks, lexical
 // acquisition, LanceDB acquisition, fusion, ranking, packing and session writes.
