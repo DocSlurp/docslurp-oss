@@ -4,6 +4,7 @@ import { HTTPException } from "hono/http-exception";
 
 import { apiError, isDefaultWorkspaceAlias, isWorkspaceUuid, type WorkspaceRecord } from "@docslurp/shared";
 
+import { apiErrorResponse } from "./api-error.js";
 import { auth, appDbPool } from "./auth.js";
 import { isConfiguredAdminUser } from "./admin-emails.js";
 import { apiKeyAllowsWorkspace, apiKeyCanUseWorkspace } from "./api-key-workspace-scope.js";
@@ -231,10 +232,10 @@ export async function assertApiKeyWorkspaceAccess(
     return null;
   }
   if (!actorHasAnyApiKeyScope(actor, [scope])) {
-    return c.json({ error: "Forbidden" }, 403);
+    return apiErrorResponse(c, 403, "forbidden", "Forbidden");
   }
   const workspace = await loadActorScopedWorkspace(workspaceId, actor);
-  return workspace ? null : c.json({ error: "Workspace not found" }, 404);
+  return workspace ? null : apiErrorResponse(c, 404, "workspace_not_found", "Workspace not found");
 }
 
 /**

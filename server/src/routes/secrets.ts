@@ -12,7 +12,7 @@ import {
   rotateWorkspaceSecret
 } from "../services/secrets.js";
 import { requestIp, requestUserAgent } from "../lib/request-context.js";
-import { apiStatusError } from "../lib/api-error.js";
+import { apiErrorResponse, apiStatusError } from "../lib/api-error.js";
 import { validationHook } from "../lib/validation.js";
 
 const createSecretSchema = z.object({
@@ -33,7 +33,7 @@ export const secretsRoutes = new Hono()
 
     const authorization = await authorizeWorkspaceSecretAccess({ workspaceId, userId });
     if (!authorization.ok) {
-      return c.json(authorization.body, authorization.status);
+      return apiErrorResponse(c, authorization.status, authorization.code, authorization.message);
     }
 
     const secrets = await listWorkspaceSecrets({ access: authorization.grant });
@@ -46,7 +46,7 @@ export const secretsRoutes = new Hono()
 
     const authorization = await authorizeWorkspaceSecretAccess({ workspaceId, userId });
     if (!authorization.ok) {
-      return c.json(authorization.body, authorization.status);
+      return apiErrorResponse(c, authorization.status, authorization.code, authorization.message);
     }
 
     try {
@@ -87,7 +87,7 @@ export const secretsRoutes = new Hono()
 
     const authorization = await authorizeWorkspaceSecretAccess({ workspaceId, userId });
     if (!authorization.ok) {
-      return c.json(authorization.body, authorization.status);
+      return apiErrorResponse(c, authorization.status, authorization.code, authorization.message);
     }
 
     const secret = await rotateWorkspaceSecret({
@@ -125,7 +125,7 @@ export const secretsRoutes = new Hono()
 
     const authorization = await authorizeWorkspaceSecretAccess({ workspaceId, userId });
     if (!authorization.ok) {
-      return c.json(authorization.body, authorization.status);
+      return apiErrorResponse(c, authorization.status, authorization.code, authorization.message);
     }
 
     const deleted = await deleteWorkspaceSecret({
