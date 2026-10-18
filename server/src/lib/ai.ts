@@ -1,7 +1,7 @@
 import { assertProviderAllowed, authorizePrivateModelCall, createOpenRouterReasoningFetch, createOpenRouterUsageCapture, isPrivateModelUri, PRIVATE_MODEL_PROVIDER, resolveOpenRouterUsage, resolveSupportedModelIdWithWarning, type PrivacyMode, type PrivateCallAuditScope, type ProviderTextUsage } from "@docslurp/shared";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { withObservation, aiResultDetails } from "@docslurp/shared/observability";
+import { withObservation, aiResultDetails, instrumentFetch } from "@docslurp/shared/observability";
 import { createOpenAI } from "@ai-sdk/openai";
 import { defaultEmbeddingConfig, defaultPipelineFeatures, fitEmbeddingDimensions, parseLlmModelUri, openRouterEmbeddingRoute, validateHostedEmbeddingVector } from "@docslurp/shared";
 import { embed, generateText, streamText } from "ai";
@@ -78,7 +78,7 @@ async function generatePrivateEndpointText(args: {
       result: aiResultDetails,
     },
     async () => {
-      const provider = createOpenAI({ apiKey: PRIVATE_ENDPOINT_API_KEY, baseURL: call.baseUrl, fetch: call.fetch });
+      const provider = createOpenAI({ apiKey: PRIVATE_ENDPOINT_API_KEY, baseURL: call.baseUrl, fetch: instrumentFetch("private", "inference", call.fetch) });
       const startedAt = Date.now();
       const result = streamText({
         ...posthogAiTelemetry({ functionId: args.operation, provider: PRIVATE_MODEL_PROVIDER, context: args.observability }),
@@ -188,7 +188,7 @@ export async function generateOpenRouterText(args: {
     async () => {
       const accounting = createOpenRouterUsageCapture();
       const provider = createOpenAI({
-        fetch: createOpenRouterReasoningFetch(accounting.fetch),
+        fetch: instrumentFetch("openrouter", "chat", createOpenRouterReasoningFetch(accounting.fetch)),
         apiKey: args.apiKey,
         baseURL: OPENROUTER_BASE_URL,
       });
@@ -259,7 +259,7 @@ export async function generateOpenRouterDocumentText(args: {
   assertProviderAllowed(args.privacyMode, { provider: "openrouter", model: args.model ?? SEARCH_OPENROUTER_MODEL, operation: "api.text.openrouter-documents", target: "hosted" });
   const accounting = createOpenRouterUsageCapture();
   const provider = createOpenAI({
-    fetch: createOpenRouterReasoningFetch(accounting.fetch),
+    fetch: instrumentFetch("openrouter", "chat", createOpenRouterReasoningFetch(accounting.fetch)),
     apiKey: args.apiKey,
     baseURL: OPENROUTER_BASE_URL,
   });
@@ -368,6 +368,7 @@ export async function embedOpenAiText(args: {
     },
     async () => {
       const provider = createOpenAI({
+        fetch: instrumentFetch("openai", "embedding"),
         apiKey: args.apiKey,
         ...(args.baseURL && args.baseURL !== DEFAULT_OPENAI_BASE_URL
           ? { baseURL: args.baseURL }
@@ -421,6 +422,7 @@ async function embedOpenAiCompatibleText(args: {
     },
     async () => {
       const provider = createOpenAI({
+        fetch: instrumentFetch(args.provider, "embedding"),
         apiKey: args.apiKey || "local",
         baseURL: args.baseURL,
       });
@@ -483,6 +485,7 @@ export async function embedConfiguredText(args: {
 
   if (args.provider === "perplexity") {
     const result = await withObservation({ name: "api.embedding.perplexity", type: "embedding", model: args.model, input: args.value, result: aiResultDetails }, () => embedPerplexity({
+              fetch: instrumentFetch("perplexity", "embedding"),
       model: args.model ?? "",
       dimensions: args.dimensions,
       apiKey: args.apiKey ?? "",
@@ -497,7 +500,7 @@ export async function embedConfiguredText(args: {
     const route = openRouterEmbeddingRoute(args.model ?? "");
     if (args.dimensions !== undefined && args.dimensions !== route.dimensions) throw new Error("OpenRouter embedding dimensions do not match the registered model");
     if (!args.apiKey) throw new Error("OPENROUTER_API_KEY is required for remote OpenRouter embeddings");
-    const provider = createOpenAI({ apiKey: args.apiKey, baseURL: OPENROUTER_BASE_URL });
+    const provider = createOpenAI({ apiKey: args.apiKey, baseURL: OPENROUTER_BASE_URL, fetch: instrumentFetch("openrouter", "embedding") });
     const result = await withObservation({ name: "api.embedding.openrouter", type: "embedding", model: route.model, input: args.value, result: aiResultDetails }, () => embed({
       model: provider.embedding(route.model), value: args.value, abortSignal: args.signal, maxRetries: 0,
       ...posthogAiTelemetry({ functionId: "api.embedding.openrouter", provider: "openrouter", context: args.observability }),
@@ -569,7 +572,7 @@ async function embedPrivateEndpointText(args: {
   return withObservation(
     { name: "api.embedding.private", type: "embedding", model: call.model, input: args.value, result: aiResultDetails },
     async () => {
-      const provider = createOpenAI({ apiKey: PRIVATE_ENDPOINT_API_KEY, baseURL: call.baseUrl, fetch: call.fetch });
+      const provider = createOpenAI({ apiKey: PRIVATE_ENDPOINT_API_KEY, baseURL: call.baseUrl, fetch: instrumentFetch("private", "inference", call.fetch) });
       const startedAt = Date.now();
       const result = await embed({
         ...posthogAiTelemetry({ functionId: "api.embedding.private", provider: PRIVATE_MODEL_PROVIDER, context: args.observability }),

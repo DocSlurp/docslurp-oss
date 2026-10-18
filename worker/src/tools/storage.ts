@@ -1,3 +1,4 @@
+import { instrumentS3Client } from "@docslurp/shared/observability";
 import {
   AbortMultipartUploadCommand,
   CompleteMultipartUploadCommand,
@@ -87,7 +88,7 @@ export class ArtifactStore {
 
   constructor(cfg: Config) {
     this.bucket = cfg.s3Bucket;
-    this.client = new S3Client(s3ClientConfig(cfg.storage));
+    this.client = instrumentS3Client(new S3Client(s3ClientConfig(cfg.storage)), cfg.storage.endpoint);
   }
 
   async putJson(key: string, value: unknown): Promise<void> {

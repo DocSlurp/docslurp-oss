@@ -1,3 +1,4 @@
+import { instrumentPostgres } from "@docslurp/shared/observability";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -109,13 +110,13 @@ export class IndexStage implements Stage {
   /** One queue (and a small pooled client) per worker process, created on first LanceDB write. */
   private writeQueue(): LanceDbWriteQueue {
     if (this.queue) return this.queue;
-    this.queueSql = postgres(this.config.databaseUrl, {
+    this.queueSql = instrumentPostgres(postgres(this.config.databaseUrl, {
       max: Math.max(1, Number.parseInt(process.env.WORKER_VECTOR_QUEUE_DB_POOL_MAX ?? "2", 10) || 2),
       // Transaction-mode poolers (Neon pooler, PgBouncer) cannot route prepared statements.
       prepare: false,
       idle_timeout: 20,
       connect_timeout: 10,
-    });
+    }), this.config.databaseUrl);
     this.queue = new LanceDbWriteQueue({
       sql: this.queueSql,
       loadRecords: async (row) => {
