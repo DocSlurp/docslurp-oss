@@ -1,3 +1,4 @@
+import { instrumentS3Client } from "@docslurp/shared/observability";
 import type { FileRef } from "@docslurp/shared";
 import { s3CredentialsSchema, s3ConfigSchema } from "@docslurp/shared";
 import type { ConnectorAdapter } from "./base.js";
@@ -39,7 +40,7 @@ export class S3ConnectorAdapter implements ConnectorAdapter {
         );
       });
 
-      const client = new S3Client({
+      const client = instrumentS3Client(new S3Client({
         region: creds.region,
         credentials: {
           accessKeyId: creds.accessKeyId,
@@ -48,7 +49,7 @@ export class S3ConnectorAdapter implements ConnectorAdapter {
         },
         endpoint,
         forcePathStyle: endpoint !== undefined,
-      });
+      }), endpoint);
 
       const files: FileRef[] = [];
       let continuationToken: string | undefined;
@@ -117,7 +118,7 @@ export class S3ConnectorAdapter implements ConnectorAdapter {
         );
       });
 
-      const client = new S3Client({
+      const client = instrumentS3Client(new S3Client({
         region: creds.region,
         credentials: {
           accessKeyId: creds.accessKeyId,
@@ -126,7 +127,7 @@ export class S3ConnectorAdapter implements ConnectorAdapter {
         },
         endpoint,
         forcePathStyle: endpoint !== undefined,
-      });
+      }), endpoint);
 
       const response = await client.send(
         new GetObjectCommand({

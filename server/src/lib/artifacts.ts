@@ -1,3 +1,4 @@
+import { instrumentS3Client } from "@docslurp/shared/observability";
 import { GetObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import { s3ClientConfig, parseArtifactUri, type ParsedArtifactUri } from "@docslurp/shared";
 
@@ -5,7 +6,7 @@ import { readBoundedArtifactText } from "./bounded-artifact-body.js";
 
 import { env } from "../config.js";
 
-const s3Client = new S3Client(s3ClientConfig(env.storage));
+const s3Client = instrumentS3Client(new S3Client(s3ClientConfig(env.storage)), env.storage.endpoint);
 
 export { parseArtifactUri, type ParsedArtifactUri };
 

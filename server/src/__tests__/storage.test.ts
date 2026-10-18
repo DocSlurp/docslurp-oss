@@ -4,6 +4,7 @@ const sendMock = vi.fn();
 
 vi.mock("@aws-sdk/client-s3", () => {
   class S3Client {
+    middlewareStack = { add: vi.fn(), addRelativeTo: vi.fn() };
     send = sendMock;
   }
 
