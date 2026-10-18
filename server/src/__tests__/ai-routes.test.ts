@@ -66,7 +66,8 @@ describe("aiRoutes", () => {
           auth: { type: "apiKey", scopes: ["search"], workspaceScoped: true, orgScoped: true },
           idempotent: false,
           costHints: { baselineCostCents: 0, billableMetrics: [] },
-          featureGates: []
+          featureGates: [],
+          annotations: { readOnly: false, destructive: false, idempotent: false, openWorld: true },
         }
       ],
       resources: [],
