@@ -1,7 +1,7 @@
 import postgres from "postgres";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { normalizePipelineFeatures, defaultWorkspaceSearchSettings } from "@docslurp/shared";
-import { startMigratedPostgres } from "../../../worker/src/test/migrated-postgres.js";
+import { startMigratedPostgres } from "@docslurp/worker/testing";
 
 let sql: postgres.Sql;
 let stop: () => Promise<void>;
@@ -18,6 +18,8 @@ beforeAll(async () => {
   vi.doMock("../db.js", () => ({ sql }));
   vi.stubEnv("DEEPINFRA_API_KEY", "synthetic-no-provider-access");
   vi.stubEnv("SKIP_RUN_BUDGET_GUARDS_IN_DEV", "false");
+  vi.stubEnv("SEARCH_RERANK_CONCURRENCY", "4");
+  vi.stubEnv("SEARCH_RERANK_TIMEOUT_MS", "15000");
   vi.stubGlobal("fetch", http);
   http.mockImplementation(async (url: string, request: RequestInit) => {
     if (url !== "https://api.deepinfra.com/v1/inference/Qwen/Qwen3-Reranker-0.6B") throw Error("Unexpected network destination");
@@ -65,6 +67,28 @@ describe("real hybrid search with hosted reranking and actual SQL usage", () => 
     await hybridSearch("pump maintenance", "hosted-user", { ...options, useRerank: false });
     await expect(hybridSearch("pump maintenance", "outsider", options)).rejects.toThrow();
     expect(http).toHaveBeenCalledTimes(before);
+  });
+  it("persists late sibling usage before returning a parallel fallback", async () => {
+    await sql`update documents set page_count=50 where id='hosted-doc'`;
+    const extra=Array.from({length:48},(_,i)=>({id:`hosted-extra-${i}`,document_id:"hosted-doc",run_id:"hosted-run",user_id:"hosted-user",chunk_index:i+2,text:`Pump maintenance supplemental schedule ${i}.`,heading_path:[],token_estimate:8,page_number:i+3,metadata:{}}));
+    await sql`insert into document_chunks ${sql(extra)}`;
+    const waiting: Array<(r:Response)=>void> = [];
+    http.mockImplementation(()=>new Promise<Response>(resolve=>waiting.push(resolve)));
+    let returned=false;
+    const running=hybridSearch("pump maintenance","hosted-user",{...options,rootSessionId:"hosted-parallel"}).then(r=>{returned=true;return r;});
+    await vi.waitFor(()=>expect(waiting).toHaveLength(2));
+    waiting[0](Response.json({input_tokens:10},{status:429}));
+    await new Promise<void>(resolve=>setImmediate(resolve));
+    expect(returned).toBe(false);
+    waiting[1](Response.json({input_tokens:20,scores:Array(25).fill(.5)}));
+    const result=await running;
+    expect(result.usageEvents?.reduce((n,e)=>n+(e.inputTokens??0),0)).toBe(30);
+    const { attributedUsage }=await import("../services/usage-attribution.js");
+    const events=await sql`select input_tokens from ${attributedUsage(null)} au where au.metadata->>'sessionId'=${result.sessionId}`;
+    expect(events).toHaveLength(2);
+    expect(events.reduce((n,e)=>n+Number(e.input_tokens),0)).toBe(30);
+    const [session]=await sql`select metadata from search_sessions where id=${result.sessionId}`;
+    expect(session.metadata.diagnostics.hostedRerank).toMatchObject({status:"fallback",reason:"provider_http",inputTokens:30,unreceiptedRequests:0});
   });
   it("privacy and actual exhausted budget block provider calls", async () => {
     const before = http.mock.calls.length;

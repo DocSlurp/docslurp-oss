@@ -162,18 +162,29 @@ chat share the post-retrieval implementation. Existing output-score and citation
 contracts are retained; provider scores only choose candidate ordering.
 
 The hosted path preserves the original query and candidate bodies/identities,
-uses serial batches of at most 25 pairs, and has one eight-second provider
-request deadline across the batches. Each pair is bounded to 30,000 combined
+uses batches of at most 25 pairs with up to four requests in flight. One shared
+provider request deadline covers all waves: 15 seconds by default. Operators may
+set `SEARCH_RERANK_CONCURRENCY` (clamped to 1–4) and
+`SEARCH_RERANK_TIMEOUT_MS` (clamped to 1,000–30,000 ms); invalid noninteger values
+use the defaults. Two concurrent waves cover a full 200-candidate pool at the
+default concurrency, instead of eight serial calls. This is scheduling arithmetic,
+not a new provider latency measurement. Each pair is bounded to 30,000 combined
 UTF8 bytes as a conservative input limit; overlength inputs fall back without
 silently truncating evidence. Privacy modes that forbid hosted calls, missing
 keys, invalid configuration, exhausted budgets, timeout, malformed output and
-provider failures fall back to BM25 without retries. An explicit
+provider failures fall back to BM25 without retries. Privacy and scoped spend
+checks run before every dispatch. A failure stops new dispatches; every already
+dispatched sibling is awaited and its actual returned usage recorded before
+fallback or a metering error reaches the caller. A late successful response cannot
+clear another request’s unknown-charge diagnostic. Equal provider scores retain
+original candidate order regardless of response order. An explicit
 `candidateDepth` still controls the same acquisition/ranking pool independently
 of the provider. This integration does not assert a corpus-quality improvement.
 
 Search Session diagnostics include `hostedRerank` status, fallback reason,
-request/candidate counts, actual tokens, duration, and
-`possibleUnreceiptedCharge` when a failed call has no provider usage receipt.
+request/candidate counts, actual tokens, configured concurrency/timeout, duration, and
+`possibleUnreceiptedCharge` plus `unreceiptedRequests` when failed calls have no
+provider usage receipt.
 Raw provider errors, keys and document bodies are excluded from diagnostics.
 Actual returned tokens, including billable HTTP failures, are recorded through
 that Search Session's usage journal and persisted with its org/workspace/session
