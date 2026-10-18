@@ -1,3 +1,4 @@
+import { withDependencySpan } from "@docslurp/shared/observability";
 /**
  * LanceDB vector search service for query-time ANN retrieval.
  *
@@ -52,7 +53,7 @@ function getDb(uri: string): Promise<lancedb.Connection> {
   let connection = connections.get(key);
   if (!connection) {
     const { storageOptions } = resolveLanceDbConfig();
-    connection = lancedb.connect(uri, { readConsistencyInterval: READ_CONSISTENCY_SECONDS, ...(storageOptions ? { storageOptions } : {}) });
+    connection = lanceSpan("connect", () => lancedb.connect(uri, { readConsistencyInterval: READ_CONSISTENCY_SECONDS, ...(storageOptions ? { storageOptions } : {}) }));
     connection.catch(() => connections.delete(key));
     connections.set(key, connection);
   }
@@ -65,7 +66,7 @@ async function getTable(uri: string, name: string): Promise<lancedb.Table | null
   if (missingUntil && missingUntil > Date.now()) return null;
   let table = tables.get(key);
   if (!table) {
-    table = getDb(uri).then((db) => db.openTable(name));
+    table = getDb(uri).then((db) => lanceSpan("openTable", () => db.openTable(name)));
     tables.set(key, table);
   }
   try {
@@ -180,7 +181,7 @@ export async function lanceDbVectorSearch(args: {
       if (tuning.ef !== undefined) query.ef(tuning.ef);
       if (tuning.refineFactor !== undefined) query.refineFactor(tuning.refineFactor);
       // Retain an independent scope check at the storage boundary.
-      return filterLanceDbRowsByDocumentIds((await query.toArray()) as LanceDbRow[], documentIds);
+      return filterLanceDbRowsByDocumentIds((await lanceSpan("search", () => query.toArray())) as LanceDbRow[], documentIds);
     } catch {
       dropTable(uri, name);
       return [];
@@ -209,4 +210,10 @@ export async function lanceDbVectorSearch(args: {
 
 export function getOrgLanceDbPrefix(orgId: string): string {
   return VectorNamespaceManager.getTableName(orgId);
+}
+
+function lanceSpan<T>(operation: string, run: () => Promise<T>): Promise<T> {
+  return withDependencySpan(`lancedb.${operation}`, { "db.system.name": "lancedb",
+    "docslurp.dependency.type": "vector", "docslurp.dependency.provider": "lancedb",
+    "docslurp.dependency.operation": operation, "docslurp.dependency.phase": "adapter" }, run);
 }

@@ -1,12 +1,10 @@
 import { publicErrorMiddleware } from "../lib/public-errors.js";
-import { Hono } from "hono";
+import { apiErrorResponse, apiStatusError, usesNativeErrorEnvelope } from "../lib/api-error.js";
+import { mapValidationIssues, type ValidationErrorSource } from "../lib/validation.js";
+import { Hono, type Context } from "hono";
 import { z } from "zod";
 
-import {
-  aggregateWorkspaceRagSearchRequestSchema,
-  aiAdvancedRequestSchema,
-  aiSimpleRequestSchema,
-} from "@docslurp/shared";
+import { aggregateWorkspaceRagSearchRequestSchema, type ApiErrorCode } from "@docslurp/shared";
 
 import {
   apiKeyHasAnyScope,
@@ -15,6 +13,8 @@ import { getApiKey, getRequestActor, loadActorScopedWorkspace, resolveActorWorks
 import { listWorkspaces } from "./workspaces.js";
 import { apiKeyCanUseWorkspace } from "../lib/api-key-workspace-scope.js";
 import { listWorkspacesInput, uploadInput, completeUploadInput, productToolAliases, productToolDefinitions } from "./mcp-product-tools.js";
+import { aiAdvancedToolSchema, aiSimpleToolSchema, toolInputJsonSchema } from "./mcp-tool-schemas.js";
+import { batchSearchInputSchema, searchInputSchema, workspaceChatInputSchema } from "../lib/search-input.js";
 import { mcpOrigin } from "../lib/mcp-origin.js";
 import { searchRoutes } from "../routes/search.js";
 import { sql } from "../db.js";
@@ -29,32 +29,8 @@ import {
   submitSimpleAutomation
 } from "../services/automation.js";
 
-const WORKSPACE_REF_DESCRIPTION = 'Optional workspace slug (e.g. "legal-contracts"), former slug, or UUID. Omit or pass "default" for the organization default workspace.';
-// Tool inputs are the request schemas without identity. Cost approval is never
-// a tool argument (the request schemas have none, and unknown keys are
-// stripped): every surface built from mcpManifest (remote MCP, WebMCP, chat,
-// CLI stdio) inherits that from here.
-const aiSimpleToolSchema = aiSimpleRequestSchema.omit({ userId: true }).extend({
-  workspaceId: z.string().min(1).max(256).optional().describe(WORKSPACE_REF_DESCRIPTION),
-});
-const aiAdvancedToolSchema = aiAdvancedRequestSchema.omit({ userId: true }).extend({
-  workspaceId: z.string().min(1).max(256).optional().describe(WORKSPACE_REF_DESCRIPTION),
-});
 const operationInputSchema = z.object({ operationId: z.string().uuid() });
 
-const queryInputSchema = {
-  type: "object",
-  properties: {
-    workspaceId: { type: "string", minLength: 1, maxLength: 256, description: WORKSPACE_REF_DESCRIPTION },
-    q: { type: "string", minLength: 1, maxLength: 16_000 },
-    limit: { type: "integer", minimum: 1, maximum: 100 },
-    minScore: { type: "number", minimum: 0, maximum: 1, description: "Relevance floor: drop weaker matches (0 disables). The response reports noMatch when nothing relevant remains." },
-    documentId: { type: "string", minLength: 1, maxLength: 256 },
-    filenameContains: { type: "string" },
-    tags: { type: "string", description: "Comma-separated tags." },
-  },
-  required: ["q"],
-};
 const workspaceIngestReportSchema = z.object({
   workspaceId: z.string().min(1).max(256).optional(),
   runId: z.string().trim().min(1).max(128).optional(),
@@ -66,35 +42,55 @@ const workspaceSuggestSchema = z.object({
   limit: z.number().int().min(1).max(25).optional(),
 });
 
+// Agent-safety hints live with the tool definition so every surface (remote MCP,
+// WebMCP, chat tools) reads the same values instead of inferring them per surface.
+type ToolAnnotations = { readOnly: boolean; destructive: boolean; idempotent: boolean; openWorld: boolean };
+const READ_ONLY_TOOL: ToolAnnotations = { readOnly: true, destructive: false, idempotent: true, openWorld: false };
+const workspaceToolAnnotations: Record<string, ToolAnnotations> = {
+  search: READ_ONLY_TOOL,
+  chat: { readOnly: false, destructive: false, idempotent: false, openWorld: false },
+  "ingest-report": READ_ONLY_TOOL,
+  suggest: READ_ONLY_TOOL,
+};
+
+/**
+ * The product search tool accepts one query or a batch, both defined by the
+ * search route's own zod schemas. MCP requires an object at the top level, so
+ * the two forms are merged into one object whose oneOf keeps them exclusive.
+ */
+function searchToolInputSchema() {
+  const single = toolInputJsonSchema(searchInputSchema) as { properties: Record<string, unknown> };
+  const { properties: batch } = toolInputJsonSchema(batchSearchInputSchema) as { properties: Record<string, unknown> };
+  return {
+    type: "object", additionalProperties: false,
+    properties: { ...single.properties, ...batch },
+    oneOf: [
+      { required: ["q"], not: { anyOf: Object.keys(batch).map(key => ({ required: [key] })) } },
+      { required: ["queries"], not: { anyOf: Object.keys(single.properties).map(key => ({ required: [key] })) } },
+    ],
+  };
+}
+
 function legacyManifest(baseUrl: string, scopes?: string[]) {
   const manifest = getAutomationCapabilityManifest(baseUrl);
   return {
     ...manifest,
+    // The MCP surface knows its own transports; never inherit a stale claim.
     server: { ...manifest.server, transports: ["streamable-http", "stdio"], endpoint: `${baseUrl}/v1/mcp` },
     capabilities: [
-      ...manifest.capabilities.map((capability) => {
-        const schema = capability.id === "ai.simple" ? aiSimpleToolSchema
-          : capability.id === "ai.advanced" ? aiAdvancedToolSchema : null;
-        return schema ? { ...capability, inputSchema: z.toJSONSchema(schema, { io: "input" }) } : capability;
-      }),
+      ...manifest.capabilities,
       {
         id: "ai.operation.get", title: "Get Automation Operation",
         description: "Read an automation operation by ID, including pending approval, progress, errors and final result. Poll on a later turn if still running.",
         category: "tool", endpoint: `${baseUrl}/v1/mcp/tools/ai.operation.get`,
-        inputSchema: z.toJSONSchema(operationInputSchema),
+        inputSchema: toolInputJsonSchema(operationInputSchema),
+        annotations: READ_ONLY_TOOL,
       },
       ...[
-        { name: "search", title: "Search Workspace", description: "Retrieve portable text passages with source citations. Use these as context for any LLM; this tool does not generate an answer.", inputSchema: queryInputSchema },
-        { name: "search-many", title: "Search Multiple Queries", description: "Run up to 20 scoped retrieval queries with bounded parallelism. Results stay in input order; each contains cited context or its own error. No answer generation.", inputSchema: {
-          type: "object", properties: { queries: { type: "array", minItems: 1, maxItems: 20, items: queryInputSchema }, concurrency: { type: "integer", minimum: 1, maximum: 4, default: 4 } }, required: ["queries"],
-        } },
-        { name: "chat", title: "Chat With Workspace", description: "Generate a grounded answer with citations and token usage using the workspace's configured model. This calls AI and can incur cost; use workspace.search for your own LLM.", inputSchema: {
-          type: "object", properties: { workspaceId: { type: "string", minLength: 1, maxLength: 256, description: WORKSPACE_REF_DESCRIPTION }, q: { type: "string", minLength: 1, maxLength: 16_000 }, sessionId: { type: "string", minLength: 1, maxLength: 256 } }, required: ["q"],
-        } },
-        { name: "ingest-report", title: "Workspace Ingest Report", description: "Report how the workspace's files processed, without AI calls: pages, bytes and plain-text bytes per page (histograms), images per page, scanned-looking pages, pages read with vision, searchable pages with a reason for each unsearchable one, failed or skipped stages, cost and pages per minute, the pipeline settings that shaped it, and rule-based recommendations with estimated cost. Use it when a user asks why something cannot be found.", inputSchema: z.toJSONSchema(workspaceIngestReportSchema) },
-        { name: "suggest", title: "Suggest Workspace Queries", description: "Read prior queries and suggestions without AI calls.", inputSchema: {
-          type: "object", properties: { workspaceId: { type: "string", minLength: 1, maxLength: 256, description: WORKSPACE_REF_DESCRIPTION }, q: { type: "string" }, limit: { type: "integer", minimum: 1, maximum: 25 } },
-        } },
+        { name: "search", title: "Search Workspace", description: "Retrieve portable text passages with source citations. Use these as context for any LLM; this tool does not generate an answer.", inputSchema: toolInputJsonSchema(searchInputSchema) },
+        { name: "chat", title: "Chat With Workspace", description: "Generate a grounded answer with citations and token usage using the workspace's configured model. This calls AI and can incur cost; use workspace.search for your own LLM.", inputSchema: toolInputJsonSchema(workspaceChatInputSchema) },
+        { name: "ingest-report", title: "Workspace Ingest Report", description: "Report how the workspace's files processed, without AI calls: pages, bytes and plain-text bytes per page (histograms), images per page, scanned-looking pages, pages read with vision, searchable pages with a reason for each unsearchable one, failed or skipped stages, cost and pages per minute, the pipeline settings that shaped it, and rule-based recommendations with estimated cost. Use it when a user asks why something cannot be found.", inputSchema: toolInputJsonSchema(workspaceIngestReportSchema) },
+        { name: "suggest", title: "Suggest Workspace Queries", description: "Read prior queries and suggestions without AI calls.", inputSchema: toolInputJsonSchema(workspaceSuggestSchema) },
       ].map(({ name, title, description, inputSchema }) => ({
         id: `workspace.${name}`,
         title,
@@ -102,6 +98,7 @@ function legacyManifest(baseUrl: string, scopes?: string[]) {
         category: "tool",
         endpoint: `${baseUrl}/v1/mcp/tools/workspace.${name}`,
         inputSchema,
+        annotations: workspaceToolAnnotations[name] ?? READ_ONLY_TOOL,
       })),
     ].filter((tool) => !scopes || tool.category !== "tool" || (tool.id.startsWith("ai.")
       ? scopes.some((scope) => scope === "search" || scope === "ingest")
@@ -112,24 +109,14 @@ function legacyManifest(baseUrl: string, scopes?: string[]) {
 /** The public MCP catalog follows the product's upload → search → chat flow. */
 export function mcpManifest(baseUrl: string, scopes?: string[]) {
   const manifest = legacyManifest(baseUrl);
-  const tools = Object.entries(productToolAliases).filter(([name]) => name !== "searchMany").map(([name, legacyId]) => {
+  const tools = Object.entries(productToolAliases).map(([name, legacyId]) => {
     const tool = manifest.capabilities.find(item => item.id === legacyId)!;
     return { ...tool, id: name, endpoint: `${baseUrl}/v1/mcp/tools/${name}`,
       description: tool.description.replaceAll("workspace.search", "search"),
       ...(name === "search" ? {
         title: "Search documents",
         description: "Retrieve cited passages for one query (q) or up to 20 independent queries (queries). Supply exactly one form. Batch results stay in input order with per-query errors; each query can select a workspace. Omitted workspace uses the default. Does not generate answers.",
-        inputSchema: {
-          type: "object", additionalProperties: false,
-          properties: { ...queryInputSchema.properties,
-            queries: { type: "array", minItems: 1, maxItems: 20, items: queryInputSchema },
-            concurrency: { type: "integer", minimum: 1, maximum: 4, default: 4 },
-          },
-          oneOf: [
-            { required: ["q"], not: { anyOf: [{ required: ["queries"] }, { required: ["concurrency"] }] } },
-            { required: ["queries"], not: { anyOf: Object.keys(queryInputSchema.properties).map(key => ({ required: [key] })) } },
-          ],
-        },
+        inputSchema: searchToolInputSchema(),
       } : {}),
       ...(name === "getUploadStatus" ? { title: "Get upload status", description: "Check uploaded files and ingestion progress in a workspace, optionally for a runId returned by upload. Reports searchable pages, failures, costs and processing speed without AI calls. Use before search or chat when files are still processing." } : {}),
     };
@@ -147,6 +134,22 @@ function routeBaseUrl(_url: string): string {
 }
 
 // The protocol and compatibility REST adapters share authorization and handlers.
+/**
+ * These adapter routes serve `/v1/mcp` (legacy `{ error }` bodies) and
+ * `/v1/session-tools` (the native envelope); the request path picks the shape.
+ */
+function adapterError(c: Context, status: number, message: string, code?: ApiErrorCode): Response {
+  return usesNativeErrorEnvelope(c.req.path)
+    ? apiStatusError(c, status, message, { code })
+    : c.json({ error: message }, status as 400);
+}
+
+function invalidInput(c: Context, error: ValidationErrorSource & { issues: unknown[] }): Response {
+  return usesNativeErrorEnvelope(c.req.path)
+    ? apiErrorResponse(c, 400, "invalid_request", "Invalid request", { issues: mapValidationIssues(error) })
+    : c.json({ error: { issues: error.issues } }, 400);
+}
+
 // Only a trusted in-process dispatcher can skip token authentication here.
 const mcpAdapterRoutes = new Hono()
   .use("*", publicErrorMiddleware)
@@ -168,13 +171,13 @@ const mcpAdapterRoutes = new Hono()
       body = await c.req.json();
       if (!body || Array.isArray(body) || typeof body !== "object") throw new Error("Expected object");
     } catch {
-      return c.json({ error: "Expected a JSON object" }, 400);
+      return adapterError(c, 400, "Expected a JSON object");
     }
 
     if (toolId === "listWorkspaces") {
-      if (apiKey && !apiKeyHasAnyScope(apiKey, ["search", "ingest"])) return c.json({ error: "Forbidden" }, 403);
+      if (apiKey && !apiKeyHasAnyScope(apiKey, ["search", "ingest"])) return adapterError(c, 403, "Forbidden");
       const parsed = listWorkspacesInput.safeParse(body);
-      if (!parsed.success) return c.json({ error: { issues: parsed.error.issues } }, 400);
+      if (!parsed.success) return invalidInput(c, parsed.error);
       const accessible = (await listWorkspaces(actor.userId, { refineNames: false }))
         .filter(workspace => !apiKey || apiKeyCanUseWorkspace(apiKey, workspace));
       const { offset, limit } = parsed.data;
@@ -187,13 +190,13 @@ const mcpAdapterRoutes = new Hono()
     }
 
     if (toolId === "upload") {
-      if (apiKey && !apiKeyHasAnyScope(apiKey, ["ingest"])) return c.json({ error: "Forbidden" }, 403);
+      if (apiKey && !apiKeyHasAnyScope(apiKey, ["ingest"])) return adapterError(c, 403, "Forbidden");
       const parsed = uploadInput.safeParse(body);
-      if (!parsed.success) return c.json({ error: { issues: parsed.error.issues } }, 400);
+      if (!parsed.success) return invalidInput(c, parsed.error);
       const input = parsed.data;
-      if (input.workspaceName && apiKey?.workspaceIds?.length) return c.json({ error: "This key cannot create workspaces outside its allowlist" }, 403);
+      if (input.workspaceName && apiKey?.workspaceIds?.length) return adapterError(c, 403, "This key cannot create workspaces outside its allowlist");
       const workspaceId = input.workspaceName ? undefined : await resolveActorWorkspaceId(actor, input.workspaceId);
-      if (workspaceId && !await loadActorScopedWorkspace(workspaceId, actor)) return c.json({ error: "Workspace not found" }, 404);
+      if (workspaceId && !await loadActorScopedWorkspace(workspaceId, actor)) return adapterError(c, 404, "Workspace not found", "workspace_not_found");
       // Reuse upload authorization, URL validation, admission, spend checks and idempotency.
       const { uploadsRoutes } = await import("../routes/uploads.js");
       const native = new Hono().use("*", publicErrorMiddleware).use("*", async (inner, next) => {
@@ -212,19 +215,19 @@ const mcpAdapterRoutes = new Hono()
     }
 
     if (toolId === "completeUpload") {
-      if (apiKey && !apiKeyHasAnyScope(apiKey, ["ingest"])) return c.json({ error: "Forbidden" }, 403);
+      if (apiKey && !apiKeyHasAnyScope(apiKey, ["ingest"])) return adapterError(c, 403, "Forbidden");
       const parsed = completeUploadInput.safeParse(body);
-      if (!parsed.success) return c.json({ error: { issues: parsed.error.issues } }, 400);
+      if (!parsed.success) return invalidInput(c, parsed.error);
       const { loadDirectUploadSession } = await import("./direct-upload-session.js");
       const loaded = await loadDirectUploadSession(parsed.data.sessionId, actor.userId);
       if (!loaded || (apiKey && (loaded.session.org_id !== apiKey.orgId ||
         (loaded.session.workspace_id ? !await loadActorScopedWorkspace(loaded.session.workspace_id, actor) : Boolean(apiKey.workspaceIds?.length))))) {
-        return c.json({ error: "Upload session not found" }, 404);
+        return adapterError(c, 404, "Upload session not found");
       }
-      if (!["pending", "uploading"].includes(loaded.session.status)) return c.json({ error: "Upload session is already confirmed or closed" }, 409);
+      if (!["pending", "uploading"].includes(loaded.session.status)) return adapterError(c, 409, "Upload session is already confirmed or closed");
       if (loaded.files.length > 10 || loaded.files.some(file => file.upload_mode !== "single") ||
         new Set(parsed.data.fileIds).size !== loaded.files.length || loaded.files.some(file => !parsed.data.fileIds.includes(file.id))) {
-        return c.json({ error: "Provide all file IDs from this upload session" }, 400);
+        return adapterError(c, 400, "Provide all file IDs from this upload session");
       }
       const { uploadsRoutes } = await import("../routes/uploads.js");
       const native = new Hono().use("*", publicErrorMiddleware).use("*", async (inner, next) => {
@@ -242,18 +245,18 @@ const mcpAdapterRoutes = new Hono()
     }
 
     if (toolId === "ai.operation.get") {
-      if (apiKey && !apiKeyHasAnyScope(apiKey, ["search", "ingest"])) return c.json({ error: "Forbidden" }, 403);
+      if (apiKey && !apiKeyHasAnyScope(apiKey, ["search", "ingest"])) return adapterError(c, 403, "Forbidden");
       const parsed = operationInputSchema.safeParse(body);
-      if (!parsed.success) return c.json({ error: { issues: parsed.error.issues } }, 400);
+      if (!parsed.success) return invalidInput(c, parsed.error);
       const operation = await getAutomationOperation({ ...parsed.data, userId: actor.userId, apiKey });
-      return operation ? c.json({ operation }) : c.json({ error: "Operation not found" }, 404);
+      return operation ? c.json({ operation }) : adapterError(c, 404, "Operation not found");
     }
 
     if (toolId === "ai.simple") {
       const parsed = aiSimpleToolSchema.safeParse(body);
-      if (!parsed.success) return c.json({ error: { issues: parsed.error.issues } }, 400);
+      if (!parsed.success) return invalidInput(c, parsed.error);
       const request = { ...parsed.data, userId: actor.userId, workspaceId: await resolveActorWorkspaceId(actor, parsed.data.workspaceId) };
-      if (request.sourceUrls.length && apiKey && !apiKeyHasAnyScope(apiKey, ["ingest"])) return c.json({ error: "Source ingestion requires ingest scope" }, 403);
+      if (request.sourceUrls.length && apiKey && !apiKeyHasAnyScope(apiKey, ["ingest"])) return adapterError(c, 403, "Source ingestion requires ingest scope");
       const submitted = await submitSimpleAutomation({ request, apiKey });
       return c.json({
         tool: toolId,
@@ -267,9 +270,9 @@ const mcpAdapterRoutes = new Hono()
 
     if (toolId === "ai.advanced") {
       const parsed = aiAdvancedToolSchema.safeParse(body);
-      if (!parsed.success) return c.json({ error: { issues: parsed.error.issues } }, 400);
+      if (!parsed.success) return invalidInput(c, parsed.error);
       const request = { ...parsed.data, userId: actor.userId, workspaceId: await resolveActorWorkspaceId(actor, parsed.data.workspaceId) };
-      if (request.sourceUrls.length && apiKey && !apiKeyHasAnyScope(apiKey, ["ingest"])) return c.json({ error: "Source ingestion requires ingest scope" }, 403);
+      if (request.sourceUrls.length && apiKey && !apiKeyHasAnyScope(apiKey, ["ingest"])) return adapterError(c, 403, "Source ingestion requires ingest scope");
       const submitted = await submitAdvancedAutomation({ request, apiKey });
       return c.json({
         tool: toolId,
@@ -281,15 +284,15 @@ const mcpAdapterRoutes = new Hono()
       }, 202);
     }
 
-    if (["workspace.search", "workspace.search-many", "workspace.chat"].includes(toolId)) {
-      if (apiKey && !apiKeyHasAnyScope(apiKey, ["search"])) return c.json({ error: "Forbidden" }, 403);
+    if (["workspace.search", "workspace.chat"].includes(toolId)) {
+      if (apiKey && !apiKeyHasAnyScope(apiKey, ["search"])) return adapterError(c, 403, "Forbidden");
       const actor = c.get("requestActor");
       const native = new Hono().use("*", publicErrorMiddleware).use("*", async (inner, next) => {
         setRequestActor(inner, actor);
         await next();
       }).route("/", searchRoutes);
       native.onError(spendAwareErrorHandler);
-      const path = toolId === "workspace.chat" ? "/chat" : toolId === "workspace.search-many" ? "/batch" : "/";
+      const path = toolId === "workspace.chat" ? "/chat" : "/";
       return native.request(`http://mcp.internal${path}`, {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body), signal: c.req.raw.signal,
@@ -297,10 +300,10 @@ const mcpAdapterRoutes = new Hono()
     }
 
     if (toolId === "workspace.aggregate-rag-search") {
-      if (apiKey && !apiKeyHasAnyScope(apiKey, ["search"])) return c.json({ error: "Forbidden" }, 403);
+      if (apiKey && !apiKeyHasAnyScope(apiKey, ["search"])) return adapterError(c, 403, "Forbidden");
       const parsed = aggregateWorkspaceRagSearchRequestSchema.safeParse(body);
       if (!parsed.success) {
-        return c.json({ error: { issues: parsed.error.issues } }, 400);
+        return invalidInput(c, parsed.error);
       }
       const response = await aggregateWorkspaceRagSearch({
         userId: actor.userId,
@@ -311,14 +314,14 @@ const mcpAdapterRoutes = new Hono()
     }
 
     if (toolId === "workspace.ingest-report") {
-      if (apiKey && !apiKeyHasAnyScope(apiKey, ["search", "ingest"])) return c.json({ error: "Forbidden" }, 403);
+      if (apiKey && !apiKeyHasAnyScope(apiKey, ["search", "ingest"])) return adapterError(c, 403, "Forbidden");
       const parsed = workspaceIngestReportSchema.safeParse(body);
-      if (!parsed.success) return c.json({ error: { issues: parsed.error.issues } }, 400);
+      if (!parsed.success) return invalidInput(c, parsed.error);
       const workspace = await loadActorScopedWorkspace(
         await resolveActorWorkspaceId(c.get("requestActor"), parsed.data.workspaceId),
         actor,
       );
-      if (!workspace) return c.json({ error: "Workspace not found" }, 404);
+      if (!workspace) return adapterError(c, 404, "Workspace not found", "workspace_not_found");
       const report = await loadIngestReport({
         workspace, canEdit: false, runId: parsed.data.runId ?? null, documentIds: parsed.data.documentIds ?? null,
       });
@@ -326,15 +329,15 @@ const mcpAdapterRoutes = new Hono()
     }
 
     if (toolId === "workspace.suggest") {
-      if (apiKey && !apiKeyHasAnyScope(apiKey, ["search"])) return c.json({ error: "Forbidden" }, 403);
+      if (apiKey && !apiKeyHasAnyScope(apiKey, ["search"])) return adapterError(c, 403, "Forbidden");
       const parsed = workspaceSuggestSchema.safeParse(body);
-      if (!parsed.success) return c.json({ error: { issues: parsed.error.issues } }, 400);
+      if (!parsed.success) return invalidInput(c, parsed.error);
       const suggestBody = parsed.data;
       const workspace = await loadActorScopedWorkspace(
         await resolveActorWorkspaceId(c.get("requestActor"), suggestBody.workspaceId),
         actor,
       );
-      if (!workspace) return c.json({ error: "Workspace not found" }, 404);
+      if (!workspace) return adapterError(c, 404, "Workspace not found", "workspace_not_found");
       const like = (suggestBody.q ?? "").trim() ? `${(suggestBody.q ?? "").trim()}%` : "%";
       const limit = Math.min(25, Math.max(1, suggestBody.limit ?? 8));
       const suggestions = await sql<{ phrase: string }[]>`
@@ -354,7 +357,7 @@ const mcpAdapterRoutes = new Hono()
       return c.json({ tool: toolId, suggestions: suggestions.map((r) => r.phrase).filter((phrase) => !isProtectedStoredQuery(phrase)) });
     }
 
-    return c.json({ error: "Unknown MCP tool" }, 404);
+    return adapterError(c, 404, "Unknown MCP tool");
   })
   .get("/resources/:id", async (c) => {
     const actor = getRequestActor(c);
@@ -368,7 +371,7 @@ const mcpAdapterRoutes = new Hono()
     if (resourceId === "ai.operation") {
       const operationId = c.req.query("operationId");
       if (!operationId) {
-        return c.json({ error: "Missing operationId" }, 400);
+        return adapterError(c, 400, "Missing operationId");
       }
       const operation = await getAutomationOperation({
         operationId,
@@ -376,16 +379,16 @@ const mcpAdapterRoutes = new Hono()
         apiKey
       });
       if (!operation) {
-        return c.json({ error: "Operation not found" }, 404);
+        return adapterError(c, 404, "Operation not found");
       }
       return c.json({ operation });
     }
 
-    return c.json({ error: "Unknown MCP resource" }, 404);
+    return adapterError(c, 404, "Unknown MCP resource");
   })
   .get("/prompts/:id", async (c) => {
     if (c.req.param("id") !== "workspace-grounded-answer") {
-      return c.json({ error: "Unknown MCP prompt" }, 404);
+      return adapterError(c, 404, "Unknown MCP prompt");
     }
 
     return c.json({

@@ -256,6 +256,31 @@ test("permanent errors and exhausted retries preserve status and body", async ()
   }
 });
 
+test("DocSlurpApiError exposes the native envelope code and request id", async () => {
+  const envelope = { error: { code: "chat_disabled", message: "Chat is turned off.", requestId: "req-1" } };
+  const sdk = client(async () => json(envelope, 403));
+  await assert.rejects(sdk.chat({ workspaceId: "workspace", q: "question" }), (error) => {
+    assert.ok(error instanceof DocSlurpApiError);
+    assert.equal(error.status, 403);
+    assert.equal(error.code, "chat_disabled");
+    assert.equal(error.requestId, "req-1");
+    assert.deepEqual(error.body, envelope);
+    return true;
+  });
+});
+
+test("DocSlurpApiError leaves code undefined for legacy and non-JSON bodies", async () => {
+  for (const response of [() => json({ error: "Forbidden" }, 403), () => json({ error: { issues: [] } }, 403), () => new Response("<h1>bad gateway</h1>", { status: 403 })]) {
+    const sdk = client(async () => response());
+    await assert.rejects(sdk.getRun("run"), (error) => {
+      assert.ok(error instanceof DocSlurpApiError);
+      assert.equal(error.code, undefined);
+      assert.equal(error.requestId, undefined);
+      return true;
+    });
+  }
+});
+
 test("AI calls and unkeyed uploads never retry; keyed upload can retry", async () => {
   for (const method of ["chat", "search", "upload", "ingestUrls"]) {
     let calls = 0;

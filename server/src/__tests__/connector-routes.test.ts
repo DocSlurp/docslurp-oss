@@ -51,9 +51,9 @@ describe("connector creation", () => {
     const response = await createConnector(type);
 
     expect(response.status).toBe(422);
-    const body = (await response.json()) as { error: string; issues: Array<{ path: string }> };
-    expect(body.error).toBe("Invalid connector payload");
-    expect(body.issues.some((issue) => issue.path === "type")).toBe(true);
+    const body = (await response.json()) as { error: { code: string; message: string; details: { issues: Array<{ path: string }> } } };
+    expect(body.error).toMatchObject({ code: "invalid_request", message: "Invalid connector payload" });
+    expect(body.error.details.issues.some((issue) => issue.path === "type")).toBe(true);
     expect(sqlMock).not.toHaveBeenCalled();
   });
 

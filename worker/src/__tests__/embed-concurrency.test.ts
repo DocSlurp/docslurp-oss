@@ -88,7 +88,7 @@ async function embedOnce(env: Record<string, string>, documents = ["doc"], pipel
   }
   const run = {
     id: "run", userId: "u1", orgId: "o1", workspaceId: "w1", stage: "embed", status: "processing",
-    pipeline: { ...normalizePipelineFeatures({ embedding: { profile: "cheapest-hosted" } as never }), ...pipelineOverrides },
+    pipeline: { ...normalizePipelineFeatures({ embedding: { profile: "cheapest-hosted", modelUri: "llm://openai/text-embedding-3-small", target: "hosted" } as never }), ...pipelineOverrides },
     stats: {}, artifacts, spentCents: 0,
   } as unknown as WorkspaceRun;
   const state = WorkflowState.create(run, docs);

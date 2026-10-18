@@ -8,7 +8,7 @@ import type { WorkspaceRun } from "../models.js";
 import type { MediaJournal, MediaReceipt } from "./types.js";
 import type { ArtifactStore } from "../tools/storage.js";
 import type { MediaVisionProvider, VisionResult } from "./vision.js";
-vi.mock("@docslurp/shared/observability",()=>({withObservation:(_:unknown,run:()=>unknown)=>run(),recordMediaTelemetry:vi.fn(),emitTelemetryLog:vi.fn()}));
+vi.mock("@docslurp/shared/observability",async (importOriginal)=>({...await importOriginal<typeof import("@docslurp/shared/observability")>(),withObservation:(_:unknown,run:()=>unknown)=>run(),recordMediaTelemetry:vi.fn(),emitTelemetryLog:vi.fn()}));
 function fixture(){
   let receipt:MediaReceipt|undefined;let saved:VisionResult;
   const journal:MediaJournal={admit:vi.fn(async()=>{if(receipt)return {receipt,acquired:false};receipt={id:"vision-receipt",status:"submitting",resultKey:null,costCents:null};return{receipt,acquired:true};}),

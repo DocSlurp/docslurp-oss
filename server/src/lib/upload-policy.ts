@@ -3,6 +3,7 @@ import path from "node:path";
 import { bodyLimit } from "hono/body-limit";
 
 import { env } from "../config.js";
+import { apiErrorResponse } from "./api-error.js";
 
 const supportedMimeTypes = new Set([
   "application/pdf",
@@ -122,20 +123,21 @@ export function enforceRequestContentLength(rawContentLength: string | null | un
   }
 }
 
-/** 413 body for a multipart (/v1/ingest/bulk) request over MAX_MULTIPART_UPLOAD_BYTES. */
-export function multipartTooLargeBody(maxBytes: number) {
+/** Envelope message and details for a multipart (/v1/ingest/bulk) request over MAX_MULTIPART_UPLOAD_BYTES. */
+export function multipartTooLarge(maxBytes: number) {
   const mb = Math.round((maxBytes / (1024 * 1024)) * 10) / 10;
   return {
-    error:
+    message:
       `Multipart uploads to /v1/ingest/bulk are limited to ${mb} MB per request. ` +
       "Upload larger files with a direct upload session: POST /v1/ingest/direct/sessions, " +
       "PUT each file to the returned URLs, then POST /v1/ingest/direct/sessions/{sessionId}/confirm. " +
       "The SDK (client.upload) and CLI (docslurp upload) do this automatically.",
-    code: "multipart_upload_too_large",
-    maxBytes,
-    directUpload: {
-      createSession: "/v1/ingest/direct/sessions",
-      maxFileBytes: env.maxUploadBytes,
+    details: {
+      maxBytes,
+      directUpload: {
+        createSession: "/v1/ingest/direct/sessions",
+        maxFileBytes: env.maxUploadBytes,
+      },
     },
   };
 }
@@ -144,7 +146,10 @@ export function multipartTooLargeBody(maxBytes: number) {
 export function multipartBodyLimit(maxBytes: number) {
   return bodyLimit({
     maxSize: maxBytes,
-    onError: (c) => c.json(multipartTooLargeBody(maxBytes), 413),
+    onError: (c) => {
+      const { message, details } = multipartTooLarge(maxBytes);
+      return apiErrorResponse(c, 413, "payload_too_large", message, details);
+    },
   });
 }
 

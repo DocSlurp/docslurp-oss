@@ -13,13 +13,18 @@ import { drainDocumentCleanupQueue, purgeSupersededDocuments, type DeleteVectorR
 let db: PGlite;
 let server: PGLiteSocketServer;
 let sql: postgres.Sql<Record<string, unknown>>;
+const realUrl = process.env.GRAPH_PURGE_TEST_DATABASE_URL;
 
 beforeAll(async () => {
-  db = await createMigratedDatabase();
-  const served = await serveOnRandomPort(db);
-  server = served.server;
-  const port = served.port;
-  sql = postgres(`postgres://postgres@127.0.0.1:${port}/postgres`, { max: 1, prepare: false, onnotice: () => {} });
+  if (realUrl) {
+    // This URL must name a migrated, throwaway database owned by this test run.
+    sql = postgres(realUrl, { max: 4, prepare: false, onnotice: () => {} });
+  } else {
+    db = await createMigratedDatabase();
+    const served = await serveOnRandomPort(db);
+    server = served.server;
+    sql = postgres(`postgres://postgres@127.0.0.1:${served.port}/postgres`, { max: 1, prepare: false, onnotice: () => {} });
+  }
   await sql`insert into "user"(id, name, email) values ('u1', 'A', 'a@x')`;
   await sql`insert into organizations(id, name, slug, created_by_user_id) values ('o1', 'Org', 'org', 'u1')`;
   await sql`insert into workspaces(id, org_id, user_id, name) values ('w', 'o1', 'u1', 'W')`;
@@ -97,6 +102,32 @@ const options = (deleteVectorRows: DeleteVectorRows, graceSeconds = 0) => ({
 });
 
 describe("superseded version purge", () => {
+  it.skipIf(!realUrl)("defers cleanup while graph extraction owns the workspace lock, then purges after release", async () => {
+    await seedRun("run-1");
+    await seedRun("run-2");
+    await seedVersion({ id: "v1", runId: "run-1", createdAt: "2026-01-01" });
+    await sql`update documents set status = 'completed' where id = 'v1'`;
+    await seedVersion({ id: "v2", runId: "run-2", createdAt: "2026-01-02" });
+    await sql`update documents set status = 'completed' where id = 'v2'`;
+    const held = await sql.reserve();
+    const vectorDeletes: string[] = [];
+    const { storage, deleted } = fakeStorage(["u1/run-1/markdown/v1.md"]);
+    const purgeOptions = options(async ({ documentIds }) => { vectorDeletes.push(...documentIds); });
+    try {
+      await held`select pg_advisory_lock(hashtextextended('kg:w', 0))`;
+      expect(await purgeSupersededDocuments(sql, storage, purgeOptions)).toEqual({ purged: 0, failed: 0 });
+      expect(vectorDeletes).toEqual([]);
+      expect(deleted).toEqual([]);
+      expect((await sql`select purged_at from documents where id = 'v1'`)[0].purged_at).toBeNull();
+    } finally {
+      await held`select pg_advisory_unlock(hashtextextended('kg:w', 0))`;
+      held.release();
+    }
+    expect(await purgeSupersededDocuments(sql, storage, purgeOptions)).toEqual({ purged: 1, failed: 0 });
+    expect(vectorDeletes).toEqual(["v1"]);
+    expect(deleted).toEqual(["u1/run-1/markdown/v1.md"]);
+  }, 10_000);
+
   it("swaps versions atomically, then deletes the old version's derived data but keeps its tombstone and source", async () => {
     await seedRun("run-1");
     await seedRun("run-2");
@@ -287,6 +318,9 @@ describe("superseded version purge", () => {
     await seedVersion({ id: "next", runId: "run-3", createdAt: "2026-01-03" });
     await sql`update documents set status = 'completed' where id = 'next'`;
 
+    // This tests artifact ownership, independent of the millisecond clock's
+    // strict grace-period boundary (superseded_at < now()).
+    await sql`update documents set superseded_at = now() - interval '1 second' where superseded_at is not null`;
     const { storage, deleted } = fakeStorage(["u1/run-1/markdown/source.md", "u1/run-2/markdown/copy.md"]);
     await purgeSupersededDocuments(sql, storage, options(async () => {}));
     expect(deleted).toEqual(["u1/run-2/markdown/copy.md"]);

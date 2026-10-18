@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({ observe: vi.fn(), generate: vi.fn(), usage: vi.fn() }));
-vi.mock("@docslurp/shared/observability", () => ({ withObservation: mocks.observe, aiResultDetails: () => ({ usageDetails: { input: 10, output: 2 } }) }));
+vi.mock("@docslurp/shared/observability", async (importOriginal) => ({ ...await importOriginal<typeof import("@docslurp/shared/observability")>(), withObservation: mocks.observe, aiResultDetails: () => ({ usageDetails: { input: 10, output: 2 } }) }));
 vi.mock("@docslurp/shared", async (importOriginal) => ({
   ...await importOriginal<typeof import("@docslurp/shared")>(),
   createOpenRouterUsageCapture: () => ({ fetch: vi.fn(), usage: () => undefined, providerName: () => undefined }),

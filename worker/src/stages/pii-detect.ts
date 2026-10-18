@@ -1,3 +1,4 @@
+import { instrumentPostgres } from "@docslurp/shared/observability";
 import { isUtf8 } from "node:buffer";
 
 import postgres from "postgres";
@@ -81,13 +82,13 @@ function resolvePolicy(pipeline: WorkflowState["run"]["pipeline"]): PiiPolicy {
 }
 
 export function createPostgresPiiDetectionSink(databaseUrl: string): PiiDetectionSink {
-  const db = postgres(databaseUrl, {
+  const db = instrumentPostgres(postgres(databaseUrl, {
     max: Math.max(1, Number.parseInt(process.env.WORKER_PII_DB_POOL_MAX ?? "2", 10) || 2),
     // Transaction-mode poolers (Neon pooler, PgBouncer) cannot route prepared statements.
     prepare: false,
     idle_timeout: 20,
     connect_timeout: 10,
-  });
+  }), databaseUrl);
   return {
     async recordDetections(documentId, runId, matches, redacted) {
       // A rescan of the same run replaces its detections instead of duplicating them.

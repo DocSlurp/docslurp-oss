@@ -27,7 +27,7 @@ function buildIpLimitedApp(now: () => number) {
     keyPrefix: "test",
     now,
   }));
-  app.get("/ok", (c) => c.json({ ok: true }));
+  app.get("/v1/ok", (c) => c.json({ ok: true }));
   return app;
 }
 
@@ -91,35 +91,59 @@ describe("api rate limit middleware", () => {
   it("returns 429 with retry metadata after the per-identity window is exhausted", async () => {
     const app = buildIpLimitedApp(() => currentTime);
 
-    expect((await app.request("/ok", { headers: { "x-forwarded-for": "203.0.113.10" } })).status).toBe(200);
-    const second = await app.request("/ok", { headers: { "x-forwarded-for": "203.0.113.10" } });
+    expect((await app.request("/v1/ok", { headers: { "x-forwarded-for": "203.0.113.10" } })).status).toBe(200);
+    const second = await app.request("/v1/ok", { headers: { "x-forwarded-for": "203.0.113.10" } });
     expect(second.status).toBe(200);
     expect(second.headers.get("X-RateLimit-Remaining")).toBe("0");
     expect(second.headers.get("X-RateLimit-Limit")).toBe("2");
     expect(second.headers.get("RateLimit-Policy")).toBe('"free-read";q=2;w=1, "ip-burst";q=200;w=10');
     expect(second.headers.get("RateLimit")).toBe('"free-read";r=0;t=2, "ip-burst";r=198;t=9');
 
-    const limited = await app.request("/ok", { headers: { "x-forwarded-for": "203.0.113.10" } });
+    const limited = await app.request("/v1/ok", { headers: { "x-forwarded-for": "203.0.113.10" } });
 
     expect(limited.status).toBe(429);
     // Denied requests count against an IP, so the wait covers this one too.
     expect(limited.headers.get("Retry-After")).toBe("2");
     await expect(limited.json()).resolves.toMatchObject({
-      error: "Too many requests",
-      code: "rate_limited",
-      retryAfterSeconds: 2,
+      error: { code: "rate_limited", message: "Too many requests", details: { retryAfterSeconds: 2 } },
     });
   });
+
+  it("keeps Retry-After and rate-limit headers on the envelope 429", async () => {
+    const app = buildIpLimitedApp(() => currentTime);
+    const headers = { "x-forwarded-for": "203.0.113.20" };
+    await app.request("/v1/ok", { headers });
+    await app.request("/v1/ok", { headers });
+    const limited = await app.request("/v1/ok", { headers });
+    expect(limited.status).toBe(429);
+    expect(limited.headers.get("Retry-After")).toBe("2");
+    expect(limited.headers.get("RateLimit-Policy")).toContain('"free-read"');
+    expect(limited.headers.get("RateLimit")).toContain('"free-read";r=0');
+    expect(limited.headers.get("X-RateLimit-Remaining")).toBe("0");
+  });
+
+  it.each(["/compat/algolia/1/indexes/ws/query", "/oauth/mcp/token", "/v1/chat/completions", "/v1/mcp"])(
+    "keeps the flat { error, code } 429 body on the protocol surface %s", async (path) => {
+      const app = new Hono();
+      app.use("*", createApiRateLimit({ windowMs: 1_000, maxRequests: 1, keyPrefix: "protocol", now: () => currentTime }));
+      app.all("*", (c) => c.json({ ok: true }));
+      const headers = { "x-forwarded-for": "203.0.113.21" };
+      await app.request(path, { headers });
+      const limited = await app.request(path, { headers });
+      expect(limited.status).toBe(429);
+      expect(limited.headers.get("Retry-After")).toBeTruthy();
+      await expect(limited.json()).resolves.toMatchObject({ error: "Too many requests", code: "rate_limited" });
+    });
 
   it("resets counts after the sliding window expires", async () => {
     const app = buildIpLimitedApp(() => currentTime);
 
-    await app.request("/ok", { headers: { "x-forwarded-for": "203.0.113.11" } });
-    await app.request("/ok", { headers: { "x-forwarded-for": "203.0.113.11" } });
+    await app.request("/v1/ok", { headers: { "x-forwarded-for": "203.0.113.11" } });
+    await app.request("/v1/ok", { headers: { "x-forwarded-for": "203.0.113.11" } });
     // The weighted previous window has fully aged out one window later.
     currentTime = 3_001;
 
-    const response = await app.request("/ok", { headers: { "x-forwarded-for": "203.0.113.11" } });
+    const response = await app.request("/v1/ok", { headers: { "x-forwarded-for": "203.0.113.11" } });
 
     expect(response.status).toBe(200);
     expect(response.headers.get("X-RateLimit-Remaining")).toBe("1");
@@ -140,9 +164,9 @@ describe("api rate limit middleware", () => {
       now: () => currentTime,
       store: { consume },
     }));
-    app.get("/ok", (c) => c.json({ ok: true }));
+    app.get("/v1/ok", (c) => c.json({ ok: true }));
 
-    const limited = await app.request("/ok", { headers: { "x-forwarded-for": "203.0.113.12" } });
+    const limited = await app.request("/v1/ok", { headers: { "x-forwarded-for": "203.0.113.12" } });
 
     expect(limited.status).toBe(429);
     expect(consume).toHaveBeenCalledTimes(1);
@@ -163,10 +187,10 @@ describe("api rate limit middleware", () => {
       maxRequests: 1,
       store: { consume },
     }));
-    app.get("/ok", (c) => c.json({ ok: true }));
+    app.get("/v1/ok", (c) => c.json({ ok: true }));
 
-    expect((await app.request("/ok")).status).toBe(200);
-    expect((await app.request("/ok")).status).toBe(200);
+    expect((await app.request("/v1/ok")).status).toBe(200);
+    expect((await app.request("/v1/ok")).status).toBe(200);
     expect(consume).not.toHaveBeenCalled();
   });
 
@@ -185,7 +209,7 @@ describe("api rate limit middleware", () => {
 
     const limitedSearch = await app.request("/v1/search", { headers });
     expect(limitedSearch.status).toBe(429);
-    await expect(limitedSearch.json()).resolves.toMatchObject({ category: "search", policy: "free-search" });
+    await expect(limitedSearch.json()).resolves.toMatchObject({ error: { code: "rate_limited", details: { category: "search", policy: "free-search" } } });
 
     const read = await app.request("/v1/documents", { headers });
     expect(read.status).toBe(200);
@@ -295,19 +319,19 @@ describe("api rate limit middleware", () => {
     const app = buildIpLimitedApp(() => currentTime);
     const headers = { "x-forwarded-for": "203.0.113.20" };
     currentTime = 1_000;
-    expect((await app.request("/ok", { headers })).status).toBe(200);
-    expect((await app.request("/ok", { headers })).status).toBe(200);
+    expect((await app.request("/v1/ok", { headers })).status).toBe(200);
+    expect((await app.request("/v1/ok", { headers })).status).toBe(200);
 
     // 25% into the next window, 75% of the previous window's 2 requests still count.
     currentTime = 2_250;
-    const limited = await app.request("/ok", { headers });
+    const limited = await app.request("/v1/ok", { headers });
     expect(limited.status).toBe(429);
     expect(limited.headers.get("Retry-After")).toBe("1");
 
     // Denied IP traffic still counts, so this window holds the 429 above. At 60% into
     // the window after, 40% of it (0.4 of a request) remains, leaving room again.
     currentTime = 3_600;
-    expect((await app.request("/ok", { headers })).status).toBe(200);
+    expect((await app.request("/v1/ok", { headers })).status).toBe(200);
   });
 
   it("puts an IP in the penalty box after a suspicious burst", async () => {
@@ -322,7 +346,7 @@ describe("api rate limit middleware", () => {
     for (let i = 0; i < 3; i += 1) expect((await app.request("/v1/documents", { headers })).status).toBe(200);
     const burst = await app.request("/v1/documents", { headers });
     expect(burst.status).toBe(429);
-    await expect(burst.json()).resolves.toMatchObject({ code: "ip_temporarily_blocked", retryAfterSeconds: 30 });
+    await expect(burst.json()).resolves.toMatchObject({ error: { code: "ip_temporarily_blocked", details: { retryAfterSeconds: 30 } } });
 
     // Still blocked after the burst window, until the penalty expires.
     currentTime += 20_000;
@@ -354,14 +378,14 @@ describe("api rate limit middleware", () => {
     expect((await app.request("/v1/documents", { headers })).status).toBe(401);
     const jailed = await app.request("/v1/documents", { headers });
     expect(jailed.status).toBe(429);
-    await expect(jailed.json()).resolves.toMatchObject({ code: "ip_temporarily_blocked", retryAfterSeconds: 900 });
+    await expect(jailed.json()).resolves.toMatchObject({ error: { code: "ip_temporarily_blocked", details: { retryAfterSeconds: 900 } } });
   });
 
   it("ignores spoofed left-hand X-Forwarded-For hops", async () => {
     const app = buildIpLimitedApp(() => currentTime);
-    expect((await app.request("/ok", { headers: { "x-forwarded-for": "1.1.1.1, 203.0.113.30" } })).status).toBe(200);
-    expect((await app.request("/ok", { headers: { "x-forwarded-for": "2.2.2.2, 203.0.113.30" } })).status).toBe(200);
-    expect((await app.request("/ok", { headers: { "x-forwarded-for": "3.3.3.3, 203.0.113.30" } })).status).toBe(429);
+    expect((await app.request("/v1/ok", { headers: { "x-forwarded-for": "1.1.1.1, 203.0.113.30" } })).status).toBe(200);
+    expect((await app.request("/v1/ok", { headers: { "x-forwarded-for": "2.2.2.2, 203.0.113.30" } })).status).toBe(200);
+    expect((await app.request("/v1/ok", { headers: { "x-forwarded-for": "3.3.3.3, 203.0.113.30" } })).status).toBe(429);
   });
 
   it("enforces a key's custom request windows across categories", async () => {
@@ -376,7 +400,7 @@ describe("api rate limit middleware", () => {
 
     const limited = await app.request("/v1/documents");
     expect(limited.status).toBe(429);
-    await expect(limited.json()).resolves.toMatchObject({ code: "rate_limited", policy: "key-requests-1h" });
+    await expect(limited.json()).resolves.toMatchObject({ error: { code: "rate_limited", details: { policy: "key-requests-1h" } } });
   });
 
   it("blocks cost-incurring requests once a key's spend window is exhausted", async () => {
@@ -386,7 +410,7 @@ describe("api rate limit middleware", () => {
 
     const search = await app.request("/v1/search");
     expect(search.status).toBe(429);
-    await expect(search.json()).resolves.toMatchObject({ code: "spend_limit_exceeded", limitCents: 500, policy: "key-spend-1d" });
+    await expect(search.json()).resolves.toMatchObject({ error: { code: "spend_limit_exceeded", details: { limitCents: 500, policy: "key-spend-1d" } } });
     expect(search.headers.get("X-DocSlurp-Spend")).toBe('"key-spend-1d";q=500;r=0;w=86400;u=usd-cents');
 
     // Reads stay available, and the spend lookup is cached between requests.
@@ -401,7 +425,7 @@ describe("api rate limit middleware", () => {
 
     const upload = await app.request("/v1/ingest", { method: "POST" });
     expect(upload.status).toBe(429);
-    await expect(upload.json()).resolves.toMatchObject({ code: "daily_page_limit" });
+    await expect(upload.json()).resolves.toMatchObject({ error: { code: "daily_page_limit", details: { category: "upload" } } });
     expect((await app.request("/v1/search")).status).toBe(200);
   });
 
@@ -411,7 +435,6 @@ describe("api rate limit middleware", () => {
     expect(classifyRateLimitCategory("POST", "/v1/uploads/direct/sessions")).toBe("upload");
     expect(classifyRateLimitCategory("GET", "/v1/search")).toBe("search");
     expect(classifyRateLimitCategory("POST", "/v1/search/chat")).toBe("chat-ai");
-    expect(classifyRateLimitCategory("POST", "/v1/search/batch")).toBe("search");
     expect(classifyRateLimitCategory("POST", "/v1/chat")).toBe("chat-ai");
     expect(classifyRateLimitCategory("POST", "/v1/chat/completions")).toBe("chat-ai");
     expect(classifyRateLimitCategory("POST", "/v1/workspaces/ws-1/chat")).toBe("chat-ai");
@@ -452,17 +475,17 @@ describe("IP limiter behind Cloudflare on Fly", () => {
 
   it("keys on the visitor behind a shared Cloudflare edge, so one busy edge does not throttle others", async () => {
     const app = buildIpLimitedApp(() => 1_000);
-    expect((await app.request("/ok", { headers: edge("203.0.113.1") })).status).toBe(200);
-    expect((await app.request("/ok", { headers: edge("203.0.113.1") })).status).toBe(200);
-    expect((await app.request("/ok", { headers: edge("203.0.113.1") })).status).toBe(429);
-    expect((await app.request("/ok", { headers: edge("203.0.113.2") })).status).toBe(200);
+    expect((await app.request("/v1/ok", { headers: edge("203.0.113.1") })).status).toBe(200);
+    expect((await app.request("/v1/ok", { headers: edge("203.0.113.1") })).status).toBe(200);
+    expect((await app.request("/v1/ok", { headers: edge("203.0.113.1") })).status).toBe(429);
+    expect((await app.request("/v1/ok", { headers: edge("203.0.113.2") })).status).toBe(200);
   });
 
   it("cannot be evaded by rotating a spoofed CF-Connecting-IP on a direct request", async () => {
     const app = buildIpLimitedApp(() => 1_000);
     const direct = (spoof: string) => ({ "fly-client-ip": "198.51.100.7", "cf-connecting-ip": spoof });
-    expect((await app.request("/ok", { headers: direct("1.1.1.1") })).status).toBe(200);
-    expect((await app.request("/ok", { headers: direct("1.1.1.2") })).status).toBe(200);
-    expect((await app.request("/ok", { headers: direct("1.1.1.3") })).status).toBe(429);
+    expect((await app.request("/v1/ok", { headers: direct("1.1.1.1") })).status).toBe(200);
+    expect((await app.request("/v1/ok", { headers: direct("1.1.1.2") })).status).toBe(200);
+    expect((await app.request("/v1/ok", { headers: direct("1.1.1.3") })).status).toBe(429);
   });
 });

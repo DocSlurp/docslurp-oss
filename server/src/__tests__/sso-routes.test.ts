@@ -350,7 +350,7 @@ describe("ssoRoutes security hardening", () => {
 
     expect(blocked.status).toBe(429);
     expect(blocked.headers.get("Retry-After")).toBe("60");
-    expect(await blocked.json()).toEqual({ error: "Too many SSO requests" });
+    expect(await blocked.json()).toEqual({ error: { code: "rate_limited", message: "Too many SSO requests" } });
   });
 });
 
@@ -367,7 +367,7 @@ describe("SSO domain verification", () => {
 
     const enable = await putSso(app, { ...oidcConfig, enforceSso: true });
     expect(enable.status).toBe(422);
-    expect((await enable.json() as { error: string }).error).toMatch(/Verify ownership of acme\.com/);
+    expect((await enable.json() as { error: { code: string; message: string } }).error).toMatchObject({ code: "invalid_request", message: expect.stringMatching(/Verify ownership of acme\.com/) });
 
     const enforceOnly = await putSso(app, { enforceSso: true });
     expect(enforceOnly.status).toBe(422);
@@ -416,7 +416,7 @@ describe("SSO domain verification", () => {
     for (const domain of ["gmail.com", "outlook.com", "proton.me", "mail.yahoo.com", "@icloud.com"]) {
       const response = await putSso(app, { emailDomain: domain });
       expect(response.status, domain).toBe(422);
-      expect((await response.json() as { error: string }).error).toMatch(/Public email providers/);
+      expect((await response.json() as { error: { message: string } }).error.message).toMatch(/Public email providers/);
     }
     expect(validateClaimableDomain("not a domain")).toMatch(/valid domain/);
     expect(db.domains).toHaveLength(0);

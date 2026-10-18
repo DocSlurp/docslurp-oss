@@ -2,8 +2,9 @@ import { addTraceMetadata } from "@docslurp/shared/observability";
 import type { Context } from "hono";
 import { HTTPException } from "hono/http-exception";
 
-import { isDefaultWorkspaceAlias, isWorkspaceUuid, type WorkspaceRecord } from "@docslurp/shared";
+import { apiError, isDefaultWorkspaceAlias, isWorkspaceUuid, type WorkspaceRecord } from "@docslurp/shared";
 
+import { apiErrorResponse } from "./api-error.js";
 import { auth, appDbPool } from "./auth.js";
 import { isConfiguredAdminUser } from "./admin-emails.js";
 import { apiKeyAllowsWorkspace, apiKeyCanUseWorkspace } from "./api-key-workspace-scope.js";
@@ -43,6 +44,7 @@ declare module "hono" {
     sessionUser: SessionUser;
     apiKey: ValidatedKey;
     rateLimitActorChecked: boolean;
+    requestId: string;
   }
 }
 
@@ -230,10 +232,10 @@ export async function assertApiKeyWorkspaceAccess(
     return null;
   }
   if (!actorHasAnyApiKeyScope(actor, [scope])) {
-    return c.json({ error: "Forbidden" }, 403);
+    return apiErrorResponse(c, 403, "forbidden", "Forbidden");
   }
   const workspace = await loadActorScopedWorkspace(workspaceId, actor);
-  return workspace ? null : c.json({ error: "Workspace not found" }, 404);
+  return workspace ? null : apiErrorResponse(c, 404, "workspace_not_found", "Workspace not found");
 }
 
 /**
@@ -271,8 +273,10 @@ export async function resolveActorWorkspaceId(
  * any other inaccessible workspace (Hono renders an HTTPException's response).
  */
 export class ApiKeyWorkspaceNotAllowedError extends HTTPException {
+  /** Same code the workspace-access errors use, so one condition never splits across two codes. */
+  readonly code = "workspace_not_found";
   constructor() {
-    super(404, { message: "Workspace not found", res: Response.json({ error: "Workspace not found" }, { status: 404 }) });
+    super(404, { message: "Workspace not found", res: Response.json(apiError("workspace_not_found", "Workspace not found"), { status: 404 }) });
   }
 }
 

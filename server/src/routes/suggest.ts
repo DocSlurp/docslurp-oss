@@ -4,6 +4,7 @@ import { sql } from "../db.js";
 import { isProtectedStoredQuery } from "../search/session.js";
 import { actorHasAnyApiKeyScope, getRequestActor, loadActorScopedWorkspace, resolveActorWorkspaceId } from "../lib/request-actor.js";
 import { acceptApiKeys } from "../lib/route-auth.js";
+import { apiStatusError } from "../lib/api-error.js";
 
 function normalizePrefix(q: string | null): string {
   return (q ?? "").trim().slice(0, 64);
@@ -188,10 +189,10 @@ export const suggestRoutes = new Hono()
   })
   .get("/search/diagnostics", async (c) => {
     const sessionId = c.req.query("sessionId");
-    if (!sessionId) return c.json({ error: "Missing sessionId" }, 400);
+    if (!sessionId) return apiStatusError(c, 400, "Missing sessionId");
     const actor = getRequestActor(c);
     if (actor.type === "apiKey" && !actorHasAnyApiKeyScope(actor, ["search"])) {
-      return c.json({ error: "Forbidden" }, 403);
+      return apiStatusError(c, 403, "Forbidden");
     }
 
     const [row] = await sql<{ reason: string; suggestions: unknown; created_at: string; workspace_id: string }[]>`

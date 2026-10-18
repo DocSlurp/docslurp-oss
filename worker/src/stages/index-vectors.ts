@@ -1,3 +1,4 @@
+import { instrumentPostgres } from "@docslurp/shared/observability";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -109,17 +110,17 @@ export class IndexStage implements Stage {
   /** One queue (and a small pooled client) per worker process, created on first LanceDB write. */
   private writeQueue(): LanceDbWriteQueue {
     if (this.queue) return this.queue;
-    this.queueSql = postgres(this.config.databaseUrl, {
+    this.queueSql = instrumentPostgres(postgres(this.config.databaseUrl, {
       max: Math.max(1, Number.parseInt(process.env.WORKER_VECTOR_QUEUE_DB_POOL_MAX ?? "2", 10) || 2),
       // Transaction-mode poolers (Neon pooler, PgBouncer) cannot route prepared statements.
       prepare: false,
       idle_timeout: 20,
       connect_timeout: 10,
-    });
+    }), this.config.databaseUrl);
     this.queue = new LanceDbWriteQueue({
       sql: this.queueSql,
       loadRecords: async (row) => {
-        const artifact = await this.storage.getJson<EmbeddingArtifact>(row.artifactKey);
+        const artifact = await this.storage.getJson<EmbeddingArtifact>(row.artifactKey, { streamJson: true });
         return buildVectorRecords(artifact, row.documentId, row.metadata);
       },
       maintenance: {
@@ -161,7 +162,7 @@ export class IndexStage implements Stage {
         "vector index manifests ready",
         async () => {
           const embeddingKey = `${document.userId}/${state.run.id}/embeddings/${document.id}.json`;
-          const artifact = await this.storage.getJson<EmbeddingArtifact>(embeddingKey);
+          const artifact = await this.storage.getJson<EmbeddingArtifact>(embeddingKey, { streamJson: true });
           const records = buildVectorRecords(artifact, document.id, {
             sourceKey: document.sourceKey,
             filename: document.filename

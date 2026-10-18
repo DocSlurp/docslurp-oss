@@ -36,6 +36,8 @@ import {
 } from "../services/billing.js";
 import { listOrganizations } from "../services/organizations.js";
 import { requestIp, requestUserAgent } from "../lib/request-context.js";
+import { apiStatusError } from "../lib/api-error.js";
+import { validationHook } from "../lib/validation.js";
 
 const orgOnlySchema = z.object({ orgId: z.string().optional() });
 
@@ -76,16 +78,16 @@ async function resolveBillingOrganization(userId: string, requestedOrgId?: strin
 /** Map billing errors to HTTP: 503 when Stripe is not configured, 400 for caller mistakes. */
 function billingError(c: Context, error: unknown, fallback: string) {
   if (error instanceof BillingNotConfiguredError) {
-    return c.json({ error: "billing_not_configured" }, 503);
+    return apiStatusError(c, 503, "billing_not_configured");
   }
   if (error instanceof BillingRequestError) {
     if (error.code === "billing_not_configured") {
-      return c.json({ error: "billing_not_configured" }, 503);
+      return apiStatusError(c, 503, "billing_not_configured");
     }
-    return c.json({ error: error.message, code: error.code }, 400);
+    return apiStatusError(c, 400, error.message, { code: error.code });
   }
   console.error(`[billing] ${fallback}: ${error instanceof Error ? error.message : String(error)}`);
-  return c.json({ error: reportPublicError(error) }, 400);
+  return apiStatusError(c, 400, reportPublicError(error));
 }
 
 async function audit(
@@ -122,7 +124,7 @@ export const billingRoutes = new Hono()
     const userId = c.get("sessionUser").id;
     const org = await resolveBillingOrganization(userId, c.req.query("orgId"));
     if (!org) {
-      return c.json({ error: "No organization found" }, 404);
+      return apiStatusError(c, 404, "No organization found");
     }
     return c.json(await getBillingOverview(org.id));
   })
@@ -139,7 +141,7 @@ export const billingRoutes = new Hono()
     const userId = c.get("sessionUser").id;
     const org = await resolveBillingOrganization(userId, c.req.query("orgId"));
     if (!org) {
-      return c.json({ error: "No organization found" }, 404);
+      return apiStatusError(c, 404, "No organization found");
     }
     const entries = await listCreditLedger({
       orgId: org.id,
@@ -152,21 +154,21 @@ export const billingRoutes = new Hono()
     const userId = c.get("sessionUser").id;
     const org = await resolveBillingOrganization(userId, c.req.query("orgId"));
     if (!org) {
-      return c.json({ error: "No organization found" }, 404);
+      return apiStatusError(c, 404, "No organization found");
     }
     return c.json(await getAutoRechargeSettings(org.id));
   })
 
   // ---------------------------------------------------------------- Stripe flows
-  .post("/subscription/checkout", zValidator("json", planCheckoutSchema), async (c) => {
+  .post("/subscription/checkout", zValidator("json", planCheckoutSchema, validationHook), async (c) => {
     const userId = c.get("sessionUser").id;
     const { orgId, planId } = c.req.valid("json");
     const org = await resolveBillingOrganization(userId, orgId);
     if (!org) {
-      return c.json({ error: "No organization found" }, 404);
+      return apiStatusError(c, 404, "No organization found");
     }
     if (!billingRoles.has(org.memberRole)) {
-      return c.json({ error: "Forbidden" }, 403);
+      return apiStatusError(c, 403, "Forbidden");
     }
     try {
       const result = await createPlanCheckout({
@@ -180,15 +182,15 @@ export const billingRoutes = new Hono()
       return billingError(c, error, "Failed to create checkout");
     }
   })
-  .post("/portal", zValidator("json", orgOnlySchema), async (c) => {
+  .post("/portal", zValidator("json", orgOnlySchema, validationHook), async (c) => {
     const userId = c.get("sessionUser").id;
     const { orgId } = c.req.valid("json");
     const org = await resolveBillingOrganization(userId, orgId);
     if (!org) {
-      return c.json({ error: "No organization found" }, 404);
+      return apiStatusError(c, 404, "No organization found");
     }
     if (!billingRoles.has(org.memberRole)) {
-      return c.json({ error: "Forbidden" }, 403);
+      return apiStatusError(c, 403, "Forbidden");
     }
     try {
       const result = await createPortalSession({ orgId: org.id });
@@ -198,15 +200,15 @@ export const billingRoutes = new Hono()
       return billingError(c, error, "Failed to open billing portal");
     }
   })
-  .post("/topup/checkout", zValidator("json", topUpCheckoutSchema), async (c) => {
+  .post("/topup/checkout", zValidator("json", topUpCheckoutSchema, validationHook), async (c) => {
     const userId = c.get("sessionUser").id;
     const { orgId, amountCents } = c.req.valid("json");
     const org = await resolveBillingOrganization(userId, orgId);
     if (!org) {
-      return c.json({ error: "No organization found" }, 404);
+      return apiStatusError(c, 404, "No organization found");
     }
     if (!billingRoles.has(org.memberRole)) {
-      return c.json({ error: "Forbidden" }, 403);
+      return apiStatusError(c, 403, "Forbidden");
     }
     try {
       const result = await createTopUpCheckout({
@@ -220,15 +222,15 @@ export const billingRoutes = new Hono()
       return billingError(c, error, "Failed to create top-up checkout");
     }
   })
-  .put("/auto-recharge", zValidator("json", autoRechargeUpdateSchema), async (c) => {
+  .put("/auto-recharge", zValidator("json", autoRechargeUpdateSchema, validationHook), async (c) => {
     const userId = c.get("sessionUser").id;
     const { orgId, ...settings } = c.req.valid("json");
     const org = await resolveBillingOrganization(userId, orgId);
     if (!org) {
-      return c.json({ error: "No organization found" }, 404);
+      return apiStatusError(c, 404, "No organization found");
     }
     if (!billingRoles.has(org.memberRole)) {
-      return c.json({ error: "Forbidden" }, 403);
+      return apiStatusError(c, 403, "Forbidden");
     }
     try {
       const saved = await updateAutoRechargeSettings({ orgId: org.id, userId, settings });
@@ -237,7 +239,7 @@ export const billingRoutes = new Hono()
     } catch (error) {
       // Enabling without a payment method is a 400 even when Stripe is unconfigured locally.
       if (error instanceof BillingRequestError && error.code === "payment_method_required") {
-        return c.json({ error: error.message, code: error.code }, 400);
+        return apiStatusError(c, 400, error.message, { code: error.code });
       }
       return billingError(c, error, "Failed to update auto-recharge");
     }
@@ -248,7 +250,7 @@ export const billingRoutes = new Hono()
     const userId = c.get("sessionUser").id;
     const org = await resolveBillingOrganization(userId, c.req.query("orgId"));
     if (!org) {
-      return c.json({ error: "No organization found" }, 404);
+      return apiStatusError(c, 404, "No organization found");
     }
     return c.json(await getUsageBreakdown(org.id));
   })
@@ -256,7 +258,7 @@ export const billingRoutes = new Hono()
     const userId = c.get("sessionUser").id;
     const org = await resolveBillingOrganization(userId, c.req.query("orgId"));
     if (!org) {
-      return c.json({ error: "No organization found" }, 404);
+      return apiStatusError(c, 404, "No organization found");
     }
     const result = await getIngestJobCosts({
       orgId: org.id,
@@ -270,7 +272,7 @@ export const billingRoutes = new Hono()
     const userId = c.get("sessionUser").id;
     const org = await resolveBillingOrganization(userId, c.req.query("orgId"));
     if (!org) {
-      return c.json({ error: "No organization found" }, 404);
+      return apiStatusError(c, 404, "No organization found");
     }
     return c.json(await getRunCostBreakdown({ runId: c.req.param("runId"), orgId: org.id }));
   })
@@ -329,15 +331,15 @@ export const billingRoutes = new Hono()
       return billingError(c, error, "Failed to list payment methods");
     }
   })
-  .post("/payment-methods/setup-intent", zValidator("json", orgOnlySchema), async (c) => {
+  .post("/payment-methods/setup-intent", zValidator("json", orgOnlySchema, validationHook), async (c) => {
     const userId = c.get("sessionUser").id;
     const { orgId } = c.req.valid("json");
     const org = await resolveBillingOrganization(userId, orgId);
     if (!org) {
-      return c.json({ error: "No organization found" }, 404);
+      return apiStatusError(c, 404, "No organization found");
     }
     if (!billingRoles.has(org.memberRole)) {
-      return c.json({ error: "Forbidden" }, 403);
+      return apiStatusError(c, 403, "Forbidden");
     }
     try {
       const result = await createSetupIntent({
@@ -352,15 +354,15 @@ export const billingRoutes = new Hono()
       return billingError(c, error, "Failed to create setup intent");
     }
   })
-  .post("/payment-methods", zValidator("json", attachPaymentMethodSchema), async (c) => {
+  .post("/payment-methods", zValidator("json", attachPaymentMethodSchema, validationHook), async (c) => {
     const userId = c.get("sessionUser").id;
     const { orgId, paymentMethodId } = c.req.valid("json");
     const org = await resolveBillingOrganization(userId, orgId);
     if (!org) {
-      return c.json({ error: "No organization found" }, 404);
+      return apiStatusError(c, 404, "No organization found");
     }
     if (!billingRoles.has(org.memberRole)) {
-      return c.json({ error: "Forbidden" }, 403);
+      return apiStatusError(c, 403, "Forbidden");
     }
     try {
       const pm = await attachPaymentMethod({ orgId: org.id, paymentMethodId });
@@ -375,10 +377,10 @@ export const billingRoutes = new Hono()
     const paymentMethodId = c.req.param("id");
     const org = await resolveBillingOrganization(userId, c.req.query("orgId"));
     if (!org) {
-      return c.json({ error: "No organization found" }, 404);
+      return apiStatusError(c, 404, "No organization found");
     }
     if (!billingRoles.has(org.memberRole)) {
-      return c.json({ error: "Forbidden" }, 403);
+      return apiStatusError(c, 403, "Forbidden");
     }
     try {
       await detachPaymentMethod({ orgId: org.id, paymentMethodId });

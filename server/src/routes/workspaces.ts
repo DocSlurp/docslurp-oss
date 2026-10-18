@@ -31,7 +31,7 @@ import { actorHasAnyApiKeyScope, getRequestActor, apiKeyCanUseWorkspace } from "
 import { requestIp, requestUserAgent } from "../lib/request-context.js";
 import { isWorkspaceChatAgent } from "../lib/mastra.js";
 import { chatVoiceRoutes } from "./chat-voice.js";
-import type { ValidationErrorSource } from "../lib/validation.js";
+import { validationHook } from "../lib/validation.js";
 import { appendAuditLog } from "../services/audit-log.js";
 import {
   archiveWorkspace,
@@ -86,6 +86,7 @@ import {
   type WorkspaceChatUIMessage,
 } from "@docslurp/shared/workspace-chat-ui";
 import { acceptApiKeys } from "../lib/route-auth.js";
+import { apiErrorResponse, apiStatusError } from "../lib/api-error.js";
 
 const optionalText = (max: number) => z.string().max(max).nullable().optional();
 
@@ -213,12 +214,12 @@ async function createWorkspaceAgentChatResponse(c: Context) {
   const userId = c.get("sessionUser").id;
   const workspaceId = c.req.param("workspaceId");
   if (!workspaceId) {
-    return c.json({ error: "Missing workspaceId" }, 400);
+    return apiStatusError(c, 400, "Missing workspaceId");
   }
 
   const body = await c.req.json<WorkspaceChatPostBody>();
   const scope = parseChatScope(body);
-  if (!scope) return c.json({ error: "Invalid retrieval or filters" }, 400);
+  if (!scope) return apiStatusError(c, 400, "Invalid retrieval or filters");
   const messages = Array.isArray(body.messages) ? body.messages : [];
   const lastUserMessage = [...messages]
     .reverse()
@@ -226,15 +227,15 @@ async function createWorkspaceAgentChatResponse(c: Context) {
   const query = lastUserMessage ? getMessageText(lastUserMessage).trim() : "";
 
   if (!query) {
-    return c.json({ error: "Missing query" }, 400);
+    return apiStatusError(c, 400, "Missing query");
   }
 
   const workspace = await getWorkspace(workspaceId, userId);
   if (!workspace) {
-    return c.json({ error: "Workspace not found" }, 404);
+    return apiErrorResponse(c, 404, "workspace_not_found", "Workspace not found");
   }
   const chatDisabled = await workspaceChatDisabledBody(workspace.id, userId);
-  if (chatDisabled) return c.json(chatDisabled, 403);
+  if (chatDisabled) return apiErrorResponse(c, 403, "chat_disabled", chatDisabled.error);
 
   return createUIMessageStreamResponse({
     headers: {
@@ -495,30 +496,19 @@ async function createWorkspaceAgentChatResponse(c: Context) {
   });
 }
 
-const workspaceValidationHook = (
-  result: { success: boolean; error?: ValidationErrorSource },
-  c: Context,
-) => {
-  if (result.success) {
-    return;
-  }
-
-  return c.json(
-    {
-      success: false,
-      error: {
-        issues: result.error?.issues ?? [],
-      },
-    },
-    400,
-  );
-};
+/** Failed workspace mutations: expected access errors keep their status, anything else is a 400. */
+function workspaceMutationError(c: Context, error: unknown): Response {
+  const message = reportPublicError(error);
+  const originalMessage = error instanceof Error ? error.message : "";
+  if (originalMessage === "Workspace not found") return apiErrorResponse(c, 404, "workspace_not_found", message);
+  return apiStatusError(c, originalMessage === "Forbidden" ? 403 : 400, message);
+}
 
 export const workspacesRoutes = new Hono()
   .route("/", chatVoiceRoutes)
   .post(
     "/invites/:token/accept",
-    zValidator("json", acceptWorkspaceInviteSchema),
+    zValidator("json", acceptWorkspaceInviteSchema, validationHook),
     async (c) => {
       try {
         const userId = c.get("sessionUser").id;
@@ -540,13 +530,7 @@ export const workspacesRoutes = new Hono()
         });
         return c.json(member);
       } catch (error) {
-        return c.json(
-          {
-            error:
-              reportPublicError(error),
-          },
-          400,
-        );
+        return apiStatusError(c, 400, reportPublicError(error));
       }
     },
   )
@@ -557,7 +541,7 @@ export const workspacesRoutes = new Hono()
     const userId = c.get("sessionUser").id;
     const actor = getRequestActor(c);
     if (actor.type === "apiKey" && !actorHasAnyApiKeyScope(actor, ["ingest", "search", "artifacts", "workspaces:manage"])) {
-      return c.json({ error: "Forbidden" }, 403);
+      return apiStatusError(c, 403, "Forbidden");
     }
     if (actor.type === "session") await ensurePersonalDefaultWorkspace(userId);
     const workspaces = await listWorkspaces(userId);
@@ -581,12 +565,7 @@ export const workspacesRoutes = new Hono()
       );
       return c.json(cockpit);
     } catch (error) {
-      return c.json(
-        {
-          error: reportPublicError(error),
-        },
-        404,
-      );
+      return apiStatusError(c, 404, reportPublicError(error));
     }
   })
   .get("/:workspaceId/traces", async (c) => {
@@ -600,12 +579,7 @@ export const workspacesRoutes = new Hono()
       );
       return c.json(traces);
     } catch (error) {
-      return c.json(
-        {
-          error: reportPublicError(error),
-        },
-        404,
-      );
+      return apiStatusError(c, 404, reportPublicError(error));
     }
   })
   .get("/:workspaceId/versions", async (c) => {
@@ -617,22 +591,17 @@ export const workspacesRoutes = new Hono()
       );
       return c.json({ versions });
     } catch (error) {
-      return c.json(
-        {
-          error: reportPublicError(error),
-        },
-        404,
-      );
+      return apiStatusError(c, 404, reportPublicError(error));
     }
   })
-  .get("/:workspaceId/state", zValidator("query", workspaceStateQuerySchema), async (c) => {
+  .get("/:workspaceId/state", zValidator("query", workspaceStateQuerySchema, validationHook), async (c) => {
     const actor = getRequestActor(c);
     if (actor.type === "apiKey" && (actor.apiKey.keyType !== "server" || !actorHasAnyApiKeyScope(actor, ["ingest", "search", "artifacts", "workspaces:manage"]))) {
-      return c.json({ error: "Forbidden" }, 403);
+      return apiStatusError(c, 403, "Forbidden");
     }
     const workspace = await getWorkspace(c.req.param("workspaceId"), actor.userId);
     if (!workspace || (actor.type === "apiKey" && !apiKeyCanUseWorkspace(actor.apiKey, workspace))) {
-      return c.json({ error: "Workspace not found" }, 404);
+      return apiErrorResponse(c, 404, "workspace_not_found", "Workspace not found");
     }
     return c.json(await getWorkspaceState({
       workspaceId: workspace.id,
@@ -640,14 +609,14 @@ export const workspacesRoutes = new Hono()
       recentWindowHours: c.req.valid("query").recentWindowHours,
     }));
   })
-  .get("/:workspaceId/ingest-report", zValidator("query", ingestReportQuerySchema, workspaceValidationHook), async (c) => {
+  .get("/:workspaceId/ingest-report", zValidator("query", ingestReportQuerySchema, validationHook), async (c) => {
     const actor = getRequestActor(c);
     if (actor.type === "apiKey" && (actor.apiKey.keyType !== "server" || !actorHasAnyApiKeyScope(actor, ["ingest", "search", "artifacts", "workspaces:manage"]))) {
-      return c.json({ error: "Forbidden" }, 403);
+      return apiStatusError(c, 403, "Forbidden");
     }
     const workspace = await getWorkspace(c.req.param("workspaceId"), actor.userId);
     if (!workspace || (actor.type === "apiKey" && !apiKeyCanUseWorkspace(actor.apiKey, workspace))) {
-      return c.json({ error: "Workspace not found" }, 404);
+      return apiErrorResponse(c, 404, "workspace_not_found", "Workspace not found");
     }
     const query = c.req.valid("query");
     const access = actor.type === "apiKey" ? null : await getWorkspaceAccess(workspace.id, actor.userId);
@@ -658,10 +627,10 @@ export const workspacesRoutes = new Hono()
       documentIds: query.documentIds ?? null,
     }));
   })
-  .post("/:workspaceId/ingest-report/apply", zValidator("json", applyIngestRecommendationSchema, workspaceValidationHook), async (c) => {
+  .post("/:workspaceId/ingest-report/apply", zValidator("json", applyIngestRecommendationSchema, validationHook), async (c) => {
     const userId = c.get("sessionUser").id;
     const workspace = await getWorkspace(c.req.param("workspaceId"), userId);
-    if (!workspace) return c.json({ error: "Workspace not found" }, 404);
+    if (!workspace) return apiErrorResponse(c, 404, "workspace_not_found", "Workspace not found");
     const body = c.req.valid("json");
     try {
       const result = await applyIngestRecommendation({ workspace, userId, recommendationId: body.recommendationId, runId: body.runId ?? null, documentIds: body.documentIds ?? null });
@@ -683,14 +652,14 @@ export const workspacesRoutes = new Hono()
       });
       return c.json({ recommendationId: body.recommendationId, patch: result.recommendation.patch, pipeline: result.pipeline });
     } catch (error) {
-      if (error instanceof IngestReportActionError) return c.json({ error: error.message }, error.status);
+      if (error instanceof IngestReportActionError) return apiStatusError(c, error.status, error.message);
       throw error;
     }
   })
-  .post("/:workspaceId/ingest-report/reprocess", zValidator("json", reprocessIngestRecommendationSchema, workspaceValidationHook), async (c) => {
+  .post("/:workspaceId/ingest-report/reprocess", zValidator("json", reprocessIngestRecommendationSchema, validationHook), async (c) => {
     const userId = c.get("sessionUser").id;
     const workspace = await getWorkspace(c.req.param("workspaceId"), userId);
-    if (!workspace) return c.json({ error: "Workspace not found" }, 404);
+    if (!workspace) return apiErrorResponse(c, 404, "workspace_not_found", "Workspace not found");
     const body = c.req.valid("json");
     try {
       const result = await reprocessIngestRecommendation({ workspace, userId, recommendationId: body.recommendationId, runId: body.runId ?? null, documentIds: body.documentIds ?? null });
@@ -713,7 +682,7 @@ export const workspacesRoutes = new Hono()
       });
       return c.json(result, 201);
     } catch (error) {
-      if (error instanceof IngestReportActionError) return c.json({ error: error.message }, error.status);
+      if (error instanceof IngestReportActionError) return apiStatusError(c, error.status, error.message);
       throw error;
     }
   })
@@ -721,12 +690,12 @@ export const workspacesRoutes = new Hono()
     const userId = c.get("sessionUser").id;
     const actor = getRequestActor(c);
     if (actor.type === "apiKey" && !actorHasAnyApiKeyScope(actor, ["ingest", "search", "artifacts", "workspaces:manage"])) {
-      return c.json({ error: "Forbidden" }, 403);
+      return apiStatusError(c, 403, "Forbidden");
     }
     const workspace = await getWorkspace(c.req.param("workspaceId"), userId);
 
     if (!workspace || (actor.type === "apiKey" && !apiKeyCanUseWorkspace(actor.apiKey, workspace))) {
-      return c.json({ error: "Workspace not found" }, 404);
+      return apiErrorResponse(c, 404, "workspace_not_found", "Workspace not found");
     }
 
     return c.json(workspace);
@@ -739,7 +708,7 @@ export const workspacesRoutes = new Hono()
     );
 
     if (!settings) {
-      return c.json({ error: "Workspace not found" }, 404);
+      return apiErrorResponse(c, 404, "workspace_not_found", "Workspace not found");
     }
 
     return c.json(settings);
@@ -748,12 +717,12 @@ export const workspacesRoutes = new Hono()
     const query = c.req.query("q");
     const userId = c.get("sessionUser").id;
     if (!query) {
-      return c.json({ error: "Missing q" }, 400);
+      return apiStatusError(c, 400, "Missing q");
     }
 
     const workspace = await getWorkspace(c.req.param("workspaceId"), userId);
     if (!workspace) {
-      return c.json({ error: "Workspace not found" }, 404);
+      return apiErrorResponse(c, 404, "workspace_not_found", "Workspace not found");
     }
 
     const runId = c.req.query("runId");
@@ -765,7 +734,7 @@ export const workspacesRoutes = new Hono()
     try {
       flags = parseRetrievalQueryFlags((name) => c.req.query(name));
     } catch (error) {
-      if (error instanceof InvalidRetrievalQueryError) return c.json({ error: error.message }, 400);
+      if (error instanceof InvalidRetrievalQueryError) return apiStatusError(c, 400, error.message);
       throw error;
     }
     const rootSessionId = c.req.query("sessionId") ?? randomUUID();
@@ -863,20 +832,20 @@ export const workspacesRoutes = new Hono()
   .post("/:workspaceId/chat/:agentId", async (c) => {
     const agentId = c.req.param("agentId");
     if (!agentId || !isWorkspaceChatAgent(agentId)) {
-      return c.json({ error: "Agent not found" }, 404);
+      return apiStatusError(c, 404, "Agent not found");
     }
 
     return createWorkspaceAgentChatResponse(c);
   })
   .put(
     "/:workspaceId/chat/feedback",
-    zValidator("json", chatFeedbackSchema, workspaceValidationHook),
+    zValidator("json", chatFeedbackSchema, validationHook),
     async (c) => {
       const userId = c.get("sessionUser").id;
       const workspaceId = c.req.param("workspaceId");
       const workspace = await getWorkspace(workspaceId, userId);
       if (!workspace) {
-        return c.json({ error: "Workspace not found" }, 404);
+        return apiErrorResponse(c, 404, "workspace_not_found", "Workspace not found");
       }
 
       const feedback = await upsertChatFeedback({ ...c.req.valid("json"), workspaceId, userId });
@@ -888,7 +857,7 @@ export const workspacesRoutes = new Hono()
     const workspaceId = c.req.param("workspaceId");
     const workspace = await getWorkspace(workspaceId, userId);
     if (!workspace) {
-      return c.json({ error: "Workspace not found" }, 404);
+      return apiErrorResponse(c, 404, "workspace_not_found", "Workspace not found");
     }
 
     await deleteChatFeedback({ workspaceId, userId, messageId: c.req.param("messageId") });
@@ -903,12 +872,7 @@ export const workspacesRoutes = new Hono()
       );
       return c.json({ members });
     } catch (error) {
-      return c.json(
-        {
-          error: reportPublicError(error),
-        },
-        404,
-      );
+      return apiStatusError(c, 404, reportPublicError(error));
     }
   })
   .get("/:workspaceId/invites", async (c) => {
@@ -920,15 +884,10 @@ export const workspacesRoutes = new Hono()
       );
       return c.json({ invites });
     } catch (error) {
-      return c.json(
-        {
-          error: reportPublicError(error),
-        },
-        404,
-      );
+      return apiStatusError(c, 404, reportPublicError(error));
     }
   })
-  .post("/", zValidator("json", createWorkspaceSchema, workspaceValidationHook), async (c) => {
+  .post("/", zValidator("json", createWorkspaceSchema, validationHook), async (c) => {
     const userId = c.get("sessionUser").id;
     const input = { ...c.req.valid("json"), userId };
     const workspace = await createWorkspace(input);
@@ -950,14 +909,14 @@ export const workspacesRoutes = new Hono()
   })
   .post(
     "/:workspaceId/clone",
-    zValidator("json", cloneWorkspaceSchema),
+    zValidator("json", cloneWorkspaceSchema, validationHook),
     async (c) => {
       try {
         const userId = c.get("sessionUser").id;
         const input = c.req.valid("json");
         const source = await getWorkspace(c.req.param("workspaceId"), userId);
         if (!source) {
-          return c.json({ error: "Workspace not found" }, 404);
+          return apiErrorResponse(c, 404, "workspace_not_found", "Workspace not found");
         }
 
         const workspace = await cloneWorkspace(
@@ -982,19 +941,13 @@ export const workspacesRoutes = new Hono()
         });
         return c.json(workspace, 201);
       } catch (error) {
-        return c.json(
-          {
-            error:
-              reportPublicError(error),
-          },
-          400,
-        );
+        return apiStatusError(c, 400, reportPublicError(error));
       }
     },
   )
   .post(
     "/:workspaceId/archive",
-    zValidator("json", workspaceConfirmationSchema),
+    zValidator("json", workspaceConfirmationSchema, validationHook),
     async (c) => {
       try {
         const userId = c.get("sessionUser").id;
@@ -1021,21 +974,13 @@ export const workspacesRoutes = new Hono()
 
         return c.json(workspace);
       } catch (error) {
-        const message = reportPublicError(error);
-        const originalMessage = error instanceof Error ? error.message : "";
-        const status =
-          originalMessage === "Workspace not found"
-            ? 404
-            : originalMessage === "Forbidden"
-              ? 403
-              : 400;
-        return c.json({ error: message }, status);
+        return workspaceMutationError(c, error);
       }
     },
   )
   .post(
     "/:workspaceId/restore",
-    zValidator("json", workspaceConfirmationSchema),
+    zValidator("json", workspaceConfirmationSchema, validationHook),
     async (c) => {
       try {
         const userId = c.get("sessionUser").id;
@@ -1061,21 +1006,13 @@ export const workspacesRoutes = new Hono()
 
         return c.json(workspace);
       } catch (error) {
-        const message = reportPublicError(error);
-        const originalMessage = error instanceof Error ? error.message : "";
-        const status =
-          originalMessage === "Workspace not found"
-            ? 404
-            : originalMessage === "Forbidden"
-              ? 403
-              : 400;
-        return c.json({ error: message }, status);
+        return workspaceMutationError(c, error);
       }
     },
   )
   .post(
     "/:workspaceId/invites",
-    zValidator("json", createWorkspaceInviteSchema),
+    zValidator("json", createWorkspaceInviteSchema, validationHook),
     async (c) => {
       try {
         const userId = c.get("sessionUser").id;
@@ -1100,13 +1037,7 @@ export const workspacesRoutes = new Hono()
         });
         return c.json(invite, 201);
       } catch (error) {
-        return c.json(
-          {
-            error:
-              reportPublicError(error),
-          },
-          400,
-        );
+        return apiStatusError(c, 400, reportPublicError(error));
       }
     },
   )
@@ -1136,18 +1067,12 @@ export const workspacesRoutes = new Hono()
       });
       return c.json(invite);
     } catch (error) {
-      return c.json(
-        {
-          error:
-            reportPublicError(error),
-        },
-        400,
-      );
+      return apiStatusError(c, 400, reportPublicError(error));
     }
   })
   .patch(
     "/:workspaceId/members/:memberUserId",
-    zValidator("json", updateWorkspaceMemberSchema),
+    zValidator("json", updateWorkspaceMemberSchema, validationHook),
     async (c) => {
       try {
         const userId = c.get("sessionUser").id;
@@ -1172,13 +1097,7 @@ export const workspacesRoutes = new Hono()
         });
         return c.json(member);
       } catch (error) {
-        return c.json(
-          {
-            error:
-              reportPublicError(error),
-          },
-          400,
-        );
+        return apiStatusError(c, 400, reportPublicError(error));
       }
     },
   )
@@ -1192,7 +1111,7 @@ export const workspacesRoutes = new Hono()
       });
 
       if (!removed) {
-        return c.json({ error: "Workspace membership not found" }, 404);
+        return apiStatusError(c, 404, "Workspace membership not found");
       }
 
       await appendAuditLog({
@@ -1209,13 +1128,7 @@ export const workspacesRoutes = new Hono()
       });
       return c.json({ ok: true });
     } catch (error) {
-      return c.json(
-        {
-          error:
-            reportPublicError(error),
-        },
-        400,
-      );
+      return apiStatusError(c, 400, reportPublicError(error));
     }
   })
   .post("/:workspaceId/chat", async (c) => {
@@ -1228,18 +1141,18 @@ export const workspacesRoutes = new Hono()
       filters?: unknown;
     }>();
     if (!body.q) {
-      return c.json({ error: "Missing q" }, 400);
+      return apiStatusError(c, 400, "Missing q");
     }
     const scope = parseChatScope(body);
-    if (!scope) return c.json({ error: "Invalid retrieval or filters" }, 400);
+    if (!scope) return apiStatusError(c, 400, "Invalid retrieval or filters");
 
     const userId = c.get("sessionUser").id;
     const workspace = await getWorkspace(c.req.param("workspaceId"), userId);
     if (!workspace) {
-      return c.json({ error: "Workspace not found" }, 404);
+      return apiErrorResponse(c, 404, "workspace_not_found", "Workspace not found");
     }
     const chatDisabled = await workspaceChatDisabledBody(workspace.id, userId);
-    if (chatDisabled) return c.json(chatDisabled, 403);
+    if (chatDisabled) return apiErrorResponse(c, 403, "chat_disabled", chatDisabled.error);
 
     const response = await chatWorkspace({
       workspaceId: c.req.param("workspaceId"),
@@ -1279,7 +1192,7 @@ export const workspacesRoutes = new Hono()
   })
   .post(
     "/:workspaceId/versions/:versionId/rollback",
-    zValidator("json", rollbackWorkspaceVersionSchema),
+    zValidator("json", rollbackWorkspaceVersionSchema, validationHook),
     async (c) => {
       const userId = c.get("sessionUser").id;
       const input = c.req.valid("json");
@@ -1310,19 +1223,13 @@ export const workspacesRoutes = new Hono()
 
         return c.json(workspace);
       } catch (error) {
-        return c.json(
-          {
-            error:
-              reportPublicError(error),
-          },
-          400,
-        );
+        return apiStatusError(c, 400, reportPublicError(error));
       }
     },
   )
   .patch(
     "/:workspaceId/search-settings",
-    zValidator("json", updateWorkspaceSearchSettingsSchema),
+    zValidator("json", updateWorkspaceSearchSettingsSchema, validationHook),
     async (c) => {
       const workspaceId = String(c.req.param("workspaceId"));
       const userId = c.get("sessionUser").id;
@@ -1333,7 +1240,7 @@ export const workspacesRoutes = new Hono()
       });
 
       if (!settings) {
-        return c.json({ error: "Workspace not found" }, 404);
+        return apiErrorResponse(c, 404, "workspace_not_found", "Workspace not found");
       }
 
       await appendAuditLog({
@@ -1355,7 +1262,7 @@ export const workspacesRoutes = new Hono()
   )
   .patch(
     "/:workspaceId",
-    zValidator("json", updateWorkspaceSchema, workspaceValidationHook),
+    zValidator("json", updateWorkspaceSchema, validationHook),
     async (c) => {
       const workspaceId = String(c.req.param("workspaceId"));
       const userId = c.get("sessionUser").id;
@@ -1364,23 +1271,23 @@ export const workspacesRoutes = new Hono()
         // Opt-in server-key scope, bound to the key's organization; the key
         // owner's workspace role still decides what may change.
         if (actor.apiKey.keyType !== "server" || !actorHasAnyApiKeyScope(actor, ["workspaces:manage"])) {
-          return c.json({ error: "This endpoint requires a server API key with the workspaces:manage scope" }, 403);
+          return apiStatusError(c, 403, "This endpoint requires a server API key with the workspaces:manage scope");
         }
         const current = await getWorkspace(workspaceId, userId);
         if (!current || !apiKeyCanUseWorkspace(actor.apiKey, current)) {
-          return c.json({ error: "Workspace not found" }, 404);
+          return apiErrorResponse(c, 404, "workspace_not_found", "Workspace not found");
         }
       }
       let workspace;
       try {
         workspace = await updateWorkspace(workspaceId, userId, c.req.valid("json"));
       } catch (error) {
-        if (error instanceof WorkspaceSlugError) return c.json({ error: error.message }, error.status);
+        if (error instanceof WorkspaceSlugError) return apiStatusError(c, error.status, error.message);
         throw error;
       }
 
       if (!workspace) {
-        return c.json({ error: "Workspace not found" }, 404);
+        return apiErrorResponse(c, 404, "workspace_not_found", "Workspace not found");
       }
 
       await appendAuditLog({
@@ -1403,7 +1310,7 @@ export const workspacesRoutes = new Hono()
   )
   .delete(
     "/:workspaceId",
-    zValidator("json", workspaceConfirmationSchema),
+    zValidator("json", workspaceConfirmationSchema, validationHook),
     async (c) => {
       try {
         const userId = c.get("sessionUser").id;
@@ -1434,15 +1341,7 @@ export const workspacesRoutes = new Hono()
           workspaceName: deleted.name,
         });
       } catch (error) {
-        const message = reportPublicError(error);
-        const originalMessage = error instanceof Error ? error.message : "";
-        const status =
-          originalMessage === "Workspace not found"
-            ? 404
-            : originalMessage === "Forbidden"
-              ? 403
-              : 400;
-        return c.json({ error: message }, status);
+        return workspaceMutationError(c, error);
       }
     },
   );

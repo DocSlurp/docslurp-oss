@@ -2,7 +2,7 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { SpanStatusCode } from "@opentelemetry/api";
 import { performance } from "node:perf_hooks";
-import { initializeObservability, observationTelemetry, mapsObservationAiUsage } from "./telemetry.js";
+import { initializeObservability, observationTelemetry, mapsObservationAiUsage, withDependencyScope } from "./telemetry.js";
 export { initializeObservability, flushObservability, shutdownObservability, installObservabilitySignalHandlers, emitTelemetryLog, exportsOtlpLogs, withHttpSpan, recordMediaTelemetry } from "./telemetry.js";
 import {
   LangfuseOtelSpanAttributes,
@@ -78,6 +78,8 @@ function safeUpdate(
       observation.otelSpan?.setStatus?.({ code: SpanStatusCode.ERROR });
       observation.otelSpan?.setAttribute("error.type", "Error");
     }
+    const provider = attributes.metadata?.provider;
+    if (typeof provider === "string") observation.otelSpan?.setAttribute("gen_ai.provider.name", provider);
     if (attributes.model) observation.otelSpan?.setAttribute("gen_ai.request.model", attributes.model);
     if (mapsObservationAiUsage()) for (const [source, target] of [["input", "gen_ai.usage.input_tokens"], ["output", "gen_ai.usage.output_tokens"]] as const) {
       const value = (attributes.usageDetails as Record<string, unknown> | undefined)?.[source];
@@ -121,11 +123,11 @@ export async function withObservation<T>(
       } catch { /* Best effort metadata. */ }
       try {
         invoked = true;
-        const result = await run();
+        const result = await withDependencyScope(metadata, run);
         savedOutcome = { ok: true, value: result };
         try {
           const details = options.result?.(result) ?? {};
-          // The exporter maps only allowlisted correlation fields. Include IDs that
+          // Include correlation IDs that
           // become available after a provider responds, as well as initial scope.
           Object.assign(metadata, details.metadata ?? {});
           safeUpdate(observation, {
@@ -214,3 +216,9 @@ export function aiResultDetails(result: {
   );
   return { output: result.text, usageDetails };
 }
+
+export { instrumentPostgres } from "./dependency-postgres.js";
+export { startDependencySpan, withDependencySpan } from "./telemetry.js";
+export { instrumentFetch } from "./dependency-fetch.js";
+export { instrumentS3Client } from "./dependency-s3.js";
+export { recordUsageReceipt, usageTraceContext } from "./dependency-usage.js";

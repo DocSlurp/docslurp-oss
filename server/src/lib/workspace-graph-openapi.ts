@@ -7,6 +7,7 @@ import {
 } from "@docslurp/shared";
 
 import { workspaceRefHeaders, workspaceRefParameter } from "./state-management-openapi.js";
+import { apiErrorOpenApiResponse } from "./api-error-openapi.js";
 
 const ref = (name: string) => ({ $ref: `#/components/schemas/${name}` });
 const json = (schema: object) => ({ "application/json": { schema } });
@@ -17,9 +18,9 @@ const jobIdParameter = { in: "path", name: "jobId", required: true, schema: { ty
 const readAccess = "Session workspace access, or an organization-bound key with any of ingest, search, artifacts, workspaces:manage.";
 const writeAccess = "Session with edit access, or a server key with the opt-in workspaces:manage scope (the key owner's workspace role still applies).";
 const errors = {
-  "401": { description: "Authentication required" },
-  "403": { description: "Missing scope or workspace edit access" },
-  "404": { description: "Workspace or job not found" },
+  "401": apiErrorOpenApiResponse("Authentication required"),
+  "403": apiErrorOpenApiResponse("Missing scope or workspace edit access"),
+  "404": apiErrorOpenApiResponse("Workspace or job not found"),
 };
 
 export const workspaceGraphSchemas = {
@@ -48,7 +49,7 @@ export const workspaceGraphPaths = {
       requestBody: { required: true, content: json(ref("UpdateWorkspaceGraph")) },
       responses: {
         "200": { description: "Updated graph status", headers: workspaceRefHeaders, content: json(ref("WorkspaceGraphStatus")) },
-        "400": { description: "Invalid fields, or the graph needs embeddings enabled" },
+        "400": apiErrorOpenApiResponse("Invalid fields, or the graph needs embeddings enabled"),
         ...errors,
       },
     },
@@ -63,7 +64,7 @@ export const workspaceGraphPaths = {
       requestBody: { required: true, content: json(ref("StartGraphRebuild")) },
       responses: {
         "202": { description: "Queued job with its estimate", content: json(ref("GraphJob")) },
-        "409": { description: "Graph disabled, nothing to rebuild, or a job is already active (returned as activeJob)" },
+        "409": apiErrorOpenApiResponse("Graph disabled, nothing to rebuild, or a job is already active (returned as activeJob)"),
         ...errors,
       },
     },

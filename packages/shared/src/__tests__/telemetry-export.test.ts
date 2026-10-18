@@ -62,6 +62,10 @@ it("exports three real protobuf signals, preserves trace correlation and exclude
         expect(bytes.includes(Buffer.from("docslurp.media.frames"))).toBe(true);
         expect(bytes.includes(Buffer.from("docslurp.media.input_tokens"))).toBe(true);
       }
+      if (path === "/v1/traces") {
+        for (const attribute of ["postgres.SELECT", "synthetic-db.example", "synthetic-usage-event", "docslurp.usage.provider_cost_usd"])
+          expect(bytes.includes(Buffer.from(attribute))).toBe(true);
+      }
       if (path === "/v1/logs") {
         // Stable event name (field and attribute) plus a readable body and per-stage line.
         expect(bytes.includes(Buffer.from("docslurp.api.request_completed"))).toBe(true);

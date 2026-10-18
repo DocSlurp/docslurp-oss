@@ -186,7 +186,7 @@ export function ChatEmbed({
     setError(null);
     setAnswer(null);
     try {
-      const res = await fetch(`${apiUrl.replace(/\/$/, "")}/v1/search/chat`, {
+      const res = await fetch(`${apiUrl.replace(/\/$/, "")}/v1/chat`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",

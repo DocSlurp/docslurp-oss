@@ -9,6 +9,7 @@ import { getRequestActor } from "../lib/request-actor.js";
 import { notifySignup } from "../lib/signup-notifications.js";
 import { getInvitePreview, listOrganizations } from "../services/organizations.js";
 import { listWorkspaces } from "../services/workspaces.js";
+import { apiStatusError } from "../lib/api-error.js";
 
 /**
  * Endpoints the dashboard (a separate process in hosting mode b) reads over HTTP
@@ -20,7 +21,7 @@ import { listWorkspaces } from "../services/workspaces.js";
 /** GET /dashboard/bootstrap: the signed-in user's admin flag, organizations and accessible workspaces. */
 export const dashboardRoutes = new Hono().get("/", async (c) => {
   const actor = getRequestActor(c);
-  if (actor.type !== "session") return c.json({ error: "Forbidden" }, 403);
+  if (actor.type !== "session") return apiStatusError(c, 403, "Forbidden");
   c.header("Cache-Control", "private, no-store");
   const isAdmin = actor.user.isAdmin === true;
   const [organizations, workspaces] = await Promise.all([listOrganizations(actor.userId), listWorkspaces(actor.userId, { refineNames: false })]);
@@ -30,10 +31,10 @@ export const dashboardRoutes = new Hono().get("/", async (c) => {
 /** GET /v1/invites/:token?kind=organization|workspace: what the accept page offers. The token is the credential. */
 export const inviteRoutes = new Hono().get("/:token", async (c) => {
   const actor = getRequestActor(c);
-  if (actor.type !== "session") return c.json({ error: "Forbidden" }, 403);
+  if (actor.type !== "session") return apiStatusError(c, 403, "Forbidden");
   const kind = c.req.query("kind") === "organization" ? "organization" : "workspace";
   const preview = await getInvitePreview(c.req.param("token"), kind);
-  return preview ? c.json(preview) : c.json({ error: "Invite not found" }, 404);
+  return preview ? c.json(preview) : apiStatusError(c, 404, "Invite not found");
 });
 
 /** GET /meta/mcp-origin: the canonical public MCP origin. Public configuration, no auth. */
@@ -59,10 +60,10 @@ export const waitlistRoutes = new Hono().post("/", async (c) => {
   try {
     body = await c.req.json();
   } catch {
-    return c.json({ error: "Invalid JSON" }, 400);
+    return apiStatusError(c, 400, "Invalid JSON");
   }
   const email = typeof body.email === "string" ? body.email.trim().toLowerCase() : "";
-  if (!email || !email.includes("@") || email.length > 320) return c.json({ error: "Valid email is required" }, 400);
+  if (!email || !email.includes("@") || email.length > 320) return apiStatusError(c, 400, "Valid email is required");
   const name = typeof body.name === "string" ? body.name.trim().slice(0, 200) || null : null;
   const useCase = typeof body.use_case === "string" ? body.use_case.trim().slice(0, 1000) || null : null;
   const inserted = await sql`

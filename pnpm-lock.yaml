@@ -172,6 +172,9 @@ importers:
       '@opentelemetry/sdk-trace-node':
         specifier: ^2.12.0
         version: 2.12.0(@opentelemetry/api@1.9.1)
+      '@smithy/types':
+        specifier: 4.19.0
+        version: 4.19.0
       zod:
         specifier: ^4.6.7
         version: 4.6.7
@@ -345,6 +348,9 @@ importers:
       '@llamaindex/liteparse':
         specifier: 2.15.1
         version: 2.15.1
+      '@streamparser/json':
+        specifier: 0.0.26
+        version: 0.0.26
       '@temporalio/activity':
         specifier: ^1.24.0
         version: 1.24.0
@@ -2273,6 +2279,9 @@ packages:
 
   '@standard-schema/spec@1.1.0':
     resolution: {integrity: sha512-l2aFy5jALhniG5HgqrD6jXLi/rUWrKvqN/qJx6yoJsgKhblVd+iqqU4RCXavm/jPityDo5TCvKMnpjKnOriy0w==}
+
+  '@streamparser/json@0.0.26':
+    resolution: {integrity: sha512-46597LNFI+MFdUnzX2QJWwmdTRdq0XVD+vVNJTtGVzIrnCuhG9pFo1OAzbNBqci8UJgk/X5KJZ6LcV+y7PTuDQ==}
 
   '@swc/core-darwin-arm64@1.16.18':
     resolution: {integrity: sha512-ozgiCHyFDCwfXzTnaLR+i8WxEyt06GTudn9rPh08vj+u3Z8vMvt5Pi8T+BikyNXm7y++h6UMdqsnJuWrV+tk2A==}
@@ -7117,6 +7126,8 @@ snapshots:
       zod: 4.6.7
 
   '@standard-schema/spec@1.1.0': {}
+
+  '@streamparser/json@0.0.26': {}
 
   '@swc/core-darwin-arm64@1.16.18':
     optional: true
