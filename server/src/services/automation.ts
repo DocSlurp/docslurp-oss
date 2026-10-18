@@ -32,6 +32,7 @@ import {
 } from "../lib/ai.js";
 import { recordCostEvent, recordUsageEvent, type UsageScope } from "../lib/ai-usage.js";
 import { assertCanSpend } from "./billing/spend-guard.js";
+import { aiAdvancedToolSchema, aiSimpleToolSchema, toolInputJsonSchema } from "./mcp-tool-schemas.js";
 import type { ValidatedKey } from "./api-keys.js";
 import { generateGroundedSummary } from "./grounded-summaries.js";
 import { remoteUrlIntakeItems } from "./remote-ingest.js";
@@ -1487,7 +1488,7 @@ export function getAutomationCapabilityManifest(
       id: env.mcpServerId,
       title: "DocSlurp MCP",
       version: "0.1.0",
-      transports: ["http", "sse", "stdio"],
+      transports: ["streamable-http", "stdio"],
       auth: {
         type: "apiKey",
         scopes: ["search", "ingest", "artifacts"],
@@ -1501,13 +1502,7 @@ export function getAutomationCapabilityManifest(
           "Safest default workflow: optional ingest, wait-for-index, retrieval, answer, and citations.",
         category: "tool",
         endpoint: `${baseUrl}/v1/mcp/tools/ai.simple`,
-        inputSchema: {
-          type: "object",
-          properties: {
-            workspaceId: { type: "string" },
-            goal: { type: "string" },
-          },
-        },
+        inputSchema: toolInputJsonSchema(aiSimpleToolSchema),
         outputSchema: {
           type: "object",
           properties: { operation: { type: "object" } },
@@ -1525,6 +1520,7 @@ export function getAutomationCapabilityManifest(
           billableMetrics: ["ai-preflight", "ai-operation"],
         },
         featureGates: ["automation", "citations"],
+        annotations: { readOnly: false, destructive: false, idempotent: false, openWorld: true },
       },
       {
         id: "ai.advanced",
@@ -1533,14 +1529,7 @@ export function getAutomationCapabilityManifest(
           "Full retrieval and output controls for deterministic agent workflows.",
         category: "tool",
         endpoint: `${baseUrl}/v1/mcp/tools/ai.advanced`,
-        inputSchema: {
-          type: "object",
-          properties: {
-            workspaceId: { type: "string" },
-            goal: { type: "string" },
-            outputFormat: { type: "string" },
-          },
-        },
+        inputSchema: toolInputJsonSchema(aiAdvancedToolSchema),
         outputSchema: {
           type: "object",
           properties: { operation: { type: "object" } },
@@ -1558,6 +1547,7 @@ export function getAutomationCapabilityManifest(
           billableMetrics: ["ai-preflight", "ai-operation"],
         },
         featureGates: ["automation", "structured-output", "grounded-summary"],
+        annotations: { readOnly: false, destructive: false, idempotent: false, openWorld: true },
       },
       {
         id: "workspace.aggregate-rag-search",
@@ -1604,29 +1594,7 @@ export function getAutomationCapabilityManifest(
           billableMetrics: ["embed-query", "aggregate-rag-answer"],
         },
         featureGates: ["automation", "citations", "aggregate-rag"],
-      },
-      {
-        id: "ai.operation.get",
-        title: "Get Automation Operation",
-        description:
-          "Read the latest durable operation snapshot and contract-first result envelope.",
-        category: "resource",
-        endpoint: `${baseUrl}/v1/ai/operations/{id}`,
-        inputSchema: { type: "object", properties: { id: { type: "string" } } },
-        outputSchema: {
-          type: "object",
-          properties: { operation: { type: "object" } },
-        },
-        streaming: true,
-        auth: {
-          type: "apiKey",
-          scopes: ["search"],
-          workspaceScoped: true,
-          orgScoped: true,
-        },
-        idempotent: true,
-        costHints: { baselineCostCents: 0, billableMetrics: [] },
-        featureGates: ["automation"],
+        annotations: { readOnly: true, destructive: false, idempotent: true, openWorld: false },
       },
     ],
     resources: [
@@ -1652,6 +1620,7 @@ export function getAutomationCapabilityManifest(
         idempotent: true,
         costHints: { baselineCostCents: 0, billableMetrics: [] },
         featureGates: ["automation"],
+        annotations: { readOnly: true, destructive: false, idempotent: true, openWorld: false },
       },
     ],
     prompts: [
@@ -1680,6 +1649,7 @@ export function getAutomationCapabilityManifest(
         idempotent: true,
         costHints: { baselineCostCents: 0, billableMetrics: [] },
         featureGates: ["automation"],
+        annotations: { readOnly: true, destructive: false, idempotent: true, openWorld: false },
       },
     ],
   });

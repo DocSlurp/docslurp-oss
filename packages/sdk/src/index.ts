@@ -274,6 +274,8 @@ export type ChatInput = {
   q: string;
   sessionId?: string;
   workspaceId?: string;
+  /** Override the workspace's configured chat model for this request. */
+  model?: string;
 };
 
 export type ChatResponse = {
@@ -286,6 +288,28 @@ export type ChatResponse = {
   availability: SearchAvailability | null;
   usage: { inputTokens: number; outputTokens: number; totalTokens: number; costCents?: number; costSource?: string };
   runtime: { startedAt: string; completedAt: string; totalMs: number };
+};
+
+/** SSE events from {@link DocSlurpClient.chatStream}: retrieval status, the answer, then the done envelope. */
+export type ChatStreamEvent =
+  | { event: "status"; data: { stage: string; message: string } }
+  | { event: "message"; data: ChatResponse }
+  | { event: "done"; data: { id: string; sessionId: string; searchSessionId: string | null } };
+
+export type ListDocumentsInput = {
+  workspaceId?: string;
+  runId?: string;
+  /** Comma-separated tags. */
+  tags?: string;
+};
+
+/** Result of {@link DocSlurpClient.deleteDocument}: the identities of the removed document. */
+export type DeletedDocument = JsonObject & {
+  documentId: string;
+  filename: string;
+  workspaceId?: string | null;
+  runId?: string | null;
+  sourceKey?: string;
 };
 
 export type RequestOptions = {
@@ -976,6 +1000,11 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
     streamActivity,
     waitForRun,
 
+    /** The caller's recent runs, newest first. */
+    async listRuns(options?: RequestOptions): Promise<WorkspaceRun[]> {
+      return (await request<{ runs: WorkspaceRun[] }>("/v1/runs", {}, options, true)).runs;
+    },
+
     getWorkspaceState(id: string | undefined = workspaceId, options: WorkspaceStateOptions = {}): Promise<WorkspaceState> {
       if (!id?.trim()) throw new Error("Set DOCSLURP_WORKSPACE_ID or pass workspaceId for workspace state.");
       const hours = options.recentWindowHours ?? 24;
@@ -1054,8 +1083,47 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
       }, requestOptions);
     },
 
+    /**
+     * Streamed grounded answer, as a streaming companion to chat(). Yields a
+     * retrieval `status`, the `message` (a full ChatResponse) and a final `done`
+     * envelope. Throws if the stream ends before `done`, so a truncated answer
+     * is never mistaken for success. This targets the legacy SSE endpoint; for
+     * the canonical stream use POST /v1/chat/completions with stream: true.
+     */
+    async *chatStream(input: ChatInput, requestOptions: RequestOptions = {}): AsyncGenerator<ChatStreamEvent> {
+      const target = inWorkspace(input);
+      const params = new URLSearchParams({ q: target.q, workspaceId: target.workspaceId ?? workspaceId });
+      if (target.sessionId) params.set("sessionId", target.sessionId);
+      if (target.model) params.set("model", target.model);
+      let completed = false;
+      for await (const frame of streamEventsAt(`/v1/search/chat/stream?${params.toString()}`, requestOptions)) {
+        if (frame.event === "status" || frame.event === "message" || frame.event === "done") {
+          if (frame.event === "done") completed = true;
+          yield { event: frame.event, data: frame.data } as ChatStreamEvent;
+        }
+      }
+      if (!completed) throw new Error("DocSlurp chat stream ended before completion");
+    },
+
     getDocument(documentId: string, requestOptions?: RequestOptions): Promise<DocumentViewerPayload> {
       return request<DocumentViewerPayload>(`/v1/documents/${encodeURIComponent(documentId)}`, {}, requestOptions, true);
+    },
+
+    /** Documents in a workspace (the client default unless one is passed), newest first. */
+    async listDocuments(input: ListDocumentsInput = {}, requestOptions?: RequestOptions): Promise<DocumentRecord[]> {
+      const params = new URLSearchParams({ workspaceId: input.workspaceId?.trim() || workspaceId });
+      if (input.runId) params.set("runId", input.runId);
+      if (input.tags) params.set("tags", input.tags);
+      return (await request<{ documents: DocumentRecord[] }>(`/v1/documents?${params.toString()}`, {}, requestOptions, true)).documents;
+    },
+
+    /**
+     * Delete a document and return the identities of the removed record.
+     * Requires a signed-in session: documents accept API-key authentication for
+     * reads only, so key-authenticated calls to this method receive 403.
+     */
+    deleteDocument(documentId: string, requestOptions?: RequestOptions): Promise<DeletedDocument> {
+      return request<DeletedDocument>(`/v1/documents/${encodeURIComponent(documentId)}`, { method: "DELETE" }, requestOptions);
     },
 
     uploadUrls,

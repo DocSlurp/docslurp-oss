@@ -2,11 +2,7 @@ import { publicErrorMiddleware } from "../lib/public-errors.js";
 import { Hono } from "hono";
 import { z } from "zod";
 
-import {
-  aggregateWorkspaceRagSearchRequestSchema,
-  aiAdvancedRequestSchema,
-  aiSimpleRequestSchema,
-} from "@docslurp/shared";
+import { aggregateWorkspaceRagSearchRequestSchema } from "@docslurp/shared";
 
 import {
   apiKeyHasAnyScope,
@@ -15,6 +11,8 @@ import { getApiKey, getRequestActor, loadActorScopedWorkspace, resolveActorWorks
 import { listWorkspaces } from "./workspaces.js";
 import { apiKeyCanUseWorkspace } from "../lib/api-key-workspace-scope.js";
 import { listWorkspacesInput, uploadInput, completeUploadInput, productToolAliases, productToolDefinitions } from "./mcp-product-tools.js";
+import { aiAdvancedToolSchema, aiSimpleToolSchema, toolInputJsonSchema } from "./mcp-tool-schemas.js";
+import { batchSearchInputSchema, searchInputSchema, workspaceChatInputSchema } from "../lib/search-input.js";
 import { mcpOrigin } from "../lib/mcp-origin.js";
 import { searchRoutes } from "../routes/search.js";
 import { sql } from "../db.js";
@@ -29,32 +27,8 @@ import {
   submitSimpleAutomation
 } from "../services/automation.js";
 
-const WORKSPACE_REF_DESCRIPTION = 'Optional workspace slug (e.g. "legal-contracts"), former slug, or UUID. Omit or pass "default" for the organization default workspace.';
-// Tool inputs are the request schemas without identity. Cost approval is never
-// a tool argument (the request schemas have none, and unknown keys are
-// stripped): every surface built from mcpManifest (remote MCP, WebMCP, chat,
-// CLI stdio) inherits that from here.
-const aiSimpleToolSchema = aiSimpleRequestSchema.omit({ userId: true }).extend({
-  workspaceId: z.string().min(1).max(256).optional().describe(WORKSPACE_REF_DESCRIPTION),
-});
-const aiAdvancedToolSchema = aiAdvancedRequestSchema.omit({ userId: true }).extend({
-  workspaceId: z.string().min(1).max(256).optional().describe(WORKSPACE_REF_DESCRIPTION),
-});
 const operationInputSchema = z.object({ operationId: z.string().uuid() });
 
-const queryInputSchema = {
-  type: "object",
-  properties: {
-    workspaceId: { type: "string", minLength: 1, maxLength: 256, description: WORKSPACE_REF_DESCRIPTION },
-    q: { type: "string", minLength: 1, maxLength: 16_000 },
-    limit: { type: "integer", minimum: 1, maximum: 100 },
-    minScore: { type: "number", minimum: 0, maximum: 1, description: "Relevance floor: drop weaker matches (0 disables). The response reports noMatch when nothing relevant remains." },
-    documentId: { type: "string", minLength: 1, maxLength: 256 },
-    filenameContains: { type: "string" },
-    tags: { type: "string", description: "Comma-separated tags." },
-  },
-  required: ["q"],
-};
 const workspaceIngestReportSchema = z.object({
   workspaceId: z.string().min(1).max(256).optional(),
   runId: z.string().trim().min(1).max(128).optional(),
@@ -66,32 +40,55 @@ const workspaceSuggestSchema = z.object({
   limit: z.number().int().min(1).max(25).optional(),
 });
 
+// Agent-safety hints live with the tool definition so every surface (remote MCP,
+// WebMCP, chat tools) reads the same values instead of inferring them per surface.
+type ToolAnnotations = { readOnly: boolean; destructive: boolean; idempotent: boolean; openWorld: boolean };
+const READ_ONLY_TOOL: ToolAnnotations = { readOnly: true, destructive: false, idempotent: true, openWorld: false };
+const workspaceToolAnnotations: Record<string, ToolAnnotations> = {
+  search: READ_ONLY_TOOL,
+  chat: { readOnly: false, destructive: false, idempotent: false, openWorld: false },
+  "ingest-report": READ_ONLY_TOOL,
+  suggest: READ_ONLY_TOOL,
+};
+
+/**
+ * The product search tool accepts one query or a batch, both defined by the
+ * search route's own zod schemas. MCP requires an object at the top level, so
+ * the two forms are merged into one object whose oneOf keeps them exclusive.
+ */
+function searchToolInputSchema() {
+  const single = toolInputJsonSchema(searchInputSchema) as { properties: Record<string, unknown> };
+  const { properties: batch } = toolInputJsonSchema(batchSearchInputSchema) as { properties: Record<string, unknown> };
+  return {
+    type: "object", additionalProperties: false,
+    properties: { ...single.properties, ...batch },
+    oneOf: [
+      { required: ["q"], not: { anyOf: Object.keys(batch).map(key => ({ required: [key] })) } },
+      { required: ["queries"], not: { anyOf: Object.keys(single.properties).map(key => ({ required: [key] })) } },
+    ],
+  };
+}
+
 function legacyManifest(baseUrl: string, scopes?: string[]) {
   const manifest = getAutomationCapabilityManifest(baseUrl);
   return {
     ...manifest,
+    // The MCP surface knows its own transports; never inherit a stale claim.
     server: { ...manifest.server, transports: ["streamable-http", "stdio"], endpoint: `${baseUrl}/v1/mcp` },
     capabilities: [
-      ...manifest.capabilities.map((capability) => {
-        const schema = capability.id === "ai.simple" ? aiSimpleToolSchema
-          : capability.id === "ai.advanced" ? aiAdvancedToolSchema : null;
-        return schema ? { ...capability, inputSchema: z.toJSONSchema(schema, { io: "input" }) } : capability;
-      }),
+      ...manifest.capabilities,
       {
         id: "ai.operation.get", title: "Get Automation Operation",
         description: "Read an automation operation by ID, including pending approval, progress, errors and final result. Poll on a later turn if still running.",
         category: "tool", endpoint: `${baseUrl}/v1/mcp/tools/ai.operation.get`,
-        inputSchema: z.toJSONSchema(operationInputSchema),
+        inputSchema: toolInputJsonSchema(operationInputSchema),
+        annotations: READ_ONLY_TOOL,
       },
       ...[
-        { name: "search", title: "Search Workspace", description: "Retrieve portable text passages with source citations. Use these as context for any LLM; this tool does not generate an answer.", inputSchema: queryInputSchema },
-        { name: "chat", title: "Chat With Workspace", description: "Generate a grounded answer with citations and token usage using the workspace's configured model. This calls AI and can incur cost; use workspace.search for your own LLM.", inputSchema: {
-          type: "object", properties: { workspaceId: { type: "string", minLength: 1, maxLength: 256, description: WORKSPACE_REF_DESCRIPTION }, q: { type: "string", minLength: 1, maxLength: 16_000 }, sessionId: { type: "string", minLength: 1, maxLength: 256 } }, required: ["q"],
-        } },
-        { name: "ingest-report", title: "Workspace Ingest Report", description: "Report how the workspace's files processed, without AI calls: pages, bytes and plain-text bytes per page (histograms), images per page, scanned-looking pages, pages read with vision, searchable pages with a reason for each unsearchable one, failed or skipped stages, cost and pages per minute, the pipeline settings that shaped it, and rule-based recommendations with estimated cost. Use it when a user asks why something cannot be found.", inputSchema: z.toJSONSchema(workspaceIngestReportSchema) },
-        { name: "suggest", title: "Suggest Workspace Queries", description: "Read prior queries and suggestions without AI calls.", inputSchema: {
-          type: "object", properties: { workspaceId: { type: "string", minLength: 1, maxLength: 256, description: WORKSPACE_REF_DESCRIPTION }, q: { type: "string" }, limit: { type: "integer", minimum: 1, maximum: 25 } },
-        } },
+        { name: "search", title: "Search Workspace", description: "Retrieve portable text passages with source citations. Use these as context for any LLM; this tool does not generate an answer.", inputSchema: toolInputJsonSchema(searchInputSchema) },
+        { name: "chat", title: "Chat With Workspace", description: "Generate a grounded answer with citations and token usage using the workspace's configured model. This calls AI and can incur cost; use workspace.search for your own LLM.", inputSchema: toolInputJsonSchema(workspaceChatInputSchema) },
+        { name: "ingest-report", title: "Workspace Ingest Report", description: "Report how the workspace's files processed, without AI calls: pages, bytes and plain-text bytes per page (histograms), images per page, scanned-looking pages, pages read with vision, searchable pages with a reason for each unsearchable one, failed or skipped stages, cost and pages per minute, the pipeline settings that shaped it, and rule-based recommendations with estimated cost. Use it when a user asks why something cannot be found.", inputSchema: toolInputJsonSchema(workspaceIngestReportSchema) },
+        { name: "suggest", title: "Suggest Workspace Queries", description: "Read prior queries and suggestions without AI calls.", inputSchema: toolInputJsonSchema(workspaceSuggestSchema) },
       ].map(({ name, title, description, inputSchema }) => ({
         id: `workspace.${name}`,
         title,
@@ -99,6 +96,7 @@ function legacyManifest(baseUrl: string, scopes?: string[]) {
         category: "tool",
         endpoint: `${baseUrl}/v1/mcp/tools/workspace.${name}`,
         inputSchema,
+        annotations: workspaceToolAnnotations[name] ?? READ_ONLY_TOOL,
       })),
     ].filter((tool) => !scopes || tool.category !== "tool" || (tool.id.startsWith("ai.")
       ? scopes.some((scope) => scope === "search" || scope === "ingest")
@@ -116,17 +114,7 @@ export function mcpManifest(baseUrl: string, scopes?: string[]) {
       ...(name === "search" ? {
         title: "Search documents",
         description: "Retrieve cited passages for one query (q) or up to 20 independent queries (queries). Supply exactly one form. Batch results stay in input order with per-query errors; each query can select a workspace. Omitted workspace uses the default. Does not generate answers.",
-        inputSchema: {
-          type: "object", additionalProperties: false,
-          properties: { ...queryInputSchema.properties,
-            queries: { type: "array", minItems: 1, maxItems: 20, items: queryInputSchema },
-            concurrency: { type: "integer", minimum: 1, maximum: 4, default: 4 },
-          },
-          oneOf: [
-            { required: ["q"], not: { anyOf: [{ required: ["queries"] }, { required: ["concurrency"] }] } },
-            { required: ["queries"], not: { anyOf: Object.keys(queryInputSchema.properties).map(key => ({ required: [key] })) } },
-          ],
-        },
+        inputSchema: searchToolInputSchema(),
       } : {}),
       ...(name === "getUploadStatus" ? { title: "Get upload status", description: "Check uploaded files and ingestion progress in a workspace, optionally for a runId returned by upload. Reports searchable pages, failures, costs and processing speed without AI calls. Use before search or chat when files are still processing." } : {}),
     };

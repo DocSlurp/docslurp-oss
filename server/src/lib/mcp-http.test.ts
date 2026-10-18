@@ -9,6 +9,7 @@ import { handleMcpHttp, type McpDispatch } from "./mcp-http.js";
 const manifest = { capabilities: [{
   id: "workspace.suggest", title: "Suggestions", description: "No AI suggestions", category: "tool",
   inputSchema: { type: "object", properties: { workspaceId: { type: "string" } }, required: ["workspaceId"] },
+  annotations: { readOnly: true, destructive: false, idempotent: true, openWorld: false },
 }] };
 const dispatch: McpDispatch = async (path, init) => {
   expect(new Headers(init?.headers).has("Authorization")).toBe(false);
@@ -49,7 +50,8 @@ describe("hosted MCP transport", () => {
   });
 
   it("does not advertise stateful workspace chat as read-only or idempotent", async () => {
-    const chatManifest = { capabilities: [...manifest.capabilities, { ...manifest.capabilities[0]!, id: "workspace.chat" }] };
+    const chatManifest = { capabilities: [...manifest.capabilities, { ...manifest.capabilities[0]!, id: "workspace.chat",
+      annotations: { readOnly: false, destructive: false, idempotent: false, openWorld: false } }] };
     const response = await handleMcpHttp(new Request("http://localhost/v1/mcp", {
       method: "POST", headers: { "Content-Type": "application/json", Accept: "application/json, text/event-stream", "MCP-Protocol-Version": "2025-11-25" },
       body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} }),
