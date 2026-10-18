@@ -34,6 +34,10 @@
       "types": "./dist/error-reporting.d.ts",
       "import": "./dist/error-reporting.js"
     },
+    "./api-error": {
+      "types": "./dist/api-error.d.ts",
+      "import": "./dist/api-error.js"
+    },
     "./error-response": {
       "types": "./dist/error-response.d.ts",
       "import": "./dist/error-response.js"

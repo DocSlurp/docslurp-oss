@@ -17,6 +17,9 @@ export const PUBLIC_ERROR_MESSAGES = {
   rateLimit: "Please wait a moment before trying again.",
   processing: "We couldn’t finish processing this document. Please try again.",
   paused: "Processing is paused. Your workspace administrator can help you resume it.",
+  workspaceMissing: "We couldn’t find that workspace. It may have been moved or removed.",
+  chatDisabled: "Chat is turned off for this workspace. Enable it in workspace settings.",
+  searchScope: "Search must stay within a single workspace.",
 } as const;
 
 export function publicErrorForStatus(status: number): string {

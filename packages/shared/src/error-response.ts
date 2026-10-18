@@ -1,5 +1,6 @@
 import { friendlyErrorMessage, publicErrorForStatus, PUBLIC_ERROR_MESSAGES } from "./public-errors.js";
 import { reportException } from "./error-reporting.js";
+import { publicApiErrorEnvelope } from "./api-error.js";
 
 export type PublicErrorReporter = (error: unknown, context?: Record<string, string | number | boolean>) => string;
 
@@ -19,6 +20,9 @@ export async function safeErrorResponse(response: Response, requestId?: string, 
       const original = await response.clone().json();
       // Retain protocol envelopes and machine codes, but never arbitrary details.
       if (original && typeof original === "object") {
+        // The native envelope is already closed vocabulary: code, reviewed copy and field paths.
+        const envelope = publicApiErrorEnvelope(original, response.status, requestId);
+        if (envelope) return jsonErrorResponse(response, envelope);
         const diagnostic = original.error ?? original.message;
         if (diagnostic && !(typeof diagnostic === "string" && Object.values(PUBLIC_ERROR_MESSAGES).some(value => value === diagnostic))) {
           report(new Error(typeof diagnostic === "string" ? diagnostic : JSON.stringify(diagnostic)), { requestId: requestId ?? "", status: response.status, surface: "http-response" });
@@ -51,6 +55,10 @@ export async function safeErrorResponse(response: Response, requestId?: string, 
     } catch { /* proxies and malformed response bodies receive safe copy too */ }
   }
   if (requestId) body.requestId = requestId;
+  return jsonErrorResponse(response, body);
+}
+
+function jsonErrorResponse(response: Response, body: unknown): Response {
   const headers = new Headers(response.headers);
   headers.set("content-type", "application/json; charset=UTF-8");
   headers.set("cache-control", "no-store");

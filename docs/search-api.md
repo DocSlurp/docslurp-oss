@@ -66,6 +66,16 @@ The batch contains 1–20 queries; concurrency is an integer from 1 to 4, defaul
 
 Every item independently checks the API key's `search` scope and organization/workspace access. Item error codes include `FORBIDDEN` (403), `WORKSPACE_NOT_FOUND` (404), `INVALID_SEARCH_SCOPE` (400), and `SEARCH_FAILED` (500). Unexpected internal errors are sanitized. Disconnecting prevents queued retrieval from starting; in-flight retrieval may finish and record usage. Unstarted items carry `REQUEST_ABORTED` (499) if a response remains deliverable.
 
+## Errors
+
+Failed requests to `/v1/search*` and `/v1/chat` (not the OpenAI-compatible `/v1/chat/completions`) answer with one envelope:
+
+```json
+{"error": {"code": "invalid_request", "message": "Please check the information you entered and try again.", "details": {"issues": [{"path": "queries.0.q", "message": "...", "code": "invalid_value"}]}, "requestId": "req_123"}}
+```
+
+`code` is a closed set you can branch on: `invalid_request`, `unauthorized`, `forbidden`, `not_found`, `workspace_not_found`, `conflict`, `payload_too_large`, `rate_limited`, `payment_required`, `credit_exhausted`, `workspace_budget_paused`, `org_budget_paused`, `minimum_credit_required`, `plan_not_entitled`, `chat_disabled`, `invalid_search_scope`, `unavailable`, `internal`. `message` is reviewed copy for people and may change; `details.issues` names the request fields that failed validation; quote `requestId` in support requests. The SDK exposes `DocSlurpApiError.code` and `.requestId`. Per-item batch errors keep their own `{code, message, status}` shape (above).
+
 ## Grounded chat
 
 `POST /v1/chat` is the canonical workspace chat endpoint. Send `{q, workspaceId?, sessionId?, model?}`; an omitted `workspaceId` means your organization's default workspace. `sessionId` and `model` are nonempty strings of at most 256 characters; all fields are checked before model calls. The response includes an answer, citations, and the chat session ID. For streaming, use `/v1/chat/completions` with `stream: true`; omit it for the JSON fallback.
