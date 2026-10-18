@@ -68,15 +68,24 @@ Every item independently checks the API key's `search` scope and organization/wo
 
 ## Errors
 
-Errors raised while handling `/v1/search*` and `/v1/chat` (not the OpenAI-compatible `/v1/chat/completions`) answer with one envelope:
+Every error from the native JSON API (`/v1/*`, including authentication, rate limits, CORS and request-size rejections) answers with one envelope:
 
 ```json
 {"error": {"code": "invalid_request", "message": "Please check the information you entered and try again.", "details": {"issues": [{"path": "queries.0.q", "message": "...", "code": "invalid_value"}]}, "requestId": "req_123"}}
 ```
 
-`code` is a closed set you can branch on: `invalid_request`, `unauthorized`, `forbidden`, `not_found`, `workspace_not_found`, `conflict`, `payload_too_large`, `rate_limited`, `payment_required`, `credit_exhausted`, `workspace_budget_paused`, `org_budget_paused`, `minimum_credit_required`, `plan_not_entitled`, `chat_disabled`, `invalid_search_scope`, `unavailable`, `internal`. `message` is reviewed copy for people and may change; `details.issues` names the request fields that failed validation; quote `requestId` in support requests. The SDK exposes `DocSlurpApiError.code` and `.requestId`. Per-item batch errors keep their own `{code, message, status}` shape (above).
+`code` is a closed set you can branch on:
 
-Requests rejected before routing — invalid authentication, rate limiting, widget CORS, or the body-size limit — may answer with a middleware-specific body instead. When they do, `error.code` can be absent, so treat `DocSlurpApiError.code` as best-effort for those responses and fall back to `status`.
+- Request and access: `invalid_request`, `unauthorized`, `forbidden`, `not_found`, `workspace_not_found`, `conflict`, `payload_too_large`, `session_required`, `invalid_search_scope`, `chat_disabled`.
+- Limits: `rate_limited`, `spend_limit_exceeded`, `daily_page_limit`, `ip_temporarily_blocked`.
+- Billing: `payment_required`, `credit_exhausted`, `workspace_budget_paused`, `org_budget_paused`, `minimum_credit_required`, `plan_not_entitled`.
+- Uploads: `unsupported_type`, `file_too_large`, `unreadable_source`.
+- Organizations: `organization_not_found`, `organization_forbidden`, `organization_conflict`, `personal_organization`, `membership_exists`, `membership_forbidden`, `membership_not_found`, `last_owner`, `ownership_transfer_required`, `user_not_found`.
+- Anything else: `unavailable` and `internal`.
+
+`message` is reviewed copy for people and may change. `details` is optional and holds only `issues` (the request fields that failed validation) and limit metadata: `retryAfterSeconds`, `category`, `policy`, `limitCents`, `spentCents` on 429s, and `maxBytes` (with `directUpload` on multipart uploads) on 413s. Rate-limit responses also keep `Retry-After`, `RateLimit-Policy` and `RateLimit`. Quote `requestId` in support requests. The SDK exposes `DocSlurpApiError.code` and `.requestId`. Per-item batch errors inside a successful `200` keep their own `{code, message, status}` shape (above).
+
+Protocol surfaces keep the shapes their clients already parse: the OpenAI-compatible `/v1/chat/completions` and `/v1/models`, the MCP endpoint (`/v1/mcp`, JSON-RPC), OAuth (`/oauth/mcp/*`), the search compatibility adapters (`/compat/*`) and the Stripe webhook.
 
 ## Grounded chat
 
