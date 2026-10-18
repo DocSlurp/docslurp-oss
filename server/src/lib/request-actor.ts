@@ -43,6 +43,7 @@ declare module "hono" {
     sessionUser: SessionUser;
     apiKey: ValidatedKey;
     rateLimitActorChecked: boolean;
+    requestId: string;
   }
 }
 
