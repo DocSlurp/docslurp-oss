@@ -228,7 +228,7 @@ describe("workspace reference boundaries", () => {
     const app = buildApp();
     const runs = await app.request("/runs/preview", post({ files: [{ filename: "a.pdf", mimeType: "application/pdf", sizeBytes: 10 }] }));
     expect(runs.status).toBe(404);
-    await expect(runs.json()).resolves.toMatchObject({ code: "organization_not_found" });
+    await expect(runs.json()).resolves.toMatchObject({ error: { code: "organization_not_found" } });
     const direct = await app.request("/ingest/direct/sessions", post({
       orgId: "org-other",
       files: [{ filename: "a.txt", mimeType: "text/plain", sizeBytes: 5 }],

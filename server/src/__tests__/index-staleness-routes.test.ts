@@ -70,7 +70,7 @@ describe("POST /runs/:runId/reindex", () => {
     const response = await buildApp().request("/runs/run-1/reindex", { method: "POST" });
 
     expect(response.status).toBe(409);
-    await expect(response.json()).resolves.toMatchObject({ code: "missing_stage_artifacts" });
+    await expect(response.json()).resolves.toMatchObject({ error: { code: "conflict" } });
     expect(sqlCalls).toEqual([]);
   });
 

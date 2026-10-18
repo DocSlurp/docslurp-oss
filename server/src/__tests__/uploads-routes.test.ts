@@ -110,8 +110,7 @@ describe("uploadsRoutes over Workspace Intake", () => {
     const response = await app.request("/uploads/bulk", bulk([text("contracts.txt")], { pipeline: "{not-json" }));
     expect(response.status).toBe(422);
     await expect(response.json()).resolves.toMatchObject({
-      error: "Invalid pipeline payload",
-      issues: [expect.objectContaining({ path: "pipeline" })],
+      error: { code: "invalid_request", message: "Invalid pipeline payload", details: { issues: [expect.objectContaining({ path: "pipeline" })] } },
     });
     expect(fakes.runs).toEqual([]);
   });
@@ -124,7 +123,7 @@ describe("uploadsRoutes over Workspace Intake", () => {
     );
     expect(response.status).toBe(422);
     await expect(response.json()).resolves.toMatchObject({
-      issues: expect.arrayContaining([expect.objectContaining({ path: "pipeline.indexVectors" })]),
+      error: { code: "invalid_request", details: { issues: expect.arrayContaining([expect.objectContaining({ path: "pipeline.indexVectors" })]) } },
     });
   });
 
@@ -136,7 +135,7 @@ describe("uploadsRoutes over Workspace Intake", () => {
     const { app } = setup();
     const response = await app.request("/uploads/url", json({ workspaceId: "ws-1", urls: ["https://example.com/report.docx"] }));
     expect(response.status).toBe(415);
-    await expect(response.json()).resolves.toMatchObject({ error: expect.stringContaining("REMOTE_INGEST_COMPLEX_FORMATS_ENABLED=true") });
+    await expect(response.json()).resolves.toMatchObject({ error: { code: "invalid_request", message: expect.stringContaining("REMOTE_INGEST_COMPLEX_FORMATS_ENABLED=true") } });
   });
 
   it("reports what URL ingest fetched", async () => {
@@ -191,7 +190,7 @@ describe("uploadsRoutes over Workspace Intake", () => {
     fakes.state.blockRunCreation = new RunCreationBlockedError("Credit balance exhausted.", 402, "credit_exhausted");
     const response = await app.request("/uploads/bulk", bulk([text("contracts.txt")]));
     expect(response.status).toBe(402);
-    await expect(response.json()).resolves.toMatchObject({ error: "Credit balance exhausted.", code: "credit_exhausted" });
+    await expect(response.json()).resolves.toMatchObject({ error: { code: "credit_exhausted", message: "Credit balance exhausted." } });
     expect(fakes.objects.size).toBe(0);
   });
 });

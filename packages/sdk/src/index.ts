@@ -429,13 +429,32 @@ function deadline(timeoutMs: number, external?: AbortSignal) {
 export class DocSlurpApiError extends Error {
   readonly body: unknown;
   readonly status: number;
+  /** Machine-readable `error.code` from the native error envelope; branch on this, never on `message`. */
+  readonly code?: string;
+  /** Server correlation id (`error.requestId`) to quote in support requests. */
+  readonly requestId?: string;
 
   constructor(message: string, status: number, body: unknown) {
     super(message);
     this.name = "DocSlurpApiError";
     this.status = status;
     this.body = body;
+    const envelope = apiErrorEnvelope(body);
+    if (envelope?.code) this.code = envelope.code;
+    if (envelope?.requestId) this.requestId = envelope.requestId;
   }
+}
+
+/** Reads `{ error: { code, requestId } }`; legacy bodies, OpenAI errors without a string code and text yield nothing. */
+function apiErrorEnvelope(body: unknown): { code?: string; requestId?: string } | null {
+  if (!body || typeof body !== "object") return null;
+  const error = (body as { error?: unknown }).error;
+  if (!error || typeof error !== "object") return null;
+  const { code, requestId } = error as { code?: unknown; requestId?: unknown };
+  return {
+    ...(typeof code === "string" && code ? { code } : {}),
+    ...(typeof requestId === "string" && requestId ? { requestId } : {}),
+  };
 }
 
 /**

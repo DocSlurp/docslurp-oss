@@ -25,8 +25,8 @@ const validatedKey: ValidatedKey = {
 
 function buildApp() {
   const app = new Hono();
-  app.use("/protected", apiKeyAuth);
-  app.get("/protected", (c) => {
+  app.use("/v1/protected", apiKeyAuth);
+  app.get("/v1/protected", (c) => {
     const actor = c.get("requestActor");
     return c.json({
       ok: true,
@@ -48,21 +48,20 @@ describe("apiKeyAuth middleware", () => {
   });
 
   it("returns 401 when the Authorization header is missing", async () => {
-    const res = await app.request("/protected");
+    const res = await app.request("/v1/protected");
     expect(res.status).toBe(401);
-    const body = await res.json();
-    expect(body.error).toBeDefined();
+    expect(await res.json()).toEqual({ error: { code: "unauthorized", message: "Missing or invalid Authorization header" } });
   });
 
   it("returns 401 when Authorization header doesn't start with 'Bearer '", async () => {
-    const res = await app.request("/protected", {
+    const res = await app.request("/v1/protected", {
       headers: { Authorization: "Basic dXNlcjpwYXNz" },
     });
     expect(res.status).toBe(401);
   });
 
   it("returns 401 for an Authorization header with only 'Bearer' (no key)", async () => {
-    const res = await app.request("/protected", {
+    const res = await app.request("/v1/protected", {
       headers: { Authorization: "Bearer" },
     });
     // "Bearer" doesn't start with "Bearer " (note trailing space) → 401
@@ -71,17 +70,23 @@ describe("apiKeyAuth middleware", () => {
 
   it("returns 403 when validateApiKey returns null (invalid/revoked key)", async () => {
     vi.mocked(validateApiKey).mockResolvedValue(null);
-    const res = await app.request("/protected", {
+    const res = await app.request("/v1/protected", {
       headers: { Authorization: "Bearer dslp_invalid" },
     });
     expect(res.status).toBe(403);
-    const body = await res.json();
-    expect(body.error).toBeDefined();
+    expect(await res.json()).toEqual({ error: { code: "forbidden", message: "Invalid API key or rate limit exceeded" } });
+  });
+
+  it("keeps the flat { error, code } body on protocol surfaces", async () => {
+    const compat = new Hono().use("*", apiKeyAuth).get("/compat/algolia/ping", (c) => c.json({ ok: true }));
+    const res = await compat.request("/compat/algolia/ping");
+    expect(res.status).toBe(401);
+    expect(await res.json()).toEqual({ error: "Missing or invalid Authorization header", code: "unauthorized" });
   });
 
   it("calls next and returns 200 for a valid API key", async () => {
     vi.mocked(validateApiKey).mockResolvedValue(validatedKey);
-    const res = await app.request("/protected", {
+    const res = await app.request("/v1/protected", {
       headers: { Authorization: "Bearer dslp_validkey123" },
     });
     expect(res.status).toBe(200);
@@ -97,7 +102,7 @@ describe("apiKeyAuth middleware", () => {
 
   it("strips the 'Bearer ' prefix before passing the key to validateApiKey", async () => {
     vi.mocked(validateApiKey).mockResolvedValue(null);
-    await app.request("/protected", {
+    await app.request("/v1/protected", {
       headers: { Authorization: "Bearer my-secret-key" },
     });
     expect(validateApiKey).toHaveBeenCalledWith("my-secret-key", {
@@ -108,14 +113,14 @@ describe("apiKeyAuth middleware", () => {
 
   it("calls validateApiKey exactly once per request", async () => {
     vi.mocked(validateApiKey).mockResolvedValue(validatedKey);
-    await app.request("/protected", {
+    await app.request("/v1/protected", {
       headers: { Authorization: "Bearer dslp_key" },
     });
     expect(validateApiKey).toHaveBeenCalledTimes(1);
   });
 
   it("does not call validateApiKey when the Authorization header is malformed", async () => {
-    await app.request("/protected", {
+    await app.request("/v1/protected", {
       headers: { Authorization: "Token abc" },
     });
     expect(validateApiKey).not.toHaveBeenCalled();
@@ -124,7 +129,7 @@ describe("apiKeyAuth middleware", () => {
   it("forwards origin and referer headers to API key validation", async () => {
     vi.mocked(validateApiKey).mockResolvedValue(validatedKey);
 
-    await app.request("/protected", {
+    await app.request("/v1/protected", {
       headers: {
         Authorization: "Bearer dslp_client_key",
         Origin: "https://app.docslurp.dev",

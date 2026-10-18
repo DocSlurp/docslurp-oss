@@ -88,7 +88,7 @@ describe("workspace graph routes", () => {
       body: JSON.stringify({ mode: "full" }),
     });
     expect(response.status).toBe(409);
-    expect(await response.json()).toEqual({ error: "A graph rebuild is already running", activeJob: job("running", 2) });
+    expect(await response.json()).toEqual({ error: { code: "conflict", message: "A graph rebuild is already running", details: { activeJob: job("running", 2) } } });
   });
 
   it("lets read-scoped API keys read but not change the graph", async () => {

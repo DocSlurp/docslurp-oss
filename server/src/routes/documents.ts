@@ -32,6 +32,8 @@ import {
   setDocumentTags
 } from "../services/documents.js";
 import { acceptApiKeys } from "../lib/route-auth.js";
+import { apiStatusError } from "../lib/api-error.js";
+import { validationHook } from "../lib/validation.js";
 
 const bulkSchema = z.object({
   action: z.enum(["reprocess", "export-artifacts", "apply-tags", "remove-tags", "delete"]),
@@ -56,12 +58,12 @@ async function requireApiKeyDocumentScope(c: Context, docId: string, userId: str
   const apiKey = c.get("apiKey");
   const viewer = await getDocumentViewerPayload(docId, userId);
   if (!viewer) {
-    return { response: c.json({ error: "Document not found" }, 404) };
+    return { response: apiStatusError(c, 404, "Document not found") };
   }
   try {
     assertApiKeyWorkspaceScope(apiKey, viewer.document);
   } catch {
-    return { response: c.json({ error: "Document not found" }, 404) };
+    return { response: apiStatusError(c, 404, "Document not found") };
   }
   return { viewer };
 }
@@ -74,10 +76,10 @@ export const documentsRoutes = new Hono()
       return;
     }
     if (!apiKeyHasAnyScope(apiKey, ["artifacts"])) {
-      return c.json({ error: "Forbidden" }, 403);
+      return apiStatusError(c, 403, "Forbidden");
     }
     if (c.req.method !== "GET") {
-      return c.json({ error: "This endpoint requires a dashboard session or server-side document API" }, 403);
+      return apiStatusError(c, 403, "This endpoint requires a dashboard session or server-side document API");
     }
     await next();
   })
@@ -138,7 +140,7 @@ export const documentsRoutes = new Hono()
     const deleted = await deleteDocument(c.req.param("docId"), userId);
 
     if (!deleted) {
-      return c.json({ error: "Document not found" }, 404);
+      return apiStatusError(c, 404, "Document not found");
     }
 
     await appendAuditLog({
@@ -172,13 +174,13 @@ export const documentsRoutes = new Hono()
     const viewer = scoped.viewer;
     const structuredUri = viewer.stages.find((stage) => stage.stage_name === "structured-extract")?.artifact_uri;
     if (!structuredUri) {
-      return c.json({ error: "No structured artifact for this document" }, 404);
+      return apiStatusError(c, 404, "No structured artifact for this document");
     }
     try {
       const json = await getArtifactJson<Record<string, unknown>>(structuredUri);
       return c.json({ structured: json, uri: structuredUri });
     } catch {
-      return c.json({ error: "Unable to read structured artifact" }, 500);
+      return apiStatusError(c, 500, "Unable to read structured artifact");
     }
   })
   .get("/:docId/versions", async (c) => {
@@ -188,7 +190,7 @@ export const documentsRoutes = new Hono()
     const versions = await getDocumentVersionsWithTags(c.req.param("docId"), userId);
 
     if (versions.length === 0) {
-      return c.json({ error: "Document not found" }, 404);
+      return apiStatusError(c, 404, "Document not found");
     }
 
     return c.json({ versions });
@@ -200,7 +202,7 @@ export const documentsRoutes = new Hono()
     const changelog = await getDocumentVersionChangelog(c.req.param("docId"), userId);
 
     if (!changelog) {
-      return c.json({ error: "Document not found" }, 404);
+      return apiStatusError(c, 404, "Document not found");
     }
 
     return c.json({
@@ -215,12 +217,12 @@ export const documentsRoutes = new Hono()
     const payload = await getCorrectionWorkbench(c.req.param("docId"), userId);
 
     if (!payload) {
-      return c.json({ error: "Document not found" }, 404);
+      return apiStatusError(c, 404, "Document not found");
     }
 
     return c.json(payload);
   })
-  .put("/:docId/correction-workbench", zValidator("json", saveCorrectionSchema), async (c) => {
+  .put("/:docId/correction-workbench", zValidator("json", saveCorrectionSchema, validationHook), async (c) => {
     const userId = c.get("sessionUser").id;
     const body = c.req.valid("json");
     const payload = await saveDocumentCorrection({
@@ -233,7 +235,7 @@ export const documentsRoutes = new Hono()
     });
 
     if (!payload) {
-      return c.json({ error: "Document not found" }, 404);
+      return apiStatusError(c, 404, "Document not found");
     }
 
     await appendAuditLog({
@@ -256,7 +258,7 @@ export const documentsRoutes = new Hono()
 
     return c.json(payload);
   })
-  .post("/:docId/correction-workbench/reindex", zValidator("json", reindexCorrectionSchema), async (c) => {
+  .post("/:docId/correction-workbench/reindex", zValidator("json", reindexCorrectionSchema, validationHook), async (c) => {
     const userId = c.get("sessionUser").id;
     const result = await reindexDocumentCorrection({
       docId: c.req.param("docId"),
@@ -264,7 +266,7 @@ export const documentsRoutes = new Hono()
     });
 
     if (!result) {
-      return c.json({ error: "Correction not found" }, 404);
+      return apiStatusError(c, 404, "Correction not found");
     }
 
     await appendAuditLog({
@@ -285,13 +287,13 @@ export const documentsRoutes = new Hono()
 
     return c.json(result);
   })
-  .put("/:docId/tags", zValidator("json", setTagsSchema), async (c) => {
+  .put("/:docId/tags", zValidator("json", setTagsSchema, validationHook), async (c) => {
     const userId = c.get("sessionUser").id;
     const body = c.req.valid("json");
     const tags = await setDocumentTags(c.req.param("docId"), userId, body.tags);
 
     if (tags === null) {
-      return c.json({ error: "Document not found" }, 404);
+      return apiStatusError(c, 404, "Document not found");
     }
 
     await appendAuditLog({
@@ -309,7 +311,7 @@ export const documentsRoutes = new Hono()
 
     return c.json({ documentId: c.req.param("docId"), tags });
   })
-  .post("/bulk", zValidator("json", bulkSchema), async (c) => {
+  .post("/bulk", zValidator("json", bulkSchema, validationHook), async (c) => {
     const userId = c.get("sessionUser").id;
     const body = c.req.valid("json");
 

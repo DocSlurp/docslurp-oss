@@ -701,16 +701,19 @@ const result = await client.revokeOrganizationApiKeys(org_id); // {keys, revoked
 | 409 | Duplicate membership or slug, a personal membership, or removing, demoting or leaving as the last owner. |
 | 429 | Rate limit reached. Wait for `Retry-After`, and cap your retries. |
 
-Organization errors have the shape `{ "error": <message>, "code": <code> }`. For example, removing the last owner returns:
+Organization errors use the [error envelope](https://docslurp.io/docs/search-reference#errors). For example, removing the last owner returns:
 
 ```json
 {
-  "error": "Organization must retain an owner",
-  "code": "last_owner"
+  "error": {
+    "code": "last_owner",
+    "message": "An organization must keep at least one owner.",
+    "requestId": "req_123"
+  }
 }
 ```
 
-Other codes include `personal_organization`, `membership_exists`, `membership_forbidden`, `membership_not_found`, `organization_not_found`, `organization_conflict` and `user_not_found`. In the SDK, HTTP failures throw `DocSlurpApiError` with `status` and the response in `body`; check `body.code` when it's present. The SDK never retries organization writes, so keep earlier successful responses when a later call fails.
+Other codes include `personal_organization`, `membership_exists`, `membership_forbidden`, `membership_not_found`, `organization_not_found`, `organization_forbidden`, `organization_conflict`, `session_required` and `user_not_found`. In the SDK, HTTP failures throw `DocSlurpApiError` with `status`, `code`, `requestId` and the response in `body`; branch on `code`. The SDK never retries organization writes, so keep earlier successful responses when a later call fails.
 
 ## Make failures recoverable
 
@@ -757,7 +760,7 @@ X-DocSlurp-Spend: "key-spend-1d";q=500;r=212;w=86400;u=usd-cents
 
 Custom request and spend windows are set per key on the API keys page (under "Permissions and limits", then "Advanced rate limits") or with `rateLimits` on `POST`/`PATCH /v1/api-keys`, e.g. `[{ "metric": "requests", "limit": 1000, "windowSeconds": 3600 }, { "metric": "spend", "limit": 500, "windowSeconds": 86400 }]` (spend in US cents; at most five rules, one per metric and window, windows up to 31 days). Spend is recorded when the work it pays for finishes and is refreshed every few seconds, so a request already running can carry a key slightly past its spend limit.
 
-Every 429 has `Retry-After` and a JSON body with a `code`: `rate_limited` (with `category` and `policy`), `spend_limit_exceeded`, `daily_page_limit` or `ip_temporarily_blocked`. An IP is blocked for a while after an extreme burst or after repeatedly presenting invalid API keys, so stop and fix credentials rather than retrying 401s in a loop.
+Every 429 has `Retry-After` and the [error envelope](https://docslurp.io/docs/search-reference#errors) with `error.code` set to `rate_limited` (with `details.category` and `details.policy`), `spend_limit_exceeded`, `daily_page_limit` or `ip_temporarily_blocked`. An IP is blocked for a while after an extreme burst or after repeatedly presenting invalid API keys, so stop and fix credentials rather than retrying 401s in a loop.
 
 ## Authentication and integration boundaries
 

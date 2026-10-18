@@ -6,6 +6,7 @@ import {
   setRequestActor
 } from "../lib/request-actor.js";
 import { routeAuthMode } from "../lib/route-auth.js";
+import { middlewareErrorResponse } from "../lib/api-error.js";
 
 /**
  * Resolves the active Better Auth session from the incoming request cookies and
@@ -49,12 +50,12 @@ export const sessionAuth: MiddlewareHandler = async (c, next) => {
     }
     // A supplied bearer credential is authoritative. Never turn an invalid
     // token into a more privileged cookie-session request.
-    return c.json({ error: "Unauthorized" }, 401);
+    return middlewareErrorResponse(c, 401, "unauthorized", "Unauthorized");
   }
 
   const actor = await resolveBetterAuthSessionActor(c.req.raw.headers);
   if (!actor) {
-    return c.json({ error: "Unauthorized" }, 401);
+    return middlewareErrorResponse(c, 401, "unauthorized", "Unauthorized");
   }
 
   setRequestActor(c, actor);

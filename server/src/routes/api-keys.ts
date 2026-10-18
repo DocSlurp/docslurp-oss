@@ -8,6 +8,8 @@ import { OrganizationError } from "../services/organizations.js";
 import { requestIp, requestUserAgent } from "../lib/request-context.js";
 import { appendAuditLog } from "../services/audit-log.js";
 import { ApiKeyTypeChangeError, apiKeyTypes, createApiKey, supportedApiKeyScopes, listApiKeys, revokeApiKey, rotateApiKey, updateApiKey } from "../services/api-keys.js";
+import { apiStatusError } from "../lib/api-error.js";
+import { validationHook } from "../lib/validation.js";
 
 const apiKeyScopeSchema = z.enum(supportedApiKeyScopes);
 const apiKeyTypeSchema = z.enum(apiKeyTypes);
@@ -42,7 +44,7 @@ const updateApiKeySchema = z.object({
 });
 
 export const apiKeysRoutes = new Hono()
-  .post("/", zValidator("json", createApiKeySchema), async (c) => {
+  .post("/", zValidator("json", createApiKeySchema, validationHook), async (c) => {
     const userId = c.get("sessionUser").id;
     const body = c.req.valid("json");
     let result;
@@ -59,8 +61,8 @@ export const apiKeysRoutes = new Hono()
         allowClientSensitiveScopes: body.allowClientSensitiveScopes,
       });
     } catch (error) {
-      if (error instanceof OrganizationError) return c.json({ error: error.message, code: error.code }, error.status);
-      return c.json({ error: reportPublicError(error) }, 400);
+      if (error instanceof OrganizationError) return apiStatusError(c, error.status, error.message, { code: error.code });
+      return apiStatusError(c, 400, reportPublicError(error));
     }
     await appendAuditLog({
       userId,
@@ -89,7 +91,7 @@ export const apiKeysRoutes = new Hono()
     const keys = await listApiKeys(userId);
     return c.json({ keys });
   })
-  .patch("/:id", zValidator("json", updateApiKeySchema), async (c) => {
+  .patch("/:id", zValidator("json", updateApiKeySchema, validationHook), async (c) => {
     const userId = c.get("sessionUser").id;
     const body = c.req.valid("json");
     let key;
@@ -106,13 +108,13 @@ export const apiKeysRoutes = new Hono()
         allowClientSensitiveScopes: body.allowClientSensitiveScopes,
       });
     } catch (error) {
-      if (error instanceof OrganizationError) return c.json({ error: error.message, code: error.code }, error.status);
-      if (error instanceof ApiKeyTypeChangeError) return c.json({ error: error.message, code: error.code }, error.status);
-      return c.json({ error: reportPublicError(error) }, 400);
+      if (error instanceof OrganizationError) return apiStatusError(c, error.status, error.message, { code: error.code });
+      if (error instanceof ApiKeyTypeChangeError) return apiStatusError(c, error.status, error.message, { code: error.code });
+      return apiStatusError(c, 400, reportPublicError(error));
     }
 
     if (!key) {
-      return c.json({ error: "API key not found or already revoked" }, 404);
+      return apiStatusError(c, 404, "API key not found or already revoked");
     }
 
     await appendAuditLog({
@@ -142,7 +144,7 @@ export const apiKeysRoutes = new Hono()
     const result = await rotateApiKey(c.req.param("id"), userId);
 
     if (!result) {
-      return c.json({ error: "API key not found or already revoked" }, 404);
+      return apiStatusError(c, 404, "API key not found or already revoked");
     }
 
     await appendAuditLog({
@@ -164,7 +166,7 @@ export const apiKeysRoutes = new Hono()
     const userId = c.get("sessionUser").id;
     const key = await revokeApiKey(c.req.param("id"), userId);
     if (!key) {
-      return c.json({ error: "API key not found or already revoked" }, 404);
+      return apiStatusError(c, 404, "API key not found or already revoked");
     }
     await appendAuditLog({
       userId,

@@ -32,6 +32,8 @@ vi.mock("../services/workspaces.js", () => ({ resolveWorkspaceRef: vi.fn(async (
 }));
 
 const { searchRoutes, clearSearchResponseCacheForTests } = await import("../routes/search.js");
+const { publicErrorMiddleware } = await import("../lib/public-errors.js");
+const { apiErrorEnvelopeSchema, PUBLIC_ERROR_MESSAGES } = await import("@docslurp/shared");
 
 function buildApp() {
   const app = new Hono();
@@ -117,7 +119,7 @@ describe("searchRoutes", () => {
     for (const bad of ["abc", "7", "-1"]) {
       const response = await app.request(`/search?q=test&workspaceId=ws-1&minScore=${bad}`);
       expect(response.status, bad).toBe(400);
-      await expect(response.json()).resolves.toMatchObject({ error: expect.stringContaining("minScore") });
+      await expect(response.json()).resolves.toMatchObject({ error: { code: "invalid_request", message: expect.stringContaining("minScore") } });
     }
     expect(hybridSearch).not.toHaveBeenCalled();
   });
@@ -349,14 +351,65 @@ describe("searchRoutes", () => {
         body: JSON.stringify({ q: "test", workspaceId: "ws-chat" }),
       });
       expect(post.status).toBe(403);
-      expect(await post.json()).toMatchObject({ code: "chat_disabled" });
+      expect(await post.json()).toMatchObject({ error: { code: "chat_disabled", message: "Chat is turned off for this workspace." } });
 
       const stream = await app.request("/search/chat/stream?q=test&workspaceId=ws-chat");
       expect(stream.status).toBe(403);
+      expect(await stream.json()).toMatchObject({ error: { code: "chat_disabled" } });
       expect(chatWorkspace).not.toHaveBeenCalled();
     } finally {
       workspaceChatDisabledBody.mockResolvedValue(null);
     }
+  });
+
+  describe("native error envelope", () => {
+    const post = (path: string, body: unknown) => app.request(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+
+    it("answers invalid search and chat bodies with invalid_request and validation issues in details", async () => {
+      for (const [path, body] of [["/search", { q: "" }], ["/search", { queries: [] }], ["/search/chat", {}], ["/search/aggregate", {}]] as const) {
+        const response = await post(path, body);
+        expect(response.status, path).toBe(400);
+        const json = await response.json();
+        expect(json, path).toMatchObject({ error: { code: "invalid_request", message: expect.any(String), details: { issues: expect.any(Array) } } });
+        expect(Object.keys(json), path).toEqual(["error"]);
+      }
+    });
+
+    it("answers a missing q, an unparseable body and a missing feedback chunk with invalid_request", async () => {
+      expect(await (await app.request("/search?workspaceId=ws-1")).json()).toMatchObject({ error: { code: "invalid_request" } });
+      const unparseable = await app.request("/search/aggregate", { method: "POST", body: "{nope" });
+      expect(unparseable.status).toBe(400);
+      expect(await unparseable.json()).toMatchObject({ error: { code: "invalid_request" } });
+      const feedback = await app.request("/search/session-1/feedback", { method: "POST", body: "{}" });
+      expect(feedback.status).toBe(400);
+      expect(await feedback.json()).toMatchObject({ error: { code: "invalid_request", message: "Missing clickedChunkId" } });
+    });
+
+    it("keeps the envelope for thrown spend blocks and unexpected failures", async () => {
+      hybridSearch.mockRejectedValueOnce(Object.assign(new Error("credits"), { statusCode: 402, code: "credit_exhausted" }));
+      const blocked = await post("/search", { q: "test", workspaceId: "ws-1" });
+      expect(blocked.status).toBe(402);
+      expect(await blocked.json()).toMatchObject({ error: { code: "credit_exhausted" } });
+
+      hybridSearch.mockRejectedValueOnce(new Error("postgres password=secret"));
+      const failed = await post("/search", { q: "test", workspaceId: "ws-1" });
+      expect(failed.status).toBe(500);
+      const json = await failed.json();
+      expect(json).toMatchObject({ error: { code: "internal" } });
+      expect(JSON.stringify(json)).not.toMatch(/postgres|secret/);
+    });
+
+    it("stamps requestId and reviewed copy once behind the public error boundary", async () => {
+      const guarded = new Hono();
+      guarded.use("*", async (c, next) => { c.set("requestId", "req-env-1"); await next(); });
+      guarded.use("*", publicErrorMiddleware);
+      guarded.route("/", app);
+      workspaceChatDisabledBody.mockResolvedValueOnce({ error: "internal wording", code: "chat_disabled" });
+      const response = await guarded.request("/search/chat", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ q: "test", workspaceId: "ws-chat" }) });
+      expect(response.status).toBe(403);
+      const json = await response.json();
+      expect(apiErrorEnvelopeSchema.parse(json)).toEqual({ error: { code: "chat_disabled", message: PUBLIC_ERROR_MESSAGES.chatDisabled, requestId: "req-env-1" } });
+    });
   });
 
   it("scopes search feedback updates to the signed-in user's session", async () => {
