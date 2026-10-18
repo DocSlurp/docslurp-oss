@@ -1,3 +1,4 @@
+import { apiErrorOpenApiResponse } from "./api-error-openapi.js";
 /**
  * OpenAPI entries for API-key routes that had no documentation of their own
  * (document reads, direct uploads, AI operations, run events and search
@@ -13,11 +14,11 @@ export const keyOnlySecurity = [{ bearerAuth: [] }];
 type Method = "get" | "post" | "put" | "patch" | "delete";
 
 const errors = {
-  "400": { description: "Invalid request" },
-  "401": { description: "Authentication required" },
-  "403": { description: "Key scope, key type, workspace allowlist or browser domain denied" },
-  "404": { description: "Resource not found in your organization" },
-  "429": { description: "Rate limit reached" },
+  "400": apiErrorOpenApiResponse("Invalid request"),
+  "401": apiErrorOpenApiResponse("Authentication required"),
+  "403": apiErrorOpenApiResponse("Key scope, key type, workspace allowlist or browser domain denied"),
+  "404": apiErrorOpenApiResponse("Resource not found in your organization"),
+  "429": apiErrorOpenApiResponse("Rate limit reached"),
 };
 
 function pathParameters(path: string) {

@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { batchSearchInputSchema, searchInputSchema, workspaceChatInputSchema } from "./search-input.js";
+import { apiErrorOpenApiResponse } from "./api-error-openapi.js";
 import { searchResultSchema, workspaceChatResponseSchema } from "@docslurp/shared";
 
 const ref = (name: string) => ({ $ref: `#/components/schemas/${name}` });
@@ -19,7 +20,16 @@ const uploadTarget = {
   orgId: { type: "string", description: "Session callers only: target this organization's default workspace. API keys use their organization." },
 };
 const errors = {
-  "400": { description: "Invalid request" },
+  "400": apiErrorOpenApiResponse("Invalid request"),
+  "401": apiErrorOpenApiResponse("Authentication required"),
+  "403": apiErrorOpenApiResponse("Key scope or browser domain denied"),
+  "404": apiErrorOpenApiResponse("Resource not found in your organization"),
+  "429": apiErrorOpenApiResponse("Rate limit reached"),
+};
+
+/** The OpenAI-compatible endpoints keep OpenAI's own error body, not the native envelope. */
+const openAiErrors = {
+  "400": { description: "Invalid request (OpenAI-style error body)" },
   "401": { description: "Authentication required" },
   "403": { description: "Key scope or browser domain denied" },
   "404": { description: "Resource not found in your organization" },
@@ -160,12 +170,12 @@ const canonicalServicePaths = {
   } },
   "/v1/models": { get: {
     tags: ["chat"], summary: "List accessible workspaces as chat models", security: keySecurity,
-    responses: { "200": response("Workspace model list", { type: "object", required: ["object", "data"], properties: { object: { const: "list" }, data: { type: "array", items: ref("WorkspaceModel") } } }), ...errors },
+    responses: { "200": response("Workspace model list", { type: "object", required: ["object", "data"], properties: { object: { const: "list" }, data: { type: "array", items: ref("WorkspaceModel") } } }), ...openAiErrors },
   } },
   "/v1/chat/completions": { post: {
     tags: ["chat"], summary: "OpenAI-compatible workspace chat", security: keySecurity,
     requestBody: request(ref("ChatCompletionRequest")),
-    responses: { "200": { description: "Completion JSON, or data-only SSE chunks ending with [DONE]. include_usage adds a final usage chunk. Usage covers answer generation; retrieval is logged separately.", content: { ...json(ref("ChatCompletion")), "text/event-stream": { schema: { type: "string" } } } }, ...errors, "500": { description: "Workspace answer failed" } },
+    responses: { "200": { description: "Completion JSON, or data-only SSE chunks ending with [DONE]. include_usage adds a final usage chunk. Usage covers answer generation; retrieval is logged separately.", content: { ...json(ref("ChatCompletion")), "text/event-stream": { schema: { type: "string" } } } }, ...openAiErrors, "500": { description: "Workspace answer failed" } },
   } },
 };
 

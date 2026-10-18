@@ -100,14 +100,14 @@ export async function authorizeWorkspaceSecretAccess(args: {
   userId: string;
 }): Promise<
   | { ok: true; grant: WorkspaceSecretAccessGrant }
-  | { ok: false; status: 403 | 404; body: { error: string } }
+  | { ok: false; status: 403 | 404; code: "forbidden" | "workspace_not_found"; message: string }
 > {
   const access = await getWorkspaceAccess(args.workspaceId, args.userId);
   if (!access) {
-    return { ok: false, status: 404, body: { error: "Workspace not found" } };
+    return { ok: false, status: 404, code: "workspace_not_found", message: "Workspace not found" };
   }
   if (!canManageWorkspace(access, args.userId)) {
-    return { ok: false, status: 403, body: { error: "Forbidden" } };
+    return { ok: false, status: 403, code: "forbidden", message: "Forbidden" };
   }
 
   return {
@@ -133,7 +133,7 @@ async function requireWorkspaceSecretAccess(
 
   const authorization = await authorizeWorkspaceSecretAccess(args);
   if (!authorization.ok) {
-    throw new Error(authorization.body.error);
+    throw new Error(authorization.message);
   }
   return authorization.grant;
 }

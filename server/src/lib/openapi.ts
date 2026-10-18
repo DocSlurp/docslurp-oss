@@ -4,6 +4,7 @@ import { simpleServicePaths, simpleServiceSchemas } from "./simple-service-opena
 import { webhookEventCatalog } from "./webhook-events.js";
 import { searchCompatibilityPaths, searchCompatibilitySchemas } from "./search-compat-openapi.js";
 import { apiKeySurfacePaths, keyOnlySecurity, keyOrSessionSecurity } from "./api-key-surface-openapi.js";
+import { apiErrorOpenApiResponse, apiErrorSchema } from "./api-error-openapi.js";
 
 export function buildOpenApiDocument(baseUrl: string) {
   return {
@@ -23,7 +24,7 @@ export function buildOpenApiDocument(baseUrl: string) {
         bearerAuth: { type: "http", scheme: "bearer", description: "DocSlurp API key. Server keys start with dslp_priv_ and must stay secret; browser/embed client keys start with dslp_pub_ and are search-only and domain-restricted. Keys issued before typed prefixes (dslp_...) remain valid." },
         sessionAuth: { type: "apiKey", in: "cookie", name: "better-auth.session_token", description: "Authenticated dashboard session" },
       },
-      schemas: { ...simpleServiceSchemas, ...stateManagementSchemas, ...workspaceGraphSchemas, ...searchCompatibilitySchemas },
+      schemas: { ApiError: apiErrorSchema, ...simpleServiceSchemas, ...stateManagementSchemas, ...workspaceGraphSchemas, ...searchCompatibilitySchemas },
     },
     tags: [
       { name: "health" },
@@ -135,7 +136,7 @@ export function buildOpenApiDocument(baseUrl: string) {
           security: keyOnlySecurity,
           responses: {
             "200": { description: "Capability manifest" },
-            "401": { description: "Missing or invalid API key" }
+            "401": apiErrorOpenApiResponse("Missing or invalid API key")
           }
         }
       },
@@ -149,7 +150,7 @@ export function buildOpenApiDocument(baseUrl: string) {
           ],
           responses: {
             "200": { description: "Operation snapshot and event history" },
-            "404": { description: "Operation not found" }
+            "404": apiErrorOpenApiResponse("Operation not found")
           }
         }
       },
@@ -163,7 +164,7 @@ export function buildOpenApiDocument(baseUrl: string) {
           ],
           responses: {
             "200": { description: "Server-sent event stream" },
-            "404": { description: "Operation not found" }
+            "404": apiErrorOpenApiResponse("Operation not found")
           }
         }
       },
@@ -260,7 +261,7 @@ export function buildOpenApiDocument(baseUrl: string) {
           ],
           responses: {
             "200": { description: "Test delivery attempted" },
-            "404": { description: "Webhook not found" }
+            "404": apiErrorOpenApiResponse("Webhook not found")
           }
         }
       },
@@ -274,7 +275,7 @@ export function buildOpenApiDocument(baseUrl: string) {
           ],
           responses: {
             "200": { description: "Signed artifact URL" },
-            "400": { description: "Missing artifact URI" }
+            "400": apiErrorOpenApiResponse("Missing artifact URI")
           }
         },
         post: {
