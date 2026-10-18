@@ -37,7 +37,7 @@ beforeAll(async () => {
   await sql`insert into "user" (id,name,email) values ('refine-user','Local tester','refine@example.invalid'), ('refine-outsider','Outsider','outsider@example.invalid')`;
   await sql`insert into organizations(id,name,created_by_user_id) values('refine-org','Local test','refine-user')`;
   await sql`insert into org_memberships(org_id,user_id,role) values('refine-org','refine-user','owner')`;
-  await sql`insert into workspaces(id,user_id,name,org_id,pipeline) values('refine-ws','refine-user','Local test','refine-org',${sql.json({ privacyMode: "standard", embedding: { profile: "cheapest-hosted" } })})`;
+  await sql`insert into workspaces(id,user_id,name,org_id,pipeline) values('refine-ws','refine-user','Local test','refine-org',${sql.json({ privacyMode: "standard", embedding: { profile: "cheapest-hosted", target: "hosted", modelUri: "llm://openai/text-embedding-3-small" } })})`;
   await sql`insert into workspace_runs(id,user_id,workspace_id,kind,status,stage) values('refine-run','refine-user','refine-ws','ingest','completed','completed')`;
   await sql`insert into documents(id,user_id,workspace_id,run_id,filename,mime_type,source_key,status,org_id,page_count) values('refine-doc','refine-user','refine-ws','refine-run','local.txt','text/plain','local','completed','refine-org',2)`;
   await sql`insert into vector_indexes(id,document_id,backend,bucket,path,embedding_model,dimension) values('refine-index','refine-doc','lancedb','local','local','text-embedding-3-small',1536)`;
@@ -56,6 +56,7 @@ afterAll(async () => {
   reset?.(); table?.close(); db?.close();
   await sql?.end({ timeout: 2 }); await pg?.stop();
   if (directory) await rm(directory, { recursive: true, force: true });
+  expect(fetch).not.toHaveBeenCalled();
   vi.unstubAllGlobals(); vi.unstubAllEnvs();
 });
 

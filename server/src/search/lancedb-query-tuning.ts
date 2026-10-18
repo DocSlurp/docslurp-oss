@@ -8,6 +8,7 @@ export function lanceDbQueryTuning(limit: number, documentCount: number, rawRefi
   if (refineFactor !== undefined && (!Number.isSafeInteger(refineFactor) || refineFactor < 1 || refineFactor > 16)) {
     throw new Error("LANCEDB_REFINE_FACTOR must be an integer between 1 and 16");
   }
+  // Keep the existing scoped-search budget when refinement is unset.
   const scopedEf = documentCount > 0
     ? Math.ceil(Math.min(Math.max(limit * 10, documentCount * limit), 1_000) * 1.5)
     : undefined;
