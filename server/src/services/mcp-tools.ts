@@ -69,6 +69,8 @@ const workspaceSuggestSchema = z.object({
 // Agent-safety hints live with the tool definition so every surface (remote MCP,
 // WebMCP, chat tools) reads the same values instead of inferring them per surface.
 type ToolAnnotations = { readOnly: boolean; destructive: boolean; idempotent: boolean; openWorld: boolean };
+/** A tool with no declared hints. Matches the MCP defaults, which assume it may write. */
+const UNKNOWN_TOOL: ToolAnnotations = { readOnly: false, destructive: true, idempotent: false, openWorld: true };
 const READ_ONLY_TOOL: ToolAnnotations = { readOnly: true, destructive: false, idempotent: true, openWorld: false };
 const workspaceToolAnnotations: Record<string, ToolAnnotations> = {
   search: READ_ONLY_TOOL,
@@ -112,7 +114,7 @@ function legacyManifest(baseUrl: string, scopes?: string[]) {
         category: "tool",
         endpoint: `${baseUrl}/v1/mcp/tools/workspace.${name}`,
         inputSchema,
-        annotations: workspaceToolAnnotations[name] ?? READ_ONLY_TOOL,
+        annotations: workspaceToolAnnotations[name] ?? UNKNOWN_TOOL,
       })),
     ].filter((tool) => !scopes || tool.category !== "tool" || (tool.id.startsWith("ai.")
       ? scopes.some((scope) => scope === "search" || scope === "ingest")

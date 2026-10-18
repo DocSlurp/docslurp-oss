@@ -1606,6 +1606,7 @@ export function getAutomationCapabilityManifest(
           billableMetrics: ["embed-query", "aggregate-rag-answer"],
         },
         featureGates: ["automation", "citations", "aggregate-rag"],
+        // readOnly/idempotent describe data safety, not cost: this may still call a paid answer model.
         annotations: { readOnly: true, destructive: false, idempotent: true, openWorld: false },
       },
     ],
