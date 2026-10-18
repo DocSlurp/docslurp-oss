@@ -68,13 +68,15 @@ Every item independently checks the API key's `search` scope and organization/wo
 
 ## Errors
 
-Failed requests to `/v1/search*` and `/v1/chat` (not the OpenAI-compatible `/v1/chat/completions`) answer with one envelope:
+Errors raised while handling `/v1/search*` and `/v1/chat` (not the OpenAI-compatible `/v1/chat/completions`) answer with one envelope:
 
 ```json
 {"error": {"code": "invalid_request", "message": "Please check the information you entered and try again.", "details": {"issues": [{"path": "queries.0.q", "message": "...", "code": "invalid_value"}]}, "requestId": "req_123"}}
 ```
 
 `code` is a closed set you can branch on: `invalid_request`, `unauthorized`, `forbidden`, `not_found`, `workspace_not_found`, `conflict`, `payload_too_large`, `rate_limited`, `payment_required`, `credit_exhausted`, `workspace_budget_paused`, `org_budget_paused`, `minimum_credit_required`, `plan_not_entitled`, `chat_disabled`, `invalid_search_scope`, `unavailable`, `internal`. `message` is reviewed copy for people and may change; `details.issues` names the request fields that failed validation; quote `requestId` in support requests. The SDK exposes `DocSlurpApiError.code` and `.requestId`. Per-item batch errors keep their own `{code, message, status}` shape (above).
+
+Requests rejected before routing — invalid authentication, rate limiting, widget CORS, or the body-size limit — may answer with a middleware-specific body instead. When they do, `error.code` can be absent, so treat `DocSlurpApiError.code` as best-effort for those responses and fall back to `status`.
 
 ## Grounded chat
 

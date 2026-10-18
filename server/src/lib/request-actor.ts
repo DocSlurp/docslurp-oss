@@ -272,6 +272,8 @@ export async function resolveActorWorkspaceId(
  * any other inaccessible workspace (Hono renders an HTTPException's response).
  */
 export class ApiKeyWorkspaceNotAllowedError extends HTTPException {
+  /** Same code the workspace-access errors use, so one condition never splits across two codes. */
+  readonly code = "workspace_not_found";
   constructor() {
     super(404, { message: "Workspace not found", res: Response.json({ error: "Workspace not found" }, { status: 404 }) });
   }
