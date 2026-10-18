@@ -135,3 +135,66 @@ For an equal-candidate comparison, hold `candidateDepth`, `limit`, filters and f
 Both controls are also optional workspace retrieval defaults and per-request/thread chat retrieval overrides. The SDK exposes them on `SearchInput`; MCP schemas derive them from the same request contract. Search Session metadata records the chosen controls and adapter, fused-window, floor and ranking-depth counts.
 
 Omitting both controls preserves existing behavior: rerank-enabled searches acquire and rank up to 200 candidates, while rerank-disabled acquisition follows the result limit. Existing postprocessing packs its selected results; unprocessed fusion returns relevance order. Explicit controls are opt-in so this interface change does not claim a new ranking default based on exposed development evaluations. Scores remain the existing reciprocal output-position scores, and confidence is not a calibrated probability of answer correctness.
+
+### Optional hosted learned reranking
+
+Workspace search settings can explicitly select DeepInfra's pointwise
+`Qwen/Qwen3-Reranker-0.6B`. Omitted provider settings continue to use local BM25.
+With the operator's `DEEPINFRA_API_KEY` configured, an authorized workspace owner
+can opt in through `PATCH /v1/workspaces/:workspaceId/search-settings`:
+
+```json
+{
+  "retrievalDefaults": {
+    "useRerank": true,
+    "rerankProvider": "deepinfra",
+    "rerankModel": "Qwen/Qwen3-Reranker-0.6B",
+    "candidateDepth": 100,
+    "resultOrder": "relevance"
+  }
+}
+```
+
+Set `rerankProvider` to `"bm25"` to restore local ranking; a request with
+`rerank:false` makes no reranker call. Provider/model selection is a workspace
+setting, not an arbitrary per-request URL or credential. Search and workspace
+chat share the post-retrieval implementation. Existing output-score and citation
+contracts are retained; provider scores only choose candidate ordering.
+
+The hosted path preserves the original query and candidate bodies/identities,
+uses batches of at most 25 pairs with up to four requests in flight. One shared
+provider request deadline covers all waves: 15 seconds by default. Operators may
+set `SEARCH_RERANK_CONCURRENCY` (clamped to 1–4) and
+`SEARCH_RERANK_TIMEOUT_MS` (clamped to 1,000–30,000 ms); invalid noninteger values
+use the defaults. Two concurrent waves cover a full 200-candidate pool at the
+default concurrency, instead of eight serial calls. This is scheduling arithmetic,
+not a new provider latency measurement. Each pair is bounded to 30,000 combined
+UTF8 bytes as a conservative input limit; overlength inputs fall back without
+silently truncating evidence. Privacy modes that forbid hosted calls, missing
+keys, invalid configuration, exhausted budgets, timeout, malformed output and
+provider failures fall back to BM25 without retries. Privacy and scoped spend
+checks run before every dispatch. A failure stops new dispatches; every already
+dispatched sibling is awaited and its actual returned usage recorded before
+fallback or a metering error reaches the caller. A late successful response cannot
+clear another request’s unknown-charge diagnostic. Equal provider scores retain
+original candidate order regardless of response order. An explicit
+`candidateDepth` still controls the same acquisition/ranking pool independently
+of the provider. This integration does not assert a corpus-quality improvement.
+
+Search Session diagnostics include `hostedRerank` status, fallback reason,
+request/candidate counts, actual tokens, configured concurrency/timeout, duration, and
+`possibleUnreceiptedCharge` plus `unreceiptedRequests` when failed calls have no
+provider usage receipt.
+Raw provider errors, keys and document bodies are excluded from diagnostics.
+Actual returned tokens, including billable HTTP failures, are recorded through
+that Search Session's usage journal and persisted with its org/workspace/session
+scope. A broken usage recorder fails the search instead of hiding a lost usage
+event. Provider cost uses the verified default-tier rate of $0.01/M input tokens;
+customer ledger charges follow normal billing policy and can differ from provider
+cost. [DeepInfra model/pricing](https://deepinfra.com/Qwen/Qwen3-Reranker-0.6B).
+
+Local integration tests exercise actual `hybridSearch`, workspace settings,
+authorization, migrated Postgres spend checks, citation mapping and persisted
+usage with a mocked provider. They also verify rerank-off, privacy-blocked,
+credit-blocked and outsider requests make no provider calls. No deployment or
+provider corpus evaluation follows from enabling the implementation in source.

@@ -10,6 +10,8 @@ export interface WorkspaceRetrievalOptions {
   limit?: number;
   useHyDE?: boolean;
   useRerank?: boolean;
+  rerankProvider?: "bm25" | "deepinfra";
+  rerankModel?: "Qwen/Qwen3-Reranker-0.6B";
   candidateDepth?: number;
   resultOrder?: "relevance" | "prompt";
   useMmr?: boolean;
@@ -102,6 +104,8 @@ export function resolveWorkspaceRetrievalControls<
     candidateDepth: fromDefault("candidateDepth", defaults.candidateDepth) as number | undefined,
     resultOrder: fromDefault("resultOrder", defaults.resultOrder) as "relevance" | "prompt" | undefined,
     useHyDE: fromDefault("useHyDE", defaults.useHyDE) as boolean,
+    rerankProvider: fromDefault("rerankProvider", defaults.rerankProvider),
+    rerankModel: fromDefault("rerankModel", defaults.rerankModel),
     useRerank: fromDefault("useRerank", defaults.useRerank) as boolean,
     useContextualCompression:
       fromDefault(

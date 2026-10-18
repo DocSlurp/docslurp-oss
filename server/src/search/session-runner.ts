@@ -226,6 +226,8 @@ export async function runSearchSession(args: {
         workspaceSettings,
         wholeCorpusFallback: adapters.wholeCorpusFallback,
         openRouterApiKey,
+        rerankApiKey: setup.rerankApiKey,
+        rerankScope: normalizedScope,
         privacyMode,
       });
     },

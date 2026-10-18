@@ -317,6 +317,9 @@ export const searchResultOrderSchema = z.enum(["relevance", "prompt"]);
 export type SearchResultOrder = z.infer<typeof searchResultOrderSchema>;
 
 export const workspaceSearchRetrievalDefaultsSchema = z.object({
+  /** Explicit opt-in; omitted keeps local BM25 reranking. */
+  rerankProvider: z.enum(["bm25", "deepinfra"]).optional(),
+  rerankModel: z.literal("Qwen/Qwen3-Reranker-0.6B").optional(),
   /** Omitted: retain the historical rerank-dependent candidate window. */
   candidateDepth: searchCandidateDepthSchema.optional(),
   /** Omitted: retain historical ordering; prompt packs the selected set. */
@@ -399,6 +402,8 @@ export type WorkspaceSearchChatSettings = z.infer<
 >;
 
 export const updateWorkspaceSearchRetrievalDefaultsSchema = z.object({
+  rerankProvider: z.enum(["bm25", "deepinfra"]).optional(),
+  rerankModel: z.literal("Qwen/Qwen3-Reranker-0.6B").optional(),
   /** Omitted: retain the historical rerank-dependent candidate window. */
   candidateDepth: searchCandidateDepthSchema.optional(),
   /** Omitted: retain historical ordering; prompt packs the selected set. */

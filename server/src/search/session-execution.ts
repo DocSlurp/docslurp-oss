@@ -6,6 +6,7 @@ import { calibrateSearchConfidence } from "./confidence.js";
 import { compressChunks } from "./contextual-compression.js";
 import { mmrSelect } from "./mmr.js";
 import { lostInTheMiddleReorder } from "./position-reorder.js";
+import { rerankHosted } from "./hosted-rerank.js";
 import { rerankBM25, type RankedChunk } from "./rerank.js";
 import {
   applyRelevanceFloor,
@@ -54,8 +55,10 @@ export interface SearchPostRetrievalInput {
   limit: number;
   options: Pick<
     SearchOptions,
-    "useRerank" | "useMmr" | "mmrLambda" | "useContextualCompression" | "candidateDepth" | "resultOrder"
+    "useRerank" | "useMmr" | "mmrLambda" | "useContextualCompression" | "candidateDepth" | "resultOrder" | "rerankProvider" | "rerankModel"
   >;
+  rerankApiKey?: string;
+  rerankScope?: { orgId: string; workspaceId: string };
   openRouterApiKey?: string | null;
   privacyMode: PrivacyMode;
   session: SearchSessionJournal;
@@ -66,6 +69,8 @@ export interface SearchSessionRetrievalInput
   limit: number;
   retrieveCandidateLists(): Promise<SearchChunk[][]>;
   buildAvailability(chunks: SearchChunk[]): SearchAvailability;
+  rerankApiKey?: string;
+  rerankScope?: { orgId: string; workspaceId: string };
   openRouterApiKey?: string | null;
   privacyMode: PrivacyMode;
 }
@@ -178,7 +183,11 @@ export async function applySearchPostRetrievalProcessing(
   }));
 
   if (input.options.useRerank) {
-    ranked = rerankBM25(input.query, ranked);
+    ranked = input.options.rerankProvider === "deepinfra"
+      ? await rerankHosted({ query: input.query, chunks: ranked, model: input.options.rerankModel,
+          apiKey: input.rerankApiKey, scope: input.rerankScope,
+          privacyMode: input.privacyMode, session: input.session })
+      : rerankBM25(input.query, ranked);
   } else {
     ranked = [...ranked].sort((a, b) => b.score - a.score);
   }
@@ -284,6 +293,8 @@ export async function executeSearchSessionRetrieval(
         limit: input.limit,
         options: input.options,
         openRouterApiKey: input.openRouterApiKey,
+        rerankApiKey: input.rerankApiKey,
+        rerankScope: input.rerankScope,
         privacyMode: input.privacyMode,
         session: input.session,
       })
