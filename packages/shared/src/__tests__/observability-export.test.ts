@@ -1,7 +1,7 @@
 import { createServer } from "node:http";
 import { gunzipSync } from "node:zlib";
 import { afterEach, expect, it, vi } from "vitest";
-import { aiResultDetails, flushObservability, withObservation } from "../observability.js";
+import { aiResultDetails, flushObservability, withObservation, withDependencySpan, recordUsageReceipt } from "../observability.js";
 
 afterEach(() => vi.unstubAllEnvs());
 
@@ -40,13 +40,21 @@ it("exports a complete v4 root, generation and child span through the real SDK",
     await withObservation({ name: "canary-root", input: "request", metadata: { userId: "user", sessionId: "session" }, result: value => ({ output: value }) }, async () => {
       await withObservation({ name: "canary-generation", type: "generation", model: "test-model", result: aiResultDetails }, async () => ({ text: "answer", usage: { inputTokens: 7, outputTokens: 2 } }));
       await withObservation({ name: "canary-child", type: "span" }, async () => null);
+      await withDependencySpan("s3.GetObject", {
+        "docslurp.dependency.type": "s3", "docslurp.dependency.provider": "backblaze",
+        "server.address": "s3.example.test", "aws.requestId": "provider-request",
+        "docslurp.runId": "run-123", "authorization": "Bearer must-not-export",
+      }, async () => {
+        recordUsageReceipt({ id: "usage-123", provider: "deepinfra", model: "embedding-model", metric: "embedding",
+          costCents: 12, inputTokens: 123, metadata: { providerCostCents: 2, runId: "run-123" } });
+      });
       return "response";
     });
     await flushObservability();
     expect(requests.length).toBeGreaterThan(0);
     expect(requests.every(request => request.version === "4")).toBe(true);
     const spans = requests.flatMap(request => request.body.resourceSpans.flatMap(resource => resource.scopeSpans.flatMap(scope => scope.spans)));
-    expect(spans).toHaveLength(3);
+    expect(spans).toHaveLength(5);
     const root = spans.find(span => span.name === "canary-root");
     if (!root) throw new Error("Missing root observation");
     for (const span of spans) {
@@ -55,7 +63,24 @@ it("exports a complete v4 root, generation and child span through the real SDK",
       expect(attrs["langfuse.trace.name"]).toBe("canary-root");
       expect(attrs["user.id"]).toBe("user");
       expect(attrs["session.id"]).toBe("session");
-      if (span !== root) expect(span.parentSpanId).toBe(root.spanId);
+      if (span !== root) expect(span.parentSpanId).toBe(
+        span.name === "usage.receipt" ? spans.find(item => item.name === "s3.GetObject")!.spanId : root.spanId,
+      );
+      if (span.name === "s3.GetObject") {
+        expect(attrs["docslurp.dependency.provider"]).toBe("backblaze");
+        expect(attrs["server.address"]).toBe("s3.example.test");
+        expect(attrs["aws.requestId"]).toBe("provider-request");
+        expect(attrs["docslurp.runId"]).toBe("run-123");
+        expect(attrs.authorization).toBeUndefined();
+      }
+      if (span.name === "usage.receipt") {
+        expect(attrs["docslurp.usage.event_id"]).toBe("usage-123");
+        expect(attrs["docslurp.dependency.provider"]).toBe("deepinfra");
+        expect(attrs["docslurp.runId"]).toBe("run-123");
+        const values = Object.fromEntries(span.attributes.map(attr => [attr.key, attr.value]));
+        expect(values["docslurp.usage.provider_cost_usd"]).toEqual({ doubleValue: 0.02 });
+        expect(values["docslurp.usage.billable_credits"]).toEqual({ intValue: 12 });
+      }
       if (span === root) {
         expect(attrs["langfuse.observation.input"]).toBe("request");
         expect(attrs["langfuse.observation.output"]).toBe("response");

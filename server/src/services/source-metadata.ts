@@ -1,3 +1,4 @@
+import { instrumentS3Client } from "@docslurp/shared/observability";
 import { createHash } from "node:crypto";
 import { spawn } from "node:child_process";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
@@ -47,7 +48,7 @@ class PdfInfoExitError extends Error {
   }
 }
 
-const pageCountS3Client = new S3Client(s3ClientConfig(apiEnv.storage));
+const pageCountS3Client = instrumentS3Client(new S3Client(s3ClientConfig(apiEnv.storage)), apiEnv.storage.endpoint);
 
 function sha256Hex(bytes: Uint8Array): string {
   return createHash("sha256").update(bytes).digest("hex");

@@ -1,3 +1,4 @@
+import { instrumentS3Client } from "@docslurp/shared/observability";
 // Prebuilt vendor bundles: heavy, optional extractor stacks (Docling,
 // Unstructured, their models) published as content-addressed .tar.zst
 // archives and unpacked on demand, so installing one is a download and an
@@ -303,13 +304,13 @@ class HashingLimit extends Transform {
 
 async function openS3Object(source: S3BundleSource, key: string, artifact: VendorBundleArtifact, signal: AbortSignal): Promise<Readable> {
   const { S3Client, GetObjectCommand } = await import("@aws-sdk/client-s3");
-  const client = new S3Client({
+  const client = instrumentS3Client(new S3Client({
     region: source.region,
     endpoint: source.endpoint,
     forcePathStyle: true,
     maxAttempts: 2,
     credentials: { accessKeyId: source.accessKeyId, secretAccessKey: source.secretAccessKey },
-  });
+  }), source.endpoint);
   signal.addEventListener("abort", () => client.destroy(), { once: true });
   let response;
   try {

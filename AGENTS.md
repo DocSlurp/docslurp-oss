@@ -46,3 +46,11 @@ Squash-merge pull requests into `main` (`gh pr merge --squash`) so each PR lands
 ## Releases
 
 Follow [docs/releases.md](docs/releases.md). All public libraries share a version and release together through release-npm.yml. Do not publish or push release tags without an explicit release request.
+
+## Production performance investigations
+
+During production tests or tuning, inspect logs and traces before, at least every
+five minutes during active experiments, and after the run. Use
+[dependency tracing](docs/dependency-tracing.md) for attribution and verification.
+Keep provider costs separate from customer credits and deduplicate usage receipts.
+Do not create a recurring scheduler unless explicitly requested.

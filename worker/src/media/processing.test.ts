@@ -8,7 +8,7 @@ import { runSpentCents } from "../pipeline/checkpoints.js";
 import type { WorkspaceRun } from "../models.js";
 import type { MediaJournal, MediaProvider, MediaReceipt } from "./types.js";
 import type { ArtifactStore } from "../tools/storage.js";
-vi.mock("@docslurp/shared/observability", () => ({ withObservation: (_: unknown, run: () => unknown) => run(), emitTelemetryLog: vi.fn(), recordMediaTelemetry: vi.fn() }));
+vi.mock("@docslurp/shared/observability", async (importOriginal) => ({ ...await importOriginal<typeof import("@docslurp/shared/observability")>(), withObservation: (_: unknown, run: () => unknown) => run(), emitTelemetryLog: vi.fn(), recordMediaTelemetry: vi.fn() }));
 function fixture() {
   let receipt: MediaReceipt | undefined;
   const journal: MediaJournal = {
