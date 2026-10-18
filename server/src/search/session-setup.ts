@@ -34,6 +34,7 @@ export interface SearchSetup {
   workspaceSettings: WorkspaceSearchSettings;
   /** Undefined when privacyMode forbids hosted LLM strategies for this workspace. */
   openRouterApiKey: string | undefined;
+  rerankApiKey?: string;
   availabilityRow: SearchAvailabilityRow | undefined;
   resolvedOptions: SearchOptions;
   workspacePipeline: PipelineFeatures;
@@ -118,11 +119,18 @@ export async function resolveSearchSetup(
   if (!privacyModeAllowsHosted(privacyMode)) {
     session.recordDiagnostic("privacyMode", { privacyMode, hostedStrategies: "blocked" });
   }
+  const rerankApiKey = resolvedOptions.useRerank && resolvedOptions.rerankProvider === "deepinfra"
+    ? await hostedApiKeyForWorkspace({
+        apiKey: process.env.DEEPINFRA_API_KEY,
+        privacyMode, workspaceId: normalizedScope.workspaceId,
+        call: { provider: "deepinfra", model: "Qwen/Qwen3-Reranker-0.6B", operation: "api.search.rerank", target: "hosted" },
+      })
+    : undefined;
   // When the org may not spend (credits, budget caps), withhold the key too:
   // retrieval still runs, without model calls.
   const [availabilityRow, spendAllowed] = await Promise.all([
     availabilityPromise,
-    openRouterApiKey ? canSpend(normalizedScope.orgId, normalizedScope.workspaceId, { kind: "interactive", hold: false }) : true,
+    (openRouterApiKey || rerankApiKey) ? canSpend(normalizedScope.orgId, normalizedScope.workspaceId, { kind: "interactive", hold: false }) : true,
   ]);
   if (!spendAllowed) session.recordDiagnostic("aiStrategies", { disabled: "spend_blocked" });
 
@@ -131,6 +139,7 @@ export async function resolveSearchSetup(
     normalizedScope,
     workspaceSettings,
     openRouterApiKey: spendAllowed ? openRouterApiKey : undefined,
+    rerankApiKey: spendAllowed ? rerankApiKey : undefined,
     availabilityRow,
     resolvedOptions,
     workspacePipeline,

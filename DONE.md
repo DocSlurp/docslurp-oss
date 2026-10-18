@@ -1,5 +1,7 @@
 # Completed
 
+- Add opt-in hosted Qwen reranking at the actual search post-retrieval seam, with workspace provider/model settings, scoped spend/privacy gates, actual-token Search Session usage, bounded fallback diagnostics and isolated SQL/service tests.
+
 - Audit public API and SDK references: feature canonical upload/search/chat interfaces, label OpenAPI compatibility aliases deprecated, document the 0.3.0 SDK methods, and correct progress, workspace and webhook examples. Align browser/CLI adapters with the documented routes.
 
 - Stream worker source downloads to disk with size checks and partial-file cleanup; classify interrupted storage bodies as infrastructure failures and stream-parse embedding artifacts for indexing beyond JavaScript's single-string limit.
