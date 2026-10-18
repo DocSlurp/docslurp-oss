@@ -3,7 +3,8 @@ import { describe, expect, it, vi } from "vitest";
 
 const s3 = vi.hoisted(() => ({ bytes: new Uint8Array() }));
 vi.mock("@aws-sdk/client-s3", () => ({
-  S3Client: class { send = async () => ({ Body: { transformToByteArray: async () => s3.bytes } }); },
+  S3Client: class {
+    middlewareStack = { add: vi.fn(), addRelativeTo: vi.fn() }; send = async () => ({ Body: { transformToByteArray: async () => s3.bytes } }); },
   GetObjectCommand: class { constructor(readonly input: unknown) {} },
 }));
 

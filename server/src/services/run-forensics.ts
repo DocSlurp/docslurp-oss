@@ -1,3 +1,4 @@
+import { instrumentS3Client } from "@docslurp/shared/observability";
 import { HeadObjectCommand, S3Client } from "@aws-sdk/client-s3";
 
 import type { DocumentRecord, WorkspaceRun, WorkspaceRunStageState } from "@docslurp/shared";
@@ -153,7 +154,7 @@ export interface RunForensicsPayload {
 
 const LOW_CONFIDENCE_THRESHOLD = 0.45;
 
-const s3Client = new S3Client(s3ClientConfig(env.storage));
+const s3Client = instrumentS3Client(new S3Client(s3ClientConfig(env.storage)), env.storage.endpoint);
 
 function mapDocument(row: RunDocumentRow): DocumentRecord {
   return {

@@ -1,3 +1,4 @@
+import { recordUsageReceipt, usageTraceContext } from "@docslurp/shared/observability";
 import { randomUUID } from "node:crypto";
 import type { TransactionSql } from "postgres";
 
@@ -127,6 +128,7 @@ export async function recordCostEvent(args: {
     on conflict (id) do nothing
     returning id
   `;
+  if (rows.length > 0) recordUsageReceipt(event, { ...args.scope, ...metadata });
   return rows.length > 0;
 }
 
@@ -225,7 +227,7 @@ export function stampUsageScope(
   metadata: Record<string, unknown>,
   scope: UsageScope,
 ): Record<string, unknown> {
-  const stamped = { ...metadata };
+  const stamped = { ...usageTraceContext(), ...metadata };
   if (scope.orgId) stamped.orgId = scope.orgId;
   if (scope.workspaceId) stamped.workspaceId = scope.workspaceId;
   if (scope.workspaceIds && scope.workspaceIds.length > 0) {
@@ -247,6 +249,7 @@ function logUsage({ id, ...input }: UsageInput): UsageEvent {
       includeOutputTokens: input.logOutputTokens,
     }),
   );
+  event.metadata = { ...usageTraceContext(), ...event.metadata };
   return event;
 }
 
@@ -318,6 +321,7 @@ async function insertUsageEvent(
     where recorded.org_id is not null
       and recorded.cost_cents > 0 and ${metadata.billable !== false}
   `;
+  recordUsageReceipt(event, { ...scope, ...metadata });
   return event;
 }
 
