@@ -32,6 +32,7 @@ import {
 } from "../lib/ai.js";
 import { recordCostEvent, recordUsageEvent, type UsageScope } from "../lib/ai-usage.js";
 import { assertCanSpend } from "./billing/spend-guard.js";
+import { aiAdvancedToolSchema, aiSimpleToolSchema, toolInputJsonSchema } from "./mcp-tool-schemas.js";
 import type { ValidatedKey } from "./api-keys.js";
 import { generateGroundedSummary } from "./grounded-summaries.js";
 import { remoteUrlIntakeItems } from "./remote-ingest.js";
@@ -1501,13 +1502,7 @@ export function getAutomationCapabilityManifest(
           "Safest default workflow: optional ingest, wait-for-index, retrieval, answer, and citations.",
         category: "tool",
         endpoint: `${baseUrl}/v1/mcp/tools/ai.simple`,
-        inputSchema: {
-          type: "object",
-          properties: {
-            workspaceId: { type: "string" },
-            goal: { type: "string" },
-          },
-        },
+        inputSchema: toolInputJsonSchema(aiSimpleToolSchema),
         outputSchema: {
           type: "object",
           properties: { operation: { type: "object" } },
@@ -1534,14 +1529,7 @@ export function getAutomationCapabilityManifest(
           "Full retrieval and output controls for deterministic agent workflows.",
         category: "tool",
         endpoint: `${baseUrl}/v1/mcp/tools/ai.advanced`,
-        inputSchema: {
-          type: "object",
-          properties: {
-            workspaceId: { type: "string" },
-            goal: { type: "string" },
-            outputFormat: { type: "string" },
-          },
-        },
+        inputSchema: toolInputJsonSchema(aiAdvancedToolSchema),
         outputSchema: {
           type: "object",
           properties: { operation: { type: "object" } },
