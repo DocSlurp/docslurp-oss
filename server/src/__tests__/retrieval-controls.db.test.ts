@@ -10,6 +10,11 @@ import { startMigratedPostgres } from "../../../worker/src/test/migrated-postgre
 // Bind only the database connection; execute actual SQL, access checks, lexical
 // acquisition, LanceDB acquisition, fusion, ranking, packing and session writes.
 let sql: postgres.Sql;
+const databaseBinding = vi.hoisted(() => ({ sql: undefined as postgres.Sql | undefined }));
+vi.mock("../db.js", () => ({ get sql() {
+  if (!databaseBinding.sql) throw new Error("Isolated database is not initialized");
+  return databaseBinding.sql;
+} }));
 let stop: () => Promise<void>;
 let directory: string;
 let hybridSearch: typeof import("../services/search.js").hybridSearch;
@@ -25,11 +30,11 @@ vi.mock("../lib/ai.js", async (original) => ({
 beforeAll(async () => {
   const database = await startMigratedPostgres(); stop = database.stop;
   sql = postgres(database.url, { max: 1, prepare: false, onnotice: () => {} });
-  vi.doMock("../db.js", () => ({ sql }));
+  databaseBinding.sql = sql;
   directory = await mkdtemp(join(tmpdir(), "docslurp-retrieval-controls-"));
   vi.stubEnv("LANCEDB_URI", directory);
-  const pipeline = normalizePipelineFeatures({ privacyMode: "local-only" });
-  const model = resolveEmbeddingRoute(pipeline.embedding).model;
+  const pipeline = { privacyMode: "local-only", embedding: { profile: "good-fast-local" } } as const;
+  const model = resolveEmbeddingRoute(normalizePipelineFeatures(pipeline).embedding).model;
   await sql`insert into "user" (id, name, email) values ('rank-user', 'Ranking', 'ranking@example.invalid')`;
   await sql`insert into organizations (id, name, slug, created_by_user_id) values ('rank-org', 'Ranking', 'ranking', 'rank-user')`;
   await sql`insert into org_memberships (org_id, user_id, role) values ('rank-org', 'rank-user', 'owner')`;
@@ -53,9 +58,14 @@ beforeAll(async () => {
     ...rows.map((r, i) => ({ id: r.id, documentId: r.document_id, chunkIndex: i, vector: [1 - i / 100, i / 100, 0] })),
     { id: 'foreign-chunk', documentId: 'foreign-doc', chunkIndex: 0, vector: [1, 0, 0] },
   ]);
+  expect(await table.vectorSearch([1, 0, 0]).limit(50).toArray()).toHaveLength(50);
   table.close(); db.close();
+  const { loadWorkspacePipeline } = await import("../search/session-setup.js");
+  expect(resolveEmbeddingRoute((await loadWorkspacePipeline("rank-ws")).embedding).model).toBe(model);
   ({ hybridSearch } = await import("../services/search.js"));
-  ({ resetLanceDbConnectionForTests } = await import("../search/lancedb.js"));
+  const lance = await import("../search/lancedb.js");
+  resetLanceDbConnectionForTests = lance.resetLanceDbConnectionForTests;
+  expect(await lance.lanceDbVectorSearch({ orgId: "rank-org", embeddingModel: model, queryVector: [1, 0, 0], documentIds: ["rank-doc"], limit: 50 })).toHaveLength(50);
 }, 120_000);
 
 afterAll(async () => {

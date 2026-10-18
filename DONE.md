@@ -12,3 +12,5 @@
 
 - Trace PostgreSQL, S3, provider transports and vector-search adapters through the shared SigNoz and Langfuse exporters; retain dependency attributes, request-chain correlation and separately labeled usage costs, with real exporter, SDK and database regressions.
 - Serialize superseded-document graph cleanup with graph extraction to prevent the production graph-refresh deadlock, using a nonblocking workspace lock when document rows are already held.
+
+- Add opt-in candidate depth and relevance/prompt ordering controls across search GET/POST/batch, workspace/chat retrieval settings, SDK types and MCP-derived contracts. Keep omitted defaults stable; validate actual SQL/LanceDB retrieval in an isolated migrated database without model calls.

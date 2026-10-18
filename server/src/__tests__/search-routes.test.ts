@@ -436,3 +436,17 @@ describe("searchRoutes", () => {
     expect(userId).toBe("user-1");
   });
 });
+
+
+describe("explicit ranking control transport", () => {
+  it.each(["GET", "POST"])("forwards candidate depth and ordering on %s", async method => {
+    const app = buildApp();
+    hybridSearch.mockResolvedValue({ results: [], sessionId: "ranking-transport", usageEvents: [] });
+    const fields = { q: "pump maintenance", candidateDepth: 50, resultOrder: "relevance", rerank: false };
+    const response = method === "GET"
+      ? await app.request("/search?" + new URLSearchParams(Object.entries(fields).map(([k, v]) => [k, String(v)])))
+      : await app.request("/search", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(fields) });
+    expect(response.status).toBe(200);
+    expect(hybridSearch).toHaveBeenLastCalledWith("pump maintenance", "user-1", expect.objectContaining({ candidateDepth: 50, resultOrder: "relevance", useRerank: false }));
+  });
+});

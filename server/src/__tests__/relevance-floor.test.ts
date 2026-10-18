@@ -298,7 +298,7 @@ describe("explicit candidate windows and ordering through session execution", ()
     const xs = [chunk("a", { relevance: 0 }), chunk("b", { relevance: 1 }), chunk("c", { relevance: 1 })];
     const response = await run({ lists: [xs], candidateDepth: 2, resultOrder: "relevance", minScore: .5, limit: 10 });
     expect(response.results.map(r => r.citation.documentId)).toEqual(["doc-b"]);
-    expect(response.relevanceFloor.dropped).toBe(1);
+    expect(response.relevanceFloor?.dropped).toBe(1);
   });
 
   it("uses fusion relevance rather than incomparable adapter scores and packs without reranking", async () => {
