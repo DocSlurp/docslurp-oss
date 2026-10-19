@@ -1,0 +1,74 @@
+{
+  "version": 1,
+  "privateEvidenceRoot": "/tmp/docslurp-retrieval-quality-evidence/dataset",
+  "sourcesRedistributed": false,
+  "confirmation": "Not authored or inspected by this evaluator; required before promotion.",
+  "originalCases": 13,
+  "developmentV2Cases": 16,
+  "misses": [
+    {
+      "id": "asu-08",
+      "classification": "ranking",
+      "evidence": "Exact indexed supporting passage recovered at rank8 by identifier; original question misses top10."
+    },
+    {
+      "id": "st083-01",
+      "classification": "oracle_error_wrong_act_and_original_question_miss",
+      "evidence": "Section14 belongs to preceding act91-79, not91-80 in running header; needle recovers passage rank2."
+    },
+    {
+      "id": "st083-04",
+      "classification": "oracle_error_overstrict_header",
+      "evidence": "Original query returns answer and correct page at rank3; heading absent in chunk."
+    }
+  ],
+  "newSearchCalls": 5,
+  "usage": {
+    "inputTokens": 106,
+    "outputTokens": 0,
+    "apiEstimatedCostCents": 0.0002544,
+    "billedLedgerCharges": "Not independently reconciled; sessionIds retained in raw traces."
+  },
+  "files": [
+    {
+      "name": "asu-08-needle-replay-v1.json",
+      "sha256": "2c3cf5914278430a5ecf114cde50507a2e9131eaba14c4eb6ade5b47465a03b5"
+    },
+    {
+      "name": "asu-08-replay-v1.json",
+      "sha256": "c3acc0a1ce0b90962ff3acd83a79c7efe3dfc813a12e80ec05d8514fbdc2ced2"
+    },
+    {
+      "name": "development-v1.json",
+      "sha256": "31ee59fcac8fc43e4c4c1e61751dc7de1fbe6140827d4ae8dd088d5a70c733ed"
+    },
+    {
+      "name": "development-v2.json",
+      "sha256": "a0833a0dc6e35739d37e2ed86699b9efb8ab36ebed1f3a23f33912400c1d6df8"
+    },
+    {
+      "name": "integrity-v1.json",
+      "sha256": "d6515f0b5b567e9b004b239c4e7d9b56ead01fe07709ff57e012871452f6fed7"
+    },
+    {
+      "name": "oracle-correction-provenance-v1.json",
+      "sha256": "c561e7f8b994116742902404d2ed41fd1286214c6c0c53e869528afdcb7f6845"
+    },
+    {
+      "name": "replay-v1-score.json",
+      "sha256": "ff023654912f61f42bdbc9b259c080c411016b5a0dc8e7fdbdf0cb0edfd04ed5"
+    },
+    {
+      "name": "st083-01-needle-replay-v1.json",
+      "sha256": "066d14f4669d84bb99d63dfe158fde7894ce99c078e6beb57f58bd16c182b6c9"
+    },
+    {
+      "name": "st083-01-replay-v1.json",
+      "sha256": "a246645891631bda8b36c973e3c703223d4f8b388ff9f33f38e4118bdbaf360e"
+    },
+    {
+      "name": "st083-04-replay-v1.json",
+      "sha256": "92dedf2a9322beb79dae384cac186e0674abc89a34b4cc1ea33e94a08f2d1188"
+    }
+  ]
+}

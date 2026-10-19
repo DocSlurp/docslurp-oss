@@ -1,5 +1,5 @@
 import { dynamicTool, jsonSchema, type ToolSet } from "ai";
-import { searchResultSchema, type SearchResult } from "@docslurp/shared";
+import { CHAT_MAX_RETRIEVED_PASSAGES, searchResultSchema, type SearchResult, type WorkspaceSearchRetrievalDefaults } from "@docslurp/shared";
 import type { McpDispatch, McpManifest } from "../lib/mcp-http.js";
 
 export interface ChatToolActivity {
@@ -20,6 +20,7 @@ export function createChatMcpTools(args: {
   manifest: McpManifest;
   dispatch: McpDispatch;
   workspaceId: string;
+  retrievalDefaults?: WorkspaceSearchRetrievalDefaults;
   signal: AbortSignal;
   onActivity?: (activity: ChatToolActivity) => void;
   onEvidence?: (citations: SearchResult[]) => void;
@@ -33,6 +34,26 @@ export function createChatMcpTools(args: {
   const activity = new Map<string, ChatToolActivity>();
   let calls = 0;
   const tools: ToolSet = {};
+  const defaults = args.retrievalDefaults;
+  const limit = defaults ? Math.min(defaults.resultCount, CHAT_MAX_RETRIEVED_PASSAGES) : undefined;
+  const searchDefaults = defaults ? {
+    limit, hyde: defaults.useHyDE, rerank: defaults.useRerank, mmr: defaults.useMmr,
+    candidateDepth: defaults.candidateDepth, resultOrder: defaults.resultOrder,
+    compression: defaults.useContextualCompression, mmrLambda: defaults.mmrLambda,
+    minScore: defaults.minScore, parentRetrieval: defaults.parentRetrieval,
+    summarySeed: defaults.summarySeed, queryRewrite: defaults.queryRewrite,
+    queryDecompose: defaults.queryDecompose, stepback: defaults.stepback,
+    selfQuery: defaults.selfQuery, iterativeMultiHop: defaults.iterativeMultiHop,
+    graphExpansion: defaults.enableGraphExpansion, communityExpansion: defaults.enableCommunityExpansion,
+    graphHops: defaults.graphHops,
+  } : {};
+  const chatDefaults = defaults ? {
+    resultCount: limit, useHyDE: defaults.useHyDE, useRerank: defaults.useRerank,
+    candidateDepth: defaults.candidateDepth, resultOrder: defaults.resultOrder,
+    useMmr: defaults.useMmr, mmrLambda: defaults.mmrLambda,
+    iterativeMultiHop: defaults.iterativeMultiHop, enableGraphExpansion: defaults.enableGraphExpansion,
+    enableCommunityExpansion: defaults.enableCommunityExpansion, graphHops: defaults.graphHops,
+  } : undefined;
 
   function collectEvidence(value: unknown): void {
     if (!value || typeof value !== "object") return;
@@ -63,9 +84,15 @@ export function createChatMcpTools(args: {
         // G-04: the user-selected workspace is the only scope. It is applied
         // after the model's arguments, so a prompt-injected workspaceId can't
         // send a search into another workspace the user happens to reach.
-        const body = (definition.id === "search" && Array.isArray(supplied.queries))
-          ? { ...supplied, queries: supplied.queries.map(q => ({ ...(q && typeof q === "object" && !Array.isArray(q) ? q : {}), workspaceId: args.workspaceId })) }
-          : { ...supplied, workspaceId: args.workspaceId };
+        // Workspace retrieval controls (including this request's overrides) are
+        // also applied after the model's arguments so a tool call cannot widen them.
+        const body = definition.id === "search"
+          ? Array.isArray(supplied.queries)
+            ? { ...supplied, queries: supplied.queries.map(q => ({ ...(q && typeof q === "object" && !Array.isArray(q) ? q : {}), ...searchDefaults, workspaceId: args.workspaceId })) }
+            : { ...supplied, ...searchDefaults, workspaceId: args.workspaceId }
+          : definition.id === "chat" && chatDefaults
+            ? { ...supplied, retrieval: chatDefaults, workspaceId: args.workspaceId }
+            : { ...supplied, workspaceId: args.workspaceId };
         const started = Date.now();
         const update = (status: ChatToolActivity["status"]) => {
           const event: ChatToolActivity = { id: toolCallId, name: definition.id, status,

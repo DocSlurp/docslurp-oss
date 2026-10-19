@@ -17,6 +17,7 @@ import { chatWorkspace, workspaceChatDisabledBody } from "../services/workspace-
 import { listWorkspaces } from "../services/workspaces.js";
 import { normalizeExtractedText, type WorkspaceChatResponse, type WorkspaceChatTurn } from "@docslurp/shared";
 import { authenticatedByRoute } from "../lib/route-auth.js";
+import { env } from "../config.js";
 
 const textContent = z.union([
   z.string().max(64_000),
@@ -146,6 +147,7 @@ export const chatCompletionsRoutes = new Hono()
     const args = {
       workspaceId,
       userId: actor.userId,
+      actor, allowAgentTools: env.publicChatAgentEnabled, signal: c.req.raw.signal,
       query: contentText(input.messages.at(-1)!.content),
       history,
       maxOutputTokens: input.max_completion_tokens ?? input.max_tokens,

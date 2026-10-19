@@ -367,6 +367,9 @@ async function planIterativeMultiHop(args: {
   };
 }
 
+/** Hosted providers that report actual usage and fail loudly instead of degrading to text-only search. */
+const METERED_EMBEDDING_PROVIDERS = new Set(["openrouter", "perplexity", "deepinfra"]);
+
 async function embedQuery(
   query: string,
   embedding: EmbeddingConfig,
@@ -382,7 +385,8 @@ async function embedQuery(
     runtime === "remote" && provider === "openai"
       ? process.env.OPENAI_API_KEY
       : provider === "openrouter" ? process.env.OPENROUTER_API_KEY ?? process.env.OPENROUTER_KEY
-        : provider === "perplexity" ? process.env.PERPLEXITY_API_KEY ?? process.env.PERPLEXITYAI_API_KEY : undefined;
+        : provider === "perplexity" ? process.env.PERPLEXITY_API_KEY ?? process.env.PERPLEXITYAI_API_KEY
+          : provider === "deepinfra" ? process.env.DEEPINFRA_API_KEY : undefined;
   if (runtime === "remote" && provider === "openai" && !apiKey) {
     return null;
   }
@@ -396,13 +400,13 @@ async function embedQuery(
       model,
       dimensions,
       requestedDimensions,
-      normalize: true,
+      normalize: provider === "deepinfra" ? embedding.normalize : true,
       apiKey,
       baseURL: baseUrl ?? process.env.OPENAI_BASE_URL,
       privacyMode,
       modelUri: route.modelUri,
       auditScope: { workspaceId: auditWorkspaceId ?? null },
-      ...(["openrouter", "perplexity"].includes(provider) ? { onUsage: (actual: { inputTokens: number }) => {
+      ...(METERED_EMBEDDING_PROVIDERS.has(provider) ? { onUsage: (actual: { inputTokens: number }) => {
         usage.record({ provider, model, metric: "embed-query", inputTokens: actual.inputTokens, logOutputTokens: false, metadata: { usageSource: "provider" } });
         usageRecorded = true;
       } } : {}),
@@ -421,7 +425,7 @@ async function embedQuery(
     });
     return result.embedding;
   } catch (error) {
-    if (["openrouter", "perplexity"].includes(provider)) throw error;
+    if (METERED_EMBEDDING_PROVIDERS.has(provider)) throw error;
     return null;
   }
 }
