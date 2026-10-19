@@ -11,9 +11,9 @@ BEGIN
   INSERT INTO organizations (id, name, is_personal, personal_owner_user_id, created_by_user_id)
     VALUES (personal_id, 'Personal test', true, account_id, account_id);
   SELECT credit_balance_cents INTO balance FROM organizations WHERE id = personal_id;
-  IF balance <> 2500 THEN RAISE EXCEPTION 'Expected 2500 starter cents, got %', balance; END IF;
+  IF balance <> 250 THEN RAISE EXCEPTION 'Expected 250 starter cents, got %', balance; END IF;
   SELECT count(*) INTO grant_count FROM credit_ledger
-    WHERE user_id = account_id AND reason = 'new-account-starter-credit' AND delta = 25.00
+    WHERE user_id = account_id AND reason = 'new-account-starter-credit' AND delta = 2.50
       AND metadata->>'orgId' = personal_id;
   IF grant_count <> 1 THEN RAISE EXCEPTION 'Starter grant must have exactly one matching ledger entry'; END IF;
 
@@ -21,7 +21,7 @@ BEGIN
     VALUES (gen_random_uuid()::text, 'Repeated onboarding', true, account_id, account_id)
     ON CONFLICT (personal_owner_user_id) DO NOTHING;
   SELECT credit_balance_cents INTO balance FROM organizations WHERE id = personal_id;
-  IF balance <> 2500 THEN RAISE EXCEPTION 'Repeated onboarding changed starter balance'; END IF;
+  IF balance <> 250 THEN RAISE EXCEPTION 'Repeated onboarding changed starter balance'; END IF;
 
   INSERT INTO organizations (id, name, is_personal, created_by_user_id)
     VALUES (team_id, 'Team test', false, account_id);
