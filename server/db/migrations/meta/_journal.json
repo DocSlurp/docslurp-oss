@@ -421,6 +421,13 @@
       "when": 1792368000000,
       "tag": "0059_starter_credit_250",
       "breakpoints": true
+    },
+    {
+      "idx": 60,
+      "version": "7",
+      "when": 1792454400000,
+      "tag": "0060_drop_automation_tables",
+      "breakpoints": true
     }
   ]
 }
