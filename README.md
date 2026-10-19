@@ -1,3 +1,5 @@
+<img src="docs/brand/docslurp-mark.svg" width="72" alt="DocSlurp logo">
+
 # DocSlurp
 
 Send DocSlurp any file. Get back page-by-page Markdown and structured fields, hybrid search and RAG context, and a chat endpoint whose answers cite the page they came from.
