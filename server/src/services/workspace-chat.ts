@@ -951,6 +951,8 @@ export async function chatWorkspace(args: {
   maxOutputTokens?: number;
   allowConfiguration?: boolean;
   actor?: RequestActor;
+  /** Trusted entrypoint only; nested workspace.chat must never start another agent. */
+  allowAgentTools?: boolean;
   signal?: AbortSignal;
   onToolActivity?: (activity: ChatToolActivity) => void;
   pendingSearchRetry?: WorkspaceChatPendingSearchRetry;
@@ -1064,12 +1066,13 @@ async function chatWorkspaceTurn(
   const history = args.history ?? await listRecentTurns(sessionId, 20);
   if (workspace && args.allowConfiguration !== false && history.length === 0) await refineWorkspaceNames([args.workspaceId], args.query);
   // Filtered questions take direct retrieval so the filters are guaranteed to apply.
-  if (args.actor && env.chatMcpEnabled && chatApiKey && !filterDocumentIds && !narrowingFilters) {
+  if (args.allowAgentTools !== false && args.actor && env.chatMcpEnabled && chatApiKey && !filterDocumentIds && !narrowingFilters) {
     if (!workspace) throw new Error("Workspace not found");
     const { runChatMcpAgent } = await import("./chat-mcp-agent.js");
     const generated = await runChatMcpAgent({
       actor: args.actor, workspaceId: args.workspaceId, orgId: workspace.orgId, sessionId,
       query: args.query, history, apiKey: chatApiKey, privacyMode, model,
+      retrievalDefaults: searchSettings.retrievalDefaults,
       workspaceInstructions: [
         workspace.systemPrompt ? `Workspace ingest instruction: ${workspace.systemPrompt}` : "",
         searchSettings.chat.searchInstructions ? `Workspace search instruction: ${searchSettings.chat.searchInstructions}` : "",

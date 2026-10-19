@@ -63,41 +63,55 @@ For files already hosted online, call `upload` with `{"urls":["https://example.c
 
 The remote endpoint supports modern per-request MCP and stateless legacy Streamable HTTP clients. Stdio-only clients can use `docslurp mcp-server` from `@docslurp/cli`; its native REST adapters expose the same tools. Transport and adapter calls share the same authorization and search/chat implementation, without an internal network hop or forwarding credentials.
 
-## Testing with Pi
+## Testing with real clients
 
-Run `pnpm test:mcp` for the protocol tests and the Pi agent integration test in
-`server/src/lib/mcp-pi.test.ts`. The integration test starts a loopback HTTP server
-at `/v1/mcp` using the production MCP handler, discovers tool schemas with the
-official MCP client, and wraps those tools for Pi's agent loop. It checks tool
-arguments, result delivery to the next model turn, adapter errors, unexpected
-backend failures, and argument validation against the discovered schema.
+`pnpm test:mcp` runs the MCP and OpenAI-compatible client tests. None of them needs
+API keys, a database service or paid model calls: databases are migrated in-memory
+Postgres (PGlite), models are scripted, and the document backend behind the tools is
+a stub.
 
-The test uses Pi's scripted faux model and a stub document backend. It needs no
-API keys, database, or paid model calls. It covers agent/transport interoperability;
-it does not exercise the mounted endpoint's authentication or document retrieval.
+- `server/src/__tests__/mcp-oauth-client.db.test.ts` uses the official
+  `@modelcontextprotocol/client` SDK over Streamable HTTP against the real OAuth
+  routes and `/v1/mcp`: protected resource and authorization server discovery,
+  dynamic client registration, PKCE authorization with consent, code exchange,
+  `search` and `chat` tool calls, transparent refresh after the access token
+  expires, revocation (`401` with `error="invalid_token"`), browser
+  re-authorization after a dead refresh token, and refresh-token reuse handling.
+- `server/src/__tests__/mcp-pi-agent.db.test.ts` runs the
+  [Pi coding agent](https://pi.dev) (`@earendil-works/pi-coding-agent`) the way a
+  user configures it: an `mcp.json` entry with only the endpoint URL. Pi's own MCP
+  client signs in through its loopback OAuth callback (`/mcp login`), lists the
+  DocSlurp tools, calls `search` in an agent turn with Pi's faux model, and refreshes
+  the access token mid-session.
+- `server/src/lib/mcp-pi.test.ts` wraps discovered tools for Pi's agent loop and
+  checks argument validation and error delivery.
+- `server/src/__tests__/chat-completions-openai-sdk.test.ts` drives `/v1/models` and
+  `/v1/chat/completions` with the official `openai` SDK: `workspace:default` and
+  `workspace:<slug>`, streaming to `[DONE]`, and the SDK's 401/404/400 error classes.
 
-For an explicit paid smoke test, run `pnpm test:mcp:live` (or append
-`--model z-ai/glm-5.3-flash` to select one model). This runs DeepSeek V4.1 Flash
-and GLM 5.3 Flash through OpenRouter against the local production MCP handler
-with synthetic suggestions. GLM uses low reasoning and the DeepInfra FP4 route.
-The runner requires OpenRouter and Langfuse credentials from `.env`, checks the
-live catalog prices, limits each model to three turns of 512 output tokens,
-reserves at most $0.10 across the run, and disables automatic provider retries.
+To try Pi against a running server by hand (a real sign-in in your browser; model
+calls are billed by whichever provider Pi uses):
 
-Each run saves model transcripts, tool results, provider billing receipts, a
-scoped SQLite `usage_events` database, and a durable Langfuse outbox under
-`.tmp/mcp-pi-live/`. Langfuse receives agent, generation and tool observations
-with actual usage and available provider-reported costs. The runner verifies
-observation counts by reading the traces back. Telemetry or billing reads never
-replay a model call. The default command does not connect to production workspaces.
+```bash
+pi mcp add docslurp --url http://localhost:4321/v1/mcp   # or https://docslurp.io/v1/mcp
+pi mcp login docslurp
+pi mcp list                                             # connects and lists the tools
+```
 
-For an explicitly authorized production test, append
-`--production --workspace WORKSPACE_ID`. This uses `https://docslurp.io/v1/mcp`
-and `.env.production`'s database, creates a temporary organization-scoped
-search-only API key, and revokes it during cleanup. The workspace's returned
-suggestions are sent to OpenRouter and Langfuse. Model usage is also persisted
-through the scoped production usage ledger. Baseline results and key-revocation
-receipts are saved beside the run evidence; credentials are never saved in traces.
+### OAuth behaviour clients rely on
+
+- `GET` and `DELETE` on `/v1/mcp` answer `405` without asking for credentials: the
+  server is stateless and offers no standalone SSE stream.
+- A `401` carries `WWW-Authenticate: Bearer resource_metadata="…", scope="…"`, plus
+  `error="invalid_token"` when a token was presented but refused.
+- Access tokens last 15 minutes and refresh tokens 30 days. Refresh tokens rotate on
+  every use. Presenting an already-rotated refresh token within 30 seconds (two
+  processes sharing a credential store, or a retried request) is refused without
+  revoking anything; presenting it later revokes the whole grant, and the client must
+  sign in again. Token errors are RFC 6749 JSON with an `error_description`, and the
+  server logs `[mcp-oauth] token_rejected reason=…` without the token.
+- Loopback redirect URIs may use any port (RFC 8252). The `resource` parameter
+  defaults to the MCP endpoint and any other value is refused.
 
 ## Dashboard chat and WebMCP
 

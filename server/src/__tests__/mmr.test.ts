@@ -71,35 +71,20 @@ describe("mmrSelect", () => {
     expect(result[1]!.id).toBe("b"); // diverse pick preferred over near-duplicate
   });
 
-  it("falls back to position-based diversity when no vectors are present", () => {
+  it.each([false, true])("preserves the strongest passages without complete vectors (partial=%s)", (partial) => {
     const candidates = [
-      chunk("a", 0.9),
-      chunk("b", 0.8),
-      chunk("c", 0.7),
-      chunk("d", 0.6),
+      chunk("weak", 0.2),
+      chunk("best", 0.9, partial ? V_A : undefined),
+      chunk("second", 0.8),
+      chunk("third", 0.7),
     ];
-    // Should not throw and should return topK items
-    const result = mmrSelect(candidates, 2);
-    expect(result).toHaveLength(2);
-  });
-
-  it("falls back to position diversity when only some candidates have vectors", () => {
-    const candidates = [
-      chunk("a", 0.9, V_A),
-      chunk("b", 0.8),         // no vector
-    ];
-    const result = mmrSelect(candidates, 2);
-    expect(result).toHaveLength(2);
-  });
-
-  it("position-diversity fallback returns highest-score item first", () => {
-    const candidates = [
-      chunk("low", 0.2),
-      chunk("high", 0.9),
-      chunk("mid", 0.6),
-    ];
-    const result = mmrSelect(candidates, 2);
-    expect(result[0]!.id).toBe("high");
+    // Without similarity evidence, changing lambda must not drop the second
+    // strongest result simply because it occupies an odd ranking position.
+    for (const lambda of [0, 0.5, 1]) {
+      expect(mmrSelect(candidates, 2, lambda).map((c) => c.id))
+        .toEqual(["best", "second"]);
+    }
+    expect(candidates.map((c) => c.id)).toEqual(["weak", "best", "second", "third"]);
   });
 
   it("returns a copy, not the same array reference", () => {

@@ -1,0 +1,126 @@
+{
+  "at": "2026-10-17T05:39:15.144Z",
+  "kind": "frozen-preflight-no-corpus-provider-calls",
+  "corpora": [
+    {
+      "runName": "e2-hosted-asu",
+      "runId": "60d446ca-aff3-4f50-a2d8-172663c01a0c",
+      "documentId": "26b495d4-9703-4a2a-83c4-e920592e13ee",
+      "chunks": 8816,
+      "dimensionCounts": {
+        "1536": 8816
+      },
+      "corpusSha256": "1e155ef037816b4fea6a7435cf3aaf201dfe1c6b0ff191b998426da943e22cc1",
+      "artifactSha256": "fa354e3198514e48a02bc55402f5a83739ac68f7eaac89aebc01b6289106a613",
+      "artifactBytes": 333863025,
+      "utf8Bytes": 16792231,
+      "maxChunkBytes": 2148,
+      "over8192Bytes": 0,
+      "tokenEstimate": 2726341,
+      "embedding": {
+        "profile": "cheapest-hosted",
+        "target": "hosted",
+        "modelUri": "llm://openai/text-embedding-3-small",
+        "runtime": "remote",
+        "provider": "openai",
+        "model": "text-embedding-3-small",
+        "baseUrl": null,
+        "dimensions": 1536,
+        "task": "document",
+        "normalize": true,
+        "batchSize": 256,
+        "lateChunking": false,
+        "lateChunkingWindow": 2,
+        "supportsCustomDimensions": true
+      }
+    },
+    {
+      "runName": "e3-hosted-statutes83",
+      "runId": "1d4e9862-29d0-473e-8371-38727aa63fa4",
+      "documentId": "a2a9b452-739d-4e35-9789-259df1eb9147",
+      "chunks": 4859,
+      "dimensionCounts": {
+        "1536": 4859
+      },
+      "corpusSha256": "221d6f68248a2c27b7fe34ef4f944c177d9e032bee49580539862ec55655cc19",
+      "artifactSha256": "af82d0fbc73c96a27e8f43cc13a956aa3042ebf96e50e5079f615152fd0cf34f",
+      "artifactBytes": 169610779,
+      "utf8Bytes": 5167277,
+      "maxChunkBytes": 2217,
+      "over8192Bytes": 0,
+      "tokenEstimate": 1051298,
+      "embedding": {
+        "profile": "cheapest-hosted",
+        "target": "hosted",
+        "modelUri": "llm://openai/text-embedding-3-small",
+        "runtime": "remote",
+        "provider": "openai",
+        "model": "text-embedding-3-small",
+        "baseUrl": null,
+        "dimensions": 1536,
+        "task": "document",
+        "normalize": true,
+        "batchSize": 256,
+        "lateChunking": false,
+        "lateChunkingWindow": 2,
+        "supportsCustomDimensions": true
+      }
+    }
+  ],
+  "datasetSha256": "a0833a0dc6e35739d37e2ed86699b9efb8ab36ebed1f3a23f33912400c1d6df8",
+  "querySha256": "dccb80ba2ec711f7c1f43b631c916906ac654803a92756f75031d966b3c58728",
+  "queryCount": 16,
+  "queryUtf8Bytes": 1888,
+  "totalChunks": 13675,
+  "totalDocumentUtf8Bytes": 21959508,
+  "inputTokenUpperBoundPerArm": 21988778,
+  "tokenBound": "one token per UTF-8 byte plus two special tokens per input; conservative, no retries",
+  "providerUpperBoundUsd": 1.5392528600000002,
+  "providerCapWith20PercentReserveUsd": 1.924066075,
+  "phaseProviderSpentUsd": 3e-7,
+  "arms": [
+    {
+      "id": "openai1536",
+      "provider": "openai",
+      "model": "text-embedding-3-small",
+      "dimensions": 1536,
+      "documentVectors": "retained",
+      "queryVectors": "new-metered"
+    },
+    {
+      "id": "openai256",
+      "provider": "openai",
+      "model": "text-embedding-3-small",
+      "dimensions": 256,
+      "documentVectors": "new-metered"
+    },
+    {
+      "id": "openai512",
+      "provider": "openai",
+      "model": "text-embedding-3-small",
+      "dimensions": 512,
+      "documentVectors": "new-metered"
+    },
+    {
+      "id": "openai768",
+      "provider": "openai",
+      "model": "text-embedding-3-small",
+      "dimensions": 768,
+      "documentVectors": "new-metered"
+    },
+    {
+      "id": "bge1024",
+      "provider": "deepinfra",
+      "model": "BAAI/bge-m3",
+      "dimensions": 1024,
+      "documentVectors": "new-metered"
+    },
+    {
+      "id": "gemini3072",
+      "provider": "google",
+      "model": "gemini-embedding-2",
+      "dimensions": 3072,
+      "status": "deferred-missing-native-metered-adapter"
+    }
+  ]
+}

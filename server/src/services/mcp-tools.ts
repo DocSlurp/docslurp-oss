@@ -11,7 +11,7 @@ import { listWorkspaces } from "./workspaces.js";
 import { apiKeyCanUseWorkspace } from "../lib/api-key-workspace-scope.js";
 import { completeUploadInput, listWorkspacesInput, mcpManifest, mcpTools, suggestQueriesInput, uploadInput, uploadStatusInput } from "./mcp-catalog.js";
 import { mcpOrigin } from "../lib/mcp-origin.js";
-import { searchRoutes } from "../routes/search.js";
+import { groundedWorkspaceChatRoutes, searchRoutes } from "../routes/search.js";
 import { sql } from "../db.js";
 import { isProtectedStoredQuery } from "../search/session.js";
 import { spendAwareErrorHandler } from "./billing/spend-guard.js";
@@ -135,13 +135,14 @@ const mcpAdapterRoutes = new Hono()
 
     if (toolId === "search" || toolId === "chat") {
       const actor = c.get("requestActor");
+      // The MCP chat tool is grounded retrieval only: it never starts another
+      // agent (which would refresh the outer tool budget) or changes settings.
       const native = new Hono().use("*", publicErrorMiddleware).use("*", async (inner, next) => {
         setRequestActor(inner, actor);
         await next();
-      }).route("/", searchRoutes);
+      }).route("/", toolId === "chat" ? groundedWorkspaceChatRoutes : searchRoutes);
       native.onError(spendAwareErrorHandler);
-      const path = toolId === "chat" ? "/chat" : "/";
-      return native.request(`http://mcp.internal${path}`, {
+      return native.request("http://mcp.internal/", {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body), signal: c.req.raw.signal,
       });

@@ -1,6 +1,6 @@
 # DocSlurp trademark policy
 
-Last updated: 2026-10-15
+Last updated: 2026-10-19
 
 "**DocSlurp**", the DocSlurp logo and related names, logos and visual identity (together, the "**Marks**") identify the DocSlurp service and software published by DocSlurp, Inc. ("DocSlurp", "we"). The source code in this repository is available under the licenses in [LICENSE](LICENSE) (SSPL-1.0 with an Apache-2.0 future grant for the server, worker, CLI and server-side adapter; MIT for the SDKs, shared contracts and client integrations). **Those licenses cover the code. They do not grant any right to use the Marks**, except as this policy says. This is true for the MIT-licensed packages too.
 
@@ -44,7 +44,7 @@ Accurate statements of origin (for example "based on the DocSlurp source code") 
 
 ## Logo usage
 
-The logo is not included in this repository. Where we publish brand assets for press or integration use on docslurp.io, use them unaltered: do not change colors, proportions or typography, do not combine them with other marks or add effects, keep clear space around them, and do not use them in a way that makes your product look official. Without a published asset kit, use the plain-text name.
+The logo and brand assets are published in [docs/brand](docs/brand/README.md) for press and integration use. Their presence in this repository does not license them under the code licenses; this policy governs their use. Use them unaltered: do not change colors, proportions or typography, do not combine them with other marks or add effects, keep clear space around them, and do not use them in a way that makes your product look official. When in doubt, use the plain-text name.
 
 ## Requesting permission and reporting misuse
 

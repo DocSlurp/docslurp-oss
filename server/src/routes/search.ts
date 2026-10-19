@@ -23,6 +23,7 @@ import { publicSearchResponse } from "../lib/search-usage.js";
 import { sql } from "../db.js";
 import { acceptApiKeys } from "../lib/route-auth.js";
 import { currentRequestApiKeyId } from "../lib/request-context.js";
+import { env } from "../config.js";
 
 /** Runs each validated query, preserving input order and per-item errors. */
 async function runSearchBatch(c: Context, parsed: { queries: SearchInput[]; concurrency: number }, userId: string): Promise<BatchResult[]> {
@@ -70,7 +71,8 @@ async function denyWorkspaceAccess(c: Context, workspaceId: string): Promise<Res
     : apiErrorResponse(c, 404, "workspace_not_found", "Workspace not found");
 }
 
-async function workspaceChatHandler(c: Context) {
+/** `grounded` is the nested MCP tool target: retrieval-only, never another agent or a settings change. */
+async function handleWorkspaceChat(c: Context, mode: "public" | "grounded") {
   const parsed = workspaceChatInputSchema.safeParse(await c.req.json().catch(() => null));
   if (!parsed.success) return apiErrorResponse(c, 400, "invalid_request", "Invalid chat input", { issues: parsed.error.issues });
   const body = parsed.data;
@@ -83,12 +85,20 @@ async function workspaceChatHandler(c: Context) {
   if (chatDisabled) return apiErrorResponse(c, 403, "chat_disabled", chatDisabled.error);
   const response = await chatWorkspace({ workspaceId, userId,
     query: body.q, sessionId: body.sessionId, model: body.model,
+    actor: getRequestActor(c), signal: c.req.raw.signal,
+    ...(mode === "grounded"
+      ? { allowAgentTools: false, allowConfiguration: false }
+      : { allowAgentTools: env.publicChatAgentEnabled }),
     ...(body.retrieval ? { retrieval: body.retrieval } : {}),
     ...(body.filters ? { filters: body.filters } : {}) });
   return c.json(response);
 }
 
+const workspaceChatHandler = (c: Context) => handleWorkspaceChat(c, "public");
+
 export const workspaceChatRoutes = new Hono().use("*", nativeApiErrors).post("/", workspaceChatHandler);
+/** Internal tool target only. Never mount this router as a public agent entrypoint. */
+export const groundedWorkspaceChatRoutes = new Hono().use("*", nativeApiErrors).post("/", (c: Context) => handleWorkspaceChat(c, "grounded"));
 
 type SearchData = ReturnType<typeof publicSearchResponse>;
 type BatchResult = { ok: true; data: SearchData } | { ok: false; error: { code: string; message: string; status: number } };
@@ -186,6 +196,7 @@ export const searchRoutes = new Hono()
         workspaceId,
         userId,
         query,
+        actor: getRequestActor(c), allowAgentTools: env.publicChatAgentEnabled, signal: c.req.raw.signal,
         sessionId,
         model
       });

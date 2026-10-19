@@ -112,6 +112,23 @@ describe("Direct Upload Session Module", () => {
     }
   });
 
+  it("names the failed validation when completing direct uploads", async () => {
+    const fixture = directUploadSessionFixture();
+    const run = async (file: Partial<LoadedDirectUploadSession["files"][number]>, input: Partial<Parameters<typeof completeDirectUploadFile>[0]> = {}) => {
+      sqlMock.mockReset();
+      sqlMock.mockResolvedValueOnce([fixture.session]).mockResolvedValueOnce([{ ...fixture.files[0], ...file }]).mockResolvedValue([]);
+      return completeDirectUploadFile({ sessionId: "session-1", userId: "user-1", fileId: "file-1", ...input });
+    };
+    // Single-part file completed without ever PUTting the object (what a multipart-only client does).
+    getUploadedObjectMetadata.mockRejectedValueOnce(Object.assign(new Error("NotFound"), { name: "NotFound", $metadata: { httpStatusCode: 404 } }));
+    await expect(run({ size_bytes: 30e6 })).rejects.toMatchObject({ statusCode: 400, message: expect.stringContaining("single-part mode") });
+    getUploadedObjectMetadata.mockResolvedValueOnce({ contentLength: 41, etag: "e" });
+    await expect(run({})).rejects.toMatchObject({ statusCode: 400, message: expect.stringContaining("41 bytes") });
+    const multipart = { upload_mode: "multipart" as const, upload_id: "u1", part_size: 8, size_bytes: 20 };
+    await expect(run(multipart, { parts: [] })).rejects.toMatchObject({ statusCode: 400, message: expect.stringContaining("requires the parts array") });
+    await expect(run(multipart, { parts: [{ partNumber: 1, etag: "a" }] })).rejects.toMatchObject({ statusCode: 400, message: expect.stringContaining("1 parts but contracts.pdf needs 3") });
+  });
+
   it("computes multipart part counts at the protocol seam", () => {
     expect(toDirectUploadPartCount(1, 8)).toBe(1);
     expect(toDirectUploadPartCount(8, 8)).toBe(1);

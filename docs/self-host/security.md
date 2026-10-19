@@ -1,0 +1,81 @@
+# Security
+
+What protects a self-hosted install: the parser sandbox, malware scanning, secrets and encryption keys, and network exposure. For how the pieces connect, see the [trust boundaries diagram](architecture.md#trust-boundaries).
+
+## Parser sandbox
+
+Document parsers run untrusted input. The worker starts each parser through `worker/scripts/parser-sandbox.sh`, which wraps it in bubblewrap (`bwrap`).
+
+What the sandbox does:
+
+- **Unshares** the network, PID, IPC and UTS namespaces (`--unshare-net`, `--unshare-pid`, `--unshare-ipc`, `--unshare-uts`). The parser has no network.
+- **Drops all capabilities** (`--cap-drop ALL`), starts a new session, and dies with its parent.
+- **Mounts a fresh `/proc`** and `/dev`, and an empty `/tmp`.
+- **Binds read-only** only the runtime paths it needs: `/usr`, `/bin`, `/sbin`, `/lib`, `/lib64`, and a few files under `/etc` (`ld.so.cache`, `fonts`, `ssl`, `localtime`, `passwd`, `group`, ImageMagick config) plus `/var/cache/fontconfig`, where they exist. The worker adds the input files and any unpacked vendor bundles through `DOCSLURP_PARSER_SANDBOX_READABLE_PATHS`, also read-only. The application checkout, other jobs and worker credentials are not mounted.
+- **Binds writable** only the per-run scratch directory and the paths the worker lists in `DOCSLURP_PARSER_SANDBOX_WRITABLE_PATHS`. The script refuses any writable path that is not under `/tmp/docslurp-*` or `<host temp root>/docslurp-*`, and any path with `..` in it. It exits with code 70 (`refusing broad writable mount` or `refusing traversal in writable mount`) rather than mounting more.
+- **Rewrites** `HOME`, `TMPDIR`, `TMP`, `TEMP` and the `XDG_*` directories to a private per-run directory, which is deleted when the command exits.
+- **Passes a small environment**. Only these variables reach a parser, when set: `LANG`, `LC_ALL`, `LC_CTYPE`, `PATH`, `SSL_CERT_DIR`, `SSL_CERT_FILE`, `NODE_EXTRA_CA_CERTS`, `OPENSSL_CONF`, `PYTHON_VENV`, `TMP`, `TMPDIR`, `TEMP` and `TZ` (`defaultParserEnvAllowlist` in `worker/src/tools/process-env.ts`). Add more names, comma-separated, with `DOCSLURP_PARSER_ENV_ALLOWLIST`. Database, storage, auth and AI keys are not on the list.
+
+If `bwrap` is missing, the launcher exits with code 70 and `refusing to run parser without isolation`. It never falls back to running the parser unsandboxed.
+
+The sandbox is always on when `NODE_ENV=production`, which the Compose stack sets. Outside production it is on by default except on macOS, and `DOCSLURP_PARSER_SANDBOX_ENABLED` can turn it off. The `inherit` mode (`DOCSLURP_PARSER_SANDBOX_MODE=inherit`) skips isolation, and the worker honours it only outside production (`resolveParserSandboxSettings` in `worker/src/tools/runner.ts`).
+
+### Why Compose sets `systempaths=unconfined`
+
+The worker services in `compose.selfhost.yml` set `systempaths=unconfined` so bubblewrap can mount a fresh `/proc`. Docker masks some `/proc` paths by default, and that blocks the mount. The worker keeps `cap_drop: [ALL]`, `no-new-privileges:true`, a pids limit of 256 and the seccomp profile `worker/security/seccomp-doc-extract.json`. The parser still runs inside the bubblewrap namespaces.
+
+### The error you see without it
+
+At startup, `scripts/start-worker.sh` runs `scripts/check-worker-prerequisites.mjs` with `--sandbox`. It runs the launcher against `/usr/bin/true`. If that fails, the worker prints a line like this and exits without starting:
+
+```text
+[worker-prerequisites] parser isolation unavailable: <reason from bubblewrap>
+```
+
+Common causes are a host that forbids unprivileged user namespaces or mounts (sysctl or AppArmor), or removing `systempaths=unconfined` from the Compose file. See [Requirements](requirements.md#host-requirements). The output ends with `status=failed`.
+
+### Commands that skip the sandbox
+
+Two kinds of command do not go through the launcher:
+
+- **The vector writer** (`vector_backend_write.py` and `orama_write.mjs`). It has to reach object storage, and the sandbox has no network. It receives the vector backend URIs (`LANCEDB_URI`, `STORAGE_URI`, `CHROMA_PATH`, `CHROMA_URL`, `MILVUS_URI`, `ORAMA_PATH`) and AWS credentials including `AWS_SESSION_TOKEN`, and nothing else beyond the default allowlist. Only these two trusted scripts get that list; an input filename cannot ask for it (`isVectorBackendCommand` in `worker/src/tools/runner.ts`).
+- **The embedding pool**. It is a long-lived Python process started by the worker (`getEmbedPool` in the same file) rather than a per-call command. It has its own environment allowlist (`defaultPythonPoolEnvAllowlist`, extended with `DOCSLURP_PYTHON_POOL_ENV_ALLOWLIST`). It handles text to embed, not file parsing.
+
+## Malware scanning
+
+The worker scans files with ClamAV. At startup, `scripts/start-worker.sh` prepares ClamAV, updates signatures with `freshclam` and checks that `clamd` is ready when the daemon is required or managed. `DOCSLURP_CLAMAV_ENABLED=false` turns that startup step off (default `true`).
+
+The scan policy comes from `resolveMalwareScanPolicy` in `worker/src/tools/runner.ts`:
+
+| Variable | Default in production | Default otherwise | Meaning |
+| --- | --- | --- | --- |
+| `DOCSLURP_CLAMAV_REQUIRE_DAEMON` | `true` | `false` | Require `clamdscan`. If it is unavailable, the scan returns an error ("clamdscan is required but unavailable"). |
+| `DOCSLURP_CLAMAV_FAIL_OPEN_ON_STALE_DB` | `false` | `true` | When `false`, a stale or missing signature database blocks scanning. When `true`, it only produces a warning. |
+| `DOCSLURP_CLAMAV_MAX_DB_AGE_HOURS` | `24` | `24` | Age after which signatures count as stale. |
+| `DOCSLURP_CLAMAV_DB_DIR` | `/var/lib/clamav` | `/var/lib/clamav` | Signature directory. |
+
+"Production" means `NODE_ENV=production`, which the Compose stack sets. If no scan engine is available at all and the daemon is not required, the scan result is `skipped-unavailable`.
+
+## Secrets and encryption keys
+
+`node scripts/selfhost-init.mjs` generates distinct random values and writes them to `.env.selfhost`, which Git ignores. Back this file up somewhere private. If you lose it, or change an encryption key, stored data protected by that key becomes unreadable.
+
+| Variable | What it protects |
+| --- | --- |
+| `POSTGRES_PASSWORD`, `DATABASE_URL` | The database. Keep the password in `DATABASE_URL` in step with `POSTGRES_PASSWORD`. Postgres reads the password only when its volume is created, so editing the file does not change an existing database. |
+| `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` | Object storage. In this stack they are also the MinIO root user and password. |
+| `BETTER_AUTH_SECRET` | Better Auth, the sign-in layer. It is also the last fallback root for file proxy URL tokens. |
+| `OAUTH_TOKEN_ENCRYPTION_KEY` | OAuth tokens persisted in `oauth_accounts`. |
+| `CREDENTIALS_ENCRYPTION_KEY` | Connector credentials. |
+| `SECRETS_ENCRYPTION_KEY` | Workspace secrets stored at rest. It is also the first fallback root for file proxy URL tokens. |
+| `METRICS_SECRET` | Access to the metrics endpoint. |
+
+Rotation caveat: the three `*_ENCRYPTION_KEY` values encrypt data already in Postgres, and this repository documents no re-encryption procedure. Replacing a key makes the rows encrypted under the old key unreadable. Do not rotate them casually. If you must replace one, take a backup first.
+
+Provider keys (`OPENAI_API_KEY`, `OPENROUTER_API_KEY`, `ANTHROPIC_API_KEY`, `GOOGLE_GENERATIVE_AI_API_KEY`) and OAuth client secrets are optional and live in the same file. See [Configuration](configuration.md).
+
+## Network exposure
+
+The Compose file publishes only the server, on `${SERVER_BIND_ADDRESS:-127.0.0.1}:${SERVER_PORT:-8787}`. Do not publish the Postgres, Redis, MinIO or Temporal ports, and do not add `ports:` entries for them. None of them is meant to face the internet or an untrusted network. If you run a reverse proxy on another host, bind the server to an address that only your private network can reach and firewall the port.
+
+For TLS, a reverse proxy, forwarded headers and client IP handling, see [Public access](public-access.md).

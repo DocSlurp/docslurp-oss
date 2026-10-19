@@ -333,17 +333,37 @@ export async function completeDirectUploadFile(input: CompleteDirectUploadFileIn
   }
 
   if (file.upload_mode === "multipart") {
-    if (!file.upload_id || !input.parts || input.parts.length === 0) {
+    if (!file.upload_id) {
       throw new WorkspaceIntakeError(
-        "Multipart completion requires parts and uploadId",
+        "Multipart upload session file has no upload id; create a new upload session",
         400,
       );
     }
-    await completeMultipartUpload({
-      key: file.source_key,
-      uploadId: file.upload_id,
-      parts: input.parts,
-    });
+    if (!input.parts || input.parts.length === 0) {
+      throw new WorkspaceIntakeError(
+        "Multipart completion requires the parts array (partNumber and etag for every uploaded part)",
+        400,
+      );
+    }
+    const expectedParts = toDirectUploadPartCount(
+      file.size_bytes,
+      file.part_size ?? MULTIPART_PART_SIZE_BYTES,
+    );
+    if (input.parts.length !== expectedParts) {
+      throw new WorkspaceIntakeError(
+        `Multipart completion received ${input.parts.length} parts but ${file.filename} needs ${expectedParts}`,
+        400,
+      );
+    }
+    try {
+      await completeMultipartUpload({
+        key: file.source_key,
+        uploadId: file.upload_id,
+        parts: input.parts,
+      });
+    } catch (error) {
+      throw multipartCompletionError(error, file.filename);
+    }
     await verifyCompletedDirectUpload(file);
     await sql`
       update upload_session_files
@@ -478,10 +498,23 @@ export function directUploadIntakeItems(
 async function verifyCompletedDirectUpload(
   file: UploadSessionFileRow,
 ): Promise<{ etag: string | null }> {
-  const metadata = await getUploadedObjectMetadata(file.source_key);
+  let metadata: Awaited<ReturnType<typeof getUploadedObjectMetadata>>;
+  try {
+    metadata = await getUploadedObjectMetadata(file.source_key);
+  } catch (error) {
+    if (isStorageNotFound(error)) {
+      throw new WorkspaceIntakeError(
+        file.upload_mode === "single"
+          ? `No object found in storage for ${file.filename}: this file uses single-part mode, so PUT its bytes to the file's putUrl before completing (the session has no parts to upload)`
+          : `No object found in storage for ${file.filename} after completing the multipart upload`,
+        400,
+      );
+    }
+    throw error;
+  }
   const actualSize = metadata.contentLength;
   if (actualSize === null) {
-    throw new Error(`Unable to verify upload size for ${file.filename}`);
+    throw new WorkspaceIntakeError(`Unable to verify upload size for ${file.filename}`, 400);
   }
   admitIntakeFile(
     { filename: file.filename, mimeType: file.mime_type, sizeBytes: actualSize },
@@ -489,9 +522,38 @@ async function verifyCompletedDirectUpload(
   );
   if (actualSize !== file.size_bytes) {
     await deleteUploadedObject(file.source_key).catch(() => undefined);
-    throw new Error(
-      `Uploaded size for ${file.filename} did not match the declared size`,
+    throw new WorkspaceIntakeError(
+      `Uploaded size for ${file.filename} (${actualSize} bytes) did not match the declared size (${file.size_bytes} bytes)`,
+      400,
     );
   }
   return { etag: metadata.etag };
+}
+
+function storageErrorName(error: unknown): string {
+  const e = error as { name?: unknown; Code?: unknown; $metadata?: { httpStatusCode?: number } } | null;
+  const name = typeof e?.name === "string" ? e.name : typeof e?.Code === "string" ? e.Code : "";
+  if (e?.$metadata?.httpStatusCode === 404 && !name) return "NotFound";
+  return name;
+}
+
+function isStorageNotFound(error: unknown): boolean {
+  const name = storageErrorName(error);
+  return name === "NotFound" || name === "NoSuchKey" || (error as { $metadata?: { httpStatusCode?: number } })?.$metadata?.httpStatusCode === 404;
+}
+
+/** Maps S3 CompleteMultipartUpload failures to a specific, secret-free 400. Unknown errors rethrow. */
+function multipartCompletionError(error: unknown, filename: string): unknown {
+  switch (storageErrorName(error)) {
+    case "InvalidPart":
+      return new WorkspaceIntakeError(`Multipart completion for ${filename} failed: a part is missing or its etag does not match the uploaded part (InvalidPart)`, 400);
+    case "InvalidPartOrder":
+      return new WorkspaceIntakeError(`Multipart completion for ${filename} failed: parts must be in ascending partNumber order (InvalidPartOrder)`, 400);
+    case "EntityTooSmall":
+      return new WorkspaceIntakeError(`Multipart completion for ${filename} failed: a non-final part is smaller than the storage provider's minimum part size (EntityTooSmall)`, 400);
+    case "NoSuchUpload":
+      return new WorkspaceIntakeError(`Multipart upload for ${filename} is no longer open (expired, aborted or already completed); create a new upload session`, 400);
+    default:
+      return error;
+  }
 }
