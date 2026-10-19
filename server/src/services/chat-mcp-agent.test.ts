@@ -72,25 +72,25 @@ describe("chat MCP agent with the real SDK loop", () => {
     let modelStep = 0;
     mocks.provider.mockReturnValue(new MockLanguageModelV4({ doStream: async (options) => {
       const current = modelStep++;
-      if (current === 1) expect(JSON.stringify(options.prompt)).toContain("The active project is P7.");
+      if (current === 1) expect(JSON.stringify(options.prompt)).toContain("The on-call team is Blue.");
       if (current === 2) {
-        expect(JSON.stringify(options.prompt)).toContain("P7 has 8 kits with 3 probes each.");
+        expect(JSON.stringify(options.prompt)).toContain("Team Blue has 5 members with 2 pagers each.");
         expect(JSON.stringify(options.prompt)).toContain("citationIndex");
       }
       const searching = current < 2;
       return { stream: simulateReadableStream({ chunks: [
         { type: "stream-start", warnings: [] },
-        ...(searching ? [{ type: "tool-call" as const, toolCallId: `hop-${current}`, toolName: "search", input: JSON.stringify({ q: current === 0 ? "active project" : "P7 kit inventory" }) }]
-          : [{ type: "text-start" as const, id: "answer" }, { type: "text-delta" as const, id: "answer", delta: "The active project is P7 [1]. Its 8 kits contain 3 probes each [2], so there are 24 probes." }, { type: "text-end" as const, id: "answer" }]),
+        ...(searching ? [{ type: "tool-call" as const, toolCallId: `hop-${current}`, toolName: "search", input: JSON.stringify({ q: current === 0 ? "on-call team" : "Team Blue roster" }) }]
+          : [{ type: "text-start" as const, id: "answer" }, { type: "text-delta" as const, id: "answer", delta: "The on-call team is Blue [1]. Its 5 members carry 2 pagers each [2], so there are 10 pagers." }, { type: "text-end" as const, id: "answer" }]),
         { type: "finish", finishReason: { unified: searching ? "tool-calls" as const : "stop" as const, raw: undefined }, usage: { inputTokens: { total: 10, noCache: 10, cacheRead: 0, cacheWrite: 0 }, outputTokens: { total: 4, text: 4, reasoning: 0 } } },
       ], initialDelayInMs: 0, chunkDelayInMs: 0 }) };
     } }));
     mocks.dispatch.mockImplementation(async (_path, request) => {
       const query = JSON.parse(request.body).q;
-      const second = query === "P7 kit inventory";
-      return Response.json({ results: [{ text: second ? "P7 has 8 kits with 3 probes each." : "The active project is P7.", score: 1, citation: { filename: "register.pdf", documentId: "register", chunkIndex: second ? 1 : 0, headingPath: [], pageNumber: second ? 2 : 1 } }] });
+      const second = query === "Team Blue roster";
+      return Response.json({ results: [{ text: second ? "Team Blue has 5 members with 2 pagers each." : "The on-call team is Blue.", score: 1, citation: { filename: "rota.pdf", documentId: "rota", chunkIndex: second ? 1 : 0, headingPath: [], pageNumber: second ? 2 : 1 } }] });
     });
-    const result = await runChatMcpAgent({ ...args, query: "How many probes belong to the active project?" });
+    const result = await runChatMcpAgent({ ...args, query: "How many pagers does the on-call team carry?" });
     expect(mocks.dispatch).toHaveBeenCalledTimes(2);
     expect(result.toolCalls).toMatchObject([{ id: "hop-0", name: "search", status: "success" }, { id: "hop-1", name: "search", status: "success" }]);
     expect(result.citations.map(c => c.citation.pageNumber)).toEqual([1, 2]);
