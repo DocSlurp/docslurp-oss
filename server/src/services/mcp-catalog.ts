@@ -1,0 +1,122 @@
+import { z } from "zod";
+
+import { env } from "../config.js";
+import { batchSearchInputSchema, searchInputSchema, workspaceChatInputSchema } from "../lib/search-input.js";
+import { toolInputJsonSchema } from "./mcp-tool-schemas.js";
+
+export const workspaceRef = z.string().min(1).max(256).optional().describe('Workspace slug or UUID. Omit or use "default" for the organization default workspace.');
+export const listWorkspacesInput = z.object({
+  limit: z.number().int().min(1).max(100).default(50),
+  offset: z.number().int().nonnegative().default(0),
+}).strict();
+export const uploadInput = z.object({
+  workspaceId: workspaceRef,
+  workspaceName: z.string().trim().min(1).max(120).optional().describe("Create a new workspace with this name only when the user asks for one."),
+  urls: z.array(z.url().refine(url => /^https?:\/\//i.test(url), "Use HTTP or HTTPS URLs")).min(1).max(20).optional(),
+  files: z.array(z.object({
+    filename: z.string().min(1).max(512),
+    sizeBytes: z.number().int().positive().max(5 * 1024 ** 3),
+    mimeType: z.string().min(1).max(256).describe("Content-Type to send with the signed PUT request."),
+  }).strict()).min(1).max(10).optional(),
+  idempotencyKey: z.string().min(1).max(200).optional().describe("For URL ingestion only: reuse the same key when retrying this exact request to avoid duplicate ingestion."),
+}).strict().refine(value => Boolean(value.urls) !== Boolean(value.files), "Supply either urls or files, not both")
+  .refine(value => !(value.workspaceId && value.workspaceName), "Choose an existing workspaceId or a new workspaceName");
+
+export const completeUploadInput = z.object({
+  sessionId: z.string().uuid(),
+  fileIds: z.array(z.string().uuid()).min(1).max(10).refine(ids => new Set(ids).size === ids.length, "File IDs must be unique").describe("IDs returned by upload, after every corresponding PUT succeeds."),
+}).strict();
+
+export const uploadStatusInput = z.object({
+  workspaceId: z.string().min(1).max(256).optional(),
+  runId: z.string().trim().min(1).max(128).optional(),
+  documentIds: z.array(z.string().min(1).max(128)).max(100).optional(),
+}).strict();
+export const suggestQueriesInput = z.object({
+  workspaceId: z.string().min(1).max(256).optional(),
+  q: z.string().max(10_000).optional(),
+  limit: z.number().int().min(1).max(25).optional(),
+});
+
+/**
+ * The search tool accepts one query or a batch, both defined by the search
+ * route's own zod schemas. MCP requires an object at the top level, so the two
+ * forms are merged into one object whose oneOf keeps them exclusive.
+ */
+function searchToolInputSchema() {
+  const single = toolInputJsonSchema(searchInputSchema) as { properties: Record<string, unknown> };
+  const { properties: batch } = toolInputJsonSchema(batchSearchInputSchema) as { properties: Record<string, unknown> };
+  return {
+    type: "object", additionalProperties: false,
+    properties: { ...single.properties, ...batch },
+    oneOf: [
+      { required: ["q"], not: { anyOf: Object.keys(batch).map(key => ({ required: [key] })) } },
+      { required: ["queries"], not: { anyOf: Object.keys(single.properties).map(key => ({ required: [key] })) } },
+    ],
+  };
+}
+
+export type McpScope = "search" | "ingest";
+// Agent-safety hints live with the tool definition so every surface (remote MCP,
+// stdio, chat tools) reads the same values instead of inferring them per surface.
+export type ToolAnnotations = { readOnly: boolean; destructive: boolean; idempotent: boolean; openWorld: boolean };
+const READ_ONLY: ToolAnnotations = { readOnly: true, destructive: false, idempotent: true, openWorld: false };
+
+export interface McpTool {
+  id: string;
+  title: string;
+  description: string;
+  category: "tool";
+  endpoint: string;
+  inputSchema: Record<string, unknown>;
+  /** An API key needs at least one of these scopes to see or call the tool. */
+  scopes: McpScope[];
+  annotations: ToolAnnotations;
+}
+
+/** The public MCP catalog, in the product's upload → search → chat order. Tool ids are the public names. */
+export function mcpTools(baseUrl: string): McpTool[] {
+  const tools: Omit<McpTool, "category" | "endpoint">[] = [
+    { id: "listWorkspaces", title: "List workspaces", scopes: ["search", "ingest"], annotations: READ_ONLY,
+      description: "List workspaces you can access, including their IDs, slugs, default workspace, document/page counts and latest processing status. Use a returned slug as workspaceId in upload, search or chat. Does not call AI.",
+      inputSchema: toolInputJsonSchema(listWorkspacesInput) },
+    { id: "upload", title: "Upload documents", scopes: ["ingest"],
+      annotations: { readOnly: false, destructive: false, idempotent: false, openWorld: true },
+      description: "Upload documents using either fetchable HTTP(S) urls or files metadata. For files, generate one presigned PUT URL per file, up to 10 files (5 GiB each, subject to account limits). PUT the raw bytes to each putUrl with the declared Content-Type, then call completeUpload with sessionId and file IDs. Never send file bytes or local paths as tool arguments. URLs start ingestion immediately; files start only on completion. Omit workspaceId for the default workspace; workspaceName explicitly creates a new one. Ingestion can incur cost. idempotencyKey applies to URL ingestion retries.",
+      inputSchema: {
+        ...toolInputJsonSchema(uploadInput),
+        oneOf: [{ required: ["urls"], not: { required: ["files"] } }, { required: ["files"], not: { required: ["urls"] } }],
+        not: { required: ["workspaceId", "workspaceName"] },
+      } },
+    { id: "completeUpload", title: "Complete upload", scopes: ["ingest"],
+      annotations: { readOnly: false, destructive: false, idempotent: false, openWorld: false },
+      description: "After all presigned PUT requests succeed, verify uploaded files and start ingestion. Pass sessionId and fileIds from upload. Returns workspace and run IDs for getUploadStatus. File size is verified before ingestion; do not call before uploading the bytes.",
+      inputSchema: toolInputJsonSchema(completeUploadInput) },
+    { id: "search", title: "Search documents", scopes: ["search"], annotations: READ_ONLY,
+      description: "Retrieve cited passages for one query (q) or up to 20 independent queries (queries). Supply exactly one form. Batch results stay in input order with per-query errors; each query can select a workspace. Omitted workspace uses the default. Does not generate answers.",
+      inputSchema: searchToolInputSchema() },
+    { id: "chat", title: "Chat with workspace", scopes: ["search"],
+      annotations: { readOnly: false, destructive: false, idempotent: false, openWorld: false },
+      description: "Generate a grounded answer with citations and token usage using the workspace's configured model. This calls AI and can incur cost; use search for your own LLM.",
+      inputSchema: toolInputJsonSchema(workspaceChatInputSchema) },
+    { id: "getUploadStatus", title: "Get upload status", scopes: ["search", "ingest"], annotations: READ_ONLY,
+      description: "Check uploaded files and ingestion progress in a workspace, optionally for a runId returned by upload. Reports searchable pages, failures, costs and processing speed without AI calls. Use before search or chat when files are still processing.",
+      inputSchema: toolInputJsonSchema(uploadStatusInput) },
+    { id: "suggestQueries", title: "Suggest queries", scopes: ["search"], annotations: READ_ONLY,
+      description: "Read prior queries and suggestions without AI calls.",
+      inputSchema: toolInputJsonSchema(suggestQueriesInput) },
+  ];
+  return tools.map(tool => ({ ...tool, category: "tool", endpoint: `${baseUrl}/v1/mcp/tools/${tool.id}` }));
+}
+
+/** The catalog visible to a caller: session callers see everything, API keys see tools their scopes allow. */
+export function mcpManifest(baseUrl: string, scopes?: string[]) {
+  return {
+    server: {
+      id: env.mcpServerId, title: "DocSlurp MCP", version: "0.1.0",
+      transports: ["streamable-http", "stdio"], endpoint: `${baseUrl}/v1/mcp`,
+      auth: { type: "apiKey", scopes: ["search", "ingest"] },
+    },
+    capabilities: mcpTools(baseUrl).filter(tool => !scopes || tool.scopes.some(scope => scopes.includes(scope))),
+  };
+}

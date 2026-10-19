@@ -50,8 +50,8 @@ describe("native handlers emit the envelope directly", () => {
       withKey(scopes).route(path, mcpAdapterRoutes).request(`${path}/tools/${tool}`, {
         method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
       });
-    await expectEnvelope(await post("/v1/session-tools", "workspace.search", ["ingest"], {}), 403, "forbidden");
-    expect(await (await post("/v1/mcp", "workspace.search", ["ingest"], {})).json()).toEqual({ error: expect.any(String) });
+    await expectEnvelope(await post("/v1/session-tools", "search", ["ingest"], {}), 403, "forbidden");
+    expect(await (await post("/v1/mcp", "search", ["ingest"], {})).json()).toEqual({ error: expect.any(String) });
 
     const invalid = await expectEnvelope(await post("/v1/session-tools", "listWorkspaces", ["search"], { limit: "many" }), 400, "invalid_request");
     expect(invalid.details?.issues).toEqual([expect.objectContaining({ path: "limit" })]);

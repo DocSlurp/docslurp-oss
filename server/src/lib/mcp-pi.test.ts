@@ -10,7 +10,7 @@ import { describe, expect, it, vi } from "vitest";
 import { handleMcpHttp, type McpDispatch, type McpManifest } from "./mcp-http.js";
 
 const manifest: McpManifest = { capabilities: [{
-  id: "workspace.suggest",
+  id: "suggestQueries",
   title: "Workspace suggestions",
   description: "Suggest queries for a workspace without AI generation.",
   category: "tool",
@@ -70,20 +70,20 @@ describe("Pi agent with the DocSlurp MCP HTTP endpoint", () => {
     const dispatch = vi.fn<McpDispatch>(async () => Response.json({ suggestions: ["support hours"] }));
     await withEndpoint(dispatch, async client => {
       const tools = await discoverTools(client);
-      expect(tools.map(tool => tool.name)).toEqual(["workspace.suggest"]);
+      expect(tools.map(tool => tool.name)).toEqual(["suggestQueries"]);
       expect(tools[0]?.parameters).toMatchObject(manifest.capabilities[0]!.inputSchema);
 
       const faux = createFauxCore({});
       const followUp = vi.fn((context: TranscriptContext) => {
         const result = context.messages.findLast(message => message.role === "toolResult");
-        expect(result).toMatchObject({ toolName: "workspace.suggest", isError: false });
+        expect(result).toMatchObject({ toolName: "suggestQueries", isError: false });
         const text = result?.content[0];
         if (text?.type !== "text") throw new Error("Expected an MCP text result in Pi's model context");
         expect(JSON.parse(text.text)).toEqual({ suggestions: ["support hours"] });
         return fauxAssistantMessage("Try searching for support hours.");
       });
       faux.setResponses([
-        fauxAssistantMessage(fauxToolCall("workspace.suggest", { workspaceId: "example" }, { id: "suggest-1" })),
+        fauxAssistantMessage(fauxToolCall("suggestQueries", { workspaceId: "example" }, { id: "suggest-1" })),
         followUp,
       ]);
       const agent = new Agent({ initialState: { model: faux.getModel(), tools }, streamFn: faux.streamSimple });
@@ -96,7 +96,7 @@ describe("Pi agent with the DocSlurp MCP HTTP endpoint", () => {
       expect(followUp).toHaveBeenCalledOnce();
       expect(dispatch).toHaveBeenCalledOnce();
       const [path, init] = dispatch.mock.calls[0]!;
-      expect(path).toBe("/tools/workspace.suggest");
+      expect(path).toBe("/tools/suggestQueries");
       expect(init?.method).toBe("POST");
       expect(JSON.parse(init?.body as string)).toEqual({ workspaceId: "example" });
       expect(agent.state.messages.at(-1)).toMatchObject({
@@ -117,7 +117,7 @@ describe("Pi agent with the DocSlurp MCP HTTP endpoint", () => {
     await withEndpoint(dispatch, async client => {
       const faux = createFauxCore({});
       faux.setResponses([
-        fauxAssistantMessage(fauxToolCall("workspace.suggest", args, { id: "suggest-error" })),
+        fauxAssistantMessage(fauxToolCall("suggestQueries", args, { id: "suggest-error" })),
         fauxAssistantMessage("The suggestion tool failed."),
       ]);
       const agent = new Agent({
@@ -126,7 +126,7 @@ describe("Pi agent with the DocSlurp MCP HTTP endpoint", () => {
       });
       await agent.prompt("Suggest a query.");
       const result = agent.state.messages.find(message => message.role === "toolResult");
-      expect(result).toMatchObject({ toolCallId: "suggest-error", toolName: "workspace.suggest", isError: true });
+      expect(result).toMatchObject({ toolCallId: "suggest-error", toolName: "suggestQueries", isError: true });
       expect(JSON.stringify(result)).toContain(error);
       expect(JSON.stringify(result)).not.toContain("private backend details");
       expect(dispatch).toHaveBeenCalledTimes(dispatched ? 1 : 0);

@@ -2,132 +2,22 @@ import { publicErrorMiddleware } from "../lib/public-errors.js";
 import { apiErrorResponse, apiStatusError, usesNativeErrorEnvelope } from "../lib/api-error.js";
 import { mapValidationIssues, type ValidationErrorSource } from "../lib/validation.js";
 import { Hono, type Context } from "hono";
-import { z } from "zod";
 
-import { aggregateWorkspaceRagSearchRequestSchema, type ApiErrorCode } from "@docslurp/shared";
+import type { ApiErrorCode } from "@docslurp/shared";
 
-import {
-  apiKeyHasAnyScope,
-} from "../lib/api-key-authorization.js";
+import { apiKeyHasAnyScope } from "../lib/api-key-authorization.js";
 import { getApiKey, getRequestActor, loadActorScopedWorkspace, resolveActorWorkspaceId, setRequestActor, type RequestActor } from "../lib/request-actor.js";
 import { listWorkspaces } from "./workspaces.js";
 import { apiKeyCanUseWorkspace } from "../lib/api-key-workspace-scope.js";
-import { listWorkspacesInput, uploadInput, completeUploadInput, productToolAliases, productToolDefinitions } from "./mcp-product-tools.js";
-import { aiAdvancedToolSchema, aiSimpleToolSchema, toolInputJsonSchema } from "./mcp-tool-schemas.js";
-import { batchSearchInputSchema, searchInputSchema, workspaceChatInputSchema } from "../lib/search-input.js";
+import { completeUploadInput, listWorkspacesInput, mcpManifest, mcpTools, suggestQueriesInput, uploadInput, uploadStatusInput } from "./mcp-catalog.js";
 import { mcpOrigin } from "../lib/mcp-origin.js";
 import { searchRoutes } from "../routes/search.js";
 import { sql } from "../db.js";
 import { isProtectedStoredQuery } from "../search/session.js";
 import { spendAwareErrorHandler } from "./billing/spend-guard.js";
-import { aggregateWorkspaceRagSearch } from "../services/aggregate-rag.js";
 import { loadIngestReport, summarizeIngestReport } from "./ingest-report.js";
-import {
-  getAutomationCapabilityManifest,
-  getAutomationOperation,
-  submitAdvancedAutomation,
-  submitSimpleAutomation
-} from "../services/automation.js";
 
-const operationInputSchema = z.object({ operationId: z.string().uuid() });
-
-const workspaceIngestReportSchema = z.object({
-  workspaceId: z.string().min(1).max(256).optional(),
-  runId: z.string().trim().min(1).max(128).optional(),
-  documentIds: z.array(z.string().min(1).max(128)).max(100).optional(),
-}).strict();
-const workspaceSuggestSchema = z.object({
-  workspaceId: z.string().min(1).max(256).optional(),
-  q: z.string().max(10_000).optional(),
-  limit: z.number().int().min(1).max(25).optional(),
-});
-
-// Agent-safety hints live with the tool definition so every surface (remote MCP,
-// WebMCP, chat tools) reads the same values instead of inferring them per surface.
-type ToolAnnotations = { readOnly: boolean; destructive: boolean; idempotent: boolean; openWorld: boolean };
-const READ_ONLY_TOOL: ToolAnnotations = { readOnly: true, destructive: false, idempotent: true, openWorld: false };
-const workspaceToolAnnotations: Record<string, ToolAnnotations> = {
-  search: READ_ONLY_TOOL,
-  chat: { readOnly: false, destructive: false, idempotent: false, openWorld: false },
-  "ingest-report": READ_ONLY_TOOL,
-  suggest: READ_ONLY_TOOL,
-};
-
-/**
- * The product search tool accepts one query or a batch, both defined by the
- * search route's own zod schemas. MCP requires an object at the top level, so
- * the two forms are merged into one object whose oneOf keeps them exclusive.
- */
-function searchToolInputSchema() {
-  const single = toolInputJsonSchema(searchInputSchema) as { properties: Record<string, unknown> };
-  const { properties: batch } = toolInputJsonSchema(batchSearchInputSchema) as { properties: Record<string, unknown> };
-  return {
-    type: "object", additionalProperties: false,
-    properties: { ...single.properties, ...batch },
-    oneOf: [
-      { required: ["q"], not: { anyOf: Object.keys(batch).map(key => ({ required: [key] })) } },
-      { required: ["queries"], not: { anyOf: Object.keys(single.properties).map(key => ({ required: [key] })) } },
-    ],
-  };
-}
-
-function legacyManifest(baseUrl: string, scopes?: string[]) {
-  const manifest = getAutomationCapabilityManifest(baseUrl);
-  return {
-    ...manifest,
-    // The MCP surface knows its own transports; never inherit a stale claim.
-    server: { ...manifest.server, transports: ["streamable-http", "stdio"], endpoint: `${baseUrl}/v1/mcp` },
-    capabilities: [
-      ...manifest.capabilities,
-      {
-        id: "ai.operation.get", title: "Get Automation Operation",
-        description: "Read an automation operation by ID, including pending approval, progress, errors and final result. Poll on a later turn if still running.",
-        category: "tool", endpoint: `${baseUrl}/v1/mcp/tools/ai.operation.get`,
-        inputSchema: toolInputJsonSchema(operationInputSchema),
-        annotations: READ_ONLY_TOOL,
-      },
-      ...[
-        { name: "search", title: "Search Workspace", description: "Retrieve portable text passages with source citations. Use these as context for any LLM; this tool does not generate an answer.", inputSchema: toolInputJsonSchema(searchInputSchema) },
-        { name: "chat", title: "Chat With Workspace", description: "Generate a grounded answer with citations and token usage using the workspace's configured model. This calls AI and can incur cost; use workspace.search for your own LLM.", inputSchema: toolInputJsonSchema(workspaceChatInputSchema) },
-        { name: "ingest-report", title: "Workspace Ingest Report", description: "Report how the workspace's files processed, without AI calls: pages, bytes and plain-text bytes per page (histograms), images per page, scanned-looking pages, pages read with vision, searchable pages with a reason for each unsearchable one, failed or skipped stages, cost and pages per minute, the pipeline settings that shaped it, and rule-based recommendations with estimated cost. Use it when a user asks why something cannot be found.", inputSchema: toolInputJsonSchema(workspaceIngestReportSchema) },
-        { name: "suggest", title: "Suggest Workspace Queries", description: "Read prior queries and suggestions without AI calls.", inputSchema: toolInputJsonSchema(workspaceSuggestSchema) },
-      ].map(({ name, title, description, inputSchema }) => ({
-        id: `workspace.${name}`,
-        title,
-        description,
-        category: "tool",
-        endpoint: `${baseUrl}/v1/mcp/tools/workspace.${name}`,
-        inputSchema,
-        annotations: workspaceToolAnnotations[name] ?? READ_ONLY_TOOL,
-      })),
-    ].filter((tool) => !scopes || tool.category !== "tool" || (tool.id.startsWith("ai.")
-      ? scopes.some((scope) => scope === "search" || scope === "ingest")
-      : scopes.includes("search"))),
-  };
-}
-
-/** The public MCP catalog follows the product's upload → search → chat flow. */
-export function mcpManifest(baseUrl: string, scopes?: string[]) {
-  const manifest = legacyManifest(baseUrl);
-  const tools = Object.entries(productToolAliases).map(([name, legacyId]) => {
-    const tool = manifest.capabilities.find(item => item.id === legacyId)!;
-    return { ...tool, id: name, endpoint: `${baseUrl}/v1/mcp/tools/${name}`,
-      description: tool.description.replaceAll("workspace.search", "search"),
-      ...(name === "search" ? {
-        title: "Search documents",
-        description: "Retrieve cited passages for one query (q) or up to 20 independent queries (queries). Supply exactly one form. Batch results stay in input order with per-query errors; each query can select a workspace. Omitted workspace uses the default. Does not generate answers.",
-        inputSchema: searchToolInputSchema(),
-      } : {}),
-      ...(name === "getUploadStatus" ? { title: "Get upload status", description: "Check uploaded files and ingestion progress in a workspace, optionally for a runId returned by upload. Reports searchable pages, failures, costs and processing speed without AI calls. Use before search or chat when files are still processing." } : {}),
-    };
-  });
-  return { ...manifest, capabilities: [...productToolDefinitions(baseUrl), ...tools].filter(tool => {
-    if (!scopes) return true;
-    if (["upload", "completeUpload"].includes(tool.id)) return scopes.includes("ingest");
-    if (["listWorkspaces", "getUploadStatus"].includes(tool.id)) return scopes.some(scope => ["ingest", "search"].includes(scope));
-    return scopes.includes("search");
-  }) };
-}
+export { mcpManifest };
 
 function routeBaseUrl(_url: string): string {
   return mcpOrigin(_url);
@@ -164,8 +54,10 @@ const mcpAdapterRoutes = new Hono()
   .post("/tools/:id", async (c) => {
     const actor = getRequestActor(c);
     const apiKey = getApiKey(c);
-    const requestedTool = c.req.param("id");
-    const toolId = productToolAliases[requestedTool] ?? requestedTool;
+    const toolId = c.req.param("id");
+    const tool = mcpTools(routeBaseUrl(c.req.url)).find(item => item.id === toolId);
+    if (!tool) return adapterError(c, 404, "Unknown MCP tool");
+    if (apiKey && !apiKeyHasAnyScope(apiKey, tool.scopes)) return adapterError(c, 403, "Forbidden");
     let body: Record<string, unknown>;
     try {
       body = await c.req.json();
@@ -175,7 +67,6 @@ const mcpAdapterRoutes = new Hono()
     }
 
     if (toolId === "listWorkspaces") {
-      if (apiKey && !apiKeyHasAnyScope(apiKey, ["search", "ingest"])) return adapterError(c, 403, "Forbidden");
       const parsed = listWorkspacesInput.safeParse(body);
       if (!parsed.success) return invalidInput(c, parsed.error);
       const accessible = (await listWorkspaces(actor.userId, { refineNames: false }))
@@ -190,7 +81,6 @@ const mcpAdapterRoutes = new Hono()
     }
 
     if (toolId === "upload") {
-      if (apiKey && !apiKeyHasAnyScope(apiKey, ["ingest"])) return adapterError(c, 403, "Forbidden");
       const parsed = uploadInput.safeParse(body);
       if (!parsed.success) return invalidInput(c, parsed.error);
       const input = parsed.data;
@@ -215,7 +105,6 @@ const mcpAdapterRoutes = new Hono()
     }
 
     if (toolId === "completeUpload") {
-      if (apiKey && !apiKeyHasAnyScope(apiKey, ["ingest"])) return adapterError(c, 403, "Forbidden");
       const parsed = completeUploadInput.safeParse(body);
       if (!parsed.success) return invalidInput(c, parsed.error);
       const { loadDirectUploadSession } = await import("./direct-upload-session.js");
@@ -244,78 +133,22 @@ const mcpAdapterRoutes = new Hono()
       return native.request(`http://mcp.internal${sessionPath}/confirm`, { method: "POST", signal: c.req.raw.signal });
     }
 
-    if (toolId === "ai.operation.get") {
-      if (apiKey && !apiKeyHasAnyScope(apiKey, ["search", "ingest"])) return adapterError(c, 403, "Forbidden");
-      const parsed = operationInputSchema.safeParse(body);
-      if (!parsed.success) return invalidInput(c, parsed.error);
-      const operation = await getAutomationOperation({ ...parsed.data, userId: actor.userId, apiKey });
-      return operation ? c.json({ operation }) : adapterError(c, 404, "Operation not found");
-    }
-
-    if (toolId === "ai.simple") {
-      const parsed = aiSimpleToolSchema.safeParse(body);
-      if (!parsed.success) return invalidInput(c, parsed.error);
-      const request = { ...parsed.data, userId: actor.userId, workspaceId: await resolveActorWorkspaceId(actor, parsed.data.workspaceId) };
-      if (request.sourceUrls.length && apiKey && !apiKeyHasAnyScope(apiKey, ["ingest"])) return adapterError(c, 403, "Source ingestion requires ingest scope");
-      const submitted = await submitSimpleAutomation({ request, apiKey });
-      return c.json({
-        tool: toolId,
-        operation: submitted.operation,
-        events: submitted.events,
-        ...(apiKey ? { streamUrl: `${routeBaseUrl(c.req.url)}/v1/ai/operations/${submitted.operation.id}/stream` } : {}),
-        pollTool: { name: "ai.operation.get", arguments: { operationId: submitted.operation.id } },
-        ...(apiKey ? { pollUrl: `${routeBaseUrl(c.req.url)}/v1/ai/operations/${submitted.operation.id}` } : {})
-      }, 202);
-    }
-
-    if (toolId === "ai.advanced") {
-      const parsed = aiAdvancedToolSchema.safeParse(body);
-      if (!parsed.success) return invalidInput(c, parsed.error);
-      const request = { ...parsed.data, userId: actor.userId, workspaceId: await resolveActorWorkspaceId(actor, parsed.data.workspaceId) };
-      if (request.sourceUrls.length && apiKey && !apiKeyHasAnyScope(apiKey, ["ingest"])) return adapterError(c, 403, "Source ingestion requires ingest scope");
-      const submitted = await submitAdvancedAutomation({ request, apiKey });
-      return c.json({
-        tool: toolId,
-        operation: submitted.operation,
-        events: submitted.events,
-        ...(apiKey ? { streamUrl: `${routeBaseUrl(c.req.url)}/v1/ai/operations/${submitted.operation.id}/stream` } : {}),
-        pollTool: { name: "ai.operation.get", arguments: { operationId: submitted.operation.id } },
-        ...(apiKey ? { pollUrl: `${routeBaseUrl(c.req.url)}/v1/ai/operations/${submitted.operation.id}` } : {})
-      }, 202);
-    }
-
-    if (["workspace.search", "workspace.chat"].includes(toolId)) {
-      if (apiKey && !apiKeyHasAnyScope(apiKey, ["search"])) return adapterError(c, 403, "Forbidden");
+    if (toolId === "search" || toolId === "chat") {
       const actor = c.get("requestActor");
       const native = new Hono().use("*", publicErrorMiddleware).use("*", async (inner, next) => {
         setRequestActor(inner, actor);
         await next();
       }).route("/", searchRoutes);
       native.onError(spendAwareErrorHandler);
-      const path = toolId === "workspace.chat" ? "/chat" : "/";
+      const path = toolId === "chat" ? "/chat" : "/";
       return native.request(`http://mcp.internal${path}`, {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body), signal: c.req.raw.signal,
       });
     }
 
-    if (toolId === "workspace.aggregate-rag-search") {
-      if (apiKey && !apiKeyHasAnyScope(apiKey, ["search"])) return adapterError(c, 403, "Forbidden");
-      const parsed = aggregateWorkspaceRagSearchRequestSchema.safeParse(body);
-      if (!parsed.success) {
-        return invalidInput(c, parsed.error);
-      }
-      const response = await aggregateWorkspaceRagSearch({
-        userId: actor.userId,
-        apiKey,
-        request: parsed.data,
-      });
-      return c.json({ tool: toolId, ...response });
-    }
-
-    if (toolId === "workspace.ingest-report") {
-      if (apiKey && !apiKeyHasAnyScope(apiKey, ["search", "ingest"])) return adapterError(c, 403, "Forbidden");
-      const parsed = workspaceIngestReportSchema.safeParse(body);
+    if (toolId === "getUploadStatus") {
+      const parsed = uploadStatusInput.safeParse(body);
       if (!parsed.success) return invalidInput(c, parsed.error);
       const workspace = await loadActorScopedWorkspace(
         await resolveActorWorkspaceId(c.get("requestActor"), parsed.data.workspaceId),
@@ -328,9 +161,8 @@ const mcpAdapterRoutes = new Hono()
       return c.json({ tool: toolId, summary: summarizeIngestReport(report), report });
     }
 
-    if (toolId === "workspace.suggest") {
-      if (apiKey && !apiKeyHasAnyScope(apiKey, ["search"])) return adapterError(c, 403, "Forbidden");
-      const parsed = workspaceSuggestSchema.safeParse(body);
+    if (toolId === "suggestQueries") {
+      const parsed = suggestQueriesInput.safeParse(body);
       if (!parsed.success) return invalidInput(c, parsed.error);
       const suggestBody = parsed.data;
       const workspace = await loadActorScopedWorkspace(
@@ -360,28 +192,8 @@ const mcpAdapterRoutes = new Hono()
     return adapterError(c, 404, "Unknown MCP tool");
   })
   .get("/resources/:id", async (c) => {
-    const actor = getRequestActor(c);
-    const apiKey = getApiKey(c);
-    const resourceId = c.req.param("id");
-
-    if (resourceId === "ai.capabilities") {
-      return c.json(mcpManifest(routeBaseUrl(c.req.url), apiKey?.scopes));
-    }
-
-    if (resourceId === "ai.operation") {
-      const operationId = c.req.query("operationId");
-      if (!operationId) {
-        return adapterError(c, 400, "Missing operationId");
-      }
-      const operation = await getAutomationOperation({
-        operationId,
-        userId: actor.userId,
-        apiKey
-      });
-      if (!operation) {
-        return adapterError(c, 404, "Operation not found");
-      }
-      return c.json({ operation });
+    if (c.req.param("id") === "capabilities") {
+      return c.json(mcpManifest(routeBaseUrl(c.req.url), getApiKey(c)?.scopes));
     }
 
     return adapterError(c, 404, "Unknown MCP resource");

@@ -626,8 +626,7 @@ function writeMcpResponse(response: Record<string, unknown>): void {
   process.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", ...response })}\n`);
 }
 
-const MCP_CAPABILITIES_URI = "docslurp://ai/capabilities";
-const MCP_OPERATION_URI = /^docslurp:\/\/ai\/operations\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i;
+const MCP_CAPABILITIES_URI = "docslurp://capabilities";
 
 async function mcpFetch(args: {
   apiUrl: string;
@@ -726,25 +725,17 @@ async function mcpServerCommand(flags: Record<string, string | boolean>): Promis
         // template and adapter paths, so stdio and HTTP clients see one surface.
         case "resources/list":
           respond({ resources: [{
-            uri: MCP_CAPABILITIES_URI, name: "ai.capabilities", title: "DocSlurp capabilities",
+            uri: MCP_CAPABILITIES_URI, name: "capabilities", title: "DocSlurp capabilities",
             description: "Available tools, schemas and authorization scopes.", mimeType: "application/json"
           }] });
           break;
         case "resources/templates/list":
-          respond({ resourceTemplates: [{
-            uriTemplate: "docslurp://ai/operations/{operationId}", name: "ai.operation",
-            description: "Read an authorized automation operation.", mimeType: "application/json"
-          }] });
+          respond({ resourceTemplates: [] });
           break;
         case "resources/read": {
           const uri = envelope.params?.uri;
-          let pathname: string;
-          if (uri === MCP_CAPABILITIES_URI) pathname = "/v1/mcp/resources/ai.capabilities";
-          else {
-            const match = typeof uri === "string" ? MCP_OPERATION_URI.exec(uri) : null;
-            if (!match) { invalid("Unknown resource URI"); break; }
-            pathname = `/v1/mcp/resources/ai.operation?operationId=${encodeURIComponent(match[1]!)}`;
-          }
+          if (uri !== MCP_CAPABILITIES_URI) { invalid("Unknown resource URI"); break; }
+          const pathname = "/v1/mcp/resources/capabilities";
           let result: unknown;
           try { result = await get(pathname); }
           catch { invalid("Resource unavailable"); break; }

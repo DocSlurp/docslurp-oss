@@ -507,7 +507,6 @@ export function classifyRateLimitCategory(method: string, path: string): RateLim
     || normalizedPath === "/v1/chat"
     || normalizedPath === "/v1/chat/completions"
     || /^\/v1\/workspaces\/[^/]+\/chat(?:\/|$)/.test(normalizedPath)
-    || normalizedPath.startsWith("/v1/ai")
   ) {
     return "chat-ai";
   }

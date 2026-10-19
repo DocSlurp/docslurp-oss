@@ -37,12 +37,6 @@ type QueueMetricRow = WorkerScalerSnapshot;
 
 type QueueMetrics = QueueMetricRow;
 
-type AutomationMetricRow = {
-  kind: string;
-  status: string;
-  count: number;
-};
-
 const SCALER = resolveWorkerScalerConfig();
 const SCALER_QUERY = resolveWorkerScalerQueryParams();
 // fly-autoscaler polls every ~15 s; one cached answer per window keeps 125+
@@ -101,7 +95,7 @@ function wait(ms: number): Promise<void> {
 }
 
 async function buildPrometheusPayload(): Promise<string> {
-  const [runsByStatus, queueRows, stageRows, costRows, automationRows, automationUsageRows] = await Promise.all([
+  const [runsByStatus, queueRows, stageRows, costRows] = await Promise.all([
     sql<RunMetricRow[]>`
       select status, count(*)::int as count
       from workspace_runs
@@ -191,21 +185,7 @@ async function buildPrometheusPayload(): Promise<string> {
       group by stage_name
       order by stage_name
     `,
-    spendByProviderModel() as Promise<CostMetricRow[]>,
-    sql<AutomationMetricRow[]>`
-      select
-        kind,
-        status,
-        count(*)::int as count
-      from ai_operations
-      group by kind, status
-      order by kind, status
-    `,
-    sql<{ estimated_cost_cents: number }[]>`
-      select
-        coalesce(sum(estimated_cost_cents), 0)::double precision as estimated_cost_cents
-      from ai_operations
-    `
+    spendByProviderModel() as Promise<CostMetricRow[]>
   ]);
 
   const queue = queueRows[0] ?? {
@@ -246,18 +226,7 @@ async function buildPrometheusPayload(): Promise<string> {
         provider: row.provider,
         model: row.model
       })
-    ),
-    "# HELP docslurp_ai_operations_total Total automation operations by kind and status.",
-    "# TYPE docslurp_ai_operations_total gauge",
-    ...(automationRows ?? []).map((row) =>
-      metricLine("docslurp_ai_operations_total", Number(row.count ?? 0), {
-        kind: row.kind,
-        status: row.status
-      })
-    ),
-    "# HELP docslurp_ai_estimated_cost_cents_total Total estimated automation cost in cents.",
-    "# TYPE docslurp_ai_estimated_cost_cents_total counter",
-    metricLine("docslurp_ai_estimated_cost_cents_total", Number(automationUsageRows?.[0]?.estimated_cost_cents ?? 0))
+    )
   ];
   appendQueueMetricLines(lines, queue);
   appendAlertMetricLines(lines);

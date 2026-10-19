@@ -1,5 +1,4 @@
 import { describe, expect, it } from "vitest";
-import { getAutomationCapabilityManifest } from "../services/automation.js";
 import { mcpManifest } from "../services/mcp-tools.js";
 
 /**
@@ -8,19 +7,6 @@ import { mcpManifest } from "../services/mcp-tools.js";
  * or a wrong hint fails here instead of only at an agent's decision point.
  */
 describe("capability manifest annotations", () => {
-  it("declares hints for every automation capability, resource and prompt", () => {
-    const manifest = getAutomationCapabilityManifest("https://example.test");
-    for (const item of [...manifest.capabilities, ...manifest.resources, ...manifest.prompts]) {
-      expect(item.annotations, item.id).toBeDefined();
-    }
-    const byId = new Map(manifest.capabilities.map((capability) => [capability.id, capability.annotations]));
-    expect(byId.get("ai.simple")).toMatchObject({ readOnly: false, openWorld: true });
-    expect(byId.get("ai.advanced")).toMatchObject({ readOnly: false, openWorld: true });
-    expect(byId.get("workspace.aggregate-rag-search")).toMatchObject({ readOnly: true, idempotent: true });
-    expect(manifest.resources.find((resource) => resource.id === "ai.capabilities")?.annotations).toMatchObject({ readOnly: true, idempotent: true });
-    expect(manifest.prompts.find((prompt) => prompt.id === "prompt.workspace-grounded-answer")?.annotations).toMatchObject({ readOnly: true, idempotent: true });
-  });
-
   it("declares hints for every exposed MCP tool", () => {
     const manifest = mcpManifest("https://example.test", ["search", "ingest"]);
     const expected: Record<string, { readOnly: boolean; idempotent: boolean }> = {

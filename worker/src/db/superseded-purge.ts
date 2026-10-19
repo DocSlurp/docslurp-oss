@@ -29,7 +29,6 @@ const DERIVED_TABLES = [
   "document_pages",
   "document_summaries",
   "document_propositions",
-  "grounded_summaries",
   "page_stage_states",
   "page_work_tasks",
   "pii_detections",

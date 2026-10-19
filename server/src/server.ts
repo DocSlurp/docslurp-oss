@@ -21,7 +21,6 @@ import { multipartBodyLimit } from "./lib/upload-policy.js";
 import { emitPostHogApiLog } from "./lib/posthog-ai-observability.js";
 import { apiActorRateLimit, apiIpRateLimit } from "./middleware/rate-limit.js";
 import { sessionAuth } from "./middleware/session-auth.js";
-import { aiRoutes } from "./routes/ai.js";
 import { chatCompletionsRoutes } from "./routes/chat-completions.js";
 import { documentsRoutes } from "./routes/documents.js";
 import { extractorRoutes } from "./routes/extractors.js";
@@ -147,7 +146,6 @@ export function createApiApp(): Hono {
   app.route("/dashboard/bootstrap", dashboardRoutes);
   app.route("/v1/invites", inviteRoutes);
   app.route("/v1/waitlist", waitlistRoutes);
-  app.route("/v1/ai", aiRoutes);
   app.route("/v1/organizations", organizationsRoutes);
   app.route("/v1/organizations", ssoRoutes);
   app.route("/v1/runs", runsRoutes);

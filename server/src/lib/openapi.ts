@@ -3,7 +3,7 @@ import { workspaceGraphPaths, workspaceGraphSchemas } from "./workspace-graph-op
 import { simpleServicePaths, simpleServiceSchemas } from "./simple-service-openapi.js";
 import { webhookEventCatalog } from "./webhook-events.js";
 import { searchCompatibilityPaths, searchCompatibilitySchemas } from "./search-compat-openapi.js";
-import { apiKeySurfacePaths, keyOnlySecurity, keyOrSessionSecurity } from "./api-key-surface-openapi.js";
+import { apiKeySurfacePaths, keyOrSessionSecurity } from "./api-key-surface-openapi.js";
 import { apiErrorOpenApiResponse, apiErrorSchema } from "./api-error-openapi.js";
 
 export function buildOpenApiDocument(baseUrl: string) {
@@ -35,7 +35,6 @@ export function buildOpenApiDocument(baseUrl: string) {
       { name: "ingest" },
       { name: "search" },
       { name: "chat" },
-      { name: "ai" },
       { name: "mcp" },
       { name: "webhooks" },
       { name: "artifacts" }
@@ -126,45 +125,6 @@ export function buildOpenApiDocument(baseUrl: string) {
           },
           responses: {
             "201": { description: "Workspace created" }
-          }
-        }
-      },
-      "/v1/ai/capabilities": {
-        get: {
-          tags: ["ai"],
-          summary: "Get the machine-readable AI and MCP capability manifest",
-          security: keyOnlySecurity,
-          responses: {
-            "200": { description: "Capability manifest" },
-            "401": apiErrorOpenApiResponse("Missing or invalid API key")
-          }
-        }
-      },
-      "/v1/ai/operations/{id}": {
-        get: {
-          tags: ["ai"],
-          summary: "Get a durable automation operation snapshot",
-          security: keyOnlySecurity,
-          parameters: [
-            { in: "path", name: "id", required: true, schema: { type: "string" } }
-          ],
-          responses: {
-            "200": { description: "Operation snapshot and event history" },
-            "404": apiErrorOpenApiResponse("Operation not found")
-          }
-        }
-      },
-      "/v1/ai/operations/{id}/stream": {
-        get: {
-          tags: ["ai"],
-          summary: "Stream operation events over SSE",
-          security: keyOnlySecurity,
-          parameters: [
-            { in: "path", name: "id", required: true, schema: { type: "string" } }
-          ],
-          responses: {
-            "200": { description: "Server-sent event stream" },
-            "404": apiErrorOpenApiResponse("Operation not found")
           }
         }
       },

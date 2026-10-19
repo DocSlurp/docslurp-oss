@@ -8,7 +8,7 @@ vi.mock("../lib/ai-usage.js", () => ({ recordUsageEvent: mocks.record }));
 vi.mock("../lib/posthog-ai-observability.js", () => ({ posthogAiTelemetry: () => ({}) }));
 vi.mock("./mcp-tools.js", () => ({
   createMcpDispatcher: mocks.createDispatch,
-  mcpManifest: () => ({ capabilities: [{ id: "workspace.search", title: "Search", description: "Retrieve", category: "tool", inputSchema: { type: "object", properties: { q: { type: "string" } }, required: ["q"] } }] }),
+  mcpManifest: () => ({ capabilities: [{ id: "search", title: "Search", description: "Retrieve", category: "tool", inputSchema: { type: "object", properties: { q: { type: "string" } }, required: ["q"] } }] }),
 }));
 vi.mock("@docslurp/shared", async importOriginal => ({
   ...await importOriginal<typeof import("@docslurp/shared")>(),
@@ -22,7 +22,7 @@ const args = { actor, workspaceId: "ws", orgId: "org", sessionId: "conversation"
 function step(toolCall: boolean): Awaited<ReturnType<MockLanguageModelV4["doStream"]>> {
   return { stream: simulateReadableStream({ chunks: [
     { type: "stream-start", warnings: [] },
-    ...(toolCall ? [{ type: "tool-call" as const, toolCallId: "call", toolName: "workspace_search", input: '{"q":"policy"}' }]
+    ...(toolCall ? [{ type: "tool-call" as const, toolCallId: "call", toolName: "search", input: '{"q":"policy"}' }]
       : [{ type: "text-start" as const, id: "text" }, { type: "text-delta" as const, id: "text", delta: "The policy is supported [1]." }, { type: "text-end" as const, id: "text" }]),
     { type: "finish", finishReason: { unified: toolCall ? "tool-calls" : "stop", raw: undefined },
       usage: { inputTokens: { total: 10, noCache: 10, cacheRead: 0, cacheWrite: 0 }, outputTokens: { total: 4, text: 4, reasoning: 0 } } },
@@ -47,7 +47,7 @@ describe("chat MCP agent with the real SDK loop", () => {
     expect(JSON.stringify(model.doStreamCalls[1]!.prompt)).toContain("The policy is supported.");
     expect(result.answer).toBe(deltas.join(""));
     expect(result.citations).toHaveLength(1);
-    expect(result.toolCalls).toMatchObject([{ name: "workspace.search", status: "success" }]);
+    expect(result.toolCalls).toMatchObject([{ name: "search", status: "success" }]);
     expect(mocks.record).toHaveBeenCalledTimes(2);
     for (const [entry] of mocks.record.mock.calls) {
       expect(entry).toMatchObject({ userId: "user", scope: { workspaceId: "ws", orgId: "org", sessionId: "conversation" }, usage: { inputTokens: 10, outputTokens: 4 } });

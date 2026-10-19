@@ -46,7 +46,7 @@ Parallel retrieval defaults to at most four in-flight queries; set `concurrency`
 }
 ```
 
-Discover schemas with `tools/list`. `upload` and `completeUpload` require `ingest` scope; `listWorkspaces` and `getUploadStatus` accept `ingest` or `search`; retrieval, chat and suggestions require `search`. New default OAuth consent requests include ingest access; existing read-only connections must reauthorize with ingest scope to discover upload tools. Explicitly requested read-only scopes stay read-only. Internal automation tools are not advertised.
+Discover schemas with `tools/list`. `upload` and `completeUpload` require `ingest` scope; `listWorkspaces` and `getUploadStatus` accept `ingest` or `search`; retrieval, chat and suggestions require `search`. New default OAuth consent requests include ingest access; existing read-only connections must reauthorize with ingest scope to discover upload tools. Explicitly requested read-only scopes stay read-only. The `docslurp://capabilities` resource returns the same catalog with each tool's scopes.
 
 ## Upload files from an agent
 

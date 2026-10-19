@@ -17,6 +17,7 @@ export interface McpManifest {
 
 export type McpDispatch = (path: string, init?: RequestInit) => Promise<Response>;
 
+const CAPABILITIES_URI = "docslurp://capabilities";
 const MAX_BODY_BYTES = 1_048_576;
 const REQUEST_TIMEOUT_MS = 120_000;
 
@@ -55,22 +56,13 @@ function createServer(manifest: McpManifest, adapterDispatch: McpDispatch, signa
       structuredContent: result as Record<string, unknown>, isError: !response.ok };
   });
   server.setRequestHandler("resources/list", () => ({ resources: [{
-    uri: "docslurp://ai/capabilities", name: "ai.capabilities", title: "DocSlurp capabilities",
+    uri: CAPABILITIES_URI, name: "capabilities", title: "DocSlurp capabilities",
     description: "Available tools, schemas and authorization scopes.", mimeType: "application/json",
   }] }));
-  server.setRequestHandler("resources/templates/list", () => ({ resourceTemplates: [{
-    uriTemplate: "docslurp://ai/operations/{operationId}", name: "ai.operation",
-    description: "Read an authorized automation operation.", mimeType: "application/json",
-  }] }));
+  server.setRequestHandler("resources/templates/list", () => ({ resourceTemplates: [] }));
   server.setRequestHandler("resources/read", async (request, ctx) => {
-    let path: string;
-    if (request.params.uri === "docslurp://ai/capabilities") path = "/resources/ai.capabilities";
-    else {
-      const match = /^docslurp:\/\/ai\/operations\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i.exec(request.params.uri);
-      if (!match) throw new ProtocolError(ProtocolErrorCode.InvalidParams, "Unknown resource URI");
-      path = `/resources/ai.operation?operationId=${encodeURIComponent(match[1]!)}`;
-    }
-    const response = await dispatch(path, { signal: AbortSignal.any([signal, ctx.mcpReq.signal]) });
+    if (request.params.uri !== CAPABILITIES_URI) throw new ProtocolError(ProtocolErrorCode.InvalidParams, "Unknown resource URI");
+    const response = await dispatch("/resources/capabilities", { signal: AbortSignal.any([signal, ctx.mcpReq.signal]) });
     if (!response.ok) throw new ProtocolError(ProtocolErrorCode.InvalidParams, "Resource unavailable");
     return { contents: [{ uri: request.params.uri, mimeType: "application/json", text: await response.text() }] };
   });
