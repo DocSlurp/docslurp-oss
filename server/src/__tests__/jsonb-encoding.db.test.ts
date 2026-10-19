@@ -62,7 +62,12 @@ describe("jsonb values are stored as objects, not JSON strings", () => {
     expect(await sql`select id, jsonb_typeof(metadata) as t from audit_log order by id`)
       .toEqual([{ id: "s1", t: "string" }, { id: "s2", t: "object" }, { id: "s3", t: "string" }]);
     const migration = readFileSync(new URL("../../db/migrations/0058_jsonb_unwrap_string_objects.sql", import.meta.url), "utf8");
-    await sql.unsafe(migration);
+    // Replay against the current schema: skip statements on tables a later migration dropped.
+    const present = new Set((await sql<{ name: string }[]>`select tablename as name from pg_tables where schemaname = current_schema()`).map(row => row.name));
+    for (const statement of migration.split(/;\s*\n/).map(part => part.trim()).filter(Boolean)) {
+      const table = /^UPDATE\s+(\w+)/m.exec(statement)?.[1];
+      if (!table || present.has(table)) await sql.unsafe(statement);
+    }
     expect(await sql`select id, jsonb_typeof(metadata) as t, metadata->>'k' as k from audit_log order by id`)
       .toEqual([{ id: "s1", t: "object", k: "1" }, { id: "s2", t: "object", k: "2" }, { id: "s3", t: "string", k: null }]);
   });

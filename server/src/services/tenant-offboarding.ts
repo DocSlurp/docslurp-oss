@@ -190,9 +190,7 @@ export async function purgeOrganization(
     documents += (await deleteWorkspaceData(workspaceId, deps)).documents;
   }
 
-  // Org-scoped rows that are not billing or audit history. ai_operations is
-  // retired but keeps old payloads until its contract migration drops it.
-  await sql`delete from ai_operations where org_id = ${orgId}`;
+  // Org-scoped rows that are not billing or audit history.
   await sql`delete from graph_jobs where org_id = ${orgId}`;
   await sql`delete from budget_alerts where org_id = ${orgId}`;
   await sql`delete from credit_leases where org_id = ${orgId}`;
