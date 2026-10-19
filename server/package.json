@@ -15,7 +15,7 @@
     "start": "tsx src/main.ts",
     "typecheck": "pnpm --filter @docslurp/shared build && pnpm --filter @docslurp/sdk build && tsc -p tsconfig.json --noEmit",
     "test": "vitest run && pnpm test:db",
-    "test:db": "tsx db/tests/run.mjs",
+    "test:db": "pnpm --filter @docslurp/shared build && tsx db/tests/run.mjs",
     "db:migrate": "node db/migrate.mjs",
     "db:seed": "tsx db/seed.ts",
     "test:watch": "vitest"
