@@ -68,7 +68,7 @@ export const SERVICE_PLANS: readonly ServicePlan[] = [
     support: "Community",
     stripeLookupKey: null,
     highlights: [
-      "2,500 one-time starter credits",
+      "250 one-time starter credits",
       "50 concurrent workers",
       "1 GB storage included (50 MB index)",
     ],
@@ -149,7 +149,7 @@ export function creditsForSubscriptionPayment(planId: PlanId, amountPaidCents: n
   return Math.round(credits * 100) / 100;
 }
 
-export const STARTER_CREDITS = 2_500;
+export const STARTER_CREDITS = 250;
 export const MIN_TOPUP_CENTS = 500;
 export const MAX_TOPUP_CENTS = 1_000_000;
 

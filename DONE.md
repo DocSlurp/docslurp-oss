@@ -17,3 +17,5 @@
 
 - Add opt-in candidate depth and relevance/prompt ordering controls across search GET/POST/batch, workspace/chat retrieval settings, SDK types and MCP-derived contracts. Keep omitted defaults stable; validate actual SQL/LanceDB retrieval in an isolated migrated database without model calls.
 - Add opt-in LANCEDB_REFINE_FACTOR with ef covering refined candidates; verify authorization, SQL hydration/citations and unindexed tails through migrated local PostgreSQL and real Lance (2026-10-17).
+
+- Reduced new-account starter credits to 250 ($2.50), below Silver’s 2,000 monthly credits; migration preserves existing grants and one-time claims.

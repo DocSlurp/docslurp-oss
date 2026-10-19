@@ -414,6 +414,13 @@
       "when": 1791900000010,
       "tag": "0058_jsonb_unwrap_string_objects",
       "breakpoints": true
+    },
+    {
+      "idx": 59,
+      "version": "7",
+      "when": 1792368000000,
+      "tag": "0059_starter_credit_250",
+      "breakpoints": true
     }
   ]
 }
