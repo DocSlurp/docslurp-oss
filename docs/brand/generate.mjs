@@ -28,11 +28,24 @@ const tile = (s) => {
   const o = (64 - 64 * s) / 2;
   return `<rect width="64" height="64" fill="${P.blue}"/><g transform="translate(${o} ${o}) scale(${s})">${inverse}</g>`;
 };
+const SANS = "Inter, 'Segoe UI', system-ui, -apple-system, Helvetica, Arial, sans-serif";
+const MONO = "'JetBrains Mono', ui-monospace, Menlo, Consolas, monospace";
 // The default lockup follows the viewer's colour scheme, so the wordmark stays
 // readable when the SVG is shown on a dark page via <img>.
 const adaptive = `<style>text{fill:${P.ink}}@media (prefers-color-scheme:dark){text{fill:${P.paper}}}</style>`;
 const lock = (fg) =>
-  `${fg ? "" : adaptive}${primary}<text x="60" y="44" font-family="Inter, 'Segoe UI', system-ui, -apple-system, Helvetica, Arial, sans-serif" font-size="34" letter-spacing="-0.6"${fg ? ` fill="${fg}"` : ""}><tspan font-weight="500">Doc</tspan><tspan font-weight="800">Slurp</tspan></text>`;
+  `${fg ? "" : adaptive}${primary}<text x="60" y="44" font-family="${SANS}" font-size="34" letter-spacing="-0.6"${fg ? ` fill="${fg}"` : ""}><tspan font-weight="500">Doc</tspan><tspan font-weight="800">Slurp</tspan></text>`;
+// GitHub social preview, 1280x640. Content stays clear of the outer 64px,
+// which some link unfurlers crop.
+const card =
+  `<defs><radialGradient id="glow" cx="260" cy="320" r="380" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="${P.blue}" stop-opacity=".45"/><stop offset="1" stop-color="${P.blue}" stop-opacity="0"/></radialGradient></defs>` +
+  `<rect width="1280" height="640" fill="${P.ink}"/><rect width="1280" height="640" fill="url(#glow)"/>` +
+  `<g transform="translate(84 144) scale(5.5)">${primary}</g>` +
+  `<g font-family="${SANS}"><text x="480" y="262" font-size="112" letter-spacing="-2.5" fill="${P.paper}"><tspan font-weight="500">Doc</tspan><tspan font-weight="800">Slurp</tspan></text>` +
+  `<text font-size="32" fill="#CBD5E1"><tspan x="484" y="336">Send any file. Get page-by-page Markdown,</tspan><tspan x="484" y="380">hybrid search, RAG context and cited chat.</tspan></text>` +
+  `<text x="484" y="452" font-size="21" font-weight="700" letter-spacing="2" fill="${P.orange}">REST · SDK · CLI · MCP · OPENAI-COMPATIBLE CHAT</text></g>` +
+  `<text x="484" y="560" font-family="${MONO}" font-size="22" fill="#64748B">github.com/DocSlurp/docslurp-oss</text>` +
+  `<rect y="628" width="1280" height="12" fill="${P.blue}"/>`;
 
 const files = {
   "docslurp-mark.svg": svg(primary),
@@ -45,6 +58,7 @@ const files = {
   "docslurp-lockup.svg": svg(lock(), "0 0 236 64"),
   "docslurp-lockup-dark.svg": svg(lock(P.ink), "0 0 236 64"),
   "docslurp-lockup-white.svg": svg(lock("#fff"), "0 0 236 64"),
+  "social-card.svg": svg(card, "0 0 1280 640"),
 };
 for (const [f, s] of Object.entries(files)) fs.writeFileSync(path.join(out, f), s);
 fs.writeFileSync(path.join(out, "palette.json"), `${JSON.stringify(P, null, 2)}\n`);

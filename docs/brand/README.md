@@ -17,6 +17,7 @@ The DocSlurp mark is a cup that is also a page: a folded corner, Markdown lines 
 | `apple-touch-icon.png` | iOS home screen, 180 px |
 | `icon-192.png`, `icon-512.png`, `docslurp-app-icon.svg` | App and PWA icons on a full-bleed blue square |
 | `icon-maskable-512.png`, `docslurp-app-icon-maskable.svg` | PWA `maskable` icon, with the mark inside the 80% safe zone |
+| `social-card.png`, `social-card.svg` | GitHub social preview, 1280×640; upload it under the repository's Settings → General → Social preview |
 | `palette.json` | Brand colours |
 
 On GitHub, where the page theme can differ from the system setting, pick the variant with `<picture>`:
@@ -61,4 +62,5 @@ rsvg-convert -w 180 -h 180 docslurp-app-icon.svg -o apple-touch-icon.png
 rsvg-convert -w 192 -h 192 docslurp-app-icon.svg -o icon-192.png
 rsvg-convert -w 512 -h 512 docslurp-app-icon.svg -o icon-512.png
 rsvg-convert -w 512 -h 512 docslurp-app-icon-maskable.svg -o icon-maskable-512.png
+rsvg-convert -w 1280 -h 640 social-card.svg -o social-card.png
 ```
