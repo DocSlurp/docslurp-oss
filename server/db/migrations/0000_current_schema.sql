@@ -1,7 +1,5 @@
 CREATE EXTENSION IF NOT EXISTS vector;
 --> statement-breakpoint
-CREATE EXTENSION IF NOT EXISTS pgcrypto;
---> statement-breakpoint
 CREATE TABLE "credit_ledger" (
 	"id" text PRIMARY KEY NOT NULL,
 	"user_id" text NOT NULL,
