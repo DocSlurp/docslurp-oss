@@ -34,7 +34,7 @@ const complexRemoteExtensions = new Set([
   ".tiff"
 ]);
 
-export type RemoteIngestSourceKind = "url" | "automation" | "connector";
+export type RemoteIngestSourceKind = "url" | "connector";
 
 function normalizeMimeType(value: string | null | undefined): string | null {
   const normalized = value?.split(";")[0]?.trim().toLowerCase() ?? null;
@@ -43,8 +43,6 @@ function normalizeMimeType(value: string | null | undefined): string | null {
 
 function sourceKindLabel(kind: RemoteIngestSourceKind): string {
   switch (kind) {
-    case "automation":
-      return "Automation source";
     case "connector":
       return "Connector source";
     default:
