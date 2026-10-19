@@ -1,6 +1,6 @@
 # Backing services for local development (`pnpm db:up`). Run the API and worker on the host:
 # `pnpm dev:api` and `pnpm dev:worker`. For a full containerised stack use compose.selfhost.yml.
-# Object storage is one URI (see docs/self-host.md#storage-configuration). The
+# Object storage is one URI (see docs/self-host/configuration.md#storage-configuration). The
 # MinIO root credentials double as AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY.
 x-storage-uri: &storage-uri ${STORAGE_URI:-s3://docslurp-files?endpoint=http://minio:9000&region=us-west-2}
 # Containers don't share /tmp, so app and workers share one LanceDB store in the
