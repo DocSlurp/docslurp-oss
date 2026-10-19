@@ -9,14 +9,14 @@ import { mcpManifest } from "../services/mcp-tools.js";
 describe("capability manifest annotations", () => {
   it("declares hints for every exposed MCP tool", () => {
     const manifest = mcpManifest("https://example.test", ["search", "ingest"]);
-    const expected: Record<string, { readOnly: boolean; idempotent: boolean }> = {
-      listWorkspaces: { readOnly: true, idempotent: true },
-      upload: { readOnly: false, idempotent: false },
-      completeUpload: { readOnly: false, idempotent: false },
-      search: { readOnly: true, idempotent: true },
-      chat: { readOnly: false, idempotent: false },
-      getUploadStatus: { readOnly: true, idempotent: true },
-      suggestQueries: { readOnly: true, idempotent: true },
+    const expected: Record<string, { readOnly: boolean; idempotent: boolean; consequential: boolean }> = {
+      listWorkspaces: { readOnly: true, idempotent: true, consequential: false },
+      upload: { readOnly: false, idempotent: false, consequential: true },
+      completeUpload: { readOnly: false, idempotent: false, consequential: true },
+      search: { readOnly: true, idempotent: true, consequential: false },
+      chat: { readOnly: false, idempotent: false, consequential: false },
+      getUploadStatus: { readOnly: true, idempotent: true, consequential: false },
+      suggestQueries: { readOnly: true, idempotent: true, consequential: false },
     };
     const tools = manifest.capabilities.filter((capability) => capability.category === "tool");
     expect(new Set(tools.map((tool) => tool.id))).toEqual(new Set(Object.keys(expected)));

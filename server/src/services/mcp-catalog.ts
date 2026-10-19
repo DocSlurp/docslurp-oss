@@ -58,9 +58,11 @@ function searchToolInputSchema() {
 
 export type McpScope = "search" | "ingest";
 // Agent-safety hints live with the tool definition so every surface (remote MCP,
-// stdio, chat tools) reads the same values instead of inferring them per surface.
-export type ToolAnnotations = { readOnly: boolean; destructive: boolean; idempotent: boolean; openWorld: boolean };
-const READ_ONLY: ToolAnnotations = { readOnly: true, destructive: false, idempotent: true, openWorld: false };
+// stdio, chat tools, WebMCP) reads the same values instead of inferring them per surface.
+// `consequential` (WebMCP's consequentialHint) marks calls a person should confirm:
+// they start paid ingestion of new content.
+export type ToolAnnotations = { readOnly: boolean; destructive: boolean; idempotent: boolean; openWorld: boolean; consequential: boolean };
+const READ_ONLY: ToolAnnotations = { readOnly: true, destructive: false, idempotent: true, openWorld: false, consequential: false };
 
 export interface McpTool {
   id: string;
@@ -81,7 +83,7 @@ export function mcpTools(baseUrl: string): McpTool[] {
       description: "List workspaces you can access, including their IDs, slugs, default workspace, document/page counts and latest processing status. Use a returned slug as workspaceId in upload, search or chat. Does not call AI.",
       inputSchema: toolInputJsonSchema(listWorkspacesInput) },
     { id: "upload", title: "Upload documents", scopes: ["ingest"],
-      annotations: { readOnly: false, destructive: false, idempotent: false, openWorld: true },
+      annotations: { readOnly: false, destructive: false, idempotent: false, openWorld: true, consequential: true },
       description: "Upload documents using either fetchable HTTP(S) urls or files metadata. For files, generate one presigned PUT URL per file, up to 10 files (5 GiB each, subject to account limits). PUT the raw bytes to each putUrl with the declared Content-Type, then call completeUpload with sessionId and file IDs. Never send file bytes or local paths as tool arguments. URLs start ingestion immediately; files start only on completion. Omit workspaceId for the default workspace; workspaceName explicitly creates a new one. Ingestion can incur cost. idempotencyKey applies to URL ingestion retries.",
       inputSchema: {
         ...toolInputJsonSchema(uploadInput),
@@ -89,14 +91,14 @@ export function mcpTools(baseUrl: string): McpTool[] {
         not: { required: ["workspaceId", "workspaceName"] },
       } },
     { id: "completeUpload", title: "Complete upload", scopes: ["ingest"],
-      annotations: { readOnly: false, destructive: false, idempotent: false, openWorld: false },
+      annotations: { readOnly: false, destructive: false, idempotent: false, openWorld: false, consequential: true },
       description: "After all presigned PUT requests succeed, verify uploaded files and start ingestion. Pass sessionId and fileIds from upload. Returns workspace and run IDs for getUploadStatus. File size is verified before ingestion; do not call before uploading the bytes.",
       inputSchema: toolInputJsonSchema(completeUploadInput) },
     { id: "search", title: "Search documents", scopes: ["search"], annotations: READ_ONLY,
       description: "Retrieve cited passages for one query (q) or up to 20 independent queries (queries). Supply exactly one form. Batch results stay in input order with per-query errors; each query can select a workspace. Omitted workspace uses the default. Does not generate answers.",
       inputSchema: searchToolInputSchema() },
     { id: "chat", title: "Chat with workspace", scopes: ["search"],
-      annotations: { readOnly: false, destructive: false, idempotent: false, openWorld: false },
+      annotations: { readOnly: false, destructive: false, idempotent: false, openWorld: false, consequential: false },
       description: "Generate a grounded answer with citations and token usage using the workspace's configured model. This calls AI and can incur cost; use search for your own LLM.",
       inputSchema: toolInputJsonSchema(workspaceChatInputSchema) },
     { id: "getUploadStatus", title: "Get upload status", scopes: ["search", "ingest"], annotations: READ_ONLY,

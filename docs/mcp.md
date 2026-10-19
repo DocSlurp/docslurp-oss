@@ -103,7 +103,10 @@ receipts are saved beside the run evidence; credentials are never saved in trace
 
 Signed-in dashboard chat uses the same tool handlers with the current user's
 permissions. Supported browsers also receive WebMCP tools through
-`document.modelContext`; unsupported browsers retain the normal interface.
+`document.modelContext` from `/v1/session-tools`, the same catalog with each
+tool's `readOnly` and `consequential` hints (upload and completeUpload ask for
+confirmation); unsupported browsers retain the normal interface. Set
+`DOCSLURP_WEBMCP_ENABLED=false` to turn it off.
 Neither path requires creating a server API key. Remote `/v1/mcp` remains
 bearer-authenticated.
 
