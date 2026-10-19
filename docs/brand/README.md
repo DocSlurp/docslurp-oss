@@ -11,12 +11,22 @@ The DocSlurp mark is a cup that is also a page: a folded corner, Markdown lines 
 | `docslurp-mark.svg` | Primary mark, on light or dark backgrounds |
 | `docslurp-mark-inverse.svg` | Mark for Slurp Blue or other saturated backgrounds |
 | `docslurp-mark-mono.svg`, `docslurp-mark-mono-white.svg` | Single colour (Ink or white) for print, embossing and monochrome UI |
-| `docslurp-lockup.svg`, `docslurp-lockup-white.svg` | Mark with the “DocSlurp” wordmark, for light and dark backgrounds |
+| `docslurp-lockup.svg` | Mark with the “DocSlurp” wordmark; the wordmark switches to Paper when the viewer prefers a dark colour scheme |
+| `docslurp-lockup-dark.svg`, `docslurp-lockup-white.svg` | Fixed Ink or white wordmark, for when you know the background |
 | `favicon.svg`, `favicon.ico`, `favicon-16.png`, `favicon-32.png` | Browser tab icons (`.ico` holds 16, 32 and 48 px) |
 | `apple-touch-icon.png` | iOS home screen, 180 px |
 | `icon-192.png`, `icon-512.png`, `docslurp-app-icon.svg` | App and PWA icons on a full-bleed blue square |
 | `icon-maskable-512.png`, `docslurp-app-icon-maskable.svg` | PWA `maskable` icon, with the mark inside the 80% safe zone |
 | `palette.json` | Brand colours |
+
+On GitHub, where the page theme can differ from the system setting, pick the variant with `<picture>`:
+
+```html
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/brand/docslurp-lockup-white.svg">
+  <img src="docs/brand/docslurp-lockup-dark.svg" height="64" alt="DocSlurp">
+</picture>
+```
 
 The lockup sets the wordmark as live text in Inter (falling back to the system sans-serif), so it renders slightly differently where Inter is not installed. Outline the text before you use it in print.
 

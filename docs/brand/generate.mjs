@@ -28,8 +28,11 @@ const tile = (s) => {
   const o = (64 - 64 * s) / 2;
   return `<rect width="64" height="64" fill="${P.blue}"/><g transform="translate(${o} ${o}) scale(${s})">${inverse}</g>`;
 };
+// The default lockup follows the viewer's colour scheme, so the wordmark stays
+// readable when the SVG is shown on a dark page via <img>.
+const adaptive = `<style>text{fill:${P.ink}}@media (prefers-color-scheme:dark){text{fill:${P.paper}}}</style>`;
 const lock = (fg) =>
-  `${primary}<text x="60" y="44" font-family="Inter, 'Segoe UI', system-ui, -apple-system, Helvetica, Arial, sans-serif" font-size="34" letter-spacing="-0.6" fill="${fg}"><tspan font-weight="500">Doc</tspan><tspan font-weight="800">Slurp</tspan></text>`;
+  `${fg ? "" : adaptive}${primary}<text x="60" y="44" font-family="Inter, 'Segoe UI', system-ui, -apple-system, Helvetica, Arial, sans-serif" font-size="34" letter-spacing="-0.6"${fg ? ` fill="${fg}"` : ""}><tspan font-weight="500">Doc</tspan><tspan font-weight="800">Slurp</tspan></text>`;
 
 const files = {
   "docslurp-mark.svg": svg(primary),
@@ -39,7 +42,8 @@ const files = {
   "docslurp-app-icon.svg": svg(tile(0.78)),
   "docslurp-app-icon-maskable.svg": svg(tile(0.6)),
   "favicon.svg": svg(primary),
-  "docslurp-lockup.svg": svg(lock(P.ink), "0 0 236 64"),
+  "docslurp-lockup.svg": svg(lock(), "0 0 236 64"),
+  "docslurp-lockup-dark.svg": svg(lock(P.ink), "0 0 236 64"),
   "docslurp-lockup-white.svg": svg(lock("#fff"), "0 0 236 64"),
 };
 for (const [f, s] of Object.entries(files)) fs.writeFileSync(path.join(out, f), s);
