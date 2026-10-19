@@ -1,10 +1,11 @@
 import { reportPublicError } from "../lib/public-errors.js";
+import { apiErrorResponse, nativeApiErrors } from "../lib/api-error.js";
 import { Hono, type Context } from "hono";
 import { batchSearchInputSchema, searchInputSchema, searchOptions, workspaceChatInputSchema, type SearchInput } from "../lib/search-input.js";
 import { streamSSE } from "hono/streaming";
 import { assertCanSpend } from "../services/billing/spend-guard.js";
 
-import { aggregateWorkspaceRagSearchRequestSchema } from "@docslurp/shared";
+import { aggregateWorkspaceRagSearchRequestSchema, type ApiErrorCode } from "@docslurp/shared";
 
 import {
   actorHasAnyApiKeyScope,
@@ -22,6 +23,37 @@ import { publicSearchResponse } from "../lib/search-usage.js";
 import { sql } from "../db.js";
 import { acceptApiKeys } from "../lib/route-auth.js";
 import { currentRequestApiKeyId } from "../lib/request-context.js";
+import { env } from "../config.js";
+
+/** Runs each validated query, preserving input order and per-item errors. */
+async function runSearchBatch(c: Context, parsed: { queries: SearchInput[]; concurrency: number }, userId: string): Promise<BatchResult[]> {
+  const { queries, concurrency } = parsed;
+  const signal = c.req.raw.signal;
+  const results: BatchResult[] = queries.map(() => ({ ok: false,
+    error: { code: "REQUEST_ABORTED", message: "Request aborted before search started", status: 499 } }));
+  let next = 0;
+  async function worker() {
+    while (!signal.aborted && next < queries.length) {
+      const index = next++;
+      const query = queries[index]!;
+      try {
+        const input = { ...query, workspaceId: await resolveActorWorkspaceId(getRequestActor(c), query.workspaceId, query.orgId) };
+        const forbidden = await assertApiKeyWorkspaceAccess(c, input.workspaceId, "search");
+        if (forbidden) {
+          results[index] = { ok: false, error: {
+            code: forbidden.status === 403 ? "FORBIDDEN" : "WORKSPACE_NOT_FOUND",
+            message: forbidden.status === 403 ? "Forbidden" : "Workspace not found", status: forbidden.status } };
+        } else if (!signal.aborted) {
+          results[index] = { ok: true, data: await retrieve(input, userId) };
+        }
+      } catch (error) {
+        results[index] = { ok: false, error: searchError(error) };
+      }
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(concurrency, queries.length) }, () => worker()));
+  return results;
+}
 
 function clampSearchLimit(value: number | undefined): number | undefined {
   if (value === undefined || !Number.isFinite(value)) {
@@ -30,45 +62,64 @@ function clampSearchLimit(value: number | undefined): number | undefined {
   return Math.max(1, Math.min(100, Math.floor(value)));
 }
 
-async function handleWorkspaceChat(c: Context, allowAgentTools: boolean) {
+/** API-key scope and workspace checks, answered in the native error envelope. */
+async function denyWorkspaceAccess(c: Context, workspaceId: string): Promise<Response | null> {
+  const denied = await assertApiKeyWorkspaceAccess(c, workspaceId, "search");
+  if (!denied) return null;
+  return denied.status === 403
+    ? apiErrorResponse(c, 403, "forbidden", "Forbidden")
+    : apiErrorResponse(c, 404, "workspace_not_found", "Workspace not found");
+}
+
+/** `grounded` is the nested MCP tool target: retrieval-only, never another agent or a settings change. */
+async function handleWorkspaceChat(c: Context, mode: "public" | "grounded") {
   const parsed = workspaceChatInputSchema.safeParse(await c.req.json().catch(() => null));
-  if (!parsed.success) return c.json({ error: "Invalid chat input", issues: parsed.error.issues }, 400);
+  if (!parsed.success) return apiErrorResponse(c, 400, "invalid_request", "Invalid chat input", { issues: parsed.error.issues });
   const body = parsed.data;
   const userId = c.get("sessionUser")?.id;
-  if (!userId) return c.json({ error: "Missing session" }, 401);
+  if (!userId) return apiErrorResponse(c, 401, "unauthorized", "Missing session");
   const workspaceId = await resolveActorWorkspaceId(getRequestActor(c), body.workspaceId, body.orgId);
-  const forbidden = await assertApiKeyWorkspaceAccess(c, workspaceId, "search");
+  const forbidden = await denyWorkspaceAccess(c, workspaceId);
   if (forbidden) return forbidden;
   const chatDisabled = await workspaceChatDisabledBody(workspaceId, userId);
-  if (chatDisabled) return c.json(chatDisabled, 403);
+  if (chatDisabled) return apiErrorResponse(c, 403, "chat_disabled", chatDisabled.error);
   const response = await chatWorkspace({ workspaceId, userId,
     query: body.q, sessionId: body.sessionId, model: body.model,
-    actor: getRequestActor(c), allowAgentTools, signal: c.req.raw.signal,
-    ...(allowAgentTools ? {} : { allowConfiguration: false }),
+    actor: getRequestActor(c), signal: c.req.raw.signal,
+    ...(mode === "grounded"
+      ? { allowAgentTools: false, allowConfiguration: false }
+      : { allowAgentTools: env.publicChatAgentEnabled }),
     ...(body.retrieval ? { retrieval: body.retrieval } : {}),
     ...(body.filters ? { filters: body.filters } : {}) });
   return c.json(response);
 }
 
-const workspaceChatHandler = (c: Context) => handleWorkspaceChat(c, true);
+const workspaceChatHandler = (c: Context) => handleWorkspaceChat(c, "public");
 
-export const workspaceChatRoutes = new Hono().post("/", workspaceChatHandler);
+export const workspaceChatRoutes = new Hono().use("*", nativeApiErrors).post("/", workspaceChatHandler);
 /** Internal tool target only. Never mount this router as a public agent entrypoint. */
-export const groundedWorkspaceChatRoutes = new Hono().post("/", (c: Context) => handleWorkspaceChat(c, false));
+export const groundedWorkspaceChatRoutes = new Hono().use("*", nativeApiErrors).post("/", (c: Context) => handleWorkspaceChat(c, "grounded"));
 
 type SearchData = ReturnType<typeof publicSearchResponse>;
 type BatchResult = { ok: true; data: SearchData } | { ok: false; error: { code: string; message: string; status: number } };
-function searchError(error: unknown): { code: string; message: string; status: 400 | 403 | 404 | 500 } {
+type SearchFailure = { code: string; apiCode: ApiErrorCode; message: string; status: 400 | 403 | 404 };
+/** `code` is the per-item batch code; `apiCode` is the envelope code of a whole-request failure. */
+function expectedSearchFailure(error: unknown): SearchFailure | null {
   if (error instanceof WorkspaceAccessError) {
-    return { code: error.status === 403 ? "FORBIDDEN" : "WORKSPACE_NOT_FOUND", message: error.message, status: error.status === 403 ? 403 : 404 };
+    return error.status === 403
+      ? { code: "FORBIDDEN", apiCode: "forbidden", message: error.message, status: 403 }
+      : { code: "WORKSPACE_NOT_FOUND", apiCode: "workspace_not_found", message: error.message, status: 404 };
   }
   if (error instanceof MissingWorkspaceScopeError || (error instanceof Error && error.message === "Search scope must stay within a single workspace")) {
-    return { code: "INVALID_SEARCH_SCOPE", message: error.message, status: 400 };
+    return { code: "INVALID_SEARCH_SCOPE", apiCode: "invalid_search_scope", message: error.message, status: 400 };
   }
   if (error instanceof Error && error.message === "Workspace not found") {
-    return { code: "WORKSPACE_NOT_FOUND", message: error.message, status: 404 };
+    return { code: "WORKSPACE_NOT_FOUND", apiCode: "workspace_not_found", message: error.message, status: 404 };
   }
-  return { code: "SEARCH_FAILED", message: reportPublicError(error), status: 500 };
+  return null;
+}
+function searchError(error: unknown): { code: string; message: string; status: 400 | 403 | 404 | 500 } {
+  return expectedSearchFailure(error) ?? { code: "SEARCH_FAILED", message: reportPublicError(error), status: 500 };
 }
 /**
  * Identical searches repeat constantly (type-ahead, popular questions), so a
@@ -112,19 +163,20 @@ async function retrieve(body: SearchInput & { workspaceId: string }, userId: str
 }
 
 export const searchRoutes = new Hono()
+  .use("*", nativeApiErrors)
   .get("/chat/stream", async (c) => {
     const parsed = workspaceChatInputSchema.safeParse({ q: c.req.query("q"),
       workspaceId: c.req.query("workspaceId") || undefined, orgId: c.req.query("orgId") || undefined,
       sessionId: c.req.query("sessionId"), model: c.req.query("model") });
-    if (!parsed.success) return c.json({ error: "Invalid chat input", issues: parsed.error.issues }, 400);
+    if (!parsed.success) return apiErrorResponse(c, 400, "invalid_request", "Invalid chat input", { issues: parsed.error.issues });
     const { q: query, sessionId, model } = parsed.data;
 
     const userId = c.get("sessionUser").id;
     const workspaceId = await resolveActorWorkspaceId(getRequestActor(c), parsed.data.workspaceId, parsed.data.orgId);
-    const forbidden = await assertApiKeyWorkspaceAccess(c, workspaceId, "search");
+    const forbidden = await denyWorkspaceAccess(c, workspaceId);
     if (forbidden) return forbidden;
     const chatDisabled = await workspaceChatDisabledBody(workspaceId, userId);
-    if (chatDisabled) return c.json(chatDisabled, 403);
+    if (chatDisabled) return apiErrorResponse(c, 403, "chat_disabled", chatDisabled.error);
     // Refuse before the stream opens, so a blocked spend is a 402.
     // Pre-check only: chatWorkspace takes the interactive hold.
     await assertCanSpend(null, workspaceId, { kind: "interactive", hold: false });
@@ -144,7 +196,7 @@ export const searchRoutes = new Hono()
         workspaceId,
         userId,
         query,
-        actor: getRequestActor(c), allowAgentTools: true, signal: c.req.raw.signal,
+        actor: getRequestActor(c), allowAgentTools: env.publicChatAgentEnabled, signal: c.req.raw.signal,
         sessionId,
         model
       });
@@ -164,55 +216,22 @@ export const searchRoutes = new Hono()
     });
   })
   .post("/chat", workspaceChatHandler)
-  .post("/batch", async (c) => {
-    // Validate every item before authentication checks can reach retrieval.
-    const parsed = batchSearchInputSchema.safeParse(await c.req.json().catch(() => null));
-    if (!parsed.success) return c.json({ error: "Invalid batch search input", issues: parsed.error.issues }, 400);
-    const userId = c.get("sessionUser")?.id;
-    if (!userId) return c.json({ error: "Missing session" }, 401);
-    const { queries, concurrency } = parsed.data;
-    const signal = c.req.raw.signal;
-    const results: BatchResult[] = queries.map(() => ({ ok: false,
-      error: { code: "REQUEST_ABORTED", message: "Request aborted before search started", status: 499 } }));
-    let next = 0;
-    async function worker() {
-      while (!signal.aborted && next < queries.length) {
-        const index = next++;
-        const query = queries[index]!;
-        try {
-          const input = { ...query, workspaceId: await resolveActorWorkspaceId(getRequestActor(c), query.workspaceId, query.orgId) };
-          const forbidden = await assertApiKeyWorkspaceAccess(c, input.workspaceId, "search");
-          if (forbidden) {
-            results[index] = { ok: false, error: {
-              code: forbidden.status === 403 ? "FORBIDDEN" : "WORKSPACE_NOT_FOUND",
-              message: forbidden.status === 403 ? "Forbidden" : "Workspace not found", status: forbidden.status } };
-          } else if (!signal.aborted) {
-            results[index] = { ok: true, data: await retrieve(input, userId!) };
-          }
-        } catch (error) {
-          results[index] = { ok: false, error: searchError(error) };
-        }
-      }
-    }
-    await Promise.all(Array.from({ length: Math.min(concurrency, queries.length) }, () => worker()));
-    return c.json({ results });
-  })
   .get("/", async (c) => {
     const query = c.req.query("q");
     if (!query) {
-      return c.json({ error: "Missing query parameter 'q'" }, 400);
+      return apiErrorResponse(c, 400, "invalid_request", "Missing query parameter 'q'");
     }
 
     const userId = c.get("sessionUser")?.id;
     if (!userId) {
-      return c.json({ error: "Missing session" }, 401);
+      return apiErrorResponse(c, 401, "unauthorized", "Missing session");
     }
     const workspaceId = await resolveActorWorkspaceId(
       getRequestActor(c),
       c.req.query("workspaceId"),
       c.req.query("orgId"),
     );
-    const forbidden = await assertApiKeyWorkspaceAccess(c, workspaceId, "search");
+    const forbidden = await denyWorkspaceAccess(c, workspaceId);
     if (forbidden) return forbidden;
     const runId = c.req.query("runId");
     const limit = c.req.query("limit");
@@ -224,7 +243,7 @@ export const searchRoutes = new Hono()
     try {
       flags = parseRetrievalQueryFlags((name) => c.req.query(name));
     } catch (error) {
-      if (error instanceof InvalidRetrievalQueryError) return c.json({ error: error.message }, 400);
+      if (error instanceof InvalidRetrievalQueryError) return apiErrorResponse(c, 400, "invalid_request", error.message);
       throw error;
     }
 
@@ -253,47 +272,49 @@ export const searchRoutes = new Hono()
       });
       return c.json(publicSearchResponse(response));
     } catch (error) {
-      if (error instanceof MissingWorkspaceScopeError) {
-        return c.json({ error: error.message }, 400);
-      }
-      if (error instanceof Error && error.message === "Workspace not found") {
-        return c.json({ error: error.message }, 404);
-      }
-      if (error instanceof Error && error.message === "Search scope must stay within a single workspace") {
-        return c.json({ error: error.message }, 400);
-      }
+      const failure = expectedSearchFailure(error);
+      if (failure) return apiErrorResponse(c, failure.status, failure.apiCode, failure.message);
       throw error;
     }
   })
   .post("/", async (c) => {
-    const parsed = searchInputSchema.safeParse(await c.req.json().catch(() => null));
+    const input = await c.req.json().catch(() => null);
+    // One query (`q`) or up to 20 (`queries`): the same endpoint serves both.
+    if (input && typeof input === "object" && "queries" in input) {
+      const batch = batchSearchInputSchema.safeParse(input);
+      if (!batch.success) return apiErrorResponse(c, 400, "invalid_request", "Invalid search input", { issues: batch.error.issues });
+      const userId = c.get("sessionUser")?.id;
+      if (!userId) return apiErrorResponse(c, 401, "unauthorized", "Missing session");
+      return c.json({ results: await runSearchBatch(c, batch.data, userId) });
+    }
+    const parsed = searchInputSchema.safeParse(input);
     if (!parsed.success) {
-      return c.json({ error: "Invalid search input", issues: parsed.error.issues }, 400);
+      return apiErrorResponse(c, 400, "invalid_request", "Invalid search input", { issues: parsed.error.issues });
     }
     const userId = c.get("sessionUser")?.id;
-    if (!userId) return c.json({ error: "Missing session" }, 401);
+    if (!userId) return apiErrorResponse(c, 401, "unauthorized", "Missing session");
     const workspaceId = await resolveActorWorkspaceId(getRequestActor(c), parsed.data.workspaceId, parsed.data.orgId);
-    const forbidden = await assertApiKeyWorkspaceAccess(c, workspaceId, "search");
+    const forbidden = await denyWorkspaceAccess(c, workspaceId);
     if (forbidden) return forbidden;
     try {
       return c.json(await retrieve({ ...parsed.data, workspaceId }, userId));
     } catch (error) {
-      const failure = searchError(error);
-      if (failure.status !== 500) return c.json({ error: failure.message }, failure.status);
+      const failure = expectedSearchFailure(error);
+      if (failure) return apiErrorResponse(c, failure.status, failure.apiCode, failure.message);
       throw error;
     }
   })
   .post("/aggregate", async (c) => {
     const parsed = aggregateWorkspaceRagSearchRequestSchema.safeParse(
-      await c.req.json(),
+      await c.req.json().catch(() => null),
     );
     if (!parsed.success) {
-      return c.json({ error: { issues: parsed.error.issues } }, 400);
+      return apiErrorResponse(c, 400, "invalid_request", "Invalid search input", { issues: parsed.error.issues });
     }
 
     const actor = getRequestActor(c);
     if (actor.type === "apiKey" && !actorHasAnyApiKeyScope(actor, ["search"])) {
-      return c.json({ error: "Forbidden" }, 403);
+      return apiErrorResponse(c, 403, "forbidden", "Forbidden");
     }
 
     try {
@@ -310,27 +331,27 @@ export const searchRoutes = new Hono()
       return c.json(response);
     } catch (error) {
       if (error instanceof Error && error.message.startsWith("Workspace not found")) {
-        return c.json({ error: "Workspace not found" }, 404);
+        return apiErrorResponse(c, 404, "workspace_not_found", "Workspace not found");
       }
       throw error;
     }
   })
   .post("/:sessionId/feedback", async (c) => {
     const { sessionId } = c.req.param();
-    const body = await c.req.json<{ clickedChunkId: string }>();
+    const body = await c.req.json<{ clickedChunkId?: string } | null>().catch(() => null);
 
-    if (!body.clickedChunkId) {
-      return c.json({ error: "Missing clickedChunkId" }, 400);
+    if (!body?.clickedChunkId) {
+      return apiErrorResponse(c, 400, "invalid_request", "Missing clickedChunkId");
     }
 
     const userId = c.get("sessionUser")?.id;
     if (!userId) {
-      return c.json({ error: "Missing session" }, 401);
+      return apiErrorResponse(c, 401, "unauthorized", "Missing session");
     }
     const actor = getRequestActor(c);
     const apiKey = actor.type === "apiKey" ? actor.apiKey : null;
     if (actor.type === "apiKey" && !actorHasAnyApiKeyScope(actor, ["search"])) {
-      return c.json({ error: "Forbidden" }, 403);
+      return apiErrorResponse(c, 403, "forbidden", "Forbidden");
     }
 
     await sql`

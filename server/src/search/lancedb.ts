@@ -1,3 +1,4 @@
+import { withDependencySpan } from "@docslurp/shared/observability";
 /**
  * LanceDB vector search service for query-time ANN retrieval.
  *
@@ -9,6 +10,8 @@
 import * as lancedb from "@lancedb/lancedb";
 
 import { resolveLanceDbConfig, VectorNamespaceManager } from "@docslurp/shared";
+
+import { lanceDbQueryTuning } from "./lancedb-query-tuning.js";
 
 /**
  * Connections and table handles are reused across searches. Opening them per
@@ -50,7 +53,7 @@ function getDb(uri: string): Promise<lancedb.Connection> {
   let connection = connections.get(key);
   if (!connection) {
     const { storageOptions } = resolveLanceDbConfig();
-    connection = lancedb.connect(uri, { readConsistencyInterval: READ_CONSISTENCY_SECONDS, ...(storageOptions ? { storageOptions } : {}) });
+    connection = lanceSpan("connect", () => lancedb.connect(uri, { readConsistencyInterval: READ_CONSISTENCY_SECONDS, ...(storageOptions ? { storageOptions } : {}) }));
     connection.catch(() => connections.delete(key));
     connections.set(key, connection);
   }
@@ -63,7 +66,7 @@ async function getTable(uri: string, name: string): Promise<lancedb.Table | null
   if (missingUntil && missingUntil > Date.now()) return null;
   let table = tables.get(key);
   if (!table) {
-    table = getDb(uri).then((db) => db.openTable(name));
+    table = getDb(uri).then((db) => lanceSpan("openTable", () => db.openTable(name)));
     tables.set(key, table);
   }
   try {
@@ -143,6 +146,10 @@ export async function lanceDbVectorSearch(args: {
     return [];
   }
 
+  const refineFactor = process.env.LANCEDB_REFINE_FACTOR;
+  // Validate outside the native-query catch: configuration errors must be visible.
+  lanceDbQueryTuning(args.limit, 0, refineFactor);
+
   // Read per search so tests and config reloads see the current LANCEDB_URI.
   const { root } = resolveLanceDbConfig();
   const targets: Array<{ uri: string; name: string; documentIds?: string[] }> = [];
@@ -169,14 +176,12 @@ export async function lanceDbVectorSearch(args: {
       if (documentIds?.length) {
         const literals = [...new Set(documentIds)].map(id => `'${id.replace(/'/g, "''")}'`);
         query.where(`"documentId" IN (${literals.join(", ")})`);
-        // HNSW defaults ef to 1.5 * limit. Preserve the former exploration
-        // budget when reducing materialized rows, rather than trading recall
-        // for fewer returned rows. Ignored for tables without an HNSW index.
-        const previousLimit = Math.min(Math.max(args.limit * 10, documentIds.length * args.limit), 1_000);
-        query.ef(Math.ceil(previousLimit * 1.5));
       }
+      const tuning = lanceDbQueryTuning(args.limit, documentIds?.length ?? 0, refineFactor);
+      if (tuning.ef !== undefined) query.ef(tuning.ef);
+      if (tuning.refineFactor !== undefined) query.refineFactor(tuning.refineFactor);
       // Retain an independent scope check at the storage boundary.
-      return filterLanceDbRowsByDocumentIds((await query.toArray()) as LanceDbRow[], documentIds);
+      return filterLanceDbRowsByDocumentIds((await lanceSpan("search", () => query.toArray())) as LanceDbRow[], documentIds);
     } catch {
       dropTable(uri, name);
       return [];
@@ -205,4 +210,10 @@ export async function lanceDbVectorSearch(args: {
 
 export function getOrgLanceDbPrefix(orgId: string): string {
   return VectorNamespaceManager.getTableName(orgId);
+}
+
+function lanceSpan<T>(operation: string, run: () => Promise<T>): Promise<T> {
+  return withDependencySpan(`lancedb.${operation}`, { "db.system.name": "lancedb",
+    "docslurp.dependency.type": "vector", "docslurp.dependency.provider": "lancedb",
+    "docslurp.dependency.operation": operation, "docslurp.dependency.phase": "adapter" }, run);
 }

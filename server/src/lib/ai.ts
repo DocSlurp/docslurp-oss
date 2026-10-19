@@ -1,10 +1,11 @@
 import { assertProviderAllowed, authorizePrivateModelCall, createOpenRouterReasoningFetch, createOpenRouterUsageCapture, isPrivateModelUri, PRIVATE_MODEL_PROVIDER, resolveOpenRouterUsage, resolveSupportedModelIdWithWarning, type PrivacyMode, type PrivateCallAuditScope, type ProviderTextUsage } from "@docslurp/shared";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { withObservation, aiResultDetails } from "@docslurp/shared/observability";
+import { withObservation, aiResultDetails, instrumentFetch } from "@docslurp/shared/observability";
 import { createOpenAI } from "@ai-sdk/openai";
-import { defaultEmbeddingConfig, defaultPipelineFeatures, DEEPINFRA_EMBEDDING_BASE_URL, validateDeepInfraEmbedding, fitEmbeddingDimensions, parseLlmModelUri } from "@docslurp/shared";
+import { defaultEmbeddingConfig, defaultPipelineFeatures, DEEPINFRA_EMBEDDING_BASE_URL, validateDeepInfraEmbedding, fitEmbeddingDimensions, parseLlmModelUri, openRouterEmbeddingRoute, validateHostedEmbeddingVector } from "@docslurp/shared";
 import { embed, generateText, streamText } from "ai";
+import { embedPerplexity } from "@docslurp/shared";
 
 import {
   posthogAiTelemetry,
@@ -77,7 +78,7 @@ async function generatePrivateEndpointText(args: {
       result: aiResultDetails,
     },
     async () => {
-      const provider = createOpenAI({ apiKey: PRIVATE_ENDPOINT_API_KEY, baseURL: call.baseUrl, fetch: call.fetch });
+      const provider = createOpenAI({ apiKey: PRIVATE_ENDPOINT_API_KEY, baseURL: call.baseUrl, fetch: instrumentFetch("private", "inference", call.fetch) });
       const startedAt = Date.now();
       const result = streamText({
         ...posthogAiTelemetry({ functionId: args.operation, provider: PRIVATE_MODEL_PROVIDER, context: args.observability }),
@@ -187,7 +188,7 @@ export async function generateOpenRouterText(args: {
     async () => {
       const accounting = createOpenRouterUsageCapture();
       const provider = createOpenAI({
-        fetch: createOpenRouterReasoningFetch(accounting.fetch),
+        fetch: instrumentFetch("openrouter", "chat", createOpenRouterReasoningFetch(accounting.fetch)),
         apiKey: args.apiKey,
         baseURL: OPENROUTER_BASE_URL,
       });
@@ -258,7 +259,7 @@ export async function generateOpenRouterDocumentText(args: {
   assertProviderAllowed(args.privacyMode, { provider: "openrouter", model: args.model ?? SEARCH_OPENROUTER_MODEL, operation: "api.text.openrouter-documents", target: "hosted" });
   const accounting = createOpenRouterUsageCapture();
   const provider = createOpenAI({
-    fetch: createOpenRouterReasoningFetch(accounting.fetch),
+    fetch: instrumentFetch("openrouter", "chat", createOpenRouterReasoningFetch(accounting.fetch)),
     apiKey: args.apiKey,
     baseURL: OPENROUTER_BASE_URL,
   });
@@ -368,6 +369,7 @@ export async function embedOpenAiText(args: {
     },
     async () => {
       const provider = createOpenAI({
+        fetch: instrumentFetch("openai", "embedding"),
         apiKey: args.apiKey,
         ...(args.baseURL && args.baseURL !== DEFAULT_OPENAI_BASE_URL
           ? { baseURL: args.baseURL }
@@ -422,6 +424,7 @@ async function embedOpenAiCompatibleText(args: {
     },
     async () => {
       const provider = createOpenAI({
+        fetch: instrumentFetch(args.provider, "embedding"),
         apiKey: args.apiKey || "local",
         baseURL: args.baseURL,
       });
@@ -464,12 +467,12 @@ export async function embedConfiguredText(args: {
   privacyMode: PrivacyMode;
   signal?: AbortSignal;
   observability?: AiObservabilityContext;
+  /** Receives actual usage before hosted vector validation, including malformed paid responses. */
+  onUsage?: (usage: EmbeddingUsage) => Promise<void> | void;
   /** `llm://private/...` route; required when `provider` is `private`. */
   modelUri?: string;
   /** Workspace attribution for strict-privacy audit rows on private endpoint calls. */
   auditScope?: PrivateCallAuditScope;
-  /** Persist paid hosted usage before validating or retaining response vectors. */
-  onUsage?: (usage: EmbeddingUsage) => void | Promise<void>;
 }): Promise<{ embedding: number[]; usage: EmbeddingUsage }> {
   if (args.provider === PRIVATE_MODEL_PROVIDER) {
     return await embedPrivateEndpointText({ ...args, modelUri: args.modelUri ?? "" });
@@ -487,13 +490,42 @@ export async function embedConfiguredText(args: {
     if (!args.apiKey) throw new Error("DEEPINFRA_API_KEY is required for DeepInfra embeddings");
     if (args.model !== "BAAI/bge-m3" || (args.dimensions !== undefined && args.dimensions !== 1024) || args.requestedDimensions !== undefined) throw new Error("DeepInfra BGE-M3 requires its native 1024 dimensions");
     return withObservation({ name: "api.embedding.deepinfra", type: "embedding", model: args.model, input: args.value, result: aiResultDetails }, async () => {
-      const provider = createOpenAI({ apiKey: args.apiKey, baseURL: DEEPINFRA_EMBEDDING_BASE_URL });
+      const provider = createOpenAI({ apiKey: args.apiKey, baseURL: DEEPINFRA_EMBEDDING_BASE_URL, fetch: instrumentFetch("deepinfra", "embedding") });
       const result = await embed({ model: provider.embedding(args.model!), value: args.value, abortSignal: args.signal, maxRetries: 0 });
       if (!Number.isSafeInteger(result.usage.tokens) || result.usage.tokens! < 0) throw new Error("DeepInfra embeddings require actual provider token usage");
       const usage = { inputTokens: result.usage.tokens! };
       await args.onUsage?.(usage);
       return { embedding: validateDeepInfraEmbedding(result.embedding, 1024, args.normalize ?? true), usage };
     });
+  }
+
+  if (args.provider === "perplexity") {
+    const result = await withObservation({ name: "api.embedding.perplexity", type: "embedding", model: args.model, input: args.value, result: aiResultDetails }, () => embedPerplexity({
+              fetch: instrumentFetch("perplexity", "embedding"),
+      model: args.model ?? "",
+      dimensions: args.dimensions,
+      apiKey: args.apiKey ?? "",
+      values: [args.value],
+      normalize: args.normalize,
+      signal: args.signal,
+      onUsage: tokens => args.onUsage?.({ inputTokens: tokens }),
+    }));
+    return { embedding: result.embeddings[0]!, usage: { inputTokens: result.usage.tokens } };
+  }
+  if (args.provider === "openrouter") {
+    const route = openRouterEmbeddingRoute(args.model ?? "");
+    if (args.dimensions !== undefined && args.dimensions !== route.dimensions) throw new Error("OpenRouter embedding dimensions do not match the registered model");
+    if (!args.apiKey) throw new Error("OPENROUTER_API_KEY is required for remote OpenRouter embeddings");
+    const provider = createOpenAI({ apiKey: args.apiKey, baseURL: OPENROUTER_BASE_URL, fetch: instrumentFetch("openrouter", "embedding") });
+    const result = await withObservation({ name: "api.embedding.openrouter", type: "embedding", model: route.model, input: args.value, result: aiResultDetails }, () => embed({
+      model: provider.embedding(route.model), value: args.value, abortSignal: args.signal, maxRetries: 0,
+      ...posthogAiTelemetry({ functionId: "api.embedding.openrouter", provider: "openrouter", context: args.observability }),
+    }));
+    const inputTokens = result.usage.tokens;
+    if (!Number.isSafeInteger(inputTokens) || !(inputTokens! > 0)) throw new Error("OpenRouter embedding response omitted actual usage");
+    const usage = { inputTokens: inputTokens! };
+    await args.onUsage?.(usage);
+    return { embedding: validateHostedEmbeddingVector(result.embedding, route.dimensions, args.normalize), usage };
   }
 
   if (args.provider === "openai") {
@@ -557,7 +589,7 @@ async function embedPrivateEndpointText(args: {
   return withObservation(
     { name: "api.embedding.private", type: "embedding", model: call.model, input: args.value, result: aiResultDetails },
     async () => {
-      const provider = createOpenAI({ apiKey: PRIVATE_ENDPOINT_API_KEY, baseURL: call.baseUrl, fetch: call.fetch });
+      const provider = createOpenAI({ apiKey: PRIVATE_ENDPOINT_API_KEY, baseURL: call.baseUrl, fetch: instrumentFetch("private", "inference", call.fetch) });
       const startedAt = Date.now();
       const result = await embed({
         ...posthogAiTelemetry({ functionId: "api.embedding.private", provider: PRIVATE_MODEL_PROVIDER, context: args.observability }),

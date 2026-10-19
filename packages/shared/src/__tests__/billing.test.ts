@@ -5,6 +5,7 @@ import {
   EXAMPLE_CORPORA,
   MAX_PAGE_FANOUT_PER_RUN,
   SERVICE_PLANS,
+  STARTER_CREDITS,
   autoRechargeSettingsSchema,
   creditsForSubscriptionPayment,
   dailyStorageCredits,
@@ -141,6 +142,14 @@ describe("privacy route factors", () => {
 });
 
 describe("service plans", () => {
+  it("keeps the one-time starter grant below every paid monthly allowance", () => {
+    expect(STARTER_CREDITS).toBe(250);
+    for (const plan of SERVICE_PLANS.filter((entry) => entry.monthlyMinimumCents > 0)) {
+      expect(plan.includedCreditsPerMonth).toBeGreaterThan(STARTER_CREDITS);
+    }
+    expect(getPlan("free").highlights).toContain(`${STARTER_CREDITS} one-time starter credits`);
+  });
+
   it("defines the published minimums and worker ceilings", () => {
     const byId = Object.fromEntries(SERVICE_PLANS.map((plan) => [plan.id, plan]));
     expect(byId.silver).toMatchObject({ monthlyMinimumCents: 2_000, workers: 100 });

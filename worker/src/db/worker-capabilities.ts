@@ -1,4 +1,5 @@
 import type { Sql } from "postgres";
+import { withBackgroundSpan } from "@docslurp/shared/observability";
 
 import {
   WORKER_CAPABILITY_PROTOCOL,
@@ -171,7 +172,7 @@ export class WorkerCapabilityRegistry {
         timeout.unref?.();
       }),
     ]).finally(() => clearTimeout(timeout));
-    this.timer = setInterval(() => void this.heartbeat(), this.intervalMs);
+    this.timer = setInterval(() => void withBackgroundSpan("worker.capability-heartbeat", () => this.heartbeat()), this.intervalMs);
     this.timer.unref?.();
     // Housekeeping: drop rows of hosts not seen for a week.
     void this.options.sql`delete from worker_capabilities where last_seen_at < now() - interval '7 days'`.catch(() => {});

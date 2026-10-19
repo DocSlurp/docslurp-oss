@@ -117,7 +117,7 @@ describe("workspace transcription route", () => {
     mocks.sql.mockClear();
     const response = await app().request("/workspaces/ws/chat/transcribe", { method: "POST", body: upload() });
     expect(response.status).toBe(403);
-    expect(await response.json()).toEqual({ error: "You don’t have access to this action. Ask your workspace administrator for help." });
+    expect(await response.json()).toEqual({ error: { code: "forbidden", message: "You don’t have access to this action. Ask your workspace administrator for help." } });
     expect(providerFetch).not.toHaveBeenCalled();
     expect(mocks.record).not.toHaveBeenCalled();
     expect(mocks.sql).not.toHaveBeenCalled();

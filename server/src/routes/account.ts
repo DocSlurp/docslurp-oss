@@ -5,6 +5,8 @@ import { z } from "zod";
 import { auth } from "../lib/auth.js";
 import { getRequestActor } from "../lib/request-actor.js";
 import { deleteAccount, OffboardingError, planAccountDeletion } from "../services/tenant-offboarding.js";
+import { apiStatusError } from "../lib/api-error.js";
+import { validationHook } from "../lib/validation.js";
 
 const deleteAccountSchema = z.object({ confirmation: z.string().min(1).max(500) }).strict();
 
@@ -14,18 +16,18 @@ const deleteAccountSchema = z.object({ confirmation: z.string().min(1).max(500) 
  */
 export const accountRoutes = new Hono()
   .onError((error, c) => {
-    if (error instanceof OffboardingError) return c.json({ error: error.message, code: error.code, ...error.details }, error.status);
+    if (error instanceof OffboardingError) return apiStatusError(c, error.status, error.message, { code: error.code, details: error.details });
     throw error;
   })
   .use("*", async (c, next) => {
     if (getRequestActor(c).type !== "session") {
-      return c.json({ error: "Account management requires a signed-in session", code: "session_required" }, 403);
+      return apiStatusError(c, 403, "Account management requires a signed-in session", { code: "session_required" });
     }
     await next();
   })
   /** What deleting the account would do: orgs deleted, orgs left, and blockers. */
   .get("/deletion", async (c) => c.json(await planAccountDeletion(getRequestActor(c).userId)))
-  .delete("/", zValidator("json", deleteAccountSchema), async (c) => {
+  .delete("/", zValidator("json", deleteAccountSchema, validationHook), async (c) => {
     const userId = getRequestActor(c).userId;
     const result = await deleteAccount({ userId, confirmation: c.req.valid("json").confirmation });
     const response = c.json({ ok: true, ...result });

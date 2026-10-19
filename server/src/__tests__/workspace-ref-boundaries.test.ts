@@ -17,7 +17,6 @@ const mocks = vi.hoisted(() => ({
   listLowConfidenceReviewQueue: vi.fn(),
   aggregateWorkspaceRagSearch: vi.fn(),
   getRunProcessingPreview: vi.fn(),
-  getAutomationUsage: vi.fn(),
   listNotificationInbox: vi.fn(),
   markAllNotificationsRead: vi.fn(),
   validateApiKey: vi.fn(),
@@ -57,7 +56,6 @@ vi.mock("../services/runs.js", () => ({
   isRunCreationBlockedError: () => false,
 }));
 vi.mock("../services/audit-log.js", () => ({ appendAuditLog: vi.fn() }));
-vi.mock("../services/automation.js", () => ({ getAutomationUsage: mocks.getAutomationUsage }));
 vi.mock("../services/api-keys.js", () => ({ validateApiKey: mocks.validateApiKey }));
 vi.mock("../services/notifications.js", () => ({
   listNotificationInbox: mocks.listNotificationInbox,
@@ -68,7 +66,6 @@ const { uploadsRoutes } = await import("../routes/uploads.js");
 const { documentsRoutes } = await import("../routes/documents.js");
 const { searchRoutes } = await import("../routes/search.js");
 const { runsRoutes } = await import("../routes/runs.js");
-const { aiRoutes } = await import("../routes/ai.js");
 const { notificationsRoutes } = await import("../routes/notifications.js");
 const { WorkspaceAccessError } = await import("../services/default-workspace.js");
 
@@ -87,7 +84,6 @@ const apiKey: ValidatedKey = {
 
 function buildApp() {
   const app = new Hono();
-  app.route("/ai", aiRoutes);
   app.use("*", async (c, next) => {
     c.set("sessionUser", { id: "user-1", email: "user@example.com", name: "User" } as never);
     await next();
@@ -161,12 +157,6 @@ const boundaries: Boundary[] = [
     received: () => mocks.getRunProcessingPreview.mock.calls[0]?.[0]?.workspaceId,
   },
   {
-    route: "GET /ai/usage",
-    omitted: "unfiltered",
-    call: (app, ref) => app.request(`/ai/usage${query(ref)}`, { headers: { Authorization: "Bearer dslp_test" } }),
-    received: () => mocks.getAutomationUsage.mock.calls[0]?.[0]?.workspaceId,
-  },
-  {
     route: "GET /notifications/inbox",
     omitted: "unfiltered",
     call: (app, ref) => app.request(`/notifications/inbox${query(ref)}`),
@@ -199,7 +189,6 @@ describe("workspace reference boundaries", () => {
     mocks.listLowConfidenceReviewQueue.mockResolvedValue([]);
     mocks.aggregateWorkspaceRagSearch.mockResolvedValue({ workspaces: [] });
     mocks.getRunProcessingPreview.mockResolvedValue({ estimatedPages: 1 });
-    mocks.getAutomationUsage.mockResolvedValue({});
     mocks.listNotificationInbox.mockResolvedValue({ deliveries: [], unreadCount: 0 });
     mocks.markAllNotificationsRead.mockResolvedValue(0);
   });
@@ -228,7 +217,7 @@ describe("workspace reference boundaries", () => {
     const app = buildApp();
     const runs = await app.request("/runs/preview", post({ files: [{ filename: "a.pdf", mimeType: "application/pdf", sizeBytes: 10 }] }));
     expect(runs.status).toBe(404);
-    await expect(runs.json()).resolves.toMatchObject({ code: "organization_not_found" });
+    await expect(runs.json()).resolves.toMatchObject({ error: { code: "organization_not_found" } });
     const direct = await app.request("/ingest/direct/sessions", post({
       orgId: "org-other",
       files: [{ filename: "a.txt", mimeType: "text/plain", sizeBytes: 5 }],

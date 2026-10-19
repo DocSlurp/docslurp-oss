@@ -1,9 +1,16 @@
 import { describe, expect, it, vi } from "vitest";
 
-const sqlMock = vi.hoisted(() => vi.fn());
+const sqlMock = vi.hoisted(() => Object.assign(vi.fn(), { json: (value: unknown) => value }));
+const signSingleUploadPut = vi.hoisted(() => vi.fn(async ({ key }: { key: string }) => `https://storage.example/${key}`));
+const getUploadedObjectMetadata = vi.hoisted(() => vi.fn());
+const deleteUploadedObject = vi.hoisted(() => vi.fn(async () => {}));
+const createMultipartUpload = vi.hoisted(() => vi.fn());
+vi.mock("../lib/storage.js", async (importOriginal) => ({ ...await importOriginal<typeof import("../lib/storage.js")>(), signSingleUploadPut, createMultipartUpload, getUploadedObjectMetadata, deleteUploadedObject }));
 vi.mock("../db.js", () => ({ sql: sqlMock }));
 
 import {
+  createDirectUploadSession,
+  completeDirectUploadFile,
   assertDirectUploadSessionReadyForIntake,
   directUploadIntakeItems,
   loadDirectUploadSession,
@@ -57,6 +64,52 @@ describe("Direct Upload Session Module", () => {
     const loaded = await loadDirectUploadSession("session-1", "user-1");
     expect(loaded?.files[0].size_bytes).toBe(42);
     expect(loaded?.files[0].part_size).toBe(8);
+  });
+
+  it("returns one signed PUT per requested single-part file even above the multipart threshold", async () => {
+    const fixture = directUploadSessionFixture();
+    const files = Array.from({ length: 10 }, (_, i) => ({ ...fixture.files[0]!, id: `file-${i}`, source_key: `source-${i}`, size_bytes: 40 * 1024 * 1024 }));
+    sqlMock.mockReset();
+    sqlMock.mockImplementation(async (strings: TemplateStringsArray) => {
+      const query = strings.join("?");
+      if (query.includes("from upload_sessions")) return [fixture.session];
+      if (query.includes("from upload_session_files")) return files;
+      return [];
+    });
+    signSingleUploadPut.mockClear();
+    const result = await createDirectUploadSession({ userId: "user-1", orgId: "org-1", pipeline: {}, files: files.map(file => ({ filename: file.filename, mimeType: file.mime_type, sizeBytes: file.size_bytes, singlePart: true })) });
+    expect(result.files).toHaveLength(10);
+    expect(result.files.every(file => file.mode === "single" && "putUrl" in file)).toBe(true);
+    expect(signSingleUploadPut).toHaveBeenCalledTimes(10);
+    expect(result.files[0]).toMatchObject({ method: "PUT", headers: { "Content-Type": "application/pdf" }, expiresInSeconds: 900 });
+    expect(signSingleUploadPut).toHaveBeenCalledWith(expect.objectContaining({ expiresInSeconds: 900 }));
+    expect(createMultipartUpload).not.toHaveBeenCalled();
+    const insertedFiles = sqlMock.mock.calls.filter(([strings]) => strings.join("?").includes("insert into upload_session_files"));
+    expect(insertedFiles).toHaveLength(10);
+    expect(insertedFiles.every(call => call.includes("single"))).toBe(true);
+  });
+
+  it("rejects oversized single-part uploads before creating a session", async () => {
+    sqlMock.mockClear();
+    await expect(createDirectUploadSession({ userId: "user-1", pipeline: {}, files: [{ filename: "large.pdf", mimeType: "application/pdf", sizeBytes: 5 * 1024 ** 3 + 1, singlePart: true }] })).rejects.toThrow("5 GiB");
+    expect(sqlMock).not.toHaveBeenCalled();
+  });
+
+  it("verifies stored bytes before completing a signed file", async () => {
+    const fixture = directUploadSessionFixture();
+    for (const actualSize of [null, 41, 42]) {
+      sqlMock.mockReset();
+      sqlMock.mockResolvedValueOnce([fixture.session]).mockResolvedValueOnce(fixture.files).mockResolvedValue([]);
+      getUploadedObjectMetadata.mockResolvedValue({ contentLength: actualSize, etag: "etag" });
+      const completing = completeDirectUploadFile({ sessionId: "session-1", userId: "user-1", fileId: "file-1" });
+      if (actualSize === 42) {
+        await expect(completing).resolves.toBeUndefined();
+        expect(sqlMock.mock.calls.some(([strings]) => strings.join("?").includes("set status = 'completed'"))).toBe(true);
+      } else {
+        await expect(completing).rejects.toThrow();
+        expect(sqlMock).toHaveBeenCalledTimes(2);
+      }
+    }
   });
 
   it("computes multipart part counts at the protocol seam", () => {

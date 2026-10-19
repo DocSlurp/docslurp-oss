@@ -3,7 +3,7 @@ import { logs as logsApi } from "@opentelemetry/api-logs";
 // Server-only runtime. One provider owns context; exporters never own app lifecycle.
 import { hostname } from "node:os";
 import { performance } from "node:perf_hooks";
-import { context, propagation, ROOT_CONTEXT, SpanKind, SpanStatusCode, trace, type Attributes, type Histogram } from "@opentelemetry/api";
+import { context, createContextKey, propagation, ROOT_CONTEXT, SpanKind, SpanStatusCode, trace, type Attributes, type Histogram } from "@opentelemetry/api";
 import { AsyncLocalStorageContextManager } from "@opentelemetry/context-async-hooks";
 import { W3CTraceContextPropagator, type ExportResult } from "@opentelemetry/core";
 import { resourceFromAttributes, defaultResource } from "@opentelemetry/resources";
@@ -14,7 +14,7 @@ import { LoggerProvider, BatchLogRecordProcessor, type LogRecordProcessor } from
 import { OTLPTraceExporter } from "@opentelemetry/exporter-trace-otlp-proto";
 import { OTLPMetricExporter } from "@opentelemetry/exporter-metrics-otlp-proto";
 import { OTLPLogExporter } from "@opentelemetry/exporter-logs-otlp-proto";
-import { LangfuseSpanProcessor } from "@langfuse/otel";
+import { LangfuseSpanProcessor, isDefaultExportSpan } from "@langfuse/otel";
 import { setLangfuseTracerProvider } from "@langfuse/tracing";
 
 export interface ObservabilityOptions {
@@ -30,6 +30,7 @@ type Runtime = {
   metrics?: MeterProvider;
   operationDuration?: Histogram;
   httpDuration?: Histogram;
+  dependencyDuration?: Histogram;
   logs?: LoggerProvider;
   shutdown?: Promise<void>;
   signalsInstalled?: boolean;
@@ -52,11 +53,13 @@ function numberSetting(value: string | undefined, fallback: number, min: number,
   return result;
 }
 
-/** Explicit allowlist: Langfuse capture opt-in must not spill content into SigNoz. */
+/** Preserve integration/correlation attributes; strip credentials and explicit content payloads. */
 function safeAttributes(attributes: Attributes): Attributes {
   return Object.fromEntries(Object.entries(attributes).filter(([key, value]) =>
-    value !== undefined && /^(docslurp\.(requestId|runId|documentId|workspaceId|orgId|stageName|scope|media\.(provider|model|mediaJobId|leaseId|resourceId|deadline|durationMs|audioSeconds|costUsd|costSource|costState|providerRequestId|frames|reportedCostUsd|expectedCostUsd|outstanding|overdue)|operation\.(name|type))|http\.(request\.method|route|response\.status_code)|url\.path|event\.name|duration_ms|handler_duration_ms|telemetry_flush_ms|telemetry_flush|error\.type|gen_ai\.(request\.model|operation\.name|usage\.(input_tokens|output_tokens)))$/.test(key),
-  ).map(([key, value]) => [key, typeof value === "string" ? value.slice(0, 200) : value]));
+    value !== undefined && !/(authorization|cookie|password|secret|api[._-]?key|access[._-]?token|refresh[._-]?token)/i.test(key)
+      && !/^(langfuse\.observation\.(input|output)|gen_ai\.(input|output)\.messages|ai\.(prompt|response\.text))$/.test(key),
+  ).map(([key, value]) => [key, typeof value === "string"
+    ? value.replace(/Bearer\s+\S+/gi, "Bearer [redacted]").slice(0, 16000) : value]));
 }
 
 class PrivateTraceExporter implements SpanExporter {
@@ -75,7 +78,7 @@ class PrivateTraceExporter implements SpanExporter {
       events: span.events.filter(event => event.name === "exception").map(event => ({
         ...event, attributes: { "exception.type": event.attributes?.["exception.type"] ?? "Error" },
       })),
-      links: span.links.map(link => ({ ...link, attributes: {} })),
+      links: span.links.map(link => ({ ...link, attributes: safeAttributes(link.attributes ?? {}) })),
       spanContext: () => span.spanContext(),
     })), done);
   }
@@ -124,6 +127,7 @@ export function initializeObservability(options: ObservabilityOptions = {}): boo
     if (langfuse) processors.push(new LangfuseSpanProcessor({
       publicKey: process.env.LANGFUSE_PUBLIC_KEY!.trim(), secretKey: process.env.LANGFUSE_SECRET_KEY!.trim(),
       baseUrl: process.env.LANGFUSE_BASE_URL!.trim(), timeout: 5, flushAt: 32, flushInterval: 2,
+      shouldExportSpan: ({ otelSpan }) => isDefaultExportSpan(otelSpan) || otelSpan.instrumentationScope.name.startsWith("docslurp."),
       mediaUploadEnabled: false, additionalHeaders: { "x-langfuse-ingestion-version": "4" },
       environment: process.env.LANGFUSE_TRACING_ENVIRONMENT ?? process.env.NODE_ENV ?? "development",
     }));
@@ -170,6 +174,7 @@ export function initializeObservability(options: ObservabilityOptions = {}): boo
     setLangfuseTracerProvider(traces);
     processState[runtimeKey] = { traces, metrics, logs, otlpLogs: Boolean(logsOptions), nativeAiTelemetry: options.nativeAiTelemetry,
       operationDuration: metrics?.getMeter("docslurp.operations").createHistogram("docslurp.operation.duration", { unit: "s" }),
+      dependencyDuration: metrics?.getMeter("docslurp.dependencies").createHistogram("docslurp.dependency.duration", { unit: "s" }),
       httpDuration: metrics?.getMeter("docslurp.http").createHistogram("http.server.request.duration", { unit: "s" }),
     };
     if (metrics) registerRuntimeMetrics(metrics);
@@ -306,6 +311,33 @@ export async function withHttpSpan<T>(options: { method: string; route: string; 
   return outcome.value;
 }
 
+/**
+ * One pass of a background loop (timer tick or LISTEN drain) as its own root
+ * span, so its dependency spans share one named trace instead of each starting
+ * an anonymous one, and never attach to the request that created the timer.
+ */
+export async function withBackgroundSpan<T>(task: string, run: () => Promise<T>): Promise<T> {
+  let span: ReturnType<ReturnType<NodeTracerProvider["getTracer"]>["startSpan"]> | undefined;
+  try {
+    span = getRuntime()?.traces.getTracer("docslurp.background").startSpan(task, {
+      kind: SpanKind.INTERNAL, root: true, attributes: { "docslurp.background.task": task },
+    }, ROOT_CONTEXT);
+  } catch { /* Best effort. */ }
+  if (!span) return run();
+  const active = span;
+  try {
+    return await context.with(trace.setSpan(ROOT_CONTEXT, active), run);
+  } catch (error) {
+    bestEffort(() => {
+      active.setStatus({ code: SpanStatusCode.ERROR });
+      active.setAttribute("error.type", error instanceof Error ? error.name : "Error");
+    });
+    throw error;
+  } finally {
+    bestEffort(() => active.end());
+  }
+}
+
 /** IDs stay on logs/spans; media metric labels are bounded provider/model categories. */
 export function recordMediaTelemetry(args: { provider: string; model: string; operation: string; outcome: string;
   durationSeconds: number; audioSeconds?: number; costUsd?: number; costSource?: string; candidateFrames?: number; selectedFrames?: number; inputTokens?: number; outputTokens?: number }): void {
@@ -322,4 +354,49 @@ export function recordMediaTelemetry(args: { provider: string; model: string; op
     if (args.costUsd !== undefined) meter.createCounter("docslurp.media.cost", { unit: "USD" }).add(args.costUsd,
       { ...labels, costSource: args.costSource ?? "estimate" });
   });
+}
+
+const dependencyScopeKey = createContextKey("docslurp.dependency.scope");
+export function withDependencyScope<T>(scope: Record<string, unknown>, run: () => T): T {
+  return context.with(context.active().setValue(dependencyScopeKey, scope), run);
+}
+
+/** Low-cardinality dependency timing; no URLs, SQL text, keys, bodies or headers. */
+export function startDependencySpan(name: string, attributes: Attributes) {
+  const started = performance.now();
+  const scope = context.active().getValue(dependencyScopeKey) as Record<string, unknown> | undefined;
+  const correlation = Object.fromEntries(Object.entries(scope ?? {}).filter(([key, value]) =>
+    ["requestId", "runId", "documentId", "workspaceId", "orgId", "sessionId", "stageName"].includes(key) && typeof value === "string")
+    .map(([key, value]) => [`docslurp.${key}`, value as string]));
+  attributes = { ...correlation, ...attributes };
+  const runtime = getRuntime();
+  let span: ReturnType<ReturnType<NodeTracerProvider["getTracer"]>["startSpan"]> | undefined;
+  try { span = runtime?.traces.getTracer("docslurp.dependencies").startSpan(name, { kind: SpanKind.CLIENT, attributes: safeAttributes(attributes) }); } catch { /* Best effort. */ }
+  const parent = context.active();
+  const active = span ? trace.setSpan(parent, span) : parent;
+  let ended = false;
+  return {
+    run<T>(callback: () => T): T { return context.with(active, callback); },
+    set(values: Attributes): void { bestEffort(() => span?.setAttributes(safeAttributes(values))); },
+    end(error?: unknown): void {
+      if (ended) return;
+      ended = true;
+      const errorType = error instanceof Error ? error.name : error ? "Error" : undefined;
+      bestEffort(() => {
+        if (errorType) { span?.setStatus({ code: SpanStatusCode.ERROR }); span?.setAttribute("error.type", errorType); }
+        // IDs, server names and model names belong on spans, never metric labels.
+        const labels = Object.fromEntries(Object.entries(attributes).filter(([key]) =>
+          ["docslurp.dependency.type", "docslurp.dependency.operation", "docslurp.dependency.provider", "docslurp.dependency.phase"].includes(key)));
+        runtime?.dependencyDuration?.record((performance.now() - started) / 1000, { ...labels, "error.type": errorType ?? "none" });
+      });
+      bestEffort(() => span?.end());
+    },
+  };
+}
+
+export async function withDependencySpan<T>(name: string, attributes: Attributes, run: () => Promise<T>): Promise<T> {
+  const span = startDependencySpan(name, attributes);
+  try { return await span.run(run); }
+  catch (error) { span.end(error); throw error; }
+  finally { span.end(); }
 }

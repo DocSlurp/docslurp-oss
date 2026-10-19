@@ -33,6 +33,7 @@ vi.mock("../services/billing/credits.js", () => ({
 
 vi.mock("@aws-sdk/client-s3", () => ({
   S3Client: class {
+    middlewareStack = { add: vi.fn(), addRelativeTo: vi.fn() };
     send = s3SendMock;
   },
   GetObjectCommand: class {

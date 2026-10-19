@@ -161,9 +161,8 @@ features handle a block in a predictable way:
   fallback, extraction self-critique, and the API's search strategies (HyDE,
   rewrite, stepback, self-query, compression, multi-hop bridging).
 - **Local fallback:** graph extraction and community summaries use their
-  heuristics. Contextual chunk preambles use the heuristic preamble. Chat,
-  grounded summaries and automation answers return the retrieval fallback with a
-  warning. Automation structured output returns `null` with a warning.
+  heuristics. Contextual chunk preambles use the heuristic preamble. Chat
+  returns the retrieval fallback with a warning.
 - **Refused:** embeddings have no substitute. The pipeline schema rejects a
   hosted embedding profile, or a hosted `vision.remoteFallbackModelUri`, outside
   `standard`. Voice transcription returns HTTP 403.
@@ -311,3 +310,62 @@ never blocks boot.
 Only the Claude 5.5 generation is supported: `claude-opus-5-5` ($4/$20 per MTok), `claude-sonnet-5-5` ($2/$10) and `claude-haiku-5-5` ($0.10/$0.50, $0.50/$2.50 above 100K prompt tokens), or their OpenRouter ids `anthropic/claude-*-5.5`. The registry lives in `packages/shared/src/anthropic-models.ts`.
 
 Every older Claude id (Haiku 4.5, Sonnet 4.x/5, Opus 4.x/5, Fable 5/5.1, Claude 3.x) is deprecated. Stored settings and API callers that still name one keep working: `resolveSupportedModelId` swaps in the same family's 5.5 model at call time (Fable and Mythos map to Opus 5.5) and logs `[ai-models] deprecated model=… replaced_by=…` once per process. Price entries for deprecated ids remain only to reprice historical usage. the internal pricing validation fails if a default or selectable route names a deprecated Claude model.
+
+### Hosted Perplexity embeddings through OpenRouter
+
+New workspaces default to `llm://openrouter/perplexity/pplx-embed-v1-0.6b`
+(native 1024 dimensions). Workspaces can also select `llm://openrouter/perplexity/pplx-embed-v1-4b`
+(native 2560 dimensions). Set the embedding target to `hosted`; both ingestion
+and search use `OPENROUTER_API_KEY` and the fixed official OpenRouter endpoint.
+For example, use this embedding configuration in the workspace pipeline:
+
+```json
+{
+  "profile": "cheapest-hosted",
+  "target": "hosted",
+  "modelUri": "llm://openrouter/perplexity/pplx-embed-v1-0.6b",
+  "task": "document",
+  "normalize": true
+}
+```
+
+These routes preserve the native embedding width and require actual token usage.
+The worker splits requests by input count and a conservative UTF-8 token upper
+bound so the provider's 120,000-token aggregate request limit cannot drop content.
+They do not support dimension overrides. Reindex existing documents when changing
+embedding models so document and query vectors use the same space. Provider errors
+remain errors rather than silently switching retrieval to keywords. Existing
+explicit workspace model URIs remain selected. The `cheapest-hosted` profile
+and the default embedding configuration now select Perplexity 0.6B. Self-hosted
+operators need `OPENROUTER_API_KEY` for this default or must explicitly choose a
+local/private embedding route.
+
+Verified OpenRouter list prices on 2026-10-17 are $0.004 and $0.03 per million
+input tokens respectively, before DocSlurp's applicable AI markup. The shared
+usage catalog prices both routes and the existing usage ledger persists calls.
+See the [OpenRouter model catalog](https://openrouter.ai/api/v1/embeddings/models)
+for current prices and the [Perplexity embedding paper](https://arxiv.org/abs/2602.11151)
+for model details. These prices are not ingestion-throughput guarantees.
+
+
+### Native Perplexity embedding endpoint
+
+To use Perplexity directly, set `PERPLEXITY_API_KEY` in both the server and worker
+(the legacy `PERPLEXITYAI_API_KEY` is accepted) and explicitly select
+`llm://perplexity/pplx-embed-v1-0.6b` or `llm://perplexity/pplx-embed-v1-4b`
+with embedding target `hosted`. The default remains the OpenRouter route above.
+
+Document and query calls use the fixed `https://api.perplexity.ai/v1/embeddings`
+endpoint. The adapter decodes signed INT8 responses into normalized vectors,
+requires actual token usage, and records usage before validating paid responses.
+Native widths are 1024 and 2560 respectively; dimension overrides are rejected.
+Changing the workspace route requires reindexing, including when switching between
+native Perplexity and OpenRouter. Privacy mode still rejects remote requests.
+
+Requests are packed to at most 128 inputs and a conservative 120,000-token upper
+bound without truncating inputs. Existing spend checks, provider admission limits,
+retry handling and usage attribution apply. Verified native input prices on
+2026-10-17 are $0.004 and $0.03 per million tokens, before applicable markup.
+See the [native embedding documentation](https://docs.perplexity.ai/docs/embeddings/quickstart)
+and [rate limits](https://docs.perplexity.ai/docs/admin/rate-limits-usage-tiers).
+Embedding API burst throughput does not establish full ingestion throughput.

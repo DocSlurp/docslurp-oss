@@ -7,6 +7,7 @@ import { openFileToken } from "../lib/file-tokens.js";
 import { actorHasAnyApiKeyScope, getRequestActor } from "../lib/request-actor.js";
 import { acceptApiKeys } from "../lib/route-auth.js";
 import { userCanAccessArtifactUri } from "../services/documents.js";
+import { apiStatusError } from "../lib/api-error.js";
 
 /**
  * The file proxy: the only way a client reads a stored document or artifact.
@@ -62,7 +63,7 @@ const PDF_CSP = "frame-ancestors 'self'";
 
 function notFound(c: Context) {
   c.header("Cache-Control", "no-store");
-  return c.json({ error: "Not found" }, 404);
+  return apiStatusError(c, 404, "Not found");
 }
 
 function sameSecret(a: string, b: string): boolean {

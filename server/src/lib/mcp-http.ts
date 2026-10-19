@@ -7,6 +7,8 @@ interface Capability {
   description: string;
   category: string;
   inputSchema: Record<string, unknown>;
+  /** Agent-safety hints from the capability manifest. Absent → treated as fully unknown (not read-only). */
+  annotations?: { readOnly: boolean; destructive: boolean; idempotent: boolean; openWorld: boolean };
 }
 
 export interface McpManifest {
@@ -15,8 +17,12 @@ export interface McpManifest {
 
 export type McpDispatch = (path: string, init?: RequestInit) => Promise<Response>;
 
+const CAPABILITIES_URI = "docslurp://capabilities";
 const MAX_BODY_BYTES = 1_048_576;
 const REQUEST_TIMEOUT_MS = 120_000;
+
+/** A capability that declares no hints. Assume it may write, so agents confirm first. */
+const UNKNOWN_ANNOTATIONS = { readOnly: false, destructive: false, idempotent: false, openWorld: false };
 
 function createServer(manifest: McpManifest, adapterDispatch: McpDispatch, signal: AbortSignal): Server {
   const dispatch: McpDispatch = async (path, init) => {
@@ -25,14 +31,17 @@ function createServer(manifest: McpManifest, adapterDispatch: McpDispatch, signa
   };
   const server = new Server({ name: "docslurp", version: "0.1.0" }, {
     capabilities: { tools: {}, resources: {}, prompts: {} },
-    instructions: "Use workspace.search or workspace.search-many for portable cited context for any LLM. Use workspace.chat for a generated grounded answer; it incurs AI usage. Automation tools submit asynchronous operations; poll ai.operation.get or the operation resource for progress. Respect the user's workspace and cost constraints.",
+    instructions: "Use listWorkspaces to discover authorized workspaces. Use upload for URLs or up to 10 presigned file PUT URLs. PUT the bytes then call completeUpload before getUploadStatus. Workspace selection is optional: omitted workspaceId uses the organization default. Use search with q for one query or queries for a batch of cited passages to answer with your own model, or chat for a generated grounded answer that incurs AI usage. Respect workspace and cost constraints.",
   });
   const tools = manifest.capabilities.filter((item) => item.category === "tool");
-  server.setRequestHandler("tools/list", () => ({ tools: tools.map((item) => ({
-    name: item.id, title: item.title, description: item.description,
-    inputSchema: item.inputSchema as { type: "object"; [key: string]: unknown },
-    annotations: { readOnlyHint: (item.id.startsWith("workspace.") && item.id !== "workspace.chat") || item.id === "ai.operation.get", destructiveHint: false, idempotentHint: (item.id.startsWith("workspace.") && item.id !== "workspace.chat") || item.id === "ai.operation.get", openWorldHint: ["ai.simple", "ai.advanced"].includes(item.id) },
-  })) }));
+  server.setRequestHandler("tools/list", () => ({ tools: tools.map((item) => {
+    const a = item.annotations ?? UNKNOWN_ANNOTATIONS;
+    return {
+      name: item.id, title: item.title, description: item.description,
+      inputSchema: item.inputSchema as { type: "object"; [key: string]: unknown },
+      annotations: { readOnlyHint: a.readOnly, destructiveHint: a.destructive, idempotentHint: a.idempotent, openWorldHint: a.openWorld },
+    };
+  }) }));
   server.setRequestHandler("tools/call", async (request, ctx) => {
     if (!tools.some((item) => item.id === request.params.name)) throw new ProtocolError(ProtocolErrorCode.InvalidParams, "Unknown tool");
     const response = await dispatch(`/tools/${encodeURIComponent(request.params.name)}`, {
@@ -47,22 +56,13 @@ function createServer(manifest: McpManifest, adapterDispatch: McpDispatch, signa
       structuredContent: result as Record<string, unknown>, isError: !response.ok };
   });
   server.setRequestHandler("resources/list", () => ({ resources: [{
-    uri: "docslurp://ai/capabilities", name: "ai.capabilities", title: "DocSlurp capabilities",
+    uri: CAPABILITIES_URI, name: "capabilities", title: "DocSlurp capabilities",
     description: "Available tools, schemas and authorization scopes.", mimeType: "application/json",
   }] }));
-  server.setRequestHandler("resources/templates/list", () => ({ resourceTemplates: [{
-    uriTemplate: "docslurp://ai/operations/{operationId}", name: "ai.operation",
-    description: "Read an authorized automation operation.", mimeType: "application/json",
-  }] }));
+  server.setRequestHandler("resources/templates/list", () => ({ resourceTemplates: [] }));
   server.setRequestHandler("resources/read", async (request, ctx) => {
-    let path: string;
-    if (request.params.uri === "docslurp://ai/capabilities") path = "/resources/ai.capabilities";
-    else {
-      const match = /^docslurp:\/\/ai\/operations\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i.exec(request.params.uri);
-      if (!match) throw new ProtocolError(ProtocolErrorCode.InvalidParams, "Unknown resource URI");
-      path = `/resources/ai.operation?operationId=${encodeURIComponent(match[1]!)}`;
-    }
-    const response = await dispatch(path, { signal: AbortSignal.any([signal, ctx.mcpReq.signal]) });
+    if (request.params.uri !== CAPABILITIES_URI) throw new ProtocolError(ProtocolErrorCode.InvalidParams, "Unknown resource URI");
+    const response = await dispatch("/resources/capabilities", { signal: AbortSignal.any([signal, ctx.mcpReq.signal]) });
     if (!response.ok) throw new ProtocolError(ProtocolErrorCode.InvalidParams, "Resource unavailable");
     return { contents: [{ uri: request.params.uri, mimeType: "application/json", text: await response.text() }] };
   });

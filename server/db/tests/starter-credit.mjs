@@ -11,7 +11,7 @@ try {
     await client.query(await readFile(new URL('../migrations/0012_new_account_starter_credit.sql', import.meta.url), 'utf8'));
   }
   await client.query(await readFile(new URL('./starter-credit.sql', import.meta.url), 'utf8'));
-  console.log('Starter credit: $25 grant, ledger, repeated onboarding, extra organization, and recreation checks passed.');
+  console.log('Starter credit: $2.50 grant, ledger, repeated onboarding, extra organization, and recreation checks passed.');
 } finally {
   await client.query('rollback');
   await client.end();

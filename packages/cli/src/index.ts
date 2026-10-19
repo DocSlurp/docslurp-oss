@@ -288,7 +288,7 @@ async function putToStorage(url: string, body: Blob, contentType?: string): Prom
 async function uploadDirect(files: Array<{ blob: Blob; name: string }>, fields: FormData, flags: Record<string, string | boolean>): Promise<Response> {
   const field = (name: string) => (typeof fields.get(name) === "string" ? String(fields.get(name)) : undefined);
   const json = (body: unknown): RequestInit => ({ method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
-  const created = await apiFetch("/v1/ingest/direct/sessions", flags, json({
+  const created = await apiFetch("/v1/uploads/direct/sessions", flags, json({
     ...(field("workspaceId") ? { workspaceId: field("workspaceId") } : {}),
     ...(field("newWorkspace") === "true" ? { newWorkspace: true } : {}),
     files: files.map(({ blob, name }) => ({
@@ -298,7 +298,7 @@ async function uploadDirect(files: Array<{ blob: Blob; name: string }>, fields: 
   }));
   if (!created.ok) return created;
   const session = await created.json() as { sessionId: string; files: DirectUploadDescriptor[] };
-  const sessionPath = `/v1/ingest/direct/sessions/${encodeURIComponent(session.sessionId)}`;
+  const sessionPath = `/v1/uploads/direct/sessions/${encodeURIComponent(session.sessionId)}`;
   try {
     const remaining = [...files];
     for (const descriptor of session.files) {
@@ -357,12 +357,12 @@ async function uploadCommand(files: string[], flags: Record<string, string | boo
     formData.append("files", blob, basename(filePath));
   }
 
-  // /v1/ingest/bulk buffers multipart bodies and is capped (25 MB by default);
+  // /v1/uploads/bulk buffers multipart bodies and is capped (25 MB by default);
   // larger uploads go straight to storage through a direct upload session.
   const totalBytes = blobs.reduce((sum, file) => sum + file.blob.size, 0);
   const response = totalBytes > DIRECT_UPLOAD_THRESHOLD_BYTES
     ? await uploadDirect(blobs, formData, flags)
-    : await apiFetch("/v1/ingest/bulk", flags, {
+    : await apiFetch("/v1/uploads/bulk", flags, {
       method: "POST",
       body: formData
     });
@@ -393,7 +393,7 @@ async function ingestUrlCommand(urls: string[], flags: Record<string, string | b
     process.exitCode = 1;
     return;
   }
-  const response = await apiFetch("/v1/ingest/url", flags, {
+  const response = await apiFetch("/v1/uploads/url", flags, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ urls, ...resolveIntakeTarget(flags) }),
@@ -575,7 +575,7 @@ async function searchCommand(query: string, flags: Record<string, string | boole
     });
     const concurrency = Number(flags.concurrency ?? 4);
     if (!Number.isInteger(concurrency) || concurrency < 1 || concurrency > 4) throw new Error("--concurrency must be an integer from 1 to 4.");
-    const response = await apiFetch("/v1/search/batch", flags, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ queries, concurrency }) });
+    const response = await apiFetch("/v1/search", flags, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ queries, concurrency }) });
     if (!response.ok) throw new Error(publicHttpError(response.status));
     const data = await response.json() as { results: Array<{ ok: true; data: CliSearchResponse } | { ok: false; error: { code: string; message: string; status: number } }> };
     if (flags.json) console.log(JSON.stringify(data));
@@ -626,8 +626,7 @@ function writeMcpResponse(response: Record<string, unknown>): void {
   process.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", ...response })}\n`);
 }
 
-const MCP_CAPABILITIES_URI = "docslurp://ai/capabilities";
-const MCP_OPERATION_URI = /^docslurp:\/\/ai\/operations\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i;
+const MCP_CAPABILITIES_URI = "docslurp://capabilities";
 
 async function mcpFetch(args: {
   apiUrl: string;
@@ -726,25 +725,17 @@ async function mcpServerCommand(flags: Record<string, string | boolean>): Promis
         // template and adapter paths, so stdio and HTTP clients see one surface.
         case "resources/list":
           respond({ resources: [{
-            uri: MCP_CAPABILITIES_URI, name: "ai.capabilities", title: "DocSlurp capabilities",
+            uri: MCP_CAPABILITIES_URI, name: "capabilities", title: "DocSlurp capabilities",
             description: "Available tools, schemas and authorization scopes.", mimeType: "application/json"
           }] });
           break;
         case "resources/templates/list":
-          respond({ resourceTemplates: [{
-            uriTemplate: "docslurp://ai/operations/{operationId}", name: "ai.operation",
-            description: "Read an authorized automation operation.", mimeType: "application/json"
-          }] });
+          respond({ resourceTemplates: [] });
           break;
         case "resources/read": {
           const uri = envelope.params?.uri;
-          let pathname: string;
-          if (uri === MCP_CAPABILITIES_URI) pathname = "/v1/mcp/resources/ai.capabilities";
-          else {
-            const match = typeof uri === "string" ? MCP_OPERATION_URI.exec(uri) : null;
-            if (!match) { invalid("Unknown resource URI"); break; }
-            pathname = `/v1/mcp/resources/ai.operation?operationId=${encodeURIComponent(match[1]!)}`;
-          }
+          if (uri !== MCP_CAPABILITIES_URI) { invalid("Unknown resource URI"); break; }
+          const pathname = "/v1/mcp/resources/capabilities";
           let result: unknown;
           try { result = await get(pathname); }
           catch { invalid("Resource unavailable"); break; }

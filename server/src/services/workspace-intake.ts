@@ -49,7 +49,6 @@ export type WorkspaceIntakeKind =
   | "bulk-upload"
   | "direct-upload"
   | "url-ingest"
-  | "ai-automation"
   | "connector-sync";
 
 export type WorkspaceIntakeStatusCode = 400 | 404 | 409 | 413 | 415 | 422 | 500;
@@ -272,7 +271,6 @@ export type IntakeFileVerdict =
 
 const remoteSourceLabels = {
   "url-ingest": "url",
-  "ai-automation": "automation",
   "connector-sync": "connector",
 } as const;
 

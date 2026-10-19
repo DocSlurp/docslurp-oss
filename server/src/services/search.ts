@@ -98,6 +98,12 @@ export interface SearchOptions {
   queryVector?: number[];
   useHyDE?: boolean;
   useRerank?: boolean;
+  rerankProvider?: "bm25" | "deepinfra";
+  rerankModel?: "Qwen/Qwen3-Reranker-0.6B";
+  /** Per-adapter and fused candidate cap, 1..200; independent of rerank and output limit. */
+  candidateDepth?: number;
+  /** Explicit relevance order or lost-in-middle prompt packing; omitted preserves legacy behavior. */
+  resultOrder?: "relevance" | "prompt";
   useMmr?: boolean;
   mmrLambda?: number;
   filters?: SearchFilters;

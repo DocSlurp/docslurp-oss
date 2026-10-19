@@ -24,6 +24,8 @@ import {
   verifySsoDomain
 } from "../services/sso-domains.js";
 import { authenticatedByRoute } from "../lib/route-auth.js";
+import { apiStatusError } from "../lib/api-error.js";
+import { validationHook } from "../lib/validation.js";
 
 const ssoConfigSchema = z.object({
   providerType: z.enum(["saml", "oidc"]).nullable().optional(),
@@ -478,7 +480,7 @@ async function ssoRateLimit(c: any, next: () => Promise<void>) {
   if (bucket.count > ssoRateLimitMax) {
     const retryAfterSeconds = Math.max(1, Math.ceil((bucket.resetAt - now) / 1000));
     c.header("Retry-After", String(retryAfterSeconds));
-    return c.json({ error: "Too many SSO requests" }, 429);
+    return apiStatusError(c, 429, "Too many SSO requests");
   }
 
   await next();
@@ -660,7 +662,7 @@ async function finishSsoCallback(c: any, identity: SsoAssertedIdentity, requestR
     if (result.userFacing) {
       return redirectToApp(c, `/app?authError=${encodeURIComponent(result.error)}&authEmail=${encodeURIComponent(identity.email)}`);
     }
-    return c.json({ error: result.error }, result.status);
+    return apiStatusError(c, result.status, result.error);
   }
   if (result.kind === "linked") {
     return redirectToApp(c, requestRow.redirect_path ?? "/app/sso?linked=1");
@@ -802,7 +804,7 @@ async function loadOrgBySlugOrId(slug: string): Promise<OrgRow | null> {
 }
 
 function ssoErrorResponse(c: any, err: unknown, fallback = "Unauthorized") {
-  return c.json({ error: reportPublicError(err) }, 403);
+  return apiStatusError(c, 403, reportPublicError(err));
 }
 
 async function loadDomainStatus(orgId: string, domain: string | null | undefined) {
@@ -922,13 +924,13 @@ export const ssoRoutes = new Hono()
 
     const org = await loadOrgById(orgId);
     if (!org) {
-      return c.json({ error: "Organization not found" }, 404);
+      return apiStatusError(c, 404, "Organization not found");
     }
 
     const config = sanitizeSsoConfig(org.sso_config);
     return c.json({ ssoConfig: config, domainVerification: await loadDomainStatus(orgId, config.emailDomain) });
   })
-  .put("/:orgId/sso", zValidator("json", ssoConfigSchema), async (c) => {
+  .put("/:orgId/sso", zValidator("json", ssoConfigSchema, validationHook), async (c) => {
     const userId = c.get("sessionUser").id;
     const orgId = c.req.param("orgId");
 
@@ -940,7 +942,7 @@ export const ssoRoutes = new Hono()
 
     const org = await loadOrgById(orgId);
     if (!org) {
-      return c.json({ error: "Organization not found" }, 404);
+      return apiStatusError(c, 404, "Organization not found");
     }
 
     const patch = c.req.valid("json");
@@ -965,20 +967,20 @@ export const ssoRoutes = new Hono()
 
     const validationError = validateConfig(merged);
     if (validationError) {
-      return c.json({ error: validationError }, 422);
+      return apiStatusError(c, 422, validationError);
     }
 
     let domainRow: Awaited<ReturnType<typeof claimSsoDomain>> | null = null;
     if (merged.emailDomain) {
       const domainError = validateClaimableDomain(merged.emailDomain);
       if (domainError) {
-        return c.json({ error: domainError }, 422);
+        return apiStatusError(c, 422, domainError);
       }
       try {
         domainRow = await claimSsoDomain(orgId, merged.emailDomain, userId);
       } catch (err) {
         if (err instanceof SsoDomainConflictError) {
-          return c.json({ error: err.message }, 409);
+          return apiStatusError(c, 409, err.message);
         }
         throw err;
       }
@@ -986,10 +988,7 @@ export const ssoRoutes = new Hono()
     const domainVerification = domainRow ? toDomainStatus(domainRow) : null;
 
     if ((merged.enabled || merged.enforceSso) && !domainRow?.verified_at) {
-      return c.json({
-        error: `Verify ownership of ${merged.emailDomain} with a DNS TXT record before enabling SSO`,
-        domainVerification
-      }, 422);
+      return apiStatusError(c, 422, `Verify ownership of ${merged.emailDomain} with a DNS TXT record before enabling SSO`);
     }
 
     const stored = toStoredSsoConfig(merged);
@@ -1018,12 +1017,12 @@ export const ssoRoutes = new Hono()
 
     const org = await loadOrgById(orgId);
     if (!org) {
-      return c.json({ error: "Organization not found" }, 404);
+      return apiStatusError(c, 404, "Organization not found");
     }
 
     const domain = normalizeEmailDomain(resolveStoredSsoConfig(org.sso_config).emailDomain ?? null);
     if (!domain) {
-      return c.json({ error: "Save an SSO email domain first" }, 422);
+      return apiStatusError(c, 422, "Save an SSO email domain first");
     }
 
     try {
@@ -1031,9 +1030,9 @@ export const ssoRoutes = new Hono()
       return c.json({ domainVerification: toDomainStatus(row) });
     } catch (err) {
       if (err instanceof SsoDomainConflictError) {
-        return c.json({ error: err.message }, 409);
+        return apiStatusError(c, 409, err.message);
       }
-      return c.json({ error: reportPublicError(err) }, 422);
+      return apiStatusError(c, 422, reportPublicError(err));
     }
   })
   .post("/:orgId/sso/test", async (c) => {
@@ -1048,7 +1047,7 @@ export const ssoRoutes = new Hono()
 
     const org = await loadOrgById(orgId);
     if (!org) {
-      return c.json({ error: "Organization not found" }, 404);
+      return apiStatusError(c, 404, "Organization not found");
     }
 
     const config = resolveStoredSsoConfig(org.sso_config);
@@ -1065,11 +1064,11 @@ export const ssoRoutes = new Hono()
     const user = c.get("sessionUser");
     const orgId = c.req.param("orgId");
     if (!(await isOrgMember(orgId, user.id))) {
-      return c.json({ error: "Not a member of this organization" }, 403);
+      return apiStatusError(c, 403, "Not a member of this organization");
     }
     const org = await loadOrgById(orgId);
     if (!org) {
-      return c.json({ error: "Organization not found" }, 404);
+      return apiStatusError(c, 404, "Organization not found");
     }
     const config = resolveStoredSsoConfig(org.sso_config);
     const domain = normalizeEmailDomain(config.emailDomain ?? null);
@@ -1093,22 +1092,22 @@ export const ssoRoutes = new Hono()
     const orgId = c.req.param("orgId");
     // JSON only, so a cross-site page can't start a link flow without a CORS preflight.
     if (!c.req.header("content-type")?.toLowerCase().startsWith("application/json")) {
-      return c.json({ error: "Expected a JSON request" }, 415);
+      return apiStatusError(c, 415, "Expected a JSON request");
     }
     if (!(await isOrgMember(orgId, user.id))) {
-      return c.json({ error: "Not a member of this organization" }, 403);
+      return apiStatusError(c, 403, "Not a member of this organization");
     }
     const org = await loadOrgById(orgId);
     if (!org) {
-      return c.json({ error: "Organization not found" }, 404);
+      return apiStatusError(c, 404, "Organization not found");
     }
     const config = resolveStoredSsoConfig(org.sso_config);
     if (!isOidcReady(config) && !isSamlReady(config)) {
-      return c.json({ error: "SSO is not fully configured for this organization" }, 400);
+      return apiStatusError(c, 400, "SSO is not fully configured for this organization");
     }
     const domainError = await requireVerifiedSsoDomain(org, config, user.email ?? "");
     if (domainError) {
-      return c.json({ error: domainError }, 403);
+      return apiStatusError(c, 403, domainError);
     }
     const body = (await c.req.json().catch(() => ({}))) as { redirect?: unknown };
     const redirectPath = sanitizeRedirectPath(typeof body.redirect === "string" ? body.redirect : "/app/sso?linked=1");
@@ -1128,12 +1127,12 @@ export const samlCallbackRoutes = new Hono()
     const orgId = c.req.param("orgId");
     const org = await loadOrgById(orgId);
     if (!org) {
-      return c.json({ error: "Organization not found" }, 404);
+      return apiStatusError(c, 404, "Organization not found");
     }
 
     const config = resolveStoredSsoConfig(org.sso_config);
     if (!isOidcReady(config) || !(await orgHasVerifiedDomain(org.id, config.emailDomain))) {
-      return c.json({ error: "OIDC SSO is not fully configured for this organization" }, 400);
+      return apiStatusError(c, 400, "OIDC SSO is not fully configured for this organization");
     }
 
     const url = await beginSsoFlow(c, org, config, { redirectPath: sanitizeRedirectPath(c.req.query("redirect")) });
@@ -1143,22 +1142,22 @@ export const samlCallbackRoutes = new Hono()
     const state = c.req.query("state");
     const code = c.req.query("code");
     if (!state || !code) {
-      return c.json({ error: "Missing OIDC code/state callback parameters" }, 400);
+      return apiStatusError(c, 400, "Missing OIDC code/state callback parameters");
     }
 
     const requestRow = await consumeSsoRequest(state, "oidc");
     if (!requestRow || requestRow.org_id !== c.req.param("orgId")) {
-      return c.json({ error: "Invalid or expired OIDC state" }, 400);
+      return apiStatusError(c, 400, "Invalid or expired OIDC state");
     }
 
     const org = await loadOrgById(requestRow.org_id);
     if (!org) {
-      return c.json({ error: "Organization not found" }, 404);
+      return apiStatusError(c, 404, "Organization not found");
     }
 
     const config = resolveStoredSsoConfig(org.sso_config);
     if (!isOidcReady(config)) {
-      return c.json({ error: "OIDC SSO is not fully configured for this organization" }, 400);
+      return apiStatusError(c, 400, "OIDC SSO is not fully configured for this organization");
     }
 
     const metadata = await fetchOidcMetadata(config.metadataUrl!);
@@ -1181,12 +1180,12 @@ export const samlCallbackRoutes = new Hono()
     });
 
     if (!tokenResponse.ok) {
-      return c.json({ error: `OIDC token exchange failed (HTTP ${tokenResponse.status})` }, 400);
+      return apiStatusError(c, 400, `OIDC token exchange failed (HTTP ${tokenResponse.status})`);
     }
 
     const tokenJson = (await tokenResponse.json()) as { id_token?: string };
     if (!tokenJson.id_token) {
-      return c.json({ error: "OIDC response is missing id_token" }, 400);
+      return apiStatusError(c, 400, "OIDC response is missing id_token");
     }
 
     const jwks = createRemoteJWKSet(new URL(metadata.jwks_uri), {
@@ -1200,21 +1199,21 @@ export const samlCallbackRoutes = new Hono()
     });
 
     if (!requestRow.nonce || verification.payload.nonce !== requestRow.nonce) {
-      return c.json({ error: "OIDC nonce mismatch" }, 400);
+      return apiStatusError(c, 400, "OIDC nonce mismatch");
     }
 
     const payload = verification.payload as Record<string, unknown>;
     const email = extractEmailFromOidcPayload(payload);
     if (!email) {
-      return c.json({ error: "OIDC token does not include a valid email claim" }, 400);
+      return apiStatusError(c, 400, "OIDC token does not include a valid email claim");
     }
     if (typeof payload.sub !== "string" || !payload.sub) {
-      return c.json({ error: "OIDC token does not include a subject" }, 400);
+      return apiStatusError(c, 400, "OIDC token does not include a subject");
     }
 
     const domainError = await requireVerifiedSsoDomain(org, config, email);
     if (domainError) {
-      return c.json({ error: domainError }, 403);
+      return apiStatusError(c, 403, domainError);
     }
 
     return await finishSsoCallback(c, {
@@ -1229,12 +1228,12 @@ export const samlCallbackRoutes = new Hono()
     const orgSlug = c.req.param("orgSlug");
     const org = await loadOrgBySlugOrId(orgSlug);
     if (!org) {
-      return c.json({ error: "Organization not found" }, 404);
+      return apiStatusError(c, 404, "Organization not found");
     }
 
     const config = resolveStoredSsoConfig(org.sso_config);
     if (!isSamlReady(config) || !(await orgHasVerifiedDomain(org.id, config.emailDomain))) {
-      return c.json({ error: "SAML SSO is not fully configured for this organization" }, 400);
+      return apiStatusError(c, 400, "SAML SSO is not fully configured for this organization");
     }
 
     const url = await beginSsoFlow(c, org, config, { redirectPath: sanitizeRedirectPath(c.req.query("redirect")) });
@@ -1244,45 +1243,45 @@ export const samlCallbackRoutes = new Hono()
     const orgSlug = c.req.param("orgSlug");
     const org = await loadOrgBySlugOrId(orgSlug);
     if (!org) {
-      return c.json({ error: "Organization not found" }, 404);
+      return apiStatusError(c, 404, "Organization not found");
     }
 
     const config = resolveStoredSsoConfig(org.sso_config);
     if (!isSamlReady(config)) {
-      return c.json({ error: "SAML SSO is not fully configured for this organization" }, 400);
+      return apiStatusError(c, 400, "SAML SSO is not fully configured for this organization");
     }
 
     const formData = await c.req.formData().catch(() => null);
     const samlResponse = formData?.get("SAMLResponse");
     const relayState = formData?.get("RelayState");
     if (typeof samlResponse !== "string" || typeof relayState !== "string") {
-      return c.json({ error: "Missing required SAML callback parameters" }, 400);
+      return apiStatusError(c, 400, "Missing required SAML callback parameters");
     }
 
     const requestRow = await consumeSsoRequest(relayState, "saml");
     if (!requestRow || requestRow.org_id !== org.id) {
-      return c.json({ error: "Invalid or expired SAML RelayState" }, 400);
+      return apiStatusError(c, 400, "Invalid or expired SAML RelayState");
     }
 
     const samlMetadata = await fetchSamlMetadata(config.metadataUrl!);
     const validated = await createSamlClient(c, org, samlMetadata).validatePostResponseAsync({ SAMLResponse: samlResponse });
     const profile = validated.profile as Record<string, unknown> | null;
     if (!profile) {
-      return c.json({ error: "SAML response did not contain an authenticated profile" }, 400);
+      return apiStatusError(c, 400, "SAML response did not contain an authenticated profile");
     }
 
     const email = extractEmailFromSamlProfile(profile);
     if (!email) {
-      return c.json({ error: "SAML assertion did not include an email attribute" }, 400);
+      return apiStatusError(c, 400, "SAML assertion did not include an email attribute");
     }
     const subject = typeof profile.nameID === "string" ? profile.nameID : null;
     if (!subject) {
-      return c.json({ error: "SAML assertion did not include a NameID" }, 400);
+      return apiStatusError(c, 400, "SAML assertion did not include a NameID");
     }
 
     const domainError = await requireVerifiedSsoDomain(org, config, email);
     if (domainError) {
-      return c.json({ error: domainError }, 403);
+      return apiStatusError(c, 403, domainError);
     }
 
     const issuer = (typeof profile.issuer === "string" && profile.issuer)

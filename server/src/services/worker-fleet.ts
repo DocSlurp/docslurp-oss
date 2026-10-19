@@ -1,3 +1,4 @@
+import { withBackgroundSpan } from "@docslurp/shared/observability";
 import {
   DEFAULT_FLEET_CAPABILITY_OPTIONS,
   gatedFeatureStates,
@@ -375,7 +376,7 @@ export function startWorkerFleetRefresher(env: Env = process.env): void {
   if (!Object.values(configuredGatedFlags(env)).some(Boolean)) return;
   const intervalMs = readMs(env, "WORKER_CAPABILITY_CACHE_MS", 15_000, 1_000, 5 * 60_000);
   void workerFleet().resolve();
-  refresher = setInterval(() => void workerFleet().resolve(), intervalMs);
+  refresher = setInterval(() => void withBackgroundSpan("api.worker-fleet-refresh", () => workerFleet().resolve()), intervalMs);
   refresher.unref?.();
 }
 

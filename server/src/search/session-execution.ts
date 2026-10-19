@@ -5,6 +5,8 @@ import { sql } from "../db.js";
 import { calibrateSearchConfidence } from "./confidence.js";
 import { compressChunks } from "./contextual-compression.js";
 import { mmrSelect } from "./mmr.js";
+import { lostInTheMiddleReorder } from "./position-reorder.js";
+import { rerankHosted } from "./hosted-rerank.js";
 import { rerankBM25, type RankedChunk } from "./rerank.js";
 import {
   applyRelevanceFloor,
@@ -12,6 +14,7 @@ import {
   withBestRelevance,
 } from "./relevance.js";
 import { reciprocalRankFusion } from "./rrf.js";
+import { rankingDepth, validateRetrievalControls } from "./retrieval-controls.js";
 import {
   toSearchMetadataRecord,
   type SearchSessionJournal,
@@ -52,8 +55,10 @@ export interface SearchPostRetrievalInput {
   limit: number;
   options: Pick<
     SearchOptions,
-    "useRerank" | "useMmr" | "mmrLambda" | "useContextualCompression"
+    "useRerank" | "useMmr" | "mmrLambda" | "useContextualCompression" | "candidateDepth" | "resultOrder" | "rerankProvider" | "rerankModel"
   >;
+  rerankApiKey?: string;
+  rerankScope?: { orgId: string; workspaceId: string };
   openRouterApiKey?: string | null;
   privacyMode: PrivacyMode;
   session: SearchSessionJournal;
@@ -64,6 +69,8 @@ export interface SearchSessionRetrievalInput
   limit: number;
   retrieveCandidateLists(): Promise<SearchChunk[][]>;
   buildAvailability(chunks: SearchChunk[]): SearchAvailability;
+  rerankApiKey?: string;
+  rerankScope?: { orgId: string; workspaceId: string };
   openRouterApiKey?: string | null;
   privacyMode: PrivacyMode;
 }
@@ -163,7 +170,8 @@ export function fuseSearchChunkLists(
 export async function applySearchPostRetrievalProcessing(
   input: SearchPostRetrievalInput,
 ): Promise<SearchChunk[]> {
-  const candidates = input.chunks.slice(0, input.options.useRerank ? 200 : input.limit * 2);
+  validateRetrievalControls(input.options);
+  const candidates = input.chunks.slice(0, rankingDepth(input.options, input.limit));
   if (candidates.length === 0) {
     return [];
   }
@@ -175,7 +183,11 @@ export async function applySearchPostRetrievalProcessing(
   }));
 
   if (input.options.useRerank) {
-    ranked = rerankBM25(input.query, ranked);
+    ranked = input.options.rerankProvider === "deepinfra"
+      ? await rerankHosted({ query: input.query, chunks: ranked, model: input.options.rerankModel,
+          apiKey: input.rerankApiKey, scope: input.rerankScope,
+          privacyMode: input.privacyMode, session: input.session })
+      : rerankBM25(input.query, ranked);
   } else {
     ranked = [...ranked].sort((a, b) => b.score - a.score);
   }
@@ -215,12 +227,16 @@ export async function applySearchPostRetrievalProcessing(
     : ranked.slice(0, input.limit);
 
   const rankById = new Map(ranked.map((chunk) => [chunk.id, chunk]));
-  // Search consumers may take a shorter prefix (for example, chat citations).
-  // Preserve retrieval order here; moving the second-best passage to the end
-  // before that cap can discard it. Prompt positioning belongs after selection.
+  const selectedScores = selected.map((chunk) => ({
+    id: chunk.id,
+    score: rankById.get(chunk.id)?.crossScore ?? chunk.score,
+  }));
+  const reordered = input.options.resultOrder === "relevance"
+    ? [...selectedScores].sort((a, b) => b.score - a.score)
+    : lostInTheMiddleReorder(selectedScores);
   const chunkById = new Map(candidates.map((chunk) => [chunk.id, chunk]));
 
-  return selected
+  return reordered
     .map((result, index) => {
       const chunk = chunkById.get(result.id);
       if (!chunk) {
@@ -238,19 +254,38 @@ export async function applySearchPostRetrievalProcessing(
 export async function executeSearchSessionRetrieval(
   input: SearchSessionRetrievalInput,
 ): Promise<SearchResponse> {
+  validateRetrievalControls(input.options);
   const candidateLists = await input.retrieveCandidateLists();
   // Fusion keeps one copy per chunk and re-scores by rank, so the raw relevance
   // measured on each branch is carried over before the floor and rerank run.
+  const fusedCandidates = withBestRelevance(reciprocalRankFusion(candidateLists) ?? [], candidateLists);
+  const candidateWindow = input.options.candidateDepth === undefined
+    ? fusedCandidates
+    : fusedCandidates.slice(0, input.options.candidateDepth);
   const floor = applyRelevanceFloor(
-    withBestRelevance(reciprocalRankFusion(candidateLists) ?? [], candidateLists),
+    candidateWindow,
     resolveMinScore(input.options.minScore),
   );
-  const fused = floor.kept;
+  // Explicit controls use fusion rank as the baseline score. Adapter scores are
+  // from different spaces and cannot define a common relevance ordering.
+  const fused = input.options.candidateDepth !== undefined || input.options.resultOrder !== undefined
+    ? floor.kept.map((chunk, index) => ({ ...chunk, score: 1 / (1 + index) }))
+    : floor.kept;
+  input.session.recordDiagnostic("candidateSelection", {
+    candidateDepth: input.options.candidateDepth ?? null,
+    resultOrder: input.options.resultOrder ?? "legacy",
+    adapterCounts: candidateLists.map((list) => list.length),
+    fusedCount: fusedCandidates.length,
+    candidateWindowCount: candidateWindow.length,
+    afterFloorCount: fused.length,
+    rankingDepth: rankingDepth(input.options, input.limit),
+  });
   const shouldPostProcess =
     fused.length > 0 &&
     (input.options.useRerank ||
       input.options.useMmr ||
-      input.options.useContextualCompression);
+      input.options.useContextualCompression ||
+      input.options.resultOrder === "prompt");
   const chunks = shouldPostProcess
     ? await applySearchPostRetrievalProcessing({
         query: input.query,
@@ -258,6 +293,8 @@ export async function executeSearchSessionRetrieval(
         limit: input.limit,
         options: input.options,
         openRouterApiKey: input.openRouterApiKey,
+        rerankApiKey: input.rerankApiKey,
+        rerankScope: input.rerankScope,
         privacyMode: input.privacyMode,
         session: input.session,
       })

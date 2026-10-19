@@ -10,6 +10,8 @@ import { acceptOrganizationInvite, createOrganization, getOrganization, getOrgan
   updateOrganizationMemberRole, OrganizationError } from "../services/organizations.js";
 import { acceptApiKeys } from "../lib/route-auth.js";
 import { deleteOrganization, OffboardingError } from "../services/tenant-offboarding.js";
+import { apiStatusError } from "../lib/api-error.js";
+import { validationHook } from "../lib/validation.js";
 
 const updateMemberSchema = z.object({ role: z.enum(["owner", "admin", "member", "billing"]) }).strict();
 const deleteOrganizationSchema = z.object({ confirmation: z.string().min(1).max(500) }).strict();
@@ -22,28 +24,28 @@ function scopeAccess(access: OrganizationAccess, actor: ReturnType<typeof getReq
 
 export const organizationsRoutes = new Hono()
   .onError((error, c) => {
-    if (error instanceof OrganizationError) return c.json({ error: error.message, code: error.code }, error.status);
-    if (error instanceof OffboardingError) return c.json({ error: error.message, code: error.code, ...error.details }, error.status);
+    if (error instanceof OrganizationError) return apiStatusError(c, error.status, error.message, { code: error.code });
+    if (error instanceof OffboardingError) return apiStatusError(c, error.status, error.message, { code: error.code, details: error.details });
     throw error;
   })
   // Session only: the invitee accepts as themselves (declared session-only below).
   .post("/invites/:token/accept", async c => {
     const actor = getRequestActor(c);
-    if (actor.type !== "session") return c.json({ error: "Accept invites while signed in", code: "session_required" }, 403);
+    if (actor.type !== "session") return apiStatusError(c, 403, "Accept invites while signed in", { code: "session_required" });
     return c.json(await acceptOrganizationInvite(c.req.param("token"), actor.userId));
   })
   .use("*", async (c, next) => {
     const actor = getRequestActor(c);
     if (actor.type === "apiKey") {
       const key = actor.apiKey;
-      if (key.keyType === "client") return c.json({ error: "Organization management requires a server key", code: "organization_forbidden" }, 403);
+      if (key.keyType === "client") return apiStatusError(c, 403, "Organization management requires a server key", { code: "organization_forbidden" });
       const path = c.req.path.replace(/\/$/, "");
       const orgId = path.match(/\/organizations(?:\/([^/]+))?$/)?.[1]
         ?? path.match(/\/organizations\/([^/]+)\//)?.[1];
-      if (c.req.method === "POST" && !orgId) return c.json({ error: "Create organizations using session authentication", code: "session_required" }, 403);
-      if (orgId && orgId !== key.orgId) return c.json({ error: "Organization not found", code: "organization_not_found" }, 404);
+      if (c.req.method === "POST" && !orgId) return apiStatusError(c, 403, "Create organizations using session authentication", { code: "session_required" });
+      if (orgId && orgId !== key.orgId) return apiStatusError(c, 404, "Organization not found", { code: "organization_not_found" });
       const scopes = c.req.method === "GET" ? ["organizations:read", "organizations:manage"] : ["organizations:manage"];
-      if (!scopes.some(scope => key.scopes.includes(scope))) return c.json({ error: "Organization API key scope required", code: "organization_forbidden" }, 403);
+      if (!scopes.some(scope => key.scopes.includes(scope))) return apiStatusError(c, 403, "Organization API key scope required", { code: "organization_forbidden" });
     }
     await next();
   })
@@ -70,19 +72,19 @@ export const organizationsRoutes = new Hono()
     return c.json(scopeAccess(await getOrganizationAccess(c.req.param("orgId"), actor.userId), actor));
   })
   // Permanent: owner only, from a signed-in session, confirmed by the org name (docs/data-deletion.md).
-  .delete("/:orgId", zValidator("json", deleteOrganizationSchema), async c => {
+  .delete("/:orgId", zValidator("json", deleteOrganizationSchema, validationHook), async c => {
     const actor = getRequestActor(c);
     if (actor.type === "apiKey") {
-      return c.json({ error: "Deleting an organization requires a signed-in owner", code: "session_required" }, 403);
+      return apiStatusError(c, 403, "Deleting an organization requires a signed-in owner", { code: "session_required" });
     }
     const result = await deleteOrganization({ orgId: c.req.param("orgId"), userId: actor.userId, confirmation: c.req.valid("json").confirmation });
     return c.json({ ok: true, ...result });
   })
-  .patch("/:orgId", zValidator("json", updateOrganizationSchema), async c =>
+  .patch("/:orgId", zValidator("json", updateOrganizationSchema, validationHook), async c =>
     c.json(await updateOrganization(c.req.param("orgId"), getRequestActor(c).userId, c.req.valid("json"))))
   .get("/:orgId/members", async c => c.json({ memberships: await listOrganizationMembers(c.req.param("orgId"), getRequestActor(c).userId) }))
   .get("/:orgId/api-keys", async c => c.json({ keys: await listOrganizationApiKeys(c.req.param("orgId"), getRequestActor(c).userId) }))
-  .post("/", zValidator("json", createOrganizationSchema), async c =>
+  .post("/", zValidator("json", createOrganizationSchema, validationHook), async c =>
     c.json(await createOrganization({ ...c.req.valid("json"), userId: getRequestActor(c).userId }), 201))
   .delete("/:orgId/api-keys", async c => {
     const keys = await revokeOrganizationApiKeys(c.req.param("orgId"), getRequestActor(c).userId);
@@ -90,14 +92,14 @@ export const organizationsRoutes = new Hono()
   })
   // Membership starts with an email invite the invitee accepts (G-02); there is no add-by-user-ID.
   .get("/:orgId/invites", async c => c.json({ invites: await listOrganizationInvites(c.req.param("orgId"), getRequestActor(c).userId) }))
-  .post("/:orgId/invites", zValidator("json", createOrganizationInviteSchema), async c => {
+  .post("/:orgId/invites", zValidator("json", createOrganizationInviteSchema, validationHook), async c => {
     const { invite, token } = await inviteOrganizationMember(c.req.param("orgId"), getRequestActor(c).userId, c.req.valid("json"));
     // The token is returned once so an admin can share the link if email is not configured.
     return c.json({ invite, inviteUrl: inviteAcceptUrl(token, "organization") }, 201);
   })
   .delete("/:orgId/invites/:inviteId", async c =>
     c.json(await revokeOrganizationInvite(c.req.param("orgId"), getRequestActor(c).userId, c.req.param("inviteId"))))
-  .patch("/:orgId/members/:memberUserId", zValidator("json", updateMemberSchema), async c =>
+  .patch("/:orgId/members/:memberUserId", zValidator("json", updateMemberSchema, validationHook), async c =>
     c.json(await updateOrganizationMemberRole({ orgId: c.req.param("orgId"), userId: getRequestActor(c).userId,
       memberUserId: c.req.param("memberUserId"), role: c.req.valid("json").role })))
   .delete("/:orgId/members/:memberUserId", async c => {

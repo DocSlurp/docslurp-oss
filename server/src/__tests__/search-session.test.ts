@@ -296,11 +296,11 @@ describe("Search Session execution helpers", () => {
     },
   };
 
-  it.each([false, true])("preserves strongest passages when a consumer takes a result prefix (MMR=%s)", async (useMmr) => {
+  it.each([false, true])("preserves the reranker winner through context positioning (MMR=%s)", async (useMmr) => {
     const chunks = searchResultsToChunks([
       { ...result, text: "Routine maintenance checklist for the plant.", score: 1 },
       {
-        ...result, text: "Cobalt pump maintenance procedures.", score: 0.8,
+        ...result, text: "General equipment safety procedures.", score: 0.8,
         citation: { ...result.citation, chunkIndex: 3 },
       },
       {
@@ -317,10 +317,44 @@ describe("Search Session execution helpers", () => {
       session: createSearchSessionJournal({ rootSessionId: "ranking-test" }),
     });
 
-    expect(processed.slice(0, 2).map((chunk) => chunk.id)).toEqual([chunks[2]?.id, chunks[1]?.id]);
+    expect(processed[0]?.id).toBe(chunks[2]?.id);
     expect(new Set(processed.map((chunk) => chunk.id))).toEqual(
       new Set(chunks.map((chunk) => chunk.id)),
     );
+  });
+
+  it("keeps an explicit candidate window fixed when rerank is toggled", async () => {
+    const chunks = searchResultsToChunks(Array.from({ length: 80 }, (_, i) => ({
+      ...result, text: i === 49 ? "cobalt calibration" : "routine maintenance",
+      score: 1 / (i + 1), citation: { ...result.citation, chunkIndex: i },
+    })));
+    for (const useRerank of [false, true]) {
+      const processed = await applySearchPostRetrievalProcessing({
+        query: "cobalt calibration", chunks, limit: 3,
+        options: { useRerank, candidateDepth: 50, resultOrder: "relevance" },
+        privacyMode: "standard", session: createSearchSessionJournal({}),
+      });
+      expect(processed).toHaveLength(3);
+      expect(processed.every(c => chunks.slice(0, 50).some(x => x.id === c.id))).toBe(true);
+      if (useRerank) expect(processed[0]?.id).toBe(chunks[49].id);
+      else expect(processed.map(c => c.id)).toEqual(chunks.slice(0, 3).map(c => c.id));
+    }
+  });
+
+  it("packs only the selected set and preserves relevance order when requested", async () => {
+    const chunks = searchResultsToChunks(Array.from({ length: 12 }, (_, i) => ({
+      ...result, text: `maintenance ${i}`, score: 1 / (i + 1), citation: { ...result.citation, chunkIndex: i },
+    })));
+    const run = (resultOrder?: "relevance" | "prompt") => applySearchPostRetrievalProcessing({
+      query: "maintenance", chunks, limit: 10, options: { candidateDepth: 12, resultOrder },
+      privacyMode: "standard", session: createSearchSessionJournal({}),
+    });
+    const relevance = await run("relevance"), prompt = await run("prompt"), legacy = await run();
+    expect(relevance.map(c => c.id)).toEqual(chunks.slice(0, 10).map(c => c.id));
+    expect(prompt[9].id).toBe(relevance[1].id);
+    expect(new Set(prompt.map(c => c.id))).toEqual(new Set(relevance.map(c => c.id)));
+    expect(legacy.map(c => c.id)).toEqual(prompt.map(c => c.id));
+    expect(prompt.map(c => [c.documentId, c.pageNumber, c.chunkIndex])).toEqual(legacy.map(c => [c.documentId, c.pageNumber, c.chunkIndex]));
   });
 
   it("converts Search Session results back into retrieval chunks", () => {

@@ -38,6 +38,7 @@ describe("widget CORS", () => {
     expect(actual.headers.get("Access-Control-Allow-Credentials")).toBeNull();
     const missing = await app().request("/v1/chat", { method: "POST", headers: { Origin: origin, Cookie: "session=fixture" } });
     expect(missing.status).toBe(403);
+    expect(await missing.json()).toEqual({ error: { code: "forbidden", message: "Browser integrations require an API key" } });
     const unrelated = await app().request("/v1/chat/admin", { method: "OPTIONS", headers: { Origin: origin, "Access-Control-Request-Method": "POST" } });
     expect(unrelated.headers.get("Access-Control-Allow-Origin")).toBeNull();
   });
@@ -58,6 +59,7 @@ describe("widget CORS", () => {
       method: "POST", headers: { Origin: "https://customer.example", Cookie: "session=secret" },
     });
     expect(missing.status).toBe(403);
+    expect(await missing.json()).toEqual({ error: "Browser integrations require an API key", code: "forbidden" });
   });
   it("permits key-authenticated widget preflight without cross-site cookies", async () => {
     const response = await app().request("/v1/search", { method: "OPTIONS", headers: { Origin: "https://customer.example", "Access-Control-Request-Method": "POST", "Access-Control-Request-Headers": "authorization,content-type" } });

@@ -3,7 +3,8 @@ import { workspaceGraphPaths, workspaceGraphSchemas } from "./workspace-graph-op
 import { simpleServicePaths, simpleServiceSchemas } from "./simple-service-openapi.js";
 import { webhookEventCatalog } from "./webhook-events.js";
 import { searchCompatibilityPaths, searchCompatibilitySchemas } from "./search-compat-openapi.js";
-import { apiKeySurfacePaths, keyOnlySecurity, keyOrSessionSecurity } from "./api-key-surface-openapi.js";
+import { apiKeySurfacePaths, keyOrSessionSecurity } from "./api-key-surface-openapi.js";
+import { apiErrorOpenApiResponse, apiErrorSchema } from "./api-error-openapi.js";
 
 export function buildOpenApiDocument(baseUrl: string) {
   return {
@@ -23,7 +24,7 @@ export function buildOpenApiDocument(baseUrl: string) {
         bearerAuth: { type: "http", scheme: "bearer", description: "DocSlurp API key. Server keys start with dslp_priv_ and must stay secret; browser/embed client keys start with dslp_pub_ and are search-only and domain-restricted. Keys issued before typed prefixes (dslp_...) remain valid." },
         sessionAuth: { type: "apiKey", in: "cookie", name: "better-auth.session_token", description: "Authenticated dashboard session" },
       },
-      schemas: { ...simpleServiceSchemas, ...stateManagementSchemas, ...workspaceGraphSchemas, ...searchCompatibilitySchemas },
+      schemas: { ApiError: apiErrorSchema, ...simpleServiceSchemas, ...stateManagementSchemas, ...workspaceGraphSchemas, ...searchCompatibilitySchemas },
     },
     tags: [
       { name: "health" },
@@ -34,7 +35,6 @@ export function buildOpenApiDocument(baseUrl: string) {
       { name: "ingest" },
       { name: "search" },
       { name: "chat" },
-      { name: "ai" },
       { name: "mcp" },
       { name: "webhooks" },
       { name: "artifacts" }
@@ -125,45 +125,6 @@ export function buildOpenApiDocument(baseUrl: string) {
           },
           responses: {
             "201": { description: "Workspace created" }
-          }
-        }
-      },
-      "/v1/ai/capabilities": {
-        get: {
-          tags: ["ai"],
-          summary: "Get the machine-readable AI and MCP capability manifest",
-          security: keyOnlySecurity,
-          responses: {
-            "200": { description: "Capability manifest" },
-            "401": { description: "Missing or invalid API key" }
-          }
-        }
-      },
-      "/v1/ai/operations/{id}": {
-        get: {
-          tags: ["ai"],
-          summary: "Get a durable automation operation snapshot",
-          security: keyOnlySecurity,
-          parameters: [
-            { in: "path", name: "id", required: true, schema: { type: "string" } }
-          ],
-          responses: {
-            "200": { description: "Operation snapshot and event history" },
-            "404": { description: "Operation not found" }
-          }
-        }
-      },
-      "/v1/ai/operations/{id}/stream": {
-        get: {
-          tags: ["ai"],
-          summary: "Stream operation events over SSE",
-          security: keyOnlySecurity,
-          parameters: [
-            { in: "path", name: "id", required: true, schema: { type: "string" } }
-          ],
-          responses: {
-            "200": { description: "Server-sent event stream" },
-            "404": { description: "Operation not found" }
           }
         }
       },
@@ -260,7 +221,7 @@ export function buildOpenApiDocument(baseUrl: string) {
           ],
           responses: {
             "200": { description: "Test delivery attempted" },
-            "404": { description: "Webhook not found" }
+            "404": apiErrorOpenApiResponse("Webhook not found")
           }
         }
       },
@@ -274,7 +235,7 @@ export function buildOpenApiDocument(baseUrl: string) {
           ],
           responses: {
             "200": { description: "Signed artifact URL" },
-            "400": { description: "Missing artifact URI" }
+            "400": apiErrorOpenApiResponse("Missing artifact URI")
           }
         },
         post: {

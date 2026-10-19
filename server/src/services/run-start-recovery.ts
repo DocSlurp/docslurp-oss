@@ -1,3 +1,4 @@
+import { withBackgroundSpan } from "@docslurp/shared/observability";
 import {
   defaultPipelineFeatures,
   type PipelineFeatures,
@@ -208,7 +209,7 @@ let unsubscribe: (() => void) | null = null;
 export function startRunStartRecovery(): void {
   if (unsubscribe) return;
   const kick = (options?: { ignoreBackoff?: boolean }) => {
-    runStartRecovery.kick(options).catch(logSweepError("run-start-recovery"));
+    withBackgroundSpan("api.run-start-recovery", () => runStartRecovery.kick(options)).catch(logSweepError("run-start-recovery"));
   };
   unsubscribe = onTemporalClientConnected(() => kick({ ignoreBackoff: true }));
 
@@ -229,7 +230,7 @@ export function startRunStartRecovery(): void {
     if (!isTemporalClientConnected()) void warmTemporalClient();
     kick();
     if (!isMaintenanceSweepEnabled() && tick % staleEveryTicks === 0) {
-      sweepStaleQueuedRuns().catch(logSweepError("stale-queued-run-sweep"));
+      withBackgroundSpan("api.stale-queued-run-sweep", () => sweepStaleQueuedRuns()).catch(logSweepError("stale-queued-run-sweep"));
     }
   }, config.intervalMs);
   timer.unref?.();

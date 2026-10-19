@@ -1,16 +1,20 @@
 import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
+import { Hono } from "hono";
+import { bodyLimit } from "hono/body-limit";
+import { rejectNulBytes } from "./reject-nul.js";
 import { describe, expect, it, vi } from "vitest";
 
 import { handleMcpHttp, type McpDispatch } from "./mcp-http.js";
 
 const manifest = { capabilities: [{
-  id: "workspace.suggest", title: "Suggestions", description: "No AI suggestions", category: "tool",
+  id: "suggestQueries", title: "Suggestions", description: "No AI suggestions", category: "tool",
   inputSchema: { type: "object", properties: { workspaceId: { type: "string" } }, required: ["workspaceId"] },
+  annotations: { readOnly: true, destructive: false, idempotent: true, openWorld: false },
 }] };
 const dispatch: McpDispatch = async (path, init) => {
   expect(new Headers(init?.headers).has("Authorization")).toBe(false);
   expect(new Headers(init?.headers).has("Cookie")).toBe(false);
-  if (path === "/tools/workspace.suggest") return Response.json({ suggestions: ["support hours"] });
+  if (path === "/tools/suggestQueries") return Response.json({ suggestions: ["support hours"] });
   if (path === "/prompts/workspace-grounded-answer") return Response.json({ prompt: "Use citations." });
   return Response.json(manifest);
 };
@@ -22,8 +26,32 @@ function transport() {
 }
 
 describe("hosted MCP transport", () => {
+  it.each([true, false])("initializes and discovers tools through production body middleware (content-length: %s)", async (withLength) => {
+    const app = new Hono();
+    app.use("*", rejectNulBytes);
+    app.use("/v1/mcp", bodyLimit({ maxSize: 1024 * 1024 }));
+    app.all("/v1/mcp", (c) => handleMcpHttp(c.req.raw, manifest, dispatch));
+    const http = new StreamableHTTPClientTransport(new URL("http://localhost/v1/mcp"), {
+      fetch: async (url, init) => {
+        const headers = new Headers(init?.headers);
+        if (withLength && typeof init?.body === "string") {
+          headers.set("content-length", String(Buffer.byteLength(init.body)));
+        }
+        return app.fetch(new Request(url, { ...init, headers }));
+      },
+    });
+    const client = new Client({ name: "middleware-regression", version: "1" });
+    try {
+      await client.connect(http);
+      expect((await client.listTools()).tools.map((tool) => tool.name)).toEqual(["suggestQueries"]);
+    } finally {
+      await client.close();
+    }
+  });
+
   it("does not advertise stateful workspace chat as read-only or idempotent", async () => {
-    const chatManifest = { capabilities: [...manifest.capabilities, { ...manifest.capabilities[0]!, id: "workspace.chat" }] };
+    const chatManifest = { capabilities: [...manifest.capabilities, { ...manifest.capabilities[0]!, id: "chat",
+      annotations: { readOnly: false, destructive: false, idempotent: false, openWorld: false } }] };
     const response = await handleMcpHttp(new Request("http://localhost/v1/mcp", {
       method: "POST", headers: { "Content-Type": "application/json", Accept: "application/json, text/event-stream", "MCP-Protocol-Version": "2025-11-25" },
       body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} }),
@@ -31,20 +59,20 @@ describe("hosted MCP transport", () => {
     const wire = await response.text();
     const data = wire.split("\n").find(line => line.startsWith("data: "))?.slice(6) ?? wire;
     const tools = JSON.parse(data).result.tools;
-    expect(tools.find((tool: any) => tool.name === "workspace.chat").annotations).toMatchObject({ readOnlyHint: false, idempotentHint: false });
-    expect(tools.find((tool: any) => tool.name === "workspace.suggest").annotations).toMatchObject({ readOnlyHint: true });
+    expect(tools.find((tool: any) => tool.name === "chat").annotations).toMatchObject({ readOnlyHint: false, idempotentHint: false });
+    expect(tools.find((tool: any) => tool.name === "suggestQueries").annotations).toMatchObject({ readOnlyHint: true });
   });
 
   it("interoperates with the official modern client over HTTP without sessions", async () => {
     const client = new Client({ name: "docslurp-test", version: "1" });
     const http = transport();
     await client.connect(http);
-    expect((await client.listTools()).tools.map((tool) => tool.name)).toEqual(["workspace.suggest"]);
-    const result = await client.callTool({ name: "workspace.suggest", arguments: { workspaceId: "example" } });
+    expect((await client.listTools()).tools.map((tool) => tool.name)).toEqual(["suggestQueries"]);
+    const result = await client.callTool({ name: "suggestQueries", arguments: { workspaceId: "example" } });
     expect(result).toMatchObject({ structuredContent: { suggestions: ["support hours"] }, isError: false });
-    expect((await client.listResources()).resources[0]?.uri).toBe("docslurp://ai/capabilities");
-    expect((await client.readResource({ uri: "docslurp://ai/capabilities" })).contents).toHaveLength(1);
-    expect((await client.listResourceTemplates()).resourceTemplates).toHaveLength(1);
+    expect((await client.listResources()).resources[0]?.uri).toBe("docslurp://capabilities");
+    expect((await client.readResource({ uri: "docslurp://capabilities" })).contents).toHaveLength(1);
+    expect((await client.listResourceTemplates()).resourceTemplates).toEqual([]);
     expect((await client.getPrompt({ name: "workspace-grounded-answer" })).messages[0]?.content).toEqual({ type: "text", text: "Use citations." });
     await expect(client.callTool({ name: "unknown", arguments: {} })).rejects.toThrow("Unknown tool");
     await expect(client.readResource({ uri: "https://private.example/secret" })).rejects.toThrow("Unknown resource");
@@ -60,7 +88,7 @@ describe("hosted MCP transport", () => {
     expect(initialized.headers.has("mcp-session-id")).toBe(false);
     expect(await initialized.text()).toContain('"protocolVersion":"2025-11-25"');
     const listed = await request({ jsonrpc: "2.0", id: 2, method: "tools/list", params: {} });
-    expect(await listed.text()).toContain("workspace.suggest");
+    expect(await listed.text()).toContain("suggestQueries");
   });
 
   it("rejects oversized, malformed, non-JSON and session methods before dispatch", async () => {
@@ -84,7 +112,7 @@ describe("hosted MCP transport", () => {
     };
     const pending = handleMcpHttp(new Request("http://localhost/v1/mcp", {
       method: "POST", headers: { "Content-Type": "application/json", Accept: "application/json, text/event-stream" },
-      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "workspace.suggest", arguments: {} } }), signal: abort.signal,
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "suggestQueries", arguments: {} } }), signal: abort.signal,
     }), manifest, pendingDispatch);
     await vi.waitFor(() => expect(downstream).toBeDefined());
     abort.abort();

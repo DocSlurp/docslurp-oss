@@ -367,6 +367,9 @@ async function planIterativeMultiHop(args: {
   };
 }
 
+/** Hosted providers that report actual usage and fail loudly instead of degrading to text-only search. */
+const METERED_EMBEDDING_PROVIDERS = new Set(["openrouter", "perplexity", "deepinfra"]);
+
 async function embedQuery(
   query: string,
   embedding: EmbeddingConfig,
@@ -381,11 +384,14 @@ async function embedQuery(
   const apiKey =
     runtime === "remote" && provider === "openai"
       ? process.env.OPENAI_API_KEY
-      : provider === "deepinfra" ? process.env.DEEPINFRA_API_KEY : undefined;
+      : provider === "openrouter" ? process.env.OPENROUTER_API_KEY ?? process.env.OPENROUTER_KEY
+        : provider === "perplexity" ? process.env.PERPLEXITY_API_KEY ?? process.env.PERPLEXITYAI_API_KEY
+          : provider === "deepinfra" ? process.env.DEEPINFRA_API_KEY : undefined;
   if (runtime === "remote" && provider === "openai" && !apiKey) {
     return null;
   }
 
+  let usageRecorded = false;
   try {
     const result = await embedConfiguredText({
       value: query,
@@ -400,18 +406,13 @@ async function embedQuery(
       privacyMode,
       modelUri: route.modelUri,
       auditScope: { workspaceId: auditWorkspaceId ?? null },
-      ...(provider === "deepinfra" ? {
-        onUsage: (paid: { inputTokens: number }) => {
-          usage.record({
-            provider, model, metric: "embed-query", inputTokens: paid.inputTokens,
-            metadata: { usageSource: "provider", costSource: "catalog" },
-            logOutputTokens: false,
-          });
-        },
-      } : {}),
+      ...(METERED_EMBEDDING_PROVIDERS.has(provider) ? { onUsage: (actual: { inputTokens: number }) => {
+        usage.record({ provider, model, metric: "embed-query", inputTokens: actual.inputTokens, logOutputTokens: false, metadata: { usageSource: "provider" } });
+        usageRecorded = true;
+      } } : {}),
     });
 
-    if (provider !== "deepinfra") usage.record({
+    if (!usageRecorded) usage.record({
       provider,
       model,
       metric: "embed-query",
@@ -424,7 +425,7 @@ async function embedQuery(
     });
     return result.embedding;
   } catch (error) {
-    if (provider === "deepinfra") throw error;
+    if (METERED_EMBEDDING_PROVIDERS.has(provider)) throw error;
     return null;
   }
 }

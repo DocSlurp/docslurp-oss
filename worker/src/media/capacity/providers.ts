@@ -1,13 +1,29 @@
+import { instrumentFetch, startDependencySpan } from "@docslurp/shared/observability";
 import { jsonResponse } from "../providers.js";
 import type { CapacityProvider, CapacityQuote, CapacityResource } from "./types.js";
-async function api(url: string, key: string, method = "GET", body?: unknown): Promise<any> {
-  const response = await fetch(url, { method, redirect: "error", signal: AbortSignal.timeout(20000),
-    headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
-    ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
-  if (!response.ok) { await response.body?.cancel(); throw new Error(`Capacity API HTTP ${response.status}`); }
-  if (response.status === 204) return {};
-  return jsonResponse(response);
+async function api(provider: string, operation: string, url: string, key: string, method = "GET", body?: unknown): Promise<any> {
+  const span = startDependencySpan(`${provider}.capacity.${operation}`, {
+    "docslurp.dependency.type": "compute", "docslurp.dependency.provider": provider,
+    "docslurp.dependency.operation": operation, "docslurp.dependency.phase": "adapter",
+  });
+  try {
+    return await span.run(async () => {
+      const response = await instrumentFetch(provider, `capacity.${operation}`)(url, { method, redirect: "error", signal: AbortSignal.timeout(20000),
+        headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
+        ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
+      if (!response.ok) { await response.body?.cancel(); throw new Error(`Capacity API HTTP ${response.status}`); }
+      if (response.status === 204) return {};
+      const result = await jsonResponse(response);
+      const resourceId = result && typeof result === "object"
+        ? ("container_id" in result ? result.container_id : "new_contract" in result ? result.new_contract : undefined)
+        : undefined;
+      if (typeof resourceId === "string" || typeof resourceId === "number") span.set({ "cloud.resource_id": String(resourceId) });
+      return result;
+    });
+  } catch (error) { span.end(error); throw error; }
+  finally { span.end(); }
 }
+
 export interface HostTemplate {
   image: string; bootstrap: string; maxHourlyUsd: number; fixedReserveUsd: number;
   gpuConfig?: string; offerId?: number; diskGb?: number;
@@ -22,30 +38,30 @@ export class DeepInfraCapacityProvider implements CapacityProvider {
   readonly id = "deepinfra";
   constructor(private readonly key: string, private readonly template: HostTemplate) { validate(template); if (!key || !template.gpuConfig) throw new Error("DeepInfra capacity configuration missing"); }
   async quote(): Promise<CapacityQuote> {
-    const data = await api("https://api.deepinfra.com/v1/containers/gpu_availability", this.key);
+    const data = await api("deepinfra", "quote", "https://api.deepinfra.com/v1/containers/gpu_availability", this.key);
     const match = data.gpus?.find((gpu: any) => gpu.gpu_config === this.template.gpuConfig && gpu.available === true);
     if (!match || !Number.isFinite(match.usd_per_hour) || match.usd_per_hour <= 0 || match.usd_per_hour > this.template.maxHourlyUsd) throw new Error("DeepInfra capacity unavailable or over ceiling");
     return { hourlyUsd: match.usd_per_hour, fixedReserveUsd: this.template.fixedReserveUsd, observedAt: Date.now() };
   }
   async inventory(): Promise<CapacityResource[]> {
-    const data = await api("https://api.deepinfra.com/v1/containers", this.key);
+    const data = await api("deepinfra", "inventory", "https://api.deepinfra.com/v1/containers", this.key);
     if (!Array.isArray(data)) throw new Error("Invalid DeepInfra capacity inventory");
     return data.map(row => ({ id: String(row.id), name: row.name, state: row.state, createdAt: row.start_ts * 1000 }));
   }
   async create(name: string): Promise<string> {
-    const data = await api("https://api.deepinfra.com/v1/containers", this.key, "POST", { name,
+    const data = await api("deepinfra", "create", "https://api.deepinfra.com/v1/containers", this.key, "POST", { name,
       gpu_config: this.template.gpuConfig, container_image: this.template.image,
       cloud_init_user_data: this.template.bootstrap.replaceAll("{{name}}", name) });
     if (typeof data.container_id !== "string" || !data.container_id) throw new Error("Ambiguous DeepInfra create response");
     return data.container_id;
   }
-  async destroy(id: string): Promise<void> { await api(`https://api.deepinfra.com/v1/containers/${encodeURIComponent(id)}`, this.key, "DELETE"); }
+  async destroy(id: string): Promise<void> { await api("deepinfra", "destroy", `https://api.deepinfra.com/v1/containers/${encodeURIComponent(id)}`, this.key, "DELETE"); }
 }
 export class VastCapacityProvider implements CapacityProvider {
   readonly id = "vast";
   constructor(private readonly key: string, private readonly template: HostTemplate) { validate(template); if (!key || !Number.isSafeInteger(template.offerId) || !template.diskGb) throw new Error("Vast offer configuration missing"); }
   async quote(): Promise<CapacityQuote> {
-    const data = await api("https://console.vast.ai/api/v0/bundles/", this.key, "POST", { id: { eq: this.template.offerId }, type: "on-demand", rented: { eq: false }, limit: 1 });
+    const data = await api("vast", "quote", "https://console.vast.ai/api/v0/bundles/", this.key, "POST", { id: { eq: this.template.offerId }, type: "on-demand", rented: { eq: false }, limit: 1 });
     const offer = data.offers?.find((row: any) => row.id === this.template.offerId);
     const hourlyUsd = Number(offer?.dph_total) + Number(offer?.storage_cost) * this.template.diskGb! / 720;
     if (!offer || !Number.isFinite(hourlyUsd) || hourlyUsd <= 0 || hourlyUsd > this.template.maxHourlyUsd) throw new Error("Vast offer unavailable or over ceiling");
@@ -53,19 +69,19 @@ export class VastCapacityProvider implements CapacityProvider {
     return { hourlyUsd, fixedReserveUsd: this.template.fixedReserveUsd, observedAt: Date.now() };
   }
   async inventory(): Promise<CapacityResource[]> {
-    const data = await api("https://console.vast.ai/api/v0/instances/", this.key);
+    const data = await api("vast", "inventory", "https://console.vast.ai/api/v0/instances/", this.key);
     if (!Array.isArray(data.instances)) throw new Error("Invalid Vast inventory");
     return data.instances.map((row: any) => ({ id: String(row.id), name: row.label, state: row.actual_status, createdAt: row.start_date * 1000 }));
   }
   async create(name: string): Promise<string> {
-    const data = await api(`https://console.vast.ai/api/v0/asks/${this.template.offerId}/`, this.key, "PUT", {
+    const data = await api("vast", "create", `https://console.vast.ai/api/v0/asks/${this.template.offerId}/`, this.key, "PUT", {
       client_id: "me", image: this.template.image, disk: this.template.diskGb, label: name,
       runtype: "args", onstart: this.template.bootstrap.replaceAll("{{name}}", name), env: {} });
     if (data.success !== true || !Number.isSafeInteger(data.new_contract)) throw new Error("Ambiguous Vast create response");
     return String(data.new_contract);
   }
   async destroy(id: string): Promise<void> {
-    const data = await api(`https://console.vast.ai/api/v0/instances/${encodeURIComponent(id)}/`, this.key, "DELETE");
+    const data = await api("vast", "destroy", `https://console.vast.ai/api/v0/instances/${encodeURIComponent(id)}/`, this.key, "DELETE");
     if (data.success !== true) throw new Error("Vast deletion unacknowledged");
   }
 }

@@ -152,7 +152,7 @@ export type UploadOptions = RequestOptions & {
    * How files reach storage. "auto" (default) sends uploads larger than
    * DIRECT_UPLOAD_THRESHOLD_BYTES through a direct upload session (presigned
    * PUTs straight to object storage); smaller ones use one multipart request
-   * to /v1/ingest/bulk, which the server caps at MAX_MULTIPART_UPLOAD_BYTES
+   * to /v1/uploads/bulk, which the server caps at MAX_MULTIPART_UPLOAD_BYTES
    * (25 MB by default). Streams always use multipart. Direct sessions ignore
    * idempotencyKey.
    */
@@ -196,7 +196,8 @@ export type UploadResponse = {
   workspace: WorkspaceRecord;
 };
 
-export type IngestUrlInput = {
+export type UploadUrlsInput = {
+  idempotencyKey?: string;
   newWorkspace?: boolean;
   orgId?: string;
   templateKey?: WorkspaceTemplateKey;
@@ -206,7 +207,14 @@ export type IngestUrlInput = {
   workspaceName?: string;
 };
 
+/** @deprecated Use UploadUrlsInput. */
+export type IngestUrlInput = UploadUrlsInput;
+
 export type SearchInput = {
+  /** Independent per-adapter and fused candidate cap, 1..200. Omitted preserves server defaults. */
+  candidateDepth?: number;
+  /** Keep ranked search order, or pack the same selected passages for a prompt. */
+  resultOrder?: "relevance" | "prompt";
   documentId?: string;
   filenameContains?: string;
   limit?: number;
@@ -247,6 +255,8 @@ export type SearchBatchOptions = {
   concurrency?: number;
 };
 
+export type SearchBatchInput = SearchBatchOptions & { queries: SearchInput[] };
+
 export type SearchBatchResponse = {
   /** One outcome per input query, in input order. */
   results: Array<
@@ -268,6 +278,8 @@ export type ChatInput = {
   q: string;
   sessionId?: string;
   workspaceId?: string;
+  /** Override the workspace's configured chat model for this request. */
+  model?: string;
 };
 
 export type ChatResponse = {
@@ -280,6 +292,28 @@ export type ChatResponse = {
   availability: SearchAvailability | null;
   usage: { inputTokens: number; outputTokens: number; totalTokens: number; costCents?: number; costSource?: string };
   runtime: { startedAt: string; completedAt: string; totalMs: number };
+};
+
+/** SSE events from {@link DocSlurpClient.chatStream}: retrieval status, the answer, then the done envelope. */
+export type ChatStreamEvent =
+  | { event: "status"; data: { stage: string; message: string } }
+  | { event: "message"; data: ChatResponse }
+  | { event: "done"; data: { id: string; sessionId: string; searchSessionId: string | null } };
+
+export type ListDocumentsInput = {
+  workspaceId?: string;
+  runId?: string;
+  /** Comma-separated tags. */
+  tags?: string;
+};
+
+/** Result of {@link DocSlurpClient.deleteDocument}: the identities of the removed document. */
+export type DeletedDocument = JsonObject & {
+  documentId: string;
+  filename: string;
+  workspaceId?: string | null;
+  runId?: string | null;
+  sourceKey?: string;
 };
 
 export type RequestOptions = {
@@ -399,31 +433,59 @@ function deadline(timeoutMs: number, external?: AbortSignal) {
 export class DocSlurpApiError extends Error {
   readonly body: unknown;
   readonly status: number;
+  /** Machine-readable `error.code` from the native error envelope; branch on this, never on `message`. */
+  readonly code?: string;
+  /** Server correlation id (`error.requestId`) to quote in support requests. */
+  readonly requestId?: string;
 
   constructor(message: string, status: number, body: unknown) {
     super(message);
     this.name = "DocSlurpApiError";
     this.status = status;
     this.body = body;
+    const envelope = apiErrorEnvelope(body);
+    if (envelope?.code) this.code = envelope.code;
+    if (envelope?.requestId) this.requestId = envelope.requestId;
   }
+}
+
+/** Reads `{ error: { code, requestId } }`; legacy bodies, OpenAI errors without a string code and text yield nothing. */
+function apiErrorEnvelope(body: unknown): { code?: string; requestId?: string } | null {
+  if (!body || typeof body !== "object") return null;
+  const error = (body as { error?: unknown }).error;
+  if (!error || typeof error !== "object") return null;
+  const { code, requestId } = error as { code?: unknown; requestId?: unknown };
+  return {
+    ...(typeof code === "string" && code ? { code } : {}),
+    ...(typeof requestId === "string" && requestId ? { requestId } : {}),
+  };
 }
 
 /**
  * Uploads above this total size go through a direct upload session instead of
- * multipart /v1/ingest/bulk (server cap: MAX_MULTIPART_UPLOAD_BYTES, 25 MB).
+ * multipart /v1/uploads/bulk (server cap: MAX_MULTIPART_UPLOAD_BYTES, 25 MB).
  */
 export const DIRECT_UPLOAD_THRESHOLD_BYTES = 20 * 1024 * 1024;
 
-type DirectUploadDescriptor = {
+export type DirectUploadDescriptor = {
   id: string;
   filename: string;
   mimeType: string;
   sizeBytes: number;
   mode: "single" | "multipart";
   putUrl?: string;
+  method?: "PUT";
+  headers?: Record<string, string>;
+  expiresInSeconds?: number;
   partSize?: number;
   pendingParts?: Array<{ partNumber: number; sizeBytes: number; url: string }>;
 };
+
+export type UploadSessionInput = Omit<UploadInput, "files" | "idempotencyKey"> & {
+  files: Array<{ filename: string; mimeType: string; sizeBytes: number; canonicalId?: string; singlePart?: boolean }>;
+};
+export type UploadSession = { sessionId: string; status: string; files: DirectUploadDescriptor[] };
+export type CompleteUploadFileInput = { fileId: string; etag?: string; parts?: Array<{ partNumber: number; etag: string }> };
 
 function normalizeApiUrl(apiUrl: string): string {
   return apiUrl.replace(/\/+$/, "");
@@ -797,10 +859,34 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
     return { ...input, workspaceId: input.workspaceId?.trim() || workspaceId };
   }
 
+  function uploadUrls(input: UploadUrlsInput, options?: RequestOptions): Promise<UploadResponse> {
+    const { idempotencyKey, urls, workspaceName, orgId, templateKey } = input;
+    const body = { urls, workspaceName, orgId, templateKey, ...intakeTarget(input) };
+    return request("/v1/uploads/url", {
+      ...jsonRequest("POST", body),
+      headers: { "Content-Type": "application/json", ...(idempotencyKey ? { "Idempotency-Key": idempotencyKey } : {}) },
+    }, options, Boolean(idempotencyKey));
+  }
+
+  function search(input: SearchInput, options?: RequestOptions): SearchRequest;
+  function search(input: SearchBatchInput, options?: RequestOptions): Promise<SearchBatchResponse>;
+  function search(input: SearchInput | SearchBatchInput, options?: RequestOptions): SearchRequest | Promise<SearchBatchResponse> {
+    if ("queries" in input) {
+      if (input.queries.length < 1 || input.queries.length > 20) throw new RangeError("search accepts 1–20 queries.");
+      const concurrency = input.concurrency ?? 4;
+      if (!Number.isInteger(concurrency) || concurrency < 1 || concurrency > 4) throw new RangeError("Search concurrency must be an integer from 1 to 4.");
+      return request<SearchBatchResponse>("/v1/search", jsonRequest("POST", { queries: input.queries.map(inWorkspace), concurrency }), options);
+    }
+    const response = request<SearchResponse>("/v1/search", jsonRequest("POST", inWorkspace(input)), options);
+    return Object.assign(response, { async *[Symbol.asyncIterator]() { yield* (await response).results; } });
+  }
+
   function upload(input: Array<Blob | File | UploadFileInput>, options?: UploadOptions): Promise<UploadResponse>;
+  function upload(input: UploadUrlsInput, options?: UploadOptions): Promise<UploadResponse>;
   function upload(input: UploadInput, options?: UploadOptions): Promise<UploadResponse>;
   function upload(input: Blob | UploadFileInput | UploadByteStream, options?: UploadOptions): Promise<UploadResponse>;
-  async function upload(input: UploadInput | Blob | UploadFileInput | UploadByteStream | Array<Blob | File | UploadFileInput>, options: UploadOptions = {}): Promise<UploadResponse> {
+  async function upload(input: UploadUrlsInput | UploadInput | Blob | UploadFileInput | UploadByteStream | Array<Blob | File | UploadFileInput>, options: UploadOptions = {}): Promise<UploadResponse> {
+    if ("urls" in input) return uploadUrls({ ...input, ...options }, options);
     if (Array.isArray(input)) input = { files: input };
     const metadata = "files" in input ? { ...input, ...options } : options;
     const fields: Record<string, string> = {};
@@ -819,7 +905,7 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
         headers.set("Content-Type", `multipart/form-data; boundary=${stream.boundary}`);
         const init: RequestInit & { duplex: "half" } = { body: stream.body, headers, method: "POST", duplex: "half" };
         // A consumed source cannot be replayed, even with an idempotency key.
-        return await request<UploadResponse>("/v1/ingest/bulk", init, options, false, stream.dispose);
+        return await request<UploadResponse>("/v1/uploads/bulk", init, options, false, stream.dispose);
       } finally { stream.dispose(); }
     }
     const files = "files" in input ? input.files : [input];
@@ -835,7 +921,7 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
     for (const [index, blob] of blobs.entries()) form.append("files", blob, names[index]);
     if (!fields.canonicalId && canonicalIds.some(Boolean)) fields.canonicalIds = JSON.stringify(canonicalIds);
     for (const [name, value] of Object.entries(fields)) form.set(name, value);
-    return request<UploadResponse>("/v1/ingest/bulk", { body: form, headers, method: "POST" }, options, Boolean(metadata.idempotencyKey));
+    return request<UploadResponse>("/v1/uploads/bulk", { body: form, headers, method: "POST" }, options, Boolean(metadata.idempotencyKey));
   }
 
   /** PUT to a presigned storage URL: no API credentials, its own long deadline. */
@@ -869,7 +955,7 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
     target: { newWorkspace: boolean; workspaceId?: string };
   }, options: UploadOptions): Promise<UploadResponse> {
     const { metadata } = args;
-    const session = await request<{ sessionId: string; files: DirectUploadDescriptor[] }>("/v1/ingest/direct/sessions", jsonRequest("POST", {
+    const session = await request<{ sessionId: string; files: DirectUploadDescriptor[] }>("/v1/uploads/direct/sessions", jsonRequest("POST", {
       ...(metadata.orgId ? { orgId: metadata.orgId } : {}),
       ...(args.target.workspaceId ? { workspaceId: args.target.workspaceId } : {}),
       ...(args.target.newWorkspace ? { newWorkspace: true } : {}),
@@ -882,7 +968,7 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
         ...(args.canonicalIds[index] ? { canonicalId: args.canonicalIds[index] } : {}),
       })),
     }), options);
-    const sessionPath = `/v1/ingest/direct/sessions/${encodeURIComponent(session.sessionId)}`;
+    const sessionPath = `/v1/uploads/direct/sessions/${encodeURIComponent(session.sessionId)}`;
     const remaining = args.blobs.map((blob, index) => ({ blob, name: args.names[index] }));
     try {
       for (const descriptor of session.files) {
@@ -917,6 +1003,11 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
     streamRun,
     streamActivity,
     waitForRun,
+
+    /** The caller's recent runs, newest first. */
+    async listRuns(options?: RequestOptions): Promise<WorkspaceRun[]> {
+      return (await request<{ runs: WorkspaceRun[] }>("/v1/runs", {}, options, true)).runs;
+    },
 
     getWorkspaceState(id: string | undefined = workspaceId, options: WorkspaceStateOptions = {}): Promise<WorkspaceState> {
       if (!id?.trim()) throw new Error("Set DOCSLURP_WORKSPACE_ID or pass workspaceId for workspace state.");
@@ -996,41 +1087,75 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
       }, requestOptions);
     },
 
+    /**
+     * Streamed grounded answer, as a streaming companion to chat(). Yields a
+     * retrieval `status`, the `message` (a full ChatResponse) and a final `done`
+     * envelope. Throws if the stream ends before `done`, so a truncated answer
+     * is never mistaken for success. This targets the legacy SSE endpoint; for
+     * the canonical stream use POST /v1/chat/completions with stream: true.
+     */
+    async *chatStream(input: ChatInput, requestOptions: RequestOptions = {}): AsyncGenerator<ChatStreamEvent> {
+      const target = inWorkspace(input);
+      const params = new URLSearchParams({ q: target.q, workspaceId: target.workspaceId ?? workspaceId });
+      if (target.sessionId) params.set("sessionId", target.sessionId);
+      if (target.model) params.set("model", target.model);
+      let completed = false;
+      for await (const frame of streamEventsAt(`/v1/search/chat/stream?${params.toString()}`, requestOptions)) {
+        if (frame.event === "status" || frame.event === "message" || frame.event === "done") {
+          if (frame.event === "done") completed = true;
+          yield { event: frame.event, data: frame.data } as ChatStreamEvent;
+        }
+      }
+      if (!completed) throw new Error("DocSlurp chat stream ended before completion");
+    },
+
     getDocument(documentId: string, requestOptions?: RequestOptions): Promise<DocumentViewerPayload> {
       return request<DocumentViewerPayload>(`/v1/documents/${encodeURIComponent(documentId)}`, {}, requestOptions, true);
     },
 
-    ingestUrls(input: IngestUrlInput, requestOptions?: RequestOptions): Promise<UploadResponse> {
-      return request<UploadResponse>("/v1/ingest/url", {
-        body: JSON.stringify({ ...input, ...intakeTarget(input) }),
-        headers: { "Content-Type": "application/json" },
-        method: "POST",
-      }, requestOptions);
+    /** Documents in a workspace (the client default unless one is passed), newest first. */
+    async listDocuments(input: ListDocumentsInput = {}, requestOptions?: RequestOptions): Promise<DocumentRecord[]> {
+      const params = new URLSearchParams({ workspaceId: input.workspaceId?.trim() || workspaceId });
+      if (input.runId) params.set("runId", input.runId);
+      if (input.tags) params.set("tags", input.tags);
+      return (await request<{ documents: DocumentRecord[] }>(`/v1/documents?${params.toString()}`, {}, requestOptions, true)).documents;
     },
 
-    search(input: SearchInput, requestOptions?: RequestOptions): SearchRequest {
-      const response = request<SearchResponse>("/v1/search", {
-        body: JSON.stringify(inWorkspace(input)),
-        headers: { "Content-Type": "application/json" },
-        method: "POST",
-      }, requestOptions);
-      return Object.assign(response, {
-        async *[Symbol.asyncIterator]() {
-          yield* (await response).results;
-        },
-      });
+    /**
+     * Delete a document and return the identities of the removed record.
+     * Requires a signed-in session: documents accept API-key authentication for
+     * reads only, so key-authenticated calls to this method receive 403.
+     */
+    deleteDocument(documentId: string, requestOptions?: RequestOptions): Promise<DeletedDocument> {
+      return request<DeletedDocument>(`/v1/documents/${encodeURIComponent(documentId)}`, { method: "DELETE" }, requestOptions);
     },
 
-    searchMany(inputs: SearchInput[], batchOptions: SearchBatchOptions = {}, requestOptions?: RequestOptions): Promise<SearchBatchResponse> {
-      if (inputs.length < 1 || inputs.length > 20) throw new RangeError("searchMany accepts 1–20 queries.");
-      const concurrency = batchOptions.concurrency ?? 4;
-      if (!Number.isInteger(concurrency) || concurrency < 1 || concurrency > 4) throw new RangeError("Search concurrency must be an integer from 1 to 4.");
-      return request<SearchBatchResponse>("/v1/search/batch", {
-        body: JSON.stringify({ queries: inputs.map(inWorkspace), concurrency }),
-        headers: { "Content-Type": "application/json" },
-        method: "POST",
-      }, requestOptions);
+    uploadUrls,
+    /** @deprecated Use upload({ urls }) or uploadUrls(). */
+    ingestUrls: uploadUrls,
+    async listWorkspaces(options?: RequestOptions): Promise<WorkspaceRecord[]> {
+      return (await request<{ workspaces: WorkspaceRecord[] }>("/v1/workspaces", {}, options, true)).workspaces;
     },
+    getWorkspace(id: string, options?: RequestOptions): Promise<WorkspaceRecord> {
+      return request(`/v1/workspaces/${encodeURIComponent(id)}`, {}, options, true);
+    },
+    createUploadSession(input: UploadSessionInput, options?: RequestOptions): Promise<UploadSession> {
+      return request("/v1/uploads/direct/sessions", jsonRequest("POST", { ...input, ...intakeTarget(input) }), options);
+    },
+    getUploadSession(sessionId: string, options?: RequestOptions): Promise<UploadSession> {
+      return request(`/v1/uploads/direct/sessions/${encodeURIComponent(sessionId)}`, {}, options, true);
+    },
+    completeUploadFile(sessionId: string, input: CompleteUploadFileInput, options?: RequestOptions): Promise<{ ok: boolean }> {
+      return request(`/v1/uploads/direct/sessions/${encodeURIComponent(sessionId)}/files/complete`, jsonRequest("POST", input), options);
+    },
+    completeUploadSession(sessionId: string, options?: RequestOptions): Promise<UploadResponse> {
+      return request(`/v1/uploads/direct/sessions/${encodeURIComponent(sessionId)}/confirm`, { method: "POST" }, options);
+    },
+    abortUploadSession(sessionId: string, options?: RequestOptions): Promise<{ ok: boolean }> {
+      return request(`/v1/uploads/direct/sessions/${encodeURIComponent(sessionId)}/abort`, { method: "POST" }, options);
+    },
+
+    search,
 
     upload,
   };

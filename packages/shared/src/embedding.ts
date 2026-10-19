@@ -4,6 +4,8 @@ import { lookupPrivateModelRoute, parsePrivateModelUri, PRIVATE_MODEL_PROVIDER }
 export const supportedEmbeddingModels = [
   "text-embedding-3-small",
   "BAAI/bge-m3",
+  "perplexity/pplx-embed-v1-0.6b",
+  "perplexity/pplx-embed-v1-4b",
   "onnx-community/embeddinggemma-300m-ONNX",
   "jinaai/jina-embeddings-v2-base-code",
   "Xenova/jina-embeddings-v2-base-en",
@@ -127,6 +129,7 @@ export type EmbeddingTask = z.infer<typeof embeddingTaskSchema>;
 export const embeddingProviderSchema = z.enum([
   "openai",
   "deepinfra",
+  "openrouter",
   "ollama",
   "vllm",
   "lmstudio",
@@ -248,12 +251,12 @@ export const embeddingProfileCatalog: Record<
   "cheapest-hosted": {
     label: "Cheapest hosted",
     description:
-      "Managed OpenAI embeddings for workers that should not load a local model.",
+      "Fast, low-cost Perplexity 0.6B embeddings through OpenRouter.",
     tags: ["cost", "hosted", "managed"],
     config: {
       profile: "cheapest-hosted",
       target: "hosted",
-      modelUri: "llm://openai/text-embedding-3-small",
+      modelUri: "llm://openrouter/perplexity/pplx-embed-v1-0.6b",
       task: "document",
       normalize: true,
     },
@@ -286,6 +289,10 @@ export function validateDeepInfraEmbedding(vector: number[], dimensions = 1024, 
 }
 
 const embeddingModelEntries = [
+  ["llm://perplexity/pplx-embed-v1-0.6b", "Perplexity Embed 0.6B (native API)", "hosted", "remote", "perplexity", "pplx-embed-v1-0.6b", 1024, 128, false, ["hosted", "open-weights", "cost"]],
+  ["llm://perplexity/pplx-embed-v1-4b", "Perplexity Embed 4B (native API)", "hosted", "remote", "perplexity", "pplx-embed-v1-4b", 2560, 128, false, ["hosted", "open-weights", "quality"]],
+  ["llm://openrouter/perplexity/pplx-embed-v1-0.6b", "Perplexity Embed 0.6B (OpenRouter)", "hosted", "remote", "openrouter", "perplexity/pplx-embed-v1-0.6b", 1024, 128, false, ["hosted", "open-weights", "cost"]],
+  ["llm://openrouter/perplexity/pplx-embed-v1-4b", "Perplexity Embed 4B (OpenRouter)", "hosted", "remote", "openrouter", "perplexity/pplx-embed-v1-4b", 2560, 128, false, ["hosted", "open-weights", "quality"]],
   ["llm://deepinfra/BAAI/bge-m3", "DeepInfra BGE-M3", "hosted", "remote", "deepinfra", "BAAI/bge-m3", 1024, 64, false, ["hosted", "multilingual", "quality"]],
   ["llm://openai/text-embedding-3-small", "OpenAI text-embedding-3-small", "hosted", "remote", "openai", "text-embedding-3-small", 1536, 64, true, ["hosted", "managed", "cost"]],
   ["llm://onnx/onnx-community/embeddinggemma-300m-ONNX", "EmbeddingGemma 300M ONNX", "local", "local", "onnx", "onnx-community/embeddinggemma-300m-ONNX", 768, 16, false, ["local", "onnx", "small"]],
@@ -366,6 +373,22 @@ export function fitEmbeddingDimensions(
   return norm > 0 ? sliced.map((value) => value / norm) : sliced;
 }
 
+/** Hosted provider vectors must preserve the registered space; never pad or truncate them. */
+export function validateHostedEmbeddingVector(vector: number[], dimensions: number, normalize = true): number[] {
+  if (vector.length !== dimensions || vector.some(value => !Number.isFinite(value))) {
+    throw new Error("Hosted embedding returned invalid dimensions or values");
+  }
+  const norm = Math.hypot(...vector);
+  if (!(norm > 0) || !Number.isFinite(norm)) throw new Error("Hosted embedding returned a zero or invalid vector");
+  return normalize ? vector.map(value => value / norm) : vector;
+}
+
+export function openRouterEmbeddingRoute(model: string) {
+  const route = embeddingModelCatalogByUri[`llm://openrouter/${model}`];
+  if (!route || route.provider !== "openrouter") throw new Error("Unregistered OpenRouter embedding model");
+  return route;
+}
+
 export function resolveEmbeddingRoute(config: EmbeddingConfig) {
   const parsed = parseLlmModelUri(config.modelUri);
   if (parsed.provider === PRIVATE_MODEL_PROVIDER) {
@@ -404,7 +427,9 @@ export function resolveEmbeddingRoute(config: EmbeddingConfig) {
       dimensions: config.dimensions ?? known.dimensions,
       requestedDimensions,
       modelUri: config.modelUri,
-      baseUrl: known.provider === "deepinfra" ? DEEPINFRA_EMBEDDING_BASE_URL : parsed.params.get("baseUrl") ?? defaultBaseUrl,
+      baseUrl: known.provider === "openrouter" ? OPENROUTER_BASE_URL
+        : known.provider === "deepinfra" ? DEEPINFRA_EMBEDDING_BASE_URL
+          : parsed.params.get("baseUrl") ?? defaultBaseUrl,
     };
   }
 
@@ -863,7 +888,7 @@ export const parserPlaybookCatalog: Record<
 
 export const embeddingConfigSchema = z
   .object({
-    profile: embeddingProfileKeySchema.default("good-fast-local"),
+    profile: embeddingProfileKeySchema.default("cheapest-hosted"),
     dimensions: z.number().int().min(128).max(3072).optional(),
     target: modelTargetSchema.optional(),
     modelUri: llmModelUriSchema.optional(),
@@ -877,6 +902,9 @@ export const embeddingConfigSchema = z
     const defaults = embeddingProfileCatalog[value.profile].config;
     const modelUri = value.modelUri ?? defaults.modelUri;
     if (!llmModelUriSchema.safeParse(modelUri).success) return;
+    if (parseLlmModelUri(modelUri).provider === "openrouter" && parseLlmModelUri(modelUri).params.has("baseUrl")) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["modelUri"], message: "OpenRouter embedding routes use the fixed official endpoint" });
+    }
     if (value.dimensions !== undefined) {
       const model = embeddingModelCatalogByUri[modelUri];
       if (!supportsReducedEmbeddingDimensions(modelUri) || (model && value.dimensions > model.dimensions)) {
@@ -922,7 +950,7 @@ export const embeddingConfigSchema = z
 export type EmbeddingConfig = z.infer<typeof embeddingConfigSchema>;
 
 export const defaultEmbeddingConfig: EmbeddingConfig = {
-  ...embeddingProfileCatalog["good-fast-local"].config,
+  ...embeddingProfileCatalog["cheapest-hosted"].config,
   lateChunking: false,
   lateChunkingWindow: 2,
 };

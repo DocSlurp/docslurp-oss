@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 
 vi.mock("../config.js", () => ({ env: { maxUploadBytes: 500 * 1024 * 1024 } }));
 
-const { multipartBodyLimit, multipartTooLargeBody } = await import("../lib/upload-policy.js");
+const { multipartBodyLimit, multipartTooLarge } = await import("../lib/upload-policy.js");
 
 function app(maxBytes: number) {
   const reached = vi.fn();
@@ -36,12 +36,12 @@ describe("multipart upload cap", () => {
     const response = await hono.request("/v1/ingest/bulk", { method: "POST", body: form(200 * 1024) });
     expect(response.status).toBe(413);
     const body = await response.json();
-    expect(body).toMatchObject({ code: "multipart_upload_too_large", maxBytes: 64 * 1024, directUpload: { createSession: "/v1/ingest/direct/sessions" } });
-    expect(body.error).toContain("/v1/ingest/direct/sessions");
+    expect(body).toMatchObject({ error: { code: "payload_too_large", details: { maxBytes: 64 * 1024, directUpload: { createSession: "/v1/ingest/direct/sessions" } } } });
+    expect(body.error.message).toContain("/v1/ingest/direct/sessions");
     expect(reached).not.toHaveBeenCalled();
   });
 
   it("reports the limit in MB", () => {
-    expect(multipartTooLargeBody(25 * 1024 * 1024).error).toContain("25 MB");
+    expect(multipartTooLarge(25 * 1024 * 1024).message).toContain("25 MB");
   });
 });

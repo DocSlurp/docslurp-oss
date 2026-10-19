@@ -1,9 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
-import { z } from "zod";
 import type { McpDispatch } from "../lib/mcp-http.js";
 import { createChatMcpTools } from "./chat-mcp-tools.js";
 
-function setup(ids = ["workspace.search"]) {
+function setup(ids = ["search"]) {
   const dispatch = vi.fn<McpDispatch>(async () => Response.json({ results: [] }));
   const onActivity = vi.fn();
   const controller = new AbortController();
@@ -15,43 +14,37 @@ function setup(ids = ["workspace.search"]) {
 
 describe("chat MCP tools", () => {
   it("pins every tool to the selected workspace, overriding model-supplied scope (G-04)", async () => {
-    const t = setup(["workspace.search", "workspace.search-many", "workspace.aggregate-rag-search", "workspace.chat"]);
-    await t.execute("workspace_search", { q: "question", workspaceId: "injected" });
+    const t = setup(["search", "chat"]);
+    await t.execute("search", { q: "question", workspaceId: "injected" });
     expect(JSON.parse(t.dispatch.mock.calls[0]![1]!.body as string)).toEqual({ q: "question", workspaceId: "selected" });
-    await t.execute("workspace_search-many", { queries: [{ q: "a" }, { q: "b", workspaceId: "injected" }] });
-    expect(JSON.parse(t.dispatch.mock.calls[1]![1]!.body as string).queries.map((q: { workspaceId: string }) => q.workspaceId)).toEqual(["selected", "selected"]);
-    await t.execute("workspace_aggregate-rag-search", { q: "all", workspaceIds: ["injected", "other"] });
-    expect(JSON.parse(t.dispatch.mock.calls[2]![1]!.body as string).workspaceIds).toEqual(["selected"]);
-    await t.execute("workspace_chat", { q: "x", workspaceId: "injected" });
-    expect(JSON.parse(t.dispatch.mock.calls[3]![1]!.body as string).workspaceId).toBe("selected");
+    await t.execute("chat", { q: "x", workspaceId: "injected" });
+    expect(JSON.parse(t.dispatch.mock.calls[1]![1]!.body as string).workspaceId).toBe("selected");
   });
 
-  it("has no cost approval argument to pass through (schemas define none)", async () => {
-    const { aiAdvancedRequestSchema, aiSimpleRequestSchema } = await import("@docslurp/shared");
-    for (const schema of [aiSimpleRequestSchema, aiAdvancedRequestSchema]) {
-      expect(JSON.stringify(z.toJSONSchema(schema, { io: "input" }))).not.toMatch(/approve/i);
-      expect(schema.parse({ workspaceId: "w", goal: "g", approveCostEstimate: true })).not.toHaveProperty("approveCostEstimate");
-    }
+  it("pins every batch query to the selected workspace", async () => {
+    const t = setup(["search"]);
+    await t.execute("search", { queries: [{ q: "a", workspaceId: "foreign" }] });
+    expect(JSON.parse(t.dispatch.mock.calls[0]![1]!.body as string).queries[0].workspaceId).toBe("selected");
   });
 
-  it("does not offer automation tools that fetch sourceUrls or start paid work (G-04)", () => {
-    const t = setup(["workspace.search", "ai.simple", "ai.advanced", "ai.operation.get"]);
-    expect(Object.keys(t.tools)).toEqual(["workspace_search"]);
+  it("does not offer ingestion tools that fetch URLs or start paid work (G-04)", () => {
+    const t = setup(["search", "upload", "completeUpload", "listWorkspaces"]);
+    expect(Object.keys(t.tools)).toEqual(["search"]);
   });
 
   it("bounds calls and honors cancellation before dispatch", async () => {
     const t = setup();
-    for (let i = 0; i < 13; i++) await t.execute("workspace_search", { q: "repeat" }, `${i}`);
+    for (let i = 0; i < 13; i++) await t.execute("search", { q: "repeat" }, `${i}`);
     expect(t.dispatch).toHaveBeenCalledTimes(12);
     t.controller.abort();
-    await expect(t.execute("workspace_search")).rejects.toThrow();
+    await expect(t.execute("search")).rejects.toThrow();
     expect(t.dispatch).toHaveBeenCalledTimes(12);
   });
 
   it("returns adapter errors and reports failed activity without claiming success", async () => {
     const t = setup();
     t.dispatch.mockResolvedValueOnce(Response.json({ error: "Workspace not found" }, { status: 404 }));
-    await expect(t.execute("workspace_search")).resolves.toMatchObject({ ok: false, status: 404 });
+    await expect(t.execute("search")).resolves.toMatchObject({ ok: false, status: 404 });
     expect(t.onActivity.mock.calls.map(([event]) => event.status)).toEqual(["loading", "error"]);
   });
 
@@ -59,25 +52,27 @@ describe("chat MCP tools", () => {
     const t = setup();
     const source = { text: "Supported fact", score: 1, citation: { documentId: "doc", filename: "guide.pdf", pageNumber: 1, chunkIndex: 0, headingPath: [] } };
     t.dispatch.mockImplementation(async () => Response.json({ results: [source] }));
-    await t.execute("workspace_search");
-    const result = await t.execute("workspace_search");
+    await t.execute("search");
+    const result = await t.execute("search");
     expect(t.citations).toHaveLength(1);
     expect(result).toMatchObject({ evidence: [{ citationIndex: 1, text: "Supported fact" }] });
   });
 });
 
- it("enforces resolved retrieval controls on every search and nested chat", async () => {
-  const { workspaceSearchRetrievalDefaultsSchema } = await import("@docslurp/shared");
-  const dispatch = vi.fn<McpDispatch>(async () => Response.json({ results: [] }));
-  const context = createChatMcpTools({ manifest: { capabilities: ["workspace.search", "workspace.search-many", "workspace.chat"].map(id => ({ id, title: id, category: "tool", description: id, inputSchema: { type: "object" } })) },
-    dispatch, workspaceId: "selected", signal: new AbortController().signal,
-    retrievalDefaults: workspaceSearchRetrievalDefaultsSchema.parse({ resultCount: 4, useHyDE: false, useRerank: false, useMmr: true, iterativeMultiHop: false }),
+describe("chat MCP tool retrieval controls", () => {
+  it("enforces resolved retrieval controls on every search, batch query and nested chat", async () => {
+    const { workspaceSearchRetrievalDefaultsSchema } = await import("@docslurp/shared");
+    const dispatch = vi.fn<McpDispatch>(async () => Response.json({ results: [] }));
+    const context = createChatMcpTools({ manifest: { capabilities: ["search", "chat"].map(id => ({ id, title: id, category: "tool", description: id, inputSchema: { type: "object" } })) },
+      dispatch, workspaceId: "selected", signal: new AbortController().signal,
+      retrievalDefaults: workspaceSearchRetrievalDefaultsSchema.parse({ resultCount: 4, useHyDE: false, useRerank: false, useMmr: true, iterativeMultiHop: false, resultOrder: "relevance" }),
+    });
+    const execute = (name: string, input: unknown) => context.tools[name]!.execute!(input, { toolCallId: name, messages: [], context: {} });
+    await execute("search", { q: "a", hyde: true, rerank: true, limit: 100, resultOrder: "prompt" });
+    expect(JSON.parse(dispatch.mock.calls[0]![1]!.body as string)).toMatchObject({ workspaceId: "selected", limit: 4, hyde: false, rerank: false, mmr: true, resultOrder: "relevance" });
+    await execute("search", { queries: [{ q: "a", hyde: true, limit: 100 }, { q: "b" }] });
+    for (const query of JSON.parse(dispatch.mock.calls[1]![1]!.body as string).queries) expect(query).toMatchObject({ workspaceId: "selected", limit: 4, hyde: false, mmr: true });
+    await execute("chat", { q: "a", retrieval: { useHyDE: true } });
+    expect(JSON.parse(dispatch.mock.calls[2]![1]!.body as string)).toMatchObject({ workspaceId: "selected", retrieval: { resultCount: 4, useHyDE: false, useMmr: true, resultOrder: "relevance" } });
   });
-  const execute = (name: string, input: unknown) => context.tools[name]!.execute!(input, { toolCallId: name, messages: [], context: {} });
-  await execute("workspace_search", { q: "a", hyde: true, rerank: true, limit: 100 });
-  expect(JSON.parse(dispatch.mock.calls[0]![1]!.body as string)).toMatchObject({ limit: 4, hyde: false, rerank: false, mmr: true });
-  await execute("workspace_search-many", { queries: [{ q: "a", hyde: true, limit: 100 }, { q: "b" }] });
-  for (const query of JSON.parse(dispatch.mock.calls[1]![1]!.body as string).queries) expect(query).toMatchObject({ workspaceId: "selected", limit: 4, hyde: false, mmr: true });
-  await execute("workspace_chat", { q: "a", retrieval: { useHyDE: true } });
-  expect(JSON.parse(dispatch.mock.calls[2]![1]!.body as string)).toMatchObject({ retrieval: { resultCount: 4, useHyDE: false, useMmr: true } });
- });
+});

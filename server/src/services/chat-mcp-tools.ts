@@ -10,11 +10,10 @@ export interface ChatToolActivity {
 }
 
 /**
- * Chat never exposes automation tools: ai.simple / ai.advanced fetch
- * arbitrary sourceUrls and start paid ingestion, and the model's arguments
- * can be steered by document text (G-04). ai.operation.get goes with them.
+ * Chat never exposes ingestion tools: upload fetches arbitrary URLs and starts
+ * paid ingestion, and the model's arguments can be steered by document text (G-04).
  */
-const CHAT_EXCLUDED_TOOL_PREFIX = "ai.";
+const CHAT_EXCLUDED_TOOLS = new Set(["upload", "completeUpload", "listWorkspaces"]);
 
 /** A turn owns its tool budget and citation numbering; no global user state. */
 export function createChatMcpTools(args: {
@@ -39,6 +38,7 @@ export function createChatMcpTools(args: {
   const limit = defaults ? Math.min(defaults.resultCount, CHAT_MAX_RETRIEVED_PASSAGES) : undefined;
   const searchDefaults = defaults ? {
     limit, hyde: defaults.useHyDE, rerank: defaults.useRerank, mmr: defaults.useMmr,
+    candidateDepth: defaults.candidateDepth, resultOrder: defaults.resultOrder,
     compression: defaults.useContextualCompression, mmrLambda: defaults.mmrLambda,
     minScore: defaults.minScore, parentRetrieval: defaults.parentRetrieval,
     summarySeed: defaults.summarySeed, queryRewrite: defaults.queryRewrite,
@@ -49,6 +49,7 @@ export function createChatMcpTools(args: {
   } : {};
   const chatDefaults = defaults ? {
     resultCount: limit, useHyDE: defaults.useHyDE, useRerank: defaults.useRerank,
+    candidateDepth: defaults.candidateDepth, resultOrder: defaults.resultOrder,
     useMmr: defaults.useMmr, mmrLambda: defaults.mmrLambda,
     iterativeMultiHop: defaults.iterativeMultiHop, enableGraphExpansion: defaults.enableGraphExpansion,
     enableCommunityExpansion: defaults.enableCommunityExpansion, graphHops: defaults.graphHops,
@@ -65,10 +66,10 @@ export function createChatMcpTools(args: {
       return;
     }
     const object = value as Record<string, unknown>;
-    for (const key of ["results", "citations", "data", "response", "operation"]) collectEvidence(object[key]);
+    for (const key of ["results", "citations", "data", "response"]) collectEvidence(object[key]);
   }
 
-  for (const definition of args.manifest.capabilities.filter(item => item.category === "tool" && !item.id.startsWith(CHAT_EXCLUDED_TOOL_PREFIX))) {
+  for (const definition of args.manifest.capabilities.filter(item => item.category === "tool" && !CHAT_EXCLUDED_TOOLS.has(item.id))) {
     // OpenAI-compatible providers restrict function names to letters, numbers, _ and -.
     const name = definition.id.replace(/[^a-zA-Z0-9_-]/g, "_");
     if (tools[name]) throw new Error("Duplicate model tool name");
@@ -83,16 +84,15 @@ export function createChatMcpTools(args: {
         // G-04: the user-selected workspace is the only scope. It is applied
         // after the model's arguments, so a prompt-injected workspaceId can't
         // send a search into another workspace the user happens to reach.
-        const body = definition.id === "workspace.search-many"
-          ? { ...supplied, queries: Array.isArray(supplied.queries)
-            ? supplied.queries.map(q => ({ ...(q && typeof q === "object" && !Array.isArray(q) ? q : {}), ...searchDefaults, workspaceId: args.workspaceId }))
-            : supplied.queries }
-          : definition.id === "workspace.aggregate-rag-search"
-            ? { ...supplied, workspaceIds: [args.workspaceId] }
-            : { ...supplied,
-              ...(definition.id === "workspace.search" ? searchDefaults : {}),
-              ...(definition.id === "workspace.chat" && chatDefaults ? { retrieval: chatDefaults } : {}),
-              workspaceId: args.workspaceId };
+        // Workspace retrieval controls (including this request's overrides) are
+        // also applied after the model's arguments so a tool call cannot widen them.
+        const body = definition.id === "search"
+          ? Array.isArray(supplied.queries)
+            ? { ...supplied, queries: supplied.queries.map(q => ({ ...(q && typeof q === "object" && !Array.isArray(q) ? q : {}), ...searchDefaults, workspaceId: args.workspaceId })) }
+            : { ...supplied, ...searchDefaults, workspaceId: args.workspaceId }
+          : definition.id === "chat" && chatDefaults
+            ? { ...supplied, retrieval: chatDefaults, workspaceId: args.workspaceId }
+            : { ...supplied, workspaceId: args.workspaceId };
         const started = Date.now();
         const update = (status: ChatToolActivity["status"]) => {
           const event: ChatToolActivity = { id: toolCallId, name: definition.id, status,

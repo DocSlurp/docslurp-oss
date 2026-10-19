@@ -48,6 +48,7 @@ describe("lanceDbVectorSearch tenant isolation", () => {
   afterEach(async () => {
     resetLanceDbConnectionForTests();
     delete process.env.LANCEDB_URI;
+    delete process.env.LANCEDB_REFINE_FACTOR;
     if (lancedbDir) {
       await rm(lancedbDir, { recursive: true, force: true });
       lancedbDir = null;
@@ -142,6 +143,26 @@ describe("lanceDbVectorSearch tenant isolation", () => {
     expect(hits[0]?.id).toBe("chunk-7");
     const tail = await lanceDbVectorSearch({ orgId: "org-a", embeddingModel: "provider/small", queryVector: vector(99), documentIds: ["doc-late"], limit: 3 });
     expect(tail.map((hit) => hit.id)).toEqual(["late"]);
+  });
+
+  it("supports opt-in refinement for indexed unscoped/scoped search and the fresh tail", async () => {
+    process.env.LANCEDB_REFINE_FACTOR = "16";
+    const db = await lancedb.connect(lancedbDir!);
+    const table = await db.createTable(VectorNamespaceManager.getTableName("org-a"), Array.from({ length: 256 }, (_, i) => ({
+      id: `refine-${i}`, documentId: "doc-a", vector: [Math.cos(i), Math.sin(i), 0, 0, 0, 0, 0, 0],
+    })));
+    try {
+      await table.createIndex("vector", { config: lancedb.Index.hnswSq({ distanceType: "l2", numPartitions: 1 }) });
+      for (const documentIds of [undefined, ["doc-a"]]) {
+        const hits = await lanceDbVectorSearch({ orgId: "org-a", queryVector: [1, 0, 0, 0, 0, 0, 0, 0], documentIds, limit: 50 });
+        expect(hits).toHaveLength(50);
+        expect(hits[0]?.id).toBe("refine-0");
+      }
+      await table.add([{ id: "fresh-refined", documentId: "doc-fresh", vector: [0, 0, 1, 0, 0, 0, 0, 0] }]);
+      resetLanceDbConnectionForTests();
+      const fresh = await lanceDbVectorSearch({ orgId: "org-a", queryVector: [0, 0, 1, 0, 0, 0, 0, 0], documentIds: ["doc-fresh"], limit: 50 });
+      expect(fresh.map(hit => hit.id)).toEqual(["fresh-refined"]);
+    } finally { table.close(); db.close(); }
   });
 
   it("reuses table handles across searches and briefly remembers missing tables", async () => {

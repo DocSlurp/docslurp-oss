@@ -1,9 +1,10 @@
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 
-import { apiKeyRateLimitPolicyName, type ApiKeyRateLimitRule } from "@docslurp/shared";
+import { apiKeyRateLimitPolicyName, type ApiErrorCode, type ApiKeyRateLimitRule } from "@docslurp/shared";
 import type { Context, MiddlewareHandler } from "hono";
 import { createClient } from "redis";
+import { middlewareErrorResponse } from "../lib/api-error.js";
 
 import { requestIp } from "../lib/request-context.js";
 import { apiKeyPagesToday } from "../services/api-key-usage.js";
@@ -500,13 +501,12 @@ export function classifyRateLimitCategory(method: string, path: string): RateLim
   const normalizedMethod = method.toUpperCase();
 
   if (normalizedPath.startsWith("/webhooks/")) return "webhook";
-  if (normalizedPath.startsWith("/v1/ingest")) return "upload";
+  if ((normalizedPath.startsWith("/v1/ingest") || normalizedPath === "/v1/uploads" || normalizedPath.startsWith("/v1/uploads/"))) return "upload";
   if (
     normalizedPath.startsWith("/v1/search/chat")
     || normalizedPath === "/v1/chat"
     || normalizedPath === "/v1/chat/completions"
     || /^\/v1\/workspaces\/[^/]+\/chat(?:\/|$)/.test(normalizedPath)
-    || normalizedPath.startsWith("/v1/ai")
   ) {
     return "chat-ai";
   }
@@ -630,15 +630,16 @@ function writePolicyHeaders(c: Context, states: PolicyState[]): void {
   c.header("X-RateLimit-Reset", String(Math.ceil(Date.now() / 1000) + tightest.resetSeconds));
 }
 
-function tooManyRequests(c: Context, body: Record<string, unknown> & { retryAfterSeconds: number }): Response {
-  c.header("Retry-After", String(body.retryAfterSeconds));
-  return c.json({ error: "Too many requests", code: "rate_limited", ...body }, 429);
+type RateLimitCode = Extract<ApiErrorCode, "rate_limited" | "spend_limit_exceeded" | "daily_page_limit" | "ip_temporarily_blocked">;
+
+/** 429 in the error envelope (the legacy `{ error, code }` body on protocol surfaces) with `Retry-After`. */
+function tooManyRequests(c: Context, code: RateLimitCode, message: string, details: { retryAfterSeconds: number } & Record<string, unknown>): Response {
+  c.header("Retry-After", String(details.retryAfterSeconds));
+  return middlewareErrorResponse(c, 429, code, message, details);
 }
 
 function blockedResponse(c: Context, blockedMs: number): Response {
-  return tooManyRequests(c, {
-    code: "ip_temporarily_blocked",
-    error: "Too many requests from this network; try again later",
+  return tooManyRequests(c, "ip_temporarily_blocked", "Too many requests from this network; try again later", {
     retryAfterSeconds: Math.max(1, Math.ceil(blockedMs / 1000)),
   });
 }
@@ -663,7 +664,7 @@ async function consumeCounters(
     const state = states[result.denied]!;
     const penaltyMs = counters[result.denied]?.penaltyMs ?? 0;
     if (penaltyMs > 0) return blockedResponse(c, penaltyMs);
-    return tooManyRequests(c, { category: args.category, policy: state.name, retryAfterSeconds: state.retryAfterSeconds });
+    return tooManyRequests(c, "rate_limited", "Too many requests", { category: args.category, policy: state.name, retryAfterSeconds: state.retryAfterSeconds });
   }
   return null;
 }
@@ -728,9 +729,7 @@ async function checkApiKeyQuotas(c: Context, apiKey: ApiKeyQuotaSubject, categor
     if (pages >= apiKey.rateLimitPpd) {
       const midnight = new Date(now);
       midnight.setHours(24, 0, 0, 0);
-      return tooManyRequests(c, {
-        code: "daily_page_limit",
-        error: `This API key has used its ${apiKey.rateLimitPpd.toLocaleString("en-US")} pages for today`,
+      return tooManyRequests(c, "daily_page_limit", `This API key has used its ${apiKey.rateLimitPpd.toLocaleString("en-US")} pages for today`, {
         category,
         retryAfterSeconds: Math.max(1, Math.ceil((midnight.getTime() - now) / 1000)),
       });
@@ -753,9 +752,7 @@ async function checkApiKeyQuotas(c: Context, apiKey: ApiKeyQuotaSubject, categor
 
   const exceeded = spends.find((spend) => spend.cents >= spend.rule.limit);
   if (exceeded && SPEND_LIMITED_CATEGORIES.has(category)) {
-    return tooManyRequests(c, {
-      code: "spend_limit_exceeded",
-      error: `This API key reached its $${(exceeded.rule.limit / 100).toFixed(2)} spend limit for the current window`,
+    return tooManyRequests(c, "spend_limit_exceeded", `This API key reached its $${(exceeded.rule.limit / 100).toFixed(2)} spend limit for the current window`, {
       category,
       policy: apiKeyRateLimitPolicyName(exceeded.rule),
       spentCents: Math.round(exceeded.cents * 100) / 100,

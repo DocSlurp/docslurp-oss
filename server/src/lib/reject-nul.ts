@@ -1,4 +1,5 @@
 import type { MiddlewareHandler } from "hono";
+import { middlewareErrorResponse } from "./api-error.js";
 
 /** JSON bodies larger than this are not scanned (uploads and streams do not go through here). */
 const MAX_SCANNED_BODY_BYTES = 2 * 1024 * 1024;
@@ -14,15 +15,16 @@ const JSON_NUL_ESCAPE = /(?<!\\)(?:\\\\)*\\u0000/i;
  * field. File uploads and non-JSON bodies are not inspected.
  */
 export const rejectNulBytes: MiddlewareHandler = async (c, next) => {
-  const reject = () => c.json({ error: "Request contains a NUL (\\u0000) character, which is not supported.", code: "invalid_characters" }, 400);
+  const reject = () => middlewareErrorResponse(c, 400, "invalid_request", "Request contains a NUL (\\u0000) character, which is not supported.");
 
   if (/%00/i.test(c.req.url)) return reject();
 
   const contentType = c.req.header("content-type") ?? "";
   const length = Number(c.req.header("content-length") ?? "0");
   if (/\bjson\b/i.test(contentType) && length <= MAX_SCANNED_BODY_BYTES && ["POST", "PUT", "PATCH"].includes(c.req.method)) {
-    // Hono caches the body, so handlers can still read it as JSON afterwards.
-    const body = await c.req.text().catch(() => "");
+    // Inspect a clone: Hono caches c.req.text(), but raw Request consumers
+    // (MCP transport and body-limit middleware) cannot use that cache.
+    const body = await c.req.raw.clone().text().catch(() => "");
     if (JSON_NUL_ESCAPE.test(body)) return reject();
   }
   await next();

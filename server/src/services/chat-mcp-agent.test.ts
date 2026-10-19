@@ -10,7 +10,7 @@ vi.mock("./workspaces.js", () => ({ resolveWorkspaceRef: vi.fn(async () => ({ id
 vi.mock("../lib/posthog-ai-observability.js", () => ({ posthogAiTelemetry: () => ({}) }));
 vi.mock("./mcp-tools.js", () => ({
   createMcpDispatcher: mocks.createDispatch,
-  mcpManifest: () => ({ capabilities: [{ id: "workspace.search", title: "Search", description: "Retrieve", category: "tool", inputSchema: { type: "object", properties: { q: { type: "string" } }, required: ["q"] } }] }),
+  mcpManifest: () => ({ capabilities: [{ id: "search", title: "Search", description: "Retrieve", category: "tool", inputSchema: { type: "object", properties: { q: { type: "string" } }, required: ["q"] } }] }),
 }));
 vi.mock("@docslurp/shared", async importOriginal => ({
   ...await importOriginal<typeof import("@docslurp/shared")>(),
@@ -24,7 +24,7 @@ const args = { actor, workspaceId: "ws", orgId: "org", sessionId: "conversation"
 function step(toolCall: boolean): Awaited<ReturnType<MockLanguageModelV4["doStream"]>> {
   return { stream: simulateReadableStream({ chunks: [
     { type: "stream-start", warnings: [] },
-    ...(toolCall ? [{ type: "tool-call" as const, toolCallId: "call", toolName: "workspace_search", input: '{"q":"policy"}' }]
+    ...(toolCall ? [{ type: "tool-call" as const, toolCallId: "call", toolName: "search", input: '{"q":"policy"}' }]
       : [{ type: "text-start" as const, id: "text" }, { type: "text-delta" as const, id: "text", delta: "The policy is supported [1]." }, { type: "text-end" as const, id: "text" }]),
     { type: "finish", finishReason: { unified: toolCall ? "tool-calls" : "stop", raw: undefined },
       usage: { inputTokens: { total: 10, noCache: 10, cacheRead: 0, cacheWrite: 0 }, outputTokens: { total: 4, text: 4, reasoning: 0 } } },
@@ -49,7 +49,7 @@ describe("chat MCP agent with the real SDK loop", () => {
     expect(JSON.stringify(model.doStreamCalls[1]!.prompt)).toContain("The policy is supported.");
     expect(result.answer).toBe(deltas.join(""));
     expect(result.citations).toHaveLength(1);
-    expect(result.toolCalls).toMatchObject([{ name: "workspace.search", status: "success" }]);
+    expect(result.toolCalls).toMatchObject([{ name: "search", status: "success" }]);
     expect(mocks.record).toHaveBeenCalledTimes(2);
     for (const [entry] of mocks.record.mock.calls) {
       expect(entry).toMatchObject({ userId: "user", scope: { workspaceId: "ws", orgId: "org", sessionId: "conversation" }, usage: { inputTokens: 10, outputTokens: 4 } });
@@ -80,7 +80,7 @@ describe("chat MCP agent with the real SDK loop", () => {
       const searching = current < 2;
       return { stream: simulateReadableStream({ chunks: [
         { type: "stream-start", warnings: [] },
-        ...(searching ? [{ type: "tool-call" as const, toolCallId: `hop-${current}`, toolName: "workspace_search", input: JSON.stringify({ q: current === 0 ? "active project" : "P7 kit inventory" }) }]
+        ...(searching ? [{ type: "tool-call" as const, toolCallId: `hop-${current}`, toolName: "search", input: JSON.stringify({ q: current === 0 ? "active project" : "P7 kit inventory" }) }]
           : [{ type: "text-start" as const, id: "answer" }, { type: "text-delta" as const, id: "answer", delta: "The active project is P7 [1]. Its 8 kits contain 3 probes each [2], so there are 24 probes." }, { type: "text-end" as const, id: "answer" }]),
         { type: "finish", finishReason: { unified: searching ? "tool-calls" as const : "stop" as const, raw: undefined }, usage: { inputTokens: { total: 10, noCache: 10, cacheRead: 0, cacheWrite: 0 }, outputTokens: { total: 4, text: 4, reasoning: 0 } } },
       ], initialDelayInMs: 0, chunkDelayInMs: 0 }) };
@@ -92,7 +92,7 @@ describe("chat MCP agent with the real SDK loop", () => {
     });
     const result = await runChatMcpAgent({ ...args, query: "How many probes belong to the active project?" });
     expect(mocks.dispatch).toHaveBeenCalledTimes(2);
-    expect(result.toolCalls).toMatchObject([{ id: "hop-0", name: "workspace.search", status: "success" }, { id: "hop-1", name: "workspace.search", status: "success" }]);
+    expect(result.toolCalls).toMatchObject([{ id: "hop-0", name: "search", status: "success" }, { id: "hop-1", name: "search", status: "success" }]);
     expect(result.citations.map(c => c.citation.pageNumber)).toEqual([1, 2]);
     expect(result.answer).toContain("[1]"); expect(result.answer).toContain("[2]");
     expect(mocks.record).toHaveBeenCalledTimes(3);

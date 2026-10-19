@@ -63,14 +63,14 @@ test("batch sends bounded parallel requests once and preserves ordered failures"
   const outcomes = { results: [{ ok: true, data: { results: [], sessionId: "first", availability: null } }, { ok: false, error: { status: 403, code: "forbidden", message: "Forbidden" } }] };
   const client = createDocSlurpClient({ apiUrl: "https://example.test", workspaceId: "default", fetch: async (url, init) => {
     calls++;
-    assert.equal(url, "https://example.test/v1/search/batch");
+    assert.equal(url, "https://example.test/v1/search");
     assert.deepEqual(JSON.parse(init.body), { queries: [{ q: "first", workspaceId: "default" }, { q: "second", workspaceId: "other" }], concurrency: 3 });
     return json(outcomes);
   } });
-  assert.deepEqual(await client.searchMany([{ q: "first" }, { q: "second", workspaceId: "other" }], { concurrency: 3 }), outcomes);
+  assert.deepEqual(await client.search({ queries: [{ q: "first" }, { q: "second", workspaceId: "other" }], concurrency: 3 }), outcomes);
   assert.equal(calls, 1);
-  for (const inputs of [[], Array.from({ length: 21 }, () => ({ q: "question" }))]) assert.throws(() => client.searchMany(inputs), RangeError);
-  for (const concurrency of [0, 5, 1.5, NaN]) assert.throws(() => client.searchMany([{ q: "question" }], { concurrency }), RangeError);
+  for (const inputs of [[], Array.from({ length: 21 }, () => ({ q: "question" }))]) assert.throws(() => client.search({ queries: inputs }), RangeError);
+  for (const concurrency of [0, 5, 1.5, NaN]) assert.throws(() => client.search({ queries: [{ q: "question" }], concurrency }), RangeError);
   assert.equal(calls, 1);
 });
 
@@ -81,10 +81,10 @@ test("batch honors abort signals and never retries AI-backed failures", async ()
     controller.abort(reason);
     init.signal.throwIfAborted();
   } });
-  await assert.rejects(client.searchMany([{ q: "question" }], {}, { signal: controller.signal }), (error) => error === reason);
+  await assert.rejects(client.search({ queries: [{ q: "question" }] }, { signal: controller.signal }), (error) => error === reason);
   let calls = 0;
   const failing = createDocSlurpClient({ workspaceId: "workspace", fetch: async () => { calls++; return json({ error: "Unavailable" }, 503); } });
-  await assert.rejects(failing.searchMany([{ q: "question" }]), DocSlurpApiError);
+  await assert.rejects(failing.search({ queries: [{ q: "question" }] }), DocSlurpApiError);
   assert.equal(calls, 1);
 });
 

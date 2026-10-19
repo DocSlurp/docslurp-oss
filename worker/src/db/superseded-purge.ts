@@ -3,7 +3,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { resolveLanceDbConfig, resolveObjectStorageConfig, VectorNamespaceManager } from "@docslurp/shared";
 import type { Sql } from "postgres";
 
-import { refreshGraphElements } from "../graph/graph-store.js";
+import { lockWorkspaceGraph, refreshGraphElements } from "../graph/graph-store.js";
 import { appendWorkspaceRunEvent } from "./run-event-store.js";
 import { keyFromStorageUri } from "../tools/storage.js";
 import { connectLanceDb } from "../stages/lancedb-connection.js";
@@ -29,7 +29,6 @@ const DERIVED_TABLES = [
   "document_pages",
   "document_summaries",
   "document_propositions",
-  "grounded_summaries",
   "page_stage_states",
   "page_work_tasks",
   "pii_detections",
@@ -70,6 +69,7 @@ export interface SupersededPurgeResult {
 
 type ClaimedDocument = {
   id: string;
+  workspace_id: string;
   org_id: string;
   user_id: string;
   run_id: string | null;
@@ -211,7 +211,7 @@ export async function purgeSupersededDocuments(
         // Deletes in this transaction also drop embedding reuse refs into deleted artifacts.
         const txStorage = forgettingEmbeddingReuseRefs(client, storage);
         const [doc] = await client<ClaimedDocument[]>`
-          select d.id, d.org_id, d.user_id, d.run_id, d.source_key, d.superseded_by_document_id,
+          select d.id, d.workspace_id, d.org_id, d.user_id, d.run_id, d.source_key, d.superseded_by_document_id,
             replacement.run_id as replacement_run_id,
             replacement.user_id as replacement_user_id,
             exists (
@@ -236,6 +236,13 @@ export async function purgeSupersededDocuments(
           for update of d skip locked
         `;
         if (!doc) return;
+        // Extraction holds the graph lock before its FK checks on documents.
+        // We already hold this document row, so waiting for that lock would
+        // invert the order. Defer this sweep before any external side effects.
+        const [graphLock] = await client<{ acquired: boolean }[]>`
+          select pg_try_advisory_xact_lock(hashtextextended(${`kg:${doc.workspace_id}`}, 0)) as acquired
+        `;
+        if (!graphLock?.acquired) return;
         claimedAny = true;
 
         // Dedup copies reuse this version's artifacts and vectors; keep those
@@ -558,6 +565,11 @@ async function cleanDeletedDocuments(
   options: SupersededPurgeOptions,
   rows: CleanupRow[],
 ): Promise<void> {
+  // Queue rows are independent of graph writers; lock all workspace graphs
+  // in a stable order before refreshing their shared nodes and edges.
+  for (const workspaceId of [...new Set(rows.map((row) => row.workspace_id))].sort()) {
+    await lockWorkspaceGraph(client, workspaceId);
+  }
   // Deletes in this transaction also drop embedding reuse refs into deleted artifacts.
   const storage = forgettingEmbeddingReuseRefs(client, rawStorage);
   const deleteVectorRows = options.deleteVectorRows ?? deleteLanceDbDocumentRows;
@@ -859,4 +871,3 @@ async function purgePrefix(storage: PurgeStorage, prefix: string, keep: (key: st
   }
   throw new Error(`Too many keys under ${prefix}; continuing on the next sweep`);
 }
-

@@ -1,4 +1,5 @@
-import { publicErrorMiddleware } from "./lib/public-errors.js";
+import { apiPublicErrorMiddleware } from "./lib/public-errors.js";
+import { nativeBodyLimit, nativeErrorHandler } from "./lib/api-error.js";
 import { sessionToolRoutes } from "./routes/session-tools.js";
 import { existsSync } from "node:fs";
 import { initializeObservability } from "@docslurp/shared/observability";
@@ -20,7 +21,6 @@ import { multipartBodyLimit } from "./lib/upload-policy.js";
 import { emitPostHogApiLog } from "./lib/posthog-ai-observability.js";
 import { apiActorRateLimit, apiIpRateLimit } from "./middleware/rate-limit.js";
 import { sessionAuth } from "./middleware/session-auth.js";
-import { aiRoutes } from "./routes/ai.js";
 import { chatCompletionsRoutes } from "./routes/chat-completions.js";
 import { documentsRoutes } from "./routes/documents.js";
 import { extractorRoutes } from "./routes/extractors.js";
@@ -89,16 +89,17 @@ export { IN_PROCESS_ENV_KEY } from "./lib/client-ip.js";
 export function createApiApp(): Hono {
   const app = new Hono();
   // Spend blocked by credits, budget caps or entitlement is a 402, not a 500.
-  app.onError((error, c) => error instanceof UnreadableSourceError
+  // Native paths answer thrown errors in the error envelope; protocol surfaces keep their shapes.
+  app.onError(nativeErrorHandler((error, c) => error instanceof UnreadableSourceError
     ? c.json({ error: error.message, code: error.code }, error.statusCode)
-    : spendAwareErrorHandler(error, c));
+    : spendAwareErrorHandler(error, c)));
 
   // Authentication is served first, ahead of the global middleware below: these
   // paths never ran the API IP limit, request context or widget CORS.
   app.route("/", authRoutes);
 
   app.use("*", requestContextMiddleware);
-  app.use("*", publicErrorMiddleware);
+  app.use("*", apiPublicErrorMiddleware);
   app.use("*", apiIpRateLimit);
   app.use("*", rejectNulBytes);
   app.use("*", serviceCors(env.corsAllowedOrigins));
@@ -112,9 +113,15 @@ export function createApiApp(): Hono {
   );
   app.use(
     "/v1/ingest/*",
-    bodyLimit({
-      maxSize: env.maxUploadBytes
-    })
+    nativeBodyLimit(env.maxUploadBytes)
+  );
+  app.use(
+    "/v1/uploads/bulk",
+    multipartBodyLimit(env.maxMultipartUploadBytes)
+  );
+  app.use(
+    "/v1/uploads/*",
+    nativeBodyLimit(env.maxUploadBytes)
   );
 
   app.use(
@@ -139,7 +146,6 @@ export function createApiApp(): Hono {
   app.route("/dashboard/bootstrap", dashboardRoutes);
   app.route("/v1/invites", inviteRoutes);
   app.route("/v1/waitlist", waitlistRoutes);
-  app.route("/v1/ai", aiRoutes);
   app.route("/v1/organizations", organizationsRoutes);
   app.route("/v1/organizations", ssoRoutes);
   app.route("/v1/runs", runsRoutes);
@@ -147,6 +153,7 @@ export function createApiApp(): Hono {
   app.route("/v1/documents", documentsRoutes);
   app.route("/v1/extractors", extractorRoutes);
   app.route("/v1/ingest", uploadsRoutes);
+  app.route("/v1/uploads", uploadsRoutes);
   app.route("/v1/webhooks", webhooksRoutes);
   app.route("/v1/artifacts", artifactsRoutes);
   app.route("/v1/files", filesRoutes);

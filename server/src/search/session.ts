@@ -44,6 +44,10 @@ export interface SearchSessionOptions {
   filters?: unknown;
   useHyDE?: boolean;
   useRerank?: boolean;
+  rerankProvider?: "bm25" | "deepinfra";
+  rerankModel?: "Qwen/Qwen3-Reranker-0.6B";
+  candidateDepth?: number;
+  resultOrder?: "relevance" | "prompt";
   useMmr?: boolean;
   parentRetrieval?: boolean;
   queryRewrite?: boolean;
@@ -220,6 +224,10 @@ function buildSearchSessionMetadata(
     runId: args.options.runId ?? null,
     useHyDE: args.options.useHyDE ?? false,
     useRerank: args.options.useRerank ?? false,
+    rerankProvider: args.options.rerankProvider ?? "bm25",
+    rerankModel: args.options.rerankProvider === "deepinfra" ? (args.options.rerankModel ?? "Qwen/Qwen3-Reranker-0.6B") : null,
+    candidateDepth: args.options.candidateDepth ?? null,
+    resultOrder: args.options.resultOrder ?? null,
     useMmr: args.options.useMmr ?? false,
     parentRetrieval: args.options.parentRetrieval ?? false,
     queryRewrite: args.options.queryRewrite ?? false,

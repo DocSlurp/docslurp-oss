@@ -1,3 +1,4 @@
+import { withBackgroundSpan } from "@docslurp/shared/observability";
 import { runAutoRecharge } from "./billing/auto-recharge.js";
 import { syncMeteringEnforcement } from "./billing/metering.js";
 import { runStorageMeter } from "./billing/storage-meter.js";
@@ -60,7 +61,7 @@ export function startMaintenanceSweeper(): void {
   if (timer || MAINTENANCE_SWEEP_INTERVAL_MS === 0) return;
   timer = setInterval(() => {
     for (const [name, run] of sweeps) {
-      run().catch((error) => {
+      withBackgroundSpan(`maintenance.${name}`, run).catch((error) => {
         console.error(`[${name}] sweep failed: ${error instanceof Error ? error.message : String(error)}`);
       });
     }

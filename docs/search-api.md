@@ -50,7 +50,7 @@ Chunks reach keyword search once the embed stage has written every chunk row of 
 
 ## Batch retrieval
 
-`POST /v1/search/batch` accepts the same search input objects:
+`POST /v1/search` accepts either a single `{ q, ...filters }` input or a batch of search input objects. Supply exactly one form; batch workspace and filter options belong inside each query:
 
 ```json
 {
@@ -66,9 +66,30 @@ The batch contains 1–20 queries; concurrency is an integer from 1 to 4, defaul
 
 Every item independently checks the API key's `search` scope and organization/workspace access. Item error codes include `FORBIDDEN` (403), `WORKSPACE_NOT_FOUND` (404), `INVALID_SEARCH_SCOPE` (400), and `SEARCH_FAILED` (500). Unexpected internal errors are sanitized. Disconnecting prevents queued retrieval from starting; in-flight retrieval may finish and record usage. Unstarted items carry `REQUEST_ABORTED` (499) if a response remains deliverable.
 
+## Errors
+
+Every error from the native JSON API (`/v1/*`, including authentication, rate limits, CORS and request-size rejections) answers with one envelope:
+
+```json
+{"error": {"code": "invalid_request", "message": "Please check the information you entered and try again.", "details": {"issues": [{"path": "queries.0.q", "message": "...", "code": "invalid_value"}]}, "requestId": "req_123"}}
+```
+
+`code` is a closed set you can branch on:
+
+- Request and access: `invalid_request`, `unauthorized`, `forbidden`, `not_found`, `workspace_not_found`, `conflict`, `payload_too_large`, `session_required`, `invalid_search_scope`, `chat_disabled`.
+- Limits: `rate_limited`, `spend_limit_exceeded`, `daily_page_limit`, `ip_temporarily_blocked`.
+- Billing: `payment_required`, `credit_exhausted`, `workspace_budget_paused`, `org_budget_paused`, `minimum_credit_required`, `plan_not_entitled`.
+- Uploads: `unsupported_type`, `file_too_large`, `unreadable_source`.
+- Organizations: `organization_not_found`, `organization_forbidden`, `organization_conflict`, `personal_organization`, `membership_exists`, `membership_forbidden`, `membership_not_found`, `last_owner`, `ownership_transfer_required`, `user_not_found`.
+- Anything else: `unavailable` and `internal`.
+
+`message` is reviewed copy for people and may change. `details` is optional and holds only `issues` (the request fields that failed validation) and limit metadata: `retryAfterSeconds`, `category`, `policy`, `limitCents`, `spentCents` on 429s, and `maxBytes` (with `directUpload` on multipart uploads) on 413s. Rate-limit responses also keep `Retry-After`, `RateLimit-Policy` and `RateLimit`. Quote `requestId` in support requests. The SDK exposes `DocSlurpApiError.code` and `.requestId`. Per-item batch errors inside a successful `200` keep their own `{code, message, status}` shape (above).
+
+Protocol surfaces keep the shapes their clients already parse: the OpenAI-compatible `/v1/chat/completions` and `/v1/models`, the MCP endpoint (`/v1/mcp`, JSON-RPC), OAuth (`/oauth/mcp/*`), the search compatibility adapters (`/compat/*`) and the Stripe webhook.
+
 ## Grounded chat
 
-`POST /v1/chat` is the canonical workspace chat endpoint. `POST /v1/search/chat` remains a compatibility alias with the same validated request and response. Send `{q, workspaceId?, sessionId?, model?}`; an omitted `workspaceId` means your organization's default workspace. `sessionId` and `model` are nonempty strings of at most 256 characters; all fields are checked before model calls. The response includes an answer, citations, and the chat session ID. Native clients can keep using `GET /v1/search/chat/stream`; OpenAI-compatible clients retain `/v1/chat/completions` and its JSON/SSE fallback.
+`POST /v1/chat` is the canonical workspace chat endpoint. Send `{q, workspaceId?, sessionId?, model?}`; an omitted `workspaceId` means your organization's default workspace. `sessionId` and `model` are nonempty strings of at most 256 characters; all fields are checked before model calls. The response includes an answer, citations, and the chat session ID. For streaming, use `/v1/chat/completions` with `stream: true`; omit it for the JSON fallback.
 
 Independent conversations can run concurrently. Await each reply before reusing its `sessionId` for the next turn. Simultaneous turns in the same conversation have no ordering guarantee. Session ownership must be verified before a caller-provided session can be reused; a database failure fails closed.
 
@@ -76,7 +97,7 @@ All routes use the existing authenticated request actor. API keys remain scoped 
 
 ## Retrieval usage and cost
 
-Successful GET/POST `/v1/search` responses include `usage`. Batch responses expose it in each successful item's `data.usage`; MCP `workspace.search` and `workspace.search-many` return the same fields.
+Successful GET/POST `/v1/search` responses include `usage`. Batch responses expose it in each successful item's `data.usage`; MCP `search` accepts the same single or batch forms and returns the same fields.
 
 | Field | Meaning |
 | --- | --- |
@@ -89,3 +110,91 @@ Successful GET/POST `/v1/search` responses include `usage`. Batch responses expo
 This is request metadata, not an invoice. It excludes ingestion, storage, and calls to your own model. Provider-reported costs and estimates remain distinguishable; zero recorded usage does not mean every service operation is free. Native chat's `usage` describes answer generation.
 
 The TypeScript SDK supports direct `for await (const hit of client.search(input))`. Save the search and await it after iteration to read `usage` and `sessionId` without sending a second request.
+
+
+## Candidate depth and result order
+
+`GET /v1/search` and single or batch `POST /v1/search` accept two optional controls:
+
+- `candidateDepth`: integer from 1 to 200. Bounds each evidence adapter's contribution and the fused candidate window before the relevance floor. This window is independent of `rerank` and the returned `limit`; a depth smaller than the output limit can return fewer hits. Filtering and the relevance floor can reduce the window further; there is no automatic refill.
+- `resultOrder`: `"relevance"` keeps the selected results in ranked order; `"prompt"` places high-ranked passages at the beginning and end for prompt assembly. It changes placement of the selected passages, not membership. This does not measure generated-answer quality.
+
+For an equal-candidate comparison, hold `candidateDepth`, `limit`, filters and floor constant while toggling `rerank`:
+
+```json
+{
+  "q": "pump maintenance interval",
+  "workspaceId": "manuals",
+  "candidateDepth": 100,
+  "limit": 10,
+  "rerank": false,
+  "resultOrder": "relevance"
+}
+```
+
+Both controls are also optional workspace retrieval defaults and per-request/thread chat retrieval overrides. The SDK exposes them on `SearchInput`; MCP schemas derive them from the same request contract. Search Session metadata records the chosen controls and adapter, fused-window, floor and ranking-depth counts.
+
+Omitting both controls preserves existing behavior: rerank-enabled searches acquire and rank up to 200 candidates, while rerank-disabled acquisition follows the result limit. Existing postprocessing packs its selected results; unprocessed fusion returns relevance order. Explicit controls are opt-in so this interface change does not claim a new ranking default based on exposed development evaluations. Scores remain the existing reciprocal output-position scores, and confidence is not a calibrated probability of answer correctness.
+
+### Optional hosted learned reranking
+
+Workspace search settings can explicitly select DeepInfra's pointwise
+`Qwen/Qwen3-Reranker-0.6B`. Omitted provider settings continue to use local BM25.
+With the operator's `DEEPINFRA_API_KEY` configured, an authorized workspace owner
+can opt in through `PATCH /v1/workspaces/:workspaceId/search-settings`:
+
+```json
+{
+  "retrievalDefaults": {
+    "useRerank": true,
+    "rerankProvider": "deepinfra",
+    "rerankModel": "Qwen/Qwen3-Reranker-0.6B",
+    "candidateDepth": 100,
+    "resultOrder": "relevance"
+  }
+}
+```
+
+Set `rerankProvider` to `"bm25"` to restore local ranking; a request with
+`rerank:false` makes no reranker call. Provider/model selection is a workspace
+setting, not an arbitrary per-request URL or credential. Search and workspace
+chat share the post-retrieval implementation. Existing output-score and citation
+contracts are retained; provider scores only choose candidate ordering.
+
+The hosted path preserves the original query and candidate bodies/identities,
+uses batches of at most 25 pairs with up to four requests in flight. One shared
+provider request deadline covers all waves: 15 seconds by default. Operators may
+set `SEARCH_RERANK_CONCURRENCY` (clamped to 1–4) and
+`SEARCH_RERANK_TIMEOUT_MS` (clamped to 1,000–30,000 ms); invalid noninteger values
+use the defaults. Two concurrent waves cover a full 200-candidate pool at the
+default concurrency, instead of eight serial calls. This is scheduling arithmetic,
+not a new provider latency measurement. Each pair is bounded to 30,000 combined
+UTF8 bytes as a conservative input limit; overlength inputs fall back without
+silently truncating evidence. Privacy modes that forbid hosted calls, missing
+keys, invalid configuration, exhausted budgets, timeout, malformed output and
+provider failures fall back to BM25 without retries. Privacy and scoped spend
+checks run before every dispatch. A failure stops new dispatches; every already
+dispatched sibling is awaited and its actual returned usage recorded before
+fallback or a metering error reaches the caller. A late successful response cannot
+clear another request’s unknown-charge diagnostic. Equal provider scores retain
+original candidate order regardless of response order. An explicit
+`candidateDepth` still controls the same acquisition/ranking pool independently
+of the provider. This integration does not assert a corpus-quality improvement.
+
+Search Session diagnostics include `hostedRerank` status, fallback reason,
+request/candidate counts, actual tokens, configured concurrency/timeout, duration, and
+`possibleUnreceiptedCharge` plus `unreceiptedRequests` when failed calls have no
+provider usage receipt.
+Raw provider errors, keys and document bodies are excluded from diagnostics.
+Actual returned tokens, including billable HTTP failures, are recorded through
+that Search Session's usage journal and persisted with its org/workspace/session
+scope. A broken usage recorder fails the search instead of hiding a lost usage
+event. Provider cost uses the verified default-tier rate of $0.01/M input tokens;
+customer ledger charges follow normal billing policy and can differ from provider
+cost. [DeepInfra model/pricing](https://deepinfra.com/Qwen/Qwen3-Reranker-0.6B).
+
+Local integration tests exercise actual `hybridSearch`, workspace settings,
+authorization, migrated Postgres spend checks, citation mapping and persisted
+usage with a mocked provider. They also verify rerank-off, privacy-blocked,
+credit-blocked and outsider requests make no provider calls. No deployment or
+provider corpus evaluation follows from enabling the implementation in source.

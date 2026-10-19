@@ -280,22 +280,4 @@ describe("Usage Event ledger", () => {
       expect(Number(call[9]), String(call[5])).toBeGreaterThan(0);
     }
   });
-
-  it("prices automation LLM calls from tokens in the operation's scope", async () => {
-    vi.spyOn(console, "log").mockImplementation(() => undefined);
-    const { recordAutomationAiUsage } = await import("../services/automation.js");
-    await recordAutomationAiUsage({
-      operation: {
-        id: "op-1", userId: "user-1", orgId: "org-1", workspaceId: "ws-1", apiKeyId: "key-1", kind: "advanced",
-      } as never,
-      metric: "automation-structured-output",
-      model: "unlisted/model",
-      usage: { inputTokens: 900, outputTokens: 100 },
-    });
-    const [call] = usageInserts();
-    expect(call?.[1]).toBe("aiop:op-1:automation-structured-output");
-    expect(Number(call?.[9])).toBeGreaterThan(0);
-    expect(insertedMetadata(call)).toMatchObject({ operationId: "op-1", orgId: "org-1", workspaceId: "ws-1", apiKeyId: "key-1" });
-    expect(console.log).toHaveBeenCalledWith(expect.stringContaining("[ai-usage] automation-structured-output"));
-  }, 60_000);
 });

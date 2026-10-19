@@ -91,7 +91,7 @@ test("browser use needs no process global and ignores browser process shims", as
     const factory = runInNewContext(`${compiled}\ncreateDocSlurpClient`, {
       ...globals, Headers, FormData, AbortController, setTimeout, clearTimeout,
       fetch: async (url, init) => {
-        assert.equal(url, init.method === "POST" ? "https://docslurp.io/v1/ingest/bulk" : "https://docslurp.io/v1/runs/run/progress");
+        assert.equal(url, init.method === "POST" ? "https://docslurp.io/v1/uploads/bulk" : "https://docslurp.io/v1/runs/run/progress");
         // Browser shims never leak DOCSLURP_WORKSPACE_ID; the default workspace is used.
         if (init.method === "POST") assert.equal(init.body.get("workspaceId"), "default");
         assert.equal(init.headers.has("authorization"), false);
@@ -156,7 +156,7 @@ test("workspaceName or templateKey without workspaceId creates a workspace inste
 
 test("upload sends named file, bearer key and workspace without pipeline options", async () => {
   const sdk = client(async (url, init) => {
-    assert.equal(url, "https://example.test/v1/ingest/bulk");
+    assert.equal(url, "https://example.test/v1/uploads/bulk");
     assert.equal(init.headers.get("authorization"), "Bearer key");
     assert.equal(init.credentials, "omit");
     assert.equal(init.body.get("files").name, "policy.pdf");
@@ -256,6 +256,31 @@ test("permanent errors and exhausted retries preserve status and body", async ()
   }
 });
 
+test("DocSlurpApiError exposes the native envelope code and request id", async () => {
+  const envelope = { error: { code: "chat_disabled", message: "Chat is turned off.", requestId: "req-1" } };
+  const sdk = client(async () => json(envelope, 403));
+  await assert.rejects(sdk.chat({ workspaceId: "workspace", q: "question" }), (error) => {
+    assert.ok(error instanceof DocSlurpApiError);
+    assert.equal(error.status, 403);
+    assert.equal(error.code, "chat_disabled");
+    assert.equal(error.requestId, "req-1");
+    assert.deepEqual(error.body, envelope);
+    return true;
+  });
+});
+
+test("DocSlurpApiError leaves code undefined for legacy and non-JSON bodies", async () => {
+  for (const response of [() => json({ error: "Forbidden" }, 403), () => json({ error: { issues: [] } }, 403), () => new Response("<h1>bad gateway</h1>", { status: 403 })]) {
+    const sdk = client(async () => response());
+    await assert.rejects(sdk.getRun("run"), (error) => {
+      assert.ok(error instanceof DocSlurpApiError);
+      assert.equal(error.code, undefined);
+      assert.equal(error.requestId, undefined);
+      return true;
+    });
+  }
+});
+
 test("AI calls and unkeyed uploads never retry; keyed upload can retry", async () => {
   for (const method of ["chat", "search", "upload", "ingestUrls"]) {
     let calls = 0;
@@ -303,7 +328,7 @@ test("the actual homepage example uploads, waits and searches over HTTP", { skip
     for await (const chunk of request) chunks.push(chunk);
     requests.push({ url: request.url, method: request.method, authorization: request.headers.authorization, body: Buffer.concat(chunks).toString() });
     let body;
-    if (request.url === "/v1/ingest/bulk" && request.method === "POST") {
+    if (request.url === "/v1/uploads/bulk" && request.method === "POST") {
       body = { workspace: { id: "workspace", name: "Handbook" }, run: { id: "run", status: "queued" }, documents: [] };
     } else if (request.url === "/v1/runs/run/progress") {
       body = { run: { id: "run", status: ++polls === 1 ? "processing" : "completed" } };
@@ -333,7 +358,7 @@ test("the actual homepage example uploads, waits and searches over HTTP", { skip
         { log: () => {} },
       );
       assert.deepEqual(requests.map(({ method, url }) => `${method} ${url}`), [
-        "POST /v1/ingest/bulk", "GET /v1/runs/run/progress", "GET /v1/runs/run/progress", "POST /v1/search",
+        "POST /v1/uploads/bulk", "GET /v1/runs/run/progress", "GET /v1/runs/run/progress", "POST /v1/search",
       ]);
       assert.ok(requests.every((request) => request.authorization === "Bearer test-key"));
       assert.match(requests[0].body, /filename="handbook.pdf"/);

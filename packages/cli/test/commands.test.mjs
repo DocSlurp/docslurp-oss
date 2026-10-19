@@ -92,7 +92,7 @@ test("upload sends actual named file bytes and authenticates", async () => {
     } }));
     assert.equal(result.code, 0, result.stderr);
     assert.equal(result.requests[0].headers.authorization, "Bearer test-key");
-    assert.equal(result.requests[0].url, "/v1/ingest/bulk");
+    assert.equal(result.requests[0].url, "/v1/uploads/bulk");
     assert.match(result.requests[0].body, /filename="policy\.txt"/);
     assert.match(result.requests[0].body, /Actual source bytes/);
     assert.match(result.requests[0].body, /name="workspaceId"\r\n\r\nworkspace/);
@@ -109,7 +109,7 @@ test("upload over the multipart cap goes straight to storage through a direct se
     const size = 20 * 1024 * 1024 + 1;
     await writeFile(file, Buffer.alloc(size, 1));
     const result = await invoke(["upload", file, "--workspace", "workspace"], (request) => {
-      if (request.url === "/v1/ingest/direct/sessions") {
+      if (request.url === "/v1/uploads/direct/sessions") {
         return { status: 201, body: { sessionId: "s1", files: [{ id: "f1", filename: "scan.pdf", mimeType: "application/pdf", sizeBytes: size, mode: "single", putUrl: `http://${request.headers.host}/storage/put/f1` }] } };
       }
       if (request.url.startsWith("/storage/")) return { body: {} };
@@ -118,10 +118,10 @@ test("upload over the multipart cap goes straight to storage through a direct se
     });
     assert.equal(result.code, 0, result.stderr);
     assert.deepEqual(result.requests.map((request) => `${request.method} ${request.url}`), [
-      "POST /v1/ingest/direct/sessions",
+      "POST /v1/uploads/direct/sessions",
       "PUT /storage/put/f1",
-      "POST /v1/ingest/direct/sessions/s1/files/complete",
-      "POST /v1/ingest/direct/sessions/s1/confirm",
+      "POST /v1/uploads/direct/sessions/s1/files/complete",
+      "POST /v1/uploads/direct/sessions/s1/confirm",
     ]);
     assert.deepEqual(JSON.parse(result.requests[0].body), { workspaceId: "workspace", files: [{ filename: "scan.pdf", mimeType: "application/pdf", sizeBytes: size }] });
     assert.equal(result.requests[1].headers.authorization, undefined, "storage never receives the API key");
@@ -222,7 +222,7 @@ test("ingest-url posts URLs with the same workspace targeting as upload", async 
   const respond = () => ({ body: { run: { id: "run" }, workspace: { id: "workspace", name: "Docs" }, documents: [{}] } });
   let result = await invoke(["ingest-url", "https://example.test/a.pdf", "--template", "legal-contracts"], respond);
   assert.equal(result.code, 0, result.stderr);
-  assert.equal(result.requests[0].url, "/v1/ingest/url");
+  assert.equal(result.requests[0].url, "/v1/uploads/url");
   assert.deepEqual(JSON.parse(result.requests[0].body), { urls: ["https://example.test/a.pdf"], newWorkspace: true, templateKey: "legal-contracts" });
   assert.match(result.stdout, /Run ID: +run/);
 
@@ -272,7 +272,7 @@ test("batch search reads a portable query file and reports ordered partial failu
     const body = { results: [{ ok: true, data: { results: [] } }, { ok: false, error: { code: "forbidden", message: "Forbidden", status: 403 } }] };
     const result = await invoke(["search", "--queries-file", path, "--concurrency", "3", "--json"], () => ({ body }), { workspaceId: "workspace" });
     assert.equal(result.code, 1);
-    assert.equal(result.requests[0].url, "/v1/search/batch");
+    assert.equal(result.requests[0].url, "/v1/search");
     assert.deepEqual(JSON.parse(result.requests[0].body), { queries: [{ q: "first", workspaceId: "workspace" }, { q: "second", workspaceId: "other" }], concurrency: 3 });
     assert.deepEqual(JSON.parse(result.stdout), body);
     const invalid = await invoke(["search", "--queries-file", path, "--concurrency", "5"], () => ({ body }), { workspaceId: "workspace" });

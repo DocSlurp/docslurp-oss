@@ -176,3 +176,25 @@ describe("workspace retrieval session options", () => {
     expect(workspaceSearchSettingsSchema.shape.retrievalDefaults.safeParse({ ...base.retrievalDefaults, minScore: 2 }).success).toBe(false);
   });
 });
+
+
+describe("independent candidate and ordering request controls", () => {
+  it("validates and forwards bounded controls without changing result count", () => {
+    const body = searchInputSchema.parse({ q: "pump maintenance", candidateDepth: 50, resultOrder: "relevance", limit: 4, rerank: false });
+    expect(searchOptions({ ...body, workspaceId: "ws-1" })).toMatchObject({ candidateDepth: 50, resultOrder: "relevance", limit: 4, useRerank: false });
+    for (const candidateDepth of [0, -1, 201, 50.5, "50"]) {
+      expect(searchInputSchema.safeParse({ q: "q", candidateDepth }).success).toBe(false);
+    }
+    expect(searchInputSchema.safeParse({ q: "q", resultOrder: "unknown" }).success).toBe(false);
+    const legacy = searchInputSchema.parse({ q: "q" });
+    expect(legacy.candidateDepth).toBeUndefined();
+    expect(legacy.resultOrder).toBeUndefined();
+  });
+
+  it("inherits optional workspace controls and respects per-request overrides", () => {
+    const settings = { ...defaultWorkspaceSearchSettings, retrievalDefaults: { ...defaultWorkspaceSearchSettings.retrievalDefaults, candidateDepth: 100, resultOrder: "prompt" as const } };
+    expect(applyWorkspaceRetrievalDefaults({}, "ws-1", settings)).toMatchObject({ candidateDepth: 100, resultOrder: "prompt" });
+    expect(applyWorkspaceRetrievalDefaults({ candidateDepth: 50, resultOrder: "relevance" }, "ws-1", settings)).toMatchObject({ candidateDepth: 50, resultOrder: "relevance" });
+    expect(applyWorkspaceRetrievalDefaults({}, "ws-1").candidateDepth).toBeUndefined();
+  });
+});

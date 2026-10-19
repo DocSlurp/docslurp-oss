@@ -11,7 +11,7 @@ import {
 
 import { actorHasAnyApiKeyScope, getRequestActor, loadActorScopedWorkspace, requireActorWorkspace } from "../lib/request-actor.js";
 import { WorkspaceAccessError } from "../services/default-workspace.js";
-import { validationErrorResponse, type ValidationErrorSource } from "../lib/validation.js";
+import { validationErrorResponse, type ValidationErrorSource, validationHook } from "../lib/validation.js";
 import { requestIp, requestUserAgent } from "../lib/request-context.js";
 import { appendAuditLog } from "../services/audit-log.js";
 import { isApiKeyLive } from "../services/api-key-liveness.js";
@@ -33,6 +33,7 @@ import {
   retryRun
 } from "../services/runs.js";
 import { acceptApiKeys } from "../lib/route-auth.js";
+import { apiErrorResponse, apiStatusError } from "../lib/api-error.js";
 
 const STREAM_HEARTBEAT_MS = 4_000;
 const STREAM_RECONCILE_MS = 30_000;
@@ -45,13 +46,13 @@ const controlRunSchema = z.object({
 /** Maps workspace resolution and access failures to 403/404; rethrows anything else. */
 function workspaceErrorResponse(c: Context, error: unknown): Response {
   if (error instanceof WorkspaceAccessError) {
-    return c.json({ error: error.message, code: error.code }, error.status === 403 ? 403 : 404);
+    return apiStatusError(c, error.status === 403 ? 403 : 404, error.message, { code: error.code });
   }
   if (error instanceof Error && error.message === "Workspace not found") {
-    return c.json({ error: "Workspace not found" }, 404);
+    return apiErrorResponse(c, 404, "workspace_not_found", "Workspace not found");
   }
   if (error instanceof Error && error.message === "Forbidden") {
-    return c.json({ error: "Forbidden" }, 403);
+    return apiStatusError(c, 403, "Forbidden");
   }
   throw error;
 }
@@ -73,7 +74,7 @@ export const runsRoutes = new Hono()
     const userId = c.get("sessionUser").id;
     const actor = getRequestActor(c);
     if (actor.type === "apiKey" && !actorHasAnyApiKeyScope(actor, ["ingest", "search", "artifacts"])) {
-      return c.json({ error: "Forbidden" }, 403);
+      return apiStatusError(c, 403, "Forbidden");
     }
     const runs = c.req.query("activity") === "true" ? await listRuns(userId, true) : await listRuns(userId);
     const orgId = actor.type === "apiKey" ? actor.apiKey.orgId : null;
@@ -83,7 +84,7 @@ export const runsRoutes = new Hono()
     const userId = c.get("sessionUser").id;
     const actor = getRequestActor(c);
     if (actor.type === "apiKey" && !actorHasAnyApiKeyScope(actor, ["ingest", "search", "artifacts"])) {
-      return c.json({ error: "Forbidden" }, 403);
+      return apiStatusError(c, 403, "Forbidden");
     }
     const orgId = actor.type === "apiKey" ? actor.apiKey.orgId : null;
     c.header("Cache-Control", "no-cache, no-transform");
@@ -128,17 +129,17 @@ export const runsRoutes = new Hono()
     const actor = getRequestActor(c);
     if (actor.type === "apiKey") {
       if (!actorHasAnyApiKeyScope(actor, ["ingest", "search", "artifacts"])) {
-        return c.json({ error: "Forbidden" }, 403);
+        return apiStatusError(c, 403, "Forbidden");
       }
       const run = await getRun(c.req.param("runId"), userId, { cost: false });
       if (!run || !await loadActorScopedWorkspace(run.workspaceId, actor)) {
-        return c.json({ error: "Run not found" }, 404);
+        return apiStatusError(c, 404, "Run not found");
       }
     }
     const snapshot = await getRunProgress(c.req.param("runId"), userId);
 
     if (!snapshot) {
-      return c.json({ error: "Run not found" }, 404);
+      return apiStatusError(c, 404, "Run not found");
     }
 
     return c.json(snapshot);
@@ -147,11 +148,11 @@ export const runsRoutes = new Hono()
     const actor = getRequestActor(c);
     const runId = c.req.param("runId");
     if (actor.type === "apiKey" && !actorHasAnyApiKeyScope(actor, ["ingest", "search", "artifacts"])) {
-      return c.json({ error: "Forbidden" }, 403);
+      return apiStatusError(c, 403, "Forbidden");
     }
     const run = await getRun(runId, actor.userId, { cost: false });
     if (!run || !await loadActorScopedWorkspace(run.workspaceId, actor)) {
-      return c.json({ error: "Run not found" }, 404);
+      return apiStatusError(c, 404, "Run not found");
     }
     c.header("X-Accel-Buffering", "no");
     const response = streamSSE(c, async stream => {
@@ -175,7 +176,7 @@ export const runsRoutes = new Hono()
     const manifest = await exportRun(c.req.param("runId"), userId);
 
     if (!manifest) {
-      return c.json({ error: "Run not found" }, 404);
+      return apiStatusError(c, 404, "Run not found");
     }
 
     return c.json(manifest);
@@ -185,7 +186,7 @@ export const runsRoutes = new Hono()
     const forensics = await getRunForensics(c.req.param("runId"), userId);
 
     if (!forensics) {
-      return c.json({ error: "Run not found" }, 404);
+      return apiStatusError(c, 404, "Run not found");
     }
 
     return c.json(forensics);
@@ -195,11 +196,11 @@ export const runsRoutes = new Hono()
     const actor = getRequestActor(c);
     if (actor.type === "apiKey") {
       if (!actorHasAnyApiKeyScope(actor, ["ingest", "search", "artifacts"])) {
-        return c.json({ error: "Forbidden" }, 403);
+        return apiStatusError(c, 403, "Forbidden");
       }
       const run = await getRun(c.req.param("runId"), userId, { cost: false });
       if (!run || !await loadActorScopedWorkspace(run.workspaceId, actor)) {
-        return c.json({ error: "Run not found" }, 404);
+        return apiStatusError(c, 404, "Run not found");
       }
     }
     const after = c.req.query("after") ?? undefined;
@@ -219,10 +220,10 @@ export const runsRoutes = new Hono()
 
     const actor = getRequestActor(c);
     if (actor.type === "apiKey" && !actorHasAnyApiKeyScope(actor, ["ingest", "search", "artifacts"])) {
-      return c.json({ error: "Forbidden" }, 403);
+      return apiStatusError(c, 403, "Forbidden");
     }
     if (!run || (actor.type === "apiKey" && !await loadActorScopedWorkspace(run.workspaceId, actor))) {
-      return c.json({ error: "Run not found" }, 404);
+      return apiStatusError(c, 404, "Run not found");
     }
 
     c.header("Cache-Control", "no-cache");
@@ -279,7 +280,7 @@ export const runsRoutes = new Hono()
       return workspaceErrorResponse(c, error);
     }
   })
-  .post("/:runId/reprocess", zValidator("json", reprocessRunSchema), async (c) => {
+  .post("/:runId/reprocess", zValidator("json", reprocessRunSchema, validationHook), async (c) => {
     const userId = c.get("sessionUser").id;
     const body = c.req.valid("json");
     let reprocessed: Awaited<ReturnType<typeof reprocessRun>>;
@@ -287,16 +288,16 @@ export const runsRoutes = new Hono()
       reprocessed = await reprocessRun(c.req.param("runId"), userId, body);
     } catch (error) {
       if (isReprocessRejectedError(error)) {
-        return c.json({ error: error.message, code: error.code, details: error.details }, error.statusCode);
+        return apiStatusError(c, error.statusCode, error.message, { code: error.code, details: error.details });
       }
       if (isRunCreationBlockedError(error)) {
-        return c.json({ error: error.message, code: error.code }, error.statusCode);
+        return apiStatusError(c, error.statusCode, error.message, { code: error.code });
       }
       throw error;
     }
 
     if (!reprocessed) {
-      return c.json({ error: "Run not found" }, 404);
+      return apiStatusError(c, 404, "Run not found");
     }
 
     const { run, deferredReason: deferred } = reprocessed;
@@ -329,7 +330,7 @@ export const runsRoutes = new Hono()
     const retried = await retryRun(c.req.param("runId"), userId);
 
     if (!retried) {
-      return c.json({ error: "Run not found" }, 404);
+      return apiStatusError(c, 404, "Run not found");
     }
 
     const { run, outcome } = retried;
@@ -357,7 +358,7 @@ export const runsRoutes = new Hono()
 
     return c.json(run);
   })
-  .post("/:runId/control", zValidator("json", controlRunSchema), async (c) => {
+  .post("/:runId/control", zValidator("json", controlRunSchema, validationHook), async (c) => {
     const userId = c.get("sessionUser").id;
     const body = c.req.valid("json");
     const run = await controlRun(c.req.param("runId"), userId, {
@@ -366,7 +367,7 @@ export const runsRoutes = new Hono()
     });
 
     if (!run) {
-      return c.json({ error: "Run not found" }, 404);
+      return apiStatusError(c, 404, "Run not found");
     }
 
     await appendAuditLog({

@@ -9,6 +9,7 @@ import {
   contextualizeChunksForEmbedding,
   embedTextChunks,
   remoteEmbeddingProviderOptions,
+  packEmbeddingBatches,
 } from "../stages/embedding-runtime.js";
 import {
   MemoryProviderRateStore,
@@ -78,7 +79,7 @@ describe("embedTextChunks", () => {
     aiMock.embedMany.mockResolvedValueOnce({ embeddings: [Array(1024).fill(1)], usage: { tokens: 17 } });
     const args = { privacyMode: "standard" as const, chunks: ["generic document passage"], profile, config: { ...fromEnv(), deepInfraApiKey: "deepinfra-test-only" }, onRemoteUsage };
     const result = await embedTextChunks(args);
-    expect(openAiMock.createOpenAI).toHaveBeenCalledWith({ apiKey: "deepinfra-test-only", baseURL: "https://api.deepinfra.com/v1/openai" });
+    expect(openAiMock.createOpenAI).toHaveBeenCalledWith({ apiKey: "deepinfra-test-only", baseURL: "https://api.deepinfra.com/v1/openai", fetch: expect.any(Function) });
     expect(remoteEmbeddingProviderOptions(profile)).toBeUndefined();
     expect(result.totalTokens).toBe(17);
     expect(Math.hypot(...result.vectors[0]!)).toBeCloseTo(1, 12);
@@ -87,15 +88,61 @@ describe("embedTextChunks", () => {
     expect(onRemoteUsage).toHaveBeenLastCalledWith(expect.objectContaining({ inputTokens: 19 }));
   });
 
-  it("refuses to silently truncate a hosted OpenAI response that ignored requested dimensions", async () => {
+  it("rejects hosted OpenAI vectors that cannot be fitted to the requested dimensions", async () => {
     const profile: EmbeddingProfile = { profile: "cheapest-hosted", target: "hosted", modelUri: "llm://openai/text-embedding-3-small", runtime: "remote", provider: "openai", model: "text-embedding-3-small", baseUrl: null, dimensions: 4, task: "document", normalize: true, batchSize: 1, lateChunking: false, lateChunkingWindow: 2, supportsCustomDimensions: true };
     const onRemoteUsage = vi.fn();
-    aiMock.embedMany.mockResolvedValueOnce({ embeddings: [Array(8).fill(1)], usage: { tokens: 9 } });
+    aiMock.embedMany.mockResolvedValueOnce({ embeddings: [Array(2).fill(1)], usage: { tokens: 9 } });
     await expect(embedTextChunks({ chunks: ["generic text"], profile, config: fromEnv(), privacyMode: "standard", onRemoteUsage })).rejects.toThrow("match requested dimensions");
     expect(onRemoteUsage).toHaveBeenCalledWith(expect.objectContaining({ inputTokens: 9 }));
     aiMock.embedMany.mockResolvedValueOnce({ embeddings: [Array(4).fill(Number.MAX_VALUE)], usage: { tokens: 11 } });
     await expect(embedTextChunks({ chunks: ["generic text"], profile, config: fromEnv(), privacyMode: "standard", onRemoteUsage })).rejects.toThrow("finite nonzero vectors");
     expect(onRemoteUsage).toHaveBeenLastCalledWith(expect.objectContaining({ inputTokens: 11 }));
+  });
+
+  it("packs hosted requests by count and UTF-8 upper bound without dropping inputs", () => {
+    const chunks = ["a".repeat(60_000), "b".repeat(60_000), "é".repeat(20_000), "last"];
+    const batches = packEmbeddingBatches(chunks, 128, 120_000);
+    expect(batches.flat()).toEqual(chunks);
+    expect(batches).toHaveLength(2);
+    for (const batch of batches) expect(batch.reduce((sum, text) => sum + new TextEncoder().encode(text).byteLength + 8, 0)).toBeLessThanOrEqual(120_000);
+    expect(packEmbeddingBatches(["a", "b", "c"], 2)).toEqual([["a", "b"], ["c"]]);
+    expect(() => packEmbeddingBatches(["a".repeat(120_000)], 128, 120_000)).toThrow("reduce chunk size");
+  });
+
+  it("uses registered OpenRouter embeddings with exact vectors and actual usage", async () => {
+    const profile: EmbeddingProfile = { profile: "cheapest-hosted", target: "hosted", modelUri: "llm://openrouter/perplexity/pplx-embed-v1-0.6b", runtime: "remote", provider: "openrouter", model: "perplexity/pplx-embed-v1-0.6b", baseUrl: null, dimensions: 1024, task: "document", normalize: true, batchSize: 32, lateChunking: false, lateChunkingWindow: 2 };
+    const onRemoteUsage = vi.fn();
+    const args = { chunks: ["A guide requires two replaceable batteries."], profile, privacyMode: "standard" as const, config: { ...fromEnv(), openRouterApiKey: "router-key" }, onRemoteUsage };
+    aiMock.embedMany.mockResolvedValueOnce({ embeddings: [Array.from({ length: 1024 }, () => 1)], usage: { tokens: 12 } });
+    const result = await embedTextChunks(args);
+    expect(openAiMock.createOpenAI).toHaveBeenCalledWith({ apiKey: "router-key", baseURL: "https://openrouter.ai/api/v1", fetch: expect.any(Function) });
+    expect(result.vectors[0]).toHaveLength(1024);
+    expect(Math.hypot(...result.vectors[0]!)).toBeCloseTo(1);
+    expect(onRemoteUsage).toHaveBeenCalledWith(expect.objectContaining({ inputTokens: 12, chunks: 1 }));
+    aiMock.embedMany.mockResolvedValueOnce({ embeddings: [[1, 2]], usage: { tokens: 14 } });
+    await expect(embedTextChunks(args)).rejects.toThrow("invalid dimensions");
+    expect(onRemoteUsage).toHaveBeenLastCalledWith(expect.objectContaining({ inputTokens: 14 }));
+    await expect(embedTextChunks({ ...args, config: { ...args.config, openRouterApiKey: "" } })).rejects.toThrow("OPENROUTER_API_KEY");
+  });
+
+  it("meters native Perplexity batches once before validating signed INT8 vectors", async () => {
+    const profile: EmbeddingProfile = { profile: "cheapest-hosted", target: "hosted", modelUri: "llm://perplexity/pplx-embed-v1-0.6b", runtime: "remote",
+      provider: "perplexity", model: "pplx-embed-v1-0.6b", baseUrl: null, dimensions: 1024, task: "document", normalize: true, batchSize: 32,
+      lateChunking: false, lateChunkingWindow: 2 };
+    const onRemoteUsage = vi.fn();
+    const fetch = vi.fn().mockResolvedValueOnce(Response.json({ usage: { prompt_tokens: 12 }, data: [{ index: 0, embedding: Buffer.alloc(1024, 1).toString("base64") }] }))
+      .mockResolvedValueOnce(Response.json({ usage: { prompt_tokens: 14 }, data: [] }));
+    vi.stubGlobal("fetch", fetch);
+    const args = { chunks: ["A guide requires two batteries."], profile, privacyMode: "standard" as const,
+      config: { ...fromEnv(), perplexityApiKey: "native-key" }, onRemoteUsage };
+    try {
+      const result = await embedTextChunks(args);
+      expect(result.vectors[0]).toHaveLength(1024);
+      expect(Math.hypot(...result.vectors[0]!)).toBeCloseTo(1);
+      expect(onRemoteUsage).toHaveBeenCalledExactlyOnceWith({ inputTokens: 12, chunks: 1 });
+      await expect(embedTextChunks(args)).rejects.toThrow("omitted vectors");
+      expect(onRemoteUsage).toHaveBeenLastCalledWith({ inputTokens: 14, chunks: 1 });
+    } finally { vi.unstubAllGlobals(); }
   });
 
   it("uses the cached JS transformers pipeline for local embeddings", async () => {
@@ -333,6 +380,7 @@ describe("embedTextChunks", () => {
     expect(openAiMock.createOpenAI).toHaveBeenCalledWith({
       apiKey: "local",
       baseURL: "http://127.0.0.1:11434/v1",
+      fetch: expect.any(Function),
     });
     expect(aiMock.embedMany).toHaveBeenCalledOnce();
     expect(aiMock.embedMany.mock.calls[0]?.[0]).toMatchObject({ providerOptions: undefined });

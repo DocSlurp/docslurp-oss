@@ -151,6 +151,37 @@ describe("chatWorkspace", () => {
     }
   });
 
+  it.each([{ requested: 8, expected: 8 }, { requested: 12, expected: 12 }, { requested: 50, expected: 12 }])(
+    "passes the resolved retrieval budget to answer generation ($requested → $expected)",
+    async ({ requested, expected }) => {
+      sqlMock.mockResolvedValue([]);
+      getWorkspace.mockResolvedValue({ id: "ws-1", orgId: "org-1", systemPrompt: null });
+      getWorkspaceSearchSettings.mockResolvedValue(buildSearchSettings({
+        chat: { mode: "retrieval" }, retrievalDefaults: { resultCount: requested },
+      }));
+      loadWorkspaceWholeCorpusContext.mockResolvedValue({
+        eligible: false, reason: "chunk-limit-exceeded", results: [],
+        stats: { documentCount: 1, chunkCount: 30, tokenEstimate: 15000, charEstimate: 60000,
+          maxDocuments: 12, maxChunks: 24, maxTokens: 12000, maxChars: 60000 },
+      });
+      const results = Array.from({ length: 15 }, (_, index) => ({
+        text: `Equipment maintenance revision ${index + 1}.`, score: 1 / (index + 1),
+        citation: { documentId: "doc-1", filename: "equipment.pdf", pageNumber: index + 1,
+          pageNumbers: [index + 1], headingPath: [], chunkIndex: index, blockIds: [], blockTypes: [] },
+      }));
+      hybridSearch.mockResolvedValue({ sessionId: "search-1", results });
+      generateAnthropicDocumentText.mockResolvedValue({ text: `Maintenance revision [${expected}].`,
+        usage: { inputTokens: 20, outputTokens: 5 }, sources: [] });
+      process.env.ANTHROPIC_API_KEY = "test-key";
+      const response = await chatWorkspace({ workspaceId: "ws-1", userId: "user-1",
+        query: "Which maintenance revisions apply?", allowConfiguration: false });
+      expect(hybridSearch).toHaveBeenCalledWith(expect.any(String), "user-1", expect.objectContaining({ limit: expected }));
+      expect(response.citations).toHaveLength(expected);
+      expect(generateAnthropicDocumentText.mock.calls[0]?.[0].documents).toHaveLength(expected);
+      expect(generateAnthropicDocumentText.mock.calls[0]?.[0].documents.at(-1).text).toBe(`Equipment maintenance revision ${expected}.`);
+    },
+  );
+
   it.each([false, true, undefined])(
     "permits workspace configuration and naming only when enabled (allowConfiguration: %s)",
     async (allowConfiguration) => {
