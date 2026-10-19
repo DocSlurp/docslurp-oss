@@ -22,6 +22,39 @@ export function validRedirect(value: unknown): value is string {
   }
 }
 
+const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]"]);
+
+/**
+ * Exact redirect URI matching (OAuth 2.1 §4.1.1), except that a loopback
+ * redirect may use any port (RFC 8252 §7.3): native clients bind an ephemeral
+ * port at request time. Scheme, host, path and query must still match exactly.
+ */
+export function redirectMatches(registered: readonly string[], requested: string): boolean {
+  if (registered.includes(requested)) return true;
+  let target: URL;
+  try { target = new URL(requested); } catch { return false; }
+  if (target.protocol !== "http:" || !LOOPBACK_HOSTS.has(target.hostname)) return false;
+  return registered.some((value) => {
+    try {
+      const candidate = new URL(value);
+      return candidate.protocol === "http:" && candidate.hostname === target.hostname
+        && candidate.pathname === target.pathname && candidate.search === target.search
+        && !target.username && !target.password && !target.hash;
+    } catch {
+      return false;
+    }
+  });
+}
+
+/** Seconds during which a just-rotated refresh token is refused without revoking the grant. */
+export const REFRESH_REUSE_LEEWAY_SECONDS = 30;
+
+/** Token endpoint failures are logged by reason only: never the token, verifier or code. */
+export function logTokenRejection(reason: string, details: { grantType: unknown; clientId?: unknown; grantId?: string }) {
+  const client = typeof details.clientId === "string" ? details.clientId.slice(0, 64) : "-";
+  console.warn(`[mcp-oauth] token_rejected reason=${reason} grant_type=${String(details.grantType).slice(0, 32)} client=${client}${details.grantId ? ` grant=${details.grantId}` : ""}`);
+}
+
 export function parseScopes(value: string | null): string[] {
   const scopes = [...new Set((value ?? MCP_SCOPES.join(" ")).split(/\s+/).filter(Boolean))];
   if (!scopes.length || scopes.some(scope => !MCP_SCOPES.includes(scope as typeof MCP_SCOPES[number]))) {

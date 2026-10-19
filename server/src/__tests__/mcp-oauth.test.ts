@@ -5,7 +5,8 @@ const release = vi.hoisted(() => vi.fn());
 vi.mock("../lib/auth.js", () => ({ appDbPool: { query, connect: async () => ({ query, release }) } }));
 vi.mock("../lib/request-actor.js", () => ({ resolveBetterAuthSessionActor: vi.fn(async () => null) }));
 import { mcpOAuthRoutes, mcpOAuthMetadataRoutes } from "../routes/mcp-oauth.js";
-import { parseScopes, pkceChallenge, validRedirect, validateMcpToken } from "../services/mcp-oauth.js";
+import { parseScopes, pkceChallenge, redirectMatches, validRedirect, validateMcpToken } from "../services/mcp-oauth.js";
+import { bearerToken, mcpBearerChallenge } from "../middleware/mcp-auth.js";
 const app = new Hono().route("/oauth/mcp", mcpOAuthRoutes).route("/", mcpOAuthMetadataRoutes);
 const url = "http://localhost:4321";
 const verifier = "x".repeat(43);
@@ -42,6 +43,42 @@ describe("MCP OAuth", () => {
     query.mockImplementation(async (sql: string) => ({ rows: sql.includes("FOR UPDATE") ? [grant] : [], rowCount: sql.includes("FROM api_keys") ? 0 : 1 }));
     expect((await token({})).status).toBe(400);
     expect(query.mock.calls.some(([sql]) => String(sql).includes("INSERT INTO mcp_oauth_tokens"))).toBe(false);
+  });
+
+  it("lets loopback redirects use any port but otherwise matches exactly (RFC 8252 §7.3)", () => {
+    const registered = ["http://127.0.0.1:3000/callback", "https://client.example/cb"];
+    expect(redirectMatches(registered, "http://127.0.0.1:51234/callback")).toBe(true);
+    expect(redirectMatches(registered, "https://client.example/cb")).toBe(true);
+    for (const uri of ["http://127.0.0.1:51234/other", "http://localhost:3000/callback", "https://client.example:8443/cb", "https://client.example/cb?x=1", "http://127.0.0.1:3000/callback?x=1"])
+      expect(redirectMatches(registered, uri)).toBe(false);
+  });
+  it("defaults an omitted resource to this server and still binds the grant", async () => {
+    query.mockImplementation(async (sql: string) => ({ rows: sql.includes("FOR UPDATE") ? [grant] : [], rowCount: 1 }));
+    const res = await token({ resource: undefined });
+    expect(res.status).toBe(200);
+  });
+  it("answers RFC 6749 §5.2 errors with a description and logs only the reason", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    query.mockImplementation(async (sql: string) => ({ rows: sql.includes("FOR UPDATE") ? [grant] : [], rowCount: 1 }));
+    const res = await token({ code_verifier: "y".repeat(43) });
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({ error: "invalid_grant", error_description: expect.stringContaining("code_verifier") });
+    expect(warn).toHaveBeenCalledWith("[mcp-oauth] token_rejected reason=pkce_mismatch grant_type=authorization_code client=client grant=grant");
+    expect(JSON.stringify(warn.mock.calls)).not.toContain("y".repeat(43));
+    warn.mockRestore();
+  });
+  it("reports a changed scope as invalid_scope and a missing client as invalid_request", async () => {
+    query.mockImplementation(async (sql: string) => ({ rows: sql.includes("FOR UPDATE") ? [grant] : [], rowCount: 1 }));
+    expect(await (await token({ scope: "read search" })).json()).toMatchObject({ error: "invalid_scope" });
+    expect((await token({ scope: "read" })).status).toBe(200);
+    expect(await (await token({ client_id: undefined })).json()).toMatchObject({ error: "invalid_request" });
+  });
+  it("parses the bearer scheme case-insensitively and challenges refused tokens with invalid_token", () => {
+    expect(bearerToken("bearer dsmcp_abc")).toBe("dsmcp_abc");
+    expect(bearerToken("Bearer  dsmcp_abc ")).toBe("dsmcp_abc");
+    expect(bearerToken("Basic abc")).toBe("");
+    expect(mcpBearerChallenge(url, false)).toBe(`Bearer resource_metadata="${url}/.well-known/oauth-protected-resource/v1/mcp", scope="search read ingest"`);
+    expect(mcpBearerChallenge(url, true)).toMatch(/^Bearer error="invalid_token", error_description="[^"]+", resource_metadata=/);
   });
 
 });
