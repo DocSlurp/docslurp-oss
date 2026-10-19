@@ -298,7 +298,7 @@ function option(options: Record<string, string>, ...names: string[]): string | u
  * tracing proxy (started once per upstream endpoint and credential set). Otherwise returns the options unchanged.
  */
 export async function withLanceS3Trace(uri: string, storageOptions: Record<string, string> | undefined, env: Record<string, string | undefined> = process.env): Promise<Record<string, string> | undefined> {
-  if (!storageOptions || !lanceS3TraceEnabled(env) || !/^s3(a|\+ddb)?:\/\//.test(uri)) return storageOptions;
+  if (!storageOptions || !lanceS3TraceEnabled(env) || !/^s3a?:\/\//.test(uri)) return storageOptions;
   const accessKeyId = option(storageOptions, "aws_access_key_id", "access_key_id") ?? env.AWS_ACCESS_KEY_ID;
   const secretAccessKey = option(storageOptions, "aws_secret_access_key", "secret_access_key") ?? env.AWS_SECRET_ACCESS_KEY;
   if (!accessKeyId || !secretAccessKey) {

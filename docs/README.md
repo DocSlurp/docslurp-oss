@@ -4,7 +4,7 @@ This index lists the documentation published in the public source tree. The file
 
 | Topic | File |
 | --- | --- |
-| Self-hosting: compose, storage, environment | self-host.md |
+| Self-hosting: compose, storage, environment | self-host/README.md |
 | Architecture overview | architecture.md |
 | HTTP API and SDK reference | api-sdk.md |
 | Search API and drop-in compatibility clients | search-api.md |

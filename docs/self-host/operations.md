@@ -1,0 +1,136 @@
+# Operations
+
+Commands on this page run from the repository root, with the stack started as
+described in [Docker Compose install](docker-compose.md).
+
+## Backups and restore
+
+Three things hold your data:
+
+- Postgres, in the named volume `postgres_data`: database records. Temporal also
+  keeps its state in this Postgres instance.
+- MinIO, in the named volume `minio_data`: raw and derived artifacts in the
+  `docslurp-files` bucket. The LanceDB vector indexes live in the same bucket
+  under the `lancedb/` prefix.
+- `.env.selfhost`: the generated credentials and encryption keys. Without the
+  encryption keys, stored credentials and secrets cannot be read.
+
+Redis is an ephemeral rate-limit cache and needs no backup.
+
+Back up all three before upgrading. The commands below write to `./backup`.
+
+```sh
+mkdir -p backup
+cp .env.selfhost backup/env.selfhost
+
+# Postgres: the docslurp database, custom format
+docker compose --env-file .env.selfhost -f compose.selfhost.yml exec -T postgres \
+  pg_dump -U docslurp -d docslurp -Fc > backup/docslurp.dump
+
+# MinIO: the whole bucket, including lancedb/, with the mc client from the createbucket service.
+# Runs as your user so it can write to ./backup.
+set -a; . ./.env.selfhost; set +a
+export MC_HOST_local="http://${AWS_ACCESS_KEY_ID}:${AWS_SECRET_ACCESS_KEY}@minio:9000"
+docker compose --env-file .env.selfhost -f compose.selfhost.yml run --rm --no-deps \
+  --user "$(id -u):$(id -g)" -e HOME=/tmp -e MC_HOST_local -v "$PWD/backup:/backup" \
+  --entrypoint mc createbucket mirror --overwrite local/docslurp-files /backup/minio
+```
+
+The `pg_dump` covers the `docslurp` database only. Workflows still in flight in
+Temporal are not in this dump; resubmit any document that was processing when you
+took the backup.
+
+`selfhost-init` generates hex keys, so they are URL-safe in `MC_HOST_local`. If you chose keys with reserved characters, URL-encode them there.
+
+The image runs as a non-root user that cannot write to a host directory you own, so the command runs as your user. `mc` reports success even when it cannot write, so check that the copy landed:
+
+```sh
+find backup/minio -type f | head
+```
+
+To restore, use a stack that has not served traffic yet, ideally on a separate
+host. Order matters:
+
+1. Put the saved file back as `.env.selfhost`.
+2. Start only the data services: `docker compose --env-file .env.selfhost -f compose.selfhost.yml up -d postgres minio`. Wait until Postgres accepts connections.
+3. Restore Postgres:
+
+   ```sh
+   docker compose --env-file .env.selfhost -f compose.selfhost.yml exec -T postgres \
+     pg_restore -U docslurp -d docslurp --clean --if-exists < backup/docslurp.dump
+   ```
+
+4. Restore the bucket. Export `MC_HOST_local` as in the backup step first.
+
+   ```sh
+   docker compose --env-file .env.selfhost -f compose.selfhost.yml run --rm --no-deps \
+     --user "$(id -u):$(id -g)" -e HOME=/tmp -e MC_HOST_local \
+     --entrypoint mc createbucket mb --ignore-existing local/docslurp-files
+   docker compose --env-file .env.selfhost -f compose.selfhost.yml run --rm --no-deps \
+     --user "$(id -u):$(id -g)" -e HOME=/tmp -e MC_HOST_local -v "$PWD/backup:/backup" \
+     --entrypoint mc createbucket mirror --overwrite /backup/minio local/docslurp-files
+   ```
+
+5. Start everything: `docker compose --env-file .env.selfhost -f compose.selfhost.yml up -d --build`.
+
+Test a restore on a separate host before you rely on it.
+
+## Upgrades
+
+To upgrade, pull the chosen release and run the same `up -d --build` command.
+The one-shot `migrate` service applies the checked-in migrations before the
+server and worker start. Watch its exit status and the server logs. Breaking schema
+changes are possible while DocSlurp is pre-release; read release notes before
+upgrading and keep a rollback backup (see [Backups and restore](#backups-and-restore)).
+
+## Monitoring
+
+- `GET /health` returns `{"ok":true,...}` while the server process is up. The
+  container healthcheck uses it.
+- `GET /ready` checks dependencies and returns 503 when a critical one fails. Only
+  Fly deployments redact it for public requests (`arrivedThroughPublicEdge` in
+  `server/src/routes/health.ts`, which needs `FLY_APP_NAME`). In the Compose stack
+  `/ready` returns full detail to every caller: latencies, schema version and
+  error text. For a public deployment, block `/ready` and `/metrics` at the
+  reverse proxy. See [Public access](public-access.md#block-internal-endpoints).
+- `GET /metrics` returns Prometheus text. It needs
+  `Authorization: Bearer <METRICS_SECRET>`, using the `METRICS_SECRET` value from
+  `.env.selfhost`. It returns 404 when `METRICS_SECRET` is unset and 401 when the
+  header is wrong.
+- Container logs: `docker compose --env-file .env.selfhost -f compose.selfhost.yml logs -f server worker`.
+
+Watch disk, memory, worker errors and `/health` before inviting users.
+
+## Scaling workers on one host
+
+Each worker processes `WORKER_DOC_CONCURRENCY` documents at a time (default `1`).
+To use more of one machine, either raise that value in `.env.selfhost` or run
+more worker containers:
+
+```sh
+docker compose --env-file .env.selfhost -f compose.selfhost.yml up -d --scale worker=2
+```
+
+With the full worker: `docker compose --env-file .env.selfhost -f compose.selfhost.yml --profile full up -d --scale worker=0 --scale worker-full=2`.
+
+Memory is the limit. Raise one setting at a time and watch memory and latency
+after each change. See [sizing](requirements.md#sizing) for what has been measured.
+This is scaling on a single host, not a multi-host design.
+
+## Troubleshooting
+
+| Symptom or message | Cause | Fix |
+| --- | --- | --- |
+| `Missing .env.selfhost. Run: node scripts/selfhost-init.mjs` | `scripts/selfhost-check.mjs` found no `.env.selfhost`. | Run `node scripts/selfhost-init.mjs` from the repository root. |
+| `.env.selfhost already exists; keeping its credentials unchanged.` | `selfhost-init.mjs` never overwrites an existing file. | Nothing to fix. Delete the file only if you want new credentials and a new database. |
+| `Missing self-host values:` followed by names | Required keys are blank in `.env.selfhost`. | Fill them in, or regenerate the file. |
+| `Use HTTPS for a non-local SELFHOST_URL.` | `SELFHOST_URL` is plain `http://` on a non-local host. | Put a TLS proxy in front and set `SELFHOST_URL=https://your-domain`. See [Public access](public-access.md). |
+| `Run node scripts/selfhost-init.mjs first` from `docker compose` | Compose was run without `--env-file .env.selfhost`, or the file is missing `DATABASE_URL`. | Use the full command from [Docker Compose install](docker-compose.md#start). |
+| `Required services are not running` from `selfhost-check.mjs --running` | A service exited or never started. | Run `ps --all` and read that service's logs. |
+| `Server health check failed: fetch failed` | The server is still starting (about 15 seconds), or it crashed, or it is not answering on the bound port. | Wait until `ps` shows the server as `healthy`, then run the check again. If it stays down, read `logs server` and check `SERVER_BIND_ADDRESS` and `SERVER_PORT`. |
+| The `migrate` service exits non-zero; server and worker never start. Logs show `[migrate] failed:` | A migration failed, or Postgres is unreachable. The server and worker wait for `migrate` to complete successfully. | Read `logs migrate`. `[migrate] waiting for the migration lock` means another migration holds the lock. Fix the cause and run `up -d` again. Restore from backup if a release broke the schema. |
+| `parser isolation unavailable` and the worker exits at start | `scripts/check-worker-prerequisites.mjs --sandbox` could not run bubblewrap. The host forbids unprivileged user namespaces or mounts (sysctl or AppArmor), or `systempaths=unconfined` was removed. | Start the worker with `compose.selfhost.yml` as shipped and keep the `security_opt` entries. On Ubuntu 23.10+, check `kernel.apparmor_restrict_unprivileged_userns`. See the host notes in [Requirements](requirements.md#host-requirements) and [Parser sandbox](security.md#parser-sandbox). |
+| `TEMPORAL_NAMESPACE must be set to a non-default namespace in production` | `TEMPORAL_NAMESPACE` is unset or `default`. | Compose sets `docslurp`. Set a non-default namespace if you changed it. |
+| Full worker shows `[worker-start] installing deferred Python deps` for a long time | With no vendor bundle source, the full worker pip-installs several GB on first boot. | Wait, or set `DOCSLURP_VENDOR_BUNDLE_BASE_URL`. See [Worker image and vendor bundles](../worker-image.md). |
+| Storage errors after you edited `AWS_ACCESS_KEY_ID` or `AWS_SECRET_ACCESS_KEY` | MinIO, the server and the worker all read these as one credential. They disagree until every service is recreated. | Recreate them together with `up -d`. If errors continue, change the keys back. |
+| Postgres rejects the new password after you edited `POSTGRES_PASSWORD` | Postgres sets its password only when the volume is first created. | Change it inside Postgres with `ALTER USER docslurp PASSWORD '...'`, then update `POSTGRES_PASSWORD` and the `DATABASE_URL` password to match and run `up -d`. |

@@ -50,10 +50,6 @@
       "types": "./dist/workspace-chat-models.d.ts",
       "import": "./dist/workspace-chat-models.js"
     },
-    "./lancedb-ddb": {
-      "types": "./dist/lancedb-ddb.d.ts",
-      "import": "./dist/lancedb-ddb.js"
-    },
     "./lancedb-s3-trace": {
       "types": "./dist/lancedb-s3-trace.d.ts",
       "import": "./dist/lancedb-s3-trace.js"

@@ -133,10 +133,10 @@ describe("GET /oauth/mcp/consent/:id", () => {
   });
   it("looks the request up by the caller's own user and session, and hides the PKCE challenge", async () => {
     mocks.resolveSession.mockResolvedValue({ type: "session", userId: "u1", sessionId: "s1" });
-    mocks.consentQuery.mockResolvedValue({ rows: [{ id: "c1", client_name: "Client", redirect_uri: "https://c.example/cb", scopes: ["search"], challenge: "secret", user_id: "u1", session_id: "s1" }] });
+    mocks.consentQuery.mockResolvedValue({ rows: [{ id: "c1", client_name: "Client", redirect_uri: "https://c.example/cb", scopes: ["search"], challenge: "secret", user_id: "u1", session_id: "s1", expires_at: new Date("2026-10-19T22:00:00Z") }] });
     const res = await app.request("/oauth/mcp/consent/c1");
     expect(res.headers.get("cache-control")).toBe("no-store");
-    expect(await res.json()).toEqual({ id: "c1", client_name: "Client", redirect_uri: "https://c.example/cb", scopes: ["search"] });
+    expect(await res.json()).toEqual({ id: "c1", client_name: "Client", redirect_uri: "https://c.example/cb", scopes: ["search"], expires_at: "2026-10-19T22:00:00.000Z" });
     expect(mocks.consentQuery.mock.calls[0]?.[1]).toEqual(["c1", "u1", "s1"]);
   });
   it("returns 404 when the request belongs to someone else (query matches no row)", async () => {

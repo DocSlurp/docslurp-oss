@@ -32,6 +32,14 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - name: Check migrations are expand/contract safe
         run: node scripts/check-migration-safety.mjs
+      - name: Check doc links
+        run: node scripts/check-docs-links.mjs
+      - name: Check Mermaid diagrams
+        run: node scripts/check-docs-mermaid.mjs
+        env:
+          # Use the runner's Chrome instead of downloading one through npx.
+          PUPPETEER_EXECUTABLE_PATH: /usr/bin/google-chrome
+          PUPPETEER_SKIP_DOWNLOAD: "1"
       - run: pnpm typecheck
       - run: pnpm build
       # Imports every released package export and enforces the server/ import boundary.

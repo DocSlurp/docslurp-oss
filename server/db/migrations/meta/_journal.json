@@ -428,6 +428,13 @@
       "when": 1792454400000,
       "tag": "0060_drop_automation_tables",
       "breakpoints": true
+    },
+    {
+      "idx": 61,
+      "version": "7",
+      "when": 1792540800000,
+      "tag": "0061_create_pgcrypto",
+      "breakpoints": true
     }
   ]
 }
