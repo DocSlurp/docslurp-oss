@@ -1,4 +1,4 @@
-import { Hono } from "hono";
+import { Hono, type Context } from "hono";
 import { appDbPool } from "../lib/auth.js";
 import { resolveBetterAuthSessionActor } from "../lib/request-actor.js";
 import { getConsentRequest, MCP_SCOPES, mcpOrigin, mcpResource, validRedirect, redirectMatches, parseScopes, transaction, oauthHash, pkceChallenge, issueTokens, secret, randomUUID, cleanupExpiredOAuthRequests, logTokenRejection, REFRESH_REUSE_LEEWAY_SECONDS } from "../services/mcp-oauth.js";
@@ -29,31 +29,37 @@ mcpOAuthRoutes.post("/register", async (c) => {
   await appDbPool.query("INSERT INTO mcp_oauth_clients(id,name,redirect_uris) VALUES($1,$2,$3::jsonb)", [id, name, JSON.stringify(body.redirect_uris)]);
   return c.json({ client_id: id, client_id_issued_at: Math.floor(Date.now() / 1000), client_name: name, redirect_uris: body.redirect_uris, token_endpoint_auth_method: "none", grant_types: ["authorization_code", "refresh_token"], response_types: ["code"] }, 201);
 });
+// Dynamically registered redirect URIs are not trusted, so request errors are
+// shown here rather than redirected to the client (RFC 9700 §4.11.2). A browser
+// gets the consent page's explanation; other callers get the OAuth JSON error.
+function authorizeError(c: Context, error: string, description: string) {
+  if (c.req.header("accept")?.includes("text/html"))
+    return c.redirect(`/app/mcp/authorize?${new URLSearchParams({ error, error_description: description })}`);
+  return c.json({ error, error_description: description }, 400);
+}
 mcpOAuthRoutes.get("/authorize", async (c) => {
   const params = new URL(c.req.url).searchParams;
   const client = (await appDbPool.query("SELECT * FROM mcp_oauth_clients WHERE id=$1", [params.get("client_id")])).rows[0];
   const redirect = params.get("redirect_uri"), challenge = params.get("code_challenge");
-  // Dynamically registered redirect URIs are not trusted, so request errors are
-  // shown here rather than redirected to the client (RFC 9700 §4.11.2).
   if (!client || !redirect || !validRedirect(redirect) || !redirectMatches(client.redirect_uris, redirect))
-    return c.json({ error: "invalid_request", error_description: "Unknown client_id or unregistered redirect_uri" }, 400);
+    return authorizeError(c, "invalid_request", "Unknown client_id or unregistered redirect_uri");
   if (params.get("response_type") !== "code")
-    return c.json({ error: "unsupported_response_type", error_description: "Only response_type=code is supported" }, 400);
+    return authorizeError(c, "unsupported_response_type", "Only response_type=code is supported");
   if (params.get("code_challenge_method") !== "S256" || !challenge || !/^[A-Za-z0-9_-]{43}$/.test(challenge))
-    return c.json({ error: "invalid_request", error_description: "PKCE with code_challenge_method=S256 is required" }, 400);
+    return authorizeError(c, "invalid_request", "PKCE with code_challenge_method=S256 is required");
   // RFC 8707: the token is always audience-bound to this MCP server. An omitted
   // resource defaults to it; any other resource is refused.
   const resource = params.get("resource") ?? mcpResource(c.req.url);
   if (resource !== mcpResource(c.req.url))
-    return c.json({ error: "invalid_target", error_description: `resource must be ${mcpResource(c.req.url)}` }, 400);
+    return authorizeError(c, "invalid_target", `resource must be ${mcpResource(c.req.url)}`);
   if ((params.get("state")?.length ?? 0) > 2048)
-    return c.json({ error: "invalid_request", error_description: "state is too long" }, 400);
+    return authorizeError(c, "invalid_request", "state is too long");
   let scopes: string[];
   try {
     scopes = parseScopes(params.get("scope"));
   }
   catch {
-    return c.json({ error: "invalid_scope", error_description: `Supported scopes: ${MCP_SCOPES.join(" ")}` }, 400);
+    return authorizeError(c, "invalid_scope", `Supported scopes: ${MCP_SCOPES.join(" ")}`);
   }
   const actor = await resolveBetterAuthSessionActor(c.req.raw.headers);
   if (!actor)
@@ -72,24 +78,28 @@ mcpOAuthRoutes.get("/consent/:id", async (c) => {
   const request = await getConsentRequest(c.req.param("id"), actor.userId, actor.sessionId);
   if (!request)
     return c.json({ error: "Not found" }, 404);
-  return c.json({ id: request.id, client_name: request.client_name, redirect_uri: request.redirect_uri, scopes: request.scopes });
+  return c.json({ id: request.id, client_name: request.client_name, redirect_uri: request.redirect_uri, scopes: request.scopes, expires_at: new Date(request.expires_at).toISOString() });
 });
 mcpOAuthRoutes.post("/authorize", async (c) => {
   if (c.req.header("origin") !== mcpOrigin(c.req.url))
     return c.json({ error: "Forbidden" }, 403);
+  const body = await c.req.parseBody();
+  // A failed decision returns to the consent page, which explains an expired,
+  // used or signed-out request instead of leaving the browser on a JSON error.
+  const requestId = typeof body.request === "string" ? body.request : "";
+  const consentPage = (extra = "") => c.redirect(`/app/mcp/authorize?request=${encodeURIComponent(requestId)}${extra}`, 303);
   const actor = await resolveBetterAuthSessionActor(c.req.raw.headers);
   if (!actor)
-    return c.json({ error: "Unauthorized" }, 401);
-  const body = await c.req.parseBody();
+    return consentPage();
   const result = await transaction(async (db) => {
-    const { rows } = await db.query(`SELECT * FROM mcp_oauth_requests WHERE id=$1 AND user_id=$2 AND session_id=$3 AND expires_at>now() AND consumed_at IS NULL FOR UPDATE`, [body.request, actor.userId, actor.sessionId]);
+    const { rows } = await db.query(`SELECT * FROM mcp_oauth_requests WHERE id=$1 AND user_id=$2 AND session_id=$3 AND expires_at>now() AND consumed_at IS NULL FOR UPDATE`, [requestId, actor.userId, actor.sessionId]);
     const request = rows[0];
     if (!request)
       return null;
     const orgId = typeof body.orgId === "string" && body.orgId.length <= 200 ? body.orgId : null;
     // Check the chosen organization before consuming, so a bad form post leaves the request usable.
     if (body.decision === "allow" && !(await db.query("SELECT 1 FROM org_memberships WHERE org_id=$1 AND user_id=$2", [orgId, actor.userId])).rowCount)
-      return null;
+      return { redirect: null, retry: "organization" };
     await db.query("UPDATE mcp_oauth_requests SET consumed_at=now() WHERE id=$1", [request.id]);
     const redirect = new URL(request.redirect_uri);
     if (request.state !== null)
@@ -97,7 +107,7 @@ mcpOAuthRoutes.post("/authorize", async (c) => {
     redirect.searchParams.set("iss", mcpOrigin(c.req.url));
     if (body.decision !== "allow") {
       redirect.searchParams.set("error", "access_denied");
-      return redirect.href;
+      return { redirect: redirect.href };
     }
     const grant = randomUUID(), code = secret("dsmcpc"), keyId = randomUUID();
     // This unexported identity lets existing usage/operation foreign keys stay valid.
@@ -109,9 +119,11 @@ mcpOAuthRoutes.post("/authorize", async (c) => {
     await db.query(`INSERT INTO mcp_oauth_grants(id,client_id,user_id,org_id,resource,scopes,api_key_id) VALUES($1,$2,$3,$4,$5,$6::jsonb,$7)`, [grant, request.client_id, actor.userId, orgId, request.resource, JSON.stringify(request.scopes), keyId]);
     await db.query(`INSERT INTO mcp_oauth_tokens(hash,grant_id,kind,redirect_uri,challenge,expires_at) VALUES($1,$2,'code',$3,$4,now()+interval '2 minutes')`, [oauthHash(code), grant, request.redirect_uri, request.challenge]);
     redirect.searchParams.set("code", code);
-    return redirect.href;
+    return { redirect: redirect.href };
   });
-  return result ? c.redirect(result, 303) : c.json({ error: "invalid_request" }, 400);
+  if (!result)
+    return consentPage();
+  return result.redirect ? c.redirect(result.redirect, 303) : consentPage(`&error=${result.retry}`);
 });
 type TokenFailure = { error: "invalid_grant" | "invalid_scope"; description: string; reason: string; grantId?: string };
 const tokenFailure = (reason: string, description: string, grantId?: string, error: TokenFailure["error"] = "invalid_grant"): TokenFailure => ({ error, description, reason, grantId });
