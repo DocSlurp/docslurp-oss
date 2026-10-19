@@ -11,7 +11,7 @@ This repository (`DocSlurp/docslurp-oss`) owns the server, worker, packages and 
 - `server/`: Hono API (`@docslurp/server`). Routes in `server/src/routes/`, services in `server/src/services/`, the Drizzle schema, Postgres migrations, `migrate.mjs` and `seed.ts` in `server/db/`.
 - `worker/`: TypeScript ingestion pipeline. Stages live in `worker/src/stages/`.
 - `packages/`: `sdk` (with the `@docslurp/sdk/embed` subpath), `cli`, `contrib-astro`, `contrib-search-compat`, `contrib-algolia-server`, `contrib-wordpress` and `shared` (contracts shared by server and clients).
-- `docs/`: public documentation. Self-host instructions are in `docs/self-host.md`.
+- `docs/`: public documentation. Self-host instructions are in `docs/self-host/`.
 
 Keep new code in the package that owns it. `server/` must not import from outside the workspace packages it declares.
 

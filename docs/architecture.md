@@ -9,7 +9,7 @@ This document captures architecture decisions that are cross-cutting enough to m
 - `worker/` runs the ingestion pipeline as Temporal activities (stages in `worker/src/stages/`). It shares Postgres, object storage and LanceDB with the server.
 - `packages/` holds the SDK (with `/embed`), CLI, `shared` contracts and the `contrib-*` integrations.
 
-A run flows from upload to object storage and a run record, through the worker stages (normalize, detect, split and render, extract, embed, index, then summarize and structure), and becomes searchable, chat-ready and visible in the dashboard. PDFs use Kreuzberg by default with Poppler as the fallback; a private native-pdf engine is used when installed, and Docling and Unstructured are optional vendor bundles ([worker image](worker-image.md)). Scanned pages go to vision models within a per-document page budget.
+A run flows from upload to object storage and a run record, through the worker stages (detect, normalize, split, extract and render, then summarize and structure, then embed and index), and becomes searchable, chat-ready and visible in the dashboard. PDFs use Kreuzberg by default with Poppler as the fallback; a private native-pdf engine is used when installed, and Docling and Unstructured are optional vendor bundles ([worker image](worker-image.md)). Scanned pages go to vision models within a per-document page budget.
 
 Deploys run migrate, then worker, then app. A worker capability handshake keeps flags that need both sides off until every live worker supports them; see releases.
 
