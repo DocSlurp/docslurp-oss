@@ -100,7 +100,8 @@ describe("batch retrieval and canonical chat", () => {
   it.each(["/v1/chat", "/v1/search/chat"])("shares validated native chat at %s", async path => {
     mocks.chat.mockResolvedValue({ answer: "answer", citations: [] });
     expect((await app().request(path, json({ q: "hello", workspaceId: "workspace", sessionId: "session", model: "model" }))).status).toBe(200);
-    expect(mocks.chat).toHaveBeenCalledWith({ query: "hello", workspaceId: "workspace", userId: "user", sessionId: "session", model: "model" });
+    expect(mocks.chat).toHaveBeenCalledWith({ query: "hello", workspaceId: "workspace", userId: "user", sessionId: "session", model: "model",
+      actor: undefined, allowAgentTools: true, signal: expect.any(AbortSignal) });
   });
   it.each([{ q: 7, workspaceId: "workspace" }, { q: "hello", workspaceId: {} }, { q: "hello", workspaceId: "workspace", model: "x".repeat(257) },
     { q: "hello", workspaceId: "workspace", sessionId: 42 }, { q: "x".repeat(16001), workspaceId: "workspace" }])("rejects malformed chat before service calls: %j", async body => {
