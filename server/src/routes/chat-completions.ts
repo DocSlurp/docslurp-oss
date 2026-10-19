@@ -91,7 +91,10 @@ const compatibleChatAuth: MiddlewareHandler = async (c, next) => {
       if (retryAfter) c.header("Retry-After", retryAfter);
       return c.json(errorBody("Request rate limit exceeded. Retry later.", "rate_limit_error", "rate_limit_exceeded"), 429);
     }
-    return c.json(errorBody("A valid DocSlurp API key is required", "authentication_error", "invalid_api_key"), denied.status as 401 | 403);
+    // A missing or unknown key is a 401 here (OpenAI clients raise AuthenticationError),
+    // even though the native API answers an unknown key with 403.
+    c.header("WWW-Authenticate", 'Bearer realm="docslurp"');
+    return c.json(errorBody("A valid DocSlurp API key is required", "authentication_error", "invalid_api_key"), 401);
   }
   if (!actorHasAnyApiKeyScope(getRequestActor(c), ["search"])) {
     return c.json(errorBody("API key needs search access", "permission_error", "insufficient_scope"), 403);
