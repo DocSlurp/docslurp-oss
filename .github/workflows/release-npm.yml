@@ -76,13 +76,20 @@ jobs:
           NODE_OPTIONS: --max-old-space-size=4096
       - run: pnpm --filter @docslurp/sdk --filter @docslurp/cli test
       - run: node --test scripts/package-release.test.mjs scripts/check-package-contents.test.mjs scripts/retire-packages.test.mjs scripts/deprecated-shims/build.test.mjs
-      # Published packages promise engines >=24 (the .nvmrc LTS); prove the built exports import.
-      - name: Test and import public packages
+      # Published packages promise engines >=20; prove it on the tagged build.
+      # CI runs only the .nvmrc LTS; this release-time step is the Node 20 floor check.
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '20'
+          package-manager-cache: false
+      - name: Test and import public packages on Node 20
         run: |
           node --version
           for package in $(node scripts/package-release.mjs list); do
             pnpm --dir "$package" run --if-present build
           done
+          (cd packages/sdk && node --test test/*.test.mjs)
+          (cd packages/cli && node --test test/*.test.mjs)
           (cd packages/contrib-search-compat && node --test test/*.test.mjs)
           # Tags before the import check existed still release.
           if [ -f scripts/check-package-imports.mjs ]; then node scripts/check-package-imports.mjs; fi
