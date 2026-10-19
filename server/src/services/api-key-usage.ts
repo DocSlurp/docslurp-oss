@@ -1,3 +1,4 @@
+import { withBackgroundSpan } from "@docslurp/shared/observability";
 import { sql } from "../db.js";
 
 /**
@@ -25,7 +26,7 @@ export function recordApiKeyRequest(keyId: string, now = Date.now()): void {
   buckets.set(minute, (buckets.get(minute) ?? 0) + 1);
   pendingRequests.set(keyId, buckets);
   if (!flushTimer) {
-    flushTimer = setTimeout(() => { void flushApiKeyUsage(); }, FLUSH_INTERVAL_MS);
+    flushTimer = setTimeout(() => { void withBackgroundSpan("api.api-key-usage-flush", () => flushApiKeyUsage()); }, FLUSH_INTERVAL_MS);
     flushTimer.unref?.();
   }
 }

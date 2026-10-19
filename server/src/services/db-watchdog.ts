@@ -15,6 +15,7 @@
  * few seconds of boot per minute and recovers by itself when the database
  * returns. Production only; DB_WATCHDOG_EXIT_AFTER_MS=0 disables it.
  */
+import { withBackgroundSpan } from "@docslurp/shared/observability";
 
 import { sql } from "../db.js";
 
@@ -81,7 +82,7 @@ export function startDbWatchdog(
   timer = setInterval(() => {
     if (running) return;
     running = true;
-    void probe(options.timeoutMs).then(({ ok, detail }) => {
+    void withBackgroundSpan("api.db-watchdog", () => probe(options.timeoutMs)).then(({ ok, detail }) => {
       const decision = state.record(ok, Date.now());
       if (!ok) console.warn(`[db-watchdog] database probe failed for ${Math.round(decision.failingForMs / 1000)}s: ${detail}`);
       if (decision.exit) {

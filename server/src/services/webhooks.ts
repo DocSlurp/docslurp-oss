@@ -1,3 +1,4 @@
+import { withBackgroundSpan } from "@docslurp/shared/observability";
 import { PUBLIC_ERROR_MESSAGES } from "@docslurp/shared";
 import { reportPublicError } from "../lib/public-errors.js";
 import { randomUUID, createHmac } from "node:crypto";
@@ -586,7 +587,7 @@ export function requestWebhookOutboxDrain(): Promise<void> {
 export async function startWebhookOutboxListener(): Promise<void> {
   if (outboxListener) return;
   outboxListener = await sql.listen("webhook_outbox", () => {
-    void requestWebhookOutboxDrain();
+    void withBackgroundSpan("api.webhook-outbox-drain", () => requestWebhookOutboxDrain());
   });
   void requestWebhookOutboxDrain();
 }

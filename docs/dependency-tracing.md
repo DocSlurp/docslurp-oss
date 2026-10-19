@@ -13,6 +13,13 @@ organization, session and stage IDs when those are available in the observation
 scope. Late-bound IDs apply to subsequent children; parent trace links remain the
 primary correlation mechanism. Existing W3C context propagation connects services.
 
+Background loops (timer ticks and LISTEN drains, such as the credit-debit flush,
+graph-job poll, maintenance sweeps and alert evaluation) run each pass under
+`withBackgroundSpan`, a root span named for the task (`worker.graph-jobs`,
+`maintenance.webhook-outbox`, `api.db-watchdog`) with a `docslurp.background.task`
+attribute. Their queries are its children instead of one-span traces, so filter
+or group by that attribute to separate idle polling from request and run work.
+
 - PostgreSQL spans cover query consumption, including pool wait, and transactions.
   They include the host, port, operation, returned row count and SQLSTATE on failure.
   Query values and connection credentials are excluded.

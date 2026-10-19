@@ -1,5 +1,5 @@
 import { flushErrorReporting, initializeWorkerErrorReporting, reportException } from "@docslurp/shared/error-reporting";
-import { initializeObservability, shutdownObservability } from "@docslurp/shared/observability";
+import { initializeObservability, shutdownObservability, withBackgroundSpan } from "@docslurp/shared/observability";
 /**
  * Temporal worker entry point.
  *
@@ -254,7 +254,8 @@ async function main(): Promise<void> {
   let maintenanceLeader = cfg.workerRunMaintenance === "true";
   const refreshMaintenanceLeadership = async () => {
     if (cfg.workerRunMaintenance !== "auto") return;
-    const leader = await store.tryMaintenanceLease("worker-maintenance", workerIdentity, maintenanceLeaseMs)
+    const leader = await withBackgroundSpan("worker.maintenance-lease", () =>
+      store.tryMaintenanceLease("worker-maintenance", workerIdentity, maintenanceLeaseMs))
       .catch((err) => {
         console.warn(`[temporal-worker] maintenance lease check failed: ${err instanceof Error ? err.message : String(err)}`);
         return false;
@@ -272,13 +273,13 @@ async function main(): Promise<void> {
   const onLeader = (task: () => void) => () => {
     if (maintenanceLeader) task();
   };
-  const scalerTimer = setInterval(onLeader(() => void scaler.tick()), 60_000);
+  const scalerTimer = setInterval(onLeader(() => void withBackgroundSpan("worker.autoscaler", () => scaler.tick())), 60_000);
   scalerTimer.unref();
 
   // Every worker (not just the leader) mirrors the app's billing enforcement so
   // compute is billed whenever Stripe is configured.
   const refreshMeteringEnforcement = () =>
-    store.loadMeteringEnforced().then(setMeteringEnforced).catch((err) => {
+    withBackgroundSpan("worker.metering-enforcement", () => store.loadMeteringEnforced()).then(setMeteringEnforced).catch((err) => {
       console.error(`[billing] metering enforcement refresh failed: ${err instanceof Error ? err.message : String(err)}`);
     });
   await refreshMeteringEnforcement();
@@ -297,13 +298,13 @@ async function main(): Promise<void> {
 
   // Background maintenance tasks (same as legacy worker)
   const budgetTimer = setInterval(onLeader(() => {
-    store.processBudgetAlerts().catch((err) => {
+    withBackgroundSpan("worker.budget-alerts", () => store.processBudgetAlerts()).catch((err) => {
       console.error(
         "budget alert sweep failed:",
         err instanceof Error ? err.message : String(err)
       );
     });
-    store.processSecretExpiryAlerts().catch((err) => {
+    withBackgroundSpan("worker.secret-expiry-alerts", () => store.processSecretExpiryAlerts()).catch((err) => {
       console.error(
         "secret expiry sweep failed:",
         err instanceof Error ? err.message : String(err)
@@ -319,7 +320,7 @@ async function main(): Promise<void> {
   const flushCreditDebits = () => {
     if (creditFlushRunning) return;
     creditFlushRunning = true;
-    store.flushPendingCreditDebits()
+    withBackgroundSpan("worker.credit-debit-flush", () => store.flushPendingCreditDebits())
       .then((result) => {
         if (result.debits > 0) {
           console.log(`[billing] credit-debit-flush orgs=${result.orgs} debits=${result.debits} credits=${result.credits.toFixed(6)}`);
@@ -340,7 +341,7 @@ async function main(): Promise<void> {
   // Replaced canonical versions: delete derived data once the grace period passes.
   const purgeOptions = purgeConfig();
   const purgeSuperseded = () =>
-    store.purgeSupersededDocuments(storage, purgeOptions).catch((err) => {
+    withBackgroundSpan("worker.superseded-purge", () => store.purgeSupersededDocuments(storage, purgeOptions)).catch((err) => {
       console.error(
         "superseded purge sweep failed:",
         err instanceof Error ? err.message : String(err)
@@ -357,12 +358,11 @@ async function main(): Promise<void> {
   const runGraphJobs = () => {
     if (graphJobRunning) return;
     graphJobRunning = true;
-    store
-      .runGraphJobs({
-        workerId: workerIdentity,
-        config: cfg,
-        concurrency: cfg.graphJobConcurrency,
-      })
+    withBackgroundSpan("worker.graph-jobs", () => store.runGraphJobs({
+      workerId: workerIdentity,
+      config: cfg,
+      concurrency: cfg.graphJobConcurrency,
+    }))
       .catch((err) => {
         console.error(
           "graph job sweep failed:",
@@ -389,7 +389,7 @@ async function main(): Promise<void> {
     ? setInterval(onLeader(() => {
         if (lanceSweepRunning) return;
         lanceSweepRunning = true;
-        indexStage.sweepLanceDbMaintenance()
+        withBackgroundSpan("worker.lancedb-maintenance-sweep", () => indexStage.sweepLanceDbMaintenance())
           .then((scheduled) => {
             if (scheduled > 0) console.log(`[lancedb] maintenance sweep scheduled=${scheduled}`);
           })
@@ -402,17 +402,16 @@ async function main(): Promise<void> {
   lanceSweepTimer?.unref();
 
   const retentionTimer = setInterval(onLeader(() => {
-    store.runRetentionSweep(storage, cfg.retentionSweepBatchSize).catch((err) => {
+    withBackgroundSpan("worker.retention-sweep", () => store.runRetentionSweep(storage, cfg.retentionSweepBatchSize)).catch((err) => {
       console.error(
         "retention sweep failed:",
         err instanceof Error ? err.message : String(err)
       );
     });
-    store
-      .runStorageIntegritySweep(storage, {
-        maxKeys: cfg.storageIntegritySweepMaxKeys,
-        prefix: cfg.storageIntegritySweepPrefix,
-      })
+    withBackgroundSpan("worker.storage-integrity-sweep", () => store.runStorageIntegritySweep(storage, {
+      maxKeys: cfg.storageIntegritySweepMaxKeys,
+      prefix: cfg.storageIntegritySweepPrefix,
+    }))
       .catch((err) => {
         console.error(
           "integrity sweep failed:",

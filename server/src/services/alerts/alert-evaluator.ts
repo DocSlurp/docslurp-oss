@@ -1,3 +1,4 @@
+import { withBackgroundSpan } from "@docslurp/shared/observability";
 import { existsSync, readFileSync } from "node:fs";
 import { hostname } from "node:os";
 import { dirname, resolve } from "node:path";
@@ -282,7 +283,7 @@ export function startAlertEvaluator(env: NodeJS.ProcessEnv = process.env): Alert
     `env=${options.delivery.environment} instance=${options.instance}`,
   );
   timer = setInterval(() => {
-    instance.tick().catch((error) => console.error(`[alert] evaluation failed: ${errorMessage(error)}`));
+    withBackgroundSpan("api.alert-evaluation", () => instance.tick()).catch((error) => console.error(`[alert] evaluation failed: ${errorMessage(error)}`));
   }, options.intervalMs);
   timer.unref?.();
   return evaluator;
