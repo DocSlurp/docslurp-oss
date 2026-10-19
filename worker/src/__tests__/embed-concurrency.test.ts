@@ -17,7 +17,11 @@ vi.mock("ai", async (importOriginal) => ({
     await sleep(5 + (digest[0]! % 25));
     calls.inFlight--;
     return {
-      embeddings: args.values.map((value) => Array.from(createHash("sha256").update(value).digest().subarray(0, 8), (byte) => byte / 255)),
+      // Full requested size: hosted OpenAI vectors shorter than the profile are rejected.
+      embeddings: args.values.map((value) => {
+        const digest = createHash("sha256").update(value).digest();
+        return Array.from({ length: 1536 }, (_, index) => (digest[index % 8]! + 1) / 256);
+      }),
       usage: { tokens: args.values.length * 7 },
     };
   }),

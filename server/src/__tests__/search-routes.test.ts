@@ -25,19 +25,21 @@ vi.mock("../services/aggregate-rag.js", () => ({
   aggregateWorkspaceRagSearch,
 }));
 
+const getWorkspace = vi.fn();
 const ensureDefaultWorkspace = vi.fn(async () => ({ id: "ws-default" }));
 vi.mock("../services/workspaces.js", () => ({ resolveWorkspaceRef: vi.fn(async () => null),
   ensureDefaultWorkspace,
-  getWorkspace: vi.fn(),
+  getWorkspace,
 }));
 
 const { searchRoutes, clearSearchResponseCacheForTests } = await import("../routes/search.js");
 const { publicErrorMiddleware } = await import("../lib/public-errors.js");
 const { apiErrorEnvelopeSchema, PUBLIC_ERROR_MESSAGES } = await import("@docslurp/shared");
 
-function buildApp() {
+function buildApp(actor?: import("../lib/request-actor.js").RequestActor) {
   const app = new Hono();
   app.use("*", async (c, next) => {
+    if (actor) c.set("requestActor", actor);
     c.set("sessionUser", {
       id: "user-1",
       email: "user-1@example.com",
@@ -294,6 +296,44 @@ describe("searchRoutes", () => {
     expect(hybridSearch).not.toHaveBeenCalled();
   });
 
+  it("forwards a verified API actor and preserves scope and workspace denials", async () => {
+    const actor = { type: "apiKey" as const, userId: "user-1", apiKey: { keyId: "key", userId: "user-1", orgId: "org", keyType: "server" as const, allowedDomains: [], scopes: ["search"], rateLimitRpm: 60, rateLimitPpd: 1000, rateLimits: [], workspaceIds: ["ws-chat"] } };
+    getWorkspace.mockResolvedValue({ id: "ws-chat", orgId: "org" });
+    chatWorkspace.mockResolvedValue({ answer: "Supported" });
+    const request = () => buildApp(actor).request("/search/chat", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ q: "Question", workspaceId: "ws-chat" }) });
+    expect((await request()).status).toBe(200);
+    expect(chatWorkspace).toHaveBeenCalledWith(expect.objectContaining({ actor, allowAgentTools: true }));
+    chatWorkspace.mockClear();
+    actor.apiKey.scopes = ["ingest"];
+    expect((await request()).status).toBe(403);
+    expect(chatWorkspace).not.toHaveBeenCalled();
+    actor.apiKey.scopes = ["search"];
+    actor.apiKey.workspaceIds = ["other"];
+    expect((await request()).status).toBe(404);
+    expect(chatWorkspace).not.toHaveBeenCalled();
+  });
+
+  it("keeps public chat on grounded retrieval when DOCSLURP_PUBLIC_CHAT_AGENT_ENABLED is off", async () => {
+    const { env } = await import("../config.js");
+    const previous = env.publicChatAgentEnabled;
+    env.publicChatAgentEnabled = false;
+    try {
+      chatWorkspace.mockResolvedValueOnce({ answer: "Supported" });
+      const response = await buildApp().request("/search/chat", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ q: "Question", workspaceId: "ws-chat" }) });
+      expect(response.status).toBe(200);
+      expect(chatWorkspace).toHaveBeenCalledWith(expect.objectContaining({ allowAgentTools: false }));
+      expect(chatWorkspace.mock.calls.at(-1)?.[0]).not.toHaveProperty("allowConfiguration");
+    } finally {
+      env.publicChatAgentEnabled = previous;
+    }
+  });
+
+  it("rejects public attempts to set the internal agent permission", async () => {
+    const response = await app.request("/search/chat", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ q: "Question", workspaceId: "ws-chat", allowAgentTools: true }) });
+    expect(response.status).toBe(400);
+    expect(chatWorkspace).not.toHaveBeenCalled();
+  });
+
   it("requires workspaceId for chat POST and forwards it to workspace chat", async () => {
     chatWorkspace.mockResolvedValueOnce({
       id: "resp-1",
@@ -339,6 +379,9 @@ describe("searchRoutes", () => {
       query: "test",
       sessionId: undefined,
       model: undefined,
+      actor: expect.objectContaining({ type: "session", userId: "user-1" }),
+      allowAgentTools: true,
+      signal: expect.any(AbortSignal),
     });
   });
 

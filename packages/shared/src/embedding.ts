@@ -3,6 +3,7 @@ import { lookupPrivateModelRoute, parsePrivateModelUri, PRIVATE_MODEL_PROVIDER }
 
 export const supportedEmbeddingModels = [
   "text-embedding-3-small",
+  "BAAI/bge-m3",
   "perplexity/pplx-embed-v1-0.6b",
   "perplexity/pplx-embed-v1-4b",
   "onnx-community/embeddinggemma-300m-ONNX",
@@ -127,6 +128,7 @@ export type EmbeddingTask = z.infer<typeof embeddingTaskSchema>;
 
 export const embeddingProviderSchema = z.enum([
   "openai",
+  "deepinfra",
   "openrouter",
   "ollama",
   "vllm",
@@ -274,11 +276,24 @@ export type EmbeddingModelRouteSpec = {
   supportsCustomDimensions: boolean;
 };
 
+export const DEEPINFRA_EMBEDDING_BASE_URL = "https://api.deepinfra.com/v1/openai";
+
+/** BGE-M3 is fixed-size, not Matryoshka; reject malformed output instead of cutting it. */
+export function validateDeepInfraEmbedding(vector: number[], dimensions = 1024, normalize = true): number[] {
+  if (dimensions !== 1024 || vector.length !== 1024 || vector.some((value) => !Number.isFinite(value))) {
+    throw new Error("DeepInfra BGE-M3 requires exactly 1024 finite embedding values");
+  }
+  const norm = Math.hypot(...vector);
+  if (!Number.isFinite(norm) || norm === 0) throw new Error("DeepInfra BGE-M3 returned an invalid zero embedding");
+  return normalize ? vector.map((value) => value / norm) : vector;
+}
+
 const embeddingModelEntries = [
   ["llm://perplexity/pplx-embed-v1-0.6b", "Perplexity Embed 0.6B (native API)", "hosted", "remote", "perplexity", "pplx-embed-v1-0.6b", 1024, 128, false, ["hosted", "open-weights", "cost"]],
   ["llm://perplexity/pplx-embed-v1-4b", "Perplexity Embed 4B (native API)", "hosted", "remote", "perplexity", "pplx-embed-v1-4b", 2560, 128, false, ["hosted", "open-weights", "quality"]],
   ["llm://openrouter/perplexity/pplx-embed-v1-0.6b", "Perplexity Embed 0.6B (OpenRouter)", "hosted", "remote", "openrouter", "perplexity/pplx-embed-v1-0.6b", 1024, 128, false, ["hosted", "open-weights", "cost"]],
   ["llm://openrouter/perplexity/pplx-embed-v1-4b", "Perplexity Embed 4B (OpenRouter)", "hosted", "remote", "openrouter", "perplexity/pplx-embed-v1-4b", 2560, 128, false, ["hosted", "open-weights", "quality"]],
+  ["llm://deepinfra/BAAI/bge-m3", "DeepInfra BGE-M3", "hosted", "remote", "deepinfra", "BAAI/bge-m3", 1024, 64, false, ["hosted", "multilingual", "quality"]],
   ["llm://openai/text-embedding-3-small", "OpenAI text-embedding-3-small", "hosted", "remote", "openai", "text-embedding-3-small", 1536, 64, true, ["hosted", "managed", "cost"]],
   ["llm://onnx/onnx-community/embeddinggemma-300m-ONNX", "EmbeddingGemma 300M ONNX", "local", "local", "onnx", "onnx-community/embeddinggemma-300m-ONNX", 768, 16, false, ["local", "onnx", "small"]],
   ["llm://huggingface/jinaai/jina-embeddings-v2-base-code", "Jina v2 Code", "local", "local", "huggingface", "jinaai/jina-embeddings-v2-base-code", 768, 16, false, ["local", "code"]],
@@ -412,9 +427,13 @@ export function resolveEmbeddingRoute(config: EmbeddingConfig) {
       dimensions: config.dimensions ?? known.dimensions,
       requestedDimensions,
       modelUri: config.modelUri,
-      baseUrl: known.provider === "openrouter" ? OPENROUTER_BASE_URL : parsed.params.get("baseUrl") ?? defaultBaseUrl,
+      baseUrl: known.provider === "openrouter" ? OPENROUTER_BASE_URL
+        : known.provider === "deepinfra" ? DEEPINFRA_EMBEDDING_BASE_URL
+          : parsed.params.get("baseUrl") ?? defaultBaseUrl,
     };
   }
+
+  if (parsed.provider === "deepinfra") throw new Error("Unsupported DeepInfra embedding model");
 
   return {
     label: parsed.model,

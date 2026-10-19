@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 /** Deterministic leakage screening; independent from extraction quality scoring.
- * Supported external manifest: integrity-manifest.json, schema docslurp-authored-eval@v1.
+ * Supported external manifest: integrity-manifest.json, schema docslurp-authored-eval@v1
+ * or docslurp-source-derived-eval@v1. Source-derived provenance records question
+ * author, derivation time and publisher/HTTPS URL/PDF hash/extraction/page hashes.
  * Each case has id, source:{path,sha256}, labels:{path,sha256}, and
  * provenance:{kind:"authored",author,description,createdAt}. Label files contain
  * {labels:[{name:string,expected:JSON}]}. Unsupported catalogs fail closed.
@@ -43,7 +45,7 @@ export function judgeIntegrity({ dataset, repo = process.cwd(), base = 'HEAD' })
     const manifestBytes = readFileSync(manifestPath);
     result.datasetHash = hash(manifestBytes);
     const manifest = JSON.parse(manifestBytes);
-    if (manifest.schema !== 'docslurp-authored-eval@v1' || !Array.isArray(manifest.cases) || !manifest.cases.length) throw new Error('unsupported-or-empty-manifest');
+    if (!['docslurp-authored-eval@v1', 'docslurp-source-derived-eval@v1'].includes(manifest.schema) || !Array.isArray(manifest.cases) || !manifest.cases.length) throw new Error('unsupported-or-empty-manifest');
     const identifiers = new Set(), labelNames = new Set(), expected = new Set(), weakAnswers = new Set(), sourceHashes = new Set();
     const load = (entry) => {
       if (!entry || !nonempty(entry.path) || isAbsolute(entry.path) || !/^[a-f0-9]{64}$/.test(entry.sha256 ?? '')) throw new Error('missing-artifact-provenance');
@@ -56,11 +58,32 @@ export function judgeIntegrity({ dataset, repo = process.cwd(), base = 'HEAD' })
     for (const entry of manifest.cases) {
       if (!nonempty(entry.id) || entry.id.length < 12 || identifiers.has(entry.id)) throw new Error('invalid-or-duplicate-case-id');
       const provenance = entry.provenance;
-      if (provenance?.kind !== 'authored' || !nonempty(provenance.author) || !nonempty(provenance.description) || !nonempty(provenance.createdAt) || !Number.isFinite(Date.parse(provenance.createdAt))) throw new Error('missing-authored-provenance');
+      if (manifest.schema === 'docslurp-authored-eval@v1') {
+        if (provenance?.kind !== 'authored' || !nonempty(provenance.author) || !nonempty(provenance.description) || !nonempty(provenance.createdAt) || !Number.isFinite(Date.parse(provenance.createdAt))) throw new Error('missing-authored-provenance');
+      } else {
+        if (provenance?.kind !== 'source-derived' || !nonempty(provenance.questionAuthor) || !nonempty(provenance.description) || !nonempty(provenance.derivedAt) || !Number.isFinite(Date.parse(provenance.derivedAt)) || !Array.isArray(provenance.sources) || !provenance.sources.length) throw new Error('missing-source-derived-provenance');
+        const sourceIdentities = new Set();
+        for (const source of provenance.sources) {
+          let url;
+          try { url = new URL(source.sourceUrl); } catch { throw new Error('invalid-source-url'); }
+          if (url.protocol !== 'https:' || url.username || url.password) throw new Error('invalid-source-url');
+          if (!nonempty(source.publisher) || !nonempty(source.extractionMethod) || !/^[a-f0-9]{64}$/.test(source.originalPdfSha256 ?? '') || !Array.isArray(source.pages) || !source.pages.length) throw new Error('missing-source-derived-provenance');
+          if (sourceIdentities.has(source.originalPdfSha256)) throw new Error('duplicate-source-provenance');
+          sourceIdentities.add(source.originalPdfSha256);
+          const pages = new Set();
+          for (const page of source.pages) {
+            if (!Number.isSafeInteger(page.page) || page.page < 1 || pages.has(page.page) || !/^[a-f0-9]{64}$/.test(page.excerptSha256 ?? '')) throw new Error('invalid-source-page-provenance');
+            pages.add(page.page);
+            sourceHashes.add(page.excerptSha256);
+          }
+          sourceHashes.add(source.originalPdfSha256);
+        }
+      }
       const source = load(entry.source), labelsBytes = load(entry.labels);
       const labels = JSON.parse(labelsBytes);
       if (!Array.isArray(labels.labels) || !labels.labels.length) throw new Error('missing-labels');
       identifiers.add(entry.id);
+      if (nonempty(entry.originalCaseId)) identifiers.add(entry.originalCaseId);
       identifiers.add(entry.source.path);
       identifiers.add(basename(entry.source.path));
       sourceHashes.add(hash(source));

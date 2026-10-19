@@ -30,7 +30,7 @@ export type InvitePreview = {
 };
 
 /** GET /oauth/mcp/consent/:id */
-export type McpConsentRequest = { id: string; client_name: string; redirect_uri: string; scopes: string[] };
+export type McpConsentRequest = { id: string; client_name: string; redirect_uri: string; scopes: string[]; expires_at: string };
 
 /** POST /v1/waitlist */
 export type WaitlistResponse = { ok: true; already_registered: boolean };

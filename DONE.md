@@ -1,5 +1,7 @@
 # Completed
 
+- Let authenticated public chat (/v1/chat, /v1/search/chat, OpenAI-compatible completions) run the bounded search agent with workspace retrieval controls enforced on every tool call, while the MCP chat tool stays grounded retrieval only (no nested agents). Toggle with DOCSLURP_PUBLIC_CHAT_AGENT_ENABLED. Also: generic missing-premise/citation agent guidance, relevance-preserving MMR without vectors, opt-in metered DeepInfra BGE-M3 embeddings, failed-search usage persistence, and retrieval/multi-search evaluation harnesses with integrity-gated evidence.
+
 - Add opt-in hosted Qwen reranking at the actual search post-retrieval seam, with workspace provider/model settings, scoped spend/privacy gates, actual-token Search Session usage, bounded fallback diagnostics and isolated SQL/service tests.
 
 - Audit public API and SDK references: feature canonical upload/search/chat interfaces, label OpenAPI compatibility aliases deprecated, document the 0.3.0 SDK methods, and correct progress, workspace and webhook examples. Align browser/CLI adapters with the documented routes.
@@ -20,4 +22,4 @@
 
 - Reduced new-account starter credits to 250 ($2.50), below Silver’s 2,000 monthly credits; migration preserves existing grants and one-time claims.
 
-- Retire the automation surface: delete the hidden `ai.simple` / `ai.advanced` / `ai.operation.get` MCP tools, `/v1/ai/*`, automation operations and grounded summaries. Their tables (`ai_operations`, `ai_operation_events`, `grounded_summaries`) are now unused; drop them in a contract migration after this deploys. The MCP catalog now has one definition per public tool name; the internal `workspace.*` ids, alias map and `docslurp://ai/*` resources are gone (`docslurp://capabilities` replaces them).
+- Retire the automation surface: delete the hidden `ai.simple` / `ai.advanced` / `ai.operation.get` MCP tools, `/v1/ai/*`, automation operations and grounded summaries. Migration 0060 drops their tables (`ai_operations`, `ai_operation_events`, `grounded_summaries`) as the follow-up contract step. The MCP catalog now has one definition per public tool name; the internal `workspace.*` ids, alias map and `docslurp://ai/*` resources are gone (`docslurp://capabilities` replaces them).

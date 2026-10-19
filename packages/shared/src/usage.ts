@@ -67,6 +67,11 @@ export const defaultAiUsagePricing: AiUsagePricing = {
 
 export const defaultAiUsagePricingCatalog: AiUsagePricingCatalogEntry[] = [
   {
+    provider: "deepinfra", model: "BAAI/bge-m3",
+    // DeepInfra official route: $0.010/M input tokens, checked 2026-10-16.
+    costPer1kInputTokens: 0.001, costPer1kOutputTokens: 0,
+  },
+  {
     provider: "openrouter",
     model: DEFAULT_PIPELINE_TEXT_MODEL,
     ...defaultAiUsagePricing,

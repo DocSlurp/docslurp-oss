@@ -1,0 +1,59 @@
+{
+  "at": "2026-10-17T05:43:52.436Z",
+  "documents": [
+    {
+      "runName": "e2-hosted-asu",
+      "keys": [
+        "documentId",
+        "embedding",
+        "vectorBackends",
+        "chunking",
+        "source",
+        "chunks",
+        "usage",
+        "runtime",
+        "reuse",
+        "documentContext"
+      ],
+      "storedReuseKeys": [
+        "keyVersion",
+        "fingerprint",
+        "hits",
+        "misses",
+        "documentContextReused"
+      ],
+      "fingerprintSource": "artifact.reuse.fingerprint",
+      "fingerprint": "{\"v\":1,\"runtime\":\"remote\",\"provider\":\"openai\",\"model\":\"text-embedding-3-small\",\"baseUrl\":null,\"dimensions\":1536,\"customDimensions\":true,\"task\":\"document\",\"normalize\":true,\"dtype\":null}",
+      "chunks": 8816,
+      "missing": 0,
+      "mismatch": 0
+    },
+    {
+      "runName": "e3-hosted-statutes83",
+      "keys": [
+        "documentId",
+        "embedding",
+        "vectorBackends",
+        "chunking",
+        "source",
+        "chunks",
+        "usage",
+        "runtime",
+        "reuse",
+        "documentContext"
+      ],
+      "storedReuseKeys": [
+        "keyVersion",
+        "fingerprint",
+        "hits",
+        "misses",
+        "documentContextReused"
+      ],
+      "fingerprintSource": "artifact.reuse.fingerprint",
+      "fingerprint": "{\"v\":1,\"runtime\":\"remote\",\"provider\":\"openai\",\"model\":\"text-embedding-3-small\",\"baseUrl\":null,\"dimensions\":1536,\"customDimensions\":true,\"task\":\"document\",\"normalize\":true,\"dtype\":null}",
+      "chunks": 4859,
+      "missing": 0,
+      "mismatch": 0
+    }
+  ]
+}
