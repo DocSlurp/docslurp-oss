@@ -622,7 +622,10 @@ class MultipartUploadWriter extends Writable {
 
     // Cut exactly partSizeBytes for every non-final part: R2 (and other strict stores) reject
     // CompleteMultipartUpload with InvalidPart when non-trailing parts differ in length.
-    const all = Buffer.concat(this.pendingChunks, this.totalBufferedBytes);
+    const all =
+      this.pendingChunks.length === 1
+        ? this.pendingChunks[0]!
+        : Buffer.concat(this.pendingChunks, this.totalBufferedBytes);
     const cut = force ? all.length : this.partSizeBytes;
     const body = all.subarray(0, cut);
     const rest = all.subarray(cut);
