@@ -15,7 +15,7 @@ import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import type { Readable } from "node:stream";
 
 import { env } from "../config.js";
-import { s3ClientConfig } from "@docslurp/shared";
+import { resolveS3ClientTuning, s3ClientConfig } from "@docslurp/shared";
 
 const s3Client = instrumentS3Client(new S3Client(s3ClientConfig(env.storage)), env.storage.endpoint);
 
@@ -99,7 +99,7 @@ export async function uploadFile(key: string, body: Buffer, contentType: string)
   return key;
 }
 
-const STREAM_PART_BYTES = 8 * 1024 * 1024;
+const STREAM_PART_BYTES = resolveS3ClientTuning().multipartPartSizeBytes ?? 8 * 1024 * 1024;
 
 /**
  * Stream a body into storage. PutObject needs a known Content-Length: a stream
