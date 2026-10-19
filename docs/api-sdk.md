@@ -770,7 +770,7 @@ Every 429 has `Retry-After` and the [error envelope](https://docslurp.io/docs/se
 - Allowed websites restrict where a browser key works. They don't make a server key safe to use in a browser.
 - Stored files never leave private storage directly. Every `url` in document, artifact and export responses is a DocSlurp file URL (`/v1/files/…`) that streams through an authenticated proxy. It works only with the same API key that received it (send the same `Authorization` header), expires within about 75 minutes, and stops working when the key is revoked or loses access to the document. To show page images to your own users, stream them through your backend. Byte ranges (`Range`) are supported.
 - `formatSearchContext` formats search results as evidence for any LLM. Keep document text separate from your instructions, and keep the structured citations.
-- The Node SDK and CLI need Node.js 20+ and are ESM. From other languages, use HTTP; there is no Python SDK.
+- The Node SDK and CLI need Node.js 24+ and are ESM. From other languages, use HTTP; there is no Python SDK.
 
 ## Primary sponsor
 

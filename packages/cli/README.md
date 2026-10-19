@@ -12,7 +12,7 @@ Start with [your first search](#your-first-search), see [shell workflows](#built
 
 ## Your first search
 
-You need **Node.js 20+** and a [server key](https://docslurp.io/app/api-keys) with the **ingest** and **search** scopes. These commands use Bash or zsh. In PowerShell, set the key with `$env:DOCSLURP_API_KEY = 'your-server-key'`.
+You need **Node.js 24+** and a [server key](https://docslurp.io/app/api-keys) with the **ingest** and **search** scopes. These commands use Bash or zsh. In PowerShell, set the key with `$env:DOCSLURP_API_KEY = 'your-server-key'`.
 
 ```bash
 npm install --global @docslurp/cli

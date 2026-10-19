@@ -16,7 +16,7 @@ Start with the [quickstart](#from-file-to-search-results). Then see [live progre
 
 ## From file to search results
 
-You need **Node.js 20+** and ESM (`.mjs` files, or `"type": "module"`); TypeScript works the same way. Create a [server key](https://docslurp.io/app/api-keys) with the **ingest** and **search** scopes.
+You need **Node.js 24+** and ESM (`.mjs` files, or `"type": "module"`); TypeScript works the same way. Create a [server key](https://docslurp.io/app/api-keys) with the **ingest** and **search** scopes.
 
 ```bash
 npm install @docslurp/sdk@^0.3.0
