@@ -60,10 +60,22 @@ if (profile === 'full' || profile === 'test' || profile === 'lean') {
 if (args.includes('--sandbox')) {
   if (process.platform !== 'linux') failures.push('bubblewrap isolation requires Linux');
   else {
-    const result = spawnSync('bash', [path.join(root, 'worker/scripts/parser-sandbox.sh'), '/usr/bin/true'], {
+    const sandboxed = (command) => spawnSync('bash', [path.join(root, 'worker/scripts/parser-sandbox.sh'), ...command], {
       encoding: 'utf8', timeout: 10000, env: { ...process.env, DOCSLURP_PARSER_SANDBOX_MODE: 'isolated' },
     });
+    const result = sandboxed(['/usr/bin/true']);
     if (result.status !== 0) failures.push(`parser isolation unavailable: ${result.error?.message || result.stderr.trim()}`);
+    else {
+      // `true` links only libc. Run the real parsers too, so a library the
+      // sandbox cannot see (ffmpeg's libblas.so.3 via /etc/alternatives) fails
+      // startup instead of every upload of that format.
+      for (const [name, flag] of [['ffprobe', '-version'], ['ffmpeg', '-version'], ['pdftoppm', '-v'], ['pandoc', '--version']]) {
+        const binary = await binaryPath(name);
+        if (!binary) continue;
+        const run = sandboxed([binary, flag]);
+        if (run.status !== 0) failures.push(`${name} fails inside the parser sandbox (exit ${run.status}): ${run.error?.message || run.stderr.trim().split('\n')[0]}`);
+      }
+    }
   }
 }
 for (const failure of failures) console.error(`[worker-prerequisites] ${failure}`);
