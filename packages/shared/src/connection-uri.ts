@@ -19,6 +19,12 @@
  * AWS SDK, via AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY. Use redactUri()
  * before logging a URI.
  *
+ * LANCEDB_STORAGE_URI (same shape as STORAGE_URI) gives the index its own
+ * endpoint, region and credentials, so blobs can live on a store without
+ * conditional writes (for example Backblaze B2) while LanceDB commits elsewhere.
+ * S3_* variables tune the AWS SDK client; LANCEDB_* variables tune Lance's
+ * object store (see resolveS3ClientTuning and resolveLanceDbConfig).
+ *
  * The pre-URI variables (S3_BUCKET, AWS_ENDPOINT_URL_S3, AWS_REGION) are still
  * honored when STORAGE_URI is unset so existing deployments keep working.
  */
@@ -152,13 +158,104 @@ export function resolveObjectStorageConfig(env: Env = process.env): ObjectStorag
   };
 }
 
-/** Builds the S3Client configuration shared by every object-storage client. */
-export function s3ClientConfig(storage: ObjectStorageConfig) {
+function readInt(env: Env, name: string, min: number, max = Number.MAX_SAFE_INTEGER): number | undefined {
+  const raw = readEnv(env[name]);
+  if (raw === undefined) return undefined;
+  const value = Number(raw);
+  if (!Number.isInteger(value) || value < min || value > max) {
+    throw new Error(`${name} must be an integer between ${min} and ${max}; received "${raw}"`);
+  }
+  return value;
+}
+
+function readEnvBoolean(env: Env, name: string): boolean | undefined {
+  const raw = readEnv(env[name]);
+  return raw === undefined ? undefined : readBoolean(raw, false);
+}
+
+export type S3ChecksumMode = "when_supported" | "when_required";
+
+/** Optional S3 client tuning from S3_* variables; every field is undefined unless set. */
+export interface S3ClientTuning {
+  maxSockets?: number;
+  keepAlive?: boolean;
+  keepAliveInitialDelayMs?: number;
+  connectionTimeoutMs?: number;
+  requestTimeoutMs?: number;
+  socketTimeoutMs?: number;
+  maxAttempts?: number;
+  retryMode?: "standard" | "adaptive";
+  checksumMode?: S3ChecksumMode;
+  forcePathStyle?: boolean;
+  /** Multipart part size in bytes for streamed uploads (server). */
+  multipartPartSizeBytes?: number;
+}
+
+/**
+ * Reads S3 client tuning:
+ *   S3_MAX_SOCKETS, S3_KEEPALIVE, S3_KEEPALIVE_INITIAL_DELAY_MS,
+ *   S3_CONNECTION_TIMEOUT_MS, S3_REQUEST_TIMEOUT_MS, S3_SOCKET_TIMEOUT_MS,
+ *   S3_MAX_ATTEMPTS, S3_RETRY_MODE (standard|adaptive),
+ *   S3_CHECKSUM_MODE (when_supported|when_required),
+ *   S3_FORCE_PATH_STYLE (overrides STORAGE_URI pathStyle),
+ *   S3_MULTIPART_PART_SIZE_MB (5-5120).
+ * Unset variables leave the AWS SDK defaults untouched.
+ */
+export function resolveS3ClientTuning(env: Env = process.env): S3ClientTuning {
+  const retryMode = readEnv(env.S3_RETRY_MODE)?.toLowerCase();
+  if (retryMode && retryMode !== "standard" && retryMode !== "adaptive") {
+    throw new Error(`S3_RETRY_MODE must be standard or adaptive; received "${retryMode}"`);
+  }
+  const checksum = readEnv(env.S3_CHECKSUM_MODE)?.toLowerCase();
+  if (checksum && checksum !== "when_supported" && checksum !== "when_required") {
+    throw new Error(`S3_CHECKSUM_MODE must be when_supported or when_required; received "${checksum}"`);
+  }
+  const partMb = readInt(env, "S3_MULTIPART_PART_SIZE_MB", 5, 5120);
+  const tuning: S3ClientTuning = {
+    maxSockets: readInt(env, "S3_MAX_SOCKETS", 1),
+    keepAlive: readEnvBoolean(env, "S3_KEEPALIVE"),
+    keepAliveInitialDelayMs: readInt(env, "S3_KEEPALIVE_INITIAL_DELAY_MS", 0),
+    connectionTimeoutMs: readInt(env, "S3_CONNECTION_TIMEOUT_MS", 1),
+    requestTimeoutMs: readInt(env, "S3_REQUEST_TIMEOUT_MS", 1),
+    socketTimeoutMs: readInt(env, "S3_SOCKET_TIMEOUT_MS", 1),
+    maxAttempts: readInt(env, "S3_MAX_ATTEMPTS", 1, 20),
+    retryMode: retryMode as S3ClientTuning["retryMode"],
+    checksumMode: checksum as S3ChecksumMode | undefined,
+    forcePathStyle: readEnvBoolean(env, "S3_FORCE_PATH_STYLE"),
+    multipartPartSizeBytes: partMb === undefined ? undefined : partMb * 1024 * 1024,
+  };
+  for (const key of Object.keys(tuning) as Array<keyof S3ClientTuning>) if (tuning[key] === undefined) delete tuning[key];
+  return tuning;
+}
+
+/**
+ * Builds the S3Client configuration shared by every object-storage client.
+ * Tuning comes from S3_* variables (see resolveS3ClientTuning); with none set
+ * the result is the plain region/endpoint/credentials configuration.
+ */
+export function s3ClientConfig(storage: ObjectStorageConfig, env: Env = process.env) {
+  const tuning = resolveS3ClientTuning(env);
+  const agentOptions = {
+    ...(tuning.maxSockets !== undefined ? { maxSockets: tuning.maxSockets } : {}),
+    ...(tuning.keepAlive !== undefined ? { keepAlive: tuning.keepAlive } : {}),
+    ...(tuning.keepAliveInitialDelayMs !== undefined ? { keepAliveMsecs: tuning.keepAliveInitialDelayMs } : {}),
+  };
+  const handlerOptions = {
+    ...(tuning.connectionTimeoutMs !== undefined ? { connectionTimeout: tuning.connectionTimeoutMs } : {}),
+    ...(tuning.requestTimeoutMs !== undefined ? { requestTimeout: tuning.requestTimeoutMs } : {}),
+    ...(tuning.socketTimeoutMs !== undefined ? { socketTimeout: tuning.socketTimeoutMs } : {}),
+    ...(Object.keys(agentOptions).length ? { httpAgent: agentOptions, httpsAgent: agentOptions } : {}),
+  };
+  const checksum = tuning.checksumMode === undefined ? undefined : (tuning.checksumMode.toUpperCase() as "WHEN_SUPPORTED" | "WHEN_REQUIRED");
   return {
     region: storage.region,
     ...(storage.endpoint ? { endpoint: storage.endpoint } : {}),
-    forcePathStyle: storage.forcePathStyle,
+    forcePathStyle: tuning.forcePathStyle ?? storage.forcePathStyle,
     credentials: { accessKeyId: storage.accessKeyId, secretAccessKey: storage.secretAccessKey },
+    ...(Object.keys(handlerOptions).length ? { requestHandler: handlerOptions } : {}),
+    ...(tuning.maxAttempts !== undefined ? { maxAttempts: tuning.maxAttempts } : {}),
+    ...(tuning.retryMode ? { retryMode: tuning.retryMode } : {}),
+    ...(checksum ? { requestChecksumCalculation: checksum, responseChecksumValidation: checksum } : {}),
   };
 }
 
@@ -196,5 +293,35 @@ export function parseLanceDbUri(value: string | undefined, storage?: ObjectStora
 
 /** LanceDB config from LANCEDB_URI plus the shared object storage settings. */
 export function resolveLanceDbConfig(env: Env = process.env, storage = resolveObjectStorageConfig(env)): LanceDbConfig {
-  return parseLanceDbUri(env.LANCEDB_URI, storage);
+  const lanceStorageUri = readEnv(env.LANCEDB_STORAGE_URI);
+  if (!lanceStorageUri) return withLanceTuning(parseLanceDbUri(env.LANCEDB_URI, storage), env);
+  // Separate index store: its own endpoint, region and credentials. When
+  // LANCEDB_URI is unset the index lives at s3://<LANCEDB_STORAGE_URI bucket>/lancedb.
+  let lanceStorage: ObjectStorageConfig;
+  try {
+    lanceStorage = parseStorageUri(lanceStorageUri, env);
+  } catch (error) {
+    throw new Error(String(error instanceof Error ? error.message : error).replace("STORAGE_URI", "LANCEDB_STORAGE_URI"));
+  }
+  const root = readEnv(env.LANCEDB_URI) ?? `s3://${lanceStorage.bucket}/lancedb`;
+  return withLanceTuning(parseLanceDbUri(root, lanceStorage), env);
+}
+
+/**
+ * Optional LanceDB object-store tuning, merged into s3 storage options:
+ *   LANCEDB_CONNECT_TIMEOUT_SECONDS, LANCEDB_REQUEST_TIMEOUT_SECONDS,
+ *   LANCEDB_CLIENT_MAX_RETRIES, LANCEDB_POOL_MAX_IDLE_PER_HOST.
+ */
+function withLanceTuning(config: LanceDbConfig, env: Env): LanceDbConfig {
+  if (!config.storageOptions) return config;
+  const extra: Record<string, string> = {};
+  const connect = readInt(env, "LANCEDB_CONNECT_TIMEOUT_SECONDS", 1);
+  const request = readInt(env, "LANCEDB_REQUEST_TIMEOUT_SECONDS", 1);
+  const retries = readInt(env, "LANCEDB_CLIENT_MAX_RETRIES", 0, 100);
+  const idle = readInt(env, "LANCEDB_POOL_MAX_IDLE_PER_HOST", 0);
+  if (connect !== undefined) extra.connect_timeout = `${connect}s`;
+  if (request !== undefined) extra.timeout = `${request}s`;
+  if (retries !== undefined) extra.client_max_retries = String(retries);
+  if (idle !== undefined) extra.pool_max_idle_per_host = String(idle);
+  return Object.keys(extra).length ? { ...config, storageOptions: { ...config.storageOptions, ...extra } } : config;
 }

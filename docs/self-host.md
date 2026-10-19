@@ -144,6 +144,26 @@ LANCEDB_URI=s3://docslurp-files/lancedb
 LANCEDB_URI=s3://docslurp-vectors/lancedb?region=eu-west-1
 ```
 
+**Separate index store** — set `LANCEDB_STORAGE_URI` (same shape as
+`STORAGE_URI`, with its own credentials) to keep the index on a different store
+than blobs, for example blobs on Backblaze B2 (which rejects conditional
+`PutObject`, so Lance cannot commit there) and the index on Tigris or S3. When
+`LANCEDB_URI` is unset the root is `s3://<that bucket>/lancedb`. Unset, the
+index inherits `STORAGE_URI` as before.
+
+**Client tuning** — all optional; unset keeps AWS SDK and Lance defaults.
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `S3_MAX_SOCKETS` | SDK (50) | Max concurrent sockets per host. |
+| `S3_KEEPALIVE` / `S3_KEEPALIVE_INITIAL_DELAY_MS` | SDK (on) | TCP keepalive. |
+| `S3_CONNECTION_TIMEOUT_MS` / `S3_REQUEST_TIMEOUT_MS` / `S3_SOCKET_TIMEOUT_MS` | SDK | Connect, request and idle-socket timeouts. |
+| `S3_MAX_ATTEMPTS` / `S3_RETRY_MODE` | SDK (3, `standard`) | Retries; mode `standard` or `adaptive`. |
+| `S3_CHECKSUM_MODE` | SDK | `when_supported` or `when_required`; sets request and response checksum handling. Providers such as B2 and R2 often need `when_required`. |
+| `S3_FORCE_PATH_STYLE` | `STORAGE_URI` `pathStyle` | Overrides path-style addressing. |
+| `S3_MULTIPART_PART_SIZE_MB` | `8` | Part size for streamed server uploads (5-5120). |
+| `LANCEDB_CONNECT_TIMEOUT_SECONDS`, `LANCEDB_REQUEST_TIMEOUT_SECONDS`, `LANCEDB_CLIENT_MAX_RETRIES`, `LANCEDB_POOL_MAX_IDLE_PER_HOST` | Lance | Lance object-store options (`connect_timeout`, `timeout`, `client_max_retries`, `pool_max_idle_per_host`) for `s3://` roots. |
+
 Use a shared `s3://` root whenever the server and worker run in separate containers
 or machines. Log URIs only after redaction because `STORAGE_URI` may hold a
 secret.
