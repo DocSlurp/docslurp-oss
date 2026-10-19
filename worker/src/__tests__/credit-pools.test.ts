@@ -1,3 +1,4 @@
+import { STARTER_CREDITS } from "@docslurp/shared";
 import type { PGlite } from "@electric-sql/pglite";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
@@ -165,11 +166,11 @@ describe("credit pool functions", () => {
       insert into organizations (id, name, created_by_user_id, is_personal, personal_owner_user_id)
       values ('starter-org', 'S', 'starter-user', true, 'starter-user');
     `);
-    expect((await pools("starter-org")).prepaid).toBe(2500);
+    expect((await pools("starter-org")).prepaid).toBe(STARTER_CREDITS);
     const { rows } = await db.query<{ source: string; credits: string }>(
       `select source, credits::text from credit_grants where org_id = 'starter-org'`,
     );
-    expect(rows).toEqual([{ source: "starter", credits: "2500.000000000000" }]);
+    expect(rows).toEqual([{ source: "starter", credits: STARTER_CREDITS.toFixed(12) }]);
   });
 
   describe("pending debits (migration 0030)", () => {
