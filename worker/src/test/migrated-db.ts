@@ -3,6 +3,7 @@ import { fileURLToPath } from "node:url";
 
 import { PGlite } from "@electric-sql/pglite";
 import { vector } from "@electric-sql/pglite-pgvector";
+import { pgcrypto } from "@electric-sql/pglite/contrib/pgcrypto";
 
 // The migrations live in the server package (server/db/migrations), which owns the
 // schema. The worker only reads the SQL files by relative path for its test
@@ -69,7 +70,7 @@ export async function createMigratedDatabase(options: { stopBefore?: string } = 
   const tags = journal.map((entry) => entry.tag);
   const stop = options.stopBefore ? findTag(tags, options.stopBefore) : tags.length;
   if (stop < 0) throw new Error(`Unknown migration ${options.stopBefore}`);
-  const db = new PGlite({ extensions: { vector } });
+  const db = new PGlite({ extensions: { vector, pgcrypto } });
   for (const tag of tags.slice(0, stop)) await applyMigration(db, tag);
   return db;
 }
