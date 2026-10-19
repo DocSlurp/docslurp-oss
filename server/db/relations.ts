@@ -1,5 +1,5 @@
 import { relations } from "drizzle-orm/relations";
-import { user, creditLedger, organizations, documents, vectorIndexes, workspaceRuns, usageEvents, workspaces, performanceLog, workspaceRunEvents, workspaceSecrets, session, account, workspaceInvites, documentCorrections, pageStageStates, workspaceConnectors, webhooks, documentChunks, documentPages, webhookDeliveries, notificationPrefs, notificationDeliveries, apiKeys, documentSummaries, searchSessions, searchSessionResults, auditLog, searchEvalFixtures, searchIndexStaleness, documentPropositions, idempotencyCache, searchExperiments, chatSessions, chatTurns, aiOperations, aiOperationEvents, groundedSummaries, piiDetections, chatAnswerEvidenceSpans, parserEvalFixtures, parserEvalResults, uploadSessions, uploadSessionFiles, searchZeroResults, workspaceSearchSettings, querySuggestions, privacyAuditLog, connectorSyncLog, oauthAccounts, ssoAuthRequests, kgNodes, kgEdges, kgCommunities, orgMemberships, documentTags, apiKeyUsage, kgCommunityMembers, workspaceMembers, workspaceRunStageStates, documentRunStageStates, chunkEntities, creditGrants, storageMeterDays } from "./schema";
+import { user, creditLedger, organizations, documents, vectorIndexes, workspaceRuns, usageEvents, workspaces, performanceLog, workspaceRunEvents, workspaceSecrets, session, account, workspaceInvites, documentCorrections, pageStageStates, workspaceConnectors, webhooks, documentChunks, documentPages, webhookDeliveries, notificationPrefs, notificationDeliveries, apiKeys, documentSummaries, searchSessions, searchSessionResults, auditLog, searchEvalFixtures, searchIndexStaleness, documentPropositions, idempotencyCache, searchExperiments, chatSessions, chatTurns, piiDetections, chatAnswerEvidenceSpans, parserEvalFixtures, parserEvalResults, uploadSessions, uploadSessionFiles, searchZeroResults, workspaceSearchSettings, querySuggestions, privacyAuditLog, connectorSyncLog, oauthAccounts, ssoAuthRequests, kgNodes, kgEdges, kgCommunities, orgMemberships, documentTags, apiKeyUsage, kgCommunityMembers, workspaceMembers, workspaceRunStageStates, documentRunStageStates, chunkEntities, creditGrants, storageMeterDays } from "./schema";
 
 export const creditLedgerRelations = relations(creditLedger, ({one}) => ({
 	user: one(user, {
@@ -45,9 +45,7 @@ export const userRelations = relations(user, ({many}) => ({
 	idempotencyCaches: many(idempotencyCache),
 	searchExperiments: many(searchExperiments),
 	chatSessions: many(chatSessions),
-	aiOperations: many(aiOperations),
 	workspaces: many(workspaces),
-	groundedSummaries: many(groundedSummaries),
 	chatAnswerEvidenceSpans: many(chatAnswerEvidenceSpans),
 	parserEvalFixtures: many(parserEvalFixtures),
 	parserEvalResults: many(parserEvalResults),
@@ -87,7 +85,6 @@ export const organizationsRelations = relations(organizations, ({one, many}) => 
 	notificationDeliveries: many(notificationDeliveries),
 	apiKeys: many(apiKeys),
 	auditLogs: many(auditLog),
-	aiOperations: many(aiOperations),
 	uploadSessions: many(uploadSessions),
 	ssoAuthRequests: many(ssoAuthRequests),
 	creditGrants: many(creditGrants),
@@ -135,7 +132,6 @@ export const documentsRelations = relations(documents, ({one, many}) => ({
 	auditLogs: many(auditLog),
 	searchIndexStalenesses: many(searchIndexStaleness),
 	documentPropositions: many(documentPropositions),
-	groundedSummaries: many(groundedSummaries),
 	piiDetections: many(piiDetections),
 	parserEvalFixtures: many(parserEvalFixtures),
 	parserEvalResults: many(parserEvalResults),
@@ -173,7 +169,6 @@ export const workspaceRunsRelations = relations(workspaceRuns, ({one, many}) => 
 	searchEvalFixtures: many(searchEvalFixtures),
 	searchIndexStalenesses: many(searchIndexStaleness),
 	documentPropositions: many(documentPropositions),
-	groundedSummaries: many(groundedSummaries),
 	piiDetections: many(piiDetections),
 	parserEvalFixtures: many(parserEvalFixtures),
 	parserEvalResults: many(parserEvalResults),
@@ -203,12 +198,10 @@ export const workspacesRelations = relations(workspaces, ({one, many}) => ({
 	notificationDeliveries: many(notificationDeliveries),
 	auditLogs: many(auditLog),
 	chatSessions: many(chatSessions),
-	aiOperations: many(aiOperations),
 	user: one(user, {
 		fields: [workspaces.userId],
 		references: [user.id]
 	}),
-	groundedSummaries: many(groundedSummaries),
 	chatAnswerEvidenceSpans: many(chatAnswerEvidenceSpans),
 	uploadSessions: many(uploadSessions),
 	workspaceRuns: many(workspaceRuns),
@@ -433,7 +426,6 @@ export const apiKeysRelations = relations(apiKeys, ({one, many}) => ({
 		references: [user.id]
 	}),
 	auditLogs: many(auditLog),
-	aiOperations: many(aiOperations),
 	apiKeyUsages: many(apiKeyUsage),
 }));
 
@@ -568,52 +560,6 @@ export const chatTurnsRelations = relations(chatTurns, ({one}) => ({
 	chatSession: one(chatSessions, {
 		fields: [chatTurns.sessionId],
 		references: [chatSessions.id]
-	}),
-}));
-
-export const aiOperationsRelations = relations(aiOperations, ({one, many}) => ({
-	organization: one(organizations, {
-		fields: [aiOperations.orgId],
-		references: [organizations.id]
-	}),
-	workspace: one(workspaces, {
-		fields: [aiOperations.workspaceId],
-		references: [workspaces.id]
-	}),
-	apiKey: one(apiKeys, {
-		fields: [aiOperations.apiKeyId],
-		references: [apiKeys.id]
-	}),
-	user: one(user, {
-		fields: [aiOperations.userId],
-		references: [user.id]
-	}),
-	aiOperationEvents: many(aiOperationEvents),
-}));
-
-export const aiOperationEventsRelations = relations(aiOperationEvents, ({one}) => ({
-	aiOperation: one(aiOperations, {
-		fields: [aiOperationEvents.operationId],
-		references: [aiOperations.id]
-	}),
-}));
-
-export const groundedSummariesRelations = relations(groundedSummaries, ({one}) => ({
-	document: one(documents, {
-		fields: [groundedSummaries.documentId],
-		references: [documents.id]
-	}),
-	workspaceRun: one(workspaceRuns, {
-		fields: [groundedSummaries.runId],
-		references: [workspaceRuns.id]
-	}),
-	workspace: one(workspaces, {
-		fields: [groundedSummaries.workspaceId],
-		references: [workspaces.id]
-	}),
-	user: one(user, {
-		fields: [groundedSummaries.userId],
-		references: [user.id]
 	}),
 }));
 

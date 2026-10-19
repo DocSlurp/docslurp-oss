@@ -2,10 +2,7 @@ import { Hono } from "hono";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { ValidatedKey } from "../services/api-keys.js";
 import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
-import { aiSimpleToolSchema, toolInputJsonSchema } from "../services/mcp-tool-schemas.js";
 
-const aggregateWorkspaceRagSearch = vi.fn();
-const getAutomationCapabilityManifest = vi.fn();
 const validateApiKey = vi.fn();
 const hybridSearch = vi.fn();
 const chatWorkspace = vi.fn();
@@ -15,15 +12,9 @@ const listWorkspaces = vi.fn();
 const uploadRequest = vi.fn();
 const loadDirectUploadSession = vi.fn();
 vi.mock("../services/direct-upload-session.js", () => ({ loadDirectUploadSession }));
-const getAutomationOperation = vi.fn();
-const submitSimpleAutomation = vi.fn();
 
 vi.mock("../services/api-keys.js", () => ({
   validateApiKey,
-}));
-
-vi.mock("../services/aggregate-rag.js", () => ({
-  aggregateWorkspaceRagSearch,
 }));
 
 vi.mock("../services/search.js", () => ({
@@ -42,13 +33,6 @@ vi.mock("../routes/uploads.js", async () => {
     return c.json({ workspace: { id: "ws-1" }, run: { id: "run-1" } }, 201);
   }) };
 });
-
-vi.mock("../services/automation.js", () => ({
-  getAutomationCapabilityManifest,
-  getAutomationOperation,
-  submitAdvancedAutomation: vi.fn(),
-  submitSimpleAutomation,
-}));
 
 vi.mock("../db.js", () => ({
   sql: vi.fn(),
@@ -84,9 +68,6 @@ describe("mcpRoutes", () => {
 
   beforeEach(() => {
     app = buildApp();
-    aggregateWorkspaceRagSearch.mockReset();
-    getAutomationCapabilityManifest.mockReset();
-    getAutomationCapabilityManifest.mockReturnValue({ server: { transports: ["http", "sse", "stdio"] }, capabilities: [] });
     validateApiKey.mockReset();
     validateApiKey.mockResolvedValue(validatedKey);
     listWorkspaces.mockReset();
@@ -99,49 +80,6 @@ describe("mcpRoutes", () => {
     getWorkspace.mockImplementation(async (id: string) => id === "foreign" ? { id, orgId: "org-2" } : { id, orgId: "org-1" });
   });
 
-  it("exposes aggregate workspace RAG search as an MCP tool", async () => {
-    aggregateWorkspaceRagSearch.mockResolvedValueOnce({
-      query: "audience?",
-      answer: "The documents target implementation teams [1].",
-      citations: [],
-      evidenceSpans: [],
-      workspaces: [],
-      warnings: [],
-      partial: false,
-      usage: {
-        inputTokens: 10,
-        outputTokens: 12,
-        totalTokens: 22,
-      },
-    });
-
-    const response = await app.request("/mcp/tools/workspace.aggregate-rag-search", {
-      method: "POST",
-      headers: {
-        Authorization: "Bearer dslp_test",
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        goal: "audience?",
-        workspaceIds: ["ws-1", "ws-2"],
-      }),
-    });
-
-    expect(response.status).toBe(200);
-    await expect(response.json()).resolves.toMatchObject({
-      tool: "workspace.aggregate-rag-search",
-      query: "audience?",
-      answer: "The documents target implementation teams [1].",
-    });
-    expect(aggregateWorkspaceRagSearch).toHaveBeenCalledWith({
-      userId: "user-1",
-      apiKey: validatedKey,
-      request: expect.objectContaining({
-        goal: "audience?",
-        workspaceIds: ["ws-1", "ws-2"],
-      }),
-    });
-  });
   it("lists only credential-authorized workspaces before pagination without refining names", async () => {
     validateApiKey.mockResolvedValue({ ...validatedKey, workspaceIds: ["allowed"] });
     listWorkspaces.mockResolvedValue([
@@ -227,23 +165,21 @@ describe("mcpRoutes", () => {
   });
 
   it.each(["null", "[]", "{", '"string"'])("rejects malformed tool bodies with HTTP 400: %s", async (body) => {
-    const response = await app.request("/mcp/tools/workspace.search", {
+    const response = await app.request("/mcp/tools/search", {
       method: "POST", headers: { Authorization: "Bearer dslp_test", "Content-Type": "application/json" }, body,
     });
     expect(response.status).toBe(400);
   });
 
   it.each([
-    ["workspace.search", { workspaceId: "", q: "query" }],
-    ["workspace.search", { workspaceId: "00000000-0000-4000-8000-000000000001", q: " " }],
-    ["workspace.suggest", { workspaceId: "00000000-0000-4000-8000-000000000001", limit: -1 }],
-    ["workspace.ingest-report", { documentIds: Array.from({ length: 101 }, (_, index) => `d${index}`) }],
-    ["workspace.ingest-report", { workspaceId: "ws-1", sql: "drop table documents" }],
-    ["ai.simple", {}],
-    ["ai.advanced", {}],
-    ["workspace.chat", { workspaceId: "ws-1", q: " " }],
-    ["workspace.search", { queries: [] }],
-    ["workspace.search", { queries: [{ workspaceId: "ws-1", q: "query" }], concurrency: 5 }],
+    ["search", { workspaceId: "", q: "query" }],
+    ["search", { workspaceId: "00000000-0000-4000-8000-000000000001", q: " " }],
+    ["suggestQueries", { workspaceId: "00000000-0000-4000-8000-000000000001", limit: -1 }],
+    ["getUploadStatus", { documentIds: Array.from({ length: 101 }, (_, index) => `d${index}`) }],
+    ["getUploadStatus", { workspaceId: "ws-1", sql: "drop table documents" }],
+    ["chat", { workspaceId: "ws-1", q: " " }],
+    ["search", { queries: [] }],
+    ["search", { queries: [{ workspaceId: "ws-1", q: "query" }], concurrency: 5 }],
   ])("rejects invalid %s arguments before running the tool", async (tool, body) => {
     const response = await app.request(`/mcp/tools/${tool}`, {
       method: "POST", headers: { Authorization: "Bearer dslp_test", "Content-Type": "application/json" }, body: JSON.stringify(body),
@@ -251,25 +187,15 @@ describe("mcpRoutes", () => {
     expect(response.status).toBe(400);
   });
 
-  it("never lets a remote MCP caller pre-approve automation spend", async () => {
-    getAutomationCapabilityManifest.mockReturnValue({ server: {}, capabilities: [{ id: "ai.simple", title: "Simple", category: "tool", inputSchema: toolInputJsonSchema(aiSimpleToolSchema) }] });
-    submitSimpleAutomation.mockReset();
-    submitSimpleAutomation.mockResolvedValueOnce({ operation: { id: "00000000-0000-4000-8000-000000000001" }, events: [] });
+  it("never lets a remote MCP caller pre-approve spend", async () => {
     const tools = (await (await app.request("/mcp/tools", { headers: { Authorization: "Bearer dslp_test" } })).json()).tools as Array<{ id: string; inputSchema: unknown }>;
-    expect(tools.map((tool) => tool.id)).not.toContain("ai.operation.approve");
     expect(JSON.stringify(tools.map((tool) => tool.inputSchema))).not.toMatch(/approve/i);
-    const response = await app.request("/mcp/tools/ai.simple", {
-      method: "POST", headers: { Authorization: "Bearer dslp_test", "Content-Type": "application/json" },
-      body: JSON.stringify({ workspaceId: "ws-1", goal: "ingest", approveCostEstimate: true }),
-    });
-    expect(response.status).toBe(202);
-    expect(submitSimpleAutomation.mock.calls[0]![0].request).not.toHaveProperty("approveCostEstimate");
   });
 
   it("requires a bearer key and enforces search scope", async () => {
     expect((await app.request("/mcp/tools")).status).toBe(401);
     validateApiKey.mockResolvedValueOnce({ ...validatedKey, scopes: ["ingest"] });
-    const response = await app.request("/mcp/tools/workspace.suggest", {
+    const response = await app.request("/mcp/tools/suggestQueries", {
       method: "POST", headers: { Authorization: "Bearer dslp_test", "Content-Type": "application/json" }, body: "{}",
     });
     expect(response.status).toBe(403);
@@ -300,10 +226,6 @@ describe("mcpRoutes", () => {
   });
 
   it("offers a real HTTP MCP endpoint and preserves scoped actor on tool dispatch", async () => {
-    aggregateWorkspaceRagSearch.mockResolvedValueOnce({ answer: "safe evidence" });
-    getAutomationCapabilityManifest.mockReturnValue({ server: {}, capabilities: [{
-      id: "workspace.aggregate-rag-search", title: "RAG", description: "Grounded retrieval", category: "tool", inputSchema: { type: "object", properties: {} },
-    }] });
     const client = new Client({ name: "http-route-test", version: "1" });
     await client.connect(new StreamableHTTPClientTransport(new URL("http://localhost:4321/mcp"), {
       requestInit: { headers: { Authorization: "Bearer dslp_test" } },
@@ -321,7 +243,7 @@ describe("mcpRoutes", () => {
     expect((await app.request("http://localhost:4321/mcp", init)).status).toBe(403);
     const host = await app.request("http://localhost:4321/mcp", { ...init, headers: { ...init.headers, Origin: "http://localhost:4321", Host: "evil.example" } });
     expect(host.status).toBe(403);
-    expect(aggregateWorkspaceRagSearch).not.toHaveBeenCalled();
+    expect(hybridSearch).not.toHaveBeenCalled();
   });
 
   it("requires bearer authentication on the protocol endpoint", async () => {
@@ -332,7 +254,7 @@ describe("mcpRoutes", () => {
 
   it("returns portable cited search data and a direct grounded chat answer", async () => {
     chatWorkspace.mockResolvedValueOnce({ answer: "Weekdays [1]", citations: [{ filename: "guide.txt", pageNumber: 1 }], sessionId: "chat-1", usage: { inputTokens: 10, outputTokens: 3 } });
-    const call = (name: string, args: unknown) => app.request(`/mcp/tools/workspace.${name}`, {
+    const call = (name: string, args: unknown) => app.request(`/mcp/tools/${name}`, {
       method: "POST", headers: { Authorization: "Bearer dslp_test", "Content-Type": "application/json" }, body: JSON.stringify(args),
     });
     expect(await (await call("search", { workspaceId: "ws-1", q: "Support hours?" })).json()).toMatchObject({ results: [{ text: "Support hours" }], sessionId: "retrieval-1", availability: { status: "ready" } });
@@ -343,7 +265,7 @@ describe("mcpRoutes", () => {
   });
 
   it("keeps parallel retrieval results ordered and denies foreign workspaces before retrieval", async () => {
-    const response = await app.request("/mcp/tools/workspace.search", {
+    const response = await app.request("/mcp/tools/search", {
       method: "POST", headers: { Authorization: "Bearer dslp_test", "Content-Type": "application/json" }, body: JSON.stringify({ queries: [{ q: "first", workspaceId: "ws-1" }, { q: "private", workspaceId: "foreign" }] }),
     });
     expect(response.status).toBe(200);
@@ -358,7 +280,7 @@ describe("mcpRoutes", () => {
     const listed = await app.request("/mcp/tools", { headers: { Authorization: "Bearer dslp_test" } });
     expect((await listed.json()).tools.map((tool: { id: string }) => tool.id)).toEqual(["listWorkspaces", "upload", "completeUpload", "getUploadStatus"]);
     for (const name of ["search", "chat"]) {
-      expect((await app.request(`/mcp/tools/workspace.${name}`, { method: "POST", headers: { Authorization: "Bearer dslp_test", "Content-Type": "application/json" }, body: "{}" })).status).toBe(403);
+      expect((await app.request(`/mcp/tools/${name}`, { method: "POST", headers: { Authorization: "Bearer dslp_test", "Content-Type": "application/json" }, body: "{}" })).status).toBe(403);
     }
     expect(chatWorkspace).not.toHaveBeenCalled();
     expect(hybridSearch).not.toHaveBeenCalled();
@@ -389,32 +311,30 @@ describe("session MCP tools", () => {
     const { sessionToolRoutes } = await import("../routes/session-tools.js");
     const { setRequestActor } = await import("../lib/request-actor.js");
     app = new Hono().use("*", async (c, next) => { setRequestActor(c, actor); await next(); }).route("/tools", sessionToolRoutes);
-    getAutomationCapabilityManifest.mockReturnValue({ server: {}, capabilities: [{ id: "ai.simple", title: "Simple", category: "tool", inputSchema: toolInputJsonSchema(aiSimpleToolSchema) }] });
     getWorkspace.mockImplementation(async (id: string) => id === "foreign" ? null : { id, orgId: "org-1" });
     hybridSearch.mockClear();
-    submitSimpleAutomation.mockReset();
   });
   const headers = { Origin: "http://localhost:4321", "Content-Type": "application/json" };
 
   it("uses the authenticated session identity and preserves workspace access checks", async () => {
-    const response = await app.request("/tools/tools/workspace.search", { method: "POST", headers, body: JSON.stringify({ workspaceId: "ws-1", q: "hello" }) });
+    const response = await app.request("/tools/tools/search", { method: "POST", headers, body: JSON.stringify({ workspaceId: "ws-1", q: "hello" }) });
     expect(response.status).toBe(200);
     expect(hybridSearch).toHaveBeenCalledWith("hello", "user-1", expect.anything());
-    expect((await app.request("/tools/tools/workspace.suggest", { method: "POST", headers, body: JSON.stringify({ workspaceId: "foreign" }) })).status).toBe(404);
+    expect((await app.request("/tools/tools/suggestQueries", { method: "POST", headers, body: JSON.stringify({ workspaceId: "foreign" }) })).status).toBe(404);
   });
 
   it("returns a read-only ingest report for an accessible workspace and hides foreign ones", async () => {
     loadIngestReport.mockClear();
-    const response = await app.request("/tools/tools/workspace.ingest-report", { method: "POST", headers, body: JSON.stringify({ workspaceId: "ws-1", runId: "run-1" }) });
+    const response = await app.request("/tools/tools/getUploadStatus", { method: "POST", headers, body: JSON.stringify({ workspaceId: "ws-1", runId: "run-1" }) });
     expect(response.status).toBe(200);
-    await expect(response.json()).resolves.toMatchObject({ tool: "workspace.ingest-report", summary: expect.stringContaining("Ingest report"), report: { workspaceId: "ws-1" } });
+    await expect(response.json()).resolves.toMatchObject({ tool: "getUploadStatus", summary: expect.stringContaining("Ingest report"), report: { workspaceId: "ws-1" } });
     expect(loadIngestReport).toHaveBeenCalledWith(expect.objectContaining({ canEdit: false, runId: "run-1", workspace: expect.objectContaining({ id: "ws-1" }) }));
-    expect((await app.request("/tools/tools/workspace.ingest-report", { method: "POST", headers, body: JSON.stringify({ workspaceId: "foreign" }) })).status).toBe(404);
+    expect((await app.request("/tools/tools/getUploadStatus", { method: "POST", headers, body: JSON.stringify({ workspaceId: "foreign" }) })).status).toBe(404);
     expect(loadIngestReport).toHaveBeenCalledTimes(1);
   });
 
   it.each([undefined, "https://foreign.example", "null"])("rejects an untrusted execution origin: %s", async origin => {
-    const response = await app.request("/tools/tools/workspace.search", { method: "POST", headers: { "Content-Type": "application/json", ...(origin ? { Origin: origin } : {}) }, body: '{"q":"hello"}' });
+    const response = await app.request("/tools/tools/search", { method: "POST", headers: { "Content-Type": "application/json", ...(origin ? { Origin: origin } : {}) }, body: '{"q":"hello"}' });
     expect(response.status).toBe(403);
     expect(hybridSearch).not.toHaveBeenCalled();
   });
@@ -431,30 +351,7 @@ describe("session MCP tools", () => {
     expect(tool.inputSchema.properties.urls).toBeDefined();
     expect(tool.inputSchema.properties.files).toBeDefined();
     expect(tool.inputSchema.properties.userId).toBeUndefined();
-    expect(tools.some((tool: { id: string }) => tool.id.startsWith("ai."))).toBe(false);
+    expect(tools.map((tool: { id: string }) => tool.id)).toEqual(["listWorkspaces", "upload", "completeUpload", "search", "chat", "getUploadStatus", "suggestQueries"]);
     expect(response.headers.get("Cache-Control")).toBe("no-store");
-  });
-
-  it("submits automation as the session user and returns a usable poll tool", async () => {
-    submitSimpleAutomation.mockResolvedValueOnce({ operation: { id: "00000000-0000-4000-8000-000000000001" }, events: [] });
-    const response = await app.request("/tools/tools/ai.simple", { method: "POST", headers, body: JSON.stringify({ workspaceId: "ws-1", goal: "summarize", userId: "victim", maxCostCents: 5 }) });
-    expect(response.status).toBe(202);
-    expect(submitSimpleAutomation).toHaveBeenCalledWith({ apiKey: null, request: expect.objectContaining({ userId: "user-1", workspaceId: "ws-1", maxCostCents: 5 }) });
-    expect(await response.json()).toMatchObject({ pollTool: { name: "ai.operation.get" } });
-  });
-
-  it("never lets a WebMCP caller pre-approve automation spend", async () => {
-    submitSimpleAutomation.mockResolvedValueOnce({ operation: { id: "00000000-0000-4000-8000-000000000001" }, events: [] });
-    const tools = (await (await app.request("/tools/tools")).json()).tools as Array<{ id: string; inputSchema: unknown }>;
-    expect(JSON.stringify(tools.map((tool) => tool.inputSchema))).not.toMatch(/approve/i);
-    await app.request("/tools/tools/ai.simple", { method: "POST", headers, body: JSON.stringify({ workspaceId: "ws-1", goal: "ingest", approveCostEstimate: true }) });
-    expect(submitSimpleAutomation.mock.calls[0]![0].request).not.toHaveProperty("approveCostEstimate");
-  });
-
-  it("looks up operations with the caller identity", async () => {
-    getAutomationOperation.mockResolvedValueOnce(null);
-    const response = await app.request("/tools/tools/ai.operation.get", { method: "POST", headers, body: '{"operationId":"00000000-0000-4000-8000-000000000001"}' });
-    expect(response.status).toBe(404);
-    expect(getAutomationOperation).toHaveBeenLastCalledWith({ operationId: "00000000-0000-4000-8000-000000000001", userId: "user-1", apiKey: null });
   });
 });

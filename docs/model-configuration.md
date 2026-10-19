@@ -161,9 +161,8 @@ features handle a block in a predictable way:
   fallback, extraction self-critique, and the API's search strategies (HyDE,
   rewrite, stepback, self-query, compression, multi-hop bridging).
 - **Local fallback:** graph extraction and community summaries use their
-  heuristics. Contextual chunk preambles use the heuristic preamble. Chat,
-  grounded summaries and automation answers return the retrieval fallback with a
-  warning. Automation structured output returns `null` with a warning.
+  heuristics. Contextual chunk preambles use the heuristic preamble. Chat
+  returns the retrieval fallback with a warning.
 - **Refused:** embeddings have no substitute. The pipeline schema rejects a
   hosted embedding profile, or a hosted `vision.remoteFallbackModelUri`, outside
   `standard`. Voice transcription returns HTTP 403.

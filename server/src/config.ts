@@ -160,9 +160,5 @@ export const env = {
   ),
   remoteIngestComplexFormatsEnabled: readBoolean(process.env.REMOTE_INGEST_COMPLEX_FORMATS_ENABLED, false),
   metricsSecret: process.env.METRICS_SECRET?.trim() || null,
-  aiInteractiveLatencyMs: readNumber(process.env.AI_INTERACTIVE_LATENCY_MS, 8_000),
-  aiKeyConcurrencyLimit: readNumber(process.env.AI_KEY_CONCURRENCY_LIMIT, 2),
-  aiOrgConcurrencyLimit: readNumber(process.env.AI_ORG_CONCURRENCY_LIMIT, 8),
-  aiOperationPollIntervalMs: readNumber(process.env.AI_OPERATION_POLL_INTERVAL_MS, 1_000),
   mcpServerId: process.env.MCP_SERVER_ID ?? "docslurp-mcp"
 };

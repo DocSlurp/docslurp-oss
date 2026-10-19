@@ -64,14 +64,14 @@ describe("request observation names", () => {
   it("keeps polling and progress HTTP telemetry without creating AI observations", async () => {
     const app = new Hono();
     app.use("*", requestContextMiddleware);
-    for (const route of ["/v1/runs/:id", "/v1/runs/:id/progress", "/v1/runs/:id/events", "/v1/ai-operations/:operationId"]) app.get(route, c => c.text("ready"));
-    for (const path of ["/v1/runs/run-a", "/v1/runs/run-a/progress", "/v1/runs/run-a/events", "/v1/ai-operations/op-a"]) {
+    for (const route of ["/v1/runs/:id", "/v1/runs/:id/progress", "/v1/runs/:id/events"]) app.get(route, c => c.text("ready"));
+    for (const path of ["/v1/runs/run-a", "/v1/runs/run-a/progress", "/v1/runs/run-a/events"]) {
       const response = await app.request(path);
       expect(response.status).toBe(200);
       expect(response.headers.get("X-Request-ID")).toBeTruthy();
     }
     expect(observe).not.toHaveBeenCalled();
-    expect(posthogLog).toHaveBeenCalledTimes(4);
+    expect(posthogLog).toHaveBeenCalledTimes(3);
     expect(posthogLog.mock.calls[1][0].attributes["http.route"]).toBe("/v1/runs/:id/progress");
   });
 

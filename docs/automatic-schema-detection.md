@@ -319,7 +319,7 @@ This project is pre-release, so prefer the clean v1 model over preserving two pe
 1. Convert each non-empty inline `pipeline.outputSchema` into a workspace-owned `Imported workspace schema` revision.
 2. Bind and activate that revision for the workspace.
 3. Change `structured-extract` to consume a document assignment.
-4. Remove `pipeline.outputSchema` after the migration and update advanced automation requests to reference a revision or provide an explicitly ephemeral run schema.
+4. Remove `pipeline.outputSchema` after the migration; one-shot requests reference a revision or provide an explicitly ephemeral run schema.
 
 An ephemeral run schema may remain useful for one-shot APIs, but its full contract must be snapshotted into the run and result so it is reproducible.
 

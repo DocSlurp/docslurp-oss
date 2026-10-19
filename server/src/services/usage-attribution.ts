@@ -299,49 +299,6 @@ export function sessionTokenUsage(
   )`;
 }
 
-export interface AutomationUsageRow {
-  metric: string;
-  provider: string;
-  model: string;
-  requests: number;
-  cost_cents: number;
-  input_tokens: number;
-  output_tokens: number;
-}
-
-/** A user's automation (AI operation) spend by metric, provider and model. */
-export async function automationUsageByMetric(
-  args: { userId: string; workspaceId?: string | null; orgId?: string | null },
-  client: SqlClient = sql,
-): Promise<AutomationUsageRow[]> {
-  const workspaceId = args.workspaceId ?? null;
-  const orgId = args.orgId ?? null;
-  const rows = await client<AutomationUsageRow[]>`
-    select
-      au.metric,
-      au.provider,
-      au.model,
-      count(distinct au.id)::int as requests,
-      coalesce(sum(au.cost_cents), 0)::double precision as cost_cents,
-      round(coalesce(sum(au.input_tokens), 0))::int as input_tokens,
-      round(coalesce(sum(au.output_tokens), 0))::int as output_tokens
-    from ${attributedUsage(null, client)} au
-    where au.user_id = ${args.userId}
-      and (au.metadata ? 'operationId' or au.metric like 'ai-%')
-      and (${workspaceId}::text is null or au.workspace_id = ${workspaceId})
-      and (${orgId}::text is null or au.org_id = ${orgId})
-    group by au.metric, au.provider, au.model
-    order by cost_cents desc, requests desc
-  `;
-  return rows.map((row) => ({
-    ...row,
-    requests: Number(row.requests ?? 0),
-    cost_cents: Number(row.cost_cents ?? 0),
-    input_tokens: Number(row.input_tokens ?? 0),
-    output_tokens: Number(row.output_tokens ?? 0),
-  }));
-}
-
 export interface IngestUsageRow {
   run_id: string;
   document_id: string | null;

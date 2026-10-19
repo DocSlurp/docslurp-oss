@@ -297,7 +297,7 @@ describe("Workspace Intake", () => {
     });
 
     it("never fails the whole request over one bad file, whatever the intake kind", async () => {
-      for (const kind of ["direct-upload", "url-ingest", "bulk-upload", "ai-automation"] as const) {
+      for (const kind of ["direct-upload", "url-ingest", "bulk-upload", "connector-sync"] as const) {
         const fakes = createWorkspaceIntakeFakes();
         fakes.state.unreadable.add("broken.pdf");
         const result = await intakeIntoWorkspace(

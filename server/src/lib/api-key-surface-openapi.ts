@@ -1,15 +1,13 @@
 import { apiErrorOpenApiResponse } from "./api-error-openapi.js";
 /**
  * OpenAPI entries for API-key routes that had no documentation of their own
- * (document reads, direct uploads, AI operations, run events and search
+ * (document reads, direct uploads, run events and search
  * helpers). Document writes stay session-only: the documents router rejects
  * non-GET API key requests.
  * `route-auth-integration.test.ts` requires the bearerAuth operations in the
  * OpenAPI document to match the routes declared with `acceptApiKeys` exactly.
  */
 export const keyOrSessionSecurity = [{ bearerAuth: [] }, { sessionAuth: [] }];
-/** /v1/ai/* answers API keys only. */
-export const keyOnlySecurity = [{ bearerAuth: [] }];
 
 type Method = "get" | "post" | "put" | "patch" | "delete";
 
@@ -40,8 +38,6 @@ function operation(path: string, tag: string, summary: string, scope: string, su
 const jsonBody = { requestBody: { required: true, content: { "application/json": { schema: { type: "object" } } } } };
 
 const entries: Array<[path: string, method: Method, tag: string, summary: string, scope: string, success: string, extra?: Record<string, unknown>]> = [
-  ["/v1/ai/usage", "get", "ai", "Automation usage for the key's organization", "API key", "Usage totals", { security: keyOnlySecurity }],
-  ["/v1/ai/operations/{id}/approve", "post", "ai", "Approve a durable automation operation waiting for confirmation", "API key", "Operation approved", { security: keyOnlySecurity }],
   ["/v1/runs/activity/stream", "get", "runs", "Stream account run activity over SSE", "ingest, search or artifacts", "Server-sent event stream"],
   ["/v1/runs/{runId}/events", "get", "runs", "List a run's events", "ingest, search or artifacts", "Run events"],
   ["/v1/runs/{runId}/events/stream", "get", "runs", "Stream a run's events over SSE", "ingest, search or artifacts", "Server-sent event stream"],

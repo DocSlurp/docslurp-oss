@@ -10,11 +10,10 @@ export interface ChatToolActivity {
 }
 
 /**
- * Chat never exposes automation tools: ai.simple / ai.advanced fetch
- * arbitrary sourceUrls and start paid ingestion, and the model's arguments
- * can be steered by document text (G-04). ai.operation.get goes with them.
+ * Chat never exposes ingestion tools: upload fetches arbitrary URLs and starts
+ * paid ingestion, and the model's arguments can be steered by document text (G-04).
  */
-const CHAT_EXCLUDED_TOOL_PREFIX = "ai.";
+const CHAT_EXCLUDED_TOOLS = new Set(["upload", "completeUpload", "listWorkspaces"]);
 
 /** A turn owns its tool budget and citation numbering; no global user state. */
 export function createChatMcpTools(args: {
@@ -46,10 +45,10 @@ export function createChatMcpTools(args: {
       return;
     }
     const object = value as Record<string, unknown>;
-    for (const key of ["results", "citations", "data", "response", "operation"]) collectEvidence(object[key]);
+    for (const key of ["results", "citations", "data", "response"]) collectEvidence(object[key]);
   }
 
-  for (const definition of args.manifest.capabilities.filter(item => item.category === "tool" && !item.id.startsWith(CHAT_EXCLUDED_TOOL_PREFIX) && !["upload", "completeUpload", "listWorkspaces"].includes(item.id))) {
+  for (const definition of args.manifest.capabilities.filter(item => item.category === "tool" && !CHAT_EXCLUDED_TOOLS.has(item.id))) {
     // OpenAI-compatible providers restrict function names to letters, numbers, _ and -.
     const name = definition.id.replace(/[^a-zA-Z0-9_-]/g, "_");
     if (tools[name]) throw new Error("Duplicate model tool name");
@@ -66,9 +65,7 @@ export function createChatMcpTools(args: {
         // send a search into another workspace the user happens to reach.
         const body = (definition.id === "search" && Array.isArray(supplied.queries))
           ? { ...supplied, queries: supplied.queries.map(q => ({ ...(q && typeof q === "object" && !Array.isArray(q) ? q : {}), workspaceId: args.workspaceId })) }
-          : definition.id === "workspace.aggregate-rag-search"
-            ? { ...supplied, workspaceIds: [args.workspaceId] }
-            : { ...supplied, workspaceId: args.workspaceId };
+          : { ...supplied, workspaceId: args.workspaceId };
         const started = Date.now();
         const update = (status: ChatToolActivity["status"]) => {
           const event: ChatToolActivity = { id: toolCallId, name: definition.id, status,

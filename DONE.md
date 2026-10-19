@@ -19,3 +19,5 @@
 - Add opt-in LANCEDB_REFINE_FACTOR with ef covering refined candidates; verify authorization, SQL hydration/citations and unindexed tails through migrated local PostgreSQL and real Lance (2026-10-17).
 
 - Reduced new-account starter credits to 250 ($2.50), below Silver’s 2,000 monthly credits; migration preserves existing grants and one-time claims.
+
+- Retire the automation surface: delete the hidden `ai.simple` / `ai.advanced` / `ai.operation.get` MCP tools, `/v1/ai/*`, automation operations and grounded summaries. Their tables (`ai_operations`, `ai_operation_events`, `grounded_summaries`) are now unused; drop them in a contract migration after this deploys. The MCP catalog now has one definition per public tool name; the internal `workspace.*` ids, alias map and `docslurp://ai/*` resources are gone (`docslurp://capabilities` replaces them).
