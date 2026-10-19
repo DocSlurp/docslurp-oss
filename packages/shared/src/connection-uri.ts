@@ -48,6 +48,20 @@ export interface LanceDbConfig {
   storageOptions: Record<string, string> | undefined;
   /** Remaining query parameters, e.g. worker maintenance tuning. */
   params: URLSearchParams;
+  /** Set for s3+ddb:// roots: Lance commits through this DynamoDB table (see lancedb-ddb.ts). */
+  ddb?: LanceDdbConfig;
+}
+
+export interface LanceDdbConfig {
+  table: string;
+  /** DynamoDB region (the S3 side keeps its own region). */
+  region: string;
+  /** Separate DynamoDB credentials; empty means Lance reuses the S3 credentials for DynamoDB. */
+  accessKeyId?: string;
+  secretAccessKey?: string;
+  sessionToken?: string;
+  /** Custom DynamoDB endpoint (DynamoDB Local). */
+  endpoint?: string;
 }
 
 type Env = Record<string, string | undefined>;
@@ -55,6 +69,7 @@ type Env = Record<string, string | undefined>;
 const DEFAULT_BUCKET = "docslurp-files";
 const DEFAULT_REGION = "us-west-2";
 const DEFAULT_LOCAL_ENDPOINT = "http://localhost:9000";
+const DEFAULT_DDB_REGION = "us-east-1";
 const DEFAULT_LANCEDB_ROOT = "/tmp/docslurp-lancedb";
 
 function readEnv(value: string | undefined): string | undefined {
@@ -259,7 +274,7 @@ export function s3ClientConfig(storage: ObjectStorageConfig, env: Env = process.
   };
 }
 
-const LANCE_STORAGE_PARAMS = new Set(["endpoint", "region", "allowHttp"]);
+const LANCE_STORAGE_PARAMS = new Set(["endpoint", "region", "allowHttp", "ddbTableName"]);
 
 /**
  * Splits LANCEDB_URI into a storage root (query removed, safe to append
@@ -274,7 +289,7 @@ export function parseLanceDbUri(value: string | undefined, storage?: ObjectStora
   const root = base.startsWith("file://") ? decodeURIComponent(new URL(base).pathname) : base.replace(/\/+$/, "");
 
   let storageOptions: Record<string, string> | undefined;
-  if (/^(s3|s3a|gs|az):\/\//.test(root)) {
+  if (/^(s3|s3a|s3\+ddb|gs|az):\/\//.test(root)) {
     const endpoint = params.get("endpoint") ?? (root.startsWith("s3") ? storage?.endpoint ?? null : null);
     const region = params.get("region") ?? (root.startsWith("s3") ? storage?.region ?? "auto" : null);
     storageOptions = {
@@ -288,13 +303,14 @@ export function parseLanceDbUri(value: string | undefined, storage?: ObjectStora
 
   const remaining = new URLSearchParams();
   for (const [key, entry] of params) if (!LANCE_STORAGE_PARAMS.has(key)) remaining.append(key, entry);
-  return { root, storageOptions, params: remaining };
+  const ddbTable = params.get("ddbTableName") ?? undefined;
+  return { root, storageOptions, params: remaining, ...(ddbTable ? { ddb: { table: ddbTable, region: DEFAULT_DDB_REGION } } : {}) };
 }
 
 /** LanceDB config from LANCEDB_URI plus the shared object storage settings. */
 export function resolveLanceDbConfig(env: Env = process.env, storage = resolveObjectStorageConfig(env)): LanceDbConfig {
   const lanceStorageUri = readEnv(env.LANCEDB_STORAGE_URI);
-  if (!lanceStorageUri) return withLanceTuning(parseLanceDbUri(env.LANCEDB_URI, storage), env);
+  if (!lanceStorageUri) return applyLanceDdbEnv(withLanceTuning(parseLanceDbUri(withDdbScheme(env.LANCEDB_URI, env), storage), env), env);
   // Separate index store: its own endpoint, region and credentials. When
   // LANCEDB_URI is unset the index lives at s3://<LANCEDB_STORAGE_URI bucket>/lancedb.
   let lanceStorage: ObjectStorageConfig;
@@ -304,7 +320,41 @@ export function resolveLanceDbConfig(env: Env = process.env, storage = resolveOb
     throw new Error(String(error instanceof Error ? error.message : error).replace("STORAGE_URI", "LANCEDB_STORAGE_URI"));
   }
   const root = readEnv(env.LANCEDB_URI) ?? `s3://${lanceStorage.bucket}/lancedb`;
-  return withLanceTuning(parseLanceDbUri(root, lanceStorage), env);
+  return applyLanceDdbEnv(withLanceTuning(parseLanceDbUri(withDdbScheme(root, env), lanceStorage), env), env);
+}
+
+/** LANCEDB_DDB_TABLE turns an s3:// Lance root into s3+ddb:// (external DynamoDB commit store). */
+function withDdbScheme(root: string | undefined, env: Env): string | undefined {
+  if (!root || !readEnv(env.LANCEDB_DDB_TABLE)) return root;
+  return root.startsWith("s3://") ? `s3+ddb://${root.slice("s3://".length)}` : root;
+}
+
+/**
+ * s3+ddb:// commit store settings:
+ *   LANCEDB_DDB_TABLE (or ?ddbTableName= on LANCEDB_URI), LANCEDB_DDB_REGION (default us-east-1),
+ *   LANCEDB_DDB_ACCESS_KEY_ID / LANCEDB_DDB_SECRET_ACCESS_KEY / LANCEDB_DDB_SESSION_TOKEN (optional; both keys
+ *   required together; without them Lance uses the object-store credentials for DynamoDB), LANCEDB_DDB_ENDPOINT.
+ */
+function applyLanceDdbEnv(config: LanceDbConfig, env: Env): LanceDbConfig {
+  if (!config.root.startsWith("s3+ddb://")) {
+    if (readEnv(env.LANCEDB_DDB_TABLE) && !config.root.startsWith("s3")) throw new Error("LANCEDB_DDB_TABLE requires an s3:// or s3+ddb:// LanceDB root");
+    return config;
+  }
+  const table = readEnv(env.LANCEDB_DDB_TABLE) ?? config.ddb?.table;
+  if (!table) throw new Error("s3+ddb:// LANCEDB_URI needs a DynamoDB table: set LANCEDB_DDB_TABLE or ?ddbTableName=");
+  const accessKeyId = readEnv(env.LANCEDB_DDB_ACCESS_KEY_ID);
+  const secretAccessKey = readEnv(env.LANCEDB_DDB_SECRET_ACCESS_KEY);
+  if (Boolean(accessKeyId) !== Boolean(secretAccessKey)) throw new Error("LANCEDB_DDB_ACCESS_KEY_ID and LANCEDB_DDB_SECRET_ACCESS_KEY must be set together");
+  return {
+    ...config,
+    ddb: {
+      table,
+      region: readEnv(env.LANCEDB_DDB_REGION) ?? DEFAULT_DDB_REGION,
+      ...(accessKeyId && secretAccessKey ? { accessKeyId, secretAccessKey } : {}),
+      ...(readEnv(env.LANCEDB_DDB_SESSION_TOKEN) ? { sessionToken: readEnv(env.LANCEDB_DDB_SESSION_TOKEN) } : {}),
+      ...(readEnv(env.LANCEDB_DDB_ENDPOINT) ? { endpoint: readEnv(env.LANCEDB_DDB_ENDPOINT) } : {}),
+    },
+  };
 }
 
 /**
