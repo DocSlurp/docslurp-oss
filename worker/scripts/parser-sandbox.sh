@@ -69,7 +69,9 @@ bwrap_args=(
 
 # Start from an empty filesystem. Never expose worker credentials, other jobs,
 # host process environments, or the complete application checkout.
-for runtime_path in /usr /bin /sbin /lib /lib64 /etc/ld.so.cache /etc/fonts /etc/ssl /etc/localtime /etc/passwd /etc/group /etc/ImageMagick-6 /etc/ImageMagick-7 /var/cache/fontconfig; do
+# /etc/alternatives holds only Debian alternatives symlinks; shared libraries
+# such as ffmpeg's libblas.so.3 resolve through it.
+for runtime_path in /usr /bin /sbin /lib /lib64 /etc/ld.so.cache /etc/alternatives /etc/fonts /etc/ssl /etc/localtime /etc/passwd /etc/group /etc/ImageMagick-6 /etc/ImageMagick-7 /var/cache/fontconfig; do
   if [[ -e "${runtime_path}" ]]; then
     bwrap_args+=(--ro-bind "${runtime_path}" "${runtime_path}")
   fi
