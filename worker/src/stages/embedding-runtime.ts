@@ -6,7 +6,7 @@ import { isUtf8 } from "node:buffer";
 import path from "node:path";
 
 import type { CanonicalDocument } from "@docslurp/shared";
-import { assertProviderAllowed, authorizePrivateModelCall, textModelCallDescriptor, canonicalDocumentSchema, fitEmbeddingDimensions, openRouterEmbeddingRoute, validateHostedEmbeddingVector, OPENROUTER_BASE_URL, PRIVATE_MODEL_PROVIDER, isProviderCallAllowed, resolvePipelineTextModel, type PrivacyMode, type TextGenerationConfig } from "@docslurp/shared";
+import { assertProviderAllowed, authorizePrivateModelCall, textModelCallDescriptor, canonicalDocumentSchema, DEEPINFRA_EMBEDDING_BASE_URL, validateDeepInfraEmbedding, fitEmbeddingDimensions, openRouterEmbeddingRoute, validateHostedEmbeddingVector, OPENROUTER_BASE_URL, PRIVATE_MODEL_PROVIDER, isProviderCallAllowed, resolvePipelineTextModel, type PrivacyMode, type TextGenerationConfig } from "@docslurp/shared";
 import { embedMany } from "ai";
 import { embedPerplexity } from "@docslurp/shared";
 import { noteWorkProgress, withRequestTimeout } from "../lib/work-progress.js";
@@ -705,6 +705,7 @@ async function embedRemoteChunks(args: {
       ? privateCall.cost({ inputTokens: result.usage.tokens ?? 0, durationMs: Date.now() - batchStartedAt })
       : null;
     if (privateCost) privateCostCents += privateCost.costCents;
+    if (args.profile.provider === "deepinfra" && (!Number.isSafeInteger(result.usage.tokens) || result.usage.tokens! < 0)) throw new Error("DeepInfra embeddings require actual provider token usage");
     // Persist actual paid usage before retaining vectors or starting another request.
     if (!isNativePerplexity && typeof result.usage.tokens === "number") {
       const tokens = result.usage.tokens;
@@ -716,7 +717,16 @@ async function embedRemoteChunks(args: {
       if (result.embeddings.length !== batch.length) throw new Error("OpenRouter embedding response omitted vectors");
       const route = openRouterEmbeddingRoute(args.profile.model);
       batchEmbeddings[batchIndex] = result.embeddings.map(vector => validateHostedEmbeddingVector(vector, route.dimensions, args.profile.normalize));
+    } else if (args.profile.provider === "deepinfra") {
+      if (result.embeddings.length !== batch.length) throw new Error("DeepInfra embedding response count mismatch");
+      batchEmbeddings[batchIndex] = result.embeddings.map((vector) => validateDeepInfraEmbedding(vector, args.profile.dimensions, args.profile.normalize));
     } else {
+      // Longer Matryoshka vectors are still shortened below; anything that
+      // cannot be fitted to the requested size is rejected after usage is journaled.
+      if (args.profile.provider === "openai" && args.profile.supportsCustomDimensions && (result.embeddings.length !== batch.length
+        || result.embeddings.some((vector) => vector.length < args.profile.dimensions || vector.some((value) => !Number.isFinite(value)) || !(Math.hypot(...vector) > 0) || !Number.isFinite(Math.hypot(...vector))))) {
+        throw new Error("OpenAI embedding response must match requested dimensions with finite nonzero vectors");
+      }
       batchEmbeddings[batchIndex] = result.embeddings;
     }
 
@@ -1185,6 +1195,9 @@ export function packEmbeddingBatches(chunks: readonly string[], maxInputs: numbe
 
 function createRemoteEmbeddingModel(profile: EmbeddingProfile, config: Config) {
   switch (profile.provider) {
+    case "deepinfra":
+      if (profile.model !== "BAAI/bge-m3" || profile.dimensions !== 1024) throw new Error("DeepInfra BGE-M3 requires its native 1024 dimensions");
+      return createOpenAI({ apiKey: requiredKey(config.deepInfraApiKey ?? "", "DEEPINFRA_API_KEY"), baseURL: DEEPINFRA_EMBEDDING_BASE_URL, fetch: instrumentFetch("deepinfra", "embedding") }).embedding(profile.model) as any;
     case "openrouter": {
       const route = openRouterEmbeddingRoute(profile.model);
       if (profile.dimensions !== route.dimensions) throw new Error("OpenRouter embedding dimensions do not match the registered model");

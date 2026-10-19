@@ -3,7 +3,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { withObservation, aiResultDetails, instrumentFetch } from "@docslurp/shared/observability";
 import { createOpenAI } from "@ai-sdk/openai";
-import { defaultEmbeddingConfig, defaultPipelineFeatures, fitEmbeddingDimensions, parseLlmModelUri, openRouterEmbeddingRoute, validateHostedEmbeddingVector } from "@docslurp/shared";
+import { defaultEmbeddingConfig, defaultPipelineFeatures, DEEPINFRA_EMBEDDING_BASE_URL, validateDeepInfraEmbedding, fitEmbeddingDimensions, parseLlmModelUri, openRouterEmbeddingRoute, validateHostedEmbeddingVector } from "@docslurp/shared";
 import { embed, generateText, streamText } from "ai";
 import { embedPerplexity } from "@docslurp/shared";
 
@@ -354,6 +354,7 @@ export async function embedOpenAiText(args: {
   value: string;
   model?: string;
   dimensions?: number;
+  maxRetries?: number;
   baseURL?: string;
   signal?: AbortSignal;
   observability?: AiObservabilityContext;
@@ -384,6 +385,7 @@ export async function embedOpenAiText(args: {
         model: provider.embedding(args.model ?? SEARCH_EMBEDDING_MODEL),
         value: args.value,
         abortSignal: args.signal,
+        ...(args.maxRetries !== undefined ? { maxRetries: args.maxRetries } : {}),
         providerOptions:
           typeof args.dimensions === "number"
             ? { openai: { dimensions: args.dimensions } }
@@ -455,6 +457,7 @@ export async function embedConfiguredText(args: {
   provider: string;
   model?: string;
   dimensions?: number;
+  maxRetries?: number;
   /** Workspace-configured dimensions to request from servers that support them. */
   requestedDimensions?: number;
   normalize?: boolean;
@@ -481,6 +484,19 @@ export async function embedConfiguredText(args: {
   });
   if (args.runtime === "local") {
     return await embedLocalText(args);
+  }
+
+  if (args.provider === "deepinfra") {
+    if (!args.apiKey) throw new Error("DEEPINFRA_API_KEY is required for DeepInfra embeddings");
+    if (args.model !== "BAAI/bge-m3" || (args.dimensions !== undefined && args.dimensions !== 1024) || args.requestedDimensions !== undefined) throw new Error("DeepInfra BGE-M3 requires its native 1024 dimensions");
+    return withObservation({ name: "api.embedding.deepinfra", type: "embedding", model: args.model, input: args.value, result: aiResultDetails }, async () => {
+      const provider = createOpenAI({ apiKey: args.apiKey, baseURL: DEEPINFRA_EMBEDDING_BASE_URL, fetch: instrumentFetch("deepinfra", "embedding") });
+      const result = await embed({ model: provider.embedding(args.model!), value: args.value, abortSignal: args.signal, maxRetries: 0 });
+      if (!Number.isSafeInteger(result.usage.tokens) || result.usage.tokens! < 0) throw new Error("DeepInfra embeddings require actual provider token usage");
+      const usage = { inputTokens: result.usage.tokens! };
+      await args.onUsage?.(usage);
+      return { embedding: validateDeepInfraEmbedding(result.embedding, 1024, args.normalize ?? true), usage };
+    });
   }
 
   if (args.provider === "perplexity") {
@@ -524,6 +540,7 @@ export async function embedConfiguredText(args: {
       value: args.value,
       model: args.model,
       dimensions: args.dimensions,
+      maxRetries: args.maxRetries,
       baseURL: args.baseURL,
       signal: args.signal,
       observability: args.observability,

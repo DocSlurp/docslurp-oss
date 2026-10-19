@@ -107,3 +107,64 @@ test('structured identifiers and proper multiword answers remain individual leak
     assert.ok(rules(f.run()).includes('labeled-answer'), expected);
   }
 });
+
+function sourceDerivedFixture(t) {
+  const f = fixture(t);
+  f.manifest.schema = 'docslurp-source-derived-eval@v1';
+  f.manifest.cases[0].provenance = {
+    kind: 'source-derived', questionAuthor: 'Test question writer',
+    description: 'Questions derived from a third-party synthetic source; no claim of source authorship.',
+    derivedAt: '2026-10-17', sources: [{
+      publisher: 'Synthetic publisher', sourceUrl: 'https://example.invalid/source.pdf',
+      originalPdfSha256: sha(f.source), extractionMethod: 'Synthetic text extraction',
+      pages: [{ page: 1, excerptSha256: sha('Synthetic excerpt') }],
+    }],
+  };
+  f.save(); return f;
+}
+test('accepts honest source-derived provenance without changing leakage checks', (t) => {
+  const f = sourceDerivedFixture(t);
+  assert.equal(f.run().passed, true);
+  writeFileSync(join(f.repo, 'worker.ts'), 'const answer = "Distinctive Example Supplier";');
+  const report = f.run();
+  assert.equal(report.passed, false);
+  assert.ok(rules(report).includes('labeled-answer'));
+  assert.ok(!JSON.stringify(report).includes('Distinctive Example Supplier'));
+});
+test('source-derived manifests fail closed on missing provenance, invalid URLs, pages and hashes', (t) => {
+  for (const mutation of [
+    p => { delete p.questionAuthor; }, p => { delete p.derivedAt; },
+    p => { p.kind = 'authored'; }, p => { p.sources = []; },
+    p => { p.sources.push({ ...p.sources[0] }); },
+    p => { delete p.sources[0].publisher; }, p => { delete p.sources[0].extractionMethod; },
+    p => { p.sources[0].sourceUrl = 'http://example.invalid/source.pdf'; },
+    p => { p.sources[0].sourceUrl = 'https://name:secret@example.invalid/source.pdf'; },
+    p => { p.sources[0].originalPdfSha256 = 'not-a-hash'; },
+    p => { p.sources[0].pages = []; },
+    p => { p.sources[0].pages[0].page = 0; },
+    p => { p.sources[0].pages[0].page = 1.5; },
+    p => { p.sources[0].pages.push({ ...p.sources[0].pages[0] }); },
+    p => { p.sources[0].pages[0].excerptSha256 = 'bad'; },
+  ]) {
+    const f = sourceDerivedFixture(t); mutation(f.manifest.cases[0].provenance); f.save();
+    assert.equal(f.run().passed, false);
+  }
+  const f = sourceDerivedFixture(t);
+  writeFileSync(join(f.dataset, 'held-out-document.pdf'), 'changed bytes');
+  assert.ok(rules(f.run()).includes('artifact-hash-mismatch'));
+});
+test('source-derived PDF and excerpt recognition hashes remain leakage evidence', (t) => {
+  const f = sourceDerivedFixture(t);
+  const source = f.manifest.cases[0].provenance.sources[0];
+  writeFileSync(join(f.repo, 'worker.ts'), `const known = "${source.originalPdfSha256}"; const excerpt = "${source.pages[0].excerptSha256}";`);
+  const report = f.run();
+  assert.equal(report.passed, false);
+  assert.equal(report.findings.filter(f => f.rule === 'source-recognition-hash').length, 2);
+});
+
+test('original case IDs are recognized when source-derived cases receive namespaced IDs', (t) => {
+  const f = sourceDerivedFixture(t);
+  f.manifest.cases[0].originalCaseId = 'sample-01'; f.save();
+  writeFileSync(join(f.repo, 'worker.ts'), 'const known = "sample-01";');
+  assert.ok(rules(f.run()).includes('fixture-identifier'));
+});

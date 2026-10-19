@@ -1,0 +1,70 @@
+{
+  "startedAt": "2026-10-17T05:35:34.974Z",
+  "completedAt": "2026-10-17T05:35:52.388Z",
+  "sourceCommit": "199c60614152488d49a0abbacee688725ca18835",
+  "sessionId": "embedding-smoke-de61f7cd-cbeb-474b-a49f-7319b087cf35",
+  "route": {
+    "provider": "deepinfra",
+    "model": "BAAI/bge-m3",
+    "baseUrl": "https://api.deepinfra.com/v1/openai",
+    "dimensions": 1024,
+    "normalization": "L2",
+    "documentTask": "unprefixed-text",
+    "queryTask": "unprefixed-text"
+  },
+  "attempts": [
+    {
+      "kind": "document",
+      "startedAt": "2026-10-17T05:35:36.226Z",
+      "status": "success",
+      "inputCharacters": 77,
+      "actualInputTokens": 18,
+      "finishedAt": "2026-10-17T05:35:40.408Z",
+      "vector": {
+        "dimensions": 1024,
+        "finite": true,
+        "norm": 1,
+        "vectorSha256": "c23eb7699c12e8741ea227d742f5e9d9fa809225e1384bb2e55040bb5abd1e78"
+      }
+    },
+    {
+      "kind": "query",
+      "startedAt": "2026-10-17T05:35:40.465Z",
+      "status": "success",
+      "inputCharacters": 44,
+      "actualInputTokens": 12,
+      "finishedAt": "2026-10-17T05:35:52.330Z",
+      "vector": {
+        "dimensions": 1024,
+        "finite": true,
+        "norm": 1,
+        "vectorSha256": "1030908d0824ae68da23665adecbb21b090989e2a6db0e5ca23590e0da8ce61c"
+      }
+    }
+  ],
+  "providerActualUsd": 3e-7,
+  "customerLedgerUsd": 3.6e-7,
+  "persistedUsage": [
+    {
+      "id": "1d89c289-5552-4410-95e2-a7f28d4e82ce",
+      "provider": "deepinfra",
+      "model": "BAAI/bge-m3",
+      "metric": "embedding-tokens",
+      "input_tokens": 18,
+      "output_tokens": 0,
+      "cost_cents": 0.0000216,
+      "usageSource": "provider"
+    },
+    {
+      "id": "5a0adad2-29cd-4812-9d03-3bdb5ca00fcc",
+      "provider": "deepinfra",
+      "model": "BAAI/bge-m3",
+      "metric": "embed-query",
+      "input_tokens": 12,
+      "output_tokens": 0,
+      "cost_cents": 0.0000144,
+      "usageSource": "provider"
+    }
+  ],
+  "sourceEvidenceSha256": "6bd97d66649c06535f51a68ceccf2271eaea42175c5bec5e5477051403976ddb"
+}

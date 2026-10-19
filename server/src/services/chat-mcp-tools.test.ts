@@ -58,3 +58,21 @@ describe("chat MCP tools", () => {
     expect(result).toMatchObject({ evidence: [{ citationIndex: 1, text: "Supported fact" }] });
   });
 });
+
+describe("chat MCP tool retrieval controls", () => {
+  it("enforces resolved retrieval controls on every search, batch query and nested chat", async () => {
+    const { workspaceSearchRetrievalDefaultsSchema } = await import("@docslurp/shared");
+    const dispatch = vi.fn<McpDispatch>(async () => Response.json({ results: [] }));
+    const context = createChatMcpTools({ manifest: { capabilities: ["search", "chat"].map(id => ({ id, title: id, category: "tool", description: id, inputSchema: { type: "object" } })) },
+      dispatch, workspaceId: "selected", signal: new AbortController().signal,
+      retrievalDefaults: workspaceSearchRetrievalDefaultsSchema.parse({ resultCount: 4, useHyDE: false, useRerank: false, useMmr: true, iterativeMultiHop: false, resultOrder: "relevance" }),
+    });
+    const execute = (name: string, input: unknown) => context.tools[name]!.execute!(input, { toolCallId: name, messages: [], context: {} });
+    await execute("search", { q: "a", hyde: true, rerank: true, limit: 100, resultOrder: "prompt" });
+    expect(JSON.parse(dispatch.mock.calls[0]![1]!.body as string)).toMatchObject({ workspaceId: "selected", limit: 4, hyde: false, rerank: false, mmr: true, resultOrder: "relevance" });
+    await execute("search", { queries: [{ q: "a", hyde: true, limit: 100 }, { q: "b" }] });
+    for (const query of JSON.parse(dispatch.mock.calls[1]![1]!.body as string).queries) expect(query).toMatchObject({ workspaceId: "selected", limit: 4, hyde: false, mmr: true });
+    await execute("chat", { q: "a", retrieval: { useHyDE: true } });
+    expect(JSON.parse(dispatch.mock.calls[2]![1]!.body as string)).toMatchObject({ workspaceId: "selected", retrieval: { resultCount: 4, useHyDE: false, useMmr: true, resultOrder: "relevance" } });
+  });
+});

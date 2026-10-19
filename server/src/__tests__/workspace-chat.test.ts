@@ -21,6 +21,8 @@ const getWorkspaceSearchSettings = vi.fn();
 const generateAnthropicText = vi.fn();
 const generateAnthropicDocumentText = vi.fn();
 const configureSearchFromChat = vi.fn();
+const runChatMcpAgent = vi.fn();
+vi.mock("../services/chat-mcp-agent.js", () => ({ runChatMcpAgent }));
 const refineWorkspaceNames = vi.fn();
 
 // Spend admission has its own tests (spend-guard.test.ts); allow spend here.
@@ -126,6 +128,7 @@ describe("chatWorkspace", () => {
   });
 
   beforeEach(() => {
+    runChatMcpAgent.mockReset();
     sqlMock.mockReset();
     sqlMock.begin.mockReset();
     sqlMock.begin.mockImplementation(async (run) => run(sqlMock));
@@ -215,6 +218,29 @@ describe("chatWorkspace", () => {
       expect(hybridSearch).toHaveBeenCalledOnce();
     },
   );
+
+  it.each([false, true])("honors the trusted agent entrypoint permission (%s) with a verified actor and key", async (allowAgentTools) => {
+    sqlMock.mockResolvedValue([]);
+    getWorkspace.mockResolvedValue({ id: "ws-1", orgId: "org-1", systemPrompt: null });
+    hybridSearch.mockResolvedValue({ sessionId: "search-1", results: [] });
+    loadWorkspaceWholeCorpusContext.mockResolvedValue({ eligible: false, results: [], reason: "empty-workspace", stats: { documentCount: 0, chunkCount: 0, tokenEstimate: 0, charEstimate: 0, maxDocuments: 12, maxChunks: 24, maxTokens: 12000, maxChars: 60000 } });
+    runChatMcpAgent.mockResolvedValue({ answer: "Supported answer", citations: [], toolCalls: [], finishReason: "stop", usage: { inputTokens: 10, outputTokens: 4, totalTokens: 14, costCents: 0.01 } });
+    const previous = process.env.OPENROUTER_API_KEY;
+    process.env.OPENROUTER_API_KEY = "fake";
+    try {
+      await chatWorkspace({ workspaceId: "ws-1", userId: "user-1", query: "Find evidence", history: [], allowAgentTools, allowConfiguration: false,
+        actor: { type: "session", userId: "user-1", sessionId: "s", user: { id: "user-1", email: "", name: "User" } } });
+      if (allowAgentTools) {
+        expect(runChatMcpAgent).toHaveBeenCalledOnce();
+        expect(hybridSearch).not.toHaveBeenCalled();
+      } else {
+        expect(runChatMcpAgent).not.toHaveBeenCalled();
+        expect(hybridSearch).toHaveBeenCalledOnce();
+      }
+    } finally {
+      if (previous === undefined) delete process.env.OPENROUTER_API_KEY; else process.env.OPENROUTER_API_KEY = previous;
+    }
+  });
 
   it("says nothing relevant was found, without calling the model, when the relevance floor removed every passage", async () => {
     sqlMock.mockResolvedValue([]);

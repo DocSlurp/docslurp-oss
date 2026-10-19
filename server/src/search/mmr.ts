@@ -29,24 +29,6 @@ function cosineSimilarity(a: number[], b: number[]): number {
 }
 
 /**
- * Position-based diversity fallback: alternate between top and bottom ranks.
- * Picks rank 0, 2, 4, ..., then 5, 3, 1 (for 6 items).
- */
-function positionDiversity<T>(sorted: T[], topK: number): T[] {
-  const result: T[] = [];
-  const evens: T[] = [];
-  const odds: T[] = [];
-
-  for (let i = 0; i < sorted.length; i++) {
-    if (i % 2 === 0) evens.push(sorted[i]);
-    else odds.push(sorted[i]);
-  }
-
-  result.push(...evens, ...odds.reverse());
-  return result.slice(0, topK);
-}
-
-/**
  * MMR selection: pick top-K results balancing relevance and diversity.
  *
  * @param candidates - Candidate chunks with scores and optional vectors
@@ -64,9 +46,10 @@ export function mmrSelect(
   const hasVectors = candidates.every((c) => c.vector && c.vector.length > 0);
 
   if (!hasVectors) {
-    // Fall back to position-based diversity
+    // Without similarity evidence, preserve relevance. Rank parity is not
+    // diversity and can discard the second-best supporting passage.
     const sorted = [...candidates].sort((a, b) => b.score - a.score);
-    return positionDiversity(sorted, topK);
+    return sorted.slice(0, topK);
   }
 
   const selected: VectorizedChunk[] = [];

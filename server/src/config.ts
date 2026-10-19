@@ -133,6 +133,8 @@ const storage = resolveObjectStorageConfig();
 
 export const env = {
   chatMcpEnabled: readBoolean(process.env.DOCSLURP_CHAT_MCP_ENABLED, true),
+  /** Public chat APIs (/v1/search/chat, /v1/chat, chat completions) may run the bounded search agent. */
+  publicChatAgentEnabled: readBoolean(process.env.DOCSLURP_PUBLIC_CHAT_AGENT_ENABLED, true),
   webMcpEnabled: readBoolean(process.env.DOCSLURP_WEBMCP_ENABLED, true),
   port: readNumber(process.env.PORT, 8787),
   databaseUrl: resolveDatabaseUrl(),
