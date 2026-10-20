@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { visionModelCatalog } from "@docslurp/shared";
 
 import {
   buildFailedVisionAttemptUsage,
@@ -30,6 +31,30 @@ describe("shouldFailOpenVisionError", () => {
     expect(price({ ...tokens, model: "google/gemini-3.1-flash-lite" })).toBeCloseTo((2_000 * 0.25 + 1_000 * 1.5) / 1e4, 12);
     expect(price({ ...tokens, model: "vendor/uncataloged-vlm" })).toBeCloseTo(0.05, 10);
     expect(price({ ...tokens, model: "nvidia/nemotron-3.5-super-vl", baseUrl: "http://127.0.0.1:8000/v1" })).toBe(0);
+  });
+
+  it("never prices a receipt-less cataloged hosted call below the default fallback and labels its pricing source", () => {
+    const cfg = { openAiBaseUrl: "https://api.openai.com/v1", costPer1kInputTokens: 0.01, costPer1kOutputTokens: 0.03 } as Config;
+    const stage = new VisionExtractStage({} as CommandRunner, {} as ArtifactStore, cfg, {} as never);
+    const internals = stage as unknown as {
+      calculateVisionCost(value: Record<string, unknown>): number;
+      visionPricingSource(value: Record<string, unknown>): string;
+    };
+    const tokens = { inputTokens: 2_000, outputTokens: 1_000 };
+    const fallback = (tokens.inputTokens / 1000) * cfg.costPer1kInputTokens + (tokens.outputTokens / 1000) * cfg.costPer1kOutputTokens;
+    for (const entry of visionModelCatalog.filter((spec) => spec.target === "hosted")) {
+      const call = entry.runtime === "remote-openai"
+        ? { runtime: "remote-openai", baseUrl: cfg.openAiBaseUrl }
+        : { runtime: "openai-compatible", baseUrl: "https://openrouter.ai/api/v1" };
+      const cost = internals.calculateVisionCost({ ...call, ...tokens, model: entry.id });
+      expect(cost, entry.id).toBeGreaterThan(0);
+      expect(cost, entry.id).toBeGreaterThanOrEqual(fallback);
+      expect(internals.visionPricingSource({ ...call, model: entry.id }), entry.id).toBe("vision-catalog-list-price");
+    }
+    expect(internals.visionPricingSource({ runtime: "openai-compatible", baseUrl: "https://openrouter.ai/api/v1", model: "vendor/x" }))
+      .toBe("configured-fallback");
+    expect(internals.visionPricingSource({ runtime: "local-cli", baseUrl: null, model: "microsoft/Florence-2-base-ft" }))
+      .toBe("non-billable-runtime");
   });
 
   it("uses persisted triage without launching another source text extraction pass", async () => {
