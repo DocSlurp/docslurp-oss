@@ -466,6 +466,20 @@ describe("searchRoutes", () => {
       }
     });
 
+    it("explains a call that mixes the single and batch search forms so a model can retry", async () => {
+      const cases = [
+        [{ q: "a", queries: [{ q: "b" }] }, "Send either q for one query or queries for a batch, not both."],
+        [{ queries: [{ q: "b" }], limit: 5 }, "With queries, put limit inside each queries item; only concurrency may accompany queries."],
+        [{ q: "a", concurrency: 2 }, "concurrency applies only to a queries batch; remove it or send queries instead of q."],
+      ] as const;
+      for (const [body, message] of cases) {
+        const response = await post("/search", body);
+        expect(response.status).toBe(400);
+        expect(await response.json()).toMatchObject({ error: { code: "invalid_request", message } });
+      }
+      expect(hybridSearch).not.toHaveBeenCalled();
+    });
+
     it("answers a missing q, an unparseable body and a missing feedback chunk with invalid_request", async () => {
       expect(await (await app.request("/search?workspaceId=ws-1")).json()).toMatchObject({ error: { code: "invalid_request" } });
       const unparseable = await app.request("/search/aggregate", { method: "POST", body: "{nope" });

@@ -11,6 +11,9 @@ export const TOOL_CALL_LIMIT_RESULT = {
   limitReached: true,
 } as const;
 
+/** One page of a tool call's evidence; pageNumber is null only for a document with no known page. */
+export type EvidencePage = { documentId: string; pageNumber: number | null };
+
 /**
  * One tool call as reported in the response's `debug.toolCalls`. `queries` are
  * the model's own search strings: fine for the caller's debug, never put on spans.
@@ -20,7 +23,7 @@ export interface ChatToolCallDetail extends ChatToolActivity {
   resultCount?: number;
   zeroHit?: boolean;
   /** Distinct pages of the evidence this call returned. */
-  evidencePages?: Array<{ documentId: string; pageNumber: number | null }>;
+  evidencePages?: EvidencePage[];
   errorCode?: string;
   /** Provider cost the tool reported for its own work (embeddings, rewrites, nested answers), USD cents. */
   costCents?: number;
@@ -48,6 +51,23 @@ function responseErrorCode(result: unknown, status: number): string {
   const error = result && typeof result === "object" ? (result as { error?: unknown }).error : undefined;
   const code = error && typeof error === "object" ? (error as { code?: unknown }).code : undefined;
   return typeof code === "string" && /^[a-z0-9_]{1,64}$/i.test(code) ? code : `http_${status}`;
+}
+
+/**
+ * Distinct pages of a tool call's evidence. A chunk spanning pages has a null
+ * `pageNumber` and lists them in `pageNumbers`, so each listed page is reported.
+ * A document gets a null page only when none of its evidence names a page.
+ */
+export function evidencePages(results: SearchResult[]): EvidencePage[] {
+  const byDocument = new Map<string, Set<number>>();
+  for (const { citation } of results) {
+    const pages = byDocument.get(citation.documentId) ?? new Set<number>();
+    byDocument.set(citation.documentId, pages);
+    for (const page of citation.pageNumber != null ? [citation.pageNumber] : citation.pageNumbers ?? []) pages.add(page);
+  }
+  return [...byDocument].flatMap(([documentId, pages]) => pages.size
+    ? [...pages].sort((a, b) => a - b).map((pageNumber): EvidencePage => ({ documentId, pageNumber }))
+    : [{ documentId, pageNumber: null }]);
 }
 
 /** Retrieval shape of one search tool call: counts and scores only, never passage text. */
@@ -240,14 +260,13 @@ export function createChatMcpTools(args: {
             args.onEvidence?.([...citations]);
           }
           update(response.ok ? "success" : "error");
-          const pages = new Map(returned.map(item => [`${item.citation.documentId}:${item.citation.pageNumber ?? ""}`,
-            { documentId: item.citation.documentId, pageNumber: item.citation.pageNumber ?? null }]));
+          const pages = evidencePages(returned);
           const costCents = response.ok ? reportedToolCostCents(result) : 0;
           counters.toolCostCents += costCents;
           const stats = definition.id === "search" ? searchCallStats(toolCallId, response.ok, queryCount, concurrency, result) : undefined;
           detail({ status: response.ok ? "success" : "error", ...(queries ? { queries } : {}),
             ...(stats ? { resultCount: stats.resultCount, zeroHit: stats.zeroHit } : {}),
-            evidencePages: [...pages.values()], ...(response.ok ? { costCents } : {}),
+            evidencePages: pages, ...(response.ok ? { costCents } : {}),
             ...(response.ok ? {} : { errorCode: responseErrorCode(result, response.status) }) });
           if (stats) {
             searchCalls.push(stats);

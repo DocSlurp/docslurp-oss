@@ -1,7 +1,7 @@
 import { reportPublicError } from "../lib/public-errors.js";
 import { apiErrorResponse, nativeApiErrors } from "../lib/api-error.js";
 import { Hono, type Context } from "hono";
-import { batchSearchInputSchema, searchInputSchema, searchOptions, workspaceChatInputSchema, type SearchInput } from "../lib/search-input.js";
+import { batchSearchInputSchema, searchFormError, searchInputSchema, searchOptions, workspaceChatInputSchema, type SearchInput } from "../lib/search-input.js";
 import { streamSSE } from "hono/streaming";
 import { assertCanSpend } from "../services/billing/spend-guard.js";
 
@@ -298,7 +298,9 @@ export const searchRoutes = new Hono()
   })
   .post("/", async (c) => {
     const input = await c.req.json().catch(() => null);
-    // One query (`q`) or up to 20 (`queries`): the same endpoint serves both.
+    // One query (`q`) or up to 20 (`queries`): the same endpoint serves both, never mixed.
+    const formError = input && typeof input === "object" && !Array.isArray(input) ? searchFormError(input) : undefined;
+    if (formError) return apiErrorResponse(c, 400, "invalid_request", formError);
     if (input && typeof input === "object" && "queries" in input) {
       const batch = batchSearchInputSchema.safeParse(input);
       if (!batch.success) return apiErrorResponse(c, 400, "invalid_request", "Invalid search input", { issues: batch.error.issues });

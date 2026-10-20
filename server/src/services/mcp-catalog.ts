@@ -39,20 +39,25 @@ export const suggestQueriesInput = z.object({
 });
 
 /**
- * The search tool accepts one query or a batch, both defined by the search
- * route's own zod schemas. MCP requires an object at the top level, so the two
- * forms are merged into one object whose oneOf keeps them exclusive.
+ * The search tool accepts one query (`q` plus its options) or a batch
+ * (`queries` plus `concurrency`), both defined by the search route's own zod
+ * schemas. The advertised schema is the flat union of their properties with
+ * no top-level oneOf/anyOf/allOf/not: Anthropic (direct, Bedrock, Vertex) rejects
+ * those combinators at the top level of a tool input schema, which broke the chat
+ * agent and any MCP client that forwards tools to Claude. The search route
+ * enforces q XOR queries and answers a mixed call with a recoverable 400.
  */
 function searchToolInputSchema() {
-  const single = toolInputJsonSchema(searchInputSchema) as { properties: Record<string, unknown> };
-  const { properties: batch } = toolInputJsonSchema(batchSearchInputSchema) as { properties: Record<string, unknown> };
+  const single = toolInputJsonSchema(searchInputSchema) as { properties: Record<string, Record<string, unknown>> };
+  const { properties: batch } = toolInputJsonSchema(batchSearchInputSchema) as { properties: Record<string, Record<string, unknown>> };
   return {
     type: "object", additionalProperties: false,
-    properties: { ...single.properties, ...batch },
-    oneOf: [
-      { required: ["q"], not: { anyOf: Object.keys(batch).map(key => ({ required: [key] })) } },
-      { required: ["queries"], not: { anyOf: Object.keys(single.properties).map(key => ({ required: [key] })) } },
-    ],
+    properties: {
+      ...single.properties,
+      q: { ...single.properties.q, description: "One search query. Send either q (with the other top-level options) or queries, never both." },
+      queries: { ...batch.queries, description: "Batch form: up to 20 independent queries, each an object with its own q and options. Use instead of q; only concurrency may accompany it." },
+      concurrency: { ...batch.concurrency, description: "Batch form only: parallel retrievals for queries (1-8, default 4)." },
+    },
   };
 }
 
@@ -84,18 +89,15 @@ export function mcpTools(baseUrl: string): McpTool[] {
       inputSchema: toolInputJsonSchema(listWorkspacesInput) },
     { id: "upload", title: "Upload documents", scopes: ["ingest"],
       annotations: { readOnly: false, destructive: false, idempotent: false, openWorld: true, consequential: true },
-      description: "Upload documents using either fetchable HTTP(S) urls or files metadata. For files, generate one presigned PUT URL per file, up to 10 files (5 GiB each, subject to account limits). PUT the raw bytes to each putUrl with the declared Content-Type, then call completeUpload with sessionId and file IDs. Never send file bytes or local paths as tool arguments. URLs start ingestion immediately; files start only on completion. Omit workspaceId for the default workspace; workspaceName explicitly creates a new one. Ingestion can incur cost. idempotencyKey applies to URL ingestion retries.",
-      inputSchema: {
-        ...toolInputJsonSchema(uploadInput),
-        oneOf: [{ required: ["urls"], not: { required: ["files"] } }, { required: ["files"], not: { required: ["urls"] } }],
-        not: { required: ["workspaceId", "workspaceName"] },
-      } },
+      description: "Upload documents using either fetchable HTTP(S) urls or files metadata, never both. For files, generate one presigned PUT URL per file, up to 10 files (5 GiB each, subject to account limits). PUT the raw bytes to each putUrl with the declared Content-Type, then call completeUpload with sessionId and file IDs. Never send file bytes or local paths as tool arguments. URLs start ingestion immediately; files start only on completion. Omit workspaceId for the default workspace; workspaceName explicitly creates a new one (do not send both). Ingestion can incur cost. idempotencyKey applies to URL ingestion retries.",
+      // Flat like every tool schema: uploadInput's refinements enforce urls XOR files and workspaceId XOR workspaceName.
+      inputSchema: toolInputJsonSchema(uploadInput) },
     { id: "completeUpload", title: "Complete upload", scopes: ["ingest"],
       annotations: { readOnly: false, destructive: false, idempotent: false, openWorld: false, consequential: true },
       description: "After all presigned PUT requests succeed, verify uploaded files and start ingestion. Pass sessionId and fileIds from upload. Returns workspace and run IDs for getUploadStatus. File size is verified before ingestion; do not call before uploading the bytes.",
       inputSchema: toolInputJsonSchema(completeUploadInput) },
     { id: "search", title: "Search documents", scopes: ["search"], annotations: READ_ONLY,
-      description: "Retrieve cited passages for one query (q) or up to 20 independent queries (queries). Supply exactly one form. Batch results stay in input order with per-query errors; each query can select a workspace; concurrency (1-8, default 4) bounds parallel retrieval. Omitted workspace uses the default. Does not generate answers.",
+      description: "Retrieve cited passages for one query (q) or up to 20 independent queries (queries). Supply exactly one form: q with top-level options, or queries (each item has its own q and options) with optional concurrency; a call with both is rejected. Batch results stay in input order with per-query errors; each query can select a workspace; concurrency (1-8, default 4) bounds parallel retrieval. Omitted workspace uses the default. Does not generate answers.",
       inputSchema: searchToolInputSchema() },
     { id: "chat", title: "Chat with workspace", scopes: ["search"],
       annotations: { readOnly: false, destructive: false, idempotent: false, openWorld: false, consequential: false },
