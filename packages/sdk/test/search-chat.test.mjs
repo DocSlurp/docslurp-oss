@@ -95,3 +95,12 @@ test("portable context retains complete source text and citations without requir
   assert.ok(result.includes("policy.pdf"));
   assert.equal(formatSearchContext({ results: [], sessionId: "s", availability: null }), "");
 });
+
+
+test("lists workspace tags with counts using the client workspace default", async () => {
+  const client = createDocSlurpClient({ workspaceId: "my-workspace", fetch: async (url) => {
+    assert.ok(String(url).endsWith("/v1/workspaces/my-workspace/tags"));
+    return json({ tags: [{ tag: "finance", documentCount: 3 }] });
+  } });
+  assert.deepEqual(await client.listWorkspaceTags(), [{ tag: "finance", documentCount: 3 }]);
+});

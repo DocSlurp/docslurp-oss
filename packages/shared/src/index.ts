@@ -67,3 +67,5 @@ export * from "./routing-targets.js";
 export * from "./public-errors.js";
 export * from "./api-error.js";
 export * from "./frontend-api.js";
+
+export { documentTagsSchema } from "./document-tags.js";

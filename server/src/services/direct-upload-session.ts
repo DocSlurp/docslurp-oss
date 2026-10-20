@@ -34,6 +34,7 @@ export interface DirectUploadSessionFileInput {
 }
 
 export interface CreateDirectUploadSessionInput {
+  tags?: string[];
   userId: string;
   orgId?: string | null;
   workspaceId?: string | null;
@@ -53,6 +54,7 @@ export interface CompleteDirectUploadFileInput {
 }
 
 export type UploadSessionRow = {
+  tags?: string[];
   id: string;
   user_id: string;
   org_id: string | null;
@@ -100,7 +102,7 @@ export async function loadDirectUploadSession(
   userId: string,
 ): Promise<LoadedDirectUploadSession | null> {
   const [session] = await sql<UploadSessionRow[]>`
-    select id, user_id, org_id, workspace_id, workspace_name, template_key, pipeline, status
+    select id, user_id, org_id, workspace_id, workspace_name, template_key, pipeline, tags, status
     from upload_sessions
     where id = ${sessionId} and user_id = ${userId}
     limit 1
@@ -232,6 +234,7 @@ export async function createDirectUploadSession(input: CreateDirectUploadSession
       workspace_name,
       template_key,
       pipeline,
+      tags,
       status
     )
     values (
@@ -242,6 +245,7 @@ export async function createDirectUploadSession(input: CreateDirectUploadSession
       ${input.workspaceName ?? null},
       ${input.templateKey ?? null},
       ${sql.json(JSON.parse(JSON.stringify(input.pipeline)))},
+      ${sql.array(input.tags ?? [])},
       'pending'
     )
   `;

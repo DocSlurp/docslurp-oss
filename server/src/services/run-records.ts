@@ -47,6 +47,7 @@ export type WorkspaceRunRow = {
 };
 
 export type DocumentRow = {
+  tags?: string[];
   id: string;
   org_id: string;
   user_id: string;
@@ -155,6 +156,7 @@ export function mapDocument(row: DocumentRow): DocumentRecord {
     versionNumber: row.version_number ?? 1,
     previousVersionId: row.previous_version_id ?? null,
     canonicalId: row.canonical_id ?? null,
+    tags: row.tags ?? [],
     supersededAt: row.superseded_at ? serializeTimestamp(row.superseded_at) : null,
     supersededByDocumentId: row.superseded_by_document_id ?? null,
     createdAt: serializeTimestamp(row.created_at),

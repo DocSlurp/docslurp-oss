@@ -11,7 +11,13 @@ Each result has a `score` (rank-based, so the top hit is always near 1) and a `r
 - Filters: `documentId`, `runId`, `filenameContains`, `pageFrom`, `pageTo`, and comma-separated `tags` or `mimeTypes`.
 - Retrieval flags such as `rerank`, `hyde` or `graphExpansion`: anything you omit (including `limit`) uses the workspace's retrieval defaults, and anything you pass wins.
 
+Filters intersect across document evidence from keyword, vector, graph and page retrieval, whole-corpus fallback, and parent context. Tags match any supplied tag; tags and other filters apply together. Internal callers that supply both `documentId` and `documentIds` receive their intersection. Dates filter the creation time of a chunk or page. Raw pages cannot satisfy chunk language or heading filters, so those requests use matching chunks. Pins reorder eligible retrieved results. Vector search selects eligible documents before ANN and validates full chunk filters during hydration. Within one eligible document, chunk-level filters can reduce recall because ANN selects its candidates before hydration.
+
+GraphRAG community summaries remain broader workspace context. A summary returned alongside a filtered request carries an explicit scope qualification; its claims may come from documents outside the selected evidence scope.
+
 With the defaults, local reranking and parent-section retrieval are on, and graph expansion follows the workspace pipeline. Provider-backed steps (HyDE, compression, query rewriting and decomposition, step-back, self-query) stay off unless the request or the workspace owner turns them on. Embedding the query can still use a provider; that usage is logged and reported in `usage`.
+
+When `selfQuery` is enabled, `budget tag:finance` searches for `budget` within documents tagged `finance`. Tag labels are case sensitive; quote labels containing spaces, for example `budget tag:"Finance Team"`. Explicit caller `tags` filters take precedence over labels in the query. Consumed labels are excluded from retrieval text, reranking, relevance scoring and derived model prompts; diagnostics retain the original query. Malformed labels and queries containing only tag labels return HTTP 400.
 
 ## Citation locators
 

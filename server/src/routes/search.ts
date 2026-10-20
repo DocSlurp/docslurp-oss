@@ -120,6 +120,9 @@ type BatchResult = { ok: true; data: SearchData } | { ok: false; error: { code: 
 type SearchFailure = { code: string; apiCode: ApiErrorCode; message: string; status: 400 | 403 | 404 };
 /** `code` is the per-item batch code; `apiCode` is the envelope code of a whole-request failure. */
 function expectedSearchFailure(error: unknown): SearchFailure | null {
+  if (error instanceof InvalidRetrievalQueryError) {
+    return { code: "INVALID_RETRIEVAL_QUERY", apiCode: "invalid_request", message: error.message, status: 400 };
+  }
   if (error instanceof WorkspaceAccessError) {
     return error.status === 403
       ? { code: "FORBIDDEN", apiCode: "forbidden", message: error.message, status: 403 }

@@ -7,6 +7,7 @@
 import { createHash } from "node:crypto";
 
 import {
+  documentTagsSchema,
   pipelineFeatureOverridesSchema,
   workspaceTemplateKeySchema,
   type PipelineFeatureOverrides,
@@ -57,7 +58,7 @@ export type BulkWorkspaceIntakeFile = Pick<File, "arrayBuffer" | "name" | "size"
 
 type IntakeTargetArgs = Pick<
   WorkspaceIntakeRequest,
-  "userId" | "orgId" | "workspaceId" | "newWorkspace" | "workspaceName" | "templateKey" | "pipeline"
+  "userId" | "orgId" | "workspaceId" | "newWorkspace" | "workspaceName" | "templateKey" | "pipeline" | "tags"
 >;
 
 async function requiredIntake(
@@ -181,6 +182,7 @@ export async function confirmDirectUploadWorkspaceIntake(
         ? workspaceTemplateKeySchema.parse(session.template_key)
         : undefined,
       pipeline: session.pipeline ?? undefined,
+      tags: session.tags ?? [],
       kind: "direct-upload",
       items,
       audit: args.audit,
@@ -292,4 +294,17 @@ export async function createRemoteUrlWorkspaceIntake(
       });
     },
   );
+}
+
+/** Multipart encodes the same tag array as JSON. Validate before storing files. */
+export function parseFormDocumentTags(raw: unknown): string[] | undefined {
+  if (raw === undefined) return undefined;
+  let value: unknown;
+  try { value = typeof raw === "string" ? JSON.parse(raw) : raw; }
+  catch { throw new WorkspaceIntakeError("tags must be a JSON array of strings", 422); }
+  const parsed = documentTagsSchema.safeParse(value);
+  if (!parsed.success) throw new WorkspaceIntakeError("Invalid tags", 422, parsed.error.issues.map((issue) => ({
+    path: ["tags", ...issue.path].join("."), message: issue.message, code: issue.code,
+  })));
+  return parsed.data;
 }

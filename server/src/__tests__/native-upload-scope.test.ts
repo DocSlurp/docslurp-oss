@@ -9,6 +9,7 @@ vi.mock("../lib/request-actor.js", () => ({
 vi.mock("../services/workspace-intake-actions.js", () => ({
   createBulkWorkspaceIntake: mocks.intake, createRemoteUrlWorkspaceIntake: mocks.intake,
   parseFormWorkspaceIntakePipeline: vi.fn(), parseWorkspaceIntakePipeline: vi.fn(),
+  parseFormDocumentTags: vi.fn(),
   parseWorkspaceIntakeTemplateKey: vi.fn(), confirmDirectUploadWorkspaceIntake: vi.fn(),
 }));
 vi.mock("../services/direct-upload-session.js", () => ({
