@@ -343,11 +343,35 @@ export function caseFromMultiHop(pair, reply, { tier, generatorModel, createdAt,
 const defaultMaxCalls = (target) => Math.ceil(target * 2);
 
 /**
+ * Pairs each sampled page with its best-overlapping neighbour (same source
+ * document, within `span` pages) drawn from the full corpus, so a multi-hop
+ * question can bridge consecutive pages of one section.
+ */
+export function pairNeighbourPages(pages, neighbours, { seed, span = 3, minOverlap = 0.03, minChars = 200, exclude = new Set() }) {
+  const used = new Set(), pairs = [];
+  for (const first of selectPages(pages, { seed: `${seed}:neighbours`, minChars, exclude })) {
+    if (used.has(pageRef(first))) continue;
+    let best = null;
+    for (let offset = -span; offset <= span; offset++) {
+      if (!offset) continue;
+      const second = neighbours.get(`${first.sourceDoc}#${first.page + offset}`);
+      if (!second || second.markdown.trim().length < minChars || used.has(pageRef(second)) || exclude.has(pageRef(second))) continue;
+      const overlap = jaccard(first.markdown, second.markdown);
+      if (overlap >= minOverlap && (!best || overlap > best.overlap)) best = { page: second, overlap };
+    }
+    if (!best) continue;
+    used.add(pageRef(first)); used.add(pageRef(best.page));
+    pairs.push({ pages: first.page < best.page.page ? [first, best.page] : [best.page, first], overlap: best.overlap });
+  }
+  return pairs;
+}
+
+/**
  * `generate`: walks the seeded page order until `single` single-hop and
  * `multi` multi-hop cases are accepted or each kind's call cap is reached.
  * Pages behind accepted single-hop cases are not reused for pairs.
  */
-export async function generateCases({ pages, tier, seed, single = 0, multi = 0, maxSingleCalls = defaultMaxCalls(single), maxMultiCalls = defaultMaxCalls(multi), generatorModel, prices, apiKey, ledgerPath, guard, fetchImpl, createdAt = new Date().toISOString(), log = console.log }) {
+export async function generateCases({ pages, neighbours = null, tier, seed, single = 0, multi = 0, maxSingleCalls = defaultMaxCalls(single), maxMultiCalls = defaultMaxCalls(multi), generatorModel, prices, apiKey, ledgerPath, guard, fetchImpl, createdAt = new Date().toISOString(), log = console.log }) {
   const accepted = [], rejected = [];
   const call = (messages, scope) => openRouterJson({ model: generatorModel, messages, apiKey, metric: "search-model-eval-dataset-generate", ledgerPath, guard, prices, fetchImpl, scope, maxTokens: GENERATE_MAX_TOKENS, log });
   const used = new Set();
@@ -362,7 +386,7 @@ export async function generateCases({ pages, tier, seed, single = 0, multi = 0, 
   }
   calls = 0;
   let multis = 0;
-  for (const pair of pairPages(pages, { seed, exclude: used })) {
+  for (const pair of neighbours ? pairNeighbourPages(pages, neighbours, { seed, exclude: used }) : pairPages(pages, { seed, exclude: used })) {
     if (multis >= multi || calls >= maxMultiCalls) break;
     calls++;
     const reply = await call(multiHopMessages(...pair.pages), { tier, pages: pair.pages.map(pageRef) });
@@ -680,7 +704,17 @@ export async function main(argv = process.argv.slice(2)) {
       console.log(JSON.stringify({ tier, pages: pages.length, single, multi, singleHop: estimateGenerationUsd({ model: setup.generatorModel, prices: setup.prices, calls: maxSingleCalls, avgPromptChars: chars + 900 }), multiHop: estimateGenerationUsd({ model: setup.generatorModel, prices: setup.prices, calls: maxMultiCalls, avgPromptChars: 2 * chars + 1100 }) }, null, 2));
       return 0;
     }
-    writeCandidates(setup.out, await generateCases({ pages, tier, seed, single, multi, maxSingleCalls, maxMultiCalls, apiKey: process.env[options["api-key-env"] ?? "OPENROUTER_API_KEY"], createdAt, ...setup }));
+    let neighbours = null;
+    if (options.corpus) {
+      const wanted = pages.flatMap((page) => [-3, -2, -1, 1, 2, 3].map((offset) => ({ sourceDoc: page.sourceDoc, page: page.page + offset })));
+      const scope = (options.tiers ? readJson(options.tiers) : {})[tier]?.scope ?? {};
+      neighbours = new Map();
+      for (const [key, row] of await loadCorpusPages(options.corpus, wanted)) {
+        if (scope.maxPage && row.page > scope.maxPage) continue;
+        neighbours.set(key, normalizePage({ ...row, markdown: row.text }, { tier, workspaceId: pages[0]?.workspaceId }));
+      }
+    }
+    writeCandidates(setup.out, await generateCases({ pages, neighbours, tier, seed, single, multi, maxSingleCalls, maxMultiCalls, apiKey: process.env[options["api-key-env"] ?? "OPENROUTER_API_KEY"], createdAt, ...setup }));
     console.log(JSON.stringify({ guard: setup.guard.state() }));
   } else if (command === "unanswerable") {
     if (!options.pages || !options.corpus) throw new Error(USAGE);

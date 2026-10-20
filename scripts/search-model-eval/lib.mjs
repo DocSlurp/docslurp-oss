@@ -201,6 +201,7 @@ export async function openRouterJson({ model, messages, apiKey, metric, ledgerPa
   if (guard && !reservationId) throw new BudgetExceededError(`Budget cap reached before ${metric}`);
   let body;
   try {
+    for (let attempt = 1; ; attempt++) {
     const response = await fetchImpl(OPENROUTER_URL, {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}`, "X-Title": "docslurp-search-model-eval" },
@@ -209,7 +210,11 @@ export async function openRouterJson({ model, messages, apiKey, metric, ledgerPa
     });
     const raw = await response.text();
     try { body = JSON.parse(raw); } catch { body = null; }
+    // Transient 429/5xx: up to two retries with backoff. Failed attempts are unbilled by OpenRouter.
+    if ((response.status === 429 || response.status >= 500) && attempt < 3) { log(`[retry] ${metric} OpenRouter HTTP ${response.status} attempt=${attempt}`); await new Promise((resolve) => setTimeout(resolve, attempt * 4000 + Math.random() * 2000)); continue; }
     if (!response.ok || !body) throw new Error(`OpenRouter HTTP ${response.status}`);
+    break;
+    }
   } catch (error) {
     if (guard) guard.reconcile(reservationId, { actualUsd: body?.usage?.cost ?? null, source: "openrouter-usage" });
     throw error;
