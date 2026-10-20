@@ -1,7 +1,7 @@
 import type postgres from "postgres";
 import { randomBytes, randomUUID, createHash } from "node:crypto";
 
-import { apiKeyRateLimitRulesSchema, type ApiKeyRateLimitRule } from "@docslurp/shared";
+import { apiKeyRateLimitRulesSchema, materializationPolicyOverridesSchema, type ApiKeyRateLimitRule, type MaterializationPolicy } from "@docslurp/shared";
 
 import { sql } from "../db.js";
 import { recordApiKeyRequest } from "./api-key-usage.js";
@@ -20,6 +20,7 @@ type ApiKeyRow = {
   rate_limit_ppd: number;
   rate_limits: unknown;
   workspace_ids: string[] | null;
+  materialization_policy?: unknown;
   last_used_at: string | null;
   created_at: string;
   revoked_at: string | null;
@@ -51,6 +52,8 @@ export interface ApiKey {
   rateLimits: ApiKeyRateLimitRule[];
   /** Workspaces this key may use; empty means every workspace the owner can reach in the key's org. */
   workspaceIds: string[];
+  /** Per-key caps on query-time page parsing; `{}` adds no restriction. */
+  materializationPolicy?: Partial<MaterializationPolicy>;
   lastUsedAt: string | null;
   createdAt: string;
   revokedAt: string | null;
@@ -149,6 +152,12 @@ export function parseApiKeyRateLimits(value: unknown): ApiKeyRateLimitRule[] {
   return parsed.success ? parsed.data : [];
 }
 
+/** Stored policy is re-validated on read so a malformed row can never break auth; invalid means no overrides. */
+export function parseKeyMaterializationPolicy(value: unknown): Partial<MaterializationPolicy> {
+  const parsed = materializationPolicyOverridesSchema.safeParse(value ?? {});
+  return parsed.success ? parsed.data : {};
+}
+
 function mapApiKey(row: ApiKeyRow): ApiKey {
   return {
     id: row.id,
@@ -162,6 +171,7 @@ function mapApiKey(row: ApiKeyRow): ApiKey {
     rateLimitPpd: row.rate_limit_ppd,
     rateLimits: parseApiKeyRateLimits(row.rate_limits),
     workspaceIds: row.workspace_ids ?? [],
+    materializationPolicy: parseKeyMaterializationPolicy(row.materialization_policy),
     lastUsedAt: row.last_used_at,
     createdAt: row.created_at,
     revokedAt: row.revoked_at,
@@ -184,6 +194,7 @@ export async function createApiKey(
     workspaceIds?: string[];
     /** Required to give a client key ingest or artifacts (with a workspace allowlist). */
     allowClientSensitiveScopes?: boolean;
+    materializationPolicy?: Partial<MaterializationPolicy>;
   }
 ): Promise<{ key: ApiKey; rawKey: string }> {
   const id = randomUUID();
@@ -204,10 +215,11 @@ export async function createApiKey(
     const workspaceIds = await normalizeKeyWorkspaceIds(tx, orgId, userId, limits?.workspaceIds);
     assertClientKeySensitiveScopes(keyType, scopes, workspaceIds, limits?.allowClientSensitiveScopes === true);
     const [row] = await tx<ApiKeyRow[]>`
-      insert into api_keys (id, user_id, org_id, key_hash, name, key_type, allowed_domains, scopes, rate_limit_rpm, rate_limit_ppd, rate_limits, workspace_ids)
+      insert into api_keys (id, user_id, org_id, key_hash, name, key_type, allowed_domains, scopes, rate_limit_rpm, rate_limit_ppd, rate_limits, workspace_ids, materialization_policy)
       values (${id}, ${userId}, ${orgId}, ${keyHash}, ${name}, ${keyType}, ${tx.array(allowedDomains)},
         ${tx.array(scopes)}, ${limits?.rpm ?? 60}, ${limits?.ppd ?? 10000},
-        ${tx.json(apiKeyRateLimitRulesSchema.parse(limits?.rateLimits ?? []) as never)}, ${tx.array(workspaceIds)})
+        ${tx.json(apiKeyRateLimitRulesSchema.parse(limits?.rateLimits ?? []) as never)}, ${tx.array(workspaceIds)},
+        ${tx.json(materializationPolicyOverridesSchema.parse(limits?.materializationPolicy ?? {}) as never)})
       returning *`;
     return { key: mapApiKey(row!), rawKey };
   });
@@ -362,7 +374,7 @@ export class ApiKeyTypeChangeError extends Error {
 
 export async function updateApiKey(id: string, userId: string, updates: {
   name?: string; scopes?: string[]; rateLimitRpm?: number; rateLimitPpd?: number; rateLimits?: ApiKeyRateLimitRule[]; keyType?: ApiKeyType; allowedDomains?: string[];
-  workspaceIds?: string[]; allowClientSensitiveScopes?: boolean;
+  workspaceIds?: string[]; allowClientSensitiveScopes?: boolean; materializationPolicy?: Partial<MaterializationPolicy>;
 }): Promise<ApiKey | null> {
   return await withOwnedKeyLock(id, userId, async (tx, existing, role) => {
     const nextKeyType = parseApiKeyType(existing.key_type);
@@ -385,7 +397,8 @@ export async function updateApiKey(id: string, userId: string, updates: {
       scopes = coalesce(${updates.scopes ? tx.array(nextScopes) : null}, scopes),
       workspace_ids = ${tx.array(nextWorkspaceIds)},
       rate_limit_rpm = coalesce(${updates.rateLimitRpm ?? null}, rate_limit_rpm), rate_limit_ppd = coalesce(${updates.rateLimitPpd ?? null}, rate_limit_ppd),
-      rate_limits = coalesce(${updates.rateLimits ? tx.json(apiKeyRateLimitRulesSchema.parse(updates.rateLimits) as never) : null}::jsonb, rate_limits)
+      rate_limits = coalesce(${updates.rateLimits ? tx.json(apiKeyRateLimitRulesSchema.parse(updates.rateLimits) as never) : null}::jsonb, rate_limits),
+      materialization_policy = coalesce(${updates.materializationPolicy ? tx.json(materializationPolicyOverridesSchema.parse(updates.materializationPolicy) as never) : null}::jsonb, materialization_policy)
       where id = ${id} and user_id = ${userId} and revoked_at is null returning *`;
     return row ? mapApiKey(row) : null;
   });
@@ -423,6 +436,8 @@ export interface ValidatedKey {
   rateLimits: ApiKeyRateLimitRule[];
   /** Workspace allowlist; empty means every workspace the owner can reach in `orgId`. */
   workspaceIds: string[];
+  /** Per-key materialization caps; absent or `{}` adds no restriction. */
+  materializationPolicy?: Partial<MaterializationPolicy>;
 }
 
 export async function validateApiKey(
@@ -472,5 +487,24 @@ export async function validateApiKey(
     rateLimitPpd: row.rate_limit_ppd,
     rateLimits: parseApiKeyRateLimits(row.rate_limits),
     workspaceIds: row.workspace_ids ?? [],
+    materializationPolicy: parseKeyMaterializationPolicy(row.materialization_policy),
   };
+}
+
+/**
+ * Liveness and policy of one key by id, for sealed capability tokens issued
+ * under it. Skips the type/domain checks: the token holder is not the key.
+ * Null when the key is revoked, gone, or its owner left the organization.
+ */
+export async function getLiveApiKeyById(keyId: string): Promise<{ keyType: ApiKeyType; scopes: string[]; workspaceIds: string[]; materializationPolicy: Partial<MaterializationPolicy> } | null> {
+  const [row] = await sql<ApiKeyRow[]>`
+    select * from api_keys
+    where id = ${keyId} and revoked_at is null
+      and exists (
+        select 1 from org_memberships om
+        where om.org_id = api_keys.org_id and om.user_id = api_keys.user_id
+      )
+  `;
+  const keyType = row ? parseApiKeyType(row.key_type) : null;
+  return row && keyType ? { keyType, scopes: effectiveKeyScopes(keyType, row.scopes ?? [...defaultApiKeyScopes], row.workspace_ids ?? []), workspaceIds: row.workspace_ids ?? [], materializationPolicy: parseKeyMaterializationPolicy(row.materialization_policy) } : null;
 }

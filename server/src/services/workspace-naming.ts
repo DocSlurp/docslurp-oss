@@ -23,7 +23,12 @@ export async function markWorkspaceAutoNamed(workspaceId: string, userId: string
 export async function refineWorkspaceNames(workspaceIds: string[], firstMessage?: string) {
   if (!workspaceIds.length) return;
   const rows = await sql<{ id: string; name: string; title: string | null }[]>`
-    select w.id, w.name, coalesce(c.metadata ->> 'title', c.heading_path[1]) as title
+    select w.id, w.name, coalesce(
+      c.metadata ->> 'title', c.heading_path[1],
+      -- Deferred documents have no chunks until pages are searched; their Index Map supplies a title.
+      (select d.metadata ->> 'mapTitle' from documents d
+        where d.workspace_id = w.id and d.metadata ->> 'mapTitle' is not null order by d.created_at limit 1)
+    ) as title
     from workspaces w
     join workspace_search_settings s on s.workspace_id = w.id
     left join lateral (

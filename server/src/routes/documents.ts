@@ -33,8 +33,15 @@ import {
   setDocumentTags
 } from "../services/documents.js";
 import { acceptApiKeys } from "../lib/route-auth.js";
-import { apiStatusError } from "../lib/api-error.js";
+import { apiErrorResponse, apiStatusError } from "../lib/api-error.js";
+import { indexingModeErrorResponse } from "../lib/indexing-mode-error.js";
 import { validationHook } from "../lib/validation.js";
+import { deferredProfilesEnabled } from "@docslurp/shared";
+import { getRun } from "../services/runs.js";
+import { runLifecycle } from "../services/run-lifecycle.js";
+import { resolveMaterializationPolicy } from "../services/materialization-policy.js";
+import { getWorkspace } from "../services/workspaces.js";
+import { IndexingModeError, requestFullIndex } from "../services/workspace-indexing-mode.js";
 
 const bulkSchema = z.object({
   action: z.enum(["reprocess", "export-artifacts", "apply-tags", "remove-tags", "delete"]),
@@ -76,10 +83,12 @@ export const documentsRoutes = new Hono()
       await next();
       return;
     }
-    if (!apiKeyHasAnyScope(apiKey, ["artifacts"])) {
+    const fullIndexRequest = c.req.method === "POST" && /\/[^/]+\/full-index\/?$/.test(c.req.path);
+    // Full index spends credits, so it needs ingest (like the workspace endpoint) instead of artifacts.
+    if (!apiKeyHasAnyScope(apiKey, fullIndexRequest ? ["ingest"] : ["artifacts"])) {
       return apiStatusError(c, 403, "Forbidden");
     }
-    if (c.req.method !== "GET") {
+    if (c.req.method !== "GET" && !fullIndexRequest) {
       return apiStatusError(c, 403, "This endpoint requires a dashboard session or server-side document API");
     }
     await next();
@@ -100,6 +109,44 @@ export const documentsRoutes = new Hono()
       tags
     });
     return c.json({ documents });
+  })
+  .post("/:documentId/full-index", async (c) => {
+    if (!deferredProfilesEnabled()) return apiErrorResponse(c, 404, "not_found", "Not found");
+    const userId = c.get("sessionUser").id;
+    const viewer = await getDocumentViewerPayload(c.req.param("documentId"), userId);
+    const workspace = viewer ? await getWorkspace(viewer.document.workspaceId, userId) : null;
+    const apiKey = c.get("apiKey");
+    if (!viewer || !workspace) return apiErrorResponse(c, 404, "not_found", "Document not found");
+    if (apiKey) {
+      try {
+        assertApiKeyWorkspaceScope(apiKey, viewer.document);
+      } catch {
+        return apiErrorResponse(c, 404, "not_found", "Document not found");
+      }
+    }
+    const resolved = await resolveMaterializationPolicy({
+      workspacePipeline: workspace.pipeline,
+      apiKey,
+      capabilityHeader: c.req.header("X-DocSlurp-Capability"),
+      origin: c.req.header("Origin"),
+      workspaceId: workspace.id,
+    });
+    if ("error" in resolved) return apiErrorResponse(c, 403, "forbidden", "Invalid capability", { category: resolved.error });
+    try {
+      const result = await requestFullIndex({
+        orgId: workspace.orgId,
+        workspaceId: workspace.id,
+        documentIds: [viewer.document.id],
+        actor: getRequestActor(c),
+        policy: resolved.policy,
+      });
+      const run = await getRun(result.runId, userId);
+      if (run) await runLifecycle.start(run);
+      return c.json({ runId: result.runId, pages: result.pages, estimatedCredits: result.estimatedCredits, billing: result.billing }, 202);
+    } catch (error) {
+      if (error instanceof IndexingModeError) return indexingModeErrorResponse(c, error);
+      throw error;
+    }
   })
   .get("/index", async (c) => {
     const userId = c.get("sessionUser").id;
@@ -388,8 +435,9 @@ export const documentsRoutes = new Hono()
     return c.json({ runs, failed, warnings }, 201);
   });
 
-// Reads only: the router's guard above rejects non-GET API key requests.
+// Reads only, plus full-index (policy-gated): the router guard above rejects other non-GET API key requests.
 acceptApiKeys(documentsRoutes, [
+  "POST /:documentId/full-index",
   "GET /",
   "GET /index",
   "GET /review-queue",

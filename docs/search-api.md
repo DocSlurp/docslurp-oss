@@ -295,3 +295,5 @@ authorization, migrated Postgres spend checks, citation mapping and persisted
 usage with a mocked provider. They also verify rerank-off, privacy-blocked,
 credit-blocked and outsider requests make no provider calls. No deployment or
 provider corpus evaluation follows from enabling the implementation in source.
+
+Workspaces that index on demand (page map or page images) add a `deferred` stats block to search results; see [Deferred indexing modes](deferred-indexing.md).

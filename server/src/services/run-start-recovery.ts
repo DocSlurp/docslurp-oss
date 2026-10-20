@@ -78,6 +78,7 @@ export function createRunStartRecovery(deps: {
         from workspace_runs
         where status = 'queued'
           and workflow_started_at is null
+          and kind <> 'materialize'
           and coalesce(control_state, '') not in ('paused', 'pause_requested', 'cancelled', 'cancel_requested', 'dead-letter')
           and creation_ready_at is not null
           and (

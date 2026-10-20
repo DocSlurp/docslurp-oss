@@ -19,6 +19,10 @@ import { ApplicationFailure } from "@temporalio/common";
 
 import type { Config } from "../config.js";
 import type { Store } from "../db/store.js";
+import type { CommandRunner } from "../tools/runner.js";
+import type { MaterializePagesInput } from "@docslurp/shared";
+import { completeMaterializeRun, runMaterializeRange } from "../deferred/materialize-activity.js";
+import type { MaterializeResult } from "./materialize-ranges.js";
 import type { Stage } from "../pipeline/pipeline.js";
 import {
   createStageExecution,
@@ -62,6 +66,8 @@ export interface ActivityDependencies {
   storage: ArtifactStore;
   stages: Stage[];
   config: Config;
+  /** Command runner for the materialize activities (deferred indexing). */
+  runner?: CommandRunner;
 }
 
 /**
@@ -172,6 +178,24 @@ export function createActivities(deps: ActivityDependencies) {
   const slotsEnabled = resolveWorkerSlotOptions().enabled;
 
   const activities = {
+    /** One contiguous page range of a materializePages workflow. */
+    async materializePageRangeActivity(input: MaterializePagesInput): Promise<MaterializeResult> {
+      const context = Context.current();
+      if (!deps.runner) throw ApplicationFailure.nonRetryable("materialize activities require a command runner");
+      return runMaterializeRange({
+        store, sql: store.stageSql,
+        materializer: { storage: deps.storage, runner: deps.runner, config: deps.config },
+        heartbeat: () => context.heartbeat(),
+        signal: context.cancellationSignal,
+        startToCloseMs: 5 * 60_000,
+      }, input);
+    },
+
+    /** Marks the materialize run row terminal once every range has settled. */
+    async completeMaterializeRun(input: { runId: string; result: MaterializeResult }): Promise<void> {
+      await completeMaterializeRun(store.stageSql, input.runId, input.result);
+    },
+
     async runVisionPageBundle(tasks: VisionPageTask[]): Promise<UsageSummary> {
       return runPageBundle(tasks, (task) => activities.runVisionPageTask(task, 1 / Math.min(2, tasks.length)));
     },

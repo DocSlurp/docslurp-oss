@@ -17,6 +17,10 @@ import {
 } from "./embedding.js";
 import { isProviderCallAllowed } from "./privacy.js";
 import { decisionFormatSchema, routingObjectiveSchema } from "./page-routing.js";
+import {
+  indexingModeSchema,
+  materializationPolicyOverridesSchema,
+} from "./deferred-indexing.js";
 import { isPrivateModelUri, parsePrivateModelUri } from "./private-endpoints.js";
 
 export const organizationRoleSchema = z.enum([
@@ -68,6 +72,8 @@ export const runStageSchema = z.enum([
   "page-index",
   "index",
   "proposition-index",
+  "document-map",
+  "page-embed",
   "completed",
 ]);
 export type RunStage = z.infer<typeof runStageSchema>;
@@ -185,7 +191,7 @@ export type PrivacyMode = z.infer<typeof privacyModeSchema>;
 // Model IDs belong in defaults/catalogs; runtime stages resolve workspace settings.
 export const DEFAULT_PIPELINE_TEXT_MODEL = "qwen/qwen3.5-flash-02-23";
 export const pipelineTextOperationSchema = z.enum([
-  "document-summary", "proposition-extraction", "structured-extraction",
+  "document-summary", "document-map", "proposition-extraction", "structured-extraction",
   "graph-extraction", "community-summary", "contextual-chunk-preamble",
 ]);
 export type PipelineTextOperation = z.infer<typeof pipelineTextOperationSchema>;
@@ -413,6 +419,16 @@ export function withPlatformPageRouterMode<T extends { pageRouter?: Partial<Page
 
 export const pipelineFeaturesSchema = z
   .object({
+    // Deferred indexing: `full` indexes eagerly; `map`/`visual` defer parsing until a query needs pages.
+    indexingMode: indexingModeSchema.default("full"),
+    materialization: materializationPolicyOverridesSchema.default({}),
+    visualPages: z
+      .object({
+        route: z.enum(["auto", "jina-private", "gemini"]).default("auto"),
+        // Map mode only: embed uncovered pages of scanned documents at index time. Costs per page; off unless chosen.
+        coarseFallback: z.boolean().default(false),
+      })
+      .default({ route: "auto", coarseFallback: false }),
     inferenceLane: inferenceLaneSchema.default("standard"),
     textGeneration: textGenerationConfigSchema.default(defaultTextGenerationConfig),
     // Named parser playbook selection controls which extraction/vision strategies to prefer.
@@ -600,6 +616,9 @@ export const pipelineFeaturesSchema = z
 export type PipelineFeatures = z.infer<typeof pipelineFeaturesSchema>;
 
 export const defaultPipelineFeatures: PipelineFeatures = {
+  indexingMode: "full",
+  materialization: {},
+  visualPages: { route: "auto", coarseFallback: false },
   inferenceLane: "standard",
   textGeneration: defaultTextGenerationConfig,
   parserPlaybook: "balanced",
@@ -647,7 +666,11 @@ export const defaultPipelineFeatures: PipelineFeatures = {
 
 const alwaysEnabled = () => true;
 
-export const pipelineStagePlan: readonly PipelineStagePlanItem[] = [
+export function isDeferredMode(features: Pick<PipelineFeatures, "indexingMode">): boolean {
+  return features.indexingMode !== "full";
+}
+
+const basePipelineStagePlan: readonly PipelineStagePlanItem[] = [
   {
     stage: "quarantine",
     label: "Quarantine",
@@ -696,6 +719,20 @@ export const pipelineStagePlan: readonly PipelineStagePlanItem[] = [
     phase: "prep",
     phaseLabel: "Prep",
     isEnabled: alwaysEnabled,
+  },
+  {
+    stage: "document-map",
+    label: "Document map",
+    phase: "extract",
+    phaseLabel: "Extract",
+    isEnabled: (features) => features.indexingMode === "map",
+  },
+  {
+    stage: "page-embed",
+    label: "Page embed",
+    phase: "extract",
+    phaseLabel: "Extract",
+    isEnabled: (features) => features.indexingMode === "visual",
   },
   {
     stage: "extract-markdown",
@@ -802,6 +839,17 @@ export const pipelineStagePlan: readonly PipelineStagePlanItem[] = [
     isEnabled: (features) => features.indexVectors,
   },
 ];
+
+const deferredLocatorStages: ReadonlySet<PipelineRunStage> = new Set(["document-map", "page-embed"]);
+const eagerStartIndex = basePipelineStagePlan.findIndex((item) => item.stage === "extract-markdown");
+
+/** Deferred modes skip every eager extract/index stage: wrap their predicates. */
+export const pipelineStagePlan: readonly PipelineStagePlanItem[] = basePipelineStagePlan.map(
+  (item, position) =>
+    position < eagerStartIndex || deferredLocatorStages.has(item.stage)
+      ? item
+      : { ...item, isEnabled: (features) => !isDeferredMode(features) && item.isEnabled(features) },
+);
 
 export const pipelineStageOrder: PipelineRunStage[] = pipelineStagePlan.map(
   (item) => item.stage,
@@ -1101,6 +1149,11 @@ export const stageDataFlow: Record<PipelineRunStage, StageDataFlow> = {
   normalize: { consumes: ["normalizedFormat"], produces: ["normalize"] },
   "pdf-tooling": { produces: ["pdf-tooling"] },
   "split-pages": { produces: ["pages"] },
+  "document-map": {
+    consumes: ["pages", "normalizedFormat"],
+    produces: ["document-map", "page-labels"],
+  },
+  "page-embed": { consumes: ["pages"], produces: ["page-image-vectors"] },
   "extract-markdown": {
     consumes: ["normalizedFormat", "parser-playbook", "hasTablePages", "images"],
     produces: [
@@ -1220,6 +1273,26 @@ export function withoutStageSelection<T extends { restartFromStage?: unknown; st
 ): Omit<T, "restartFromStage" | "stageSubset"> {
   const { restartFromStage: _restart, stageSubset: _subset, ...rest } = features;
   return rest;
+}
+
+/**
+ * Pipeline features for version hashes: drops stage selection plus
+ * `indexingMode`/`materialization`/`visualPages`, so switching modes (or the
+ * new `visualPages` default appearing on stored pipelines) never marks chunks stale.
+ * The stored pipeline keeps those fields (use `withoutStageSelection` there).
+ */
+export function pipelineVersionFeatures<T extends object>(
+  features: T,
+): Omit<T, "restartFromStage" | "stageSubset" | "indexingMode" | "materialization" | "visualPages"> {
+  const {
+    restartFromStage: _restart,
+    stageSubset: _subset,
+    indexingMode: _mode,
+    materialization: _materialization,
+    visualPages: _visualPages,
+    ...rest
+  } = features as T & Record<string, unknown>;
+  return rest as Omit<T, "restartFromStage" | "stageSubset" | "indexingMode" | "materialization" | "visualPages">;
 }
 
 function selectStages(

@@ -1,4 +1,4 @@
-import { publicDiagnostics, publicDocumentError } from "@docslurp/shared";
+import { deferredProfilesEnabled, isBillingEnforced, PUBLIC_ERROR_MESSAGES, publicDiagnostics, publicDocumentError } from "@docslurp/shared";
 import { refineWorkspaceNames } from "./workspace-naming.js";
 import { jsonRecord } from "../lib/json-record.js";
 import { randomUUID } from "node:crypto";
@@ -26,6 +26,12 @@ import {
 } from "@docslurp/shared";
 
 import { sql } from "../db.js";
+import {
+  defaultIndexingModeForOrg,
+  effectiveIndexingMode,
+  validateModeChoice,
+  validateModeSwitch,
+} from "./workspace-indexing-mode.js";
 import { buildRunProgressSnapshot, withRunCosts } from "./runs.js";
 import {
   canEditWorkspace,
@@ -61,6 +67,7 @@ type WorkspaceRow = {
   run_retention_days?: number | null;
   document_count: number;
   total_page_count: number;
+  indexed_page_count?: number | null;
   source_bytes?: number | string | null;
   pending_document_count?: number | null;
   pending_page_count?: number | null;
@@ -273,12 +280,19 @@ function mapWorkspace(row: WorkspaceRow): WorkspaceRecord {
     name: row.name,
     templateKey: parseWorkspaceTemplateKey(row.template_key),
     systemPrompt: row.system_prompt ?? null,
-    pipeline: normalizePipelineFeatures(row.pipeline ?? defaultPipelineFeatures),
+    pipeline: {
+      ...normalizePipelineFeatures(row.pipeline ?? defaultPipelineFeatures),
+      indexingMode: effectiveIndexingMode(row.pipeline?.indexingMode),
+    },
     monthlyBudgetCents: row.monthly_budget_cents ?? null,
     artifactRetentionDays: row.artifact_retention_days ?? null,
     runRetentionDays: row.run_retention_days ?? null,
     documentCount: row.document_count ?? 0,
     totalPageCount: row.total_page_count ?? 0,
+    indexingMode: effectiveIndexingMode(row.pipeline?.indexingMode),
+    indexedPageCount: row.indexed_page_count ?? row.total_page_count ?? 0,
+    deferredIndexingAvailable: deferredProfilesEnabled(),
+    billingEnforced: isBillingEnforced(),
     sourceBytes: Number(row.source_bytes ?? 0),
     pendingDocumentCount: row.pending_document_count ?? 0,
     pendingPageCount: row.pending_page_count ?? 0,
@@ -349,6 +363,14 @@ export async function createWorkspace(input: CreateWorkspaceInput): Promise<Work
     throw new Error("Organization not found");
   }
 
+  // Plan default unless the caller chose a mode; coerced to full while the flag is off.
+  const requestedMode = (input.pipeline as { indexingMode?: PipelineFeatures["indexingMode"] } | undefined)?.indexingMode;
+  pipeline.indexingMode = effectiveIndexingMode(requestedMode ?? (await defaultIndexingModeForOrg(organization.id)));
+  // An explicit choice goes through the same gates as a switch (visual privacy, full needs credits).
+  if (requestedMode !== undefined && deferredProfilesEnabled()) {
+    await validateModeChoice({ orgId: organization.id, workspaceId: null, currentMode: null, nextPipeline: pipeline });
+  }
+
   const [row] = await sql<WorkspaceRow[]>`
     insert into workspaces (id, org_id, user_id, name, template_key, system_prompt, pipeline)
     values (
@@ -370,6 +392,7 @@ export async function createWorkspace(input: CreateWorkspaceInput): Promise<Work
       pipeline,
       0::int as document_count,
       0::int as total_page_count,
+      0::int as indexed_page_count,
       0::double precision as source_bytes,
       0::int as pending_document_count,
       0::int as pending_page_count,
@@ -488,6 +511,7 @@ export async function getWorkspace(workspaceId: string, userId: string): Promise
       w.run_retention_days,
       coalesce(cs.document_count, 0)::int as document_count,
       coalesce(cs.page_count, 0)::int as total_page_count,
+      greatest(coalesce(cs.page_count, 0)::int - coalesce(idx.unindexed_pages, 0), 0)::int as indexed_page_count,
       coalesce(cs.source_bytes, 0)::double precision as source_bytes,
       coalesce(inflight.document_count, 0)::int as pending_document_count,
       coalesce(inflight.page_count, 0)::int as pending_page_count,
@@ -533,6 +557,18 @@ export async function getWorkspace(workspaceId: string, userId: string): Promise
     from workspaces w
     -- Current corpus totals are trigger-maintained; never aggregate documents here.
     left join workspace_corpus_stats cs on cs.workspace_id = w.id
+    -- Searchable pages: only deferred documents can be partly indexed (skipped while the flag is off).
+    left join lateral (
+      select coalesce(sum(greatest(d.page_count - coalesce(ps.indexed, 0), 0)), 0)::int as unindexed_pages
+      from documents d
+      left join lateral (
+        select count(*)::int as indexed from document_page_states s
+        where s.document_id = d.id and s.state in ('indexed', 'blocked-pii')
+      ) ps on true
+      where ${deferredProfilesEnabled()}::boolean
+        and d.workspace_id = w.id and d.indexing_mode <> 'full'
+        and d.status = 'completed' and d.superseded_at is null
+    ) idx on true
     -- In-flight ingest reads only the documents_workspace_in_flight_idx partial index.
     left join lateral (
       select count(*)::int as document_count,
@@ -581,6 +617,7 @@ export async function listWorkspaces(userId: string, options: { refineNames?: bo
       w.run_retention_days,
       coalesce(cs.document_count, 0)::int as document_count,
       coalesce(cs.page_count, 0)::int as total_page_count,
+      greatest(coalesce(cs.page_count, 0)::int - coalesce(idx.unindexed_pages, 0), 0)::int as indexed_page_count,
       coalesce(cs.source_bytes, 0)::double precision as source_bytes,
       coalesce(inflight.document_count, 0)::int as pending_document_count,
       coalesce(inflight.page_count, 0)::int as pending_page_count,
@@ -626,6 +663,18 @@ export async function listWorkspaces(userId: string, options: { refineNames?: bo
     from workspaces w
     -- Current corpus totals are trigger-maintained; never aggregate documents here.
     left join workspace_corpus_stats cs on cs.workspace_id = w.id
+    -- Searchable pages: only deferred documents can be partly indexed (skipped while the flag is off).
+    left join lateral (
+      select coalesce(sum(greatest(d.page_count - coalesce(ps.indexed, 0), 0)), 0)::int as unindexed_pages
+      from documents d
+      left join lateral (
+        select count(*)::int as indexed from document_page_states s
+        where s.document_id = d.id and s.state in ('indexed', 'blocked-pii')
+      ) ps on true
+      where ${deferredProfilesEnabled()}::boolean
+        and d.workspace_id = w.id and d.indexing_mode <> 'full'
+        and d.status = 'completed' and d.superseded_at is null
+    ) idx on true
     -- In-flight ingest reads only the documents_workspace_in_flight_idx partial index.
     left join lateral (
       select count(*)::int as document_count,
@@ -755,7 +804,8 @@ export async function listWorkspaceBoardRecords(userId: string): Promise<Workspa
 export async function updateWorkspace(
   workspaceId: string,
   userId: string,
-  input: UpdateWorkspaceInput
+  input: UpdateWorkspaceInput,
+  options: { indexingMode?: PipelineFeatures["indexingMode"] } = {},
 ): Promise<WorkspaceRecord | null> {
   const parsed = updateWorkspaceSchema.parse(input);
   const access = await getWorkspaceAccess(workspaceId, userId);
@@ -775,6 +825,17 @@ export async function updateWorkspace(
         : current.pipeline),
   );
   const pipeline = applyWorkspaceTemplateLocks(draftPipeline, template);
+  // The schema defaults a missing indexingMode to "full", so a pipeline edit must not
+  // flip the mode: only an explicit request (options) changes it. Flag off pins "full".
+  // With the flag off the stored raw mode is preserved (only the effective mode is coerced).
+  const [storedRow] = await sql<{ mode: PipelineFeatures["indexingMode"] | null }[]>`
+    select pipeline ->> 'indexingMode' as mode from workspaces where id = ${workspaceId}
+  `;
+  const storedMode = storedRow?.mode ?? "full";
+  pipeline.indexingMode = deferredProfilesEnabled() ? (options.indexingMode ?? storedMode) : storedMode;
+  if (deferredProfilesEnabled() && pipeline.indexingMode !== current.pipeline.indexingMode) {
+    await validateModeSwitch({ current, nextPipeline: pipeline });
+  }
 
   const nextSlug = parsed.slug === undefined ? current.slug : parsed.slug.toLowerCase();
   if (nextSlug !== current.slug) {
@@ -1105,7 +1166,7 @@ export async function getWorkspaceCockpit(
   const [runSummaryRow] = await sql<Array<Record<string, number>>>`
     select
       coalesce(count(*)::int, 0) as total_runs,
-      coalesce(count(*) filter (where status = 'queued')::int, 0) as queued_runs,
+      coalesce(count(*) filter (where status = 'queued' and kind <> 'materialize')::int, 0) as queued_runs,
       coalesce(count(*) filter (where status = 'processing')::int, 0) as processing_runs,
       coalesce(count(*) filter (where status = 'completed')::int, 0) as completed_runs,
       coalesce(count(*) filter (where status = 'failed')::int, 0) as failed_runs,

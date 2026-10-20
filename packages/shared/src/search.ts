@@ -22,6 +22,12 @@ export const searchResultSchema = z.object({
       reasons: z.array(z.string()).default([]),
     })
     .optional(),
+  retrieval: z
+    .object({
+      stage: z.enum(["chunk", "page-text", "map-node", "page-image"]),
+      temperature: z.enum(["cold", "warm", "hot"]).optional(),
+    })
+    .optional(),
 });
 export type SearchResult = z.infer<typeof searchResultSchema>;
 

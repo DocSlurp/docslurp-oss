@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { documentTagsSchema } from "./document-tags.js";
+import { indexingModeSchema } from "./deferred-indexing.js";
 import {
   defaultPipelineFeatures,
   mergePipelineFeatures,
@@ -87,6 +88,14 @@ export const workspaceSchema = z.object({
   pendingDocumentCount: z.number().int().nonnegative().default(0),
   /** Known pages across in-flight documents; 0 until a parser reports page counts. */
   pendingPageCount: z.number().int().nonnegative().default(0),
+  /** Mode new uploads use (`pipeline.indexingMode`; always `full` while deferred profiles are off). */
+  indexingMode: indexingModeSchema.optional(),
+  /** Searchable pages: indexed pages of deferred documents plus all pages of full-mode documents. */
+  indexedPageCount: z.number().int().nonnegative().optional(),
+  /** False when DOCSLURP_DEFERRED_PROFILES is off; clients hide indexing controls. */
+  deferredIndexingAvailable: z.boolean().optional(),
+  /** False on deployments that do not bill (self-hosted without Stripe): estimates are not prices. */
+  billingEnforced: z.boolean().optional(),
   runCount: z.number().int().nonnegative().default(0),
   searchSessionCount: z.number().int().nonnegative().default(0),
   chatThreadCount: z.number().int().nonnegative().default(0),
@@ -649,6 +658,8 @@ export const uploadRequestSchema = z.object({
   userId: z.string().min(1),
   filenames: z.array(z.string()).min(1),
   pipeline: pipelineFeaturesSchema.default(defaultPipelineFeatures),
+  /** Per-upload indexing mode; stamps the documents (ignored as `full` while deferred profiles are off). */
+  indexingMode: indexingModeSchema.optional(),
 });
 export type UploadRequest = z.infer<typeof uploadRequestSchema>;
 

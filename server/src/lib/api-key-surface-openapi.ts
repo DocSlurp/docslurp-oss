@@ -38,6 +38,7 @@ function operation(path: string, tag: string, summary: string, scope: string, su
 const jsonBody = { requestBody: { required: true, content: { "application/json": { schema: { type: "object" } } } } };
 
 const entries: Array<[path: string, method: Method, tag: string, summary: string, scope: string, success: string, extra?: Record<string, unknown>]> = [
+  ["/v1/capabilities", "post", "search", "Mint a sealed search capability (X-DocSlurp-Capability) that bounds query-time page parsing for browser callers. Server keys only", "search", "Capability token, expiry and effective policy", jsonBody],
   ["/v1/runs/activity/stream", "get", "runs", "Stream account run activity over SSE", "ingest, search or artifacts", "Server-sent event stream"],
   ["/v1/runs/{runId}/events", "get", "runs", "List a run's events", "ingest, search or artifacts", "Run events"],
   ["/v1/runs/{runId}/events/stream", "get", "runs", "Stream a run's events over SSE", "ingest, search or artifacts", "Server-sent event stream"],
@@ -59,6 +60,7 @@ const entries: Array<[path: string, method: Method, tag: string, summary: string
   ["/v1/search/chat/stream", "get", "search", "Legacy chat stream; use POST /v1/chat/completions with stream: true", "search", "Server-sent event stream", { deprecated: true }],
   ["/v1/search/aggregate", "post", "search", "Search several workspaces and merge the results", "search", "Aggregated results", jsonBody],
   ["/v1/search/{sessionId}/feedback", "post", "search", "Record click or relevance feedback for a search session", "search", "Feedback recorded", jsonBody],
+  ["/v1/searches/{sessionId}/materialization", "get", "search", "Poll on-demand page materialization for a deferred-index search session", "search", "Candidate pages and their ledger state"],
   ["/v1/search/diagnostics", "get", "search", "Zero-result diagnostics for a search session in a workspace you can read", "search", "Diagnostics or null", {
     parameters: [{ in: "query", name: "sessionId", required: true, schema: { type: "string" } }],
   }],

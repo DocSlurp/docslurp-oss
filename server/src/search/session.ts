@@ -214,7 +214,7 @@ class SqlSearchSessionJournal implements SearchSessionJournal {
   }
 }
 
-function buildSearchSessionMetadata(
+export function buildSearchSessionMetadata(
   args: SearchSessionMetadataInput,
 ): Record<string, unknown> {
   return {
@@ -245,6 +245,7 @@ function buildSearchSessionMetadata(
     retrievalChain: args.retrievalChain ?? [],
     finalization: args.finalization ?? null,
     diagnostics: args.diagnostics ?? {},
+    deferred: (args.diagnostics as { deferred?: unknown } | undefined)?.deferred ?? null,
   };
 }
 

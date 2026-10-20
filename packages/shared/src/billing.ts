@@ -14,6 +14,16 @@ import { PRIVATE_MODEL_PROVIDER } from "./private-endpoints.js";
 export const CENTS_PER_CREDIT = 1;
 export const CREDITS_PER_DOLLAR = 100 / CENTS_PER_CREDIT;
 
+/**
+ * Whether this deployment bills at all: Stripe configured (metering is enforced), or a `DOCSLURP_BILL_*`
+ * flag set to `true`. Self-hosted deployments without either run with billing disabled, so price
+ * estimates there are not a charge.
+ */
+export function isBillingEnforced(env: Record<string, string | undefined> = process.env): boolean {
+  if (env.STRIPE_SECRET_KEY?.trim()) return true;
+  return Object.entries(env).some(([key, value]) => key.startsWith("DOCSLURP_BILL_") && value?.trim().toLowerCase() === "true");
+}
+
 export function creditsToDollars(credits: number): number {
   return (credits * CENTS_PER_CREDIT) / 100;
 }

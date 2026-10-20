@@ -74,6 +74,63 @@ async function rejection(promise: Promise<unknown>) {
 
 const runCount = async () => Number((await sql<{ n: number }[]>`select count(*)::int as n from workspace_runs`)[0]?.n);
 
+describe("reprocess keeps the deferred indexing mode", () => {
+  it("gives reprocessed and bulk-reprocessed versions the run pipeline's mode", async () => {
+    process.env.DOCSLURP_DEFERRED_PROFILES = "1";
+    try {
+      await sql`
+        insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, pipeline, artifacts, total_documents, pages_total)
+        values ('run-map', 'o1', 'u1', 'w', 'bulk-upload', 'completed', 'completed',
+          ${sql.json({ ...defaultPipelineFeatures, indexingMode: "map" } as unknown as postgres.JSONValue)}, '{}'::jsonb, 1, 2)
+      `;
+      await sql`
+        insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status, page_count, indexing_mode)
+        values ('src-map', 'o1', 'u1', 'w', 'run-map', 'm.pdf', 'application/pdf', 'raw/m.pdf', 'completed', 2, 'map')
+      `;
+      const created = await reprocessRun("run-map", "u1");
+      const [doc] = await sql<{ indexing_mode: string }[]>`select indexing_mode from documents where run_id = ${created!.run.id}`;
+      expect(doc?.indexing_mode).toBe("map");
+
+      const { bulkReprocessDocuments } = await import("../services/documents.js");
+      const [bulk] = (await bulkReprocessDocuments(["src-map"], "u1")).runs;
+      const [bulkDoc] = await sql<{ indexing_mode: string }[]>`select indexing_mode from documents where run_id = ${bulk!.id}`;
+      expect(bulkDoc?.indexing_mode).toBe("map");
+    } finally {
+      delete process.env.DOCSLURP_DEFERRED_PROFILES;
+    }
+  });
+});
+
+describe("reprocess after a mode-switch backfill adopted the source", () => {
+  it("follows documents.indexing_mode, not the source run's old pipeline mode", async () => {
+    process.env.DOCSLURP_DEFERRED_PROFILES = "1";
+    try {
+      // The source was uploaded in map mode; a backfill later adopted it into visual mode (its run is unchanged).
+      await sql`
+        insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, pipeline, artifacts, total_documents, pages_total)
+        values ('run-old', 'o1', 'u1', 'w', 'bulk-upload', 'completed', 'completed',
+          ${sql.json({ ...defaultPipelineFeatures, indexingMode: "map" } as unknown as postgres.JSONValue)}, '{}'::jsonb, 1, 2)
+      `;
+      await sql`
+        insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status, page_count, indexing_mode)
+        values ('src-adopted', 'o1', 'u1', 'w', 'run-old', 'v.pdf', 'application/pdf', 'raw/v.pdf', 'completed', 2, 'visual')
+      `;
+      const created = await reprocessRun("run-old", "u1");
+      expect(created?.run.pipeline.indexingMode).toBe("visual");
+      const [doc] = await sql<{ indexing_mode: string }[]>`select indexing_mode from documents where run_id = ${created!.run.id}`;
+      expect(doc?.indexing_mode).toBe("visual");
+
+      const { bulkReprocessDocuments } = await import("../services/documents.js");
+      const [bulk] = (await bulkReprocessDocuments(["src-adopted"], "u1")).runs;
+      expect(bulk?.pipeline.indexingMode).toBe("visual");
+      const [bulkDoc] = await sql<{ indexing_mode: string }[]>`select indexing_mode from documents where run_id = ${bulk!.id}`;
+      expect(bulkDoc?.indexing_mode).toBe("visual");
+    } finally {
+      delete process.env.DOCSLURP_DEFERRED_PROFILES;
+    }
+  });
+});
+
 describe("reprocessRun", () => {
   it("creates a partial run whose documents reuse the source versions", async () => {
     await seedSource();

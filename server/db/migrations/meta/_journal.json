@@ -449,6 +449,13 @@
       "when": 1792627200000,
       "tag": "0063_document_chunk_page_counters",
       "breakpoints": true
+    },
+    {
+      "idx": 64,
+      "version": "7",
+      "when": 1792627200001,
+      "tag": "0064_deferred_indexing_modes",
+      "breakpoints": true
     }
   ]
 }

@@ -7,6 +7,7 @@ import {
   isDefaultWorkspaceAlias,
   pipelineFeatureOverridesSchema,
   workspaceTemplateKeySchema,
+  indexingModeSchema,
 } from "@docslurp/shared";
 
 import { requestIp, requestUserAgent } from "../lib/request-context.js";
@@ -56,6 +57,7 @@ const ingestUrlSchema = z.object({
   newWorkspace: z.boolean().optional(),
   workspaceName: z.string().optional(),
   templateKey: workspaceTemplateKeySchema.optional(),
+  indexingMode: indexingModeSchema.optional(),
   /** Plain URLs default their canonical ID to the URL; objects may override it. */
   urls: z.array(z.union([
     z.string().url(),
@@ -338,6 +340,7 @@ export const createUploadsRoutes = (ports: WorkspaceIntakePorts = workspaceIntak
         newWorkspace: requestedNewWorkspace,
         workspaceName: requestedWorkspaceName,
         templateKey: requestedTemplateKey,
+        indexingMode: indexingModeSchema.safeParse(body.indexingMode).data,
         pipeline,
         files,
         canonicalIds,
@@ -381,6 +384,7 @@ export const createUploadsRoutes = (ports: WorkspaceIntakePorts = workspaceIntak
           newWorkspace: body.newWorkspace,
           workspaceName: body.workspaceName?.trim() || null,
           templateKey: body.templateKey,
+          indexingMode: body.indexingMode,
           pipeline: body.pipeline,
           tags: body.tags,
           urls: body.urls.map((entry) => typeof entry === "string" ? entry : entry.url),

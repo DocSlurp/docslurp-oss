@@ -18,6 +18,9 @@ const requestContextStorage = new AsyncLocalStorage<{
   requestStartedAt: number;
   userId: string | null;
   apiKeyId?: string | null;
+  /** `X-DocSlurp-Capability` and `Origin` as sent, so routes without a deferred context still narrow by the token. */
+  capabilityHeader?: string | null;
+  origin?: string | null;
   /** The Better Auth session behind a cookie-authenticated request; file URLs bind to it. */
   sessionId?: string | null;
   /** The API key actor's workspace allowlist; null when unrestricted or not a key. */
@@ -127,6 +130,12 @@ export function setCurrentRequestApiKeyId(apiKeyId: string | null | undefined): 
   if (store) store.apiKeyId = apiKeyId ?? null;
 }
 
+/** The request's search capability token and origin (null when absent or outside a request). */
+export function currentRequestCapability(): { header: string | null; origin: string | null } {
+  const store = requestContextStorage.getStore();
+  return { header: store?.capabilityHeader ?? null, origin: store?.origin ?? null };
+}
+
 export function currentRequestApiKeyId(): string | null {
   return requestContextStorage.getStore()?.apiKeyId ?? null;
 }
@@ -218,7 +227,11 @@ export const requestContextMiddleware: MiddlewareHandler = async (c, next) => {
   await errorContext.run({ requestId }, () => withHttpSpan({ method: c.req.method, route,
     headers: { traceparent: c.req.header("traceparent") ?? "", tracestate: c.req.header("tracestate") ?? "", baggage: c.req.header("baggage") ?? "" },
     status: () => c.res.status,
-  }, () => requestContextStorage.run({ requestId, requestStartedAt: startedAt, userId: null, performanceEvents: [] }, async () => {
+  }, () => requestContextStorage.run({
+    requestId, requestStartedAt: startedAt, userId: null, performanceEvents: [],
+    capabilityHeader: c.req.header("X-DocSlurp-Capability")?.trim() || null,
+    origin: c.req.header("Origin") ?? null,
+  }, async () => {
     c.set("requestId", requestId);
     c.set("requestStartedAt", startedAt);
     c.header(REQUEST_ID_HEADER, requestId);

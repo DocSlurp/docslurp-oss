@@ -7,18 +7,22 @@ import "../env.js";
  * and query pipeline workflows.
  */
 
-import { Client, Connection, type WorkflowExecutionStatusName } from "@temporalio/client";
+import { Client, Connection, WorkflowExecutionAlreadyStartedError, type WorkflowExecutionStatusName } from "@temporalio/client";
 import {
   WorkflowIdConflictPolicy,
   WorkflowIdReusePolicy,
   type Duration,
 } from "@temporalio/common";
 import {
+  DEFAULT_MATERIALIZE_TASK_QUEUE,
+  MATERIALIZE_WORKFLOW,
   MAX_PAGE_FANOUT_PER_RUN,
+  deferredProfilesEnabled,
   executionStageOrder,
   getPipelineStageOrder,
   pipelineStageOrder,
   runStageSchema,
+  type MaterializePagesInput,
   type PipelineFeatures,
   type PipelineRunStage,
   type WorkerCapability,
@@ -299,7 +303,7 @@ export function resolveWorkflowStageOrder(
 ): PipelineRunStage[] {
   const indexBeforeEnrich = envFlag(env.WORKER_INDEX_BEFORE_ENRICH, env.NODE_ENV !== "production")
     && (!capabilities || capabilities.has("workflow.index-before-enrich"));
-  return executionStageOrder(getPipelineStageOrder(pipeline), { indexBeforeEnrich });
+  return executionStageOrder(pipelineStageOrderForStart(pipeline), { indexBeforeEnrich });
 }
 
 /**
@@ -327,6 +331,18 @@ export function resolveWorkflowPriority(scope: RunSlotScope | null, env: NodeJS.
   const weight = Math.max(1, Math.min(1_000, scope.workerSlots ?? 1));
   // Fairness keys are limited to 64 bytes.
   return { fairnessKey: scope.orgKey.slice(0, 64), fairnessWeight: weight };
+}
+
+/**
+ * Stage order handed to the workflow. With DOCSLURP_DEFERRED_PROFILES off the worker runs a stored
+ * `map`/`visual` pipeline as `full`, so the explicit order must be compiled from that same coerced
+ * pipeline; otherwise the workflow would skip the full stages the worker then expects.
+ */
+export function pipelineStageOrderForStart(pipeline: PipelineFeatures, flagEnabled = deferredProfilesEnabled()) {
+  const effective = !flagEnabled && pipeline.indexingMode && pipeline.indexingMode !== "full"
+    ? { ...pipeline, indexingMode: "full" as const }
+    : pipeline;
+  return getPipelineStageOrder(effective);
 }
 
 export async function startPipelineWorkflow(
@@ -363,6 +379,30 @@ export async function startPipelineWorkflow(
       ? WorkflowIdConflictPolicy.TERMINATE_EXISTING
       : undefined,
   });
+}
+
+/**
+ * Start the worker's `materializePages` workflow on its own task queue. The
+ * workflow id is deterministic per (document, page set), so an identical
+ * concurrent start is an "already running" success, not an error.
+ */
+export async function startMaterializeWorkflow(
+  input: MaterializePagesInput,
+  workflowId: string,
+): Promise<"started" | "already-running"> {
+  const client = await getClient();
+  try {
+    await client.workflow.start(MATERIALIZE_WORKFLOW, {
+      taskQueue: process.env.TEMPORAL_MATERIALIZE_TASK_QUEUE?.trim() || DEFAULT_MATERIALIZE_TASK_QUEUE,
+      workflowId,
+      args: [input],
+      workflowExecutionTimeout: "15 minutes",
+    });
+    return "started";
+  } catch (error) {
+    if (error instanceof WorkflowExecutionAlreadyStartedError) return "already-running";
+    throw error;
+  }
 }
 
 export interface TemporalRunProgress {

@@ -26,6 +26,8 @@ export * from "./vector-namespace.js";
 // Sub-modules created during refactor
 export * from "./embedding.js";
 export * from "./perplexity-embeddings.js";
+export * from "./deferred-indexing.js";
+export * from "./page-vectors.js";
 export * from "./pipeline.js";
 export * from "./privacy.js";
 export * from "./private-endpoints.js";

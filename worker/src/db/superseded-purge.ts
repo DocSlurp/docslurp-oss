@@ -34,6 +34,10 @@ const DERIVED_TABLES = [
   "pii_detections",
   "search_index_staleness",
   "vector_indexes",
+  // Deferred indexing: a superseded version is a tombstone, not a delete, so these do not cascade away.
+  "document_page_states",
+  "document_maps",
+  "document_page_vectors",
 ] as const;
 
 const SAFE_DOCUMENT_ID = /^[A-Za-z0-9_-]+$/;

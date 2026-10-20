@@ -67,6 +67,7 @@ export type DocumentRow = {
   canonical_id?: string | null;
   superseded_at?: string | Date | null;
   superseded_by_document_id?: string | null;
+  indexing_mode?: string | null;
   created_at: string | Date;
   updated_at: string | Date;
 };

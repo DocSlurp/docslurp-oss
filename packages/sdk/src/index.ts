@@ -20,10 +20,54 @@ export type WorkspaceTemplateKey =
 
 export type JsonObject = Record<string, unknown>;
 
+export type IndexingMode = "full" | "map" | "visual";
+
 export type WorkspaceRecord = JsonObject & {
   id: string;
   name: string;
+  /** Mode new uploads use; always "full" while deferred indexing is unavailable. */
+  indexingMode?: IndexingMode;
+  /** Searchable pages (indexed pages of deferred documents plus all pages of full-mode documents). */
+  indexedPageCount?: number;
+  /** False when the service has deferred indexing profiles off; hide indexing controls. */
+  deferredIndexingAvailable?: boolean;
 };
+
+export type RetrievalStage = "chunk" | "page-text" | "map-node" | "page-image";
+
+/** Per-search stats for deferred workspaces: pages parsed on demand for this query. */
+export type DeferredSearchStats = {
+  temperature: "cold" | "warm" | "hot";
+  candidatePages: number;
+  indexedCandidatePages: number;
+  materializedPages: number;
+  pendingPages: number;
+  materializeMs: number;
+  creditsSpent: number;
+  routerUsed: boolean;
+  fallbackUsed: boolean;
+  stoppedBy: "policy" | "credits" | "deadline" | null;
+};
+
+export type MaterializationPolicy = {
+  maxPagesPerQuery: number;
+  maxCreditsPerQuery: number;
+  maxPagesPerDay?: number;
+  deadlineMs: number;
+  allowFullIndexRequest: boolean;
+  allowAgentDiscovery: boolean;
+  mapRouter: "off" | "auto" | "always";
+};
+
+export type CreateCapabilityInput = {
+  workspaceIds?: string[];
+  policy?: Partial<MaterializationPolicy>;
+  ttlSeconds?: number;
+  boundClientKeyId?: string;
+  allowedOrigins?: string[];
+};
+
+export type FullIndexResponse = { runId: string; pages: number; estimatedCredits: number | null; billing?: "enforced" | "disabled" };
 
 export type WorkspaceRun = JsonObject & {
   id: string;
@@ -108,6 +152,8 @@ export type SearchResult = JsonObject & {
   text: string;
   citation: SearchCitation;
   parentText?: string;
+  /** How this result was retrieved (deferred workspaces). */
+  retrieval?: { stage: RetrievalStage; pageNumbers?: number[]; materialized?: boolean };
 };
 
 /** Reserved workspace ID for the organization's default workspace. */
@@ -150,6 +196,7 @@ export type UploadOptions = RequestOptions & {
   tags?: string[];
   /** Canonical ID for a single-file or streamed upload. Use UploadFileInput.canonicalId for several files. */
   canonicalId?: string;
+  indexingMode?: IndexingMode;
   /**
    * How files reach storage. "auto" (default) sends uploads larger than
    * DIRECT_UPLOAD_THRESHOLD_BYTES through a direct upload session (presigned
@@ -176,6 +223,8 @@ export type UploadInput = {
   tags?: string[];
   files: Array<Blob | File | UploadFileInput>;
   idempotencyKey?: string;
+  /** Stamp these documents with an indexing mode instead of the workspace's. */
+  indexingMode?: IndexingMode;
   newWorkspace?: boolean;
   orgId?: string;
   templateKey?: WorkspaceTemplateKey;
@@ -204,6 +253,7 @@ export type UploadUrlsInput = {
   /** Labels applied to every accepted document in this upload. */
   tags?: string[];
   idempotencyKey?: string;
+  indexingMode?: IndexingMode;
   newWorkspace?: boolean;
   orgId?: string;
   templateKey?: WorkspaceTemplateKey;
@@ -254,6 +304,8 @@ export type SearchResponse = {
   relevanceFloor?: { minScore: number; dropped: number };
   results: SearchResult[];
   sessionId: string;
+  /** Present for deferred (map/visual) workspaces. */
+  deferred?: DeferredSearchStats;
 };
 
 export type SearchBatchOptions = {
@@ -916,6 +968,7 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
     if (options.canonicalId) fields.canonicalId = options.canonicalId;
     if (metadata.workspaceName) fields.workspaceName = metadata.workspaceName;
     if (metadata.templateKey) fields.templateKey = metadata.templateKey;
+    if (metadata.indexingMode) fields.indexingMode = metadata.indexingMode;
     const headers = new Headers();
     if (metadata.idempotencyKey) headers.set("Idempotency-Key", metadata.idempotencyKey);
     if (Symbol.asyncIterator in input) {
@@ -1181,6 +1234,28 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
     search,
 
     upload,
+
+    /** Mints a sealed `X-DocSlurp-Capability` token a browser can use; needs a server key. */
+    createCapability(input: CreateCapabilityInput = {}, requestOptions?: RequestOptions): Promise<{ token: string; expiresAt: string } & JsonObject> {
+      return request("/v1/capabilities", jsonRequest("POST", input), requestOptions);
+    },
+
+    /** Indexes every unindexed page of a workspace (or the given documents) in the background. */
+    fullIndex(input: { workspaceId?: string; documentIds?: string[] } = {}, requestOptions?: RequestOptions): Promise<FullIndexResponse> {
+      const id = input.workspaceId?.trim() || workspaceId;
+      return request<FullIndexResponse>(`/v1/workspaces/${encodeURIComponent(id)}/full-index`, jsonRequest("POST", { documentIds: input.documentIds }), requestOptions);
+    },
+
+    /** Indexes one document in full. */
+    fullIndexDocument(documentId: string, requestOptions?: RequestOptions): Promise<FullIndexResponse> {
+      return request<FullIndexResponse>(`/v1/documents/${encodeURIComponent(documentId)}/full-index`, { method: "POST" }, requestOptions);
+    },
+
+    /** What switching a workspace to `mode` would cost. */
+    estimateIndexingMode(mode: IndexingMode, input: { workspaceId?: string } = {}, requestOptions?: RequestOptions): Promise<{ pages: number; estimatedCredits: number | null; billing?: "enforced" | "disabled"; job: "none" | "full-index" | "build-maps" | "embed-pages" }> {
+      const id = input.workspaceId?.trim() || workspaceId;
+      return request(`/v1/workspaces/${encodeURIComponent(id)}/indexing-mode/estimate`, jsonRequest("POST", { mode }), requestOptions);
+    },
   };
 }
 

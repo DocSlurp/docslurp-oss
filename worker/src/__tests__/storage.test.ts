@@ -92,6 +92,8 @@ describe("ArtifactStore object inspection", () => {
       workerRunMaintenance: "auto",
       workerShutdownGraceMs: 240_000,
       temporalActivityTaskQueue: null,
+      temporalMaterializeTaskQueue: null,
+      materializeConcurrency: 4,
       poisonRunFailureThreshold: 3,
       temporalAddress: "localhost:7233",
       temporalNamespace: "default",

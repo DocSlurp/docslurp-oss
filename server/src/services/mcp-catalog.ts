@@ -1,5 +1,7 @@
 import { z } from "zod";
 
+import { deferredProfilesEnabled } from "@docslurp/shared";
+
 import { env } from "../config.js";
 import { batchSearchInputSchema, searchInputSchema, workspaceChatInputSchema } from "../lib/search-input.js";
 import { toolInputJsonSchema } from "./mcp-tool-schemas.js";
@@ -31,6 +33,10 @@ export const uploadStatusInput = z.object({
   workspaceId: z.string().min(1).max(256).optional(),
   runId: z.string().trim().min(1).max(128).optional(),
   documentIds: z.array(z.string().min(1).max(128)).max(100).optional(),
+}).strict();
+export const fullIndexInput = z.object({
+  workspaceId: workspaceRef,
+  documentIds: z.array(z.string().min(1)).max(500).optional().describe("Only these documents; omit to index every remaining page in the workspace."),
 }).strict();
 export const suggestQueriesInput = z.object({
   workspaceId: z.string().min(1).max(256).optional(),
@@ -109,6 +115,10 @@ export function mcpTools(baseUrl: string): McpTool[] {
     { id: "suggestQueries", title: "Suggest queries", scopes: ["search"], annotations: READ_ONLY,
       description: "Read prior queries and suggestions without AI calls.",
       inputSchema: toolInputJsonSchema(suggestQueriesInput) },
+    ...(deferredProfilesEnabled() ? [{ id: "fullIndex", title: "Index workspace fully", scopes: ["ingest" as const],
+      annotations: { readOnly: false, destructive: false, idempotent: false, openWorld: false, consequential: true },
+      description: "Parse and index every remaining page of a deferred (map/visual) workspace, or of the listed documents, in the background. Spends credits and is refused unless the key or capability policy allows full-index requests.",
+      inputSchema: toolInputJsonSchema(fullIndexInput) }] : []),
   ];
   return tools.map(tool => ({ ...tool, category: "tool", endpoint: `${baseUrl}/v1/mcp/tools/${tool.id}` }));
 }

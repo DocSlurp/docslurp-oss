@@ -69,7 +69,7 @@ export type PiiDocumentOutcome = {
   withheldArtifactUris: string[];
 };
 
-function resolvePolicy(pipeline: WorkflowState["run"]["pipeline"]): PiiPolicy {
+export function resolvePolicy(pipeline: WorkflowState["run"]["pipeline"]): PiiPolicy {
   const raw = pipeline.piiPolicy;
   return {
     enabled: raw.enabled,
