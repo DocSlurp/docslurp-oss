@@ -22,6 +22,8 @@ export interface RemoteFs {
   remove(p: string): Promise<void>;
 }
 
+type ClaimKind = "upload" | "download" | "directory";
+
 /** The state of a command's writable paths just before it ran. */
 export interface RemoteSnapshot {
   readonly roots: string[];
@@ -40,8 +42,8 @@ export interface RemoteSnapshot {
  */
 export class SessionStaging {
   private readonly uploaded = new Set<string>();
-  /** Path -> sequence number of the last upload, download or directory creation that put it there. */
-  private readonly claims = new Map<string, number>();
+  /** Path -> the last upload, download or directory creation that put it there, by sequence number. */
+  private readonly claims = new Map<string, { seq: number; kind: ClaimKind }>();
   private seq = 0;
 
   constructor(private readonly remote: RemoteFs) {}
@@ -56,7 +58,7 @@ export class SessionStaging {
     for (const p of paths) {
       const abs = path.resolve(p);
       await this.remote.mkdir(abs);
-      this.claim(abs);
+      this.claim(abs, "directory");
     }
   }
 
@@ -69,17 +71,20 @@ export class SessionStaging {
 
   /**
    * Copy back what changed under the snapshot's roots since it was taken: new and modified
-   * files, and new directories. A root the command never created is skipped silently.
+   * files, and new directories. Inputs uploaded for another command meanwhile are not copied
+   * back. A root the command never created is skipped silently.
    */
   async download(snapshot: RemoteSnapshot): Promise<void> {
     const changed = this.changes(snapshot, await this.walk(snapshot.roots));
     for (const entry of changed) {
+      const claim = this.claims.get(entry.path);
+      if (claim?.kind === "upload" && claim.seq > snapshot.seq) continue;
       if (entry.isDir) await mkdir(entry.path, { recursive: true });
       else {
         await mkdir(path.dirname(entry.path), { recursive: true });
         await writeFile(entry.path, await this.remote.readFile(entry.path));
       }
-      this.claim(entry.path);
+      this.claim(entry.path, "download");
     }
   }
 
@@ -91,7 +96,7 @@ export class SessionStaging {
    */
   async discard(snapshot: RemoteSnapshot): Promise<string[]> {
     const changed = this.changes(snapshot, await this.walk(snapshot.roots));
-    const claimedSince = [...this.claims].filter(([, seq]) => seq > snapshot.seq).map(([p]) => p);
+    const claimedSince = [...this.claims].filter(([, claim]) => claim.seq > snapshot.seq).map(([p]) => p);
     const isClaimed = (p: string) => claimedSince.some((c) => c === p || c.startsWith(`${p}${path.sep}`));
     const removed: string[] = [];
     // Parents sort before children, so a removed new directory takes its subtree with it.
@@ -107,8 +112,8 @@ export class SessionStaging {
     return removed;
   }
 
-  private claim(abs: string): void {
-    this.claims.set(abs, ++this.seq);
+  private claim(abs: string, kind: ClaimKind): void {
+    this.claims.set(abs, { seq: ++this.seq, kind });
   }
 
   /** Drop a removed path, its subtree and its ancestors from the uploaded set so they upload again. */
@@ -158,11 +163,11 @@ export class SessionStaging {
     this.uploaded.add(abs);
     if (stats.isDirectory()) {
       await this.remote.mkdir(abs);
-      this.claim(abs);
+      this.claim(abs, "upload");
       for (const name of await readdir(abs)) await this.upload(path.join(abs, name));
     } else if (stats.isFile()) {
       await this.remote.writeFile(abs, await readFile(abs));
-      this.claim(abs);
+      this.claim(abs, "upload");
     }
   }
 }

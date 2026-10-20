@@ -208,9 +208,15 @@ export function defineSandboxContract(
         command(["-c", `echo partial > "${partial}"; sleep 31.5`], { writablePaths: [dir] }),
         controller.signal,
       ).catch((error: unknown) => error);
-      // Late enough for the remote command to have started and written its partial file.
-      setTimeout(() => controller.abort(), 3_000);
+      // Abort only once the partial file exists remotely, so the cleanup path really runs.
+      const deadline = Date.now() + 20_000;
+      let written = false;
+      while (!written && Date.now() < deadline) {
+        written = (await execInSession(opened, command(["-c", `test -e "${partial}"`]))).exitCode === 0;
+      }
+      controller.abort();
       await aborted;
+      expect(written, "the command never wrote its partial file").toBe(true);
       expect(existsSync(partial)).toBe(false);
       const check = await execInSession(
         opened,
