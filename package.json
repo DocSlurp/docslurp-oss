@@ -24,6 +24,7 @@
     "dev": "pnpm dev:api",
     "dev:worker": "pnpm --filter @docslurp/worker dev",
     "worker:python:setup": "bash scripts/setup-worker-python-venv.sh",
+    "eval:routing": "pnpm --filter @docslurp/worker eval:document-routing",
     "worker:check": "node scripts/check-worker-prerequisites.mjs",
     "build": "pnpm -r build",
     "typecheck": "pnpm --filter @docslurp/shared build && pnpm --filter @docslurp/sdk build && pnpm --filter @docslurp/contrib-search-compat build && pnpm -r typecheck",

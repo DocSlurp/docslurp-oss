@@ -45,6 +45,33 @@ jobs:
       # Imports every released package export and enforces the server/ import boundary.
       - name: Import public packages
         run: node scripts/check-package-imports.mjs
+      # The public packages promise engines >=20 while the repo builds on Node 24.
+      # Reuse this job's install and build, then test the built packages on each
+      # older supported Node (no extra checkout, install or build).
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '20'
+          package-manager-cache: false
+      - name: Test and import public packages on Node 20
+        run: |
+          node --version
+          (cd packages/sdk && node --test test/*.test.mjs)
+          (cd packages/cli && node --test test/*.test.mjs)
+          (cd packages/contrib-astro && node --test index-docs.test.mjs)
+          (cd packages/contrib-search-compat && node --test test/*.test.mjs)
+          node scripts/check-package-imports.mjs
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '22'
+          package-manager-cache: false
+      - name: Test and import public packages on Node 22
+        run: |
+          node --version
+          (cd packages/sdk && node --test test/*.test.mjs)
+          (cd packages/cli && node --test test/*.test.mjs)
+          (cd packages/contrib-astro && node --test index-docs.test.mjs)
+          (cd packages/contrib-search-compat && node --test test/*.test.mjs)
+          node scripts/check-package-imports.mjs
 
   # `pnpm test` runs worker then server serially (pnpm -r follows the dependency
   # graph). Split them across runners and shard the worker suite so the slowest
@@ -110,6 +137,10 @@ jobs:
         if: matrix.worker-tools
         run: pnpm worker:check --profile=test --sandbox
       - run: ${{ matrix.run }}
+      # Deterministic, local-only routing regression gate: no hosted AI calls, no spend.
+      - name: Document routing regression eval
+        if: matrix.suite == 'worker 1/2'
+        run: pnpm eval:routing
 
   ci-success:
     # A stable required check. Never mask failures.
