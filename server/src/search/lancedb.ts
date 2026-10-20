@@ -204,6 +204,7 @@ export async function lanceDbVectorSearch(args: {
       span.end();
       if (cached) {
         countSearchEvent("resultCacheHit");
+        console.info(`[search-cache] result hit hits=${cached.length} entries=${cache.size}`);
         return cached.map((hit) => ({ ...hit }));
       }
       countSearchEvent("resultCacheMiss");
