@@ -27,6 +27,11 @@ Agreed during brainstorming; later sub-projects build on these.
   (3) Terraform foundation with Fly and AWS stacks, (4) GCP, Vercel and
   Cloudflare stacks, (5) CLI wizard, (6) agent skill. Each gets its own spec,
   plan and pull request.
+- Added 2026-10-20: a platform-task parser provider (per-job ECS task, Cloud
+  Run job or Fly Machine) follows the Terraform foundation, because it needs
+  those tasks and their network and credential setup. It uses operator
+  attestation plus an in-job probe that fails closed. Until it exists, Fargate
+  deployments use `modal`.
 - Parser sandbox: a provider interface modeled on Mastra's
   `SandboxProvider`/`WorkspaceSandbox` split (descriptor with `id`, `name`,
   `description`, JSON Schema `configSchema`, `probe`, `create`; instance with

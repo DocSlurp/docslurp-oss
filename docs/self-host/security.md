@@ -9,7 +9,7 @@ Document parsers run untrusted input. The worker starts each parser through a sa
 | Provider | Filesystem | Network | Processes |
 | --- | --- | --- | --- |
 | `bubblewrap` | Read-only runtime paths, private scratch | Blocked | Separate PID, IPC and UTS namespaces |
-| `landlock` | Landlock rules: read-only runtime paths and inputs, writes only to scratch and declared outputs | TCP connect and bind denied on kernel 6.8 or newer; not isolated on older kernels | Not isolated |
+| `landlock` | Landlock rules: read-only runtime paths and inputs, writes only to scratch and declared outputs | TCP connect and bind denied. Runs only on kernels with Landlock ABI v9 (landrun v0.1.17); on older kernels the probe fails and the worker does not start | Not isolated |
 | `modal` | Separate remote sandbox, files staged in and out per command | Blocked | Separate remote sandbox |
 | `none` | Not isolated | Not isolated | Not isolated |
 

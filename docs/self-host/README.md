@@ -57,3 +57,4 @@ flowchart LR
 - [Requirements](requirements.md): host requirements, sizing and GPU.
 - [Security](security.md): parser sandbox, malware scanning, secrets and network exposure.
 - [Parser sandbox providers](sandbox-providers.md): bubblewrap, landlock and Modal, selection, production policy and benchmarks.
+- [Choosing isolation per platform](platform-isolation.md): what Fargate, Cloud Run, Kubernetes, Fly.io and others give you, and which mode to use.

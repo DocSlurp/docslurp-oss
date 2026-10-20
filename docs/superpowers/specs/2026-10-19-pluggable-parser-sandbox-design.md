@@ -298,3 +298,40 @@ recommend `modal` for those hosts.
   isolation tests plus the contract suite run before and after the move.
 - landrun maintenance (single maintainer): pinned version and hash; the
   provider shells out to a CLI, so replacing it later is local to one folder.
+
+## Findings after implementation (2026-10-20)
+
+Appended after the spikes and implementation. The sections above are unchanged.
+
+- Landlock kernel assumption. The spec says landlock reports
+  `tcp-only` on kernel 6.8 or newer and `none` below that. That is wrong for
+  the pinned tool. landrun v0.1.17 requires Landlock ABI v9 and refuses to run
+  on a lower ABI without `--best-effort`. The provider never uses
+  `--best-effort`. On an older ABI the probe fails with
+  `missing kernel Landlock support`, and the worker does not start with
+  landlock. It reports `tcp-only` whenever it does run. The release binary
+  also needs glibc 2.38 or newer, so worker images use Debian trixie.
+- Fargate run 1 (us-west-1, platform 1.4.0, kernel 6.1.188). bubblewrap fails
+  because user namespaces are not permitted. landrun fails because Fargate
+  exposes ABI v2. With `--best-effort` (diagnostic only) the filesystem rules
+  applied but TCP was not blocked, so even best-effort could not meet the
+  production policy. The spec's open question is answered: on Fargate use
+  `modal`. Cloud Run is still untested.
+- Fargate run 2: a per-job hardened task with no bubblewrap or landlock
+  (`readonlyRootFilesystem`, user 65534, all capabilities dropped, no task
+  role, no public IP, security-group egress only to VPC endpoints). Internet
+  TCP was blocked and IMDS unreachable, and the credentials endpoint returned
+  404. DNS still resolved through the VPC resolver (an exfiltration path
+  unless Route 53 Resolver DNS Firewall is used), and task metadata v4 stayed
+  reachable (ARNs, no secrets). Fargate bind volumes are root-owned, so a
+  trusted init container must chown scratch. Start latency was 43 to 48 s cold
+  and about 12.5 s warm. Full tables are in
+  `docs/self-host/sandbox-providers.md`.
+- Follow-up. A `platform-task` provider (per-job ECS task, Cloud Run job or
+  Fly Machine, with operator attestation and an in-job probe that fails closed)
+  is a separate sub-project, ordered after the Terraform foundation. Per-platform
+  guidance is in `docs/self-host/platform-isolation.md`.
+- Modal aborts. An aborted or timed-out command's remote process is killed,
+  files it changed in writable directories are removed remotely and not copied
+  back, and each command copies back only files it created or changed. (The
+  original design assumed the aborted process could keep running.)

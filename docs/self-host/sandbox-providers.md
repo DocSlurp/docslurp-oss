@@ -97,7 +97,8 @@ How it behaves:
 - The sandbox is created with the network blocked.
 - Only the command's input files (file arguments inside the worker's DocSlurp temp workspaces) are uploaded, at the same paths, before each command. Parsers, scripts, Node and Python come from the image, never from the worker host. Files under the declared writable paths are copied back after the command. A writable path the command never creates is not an error and produces no file.
 - Time limits are enforced by Modal. A command that exceeds its limit is reported like a killed process.
-- When one command is aborted (for example a stage's per-command timeout), only that command fails; other commands in the same activity keep using the sandbox. The Modal SDK cannot kill a single exec, so the aborted process keeps running in the sandbox until its own time limit, and its output is discarded.
+- When one command is aborted (for example a stage's per-command timeout) or times out, only that command fails; other commands in the same activity keep using the sandbox. The aborted command's remote process is killed. Files it created or changed in its writable directories are removed remotely and never copied back.
+- Each command copies back only the files it created or changed, not the whole writable directory.
 - The sandbox is terminated when the activity's session closes, whether the activity succeeds, fails or is cancelled. `DOCSLURP_MODAL_SESSION_TIMEOUT_SECONDS` is the backstop if the worker dies.
 - Each command logs one line:
 
@@ -271,13 +272,108 @@ Not yet tested:
 | --- | --- |
 | Google Cloud Run | Not yet tested |
 
-Do not assume landlock works on Cloud Run until it has been checked. The probe at worker start tells you for your platform. Build the worker first (`pnpm --filter @docslurp/worker build`); the probe and `scripts/check-worker-prerequisites.mjs --sandbox` both run the compiled `worker/dist/`. Then run the probe without starting the worker:
+Do not assume landlock works on Cloud Run until it has been checked. [Choosing isolation per platform](platform-isolation.md) lists what each platform's own boundary gives you. The probe at worker start tells you for your platform. Build the worker first (`pnpm --filter @docslurp/worker build`); the probe and `scripts/check-worker-prerequisites.mjs --sandbox` both run the compiled `worker/dist/`. Then run the probe without starting the worker:
 
 ```bash
 node worker/dist/sandbox/probe-cli.js
 ```
 
 It prints `ok <provider>` and exits 0, or prints the failure detail and exits 1. After the probe succeeds it also opens one session and runs `ffprobe -version`, `ffmpeg -version`, `pdftoppm -v` and `pandoc --version` inside it, for each of those that is installed. A library the sandbox cannot see then fails the check, not every upload of that format. If one fails, the probe prints `<name> fails inside the parser sandbox (exit <status>): <first line of stderr>` and exits 2. For a remote provider such as Modal it skips these checks without opening a sandbox, because the binaries live in the provider's image, and prints `parser binary checks skipped: remote provider`. The Modal probe also does not pull the image, so a wrong or unpullable `DOCSLURP_MODAL_IMAGE` first shows up as `modal sandbox creation failed` in the first activity that runs a parser.
+
+## Running parsers in a separate Fargate task (no bubblewrap or landlock)
+
+DocSlurp does not yet have a provider that launches such tasks. This section records a spike that shows the approach works, so you can judge it. It is planned as the `platform-task` provider: one ECS task, Cloud Run job or Fly Machine per job, with operator attestation plus an in-job probe that fails closed if the network or credential endpoints are reachable. Until it exists, on Fargate use `modal`.
+
+The spike ran on 2026-10-20 in us-west-1, platform 1.4.0, kernel 6.1.188, with the same image as above. A task ran the probe script with no bubblewrap and no landlock, relying only on the task's own settings.
+
+| Check | Result |
+| --- | --- |
+| Identity and capabilities | `uid=65534(nobody)`, all capability sets empty (`CapEff` `0000000000000000`), seccomp mode 2. |
+| Root filesystem | Read-only: writing `/probe-write` fails with `Read-only file system`. |
+| Scratch volume | Fargate bind volumes are root-owned, so a non-root parser needs a trusted init container to `chown` the volume (see the settings below). The `/tmp` write in the captured output below failed with `Read-only file system`; the writable-scratch result comes from the spike notes, not from that capture. |
+| Internet TCP | Blocked by the security group. `https://example.com` and `1.1.1.1:443` both time out. |
+| DNS | Still resolves `example.com`. The VPC resolver answers even with no egress. This is a data exfiltration path. Use [Route 53 Resolver DNS Firewall](https://docs.aws.amazon.com/Route53/latest/DeveloperGuide/resolver-dns-firewall.html) if it matters. |
+| EC2 metadata (IMDS) | Unreachable: `169.254.169.254` refuses the connection. |
+| Task credentials endpoint | `AWS_CONTAINER_CREDENTIALS_RELATIVE_URI` is unset and the endpoint returns `404` when the task has no task role. |
+| Task metadata v4 | Reachable through `ECS_CONTAINER_METADATA_URI_V4`. It returns cluster and task ARNs, no secrets. |
+
+For contrast, a default task (root, default capabilities, public IP, open egress) ran as uid 0 with `CapEff` `00000000a80425fb`, a writable root filesystem, and internet access (`example.com` 200, `1.1.1.1` 301).
+
+Task-definition settings used:
+
+- `readonlyRootFilesystem: true`, user `65534`, and Linux capabilities drop `ALL`.
+- No task role. The execution role only pulls the image and writes logs.
+- A scratch bind volume. Fargate bind volumes are root-owned and do not copy the image directory's ownership, so a trusted init container (root, `CHOWN` only, `essential: false`, with the parser container `dependsOn` it at `SUCCESS`) chowns the volume for the non-root parser.
+- `assignPublicIp: DISABLED`. The security group allows egress only on 443, to the VPC CIDR (interface endpoints for `ecr.api`, `ecr.dkr` and `logs`) and to the S3 prefix list (gateway endpoint).
+
+With no internet egress, the task cannot pull its image or write logs unless those VPC endpoints exist. Plan for them. The security-group rules above are the only egress.
+
+Start latency, from `RunTask` to the container started:
+
+| Case | Time |
+| --- | --- |
+| Cold, image pulled through the VPC endpoints (3 runs) | 43 to 48 s (about 33 s of it the pull) |
+| Warm (2 runs, includes the init container) | about 12.5 s |
+
+That suits large documents or media jobs, and is slow for small PDFs.
+
+The spike removed every resource it created (cluster, task definitions, VPC endpoints, security group, ECR repository, log group, IAM role).
+
+<details>
+<summary>Raw probe output, AWS Fargate per-job hardened task</summary>
+
+```text
+== id
+uid=65534(nobody) gid=65534(nogroup) groups=65534(nogroup)
+== kernel
+6.1.188
+== status
+CapPrm:
+0000000000000000
+CapEff:
+0000000000000000
+CapBnd:
+0000000000000000
+NoNewPrivs:
+0
+Seccomp:
+2
+== visible pids
+3
+== write to root fs (/probe-write)
+sh: 1: cannot create /probe-write: Read-only file system
+exit=2
+== write to /tmp (scratch volume)
+sh: 1: cannot create /tmp/probe-write: Read-only file system
+exit=2
+== internet https (example.com)
+curl: (28) Connection timed out after 5001 milliseconds
+000
+exit=28
+== internet tcp by IP (1.1.1.1:443)
+curl: (28) Connection timed out after 5002 milliseconds
+000
+exit=28
+== dns lookup
+2606:4700:10::ac42:93f3 example.com
+2606:4700:10::6814:179a example.com
+exit=0
+== EC2 IMDS 169.254.169.254
+curl: (7) Failed to connect to 169.254.169.254 port 80 after 0 ms: Could not connect to server
+exit=7
+== credentials uri env
+<unset>
+== ECS credentials endpoint
+404 page not found
+exit=0
+== ECS task metadata v4 (task)
+(JSON with cluster and task ARNs; account id and task ids omitted)
+exit=0
+== env keys
+AWS_DEFAULT_REGION AWS_EXECUTION_ENV AWS_REGION ECS_AGENT_URI ECS_CONTAINER_METADATA_URI ECS_CONTAINER_METADATA_URI_V4 HOME HOSTNAME PATH PWD TMPDIR 
+```
+
+</details>
 
 ## Overhead
 
