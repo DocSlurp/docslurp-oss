@@ -1,4 +1,5 @@
 import { execInSession } from "./exec.js";
+import { closeSandboxQuietly } from "./session-context.js";
 import type { SandboxCommand, SandboxSession } from "./types.js";
 
 /**
@@ -52,6 +53,6 @@ export async function checkParserBinaries(args: {
     }
     return { failures, skipped };
   } finally {
-    await session.close();
+    await closeSandboxQuietly(() => session.close(), "activity=binary-check");
   }
 }

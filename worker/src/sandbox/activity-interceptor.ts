@@ -1,7 +1,7 @@
 import { Context } from "@temporalio/activity";
 import type { ActivityInterceptorsFactory } from "@temporalio/worker";
 
-import { runWithSandboxScope, SandboxSessionScope } from "./session-context.js";
+import { closeSandboxQuietly, runWithSandboxScope, SandboxSessionScope } from "./session-context.js";
 import type { SandboxSession } from "./types.js";
 
 /**
@@ -14,11 +14,12 @@ export function createSandboxActivityInterceptor(
   return () => ({
     inbound: {
       async execute(input, next) {
-        const scope = new SandboxSessionScope(() => open(Context.current().info.activityId));
+        const activityId = Context.current().info.activityId;
+        const scope = new SandboxSessionScope(() => open(activityId));
         try {
           return await runWithSandboxScope(scope, () => next(input));
         } finally {
-          await scope.close();
+          await closeSandboxQuietly(() => scope.close(), `activity=${activityId}`);
         }
       },
     },

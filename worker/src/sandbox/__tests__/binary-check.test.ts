@@ -93,6 +93,16 @@ describe("checkParserBinaries", () => {
     expect(session.close).toHaveBeenCalledOnce();
   });
 
+  it("returns the check result when closing the session fails", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const session = fakeSession("local", async () => ok);
+    session.close.mockRejectedValue(new Error("terminate failed"));
+    const result = await checkParserBinaries({ session, resolveBinary: resolveAll, buildCommand });
+    expect(result).toEqual({ failures: [], skipped: [] });
+    expect(warn).toHaveBeenCalledWith("[parser-sandbox] session close failed activity=binary-check: terminate failed");
+    warn.mockRestore();
+  });
+
   it("skips every binary for a remote session", async () => {
     const run = vi.fn(async () => ok);
     const session = fakeSession("remote", run);

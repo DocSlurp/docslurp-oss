@@ -56,6 +56,40 @@ describe("sandbox activity interceptor", () => {
     expect(close).toHaveBeenCalledTimes(1);
   });
 
+  it("keeps a successful activity's result when closing the session fails", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const open = vi.fn(async () =>
+      fakeSession(async () => {
+        throw new Error("terminate failed");
+      }),
+    );
+    const result = await runActivity(open, async () => {
+      await sandboxScopeStorage.getStore()!.get();
+      return "done";
+    });
+    expect(result).toBe("done");
+    expect(warn).toHaveBeenCalledWith(
+      "[parser-sandbox] session close failed activity=activity-42: terminate failed",
+    );
+    warn.mockRestore();
+  });
+
+  it("keeps a failing activity's own error when closing the session also fails", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const open = vi.fn(async () =>
+      fakeSession(async () => {
+        throw new Error("terminate failed");
+      }),
+    );
+    const original = new Error("non-retryable parser failure");
+    const error = await runActivity(open, async () => {
+      await sandboxScopeStorage.getStore()!.get();
+      throw original;
+    }).catch((e: unknown) => e);
+    expect(error).toBe(original);
+    warn.mockRestore();
+  });
+
   it("never opens a session for an activity that runs no command", async () => {
     const open = vi.fn(async () => fakeSession(async () => {}));
     await runActivity(open, async () => "idle");

@@ -34,3 +34,17 @@ export const sandboxScopeStorage = new AsyncLocalStorage<SandboxSessionScope>();
 export function runWithSandboxScope<T>(scope: SandboxSessionScope, fn: () => Promise<T>): Promise<T> {
   return sandboxScopeStorage.run(scope, fn);
 }
+
+/**
+ * Close a session without letting a close failure replace the caller's outcome: a
+ * completed activity must not fail (and retry billed work) because teardown failed,
+ * and a failing activity must keep its own error. Providers keep secrets out of messages.
+ */
+export async function closeSandboxQuietly(close: () => Promise<void>, label: string): Promise<void> {
+  try {
+    await close();
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    console.warn(`[parser-sandbox] session close failed ${label}: ${reason}`);
+  }
+}
