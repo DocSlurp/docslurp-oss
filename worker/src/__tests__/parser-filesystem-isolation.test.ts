@@ -1,10 +1,36 @@
 import { createServer } from "node:net";
-import { buildSpawnCommandSpec, resolveParserSandboxSettings } from "../tools/runner.js";
+import { buildSandboxCommand } from "../tools/runner.js";
+import bubblewrap from "../sandbox/providers/bubblewrap/index.js";
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import path from "node:path";
 import { tmpdir } from "node:os";
 import { expect, it } from "vitest";
+import type { SandboxCommand } from "../sandbox/types.js";
+
+const sandboxInputs = {
+  scriptsDir: path.resolve("scripts"),
+  scratchRoot: "/tmp/docslurp-parser-sandbox",
+  configuredWritablePaths: [],
+  limits: { timeoutMs: 10_000 },
+};
+
+/** Run a command through the real bubblewrap provider, as the runner does for local sessions. */
+async function runThroughBubblewrap(command: SandboxCommand) {
+  const session = await bubblewrap.openSession(bubblewrap.readConfig({}), { activityId: "test" });
+  try {
+    const child = session.spawn!(command);
+    let stderr = "";
+    child.stderr?.on("data", (chunk) => (stderr += chunk));
+    child.stdout?.resume();
+    const timer = setTimeout(() => child.kill("SIGKILL"), 10_000);
+    const status = await new Promise<number | null>((resolve) => child.once("close", resolve));
+    clearTimeout(timer);
+    return { status, stderr };
+  } finally {
+    await session.close();
+  }
+}
 
 it.skipIf(process.platform !== "linux" || !existsSync("/usr/bin/bwrap"))("isolates neighboring jobs and host process environments with real bubblewrap", () => {
   const root = mkdtempSync(path.join(tmpdir(), "docslurp-isolation-test-"));
@@ -45,10 +71,8 @@ const conf = fs.readFileSync(process.argv[2].slice('--config-file='.length), 'ut
 const socket = net.createConnection(conf.trim().split(/\\s+/)[1]);
 socket.on('connect', () => { socket.destroy(); }); socket.on('error', () => process.exit(3));
 `, { mode: 0o700 });
-    const sandbox = resolveParserSandboxSettings({ scriptsDir: path.resolve("scripts"), env: { NODE_ENV: "production" } });
-    const spec = buildSpawnCommandSpec({ plan: { binary, args: [`--config-file=${config}`, path.join(job, "input")], available: true }, venvBin: "/tmp/nonexistent-venv/bin", sandbox });
-    const result = spawnSync(spec.binary, spec.args, { env: spec.env, timeout: 10_000, killSignal: "SIGKILL", encoding: "utf8" });
-    expect(result.status, result.stderr || result.error?.message).toBe(0);
+    const result = await runThroughBubblewrap(buildSandboxCommand({ plan: { binary, args: [`--config-file=${config}`, path.join(job, "input")], available: true }, venvBin: "/tmp/nonexistent-venv/bin", ...sandboxInputs }));
+    expect(result.status, result.stderr).toBe(0);
   } finally {
     await new Promise<void>((resolve) => setImmediate(resolve));
     await new Promise<void>((resolve) => server.close(() => resolve()));
@@ -67,12 +91,11 @@ it.skipIf(process.platform !== "linux" || !existsSync("/usr/bin/bwrap"))("runs a
     symlinkSync("/bin/sh", path.join(venv, "bin", "python"));
     symlinkSync("python", path.join(venv, "bin", "python3"));
     writeFileSync(path.join(job, "input"), "input");
-    const sandbox = resolveParserSandboxSettings({ scriptsDir: path.resolve("scripts"), env: { NODE_ENV: "production" } });
     const plan = { binary: path.join(venv, "bin", "python3"), args: ["-c", 'test -r "$0"', path.join(job, "input")], available: true };
-    const spec = buildSpawnCommandSpec({ plan, venvBin: path.join(venv, "bin"), sandbox });
-    expect(spec.env.DOCSLURP_PARSER_SANDBOX_READABLE_PATHS?.split(",")).not.toContain(path.join(venv, "bin", "python3"));
-    const result = spawnSync(spec.binary, spec.args, { env: spec.env, timeout: 10_000, killSignal: "SIGKILL", encoding: "utf8" });
-    expect(result.status, result.stderr || result.error?.message).toBe(0);
+    const command = buildSandboxCommand({ plan, venvBin: path.join(venv, "bin"), ...sandboxInputs });
+    expect(command.readablePaths).not.toContain(path.join(venv, "bin", "python3"));
+    const result = await runThroughBubblewrap(command);
+    expect(result.status, result.stderr).toBe(0);
   } finally {
     rmSync(venv, { recursive: true, force: true });
     rmSync(job, { recursive: true, force: true });

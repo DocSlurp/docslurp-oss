@@ -2,7 +2,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
-import { resolveScriptsDir } from "../../../tools/runner.js";
+import { resolveScriptsDir } from "../../../tools/scripts-dir.js";
 import { readSandboxConfig } from "../../config-schema.js";
 import type {
   ParserSandboxProvider,

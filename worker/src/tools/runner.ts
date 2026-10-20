@@ -11,12 +11,17 @@ import { DEFAULT_LOCAL_OCR_MODEL, DEFAULT_IMAGE_CLASSIFICATION_MODEL } from "@do
 import { existsSync, readFileSync, readdirSync, readlinkSync, lstatSync, realpathSync, statSync } from "node:fs";
 import { access } from "node:fs/promises";
 import path from "node:path";
-import { spawn } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
+import { Readable } from "node:stream";
+import { platform } from "node:os";
 import { pipeline } from "node:stream/promises";
 import type { Writable } from "node:stream";
-import { platform, tmpdir } from "node:os";
 
 import { resolveCommandPaths } from "../sandbox/paths.js";
+import { sandboxScopeStorage } from "../sandbox/session-context.js";
+import { initializeParserSandbox, type InitializedParserSandbox } from "../sandbox/startup.js";
+import type { SandboxCommand, SandboxResult, SandboxSession } from "../sandbox/types.js";
+import { resolveScriptsDir } from "./scripts-dir.js";
 import { createPool, type PythonPool } from "./python-pool.js";
 import {
   buildAllowlistedEnv,
@@ -55,19 +60,17 @@ export interface CommandResult {
   stderr: string;
 }
 
-export interface ParserSandboxSettings {
-  enabled: boolean;
-  launcherPath: string | null;
-  mode: "inherit" | "isolated";
-  scratchRoot: string;
-  writablePaths: string[];
+export interface CommandRunnerOptions {
+  /** Opens a sandbox session for an activity. Omit outside the Temporal worker to use the env-configured provider. */
+  openSession?: (activityId: string) => Promise<SandboxSession>;
 }
 
-export interface SpawnCommandSpec {
-  binary: string;
-  args: string[];
-  env: NodeJS.ProcessEnv;
-}
+/** A started command: a local child process to monitor, or a remote run that completes on its own. */
+export type LaunchedCommand =
+  | { child: ChildProcess; release(): Promise<void> }
+  | { remote: Promise<SandboxResult>; release(): Promise<void> };
+
+const DEFAULT_SCRATCH_ROOT = "/tmp/docslurp-parser-sandbox";
 
 export interface DocumentToolInvocation {
   binary: string;
@@ -117,19 +120,17 @@ export class CommandRunner {
   private readonly pythonBinary: string;
   private readonly commandRssBudgetKb: number | null;
   private readonly containerMemoryLimitMb: number | null;
-  private readonly parserSandbox: ParserSandboxSettings;
+  private readonly openSession?: (activityId: string) => Promise<SandboxSession>;
+  private lazySandbox?: Promise<InitializedParserSandbox>;
   private readonly warmedCommands = new Set<string>();
   private embedPool?: PythonPool;
 
-  constructor() {
+  constructor(options: CommandRunnerOptions = {}) {
+    this.openSession = options.openSession;
     this.scriptsDir = resolveScriptsDir();
     this.venvBin = resolveVenvBin(process.env.PYTHON_VENV);
     const preferred = path.join(this.venvBin, "python3");
     this.pythonBinary = existsSync(preferred) ? preferred : "python3";
-    this.parserSandbox = resolveParserSandboxSettings({
-      scriptsDir: this.scriptsDir,
-      env: process.env,
-    });
     this.containerMemoryLimitMb = detectContainerMemoryLimitMb();
     const commandRssBudgetMb = resolveCommandRssBudgetMb({
       explicitMb: readPositiveNumber(process.env.WORKER_COMMAND_MAX_RSS_MB),
@@ -143,13 +144,6 @@ export class CommandRunner {
       console.log(
         `[worker-memory] container_limit_mb=${this.containerMemoryLimitMb ?? "unknown"} ` +
           `command_rss_budget_mb=${Math.round(this.commandRssBudgetKb / 1024)}`,
-      );
-    }
-
-    if (this.parserSandbox.enabled) {
-      console.log(
-        `[parser-sandbox] status=${this.parserSandbox.launcherPath ? "enabled" : "missing-launcher"} ` +
-          `launcher=${this.parserSandbox.launcherPath ?? "direct"} scratch_root=${this.parserSandbox.scratchRoot}`,
       );
     }
   }
@@ -217,8 +211,15 @@ export class CommandRunner {
         }),
       },
       async () => {
-        return await new Promise<CommandResult>((resolve, reject) => {
-          const child = this.spawn(plan, signal);
+        const launched = await this.launch(plan, signal);
+        try {
+          if ("remote" in launched) {
+            const result = await this.settleRemote(plan, launched);
+            if (result.exitCode === 0) return { stdout: result.stdout, stderr: result.stderr };
+            throw new Error(`${plan.binary} (${result.exitCode ?? "unknown"}): ${result.stderr || result.stdout}`.trim());
+          }
+          const { child } = launched;
+          return await new Promise<CommandResult>((resolve, reject) => {
           const monitor = this.startCommandMonitor(plan, child);
 
           let stdout = "";
@@ -230,7 +231,7 @@ export class CommandRunner {
             readPositiveNumber(process.env.WORKER_COMMAND_MAX_OUTPUT_BYTES) ??
             DEFAULT_MAX_COMMAND_OUTPUT_BYTES;
 
-          child.stdout.on("data", (chunk) => {
+          child.stdout!.on("data", (chunk) => {
             stdoutBytes += Buffer.byteLength(chunk);
             if (stdoutBytes > maxOutputBytes) {
               outputLimitError = new Error(
@@ -241,7 +242,7 @@ export class CommandRunner {
             }
             stdout += chunk.toString();
           });
-          child.stderr.on("data", (chunk) => {
+          child.stderr!.on("data", (chunk) => {
             stderrBytes += Buffer.byteLength(chunk);
             if (stderrBytes > maxOutputBytes) {
               outputLimitError = new Error(
@@ -276,7 +277,10 @@ export class CommandRunner {
               ),
             );
           });
-        });
+          });
+        } finally {
+          await launched.release();
+        }
       },
     );
   }
@@ -292,64 +296,84 @@ export class CommandRunner {
         metadata: { binary: path.basename(plan.binary) },
       },
       async () => {
-        const child = this.spawn(plan, signal);
-        const monitor = this.startCommandMonitor(plan, child);
-        let stderr = "";
-        let stderrBytes = 0;
-        let outputLimitError: Error | null = null;
-        const maxOutputBytes =
-          readPositiveNumber(process.env.WORKER_COMMAND_MAX_OUTPUT_BYTES) ??
-          DEFAULT_MAX_COMMAND_OUTPUT_BYTES;
-
-        const exitPromise = new Promise<void>((resolve, reject) => {
-          child.on("error", (error) => {
-            reject(monitor.finish() ?? error);
-          });
-          child.on("close", (code) => {
-            if (outputLimitError) {
-              reject(outputLimitError);
-              return;
+        const launched = await this.launch(plan, signal);
+        try {
+          if ("remote" in launched) {
+            const result = await this.settleRemote(plan, launched);
+            if (result.exitCode !== 0) {
+              throw new Error(`${plan.binary} (${result.exitCode ?? "unknown"}): ${result.stderr}`.trim());
             }
-            const budgetError = monitor.finish(code);
-            if (budgetError) {
-              reject(budgetError);
-              return;
-            }
-            if (code === 0) {
-              resolve();
-              return;
-            }
-
-            reject(
-              new Error(
-                `${plan.binary} (${code ?? "unknown"}): ${stderr}`.trim(),
-              ),
-            );
-          });
-        });
-
-        child.stderr.on("data", (chunk) => {
-          stderrBytes += Buffer.byteLength(chunk);
-          if (stderrBytes > maxOutputBytes) {
-            outputLimitError = new Error(
-              `${plan.binary} stderr exceeded ${maxOutputBytes} bytes`,
-            );
-            void killProcessTree(child.pid === undefined ? [] : [child.pid]);
-            return;
+            await pipeline(Readable.from([result.stdout]), destination);
+            return { stderr: result.stderr };
           }
-          stderr += chunk.toString();
-        });
-
-        await Promise.all([
-          pipeline(child.stdout, destination).catch((error) => {
-            throw monitor.peekBudgetError() ?? error;
-          }),
-          exitPromise,
-        ]);
-
-        return { stderr };
+          return await this.streamToWritable(plan, launched.child, destination);
+        } finally {
+          await launched.release();
+        }
       },
     );
+  }
+
+  private async streamToWritable(
+    plan: CommandPlan,
+    child: ChildProcess,
+    destination: Writable,
+  ): Promise<{ stderr: string }> {
+    const monitor = this.startCommandMonitor(plan, child);
+    let stderr = "";
+    let stderrBytes = 0;
+    let outputLimitError: Error | null = null;
+    const maxOutputBytes =
+      readPositiveNumber(process.env.WORKER_COMMAND_MAX_OUTPUT_BYTES) ??
+      DEFAULT_MAX_COMMAND_OUTPUT_BYTES;
+
+    const exitPromise = new Promise<void>((resolve, reject) => {
+      child.on("error", (error) => {
+        reject(monitor.finish() ?? error);
+      });
+      child.on("close", (code) => {
+        if (outputLimitError) {
+          reject(outputLimitError);
+          return;
+        }
+        const budgetError = monitor.finish(code);
+        if (budgetError) {
+          reject(budgetError);
+          return;
+        }
+        if (code === 0) {
+          resolve();
+          return;
+        }
+
+        reject(
+          new Error(
+            `${plan.binary} (${code ?? "unknown"}): ${stderr}`.trim(),
+          ),
+        );
+      });
+    });
+
+    child.stderr!.on("data", (chunk) => {
+      stderrBytes += Buffer.byteLength(chunk);
+      if (stderrBytes > maxOutputBytes) {
+        outputLimitError = new Error(
+          `${plan.binary} stderr exceeded ${maxOutputBytes} bytes`,
+        );
+        void killProcessTree(child.pid === undefined ? [] : [child.pid]);
+        return;
+      }
+      stderr += chunk.toString();
+    });
+
+    await Promise.all([
+      pipeline(child.stdout!, destination).catch((error) => {
+        throw monitor.peekBudgetError() ?? error;
+      }),
+      exitPromise,
+    ]);
+
+    return { stderr };
   }
 
   async pdfInfo(source: string): Promise<CommandPlan> {
@@ -939,18 +963,46 @@ export class CommandRunner {
       };
     }
 
-    return await new Promise<MalwareScanResult>((resolve, reject) => {
-      const child = this.spawn(selected.plan, signal);
-      const monitor = this.startCommandMonitor(selected.plan, child, {
-        metricPrefix: "malware-scan",
-      });
+    const launched = await this.launch(selected.plan, signal);
+    let outcome: SandboxResult;
+    try {
+      outcome =
+        "remote" in launched
+          ? await this.settleRemote(selected.plan, launched, "malware-scan")
+          : await this.collectChild(selected.plan, launched.child, "malware-scan");
+    } finally {
+      await launched.release();
+    }
+    const { exitCode: code, stdout, stderr } = outcome;
+    const base = {
+      engine: selected.engine,
+      available: true as const,
+      databaseStatus: databaseHealth.status,
+      databaseUpdatedAt: databaseHealth.updatedAt,
+      databaseAgeHours: databaseHealth.ageHours,
+      databaseSource: databaseHealth.source,
+      healthWarnings,
+      stdout,
+      stderr,
+      exitCode: code,
+    };
+    if (code === 0) return { ...base, status: "clean", signature: null };
+    if (code === 1) {
+      return { ...base, status: "infected", signature: parseClamSignature(stdout) ?? parseClamSignature(stderr) };
+    }
+    return { ...base, status: "error", signature: null };
+  }
+
+  /** Run a monitored local child to completion; rejects on spawn errors and budget or timeout kills. */
+  private collectChild(plan: CommandPlan, child: ChildProcess, metricPrefix: string): Promise<SandboxResult> {
+    return new Promise<SandboxResult>((resolve, reject) => {
+      const monitor = this.startCommandMonitor(plan, child, { metricPrefix });
       let stdout = "";
       let stderr = "";
-
-      child.stdout.on("data", (chunk) => {
+      child.stdout?.on("data", (chunk) => {
         stdout += chunk.toString();
       });
-      child.stderr.on("data", (chunk) => {
+      child.stderr?.on("data", (chunk) => {
         stderr += chunk.toString();
       });
       child.on("error", (error) => {
@@ -958,60 +1010,8 @@ export class CommandRunner {
       });
       child.on("close", (code) => {
         const budgetError = monitor.finish(code);
-        if (budgetError) {
-          reject(budgetError);
-          return;
-        }
-        if (code === 0) {
-          resolve({
-            engine: selected.engine,
-            available: true,
-            status: "clean",
-            signature: null,
-            databaseStatus: databaseHealth.status,
-            databaseUpdatedAt: databaseHealth.updatedAt,
-            databaseAgeHours: databaseHealth.ageHours,
-            databaseSource: databaseHealth.source,
-            healthWarnings,
-            stdout,
-            stderr,
-            exitCode: code,
-          });
-          return;
-        }
-
-        if (code === 1) {
-          resolve({
-            engine: selected.engine,
-            available: true,
-            status: "infected",
-            signature: parseClamSignature(stdout) ?? parseClamSignature(stderr),
-            databaseStatus: databaseHealth.status,
-            databaseUpdatedAt: databaseHealth.updatedAt,
-            databaseAgeHours: databaseHealth.ageHours,
-            databaseSource: databaseHealth.source,
-            healthWarnings,
-            stdout,
-            stderr,
-            exitCode: code,
-          });
-          return;
-        }
-
-        resolve({
-          engine: selected.engine,
-          available: true,
-          status: "error",
-          signature: null,
-          databaseStatus: databaseHealth.status,
-          databaseUpdatedAt: databaseHealth.updatedAt,
-          databaseAgeHours: databaseHealth.ageHours,
-          databaseSource: databaseHealth.source,
-          healthWarnings,
-          stdout,
-          stderr,
-          exitCode: code,
-        });
+        if (budgetError) reject(budgetError);
+        else resolve({ exitCode: code, stdout, stderr });
       });
     });
   }
@@ -1150,19 +1150,105 @@ export class CommandRunner {
     return false;
   }
 
-  private spawn(plan: CommandPlan, signal?: AbortSignal) {
-    const command = buildSpawnCommandSpec({
+  private sandboxForRun(): Promise<InitializedParserSandbox> {
+    this.lazySandbox ??= initializeParserSandbox(process.env, process.platform);
+    return this.lazySandbox;
+  }
+
+  private async acquireSession(): Promise<{ session: SandboxSession; release(): Promise<void> }> {
+    const scope = sandboxScopeStorage.getStore();
+    if (scope) return { session: await scope.get(), release: async () => {} };
+    // Outside an activity scope (CLIs, tests): one short-lived session per command.
+    const open = this.openSession
+      ? (id: string) => this.openSession!(id)
+      : async (id: string) => {
+          const { provider, config } = await this.sandboxForRun();
+          return provider.openSession(config, { activityId: id });
+        };
+    const session = await open("command");
+    return { session, release: () => session.close() };
+  }
+
+  /** Scratch and writable inputs come from the provider config when it declares them, else from the shared env vars. */
+  private async sandboxPathConfig(): Promise<{ scratchRoot: string; writablePaths: string[] }> {
+    const config = (this.openSession ? null : (await this.sandboxForRun()).config) as
+      | { scratchRoot?: unknown; writablePaths?: unknown }
+      | null;
+    const scratchRoot =
+      typeof config?.scratchRoot === "string"
+        ? config.scratchRoot
+        : process.env.DOCSLURP_PARSER_SANDBOX_ROOT?.trim() || DEFAULT_SCRATCH_ROOT;
+    const writablePaths = Array.isArray(config?.writablePaths)
+      ? (config.writablePaths as string[])
+      : (process.env.DOCSLURP_PARSER_SANDBOX_WRITABLE_PATHS ?? "")
+          .split(",")
+          .map((item) => item.trim())
+          .filter(Boolean);
+    return { scratchRoot, writablePaths };
+  }
+
+  /**
+   * Start a command through the activity's sandbox session. Vector-writer commands hold
+   * backend credentials and run outside the sandbox. Callers must `release()` when done.
+   */
+  async launch(plan: CommandPlan, signal?: AbortSignal): Promise<LaunchedCommand> {
+    if (isVectorBackendCommand(plan.args, this.scriptsDir)) {
+      const env = buildCommandEnv({ plan, venvBin: this.venvBin, isVectorBackend: true });
+      const child = spawn(plan.binary, plan.args, { env, stdio: ["ignore", "pipe", "pipe"], signal });
+      return { child, release: async () => {} };
+    }
+    const { scratchRoot, writablePaths } = await this.sandboxPathConfig();
+    const pages = plan.pages ?? currentPerfContext()?.pageCount;
+    const command = buildSandboxCommand({
       plan,
       venvBin: this.venvBin,
-      sandbox: this.parserSandbox,
-      env: process.env,
+      scriptsDir: this.scriptsDir,
+      scratchRoot,
+      configuredWritablePaths: writablePaths,
+      limits: {
+        timeoutMs: plan.timeoutMs ?? resolveCommandTimeoutMs(pages),
+        ...(this.commandRssBudgetKb ? { rssBudgetMb: Math.round(this.commandRssBudgetKb / 1024) } : {}),
+      },
     });
+    const { session, release } = await this.acquireSession();
+    try {
+      if (session.spawn) return { child: session.spawn(command, signal), release };
+      if (session.run) return { remote: session.run(command, signal), release };
+      throw new Error(`Sandbox session '${session.providerId}' offers neither spawn nor run`);
+    } catch (error) {
+      await release();
+      throw error;
+    }
+  }
 
-    return spawn(command.binary, command.args, {
-      env: command.env,
-      stdio: ["ignore", "pipe", "pipe"],
-      signal,
-    });
+  /** Await a remote run and record its provider-reported usage; the local monitor does not apply. */
+  private async settleRemote(
+    plan: CommandPlan,
+    launched: { remote: Promise<SandboxResult> },
+    metricPrefix = "command",
+  ): Promise<SandboxResult> {
+    const startedAt = Date.now();
+    const result = await launched.remote;
+    noteWorkProgress(`command-exit:${path.basename(plan.binary)}`);
+    const context = currentPerfContext();
+    if (context) {
+      const metadata = { binary: plan.binary, exitCode: result.exitCode, measurement: "provider-reported" };
+      const tags = ["process", "subprocess", "remote", context.scope];
+      pushPerfMetric({ metric: `${metricPrefix}-duration`, value: Date.now() - startedAt, unit: "ms", tags, metadata });
+      if (result.cpuSeconds !== undefined) {
+        pushPerfMetric({ metric: `${metricPrefix}-cpu-time`, value: roundMetric(result.cpuSeconds), unit: "second", tags, metadata });
+      }
+      if (result.peakRssKb !== undefined) {
+        pushPerfMetric({
+          metric: `${metricPrefix}-rss-peak`,
+          value: roundMetric(result.peakRssKb / 1024),
+          unit: "mb",
+          tags,
+          metadata,
+        });
+      }
+    }
+    return result;
   }
 
   private startCommandMonitor(
@@ -1517,19 +1603,7 @@ async function killProcessTree(pids: number[]): Promise<void> {
   }
 }
 
-export function resolveScriptsDir(): string {
-  const explicit = process.env.DOCSLURP_WORKER_SCRIPTS_DIR;
-  if (explicit) {
-    return explicit;
-  }
-
-  const candidates = [
-    path.join(process.cwd(), "worker", "scripts"),
-    path.join(process.cwd(), "scripts"),
-  ];
-
-  return candidates.find((candidate) => existsSync(candidate)) ?? candidates[0];
-}
+export { resolveScriptsDir };
 
 export function planDocumentToolInvocation(
   invocation: DocumentToolInvocation,
@@ -1579,52 +1653,14 @@ export function sanitizeDocumentToolFileArg(arg: string): string {
   return `.${path.sep}${arg}`;
 }
 
-export function resolveParserSandboxSettings(args: {
-  scriptsDir: string;
-  env?: NodeJS.ProcessEnv;
-}): ParserSandboxSettings {
-  const env = args.env ?? process.env;
-  const production = env.NODE_ENV === "production";
-  const enabled = production || readBooleanFlag(
-    env.DOCSLURP_PARSER_SANDBOX_ENABLED,
-    platform() !== "darwin",
-  );
-  const explicitLauncher = env.DOCSLURP_PARSER_SANDBOX_SCRIPT?.trim();
-  const candidates = [
-    explicitLauncher,
-    path.join(args.scriptsDir, "parser-sandbox.sh"),
-  ].filter((candidate): candidate is string => Boolean(candidate));
-
-  return {
-    enabled,
-    launcherPath: enabled
-      ? (candidates.find((candidate) => existsSync(candidate)) ?? null)
-      : null,
-    mode:
-      !production && env.DOCSLURP_PARSER_SANDBOX_MODE?.trim().toLowerCase() === "inherit"
-        ? "inherit"
-        : "isolated",
-    scratchRoot:
-      env.DOCSLURP_PARSER_SANDBOX_ROOT?.trim() ||
-      "/tmp/docslurp-parser-sandbox",
-    writablePaths: (
-      env.DOCSLURP_PARSER_SANDBOX_WRITABLE_PATHS ?? ""
-    )
-      .split(",")
-      .map((item) => item.trim())
-      .filter(Boolean),
-  };
-}
-
-export function buildSpawnCommandSpec(args: {
+export function buildCommandEnv(args: {
   plan: CommandPlan;
   venvBin: string;
-  sandbox: ParserSandboxSettings;
+  isVectorBackend: boolean;
   env?: NodeJS.ProcessEnv;
-}): SpawnCommandSpec {
-  const isVectorBackend = isVectorBackendCommand(args.plan.args, args.sandbox.launcherPath);
-  const env = buildAllowlistedEnv({
-    defaultAllowlist: isVectorBackend
+}): NodeJS.ProcessEnv {
+  return buildAllowlistedEnv({
+    defaultAllowlist: args.isVectorBackend
       ? [...defaultParserEnvAllowlist, ...vectorBackendEnvAllowlist]
       : defaultParserEnvAllowlist,
     allowlistEnvVar: "DOCSLURP_PARSER_ENV_ALLOWLIST",
@@ -1635,43 +1671,37 @@ export function buildSpawnCommandSpec(args: {
     },
     sourceEnv: args.env,
   });
+}
 
-  if (!args.sandbox.enabled || isVectorBackend) {
-    return {
-      binary: args.plan.binary,
-      args: args.plan.args,
-      env,
-    };
-  }
-  if (!args.sandbox.launcherPath) {
-    throw new Error("Parser sandbox is enabled but no sandbox launcher was found");
-  }
-
+/** Provider-neutral description of a parser command: allowlisted env plus the paths it may read and write. */
+export function buildSandboxCommand(args: {
+  plan: CommandPlan;
+  venvBin: string;
+  scriptsDir: string;
+  scratchRoot: string;
+  configuredWritablePaths: string[];
+  limits: SandboxCommand["limits"];
+  env?: NodeJS.ProcessEnv;
+}): SandboxCommand {
   const paths = resolveCommandPaths({
     plan: args.plan,
     venvBin: args.venvBin,
-    scratchRoot: args.sandbox.scratchRoot,
-    configuredWritablePaths: args.sandbox.writablePaths,
-    scriptsDir: path.dirname(args.sandbox.launcherPath),
+    scratchRoot: args.scratchRoot,
+    configuredWritablePaths: args.configuredWritablePaths,
+    scriptsDir: args.scriptsDir,
   });
-
   return {
-    binary: args.sandbox.launcherPath,
-    args: [args.plan.binary, ...args.plan.args],
-    env: {
-      ...env,
-      DOCSLURP_PARSER_SANDBOX_MODE: args.sandbox.mode,
-      DOCSLURP_PARSER_SANDBOX_READABLE_PATHS: paths.readablePaths.join(","),
-      DOCSLURP_PARSER_SANDBOX_ROOT: args.sandbox.scratchRoot,
-      DOCSLURP_PARSER_SANDBOX_TMP_ROOT: path.resolve(tmpdir()),
-      DOCSLURP_PARSER_SANDBOX_WRITABLE_PATHS: paths.writablePaths.join(","),
-    },
+    binary: args.plan.binary,
+    args: args.plan.args,
+    env: buildCommandEnv({ plan: args.plan, venvBin: args.venvBin, isVectorBackend: false, env: args.env }),
+    readablePaths: paths.readablePaths,
+    writablePaths: paths.writablePaths,
+    limits: args.limits,
   };
 }
 
-function isVectorBackendCommand(commandArgs: string[], launcherPath: string | null): boolean {
+export function isVectorBackendCommand(commandArgs: string[], scriptsDir: string): boolean {
   // Only trusted entrypoints receive backend credentials; input filenames are never capabilities.
-  const scriptsDir = launcherPath ? path.dirname(launcherPath) : resolveScriptsDir();
   return ["vector_backend_write.py", "orama_write.mjs"].some((script) =>
     commandArgs[0] === path.join(scriptsDir, script));
 }
