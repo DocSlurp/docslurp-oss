@@ -7,7 +7,7 @@ The worker runs file parsers (poppler, pandoc, LibreOffice and similar) on untru
 | Provider | `DOCSLURP_PARSER_SANDBOX` | Filesystem | Network | Process isolation | Where it runs |
 | --- | --- | --- | --- | --- | --- |
 | Bubblewrap | `bubblewrap` | Isolated | Fully blocked (`full`) | Yes | Local |
-| Landlock | `landlock` | Isolated | TCP blocked (`tcp-only`) on Linux 6.8+, otherwise not isolated (`none`) | No | Local |
+| Landlock | `landlock` | Isolated | TCP blocked (`tcp-only`) | No | Local |
 | Modal | `modal` | Isolated | Fully blocked (`full`) | Yes | Remote |
 | None | `none` | Not isolated | Not isolated (`none`) | No | Local |
 
@@ -20,7 +20,7 @@ The network levels mean:
 | Provider | Host requirements |
 | --- | --- |
 | Bubblewrap | Linux, `bwrap` installed, a kernel and container runtime that allow unprivileged user namespaces. In Docker this needs the security options in [Requirements](requirements.md#host-requirements). |
-| Landlock | Linux with the Landlock LSM, and the `landrun` binary. Kernel 6.8 or newer for the TCP rule. The worker images include landrun. `landrun` v0.1.17 is a dynamically linked release binary that needs glibc 2.38 or newer (Debian trixie, not bookworm). No namespaces or extra container options needed. |
+| Landlock | Linux with a kernel that supports Landlock ABI v9, and the `landrun` binary. landrun v0.1.17 refuses to run on a kernel with a lower ABI; the probe tells you whether yours qualifies (the test host on kernel 7.2.5 works, Fargate's kernel 6.1 does not). The worker images include landrun. `landrun` v0.1.17 is a dynamically linked release binary that needs glibc 2.38 or newer (Debian trixie, not bookworm). No namespaces or extra container options needed. |
 | Modal | Outbound HTTPS from the worker to Modal, a Modal account and API token, and the `modal` npm package (an optional dependency of `@docslurp/worker`). |
 | None | Nothing. Development only. |
 
@@ -47,7 +47,7 @@ With `NODE_ENV=production` (which Compose sets), the provider must report:
 - filesystem isolation, and
 - network isolation of `tcp-only` or `full`.
 
-So landlock on a kernel older than 6.8 is refused in production. Provider `none` is refused unless you set `DOCSLURP_PARSER_SANDBOX_ALLOW_UNISOLATED=true`. With that override, every start logs:
+Landlock reports `tcp-only`, so it passes. On a kernel without Landlock ABI v9 it never gets that far: the probe fails (see [Landlock](#landlock)). Provider `none` is refused unless you set `DOCSLURP_PARSER_SANDBOX_ALLOW_UNISOLATED=true`. With that override, every start logs:
 
 ```text
 [parser-sandbox] status=unisolated
@@ -81,7 +81,7 @@ A required variable that is missing, or a number or boolean that does not parse,
 
 Set `DOCSLURP_PARSER_SANDBOX=landlock`. The worker images ship `landrun` at `/usr/local/bin/landrun`. Elsewhere, install the pinned release from `worker/sandbox-tools.json` and point `DOCSLURP_LANDRUN_BINARY` at it.
 
-Landlock restricts the parser to read-only access to system runtime paths and the input files, and write access to its scratch and declared output directories. Like the bubblewrap launcher, each command gets a private directory under `DOCSLURP_PARSER_SANDBOX_ROOT` with `HOME`, `TMPDIR`, `TMP`, `TEMP` and the `XDG_*` directories pointed into it; it is removed when the command exits. The worker resolves `DOCSLURP_LANDRUN_BINARY` against its `PATH` once at start, so the probe and every command run the same landrun. A path containing a comma cannot be granted (landrun splits grant lists on commas), so such a command fails instead of running with the wrong grants. It denies TCP connect and bind on kernel 6.8 and newer. It does not create namespaces, so it works in containers where bubblewrap cannot. It has no PID or IPC isolation, and the `processes` flag is `false`.
+Landlock restricts the parser to read-only access to system runtime paths and the input files, and write access to its scratch and declared output directories. Like the bubblewrap launcher, each command gets a private directory under `DOCSLURP_PARSER_SANDBOX_ROOT` with `HOME`, `TMPDIR`, `TMP`, `TEMP` and the `XDG_*` directories pointed into it; it is removed when the command exits. The worker resolves `DOCSLURP_LANDRUN_BINARY` against its `PATH` once at start, so the probe and every command run the same landrun. A path containing a comma cannot be granted (landrun splits grant lists on commas), so such a command fails instead of running with the wrong grants. It denies TCP connect and bind. landrun v0.1.17 refuses to run unless the kernel supports Landlock ABI v9. On an older ABI the probe fails with `missing kernel Landlock support. Got Landlock ABI vN, wanted {Landlock V9; ...}`, and the worker refuses to start with landlock rather than running with weaker isolation. The probe tells you whether your kernel qualifies; the test host on kernel 7.2.5 works and Fargate's kernel 6.1 (ABI v2) does not. If you see this, the kernel is too old for landrun v0.1.17: use `bubblewrap` on a host that allows user namespaces, or `modal`. It does not create namespaces, so it works in containers where bubblewrap cannot. It has no PID or IPC isolation, and the `processes` flag is `false`.
 
 ## Modal
 
@@ -113,7 +113,7 @@ Modal sends your document contents to a third party. Decide whether that fits yo
 
 ## Where these providers work in containers
 
-Results of a local check on 2026-10-20. Image: Debian trixie-slim with bubblewrap and landrun v0.1.17. Docker 29.7.2, host kernel 7.2.5.
+Results of local Docker checks on 2026-10-20. Image: Debian trixie-slim with bubblewrap and landrun v0.1.17. Docker 29.7.2, host kernel 7.2.5.
 
 | Docker security options | Bubblewrap | Landlock |
 | --- | --- | --- |
@@ -192,14 +192,86 @@ exit=7
 
 </details>
 
+### AWS Fargate
+
+Run on 2026-10-20 in us-west-1, platform 1.4.0, kernel 6.1.188, 0.25 vCPU / 0.5 GB, with the same image (Debian trixie-slim, bubblewrap, landrun v0.1.17).
+
+| Platform | Bubblewrap | Landlock |
+| --- | --- | --- |
+| AWS Fargate | Fails: no user namespaces (`bwrap: No permissions to create a new namespace`) | Fails: landrun v0.1.17 needs Landlock ABI v9, Fargate exposes ABI v2 (`missing kernel Landlock support`) |
+
+Takeaway: on Fargate neither local provider works. Bubblewrap cannot create user namespaces. Landlock fails the probe, and ABI v2 has filesystem rules only and no network rules, so it could not pass the production policy even with `--best-effort`. Use the `modal` provider on Fargate.
+
+<details>
+<summary>Raw probe output, AWS Fargate</summary>
+
+```text
+== uname
+6.1.188
+== lsm
+cat: /sys/kernel/security/lsm: No such file or directory
+== userns_clone
+cat: /proc/sys/kernel/unprivileged_userns_clone: No such file or directory
+16384
+== unshare --user true
+unshare: unshare failed: Operation not permitted
+exit=1
+== bwrap --unshare-all --ro-bind / / true
+bwrap: No permissions to create a new namespace, likely because the kernel does not allow non-privileged user namespaces. See <https://deb.li/bubblewrap> or <file:///usr/share/doc/bubblewrap/README.Debian.gz>.
+exit=1
+== landrun --version
+landrun version 0.1.17
+exit=0
+== landrun fs allow /usr
+[landrun:error] 2026/10/20 16:25:40 Failed to apply sandbox: failed to apply Landlock restrictions: missing kernel Landlock support. Got Landlock ABI v2, wanted {Landlock V9; FS: all; Net: all; Scoped: all}
+exit=1
+== landrun fs deny (read /etc/hostname without /etc)
+[landrun:error] 2026/10/20 16:25:40 Failed to apply sandbox: failed to apply Landlock restrictions: missing kernel Landlock support. Got Landlock ABI v2, wanted {Landlock V9; FS: all; Net: all; Scoped: all}
+exit=1
+== curl without landrun (baseline)
+200
+exit=0
+== landrun tcp deny (curl must fail)
+[landrun:error] 2026/10/20 16:25:40 Failed to apply sandbox: failed to apply Landlock restrictions: missing kernel Landlock support. Got Landlock ABI v2, wanted {Landlock V9; FS: all; Net: all; Scoped: all}
+exit=1
+```
+
+</details>
+
+<details>
+<summary>Raw probe output, AWS Fargate, landrun with --best-effort (diagnostic only)</summary>
+
+Diagnostic only: the provider never uses `--best-effort`.
+
+```text
+== best-effort fs allow
+exit=0
+== best-effort fs deny
+cat: /etc/hostname: Permission denied
+exit=1
+== best-effort tcp (ABI v2 has no net rules)
+curl: (23) client returned ERROR on write of 577 bytes
+200
+exit=23
+```
+
+curl exit 23 means `/dev/null` was not writable inside the sandbox. The HTTP 200 shows TCP was not blocked.
+
+</details>
+
+If the landlock probe fails with the following message, the kernel is too old for landrun v0.1.17:
+
+```text
+missing kernel Landlock support
+```
+
 Not yet tested:
 
 | Platform | Status |
 | --- | --- |
-| AWS Fargate | Not yet tested |
 | Google Cloud Run | Not yet tested |
 
-Do not assume landlock works on either until it has been checked. The probe at worker start tells you for your platform. Build the worker first (`pnpm --filter @docslurp/worker build`); the probe and `scripts/check-worker-prerequisites.mjs --sandbox` both run the compiled `worker/dist/`. Then run the probe without starting the worker:
+Do not assume landlock works on Cloud Run until it has been checked. The probe at worker start tells you for your platform. Build the worker first (`pnpm --filter @docslurp/worker build`); the probe and `scripts/check-worker-prerequisites.mjs --sandbox` both run the compiled `worker/dist/`. Then run the probe without starting the worker:
 
 ```bash
 node worker/dist/sandbox/probe-cli.js

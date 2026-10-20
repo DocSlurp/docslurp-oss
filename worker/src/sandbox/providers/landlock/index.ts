@@ -53,7 +53,9 @@ const configSchema: SandboxConfigSchema = {
   },
 };
 
-/** Landlock TCP connect/bind rules arrived with ABI v4 in Linux 6.7/6.8; older kernels leave the network open. */
+/** Landlock TCP connect/bind rules arrived with ABI v4 in Linux 6.7/6.8; older kernels leave the network open.
+ * In practice the "none" branch is unreachable with landrun v0.1.17: it needs Landlock ABI v9, so
+ * the probe fails on any kernel below that and this function is never reached. Kept as a guard. */
 export function networkForKernel(kernelRelease: string): SandboxNetworkIsolation {
   const match = /^(\d+)\.(\d+)/.exec(kernelRelease);
   if (!match) return "none";
