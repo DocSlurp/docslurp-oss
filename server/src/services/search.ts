@@ -7,6 +7,7 @@ import type {
   CitationLocator,
   CanonicalEvidenceType,
   LayoutRegion,
+  PrivacyMode,
   SearchResult,
   SourceTrace,
   TableCell,
@@ -724,6 +725,7 @@ async function vectorSearch(
   workspaceId: string,
   options: SearchOptions,
   serving: IndexServing | null = null,
+  privacyMode?: PrivacyMode,
 ): Promise<SearchChunk[]> {
   const access = await getWorkspaceAccess(workspaceId, userId);
   if (!access) return [];
@@ -783,6 +785,7 @@ async function vectorSearch(
     queryVector,
     documentIds: searchDocumentIds,
     limit,
+    privacyMode,
   });
 
   if (hits.length === 0) return [];
@@ -1300,8 +1303,8 @@ async function executeHybridSearch(
           queryVector,
           query,
           deps: {
-            search: (vector, serving) => vectorSearch(vector, userId, workspaceId, options, serving),
-            embed: (text, embedding) => embedQuery(text, embedding, setup.session, setup.privacyMode, workspaceId),
+            search: (vector, serving) => vectorSearch(vector, userId, workspaceId, options, serving, setup.privacyMode),
+            embed: (text, embedding) => embedQuery(text, embedding, setup.session, setup.privacyMode, workspaceId, setup.normalizedScope.orgId),
             diagnostic: (name, value) => setup.session.recordDiagnostic(name, value as never),
           },
         })),
@@ -1339,7 +1342,7 @@ async function executeHybridSearch(
                 search: {
                   textSearch: ({ query, userId, options }) => textSearch(query, userId, options),
                   vectorSearch: ({ queryVector, userId, workspaceId, options }) =>
-                    vectorSearch(queryVector, userId, workspaceId, options),
+                    vectorSearch(queryVector, userId, workspaceId, options, null, setup.privacyMode),
                 },
               }));
             },

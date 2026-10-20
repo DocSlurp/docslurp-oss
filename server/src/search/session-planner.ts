@@ -237,6 +237,7 @@ export async function prepareSearchSessionRetrievalPlan(args: {
         orgId: access.orgId,
         queryVector,
         limit: 50,
+        privacyMode,
       });
       if (seedHits.length > 0) {
         const docScores = new Map<string, number>();
@@ -377,6 +378,13 @@ async function planIterativeMultiHop(args: {
   };
 }
 
+/** Why a query embedding must skip the cache, or null when it may use it. */
+export function embeddingCacheBypassReason(privacyMode: PrivacyMode, orgId: string | undefined): "strict-privacy" | "no-org" | null {
+  if (privacyMode === "strict-privacy") return "strict-privacy";
+  if (!orgId) return "no-org";
+  return null;
+}
+
 /** Hosted providers that report actual usage and fail loudly instead of degrading to text-only search. */
 const METERED_EMBEDDING_PROVIDERS = new Set(["openrouter", "perplexity", "deepinfra"]);
 
@@ -397,23 +405,31 @@ export async function embedQuery(
   // Cache hits make no provider call, so they record no usage event: usage_events and
   // [ai-usage] keep meaning "provider calls actually made", and billing/budgets stay
   // exact. Hits are counted in search timings, the search session diagnostics and a span.
-  // Private routes and non-standard privacy modes always call through (strict-privacy
-  // audits every embedding attempt). Without an org there is no safe cache scope.
+  // strict-privacy always calls through: it audits every private embedding call, and a
+  // hit would skip that audit row. Without an org there is no safe cache scope.
   const cache = embeddingCache();
-  const cacheKey = cache.enabled && orgId && privacyMode === "standard" && !isPrivate
+  const bypassReason = embeddingCacheBypassReason(privacyMode, orgId);
+  const cacheKey = cache.enabled && !bypassReason && orgId
     ? embeddingCacheKey({ orgId, provider, runtime, model, modelUri: route.modelUri, baseUrl, dimensions, requestedDimensions, normalize: Boolean(normalize) }, query)
     : null;
-  if (cacheKey) {
-    const cached = cache.get(cacheKey);
+  if (cache.enabled) {
+    const cached = cacheKey ? cache.get(cacheKey) : undefined;
     startDependencySpan("embed.cache", {
       "docslurp.dependency.type": "cache", "docslurp.dependency.provider": "memory",
       "docslurp.dependency.operation": "embedding_cache", "docslurp.dependency.phase": "adapter",
-      "docslurp.cache.hit": cached !== undefined, "gen_ai.request.model": model,
+      "docslurp.cache.hit": cached !== undefined, "docslurp.cache.bypassed": bypassReason !== null,
+      ...(bypassReason ? { "docslurp.cache.bypass_reason": bypassReason } : {}),
+      "docslurp.privacy.mode": privacyMode, "gen_ai.request.model": model,
     }).end();
-    countSearchEvent(cached ? "embedCacheHit" : "embedCacheMiss");
-    usage.recordDiagnostic("embeddingCache", { hit: cached !== undefined, hits: cache.hits, misses: cache.misses, entries: cache.size });
+    if (bypassReason) {
+      countSearchEvent("embedCacheBypass");
+      usage.recordDiagnostic("embeddingCache", { hit: false, bypassed: true, bypassReason, privacyMode });
+    } else {
+      countSearchEvent(cached ? "embedCacheHit" : "embedCacheMiss");
+      usage.recordDiagnostic("embeddingCache", { hit: cached !== undefined, hits: cache.hits, misses: cache.misses, entries: cache.size, privacyMode });
+    }
     if (cached) {
-      console.info(`[search-cache] embedding hit model=${model} entries=${cache.size}`);
+      console.info(`[search-cache] embedding hit model=${model} privacy=${privacyMode} entries=${cache.size}`);
       return cached.slice();
     }
   }

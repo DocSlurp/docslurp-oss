@@ -10,7 +10,7 @@ vi.mock("../services/organizations.js", () => ({ getWorkspaceAccess: vi.fn() }))
 
 import { defaultEmbeddingConfig } from "@docslurp/shared";
 import { createEmbeddingCache, embeddingCacheKey, normalizeEmbeddingQuery, resetEmbeddingCacheForTests, type EmbeddingCacheIdentity } from "../search/embedding-cache.js";
-import { prepareSearchSessionRetrievalPlan } from "../search/session-planner.js";
+import { embeddingCacheBypassReason, prepareSearchSessionRetrievalPlan } from "../search/session-planner.js";
 import { collectSearchTimings } from "../search/timings.js";
 import { TtlLruCache } from "../search/ttl-lru.js";
 
@@ -81,7 +81,7 @@ describe("query embedding through the search planner", () => {
   };
   const embedding = defaultEmbeddingConfig;
 
-  function plan(query: string, orgId = "org-a", privacyMode: "standard" | "strict-privacy" = "standard") {
+  function plan(query: string, orgId = "org-a", privacyMode: "standard" | "local-only" | "strict-privacy" = "standard") {
     return collectSearchTimings(() => prepareSearchSessionRetrievalPlan({
       query, userId: "u", options: {} as never, effectiveOptions: {} as never, workspaceId: "ws", orgId,
       workspaceSettings: {}, embedding, privacyMode, session: session as never,
@@ -123,10 +123,26 @@ describe("query embedding through the search planner", () => {
     expect(second.value.queryVector).toEqual([0.1, 0.2, 0.3]);
   });
 
-  it("bypasses the cache outside standard privacy mode", async () => {
-    await plan("q", "org-a", "strict-privacy").catch(() => undefined);
+  it("bypasses the cache in strict-privacy mode and counts the bypass", async () => {
+    const first = await plan("q", "org-a", "strict-privacy").catch(() => undefined);
     await plan("q", "org-a", "strict-privacy").catch(() => undefined);
     expect(embedConfiguredText.mock.calls.length).toBe(2);
+    if (first) expect(first.timings.embedCacheBypass).toBe(1);
+    expect(session.recordDiagnostic).toHaveBeenCalledWith("embeddingCache", expect.objectContaining({ bypassed: true, bypassReason: "strict-privacy" }));
+  });
+
+  it("caches in local-only mode", async () => {
+    await plan("q", "org-a", "local-only").catch(() => undefined);
+    const second = await plan("q", "org-a", "local-only").catch(() => undefined);
+    expect(embedConfiguredText.mock.calls.length).toBe(1);
+    if (second) expect(second.timings.embedCacheHit).toBe(1);
+  });
+
+  it("names the bypass reason", () => {
+    expect(embeddingCacheBypassReason("strict-privacy", "org-a")).toBe("strict-privacy");
+    expect(embeddingCacheBypassReason("standard", undefined)).toBe("no-org");
+    expect(embeddingCacheBypassReason("local-only", "org-a")).toBeNull();
+    expect(embeddingCacheBypassReason("standard", "org-a")).toBeNull();
   });
 
   it("does not cache failures", async () => {
