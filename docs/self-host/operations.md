@@ -75,6 +75,64 @@ host. Order matters:
 
 Test a restore on a separate host before you rely on it.
 
+## Local disk cache for LanceDB
+
+When the vector index lives on object storage (`LANCEDB_URI=s3://...`, including
+`s3+ddb://`), every search reads index and data ranges over the network: 40-60 ms per
+request on most providers, more on others. Lance never rewrites its `data/*.lance`
+or `_indices/**` files, so a local copy of those bytes cannot go stale. The optional
+cache keeps them on local disk and serves repeat reads in well under a millisecond.
+
+```bash
+LANCEDB_S3_CACHE_DIR=/data/lance-cache   # enables the cache (off when unset)
+LANCEDB_S3_CACHE_MAX_GB=10               # LRU limit, default 10
+LANCEDB_S3_CACHE_BLOCK_KB=1024           # fill granularity, default 1024
+```
+
+Setting the directory starts the same localhost re-signing proxy that
+`LANCEDB_S3_TRACE` uses (tracing itself stays off) and needs explicit credentials in the
+storage URI or `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`. It works with any
+S3-compatible provider.
+
+What is cached, and what is not:
+
+- Cached: `GET` (whole object and byte ranges) and `HEAD` for keys under
+  `<table>.lance/data/` and `<table>.lance/_indices/`. Objects are stored as aligned
+  blocks, so overlapping ranges share entries. A request is answered with exactly the
+  bytes it asked for (`206` and `Content-Range` for ranges) and the origin's `ETag`.
+- Never cached: `_versions/` manifests, `_latest`, `_transactions/`, `_deletions/`,
+  LIST, `PUT`, deletes, multipart, conditional requests (`If-Match`, `If-None-Match`,
+  ...), anything with a query string, and every non-2xx answer. Readers still see new
+  table versions as soon as Lance does.
+- A read that spans more than 32 blocks (a scan of a large file) streams through
+  uncached. Writes and deletes that pass through the proxy drop that object's entries.
+- Cache files are written to a temporary name and renamed into place. A missing or
+  truncated file is a miss. Eviction is least-recently-used; the index is rebuilt from
+  the directory at start, so the cache survives restarts.
+
+Sizing and placement:
+
+- **Fly.io:** create a volume on the machine that runs the API or worker
+  (`fly volumes create lance_cache --size 20 --region <region>`), mount it at
+  `/data`, and set `LANCEDB_S3_CACHE_DIR=/data/lance-cache`. Volumes attach to one
+  machine, so each machine has its own cache; they cost about 0.15 USD/GB/month. Set
+  `LANCEDB_S3_CACHE_MAX_GB` to about 80% of the volume. Without a volume the machine
+  root filesystem works but is wiped on every deploy.
+- **Local or bare metal:** point it at NVMe. Spinning disks work but lose most of the gain.
+- **One process per directory.** The server and each worker keep their own size
+  accounting, so give each its own directory (or its own volume). Sharing a directory
+  does not corrupt data, but the limit is then not enforced across processes.
+- The cache costs disk reads of whole blocks: a small range read fetches up to one
+  block from the origin the first time. Lower `LANCEDB_S3_CACHE_BLOCK_KB` (for example
+  256) if your index reads are small and sparse.
+
+Watch the `[lancedb-s3]` line logged every 60 seconds: `cache_hits`, `cache_misses`,
+`cache_hit_ratio`, `cache_bytes_served`, `cache_bytes_filled`, `cache_evictions`,
+`cache_size_bytes` and `upstream_requests` (see
+[dependency tracing](../dependency-tracing.md)). A steady stream of evictions with a
+low hit ratio means the working set is larger than `LANCEDB_S3_CACHE_MAX_GB`. To empty
+the cache, stop the process and delete the directory.
+
 ## Upgrades
 
 To upgrade, pull the chosen release and run the same `up -d --build` command.

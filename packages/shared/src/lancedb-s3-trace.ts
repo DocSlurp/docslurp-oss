@@ -7,6 +7,7 @@ import type { AddressInfo } from "node:net";
 import { SignatureV4 } from "@smithy/signature-v4";
 import type { HttpRequest as SmithyRequest } from "@smithy/types";
 import { startDependencySpan } from "./telemetry.js";
+import { DiskBlockCache, invalidateCachedObject, isImmutableLanceKey, lanceS3CacheConfig, serveCachedRequest, sharedDiskBlockCache, type BufferedUpstream } from "./lancedb-s3-cache.js";
 
 /**
  * LANCEDB_S3_TRACE=1 starts an in-process localhost proxy and points Lance's
@@ -15,6 +16,9 @@ import { startDependencySpan } from "./telemetry.js";
  * (If-Match / If-None-Match carry the commit protocol) and emits one dependency
  * span per request. Lance's own SDK is not hookable, so this is the only way to
  * see its requests. Default off; see docs/dependency-tracing.md for overhead.
+ *
+ * LANCEDB_S3_CACHE_DIR starts the same proxy with a read-through disk cache for Lance's immutable files (see
+ * lancedb-s3-cache.ts), independent of tracing.
  */
 
 export type LanceS3Operation = "GetObject" | "HeadObject" | "PutObject" | "CopyObject" | "DeleteObject" | "DeleteObjects" | "ListObjectsV2" | "ListMultipartUploads"
@@ -224,6 +228,17 @@ export class LanceS3Stats {
   readonly byStatus = new Map<string, number>();
   readonly windowByOperation = new Map<string, number>();
   readonly windowByStatus = new Map<string, number>();
+  /** Set by the proxy when the disk cache is on; its counters join the summary line and snapshot. */
+  cache: DiskBlockCache | undefined;
+  /** Requests actually sent to the object store, by operation (client requests served from the cache are not included). */
+  readonly upstreamByOperation = new Map<string, number>();
+  windowUpstream = 0;
+  upstreamTotal = 0;
+  upstream(operation: string): void {
+    this.upstreamByOperation.set(operation, (this.upstreamByOperation.get(operation) ?? 0) + 1);
+    this.upstreamTotal++; this.windowUpstream++;
+  }
+
   /** Searches that made at least one proxied request, with their requests by object class (window and cumulative). */
   windowSearch = newSearchAggregate();
   readonly cumulativeSearch = newSearchAggregate();
@@ -258,7 +273,8 @@ export class LanceS3Stats {
 
   snapshot() {
     return { ...summarize(this.cumulative), byOperation: Object.fromEntries(this.byOperation), byOperationStatus: Object.fromEntries(this.byStatus), histogramMsBuckets: BUCKETS_MS, histogram: [...this.cumulative.hist],
-      searches: this.cumulativeSearch.searches, searchOverlapped: this.cumulativeSearch.overlapped, searchRequests: this.cumulativeSearch.requests, searchByClass: Object.fromEntries(this.cumulativeSearch.byClass) };
+      searches: this.cumulativeSearch.searches, searchOverlapped: this.cumulativeSearch.overlapped, searchRequests: this.cumulativeSearch.requests, searchByClass: Object.fromEntries(this.cumulativeSearch.byClass),
+      upstreamRequests: this.upstreamTotal, upstreamByOperation: Object.fromEntries(this.upstreamByOperation), ...(this.cache ? { cache: this.cache.snapshot() } : {}) };
   }
 
   /** One-line summary of the window since the last call; resets the window. */
@@ -267,9 +283,11 @@ export class LanceS3Stats {
     const fmt = (map: Map<string, number>) => [...map].sort((a, b) => b[1] - a[1]).map(([k, v]) => `${k}=${v}`).join(",") || "none";
     const line = `[lancedb-s3] window=${windowSeconds}s requests=${w.requests} errors=${w.errors} retries=${w.retries} bytes_in=${w.bytesIn} bytes_out=${w.bytesOut} `
       + `avg_ms=${w.avgMs} avg_ttfb_ms=${w.avgTtfbMs} p50_ms=${w.p50Ms} p95_ms=${w.p95Ms} p99_ms=${w.p99Ms} ops=${fmt(this.windowByOperation)} statuses=${fmt(this.windowByStatus)} `
-      + `total_requests=${this.cumulative.requests}`
-      + (this.windowSearch.searches ? ` searches=${this.windowSearch.searches} search_overlapped=${this.windowSearch.overlapped} search_requests=${this.windowSearch.requests} search_by_class=${fmt(this.windowSearch.byClass)}` : "");
+      + `total_requests=${this.cumulative.requests} upstream_requests=${this.windowUpstream}`
+      + (this.windowSearch.searches ? ` searches=${this.windowSearch.searches} search_overlapped=${this.windowSearch.overlapped} search_requests=${this.windowSearch.requests} search_by_class=${fmt(this.windowSearch.byClass)}` : "")
+      + (this.cache ? ` ${this.cache.summaryFragment()}` : "");
     this.window = newAggregate();
+    this.windowUpstream = 0;
     this.windowSearch = newSearchAggregate();
     this.windowByOperation.clear();
     this.windowByStatus.clear();
@@ -311,7 +329,7 @@ export function keyPrefix(key: string): string {
   return prefix.length > 96 ? prefix.slice(0, 96) : prefix;
 }
 
-export interface LanceS3ProxyOptions { endpoint?: string; region: string; credentials: Credentials; logIntervalMs?: number; stats?: LanceS3Stats; log?: (line: string) => void; maxSockets?: number }
+export interface LanceS3ProxyOptions { cache?: DiskBlockCache; endpoint?: string; region: string; credentials: Credentials; logIntervalMs?: number; stats?: LanceS3Stats; log?: (line: string) => void; maxSockets?: number }
 export interface LanceS3Proxy { endpoint: string; port: number; close(): Promise<void>; stats: LanceS3Stats }
 
 export async function startLanceS3Proxy(options: LanceS3ProxyOptions): Promise<LanceS3Proxy> {
@@ -319,6 +337,9 @@ export async function startLanceS3Proxy(options: LanceS3ProxyOptions): Promise<L
   const target: UpstreamTarget = { protocol: upstreamUrl.protocol as "https:" | "http:", hostname: upstreamUrl.hostname, port: upstreamUrl.port || undefined, region: options.region };
   const provider = providerFor(upstreamUrl.hostname);
   const stats = options.stats ?? lanceS3Stats;
+  const cache = options.cache;
+  if (cache) stats.cache = cache;
+  const namespace = `${upstreamUrl.hostname}:${upstreamUrl.port}`;
   const agentOptions = { keepAlive: true, noDelay: true, maxSockets: options.maxSockets ?? 256 };
   const agent = target.protocol === "https:" ? new HttpsAgent(agentOptions) : new HttpAgent(agentOptions);
   const send = target.protocol === "https:" ? httpsRequest : httpRequest;
@@ -329,6 +350,21 @@ export async function startLanceS3Proxy(options: LanceS3ProxyOptions): Promise<L
   const handle = async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
     const method = req.method ?? "GET";
     const rawUrl = req.url ?? "/";
+    /** One signed, fully buffered upstream request for the cache. Only Range is forwarded, never client conditionals. */
+    const bufferedUpstream = async (m: "GET" | "HEAD", range?: string): Promise<BufferedUpstream> => {
+      const signed = await signUpstreamRequest(m, rawUrl, range ? { range } : {}, target, options.credentials);
+      stats.upstream(m === "GET" ? "GetObject" : "HeadObject");
+      return await new Promise<BufferedUpstream>((resolve, reject) => {
+        const upstream = send({ agent, protocol: signed.protocol, hostname: signed.hostname, port: signed.port, method: m, path: signed.path, headers: signed.headers }, (response) => {
+          const chunks: Buffer[] = [];
+          response.on("data", (chunk: Buffer) => chunks.push(chunk));
+          response.on("end", () => resolve({ status: response.statusCode ?? 502, headers: response.headers, body: Buffer.concat(chunks) }));
+          response.on("error", reject);
+        });
+        upstream.on("error", reject);
+        upstream.end();
+      });
+    };
     const classified = classifyS3Request(method, rawUrl, req.headers);
     const finger = fingerprint(req);
     const failedAt = recentFailures.get(finger);
@@ -347,11 +383,13 @@ export async function startLanceS3Proxy(options: LanceS3ProxyOptions): Promise<L
       "docslurp.s3.condition": condition, "http.request.resend_count": retry ? 1 : undefined, "docslurp.lancedb_s3.retry_suspected": retry,
     });
     let bytesIn = 0, bytesOut = 0, ttfbMs = 0, status: number | "error" = "error", finished = false;
+    let cacheOutcome: string | undefined, cacheBytes = 0, cacheFilled = 0, cacheUpstream = 0;
     const finish = (error?: unknown) => {
       if (finished) return;
       finished = true;
       const totalMs = performance.now() - started;
-      span.set({ "http.request.body.size": bytesIn, "http.response.body.size": bytesOut, "docslurp.s3.ttfb_ms": Math.round(ttfbMs), "docslurp.s3.duration_ms": Math.round(totalMs), ...(typeof status === "number" ? { "http.response.status_code": status } : {}) });
+      span.set({ "http.request.body.size": bytesIn, "http.response.body.size": bytesOut, "docslurp.s3.ttfb_ms": Math.round(ttfbMs), "docslurp.s3.duration_ms": Math.round(totalMs), ...(typeof status === "number" ? { "http.response.status_code": status } : {}),
+        ...(cacheOutcome ? { "docslurp.lancedb_s3.cache": cacheOutcome, "docslurp.lancedb_s3.cache.bytes_served": cacheBytes, "docslurp.lancedb_s3.cache.bytes_filled": cacheFilled, "docslurp.lancedb_s3.cache.upstream_requests": cacheUpstream } : {}) });
       const failed = status === "error" || status >= 500 || status === 429;
       if (failed) recentFailures.set(finger, Date.now()); else recentFailures.delete(finger);
       if (recentFailures.size > 1000) for (const [k, t] of recentFailures) if (Date.now() - t > 120_000) recentFailures.delete(k);
@@ -360,7 +398,27 @@ export async function startLanceS3Proxy(options: LanceS3ProxyOptions): Promise<L
       span.end(error ?? (status === "error" ? new Error("aborted") : undefined));
     };
     try {
+      if (cache && (objectClass === "data" || objectClass === "indices") && isImmutableLanceKey(classified.key) && classified.query.length === 0) {
+        if ((classified.operation === "GetObject" || classified.operation === "HeadObject") && !(req.headers.range && classified.operation === "HeadObject")) {
+          res.on("close", () => { if (!finished) finish(new Error("client closed")); });
+          const fetchUpstream = (m: "GET" | "HEAD", range?: string) => bufferedUpstream(m, range);
+          const result = await serveCachedRequest({ cache, namespace, method, bucket: classified.bucket, key: classified.key, headers: req.headers, fetchUpstream });
+          if (result.kind === "response") {
+            cacheOutcome = result.outcome; cacheBytes = result.bytesFromCache; cacheFilled = result.bytesFilled; cacheUpstream = result.upstreamRequests;
+            status = result.status; ttfbMs = performance.now() - started; bytesOut = result.body.length;
+            res.writeHead(status, { ...result.headers, "x-docslurp-cache": result.outcome });
+            res.end(method === "HEAD" ? undefined : result.body);
+            finish();
+            return;
+          }
+          cacheOutcome = "bypass";
+        } else if (classified.operation === "PutObject" || classified.operation === "DeleteObject" || classified.operation === "CopyObject") {
+          // Lance never rewrites these paths, but a write or delete through the proxy must not leave a stale copy behind.
+          await invalidateCachedObject(cache, namespace, classified.bucket, classified.key);
+        }
+      }
       const signed = await signUpstreamRequest(method, rawUrl, req.headers, target, options.credentials);
+      stats.upstream(classified.operation);
       const upstream = send({ agent, protocol: signed.protocol, hostname: signed.hostname, port: signed.port, method, path: signed.path, headers: signed.headers }, (response) => {
         ttfbMs = performance.now() - started;
         status = response.statusCode ?? 502;
@@ -411,6 +469,11 @@ export function lanceS3TraceEnabled(env: Record<string, string | undefined> = pr
   return /^(1|true|yes|on)$/i.test(env.LANCEDB_S3_TRACE?.trim() ?? "");
 }
 
+/** The proxy runs when tracing or the disk cache is on. */
+export function lanceS3ProxyEnabled(env: Record<string, string | undefined> = process.env): boolean {
+  return lanceS3TraceEnabled(env) || lanceS3CacheConfig(env) !== undefined;
+}
+
 const ENDPOINT_KEYS = ["endpoint", "aws_endpoint", "aws_endpoint_url", "allow_http", "aws_allow_http", "virtual_hosted_style_request", "aws_virtual_hosted_style_request"];
 const proxies = new Map<string, Promise<LanceS3Proxy>>();
 
@@ -420,15 +483,16 @@ function option(options: Record<string, string>, ...names: string[]): string | u
 }
 
 /**
- * When LANCEDB_S3_TRACE is on and the Lance root is s3://, returns storage options that route Lance through the
- * tracing proxy (started once per upstream endpoint and credential set). Otherwise returns the options unchanged.
+ * When LANCEDB_S3_TRACE or LANCEDB_S3_CACHE_DIR is set and the Lance root is s3:// (or s3+ddb://, whose data store
+ * is S3), returns storage options that route Lance through the local proxy (started once per upstream endpoint and
+ * credential set). Otherwise returns the options unchanged.
  */
-export async function withLanceS3Trace(uri: string, storageOptions: Record<string, string> | undefined, env: Record<string, string | undefined> = process.env): Promise<Record<string, string> | undefined> {
-  if (!storageOptions || !lanceS3TraceEnabled(env) || !/^s3(a|\+ddb)?:\/\//.test(uri)) return storageOptions;
+export async function withLanceS3Proxy(uri: string, storageOptions: Record<string, string> | undefined, env: Record<string, string | undefined> = process.env): Promise<Record<string, string> | undefined> {
+  if (!storageOptions || !lanceS3ProxyEnabled(env) || !/^s3(a|\+ddb)?:\/\//.test(uri)) return storageOptions;
   const accessKeyId = option(storageOptions, "aws_access_key_id", "access_key_id") ?? env.AWS_ACCESS_KEY_ID;
   const secretAccessKey = option(storageOptions, "aws_secret_access_key", "secret_access_key") ?? env.AWS_SECRET_ACCESS_KEY;
   if (!accessKeyId || !secretAccessKey) {
-    console.warn("[lancedb-s3] LANCEDB_S3_TRACE needs explicit credentials (storage URI userinfo or AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY); tracing disabled");
+    console.warn("[lancedb-s3] LANCEDB_S3_TRACE / LANCEDB_S3_CACHE_DIR need explicit credentials (storage URI userinfo or AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY); proxy, tracing and cache disabled");
     return storageOptions;
   }
   const sessionToken = option(storageOptions, "aws_session_token", "session_token") ?? env.AWS_SESSION_TOKEN;
@@ -437,10 +501,11 @@ export async function withLanceS3Trace(uri: string, storageOptions: Record<strin
   const key = JSON.stringify([endpoint ?? null, region, accessKeyId, secretAccessKey, sessionToken ?? null]);
   let proxy = proxies.get(key);
   if (!proxy) {
-    proxy = startLanceS3Proxy({ endpoint, region, credentials: { accessKeyId, secretAccessKey, sessionToken } });
+    const cacheConfig = lanceS3CacheConfig(env);
+    proxy = startLanceS3Proxy({ endpoint, region, credentials: { accessKeyId, secretAccessKey, sessionToken }, cache: cacheConfig ? sharedDiskBlockCache(cacheConfig) : undefined });
     proxy.catch(() => proxies.delete(key));
     proxies.set(key, proxy);
-    void proxy.then((started) => console.log(`[lancedb-s3] tracing proxy ${started.endpoint} -> ${endpoint ?? `https://s3.${region}.amazonaws.com`} (path-style, summary every 60s)`));
+    void proxy.then((started) => console.log(`[lancedb-s3] proxy ${started.endpoint} -> ${endpoint ?? `https://s3.${region}.amazonaws.com`} (path-style, summary every 60s${cacheConfig ? `, disk cache ${cacheConfig.dir} max ${(cacheConfig.maxBytes / 1024 ** 3).toFixed(1)} GB block ${cacheConfig.blockBytes / 1024} KB` : ""})`));
   }
   const { endpoint: proxied } = await proxy;
   const next = Object.fromEntries(Object.entries(storageOptions).filter(([name]) => !ENDPOINT_KEYS.includes(name.toLowerCase())));
