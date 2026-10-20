@@ -1,5 +1,5 @@
 import { reportException, initializeWorkerErrorReporting } from "@docslurp/shared/error-reporting";
-import { compilePipelinePlan, getPipelineStageOrder } from "@docslurp/shared";
+import { compilePipelinePlan, deferredProfilesEnabled, getPipelineStageOrder } from "@docslurp/shared";
 import { withObservation, flushObservability } from "@docslurp/shared/observability";
 import { ApplicationFailure } from "@temporalio/common";
 
@@ -108,6 +108,17 @@ export type LoadRunOptions = {
   artifacts?: Record<string, string>;
 };
 
+/**
+ * With DOCSLURP_DEFERRED_PROFILES off, a stored `map`/`visual` pipeline runs as
+ * `full`, so the deferred stages never execute locator-only.
+ */
+export function coerceIndexingModeForFlag<T extends { pipeline: { indexingMode?: string } }>(run: T, enabled = deferredProfilesEnabled()): T {
+  if (!enabled && run.pipeline && run.pipeline.indexingMode && run.pipeline.indexingMode !== "full") {
+    run.pipeline = { ...run.pipeline, indexingMode: "full" };
+  }
+  return run;
+}
+
 /** The one Run hydration path for every activity entry point. */
 export async function loadRunState(
   store: Pick<StageExecutionStore, "loadRun" | "loadDocumentsForRun" | "hydrateState">,
@@ -115,7 +126,7 @@ export async function loadRunState(
   options: LoadRunOptions = {},
 ): Promise<WorkflowState> {
   const [run, documents] = await Promise.all([store.loadRun(runId), store.loadDocumentsForRun(runId)]);
-  const state = WorkflowState.create(run, documents);
+  const state = WorkflowState.create(coerceIndexingModeForFlag(run), documents);
   if (options.docConcurrency !== undefined) state.docConcurrency = options.docConcurrency;
   if (options.totalStages !== undefined) state.totalStages = options.totalStages;
   for (const [key, value] of Object.entries(options.artifacts ?? {})) {

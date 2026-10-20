@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 
-import { withoutStageSelection } from "@docslurp/shared";
+import { pipelineVersionFeatures } from "@docslurp/shared";
 import { Hono } from "hono";
 
 import { sql } from "../db.js";
@@ -18,7 +18,7 @@ export const indexStalenessRoutes = new Hono()
     }
 
     const currentVersion = createHash("sha256")
-      .update(JSON.stringify(withoutStageSelection(run.pipeline)))
+      .update(JSON.stringify(pipelineVersionFeatures(run.pipeline)))
       .digest("hex")
       .slice(0, 8);
 

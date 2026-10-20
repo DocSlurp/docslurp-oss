@@ -1,4 +1,5 @@
 import { reportPublicError } from "../lib/public-errors.js";
+import { getDeferredContext } from "../search/deferred/deferred-context.js";
 import { hostedApiKeyForWorkspace, loadWorkspacePrivacyMode, openRouterCall, privacyModeOf, privateTextModelForWorkspace } from "../lib/privacy.js";
 import { ingestReportFocusPages, parsePrivateModelUri, requestsIngestReport } from "@docslurp/shared";
 import type { PrivacyMode } from "@docslurp/shared";
@@ -509,6 +510,8 @@ async function generateWorkspaceChatTextWithFailover(args: {
   maxOutputTokens: number;
   onTextDelta?: TextDeltaHandler;
 }): Promise<WorkspaceChatGeneratedText> {
+  // The streaming client left while pages were materializing: do not pay for an answer nobody reads.
+  if (getDeferredContext()?.signal?.aborted) throw Object.assign(new Error("Chat request aborted"), { name: "AbortError" });
   if (args.privateModel) {
     const generated = await generateOpenRouterDocumentText({
       apiKey: args.apiKey,
@@ -543,6 +546,7 @@ async function generateWorkspaceChatTextWithFailover(args: {
         model,
       };
     } catch (error) {
+      rethrowIfAborted(error);
       reportPublicError(error, { operation: "chat-generation", model });
       lastError = error;
     }
@@ -940,6 +944,11 @@ export async function workspaceChatDisabledBody(
   return { error: error.message, code: error.code };
 }
 
+/** A disconnected client is not a generation failure: nothing may be persisted on its behalf. */
+function rethrowIfAborted(error: unknown): void {
+  if ((error instanceof Error && error.name === "AbortError") || getDeferredContext()?.signal?.aborted) throw error;
+}
+
 export async function chatWorkspace(args: {
   workspaceId: string;
   userId: string;
@@ -1245,7 +1254,8 @@ async function chatWorkspaceTurn(
             wholeCorpus: wholeCorpusDebug,
           },
         };
-      } catch {
+      } catch (error) {
+        rethrowIfAborted(error);
         wholeCorpusDebug.fallbackReason = "generation-failed";
       }
     }
@@ -1363,7 +1373,8 @@ async function chatWorkspaceTurn(
           wholeCorpus: wholeCorpusDebug,
         },
       };
-    } catch {
+    } catch (error) {
+      rethrowIfAborted(error);
       const answer = buildFallbackAnswer(args.query, summaryEvidence, null);
       const evidenceSpans = buildWorkspaceChatEvidenceSpans(
         answer,
@@ -1594,7 +1605,8 @@ async function chatWorkspaceTurn(
         wholeCorpus: wholeCorpusDebug,
       },
     };
-  } catch {
+  } catch (error) {
+    rethrowIfAborted(error);
     const answer = buildFallbackAnswer(
       args.query,
       citations,

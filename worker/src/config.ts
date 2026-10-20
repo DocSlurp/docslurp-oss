@@ -139,6 +139,10 @@ export interface Config {
   workerShutdownGraceMs: number;
   /** Optional separate queue for activities; workflows stay on temporalTaskQueue. */
   temporalActivityTaskQueue: string | null;
+  /** Queue of the materializePages workflow and its activities (DOCSLURP_DEFERRED_PROFILES=1). */
+  temporalMaterializeTaskQueue: string | null;
+  /** Concurrent materialize activities per worker process. */
+  materializeConcurrency: number;
   poisonRunFailureThreshold: number;
   temporalAddress: string;
   temporalNamespace: string;
@@ -374,6 +378,8 @@ export function fromEnv(): Config {
     workerRunMaintenance: readMaintenanceMode(process.env.WORKER_RUN_MAINTENANCE),
     workerShutdownGraceMs: parseDurationMs(process.env.WORKER_SHUTDOWN_GRACE, 240_000),
     temporalActivityTaskQueue: readEnv(process.env.TEMPORAL_ACTIVITY_TASK_QUEUE) ?? null,
+    temporalMaterializeTaskQueue: readEnv(process.env.TEMPORAL_MATERIALIZE_TASK_QUEUE) ?? null,
+    materializeConcurrency: Math.max(1, Math.floor(readNumber(process.env.WORKER_MATERIALIZE_CONCURRENCY, 4))),
     poisonRunFailureThreshold: readNumber(
       process.env.POISON_RUN_FAILURE_THRESHOLD,
       3,

@@ -81,3 +81,17 @@ describe("run-start recovery wiring", () => {
     }
   });
 });
+
+describe("run-start recovery claim query", () => {
+  it("never claims materialize runs (they are started by the query path, not as pipeline runs)", async () => {
+    const { createRunStartRecovery } = await import("../services/run-start-recovery.js");
+    mocks.sql.mockClear();
+    await createRunStartRecovery({
+      sql: mocks.sql as never,
+      lifecycle: { start: vi.fn() } as never,
+      config: { batchSize: 5, leaseMs: 1000 },
+    }).sweepOnce();
+    const claim = mocks.sql.mock.calls.map(([s]) => (s as TemplateStringsArray).join("")).find((t) => t.includes("for update skip locked") && t.includes("status = 'queued'"));
+    expect(claim).toContain("kind <> 'materialize'");
+  });
+});

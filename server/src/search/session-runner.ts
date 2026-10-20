@@ -2,7 +2,7 @@ import { parseSelfQuerySyntax } from "./self-query.js";
 import { currentChatSessionId } from "../lib/chat-agent-context.js";
 import { reportPublicError } from "../lib/public-errors.js";
 import { withObservation } from "@docslurp/shared/observability";
-import { resolveEmbeddingRoute, type SearchResult } from "@docslurp/shared";
+import { resolveEmbeddingRoute, type DeferredSearchStats, type SearchResult } from "@docslurp/shared";
 
 import {
   createEvidenceRetrievalAdapters,
@@ -71,6 +71,18 @@ export interface SearchSessionRunnerAdapters {
     options: SearchOptions;
   }): Promise<SearchChunk[]>;
   wholeCorpusFallback(filters?: SearchOptions["filters"]): Promise<SearchResult[]>;
+  /**
+   * Deferred (map/visual) documents: locate and materialize candidate pages,
+   * then return chunks over them. Absent unless deferred profiles are enabled;
+   * null when the scope has no deferred documents.
+   */
+  deferredPageSearch?(args: {
+    query: string;
+    textQuery: string;
+    queryVector: number[] | null;
+    userId: string;
+    options: SearchOptions;
+  }): Promise<{ chunks: SearchChunk[]; stats: DeferredSearchStats; documentIds: string[] } | null>;
 }
 
 function embeddingPipelineOf(setup: SearchSetup): string | null {
@@ -213,7 +225,8 @@ async function executeSearchSession(args: Parameters<typeof runSearchSession>[0]
         workspaceId: normalizedScope.workspaceId,
       }));
 
-      return executeSearchSessionRetrieval({
+      let deferred: { stats: DeferredSearchStats; documentIds: string[] } | null = null;
+      const response = await executeSearchSessionRetrieval({
         query,
         retrievalQuery,
         userId,
@@ -222,6 +235,17 @@ async function executeSearchSession(args: Parameters<typeof runSearchSession>[0]
         workspaceId: normalizedScope.workspaceId,
         limit: options.limit ?? 20,
         retrieveCandidateLists: async () => {
+          // Runs alongside normal retrieval, not before it: the hot path adds no
+          // latency, and a cold one overlaps materialization with retrieval.
+          const deferredPromise = adapters.deferredPageSearch
+            ? adapters.deferredPageSearch({
+                query,
+                textQuery,
+                queryVector,
+                userId,
+                options: { ...effectiveOptions, limit: options.limit ?? 20 },
+              }).catch(() => null)
+            : Promise.resolve(null);
           const evidenceResults = await timePhase("retrieve", () => retrieveEvidence(
             createEvidenceRetrievalAdapters({
               vectorSearch: adapters.vectorSearch,
@@ -243,10 +267,14 @@ async function executeSearchSession(args: Parameters<typeof runSearchSession>[0]
           const boundedResults = effectiveOptions.candidateDepth === undefined
             ? evidenceResults
             : evidenceResults.map((result) => ({ ...result, chunks: result.chunks.slice(0, effectiveOptions.candidateDepth) }));
-          return annotateEvidenceRelevance(boundedResults, {
+          const lists = annotateEvidenceRelevance(boundedResults, {
             query: retrievalQuery,
             embeddingPipeline: embeddingPipelineOf(setup),
           });
+          const deferredResult = await deferredPromise;
+          deferred = deferredResult ? { stats: deferredResult.stats, documentIds: deferredResult.documentIds } : null;
+          // Locator-ranked chunks go first so fusion keeps their stage label.
+          return deferredResult && deferredResult.chunks.length > 0 ? [deferredResult.chunks, ...lists] : lists;
         },
         buildAvailability: (chunks) =>
           adapters.buildAvailability(chunks, effectiveOptions),
@@ -261,6 +289,20 @@ async function executeSearchSession(args: Parameters<typeof runSearchSession>[0]
         rerankScope: normalizedScope,
         privacyMode,
       });
+      return deferred ? withDeferredStats(response, deferred as { stats: DeferredSearchStats; documentIds: string[] }) : response;
     },
   );
+}
+
+/** Attach deferred stats; only results from deferred-mode documents carry a temperature. */
+function withDeferredStats(response: SearchResponse, deferred: { stats: DeferredSearchStats; documentIds: string[] }): SearchResponse {
+  const inScope = new Set(deferred.documentIds);
+  return {
+    ...response,
+    deferred: deferred.stats,
+    results: response.results.map((result) =>
+      inScope.has(result.citation.documentId)
+        ? { ...result, retrieval: { stage: result.retrieval?.stage ?? "chunk", temperature: deferred.stats.temperature } }
+        : result),
+  };
 }

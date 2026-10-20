@@ -3,6 +3,7 @@ import { qualifyCommunitySummary } from "../search/community-context.js";
 import { retrievalScope } from "../search/retrieval-scope.js";
 import type {
   CanonicalBlockType,
+  DeferredSearchStats,
   CitationLocator,
   CanonicalEvidenceType,
   LayoutRegion,
@@ -14,6 +15,7 @@ import type {
   WorkspaceChatFallbackReason,
 } from "@docslurp/shared";
 import {
+  deferredProfilesEnabled,
   citationLocatorSchema,
   MAX_LOCATOR_BOXES,
   resolveEmbeddingRoute,
@@ -27,14 +29,17 @@ import { lanceDbVectorSearch } from "../search/lancedb.js";
 import type { SearchFilters } from "../search/filters.js";
 import { type SearchUsageEvent } from "../search/session.js";
 import { searchChunkToResult } from "../search/session-execution.js";
-import { runSearchSession } from "../search/session-runner.js";
+import { runSearchSession, type SearchSessionRunnerAdapters } from "../search/session-runner.js";
 import {
   resolveSearchSetup,
   loadWorkspacePipeline,
   type SearchAvailabilityRow,
 } from "../search/session-setup.js";
+import { getDeferredContext } from "../search/deferred/deferred-context.js";
+import { runDeferredPageSearch } from "../search/deferred/deferred-search.js";
 import { getWorkspaceAccess } from "./organizations.js";
-import type { SqlFragment } from "../lib/sql-fragments.js";
+import { resolveSearchMaterializationPolicy } from "../search/deferred/request-policy.js";
+import { andSqlFragments, type SqlFragment } from "../lib/sql-fragments.js";
 import {
   earlyLexicalDocument,
   lexicalSearchableDocument,
@@ -86,6 +91,8 @@ export interface SearchChunk {
   locator?: CitationLocator | null;
   source: "document" | "community_summary" | "web";
   retrievalStage: "full-index" | "page-index";
+  /** Set when a deferred-search locator (Index Map node or page image) picked this chunk's page. */
+  deferredLocator?: "map-node" | "page-image";
 }
 
 export interface SearchActivity {
@@ -153,6 +160,8 @@ export interface SearchResponse {
   usageEvents?: SearchUsageEvent[];
   /** Phase durations in ms (setup, embed, vector, text, …, total). */
   timings?: SearchTimings;
+  /** Present when the search touched deferred-mode documents (map/visual). */
+  deferred?: DeferredSearchStats;
 }
 
 export interface SearchAvailability {
@@ -1284,6 +1293,36 @@ async function executeHybridSearch(
         timePhase("progressive", () => progressivePageSearch(query, userId, options)),
       completedPageSearch,
       wholeCorpusFallback,
+      ...(deferredProfilesEnabled()
+        ? {
+            deferredPageSearch: async (deferredArgs: Parameters<NonNullable<SearchSessionRunnerAdapters["deferredPageSearch"]>>[0]) => {
+              const context = getDeferredContext();
+              // Context-less callers (completions, compat, aggregate, automation) still
+              // run under their own API key's policy; unresolvable keys fail closed.
+              const policy = () => resolveSearchMaterializationPolicy({
+                context,
+                workspacePipeline: setup.workspacePipeline,
+                workspaceId: setup.normalizedScope.workspaceId,
+              });
+              return timePhase("deferred", () => runDeferredPageSearch({
+                ...deferredArgs,
+                orgId: setup.normalizedScope.orgId,
+                workspaceId: setup.normalizedScope.workspaceId,
+                policy,
+                privacyMode: setup.privacyMode,
+                openRouterApiKey: setup.openRouterApiKey,
+                journal: setup.session,
+                onEvent: context?.onEvent,
+                signal: context?.signal,
+                search: {
+                  textSearch: ({ query, userId, options }) => textSearch(query, userId, options),
+                  vectorSearch: ({ queryVector, userId, workspaceId, options }) =>
+                    vectorSearch(queryVector, userId, workspaceId, options),
+                },
+              }));
+            },
+          }
+        : {}),
     },
   });
 }

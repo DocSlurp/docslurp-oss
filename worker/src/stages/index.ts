@@ -1,3 +1,4 @@
+import type { Sql } from "postgres";
 import type { CapacityLeaseStore } from "../media/capacity/types.js";
 import type { MediaJournal } from "../media/types.js";
 import { pipelineStageOrder, type PipelineRunStage } from "@docslurp/shared";
@@ -22,12 +23,16 @@ import { FormatToolingStage } from "./format-tooling.js";
 import { ToCanonicalStage } from "./to-canonical.js";
 import { StructuredExtractStage } from "./structured-extract.js";
 import { VisionExtractStage } from "./vision-extract.js";
+import { DocumentMapStage } from "./document-map.js";
 import { PageIndexStage } from "./page-index.js";
 import { DocumentSummaryStage } from "./document-summary.js";
 import { PropositionIndexStage } from "./proposition-index.js";
 import { QuarantineStage } from "./quarantine.js";
 import { GraphEnrichStage } from "./graph-enrich.js";
 import { PiiDetectStage } from "./pii-detect.js";
+import { PageEmbedStage } from "./page-embed.js";
+
+/** Placeholder until the deferred-indexing stage lands; only reachable when a workspace opts into that mode. */
 
 export function createStages(args: {
   runner: CommandRunner;
@@ -35,6 +40,8 @@ export function createStages(args: {
   config: Config;
   mediaJournal?: MediaJournal;
   capacityStore?: CapacityLeaseStore;
+  /** Database client for the deferred-indexing stages. */
+  sql?: Sql<Record<string, unknown>>;
 }): Stage[] {
   const sourceCache = new PdfSourceCache(args.storage);
   const rasterCache = new PdfRasterCache(args.runner, args.storage, sourceCache);
@@ -46,6 +53,11 @@ export function createStages(args: {
     normalize: () => new NormalizeStage(args.runner),
     "pdf-tooling": () => new PdfToolingStage(args.runner, args.storage),
     "split-pages": () => new SplitPagesStage(sourceCache, args.storage),
+    "document-map": () => new DocumentMapStage(sourceCache, args.storage, args.runner, args.config),
+    "page-embed": () => new PageEmbedStage(rasterCache, args.storage, () => {
+      if (!args.sql) throw new Error("page-embed requires a database client");
+      return args.sql;
+    }),
     "render-images": () => new RenderImagesStage(rasterCache, args.storage, args.config),
     // Classify after initial canonical/format prep so downstream stages can honor playbook overrides.
     "classify-route": () => new ClassifyRouteStage(args.storage),
@@ -58,7 +70,10 @@ export function createStages(args: {
     "structured-extract": () => new StructuredExtractStage(args.storage, args.config),
     embed: () => new EmbedStage(args.runner, args.storage, args.config),
     "graph-enrich": () => new GraphEnrichStage(args.runner, args.storage, args.config),
-    "page-index": () => new PageIndexStage(args.runner, args.storage),
+    "page-index": () => new PageIndexStage(args.runner, args.storage, () => {
+      if (!args.sql) throw new Error("page-index requires a database client");
+      return args.sql;
+    }),
     "proposition-index": () => new PropositionIndexStage(args.runner, args.storage, args.config),
     index: () => new IndexStage(args.runner, args.storage, args.config)
   };

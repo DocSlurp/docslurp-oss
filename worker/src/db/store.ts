@@ -2,6 +2,7 @@ import { instrumentPostgres } from "@docslurp/shared/observability";
 import { PostgresCapacityLeaseStore } from "../media/capacity/store.js";
 import { PostgresMediaJournal } from "../media/journal.js";
 import { PUBLIC_ERROR_MESSAGES } from "@docslurp/shared";
+import { DocumentNotFoundError, isMissingDocumentError } from "./missing-document.js";
 import { recordPageBaseFee } from "./page-base-fee.js";
 import { PageTaskStore } from "./page-task-store.js";
 import { WorkerSlotStore, resolveWorkerSlotOptions, tryMaintenanceLease, type WorkerSlotOptions } from "./worker-slot-store.js";
@@ -11,6 +12,7 @@ import postgres, { type JSONValue, type Sql } from "postgres";
 import { defaultPipelineFeatures, PII_BLOCKED_DOCUMENT_STATUS, planRunFailure, type PrivacyAuditEntry } from "@docslurp/shared";
 
 import { mergePipelineFeatures } from "../models.js";
+import { adoptBackfillDocuments } from "../deferred/backfill-adoption.js";
 import { insertPrivacyAuditRows } from "../lib/privacy-guard.js";
 import type {
   Document,
@@ -350,6 +352,8 @@ async function supersededInThisTransaction(
 export class Store {
   private readonly sql: Sql<Record<string, unknown>>;
   capacityLeaseStore(providerIds: string[]) { return new PostgresCapacityLeaseStore(this.sql, (id) => this.loadRun(id).catch(() => null), providerIds); }
+  /** Raw client for stages that write their own tables (deferred indexing). */
+  get stageSql(): Sql<Record<string, unknown>> { return this.sql; }
   get mediaJournal(): PostgresMediaJournal { return new PostgresMediaJournal(this.sql); }
   private readonly plausibilityWarningThreshold: number;
   private readonly apiKeyUsageRetentionDays: number;
@@ -432,6 +436,12 @@ export class Store {
     }
 
     return mapRun(row);
+  }
+
+  async loadDocument(documentId: string): Promise<Document> {
+    const [row] = await this.sql<DocumentRow[]>`select * from documents where id = ${documentId} limit 1`;
+    if (!row) throw new DocumentNotFoundError(documentId);
+    return mapDocument(row);
   }
 
   async loadDocumentsForRun(runId: string): Promise<Document[]> {
@@ -566,7 +576,9 @@ export class Store {
       update workspace_runs
       set
         last_heartbeat_at = now(),
-        lease_expires_at = now() + (${this.leaseTtlMs} * interval '1 millisecond'),
+        lease_expires_at = case when workspace_runs.kind = 'materialize'
+            then greatest(coalesce(workspace_runs.lease_expires_at, now()), now() + (${this.leaseTtlMs} * interval '1 millisecond'))
+            else now() + (${this.leaseTtlMs} * interval '1 millisecond') end,
         updated_at = now()
       where id = ${runId} and status = 'processing'
     `;
@@ -604,13 +616,47 @@ export class Store {
     options: { stageBoundary?: boolean } = {},
   ): Promise<{ unspentSinceCheck: boolean; lease?: { observation: LeaseObservation | null } }> {
     const previous = this.progressQueues.get(state) ?? Promise.resolve();
-    const next = previous.then(() => this.writeProgressNow(state, prelude, options));
+    const next = previous.then(() => this.writeProgressGuarded(state, prelude, options));
     const tail = next.catch(() => undefined);
     this.progressQueues.set(state, tail);
     void tail.then(() => {
       if (this.progressQueues.get(state) === tail) this.progressQueues.delete(state);
     });
     return next;
+  }
+
+  private async writeProgressGuarded(
+    state: WorkflowState,
+    prelude: ((client: Sql<Record<string, unknown>>) => Promise<void>) | undefined,
+    options: { stageBoundary?: boolean },
+  ): Promise<{ unspentSinceCheck: boolean; lease?: { observation: LeaseObservation | null } }> {
+    try {
+      return await this.writeProgressNow(state, prelude, options);
+    } catch (error) {
+      // A document deleted mid-run (DELETE /v1/documents/:id hard-deletes the row) leaves rows in the buffers
+      // that reference it. The checkpoint rolled back as a whole, which would also drop the usage already
+      // incurred; prune the dead references and write the rest.
+      if (!isMissingDocumentError(error) || !(await this.dropRowsForDeletedDocuments(state))) throw error;
+      return await this.writeProgressNow(state, prelude, options);
+    }
+  }
+
+  /** Removes buffered rows that reference deleted documents. Returns whether anything changed. */
+  private async dropRowsForDeletedDocuments(state: WorkflowState): Promise<boolean> {
+    const referenced = new Set<string>();
+    for (const vector of state.vectorIndexes) referenced.add(vector.documentId);
+    for (const event of state.pendingPerformance) if (event.documentId) referenced.add(event.documentId);
+    for (const evaluation of state.pendingParserEvaluations) referenced.add(evaluation.documentId);
+    if (referenced.size === 0) return false;
+    const live = new Set((await this.sql<{ id: string }[]>`select id from documents where id = any(${[...referenced]})`).map((row) => row.id));
+    const missing = new Set([...referenced].filter((id) => !live.has(id)));
+    if (missing.size === 0) return false;
+    console.warn(`[store] dropping checkpoint rows for deleted documents run=${state.run.id} documents=${[...missing].join(",")}`);
+    state.vectorIndexes = state.vectorIndexes.filter((vector) => !missing.has(vector.documentId));
+    state.pendingParserEvaluations = state.pendingParserEvaluations.filter((evaluation) => !missing.has(evaluation.documentId));
+    // Performance samples stay (stage timings still describe real work), detached from the deleted document.
+    state.pendingPerformance = state.pendingPerformance.map((event) => (event.documentId && missing.has(event.documentId) ? { ...event, documentId: undefined } : event));
+    return true;
   }
 
   private async writeProgressNow(
@@ -696,7 +742,11 @@ export class Store {
             ${counter.assignments},
             ${runAssignments},
             last_heartbeat_at = case when workspace_runs.status in ('completed', 'failed') then workspace_runs.last_heartbeat_at else now() end,
-            lease_expires_at = case when workspace_runs.status in ('completed', 'failed') then workspace_runs.lease_expires_at else now() + (${this.leaseTtlMs} * interval '1 millisecond') end,
+            lease_expires_at = case
+              when workspace_runs.status in ('completed', 'failed') then workspace_runs.lease_expires_at
+              when workspace_runs.kind = 'materialize'
+                then greatest(coalesce(workspace_runs.lease_expires_at, now()), now() + (${this.leaseTtlMs} * interval '1 millisecond'))
+              else now() + (${this.leaseTtlMs} * interval '1 millisecond') end,
             updated_at = now()
           from ${counter.from}
           where workspace_runs.id = spend_prev.id
@@ -713,7 +763,11 @@ export class Store {
           set
             ${runAssignments},
             last_heartbeat_at = case when workspace_runs.status in ('completed', 'failed') then workspace_runs.last_heartbeat_at else now() end,
-            lease_expires_at = case when workspace_runs.status in ('completed', 'failed') then workspace_runs.lease_expires_at else now() + (${this.leaseTtlMs} * interval '1 millisecond') end,
+            lease_expires_at = case
+              when workspace_runs.status in ('completed', 'failed') then workspace_runs.lease_expires_at
+              when workspace_runs.kind = 'materialize'
+                then greatest(coalesce(workspace_runs.lease_expires_at, now()), now() + (${this.leaseTtlMs} * interval '1 millisecond'))
+              else now() + (${this.leaseTtlMs} * interval '1 millisecond') end,
             updated_at = now()
           where id = ${state.run.id}
           returning spent_cents
@@ -882,6 +936,9 @@ export class Store {
 
     const cutover = await this.sql.begin(async (tx) => {
       const client = tx as unknown as typeof this.sql;
+      // Mode-switch backfills re-key their artifacts onto the source document and retire themselves
+      // (see backfill-adoption.ts); they must not supersede the source version.
+      const adopted = new Set(state.run.kind === "full-index" ? await adoptBackfillDocuments(client, state.run.id) : []);
       const completed = await client<{ id: string }[]>`
         update documents
         set status = 'completed',
@@ -896,7 +953,7 @@ export class Store {
           )
         returning id
       `;
-      return await supersededInThisTransaction(client, completed.map((row) => row.id));
+      return await supersededInThisTransaction(client, completed.map((row) => row.id).filter((id) => !adopted.has(id)));
     });
     await this.announceReplacements(state, cutover);
 

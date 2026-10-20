@@ -1,11 +1,13 @@
 import { randomUUID } from "node:crypto";
 
 import {
+  effectiveIndexingMode,
   pageRouterModeSchema,
   stageSelectionKeys,
   withoutStageSelection,
   withPlatformPageRouterMode,
   type DocumentRecord,
+  type IndexingMode,
   type PipelineFeatures,
   type WorkspaceRun,
 } from "@docslurp/shared";
@@ -632,6 +634,7 @@ export function createRunCreation(deps: RunCreationDeps) {
     orgId: string,
     input: CreateRunInput,
     files: RunSourceFile[],
+    indexingMode: IndexingMode,
   ) {
     const documents: DocumentRow[] = [];
     const unreadable: UnreadableSource[] = [];
@@ -685,7 +688,7 @@ export function createRunCreation(deps: RunCreationDeps) {
             id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key,
             status, extraction_mode, page_count, source_sha256,
             deduped_from_document_id, dedup_scope, version_number, previous_version_id,
-            canonical_id, file_size, metadata
+            canonical_id, file_size, metadata, indexing_mode
           )
           values (
             ${documentId},
@@ -708,7 +711,8 @@ export function createRunCreation(deps: RunCreationDeps) {
             ${existing?.id ?? null},
             ${canonicalId},
             ${file.fileSize ?? 0},
-            ${JSON.stringify({ ...file.metadata, sourceSizeMeasured: file.fileSize !== undefined })}::text::jsonb
+            ${JSON.stringify({ ...file.metadata, sourceSizeMeasured: file.fileSize !== undefined })}::text::jsonb,
+            ${indexingMode}
           )
           returning *
         `;
@@ -744,6 +748,7 @@ export function createRunCreation(deps: RunCreationDeps) {
     input: CreateRunInput,
     sources: SourceDocumentRow[],
     reuse: boolean,
+    indexingMode: IndexingMode,
   ) {
     const documents: DocumentRow[] = [];
     for (const source of sources) {
@@ -763,7 +768,7 @@ export function createRunCreation(deps: RunCreationDeps) {
           insert into documents (
             id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key,
             status, extraction_mode, page_count, file_size, source_sha256,
-            canonical_id, version_number, previous_version_id, reused_from_document_id, metadata
+            canonical_id, version_number, previous_version_id, reused_from_document_id, metadata, indexing_mode
           )
           values (
             ${randomUUID()},
@@ -784,7 +789,9 @@ export function createRunCreation(deps: RunCreationDeps) {
             ${(latest?.version_number ?? source.version_number ?? 1) + 1},
             ${latest?.id ?? source.id},
             ${reuse ? source.id : null},
-            ${sql.json(sourceMetadata(source.metadata))}
+            ${sql.json(sourceMetadata(source.metadata))},
+            -- The Run's pipeline decides how the new version indexes.
+            ${indexingMode}
           )
           returning *
         `;
@@ -865,10 +872,12 @@ export function createRunCreation(deps: RunCreationDeps) {
       pipeline: platformRunPipeline(sources.kind === "files" ? withoutStageSelection(input.pipeline) : input.pipeline),
     });
 
+    // Stamped on every Document so a later workspace mode switch never rewrites how it was indexed.
+    const indexingMode = effectiveIndexingMode(input.pipeline.indexingMode);
     const published = await prepareAndPublish(runId, async () => {
       const materialised = sources.kind === "files"
-        ? await materialiseFiles(runId, access.orgId, input, sources.files)
-        : await materialiseVersions(runId, input, sourceDocuments, reuse);
+        ? await materialiseFiles(runId, access.orgId, input, sources.files, indexingMode)
+        : await materialiseVersions(runId, input, sourceDocuments, reuse, indexingMode);
       return materialised;
     });
 

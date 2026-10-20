@@ -58,7 +58,7 @@ export type BulkWorkspaceIntakeFile = Pick<File, "arrayBuffer" | "name" | "size"
 
 type IntakeTargetArgs = Pick<
   WorkspaceIntakeRequest,
-  "userId" | "orgId" | "workspaceId" | "newWorkspace" | "workspaceName" | "templateKey" | "pipeline" | "tags"
+  "userId" | "orgId" | "workspaceId" | "newWorkspace" | "workspaceName" | "templateKey" | "pipeline" | "tags" | "indexingMode"
 >;
 
 async function requiredIntake(

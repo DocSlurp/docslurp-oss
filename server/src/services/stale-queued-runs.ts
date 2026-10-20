@@ -136,6 +136,7 @@ async function sweepOnce(): Promise<void> {
     from workspace_runs
     where status = 'queued'
       and creation_ready_at is not null
+      and kind <> 'materialize'
       and coalesce(control_state, '') not in ('paused', 'cancelled', 'dead-letter')
       and created_at < now() - (${STALE_QUEUED_RUN_COLD_START_GRACE_MS} * interval '1 millisecond')
     order by created_at asc

@@ -40,7 +40,7 @@ import { resolveWorkerScalerConfig, resolveWorkerScalerQueryParams } from "@docs
 import { warmLocalEmbedding } from "../stages/embedding-runtime.js";
 import { closeSharedLocalEmbeddingPool } from "../stages/local-embedding-thread.js";
 import { resolveEmbeddingModel } from "../embeddings/resolver.js";
-import { defaultPipelineFeatures } from "@docslurp/shared";
+import { DEFAULT_MATERIALIZE_TASK_QUEUE, defaultPipelineFeatures, deferredProfilesEnabled } from "@docslurp/shared";
 import { purgeConfig } from "../db/superseded-purge.js";
 import { prefetchVendorBundles } from "../tools/vendor-bundles.js";
 import { initializePrivateModelEndpoints } from "../lib/privacy-guard.js";
@@ -108,10 +108,10 @@ async function main(): Promise<void> {
   const openSession = (activityId: string) => sandbox.provider.openSession(sandbox.config, { activityId });
   const runner = new CommandRunner({ openSession });
   const storage = new ArtifactStore(cfg);
-  const stages = createStages({ runner, storage, config: cfg, mediaJournal: store.mediaJournal, capacityStore: store.capacityLeaseStore([]) });
+  const stages = createStages({ runner, storage, config: cfg, mediaJournal: store.mediaJournal, capacityStore: store.capacityLeaseStore([]), sql: store.stageSql });
 
   // Create activity implementations with injected dependencies
-  const activities = createActivities({ store, storage, stages, config: cfg });
+  const activities = createActivities({ store, storage, stages, config: cfg, runner });
 
   // Connect to Temporal server
   let connection: NativeConnection | null = null;
@@ -188,6 +188,23 @@ async function main(): Promise<void> {
         await Worker.create({ ...common, ...activityOptions, taskQueue: activityTaskQueue }),
       ]
     : [await Worker.create({ ...common, ...combinedWorkflowOptions, ...activityOptions, taskQueue: temporal.taskQueue })];
+  // Deferred indexing: materializePages runs on its own queue and slot budget so
+  // on-demand page work never starves (or is starved by) the main pipeline.
+  if (deferredProfilesEnabled()) {
+    const materializeQueue = cfg.temporalMaterializeTaskQueue ?? DEFAULT_MATERIALIZE_TASK_QUEUE;
+    workers.push(await Worker.create({
+      ...common,
+      ...workflowOptions,
+      activities: {
+        materializePageRangeActivity: activities.materializePageRangeActivity,
+        completeMaterializeRun: activities.completeMaterializeRun,
+      },
+      maxConcurrentActivityTaskExecutions: cfg.materializeConcurrency,
+      maxConcurrentActivityTaskPolls: Math.min(cfg.materializeConcurrency, 2),
+      taskQueue: materializeQueue,
+    }));
+    console.log(`[temporal-worker] materialize queue=${materializeQueue} concurrency=${cfg.materializeConcurrency}`);
+  }
   // A machine the autoscaler just started should be ready to embed when its first shard arrives.
   const defaultEmbedding = resolveEmbeddingModel(cfg, defaultPipelineFeatures);
   if (defaultEmbedding.runtime === "local" && process.env.LOCAL_EMBEDDING_WARMUP !== "false") {

@@ -12,6 +12,8 @@ export const WORKFLOW_STAGE_ORDER = [
   "normalize",
   "pdf-tooling",
   "split-pages",
+  "document-map",
+  "page-embed",
   "extract-markdown",
   "extract-html",
   "classify-route",

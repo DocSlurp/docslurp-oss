@@ -9,11 +9,17 @@ import { apiKeyHasAnyScope } from "../lib/api-key-authorization.js";
 import { getApiKey, getRequestActor, loadActorScopedWorkspace, resolveActorWorkspaceId, setRequestActor, type RequestActor } from "../lib/request-actor.js";
 import { listWorkspaces } from "./workspaces.js";
 import { apiKeyCanUseWorkspace } from "../lib/api-key-workspace-scope.js";
-import { completeUploadInput, listWorkspacesInput, mcpManifest, mcpTools, suggestQueriesInput, uploadInput, uploadStatusInput } from "./mcp-catalog.js";
+import { completeUploadInput, fullIndexInput, listWorkspacesInput, mcpManifest, mcpTools, suggestQueriesInput, uploadInput, uploadStatusInput } from "./mcp-catalog.js";
 import { mcpOrigin } from "../lib/mcp-origin.js";
 import { groundedWorkspaceChatRoutes, searchRoutes } from "../routes/search.js";
 import { sql } from "../db.js";
 import { isProtectedStoredQuery } from "../search/session.js";
+import { deferredProfilesEnabled } from "@docslurp/shared";
+import { getRun } from "./runs.js";
+import { runLifecycle } from "./run-lifecycle.js";
+import { resolveMaterializationPolicy } from "./materialization-policy.js";
+import { IndexingModeError, requestFullIndex } from "./workspace-indexing-mode.js";
+import { indexingModeErrorResponse } from "../lib/indexing-mode-error.js";
 import { spendAwareErrorHandler } from "./billing/spend-guard.js";
 import { loadIngestReport, summarizeIngestReport } from "./ingest-report.js";
 
@@ -146,6 +152,32 @@ const mcpAdapterRoutes = new Hono()
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body), signal: c.req.raw.signal,
       });
+    }
+
+    if (toolId === "fullIndex") {
+      const parsed = fullIndexInput.safeParse(body);
+      if (!parsed.success) return invalidInput(c, parsed.error);
+      const workspace = await loadActorScopedWorkspace(await resolveActorWorkspaceId(actor, parsed.data.workspaceId), actor);
+      if (!workspace) return adapterError(c, 404, "Workspace not found", "workspace_not_found");
+      const resolved = await resolveMaterializationPolicy({
+        workspacePipeline: workspace.pipeline,
+        apiKey,
+        capabilityHeader: c.req.header("X-DocSlurp-Capability"),
+        origin: c.req.header("Origin"),
+        workspaceId: workspace.id,
+      });
+      if ("error" in resolved) return adapterError(c, 403, "Invalid capability");
+      try {
+        const result = await requestFullIndex({
+          orgId: workspace.orgId, workspaceId: workspace.id, documentIds: parsed.data.documentIds, actor, policy: resolved.policy,
+        });
+        const run = await getRun(result.runId, actor.userId);
+        if (run) await runLifecycle.start(run);
+        return c.json({ tool: toolId, runId: result.runId, pages: result.pages, estimatedCredits: result.estimatedCredits, billing: result.billing }, 202);
+      } catch (error) {
+        if (error instanceof IndexingModeError) return indexingModeErrorResponse(c, error);
+        throw error;
+      }
     }
 
     if (toolId === "getUploadStatus") {

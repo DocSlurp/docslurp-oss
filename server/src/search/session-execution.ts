@@ -81,6 +81,7 @@ export interface SearchSessionRetrievalInput
 }
 
 export function searchChunkToResult(chunk: SearchChunk): SearchResult {
+  const stage = chunk.deferredLocator ?? (chunk.retrievalStage === "page-index" ? "page-text" : "chunk");
   return {
     text: chunk.text,
     score: chunk.score,
@@ -110,6 +111,7 @@ export function searchChunkToResult(chunk: SearchChunk): SearchResult {
       sourceTrace: chunk.sourceTrace ?? undefined,
       locator: chunk.locator ?? null,
     },
+    ...(stage === "chunk" ? {} : { retrieval: { stage } }),
   };
 }
 
@@ -148,6 +150,9 @@ export function searchResultsToChunks(results: SearchResult[]): SearchChunk[] {
       result.citation.sourceTrace?.extractor === "page-index"
         ? "page-index"
         : "full-index",
+    ...(result.retrieval?.stage === "map-node" || result.retrieval?.stage === "page-image"
+      ? { deferredLocator: result.retrieval.stage }
+      : {}),
   }));
 }
 

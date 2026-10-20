@@ -16,6 +16,7 @@ export function publicSearchResponse(response: SearchResponse) {
     noMatch: response.relevanceFloor?.noMatch ?? false,
     ...(response.relevanceFloor ? { relevanceFloor: { minScore: response.relevanceFloor.minScore, dropped: response.relevanceFloor.dropped } } : {}),
     ...(response.timings ? { timings: response.timings } : {}),
+    ...(response.deferred ? { deferred: response.deferred } : {}),
     usage: {
       inputTokens, outputTokens, totalTokens: inputTokens + outputTokens,
       costCents: events.reduce((sum, event) => sum + event.costCents, 0),

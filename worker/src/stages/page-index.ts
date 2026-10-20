@@ -1,4 +1,6 @@
-import { splitTextIntoPages } from "@docslurp/shared";
+import type { Sql } from "postgres";
+import { deferredProfilesEnabled, splitTextIntoPages } from "@docslurp/shared";
+import { ensurePageRows } from "../deferred/page-ledger.js";
 import type { Stage, WorkflowState } from "../pipeline/pipeline.js";
 import { runDocumentStage, runDocuments } from "../pipeline/checkpoints.js";
 import type { CommandRunner } from "../tools/runner.js";
@@ -23,7 +25,8 @@ export class PageIndexStage implements Stage {
 
   constructor(
     private readonly runner: CommandRunner,
-    private readonly storage: ArtifactStore
+    private readonly storage: ArtifactStore,
+    private readonly sql?: () => Sql<Record<string, unknown>>
   ) {}
 
   async run(state: WorkflowState, signal?: AbortSignal): Promise<void> {
@@ -76,6 +79,10 @@ export class PageIndexStage implements Stage {
             await (state.store as { linkChunksToPages: (documentId: string, runId: string) => Promise<void> }).linkChunksToPages(document.id, state.run.id);
           }
 
+          if (this.sql && deferredProfilesEnabled()) {
+            await markPagesIngestedIfDeferred(this.sql(), document.id, pageRows.length, state.run.kind === "full-index" ? "full-index" : "ingest");
+          }
+
           const key = `${document.userId}/${state.run.id}/page-index/${document.id}.json`;
           const search = buildPageIndexSearchMetadata(pageRows.length);
           await this.storage.putJson(key, {
@@ -96,6 +103,36 @@ export class PageIndexStage implements Stage {
       );
     });
   }
+}
+
+/**
+ * Ledger rows exist only for documents that defer indexing (`indexing_mode <> 'full'`): readers treat a
+ * `full` document as hot without consulting the ledger, so full-index runs of deferred documents
+ * (which produce new `full` versions) and ordinary uploads write nothing here.
+ */
+export async function markPagesIngestedIfDeferred(sql: Sql<Record<string, unknown>>, documentId: string, pageCount: number, materializedBy: "ingest" | "full-index" = "ingest"): Promise<boolean> {
+  const [row] = await sql<{ deferred: boolean }[]>`select indexing_mode <> 'full' as deferred from documents where id = ${documentId}`;
+  if (!row?.deferred) return false;
+  await markPagesIngested(sql, documentId, pageCount, materializedBy);
+  return true;
+}
+
+/**
+ * Pages written by the ingest pipeline are searchable, so the deferred-indexing
+ * ledger records them as `indexed` and a query never re-materializes them.
+ * `materialized_by` follows the run kind: 'full-index' for full-index runs, else 'ingest'.
+ * Never touches `blocked-pii` pages or pages under a live claim.
+ */
+export async function markPagesIngested(sql: Sql<Record<string, unknown>>, documentId: string, pageCount: number, materializedBy: "ingest" | "full-index" = "ingest"): Promise<void> {
+  await ensurePageRows(sql, documentId, pageCount);
+  await sql`
+    update document_page_states
+    set state = 'indexed', materialized_by = ${materializedBy},
+        claimed_by_run = null, claim_expires_at = null, failure_reason = null, updated_at = now()
+    where document_id = ${documentId} and page_number <= ${pageCount}
+      and (state in ('unseen', 'failed', 'parsed')
+           or (state in ('claimed', 'pii-checked') and (claim_expires_at is null or claim_expires_at <= now())))
+  `;
 }
 
 function splitByPages(text: string, pageCount: number): string[] {
