@@ -9,30 +9,47 @@ import { buildModalUsageEvent, createModalProvider, type ModalSdk } from "../pro
 import { SessionStaging, type RemoteFs } from "../providers/modal/staging.js";
 import { SandboxConfigError, SandboxRunError } from "../types.js";
 
+/** In-memory remote filesystem; every write gets a fresh mtime so changes are always visible. */
 class MemoryRemoteFs implements RemoteFs {
-  files = new Map<string, Uint8Array>();
+  files = new Map<string, { data: Uint8Array; mtime: number }>();
   dirs = new Set<string>(["/"]);
   writes: string[] = [];
+  reads: string[] = [];
+  removed: string[] = [];
+  private clock = 0;
 
-  async exists(p: string) {
-    return this.files.has(p) || this.dirs.has(p);
+  put(p: string, data: string) {
+    for (let dir = path.dirname(p); !this.dirs.has(dir); dir = path.dirname(dir)) this.dirs.add(dir);
+    this.files.set(p, { data: Buffer.from(data), mtime: ++this.clock });
+  }
+  async stat(p: string) {
+    const file = this.files.get(p);
+    if (file) return { path: p, isDir: false, size: file.data.length, mtime: file.mtime };
+    return this.dirs.has(p) ? { path: p, isDir: true, size: 0, mtime: 0 } : null;
   }
   async writeFile(p: string, data: Uint8Array) {
     this.writes.push(p);
-    this.files.set(p, data);
+    this.files.set(p, { data, mtime: ++this.clock });
   }
   async readFile(p: string) {
-    const data = this.files.get(p);
-    if (!data) throw new Error(`ENOENT ${p}`);
-    return data;
+    this.reads.push(p);
+    const file = this.files.get(p);
+    if (!file) throw new Error(`ENOENT ${p}`);
+    return file.data;
   }
   async mkdir(p: string) {
-    this.dirs.add(p);
+    for (let dir = p; !this.dirs.has(dir); dir = path.dirname(dir)) this.dirs.add(dir);
+  }
+  async remove(p: string) {
+    this.removed.push(p);
+    const under = (q: string) => q === p || q.startsWith(`${p}/`);
+    for (const file of [...this.files.keys()]) if (under(file)) this.files.delete(file);
+    for (const dir of [...this.dirs]) if (under(dir)) this.dirs.delete(dir);
   }
   async list(p: string) {
-    const out: { path: string; isDir: boolean }[] = [];
-    for (const dir of this.dirs) if (dir !== p && path.dirname(dir) === p) out.push({ path: dir, isDir: true });
-    for (const file of this.files.keys()) if (path.dirname(file) === p) out.push({ path: file, isDir: false });
+    const out = [];
+    for (const dir of this.dirs) if (dir !== p && path.dirname(dir) === p) out.push((await this.stat(dir))!);
+    for (const file of this.files.keys()) if (path.dirname(file) === p) out.push((await this.stat(file))!);
     return out;
   }
 }
@@ -55,7 +72,7 @@ describe("SessionStaging", () => {
     await staging.ensureUploaded([file]);
     await staging.ensureUploaded([file, file]);
     expect(remote.writes).toEqual([file]);
-    expect(Buffer.from(remote.files.get(file)!).toString()).toBe("hello");
+    expect(Buffer.from(remote.files.get(file)!.data).toString()).toBe("hello");
   });
 
   it("uploads directories recursively at the same absolute path", async () => {
@@ -78,27 +95,87 @@ describe("SessionStaging", () => {
 
   it("downloads nothing, without throwing, for a writable path the command never created", async () => {
     const target = path.join(root, "never-created");
-    await expect(staging.download([target])).resolves.toBeUndefined();
+    const snapshot = await staging.snapshot([target]);
+    await expect(staging.download(snapshot)).resolves.toBeUndefined();
     expect(existsSync(target)).toBe(false);
   });
 
-  it("downloads a remote file", async () => {
-    const target = path.join(root, "out", "result.txt");
-    remote.dirs.add(path.join(root, "out"));
-    remote.files.set(target, Buffer.from("done"));
-    await staging.download([target]);
-    expect(readFileSync(target, "utf8")).toBe("done");
+  it("downloads a file the command created", async () => {
+    const dir = path.join(root, "out");
+    const snapshot = await staging.snapshot([dir]);
+    remote.put(path.join(dir, "result.txt"), "done");
+    await staging.download(snapshot);
+    expect(readFileSync(path.join(dir, "result.txt"), "utf8")).toBe("done");
   });
 
-  it("recreates a remote directory tree locally", async () => {
+  it("recreates a directory tree the command created", async () => {
     const dir = path.join(root, "out");
-    remote.dirs.add(dir);
-    remote.dirs.add(path.join(dir, "sub"));
-    remote.files.set(path.join(dir, "a.txt"), Buffer.from("a"));
-    remote.files.set(path.join(dir, "sub", "b.txt"), Buffer.from("b"));
-    await staging.download([dir]);
+    await remote.mkdir(dir);
+    const snapshot = await staging.snapshot([dir]);
+    await remote.mkdir(path.join(dir, "empty"));
+    remote.put(path.join(dir, "a.txt"), "a");
+    remote.put(path.join(dir, "sub", "b.txt"), "b");
+    await staging.download(snapshot);
     expect(readFileSync(path.join(dir, "a.txt"), "utf8")).toBe("a");
     expect(readFileSync(path.join(dir, "sub", "b.txt"), "utf8")).toBe("b");
+    expect(existsSync(path.join(dir, "empty"))).toBe(true);
+  });
+
+  it("downloads only files created or changed since the snapshot, never inputs or earlier files", async () => {
+    const dir = path.join(root, "work");
+    mkdirSync(dir);
+    const input = path.join(dir, "input.txt");
+    writeFileSync(input, "local input");
+    await staging.ensureUploaded([input]);
+    remote.put(path.join(dir, "earlier.txt"), "from an earlier command");
+    remote.put(path.join(dir, "rewritten.txt"), "old");
+    const snapshot = await staging.snapshot([dir]);
+    remote.put(path.join(dir, "rewritten.txt"), "new");
+    remote.put(path.join(dir, "out.txt"), "output");
+    // The host changed its copy of the input meanwhile; a download must not overwrite it.
+    writeFileSync(input, "host edit");
+    await staging.download(snapshot);
+    expect(remote.reads.sort()).toEqual([path.join(dir, "out.txt"), path.join(dir, "rewritten.txt")]);
+    expect(readFileSync(input, "utf8")).toBe("host edit");
+    expect(existsSync(path.join(dir, "earlier.txt"))).toBe(false);
+    expect(readFileSync(path.join(dir, "rewritten.txt"), "utf8")).toBe("new");
+  });
+
+  it("discards a command's new and modified paths and re-uploads a modified input on next use", async () => {
+    const dir = path.join(root, "work");
+    mkdirSync(dir);
+    const input = path.join(dir, "input.txt");
+    writeFileSync(input, "input");
+    await staging.ensureUploaded([input]);
+    remote.put(path.join(dir, "earlier.txt"), "kept");
+    const snapshot = await staging.snapshot([dir]);
+    remote.put(path.join(dir, "partial.txt"), "partial");
+    remote.put(path.join(dir, "pages", "1.png"), "png");
+    remote.put(input, "clobbered");
+
+    const removed = await staging.discard(snapshot);
+    expect(removed.sort()).toEqual([input, path.join(dir, "pages"), path.join(dir, "partial.txt")]);
+    expect([...remote.files.keys()]).toEqual([path.join(dir, "earlier.txt")]);
+    expect(remote.dirs.has(dir)).toBe(true);
+
+    await staging.ensureUploaded([input]);
+    expect(Buffer.from(remote.files.get(input)!.data).toString()).toBe("input");
+  });
+
+  it("does not discard paths a later upload or download put there", async () => {
+    const dir = path.join(root, "work");
+    await remote.mkdir(dir);
+    const aborted = await staging.snapshot([dir]);
+    const other = await staging.snapshot([dir]);
+    remote.put(path.join(dir, "other.txt"), "finished output");
+    await staging.download(other);
+    const laterInput = path.join(dir, "later-input.txt");
+    writeFileSync(laterInput, "input");
+    await staging.ensureUploaded([laterInput]);
+    remote.put(path.join(dir, "partial.txt"), "partial");
+
+    expect(await staging.discard(aborted)).toEqual([path.join(dir, "partial.txt")]);
+    expect([...remote.files.keys()].sort()).toEqual([laterInput, path.join(dir, "other.txt")]);
   });
 });
 
@@ -174,28 +251,74 @@ function finished(stdout = "out", exitCode = 0): FakeProcess {
   return { stdout: { readText: async () => stdout }, stderr: { readText: async () => "" }, wait: async () => exitCode };
 }
 
-/** A Modal SDK double: records filesystem traffic and lets each test script `exec`. */
-function fakeSdk(opts: { createFails?: boolean; exec?: (argv: string[]) => Promise<FakeProcess> } = {}) {
+/** A process that runs until the test's kill handler (or the test) ends it. */
+function running(): { process: FakeProcess; end(exitCode: number): void } {
+  let end!: (exitCode: number) => void;
+  const exited = new Promise<number>((resolve) => (end = resolve));
+  const process = { stdout: { readText: async () => (await exited, "") }, stderr: { readText: async () => (await exited, "") }, wait: () => exited };
+  return { process, end };
+}
+
+/** The provider launches commands as [sh, -c, launch, sh, start, control, binary, ...args] and kills as [sh, -c, kill, sh, control]. */
+const isKill = (argv: string[]) => argv.length === 5;
+const controlOf = (argv: string[]) => (isKill(argv) ? argv[4] : argv[5]);
+
+/**
+ * A Modal SDK double: an in-memory sandbox filesystem plus a scripted `exec`. Each test
+ * scripts the parser command (`exec` gets the command's own argv); kills are recorded and
+ * passed to `onKill` with the control path of the command being killed.
+ */
+function fakeSdk(
+  opts: {
+    createFails?: boolean;
+    exec?: (command: string[], control: string) => Promise<FakeProcess>;
+    onKill?: (control: string) => void;
+  } = {},
+) {
+  const remote = new MemoryRemoteFs();
   const state = {
     terminate: 0,
     clientClose: 0,
-    writes: [] as string[],
     mkdirs: [] as string[],
     stats: [] as string[],
     images: [] as Array<[string, unknown]>,
+    commands: [] as string[][],
+    kills: [] as string[],
+    remote,
   };
+  const info = (entry: { path: string; isDir: boolean; size: number; mtime: number }) => ({
+    path: entry.path,
+    type: entry.isDir ? "directory" : "file",
+    size: entry.size,
+    modifiedTime: entry.mtime,
+  });
   const sandbox = {
     terminate: async () => void state.terminate++,
     filesystem: {
-      makeDirectory: async (p: string) => void state.mkdirs.push(p),
-      writeBytes: async (_data: Uint8Array, p: string) => void state.writes.push(p),
+      makeDirectory: async (p: string) => {
+        state.mkdirs.push(p);
+        await remote.mkdir(p);
+      },
+      writeBytes: (data: Uint8Array, p: string) => remote.writeFile(p, data),
+      readBytes: (p: string) => remote.readFile(p),
+      remove: (p: string) => remote.remove(p),
       stat: async (p: string) => {
         state.stats.push(p);
-        throw new NotFound();
+        const entry = await remote.stat(p);
+        if (!entry) throw new NotFound();
+        return info(entry);
       },
-      listFiles: async () => [],
+      listFiles: async (p: string) => (await remote.list(p)).map(info),
     },
-    exec: opts.exec ?? (async () => finished()),
+    exec: async (argv: string[]) => {
+      if (isKill(argv)) {
+        state.kills.push(controlOf(argv));
+        opts.onKill?.(controlOf(argv));
+        return finished("", 0);
+      }
+      state.commands.push(argv.slice(6));
+      return (opts.exec ?? (async () => finished()))(argv.slice(6), controlOf(argv));
+    },
   };
   const sdk = {
     SandboxFilesystemNotFoundError: NotFound,
@@ -249,36 +372,166 @@ describe("modal provider session lifecycle", () => {
     expect(state.clientClose).toBe(1);
   });
 
-  it("aborting one command rejects only that command; the session keeps running others", async () => {
-    let release!: (process: FakeProcess) => void;
+  /** Usage lines logged for this test's commands. */
+  function usageLines(): string[] {
+    return vi.mocked(console.log).mock.calls.map(([line]) => String(line)).filter((line) => line.startsWith("[sandbox-usage]"));
+  }
+
+  it("aborting a command kills its process group and rejects only that command", async () => {
+    const processes = new Map<string, ReturnType<typeof running>>();
     let calls = 0;
     const { state, session } = await open({
-      exec: () => (++calls === 1 ? new Promise<FakeProcess>((resolve) => (release = resolve)) : Promise.resolve(finished("second"))),
+      exec: async (_command, control) => {
+        if (++calls > 1) return finished("second");
+        const proc = running();
+        processes.set(control, proc);
+        return proc.process;
+      },
+      onKill: (control) => processes.get(control)?.end(137),
     });
     const opened = await session();
     const controller = new AbortController();
+    const running1 = opened.run!(command, controller.signal).catch((e: unknown) => e);
+    await vi.waitFor(() => expect(processes.size).toBe(1));
+    controller.abort();
+    const error = await running1;
+    expect(error).toBeInstanceOf(SandboxRunError);
+    expect((error as Error).message).toBe("modal sandbox command aborted");
+    expect(state.kills).toEqual([...processes.keys()]);
+    expect(state.terminate).toBe(0);
+    // Usage is recorded exactly once for the aborted command.
+    expect((error as SandboxRunError).usage?.provider).toBe("modal");
+    expect(usageLines()).toHaveLength(1);
+
+    const next = await opened.run!(command);
+    expect(next.stdout).toBe("second");
+    expect(usageLines()).toHaveLength(2);
+    await opened.close();
+    expect(state.terminate).toBe(1);
+  });
+
+  it("starts no remote process when the abort lands while inputs are staging", async () => {
     const dir = mkdtempSync(path.join(tmpdir(), "docslurp-modal-abort-"));
     try {
-      const running = opened.run!({ ...command, writablePaths: [dir] }, controller.signal).catch((e: unknown) => e);
-      await new Promise((resolve) => setTimeout(resolve, 10));
-      controller.abort();
-      const error = await running;
-      expect((error as Error).message).toContain("aborted");
-      expect(state.terminate).toBe(0);
-
-      const next = await opened.run!(command);
-      expect(next.exitCode).toBe(0);
-      expect(next.stdout).toBe("second");
-
-      // The abandoned exec finishing later must not write its outputs back.
-      release(finished("late"));
-      await new Promise((resolve) => setTimeout(resolve, 10));
-      expect(state.stats).not.toContain(dir);
+      const input = path.join(dir, "input.pdf");
+      writeFileSync(input, "%PDF");
+      const { state, session } = await open();
+      const opened = await session();
+      const controller = new AbortController();
+      const write = state.remote.writeFile.bind(state.remote);
+      state.remote.writeFile = async (p, data) => {
+        controller.abort();
+        await write(p, data);
+      };
+      const error = await opened.run!({ ...command, inputPaths: [input], writablePaths: [dir] }, controller.signal).catch(
+        (e: unknown) => e,
+      );
+      expect((error as Error).message).toBe("modal sandbox command aborted");
+      expect(state.commands).toEqual([]);
+      expect(state.kills).toEqual([]);
+      expect(usageLines()).toHaveLength(1);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
-    await opened.close();
-    expect(state.terminate).toBe(1);
+  });
+
+  it("removes an aborted command's partial output remotely and never downloads it", async () => {
+    const dir = mkdtempSync(path.join(tmpdir(), "docslurp-modal-abort-"));
+    try {
+      const partial = path.join(dir, "partial.json");
+      const processes = new Map<string, ReturnType<typeof running>>();
+      const { state, session } = await open({
+        exec: async ([binary], control) => {
+          if (binary === "partial") {
+            state.remote.put(partial, "{\"incomplete\":");
+            const proc = running();
+            processes.set(control, proc);
+            return proc.process;
+          }
+          state.remote.put(path.join(dir, "ok.json"), "{}");
+          return finished();
+        },
+        // Killing stops the process; it writes nothing after the kill.
+        onKill: (control) => processes.get(control)?.end(137),
+      });
+      const opened = await session();
+      const controller = new AbortController();
+      const aborted = opened.run!({ ...command, binary: "partial", writablePaths: [dir] }, controller.signal).catch(
+        (e: unknown) => e,
+      );
+      await vi.waitFor(() => expect(processes.size).toBe(1));
+      controller.abort();
+      expect((await aborted) as Error).toBeInstanceOf(SandboxRunError);
+      expect(state.remote.files.has(partial)).toBe(false);
+      expect(existsSync(partial)).toBe(false);
+
+      await opened.run!({ ...command, binary: "ok", writablePaths: [dir] });
+      expect(readFileSync(path.join(dir, "ok.json"), "utf8")).toBe("{}");
+      expect(existsSync(partial)).toBe(false);
+      await opened.close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("kills a timed-out command and discards its partial output", async () => {
+    const dir = mkdtempSync(path.join(tmpdir(), "docslurp-modal-timeout-"));
+    try {
+      const partial = path.join(dir, "partial.json");
+      const { state, session } = await open({
+        exec: async () => {
+          state.remote.put(partial, "{");
+          throw new Error("Deadline exceeded while streaming stdio for exec x");
+        },
+      });
+      const opened = await session();
+      const result = await opened.run!({ ...command, writablePaths: [dir] });
+      expect(result.exitCode).toBeNull();
+      expect(state.kills).toHaveLength(1);
+      expect(state.remote.files.has(partial)).toBe(false);
+      expect(existsSync(partial)).toBe(false);
+      expect(usageLines()).toHaveLength(1);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("defers removing an aborted command's changes until concurrent commands finish", async () => {
+    const dir = mkdtempSync(path.join(tmpdir(), "docslurp-modal-concurrent-"));
+    try {
+      const processes = new Map<string, ReturnType<typeof running>>();
+      const { state, session } = await open({
+        exec: async ([binary], control) => {
+          const proc = running();
+          processes.set(binary, proc);
+          state.remote.put(path.join(dir, `${binary}.json`), binary === "slow" ? "{\"in-progress\":" : "{");
+          return proc.process;
+        },
+        onKill: () => processes.get("aborted")?.end(137),
+      });
+      const opened = await session();
+      const controller = new AbortController();
+      const aborted = opened.run!({ ...command, binary: "aborted", writablePaths: [dir] }, controller.signal).catch(
+        (e: unknown) => e,
+      );
+      await vi.waitFor(() => expect(processes.has("aborted")).toBe(true));
+      const slow = opened.run!({ ...command, binary: "slow", writablePaths: [dir] });
+      await vi.waitFor(() => expect(processes.has("slow")).toBe(true));
+      controller.abort();
+      expect((await aborted) as Error).toBeInstanceOf(SandboxRunError);
+      // The slow command is still writing slow.json, which the aborted command's snapshot
+      // cannot tell apart from its own output; nothing may be removed yet.
+      expect(state.remote.removed).toEqual([]);
+
+      state.remote.put(path.join(dir, "slow.json"), "{\"done\":true}");
+      processes.get("slow")!.end(0);
+      await slow;
+      expect(readFileSync(path.join(dir, "slow.json"), "utf8")).toBe("{\"done\":true}");
+      expect(state.remote.removed).toEqual([path.join(dir, "aborted.json")]);
+      expect(state.remote.files.has(path.join(dir, "slow.json"))).toBe(true);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it("rejects an already-aborted command without terminating the session", async () => {
@@ -372,9 +625,9 @@ describe("CommandRunner through the modal provider", () => {
 
     await runner.run({ binary: venvPython, args: [script, "--input", input, "--output", output], available: true });
 
-    expect(state.writes).toEqual([input]);
-    expect(state.mkdirs).toEqual([workspace]);
-    const staged = [...state.writes, ...state.mkdirs].join("\n");
+    expect(state.remote.writes).toEqual([input]);
+    expect(state.mkdirs).toEqual(["/tmp/.docslurp-modal-control", workspace]);
+    const staged = [...state.remote.writes, ...state.mkdirs.slice(1)].join("\n");
     for (const host of ["node_modules", ".venv", process.execPath, resolveScriptsDir()]) expect(staged).not.toContain(host);
     expect(staged.split("\n").some((p) => p === "/usr" || p.startsWith("/usr/"))).toBe(false);
   });

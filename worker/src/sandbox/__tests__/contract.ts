@@ -195,6 +195,42 @@ export function defineSandboxContract(
       expect(next.stdout.trim()).toBe("still-open");
     });
 
+    it("never brings back an aborted command's partial output, and stops its processes", async (ctx) => {
+      const opened = ready(ctx);
+      // A local command writes the host directory directly, so a partial file it wrote before
+      // the kill stays there by design; only remote providers copy outputs back.
+      if (opened.isolation.location === "local") ctx.skip("outputs are staged back on remote providers only");
+      const dir = workspace("aborted");
+      const partial = path.join(dir, "partial.txt");
+      const controller = new AbortController();
+      const aborted = execInSession(
+        opened,
+        command(["-c", `echo partial > "${partial}"; sleep 31.5`], { writablePaths: [dir] }),
+        controller.signal,
+      ).catch((error: unknown) => error);
+      // Late enough for the remote command to have started and written its partial file.
+      setTimeout(() => controller.abort(), 3_000);
+      await aborted;
+      expect(existsSync(partial)).toBe(false);
+      const check = await execInSession(
+        opened,
+        command(
+          [
+            "-c",
+            `test -e "${partial}" && echo remote-partial
+for f in /proc/[0-9]*/cmdline; do
+  case "$(tr '\\0' ' ' < "$f" 2>/dev/null)" in "sleep 31.5"*) echo still-running ;; esac
+done
+echo checked`,
+          ],
+          { writablePaths: [dir] },
+        ),
+      );
+      expect(check.exitCode, check.stderr).toBe(0);
+      expect(check.stdout).toBe("checked\n");
+      expect(existsSync(partial)).toBe(false);
+    });
+
     it("passes only the provided environment variables", async (ctx) => {
       const opened = ready(ctx);
       const result = await execInSession(
