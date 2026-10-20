@@ -11,7 +11,7 @@ import * as lancedb from "@lancedb/lancedb";
 
 import { resolveLanceDbConfig, VectorNamespaceManager } from "@docslurp/shared";
 import { withLanceDdb } from "@docslurp/shared/lancedb-ddb";
-import { withLanceS3Trace } from "@docslurp/shared/lancedb-s3-trace";
+import { withLanceS3Proxy } from "@docslurp/shared/lancedb-s3-trace";
 
 import { lanceDbQueryTuning } from "./lancedb-query-tuning.js";
 
@@ -55,9 +55,9 @@ function getDb(uri: string): Promise<lancedb.Connection> {
   let connection = connections.get(key);
   if (!connection) {
     connection = lanceSpan("connect", async () => {
-      // LANCEDB_S3_TRACE=1 routes Lance's native S3 requests through the tracing proxy.
+      // LANCEDB_S3_TRACE=1 or LANCEDB_S3_CACHE_DIR routes Lance's native S3 requests through the local proxy (tracing, disk cache).
       const config = resolveLanceDbConfig();
-      const traced = await withLanceS3Trace(uri, config.storageOptions);
+      const traced = await withLanceS3Proxy(uri, config.storageOptions);
       // s3+ddb:// roots commit through DynamoDB; withLanceDdb adds ?ddbTableName= and the credential-splitting proxy.
       const { uri: connectUri, storageOptions } = await withLanceDdb(uri, traced, config);
       return lancedb.connect(connectUri, { readConsistencyInterval: READ_CONSISTENCY_SECONDS, ...(storageOptions ? { storageOptions } : {}) });

@@ -2,7 +2,7 @@ import { createServer, type IncomingHttpHeaders } from "node:http";
 import { afterAll, expect, it, vi } from "vitest";
 import type { ReadableSpan } from "@opentelemetry/sdk-trace-base";
 import { initializeObservability, shutdownObservability } from "../observability.js";
-import { LanceS3Stats, classifyS3Request, getLanceS3TraceStats, keyPrefix, signUpstreamRequest, startLanceS3Proxy, withLanceS3Trace } from "../lancedb-s3-trace.js";
+import { LanceS3Stats, classifyS3Request, getLanceS3TraceStats, keyPrefix, signUpstreamRequest, startLanceS3Proxy, withLanceS3Proxy } from "../lancedb-s3-trace.js";
 
 vi.stubEnv("OTEL_ENABLED", "true");
 vi.stubEnv("LANGFUSE_ENABLED", "false");
@@ -136,7 +136,7 @@ it("flags a repeat of a failed request as a suspected retry and reports upstream
 
 it("is off unless LANCEDB_S3_TRACE is set and only rewrites s3 roots", async () => {
   const options = { region: "auto", endpoint: "https://x.example", aws_access_key_id: "a", aws_secret_access_key: "b" };
-  expect(await withLanceS3Trace("s3://b/lancedb", options, {})).toBe(options);
-  expect(await withLanceS3Trace("/tmp/lance", options, { LANCEDB_S3_TRACE: "1" })).toBe(options);
+  expect(await withLanceS3Proxy("s3://b/lancedb", options, {})).toBe(options);
+  expect(await withLanceS3Proxy("/tmp/lance", options, { LANCEDB_S3_TRACE: "1" })).toBe(options);
   expect(getLanceS3TraceStats().requests).toBeGreaterThanOrEqual(0);
 });

@@ -54,6 +54,10 @@
       "types": "./dist/lancedb-ddb.d.ts",
       "import": "./dist/lancedb-ddb.js"
     },
+    "./lancedb-s3-cache": {
+      "types": "./dist/lancedb-s3-cache.d.ts",
+      "import": "./dist/lancedb-s3-cache.js"
+    },
     "./lancedb-s3-trace": {
       "types": "./dist/lancedb-s3-trace.d.ts",
       "import": "./dist/lancedb-s3-trace.js"

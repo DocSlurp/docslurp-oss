@@ -1,7 +1,7 @@
 import { CreateBucketCommand, S3Client } from "@aws-sdk/client-s3";
 import { connect, type Connection } from "@lancedb/lancedb";
 import { initializeObservability, shutdownObservability } from "@docslurp/shared/observability";
-import { lanceS3Stats, startLanceS3Proxy, withLanceS3Trace, type LanceS3Proxy } from "@docslurp/shared/lancedb-s3-trace";
+import { lanceS3Stats, startLanceS3Proxy, withLanceS3Proxy, type LanceS3Proxy } from "@docslurp/shared/lancedb-s3-trace";
 type ReadableSpan = { name: string; attributes: Record<string, unknown> };
 import { afterAll, beforeAll, expect, it, vi } from "vitest";
 
@@ -29,8 +29,8 @@ beforeAll(async () => {
 });
 afterAll(async () => { await proxy?.close(); await shutdownObservability(); vi.unstubAllEnvs(); });
 
-it.skipIf(!reachable)("withLanceS3Trace rewrites storage options to the local proxy", async () => {
-  const rewritten = await withLanceS3Trace(`s3://${bucket}/idx`, { ...direct, endpoint }, { LANCEDB_S3_TRACE: "1" });
+it.skipIf(!reachable)("withLanceS3Proxy rewrites storage options to the local proxy", async () => {
+  const rewritten = await withLanceS3Proxy(`s3://${bucket}/idx`, { ...direct, endpoint }, { LANCEDB_S3_TRACE: "1" });
   expect(rewritten).toMatchObject({ allow_http: "true", virtual_hosted_style_request: "false" });
   expect(rewritten!.endpoint).toMatch(/^http:\/\/127\.0\.0\.1:\d+$/);
   expect(rewritten!.endpoint).not.toBe(endpoint);
