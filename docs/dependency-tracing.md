@@ -66,6 +66,16 @@ p95_ms=... p99_ms=... ops=Op=n,... statuses=Op:status=n,... total_requests=...`.
 Percentiles are histogram bucket upper bounds. `getLanceS3TraceStats()` from
 `@docslurp/shared/lancedb-s3-trace` returns the cumulative counters.
 
+With `LANCEDB_S3_CACHE_DIR` set the proxy also serves cached reads (see
+[Local disk cache for LanceDB](self-host/operations.md#local-disk-cache-for-lancedb)). The
+summary line then ends with `upstream_requests=...` (requests actually sent to the
+object store) and `cache_hits`, `cache_misses`, `cache_hit_ratio`, `cache_bypass`,
+`cache_bytes_served`, `cache_bytes_filled`, `cache_fill_requests`, `cache_evictions`,
+`cache_evicted_bytes`, `cache_size_bytes` and `cache_max_bytes`; spans carry
+`docslurp.lancedb_s3.cache` (`hit`, `miss`, `upstream` for passed-through origin errors
+and HEAD misses, `bypass`) and the bytes served, bytes filled and upstream requests
+for that request. Cached responses also set `x-docslurp-cache`.
+
 Caveats: the proxy is another hop. On loopback against MinIO it added about
 0.2-0.5 ms per request and about 0.7 ms per MB streamed (roughly a 1.4 GB/s
 ceiling); against a remote provider this is small next to network latency, but
