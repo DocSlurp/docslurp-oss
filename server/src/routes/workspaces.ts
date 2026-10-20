@@ -50,6 +50,7 @@ import {
   updateWorkspace,
   WorkspaceSlugError,
 } from "../services/workspaces.js";
+import { listWorkspaceTags } from "../services/workspace-tags.js";
 import { getWorkspaceState } from "../services/workspace-state.js";
 import {
   applyIngestRecommendation,
@@ -593,6 +594,17 @@ export const workspacesRoutes = new Hono()
     } catch (error) {
       return apiStatusError(c, 404, reportPublicError(error));
     }
+  })
+  .get("/:workspaceId/tags", async (c) => {
+    const actor = getRequestActor(c);
+    if (actor.type === "apiKey" && !actorHasAnyApiKeyScope(actor, ["ingest", "search", "artifacts", "workspaces:manage"])) {
+      return apiStatusError(c, 403, "Forbidden");
+    }
+    const workspace = await getWorkspace(c.req.param("workspaceId"), actor.userId);
+    if (!workspace || (actor.type === "apiKey" && !apiKeyCanUseWorkspace(actor.apiKey, workspace))) {
+      return apiErrorResponse(c, 404, "workspace_not_found", "Workspace not found");
+    }
+    return c.json({ tags: await listWorkspaceTags(workspace.id) });
   })
   .get("/:workspaceId/state", zValidator("query", workspaceStateQuerySchema, validationHook), async (c) => {
     const actor = getRequestActor(c);
@@ -1347,4 +1359,4 @@ export const workspacesRoutes = new Hono()
   );
 
 // Workspace reads and rename/settings updates (the PATCH requires workspaces:manage).
-acceptApiKeys(workspacesRoutes, ["GET /", "GET /:workspaceId", "GET /:workspaceId/state", "GET /:workspaceId/ingest-report", "PATCH /:workspaceId"]);
+acceptApiKeys(workspacesRoutes, ["GET /", "GET /:workspaceId", "GET /:workspaceId/tags", "GET /:workspaceId/state", "GET /:workspaceId/ingest-report", "PATCH /:workspaceId"]);

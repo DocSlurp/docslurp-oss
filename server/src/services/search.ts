@@ -1,4 +1,6 @@
 import { randomUUID } from "node:crypto";
+import { qualifyCommunitySummary } from "../search/community-context.js";
+import { documentTagPredicate } from "../search/document-tags.js";
 import type {
   CanonicalBlockType,
   CitationLocator,
@@ -380,6 +382,7 @@ export async function loadWorkspaceWholeCorpusContext(args: {
   workspaceId: string;
   documentIds?: string[];
   documentId?: string;
+  tags?: string[];
   userId: string;
   maxDocuments?: number;
   maxChunks?: number;
@@ -424,6 +427,7 @@ export async function loadWorkspaceWholeCorpusContext(args: {
         and ${lexicalSearchableDocument("d")}
         and (${!args.documentIds?.length} or d.id in (select jsonb_array_elements_text(${sql.json(args.documentIds ?? [])}::jsonb)))
         and (${args.documentId ?? null}::text is null or d.id = ${args.documentId ?? null})
+        and ${documentTagPredicate(sql`d.id`, args.tags)}
     `;
 
     const stats = {
@@ -448,6 +452,7 @@ export async function loadWorkspaceWholeCorpusContext(args: {
           and ${lexicalSearchableDocument("d")}
         and (${!args.documentIds?.length} or d.id in (select jsonb_array_elements_text(${sql.json(args.documentIds ?? [])}::jsonb)))
         and (${args.documentId ?? null}::text is null or d.id = ${args.documentId ?? null})
+        and ${documentTagPredicate(sql`d.id`, args.tags)}
       `;
       const pageCount = pageSummary?.page_count ?? 0;
       const pageChars = pageSummary?.char_estimate ?? 0;
@@ -461,6 +466,7 @@ export async function loadWorkspaceWholeCorpusContext(args: {
             and ${lexicalSearchableDocument("d")}
         and (${!args.documentIds?.length} or d.id in (select jsonb_array_elements_text(${sql.json(args.documentIds ?? [])}::jsonb)))
         and (${args.documentId ?? null}::text is null or d.id = ${args.documentId ?? null})
+        and ${documentTagPredicate(sql`d.id`, args.tags)}
           order by d.filename asc, p.page_number asc
           limit ${limits.maxChunks}
         `;
@@ -537,6 +543,7 @@ export async function loadWorkspaceWholeCorpusContext(args: {
         and ${lexicalSearchableDocument("d")}
         and (${!args.documentIds?.length} or d.id in (select jsonb_array_elements_text(${sql.json(args.documentIds ?? [])}::jsonb)))
         and (${args.documentId ?? null}::text is null or d.id = ${args.documentId ?? null})
+        and ${documentTagPredicate(sql`d.id`, args.tags)}
       order by d.filename asc, c.chunk_index asc
       limit ${limits.maxChunks}
     `;
@@ -743,6 +750,7 @@ async function vectorSearch(
       join vector_indexes v on v.document_id = d.id
       where d.workspace_id = ${workspaceId}
         and d.status = 'completed' and d.superseded_at is null
+        and ${documentTagPredicate(sql`d.id`, options.filters?.tags)}
         and v.backend = 'lancedb'
         and v.embedding_model = ${embedding.model}
         and v.dimension = ${queryVector.length}
@@ -1176,6 +1184,7 @@ async function completedPageSearch(args: {
       where d.workspace_id = ${args.workspaceId}
         and d.status = 'completed' and d.superseded_at is null
         and c.id is null
+        and ${documentTagPredicate(sql`d.id`, args.options.filters?.tags)}
         and to_tsvector('english', p.text) @@ websearch_to_tsquery('english', ${args.query})
       order by rank asc
       limit ${limit}
@@ -1222,10 +1231,10 @@ async function communitySummarySearch(
     documentId: `community:${row.id}`,
     runId: row.run_id,
     chunkIndex: 0,
-    text: row.summary,
+    text: qualifyCommunitySummary(row.summary, options.filters?.tags),
     headingPath: [row.label],
     pageNumber: null,
-    tokenEstimate: Math.ceil(row.summary.length / 4),
+    tokenEstimate: Math.ceil(qualifyCommunitySummary(row.summary, options.filters?.tags).length / 4),
     score: 1 / (120 + row.rank),
     filename: `${row.label} community`,
     pageNumbers: [],
@@ -1309,6 +1318,7 @@ async function graphNeighborSearch(
       join documents document on document.id = chunk.document_id
       where document.workspace_id = ${workspaceId}
         and ${lexicalSearchableDocument("document")}
+        and ${documentTagPredicate(sql`document.id`, options.filters?.tags)}
       order by rank asc
       limit ${limit}
     `;
@@ -1352,12 +1362,13 @@ async function executeHybridSearch(
   options: SearchOptions = {},
 ): Promise<SearchResponse> {
   const setup = await timePhase("setup", () => resolveSearchSetup(userId, options));
-  const wholeCorpusFallback = async (): Promise<SearchResult[]> => {
+  const wholeCorpusFallback = async (filters = setup.resolvedOptions.filters): Promise<SearchResult[]> => {
     const corpusCtx = await loadWorkspaceWholeCorpusContext({
       workspaceId: setup.normalizedScope.workspaceId,
       userId,
-      documentIds: setup.resolvedOptions.filters?.documentIds,
-      documentId: setup.resolvedOptions.filters?.documentId,
+      documentIds: filters?.documentIds,
+      documentId: filters?.documentId,
+      tags: filters?.tags,
       maxDocuments: wholeCorpusContextLimits.maxDocuments,
       maxChunks: wholeCorpusContextLimits.maxChunks,
       maxTokens: wholeCorpusContextLimits.maxTokens,

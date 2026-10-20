@@ -3,6 +3,7 @@ import { Hono, type Context } from "hono";
 import { z } from "zod";
 import { zValidator } from "@hono/zod-validator";
 import {
+  documentTagsSchema,
   isDefaultWorkspaceAlias,
   pipelineFeatureOverridesSchema,
   workspaceTemplateKeySchema,
@@ -31,6 +32,7 @@ import {
   createBulkWorkspaceIntake,
   createRemoteUrlWorkspaceIntake,
   parseFormWorkspaceIntakePipeline,
+  parseFormDocumentTags,
   parseWorkspaceIntakePipeline,
   parseWorkspaceIntakeTemplateKey,
 } from "../services/workspace-intake-actions.js";
@@ -48,6 +50,7 @@ type Uploadable = File | string | Array<File | string> | undefined;
 const canonicalIdSchema = z.string().trim().min(1).max(MAX_CANONICAL_ID_LENGTH);
 
 const ingestUrlSchema = z.object({
+  tags: documentTagsSchema.optional(),
   orgId: z.string().optional(),
   workspaceId: z.string().optional(),
   newWorkspace: z.boolean().optional(),
@@ -71,6 +74,7 @@ const directUploadFileSchema = z.object({
 });
 
 const createDirectSessionSchema = z.object({
+  tags: documentTagsSchema.optional(),
   orgId: z.string().optional(),
   workspaceId: z.string().optional(),
   newWorkspace: z.boolean().optional(),
@@ -219,6 +223,7 @@ export const createUploadsRoutes = (ports: WorkspaceIntakePorts = workspaceIntak
           templateKey: input.templateKey ?? null,
           pipeline,
           files: input.files,
+          tags: input.tags,
         });
         return c.json(session, 201);
       } catch (error) {
@@ -336,6 +341,7 @@ export const createUploadsRoutes = (ports: WorkspaceIntakePorts = workspaceIntak
         pipeline,
         files,
         canonicalIds,
+        tags: parseFormDocumentTags(body.tags),
         idempotencyKey,
         contentLength: c.req.header("content-length"),
         audit: {
@@ -376,6 +382,7 @@ export const createUploadsRoutes = (ports: WorkspaceIntakePorts = workspaceIntak
           workspaceName: body.workspaceName?.trim() || null,
           templateKey: body.templateKey,
           pipeline: body.pipeline,
+          tags: body.tags,
           urls: body.urls.map((entry) => typeof entry === "string" ? entry : entry.url),
           canonicalIds: body.urls.map((entry) => typeof entry === "string" ? null : entry.canonicalId ?? null),
           idempotencyKey,

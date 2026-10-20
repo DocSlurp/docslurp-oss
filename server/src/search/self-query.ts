@@ -54,7 +54,7 @@ function mergeFilters(
     documentIds: base?.documentIds?.length
       ? base.documentIds
       : derived.documentIds,
-    tags: uniqueStrings([...(base?.tags ?? []), ...(derived.tags ?? [])]),
+    tags: base?.tags?.length ? base.tags : derived.tags,
     mimeTypes: uniqueStrings([
       ...(base?.mimeTypes ?? []),
       ...(derived.mimeTypes ?? []),
@@ -96,6 +96,13 @@ function deriveHeuristicPlan(query: string): SelfQueryPlan {
   const filters: SearchFilters = {};
   const reasons: string[] = [];
 
+  const tags = [...query.matchAll(/\btag:(?:"([^"\n]+)"|([^\s,]+))/g)]
+    .map((match) => (match[1] ?? match[2]).trim()).filter(Boolean);
+  if (tags.length && tags.length <= 24 && tags.every((tag) => tag.length <= 100 && !/[\u0000,]/.test(tag))) {
+    filters.tags = uniqueStrings(tags);
+    reasons.push("Applied explicit tag: labels.");
+  }
+
   const pageRange = query.match(
     /\b(?:page|pages|slide|slides)\s+(\d+)(?:\s*[-–to]+\s*(\d+))?/i,
   );
@@ -113,7 +120,7 @@ function deriveHeuristicPlan(query: string): SelfQueryPlan {
     }
   }
 
-  const quotedDocument = query.match(/["“](.+?)["”]/);
+  const quotedDocument = query.replace(/\btag:(?:"[^"\n]+"|[^\s,]+)/g, "").match(/["“](.+?)["”]/);
   if (quotedDocument?.[1]) {
     filters.filenameContains = quotedDocument[1];
     reasons.push(`Detected quoted document reference "${quotedDocument[1]}".`);

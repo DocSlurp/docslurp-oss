@@ -169,6 +169,7 @@ export function applySearchControls(args: {
   query: string;
   results: SearchResult[];
   settings: WorkspaceSearchSettings;
+  allowMissingPins?: boolean;
 }): SearchResult[] {
   let out = [...args.results];
 
@@ -222,7 +223,7 @@ export function applySearchControls(args: {
       } else if (p.documentId) {
         candidate = out.find((r) => r.citation.documentId === p.documentId) ?? null;
       }
-      if (!candidate && p.documentId) {
+      if (!candidate && p.documentId && args.allowMissingPins !== false) {
         // fabricate a placeholder the UI can still surface as a top link
         candidate = {
           text: "",

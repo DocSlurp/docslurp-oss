@@ -94,6 +94,7 @@ export type WorkspaceIntakeAudit = {
 };
 
 export interface WorkspaceIntakeRequest {
+  tags?: string[];
   userId: string;
   orgId?: string | null;
   /**
@@ -121,6 +122,7 @@ export interface WorkspaceIntakeRequest {
 }
 
 export interface StoredIntakeFile {
+  tags?: string[];
   /** Measured while storing source bytes; absent for already-stored sources. */
   fileSize?: number;
   filename: string;
@@ -428,6 +430,7 @@ async function storeItem(
     sourceKey,
     ...(fileSize === undefined ? {} : { fileSize }),
     ...(item.metadata ? { metadata: item.metadata } : {}),
+    ...(request.tags ? { tags: request.tags } : {}),
     ...(item.canonicalId ? { canonicalId: item.canonicalId } : {}),
   });
   const { content } = item;

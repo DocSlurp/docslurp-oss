@@ -1,3 +1,4 @@
+import { qualifyCommunitySummary } from "./community-context.js";
 import type { PrivacyMode } from "@docslurp/shared";
 import type { SearchResult } from "@docslurp/shared";
 
@@ -44,7 +45,7 @@ export interface SearchSessionExecutionInput {
   variant?: string;
   workspaceSettings?: Parameters<typeof applySearchControls>[0]["settings"];
   retrievalChain?: unknown;
-  wholeCorpusFallback?: () => Promise<SearchResult[]>;
+  wholeCorpusFallback?: (filters?: SearchOptions["filters"]) => Promise<SearchResult[]>;
   /** Floor already applied to `chunks`; omitted: resolved from the options with nothing dropped yet. */
   relevanceFloor?: { minScore: number; dropped: number };
 }
@@ -330,8 +331,14 @@ export async function finalizeSearchSessionExecution(
       query: input.query,
       results,
       settings: input.workspaceSettings,
+      allowMissingPins: !input.filters?.tags?.length,
     });
   }
+
+  // Compression may rewrite the text; restore the scope qualification afterward.
+  results = results.map((result) => result.citation.source === "community_summary"
+    ? { ...result, text: qualifyCommunitySummary(result.text, input.filters?.tags) }
+    : result);
 
   if (input.options.parentRetrieval) {
     await attachParentText(results);
@@ -355,7 +362,7 @@ export async function finalizeSearchSessionExecution(
     input.wholeCorpusFallback
   ) {
     try {
-      const fallbackResults = await input.wholeCorpusFallback();
+      const fallbackResults = await input.wholeCorpusFallback(input.filters);
       if (fallbackResults.length > 0) {
         calibratedResults = calibrateSearchConfidence(fallbackResults);
         usedWholeCorpusFallback = calibratedResults.length > 0;

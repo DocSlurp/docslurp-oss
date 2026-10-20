@@ -68,7 +68,7 @@ export interface SearchSessionRunnerAdapters {
     workspaceId: string;
     options: SearchOptions;
   }): Promise<SearchChunk[]>;
-  wholeCorpusFallback(): Promise<SearchResult[]>;
+  wholeCorpusFallback(filters?: SearchOptions["filters"]): Promise<SearchResult[]>;
 }
 
 function embeddingPipelineOf(setup: SearchSetup): string | null {
@@ -198,6 +198,7 @@ async function executeSearchSession(args: Parameters<typeof runSearchSession>[0]
         enabled: effectiveOptions.enableGraphExpansion,
         query,
         textQuery: retrievalPlan.textQuery,
+        tags: effectiveOptions.filters?.tags,
         workspaceId: normalizedScope.workspaceId,
       }));
 

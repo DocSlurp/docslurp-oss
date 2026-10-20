@@ -2087,6 +2087,7 @@ export const parserEvalResults = pgTable(
 export const uploadSessions = pgTable(
   "upload_sessions",
   {
+    tags: text().array().default([]).notNull(),
     id: text().primaryKey().notNull(),
     userId: text("user_id").notNull(),
     orgId: text("org_id"),
@@ -2853,6 +2854,7 @@ export const documentTags = pgTable(
       .notNull(),
   },
   (table) => [
+    index("document_tags_tag_document_idx").on(table.tag, table.documentId),
     index("document_tags_document_id_idx").using(
       "btree",
       table.documentId.asc().nullsLast().op("text_ops"),

@@ -1,3 +1,4 @@
+import { documentTagPredicate } from "./document-tags.js";
 import { sql } from "../db.js";
 
 export async function expandGraphTextQuery(args: {
@@ -5,6 +6,7 @@ export async function expandGraphTextQuery(args: {
   query: string;
   textQuery: string;
   workspaceId: string;
+  tags?: string[];
 }): Promise<string> {
   if (!args.enabled) {
     return args.textQuery;
@@ -20,6 +22,7 @@ export async function expandGraphTextQuery(args: {
       join documents d on d.id = c.document_id
       where d.workspace_id = ${args.workspaceId}
         and d.superseded_at is null
+        and ${documentTagPredicate(sql`d.id`, args.tags)}
         and d.status <> 'pii_blocked'
         and (
           c.ts_content @@ websearch_to_tsquery('english', ${args.query})

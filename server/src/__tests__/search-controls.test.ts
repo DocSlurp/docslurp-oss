@@ -1,3 +1,4 @@
+import { defaultWorkspaceSearchSettings } from "@docslurp/shared";
 import { describe, expect, it } from "vitest";
 
 import { applySearchControls } from "../services/search-controls.js";
@@ -150,4 +151,12 @@ describe("applySearchControls", () => {
     });
     expect(out[0]?.citation.documentId).toBe("d2");
   });
+});
+
+
+it("does not fabricate pinned documents outside filtered candidates", () => {
+  const results = applySearchControls({ query: "budget", results: [], allowMissingPins: false,
+    settings: { ...defaultWorkspaceSearchSettings, workspaceId: "w", userId: "u", pinnedResults: [{ queryPattern: "budget", documentId: "outside" }] },
+  });
+  expect(results).toEqual([]);
 });
