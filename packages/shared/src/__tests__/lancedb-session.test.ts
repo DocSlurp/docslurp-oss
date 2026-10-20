@@ -30,7 +30,7 @@ describe("resolveLanceSessionConfig", () => {
   });
 
   it("defaults read consistency to 10 s and accepts 0", () => {
-    expect(resolveLanceSessionConfig({}, GB).readConsistencySeconds).toBe(10);
+    expect(resolveLanceSessionConfig({}, GB).readConsistencySeconds).toBe(30);
     expect(resolveLanceSessionConfig({ LANCEDB_READ_CONSISTENCY_SECONDS: "60" }, GB).readConsistencySeconds).toBe(60);
     expect(resolveLanceSessionConfig({ LANCEDB_READ_CONSISTENCY_SECONDS: "0" }, GB).readConsistencySeconds).toBe(0);
   });

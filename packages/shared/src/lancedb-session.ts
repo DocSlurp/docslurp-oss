@@ -63,7 +63,7 @@ export function availableMemoryBytes(): number {
 export function resolveLanceSessionConfig(env: Env = process.env, memoryBytes: number = availableMemoryBytes()): LanceSessionConfig {
   const indexMb = parseNumber(env, "LANCEDB_INDEX_CACHE_MB", 1, true);
   const metadataMb = parseNumber(env, "LANCEDB_METADATA_CACHE_MB", 1, true);
-  const readConsistencySeconds = parseNumber(env, "LANCEDB_READ_CONSISTENCY_SECONDS", 0) ?? 10;
+  const readConsistencySeconds = parseNumber(env, "LANCEDB_READ_CONSISTENCY_SECONDS", 0) ?? 30;
   // 25% / 5% of usable memory, capped at LanceDB's defaults and floored so tiny machines still cache.
   const autoIndex = Math.min(LANCE_DEFAULT_INDEX_CACHE_BYTES, Math.max(64 * MB, Math.floor(memoryBytes * 0.25)));
   const autoMetadata = Math.min(LANCE_DEFAULT_METADATA_CACHE_BYTES, Math.max(32 * MB, Math.floor(memoryBytes * 0.05)));

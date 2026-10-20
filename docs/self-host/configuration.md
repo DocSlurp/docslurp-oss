@@ -115,7 +115,7 @@ answers searches. Instead the server re-prewarms open tables every
 | `LANCEDB_PREWARM_BLOCKING` | `false` | `true` makes the first search wait for the prewarm. Off, the first searches run while it loads. |
 | `LANCEDB_PREWARM_REFRESH_SECONDS` | `60` | With `LANCEDB_PREWARM_INDEX=true`, re-prewarm open tables this often. `0` disables. |
 | `LANCEDB_PREWARM_DATA` | `false` | Also load the `vector`, `id` and `documentId` columns, so refine and `documentId` filters read memory. Costs RAM of that size. |
-| `LANCEDB_READ_CONSISTENCY_SECONDS` | `10` | How often an open table checks for a new version. Higher means fewer manifest reads, but new rows take that long to become searchable. While documents are being ingested, a longer interval avoids re-reading each new unindexed fragment (see the benchmark in the PR). `0` checks on every query. |
+| `LANCEDB_READ_CONSISTENCY_SECONDS` | `30` | How often an open table checks for a new version. Higher means fewer manifest reads, but new rows take that long to become searchable. While documents are being ingested, a longer interval avoids re-reading each new unindexed fragment (see the benchmark in the PR). `0` checks on every query. |
 
 The server logs `[lancedb-session] created ...` at startup with the configured sizes.
 
