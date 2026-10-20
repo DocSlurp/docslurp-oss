@@ -69,7 +69,8 @@ Variables each provider reads. Secret values are never logged or included in err
 | `MODAL_TOKEN_ID` | modal | required | Modal API token id. Secret. |
 | `MODAL_TOKEN_SECRET` | modal | required | Modal API token secret. Secret. |
 | `DOCSLURP_MODAL_APP` | modal | `docslurp-parsers` | Modal app that owns the sandboxes. Created if missing. |
-| `DOCSLURP_MODAL_IMAGE` | modal | `ghcr.io/docslurp/worker-full:<worker version>` | Image the sandboxes run. It must contain the parser binaries. |
+| `DOCSLURP_MODAL_IMAGE` | modal | `ghcr.io/docslurp/worker-full:<DOCSLURP_VERSION>` in release images; required otherwise | Image the sandboxes run. It must contain the parser binaries. |
+| `DOCSLURP_MODAL_REGISTRY_SECRET` | modal | unset | Name of a Modal Secret holding `REGISTRY_USERNAME` and `REGISTRY_PASSWORD`, for pulling a private image. |
 | `DOCSLURP_MODAL_CPU` | modal | `2` | Requested CPU cores per sandbox. |
 | `DOCSLURP_MODAL_MEMORY_MB` | modal | `4096` | Requested memory in MiB per sandbox. |
 | `DOCSLURP_MODAL_SESSION_TIMEOUT_SECONDS` | modal | `900` | Maximum sandbox lifetime. Bounds billing if a session leaks. |
@@ -88,7 +89,7 @@ Modal runs each activity's parser commands in a remote sandbox. Use it when the 
 
 1. Create a Modal API token and set `MODAL_TOKEN_ID` and `MODAL_TOKEN_SECRET` on the worker. Keep them in your secret store, not in the repository.
 2. Set `DOCSLURP_PARSER_SANDBOX=modal`.
-3. The default image is `ghcr.io/docslurp/worker-full:<version>`, matching the worker's version. `.github/workflows/worker-images.yml` publishes it on release tags (see [Releases](../releases.md)). To use your own image, set `DOCSLURP_MODAL_IMAGE`.
+3. Choose the image. Release worker images set `DOCSLURP_VERSION`, and the default image is `ghcr.io/docslurp/worker-full:<DOCSLURP_VERSION>`, which `.github/workflows/worker-images.yml` publishes on the same release tag (see [Releases](../releases.md)). A worker run from source or a local image build has no `DOCSLURP_VERSION`, so `DOCSLURP_MODAL_IMAGE` is required there; without it the worker stops at start with `Invalid sandbox configuration; missing required: DOCSLURP_MODAL_IMAGE`. Modal pulls the image without credentials, so the GHCR package must be public. For a private image, create a Modal Secret with `REGISTRY_USERNAME` and `REGISTRY_PASSWORD` and set `DOCSLURP_MODAL_REGISTRY_SECRET` to its name.
 4. Start the worker. The probe loads the `modal` package and opens the app (`DOCSLURP_MODAL_APP`, created if it does not exist).
 
 How it behaves:

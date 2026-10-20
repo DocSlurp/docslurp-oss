@@ -1,5 +1,3 @@
-import { readFileSync } from "node:fs";
-
 import { resolveWorkerDeploymentProfile, buildLocalComputeUsageEvent } from "../../../pipeline/local-compute-cost.js";
 import type { UsageEvent } from "../../../models.js";
 import { readSandboxConfig } from "../../config-schema.js";
@@ -22,19 +20,14 @@ export interface ModalConfig {
   tokenSecret: string;
   app: string;
   image: string;
+  /** Name of a Modal Secret with REGISTRY_USERNAME/REGISTRY_PASSWORD for a private image. */
+  registrySecret?: string;
   cpu: number;
   memoryMb: number;
   sessionTimeoutSeconds: number;
 }
 
 const ISOLATION: SandboxIsolation = { filesystem: true, network: "full", processes: true, location: "remote" };
-
-function workerVersion(): string {
-  const manifest = JSON.parse(readFileSync(new URL("../../../../package.json", import.meta.url), "utf8")) as {
-    version: string;
-  };
-  return manifest.version;
-}
 
 const configSchema: SandboxConfigSchema = {
   type: "object",
@@ -50,9 +43,16 @@ const configSchema: SandboxConfigSchema = {
     },
     image: {
       type: "string",
-      description: "Container image sandboxes run, which must contain the parser binaries.",
-      default: `ghcr.io/docslurp/worker-full:${workerVersion()}`,
+      description:
+        "Container image sandboxes run, which must contain the parser binaries. Defaults to " +
+        "ghcr.io/docslurp/worker-full:<DOCSLURP_VERSION> in release images; required otherwise.",
       env: "DOCSLURP_MODAL_IMAGE",
+    },
+    registrySecret: {
+      type: "string",
+      description:
+        "Name of a Modal Secret holding REGISTRY_USERNAME and REGISTRY_PASSWORD, for pulling a private image.",
+      env: "DOCSLURP_MODAL_REGISTRY_SECRET",
     },
     cpu: { type: "number", description: "Requested CPU cores per sandbox.", default: 2, env: "DOCSLURP_MODAL_CPU" },
     memoryMb: {
@@ -69,6 +69,20 @@ const configSchema: SandboxConfigSchema = {
     },
   },
 };
+
+/**
+ * Release worker images bake DOCSLURP_VERSION (worker-images.yml), and the same release
+ * publishes worker-full under that tag. Source and development installs have no published
+ * image of their own version, so they must name one.
+ */
+function defaultModalImage(env: NodeJS.ProcessEnv): string {
+  const version = env.DOCSLURP_VERSION?.trim();
+  if (version) return `ghcr.io/docslurp/worker-full:${version}`;
+  throw new SandboxConfigError(
+    "Invalid sandbox configuration; missing required: DOCSLURP_MODAL_IMAGE (DOCSLURP_VERSION is unset, " +
+      "so there is no published worker image to default to; release images set it)",
+  );
+}
 
 /** Error text with secret config values removed. Never forward raw SDK errors. */
 function safeMessage(config: Partial<ModalConfig>, error: unknown): string {
@@ -172,7 +186,10 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
     name: "Modal",
     description: "Runs each parser in a remote Modal sandbox with files staged in and out per activity.",
     configSchema,
-    readConfig: (env) => readSandboxConfig<ModalConfig>(configSchema, env),
+    readConfig: (env) => {
+      const config = readSandboxConfig<Omit<ModalConfig, "image"> & { image?: string }>(configSchema, env);
+      return { ...config, image: config.image ?? defaultModalImage(env) };
+    },
     async probe(config) {
       let client: Awaited<ReturnType<typeof loadClient>>["client"] | undefined;
       try {
@@ -212,7 +229,8 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
       function ensureSandbox(): Promise<void> {
         creating ??= (async () => {
           const app = await client.apps.fromName(config.app, { createIfMissing: true });
-          const image = client.images.fromRegistry(config.image);
+          const registrySecret = config.registrySecret ? await client.secrets.fromName(config.registrySecret) : undefined;
+          const image = client.images.fromRegistry(config.image, registrySecret);
           sandbox = await client.sandboxes.create(app, image, {
             cpu: config.cpu,
             memoryMiB: config.memoryMb,

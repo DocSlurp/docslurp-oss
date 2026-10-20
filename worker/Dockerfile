@@ -106,9 +106,6 @@ RUN groupadd --system --gid 10001 docslurp \
 
 ENV HOME=/home/docslurp
 ENV DOCSLURP_CLAMAV_RUN_DIR=/tmp/clamav
-ENV DOCSLURP_PARSER_SANDBOX_ENABLED=true
-ENV DOCSLURP_PARSER_SANDBOX_NETWORK=none
-ENV DOCSLURP_PARSER_SANDBOX_MODE=isolated
 ENV DOCSLURP_PARSER_SANDBOX_WRITABLE_PATHS=
 ENV DOCSLURP_DEPLOYMENT_PROFILE=heavy
 ENV DOCSLURP_WORKER_IMAGE=worker-default
@@ -119,6 +116,11 @@ ENV DOCSLURP_ALLOCATED_MEMORY_GB=4
 ENV DOCSLURP_NATIVE_PDF_INSTALLED=${DOCSLURP_NATIVE_PDF:+1}
 ENV NATIVE_PDF_OCR_MODEL_DIR=${DOCSLURP_NATIVE_PDF_OCR_MODELS:+/opt/native-pdf/ocr-models}
 ENV NATIVE_PDF_FONTS_DIR=${DOCSLURP_NATIVE_PDF_CJK_FONTS:+/opt/native-pdf/fonts}
+
+# Release version of this image (set by .github/workflows/worker-images.yml; empty for
+# local builds). The Modal parser sandbox defaults to worker-full:<this version>.
+ARG DOCSLURP_VERSION=
+ENV DOCSLURP_VERSION=${DOCSLURP_VERSION}
 
 # Temporal Build ID for this image (worker/src/temporal/worker-versioning.ts).
 # Last, so a new SHA does not invalidate earlier layers.

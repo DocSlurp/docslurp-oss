@@ -176,7 +176,14 @@ function finished(stdout = "out", exitCode = 0): FakeProcess {
 
 /** A Modal SDK double: records filesystem traffic and lets each test script `exec`. */
 function fakeSdk(opts: { createFails?: boolean; exec?: (argv: string[]) => Promise<FakeProcess> } = {}) {
-  const state = { terminate: 0, clientClose: 0, writes: [] as string[], mkdirs: [] as string[], stats: [] as string[] };
+  const state = {
+    terminate: 0,
+    clientClose: 0,
+    writes: [] as string[],
+    mkdirs: [] as string[],
+    stats: [] as string[],
+    images: [] as Array<[string, unknown]>,
+  };
   const sandbox = {
     terminate: async () => void state.terminate++,
     filesystem: {
@@ -194,7 +201,8 @@ function fakeSdk(opts: { createFails?: boolean; exec?: (argv: string[]) => Promi
     SandboxFilesystemNotFoundError: NotFound,
     ModalClient: class {
       apps = { fromName: async () => ({}) };
-      images = { fromRegistry: () => ({}) };
+      images = { fromRegistry: (tag: string, secret?: unknown) => void state.images.push([tag, secret]) };
+      secrets = { fromName: async (name: string) => ({ secret: name }) };
       sandboxes = {
         create: async () => {
           if (opts.createFails) throw new Error("no capacity");
@@ -314,6 +322,17 @@ describe("modal provider session lifecycle", () => {
     expect((error as SandboxRunError).usage?.provider).toBe("modal");
   });
 
+  it("pulls the image with the named registry secret when one is configured", async () => {
+    const { sdk, state } = fakeSdk();
+    const provider = createModalProvider(async () => sdk);
+    await (await provider.openSession({ ...config, registrySecret: "ghcr-pull" }, { activityId: "a" })).close();
+    await (await provider.openSession(config, { activityId: "b" })).close();
+    expect(state.images).toEqual([
+      ["debian:trixie-slim", { secret: "ghcr-pull" }],
+      ["debian:trixie-slim", undefined],
+    ]);
+  });
+
   it("reports an exec deadline as a killed command", async () => {
     const { session } = await open({
       exec: async () => {
@@ -371,5 +390,28 @@ describe("modal usage event", () => {
     expect(event.costCents).toBe(0);
     expect(event.metadata).toMatchObject({ costRollup: "included", billable: false, activityId: "activity-1" });
     expect(Number(event.metadata?.effectiveCostCents)).toBeGreaterThan(0);
+  });
+});
+
+describe("modal image default", () => {
+  const provider = createModalProvider(async () => {
+    throw new Error("not loaded");
+  });
+  const tokens = { MODAL_TOKEN_ID: "ak-id", MODAL_TOKEN_SECRET: "as-secret" };
+
+  it("defaults to the worker-full image of the release the worker image was built from", () => {
+    expect(provider.readConfig({ ...tokens, DOCSLURP_VERSION: "1.2.3" }).image).toBe("ghcr.io/docslurp/worker-full:1.2.3");
+  });
+
+  it("uses DOCSLURP_MODAL_IMAGE when set", () => {
+    expect(provider.readConfig({ ...tokens, DOCSLURP_VERSION: "1.2.3", DOCSLURP_MODAL_IMAGE: "example/parsers:1" }).image).toBe(
+      "example/parsers:1",
+    );
+  });
+
+  it("requires DOCSLURP_MODAL_IMAGE when DOCSLURP_VERSION is unset", () => {
+    const read = () => provider.readConfig({ ...tokens });
+    expect(read).toThrow(SandboxConfigError);
+    expect(read).toThrow(/DOCSLURP_MODAL_IMAGE.*DOCSLURP_VERSION is unset/);
   });
 });

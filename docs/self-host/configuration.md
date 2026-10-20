@@ -129,7 +129,8 @@ read them through `packages/shared/src/temporal-security.ts`.
 | `DOCSLURP_PARSER_SANDBOX_WRITABLE_PATHS` | empty | Comma-separated private workspaces parsers may write (bubblewrap, landlock). |
 | `DOCSLURP_LANDRUN_BINARY` | `landrun` | landrun executable (landlock). |
 | `MODAL_TOKEN_ID`, `MODAL_TOKEN_SECRET` | required for `modal` | Modal API token. Secrets. |
-| `DOCSLURP_MODAL_APP`, `DOCSLURP_MODAL_IMAGE`, `DOCSLURP_MODAL_CPU`, `DOCSLURP_MODAL_MEMORY_MB`, `DOCSLURP_MODAL_SESSION_TIMEOUT_SECONDS` | `docslurp-parsers`, `ghcr.io/docslurp/worker-full:<version>`, `2`, `4096`, `900` | Modal sandbox settings. |
+| `DOCSLURP_MODAL_APP`, `DOCSLURP_MODAL_IMAGE`, `DOCSLURP_MODAL_REGISTRY_SECRET`, `DOCSLURP_MODAL_CPU`, `DOCSLURP_MODAL_MEMORY_MB`, `DOCSLURP_MODAL_SESSION_TIMEOUT_SECONDS` | `docslurp-parsers`, `ghcr.io/docslurp/worker-full:<DOCSLURP_VERSION>` (required when `DOCSLURP_VERSION` is unset), unset, `2`, `4096`, `900` | Modal sandbox settings. |
+| `DOCSLURP_VERSION` | set by release worker images; unset in source installs | Release version the image was built from. Picks the default Modal image. |
 
 Details are in [Parser sandbox providers](sandbox-providers.md#configuration).
 

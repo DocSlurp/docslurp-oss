@@ -85,6 +85,9 @@ jobs:
           file: ${{ matrix.dockerfile }}
           platforms: linux/amd64
           push: true
+          # Baked into the image as DOCSLURP_VERSION; the Modal provider's default image tag.
+          build-args: |
+            DOCSLURP_VERSION=${{ steps.version.outputs.version }}
           tags: |
             ghcr.io/docslurp/worker-${{ matrix.profile }}:${{ steps.version.outputs.version }}
             ghcr.io/docslurp/worker-${{ matrix.profile }}:${{ github.sha }}

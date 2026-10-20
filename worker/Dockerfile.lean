@@ -153,9 +153,6 @@ RUN rm -rf ./worker/scripts/__pycache__ \
 ENV HOME=/home/docslurp
 ENV PYTHON_VENV=/app/.venv
 ENV DOCSLURP_CLAMAV_RUN_DIR=/tmp/clamav
-ENV DOCSLURP_PARSER_SANDBOX_ENABLED=true
-ENV DOCSLURP_PARSER_SANDBOX_NETWORK=none
-ENV DOCSLURP_PARSER_SANDBOX_MODE=isolated
 ENV DOCSLURP_PARSER_SANDBOX_WRITABLE_PATHS=
 ENV DOCSLURP_DEPLOYMENT_PROFILE=lean
 ENV DOCSLURP_WORKER_IMAGE=worker-lean
@@ -176,6 +173,11 @@ ARG DOCSLURP_NATIVE_PDF_CJK_FONTS=
 ENV DOCSLURP_NATIVE_PDF_INSTALLED=${DOCSLURP_NATIVE_PDF:+1}
 ENV NATIVE_PDF_OCR_MODEL_DIR=${DOCSLURP_NATIVE_PDF_OCR_MODELS:+/opt/native-pdf/ocr-models}
 ENV NATIVE_PDF_FONTS_DIR=${DOCSLURP_NATIVE_PDF_CJK_FONTS:+/opt/native-pdf/fonts}
+
+# Release version of this image (set by .github/workflows/worker-images.yml; empty for
+# local builds). The Modal parser sandbox defaults to worker-full:<this version>.
+ARG DOCSLURP_VERSION=
+ENV DOCSLURP_VERSION=${DOCSLURP_VERSION}
 
 # Temporal Build ID for this image (worker/src/temporal/worker-versioning.ts).
 # Last, so a new SHA does not invalidate earlier layers.
