@@ -24,6 +24,11 @@ import { sql } from "../db.js";
 import { acceptApiKeys } from "../lib/route-auth.js";
 import { currentRequestApiKeyId } from "../lib/request-context.js";
 import { env } from "../config.js";
+import { chatModelRefused, ChatModelNotAllowedError } from "../lib/chat-model-policy.js";
+
+function modelNotAllowed(c: Context): Response {
+  return apiErrorResponse(c, 400, "model_not_allowed", new ChatModelNotAllowedError().message);
+}
 
 /** Runs each validated query, preserving input order and per-item errors. */
 async function runSearchBatch(c: Context, parsed: { queries: SearchInput[]; concurrency: number }, userId: string): Promise<BatchResult[]> {
@@ -83,14 +88,20 @@ async function handleWorkspaceChat(c: Context, mode: "public" | "grounded") {
   if (forbidden) return forbidden;
   const chatDisabled = await workspaceChatDisabledBody(workspaceId, userId);
   if (chatDisabled) return apiErrorResponse(c, 403, "chat_disabled", chatDisabled.error);
-  const response = await chatWorkspace({ workspaceId, userId,
-    query: body.q, sessionId: body.sessionId, model: body.model,
-    actor: getRequestActor(c), signal: c.req.raw.signal,
-    ...(mode === "grounded"
-      ? { allowAgentTools: false, allowConfiguration: false }
-      : { allowAgentTools: env.publicChatAgentEnabled }),
-    ...(body.retrieval ? { retrieval: body.retrieval } : {}),
-    ...(body.filters ? { filters: body.filters } : {}) });
+  let response;
+  try {
+    response = await chatWorkspace({ workspaceId, userId,
+      query: body.q, sessionId: body.sessionId, model: body.model,
+      actor: getRequestActor(c), signal: c.req.raw.signal,
+      ...(mode === "grounded"
+        ? { allowAgentTools: false, allowConfiguration: false }
+        : { allowAgentTools: env.publicChatAgentEnabled, ...(body.agent ? { agent: body.agent } : {}) }),
+      ...(body.retrieval ? { retrieval: body.retrieval } : {}),
+      ...(body.filters ? { filters: body.filters } : {}) });
+  } catch (error) {
+    if (error instanceof ChatModelNotAllowedError) return modelNotAllowed(c);
+    throw error;
+  }
   return c.json(response);
 }
 
@@ -177,6 +188,7 @@ export const searchRoutes = new Hono()
     if (forbidden) return forbidden;
     const chatDisabled = await workspaceChatDisabledBody(workspaceId, userId);
     if (chatDisabled) return apiErrorResponse(c, 403, "chat_disabled", chatDisabled.error);
+    if (await chatModelRefused(getRequestActor(c), model)) return modelNotAllowed(c);
     // Refuse before the stream opens, so a blocked spend is a 402.
     // Pre-check only: chatWorkspace takes the interactive hold.
     await assertCanSpend(null, workspaceId, { kind: "interactive", hold: false });

@@ -50,10 +50,11 @@ import { getWorkspaceSearchSettings } from "./search-controls.js";
 import { getWorkspace } from "./workspaces.js";
 import { loadIngestReport, summarizeIngestReport } from "./ingest-report.js";
 import { canEditWorkspace, getWorkspaceAccess } from "./organizations.js";
-import {
-  resolveWorkspaceChatModel,
-  type WorkspaceChatModelId,
-} from "@docslurp/shared/workspace-chat-models";
+import type { WorkspaceChatModelId } from "@docslurp/shared/workspace-chat-models";
+import type { ChatAgentLimits, ChatAgentLimitsInput } from "@docslurp/shared";
+import { resolveChatAgentLimits, resolveChatModelRequest } from "../lib/chat-model-policy.js";
+import { isPlatformAdminActor } from "../lib/request-actor.js";
+import { currentRequestId } from "../lib/request-context.js";
 
 export type ChatSearchActivity = {
   id: string; groupId: string; query: string; status: "loading" | "success" | "error";
@@ -107,7 +108,7 @@ type PrivateChatModel = `llm://private/${string}`;
 type WorkspaceChatGeneratedText = Awaited<
   ReturnType<typeof generateOpenRouterDocumentText>
 > & {
-  model: WorkspaceChatModelId | PrivateChatModel;
+  model: string | PrivateChatModel;
 };
 
 type WorkspaceChatPendingSearchRetry = {
@@ -486,16 +487,20 @@ function buildUsageSummary(args?: {
   };
 }
 
+/** Eval models never fail over: a comparison must not silently measure another model. */
 function buildModelFailoverOrder(
-  preferredModel: WorkspaceChatModelId,
-): WorkspaceChatModelId[] {
-  return [...new Set([preferredModel, WORKSPACE_CHAT_FAILOVER_MODEL])];
+  preferredModel: string,
+  failover = true,
+): string[] {
+  return failover ? [...new Set([preferredModel, WORKSPACE_CHAT_FAILOVER_MODEL])] : [preferredModel];
 }
 
 async function generateWorkspaceChatTextWithFailover(args: {
   apiKey: string;
   privacyMode: PrivacyMode;
-  preferredModel: WorkspaceChatModelId;
+  preferredModel: string;
+  /** False for eval-allowlist models, which must answer themselves or fail. */
+  failover?: boolean;
   /** Non-standard workspaces: answer with this private route instead of hosted models (no failover). */
   privateModel?: PrivateChatModel;
   workspaceId?: string;
@@ -521,7 +526,7 @@ async function generateWorkspaceChatTextWithFailover(args: {
   }
   let lastError: unknown;
 
-  for (const model of buildModelFailoverOrder(args.preferredModel)) {
+  for (const model of buildModelFailoverOrder(args.preferredModel, args.failover)) {
     try {
       const generated = await generateOpenRouterDocumentText({
         apiKey: args.apiKey,
@@ -621,7 +626,7 @@ async function logChatUsage(args: {
   orgId: string | null | undefined;
   chatSessionId: string;
   searchSessionId: string | null;
-  model: WorkspaceChatModelId | PrivateChatModel;
+  model: string | PrivateChatModel;
   mode: "retrieval" | "whole-corpus";
   wholeCorpusFallbackReason?: WorkspaceChatFallbackReason | null;
   inputTokens: number;
@@ -649,7 +654,7 @@ async function logChatUsage(args: {
   });
 }
 
-function chatUsageLabels(model: WorkspaceChatModelId | PrivateChatModel): { provider: string; model: string } {
+function chatUsageLabels(model: string | PrivateChatModel): { provider: string; model: string } {
   const ref = parsePrivateModelUri(model);
   return ref ? { provider: "private", model: `${ref.alias}/${ref.model}` } : { provider: "openrouter", model };
 }
@@ -963,6 +968,8 @@ export async function chatWorkspace(args: {
   retrieval?: ChatRetrievalOverrides;
   /** Composer filters: documents, types, tags and indexed date. */
   filters?: ChatSearchFilters;
+  /** Search-agent budgets for this turn; only admins may raise them above the defaults. */
+  agent?: ChatAgentLimitsInput;
   /**
    * Dashboard chat only: answer "/status" (and, unless
    * CHAT_INGEST_REPORT_NATURAL=false, questions like "how did my files
@@ -974,6 +981,14 @@ export async function chatWorkspace(args: {
   if (args.actor && args.actor.userId !== args.userId) throw new Error("Chat actor does not match user");
   // Enforced here too so every caller (routes, MCP, automation) honours the switch.
   if (!(await isWorkspaceChatEnabled(args.workspaceId, args.userId))) throw new WorkspaceChatDisabledError();
+  // An explicit model is honoured exactly or refused (400), never silently swapped for the default.
+  const isAdmin = await isPlatformAdminActor(args.actor);
+  const resolved = resolveChatModelRequest({ requested: args.model, isAdmin });
+  const policy: ChatTurnPolicy = {
+    model: resolved.model, failover: resolved.source !== "eval",
+    requestedModel: args.model?.trim() || null,
+    limits: resolveChatAgentLimits(args.agent, isAdmin),
+  };
   // "/status" and "how did my files process?" are answered from the ingest report, without a model.
   if (args.answerIngestReport && requestsIngestReport(args.query, { natural: ingestReportNaturalIntents() })) {
     return await answerIngestReportTurn(args);
@@ -992,7 +1007,7 @@ export async function chatWorkspace(args: {
       sessionId,
       traceName: "workspace_chat",
     },
-    () => chatWorkspaceTurn(args, sessionId),
+    () => chatWorkspaceTurn(args, sessionId, policy),
   );
 }
 
@@ -1029,13 +1044,16 @@ async function answerIngestReportTurn(args: Parameters<typeof chatWorkspace>[0])
   };
 }
 
+type ChatTurnPolicy = { model: string; failover: boolean; requestedModel: string | null; limits: ChatAgentLimits };
+
 async function chatWorkspaceTurn(
   args: Parameters<typeof chatWorkspace>[0],
   sessionId: string,
+  policy: ChatTurnPolicy,
 ): Promise<WorkspaceChatResponse> {
   const startedAtMs = Date.now();
   const responseId = randomUUID();
-  const model = resolveWorkspaceChatModel(args.model);
+  const model = policy.model;
   const workspace = await getWorkspace(args.workspaceId, args.userId);
   // Every hosted call in this turn sees workspace content or the user's query
   // about it, so one privacy decision covers configuration, MCP and answers.
@@ -1080,6 +1098,7 @@ async function chatWorkspaceTurn(
         `Current search settings: ${JSON.stringify(searchSettings.retrievalDefaults)}. Explicit search configuration requests have already been processed; explain these current values rather than applying the change again.`,
       ].filter(Boolean).join("\n"),
       maxOutputTokens: args.maxOutputTokens ?? 2048, signal: args.signal,
+      requestedModel: policy.requestedModel, limits: policy.limits, requestId: currentRequestId(),
       onTextDelta: args.onTextDelta, onToolActivity: args.onToolActivity, onEvidence: args.onEvidence,
     });
     const answer = requireGeneratedAnswer(generated.answer);
@@ -1094,7 +1113,7 @@ async function chatWorkspaceTurn(
       finishReason: generated.finishReason === "length" ? "length" : generated.finishReason === "content-filter" ? "content-filter" : "stop",
       runtime: buildRuntimeSummary(startedAtMs),
       debug: { citations: generated.citations.length, model, fallback: false, historyTurns: history.length,
-        mode: "retrieval", wholeCorpus: buildWholeCorpusDebug(), toolCalls: generated.toolCalls },
+        mode: "retrieval", wholeCorpus: buildWholeCorpusDebug(), toolCalls: generated.toolCalls, ...generated.debug },
     };
   }
   // Resolve explicit filename restrictions inside the already-authorized workspace.
@@ -1156,7 +1175,7 @@ async function chatWorkspaceTurn(
         const generated = await generateWorkspaceChatTextWithFailover({
           apiKey: openRouterApiKey,
           privacyMode,
-          preferredModel: model,
+          preferredModel: model, failover: policy.failover,
           privateModel: privateChatModel,
           workspaceId: args.workspaceId,
           system: buildSystemInstructions({
@@ -1274,7 +1293,7 @@ async function chatWorkspaceTurn(
       const generated = await generateWorkspaceChatTextWithFailover({
         apiKey: openRouterApiKey,
         privacyMode,
-        preferredModel: model,
+        preferredModel: model, failover: policy.failover,
         privateModel: privateChatModel,
         workspaceId: args.workspaceId,
         system: buildSystemInstructions({
@@ -1508,7 +1527,7 @@ async function chatWorkspaceTurn(
     const generated = await generateWorkspaceChatTextWithFailover({
       apiKey: openRouterApiKey,
       privacyMode,
-      preferredModel: model,
+      preferredModel: model, failover: policy.failover,
       privateModel: privateChatModel,
       workspaceId: args.workspaceId,
       system: buildSystemInstructions({

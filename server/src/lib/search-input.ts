@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { chatRetrievalOverridesSchema, chatSearchFiltersSchema, searchCandidateDepthSchema, searchResultOrderSchema } from "@docslurp/shared";
+import { chatAgentLimitsInputSchema, chatRetrievalOverridesSchema, chatSearchFiltersSchema, searchCandidateDepthSchema, searchResultOrderSchema } from "@docslurp/shared";
 import { parseFilters } from "../search/filters.js";
 
 const id = z.string().trim().min(1).max(256);
@@ -50,7 +50,8 @@ export const searchInputSchema = z.object({
 export type SearchInput = z.infer<typeof searchInputSchema>;
 export const batchSearchInputSchema = z.object({
   queries: z.array(searchInputSchema).min(1).max(20),
-  concurrency: z.number().int().min(1).max(4).default(4),
+  /** Parallel retrievals; the chat search agent clamps it to the turn's `agent.searchConcurrency`. */
+  concurrency: z.number().int().min(1).max(8).default(4),
 }).strict();
 export const workspaceChatInputSchema = z.object({
   q: query,
@@ -62,6 +63,8 @@ export const workspaceChatInputSchema = z.object({
   retrieval: chatRetrievalOverridesSchema.optional(),
   /** Documents, types, tags and indexed-date filters. */
   filters: chatSearchFiltersSchema.optional(),
+  /** Search-agent budgets for this turn; non-admins may only lower the defaults. */
+  agent: chatAgentLimitsInputSchema.optional(),
 }).strict();
 
 /**

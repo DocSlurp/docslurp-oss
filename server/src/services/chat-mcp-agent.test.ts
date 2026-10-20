@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { MockLanguageModelV4 } from "ai/test";
 import { simulateReadableStream } from "ai";
 
-const mocks = vi.hoisted(() => ({ provider: vi.fn(), record: vi.fn(), dispatch: vi.fn(), createDispatch: vi.fn() }));
+const mocks = vi.hoisted(() => ({ provider: vi.fn(), record: vi.fn(), dispatch: vi.fn(), createDispatch: vi.fn(), providerName: undefined as string | undefined }));
 vi.mock("@ai-sdk/openai", () => ({ createOpenAI: () => ({ chat: mocks.provider }) }));
 vi.mock("../lib/ai-usage.js", () => ({ recordUsageEvent: mocks.record }));
 vi.mock("../lib/privacy.js", () => ({ allowHostedCallForWorkspace: vi.fn(async () => true), loadWorkspacePrivacyMode: vi.fn(async () => "standard"), openRouterCall: vi.fn() }));
@@ -14,7 +14,7 @@ vi.mock("./mcp-tools.js", () => ({
 }));
 vi.mock("@docslurp/shared", async importOriginal => ({
   ...await importOriginal<typeof import("@docslurp/shared")>(),
-  createOpenRouterUsageCapture: () => ({ fetch: vi.fn(), usage: () => undefined }),
+  createOpenRouterUsageCapture: () => ({ fetch: vi.fn(), usage: () => undefined, providerName: () => mocks.providerName }),
   resolveOpenRouterUsage: async ({ usage }: { usage: { inputTokens: number; outputTokens: number } }) => ({ ...usage, costCents: 0.01 }),
 }));
 const { runChatMcpAgent } = await import("./chat-mcp-agent.js");
