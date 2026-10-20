@@ -242,6 +242,45 @@ describe("chatWorkspace", () => {
     }
   });
 
+  it("refuses an unknown or non-admin eval model before spending or opening a session", async () => {
+    getWorkspaceSearchSettings.mockResolvedValue(buildSearchSettings());
+    const previous = process.env.DOCSLURP_CHAT_EVAL_MODELS;
+    process.env.DOCSLURP_CHAT_EVAL_MODELS = "inception/mercury-3";
+    const member = { type: "session" as const, userId: "user-1", sessionId: "s", user: { id: "user-1", email: "", name: "User" } };
+    try {
+      for (const model of ["unknown/model", "inception/mercury-3"]) {
+        await expect(chatWorkspace({ workspaceId: "ws-1", userId: "user-1", query: "hello", model, actor: member }))
+          .rejects.toMatchObject({ name: "ChatModelNotAllowedError", status: 400, code: "model_not_allowed" });
+      }
+      expect(sqlMock).not.toHaveBeenCalled();
+    } finally {
+      if (previous === undefined) delete process.env.DOCSLURP_CHAT_EVAL_MODELS; else process.env.DOCSLURP_CHAT_EVAL_MODELS = previous;
+    }
+  });
+
+  it("runs an admin's eval model in the agent with resolved limits and returns the agent debug", async () => {
+    sqlMock.mockResolvedValue([]);
+    getWorkspace.mockResolvedValue({ id: "ws-1", orgId: "org-1", systemPrompt: null });
+    getWorkspaceSearchSettings.mockResolvedValue(buildSearchSettings());
+    const agentDebug = { requestedModel: "inception/mercury-3", resolvedModel: "inception/mercury-3-20261001", stopReason: "answered", steps: 2 };
+    runChatMcpAgent.mockResolvedValue({ answer: "Supported answer", citations: [], toolCalls: [], finishReason: "stop",
+      usage: { inputTokens: 10, outputTokens: 4, totalTokens: 14, costCents: 0.01 }, debug: agentDebug });
+    const previous = { key: process.env.OPENROUTER_API_KEY, models: process.env.DOCSLURP_CHAT_EVAL_MODELS };
+    process.env.OPENROUTER_API_KEY = "fake";
+    process.env.DOCSLURP_CHAT_EVAL_MODELS = "inception/mercury-3";
+    try {
+      const response = await chatWorkspace({ workspaceId: "ws-1", userId: "user-1", query: "Find evidence", history: [], allowConfiguration: false,
+        model: "inception/mercury-3", agent: { maxSteps: 10, searchConcurrency: 8 },
+        actor: { type: "session", userId: "user-1", sessionId: "s", user: { id: "user-1", email: "", name: "Admin", isAdmin: true } } });
+      expect(runChatMcpAgent).toHaveBeenCalledWith(expect.objectContaining({ model: "inception/mercury-3", requestedModel: "inception/mercury-3",
+        limits: { maxSteps: 10, maxToolCalls: 12, searchConcurrency: 8, clamped: [] } }));
+      expect(response.debug).toMatchObject({ model: "inception/mercury-3", ...agentDebug });
+    } finally {
+      if (previous.key === undefined) delete process.env.OPENROUTER_API_KEY; else process.env.OPENROUTER_API_KEY = previous.key;
+      if (previous.models === undefined) delete process.env.DOCSLURP_CHAT_EVAL_MODELS; else process.env.DOCSLURP_CHAT_EVAL_MODELS = previous.models;
+    }
+  });
+
   it("says nothing relevant was found, without calling the model, when the relevance floor removed every passage", async () => {
     sqlMock.mockResolvedValue([]);
     getWorkspace.mockResolvedValue({ id: "ws-1", systemPrompt: null });

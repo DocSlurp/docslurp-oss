@@ -59,6 +59,33 @@ describe("chat MCP tools", () => {
   });
 });
 
+describe("chat MCP tool budgets", () => {
+  function budgeted(maxToolCalls: number, searchConcurrency: number) {
+    const dispatch = vi.fn<McpDispatch>(async () => Response.json({ results: [] }));
+    const context = createChatMcpTools({ manifest: { capabilities: [{ id: "search", title: "search", category: "tool", description: "search", inputSchema: { type: "object" } }] },
+      dispatch, workspaceId: "selected", signal: new AbortController().signal, maxToolCalls, searchConcurrency });
+    const execute = (input: unknown, id: string) => context.tools.search!.execute!(input, { toolCallId: id, messages: [], context: {} });
+    return { ...context, dispatch, execute };
+  }
+
+  it("caps batch concurrency at the turn's searchConcurrency and uses it when the model omits it", async () => {
+    const t = budgeted(5, 2);
+    await t.execute({ queries: [{ q: "a" }, { q: "b" }, { q: "c" }], concurrency: 8 }, "1");
+    await t.execute({ queries: [{ q: "a" }] }, "2");
+    await t.execute({ queries: [{ q: "a" }], concurrency: 1 }, "3");
+    expect(t.dispatch.mock.calls.map(([, init]) => JSON.parse(init!.body as string).concurrency)).toEqual([2, 2, 1]);
+    expect(t.searchCalls.map(call => [call.queryCount, call.concurrency, call.zeroHit])).toEqual([[3, 2, true], [1, 2, true], [1, 1, true]]);
+  });
+
+  it("refuses calls beyond maxToolCalls with a coded result and counts them", async () => {
+    const t = budgeted(1, 4);
+    await t.execute({ q: "a" }, "1");
+    await expect(t.execute({ q: "b" }, "2")).resolves.toMatchObject({ code: "tool_call_limit", limitReached: true });
+    expect(t.dispatch).toHaveBeenCalledTimes(1);
+    expect(t.counters).toMatchObject({ executed: 1, refused: 1, byTool: { search: 1 } });
+  });
+});
+
 describe("chat MCP tool retrieval controls", () => {
   it("enforces resolved retrieval controls on every search, batch query and nested chat", async () => {
     const { workspaceSearchRetrievalDefaultsSchema } = await import("@docslurp/shared");

@@ -385,6 +385,33 @@ describe("searchRoutes", () => {
     });
   });
 
+  it("forwards per-request agent limits and rejects out-of-range ones", async () => {
+    chatWorkspace.mockResolvedValueOnce({ answer: "Supported" });
+    const post = (body: unknown) => app.request("/search/chat", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    expect((await post({ q: "Question", workspaceId: "ws-chat", agent: { maxSteps: 3, maxToolCalls: 2, searchConcurrency: 1 } })).status).toBe(200);
+    expect(chatWorkspace).toHaveBeenCalledWith(expect.objectContaining({ agent: { maxSteps: 3, maxToolCalls: 2, searchConcurrency: 1 } }));
+    chatWorkspace.mockClear();
+    for (const agent of [{ maxSteps: 13 }, { maxToolCalls: 0 }, { searchConcurrency: 9 }, { unknown: 1 }]) {
+      const response = await post({ q: "Question", workspaceId: "ws-chat", agent });
+      expect(response.status).toBe(400);
+      expect(await response.json()).toMatchObject({ error: { code: "invalid_request" } });
+    }
+    expect(chatWorkspace).not.toHaveBeenCalled();
+  });
+
+  it("answers 400 model_not_allowed for a refused model on chat POST and before the chat stream opens", async () => {
+    const { ChatModelNotAllowedError } = await import("../lib/chat-model-policy.js");
+    chatWorkspace.mockRejectedValueOnce(new ChatModelNotAllowedError());
+    const post = await app.request("/search/chat", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ q: "Question", workspaceId: "ws-chat", model: "unknown/model" }) });
+    expect(post.status).toBe(400);
+    expect(await post.json()).toMatchObject({ error: { code: "model_not_allowed" } });
+    chatWorkspace.mockClear();
+    const stream = await app.request("/search/chat/stream?q=test&workspaceId=ws-chat&model=inception/mercury-3");
+    expect(stream.status).toBe(400);
+    expect(await stream.json()).toMatchObject({ error: { code: "model_not_allowed" } });
+    expect(chatWorkspace).not.toHaveBeenCalled();
+  });
+
   it("rejects chat POST and chat stream with 403 when the workspace turned chat off", async () => {
     workspaceChatDisabledBody.mockResolvedValue({ error: "Chat is turned off for this workspace.", code: "chat_disabled" });
     try {
