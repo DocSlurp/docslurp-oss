@@ -348,4 +348,72 @@ describe("search availability from document counters", () => {
     await sql`delete from workspace_runs where id = 'r-stalled'`;
     await expectSameAsLegacy(scopes);
   });
+  it("follows chunk rows an upsert moves to another document", async () => {
+    // A deduplicated embed artifact carries the first document's chunk ids, and
+    // insertChunks upserts with `document_id = excluded.document_id`: the copy's
+    // document takes over the rows (worker/src/stages/embed.ts).
+    await mixedWorkspace();
+    await doc("dedup-copy", { runId: "r-live", status: "completed", pages: 10 });
+    await sql`
+      insert into document_chunks (id, document_id, run_id, user_id, chunk_index, text, heading_path, token_estimate, metadata)
+      select id, 'dedup-copy', 'r-live', user_id, chunk_index, text, heading_path, token_estimate, metadata
+      from document_chunks where document_id = 'complete' and chunk_index < 20
+      on conflict (id) do update set document_id = excluded.document_id, run_id = excluded.run_id
+    `;
+    await sql`update document_chunks set document_id = 'complete', run_id = 'r-done' where id = 'complete-c0'`;
+    await sql`update document_chunks set text = 'retitled' where document_id = 'dedup-copy'`;
+    await expectSameAsLegacy(scopes);
+  });
+
+  it("backfills counters for rows written before the triggers existed", async () => {
+    await mixedWorkspace();
+    await sql`update documents set chunk_count = 0, stored_page_count = 0`;
+    await sql`update documents set chunk_count = 99 where id = 'complete'`;
+    const { readFileSync } = await import("node:fs");
+    const migration = readFileSync(new URL("../../db/migrations/0063_document_chunk_page_counters.sql", import.meta.url), "utf8");
+    await sql.begin(async (tx) => {
+      for (const statement of migration.split("--> statement-breakpoint")) await tx.unsafe(statement);
+    });
+    await expectSameAsLegacy(scopes);
+  });
+});
+
+describe("migration 0063 backfill", () => {
+  it("counts chunks and pages that existed before the migration", async () => {
+    const { createMigratedDatabase, applyRemainingMigrations } = await import("@docslurp/worker/testing");
+    const db = await createMigratedDatabase({ stopBefore: "document_chunk_page_counters" });
+    try {
+      await db.exec(`
+        insert into "user"(id, name, email) values ('u1', 'A', 'a@x');
+        insert into organizations(id, name, slug, created_by_user_id) values ('o1', 'Org', 'org', 'u1');
+        insert into workspaces(id, org_id, user_id, name) values ('w', 'o1', 'u1', 'W');
+        insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, pipeline)
+        values ('r', 'o1', 'u1', 'w', 'bulk-upload', 'completed', 'embed', '{}'::jsonb);
+        insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status, page_count)
+        values ('a', 'o1', 'u1', 'w', 'r', 'a.pdf', 'application/pdf', 'raw/a', 'completed', 3),
+               ('b', 'o1', 'u1', 'w', 'r', 'b.pdf', 'application/pdf', 'raw/b', 'completed', 2),
+               ('empty', 'o1', 'u1', 'w', 'r', 'e.pdf', 'application/pdf', 'raw/e', 'completed', 1);
+        insert into document_pages (id, document_id, run_id, user_id, page_number, text)
+        select 'a-p' || n, 'a', 'r', 'u1', n, 'p' from generate_series(1, 3) n;
+        insert into document_chunks (id, document_id, run_id, user_id, chunk_index, text, heading_path, token_estimate, metadata)
+        select d || '-c' || n, d, 'r', 'u1', n, 't', '{}', 1, '{}'
+        from (values ('a', 7), ('b', 2)) docs(d, total), generate_series(1, total) n;
+      `);
+      await applyRemainingMigrations(db, "document_chunk_page_counters");
+      const { rows } = await db.query<{ id: string; chunk_count: number; stored_page_count: number }>(
+        "select id, chunk_count, stored_page_count from documents order by id",
+      );
+      expect(rows).toEqual([
+        { id: "a", chunk_count: 7, stored_page_count: 3 },
+        { id: "b", chunk_count: 2, stored_page_count: 0 },
+        { id: "empty", chunk_count: 0, stored_page_count: 0 },
+      ]);
+      // The triggers are live after the backfill.
+      await db.exec("delete from document_chunks where id = 'a-c1'");
+      const { rows: after } = await db.query<{ chunk_count: number }>("select chunk_count from documents where id = 'a'");
+      expect(after[0]?.chunk_count).toBe(6);
+    } finally {
+      await db.close();
+    }
+  }, 120_000);
 });
