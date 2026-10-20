@@ -1135,24 +1135,19 @@ export async function getDocumentViewerPayload(docId: string, userId: string): P
 
 export async function setDocumentTags(docId: string, userId: string, tags: string[]): Promise<string[] | null> {
   const document = await getDocumentRow(docId, userId);
-  if (!document) {
+  if (!document || !(await listEditableWorkspaceIds(userId)).includes(document.workspace_id)) {
     return null;
   }
 
-  await sql`
-    delete from document_tags
-    where document_id = ${docId} and user_id = ${userId}
-  `;
-
   const normalized = Array.from(new Set(tags.map((tag) => tag.trim()).filter(Boolean)));
-  if (normalized.length > 0) {
-    const rows = normalized.map((tag) => ({
-      document_id: docId,
-      user_id: userId,
-      tag
-    }));
-    await sql`insert into document_tags ${sql(rows)}`;
-  }
+  await sql.begin(async (tx) => {
+    // Serialize replacements, including when the document currently has no tags.
+    await tx`select id from documents where id = ${docId} for update`;
+    await tx`delete from document_tags where document_id = ${docId}`;
+    for (const tag of normalized) {
+      await tx`insert into document_tags (document_id, user_id, tag) values (${docId}, ${userId}, ${tag})`;
+    }
+  });
 
   return normalized;
 }
@@ -1163,7 +1158,7 @@ export async function addDocumentTags(documentIds: string[], userId: string, tag
     return 0;
   }
 
-  const accessibleWorkspaceIds = await listAccessibleWorkspaceIds(userId);
+  const accessibleWorkspaceIds = await listEditableWorkspaceIds(userId);
   if (accessibleWorkspaceIds.length === 0) {
     return 0;
   }
@@ -1201,7 +1196,7 @@ export async function removeDocumentTags(documentIds: string[], userId: string, 
     return 0;
   }
 
-  const accessibleWorkspaceIds = await listAccessibleWorkspaceIds(userId);
+  const accessibleWorkspaceIds = await listEditableWorkspaceIds(userId);
   if (accessibleWorkspaceIds.length === 0) {
     return 0;
   }
@@ -1220,7 +1215,6 @@ export async function removeDocumentTags(documentIds: string[], userId: string, 
   await sql`
     delete from document_tags
     where document_id = any(${sql.array(scopedIds.map((row) => row.id))})
-      and user_id = ${userId}
       and tag = any(${sql.array(normalized)})
   `;
 

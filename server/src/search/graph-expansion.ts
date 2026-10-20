@@ -1,3 +1,6 @@
+import { retrievalScope } from "./retrieval-scope.js";
+import type { SearchFilters } from "./filters.js";
+import { lexicalSearchableDocument } from "./eligibility.js";
 import { sql } from "../db.js";
 
 export async function expandGraphTextQuery(args: {
@@ -5,6 +8,8 @@ export async function expandGraphTextQuery(args: {
   query: string;
   textQuery: string;
   workspaceId: string;
+  filters?: SearchFilters;
+  runId?: string;
 }): Promise<string> {
   if (!args.enabled) {
     return args.textQuery;
@@ -19,8 +24,8 @@ export async function expandGraphTextQuery(args: {
       join document_chunks c on c.id = ce.chunk_id
       join documents d on d.id = c.document_id
       where d.workspace_id = ${args.workspaceId}
-        and d.superseded_at is null
-        and d.status <> 'pii_blocked'
+        and ${lexicalSearchableDocument("d")}
+        and ${retrievalScope(args).chunk()}
         and (
           c.ts_content @@ websearch_to_tsquery('english', ${args.query})
           or lower(ce.entity_name) = any(

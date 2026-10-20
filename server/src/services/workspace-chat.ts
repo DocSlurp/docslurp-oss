@@ -1109,7 +1109,7 @@ async function chatWorkspaceTurn(
   const wholeCorpus = await loadWorkspaceWholeCorpusContext({
     workspaceId: args.workspaceId,
     userId: args.userId,
-    documentIds,
+    filters: { documentIds },
   });
   const wholeCorpusDebug = buildWholeCorpusDebug({
     attempted: true,

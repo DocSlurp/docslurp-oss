@@ -435,6 +435,13 @@
       "when": 1792540800000,
       "tag": "0061_create_pgcrypto",
       "breakpoints": true
+    },
+    {
+      "idx": 62,
+      "version": "7",
+      "when": 1792540800001,
+      "tag": "0062_upload_tags",
+      "breakpoints": true
     }
   ]
 }
