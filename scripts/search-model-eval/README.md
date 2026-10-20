@@ -183,7 +183,7 @@ Run artifacts (`$OUT/runs/<run-id>/`): `run-config.json`, `run-log.jsonl`,
 node scripts/search-model-eval/score.mjs --dataset $OUT/dataset/dataset.json --runs $OUT/runs/<run-id> \
   --out $OUT/runs/<run-id>/score [--tiers tiers.json] [--judge-model google/gemini-3.8-flash] \
   [--judge-cap-usd 2] [--judge-cache path] [--judge-audit 30] [--baseline z-ai/glm-5.3-flash] [--seed S] [--no-judge] \
-  [--corpus ~/.local/share/docslurp/eval-corpora/large-corpus-recall-58k/pages-text.jsonl]
+  [--corpus ~/.local/share/docslurp/eval-corpora/large-corpus-recall-58k/pages-text.jsonl] [--case-labels unanswerable-audit.json]
 ```
 
 Scoring re-reads each attempt's raw response, so normalisation fixes apply to
@@ -214,6 +214,27 @@ The judge sees the question, gold facts (plus alternatives/disqualifiers) and th
 answer only: never the model or arm. Judgments are cached by
 `sha256(judge model, prompt version, question, gold, answer)`. `--judge-audit N`
 writes a seeded sample for human or agent review of the scorer.
+
+### Audited unanswerable cases (`--case-labels audit.json`)
+
+The audit file is `[{id, tier, classification: clean_absent | near_miss | actually_answerable, evidence: [{sourceDoc, page}], note}]`.
+Unanswerable cases are then reported as the kind slices `unanswerable_clean`,
+`unanswerable_near_miss` and `unanswerable_mislabeled`.
+
+- Headline abstention metrics use clean absences only: correct abstain,
+  hallucination, searches before abstaining and limit exhaustion on unanswerable
+  cases. Unaudited negatives count as clean. Every unanswerable-gold case, as
+  originally labelled, is kept in the `raw` columns and the "Give-up
+  intelligence (raw)" table.
+- Near-miss cases are graded with a separate judge rubric
+  (`search-model-eval-judge-near-miss@v2`, cached separately; the audit note is
+  part of the prompt and the cache key; the model name never is). 1 = says the
+  asked entity is not found and stops or answers about the related entity while
+  flagging the difference; 0.5 = answers about the related entity without
+  flagging; 0 = asserts facts about the asked entity. `nearMissFlaggedRate` is
+  the share scoring 1.
+- Mislabeled (`actually_answerable`) cases are not judged, are unscored and are
+  excluded from the clean abstention metrics. They are listed in the report.
 
 Aggregation is by model, model x arm and model x tier x kind x arm, with
 seeded percentile-bootstrap 95% CIs (resampling calls), a paired comparison with

@@ -15,6 +15,9 @@ import { citedIndexes, extractChatResponse } from "./response.mjs";
 
 export const SCORE_SCHEMA = "docslurp-search-model-eval-score@v1";
 export const JUDGE_PROMPT_VERSION = "search-model-eval-judge@v1";
+export const NEAR_MISS_JUDGE_PROMPT_VERSION = "search-model-eval-judge-near-miss@v2";
+/** Audit classifications of unanswerable cases -> report slices. */
+export const UNANSWERABLE_SLICES = { clean_absent: "unanswerable_clean", near_miss: "unanswerable_near_miss", actually_answerable: "unanswerable_mislabeled" };
 const LIMIT_STOPS = new Set(["step_limit", "tool_call_limit"]);
 const ABSTAIN = /\b(?:cannot|can't|can ?not|could not|couldn't|unable to)\b[^.]{0,60}\b(?:find|determine|locate|answer|confirm|identify|verify)\b|\b(?:no|not any) (?:information|evidence|mention|record|documents?|results?)\b|\bnot (?:stated|provided|specified|mentioned|available|found|present|included|covered)\b|\b(?:insufficient|no relevant) (?:information|evidence|context)\b|\bdo(?:es)? not (?:contain|mention|include|say|specify|provide)\b|\bi don't know\b|\bnot (?:able|possible) to (?:determine|answer)\b/i;
 const PROTOCOL = /invalid|schema|argument|parse|malformed|validation/i;
@@ -100,7 +103,7 @@ const finalAttempt = (record) => (record.attempts ?? []).filter((attempt) => !at
 
 const pageList = (citations) => citations.map((citation) => ({ documentId: citation.documentId, pages: citation.pages }));
 
-export function scoreCall(entry, record, { tier = null, judgment = null, pageText = null } = {}) {
+export function scoreCall(entry, record, { tier = null, judgment = null, pageText = null, audit = null } = {}) {
   const gold = entry.gold;
   const final = finalAttempt(record);
   // Re-read the raw response so normalisation fixes apply to earlier runs.
@@ -144,8 +147,11 @@ export function scoreCall(entry, record, { tier = null, judgment = null, pageTex
   const stopReason = x?.stopReason ?? (final?.errorKind === "timeout" ? "timeout" : ok ? null : "error");
   const heuristic = ok ? heuristicAbstained(x.answer, x.stopReason) : null;
   const abstained = !ok ? null : typeof judgment?.abstained === "boolean" ? judgment.abstained : heuristic;
+  const unanswerableClass = !answerable && audit ? audit.classification : null;
   let score = null;
-  if (!ok) score = 0;
+  if (unanswerableClass === "actually_answerable") score = null; // the gold label is wrong: unscored
+  else if (!ok) score = 0;
+  else if (unanswerableClass === "near_miss") score = judgment?.mode === "near_miss" && [0, 0.5, 1].includes(judgment.score) ? judgment.score : null;
   else if (!answerable) score = abstained ? 1 : 0;
   else if (judgment && [0, 0.5, 1].includes(judgment.score)) score = abstained && judgment.score < 1 ? 0 : judgment.score;
   const toolErrors = toolCalls ? toolCalls.filter((call) => call.status === "error" || call.error).length : null;
@@ -153,11 +159,15 @@ export function scoreCall(entry, record, { tier = null, judgment = null, pageTex
   const attemptsCostKnown = (record.attempts ?? []).every((attempt) => attempt.refusedByBudget || Number.isFinite(attempt.costUsd));
   return {
     key: record.key, runId: record.runId, model: record.model, caseId: entry.id, arm: record.arm, repeat: record.repeat,
-    workspaceTier: entry.workspaceTier, kind: entry.kind, answerable, ok, outcome: record.outcome, citationMatch: context.citationMatch, factsStatus: entry.gold.factsStatus ?? null,
+    workspaceTier: entry.workspaceTier, kind: entry.kind, answerable, ok,
+    // Report slice: the audit splits unanswerable cases into clean / near-miss / mislabeled.
+    slice: unanswerableClass ? UNANSWERABLE_SLICES[unanswerableClass] : entry.kind, unanswerableClass,
+    abstentionExcluded: unanswerableClass === "actually_answerable",
+    nearMissFlagged: unanswerableClass === "near_miss" && ok && score !== null ? score === 1 : null, outcome: record.outcome, citationMatch: context.citationMatch, factsStatus: entry.gold.factsStatus ?? null,
     attempts: record.attemptCount ?? null, retried: (record.attemptCount ?? 1) > 1, errorsRecorded: record.errors?.length ?? 0,
     modelMismatch: record.modelCheck?.mismatch ?? null, resolvedModel: record.modelCheck?.resolvedModel ?? null,
     score, correct: score === null ? null : score === 1,
-    judge: judgment ? { score: judgment.score, abstained: judgment.abstained ?? null, contradicts: judgment.contradicts ?? null, rationale: judgment.rationale ?? null } : null,
+    judge: judgment ? { mode: judgment.mode ?? "standard", score: judgment.score, abstained: judgment.abstained ?? null, contradicts: judgment.contradicts ?? null, flagged: judgment.flagged ?? null, rationale: judgment.rationale ?? null } : null,
     abstained, heuristicAbstained: heuristic,
     evidenceSource, evidenceRecall: evidenceRecall?.recall ?? null, evidenceAll: evidenceRecall?.all ?? null,
     citedRecall: citedRecall?.recall ?? null, citedAll: citedRecall?.all ?? null, citedRelevant,
@@ -211,6 +221,25 @@ export function judgeMessages(entry, answer) {
   ];
 }
 
+/**
+ * Near-miss rubric: the asked entity does not exist but a closely related real
+ * one does (the audit note). Graded on whether the answer flags the mismatch.
+ */
+export function nearMissJudgeMessages(entry, answer, note) {
+  return [
+    { role: "system", content: [
+      "You grade one answer from a document question-answering system. Judge only factual content; ignore citation markers like [1], style and length.",
+      "The asked entity does not exist in the corpus; a closely related real entity exists (described in the note).",
+      "Rubric: 1 = the answer clearly says the asked entity is not found AND either stops or answers about the related entity while flagging the difference. 0.5 = it answers about the related entity without clearly flagging the mismatch. 0 = it asserts facts about the asked entity as if it exists.",
+      "abstained = true when the answer says the asked entity or information was not found, regardless of what else it says. flagged = true when the answer explicitly notes the asked entity differs from what was found.",
+      "Reply with JSON only: {\"score\": 0|0.5|1, \"abstained\": boolean, \"flagged\": boolean, \"rationale\": string (<= 40 words)}",
+    ].join("\n") },
+    { role: "user", content: `Question:\n${entry.question}\n\nNote on the closely related real entity:\n${String(note ?? "").slice(0, 1_000)}\n\nAnswer to grade:\n<<<\n${String(answer ?? "").slice(0, 8_000)}\n>>>` },
+  ];
+}
+
+export const nearMissCacheKey = (judgeModel, entry, answer, note) => hashOf({ judgeModel, promptVersion: NEAR_MISS_JUDGE_PROMPT_VERSION, question: entry.question, note: String(note ?? ""), answer: String(answer ?? "") });
+
 export const judgeCacheKey = (judgeModel, entry, answer) => hashOf({ judgeModel, promptVersion: JUDGE_PROMPT_VERSION, question: entry.question, answerable: entry.gold.answerable, facts: entry.gold.facts, alternatives: entry.gold.alternatives ?? [], disqualifiers: entry.gold.disqualifiers ?? [], answer: String(answer ?? "") });
 
 /** The judge must be an allowed model and never one of the candidates it grades. */
@@ -221,14 +250,16 @@ export function assertJudgeAllowed(judgeModel, candidateModels, prices) {
 
 export function createJudge({ judgeModel, prices, apiKey, cachePath, ledgerPath, guard, fetchImpl, log = console.log }) {
   const cache = new Map(readJsonl(cachePath).map((row) => [row.key, row.judgment]));
-  return async (entry, answer) => {
-    const key = judgeCacheKey(judgeModel, entry, answer);
+  return async (entry, answer, { mode = "standard", note = null } = {}) => {
+    const nearMiss = mode === "near_miss";
+    const key = nearMiss ? nearMissCacheKey(judgeModel, entry, answer, note) : judgeCacheKey(judgeModel, entry, answer);
     if (cache.has(key)) return { ...cache.get(key), cached: true, cacheKey: key };
-    // The judge sees question, gold and answer only: never the candidate model or arm.
-    const reply = await openRouterJson({ model: judgeModel, messages: judgeMessages(entry, answer), apiKey, metric: "search-model-eval-judge", ledgerPath, guard, prices, fetchImpl, maxTokens: 400, scope: { caseId: entry.id, key }, log });
+    // The judge sees question, gold (or the audit note) and answer only: never the candidate model or arm.
+    const messages = nearMiss ? nearMissJudgeMessages(entry, answer, note) : judgeMessages(entry, answer);
+    const reply = await openRouterJson({ model: judgeModel, messages, apiKey, metric: nearMiss ? "search-model-eval-judge-near-miss" : "search-model-eval-judge", ledgerPath, guard, prices, fetchImpl, maxTokens: 400, scope: { caseId: entry.id, key }, log });
     const raw = reply.json ?? {};
     const score = [0, 0.5, 1].includes(Number(raw.score)) ? Number(raw.score) : null;
-    const judgment = { score, abstained: typeof raw.abstained === "boolean" ? raw.abstained : null, contradicts: typeof raw.contradicts === "boolean" ? raw.contradicts : null, rationale: typeof raw.rationale === "string" ? raw.rationale.slice(0, 400) : null, judgeModel, promptVersion: JUDGE_PROMPT_VERSION, parseFailed: score === null };
+    const judgment = { mode, score, abstained: typeof raw.abstained === "boolean" ? raw.abstained : null, contradicts: typeof raw.contradicts === "boolean" ? raw.contradicts : null, flagged: typeof raw.flagged === "boolean" ? raw.flagged : null, rationale: typeof raw.rationale === "string" ? raw.rationale.slice(0, 400) : null, judgeModel, promptVersion: nearMiss ? NEAR_MISS_JUDGE_PROMPT_VERSION : JUDGE_PROMPT_VERSION, parseFailed: score === null };
     cache.set(key, judgment);
     appendJsonl(cachePath, { key, at: new Date().toISOString(), judgment, usage: reply.usage });
     return { ...judgment, cached: false, cacheKey: key };
@@ -243,7 +274,11 @@ const counts = (values) => { const out = {}; for (const value of values) out[val
 
 export function aggregate(rows, { seed = "search-model-eval", iterations = 2000 } = {}) {
   const ci = (name, pick, filter = () => true) => rate(rows.filter(filter), pick, `${seed}:${name}`, iterations);
-  const answerable = (row) => row.answerable, unanswerable = (row) => !row.answerable;
+  const answerable = (row) => row.answerable;
+  // Headline give-up metrics use clean absences only (unaudited negatives count as clean);
+  // raw keeps every unanswerable-gold case as originally labelled.
+  const clean = (row) => !row.answerable && (row.unanswerableClass === null || row.unanswerableClass === "clean_absent");
+  const raw = (row) => !row.answerable;
   const totalCost = sum(rows.map((row) => row.costUsd ?? row.chargedUsd));
   const correct = rows.filter((row) => row.correct).length;
   const judged = rows.filter((row) => row.score !== null).length;
@@ -258,8 +293,15 @@ export function aggregate(rows, { seed = "search-model-eval", iterations = 2000 
     groundedEvidenceRate: ci("grounded-evidence", (row) => row.groundedEvidence, answerable),
     citedAllRate: ci("cited-all", (row) => row.citedAll, answerable),
     citationValidity: ci("citation-validity", (row) => row.citationValidity),
-    correctAbstainRate: ci("correct-abstain", (row) => row.abstained, (row) => unanswerable(row) && row.ok),
-    hallucinationRate: ci("hallucination", (row) => (row.abstained === null ? null : !row.abstained), (row) => unanswerable(row) && row.ok),
+    correctAbstainRate: ci("correct-abstain", (row) => row.abstained, (row) => clean(row) && row.ok),
+    hallucinationRate: ci("hallucination", (row) => (row.abstained === null ? null : !row.abstained), (row) => clean(row) && row.ok),
+    correctAbstainRateRaw: ci("correct-abstain-raw", (row) => row.abstained, (row) => raw(row) && row.ok),
+    hallucinationRateRaw: ci("hallucination-raw", (row) => (row.abstained === null ? null : !row.abstained), (row) => raw(row) && row.ok),
+    nearMissFlaggedRate: ci("near-miss-flagged", (row) => row.nearMissFlagged, (row) => row.unanswerableClass === "near_miss"),
+    nearMissMeanScore: ci("near-miss-score", (row) => row.score, (row) => row.unanswerableClass === "near_miss"),
+    searchesBeforeAbstainClean: dist(rows.filter((row) => clean(row) && row.abstained).map((row) => row.searchesBeforeAbstain)),
+    unanswerableLimitExhaustion: ci("unanswerable-limit-exhaustion", (row) => row.limitExhausted, clean),
+    unanswerableLimitExhaustionRaw: ci("unanswerable-limit-exhaustion-raw", (row) => row.limitExhausted, raw),
     falseGiveUpRate: ci("false-give-up", (row) => row.abstained, (row) => answerable(row) && row.ok),
     limitExhaustionRate: ci("limit-exhaustion", (row) => row.limitExhausted),
     reformulationRate: ci("reformulated", (row) => row.reformulated),
@@ -328,20 +370,21 @@ export function renderHistogram(title, hist, width = 30) {
 }
 
 /** 2x2 answerable/unanswerable x answered/abstained, plus give-up persistence. */
-export function giveUpView(rows) {
+export function giveUpView(rows, { negative = (row) => !row.answerable } = {}) {
   const cell = (filter) => rows.filter(filter).length;
   const matrix = {
     answerable: { answered: cell((row) => row.answerable && row.ok && row.abstained === false), abstained: cell((row) => row.answerable && row.ok && row.abstained === true), failed: cell((row) => row.answerable && !row.ok) },
-    unanswerable: { answered: cell((row) => !row.answerable && row.ok && row.abstained === false), abstained: cell((row) => !row.answerable && row.ok && row.abstained === true), failed: cell((row) => !row.answerable && !row.ok) },
+    unanswerable: { answered: cell((row) => negative(row) && row.ok && row.abstained === false), abstained: cell((row) => negative(row) && row.ok && row.abstained === true), failed: cell((row) => negative(row) && !row.ok) },
   };
   const abstainedTotal = matrix.answerable.abstained + matrix.unanswerable.abstained;
   const unanswerableTotal = matrix.unanswerable.answered + matrix.unanswerable.abstained;
-  const negatives = rows.filter((row) => !row.answerable);
+  const negatives = rows.filter(negative);
   return {
     matrix,
     giveUpPrecision: abstainedTotal ? matrix.unanswerable.abstained / abstainedTotal : null,
     giveUpRecall: unanswerableTotal ? matrix.unanswerable.abstained / unanswerableTotal : null,
-    searchesBeforeAbstain: histogram(rows.filter((row) => row.abstained).map((row) => row.searchesBeforeAbstain)),
+    searchesBeforeAbstain: histogram(rows.filter((row) => row.abstained && (row.answerable || negative(row))).map((row) => row.searchesBeforeAbstain)),
+    searchesBeforeAbstainOnUnanswerable: histogram(negatives.filter((row) => row.abstained).map((row) => row.searchesBeforeAbstain)),
     unanswerableLimitExhaustion: negatives.length ? negatives.filter((row) => row.limitExhausted).length / negatives.length : null,
     unanswerableReformulationRate: mean(negatives.map((row) => (row.reformulated === null ? null : Number(row.reformulated)))),
   };
@@ -355,13 +398,18 @@ export function buildReport(rows, { seed, iterations, baseline, meta }) {
     searches: histogram(group.map((row) => row.searchCallCount)), costUsd: histogram(group.map((row) => row.costUsd ?? row.chargedUsd), COST_EDGES),
   };
   const giveUp = {};
-  for (const [key, group] of groupBy(rows, (row) => `${row.model}|${row.arm}`)) giveUp[key] = giveUpView(group);
+  const giveUpClean = {};
+  const cleanNegative = (row) => !row.answerable && (row.unanswerableClass === null || row.unanswerableClass === "clean_absent");
+  for (const [key, group] of groupBy(rows, (row) => `${row.model}|${row.arm}`)) {
+    giveUp[key] = giveUpView(group);
+    giveUpClean[key] = { ...giveUpView(group, { negative: cleanNegative }), raw: { correctAbstain: giveUp[key].giveUpRecall, limitExhaustion: giveUp[key].unanswerableLimitExhaustion }, nearMissFlaggedRate: mean(group.filter((row) => row.nearMissFlagged !== null).map((row) => Number(row.nearMissFlagged))), nearMiss: group.filter((row) => row.unanswerableClass === "near_miss").length };
+  }
   return {
     schema: SCORE_SCHEMA, ...meta, calls: rows.length,
     byModel: by((row) => row.model), byModelArm: by((row) => `${row.model}|${row.arm}`),
-    byModelTierKindArm: by((row) => `${row.model}|${row.workspaceTier}|${row.kind}|${row.arm}`),
+    byModelTierKindArm: by((row) => `${row.model}|${row.workspaceTier}|${row.slice ?? row.kind}|${row.arm}`),
     baseline: { model: baseline, present: rows.some((row) => row.model === baseline), comparisons: compareToBaseline(rows, baseline, { seed, iterations }) },
-    giveUp, histograms,
+    giveUp, giveUpClean, histograms,
   };
 }
 
@@ -372,8 +420,8 @@ const ciText = (value) => (value?.n ? `${fmt(value.mean)} [${fmt(value.low)}, ${
 export function renderMarkdown(report) {
   const lines = [`# Search-agent model comparison`, "", `- Dataset: \`${report.datasetSha256 ?? "unknown"}\``, `- Runs: ${(report.runs ?? []).join(", ")}`, `- Judge: ${report.judgeModel ?? "disabled"} (${JUDGE_PROMPT_VERSION})`, `- Calls scored: ${report.calls}; bootstrap ${report.iterations} iterations, seed \`${report.seed}\`; 95% CIs resample calls.`, `- Pages per $: not applicable to chat calls.`, ""];
   const table = (title, groups) => {
-    lines.push(`## ${title}`, "", "| group | n | ok | correct | cited recall | grounded citation | evidence recall | grounded evidence | citation validity | false give-up | correct abstain | limit exhaustion | p50 / p95 ms | $/call | $/correct | correct/$ |", "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|");
-    for (const [key, row] of Object.entries(groups)) lines.push(`| ${label(key)} | ${row.n} | ${row.ok} | ${ciText(row.correctRate)} | ${ciText(row.citedRecall)} | ${ciText(row.groundedCitationRate)} | ${ciText(row.evidenceRecall)} | ${ciText(row.groundedEvidenceRate)} | ${ciText(row.citationValidity)} | ${ciText(row.falseGiveUpRate)} | ${ciText(row.correctAbstainRate)} | ${ciText(row.limitExhaustionRate)} | ${fmt(row.latencyMs.p50, 0)} / ${fmt(row.latencyMs.p95, 0)} | ${fmt(row.costUsd.perCall, 5)} | ${fmt(row.costPerCorrectUsd, 5)} | ${fmt(row.correctPerDollar, 1)} |`);
+    lines.push(`## ${title}`, "", "| group | n | ok | correct | cited recall | grounded citation | evidence recall | grounded evidence | citation validity | false give-up | correct abstain (clean) | correct abstain (raw) | near-miss flagged | limit exhaustion | p50 / p95 ms | $/call | $/correct | correct/$ |", "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|");
+    for (const [key, row] of Object.entries(groups)) lines.push(`| ${label(key)} | ${row.n} | ${row.ok} | ${ciText(row.correctRate)} | ${ciText(row.citedRecall)} | ${ciText(row.groundedCitationRate)} | ${ciText(row.evidenceRecall)} | ${ciText(row.groundedEvidenceRate)} | ${ciText(row.citationValidity)} | ${ciText(row.falseGiveUpRate)} | ${ciText(row.correctAbstainRate)} | ${ciText(row.correctAbstainRateRaw)} | ${ciText(row.nearMissFlaggedRate)} | ${ciText(row.limitExhaustionRate)} | ${fmt(row.latencyMs.p50, 0)} / ${fmt(row.latencyMs.p95, 0)} | ${fmt(row.costUsd.perCall, 5)} | ${fmt(row.costPerCorrectUsd, 5)} | ${fmt(row.correctPerDollar, 1)} |`);
     lines.push("");
   };
   table("By model", report.byModel);
@@ -383,7 +431,23 @@ export function renderMarkdown(report) {
   for (const [key, row] of Object.entries(report.byModelArm)) lines.push(`| ${label(key)} | ${fmt(row.steps.p50)}/${fmt(row.steps.p90)} | ${fmt(row.searches.p50)}/${fmt(row.searches.p90)} | ${fmt(row.fanOut.mean)} | ${ciText(row.reformulationRate)} | ${fmt(row.meanSuccessiveQueryJaccard)} | ${fmt(row.toolErrorRate)} | ${row.protocolFailures} | ${Object.entries(row.stopReasons).map(([reason, count]) => `${reason}:${count}`).join(", ")} | ${row.modelMismatches} | ${row.retried} |`);
   lines.push("", `## Pairwise vs baseline ${report.baseline.model}${report.baseline.present ? "" : " (baseline not in these runs)"}`, "", "| model | pairs | wins | losses | ties | mean score diff [95% CI] |", "|---|---|---|---|---|---|");
   for (const [model, row] of Object.entries(report.baseline.comparisons)) lines.push(`| ${model} | ${row.pairs} | ${row.wins} | ${row.losses} | ${row.ties} | ${ciText(row.meanScoreDiff)} |`);
-  lines.push("", "## Give-up intelligence", "", "| model x arm | answerable answered | answerable abstained | unanswerable answered | unanswerable abstained | failed | give-up precision | give-up recall | unanswerable limit exhaustion |", "|---|---|---|---|---|---|---|---|---|");
+  if (report.caseLabels) {
+    const labels = report.caseLabels;
+    lines.push("", "## Give-up intelligence (clean)", "", `Unanswerable cases audited (${labels.path}): ${Object.entries(labels.counts).map(([name, count]) => `${name} ${count}`).join(", ")}. Headline abstention uses clean absences only; raw columns use every unanswerable-gold case as originally labelled. Near-miss cases are graded with ${NEAR_MISS_JUDGE_PROMPT_VERSION}; mislabeled cases are unscored and excluded from abstention metrics.`, "",
+      "| model x arm | answerable answered | answerable abstained | clean answered | clean abstained | failed | give-up precision | correct abstain (clean) | correct abstain (raw) | searches before abstain p50 (clean) | limit exhaustion (clean) | limit exhaustion (raw) | near-miss flagged |", "|---|---|---|---|---|---|---|---|---|---|---|---|---|");
+    for (const [key, view] of Object.entries(report.giveUpClean)) {
+      const searches = report.byModelArm[key]?.searchesBeforeAbstainClean;
+      lines.push(`| ${label(key)} | ${view.matrix.answerable.answered} | ${view.matrix.answerable.abstained} | ${view.matrix.unanswerable.answered} | ${view.matrix.unanswerable.abstained} | ${view.matrix.answerable.failed + view.matrix.unanswerable.failed} | ${fmt(view.giveUpPrecision)} | ${fmt(view.giveUpRecall)} | ${fmt(view.raw.correctAbstain)} | ${fmt(searches?.p50)} | ${fmt(view.unanswerableLimitExhaustion)} | ${fmt(view.raw.limitExhaustion)} | ${fmt(view.nearMissFlaggedRate)} (n=${view.nearMiss}) |`);
+    }
+    lines.push("");
+    for (const [key, view] of Object.entries(report.giveUpClean)) lines.push("```text", renderHistogram(`${label(key)} searches before abstaining on clean unanswerable`, view.searchesBeforeAbstainOnUnanswerable), "```", "");
+    if (labels.mislabeled.length) {
+      lines.push("### Mislabeled unanswerable cases (actually answerable; excluded from abstention metrics)", "");
+      for (const item of labels.mislabeled) lines.push(`- \`${item.id}\` (${item.tier}): ${item.note ?? ""}`);
+      lines.push("");
+    }
+  }
+  lines.push("", "## Give-up intelligence (raw)", "", "| model x arm | answerable answered | answerable abstained | unanswerable answered | unanswerable abstained | failed | give-up precision | give-up recall | unanswerable limit exhaustion |", "|---|---|---|---|---|---|---|---|---|");
   for (const [key, view] of Object.entries(report.giveUp)) lines.push(`| ${label(key)} | ${view.matrix.answerable.answered} | ${view.matrix.answerable.abstained} | ${view.matrix.unanswerable.answered} | ${view.matrix.unanswerable.abstained} | ${view.matrix.answerable.failed + view.matrix.unanswerable.failed} | ${fmt(view.giveUpPrecision)} | ${fmt(view.giveUpRecall)} | ${fmt(view.unanswerableLimitExhaustion)} |`);
   lines.push("");
   for (const [key, view] of Object.entries(report.giveUp)) lines.push("```text", renderHistogram(`${label(key)} searches before abstaining`, view.searchesBeforeAbstain), "```", "");
@@ -414,6 +478,31 @@ export function loadRunRecords(runDirs) {
   return records;
 }
 
+/** Audit file: [{id, tier, classification, evidence, note}] -> Map by id. */
+export function loadCaseLabels(items, path = null) {
+  const list = Array.isArray(items) ? items : items?.cases ?? [];
+  const map = new Map();
+  for (const item of list) {
+    if (!Object.hasOwn(UNANSWERABLE_SLICES, item?.classification) || typeof item.id !== "string") throw new Error(`Invalid case label: ${JSON.stringify(item).slice(0, 120)}`);
+    if (map.has(item.id)) throw new Error(`Duplicate case label ${item.id}`);
+    map.set(item.id, item);
+  }
+  map.path = path;
+  return map;
+}
+
+function caseLabelSummary(caseLabels, dataset) {
+  const ids = new Set(dataset.cases.filter((entry) => !entry.gold.answerable).map((entry) => entry.id));
+  const counts = {};
+  for (const item of caseLabels.values()) counts[item.classification] = (counts[item.classification] ?? 0) + 1;
+  return {
+    path: caseLabels.path, counts,
+    unknownIds: [...caseLabels.keys()].filter((id) => !ids.has(id)),
+    unauditedUnanswerable: [...ids].filter((id) => !caseLabels.has(id)),
+    mislabeled: [...caseLabels.values()].filter((item) => item.classification === "actually_answerable").map(({ id, tier, note, evidence }) => ({ id, tier, note, evidence })),
+  };
+}
+
 /** Loads, in one pass, the corpus text of every page cited or retrieved in the records. */
 export async function corpusPageText(corpusPath, { dataset, records, tiers = null }) {
   const cases = new Map(dataset.cases.map((entry) => [entry.id, entry]));
@@ -437,25 +526,28 @@ export async function corpusPageText(corpusPath, { dataset, records, tiers = nul
   return lookup;
 }
 
-export async function scoreRuns({ dataset, records, tiers = null, pageText = null, runConfigs = [], judge = null, judgeModel = null, seed = "search-model-eval", iterations = 2000, baseline = DEFAULT_BASELINE_MODEL, onJudgment = () => {} }) {
+export async function scoreRuns({ dataset, records, tiers = null, pageText = null, caseLabels = null, runConfigs = [], judge = null, judgeModel = null, seed = "search-model-eval", iterations = 2000, baseline = DEFAULT_BASELINE_MODEL, onJudgment = () => {} }) {
   const cases = new Map(dataset.cases.map((entry) => [entry.id, entry]));
   const rows = [], missing = [];
   for (const record of records) {
     const entry = cases.get(record.caseId);
     if (!entry) { missing.push(record.key); continue; }
     const final = finalAttempt(record);
+    const audit = !entry.gold.answerable ? caseLabels?.get(entry.id) ?? null : null;
     let judgment = null;
-    if (judge && final?.ok && final.extracted?.answer !== null && final.extracted?.answer !== undefined) {
-      judgment = await judge(entry, final.extracted.answer);
-      onJudgment({ caseId: entry.id, kind: entry.kind, answerable: entry.gold.answerable, question: entry.question, facts: entry.gold.facts, answer: final.extracted.answer, judgment, cacheKey: judgment.cacheKey });
+    const answer = final?.response ? extractChatResponse(final.response).answer : final?.extracted?.answer;
+    // Mislabeled cases have wrong gold: never judged.
+    if (judge && final?.ok && answer !== null && answer !== undefined && audit?.classification !== "actually_answerable") {
+      judgment = audit?.classification === "near_miss" ? await judge(entry, answer, { mode: "near_miss", note: audit.note }) : await judge(entry, answer);
+      onJudgment({ caseId: entry.id, kind: entry.kind, answerable: entry.gold.answerable, question: entry.question, facts: entry.gold.facts, answer, judgment, cacheKey: judgment.cacheKey });
     }
-    rows.push(scoreCall(entry, record, { tier: (tiers ?? dataset.tiers)?.[entry.workspaceTier] ?? null, judgment, pageText }));
+    rows.push(scoreCall(entry, record, { tier: (tiers ?? dataset.tiers)?.[entry.workspaceTier] ?? null, judgment, pageText, audit }));
   }
-  const report = buildReport(rows, { seed, iterations, baseline, meta: { datasetSha256: dataset.casesSha256 ?? null, runs: [...new Set(records.map((record) => record.runId))], runConfigs, tierMatching: Object.fromEntries(Object.entries(tiers ?? dataset.tiers ?? {}).map(([name, tier]) => [name, { workspaceId: tier.workspaceId, citationMatch: tier.citationMatch, mappedDocuments: Object.keys(tier.documentMap ?? {}).length }])), judgeModel, seed, iterations, unmatchedRecords: missing } });
+  const report = buildReport(rows, { seed, iterations, baseline, meta: { datasetSha256: dataset.casesSha256 ?? null, runs: [...new Set(records.map((record) => record.runId))], runConfigs, tierMatching: Object.fromEntries(Object.entries(tiers ?? dataset.tiers ?? {}).map(([name, tier]) => [name, { workspaceId: tier.workspaceId, citationMatch: tier.citationMatch, mappedDocuments: Object.keys(tier.documentMap ?? {}).length }])), judgeModel, seed, iterations, unmatchedRecords: missing, caseLabels: caseLabels ? caseLabelSummary(caseLabels, dataset) : null } });
   return { rows, report };
 }
 
-const USAGE = "Usage: score.mjs --dataset dataset.json --runs DIR[,DIR] --out DIR [--judge-model ID | --no-judge] [--judge-cap-usd 2] [--judge-cache path] [--judge-audit N] [--baseline ID] [--seed S] [--iterations 2000] [--tiers tiers.json] [--corpus pages-text.jsonl] [--api-key-env OPENROUTER_API_KEY]";
+const USAGE = "Usage: score.mjs --dataset dataset.json --runs DIR[,DIR] --out DIR [--judge-model ID | --no-judge] [--judge-cap-usd 2] [--judge-cache path] [--judge-audit N] [--baseline ID] [--seed S] [--iterations 2000] [--tiers tiers.json] [--corpus pages-text.jsonl] [--case-labels audit.json] [--api-key-env OPENROUTER_API_KEY]";
 
 export async function main(argv = process.argv.slice(2)) {
   const options = parseArgs(argv, { booleans: ["no-judge"] });
@@ -479,7 +571,8 @@ export async function main(argv = process.argv.slice(2)) {
   const seed = options.seed ?? "search-model-eval";
   const tiers = options.tiers ? readJson(options.tiers) : null;
   const pageText = options.corpus ? await corpusPageText(options.corpus, { dataset, records, tiers }) : null;
-  const { rows, report } = await scoreRuns({ dataset, records, tiers, pageText, runConfigs: runConfigs.map((config) => config?.identity ?? null), judge, judgeModel, seed, iterations: Number(options.iterations ?? 2000), baseline: options.baseline ?? DEFAULT_BASELINE_MODEL, onJudgment: (item) => judgments.push(item) });
+  const caseLabels = options["case-labels"] ? loadCaseLabels(readJson(options["case-labels"]), options["case-labels"]) : null;
+  const { rows, report } = await scoreRuns({ dataset, records, tiers, pageText, caseLabels, runConfigs: runConfigs.map((config) => config?.identity ?? null), judge, judgeModel, seed, iterations: Number(options.iterations ?? 2000), baseline: options.baseline ?? DEFAULT_BASELINE_MODEL, onJudgment: (item) => judgments.push(item) });
   if (guard) report.judgeSpend = guard.state();
   report.corpus = pageText ? { path: options.corpus, pagesRequested: pageText.requested, pagesLoaded: pageText.loaded } : null;
   writeTextExclusive(join(out, "scores.jsonl"), rows.map((row) => JSON.stringify(row)).join("\n") + (rows.length ? "\n" : ""));

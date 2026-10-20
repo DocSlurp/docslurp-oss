@@ -6,7 +6,7 @@ import test from "node:test";
 import { bootstrapCi, loadPrices, readJsonl } from "./lib.mjs";
 import { extractChatResponse, normalizeToolCall } from "./response.mjs";
 import {
-  aggregate, assertJudgeAllowed, corpusPageText, factGrounding, matchContext, compareToBaseline, createJudge, giveUpView, heuristicAbstained, histogram, judgeMessages, renderJudgeAudit, renderMarkdown, scoreCall, scoreRuns, supportRecall,
+  NEAR_MISS_JUDGE_PROMPT_VERSION, aggregate, assertJudgeAllowed, corpusPageText, loadCaseLabels, factGrounding, matchContext, compareToBaseline, createJudge, giveUpView, heuristicAbstained, histogram, judgeMessages, renderJudgeAudit, renderMarkdown, scoreCall, scoreRuns, supportRecall,
 } from "./score.mjs";
 
 const prices = loadPrices();
@@ -225,4 +225,83 @@ test("corpus page text is loaded once for every cited or retrieved source page",
   assert.equal(lookup.loaded, 3);
   assert.equal(lookup("src", 1212), "b");
   assert.equal(lookup("src", 1), null);
+});
+
+const negativeGold = { answerable: false, facts: [], supportMode: "any_of", supportPages: [] };
+const negativeCase = (id) => ({ ...entry(id, negativeGold, "unanswerable") });
+
+test("case labels split unanswerable into clean, near-miss and mislabeled slices", async () => {
+  assert.throws(() => loadCaseLabels([{ id: "x", classification: "maybe" }]), /Invalid case label/);
+  assert.throws(() => loadCaseLabels([{ id: "x", classification: "near_miss" }, { id: "x", classification: "near_miss" }]), /Duplicate/);
+  const labels = loadCaseLabels([
+    { id: "clean-1", tier: "mid-5k", classification: "clean_absent", evidence: [], note: "absent" },
+    { id: "clean-2", tier: "mid-5k", classification: "clean_absent", evidence: [], note: "absent" },
+    { id: "near-1", tier: "mid-5k", classification: "near_miss", evidence: [{ sourceDoc: "src", page: 3 }], note: "Real program is LAJUSMIN; only the code differs." },
+    { id: "wrong-1", tier: "mid-5k", classification: "actually_answerable", evidence: [{ sourceDoc: "src", page: 9 }], note: "Stated on page 9." },
+  ], "audit.json");
+  const dataset = { casesSha256: "sha", cases: [entry("a1", singleGold), ...["clean-1", "clean-2", "near-1", "wrong-1"].map(negativeCase)] };
+  const answers = { a1: "It is 42 units [1].", "clean-1": "The documents do not mention it.", "clean-2": "It is 17 units [1].", "near-1": "No such program code was found; the closely related LAJUSMIN program requires 12 credits.", "wrong-1": "The documents do not mention it." };
+  const records = Object.entries(answers).map(([caseId, answer]) => record({ caseId, response: response(answer, { searchCallCount: caseId === "clean-1" ? 4 : 2, stopReason: caseId === "clean-2" ? "step_limit" : "answered" }) }));
+  const calls = [];
+  const judge = async (item, answer, options = {}) => {
+    calls.push({ id: item.id, ...options, answer });
+    if (options.mode === "near_miss") return { mode: "near_miss", score: 1, abstained: true, flagged: true, cacheKey: `nm:${item.id}` };
+    return { score: item.gold.answerable ? 1 : answer.includes("not mention") ? 1 : 0, abstained: answer.includes("not mention"), cacheKey: item.id };
+  };
+  const { rows, report } = await scoreRuns({ dataset, records, judge, judgeModel: "google/gemini-3.8-flash", caseLabels: labels, seed: "s", iterations: 100 });
+  const by = Object.fromEntries(rows.map((row) => [row.caseId, row]));
+  assert.deepEqual(calls.find((call) => call.id === "near-1"), { id: "near-1", mode: "near_miss", note: "Real program is LAJUSMIN; only the code differs.", answer: answers["near-1"] });
+  assert.ok(!calls.some((call) => call.id === "wrong-1"), "mislabeled cases are not judged");
+  assert.equal(by["wrong-1"].score, null);
+  assert.equal(by["wrong-1"].abstentionExcluded, true);
+  assert.equal(by["near-1"].slice, "unanswerable_near_miss");
+  assert.equal(by["near-1"].nearMissFlagged, true);
+  assert.equal(by["clean-1"].slice, "unanswerable_clean");
+  assert.equal(by.a1.slice, "single_hop");
+  const model = report.byModel["z-ai/glm-5.3-flash"];
+  assert.equal(model.correctAbstainRate.n, 2, "clean only");
+  assert.equal(model.correctAbstainRate.mean, 0.5);
+  assert.equal(model.correctAbstainRateRaw.n, 4, "raw keeps every unanswerable-gold case");
+  assert.equal(model.correctAbstainRateRaw.mean, 0.75);
+  assert.equal(model.hallucinationRate.mean, 0.5);
+  assert.equal(model.nearMissFlaggedRate.mean, 1);
+  assert.equal(model.searchesBeforeAbstainClean.p50, 4);
+  assert.equal(model.unanswerableLimitExhaustion.mean, 0.5);
+  assert.ok(Object.keys(report.byModelTierKindArm).some((key) => key.includes("|unanswerable_near_miss|")));
+  assert.ok(Object.keys(report.byModelTierKindArm).some((key) => key.includes("|unanswerable_mislabeled|")));
+  const clean = report.giveUpClean["z-ai/glm-5.3-flash|default"];
+  assert.deepEqual(clean.matrix.unanswerable, { answered: 1, abstained: 1, failed: 0 });
+  assert.equal(clean.giveUpRecall, 0.5);
+  assert.equal(clean.raw.correctAbstain, 0.75);
+  assert.deepEqual(report.caseLabels.mislabeled.map((item) => item.id), ["wrong-1"]);
+  assert.deepEqual(report.caseLabels.counts, { clean_absent: 2, near_miss: 1, actually_answerable: 1 });
+  const markdown = renderMarkdown(report);
+  assert.match(markdown, /## Give-up intelligence \(clean\)/);
+  assert.match(markdown, /`wrong-1` \(mid-5k\): Stated on page 9\./);
+  assert.match(markdown, /\| default \| single_hop \|| \/ single_hop \/ /);
+});
+
+test("near-miss judge mode uses its own rubric version and cache key, with the note and no model name", async (t) => {
+  const dir = tempDir(t);
+  const bodies = [];
+  const fetchImpl = async (_, init) => {
+    bodies.push(JSON.parse(init.body));
+    return { ok: true, status: 200, text: async () => JSON.stringify({ id: "g", choices: [{ message: { content: '{"score": 0.5, "abstained": false, "flagged": false, "rationale": "answers about the related entity"}' } }], usage: { prompt_tokens: 200, completion_tokens: 20, cost: 0.0002 } }) };
+  };
+  const judge = createJudge({ judgeModel: "google/gemini-3.8-flash", prices, apiKey: "k", cachePath: join(dir, "cache.jsonl"), ledgerPath: null, guard: null, fetchImpl, log: () => {} });
+  const item = negativeCase("near-1");
+  const nearMiss = await judge(item, "LAJUSMIN requires 12 credits.", { mode: "near_miss", note: "Real program is LAJUSMIN." });
+  assert.equal(nearMiss.score, 0.5);
+  assert.equal(nearMiss.promptVersion, NEAR_MISS_JUDGE_PROMPT_VERSION);
+  assert.equal(nearMiss.flagged, false);
+  const standard = await judge(item, "LAJUSMIN requires 12 credits.");
+  assert.notEqual(standard.cacheKey, nearMiss.cacheKey);
+  assert.equal(bodies.length, 2);
+  const prompt = JSON.stringify(bodies[0].messages);
+  assert.ok(prompt.includes("Real program is LAJUSMIN.") && prompt.includes("closely related real entity"));
+  assert.ok(!prompt.includes("glm") && !prompt.includes("default"));
+  await judge(item, "LAJUSMIN requires 12 credits.", { mode: "near_miss", note: "Real program is LAJUSMIN." });
+  assert.equal(bodies.length, 2, "cached");
+  await judge(item, "LAJUSMIN requires 12 credits.", { mode: "near_miss", note: "A different note." });
+  assert.equal(bodies.length, 3, "the note is part of the cache key");
 });
