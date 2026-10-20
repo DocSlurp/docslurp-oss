@@ -4,6 +4,8 @@ import {
   canonicalDocumentSchema,
   parserPlaybookCatalog,
   resolveVisionRoute,
+  visionListPriceCents,
+  visionModelTokenPricing,
   type AdaptivePageRoutingEntry,
   type ParserPlaybookKey,
   type VisionConfig,
@@ -1038,6 +1040,9 @@ export class VisionExtractStage implements Stage {
           metadata: {
             ...result.costMetadata,
             costSource: result.costMetadata?.costSource ?? (result.costCents !== undefined ? "provider" : "estimate"),
+            ...(result.costCents === undefined
+              ? { pricingSource: visionModelTokenPricing(result.model) ? "vision-catalog-list-price" : "configured-fallback" }
+              : {}),
             documentId: document.id,
             pageNumber: page.pageNumber,
             rasterArtifactUri: page.artifactUri,
@@ -1268,6 +1273,7 @@ export class VisionExtractStage implements Stage {
 
   private calculateVisionCost(result: {
     costCents?: number;
+    model: string;
     runtime: string;
     baseUrl: string | null;
     inputTokens: number;
@@ -1285,9 +1291,12 @@ export class VisionExtractStage implements Stage {
       return 0;
     }
 
+    // Without a provider charge, price cataloged hosted models at their own list price rather than the
+    // generic COST_PER_1K_* fallback, which overstates low-cost routes by more than an order of magnitude.
     return (
-      (result.inputTokens / 1000) * this.cfg.costPer1kInputTokens +
-        (result.outputTokens / 1000) * this.cfg.costPer1kOutputTokens
+      visionListPriceCents(result.model, result) ??
+        (result.inputTokens / 1000) * this.cfg.costPer1kInputTokens +
+          (result.outputTokens / 1000) * this.cfg.costPer1kOutputTokens
     );
   }
 }

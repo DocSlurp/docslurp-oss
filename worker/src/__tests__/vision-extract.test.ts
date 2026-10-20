@@ -24,6 +24,12 @@ describe("shouldFailOpenVisionError", () => {
     expect(price({ ...result, costCents: 0.00321 })).toBe(0.00321);
     expect(price({ ...result, costCents: 0 })).toBe(0);
     expect(price(result)).toBeCloseTo(0.0025, 10);
+    // Without a provider charge, cataloged hosted models use their own list price, not the generic fallback.
+    const tokens = { ...result, inputTokens: 2_000, outputTokens: 1_000 };
+    expect(price({ ...tokens, model: "nvidia/nemotron-3.5-super-vl" })).toBeCloseTo((2_000 * 0.15 + 1_000 * 0.5) / 1e4, 12);
+    expect(price({ ...tokens, model: "google/gemini-3.1-flash-lite" })).toBeCloseTo((2_000 * 0.25 + 1_000 * 1.5) / 1e4, 12);
+    expect(price({ ...tokens, model: "vendor/uncataloged-vlm" })).toBeCloseTo(0.05, 10);
+    expect(price({ ...tokens, model: "nvidia/nemotron-3.5-super-vl", baseUrl: "http://127.0.0.1:8000/v1" })).toBe(0);
   });
 
   it("uses persisted triage without launching another source text extraction pass", async () => {
