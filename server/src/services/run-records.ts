@@ -1,5 +1,6 @@
 import {
   PUBLIC_ERROR_MESSAGES,
+  publicDocumentError,
   parseStoredPipelineFeatures,
   defaultPipelineFeatures,
   documentSchema,
@@ -129,7 +130,7 @@ export function mapWorkspaceRun(row: WorkspaceRunRow, cost?: Pick<RunUsageCostSu
     pipeline: parseStoredPipelineFeatures(typeof row.pipeline === "string" ? jsonRecord(row.pipeline) : row.pipeline ?? defaultPipelineFeatures),
     stats: publicDiagnostics(jsonRecord(row.stats)),
     artifacts: jsonRecord(row.artifacts),
-    error: row.error ? PUBLIC_ERROR_MESSAGES.processing : null,
+    error: publicDocumentError(row.error),
     createdAt: serializeTimestamp(row.created_at),
     updatedAt: serializeTimestamp(row.updated_at),
   });
