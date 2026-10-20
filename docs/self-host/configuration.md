@@ -122,7 +122,6 @@ isolation, set `DOCSLURP_PARSER_SANDBOX=none` (and
 `DOCSLURP_PARSER_SANDBOX_ALLOW_UNISOLATED=true` in production). Setting the old
 names has no effect.
 
-
 The pre-URI variables `S3_BUCKET`, `AWS_ENDPOINT_URL_S3`, and `AWS_REGION` are
 deprecated. They are honored only when `STORAGE_URI` is unset and are no longer
 forwarded to the sandboxed vector-writer script. The superseded-purge variables

@@ -52,7 +52,6 @@ Common causes for bubblewrap are a host that forbids unprivileged user namespace
 Three kinds of code do not go through a sandbox provider:
 
 - **In-process Node parsers** (Kreuzberg and LiteParse). They run inside the worker process, so no provider sandboxes them, and they share the worker's environment. Treat the worker as the trust boundary for these.
-
 - **The vector writer** (`vector_backend_write.py` and `orama_write.mjs`). It has to reach object storage, and the sandbox has no network. It is not sandboxed by any provider. It receives the vector backend URIs (`LANCEDB_URI`, `STORAGE_URI`, `CHROMA_PATH`, `CHROMA_URL`, `MILVUS_URI`, `ORAMA_PATH`) and AWS credentials including `AWS_SESSION_TOKEN`, and nothing else beyond the default allowlist. Only these two trusted scripts get that list; an input filename cannot ask for it (`isVectorBackendCommand` in `worker/src/tools/runner.ts`).
 - **The embedding pool**. It is a long-lived Python process started by the worker (`getEmbedPool` in the same file) rather than a per-call command. It has its own environment allowlist (`defaultPythonPoolEnvAllowlist`, extended with `DOCSLURP_PYTHON_POOL_ENV_ALLOWLIST`). It handles text to embed, not file parsing.
 

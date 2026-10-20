@@ -116,7 +116,77 @@ Results of a local check on 2026-10-20. Image: Debian trixie-slim with bubblewra
 | Default seccomp | Fails: `bwrap: No permissions to create a new namespace` | Works: filesystem rules enforced, TCP connect denied |
 | `seccomp`, `apparmor` and `systempaths` all `unconfined` | Works | Works |
 
-Takeaway: landlock works in containers without `unconfined` security options. Bubblewrap needs them. `compose.selfhost.yml` keeps bubblewrap as the default and sets `systempaths=unconfined` for the worker (see [Security](security.md#parser-sandbox)).
+Takeaway: landlock works in containers without `unconfined` security options. Bubblewrap worked only when `seccomp`, `apparmor` and `systempaths` were all `unconfined` in this test. Each option was not tested alone. `compose.selfhost.yml` keeps bubblewrap as the default and uses `systempaths=unconfined` plus a custom seccomp profile (see [Security](security.md#parser-sandbox)).
+
+<details>
+<summary>Raw probe output, default seccomp</summary>
+
+```text
+== uname
+7.2.5-3-omarchy
+== lsm
+cat: /sys/kernel/security/lsm: No such file or directory
+
+== userns_clone
+1
+256370
+== unshare --user true
+unshare: unshare failed: Operation not permitted
+exit=1
+== bwrap --unshare-all --ro-bind / / true
+bwrap: No permissions to create a new namespace, likely because the kernel does not allow non-privileged user namespaces. See <https://deb.li/bubblewrap> or <file:///usr/share/doc/bubblewrap/README.Debian.gz>.
+exit=1
+== landrun --version
+landrun version 0.1.17
+exit=0
+== landrun fs allow /usr
+exit=0
+== landrun fs deny (read /etc/hostname without /etc)
+cat: /etc/hostname: Permission denied
+exit=1
+== curl without landrun (baseline)
+200
+exit=0
+== landrun tcp deny (curl must fail)
+curl: (7) Failed to connect to example.com port 443 after 0 ms: Could not connect to server
+exit=7
+```
+
+</details>
+
+<details>
+<summary>Raw probe output, seccomp, apparmor and systempaths unconfined</summary>
+
+```text
+== uname
+7.2.5-3-omarchy
+== lsm
+cat: /sys/kernel/security/lsm: No such file or directory
+
+== userns_clone
+1
+256370
+== unshare --user true
+exit=0
+== bwrap --unshare-all --ro-bind / / true
+exit=0
+== landrun --version
+landrun version 0.1.17
+exit=0
+== landrun fs allow /usr
+exit=0
+== landrun fs deny (read /etc/hostname without /etc)
+cat: /etc/hostname: Permission denied
+exit=1
+== curl without landrun (baseline)
+200
+exit=0
+== landrun tcp deny (curl must fail)
+curl: (7) Failed to connect to example.com port 443 after 0 ms: Could not connect to server
+exit=7
+```
+
+</details>
 
 Not yet tested:
 
@@ -125,7 +195,7 @@ Not yet tested:
 | AWS Fargate | Not yet tested |
 | Google Cloud Run | Not yet tested |
 
-Do not assume landlock works on either until it has been checked. The probe at worker start tells you for your platform. Run it without starting the worker:
+Do not assume landlock works on either until it has been checked. The probe at worker start tells you for your platform. Build the worker first (`pnpm --filter @docslurp/worker build`); the probe and `scripts/check-worker-prerequisites.mjs --sandbox` both run the compiled `worker/dist/`. Then run the probe without starting the worker:
 
 ```bash
 node worker/dist/sandbox/probe-cli.js
