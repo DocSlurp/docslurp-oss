@@ -10,6 +10,7 @@ All public libraries listed in `scripts/package-release.mjs` share one stable ve
 2. Run `node scripts/package-release.mjs check`.
 3. Dispatch `release-npm.yml` on main with `dry_run=true`. The dry run builds and tests packages, tests and imports them on Node 20 (the published engines floor), inspects the packed tarballs and runs npm publish in dry-run mode. It publishes nothing.
 4. After the dry run succeeds, run `pnpm release:tag` on clean, up-to-date main and push that tag to origin. Tag pushes publish packages; do not push a tag during a repository migration or routine verification.
+5. The same tag push runs `worker-images.yml`, which builds `ghcr.io/docslurp/worker-lean` and `ghcr.io/docslurp/worker-full` (linux/amd64) and tags each with the version and the commit SHA. The Modal parser sandbox provider defaults to `worker-full:<version>`, so confirm both images exist in GHCR before announcing the release. To republish images without a package release, dispatch `worker-images.yml` with the `version` input.
 
 The release workflow validates that a tag matches all package versions, is on main, and has not moved between verification and publishing. The publish job uses the verified tarballs and compares npm SHA-512 integrity afterwards. Existing versions are skipped only when their integrity matches. Retired-package shims and deprecation are explicit workflow inputs.
 
