@@ -138,6 +138,20 @@ export function defineSandboxContract(
       expect(readFileSync(target, "utf8").trim()).toBe("written");
     });
 
+    it("gives the command a writable $TMPDIR and $HOME", async (ctx) => {
+      // Parsers write there: soffice keeps its profile in $HOME, Python's tempfile uses $TMPDIR.
+      const opened = requireFilesystem(ctx);
+      const result = await execInSession(
+        opened,
+        command([
+          "-c",
+          ': "${HOME:?HOME is unset}"; t="${TMPDIR:-/tmp}"; echo tmp > "$t/contract-probe" && echo home > "$HOME/contract-probe" && cat "$t/contract-probe" "$HOME/contract-probe"',
+        ]),
+      );
+      expect(result.exitCode, result.stderr).toBe(0);
+      expect(result.stdout).toBe("tmp\nhome\n");
+    });
+
     it("blocks outbound TCP connections", async (ctx) => {
       const opened = ready(ctx);
       if (opened.isolation.network === "none") ctx.skip("provider declares no network isolation");

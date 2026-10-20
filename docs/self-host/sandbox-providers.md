@@ -81,7 +81,7 @@ A required variable that is missing, or a number or boolean that does not parse,
 
 Set `DOCSLURP_PARSER_SANDBOX=landlock`. The worker images ship `landrun` at `/usr/local/bin/landrun`. Elsewhere, install the pinned release from `worker/sandbox-tools.json` and point `DOCSLURP_LANDRUN_BINARY` at it.
 
-Landlock restricts the parser to read-only access to system runtime paths and the input files, and write access to its scratch and declared output directories. It denies TCP connect and bind on kernel 6.8 and newer. It does not create namespaces, so it works in containers where bubblewrap cannot. It has no PID or IPC isolation, and the `processes` flag is `false`.
+Landlock restricts the parser to read-only access to system runtime paths and the input files, and write access to its scratch and declared output directories. Like the bubblewrap launcher, each command gets a private directory under `DOCSLURP_PARSER_SANDBOX_ROOT` with `HOME`, `TMPDIR`, `TMP`, `TEMP` and the `XDG_*` directories pointed into it; it is removed when the command exits. The worker resolves `DOCSLURP_LANDRUN_BINARY` against its `PATH` once at start, so the probe and every command run the same landrun. A path containing a comma cannot be granted (landrun splits grant lists on commas), so such a command fails instead of running with the wrong grants. It denies TCP connect and bind on kernel 6.8 and newer. It does not create namespaces, so it works in containers where bubblewrap cannot. It has no PID or IPC isolation, and the `processes` flag is `false`.
 
 ## Modal
 

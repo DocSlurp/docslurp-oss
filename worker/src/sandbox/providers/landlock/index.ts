@@ -1,5 +1,5 @@
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync } from "node:fs";
+import { accessSync, constants, existsSync, mkdirSync, mkdtempSync, rmSync, statSync } from "node:fs";
 import { release } from "node:os";
 import path from "node:path";
 
@@ -13,7 +13,10 @@ import type {
 } from "../../types.js";
 
 export interface LandlockConfig {
-  /** landrun executable (a release >= v0.1.12, MIT; pinned in worker/sandbox-tools.json). */
+  /**
+   * landrun executable (a release >= v0.1.12, MIT; pinned in worker/sandbox-tools.json),
+   * resolved against the worker's PATH once so the probe and every command run the same file.
+   */
   binary: string;
   scratchRoot: string;
   /** Extra private DocSlurp workspaces the runner merges into every command's writable paths. */
@@ -63,12 +66,55 @@ function isolationFor(kernelRelease: string): SandboxIsolation {
   return { filesystem: true, network: networkForKernel(kernelRelease), processes: false, location: "local" };
 }
 
+/** Grantable paths that exist. landrun splits a grant list on commas, so a comma in a path fails closed. */
 function existing(paths: string[]): string[] {
+  for (const candidate of paths) {
+    if (candidate.includes(",")) throw new Error(`landrun cannot grant a path containing a comma: ${candidate}`);
+  }
   return paths.filter((candidate) => existsSync(candidate));
 }
 
 function pathFlags(flag: string, paths: string[]): string[] {
   return paths.length > 0 ? [flag, paths.join(",")] : [];
+}
+
+/** Resolve a bare executable name against `searchPath`; paths are made absolute. Unresolved names are returned as is. */
+export function resolveExecutable(binary: string, searchPath: string): string {
+  if (binary.includes(path.sep)) return path.resolve(binary);
+  for (const directory of searchPath.split(path.delimiter)) {
+    if (!directory) continue;
+    const candidate = path.resolve(directory, binary);
+    try {
+      accessSync(candidate, constants.X_OK);
+      if (statSync(candidate).isFile()) return candidate;
+    } catch {
+      /* try the next directory */
+    }
+  }
+  return binary;
+}
+
+/**
+ * Per-command private scratch, the same layout and variables as the bubblewrap launcher
+ * (worker/scripts/parser-sandbox.sh): parsers such as soffice need a writable $HOME, and
+ * Python's tempfile a writable $TMPDIR. Landlock otherwise grants no write access to them.
+ */
+export function createCommandScratch(scratchRoot: string): { dir: string; cwd: string; env: Record<string, string> } {
+  mkdirSync(scratchRoot, { recursive: true, mode: 0o700 });
+  const dir = mkdtempSync(path.join(scratchRoot, "run-"));
+  const tmp = path.join(dir, "tmp");
+  const env = {
+    HOME: path.join(dir, "home"),
+    TMPDIR: tmp,
+    TMP: tmp,
+    TEMP: tmp,
+    XDG_CACHE_HOME: path.join(dir, "xdg-cache"),
+    XDG_CONFIG_HOME: path.join(dir, "xdg-config"),
+    XDG_DATA_HOME: path.join(dir, "xdg-data"),
+  };
+  const cwd = path.join(dir, "work");
+  for (const directory of [...new Set(Object.values(env)), cwd]) mkdirSync(directory, { recursive: true });
+  return { dir, cwd, env };
 }
 
 export function landrunArgs(
@@ -99,7 +145,7 @@ export const landlockProvider: ParserSandboxProvider<LandlockConfig> = {
   readConfig(env) {
     const raw = readSandboxConfig<{ binary: string; scratchRoot: string; writablePaths: string }>(configSchema, env);
     return {
-      binary: raw.binary,
+      binary: resolveExecutable(raw.binary, env.PATH ?? ""),
       scratchRoot: raw.scratchRoot,
       writablePaths: raw.writablePaths
         .split(",")
@@ -127,12 +173,29 @@ export const landlockProvider: ParserSandboxProvider<LandlockConfig> = {
     return {
       providerId: "landlock",
       isolation,
-      spawn: (command, signal) =>
-        spawn(config.binary, landrunArgs(command), {
-          env: command.env,
-          stdio: ["ignore", "pipe", "pipe"],
-          signal,
-        }),
+      spawn: (command, signal) => {
+        const scratch = createCommandScratch(config.scratchRoot);
+        const cleanup = () => rmSync(scratch.dir, { recursive: true, force: true });
+        try {
+          const sandboxed = {
+            ...command,
+            env: { ...command.env, ...scratch.env },
+            writablePaths: [...command.writablePaths, scratch.dir],
+          };
+          const child = spawn(config.binary, landrunArgs(sandboxed), {
+            env: sandboxed.env,
+            cwd: scratch.cwd,
+            stdio: ["ignore", "pipe", "pipe"],
+            signal,
+          });
+          // 'close' follows a normal exit, a kill or abort, and a failed spawn alike.
+          child.once("close", cleanup);
+          return child;
+        } catch (error) {
+          cleanup();
+          throw error;
+        }
+      },
       close: async () => {},
     };
   },
