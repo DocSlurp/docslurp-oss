@@ -626,7 +626,7 @@ const USAGE = `Usage:
   dataset.mjs tiers --out tiers.json --mid-workspace ID --large-workspace ID [--state ingest/state.json] [--mid-source-doc DOC] [--mid-max-page 4000] [--mid-documents pagecounts.json]
   dataset.mjs generate --pages pages.jsonl --tier mid-5k|large-58k --tiers tiers.json --out cases.jsonl [--single N] [--multi N] [--max-single-calls N] [--max-multi-calls N] [--seed S] [--generator-model ID] [--cap-usd 1] [--api-key-env OPENROUTER_API_KEY] [--dry-run]
   dataset.mjs unanswerable --pages pages.jsonl --tier T --tiers tiers.json --corpus pages-text.jsonl --out cases.jsonl --count N [--candidates N] [--max-calls N] [--search-base URL --credentials FILE] [--dry-run]
-  dataset.mjs import-labeled --queries queries-pages.jsonl --source-dataset dataset.json --corpus pages-text.jsonl --tiers tiers.json --out cases.jsonl [--tier large-58k] [--no-silver] [--dry-run]
+  dataset.mjs import-labeled --queries queries-pages.jsonl (--source-dataset dataset.json | --questions questions.jsonl) --corpus pages-text.jsonl --tiers tiers.json --out cases.jsonl [--tier large-58k] [--no-silver] [--dry-run]
   dataset.mjs freeze --cases a.jsonl[,b.jsonl] --out-dir DIR --seed S --tiers tiers.json [--test-fraction 0.7] [--previous old/dataset.json]
   dataset.mjs validate DIR/dataset.json`;
 
@@ -698,17 +698,25 @@ export async function main(argv = process.argv.slice(2)) {
     writeCandidates(setup.out, await generateUnanswerable({ pages, tier, seed, count, candidates, maxCalls, apiKey: process.env[options["api-key-env"] ?? "OPENROUTER_API_KEY"], verifyLocal, verifySearch, createdAt, ...setup }));
     console.log(JSON.stringify({ guard: setup.guard.state() }));
   } else if (command === "import-labeled") {
-    for (const key of ["queries", "source-dataset", "out"]) if (!options[key]) throw new Error(USAGE);
+    for (const key of ["queries", "out"]) if (!options[key]) throw new Error(USAGE);
+    if (!options["source-dataset"] === !options.questions) throw new Error("import-labeled needs exactly one of --source-dataset or --questions");
     const tier = options.tier ?? "large-58k";
     const tiers = options.tiers ? readJson(options.tiers) : {};
     const workspaceId = options["workspace-id"] ?? tiers[tier]?.workspaceId;
     if (!workspaceId) throw new Error("workspace required: --tiers or --workspace-id");
     const queries = readJsonl(options.queries);
-    const sourceBytes = readFileSync(options["source-dataset"]);
-    const sourceSha = sha256(sourceBytes);
-    const expected = new Set(queries.map((row) => row.provenance?.dataset_sha256).filter(Boolean));
-    if (expected.size && !expected.has(sourceSha)) throw new Error("Source dataset sha256 differs from the hash recorded in the queries' provenance");
-    const imported = importLabeled({ queries, sourceDataset: JSON.parse(sourceBytes), workspaceId, tier, documentMap: tiers[tier]?.documentMap ?? {}, createdAt });
+    let sourceDataset;
+    if (options.questions) {
+      // Recovered question text ({id, question} JSONL) when the original dataset.json is gone; its hash is recorded instead.
+      const questionBytes = readFileSync(options.questions);
+      sourceDataset = { versionSha256: `questions:${sha256(questionBytes)}`, queries: readJsonl(options.questions).map((row) => ({ id: row.id, question: row.question })) };
+    } else {
+      const sourceBytes = readFileSync(options["source-dataset"]);
+      const expected = new Set(queries.map((row) => row.provenance?.dataset_sha256).filter(Boolean));
+      if (expected.size && !expected.has(sha256(sourceBytes))) throw new Error("Source dataset sha256 differs from the hash recorded in the queries' provenance");
+      sourceDataset = JSON.parse(sourceBytes);
+    }
+    const imported = importLabeled({ queries, sourceDataset, workspaceId, tier, documentMap: tiers[tier]?.documentMap ?? {}, createdAt });
     const setup = generatorSetup(options);
     if (options["dry-run"]) {
       console.log(JSON.stringify({ tier, imported: imported.accepted.length, skipped: imported.skipped, silver: options["no-silver"] ? "disabled" : estimateGenerationUsd({ model: setup.generatorModel, prices: setup.prices, calls: imported.accepted.filter((entry) => entry.gold.answerable).length, avgPromptChars: 6 * 6_000 + 600, maxOutputTokens: 512 }) }, null, 2));
