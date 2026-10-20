@@ -3,7 +3,8 @@
 //
 //   node scripts/check-docs-mermaid.mjs [files...]
 //
-// Uses the same default file set as check-docs-links.mjs. The renderer is
+// Defaults to README.md, docs/**/*.md (except historical docs/superpowers),
+// and packages/*/README.md. Other files can be passed explicitly. The renderer is
 // fetched on demand with npx at a pinned version (it downloads Chromium, so it
 // is deliberately not a devDependency). Set MMDC to a local mmdc binary to
 // skip npx. Set PUPPETEER_EXECUTABLE_PATH to use an installed Chrome or Chromium
@@ -13,7 +14,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { defaultFiles } from "./check-docs-links.mjs";
+import { publicDocsFiles } from "./check-docs-links.mjs";
 
 export const MERMAID_CLI_VERSION = "11.17.0";
 
@@ -37,7 +38,7 @@ export function extractMermaid(markdown) {
 
 function main() {
   const args = process.argv.slice(2);
-  const files = args.length > 0 ? args.map((f) => resolve(f)) : defaultFiles();
+  const files = args.length > 0 ? args.map((f) => resolve(f)) : publicDocsFiles();
   const blocks = files.flatMap((file) => extractMermaid(readFileSync(file, "utf8")).map((block) => ({ ...block, file })));
   if (blocks.length === 0) {
     console.log("no mermaid blocks");

@@ -1,17 +1,19 @@
 #!/usr/bin/env node
-// Checks relative links and heading anchors in the public Markdown docs.
+// Checks relative links and heading anchors in repository Markdown.
 //
 //   node scripts/check-docs-links.mjs [files...]
 //
-// With no arguments it checks README.md, docs/**/*.md (except docs/superpowers)
-// and packages/*/README.md. Exit 1 prints one `path:line: broken link <target>`
+// With no arguments it checks tracked and non-ignored untracked Markdown files
+// that exist in the working tree. Exit 1 prints one `path:line: broken link <target>`
 // line per failure. External links (any URL scheme) are not fetched.
-import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const SCHEME = /^[a-z][a-z0-9+.-]*:/i;
+const MARKDOWN = /\.(?:md|mdx|markdown)$/i;
 const FENCE = /^ {0,3}(`{3,}|~{3,})/;
 
 /** GitHub's heading anchor for one heading's text (without duplicate suffixes). */
@@ -105,33 +107,31 @@ export function checkFile(path) {
     const anchor = hashAt < 0 ? "" : decode(target.slice(hashAt + 1));
     const dest = rawPath === "" ? file : rawPath.startsWith("/") ? join(ROOT, decode(rawPath)) : resolve(dirname(file), decode(rawPath));
     let ok = existsSync(dest);
-    if (ok && anchor && statSync(dest).isFile() && dest.endsWith(".md")) ok = anchorsForFile(dest).has(anchor.toLowerCase()) || anchorsForFile(dest).has(anchor);
+    if (ok && anchor && statSync(dest).isFile() && MARKDOWN.test(dest)) ok = anchorsForFile(dest).has(anchor.toLowerCase()) || anchorsForFile(dest).has(anchor);
     if (!ok) broken.push({ line, target });
   }
   return broken;
 }
 
-function walk(dir, out) {
-  for (const entry of readdirSync(dir, { withFileTypes: true })) {
-    if (entry.name === "node_modules") continue;
-    const full = join(dir, entry.name);
-    if (entry.isDirectory()) {
-      if (relative(ROOT, full) === join("docs", "superpowers")) continue;
-      walk(full, out);
-    } else if (entry.name.endsWith(".md")) out.push(full);
-  }
+/** Existing tracked and non-ignored untracked Markdown, sorted for stable diagnostics. */
+export function defaultFiles(root = ROOT) {
+  const paths = execFileSync("git", ["ls-files", "--cached", "--others", "--exclude-standard", "-z"], {
+    cwd: root,
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+    maxBuffer: 16 * 1024 * 1024,
+  }).split("\0").filter((path) => MARKDOWN.test(path));
+  return [...new Set(paths)].sort().map((path) => resolve(root, path))
+    .filter((path) => existsSync(path) && statSync(path).isFile());
 }
 
-/** README.md, docs/**\/*.md (minus docs/superpowers) and packages/*\/README.md as absolute paths. */
-export function defaultFiles() {
-  const files = [];
-  if (existsSync(join(ROOT, "README.md"))) files.push(join(ROOT, "README.md"));
-  if (existsSync(join(ROOT, "docs"))) walk(join(ROOT, "docs"), files);
-  for (const pkg of existsSync(join(ROOT, "packages")) ? readdirSync(join(ROOT, "packages")) : []) {
-    const readme = join(ROOT, "packages", pkg, "README.md");
-    if (existsSync(readme)) files.push(readme);
-  }
-  return files;
+/** Published documentation rendered in CI; historical plans may contain pseudo-code. */
+export function publicDocsFiles(root = ROOT) {
+  return defaultFiles(root).filter((file) => {
+    const path = relative(root, file).split("\\").join("/");
+    return path === "README.md" || /^packages\/[^/]+\/README\.md$/.test(path)
+      || (path.startsWith("docs/") && path.endsWith(".md") && !path.startsWith("docs/superpowers/"));
+  });
 }
 
 function main() {

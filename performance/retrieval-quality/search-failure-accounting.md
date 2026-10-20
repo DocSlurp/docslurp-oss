@@ -1,5 +1,16 @@
 # Persist paid search usage when retrieval fails
 
+> Historical investigation record from the October 2026 retrieval experiments;
+> classified 2026-10-20. Status, deployment, provider prices, available adapters,
+> budgets and agent assignments below describe their original checkpoints. They
+> are not current operating instructions or renewed spending/delegation authority.
+> Current references: [dependency tracing](../../docs/dependency-tracing.md) and [search API](../../docs/search-api.md).
+> Reported checks/results and outstanding work are preserved without rerunning
+> experiments or claiming that pending verification is complete. Any `/tmp` paths
+> are historical external evidence locations; their existence and contents were
+> not verified in this cleanup. They have not been relocated. New scratch work
+> follows the repository's agent-storage guidance.
+
 Independent review of the new BGE query route found that actual usage was buffered before vector validation, but malformed output threw before the only successful-search finalizer could persist that buffer. Paid usage could disappear from attribution. The same failure shape affects strategy/retrieval exceptions, including suppressed child searches whose parent never adopts their events.
 
 The search journal now exposes a serialized usage-only flush that stamps its existing organization, workspace and session scope without writing a successful search/results row. The runner flushes before returning, including suppressed child searches, and on failure. Existing deterministic event IDs and ledger flush progress keep subsequent flush/adoption idempotent. A failed persistence attempt is reported through error telemetry while the original retrieval error is rethrown; a database outage remains an accounting failure, not a claim that the event was stored.

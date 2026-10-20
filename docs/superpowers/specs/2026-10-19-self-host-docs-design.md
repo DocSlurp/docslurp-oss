@@ -1,7 +1,26 @@
 # Self-host docs and system map — design
 
+> Historical design record, classified 2026-10-20. Implementation landed in
+> [ed8013f0](https://github.com/DocSlurp/docslurp-oss/commit/ed8013f0).
+> Current guidance: [self-host guide](../../self-host/README.md).
+> The original proposal, rollout instructions and test intentions below are
+> retained for context; they are not current implementation or deployment status.
+
+### Retired execution plan: verification and follow-up
+
+The task-by-task plan was retired on 2026-10-20 after implementation landed.
+Its unchecked boxes were planning instructions, not test receipts. This record
+does not establish that the complete Compose quickstart ran in a fresh isolated
+checkout, that every moved paragraph was compared, or that every proposed
+link/Mermaid check passed. Revalidate those when changing the guide; consult the
+implementation commit and CI for historical check results.
+
+The separate `DocSlurp/app` docs-site chapter remains a cross-repository follow-up
+from this design; its completion is not established by this checkout. Later
+program proposals below are design history, not an approved execution queue.
+
 Date: 2026-10-19
-Status: draft for review
+Original status: draft for review
 Sub-project 1 of 7 in the self-host and deploy program (see "Program decisions").
 
 ## Goal

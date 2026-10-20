@@ -280,7 +280,8 @@ propositions can then be turned back on.
 | API voice input | `/audio/transcriptions` (multipart) | Used outside `standard` when `DOCSLURP_PRIVATE_STT_MODEL` names a registered `stt` model. |
 
 Not routed yet: the API's optional search strategies, the chat MCP agent, and
-reranking. They behave as they did before private routes existed (see TODO.md).
+reranking. Routing these surfaces through the private registry remains outstanding;
+they retain their existing routing behavior.
 Standard workspaces keep their hosted routes, but they can also name a private
 route explicitly.
 

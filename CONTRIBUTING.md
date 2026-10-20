@@ -44,6 +44,19 @@ Database schema changes go only through `server/db/migrations` (`pnpm db:generat
 - Every LLM or embedding call must log usage as `[ai-usage] <metric> model=<id> input_tokens=<n> output_tokens=<n>` and persist it through the existing usage recorder.
 - Add a test for behaviour you change.
 
+## Documentation lifecycle
+
+Keep documentation links current when moving or removing files. Run
+`node scripts/check-docs-links.mjs` to check all tracked Markdown and non-ignored
+new Markdown in the working tree. `pnpm docs:check` also renders Mermaid in the
+public documentation; historical plans outside that scope are not rendered.
+
+Plans and investigation notes should state their status and date and link to
+implementation evidence or a replacement document when completed or superseded.
+Preserve unresolved follow-ups and useful evidence when archiving or consolidating
+notes. A historical budget records past authorization; it does not authorize new
+spending or experiments.
+
 ## Commits and pull requests
 
 Short imperative subjects ("Fix worker timeout on large PDFs") with a body explaining why. Keep pull requests small, describe user-visible behaviour, and note any environment variable or schema change.
@@ -52,13 +65,13 @@ AI-assisted contributions are welcome. You are responsible for reviewing the cod
 
 ## Licensing of contributions and the CLA
 
-DocSlurp uses different licenses for different parts of the tree (SSPL-1.0 with an Apache-2.0 future grant for the server, worker, CLI and server-side adapter; MIT for the SDKs, shared contracts and client integrations; see [LICENSE](LICENSE)). To keep that model workable, and to let us offer commercial terms, **every contributor signs the [Contributor License Agreement](CLA.md)** before a pull request can be merged.
+DocSlurp uses different licenses for different parts of the tree (SSPL-1.0 with an Apache-2.0 future grant for the server, worker and CLI; MIT for the SDKs, shared contracts and integrations, including `contrib-algolia-server`; see [LICENSE](LICENSE)). To keep that model workable, and to let us offer commercial terms, **every contributor signs the [Contributor License Agreement](CLA.md)** before a pull request can be merged.
 
 - **You keep the copyright** in your contribution. You grant DocSlurp, Inc. a copyright and patent license that includes the right to relicense it, and you confirm the work is yours to contribute. It is modelled on the Apache individual and corporate CLAs.
 - **Individuals:** open a pull request. The CLA Assistant bot comments with the exact sentence to reply with; the check turns green once you have signed. You sign once; it covers later pull requests under the same CLA version.
 - **Employees:** if your employer may own what you write, ask it to sign the corporate CLA (Part B of [CLA.md](CLA.md)) and email it to **legal@docslurp.io**, listing your GitHub username. Do this before you contribute.
 - **Not required:** DocSlurp organization members, and bots such as Dependabot.
-- Accepted pull requests are merged in our private monorepo and published here by the exporter, so the commit that lands here may be re-created by the exporter. We keep you as the commit author or credit you by name in the commit message.
+- Accepted pull requests are squash-merged into this repository. The private application pins this repository for its server and worker code.
 - Do not submit code you do not have the right to license, including output copied from other projects. Say so in the pull request if part of your change comes from elsewhere, and name its license.
 
 Questions about the CLA: **legal@docslurp.io**.

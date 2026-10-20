@@ -1,5 +1,16 @@
 # Multi-search and inference screening
 
+> Historical investigation record from the October 2026 retrieval experiments;
+> classified 2026-10-20. Status, deployment, provider prices, available adapters,
+> budgets and agent assignments below describe their original checkpoints. They
+> are not current operating instructions or renewed spending/delegation authority.
+> Current references: [search API](../../docs/search-api.md) and [evaluation integrity](../../docs/evaluation-integrity.md).
+> Reported checks/results and outstanding work are preserved without rerunning
+> experiments or claiming that pending verification is complete. Any `/tmp` paths
+> are historical external evidence locations; their existence and contents were
+> not verified in this cleanup. They have not been relocated. New scratch work
+> follows the repository's agent-storage guidance.
+
 Status: authored local harness, no paid inference and no measured product quality result. Evidence lives outside Git at `/tmp/docslurp-retrieval-quality-evidence/multisearch/`. Development and heldout each contain six locally authored questions, source Markdown, gold and SHA-256 provenance. Coverage: direct fact, cross-page identity join plus calendar arithmetic, cross-page numeric deduction, ambiguous entity, absent fact and conflicting revisions. Heldout IDs are opaque. Coordinator/tuner must not open heldout gold, questions or the external authoring script; an independent evaluator runs confirmation after the candidate is frozen.
 
 ## Production trace

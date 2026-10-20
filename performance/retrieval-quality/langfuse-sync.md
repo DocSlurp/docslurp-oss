@@ -1,5 +1,16 @@
 # Langfuse evaluation sync
 
+> Historical investigation record from the October 2026 retrieval experiments;
+> classified 2026-10-20. Status, deployment, provider prices, available adapters,
+> budgets and agent assignments below describe their original checkpoints. They
+> are not current operating instructions or renewed spending/delegation authority.
+> Current references: [sync tooling contract](../../scripts/eval-sync/README.md) and [evaluation integrity](../../docs/evaluation-integrity.md).
+> Reported checks/results and outstanding work are preserved without rerunning
+> experiments or claiming that pending verification is complete. Any `/tmp` paths
+> are historical external evidence locations; their existence and contents were
+> not verified in this cleanup. They have not been relocated. New scratch work
+> follows the repository's agent-storage guidance.
+
 Verified 2026-10-17 05:29 UTC. Three development datasets were synced and read back from the existing DocSlurp Langfuse project:
 
 | Dataset | Remote items | Second-pass creates | Second-pass updates | Unchanged |

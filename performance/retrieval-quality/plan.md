@@ -1,5 +1,16 @@
 # Retrieval and multi-search quality tuning
 
+> Historical investigation record from the October 2026 retrieval experiments;
+> classified 2026-10-20. Status, deployment, provider prices, available adapters,
+> budgets and agent assignments below describe their original checkpoints. They
+> are not current operating instructions or renewed spending/delegation authority.
+> Current references: [search API](../../docs/search-api.md), [evaluation integrity](../../docs/evaluation-integrity.md) and [development experiment report](../../docs/evals/retrieval-quality/existing-options-experiment.md).
+> Reported checks/results and outstanding work are preserved without rerunning
+> experiments or claiming that pending verification is complete. Any `/tmp` paths
+> are historical external evidence locations; their existence and contents were
+> not verified in this cleanup. They have not been relocated. New scratch work
+> follows the repository's agent-storage guidance.
+
 ## Objective and scope
 
 Recover missing supporting passages and produce cited, defensible answers to direct and multi-step questions. The existing ASU and statutes queries are development evidence: 8/9 and 2/4 strict top-10 passage checks passed. These small samples do not establish production-wide accuracy. Preserve source text, page citations and raw failures; never encode fixture-specific knowledge in product logic.
@@ -22,18 +33,18 @@ Compare one coherent mechanism at a time: retrieval configuration; context compr
 
 Check live official DeepInfra BGE/Jina/Omni availability and prices; use supported Gemini default dimensions as an alternative. No unverified catalog aliases, prohibited models or new paid infrastructure. Keep source fixtures outside the repository.
 
-## Bounds and evidence
+## Historical bounds and evidence
 
 Initial extension: six screening configurations and 90 minutes of active tuning, then reassess evidence. Preserve the prior cumulative $10 API budget; additionally cap this phase at $3 of new provider usage and count all customer-ledger fees against remaining benchmark allowance before any full reingestion. Research and local checks precede paid runs. No unbounded retries. Record actual usage through existing journals/ledgers; do not call providers with unmetered ad-hoc scripts.
 
 Raw evidence: /tmp/docslurp-retrieval-quality-evidence/. Prior corpus and retained runs: /tmp/docslurp-large-docs/. Prior extraction-quality held-out cases remain sealed and are not this task's training material.
 
-Parallel responsibilities: missing-passage diagnosis; embedding/provider capabilities; multi-search and inferred-answer behavior. Coordinator integrates fixes, arranges independent review and keeps deployment separate from measurements.
+Historical task split: missing-passage diagnosis, embedding/provider capabilities, and multi-search/inferred-answer behavior. These assignments ended with that investigation; they do not allocate agents for future work.
 
-## Experiment history and growing regression coverage
+## Original experiment protocol and regression coverage
 
 Every experiment has its own commit recording hypothesis, exact source/configuration, results and disposition. Push the experiment branch to preserve its full commit history even when production PRs are squash-merged. Reject changes through forward revert commits; never rewrite or erase failed experiments. Keep durable evidence paths and hashes with each result.
 
 Every discovered miss becomes a versioned development regression case: source provenance/hash, question, expected supporting passage/page, expected answer or explicit abstention, retrieval flags, observed rank/citation and retained raw trace. When original traces were not retained, mark that gap and label fresh replay evidence explicitly. A correction to a faulty oracle creates a new dataset version; it must not silently improve the old score. Newly discovered cases do not enter an already-used confirmation set.
 
-Model allocation: GPT-6 Astra for retrieval diagnosis/regressions; GPT-6.1 Sol for embedding-provider comparisons and multi-search evals. Runtime allows three children plus coordinator; no more than four active agents total.
+Historical model allocation was GPT-6 Astra for retrieval diagnosis/regressions and GPT-6.1 Sol for embedding-provider comparisons and multi-search evals, with a four-agent runtime limit. This records the original run only; current agent instructions govern new work.
