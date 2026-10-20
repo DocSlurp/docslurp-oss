@@ -1,6 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 import type { McpDispatch } from "../lib/mcp-http.js";
-import { createChatMcpTools } from "./chat-mcp-tools.js";
+import { asSchema } from "ai";
+import { createChatMcpTools, evidencePages } from "./chat-mcp-tools.js";
+import { mcpManifest } from "./mcp-catalog.js";
 
 function setup(ids = ["search"]) {
   const dispatch = vi.fn<McpDispatch>(async () => Response.json({ results: [] }));
@@ -125,5 +127,49 @@ describe("chat MCP tool retrieval controls", () => {
     for (const query of JSON.parse(dispatch.mock.calls[1]![1]!.body as string).queries) expect(query).toMatchObject({ workspaceId: "selected", limit: 4, hyde: false, mmr: true });
     await execute("chat", { q: "a", retrieval: { useHyDE: true } });
     expect(JSON.parse(dispatch.mock.calls[2]![1]!.body as string)).toMatchObject({ workspaceId: "selected", retrieval: { resultCount: 4, useHyDE: false, useMmr: true, resultOrder: "relevance" } });
+  });
+});
+
+describe("chat agent tool schemas", () => {
+  // Anthropic (direct, Bedrock, Vertex) answers 400 "input_schema does not support oneOf,
+  // allOf, or anyOf at the top level"; OpenAI rejects them (and `not`) at the top level too.
+  const COMBINATORS = ["oneOf", "anyOf", "allOf", "not"];
+
+  it("sends every chat-agent tool to the model as a plain object schema without top-level combinators", async () => {
+    const context = createChatMcpTools({ manifest: mcpManifest("http://mcp.internal"),
+      dispatch: vi.fn<McpDispatch>(), workspaceId: "selected", signal: new AbortController().signal });
+    const names = Object.keys(context.tools);
+    expect(names).toEqual(expect.arrayContaining(["search", "chat"]));
+    for (const name of names) {
+      const schema = await asSchema(context.tools[name]!.inputSchema).jsonSchema as Record<string, unknown>;
+      expect(schema.type, name).toBe("object");
+      expect(COMBINATORS.filter(key => key in schema), name).toEqual([]);
+    }
+  });
+
+  it("keeps the whole MCP catalog flat, since MCP clients forward these schemas to the same providers", () => {
+    for (const tool of mcpManifest("http://mcp.internal").capabilities) {
+      expect(tool.inputSchema.type, tool.id).toBe("object");
+      expect(COMBINATORS.filter(key => key in tool.inputSchema), tool.id).toEqual([]);
+    }
+  });
+});
+
+describe("evidence pages", () => {
+  const hit = (documentId: string, pageNumber: number | null, pageNumbers: number[] = []) =>
+    ({ text: "passage", score: 1, citation: { documentId, filename: "f.pdf", pageNumber, pageNumbers, chunkIndex: 0, headingPath: [] } }) as never;
+
+  it("expands multi-page chunks into their pages, deduplicated, and drops null when a page is known", () => {
+    expect(evidencePages([hit("d1", null, [1211, 1212]), hit("d1", 1212), hit("d1", null), hit("d2", null, [3]), hit("d3", null)])).toEqual([
+      { documentId: "d1", pageNumber: 1211 }, { documentId: "d1", pageNumber: 1212 },
+      { documentId: "d2", pageNumber: 3 }, { documentId: "d3", pageNumber: null },
+    ]);
+  });
+
+  it("reports multi-page evidence on the tool call detail", async () => {
+    const t = setup(["search"]);
+    t.dispatch.mockResolvedValueOnce(Response.json({ results: [hit("doc", null, [1211, 1212])] }));
+    await t.execute("search", { q: "spanning" }, "span");
+    expect(t.details.get("span")?.evidencePages).toEqual([{ documentId: "doc", pageNumber: 1211 }, { documentId: "doc", pageNumber: 1212 }]);
   });
 });
