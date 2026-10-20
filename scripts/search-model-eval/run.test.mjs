@@ -150,7 +150,7 @@ test("one retry on 5xx, up to five on 429, keeps every attempt; 4xx is not retri
   assert.equal(limited.outcome, "http_429");
   assert.equal(read(2).attemptCount, 1);
   assert.equal(summary.counts.retried, 5);
-  assert.equal(readJsonl(join(outDir, "attempts.jsonl")).length, 6);
+  assert.equal(readJsonl(join(outDir, "attempts.jsonl")).length, 9);
 });
 
 test("network errors retry once; timeouts are recorded and not retried by default", async (t) => {
