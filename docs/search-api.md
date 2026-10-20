@@ -68,7 +68,7 @@ Chunks reach keyword search once the embed stage has written every chunk row of 
 }
 ```
 
-The batch contains 1–20 queries; concurrency is an integer from 1 to 4, defaulting to 4. The entire envelope is validated before any retrieval starts. The response is `{results: [...]}`, preserving query order even when requests complete out of order. Each result is either `{ok: true, data}`, where `data` is a full search response, or `{ok: false, error: {code, message, status}}`. A valid batch returns HTTP 200 even when individual items fail. Invalid envelopes return HTTP 400.
+The batch contains 1–20 queries; concurrency is an integer from 1 to 8, defaulting to 4 (inside chat, the turn's `agent.searchConcurrency` caps it). The entire envelope is validated before any retrieval starts. The response is `{results: [...]}`, preserving query order even when requests complete out of order. Each result is either `{ok: true, data}`, where `data` is a full search response, or `{ok: false, error: {code, message, status}}`. A valid batch returns HTTP 200 even when individual items fail. Invalid envelopes return HTTP 400.
 
 Every item independently checks the API key's `search` scope and organization/workspace access. Item error codes include `FORBIDDEN` (403), `WORKSPACE_NOT_FOUND` (404), `INVALID_SEARCH_SCOPE` (400), and `SEARCH_FAILED` (500). Unexpected internal errors are sanitized. Disconnecting prevents queued retrieval from starting; in-flight retrieval may finish and record usage. Unstarted items carry `REQUEST_ABORTED` (499) if a response remains deliverable.
 
@@ -82,7 +82,7 @@ Every error from the native JSON API (`/v1/*`, including authentication, rate li
 
 `code` is a closed set you can branch on:
 
-- Request and access: `invalid_request`, `unauthorized`, `forbidden`, `not_found`, `workspace_not_found`, `conflict`, `payload_too_large`, `session_required`, `invalid_search_scope`, `chat_disabled`.
+- Request and access: `invalid_request`, `unauthorized`, `forbidden`, `not_found`, `workspace_not_found`, `conflict`, `payload_too_large`, `session_required`, `invalid_search_scope`, `chat_disabled`, `model_not_allowed`.
 - Limits: `rate_limited`, `spend_limit_exceeded`, `daily_page_limit`, `ip_temporarily_blocked`.
 - Billing: `payment_required`, `credit_exhausted`, `workspace_budget_paused`, `org_budget_paused`, `minimum_credit_required`, `plan_not_entitled`.
 - Uploads: `unsupported_type`, `file_too_large`, `unreadable_source`.
@@ -95,7 +95,89 @@ Protocol surfaces keep the shapes their clients already parse: the OpenAI-compat
 
 ## Grounded chat
 
-`POST /v1/chat` is the canonical workspace chat endpoint. Send `{q, workspaceId?, sessionId?, model?}`; an omitted `workspaceId` means your organization's default workspace. `sessionId` and `model` are nonempty strings of at most 256 characters; all fields are checked before model calls. The response includes an answer, citations, and the chat session ID. For streaming, use `/v1/chat/completions` with `stream: true`; omit it for the JSON fallback.
+`POST /v1/chat` is the canonical workspace chat endpoint. Send `{q, workspaceId?, sessionId?, model?, retrieval?, filters?, agent?}`; an omitted `workspaceId` means your organization's default workspace. `sessionId` and `model` are nonempty strings of at most 256 characters; all fields are checked before model calls. The response includes an answer, citations, and the chat session ID. For streaming, use `/v1/chat/completions` with `stream: true`; omit it for the JSON fallback.
+
+### Model
+
+Omit `model` to use the default (`z-ai/glm-5.3-flash`). Any workspace chat catalog model (`z-ai/glm-5.3-flash`, `anthropic/claude-haiku-5.5`, `deepseek/deepseek-v4.1-flash`, `openai/gpt-6.1-sol`, `openai/gpt-6-luna`) is accepted from anyone. Any other value returns HTTP 400 with code `model_not_allowed`; the server never substitutes the default for a model you named. The same check applies to the streaming chat route (before the stream opens) and the dashboard chat routes.
+
+Operators can list extra OpenRouter ids in `DOCSLURP_CHAT_EVAL_MODELS` (comma-separated; `:free` suffixes allowed) for model evaluations. Only platform admins can request them: a session whose verified email is in `ADMIN_EMAILS`, or a server API key owned by such a user. Client (publishable) keys and organization owners or admins do not qualify. For an evaluation account that should not be a platform admin, list its organization in `DOCSLURP_CHAT_EVAL_ORG_IDS` (comma-separated org ids): a turn whose workspace is owned by a listed organization may then use the eval models and the full `agent` limit range, from a session or a server API key (never a client key). The workspace's owning organization decides, not the caller's memberships, and the setting grants nothing else. When the configuration loads, the server logs and drops ids that match the Pro/Ultra prohibition, ids without a verified price in `packages/shared/src/chat-model-prices.ts` (mirrored from `scripts/lib/model-prices.json`), and ids whose output price is $50 per million tokens or more. An eval model answers on its own: if it fails, chat does not fail over to another model.
+
+### Agent limits
+
+When the search agent answers (the default for `/v1/chat` with `DOCSLURP_PUBLIC_CHAT_AGENT_ENABLED` on and no document, type, tag or date filters), `agent` bounds that turn:
+
+| Field | Default | Range | Meaning |
+|---|---|---|---|
+| `maxSteps` | 6 | 1–12 | Model calls in the loop. The last one runs with tools disabled, so the agent always ends with an answer. |
+| `maxToolCalls` | 12 | 1–24 | Tool calls across the turn. Later calls get `{error, code: "tool_call_limit", limitReached: true}` instead of running. |
+| `searchConcurrency` | 4 | 1–8 | Upper bound on the search tool's parallel `queries`, and the value it uses when the model omits `concurrency`. |
+
+Platform admins, and turns in a `DOCSLURP_CHAT_EVAL_ORG_IDS` organization's workspace, can use the full range. For everyone else, a value above the default is lowered to the default and listed in `debug.limits.clamped`; lower values apply as sent. Out-of-range values or unknown fields return HTTP 400 `invalid_request`.
+
+Agent responses add these `debug` fields (other turns omit them):
+
+| Field | Meaning |
+|---|---|
+| `requestedModel` | The `model` you sent, or `null` |
+| `resolvedModel` | The `model` field of OpenRouter's last response (the routed build, for example `deepseek/deepseek-v4.1-flash-20261017` behind the `deepseek/deepseek-v4.1-flash` alias), falling back to the SDK's response model id |
+| `resolvedProvider` | The upstream provider OpenRouter routed to, when it reports one |
+| `steps` | Model steps run |
+| `toolCallCount`, `toolCallsRefused` | Tool calls executed, and calls refused by `maxToolCalls` |
+| `searchCallCount`, `searchQueryCount` | Search tool calls, and retrieval queries counting each item of a parallel batch |
+| `zeroHitSearchCount` | Search calls that returned no results |
+| `stepUsage` | Per step: `{step, model, finishReason, inputTokens, outputTokens, costCents?, toolCalls}` |
+| `toolCalls` | Per tool call, in order (refused calls included): `{id, name, status, runtimeMs, queries?, resultCount?, zeroHit?, evidencePages?, costCents?, errorCode?}`. `queries` are the search strings the model sent (never put on spans); `evidencePages` lists the distinct `{documentId, pageNumber}` of the evidence that call returned; `errorCode` is `tool_call_limit`, `invalid_arguments`, `aborted`, `exception`, the tool's own error code or `http_<status>`. |
+| `limits` | `{maxSteps, maxToolCalls, searchConcurrency, clamped}` as applied |
+| `stopReason` | See below |
+
+On agent turns, `usage.costCents` is the **provider cost** in USD cents of the agent's own model calls (the OpenRouter receipt, or an estimate from verified list prices when the receipt is missing; `usage.costSource` says `provider`, `estimate` or `mixed`). It is not customer credits; credits are derived from the recorded usage events by the rate card. It excludes tool work: the provider cost the tools report for their own work (query embeddings, rewrites, HyDE, reranking, nested answers) is in `usage.toolCostCents` and per call in `debug.toolCalls[].costCents`, and is recorded as separate usage events. A turn's total provider cost is `costCents + toolCostCents`; cached search responses report 0.
+
+`stopReason` is chosen deterministically, without reading the answer's meaning. The first rule that matches wins:
+
+1. `timeout` (the 120-second agent budget ran out) or `error` (any other failure). Both appear only in traces and metrics, because the HTTP response is then an error.
+2. `tool_call_limit`: at least one tool call was refused.
+3. `step_limit`: the loop ended mid tool call, or the last step ran with tools disabled right after a tool-calling step. With `maxSteps: 1`, tools are disabled from the start, so that does not count as a limit hit.
+4. `no_evidence`: the agent searched and every search returned zero results.
+5. `answered_without_citations`: the agent searched, but the answer has no `[n]` citation.
+6. `answered`: everything else, including answers that needed no search.
+
+```bash
+curl -sS -X POST "$DOCSLURP_URL/v1/chat" -H "Authorization: Bearer $DOCSLURP_API_KEY" -H "Content-Type: application/json" \
+  -d '{"q": "Which plan covers on-call pagers?", "model": "anthropic/claude-haiku-5.5", "agent": {"maxSteps": 4, "maxToolCalls": 6, "searchConcurrency": 2}}'
+```
+
+```json
+{
+  "answer": "The Team plan covers pagers [1].",
+  "debug": {
+    "model": "anthropic/claude-haiku-5.5",
+    "requestedModel": "anthropic/claude-haiku-5.5",
+    "resolvedModel": "anthropic/claude-haiku-5.5",
+    "resolvedProvider": "Anthropic",
+    "steps": 2, "toolCallCount": 1, "toolCallsRefused": 0,
+    "searchCallCount": 1, "searchQueryCount": 2, "zeroHitSearchCount": 0,
+    "stopReason": "answered",
+    "stepUsage": [
+      {"step": 0, "model": "anthropic/claude-haiku-5.5", "finishReason": "tool-calls", "inputTokens": 1830, "outputTokens": 61, "costCents": 0.021, "toolCalls": ["search"]},
+      {"step": 1, "model": "anthropic/claude-haiku-5.5", "finishReason": "stop", "inputTokens": 4120, "outputTokens": 92, "costCents": 0.046, "toolCalls": []}
+    ],
+    "limits": {"maxSteps": 4, "maxToolCalls": 6, "searchConcurrency": 2, "clamped": []}
+  }
+}
+```
+
+### Agent traces
+
+With OpenTelemetry export on, each agent turn emits spans on the `docslurp.chat` tracer that follow the OpenTelemetry GenAI conventions. Attributes hold ids, counts, enums and scores, never prompt, answer or document text.
+
+- `invoke_agent workspace-chat`: `gen_ai.operation.name=invoke_agent`, `gen_ai.agent.name=workspace-chat`, `gen_ai.provider.name=openrouter`, `gen_ai.request.model`, `gen_ai.response.model`, `gen_ai.request.max_tokens`, summed `gen_ai.usage.input_tokens`/`output_tokens`, `gen_ai.response.finish_reasons`, `gen_ai.conversation.id` (the chat session), `docslurp.chat.steps`, `.tool_calls`, `.tool_calls_refused`, `.search_calls`, `.search_queries`, `.zero_hit_searches`, `.stop_reason`, `.cost_usd`, `.upstream_provider`, `docslurp.chat.limit.max_steps`/`.max_tool_calls`/`.search_concurrency`, and `docslurp.workspaceId`, `docslurp.orgId`, `docslurp.requestId`.
+- `chat <model>` per model step (child, kind client): `gen_ai.operation.name=chat`, `docslurp.chat.step`, per-step usage, `gen_ai.response.model`, `gen_ai.response.id`, `gen_ai.response.finish_reasons` and `docslurp.chat.cost_usd`.
+- `execute_tool <tool>` per tool call (child): `gen_ai.operation.name=execute_tool`, `gen_ai.tool.name`, `gen_ai.tool.call.id`, `gen_ai.tool.type=function`, `docslurp.chat.session_id`, and `error.type` on failure (`tool_call_limit` for a refused call). Search calls add `docslurp.rag.query_count`, `.concurrency`, `.result_count`, `.top_score`, `.zero_hit`, `.document_count` (distinct documents) and `.search_session_id`.
+
+The agent span also copies the W3C baggage keys `eval.run_id`, `eval.case_id`, `eval.model` and `eval.arm` from the request's `baggage` header (other keys are ignored; values are capped at 128 characters). `/v1/chat` responses carry a `traceparent` header for the request's trace when tracing is on, so clients can join a turn to its trace.
+
+The `api.search` retrieval spans those calls create carry `docslurp.chat.session_id`, and their `search_sessions.metadata` and search usage events record `chatSessionId`. Metrics: the `docslurp.chat.agent.duration` histogram (seconds, by `gen_ai.request.model` and `docslurp.chat.stop_reason`) and the `docslurp.chat.agent.tool_calls` counter (by `gen_ai.request.model` and `gen_ai.tool.name`).
 
 Independent conversations can run concurrently. Await each reply before reusing its `sessionId` for the next turn. Simultaneous turns in the same conversation have no ordering guarantee. Session ownership must be verified before a caller-provided session can be reused; a database failure fails closed.
 

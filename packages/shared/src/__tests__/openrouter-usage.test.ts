@@ -125,4 +125,12 @@ describe("provider cost accounting", () => {
     expect(usage.costCents).toBeCloseTo(0.02, 10);
     expect(usage.metadata).toMatchObject({ costSource: "estimate", pricingSource: "openrouter-models" });
   });
+  it("estimates a receipt-less chat model call from the verified price table without the live listing", async () => {
+    const fetchMock = vi.fn().mockResolvedValueOnce(new Response("", { status: 404 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const usage = await resolveOpenRouterUsage({ apiKey: "test", model: "deepseek/deepseek-v4.1-flash-1017", generationId: "missing", usage: { inputTokens: 1_000_000, outputTokens: 1_000_000 } });
+    expect(usage.costCents).toBeCloseTo(75, 10);
+    expect(usage.metadata).toMatchObject({ costSource: "estimate", pricingSource: "model-prices" });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
 });

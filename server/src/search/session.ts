@@ -9,6 +9,7 @@ import {
   type UsageRecorder,
 } from "../lib/ai-usage.js";
 import type { SearchFilters } from "./filters.js";
+import { currentChatSessionId } from "../lib/chat-agent-context.js";
 
 export type SearchUsageEvent = UsageEvent;
 
@@ -105,6 +106,8 @@ class SqlSearchSessionJournal implements SearchSessionJournal {
   private readonly usage: UsageLedger = createUsageLedger({});
   private persistenceTail: Promise<void> = Promise.resolve();
   private readonly diagnosticEvents: Record<string, unknown> = {};
+  /** The chat turn whose search agent ran this retrieval, if any. */
+  private readonly chatSessionId = currentChatSessionId();
 
   constructor(
     sessionId: string,
@@ -114,7 +117,7 @@ class SqlSearchSessionJournal implements SearchSessionJournal {
   }
 
   record(input: UsageInput): void {
-    this.usage.record(input);
+    this.usage.record(this.chatSessionId ? { ...input, metadata: { ...input.metadata, chatSessionId: this.chatSessionId } } : input);
   }
 
   adoptUsage(events: Iterable<SearchUsageEvent | undefined>): void {
@@ -153,7 +156,8 @@ class SqlSearchSessionJournal implements SearchSessionJournal {
   private async persistSnapshot(input: PersistSearchSessionInput): Promise<void> {
     const encryptionKey = getSearchQueryEncryptionKey();
     const metadataJson = JSON.stringify(
-      { ...buildSearchSessionMetadata(input.metadata), durationMs: Date.now() - this.startedAtMs },
+      { ...buildSearchSessionMetadata(input.metadata), durationMs: Date.now() - this.startedAtMs,
+        ...(this.chatSessionId ? { chatSessionId: this.chatSessionId } : {}) },
     );
     const usageBatch = await sql.begin(async (client) => {
       const storedQuery = encryptionKey

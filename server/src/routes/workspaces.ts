@@ -27,6 +27,7 @@ import {
   reprocessIngestRecommendationSchema,
 } from "@docslurp/shared";
 
+import { chatModelRefused, ChatModelNotAllowedError } from "../lib/chat-model-policy.js";
 import { actorHasAnyApiKeyScope, getRequestActor, apiKeyCanUseWorkspace } from "../lib/request-actor.js";
 import { requestIp, requestUserAgent } from "../lib/request-context.js";
 import { isWorkspaceChatAgent } from "../lib/mastra.js";
@@ -237,6 +238,9 @@ async function createWorkspaceAgentChatResponse(c: Context) {
   }
   const chatDisabled = await workspaceChatDisabledBody(workspace.id, userId);
   if (chatDisabled) return apiErrorResponse(c, 403, "chat_disabled", chatDisabled.error);
+  if (await chatModelRefused(getRequestActor(c), body.model, workspace.id)) {
+    return apiErrorResponse(c, 400, "model_not_allowed", new ChatModelNotAllowedError().message);
+  }
 
   return createUIMessageStreamResponse({
     headers: {
@@ -1166,18 +1170,24 @@ export const workspacesRoutes = new Hono()
     const chatDisabled = await workspaceChatDisabledBody(workspace.id, userId);
     if (chatDisabled) return apiErrorResponse(c, 403, "chat_disabled", chatDisabled.error);
 
-    const response = await chatWorkspace({
-      workspaceId: c.req.param("workspaceId"),
-      userId,
-      query: body.q,
-      actor: body.retrievalOnly === true ? undefined : getRequestActor(c), signal: c.req.raw.signal,
-      allowConfiguration: body.retrievalOnly === true ? false : undefined,
-      answerIngestReport: getRequestActor(c).type === "session",
-      sessionId: body.sessionId,
-      model: body.model,
-      ...(scope.retrieval ? { retrieval: scope.retrieval } : {}),
-      ...(scope.filters ? { filters: scope.filters } : {}),
-    });
+    let response: Awaited<ReturnType<typeof chatWorkspace>>;
+    try {
+      response = await chatWorkspace({
+        workspaceId: c.req.param("workspaceId"),
+        userId,
+        query: body.q,
+        actor: body.retrievalOnly === true ? undefined : getRequestActor(c), signal: c.req.raw.signal,
+        allowConfiguration: body.retrievalOnly === true ? false : undefined,
+        answerIngestReport: getRequestActor(c).type === "session",
+        sessionId: body.sessionId,
+        model: body.model,
+        ...(scope.retrieval ? { retrieval: scope.retrieval } : {}),
+        ...(scope.filters ? { filters: scope.filters } : {}),
+      });
+    } catch (error) {
+      if (error instanceof ChatModelNotAllowedError) return apiErrorResponse(c, 400, "model_not_allowed", error.message);
+      throw error;
+    }
 
     await appendAuditLog({
       orgId: workspace.orgId,

@@ -22,7 +22,7 @@ const queries = ["one", "two", "three", "four", "five"].map(q => ({ q, workspace
 const response = (q: string) => ({ results: [{ text: q, citation: { page: 1 } }], sessionId: q, availability: { status: "complete" } });
 describe("batch retrieval and canonical chat", () => {
   beforeEach(() => { vi.resetAllMocks(); mocks.access.mockResolvedValue(null); mocks.search.mockImplementation(async q => response(q)); });
-  it.each([{ queries: [] }, { queries: Array(21).fill(queries[0]) }, { queries, concurrency: 0 }, { queries, concurrency: 5 },
+  it.each([{ queries: [] }, { queries: Array(21).fill(queries[0]) }, { queries, concurrency: 0 }, { queries, concurrency: 9 },
     { queries: [queries[0], { q: 123, workspaceId: "workspace" }] }, { queries: [{ q: " ", workspaceId: "workspace" }] },
     { queries: [{ ...queries[0], limit: 101 }] }, { queries: [{ ...queries[0], tags: [] }] }])("validates the whole envelope before retrieval: %j", async body => {
     expect((await app().request("/v1/search", json(body))).status).toBe(400);

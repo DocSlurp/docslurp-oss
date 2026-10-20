@@ -1,5 +1,5 @@
 {
-  "asOf": "2026-09-22",
+  "asOf": "2026-10-20",
   "currency": "usd",
   "unit": "per-million-tokens",
   "note": "List prices used to estimate evaluation cost from measured token counts. Provider-reported cost, when a gateway returns it, always wins over these numbers. Re-check before quoting a cost in any report.",
@@ -79,11 +79,11 @@
       "checked": "2026-09-22"
     },
     "z-ai/glm-5.3-flash": {
-      "input": 0.15,
-      "output": 0.5,
+      "input": 0.048,
+      "output": 0.16,
       "vision": true,
       "source": "https://openrouter.ai/api/v1/models",
-      "checked": "2026-09-22"
+      "checked": "2026-10-20"
     },
     "google/gemini-3.5-flash-lite": {
       "input": 0.3,
@@ -154,8 +154,71 @@
       "output": 0.5,
       "vision": true,
       "source": "https://openrouter.ai/api/v1/models",
-      "checked": "2026-10-09",
+      "checked": "2026-10-20",
       "note": "$0.50/$2.50 above 100K prompt tokens"
+    },
+    "inception/mercury-3": {
+      "input": 0.1,
+      "output": 0.35,
+      "source": "https://openrouter.ai/api/v1/models",
+      "checked": "2026-10-20",
+      "note": "Chat search-agent eval candidate; image input not verified."
+    },
+    "minimax/minimax-m3.1-flash:free": {
+      "input": 0,
+      "output": 0,
+      "source": "https://openrouter.ai/api/v1/models",
+      "checked": "2026-10-20",
+      "note": "Free OpenRouter lane; chat search-agent eval candidate; image input not verified."
+    },
+    "deepseek/deepseek-v4.1-flash-1017": {
+      "input": 0.15,
+      "output": 0.6,
+      "source": "https://openrouter.ai/api/v1/models",
+      "checked": "2026-10-20",
+      "note": "Dated build of deepseek/deepseek-v4.1-flash; chat search-agent eval candidate; image input not verified."
+    },
+    "reflection/beam-1.0-501b-a23b": {
+      "input": 0.3,
+      "output": 1.0,
+      "source": "https://openrouter.ai/api/v1/models",
+      "checked": "2026-10-20",
+      "note": "Chat search-agent eval candidate; image input not verified."
+    },
+    "liquid/lfm-2.5-24b-a2b": {
+      "input": 0.05,
+      "output": 0.7,
+      "source": "https://openrouter.ai/api/v1/models",
+      "checked": "2026-10-20",
+      "note": "Chat search-agent eval candidate; image input not verified."
+    },
+    "openai/gpt-6.1-sol": {
+      "input": 2.0,
+      "output": 10.0,
+      "source": "https://openrouter.ai/api/v1/models",
+      "checked": "2026-10-20",
+      "note": "Workspace chat catalog model; image input not verified."
+    },
+    "xiaomi/mimo-v2.6-flash": {
+      "input": 0.14,
+      "output": 0.28,
+      "source": "https://openrouter.ai/api/v1/models",
+      "checked": "2026-10-20",
+      "note": "Chat search-agent eval candidate; image input not verified."
+    },
+    "qwen/qwen3.8-max-prime": {
+      "input": 4.0,
+      "output": 12.0,
+      "source": "https://openrouter.ai/api/v1/models",
+      "checked": "2026-10-20",
+      "note": "Chat search-agent eval candidate; image input not verified."
+    },
+    "nvidia/nemotron-3.5-super-vl": {
+      "input": 0.15,
+      "output": 0.5,
+      "source": "https://openrouter.ai/api/v1/models",
+      "checked": "2026-10-20",
+      "note": "Chat search-agent eval candidate; image input not verified."
     }
   }
 }

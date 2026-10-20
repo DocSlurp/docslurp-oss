@@ -9,7 +9,6 @@ import {
 import { sql } from "../db.js";
 import { generateOpenRouterText } from "../lib/ai.js";
 import { recordUsageEvent } from "../lib/ai-usage.js";
-import type { WorkspaceChatModelId } from "@docslurp/shared/workspace-chat-models";
 
 export const conversationalSearchOptionsSchema = z.object({
   resultCount: z.number().int().min(1).max(CHAT_MAX_RETRIEVED_PASSAGES).optional(),
@@ -70,7 +69,7 @@ async function saveChatSessionSearchOverrides(args: {
  */
 export async function configureSearchFromChat(args: {
   query: string; workspaceId: string; orgId?: string | null; userId: string; sessionId: string;
-  model: WorkspaceChatModelId; current: WorkspaceSearchSettings; threadOverrides?: ChatRetrievalOverrides;
+  model: string; current: WorkspaceSearchSettings; threadOverrides?: ChatRetrievalOverrides;
   /** Hosted key already cleared by the workspace privacy gate. */
   apiKey: string | undefined; privacyMode: PrivacyMode;
 }): Promise<WorkspaceSearchSettings> {

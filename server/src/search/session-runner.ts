@@ -1,4 +1,5 @@
 import { parseSelfQuerySyntax } from "./self-query.js";
+import { currentChatSessionId } from "../lib/chat-agent-context.js";
 import { reportPublicError } from "../lib/public-errors.js";
 import { withObservation } from "@docslurp/shared/observability";
 import { resolveEmbeddingRoute, type SearchResult } from "@docslurp/shared";
@@ -121,6 +122,7 @@ async function executeSearchSession(args: Parameters<typeof runSearchSession>[0]
         userId: args.userId,
         workspaceId: args.setup.normalizedScope.workspaceId,
         sessionId: args.setup.session.sessionId,
+        ...(currentChatSessionId() ? { chatSessionId: currentChatSessionId() } : {}),
       },
       result: (result) => ({
         metadata: {

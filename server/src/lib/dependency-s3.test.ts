@@ -43,3 +43,45 @@ it("traces SDK retry attempts, body consumption and presigning without changing 
     await new Promise<void>(resolve => server.close(() => resolve()));
   }
 });
+
+it("keeps HeadObject 404 existence probes out of the error status but still marks real errors", async () => {
+  const server = createServer((request, response) => {
+    response.writeHead(request.url?.includes("forbidden") ? 403 : 404);
+    response.end();
+  });
+  await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  if (!address || typeof address === "string") throw new Error("Missing test endpoint");
+  const endpoint = `http://127.0.0.1:${address.port}`;
+  const client = instrumentS3Client(new S3Client({ endpoint, forcePathStyle: true, region: "us-east-1", maxAttempts: 1,
+    credentials: { accessKeyId: "test-key", secretAccessKey: "test-secret" } }), endpoint);
+  const ended = spans as unknown as Array<{ name: string; attributes: Record<string, unknown>; status: { code: number } }>;
+  try {
+    spans.length = 0;
+    await expect(client.send(new HeadObjectCommand({ Bucket: "test-bucket", Key: "missing" }))).rejects.toMatchObject({ name: "NotFound" });
+    const probes = ended.filter(span => span.name === "s3.HeadObject" || span.name === "s3.HeadObject.attempt");
+    expect(probes).toHaveLength(2);
+    for (const span of probes) {
+      expect(span.status.code).not.toBe(2);
+      expect(span.attributes["error.type"]).toBeUndefined();
+      expect(span.attributes["http.response.status_code"]).toBe(404);
+    }
+
+    spans.length = 0;
+    await expect(client.send(new HeadObjectCommand({ Bucket: "test-bucket", Key: "forbidden" }))).rejects.toBeDefined();
+    const failures = ended.filter(span => span.name === "s3.HeadObject" || span.name === "s3.HeadObject.attempt");
+    expect(failures).toHaveLength(2);
+    for (const span of failures) {
+      expect(span.status.code).toBe(2);
+      expect(span.attributes["error.type"]).toBeDefined();
+    }
+
+    spans.length = 0;
+    await expect(client.send(new GetObjectCommand({ Bucket: "test-bucket", Key: "missing" }))).rejects.toBeDefined();
+    const get = ended.find(span => span.name === "s3.GetObject")!;
+    expect(get.status.code).toBe(2);
+  } finally {
+    client.destroy();
+    await new Promise<void>(resolve => server.close(() => resolve()));
+  }
+});
