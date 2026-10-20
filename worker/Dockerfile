@@ -23,11 +23,30 @@ COPY scripts/fetch-native-pdf-assets.mjs /tmp/fetch-native-pdf-assets.mjs
 RUN node /tmp/fetch-native-pdf-assets.mjs --out /opt/native-pdf \
       --ocr-models="${DOCSLURP_NATIVE_PDF_OCR_MODELS}" --cjk-fonts="${DOCSLURP_NATIVE_PDF_CJK_FONTS}"
 
+# landrun (Landlock sandbox provider, MIT, pinned by worker/sandbox-tools.json). Downloaded for
+# TARGETARCH and sha256-verified. The release binary is dynamically linked and needs glibc >= 2.38:
+# it runs on Debian trixie (this base image) but fails on bookworm, so do not downgrade the base.
+FROM node:24-trixie-slim@sha256:173f125896c3b47ddf056734c7ea789d04595a6a08769a8f78e0df642781fb66 AS landrun
+ARG TARGETARCH=amd64
+COPY worker/sandbox-tools.json /tmp/sandbox-tools.json
+RUN node -e ' \
+      const fs = require("node:fs"); const crypto = require("node:crypto"); \
+      const tool = JSON.parse(fs.readFileSync("/tmp/sandbox-tools.json", "utf8")).landrun["linux-" + process.argv[1]]; \
+      if (!tool) throw new Error("no pinned landrun for arch " + process.argv[1]); \
+      fetch(tool.url).then((r) => { if (!r.ok) throw new Error("landrun download failed: " + r.status); return r.arrayBuffer(); }).then((buf) => { \
+        const data = Buffer.from(buf); \
+        const sum = crypto.createHash("sha256").update(data).digest("hex"); \
+        if (sum !== tool.sha256) throw new Error("landrun sha256 mismatch: " + sum); \
+        fs.writeFileSync("/usr/local/bin/landrun", data, { mode: 0o755 }); \
+      }).catch((e) => { console.error(e.message); process.exit(1); });' "${TARGETARCH}" \
+    && /usr/local/bin/landrun --version
+
 # Production stage: runtime only (no TypeScript toolchain or devDeps)
 FROM node:24-trixie-slim@sha256:173f125896c3b47ddf056734c7ea789d04595a6a08769a8f78e0df642781fb66
 WORKDIR /app
 COPY LICENSE THIRD_PARTY_NOTICES.md ./
 COPY LICENSES ./LICENSES
+COPY --from=landrun /usr/local/bin/landrun /usr/local/bin/landrun
 RUN corepack enable
 
 # Install CLI tools and the base Python parsers. Heavy Python dependencies are
@@ -87,9 +106,6 @@ RUN groupadd --system --gid 10001 docslurp \
 
 ENV HOME=/home/docslurp
 ENV DOCSLURP_CLAMAV_RUN_DIR=/tmp/clamav
-ENV DOCSLURP_PARSER_SANDBOX_ENABLED=true
-ENV DOCSLURP_PARSER_SANDBOX_NETWORK=none
-ENV DOCSLURP_PARSER_SANDBOX_MODE=isolated
 ENV DOCSLURP_PARSER_SANDBOX_WRITABLE_PATHS=
 ENV DOCSLURP_DEPLOYMENT_PROFILE=heavy
 ENV DOCSLURP_WORKER_IMAGE=worker-default
@@ -100,6 +116,11 @@ ENV DOCSLURP_ALLOCATED_MEMORY_GB=4
 ENV DOCSLURP_NATIVE_PDF_INSTALLED=${DOCSLURP_NATIVE_PDF:+1}
 ENV NATIVE_PDF_OCR_MODEL_DIR=${DOCSLURP_NATIVE_PDF_OCR_MODELS:+/opt/native-pdf/ocr-models}
 ENV NATIVE_PDF_FONTS_DIR=${DOCSLURP_NATIVE_PDF_CJK_FONTS:+/opt/native-pdf/fonts}
+
+# Release version of this image (set by .github/workflows/worker-images.yml; empty for
+# local builds). The Modal parser sandbox defaults to worker-full:<this version>.
+ARG DOCSLURP_VERSION=
+ENV DOCSLURP_VERSION=${DOCSLURP_VERSION}
 
 # Temporal Build ID for this image (worker/src/temporal/worker-versioning.ts).
 # Last, so a new SHA does not invalidate earlier layers.

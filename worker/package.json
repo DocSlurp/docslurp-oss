@@ -29,6 +29,7 @@
     "benchmark:kreuzberg": "tsx src/benchmarks/kreuzberg-benchmark-cli.ts",
     "benchmark:parsebench": "tsx src/benchmarks/parsebench-benchmark-cli.ts",
     "benchmark:pdf-fixtures": "tsx src/benchmarks/pdf-fixture-benchmark-cli.ts",
+    "bench:sandbox": "tsx src/benchmarks/sandbox-overhead-cli.ts",
     "benchmark:extractors": "tsx src/benchmarks/extractor-benchmark-cli.ts",
     "benchmark:parser-policy-eval": "tsx src/benchmarks/parser-policy-eval-cli.ts",
     "eval:document-routing": "pnpm --filter @docslurp/shared build && tsx src/benchmarks/document-routing-eval-cli.ts",
@@ -60,7 +61,8 @@
   },
   "optionalDependencies": {
     "@kreuzberg/node-linux-arm64-gnu": "4.10.2",
-    "@kreuzberg/node-linux-x64-gnu": "4.10.2"
+    "@kreuzberg/node-linux-x64-gnu": "4.10.2",
+    "modal": "0.11.1"
   },
   "devDependencies": {
     "@electric-sql/pglite": "0.5.9",

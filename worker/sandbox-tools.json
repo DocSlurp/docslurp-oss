@@ -1,0 +1,15 @@
+{
+  "landrun": {
+    "version": "0.1.17",
+    "license": "MIT",
+    "source": "https://github.com/Zouuup/landrun",
+    "linux-amd64": {
+      "url": "https://github.com/Zouuup/landrun/releases/download/v0.1.17/landrun-linux-amd64",
+      "sha256": "6ada66a06669e8994e174a7271af2db636308e55a0d6ec896cc7d326b46727f6"
+    },
+    "linux-arm64": {
+      "url": "https://github.com/Zouuup/landrun/releases/download/v0.1.17/landrun-linux-arm64",
+      "sha256": "365d8c8656c732b14d70e621d972cb733e490621fb5b9c0876376bcf457dbb5d"
+    }
+  }
+}

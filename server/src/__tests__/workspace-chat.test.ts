@@ -61,6 +61,13 @@ vi.mock("../services/workspaces.js", () => ({
   getWorkspace,
 }));
 
+// Eval access reads only the workspace's access row (owning org), not getWorkspace.
+const getWorkspaceAccess = vi.fn(async (): Promise<unknown> => null);
+vi.mock("../services/organizations.js", async (importOriginal) => ({
+  ...await importOriginal<typeof import("../services/organizations.js")>(),
+  getWorkspaceAccess,
+}));
+
 vi.mock("../services/search-controls.js", () => ({
   getWorkspaceSearchSettings,
 }));
@@ -239,6 +246,80 @@ describe("chatWorkspace", () => {
       }
     } finally {
       if (previous === undefined) delete process.env.OPENROUTER_API_KEY; else process.env.OPENROUTER_API_KEY = previous;
+    }
+  });
+
+  it("refuses an unknown or non-admin eval model before spending or opening a session", async () => {
+    getWorkspaceSearchSettings.mockResolvedValue(buildSearchSettings());
+    const previous = process.env.DOCSLURP_CHAT_EVAL_MODELS;
+    process.env.DOCSLURP_CHAT_EVAL_MODELS = "inception/mercury-3";
+    const member = { type: "session" as const, userId: "user-1", sessionId: "s", user: { id: "user-1", email: "", name: "User" } };
+    try {
+      for (const model of ["unknown/model", "inception/mercury-3"]) {
+        await expect(chatWorkspace({ workspaceId: "ws-1", userId: "user-1", query: "hello", model, actor: member }))
+          .rejects.toMatchObject({ name: "ChatModelNotAllowedError", status: 400, code: "model_not_allowed" });
+      }
+      expect(sqlMock).not.toHaveBeenCalled();
+    } finally {
+      if (previous === undefined) delete process.env.DOCSLURP_CHAT_EVAL_MODELS; else process.env.DOCSLURP_CHAT_EVAL_MODELS = previous;
+    }
+  });
+
+  it("runs an admin's eval model in the agent with resolved limits and returns the agent debug", async () => {
+    sqlMock.mockResolvedValue([]);
+    getWorkspace.mockResolvedValue({ id: "ws-1", orgId: "org-1", systemPrompt: null });
+    getWorkspaceSearchSettings.mockResolvedValue(buildSearchSettings());
+    const agentDebug = { requestedModel: "inception/mercury-3", resolvedModel: "inception/mercury-3-20261001", stopReason: "answered", steps: 2 };
+    runChatMcpAgent.mockResolvedValue({ answer: "Supported answer", citations: [], toolCalls: [], finishReason: "stop",
+      usage: { inputTokens: 10, outputTokens: 4, totalTokens: 14, costCents: 0.01 }, debug: agentDebug });
+    const previous = { key: process.env.OPENROUTER_API_KEY, models: process.env.DOCSLURP_CHAT_EVAL_MODELS };
+    process.env.OPENROUTER_API_KEY = "fake";
+    process.env.DOCSLURP_CHAT_EVAL_MODELS = "inception/mercury-3";
+    try {
+      const response = await chatWorkspace({ workspaceId: "ws-1", userId: "user-1", query: "Find evidence", history: [], allowConfiguration: false,
+        model: "inception/mercury-3", agent: { maxSteps: 10, searchConcurrency: 8 },
+        actor: { type: "session", userId: "user-1", sessionId: "s", user: { id: "user-1", email: "", name: "Admin", isAdmin: true } } });
+      expect(runChatMcpAgent).toHaveBeenCalledWith(expect.objectContaining({ model: "inception/mercury-3", requestedModel: "inception/mercury-3",
+        limits: { maxSteps: 10, maxToolCalls: 12, searchConcurrency: 8, clamped: [] } }));
+      expect(response.debug).toMatchObject({ model: "inception/mercury-3", ...agentDebug });
+    } finally {
+      if (previous.key === undefined) delete process.env.OPENROUTER_API_KEY; else process.env.OPENROUTER_API_KEY = previous.key;
+      if (previous.models === undefined) delete process.env.DOCSLURP_CHAT_EVAL_MODELS; else process.env.DOCSLURP_CHAT_EVAL_MODELS = previous.models;
+    }
+  });
+
+  it.each([
+    ["org-eval", true],
+    ["org-other", false],
+  ] as const)("lets a workspace owned by an eval org (%s) use eval models and the admin limit range: %s", async (orgId, allowed) => {
+    sqlMock.mockResolvedValue([]);
+    getWorkspace.mockResolvedValue({ id: "ws-1", orgId, systemPrompt: null });
+    getWorkspaceAccess.mockResolvedValue({ workspaceId: "ws-1", orgId, workspaceOwnerUserId: "user-1", orgRole: "member", workspaceRole: null });
+    getWorkspaceSearchSettings.mockResolvedValue(buildSearchSettings());
+    runChatMcpAgent.mockResolvedValue({ answer: "Supported answer", citations: [], toolCalls: [], finishReason: "stop",
+      usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2, costCents: 0 }, debug: {} });
+    const previous = { key: process.env.OPENROUTER_API_KEY, models: process.env.DOCSLURP_CHAT_EVAL_MODELS, orgs: process.env.DOCSLURP_CHAT_EVAL_ORG_IDS };
+    process.env.OPENROUTER_API_KEY = "fake";
+    process.env.DOCSLURP_CHAT_EVAL_MODELS = "inception/mercury-3";
+    process.env.DOCSLURP_CHAT_EVAL_ORG_IDS = "org-eval";
+    const member = { type: "session" as const, userId: "user-1", sessionId: "s", user: { id: "user-1", email: "", name: "Member" } };
+    try {
+      const turn = (model?: string) => chatWorkspace({ workspaceId: "ws-1", userId: "user-1", query: "Find evidence", history: [], allowConfiguration: false,
+        model, agent: { maxSteps: 10, maxToolCalls: 20, searchConcurrency: 8 }, actor: member });
+      if (allowed) {
+        await turn("inception/mercury-3");
+        expect(runChatMcpAgent).toHaveBeenLastCalledWith(expect.objectContaining({ model: "inception/mercury-3",
+          limits: { maxSteps: 10, maxToolCalls: 20, searchConcurrency: 8, clamped: [] } }));
+      } else {
+        await expect(turn("inception/mercury-3")).rejects.toMatchObject({ status: 400, code: "model_not_allowed" });
+        await turn();
+        expect(runChatMcpAgent).toHaveBeenLastCalledWith(expect.objectContaining({
+          limits: { maxSteps: 6, maxToolCalls: 12, searchConcurrency: 4, clamped: ["maxSteps", "maxToolCalls", "searchConcurrency"] } }));
+      }
+    } finally {
+      for (const [name, value] of [["OPENROUTER_API_KEY", previous.key], ["DOCSLURP_CHAT_EVAL_MODELS", previous.models], ["DOCSLURP_CHAT_EVAL_ORG_IDS", previous.orgs]] as const) {
+        if (value === undefined) delete process.env[name]; else process.env[name] = value;
+      }
     }
   });
 

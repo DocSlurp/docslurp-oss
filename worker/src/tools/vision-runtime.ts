@@ -5,6 +5,15 @@ import { fetchWithProviderRetry, providerFromBaseUrl } from "../lib/provider-ret
 
 /** Image plus transcription tokens for a typical page (observed ~1,850 in / ~510 out on Gemini Flash Lite). */
 const VISION_IMAGE_TOKEN_ESTIMATE = 2_200;
+/**
+ * Output cap for one hosted page transcription. Observed p95 output is ~2.4k
+ * tokens; without a cap a repetition loop ran to the provider's 131k limit
+ * (165 s, ~$0.07 for one page). Override with VISION_MAX_OUTPUT_TOKENS.
+ */
+export const VISION_MAX_OUTPUT_TOKENS = (() => {
+  const configured = Number(process.env.VISION_MAX_OUTPUT_TOKENS);
+  return Number.isInteger(configured) && configured >= 1_024 ? configured : 16_384;
+})();
 import { readFile } from "node:fs/promises";
 
 import {
@@ -349,6 +358,7 @@ async function runVisionRequest(args: {
             },
           ],
           temperature: 0,
+          max_tokens: VISION_MAX_OUTPUT_TOKENS,
           // Page transcription never needs thinking: pin each verified model to its lowest accepted effort.
           ...(args.baseUrl?.includes("openrouter.ai") ? openRouterReasoningParams(args.model) : {}),
         }),

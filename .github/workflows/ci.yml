@@ -103,6 +103,9 @@ jobs:
           DOCSLURP_WORKER_FALLBACK_REQUIREMENTS_FILE=worker/requirements-base.lock.txt \
           DOCSLURP_WORKER_SKIP_FALLBACK=1 \
           bash scripts/setup-worker-python-venv.sh
+      - name: Build worker sandbox probe
+        if: matrix.worker-tools
+        run: pnpm --filter @docslurp/worker build
       - name: Verify worker test prerequisites
         if: matrix.worker-tools
         run: pnpm worker:check --profile=test --sandbox

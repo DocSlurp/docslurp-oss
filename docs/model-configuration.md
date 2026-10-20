@@ -46,6 +46,17 @@ use `pipeline.embedding.modelUri`. Chat uses its existing model selector.
 Catalog IDs and built-in defaults remain centralized configuration values;
 individual text stages no longer choose a fixed model.
 
+The default vision route stays `llm://openrouter/google/gemini-3.1-flash-lite`
+(profile `good-fast-hosted`). NVIDIA Nemotron 3.5 Super VL is an opt-in hosted
+route: set `pipeline.vision.modelUri` to
+`llm://openrouter/nvidia/nemotron-3.5-super-vl` or `pipeline.vision.profile` to
+`open-weights-hosted`. Its OpenRouter list price, verified on 2026-10-20, is
+$0.15 per million input tokens and $0.50 per million output tokens (individual
+OpenRouter providers range from $0.10 to $0.25 input and $0.40 to $1.25 output).
+Page transcription sends it `reasoning: { enabled: false }`. The provider-reported
+charge is recorded when present. Otherwise cataloged hosted vision models fall back
+to their own list price instead of the generic `COST_PER_1K_*` rates.
+
 Text generation also accepts an optional `profile`, a common `reasoningEffort`,
 per-task `reasoningEfforts`, and per-task `maxOutputTokens`. For the calibrated
 GLM configuration:

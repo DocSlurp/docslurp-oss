@@ -40,7 +40,7 @@ backup of it: changing encryption keys later can make stored credentials and
 secrets unreadable. The [template](../../.env.selfhost.example) lists every
 first-run option; see [Configuration](configuration.md) for what each one does.
 
-The worker containers run with `systempaths=unconfined` so the parser sandbox (bubblewrap) can mount a fresh `/proc`; all capabilities remain dropped and the seccomp profile still applies. Without it the worker reports `parser isolation unavailable` and refuses to start. See [Parser sandbox](security.md#parser-sandbox).
+The worker containers run with `systempaths=unconfined` so the parser sandbox (bubblewrap, the default provider) can mount a fresh `/proc`; all capabilities remain dropped and the seccomp profile still applies. Without it the worker reports `parser isolation unavailable` and refuses to start. To avoid those options, see [Parser sandbox providers](sandbox-providers.md). See [Parser sandbox](security.md#parser-sandbox).
 
 To view status or logs:
 

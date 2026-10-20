@@ -179,7 +179,7 @@ describe("mcpRoutes", () => {
     ["getUploadStatus", { workspaceId: "ws-1", sql: "drop table documents" }],
     ["chat", { workspaceId: "ws-1", q: " " }],
     ["search", { queries: [] }],
-    ["search", { queries: [{ workspaceId: "ws-1", q: "query" }], concurrency: 5 }],
+    ["search", { queries: [{ workspaceId: "ws-1", q: "query" }], concurrency: 9 }],
   ])("rejects invalid %s arguments before running the tool", async (tool, body) => {
     const response = await app.request(`/mcp/tools/${tool}`, {
       method: "POST", headers: { Authorization: "Bearer dslp_test", "Content-Type": "application/json" }, body: JSON.stringify(body),

@@ -59,6 +59,57 @@ describe("chat MCP tools", () => {
   });
 });
 
+describe("chat MCP tool budgets", () => {
+  function budgeted(maxToolCalls: number, searchConcurrency: number) {
+    const dispatch = vi.fn<McpDispatch>(async () => Response.json({ results: [] }));
+    const context = createChatMcpTools({ manifest: { capabilities: [{ id: "search", title: "search", category: "tool", description: "search", inputSchema: { type: "object" } }] },
+      dispatch, workspaceId: "selected", signal: new AbortController().signal, maxToolCalls, searchConcurrency });
+    const execute = (input: unknown, id: string) => context.tools.search!.execute!(input, { toolCallId: id, messages: [], context: {} });
+    return { ...context, dispatch, execute };
+  }
+
+  it("caps batch concurrency at the turn's searchConcurrency and uses it when the model omits it", async () => {
+    const t = budgeted(5, 2);
+    await t.execute({ queries: [{ q: "a" }, { q: "b" }, { q: "c" }], concurrency: 8 }, "1");
+    await t.execute({ queries: [{ q: "a" }] }, "2");
+    await t.execute({ queries: [{ q: "a" }], concurrency: 1 }, "3");
+    expect(t.dispatch.mock.calls.map(([, init]) => JSON.parse(init!.body as string).concurrency)).toEqual([2, 2, 1]);
+    expect(t.searchCalls.map(call => [call.queryCount, call.concurrency, call.zeroHit])).toEqual([[3, 2, true], [1, 2, true], [1, 1, true]]);
+  });
+
+  it("refuses calls beyond maxToolCalls with a coded result and counts them", async () => {
+    const t = budgeted(1, 4);
+    await t.execute({ q: "a" }, "1");
+    await expect(t.execute({ q: "b" }, "2")).resolves.toMatchObject({ code: "tool_call_limit", limitReached: true });
+    expect(t.dispatch).toHaveBeenCalledTimes(1);
+    expect(t.counters).toMatchObject({ executed: 1, refused: 1, byTool: { search: 1 } });
+  });
+});
+
+describe("chat MCP tool call details", () => {
+  it("records model queries, hits, distinct evidence pages, tool cost and failure codes per call", async () => {
+    const t = setup(["search"]);
+    const hit = (documentId: string, pageNumber: number, chunkIndex: number) => ({ text: "passage", score: 1, citation: { documentId, filename: "f.pdf", pageNumber, chunkIndex, headingPath: [] } });
+    t.dispatch.mockResolvedValueOnce(Response.json({ results: [
+      { ok: true, data: { results: [hit("d1", 2, 0), hit("d1", 2, 1)], usage: { costCents: 0.01 } } },
+      { ok: true, data: { results: [hit("d2", 5, 0)], usage: { costCents: 0.02 } } },
+    ] }));
+    await t.execute("search", { queries: [{ q: "first question" }, { q: "second question" }] }, "a");
+    t.dispatch.mockResolvedValueOnce(Response.json({ error: { code: "invalid_search_scope", message: "x" } }, { status: 400 }));
+    await t.execute("search", { q: "bad" }, "b");
+    t.dispatch.mockRejectedValueOnce(new Error("boom"));
+    await t.execute("search", { q: "boom" }, "c");
+    const [first, second, third] = [...t.details.values()];
+    expect(first).toMatchObject({ id: "a", name: "search", status: "success", queries: ["first question", "second question"],
+      resultCount: 3, zeroHit: false, evidencePages: [{ documentId: "d1", pageNumber: 2 }, { documentId: "d2", pageNumber: 5 }] });
+    expect(first!.costCents).toBeCloseTo(0.03, 10);
+    expect(first!.runtimeMs).toBeGreaterThanOrEqual(0);
+    expect(second).toMatchObject({ status: "error", queries: ["bad"], errorCode: "invalid_search_scope" });
+    expect(third).toMatchObject({ status: "error", queries: ["boom"], errorCode: "exception" });
+    expect(t.counters.toolCostCents).toBeCloseTo(0.03, 10);
+  });
+});
+
 describe("chat MCP tool retrieval controls", () => {
   it("enforces resolved retrieval controls on every search, batch query and nested chat", async () => {
     const { workspaceSearchRetrievalDefaultsSchema } = await import("@docslurp/shared");

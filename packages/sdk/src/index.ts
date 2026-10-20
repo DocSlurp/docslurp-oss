@@ -278,8 +278,20 @@ export type ChatInput = {
   q: string;
   sessionId?: string;
   workspaceId?: string;
-  /** Override the workspace's configured chat model for this request. */
+  /**
+   * Chat model for this request. Omitted: the default. An unavailable model is
+   * refused with HTTP 400 `model_not_allowed`, never replaced by the default.
+   */
   model?: string;
+  /** Search-agent budgets for this turn; non-admin callers can only lower the defaults. */
+  agent?: {
+    /** Model steps, 1-12 (default 6). The last step always answers. */
+    maxSteps?: number;
+    /** Tool calls across the turn, 1-24 (default 12). */
+    maxToolCalls?: number;
+    /** Cap on parallel search queries, 1-8 (default 4). */
+    searchConcurrency?: number;
+  };
 };
 
 export type ChatResponse = {

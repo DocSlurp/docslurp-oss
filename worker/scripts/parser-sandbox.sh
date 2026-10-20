@@ -14,7 +14,6 @@ SANDBOX_ROOT="${DOCSLURP_PARSER_SANDBOX_ROOT:-/tmp/docslurp-parser-sandbox}"
 HOST_TMP_ROOT="${DOCSLURP_PARSER_SANDBOX_TMP_ROOT:-${TMPDIR:-/tmp}}"
 HOST_TMP_ROOT="${HOST_TMP_ROOT%/}"
 [[ -n "${HOST_TMP_ROOT}" ]] || HOST_TMP_ROOT=/tmp
-SANDBOX_MODE="${DOCSLURP_PARSER_SANDBOX_MODE:-isolated}"
 WRITABLE_PATHS_RAW="${DOCSLURP_PARSER_SANDBOX_WRITABLE_PATHS:-}"
 mkdir -p "${SANDBOX_ROOT}"
 SANDBOX_INSTANCE="$(mktemp -d "${SANDBOX_ROOT%/}/run-XXXXXX")"
@@ -36,10 +35,8 @@ export XDG_DATA_HOME="${SANDBOX_INSTANCE}/xdg-data"
 mkdir -p "${HOME}" "${TMPDIR}" "${XDG_CACHE_HOME}" "${XDG_CONFIG_HOME}" "${XDG_DATA_HOME}" "${SANDBOX_INSTANCE}/work"
 cd "${SANDBOX_INSTANCE}/work"
 
-if [[ "${SANDBOX_MODE}" != "isolated" ]]; then
-  exec "$@"
-fi
-
+# Only the bubblewrap provider runs this launcher, and it always isolates: there is
+# no unisolated mode. Without bwrap, refuse to run the parser.
 if ! command -v bwrap >/dev/null 2>&1; then
   echo "[parser-sandbox] bubblewrap unavailable; refusing to run parser without isolation" >&2
   exit 70

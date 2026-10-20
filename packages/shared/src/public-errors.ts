@@ -31,6 +31,7 @@ export const PUBLIC_ERROR_MESSAGES = {
   organizationMissing: "We couldn’t find that organization. It may have been moved or removed.",
   chatDisabled: "Chat is turned off for this workspace. Enable it in workspace settings.",
   searchScope: "Search must stay within a single workspace.",
+  modelNotAllowed: "That chat model isn’t available for this request. Omit model to use the default.",
 } as const;
 
 export function publicErrorForStatus(status: number): string {

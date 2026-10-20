@@ -86,13 +86,12 @@ The worker images now run as a dedicated non-root `docslurp` user. Untrusted ext
 
 Useful env overrides:
 
-- `DOCSLURP_PARSER_SANDBOX_ENABLED=true|false`
-- `DOCSLURP_PARSER_SANDBOX_SCRIPT=/absolute/path/to/parser-sandbox.sh`
+- `DOCSLURP_PARSER_SANDBOX=bubblewrap|landlock|modal|none`
 - `DOCSLURP_PARSER_SANDBOX_ROOT=/tmp/docslurp-parser-sandbox`
 
-Local macOS workers default `DOCSLURP_PARSER_SANDBOX_ENABLED` to `false`
-because the isolated launcher depends on Linux `bubblewrap`. Docker workers set
-the flag to `true` explicitly.
+Local macOS workers default `DOCSLURP_PARSER_SANDBOX` to `none`
+because the isolated launcher depends on Linux `bubblewrap`. Linux workers
+default to `bubblewrap`.
 
 This is the baseline parser boundary. Additional egress-deny and kernel/filesystem sandboxing layers can build on the same launcher path without changing the worker call sites.
 
@@ -102,13 +101,12 @@ Parser subprocesses should not inherit the full worker control-plane environment
 
 Useful env overrides:
 
-- `DOCSLURP_PARSER_SANDBOX_ENABLED=true|false`
-- `DOCSLURP_PARSER_SANDBOX_NETWORK=none|inherit`
+- `DOCSLURP_PARSER_SANDBOX=bubblewrap|landlock|modal|none`
 - `DOCSLURP_PARSER_SANDBOX_ROOT=/tmp/docslurp-parser-sandbox`
 - `DOCSLURP_PARSER_ENV_ALLOWLIST=EXTRA_ONE,EXTRA_TWO`
 - `DOCSLURP_PYTHON_POOL_ENV_ALLOWLIST=EXTRA_ONE,EXTRA_TWO`
 
-The Docker worker images now include `bubblewrap`, and the runtime defaults parser sandboxes to `DOCSLURP_PARSER_SANDBOX_MODE=isolated`. If `bubblewrap` is unavailable while isolated mode is enabled, the launcher fails closed instead of running an unisolated parser.
+The Docker worker images now include `bubblewrap`, and the runtime defaults parser sandboxes to the `bubblewrap` provider. If `bubblewrap` is unavailable, the worker fails to start (the launcher also fails closed per command) instead of running an unisolated parser.
 
 ## Sandbox Layers
 
@@ -119,14 +117,14 @@ The worker now supports two layers of parser isolation:
 
 Useful env overrides:
 
-- `DOCSLURP_PARSER_SANDBOX_ENABLED=true|false`
-- `DOCSLURP_PARSER_SANDBOX_MODE=isolated|inherit`
+- `DOCSLURP_PARSER_SANDBOX=bubblewrap|landlock|modal|none`
 - `DOCSLURP_PARSER_SANDBOX_ROOT=/tmp/docslurp-parser-sandbox`
 - `DOCSLURP_PARSER_SANDBOX_WRITABLE_PATHS=` (empty by default; set only for trusted extra writable mounts)
 
-When `bubblewrap` is unavailable, set `DOCSLURP_PARSER_SANDBOX_ENABLED=false`
-or `DOCSLURP_PARSER_SANDBOX_MODE=inherit` only for trusted local development.
-Production Docker workers should keep isolated mode enabled.
+When `bubblewrap` is unavailable, set `DOCSLURP_PARSER_SANDBOX=none` only for
+trusted local development. In production that also needs
+`DOCSLURP_PARSER_SANDBOX_ALLOW_UNISOLATED=true`; keep an isolating provider for
+production Docker workers.
 
 ## Deployment and benchmark cost profiles
 
