@@ -64,6 +64,24 @@ COPY scripts/fetch-native-pdf-assets.mjs /tmp/fetch-native-pdf-assets.mjs
 RUN node /tmp/fetch-native-pdf-assets.mjs --out /opt/native-pdf \
       --ocr-models="${DOCSLURP_NATIVE_PDF_OCR_MODELS}" --cjk-fonts="${DOCSLURP_NATIVE_PDF_CJK_FONTS}"
 
+# landrun (Landlock sandbox provider, MIT, pinned by worker/sandbox-tools.json). Downloaded for
+# TARGETARCH and sha256-verified. The release binary is dynamically linked and needs glibc >= 2.38:
+# it runs on Debian trixie (this base image) but fails on bookworm, so do not downgrade the base.
+FROM node:24-trixie-slim@sha256:173f125896c3b47ddf056734c7ea789d04595a6a08769a8f78e0df642781fb66 AS landrun
+ARG TARGETARCH=amd64
+COPY worker/sandbox-tools.json /tmp/sandbox-tools.json
+RUN node -e ' \
+      const fs = require("node:fs"); const crypto = require("node:crypto"); \
+      const tool = JSON.parse(fs.readFileSync("/tmp/sandbox-tools.json", "utf8")).landrun["linux-" + process.argv[1]]; \
+      if (!tool) throw new Error("no pinned landrun for arch " + process.argv[1]); \
+      fetch(tool.url).then((r) => { if (!r.ok) throw new Error("landrun download failed: " + r.status); return r.arrayBuffer(); }).then((buf) => { \
+        const data = Buffer.from(buf); \
+        const sum = crypto.createHash("sha256").update(data).digest("hex"); \
+        if (sum !== tool.sha256) throw new Error("landrun sha256 mismatch: " + sum); \
+        fs.writeFileSync("/usr/local/bin/landrun", data, { mode: 0o755 }); \
+      }).catch((e) => { console.error(e.message); process.exit(1); });' "${TARGETARCH}" \
+    && /usr/local/bin/landrun --version
+
 # Production stage: runtime only (no TypeScript toolchain, pnpm store or devDeps)
 FROM node:24-trixie-slim@sha256:173f125896c3b47ddf056734c7ea789d04595a6a08769a8f78e0df642781fb66
 ENV ONNXRUNTIME_NODE_INSTALL_CUDA=skip
@@ -111,6 +129,7 @@ RUN if grep -q '^#\?ConcurrentDatabaseReload' /etc/clamav/clamd.conf; then \
 
 COPY LICENSE THIRD_PARTY_NOTICES.md ./
 COPY LICENSES ./LICENSES
+COPY --from=landrun /usr/local/bin/landrun /usr/local/bin/landrun
 # Python base parsers (root-owned, read-only for the worker user).
 COPY --from=python-venv /app/.venv /app/.venv
 # Production node_modules, then compiled output (changes most often, so last).
