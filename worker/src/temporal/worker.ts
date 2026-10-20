@@ -23,6 +23,8 @@ import { fromEnv } from "../config.js";
 import { Store } from "../db/store.js";
 import { workerInstanceId } from "../db/worker-capabilities.js";
 import { CommandRunner } from "../tools/runner.js";
+import { createSandboxActivityInterceptor } from "../sandbox/activity-interceptor.js";
+import { initializeParserSandbox, setDefaultParserSandbox } from "../sandbox/startup.js";
 import { ArtifactStore } from "../tools/storage.js";
 import { createStages } from "../stages/index.js";
 import { createActivities } from "./activities.js";
@@ -99,7 +101,12 @@ async function main(): Promise<void> {
   });
   // Invalid private endpoint config fails startup; the /models probe never blocks it.
   initializePrivateModelEndpoints((entries) => store.recordPrivacyAudit(entries));
-  const runner = new CommandRunner();
+  // Fail before connecting if the parser sandbox is unavailable or violates the production policy.
+  const sandbox = await initializeParserSandbox(process.env, process.platform);
+  // Every CommandRunner in this process (stages, local-artifact adapters) shares this provider.
+  setDefaultParserSandbox(sandbox);
+  const openSession = (activityId: string) => sandbox.provider.openSession(sandbox.config, { activityId });
+  const runner = new CommandRunner({ openSession });
   const storage = new ArtifactStore(cfg);
   const stages = createStages({ runner, storage, config: cfg, mediaJournal: store.mediaJournal, capacityStore: store.capacityLeaseStore([]) });
 
@@ -150,6 +157,7 @@ async function main(): Promise<void> {
     namespace: temporal.namespace,
     identity: workerIdentity,
     ...versioning.options,
+    interceptors: { activity: [createSandboxActivityInterceptor(openSession)] },
     // Drain in-flight activities on SIGTERM / max runtime; Fly kill_timeout must exceed this.
     shutdownGraceTime: cfg.workerShutdownGraceMs,
   } satisfies Partial<WorkerOptions>;

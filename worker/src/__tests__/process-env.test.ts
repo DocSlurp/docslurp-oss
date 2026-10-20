@@ -7,7 +7,7 @@ import {
   defaultParserEnvAllowlist,
   defaultPythonPoolEnvAllowlist,
 } from "../tools/process-env.js";
-import { buildSpawnCommandSpec } from "../tools/runner.js";
+import { buildSandboxCommand } from "../tools/runner.js";
 
 describe("buildAllowlistedEnv", () => {
   it("drops non-allowlisted secrets from parser envs", () => {
@@ -50,30 +50,24 @@ describe("buildAllowlistedEnv", () => {
   });
 });
 
-describe("buildSpawnCommandSpec", () => {
-  it("passes deny-by-default parser sandbox mode through the launcher env", () => {
-    const spec = buildSpawnCommandSpec({
+describe("buildSandboxCommand", () => {
+  it("passes only allowlisted env and the declared writable paths to the provider", () => {
+    const spec = buildSandboxCommand({
       plan: { binary: "pdftotext", args: ["sample.pdf", "-"], available: true },
       venvBin: "/tmp/fake-venv/bin",
-      sandbox: {
-        enabled: true,
-        launcherPath: "/repo/worker/scripts/parser-sandbox.sh",
-        scratchRoot: "/tmp/docslurp-parser-sandbox",
-        mode: "isolated",
-        writablePaths: [path.join(tmpdir(), "docslurp-test")],
-      },
+      scriptsDir: "/repo/worker/scripts",
+      scratchRoot: "/tmp/docslurp-parser-sandbox",
+      configuredWritablePaths: [path.join(tmpdir(), "docslurp-test")],
+      limits: { timeoutMs: 1000 },
       env: {
         PATH: "/usr/bin",
         OPENAI_API_KEY: "secret",
       },
     });
 
-    expect(spec.binary).toBe("/repo/worker/scripts/parser-sandbox.sh");
+    expect(spec.binary).toBe("pdftotext");
     expect(spec.env.PATH).toBe("/tmp/fake-venv/bin:/usr/bin");
-    expect(spec.env.DOCSLURP_PARSER_SANDBOX_MODE).toBe("isolated");
-    expect(spec.env.DOCSLURP_PARSER_SANDBOX_WRITABLE_PATHS).toBe(
-      path.join(tmpdir(), "docslurp-test"),
-    );
+    expect(spec.writablePaths).toEqual([path.join(tmpdir(), "docslurp-test")]);
     expect(spec.env.OPENAI_API_KEY).toBeUndefined();
   });
 });

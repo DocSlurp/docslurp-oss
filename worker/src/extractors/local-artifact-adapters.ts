@@ -1,10 +1,9 @@
-import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { access, mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type { ExtractionArtifactRef } from "@docslurp/shared";
 import type { ArtifactGraphAdapter } from "./artifact-graph.js";
-import { buildSpawnCommandSpec, resolveParserSandboxSettings, resolveScriptsDir, resolveVenvBin } from "../tools/runner.js";
+import { CommandRunner, resolveVenvBin } from "../tools/runner.js";
 import { ensureBinary } from "../tools/python-deps.js";
 
 /** The caller owns outputDir and its lifetime. Each run writes immutable files there. */
@@ -18,36 +17,53 @@ export interface LocalArtifactAdapterOptions {
 const defaultMaxBytes = 32 * 1024 * 1024;
 const defaultTimeoutMs = 60_000;
 
+// One runner for every adapter. Inside an activity it uses the activity's session; elsewhere
+// the process default sandbox (see setDefaultParserSandbox).
+let sharedRunner: CommandRunner | undefined;
+
+function localArtifactRunner(): CommandRunner {
+  sharedRunner ??= new CommandRunner();
+  return sharedRunner;
+}
+
 export async function runLocalArtifactCommand(binary: string, args: string[], maxBytes: number, timeoutMs: number, signal?: AbortSignal): Promise<Buffer> {
   signal?.throwIfAborted();
-  return await new Promise((resolve, reject) => {
-    const spec = buildSpawnCommandSpec({
-      plan: { binary, args, available: true },
-      venvBin: resolveVenvBin(process.env.PYTHON_VENV),
-      sandbox: resolveParserSandboxSettings({ scriptsDir: resolveScriptsDir() }),
+  const runner = localArtifactRunner();
+  const plan = { binary, args, available: true, timeoutMs };
+  const launched = await runner.launch(plan, signal);
+  try {
+    if ("remote" in launched) {
+      const result = await runner.settleRemote(plan, launched);
+      if (result.exitCode !== 0) throw new Error(`${binary} exited ${result.exitCode}: ${result.stderr.trim().slice(0, 4096)}`);
+      if (Buffer.byteLength(result.stdout) > maxBytes) throw new Error(`${binary} output exceeds ${maxBytes} bytes`);
+      return Buffer.from(result.stdout);
+    }
+    const { child } = launched;
+    return await new Promise<Buffer>((resolve, reject) => {
+      const chunks: Buffer[] = [];
+      let size = 0;
+      let stderr = "";
+      let limitError: Error | null = null;
+      const timer = setTimeout(() => { limitError = new Error(`${binary} timed out`); child.kill("SIGKILL"); }, timeoutMs);
+      child.stdout?.on("data", (chunk: Buffer) => {
+        size += chunk.length;
+        if (size > maxBytes) { limitError = new Error(`${binary} output exceeds ${maxBytes} bytes`); child.kill("SIGKILL"); return; }
+        chunks.push(chunk);
+      });
+      child.stderr?.on("data", (chunk: Buffer) => {
+        if (stderr.length < 4096) stderr += chunk.toString().slice(0, 4096 - stderr.length);
+      });
+      child.on("error", (error) => { clearTimeout(timer); reject(error); });
+      child.on("close", (code) => {
+        clearTimeout(timer);
+        if (limitError) reject(limitError);
+        else if (code !== 0) reject(new Error(`${binary} exited ${code}: ${stderr.trim()}`));
+        else resolve(Buffer.concat(chunks));
+      });
     });
-    const child = spawn(spec.binary, spec.args, { env: spec.env, stdio: ["ignore", "pipe", "pipe"], signal });
-    const chunks: Buffer[] = [];
-    let size = 0;
-    let stderr = "";
-    let limitError: Error | null = null;
-    const timer = setTimeout(() => { limitError = new Error(`${binary} timed out`); child.kill("SIGKILL"); }, timeoutMs);
-    child.stdout.on("data", (chunk: Buffer) => {
-      size += chunk.length;
-      if (size > maxBytes) { limitError = new Error(`${binary} output exceeds ${maxBytes} bytes`); child.kill("SIGKILL"); return; }
-      chunks.push(chunk);
-    });
-    child.stderr.on("data", (chunk: Buffer) => {
-      if (stderr.length < 4096) stderr += chunk.toString().slice(0, 4096 - stderr.length);
-    });
-    child.on("error", (error) => { clearTimeout(timer); reject(error); });
-    child.on("close", (code) => {
-      clearTimeout(timer);
-      if (limitError) reject(limitError);
-      else if (code !== 0) reject(new Error(`${binary} exited ${code}: ${stderr.trim()}`));
-      else resolve(Buffer.concat(chunks));
-    });
-  });
+  } finally {
+    await launched.release();
+  }
 }
 
 function filePath(ref: ExtractionArtifactRef): string {

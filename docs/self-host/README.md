@@ -16,7 +16,7 @@ flowchart LR
   lance[("LanceDB vector index under lancedb/")]
   temporal["Temporal"]
   worker["Workers"]
-  sandbox["Parser sandbox (bubblewrap)"]
+  sandbox["Parser sandbox (bubblewrap, landlock, Modal)"]
   ai["Optional AI providers"]
 
   clients --> server
@@ -42,7 +42,7 @@ flowchart LR
 | Path | Status |
 | --- | --- |
 | Docker Compose on a single host | Available. Start with [Docker Compose](docker-compose.md). |
-| Pluggable parser sandbox providers, starting with Modal as the first remote provider | Planned |
+| Pluggable parser sandbox providers: bubblewrap, landlock and Modal | Available. See [Parser sandbox providers](sandbox-providers.md). |
 | Terraform stacks for Fly, AWS, GCP, Vercel and Cloudflare | Planned |
 | `docslurp deploy` setup wizard | Planned |
 | Agent skill for guided setup | Planned |
@@ -56,3 +56,5 @@ flowchart LR
 - [Architecture](architecture.md): system map, ingest sequence, trust boundaries and Compose topology.
 - [Requirements](requirements.md): host requirements, sizing and GPU.
 - [Security](security.md): parser sandbox, malware scanning, secrets and network exposure.
+- [Parser sandbox providers](sandbox-providers.md): bubblewrap, landlock and Modal, selection, production policy and benchmarks.
+- [Choosing isolation per platform](platform-isolation.md): what Fargate, Cloud Run, Kubernetes, Fly.io and others give you, and which mode to use.

@@ -119,7 +119,29 @@ read them through `packages/shared/src/temporal-security.ts`.
 - `TEMPORAL_TLS_CLIENT_CERT_PEM` / `TEMPORAL_TLS_CLIENT_CERT_PATH`: client certificate, inline or as a file path.
 - `TEMPORAL_TLS_CLIENT_KEY_PEM` / `TEMPORAL_TLS_CLIENT_KEY_PATH`: client key, inline or as a file path.
 
+## Parser sandbox
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `DOCSLURP_PARSER_SANDBOX` | `bubblewrap` on Linux; `none` elsewhere outside production | Provider: `bubblewrap`, `landlock`, `modal` or `none`. |
+| `DOCSLURP_PARSER_SANDBOX_ALLOW_UNISOLATED` | unset | `true` allows provider `none` in production and logs `[parser-sandbox] status=unisolated` at start. |
+| `DOCSLURP_PARSER_SANDBOX_ROOT` | `/tmp/docslurp-parser-sandbox` | Scratch root (bubblewrap, landlock). |
+| `DOCSLURP_PARSER_SANDBOX_WRITABLE_PATHS` | empty | Comma-separated private workspaces parsers may write (bubblewrap, landlock). |
+| `DOCSLURP_LANDRUN_BINARY` | `landrun` | landrun executable (landlock). |
+| `MODAL_TOKEN_ID`, `MODAL_TOKEN_SECRET` | required for `modal` | Modal API token. Secrets. |
+| `DOCSLURP_MODAL_APP`, `DOCSLURP_MODAL_IMAGE`, `DOCSLURP_MODAL_REGISTRY_SECRET`, `DOCSLURP_MODAL_CPU`, `DOCSLURP_MODAL_MEMORY_MB`, `DOCSLURP_MODAL_SESSION_TIMEOUT_SECONDS` | `docslurp-parsers`, `ghcr.io/docslurp/worker-full:<DOCSLURP_VERSION>` (required when `DOCSLURP_VERSION` is unset), unset, `2`, `4096`, `900` | Modal sandbox settings. |
+| `DOCSLURP_VERSION` | set by release worker images; unset in source installs | Release version the image was built from. Picks the default Modal image. |
+
+Details are in [Parser sandbox providers](sandbox-providers.md#configuration).
+
 ## Removed and deprecated
+
+`DOCSLURP_PARSER_SANDBOX_ENABLED`, `DOCSLURP_PARSER_SANDBOX_MODE` and
+`DOCSLURP_PARSER_SANDBOX_SCRIPT` were removed with no replacement of the same
+name. Use `DOCSLURP_PARSER_SANDBOX` to choose a provider; to run without
+isolation, set `DOCSLURP_PARSER_SANDBOX=none` (and
+`DOCSLURP_PARSER_SANDBOX_ALLOW_UNISOLATED=true` in production). Setting the old
+names has no effect.
 
 The pre-URI variables `S3_BUCKET`, `AWS_ENDPOINT_URL_S3`, and `AWS_REGION` are
 deprecated. They are honored only when `STORAGE_URI` is unset and are no longer
