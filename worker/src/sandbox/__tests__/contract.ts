@@ -8,9 +8,13 @@ import type { SandboxCommand, SandboxResult, SandboxSession } from "../types.js"
 const BASH = "/usr/bin/bash";
 
 /** Run a command to completion through whichever entry point the session offers. */
-export async function execInSession(session: SandboxSession, command: SandboxCommand): Promise<SandboxResult> {
+export async function execInSession(
+  session: SandboxSession,
+  command: SandboxCommand,
+  signal?: AbortSignal,
+): Promise<SandboxResult> {
   if (session.spawn) {
-    const child = session.spawn(command);
+    const child = session.spawn(command, signal);
     let stdout = "";
     let stderr = "";
     child.stdout?.on("data", (chunk) => (stdout += chunk));
@@ -27,7 +31,7 @@ export async function execInSession(session: SandboxSession, command: SandboxCom
       clearTimeout(timer);
     }
   }
-  if (session.run) return session.run(command);
+  if (session.run) return session.run(command, signal);
   throw new Error(`Session '${session.providerId}' offers neither spawn nor run`);
 }
 
@@ -168,6 +172,27 @@ export function defineSandboxContract(
       const result = await execInSession(opened, command(["-c", "sleep 30"], { limits: { timeoutMs: 1_000 } }));
       expect(Date.now() - started).toBeLessThan(5_000);
       expect(result.exitCode).not.toBe(0);
+    });
+
+    it("keeps the session usable after one command is aborted", async (ctx) => {
+      const opened = ready(ctx);
+      const controller = new AbortController();
+      const started = Date.now();
+      const aborted = execInSession(
+        opened,
+        command(["-c", "sleep 30"], { limits: { timeoutMs: 20_000 } }),
+        controller.signal,
+      ).then(
+        (result) => result,
+        (error: unknown) => error,
+      );
+      setTimeout(() => controller.abort(), 500);
+      const outcome = await aborted;
+      expect(Date.now() - started).toBeLessThan(5_000);
+      if (!(outcome instanceof Error)) expect(outcome.exitCode).not.toBe(0);
+      const next = await execInSession(opened, command(["-c", "echo still-open"]));
+      expect(next.exitCode, next.stderr).toBe(0);
+      expect(next.stdout.trim()).toBe("still-open");
     });
 
     it("passes only the provided environment variables", async (ctx) => {
