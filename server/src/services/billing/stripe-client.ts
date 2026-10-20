@@ -33,7 +33,10 @@ export function getStripe(): Stripe {
     throw new BillingNotConfiguredError();
   }
   if (cached?.key !== key) {
-    cached = { key, client: new Stripe(key, { apiVersion: "2026-08-26.dahlia" }) };
+    // stripe-node 23 types only its own default (2026-09-30.endive). Production
+    // webhook endpoints are pinned to dahlia, so stay on it until they move
+    // together (docs/pricing-and-credits.md, `--webhook-url`).
+    cached = { key, client: new Stripe(key, { apiVersion: "2026-08-26.dahlia" as Stripe.LatestApiVersion }) };
   }
   return cached.client;
 }
