@@ -28,10 +28,12 @@ function localArtifactRunner(): CommandRunner {
 
 export async function runLocalArtifactCommand(binary: string, args: string[], maxBytes: number, timeoutMs: number, signal?: AbortSignal): Promise<Buffer> {
   signal?.throwIfAborted();
-  const launched = await localArtifactRunner().launch({ binary, args, available: true, timeoutMs }, signal);
+  const runner = localArtifactRunner();
+  const plan = { binary, args, available: true, timeoutMs };
+  const launched = await runner.launch(plan, signal);
   try {
     if ("remote" in launched) {
-      const result = await launched.remote;
+      const result = await runner.settleRemote(plan, launched);
       if (result.exitCode !== 0) throw new Error(`${binary} exited ${result.exitCode}: ${result.stderr.trim().slice(0, 4096)}`);
       if (Buffer.byteLength(result.stdout) > maxBytes) throw new Error(`${binary} output exceeds ${maxBytes} bytes`);
       return Buffer.from(result.stdout);

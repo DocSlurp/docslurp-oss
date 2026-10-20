@@ -5,6 +5,7 @@ import type { UsageEvent } from "../../../models.js";
 import { readSandboxConfig } from "../../config-schema.js";
 import {
   SandboxConfigError,
+  SandboxRunError,
   type ParserSandboxProvider,
   type SandboxCommand,
   type SandboxConfigSchema,
@@ -24,11 +25,6 @@ export interface ModalConfig {
   cpu: number;
   memoryMb: number;
   sessionTimeoutSeconds: number;
-}
-
-export interface ModalProviderOptions {
-  /** Receives the provider-cost usage event after every command. Defaults to log-only. */
-  recordUsage?: (event: UsageEvent) => void;
 }
 
 const ISOLATION: SandboxIsolation = { filesystem: true, network: "full", processes: true, location: "remote" };
@@ -127,9 +123,13 @@ function buildRemoteFs(sdk: ModalSdk, fs: import("modal").SandboxFilesystem): Re
   };
 }
 
+/**
+ * Provider cost of one command as a usage event. The SDK reports no cpu/memory consumption
+ * for a sandbox, so usage is the requested cpu x wall seconds and requested memory GB x wall
+ * seconds (what Modal bills for). It is provider cost only: `costRollup: "included"` and
+ * `billable: false` keep it out of customer credits, which the stage's own compute event covers.
+ */
 export function buildModalUsageEvent(config: ModalConfig, activityId: string, wallSeconds: number): UsageEvent {
-  // The SDK reports no cpu/memory consumption for a sandbox, so usage is the requested
-  // cpu x wall seconds and requested memory GB x wall seconds (what Modal bills for).
   const cpuSeconds = config.cpu * wallSeconds;
   const memoryGbSeconds = (config.memoryMb / 1024) * wallSeconds;
   const base = resolveWorkerDeploymentProfile();
@@ -145,15 +145,13 @@ export function buildModalUsageEvent(config: ModalConfig, activityId: string, wa
       allocatedVcpu: config.cpu,
       allocatedMemoryGb: config.memoryMb / 1024,
     },
-    metadata: { activityId, sandboxProvider: "modal" },
+    costRollup: "included",
+    metadata: { activityId, sandboxProvider: "modal", billable: false },
   });
   return { ...event, provider: "modal" };
 }
 
-export function createModalProvider(
-  loadSdk: () => Promise<ModalSdk>,
-  options: ModalProviderOptions = {},
-): ParserSandboxProvider<ModalConfig> {
+export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSandboxProvider<ModalConfig> {
   async function loadClient(config: ModalConfig) {
     assertCredentials(config);
     let sdk: ModalSdk;
@@ -226,10 +224,18 @@ export function createModalProvider(
         return creating;
       }
 
-      async function execute(command: SandboxCommand, signal?: AbortSignal): Promise<SandboxResult> {
-        await ensureSandbox();
-        const started = Date.now();
+      /** Log the command's Modal time and return it as a provider-cost usage event. */
+      function meter(started: number): UsageEvent {
+        const wallSeconds = (Date.now() - started) / 1000;
+        console.log(
+          `[sandbox-usage] provider=modal cpu_seconds=${(config.cpu * wallSeconds).toFixed(3)} memory_gb_seconds=${((config.memoryMb / 1024) * wallSeconds).toFixed(3)} activity=${context.activityId}`,
+        );
+        return buildModalUsageEvent(config, context.activityId, wallSeconds);
+      }
+
+      async function execute(command: SandboxCommand, started: number, signal?: AbortSignal): Promise<SandboxResult> {
         try {
+          await ensureSandbox();
           // Only the command's inputs travel; the parser runtime comes from the image.
           await staging!.ensureUploaded(command.inputPaths);
           for (const dir of command.writablePaths) await sandbox!.filesystem.makeDirectory(dir);
@@ -256,14 +262,11 @@ export function createModalProvider(
           }
           // An aborted command's caller has moved on; never write its outputs back.
           if (!signal?.aborted) await staging!.download(command.writablePaths);
-          return { ...output, cpuSeconds: config.cpu * ((Date.now() - started) / 1000) };
-        } finally {
-          // Always log elapsed Modal time, even when staging or exec failed.
-          const wallSeconds = (Date.now() - started) / 1000;
-          console.log(
-            `[sandbox-usage] provider=modal cpu_seconds=${(config.cpu * wallSeconds).toFixed(3)} memory_gb_seconds=${((config.memoryMb / 1024) * wallSeconds).toFixed(3)} activity=${context.activityId}`,
-          );
-          options.recordUsage?.(buildModalUsageEvent(config, context.activityId, wallSeconds));
+          const usage = meter(started);
+          return { ...output, cpuSeconds: config.cpu * ((Date.now() - started) / 1000), usage };
+        } catch (error) {
+          // Elapsed Modal time is billed even when staging or exec failed.
+          throw new SandboxRunError(`modal sandbox command failed: ${safeMessage(config, error)}`, meter(started));
         }
       }
 
@@ -277,18 +280,24 @@ export function createModalProvider(
         isolation: ISOLATION,
         async run(command, signal) {
           if (closed) throw new Error("modal sandbox session is closed");
-          if (signal?.aborted) throw new Error("modal sandbox command aborted");
-          const execution = execute(command, signal).catch((error: unknown) => {
-            throw new Error(`modal sandbox command failed: ${safeMessage(config, error)}`);
-          });
+          if (signal?.aborted) throw new SandboxRunError("modal sandbox command aborted");
+          const started = Date.now();
+          const execution = execute(command, started, signal);
           if (!signal) return await execution;
           // An abort ends this command only: other commands in the activity share the sandbox,
           // which only close() terminates. The SDK cannot kill a single exec, so the caller
           // stops waiting now and the exec runs on until its own timeoutMs; its result and
-          // outputs are discarded.
+          // outputs are discarded. Usage is recorded up to the abort; the [sandbox-usage]
+          // line is logged when the exec ends.
           let onAbort!: () => void;
           const aborted = new Promise<never>((_, reject) => {
-            onAbort = () => reject(new Error("modal sandbox command aborted"));
+            onAbort = () =>
+              reject(
+                new SandboxRunError(
+                  "modal sandbox command aborted",
+                  buildModalUsageEvent(config, context.activityId, (Date.now() - started) / 1000),
+                ),
+              );
           });
           signal.addEventListener("abort", onAbort, { once: true });
           execution.catch(() => {});

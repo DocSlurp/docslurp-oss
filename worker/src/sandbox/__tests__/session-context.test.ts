@@ -1,9 +1,14 @@
 import { spawn } from "node:child_process";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
+import { PassThrough } from "node:stream";
+
+import { runWithPerfContext } from "../../lib/perf-context.js";
+import { ProgressTracker, runWithProgressTracker } from "../../lib/work-progress.js";
+import type { UsageEvent } from "../../models.js";
 import { CommandRunner } from "../../tools/runner.js";
 import { runWithSandboxScope, SandboxSessionScope } from "../session-context.js";
-import type { SandboxCommand, SandboxIsolation, SandboxSession } from "../types.js";
+import { SandboxRunError, type SandboxCommand, type SandboxIsolation, type SandboxResult, type SandboxSession } from "../types.js";
 
 const ISOLATION: SandboxIsolation = { filesystem: false, network: "none", processes: false, location: "local" };
 
@@ -105,5 +110,101 @@ describe("remote (run-only) sessions", () => {
   it("resolves stdout on success", async () => {
     const runner = new CommandRunner({ openSession: async () => remote({ exitCode: 0, stdout: "x" }) });
     await expect(runner.run(plan)).resolves.toEqual({ stdout: "x", stderr: "" });
+  });
+});
+
+describe("remote commands in the runner", () => {
+  const plan = { binary: "parser", args: ["x"], available: true, timeoutMs: 120_000 };
+  const usage: UsageEvent = {
+    provider: "modal",
+    model: "modal:app",
+    metric: "sandbox_compute",
+    amount: 1,
+    unit: "cent",
+    costCents: 0,
+    metadata: { costRollup: "included", billable: false },
+  };
+  const runSession = (run: () => Promise<SandboxResult>): SandboxSession => ({
+    providerId: "remote",
+    isolation: { ...ISOLATION, location: "remote" },
+    run,
+    close: async () => {},
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllEnvs();
+  });
+
+  function inStage<T>(events: UsageEvent[], fn: () => Promise<T>): Promise<T> {
+    return runWithPerfContext(
+      { runId: "run", scope: "document", stageName: "extract", pushPerformance: () => {}, pushUsage: (event) => events.push(event) },
+      fn,
+    );
+  }
+
+  it("caps remote stdout and stderr like local output", async () => {
+    vi.stubEnv("WORKER_COMMAND_MAX_OUTPUT_BYTES", "16");
+    const big = "x".repeat(64);
+    const stdoutRunner = new CommandRunner({ openSession: async () => runSession(async () => ({ exitCode: 0, stdout: big, stderr: "" })) });
+    await expect(stdoutRunner.run(plan)).rejects.toThrow("parser stdout exceeded 16 bytes");
+    await expect(stdoutRunner.runToWritable(plan, new PassThrough())).rejects.toThrow("parser stdout exceeded 16 bytes");
+    const stderrRunner = new CommandRunner({ openSession: async () => runSession(async () => ({ exitCode: 1, stdout: "", stderr: big })) });
+    await expect(stderrRunner.run(plan)).rejects.toThrow("parser stderr exceeded 16 bytes");
+  });
+
+  it("reports progress while a remote command is pending, up to its time limit", async () => {
+    vi.useFakeTimers();
+    let finish!: (result: SandboxResult) => void;
+    let started!: () => void;
+    const runStarted = new Promise<void>((resolve) => (started = resolve));
+    const runner = new CommandRunner({
+      openSession: async () =>
+        runSession(() => {
+          started();
+          return new Promise<SandboxResult>((resolve) => (finish = resolve));
+        }),
+    });
+    const tracker = new ProgressTracker();
+    const running = runWithProgressTracker(tracker, () => runner.run(plan));
+    await runStarted;
+    await vi.advanceTimersByTimeAsync(0);
+    tracker.note("before");
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(tracker.lastLabel).toBe("command:parser");
+    expect(tracker.idleMs()).toBe(0);
+    // Past the command's own limit the watchdog sees no more progress.
+    await vi.advanceTimersByTimeAsync(120_000);
+    tracker.note("limit");
+    await vi.advanceTimersByTimeAsync(90_000);
+    expect(tracker.lastLabel).toBe("limit");
+    finish({ exitCode: 0, stdout: "ok", stderr: "" });
+    await expect(running).resolves.toEqual({ stdout: "ok", stderr: "" });
+  });
+
+  it("records the provider's usage event once, in the stage's scope", async () => {
+    const events: UsageEvent[] = [];
+    const runner = new CommandRunner({ openSession: async () => runSession(async () => ({ exitCode: 0, stdout: "", stderr: "", usage })) });
+    await inStage(events, () => runner.run(plan));
+    expect(events).toEqual([{ ...usage, metadata: { ...usage.metadata, scope: "document", stage: "extract" } }]);
+  });
+
+  it("records the usage carried by a failed remote run", async () => {
+    const events: UsageEvent[] = [];
+    const runner = new CommandRunner({
+      openSession: async () =>
+        runSession(async () => {
+          throw new SandboxRunError("modal sandbox command aborted", usage);
+        }),
+    });
+    await expect(inStage(events, () => runner.run(plan))).rejects.toThrow("aborted");
+    expect(events.map((event) => event.provider)).toEqual(["modal"]);
+  });
+
+  it("records no sandbox provider event for a local session", async () => {
+    const events: UsageEvent[] = [];
+    const runner = new CommandRunner({ openSession: async () => recordingSession("local", []) });
+    await inStage(events, () => runner.run({ binary: process.execPath, args: ["-e", ""], available: true }));
+    expect(events.some((event) => event.provider === "modal")).toBe(false);
   });
 });

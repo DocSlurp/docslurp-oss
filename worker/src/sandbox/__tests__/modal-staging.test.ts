@@ -5,9 +5,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { CommandRunner, resolveVenvBin } from "../../tools/runner.js";
 import { resolveScriptsDir } from "../../tools/scripts-dir.js";
-import { createModalProvider, type ModalSdk } from "../providers/modal/index.js";
+import { buildModalUsageEvent, createModalProvider, type ModalSdk } from "../providers/modal/index.js";
 import { SessionStaging, type RemoteFs } from "../providers/modal/staging.js";
-import { SandboxConfigError } from "../types.js";
+import { SandboxConfigError, SandboxRunError } from "../types.js";
 
 class MemoryRemoteFs implements RemoteFs {
   files = new Map<string, Uint8Array>();
@@ -298,6 +298,22 @@ describe("modal provider session lifecycle", () => {
     await expect(opened.run!(command)).rejects.toThrow("container crashed");
   });
 
+  it("returns the command's provider cost as a usage event, and attaches it to failures", async () => {
+    const { session } = await open();
+    const opened = await session();
+    const result = await opened.run!(command);
+    expect(result.usage).toMatchObject({ provider: "modal", metric: "sandbox_compute", costCents: 0 });
+
+    const failing = await open({
+      exec: async () => {
+        throw new Error("container crashed");
+      },
+    });
+    const error = await (await failing.session()).run!(command).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(SandboxRunError);
+    expect((error as SandboxRunError).usage?.provider).toBe("modal");
+  });
+
   it("reports an exec deadline as a killed command", async () => {
     const { session } = await open({
       exec: async () => {
@@ -342,5 +358,18 @@ describe("CommandRunner through the modal provider", () => {
     const staged = [...state.writes, ...state.mkdirs].join("\n");
     for (const host of ["node_modules", ".venv", process.execPath, resolveScriptsDir()]) expect(staged).not.toContain(host);
     expect(staged.split("\n").some((p) => p === "/usr" || p.startsWith("/usr/"))).toBe(false);
+  });
+});
+
+describe("modal usage event", () => {
+  afterEach(() => vi.unstubAllEnvs());
+
+  it("is provider cost only, never customer credits, even with compute billing on", () => {
+    vi.stubEnv("DOCSLURP_BILL_COMPUTE", "true");
+    const event = buildModalUsageEvent(lifecycleConfig, "activity-1", 10);
+    expect(event.provider).toBe("modal");
+    expect(event.costCents).toBe(0);
+    expect(event.metadata).toMatchObject({ costRollup: "included", billable: false, activityId: "activity-1" });
+    expect(Number(event.metadata?.effectiveCostCents)).toBeGreaterThan(0);
   });
 });

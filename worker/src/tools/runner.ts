@@ -11,6 +11,7 @@ import { DEFAULT_LOCAL_OCR_MODEL, DEFAULT_IMAGE_CLASSIFICATION_MODEL } from "@do
 import { existsSync, readFileSync, readdirSync, readlinkSync, lstatSync, realpathSync, statSync } from "node:fs";
 import { access } from "node:fs/promises";
 import path from "node:path";
+import { AsyncResource } from "node:async_hooks";
 import { spawn, type ChildProcess } from "node:child_process";
 import { Readable } from "node:stream";
 import { platform } from "node:os";
@@ -20,7 +21,7 @@ import type { Writable } from "node:stream";
 import { resolveCommandPaths } from "../sandbox/paths.js";
 import { sandboxScopeStorage } from "../sandbox/session-context.js";
 import { defaultParserSandbox, registeredParserSandbox } from "../sandbox/startup.js";
-import type { SandboxCommand, SandboxResult, SandboxSession } from "../sandbox/types.js";
+import { SandboxRunError, type SandboxCommand, type SandboxResult, type SandboxSession } from "../sandbox/types.js";
 import { resolveScriptsDir } from "./scripts-dir.js";
 import { createPool, type PythonPool } from "./python-pool.js";
 import {
@@ -31,6 +32,7 @@ import {
 } from "./process-env.js";
 import { currentPerfContext, pushPerfMetric, pushUsageEvent } from "../lib/perf-context.js";
 import { HungWorkError } from "../lib/hung-work.js";
+import type { UsageEvent } from "../models.js";
 import { noteWorkProgress, resolveCommandTimeoutMs } from "../lib/work-progress.js";
 import {
   buildLocalComputeUsageEvent,
@@ -71,7 +73,7 @@ export interface CommandRunnerOptions {
 /** A started command: a local child process to monitor, or a remote run that completes on its own. */
 export type LaunchedCommand =
   | { child: ChildProcess; release(): Promise<void> }
-  | { remote: Promise<SandboxResult>; release(): Promise<void> };
+  | { remote: Promise<SandboxResult>; timeoutMs: number; release(): Promise<void> };
 
 const DEFAULT_SCRATCH_ROOT = "/tmp/docslurp-parser-sandbox";
 
@@ -88,6 +90,8 @@ type ProcessSample = {
 };
 
 const DEFAULT_MAX_COMMAND_OUTPUT_BYTES = 10 * 1024 * 1024;
+/** How often a pending remote command reports progress to the stage stall watchdog. */
+const REMOTE_PROGRESS_INTERVAL_MS = 30_000;
 export interface MalwareScanResult {
   engine: "clamscan" | "clamdscan" | null;
   available: boolean;
@@ -1212,7 +1216,7 @@ export class CommandRunner {
     const { session, release } = await this.acquireSession();
     try {
       if (session.spawn) return { child: session.spawn(command, signal), release };
-      if (session.run) return { remote: session.run(command, signal), release };
+      if (session.run) return { remote: session.run(command, signal), timeoutMs: command.limits.timeoutMs, release };
       throw new Error(`Sandbox session '${session.providerId}' offers neither spawn nor run`);
     } catch (error) {
       await release();
@@ -1220,14 +1224,33 @@ export class CommandRunner {
     }
   }
 
-  /** Await a remote run and record its provider-reported usage; the local monitor does not apply. */
-  private async settleRemote(
+  /**
+   * Await a remote run in place of the local monitor: report progress to the stall watchdog
+   * while it is pending (up to its time limit), record the provider's usage event in the
+   * caller's usage scope, and apply the same output cap as local commands.
+   */
+  async settleRemote(
     plan: CommandPlan,
-    launched: { remote: Promise<SandboxResult> },
+    launched: { remote: Promise<SandboxResult>; timeoutMs: number },
     metricPrefix = "command",
   ): Promise<SandboxResult> {
     const startedAt = Date.now();
-    const result = await launched.remote;
+    // Bound to this stage's async context so the note reaches its progress tracker.
+    const progress = setInterval(AsyncResource.bind(() => {
+      if (Date.now() - startedAt > launched.timeoutMs) clearInterval(progress);
+      else noteWorkProgress(`command:${path.basename(plan.binary)}`);
+    }), REMOTE_PROGRESS_INTERVAL_MS);
+    progress.unref();
+    let result: SandboxResult;
+    try {
+      result = await launched.remote;
+    } catch (error) {
+      if (error instanceof SandboxRunError && error.usage) recordRemoteUsage(error.usage);
+      throw error;
+    } finally {
+      clearInterval(progress);
+    }
+    if (result.usage) recordRemoteUsage(result.usage);
     noteWorkProgress(`command-exit:${path.basename(plan.binary)}`);
     const context = currentPerfContext();
     if (context) {
@@ -1245,6 +1268,12 @@ export class CommandRunner {
           tags,
           metadata,
         });
+      }
+    }
+    const maxOutputBytes = readPositiveNumber(process.env.WORKER_COMMAND_MAX_OUTPUT_BYTES) ?? DEFAULT_MAX_COMMAND_OUTPUT_BYTES;
+    for (const stream of ["stdout", "stderr"] as const) {
+      if (Buffer.byteLength(result[stream]) > maxOutputBytes) {
+        throw new Error(`${plan.binary} ${stream} exceeded ${maxOutputBytes} bytes`);
       }
     }
     return result;
@@ -1698,6 +1727,13 @@ export function buildSandboxCommand(args: {
     writablePaths: paths.writablePaths,
     limits: args.limits,
   };
+}
+
+/** Record a remote provider's cost in the enclosing stage's usage ledger, tagged with its scope. */
+function recordRemoteUsage(usage: UsageEvent): void {
+  const context = currentPerfContext();
+  if (!context) return;
+  pushUsageEvent({ ...usage, metadata: { ...usage.metadata, scope: context.scope, stage: context.stageName } });
 }
 
 export function isVectorBackendCommand(commandArgs: string[], scriptsDir: string): boolean {

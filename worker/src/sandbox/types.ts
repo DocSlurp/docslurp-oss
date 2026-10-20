@@ -1,5 +1,7 @@
 import type { ChildProcess } from "node:child_process";
 
+import type { UsageEvent } from "../models.js";
+
 export type SandboxNetworkIsolation = "none" | "tcp-only" | "full";
 
 export interface SandboxIsolation {
@@ -45,6 +47,19 @@ export interface SandboxResult {
   stderr: string;
   peakRssKb?: number;
   cpuSeconds?: number;
+  /** Provider cost of a remote run; the runner records it in the caller's usage scope. */
+  usage?: UsageEvent;
+}
+
+/** A remote run that failed or was aborted, with the provider cost it incurred. */
+export class SandboxRunError extends Error {
+  constructor(
+    message: string,
+    readonly usage?: UsageEvent,
+  ) {
+    super(message);
+    this.name = "SandboxRunError";
+  }
 }
 
 export interface SandboxSession {
