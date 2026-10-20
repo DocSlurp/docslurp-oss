@@ -84,3 +84,14 @@ test("a failed storage PUT aborts the session and surfaces the error", async () 
   });
   assert.ok(api.calls.some((call) => call.url.endsWith("/v1/uploads/direct/sessions/s1/abort")));
 });
+
+
+test("tags survive multipart and direct upload transport selection", async () => {
+  for (const directUpload of [false, true]) {
+    const api = fakeApi();
+    const client = createDocSlurpClient({ apiUrl: "https://api.invalid", apiKey: "key", fetch: api.fetch });
+    await client.upload({ files: [new Blob(["hello"])], tags: ["finance", "FY26"] }, { directUpload });
+    const body = api.calls[0].body;
+    assert.deepEqual(directUpload ? JSON.parse(body).tags : JSON.parse(body.get("tags")), ["finance", "FY26"]);
+  }
+});

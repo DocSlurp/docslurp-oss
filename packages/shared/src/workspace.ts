@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { documentTagsSchema } from "./document-tags.js";
 import {
   defaultPipelineFeatures,
   mergePipelineFeatures,
@@ -457,7 +458,7 @@ const isoDateSchema = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "Use YYYY-MM-DD");
 export const chatSearchFiltersSchema = z.object({
   documentIds: z.array(z.string().trim().min(1).max(200)).max(50).optional(),
   mimeTypes: z.array(z.string().trim().min(1).max(200)).max(24).optional(),
-  tags: z.array(z.string().trim().min(1).max(100)).max(24).optional(),
+  tags: documentTagsSchema.optional(),
   /** Indexed on or after this day (UTC). */
   dateFrom: isoDateSchema.optional(),
   /** Indexed on or before this day (UTC). */

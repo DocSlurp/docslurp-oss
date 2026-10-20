@@ -262,7 +262,7 @@ export async function loadSearchAvailability(args: {
   // page-only when progressive page search covers it.
   //
   // Chunk and page totals come from the trigger-maintained documents.chunk_count
-  // and documents.stored_page_count (migration 0062), never from counting
+  // and documents.stored_page_count (migration 0063), never from counting
   // document_chunks/document_pages rows: that seq-scanned every tenant's chunks
   // on each search. A document's chunks and pages always carry its run_id.
   const [row] = await sql<SearchAvailabilityRow[]>`

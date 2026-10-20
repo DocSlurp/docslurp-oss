@@ -1,6 +1,7 @@
 import { Hono } from "hono";
 import type { Context } from "hono";
 import { z } from "zod";
+import { documentTagsSchema } from "@docslurp/shared";
 import { zValidator } from "@hono/zod-validator";
 
 import { getArtifactJson } from "../lib/artifacts.js";
@@ -38,18 +39,18 @@ import { validationHook } from "../lib/validation.js";
 const bulkSchema = z.object({
   action: z.enum(["reprocess", "export-artifacts", "apply-tags", "remove-tags", "delete"]),
   documentIds: z.array(z.string()).min(1),
-  tags: z.array(z.string()).optional()
+  tags: documentTagsSchema.optional()
 });
 
 const setTagsSchema = z.object({
-  tags: z.array(z.string()).default([])
+  tags: documentTagsSchema.default([])
 });
 
 const saveCorrectionSchema = z.object({
   markdown: z.string().nullable().optional(),
   structuredData: z.record(z.string(), z.unknown()).nullable().optional(),
   notes: z.string().nullable().optional(),
-  tags: z.array(z.string()).optional()
+  tags: documentTagsSchema.optional()
 });
 
 const reindexCorrectionSchema = z.object({});

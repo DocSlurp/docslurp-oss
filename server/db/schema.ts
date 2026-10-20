@@ -346,9 +346,9 @@ export const documents = pgTable(
     status: text().notNull(),
     extractionMode: text("extraction_mode").default("hybrid").notNull(),
     pageCount: integer("page_count").default(0).notNull(),
-    /** document_chunks rows; trigger-maintained (migration 0062). */
+    /** document_chunks rows; trigger-maintained (migration 0063). */
     chunkCount: integer("chunk_count").default(0).notNull(),
-    /** document_pages rows; trigger-maintained (migration 0062). */
+    /** document_pages rows; trigger-maintained (migration 0063). */
     storedPageCount: integer("stored_page_count").default(0).notNull(),
     createdAt: timestamp("created_at", { withTimezone: true, mode: "string" })
       .defaultNow()
@@ -2091,6 +2091,7 @@ export const parserEvalResults = pgTable(
 export const uploadSessions = pgTable(
   "upload_sessions",
   {
+    tags: text().array().default([]).notNull(),
     id: text().primaryKey().notNull(),
     userId: text("user_id").notNull(),
     orgId: text("org_id"),
@@ -2857,6 +2858,7 @@ export const documentTags = pgTable(
       .notNull(),
   },
   (table) => [
+    index("document_tags_tag_document_idx").on(table.tag, table.documentId),
     index("document_tags_document_id_idx").using(
       "btree",
       table.documentId.asc().nullsLast().op("text_ops"),

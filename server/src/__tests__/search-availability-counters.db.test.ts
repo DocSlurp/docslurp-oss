@@ -5,7 +5,7 @@ import { startMigratedPostgres } from "@docslurp/worker/testing";
 
 /**
  * Search availability reads the trigger-maintained documents.chunk_count and
- * documents.stored_page_count (migration 0062) instead of counting chunk and
+ * documents.stored_page_count (migration 0063) instead of counting chunk and
  * page rows on every search. These checks build fixtures through the same kinds
  * of writes the worker and server make, then compare loadSearchAvailability with
  * the previous row-counting query, which stays here as the reference.
@@ -40,7 +40,7 @@ beforeEach(async () => {
   await sql`delete from workspace_runs`;
 });
 
-/** The pre-0062 query: counts document_pages and document_chunks rows per search. */
+/** The pre-0063 query: counts document_pages and document_chunks rows per search. */
 async function legacyAvailability(args: { workspaceId: string; runId?: string }) {
   const { fullyIndexedDocument, earlyLexicalDocument, servableInProgressVersion } = eligibility;
   const [row] = await sql`

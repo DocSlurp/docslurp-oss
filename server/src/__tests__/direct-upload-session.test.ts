@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
-const sqlMock = vi.hoisted(() => Object.assign(vi.fn(), { json: (value: unknown) => value }));
+const sqlMock = vi.hoisted(() => Object.assign(vi.fn(), { json: (value: unknown) => value, array: (value: unknown) => value }));
 const signSingleUploadPut = vi.hoisted(() => vi.fn(async ({ key }: { key: string }) => `https://storage.example/${key}`));
 const getUploadedObjectMetadata = vi.hoisted(() => vi.fn());
 const deleteUploadedObject = vi.hoisted(() => vi.fn(async () => {}));
@@ -77,7 +77,8 @@ describe("Direct Upload Session Module", () => {
       return [];
     });
     signSingleUploadPut.mockClear();
-    const result = await createDirectUploadSession({ userId: "user-1", orgId: "org-1", pipeline: {}, files: files.map(file => ({ filename: file.filename, mimeType: file.mime_type, sizeBytes: file.size_bytes, singlePart: true })) });
+    const result = await createDirectUploadSession({ userId: "user-1", orgId: "org-1", pipeline: {}, tags: ["finance"], files: files.map(file => ({ filename: file.filename, mimeType: file.mime_type, sizeBytes: file.size_bytes, singlePart: true })) });
+    expect(sqlMock.mock.calls.some((call) => call.slice(1).some((value: unknown) => Array.isArray(value) && value[0] === "finance"))).toBe(true);
     expect(result.files).toHaveLength(10);
     expect(result.files.every(file => file.mode === "single" && "putUrl" in file)).toBe(true);
     expect(signSingleUploadPut).toHaveBeenCalledTimes(10);

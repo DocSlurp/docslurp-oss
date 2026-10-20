@@ -1064,7 +1064,7 @@ export async function getWorkspaceCockpit(
         where d.workspace_id = w.id
           and d.status not in ('completed', 'failed', 'cancelled', 'pii_blocked')
       ), 0) as active_documents,
-      -- documents.chunk_count is trigger-maintained (migration 0062).
+      -- documents.chunk_count is trigger-maintained (migration 0063).
       coalesce((
         select sum(docs.chunk_count)::int
         from documents docs

@@ -47,6 +47,7 @@ export interface RunSourceFile {
   fileSize?: number;
   metadata?: Record<string, unknown>;
   canonicalId?: string | null;
+  tags?: string[];
 }
 
 export type RunSources =
@@ -712,6 +713,11 @@ export function createRunCreation(deps: RunCreationDeps) {
           returning *
         `;
 
+        for (const tag of file.tags ?? []) {
+          await client`insert into document_tags (document_id, user_id, tag)
+            values (${documentId}, ${input.userId}, ${tag}) on conflict do nothing`;
+        }
+
         if (dedupCandidate) {
           await seedDeduplicatedDocument(client, {
             sourceDocumentId: dedupCandidate.id,
@@ -722,7 +728,7 @@ export function createRunCreation(deps: RunCreationDeps) {
           });
         }
 
-        return inserted!;
+        return { ...inserted!, tags: file.tags ?? [] };
       });
       documents.push(row);
     }
@@ -782,7 +788,11 @@ export function createRunCreation(deps: RunCreationDeps) {
           )
           returning *
         `;
-        return inserted!;
+        await client`insert into document_tags (document_id, user_id, tag)
+          select ${inserted!.id}, ${input.userId}, tag from document_tags where document_id = ${source.id}
+          on conflict do nothing`;
+        const tags = await client<{ tag: string }[]>`select tag from document_tags where document_id = ${inserted!.id} order by tag`;
+        return { ...inserted!, tags: tags.map((row) => row.tag) };
       });
       documents.push(row);
     }

@@ -777,3 +777,21 @@ Every 429 has `Retry-After` and the [error envelope](https://docslurp.io/docs/se
 [![17th Street Labs logo](https://docslurp.io/sponsors/17th-street-labs-readme.svg)](https://17thstreetlabs.com)
 
 [17th Street Labs](https://17thstreetlabs.com) is DocSlurp's primary sponsor.
+
+### Document tags
+
+Apply tags to every accepted document in an upload, including streamed, URL, and direct-to-storage uploads:
+
+```ts
+await client.upload({ files: [file], tags: ["finance", "FY26"] });
+await client.upload({ urls: ["https://example.com/report.pdf"], tags: ["finance"] });
+const tags = await client.listWorkspaceTags();
+// [{ tag: "finance", documentCount: 2 }, ...]
+await client.search({ q: "revenue outlook", tags: "finance,FY26" });
+```
+
+JSON upload and direct-session requests accept `tags: string[]`. Multipart `/v1/uploads/bulk` accepts a `tags` field containing a JSON array. Tags are case-sensitive, trimmed, and deduplicated: up to 24 labels per request, each 1–100 characters, with no commas or NUL characters. Tags are saved with the document before processing starts, returned in the upload response, and preserved when reprocessing documents.
+
+`GET /v1/workspaces/{workspaceId}/tags` returns `{ "tags": [{ "tag": "finance", "documentCount": 2 }] }`, sorted by tag. Counts cover current, non-superseded documents, including pending uploads. The workspace accepts a UUID, slug, former slug, or `default`. Session callers need workspace access; API keys additionally need one of `search`, `ingest`, `artifacts`, or `workspaces:manage`, and stay within their organization and workspace restrictions. An empty workspace returns `{"tags":[]}`.
+
+Document listing and search accept comma-separated `tags`; matching any supplied tag is sufficient. Chat accepts an array in `filters.tags`. Existing dashboard-session endpoints `PUT /v1/documents/{docId}/tags` and `POST /v1/documents/bulk` (`apply-tags`/`remove-tags`) edit labels with workspace edit access. Tag changes take effect without re-ingestion.
