@@ -283,6 +283,7 @@ function fakeSdk(
     stats: [] as string[],
     images: [] as Array<[string, unknown]>,
     commands: [] as string[][],
+    commandTimeouts: [] as Array<number | undefined>,
     kills: [] as string[],
     remote,
   };
@@ -310,13 +311,14 @@ function fakeSdk(
       },
       listFiles: async (p: string) => (await remote.list(p)).map(info),
     },
-    exec: async (argv: string[]) => {
+    exec: async (argv: string[], params?: { timeoutMs?: number }) => {
       if (isKill(argv)) {
         state.kills.push(controlOf(argv));
         opts.onKill?.(controlOf(argv));
         return finished("", 0);
       }
       state.commands.push(argv.slice(6));
+      state.commandTimeouts.push(params?.timeoutMs);
       return (opts.exec ?? (async () => finished()))(argv.slice(6), controlOf(argv));
     },
   };
@@ -584,6 +586,14 @@ describe("modal provider session lifecycle", () => {
       ["debian:trixie-slim", { secret: "ghcr-pull" }],
       ["debian:trixie-slim", undefined],
     ]);
+  });
+
+  it("rounds a command's time limit up to the whole seconds Modal accepts", async () => {
+    const { state, session } = await open();
+    const opened = await session();
+    await opened.run!({ ...command, limits: { timeoutMs: 1_500 } });
+    await opened.run!({ ...command, limits: { timeoutMs: 30_000 } });
+    expect(state.commandTimeouts).toEqual([2_000, 30_000]);
   });
 
   it("reports an exec deadline as a killed command", async () => {

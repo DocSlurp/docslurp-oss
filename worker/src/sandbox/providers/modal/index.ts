@@ -102,6 +102,11 @@ function isExecTimeout(sdk: ModalSdk, error: unknown): boolean {
   return error instanceof Error && error.message.startsWith("Deadline exceeded");
 }
 
+/** Modal rejects an exec timeout that is not a whole number of seconds; round up so the command gets at least its limit. */
+function execTimeoutMs(timeoutMs: number): number {
+  return Math.max(1, Math.ceil(timeoutMs / 1000)) * 1000;
+}
+
 /** Remote directory holding each command's pid and cancel files; outside every writable path. */
 const CONTROL_DIR = "/tmp/.docslurp-modal-control";
 
@@ -344,7 +349,7 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
         settled.catch(() => {});
         const aborted = whenAborted(signal);
         try {
-          const process = await sandbox!.exec(argv, { env, timeoutMs: command.limits.timeoutMs, mode: "text" });
+          const process = await sandbox!.exec(argv, { env, timeoutMs: execTimeoutMs(command.limits.timeoutMs), mode: "text" });
           settled = Promise.all([process.stdout.readText(), process.stderr.readText(), process.wait()]).then(
             ([stdout, stderr, exitCode]) => ({ stdout, stderr, exitCode }),
           );
