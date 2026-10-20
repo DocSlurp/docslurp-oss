@@ -124,16 +124,17 @@ async function measureProvider(id: SandboxProviderId, file: string, repeat: numb
 }
 
 function formatTable(results: ProviderMeasurement[]): string {
-  const rows = ["| provider | isolation | session open ms | median command ms | total ms |", "| --- | --- | ---: | ---: | ---: |"];
+  const rows = ["| provider | isolation | session open ms | median command ms | total ms (sum of medians) |", "| --- | --- | ---: | ---: | ---: |"];
   for (const r of results) {
     rows.push(
       r.status === "measured"
-        ? `| ${r.provider} | ${r.isolation} | ${r.sessionOpenMs!.toFixed(1)} | ${r.medianCommandMs!.toFixed(1)} | ${r.totalMs!.toFixed(1)} |`
+        ? `| ${r.provider} | ${r.isolation} | ${r.isolation.endsWith("remote") ? r.sessionOpenMs!.toFixed(1) : "-"} | ${r.medianCommandMs!.toFixed(1)} | ${r.totalMs!.toFixed(1)} |`
         : `| ${r.provider} | ${r.isolation} | skipped | skipped | skipped |`,
     );
   }
   const skipped = results.filter((r) => r.status === "skipped");
-  return [rows.join("\n"), ...skipped.map((r) => `\n${r.provider} skipped: ${r.detail}`)].join("\n");
+  const note = "\nSession open is only meaningful for remote providers; local providers spawn per command (shown as -). Total is the session open median plus the sum of per-command medians.";
+  return [rows.join("\n"), note, ...skipped.map((r) => `\n${r.provider} skipped: ${r.detail}`)].join("\n");
 }
 
 async function main(): Promise<void> {

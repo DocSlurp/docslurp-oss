@@ -23,6 +23,8 @@ export interface LandlockConfig {
 const PROBE_TIMEOUT_MS = 10_000;
 // System locations a dynamically linked parser needs to start; missing ones are skipped.
 const RUNTIME_PATHS = ["/usr", "/lib", "/lib64", "/bin", "/etc"];
+// Read-only caches. Without the fontconfig cache, every poppler run rescans the system fonts.
+const READ_ONLY_RUNTIME_PATHS = ["/var/cache/fontconfig"];
 
 const configSchema: SandboxConfigSchema = {
   type: "object",
@@ -69,7 +71,7 @@ function pathFlags(flag: string, paths: string[]): string[] {
   return paths.length > 0 ? [flag, paths.join(",")] : [];
 }
 
-function landrunArgs(
+export function landrunArgs(
   command: Pick<SandboxCommand, "binary" | "args" | "env" | "readablePaths" | "writablePaths">,
 ): string[] {
   const executable = path.isAbsolute(command.binary) ? [command.binary] : [];
@@ -81,7 +83,7 @@ function landrunArgs(
   return [
     ...envFlags,
     ...pathFlags("--rox", existing([...RUNTIME_PATHS, ...executable])),
-    ...pathFlags("--ro", existing(command.readablePaths)),
+    ...pathFlags("--ro", existing([...READ_ONLY_RUNTIME_PATHS, ...command.readablePaths])),
     ...pathFlags("--rw", existing(command.writablePaths)),
     "--",
     command.binary,
