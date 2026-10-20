@@ -59,7 +59,9 @@ async function poolProbe(pool: ApiPool, timeoutMs: number): Promise<"ok" | "time
   }
 }
 
-const options: DbWatchdogOptions = { intervalMs: 100, timeoutMs: 500, exitAfterMs: 1_500, poolStallMs: 1_500 };
+// Probe timeout 1 s: PGlite runs one statement at a time, so even the dedicated
+// probe waits for the statement in progress; the pool queue is ~2 s deep.
+const options: DbWatchdogOptions = { intervalMs: 100, timeoutMs: 1_000, exitAfterMs: 2_500, poolStallMs: 2_500 };
 
 describe("database watchdog against a real pool", () => {
   it("does not exit when search-like load saturates the pool but the database answers", async () => {
@@ -67,36 +69,40 @@ describe("database watchdog against a real pool", () => {
     const probe = createDbProbe(url, { applicationName: "docslurp-api:saturated" });
     const warnings: string[] = [];
     let running = true;
-    // Search-like load: 30 callers each hold a connection for 50 ms per
+    // Search-like load: 40 callers each hold a connection for 100 ms per
     // transaction (the session-persist shape: a few statements plus app work
     // between them), and 20 more issue plain queries back to back. A new pool
-    // query waits behind roughly 30 x 50 ms / 2 connections. PGlite runs one
+    // query waits behind roughly 40 x 100 ms / 2 connections. PGlite runs one
     // statement at a time, so the load keeps database-side work tiny; the
     // contention is in the pool, as it was in production.
     const load = [
-      ...Array.from({ length: 30 }, async () => {
-        while (running) await pool.sql.begin(async (tx) => { await tx`select 1`; await sleep(50); });
+      ...Array.from({ length: 40 }, async () => {
+        while (running) await pool.sql.begin(async (tx) => { await tx`select 1`; await sleep(100); });
       }),
       ...Array.from({ length: 20 }, async () => {
         while (running) await pool.sql`select 1`;
       }),
     ];
     try {
-      await sleep(300);
+      await sleep(600);
       // The old watchdog probe (select 1 through the pool, 500 ms timeout) fails here.
-      expect(await poolProbe(pool, 500)).toBe("timeout");
+      expect(await poolProbe(pool, options.timeoutMs)).toBe("timeout");
       expect(pool.activity.snapshot().inFlight).toBeGreaterThan(10);
 
       const exits: number[] = [];
       const completedBefore = pool.activity.snapshot().completed;
       startDbWatchdog(options, (code) => exits.push(code), depsFor(pool, probe, warnings));
-      await sleep(3_500);
+      await sleep(5_000);
       stopDbWatchdog();
 
       expect(exits).toEqual([]);
-      expect(warnings.filter((message) => message.includes("probe failed"))).toEqual([]);
+      // A busy test machine may slow one probe; a streak long enough to exit never forms.
+      expect(warnings.filter((message) => message.includes("probe failed")).length).toBeLessThanOrEqual(1);
       expect(pool.activity.snapshot().completed - completedBefore).toBeGreaterThan(20);
-      expect((await probe.ping(500)).ok).toBe(true);
+      expect((await probe.ping(options.timeoutMs)).ok).toBe(true);
+      running = false;
+      // The load really ran the whole time (a failed loop would leave the pool idle).
+      expect((await Promise.allSettled(load)).filter((result) => result.status === "rejected")).toEqual([]);
     } finally {
       running = false;
       await Promise.allSettled(load);

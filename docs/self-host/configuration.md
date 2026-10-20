@@ -134,6 +134,8 @@ trip the watchdog.
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `DATABASE_POOL_MAX` | `20` | Request pool connections per API process. Budget `DATABASE_POOL_MAX + 2` per process against Postgres `max_connections`. |
+| `SEARCH_STATEMENT_TIMEOUT_MS` | `8000` | `SET LOCAL statement_timeout` for each search statement (lexical, page, community and graph branches). A timed-out branch contributes no results and the search continues with the others; `0` disables. Search SQL is also cancelled when the client disconnects. |
+| `SEARCH_LEXICAL_CANDIDATES` | `1000` | Keyword matches ranked per lexical statement. Broader queries rank the first N matches; only the top results fetch their text. |
 | `SEARCH_MAX_CONCURRENCY` | `max(2, DATABASE_POOL_MAX / 3)` (6) | Concurrent hybrid searches per process. Extra searches wait in the app instead of the pool. `0` disables the limit. Nested searches (decompose, stepback, multi-hop) share their parent's slot. |
 | `SEARCH_QUEUE_MAX` | `200` | Searches allowed to wait for a slot; beyond it a search fails at once with 503. |
 | `SEARCH_QUEUE_TIMEOUT_MS` | `30000` | Longest wait for a slot before a 503 with `Retry-After`. The wait appears as `queueMs` in search timings. |

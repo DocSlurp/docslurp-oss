@@ -59,6 +59,10 @@ export class SearchCapacityError extends HTTPException {
   }
 }
 
+function abortError(): Error {
+  return Object.assign(new Error("Search aborted while waiting for capacity"), { name: "AbortError" });
+}
+
 interface Waiter {
   grant: () => void;
   timer: ReturnType<typeof setTimeout>;
@@ -75,9 +79,9 @@ export class ConcurrencyLimiter {
     return { running: this.running, queued: this.queue.length, maxConcurrency: this.options.maxConcurrency };
   }
 
-  async run<T>(fn: () => Promise<T>): Promise<T> {
+  async run<T>(fn: () => Promise<T>, signal?: AbortSignal): Promise<T> {
     if (this.options.maxConcurrency <= 0) return fn();
-    await this.acquire();
+    await this.acquire(signal);
     try {
       return await fn();
     } finally {
@@ -85,7 +89,8 @@ export class ConcurrencyLimiter {
     }
   }
 
-  private acquire(): Promise<void> {
+  private acquire(signal?: AbortSignal): Promise<void> {
+    if (signal?.aborted) return Promise.reject(abortError());
     if (this.running < this.options.maxConcurrency) {
       this.running++;
       return Promise.resolve();
@@ -95,19 +100,28 @@ export class ConcurrencyLimiter {
       return Promise.reject(new SearchCapacityError(`Search capacity is full (${this.running} running, ${this.queue.length} queued); retry shortly`, retryAfter));
     }
     return new Promise<void>((resolve, reject) => {
+      const leave = (error: Error) => {
+        clearTimeout(waiter.timer);
+        signal?.removeEventListener("abort", onAbort);
+        const index = this.queue.indexOf(waiter);
+        if (index >= 0) this.queue.splice(index, 1);
+        reject(error);
+      };
+      // A client that went away gives up its place in the queue.
+      const onAbort = () => leave(abortError());
       const waiter: Waiter = {
         // release() hands its slot over directly, so `running` is unchanged.
         grant: () => {
           clearTimeout(waiter.timer);
+          signal?.removeEventListener("abort", onAbort);
           resolve();
         },
         timer: setTimeout(() => {
-          const index = this.queue.indexOf(waiter);
-          if (index >= 0) this.queue.splice(index, 1);
-          reject(new SearchCapacityError(`Search waited ${this.options.queueTimeoutMs}ms for capacity; retry shortly`, retryAfter));
+          leave(new SearchCapacityError(`Search waited ${this.options.queueTimeoutMs}ms for capacity; retry shortly`, retryAfter));
         }, this.options.queueTimeoutMs),
       };
       waiter.timer.unref?.();
+      signal?.addEventListener("abort", onAbort, { once: true });
       this.queue.push(waiter);
     });
   }
@@ -127,9 +141,9 @@ function searchLimiter(): ConcurrencyLimiter {
 }
 
 /** Run one search under the process-wide limit; nested searches reuse the caller's slot. */
-export function withSearchSlot<T>(fn: () => Promise<T>): Promise<T> {
+export function withSearchSlot<T>(signal: AbortSignal | undefined, fn: () => Promise<T>): Promise<T> {
   if (holdsSlot.getStore()) return fn();
-  return searchLimiter().run(() => holdsSlot.run(true, fn));
+  return searchLimiter().run(() => holdsSlot.run(true, fn), signal);
 }
 
 export function searchLimiterStats(): { running: number; queued: number; maxConcurrency: number } {

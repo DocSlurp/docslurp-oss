@@ -745,6 +745,36 @@ describe("chatWorkspace", () => {
     expect(generateAnthropicDocumentText).not.toHaveBeenCalled();
   });
 
+  it("does not re-run a pending search whose statement timed out", async () => {
+    sqlMock.mockResolvedValue([]);
+    loadWorkspaceWholeCorpusContext.mockResolvedValue({
+      eligible: false, reason: "empty-workspace", results: [],
+      stats: { documentCount: 1, chunkCount: 0, tokenEstimate: 0, charEstimate: 0, maxDocuments: 12, maxChunks: 24, maxTokens: 12000, maxChars: 60000 },
+    });
+    getWorkspace.mockResolvedValue({ id: "ws-1", systemPrompt: null });
+    hybridSearch.mockResolvedValue({
+      sessionId: "search-timeout",
+      results: [],
+      // The lexical branch hit SEARCH_STATEMENT_TIMEOUT_MS on this attempt.
+      timings: { totalMs: 8_100, lexicalTimeout: 1 },
+      availability: {
+        status: "pending", isPartial: true, scope: { workspaceId: "ws-1", runId: null },
+        coverage: { totalDocuments: 1, indexedDocuments: 0, pageIndexedDocuments: 0, searchableDocuments: 0, pageOnlyDocuments: 0,
+          inProgressDocuments: 1, totalPages: 12, searchablePages: 0, indexedChunkCount: 0, queuedRuns: 0, processingRuns: 1 },
+        resultBreakdown: { indexedResultCount: 0, pageResultCount: 0 },
+        message: "Search is still warming up for this scope. 0/1 documents are searchable so far.",
+      },
+    });
+
+    const response = await chatWorkspace({
+      workspaceId: "ws-1", userId: "user-1", query: "Summarize my docs",
+      pendingSearchRetry: { maxAttempts: 8, intervalMs: 0 },
+    });
+
+    expect(hybridSearch).toHaveBeenCalledTimes(1);
+    expect(response.searchSessionId).toBe("search-timeout");
+  });
+
   it("waits for pending indexing instead of saving a premature no-results answer", async () => {
     sqlMock.mockResolvedValue([]);
     loadWorkspaceWholeCorpusContext.mockResolvedValue({

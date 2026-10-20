@@ -25,6 +25,8 @@ const requestContextStorage = new AsyncLocalStorage<{
   sessionId?: string | null;
   /** The API key actor's workspace allowlist; null when unrestricted or not a key. */
   apiKeyWorkspaceIds?: readonly string[] | null;
+  /** Aborts when the client disconnects before the response finished (search cancels its SQL). */
+  signal?: AbortSignal;
   performanceEvents: Array<{
     scope: string;
     stageName: string;
@@ -107,6 +109,11 @@ async function flushPerformanceEvents(
 export function getRequestId(c: Context): string | null {
   const value = c.get("requestId");
   return typeof value === "string" && value.length > 0 ? value : null;
+}
+
+/** The current request's abort signal (client disconnected early), if any. */
+export function currentRequestSignal(): AbortSignal | undefined {
+  return requestContextStorage.getStore()?.signal;
 }
 
 export function currentRequestId(): string | null {
@@ -231,6 +238,7 @@ export const requestContextMiddleware: MiddlewareHandler = async (c, next) => {
     requestId, requestStartedAt: startedAt, userId: null, performanceEvents: [],
     capabilityHeader: c.req.header("X-DocSlurp-Capability")?.trim() || null,
     origin: c.req.header("Origin") ?? null,
+    signal: c.req.raw.signal,
   }, async () => {
     c.set("requestId", requestId);
     c.set("requestStartedAt", startedAt);

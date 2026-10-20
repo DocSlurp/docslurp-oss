@@ -54,8 +54,8 @@ describe("search limiter", () => {
 
   it("lets nested searches reuse their parent's slot instead of deadlocking", async () => {
     resetSearchLimiterForTests({ maxConcurrency: 1, maxQueue: 10, queueTimeoutMs: 500 });
-    const result = await withSearchSlot(async () => {
-      const children = await Promise.all([1, 2, 3].map((n) => withSearchSlot(async () => n * 2)));
+    const result = await withSearchSlot(undefined, async () => {
+      const children = await Promise.all([1, 2, 3].map((n) => withSearchSlot(undefined, async () => n * 2)));
       expect(searchLimiterStats()).toMatchObject({ running: 1, queued: 0 });
       return children;
     });
