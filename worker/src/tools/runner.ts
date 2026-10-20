@@ -1695,6 +1695,7 @@ export function buildSandboxCommand(args: {
     args: args.plan.args,
     env: buildCommandEnv({ plan: args.plan, venvBin: args.venvBin, isVectorBackend: false, env: args.env }),
     readablePaths: paths.readablePaths,
+    inputPaths: paths.inputPaths,
     writablePaths: paths.writablePaths,
     limits: args.limits,
   };

@@ -1,6 +1,6 @@
 import type { SandboxCommand } from "../sandbox/types.js";
 
-import { mkdtempSync, rmSync } from "node:fs";
+import { copyFileSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { performance } from "node:perf_hooks";
@@ -63,7 +63,10 @@ async function measureProvider(id: SandboxProviderId, file: string, repeat: numb
   // The directory name prefix is what launchers accept as a private writable workspace.
   const outputDir = mkdtempSync(path.join(tmpdir(), "docslurp-sandbox-bench-"));
   try {
-    const commands = buildCommands(file, outputDir);
+    // Parsers read their input from a DocSlurp workspace, which is what remote providers stage.
+    const input = path.join(outputDir, path.basename(file));
+    copyFileSync(file, input);
+    const commands = buildCommands(input, outputDir);
     const opens: number[] = [];
     const perCommand: Record<string, number[]> = Object.fromEntries(commands.map(([name]) => [name, []]));
     for (let run = 0; run < repeat; run += 1) {

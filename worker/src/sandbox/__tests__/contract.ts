@@ -82,6 +82,7 @@ export function defineSandboxContract(
         args,
         env: { PATH: "/usr/bin:/bin" },
         readablePaths: [],
+        inputPaths: [],
         writablePaths: [],
         limits: { timeoutMs: 20_000 },
         ...overrides,
@@ -96,6 +97,19 @@ export function defineSandboxContract(
       const result = await execInSession(opened, command(["-c", `cat "${secret}"`]));
       expect(result.exitCode).not.toBe(0);
       expect(result.stdout).not.toContain("top-secret");
+    });
+
+    it("reads a declared input file", async (ctx) => {
+      const opened = ready(ctx);
+      const dir = workspace("input");
+      const input = path.join(dir, "input.txt");
+      writeFileSync(input, "input-contents");
+      const result = await execInSession(
+        opened,
+        command(["-c", `cat "${input}"`], { readablePaths: [input], inputPaths: [input] }),
+      );
+      expect(result.exitCode, result.stderr).toBe(0);
+      expect(result.stdout).toBe("input-contents");
     });
 
     it("fails to write outside the declared writable paths", async (ctx) => {

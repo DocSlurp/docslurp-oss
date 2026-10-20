@@ -15,15 +15,38 @@ export function resolveCommandPaths(args: {
   scratchRoot: string;
   configuredWritablePaths: string[];
   scriptsDir: string;
-}): { readablePaths: string[]; writablePaths: string[] } {
+}): { readablePaths: string[]; inputPaths: string[]; writablePaths: string[] } {
+  const runtimeProjectDir = path.dirname(path.dirname(args.scriptsDir));
   return {
     readablePaths: resolveSandboxReadablePaths(args),
+    inputPaths: resolveSandboxInputPaths({ commandArgs: args.plan.args, runtimeProjectDir }),
     writablePaths: resolveSandboxWritablePaths({
       configuredPaths: args.configuredWritablePaths,
       commandArgs: args.plan.args,
-      runtimeProjectDir: path.dirname(path.dirname(args.scriptsDir)),
+      runtimeProjectDir,
     }),
   };
+}
+
+/**
+ * The command's file inputs: absolute file arguments inside a DocSlurp temp workspace.
+ * Remote providers upload exactly these; the parser runtime (scripts, node_modules,
+ * venv, interpreters) comes from the provider's image, never from the host.
+ */
+export function resolveSandboxInputPaths(args: { commandArgs: string[]; runtimeProjectDir: string }): string[] {
+  const inputs = new Set<string>();
+  for (const arg of args.commandArgs) {
+    if (!path.isAbsolute(arg)) continue;
+    const resolved = path.resolve(arg);
+    if (resolved === args.runtimeProjectDir || resolved.startsWith(`${args.runtimeProjectDir}${path.sep}`)) continue;
+    if (!inferDocslurpTempAncestor(path.dirname(resolved))) continue;
+    try {
+      if (statSync(resolved).isFile()) inputs.add(resolved);
+    } catch {
+      /* not created yet: an output path, not an input */
+    }
+  }
+  return [...inputs];
 }
 
 export function resolveSandboxWritablePaths(args: {

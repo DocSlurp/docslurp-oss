@@ -81,6 +81,28 @@ describe("sandbox command construction", () => {
     expect(spec.writablePaths).toEqual([tempWorkspace]);
   });
 
+  it("declares only existing file arguments inside DocSlurp temp workspaces as inputs", () => {
+    const workspace = mkdtempSync(path.join(tmpdir(), "docslurp-inputs-test-"));
+    const outside = mkdtempSync(path.join(tmpdir(), "inputs-outside-"));
+    try {
+      const input = path.join(workspace, "in.pdf");
+      const hostFile = path.join(outside, "host.pdf");
+      writeFileSync(input, "pdf");
+      writeFileSync(hostFile, "pdf");
+      const spec = command({
+        plan: {
+          binary: process.execPath,
+          args: [path.join(scriptsDir, "parse.mjs"), input, hostFile, path.join(workspace, "out.md"), workspace],
+          available: true,
+        },
+      });
+      expect(spec.inputPaths).toEqual([input]);
+    } finally {
+      rmSync(workspace, { recursive: true, force: true });
+      rmSync(outside, { recursive: true, force: true });
+    }
+  });
+
   it("does not infer a writable checkout from scripts in a temporary worktree", () => {
     const project = path.join(tmpdir(), "docslurp-worktree-test");
     const spec = command({

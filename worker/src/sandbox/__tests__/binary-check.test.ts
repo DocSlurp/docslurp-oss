@@ -20,6 +20,7 @@ const buildCommand = (binary: string, args: string[]): SandboxCommand => ({
   args,
   env: {},
   readablePaths: [binary],
+  inputPaths: [],
   writablePaths: [],
   limits: { timeoutMs: 1000 },
 });

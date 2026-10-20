@@ -26,7 +26,15 @@ export interface SandboxCommand {
   args: string[];
   /** Already allowlisted by the runner. */
   env: NodeJS.ProcessEnv;
+  /**
+   * Host paths a local provider exposes read-only: the parser runtime (scripts, node_modules,
+   * venv, interpreter) plus the command's inputs. Remote providers ignore it; their image
+   * supplies the runtime.
+   */
   readablePaths: string[];
+  /** The command's file inputs inside DocSlurp temp workspaces. Remote providers upload exactly these. */
+  inputPaths: string[];
+  /** Directories the command may write. Remote providers create them and copy them back. */
   writablePaths: string[];
   limits: SandboxLimits;
 }
