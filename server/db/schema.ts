@@ -346,6 +346,10 @@ export const documents = pgTable(
     status: text().notNull(),
     extractionMode: text("extraction_mode").default("hybrid").notNull(),
     pageCount: integer("page_count").default(0).notNull(),
+    /** document_chunks rows; trigger-maintained (migration 0063). */
+    chunkCount: integer("chunk_count").default(0).notNull(),
+    /** document_pages rows; trigger-maintained (migration 0063). */
+    storedPageCount: integer("stored_page_count").default(0).notNull(),
     createdAt: timestamp("created_at", { withTimezone: true, mode: "string" })
       .defaultNow()
       .notNull(),

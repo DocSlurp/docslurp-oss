@@ -1,5 +1,7 @@
 # Completed
 
+- Make search availability fast on large workspaces: every `/v1/search` and chat turn counted all `document_chunks`/`document_pages` rows for the workspace's runs, and with no usable run index it seq-scanned the whole chunk table (15.7 s on a 58k-page workspace). Migration 0063 adds trigger-maintained `documents.chunk_count` and `documents.stored_page_count` (statement-level, backfilled); availability, query suggestions and the workspace summary read them instead (1.5 ms).
+
 - Make /v1/chat model selection strict and evaluable: an unknown or unauthorized `model` is a 400 `model_not_allowed` (no silent default), `DOCSLURP_CHAT_EVAL_MODELS` adds admin-only, priced, non-Pro/Ultra OpenRouter models that never fail over, and an `agent` object sets per-turn maxSteps/maxToolCalls/searchConcurrency (non-admins may only lower them). Agent debug reports requested/resolved model, step/tool/search counts, per-step usage, limits and a deterministic stopReason; GenAI `invoke_agent`/`chat`/`execute_tool` spans carry RAG retrieval attributes and link search sessions to the chat session.
 
 - Refit the brand mark: the paper cup with an orange straw keeps its drawing but drops Slurp Blue for the product palette (paper cup on dark, ink cup on light, Deck app icon). Primary mark, lockup and `favicon.svg` follow the viewer's colour scheme. The wordmark is outlined Schibsted Grotesk (`outline-wordmark.py`, `wordmark.json`). Raster favicons come from a new rounded app icon, so they read on light and dark tab strips.

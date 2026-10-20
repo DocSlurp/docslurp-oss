@@ -260,6 +260,11 @@ export async function loadSearchAvailability(args: {
   // stage checkpoints: a document is indexed when it is `completed` and
   // current, keyword-only when its chunks are served ahead of completion, and
   // page-only when progressive page search covers it.
+  //
+  // Chunk and page totals come from the trigger-maintained documents.chunk_count
+  // and documents.stored_page_count (migration 0063), never from counting
+  // document_chunks/document_pages rows: that seq-scanned every tenant's chunks
+  // on each search. A document's chunks and pages always carry its run_id.
   const [row] = await sql<SearchAvailabilityRow[]>`
     with scoped_runs as (
       select id, status, lease_expires_at
@@ -269,6 +274,7 @@ export async function loadSearchAvailability(args: {
     ),
     scoped_docs as (
       select d.id, d.run_id, d.page_count, d.status, d.workspace_id, d.canonical_id, d.created_at, d.superseded_at,
+        d.stored_page_count, d.chunk_count,
         ${fullyIndexedDocument("d")} as fully_indexed,
         ${earlyLexicalDocument("d")} as keyword_only
       from documents d
@@ -285,18 +291,6 @@ export async function loadSearchAvailability(args: {
       where states.stage_name = 'page-index'
         and states.status = 'completed'
     ),
-    page_counts as (
-      select document_id, count(*)::int as page_count
-      from document_pages
-      where run_id in (select id from scoped_runs)
-      group by document_id
-    ),
-    chunk_counts as (
-      select document_id, count(*)::int as chunk_count
-      from document_chunks
-      where run_id in (select id from scoped_runs)
-      group by document_id
-    ),
     classified as (
       select docs.*,
         runs.status as run_status,
@@ -304,15 +298,12 @@ export async function loadSearchAvailability(args: {
         page_stage.document_id is not null as page_indexed,
         -- Same eligibility as progressivePageSearch (services/search.ts).
         page_stage.document_id is not null and not docs.fully_indexed and not docs.keyword_only
-          and coalesce(page_counts.page_count, 0) > 0
+          and coalesce(docs.stored_page_count, 0) > 0
           and ${servableInProgressVersion("docs")} as page_only,
-        coalesce(page_counts.page_count, 0) as stored_pages,
-        coalesce(chunk_counts.chunk_count, 0) as chunk_count
+        coalesce(docs.stored_page_count, 0) as stored_pages
       from scoped_runs runs
       left join scoped_docs docs on docs.run_id = runs.id
       left join page_stage on page_stage.document_id = docs.id
-      left join page_counts on page_counts.document_id = docs.id
-      left join chunk_counts on chunk_counts.document_id = docs.id
     )
     select
       count(distinct docs.id)::int as total_documents,

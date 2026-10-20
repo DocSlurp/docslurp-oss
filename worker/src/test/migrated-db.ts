@@ -43,11 +43,18 @@ function findTag(tags: string[], name: string): number {
   return tags.findIndex((tag) => tag === name || tag.replace(/^\d+_/, "") === name);
 }
 
+/**
+ * One transaction per migration, as drizzle-kit migrate runs them, so
+ * transaction-scoped statements (LOCK TABLE, SET LOCAL, ON COMMIT DROP temp
+ * tables) behave here as they do in production.
+ */
 async function applyMigration(db: PGlite, tag: string): Promise<void> {
   const sql = readFileSync(`${migrationsDir}${tag}.sql`, "utf8");
-  for (const statement of sql.split("--> statement-breakpoint")) {
-    if (statement.trim()) await db.exec(statement);
-  }
+  await db.transaction(async (tx) => {
+    for (const statement of sql.split("--> statement-breakpoint")) {
+      if (statement.trim()) await tx.exec(statement);
+    }
+  });
 }
 
 /**
