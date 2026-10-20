@@ -183,8 +183,8 @@ export function defineSandboxContract(
         command(["-c", "sleep 30"], { limits: { timeoutMs: 20_000 } }),
         controller.signal,
       ).then(
-        (result) => result,
-        (error: unknown) => error,
+        (result): SandboxResult | Error => result,
+        (error: unknown) => (error instanceof Error ? error : new Error(String(error))),
       );
       setTimeout(() => controller.abort(), 500);
       const outcome = await aborted;
