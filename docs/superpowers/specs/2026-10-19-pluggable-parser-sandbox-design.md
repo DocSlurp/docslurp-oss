@@ -2,7 +2,7 @@
 
 Date: 2026-10-19
 Status: draft for review
-Sub-project 2 of 6 in the self-host and deploy program. Program decisions are
+Sub-project 2 of 7 in the self-host and deploy program. Program decisions are
 recorded in `2026-10-19-self-host-docs-design.md`.
 
 ## Goal
@@ -42,8 +42,9 @@ requires, and today's bubblewrap behavior is unchanged when nothing is set.
   by dynamic `import()`. No published packages.
 - Modal is the first remote provider. Its image is a published worker image
   pulled from GHCR.
-- gVisor is deferred to sub-project 3 (host-level runtime), because `runsc`
-  inside a container needs privileges.
+- gVisor is deferred, because `runsc`
+  inside a container needs privileges. Platform runtime classes and the
+  platform-task sub-project (5) cover it.
 - Landlock uses landrun (MIT from v0.1.12; earlier tags were GPL-2.0 and
   must not be used), pinned by version and sha256.
 - Production network floor: `tcp-only` is accepted, because landrun cannot
@@ -107,7 +108,7 @@ export interface ParserSandboxProvider<C = Record<string, unknown>> {
   id: string;
   name: string;
   description: string;
-  configSchema: SandboxConfigSchema;    // read by the CLI wizard (sub-project 5)
+  configSchema: SandboxConfigSchema;    // read by the CLI wizard (sub-project 6)
   readConfig(env: NodeJS.ProcessEnv): C; // validated against configSchema
   probe(config: C): Promise<SandboxProbeResult>;
   openSession(config: C, context: { activityId: string }): Promise<SandboxSession>;
