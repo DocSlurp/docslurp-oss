@@ -1,0 +1,22 @@
+name: Reclaim closed PR caches
+
+on:
+  pull_request:
+    types: [closed]
+
+permissions:
+  actions: write
+  contents: read
+
+jobs:
+  cleanup:
+    # Fork tokens cannot delete caches. Never check out or execute PR code here.
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-slim
+    timeout-minutes: 2
+    steps:
+      - name: Delete only the closed PR's merge-ref caches
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: gh cache delete --all --ref "refs/pull/$PR_NUMBER/merge" --repo "$GITHUB_REPOSITORY" --succeed-on-no-caches
