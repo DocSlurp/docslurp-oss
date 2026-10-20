@@ -11,7 +11,7 @@ import {
   type SandboxResult,
   type SandboxSession,
 } from "../../types.js";
-import { SessionStaging, type RemoteFs } from "./staging.js";
+import { SessionStaging, type RemoteEntry, type RemoteFs, type RemoteSnapshot } from "./staging.js";
 
 export type ModalSdk = typeof import("modal");
 
@@ -102,6 +102,66 @@ function isExecTimeout(sdk: ModalSdk, error: unknown): boolean {
   return error instanceof Error && error.message.startsWith("Deadline exceeded");
 }
 
+/** Remote directory holding each command's pid and cancel files; outside every writable path. */
+const CONTROL_DIR = "/tmp/.docslurp-modal-control";
+
+/** How long an abort waits for the killed command's exec to end before cleaning up anyway. */
+const KILL_SETTLE_MS = 10_000;
+
+/**
+ * Starts a command in its own session when the image's setsid supports -w (util-linux), so
+ * one kill reaches every process it spawned. Arguments: the start script, the control path
+ * prefix, then the command's argv. Uses only POSIX sh, so it needs no PATH.
+ */
+const LAUNCH_SCRIPT = [
+  "start=$1; control=$2; shift 2",
+  "for s in /usr/bin/setsid /bin/setsid; do",
+  '  if [ -x "$s" ] && "$s" -w /bin/sh -c : >/dev/null 2>&1; then exec "$s" -w /bin/sh -c "$start" sh "$control" "$@"; fi',
+  "done",
+  'exec /bin/sh -c "$start" sh "$control" "$@"',
+].join("\n");
+
+/**
+ * Records the session leader's pid, then becomes the command. Checking the cancel file after
+ * writing the pid closes the race with a kill that lands before the command starts: either
+ * the kill reads the pid, or this sees the cancel file.
+ */
+const START_SCRIPT = 'echo $$ > "$1.pid"; [ -e "$1.cancel" ] && exit 137; shift; exec "$@"';
+
+/** Marks the command cancelled, then kills its process group (falling back to the pid alone). */
+const KILL_SCRIPT = [
+  ': > "$1.cancel"',
+  'read -r pid 2>/dev/null < "$1.pid" || exit 0',
+  'case $pid in ""|*[!0-9]*) exit 0 ;; esac',
+  'kill -s KILL -- "-$pid" 2>/dev/null',
+  'kill -s KILL "$pid" 2>/dev/null',
+  "exit 0",
+].join("\n");
+
+/** How a remote command ended: it exited on its own, hit its time limit, or was aborted by the caller. */
+type RemoteOutcome =
+  | { kind: "exited"; output: { stdout: string; stderr: string; exitCode: number | null } }
+  | { kind: "timeout" }
+  | { kind: "aborted" };
+
+class CommandAborted extends Error {}
+
+function throwIfAborted(signal: AbortSignal | undefined): void {
+  if (signal?.aborted) throw new CommandAborted();
+}
+
+/** Resolves when `signal` aborts (at once if it already has); `dispose` drops the listener. */
+function whenAborted(signal: AbortSignal | undefined): { promise: Promise<"aborted">; dispose(): void } {
+  if (!signal) return { promise: new Promise(() => {}), dispose: () => {} };
+  let onAbort!: () => void;
+  const promise = new Promise<"aborted">((resolve) => {
+    onAbort = () => resolve("aborted");
+    if (signal.aborted) onAbort();
+    else signal.addEventListener("abort", onAbort, { once: true });
+  });
+  return { promise, dispose: () => signal.removeEventListener("abort", onAbort) };
+}
+
 function assertCredentials(config: ModalConfig): void {
   for (const [key, env] of [
     ["tokenId", "MODAL_TOKEN_ID"],
@@ -114,14 +174,18 @@ function assertCredentials(config: ModalConfig): void {
   }
 }
 
+function toRemoteEntry(info: import("modal").FileInfo): RemoteEntry {
+  return { path: info.path, isDir: info.type === "directory", size: info.size, mtime: info.modifiedTime };
+}
+
 function buildRemoteFs(sdk: ModalSdk, fs: import("modal").SandboxFilesystem): RemoteFs {
   return {
-    async exists(p) {
+    async stat(p) {
       try {
-        await fs.stat(p);
-        return true;
+        const info = await fs.stat(p);
+        return info.type === "symlink" ? null : toRemoteEntry(info);
       } catch (error) {
-        if (error instanceof sdk.SandboxFilesystemNotFoundError) return false;
+        if (error instanceof sdk.SandboxFilesystemNotFoundError) return null;
         throw error;
       }
     },
@@ -129,11 +193,10 @@ function buildRemoteFs(sdk: ModalSdk, fs: import("modal").SandboxFilesystem): Re
     readFile: (p) => fs.readBytes(p),
     async list(p) {
       const entries = await fs.listFiles(p);
-      return entries
-        .filter((entry) => entry.type !== "symlink")
-        .map((entry) => ({ path: entry.path, isDir: entry.type === "directory" }));
+      return entries.filter((entry) => entry.type !== "symlink").map(toRemoteEntry);
     },
     mkdir: (p) => fs.makeDirectory(p),
+    remove: (p) => fs.remove(p, { recursive: true }),
   };
 }
 
@@ -237,6 +300,7 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
             timeoutMs: config.sessionTimeoutSeconds * 1000,
             blockNetwork: true,
           });
+          await sandbox.filesystem.makeDirectory(CONTROL_DIR);
           staging = new SessionStaging(buildRemoteFs(sdk, sandbox.filesystem));
         })();
         return creating;
@@ -251,39 +315,134 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
         return buildModalUsageEvent(config, context.activityId, wallSeconds);
       }
 
+      /**
+       * Kill a command's remote process group, then wait (bounded) for its exec to end. Best
+       * effort: a sandbox that is already gone has nothing left to kill.
+       */
+      async function kill(control: string, settled: Promise<unknown>): Promise<void> {
+        try {
+          const killer = await sandbox!.exec(["/bin/sh", "-c", KILL_SCRIPT, "sh", control], { timeoutMs: KILL_SETTLE_MS });
+          await killer.wait();
+        } catch (error) {
+          console.warn(`[parser-sandbox] provider=modal kill failed: ${safeMessage(config, error)}`);
+        }
+        let timer: NodeJS.Timeout | undefined;
+        await Promise.race([
+          settled.catch(() => {}),
+          new Promise((resolve) => (timer = setTimeout(resolve, KILL_SETTLE_MS))),
+        ]);
+        clearTimeout(timer);
+      }
+
+      async function runRemote(command: SandboxCommand, control: string, signal?: AbortSignal): Promise<RemoteOutcome> {
+        const env: Record<string, string> = {};
+        for (const [key, value] of Object.entries(command.env)) if (value !== undefined) env[key] = value;
+        const argv = ["/bin/sh", "-c", LAUNCH_SCRIPT, "sh", START_SCRIPT, control, command.binary, ...command.args];
+        let settled: Promise<{ stdout: string; stderr: string; exitCode: number | null }> = Promise.reject(
+          new Error("exec did not start"),
+        );
+        settled.catch(() => {});
+        const aborted = whenAborted(signal);
+        try {
+          const process = await sandbox!.exec(argv, { env, timeoutMs: command.limits.timeoutMs, mode: "text" });
+          settled = Promise.all([process.stdout.readText(), process.stderr.readText(), process.wait()]).then(
+            ([stdout, stderr, exitCode]) => ({ stdout, stderr, exitCode }),
+          );
+          settled.catch(() => {});
+          const first = await Promise.race([settled, aborted.promise]);
+          if (first !== "aborted") return { kind: "exited", output: first };
+        } catch (error) {
+          // Modal enforces the exec timeout provider-side, but may stop only the top process.
+          // Every other failure is a provider error and propagates.
+          await kill(control, settled);
+          if (isExecTimeout(sdk, error)) return { kind: "timeout" };
+          throw error;
+        } finally {
+          aborted.dispose();
+        }
+        await kill(control, settled);
+        return { kind: "aborted" };
+      }
+
+      /**
+       * Changes left by aborted and timed-out commands, removed once no command is in flight:
+       * a command still running may be writing into the same directories, and its files
+       * cannot be told apart from the abandoned command's until it has finished and claimed them.
+       */
+      const pendingDiscards: RemoteSnapshot[] = [];
+      let inFlight = 0;
+      let discarding: Promise<void> | undefined;
+
+      async function runDiscards(): Promise<void> {
+        try {
+          while (pendingDiscards.length > 0) {
+            try {
+              await staging!.discard(pendingDiscards.shift()!);
+            } catch (error) {
+              console.warn(`[parser-sandbox] provider=modal discard failed: ${safeMessage(config, error)}`);
+            }
+          }
+        } finally {
+          discarding = undefined;
+        }
+      }
+
       async function execute(command: SandboxCommand, started: number, signal?: AbortSignal): Promise<SandboxResult> {
+        while (discarding) await discarding;
+        inFlight++;
+        try {
+          return await executeCommand(command, started, signal);
+        } finally {
+          inFlight--;
+          if (inFlight === 0 && pendingDiscards.length > 0) {
+            discarding ??= runDiscards();
+            await discarding;
+          }
+        }
+      }
+
+      let commandCount = 0;
+
+      async function executeCommand(command: SandboxCommand, started: number, signal?: AbortSignal): Promise<SandboxResult> {
+        const control = `${CONTROL_DIR}/${++commandCount}`;
         try {
           await ensureSandbox();
+          throwIfAborted(signal);
           // Only the command's inputs travel; the parser runtime comes from the image.
           await staging!.ensureUploaded(command.inputPaths);
-          for (const dir of command.writablePaths) await sandbox!.filesystem.makeDirectory(dir);
-          const env: Record<string, string> = {};
-          for (const [key, value] of Object.entries(command.env)) if (value !== undefined) env[key] = value;
-          let output: { stdout: string; stderr: string; exitCode: number | null };
+          throwIfAborted(signal);
+          await staging!.ensureDirectories(command.writablePaths);
+          throwIfAborted(signal);
+          const snapshot = await staging!.snapshot(command.writablePaths);
+          throwIfAborted(signal);
+          let outcome: RemoteOutcome;
           try {
-            const process = await sandbox!.exec([command.binary, ...command.args], {
-              env,
-              timeoutMs: command.limits.timeoutMs,
-              mode: "text",
-            });
-            const [stdout, stderr, exitCode] = await Promise.all([
-              process.stdout.readText(),
-              process.stderr.readText(),
-              process.wait(),
-            ]);
-            output = { stdout, stderr, exitCode };
+            outcome = await runRemote(command, control, signal);
           } catch (error) {
-            // Modal enforces the exec timeout provider-side; report it like a killed process
-            // (null exit code). Every other failure is a provider error and propagates.
-            if (!isExecTimeout(sdk, error)) throw error;
-            output = { stdout: "", stderr: "command exceeded its time limit", exitCode: null };
+            pendingDiscards.push(snapshot);
+            throw error;
           }
-          // An aborted command's caller has moved on; never write its outputs back.
-          if (!signal?.aborted) await staging!.download(command.writablePaths);
+          if (outcome.kind === "exited" && !signal?.aborted) {
+            // Only what this command created or changed comes back.
+            await staging!.download(snapshot);
+            const usage = meter(started);
+            return { ...outcome.output, cpuSeconds: config.cpu * ((Date.now() - started) / 1000), usage };
+          }
+          // Aborted or timed out: its outputs may be partial. Never download them, and remove
+          // them remotely so no later command's download copies them back.
+          pendingDiscards.push(snapshot);
+          if (outcome.kind !== "timeout") throw new CommandAborted();
           const usage = meter(started);
-          return { ...output, cpuSeconds: config.cpu * ((Date.now() - started) / 1000), usage };
+          return {
+            stdout: "",
+            stderr: "command exceeded its time limit",
+            exitCode: null,
+            cpuSeconds: config.cpu * ((Date.now() - started) / 1000),
+            usage,
+          };
         } catch (error) {
           // Elapsed Modal time is billed even when staging or exec failed.
+          if (error instanceof CommandAborted) throw new SandboxRunError("modal sandbox command aborted", meter(started));
           throw new SandboxRunError(`modal sandbox command failed: ${safeMessage(config, error)}`, meter(started));
         }
       }
@@ -299,31 +458,10 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
         async run(command, signal) {
           if (closed) throw new Error("modal sandbox session is closed");
           if (signal?.aborted) throw new SandboxRunError("modal sandbox command aborted");
-          const started = Date.now();
-          const execution = execute(command, started, signal);
-          if (!signal) return await execution;
           // An abort ends this command only: other commands in the activity share the sandbox,
-          // which only close() terminates. The SDK cannot kill a single exec, so the caller
-          // stops waiting now and the exec runs on until its own timeoutMs; its result and
-          // outputs are discarded. Usage is recorded up to the abort; the [sandbox-usage]
-          // line is logged when the exec ends.
-          let onAbort!: () => void;
-          const aborted = new Promise<never>((_, reject) => {
-            onAbort = () =>
-              reject(
-                new SandboxRunError(
-                  "modal sandbox command aborted",
-                  buildModalUsageEvent(config, context.activityId, (Date.now() - started) / 1000),
-                ),
-              );
-          });
-          signal.addEventListener("abort", onAbort, { once: true });
-          execution.catch(() => {});
-          try {
-            return await Promise.race([execution, aborted]);
-          } finally {
-            signal.removeEventListener("abort", onAbort);
-          }
+          // which only close() terminates. The command's process group is killed and its
+          // partial outputs removed before the abort is reported.
+          return execute(command, Date.now(), signal);
         },
         async close() {
           await terminate();
