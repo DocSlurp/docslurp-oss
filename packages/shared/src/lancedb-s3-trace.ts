@@ -104,12 +104,118 @@ export async function signUpstreamRequest(
   return { protocol: target.protocol, hostname: target.hostname, port: target.port ? Number(target.port) : undefined, method, path: search ? `${path}?${search}` : path, headers: signed.headers as Record<string, string> };
 }
 
+// ---- Object classes and search-scoped read counts -----------------------------------------------------------------
+
+/** Lance object classes. Bounded set: safe for attributes and log fields. */
+export type LanceObjectClass = "list" | "latest" | "versions" | "transactions" | "indices" | "data" | "deletions" | "other";
+export const LANCE_OBJECT_CLASSES: readonly LanceObjectClass[] = ["list", "latest", "versions", "transactions", "indices", "data", "deletions", "other"];
+
+/** Classifies a request by the Lance dataset file it touches. Bucket-level listings are `list` (Lance's latest-version lookup). */
+export function lanceObjectClass(operation: LanceS3Operation, key: string): LanceObjectClass {
+  if (operation === "ListObjectsV2" || operation === "ListMultipartUploads" || operation === "ListParts") return "list";
+  const segments = key.split("/");
+  const last = segments[segments.length - 1] ?? "";
+  if (last.startsWith("_latest")) return "latest";
+  const dir = (name: string) => segments.slice(0, -1).includes(name);
+  if (dir("_versions")) return "versions";
+  if (dir("_transactions")) return "transactions";
+  if (dir("_indices")) return "indices";
+  if (dir("_deletions")) return "deletions";
+  if (dir("data")) return "data";
+  return "other";
+}
+
+export type RangeSizeBucket = "full" | "le4k" | "le64k" | "le1m" | "gt1m";
+export const RANGE_SIZE_BUCKETS: readonly RangeSizeBucket[] = ["full", "le4k", "le64k", "le1m", "gt1m"];
+
+/** Buckets the requested byte range (`Range: bytes=a-b`); requests without a closed range are `full`. */
+export function rangeSizeBucket(range: string | undefined): RangeSizeBucket {
+  const match = /^bytes=(\d+)-(\d+)$/.exec(range?.trim() ?? "");
+  if (!match) return "full";
+  const size = Number(match[2]) - Number(match[1]) + 1;
+  return size <= 4096 ? "le4k" : size <= 65536 ? "le64k" : size <= 1048576 ? "le1m" : "gt1m";
+}
+
+export interface SearchReadCounts {
+  requests: number;
+  bytes: number;
+  /** Sum of request durations (not wall time: requests run in parallel). */
+  requestMs: number;
+  byClass: Partial<Record<LanceObjectClass, number>>;
+  bySize: Partial<Record<RangeSizeBucket, number>>;
+  /** Another search was in flight at some point: the proxy cannot tell whose request it was, so each overlapping scope counts it. */
+  overlapped: boolean;
+}
+
+interface SearchReadScope extends SearchReadCounts { ended: boolean }
+const activeSearchScopes = new Set<SearchReadScope>();
+
+/**
+ * Counts the proxied Lance requests that start while a search runs. Lance issues requests from native threads, so
+ * AsyncLocalStorage cannot carry the search identity; attribution is by time window. Overlapping searches each count
+ * the shared requests and are flagged `overlapped`. Costs nothing when the tracing proxy is off (no requests arrive).
+ */
+export function beginSearchReadScope(): { end(): SearchReadCounts } {
+  const scope: SearchReadScope = { requests: 0, bytes: 0, requestMs: 0, byClass: {}, bySize: {}, overlapped: false, ended: false };
+  if (activeSearchScopes.size > 0) { scope.overlapped = true; for (const other of activeSearchScopes) other.overlapped = true; }
+  activeSearchScopes.add(scope);
+  return {
+    end() {
+      if (!scope.ended) { scope.ended = true; activeSearchScopes.delete(scope); }
+      return { ...scope, byClass: { ...scope.byClass }, bySize: { ...scope.bySize } };
+    },
+  };
+}
+
+/** Called by the proxy when a request starts. Returns the scopes to credit with its bytes and duration when it finishes. */
+function creditSearchScopes(cls: LanceObjectClass, size: RangeSizeBucket): SearchReadScope[] {
+  if (activeSearchScopes.size === 0) return [];
+  const credited = [...activeSearchScopes];
+  for (const scope of credited) {
+    scope.requests++;
+    scope.byClass[cls] = (scope.byClass[cls] ?? 0) + 1;
+    scope.bySize[size] = (scope.bySize[size] ?? 0) + 1;
+  }
+  return credited;
+}
+
+/** Span attributes for one search's reads: totals plus one bounded `docslurp.lancedb.s3.requests.<class>` per class seen. */
+export function searchReadAttributes(counts: SearchReadCounts): Record<string, string | number | boolean> {
+  const attributes: Record<string, string | number | boolean> = {
+    "docslurp.lancedb.s3.requests": counts.requests, "docslurp.lancedb.s3.bytes": counts.bytes,
+    "docslurp.lancedb.s3.request_ms": Math.round(counts.requestMs), "docslurp.lancedb.s3.overlapped": counts.overlapped,
+  };
+  for (const cls of LANCE_OBJECT_CLASSES) if (counts.byClass[cls]) attributes[`docslurp.lancedb.s3.requests.${cls}`] = counts.byClass[cls]!;
+  for (const size of RANGE_SIZE_BUCKETS) if (counts.bySize[size]) attributes[`docslurp.lancedb.s3.range.${size}`] = counts.bySize[size]!;
+  return attributes;
+}
+
+/**
+ * Runs a LanceDB search inside a dependency span that also carries the search's own S3 request counts by object class.
+ * Counts are only non-zero when LANCEDB_S3_TRACE routes Lance through the proxy; attributes are omitted otherwise.
+ */
+export async function withLanceSearchSpan<T>(name: string, attributes: Record<string, string | number | boolean>, run: () => Promise<T>, stats: LanceS3Stats = lanceS3Stats): Promise<T> {
+  const span = startDependencySpan(name, attributes);
+  const reads = beginSearchReadScope();
+  let failure: unknown;
+  try { return await span.run(run); }
+  catch (error) { failure = error; throw error; }
+  finally {
+    const counts = reads.end();
+    if (counts.requests > 0) { span.set(searchReadAttributes(counts)); stats.recordSearch(counts); }
+    span.end(failure);
+  }
+}
+
 // ---- Counters ----------------------------------------------------------------------------------------------------
 
 const BUCKETS_MS = [5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000, 30000];
 
 interface Aggregate { requests: number; errors: number; retries: number; bytesIn: number; bytesOut: number; hist: number[]; totalMs: number; ttfbMs: number }
 const newAggregate = (): Aggregate => ({ requests: 0, errors: 0, retries: 0, bytesIn: 0, bytesOut: 0, hist: new Array(BUCKETS_MS.length + 1).fill(0), totalMs: 0, ttfbMs: 0 });
+
+interface SearchAggregate { searches: number; overlapped: number; requests: number; byClass: Map<string, number> }
+const newSearchAggregate = (): SearchAggregate => ({ searches: 0, overlapped: 0, requests: 0, byClass: new Map() });
 
 export class LanceS3Stats {
   readonly cumulative = newAggregate();
@@ -118,6 +224,18 @@ export class LanceS3Stats {
   readonly byStatus = new Map<string, number>();
   readonly windowByOperation = new Map<string, number>();
   readonly windowByStatus = new Map<string, number>();
+  /** Searches that made at least one proxied request, with their requests by object class (window and cumulative). */
+  windowSearch = newSearchAggregate();
+  readonly cumulativeSearch = newSearchAggregate();
+
+  recordSearch(counts: SearchReadCounts): void {
+    for (const agg of [this.windowSearch, this.cumulativeSearch]) {
+      agg.searches++;
+      if (counts.overlapped) agg.overlapped++;
+      agg.requests += counts.requests;
+      for (const [cls, n] of Object.entries(counts.byClass)) agg.byClass.set(cls, (agg.byClass.get(cls) ?? 0) + n);
+    }
+  }
 
   record(sample: { operation: string; status: number | "error"; bytesIn: number; bytesOut: number; ttfbMs: number; totalMs: number; retry: boolean }): void {
     const bucket = BUCKETS_MS.findIndex((limit) => sample.totalMs <= limit);
@@ -139,7 +257,8 @@ export class LanceS3Stats {
   }
 
   snapshot() {
-    return { ...summarize(this.cumulative), byOperation: Object.fromEntries(this.byOperation), byOperationStatus: Object.fromEntries(this.byStatus), histogramMsBuckets: BUCKETS_MS, histogram: [...this.cumulative.hist] };
+    return { ...summarize(this.cumulative), byOperation: Object.fromEntries(this.byOperation), byOperationStatus: Object.fromEntries(this.byStatus), histogramMsBuckets: BUCKETS_MS, histogram: [...this.cumulative.hist],
+      searches: this.cumulativeSearch.searches, searchOverlapped: this.cumulativeSearch.overlapped, searchRequests: this.cumulativeSearch.requests, searchByClass: Object.fromEntries(this.cumulativeSearch.byClass) };
   }
 
   /** One-line summary of the window since the last call; resets the window. */
@@ -148,8 +267,10 @@ export class LanceS3Stats {
     const fmt = (map: Map<string, number>) => [...map].sort((a, b) => b[1] - a[1]).map(([k, v]) => `${k}=${v}`).join(",") || "none";
     const line = `[lancedb-s3] window=${windowSeconds}s requests=${w.requests} errors=${w.errors} retries=${w.retries} bytes_in=${w.bytesIn} bytes_out=${w.bytesOut} `
       + `avg_ms=${w.avgMs} avg_ttfb_ms=${w.avgTtfbMs} p50_ms=${w.p50Ms} p95_ms=${w.p95Ms} p99_ms=${w.p99Ms} ops=${fmt(this.windowByOperation)} statuses=${fmt(this.windowByStatus)} `
-      + `total_requests=${this.cumulative.requests}`;
+      + `total_requests=${this.cumulative.requests}`
+      + (this.windowSearch.searches ? ` searches=${this.windowSearch.searches} search_overlapped=${this.windowSearch.overlapped} search_requests=${this.windowSearch.requests} search_by_class=${fmt(this.windowSearch.byClass)}` : "");
     this.window = newAggregate();
+    this.windowSearch = newSearchAggregate();
     this.windowByOperation.clear();
     this.windowByStatus.clear();
     return line;
@@ -214,7 +335,11 @@ export async function startLanceS3Proxy(options: LanceS3ProxyOptions): Promise<L
     const retry = failedAt !== undefined && Date.now() - failedAt < 120_000;
     const condition = req.headers["if-none-match"] !== undefined ? "if-none-match" : req.headers["if-match"] !== undefined ? "if-match" : undefined;
     const started = performance.now();
+    const objectClass = lanceObjectClass(classified.operation, classified.key);
+    const rangeHeader = typeof req.headers.range === "string" ? req.headers.range : undefined;
+    const credited = creditSearchScopes(objectClass, rangeSizeBucket(rangeHeader));
     const span = startDependencySpan(`lancedb.s3.${classified.operation}`, {
+      "docslurp.lancedb.object_class": objectClass,
       "docslurp.storage.system": "lancedb-s3", "rpc.system": "aws-api", "rpc.service": "S3", "rpc.method": classified.operation,
       "docslurp.dependency.type": "s3", "docslurp.dependency.provider": provider, "docslurp.dependency.operation": classified.operation, "docslurp.dependency.phase": "native",
       "server.address": target.hostname, "aws.s3.bucket": classified.bucket, "docslurp.s3.key_prefix": keyPrefix(classified.key),
@@ -230,6 +355,7 @@ export async function startLanceS3Proxy(options: LanceS3ProxyOptions): Promise<L
       const failed = status === "error" || status >= 500 || status === 429;
       if (failed) recentFailures.set(finger, Date.now()); else recentFailures.delete(finger);
       if (recentFailures.size > 1000) for (const [k, t] of recentFailures) if (Date.now() - t > 120_000) recentFailures.delete(k);
+      for (const scope of credited) { scope.bytes += bytesOut; scope.requestMs += totalMs; }
       stats.record({ operation: classified.operation, status, bytesIn, bytesOut, ttfbMs, totalMs, retry });
       span.end(error ?? (status === "error" ? new Error("aborted") : undefined));
     };

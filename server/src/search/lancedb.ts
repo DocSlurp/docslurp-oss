@@ -11,7 +11,7 @@ import * as lancedb from "@lancedb/lancedb";
 
 import { resolveLanceDbConfig, VectorNamespaceManager } from "@docslurp/shared";
 import { withLanceDdb } from "@docslurp/shared/lancedb-ddb";
-import { withLanceS3Trace } from "@docslurp/shared/lancedb-s3-trace";
+import { withLanceS3Trace, withLanceSearchSpan } from "@docslurp/shared/lancedb-s3-trace";
 
 import { lanceDbQueryTuning } from "./lancedb-query-tuning.js";
 import { resultCache, resultCacheKey } from "./result-cache.js";
@@ -265,7 +265,9 @@ export function getOrgLanceDbPrefix(orgId: string): string {
 }
 
 function lanceSpan<T>(operation: string, run: () => Promise<T>): Promise<T> {
-  return withDependencySpan(`lancedb.${operation}`, { "db.system.name": "lancedb",
+  const attributes = { "db.system.name": "lancedb",
     "docslurp.dependency.type": "vector", "docslurp.dependency.provider": "lancedb",
-    "docslurp.dependency.operation": operation, "docslurp.dependency.phase": "adapter" }, run);
+    "docslurp.dependency.operation": operation, "docslurp.dependency.phase": "adapter" };
+  // Searches also report their own S3 request counts by object class (non-zero only with LANCEDB_S3_TRACE).
+  return operation === "search" ? withLanceSearchSpan(`lancedb.${operation}`, attributes, run) : withDependencySpan(`lancedb.${operation}`, attributes, run);
 }
