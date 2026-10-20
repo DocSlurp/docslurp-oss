@@ -29,3 +29,9 @@ export async function timePhase<T>(name: string, fn: () => Promise<T>): Promise<
     timings[key] = Math.round((timings[key] ?? 0) + performance.now() - started);
   }
 }
+
+/** Count an event (cache hit/miss, …) into the current search's timings (no-op outside a search). */
+export function countSearchEvent(name: string): void {
+  const timings = store.getStore();
+  if (timings) timings[name] = (timings[name] ?? 0) + 1;
+}

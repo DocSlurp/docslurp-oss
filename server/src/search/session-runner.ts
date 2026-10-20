@@ -186,6 +186,7 @@ async function executeSearchSession(args: Parameters<typeof runSearchSession>[0]
         options,
         effectiveOptions,
         workspaceId: normalizedScope.workspaceId,
+        orgId: normalizedScope.orgId,
         workspaceSettings,
         embedding: setup.workspacePipeline.embedding,
         openRouterApiKey,
