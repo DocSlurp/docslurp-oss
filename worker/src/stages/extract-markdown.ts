@@ -311,6 +311,10 @@ export class ExtractMarkdownStage implements Stage {
                   candidateA === null &&
                   (plannedExtractors.secondary ? candidateB === null : true)
                 ) {
+                  // Activity cancellation or worker shutdown aborted the extractors: that is an
+                  // interruption, not "no extractor produced output". An extractor's own timeout
+                  // aborts only its derived signal, so it still falls through to the next extractor.
+                  if (signal?.aborted) throw interruptionCause(signal, resultA, resultB);
                   const errA =
                     resultA.status === "rejected"
                       ? resultA.reason
@@ -833,7 +837,8 @@ export class ExtractMarkdownStage implements Stage {
                     `message=${message} partialArtifact=${partialArtifactUri || "none"} ` +
                     `partialStats=${JSON.stringify(partialStats)}`,
                 );
-                if (partialArtifactUri) {
+                // Rethrow interruptions untouched so they keep their AbortError/cancellation identity.
+                if (partialArtifactUri && !signal?.aborted) {
                   throw new DocumentStageError(message, {
                     artifactUri: partialArtifactUri,
                     stats: { ...partialStats, failedAt: "extract-markdown", error: message },
@@ -2473,6 +2478,13 @@ function withTimeoutSignal(
 
   const timeoutSignal = AbortSignal.timeout(timeoutMs);
   return signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
+}
+
+/** What to rethrow when the stage's own signal aborted every extractor: its reason, else an extractor's abort. */
+function interruptionCause(signal: AbortSignal, ...results: PromiseSettledResult<unknown>[]): unknown {
+  if (signal.reason instanceof Error) return signal.reason;
+  const rejected = results.find((result) => result.status === "rejected");
+  return rejected ? rejected.reason : Object.assign(new Error("The operation was aborted"), { name: "AbortError" });
 }
 
 async function settle<T>(
