@@ -1,4 +1,4 @@
-import { PUBLIC_ERROR_MESSAGES, publicDiagnostics, publicProcessingMessage } from "@docslurp/shared";
+import { publicDiagnostics, publicDocumentError, publicProcessingMessage } from "@docslurp/shared";
 import {
   planRunControlUpdate,
   runLifecycle,
@@ -304,7 +304,7 @@ function mapStageState(row: StageStateRow): WorkspaceRunStageState {
     attempts: row.attempts,
     artifactUri: row.artifact_uri,
     stats: publicDiagnostics(row.stats ?? {}),
-    error: row.error ? PUBLIC_ERROR_MESSAGES.processing : null,
+    error: publicDocumentError(row.error),
     startedAt: serializeOptionalTimestamp(row.started_at),
     completedAt: serializeOptionalTimestamp(row.completed_at),
     updatedAt: serializeTimestamp(row.updated_at),

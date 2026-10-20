@@ -1,4 +1,4 @@
-import { PUBLIC_ERROR_MESSAGES, publicDiagnostics } from "@docslurp/shared";
+import { publicDiagnostics, publicDocumentError } from "@docslurp/shared";
 import { refineWorkspaceNames } from "./workspace-naming.js";
 import { jsonRecord } from "../lib/json-record.js";
 import { randomUUID } from "node:crypto";
@@ -314,7 +314,7 @@ function mapWorkspaceRun(row: WorkspaceRunRow): WorkspaceRun {
     pipeline: normalizePipelineFeatures(row.pipeline ?? defaultPipelineFeatures),
     stats: publicDiagnostics(jsonRecord(row.stats)),
     artifacts: jsonRecord(row.artifacts),
-    error: row.error ? PUBLIC_ERROR_MESSAGES.processing : null,
+    error: publicDocumentError(row.error),
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   });

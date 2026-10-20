@@ -1,4 +1,4 @@
-import { mediaSummarySchema, PUBLIC_ERROR_MESSAGES, publicDiagnostics, type MediaSummary } from "@docslurp/shared";
+import { mediaSummarySchema, publicDiagnostics, publicDocumentError, type MediaSummary } from "@docslurp/shared";
 import path from "node:path";
 
 import {
@@ -1107,7 +1107,7 @@ export async function getDocumentViewerPayload(docId: string, userId: string): P
       },
       baseline: null
     }),
-    stages: stages.map(stage => ({ ...stage, error: stage.error ? PUBLIC_ERROR_MESSAGES.processing : null, stats: publicDiagnostics(stage.stats) as Record<string, unknown> | null })),
+    stages: stages.map(stage => ({ ...stage, error: publicDocumentError(stage.error), stats: publicDiagnostics(stage.stats) as Record<string, unknown> | null })),
     artifacts,
     source,
     pageStats: {
