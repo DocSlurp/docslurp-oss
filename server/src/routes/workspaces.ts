@@ -1158,7 +1158,7 @@ export const workspacesRoutes = new Hono()
     const chatDisabled = await workspaceChatDisabledBody(workspace.id, userId);
     if (chatDisabled) return apiErrorResponse(c, 403, "chat_disabled", chatDisabled.error);
 
-    let response;
+    let response: Awaited<ReturnType<typeof chatWorkspace>>;
     try {
       response = await chatWorkspace({
         workspaceId: c.req.param("workspaceId"),

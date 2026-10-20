@@ -88,7 +88,7 @@ async function handleWorkspaceChat(c: Context, mode: "public" | "grounded") {
   if (forbidden) return forbidden;
   const chatDisabled = await workspaceChatDisabledBody(workspaceId, userId);
   if (chatDisabled) return apiErrorResponse(c, 403, "chat_disabled", chatDisabled.error);
-  let response;
+  let response: Awaited<ReturnType<typeof chatWorkspace>>;
   try {
     response = await chatWorkspace({ workspaceId, userId,
       query: body.q, sessionId: body.sessionId, model: body.model,
