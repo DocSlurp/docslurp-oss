@@ -58,12 +58,14 @@ if (profile === 'full' || profile === 'test' || profile === 'lean') {
   }
 }
 if (args.includes('--sandbox')) {
-  // The compiled probe CLI checks whichever provider DOCSLURP_PARSER_SANDBOX selects.
+  // The compiled probe CLI checks whichever provider DOCSLURP_PARSER_SANDBOX selects, then runs the real parsers (ffmpeg, pdftoppm, pandoc) inside it.
   const probe = path.join(root, 'worker/dist/sandbox/probe-cli.js');
   if (!existsSync(probe)) failures.push(`parser isolation unavailable: sandbox probe not built (${probe})`);
   else {
     const result = spawnSync(process.execPath, [probe], { encoding: 'utf8', timeout: 30000, env: process.env });
-    if (result.status !== 0) failures.push(`parser isolation unavailable: ${result.error?.message || result.stdout.trim() || result.stderr.trim()}`);
+    // Exit 2 means the provider works but a real parser binary fails inside it; the CLI prints those lines ready to forward.
+    if (result.status === 2) failures.push(...result.stdout.trim().split('\n'));
+    else if (result.status !== 0) failures.push(`parser isolation unavailable: ${result.error?.message || result.stdout.trim() || result.stderr.trim()}`);
   }
 }
 for (const failure of failures) console.error(`[worker-prerequisites] ${failure}`);

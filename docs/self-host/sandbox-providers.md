@@ -201,7 +201,7 @@ Do not assume landlock works on either until it has been checked. The probe at w
 node worker/dist/sandbox/probe-cli.js
 ```
 
-It prints `ok <provider>` and exits 0, or prints the failure detail and exits 1.
+It prints `ok <provider>` and exits 0, or prints the failure detail and exits 1. After the probe succeeds it also opens one session and runs `ffprobe -version`, `ffmpeg -version`, `pdftoppm -v` and `pandoc --version` inside it, for each of those that is installed. A library the sandbox cannot see then fails the check, not every upload of that format. If one fails, the probe prints `<name> fails inside the parser sandbox (exit <status>): <first line of stderr>` and exits 2. For a remote provider such as Modal it skips these checks, because the binaries live in the provider's image, and prints `parser binary checks skipped: remote provider`.
 
 ## Overhead
 

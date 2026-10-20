@@ -1,4 +1,4 @@
-import type { SandboxCommand, SandboxResult, SandboxSession } from "../sandbox/types.js";
+import type { SandboxCommand } from "../sandbox/types.js";
 
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -6,6 +6,7 @@ import path from "node:path";
 import { performance } from "node:perf_hooks";
 import { parseArgs } from "node:util";
 
+import { execInSession } from "../sandbox/exec.js";
 import { loadSandboxProvider, SANDBOX_PROVIDER_IDS, type SandboxProviderId } from "../sandbox/registry.js";
 import { buildSandboxCommand, resolveVenvBin } from "../tools/runner.js";
 import { resolveScriptsDir } from "../tools/scripts-dir.js";
@@ -31,27 +32,6 @@ function median(values: number[]): number {
   const sorted = [...values].sort((a, b) => a - b);
   const mid = Math.floor(sorted.length / 2);
   return sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
-}
-
-/** Run a command to completion through whichever entry point the session offers. */
-async function execInSession(session: SandboxSession, command: SandboxCommand): Promise<SandboxResult> {
-  if (session.run) return session.run(command);
-  if (!session.spawn) throw new Error(`Session '${session.providerId}' offers neither spawn nor run`);
-  const child = session.spawn(command);
-  let stdout = "";
-  let stderr = "";
-  child.stdout?.on("data", (chunk) => (stdout += chunk));
-  child.stderr?.on("data", (chunk) => (stderr += chunk));
-  const timer = setTimeout(() => child.kill("SIGKILL"), command.limits.timeoutMs);
-  try {
-    const exitCode = await new Promise<number | null>((resolve, reject) => {
-      child.once("error", reject);
-      child.once("close", resolve);
-    });
-    return { exitCode, stdout, stderr };
-  } finally {
-    clearTimeout(timer);
-  }
 }
 
 function buildCommands(file: string, outputDir: string): Array<[string, SandboxCommand]> {

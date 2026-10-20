@@ -39,7 +39,7 @@ This applies to the default `bubblewrap` provider. The worker services in `compo
 
 ### The error you see without it
 
-At startup, `scripts/start-worker.sh` runs `scripts/check-worker-prerequisites.mjs` with `--sandbox`. It probes the selected provider (bubblewrap runs the launcher against `/usr/bin/true`). If that fails, the worker prints a line like this and exits without starting:
+At startup, `scripts/start-worker.sh` runs `scripts/check-worker-prerequisites.mjs` with `--sandbox`. It probes the selected provider, then runs the installed `ffprobe`, `ffmpeg`, `pdftoppm` and `pandoc` inside it (local providers only). If that fails, the worker prints a line like this and exits without starting:
 
 ```text
 [worker-prerequisites] parser isolation unavailable: <reason from the provider>
