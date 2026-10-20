@@ -9,7 +9,7 @@ import { startDependencySpan, withDependencySpan } from "@docslurp/shared/observ
  */
 import * as lancedb from "@lancedb/lancedb";
 
-import { resolveLanceDbConfig, VectorNamespaceManager } from "@docslurp/shared";
+import { resolveLanceDbConfig, VectorNamespaceManager, type PrivacyMode } from "@docslurp/shared";
 import { withLanceDdb } from "@docslurp/shared/lancedb-ddb";
 import { withLanceS3Proxy, withLanceSearchSpan } from "@docslurp/shared/lancedb-s3-trace";
 
@@ -204,6 +204,8 @@ export async function lanceDbVectorSearch(args: {
   queryVector: number[];
   documentIds?: string[];
   limit: number;
+  /** strict-privacy never reads or writes the result cache. */
+  privacyMode?: PrivacyMode;
 }): Promise<LanceDbSearchHit[]> {
   if (!args.orgId.trim()) {
     return [];
@@ -235,7 +237,16 @@ export async function lanceDbVectorSearch(args: {
   // like a query on that handle, so it adds no storage round trip of its own.
   const cache = resultCache<LanceDbSearchHit[]>();
   let cacheKey: string | null = null;
-  if (cache.enabled) {
+  const bypassReason = args.privacyMode === "strict-privacy" ? "strict-privacy" : null;
+  if (cache.enabled && bypassReason) {
+    startDependencySpan("lancedb.result_cache", {
+      "db.system.name": "lancedb", "docslurp.dependency.type": "cache", "docslurp.dependency.provider": "memory",
+      "docslurp.dependency.operation": "result_cache", "docslurp.dependency.phase": "adapter",
+      "docslurp.cache.hit": false, "docslurp.cache.bypassed": true, "docslurp.cache.bypass_reason": bypassReason,
+      "docslurp.privacy.mode": args.privacyMode,
+    }).end();
+    countSearchEvent("resultCacheBypass");
+  } else if (cache.enabled) {
     try {
       const present = opened.filter((target): target is typeof target & { table: lancedb.Table } => target.table !== null);
       const versions = await Promise.all(present.map((target) => target.table.version()));
@@ -252,7 +263,8 @@ export async function lanceDbVectorSearch(args: {
       const span = startDependencySpan("lancedb.result_cache", {
         "db.system.name": "lancedb", "docslurp.dependency.type": "cache", "docslurp.dependency.provider": "memory",
         "docslurp.dependency.operation": "result_cache", "docslurp.dependency.phase": "adapter",
-        "docslurp.cache.hit": cached !== undefined, "docslurp.cache.entries": cache.size,
+        "docslurp.cache.hit": cached !== undefined, "docslurp.cache.bypassed": false, "docslurp.cache.entries": cache.size,
+        ...(args.privacyMode ? { "docslurp.privacy.mode": args.privacyMode } : {}),
       });
       span.end();
       if (cached) {

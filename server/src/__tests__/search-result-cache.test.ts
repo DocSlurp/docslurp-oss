@@ -73,6 +73,20 @@ describe("lanceDbVectorSearch result cache", () => {
     expect(other.value.map((h) => h.id)).toEqual(["b1"]);
   });
 
+  it("never reads or writes the cache in strict-privacy mode", async () => {
+    const strict = () => collectSearchTimings(() =>
+      lanceDbVectorSearch({ orgId: "org-a", queryVector: [1, 0], limit: 5, privacyMode: "strict-privacy" }));
+    const first = await strict();
+    const second = await strict();
+    expect(first.timings.resultCacheBypass).toBe(1);
+    expect(second.timings.resultCacheBypass).toBe(1);
+    expect(second.timings.resultCacheHit).toBeUndefined();
+    expect(second.value).toEqual(first.value);
+    // A standard query afterwards still misses: strict-privacy stored nothing.
+    const standard = await search();
+    expect(standard.timings.resultCacheMiss).toBe(1);
+  });
+
   it("misses when the scope changes", async () => {
     await search();
     const scoped = await search("org-a", ["d2"]);
