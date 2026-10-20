@@ -21,6 +21,7 @@ export function resolveSandboxProviderId(env: NodeJS.ProcessEnv, platform: NodeJ
 // the `.js` -> `.ts` mapping. Add an entry here when a provider lands.
 const PROVIDER_LOADERS: Partial<Record<SandboxProviderId, () => Promise<{ default: ParserSandboxProvider }>>> = {
   bubblewrap: () => import("./providers/bubblewrap/index.js"),
+  modal: () => import("./providers/modal/index.js"),
   none: () => import("./providers/none/index.js"),
 };
 
