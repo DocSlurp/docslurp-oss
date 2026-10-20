@@ -5,6 +5,8 @@ import type { PrivacyMode } from "@docslurp/shared";
 import type { SearchResult } from "@docslurp/shared";
 
 import { sql } from "../db.js";
+import { reportPublicError } from "../lib/public-errors.js";
+import { withBackgroundSpan } from "@docslurp/shared/observability";
 import { calibrateSearchConfidence } from "./confidence.js";
 import { compressChunks } from "./contextual-compression.js";
 import { mmrSelect } from "./mmr.js";
@@ -332,6 +334,30 @@ export async function executeSearchSessionRetrieval(
   });
 }
 
+const pendingZeroResultDiagnostics = new Set<Promise<void>>();
+
+/**
+ * Zero-result diagnostics are analytics: they run after the response is ready,
+ * so they add no search latency, and a failed insert never fails the search.
+ */
+function scheduleZeroResultDiagnostics(
+  args: Parameters<typeof recordZeroResultDiagnostics>[0],
+): void {
+  const pending = withBackgroundSpan("api.search-zero-result", () => recordZeroResultDiagnostics(args))
+    .catch((error) => {
+      reportPublicError(error, { operation: "search-zero-result", sessionId: args.sessionId });
+    })
+    .finally(() => pendingZeroResultDiagnostics.delete(pending));
+  pendingZeroResultDiagnostics.add(pending);
+}
+
+/** Resolves once every scheduled zero-result diagnostic insert has settled. */
+export async function settleZeroResultDiagnostics(): Promise<void> {
+  while (pendingZeroResultDiagnostics.size > 0) {
+    await Promise.all(pendingZeroResultDiagnostics);
+  }
+}
+
 export async function finalizeSearchSessionExecution(
   input: SearchSessionExecutionInput,
 ): Promise<SearchResponse> {
@@ -382,16 +408,12 @@ export async function finalizeSearchSessionExecution(
     }
   }
 
-  const recordedZeroResultDiagnostics = calibratedResults.length === 0;
-  if (recordedZeroResultDiagnostics) {
-    await recordZeroResultDiagnostics({
-      sessionId: input.session.sessionId,
-      userId: input.userId,
-      workspaceId: input.workspaceId,
-      query: input.query,
-      filtersJson: toSearchMetadataRecord(input.filters),
-    }).catch(() => undefined);
-  }
+  // search_zero_results.session_id references search_sessions, so a zero-hit
+  // search is recorded only once its own session row has committed. Child
+  // searches (decompose, stepback, multi-hop) suppress their session row and
+  // share the parent's id, so their parent records the aggregate outcome.
+  const recordedZeroResultDiagnostics =
+    calibratedResults.length === 0 && !input.options.suppressSessionLog;
 
   if (!input.options.suppressSessionLog) {
     await input.session.persist({
@@ -419,6 +441,16 @@ export async function finalizeSearchSessionExecution(
         },
         diagnostics: input.session.diagnostics(),
       },
+    });
+  }
+
+  if (recordedZeroResultDiagnostics) {
+    scheduleZeroResultDiagnostics({
+      sessionId: input.session.sessionId,
+      userId: input.userId,
+      workspaceId: input.workspaceId,
+      query: input.query,
+      filtersJson: toSearchMetadataRecord(input.filters),
     });
   }
 
