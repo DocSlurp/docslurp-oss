@@ -295,7 +295,12 @@ export async function recordZeroResultDiagnostics(args: {
     suggestions.push({ kind: "lengthen-query", message: "Use a longer or more specific query." });
   }
 
+  // One row per search session: a session id reused across attempts replaces
+  // its earlier diagnostics instead of counting the same search again.
   await sql`
+    with cleared as (
+      delete from search_zero_results where session_id = ${args.sessionId}
+    )
     insert into search_zero_results (id, session_id, user_id, workspace_id, reason, suggestions)
     values (${randomUUID()}, ${args.sessionId}, ${args.userId}, ${args.workspaceId}, ${reasons.join("|") || "unknown"}, ${sql.json(suggestions)})
   `;

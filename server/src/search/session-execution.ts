@@ -6,7 +6,7 @@ import type { SearchResult } from "@docslurp/shared";
 
 import { sql } from "../db.js";
 import { reportPublicError } from "../lib/public-errors.js";
-import { withBackgroundSpan } from "@docslurp/shared/observability";
+import { startTelemetrySpan } from "@docslurp/shared/observability";
 import { calibrateSearchConfidence } from "./confidence.js";
 import { compressChunks } from "./contextual-compression.js";
 import { mmrSelect } from "./mmr.js";
@@ -334,27 +334,26 @@ export async function executeSearchSessionRetrieval(
   });
 }
 
-const pendingZeroResultDiagnostics = new Set<Promise<void>>();
-
 /**
- * Zero-result diagnostics are analytics: they run after the response is ready,
- * so they add no search latency, and a failed insert never fails the search.
+ * Zero-result diagnostics are analytics: a failed write is reported and never
+ * fails the search. The write is awaited, not backgrounded, because
+ * `GET /v1/search/diagnostics` reads it with the session id this response
+ * returns, and a reused session id (stream polling, chat pending-index retry)
+ * must apply its attempts in order so the latest attempt decides the row.
  */
-function scheduleZeroResultDiagnostics(
+async function writeZeroResultDiagnostics(
   args: Parameters<typeof recordZeroResultDiagnostics>[0],
-): void {
-  const pending = withBackgroundSpan("api.search-zero-result", () => recordZeroResultDiagnostics(args))
-    .catch((error) => {
-      reportPublicError(error, { operation: "search-zero-result", sessionId: args.sessionId });
-    })
-    .finally(() => pendingZeroResultDiagnostics.delete(pending));
-  pendingZeroResultDiagnostics.add(pending);
-}
-
-/** Resolves once every scheduled zero-result diagnostic insert has settled. */
-export async function settleZeroResultDiagnostics(): Promise<void> {
-  while (pendingZeroResultDiagnostics.size > 0) {
-    await Promise.all(pendingZeroResultDiagnostics);
+): Promise<void> {
+  const span = startTelemetrySpan("docslurp.search", "api.search-zero-result", {
+    "docslurp.sessionId": args.sessionId,
+    "docslurp.workspaceId": args.workspaceId,
+  });
+  try {
+    await span.run(() => recordZeroResultDiagnostics(args));
+    span.end();
+  } catch (error) {
+    span.end(error);
+    reportPublicError(error, { operation: "search-zero-result", sessionId: args.sessionId });
   }
 }
 
@@ -445,7 +444,7 @@ export async function finalizeSearchSessionExecution(
   }
 
   if (recordedZeroResultDiagnostics) {
-    scheduleZeroResultDiagnostics({
+    await writeZeroResultDiagnostics({
       sessionId: input.session.sessionId,
       userId: input.userId,
       workspaceId: input.workspaceId,

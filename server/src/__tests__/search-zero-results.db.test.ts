@@ -37,7 +37,6 @@ vi.mock("../lib/request-actor.js", async (original) => ({
 let sql: postgres.Sql;
 let stop: () => Promise<void>;
 let search: typeof import("../services/search.js");
-let execution: typeof import("../search/session-execution.js");
 let routes: typeof import("../routes/search.js");
 let chatContext: typeof import("../lib/chat-agent-context.js");
 
@@ -84,13 +83,11 @@ beforeAll(async () => {
   await sql`insert into document_chunks (id, document_id, run_id, user_id, chunk_index, text, token_estimate)
     values ('d-chunk', 'd', 'r', 'u', 0, 'The pump manual covers maintenance intervals.', 10)`;
   search = await import("../services/search.js");
-  execution = await import("../search/session-execution.js");
   routes = await import("../routes/search.js");
   chatContext = await import("../lib/chat-agent-context.js");
 }, 120_000);
 afterAll(async () => { await sql?.end(); await stop?.(); });
 beforeEach(async () => {
-  await execution.settleZeroResultDiagnostics();
   await sql`delete from search_zero_results`;
   await sql`delete from search_sessions`;
   routes.clearSearchResponseCacheForTests();
@@ -102,8 +99,7 @@ describe("zero-result diagnostics reference a persisted search session", () => {
   it("single search", async () => {
     const response = await search.hybridSearch("maintenance", "u", { ...options, filters: zeroHitFilters });
     expect(response.results).toEqual([]);
-    await execution.settleZeroResultDiagnostics();
-    expect(await zeroResultRows()).toEqual([
+      expect(await zeroResultRows()).toEqual([
       { session_id: response.sessionId, workspace_id: "w", persisted: true, chat_session_id: null },
     ]);
     expect(reported).toEqual([]);
@@ -114,8 +110,7 @@ describe("zero-result diagnostics reference a persisted search session", () => {
       ...options, filters: zeroHitFilters, suppressSessionLog: true, rootSessionId: crypto.randomUUID(),
     });
     expect(response.results).toEqual([]);
-    await execution.settleZeroResultDiagnostics();
-    expect(await zeroResultRows()).toEqual([]);
+      expect(await zeroResultRows()).toEqual([]);
     expect(reported).toEqual([]);
   });
 
@@ -123,8 +118,7 @@ describe("zero-result diagnostics reference a persisted search session", () => {
     const result = await post({ queries: [{ q: "maintenance", ...zeroHitBody }, { q: "intervals", ...zeroHitBody }] });
     const body = await result.json() as { results: Array<{ ok: boolean; data: { sessionId: string; results: unknown[] } }> };
     expect(body.results.map((item) => [item.ok, item.data.results.length])).toEqual([[true, 0], [true, 0]]);
-    await execution.settleZeroResultDiagnostics();
-    const rows = await zeroResultRows();
+      const rows = await zeroResultRows();
     expect(rows.map((row) => row.session_id).sort()).toEqual(body.results.map((item) => item.data.sessionId).sort());
     expect(rows.every((row) => row.persisted)).toBe(true);
     expect(reported).toEqual([]);
@@ -139,8 +133,7 @@ describe("zero-result diagnostics reference a persisted search session", () => {
     // The replay serves the first session; it writes no new session or diagnostics row.
     expect(second.timings?.cachedMs).toBe(0);
     expect(second.sessionId).toBe(first.sessionId);
-    await execution.settleZeroResultDiagnostics();
-    expect(await zeroResultRows()).toEqual([
+      expect(await zeroResultRows()).toEqual([
       { session_id: first.sessionId, workspace_id: "w", persisted: true, chat_session_id: null },
     ]);
     expect(reported).toEqual([]);
@@ -152,11 +145,41 @@ describe("zero-result diagnostics reference a persisted search session", () => {
     const result = await chatContext.runInChatAgentContext("chat-turn", () => post({ q: "maintenance", ...zeroHitBody }));
     const body = await result.json() as { sessionId: string; results: unknown[] };
     expect(body.results).toEqual([]);
-    await execution.settleZeroResultDiagnostics();
-    expect(await zeroResultRows()).toEqual([
+      expect(await zeroResultRows()).toEqual([
       { session_id: body.sessionId, workspace_id: "w", persisted: true, chat_session_id: "chat-turn" },
     ]);
     expect(reported).toEqual([]);
+  });
+
+  it("is readable as soon as the search returns", async () => {
+    // GET /v1/search/diagnostics?sessionId= is called with the id a zero-hit
+    // search just returned, so the row must exist before the response does.
+    const response = await search.hybridSearch("maintenance", "u", { ...options, filters: zeroHitFilters });
+    expect(await zeroResultRows()).toEqual([
+      { session_id: response.sessionId, workspace_id: "w", persisted: true, chat_session_id: null },
+    ]);
+  });
+
+  it("a session id reused across polling attempts keeps one row", async () => {
+    // The workspace search stream and chat's pending-index retry rerun the
+    // search under one root session id; analytics count sessions, not attempts.
+    const rootSessionId = crypto.randomUUID();
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      await search.hybridSearch("maintenance", "u", { ...options, filters: zeroHitFilters, rootSessionId });
+    }
+    expect(await zeroResultRows()).toEqual([
+      { session_id: rootSessionId, workspace_id: "w", persisted: true, chat_session_id: null },
+    ]);
+  });
+
+  it("a reused session whose later attempt finds results drops its zero-result row", async () => {
+    const rootSessionId = crypto.randomUUID();
+    await search.hybridSearch("maintenance", "u", { ...options, filters: zeroHitFilters, rootSessionId });
+    expect(await zeroResultRows()).toHaveLength(1);
+    const found = await search.hybridSearch("maintenance", "u", { ...options, filters: { workspaceId: "w" }, rootSessionId });
+    expect(found.results.length).toBeGreaterThan(0);
+    expect(found.sessionId).toBe(rootSessionId);
+    expect(await zeroResultRows()).toEqual([]);
   });
 
   it("a failed diagnostics insert never fails the search", async () => {
@@ -164,8 +187,7 @@ describe("zero-result diagnostics reference a persisted search session", () => {
     try {
       const response = await search.hybridSearch("maintenance", "u", { ...options, filters: zeroHitFilters });
       expect(response.results).toEqual([]);
-      await execution.settleZeroResultDiagnostics();
-      expect(reported).toHaveLength(1);
+          expect(reported).toHaveLength(1);
       expect(await sql`select id from search_sessions where id = ${response.sessionId}`).toHaveLength(1);
     } finally {
       await sql`alter table search_zero_results drop constraint reject_all`;
