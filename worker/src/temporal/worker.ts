@@ -24,7 +24,7 @@ import { Store } from "../db/store.js";
 import { workerInstanceId } from "../db/worker-capabilities.js";
 import { CommandRunner } from "../tools/runner.js";
 import { createSandboxActivityInterceptor } from "../sandbox/activity-interceptor.js";
-import { initializeParserSandbox } from "../sandbox/startup.js";
+import { initializeParserSandbox, setDefaultParserSandbox } from "../sandbox/startup.js";
 import { ArtifactStore } from "../tools/storage.js";
 import { createStages } from "../stages/index.js";
 import { createActivities } from "./activities.js";
@@ -103,6 +103,8 @@ async function main(): Promise<void> {
   initializePrivateModelEndpoints((entries) => store.recordPrivacyAudit(entries));
   // Fail before connecting if the parser sandbox is unavailable or violates the production policy.
   const sandbox = await initializeParserSandbox(process.env, process.platform);
+  // Every CommandRunner in this process (stages, local-artifact adapters) shares this provider.
+  setDefaultParserSandbox(sandbox);
   const openSession = (activityId: string) => sandbox.provider.openSession(sandbox.config, { activityId });
   const runner = new CommandRunner({ openSession });
   const storage = new ArtifactStore(cfg);

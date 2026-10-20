@@ -19,7 +19,7 @@ import type { Writable } from "node:stream";
 
 import { resolveCommandPaths } from "../sandbox/paths.js";
 import { sandboxScopeStorage } from "../sandbox/session-context.js";
-import { initializeParserSandbox, type InitializedParserSandbox } from "../sandbox/startup.js";
+import { defaultParserSandbox, registeredParserSandbox } from "../sandbox/startup.js";
 import type { SandboxCommand, SandboxResult, SandboxSession } from "../sandbox/types.js";
 import { resolveScriptsDir } from "./scripts-dir.js";
 import { createPool, type PythonPool } from "./python-pool.js";
@@ -61,7 +61,10 @@ export interface CommandResult {
 }
 
 export interface CommandRunnerOptions {
-  /** Opens a sandbox session for an activity. Omit outside the Temporal worker to use the env-configured provider. */
+  /**
+   * Opens a sandbox session outside an activity scope. Omit to use the process default
+   * (registered by the worker with setDefaultParserSandbox, else initialized from the env).
+   */
   openSession?: (activityId: string) => Promise<SandboxSession>;
 }
 
@@ -121,7 +124,6 @@ export class CommandRunner {
   private readonly commandRssBudgetKb: number | null;
   private readonly containerMemoryLimitMb: number | null;
   private readonly openSession?: (activityId: string) => Promise<SandboxSession>;
-  private lazySandbox?: Promise<InitializedParserSandbox>;
   private readonly warmedCommands = new Set<string>();
   private embedPool?: PythonPool;
 
@@ -1150,11 +1152,6 @@ export class CommandRunner {
     return false;
   }
 
-  private sandboxForRun(): Promise<InitializedParserSandbox> {
-    this.lazySandbox ??= initializeParserSandbox(process.env, process.platform);
-    return this.lazySandbox;
-  }
-
   private async acquireSession(): Promise<{ session: SandboxSession; release(): Promise<void> }> {
     const scope = sandboxScopeStorage.getStore();
     if (scope) return { session: await scope.get(), release: async () => {} };
@@ -1162,18 +1159,20 @@ export class CommandRunner {
     const open = this.openSession
       ? (id: string) => this.openSession!(id)
       : async (id: string) => {
-          const { provider, config } = await this.sandboxForRun();
+          const { provider, config } = await defaultParserSandbox();
           return provider.openSession(config, { activityId: id });
         };
     const session = await open("command");
     return { session, release: () => session.close() };
   }
 
-  /** Scratch and writable inputs come from the provider config when it declares them, else from the shared env vars. */
+  /**
+   * Scratch and writable inputs come from the provider config when it declares them, else from
+   * the shared env vars. A runner with its own opener never initializes a provider just for this.
+   */
   private async sandboxPathConfig(): Promise<{ scratchRoot: string; writablePaths: string[] }> {
-    const config = (this.openSession ? null : (await this.sandboxForRun()).config) as
-      | { scratchRoot?: unknown; writablePaths?: unknown }
-      | null;
+    const sandbox = registeredParserSandbox() ?? (this.openSession ? undefined : await defaultParserSandbox());
+    const config = sandbox?.config as { scratchRoot?: unknown; writablePaths?: unknown } | undefined;
     const scratchRoot =
       typeof config?.scratchRoot === "string"
         ? config.scratchRoot

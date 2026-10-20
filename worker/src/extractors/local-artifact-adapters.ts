@@ -17,14 +17,13 @@ export interface LocalArtifactAdapterOptions {
 const defaultMaxBytes = 32 * 1024 * 1024;
 const defaultTimeoutMs = 60_000;
 
-// Commands outside a Temporal activity share one runner (and its lazily initialised sandbox
-// provider); it is rebuilt if the sandbox environment changes, as tests do.
-let sharedRunner: { signature: string; runner: CommandRunner } | undefined;
+// One runner for every adapter. Inside an activity it uses the activity's session; elsewhere
+// the process default sandbox (see setDefaultParserSandbox).
+let sharedRunner: CommandRunner | undefined;
 
 function localArtifactRunner(): CommandRunner {
-  const signature = JSON.stringify(Object.entries(process.env).filter(([key]) => key.startsWith("DOCSLURP_PARSER_SANDBOX") || key === "NODE_ENV"));
-  if (sharedRunner?.signature !== signature) sharedRunner = { signature, runner: new CommandRunner() };
-  return sharedRunner.runner;
+  sharedRunner ??= new CommandRunner();
+  return sharedRunner;
 }
 
 export async function runLocalArtifactCommand(binary: string, args: string[], maxBytes: number, timeoutMs: number, signal?: AbortSignal): Promise<Buffer> {

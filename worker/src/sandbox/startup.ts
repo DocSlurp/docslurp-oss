@@ -31,3 +31,37 @@ export async function initializeParserSandbox(
   );
   return { provider, config, isolation };
 }
+
+let registeredSandbox: InitializedParserSandbox | undefined;
+let lazySandbox: Promise<InitializedParserSandbox> | undefined;
+
+/**
+ * Register the process's initialized sandbox (the Temporal worker does this at start) so
+ * every CommandRunner shares it instead of probing a provider of its own. `undefined`
+ * clears it, and any lazily initialized one.
+ */
+export function setDefaultParserSandbox(sandbox: InitializedParserSandbox | undefined): void {
+  registeredSandbox = sandbox;
+  lazySandbox = undefined;
+}
+
+/** The registered sandbox, if any; never initializes one. */
+export function registeredParserSandbox(): InitializedParserSandbox | undefined {
+  return registeredSandbox;
+}
+
+/**
+ * The registered sandbox, or (outside the worker: CLIs, tests) one initialized from the
+ * environment on first use. A failed initialization is not cached; the next call retries.
+ */
+export function defaultParserSandbox(): Promise<InitializedParserSandbox> {
+  if (registeredSandbox) return Promise.resolve(registeredSandbox);
+  if (!lazySandbox) {
+    const initializing = initializeParserSandbox(process.env, process.platform);
+    lazySandbox = initializing;
+    initializing.catch(() => {
+      if (lazySandbox === initializing) lazySandbox = undefined;
+    });
+  }
+  return lazySandbox;
+}

@@ -1,8 +1,13 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { runLocalArtifactCommand } from "./local-artifact-adapters.js";
+import { setDefaultParserSandbox } from "../sandbox/startup.js";
 
 describe("local artifact parser execution", () => {
-  afterEach(() => vi.unstubAllEnvs());
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    // Each case configures its own provider through the environment.
+    setDefaultParserSandbox(undefined);
+  });
 
   it("does not expose worker credentials to document parsers", async () => {
     vi.stubEnv("DOCSLURP_PARSER_SANDBOX", "none");
