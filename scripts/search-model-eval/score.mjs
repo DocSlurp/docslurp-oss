@@ -314,26 +314,27 @@ export function buildReport(rows, { seed, iterations, baseline, meta }) {
 }
 
 const fmt = (value, digits = 3) => (value === null || value === undefined || Number.isNaN(value) ? "n/a" : typeof value === "number" ? String(Number(value.toFixed(digits))) : String(value));
+const label = (key) => key.replaceAll("|", " / ");
 const ciText = (value) => (value?.n ? `${fmt(value.mean)} [${fmt(value.low)}, ${fmt(value.high)}] n=${value.n}` : "n/a");
 
 export function renderMarkdown(report) {
   const lines = [`# Search-agent model comparison`, "", `- Dataset: \`${report.datasetSha256 ?? "unknown"}\``, `- Runs: ${(report.runs ?? []).join(", ")}`, `- Judge: ${report.judgeModel ?? "disabled"} (${JUDGE_PROMPT_VERSION})`, `- Calls scored: ${report.calls}; bootstrap ${report.iterations} iterations, seed \`${report.seed}\`; 95% CIs resample calls.`, `- Pages per $: not applicable to chat calls.`, ""];
   const table = (title, groups) => {
     lines.push(`## ${title}`, "", "| group | n | ok | correct | cited recall | evidence recall | citation validity | false give-up | correct abstain | limit exhaustion | p50 / p95 ms | $/call | $/correct | correct/$ |", "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|");
-    for (const [key, row] of Object.entries(groups)) lines.push(`| ${key} | ${row.n} | ${row.ok} | ${ciText(row.correctRate)} | ${ciText(row.citedRecall)} | ${ciText(row.evidenceRecall)} | ${ciText(row.citationValidity)} | ${ciText(row.falseGiveUpRate)} | ${ciText(row.correctAbstainRate)} | ${ciText(row.limitExhaustionRate)} | ${fmt(row.latencyMs.p50, 0)} / ${fmt(row.latencyMs.p95, 0)} | ${fmt(row.costUsd.perCall, 5)} | ${fmt(row.costPerCorrectUsd, 5)} | ${fmt(row.correctPerDollar, 1)} |`);
+    for (const [key, row] of Object.entries(groups)) lines.push(`| ${label(key)} | ${row.n} | ${row.ok} | ${ciText(row.correctRate)} | ${ciText(row.citedRecall)} | ${ciText(row.evidenceRecall)} | ${ciText(row.citationValidity)} | ${ciText(row.falseGiveUpRate)} | ${ciText(row.correctAbstainRate)} | ${ciText(row.limitExhaustionRate)} | ${fmt(row.latencyMs.p50, 0)} / ${fmt(row.latencyMs.p95, 0)} | ${fmt(row.costUsd.perCall, 5)} | ${fmt(row.costPerCorrectUsd, 5)} | ${fmt(row.correctPerDollar, 1)} |`);
     lines.push("");
   };
   table("By model", report.byModel);
   table("By model x arm", report.byModelArm);
   table("By model x tier x kind x arm", report.byModelTierKindArm);
   lines.push("## Agent behaviour by model x arm", "", "| group | steps p50/p90 | searches p50/p90 | fan-out mean | reformulation | succ. query Jaccard | tool error rate | protocol failures | stop reasons | model mismatches | retried |", "|---|---|---|---|---|---|---|---|---|---|---|");
-  for (const [key, row] of Object.entries(report.byModelArm)) lines.push(`| ${key} | ${fmt(row.steps.p50)}/${fmt(row.steps.p90)} | ${fmt(row.searches.p50)}/${fmt(row.searches.p90)} | ${fmt(row.fanOut.mean)} | ${ciText(row.reformulationRate)} | ${fmt(row.meanSuccessiveQueryJaccard)} | ${fmt(row.toolErrorRate)} | ${row.protocolFailures} | ${Object.entries(row.stopReasons).map(([reason, count]) => `${reason}:${count}`).join(", ")} | ${row.modelMismatches} | ${row.retried} |`);
+  for (const [key, row] of Object.entries(report.byModelArm)) lines.push(`| ${label(key)} | ${fmt(row.steps.p50)}/${fmt(row.steps.p90)} | ${fmt(row.searches.p50)}/${fmt(row.searches.p90)} | ${fmt(row.fanOut.mean)} | ${ciText(row.reformulationRate)} | ${fmt(row.meanSuccessiveQueryJaccard)} | ${fmt(row.toolErrorRate)} | ${row.protocolFailures} | ${Object.entries(row.stopReasons).map(([reason, count]) => `${reason}:${count}`).join(", ")} | ${row.modelMismatches} | ${row.retried} |`);
   lines.push("", `## Pairwise vs baseline ${report.baseline.model}${report.baseline.present ? "" : " (baseline not in these runs)"}`, "", "| model | pairs | wins | losses | ties | mean score diff [95% CI] |", "|---|---|---|---|---|---|");
   for (const [model, row] of Object.entries(report.baseline.comparisons)) lines.push(`| ${model} | ${row.pairs} | ${row.wins} | ${row.losses} | ${row.ties} | ${ciText(row.meanScoreDiff)} |`);
   lines.push("", "## Give-up intelligence", "", "| model x arm | answerable answered | answerable abstained | unanswerable answered | unanswerable abstained | failed | give-up precision | give-up recall | unanswerable limit exhaustion |", "|---|---|---|---|---|---|---|---|---|");
-  for (const [key, view] of Object.entries(report.giveUp)) lines.push(`| ${key} | ${view.matrix.answerable.answered} | ${view.matrix.answerable.abstained} | ${view.matrix.unanswerable.answered} | ${view.matrix.unanswerable.abstained} | ${view.matrix.answerable.failed + view.matrix.unanswerable.failed} | ${fmt(view.giveUpPrecision)} | ${fmt(view.giveUpRecall)} | ${fmt(view.unanswerableLimitExhaustion)} |`);
+  for (const [key, view] of Object.entries(report.giveUp)) lines.push(`| ${label(key)} | ${view.matrix.answerable.answered} | ${view.matrix.answerable.abstained} | ${view.matrix.unanswerable.answered} | ${view.matrix.unanswerable.abstained} | ${view.matrix.answerable.failed + view.matrix.unanswerable.failed} | ${fmt(view.giveUpPrecision)} | ${fmt(view.giveUpRecall)} | ${fmt(view.unanswerableLimitExhaustion)} |`);
   lines.push("");
-  for (const [key, view] of Object.entries(report.giveUp)) lines.push("```text", renderHistogram(`${key} searches before abstaining`, view.searchesBeforeAbstain), "```", "");
+  for (const [key, view] of Object.entries(report.giveUp)) lines.push("```text", renderHistogram(`${label(key)} searches before abstaining`, view.searchesBeforeAbstain), "```", "");
   lines.push("## Histograms", "");
   for (const [model, hist] of Object.entries(report.histograms)) lines.push(`### ${model}`, "", "```text", renderHistogram("latency ms", hist.latencyMs), renderHistogram("steps", hist.steps), renderHistogram("search calls", hist.searches), renderHistogram("cost USD", hist.costUsd), "```", "");
   return `${lines.join("\n")}\n`;
@@ -373,7 +374,7 @@ export async function scoreRuns({ dataset, records, tiers = null, runConfigs = [
       judgment = await judge(entry, final.extracted.answer);
       onJudgment({ caseId: entry.id, kind: entry.kind, answerable: entry.gold.answerable, question: entry.question, facts: entry.gold.facts, answer: final.extracted.answer, judgment, cacheKey: judgment.cacheKey });
     }
-    rows.push(scoreCall(entry, record, { tier: (tiers ?? dataset.tiers ?? {})[entry.workspaceTier] ?? null, judgment }));
+    rows.push(scoreCall(entry, record, { tier: (tiers ?? dataset.tiers)?.[entry.workspaceTier] ?? null, judgment }));
   }
   const report = buildReport(rows, { seed, iterations, baseline, meta: { datasetSha256: dataset.casesSha256 ?? null, runs: [...new Set(records.map((record) => record.runId))], runConfigs, tierMatching: Object.fromEntries(Object.entries(tiers ?? dataset.tiers ?? {}).map(([name, tier]) => [name, { workspaceId: tier.workspaceId, citationMatch: tier.citationMatch, mappedDocuments: Object.keys(tier.documentMap ?? {}).length }])), judgeModel, seed, iterations, unmatchedRecords: missing } });
   return { rows, report };

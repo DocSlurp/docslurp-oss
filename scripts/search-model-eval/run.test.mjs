@@ -156,7 +156,7 @@ test("one retry on 5xx/429 keeps both attempts; 4xx is not retried", async (t) =
 test("network errors retry once; timeouts are recorded and not retried by default", async (t) => {
   const outDir = tempDir(t);
   let calls = 0;
-  const fetchImpl = async (url, init) => {
+  const fetchImpl = async (_url, init) => {
     calls++;
     const body = JSON.parse(init.body);
     if (body.q === "Question 0?") throw new TypeError("fetch failed");

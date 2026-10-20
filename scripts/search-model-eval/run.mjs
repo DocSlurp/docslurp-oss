@@ -97,7 +97,8 @@ export function dryRunReport(cells, config, prices, { completed = new Set() } = 
   let worstCaseUsd = 0, remaining = 0;
   for (const cell of cells) {
     const usd = estimateCallUsd(cell.model, cell.armConfig, config.budget, prices);
-    const entry = (byModel[cell.model] ??= { cells: 0, remaining: 0, worstCaseUsd: 0, worstCaseWithRetryUsd: 0 });
+    if (!byModel[cell.model]) byModel[cell.model] = { cells: 0, remaining: 0, worstCaseUsd: 0, worstCaseWithRetryUsd: 0 };
+    const entry = byModel[cell.model];
     entry.cells++;
     if (completed.has(cell.key)) continue;
     entry.remaining++; remaining++;

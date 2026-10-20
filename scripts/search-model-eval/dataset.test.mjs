@@ -170,7 +170,7 @@ test("local verifier scans only the tier scope with normalized whole-token match
     { sourceDoc: "src-a", page: 5000, pageSha256: sha256("2"), verified: true, text: "Stonebridge campus" },
     { sourceDoc: "src-b", page: 2, pageSha256: sha256("3"), verified: false, text: "Quillfeather program" },
   ];
-  writeFileSync(corpusPath, rows.map((row) => JSON.stringify(row)).join("\n") + "\n");
+  writeFileSync(corpusPath, `${rows.map((row) => JSON.stringify(row)).join("\n")}\n`);
   const scopes = { "mid-5k": { scope: { sourceDocs: ["src-a"], maxPage: 4000 } }, "large-58k": { scope: { sourceDocs: null, maxPage: null } } };
   const verify = createLocalVerifier({ corpusPath, scopes });
   const results = await verify([
@@ -237,10 +237,10 @@ test("import-labeled keeps OR-within/AND-across support groups and resolves docu
 test("silver facts are extracted from support page text, grounded, and ledgered", async (t) => {
   const dir = tempDir(t);
   const corpusPath = join(dir, "pages-text.jsonl");
-  writeFileSync(corpusPath, [
+  writeFileSync(corpusPath, `${[
     { sourceDoc: "src-a", page: 4, pageSha256: sha256("p4"), verified: true, text: "The Harbor Fund awarded 4.2 million dollars in 2031." },
     { sourceDoc: "src-a", page: 5, pageSha256: sha256("p5"), verified: true, text: "Unrelated content." },
-  ].map((row) => JSON.stringify(row)).join("\n") + "\n");
+  ].map((row) => JSON.stringify(row)).join("\n")}\n`);
   const { accepted: imported } = importLabeled({
     queries: [{ id: "q-01", answerability: "answerable", support_groups: [["src-a:page:4"]], provenance: { query_id: "q-01" } }, { id: "q-02", answerability: "answerable", support_groups: [["src-a:page:5"]], provenance: { query_id: "q-02" } }, { id: "q-03", answerability: "answerable", support_groups: [["src-a:page:5"]], provenance: { query_id: "q-03" } }],
     sourceDataset: { queries: [{ id: "q-01", question: "How much did the Harbor Fund award?" }, { id: "q-02", question: "Unanswerable from text question?", expectedAnswer: "Source answer" }, { id: "q-03", question: "Another question here?" }] },
