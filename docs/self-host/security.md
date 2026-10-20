@@ -4,9 +4,20 @@ What protects a self-hosted install: the parser sandbox, malware scanning, secre
 
 ## Parser sandbox
 
-Document parsers run untrusted input. The worker starts each parser through `worker/scripts/parser-sandbox.sh`, which wraps it in bubblewrap (`bwrap`).
+Document parsers run untrusted input. The worker starts each parser through a sandbox provider: `bubblewrap` (the default on Linux), `landlock`, `modal` or `none`. [Parser sandbox providers](sandbox-providers.md) compares them and covers setup. What each isolates:
 
-What the sandbox does:
+| Provider | Filesystem | Network | Processes |
+| --- | --- | --- | --- |
+| `bubblewrap` | Read-only runtime paths, private scratch | Blocked | Separate PID, IPC and UTS namespaces |
+| `landlock` | Landlock rules: read-only runtime paths and inputs, writes only to scratch and declared outputs | TCP connect and bind denied on kernel 6.8 or newer; not isolated on older kernels | Not isolated |
+| `modal` | Separate remote sandbox, files staged in and out per command | Blocked | Separate remote sandbox |
+| `none` | Not isolated | Not isolated | Not isolated |
+
+In all cases the parser gets an allowlisted environment and none of the worker's secrets.
+
+### Bubblewrap
+
+The default provider runs `worker/scripts/parser-sandbox.sh`, which wraps the parser in bubblewrap (`bwrap`). What it does:
 
 - **Unshares** the network, PID, IPC and UTS namespaces (`--unshare-net`, `--unshare-pid`, `--unshare-ipc`, `--unshare-uts`). The parser has no network.
 - **Drops all capabilities** (`--cap-drop ALL`), starts a new session, and dies with its parent.
@@ -18,27 +29,31 @@ What the sandbox does:
 
 If `bwrap` is missing, the launcher exits with code 70 and `refusing to run parser without isolation`. It never falls back to running the parser unsandboxed.
 
+### Choosing and enforcing a provider
+
 The sandbox provider is chosen with `DOCSLURP_PARSER_SANDBOX` (`bubblewrap`, `landlock`, `modal` or `none`). Unset, it is `bubblewrap` on Linux and `none` on macOS outside production. The worker probes the provider at startup and refuses to start if isolation is unavailable. With `NODE_ENV=production` it also requires filesystem isolation and at least `tcp-only` network isolation. Provider `none` runs parsers directly on the host and is accepted in production only with `DOCSLURP_PARSER_SANDBOX_ALLOW_UNISOLATED=true`, which logs `[parser-sandbox] status=unisolated` on every start. Startup logs one line, `[parser-sandbox] provider=<id> filesystem=<bool> network=<level> processes=<bool> location=<local|remote>`. Each Temporal activity gets its own sandbox session, closed when the activity ends (`worker/src/sandbox/`).
 
 ### Why Compose sets `systempaths=unconfined`
 
-The worker services in `compose.selfhost.yml` set `systempaths=unconfined` so bubblewrap can mount a fresh `/proc`. Docker masks some `/proc` paths by default, and that blocks the mount. The worker keeps `cap_drop: [ALL]`, `no-new-privileges:true`, a pids limit of 256 and the seccomp profile `worker/security/seccomp-doc-extract.json`. The parser still runs inside the bubblewrap namespaces.
+This applies to the default `bubblewrap` provider. The worker services in `compose.selfhost.yml` set `systempaths=unconfined` so bubblewrap can mount a fresh `/proc`. Docker masks some `/proc` paths by default, and that blocks the mount. The worker keeps `cap_drop: [ALL]`, `no-new-privileges:true`, a pids limit of 256 and the seccomp profile `worker/security/seccomp-doc-extract.json`. The parser still runs inside the bubblewrap namespaces.
 
 ### The error you see without it
 
-At startup, `scripts/start-worker.sh` runs `scripts/check-worker-prerequisites.mjs` with `--sandbox`. It runs the launcher against `/usr/bin/true`. If that fails, the worker prints a line like this and exits without starting:
+At startup, `scripts/start-worker.sh` runs `scripts/check-worker-prerequisites.mjs` with `--sandbox`. It probes the selected provider (bubblewrap runs the launcher against `/usr/bin/true`). If that fails, the worker prints a line like this and exits without starting:
 
 ```text
-[worker-prerequisites] parser isolation unavailable: <reason from bubblewrap>
+[worker-prerequisites] parser isolation unavailable: <reason from the provider>
 ```
 
-Common causes are a host that forbids unprivileged user namespaces or mounts (sysctl or AppArmor), or removing `systempaths=unconfined` from the Compose file. See [Requirements](requirements.md#host-requirements). The output ends with `status=failed`.
+Common causes for bubblewrap are a host that forbids unprivileged user namespaces or mounts (sysctl or AppArmor), or removing `systempaths=unconfined` from the Compose file. See [Requirements](requirements.md#host-requirements) and the per-provider rows in [Operations](operations.md#troubleshooting). The output ends with `status=failed`.
 
 ### Commands that skip the sandbox
 
-Two kinds of command do not go through the launcher:
+Three kinds of code do not go through a sandbox provider:
 
-- **The vector writer** (`vector_backend_write.py` and `orama_write.mjs`). It has to reach object storage, and the sandbox has no network. It receives the vector backend URIs (`LANCEDB_URI`, `STORAGE_URI`, `CHROMA_PATH`, `CHROMA_URL`, `MILVUS_URI`, `ORAMA_PATH`) and AWS credentials including `AWS_SESSION_TOKEN`, and nothing else beyond the default allowlist. Only these two trusted scripts get that list; an input filename cannot ask for it (`isVectorBackendCommand` in `worker/src/tools/runner.ts`).
+- **In-process Node parsers** (Kreuzberg and LiteParse). They run inside the worker process, so no provider sandboxes them, and they share the worker's environment. Treat the worker as the trust boundary for these.
+
+- **The vector writer** (`vector_backend_write.py` and `orama_write.mjs`). It has to reach object storage, and the sandbox has no network. It is not sandboxed by any provider. It receives the vector backend URIs (`LANCEDB_URI`, `STORAGE_URI`, `CHROMA_PATH`, `CHROMA_URL`, `MILVUS_URI`, `ORAMA_PATH`) and AWS credentials including `AWS_SESSION_TOKEN`, and nothing else beyond the default allowlist. Only these two trusted scripts get that list; an input filename cannot ask for it (`isVectorBackendCommand` in `worker/src/tools/runner.ts`).
 - **The embedding pool**. It is a long-lived Python process started by the worker (`getEmbedPool` in the same file) rather than a per-call command. It has its own environment allowlist (`defaultPythonPoolEnvAllowlist`, extended with `DOCSLURP_PYTHON_POOL_ENV_ALLOWLIST`). It handles text to embed, not file parsing.
 
 ## Malware scanning

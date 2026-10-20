@@ -4,12 +4,13 @@ What the host needs, and what to expect from memory and disk. Where DocSlurp has
 
 ## Host requirements
 
-- A Linux host with Docker Engine and Compose v2. Docker Desktop is untested. The parser sandbox (bubblewrap) is Linux-only.
+- A Linux host with Docker Engine and Compose v2. Docker Desktop is untested. The parser sandbox providers bubblewrap and landlock are Linux-only; the Modal provider runs remotely. See [Parser sandbox providers](sandbox-providers.md).
 - A kernel that allows unprivileged user namespaces, and a container runtime that lets the worker create namespaces. Ubuntu 23.10 and later restrict unprivileged user namespaces with `kernel.apparmor_restrict_unprivileged_userns=1`; CI sets it to 0 before the bubblewrap tests (`.github/workflows/ci.yml`). Not verified on an AppArmor host: Docker's default AppArmor profile may also block bubblewrap's mounts. If the worker fails the sandbox check there, add `apparmor=unconfined` to the worker's `security_opt`. The sandbox unshares network, PID, IPC and UTS namespaces, and Compose runs the worker with the `systempaths=unconfined` security option so bubblewrap can mount a fresh `/proc`. Capabilities stay dropped. See [Security](security.md#parser-sandbox).
+- Per provider: **bubblewrap** (the default) needs the namespace support above. **Landlock** needs the Landlock LSM, kernel 6.8 or newer for its network rule (older kernels fail the production policy), and `landrun`, which the worker images include; the release binary needs glibc 2.38 or newer. It works in containers without `unconfined` security options. **Modal** needs a Modal token (`MODAL_TOKEN_ID`, `MODAL_TOKEN_SECRET`) and outbound HTTPS to Modal. Details and container test results are in [Parser sandbox providers](sandbox-providers.md#where-these-providers-work-in-containers).
 - Node.js, for the one-time configuration generator (`node scripts/selfhost-init.mjs`). Node is not needed to run the containers after setup.
 - Disk for Docker images, the `postgres_data` and `minio_data` volumes, and the worker scratch space. Document artifacts (raw files, page images, derived Markdown) go to `minio_data`. There is no measured per-document figure; watch disk use on your own corpus.
 
-Source: `compose.selfhost.yml`, `worker/scripts/parser-sandbox.sh`, [Self-hosting overview](README.md).
+Source: `compose.selfhost.yml`, `worker/scripts/parser-sandbox.sh`, `worker/sandbox-tools.json`, [Self-hosting overview](README.md).
 
 ## Sizing
 

@@ -14,7 +14,7 @@ flowchart LR
   lance[("LanceDB vector index under lancedb/")]
   temporal["Temporal"]
   worker["Workers"]
-  sandbox["Parser sandbox (bubblewrap)"]
+  sandbox["Parser sandbox (bubblewrap, landlock, Modal)"]
   ai["Optional AI providers"]
 
   clients --> server
@@ -33,7 +33,7 @@ flowchart LR
   worker -.-> ai
 ```
 
-Clients talk only to the server. The server is a Hono API under `/v1` on port 8787. It reads and writes Postgres (with pgvector), uses Redis for rate limits only, and stores raw and derived files in object storage (MinIO in the Compose stack). LanceDB vector indexes live in the same bucket under `lancedb/`. The server starts pipeline runs on Temporal. Workers pick them up, run the ingestion stages, and write results to Postgres, object storage and LanceDB. Workers run file parsers inside a bubblewrap sandbox. AI providers are optional (dashed lines): the default local embedding mode needs no provider key, but LLM-powered stages do.
+Clients talk only to the server. The server is a Hono API under `/v1` on port 8787. It reads and writes Postgres (with pgvector), uses Redis for rate limits only, and stores raw and derived files in object storage (MinIO in the Compose stack). LanceDB vector indexes live in the same bucket under `lancedb/`. The server starts pipeline runs on Temporal. Workers pick them up, run the ingestion stages, and write results to Postgres, object storage and LanceDB. Workers run file parsers inside a sandbox provider: bubblewrap by default, or landlock or Modal ([providers](sandbox-providers.md)). AI providers are optional (dashed lines): the default local embedding mode needs no provider key, but LLM-powered stages do.
 
 ## Ingest sequence
 
@@ -87,7 +87,7 @@ flowchart TB
     temporal["temporal"]
     subgraph workerproc["Worker process"]
       worker["worker: same environment as server"]
-      subgraph sandbox["Sandbox: untrusted file parsing, no network"]
+      subgraph sandbox["Sandbox provider: untrusted file parsing, no network"]
         parser["Parser child: allowlisted env only, no secrets"]
       end
     end
@@ -117,7 +117,7 @@ Only the reverse proxy faces the internet. The Compose file publishes one host p
 
 The `server` and `worker` services share one environment block in `compose.selfhost.yml`, plus whatever is in `.env.selfhost`. Both therefore hold `DATABASE_URL`, the storage credentials (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`), `BETTER_AUTH_SECRET`, `OAUTH_TOKEN_ENCRYPTION_KEY`, `CREDENTIALS_ENCRYPTION_KEY`, `SECRETS_ENCRYPTION_KEY`, `METRICS_SECRET` and any AI provider keys. Treat a worker compromise as a server compromise. The one-shot `migrate` service gets only `DATABASE_URL`. `postgres`, `minio` and `temporal` get the database password or storage credentials they need to run.
 
-The parser sandbox is the boundary that matters for untrusted files. A parser runs as a child of the worker with an allowlisted environment, so it holds none of the secrets above, and it has no network. [Security](security.md#parser-sandbox) lists what the sandbox isolates and which commands skip it.
+The parser sandbox is the boundary that matters for untrusted files. A parser runs as a child of the worker with an allowlisted environment, so it holds none of the secrets above, and it has no network (landlock blocks TCP only, and only on kernel 6.8 or newer). With the Modal provider the parser runs on Modal's infrastructure instead of the worker host. [Security](security.md#parser-sandbox) lists what the sandbox isolates and which commands skip it.
 
 ## Compose topology
 
