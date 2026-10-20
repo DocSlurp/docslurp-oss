@@ -557,7 +557,8 @@ export const visionModelCatalog = [
     runtime: "openai-compatible",
     description:
       "Open-weights NVIDIA multimodal MoE (12B active of 120B) on OpenRouter; opt-in low-cost page extraction.",
-    // Placeholder until the vision comparison measures per-page tokens; list price is below Gemini 3.1 Flash Lite.
+    // Conservative like the Gemini entry. A 3-page smoke measured 0.02-0.07 cents per page (1.2k-3.2k input
+    // tokens: images tile by resolution) against 0.09-0.16 for Gemini 3.1 Flash Lite; refine after the slice run.
     estimatedCostPerPageCents: 0.2,
     tokenPricing: { inputUsdPerMillion: 0.15, outputUsdPerMillion: 0.5, checked: "2026-10-20" },
   },
