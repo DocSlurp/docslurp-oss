@@ -46,6 +46,7 @@ describe("hosted OpenRouter vision request shape", () => {
     expect(body.model).toBe(NEMOTRON_SUPER_VL_VISION_MODEL);
     expect(body.reasoning).toEqual({ enabled: false });
     expect(body.temperature).toBe(0);
+    expect(body.max_tokens).toBe(16_384);
     expect(body.response_format).toBeUndefined();
     const parts = body.messages[1].content as Array<Record<string, any>>;
     expect(parts.map((part) => part.type)).toEqual(["text", "image_url"]);
