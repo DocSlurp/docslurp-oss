@@ -1,4 +1,4 @@
-import { withDependencySpan } from "@docslurp/shared/observability";
+import { startDependencySpan, withDependencySpan } from "@docslurp/shared/observability";
 /**
  * LanceDB vector search service for query-time ANN retrieval.
  *
@@ -11,9 +11,11 @@ import * as lancedb from "@lancedb/lancedb";
 
 import { resolveLanceDbConfig, VectorNamespaceManager } from "@docslurp/shared";
 import { withLanceDdb } from "@docslurp/shared/lancedb-ddb";
-import { withLanceS3Proxy } from "@docslurp/shared/lancedb-s3-trace";
+import { withLanceS3Proxy, withLanceSearchSpan } from "@docslurp/shared/lancedb-s3-trace";
 
 import { lanceDbQueryTuning } from "./lancedb-query-tuning.js";
+import { resultCache, resultCacheKey } from "./result-cache.js";
+import { countSearchEvent } from "./timings.js";
 
 /**
  * Connections and table handles are reused across searches. Opening them per
@@ -172,8 +174,47 @@ export async function lanceDbVectorSearch(args: {
   } else {
     targets.push({ uri: root, name: VectorNamespaceManager.getTableName(args.orgId), documentIds: args.documentIds });
   }
-  const rows = (await Promise.all(targets.map(async ({ uri, name, documentIds }) => {
-    const table = await getTable(uri, name);
+  const opened = await Promise.all(targets.map(async (target) => ({ ...target, table: await getTable(target.uri, target.name) })));
+
+  // Result cache (off unless SEARCH_RESULT_CACHE_MAX_ENTRIES > 0). The key holds each
+  // table's version, so any write produces a new key. table.version() reads the open
+  // handle's dataset, which refreshes at most every READ_CONSISTENCY_SECONDS, exactly
+  // like a query on that handle, so it adds no storage round trip of its own.
+  const cache = resultCache<LanceDbSearchHit[]>();
+  let cacheKey: string | null = null;
+  if (cache.enabled) {
+    try {
+      const present = opened.filter((target): target is typeof target & { table: lancedb.Table } => target.table !== null);
+      const versions = await Promise.all(present.map((target) => target.table.version()));
+      cacheKey = resultCacheKey({
+        orgId: args.orgId,
+        targets: present.map((target, index) => ({ uri: target.uri, name: target.name, version: versions[index]!, documentIds: target.documentIds })),
+        queryVector: args.queryVector,
+        limit: args.limit,
+        refineFactor: refineFactor ?? undefined,
+        embeddingModel: args.embeddingModel,
+        tuning: present.map((target) => lanceDbQueryTuning(args.limit, target.documentIds?.length ?? 0, refineFactor)),
+      });
+      const cached = cache.get(cacheKey);
+      const span = startDependencySpan("lancedb.result_cache", {
+        "db.system.name": "lancedb", "docslurp.dependency.type": "cache", "docslurp.dependency.provider": "memory",
+        "docslurp.dependency.operation": "result_cache", "docslurp.dependency.phase": "adapter",
+        "docslurp.cache.hit": cached !== undefined, "docslurp.cache.entries": cache.size,
+      });
+      span.end();
+      if (cached) {
+        countSearchEvent("resultCacheHit");
+        console.info(`[search-cache] result hit hits=${cached.length} entries=${cache.size}`);
+        return cached.map((hit) => ({ ...hit }));
+      }
+      countSearchEvent("resultCacheMiss");
+    } catch {
+      cacheKey = null; // A version lookup failure falls through to an uncached search.
+    }
+  }
+
+  let failed = false;
+  const rows = (await Promise.all(opened.map(async ({ uri, name, documentIds, table }) => {
     if (!table) return [];
     try {
       // Filter before nearest-neighbor selection. Overfetching a global top-k
@@ -191,6 +232,7 @@ export async function lanceDbVectorSearch(args: {
       // Retain an independent scope check at the storage boundary.
       return filterLanceDbRowsByDocumentIds((await lanceSpan("search", () => query.toArray())) as LanceDbRow[], documentIds);
     } catch {
+      failed = true;
       dropTable(uri, name);
       return [];
     }
@@ -213,6 +255,8 @@ export async function lanceDbVectorSearch(args: {
     if (results.length >= args.limit) break;
   }
 
+  // Never cache a degraded answer from a target that errored.
+  if (cacheKey && !failed) cache.set(cacheKey, results.map((hit) => ({ ...hit })));
   return results;
 }
 
@@ -221,7 +265,9 @@ export function getOrgLanceDbPrefix(orgId: string): string {
 }
 
 function lanceSpan<T>(operation: string, run: () => Promise<T>): Promise<T> {
-  return withDependencySpan(`lancedb.${operation}`, { "db.system.name": "lancedb",
+  const attributes = { "db.system.name": "lancedb",
     "docslurp.dependency.type": "vector", "docslurp.dependency.provider": "lancedb",
-    "docslurp.dependency.operation": operation, "docslurp.dependency.phase": "adapter" }, run);
+    "docslurp.dependency.operation": operation, "docslurp.dependency.phase": "adapter" };
+  // Searches also report their own S3 request counts by object class (non-zero only with LANCEDB_S3_TRACE).
+  return operation === "search" ? withLanceSearchSpan(`lancedb.${operation}`, attributes, run) : withDependencySpan(`lancedb.${operation}`, attributes, run);
 }

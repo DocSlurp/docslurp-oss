@@ -2,7 +2,7 @@ import { createServer, type IncomingHttpHeaders } from "node:http";
 import { afterAll, expect, it, vi } from "vitest";
 import type { ReadableSpan } from "@opentelemetry/sdk-trace-base";
 import { initializeObservability, shutdownObservability } from "../observability.js";
-import { LanceS3Stats, classifyS3Request, getLanceS3TraceStats, keyPrefix, signUpstreamRequest, startLanceS3Proxy, withLanceS3Proxy } from "../lancedb-s3-trace.js";
+import { LanceS3Stats, beginSearchReadScope, classifyS3Request, lanceObjectClass, rangeSizeBucket, searchReadAttributes, withLanceSearchSpan, getLanceS3TraceStats, keyPrefix, signUpstreamRequest, startLanceS3Proxy, withLanceS3Proxy } from "../lancedb-s3-trace.js";
 
 vi.stubEnv("OTEL_ENABLED", "true");
 vi.stubEnv("LANGFUSE_ENABLED", "false");
@@ -139,4 +139,90 @@ it("is off unless LANCEDB_S3_TRACE is set and only rewrites s3 roots", async () 
   expect(await withLanceS3Proxy("s3://b/lancedb", options, {})).toBe(options);
   expect(await withLanceS3Proxy("/tmp/lance", options, { LANCEDB_S3_TRACE: "1" })).toBe(options);
   expect(getLanceS3TraceStats().requests).toBeGreaterThanOrEqual(0);
+});
+
+it("classifies Lance object keys and range sizes", () => {
+  const cls = (op: Parameters<typeof lanceObjectClass>[0], key: string) => lanceObjectClass(op, key);
+  expect(cls("ListObjectsV2", "")).toBe("list");
+  expect(cls("GetObject", "lancedb/org/t.lance/_versions/18446744073709551610.manifest")).toBe("versions");
+  expect(cls("HeadObject", "t.lance/_versions/3.manifest")).toBe("versions");
+  expect(cls("GetObject", "t.lance/_latest.manifest")).toBe("latest");
+  expect(cls("GetObject", "t.lance/_transactions/0-abc.txn")).toBe("transactions");
+  expect(cls("GetObject", "t.lance/_indices/5c1e/index.idx")).toBe("indices");
+  expect(cls("GetObject", "t.lance/data/0123abcd.lance")).toBe("data");
+  expect(cls("GetObject", "t.lance/_deletions/0-1.arrow")).toBe("deletions");
+  expect(cls("GetObject", "somewhere/else.bin")).toBe("other");
+  // A table or org literally named "data" or "_versions" must not be mistaken for the Lance directory of that name.
+  expect(cls("GetObject", "data/org/t.lance/_versions/1.manifest")).toBe("versions");
+  expect(rangeSizeBucket(undefined)).toBe("full");
+  expect(rangeSizeBucket("bytes=0-")).toBe("full");
+  expect(rangeSizeBucket("bytes=0-4095")).toBe("le4k");
+  expect(rangeSizeBucket("bytes=100-65635")).toBe("le64k");
+  expect(rangeSizeBucket("bytes=0-1048575")).toBe("le1m");
+  expect(rangeSizeBucket("bytes=0-1048576")).toBe("gt1m");
+});
+
+it("counts proxied requests per search by object class and flags overlapping searches", async () => {
+  spans.length = 0;
+  const upstream = createServer((req, res) => { req.resume(); res.writeHead(200, { "content-length": "4" }); res.end("data"); });
+  await new Promise<void>((r) => upstream.listen(0, "127.0.0.1", r));
+  const stats = new LanceS3Stats();
+  const proxy = await startLanceS3Proxy({ endpoint: `http://127.0.0.1:${(upstream.address() as { port: number }).port}`, region: "us-east-1", credentials: { accessKeyId: "AK", secretAccessKey: "SK" }, stats, logIntervalMs: 0 });
+  try {
+    const get = async (path: string, range?: string) => (await fetch(`${proxy.endpoint}/bkt/${path}`, { headers: range ? { range } : {} })).text();
+    await get("t.lance/_versions/1.manifest"); // outside any search: not counted
+    const first = beginSearchReadScope();
+    await fetch(`${proxy.endpoint}/bkt?list-type=2&prefix=t.lance%2F_versions%2F`).then((r) => r.text());
+    await get("t.lance/_indices/u/index.idx", "bytes=0-2097151");
+    await get("t.lance/data/a.lance", "bytes=0-99");
+    const alone = first.end();
+    expect(alone).toMatchObject({ requests: 3, bytes: 12, overlapped: false, byClass: { list: 1, indices: 1, data: 1 }, bySize: { full: 1, gt1m: 1, le4k: 1 } });
+    expect(alone.requestMs).toBeGreaterThan(0);
+
+    const a = beginSearchReadScope();
+    await get("t.lance/data/a.lance", "bytes=0-9");
+    const b = beginSearchReadScope(); // overlaps a
+    await get("t.lance/_versions/2.manifest");
+    const countsA = a.end();
+    await get("t.lance/data/b.lance");
+    const countsB = b.end();
+    expect(countsA).toMatchObject({ requests: 2, overlapped: true, byClass: { data: 1, versions: 1 } });
+    expect(countsB).toMatchObject({ requests: 2, overlapped: true, byClass: { versions: 1, data: 1 } });
+    expect(b.end()).toEqual(countsB); // idempotent
+    await get("t.lance/data/c.lance"); // scopes closed: not counted
+    expect(countsB.requests).toBe(2);
+    expect(searchReadAttributes(alone)).toMatchObject({ "docslurp.lancedb.s3.requests": 3, "docslurp.lancedb.s3.requests.list": 1, "docslurp.lancedb.s3.requests.indices": 1, "docslurp.lancedb.s3.requests.data": 1, "docslurp.lancedb.s3.range.gt1m": 1, "docslurp.lancedb.s3.overlapped": false });
+    expect(searchReadAttributes(alone)).not.toHaveProperty("docslurp.lancedb.s3.requests.versions");
+    expect(spans.find((s) => s.attributes["http.request.header.range"] === "bytes=0-2097151")!.attributes["docslurp.lancedb.object_class"]).toBe("indices");
+  } finally {
+    await proxy.close();
+    await new Promise<void>((r) => { upstream.close(() => r()); upstream.closeAllConnections(); });
+  }
+});
+
+it("puts search request counts on the search span and in the summary line", async () => {
+  spans.length = 0;
+  const upstream = createServer((req, res) => { req.resume(); res.writeHead(200, { "content-length": "2" }); res.end("ok"); });
+  await new Promise<void>((r) => upstream.listen(0, "127.0.0.1", r));
+  const stats = new LanceS3Stats();
+  const proxy = await startLanceS3Proxy({ endpoint: `http://127.0.0.1:${(upstream.address() as { port: number }).port}`, region: "us-east-1", credentials: { accessKeyId: "AK", secretAccessKey: "SK" }, stats, logIntervalMs: 0 });
+  try {
+    await withLanceSearchSpan("lancedb.search", { "docslurp.dependency.operation": "search" }, async () => {
+      await fetch(`${proxy.endpoint}/bkt?list-type=2`).then((r) => r.text());
+      await fetch(`${proxy.endpoint}/bkt/t.lance/_indices/u/index.idx`, { headers: { range: "bytes=0-9" } }).then((r) => r.text());
+    }, stats);
+    await withLanceSearchSpan("lancedb.search", {}, async () => {}, stats); // no proxied requests: nothing recorded
+    await expect(withLanceSearchSpan("lancedb.search", {}, async () => { throw new Error("boom"); }, stats)).rejects.toThrow("boom");
+    const search = spans.find((s) => s.name === "lancedb.search" && s.attributes["docslurp.lancedb.s3.requests"] !== undefined)!;
+    expect(search.attributes).toMatchObject({ "docslurp.lancedb.s3.requests": 2, "docslurp.lancedb.s3.requests.list": 1, "docslurp.lancedb.s3.requests.indices": 1, "docslurp.lancedb.s3.overlapped": false });
+    expect(spans.filter((s) => s.name === "lancedb.search")).toHaveLength(3);
+    const line = stats.summaryLine(60);
+    expect(line).toContain(" searches=1 search_overlapped=0 search_requests=2 search_by_class=");
+    expect(line).toMatch(/search_by_class=(list=1,indices=1|indices=1,list=1)$/);
+    expect(stats.snapshot()).toMatchObject({ searches: 1, searchRequests: 2, searchByClass: { list: 1, indices: 1 } });
+    expect(stats.summaryLine(60)).not.toContain("searches="); // window reset
+  } finally {
+    await proxy.close();
+    await new Promise<void>((r) => { upstream.close(() => r()); upstream.closeAllConnections(); });
+  }
 });
