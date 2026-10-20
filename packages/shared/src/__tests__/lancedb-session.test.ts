@@ -35,13 +35,13 @@ describe("resolveLanceSessionConfig", () => {
     expect(resolveLanceSessionConfig({ LANCEDB_READ_CONSISTENCY_SECONDS: "0" }, GB).readConsistencySeconds).toBe(0);
   });
 
-  it("prewarms the index by default, data only when asked", () => {
+  it("does not prewarm by default (no measured win); each switch is opt-in", () => {
     const defaults = resolveLanceSessionConfig({}, GB);
     expect(defaults.prewarmRefreshSeconds).toBe(60);
     expect(resolveLanceSessionConfig({ LANCEDB_PREWARM_REFRESH_SECONDS: "0" }, GB).prewarmRefreshSeconds).toBe(0);
-    expect([defaults.prewarmIndex, defaults.prewarmData, defaults.prewarmBlocking]).toEqual([true, false, false]);
-    const custom = resolveLanceSessionConfig({ LANCEDB_PREWARM_INDEX: "false", LANCEDB_PREWARM_DATA: "1", LANCEDB_PREWARM_BLOCKING: "on" }, GB);
-    expect([custom.prewarmIndex, custom.prewarmData, custom.prewarmBlocking]).toEqual([false, true, true]);
+    expect([defaults.prewarmIndex, defaults.prewarmData, defaults.prewarmBlocking]).toEqual([false, false, false]);
+    const custom = resolveLanceSessionConfig({ LANCEDB_PREWARM_INDEX: "true", LANCEDB_PREWARM_DATA: "1", LANCEDB_PREWARM_BLOCKING: "on" }, GB);
+    expect([custom.prewarmIndex, custom.prewarmData, custom.prewarmBlocking]).toEqual([true, true, true]);
   });
 
   it("rejects invalid values instead of silently falling back", () => {

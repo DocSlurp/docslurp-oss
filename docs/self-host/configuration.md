@@ -111,11 +111,11 @@ answers searches. Instead the server re-prewarms open tables every
 | --- | --- | --- |
 | `LANCEDB_INDEX_CACHE_MB` | 25% of usable memory, 64 MB to 6 GB | Index cache size. LanceDB's own default is a fixed 6 GB. Usable memory is the container limit when one is set. |
 | `LANCEDB_METADATA_CACHE_MB` | 5% of usable memory, 32 MB to 1 GB | File footer and schema cache size. LanceDB's own default is a fixed 1 GB. |
-| `LANCEDB_PREWARM_INDEX` | `true` | Prewarm vector and FTS indexes when a table opens. Failures are logged (`[lancedb-session] prewarm ... errors=`), never thrown. |
+| `LANCEDB_PREWARM_INDEX` | `false` | Prewarm vector and FTS indexes when a table opens. Off by default: on MinIO with injected 40 ms latency it did not measurably change search latency (`server/scripts/lancedb-session-bench.ts`). Failures are logged (`[lancedb-session] prewarm ... errors=`), never thrown. |
 | `LANCEDB_PREWARM_BLOCKING` | `false` | `true` makes the first search wait for the prewarm. Off, the first searches run while it loads. |
-| `LANCEDB_PREWARM_REFRESH_SECONDS` | `60` | Re-prewarm open tables this often (cheap when already cached). `0` disables. |
+| `LANCEDB_PREWARM_REFRESH_SECONDS` | `60` | With `LANCEDB_PREWARM_INDEX=true`, re-prewarm open tables this often. `0` disables. |
 | `LANCEDB_PREWARM_DATA` | `false` | Also load the `vector`, `id` and `documentId` columns, so refine and `documentId` filters read memory. Costs RAM of that size. |
-| `LANCEDB_READ_CONSISTENCY_SECONDS` | `10` | How often an open table checks for a new version. Higher means fewer manifest reads, but new rows take that long to become searchable. `0` checks on every query. |
+| `LANCEDB_READ_CONSISTENCY_SECONDS` | `10` | How often an open table checks for a new version. Higher means fewer manifest reads, but new rows take that long to become searchable. While documents are being ingested, a longer interval avoids re-reading each new unindexed fragment (see the benchmark in the PR). `0` checks on every query. |
 
 The server logs `[lancedb-session] created ...` at startup with the configured sizes.
 

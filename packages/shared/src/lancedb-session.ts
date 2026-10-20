@@ -73,7 +73,7 @@ export function resolveLanceSessionConfig(env: Env = process.env, memoryBytes: n
     indexCacheSource: indexMb !== undefined ? "env" : "auto",
     metadataCacheSource: metadataMb !== undefined ? "env" : "auto",
     readConsistencySeconds,
-    prewarmIndex: parseBool(env, "LANCEDB_PREWARM_INDEX", true),
+    prewarmIndex: parseBool(env, "LANCEDB_PREWARM_INDEX", false),
     prewarmData: parseBool(env, "LANCEDB_PREWARM_DATA", false),
     prewarmRefreshSeconds: parseNumber(env, "LANCEDB_PREWARM_REFRESH_SECONDS", 0) ?? 60,
     prewarmBlocking: parseBool(env, "LANCEDB_PREWARM_BLOCKING", false),

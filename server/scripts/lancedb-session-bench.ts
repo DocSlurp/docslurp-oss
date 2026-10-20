@@ -149,7 +149,7 @@ function matrix() {
   const delays = (process.env.BENCH_DELAY_MS ?? "0,40").split(",");
   const reps = Number(process.env.BENCH_REPS ?? 3);
   const only = process.env.BENCH_ONLY;
-  console.log(`| delay | variant | first (ms) | queries 2-11 p50 | steady p50 | steady p95 | steady max | GETs | cached MB |`);
+  console.log(`| delay | variant | first (ms) | queries 2-11 p50 | steady p50 | steady p95 | steady max | reads/search (data / index / version) | cached MB |`);
   console.log(`|---|---|---|---|---|---|---|---|---|`);
   for (const delay of delays) {
     for (const variant of variants) {
@@ -162,7 +162,9 @@ function matrix() {
         runs.push(JSON.parse(out.trim().split("\n").pop()!));
       }
       const med = (key: string) => percentile(runs.map((r) => r[key]), 0.5);
-      const gets = percentile(runs.map((r) => r.requests.total ?? 0), 0.5);
+      const queries = Number(process.env.BENCH_QUERIES ?? 300);
+      const per = (cls: string[]) => (percentile(runs.map((r) => cls.reduce((sum, c) => sum + (r.requests[c] ?? 0), 0)), 0.5) / queries).toFixed(2);
+      const gets = `${per(["data"])} / ${per(["index"])} / ${per(["list", "versions", "latest"])}`;
       console.log(`| ${delay} ms | ${variant.name} | ${med("firstMs")} | ${med("earlyP50")} | ${med("steadyP50")} | ${med("steadyP95")} | ${med("maxMs")} | ${gets} | ${med("cachedMb")} |`);
     }
   }
