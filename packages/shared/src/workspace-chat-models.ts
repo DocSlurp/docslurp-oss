@@ -11,6 +11,11 @@ export type WorkspaceChatModelId = (typeof WORKSPACE_CHAT_MODELS)[number]["id"];
 export const DEFAULT_WORKSPACE_CHAT_MODEL: WorkspaceChatModelId =
   "z-ai/glm-5.3-flash";
 
+export function isWorkspaceChatModelId(model: unknown): model is WorkspaceChatModelId {
+  return WORKSPACE_CHAT_MODELS.some((candidate) => candidate.id === model);
+}
+
+/** Display fallback only; request handling rejects unknown explicit models. */
 export function resolveWorkspaceChatModel(
   model: string | null | undefined,
 ): WorkspaceChatModelId {

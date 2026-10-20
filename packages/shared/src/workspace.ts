@@ -282,7 +282,73 @@ export type WorkspaceChatWholeCorpusDebug = z.infer<
   typeof workspaceChatWholeCorpusDebugSchema
 >;
 
+/** Search-agent budgets for one /v1/chat turn. Non-admin callers may only lower them. */
+export const CHAT_AGENT_LIMIT_DEFAULTS = { maxSteps: 6, maxToolCalls: 12, searchConcurrency: 4 } as const;
+export const CHAT_AGENT_LIMIT_MAXIMUMS = { maxSteps: 12, maxToolCalls: 24, searchConcurrency: 8 } as const;
+export type ChatAgentLimitName = keyof typeof CHAT_AGENT_LIMIT_DEFAULTS;
+
+export const chatAgentLimitsInputSchema = z.object({
+  /** Model steps (calls), including the final answer step. Default 6. */
+  maxSteps: z.number().int().min(1).max(CHAT_AGENT_LIMIT_MAXIMUMS.maxSteps).optional(),
+  /** Tool calls across the turn; further calls are refused with `code: "tool_call_limit"`. Default 12. */
+  maxToolCalls: z.number().int().min(1).max(CHAT_AGENT_LIMIT_MAXIMUMS.maxToolCalls).optional(),
+  /** Upper bound for the search tool's parallel `queries` concurrency. Default 4. */
+  searchConcurrency: z.number().int().min(1).max(CHAT_AGENT_LIMIT_MAXIMUMS.searchConcurrency).optional(),
+}).strict();
+export type ChatAgentLimitsInput = z.infer<typeof chatAgentLimitsInputSchema>;
+
+export const chatAgentLimitsSchema = z.object({
+  maxSteps: z.number().int().positive(),
+  maxToolCalls: z.number().int().positive(),
+  searchConcurrency: z.number().int().positive(),
+  /** Requested limits lowered to the defaults because the caller is not an admin. */
+  clamped: z.array(z.enum(["maxSteps", "maxToolCalls", "searchConcurrency"])).default([]),
+});
+export type ChatAgentLimits = z.infer<typeof chatAgentLimitsSchema>;
+
+/**
+ * Why the search agent stopped:
+ * - `answered`: the final answer cites evidence (or no search was needed).
+ * - `answered_without_citations`: the agent searched at least once but the answer has no [n] citation.
+ * - `no_evidence`: every search the agent ran returned zero results.
+ * - `step_limit`: the step budget ended the loop while the model was still calling tools.
+ * - `tool_call_limit`: at least one tool call was refused by the tool-call budget.
+ * - `timeout` / `error`: the turn failed (traces only; the HTTP response is an error).
+ */
+export const CHAT_AGENT_STOP_REASONS = ["answered", "answered_without_citations", "no_evidence", "step_limit", "tool_call_limit", "timeout", "error"] as const;
+export const chatAgentStopReasonSchema = z.enum(CHAT_AGENT_STOP_REASONS);
+export type ChatAgentStopReason = z.infer<typeof chatAgentStopReasonSchema>;
+
+export const chatAgentStepUsageSchema = z.object({
+  step: z.number().int().nonnegative(),
+  /** Model/build that answered this step, as reported by the provider. */
+  model: z.string().nullable(),
+  finishReason: z.string(),
+  inputTokens: z.number().int().nonnegative(),
+  outputTokens: z.number().int().nonnegative(),
+  costCents: z.number().nonnegative().optional(),
+  toolCalls: z.array(z.string()),
+});
+export type ChatAgentStepUsage = z.infer<typeof chatAgentStepUsageSchema>;
+
 export const workspaceChatDebugSchema = z.object({
+  /** Search-agent turns only: the `model` the caller asked for (null when omitted). */
+  requestedModel: z.string().nullable().optional(),
+  /** Search-agent turns only: the provider's model/build id from the last response (aliases can resolve to dated builds). */
+  resolvedModel: z.string().nullable().optional(),
+  /** Search-agent turns only: the upstream provider OpenRouter routed to, when reported. */
+  resolvedProvider: z.string().nullable().optional(),
+  steps: z.number().int().nonnegative().optional(),
+  /** Tool calls executed (refused calls over the budget are not counted). */
+  toolCallCount: z.number().int().nonnegative().optional(),
+  toolCallsRefused: z.number().int().nonnegative().optional(),
+  searchCallCount: z.number().int().nonnegative().optional(),
+  /** Retrieval queries, counting each item of a parallel `queries` batch. */
+  searchQueryCount: z.number().int().nonnegative().optional(),
+  zeroHitSearchCount: z.number().int().nonnegative().optional(),
+  stopReason: chatAgentStopReasonSchema.optional(),
+  stepUsage: z.array(chatAgentStepUsageSchema).optional(),
+  limits: chatAgentLimitsSchema.optional(),
   toolCalls: z.array(z.object({
     id: z.string(), name: z.string(), status: z.enum(["loading", "success", "error"]),
     runtimeMs: z.number().nonnegative().optional(),

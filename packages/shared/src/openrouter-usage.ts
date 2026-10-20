@@ -1,3 +1,5 @@
+import { chatModelPricePerToken } from "./chat-model-prices.js";
+
 /** Provider charges are USD; the application ledger uses fractional USD cents. */
 export interface ProviderTextUsage {
   inputTokens: number;
@@ -58,11 +60,13 @@ export async function resolveOpenRouterUsage(args: {
       }
     } catch { /* Record explicit fallback provenance; accounting must not discard the answer. */ }
   }
-  const pricing = await getModelPricing(args.model);
+  // No receipt: estimate from the verified price table, then the live listing.
+  const verified = chatModelPricePerToken(args.model);
+  const pricing = verified ?? await getModelPricing(args.model);
   return { ...base,
     ...(pricing ? { costCents: (base.inputTokens * pricing.input + base.outputTokens * pricing.output) * 100 } : {}),
     metadata: { costSource: "estimate", generationId: args.generationId ?? null,
-      pricingSource: pricing ? "openrouter-models" : "configured-fallback", ...(pricing ? { pricingUsdPerToken: pricing } : {}) },
+      pricingSource: verified ? "model-prices" : pricing ? "openrouter-models" : "configured-fallback", ...(pricing ? { pricingUsdPerToken: pricing } : {}) },
   };
 }
 
