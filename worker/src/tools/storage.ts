@@ -568,7 +568,7 @@ class MultipartUploadWriter extends Writable {
     this.totalBufferedBytes += chunk.length;
     this.bytesWritten += chunk.length;
 
-    if (this.totalBufferedBytes >= this.partSizeBytes) {
+    while (this.totalBufferedBytes >= this.partSizeBytes) {
       await this.flushPart();
     }
   }
@@ -620,9 +620,18 @@ class MultipartUploadWriter extends Writable {
       return;
     }
 
-    const body = Buffer.concat(this.pendingChunks, this.totalBufferedBytes);
+    // Cut exactly partSizeBytes for every non-final part: R2 (and other strict stores) reject
+    // CompleteMultipartUpload with InvalidPart when non-trailing parts differ in length.
+    const all =
+      this.pendingChunks.length === 1
+        ? this.pendingChunks[0]!
+        : Buffer.concat(this.pendingChunks, this.totalBufferedBytes);
+    const cut = force ? all.length : this.partSizeBytes;
+    const body = all.subarray(0, cut);
+    const rest = all.subarray(cut);
     this.pendingChunks.length = 0;
-    this.totalBufferedBytes = 0;
+    this.totalBufferedBytes = rest.length;
+    if (rest.length) this.pendingChunks.push(rest);
 
     const uploadId = await this.ensureUpload();
     const partNumber = this.nextPartNumber++;

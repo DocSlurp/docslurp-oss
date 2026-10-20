@@ -4,6 +4,8 @@ import { existsSync } from "node:fs";
 
 import { resolveLanceDbConfig, resolveObjectStorageConfig } from "@docslurp/shared";
 
+import { storageAccessKeyIdProblem } from "./lib/storage-credentials.js";
+
 const defaultDatabaseUrl = "postgres://docslurp:docslurp@localhost:5432/docslurp";
 
 function isContainerRuntime(): boolean {
@@ -115,7 +117,12 @@ function assertProductionSecret(
 function validateProductionSecrets(): void {
   // Object-storage credentials come from STORAGE_URI userinfo or AWS_* variables.
   const storage = resolveObjectStorageConfig();
-  assertProductionSecret("STORAGE_URI access key", storage.accessKeyId);
+  if (process.env.NODE_ENV === "production") {
+    const problem = storageAccessKeyIdProblem(storage.accessKeyId);
+    if (problem) {
+      throw new Error(`STORAGE_URI access key ${problem} in production`);
+    }
+  }
   assertProductionSecret("STORAGE_URI secret key", storage.secretAccessKey);
   assertProductionSecret("METRICS_SECRET", process.env.METRICS_SECRET);
   assertProductionSecret("BETTER_AUTH_SECRET", process.env.BETTER_AUTH_SECRET, { minLength: 32 });

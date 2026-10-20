@@ -491,6 +491,10 @@ export const pipelineFeaturesSchema = z
     webhooks: workspaceWebhookSettingsSchema.default(defaultWorkspaceWebhookSettings),
     /** Per-page decision-model router (shadow/active); off unless `mode` is set. */
     pageRouter: pageRouterConfigSchema.default(defaultPageRouterConfig),
+    /**
+     * Read sampled video frames with a vision model (needs MEDIA_VIDEO_ENABLED on the worker).
+     * A video without an audio track is always read from frames, since there is nothing to transcribe.
+     */
     mediaVideo: z.object({
       enabled: z.boolean().default(false),
       scanFps: z.number().min(.1).max(10).optional(),

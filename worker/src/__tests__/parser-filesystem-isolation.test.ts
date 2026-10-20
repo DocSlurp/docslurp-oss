@@ -101,3 +101,26 @@ it.skipIf(process.platform !== "linux" || !existsSync("/usr/bin/bwrap"))("runs a
     rmSync(job, { recursive: true, force: true });
   }
 });
+
+// Debian and Ubuntu resolve some shared libraries and tools through
+// /etc/alternatives (libblas.so.3 -> /etc/alternatives/... for ffmpeg on
+// trixie). Without that directory in the sandbox, ffprobe exits 127 and
+// every audio and video upload fails.
+const alternativesLink = existsSync("/etc/alternatives")
+  ? spawnSync("find", ["/usr/bin", "/usr/lib", "-maxdepth", "3", "-type", "l", "-lname", "/etc/alternatives/*", "-print", "-quit"], { encoding: "utf8" }).stdout.trim()
+  : "";
+it.skipIf(process.platform !== "linux" || !existsSync("/usr/bin/bwrap") || !alternativesLink)("resolves /etc/alternatives symlinks inside the sandbox", () => {
+  const result = spawnSync("bash", [path.resolve("scripts/parser-sandbox.sh"), "/bin/bash", "-c", 'test -e "$(readlink -f "$1")"', "probe", alternativesLink], {
+    encoding: "utf8", timeout: 10_000,
+    env: { PATH: process.env.PATH, DOCSLURP_PARSER_SANDBOX_MODE: "isolated", DOCSLURP_PARSER_SANDBOX_TMP_ROOT: tmpdir() },
+  });
+  expect(result.status, `${alternativesLink}: ${result.stderr || result.error?.message}`).toBe(0);
+});
+
+it.skipIf(process.platform !== "linux" || !existsSync("/usr/bin/bwrap") || !existsSync("/usr/bin/ffprobe"))("runs ffprobe inside the sandbox", () => {
+  const result = spawnSync("bash", [path.resolve("scripts/parser-sandbox.sh"), "/usr/bin/ffprobe", "-version"], {
+    encoding: "utf8", timeout: 10_000,
+    env: { PATH: process.env.PATH, DOCSLURP_PARSER_SANDBOX_MODE: "isolated", DOCSLURP_PARSER_SANDBOX_TMP_ROOT: tmpdir() },
+  });
+  expect(result.status, result.stderr || result.error?.message).toBe(0);
+});

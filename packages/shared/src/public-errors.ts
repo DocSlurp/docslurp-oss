@@ -22,6 +22,7 @@ export const PUBLIC_ERROR_MESSAGES = {
   unsupportedType: "This file type isn’t supported.",
   unreadableSource: "This file couldn’t be read. It may be corrupt, truncated or password-protected.",
   processing: "We couldn’t finish processing this document. Please try again.",
+  silentVideo: "This video has no audio track, and reading video frames is turned off on this server.",
   paused: "Processing is paused. Your workspace administrator can help you resume it.",
   workspaceMissing: "We couldn’t find that workspace. It may have been moved or removed.",
   personalOrganization: "Personal organizations can’t be changed this way.",
@@ -77,6 +78,24 @@ export function publicDiagnostics(value: unknown): unknown {
     }
     return [[key, publicDiagnostics(item)]];
   }));
+}
+
+/**
+ * Worker failure text for conditions the uploader can act on. The worker throws
+ * these exact strings; the API maps them to reviewed copy and everything else
+ * to the generic processing message.
+ */
+export const DOCUMENT_FAILURE_MARKERS = {
+  silentVideo: "Video has no audio track and MEDIA_VIDEO_ENABLED is off",
+} as const;
+
+/** Public copy for a stored Document, stage or Run error. Never echoes the raw text. */
+export function publicDocumentError(error: string | null | undefined): string | null {
+  if (!error) return null;
+  for (const [key, marker] of Object.entries(DOCUMENT_FAILURE_MARKERS)) {
+    if (error.includes(marker)) return PUBLIC_ERROR_MESSAGES[key as keyof typeof DOCUMENT_FAILURE_MARKERS];
+  }
+  return PUBLIC_ERROR_MESSAGES.processing;
 }
 
 export function publicProcessingMessage(status: string | null): string {

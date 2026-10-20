@@ -9,6 +9,7 @@ import type { CommandRunner } from "../tools/runner.js";
 import type { MediaJournal } from "./types.js";
 import { allowHostedCall } from "../lib/privacy-guard.js";
 import { transcribeChunk } from "./processing.js";
+import { DOCUMENT_FAILURE_MARKERS } from "@docslurp/shared";
 vi.mock("./rates.js", () => ({ verifyDeepInfraRate: vi.fn(async () => {}) }));
 vi.mock("../lib/privacy-guard.js", () => ({ allowHostedCall: vi.fn(async () => true) }));
 vi.mock("./prepare.js", () => ({ inspectMedia: vi.fn(async () => ({ duration: 301, hasAudio: true, hasVideo: false })), prepareAudioChunk: vi.fn(async () => new Uint8Array([1])), prepareDiarizationAudio: vi.fn(async () => new Uint8Array([1])) }));
@@ -65,6 +66,34 @@ describe("multimedia extraction pipeline boundary", () => {
     const canonical = (f.storage.putJson.mock.calls as unknown as [string, unknown][]).find(c => c[0].endsWith(".canonical.json"))![1] as { blocks: { metadata: Record<string, unknown> }[] };
     expect(canonical.blocks).toHaveLength(1);
     expect(canonical.blocks[0].metadata).toMatchObject({ mode: "shown", mediaKind: "video", startSeconds: 0, endSeconds: 1, frameSeconds: [0, 1], evidenceId: "doc:visual:0" });
+  });
+
+  it("reads a silent video's frames without the workspace opt-in, since there is no audio to transcribe", async () => {
+    vi.stubEnv("MEDIA_REMOTE_ENABLED","true");vi.stubEnv("MEDIA_VIDEO_ENABLED","true");vi.stubEnv("DEEPINFRA_API_KEY","test");
+    const f=fixture();f.journal.admitVideo=vi.fn(async()=>{});
+    vi.mocked(inspectMedia).mockResolvedValue({duration:2,hasAudio:false,hasVideo:true});
+    await extractMedia({...f,storage:f.storage as unknown as ArtifactStore});
+    expect(transcribeChunk).not.toHaveBeenCalled();expect(describeVideoChunk).toHaveBeenCalledTimes(1);
+    expect(f.storage.putJson).toHaveBeenCalledWith(expect.stringContaining(".json"),expect.objectContaining({coverage:"sampled-visual-only"}));
+  });
+
+  it("keeps audio-only coverage for a narrated video when the workspace has not opted in", async () => {
+    vi.stubEnv("MEDIA_REMOTE_ENABLED","true");vi.stubEnv("MEDIA_VIDEO_ENABLED","true");vi.stubEnv("DEEPINFRA_API_KEY","test");
+    const f=fixture();f.journal.admitVideo=vi.fn(async()=>{});
+    vi.mocked(inspectMedia).mockResolvedValue({duration:2,hasAudio:true,hasVideo:true});
+    await extractMedia({...f,storage:f.storage as unknown as ArtifactStore});
+    expect(transcribeChunk).toHaveBeenCalledTimes(1);expect(describeVideoChunk).not.toHaveBeenCalled();
+    expect(f.journal.admitVideo).toHaveBeenCalledWith(expect.objectContaining({orgId:"org"}),2,0);
+  });
+
+  it("fails a silent video with the public marker when the deployment has video frames off", async () => {
+    vi.stubEnv("MEDIA_REMOTE_ENABLED","true");vi.stubEnv("MEDIA_VIDEO_ENABLED","false");vi.stubEnv("DEEPINFRA_API_KEY","test");
+    const f=fixture();f.state.run.pipeline.mediaVideo={enabled:true};f.journal.admitVideo=vi.fn(async()=>{});
+    vi.mocked(inspectMedia).mockResolvedValue({duration:2,hasAudio:false,hasVideo:true});
+    vi.spyOn(console, "info").mockImplementation(() => {});vi.spyOn(console, "error").mockImplementation(() => {});
+    await extractMedia({...f,storage:f.storage as unknown as ArtifactStore});
+    expect(f.state.documentStage("doc","extract-markdown")).toMatchObject({status:"failed",error:DOCUMENT_FAILURE_MARKERS.silentVideo});
+    expect(describeVideoChunk).not.toHaveBeenCalled();expect(f.journal.admitVideo).not.toHaveBeenCalled();
   });
 
   it("preflights visual privacy before any paid audio call",async()=>{

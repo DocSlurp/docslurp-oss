@@ -5,6 +5,7 @@ import { scanVideo, prepareVideoFrame, describeVideoChunk } from "./video-proces
 import { LeasedMediaProvider, leasedMediaProvider } from "./capacity/runtime.js";
 import type { CapacityLeaseStore } from "./capacity/types.js";
 import { createHash } from "node:crypto";
+import { DOCUMENT_FAILURE_MARKERS } from "@docslurp/shared";
 import { allowHostedCall } from "../lib/privacy-guard.js";
 import { runDocumentStage } from "../pipeline/checkpoints.js";
 import type { WorkflowState } from "../pipeline/pipeline.js";
@@ -55,9 +56,12 @@ export async function extractMedia(args: { state: WorkflowState; document: Docum
     }
     const source = await storage.downloadToTempFile(document.sourceKey, "source.media", { maxBytes: config.maxSourceBytes });
     try {
-      const visualEnabled = process.env.MEDIA_VIDEO_ENABLED === "true" && state.run.pipeline.mediaVideo?.enabled === true;
       const { duration, hasAudio, hasVideo } = await inspectMedia(runner, source, config, signal);
-      if (!hasAudio && !visualEnabled) throw new Error("Visual-only video requires enabled workspace video processing");
+      // A silent video (screen recording) has nothing to transcribe, so its frames are the only evidence:
+      // read them without the workspace opt-in. Videos with audio still need pipeline.mediaVideo.enabled.
+      const visualEnabled = process.env.MEDIA_VIDEO_ENABLED === "true" && hasVideo
+        && (state.run.pipeline.mediaVideo?.enabled === true || !hasAudio);
+      if (!hasAudio && !visualEnabled) throw new Error(DOCUMENT_FAILURE_MARKERS.silentVideo);
       const policy = hasVideo ? videoPolicy(state.run.orgPlanId, duration, state.run.pipeline.mediaVideo) : undefined;
       if (policy) {
         if (!args.journal.admitVideo) throw new Error("Video requires durable organization quota admission");

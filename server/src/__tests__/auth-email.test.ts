@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { sendAuthEmailCode } from "../lib/auth-email.js";
+import { renderAuthCodeEmail, sendAuthEmailCode } from "../lib/auth-email.js";
 afterEach(() => { vi.unstubAllEnvs(); vi.unstubAllGlobals(); });
 describe("authentication email delivery", () => {
   it("rejects delivery without a real configured sender", async () => {
@@ -18,5 +18,12 @@ describe("authentication email delivery", () => {
     vi.stubEnv("RESEND_API_KEY", "test-key"); vi.stubEnv("EMAIL_FROM", "auth@example.com");
     vi.stubGlobal("fetch", vi.fn(async () => new Response('secret provider payload', { status: 503 })));
     await expect(sendAuthEmailCode({ email: "user@example.com", otp: "123456" })).rejects.toThrow("Unable to send verification email");
+  });
+  it("leads the subject with the code and shows it alone in text and HTML", () => {
+    const { subject, text, html } = renderAuthCodeEmail("123456");
+    expect(subject).toBe("123456 is your DocSlurp code");
+    expect(text).toContain("\n\n123456\n\n");
+    expect(html).toContain(">123456</div>");
+    expect(html).toContain("10 minutes");
   });
 });

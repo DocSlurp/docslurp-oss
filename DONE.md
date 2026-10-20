@@ -1,5 +1,7 @@
 # Completed
 
+- Refit the brand mark: the paper cup with an orange straw keeps its drawing but drops Slurp Blue for the product palette (paper cup on dark, ink cup on light, Deck app icon). Primary mark, lockup and `favicon.svg` follow the viewer's colour scheme. The wordmark is outlined Schibsted Grotesk (`outline-wordmark.py`, `wordmark.json`). Raster favicons come from a new rounded app icon, so they read on light and dark tab strips.
+
 - Let authenticated public chat (/v1/chat, /v1/search/chat, OpenAI-compatible completions) run the bounded search agent with workspace retrieval controls enforced on every tool call, while the MCP chat tool stays grounded retrieval only (no nested agents). Toggle with DOCSLURP_PUBLIC_CHAT_AGENT_ENABLED. Also: generic missing-premise/citation agent guidance, relevance-preserving MMR without vectors, opt-in metered DeepInfra BGE-M3 embeddings, failed-search usage persistence, and retrieval/multi-search evaluation harnesses with integrity-gated evidence.
 
 - Add opt-in hosted Qwen reranking at the actual search post-retrieval seam, with workspace provider/model settings, scoped spend/privacy gates, actual-token Search Session usage, bounded fallback diagnostics and isolated SQL/service tests.

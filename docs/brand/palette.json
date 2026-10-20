@@ -1,9 +1,8 @@
 {
-  "blue": "#0284C7",
-  "sky": "#7DD3FC",
-  "mist": "#E0F2FE",
-  "orange": "#F97316",
-  "ink": "#0F172A",
-  "paper": "#F8FAFC",
-  "deep": "#075985"
+  "paper": "#ECE7DB",
+  "crease": "#CFC7B4",
+  "ink": "#1A2130",
+  "slate": "#4A5568",
+  "straw": "#F97316",
+  "deck": "#0F151D"
 }

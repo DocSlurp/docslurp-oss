@@ -19,6 +19,12 @@
  * AWS SDK, via AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY. Use redactUri()
  * before logging a URI.
  *
+ * LANCEDB_STORAGE_URI (same shape as STORAGE_URI) gives the index its own
+ * endpoint, region and credentials, so blobs can live on a store without
+ * conditional writes (for example Backblaze B2) while LanceDB commits elsewhere.
+ * S3_* variables tune the AWS SDK client; LANCEDB_* variables tune Lance's
+ * object store (see resolveS3ClientTuning and resolveLanceDbConfig).
+ *
  * The pre-URI variables (S3_BUCKET, AWS_ENDPOINT_URL_S3, AWS_REGION) are still
  * honored when STORAGE_URI is unset so existing deployments keep working.
  */
@@ -42,6 +48,20 @@ export interface LanceDbConfig {
   storageOptions: Record<string, string> | undefined;
   /** Remaining query parameters, e.g. worker maintenance tuning. */
   params: URLSearchParams;
+  /** Set for s3+ddb:// roots: Lance commits through this DynamoDB table (see lancedb-ddb.ts). */
+  ddb?: LanceDdbConfig;
+}
+
+export interface LanceDdbConfig {
+  table: string;
+  /** DynamoDB region (the S3 side keeps its own region). */
+  region: string;
+  /** Separate DynamoDB credentials; empty means Lance reuses the S3 credentials for DynamoDB. */
+  accessKeyId?: string;
+  secretAccessKey?: string;
+  sessionToken?: string;
+  /** Custom DynamoDB endpoint (DynamoDB Local). */
+  endpoint?: string;
 }
 
 type Env = Record<string, string | undefined>;
@@ -49,6 +69,7 @@ type Env = Record<string, string | undefined>;
 const DEFAULT_BUCKET = "docslurp-files";
 const DEFAULT_REGION = "us-west-2";
 const DEFAULT_LOCAL_ENDPOINT = "http://localhost:9000";
+const DEFAULT_DDB_REGION = "us-east-1";
 const DEFAULT_LANCEDB_ROOT = "/tmp/docslurp-lancedb";
 
 function readEnv(value: string | undefined): string | undefined {
@@ -152,17 +173,108 @@ export function resolveObjectStorageConfig(env: Env = process.env): ObjectStorag
   };
 }
 
-/** Builds the S3Client configuration shared by every object-storage client. */
-export function s3ClientConfig(storage: ObjectStorageConfig) {
+function readInt(env: Env, name: string, min: number, max = Number.MAX_SAFE_INTEGER): number | undefined {
+  const raw = readEnv(env[name]);
+  if (raw === undefined) return undefined;
+  const value = Number(raw);
+  if (!Number.isInteger(value) || value < min || value > max) {
+    throw new Error(`${name} must be an integer between ${min} and ${max}; received "${raw}"`);
+  }
+  return value;
+}
+
+function readEnvBoolean(env: Env, name: string): boolean | undefined {
+  const raw = readEnv(env[name]);
+  return raw === undefined ? undefined : readBoolean(raw, false);
+}
+
+export type S3ChecksumMode = "when_supported" | "when_required";
+
+/** Optional S3 client tuning from S3_* variables; every field is undefined unless set. */
+export interface S3ClientTuning {
+  maxSockets?: number;
+  keepAlive?: boolean;
+  keepAliveInitialDelayMs?: number;
+  connectionTimeoutMs?: number;
+  requestTimeoutMs?: number;
+  socketTimeoutMs?: number;
+  maxAttempts?: number;
+  retryMode?: "standard" | "adaptive";
+  checksumMode?: S3ChecksumMode;
+  forcePathStyle?: boolean;
+  /** Multipart part size in bytes for streamed uploads (server). */
+  multipartPartSizeBytes?: number;
+}
+
+/**
+ * Reads S3 client tuning:
+ *   S3_MAX_SOCKETS, S3_KEEPALIVE, S3_KEEPALIVE_INITIAL_DELAY_MS,
+ *   S3_CONNECTION_TIMEOUT_MS, S3_REQUEST_TIMEOUT_MS, S3_SOCKET_TIMEOUT_MS,
+ *   S3_MAX_ATTEMPTS, S3_RETRY_MODE (standard|adaptive),
+ *   S3_CHECKSUM_MODE (when_supported|when_required),
+ *   S3_FORCE_PATH_STYLE (overrides STORAGE_URI pathStyle),
+ *   S3_MULTIPART_PART_SIZE_MB (5-5120).
+ * Unset variables leave the AWS SDK defaults untouched.
+ */
+export function resolveS3ClientTuning(env: Env = process.env): S3ClientTuning {
+  const retryMode = readEnv(env.S3_RETRY_MODE)?.toLowerCase();
+  if (retryMode && retryMode !== "standard" && retryMode !== "adaptive") {
+    throw new Error(`S3_RETRY_MODE must be standard or adaptive; received "${retryMode}"`);
+  }
+  const checksum = readEnv(env.S3_CHECKSUM_MODE)?.toLowerCase();
+  if (checksum && checksum !== "when_supported" && checksum !== "when_required") {
+    throw new Error(`S3_CHECKSUM_MODE must be when_supported or when_required; received "${checksum}"`);
+  }
+  const partMb = readInt(env, "S3_MULTIPART_PART_SIZE_MB", 5, 5120);
+  const tuning: S3ClientTuning = {
+    maxSockets: readInt(env, "S3_MAX_SOCKETS", 1),
+    keepAlive: readEnvBoolean(env, "S3_KEEPALIVE"),
+    keepAliveInitialDelayMs: readInt(env, "S3_KEEPALIVE_INITIAL_DELAY_MS", 0),
+    connectionTimeoutMs: readInt(env, "S3_CONNECTION_TIMEOUT_MS", 1),
+    requestTimeoutMs: readInt(env, "S3_REQUEST_TIMEOUT_MS", 1),
+    socketTimeoutMs: readInt(env, "S3_SOCKET_TIMEOUT_MS", 1),
+    maxAttempts: readInt(env, "S3_MAX_ATTEMPTS", 1, 20),
+    retryMode: retryMode as S3ClientTuning["retryMode"],
+    checksumMode: checksum as S3ChecksumMode | undefined,
+    forcePathStyle: readEnvBoolean(env, "S3_FORCE_PATH_STYLE"),
+    multipartPartSizeBytes: partMb === undefined ? undefined : partMb * 1024 * 1024,
+  };
+  for (const key of Object.keys(tuning) as Array<keyof S3ClientTuning>) if (tuning[key] === undefined) delete tuning[key];
+  return tuning;
+}
+
+/**
+ * Builds the S3Client configuration shared by every object-storage client.
+ * Tuning comes from S3_* variables (see resolveS3ClientTuning); with none set
+ * the result is the plain region/endpoint/credentials configuration.
+ */
+export function s3ClientConfig(storage: ObjectStorageConfig, env: Env = process.env) {
+  const tuning = resolveS3ClientTuning(env);
+  const agentOptions = {
+    ...(tuning.maxSockets !== undefined ? { maxSockets: tuning.maxSockets } : {}),
+    ...(tuning.keepAlive !== undefined ? { keepAlive: tuning.keepAlive } : {}),
+    ...(tuning.keepAliveInitialDelayMs !== undefined ? { keepAliveMsecs: tuning.keepAliveInitialDelayMs } : {}),
+  };
+  const handlerOptions = {
+    ...(tuning.connectionTimeoutMs !== undefined ? { connectionTimeout: tuning.connectionTimeoutMs } : {}),
+    ...(tuning.requestTimeoutMs !== undefined ? { requestTimeout: tuning.requestTimeoutMs } : {}),
+    ...(tuning.socketTimeoutMs !== undefined ? { socketTimeout: tuning.socketTimeoutMs } : {}),
+    ...(Object.keys(agentOptions).length ? { httpAgent: agentOptions, httpsAgent: agentOptions } : {}),
+  };
+  const checksum = tuning.checksumMode === undefined ? undefined : (tuning.checksumMode.toUpperCase() as "WHEN_SUPPORTED" | "WHEN_REQUIRED");
   return {
     region: storage.region,
     ...(storage.endpoint ? { endpoint: storage.endpoint } : {}),
-    forcePathStyle: storage.forcePathStyle,
+    forcePathStyle: tuning.forcePathStyle ?? storage.forcePathStyle,
     credentials: { accessKeyId: storage.accessKeyId, secretAccessKey: storage.secretAccessKey },
+    ...(Object.keys(handlerOptions).length ? { requestHandler: handlerOptions } : {}),
+    ...(tuning.maxAttempts !== undefined ? { maxAttempts: tuning.maxAttempts } : {}),
+    ...(tuning.retryMode ? { retryMode: tuning.retryMode } : {}),
+    ...(checksum ? { requestChecksumCalculation: checksum, responseChecksumValidation: checksum } : {}),
   };
 }
 
-const LANCE_STORAGE_PARAMS = new Set(["endpoint", "region", "allowHttp"]);
+const LANCE_STORAGE_PARAMS = new Set(["endpoint", "region", "allowHttp", "ddbTableName"]);
 
 /**
  * Splits LANCEDB_URI into a storage root (query removed, safe to append
@@ -177,7 +289,7 @@ export function parseLanceDbUri(value: string | undefined, storage?: ObjectStora
   const root = base.startsWith("file://") ? decodeURIComponent(new URL(base).pathname) : base.replace(/\/+$/, "");
 
   let storageOptions: Record<string, string> | undefined;
-  if (/^(s3|s3a|gs|az):\/\//.test(root)) {
+  if (/^(s3|s3a|s3\+ddb|gs|az):\/\//.test(root)) {
     const endpoint = params.get("endpoint") ?? (root.startsWith("s3") ? storage?.endpoint ?? null : null);
     const region = params.get("region") ?? (root.startsWith("s3") ? storage?.region ?? "auto" : null);
     storageOptions = {
@@ -191,10 +303,75 @@ export function parseLanceDbUri(value: string | undefined, storage?: ObjectStora
 
   const remaining = new URLSearchParams();
   for (const [key, entry] of params) if (!LANCE_STORAGE_PARAMS.has(key)) remaining.append(key, entry);
-  return { root, storageOptions, params: remaining };
+  const ddbTable = params.get("ddbTableName") ?? undefined;
+  return { root, storageOptions, params: remaining, ...(ddbTable ? { ddb: { table: ddbTable, region: DEFAULT_DDB_REGION } } : {}) };
 }
 
 /** LanceDB config from LANCEDB_URI plus the shared object storage settings. */
 export function resolveLanceDbConfig(env: Env = process.env, storage = resolveObjectStorageConfig(env)): LanceDbConfig {
-  return parseLanceDbUri(env.LANCEDB_URI, storage);
+  const lanceStorageUri = readEnv(env.LANCEDB_STORAGE_URI);
+  if (!lanceStorageUri) return applyLanceDdbEnv(withLanceTuning(parseLanceDbUri(withDdbScheme(env.LANCEDB_URI, env), storage), env), env);
+  // Separate index store: its own endpoint, region and credentials. When
+  // LANCEDB_URI is unset the index lives at s3://<LANCEDB_STORAGE_URI bucket>/lancedb.
+  let lanceStorage: ObjectStorageConfig;
+  try {
+    lanceStorage = parseStorageUri(lanceStorageUri, env);
+  } catch (error) {
+    throw new Error(String(error instanceof Error ? error.message : error).replace("STORAGE_URI", "LANCEDB_STORAGE_URI"));
+  }
+  const root = readEnv(env.LANCEDB_URI) ?? `s3://${lanceStorage.bucket}/lancedb`;
+  return applyLanceDdbEnv(withLanceTuning(parseLanceDbUri(withDdbScheme(root, env), lanceStorage), env), env);
+}
+
+/** LANCEDB_DDB_TABLE turns an s3:// Lance root into s3+ddb:// (external DynamoDB commit store). */
+function withDdbScheme(root: string | undefined, env: Env): string | undefined {
+  if (!root || !readEnv(env.LANCEDB_DDB_TABLE)) return root;
+  return root.startsWith("s3://") ? `s3+ddb://${root.slice("s3://".length)}` : root;
+}
+
+/**
+ * s3+ddb:// commit store settings:
+ *   LANCEDB_DDB_TABLE (or ?ddbTableName= on LANCEDB_URI), LANCEDB_DDB_REGION (default us-east-1),
+ *   LANCEDB_DDB_ACCESS_KEY_ID / LANCEDB_DDB_SECRET_ACCESS_KEY / LANCEDB_DDB_SESSION_TOKEN (optional; both keys
+ *   required together; without them Lance uses the object-store credentials for DynamoDB), LANCEDB_DDB_ENDPOINT.
+ */
+function applyLanceDdbEnv(config: LanceDbConfig, env: Env): LanceDbConfig {
+  if (!config.root.startsWith("s3+ddb://")) {
+    if (readEnv(env.LANCEDB_DDB_TABLE) && !config.root.startsWith("s3")) throw new Error("LANCEDB_DDB_TABLE requires an s3:// or s3+ddb:// LanceDB root");
+    return config;
+  }
+  const table = readEnv(env.LANCEDB_DDB_TABLE) ?? config.ddb?.table;
+  if (!table) throw new Error("s3+ddb:// LANCEDB_URI needs a DynamoDB table: set LANCEDB_DDB_TABLE or ?ddbTableName=");
+  const accessKeyId = readEnv(env.LANCEDB_DDB_ACCESS_KEY_ID);
+  const secretAccessKey = readEnv(env.LANCEDB_DDB_SECRET_ACCESS_KEY);
+  if (Boolean(accessKeyId) !== Boolean(secretAccessKey)) throw new Error("LANCEDB_DDB_ACCESS_KEY_ID and LANCEDB_DDB_SECRET_ACCESS_KEY must be set together");
+  return {
+    ...config,
+    ddb: {
+      table,
+      region: readEnv(env.LANCEDB_DDB_REGION) ?? DEFAULT_DDB_REGION,
+      ...(accessKeyId && secretAccessKey ? { accessKeyId, secretAccessKey } : {}),
+      ...(readEnv(env.LANCEDB_DDB_SESSION_TOKEN) ? { sessionToken: readEnv(env.LANCEDB_DDB_SESSION_TOKEN) } : {}),
+      ...(readEnv(env.LANCEDB_DDB_ENDPOINT) ? { endpoint: readEnv(env.LANCEDB_DDB_ENDPOINT) } : {}),
+    },
+  };
+}
+
+/**
+ * Optional LanceDB object-store tuning, merged into s3 storage options:
+ *   LANCEDB_CONNECT_TIMEOUT_SECONDS, LANCEDB_REQUEST_TIMEOUT_SECONDS,
+ *   LANCEDB_CLIENT_MAX_RETRIES, LANCEDB_POOL_MAX_IDLE_PER_HOST.
+ */
+function withLanceTuning(config: LanceDbConfig, env: Env): LanceDbConfig {
+  if (!config.storageOptions) return config;
+  const extra: Record<string, string> = {};
+  const connect = readInt(env, "LANCEDB_CONNECT_TIMEOUT_SECONDS", 1);
+  const request = readInt(env, "LANCEDB_REQUEST_TIMEOUT_SECONDS", 1);
+  const retries = readInt(env, "LANCEDB_CLIENT_MAX_RETRIES", 0, 100);
+  const idle = readInt(env, "LANCEDB_POOL_MAX_IDLE_PER_HOST", 0);
+  if (connect !== undefined) extra.connect_timeout = `${connect}s`;
+  if (request !== undefined) extra.timeout = `${request}s`;
+  if (retries !== undefined) extra.client_max_retries = String(retries);
+  if (idle !== undefined) extra.pool_max_idle_per_host = String(idle);
+  return Object.keys(extra).length ? { ...config, storageOptions: { ...config.storageOptions, ...extra } } : config;
 }

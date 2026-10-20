@@ -50,6 +50,14 @@
       "types": "./dist/workspace-chat-models.d.ts",
       "import": "./dist/workspace-chat-models.js"
     },
+    "./lancedb-ddb": {
+      "types": "./dist/lancedb-ddb.d.ts",
+      "import": "./dist/lancedb-ddb.js"
+    },
+    "./lancedb-s3-trace": {
+      "types": "./dist/lancedb-s3-trace.d.ts",
+      "import": "./dist/lancedb-s3-trace.js"
+    },
     "./chat-voice": {
       "types": "./dist/chat-voice.d.ts",
       "import": "./dist/chat-voice.js"
@@ -87,6 +95,7 @@
     "@opentelemetry/sdk-metrics": "^2.12.0",
     "@opentelemetry/sdk-trace-base": "^2.12.0",
     "@opentelemetry/sdk-trace-node": "^2.12.0",
+    "@smithy/signature-v4": "5.7.4",
     "@smithy/types": "4.19.0",
     "zod": "^4.6.7"
   },

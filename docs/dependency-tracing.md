@@ -35,6 +35,47 @@ or group by that attribute to separate idle polling from request and run work.
   from JavaScript S3 requests. Native LanceDB object-store requests do not pass
   through the AWS SDK middleware; adapter duration is not an S3 wire measurement.
 
+### LanceDB native S3 requests (`LANCEDB_S3_TRACE=1`)
+
+Lance's Rust object store has no request hooks and its `LANCE_LOG` output has no
+per-request records, so without help S3 request counts and latency for index storage
+are lower bounds (JavaScript SDK spans only). Set `LANCEDB_S3_TRACE=1` (default off,
+`s3://` Lance roots only) to start an in-process localhost proxy per upstream endpoint
+and point Lance at it with `allow_http`, path-style addressing. The proxy re-signs
+each request with SigV4 for the real host, streams request and response bodies, and
+forwards all other headers untouched, so `If-None-Match` / `If-Match` commit
+semantics and 412 responses are unchanged. It needs explicit credentials (storage URI
+userinfo or `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`); session tokens are
+supported. aws-chunked streaming payloads are rejected (object_store does not use them).
+
+Each request becomes a `lancedb.s3.<Operation>` span (`GetObject`, `HeadObject`,
+`PutObject`, `CopyObject`, `DeleteObject`, `DeleteObjects`, `ListObjectsV2`,
+`CreateMultipartUpload`, `UploadPart`, `CompleteMultipartUpload`, and so on) with
+`docslurp.storage.system=lancedb-s3`, `docslurp.dependency.type=s3`, phase `native`,
+provider, `server.address`, `aws.s3.bucket`, a truncated key prefix
+(`docslurp.s3.key_prefix`, first three segments), response status, request and
+response body bytes, `docslurp.s3.ttfb_ms`, `docslurp.s3.duration_ms`, the `Range`
+header and `docslurp.s3.condition`. Metrics stay on the shared bounded dimensions;
+keys never become labels. Retries happen inside object_store and are invisible
+except that a request identical to a recent 5xx/429/aborted one is marked
+`docslurp.lancedb_s3.retry_suspected` (a heuristic).
+
+Every 60 seconds the process logs one line, `[lancedb-s3] window=60s requests=...
+errors=... retries=... bytes_in=... bytes_out=... avg_ms=... avg_ttfb_ms=... p50_ms=...
+p95_ms=... p99_ms=... ops=Op=n,... statuses=Op:status=n,... total_requests=...`.
+Percentiles are histogram bucket upper bounds. `getLanceS3TraceStats()` from
+`@docslurp/shared/lancedb-s3-trace` returns the cumulative counters.
+
+Caveats: the proxy is another hop. On loopback against MinIO it added about
+0.2-0.5 ms per request and about 0.7 ms per MB streamed (roughly a 1.4 GB/s
+ceiling); against a remote provider this is small next to network latency, but
+confirm with `worker/scripts/lancedb-s3-trace-bench.ts` before trusting absolute
+timings, and keep it off for headline throughput runs unless every compared
+provider uses it. Spans are not linked to a workspace or run: requests arrive from a
+native thread outside the async context, so correlate by time window and key prefix.
+Upstream addressing is always path-style, and the proxy runs per process (API and
+each worker log their own lines).
+
 Metrics use bounded provider, operation, phase and error-type dimensions. IDs,
 object keys and hosts remain trace attributes, not metric labels.
 

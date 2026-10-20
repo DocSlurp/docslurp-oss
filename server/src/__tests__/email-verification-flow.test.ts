@@ -12,7 +12,7 @@ function setup(enabled: boolean) {
   let code = "";
   const transport = vi.fn(async (_url: string, init: RequestInit) => {
     const payload = JSON.parse(String(init.body));
-    code = payload.text.match(/code is (\d{6})/)[1];
+    code = payload.subject.match(/^(\d{6}) is your DocSlurp code$/)[1];
     return new Response('{}');
   });
   vi.stubGlobal("fetch", transport);

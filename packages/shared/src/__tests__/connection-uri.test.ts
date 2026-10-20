@@ -3,6 +3,8 @@ import { describe, expect, it, vi } from "vitest";
 import {
   parseLanceDbUri,
   parseStorageUri,
+  resolveLanceDbConfig,
+  resolveS3ClientTuning,
   redactUri,
   resolveObjectStorageConfig,
   s3ClientConfig,
@@ -76,5 +78,124 @@ describe("LANCEDB_URI", () => {
   it("accepts local paths and file URIs without storage options", () => {
     expect(parseLanceDbUri(undefined, storage)).toMatchObject({ root: "/tmp/docslurp-lancedb", storageOptions: undefined });
     expect(parseLanceDbUri("file:///var/lib/docslurp/lancedb", storage).root).toBe("/var/lib/docslurp/lancedb");
+  });
+});
+
+describe("S3 client tuning", () => {
+  const storage = parseStorageUri("s3://k:s@files?endpoint=https://s3.example.com&region=auto", {});
+
+  it("is a no-op when no S3_* variables are set", () => {
+    expect(resolveS3ClientTuning({})).toEqual({});
+    expect(s3ClientConfig(storage, {})).toEqual({
+      region: "auto",
+      endpoint: "https://s3.example.com",
+      forcePathStyle: true,
+      credentials: { accessKeyId: "k", secretAccessKey: "s" },
+    });
+  });
+
+  it("maps knobs onto S3Client options", () => {
+    const config = s3ClientConfig(storage, {
+      S3_MAX_SOCKETS: "256",
+      S3_KEEPALIVE: "true",
+      S3_CONNECTION_TIMEOUT_MS: "3000",
+      S3_REQUEST_TIMEOUT_MS: "60000",
+      S3_MAX_ATTEMPTS: "5",
+      S3_RETRY_MODE: "adaptive",
+      S3_CHECKSUM_MODE: "when_required",
+      S3_FORCE_PATH_STYLE: "false",
+    });
+    expect(config).toMatchObject({
+      forcePathStyle: false,
+      maxAttempts: 5,
+      retryMode: "adaptive",
+      requestChecksumCalculation: "WHEN_REQUIRED",
+      responseChecksumValidation: "WHEN_REQUIRED",
+      requestHandler: {
+        connectionTimeout: 3000,
+        requestTimeout: 60000,
+        httpsAgent: { maxSockets: 256, keepAlive: true },
+        httpAgent: { maxSockets: 256, keepAlive: true },
+      },
+    });
+  });
+
+  it("parses multipart part size and rejects bad values", () => {
+    expect(resolveS3ClientTuning({ S3_MULTIPART_PART_SIZE_MB: "16" }).multipartPartSizeBytes).toBe(16 * 1024 * 1024);
+    expect(() => resolveS3ClientTuning({ S3_MULTIPART_PART_SIZE_MB: "1" })).toThrow();
+    expect(() => resolveS3ClientTuning({ S3_MAX_SOCKETS: "abc" })).toThrow();
+    expect(() => resolveS3ClientTuning({ S3_CHECKSUM_MODE: "always" })).toThrow();
+    expect(() => resolveS3ClientTuning({ S3_RETRY_MODE: "fast" })).toThrow();
+  });
+});
+
+describe("LANCEDB_STORAGE_URI", () => {
+  const blobs = parseStorageUri("s3://blobs-key:blobs-secret@blobs?endpoint=https://b2.example.com&region=us-west-004", {});
+
+  it("falls back to inheriting STORAGE_URI when unset", () => {
+    const lance = resolveLanceDbConfig({ LANCEDB_URI: "s3://blobs/lancedb" }, blobs);
+    expect(lance.storageOptions).toMatchObject({ endpoint: "https://b2.example.com", aws_access_key_id: "blobs-key" });
+  });
+
+  it("uses its own endpoint, region and credentials, defaulting the root to its bucket", () => {
+    const lance = resolveLanceDbConfig({ LANCEDB_STORAGE_URI: "s3://idx-key:idx-secret@index?endpoint=https://t3.example.com&region=auto" }, blobs);
+    expect(lance.root).toBe("s3://index/lancedb");
+    expect(lance.storageOptions).toEqual({
+      region: "auto",
+      endpoint: "https://t3.example.com",
+      allow_http: "false",
+      aws_access_key_id: "idx-key",
+      aws_secret_access_key: "idx-secret",
+    });
+  });
+
+  it("honors an explicit LANCEDB_URI root and reports errors under its own name", () => {
+    const lance = resolveLanceDbConfig({ LANCEDB_STORAGE_URI: "s3://k:s@index?region=auto", LANCEDB_URI: "s3://index/vec" }, blobs);
+    expect(lance.root).toBe("s3://index/vec");
+    expect(() => resolveLanceDbConfig({ LANCEDB_STORAGE_URI: "gs://x" }, blobs)).toThrow(/LANCEDB_STORAGE_URI/);
+  });
+
+  it("merges optional Lance object-store tuning for s3 roots only", () => {
+    const env = { LANCEDB_URI: "s3://blobs/lancedb", LANCEDB_CONNECT_TIMEOUT_SECONDS: "5", LANCEDB_REQUEST_TIMEOUT_SECONDS: "60", LANCEDB_CLIENT_MAX_RETRIES: "6", LANCEDB_POOL_MAX_IDLE_PER_HOST: "32" };
+    expect(resolveLanceDbConfig(env, blobs).storageOptions).toMatchObject({ connect_timeout: "5s", timeout: "60s", client_max_retries: "6", pool_max_idle_per_host: "32" });
+    expect(resolveLanceDbConfig({ ...env, LANCEDB_URI: "/tmp/x" }, blobs).storageOptions).toBeUndefined();
+  });
+});
+
+describe("s3+ddb:// Lance commit store", () => {
+  const blobs = parseStorageUri("s3://b2-key:b2-secret@blobs?endpoint=https://s3.us-west-004.backblazeb2.com&region=us-west-004", {});
+
+  it("accepts an s3+ddb root with ?ddbTableName and keeps the query out of the root and tuning params", () => {
+    const lance = resolveLanceDbConfig({ LANCEDB_URI: "s3+ddb://blobs/b2ddb/lancedb?ddbTableName=commits&reindexPages=7" }, blobs);
+    expect(lance.root).toBe("s3+ddb://blobs/b2ddb/lancedb");
+    expect(lance.ddb).toEqual({ table: "commits", region: "us-east-1" });
+    expect(lance.params.get("reindexPages")).toBe("7");
+    expect(lance.params.has("ddbTableName")).toBe(false);
+    expect(lance.storageOptions).toMatchObject({ region: "us-west-004", endpoint: "https://s3.us-west-004.backblazeb2.com", aws_access_key_id: "b2-key" });
+  });
+
+  it("reads separate DynamoDB table, region and credentials from LANCEDB_DDB_*", () => {
+    const lance = resolveLanceDbConfig({
+      LANCEDB_URI: "s3+ddb://blobs/lancedb", LANCEDB_DDB_TABLE: "t", LANCEDB_DDB_REGION: "us-west-1",
+      LANCEDB_DDB_ACCESS_KEY_ID: "AKIA", LANCEDB_DDB_SECRET_ACCESS_KEY: "sec",
+    }, blobs);
+    expect(lance.ddb).toEqual({ table: "t", region: "us-west-1", accessKeyId: "AKIA", secretAccessKey: "sec" });
+    expect(lance.storageOptions?.aws_access_key_id).toBe("b2-key");
+  });
+
+  it("rewrites an s3:// LANCEDB_STORAGE_URI root to s3+ddb when LANCEDB_DDB_TABLE is set", () => {
+    const lance = resolveLanceDbConfig({ LANCEDB_STORAGE_URI: "s3://k:s@index?region=us-west-004&endpoint=https://x.example.com", LANCEDB_DDB_TABLE: "t" }, blobs);
+    expect(lance.root).toBe("s3+ddb://index/lancedb");
+    expect(lance.ddb?.table).toBe("t");
+  });
+
+  it("rejects a missing table, half a credential pair, and a non-s3 root", () => {
+    expect(() => resolveLanceDbConfig({ LANCEDB_URI: "s3+ddb://blobs/lancedb" }, blobs)).toThrow(/DynamoDB table/);
+    expect(() => resolveLanceDbConfig({ LANCEDB_URI: "s3+ddb://blobs/l", LANCEDB_DDB_TABLE: "t", LANCEDB_DDB_ACCESS_KEY_ID: "a" }, blobs)).toThrow(/together/);
+    expect(() => resolveLanceDbConfig({ LANCEDB_URI: "/tmp/x", LANCEDB_DDB_TABLE: "t" }, blobs)).toThrow(/s3/);
+  });
+
+  it("leaves plain s3:// roots without ddb", () => {
+    expect(resolveLanceDbConfig({ LANCEDB_URI: "s3://blobs/lancedb" }, blobs).ddb).toBeUndefined();
   });
 });
