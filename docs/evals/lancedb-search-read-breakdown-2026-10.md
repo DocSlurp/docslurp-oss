@@ -14,9 +14,9 @@ every number below.
   process (`-worker`: ingest writes and reads), so server-side search reads are not mixed with worker reads.
 - Correlation: the spans carry no trace or parent IDs (native threads lose async context), so an app `lancedb.s3.*`
   request is attributed to a search when it starts inside the search's `[start, start + duration]` window (+/- 5 ms).
-  Only **isolated** searches are used (no other search span overlapping): 79-88% of searches on the four fast arms,
+  Only **isolated** searches are used (no other search span overlapping): 74-79% of searches on the four fast arms,
   58% on R2 (its searches are longer, so they overlap more). A request that lands in two overlapping windows would
-  otherwise be counted twice. About 25-30% of app Lance requests fall outside isolated searches (overlapped searches,
+  otherwise be counted twice. 27-43% of app Lance requests fall outside isolated searches (overlapped searches,
   `openTable` probes); they are not in the tables.
 - **Object classes are inferred.** The exported spans dropped the object key and range header, so requests are grouped
   by operation and response size (`bytes`; for ranged reads this equals the range length). `LIST` is
@@ -153,7 +153,7 @@ then take the version lookup off the path, then #61 if search-only traffic repea
 - One run, five orgs, a synthetic chat cadence; ingest ran the whole time. Treat ratios as indicative.
 - Object classes are inferred from size; "repeat" is a size proxy, so cached-read savings are upper bounds. Small reads
   (4096 B) match by chance more often than large ones, which inflates the "all repeated GETs" row.
-- Time-window attribution drops overlapped searches (12-42% of searches); if overlapped searches differ (more
+- Time-window attribution drops overlapped searches (21-42% of searches); if overlapped searches differ (more
   concurrency, more cold reads), the isolated numbers understate the tail.
 - The storage share counts every second a request was in flight, which includes Lance deserialization waiting on the
   response; it is an upper bound on pure network time.
