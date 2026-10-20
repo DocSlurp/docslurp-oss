@@ -13,7 +13,7 @@ import {
   isWorkspaceChatModelId,
 } from "@docslurp/shared/workspace-chat-models";
 import { isPlatformAdminActor, type RequestActor } from "./request-actor.js";
-import { getWorkspace } from "../services/workspaces.js";
+import { getWorkspaceAccess } from "../services/organizations.js";
 
 /** An explicit chat `model` the caller may not use. Answered as HTTP 400 `model_not_allowed`. */
 export class ChatModelNotAllowedError extends Error {
@@ -81,8 +81,21 @@ export async function chatEvalAccess(actor: RequestActor | undefined, workspaceI
   const orgIds = configuredChatEvalOrgIds();
   if (!orgIds.size || !workspaceId) return false;
   if (actor.type === "apiKey" && actor.apiKey.keyType !== "server") return false;
-  const workspace = await getWorkspace(workspaceId, actor.userId);
-  return Boolean(workspace && orgIds.has(workspace.orgId));
+  // Access row only (owning org, membership, key allowlist): no workspace stats on the chat hot path.
+  const access = await getWorkspaceAccess(workspaceId, actor.userId);
+  return Boolean(access && orgIds.has(access.orgId));
+}
+
+/**
+ * True only when the turn asks for something eval access decides: an explicit
+ * model outside the catalog, or an agent limit above its default. Default and
+ * catalog requests skip the admin and workspace lookups entirely.
+ */
+export function chatTurnNeedsEvalAccess(model: string | null | undefined, agent?: ChatAgentLimitsInput): boolean {
+  const requested = model?.trim();
+  if (requested && !isWorkspaceChatModelId(requested)) return true;
+  return (Object.keys(CHAT_AGENT_LIMIT_DEFAULTS) as ChatAgentLimitName[])
+    .some(name => typeof agent?.[name] === "number" && Math.trunc(agent[name]!) > CHAT_AGENT_LIMIT_DEFAULTS[name]);
 }
 
 export type ChatModelSource = "default" | "catalog" | "eval";
@@ -121,7 +134,7 @@ export function resolveChatAgentLimits(requested: ChatAgentLimitsInput | undefin
 
 /** True when `model` would be refused for this actor and workspace; routes answer 400 before streaming. */
 export async function chatModelRefused(actor: RequestActor | undefined, model: string | null | undefined, workspaceId?: string): Promise<boolean> {
-  if (!model?.trim()) return false;
+  if (!chatTurnNeedsEvalAccess(model)) return false;
   try {
     resolveChatModelRequest({ requested: model, isAdmin: await chatEvalAccess(actor, workspaceId) });
     return false;

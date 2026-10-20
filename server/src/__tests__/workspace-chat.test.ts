@@ -61,6 +61,13 @@ vi.mock("../services/workspaces.js", () => ({
   getWorkspace,
 }));
 
+// Eval access reads only the workspace's access row (owning org), not getWorkspace.
+const getWorkspaceAccess = vi.fn(async (): Promise<unknown> => null);
+vi.mock("../services/organizations.js", async (importOriginal) => ({
+  ...await importOriginal<typeof import("../services/organizations.js")>(),
+  getWorkspaceAccess,
+}));
+
 vi.mock("../services/search-controls.js", () => ({
   getWorkspaceSearchSettings,
 }));
@@ -287,6 +294,7 @@ describe("chatWorkspace", () => {
   ] as const)("lets a workspace owned by an eval org (%s) use eval models and the admin limit range: %s", async (orgId, allowed) => {
     sqlMock.mockResolvedValue([]);
     getWorkspace.mockResolvedValue({ id: "ws-1", orgId, systemPrompt: null });
+    getWorkspaceAccess.mockResolvedValue({ workspaceId: "ws-1", orgId, workspaceOwnerUserId: "user-1", orgRole: "member", workspaceRole: null });
     getWorkspaceSearchSettings.mockResolvedValue(buildSearchSettings());
     runChatMcpAgent.mockResolvedValue({ answer: "Supported answer", citations: [], toolCalls: [], finishReason: "stop",
       usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2, costCents: 0 }, debug: {} });

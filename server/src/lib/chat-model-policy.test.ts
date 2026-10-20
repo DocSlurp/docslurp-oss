@@ -1,11 +1,11 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("./request-actor.js", () => ({ isPlatformAdminActor: vi.fn(async (actor?: { admin?: boolean }) => actor?.admin === true) }));
-const getWorkspace = vi.fn(async (workspaceId: string) => ({ id: workspaceId, orgId: workspaceId === "ws-eval" ? "org-eval" : "org-other" }));
-vi.mock("../services/workspaces.js", () => ({ getWorkspace }));
+const getWorkspaceAccess = vi.fn(async (workspaceId: string) => ({ workspaceId, orgId: workspaceId === "ws-eval" ? "org-eval" : "org-other" }));
+vi.mock("../services/organizations.js", () => ({ getWorkspaceAccess }));
 
 const {
-  ChatModelNotAllowedError, chatEvalAccess, chatModelRefused, configuredChatEvalModels, parseChatEvalModels,
+  ChatModelNotAllowedError, chatEvalAccess, chatModelRefused, chatTurnNeedsEvalAccess, configuredChatEvalModels, parseChatEvalModels,
   resolveChatAgentLimits, resolveChatModelRequest,
 } = await import("./chat-model-policy.js");
 const { chatAgentProviderOptions } = await import("../services/chat-mcp-agent.js");
@@ -111,9 +111,9 @@ describe("DOCSLURP_CHAT_EVAL_ORG_IDS", () => {
   });
 
   it("is off when unset, while platform admins keep access everywhere", async () => {
-    getWorkspace.mockClear();
+    getWorkspaceAccess.mockClear();
     expect(await chatEvalAccess(session, "ws-eval")).toBe(false);
-    expect(getWorkspace).not.toHaveBeenCalled();
+    expect(getWorkspaceAccess).not.toHaveBeenCalled();
     expect(await chatEvalAccess({ ...session, admin: true } as never, "ws-plain")).toBe(true);
   });
 
@@ -123,5 +123,26 @@ describe("DOCSLURP_CHAT_EVAL_ORG_IDS", () => {
     expect(await chatModelRefused(session, "inception/mercury-3", "ws-eval")).toBe(false);
     expect(await chatModelRefused(session, "inception/mercury-3", "ws-plain")).toBe(true);
     expect(await chatModelRefused(key("client"), "inception/mercury-3", "ws-eval")).toBe(true);
+  });
+});
+
+describe("eval access lookups", () => {
+  const session = { type: "session" as const, userId: "u", sessionId: "s", user: { id: "u", email: "", name: "" } };
+
+  it("is needed only for a non-catalog model or a raised agent limit", () => {
+    expect(chatTurnNeedsEvalAccess(undefined)).toBe(false);
+    expect(chatTurnNeedsEvalAccess("  ")).toBe(false);
+    expect(chatTurnNeedsEvalAccess("z-ai/glm-5.3-flash", { maxSteps: 6, maxToolCalls: 2, searchConcurrency: 4 })).toBe(false);
+    expect(chatTurnNeedsEvalAccess("inception/mercury-3")).toBe(true);
+    expect(chatTurnNeedsEvalAccess(undefined, { maxSteps: 7 })).toBe(true);
+    expect(chatTurnNeedsEvalAccess(undefined, { searchConcurrency: 8 })).toBe(true);
+  });
+
+  it("skips the workspace lookup when the stream pre-check names a catalog model or none", async () => {
+    vi.stubEnv("DOCSLURP_CHAT_EVAL_ORG_IDS", "org-eval");
+    getWorkspaceAccess.mockClear();
+    expect(await chatModelRefused(session, "anthropic/claude-haiku-5.5", "ws-eval")).toBe(false);
+    expect(await chatModelRefused(session, undefined, "ws-eval")).toBe(false);
+    expect(getWorkspaceAccess).not.toHaveBeenCalled();
   });
 });

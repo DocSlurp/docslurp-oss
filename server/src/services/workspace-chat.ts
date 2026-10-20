@@ -52,7 +52,7 @@ import { loadIngestReport, summarizeIngestReport } from "./ingest-report.js";
 import { canEditWorkspace, getWorkspaceAccess } from "./organizations.js";
 import type { WorkspaceChatModelId } from "@docslurp/shared/workspace-chat-models";
 import type { ChatAgentLimits, ChatAgentLimitsInput } from "@docslurp/shared";
-import { chatEvalAccess, resolveChatAgentLimits, resolveChatModelRequest } from "../lib/chat-model-policy.js";
+import { chatEvalAccess, chatTurnNeedsEvalAccess, resolveChatAgentLimits, resolveChatModelRequest } from "../lib/chat-model-policy.js";
 import { currentRequestId } from "../lib/request-context.js";
 
 export type ChatSearchActivity = {
@@ -982,7 +982,8 @@ export async function chatWorkspace(args: {
   if (!(await isWorkspaceChatEnabled(args.workspaceId, args.userId))) throw new WorkspaceChatDisabledError();
   // An explicit model is honoured exactly or refused (400), never silently swapped for the default.
   // Platform admins, or a workspace owned by a DOCSLURP_CHAT_EVAL_ORG_IDS org.
-  const isAdmin = await chatEvalAccess(args.actor, args.workspaceId);
+  // Looked up only when the request asks for an eval model or raised limits.
+  const isAdmin = chatTurnNeedsEvalAccess(args.model, args.agent) && await chatEvalAccess(args.actor, args.workspaceId);
   const resolved = resolveChatModelRequest({ requested: args.model, isAdmin });
   const policy: ChatTurnPolicy = {
     model: resolved.model, failover: resolved.source !== "eval",
