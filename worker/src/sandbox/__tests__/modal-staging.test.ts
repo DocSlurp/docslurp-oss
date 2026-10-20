@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { createModalProvider, type ModalSdk } from "../providers/modal/index.js";
 import { SessionStaging, type RemoteFs } from "../providers/modal/staging.js";
@@ -151,5 +151,138 @@ describe("modal provider secrets", () => {
     const result = await provider.probe(config);
     expect(result.ok).toBe(false);
     expect(result.detail).toContain("modal package not installed");
+  });
+});
+
+describe("modal provider session lifecycle", () => {
+  const config = {
+    tokenId: "ak-id",
+    tokenSecret: "as-secret",
+    app: "app",
+    image: "debian:trixie-slim",
+    cpu: 1,
+    memoryMb: 512,
+    sessionTimeoutSeconds: 60,
+  };
+  const command = {
+    binary: "/usr/bin/true",
+    args: [],
+    env: {},
+    readablePaths: [],
+    writablePaths: [],
+    limits: { timeoutMs: 5_000 },
+  };
+
+  class NotFound extends Error {}
+
+  beforeEach(() => {
+    vi.spyOn(console, "log").mockImplementation(() => {});
+  });
+  afterEach(() => vi.restoreAllMocks());
+
+  function fakeSdk(opts: { createFails?: boolean; exec?: () => Promise<unknown> } = {}) {
+    const state = { terminate: 0, clientClose: 0 };
+    const sandbox = {
+      terminate: async () => void state.terminate++,
+      filesystem: {
+        makeDirectory: async () => {},
+        stat: async () => {
+          throw new NotFound();
+        },
+        listFiles: async () => [],
+      },
+      exec:
+        opts.exec ??
+        (async () => ({
+          stdout: { readText: async () => "out" },
+          stderr: { readText: async () => "" },
+          wait: async () => 0,
+        })),
+    };
+    const sdk = {
+      SandboxFilesystemNotFoundError: NotFound,
+      ModalClient: class {
+        apps = { fromName: async () => ({}) };
+        images = { fromRegistry: () => ({}) };
+        sandboxes = {
+          create: async () => {
+            if (opts.createFails) throw new Error("no capacity");
+            return sandbox;
+          },
+        };
+        close() {
+          state.clientClose++;
+        }
+      },
+    } as unknown as ModalSdk;
+    return { sdk, state };
+  }
+
+  async function open(opts: Parameters<typeof fakeSdk>[0] = {}) {
+    const { sdk, state } = fakeSdk(opts);
+    const provider = createModalProvider(async () => sdk);
+    return { state, provider, session: () => provider.openSession(config, { activityId: "a" }) };
+  }
+
+  it("close terminates the sandbox once and is idempotent", async () => {
+    const { state, session } = await open();
+    const opened = await session();
+    await opened.close();
+    await opened.close();
+    expect(state.terminate).toBe(1);
+    expect(state.clientClose).toBe(1);
+  });
+
+  it("terminates the sandbox when the signal aborts during a run", async () => {
+    let release!: () => void;
+    const { state, session } = await open({
+      exec: () => new Promise((_, reject) => (release = () => reject(new Error("stream closed")))),
+    });
+    const opened = await session();
+    const controller = new AbortController();
+    const running = opened.run!(command, controller.signal).catch((e: unknown) => e);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    controller.abort();
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    release();
+    const error = await running;
+    expect((error as Error).message).toContain("aborted");
+    expect(state.terminate).toBe(1);
+  });
+
+  it("terminates immediately for an already-aborted signal", async () => {
+    const { state, session } = await open();
+    const opened = await session();
+    const error = await opened.run!(command, AbortSignal.abort()).catch((e: unknown) => e);
+    expect((error as Error).message).toContain("aborted");
+    expect(state.terminate).toBe(1);
+  });
+
+  it("terminates and releases the client when sandbox creation fails", async () => {
+    const { state, session } = await open({ createFails: true });
+    await expect(session()).rejects.toThrow("modal sandbox creation failed");
+    expect(state.clientClose).toBe(1);
+  });
+
+  it("rethrows a non-timeout exec error instead of reporting a timeout", async () => {
+    const { session } = await open({
+      exec: async () => {
+        throw new Error("container crashed");
+      },
+    });
+    const opened = await session();
+    await expect(opened.run!(command)).rejects.toThrow("container crashed");
+  });
+
+  it("reports an exec deadline as a killed command", async () => {
+    const { session } = await open({
+      exec: async () => {
+        throw new Error("Deadline exceeded while streaming stdio for exec x");
+      },
+    });
+    const opened = await session();
+    const result = await opened.run!(command);
+    expect(result.exitCode).toBeNull();
+    expect(result.stderr).toContain("time limit");
   });
 });

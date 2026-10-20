@@ -84,6 +84,14 @@ function safeMessage(config: Partial<ModalConfig>, error: unknown): string {
   return message;
 }
 
+/** The SDK reports an exec deadline as a typed timeout error or a plain "Deadline exceeded ..." error. */
+function isExecTimeout(sdk: ModalSdk, error: unknown): boolean {
+  for (const type of [sdk.TimeoutError, sdk.SandboxTimeoutError]) {
+    if (typeof type === "function" && error instanceof type) return true;
+  }
+  return error instanceof Error && error.message.startsWith("Deadline exceeded");
+}
+
 function assertCredentials(config: ModalConfig): void {
   for (const [key, env] of [
     ["tokenId", "MODAL_TOKEN_ID"],
@@ -221,40 +229,40 @@ export function createModalProvider(
       async function execute(command: SandboxCommand): Promise<SandboxResult> {
         await ensureSandbox();
         const started = Date.now();
-        await staging!.ensureUploaded(command.readablePaths);
-        for (const dir of command.writablePaths) await sandbox!.filesystem.makeDirectory(dir);
-        const env: Record<string, string> = {};
-        for (const [key, value] of Object.entries(command.env)) if (value !== undefined) env[key] = value;
-        let output: { stdout: string; stderr: string; exitCode: number | null };
         try {
-          const process = await sandbox!.exec([command.binary, ...command.args], {
-            env,
-            timeoutMs: command.limits.timeoutMs,
-            mode: "text",
-          });
-          const [stdout, stderr, exitCode] = await Promise.all([
-            process.stdout.readText(),
-            process.stderr.readText(),
-            process.wait(),
-          ]);
-          output = { stdout, stderr, exitCode };
-        } catch (error) {
-          // Modal enforces the exec timeout provider-side and surfaces it as a stream error;
-          // report it like a killed process (null exit code) rather than a provider failure.
-          if (Date.now() - started < command.limits.timeoutMs - 1000) throw error;
-          output = { stdout: "", stderr: "command exceeded its time limit", exitCode: null };
+          await staging!.ensureUploaded(command.readablePaths);
+          for (const dir of command.writablePaths) await sandbox!.filesystem.makeDirectory(dir);
+          const env: Record<string, string> = {};
+          for (const [key, value] of Object.entries(command.env)) if (value !== undefined) env[key] = value;
+          let output: { stdout: string; stderr: string; exitCode: number | null };
+          try {
+            const process = await sandbox!.exec([command.binary, ...command.args], {
+              env,
+              timeoutMs: command.limits.timeoutMs,
+              mode: "text",
+            });
+            const [stdout, stderr, exitCode] = await Promise.all([
+              process.stdout.readText(),
+              process.stderr.readText(),
+              process.wait(),
+            ]);
+            output = { stdout, stderr, exitCode };
+          } catch (error) {
+            // Modal enforces the exec timeout provider-side; report it like a killed process
+            // (null exit code). Every other failure is a provider error and propagates.
+            if (!isExecTimeout(sdk, error)) throw error;
+            output = { stdout: "", stderr: "command exceeded its time limit", exitCode: null };
+          }
+          await staging!.download(command.writablePaths);
+          return { ...output, cpuSeconds: config.cpu * ((Date.now() - started) / 1000) };
+        } finally {
+          // Always log elapsed Modal time, even when staging or exec failed.
+          const wallSeconds = (Date.now() - started) / 1000;
+          console.log(
+            `[sandbox-usage] provider=modal cpu_seconds=${(config.cpu * wallSeconds).toFixed(3)} memory_gb_seconds=${((config.memoryMb / 1024) * wallSeconds).toFixed(3)} activity=${context.activityId}`,
+          );
+          options.recordUsage?.(buildModalUsageEvent(config, context.activityId, wallSeconds));
         }
-        const { stdout, stderr, exitCode } = output;
-        await staging!.download(command.writablePaths);
-
-        const wallSeconds = (Date.now() - started) / 1000;
-        const cpuSeconds = config.cpu * wallSeconds;
-        const memoryGbSeconds = (config.memoryMb / 1024) * wallSeconds;
-        console.log(
-          `[sandbox-usage] provider=modal cpu_seconds=${cpuSeconds.toFixed(3)} memory_gb_seconds=${memoryGbSeconds.toFixed(3)} activity=${context.activityId}`,
-        );
-        options.recordUsage?.(buildModalUsageEvent(config, context.activityId, wallSeconds));
-        return { exitCode, stdout, stderr, cpuSeconds };
       }
 
       await ensureSandbox().catch(async (error: unknown) => {
