@@ -6,9 +6,10 @@ import { join } from "node:path";
 import test from "node:test";
 import { judgeIntegrity } from "../evaluation-integrity-judge.mjs";
 import {
-  caseFromMultiHop, createSearchVerifier, freezeDataset, generateCases, generateUnanswerable, importLabeled, pairPages, splitFor, validateCase, validateDataset,
+  addSilverFacts, caseFromMultiHop, createLocalVerifier, createSearchVerifier, distinctiveTerm, estimateGenerationUsd, freezeDataset, generateCases, generateUnanswerable,
+  importLabeled, loadCorpusPages, normalizePage, pairPages, splitFor, tiersFromState, validateCase, validateDataset,
 } from "./dataset.mjs";
-import { BudgetGuard, assertModelAllowed, loadPrices, readJsonl, sha256 } from "./lib.mjs";
+import { BudgetGuard, apiKeyResolver, assertModelAllowed, loadPrices, readJsonl, sha256 } from "./lib.mjs";
 
 const prices = loadPrices();
 const tempDir = (t) => { const dir = mkdtempSync(join(tmpdir(), "smeval-dataset-")); t.after(() => rmSync(dir, { recursive: true, force: true })); return dir; };
@@ -88,10 +89,12 @@ test("integrity manifest is accepted by the evaluation integrity judge and catch
   assert.ok(report.findings.some((finding) => finding.rule === "labeled-answer"));
 });
 
-const page = (documentId, number, text) => ({ workspaceId: "ws-a", documentId, page: number, markdown: `${text} ${"Additional filler context about the regional office operations and staffing. ".repeat(4)}` });
+const page = (sourceDoc, number, text) => normalizePage({ tier: "mid-5k", sourceDoc, page: number, markdown: `${text} ${"Additional filler context about the regional office operations and staffing. ".repeat(4)}` }, { workspaceId: "ws-a" });
 const replyFetch = (replies, calls = []) => async (url, init) => {
-  calls.push({ url, body: JSON.parse(init.body) });
-  const content = replies.shift();
+  const body = JSON.parse(init.body);
+  calls.push({ url, body });
+  const next = replies.shift();
+  const content = typeof next === "function" ? next(body) : next;
   return { ok: true, status: 200, text: async () => JSON.stringify({ id: `gen-${calls.length}`, model: "google/gemini-3.8-flash-001", choices: [{ message: { content: JSON.stringify(content) } }], usage: { prompt_tokens: 1000, completion_tokens: 100, cost: 0.00112 } }) };
 };
 
@@ -102,11 +105,18 @@ test("generate writes grounded single- and multi-hop cases and ledgers actual us
   const logs = [], calls = [];
   const replies = [
     { question: "How large was the Harbor Fund grant in 2031?", facts: ["4.2 million dollars"], rationale: "r" },
-    { question: "Which city hosts the office administering the fund that gave 4.2 million dollars in 2031?", facts: [{ text: "4.2 million dollars", page: "A" }, { text: "Coastal Office in Riverton", page: "B" }], bridge: "Harbor Fund" },
+    (body) => {
+      const grantOnA = body.messages[1].content.split("Page B text")[0].includes("4.2 million");
+      return { question: "Which city hosts the office administering the fund that gave 4.2 million dollars in 2031?", facts: [{ text: "4.2 million dollars", page: grantOnA ? "A" : "B" }, { text: "Coastal Office in Riverton", page: grantOnA ? "B" : "A" }], bridge: "Harbor Fund" };
+    },
   ];
-  const result = await generateCases({ pages, tier: "mid-5k", seed: "seed", single: 1, multi: 1, generatorModel: "google/gemini-3.8-flash", prices, apiKey: "test", ledgerPath, guard: new BudgetGuard({ capUsd: 1 }), fetchImpl: replyFetch(replies, calls), log: (line) => logs.push(line) });
-  assert.equal(result.accepted.length, 2, JSON.stringify(result.rejected));
-  const [single, multi] = result.accepted;
+  const common = { pages, tier: "mid-5k", seed: "seed", generatorModel: "google/gemini-3.8-flash", prices, apiKey: "test", ledgerPath, guard: new BudgetGuard({ capUsd: 1 }), fetchImpl: replyFetch(replies, calls), log: (line) => logs.push(line) };
+  const first = await generateCases({ ...common, single: 1 });
+  const second = await generateCases({ ...common, multi: 1 });
+  assert.equal(first.accepted.length + second.accepted.length, 2, JSON.stringify([first.rejected, second.rejected]));
+  assert.deepEqual(first.shortfall, { single_hop: 0, multi_hop: 0 });
+  const [single, multi] = [...first.accepted, ...second.accepted];
+  assert.equal(single.gold.supportPages[0].sourceDoc, single.provenance.sourcePages[0].sourceDoc);
   assert.equal(single.kind, "single_hop");
   assert.equal(multi.kind, "multi_hop");
   assert.equal(multi.gold.supportMode, "all_of");
@@ -130,21 +140,55 @@ test("ungrounded or one-sided generated facts are rejected", () => {
   assert.ok(pairPages([pair.pages[0]], { seed: "s", count: 3 }).length === 0, "needs two pages");
 });
 
-test("unanswerable keeps only questions whose key terms have no strong match, with evidence", async (t) => {
+test("unanswerable keeps only candidates whose key terms are absent from the corpus, with evidence", async (t) => {
   const dir = tempDir(t);
   const pages = [page("doc-1", 1, "The Riverton office opened in 2019."), page("doc-2", 2, "The Hillside office opened in 2015.")];
   const replies = [
-    { question: "When did the Lakemoor office open?", keyTerms: ["Lakemoor"], strategy: "perturbed_entity", rationale: "r" },
+    { question: "When did the Lakemoor office open?", keyTerms: ["Lakemoor office", "2019"], strategy: "perturbed_entity", rationale: "r" },
     { question: "When did the Stonebridge office open?", keyTerms: ["Stonebridge"], strategy: "perturbed_entity", rationale: "r" },
   ];
-  const probes = [];
-  const verify = async ({ probes: list }) => { probes.push(list); const strong = list.some((probe) => probe.term === "Stonebridge"); return { passed: !strong, checks: list.map((probe) => ({ ...probe, strong: probe.term === "Stonebridge" })) }; };
-  const result = await generateUnanswerable({ pages, tier: "large-58k", seed: "seed", count: 2, generatorModel: "google/gemini-3.8-flash", prices, apiKey: "test", ledgerPath: join(dir, "spend.jsonl"), guard: null, verify, fetchImpl: replyFetch(replies), log: () => {} });
+  const seen = [];
+  const verifyLocal = async (items) => { seen.push(...items); return new Map(items.map((item) => [item.id, { passed: !item.terms.includes("Stonebridge"), checks: item.terms.map((term) => ({ term, hits: term === "Stonebridge" ? 3 : 0 })) }])); };
+  const result = await generateUnanswerable({ pages, tier: "mid-5k", seed: "seed", count: 2, generatorModel: "google/gemini-3.8-flash", prices, apiKey: "test", ledgerPath: join(dir, "spend.jsonl"), guard: null, verifyLocal, fetchImpl: replyFetch(replies), log: () => {} });
   assert.equal(result.accepted.length, 1);
-  assert.equal(result.rejected[0].rejected, "strong-match-in-corpus");
-  assert.equal(result.accepted[0].provenance.verification.passed, true);
-  assert.ok(probes[0].some((probe) => probe.gating === false), "full question probed as evidence");
-  await assert.rejects(generateUnanswerable({ pages, tier: "large-58k", seed: "s", count: 1, generatorModel: "google/gemini-3.8-flash", prices }), /verification hook/);
+  assert.equal(result.accepted[0].workspaceId, "ws-a");
+  assert.deepEqual(result.accepted[0].provenance.keyTerms, ["Lakemoor office"], "bare numbers are not key terms");
+  assert.equal(result.accepted[0].provenance.verification.local.passed, true);
+  assert.ok(result.rejected.some((entry) => entry.rejected === "key-term-in-corpus"));
+  assert.equal(seen.length, 2, "one batched local pass");
+  await assert.rejects(generateUnanswerable({ pages, tier: "mid-5k", seed: "s", count: 1, generatorModel: "google/gemini-3.8-flash", prices }), /local verification hook/);
+  assert.equal(distinctiveTerm("2019"), false);
+  assert.equal(distinctiveTerm("1,958"), false);
+  assert.equal(distinctiveTerm("Lakemoor"), true);
+});
+
+test("local verifier scans only the tier scope with normalized whole-token matching", async (t) => {
+  const dir = tempDir(t);
+  const corpusPath = join(dir, "pages-text.jsonl");
+  const rows = [
+    { sourceDoc: "src-a", page: 1, pageSha256: sha256("1"), verified: true, text: "The Lakemoor-Office opened in 2019." },
+    { sourceDoc: "src-a", page: 5000, pageSha256: sha256("2"), verified: true, text: "Stonebridge campus" },
+    { sourceDoc: "src-b", page: 2, pageSha256: sha256("3"), verified: false, text: "Quillfeather program" },
+  ];
+  writeFileSync(corpusPath, rows.map((row) => JSON.stringify(row)).join("\n") + "\n");
+  const scopes = { "mid-5k": { scope: { sourceDocs: ["src-a"], maxPage: 4000 } }, "large-58k": { scope: { sourceDocs: null, maxPage: null } } };
+  const verify = createLocalVerifier({ corpusPath, scopes });
+  const results = await verify([
+    { id: "m1", tier: "mid-5k", terms: ["lakemoor office"] },
+    { id: "m2", tier: "mid-5k", terms: ["Stonebridge"] },
+    { id: "m3", tier: "mid-5k", terms: ["Quillfeather"] },
+    { id: "m4", tier: "mid-5k", terms: ["moor off"] },
+    { id: "l1", tier: "large-58k", terms: ["Quillfeather", "Stonebridge campus"] },
+  ]);
+  assert.equal(results.get("m1").passed, false, "punctuation-insensitive match");
+  assert.deepEqual(results.get("m1").checks[0].hitPages, [{ sourceDoc: "src-a", page: 1, pageSha256: sha256("1") }]);
+  assert.equal(results.get("m2").passed, true, "page 5000 is outside the mid scope");
+  assert.equal(results.get("m3").passed, true, "other documents are outside the mid scope");
+  assert.equal(results.get("m4").passed, true, "partial tokens do not match");
+  assert.equal(results.get("m1").pagesScanned, 1);
+  assert.equal(results.get("l1").pagesScanned, 3);
+  assert.equal(results.get("l1").unverifiedPagesScanned, 1);
+  assert.deepEqual(results.get("l1").checks.map((check) => check.hits), [1, 1]);
 });
 
 test("search verifier flags key-term hits and high relevance as strong matches", async () => {
@@ -153,40 +197,89 @@ test("search verifier flags key-term hits and high relevance as strong matches",
     const results = q === "Present" ? [{ text: "this mentions present term", relevance: 0.4, citation: { documentId: "d", pageNumber: 1 } }] : q === "Close" ? [{ text: "unrelated", relevance: 0.95, citation: { documentId: "d", pageNumber: 2 } }] : [{ text: "unrelated", relevance: 0.3, citation: { documentId: "d", pageNumber: 3 } }];
     return { ok: true, status: 200, json: async () => ({ results, noMatch: false, usage: { inputTokens: 5, outputTokens: 0, costCents: 0.001 } }) };
   };
-  const verify = createSearchVerifier({ baseUrl: "http://localhost:1", apiKey: "k", fetchImpl, log: () => {} });
-  const result = await verify({ workspaceId: "ws", probes: [{ q: "Present", term: "Present", gating: true }, { q: "Close", term: "Close", gating: true }, { q: "Absent", term: "Absent", gating: true }] });
+  const verify = createSearchVerifier({ baseUrl: "http://localhost:1", apiKeyForTier: () => "k", fetchImpl, log: () => {} });
+  const result = await verify({ workspaceId: "ws", tier: "mid-5k", probes: [{ q: "Present", term: "Present", gating: true }, { q: "Close", term: "Close", gating: true }, { q: "Absent", term: "Absent", gating: true }] });
   assert.deepEqual(result.checks.map((check) => check.strong), [true, true, false]);
   assert.equal(result.passed, false);
 });
 
-test("import-labeled maps source documents to production ids through sha256", () => {
-  const shaA = sha256("source-a"), shaB = sha256("source-b");
+test("import-labeled keeps OR-within/AND-across support groups and resolves documents by sourceDoc", () => {
   const sourceDataset = {
-    versionSha256: sha256("v"), documents: [{ id: "src-a", sha256: shaA }, { id: "src-b", sha256: shaB }],
+    versionSha256: sha256("v"),
     queries: [
-      { id: "q-01", question: "Synthetic labeled question one?", answerable: true, labelStatus: "source-derived", expectedAnswer: "Answer one", relevant: [{ document: "src-a", page: 4 }], supportEvidence: [{ document: "src-a", support_pages: [4], support_match_all: ["x"] }] },
-      { id: "q-02", question: "Synthetic labeled question two?", answerable: true, labelStatus: "provisional", expectedAnswer: "Answer two", rubric: { requiredFacts: ["fact a", "fact b"], acceptableAlternatives: ["alt"] }, relevant: [{ document: "src-a", page: 5 }, { document: "src-b", page: 9 }], supportEvidence: [{ document: "src-a", support_pages: [5] }, { document: "src-b", support_pages: [9, 10] }] },
-      { id: "negative-01", question: "Synthetic negative control?", answerable: false, labelStatus: "synthetic-control", relevant: [] },
+      { id: "q-01", question: "Synthetic labeled question one?", answerable: true, labelStatus: "source-derived", expectedAnswer: "Answer one" },
+      { id: "q-02", question: "Synthetic labeled question two?", answerable: true, labelStatus: "provisional", rubric: { requiredFacts: ["fact a", "fact b"], acceptableAlternatives: ["alt"] } },
+      { id: "negative-01", question: "Synthetic negative control?", answerable: false, labelStatus: "synthetic-control" },
     ],
   };
   const queries = [
-    { id: "q-01", split: "development", answerability: "answerable", query_group: "g1", support_groups: [["src-a:page:4"]], provenance: { query_id: "q-01" } },
-    { id: "q-02", split: "validation-provisional", answerability: "answerable", query_group: "g2", support_groups: [["src-a:page:5", "src-b:page:9"]], provenance: { query_id: "q-02" } },
-    { id: "negative-01", split: "development", answerability: "unanswerable", query_group: "g3", support_groups: [], provenance: { query_id: "negative-01" } },
+    { id: "q-01", kind: "source-derived", split: "development", answerability: "answerable", query_group: "g1", support_groups: [["src-a:page:4"]], provenance: { query_id: "q-01" } },
+    { id: "q-02", kind: "provisional", split: "validation-provisional", answerability: "answerable", query_group: "g2", support_groups: [["src-a:page:5", "src-b:page:9"], ["src-b:page:12"]], provenance: { query_id: "q-02" } },
+    { id: "negative-01", kind: "synthetic-control", split: "development", answerability: "unanswerable", query_group: "g3", support_groups: [], provenance: { query_id: "negative-01" } },
+    { id: "q-missing", answerability: "answerable", support_groups: [["src-a:page:1"]], provenance: { query_id: "q-missing" } },
   ];
-  const documentMap = [{ documentId: "prod-a", sourceSha256: shaA }, { documentId: "prod-b", sourceSha256: shaB }];
-  const { accepted } = importLabeled({ queries, sourceDataset, documentMap, workspaceId: "ws-large" });
+  const { accepted, skipped } = importLabeled({ queries, sourceDataset, workspaceId: "ws-large", documentMap: { "src-a": "prod-a" } });
   assert.equal(accepted.length, 3);
+  assert.equal(skipped[0].reason, "question-text-missing-from-source-dataset");
   const [one, two, neg] = accepted;
-  assert.deepEqual(one.gold.supportPages, [{ documentId: "prod-a", sourceSha256: shaA, page: 4, group: 0 }]);
+  assert.deepEqual(one.gold.supportPages, [{ sourceDoc: "src-a", documentId: "prod-a", page: 4, group: 0 }]);
+  assert.equal(one.gold.supportMode, "any_of");
   assert.equal(two.gold.supportMode, "all_of");
-  assert.deepEqual(two.gold.facts, ["fact a", "fact b"]);
-  assert.equal(two.gold.supportPages.filter((p) => p.group === 1).length, 2);
+  assert.deepEqual(two.gold.supportPages.map((p) => [p.sourceDoc, p.page, p.group, p.documentId ?? null]), [["src-a", 5, 0, "prod-a"], ["src-b", 9, 0, null], ["src-b", 12, 1, null]]);
+  assert.deepEqual(two.gold.sourceFacts, ["fact a", "fact b"]);
+  assert.match(two.provenance.labelStatus, /provisional/);
   assert.equal(neg.gold.answerable, false);
   assert.equal(neg.kind, "labeled");
-  for (const entry of accepted) assert.deepEqual(validateCase({ ...entry, split: "dev" }), []);
-  assert.throws(() => importLabeled({ queries, sourceDataset, documentMap: [documentMap[0]], workspaceId: "ws" }), /sha256 mapping/);
-  assert.equal(importLabeled({ queries, sourceDataset, documentMap: [documentMap[0]], workspaceId: "ws", allowUnmapped: true }).skipped.length, 1);
+  assert.deepEqual(validateCase({ ...neg, split: "dev" }), []);
+  assert.ok(validateCase({ ...one, split: "dev" }).some((problem) => /gold fact/.test(problem)), "facts pending until silver extraction");
+});
+
+test("silver facts are extracted from support page text, grounded, and ledgered", async (t) => {
+  const dir = tempDir(t);
+  const corpusPath = join(dir, "pages-text.jsonl");
+  writeFileSync(corpusPath, [
+    { sourceDoc: "src-a", page: 4, pageSha256: sha256("p4"), verified: true, text: "The Harbor Fund awarded 4.2 million dollars in 2031." },
+    { sourceDoc: "src-a", page: 5, pageSha256: sha256("p5"), verified: true, text: "Unrelated content." },
+  ].map((row) => JSON.stringify(row)).join("\n") + "\n");
+  const { accepted: imported } = importLabeled({
+    queries: [{ id: "q-01", answerability: "answerable", support_groups: [["src-a:page:4"]], provenance: { query_id: "q-01" } }, { id: "q-02", answerability: "answerable", support_groups: [["src-a:page:5"]], provenance: { query_id: "q-02" } }, { id: "q-03", answerability: "answerable", support_groups: [["src-a:page:5"]], provenance: { query_id: "q-03" } }],
+    sourceDataset: { queries: [{ id: "q-01", question: "How much did the Harbor Fund award?" }, { id: "q-02", question: "Unanswerable from text question?", expectedAnswer: "Source answer" }, { id: "q-03", question: "Another question here?" }] },
+    workspaceId: "ws",
+  });
+  const corpus = await loadCorpusPages(corpusPath, imported.flatMap((entry) => entry.gold.supportPages));
+  assert.equal(corpus.size, 2);
+  const calls = [];
+  const replies = [{ found: true, facts: ["4.2 million dollars"] }, { found: false }, { found: true, facts: ["invented zeta omega"] }];
+  const { accepted, skipped } = await addSilverFacts({ cases: imported, corpus, generatorModel: "google/gemini-3.8-flash", prices, apiKey: "k", ledgerPath: join(dir, "spend.jsonl"), guard: new BudgetGuard({ capUsd: 1 }), fetchImpl: replyFetch(replies, calls), log: () => {} });
+  assert.deepEqual(accepted[0].gold.facts, ["4.2 million dollars"]);
+  assert.equal(accepted[0].gold.factsStatus, "silver-generator-extracted");
+  assert.equal(accepted[0].provenance.sourcePages[0].pageSha256, sha256("p4"));
+  assert.deepEqual(accepted[1].gold.facts, ["Source answer"]);
+  assert.equal(accepted[1].gold.factsStatus, "source-labels-fallback");
+  assert.equal(skipped[0].reason, "silver-facts-not-found", "ungrounded silver facts are not accepted");
+  assert.ok(calls[0].body.messages[1].content.includes("Harbor Fund awarded"));
+  assert.equal(readJsonl(join(dir, "spend.jsonl")).length, 3);
+});
+
+test("tier config maps sourceDoc to production documents and per-tier keys come from a credentials file", (t) => {
+  const tiers = tiersFromState({ state: { workspaceId: "ws-large", docs: { "src-a": { documentId: "prod-a", sha256: sha256("a"), pagesTotal: 10 }, "src-b": { documentId: null } } }, mid: { workspaceId: "ws-mid", sourceDocs: ["src-a"], maxPage: 4000, documents: [{ documentId: "slice-1", pageCount: 500 }] }, large: { workspaceId: "ws-large" } });
+  assert.equal(tiers["mid-5k"].citationMatch, "pageOnly");
+  assert.deepEqual(tiers["mid-5k"].scope, { sourceDocs: ["src-a"], maxPage: 4000 });
+  assert.deepEqual(tiers["mid-5k"].documents, { "slice-1": { pageCount: 500 } });
+  assert.equal(tiers["large-58k"].citationMatch, "documentAndPage");
+  assert.deepEqual(tiers["large-58k"].documentMap, { "src-a": "prod-a" });
+  assert.equal(tiers["large-58k"].documents["prod-a"].pageCount, 10);
+  const dir = tempDir(t);
+  writeFileSync(join(dir, "creds.json"), JSON.stringify({ midApiKey: "mid-key", largeApiKey: "large-key" }));
+  const keyFor = apiKeyResolver({ credentialsPath: join(dir, "creds.json") });
+  assert.equal(keyFor("mid-5k"), "mid-key");
+  assert.equal(keyFor("large-58k"), "large-key");
+  assert.equal(apiKeyResolver({ envByTier: { "mid-5k": "X_KEY" }, env: { X_KEY: "env-key" } })("mid-5k"), "env-key");
+  assert.throws(() => apiKeyResolver({ envByTier: { "mid-5k": "MISSING" }, env: {} })("mid-5k"), /No API key/);
+  const page = normalizePage({ tier: "mid-5k", sourceDoc: "src-a", page: 3, pageSha256: sha256("x"), markdown: "text" }, { workspaceId: "ws-mid" });
+  assert.deepEqual([page.workspaceId, page.sourceDoc, page.documentId, page.pageSha256], ["ws-mid", "src-a", null, sha256("x")]);
+  const estimate = estimateGenerationUsd({ model: "google/gemini-3.8-flash", prices, calls: 10, avgPromptChars: 3000 });
+  assert.ok(Math.abs(estimate.worstCaseUsd - 10 * ((1500 * 0.75 + 1024 * 3.75) / 1e6)) < 1e-12);
 });
 
 test("price policy blocks Pro/Ultra and output >= $50/M models", () => {

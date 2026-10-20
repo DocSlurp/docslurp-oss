@@ -8,7 +8,7 @@ import { dirname, join, resolve } from "node:path";
 import { performance } from "node:perf_hooks";
 import { pathToFileURL } from "node:url";
 import {
-  BudgetGuard, appendJsonl, assertModelAllowed, hashOf, loadPrices, parseArgs, readJson, tokenCostUsd, writeJsonExclusive,
+  BudgetGuard, apiKeyResolver, appendJsonl, assertModelAllowed, hashOf, loadPrices, parseArgs, readJson, tokenCostUsd, writeJsonExclusive,
 } from "./lib.mjs";
 import { extractChatResponse, modelCheck } from "./response.mjs";
 
@@ -22,6 +22,9 @@ export function normalizeConfig(raw, { prices } = {}) {
     runId: raw.runId,
     baseUrl: raw.baseUrl ?? "http://localhost:8787",
     apiKeyEnv: raw.apiKeyEnv ?? "DOCSLURP_EVAL_API_KEY",
+    // Per-tier keys: env var names by tier, or a credentials file + field by tier.
+    apiKeyEnvByTier: raw.apiKeyEnvByTier ?? null,
+    credentials: raw.credentials ?? null,
     dataset: raw.dataset,
     split: raw.split ?? "dev",
     tiers: raw.tiers ?? null,
@@ -101,6 +104,12 @@ export function dryRunReport(cells, config, prices, { completed = new Set() } = 
     entry.worstCaseUsd += usd; entry.worstCaseWithRetryUsd += 2 * usd; worstCaseUsd += usd;
   }
   return { cells: cells.length, remaining, models: config.models.length, arms: config.arms.length, repeats: config.repeats, byModel, worstCaseUsd, worstCaseWithRetryUsd: 2 * worstCaseUsd, capUsd: config.budget.capUsd, fitsCap: worstCaseUsd <= config.budget.capUsd };
+}
+
+/** Tier -> API key. Keys are read at runtime and never written to artifacts. */
+export function keyResolverFor(config, env = process.env) {
+  if (config.credentials?.file || config.apiKeyEnvByTier) return apiKeyResolver({ credentialsPath: config.credentials?.file ?? null, fieldByTier: config.credentials?.fieldByTier, envByTier: config.apiKeyEnvByTier, env });
+  return () => { const key = env[config.apiKeyEnv]; if (!key) throw new Error(`API key missing (env ${config.apiKeyEnv})`); return key; };
 }
 
 // ---------------------------------------------------------------- one call
@@ -214,8 +223,8 @@ export function runPool(cells, limits, worker, { shouldStop = () => false } = {}
 
 // ---------------------------------------------------------------- run
 
-export async function runMatrix({ config, dataset, outDir, apiKey, prices, fetchImpl = fetch, smoke = null, sleep = (ms) => new Promise((done) => setTimeout(done, ms)), random = Math.random, log = console.log }) {
-  if (!apiKey) throw new Error(`API key missing (env ${config.apiKeyEnv})`);
+export async function runMatrix({ config, dataset, outDir, apiKey = null, apiKeyForTier = null, prices, fetchImpl = fetch, smoke = null, sleep = (ms) => new Promise((done) => setTimeout(done, ms)), random = Math.random, log = console.log }) {
+  const keyFor = apiKeyForTier ?? (apiKey ? () => apiKey : keyResolverFor(config));
   const callsDir = join(outDir, "calls");
   mkdirSync(callsDir, { recursive: true });
   const identity = matrixIdentity(config, dataset.casesSha256 ?? hashOf(dataset.cases));
@@ -230,6 +239,8 @@ export async function runMatrix({ config, dataset, outDir, apiKey, prices, fetch
   }
   const guard = BudgetGuard.fromLog({ capUsd: config.budget.capUsd, logPath: join(outDir, "guard.jsonl") });
   const cells = buildMatrix(selectCases(dataset, config), config, { smoke });
+  // Fail before any call when a tier in the matrix has no key.
+  for (const tier of new Set(cells.map((cell) => cell.case.workspaceTier))) keyFor(tier);
   const completed = new Set(cells.filter((cell) => existsSync(join(callsDir, `${cell.key}.json`))).map((cell) => cell.key));
   const todo = cells.filter((cell) => !completed.has(cell.key));
   const counts = { cells: cells.length, skippedCompleted: completed.size, completed: 0, failed: 0, refused: 0, retried: 0, modelMismatches: 0, workerErrors: 0 };
@@ -247,7 +258,7 @@ export async function runMatrix({ config, dataset, outDir, apiKey, prices, fetch
           attempts.push({ attempt, refusedByBudget: true, at: new Date().toISOString() });
           break;
         }
-        const record = await callOnce(cell, config, { apiKey, attempt, fetchImpl, price });
+        const record = await callOnce(cell, config, { apiKey: keyFor(cell.case.workspaceTier), attempt, fetchImpl, price });
         record.guard = guard.reconcile(reservationId, { actualUsd: record.costUsd, source: record.costSource });
         attempts.push(record);
         appendJsonl(join(outDir, "attempts.jsonl"), { key: cell.key, model: cell.model, caseId: cell.caseId, arm: cell.arm, repeat: cell.repeat, attempt, status: record.status, errorKind: record.errorKind ?? null, latencyMs: record.latencyMs, ttfbMs: record.ttfbMs, requestId: record.requestId, serverRequestId: record.serverRequestId, traceId: record.traceId, chargedUsd: record.guard.chargedUsd, at: record.completedAt });
@@ -276,7 +287,7 @@ export async function runMatrix({ config, dataset, outDir, apiKey, prices, fetch
   };
   const peak = await runPool(todo, config.concurrency, worker, { shouldStop: () => stopped });
   const summary = { schema: RUN_SCHEMA, runId: config.runId, finishedAt: new Date().toISOString(), smoke, counts, budgetStopped: stopped, guard: guard.state(), peakConcurrency: peak };
-  writeJsonExclusive(join(outDir, `summary.${summary.finishedAt.replace(/[:.]/g, "-")}.json`), summary);
+  writeJsonExclusive(join(outDir, `summary.${summary.finishedAt.replace(/[:.]/g, "-")}.${randomBytes(3).toString("hex")}.json`), summary);
   return summary;
 }
 
@@ -301,7 +312,7 @@ export async function main(argv = process.argv.slice(2)) {
     return 0;
   }
   if (!options.out) throw new Error(USAGE);
-  const summary = await runMatrix({ config, dataset, outDir: resolve(options.out), apiKey: process.env[config.apiKeyEnv], prices, smoke });
+  const summary = await runMatrix({ config, dataset, outDir: resolve(options.out), apiKeyForTier: keyResolverFor(config), prices, smoke });
   console.log(JSON.stringify(summary, null, 2));
   return summary.counts.workerErrors ? 1 : 0;
 }

@@ -20,23 +20,41 @@ const PROTOCOL = /invalid|schema|argument|parse|malformed|validation/i;
 
 // ---------------------------------------------------------------- page matching
 
-/** documentId set for a gold page: its own id, or every catalog document with that source sha256. */
-function goldDocumentIds(page, workspaceDocuments) {
-  if (page.documentId) return new Set([page.documentId]);
+/**
+ * Matching context for one tier: `documentAndPage` needs the cited document to
+ * be the gold page's production document (documentId, documentMap[sourceDoc],
+ * or a catalog entry with the same sourceDoc or sha256) and the same page;
+ * `pageOnly` (workspaces of prefix slices of one source) needs the same page
+ * number on any document whose known page count covers it.
+ */
+export const matchContext = (tier) => ({ citationMatch: tier?.citationMatch ?? "documentAndPage", documentMap: tier?.documentMap ?? {}, documents: tier?.documents ?? {} });
+
+function goldDocumentIds(page, context) {
   const ids = new Set();
-  for (const [documentId, meta] of Object.entries(workspaceDocuments ?? {})) if (meta?.sourceSha256 === page.sourceSha256) ids.add(documentId);
+  if (page.documentId) ids.add(page.documentId);
+  if (page.sourceDoc && context.documentMap[page.sourceDoc]) ids.add(context.documentMap[page.sourceDoc]);
+  for (const [documentId, meta] of Object.entries(context.documents)) {
+    if ((page.sourceDoc && meta?.sourceDoc === page.sourceDoc) || (page.sourceSha256 && (meta?.sha256 ?? meta?.sourceSha256) === page.sourceSha256)) ids.add(documentId);
+  }
   return ids;
 }
-const hitsPage = (goldPage, citation, workspaceDocuments) => Boolean(citation?.documentId) && goldDocumentIds(goldPage, workspaceDocuments).has(citation.documentId) && citation.pages.includes(goldPage.page);
+export function hitsPage(goldPage, citation, context = matchContext(null)) {
+  if (!citation?.pages?.includes(goldPage.page)) return false;
+  if (context.citationMatch === "pageOnly") {
+    const pageCount = context.documents[citation.documentId]?.pageCount;
+    return !Number.isSafeInteger(pageCount) || goldPage.page <= pageCount;
+  }
+  return Boolean(citation.documentId) && goldDocumentIds(goldPage, context).has(citation.documentId);
+}
 
 /**
  * Support recall over a citation list. any_of: 1 when any gold page is hit.
  * all_of: share of support groups hit (partial credit), `all` when every group is.
  */
-export function supportRecall(gold, citations, workspaceDocuments = null) {
+export function supportRecall(gold, citations, context = matchContext(null)) {
   const groups = [...new Set(gold.supportPages.map((page) => page.group))].sort((a, b) => a - b);
   if (!groups.length) return null;
-  const hitGroups = groups.filter((group) => gold.supportPages.some((page) => page.group === group && citations.some((citation) => hitsPage(page, citation, workspaceDocuments))));
+  const hitGroups = groups.filter((group) => gold.supportPages.some((page) => page.group === group && citations.some((citation) => hitsPage(page, citation, context))));
   if (gold.supportMode === "any_of") { const hit = hitGroups.length > 0 ? 1 : 0; return { recall: hit, all: hit === 1, groups: groups.length, hitGroups: hitGroups.length }; }
   return { recall: hitGroups.length / groups.length, all: hitGroups.length === groups.length, groups: groups.length, hitGroups: hitGroups.length };
 }
@@ -47,12 +65,13 @@ export const heuristicAbstained = (answer, stopReason = null) => stopReason === 
 
 const finalAttempt = (record) => (record.attempts ?? []).filter((attempt) => !attempt.refusedByBudget).at(-1) ?? null;
 
-export function scoreCall(entry, record, { documents = null, judgment = null } = {}) {
+export function scoreCall(entry, record, { tier = null, judgment = null } = {}) {
   const gold = entry.gold;
   const final = finalAttempt(record);
   const x = final?.extracted ?? null;
   const ok = Boolean(final?.ok && x);
-  const workspaceDocuments = documents?.[entry.workspaceId] ?? null;
+  const context = matchContext(tier);
+  const catalog = Object.keys(context.documents).length ? context.documents : null;
   const citations = x?.citations ?? [];
   const toolCalls = x?.toolCalls ?? null;
   const toolEvidenceExposed = Boolean(toolCalls?.some((call) => Array.isArray(call.evidence)));
@@ -61,16 +80,16 @@ export function scoreCall(entry, record, { documents = null, judgment = null } =
   const markers = ok ? citedIndexes(x.answer) : [];
   const cited = markers.map((index) => citations[index - 1] ?? null);
   const validity = cited.map((citation) => {
-    if (!citation) return { resolvable: false, exists: false, inEvidence: false, valid: false };
-    const meta = workspaceDocuments?.[citation.documentId];
-    const exists = !workspaceDocuments ? null : Boolean(meta) && citation.pages.length > 0 && (!Number.isSafeInteger(meta.pageCount) || citation.pages.every((page) => page <= meta.pageCount));
+    if (!citation) return { resolvable: false, exists: null, inEvidence: null, valid: false };
+    const meta = catalog?.[citation.documentId];
+    const exists = !catalog ? null : Boolean(meta) && citation.pages.length > 0 && (!Number.isSafeInteger(meta.pageCount) || citation.pages.every((page) => page <= meta.pageCount));
     const inEvidence = evidenceSource !== "tool_calls" ? null : evidence.some((item) => item.documentId === citation.documentId && item.pages.some((page) => citation.pages.includes(page)));
     return { resolvable: true, exists, inEvidence, valid: exists !== false && inEvidence !== false && citation.pages.length > 0 };
   });
   const answerable = gold.answerable;
-  const evidenceRecall = ok && answerable && evidenceSource ? supportRecall(gold, evidence, workspaceDocuments) : null;
-  const citedRecall = ok && answerable ? supportRecall(gold, cited.filter(Boolean), workspaceDocuments) ?? { recall: 0, all: false } : null;
-  const citedRelevant = ok && answerable && gold.relevantPages?.length ? cited.some((citation) => citation && gold.relevantPages.some((page) => hitsPage(page, citation, workspaceDocuments))) : null;
+  const evidenceRecall = ok && answerable && evidenceSource ? supportRecall(gold, evidence, context) : null;
+  const citedRecall = ok && answerable ? supportRecall(gold, cited.filter(Boolean), context) ?? { recall: 0, all: false } : null;
+  const citedRelevant = ok && answerable && gold.relevantPages?.length ? cited.some((citation) => citation && gold.relevantPages.some((page) => hitsPage(page, citation, context))) : null;
 
   const searchCalls = toolCalls ? toolCalls.filter((call) => /search/i.test(call.name ?? "")) : [];
   const queries = searchCalls.flatMap((call) => call.queries);
@@ -89,7 +108,7 @@ export function scoreCall(entry, record, { documents = null, judgment = null } =
   const attemptsCostKnown = (record.attempts ?? []).every((attempt) => attempt.refusedByBudget || Number.isFinite(attempt.costUsd));
   return {
     key: record.key, runId: record.runId, model: record.model, caseId: entry.id, arm: record.arm, repeat: record.repeat,
-    workspaceTier: entry.workspaceTier, kind: entry.kind, answerable, ok, outcome: record.outcome,
+    workspaceTier: entry.workspaceTier, kind: entry.kind, answerable, ok, outcome: record.outcome, citationMatch: context.citationMatch, factsStatus: entry.gold.factsStatus ?? null,
     attempts: record.attemptCount ?? null, retried: (record.attemptCount ?? 1) > 1, errorsRecorded: record.errors?.length ?? 0,
     modelMismatch: record.modelCheck?.mismatch ?? null, resolvedModel: record.modelCheck?.resolvedModel ?? null,
     score, correct: score === null ? null : score === 1,
@@ -342,7 +361,7 @@ export function loadRunRecords(runDirs) {
   return records;
 }
 
-export async function scoreRuns({ dataset, records, runConfigs = [], judge = null, judgeModel = null, seed = "search-model-eval", iterations = 2000, baseline = DEFAULT_BASELINE_MODEL, onJudgment = () => {} }) {
+export async function scoreRuns({ dataset, records, tiers = null, runConfigs = [], judge = null, judgeModel = null, seed = "search-model-eval", iterations = 2000, baseline = DEFAULT_BASELINE_MODEL, onJudgment = () => {} }) {
   const cases = new Map(dataset.cases.map((entry) => [entry.id, entry]));
   const rows = [], missing = [];
   for (const record of records) {
@@ -354,13 +373,13 @@ export async function scoreRuns({ dataset, records, runConfigs = [], judge = nul
       judgment = await judge(entry, final.extracted.answer);
       onJudgment({ caseId: entry.id, kind: entry.kind, answerable: entry.gold.answerable, question: entry.question, facts: entry.gold.facts, answer: final.extracted.answer, judgment, cacheKey: judgment.cacheKey });
     }
-    rows.push(scoreCall(entry, record, { documents: dataset.documents ?? null, judgment }));
+    rows.push(scoreCall(entry, record, { tier: (tiers ?? dataset.tiers ?? {})[entry.workspaceTier] ?? null, judgment }));
   }
-  const report = buildReport(rows, { seed, iterations, baseline, meta: { datasetSha256: dataset.casesSha256 ?? null, runs: [...new Set(records.map((record) => record.runId))], runConfigs, judgeModel, seed, iterations, unmatchedRecords: missing } });
+  const report = buildReport(rows, { seed, iterations, baseline, meta: { datasetSha256: dataset.casesSha256 ?? null, runs: [...new Set(records.map((record) => record.runId))], runConfigs, tierMatching: Object.fromEntries(Object.entries(tiers ?? dataset.tiers ?? {}).map(([name, tier]) => [name, { workspaceId: tier.workspaceId, citationMatch: tier.citationMatch, mappedDocuments: Object.keys(tier.documentMap ?? {}).length }])), judgeModel, seed, iterations, unmatchedRecords: missing } });
   return { rows, report };
 }
 
-const USAGE = "Usage: score.mjs --dataset dataset.json --runs DIR[,DIR] --out DIR [--judge-model ID | --no-judge] [--judge-cap-usd 2] [--judge-cache path] [--judge-audit N] [--baseline ID] [--seed S] [--iterations 2000] [--api-key-env OPENROUTER_API_KEY]";
+const USAGE = "Usage: score.mjs --dataset dataset.json --runs DIR[,DIR] --out DIR [--judge-model ID | --no-judge] [--judge-cap-usd 2] [--judge-cache path] [--judge-audit N] [--baseline ID] [--seed S] [--iterations 2000] [--tiers tiers.json] [--api-key-env OPENROUTER_API_KEY]";
 
 export async function main(argv = process.argv.slice(2)) {
   const options = parseArgs(argv, { booleans: ["no-judge"] });
@@ -382,7 +401,7 @@ export async function main(argv = process.argv.slice(2)) {
   }
   const judgments = [];
   const seed = options.seed ?? "search-model-eval";
-  const { rows, report } = await scoreRuns({ dataset, records, runConfigs: runConfigs.map((config) => config?.identity ?? null), judge, judgeModel, seed, iterations: Number(options.iterations ?? 2000), baseline: options.baseline ?? DEFAULT_BASELINE_MODEL, onJudgment: (item) => judgments.push(item) });
+  const { rows, report } = await scoreRuns({ dataset, records, tiers: options.tiers ? readJson(options.tiers) : null, runConfigs: runConfigs.map((config) => config?.identity ?? null), judge, judgeModel, seed, iterations: Number(options.iterations ?? 2000), baseline: options.baseline ?? DEFAULT_BASELINE_MODEL, onJudgment: (item) => judgments.push(item) });
   if (guard) report.judgeSpend = guard.state();
   writeTextExclusive(join(out, "scores.jsonl"), rows.map((row) => JSON.stringify(row)).join("\n") + (rows.length ? "\n" : ""));
   writeJsonExclusive(join(out, "report.json"), report);

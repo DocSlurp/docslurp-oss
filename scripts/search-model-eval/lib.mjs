@@ -4,7 +4,8 @@
 // logs and ledgers every call.
 import { createHash, randomBytes } from "node:crypto";
 import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
-import { dirname, resolve } from "node:path";
+import { homedir } from "node:os";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 export const DATASET_SCHEMA = "docslurp-search-model-eval@v1";
@@ -79,6 +80,18 @@ export function parseArgs(argv, { booleans = [] } = {}) {
     }
   }
   return options;
+}
+
+export const expandHome = (path) => (path?.startsWith("~/") ? join(homedir(), path.slice(2)) : path);
+
+/** Credentials file reader; the file is read at runtime and never printed. */
+export function apiKeyResolver({ credentialsPath = null, fieldByTier = { "mid-5k": "midApiKey", "large-58k": "largeApiKey" }, envByTier = null, env = process.env }) {
+  const credentials = credentialsPath ? JSON.parse(readFileSync(expandHome(credentialsPath), "utf8")) : null;
+  return (tier) => {
+    const key = envByTier?.[tier] ? env[envByTier[tier]] : credentials?.[fieldByTier[tier]];
+    if (!key) throw new Error(`No API key for tier ${tier}`);
+    return key;
+  };
 }
 
 // ---------------------------------------------------------------- price policy

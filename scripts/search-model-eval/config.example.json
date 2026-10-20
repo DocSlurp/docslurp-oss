@@ -1,0 +1,21 @@
+{
+  "runId": "search-models-2026-10-20-a",
+  "baseUrl": "https://docslurp.io",
+  "dataset": "/home/dan/code/17th-street-labs/docslurp-app/performance/search-models/2026-10-20/dataset/dataset.json",
+  "split": "dev",
+  "credentials": {
+    "file": "~/.config/docslurp-eval/search-model-eval.json",
+    "fieldByTier": { "mid-5k": "midApiKey", "large-58k": "largeApiKey" }
+  },
+  "models": ["z-ai/glm-5.3-flash", "deepseek/deepseek-v4.1-flash", "openai/gpt-6-luna", "google/gemini-3.5-flash-lite"],
+  "arms": [
+    { "name": "default", "maxSteps": 8, "maxToolCalls": 16, "searchConcurrency": 6 },
+    { "name": "tight", "maxSteps": 4, "maxToolCalls": 6, "searchConcurrency": 3 }
+  ],
+  "repeats": 1,
+  "concurrency": { "global": 10, "perModel": 3, "perWorkspace": 6 },
+  "budget": { "capUsd": 5, "inputTokensPerTurn": 24000, "outputTokensPerTurn": 2048, "overheadUsdPerCall": 0.002 },
+  "timeoutMs": 150000,
+  "retry": { "onTimeout": false, "minDelayMs": 1000, "maxDelayMs": 4000 },
+  "sendBaggage": false
+}
