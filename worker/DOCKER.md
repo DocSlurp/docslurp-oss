@@ -102,7 +102,6 @@ Parser subprocesses should not inherit the full worker control-plane environment
 Useful env overrides:
 
 - `DOCSLURP_PARSER_SANDBOX=bubblewrap|landlock|modal|none`
-- `DOCSLURP_PARSER_SANDBOX_NETWORK=none|inherit`
 - `DOCSLURP_PARSER_SANDBOX_ROOT=/tmp/docslurp-parser-sandbox`
 - `DOCSLURP_PARSER_ENV_ALLOWLIST=EXTRA_ONE,EXTRA_TWO`
 - `DOCSLURP_PYTHON_POOL_ENV_ALLOWLIST=EXTRA_ONE,EXTRA_TWO`

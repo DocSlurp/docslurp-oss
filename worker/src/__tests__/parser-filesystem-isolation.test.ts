@@ -43,7 +43,7 @@ it.skipIf(process.platform !== "linux" || !existsSync("/usr/bin/bwrap"))("isolat
       'test -r "$1/job/input" && test ! -e "$1/other/secret" && test ! -e "/proc/$2/environ" && printf output > "$1/job/output"',
       "probe", root, String(process.pid)], {
       encoding: "utf8", timeout: 10_000,
-      env: { PATH: process.env.PATH, DOCSLURP_PARSER_SANDBOX_MODE: "isolated", DOCSLURP_PARSER_SANDBOX_TMP_ROOT: tmpdir(), DOCSLURP_PARSER_SANDBOX_WRITABLE_PATHS: path.join(root, "job") },
+      env: { PATH: process.env.PATH, DOCSLURP_PARSER_SANDBOX_TMP_ROOT: tmpdir(), DOCSLURP_PARSER_SANDBOX_WRITABLE_PATHS: path.join(root, "job") },
     });
     expect(result.status, result.stderr || result.error?.message).toBe(0);
     expect(readFileSync(path.join(root, "job", "output"), "utf8")).toBe("output");
@@ -112,7 +112,7 @@ const alternativesLink = existsSync("/etc/alternatives")
 it.skipIf(process.platform !== "linux" || !existsSync("/usr/bin/bwrap") || !alternativesLink)("resolves /etc/alternatives symlinks inside the sandbox", () => {
   const result = spawnSync("bash", [path.resolve("scripts/parser-sandbox.sh"), "/bin/bash", "-c", 'test -e "$(readlink -f "$1")"', "probe", alternativesLink], {
     encoding: "utf8", timeout: 10_000,
-    env: { PATH: process.env.PATH, DOCSLURP_PARSER_SANDBOX_MODE: "isolated", DOCSLURP_PARSER_SANDBOX_TMP_ROOT: tmpdir() },
+    env: { PATH: process.env.PATH, DOCSLURP_PARSER_SANDBOX_TMP_ROOT: tmpdir() },
   });
   expect(result.status, `${alternativesLink}: ${result.stderr || result.error?.message}`).toBe(0);
 });
@@ -120,7 +120,25 @@ it.skipIf(process.platform !== "linux" || !existsSync("/usr/bin/bwrap") || !alte
 it.skipIf(process.platform !== "linux" || !existsSync("/usr/bin/bwrap") || !existsSync("/usr/bin/ffprobe"))("runs ffprobe inside the sandbox", () => {
   const result = spawnSync("bash", [path.resolve("scripts/parser-sandbox.sh"), "/usr/bin/ffprobe", "-version"], {
     encoding: "utf8", timeout: 10_000,
-    env: { PATH: process.env.PATH, DOCSLURP_PARSER_SANDBOX_MODE: "isolated", DOCSLURP_PARSER_SANDBOX_TMP_ROOT: tmpdir() },
+    env: { PATH: process.env.PATH, DOCSLURP_PARSER_SANDBOX_TMP_ROOT: tmpdir() },
   });
   expect(result.status, result.stderr || result.error?.message).toBe(0);
+});
+
+it.skipIf(process.platform !== "linux")("has no unisolated mode: the launcher ignores the removed DOCSLURP_PARSER_SANDBOX_MODE", async () => {
+  const { symlinkSync } = await import("node:fs");
+  // A PATH with the launcher's own tools but no bwrap: it must refuse, whatever the old mode variable says.
+  const bin = mkdtempSync(path.join(tmpdir(), "docslurp-launcher-bin-"));
+  try {
+    const which = (tool: string) => spawnSync("bash", ["-c", `command -v ${tool}`], { encoding: "utf8" }).stdout.trim();
+    for (const tool of ["mkdir", "mktemp", "rm"]) symlinkSync(which(tool), path.join(bin, tool));
+    const result = spawnSync(which("bash"), [path.resolve("scripts/parser-sandbox.sh"), "/usr/bin/true"], {
+      encoding: "utf8", timeout: 10_000,
+      env: { PATH: bin, DOCSLURP_PARSER_SANDBOX_MODE: "inherit", DOCSLURP_PARSER_SANDBOX_ROOT: path.join(bin, "scratch"), DOCSLURP_PARSER_SANDBOX_TMP_ROOT: tmpdir() },
+    });
+    expect(result.status).toBe(70);
+    expect(result.stderr).toContain("refusing to run parser without isolation");
+  } finally {
+    rmSync(bin, { recursive: true, force: true });
+  }
 });

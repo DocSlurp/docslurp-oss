@@ -44,7 +44,6 @@ function launcherPath(): string {
 
 function launcherEnv(config: BubblewrapConfig, command: Pick<SandboxCommand, "readablePaths" | "writablePaths">) {
   return {
-    DOCSLURP_PARSER_SANDBOX_MODE: "isolated",
     DOCSLURP_PARSER_SANDBOX_READABLE_PATHS: command.readablePaths.join(","),
     DOCSLURP_PARSER_SANDBOX_ROOT: config.scratchRoot,
     DOCSLURP_PARSER_SANDBOX_TMP_ROOT: path.resolve(tmpdir()),
