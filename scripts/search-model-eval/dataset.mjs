@@ -371,7 +371,7 @@ export function pairNeighbourPages(pages, neighbours, { seed, span = 3, minOverl
  * `multi` multi-hop cases are accepted or each kind's call cap is reached.
  * Pages behind accepted single-hop cases are not reused for pairs.
  */
-export async function generateCases({ pages, neighbours = null, tier, seed, single = 0, multi = 0, maxSingleCalls = defaultMaxCalls(single), maxMultiCalls = defaultMaxCalls(multi), generatorModel, prices, apiKey, ledgerPath, guard, fetchImpl, createdAt = new Date().toISOString(), log = console.log }) {
+export async function generateCases({ pages, neighbours = null, pairs = null, tier, seed, single = 0, multi = 0, maxSingleCalls = defaultMaxCalls(single), maxMultiCalls = defaultMaxCalls(multi), generatorModel, prices, apiKey, ledgerPath, guard, fetchImpl, createdAt = new Date().toISOString(), log = console.log }) {
   const accepted = [], rejected = [];
   const call = (messages, scope) => openRouterJson({ model: generatorModel, messages, apiKey, metric: "search-model-eval-dataset-generate", ledgerPath, guard, prices, fetchImpl, scope, maxTokens: GENERATE_MAX_TOKENS, log });
   const used = new Set();
@@ -386,7 +386,7 @@ export async function generateCases({ pages, neighbours = null, tier, seed, sing
   }
   calls = 0;
   let multis = 0;
-  for (const pair of neighbours ? pairNeighbourPages(pages, neighbours, { seed, exclude: used }) : pairPages(pages, { seed, exclude: used })) {
+  for (const pair of pairs ?? (neighbours ? pairNeighbourPages(pages, neighbours, { seed, exclude: used }) : pairPages(pages, { seed, exclude: used }))) {
     if (multis >= multi || calls >= maxMultiCalls) break;
     calls++;
     const reply = await call(multiHopMessages(...pair.pages), { tier, pages: pair.pages.map(pageRef) });
@@ -714,7 +714,9 @@ export async function main(argv = process.argv.slice(2)) {
         neighbours.set(key, normalizePage({ ...row, markdown: row.text }, { tier, workspaceId: pages[0]?.workspaceId }));
       }
     }
-    writeCandidates(setup.out, await generateCases({ pages, neighbours, tier, seed, single, multi, maxSingleCalls, maxMultiCalls, apiKey: process.env[options["api-key-env"] ?? "OPENROUTER_API_KEY"], createdAt, ...setup }));
+    // --pairs: precomputed page pairs (JSONL of {pages: [pageA, pageB]}), e.g. the same section across documents.
+    const pairs = options.pairs ? readJsonl(options.pairs).map((row) => ({ overlap: row.overlap ?? null, pages: row.pages.map((page) => normalizePage(page, { tier, workspaceId: pages[0]?.workspaceId })) })) : null;
+    writeCandidates(setup.out, await generateCases({ pages, neighbours, pairs, tier, seed, single, multi, maxSingleCalls, maxMultiCalls, apiKey: process.env[options["api-key-env"] ?? "OPENROUTER_API_KEY"], createdAt, ...setup }));
     console.log(JSON.stringify({ guard: setup.guard.state() }));
   } else if (command === "unanswerable") {
     if (!options.pages || !options.corpus) throw new Error(USAGE);
