@@ -100,6 +100,25 @@ index inherits `STORAGE_URI` as before.
 | `S3_MULTIPART_PART_SIZE_MB` | `8` | Part size for streamed server uploads (5-5120). |
 | `LANCEDB_CONNECT_TIMEOUT_SECONDS`, `LANCEDB_REQUEST_TIMEOUT_SECONDS`, `LANCEDB_CLIENT_MAX_RETRIES`, `LANCEDB_POOL_MAX_IDLE_PER_HOST` | Lance | Lance object-store options (`connect_timeout`, `timeout`, `client_max_retries`, `pool_max_idle_per_host`) for `s3://` roots. |
 
+**Search cache, prewarm and freshness** — the server shares one LanceDB `Session`
+across its connections and loads the vector (and full-text) indexes into it when a
+table opens. The worker shares one `Session` per process but does not prewarm: it is
+a different process from the server, so warming there would not fill the cache that
+answers searches. Instead the server re-prewarms open tables every
+`LANCEDB_PREWARM_REFRESH_SECONDS` to pick up indexes the worker rebuilt.
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `LANCEDB_INDEX_CACHE_MB` | 25% of usable memory, 64 MB to 6 GB | Index cache size. LanceDB's own default is a fixed 6 GB. Usable memory is the container limit when one is set. |
+| `LANCEDB_METADATA_CACHE_MB` | 5% of usable memory, 32 MB to 1 GB | File footer and schema cache size. LanceDB's own default is a fixed 1 GB. |
+| `LANCEDB_PREWARM_INDEX` | `true` | Prewarm vector and FTS indexes when a table opens. Failures are logged (`[lancedb-session] prewarm ... errors=`), never thrown. |
+| `LANCEDB_PREWARM_BLOCKING` | `false` | `true` makes the first search wait for the prewarm. Off, the first searches run while it loads. |
+| `LANCEDB_PREWARM_REFRESH_SECONDS` | `60` | Re-prewarm open tables this often (cheap when already cached). `0` disables. |
+| `LANCEDB_PREWARM_DATA` | `false` | Also load the `vector`, `id` and `documentId` columns, so refine and `documentId` filters read memory. Costs RAM of that size. |
+| `LANCEDB_READ_CONSISTENCY_SECONDS` | `10` | How often an open table checks for a new version. Higher means fewer manifest reads, but new rows take that long to become searchable. `0` checks on every query. |
+
+The server logs `[lancedb-session] created ...` at startup with the configured sizes.
+
 Use a shared `s3://` root whenever the server and worker run in separate containers
 or machines. Log URIs only after redaction because `STORAGE_URI` may hold a
 secret.

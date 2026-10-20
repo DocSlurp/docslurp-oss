@@ -31,8 +31,6 @@ import { prewarmTable } from "./lancedb-prewarm.js";
  *   (5 min), so absent legacy tables don't cost S3 round trips on queries.
  * - A handle that errors is dropped and reopened on the next search.
  */
-/** An open table re-prewarms (cheap when cached) this often, to pick up indexes rebuilt by the worker. */
-const PREWARM_REFRESH_MS = 60_000;
 let sessionState: { config: LanceSessionConfig; session: lancedb.Session; timer: NodeJS.Timeout } | undefined;
 const lastPrewarm = new Map<string, number>();
 
@@ -132,7 +130,7 @@ async function getTable(uri: string, name: string): Promise<lancedb.Table | null
 /** Re-prewarm periodically: the worker rebuilds indexes in another process, which this cache has not seen. */
 function refreshPrewarm(key: string, name: string, table: lancedb.Table): void {
   const { config } = lanceSession();
-  if (!config.prewarmIndex || Date.now() - (lastPrewarm.get(key) ?? 0) < PREWARM_REFRESH_MS) return;
+  if (!config.prewarmIndex || config.prewarmRefreshSeconds <= 0 || Date.now() - (lastPrewarm.get(key) ?? 0) < config.prewarmRefreshSeconds * 1_000) return;
   lastPrewarm.set(key, Date.now());
   void prewarmTable(table, name, { prewarmIndex: true, prewarmData: false });
 }

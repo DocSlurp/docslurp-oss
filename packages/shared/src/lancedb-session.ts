@@ -27,6 +27,8 @@ export interface LanceSessionConfig {
   prewarmIndex: boolean;
   /** Also prewarm vector/id/documentId column data (RAM cost: the size of those columns). */
   prewarmData: boolean;
+  /** Re-prewarm an open table's indexes this often, to pick up indexes the worker rebuilt (0 = never). */
+  prewarmRefreshSeconds: number;
   /** Await the prewarm before the first query instead of running it in the background. */
   prewarmBlocking: boolean;
 }
@@ -73,6 +75,7 @@ export function resolveLanceSessionConfig(env: Env = process.env, memoryBytes: n
     readConsistencySeconds,
     prewarmIndex: parseBool(env, "LANCEDB_PREWARM_INDEX", true),
     prewarmData: parseBool(env, "LANCEDB_PREWARM_DATA", false),
+    prewarmRefreshSeconds: parseNumber(env, "LANCEDB_PREWARM_REFRESH_SECONDS", 0) ?? 60,
     prewarmBlocking: parseBool(env, "LANCEDB_PREWARM_BLOCKING", false),
   };
 }

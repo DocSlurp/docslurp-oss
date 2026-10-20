@@ -37,6 +37,8 @@ describe("resolveLanceSessionConfig", () => {
 
   it("prewarms the index by default, data only when asked", () => {
     const defaults = resolveLanceSessionConfig({}, GB);
+    expect(defaults.prewarmRefreshSeconds).toBe(60);
+    expect(resolveLanceSessionConfig({ LANCEDB_PREWARM_REFRESH_SECONDS: "0" }, GB).prewarmRefreshSeconds).toBe(0);
     expect([defaults.prewarmIndex, defaults.prewarmData, defaults.prewarmBlocking]).toEqual([true, false, false]);
     const custom = resolveLanceSessionConfig({ LANCEDB_PREWARM_INDEX: "false", LANCEDB_PREWARM_DATA: "1", LANCEDB_PREWARM_BLOCKING: "on" }, GB);
     expect([custom.prewarmIndex, custom.prewarmData, custom.prewarmBlocking]).toEqual([false, true, true]);
