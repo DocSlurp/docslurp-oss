@@ -58,12 +58,12 @@ if (profile === 'full' || profile === 'test' || profile === 'lean') {
   }
 }
 if (args.includes('--sandbox')) {
-  if (process.platform !== 'linux') failures.push('bubblewrap isolation requires Linux');
+  // The compiled probe CLI checks whichever provider DOCSLURP_PARSER_SANDBOX selects.
+  const probe = path.join(root, 'worker/dist/sandbox/probe-cli.js');
+  if (!existsSync(probe)) failures.push(`parser isolation unavailable: sandbox probe not built (${probe})`);
   else {
-    const result = spawnSync('bash', [path.join(root, 'worker/scripts/parser-sandbox.sh'), '/usr/bin/true'], {
-      encoding: 'utf8', timeout: 10000, env: { ...process.env, DOCSLURP_PARSER_SANDBOX_MODE: 'isolated' },
-    });
-    if (result.status !== 0) failures.push(`parser isolation unavailable: ${result.error?.message || result.stderr.trim()}`);
+    const result = spawnSync(process.execPath, [probe], { encoding: 'utf8', timeout: 30000, env: process.env });
+    if (result.status !== 0) failures.push(`parser isolation unavailable: ${result.error?.message || result.stdout.trim() || result.stderr.trim()}`);
   }
 }
 for (const failure of failures) console.error(`[worker-prerequisites] ${failure}`);

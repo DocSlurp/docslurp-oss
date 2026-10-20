@@ -18,7 +18,7 @@ What the sandbox does:
 
 If `bwrap` is missing, the launcher exits with code 70 and `refusing to run parser without isolation`. It never falls back to running the parser unsandboxed.
 
-The sandbox is always on when `NODE_ENV=production`, which the Compose stack sets. Outside production it is on by default except on macOS, and `DOCSLURP_PARSER_SANDBOX_ENABLED` can turn it off. The `inherit` mode (`DOCSLURP_PARSER_SANDBOX_MODE=inherit`) skips isolation, and the worker honours it only outside production (`resolveParserSandboxSettings` in `worker/src/tools/runner.ts`).
+The sandbox provider is chosen with `DOCSLURP_PARSER_SANDBOX` (`bubblewrap`, `landlock`, `modal` or `none`). Unset, it is `bubblewrap` on Linux and `none` on macOS outside production. The worker probes the provider at startup and refuses to start if isolation is unavailable. With `NODE_ENV=production` it also requires filesystem isolation and at least `tcp-only` network isolation. Provider `none` runs parsers directly on the host and is accepted in production only with `DOCSLURP_PARSER_SANDBOX_ALLOW_UNISOLATED=true`, which logs `[parser-sandbox] status=unisolated` on every start. Startup logs one line, `[parser-sandbox] provider=<id> filesystem=<bool> network=<level> processes=<bool> location=<local|remote>`. Each Temporal activity gets its own sandbox session, closed when the activity ends (`worker/src/sandbox/`).
 
 ### Why Compose sets `systempaths=unconfined`
 
