@@ -64,6 +64,8 @@ export interface VectorIndex {
   path: string;
   embeddingModel: string;
   dimension: number;
+  /** Identity of the index config the vectors were built with (`documents.index_config_hash`). */
+  indexConfigHash?: string;
 }
 
 export class WorkflowState {

@@ -18,6 +18,7 @@ Each result has `text`, a `score` and a `citation` with the `filename`, `pageNum
 | [Node.js / TypeScript SDK](https://docslurp.io/docs/sdk) | Application code, streams, deadlines and typed responses |
 | [CLI](https://docslurp.io/docs/cli) | Exploring documents, shell scripts, CI and agent tooling |
 | [Runnable Node examples](https://docslurp.io/docs/sdk#quickstart) | Upload, wait and search, progress with polling fallback, and LLM context |
+| [Deferred indexing modes](deferred-indexing.md) | On-demand page map and page images, query spend policies, capability tokens for browser clients |
 | [20-second demo](https://docslurp.io/demos/integration.mp4) | Seeing the workflow before you build it |
 
 > **Versions:** SDK examples target `@docslurp/sdk` 0.3.0 or newer. This includes URL uploads through `upload`, batch search, workspace discovery and upload-session methods. Self-hosted deployments must run an API version with these routes.
@@ -183,6 +184,10 @@ curl -X PATCH "$api_url/v1/workspaces/amber-falcon-ridge" \
 | Batch retrieval | `POST /v1/search` with `{ queries }` | `search({ queries })` | `search --queries-file` |
 | Grounded chat | `POST /v1/chat` | `chat` | `chat` |
 | Read a document | `GET /v1/documents/:id` | `getDocument` | Use SDK/HTTP |
+| List document versions | `GET /v1/documents/:id/versions` | `listDocumentVersions` | Use SDK/HTTP |
+| Retention | `PATCH /v1/organizations/:orgId` or `/v1/workspaces/:workspace` with `retainDocumentVersions` | `setRetention` | Use SDK/HTTP |
+| Estimate work before starting it | `POST …/estimate` twins of each work-creating route | `updateWorkspaceEstimate`, `reprocessEstimate`, `fullIndexEstimate`, `uploadEstimate`, … | `--estimate` on `upload`, `full-index`, `reprocess` |
+| Follow a background job | `GET /v1/jobs/:id`, `GET /v1/jobs/:id/events` (SSE) | `getJob` / `streamJob` | `jobs get` / `jobs watch` |
 | List / create organizations | `GET` / `POST /v1/organizations` | `listOrganizations` / `createOrganization` | Use SDK/HTTP |
 | Read / update organization | `GET` / `PATCH /v1/organizations/:orgId` | `getOrganization` / `updateOrganization` | Use SDK/HTTP |
 | Organization details / access | `GET /v1/organizations/:orgId/details` / `access` | `getOrganizationDetails` / `getOrganizationAccess` | Use SDK/HTTP |
@@ -192,7 +197,11 @@ curl -X PATCH "$api_url/v1/workspaces/amber-falcon-ridge" \
 | Leave organization | `POST /v1/organizations/:orgId/leave` | `leaveOrganization` | Use SDK/HTTP |
 | List / revoke organization keys | `GET` / `DELETE /v1/organizations/:orgId/api-keys` | `listOrganizationApiKeys` / `revokeOrganizationApiKeys` | Use SDK/HTTP |
 
-The SDK and CLI use `/v1/chat`. For streamed answers, use the separate [OpenAI-compatible chat API](https://docslurp.io/docs/chat). See [search contracts](https://docslurp.io/docs/search-reference) for retrieval controls and [OpenAPI](https://docslurp.io/openapi.json) for machine-readable request and response schemas. Each deployment's OpenAPI describes that deployment.
+Guides: [document versions and retention](document-versions.md) and [config-change jobs and estimates](config-change-jobs.md).
+
+## API changes
+
+- **2026-10-14, non-breaking.** Responses of work-creating routes (workspace `PATCH`, search-settings `PATCH`, uploads, reprocess, full-index, graph rebuild) gain an optional `job`. New `POST …/estimate` routes, `GET /v1/jobs/:id` and `GET /v1/jobs/:id/events`. Workspaces gain `autoConfirmReindex` and `retainDocumentVersions`; organizations gain `retainDocumentVersions`. Uploads accept `path`. Config `PATCH` requests that succeeded before still succeed and never return `409`; a `reindex-required` change now queues a re-index. See [config-change jobs](config-change-jobs.md).
 
 ## Live ingestion progress
 
@@ -777,3 +786,21 @@ Every 429 has `Retry-After` and the [error envelope](https://docslurp.io/docs/se
 [![17th Street Labs logo](https://docslurp.io/sponsors/17th-street-labs-readme.svg)](https://17thstreetlabs.com)
 
 [17th Street Labs](https://17thstreetlabs.com) is DocSlurp's primary sponsor.
+
+### Document tags
+
+Apply tags to every accepted document in an upload, including streamed, URL, and direct-to-storage uploads:
+
+```ts
+await client.upload({ files: [file], tags: ["finance", "FY26"] });
+await client.upload({ urls: ["https://example.com/report.pdf"], tags: ["finance"] });
+const tags = await client.listWorkspaceTags();
+// [{ tag: "finance", documentCount: 2 }, ...]
+await client.search({ q: "revenue outlook", tags: "finance,FY26" });
+```
+
+JSON upload and direct-session requests accept `tags: string[]`. Multipart `/v1/uploads/bulk` accepts a `tags` field containing a JSON array. Tags are case-sensitive, trimmed, and deduplicated: up to 24 labels per request, each 1–100 characters, with no commas or NUL characters. Tags are saved with the document before processing starts, returned in the upload response, and preserved when reprocessing documents.
+
+`GET /v1/workspaces/{workspaceId}/tags` returns `{ "tags": [{ "tag": "finance", "documentCount": 2 }] }`, sorted by tag. Counts cover current, non-superseded documents, including pending uploads. The workspace accepts a UUID, slug, former slug, or `default`. Session callers need workspace access; API keys additionally need one of `search`, `ingest`, `artifacts`, or `workspaces:manage`, and stay within their organization and workspace restrictions. An empty workspace returns `{"tags":[]}`.
+
+Document listing and search accept comma-separated `tags`; matching any supplied tag is sufficient. Chat accepts an array in `filters.tags`. Existing dashboard-session endpoints `PUT /v1/documents/{docId}/tags` and `POST /v1/documents/bulk` (`apply-tags`/`remove-tags`) edit labels with workspace edit access. Tag changes take effect without re-ingestion.

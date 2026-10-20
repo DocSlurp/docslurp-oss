@@ -225,7 +225,12 @@ export async function prepareSearchSessionRetrievalPlan(args: {
     queryVector = await timePhase("embed", () => embedQuery(effectiveQuery, embedding, session, privacyMode, workspaceId, orgId));
   }
 
-  if (effectiveOptions.summarySeed && queryVector) {
+  // An explicit document selection already defines the retrieval scope. Org-wide
+  // summary seeds must never replace it with unrelated documents.
+  const hasDocumentSelection = Boolean(
+    effectiveOptions.filters?.documentId || effectiveOptions.filters?.documentIds?.length,
+  );
+  if (effectiveOptions.summarySeed && queryVector && !hasDocumentSelection) {
     const access = await getWorkspaceAccess(workspaceId, userId);
     if (access) {
       const seedHits = await lanceDbVectorSearch({
@@ -375,7 +380,7 @@ async function planIterativeMultiHop(args: {
 /** Hosted providers that report actual usage and fail loudly instead of degrading to text-only search. */
 const METERED_EMBEDDING_PROVIDERS = new Set(["openrouter", "perplexity", "deepinfra"]);
 
-async function embedQuery(
+export async function embedQuery(
   query: string,
   embedding: EmbeddingConfig,
   usage: SearchSessionJournal,

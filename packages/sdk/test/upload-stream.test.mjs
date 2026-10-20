@@ -35,10 +35,11 @@ test("direct Node streams preserve ranges, infer filenames, and set workspace op
     await withServer(async (apiUrl, requests) => {
       const client = createDocSlurpClient({ apiUrl, apiKey: "key", workspaceId: "client-default" });
       const source = createReadStream(path, { start: 6, end: 13, highWaterMark: 2 });
-      assert.equal((await client.upload(source, { workspaceId: "override" })).run.id, "run");
+      assert.equal((await client.upload(source, { workspaceId: "override", tags: ["streamed"] })).run.id, "run");
       assert.equal(requests[0].get("files").name, "handbook.pdf");
       assert.equal(await requests[0].get("files").text(), "DOCUMENT");
       assert.equal(requests[0].get("workspaceId"), "override");
+      assert.deepEqual(JSON.parse(requests[0].get("tags")), ["streamed"]);
       assert.equal(source.destroyed, true);
       await client.upload(createReadStream(path, { encoding: "hex", start: 6, end: 7 }), { filename: 'named"\r\n.pdf', workspaceId: "" });
       assert.equal(await requests[1].get("files").text(), Buffer.from("DO").toString("hex"));

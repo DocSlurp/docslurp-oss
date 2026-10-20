@@ -34,6 +34,9 @@ import {
 } from "../services/runs.js";
 import { acceptApiKeys } from "../lib/route-auth.js";
 import { apiErrorResponse, apiStatusError } from "../lib/api-error.js";
+import { inlineEstimate, jobMetaFor, jobStatusForMutation, recordJobMeta } from "../services/jobs.js";
+import { billingState } from "../services/config-change.js";
+import { estimateRunReprocess } from "../services/work-estimates.js";
 
 const STREAM_HEARTBEAT_MS = 4_000;
 const STREAM_RECONCILE_MS = 30_000;
@@ -280,9 +283,24 @@ export const runsRoutes = new Hono()
       return workspaceErrorResponse(c, error);
     }
   })
+  .post("/:runId/reprocess/estimate", zValidator("json", reprocessRunSchema, validationHook), async (c) => {
+    // The MCP in-process forward bypasses sessionAuth, so key-to-workspace scoping is enforced here.
+    const actor = getRequestActor(c);
+    if (actor.type === "apiKey") {
+      const run = await getRun(c.req.param("runId"), c.get("sessionUser").id, { cost: false });
+      if (!run || !await loadActorScopedWorkspace(run.workspaceId, actor)) return apiStatusError(c, 404, "Run not found");
+    }
+    const estimate = await estimateRunReprocess({ runId: c.req.param("runId"), userId: c.get("sessionUser").id, options: c.req.valid("json") });
+    if (!estimate) return apiStatusError(c, 404, "Run not found");
+    return c.json({ estimate, billing: billingState() });
+  })
   .post("/:runId/reprocess", zValidator("json", reprocessRunSchema, validationHook), async (c) => {
     const userId = c.get("sessionUser").id;
     const body = c.req.valid("json");
+    const inline = await inlineEstimate(
+      () => estimateRunReprocess({ runId: c.req.param("runId"), userId, options: body }),
+      `/v1/runs/${c.req.param("runId")}/reprocess/estimate`,
+    );
     let reprocessed: Awaited<ReturnType<typeof reprocessRun>>;
     try {
       reprocessed = await reprocessRun(c.req.param("runId"), userId, body);
@@ -301,6 +319,9 @@ export const runsRoutes = new Hono()
     }
 
     const { run, deferredReason: deferred } = reprocessed;
+    const meta = jobMetaFor(run.id, "reprocess", inline);
+    await recordJobMeta([run.id], meta);
+    const job = await jobStatusForMutation(meta, [run.id], userId);
 
     await appendAuditLog({
       orgId: run.orgId,
@@ -320,10 +341,10 @@ export const runsRoutes = new Hono()
 
     if (deferred) {
       c.header("X-Temporal-Deferred", "true");
-      return c.json({ run, warnings: [deferred] }, 201);
+      return c.json({ run, warnings: [deferred], job }, 201);
     }
 
-    return c.json(run, 201);
+    return c.json({ ...run, job }, 201);
   })
   .post("/:runId/retry", async (c) => {
     const userId = c.get("sessionUser").id;

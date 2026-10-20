@@ -53,6 +53,18 @@ export const batchSearchInputSchema = z.object({
   /** Parallel retrievals; the chat search agent clamps it to the turn's `agent.searchConcurrency`. */
   concurrency: z.number().int().min(1).max(8).default(4),
 }).strict();
+/**
+ * Search takes exactly one form, and tool schemas cannot say so with a top-level
+ * oneOf (Anthropic rejects it). This explains a mixed call so a model can fix it.
+ */
+export function searchFormError(input: Record<string, unknown>): string | undefined {
+  if (!("queries" in input)) return "concurrency" in input ? "concurrency applies only to a queries batch; remove it or send queries instead of q." : undefined;
+  const stray = Object.keys(input).filter(key => key !== "queries" && key !== "concurrency");
+  if (!stray.length) return undefined;
+  return "q" in input
+    ? "Send either q for one query or queries for a batch, not both."
+    : `With queries, put ${stray.join(", ")} inside each queries item; only concurrency may accompany queries.`;
+}
 export const workspaceChatInputSchema = z.object({
   q: query,
   workspaceId: workspaceRef,

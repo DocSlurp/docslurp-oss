@@ -44,18 +44,8 @@ permissions:
 
 jobs:
   lockfiles-and-image:
-    timeout-minutes: 20
+    timeout-minutes: 35
     runs-on: ubuntu-24.04
-    strategy:
-      fail-fast: true
-      matrix:
-        include:
-          - profile: lean
-            dockerfile: worker/Dockerfile.lean
-          - profile: full
-            dockerfile: worker/Dockerfile.full
-          - profile: default
-            dockerfile: worker/Dockerfile
     permissions:
       actions: read
       contents: read
@@ -65,22 +55,19 @@ jobs:
         with:
           persist-credentials: false
 
-      # Verify once in the lean lane; avoid a separately rounded setup job.
+      # Build all profiles on one runner: reuse Docker layers and clean disk once.
       - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
-        if: matrix.profile == 'lean'
         with:
           python-version: '3.11'
           version: '0.13.0'
 
       - name: Rebuild tracked worker lockfiles
-        if: matrix.profile == 'lean'
         run: |
           UV_TORCH_BACKEND=cpu uv pip compile worker/requirements-base.txt --python-version 3.11 --python-platform x86_64-unknown-linux-gnu --output-file worker/requirements-base.lock.txt
           UV_TORCH_BACKEND=cpu uv pip compile worker/requirements.txt --python-version 3.11 --python-platform x86_64-unknown-linux-gnu --output-file worker/requirements.lock.txt
           UV_TORCH_BACKEND=cpu uv pip compile worker/requirements-fallback.txt --python-version 3.11 --python-platform x86_64-unknown-linux-gnu --output-file worker/requirements-fallback.lock.txt
 
       - name: Ensure worker lockfiles are committed
-        if: matrix.profile == 'lean'
         run: git diff --exit-code -- worker/requirements-base.lock.txt worker/requirements.lock.txt worker/requirements-fallback.lock.txt
 
       - name: Reserve disk space for worker image build
@@ -94,40 +81,58 @@ jobs:
             exit 1
           fi
 
-      - name: Build worker image
-        run: docker build -f "${{ matrix.dockerfile }}" -t docslurp-worker:ci .
-
       # Fly rejects images over ~8 GB uncompressed; the worker's models, vendor
       # bundles and scratch files share a separate ~7.8 GB writable layer
       # (docs/worker-image.md). The production (lean) image keeps a tight budget.
-      - name: Enforce worker image budget and deferred ML installation
-        env:
-          MAX_IMAGE_BYTES: ${{ matrix.profile == 'lean' && '2684354560' || '6442450944' }}
+      - name: Build and verify every worker image
+        shell: bash # Includes pipefail: tee must not hide a failed Docker build.
         run: |
-          image_bytes="$(docker image inspect docslurp-worker:ci --format '{{.Size}}')"
-          echo "Worker image bytes: ${image_bytes}; limit: ${MAX_IMAGE_BYTES}"
-          test "${image_bytes}" -le "${MAX_IMAGE_BYTES}"
-          docker history --format '{{.Size}}\t{{.CreatedBy}}' docslurp-worker:ci | head -25
-          if [ "${{ matrix.profile }}" = "lean" ]; then
-            docker run --rm --entrypoint node docslurp-worker:ci scripts/check-worker-prerequisites.mjs --profile=lean
-            # Runtime pip installs stay off, the venv and app are not writable by the worker user,
-            # the vendor bundle cache is, and no pnpm store or build toolchain ships.
-            docker run --rm --entrypoint bash docslurp-worker:ci -c '
-              set -e
-              test "$DOCSLURP_PYTHON_LAZY_INSTALL" = false
-              test "$(id -u)" = 10001
-              ! touch /app/.venv/probe 2>/dev/null && ! touch /app/worker/probe 2>/dev/null
-              touch "$DOCSLURP_VENDOR_BUNDLE_DIR/probe" && rm "$DOCSLURP_VENDOR_BUNDLE_DIR/probe"
-              test ! -e /root/.local/share/pnpm && test ! -e /app/node_modules/.pnpm
-              ! command -v pnpm && ! test -x /app/.venv/bin/pip
-              node -e "JSON.parse(require(\"fs\").readFileSync(\"/app/worker/vendor-bundles.json\",\"utf8\"))"'
-          else
-            docker run --rm --entrypoint node docslurp-worker:ci scripts/check-worker-prerequisites.mjs --profile=full
-            docker run --rm --entrypoint /app/.venv/bin/python docslurp-worker:ci -c "import importlib.util; names = ['torch', 'chromadb', 'lancedb', 'pymilvus']; baked = [name for name in names if importlib.util.find_spec(name) is not None]; assert not baked, f'Optional stacks must be installed at startup: {baked}'"
-          fi
+          # All profiles share their TypeScript builder. Keep that cache local
+          # to this disposable runner; do not upload multi-GB Docker caches.
+          for profile in full default lean; do
+            dockerfile="worker/Dockerfile.$profile"
+            if [ "$profile" = default ]; then dockerfile=worker/Dockerfile; fi
+            image="docslurp-worker:ci-$profile"
+            echo "::group::Build and verify $profile"
+            # Retry a transport failure once on this runner, preserving completed
+            # layers. Compiler errors and image assertions still fail immediately.
+            build_log="$RUNNER_TEMP/worker-build-$profile.log"
+            for attempt in 1 2; do
+              if docker build -f "$dockerfile" -t "$image" . 2>&1 | tee "$build_log"; then
+                break
+              fi
+              if [ "$attempt" = 2 ] || ! grep -qE 'ECONNRESET|ETIMEDOUT|EAI_AGAIN|TLS handshake timeout' "$build_log"; then
+                exit 1
+              fi
+              echo "::warning::Transient download failure building $profile; retrying once with local layers."
+            done
+            max_image_bytes=6442450944
+            if [ "$profile" = lean ]; then max_image_bytes=2684354560; fi
+            image_bytes="$(docker image inspect "$image" --format '{{.Size}}')"
+            echo "Worker $profile image bytes: ${image_bytes}; limit: ${max_image_bytes}"
+            test "${image_bytes}" -le "${max_image_bytes}"
+            docker history --format '{{.Size}}\t{{.CreatedBy}}' "$image" | head -25
+            if [ "$profile" = lean ]; then
+              docker run --rm --entrypoint node "$image" scripts/check-worker-prerequisites.mjs --profile=lean
+              # Runtime pip installs stay off, the venv and app are not writable by the worker user,
+              # the vendor bundle cache is, and no pnpm store or build toolchain ships.
+              docker run --rm --entrypoint bash "$image" -c '
+                set -e
+                test "$DOCSLURP_PYTHON_LAZY_INSTALL" = false
+                test "$(id -u)" = 10001
+                ! touch /app/.venv/probe 2>/dev/null && ! touch /app/worker/probe 2>/dev/null
+                touch "$DOCSLURP_VENDOR_BUNDLE_DIR/probe" && rm "$DOCSLURP_VENDOR_BUNDLE_DIR/probe"
+                test ! -e /root/.local/share/pnpm && test ! -e /app/node_modules/.pnpm
+                ! command -v pnpm && ! test -x /app/.venv/bin/pip
+                node -e "JSON.parse(require(\"fs\").readFileSync(\"/app/worker/vendor-bundles.json\",\"utf8\"))"'
+            else
+              docker run --rm --entrypoint node "$image" scripts/check-worker-prerequisites.mjs --profile=full
+              docker run --rm --entrypoint /app/.venv/bin/python "$image" -c "import importlib.util; names = ['torch', 'chromadb', 'lancedb', 'pymilvus']; baked = [name for name in names if importlib.util.find_spec(name) is not None]; assert not baked, f'Optional stacks must be installed at startup: {baked}'"
+            fi
+            echo "::endgroup::"
+          done
 
       - name: Generate worker source SBOM
-        if: matrix.profile == 'full'
         uses: anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
         with:
           path: .
@@ -136,7 +141,6 @@ jobs:
           artifact-name: worker-source-sbom.spdx.json
 
       - name: Scan worker source SBOM
-        if: matrix.profile == 'full'
         id: worker-source-sbom-scan
         uses: anchore/scan-action@27805bf3b4e84b4a5c980df22ed233c00390a439 # v7.4.2
         with:
@@ -146,7 +150,7 @@ jobs:
           severity-cutoff: high
 
       - name: Retain worker vulnerability report
-        if: always() && matrix.profile == 'full' && steps.worker-source-sbom-scan.outputs.sarif != ''
+        if: always() && steps.worker-source-sbom-scan.outputs.sarif != ''
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: worker-vulnerability-report.sarif
@@ -155,7 +159,6 @@ jobs:
           if-no-files-found: error
 
       - name: Upload worker scan SARIF
-        if: matrix.profile == 'full'
         continue-on-error: true
         uses: github/codeql-action/upload-sarif@24c54180a607b1449ed407dd24f251e4e9147c8d # v4.38.3
         with:

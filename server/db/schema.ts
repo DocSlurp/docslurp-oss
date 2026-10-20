@@ -16,6 +16,7 @@ import {
   pgMaterializedView,
   pgView,
   doublePrecision,
+  real,
   customType,
   date,
   uuid,
@@ -77,6 +78,9 @@ export const organizations = pgTable(
   "organizations",
   {
     id: text().primaryKey().notNull(),
+    retainDocumentVersions: integer("retain_document_versions"),
+    retentionChangedAt: timestamp("retention_changed_at", { withTimezone: true }),
+    retentionSweptAt: timestamp("retention_swept_at", { withTimezone: true }),
     name: text().notNull(),
     slug: text(),
     isPersonal: boolean("is_personal").default(false).notNull(),
@@ -346,6 +350,10 @@ export const documents = pgTable(
     status: text().notNull(),
     extractionMode: text("extraction_mode").default("hybrid").notNull(),
     pageCount: integer("page_count").default(0).notNull(),
+    /** document_chunks rows; trigger-maintained (migration 0063). */
+    chunkCount: integer("chunk_count").default(0).notNull(),
+    /** document_pages rows; trigger-maintained (migration 0063). */
+    storedPageCount: integer("stored_page_count").default(0).notNull(),
     createdAt: timestamp("created_at", { withTimezone: true, mode: "string" })
       .defaultNow()
       .notNull(),
@@ -366,6 +374,11 @@ export const documents = pgTable(
     supersededAt: timestamp("superseded_at", { withTimezone: true, mode: "string" }),
     supersededByDocumentId: text("superseded_by_document_id"),
     purgedAt: timestamp("purged_at", { withTimezone: true, mode: "string" }),
+    indexingMode: text("indexing_mode").default("full").notNull(),
+    sourcePath: text("source_path").default("").notNull(),
+    archivedAt: timestamp("archived_at", { withTimezone: true, mode: "string" }),
+    indexConfigHash: text("index_config_hash"),
+    reindexOf: text("reindex_of"),
     // Chunks fully materialized: keyword search may serve this version before completion.
     lexicalSearchableAt: timestamp("lexical_searchable_at", { withTimezone: true, mode: "string" }),
   },
@@ -373,6 +386,9 @@ export const documents = pgTable(
     index("documents_superseded_unpurged_idx")
       .using("btree", table.supersededAt.asc().nullsLast().op("timestamptz_ops"))
       .where(sql`(superseded_at IS NOT NULL) AND (purged_at IS NULL)`),
+    index("documents_workspace_deferred_idx")
+      .using("btree", table.workspaceId.asc().nullsLast().op("text_ops"))
+      .where(sql`indexing_mode <> 'full'`),
     index("documents_workspace_in_flight_idx")
       .using("btree", table.workspaceId.asc().nullsLast().op("text_ops"))
       .where(sql`status NOT IN ('completed', 'failed', 'cancelled')`),
@@ -1207,6 +1223,7 @@ export const apiKeys = pgTable(
       .notNull(),
     revokedAt: timestamp("revoked_at", { withTimezone: true, mode: "string" }),
     orgId: text("org_id"),
+    materializationPolicy: jsonb("materialization_policy").default({}).notNull(),
   },
   (table) => [
     index("api_keys_org_id_idx").using(
@@ -1775,6 +1792,11 @@ export const workspaces = pgTable(
   "workspaces",
   {
     id: text().primaryKey().notNull(),
+    retainDocumentVersions: integer("retain_document_versions"),
+    retentionChangedAt: timestamp("retention_changed_at", { withTimezone: true }),
+    retentionSweptAt: timestamp("retention_swept_at", { withTimezone: true }),
+    indexConfigs: jsonb("index_configs"),
+    autoConfirmReindex: boolean("auto_confirm_reindex").default(false).notNull(),
     userId: text("user_id").notNull(),
     name: text().notNull(),
     createdAt: timestamp("created_at", { withTimezone: true, mode: "string" })
@@ -2087,6 +2109,7 @@ export const parserEvalResults = pgTable(
 export const uploadSessions = pgTable(
   "upload_sessions",
   {
+    tags: text().array().default([]).notNull(),
     id: text().primaryKey().notNull(),
     userId: text("user_id").notNull(),
     orgId: text("org_id"),
@@ -2149,6 +2172,7 @@ export const uploadSessionFiles = pgTable(
     completedParts: jsonb("completed_parts").default([]).notNull(),
     sha256: text(),
     canonicalId: text("canonical_id"),
+    sourcePath: text("source_path").default("").notNull(),
     createdAt: timestamp("created_at", { withTimezone: true, mode: "string" })
       .defaultNow()
       .notNull(),
@@ -2182,6 +2206,8 @@ export const workspaceRuns = pgTable(
     workspaceId: text("workspace_id").notNull(),
     kind: text().notNull(),
     status: text().notNull(),
+    blockedReason: text("blocked_reason"),
+    jobId: text("job_id"),
     stage: text().notNull(),
     totalDocuments: integer("total_documents").default(0).notNull(),
     processedDocuments: integer("processed_documents").default(0).notNull(),
@@ -2853,6 +2879,7 @@ export const documentTags = pgTable(
       .notNull(),
   },
   (table) => [
+    index("document_tags_tag_document_idx").on(table.tag, table.documentId),
     index("document_tags_document_id_idx").using(
       "btree",
       table.documentId.asc().nullsLast().op("text_ops"),
@@ -3356,3 +3383,107 @@ export const embeddingReuseRefs = pgTable("embedding_reuse_refs", {
 }, table => [primaryKey({ columns: [table.orgId, table.embedKey], name: "embedding_reuse_refs_pkey" }),
   foreignKey({ columns: [table.orgId], foreignColumns: [organizations.id], name: "embedding_reuse_refs_org_id_fkey" }).onDelete("cascade"),
   index("embedding_reuse_refs_artifact_uri_idx").using("btree", table.artifactUri.asc().nullsLast().op("text_ops"))]);
+
+export const documentPageStates = pgTable(
+  "document_page_states",
+  {
+    documentId: text("document_id").notNull(),
+    pageNumber: integer("page_number").notNull(),
+    pageLabel: text("page_label"),
+    labelSource: text("label_source").default("none").notNull(),
+    mapped: boolean().default(false).notNull(),
+    embeddedAt: timestamp("embedded_at", { withTimezone: true, mode: "string" }),
+    embeddingModel: text("embedding_model"),
+    state: text().default("unseen").notNull(),
+    claimedByRun: text("claimed_by_run"),
+    claimExpiresAt: timestamp("claim_expires_at", { withTimezone: true, mode: "string" }),
+    materializedBy: text("materialized_by"),
+    costCredits: numeric("cost_credits", { precision: 12, scale: 4, mode: "number" }).default(0).notNull(),
+    failureReason: text("failure_reason"),
+    attempts: integer().default(0).notNull(),
+    feeBilledRun: text("fee_billed_run"),
+    feeBilledAt: timestamp("fee_billed_at", { withTimezone: true, mode: "string" }),
+    updatedAt: timestamp("updated_at", { withTimezone: true, mode: "string" }).defaultNow().notNull(),
+  },
+  (table) => [
+    primaryKey({ columns: [table.documentId, table.pageNumber], name: "document_page_states_pkey" }),
+    index("document_page_states_doc_state_idx").using(
+      "btree",
+      table.documentId.asc().nullsLast().op("text_ops"),
+      table.state.asc().nullsLast().op("text_ops"),
+    ),
+    foreignKey({
+      columns: [table.documentId],
+      foreignColumns: [documents.id],
+      name: "document_page_states_document_id_fkey",
+    }).onDelete("cascade"),
+    check("document_page_states_page_number_check", sql`page_number >= 1`),
+    check(
+      "document_page_states_label_source_check",
+      sql`label_source IN ('pdf-page-labels','ocr-calibrated','none')`,
+    ),
+    check(
+      "document_page_states_state_check",
+      sql`state IN ('unseen','claimed','parsed','pii-checked','indexed','failed','blocked-pii')`,
+    ),
+    check(
+      "document_page_states_materialized_by_check",
+      sql`materialized_by IN ('ingest','query','full-index','backfill')`,
+    ),
+  ],
+);
+
+export const documentMaps = pgTable(
+  "document_maps",
+  {
+    documentId: text("document_id").primaryKey().notNull(),
+    runId: text("run_id").notNull(),
+    version: integer().default(1).notNull(),
+    nodes: jsonb().notNull(),
+    terms: jsonb().default([]).notNull(),
+    labelSegments: jsonb("label_segments").default([]).notNull(),
+    coverage: real().default(0).notNull(),
+    siphonPages: integer("siphon_pages").default(0).notNull(),
+    siphonDecisions: jsonb("siphon_decisions").default([]).notNull(),
+    searchText: tsvector("search_text"),
+    createdAt: timestamp("created_at", { withTimezone: true, mode: "string" }).defaultNow().notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true, mode: "string" }).defaultNow().notNull(),
+  },
+  (table) => [
+    index("document_maps_search_idx").using("gin", table.searchText.asc().nullsLast().op("tsvector_ops")),
+    foreignKey({
+      columns: [table.documentId],
+      foreignColumns: [documents.id],
+      name: "document_maps_document_id_fkey",
+    }).onDelete("cascade"),
+  ],
+);
+
+export const documentPageVectors = pgTable(
+  "document_page_vectors",
+  {
+    documentId: text("document_id").notNull(),
+    pageNumber: integer("page_number").notNull(),
+    model: text().notNull(),
+    dims: integer().notNull(),
+    bits: bytea().notNull(),
+    int8: bytea().notNull(),
+    scale: real().notNull(),
+    workspaceId: text("workspace_id").notNull(),
+    orgId: text("org_id"),
+    createdAt: timestamp("created_at", { withTimezone: true, mode: "string" }).defaultNow().notNull(),
+  },
+  (table) => [
+    primaryKey({ columns: [table.documentId, table.pageNumber, table.model], name: "document_page_vectors_pkey" }),
+    index("document_page_vectors_workspace_idx").using(
+      "btree",
+      table.workspaceId.asc().nullsLast().op("text_ops"),
+      table.model.asc().nullsLast().op("text_ops"),
+    ),
+    foreignKey({
+      columns: [table.documentId],
+      foreignColumns: [documents.id],
+      name: "document_page_vectors_document_id_fkey",
+    }).onDelete("cascade"),
+  ],
+);

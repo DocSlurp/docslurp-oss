@@ -17,6 +17,8 @@ const createWorkspaceMock = vi.fn();
 const deleteWorkspaceMock = vi.fn();
 const getWorkspaceMock = vi.fn();
 const getWorkspaceStateMock = vi.fn();
+const listWorkspaceTagsMock = vi.fn();
+vi.mock("../services/workspace-tags.js", () => ({ listWorkspaceTags: listWorkspaceTagsMock }));
 vi.mock("../services/workspace-state.js", () => ({ getWorkspaceState: getWorkspaceStateMock }));
 const chatWorkspaceMock = vi.fn();
 const workspaceChatDisabledBodyMock = vi.fn(async (_workspaceId: string, _userId: string): Promise<{ error: string; code: "chat_disabled" } | null> => null);
@@ -50,6 +52,16 @@ vi.mock("../services/workspaces.js", () => ({
   WorkspaceSlugError: class WorkspaceSlugError extends Error {
     constructor(message: string, readonly status: 400 | 409) { super(message); }
   },
+}));
+
+vi.mock("../services/config-change.js", () => ({
+  planWorkspaceChange: vi.fn(async (args: { workspaceId: string; input: unknown }) => ({ workspace: { id: args.workspaceId }, input: args.input })),
+  applyWorkspaceChange: vi.fn(async ({ plan, userId, updateOptions }: { plan: { workspace: { id: string }; input: unknown }; userId: string; updateOptions?: unknown }) => {
+    const workspace = await updateWorkspaceMock(plan.workspace.id, userId, plan.input, ...(updateOptions ? [updateOptions] : []));
+    return workspace ? { workspace, plan, job: null, queuedRunIds: [] } : null;
+  }),
+  estimateWorkspaceChange: vi.fn(),
+  billingState: () => "disabled",
 }));
 
 vi.mock("../services/workspace-chat.js", () => ({
@@ -1215,5 +1227,27 @@ describe("workspace rename via API keys", () => {
     await expect(response.json()).resolves.toMatchObject({ slug: "legal-contracts" });
     expect(updateWorkspaceMock).toHaveBeenCalledWith("amber-falcon-ridge", "demo-user", { slug: "legal-contracts" });
     expect(appendAuditLogMock).toHaveBeenCalledWith(expect.objectContaining({ action: "workspace.updated", apiKeyId: "key-1" }));
+  });
+});
+
+
+describe("workspace tags API", () => {
+  beforeEach(() => { vi.clearAllMocks(); });
+  it("lists counts using the resolved workspace ID", async () => {
+    getWorkspaceMock.mockResolvedValueOnce({ id: "ws-1", orgId: "org-a" });
+    listWorkspaceTagsMock.mockResolvedValueOnce([{ tag: "finance", documentCount: 3 }]);
+    const response = await buildApp({ orgId: "org-a", scopes: ["search"] }).request("/workspaces/my-workspace/tags");
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ tags: [{ tag: "finance", documentCount: 3 }] });
+    expect(listWorkspaceTagsMock).toHaveBeenCalledWith("ws-1");
+  });
+  it("hides tags outside the key organization", async () => {
+    getWorkspaceMock.mockResolvedValueOnce({ id: "foreign", orgId: "org-b" });
+    expect((await buildApp({ orgId: "org-a", scopes: ["search"] }).request("/workspaces/foreign/tags")).status).toBe(404);
+    expect(listWorkspaceTagsMock).not.toHaveBeenCalled();
+  });
+  it("requires a read scope", async () => {
+    expect((await buildApp({ orgId: "org-a", scopes: [] }).request("/workspaces/one/tags")).status).toBe(403);
+    expect(listWorkspaceTagsMock).not.toHaveBeenCalled();
   });
 });

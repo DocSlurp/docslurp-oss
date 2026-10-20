@@ -31,7 +31,7 @@ export interface CancelledRunsSummary {
   unreachable: number;
 }
 
-const ACTIVE_RUN_STATUSES = ["queued", "processing"] as const;
+const ACTIVE_RUN_STATUSES = ["queued", "blocked", "processing"] as const;
 
 /**
  * Cancel every in-flight run in the given workspaces: Temporal first (so

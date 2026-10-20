@@ -99,6 +99,7 @@ const options = (deleteVectorRows: DeleteVectorRows, graceSeconds = 0) => ({
   deleteSources: false,
   lancedbRoot: "/tmp/lance",
   deleteVectorRows,
+  billingEnforced: true,
 });
 
 describe("superseded version purge", () => {
@@ -162,6 +163,29 @@ describe("superseded version purge", () => {
 
     // Idempotent: nothing left to purge.
     expect(await purgeSupersededDocuments(sql, storage, options(async () => {}))).toEqual({ purged: 0, failed: 0 });
+  });
+
+  it("purges the deferred-indexing rows (page ledger, map, page vectors) of a superseded version", async () => {
+    await seedRun("run-1");
+    await seedRun("run-2");
+    await seedVersion({ id: "v1", runId: "run-1", createdAt: "2026-01-01" });
+    await sql`update documents set status = 'completed' where id = 'v1'`;
+    await seedVersion({ id: "v2", runId: "run-2", createdAt: "2026-01-02" });
+    for (const id of ["v1", "v2"]) {
+      await sql`insert into document_page_states (document_id, page_number, state) values (${id}, 1, 'indexed'), (${id}, 2, 'unseen')`;
+      await sql`insert into document_maps (document_id, run_id, nodes) values (${id}, ${id === "v1" ? "run-1" : "run-2"}, '[]'::jsonb)`;
+      await sql`insert into document_page_vectors (document_id, page_number, model, dims, bits, int8, scale, workspace_id, org_id)
+        values (${id}, 1, 'img', 8, decode('00','hex'), decode('00','hex'), 1, 'w', 'o1')`;
+    }
+    await sql`update documents set status = 'completed' where id = 'v2'`;
+
+    const { storage } = fakeStorage([]);
+    expect(await purgeSupersededDocuments(sql, storage, options(async () => {}))).toEqual({ purged: 1, failed: 0 });
+
+    for (const table of ["document_page_states", "document_maps", "document_page_vectors"]) {
+      const remaining = await sql.unsafe(`select distinct document_id from ${table}`);
+      expect(remaining, table).toEqual([{ document_id: "v2" }]);
+    }
   });
 
   it("keeps shared artifacts and vectors while a dedup copy still depends on them", async () => {

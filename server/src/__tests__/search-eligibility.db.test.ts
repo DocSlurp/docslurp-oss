@@ -214,3 +214,20 @@ describe("search availability while documents process", () => {
     expect(row).toMatchObject({ total_documents: 3, page_only_documents: 1, searchable_documents: 1, searchable_pages: 1 });
   });
 });
+
+describe("deferred candidate eligibility", () => {
+  it("lists only deferred documents search could serve, so none can start a materialize workflow", async () => {
+    await run("rd", { status: "completed" });
+    for (const [id, status] of [["ok", "completed"], ["pii", "pii_blocked"], ["bad", "failed"], ["gone", "completed"], ["cut", "cancelled"]] as const) {
+      await doc(id, { runId: "rd", status, word: "deferred" });
+    }
+    await sql`update documents set indexing_mode = 'map'`;
+    await sql`update documents set purged_at = now() where id = 'gone'`;
+
+    const { defaultDeferredSearchDeps } = await import("../search/deferred/deferred-search.js");
+    const all = await defaultDeferredSearchDeps.listDeferredDocuments("w");
+    expect(all.map((d) => d.id)).toEqual(["ok"]);
+    const scoped = await defaultDeferredSearchDeps.listDeferredDocuments("w", ["ok", "pii", "bad", "gone", "cut"]);
+    expect(scoped.map((d) => d.id)).toEqual(["ok"]);
+  });
+});

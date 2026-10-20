@@ -1,5 +1,7 @@
 # Build stage: compile TypeScript
 FROM node:24-trixie-slim@sha256:173f125896c3b47ddf056734c7ea789d04595a6a08769a8f78e0df642781fb66 AS builder
+# TypeScript compilation never executes GPU inference; runtime installs stay unchanged.
+ENV ONNXRUNTIME_NODE_INSTALL_CUDA=skip
 WORKDIR /app
 RUN corepack enable
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml tsconfig.base.json ./

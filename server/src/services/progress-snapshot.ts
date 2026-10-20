@@ -76,7 +76,7 @@ function lifecycleStatus(
     return "failed";
   }
 
-  return run.status;
+  return run.status === "blocked" ? "queued" : run.status;
 }
 
 function aggregateStageStates(stages: WorkspaceRunStageState[]): Map<RunStage, StageAggregate> {

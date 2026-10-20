@@ -13,7 +13,10 @@ import { resolveLanceDbConfig, VectorNamespaceManager } from "@docslurp/shared";
 import { withLanceDdb } from "@docslurp/shared/lancedb-ddb";
 import { withLanceS3Proxy, withLanceSearchSpan } from "@docslurp/shared/lancedb-s3-trace";
 
+import { formatLanceSessionLog, resolveLanceSessionConfig, type LanceSessionConfig } from "@docslurp/shared/lancedb-session";
+
 import { lanceDbQueryTuning } from "./lancedb-query-tuning.js";
+import { prewarmTable } from "./lancedb-prewarm.js";
 import { resultCache, resultCacheKey } from "./result-cache.js";
 import { countSearchEvent } from "./timings.js";
 
@@ -21,13 +24,38 @@ import { countSearchEvent } from "./timings.js";
  * Connections and table handles are reused across searches. Opening them per
  * search re-read manifests (and, on object storage, index and vector pages)
  * from S3 on every query: about two seconds per search in production.
- * - Tables check for new versions at most every READ_CONSISTENCY_SECONDS, so
- *   newly indexed rows appear within that interval.
+ * - One Session (index + metadata caches, sized by LANCEDB_INDEX_CACHE_MB /
+ *   LANCEDB_METADATA_CACHE_MB) is shared by every connection, and indexes are
+ *   prewarmed into it when a table opens (see lancedb-prewarm.ts).
+ * - Tables check for new versions at most every LANCEDB_READ_CONSISTENCY_SECONDS
+ *   (default 10), so newly indexed rows appear within that interval.
  * - A table that does not exist yet is remembered for MISSING_TABLE_TTL_MS
  *   (5 min), so absent legacy tables don't cost S3 round trips on queries.
  * - A handle that errors is dropped and reopened on the next search.
  */
-const READ_CONSISTENCY_SECONDS = 10;
+let sessionState: { config: LanceSessionConfig; session: lancedb.Session; timer: NodeJS.Timeout } | undefined;
+const lastPrewarm = new Map<string, number>();
+
+function lanceSession(): { config: LanceSessionConfig; session: lancedb.Session } {
+  if (!sessionState) {
+    const config = resolveLanceSessionConfig();
+    const session = new lancedb.Session(BigInt(config.indexCacheBytes), BigInt(config.metadataCacheBytes));
+    console.log(formatLanceSessionLog("created", config));
+    const timer = setInterval(() => {
+      console.log(formatLanceSessionLog("stats", config, { sizeBytes: session.sizeBytes(), approxNumItems: session.approxNumItems() }));
+    }, 60_000);
+    timer.unref();
+    sessionState = { config, session, timer };
+  }
+  return sessionState;
+}
+
+/** Current session cache usage, for health/metrics endpoints. */
+export function lanceDbSessionStats(): { sizeBytes: number; approxNumItems: number; indexCacheBytes: number; metadataCacheBytes: number } | null {
+  if (!sessionState) return null;
+  const { config, session } = sessionState;
+  return { sizeBytes: Number(session.sizeBytes()), approxNumItems: session.approxNumItems(), indexCacheBytes: config.indexCacheBytes, metadataCacheBytes: config.metadataCacheBytes };
+}
 const MISSING_TABLE_TTL_MS = 5 * 60_000;
 const connections = new Map<string, Promise<lancedb.Connection>>();
 const tables = new Map<string, Promise<lancedb.Table>>();
@@ -62,7 +90,8 @@ function getDb(uri: string): Promise<lancedb.Connection> {
       const traced = await withLanceS3Proxy(uri, config.storageOptions);
       // s3+ddb:// roots commit through DynamoDB; withLanceDdb adds ?ddbTableName= and the credential-splitting proxy.
       const { uri: connectUri, storageOptions } = await withLanceDdb(uri, traced, config);
-      return lancedb.connect(connectUri, { readConsistencyInterval: READ_CONSISTENCY_SECONDS, ...(storageOptions ? { storageOptions } : {}) });
+      const { config: sessionConfig, session } = lanceSession();
+      return lancedb.connect(connectUri, { readConsistencyInterval: sessionConfig.readConsistencySeconds, ...(storageOptions ? { storageOptions } : {}) }, session);
     });
     connection.catch(() => connections.delete(key));
     connections.set(key, connection);
@@ -76,11 +105,23 @@ async function getTable(uri: string, name: string): Promise<lancedb.Table | null
   if (missingUntil && missingUntil > Date.now()) return null;
   let table = tables.get(key);
   if (!table) {
-    table = getDb(uri).then((db) => lanceSpan("openTable", () => db.openTable(name)));
+    table = getDb(uri).then(async (db) => {
+      const opened = await lanceSpan("openTable", () => db.openTable(name));
+      const { config } = lanceSession();
+      if (config.prewarmIndex || config.prewarmData) {
+        lastPrewarm.set(key, Date.now());
+        const warming = prewarmTable(opened, name, config);
+        // Background by default: the first query reads from storage as it would without prewarm.
+        if (config.prewarmBlocking) await warming;
+      }
+      return opened;
+    });
     tables.set(key, table);
   }
   try {
-    return await table;
+    const opened = await table;
+    refreshPrewarm(key, name, opened);
+    return opened;
   } catch {
     tables.delete(key);
     missingTables.set(key, Date.now() + MISSING_TABLE_TTL_MS);
@@ -88,10 +129,19 @@ async function getTable(uri: string, name: string): Promise<lancedb.Table | null
   }
 }
 
+/** Re-prewarm periodically: the worker rebuilds indexes in another process, which this cache has not seen. */
+function refreshPrewarm(key: string, name: string, table: lancedb.Table): void {
+  const { config } = lanceSession();
+  if (!config.prewarmIndex || config.prewarmRefreshSeconds <= 0 || Date.now() - (lastPrewarm.get(key) ?? 0) < config.prewarmRefreshSeconds * 1_000) return;
+  lastPrewarm.set(key, Date.now());
+  void prewarmTable(table, name, { prewarmIndex: true, prewarmData: false });
+}
+
 function dropTable(uri: string, name: string): void {
   const key = `${connectionKey(uri)}\u0000${name}`;
   const table = tables.get(key);
   tables.delete(key);
+  lastPrewarm.delete(key);
   void table?.then((handle) => handle.close()).catch(() => undefined);
 }
 
@@ -101,6 +151,9 @@ export function resetLanceDbConnectionForTests(): void {
   tables.clear();
   connections.clear();
   missingTables.clear();
+  lastPrewarm.clear();
+  if (sessionState) clearInterval(sessionState.timer);
+  sessionState = undefined;
 }
 
 export interface LanceDbSearchHit {

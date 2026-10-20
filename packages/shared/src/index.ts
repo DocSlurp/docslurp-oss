@@ -26,7 +26,12 @@ export * from "./vector-namespace.js";
 // Sub-modules created during refactor
 export * from "./embedding.js";
 export * from "./perplexity-embeddings.js";
+export * from "./deferred-indexing.js";
+export * from "./page-vectors.js";
 export * from "./pipeline.js";
+export * from "./document-versions.js";
+export * from "./jobs.js";
+export * from "./config-change.js";
 export * from "./privacy.js";
 export * from "./private-endpoints.js";
 export * from "./graph.js";
@@ -67,3 +72,5 @@ export * from "./routing-targets.js";
 export * from "./public-errors.js";
 export * from "./api-error.js";
 export * from "./frontend-api.js";
+
+export { documentTagsSchema } from "./document-tags.js";

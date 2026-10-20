@@ -1,16 +1,20 @@
 import { randomUUID } from "node:crypto";
 
 import {
+  documentVersionKey,
+  effectiveIndexingMode,
   pageRouterModeSchema,
   stageSelectionKeys,
   withoutStageSelection,
   withPlatformPageRouterMode,
   type DocumentRecord,
+  type IndexingMode,
   type PipelineFeatures,
   type WorkspaceRun,
 } from "@docslurp/shared";
 
 import { sql as defaultSql, type SqlClient } from "../db.js";
+import { normalizeUploadPath } from "../lib/canonical-id.js";
 import { sanitizeUploadFilename } from "../lib/filenames.js";
 import { currentRequestId } from "../lib/request-context.js";
 import { getAvailableCredits } from "./billing/credits.js";
@@ -47,6 +51,9 @@ export interface RunSourceFile {
   fileSize?: number;
   metadata?: Record<string, unknown>;
   canonicalId?: string | null;
+  /** Folder path inside the upload; with the filename it is the version key. Empty for single files. */
+  path?: string | null;
+  tags?: string[];
 }
 
 export type RunSources =
@@ -631,12 +638,14 @@ export function createRunCreation(deps: RunCreationDeps) {
     orgId: string,
     input: CreateRunInput,
     files: RunSourceFile[],
+    indexingMode: IndexingMode,
   ) {
     const documents: DocumentRow[] = [];
     const unreadable: UnreadableSource[] = [];
 
     for (const file of files) {
       const filename = sanitizeUploadFilename(file.filename);
+      const sourcePath = normalizeUploadPath(file.path);
       const documentId = randomUUID();
       let metadata: Awaited<ReturnType<typeof resolveSourceMetadata>>;
       try {
@@ -653,24 +662,21 @@ export function createRunCreation(deps: RunCreationDeps) {
         const client = tx as unknown as SqlClient;
 
         await lockRunCreation(runId, client);
-        const canonicalId = file.canonicalId ?? null;
-        if (canonicalId) {
-          await client`select pg_advisory_xact_lock(hashtextextended(${`${input.workspaceId}:${canonicalId}`}, 0))`;
-        }
-        // Canonical documents version per workspace by logical source; others by filename.
-        const [existing] = canonicalId
-          ? await client<{ id: string; version_number: number }[]>`
-              select id, version_number from documents
-              where workspace_id = ${input.workspaceId} and canonical_id = ${canonicalId}
-              order by version_number desc, created_at desc
-              limit 1
-            `
-          : await client<{ id: string; version_number: number }[]>`
-              select id, version_number from documents
-              where org_id = ${orgId} and filename = ${filename}
-              order by version_number desc
-              limit 1
-            `;
+        // Every upload has a version key: the caller's canonicalId, else workspace + folder path + filename.
+        // Versions chain per (workspace_id, canonical_id) (documents_workspace_canonical_idx).
+        const canonicalId = documentVersionKey({
+          workspaceId: input.workspaceId,
+          path: sourcePath,
+          filename,
+          canonicalId: file.canonicalId,
+        });
+        await client`select pg_advisory_xact_lock(hashtextextended(${`${input.workspaceId}:${canonicalId}`}, 0))`;
+        const [existing] = await client<{ id: string; version_number: number }[]>`
+          select id, version_number from documents
+          where workspace_id = ${input.workspaceId} and canonical_id = ${canonicalId}
+          order by version_number desc, created_at desc
+          limit 1
+        `;
 
         const dedupCandidate = await findDedupCandidate(client, {
           orgId,
@@ -684,7 +690,7 @@ export function createRunCreation(deps: RunCreationDeps) {
             id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key,
             status, extraction_mode, page_count, source_sha256,
             deduped_from_document_id, dedup_scope, version_number, previous_version_id,
-            canonical_id, file_size, metadata
+            canonical_id, source_path, file_size, metadata, indexing_mode
           )
           values (
             ${documentId},
@@ -706,11 +712,18 @@ export function createRunCreation(deps: RunCreationDeps) {
             ${existing ? existing.version_number + 1 : 1},
             ${existing?.id ?? null},
             ${canonicalId},
+            ${sourcePath},
             ${file.fileSize ?? 0},
-            ${JSON.stringify({ ...file.metadata, sourceSizeMeasured: file.fileSize !== undefined })}::text::jsonb
+            ${JSON.stringify({ ...file.metadata, sourceSizeMeasured: file.fileSize !== undefined })}::text::jsonb,
+            ${indexingMode}
           )
           returning *
         `;
+
+        for (const tag of file.tags ?? []) {
+          await client`insert into document_tags (document_id, user_id, tag)
+            values (${documentId}, ${input.userId}, ${tag}) on conflict do nothing`;
+        }
 
         if (dedupCandidate) {
           await seedDeduplicatedDocument(client, {
@@ -722,7 +735,7 @@ export function createRunCreation(deps: RunCreationDeps) {
           });
         }
 
-        return inserted!;
+        return { ...inserted!, tags: file.tags ?? [] };
       });
       documents.push(row);
     }
@@ -738,6 +751,7 @@ export function createRunCreation(deps: RunCreationDeps) {
     input: CreateRunInput,
     sources: SourceDocumentRow[],
     reuse: boolean,
+    indexingMode: IndexingMode,
   ) {
     const documents: DocumentRow[] = [];
     for (const source of sources) {
@@ -757,7 +771,7 @@ export function createRunCreation(deps: RunCreationDeps) {
           insert into documents (
             id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key,
             status, extraction_mode, page_count, file_size, source_sha256,
-            canonical_id, version_number, previous_version_id, reused_from_document_id, metadata
+            canonical_id, version_number, previous_version_id, reused_from_document_id, metadata, indexing_mode
           )
           values (
             ${randomUUID()},
@@ -778,11 +792,17 @@ export function createRunCreation(deps: RunCreationDeps) {
             ${(latest?.version_number ?? source.version_number ?? 1) + 1},
             ${latest?.id ?? source.id},
             ${reuse ? source.id : null},
-            ${sql.json(sourceMetadata(source.metadata))}
+            ${sql.json(sourceMetadata(source.metadata))},
+            -- The Run's pipeline decides how the new version indexes.
+            ${indexingMode}
           )
           returning *
         `;
-        return inserted!;
+        await client`insert into document_tags (document_id, user_id, tag)
+          select ${inserted!.id}, ${input.userId}, tag from document_tags where document_id = ${source.id}
+          on conflict do nothing`;
+        const tags = await client<{ tag: string }[]>`select tag from document_tags where document_id = ${inserted!.id} order by tag`;
+        return { ...inserted!, tags: tags.map((row) => row.tag) };
       });
       documents.push(row);
     }
@@ -855,10 +875,12 @@ export function createRunCreation(deps: RunCreationDeps) {
       pipeline: platformRunPipeline(sources.kind === "files" ? withoutStageSelection(input.pipeline) : input.pipeline),
     });
 
+    // Stamped on every Document so a later workspace mode switch never rewrites how it was indexed.
+    const indexingMode = effectiveIndexingMode(input.pipeline.indexingMode);
     const published = await prepareAndPublish(runId, async () => {
       const materialised = sources.kind === "files"
-        ? await materialiseFiles(runId, access.orgId, input, sources.files)
-        : await materialiseVersions(runId, input, sourceDocuments, reuse);
+        ? await materialiseFiles(runId, access.orgId, input, sources.files, indexingMode)
+        : await materialiseVersions(runId, input, sourceDocuments, reuse, indexingMode);
       return materialised;
     });
 

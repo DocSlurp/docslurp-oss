@@ -17,6 +17,10 @@ import {
 } from "./embedding.js";
 import { isProviderCallAllowed } from "./privacy.js";
 import { decisionFormatSchema, routingObjectiveSchema } from "./page-routing.js";
+import {
+  indexingModeSchema,
+  materializationPolicyOverridesSchema,
+} from "./deferred-indexing.js";
 import { isPrivateModelUri, parsePrivateModelUri } from "./private-endpoints.js";
 
 export const organizationRoleSchema = z.enum([
@@ -32,6 +36,8 @@ export type WorkspaceMemberRole = z.infer<typeof workspaceMemberRoleSchema>;
 
 export const runStatusSchema = z.enum([
   "queued",
+  /** Saved but not admitted (no credits or budget); starts by itself when spend is available. */
+  "blocked",
   "processing",
   "completed",
   "failed",
@@ -68,6 +74,8 @@ export const runStageSchema = z.enum([
   "page-index",
   "index",
   "proposition-index",
+  "document-map",
+  "page-embed",
   "completed",
 ]);
 export type RunStage = z.infer<typeof runStageSchema>;
@@ -185,7 +193,7 @@ export type PrivacyMode = z.infer<typeof privacyModeSchema>;
 // Model IDs belong in defaults/catalogs; runtime stages resolve workspace settings.
 export const DEFAULT_PIPELINE_TEXT_MODEL = "qwen/qwen3.5-flash-02-23";
 export const pipelineTextOperationSchema = z.enum([
-  "document-summary", "proposition-extraction", "structured-extraction",
+  "document-summary", "document-map", "proposition-extraction", "structured-extraction",
   "graph-extraction", "community-summary", "contextual-chunk-preamble",
 ]);
 export type PipelineTextOperation = z.infer<typeof pipelineTextOperationSchema>;
@@ -413,6 +421,16 @@ export function withPlatformPageRouterMode<T extends { pageRouter?: Partial<Page
 
 export const pipelineFeaturesSchema = z
   .object({
+    // Deferred indexing: `full` indexes eagerly; `map`/`visual` defer parsing until a query needs pages.
+    indexingMode: indexingModeSchema.default("full"),
+    materialization: materializationPolicyOverridesSchema.default({}),
+    visualPages: z
+      .object({
+        route: z.enum(["auto", "jina-private", "gemini"]).default("auto"),
+        // Map mode only: embed uncovered pages of scanned documents at index time. Costs per page; off unless chosen.
+        coarseFallback: z.boolean().default(false),
+      })
+      .default({ route: "auto", coarseFallback: false }),
     inferenceLane: inferenceLaneSchema.default("standard"),
     textGeneration: textGenerationConfigSchema.default(defaultTextGenerationConfig),
     // Named parser playbook selection controls which extraction/vision strategies to prefer.
@@ -600,6 +618,9 @@ export const pipelineFeaturesSchema = z
 export type PipelineFeatures = z.infer<typeof pipelineFeaturesSchema>;
 
 export const defaultPipelineFeatures: PipelineFeatures = {
+  indexingMode: "full",
+  materialization: {},
+  visualPages: { route: "auto", coarseFallback: false },
   inferenceLane: "standard",
   textGeneration: defaultTextGenerationConfig,
   parserPlaybook: "balanced",
@@ -647,7 +668,11 @@ export const defaultPipelineFeatures: PipelineFeatures = {
 
 const alwaysEnabled = () => true;
 
-export const pipelineStagePlan: readonly PipelineStagePlanItem[] = [
+export function isDeferredMode(features: Pick<PipelineFeatures, "indexingMode">): boolean {
+  return features.indexingMode !== "full";
+}
+
+const basePipelineStagePlan: readonly PipelineStagePlanItem[] = [
   {
     stage: "quarantine",
     label: "Quarantine",
@@ -696,6 +721,20 @@ export const pipelineStagePlan: readonly PipelineStagePlanItem[] = [
     phase: "prep",
     phaseLabel: "Prep",
     isEnabled: alwaysEnabled,
+  },
+  {
+    stage: "document-map",
+    label: "Document map",
+    phase: "extract",
+    phaseLabel: "Extract",
+    isEnabled: (features) => features.indexingMode === "map",
+  },
+  {
+    stage: "page-embed",
+    label: "Page embed",
+    phase: "extract",
+    phaseLabel: "Extract",
+    isEnabled: (features) => features.indexingMode === "visual",
   },
   {
     stage: "extract-markdown",
@@ -802,6 +841,17 @@ export const pipelineStagePlan: readonly PipelineStagePlanItem[] = [
     isEnabled: (features) => features.indexVectors,
   },
 ];
+
+const deferredLocatorStages: ReadonlySet<PipelineRunStage> = new Set(["document-map", "page-embed"]);
+const eagerStartIndex = basePipelineStagePlan.findIndex((item) => item.stage === "extract-markdown");
+
+/** Deferred modes skip every eager extract/index stage: wrap their predicates. */
+export const pipelineStagePlan: readonly PipelineStagePlanItem[] = basePipelineStagePlan.map(
+  (item, position) =>
+    position < eagerStartIndex || deferredLocatorStages.has(item.stage)
+      ? item
+      : { ...item, isEnabled: (features) => !isDeferredMode(features) && item.isEnabled(features) },
+);
 
 export const pipelineStageOrder: PipelineRunStage[] = pipelineStagePlan.map(
   (item) => item.stage,
@@ -1101,6 +1151,11 @@ export const stageDataFlow: Record<PipelineRunStage, StageDataFlow> = {
   normalize: { consumes: ["normalizedFormat"], produces: ["normalize"] },
   "pdf-tooling": { produces: ["pdf-tooling"] },
   "split-pages": { produces: ["pages"] },
+  "document-map": {
+    consumes: ["pages", "normalizedFormat"],
+    produces: ["document-map", "page-labels"],
+  },
+  "page-embed": { consumes: ["pages"], produces: ["page-image-vectors"] },
   "extract-markdown": {
     consumes: ["normalizedFormat", "parser-playbook", "hasTablePages", "images"],
     produces: [
@@ -1222,6 +1277,26 @@ export function withoutStageSelection<T extends { restartFromStage?: unknown; st
   return rest;
 }
 
+/**
+ * Pipeline features for version hashes: drops stage selection plus
+ * `indexingMode`/`materialization`/`visualPages`, so switching modes (or the
+ * new `visualPages` default appearing on stored pipelines) never marks chunks stale.
+ * The stored pipeline keeps those fields (use `withoutStageSelection` there).
+ */
+export function pipelineVersionFeatures<T extends object>(
+  features: T,
+): Omit<T, "restartFromStage" | "stageSubset" | "indexingMode" | "materialization" | "visualPages"> {
+  const {
+    restartFromStage: _restart,
+    stageSubset: _subset,
+    indexingMode: _mode,
+    materialization: _materialization,
+    visualPages: _visualPages,
+    ...rest
+  } = features as T & Record<string, unknown>;
+  return rest as Omit<T, "restartFromStage" | "stageSubset" | "indexingMode" | "materialization" | "visualPages">;
+}
+
 function selectStages(
   features: PipelineFeatures,
   enabled: PipelineStagePlanItem[],
@@ -1241,7 +1316,20 @@ function selectStages(
     return null;
   }
 
-  const enabledStages = enabled.map((item) => item.stage);
+  return closeStageSelection(selected, enabled.map((item) => item.stage), features, true);
+}
+
+/**
+ * Grow `selected` to the stages `stageDataFlow` forces. With `forceAlwaysRerun`, stages marked `alwaysRerun`
+ * join whenever anything runs (partial reprocess); without it only data dependencies pull stages in
+ * (impact analysis: a summary change must not re-run `index`).
+ */
+function closeStageSelection(
+  selected: Set<PipelineRunStage>,
+  enabledStages: PipelineRunStage[],
+  features: PipelineFeatures,
+  forceAlwaysRerun: boolean,
+): { selected: Set<PipelineRunStage>; addedStages: CompiledPipelinePlan["addedStages"] } {
   const addedStages: CompiledPipelinePlan["addedStages"] = [];
   // Nothing requested is enabled: run nothing rather than only the forced stages.
   if (selected.size === 0) return { selected, addedStages };
@@ -1251,9 +1339,11 @@ function selectStages(
     addedStages.push({ stage, reason });
     return true;
   };
-  for (const stage of enabledStages) {
-    const reason = stageDataFlow[stage].alwaysRerun;
-    if (reason) add(stage, reason);
+  if (forceAlwaysRerun) {
+    for (const stage of enabledStages) {
+      const reason = stageDataFlow[stage].alwaysRerun;
+      if (reason) add(stage, reason);
+    }
   }
   // Fixed point: same-run inputs pull in their producers, and every output a
   // re-run stage writes re-runs the later stages that consume it.
@@ -1351,4 +1441,80 @@ export function parseStoredPipelineFeatures(stored: unknown): PipelineFeatures {
     }
   }
   return normalizePipelineFeatures(null);
+}
+
+/**
+ * Stage of the pipeline each feature field feeds. A change to the field re-runs these stages (when enabled in
+ * the new config) plus whatever consumes their outputs. `[]` means the field never changes stored data.
+ */
+const FIELD_SEED_STAGES: Record<keyof PipelineFeatures, readonly PipelineRunStage[]> = {
+  indexingMode: [],
+  materialization: [],
+  visualPages: [],
+  inferenceLane: [],
+  textGeneration: [],
+  parserPlaybook: ["extract-markdown"],
+  documentExtraction: ["extract-markdown"],
+  visionFallback: ["vision-extract"],
+  vision: ["vision-extract"],
+  htmlExtraction: ["extract-html"],
+  markdownExtraction: ["extract-markdown"],
+  embed: ["embed"],
+  indexVectors: ["index"],
+  embedding: ["embed"],
+  vectorBackends: ["index"],
+  preserveTables: ["extract-markdown"],
+  preserveCode: ["extract-markdown"],
+  preserveImages: ["extract-markdown"],
+  maxCostCents: [],
+  outputSchema: ["structured-extract"],
+  structuredExtraction: ["structured-extract"],
+  pageIndex: ["page-index"],
+  summarize: ["document-summary"],
+  chunkOverlap: ["embed"],
+  contextualChunkPreambles: ["embed"],
+  propositionIndex: ["proposition-index"],
+  graphRag: ["graph-enrich"],
+  graphCommunitySummaries: ["graph-enrich"],
+  entityIndex: ["graph-enrich"],
+  graph: ["graph-enrich"],
+  restartFromStage: [],
+  stageSubset: [],
+  piiPolicy: ["pii-detect"],
+  privacyMode: ["pii-detect", "index"],
+  pdfRegionExtraction: ["extract-markdown"],
+  webhooks: [],
+  pageRouter: ["route-pages"],
+  mediaVideo: ["extract-markdown"],
+};
+
+/**
+ * Minimal stage set that brings an already-ingested document in line with `after`: the stages fed by changed
+ * fields that are enabled in `after`, plus the later stages that consume their outputs (`stageDataFlow`).
+ * Unlike a partial reprocess it does not force `alwaysRerun` stages, so a summary-only change is
+ * `["document-summary"]`. Pure; order follows the pipeline.
+ */
+export function affectedStages(before: PipelineFeatures, after: PipelineFeatures): PipelineRunStage[] {
+  const enabledItems = pipelineStagePlan.filter((item) => item.isEnabled(after));
+  const enabled = enabledItems.map((item) => item.stage);
+  const seeds = new Set<PipelineRunStage>();
+  for (const key of Object.keys(FIELD_SEED_STAGES) as Array<keyof PipelineFeatures>) {
+    if (pipelineValuesEqual(before[key], after[key])) continue;
+    for (const stage of FIELD_SEED_STAGES[key]) if (enabled.includes(stage)) seeds.add(stage);
+  }
+  if (seeds.size === 0) return [];
+  const { selected } = closeStageSelection(seeds, enabled, after, false);
+  return enabled.filter((stage) => selected.has(stage));
+}
+
+function stableJson(value: unknown): string {
+  return JSON.stringify(value, (_key, v) =>
+    v && typeof v === "object" && !Array.isArray(v)
+      ? Object.fromEntries(Object.entries(v as Record<string, unknown>).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)))
+      : v);
+}
+
+/** Deep equality for pipeline feature values, independent of object key order. */
+export function pipelineValuesEqual(a: unknown, b: unknown): boolean {
+  return a === b || stableJson(a) === stableJson(b);
 }

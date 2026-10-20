@@ -27,6 +27,7 @@ import {
   type PipelineFeatures,
   type WorkspaceRecord,
   type WorkspaceTemplateKey,
+  type IndexingMode,
 } from "@docslurp/shared";
 
 import { env } from "../config.js";
@@ -37,6 +38,7 @@ import { appendAuditLog } from "./audit-log.js";
 import { explainRemoteIngestBlock, isComplexRemoteIngestFormat } from "./remote-parser-surface.js";
 import { runCreation, type CreatedRun } from "./run-creation.js";
 import { AllSourcesUnreadableError } from "./source-metadata.js";
+import { effectiveIndexingMode } from "./workspace-indexing-mode.js";
 import { markWorkspaceAutoNamed } from "./workspace-naming.js";
 import { seedPipelineFromProcessingDefaults, seedSearchSettingsFromProcessingDefaults } from "./processing-defaults.js";
 import { updateWorkspaceSearchSettingsForUser } from "./search-controls.js";
@@ -84,6 +86,8 @@ export interface WorkspaceIntakeItem {
   metadata?: Record<string, unknown>;
   /** Logical source identity; a newer completed document with the same ID supersedes older ones. */
   canonicalId?: string | null;
+  /** Folder path inside the upload (no filename). With the filename it is the version key unless `canonicalId` is set. */
+  path?: string | null;
   content: WorkspaceIntakeContent;
 }
 
@@ -94,6 +98,7 @@ export type WorkspaceIntakeAudit = {
 };
 
 export interface WorkspaceIntakeRequest {
+  tags?: string[];
   userId: string;
   orgId?: string | null;
   /**
@@ -110,6 +115,12 @@ export interface WorkspaceIntakeRequest {
    * settings always keep the template's value.
    */
   pipeline?: PipelineFeatureOverrides;
+  /**
+   * Indexing mode for these documents; defaults to the workspace's. Stamps
+   * `documents.indexing_mode` even when it differs from the workspace. Ignored
+   * (treated as `full`) while DOCSLURP_DEFERRED_PROFILES is off.
+   */
+  indexingMode?: IndexingMode;
   apiKeyId?: string | null;
   kind: WorkspaceIntakeKind;
   items: Iterable<WorkspaceIntakeItem> | AsyncIterable<WorkspaceIntakeItem>;
@@ -121,6 +132,7 @@ export interface WorkspaceIntakeRequest {
 }
 
 export interface StoredIntakeFile {
+  tags?: string[];
   /** Measured while storing source bytes; absent for already-stored sources. */
   fileSize?: number;
   filename: string;
@@ -128,6 +140,7 @@ export interface StoredIntakeFile {
   sourceKey: string;
   metadata?: Record<string, unknown>;
   canonicalId?: string | null;
+  path?: string | null;
 }
 
 export interface WorkspaceIntakeResult {
@@ -229,7 +242,12 @@ export const postgresIntakeRecords: WorkspaceIntakeRecords = {
       defaults,
     );
     const pipeline = applyWorkspacePipelineOverrides(base, overrides, template);
-    const workspace = await createWorkspace({ ...args, pipeline });
+    // Leave the mode unset unless the upload chose one, so createWorkspace applies the plan default.
+    const { indexingMode, ...pipelineWithoutMode } = pipeline;
+    const workspace = await createWorkspace({
+      ...args,
+      pipeline: overrides?.indexingMode !== undefined ? pipeline : (pipelineWithoutMode as typeof pipeline),
+    });
     const searchSeed = seedSearchSettingsFromProcessingDefaults(defaults);
     if (searchSeed) {
       await updateWorkspaceSearchSettingsForUser({ workspaceId: workspace.id, userId: args.userId, input: searchSeed })
@@ -428,7 +446,9 @@ async function storeItem(
     sourceKey,
     ...(fileSize === undefined ? {} : { fileSize }),
     ...(item.metadata ? { metadata: item.metadata } : {}),
+    ...(request.tags ? { tags: request.tags } : {}),
     ...(item.canonicalId ? { canonicalId: item.canonicalId } : {}),
+    ...(item.path ? { path: item.path } : {}),
   });
   const { content } = item;
   if ("storedKey" in content) return stored(content.storedKey);
@@ -548,7 +568,7 @@ export async function intakeIntoWorkspace(
             ? inferWorkspaceTitleFromUrls(request.urls)
             : inferWorkspaceTitleFromFilenames(files.map((file) => file.filename))),
         templateKey: request.templateKey,
-        pipeline: request.pipeline,
+        pipeline: request.indexingMode ? { ...request.pipeline, indexingMode: request.indexingMode } : request.pipeline,
         autoNamed: !request.workspaceName,
       }));
     if (!existing) createdWorkspaceId = workspace.id;
@@ -558,6 +578,11 @@ export async function intakeIntoWorkspace(
       existing ? request.pipeline : undefined,
       workspace.templateKey,
     );
+    // Per-request mode wins over the workspace's; both are pinned to full while the flag is off.
+    pipeline = {
+      ...pipeline,
+      indexingMode: effectiveIndexingMode(request.indexingMode ?? pipeline.indexingMode),
+    };
     try {
       created = await records.createRun({
         userId: request.userId,

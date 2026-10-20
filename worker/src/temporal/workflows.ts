@@ -32,7 +32,9 @@ import {
   type SignalDefinition,
 } from "@temporalio/workflow";
 
+import type { MaterializePagesInput } from "@docslurp/shared";
 import type { Activities } from "./activities.js";
+import { mergeMaterializeResults, splitMaterializeRanges, type MaterializeResult } from "./materialize-ranges.js";
 import { bundlePageTasks, runPageFanOut, slotBackoffMs } from "./page-fanout.js";
 import { planDocumentShards } from "./document-shards.js";
 import { planStageGroupEnd } from "./stage-groups.js";
@@ -548,4 +550,34 @@ export async function visionPageBatch(input: VisionPageBatchInput): Promise<Usag
   });
   if (cancelled) throw ApplicationFailure.nonRetryable("Run cancelled by user");
   return usage;
+}
+
+// ── Deferred indexing: materialize pages on demand ──
+
+const materializeActivities = proxyActivities<Activities>({
+  startToCloseTimeout: "5 minutes",
+  heartbeatTimeout: "2 minutes",
+  retry: { maximumAttempts: 2, initialInterval: "2s", backoffCoefficient: 2, maximumInterval: "30 seconds" },
+});
+
+/**
+ * Parses and indexes only the requested pages of one document. Started by
+ * search on its own task queue with the deterministic id
+ * `materialize:<documentId>:<hash(pages)>` (computed app-side), so an identical
+ * concurrent start returns the running workflow. One activity per contiguous
+ * range; a range that fails after retries reports its pages as failed.
+ */
+export async function materializePages(input: MaterializePagesInput): Promise<MaterializeResult> {
+  const ranges = splitMaterializeRanges(input.pages);
+  const settled = await Promise.all(ranges.map(async (pages): Promise<MaterializeResult> => {
+    try {
+      return await materializeActivities.materializePageRangeActivity({ ...input, pages });
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      return { indexed: [], blocked: [], failed: pages.map((page) => ({ page, reason })), costCredits: 0 };
+    }
+  }));
+  const result = mergeMaterializeResults(settled);
+  await materializeActivities.completeMaterializeRun({ runId: input.runId, result });
+  return result;
 }

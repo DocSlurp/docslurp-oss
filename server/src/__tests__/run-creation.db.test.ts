@@ -238,7 +238,7 @@ describe("Run creation versions Documents by lineage", () => {
     expect(third.documents.map((doc) => doc.versionNumber)).toEqual([3, 3]);
     const secondById = new Map(second.documents.map((doc) => [doc.canonicalId, doc.id]));
     expect(third.documents.map((doc) => doc.previousVersionId)).toEqual(third.documents.map((doc) => secondById.get(doc.canonicalId)));
-    expect(third.documents.every((doc) => doc.canonicalId?.startsWith("docslurp:document:"))).toBe(true);
+    expect(third.documents.every((doc) => doc.canonicalId?.startsWith("path:"))).toBe(true);
   });
 
   it("carries the source's size, pages, hash, mime type and source key to the new version", async () => {
@@ -350,4 +350,15 @@ describe("Run reprocessing and bulk reprocessing through Run creation", () => {
     await expect(bulkReprocessDocuments(ids, "u")).rejects.toThrow("all blocked");
     spy.mockRestore();
   });
+});
+
+
+it("stores upload tags atomically and retains them on reprocessing", async () => {
+  const original = await runCreation.create({ ...input, sources: { kind: "files", files: [{ ...files[0]!, tags: ["finance", "FY26"] }] } });
+  const originalId = original.documents[0]!.id;
+  const tags = await sql`select tag from document_tags where document_id = ${originalId} order by tag`;
+  expect(tags.map((row) => row.tag)).toEqual(["FY26", "finance"]);
+  const reprocessed = await runCreation.create({ ...input, sources: { kind: "versionsOf", documentIds: [originalId] } });
+  const copied = await sql`select tag from document_tags where document_id = ${reprocessed.documents[0]!.id} order by tag`;
+  expect(copied.map((row) => row.tag)).toEqual(["FY26", "finance"]);
 });

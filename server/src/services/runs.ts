@@ -8,6 +8,7 @@ import {
 
 import {
   compilePipelinePlan,
+  effectiveIndexingMode,
   findMissingReuseInputs,
   withoutStageSelection,
   workspaceRunEventSchema,
@@ -476,13 +477,29 @@ type ReuseSourceRow = {
  * derived data, and carry the artifacts the executed stages read.
  */
 async function assertReusableSource(
-  original: WorkspaceRun,
+  original: Pick<WorkspaceRun, "id" | "artifacts">,
   plan: ReturnType<typeof compilePipelinePlan>,
+  documentIds?: string[],
 ): Promise<void> {
   const [runRow] = await sql<{ artifacts_purged_at: Date | string | null }[]>`
     select artifacts_purged_at from workspace_runs where id = ${original.id}
   `;
-  if (runRow?.artifacts_purged_at) {
+  const sources = await sql<ReuseSourceRow[]>`
+    select id, status, purged_at from documents where run_id = ${original.id}
+    ${documentIds ? sql`and id = any(${documentIds})` : sql``}
+    order by created_at, id
+  `;
+  checkReusableSource(original, runRow?.artifacts_purged_at ?? null, sources, plan);
+}
+
+/** Pure reuse validation over already-loaded rows (shared by the single-run and batched paths). */
+function checkReusableSource(
+  original: Pick<WorkspaceRun, "id" | "artifacts">,
+  artifactsPurgedAt: Date | string | null,
+  sources: ReuseSourceRow[],
+  plan: ReturnType<typeof compilePipelinePlan>,
+): void {
+  if (artifactsPurgedAt) {
     throw new ReprocessRejectedError(
       "The source run's artifacts were purged by retention; reprocess every stage instead.",
       409,
@@ -491,9 +508,6 @@ async function assertReusableSource(
     );
   }
 
-  const sources = await sql<ReuseSourceRow[]>`
-    select id, status, purged_at from documents where run_id = ${original.id} order by created_at, id
-  `;
   const unusable = sources.filter((doc) => doc.status !== "completed" || doc.purged_at);
   if (unusable.length > 0) {
     throw new ReprocessRejectedError(
@@ -545,9 +559,19 @@ export async function reprocessRun(
     throw new Error("Forbidden");
   }
 
+  const docs = await sql<DocumentRow[]>`
+    select * from documents where run_id = ${runId} order by created_at, id
+  `;
+
+  // A mode-switch backfill re-keys onto the source document, which keeps its original run: the run pipeline
+  // still names the old mode. The document's own indexing_mode is the truth, so reprocess follows it.
+  const liveModes = new Set(docs.filter((doc) => !doc.superseded_at && doc.indexing_mode).map((doc) => doc.indexing_mode as string));
+  const adoptedMode = liveModes.size === 1 ? effectiveIndexingMode([...liveModes][0] as PipelineFeatures["indexingMode"]) : null;
+
   // A reprocess of a partial run starts from that run's full feature set.
   const pipelineConfig: PipelineFeatures = {
     ...(JSON.parse(JSON.stringify(withoutStageSelection(original.pipeline))) as PipelineFeatures),
+    ...(adoptedMode ? { indexingMode: adoptedMode } : {}),
     ...(options?.stages?.length ? { stageSubset: [...options.stages] } : {}),
     ...(options?.stageFrom && !options?.stages?.length ? { restartFromStage: options.stageFrom } : {}),
   };
@@ -562,10 +586,6 @@ export async function reprocessRun(
   }
   const partial = plan.reusedStages.length > 0;
   if (partial) await assertReusableSource(original, plan);
-
-  const docs = await sql<{ id: string }[]>`
-    select id from documents where run_id = ${runId} order by created_at, id
-  `;
 
   const created = await runCreation.create({
     userId,
@@ -964,4 +984,45 @@ export async function exportRun(
     exportedAt: new Date().toISOString(),
     artifacts,
   };
+}
+
+/**
+ * Validates a partial (stage-subset) backfill of documents across source runs with the same checks reprocessRun applies, so an unseedable run fails the request (409/400) instead of failing in the worker: two queries in total (runs, documents)
+ * instead of three per run. Throws the same rejections, for the first failing run in input order.
+ */
+export async function assertBackfillReusableMany(
+  groups: Array<{ runId: string; documentIds: string[] }>,
+  pipeline: PipelineFeatures,
+): Promise<void> {
+  if (groups.length === 0) return;
+  const plan = compilePipelinePlan(pipeline);
+  if (plan.stageOrder.length === 0) {
+    throw new ReprocessRejectedError(
+      "None of the requested stages is enabled in this workspace's pipeline.",
+      400,
+      "no_stages_to_run",
+      { requested: pipeline.stageSubset ?? null },
+    );
+  }
+  if (plan.reusedStages.length === 0) return;
+  const runIds = groups.map((group) => group.runId);
+  const runs = await sql<{ id: string; artifacts: Record<string, unknown> | null; artifacts_purged_at: Date | string | null }[]>`
+    select id, artifacts, artifacts_purged_at from workspace_runs where id = any(${runIds})
+  `;
+  const documentIds = groups.flatMap((group) => group.documentIds);
+  const docs = await sql<(ReuseSourceRow & { run_id: string })[]>`
+    select id, run_id, status, purged_at from documents
+    where id = any(${documentIds}) and run_id = any(${runIds})
+    order by created_at, id
+  `;
+  const runById = new Map(runs.map((run) => [run.id, run]));
+  for (const group of groups) {
+    const run = runById.get(group.runId);
+    if (!run) {
+      throw new ReprocessRejectedError("The source run no longer exists.", 409, "source_not_reusable", { reason: "run_missing" });
+    }
+    const wanted = new Set(group.documentIds);
+    const sources = docs.filter((doc) => doc.run_id === group.runId && wanted.has(doc.id));
+    checkReusableSource({ id: run.id, artifacts: (run.artifacts ?? {}) as WorkspaceRun["artifacts"] }, run.artifacts_purged_at, sources, plan);
+  }
 }

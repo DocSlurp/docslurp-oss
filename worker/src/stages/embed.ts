@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 
 import { RunPolicyError } from "../lib/document-failure.js";
-import { calculateAiUsageCostCents, buildPricedAiUsageLedgerEvent, resolvePipelineTextModel, withoutStageSelection } from "@docslurp/shared";
+import { calculateAiUsageCostCents, buildPricedAiUsageLedgerEvent, resolvePipelineTextModel, pipelineVersionFeatures } from "@docslurp/shared";
 
 import type { Config } from "../config.js";
 import type { Stage, WorkflowState } from "../pipeline/pipeline.js";
@@ -333,7 +333,7 @@ export class EmbedStage implements Stage {
           const embeddingKeys = embeddingInputs.map((input) => embeddingInputKey(input, vectorFingerprint));
           const reusedVectors = await reuseLookup.findVectors(embeddingKeys);
           const pipelineVersion = createHash("sha256")
-            .update(JSON.stringify(withoutStageSelection(state.run.pipeline)))
+            .update(JSON.stringify(pipelineVersionFeatures(state.run.pipeline)))
             .digest("hex")
             .slice(0, 8);
           const publishBeforeEmbedding = process.env.DOCSLURP_EARLY_LEXICAL_CHUNKS === "on";
@@ -844,7 +844,7 @@ export class EmbedStage implements Stage {
 
     const artifact = await this.storage.getJson<EmbeddingArtifact>(key);
     const pipelineVersion = createHash("sha256")
-      .update(JSON.stringify(withoutStageSelection(args.state.run.pipeline)))
+      .update(JSON.stringify(pipelineVersionFeatures(args.state.run.pipeline)))
       .digest("hex")
       .slice(0, 8);
 

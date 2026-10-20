@@ -22,13 +22,15 @@ import {
   workspaceTemplates,
   workspaceStateQuerySchema,
   normalizeExtractedText,
+  deferredProfilesEnabled,
+  indexingModeSchema,
   applyIngestRecommendationSchema,
   ingestReportQuerySchema,
   reprocessIngestRecommendationSchema,
 } from "@docslurp/shared";
 
 import { chatModelRefused, ChatModelNotAllowedError } from "../lib/chat-model-policy.js";
-import { actorHasAnyApiKeyScope, getRequestActor, apiKeyCanUseWorkspace } from "../lib/request-actor.js";
+import { actorHasAnyApiKeyScope, getRequestActor, apiKeyCanUseWorkspace, loadActorScopedWorkspace } from "../lib/request-actor.js";
 import { requestIp, requestUserAgent } from "../lib/request-context.js";
 import { isWorkspaceChatAgent } from "../lib/mastra.js";
 import { chatVoiceRoutes } from "./chat-voice.js";
@@ -51,7 +53,12 @@ import {
   updateWorkspace,
   WorkspaceSlugError,
 } from "../services/workspaces.js";
+import { listWorkspaceTags } from "../services/workspace-tags.js";
 import { getWorkspaceState } from "../services/workspace-state.js";
+import { applyWorkspaceChange, billingState, ConfigConflictError, estimateWorkspaceChange, planWorkspaceChange } from "../services/config-change.js";
+import { mergeWorkspaceSearchSettings } from "../services/search-controls.js";
+import { analyzeSearchSettingsChange, getPlan, isBillingEnforced } from "@docslurp/shared";
+import { sql } from "../db.js";
 import {
   applyIngestRecommendation,
   IngestReportActionError,
@@ -88,6 +95,21 @@ import {
 } from "@docslurp/shared/workspace-chat-ui";
 import { acceptApiKeys } from "../lib/route-auth.js";
 import { apiErrorResponse, apiStatusError } from "../lib/api-error.js";
+import { indexingModeErrorResponse } from "../lib/indexing-mode-error.js";
+import { getRun } from "../services/runs.js";
+import { runLifecycle } from "../services/run-lifecycle.js";
+import { resolveMaterializationPolicy } from "../services/materialization-policy.js";
+import { inlineEstimate, jobMetaFor, jobStatusForMutation, recordJobMeta } from "../services/jobs.js";
+import { estimateDocumentReprocess } from "../services/work-estimates.js";
+import {
+  commitIndexJobs,
+  estimateFullIndex,
+  estimateModeSwitch,
+  IndexingModeError,
+  prepareModeSwitchJobs,
+  requestFullIndex,
+  restoreStoredIndexingMode,
+} from "../services/workspace-indexing-mode.js";
 
 const optionalText = (max: number) => z.string().max(max).nullable().optional();
 
@@ -598,6 +620,17 @@ export const workspacesRoutes = new Hono()
       return apiStatusError(c, 404, reportPublicError(error));
     }
   })
+  .get("/:workspaceId/tags", async (c) => {
+    const actor = getRequestActor(c);
+    if (actor.type === "apiKey" && !actorHasAnyApiKeyScope(actor, ["ingest", "search", "artifacts", "workspaces:manage"])) {
+      return apiStatusError(c, 403, "Forbidden");
+    }
+    const workspace = await getWorkspace(c.req.param("workspaceId"), actor.userId);
+    if (!workspace || (actor.type === "apiKey" && !apiKeyCanUseWorkspace(actor.apiKey, workspace))) {
+      return apiErrorResponse(c, 404, "workspace_not_found", "Workspace not found");
+    }
+    return c.json({ tags: await listWorkspaceTags(workspace.id) });
+  })
   .get("/:workspaceId/state", zValidator("query", workspaceStateQuerySchema, validationHook), async (c) => {
     const actor = getRequestActor(c);
     if (actor.type === "apiKey" && (actor.apiKey.keyType !== "server" || !actorHasAnyApiKeyScope(actor, ["ingest", "search", "artifacts", "workspaces:manage"]))) {
@@ -893,8 +926,24 @@ export const workspacesRoutes = new Hono()
   })
   .post("/", zValidator("json", createWorkspaceSchema, validationHook), async (c) => {
     const userId = c.get("sessionUser").id;
-    const input = { ...c.req.valid("json"), userId };
-    const workspace = await createWorkspace(input);
+    const valid = c.req.valid("json");
+    // The schema defaults a missing pipeline.indexingMode to "full"; only an explicit
+    // mode in the raw body may override the plan default.
+    const raw = await c.req.json().catch(() => null) as { pipeline?: { indexingMode?: unknown } } | null;
+    const explicit = indexingModeSchema.safeParse(raw?.pipeline?.indexingMode).success;
+    const { indexingMode: _defaulted, ...pipelineWithoutMode } = valid.pipeline ?? ({} as NonNullable<typeof valid.pipeline>);
+    const input = {
+      ...valid,
+      userId,
+      ...(valid.pipeline && !explicit ? { pipeline: pipelineWithoutMode as NonNullable<typeof valid.pipeline> } : {}),
+    };
+    let workspace;
+    try {
+      workspace = await createWorkspace(input);
+    } catch (error) {
+      if (error instanceof IndexingModeError) return indexingModeErrorResponse(c, error);
+      throw error;
+    }
     await appendAuditLog({
       orgId: workspace.orgId,
       userId,
@@ -1288,16 +1337,89 @@ export const workspacesRoutes = new Hono()
           return apiErrorResponse(c, 404, "workspace_not_found", "Workspace not found");
         }
       }
-      let workspace;
-      try {
-        workspace = await updateWorkspace(workspaceId, userId, c.req.valid("json"));
-      } catch (error) {
-        if (error instanceof WorkspaceSlugError) return apiStatusError(c, error.status, error.message);
+      // The schema defaults a missing pipeline.indexingMode to "full", so read the raw body
+      // to tell an explicit mode change (and `indexAll`) from an unrelated pipeline edit.
+      const raw = deferredProfilesEnabled() ? await c.req.json().catch(() => null) as Record<string, unknown> | null : null;
+      const rawPipeline = raw?.pipeline as { indexingMode?: unknown } | undefined;
+      const requestedMode = indexingModeSchema.safeParse(rawPipeline?.indexingMode);
+      const before = requestedMode.success ? await getWorkspace(workspaceId, userId) : null;
+      const modeChange = before && before.pipeline.indexingMode !== requestedMode.data ? before : null;
+      const fail = (error: unknown) => {
+        if (error instanceof IndexingModeError) return indexingModeErrorResponse(c, error);
         throw error;
+      };
+
+      // Validate the jobs this change implies before saving it, so a rejected switch leaves the mode alone.
+      let prepared: Awaited<ReturnType<typeof prepareModeSwitchJobs>> | null = null;
+      if (modeChange && requestedMode.success) {
+        try {
+          const resolved = await resolveMaterializationPolicy({
+            workspacePipeline: modeChange.pipeline,
+            apiKey: actor.type === "apiKey" ? actor.apiKey : null,
+            workspaceId: modeChange.id,
+          });
+          if ("policy" in resolved) {
+            prepared = await prepareModeSwitchJobs({
+              workspace: modeChange, to: requestedMode.data, indexAll: raw?.indexAll === true, actor, policy: resolved.policy,
+            });
+          }
+        } catch (error) {
+          return fail(error);
+        }
       }
 
-      if (!workspace) {
+      const input = c.req.valid("json");
+      if (typeof input.retainDocumentVersions === "number" && isBillingEnforced()) {
+        const [org] = await sql<{ plan_id: string | null }[]>`
+          select o.plan_id from workspaces w join organizations o on o.id = w.org_id where w.id = ${workspaceId}
+        `;
+        if (org && getPlan(org.plan_id).id === "free") {
+          return apiErrorResponse(c, 402, "plan_not_entitled", "Keeping extra document versions needs a paid plan.", { category: "upgrade_required" });
+        }
+      }
+
+      let applied: Awaited<ReturnType<typeof applyWorkspaceChange>>;
+      try {
+        const plan = await planWorkspaceChange({
+          workspaceId, userId, input, indexingMode: requestedMode.success ? requestedMode.data : undefined,
+        });
+        applied = plan
+          ? await applyWorkspaceChange({ plan, userId, updateOptions: requestedMode.success ? { indexingMode: requestedMode.data } : undefined })
+          : null;
+      } catch (error) {
+        if (error instanceof WorkspaceSlugError) return apiStatusError(c, error.status, error.message);
+        if (error instanceof ConfigConflictError) return apiStatusError(c, error.status, error.message, { details: { category: error.code } });
+        return fail(error);
+      }
+
+      if (!applied) {
         return apiErrorResponse(c, 404, "workspace_not_found", "Workspace not found");
+      }
+      const workspace = applied.workspace;
+      for (const runId of applied.queuedRunIds) {
+        try {
+          const run = await getRun(runId, userId);
+          if (run) await runLifecycle.start(run);
+        } catch (error) {
+          // The run-start recovery sweeper starts runs whose workflow start was never confirmed.
+          console.warn(`[config-change] run=${runId} start deferred: ${error instanceof Error ? error.message : String(error)}`);
+        }
+      }
+
+      let indexingJob: { runIds: string[] } | undefined;
+      if (modeChange && prepared && prepared.batches.length > 0) {
+        try {
+          const started = await commitIndexJobs(prepared, userId);
+          for (const runId of started.runIds) {
+            const run = await getRun(runId, userId);
+            if (run) await runLifecycle.start(run);
+          }
+          if (started.runIds.length > 0) indexingJob = { runIds: started.runIds };
+        } catch (error) {
+          // Jobs could not be admitted (credits, budget, races): do not leave the mode switched.
+          await restoreStoredIndexingMode(workspace.id, modeChange.pipeline.indexingMode);
+          return fail(error);
+        }
       }
 
       await appendAuditLog({
@@ -1315,7 +1437,165 @@ export const workspacesRoutes = new Hono()
         },
       });
 
-      return c.json(workspace);
+      return c.json({ ...workspace, ...(indexingJob ? { indexingJob } : {}), ...(applied.job ? { job: applied.job } : {}) });
+    },
+  )
+  .post(
+    "/:workspaceId/estimate",
+    zValidator("json", updateWorkspaceSchema, validationHook),
+    async (c) => {
+      const userId = c.get("sessionUser").id;
+      const workspace = await getWorkspace(c.req.param("workspaceId"), userId);
+      if (!workspace) return apiErrorResponse(c, 404, "workspace_not_found", "Workspace not found");
+      const actor = getRequestActor(c);
+      // Same gates as PATCH /:workspaceId: a server key with workspaces:manage, bound to its organization,
+      // and a caller who could edit the workspace.
+      if (actor.type === "apiKey") {
+        if (actor.apiKey.keyType !== "server" || !actorHasAnyApiKeyScope(actor, ["workspaces:manage"])) {
+          return apiErrorResponse(c, 403, "forbidden", "This endpoint requires a server API key with the workspaces:manage scope");
+        }
+        if (!apiKeyCanUseWorkspace(actor.apiKey, workspace)) return apiErrorResponse(c, 404, "workspace_not_found", "Workspace not found");
+      }
+      const access = await getWorkspaceAccess(workspace.id, userId);
+      if (!access || !canEditWorkspace(access, userId)) return apiErrorResponse(c, 404, "workspace_not_found", "Workspace not found");
+      const result = await estimateWorkspaceChange({ workspaceId: workspace.id, userId, input: c.req.valid("json") });
+      if (!result) return apiErrorResponse(c, 404, "workspace_not_found", "Workspace not found");
+      return c.json(result);
+    },
+  )
+  .post(
+    "/:workspaceId/search-settings/estimate",
+    zValidator("json", updateWorkspaceSearchSettingsSchema),
+    async (c) => {
+      const userId = c.get("sessionUser").id;
+      const workspaceId = String(c.req.param("workspaceId"));
+      const actor = getRequestActor(c);
+      // The MCP in-process forward bypasses sessionAuth, so key-to-workspace scoping is enforced here.
+      if (actor.type === "apiKey" && !await loadActorScopedWorkspace(workspaceId, actor)) {
+        return apiErrorResponse(c, 404, "workspace_not_found", "Workspace not found");
+      }
+      const before = await getWorkspaceSearchSettingsForUser(workspaceId, userId);
+      const access = before ? await getWorkspaceAccess(workspaceId, userId) : null;
+      if (!before || !access || !canEditWorkspace(access, userId)) return apiErrorResponse(c, 404, "workspace_not_found", "Workspace not found");
+      const after = mergeWorkspaceSearchSettings(before, c.req.valid("json"));
+      return c.json({ impact: analyzeSearchSettingsChange(before, after), estimate: null, billing: billingState() });
+    },
+  )
+  .post(
+    "/:workspaceId/indexing-mode/estimate",
+    zValidator("json", z.object({ mode: indexingModeSchema }), validationHook),
+    async (c) => {
+      if (!deferredProfilesEnabled()) return apiErrorResponse(c, 404, "not_found", "Not found");
+      const userId = c.get("sessionUser").id;
+      const workspace = await getWorkspace(c.req.param("workspaceId"), userId);
+      if (!workspace) return apiErrorResponse(c, 404, "workspace_not_found", "Workspace not found");
+      const actor = getRequestActor(c);
+      if (actor.type === "apiKey") {
+        // Switching the indexing mode is a workspace PATCH, so its estimate needs the PATCH's key gate.
+        if (actor.apiKey.keyType !== "server" || !actorHasAnyApiKeyScope(actor, ["workspaces:manage"])) {
+          return apiErrorResponse(c, 403, "forbidden", "This endpoint requires a server API key with the workspaces:manage scope");
+        }
+        if (!apiKeyCanUseWorkspace(actor.apiKey, workspace)) return apiErrorResponse(c, 404, "workspace_not_found", "Workspace not found");
+      }
+      return c.json(await estimateModeSwitch(workspace.id, c.req.valid("json").mode));
+    },
+  )
+  .post(
+    "/:workspaceId/full-index",
+    zValidator("json", z.object({ documentIds: z.array(z.string().min(1)).max(500).optional() }).default({}), validationHook),
+    async (c) => {
+      if (!deferredProfilesEnabled()) return apiErrorResponse(c, 404, "not_found", "Not found");
+      const userId = c.get("sessionUser").id;
+      const actor = getRequestActor(c);
+      const workspace = await getWorkspace(c.req.param("workspaceId"), userId);
+      if (!workspace || (actor.type === "apiKey" && !apiKeyCanUseWorkspace(actor.apiKey, workspace))) {
+        return apiErrorResponse(c, 404, "workspace_not_found", "Workspace not found");
+      }
+      if (actor.type === "apiKey" && !actorHasAnyApiKeyScope(actor, ["ingest"])) {
+        return apiErrorResponse(c, 403, "forbidden", "Forbidden");
+      }
+      const access = await getWorkspaceAccess(workspace.id, userId);
+      if (!access || !canEditWorkspace(access, userId)) return apiErrorResponse(c, 403, "forbidden", "Forbidden");
+      const resolved = await resolveMaterializationPolicy({
+        workspacePipeline: workspace.pipeline,
+        apiKey: actor.type === "apiKey" ? actor.apiKey : null,
+        capabilityHeader: c.req.header("X-DocSlurp-Capability"),
+        origin: c.req.header("Origin"),
+        workspaceId: workspace.id,
+      });
+      if ("error" in resolved) return apiErrorResponse(c, 403, "forbidden", "Invalid capability", { category: resolved.error });
+      try {
+        const inline = await inlineEstimate(
+          () => estimateFullIndex({ workspaceId: workspace.id, orgId: workspace.orgId, documentIds: c.req.valid("json").documentIds }),
+          `/v1/workspaces/${workspace.id}/full-index/estimate`,
+        );
+        const result = await requestFullIndex({
+          orgId: workspace.orgId,
+          workspaceId: workspace.id,
+          documentIds: c.req.valid("json").documentIds,
+          actor,
+          policy: resolved.policy,
+        });
+        const meta = jobMetaFor(result.runId, "full-index", inline);
+        await recordJobMeta([result.runId], meta);
+        const run = await getRun(result.runId, userId);
+        if (run) await runLifecycle.start(run);
+        const job = await jobStatusForMutation(meta, [result.runId], userId);
+        return c.json({ runId: result.runId, pages: result.pages, estimatedCredits: result.estimatedCredits, billing: result.billing, job }, 202);
+      } catch (error) {
+        if (error instanceof IndexingModeError) return indexingModeErrorResponse(c, error);
+        throw error;
+      }
+    },
+  )
+  .post(
+    "/:workspaceId/full-index/estimate",
+    zValidator("json", z.object({ documentIds: z.array(z.string().min(1)).max(500).optional() }).default({})),
+    async (c) => {
+      if (!deferredProfilesEnabled()) return apiErrorResponse(c, 404, "not_found", "Not found");
+      const userId = c.get("sessionUser").id;
+      const actor = getRequestActor(c);
+      const workspace = await getWorkspace(c.req.param("workspaceId"), userId);
+      if (!workspace || (actor.type === "apiKey" && !apiKeyCanUseWorkspace(actor.apiKey, workspace))) {
+        return apiErrorResponse(c, 404, "workspace_not_found", "Workspace not found");
+      }
+      // Same gates as the mutation: ingest scope, edit access and a policy that allows a full-index request.
+      if (actor.type === "apiKey" && !actorHasAnyApiKeyScope(actor, ["ingest"])) {
+        return apiErrorResponse(c, 403, "forbidden", "Forbidden");
+      }
+      const access = await getWorkspaceAccess(workspace.id, userId);
+      if (!access || !canEditWorkspace(access, userId)) return apiErrorResponse(c, 403, "forbidden", "Forbidden");
+      const resolved = await resolveMaterializationPolicy({
+        workspacePipeline: workspace.pipeline,
+        apiKey: actor.type === "apiKey" ? actor.apiKey : null,
+        capabilityHeader: c.req.header("X-DocSlurp-Capability"),
+        origin: c.req.header("Origin"),
+        workspaceId: workspace.id,
+      });
+      if ("error" in resolved) return apiErrorResponse(c, 403, "forbidden", "Invalid capability", { category: resolved.error });
+      if (!resolved.policy.allowFullIndexRequest) {
+        return apiErrorResponse(c, 403, "forbidden", "This key or capability may not request a full index.", { category: "full_index_not_allowed" });
+      }
+      const estimate = await estimateFullIndex({ workspaceId: workspace.id, orgId: workspace.orgId, documentIds: c.req.valid("json").documentIds });
+      return c.json({ estimate, billing: billingState() });
+    },
+  )
+  .post(
+    "/:workspaceId/documents/bulk/estimate",
+    zValidator("json", z.object({
+      action: z.enum(["reprocess", "export-artifacts", "apply-tags", "remove-tags", "delete"]),
+      documentIds: z.array(z.string()).min(1),
+      tags: z.array(z.string()).optional(),
+    })),
+    async (c) => {
+      const userId = c.get("sessionUser").id;
+      const workspace = await getWorkspace(c.req.param("workspaceId"), userId);
+      if (!workspace) return apiErrorResponse(c, 404, "workspace_not_found", "Workspace not found");
+      const body = c.req.valid("json");
+      const estimate = body.action === "reprocess"
+        ? await estimateDocumentReprocess({ documentIds: body.documentIds, userId, workspaceId: workspace.id })
+        : null;
+      return c.json({ estimate, billing: billingState() });
     },
   )
   .delete(
@@ -1357,4 +1637,4 @@ export const workspacesRoutes = new Hono()
   );
 
 // Workspace reads and rename/settings updates (the PATCH requires workspaces:manage).
-acceptApiKeys(workspacesRoutes, ["GET /", "GET /:workspaceId", "GET /:workspaceId/state", "GET /:workspaceId/ingest-report", "PATCH /:workspaceId"]);
+acceptApiKeys(workspacesRoutes, ["GET /", "GET /:workspaceId", "GET /:workspaceId/tags", "GET /:workspaceId/state", "GET /:workspaceId/ingest-report", "PATCH /:workspaceId", "POST /:workspaceId/estimate", "POST /:workspaceId/full-index", "POST /:workspaceId/full-index/estimate", "POST /:workspaceId/indexing-mode/estimate"]);

@@ -6,8 +6,11 @@ import { startGraphRebuildSchema, updateWorkspaceGraphSchema, type GraphJob } fr
 import { actorHasAnyApiKeyScope, getRequestActor, apiKeyCanUseWorkspace } from "../lib/request-actor.js";
 import { requestIp } from "../lib/request-context.js";
 import { appendAuditLog } from "../services/audit-log.js";
+import { INLINE_ESTIMATE_BUDGET_MS, jobStatusForMutation } from "../services/jobs.js";
+import { billingState } from "../services/config-change.js";
 import {
   cancelGraphJob,
+  estimateGraphRebuild,
   getGraphJob,
   getWorkspaceGraphStatus,
   isGraphJobActive,
@@ -104,14 +107,31 @@ export const workspaceGraphRoutes = new Hono()
     if (denied) return denied;
     const userId = c.get("sessionUser").id;
     try {
-      const job = await startGraphRebuild(workspaceRef, userId, c.req.valid("json"));
+      let estimateMs = 0;
+      const job = await startGraphRebuild(workspaceRef, userId, c.req.valid("json"), { onEstimateTimed: (ms) => { estimateMs = ms; } });
       await audit(c, workspaceRef, userId, "workspace.graph.rebuild_started", job.id, {
         mode: job.mode,
         documents: job.documentsTotal,
         estimatedCostCents: job.estimate?.costCents ?? null,
         maxCostCents: job.maxCostCents,
       });
-      return c.json(job, 202);
+      const read = await jobStatusForMutation({ id: job.id, kind: "graph-rebuild" }, [], userId);
+      // Inline estimates only when they computed within the budget.
+      const status = estimateMs > INLINE_ESTIMATE_BUDGET_MS
+        ? { ...read, estimate: null, estimateUrl: `/v1/workspaces/${workspaceRef}/graph/jobs/estimate` }
+        : read;
+      return c.json({ ...job, job: status }, 202);
+    } catch (error) {
+      return graphError(c, error);
+    }
+  })
+  .post("/:workspaceId/graph/jobs/estimate", zValidator("json", startGraphRebuildSchema), async (c) => {
+    const workspaceRef = c.req.param("workspaceId");
+    const denied = await authorizeApiKey(c, workspaceRef, true);
+    if (denied) return denied;
+    try {
+      const estimate = await estimateGraphRebuild(workspaceRef, c.get("sessionUser").id, c.req.valid("json"));
+      return c.json({ estimate, billing: billingState() });
     } catch (error) {
       return graphError(c, error);
     }

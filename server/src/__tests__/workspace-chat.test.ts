@@ -517,7 +517,7 @@ describe("chatWorkspace", () => {
 
     if (namedFile) {
       expect(hybridSearch).toHaveBeenCalledWith(expect.any(String), "user-1", expect.objectContaining({ filters: { workspaceId: "ws-1", documentIds: ["doc-1"] } }));
-      expect(loadWorkspaceWholeCorpusContext).toHaveBeenCalledWith(expect.objectContaining({ documentIds: ["doc-1"] }));
+      expect(loadWorkspaceWholeCorpusContext).toHaveBeenCalledWith(expect.objectContaining({ filters: { documentIds: ["doc-1"] } }));
     }
     expect(response.searchSessionId).toEqual(expect.any(String));
     expect(response.debug.mode).toBe("retrieval");
@@ -646,6 +646,32 @@ describe("chatWorkspace", () => {
         onTextDelta: expect.any(Function),
       }),
     );
+  });
+
+  it("rethrows a client disconnect instead of persisting a fallback assistant turn (M2)", async () => {
+    sqlMock.mockResolvedValue([]);
+    loadWorkspaceWholeCorpusContext.mockResolvedValue({
+      eligible: false, reason: "chunk-limit-exceeded", results: [],
+      stats: { documentCount: 1, chunkCount: 30, tokenEstimate: 15000, charEstimate: 40000, maxDocuments: 12, maxChunks: 24, maxTokens: 12000, maxChars: 60000 },
+    });
+    getWorkspace.mockResolvedValue({ id: "ws-1", systemPrompt: null });
+    hybridSearch.mockResolvedValue({
+      sessionId: "search-1",
+      results: [{
+        text: "workspace excerpt", score: 1, parentText: "workspace excerpt",
+        citation: { documentId: "doc-1", filename: "doc.pdf", pageNumber: 1, pageNumbers: [1], headingPath: [], chunkIndex: 0, blockIds: [], blockTypes: [] },
+      }],
+    });
+    process.env.ANTHROPIC_API_KEY = "test-key";
+    const controller = new AbortController();
+    controller.abort();
+    const { withDeferredContext } = await import("../search/deferred/deferred-context.js");
+    await expect(withDeferredContext({ signal: controller.signal }, () =>
+      chatWorkspace({ workspaceId: "ws-1", userId: "user-1", query: "what changed?" }),
+    )).rejects.toMatchObject({ name: "AbortError" });
+    expect(generateAnthropicDocumentText).not.toHaveBeenCalled();
+    const persisted = sqlMock.mock.calls.some((call) => call.slice(1).includes("assistant"));
+    expect(persisted).toBe(false);
   });
 
   it("returns processing availability when chat runs before indexes are ready", async () => {

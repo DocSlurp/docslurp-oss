@@ -2,7 +2,7 @@ import { reportPublicError } from "../lib/public-errors.js";
 import { Hono } from "hono";
 import { z } from "zod";
 import { zValidator } from "@hono/zod-validator";
-import { apiKeyRateLimitRulesSchema } from "@docslurp/shared";
+import { apiKeyRateLimitRulesSchema, materializationPolicyOverridesSchema } from "@docslurp/shared";
 
 import { OrganizationError } from "../services/organizations.js";
 import { requestIp, requestUserAgent } from "../lib/request-context.js";
@@ -29,6 +29,8 @@ const createApiKeySchema = z.object({
   workspaceIds: workspaceIdsSchema.optional(),
   /** Client keys only: acknowledge granting ingest/artifacts to a public key (needs workspaceIds). */
   allowClientSensitiveScopes: z.boolean().optional(),
+  /** Caps on query-time page parsing for this key; narrower than workspace/server defaults only. */
+  materializationPolicy: materializationPolicyOverridesSchema.optional(),
 });
 
 const updateApiKeySchema = z.object({
@@ -41,6 +43,8 @@ const updateApiKeySchema = z.object({
   rateLimits: apiKeyRateLimitRulesSchema.optional(),
   workspaceIds: workspaceIdsSchema.optional(),
   allowClientSensitiveScopes: z.boolean().optional(),
+  /** Caps on query-time page parsing for this key; narrower than workspace/server defaults only. */
+  materializationPolicy: materializationPolicyOverridesSchema.optional(),
 });
 
 export const apiKeysRoutes = new Hono()
@@ -59,6 +63,7 @@ export const apiKeysRoutes = new Hono()
         rateLimits: body.rateLimits,
         workspaceIds: body.workspaceIds,
         allowClientSensitiveScopes: body.allowClientSensitiveScopes,
+        materializationPolicy: body.materializationPolicy,
       });
     } catch (error) {
       if (error instanceof OrganizationError) return apiStatusError(c, error.status, error.message, { code: error.code });
@@ -106,6 +111,7 @@ export const apiKeysRoutes = new Hono()
         rateLimits: body.rateLimits,
         workspaceIds: body.workspaceIds,
         allowClientSensitiveScopes: body.allowClientSensitiveScopes,
+        materializationPolicy: body.materializationPolicy,
       });
     } catch (error) {
       if (error instanceof OrganizationError) return apiStatusError(c, error.status, error.message, { code: error.code });

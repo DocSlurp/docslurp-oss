@@ -27,6 +27,7 @@ import { sql } from "../db.js";
 import { resolveApiAiUsagePricing } from "../lib/ai-usage.js";
 import { canEditWorkspace, getWorkspaceAccess } from "./organizations.js";
 import { getWorkspace, updateWorkspace } from "./workspaces.js";
+import { costEstimateFromGraph } from "./jobs.js";
 
 /**
  * Workspace Graph module: one knowledge graph per workspace, its settings,
@@ -299,13 +300,8 @@ export async function updateWorkspaceGraph(
   return await buildGraphStatus(updated);
 }
 
-/** Queues a rebuild; one active job per workspace. */
-export async function startGraphRebuild(
-  workspaceRef: string,
-  userId: string,
-  input: StartGraphRebuildInput,
-): Promise<GraphJob> {
-  const workspace = await requireWorkspace(workspaceRef, userId, true);
+/** One computation of what a rebuild covers and costs; the estimate route and the rebuild both use it. */
+async function planGraphRebuild(workspace: WorkspaceRecord, mode: GraphRebuildMode) {
   const pipeline = normalizePipelineFeatures(workspace.pipeline);
   if (!graphEnabled(pipeline)) {
     throw new WorkspaceGraphError("Enable the knowledge graph before rebuilding it", 409);
@@ -314,8 +310,33 @@ export async function startGraphRebuild(
   const model = graphModel(pipeline);
   const configHash = graphConfigFingerprint(config, model);
   const sizes = await documentSizes(workspace.id, configHash);
-  const estimate = await estimateFor(workspace, config, model, sizes, input.mode);
-  const documentsTotal = input.mode === "full" ? sizes.length : sizes.filter((size) => !size.current).length;
+  const estimate = await estimateFor(workspace, config, model, sizes, mode);
+  const documentsTotal = mode === "full" ? sizes.length : sizes.filter((size) => !size.current).length;
+  return { config, model, configHash, estimate, documentsTotal };
+}
+
+/** What a rebuild would cost and take, in the shared estimate shape (the rebuild's `job.estimate` is the same value). */
+export async function estimateGraphRebuild(
+  workspaceRef: string,
+  userId: string,
+  input: StartGraphRebuildInput,
+  env: Record<string, string | undefined> = process.env,
+) {
+  const workspace = await requireWorkspace(workspaceRef, userId, true);
+  return costEstimateFromGraph((await planGraphRebuild(workspace, input.mode)).estimate, env);
+}
+
+/** Queues a rebuild; one active job per workspace. `onEstimateTimed` receives the estimate's compute time (ms). */
+export async function startGraphRebuild(
+  workspaceRef: string,
+  userId: string,
+  input: StartGraphRebuildInput,
+  options: { onEstimateTimed?: (ms: number) => void } = {},
+): Promise<GraphJob> {
+  const workspace = await requireWorkspace(workspaceRef, userId, true);
+  const started = performance.now();
+  const { config, model, configHash, estimate, documentsTotal } = await planGraphRebuild(workspace, input.mode);
+  options.onEstimateTimed?.(performance.now() - started);
   if (documentsTotal === 0) {
     throw new WorkspaceGraphError(
       input.mode === "full" ? "This workspace has no documents to extract" : "Every document is already extracted with the current settings",

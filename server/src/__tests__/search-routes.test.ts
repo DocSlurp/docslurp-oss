@@ -1,4 +1,5 @@
 import { Hono } from "hono";
+import { InvalidRetrievalQueryError } from "../lib/retrieval-query-flags.js";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const hybridSearch = vi.fn();
@@ -465,6 +466,20 @@ describe("searchRoutes", () => {
       }
     });
 
+    it("explains a call that mixes the single and batch search forms so a model can retry", async () => {
+      const cases = [
+        [{ q: "a", queries: [{ q: "b" }] }, "Send either q for one query or queries for a batch, not both."],
+        [{ queries: [{ q: "b" }], limit: 5 }, "With queries, put limit inside each queries item; only concurrency may accompany queries."],
+        [{ q: "a", concurrency: 2 }, "concurrency applies only to a queries batch; remove it or send queries instead of q."],
+      ] as const;
+      for (const [body, message] of cases) {
+        const response = await post("/search", body);
+        expect(response.status).toBe(400);
+        expect(await response.json()).toMatchObject({ error: { code: "invalid_request", message } });
+      }
+      expect(hybridSearch).not.toHaveBeenCalled();
+    });
+
     it("answers a missing q, an unparseable body and a missing feedback chunk with invalid_request", async () => {
       expect(await (await app.request("/search?workspaceId=ws-1")).json()).toMatchObject({ error: { code: "invalid_request" } });
       const unparseable = await app.request("/search/aggregate", { method: "POST", body: "{nope" });
@@ -473,6 +488,18 @@ describe("searchRoutes", () => {
       const feedback = await app.request("/search/session-1/feedback", { method: "POST", body: "{}" });
       expect(feedback.status).toBe(400);
       expect(await feedback.json()).toMatchObject({ error: { code: "invalid_request", message: "Missing clickedChunkId" } });
+    });
+
+    it("answers invalid retrieval syntax with 400 in single and batch search", async () => {
+      hybridSearch.mockRejectedValueOnce(new InvalidRetrievalQueryError("Tag syntax needs search wording"));
+      const single = await post("/search", { q: "tag:finance", workspaceId: "ws-1", selfQuery: true });
+      expect(single.status).toBe(400);
+      expect(await single.json()).toMatchObject({ error: { code: "invalid_request" } });
+
+      hybridSearch.mockRejectedValueOnce(new InvalidRetrievalQueryError("Tag syntax needs search wording"));
+      const batch = await post("/search", { queries: [{ q: "tag:finance", workspaceId: "ws-1", selfQuery: true }] });
+      expect(batch.status).toBe(200);
+      expect(await batch.json()).toMatchObject({ results: [{ ok: false, error: { status: 400, code: "INVALID_RETRIEVAL_QUERY" } }] });
     });
 
     it("keeps the envelope for thrown spend blocks and unexpected failures", async () => {

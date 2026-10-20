@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import type { PipelineFeatureOverrides, WorkspaceTemplateKey } from "@docslurp/shared";
 
 import { sql } from "../db.js";
+import { normalizeUploadPath } from "../lib/canonical-id.js";
 import {
   abortMultipartUpload,
   completeMultipartUpload,
@@ -31,9 +32,11 @@ export interface DirectUploadSessionFileInput {
   canonicalId?: string | null;
   /** Request one signed PUT instead of multipart (maximum 5 GiB). */
   singlePart?: boolean;
+  path?: string;
 }
 
 export interface CreateDirectUploadSessionInput {
+  tags?: string[];
   userId: string;
   orgId?: string | null;
   workspaceId?: string | null;
@@ -53,6 +56,7 @@ export interface CompleteDirectUploadFileInput {
 }
 
 export type UploadSessionRow = {
+  tags?: string[];
   id: string;
   user_id: string;
   org_id: string | null;
@@ -76,6 +80,7 @@ export type UploadSessionFileRow = {
   status: string;
   completed_parts: Array<{ partNumber: number; etag: string }> | null;
   canonical_id?: string | null;
+  source_path?: string | null;
 };
 
 export interface LoadedDirectUploadSession {
@@ -100,7 +105,7 @@ export async function loadDirectUploadSession(
   userId: string,
 ): Promise<LoadedDirectUploadSession | null> {
   const [session] = await sql<UploadSessionRow[]>`
-    select id, user_id, org_id, workspace_id, workspace_name, template_key, pipeline, status
+    select id, user_id, org_id, workspace_id, workspace_name, template_key, pipeline, tags, status
     from upload_sessions
     where id = ${sessionId} and user_id = ${userId}
     limit 1
@@ -126,7 +131,8 @@ export async function loadDirectUploadSession(
       part_size,
       status,
       completed_parts,
-      canonical_id
+      canonical_id,
+      source_path
     from upload_session_files
     where session_id = ${sessionId}
     order by created_at asc
@@ -232,6 +238,7 @@ export async function createDirectUploadSession(input: CreateDirectUploadSession
       workspace_name,
       template_key,
       pipeline,
+      tags,
       status
     )
     values (
@@ -242,6 +249,7 @@ export async function createDirectUploadSession(input: CreateDirectUploadSession
       ${input.workspaceName ?? null},
       ${input.templateKey ?? null},
       ${sql.json(JSON.parse(JSON.stringify(input.pipeline)))},
+      ${sql.array(input.tags ?? [])},
       'pending'
     )
   `;
@@ -268,7 +276,8 @@ export async function createDirectUploadSession(input: CreateDirectUploadSession
         part_size,
         status,
         sha256,
-        canonical_id
+        canonical_id,
+        source_path
       )
       values (
         ${fileId},
@@ -282,7 +291,8 @@ export async function createDirectUploadSession(input: CreateDirectUploadSession
         ${partSize},
         'pending',
         ${file.sha256 ?? null},
-        ${file.canonicalId ?? null}
+        ${file.canonicalId ?? null},
+        ${normalizeUploadPath(file.path)}
       )
     `;
   }
@@ -489,6 +499,7 @@ export function directUploadIntakeItems(
     mimeType: file.mime_type,
     sizeBytes: file.size_bytes,
     canonicalId: file.canonical_id ?? null,
+    path: file.source_path ?? "",
     content: file.status === "completed"
       ? { storedKey: file.source_key }
       : { rejected: new WorkspaceIntakeError(`${file.filename} did not finish uploading`, 409) },

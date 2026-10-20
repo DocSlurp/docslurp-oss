@@ -115,7 +115,7 @@ jobs:
     # A stable required check. Never mask failures.
     needs: [typecheck, test]
     if: always()
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-slim
     timeout-minutes: 1
     steps:
       - name: Require every gate

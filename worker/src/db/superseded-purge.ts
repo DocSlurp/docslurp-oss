@@ -1,6 +1,12 @@
 import { setTimeout as delay } from "node:timers/promises";
 
-import { resolveLanceDbConfig, resolveObjectStorageConfig, VectorNamespaceManager } from "@docslurp/shared";
+import {
+  effectiveRetainedVersions,
+  isBillingEnforced,
+  resolveLanceDbConfig,
+  resolveObjectStorageConfig,
+  VectorNamespaceManager,
+} from "@docslurp/shared";
 import type { Sql } from "postgres";
 
 import { lockWorkspaceGraph, refreshGraphElements } from "../graph/graph-store.js";
@@ -34,6 +40,29 @@ const DERIVED_TABLES = [
   "pii_detections",
   "search_index_staleness",
   "vector_indexes",
+  // Deferred indexing: a superseded version is a tombstone, not a delete, so these do not cascade away.
+  "document_page_states",
+  "document_maps",
+  "document_page_vectors",
+] as const;
+
+/**
+ * Search-only rows removed when a superseded version is archived instead of
+ * purged. Archived versions stay browsable (pages, Markdown, page images,
+ * summaries, PII detections and history are kept) but are never searchable.
+ * Propositions are retrieval units, so they go; grounded summaries and
+ * document summaries are reader-facing, so they stay.
+ */
+const ARCHIVE_TABLES = [
+  "document_chunks", // cascades chunk_entities
+  "kg_edge_evidence",
+  "kg_document_state",
+  "document_propositions",
+  "search_index_staleness",
+  "vector_indexes",
+  "document_page_states",
+  "document_maps",
+  "document_page_vectors",
 ] as const;
 
 const SAFE_DOCUMENT_ID = /^[A-Za-z0-9_-]+$/;
@@ -58,6 +87,8 @@ export interface SupersededPurgeOptions {
   lancedbRoot: string;
   deleteVectorRows?: DeleteVectorRows;
   dropVectorTable?: DropVectorTable;
+  /** Without billing enforcement retention settings apply on every plan (default 2). Defaults to `billing_runtime` (published by the app) or the env flags. */
+  billingEnforced?: boolean;
   /** Cleanup-queue rows claimed per batch; vector and storage work is grouped per batch. */
   cleanupBatchSize?: number;
 }
@@ -65,6 +96,145 @@ export interface SupersededPurgeOptions {
 export interface SupersededPurgeResult {
   purged: number;
   failed: number;
+  /** Superseded versions kept browsable (search data removed) within the retention window. */
+  archived?: number;
+}
+
+type RetentionAction = "archive" | "purge";
+
+/**
+ * Per-plan retention inputs for the SQL keep rule, derived from `effectiveRetainedVersions` so the TS function stays the source of truth.
+ * Without billing enforcement every plan follows the paid rule (settings honoured, default 2).
+ */
+function retentionPlanRules(billingEnforced: boolean): Record<string, { fixed: boolean; fallback: number }> {
+  const rules: Record<string, { fixed: boolean; fallback: number }> = {};
+  for (const planId of ["free", "silver", "gold", "platinum"]) {
+    const fallback = effectiveRetainedVersions({ planId, orgSetting: null, workspaceSetting: null, billingEnforced });
+    const fixed = effectiveRetainedVersions({ planId, orgSetting: 100, workspaceSetting: 100, billingEnforced }) === fallback;
+    rules[planId] = { fixed, fallback };
+  }
+  return rules;
+}
+
+/**
+ * Chains worth ranking this sweep: those with a superseded version that is not archived yet (still to archive
+ * or purge), plus chains in an organization or workspace whose retention setting or plan changed since it was
+ * last fully swept (archived versions may now exceed the keep count). Fully archived chains with unchanged
+ * settings are never touched, so a sweep stays proportional to pending work, not to total history.
+ */
+export function retentionCandidateChains(sql: Sql<Record<string, unknown>>) {
+  return sql`
+    select distinct d.workspace_id, coalesce(d.canonical_id, 'legacy:' || d.id) as chain_key
+    from documents d
+    join organizations o on o.id = d.org_id
+    left join workspaces w on w.id = d.workspace_id
+    where d.superseded_at is not null and d.purged_at is null
+      and (
+        d.archived_at is null
+        -- No live row left (the current version was deleted): archived predecessors still need purging.
+        or not exists (
+          select 1 from documents live
+          where live.workspace_id = d.workspace_id
+            and coalesce(live.canonical_id, 'legacy:' || live.id) = coalesce(d.canonical_id, 'legacy:' || d.id)
+            and live.superseded_at is null and live.purged_at is null
+        )
+        or o.retention_changed_at > coalesce(o.retention_swept_at, '-infinity'::timestamptz)
+        or w.retention_changed_at > coalesce(w.retention_swept_at, '-infinity'::timestamptz)
+      )
+  `;
+}
+
+/** Marks every retention setting change up to `sweptAt` as fully applied. */
+export async function markRetentionSwept(sql: Sql<Record<string, unknown>>, sweptAt: Date): Promise<void> {
+  await sql`
+    update organizations set retention_swept_at = ${sweptAt}
+    where retention_changed_at is not null and retention_changed_at <= ${sweptAt}
+      and (retention_swept_at is null or retention_swept_at < retention_changed_at)`;
+  await sql`
+    update workspaces set retention_swept_at = ${sweptAt}
+    where retention_changed_at is not null and retention_changed_at <= ${sweptAt}
+      and (retention_swept_at is null or retention_swept_at < retention_changed_at)`;
+}
+
+/**
+ * One query per sweep. Ranks unpurged completed versions per (workspace_id,
+ * canonical_id) newest first (rank 1 is current), computes each chain's keep count
+ * in SQL (same rule as `effectiveRetainedVersions`), and returns only
+ * actionable superseded, past-grace rows, limited to `limit`. A superseded
+ * rank-1 row has no live current in its chain and is purged. Only completed
+ * rows take a slot: superseded failed/cancelled/pii_blocked rows are always
+ * purged, and queued/processing/blocked rows (re-index children included) are
+ * neither ranked nor evict anything.
+ */
+export async function retentionActions(
+  sql: Sql<Record<string, unknown>>,
+  graceSeconds: number,
+  limit: number,
+  options: { billingEnforced?: boolean } = {},
+): Promise<{ id: string; action: RetentionAction }[]> {
+  const rules = JSON.stringify(retentionPlanRules(options.billingEnforced ?? await resolveBillingEnforced(sql)));
+  const rows = await sql<{ id: string; action: RetentionAction }[]>`
+    with rules as (select * from jsonb_each(${rules}::text::jsonb) as t(plan_id, rule)),
+    chains as (${retentionCandidateChains(sql)}),
+    -- A version replaced by its own re-index (reindex_of) is purged and takes no retention slot:
+    -- its replacement occupies the slot, so a config change never evicts an older archived version.
+    reindexed as (
+      select d.id, d.superseded_at
+      from documents d
+      join documents rep on rep.id = d.superseded_by_document_id and rep.reindex_of = d.id
+      where d.purged_at is null and d.superseded_at is not null
+    ),
+    ranked as (
+      select d.id, d.superseded_at, d.archived_at, d.org_id, d.workspace_id,
+        row_number() over (
+          partition by d.workspace_id, coalesce(d.canonical_id, 'legacy:' || d.id)
+          order by d.created_at desc, d.id desc
+        )::int as version_rank
+      from documents d
+      join chains c on c.workspace_id = d.workspace_id
+        and c.chain_key = coalesce(d.canonical_id, 'legacy:' || d.id)
+      where d.purged_at is null
+        and d.status = 'completed'
+        and not exists (select 1 from reindexed x where x.id = d.id)
+    ),
+    keep as (
+      select r.id, r.version_rank, r.archived_at, r.superseded_at,
+        case
+          when (rules.rule->>'fixed')::boolean then (rules.rule->>'fallback')::int
+          else least(100, greatest(1, coalesce(w.retain_document_versions, o.retain_document_versions, (rules.rule->>'fallback')::int)))
+        end as keep_count
+      from ranked r
+      join organizations o on o.id = r.org_id
+      left join workspaces w on w.id = r.workspace_id
+      left join rules on rules.plan_id = case when o.plan_id in (select plan_id from rules) then o.plan_id else 'free' end
+    )
+    select id, action from (
+      select id, superseded_at,
+        case when version_rank > 1 and version_rank <= keep_count then 'archive' else 'purge' end as action
+      from keep
+      where superseded_at is not null
+        and superseded_at < now() - make_interval(secs => ${graceSeconds})
+        and (
+          version_rank = 1 or version_rank > keep_count
+          or (version_rank <= keep_count and archived_at is null)
+        )
+      union
+      select id, superseded_at, 'purge' as action
+      from reindexed
+      where superseded_at < now() - make_interval(secs => ${graceSeconds})
+      union
+      -- Superseded versions that never completed hold no slot and no value.
+      select d.id, d.superseded_at, 'purge' as action
+      from documents d
+      join chains c on c.workspace_id = d.workspace_id
+        and c.chain_key = coalesce(d.canonical_id, 'legacy:' || d.id)
+      where d.purged_at is null and d.superseded_at is not null and d.status <> 'completed'
+        and d.superseded_at < now() - make_interval(secs => ${graceSeconds})
+    ) actionable
+    order by superseded_at
+    limit ${limit}
+  `;
+  return rows.map((row) => ({ id: row.id, action: row.action }));
 }
 
 type ClaimedDocument = {
@@ -98,6 +268,17 @@ export function purgeConfig(): SupersededPurgeOptions & { intervalMs: number } {
     deleteSources: resolveObjectStorageConfig().purgeSupersededSources,
     lancedbRoot: resolveLanceDbConfig().root,
   };
+}
+
+/**
+ * Whether retention follows billing rules. Workers hold no Stripe key; the app publishes enforcement in
+ * `billing_runtime`, which this reads, alongside the env flags (`DOCSLURP_BILL_*`) for deployments without Stripe.
+ */
+export async function resolveBillingEnforced(sql: Sql<Record<string, unknown>>): Promise<boolean> {
+  if (isBillingEnforced()) return true;
+  if (!(await tableExists(sql, "billing_runtime"))) return false;
+  const [row] = await sql<{ metering_enforced: boolean }[]>`select metering_enforced from billing_runtime where id = true limit 1`;
+  return row?.metering_enforced === true;
 }
 
 /** Deletes documents' rows from a LanceDB table, retrying commit conflicts with concurrent writers. */
@@ -180,9 +361,12 @@ function forgettingEmbeddingReuseRefs(sql: Sql<Record<string, unknown>>, storage
   };
 }
 
-async function existingTables(sql: Sql<Record<string, unknown>>): Promise<string[]> {
+async function existingTables(
+  sql: Sql<Record<string, unknown>>,
+  names: readonly string[] = DERIVED_TABLES,
+): Promise<string[]> {
   const rows = await sql<{ name: string }[]>`
-    select name from unnest(${sql.array([...DERIVED_TABLES])}::text[]) as name
+    select name from unnest(${sql.array([...names])}::text[]) as name
     where to_regclass('public.' || name) is not null
   `;
   return rows.map((row) => row.name);
@@ -202,9 +386,13 @@ export async function purgeSupersededDocuments(
   const deleteVectorRows = options.deleteVectorRows ?? deleteLanceDbDocumentRows;
   const tables = await existingTables(sql);
   const result: SupersededPurgeResult = { purged: 0, failed: 0 };
+  const [started] = await sql<{ now: Date }[]>`select clock_timestamp() as now`;
+  const actions = await retentionActions(sql, options.graceSeconds, options.batchSize, { billingEnforced: options.billingEnforced ?? await resolveBillingEnforced(sql) });
+  // Nothing left to do: every pending retention setting change is now applied.
+  if (actions.length === 0) await markRetentionSwept(sql, started!.now);
+  const archiveTables = await existingTables(sql, ARCHIVE_TABLES);
 
-  for (let index = 0; index < options.batchSize; index += 1) {
-    let claimedAny = false;
+  for (const { id: candidateId, action } of actions) {
     try {
       await sql.begin(async (tx) => {
         const client = tx as unknown as Sql<Record<string, unknown>>;
@@ -228,11 +416,10 @@ export async function purgeSupersededDocuments(
             ) as source_shared
           from documents d
           left join documents replacement on replacement.id = d.superseded_by_document_id
-          where d.superseded_at is not null
+          where d.id = ${candidateId}
+            and d.superseded_at is not null
             and d.purged_at is null
-            and d.superseded_at < now() - make_interval(secs => ${options.graceSeconds})
-          order by d.superseded_at
-          limit 1
+            and (${action === "purge"} or d.archived_at is null)
           for update of d skip locked
         `;
         if (!doc) return;
@@ -243,7 +430,12 @@ export async function purgeSupersededDocuments(
           select pg_try_advisory_xact_lock(hashtextextended(${`kg:${doc.workspace_id}`}, 0)) as acquired
         `;
         if (!graphLock?.acquired) return;
-        claimedAny = true;
+
+        if (action === "archive") {
+          await archiveDocument(client, doc, options, deleteVectorRows, archiveTables);
+          result.archived = (result.archived ?? 0) + 1;
+          return;
+        }
 
         // Dedup copies reuse this version's artifacts and vectors; keep those
         // until the last copy is gone. Its own derived rows are still removed.
@@ -307,13 +499,45 @@ export async function purgeSupersededDocuments(
         `[superseded-purge] failed error=${error instanceof Error ? error.message.split("\n")[0] : String(error)}`,
       );
     }
-    if (!claimedAny) break;
   }
 
-  if (result.purged > 0 || result.failed > 0) {
-    console.log(`[superseded-purge] purged=${result.purged} failed=${result.failed}`);
+  if (result.purged > 0 || result.failed > 0 || (result.archived ?? 0) > 0) {
+    console.log(`[superseded-purge] purged=${result.purged} archived=${result.archived ?? 0} failed=${result.failed}`);
   }
   return result;
+}
+
+/**
+ * Archives a retained superseded version: removes everything search reads
+ * (chunks, vectors, graph evidence, staleness, deferred page vectors/maps)
+ * and keeps pages, artifacts and page images for browsing. Vector rows shared
+ * with live dedup copies stay until the last copy is gone.
+ */
+async function archiveDocument(
+  client: Sql<Record<string, unknown>>,
+  doc: ClaimedDocument,
+  options: SupersededPurgeOptions,
+  deleteVectorRows: DeleteVectorRows,
+  archiveTables: readonly string[],
+): Promise<void> {
+  if (!doc.shared_with_dedup_copies) {
+    const vectors = await client<VectorIndexRow[]>`
+      select distinct backend, embedding_model, dimension from vector_indexes where document_id = ${doc.id}
+    `;
+    for (const vector of vectors) {
+      if (vector.backend !== "lancedb") continue;
+      const location = VectorNamespaceManager.getEmbeddingLocation(
+        options.lancedbRoot, doc.org_id, vector.embedding_model, vector.dimension,
+      );
+      await deleteVectorRows({ uri: location.uri, table: location.table, documentIds: [doc.id] });
+    }
+  }
+  const kgNodeIds = await knowledgeGraphNodesForDocument(client, doc.id);
+  for (const table of archiveTables) {
+    await client`delete from ${client(table)} where document_id = ${doc.id}`;
+  }
+  await refreshKnowledgeGraphNodes(client, kgNodeIds);
+  await client`update documents set archived_at = now() where id = ${doc.id}`;
 }
 
 async function artifactKeys(

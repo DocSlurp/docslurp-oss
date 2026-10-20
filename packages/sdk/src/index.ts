@@ -5,7 +5,7 @@ import type { RunProgressSnapshot, WorkspaceState, OrganizationRecord, Organizat
 export type * from "./state.js";
 import type { IngestReport } from "./ingest-report.js";
 export type * from "./ingest-report.js";
-import type { DocumentViewerPayload } from "./document.js";
+import type { DocumentVersionEntry, DocumentViewerPayload } from "./document.js";
 export type * from "./document.js";
 
 export type DocSlurpFetch = typeof fetch;
@@ -20,10 +20,113 @@ export type WorkspaceTemplateKey =
 
 export type JsonObject = Record<string, unknown>;
 
+export type IndexingMode = "full" | "map" | "visual";
+
 export type WorkspaceRecord = JsonObject & {
   id: string;
   name: string;
+  /** Mode new uploads use; always "full" while deferred indexing is unavailable. */
+  indexingMode?: IndexingMode;
+  /** Searchable pages (indexed pages of deferred documents plus all pages of full-mode documents). */
+  indexedPageCount?: number;
+  /** False when the service has deferred indexing profiles off; hide indexing controls. */
+  deferredIndexingAvailable?: boolean;
 };
+
+export type RetrievalStage = "chunk" | "page-text" | "map-node" | "page-image";
+
+/** Per-search stats for deferred workspaces: pages parsed on demand for this query. */
+export type DeferredSearchStats = {
+  temperature: "cold" | "warm" | "hot";
+  candidatePages: number;
+  indexedCandidatePages: number;
+  materializedPages: number;
+  pendingPages: number;
+  materializeMs: number;
+  creditsSpent: number;
+  routerUsed: boolean;
+  fallbackUsed: boolean;
+  stoppedBy: "policy" | "credits" | "deadline" | null;
+};
+
+export type MaterializationPolicy = {
+  maxPagesPerQuery: number;
+  maxCreditsPerQuery: number;
+  maxPagesPerDay?: number;
+  deadlineMs: number;
+  allowFullIndexRequest: boolean;
+  allowAgentDiscovery: boolean;
+  mapRouter: "off" | "auto" | "always";
+};
+
+export type CreateCapabilityInput = {
+  workspaceIds?: string[];
+  policy?: Partial<MaterializationPolicy>;
+  ttlSeconds?: number;
+  boundClientKeyId?: string;
+  allowedOrigins?: string[];
+};
+
+export type FullIndexResponse = { runId: string; pages: number; estimatedCredits: number | null; billing?: "enforced" | "disabled"; job?: JobStatus };
+
+export type JobKind = "reindex" | "full-index" | "backfill" | "graph-rebuild" | "reprocess";
+export type JobState = "queued" | "blocked" | "processing" | "completed" | "failed" | "cancelled";
+
+/** Work estimate. With billing disabled (self-hosted) `credits` is null; pages and time still apply. */
+export type CostEstimate = {
+  pages: number;
+  documents: number;
+  billing: "enforced" | "disabled";
+  credits: { low: number; high: number } | null;
+  seconds: { low: number; high: number } | null;
+  basis: string;
+};
+
+/** A background job queued by a mutation. `estimate` is null when it took over 150 ms; fetch `estimateUrl`. */
+export type JobStatus = {
+  id: string;
+  kind: JobKind;
+  status: JobState;
+  reason?: "credits" | "budget" | "policy";
+  queue: { position: number | null; ahead: number | null };
+  runIds: string[];
+  estimate: CostEstimate | null;
+  estimateUrl?: string;
+  statusUrl: string;
+};
+
+export type ConfigChangeKind = "none" | "search-only" | "new-uploads" | "reindex-recommended" | "reindex-required";
+export type ConfigChangeImpact = {
+  kind: ConfigChangeKind;
+  stages: string[];
+  reasons: Array<{ field: string; effect: string }>;
+  documents: number;
+  pages: number;
+};
+
+/** Response of every `…/estimate` route. `impact` is present for configuration changes. */
+export type EstimateResponse = { estimate: CostEstimate; billing: "enforced" | "disabled"; impact?: ConfigChangeImpact };
+
+/** Settings accepted by workspace PATCH; `apply` and `autoConfirmReindex` control re-index queuing. */
+export type UpdateWorkspaceInput = JsonObject & {
+  /** "reindex" queues a re-index of existing documents; "new-uploads" only changes future ingestion. */
+  apply?: "new-uploads" | "reindex";
+  autoConfirmReindex?: boolean;
+  retainDocumentVersions?: number | null;
+};
+export type WorkspaceUpdateResponse = { workspace: WorkspaceRecord; impact?: ConfigChangeImpact; job?: JobStatus } & JsonObject;
+
+export type UploadEstimateInput = { files: Array<{ name: string; size: number; pages?: number }>; workspaceId?: string };
+
+/** Counts across a job's runs. */
+export type JobProgress = { documents: number; documentsTotal: number; pages: number; pagesTotal: number };
+/**
+ * One streamed update. `job` is always a full {@link JobStatus}: a `progress` frame is merged into the last
+ * known status as `job.progress`, and `data` is the raw frame payload.
+ */
+export type JobEvent = { event: "status" | "progress" | "done"; job: JobStatus & { progress?: JobProgress }; data: JsonObject };
+export type StreamJobOptions = RequestOptions & { pollIntervalMs?: number };
+
 
 export type WorkspaceRun = JsonObject & {
   id: string;
@@ -108,6 +211,8 @@ export type SearchResult = JsonObject & {
   text: string;
   citation: SearchCitation;
   parentText?: string;
+  /** How this result was retrieved (deferred workspaces). */
+  retrieval?: { stage: RetrievalStage; pageNumbers?: number[]; materialized?: boolean };
 };
 
 /** Reserved workspace ID for the organization's default workspace. */
@@ -137,6 +242,12 @@ export type UploadFileInput = {
    * workspace, older versions drop out of search.
    */
   canonicalId?: string;
+  /**
+   * Folder the file lives in, e.g. "contracts/2025" (no filename, "/"-separated, no ".." segments, max 1024).
+   * With the filename it identifies the document across re-uploads: uploading the same path and name again
+   * creates a new version that supersedes the old one, while the same name in another folder stays separate.
+   */
+  path?: string;
 };
 
 /** Structural Node ReadStream/async iterable support, without Node runtime imports. */
@@ -146,8 +257,13 @@ export type UploadByteStream = AsyncIterable<Uint8Array | string> & {
 };
 
 export type UploadOptions = RequestOptions & {
+  /** Labels applied to every accepted document in this upload. */
+  tags?: string[];
   /** Canonical ID for a single-file or streamed upload. Use UploadFileInput.canonicalId for several files. */
   canonicalId?: string;
+  /** Folder path for a single-file or streamed upload. Use UploadFileInput.path for several files. */
+  path?: string;
+  indexingMode?: IndexingMode;
   /**
    * How files reach storage. "auto" (default) sends uploads larger than
    * DIRECT_UPLOAD_THRESHOLD_BYTES through a direct upload session (presigned
@@ -170,8 +286,12 @@ export type UploadOptions = RequestOptions & {
 };
 
 export type UploadInput = {
+  /** Labels applied to every accepted document in this upload. */
+  tags?: string[];
   files: Array<Blob | File | UploadFileInput>;
   idempotencyKey?: string;
+  /** Stamp these documents with an indexing mode instead of the workspace's. */
+  indexingMode?: IndexingMode;
   newWorkspace?: boolean;
   orgId?: string;
   templateKey?: WorkspaceTemplateKey;
@@ -194,10 +314,15 @@ export type UploadResponse = {
   run: WorkspaceRun;
   warnings?: string[];
   workspace: WorkspaceRecord;
+  /** Set when the upload queued background work (for example a config-change re-index). */
+  job?: JobStatus;
 };
 
 export type UploadUrlsInput = {
+  /** Labels applied to every accepted document in this upload. */
+  tags?: string[];
   idempotencyKey?: string;
+  indexingMode?: IndexingMode;
   newWorkspace?: boolean;
   orgId?: string;
   templateKey?: WorkspaceTemplateKey;
@@ -248,6 +373,8 @@ export type SearchResponse = {
   relevanceFloor?: { minScore: number; dropped: number };
   results: SearchResult[];
   sessionId: string;
+  /** Present for deferred (map/visual) workspaces. */
+  deferred?: DeferredSearchStats;
 };
 
 export type SearchBatchOptions = {
@@ -735,6 +862,77 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
     return streamRunEvents(runId, options);
   }
 
+
+  const TERMINAL_JOB_STATES = new Set<JobState>(["completed", "failed", "cancelled"]);
+
+  function getJob(jobId: string, requestOptions?: RequestOptions): Promise<JobStatus> {
+    return request<JobStatus>(`/v1/jobs/${encodeURIComponent(jobId)}`, {}, requestOptions, true);
+  }
+
+  /**
+   * Follows a job until it finishes: SSE from /v1/jobs/:id/events, falling back
+   * to polling /v1/jobs/:id (every pollIntervalMs, default 2s) when the stream
+   * is unavailable or drops. Yields a `status`, `progress` or `done` event.
+   * `timeoutMs` (default five minutes) bounds the wait but never applies while the
+   * job is `blocked` (waiting for credits or budget): the clock restarts on every
+   * poll that sees `blocked`, so cancel with `signal` instead.
+   */
+  async function* streamJob(jobId: string, streamOptions: StreamJobOptions = {}): AsyncGenerator<JobEvent> {
+    const timeoutMs = positiveDuration(streamOptions.timeoutMs ?? 300_000, "timeoutMs");
+    const interval = positiveDuration(streamOptions.pollIntervalMs ?? 2_000, "pollIntervalMs");
+    const signal = streamOptions.signal ?? new AbortController().signal;
+    const deadlineAt = Date.now() + timeoutMs;
+    let last: JobStatus | undefined;
+    try {
+      for await (const frame of streamEventsAt(`/v1/jobs/${encodeURIComponent(jobId)}/events`, { ...streamOptions, timeoutMs })) {
+        const data = frame.data as JsonObject;
+        if (frame.event !== "status" && frame.event !== "progress" && frame.event !== "done") continue;
+        if (frame.event === "progress") {
+          // Progress frames carry counts only; attach them to the last status (the server sends status first).
+          if (!last) continue;
+          const { id: _id, job: _job, ...counts } = data;
+          last = { ...last, progress: counts as unknown as JobProgress } as JobStatus;
+          yield { event: "progress", job: last, data };
+          continue;
+        }
+        const reported = (data.job && typeof data.job === "object" ? data.job : data) as JobStatus & { progress?: JobProgress };
+        // Status frames carry no counts: keep the last known progress.
+        const kept = (last as (JobStatus & { progress?: JobProgress }) | undefined)?.progress;
+        const job = reported.progress || !kept ? reported : { ...reported, progress: kept };
+        last = job;
+        yield { event: frame.event, job, data };
+        if (frame.event === "done" || TERMINAL_JOB_STATES.has(job.status)) return;
+      }
+    } catch (error) {
+      signal.throwIfAborted();
+      // Unavailable, dropped or timed-out stream: fall through to polling.
+    }
+    let limit = deadlineAt;
+    for (;;) {
+      const job = await getJob(jobId, { signal });
+      const changed = !last || last.status !== job.status || JSON.stringify(last.queue) !== JSON.stringify(job.queue)
+        || last.runIds.join() !== job.runIds.join();
+      last = job;
+      const done = TERMINAL_JOB_STATES.has(job.status);
+      if (changed || done) yield { event: done ? "done" : "status", job, data: { job } };
+      if (done) return;
+      if (job.status === "blocked") limit = Date.now() + timeoutMs;
+      if (Date.now() >= limit) throw new DocSlurpTimeoutError(`Job ${jobId} did not finish within ${timeoutMs} ms; it keeps running.`);
+      await sleep(interval, signal);
+    }
+  }
+
+  function estimateAt(path: string, body: unknown, requestOptions?: RequestOptions): Promise<EstimateResponse> {
+    return request<EstimateResponse>(path, jsonRequest("POST", body ?? {}), requestOptions);
+  }
+  const wsPath = (id: string | undefined) => `/v1/workspaces/${encodeURIComponent(id?.trim() || workspaceId)}`;
+
+  /** What switching a workspace to `mode` would cost. */
+  function estimateIndexingMode(mode: IndexingMode, input: { workspaceId?: string } = {}, requestOptions?: RequestOptions): Promise<{ pages: number; estimatedCredits: number | null; billing?: "enforced" | "disabled"; job: "none" | "full-index" | "build-maps" | "embed-pages" }> {
+    const id = input.workspaceId?.trim() || workspaceId;
+    return request(`/v1/workspaces/${encodeURIComponent(id)}/indexing-mode/estimate`, jsonRequest("POST", { mode }), requestOptions);
+  }
+
   async function getRunProgress(runId: string, options?: RequestOptions): Promise<RunProgressSnapshot> {
     return validateRunSnapshot(await request<unknown>(`/v1/runs/${encodeURIComponent(runId)}/progress`, {}, options, true), runId);
   }
@@ -873,7 +1071,7 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
 
   function uploadUrls(input: UploadUrlsInput, options?: RequestOptions): Promise<UploadResponse> {
     const { idempotencyKey, urls, workspaceName, orgId, templateKey } = input;
-    const body = { urls, workspaceName, orgId, templateKey, ...intakeTarget(input) };
+    const body = { urls, workspaceName, orgId, templateKey, tags: input.tags, ...intakeTarget(input) };
     return request("/v1/uploads/url", {
       ...jsonRequest("POST", body),
       headers: { "Content-Type": "application/json", ...(idempotencyKey ? { "Idempotency-Key": idempotencyKey } : {}) },
@@ -903,12 +1101,15 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
     const metadata = "files" in input ? { ...input, ...options } : options;
     const fields: Record<string, string> = {};
     if (metadata.orgId) fields.orgId = metadata.orgId;
+    if (metadata.tags) fields.tags = JSON.stringify(metadata.tags);
     const target = intakeTarget(metadata);
     if (target.workspaceId) fields.workspaceId = target.workspaceId;
     if (target.newWorkspace) fields.newWorkspace = "true";
     if (options.canonicalId) fields.canonicalId = options.canonicalId;
+    if (options.path) fields.path = options.path;
     if (metadata.workspaceName) fields.workspaceName = metadata.workspaceName;
     if (metadata.templateKey) fields.templateKey = metadata.templateKey;
+    if (metadata.indexingMode) fields.indexingMode = metadata.indexingMode;
     const headers = new Headers();
     if (metadata.idempotencyKey) headers.set("Idempotency-Key", metadata.idempotencyKey);
     if (Symbol.asyncIterator in input) {
@@ -924,13 +1125,16 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
     const blobs = await Promise.all(files.map((file) => fileDataFor(file)));
     const names = files.map((file, index) => options.filename ?? fileNameFor(file, index));
     const canonicalIds = files.map((file) => ("data" in file && file.canonicalId) || null);
+    const paths = files.map((file, index) => ("data" in file && file.path) || (index === 0 && files.length === 1 ? options.path ?? "" : ""));
     const totalBytes = blobs.reduce((sum, blob) => sum + blob.size, 0);
     const mode = options.directUpload ?? "auto";
     if (mode === true || (mode === "auto" && totalBytes > DIRECT_UPLOAD_THRESHOLD_BYTES)) {
-      return uploadDirect({ blobs, names, canonicalIds: canonicalIds.map((id, index) => id || (index === 0 && files.length === 1 ? options.canonicalId ?? null : null)), metadata, target }, options);
+      return uploadDirect({ blobs, names, canonicalIds: canonicalIds.map((id, index) => id || (index === 0 && files.length === 1 ? options.canonicalId ?? null : null)), paths, metadata, target }, options);
     }
     const form = new FormData();
     for (const [index, blob] of blobs.entries()) form.append("files", blob, names[index]);
+    delete fields.path;
+    if (paths.some(Boolean)) fields.paths = JSON.stringify(paths);
     if (!fields.canonicalId && canonicalIds.some(Boolean)) fields.canonicalIds = JSON.stringify(canonicalIds);
     for (const [name, value] of Object.entries(fields)) form.set(name, value);
     return request<UploadResponse>("/v1/uploads/bulk", { body: form, headers, method: "POST" }, options, Boolean(metadata.idempotencyKey));
@@ -963,12 +1167,14 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
     blobs: Blob[];
     names: string[];
     canonicalIds: Array<string | null>;
+    paths: string[];
     metadata: UploadOptions | (UploadInput & UploadOptions);
     target: { newWorkspace: boolean; workspaceId?: string };
   }, options: UploadOptions): Promise<UploadResponse> {
     const { metadata } = args;
     const session = await request<{ sessionId: string; files: DirectUploadDescriptor[] }>("/v1/uploads/direct/sessions", jsonRequest("POST", {
       ...(metadata.orgId ? { orgId: metadata.orgId } : {}),
+      ...(metadata.tags ? { tags: metadata.tags } : {}),
       ...(args.target.workspaceId ? { workspaceId: args.target.workspaceId } : {}),
       ...(args.target.newWorkspace ? { newWorkspace: true } : {}),
       ...(metadata.workspaceName ? { workspaceName: metadata.workspaceName } : {}),
@@ -978,6 +1184,7 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
         mimeType: blob.type || "application/octet-stream",
         sizeBytes: blob.size,
         ...(args.canonicalIds[index] ? { canonicalId: args.canonicalIds[index] } : {}),
+        ...(args.paths[index] ? { path: args.paths[index] } : {}),
       })),
     }), options);
     const sessionPath = `/v1/uploads/direct/sessions/${encodeURIComponent(session.sessionId)}`;
@@ -1019,6 +1226,54 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
     /** The caller's recent runs, newest first. */
     async listRuns(options?: RequestOptions): Promise<WorkspaceRun[]> {
       return (await request<{ runs: WorkspaceRun[] }>("/v1/runs", {}, options, true)).runs;
+
+    },
+
+    getJob,
+    streamJob,
+
+    /** Applies workspace settings. Re-index-queuing changes return the queued `job`. */
+    updateWorkspace(id: string | undefined, input: UpdateWorkspaceInput, requestOptions?: RequestOptions): Promise<WorkspaceUpdateResponse> {
+      return request<WorkspaceUpdateResponse>(wsPath(id), jsonRequest("PATCH", input), requestOptions);
+    },
+    /** Impact and cost of an {@link UpdateWorkspaceInput}, without applying it. */
+    updateWorkspaceEstimate(id: string | undefined, input: UpdateWorkspaceInput, requestOptions?: RequestOptions): Promise<EstimateResponse> {
+      return estimateAt(`${wsPath(id)}/estimate`, input, requestOptions);
+    },
+    updateSearchSettings(id: string | undefined, input: JsonObject, requestOptions?: RequestOptions): Promise<WorkspaceUpdateResponse> {
+      return request<WorkspaceUpdateResponse>(`${wsPath(id)}/search-settings`, jsonRequest("PATCH", input), requestOptions);
+    },
+    /** Session-only: the search-settings mutation accepts no API key. */
+    updateSearchSettingsEstimate(id: string | undefined, input: JsonObject, requestOptions?: RequestOptions): Promise<EstimateResponse> {
+      return estimateAt(`${wsPath(id)}/search-settings/estimate`, input, requestOptions);
+    },
+    /** What re-running a run (optionally from given stages) would cost. Session-only: the reprocess mutation accepts no API key. */
+    reprocessEstimate(runId: string, input: JsonObject = {}, requestOptions?: RequestOptions): Promise<EstimateResponse> {
+      return estimateAt(`/v1/runs/${encodeURIComponent(runId)}/reprocess/estimate`, input, requestOptions);
+    },
+    /** Cost of fully indexing one document (`{ documentId }`) or a workspace (`{ workspaceId?, documentIds? }`). */
+    fullIndexEstimate(input: { documentId: string } | { workspaceId?: string; documentIds?: string[] } = {}, requestOptions?: RequestOptions): Promise<EstimateResponse> {
+      if ("documentId" in input) return estimateAt(`/v1/documents/${encodeURIComponent(input.documentId)}/full-index/estimate`, {}, requestOptions);
+      return estimateAt(`${wsPath(input.workspaceId)}/full-index/estimate`, { documentIds: input.documentIds }, requestOptions);
+    },
+    rebuildGraphEstimate(input: { workspaceId?: string } & JsonObject = {}, requestOptions?: RequestOptions): Promise<EstimateResponse> {
+      const { workspaceId: id, ...body } = input;
+      return estimateAt(`${wsPath(id)}/graph/jobs/estimate`, body, requestOptions);
+    },
+    /** Cost of an upload before sending any bytes. */
+    uploadEstimate(input: UploadEstimateInput, requestOptions?: RequestOptions): Promise<EstimateResponse> {
+      return estimateAt("/v1/uploads/estimate", input, requestOptions);
+    },
+    /**
+     * Sets how many versions of each document are kept (1–100; null clears the override).
+     * Pass `workspaceId` for a workspace override, `orgId` for the organization default.
+     */
+    setRetention(target: { orgId: string } | { workspaceId?: string }, retainDocumentVersions: number | null, requestOptions?: RequestOptions): Promise<JsonObject> {
+      if (retainDocumentVersions !== null && (!Number.isInteger(retainDocumentVersions) || retainDocumentVersions < 1 || retainDocumentVersions > 100)) {
+        throw new RangeError("retainDocumentVersions must be an integer from 1 to 100 (or null to clear).");
+      }
+      const path = "orgId" in target ? `/v1/organizations/${encodeURIComponent(target.orgId)}` : wsPath(target.workspaceId);
+      return request<JsonObject>(path, jsonRequest("PATCH", { retainDocumentVersions }), requestOptions);
     },
 
     getWorkspaceState(id: string | undefined = workspaceId, options: WorkspaceStateOptions = {}): Promise<WorkspaceState> {
@@ -1131,6 +1386,13 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
       if (input.runId) params.set("runId", input.runId);
       if (input.tags) params.set("tags", input.tags);
       return (await request<{ documents: DocumentRecord[] }>(`/v1/documents?${params.toString()}`, {}, requestOptions, true)).documents;
+
+    },
+
+    /** Every version of a document (newest first), including archived versions and purged tombstones. */
+    async listDocumentVersions(documentId: string, requestOptions?: RequestOptions): Promise<DocumentVersionEntry[]> {
+      const body = await request<{ versions: DocumentVersionEntry[] }>(`/v1/documents/${encodeURIComponent(documentId)}/versions`, {}, requestOptions, true);
+      return body.versions;
     },
 
     /**
@@ -1145,6 +1407,9 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
     uploadUrls,
     /** @deprecated Use upload({ urls }) or uploadUrls(). */
     ingestUrls: uploadUrls,
+    async listWorkspaceTags(id: string = workspaceId ?? "default", options?: RequestOptions): Promise<Array<{ tag: string; documentCount: number }>> {
+      return (await request<{ tags: Array<{ tag: string; documentCount: number }> }>(`/v1/workspaces/${encodeURIComponent(id)}/tags`, {}, options, true)).tags;
+    },
     async listWorkspaces(options?: RequestOptions): Promise<WorkspaceRecord[]> {
       return (await request<{ workspaces: WorkspaceRecord[] }>("/v1/workspaces", {}, options, true)).workspaces;
     },
@@ -1170,6 +1435,28 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
     search,
 
     upload,
+
+    /** Mints a sealed `X-DocSlurp-Capability` token a browser can use; needs a server key. */
+    createCapability(input: CreateCapabilityInput = {}, requestOptions?: RequestOptions): Promise<{ token: string; expiresAt: string } & JsonObject> {
+      return request("/v1/capabilities", jsonRequest("POST", input), requestOptions);
+    },
+
+    /** Indexes every unindexed page of a workspace (or the given documents) in the background. */
+    fullIndex(input: { workspaceId?: string; documentIds?: string[] } = {}, requestOptions?: RequestOptions): Promise<FullIndexResponse> {
+      const id = input.workspaceId?.trim() || workspaceId;
+      return request<FullIndexResponse>(`/v1/workspaces/${encodeURIComponent(id)}/full-index`, jsonRequest("POST", { documentIds: input.documentIds }), requestOptions);
+    },
+
+    /** Indexes one document in full. */
+    fullIndexDocument(documentId: string, requestOptions?: RequestOptions): Promise<FullIndexResponse> {
+      return request<FullIndexResponse>(`/v1/documents/${encodeURIComponent(documentId)}/full-index`, { method: "POST" }, requestOptions);
+    },
+
+    estimateIndexingMode,
+    /** Alias of {@link estimateIndexingMode}. */
+    setIndexingModeEstimate(mode: IndexingMode, input: { workspaceId?: string } = {}, requestOptions?: RequestOptions) {
+      return estimateIndexingMode(mode, input, requestOptions);
+    },
   };
 }
 

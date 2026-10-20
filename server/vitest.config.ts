@@ -21,6 +21,7 @@ export default defineConfig({
       "@docslurp/shared/file-token-path": shared("file-token-path"),
       "@docslurp/shared/observability": shared("observability"),
       "@docslurp/shared/lancedb-s3-trace": shared("lancedb-s3-trace"),
+      "@docslurp/shared/lancedb-session": shared("lancedb-session"),
       "@docslurp/shared/lancedb-ddb": shared("lancedb-ddb"),
       "@docslurp/shared/temporal-connection": shared("temporal-connection"),
       "@docslurp/shared/temporal-security": shared("temporal-security"),

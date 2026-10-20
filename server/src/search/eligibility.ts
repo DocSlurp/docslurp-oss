@@ -28,6 +28,9 @@ import { effectiveFleetCapabilitiesSync } from "../services/worker-fleet.js";
 /** Statuses a pipeline never serves from, even with materialized chunks. */
 const UNSERVABLE_STATUSES = sql`('completed', 'failed', 'cancelled', 'pii_blocked')`;
 
+/** Statuses that can never be served, whatever else is materialized. */
+const TERMINAL_UNSEARCHABLE_STATUSES = sql`('failed', 'cancelled', 'pii_blocked')`;
+
 function truthy(value: string): boolean | null {
   const normalized = value.trim().toLowerCase();
   if (["1", "true", "on", "yes"].includes(normalized)) return true;
@@ -134,4 +137,17 @@ export function lexicalSearchableDocument(
 ): SqlFragment {
   if (!enabled) return fullyIndexedDocument(alias);
   return sql`(${fullyIndexedDocument(alias)} or ${earlyLexicalDocument(alias, true)})`;
+}
+
+/**
+ * A document deferred indexing may locate pages in or materialize pages of:
+ * current, not purged, and not terminal-unsearchable. Materializing spends
+ * credits, so it must never target a document search could not serve.
+ */
+export function deferredCandidateDocument(alias: DocumentAlias = "d"): SqlFragment {
+  return sql`(
+    ${column(alias, "superseded_at")} is null
+    and ${column(alias, "purged_at")} is null
+    and coalesce(${column(alias, "status")}, '') not in ${TERMINAL_UNSEARCHABLE_STATUSES}
+  )`;
 }

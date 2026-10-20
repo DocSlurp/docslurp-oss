@@ -12,7 +12,9 @@ const keySecurity = [{ bearerAuth: [] }];
 const scopedQuery = z.toJSONSchema(searchInputSchema);
 const minScoreDescription = "Relevance floor, 0..1: drop results whose raw match strength is lower, and report noMatch when none remain. 0 disables it. Omitted: the workspace's retrieval default, else SEARCH_MIN_SCORE (0.1).";
 const workspaceRef = { type: "string", description: "Workspace slug, former slug, UUID, or \"default\". Omitted: the organization default workspace." };
+const uploadTags = { type: "array", maxItems: 24, items: { type: "string", minLength: 1, maxLength: 100 }, description: "Case-sensitive document labels; trimmed and deduplicated. Commas and NUL are not allowed. Applied to every accepted file." };
 const uploadTarget = {
+  tags: uploadTags,
   workspaceId: { ...workspaceRef, description: "Append to this workspace (slug, former slug, UUID, or \"default\"). Omitted without newWorkspace, workspaceName or templateKey: the organization default workspace." },
   newWorkspace: { type: "boolean", description: "Create a new self-titled workspace instead of using the default workspace. Multipart sends the string \"true\"." },
   workspaceName: { type: "string", description: "Create a new workspace with this name." },
@@ -130,12 +132,18 @@ export const simpleServiceSchemas = {
 };
 
 const canonicalServicePaths = {
+  "/v1/workspaces/{workspaceId}/tags": { get: {
+    tags: ["workspaces"], summary: "List workspace document tags", security: serviceSecurity,
+    description: "Lists distinct case-sensitive tags and document counts for current (non-superseded) documents, including pending uploads. Sorted by tag. Requires workspace access and an ingest, search, artifacts or workspaces:manage key scope.",
+    parameters: [{ in: "path", name: "workspaceId", required: true, schema: workspaceRef }],
+    responses: { "200": response("Workspace tags", { type: "object", properties: { tags: { type: "array", items: { type: "object", required: ["tag", "documentCount"], properties: { tag: { type: "string" }, documentCount: { type: "integer" } } } } } }), ...errors },
+  } },
   "/v1/uploads/bulk": { post: {
     tags: ["ingest"], summary: "Upload files into the default workspace, a chosen workspace, or a new one", security: serviceSecurity,
     description: "One buffered multipart request, capped at MAX_MULTIPART_UPLOAD_BYTES (25 MB by default; 413 code multipart_upload_too_large above it). Upload larger files with a direct upload session: POST /v1/uploads/direct/sessions, PUT to the returned URLs, then confirm.",
     parameters: [{ in: "header", name: "Idempotency-Key", schema: { type: "string" }, description: "Reuse only for identical uploads" }],
     requestBody: { required: true, content: { "multipart/form-data": { schema: { type: "object", required: ["files"], properties: {
-      files: { type: "array", minItems: 1, items: { type: "string", format: "binary" } }, ...uploadTarget, newWorkspace: { type: "string", enum: ["true"], description: uploadTarget.newWorkspace.description },
+      files: { type: "array", minItems: 1, items: { type: "string", format: "binary" } }, ...uploadTarget, tags: { type: "string", description: "JSON array of document tags, e.g. [\"finance\",\"FY26\"]. Up to 24 labels of 1–100 characters." }, newWorkspace: { type: "string", enum: ["true"], description: uploadTarget.newWorkspace.description },
     } } } } },
     responses: { "201": response("Accepted for asynchronous processing. Poll run progress before searching.", ref("UploadResponse")), ...errors },
   } },

@@ -12,6 +12,8 @@ import {
 } from "../lib/temporal.js";
 import { isMaintenanceSweepEnabled } from "./maintenance-sweeper.js";
 import { sweepInterruptedRunCreations } from "./run-creation.js";
+import { resumeBlockedRuns } from "./blocked-runs.js";
+import { pruneDrainedIndexConfigs } from "../search/index-serving.js";
 import { runLifecycle, type RunLifecycle } from "./run-lifecycle.js";
 import { sweepStaleQueuedRuns } from "./stale-queued-runs.js";
 
@@ -78,6 +80,7 @@ export function createRunStartRecovery(deps: {
         from workspace_runs
         where status = 'queued'
           and workflow_started_at is null
+          and kind <> 'materialize'
           and coalesce(control_state, '') not in ('paused', 'pause_requested', 'cancelled', 'cancel_requested', 'dead-letter')
           and creation_ready_at is not null
           and (
@@ -110,6 +113,14 @@ export function createRunStartRecovery(deps: {
 
   async function sweepOnce(options: { ignoreBackoff?: boolean } = {}): Promise<RunStartRecoveryPass> {
     await sweepInterruptedRunCreations(sql);
+    // Blocked config-change jobs become queued once their org can spend; the claim below starts them.
+    await resumeBlockedRuns({ sql }).catch((error: unknown) => {
+      console.error(`[run-start-recovery] blocked-run resume failed: ${error instanceof Error ? error.message : String(error)}`);
+    });
+    // Re-index runs that finished leave index configs no document uses; drop them from the serving map.
+    await pruneDrainedIndexConfigs(sql).catch((error: unknown) => {
+      console.error(`[run-start-recovery] index-config prune failed: ${error instanceof Error ? error.message : String(error)}`);
+    });
     const rows = await claimDue(options.ignoreBackoff === true);
     const pass: RunStartRecoveryPass = { claimed: rows.length, started: 0, deferred: 0, failed: 0 };
     for (let index = 0; index < rows.length; index += 1) {

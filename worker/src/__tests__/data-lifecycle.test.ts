@@ -97,6 +97,7 @@ function fakeExternalStores(keys: string[], vectorRows: Record<string, string[]>
     lancedbRoot: "/tmp/lance",
     deleteVectorRows,
     dropVectorTable,
+    billingEnforced: true,
   };
   return { objects, tables, vectorDeleteCalls, storage, options };
 }

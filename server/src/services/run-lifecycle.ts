@@ -120,7 +120,8 @@ export function planRunControlUpdate(
 
   if (input.action === "resume") {
     return {
-      status: run.controlState === "paused" ? "queued" : run.status,
+      // A blocked run stays blocked: spend admission (the recovery sweeper) decides when it starts.
+      status: run.controlState === "paused" && run.status !== "blocked" ? "queued" : run.status,
       controlState: null,
       controlRequestedAt: null,
       error: run.controlState === "paused" ? null : undefined,
@@ -129,7 +130,7 @@ export function planRunControlUpdate(
   }
 
   if (input.action === "pause") {
-    const immediate = run.status === "queued" || run.controlState === "paused";
+    const immediate = run.status === "queued" || run.status === "blocked" || run.controlState === "paused";
     return {
       status: run.status,
       controlState: immediate ? "paused" : "pause_requested",
@@ -138,7 +139,7 @@ export function planRunControlUpdate(
     };
   }
 
-  const immediate = run.status === "queued" || run.controlState === "paused";
+  const immediate = run.status === "queued" || run.status === "blocked" || run.controlState === "paused";
   return {
     status: immediate ? "failed" : run.status,
     controlState: immediate ? "cancelled" : "cancel_requested",

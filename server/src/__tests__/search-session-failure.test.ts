@@ -11,7 +11,7 @@ const { createSearchSessionJournal } = await import("../search/session.js");
 function fixture() {
   const session = createSearchSessionJournal({ rootSessionId: "failed-search", scope: { workspaceId: "workspace", orgId: "organization" } });
   const adapters = { buildAvailability: vi.fn(), completedPageSearch: vi.fn(), progressivePageSearch: vi.fn(), vectorSearch: vi.fn(), textSearch: vi.fn(), graphNeighborSearch: vi.fn(), communitySummarySearch: vi.fn(), runSearch: vi.fn(), wholeCorpusFallback: vi.fn() };
-  const setup = { session, normalizedScope: { workspaceId: "workspace", orgId: "organization" }, workspaceSettings: defaultWorkspaceSearchSettings, openRouterApiKey: undefined, availabilityRow: undefined, resolvedOptions: {}, workspacePipeline: normalizePipelineFeatures({ embedding: { profile: "cheapest-hosted", target: "hosted", modelUri: "llm://deepinfra/BAAI/bge-m3" } }), privacyMode: "standard" as const };
+  const setup = { session, normalizedScope: { workspaceId: "workspace", orgId: "organization" }, workspaceSettings: defaultWorkspaceSearchSettings, openRouterApiKey: undefined, availabilityRow: undefined, resolvedOptions: {}, indexConfigs: {}, workspacePipeline: normalizePipelineFeatures({ embedding: { profile: "cheapest-hosted", target: "hosted", modelUri: "llm://deepinfra/BAAI/bge-m3" } }), privacyMode: "standard" as const };
   return { query: "Generic evidence question", userId: "user", options: {}, setup, adapters };
 }
 const usageWrites = () => mocks.sql.mock.calls.filter(([parts]) => Array.isArray(parts) && parts.join(" ").includes("insert into usage_events"));

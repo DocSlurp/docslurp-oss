@@ -1,3 +1,5 @@
+import { normalizeSourcePath } from "@docslurp/shared";
+
 export const MAX_CANONICAL_ID_LENGTH = 2048;
 
 export class InvalidCanonicalIdError extends Error {}
@@ -76,4 +78,51 @@ export function canonicalIdsForFiles(
     return filenames.map((name) => normalizeCanonicalId(byName[name]));
   }
   throw new InvalidCanonicalIdError("canonicalIds must be an array or an object keyed by filename");
+}
+
+/**
+ * Folder path of an upload inside its source (drag-and-drop folder, zip entry, CLI `--path`). Rejects `..`
+ * segments and over-long values; keeps the caller's casing for display (the version key case-folds it).
+ */
+export function normalizeUploadPath(value: unknown): string {
+  if (value === undefined || value === null || value === "") return "";
+  if (typeof value !== "string") throw new InvalidCanonicalIdError("path must be a string");
+  try {
+    normalizeSourcePath(value); // throws on '..' segments and length > 1024
+  } catch (error) {
+    throw new InvalidCanonicalIdError(error instanceof Error ? error.message : "Invalid path");
+  }
+  return value
+    .replace(/\\/g, "/")
+    .normalize("NFC")
+    .replace(/\/{2,}/g, "/")
+    .replace(/^[/ \t\r\n]+|[/ \t\r\n]+$/g, "");
+}
+
+/**
+ * Multipart uploads carry folder paths as one `path` (single file), repeated `path` fields in file order,
+ * or a `paths` JSON array aligned with the files.
+ */
+export function sourcePathsForFiles(count: number, fields: { path?: unknown; paths?: unknown }): string[] {
+  if (Array.isArray(fields.path)) {
+    if (fields.path.length !== count) throw new InvalidCanonicalIdError("Repeated path fields must match the number of files");
+    return fields.path.map(normalizeUploadPath);
+  }
+  if (fields.path !== undefined && fields.path !== "") {
+    if (count !== 1) throw new InvalidCanonicalIdError("path applies to a single file; use paths for several files");
+    return [normalizeUploadPath(fields.path)];
+  }
+  if (fields.paths === undefined || fields.paths === "") return Array.from({ length: count }, () => "");
+  let parsed: unknown = fields.paths;
+  if (typeof parsed === "string") {
+    try {
+      parsed = JSON.parse(parsed);
+    } catch {
+      throw new InvalidCanonicalIdError("paths must be valid JSON");
+    }
+  }
+  if (!Array.isArray(parsed) || parsed.length !== count) {
+    throw new InvalidCanonicalIdError("paths must be an array with one entry per file");
+  }
+  return parsed.map(normalizeUploadPath);
 }

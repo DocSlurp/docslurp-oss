@@ -1,4 +1,6 @@
 import { z } from "zod";
+import { documentTagsSchema } from "./document-tags.js";
+import { indexingModeSchema } from "./deferred-indexing.js";
 import {
   defaultPipelineFeatures,
   mergePipelineFeatures,
@@ -86,6 +88,18 @@ export const workspaceSchema = z.object({
   pendingDocumentCount: z.number().int().nonnegative().default(0),
   /** Known pages across in-flight documents; 0 until a parser reports page counts. */
   pendingPageCount: z.number().int().nonnegative().default(0),
+  /** Mode new uploads use (`pipeline.indexingMode`; always `full` while deferred profiles are off). */
+  indexingMode: indexingModeSchema.optional(),
+  /** Searchable pages: indexed pages of deferred documents plus all pages of full-mode documents. */
+  indexedPageCount: z.number().int().nonnegative().optional(),
+  /** False when DOCSLURP_DEFERRED_PROFILES is off; clients hide indexing controls. */
+  deferredIndexingAvailable: z.boolean().optional(),
+  /** False on deployments that do not bill (self-hosted without Stripe): estimates are not prices. */
+  billingEnforced: z.boolean().optional(),
+  /** Retained versions per document for this workspace; null inherits the organization's setting. */
+  retainDocumentVersions: z.number().int().min(1).max(100).nullable().default(null),
+  /** Skip the confirm dialog for re-index-queuing changes; recommended changes re-index when `apply` is omitted. */
+  autoConfirmReindex: z.boolean().default(false),
   runCount: z.number().int().nonnegative().default(0),
   searchSessionCount: z.number().int().nonnegative().default(0),
   chatThreadCount: z.number().int().nonnegative().default(0),
@@ -170,6 +184,9 @@ export const organizationSchema = z.object({
   createdByUserId: z.string().nullable(),
   creditBalanceCents: z.number().default(0),
   memberRole: organizationRoleSchema,
+  planId: z.string().nullable().default(null),
+  /** Versions kept per document chain on paid plans; null uses the plan default. */
+  retainDocumentVersions: z.number().int().min(1).max(100).nullable().default(null),
   createdAt: z.string(),
   updatedAt: z.string(),
 });
@@ -457,7 +474,7 @@ const isoDateSchema = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "Use YYYY-MM-DD");
 export const chatSearchFiltersSchema = z.object({
   documentIds: z.array(z.string().trim().min(1).max(200)).max(50).optional(),
   mimeTypes: z.array(z.string().trim().min(1).max(200)).max(24).optional(),
-  tags: z.array(z.string().trim().min(1).max(100)).max(24).optional(),
+  tags: documentTagsSchema.optional(),
   /** Indexed on or after this day (UTC). */
   dateFrom: isoDateSchema.optional(),
   /** Indexed on or before this day (UTC). */
@@ -648,6 +665,8 @@ export const uploadRequestSchema = z.object({
   userId: z.string().min(1),
   filenames: z.array(z.string()).min(1),
   pipeline: pipelineFeaturesSchema.default(defaultPipelineFeatures),
+  /** Per-upload indexing mode; stamps the documents (ignored as `full` while deferred profiles are off). */
+  indexingMode: indexingModeSchema.optional(),
 });
 export type UploadRequest = z.infer<typeof uploadRequestSchema>;
 
@@ -689,6 +708,15 @@ export const updateWorkspaceSchema = z.object({
   artifactRetentionDays: z.number().int().min(0).max(3650).nullable().optional(),
   /** Null (or 0) keeps runs indefinitely. */
   runRetentionDays: z.number().int().min(0).max(3650).nullable().optional(),
+  /**
+   * What to do with existing documents when the change affects them. A required re-index always queues;
+   * a recommended one re-indexes on "reindex" (or when omitted and `autoConfirmReindex` is on).
+   */
+  apply: z.enum(["new-uploads", "reindex"]).optional(),
+  /** Skip the confirm dialog for re-index-queuing changes; also the default `apply` for recommended changes. */
+  autoConfirmReindex: z.boolean().optional(),
+  /** Versions kept per document chain (paid plans); null inherits the organization setting. */
+  retainDocumentVersions: z.number().int().min(1).max(100).nullable().optional(),
 });
 export type UpdateWorkspaceInput = z.infer<typeof updateWorkspaceSchema>;
 

@@ -1,4 +1,4 @@
-import { publicDiagnostics, publicDocumentError } from "@docslurp/shared";
+import { deferredProfilesEnabled, isBillingEnforced, PUBLIC_ERROR_MESSAGES, publicDiagnostics, publicDocumentError } from "@docslurp/shared";
 import { refineWorkspaceNames } from "./workspace-naming.js";
 import { jsonRecord } from "../lib/json-record.js";
 import { randomUUID } from "node:crypto";
@@ -26,6 +26,12 @@ import {
 } from "@docslurp/shared";
 
 import { sql } from "../db.js";
+import {
+  defaultIndexingModeForOrg,
+  effectiveIndexingMode,
+  validateModeChoice,
+  validateModeSwitch,
+} from "./workspace-indexing-mode.js";
 import { buildRunProgressSnapshot, withRunCosts } from "./runs.js";
 import {
   canEditWorkspace,
@@ -59,8 +65,11 @@ type WorkspaceRow = {
   monthly_budget_cents: number | null;
   artifact_retention_days?: number | null;
   run_retention_days?: number | null;
+  retain_document_versions?: number | null;
+  auto_confirm_reindex?: boolean | null;
   document_count: number;
   total_page_count: number;
+  indexed_page_count?: number | null;
   source_bytes?: number | string | null;
   pending_document_count?: number | null;
   pending_page_count?: number | null;
@@ -273,12 +282,21 @@ function mapWorkspace(row: WorkspaceRow): WorkspaceRecord {
     name: row.name,
     templateKey: parseWorkspaceTemplateKey(row.template_key),
     systemPrompt: row.system_prompt ?? null,
-    pipeline: normalizePipelineFeatures(row.pipeline ?? defaultPipelineFeatures),
+    pipeline: {
+      ...normalizePipelineFeatures(row.pipeline ?? defaultPipelineFeatures),
+      indexingMode: effectiveIndexingMode(row.pipeline?.indexingMode),
+    },
     monthlyBudgetCents: row.monthly_budget_cents ?? null,
     artifactRetentionDays: row.artifact_retention_days ?? null,
     runRetentionDays: row.run_retention_days ?? null,
+    retainDocumentVersions: row.retain_document_versions ?? null,
+    autoConfirmReindex: row.auto_confirm_reindex ?? false,
     documentCount: row.document_count ?? 0,
     totalPageCount: row.total_page_count ?? 0,
+    indexingMode: effectiveIndexingMode(row.pipeline?.indexingMode),
+    indexedPageCount: row.indexed_page_count ?? row.total_page_count ?? 0,
+    deferredIndexingAvailable: deferredProfilesEnabled(),
+    billingEnforced: isBillingEnforced(),
     sourceBytes: Number(row.source_bytes ?? 0),
     pendingDocumentCount: row.pending_document_count ?? 0,
     pendingPageCount: row.pending_page_count ?? 0,
@@ -349,6 +367,14 @@ export async function createWorkspace(input: CreateWorkspaceInput): Promise<Work
     throw new Error("Organization not found");
   }
 
+  // Plan default unless the caller chose a mode; coerced to full while the flag is off.
+  const requestedMode = (input.pipeline as { indexingMode?: PipelineFeatures["indexingMode"] } | undefined)?.indexingMode;
+  pipeline.indexingMode = effectiveIndexingMode(requestedMode ?? (await defaultIndexingModeForOrg(organization.id)));
+  // An explicit choice goes through the same gates as a switch (visual privacy, full needs credits).
+  if (requestedMode !== undefined && deferredProfilesEnabled()) {
+    await validateModeChoice({ orgId: organization.id, workspaceId: null, currentMode: null, nextPipeline: pipeline });
+  }
+
   const [row] = await sql<WorkspaceRow[]>`
     insert into workspaces (id, org_id, user_id, name, template_key, system_prompt, pipeline)
     values (
@@ -370,6 +396,7 @@ export async function createWorkspace(input: CreateWorkspaceInput): Promise<Work
       pipeline,
       0::int as document_count,
       0::int as total_page_count,
+      0::int as indexed_page_count,
       0::double precision as source_bytes,
       0::int as pending_document_count,
       0::int as pending_page_count,
@@ -457,6 +484,23 @@ export async function ensureDefaultWorkspace(args: {
 }
 
 /**
+ * Read-only lookup of the organization's default workspace (personal org when `orgId` is omitted). Unlike
+ * `ensureDefaultWorkspace` it creates nothing: null when the org, membership or default workspace is missing.
+ */
+export async function findDefaultWorkspace(args: { userId: string; orgId?: string | null }): Promise<WorkspaceRecord | null> {
+  const [row] = await sql<{ id: string }[]>`
+    select w.id
+    from workspaces w
+    join org_memberships om on om.org_id = w.org_id and om.user_id = ${args.userId}
+    join organizations o on o.id = w.org_id
+    where w.is_default
+      ${args.orgId ? sql`and w.org_id = ${args.orgId}` : sql`and o.personal_owner_user_id = ${args.userId}`}
+    limit 1
+  `;
+  return row ? await getWorkspace(row.id, args.userId) : null;
+}
+
+/**
  * Makes sure a dashboard user's personal organization and its default
  * workspace exist, without loading the workspace. Organizations created after
  * this get their default workspace at creation; this covers users who have
@@ -486,8 +530,11 @@ export async function getWorkspace(workspaceId: string, userId: string): Promise
       w.monthly_budget_cents,
       w.artifact_retention_days,
       w.run_retention_days,
+      w.retain_document_versions,
+      w.auto_confirm_reindex,
       coalesce(cs.document_count, 0)::int as document_count,
       coalesce(cs.page_count, 0)::int as total_page_count,
+      greatest(coalesce(cs.page_count, 0)::int - coalesce(idx.unindexed_pages, 0), 0)::int as indexed_page_count,
       coalesce(cs.source_bytes, 0)::double precision as source_bytes,
       coalesce(inflight.document_count, 0)::int as pending_document_count,
       coalesce(inflight.page_count, 0)::int as pending_page_count,
@@ -533,6 +580,18 @@ export async function getWorkspace(workspaceId: string, userId: string): Promise
     from workspaces w
     -- Current corpus totals are trigger-maintained; never aggregate documents here.
     left join workspace_corpus_stats cs on cs.workspace_id = w.id
+    -- Searchable pages: only deferred documents can be partly indexed (skipped while the flag is off).
+    left join lateral (
+      select coalesce(sum(greatest(d.page_count - coalesce(ps.indexed, 0), 0)), 0)::int as unindexed_pages
+      from documents d
+      left join lateral (
+        select count(*)::int as indexed from document_page_states s
+        where s.document_id = d.id and s.state in ('indexed', 'blocked-pii')
+      ) ps on true
+      where ${deferredProfilesEnabled()}::boolean
+        and d.workspace_id = w.id and d.indexing_mode <> 'full'
+        and d.status = 'completed' and d.superseded_at is null
+    ) idx on true
     -- In-flight ingest reads only the documents_workspace_in_flight_idx partial index.
     left join lateral (
       select count(*)::int as document_count,
@@ -579,8 +638,11 @@ export async function listWorkspaces(userId: string, options: { refineNames?: bo
       w.monthly_budget_cents,
       w.artifact_retention_days,
       w.run_retention_days,
+      w.retain_document_versions,
+      w.auto_confirm_reindex,
       coalesce(cs.document_count, 0)::int as document_count,
       coalesce(cs.page_count, 0)::int as total_page_count,
+      greatest(coalesce(cs.page_count, 0)::int - coalesce(idx.unindexed_pages, 0), 0)::int as indexed_page_count,
       coalesce(cs.source_bytes, 0)::double precision as source_bytes,
       coalesce(inflight.document_count, 0)::int as pending_document_count,
       coalesce(inflight.page_count, 0)::int as pending_page_count,
@@ -626,6 +688,18 @@ export async function listWorkspaces(userId: string, options: { refineNames?: bo
     from workspaces w
     -- Current corpus totals are trigger-maintained; never aggregate documents here.
     left join workspace_corpus_stats cs on cs.workspace_id = w.id
+    -- Searchable pages: only deferred documents can be partly indexed (skipped while the flag is off).
+    left join lateral (
+      select coalesce(sum(greatest(d.page_count - coalesce(ps.indexed, 0), 0)), 0)::int as unindexed_pages
+      from documents d
+      left join lateral (
+        select count(*)::int as indexed from document_page_states s
+        where s.document_id = d.id and s.state in ('indexed', 'blocked-pii')
+      ) ps on true
+      where ${deferredProfilesEnabled()}::boolean
+        and d.workspace_id = w.id and d.indexing_mode <> 'full'
+        and d.status = 'completed' and d.superseded_at is null
+    ) idx on true
     -- In-flight ingest reads only the documents_workspace_in_flight_idx partial index.
     left join lateral (
       select count(*)::int as document_count,
@@ -752,18 +826,29 @@ export async function listWorkspaceBoardRecords(userId: string): Promise<Workspa
   });
 }
 
-export async function updateWorkspace(
-  workspaceId: string,
-  userId: string,
-  input: UpdateWorkspaceInput
-): Promise<WorkspaceRecord | null> {
-  const parsed = updateWorkspaceSchema.parse(input);
-  const access = await getWorkspaceAccess(workspaceId, userId);
-  const current = await getWorkspace(workspaceId, userId);
-  if (!current || !access || !canEditWorkspace(access, userId)) {
-    return null;
-  }
+type WorkspaceSqlClient = typeof sql;
 
+export type WorkspaceUpdateOptions = {
+  indexingMode?: PipelineFeatures["indexingMode"];
+  /** Run the write on this transaction client (config-change jobs save the config and create runs atomically). */
+  client?: WorkspaceSqlClient;
+  /**
+   * Already-resolved inputs (access checked, pipeline resolved), so a write inside a transaction does not
+   * issue reads on other connections (the caller also validates any indexing-mode switch). With `client` the returned record is `current`, not re-read.
+   */
+  precomputed?: { current: WorkspaceRecord; pipeline: PipelineFeatures };
+};
+
+/**
+ * The pipeline an update would store (template locks applied, indexing mode resolved) without writing
+ * anything. Estimates and the mutation share it so they classify the same change.
+ */
+export async function resolveUpdatedPipeline(
+  workspaceId: string,
+  current: WorkspaceRecord,
+  parsed: UpdateWorkspaceInput,
+  options: Pick<WorkspaceUpdateOptions, "indexingMode"> = {},
+): Promise<PipelineFeatures> {
   const template = parsed.templateKey !== undefined
     ? getWorkspaceTemplate(parsed.templateKey)
     : getWorkspaceTemplate(current.templateKey);
@@ -775,6 +860,41 @@ export async function updateWorkspace(
         : current.pipeline),
   );
   const pipeline = applyWorkspaceTemplateLocks(draftPipeline, template);
+  // The schema defaults a missing indexingMode to "full", so a pipeline edit must not
+  // flip the mode: only an explicit request (options) changes it. Flag off pins "full".
+  // With the flag off the stored raw mode is preserved (only the effective mode is coerced).
+  const [storedRow] = await sql<{ mode: PipelineFeatures["indexingMode"] | null }[]>`
+    select pipeline ->> 'indexingMode' as mode from workspaces where id = ${workspaceId}
+  `;
+  const storedMode = storedRow?.mode ?? "full";
+  pipeline.indexingMode = deferredProfilesEnabled() ? (options.indexingMode ?? storedMode) : storedMode;
+  return pipeline;
+}
+
+export async function updateWorkspace(
+  workspaceId: string,
+  userId: string,
+  input: UpdateWorkspaceInput,
+  options: WorkspaceUpdateOptions = {},
+): Promise<WorkspaceRecord | null> {
+  const parsed = updateWorkspaceSchema.parse(input);
+  let current: WorkspaceRecord;
+  let pipeline: PipelineFeatures;
+  if (options.precomputed) {
+    ({ current, pipeline } = options.precomputed);
+  } else {
+    const access = await getWorkspaceAccess(workspaceId, userId);
+    const loaded = await getWorkspace(workspaceId, userId);
+    if (!loaded || !access || !canEditWorkspace(access, userId)) {
+      return null;
+    }
+    current = loaded;
+    pipeline = await resolveUpdatedPipeline(workspaceId, current, parsed, options);
+  }
+  // With precomputed inputs the caller already validated the switch (this may run inside its transaction).
+  if (!options.precomputed && deferredProfilesEnabled() && pipeline.indexingMode !== current.pipeline.indexingMode) {
+    await validateModeSwitch({ current, nextPipeline: pipeline });
+  }
 
   const nextSlug = parsed.slug === undefined ? current.slug : parsed.slug.toLowerCase();
   if (nextSlug !== current.slug) {
@@ -791,8 +911,11 @@ export async function updateWorkspace(
     value === undefined ? fallback : value === null || value === 0 ? null : value;
   const nextArtifactRetention = retention(parsed.artifactRetentionDays, current.artifactRetentionDays);
   const nextRunRetention = retention(parsed.runRetentionDays, current.runRetentionDays);
+  const nextRetainVersions = parsed.retainDocumentVersions === undefined ? current.retainDocumentVersions ?? null : parsed.retainDocumentVersions;
+  const nextAutoConfirm = parsed.autoConfirmReindex ?? current.autoConfirmReindex ?? false;
+  const client = options.client ?? sql;
 
-  await sql`
+  await client`
     with current_month_spend as (
       select coalesce(sum(au.cost_cents), 0)::double precision as spend_cents
       from ${attributedUsage("month")} au
@@ -808,6 +931,8 @@ export async function updateWorkspace(
       monthly_budget_cents = ${nextBudget},
       artifact_retention_days = ${nextArtifactRetention},
       run_retention_days = ${nextRunRetention},
+      retain_document_versions = ${nextRetainVersions},
+      auto_confirm_reindex = ${nextAutoConfirm},
       budget_paused = case
         when ${nextBudget}::integer is null then false
         when (select spend_cents from current_month_spend) < ${nextBudget} then false
@@ -823,7 +948,7 @@ export async function updateWorkspace(
     throw error;
   });
 
-  return await getWorkspace(workspaceId, userId);
+  return options.client ? current : await getWorkspace(workspaceId, userId);
 }
 
 async function mutateWorkspaceArchiveState(args: {
@@ -1064,10 +1189,10 @@ export async function getWorkspaceCockpit(
         where d.workspace_id = w.id
           and d.status not in ('completed', 'failed', 'cancelled', 'pii_blocked')
       ), 0) as active_documents,
+      -- documents.chunk_count is trigger-maintained (migration 0063).
       coalesce((
-        select count(*)::int
-        from document_chunks c
-        join documents docs on docs.id = c.document_id
+        select sum(docs.chunk_count)::int
+        from documents docs
         where docs.workspace_id = w.id
           and docs.status = 'completed'
           and docs.superseded_at is null
@@ -1105,7 +1230,7 @@ export async function getWorkspaceCockpit(
   const [runSummaryRow] = await sql<Array<Record<string, number>>>`
     select
       coalesce(count(*)::int, 0) as total_runs,
-      coalesce(count(*) filter (where status = 'queued')::int, 0) as queued_runs,
+      coalesce(count(*) filter (where status = 'queued' and kind <> 'materialize')::int, 0) as queued_runs,
       coalesce(count(*) filter (where status = 'processing')::int, 0) as processing_runs,
       coalesce(count(*) filter (where status = 'completed')::int, 0) as completed_runs,
       coalesce(count(*) filter (where status = 'failed')::int, 0) as failed_runs,
