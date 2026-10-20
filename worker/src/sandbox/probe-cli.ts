@@ -2,7 +2,7 @@ import { constants, accessSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
-import { checkParserBinaries } from "./binary-check.js";
+import { checkSandboxParserBinaries } from "./binary-check.js";
 import { initializeParserSandbox } from "./startup.js";
 import { buildSandboxCommand, resolveVenvBin } from "../tools/runner.js";
 import { resolveScriptsDir } from "../tools/scripts-dir.js";
@@ -44,13 +44,11 @@ async function main(): Promise<number> {
     process.stdout.write(`${message.startsWith(PROBE_PREFIX) ? message.slice(PROBE_PREFIX.length) : message}\n`);
     return 1;
   }
-  const { provider, config } = initialized;
-
   const venvBin = resolveVenvBin(process.env.PYTHON_VENV);
   const scriptsDir = resolveScriptsDir();
-  const session = await provider.openSession(config, { activityId: "sandbox-probe-cli" });
-  const result = await checkParserBinaries({
-    session,
+  const result = await checkSandboxParserBinaries({
+    sandbox: initialized,
+    activityId: "sandbox-probe-cli",
     resolveBinary: (name) => findOnPath(name, venvBin),
     buildCommand: (binary, args) =>
       buildSandboxCommand({
@@ -67,7 +65,7 @@ async function main(): Promise<number> {
     return 2;
   }
   if (result.remote) process.stdout.write("parser binary checks skipped: remote provider\n");
-  process.stdout.write(`ok ${provider.id}\n`);
+  process.stdout.write(`ok ${initialized.provider.id}\n`);
   return 0;
 }
 

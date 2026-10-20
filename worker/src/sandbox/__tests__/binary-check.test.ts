@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { checkParserBinaries, PARSER_BINARY_CHECKS } from "../binary-check.js";
+import { checkParserBinaries, checkSandboxParserBinaries, PARSER_BINARY_CHECKS } from "../binary-check.js";
+import type { ParserSandboxProvider } from "../types.js";
 import type { SandboxCommand, SandboxResult, SandboxSession } from "../types.js";
 
 function fakeSession(
@@ -109,6 +110,33 @@ describe("checkParserBinaries", () => {
     const result = await checkParserBinaries({ session, resolveBinary: resolveAll, buildCommand });
     expect(result).toEqual({ failures: [], skipped: ["ffprobe", "ffmpeg", "pdftoppm", "pandoc"], remote: true });
     expect(run).not.toHaveBeenCalled();
+    expect(session.close).toHaveBeenCalledOnce();
+  });
+
+  it("never opens a session of a remote provider", async () => {
+    const openSession = vi.fn();
+    const isolation = { filesystem: true, network: "full", processes: true, location: "remote" } as const;
+    const result = await checkSandboxParserBinaries({
+      sandbox: { provider: { openSession } as unknown as ParserSandboxProvider, config: {}, isolation },
+      activityId: "probe",
+      resolveBinary: resolveAll,
+      buildCommand,
+    });
+    expect(result.remote).toBe(true);
+    expect(openSession).not.toHaveBeenCalled();
+  });
+
+  it("opens one session of a local provider and closes it", async () => {
+    const session = fakeSession("local", async () => ok);
+    const openSession = vi.fn(async () => session);
+    const result = await checkSandboxParserBinaries({
+      sandbox: { provider: { openSession } as unknown as ParserSandboxProvider, config: {}, isolation: session.isolation },
+      activityId: "probe",
+      resolveBinary: resolveAll,
+      buildCommand,
+    });
+    expect(result.failures).toEqual([]);
+    expect(openSession).toHaveBeenCalledWith({}, { activityId: "probe" });
     expect(session.close).toHaveBeenCalledOnce();
   });
 });

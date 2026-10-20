@@ -1,5 +1,6 @@
 import { execInSession } from "./exec.js";
 import { closeSandboxQuietly } from "./session-context.js";
+import type { InitializedParserSandbox } from "./startup.js";
 import type { SandboxCommand, SandboxSession } from "./types.js";
 
 /**
@@ -55,4 +56,24 @@ export async function checkParserBinaries(args: {
   } finally {
     await closeSandboxQuietly(() => session.close(), "activity=binary-check");
   }
+}
+
+/**
+ * Check the parser binaries inside a new session of an initialized sandbox. A remote
+ * provider is skipped before any session opens: its binaries live in its image, and
+ * opening one would create (and bill) a remote sandbox whose cold image pull can outlast
+ * the caller's timeout, only to skip every check.
+ */
+export async function checkSandboxParserBinaries(args: {
+  sandbox: Pick<InitializedParserSandbox, "provider" | "config" | "isolation">;
+  activityId: string;
+  resolveBinary: (name: string) => string | undefined;
+  buildCommand: (binary: string, args: string[]) => SandboxCommand;
+}): Promise<ParserBinaryCheckResult> {
+  const { provider, config, isolation } = args.sandbox;
+  if (isolation.location === "remote") {
+    return { failures: [], skipped: PARSER_BINARY_CHECKS.map(([name]) => name), remote: true };
+  }
+  const session = await provider.openSession(config, { activityId: args.activityId });
+  return checkParserBinaries({ session, resolveBinary: args.resolveBinary, buildCommand: args.buildCommand });
 }
