@@ -696,7 +696,7 @@ describe("workspacesRoutes validation", () => {
       credentials: "include",
       body: {
         sessionId: "session-1",
-        model: "fallback-model",
+        model: "anthropic/claude-haiku-5.5",
       },
       fetch: async (input, init) =>
         app.request(new Request(input, init as RequestInit)),
@@ -724,7 +724,7 @@ describe("workspacesRoutes validation", () => {
         userId: "demo-user",
         query: "What changed?",
         sessionId: "session-1",
-        model: "fallback-model",
+        model: "anthropic/claude-haiku-5.5",
         onTextDelta: expect.any(Function),
       }),
     );
@@ -791,7 +791,7 @@ describe("workspacesRoutes validation", () => {
           },
         ],
         sessionId: "session-1",
-        model: "fallback-model",
+        model: "anthropic/claude-haiku-5.5",
       }),
     });
 

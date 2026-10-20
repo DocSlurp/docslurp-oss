@@ -1,6 +1,89 @@
 import { dynamicTool, jsonSchema, type ToolSet } from "ai";
-import { CHAT_MAX_RETRIEVED_PASSAGES, searchResultSchema, type SearchResult, type WorkspaceSearchRetrievalDefaults } from "@docslurp/shared";
+import { CHAT_AGENT_LIMIT_DEFAULTS, CHAT_MAX_RETRIEVED_PASSAGES, searchResultSchema, type SearchResult, type WorkspaceSearchRetrievalDefaults } from "@docslurp/shared";
+import { startTelemetrySpan, type TelemetrySpan } from "@docslurp/shared/observability";
 import type { McpDispatch, McpManifest } from "../lib/mcp-http.js";
+import { runInChatAgentContext } from "../lib/chat-agent-context.js";
+
+/** Tool result returned once the turn's tool-call budget is spent; `code` lets callers tell it apart. */
+export const TOOL_CALL_LIMIT_RESULT = {
+  error: "Tool call limit reached. Summarize the results already obtained.",
+  code: "tool_call_limit",
+  limitReached: true,
+} as const;
+
+/**
+ * One tool call as reported in the response's `debug.toolCalls`. `queries` are
+ * the model's own search strings: fine for the caller's debug, never put on spans.
+ */
+export interface ChatToolCallDetail extends ChatToolActivity {
+  queries?: string[];
+  resultCount?: number;
+  zeroHit?: boolean;
+  /** Distinct pages of the evidence this call returned. */
+  evidencePages?: Array<{ documentId: string; pageNumber: number | null }>;
+  errorCode?: string;
+  /** Provider cost the tool reported for its own work (embeddings, rewrites, nested answers), USD cents. */
+  costCents?: number;
+}
+
+function modelQueries(supplied: Record<string, unknown>): string[] {
+  const items = Array.isArray(supplied.queries) ? supplied.queries : [supplied];
+  return items.slice(0, 20).map(item => item && typeof item === "object" ? (item as { q?: unknown }).q : undefined)
+    .filter((q): q is string => typeof q === "string").map(q => q.slice(0, 1000));
+}
+
+/** Provider cost (USD cents) a tool response reports for its own work: retrieval AI steps or a nested answer. */
+function reportedToolCostCents(result: unknown): number {
+  if (!result || typeof result !== "object") return 0;
+  const body = result as { usage?: { costCents?: unknown }; results?: unknown };
+  const own = typeof body.usage?.costCents === "number" && Number.isFinite(body.usage.costCents) ? body.usage.costCents : 0;
+  const batch = Array.isArray(body.results) ? body.results.reduce<number>((sum, item) => {
+    const cost = item && typeof item === "object" ? (item as { data?: { usage?: { costCents?: unknown } } }).data?.usage?.costCents : undefined;
+    return sum + (typeof cost === "number" && Number.isFinite(cost) ? cost : 0);
+  }, 0) : 0;
+  return own + batch;
+}
+
+function responseErrorCode(result: unknown, status: number): string {
+  const error = result && typeof result === "object" ? (result as { error?: unknown }).error : undefined;
+  const code = error && typeof error === "object" ? (error as { code?: unknown }).code : undefined;
+  return typeof code === "string" && /^[a-z0-9_]{1,64}$/i.test(code) ? code : `http_${status}`;
+}
+
+/** Retrieval shape of one search tool call: counts and scores only, never passage text. */
+export interface ChatSearchCallStats {
+  toolCallId: string;
+  ok: boolean;
+  /** Retrieval queries: 1 for `q`, the batch size for `queries`. */
+  queryCount: number;
+  /** Parallelism used for a batch (1 for a single query). */
+  concurrency: number;
+  resultCount: number;
+  topScore: number | null;
+  documentCount: number;
+  zeroHit: boolean;
+  searchSessionIds: string[];
+}
+
+function searchCallStats(toolCallId: string, ok: boolean, queryCount: number, concurrency: number, result: unknown): ChatSearchCallStats {
+  const responses: Array<{ results?: unknown; sessionId?: unknown }> = [];
+  const body = result && typeof result === "object" ? result as { results?: unknown; sessionId?: unknown } : {};
+  if (queryCount > 1 || (Array.isArray(body.results) && body.results.some(item => item && typeof item === "object" && "ok" in item))) {
+    for (const item of Array.isArray(body.results) ? body.results : []) {
+      const entry = item as { ok?: unknown; data?: { results?: unknown; sessionId?: unknown } };
+      if (entry?.ok === true && entry.data) responses.push(entry.data);
+    }
+  } else if (ok) responses.push(body);
+  const hits = responses.flatMap(response => Array.isArray(response.results) ? response.results as Array<{ score?: unknown; citation?: { documentId?: unknown } }> : []);
+  const scores = hits.map(hit => hit?.score).filter((score): score is number => typeof score === "number" && Number.isFinite(score));
+  const documents = new Set(hits.map(hit => hit?.citation?.documentId).filter((id): id is string => typeof id === "string"));
+  return {
+    toolCallId, ok, queryCount, concurrency, resultCount: hits.length,
+    topScore: scores.length ? Math.max(...scores) : null, documentCount: documents.size,
+    zeroHit: ok && hits.length === 0,
+    searchSessionIds: [...new Set(responses.map(response => response.sessionId).filter((id): id is string => typeof id === "string"))],
+  };
+}
 
 export interface ChatToolActivity {
   id: string;
@@ -29,9 +112,22 @@ export function createChatMcpTools(args: {
    * to a hosted model, so a workspace whose privacyMode forbids that is refused.
    */
   allowWorkspace?: (workspaceRef: string) => Promise<boolean>;
+  /** Tool calls allowed in this turn (default 12); later calls get TOOL_CALL_LIMIT_RESULT. */
+  maxToolCalls?: number;
+  /** Ceiling for a search batch's `concurrency`; also its value when the model omits it (default 4). */
+  searchConcurrency?: number;
+  /** Chat session that owns this turn; retrieval spans and search sessions link back to it. */
+  chatSessionId?: string;
+  /** Parent for the `execute_tool` spans (the agent span). */
+  traceParent?: TelemetrySpan;
 }) {
   const citations: SearchResult[] = [];
   const activity = new Map<string, ChatToolActivity>();
+  const searchCalls: ChatSearchCallStats[] = [];
+  const maxToolCalls = args.maxToolCalls ?? CHAT_AGENT_LIMIT_DEFAULTS.maxToolCalls;
+  const searchConcurrency = args.searchConcurrency ?? CHAT_AGENT_LIMIT_DEFAULTS.searchConcurrency;
+  const counters = { executed: 0, refused: 0, byTool: {} as Record<string, number>, toolCostCents: 0 };
+  const details = new Map<string, ChatToolCallDetail>();
   let calls = 0;
   const tools: ToolSet = {};
   const defaults = args.retrievalDefaults;
@@ -55,18 +151,19 @@ export function createChatMcpTools(args: {
     enableCommunityExpansion: defaults.enableCommunityExpansion, graphHops: defaults.graphHops,
   } : undefined;
 
-  function collectEvidence(value: unknown): void {
+  function collectEvidence(value: unknown, returned: SearchResult[]): void {
     if (!value || typeof value !== "object") return;
-    if (Array.isArray(value)) { value.forEach(collectEvidence); return; }
+    if (Array.isArray(value)) { for (const item of value) collectEvidence(item, returned); return; }
     const parsed = searchResultSchema.safeParse(value);
     if (parsed.success) {
       const item = parsed.data;
+      returned.push(item);
       if (citations.length < 80 && !citations.some(c => c.citation.documentId === item.citation.documentId
         && c.citation.chunkIndex === item.citation.chunkIndex && c.text === item.text)) citations.push(item);
       return;
     }
     const object = value as Record<string, unknown>;
-    for (const key of ["results", "citations", "data", "response"]) collectEvidence(object[key]);
+    for (const key of ["results", "citations", "data", "response"]) collectEvidence(object[key], returned);
   }
 
   for (const definition of args.manifest.capabilities.filter(item => item.category === "tool" && !CHAT_EXCLUDED_TOOLS.has(item.id))) {
@@ -78,9 +175,39 @@ export function createChatMcpTools(args: {
       inputSchema: jsonSchema(definition.inputSchema),
       execute: async (input, { toolCallId }) => {
         args.signal.throwIfAborted();
-        if (++calls > 12) return { error: "Tool call limit reached. Summarize the results already obtained." };
-        if (!input || typeof input !== "object" || Array.isArray(input)) return { error: "Expected object arguments" };
+        const span = startTelemetrySpan("docslurp.chat", `execute_tool ${definition.id}`, {
+          "gen_ai.operation.name": "execute_tool", "gen_ai.tool.name": definition.id,
+          "gen_ai.tool.call.id": toolCallId, "gen_ai.tool.type": "function",
+          ...(args.chatSessionId ? { "docslurp.chat.session_id": args.chatSessionId } : {}),
+          "docslurp.workspaceId": args.workspaceId,
+        }, { parent: args.traceParent });
+        const started = Date.now();
+        const detail = (fields: Omit<ChatToolCallDetail, "id" | "name" | "runtimeMs">) => {
+          details.set(toolCallId, { id: toolCallId, name: definition.id, runtimeMs: Date.now() - started, ...fields });
+        };
+        if (++calls > maxToolCalls) {
+          counters.refused++;
+          detail({ status: "error", errorCode: "tool_call_limit" });
+          span.set({ "docslurp.chat.tool_call_refused": true });
+          span.end("tool_call_limit");
+          return { ...TOOL_CALL_LIMIT_RESULT };
+        }
+        if (!input || typeof input !== "object" || Array.isArray(input)) {
+          detail({ status: "error", errorCode: "invalid_arguments" });
+          span.end("invalid_arguments");
+          return { error: "Expected object arguments" };
+        }
+        counters.executed++;
+        counters.byTool[definition.id] = (counters.byTool[definition.id] ?? 0) + 1;
         const supplied = input as Record<string, unknown>;
+        const batch = definition.id === "search" && Array.isArray(supplied.queries);
+        const queryCount = batch ? (supplied.queries as unknown[]).length : 1;
+        // The turn's concurrency is the ceiling, and the value when the model omits it.
+        const concurrency = batch
+          ? typeof supplied.concurrency === "number" && Number.isFinite(supplied.concurrency)
+            ? Math.max(1, Math.min(Math.trunc(supplied.concurrency), searchConcurrency))
+            : searchConcurrency
+          : 1;
         // G-04: the user-selected workspace is the only scope. It is applied
         // after the model's arguments, so a prompt-injected workspaceId can't
         // send a search into another workspace the user happens to reach.
@@ -88,12 +215,12 @@ export function createChatMcpTools(args: {
         // also applied after the model's arguments so a tool call cannot widen them.
         const body = definition.id === "search"
           ? Array.isArray(supplied.queries)
-            ? { ...supplied, queries: supplied.queries.map(q => ({ ...(q && typeof q === "object" && !Array.isArray(q) ? q : {}), ...searchDefaults, workspaceId: args.workspaceId })) }
+            ? { ...supplied, concurrency, queries: supplied.queries.map(q => ({ ...(q && typeof q === "object" && !Array.isArray(q) ? q : {}), ...searchDefaults, workspaceId: args.workspaceId })) }
             : { ...supplied, ...searchDefaults, workspaceId: args.workspaceId }
           : definition.id === "chat" && chatDefaults
             ? { ...supplied, retrieval: chatDefaults, workspaceId: args.workspaceId }
             : { ...supplied, workspaceId: args.workspaceId };
-        const started = Date.now();
+        const queries = definition.id === "search" ? modelQueries(supplied) : undefined;
         const update = (status: ChatToolActivity["status"]) => {
           const event: ChatToolActivity = { id: toolCallId, name: definition.id, status,
             ...(status !== "loading" ? { runtimeMs: Date.now() - started } : {}) };
@@ -102,15 +229,38 @@ export function createChatMcpTools(args: {
         };
         update("loading");
         try {
-          const response = await args.dispatch(`/tools/${encodeURIComponent(definition.id)}`, {
+          const dispatch = () => span.run(() => args.dispatch(`/tools/${encodeURIComponent(definition.id)}`, {
             method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body), signal: args.signal,
-          });
+          }));
+          const response = await (args.chatSessionId ? runInChatAgentContext(args.chatSessionId, dispatch) : dispatch());
           const result: unknown = await response.json();
+          const returned: SearchResult[] = [];
           if (response.ok) {
-            collectEvidence(result);
+            collectEvidence(result, returned);
             args.onEvidence?.([...citations]);
           }
           update(response.ok ? "success" : "error");
+          const pages = new Map(returned.map(item => [`${item.citation.documentId}:${item.citation.pageNumber ?? ""}`,
+            { documentId: item.citation.documentId, pageNumber: item.citation.pageNumber ?? null }]));
+          const costCents = response.ok ? reportedToolCostCents(result) : 0;
+          counters.toolCostCents += costCents;
+          const stats = definition.id === "search" ? searchCallStats(toolCallId, response.ok, queryCount, concurrency, result) : undefined;
+          detail({ status: response.ok ? "success" : "error", ...(queries ? { queries } : {}),
+            ...(stats ? { resultCount: stats.resultCount, zeroHit: stats.zeroHit } : {}),
+            evidencePages: [...pages.values()], ...(response.ok ? { costCents } : {}),
+            ...(response.ok ? {} : { errorCode: responseErrorCode(result, response.status) }) });
+          if (stats) {
+            searchCalls.push(stats);
+            span.set({
+              "docslurp.rag.query_count": stats.queryCount, "docslurp.rag.concurrency": stats.concurrency,
+              "docslurp.rag.result_count": stats.resultCount, "docslurp.rag.zero_hit": stats.zeroHit,
+              "docslurp.rag.document_count": stats.documentCount,
+              ...(stats.topScore !== null ? { "docslurp.rag.top_score": stats.topScore } : {}),
+              ...(stats.searchSessionIds.length ? { "docslurp.rag.search_session_id": stats.searchSessionIds.length === 1 ? stats.searchSessionIds[0]! : stats.searchSessionIds } : {}),
+            });
+          }
+          span.set({ "docslurp.tool.status_code": response.status });
+          span.end(response.ok ? undefined : `http_${response.status}`);
           const serialized = JSON.stringify(result);
           return {
             ok: response.ok, status: response.status,
@@ -120,13 +270,16 @@ export function createChatMcpTools(args: {
               filename: citation.citation.filename, documentId: citation.citation.documentId,
               pageNumber: citation.citation.pageNumber, text: citation.text.slice(0, 1500) })),
           };
-        } catch {
+        } catch (error) {
           update("error");
+          detail({ status: "error", ...(queries ? { queries } : {}), errorCode: args.signal.aborted ? "aborted" : "exception" });
+          if (definition.id === "search") searchCalls.push(searchCallStats(toolCallId, false, queryCount, concurrency, null));
+          span.end(error ?? "Error");
           args.signal.throwIfAborted();
           return { error: "Tool execution failed. Do not assume the action succeeded or retry a submission automatically." };
         }
       },
     });
   }
-  return { tools, citations, activity };
+  return { tools, citations, activity, details, searchCalls, counters };
 }

@@ -5,7 +5,7 @@ import { hostname } from "node:os";
 import { performance } from "node:perf_hooks";
 import { context, createContextKey, propagation, ROOT_CONTEXT, SpanKind, SpanStatusCode, trace, type Attributes, type Histogram } from "@opentelemetry/api";
 import { AsyncLocalStorageContextManager } from "@opentelemetry/context-async-hooks";
-import { W3CTraceContextPropagator, type ExportResult } from "@opentelemetry/core";
+import { CompositePropagator, W3CBaggagePropagator, W3CTraceContextPropagator, type ExportResult } from "@opentelemetry/core";
 import { resourceFromAttributes, defaultResource } from "@opentelemetry/resources";
 import { NodeTracerProvider } from "@opentelemetry/sdk-trace-node";
 import { BatchSpanProcessor, ParentBasedSampler, TraceIdRatioBasedSampler, type ReadableSpan, type SpanExporter, type SpanProcessor } from "@opentelemetry/sdk-trace-base";
@@ -170,7 +170,9 @@ export function initializeObservability(options: ObservabilityOptions = {}): boo
     }) : undefined;
     const logs = logProcessors.length ? new LoggerProvider({ resource, processors: logProcessors }) : undefined;
     if (logs) logsApi.setGlobalLoggerProvider(logs);
-    traces.register({ contextManager: new AsyncLocalStorageContextManager(), propagator: new W3CTraceContextPropagator() });
+    // Baggage is extracted so allowlisted eval.* keys can label spans (evalBaggageAttributes); nothing injects it outbound.
+    traces.register({ contextManager: new AsyncLocalStorageContextManager(),
+      propagator: new CompositePropagator({ propagators: [new W3CTraceContextPropagator(), new W3CBaggagePropagator()] }) });
     setLangfuseTracerProvider(traces);
     processState[runtimeKey] = { traces, metrics, logs, otlpLogs: Boolean(logsOptions), nativeAiTelemetry: options.nativeAiTelemetry,
       operationDuration: metrics?.getMeter("docslurp.operations").createHistogram("docslurp.operation.duration", { unit: "s" }),
@@ -264,7 +266,9 @@ export function observationTelemetry(name: string, type: string, durationSeconds
     ["provider", "model", "mediaJobId", "leaseId", "resourceId", "providerRequestId", "costState"].includes(key) && typeof value === "string")
     .map(([key, value]) => [`docslurp.media.${key}`, value as string]));
   const active = trace.getSpan(context.active());
-  for (const [key, value] of Object.entries({ ...correlations, ...media })) bestEffort(() => active?.setAttribute(key, value));
+  // Retrieval run by the chat search agent links back to its conversation.
+  const chat = typeof metadata.chatSessionId === "string" ? { "docslurp.chat.session_id": metadata.chatSessionId } : {};
+  for (const [key, value] of Object.entries({ ...correlations, ...media, ...chat })) bestEffort(() => active?.setAttribute(key, value));
   if (failed || name.startsWith("worker.stage.")) emitTelemetryLog({
     eventName: "docslurp.operation.completed", severityText: failed ? "error" : "info",
     body: `${name.slice(0, 200)} ${failed ? "failed" : "completed"} in ${Math.round(durationSeconds * 1000)}ms`,
@@ -399,4 +403,82 @@ export async function withDependencySpan<T>(name: string, attributes: Attributes
   try { return await span.run(run); }
   catch (error) { span.end(error); throw error; }
   finally { span.end(); }
+}
+
+/** A span the caller ends explicitly; every method is a no-op when tracing is off. */
+export interface TelemetrySpan {
+  run<T>(callback: () => T): T;
+  set(values: Attributes): void;
+  end(error?: unknown): void;
+}
+
+/**
+ * Application span on a `docslurp.*` tracer (GenAI agent, model step and tool
+ * spans). The parent is `options.parent` when given, else the active context.
+ * Attributes must be ids, counts and enums, never prompt, answer or document
+ * text; the OTLP exporter still strips credentials and content keys.
+ */
+export function startTelemetrySpan(tracerName: string, name: string, attributes: Attributes,
+  options: { parent?: TelemetrySpan; kind?: "internal" | "client" } = {}): TelemetrySpan {
+  const runtime = getRuntime();
+  let span: ReturnType<ReturnType<NodeTracerProvider["getTracer"]>["startSpan"]> | undefined;
+  const parent = options.parent ? options.parent.run(() => context.active()) : context.active();
+  try {
+    if (runtime && !runtime.shutdown) span = runtime.traces.getTracer(tracerName).startSpan(name, {
+      kind: options.kind === "client" ? SpanKind.CLIENT : SpanKind.INTERNAL, attributes: safeAttributes(attributes) }, parent);
+  } catch { /* Best effort. */ }
+  const active = span ? trace.setSpan(parent, span) : parent;
+  let ended = false;
+  return {
+    run<T>(callback: () => T): T { return context.with(active, callback); },
+    set(values: Attributes): void { bestEffort(() => span?.setAttributes(safeAttributes(values))); },
+    end(error?: unknown): void {
+      if (ended) return;
+      ended = true;
+      if (error) bestEffort(() => {
+        span?.setStatus({ code: SpanStatusCode.ERROR });
+        span?.setAttribute("error.type", error instanceof Error ? error.name : String(error).slice(0, 64));
+      });
+      bestEffort(() => span?.end());
+    },
+  };
+}
+
+/** Low-cardinality chat agent metrics: model ids, tool names and stop reasons only, never ids. */
+export function recordChatAgentTelemetry(args: { model: string; stopReason: string; durationSeconds: number;
+  toolCalls: Readonly<Record<string, number>> }): void {
+  const meter = getRuntime()?.metrics?.getMeter("docslurp.chat");
+  if (!meter) return;
+  bestEffort(() => {
+    meter.createHistogram("docslurp.chat.agent.duration", { unit: "s" }).record(args.durationSeconds,
+      { "gen_ai.request.model": args.model, "docslurp.chat.stop_reason": args.stopReason });
+    const counter = meter.createCounter("docslurp.chat.agent.tool_calls");
+    for (const [tool, count] of Object.entries(args.toolCalls)) {
+      if (count > 0) counter.add(count, { "gen_ai.request.model": args.model, "gen_ai.tool.name": tool });
+    }
+  });
+}
+
+/** Client-supplied W3C baggage keys copied onto agent spans, so eval harnesses can join runs to traces. */
+export const EVAL_BAGGAGE_KEYS = ["eval.run_id", "eval.case_id", "eval.model", "eval.arm"] as const;
+
+/** Allowlisted `eval.*` baggage from the active context, each value capped at 128 characters. */
+export function evalBaggageAttributes(): Record<string, string> {
+  const attributes: Record<string, string> = {};
+  bestEffort(() => {
+    const baggage = propagation.getBaggage(context.active());
+    for (const key of EVAL_BAGGAGE_KEYS) {
+      const value = baggage?.getEntry(key)?.value;
+      if (typeof value === "string" && value) attributes[key] = value.slice(0, 128);
+    }
+  });
+  return attributes;
+}
+
+/** W3C `traceparent` of the active sampled-or-not span, for response headers; null without a valid span. */
+export function activeTraceparent(): string | null {
+  const span = trace.getSpan(context.active());
+  const spanContext = span?.spanContext();
+  if (!spanContext || !trace.isSpanContextValid(spanContext)) return null;
+  return `00-${spanContext.traceId}-${spanContext.spanId}-${(spanContext.traceFlags & 1).toString(16).padStart(2, "0")}`;
 }

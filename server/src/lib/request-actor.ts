@@ -128,6 +128,19 @@ export function getRequestActor(c: Context): RequestActor {
   throw new Error("Missing authenticated request actor");
 }
 
+/**
+ * Platform (operator) admin: a verified user listed in ADMIN_EMAILS. Sessions
+ * carry the flag resolved at sign-in lookup; a server API key inherits it from
+ * its owner. Client (browser-published) keys are never admin, since anyone
+ * reading the page can use them. Organization roles do not make an admin.
+ */
+export async function isPlatformAdminActor(actor: RequestActor | undefined): Promise<boolean> {
+  if (!actor) return false;
+  if (actor.type === "session") return actor.user.isAdmin === true;
+  if (actor.apiKey.keyType !== "server") return false;
+  return await isConfiguredAdminUser(appDbPool, actor.apiKey.userId);
+}
+
 export function getRequestUserId(c: Context): string {
   return getRequestActor(c).userId;
 }

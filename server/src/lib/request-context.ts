@@ -216,7 +216,7 @@ export const requestContextMiddleware: MiddlewareHandler = async (c, next) => {
   );
 
   await errorContext.run({ requestId }, () => withHttpSpan({ method: c.req.method, route,
-    headers: { traceparent: c.req.header("traceparent") ?? "", tracestate: c.req.header("tracestate") ?? "" },
+    headers: { traceparent: c.req.header("traceparent") ?? "", tracestate: c.req.header("tracestate") ?? "", baggage: c.req.header("baggage") ?? "" },
     status: () => c.res.status,
   }, () => requestContextStorage.run({ requestId, requestStartedAt: startedAt, userId: null, performanceEvents: [] }, async () => {
     c.set("requestId", requestId);
