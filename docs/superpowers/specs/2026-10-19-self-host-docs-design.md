@@ -2,7 +2,7 @@
 
 Date: 2026-10-19
 Status: draft for review
-Sub-project 1 of 6 in the self-host and deploy program (see "Program decisions").
+Sub-project 1 of 7 in the self-host and deploy program (see "Program decisions").
 
 ## Goal
 
@@ -25,11 +25,12 @@ Agreed during brainstorming; later sub-projects build on these.
 - Audience: OSS evaluators/small teams and BYO-cloud companies, equally.
 - Order: (1) self-host docs and system map, (2) pluggable parser sandbox,
   (3) Terraform foundation with Fly and AWS stacks, (4) GCP, Vercel and
-  Cloudflare stacks, (5) CLI wizard, (6) agent skill. Each gets its own spec,
-  plan and pull request.
-- Added 2026-10-20: a platform-task parser provider (per-job ECS task, Cloud
-  Run job or Fly Machine) follows the Terraform foundation, because it needs
-  those tasks and their network and credential setup. It uses operator
+  Cloudflare stacks, (5) platform-task parser provider (per-job ECS task,
+  Cloud Run job or Fly Machine), (6) CLI wizard, (7) agent skill. Each gets
+  its own spec, plan and pull request.
+- Added 2026-10-20: the platform-task provider is ordered after the Terraform
+  foundation and the other stacks, because it needs those tasks and their
+  network and credential setup. It uses operator
   attestation plus an in-job probe that fails closed. Until it exists, Fargate
   deployments use `modal`.
 - Parser sandbox: a provider interface modeled on Mastra's
@@ -37,8 +38,9 @@ Agreed during brainstorming; later sub-projects build on these.
   `description`, JSON Schema `configSchema`, `probe`, `create`; instance with
   lifecycle, `run`, `info` and optional `staging` and `runJob` capabilities).
   Providers declare their isolation guarantees and the worker enforces a policy.
-  Local providers: `bubblewrap` (current behavior), `landlock`, `gvisor`, `none`
-  (explicit acknowledgement required). First remote provider: Modal.
+  Local providers: `bubblewrap` (current behavior), `landlock`, `none`
+  (explicit acknowledgement required). gVisor is deferred; platform runtime
+  classes cover it (see `docs/self-host/platform-isolation.md`). First remote provider: Modal.
 - Providers live in-repo under `worker/src/sandbox/providers/<id>/`, loaded by
   dynamic import. No separate published packages for now.
 - Terraform: layered modules (`data`, `temporal`, `control-plane`, `workers`,

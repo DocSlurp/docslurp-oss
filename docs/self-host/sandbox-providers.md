@@ -95,10 +95,9 @@ Modal runs each activity's parser commands in a remote sandbox. Use it when the 
 How it behaves:
 
 - The sandbox is created with the network blocked.
-- Only the command's input files (file arguments inside the worker's DocSlurp temp workspaces) are uploaded, at the same paths, before each command. Parsers, scripts, Node and Python come from the image, never from the worker host. Files under the declared writable paths are copied back after the command. A writable path the command never creates is not an error and produces no file.
+- Only the command's input files (file arguments inside the worker's DocSlurp temp workspaces) are uploaded, at the same paths, before each command. Parsers, scripts, Node and Python come from the image, never from the worker host. After the command, only the files it created or changed under the declared writable paths are copied back, not the whole directory. A writable path the command never creates is not an error and produces no file.
 - Time limits are enforced by Modal. A command that exceeds its limit is reported like a killed process.
 - When one command is aborted (for example a stage's per-command timeout) or times out, only that command fails; other commands in the same activity keep using the sandbox. The aborted command's remote process is killed. Files it created or changed in its writable directories are removed remotely and never copied back.
-- Each command copies back only the files it created or changed, not the whole writable directory.
 - The sandbox is terminated when the activity's session closes, whether the activity succeeds, fails or is cancelled. `DOCSLURP_MODAL_SESSION_TIMEOUT_SECONDS` is the backstop if the worker dies.
 - Each command logs one line:
 
@@ -290,7 +289,7 @@ The spike ran on 2026-10-20 in us-west-1, platform 1.4.0, kernel 6.1.188, with t
 | --- | --- |
 | Identity and capabilities | `uid=65534(nobody)`, all capability sets empty (`CapEff` `0000000000000000`), seccomp mode 2. |
 | Root filesystem | Read-only: writing `/probe-write` fails with `Read-only file system`. |
-| Scratch volume | Fargate bind volumes are root-owned, so a non-root parser needs a trusted init container to `chown` the volume (see the settings below). The `/tmp` write in the captured output below failed with `Read-only file system`; the writable-scratch result comes from the spike notes, not from that capture. |
+| Scratch volume | Writable by the non-root parser only after a trusted init container runs `chown 65534:65534 /scratch`. The probe wrote each check's output to `$TMPDIR/o` with `TMPDIR=/scratch` (the bind volume). Without the init container every check failed with `cannot create /scratch/o: Permission denied`. With it, every output was written to and read back from `/scratch`. The "write to /tmp" line in the raw output below failed with `Read-only file system` because `/tmp` is part of the read-only root in that run, not the scratch volume. |
 | Internet TCP | Blocked by the security group. `https://example.com` and `1.1.1.1:443` both time out. |
 | DNS | Still resolves `example.com`. The VPC resolver answers even with no egress. This is a data exfiltration path. Use [Route 53 Resolver DNS Firewall](https://docs.aws.amazon.com/Route53/latest/DeveloperGuide/resolver-dns-firewall.html) if it matters. |
 | EC2 metadata (IMDS) | Unreachable: `169.254.169.254` refuses the connection. |
@@ -316,6 +315,12 @@ Start latency, from `RunTask` to the container started:
 | Warm (2 runs, includes the init container) | about 12.5 s |
 
 That suits large documents or media jobs, and is slow for small PDFs.
+
+Scratch-volume evidence from the earlier revision of the task, before the init container was added, with the same probe writing to `/scratch/o`:
+
+```text
+cannot create /scratch/o: Permission denied
+```
 
 The spike removed every resource it created (cluster, task definitions, VPC endpoints, security group, ECR repository, log group, IAM role).
 
