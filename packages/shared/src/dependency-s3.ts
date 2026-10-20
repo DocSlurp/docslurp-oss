@@ -2,6 +2,23 @@ import type { InitializeMiddleware, FinalizeRequestMiddleware, MiddlewareStack, 
 import { startDependencySpan } from "./telemetry.js";
 
 const installed = new WeakSet<object>();
+
+/**
+ * A HeadObject 404 is the normal "does not exist yet" answer to an existence
+ * probe (render caches, dedup checks), not a dependency failure. Real errors,
+ * including 403s and 5xx, still mark the span.
+ */
+export function isExpectedS3Miss(operation: string, error: unknown): boolean {
+  if (operation !== "HeadObject" || !error || typeof error !== "object") return false;
+  const { name, $metadata } = error as { name?: unknown; $metadata?: { httpStatusCode?: unknown } };
+  return name === "NotFound" || $metadata?.httpStatusCode === 404;
+}
+
+function endFailed(span: ReturnType<typeof startDependencySpan>, operation: string, error: unknown): void {
+  if (!isExpectedS3Miss(operation, error)) { span.end(error); return; }
+  span.set({ "http.response.status_code": 404 });
+  span.end();
+}
 /** Observe S3 commands and attempts without reading a body or changing SDK retries. */
 export function instrumentS3Client<T extends { middlewareStack: MiddlewareStack<any, any> }>(client: T, endpoint?: string | null): T {
   if (installed.has(client)) return client;
@@ -31,7 +48,7 @@ export function instrumentS3Client<T extends { middlewareStack: MiddlewareStack<
         output.Body.once("close", () => span.end(complete ? undefined : Object.assign(new Error(), { name: "AbortError" })));
       } else span.end();
       return result;
-    } catch (error) { span.end(error); throw error; }
+    } catch (error) { endFailed(span, operation, error); throw error; }
   };
   const attempt: FinalizeRequestMiddleware<any, MetadataBearer> = (next, context) => async args => {
     const operation = (context.commandName ?? "UnknownCommand").replace(/Command$/, "");
@@ -42,7 +59,7 @@ export function instrumentS3Client<T extends { middlewareStack: MiddlewareStack<
       const result = await span.run(() => next(args));
       span.set({ "http.response.status_code": result.output?.$metadata?.httpStatusCode });
       return result;
-    } catch (error) { span.end(error); throw error; }
+    } catch (error) { endFailed(span, operation, error); throw error; }
     finally { span.end(); }
   };
   client.middlewareStack.add(command, { step: "initialize", name: "docslurpS3CommandTelemetry" });

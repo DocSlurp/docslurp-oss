@@ -348,11 +348,37 @@ export async function runDocumentStage(
     }
   }
 
-  // All strategies exhausted
   const finalMessage = lastFailure?.message ?? "document stage failed";
   const finalArtifactUri = lastFailure?.artifactUri;
   const finalStats = lastFailure?.stats;
   const attempts = attemptsToTry.length;
+
+  // An interruption (shutdown, activity cancellation, a Run-wide abort), a
+  // Run-wide policy stop or an infrastructure error is not a verdict on the
+  // Document. Persist nothing: the stage checkpoint stays "processing" so the
+  // retried activity runs the Document again instead of skipping it as failed.
+  // Infrastructure errors that keep recurring still end the Run through
+  // failRunStage's ordinary-attempt budget.
+  const cause = lastFailure?.error ?? new Error(finalMessage);
+  if (!isDocumentLevelFailure(cause, signal)) {
+    console.warn(
+      `[checkpoint-debug] document=${document.id} stage=${stageName} ` +
+        `interrupted=true reason=${finalMessage} signalAborted=${signal?.aborted === true}`,
+    );
+    // Still checkpoint what the attempt spent: provider calls already made are
+    // billed even though the Document reruns, and stage-execution's
+    // interruption path rethrows without a flush. Best-effort so a failing
+    // store (often the very infrastructure error) never masks the cause.
+    if (state.store) {
+      await state.store.updateProgress(state).catch((flushError: unknown) => console.warn(
+        `[checkpoint-debug] document=${document.id} stage=${stageName} interrupted progress flush failed: ` +
+          `${flushError instanceof Error ? flushError.message : String(flushError)}`,
+      ));
+    }
+    throw cause;
+  }
+
+  // All strategies exhausted on the Document's own input.
   console.error(
     `[checkpoint-error] document=${document.id} stage=${stageName} ` +
       `allStrategiesExhausted attempts=${attempts} message=${finalMessage} ` +
@@ -402,10 +428,7 @@ export async function runDocumentStage(
     );
   }
   // The Document is failed and skipped from here on; the stage and Run carry
-  // on without it. Only an infrastructure error (or a Run-wide abort) still
-  // fails the stage, so the retry and Run-failure paths see it.
-  const cause = lastFailure?.error ?? new Error(finalMessage);
-  if (!isDocumentLevelFailure(cause, signal)) throw cause;
+  // on without it.
 }
 
 export function hashContent(content: string | Buffer): string {

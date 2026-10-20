@@ -27,7 +27,9 @@ class MemoryStore implements StageExecutionStore {
   runStatus = "processing";
   completedWith: WorkflowState | null = null;
   failures: Array<{ stage: string; message: string }> = [];
+  documentFailures: Array<{ documentId: string; stageName: string; message: string }> = [];
   events: WorkspaceRunEvent[] = [];
+  documentEvents: WorkspaceRunEvent[] = [];
   readonly pageTasks = { completed: async () => new Map() } as unknown as StageExecutionStore["pageTasks"];
 
   constructor(ids: string[]) {
@@ -46,6 +48,7 @@ class MemoryStore implements StageExecutionStore {
       this.docStages.set(`${documentId}:${stageName}`, { documentId, stageName, status: "completed" } as StageState);
     },
     failDocumentStage: async (state: WorkflowState, documentId: string, stageName: string, message: string) => {
+      this.documentFailures.push({ documentId, stageName, message });
       this.docStages.set(`${documentId}:${stageName}`, { documentId, stageName, status: "failed", error: message } as StageState);
       state.setDocumentStage({ documentId, stageName, status: "failed", error: message } as StageState);
     },
@@ -53,7 +56,7 @@ class MemoryStore implements StageExecutionStore {
     startRunStage: async () => undefined,
     completeRunStage: async () => undefined,
     failRunStage: async () => undefined,
-    appendEvent: async () => undefined,
+    appendEvent: async (event: WorkspaceRunEvent) => { this.documentEvents.push(event); },
     setPageStageComplete: async () => undefined,
     getCompletedPages: async () => new Set<number>(),
   } as unknown as CheckpointStore;
@@ -137,18 +140,133 @@ describe("a failing Document does not stop the Run", () => {
     expect(store.completedWith).toBeNull();
   });
 
-  it("still fails the stage on an infrastructure error", async () => {
+  it("records a genuine document-level failure with its stage state, store write and event", async () => {
+    const store = new MemoryStore(["a", "poisoned"]);
+    await runAll(store, pipeline([], poison("poisoned")));
+
+    expect(store.documentFailures).toEqual([
+      { documentId: "poisoned", stageName: "extract", message: "unparseable file" },
+    ]);
+    expect(store.docStages.get("poisoned:extract")).toMatchObject({ status: "failed", error: "unparseable file" });
+    expect(failedDocumentEvents(store)).toHaveLength(1);
+  });
+
+  it("still fails the stage on an infrastructure error without failing the Document", async () => {
     const store = new MemoryStore(["a", "b"]);
     const stages = pipeline([], (_stage, documentId) => {
       if (documentId === "b") throw Object.assign(new Error("connect ECONNREFUSED 127.0.0.1:5432"), { code: "ECONNREFUSED" });
     });
     await expect(runAll(store, stages)).rejects.toThrow("ECONNREFUSED");
     expect(store.runStatus).toBe("processing");
+    expect(store.documentFailures).toEqual([]);
+    expect(store.docStages.get("b:extract")?.status).not.toBe("failed");
   });
 
   it("still fails the stage on a Run-wide policy stop", async () => {
     const store = new MemoryStore(["a", "b"]);
     const stages = pipeline([], () => { throw new RunPolicyError("Embedding cost cap reached"); });
     await expect(runAll(store, stages)).rejects.toThrow("cost cap");
+  });
+});
+
+function failedDocumentEvents(store: MemoryStore): WorkspaceRunEvent[] {
+  return store.documentEvents.filter((event) => event.documentId && event.status === "failed");
+}
+
+function abortError(): Error {
+  return Object.assign(new Error("The operation was aborted"), { name: "AbortError" });
+}
+
+describe("an interrupted Document stage", () => {
+  /** One stage whose run() is interrupted for Document "b" while `interrupt` is set. */
+  function interruptible(calls: string[], interrupt: { controller?: AbortController }): Stage {
+    return {
+      name: "index",
+      async run(state) {
+        const signal = interrupt.controller?.signal;
+        await runDocuments(state.documents, 1, async (document) => {
+          await runDocumentStage(state, document, "index", `${document.id}:index`, "index done", async () => {
+            calls.push(document.id);
+            if (document.id === "b" && interrupt.controller) {
+              // Worker shutdown / activity cancellation fires mid-stage.
+              interrupt.controller.abort(abortError());
+              throw abortError();
+            }
+            return { artifactUri: `s3://a/${document.id}/index` };
+          }, signal);
+        });
+      },
+    };
+  }
+
+  async function runIndex(store: MemoryStore, stage: Stage) {
+    const execution = createStageExecution({ store, config, stages: [stage] });
+    const rt = { signal: new AbortController().signal, heartbeat: () => undefined, attempt: 1, progressFromProcessCpu: false };
+    await execution.runStage({ stageName: "index", runId: "run-1", totalStages: 1, artifacts: {} }, rt);
+    return execution;
+  }
+
+  it("persists no failure and the retried activity processes the Document", async () => {
+    const store = new MemoryStore(["a", "b"]);
+    const calls: string[] = [];
+    const interrupt: { controller?: AbortController } = { controller: new AbortController() };
+    const stage = interruptible(calls, interrupt);
+
+    await expect(runIndex(store, stage)).rejects.toThrow("The operation was aborted");
+    expect(store.documentFailures).toEqual([]);
+    expect(store.docStages.get("b:index")?.status).not.toBe("failed");
+    expect(failedDocumentEvents(store)).toEqual([]);
+
+    // The activity retry: a fresh state hydrated from the persisted checkpoints.
+    interrupt.controller = undefined;
+    const execution = await runIndex(store, stage);
+    await execution.completeRun({ runId: "run-1" });
+
+    expect(calls).toEqual(["a", "b", "b"]);
+    expect(store.docStages.get("b:index")?.status).toBe("completed");
+    expect(store.runStatus).toBe("completed");
+    expect(store.completedWith?.run.stats).toMatchObject({ failedDocuments: 0 });
+  });
+
+  it("still checkpoints the interrupted attempt's usage, and a failing flush keeps the cause", async () => {
+    for (const flushFails of [false, true]) {
+      const store = new MemoryStore(["b"]);
+      const flushed: number[] = [];
+      const stage: Stage = {
+        name: "index",
+        async run(state) {
+          state.store = {
+            ...state.store!,
+            updateProgress: async (s: WorkflowState) => {
+              flushed.push(s.usageLedger.pendingCount);
+              if (flushFails) throw new Error("db down");
+            },
+          } as CheckpointStore;
+          await runDocumentStage(state, state.documents[0]!, "index", "b:index", "index done", async () => {
+            state.usageLedger.enqueue({ metric: "embed", model: "m", inputTokens: 10, outputTokens: 0, costCents: 1, metadata: {} } as never);
+            throw abortError();
+          });
+        },
+      };
+      await expect(runIndex(store, stage)).rejects.toThrow("The operation was aborted");
+      expect(flushed).toEqual([1]);
+      expect(store.documentFailures).toEqual([]);
+    }
+  });
+
+  it("persists no failure when an AbortError surfaces without an aborted signal", async () => {
+    const store = new MemoryStore(["b"]);
+    const stage: Stage = {
+      name: "index",
+      async run(state) {
+        await runDocumentStage(state, state.documents[0]!, "index", "b:index", "index done", async () => {
+          throw abortError();
+        });
+      },
+    };
+    await expect(runIndex(store, stage)).rejects.toThrow("The operation was aborted");
+    expect(store.documentFailures).toEqual([]);
+    expect(store.docStages.get("b:index")?.status).not.toBe("failed");
+    expect(failedDocumentEvents(store)).toEqual([]);
   });
 });
