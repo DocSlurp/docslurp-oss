@@ -1064,10 +1064,10 @@ export async function getWorkspaceCockpit(
         where d.workspace_id = w.id
           and d.status not in ('completed', 'failed', 'cancelled', 'pii_blocked')
       ), 0) as active_documents,
+      -- documents.chunk_count is trigger-maintained (migration 0062).
       coalesce((
-        select count(*)::int
-        from document_chunks c
-        join documents docs on docs.id = c.document_id
+        select sum(docs.chunk_count)::int
+        from documents docs
         where docs.workspace_id = w.id
           and docs.status = 'completed'
           and docs.superseded_at is null

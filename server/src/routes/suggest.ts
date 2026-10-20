@@ -76,8 +76,8 @@ export const suggestRoutes = new Hono()
       .slice(0, limit)
       .map((r) => r.phrase);
 
-    // Current corpus (completed, not superseded) comes from trigger-maintained
-    // counters; in-flight ingest uses the documents_workspace_in_flight_idx
+    // Current corpus (completed, not superseded) and its chunk total come from
+    // trigger-maintained counters (documents.chunk_count, migration 0062); in-flight ingest uses the documents_workspace_in_flight_idx
     // partial index. Failed and superseded documents never keep the workspace
     // "partial", so the readiness poller can settle.
     const [semanticRow] = await sql<{
@@ -87,9 +87,8 @@ export const suggestRoutes = new Hono()
     }[]>`
       select
         coalesce((
-          select count(*)::int
-          from document_chunks c
-          join documents d on d.id = c.document_id
+          select sum(d.chunk_count)::int
+          from documents d
           where d.workspace_id = w.id
             and d.status = 'completed' and d.superseded_at is null
         ), 0) as indexed_chunk_count,
