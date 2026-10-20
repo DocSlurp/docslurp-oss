@@ -20,6 +20,7 @@ export function resolveSandboxProviderId(env: NodeJS.ProcessEnv, platform: NodeJ
 // Literal import specifiers (not a template string) so bundlers and vitest can resolve
 // the `.js` -> `.ts` mapping. Add an entry here when a provider lands.
 const PROVIDER_LOADERS: Partial<Record<SandboxProviderId, () => Promise<{ default: ParserSandboxProvider }>>> = {
+  bubblewrap: () => import("./providers/bubblewrap/index.js"),
   none: () => import("./providers/none/index.js"),
 };
 
