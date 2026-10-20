@@ -216,7 +216,7 @@ describe("mcpRoutes", () => {
       expect(tools.find(tool => tool.name === name)?.annotations).toMatchObject({ readOnlyHint: true, idempotentHint: true, destructiveHint: false });
     }
     const upload = tools.find(tool => tool.name === "upload")!;
-    expect(upload.inputSchema.oneOf).toHaveLength(2);
+    expect(upload.inputSchema).not.toHaveProperty("oneOf");
     expect(upload.inputSchema.additionalProperties).toBe(false);
     expect(upload.annotations?.openWorldHint).toBe(true);
     const result = await client.callTool({ name: "upload", arguments: { files: [] } });
