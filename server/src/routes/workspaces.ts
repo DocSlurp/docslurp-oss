@@ -237,7 +237,7 @@ async function createWorkspaceAgentChatResponse(c: Context) {
   }
   const chatDisabled = await workspaceChatDisabledBody(workspace.id, userId);
   if (chatDisabled) return apiErrorResponse(c, 403, "chat_disabled", chatDisabled.error);
-  if (await chatModelRefused(getRequestActor(c), body.model)) {
+  if (await chatModelRefused(getRequestActor(c), body.model, workspace.id)) {
     return apiErrorResponse(c, 400, "model_not_allowed", new ChatModelNotAllowedError().message);
   }
 

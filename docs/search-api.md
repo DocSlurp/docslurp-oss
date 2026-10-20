@@ -95,7 +95,7 @@ Protocol surfaces keep the shapes their clients already parse: the OpenAI-compat
 
 Omit `model` to use the default (`z-ai/glm-5.3-flash`). Any workspace chat catalog model (`z-ai/glm-5.3-flash`, `anthropic/claude-haiku-5.5`, `deepseek/deepseek-v4.1-flash`, `openai/gpt-6.1-sol`, `openai/gpt-6-luna`) is accepted from anyone. Any other value returns HTTP 400 with code `model_not_allowed`; the server never substitutes the default for a model you named. The same check applies to `GET /v1/search/chat/stream` (before the stream opens) and the dashboard chat routes.
 
-Operators can list extra OpenRouter ids in `DOCSLURP_CHAT_EVAL_MODELS` (comma-separated; `:free` suffixes allowed) for model evaluations. Only platform admins can request them: a session whose verified email is in `ADMIN_EMAILS`, or a server API key owned by such a user. Client (publishable) keys and organization owners or admins do not qualify. When the configuration loads, the server logs and drops ids that match the Pro/Ultra prohibition, ids without a verified price in `packages/shared/src/chat-model-prices.ts` (mirrored from `scripts/lib/model-prices.json`), and ids whose output price is $50 per million tokens or more. An eval model answers on its own: if it fails, chat does not fail over to another model.
+Operators can list extra OpenRouter ids in `DOCSLURP_CHAT_EVAL_MODELS` (comma-separated; `:free` suffixes allowed) for model evaluations. Only platform admins can request them: a session whose verified email is in `ADMIN_EMAILS`, or a server API key owned by such a user. Client (publishable) keys and organization owners or admins do not qualify. For an evaluation account that should not be a platform admin, list its organization in `DOCSLURP_CHAT_EVAL_ORG_IDS` (comma-separated org ids): a turn whose workspace is owned by a listed organization may then use the eval models and the full `agent` limit range, from a session or a server API key (never a client key). The workspace's owning organization decides, not the caller's memberships, and the setting grants nothing else. When the configuration loads, the server logs and drops ids that match the Pro/Ultra prohibition, ids without a verified price in `packages/shared/src/chat-model-prices.ts` (mirrored from `scripts/lib/model-prices.json`), and ids whose output price is $50 per million tokens or more. An eval model answers on its own: if it fails, chat does not fail over to another model.
 
 ### Agent limits
 
@@ -107,14 +107,14 @@ When the search agent answers (the default for `/v1/chat` with `DOCSLURP_PUBLIC_
 | `maxToolCalls` | 12 | 1–24 | Tool calls across the turn. Later calls get `{error, code: "tool_call_limit", limitReached: true}` instead of running. |
 | `searchConcurrency` | 4 | 1–8 | Upper bound on the search tool's parallel `queries`, and the value it uses when the model omits `concurrency`. |
 
-Platform admins can use the full range. For everyone else, a value above the default is lowered to the default and listed in `debug.limits.clamped`; lower values apply as sent. Out-of-range values or unknown fields return HTTP 400 `invalid_request`.
+Platform admins, and turns in a `DOCSLURP_CHAT_EVAL_ORG_IDS` organization's workspace, can use the full range. For everyone else, a value above the default is lowered to the default and listed in `debug.limits.clamped`; lower values apply as sent. Out-of-range values or unknown fields return HTTP 400 `invalid_request`.
 
 Agent responses add these `debug` fields (other turns omit them):
 
 | Field | Meaning |
 |---|---|
 | `requestedModel` | The `model` you sent, or `null` |
-| `resolvedModel` | The model/build id from the provider's last response. OpenRouter aliases can resolve to dated builds, so this can differ from `model`. |
+| `resolvedModel` | The `model` field of OpenRouter's last response (the routed build, for example `deepseek/deepseek-v4.1-flash-20261017` behind the `deepseek/deepseek-v4.1-flash` alias), falling back to the SDK's response model id |
 | `resolvedProvider` | The upstream provider OpenRouter routed to, when it reports one |
 | `steps` | Model steps run |
 | `toolCallCount`, `toolCallsRefused` | Tool calls executed, and calls refused by `maxToolCalls` |

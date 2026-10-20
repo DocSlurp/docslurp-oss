@@ -1,9 +1,11 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("./request-actor.js", () => ({ isPlatformAdminActor: vi.fn(async (actor?: { admin?: boolean }) => actor?.admin === true) }));
+const getWorkspace = vi.fn(async (workspaceId: string) => ({ id: workspaceId, orgId: workspaceId === "ws-eval" ? "org-eval" : "org-other" }));
+vi.mock("../services/workspaces.js", () => ({ getWorkspace }));
 
 const {
-  ChatModelNotAllowedError, chatModelRefused, configuredChatEvalModels, parseChatEvalModels,
+  ChatModelNotAllowedError, chatEvalAccess, chatModelRefused, configuredChatEvalModels, parseChatEvalModels,
   resolveChatAgentLimits, resolveChatModelRequest,
 } = await import("./chat-model-policy.js");
 const { chatAgentProviderOptions } = await import("../services/chat-mcp-agent.js");
@@ -89,5 +91,37 @@ describe("agent limits", () => {
   it("gives admins the full range, bounded by the schema maximums", () => {
     expect(resolveChatAgentLimits({ maxSteps: 12, maxToolCalls: 24, searchConcurrency: 8 }, true)).toEqual({ maxSteps: 12, maxToolCalls: 24, searchConcurrency: 8, clamped: [] });
     expect(resolveChatAgentLimits({ maxSteps: 99 }, true).maxSteps).toBe(12);
+  });
+});
+
+describe("DOCSLURP_CHAT_EVAL_ORG_IDS", () => {
+  const session = { type: "session" as const, userId: "u", sessionId: "s", user: { id: "u", email: "", name: "" } };
+  const key = (keyType: "server" | "client") => ({ type: "apiKey" as const, userId: "u",
+    apiKey: { keyId: "k", userId: "u", orgId: "org-eval", keyType, allowedDomains: [], scopes: ["search"], rateLimitRpm: 60, rateLimitPpd: 1, rateLimits: [], workspaceIds: [] } });
+
+  it("grants eval access for workspaces owned by a listed org, to sessions and server keys only", async () => {
+    vi.stubEnv("DOCSLURP_CHAT_EVAL_ORG_IDS", " org-eval , org-two");
+    expect(await chatEvalAccess(session, "ws-eval")).toBe(true);
+    expect(await chatEvalAccess(key("server"), "ws-eval")).toBe(true);
+    expect(await chatEvalAccess(key("client"), "ws-eval")).toBe(false);
+    // The workspace's owning org decides, not the key's or caller's org.
+    expect(await chatEvalAccess(key("server"), "ws-plain")).toBe(false);
+    expect(await chatEvalAccess(session, undefined)).toBe(false);
+    expect(await chatEvalAccess(undefined, "ws-eval")).toBe(false);
+  });
+
+  it("is off when unset, while platform admins keep access everywhere", async () => {
+    getWorkspace.mockClear();
+    expect(await chatEvalAccess(session, "ws-eval")).toBe(false);
+    expect(getWorkspace).not.toHaveBeenCalled();
+    expect(await chatEvalAccess({ ...session, admin: true } as never, "ws-plain")).toBe(true);
+  });
+
+  it("pre-checks stream models against the turn's workspace", async () => {
+    vi.stubEnv("DOCSLURP_CHAT_EVAL_ORG_IDS", "org-eval");
+    vi.stubEnv("DOCSLURP_CHAT_EVAL_MODELS", "inception/mercury-3");
+    expect(await chatModelRefused(session, "inception/mercury-3", "ws-eval")).toBe(false);
+    expect(await chatModelRefused(session, "inception/mercury-3", "ws-plain")).toBe(true);
+    expect(await chatModelRefused(key("client"), "inception/mercury-3", "ws-eval")).toBe(true);
   });
 });

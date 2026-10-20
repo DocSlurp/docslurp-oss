@@ -158,11 +158,15 @@ export function createOpenRouterReasoningFetch(baseFetch: typeof fetch, effort?:
 export function createOpenRouterUsageCapture(baseFetch: typeof fetch = fetch) {
   let captured: unknown;
   let providerName: string | undefined;
+  let responseModel: string | undefined;
   const capture = (text: string) => {
     try {
-      const value = JSON.parse(text) as { provider?: string; usage?: unknown; response?: { provider?: string; usage?: unknown } };
+      const value = JSON.parse(text) as { provider?: string; model?: string; usage?: unknown; response?: { provider?: string; model?: string; usage?: unknown } };
       const provider = value.response?.provider ?? value.provider;
       if (typeof provider === "string" && provider) providerName = provider;
+      // The routed build (e.g. a dated id behind an alias), not the requested slug.
+      const model = value.response?.model ?? value.model;
+      if (typeof model === "string" && model) responseModel = model;
       const usage = value.response?.usage ?? value.usage;
       if (usage && typeof usage === "object") captured = usage;
     } catch { /* SSE comments, [DONE], and partial frames contain no usage. */ }
@@ -170,6 +174,7 @@ export function createOpenRouterUsageCapture(baseFetch: typeof fetch = fetch) {
   const trackedFetch: typeof fetch = async (input, init) => {
     captured = undefined;
     providerName = undefined;
+    responseModel = undefined;
     const response = await baseFetch(input, init);
     if (!response.ok || !response.body) return response;
     const streaming = response.headers.get("content-type")?.includes("text/event-stream");
@@ -193,5 +198,5 @@ export function createOpenRouterUsageCapture(baseFetch: typeof fetch = fetch) {
       flush() { observe(decoder.decode()); if (streaming && buffer.startsWith("data:")) capture(buffer.slice(5).trim()); else if (!streaming) capture(buffer); },
     })), { status: response.status, statusText: response.statusText, headers: response.headers });
   };
-  return { fetch: trackedFetch, usage: () => captured, providerName: () => providerName };
+  return { fetch: trackedFetch, usage: () => captured, providerName: () => providerName, responseModel: () => responseModel };
 }

@@ -172,27 +172,29 @@ export async function runChatMcpAgent(args: {
         const stepNumber = typeof step.stepNumber === "number" ? step.stepNumber : stepUsage.length;
         const span = openStepSpan(stepNumber);
         const providerName = accounting.providerName() ?? null;
+        // Prefer OpenRouter's response `model` (the routed build); the SDK's modelId is the fallback.
+        const responseModel = accounting.responseModel?.() || step.response.modelId || null;
         const actual = await resolveOpenRouterUsage({ apiKey: args.apiKey, model: args.model, ...(providerName ? { providerName } : {}),
           generationId: step.response.id, usage: { ...step.usage, raw: accounting.usage() ?? step.usage.raw } });
         await recordUsageEvent({ userId: args.actor.userId,
           scope: { orgId: args.orgId, workspaceId: args.workspaceId, sessionId: args.sessionId },
           usage: { ...actual, provider: "openrouter", model: args.model, metric: "workspace-chat-tools",
             metadata: { ...actual.metadata, chatSessionId: args.sessionId, toolCalls: step.toolCalls.map(call => call.toolName),
-              ...(step.response.modelId ? { responseModel: step.response.modelId } : {}) } },
+              ...(responseModel ? { responseModel } : {}) } },
         });
         usage.inputTokens += actual.inputTokens;
         usage.outputTokens += actual.outputTokens;
         usage.totalTokens += actual.inputTokens + actual.outputTokens;
         usage.costCents += actual.costCents ?? 0;
-        resolvedModel = step.response.modelId || resolvedModel;
+        resolvedModel = responseModel ?? resolvedModel;
         resolvedProvider = providerName ?? resolvedProvider;
         lastFinishReason = step.finishReason;
-        stepUsage.push({ step: stepNumber, model: step.response.modelId || null, finishReason: step.finishReason,
+        stepUsage.push({ step: stepNumber, model: responseModel, finishReason: step.finishReason,
           inputTokens: actual.inputTokens, outputTokens: actual.outputTokens,
           ...(actual.costCents !== undefined ? { costCents: actual.costCents } : {}),
           toolCalls: step.toolCalls.map(call => call.toolName) });
         span.set({
-          ...(step.response.modelId ? { "gen_ai.response.model": step.response.modelId } : {}),
+          ...(responseModel ? { "gen_ai.response.model": responseModel } : {}),
           ...(step.response.id ? { "gen_ai.response.id": step.response.id } : {}),
           "gen_ai.response.finish_reasons": [step.finishReason],
           "gen_ai.usage.input_tokens": actual.inputTokens, "gen_ai.usage.output_tokens": actual.outputTokens,

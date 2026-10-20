@@ -188,7 +188,7 @@ export const searchRoutes = new Hono()
     if (forbidden) return forbidden;
     const chatDisabled = await workspaceChatDisabledBody(workspaceId, userId);
     if (chatDisabled) return apiErrorResponse(c, 403, "chat_disabled", chatDisabled.error);
-    if (await chatModelRefused(getRequestActor(c), model)) return modelNotAllowed(c);
+    if (await chatModelRefused(getRequestActor(c), model, workspaceId)) return modelNotAllowed(c);
     // Refuse before the stream opens, so a blocked spend is a 402.
     // Pre-check only: chatWorkspace takes the interactive hold.
     await assertCanSpend(null, workspaceId, { kind: "interactive", hold: false });

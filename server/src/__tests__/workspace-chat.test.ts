@@ -281,6 +281,40 @@ describe("chatWorkspace", () => {
     }
   });
 
+  it.each([
+    ["org-eval", true],
+    ["org-other", false],
+  ] as const)("lets a workspace owned by an eval org (%s) use eval models and the admin limit range: %s", async (orgId, allowed) => {
+    sqlMock.mockResolvedValue([]);
+    getWorkspace.mockResolvedValue({ id: "ws-1", orgId, systemPrompt: null });
+    getWorkspaceSearchSettings.mockResolvedValue(buildSearchSettings());
+    runChatMcpAgent.mockResolvedValue({ answer: "Supported answer", citations: [], toolCalls: [], finishReason: "stop",
+      usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2, costCents: 0 }, debug: {} });
+    const previous = { key: process.env.OPENROUTER_API_KEY, models: process.env.DOCSLURP_CHAT_EVAL_MODELS, orgs: process.env.DOCSLURP_CHAT_EVAL_ORG_IDS };
+    process.env.OPENROUTER_API_KEY = "fake";
+    process.env.DOCSLURP_CHAT_EVAL_MODELS = "inception/mercury-3";
+    process.env.DOCSLURP_CHAT_EVAL_ORG_IDS = "org-eval";
+    const member = { type: "session" as const, userId: "user-1", sessionId: "s", user: { id: "user-1", email: "", name: "Member" } };
+    try {
+      const turn = (model?: string) => chatWorkspace({ workspaceId: "ws-1", userId: "user-1", query: "Find evidence", history: [], allowConfiguration: false,
+        model, agent: { maxSteps: 10, maxToolCalls: 20, searchConcurrency: 8 }, actor: member });
+      if (allowed) {
+        await turn("inception/mercury-3");
+        expect(runChatMcpAgent).toHaveBeenLastCalledWith(expect.objectContaining({ model: "inception/mercury-3",
+          limits: { maxSteps: 10, maxToolCalls: 20, searchConcurrency: 8, clamped: [] } }));
+      } else {
+        await expect(turn("inception/mercury-3")).rejects.toMatchObject({ status: 400, code: "model_not_allowed" });
+        await turn();
+        expect(runChatMcpAgent).toHaveBeenLastCalledWith(expect.objectContaining({
+          limits: { maxSteps: 6, maxToolCalls: 12, searchConcurrency: 4, clamped: ["maxSteps", "maxToolCalls", "searchConcurrency"] } }));
+      }
+    } finally {
+      for (const [name, value] of [["OPENROUTER_API_KEY", previous.key], ["DOCSLURP_CHAT_EVAL_MODELS", previous.models], ["DOCSLURP_CHAT_EVAL_ORG_IDS", previous.orgs]] as const) {
+        if (value === undefined) delete process.env[name]; else process.env[name] = value;
+      }
+    }
+  });
+
   it("says nothing relevant was found, without calling the model, when the relevance floor removed every passage", async () => {
     sqlMock.mockResolvedValue([]);
     getWorkspace.mockResolvedValue({ id: "ws-1", systemPrompt: null });
