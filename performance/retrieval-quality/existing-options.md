@@ -1,5 +1,16 @@
 # Existing retrieval controls: readiness audit
 
+> Historical investigation record from the October 2026 retrieval experiments;
+> classified 2026-10-20. Status, deployment, provider prices, available adapters,
+> budgets and agent assignments below describe their original checkpoints. They
+> are not current operating instructions or renewed spending/delegation authority.
+> Current references: [search API](../../docs/search-api.md) and [development experiment report](../../docs/evals/retrieval-quality/existing-options-experiment.md).
+> Reported checks/results and outstanding work are preserved without rerunning
+> experiments or claiming that pending verification is complete. Any `/tmp` paths
+> are historical external evidence locations; their existence and contents were
+> not verified in this cleanup. They have not been relocated. New scratch work
+> follows the repository's agent-storage guidance.
+
 Inspected current local source; no new paid calls or production edits. These are implemented controls, not measured proof of improved retrieval. The cheapest meaningful first comparisons are local rerank on/off, parent context on/off and result count. Query rewrite, HyDE, stepback and bounded iterative retrieval already exist and can be screened before building a replacement.
 
 ## Exact configuration surfaces

@@ -1,6 +1,12 @@
 # Deferred search profiles: Index Map and Visual Pages
 
-Date: 2026-10-12. Status: design for review. Branch: `feat/cheap-deferred-search`.
+> Historical design record, classified 2026-10-20. Implementation landed in
+> [3334f3f3](https://github.com/DocSlurp/docslurp-oss/commit/3334f3f3).
+> Current guidance: [deferred indexing guide](../../deferred-indexing.md).
+> The original proposal, rollout instructions and test intentions below are
+> retained for context; they are not current implementation or deployment status.
+
+Date: 2026-10-12. Original status: design for review. Branch: `feat/cheap-deferred-search`.
 Evidence: `docs/research/cheap-search-page-embeddings-2026-10-12.md`.
 
 ## 1. Intent
@@ -437,8 +443,8 @@ unsearchable. Budget or policy stops return results so far with
 ## 8. Rollout
 
 Env flag `DOCSLURP_DEFERRED_PROFILES`; draft PR; map first, Visual Pages
-second; pricing validation before any rate-card change; TODO.md items moved to
-DONE.md as they land.
+second; pricing validation before any rate-card change. The former root completion list
+is preserved as a [dated historical snapshot](../../history/2026-10-20-completed-work.md).
 
 ## 9. Decisions log
 

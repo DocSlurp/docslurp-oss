@@ -1,5 +1,16 @@
 # Embedding route audit and bounded comparison
 
+> Historical investigation record from the October 2026 retrieval experiments;
+> classified 2026-10-20. Status, deployment, provider prices, available adapters,
+> budgets and agent assignments below describe their original checkpoints. They
+> are not current operating instructions or renewed spending/delegation authority.
+> Current references: [model configuration](../../docs/model-configuration.md) and the [later smoke/preflight record](embedding-smoke.md).
+> Reported checks/results and outstanding work are preserved without rerunning
+> experiments or claiming that pending verification is complete. Any `/tmp` paths
+> are historical external evidence locations; their existence and contents were
+> not verified in this cleanup. They have not been relocated. New scratch work
+> follows the repository's agent-storage guidance.
+
 Verified 2026-10-16 from live official pages and this checkout; research only, no provider calls or infrastructure created. This is a capability/price forecast, not a quality result. No held-out extraction inputs or gold labels were read.
 
 ## Provider evidence

@@ -1,7 +1,28 @@
 # Pluggable parser sandbox — design
 
+> Historical design record, classified 2026-10-20. Implementation landed in
+> [23e926b8](https://github.com/DocSlurp/docslurp-oss/commit/23e926b8).
+> Current guidance: [sandbox provider guide](../../self-host/sandbox-providers.md) and [platform isolation guide](../../self-host/platform-isolation.md).
+> The original proposal, rollout instructions and test intentions below are
+> retained for context; they are not current implementation or deployment status.
+
+### Retired execution plan: verification and follow-up
+
+The task-by-task plan was retired on 2026-10-20 after implementation landed.
+Unchecked test, benchmark, image-build and contract-suite steps do not prove they
+ran or passed. Provider contract tests may skip when isolation or credentials are
+unavailable; this cleanup does not turn those skips into verification. Consult
+implementation/CI receipts before asserting coverage, measured overhead, or a
+published worker image. The plan did not authorize image publishing or releases.
+
+Cloud Run remains untested in the findings recorded below. The proposed
+`platform-task` provider remains a separate follow-up; this checkout does not
+establish its completion. The findings at the end supersede the original
+kernel/network assumption and record Fargate results and Modal abort behavior.
+Use the current provider guide for configuration and operational limitations.
+
 Date: 2026-10-19
-Status: draft for review
+Original status: draft for review
 Sub-project 2 of 7 in the self-host and deploy program. Program decisions are
 recorded in `2026-10-19-self-host-docs-design.md`.
 

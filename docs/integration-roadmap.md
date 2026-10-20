@@ -1,6 +1,6 @@
 # Integration roadmap
 
-Everything on this page is **planned**: none of these are installable packages yet, and no package names or release dates are promised. Native HTTP and the shared widget are building blocks, not proof of a finished integration; delivery is tracked in the repository's `TODO.md`. Shipped integrations live in the [Search & CMS integration guide](https://docslurp.io/docs/search-integrations).
+The work listed below is **planned**, except where an existing implementation is explicitly identified. No package names or release dates are promised for planned work. Native HTTP and the shared widget are building blocks, not proof of a finished integration; remaining delivery requirements are recorded on this page. Shipped integrations live in the [Search & CMS integration guide](https://docslurp.io/docs/search-integrations).
 
 Today, use the native [HTTP API](https://docslurp.io/docs/http) from any language, or the documented widget/component for an existing frontend. The integrations directory keeps native interfaces first, followed by search adapters, CMS platforms, frameworks, documentation sites and language clients.
 
