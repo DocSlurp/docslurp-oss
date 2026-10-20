@@ -1,0 +1,90 @@
+name: Worker Images
+
+# Publishes the worker images that remote parser sandboxes (for example the
+# Modal provider's default ghcr.io/docslurp/worker-full:<version>) pull.
+# Runs only on release tags and manual dispatch.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Image version tag without the leading v (for example 1.2.3)'
+        required: true
+        type: string
+
+concurrency:
+  group: worker-images-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    timeout-minutes: 60
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - profile: lean
+            dockerfile: worker/Dockerfile.lean
+          - profile: full
+            dockerfile: worker/Dockerfile.full
+    steps:
+      - name: Resolve image version
+        id: version
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          if [ "${REF_TYPE}" = "tag" ]; then
+            version="${REF_NAME#v}"
+          else
+            version="${INPUT_VERSION#v}"
+          fi
+          if ! printf '%s' "${version}" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$'; then
+            echo "Invalid image version: ${version}" >&2
+            exit 1
+          fi
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Reserve disk space for worker image build
+        run: |
+          # These hosted-runner SDKs are unused by this Node/Python worker.
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet
+          available_bytes="$(df -B1 --output=avail / | tail -n 1 | tr -d ' ')"
+          echo "Available image-build bytes: ${available_bytes}"
+          if [ "${available_bytes}" -lt 21474836480 ]; then
+            echo "Worker image build requires at least 20 GiB of free runner disk." >&2
+            exit 1
+          fi
+
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # The lockfiles are compiled for x86_64 Linux, so images are linux/amd64 only.
+      - name: Build and push worker-${{ matrix.profile }}
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          platforms: linux/amd64
+          push: true
+          tags: |
+            ghcr.io/docslurp/worker-${{ matrix.profile }}:${{ steps.version.outputs.version }}
+            ghcr.io/docslurp/worker-${{ matrix.profile }}:${{ github.sha }}
