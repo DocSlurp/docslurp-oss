@@ -1,3 +1,5 @@
+import { retrievalScope } from "./retrieval-scope.js";
+import { lexicalSearchableDocument } from "./eligibility.js";
 import { qualifyCommunitySummary } from "./community-context.js";
 import type { PrivacyMode } from "@docslurp/shared";
 import type { SearchResult } from "@docslurp/shared";
@@ -33,6 +35,8 @@ import {
 
 export interface SearchSessionExecutionInput {
   query: string;
+  /** Natural language after consuming explicit metadata syntax. */
+  retrievalQuery?: string;
   userId: string;
   session: SearchSessionJournal;
   options: SearchOptions;
@@ -289,7 +293,7 @@ export async function executeSearchSessionRetrieval(
       input.options.resultOrder === "prompt");
   const chunks = shouldPostProcess
     ? await applySearchPostRetrievalProcessing({
-        query: input.query,
+        query: input.retrievalQuery ?? input.query,
         chunks: fused,
         limit: input.limit,
         options: input.options,
@@ -305,6 +309,7 @@ export async function executeSearchSessionRetrieval(
 
   return finalizeSearchSessionExecution({
     query: input.query,
+    retrievalQuery: input.retrievalQuery,
     userId: input.userId,
     session: input.session,
     options: input.options,
@@ -328,20 +333,19 @@ export async function finalizeSearchSessionExecution(
   let results = input.chunks.map((chunk) => searchChunkToResult(chunk));
   if (input.workspaceSettings) {
     results = applySearchControls({
-      query: input.query,
+      query: input.retrievalQuery ?? input.query,
       results,
       settings: input.workspaceSettings,
-      allowMissingPins: !input.filters?.tags?.length,
     });
   }
 
   // Compression may rewrite the text; restore the scope qualification afterward.
   results = results.map((result) => result.citation.source === "community_summary"
-    ? { ...result, text: qualifyCommunitySummary(result.text, input.filters?.tags) }
+    ? { ...result, text: qualifyCommunitySummary(result.text, { ...input.filters, ...(input.options.runId ? { runId: input.options.runId } : {}) }) }
     : result);
 
   if (input.options.parentRetrieval) {
-    await attachParentText(results);
+    await attachParentText(results, input);
   }
 
   let calibratedResults = calibrateSearchConfidence(results);
@@ -429,7 +433,9 @@ export async function finalizeSearchSessionExecution(
   };
 }
 
-async function attachParentText(results: SearchResult[]): Promise<void> {
+async function attachParentText(results: SearchResult[], input: SearchSessionExecutionInput): Promise<void> {
+  const scope = retrievalScope({ workspaceId: input.workspaceId, filters: input.filters, runId: input.options.runId });
+  results = results.filter(result => result.citation.source === "document");
   const keyMap = new Map<string, { documentId: string; pageNumber: number }>();
   for (const result of results) {
     const documentId = result.citation.documentId;
@@ -450,10 +456,13 @@ async function attachParentText(results: SearchResult[]): Promise<void> {
   const rows = await sql<
     { document_id: string; page_number: number; text: string }[]
   >`
-    select document_id, page_number, text
-    from document_pages
-    where document_id = any(${sql.array(documentIds, 25)})
-      and page_number = any(${sql.array(pageNumbers, 23)})
+    select p.document_id, p.page_number, p.text
+    from document_pages p
+    join documents d on d.id = p.document_id
+    where p.document_id = any(${sql.array(documentIds, 25)})
+      and p.page_number = any(${sql.array(pageNumbers, 23)})
+      and ${scope.page()}
+      and ${lexicalSearchableDocument("d")}
   `;
 
   const lookup = new Map(
@@ -466,7 +475,11 @@ async function attachParentText(results: SearchResult[]): Promise<void> {
       as hit(document_id text, chunk_index int, page_number int)
     join lateral (
       select c.text, c.chunk_index, c.page_number from document_chunks c
-      where c.document_id = hit.document_id and (case when hit.page_number is not null then c.chunk_index between
+      join documents d on d.id = c.document_id
+      where c.document_id = hit.document_id
+        and ${scope.chunk()}
+        and ${lexicalSearchableDocument("d")}
+        and (case when hit.page_number is not null then c.chunk_index between
         (select min(bound.chunk_index) from document_chunks bound where bound.document_id = hit.document_id and bound.page_number between hit.page_number and hit.page_number + 1)
         and (select max(bound.chunk_index) from document_chunks bound where bound.document_id = hit.document_id and bound.page_number between hit.page_number and hit.page_number + 1)
         else c.chunk_index between hit.chunk_index - 1 and hit.chunk_index + 1 end)

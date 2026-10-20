@@ -29,6 +29,7 @@ export interface RetrievalQueryFlags {
 
 /** A retrieval query parameter that cannot be honoured; routes answer it with 400. */
 export class InvalidRetrievalQueryError extends Error {
+  readonly statusCode = 400;
   constructor(message: string) {
     super(message);
     this.name = "InvalidRetrievalQueryError";

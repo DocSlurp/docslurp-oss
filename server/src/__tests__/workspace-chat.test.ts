@@ -436,7 +436,7 @@ describe("chatWorkspace", () => {
 
     if (namedFile) {
       expect(hybridSearch).toHaveBeenCalledWith(expect.any(String), "user-1", expect.objectContaining({ filters: { workspaceId: "ws-1", documentIds: ["doc-1"] } }));
-      expect(loadWorkspaceWholeCorpusContext).toHaveBeenCalledWith(expect.objectContaining({ documentIds: ["doc-1"] }));
+      expect(loadWorkspaceWholeCorpusContext).toHaveBeenCalledWith(expect.objectContaining({ filters: { documentIds: ["doc-1"] } }));
     }
     expect(response.searchSessionId).toEqual(expect.any(String));
     expect(response.debug.mode).toBe("retrieval");

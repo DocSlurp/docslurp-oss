@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { qualifyCommunitySummary } from "../search/community-context.js";
-import { documentTagPredicate } from "../search/document-tags.js";
+import { retrievalScope } from "../search/retrieval-scope.js";
 import type {
   CanonicalBlockType,
   CitationLocator,
@@ -34,7 +34,7 @@ import {
   type SearchAvailabilityRow,
 } from "../search/session-setup.js";
 import { getWorkspaceAccess } from "./organizations.js";
-import { andSqlFragments, type SqlFragment } from "../lib/sql-fragments.js";
+import type { SqlFragment } from "../lib/sql-fragments.js";
 import {
   earlyLexicalDocument,
   lexicalSearchableDocument,
@@ -380,9 +380,8 @@ type WholeCorpusSummaryRow = {
 
 export async function loadWorkspaceWholeCorpusContext(args: {
   workspaceId: string;
-  documentIds?: string[];
-  documentId?: string;
-  tags?: string[];
+  filters?: SearchFilters;
+  runId?: string;
   userId: string;
   maxDocuments?: number;
   maxChunks?: number;
@@ -415,6 +414,7 @@ export async function loadWorkspaceWholeCorpusContext(args: {
       return emptyContext;
     }
 
+    const scope = retrievalScope({ workspaceId: access.workspaceId, filters: args.filters, runId: args.runId });
     const [summary] = await sql<WholeCorpusSummaryRow[]>`
       select
         count(distinct c.document_id)::int as document_count,
@@ -425,9 +425,7 @@ export async function loadWorkspaceWholeCorpusContext(args: {
       join documents d on d.id = c.document_id
       where d.workspace_id = ${access.workspaceId}
         and ${lexicalSearchableDocument("d")}
-        and (${!args.documentIds?.length} or d.id in (select jsonb_array_elements_text(${sql.json(args.documentIds ?? [])}::jsonb)))
-        and (${args.documentId ?? null}::text is null or d.id = ${args.documentId ?? null})
-        and ${documentTagPredicate(sql`d.id`, args.tags)}
+        and ${scope.chunk()}
     `;
 
     const stats = {
@@ -450,9 +448,7 @@ export async function loadWorkspaceWholeCorpusContext(args: {
         join documents d on d.id = p.document_id
         where d.workspace_id = ${access.workspaceId}
           and ${lexicalSearchableDocument("d")}
-        and (${!args.documentIds?.length} or d.id in (select jsonb_array_elements_text(${sql.json(args.documentIds ?? [])}::jsonb)))
-        and (${args.documentId ?? null}::text is null or d.id = ${args.documentId ?? null})
-        and ${documentTagPredicate(sql`d.id`, args.tags)}
+        and ${scope.page()}
       `;
       const pageCount = pageSummary?.page_count ?? 0;
       const pageChars = pageSummary?.char_estimate ?? 0;
@@ -464,9 +460,7 @@ export async function loadWorkspaceWholeCorpusContext(args: {
           join documents d on d.id = p.document_id
           where d.workspace_id = ${access.workspaceId}
             and ${lexicalSearchableDocument("d")}
-        and (${!args.documentIds?.length} or d.id in (select jsonb_array_elements_text(${sql.json(args.documentIds ?? [])}::jsonb)))
-        and (${args.documentId ?? null}::text is null or d.id = ${args.documentId ?? null})
-        and ${documentTagPredicate(sql`d.id`, args.tags)}
+        and ${scope.page()}
           order by d.filename asc, p.page_number asc
           limit ${limits.maxChunks}
         `;
@@ -541,9 +535,7 @@ export async function loadWorkspaceWholeCorpusContext(args: {
       join documents d on d.id = c.document_id
       where d.workspace_id = ${access.workspaceId}
         and ${lexicalSearchableDocument("d")}
-        and (${!args.documentIds?.length} or d.id in (select jsonb_array_elements_text(${sql.json(args.documentIds ?? [])}::jsonb)))
-        and (${args.documentId ?? null}::text is null or d.id = ${args.documentId ?? null})
-        and ${documentTagPredicate(sql`d.id`, args.tags)}
+        and ${scope.chunk()}
       order by d.filename asc, c.chunk_index asc
       limit ${limits.maxChunks}
     `;
@@ -705,22 +697,8 @@ function buildSearchAvailability(
   });
 }
 
-function supportsProgressivePageSearch(
-  filters: SearchFilters | undefined,
-): boolean {
-  if (!filters) {
-    return true;
-  }
-
-  if (filters.language) {
-    return false;
-  }
-
-  if (filters.headingPath && filters.headingPath.length > 0) {
-    return false;
-  }
-
-  return true;
+function supportsProgressivePageSearch(filters: SearchFilters | undefined): boolean {
+  return retrievalScope({ filters }).supportsPages;
 }
 
 /**
@@ -750,7 +728,7 @@ async function vectorSearch(
       join vector_indexes v on v.document_id = d.id
       where d.workspace_id = ${workspaceId}
         and d.status = 'completed' and d.superseded_at is null
-        and ${documentTagPredicate(sql`d.id`, options.filters?.tags)}
+        and ${retrievalScope({ workspaceId, filters: options.filters, runId: options.runId }).vectorDocument()}
         and v.backend = 'lancedb'
         and v.embedding_model = ${embedding.model}
         and v.dimension = ${queryVector.length}
@@ -765,10 +743,7 @@ async function vectorSearch(
     )
     select distinct on (id) id, node as owner_id from chain order by id, depth desc
   `;
-  const requestedDocumentIds = options.filters?.documentIds?.length
-    ? new Set(options.filters.documentIds)
-    : options.filters?.documentId ? new Set([options.filters.documentId]) : null;
-  const scopedRows = docRows.filter(row => !requestedDocumentIds || requestedDocumentIds.has(row.id));
+  const scopedRows = docRows;
   const documentIds = scopedRows.map((row) => row.id);
   if (documentIds.length === 0) return [];
   const copiesByOwner = new Map<string, string[]>();
@@ -892,107 +867,12 @@ function mapRankedChunkRows(rows: ChunkRow[], partial = false, phraseIds?: Reado
   }));
 }
 
-function buildChunkSearchWhere(
-  filters: SearchFilters | undefined,
-  runId: string | undefined,
-): SqlFragment {
-  const conditions: SqlFragment[] = [lexicalSearchableDocument("d")];
-  addCommonChunkFilterFragments(conditions, filters, "chunks");
-
-  if (runId) {
-    conditions.push(sql`c.run_id = ${runId}`);
-  }
-
-  return andSqlFragments(conditions);
+function buildChunkSearchWhere(filters: SearchFilters | undefined, runId: string | undefined): SqlFragment {
+  return sql`${lexicalSearchableDocument("d")} and ${retrievalScope({ filters, runId }).chunk()}`;
 }
 
-function buildProgressivePageWhere(
-  filters: SearchFilters | undefined,
-  runId: string | undefined,
-): SqlFragment {
-  const conditions: SqlFragment[] = [];
-  addCommonChunkFilterFragments(conditions, filters, "progressive_pages");
-
-  if (runId) {
-    conditions.push(sql`progressive_pages.run_id = ${runId}`);
-  }
-
-  return andSqlFragments(conditions);
-}
-
-function addCommonChunkFilterFragments(
-  conditions: SqlFragment[],
-  filters: SearchFilters | undefined,
-  target: "chunks" | "progressive_pages",
-): void {
-  if (!filters) {
-    return;
-  }
-
-  const documentColumn =
-    target === "chunks" ? sql`c.document_id` : sql`progressive_pages.document_id`;
-  const runColumn =
-    target === "chunks" ? sql`c.run_id` : sql`progressive_pages.run_id`;
-  const pageColumn =
-    target === "chunks" ? sql`c.page_number` : sql`progressive_pages.page_number`;
-  const createdColumn =
-    target === "chunks" ? sql`c.created_at` : sql`progressive_pages.created_at`;
-
-  if (target === "chunks") {
-    if (filters.language) {
-      conditions.push(sql`c.metadata ->> 'language' = ${filters.language}`);
-    }
-
-    if (filters.headingPath && filters.headingPath.length > 0) {
-      conditions.push(sql`c.heading_path @> ${sql.array(filters.headingPath)}`);
-    }
-  }
-
-  if (filters.documentIds && filters.documentIds.length > 0) {
-    conditions.push(sql`${documentColumn} in (select jsonb_array_elements_text(${sql.json(filters.documentIds)}::jsonb))`);
-  } else if (filters.documentId) {
-    conditions.push(sql`${documentColumn} = ${filters.documentId}`);
-  }
-
-  if (filters.runId) {
-    conditions.push(sql`${runColumn} = ${filters.runId}`);
-  }
-
-  if (filters.workspaceId) {
-    conditions.push(sql`${documentColumn} in (select id from documents where workspace_id = ${filters.workspaceId})`);
-  }
-
-  if (filters.filenameContains) {
-    conditions.push(sql`${documentColumn} in (select id from documents where filename ilike ${`%${filters.filenameContains}%`})`);
-  }
-
-  if (filters.mimeTypes && filters.mimeTypes.length > 0) {
-    conditions.push(sql`${documentColumn} in (select id from documents where mime_type = any(${sql.array(filters.mimeTypes)}))`);
-  }
-
-  if (filters.tags && filters.tags.length > 0) {
-    conditions.push(sql`${documentColumn} in (
-      select document_id
-      from document_tags
-      where tag = any(${sql.array(filters.tags)})
-    )`);
-  }
-
-  if (filters.pageRange?.from !== undefined && filters.pageRange?.to !== undefined) {
-    conditions.push(sql`${pageColumn} between ${filters.pageRange.from} and ${filters.pageRange.to}`);
-  } else if (filters.pageRange?.from !== undefined) {
-    conditions.push(sql`${pageColumn} >= ${filters.pageRange.from}`);
-  } else if (filters.pageRange?.to !== undefined) {
-    conditions.push(sql`${pageColumn} <= ${filters.pageRange.to}`);
-  }
-
-  if (filters.dateRange?.from !== undefined && filters.dateRange?.to !== undefined) {
-    conditions.push(sql`${createdColumn} between ${filters.dateRange.from}::timestamptz and ${filters.dateRange.to}::timestamptz`);
-  } else if (filters.dateRange?.from !== undefined) {
-    conditions.push(sql`${createdColumn} >= ${filters.dateRange.from}::timestamptz`);
-  } else if (filters.dateRange?.to !== undefined) {
-    conditions.push(sql`${createdColumn} <= ${filters.dateRange.to}::timestamptz`);
-  }
+function buildProgressivePageWhere(filters: SearchFilters | undefined, runId: string | undefined): SqlFragment {
+  return retrievalScope({ filters, runId }).progressivePage();
 }
 
 async function textSearch(
@@ -1184,7 +1064,7 @@ async function completedPageSearch(args: {
       where d.workspace_id = ${args.workspaceId}
         and d.status = 'completed' and d.superseded_at is null
         and c.id is null
-        and ${documentTagPredicate(sql`d.id`, args.options.filters?.tags)}
+        and ${retrievalScope({ workspaceId: args.workspaceId, filters: args.options.filters, runId: args.options.runId }).page()}
         and to_tsvector('english', p.text) @@ websearch_to_tsquery('english', ${args.query})
       order by rank asc
       limit ${limit}
@@ -1231,10 +1111,10 @@ async function communitySummarySearch(
     documentId: `community:${row.id}`,
     runId: row.run_id,
     chunkIndex: 0,
-    text: qualifyCommunitySummary(row.summary, options.filters?.tags),
+    text: qualifyCommunitySummary(row.summary, { ...options.filters, ...(options.runId ? { runId: options.runId } : {}) }),
     headingPath: [row.label],
     pageNumber: null,
-    tokenEstimate: Math.ceil(qualifyCommunitySummary(row.summary, options.filters?.tags).length / 4),
+    tokenEstimate: Math.ceil(qualifyCommunitySummary(row.summary, { ...options.filters, ...(options.runId ? { runId: options.runId } : {}) }).length / 4),
     score: 1 / (120 + row.rank),
     filename: `${row.label} community`,
     pageNumbers: [],
@@ -1318,7 +1198,7 @@ async function graphNeighborSearch(
       join documents document on document.id = chunk.document_id
       where document.workspace_id = ${workspaceId}
         and ${lexicalSearchableDocument("document")}
-        and ${documentTagPredicate(sql`document.id`, options.filters?.tags)}
+        and ${retrievalScope({ workspaceId, filters: options.filters, runId: options.runId }).graphChunk()}
       order by rank asc
       limit ${limit}
     `;
@@ -1366,9 +1246,8 @@ async function executeHybridSearch(
     const corpusCtx = await loadWorkspaceWholeCorpusContext({
       workspaceId: setup.normalizedScope.workspaceId,
       userId,
-      documentIds: filters?.documentIds,
-      documentId: filters?.documentId,
-      tags: filters?.tags,
+      filters,
+      runId: setup.resolvedOptions.runId,
       maxDocuments: wholeCorpusContextLimits.maxDocuments,
       maxChunks: wholeCorpusContextLimits.maxChunks,
       maxTokens: wholeCorpusContextLimits.maxTokens,

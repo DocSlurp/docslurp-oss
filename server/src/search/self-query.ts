@@ -1,7 +1,26 @@
+import { InvalidRetrievalQueryError } from "../lib/retrieval-query-flags.js";
 import type { PrivacyMode } from "@docslurp/shared";
 import { SEARCH_OPENROUTER_MODEL, generateOpenRouterText } from "../lib/ai.js";
 import type { UsageRecorder } from "../lib/ai-usage.js";
 import type { SearchFilters } from "./filters.js";
+
+/** Consume explicit tag syntax once, before any retrieval or derived prompts. */
+export function parseSelfQuerySyntax(query: string): { query: string; tags: string[] } {
+  const tags: string[] = [];
+  const naturalLanguage = query.replace(/(^|\s)tag:("[^"\n]*"[^\s]*|[^\s]*)/g, (_token, space: string, value: string) => {
+    const tag = value.startsWith('"') && value.endsWith('"') ? value.slice(1, -1).trim() : value;
+    if (!tag || tag.length > 100 || /[\u0000,"]/.test(tag)) {
+      throw new InvalidRetrievalQueryError("tag: requires a label of 1 to 100 characters; quote labels containing spaces");
+    }
+    tags.push(tag);
+    return space;
+  }).replace(/\s+/g, " ").trim();
+  if (tags.length > 24) throw new InvalidRetrievalQueryError("At most 24 tag: labels are allowed");
+  if (tags.length && !naturalLanguage) {
+    throw new InvalidRetrievalQueryError("Include search text alongside tag: labels");
+  }
+  return { query: tags.length ? naturalLanguage : query, tags: uniqueStrings(tags) };
+}
 
 type SelfQueryPlan = {
   filters: SearchFilters;
@@ -96,10 +115,10 @@ function deriveHeuristicPlan(query: string): SelfQueryPlan {
   const filters: SearchFilters = {};
   const reasons: string[] = [];
 
-  const tags = [...query.matchAll(/\btag:(?:"([^"\n]+)"|([^\s,]+))/g)]
-    .map((match) => (match[1] ?? match[2]).trim()).filter(Boolean);
-  if (tags.length && tags.length <= 24 && tags.every((tag) => tag.length <= 100 && !/[\u0000,]/.test(tag))) {
-    filters.tags = uniqueStrings(tags);
+  const syntax = parseSelfQuerySyntax(query);
+  query = syntax.query;
+  if (syntax.tags.length) {
+    filters.tags = syntax.tags;
     reasons.push("Applied explicit tag: labels.");
   }
 
@@ -120,7 +139,7 @@ function deriveHeuristicPlan(query: string): SelfQueryPlan {
     }
   }
 
-  const quotedDocument = query.replace(/\btag:(?:"[^"\n]+"|[^\s,]+)/g, "").match(/["“](.+?)["”]/);
+  const quotedDocument = query.match(/["“](.+?)["”]/);
   if (quotedDocument?.[1]) {
     filters.filenameContains = quotedDocument[1];
     reasons.push(`Detected quoted document reference "${quotedDocument[1]}".`);
@@ -219,7 +238,7 @@ export async function deriveSelfQueryFilters(args: {
           "Extract only explicit metadata filters from the query and return pure JSON.",
           "Allowed keys: filenameContains, mimeTypes, pageFrom, pageTo, language, heading, dateFrom, dateTo, reasons.",
           "If a filter is not explicit, omit it.",
-          `Query: ${args.query}`,
+          `Query: ${parseSelfQuerySyntax(args.query).query}`,
         ].join("\n"),
       });
       // Record before parsing: tokens are spent even if the JSON is unusable.

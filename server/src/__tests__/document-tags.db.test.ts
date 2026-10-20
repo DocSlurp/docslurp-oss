@@ -66,7 +66,7 @@ it.each([false, true])("filters document evidence and preserves qualified summar
 });
 
 it("returns no unrelated document evidence for an unknown tag", async () => {
-  const context = await search.loadWorkspaceWholeCorpusContext({ workspaceId: "w", userId: "u", tags: ["missing"] });
+  const context = await search.loadWorkspaceWholeCorpusContext({ workspaceId: "w", userId: "u", filters: { tags: ["missing"] } });
   expect(context.results).toEqual([]);
 });
 

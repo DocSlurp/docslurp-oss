@@ -155,7 +155,7 @@ describe("applySearchControls", () => {
 
 
 it("does not fabricate pinned documents outside filtered candidates", () => {
-  const results = applySearchControls({ query: "budget", results: [], allowMissingPins: false,
+  const results = applySearchControls({ query: "budget", results: [],
     settings: { ...defaultWorkspaceSearchSettings, workspaceId: "w", userId: "u", pinnedResults: [{ queryPattern: "budget", documentId: "outside" }] },
   });
   expect(results).toEqual([]);

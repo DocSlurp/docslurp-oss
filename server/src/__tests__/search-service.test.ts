@@ -54,7 +54,8 @@ vi.mock("../search/query-rewrite.js", () => ({
   rewriteQuery: vi.fn(),
 }));
 
-vi.mock("../search/self-query.js", () => ({
+vi.mock("../search/self-query.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../search/self-query.js")>()),
   deriveSelfQueryFilters: vi.fn(),
 }));
 
@@ -454,7 +455,7 @@ describe("hybridSearch", () => {
           return [{ document_id: "doc-1", chunk_index: 0, text: "Neighboring page text", page_numbers: [3, 4] }];
         }
 
-        if (text.includes("select document_id, page_number, text")) {
+        if (text.includes("select p.document_id, p.page_number, p.text")) {
           return hasPages ? [
             { document_id: "doc-1", page_number: 3, text: "Parent page text" },
           ] : [];
@@ -480,7 +481,7 @@ describe("hybridSearch", () => {
     const pageLookupCall = sqlMock.mock.calls.find(
       ([strings]) =>
         Array.isArray(strings) &&
-        strings.join(" ").includes("select document_id, page_number, text"),
+        strings.join(" ").includes("select p.document_id, p.page_number, p.text"),
     );
     expect(pageLookupCall).toBeDefined();
     expect(pageLookupCall?.[0].join(" ")).toContain("document_id = any(");
@@ -585,7 +586,7 @@ describe("hybridSearch", () => {
     sqlMock.mockImplementation(async (strings) => {
       const text = Array.isArray(strings) ? strings.join(" ") : String(strings);
       if (text.includes("from workspaces w")) return [{ workspace_id: "ws-1", org_id: "org-1", workspace_owner_user_id: "user-1", org_role: "owner", workspace_role: null }];
-      if (text.includes("join vector_indexes")) return [{ id: "doc-1" }, { id: "doc-2" }];
+      if (text.includes("join vector_indexes")) return [{ id: "doc-1", owner_id: "doc-1" }];
       return [];
     });
     lanceDbVectorSearch.mockResolvedValue([]);
