@@ -10,7 +10,8 @@ import {
   BudgetGuard, DEFAULT_BASELINE_MODEL, DEFAULT_JUDGE_MODEL, appendJsonl, assertModelAllowed, bootstrapCi, hashOf, jaccard,
   loadPrices, mean, normalize, openRouterJson, parseArgs, quantile, readJson, readJsonl, seededOrder, sum, writeJsonExclusive, writeTextExclusive,
 } from "./lib.mjs";
-import { citedIndexes } from "./response.mjs";
+import { groundingOverlap, loadCorpusPages } from "./dataset.mjs";
+import { citedIndexes, extractChatResponse } from "./response.mjs";
 
 export const SCORE_SCHEMA = "docslurp-search-model-eval-score@v1";
 export const JUDGE_PROMPT_VERSION = "search-model-eval-judge@v1";
@@ -27,7 +28,39 @@ const PROTOCOL = /invalid|schema|argument|parse|malformed|validation/i;
  * `pageOnly` (workspaces of prefix slices of one source) needs the same page
  * number on any document whose known page count covers it.
  */
-export const matchContext = (tier) => ({ citationMatch: tier?.citationMatch ?? "documentAndPage", documentMap: tier?.documentMap ?? {}, documents: tier?.documents ?? {} });
+export const matchContext = (tier) => {
+  const documentMap = tier?.documentMap ?? {}, documents = tier?.documents ?? {};
+  const sourceDocById = {};
+  for (const [sourceDoc, documentId] of Object.entries(documentMap)) sourceDocById[documentId] = sourceDoc;
+  for (const [documentId, meta] of Object.entries(documents)) if (meta?.sourceDoc && !sourceDocById[documentId]) sourceDocById[documentId] = meta.sourceDoc;
+  // pageOnly workspaces are slices of one source; its pages are that source's pages.
+  const pageOnlySourceDoc = tier?.pageOnlySourceDoc ?? (tier?.scope?.sourceDocs?.length === 1 ? tier.scope.sourceDocs[0] : null);
+  return { citationMatch: tier?.citationMatch ?? "documentAndPage", documentMap, documents, sourceDocById, pageOnlySourceDoc };
+};
+
+/** Source page behind a production citation page: (sourceDoc, page), or null when unmapped. */
+export function sourcePageOf(documentId, page, context) {
+  const sourceDoc = context.citationMatch === "pageOnly" ? context.pageOnlySourceDoc : context.sourceDocById[documentId];
+  return sourceDoc ? { sourceDoc, page } : null;
+}
+
+/**
+ * Fact-grounded support: do the cited (or retrieved) pages actually contain the
+ * gold facts? Each citation is one unit (its pages' text joined, so a fact
+ * straddling a multi-page chunk counts). any_of: some unit grounds every fact;
+ * all_of: every fact is grounded by some unit. A fact is grounded at
+ * groundingOverlap >= 0.6. Null when no unit has page text.
+ */
+export function factGrounding(gold, citations, context, pageText, minOverlap = 0.6) {
+  if (!gold.answerable || !gold.facts?.length || typeof pageText !== "function") return { grounded: null, unitsWithText: 0, units: citations.length };
+  const units = citations.map((citation) => citation.pages.map((page) => { const source = sourcePageOf(citation.documentId, page, context); return source ? pageText(source.sourceDoc, source.page) : null; }).filter((text) => typeof text === "string").join("\n")).filter(Boolean);
+  if (!units.length) return { grounded: null, unitsWithText: 0, units: citations.length };
+  const grounds = (fact, text) => groundingOverlap(fact, text) >= minOverlap;
+  const grounded = gold.supportMode === "all_of"
+    ? gold.facts.every((fact) => units.some((text) => grounds(fact, text)))
+    : units.some((text) => gold.facts.every((fact) => grounds(fact, text)));
+  return { grounded, unitsWithText: units.length, units: citations.length };
+}
 
 function goldDocumentIds(page, context) {
   const ids = new Set();
@@ -65,30 +98,42 @@ export const heuristicAbstained = (answer, stopReason = null) => stopReason === 
 
 const finalAttempt = (record) => (record.attempts ?? []).filter((attempt) => !attempt.refusedByBudget).at(-1) ?? null;
 
-export function scoreCall(entry, record, { tier = null, judgment = null } = {}) {
+const pageList = (citations) => citations.map((citation) => ({ documentId: citation.documentId, pages: citation.pages }));
+
+export function scoreCall(entry, record, { tier = null, judgment = null, pageText = null } = {}) {
   const gold = entry.gold;
   const final = finalAttempt(record);
-  const x = final?.extracted ?? null;
+  // Re-read the raw response so normalisation fixes apply to earlier runs.
+  const x = final?.response ? extractChatResponse(final.response) : final?.extracted ?? null;
   const ok = Boolean(final?.ok && x);
   const context = matchContext(tier);
   const catalog = Object.keys(context.documents).length ? context.documents : null;
   const citations = x?.citations ?? [];
   const toolCalls = x?.toolCalls ?? null;
   const toolEvidenceExposed = Boolean(toolCalls?.some((call) => Array.isArray(call.evidence)));
-  const evidence = toolEvidenceExposed ? toolCalls.flatMap((call) => call.evidence ?? []) : citations;
-  const evidenceSource = !ok ? null : toolEvidenceExposed ? "tool_calls" : citations.length ? "citations_list" : null;
+  const toolEvidence = toolEvidenceExposed ? toolCalls.flatMap((call) => call.evidence ?? []) : [];
+  // Tool evidence without page numbers (a multi-page chunk before the server
+  // reports pageNumbers) cannot place a page; the response citations list is
+  // itself the gathered evidence on the agent path, so evidence is the union.
+  const pagelessEvidence = toolEvidence.filter((item) => !item.pages.length);
+  const evidence = [...toolEvidence.filter((item) => item.pages.length), ...citations];
+  const evidenceSource = !ok ? null : toolEvidenceExposed ? (citations.length ? "tool_calls+citations_list" : "tool_calls") : citations.length ? "citations_list" : null;
   const markers = ok ? citedIndexes(x.answer) : [];
   const cited = markers.map((index) => citations[index - 1] ?? null);
   const validity = cited.map((citation) => {
     if (!citation) return { resolvable: false, exists: null, inEvidence: null, valid: false };
     const meta = catalog?.[citation.documentId];
     const exists = !catalog ? null : Boolean(meta) && citation.pages.length > 0 && (!Number.isSafeInteger(meta.pageCount) || citation.pages.every((page) => page <= meta.pageCount));
-    const inEvidence = evidenceSource !== "tool_calls" ? null : evidence.some((item) => item.documentId === citation.documentId && item.pages.some((page) => citation.pages.includes(page)));
+    // Checked against tool evidence only; unknown when that document has page-less evidence.
+    const inTool = toolEvidence.some((item) => item.documentId === citation.documentId && item.pages.some((page) => citation.pages.includes(page)));
+    const inEvidence = !toolEvidenceExposed ? null : inTool ? true : pagelessEvidence.some((item) => item.documentId === citation.documentId) ? null : false;
     return { resolvable: true, exists, inEvidence, valid: exists !== false && inEvidence !== false && citation.pages.length > 0 };
   });
   const answerable = gold.answerable;
   const evidenceRecall = ok && answerable && evidenceSource ? supportRecall(gold, evidence, context) : null;
   const citedRecall = ok && answerable ? supportRecall(gold, cited.filter(Boolean), context) ?? { recall: 0, all: false } : null;
+  const groundedCited = ok && answerable ? factGrounding(gold, cited.filter(Boolean), context, pageText) : null;
+  const groundedEvidence = ok && answerable ? factGrounding(gold, evidence, context, pageText) : null;
   const citedRelevant = ok && answerable && gold.relevantPages?.length ? cited.some((citation) => citation && gold.relevantPages.some((page) => hitsPage(page, citation, context))) : null;
 
   const searchCalls = toolCalls ? toolCalls.filter((call) => /search/i.test(call.name ?? "")) : [];
@@ -116,6 +161,11 @@ export function scoreCall(entry, record, { tier = null, judgment = null } = {}) 
     abstained, heuristicAbstained: heuristic,
     evidenceSource, evidenceRecall: evidenceRecall?.recall ?? null, evidenceAll: evidenceRecall?.all ?? null,
     citedRecall: citedRecall?.recall ?? null, citedAll: citedRecall?.all ?? null, citedRelevant,
+    groundedCitation: groundedCited?.grounded ?? null, groundedEvidence: groundedEvidence?.grounded ?? null,
+    groundingUnits: groundedCited ? { cited: groundedCited.units, citedWithText: groundedCited.unitsWithText, evidence: groundedEvidence.units, evidenceWithText: groundedEvidence.unitsWithText } : null,
+    goldPages: gold.supportPages.map((page) => ({ sourceDoc: page.sourceDoc ?? null, documentId: page.documentId ?? context.documentMap[page.sourceDoc] ?? null, page: page.page, group: page.group })),
+    citedPages: ok ? pageList(cited.filter(Boolean)) : null,
+    evidencePages: ok ? pageList(evidence) : null, pagelessToolEvidence: pagelessEvidence.length,
     citationMarkers: markers.length,
     citationValidity: markers.length ? validity.filter((item) => item.valid).length / markers.length : null,
     citationsUnresolvable: validity.filter((item) => !item.resolvable).length,
@@ -204,6 +254,8 @@ export function aggregate(rows, { seed = "search-model-eval", iterations = 2000 
     answerableCorrectRate: ci("answerable-correct", (row) => row.correct, answerable),
     evidenceRecall: ci("evidence-recall", (row) => row.evidenceRecall, answerable),
     citedRecall: ci("cited-recall", (row) => row.citedRecall, answerable),
+    groundedCitationRate: ci("grounded-citation", (row) => row.groundedCitation, answerable),
+    groundedEvidenceRate: ci("grounded-evidence", (row) => row.groundedEvidence, answerable),
     citedAllRate: ci("cited-all", (row) => row.citedAll, answerable),
     citationValidity: ci("citation-validity", (row) => row.citationValidity),
     correctAbstainRate: ci("correct-abstain", (row) => row.abstained, (row) => unanswerable(row) && row.ok),
@@ -320,8 +372,8 @@ const ciText = (value) => (value?.n ? `${fmt(value.mean)} [${fmt(value.low)}, ${
 export function renderMarkdown(report) {
   const lines = [`# Search-agent model comparison`, "", `- Dataset: \`${report.datasetSha256 ?? "unknown"}\``, `- Runs: ${(report.runs ?? []).join(", ")}`, `- Judge: ${report.judgeModel ?? "disabled"} (${JUDGE_PROMPT_VERSION})`, `- Calls scored: ${report.calls}; bootstrap ${report.iterations} iterations, seed \`${report.seed}\`; 95% CIs resample calls.`, `- Pages per $: not applicable to chat calls.`, ""];
   const table = (title, groups) => {
-    lines.push(`## ${title}`, "", "| group | n | ok | correct | cited recall | evidence recall | citation validity | false give-up | correct abstain | limit exhaustion | p50 / p95 ms | $/call | $/correct | correct/$ |", "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|");
-    for (const [key, row] of Object.entries(groups)) lines.push(`| ${label(key)} | ${row.n} | ${row.ok} | ${ciText(row.correctRate)} | ${ciText(row.citedRecall)} | ${ciText(row.evidenceRecall)} | ${ciText(row.citationValidity)} | ${ciText(row.falseGiveUpRate)} | ${ciText(row.correctAbstainRate)} | ${ciText(row.limitExhaustionRate)} | ${fmt(row.latencyMs.p50, 0)} / ${fmt(row.latencyMs.p95, 0)} | ${fmt(row.costUsd.perCall, 5)} | ${fmt(row.costPerCorrectUsd, 5)} | ${fmt(row.correctPerDollar, 1)} |`);
+    lines.push(`## ${title}`, "", "| group | n | ok | correct | cited recall | grounded citation | evidence recall | grounded evidence | citation validity | false give-up | correct abstain | limit exhaustion | p50 / p95 ms | $/call | $/correct | correct/$ |", "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|");
+    for (const [key, row] of Object.entries(groups)) lines.push(`| ${label(key)} | ${row.n} | ${row.ok} | ${ciText(row.correctRate)} | ${ciText(row.citedRecall)} | ${ciText(row.groundedCitationRate)} | ${ciText(row.evidenceRecall)} | ${ciText(row.groundedEvidenceRate)} | ${ciText(row.citationValidity)} | ${ciText(row.falseGiveUpRate)} | ${ciText(row.correctAbstainRate)} | ${ciText(row.limitExhaustionRate)} | ${fmt(row.latencyMs.p50, 0)} / ${fmt(row.latencyMs.p95, 0)} | ${fmt(row.costUsd.perCall, 5)} | ${fmt(row.costPerCorrectUsd, 5)} | ${fmt(row.correctPerDollar, 1)} |`);
     lines.push("");
   };
   table("By model", report.byModel);
@@ -362,7 +414,30 @@ export function loadRunRecords(runDirs) {
   return records;
 }
 
-export async function scoreRuns({ dataset, records, tiers = null, runConfigs = [], judge = null, judgeModel = null, seed = "search-model-eval", iterations = 2000, baseline = DEFAULT_BASELINE_MODEL, onJudgment = () => {} }) {
+/** Loads, in one pass, the corpus text of every page cited or retrieved in the records. */
+export async function corpusPageText(corpusPath, { dataset, records, tiers = null }) {
+  const cases = new Map(dataset.cases.map((entry) => [entry.id, entry]));
+  const wanted = new Map();
+  for (const record of records) {
+    const entry = cases.get(record.caseId);
+    const final = finalAttempt(record);
+    if (!entry || !final?.response) continue;
+    const context = matchContext((tiers ?? dataset.tiers)?.[entry.workspaceTier] ?? null);
+    const x = extractChatResponse(final.response);
+    const items = [...x.citations, ...(x.toolCalls ?? []).flatMap((call) => call.evidence ?? [])];
+    for (const item of items) for (const page of item.pages) {
+      const source = sourcePageOf(item.documentId, page, context);
+      if (source) wanted.set(`${source.sourceDoc}#${source.page}`, source);
+    }
+  }
+  const found = await loadCorpusPages(corpusPath, [...wanted.values()]);
+  const lookup = (sourceDoc, page) => found.get(`${sourceDoc}#${page}`)?.text ?? null;
+  lookup.requested = wanted.size;
+  lookup.loaded = found.size;
+  return lookup;
+}
+
+export async function scoreRuns({ dataset, records, tiers = null, pageText = null, runConfigs = [], judge = null, judgeModel = null, seed = "search-model-eval", iterations = 2000, baseline = DEFAULT_BASELINE_MODEL, onJudgment = () => {} }) {
   const cases = new Map(dataset.cases.map((entry) => [entry.id, entry]));
   const rows = [], missing = [];
   for (const record of records) {
@@ -374,13 +449,13 @@ export async function scoreRuns({ dataset, records, tiers = null, runConfigs = [
       judgment = await judge(entry, final.extracted.answer);
       onJudgment({ caseId: entry.id, kind: entry.kind, answerable: entry.gold.answerable, question: entry.question, facts: entry.gold.facts, answer: final.extracted.answer, judgment, cacheKey: judgment.cacheKey });
     }
-    rows.push(scoreCall(entry, record, { tier: (tiers ?? dataset.tiers)?.[entry.workspaceTier] ?? null, judgment }));
+    rows.push(scoreCall(entry, record, { tier: (tiers ?? dataset.tiers)?.[entry.workspaceTier] ?? null, judgment, pageText }));
   }
   const report = buildReport(rows, { seed, iterations, baseline, meta: { datasetSha256: dataset.casesSha256 ?? null, runs: [...new Set(records.map((record) => record.runId))], runConfigs, tierMatching: Object.fromEntries(Object.entries(tiers ?? dataset.tiers ?? {}).map(([name, tier]) => [name, { workspaceId: tier.workspaceId, citationMatch: tier.citationMatch, mappedDocuments: Object.keys(tier.documentMap ?? {}).length }])), judgeModel, seed, iterations, unmatchedRecords: missing } });
   return { rows, report };
 }
 
-const USAGE = "Usage: score.mjs --dataset dataset.json --runs DIR[,DIR] --out DIR [--judge-model ID | --no-judge] [--judge-cap-usd 2] [--judge-cache path] [--judge-audit N] [--baseline ID] [--seed S] [--iterations 2000] [--tiers tiers.json] [--api-key-env OPENROUTER_API_KEY]";
+const USAGE = "Usage: score.mjs --dataset dataset.json --runs DIR[,DIR] --out DIR [--judge-model ID | --no-judge] [--judge-cap-usd 2] [--judge-cache path] [--judge-audit N] [--baseline ID] [--seed S] [--iterations 2000] [--tiers tiers.json] [--corpus pages-text.jsonl] [--api-key-env OPENROUTER_API_KEY]";
 
 export async function main(argv = process.argv.slice(2)) {
   const options = parseArgs(argv, { booleans: ["no-judge"] });
@@ -402,8 +477,11 @@ export async function main(argv = process.argv.slice(2)) {
   }
   const judgments = [];
   const seed = options.seed ?? "search-model-eval";
-  const { rows, report } = await scoreRuns({ dataset, records, tiers: options.tiers ? readJson(options.tiers) : null, runConfigs: runConfigs.map((config) => config?.identity ?? null), judge, judgeModel, seed, iterations: Number(options.iterations ?? 2000), baseline: options.baseline ?? DEFAULT_BASELINE_MODEL, onJudgment: (item) => judgments.push(item) });
+  const tiers = options.tiers ? readJson(options.tiers) : null;
+  const pageText = options.corpus ? await corpusPageText(options.corpus, { dataset, records, tiers }) : null;
+  const { rows, report } = await scoreRuns({ dataset, records, tiers, pageText, runConfigs: runConfigs.map((config) => config?.identity ?? null), judge, judgeModel, seed, iterations: Number(options.iterations ?? 2000), baseline: options.baseline ?? DEFAULT_BASELINE_MODEL, onJudgment: (item) => judgments.push(item) });
   if (guard) report.judgeSpend = guard.state();
+  report.corpus = pageText ? { path: options.corpus, pagesRequested: pageText.requested, pagesLoaded: pageText.loaded } : null;
   writeTextExclusive(join(out, "scores.jsonl"), rows.map((row) => JSON.stringify(row)).join("\n") + (rows.length ? "\n" : ""));
   writeJsonExclusive(join(out, "report.json"), report);
   writeJsonExclusive(join(out, "histograms.json"), report.histograms);

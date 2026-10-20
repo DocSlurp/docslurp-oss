@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { bootstrapCi, loadPrices, readJsonl } from "./lib.mjs";
-import { extractChatResponse } from "./response.mjs";
+import { extractChatResponse, normalizeToolCall } from "./response.mjs";
 import {
-  aggregate, assertJudgeAllowed, matchContext, compareToBaseline, createJudge, giveUpView, heuristicAbstained, histogram, judgeMessages, renderJudgeAudit, renderMarkdown, scoreCall, scoreRuns, supportRecall,
+  aggregate, assertJudgeAllowed, corpusPageText, factGrounding, matchContext, compareToBaseline, createJudge, giveUpView, heuristicAbstained, histogram, judgeMessages, renderJudgeAudit, renderMarkdown, scoreCall, scoreRuns, supportRecall,
 } from "./score.mjs";
 
 const prices = loadPrices();
@@ -53,7 +53,7 @@ test("per-call scoring: markers, citation validity against catalog and tool evid
   const r = record({ caseId: "c1", response: response("It was 42 units [1]. Also [2] and [9].", { citations: [cite("doc-a", 3), cite("doc-c", 2)], toolCalls }) });
   const row = scoreCall(entry("c1", singleGold), r, { tier, judgment: { score: 1, abstained: false } });
   assert.equal(row.citedRecall, 1);
-  assert.equal(row.evidenceSource, "tool_calls");
+  assert.equal(row.evidenceSource, "tool_calls+citations_list");
   assert.equal(row.evidenceRecall, 1);
   assert.equal(row.citationMarkers, 3);
   assert.equal(row.citationsUnresolvable, 1, "[9] has no citation");
@@ -163,4 +163,66 @@ test("end-to-end report: groups, baseline pairing, histograms, markdown and audi
   assert.equal((audit.match(/^## /gm) ?? []).length, 2);
   assert.ok(!audit.includes("glm") && !audit.includes("deepseek"), "audit withholds model names");
   assert.deepEqual(histogram([0, 1, 1, 25]).bins.at(-1), { label: "20+", count: 1 });
+});
+
+test("multi-page chunks: pageNumbers fill a null pageNumber in citations, evidence and evidencePages", () => {
+  const call = normalizeToolCall({ id: "c", name: "search", status: "success", evidencePages: [{ documentId: "d", pageNumber: null, pageNumbers: [1211, 1212] }, { documentId: "d", pageNumber: null }, { documentId: "d", pageNumber: 7 }] });
+  assert.deepEqual(call.evidence.map((item) => item.pages), [[1211, 1212], [], [7]]);
+  const extracted = extractChatResponse({ answer: "a [1]", citations: [{ text: "t", citation: { documentId: "d", pageNumber: null, pageNumbers: [1290, 1291] } }] });
+  assert.deepEqual(extracted.citations[0].pages, [1290, 1291]);
+});
+
+test("page-less tool evidence never makes evidence recall lower than cited recall", () => {
+  const gold = { answerable: true, facts: ["f"], supportMode: "any_of", supportPages: [{ documentId: "d", page: 1291, group: 0 }] };
+  const raw = { answer: "Answer [1].", citations: [{ text: "t", citation: { documentId: "d", pageNumber: null, pageNumbers: [1290, 1291] } }], debug: { toolCalls: [{ id: "c", name: "search", status: "success", evidencePages: [{ documentId: "d", pageNumber: null }, { documentId: "e", pageNumber: 4 }] }] } };
+  const r = record({ caseId: "m1", response: raw });
+  r.attempts[0].response = raw;
+  r.attempts[0].extracted = null;
+  const row = scoreCall(entry("m1", gold), r);
+  assert.equal(row.citedRecall, 1);
+  assert.equal(row.evidenceRecall, 1);
+  assert.equal(row.pagelessToolEvidence, 1);
+  assert.equal(row.citationsOutsideEvidence, 0, "unknown, not outside, when that document has page-less evidence");
+  assert.equal(row.citationValidity, 1);
+  assert.deepEqual(row.citedPages, [{ documentId: "d", pages: [1290, 1291] }]);
+  assert.deepEqual(row.goldPages, [{ sourceDoc: null, documentId: "d", page: 1291, group: 0 }]);
+});
+
+test("fact-grounded citation credits pages that contain the gold facts, kept separate from strict recall", () => {
+  const text = { "src#1211": "The Harbor Fund awarded 4.2 million dollars in 2031.", "src#1212": "continued", "src#1291": "Harbor Fund award 4.2 million dollars", "src#50": "Riverton hosts the Coastal Office." };
+  const pageText = (sourceDoc, page) => text[`${sourceDoc}#${page}`] ?? null;
+  const large = matchContext({ citationMatch: "documentAndPage", documentMap: { src: "prod" } });
+  const single = { answerable: true, facts: ["4.2 million dollars"], supportMode: "any_of", supportPages: [{ sourceDoc: "src", page: 1291, group: 0 }] };
+  assert.equal(factGrounding(single, [cite("prod", 1211, 1212)], large, pageText).grounded, true);
+  assert.equal(factGrounding(single, [cite("prod", 1212)], large, pageText).grounded, false);
+  assert.equal(factGrounding(single, [cite("other", 1211)], large, pageText).grounded, null, "unmapped document has no text");
+  assert.equal(factGrounding(single, [cite("prod", 1211)], large, null).grounded, null);
+  const multi = { answerable: true, facts: ["4.2 million dollars", "Coastal Office"], supportMode: "all_of", supportPages: [{ sourceDoc: "src", page: 1291, group: 0 }, { sourceDoc: "src", page: 50, group: 1 }] };
+  assert.equal(factGrounding(multi, [cite("prod", 1211), cite("prod", 50)], large, pageText).grounded, true, "each fact grounded by some cited page");
+  assert.equal(factGrounding(multi, [cite("prod", 1211)], large, pageText).grounded, false);
+  const mid = matchContext({ citationMatch: "pageOnly", scope: { sourceDocs: ["src"] } });
+  assert.equal(factGrounding(single, [cite("any-slice", 1211)], mid, pageText).grounded, true, "pageOnly maps any slice to the single source");
+  const r = record({ caseId: "g1", response: response("4.2 million dollars [1].", { citations: [cite("prod", 1211)] }) });
+  const row = scoreCall(entry("g1", single), r, { tier: { citationMatch: "documentAndPage", documentMap: { src: "prod" } }, pageText });
+  assert.equal(row.citedRecall, 0, "strict recall unchanged");
+  assert.equal(row.groundedCitation, true);
+  assert.equal(row.groundedEvidence, true);
+  const summary = aggregate([row], { seed: "s", iterations: 50 });
+  assert.equal(summary.groundedCitationRate.mean, 1);
+  assert.equal(summary.groundedEvidenceRate.mean, 1);
+});
+
+test("corpus page text is loaded once for every cited or retrieved source page", async (t) => {
+  const dir = tempDir(t);
+  const corpus = join(dir, "pages-text.jsonl");
+  writeFileSync(corpus, `${[{ sourceDoc: "src", page: 1211, text: "a" }, { sourceDoc: "src", page: 1212, text: "b" }, { sourceDoc: "src", page: 9, text: "c" }].map((row) => JSON.stringify(row)).join("\n")}\n`);
+  const raw = { answer: "x [1]", citations: [{ text: "t", citation: { documentId: "prod", pageNumber: null, pageNumbers: [1211, 1212] } }], debug: { toolCalls: [{ id: "c", name: "search", status: "success", evidencePages: [{ documentId: "prod", pageNumber: 9 }, { documentId: "unmapped", pageNumber: 3 }] }] } };
+  const r = record({ caseId: "c1", response: raw });
+  r.attempts[0].response = raw;
+  const dataset = { cases: [{ ...entry("c1", singleGold), workspaceTier: "large-58k" }], tiers: { "large-58k": { workspaceId: "ws", citationMatch: "documentAndPage", documentMap: { src: "prod" } } } };
+  const lookup = await corpusPageText(corpus, { dataset, records: [r] });
+  assert.equal(lookup.requested, 3);
+  assert.equal(lookup.loaded, 3);
+  assert.equal(lookup("src", 1212), "b");
+  assert.equal(lookup("src", 1), null);
 });

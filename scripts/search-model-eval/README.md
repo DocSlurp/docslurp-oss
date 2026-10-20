@@ -182,8 +182,13 @@ Run artifacts (`$OUT/runs/<run-id>/`): `run-config.json`, `run-log.jsonl`,
 ```bash
 node scripts/search-model-eval/score.mjs --dataset $OUT/dataset/dataset.json --runs $OUT/runs/<run-id> \
   --out $OUT/runs/<run-id>/score [--tiers tiers.json] [--judge-model google/gemini-3.8-flash] \
-  [--judge-cap-usd 2] [--judge-cache path] [--judge-audit 30] [--baseline z-ai/glm-5.3-flash] [--seed S] [--no-judge]
+  [--judge-cap-usd 2] [--judge-cache path] [--judge-audit 30] [--baseline z-ai/glm-5.3-flash] [--seed S] [--no-judge] \
+  [--corpus ~/.local/share/docslurp/eval-corpora/large-corpus-recall-58k/pages-text.jsonl]
 ```
+
+Scoring re-reads each attempt's raw response, so normalisation fixes apply to
+earlier runs. Every page field uses `pageNumbers` when `pageNumber` is null.
+`scores.jsonl` carries `goldPages`, `citedPages` and `evidencePages` per call.
 
 Outputs (never overwritten): `scores.jsonl`, `report.json`, `report.md`,
 `histograms.json`, `judge-cache.jsonl`, `judge-spend.jsonl`, `judge-guard.jsonl`,
@@ -193,9 +198,11 @@ Per-call metrics:
 
 | metric | definition |
 |---|---|
-| evidence recall | support recall over the retrieved evidence: tool-call evidence when `debug.toolCalls[].evidence/results/citations` is exposed (`evidenceSource: tool_calls`), else the response `citations` list, which the agent path fills with all gathered evidence (`citations_list`) |
-| cited recall | support recall over citations referenced by `[n]` markers in the answer; any-of = 0/1, all-of = share of groups hit; `citedAll` when every group is hit |
-| citation validity | share of markers that resolve to a citation, whose document/page exist in the tier catalog (null check when no catalog) and that were in tool evidence (null check when tool evidence is not exposed) |
+| evidence recall | support recall over the retrieved evidence: tool-call evidence pages (`debug.toolCalls[].evidencePages/evidence/results/citations`) united with the response `citations` list, which the agent path fills with all gathered evidence. Tool evidence with no page (`pageNumber: null` and no `pageNumbers`) cannot place a page and is counted in `pagelessToolEvidence`; the union keeps evidence recall >= cited recall |
+| cited recall | strict: support recall over citations referenced by `[n]` markers in the answer; any-of = 0/1, all-of = share of groups hit; `citedAll` when every group is hit |
+| grounded citation | with `--corpus`: do the cited pages contain the gold facts? Each citation's pages (multi-page chunks joined) are one unit; a fact is grounded at token overlap >= 0.6. any-of: one unit grounds every fact; all-of: every fact is grounded by some unit. Production pages map to source pages through `tiers.documentMap` reversed (`documentAndPage`) or the tier's single source document at the same page (`pageOnly`). Null when no cited page has text. Credits correct answers that cite another page with the same facts; strict cited recall is kept alongside |
+| grounded evidence | the same check over all evidence pages |
+| citation validity | share of markers that resolve to a citation, whose document/page exist in the tier catalog (null check when no catalog) and that were in tool evidence (null check when tool evidence is not exposed or that document has page-less evidence) |
 | abstention | judge `abstained`, else a lexical heuristic or `stopReason: no_evidence`; unanswerable: correct abstain vs hallucinated answer; answerable: false give-up |
 | correctness | judge 0/0.5/1 on answerable cases (an abstention scores 0); unanswerable = 1 when abstained; failed calls = 0; `correct` = score 1 |
 | persistence | search calls before abstaining; reformulation = >= 2 distinct normalized queries; mean token Jaccard of successive queries |
