@@ -1,4 +1,7 @@
-<img src="docs/brand/docslurp-mark.svg" width="72" alt="DocSlurp logo">
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/brand/docslurp-mark-inverse.svg">
+  <img src="docs/brand/docslurp-mark-dark.svg" width="72" alt="DocSlurp logo">
+</picture>
 
 # DocSlurp
 
