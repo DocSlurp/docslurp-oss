@@ -228,6 +228,32 @@ describe("an interrupted Document stage", () => {
     expect(store.completedWith?.run.stats).toMatchObject({ failedDocuments: 0 });
   });
 
+  it("still checkpoints the interrupted attempt's usage, and a failing flush keeps the cause", async () => {
+    for (const flushFails of [false, true]) {
+      const store = new MemoryStore(["b"]);
+      const flushed: number[] = [];
+      const stage: Stage = {
+        name: "index",
+        async run(state) {
+          state.store = {
+            ...state.store!,
+            updateProgress: async (s: WorkflowState) => {
+              flushed.push(s.usageLedger.pendingCount);
+              if (flushFails) throw new Error("db down");
+            },
+          } as CheckpointStore;
+          await runDocumentStage(state, state.documents[0]!, "index", "b:index", "index done", async () => {
+            state.usageLedger.enqueue({ metric: "embed", model: "m", inputTokens: 10, outputTokens: 0, costCents: 1, metadata: {} } as never);
+            throw abortError();
+          });
+        },
+      };
+      await expect(runIndex(store, stage)).rejects.toThrow("The operation was aborted");
+      expect(flushed).toEqual([1]);
+      expect(store.documentFailures).toEqual([]);
+    }
+  });
+
   it("persists no failure when an AbortError surfaces without an aborted signal", async () => {
     const store = new MemoryStore(["b"]);
     const stage: Stage = {

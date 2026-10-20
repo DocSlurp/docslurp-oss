@@ -365,6 +365,16 @@ export async function runDocumentStage(
       `[checkpoint-debug] document=${document.id} stage=${stageName} ` +
         `interrupted=true reason=${finalMessage} signalAborted=${signal?.aborted === true}`,
     );
+    // Still checkpoint what the attempt spent: provider calls already made are
+    // billed even though the Document reruns, and stage-execution's
+    // interruption path rethrows without a flush. Best-effort so a failing
+    // store (often the very infrastructure error) never masks the cause.
+    if (state.store) {
+      await state.store.updateProgress(state).catch((flushError: unknown) => console.warn(
+        `[checkpoint-debug] document=${document.id} stage=${stageName} interrupted progress flush failed: ` +
+          `${flushError instanceof Error ? flushError.message : String(flushError)}`,
+      ));
+    }
     throw cause;
   }
 
