@@ -49,7 +49,8 @@ import {
   servableInProgressVersion,
 } from "../search/eligibility.js";
 import { queryPhraseWindows } from "../search/relevance.js";
-import { collectSearchTimings, timePhase, type SearchTimings } from "../search/timings.js";
+import { withSearchSlot } from "../search/search-limiter.js";
+import { collectSearchTimings, recordSearchPhase, timePhase, type SearchTimings } from "../search/timings.js";
 
 export { MissingWorkspaceScopeError } from "../search/session-setup.js";
 
@@ -1236,6 +1237,14 @@ export function stripNulBytes(value: string): string {
   return value.replaceAll("\u0000", "");
 }
 
+function withSearchSlotTimed<T>(fn: () => Promise<T>): Promise<T> {
+  const started = performance.now();
+  return withSearchSlot(() => {
+    recordSearchPhase("queue", performance.now() - started);
+    return fn();
+  });
+}
+
 export async function hybridSearch(rawQuery: string, userId: string, options: SearchOptions = {}): Promise<SearchResponse> {
   // Postgres text cannot hold NUL, so a query carrying one failed every lexical lookup with a 500.
   const query = stripNulBytes(rawQuery);
@@ -1245,7 +1254,8 @@ export async function hybridSearch(rawQuery: string, userId: string, options: Se
   const report = options.onSearchActivity;
   report?.(activity);
   try {
-    const { value: result, timings } = await collectSearchTimings(() => executeHybridSearch(query, userId, { ...options, rootSessionId: activity.groupId }));
+    // Root searches wait for a process-wide slot (search/search-limiter.ts); the wait is timed as `queueMs`.
+    const { value: result, timings } = await collectSearchTimings(() => withSearchSlotTimed(() => executeHybridSearch(query, userId, { ...options, rootSessionId: activity.groupId })));
     result.timings = timings;
     console.info(`[search-timing] ${Object.entries(timings).map(([key, ms]) => `${key.replace(/Ms$/, "")}=${ms}`).join(" ")} results=${result.results.length}`);
     report?.({ ...activity, status: "success", runtimeMs: Date.now() - started, resultCount: result.results.length,

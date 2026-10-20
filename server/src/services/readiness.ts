@@ -4,7 +4,9 @@
  * `/health` stays a constant liveness answer (the process is up). `/ready`
  * checks each dependency with its own timeout, all in parallel:
  *
- * - database:   `select 1`
+ * - database:   `select 1` on the dedicated probe connection (db-probe.ts),
+ *               with the request pool's in-flight count and search queue
+ *               depth in its detail
  * - migrations: the schema has every migration this build ships
  *               (a schema *ahead* of the code is fine: that is a rollback
  *               under expand/contract, docs/releases.md#rolling-back)
@@ -16,9 +18,19 @@
  * routing to it. Temporal is not critical for routing (uploads queue durably
  * in SQL and start later), so a Temporal outage keeps 200 with `ok: false`.
  * The deploy gate requires `ok: true`, i.e. every check passing.
+ *
+ * Database checks do not go through the request pool. A saturated pool is
+ * overload, not a dead dependency: on 2026-10-20 `/ready` queued its
+ * `select 1` behind search traffic and returned 503 after 2.5 s on a machine
+ * whose database was healthy. With one app machine, failing readiness under
+ * load only turns slow responses into none; load is bounded by the search
+ * limiter (search/search-limiter.ts) instead, and the pool's queue depth is
+ * reported in the detail so overload stays visible.
  */
 
-import { sql } from "../db.js";
+import { apiPool } from "../db.js";
+import { searchLimiterStats } from "../search/search-limiter.js";
+import { sharedDbProbe } from "./db-probe.js";
 import { headStorageBucket } from "../lib/storage.js";
 import { describeTemporalNamespace } from "../lib/temporal.js";
 import { loadMigrationJournal } from "./alerts/alert-evaluator.js";
@@ -82,15 +94,16 @@ export function migrationReadiness(input: {
 
 export const defaultReadinessProbes: ReadinessProbes = {
   async database() {
-    await sql`select 1`;
-    return { ok: true };
+    const probe = await sharedDbProbe().ping(readinessTimeoutMs());
+    if (!probe.ok) return { ok: false, detail: probe.detail };
+    return { ok: true, detail: `${probe.latencyMs}ms; ${loadDetail()}` };
   },
   async migrations() {
     const journal = loadMigrationJournal();
     if (!journal) return migrationReadiness({ journal: null, latestAppliedWhen: null });
-    const [row] = await sql<{ latest: string | number | null }[]>`
+    const [row] = await sharedDbProbe().query(readinessTimeoutMs(), (sql) => sql<{ latest: string | number | null }[]>`
       select max(created_at) as latest from drizzle.__drizzle_migrations
-    `;
+    `);
     const latest = row?.latest === null || row?.latest === undefined ? null : Number(row.latest);
     return migrationReadiness({ journal, latestAppliedWhen: latest });
   },
@@ -103,6 +116,13 @@ export const defaultReadinessProbes: ReadinessProbes = {
     return { ok: true };
   },
 };
+
+/** Request pool and search queue load, for operators reading `/ready`. */
+function loadDetail(): string {
+  const pool = apiPool.activity.snapshot();
+  const search = searchLimiterStats();
+  return `pool max ${apiPool.max}, ${pool.inFlight} queries in flight; searches ${search.running} running, ${search.queued} queued`;
+}
 
 export function readinessTimeoutMs(env: NodeJS.ProcessEnv = process.env): number {
   const parsed = Number(env.READY_CHECK_TIMEOUT_MS);

@@ -1,26 +1,17 @@
-import postgres from "postgres";
-import { instrumentPostgres } from "@docslurp/shared/observability";
-
 import { env } from "./config.js";
+import { createApiPool } from "./lib/api-pool.js";
 import { processSingleton } from "./lib/process-singleton.js";
 
-function createSql(databaseUrl: string) {
-  return instrumentPostgres(postgres<Record<string, postgres.PostgresType>>(databaseUrl, {
-    max: 10,
-    // Pooler-held named statements can retain result types across schema deployments.
-    prepare: false,
-    types: { numeric: { to: 1700, from: [1700], serialize: (value: unknown) => String(value), parse: (value: string): unknown => Number(value) } },
-    idle_timeout: 20,
-    connect_timeout: 10
-  }), databaseUrl);
-}
-
 /**
- * The API's one postgres.js pool: at most `max` query connections plus one
- * LISTEN connection per process. In dev it is cached across Vite SSR module
- * reloads (see process-singleton.ts); a fresh pool per reload leaked ~10
- * connections each time and exhausted Postgres during long `astro dev` sessions.
+ * The API's one postgres.js pool: at most DATABASE_POOL_MAX (default 20) query
+ * connections plus one LISTEN connection per process. Health probes do not use
+ * it (services/db-probe.ts), so a saturated pool cannot fail them. In dev it is
+ * cached across Vite SSR module reloads (see process-singleton.ts); a fresh pool
+ * per reload leaked its connections each time and exhausted Postgres during
+ * long `astro dev` sessions.
  */
-export const sql = processSingleton(`api-sql:${env.databaseUrl}`, () => createSql(env.databaseUrl));
+export const apiPool = processSingleton(`api-pool:${env.databaseUrl}`, () => createApiPool(env.databaseUrl));
+
+export const sql = apiPool.sql;
 
 export type SqlClient = typeof sql;

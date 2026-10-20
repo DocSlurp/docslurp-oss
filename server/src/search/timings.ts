@@ -30,6 +30,14 @@ export async function timePhase<T>(name: string, fn: () => Promise<T>): Promise<
   }
 }
 
+/** Add a measured duration to the current search's timings (no-op outside a search). */
+export function recordSearchPhase(name: string, ms: number): void {
+  const timings = store.getStore();
+  if (!timings) return;
+  const key = `${name}Ms`;
+  timings[key] = Math.round((timings[key] ?? 0) + ms);
+}
+
 /** Count an event (cache hit/miss, …) into the current search's timings (no-op outside a search). */
 export function countSearchEvent(name: string): void {
   const timings = store.getStore();

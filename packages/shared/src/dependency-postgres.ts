@@ -1,7 +1,17 @@
 import { startDependencySpan, withDependencySpan } from "./telemetry.js";
 
+export interface PostgresQueryHooks {
+  /**
+   * Called when a query is consumed (awaited or executed), including queries
+   * inside transactions and reserved connections; call the returned function
+   * once it settles. Lets the owner of a pool observe in-flight demand and
+   * completed work (server/src/lib/pool-activity.ts) without a second wrapper.
+   */
+  onQueryStart?: () => () => void;
+}
+
 /** Instrument postgres.js's lazy queries without exposing SQL text or parameters. */
-export function instrumentPostgres<T extends (...args: any[]) => any>(sql: T, databaseUrl: string): T {
+export function instrumentPostgres<T extends (...args: any[]) => any>(sql: T, databaseUrl: string, hooks: PostgresQueryHooks = {}): T {
   const endpoint = new URL(databaseUrl);
   const base = { "db.system.name": "postgresql", "server.address": endpoint.hostname,
     "server.port": Number(endpoint.port || 5432), "docslurp.dependency.type": "postgres", "docslurp.dependency.provider": "postgresql" };
@@ -14,10 +24,13 @@ export function instrumentPostgres<T extends (...args: any[]) => any>(sql: T, da
     const attributes = { ...base, "db.operation.name": operation, "docslurp.dependency.operation": operation };
     const consume = () => completion ??= (() => {
       const span = startDependencySpan(`postgres.${operation}`, attributes);
+      const settled = hooks.onQueryStart?.();
       return span.run(() => Promise.resolve(value)).then(result => {
+        settled?.();
         if (typeof result?.count === "number") span.set({ "db.response.returned_rows": result.count });
         span.end(); return result;
       }, error => {
+        settled?.();
         if (typeof error?.code === "string" && /^[A-Z0-9]{5}$/.test(error.code)) span.set({ "db.response.status_code": error.code });
         span.end(error); throw error;
       });

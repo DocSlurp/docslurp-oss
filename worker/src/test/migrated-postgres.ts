@@ -12,12 +12,16 @@ import { createMigratedDatabase } from "./migrated-db.js";
  */
 /**
  * Serves `db` on a random local port. Test files run in parallel, so a port
- * can already be taken (EADDRINUSE); another one is tried.
+ * can already be taken (EADDRINUSE); another one is tried. `maxConnections`
+ * lets several clients connect at once; PGlite still runs one query at a time.
  */
-export async function serveOnRandomPort(db: PGlite): Promise<{ server: PGLiteSocketServer; port: number }> {
+export async function serveOnRandomPort(
+  db: PGlite,
+  options: { maxConnections?: number } = {},
+): Promise<{ server: PGLiteSocketServer; port: number }> {
   for (let attempt = 0; ; attempt++) {
     const port = 40_000 + Math.floor(Math.random() * 20_000);
-    const server = new PGLiteSocketServer({ db, port, host: "127.0.0.1" });
+    const server = new PGLiteSocketServer({ db, port, host: "127.0.0.1", ...(options.maxConnections ? { maxConnections: options.maxConnections } : {}) });
     try {
       await server.start();
       return { server, port };

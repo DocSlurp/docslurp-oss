@@ -124,6 +124,28 @@ Use a shared `s3://` root whenever the server and worker run in separate contain
 or machines. Log URIs only after redaction because `STORAGE_URI` may hold a
 secret.
 
+## Database pool and health checks
+
+The API process keeps one postgres.js pool for requests, plus one LISTEN
+connection and one probe connection that answers only health checks. The
+probe never queues behind requests, so search load cannot fail `/ready` or
+trip the watchdog.
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `DATABASE_POOL_MAX` | `20` | Request pool connections per API process. Budget `DATABASE_POOL_MAX + 2` per process against Postgres `max_connections`. |
+| `SEARCH_MAX_CONCURRENCY` | `max(2, DATABASE_POOL_MAX / 3)` (6) | Concurrent hybrid searches per process. Extra searches wait in the app instead of the pool. `0` disables the limit. Nested searches (decompose, stepback, multi-hop) share their parent's slot. |
+| `SEARCH_QUEUE_MAX` | `200` | Searches allowed to wait for a slot; beyond it a search fails at once with 503. |
+| `SEARCH_QUEUE_TIMEOUT_MS` | `30000` | Longest wait for a slot before a 503 with `Retry-After`. The wait appears as `queueMs` in search timings. |
+| `DB_WATCHDOG_INTERVAL_MS` | `15000` | How often the production watchdog probes. |
+| `DB_WATCHDOG_TIMEOUT_MS` | `5000` | Timeout of one probe. |
+| `DB_WATCHDOG_EXIT_AFTER_MS` | `60000` | Exit (and let the platform restart the machine) after the probe connection has failed this long. `0` disables the watchdog. |
+| `DB_WATCHDOG_POOL_STALL_MS` | `60000` | Also exit when the request pool has had queries in flight with none completing this long, the database answers the probe and `pg_stat_activity` shows none of the pool's queries running (connections that died silently). A saturated pool keeps completing queries and never trips it. `0` disables this check. |
+
+`/ready` runs its `database` and `migrations` checks on the probe connection;
+the `database` detail reports the pool's in-flight queries and the search
+queue, so overload is visible without failing readiness.
+
 ## Temporal connection
 
 The Compose file sets the Temporal connection for the server and workers. Change
