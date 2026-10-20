@@ -6,6 +6,8 @@ import {
   SEARCH_OPENROUTER_MODEL,
 } from "../lib/ai.js";
 import type { UsageRecorder } from "../lib/ai-usage.js";
+import { startDependencySpan } from "@docslurp/shared/observability";
+import { embeddingCache, embeddingCacheKey } from "./embedding-cache.js";
 import { lanceDbVectorSearch } from "./lancedb.js";
 import { hydeExpand } from "./hyde.js";
 import { decomposeQuery, rewriteQuery } from "./query-rewrite.js";
@@ -25,7 +27,7 @@ import {
 } from "./session-execution.js";
 import type { SearchSessionJournal } from "./session.js";
 import { withWorkspaceScope } from "./workspace-retrieval-session.js";
-import { timePhase } from "./timings.js";
+import { countSearchEvent, timePhase } from "./timings.js";
 
 export type RetrievalChainStep = {
   hop: number;
@@ -159,6 +161,8 @@ export async function prepareSearchSessionRetrievalPlan(args: {
   options: SearchOptions;
   effectiveOptions: SearchOptions;
   workspaceId: string;
+  /** Owning organization of the workspace; scopes the query-embedding cache. */
+  orgId: string;
   workspaceSettings: { synonyms?: Record<string, string[]> };
   embedding: EmbeddingConfig;
   openRouterApiKey?: string;
@@ -170,6 +174,7 @@ export async function prepareSearchSessionRetrievalPlan(args: {
     userId,
     options,
     workspaceId,
+    orgId,
     workspaceSettings,
     embedding,
     openRouterApiKey,
@@ -217,10 +222,15 @@ export async function prepareSearchSessionRetrievalPlan(args: {
 
   let queryVector = options.queryVector ?? null;
   if (!queryVector) {
-    queryVector = await timePhase("embed", () => embedQuery(effectiveQuery, embedding, session, privacyMode, workspaceId));
+    queryVector = await timePhase("embed", () => embedQuery(effectiveQuery, embedding, session, privacyMode, workspaceId, orgId));
   }
 
-  if (effectiveOptions.summarySeed && queryVector) {
+  // An explicit document selection already defines the retrieval scope. Org-wide
+  // summary seeds must never replace it with unrelated documents.
+  const hasDocumentSelection = Boolean(
+    effectiveOptions.filters?.documentId || effectiveOptions.filters?.documentIds?.length,
+  );
+  if (effectiveOptions.summarySeed && queryVector && !hasDocumentSelection) {
     const access = await getWorkspaceAccess(workspaceId, userId);
     if (access) {
       const seedHits = await lanceDbVectorSearch({
@@ -373,14 +383,40 @@ const METERED_EMBEDDING_PROVIDERS = new Set(["openrouter", "perplexity", "deepin
 async function embedQuery(
   query: string,
   embedding: EmbeddingConfig,
-  usage: UsageRecorder,
+  usage: SearchSessionJournal,
   privacyMode: PrivacyMode,
   /** Strict-privacy audit attribution for private embedding routes. */
   auditWorkspaceId?: string | null,
+  orgId?: string,
 ): Promise<number[] | null> {
   const route = resolveEmbeddingRoute(embedding);
   const { model, provider, runtime, dimensions, requestedDimensions, baseUrl } = route;
   const isPrivate = provider === "private";
+  const normalize = provider === "deepinfra" ? embedding.normalize : true;
+
+  // Cache hits make no provider call, so they record no usage event: usage_events and
+  // [ai-usage] keep meaning "provider calls actually made", and billing/budgets stay
+  // exact. Hits are counted in search timings, the search session diagnostics and a span.
+  // Private routes and non-standard privacy modes always call through (strict-privacy
+  // audits every embedding attempt). Without an org there is no safe cache scope.
+  const cache = embeddingCache();
+  const cacheKey = cache.enabled && orgId && privacyMode === "standard" && !isPrivate
+    ? embeddingCacheKey({ orgId, provider, runtime, model, modelUri: route.modelUri, baseUrl, dimensions, requestedDimensions, normalize: Boolean(normalize) }, query)
+    : null;
+  if (cacheKey) {
+    const cached = cache.get(cacheKey);
+    startDependencySpan("embed.cache", {
+      "docslurp.dependency.type": "cache", "docslurp.dependency.provider": "memory",
+      "docslurp.dependency.operation": "embedding_cache", "docslurp.dependency.phase": "adapter",
+      "docslurp.cache.hit": cached !== undefined, "gen_ai.request.model": model,
+    }).end();
+    countSearchEvent(cached ? "embedCacheHit" : "embedCacheMiss");
+    usage.recordDiagnostic("embeddingCache", { hit: cached !== undefined, hits: cache.hits, misses: cache.misses, entries: cache.size });
+    if (cached) {
+      console.info(`[search-cache] embedding hit model=${model} entries=${cache.size}`);
+      return cached.slice();
+    }
+  }
   const apiKey =
     runtime === "remote" && provider === "openai"
       ? process.env.OPENAI_API_KEY
@@ -400,7 +436,7 @@ async function embedQuery(
       model,
       dimensions,
       requestedDimensions,
-      normalize: provider === "deepinfra" ? embedding.normalize : true,
+      normalize,
       apiKey,
       baseURL: baseUrl ?? process.env.OPENAI_BASE_URL,
       privacyMode,
@@ -423,6 +459,7 @@ async function embedQuery(
       inputTokens: result.usage.inputTokens,
       logOutputTokens: false,
     });
+    if (cacheKey) cache.set(cacheKey, result.embedding.slice());
     return result.embedding;
   } catch (error) {
     if (METERED_EMBEDDING_PROVIDERS.has(provider)) throw error;

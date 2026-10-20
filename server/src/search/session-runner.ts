@@ -1,3 +1,4 @@
+import { parseSelfQuerySyntax } from "./self-query.js";
 import { currentChatSessionId } from "../lib/chat-agent-context.js";
 import { reportPublicError } from "../lib/public-errors.js";
 import { withObservation } from "@docslurp/shared/observability";
@@ -69,7 +70,7 @@ export interface SearchSessionRunnerAdapters {
     workspaceId: string;
     options: SearchOptions;
   }): Promise<SearchChunk[]>;
-  wholeCorpusFallback(): Promise<SearchResult[]>;
+  wholeCorpusFallback(filters?: SearchOptions["filters"]): Promise<SearchResult[]>;
 }
 
 function embeddingPipelineOf(setup: SearchSetup): string | null {
@@ -134,8 +135,13 @@ async function executeSearchSession(args: Parameters<typeof runSearchSession>[0]
       const { adapters, query, setup, userId } = args;
       const { session, normalizedScope, workspaceSettings, openRouterApiKey, privacyMode } =
         setup;
-      const options = args.options;
-      let selfQueryReasons: string[] = [];
+      const syntax = args.options.selfQuery ? parseSelfQuerySyntax(query) : { query, tags: [] };
+      const retrievalQuery = syntax.query;
+      const options: SearchOptions = syntax.tags.length ? {
+        ...args.options,
+        filters: { ...args.options.filters, tags: args.options.filters?.tags?.length ? args.options.filters.tags : syntax.tags },
+      } : args.options;
+      let selfQueryReasons: string[] = syntax.tags.length ? ["Applied explicit tag: labels."] : [];
       let effectiveOptions: SearchOptions = {
         ...options,
         filters: {
@@ -145,7 +151,7 @@ async function executeSearchSession(args: Parameters<typeof runSearchSession>[0]
       };
 
       const recursivePlan = await timePhase("plan", () => planRecursiveSearchMode({
-        query,
+        query: retrievalQuery,
         userId,
         options,
         session,
@@ -160,6 +166,7 @@ async function executeSearchSession(args: Parameters<typeof runSearchSession>[0]
         );
         return finalizeSearchSessionExecution({
           query,
+          retrievalQuery,
           userId,
           session,
           options,
@@ -181,11 +188,12 @@ async function executeSearchSession(args: Parameters<typeof runSearchSession>[0]
       }
 
       const retrievalPlan = await timePhase("prepare", () => prepareSearchSessionRetrievalPlan({
-        query,
+        query: retrievalQuery,
         userId,
         options,
         effectiveOptions,
         workspaceId: normalizedScope.workspaceId,
+        orgId: normalizedScope.orgId,
         workspaceSettings,
         embedding: setup.workspacePipeline.embedding,
         openRouterApiKey,
@@ -193,18 +201,21 @@ async function executeSearchSession(args: Parameters<typeof runSearchSession>[0]
         session,
       }));
       effectiveOptions = retrievalPlan.effectiveOptions;
-      selfQueryReasons = retrievalPlan.selfQueryReasons;
+      selfQueryReasons = [...selfQueryReasons, ...retrievalPlan.selfQueryReasons];
       const effectiveQuery = retrievalPlan.effectiveQuery;
       const queryVector = retrievalPlan.queryVector;
       const textQuery = await timePhase("graphQuery", () => expandGraphTextQuery({
         enabled: effectiveOptions.enableGraphExpansion,
-        query,
+        query: retrievalQuery,
         textQuery: retrievalPlan.textQuery,
+        filters: effectiveOptions.filters,
+        runId: effectiveOptions.runId,
         workspaceId: normalizedScope.workspaceId,
       }));
 
       return executeSearchSessionRetrieval({
         query,
+        retrievalQuery,
         userId,
         session,
         options: effectiveOptions,
@@ -221,7 +232,7 @@ async function executeSearchSession(args: Parameters<typeof runSearchSession>[0]
               completedPageSearch: adapters.completedPageSearch,
             }),
             {
-              query,
+              query: retrievalQuery,
               textQuery,
               queryVector,
               userId,
@@ -233,7 +244,7 @@ async function executeSearchSession(args: Parameters<typeof runSearchSession>[0]
             ? evidenceResults
             : evidenceResults.map((result) => ({ ...result, chunks: result.chunks.slice(0, effectiveOptions.candidateDepth) }));
           return annotateEvidenceRelevance(boundedResults, {
-            query,
+            query: retrievalQuery,
             embeddingPipeline: embeddingPipelineOf(setup),
           });
         },

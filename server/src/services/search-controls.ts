@@ -222,35 +222,6 @@ export function applySearchControls(args: {
       } else if (p.documentId) {
         candidate = out.find((r) => r.citation.documentId === p.documentId) ?? null;
       }
-      if (!candidate && p.documentId) {
-        // fabricate a placeholder the UI can still surface as a top link
-        candidate = {
-          text: "",
-          score: 1,
-          citation: {
-            source: "document",
-            documentId: p.documentId,
-            filename: "",
-            pageNumber: null,
-            pageNumbers: [],
-            headingPath: [],
-            chunkIndex: 0,
-            blockIds: [],
-            blockTypes: [],
-            regionBoxes: [],
-            regions: [],
-            regionCoordinateSpace: null,
-            sourceTrace: {
-              canonicalDocumentUri: null,
-              parserArtifactUri: null,
-              sourceArtifactUri: null,
-              blockIds: [],
-              pageNumbers: [],
-              extractor: null
-            }
-          }
-        } as SearchResult;
-      }
       if (candidate) {
         idSet.delete(`${candidate.citation.documentId}:${candidate.citation.chunkIndex}`);
         pinned.push(candidate);

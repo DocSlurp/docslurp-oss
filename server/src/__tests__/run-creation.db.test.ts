@@ -351,3 +351,14 @@ describe("Run reprocessing and bulk reprocessing through Run creation", () => {
     spy.mockRestore();
   });
 });
+
+
+it("stores upload tags atomically and retains them on reprocessing", async () => {
+  const original = await runCreation.create({ ...input, sources: { kind: "files", files: [{ ...files[0]!, tags: ["finance", "FY26"] }] } });
+  const originalId = original.documents[0]!.id;
+  const tags = await sql`select tag from document_tags where document_id = ${originalId} order by tag`;
+  expect(tags.map((row) => row.tag)).toEqual(["FY26", "finance"]);
+  const reprocessed = await runCreation.create({ ...input, sources: { kind: "versionsOf", documentIds: [originalId] } });
+  const copied = await sql`select tag from document_tags where document_id = ${reprocessed.documents[0]!.id} order by tag`;
+  expect(copied.map((row) => row.tag)).toEqual(["FY26", "finance"]);
+});

@@ -146,6 +146,8 @@ export type UploadByteStream = AsyncIterable<Uint8Array | string> & {
 };
 
 export type UploadOptions = RequestOptions & {
+  /** Labels applied to every accepted document in this upload. */
+  tags?: string[];
   /** Canonical ID for a single-file or streamed upload. Use UploadFileInput.canonicalId for several files. */
   canonicalId?: string;
   /**
@@ -170,6 +172,8 @@ export type UploadOptions = RequestOptions & {
 };
 
 export type UploadInput = {
+  /** Labels applied to every accepted document in this upload. */
+  tags?: string[];
   files: Array<Blob | File | UploadFileInput>;
   idempotencyKey?: string;
   newWorkspace?: boolean;
@@ -197,6 +201,8 @@ export type UploadResponse = {
 };
 
 export type UploadUrlsInput = {
+  /** Labels applied to every accepted document in this upload. */
+  tags?: string[];
   idempotencyKey?: string;
   newWorkspace?: boolean;
   orgId?: string;
@@ -873,7 +879,7 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
 
   function uploadUrls(input: UploadUrlsInput, options?: RequestOptions): Promise<UploadResponse> {
     const { idempotencyKey, urls, workspaceName, orgId, templateKey } = input;
-    const body = { urls, workspaceName, orgId, templateKey, ...intakeTarget(input) };
+    const body = { urls, workspaceName, orgId, templateKey, tags: input.tags, ...intakeTarget(input) };
     return request("/v1/uploads/url", {
       ...jsonRequest("POST", body),
       headers: { "Content-Type": "application/json", ...(idempotencyKey ? { "Idempotency-Key": idempotencyKey } : {}) },
@@ -903,6 +909,7 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
     const metadata = "files" in input ? { ...input, ...options } : options;
     const fields: Record<string, string> = {};
     if (metadata.orgId) fields.orgId = metadata.orgId;
+    if (metadata.tags) fields.tags = JSON.stringify(metadata.tags);
     const target = intakeTarget(metadata);
     if (target.workspaceId) fields.workspaceId = target.workspaceId;
     if (target.newWorkspace) fields.newWorkspace = "true";
@@ -969,6 +976,7 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
     const { metadata } = args;
     const session = await request<{ sessionId: string; files: DirectUploadDescriptor[] }>("/v1/uploads/direct/sessions", jsonRequest("POST", {
       ...(metadata.orgId ? { orgId: metadata.orgId } : {}),
+      ...(metadata.tags ? { tags: metadata.tags } : {}),
       ...(args.target.workspaceId ? { workspaceId: args.target.workspaceId } : {}),
       ...(args.target.newWorkspace ? { newWorkspace: true } : {}),
       ...(metadata.workspaceName ? { workspaceName: metadata.workspaceName } : {}),
@@ -1145,6 +1153,9 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
     uploadUrls,
     /** @deprecated Use upload({ urls }) or uploadUrls(). */
     ingestUrls: uploadUrls,
+    async listWorkspaceTags(id: string = workspaceId ?? "default", options?: RequestOptions): Promise<Array<{ tag: string; documentCount: number }>> {
+      return (await request<{ tags: Array<{ tag: string; documentCount: number }> }>(`/v1/workspaces/${encodeURIComponent(id)}/tags`, {}, options, true)).tags;
+    },
     async listWorkspaces(options?: RequestOptions): Promise<WorkspaceRecord[]> {
       return (await request<{ workspaces: WorkspaceRecord[] }>("/v1/workspaces", {}, options, true)).workspaces;
     },

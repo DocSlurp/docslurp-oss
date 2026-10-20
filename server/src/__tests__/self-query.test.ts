@@ -18,3 +18,13 @@ describe("deriveSelfQueryFilters", () => {
     expect(plan.reasons.length).toBeGreaterThan(0);
   });
 });
+
+
+it("plans explicit tags without widening caller restrictions or inventing filename filters", async () => {
+  const base = { privacyMode: "standard" as const, usage: { record: () => undefined } };
+  const plan = await deriveSelfQueryFilters({ ...base, query: 'find budgets tag:"finance team" tag:FY26' });
+  expect(plan.filters.tags).toEqual(["finance team", "FY26"]);
+  expect(plan.filters.filenameContains).toBeUndefined();
+  const restricted = await deriveSelfQueryFilters({ ...base, query: "find budgets tag:other", baseFilters: { tags: ["finance"] } });
+  expect(restricted.filters.tags).toEqual(["finance"]);
+});
