@@ -125,7 +125,7 @@ test("resume skips completed cells, never overwrites, and refuses a changed matr
   assert.ok(readJsonl(join(outDir, "run-log.jsonl")).some((event) => event.event === "resume"));
 });
 
-test("one retry on 5xx/429 keeps both attempts; 4xx is not retried", async (t) => {
+test("one retry on 5xx, up to five on 429, keeps every attempt; 4xx is not retried", async (t) => {
   const seen = new Map();
   const { baseUrl } = await mockServer(t, async (body) => {
     const count = (seen.get(body.q + body.model) ?? 0) + 1;
@@ -146,10 +146,10 @@ test("one retry on 5xx/429 keeps both attempts; 4xx is not retried", async (t) =
   assert.notEqual(recovered.attempts[0].traceId, recovered.attempts[1].traceId);
   assert.match(recovered.attempts[1].requestId, /-a2$/);
   const limited = read(1);
-  assert.equal(limited.attemptCount, 2, "exactly one retry");
+  assert.equal(limited.attemptCount, 5, "429 refusals retry up to max429Attempts (default 5)");
   assert.equal(limited.outcome, "http_429");
   assert.equal(read(2).attemptCount, 1);
-  assert.equal(summary.counts.retried, 2);
+  assert.equal(summary.counts.retried, 5);
   assert.equal(readJsonl(join(outDir, "attempts.jsonl")).length, 6);
 });
 
@@ -237,4 +237,10 @@ test("each case uses its tier's API key from a credentials file, never recorded 
   const artifacts = readdirSync(join(outDir, "calls")).map((file) => readFileSync(join(outDir, "calls", file), "utf8")).join("") + readFileSync(join(outDir, "run-config.json"), "utf8") + readFileSync(join(outDir, "attempts.jsonl"), "utf8");
   assert.ok(!artifacts.includes("secret-key"));
   await assert.rejects(runMatrix({ config: baseConfig({ baseUrl, apiKeyEnvByTier: { "mid-5k": "SMEVAL_TEST_MISSING" } }), dataset, outDir: tempDir(t), prices, log: quiet }), /No API key/);
+});
+
+test("429 refusals retry up to max429Attempts honouring the body's retryAfterSeconds", async () => {
+  const { retryDelayMs } = await import("./run.mjs");
+  const delay = retryDelayMs({ status: 429, responseHeaders: {}, response: { error: { details: { retryAfterSeconds: 12 } } } }, { minDelayMs: 0, maxDelayMs: 0 }, () => 0);
+  assert.equal(delay, 12_000);
 });

@@ -3,7 +3,7 @@
 // Gold never leaves this process's dataset read: requests carry the question
 // only, each case starts a fresh session, and every attempt is retained.
 import { randomBytes } from "node:crypto";
-import { existsSync, mkdirSync } from "node:fs";
+import { existsSync, mkdirSync, renameSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { performance } from "node:perf_hooks";
 import { pathToFileURL } from "node:url";
@@ -186,8 +186,10 @@ export function retryable(attempt, retry) {
 
 export function retryDelayMs(attempt, retry, random = Math.random) {
   const jitter = retry.minDelayMs + random() * (retry.maxDelayMs - retry.minDelayMs);
-  const after = Number(attempt.responseHeaders?.["retry-after"]);
-  return Number.isFinite(after) && after > 0 && after <= 30 ? Math.max(jitter, after * 1000) : jitter;
+  const header = Number(attempt.responseHeaders?.["retry-after"]);
+  const body = Number(attempt.response?.error?.details?.retryAfterSeconds);
+  const after = Number.isFinite(header) && header > 0 ? header : body;
+  return Number.isFinite(after) && after > 0 && after <= 60 ? Math.max(jitter, after * 1000 + jitter) : jitter;
 }
 
 // ---------------------------------------------------------------- scheduler
@@ -225,7 +227,7 @@ export function runPool(cells, limits, worker, { shouldStop = () => false } = {}
 
 // ---------------------------------------------------------------- run
 
-export async function runMatrix({ config, dataset, outDir, apiKey = null, apiKeyForTier = null, prices, fetchImpl = fetch, smoke = null, sleep = (ms) => new Promise((done) => setTimeout(done, ms)), random = Math.random, log = console.log }) {
+export async function runMatrix({ config, dataset, outDir, retryFailed = false, apiKey = null, apiKeyForTier = null, prices, fetchImpl = fetch, smoke = null, sleep = (ms) => new Promise((done) => setTimeout(done, ms)), random = Math.random, log = console.log }) {
   const keyFor = apiKeyForTier ?? (apiKey ? () => apiKey : keyResolverFor(config));
   const callsDir = join(outDir, "calls");
   mkdirSync(callsDir, { recursive: true });
@@ -243,6 +245,19 @@ export async function runMatrix({ config, dataset, outDir, apiKey = null, apiKey
   const cells = buildMatrix(selectCases(dataset, config), config, { smoke });
   // Fail before any call when a tier in the matrix has no key.
   for (const tier of new Set(cells.map((cell) => cell.case.workspaceTier))) keyFor(tier);
+  if (retryFailed) {
+    // Keep failed records as evidence under calls-failed/ and run those cells again.
+    const failedDir = join(outDir, "calls-failed");
+    mkdirSync(failedDir, { recursive: true });
+    for (const cell of cells) {
+      const path = join(callsDir, `${cell.key}.json`);
+      if (!existsSync(path)) continue;
+      const record = readJson(path);
+      if (record.outcome === "ok") continue;
+      renameSync(path, join(failedDir, `${cell.key}.${Date.now()}.json`));
+      appendJsonl(join(outDir, "run-log.jsonl"), { at: new Date().toISOString(), event: "retry-failed", key: cell.key, outcome: record.outcome });
+    }
+  }
   const completed = new Set(cells.filter((cell) => existsSync(join(callsDir, `${cell.key}.json`))).map((cell) => cell.key));
   const todo = cells.filter((cell) => !completed.has(cell.key));
   const counts = { cells: cells.length, skippedCompleted: completed.size, completed: 0, failed: 0, refused: 0, retried: 0, modelMismatches: 0, workerErrors: 0 };
@@ -252,7 +267,10 @@ export async function runMatrix({ config, dataset, outDir, apiKey = null, apiKey
       const price = assertModelAllowed(cell.model, prices);
       const estimateUsd = estimateCallUsd(cell.model, cell.armConfig, config.budget, prices);
       const attempts = [];
-      for (let attempt = 1; attempt <= 2; attempt++) {
+      // A rate-limit refusal (429) happens before any model call, so it retries up to max429Attempts honouring Retry-After;
+      // other retryable failures get one retry.
+      const attemptLimit = (record) => (record.status === 429 ? config.retry.max429Attempts ?? 5 : 2);
+      for (let attempt = 1; ; attempt++) {
         const reservationId = guard.reserve({ key: `${cell.key}#a${attempt}`, model: cell.model, estimateUsd });
         if (!reservationId) {
           stopped = true;
@@ -264,7 +282,7 @@ export async function runMatrix({ config, dataset, outDir, apiKey = null, apiKey
         record.guard = guard.reconcile(reservationId, { actualUsd: record.costUsd, source: record.costSource });
         attempts.push(record);
         appendJsonl(join(outDir, "attempts.jsonl"), { key: cell.key, model: cell.model, caseId: cell.caseId, arm: cell.arm, repeat: cell.repeat, attempt, status: record.status, errorKind: record.errorKind ?? null, latencyMs: record.latencyMs, ttfbMs: record.ttfbMs, requestId: record.requestId, serverRequestId: record.serverRequestId, traceId: record.traceId, chargedUsd: record.guard.chargedUsd, at: record.completedAt });
-        if (record.ok || attempt === 2 || !retryable(record, config.retry)) break;
+        if (record.ok || attempt >= attemptLimit(record) || !retryable(record, config.retry)) break;
         counts.retried++;
         await sleep(retryDelayMs(record, config.retry, random));
       }
@@ -298,7 +316,7 @@ export async function runMatrix({ config, dataset, outDir, apiKey = null, apiKey
 const USAGE = "Usage: run.mjs --config config.json --out DIR [--dataset dataset.json] [--dry-run] [--smoke N]";
 
 export async function main(argv = process.argv.slice(2)) {
-  const options = parseArgs(argv, { booleans: ["dry-run"] });
+  const options = parseArgs(argv, { booleans: ["dry-run", "retry-failed"] });
   if (!options.config) throw new Error(USAGE);
   const raw = readJson(options.config);
   const prices = loadPrices(raw.pricesPath ?? undefined, raw.priceOverrides ?? {});
@@ -314,7 +332,7 @@ export async function main(argv = process.argv.slice(2)) {
     return 0;
   }
   if (!options.out) throw new Error(USAGE);
-  const summary = await runMatrix({ config, dataset, outDir: resolve(options.out), apiKeyForTier: keyResolverFor(config), prices, smoke });
+  const summary = await runMatrix({ config, dataset, outDir: resolve(options.out), apiKeyForTier: keyResolverFor(config), prices, smoke, retryFailed: Boolean(options["retry-failed"]) });
   console.log(JSON.stringify(summary, null, 2));
   return summary.counts.workerErrors ? 1 : 0;
 }
