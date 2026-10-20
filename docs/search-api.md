@@ -121,8 +121,11 @@ Agent responses add these `debug` fields (other turns omit them):
 | `searchCallCount`, `searchQueryCount` | Search tool calls, and retrieval queries counting each item of a parallel batch |
 | `zeroHitSearchCount` | Search calls that returned no results |
 | `stepUsage` | Per step: `{step, model, finishReason, inputTokens, outputTokens, costCents?, toolCalls}` |
+| `toolCalls` | Per tool call, in order (refused calls included): `{id, name, status, runtimeMs, queries?, resultCount?, zeroHit?, evidencePages?, costCents?, errorCode?}`. `queries` are the search strings the model sent (never put on spans); `evidencePages` lists the distinct `{documentId, pageNumber}` of the evidence that call returned; `errorCode` is `tool_call_limit`, `invalid_arguments`, `aborted`, `exception`, the tool's own error code or `http_<status>`. |
 | `limits` | `{maxSteps, maxToolCalls, searchConcurrency, clamped}` as applied |
 | `stopReason` | See below |
+
+On agent turns, `usage.costCents` is the **provider cost** in USD cents of the agent's own model calls (the OpenRouter receipt, or an estimate from verified list prices when the receipt is missing; `usage.costSource` says `provider`, `estimate` or `mixed`). It is not customer credits; credits are derived from the recorded usage events by the rate card. It excludes tool work: the provider cost the tools report for their own work (query embeddings, rewrites, HyDE, reranking, nested answers) is in `usage.toolCostCents` and per call in `debug.toolCalls[].costCents`, and is recorded as separate usage events. A turn's total provider cost is `costCents + toolCostCents`; cached search responses report 0.
 
 `stopReason` is chosen deterministically, without reading the answer's meaning. The first rule that matches wins:
 
@@ -165,6 +168,8 @@ With OpenTelemetry export on, each agent turn emits spans on the `docslurp.chat`
 - `invoke_agent workspace-chat`: `gen_ai.operation.name=invoke_agent`, `gen_ai.agent.name=workspace-chat`, `gen_ai.provider.name=openrouter`, `gen_ai.request.model`, `gen_ai.response.model`, `gen_ai.request.max_tokens`, summed `gen_ai.usage.input_tokens`/`output_tokens`, `gen_ai.response.finish_reasons`, `gen_ai.conversation.id` (the chat session), `docslurp.chat.steps`, `.tool_calls`, `.tool_calls_refused`, `.search_calls`, `.search_queries`, `.zero_hit_searches`, `.stop_reason`, `.cost_usd`, `.upstream_provider`, `docslurp.chat.limit.max_steps`/`.max_tool_calls`/`.search_concurrency`, and `docslurp.workspaceId`, `docslurp.orgId`, `docslurp.requestId`.
 - `chat <model>` per model step (child, kind client): `gen_ai.operation.name=chat`, `docslurp.chat.step`, per-step usage, `gen_ai.response.model`, `gen_ai.response.id`, `gen_ai.response.finish_reasons` and `docslurp.chat.cost_usd`.
 - `execute_tool <tool>` per tool call (child): `gen_ai.operation.name=execute_tool`, `gen_ai.tool.name`, `gen_ai.tool.call.id`, `gen_ai.tool.type=function`, `docslurp.chat.session_id`, and `error.type` on failure (`tool_call_limit` for a refused call). Search calls add `docslurp.rag.query_count`, `.concurrency`, `.result_count`, `.top_score`, `.zero_hit`, `.document_count` (distinct documents) and `.search_session_id`.
+
+The agent span also copies the W3C baggage keys `eval.run_id`, `eval.case_id`, `eval.model` and `eval.arm` from the request's `baggage` header (other keys are ignored; values are capped at 128 characters). `/v1/chat` responses carry a `traceparent` header for the request's trace when tracing is on, so clients can join a turn to its trace.
 
 The `api.search` retrieval spans those calls create carry `docslurp.chat.session_id`, and their `search_sessions.metadata` and search usage events record `chatSessionId`. Metrics: the `docslurp.chat.agent.duration` histogram (seconds, by `gen_ai.request.model` and `docslurp.chat.stop_reason`) and the `docslurp.chat.agent.tool_calls` counter (by `gen_ai.request.model` and `gen_ai.tool.name`).
 

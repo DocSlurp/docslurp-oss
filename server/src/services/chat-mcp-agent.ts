@@ -4,7 +4,7 @@ import { createOpenAI } from "@ai-sdk/openai";
 import { streamText, stepCountIs } from "ai";
 import { performance } from "node:perf_hooks";
 import { assertProviderAllowed, CHAT_AGENT_LIMIT_DEFAULTS, createOpenRouterReasoningFetch, createOpenRouterUsageCapture, resolveOpenRouterUsage, type ChatAgentLimits, type ChatAgentStepUsage, type ChatAgentStopReason, type PrivacyMode, type WorkspaceChatTurn } from "@docslurp/shared";
-import { recordChatAgentTelemetry, startTelemetrySpan, type TelemetrySpan } from "@docslurp/shared/observability";
+import { evalBaggageAttributes, recordChatAgentTelemetry, startTelemetrySpan, type TelemetrySpan } from "@docslurp/shared/observability";
 import type { RequestActor } from "../lib/request-actor.js";
 import { recordUsageEvent } from "../lib/ai-usage.js";
 import { posthogAiTelemetry } from "../lib/posthog-ai-observability.js";
@@ -95,6 +95,8 @@ export async function runChatMcpAgent(args: {
     "docslurp.chat.limit.search_concurrency": limits.searchConcurrency,
     "docslurp.workspaceId": args.workspaceId, "docslurp.orgId": args.orgId,
     ...(args.requestId ? { "docslurp.requestId": args.requestId } : {}),
+    // Allowlisted eval.run_id / eval.case_id / eval.model / eval.arm from the caller's W3C baggage.
+    ...evalBaggageAttributes(),
   });
   const context = createChatMcpTools({
     manifest: mcpManifest("http://mcp.internal", args.actor.type === "apiKey" ? args.actor.apiKey.scopes : undefined),
@@ -116,7 +118,10 @@ export async function runChatMcpAgent(args: {
   });
   const accounting = createOpenRouterUsageCapture();
   const provider = createOpenAI({ apiKey: args.apiKey, baseURL: "https://openrouter.ai/api/v1", fetch: createOpenRouterReasoningFetch(accounting.fetch) });
-  const usage = { inputTokens: 0, outputTokens: 0, totalTokens: 0, costCents: 0 };
+  // costCents: provider cost of the agent's own model calls. Tool work is reported separately in toolCostCents.
+  const usage = { inputTokens: 0, outputTokens: 0, totalTokens: 0, costCents: 0, toolCostCents: 0,
+    costSource: "none" as "none" | "provider" | "estimate" | "mixed" };
+  const costSources = new Set<string>();
   const stepUsage: ChatAgentStepUsage[] = [];
   const stepSpans = new Map<number, TelemetrySpan>();
   let resolvedModel: string | null = null;
@@ -186,6 +191,8 @@ export async function runChatMcpAgent(args: {
         usage.outputTokens += actual.outputTokens;
         usage.totalTokens += actual.inputTokens + actual.outputTokens;
         usage.costCents += actual.costCents ?? 0;
+        costSources.add(actual.metadata?.costSource === "provider" ? "provider" : "estimate");
+        usage.costSource = costSources.size > 1 ? "mixed" : costSources.has("provider") ? "provider" : "estimate";
         resolvedModel = responseModel ?? resolvedModel;
         resolvedProvider = providerName ?? resolvedProvider;
         lastFinishReason = step.finishReason;
@@ -218,6 +225,7 @@ export async function runChatMcpAgent(args: {
       }
     }
     signal.throwIfAborted();
+    usage.toolCostCents = context.counters.toolCostCents;
     if (!answer.trim()) throw new Error("Chat completed without an answer; check tool status before retrying actions.");
     const finishReason = await result.finishReason;
     lastFinishReason = finishReason ?? lastFinishReason;
@@ -233,7 +241,7 @@ export async function runChatMcpAgent(args: {
       zeroHitSearchCount: context.searchCalls.filter(call => call.zeroHit).length,
       stopReason, stepUsage, limits,
     };
-    return { answer, usage, citations: context.citations, toolCalls: [...context.activity.values()], finishReason, debug };
+    return { answer, usage, citations: context.citations, toolCalls: [...context.details.values()], finishReason, debug };
   } catch (error) {
     stopReason = classifyChatAgentStop({ error, timedOut: timeout.aborted, toolCallsRefused: context.counters.refused,
       maxSteps: limits.maxSteps, searchCalls: context.searchCalls, answer, steps: [] });

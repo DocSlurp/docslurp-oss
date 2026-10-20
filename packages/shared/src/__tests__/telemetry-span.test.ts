@@ -37,3 +37,14 @@ it("links a retrieval observation run by the chat agent to its chat session", as
   const span = exporter.getFinishedSpans().find(item => item.name === "api.search.linked")!;
   expect(span.attributes).toMatchObject({ "docslurp.chat.session_id": "chat-1", "docslurp.workspaceId": "ws" });
 });
+
+it("copies only allowlisted eval.* baggage, capped at 128 characters, and exposes the active traceparent", async () => {
+  const { evalBaggageAttributes, activeTraceparent, withHttpSpan } = await import("../observability.js");
+  expect(activeTraceparent()).toBeNull();
+  const seen = await withHttpSpan({ method: "POST", route: "/v1/chat", status: () => 200, headers: {
+    traceparent: "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01", tracestate: "",
+    baggage: `eval.run_id=run-1,eval.case_id=${"x".repeat(200)},eval.secret=nope,user.email=someone`,
+  } }, async () => ({ baggage: evalBaggageAttributes(), traceparent: activeTraceparent() }));
+  expect(seen.baggage).toEqual({ "eval.run_id": "run-1", "eval.case_id": "x".repeat(128) });
+  expect(seen.traceparent).toMatch(/^00-0af7651916cd43dd8448eb211c80319c-[0-9a-f]{16}-01$/);
+});

@@ -352,6 +352,16 @@ export const workspaceChatDebugSchema = z.object({
   toolCalls: z.array(z.object({
     id: z.string(), name: z.string(), status: z.enum(["loading", "success", "error"]),
     runtimeMs: z.number().nonnegative().optional(),
+    /** Search calls: the query strings the model sent (its own words, never document text). */
+    queries: z.array(z.string()).optional(),
+    resultCount: z.number().int().nonnegative().optional(),
+    zeroHit: z.boolean().optional(),
+    /** Distinct pages of the evidence this call returned. */
+    evidencePages: z.array(z.object({ documentId: z.string(), pageNumber: z.number().int().nullable() })).optional(),
+    /** Failed calls: `tool_call_limit`, `invalid_arguments`, `aborted`, `exception`, the tool's error code or `http_<status>`. */
+    errorCode: z.string().optional(),
+    /** Provider cost (USD cents) the tool reported for its own work. */
+    costCents: z.number().nonnegative().optional(),
   })).optional(),
   citations: z.number().int().nonnegative(),
   model: z.string().nullable().default(null),

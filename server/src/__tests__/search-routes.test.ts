@@ -32,6 +32,12 @@ vi.mock("../services/workspaces.js", () => ({ resolveWorkspaceRef: vi.fn(async (
   getWorkspace,
 }));
 
+const traceparent = vi.hoisted(() => ({ value: null as string | null }));
+vi.mock("@docslurp/shared/observability", async (importOriginal) => ({
+  ...await importOriginal<typeof import("@docslurp/shared/observability")>(),
+  activeTraceparent: () => traceparent.value,
+}));
+
 const { searchRoutes, clearSearchResponseCacheForTests } = await import("../routes/search.js");
 const { publicErrorMiddleware } = await import("../lib/public-errors.js");
 const { apiErrorEnvelopeSchema, PUBLIC_ERROR_MESSAGES } = await import("@docslurp/shared");
@@ -383,6 +389,20 @@ describe("searchRoutes", () => {
       allowAgentTools: true,
       signal: expect.any(AbortSignal),
     });
+  });
+
+  it("returns the active traceparent on chat responses so clients can join traces", async () => {
+    traceparent.value = "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01";
+    try {
+      chatWorkspace.mockResolvedValueOnce({ answer: "Supported" });
+      const response = await app.request("/search/chat", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ q: "Question", workspaceId: "ws-chat" }) });
+      expect(response.headers.get("traceparent")).toBe(traceparent.value);
+    } finally {
+      traceparent.value = null;
+    }
+    chatWorkspace.mockResolvedValueOnce({ answer: "Supported" });
+    const untraced = await app.request("/search/chat", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ q: "Question", workspaceId: "ws-chat" }) });
+    expect(untraced.headers.get("traceparent")).toBeNull();
   });
 
   it("forwards per-request agent limits and rejects out-of-range ones", async () => {

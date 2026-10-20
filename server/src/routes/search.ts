@@ -24,6 +24,7 @@ import { sql } from "../db.js";
 import { acceptApiKeys } from "../lib/route-auth.js";
 import { currentRequestApiKeyId } from "../lib/request-context.js";
 import { env } from "../config.js";
+import { activeTraceparent } from "@docslurp/shared/observability";
 import { chatModelRefused, ChatModelNotAllowedError } from "../lib/chat-model-policy.js";
 
 function modelNotAllowed(c: Context): Response {
@@ -78,6 +79,9 @@ async function denyWorkspaceAccess(c: Context, workspaceId: string): Promise<Res
 
 /** `grounded` is the nested MCP tool target: retrieval-only, never another agent or a settings change. */
 async function handleWorkspaceChat(c: Context, mode: "public" | "grounded") {
+  // Lets clients join a turn to its trace (the trace id is the second field).
+  const traceparent = activeTraceparent();
+  if (traceparent) c.header("traceparent", traceparent);
   const parsed = workspaceChatInputSchema.safeParse(await c.req.json().catch(() => null));
   if (!parsed.success) return apiErrorResponse(c, 400, "invalid_request", "Invalid chat input", { issues: parsed.error.issues });
   const body = parsed.data;

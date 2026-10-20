@@ -43,8 +43,11 @@ export const workspaceChatUsageSchema = z.object({
   inputTokens: z.number().int().nonnegative().default(0),
   outputTokens: z.number().int().nonnegative().default(0),
   totalTokens: z.number().int().nonnegative().default(0),
+  /** Provider cost in USD cents (not customer credits). On agent turns: the agent's own model calls only. */
   costCents: z.number().nonnegative().optional(),
   costSource: z.string().optional(),
+  /** Agent turns: provider cost (USD cents) the tools reported for their own work, such as query embeddings, rewrites and nested answers. */
+  toolCostCents: z.number().nonnegative().optional(),
 });
 export type WorkspaceChatUsage = z.infer<typeof workspaceChatUsageSchema>;
 

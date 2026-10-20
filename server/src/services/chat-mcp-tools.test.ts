@@ -86,6 +86,30 @@ describe("chat MCP tool budgets", () => {
   });
 });
 
+describe("chat MCP tool call details", () => {
+  it("records model queries, hits, distinct evidence pages, tool cost and failure codes per call", async () => {
+    const t = setup(["search"]);
+    const hit = (documentId: string, pageNumber: number, chunkIndex: number) => ({ text: "passage", score: 1, citation: { documentId, filename: "f.pdf", pageNumber, chunkIndex, headingPath: [] } });
+    t.dispatch.mockResolvedValueOnce(Response.json({ results: [
+      { ok: true, data: { results: [hit("d1", 2, 0), hit("d1", 2, 1)], usage: { costCents: 0.01 } } },
+      { ok: true, data: { results: [hit("d2", 5, 0)], usage: { costCents: 0.02 } } },
+    ] }));
+    await t.execute("search", { queries: [{ q: "first question" }, { q: "second question" }] }, "a");
+    t.dispatch.mockResolvedValueOnce(Response.json({ error: { code: "invalid_search_scope", message: "x" } }, { status: 400 }));
+    await t.execute("search", { q: "bad" }, "b");
+    t.dispatch.mockRejectedValueOnce(new Error("boom"));
+    await t.execute("search", { q: "boom" }, "c");
+    const [first, second, third] = [...t.details.values()];
+    expect(first).toMatchObject({ id: "a", name: "search", status: "success", queries: ["first question", "second question"],
+      resultCount: 3, zeroHit: false, evidencePages: [{ documentId: "d1", pageNumber: 2 }, { documentId: "d2", pageNumber: 5 }] });
+    expect(first!.costCents).toBeCloseTo(0.03, 10);
+    expect(first!.runtimeMs).toBeGreaterThanOrEqual(0);
+    expect(second).toMatchObject({ status: "error", queries: ["bad"], errorCode: "invalid_search_scope" });
+    expect(third).toMatchObject({ status: "error", queries: ["boom"], errorCode: "exception" });
+    expect(t.counters.toolCostCents).toBeCloseTo(0.03, 10);
+  });
+});
+
 describe("chat MCP tool retrieval controls", () => {
   it("enforces resolved retrieval controls on every search, batch query and nested chat", async () => {
     const { workspaceSearchRetrievalDefaultsSchema } = await import("@docslurp/shared");

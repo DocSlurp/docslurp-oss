@@ -27,6 +27,7 @@ vi.mock("@docslurp/shared/observability", () => ({
       end: (error?: unknown) => { if (record.ended) return; record.ended = true; record.error = error; } };
   },
   recordChatAgentTelemetry: (metric: unknown) => { spans.metrics.push(metric); },
+  evalBaggageAttributes: () => ({ "eval.run_id": "run-7", "eval.arm": "control" }),
 }));
 const { runChatMcpAgent, classifyChatAgentStop } = await import("./chat-mcp-agent.js");
 const actor = { type: "session" as const, userId: "user", sessionId: "browser-session", user: { id: "user", name: "User", email: "" } };
@@ -189,6 +190,9 @@ describe("chat agent limits, debug and spans", () => {
         { step: 1, finishReason: "stop", toolCalls: [] },
       ],
     });
+    expect(result.toolCalls).toEqual([expect.objectContaining({ id: "c1", name: "search", status: "success", queries: ["a", "b"],
+      resultCount: 2, zeroHit: false, evidencePages: [{ documentId: "doc-a", pageNumber: 1 }, { documentId: "doc-b", pageNumber: 1 }] })]);
+    expect(result.usage).toMatchObject({ costSource: "estimate", toolCostCents: 0 });
     const agent = spans.list.find(span => span.name === "invoke_agent workspace-chat")!;
     expect(agent).toMatchObject({ tracer: "docslurp.chat", ended: true, error: undefined });
     expect(agent.attributes).toMatchObject({
@@ -200,6 +204,7 @@ describe("chat agent limits, debug and spans", () => {
       "docslurp.chat.stop_reason": "answered", "docslurp.chat.limit.max_steps": 4, "docslurp.chat.limit.max_tool_calls": 5,
       "docslurp.chat.limit.search_concurrency": 3, "docslurp.chat.cost_usd": 0.0002,
       "docslurp.workspaceId": "ws", "docslurp.orgId": "org", "docslurp.requestId": "req-1",
+      "eval.run_id": "run-7", "eval.arm": "control",
     });
     const steps = spans.list.filter(span => span.name === "chat z-ai/glm-5.3-flash");
     expect(steps).toHaveLength(2);
@@ -218,7 +223,7 @@ describe("chat agent limits, debug and spans", () => {
       "docslurp.rag.query_count": 2, "docslurp.rag.concurrency": 3, "docslurp.rag.result_count": 2, "docslurp.rag.top_score": 0.9,
       "docslurp.rag.zero_hit": false, "docslurp.rag.document_count": 2, "docslurp.rag.search_session_id": ["search-a", "search-b"] });
     const serialized = JSON.stringify(spans.list.map(span => span.attributes));
-    for (const content of ["Secret passage", "What is the policy?", "Supported [1]."]) expect(serialized).not.toContain(content);
+    for (const content of ["Secret passage", "What is the policy?", "Supported [1].", "\"a\"", "\"b\""]) expect(serialized).not.toContain(content);
     expect(spans.metrics).toEqual([expect.objectContaining({ model: "z-ai/glm-5.3-flash", stopReason: "answered", toolCalls: { search: 1 } })]);
   });
 

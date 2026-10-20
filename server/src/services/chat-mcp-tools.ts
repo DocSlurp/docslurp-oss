@@ -11,6 +11,45 @@ export const TOOL_CALL_LIMIT_RESULT = {
   limitReached: true,
 } as const;
 
+/**
+ * One tool call as reported in the response's `debug.toolCalls`. `queries` are
+ * the model's own search strings: fine for the caller's debug, never put on spans.
+ */
+export interface ChatToolCallDetail extends ChatToolActivity {
+  queries?: string[];
+  resultCount?: number;
+  zeroHit?: boolean;
+  /** Distinct pages of the evidence this call returned. */
+  evidencePages?: Array<{ documentId: string; pageNumber: number | null }>;
+  errorCode?: string;
+  /** Provider cost the tool reported for its own work (embeddings, rewrites, nested answers), USD cents. */
+  costCents?: number;
+}
+
+function modelQueries(supplied: Record<string, unknown>): string[] {
+  const items = Array.isArray(supplied.queries) ? supplied.queries : [supplied];
+  return items.slice(0, 20).map(item => item && typeof item === "object" ? (item as { q?: unknown }).q : undefined)
+    .filter((q): q is string => typeof q === "string").map(q => q.slice(0, 1000));
+}
+
+/** Provider cost (USD cents) a tool response reports for its own work: retrieval AI steps or a nested answer. */
+function reportedToolCostCents(result: unknown): number {
+  if (!result || typeof result !== "object") return 0;
+  const body = result as { usage?: { costCents?: unknown }; results?: unknown };
+  const own = typeof body.usage?.costCents === "number" && Number.isFinite(body.usage.costCents) ? body.usage.costCents : 0;
+  const batch = Array.isArray(body.results) ? body.results.reduce<number>((sum, item) => {
+    const cost = item && typeof item === "object" ? (item as { data?: { usage?: { costCents?: unknown } } }).data?.usage?.costCents : undefined;
+    return sum + (typeof cost === "number" && Number.isFinite(cost) ? cost : 0);
+  }, 0) : 0;
+  return own + batch;
+}
+
+function responseErrorCode(result: unknown, status: number): string {
+  const error = result && typeof result === "object" ? (result as { error?: unknown }).error : undefined;
+  const code = error && typeof error === "object" ? (error as { code?: unknown }).code : undefined;
+  return typeof code === "string" && /^[a-z0-9_]{1,64}$/i.test(code) ? code : `http_${status}`;
+}
+
 /** Retrieval shape of one search tool call: counts and scores only, never passage text. */
 export interface ChatSearchCallStats {
   toolCallId: string;
@@ -87,7 +126,8 @@ export function createChatMcpTools(args: {
   const searchCalls: ChatSearchCallStats[] = [];
   const maxToolCalls = args.maxToolCalls ?? CHAT_AGENT_LIMIT_DEFAULTS.maxToolCalls;
   const searchConcurrency = args.searchConcurrency ?? CHAT_AGENT_LIMIT_DEFAULTS.searchConcurrency;
-  const counters = { executed: 0, refused: 0, byTool: {} as Record<string, number> };
+  const counters = { executed: 0, refused: 0, byTool: {} as Record<string, number>, toolCostCents: 0 };
+  const details = new Map<string, ChatToolCallDetail>();
   let calls = 0;
   const tools: ToolSet = {};
   const defaults = args.retrievalDefaults;
@@ -111,18 +151,19 @@ export function createChatMcpTools(args: {
     enableCommunityExpansion: defaults.enableCommunityExpansion, graphHops: defaults.graphHops,
   } : undefined;
 
-  function collectEvidence(value: unknown): void {
+  function collectEvidence(value: unknown, returned: SearchResult[]): void {
     if (!value || typeof value !== "object") return;
-    if (Array.isArray(value)) { value.forEach(collectEvidence); return; }
+    if (Array.isArray(value)) { for (const item of value) collectEvidence(item, returned); return; }
     const parsed = searchResultSchema.safeParse(value);
     if (parsed.success) {
       const item = parsed.data;
+      returned.push(item);
       if (citations.length < 80 && !citations.some(c => c.citation.documentId === item.citation.documentId
         && c.citation.chunkIndex === item.citation.chunkIndex && c.text === item.text)) citations.push(item);
       return;
     }
     const object = value as Record<string, unknown>;
-    for (const key of ["results", "citations", "data", "response"]) collectEvidence(object[key]);
+    for (const key of ["results", "citations", "data", "response"]) collectEvidence(object[key], returned);
   }
 
   for (const definition of args.manifest.capabilities.filter(item => item.category === "tool" && !CHAT_EXCLUDED_TOOLS.has(item.id))) {
@@ -140,13 +181,19 @@ export function createChatMcpTools(args: {
           ...(args.chatSessionId ? { "docslurp.chat.session_id": args.chatSessionId } : {}),
           "docslurp.workspaceId": args.workspaceId,
         }, { parent: args.traceParent });
+        const started = Date.now();
+        const detail = (fields: Omit<ChatToolCallDetail, "id" | "name" | "runtimeMs">) => {
+          details.set(toolCallId, { id: toolCallId, name: definition.id, runtimeMs: Date.now() - started, ...fields });
+        };
         if (++calls > maxToolCalls) {
           counters.refused++;
+          detail({ status: "error", errorCode: "tool_call_limit" });
           span.set({ "docslurp.chat.tool_call_refused": true });
           span.end("tool_call_limit");
           return { ...TOOL_CALL_LIMIT_RESULT };
         }
         if (!input || typeof input !== "object" || Array.isArray(input)) {
+          detail({ status: "error", errorCode: "invalid_arguments" });
           span.end("invalid_arguments");
           return { error: "Expected object arguments" };
         }
@@ -173,7 +220,7 @@ export function createChatMcpTools(args: {
           : definition.id === "chat" && chatDefaults
             ? { ...supplied, retrieval: chatDefaults, workspaceId: args.workspaceId }
             : { ...supplied, workspaceId: args.workspaceId };
-        const started = Date.now();
+        const queries = definition.id === "search" ? modelQueries(supplied) : undefined;
         const update = (status: ChatToolActivity["status"]) => {
           const event: ChatToolActivity = { id: toolCallId, name: definition.id, status,
             ...(status !== "loading" ? { runtimeMs: Date.now() - started } : {}) };
@@ -187,13 +234,22 @@ export function createChatMcpTools(args: {
           }));
           const response = await (args.chatSessionId ? runInChatAgentContext(args.chatSessionId, dispatch) : dispatch());
           const result: unknown = await response.json();
+          const returned: SearchResult[] = [];
           if (response.ok) {
-            collectEvidence(result);
+            collectEvidence(result, returned);
             args.onEvidence?.([...citations]);
           }
           update(response.ok ? "success" : "error");
-          if (definition.id === "search") {
-            const stats = searchCallStats(toolCallId, response.ok, queryCount, concurrency, result);
+          const pages = new Map(returned.map(item => [`${item.citation.documentId}:${item.citation.pageNumber ?? ""}`,
+            { documentId: item.citation.documentId, pageNumber: item.citation.pageNumber ?? null }]));
+          const costCents = response.ok ? reportedToolCostCents(result) : 0;
+          counters.toolCostCents += costCents;
+          const stats = definition.id === "search" ? searchCallStats(toolCallId, response.ok, queryCount, concurrency, result) : undefined;
+          detail({ status: response.ok ? "success" : "error", ...(queries ? { queries } : {}),
+            ...(stats ? { resultCount: stats.resultCount, zeroHit: stats.zeroHit } : {}),
+            evidencePages: [...pages.values()], ...(response.ok ? { costCents } : {}),
+            ...(response.ok ? {} : { errorCode: responseErrorCode(result, response.status) }) });
+          if (stats) {
             searchCalls.push(stats);
             span.set({
               "docslurp.rag.query_count": stats.queryCount, "docslurp.rag.concurrency": stats.concurrency,
@@ -216,6 +272,7 @@ export function createChatMcpTools(args: {
           };
         } catch (error) {
           update("error");
+          detail({ status: "error", ...(queries ? { queries } : {}), errorCode: args.signal.aborted ? "aborted" : "exception" });
           if (definition.id === "search") searchCalls.push(searchCallStats(toolCallId, false, queryCount, concurrency, null));
           span.end(error ?? "Error");
           args.signal.throwIfAborted();
@@ -224,5 +281,5 @@ export function createChatMcpTools(args: {
       },
     });
   }
-  return { tools, citations, activity, searchCalls, counters };
+  return { tools, citations, activity, details, searchCalls, counters };
 }
