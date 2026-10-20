@@ -1,6 +1,6 @@
 import { afterEach, expect, it, vi } from "vitest";
 
-// Real OpenAI-compatible provider and OpenRouter usage capture; only the network is faked.
+// Real OpenRouter AI SDK provider and usage capture; only the network is faked.
 const record = vi.fn();
 vi.mock("../lib/ai-usage.js", () => ({ recordUsageEvent: record }));
 vi.mock("../lib/privacy.js", () => ({ allowHostedCallForWorkspace: vi.fn(async () => true), loadWorkspacePrivacyMode: vi.fn(async () => "standard"), openRouterCall: vi.fn() }));

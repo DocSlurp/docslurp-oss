@@ -71,7 +71,7 @@ describe("chat model resolution", () => {
 
   it("applies DeepSeek V4 reasoning options to aliases and dated builds", () => {
     for (const model of ["deepseek/deepseek-v4.1-flash", "deepseek/deepseek-v4.1-flash-1017"]) {
-      expect(chatAgentProviderOptions(model)).toEqual({ openai: { reasoningEffort: "low", forceReasoning: true } });
+      expect(chatAgentProviderOptions(model)).toEqual({ openrouter: { reasoning: { effort: "low" } } });
     }
     expect(chatAgentProviderOptions("z-ai/glm-5.3-flash")).toBeUndefined();
   });

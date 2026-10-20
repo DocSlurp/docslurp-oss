@@ -3,7 +3,10 @@ import { MockLanguageModelV4 } from "ai/test";
 import { simulateReadableStream } from "ai";
 
 const mocks = vi.hoisted(() => ({ provider: vi.fn(), record: vi.fn(), dispatch: vi.fn(), createDispatch: vi.fn(), providerName: undefined as string | undefined }));
-vi.mock("@ai-sdk/openai", () => ({ createOpenAI: () => ({ chat: mocks.provider }) }));
+vi.mock("../lib/chat-agent-model.js", async importOriginal => ({
+  ...await importOriginal<typeof import("../lib/chat-agent-model.js")>(),
+  createChatAgentModel: (options: { model: string }) => mocks.provider(options.model),
+}));
 vi.mock("../lib/ai-usage.js", () => ({ recordUsageEvent: mocks.record }));
 vi.mock("../lib/privacy.js", () => ({ allowHostedCallForWorkspace: vi.fn(async () => true), loadWorkspacePrivacyMode: vi.fn(async () => "standard"), openRouterCall: vi.fn() }));
 vi.mock("./workspaces.js", () => ({ resolveWorkspaceRef: vi.fn(async () => ({ id: "ws" })) }));
@@ -68,6 +71,27 @@ describe("chat MCP agent with the real SDK loop", () => {
       expect(entry).toMatchObject({ userId: "user", scope: { workspaceId: "ws", orgId: "org", sessionId: "conversation" }, usage: { inputTokens: 10, outputTokens: 4 } });
     }
     expect(result.usage).toMatchObject({ inputTokens: 20, outputTokens: 8, totalTokens: 28 });
+  });
+
+  it("sends each step's reasoning and its provider metadata back on the assistant turn", async () => {
+    const details = [{ type: "reasoning.text", text: "Need the policy first.", format: "unknown", index: 0 }];
+    const reasoningStep: Awaited<ReturnType<MockLanguageModelV4["doStream"]>> = { stream: simulateReadableStream({ chunks: [
+      { type: "stream-start", warnings: [] },
+      { type: "reasoning-start", id: "r", providerMetadata: { openrouter: { reasoning_details: [] } } },
+      { type: "reasoning-delta", id: "r", delta: "Need the policy first." },
+      { type: "reasoning-end", id: "r", providerMetadata: { openrouter: { reasoning_details: details } } },
+      { type: "tool-call", toolCallId: "call", toolName: "search", input: '{"q":"policy"}', providerMetadata: { openrouter: { reasoning_details: details } } },
+      { type: "finish", finishReason: { unified: "tool-calls", raw: undefined },
+        usage: { inputTokens: { total: 10, noCache: 10, cacheRead: 0, cacheWrite: 0 }, outputTokens: { total: 4, text: 0, reasoning: 4 } } },
+    ], initialDelayInMs: 0, chunkDelayInMs: 0 }) };
+    const model = new MockLanguageModelV4({ doStream: [reasoningStep, step(false)] });
+    mocks.provider.mockReturnValue(model);
+    await runChatMcpAgent(args);
+    const assistant = model.doStreamCalls[1]!.prompt.find(message => message.role === "assistant");
+    expect(assistant?.content).toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: "reasoning", text: "Need the policy first.", providerOptions: { openrouter: { reasoning_details: details } } }),
+      expect.objectContaining({ type: "tool-call", toolName: "search", providerOptions: { openrouter: { reasoning_details: details } } }),
+    ]));
   });
 
   it("preserves caller system history while keeping retrieved content in tool messages", async () => {

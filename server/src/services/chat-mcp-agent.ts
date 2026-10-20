@@ -1,9 +1,9 @@
 import { allowHostedCallForWorkspace, loadWorkspacePrivacyMode, openRouterCall } from "../lib/privacy.js";
 import { resolveWorkspaceRef } from "./workspaces.js";
-import { createOpenAI } from "@ai-sdk/openai";
+import { chatAgentProviderOptions, createChatAgentModel } from "../lib/chat-agent-model.js";
 import { streamText, stepCountIs } from "ai";
 import { performance } from "node:perf_hooks";
-import { assertProviderAllowed, CHAT_AGENT_LIMIT_DEFAULTS, createOpenRouterReasoningFetch, createOpenRouterUsageCapture, resolveOpenRouterUsage, type ChatAgentLimits, type ChatAgentStepUsage, type ChatAgentStopReason, type PrivacyMode, type WorkspaceChatTurn } from "@docslurp/shared";
+import { assertProviderAllowed, CHAT_AGENT_LIMIT_DEFAULTS, createOpenRouterUsageCapture, resolveOpenRouterUsage, type ChatAgentLimits, type ChatAgentStepUsage, type ChatAgentStopReason, type PrivacyMode, type WorkspaceChatTurn } from "@docslurp/shared";
 import { evalBaggageAttributes, recordChatAgentTelemetry, startTelemetrySpan, type TelemetrySpan } from "@docslurp/shared/observability";
 import type { RequestActor } from "../lib/request-actor.js";
 import { recordUsageEvent } from "../lib/ai-usage.js";
@@ -16,10 +16,7 @@ const AGENT_TIMEOUT_MS = 120_000;
 const MAX_AGENT_OUTPUT_TOKENS = 4096;
 const DEFAULT_LIMITS: ChatAgentLimits = { ...CHAT_AGENT_LIMIT_DEFAULTS, clamped: [] };
 
-/** DeepSeek V4 aliases and dated builds (deepseek/deepseek-v4.1-flash-1017) need explicit low reasoning. */
-export function chatAgentProviderOptions(model: string) {
-  return model.startsWith("deepseek/deepseek-v4") ? { openai: { reasoningEffort: "low", forceReasoning: true } } : undefined;
-}
+export { chatAgentProviderOptions };
 
 /**
  * Deterministic stop classification; it never interprets answer wording.
@@ -117,7 +114,6 @@ export async function runChatMcpAgent(args: {
     },
   });
   const accounting = createOpenRouterUsageCapture();
-  const provider = createOpenAI({ apiKey: args.apiKey, baseURL: "https://openrouter.ai/api/v1", fetch: createOpenRouterReasoningFetch(accounting.fetch) });
   // costCents: provider cost of the agent's own model calls. Tool work is reported separately in toolCostCents.
   const usage = { inputTokens: 0, outputTokens: 0, totalTokens: 0, costCents: 0, toolCostCents: 0,
     costSource: "none" as "none" | "provider" | "estimate" | "mixed" };
@@ -143,7 +139,7 @@ export async function runChatMcpAgent(args: {
   try {
     const result = agentSpan.run(() => streamText({
       ...posthogAiTelemetry({ functionId: "workspace-chat-tools", provider: "openrouter" }),
-      model: provider.chat(args.model),
+      model: createChatAgentModel({ apiKey: args.apiKey, model: args.model, fetch: accounting.fetch }),
       system: [
         "You are DocSlurp's signed-in assistant. Use the supplied MCP tools to carry out the user's request with their permissions.",
         `The selected workspace is ${args.workspaceId}. Every tool is limited to this workspace; to use another one the user selects it in the app.`,
