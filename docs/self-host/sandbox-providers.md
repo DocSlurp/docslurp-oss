@@ -94,9 +94,10 @@ Modal runs each activity's parser commands in a remote sandbox. Use it when the 
 How it behaves:
 
 - The sandbox is created with the network blocked.
-- Input files are staged into the sandbox before each command, and files under the declared writable paths are copied back after it. A writable path the command never creates is not an error and produces no file.
+- Only the command's input files (file arguments inside the worker's DocSlurp temp workspaces) are uploaded, at the same paths, before each command. Parsers, scripts, Node and Python come from the image, never from the worker host. Files under the declared writable paths are copied back after the command. A writable path the command never creates is not an error and produces no file.
 - Time limits are enforced by Modal. A command that exceeds its limit is reported like a killed process.
-- The sandbox is terminated when the session closes, or when the activity is aborted. `DOCSLURP_MODAL_SESSION_TIMEOUT_SECONDS` is the backstop if the worker dies.
+- When one command is aborted (for example a stage's per-command timeout), only that command fails; other commands in the same activity keep using the sandbox. The Modal SDK cannot kill a single exec, so the aborted process keeps running in the sandbox until its own time limit, and its output is discarded.
+- The sandbox is terminated when the activity's session closes, whether the activity succeeds, fails or is cancelled. `DOCSLURP_MODAL_SESSION_TIMEOUT_SECONDS` is the backstop if the worker dies.
 - Each command logs one line:
 
 ```text

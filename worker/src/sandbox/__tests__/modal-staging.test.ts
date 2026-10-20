@@ -3,6 +3,8 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { CommandRunner, resolveVenvBin } from "../../tools/runner.js";
+import { resolveScriptsDir } from "../../tools/scripts-dir.js";
 import { createModalProvider, type ModalSdk } from "../providers/modal/index.js";
 import { SessionStaging, type RemoteFs } from "../providers/modal/staging.js";
 import { SandboxConfigError } from "../types.js";
@@ -154,69 +156,75 @@ describe("modal provider secrets", () => {
   });
 });
 
-describe("modal provider session lifecycle", () => {
-  const config = {
-    tokenId: "ak-id",
-    tokenSecret: "as-secret",
-    app: "app",
-    image: "debian:trixie-slim",
-    cpu: 1,
-    memoryMb: 512,
-    sessionTimeoutSeconds: 60,
+const lifecycleConfig = {
+  tokenId: "ak-id",
+  tokenSecret: "as-secret",
+  app: "app",
+  image: "debian:trixie-slim",
+  cpu: 1,
+  memoryMb: 512,
+  sessionTimeoutSeconds: 60,
+};
+
+class NotFound extends Error {}
+
+type FakeProcess = { stdout: { readText(): Promise<string> }; stderr: { readText(): Promise<string> }; wait(): Promise<number> };
+
+function finished(stdout = "out", exitCode = 0): FakeProcess {
+  return { stdout: { readText: async () => stdout }, stderr: { readText: async () => "" }, wait: async () => exitCode };
+}
+
+/** A Modal SDK double: records filesystem traffic and lets each test script `exec`. */
+function fakeSdk(opts: { createFails?: boolean; exec?: (argv: string[]) => Promise<FakeProcess> } = {}) {
+  const state = { terminate: 0, clientClose: 0, writes: [] as string[], mkdirs: [] as string[], stats: [] as string[] };
+  const sandbox = {
+    terminate: async () => void state.terminate++,
+    filesystem: {
+      makeDirectory: async (p: string) => void state.mkdirs.push(p),
+      writeBytes: async (_data: Uint8Array, p: string) => void state.writes.push(p),
+      stat: async (p: string) => {
+        state.stats.push(p);
+        throw new NotFound();
+      },
+      listFiles: async () => [],
+    },
+    exec: opts.exec ?? (async () => finished()),
   };
+  const sdk = {
+    SandboxFilesystemNotFoundError: NotFound,
+    ModalClient: class {
+      apps = { fromName: async () => ({}) };
+      images = { fromRegistry: () => ({}) };
+      sandboxes = {
+        create: async () => {
+          if (opts.createFails) throw new Error("no capacity");
+          return sandbox;
+        },
+      };
+      close() {
+        state.clientClose++;
+      }
+    },
+  } as unknown as ModalSdk;
+  return { sdk, state };
+}
+
+describe("modal provider session lifecycle", () => {
+  const config = lifecycleConfig;
   const command = {
     binary: "/usr/bin/true",
     args: [],
     env: {},
     readablePaths: [],
+    inputPaths: [],
     writablePaths: [],
     limits: { timeoutMs: 5_000 },
   };
-
-  class NotFound extends Error {}
 
   beforeEach(() => {
     vi.spyOn(console, "log").mockImplementation(() => {});
   });
   afterEach(() => vi.restoreAllMocks());
-
-  function fakeSdk(opts: { createFails?: boolean; exec?: () => Promise<unknown> } = {}) {
-    const state = { terminate: 0, clientClose: 0 };
-    const sandbox = {
-      terminate: async () => void state.terminate++,
-      filesystem: {
-        makeDirectory: async () => {},
-        stat: async () => {
-          throw new NotFound();
-        },
-        listFiles: async () => [],
-      },
-      exec:
-        opts.exec ??
-        (async () => ({
-          stdout: { readText: async () => "out" },
-          stderr: { readText: async () => "" },
-          wait: async () => 0,
-        })),
-    };
-    const sdk = {
-      SandboxFilesystemNotFoundError: NotFound,
-      ModalClient: class {
-        apps = { fromName: async () => ({}) };
-        images = { fromRegistry: () => ({}) };
-        sandboxes = {
-          create: async () => {
-            if (opts.createFails) throw new Error("no capacity");
-            return sandbox;
-          },
-        };
-        close() {
-          state.clientClose++;
-        }
-      },
-    } as unknown as ModalSdk;
-    return { sdk, state };
-  }
 
   async function open(opts: Parameters<typeof fakeSdk>[0] = {}) {
     const { sdk, state } = fakeSdk(opts);
@@ -233,29 +241,45 @@ describe("modal provider session lifecycle", () => {
     expect(state.clientClose).toBe(1);
   });
 
-  it("terminates the sandbox when the signal aborts during a run", async () => {
-    let release!: () => void;
+  it("aborting one command rejects only that command; the session keeps running others", async () => {
+    let release!: (process: FakeProcess) => void;
+    let calls = 0;
     const { state, session } = await open({
-      exec: () => new Promise((_, reject) => (release = () => reject(new Error("stream closed")))),
+      exec: () => (++calls === 1 ? new Promise<FakeProcess>((resolve) => (release = resolve)) : Promise.resolve(finished("second"))),
     });
     const opened = await session();
     const controller = new AbortController();
-    const running = opened.run!(command, controller.signal).catch((e: unknown) => e);
-    await new Promise((resolve) => setTimeout(resolve, 10));
-    controller.abort();
-    await new Promise((resolve) => setTimeout(resolve, 10));
-    release();
-    const error = await running;
-    expect((error as Error).message).toContain("aborted");
+    const dir = mkdtempSync(path.join(tmpdir(), "docslurp-modal-abort-"));
+    try {
+      const running = opened.run!({ ...command, writablePaths: [dir] }, controller.signal).catch((e: unknown) => e);
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      controller.abort();
+      const error = await running;
+      expect((error as Error).message).toContain("aborted");
+      expect(state.terminate).toBe(0);
+
+      const next = await opened.run!(command);
+      expect(next.exitCode).toBe(0);
+      expect(next.stdout).toBe("second");
+
+      // The abandoned exec finishing later must not write its outputs back.
+      release(finished("late"));
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      expect(state.stats).not.toContain(dir);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+    await opened.close();
     expect(state.terminate).toBe(1);
   });
 
-  it("terminates immediately for an already-aborted signal", async () => {
+  it("rejects an already-aborted command without terminating the session", async () => {
     const { state, session } = await open();
     const opened = await session();
     const error = await opened.run!(command, AbortSignal.abort()).catch((e: unknown) => e);
     expect((error as Error).message).toContain("aborted");
-    expect(state.terminate).toBe(1);
+    expect(state.terminate).toBe(0);
+    await expect(opened.run!(command)).resolves.toMatchObject({ exitCode: 0 });
   });
 
   it("terminates and releases the client when sandbox creation fails", async () => {
@@ -284,5 +308,39 @@ describe("modal provider session lifecycle", () => {
     const result = await opened.run!(command);
     expect(result.exitCode).toBeNull();
     expect(result.stderr).toContain("time limit");
+  });
+});
+
+describe("CommandRunner through the modal provider", () => {
+  let workspace: string;
+
+  beforeEach(() => {
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    workspace = mkdtempSync(path.join(tmpdir(), "docslurp-modal-runner-"));
+  });
+  afterEach(() => {
+    vi.restoreAllMocks();
+    rmSync(workspace, { recursive: true, force: true });
+  });
+
+  it("stages only the command's input file, never the host runtime", async () => {
+    const { sdk, state } = fakeSdk();
+    const provider = createModalProvider(async () => sdk);
+    const runner = new CommandRunner({
+      openSession: (activityId) => provider.openSession(lifecycleConfig, { activityId }),
+    });
+    const input = path.join(workspace, "source.pdf");
+    writeFileSync(input, "%PDF-1.7");
+    const output = path.join(workspace, "source.pdf.md");
+    const script = path.join(resolveScriptsDir(), "pdf_extract.py");
+    const venvPython = path.join(resolveVenvBin(process.env.PYTHON_VENV), "python3");
+
+    await runner.run({ binary: venvPython, args: [script, "--input", input, "--output", output], available: true });
+
+    expect(state.writes).toEqual([input]);
+    expect(state.mkdirs).toEqual([workspace]);
+    const staged = [...state.writes, ...state.mkdirs].join("\n");
+    for (const host of ["node_modules", ".venv", process.execPath, resolveScriptsDir()]) expect(staged).not.toContain(host);
+    expect(staged.split("\n").some((p) => p === "/usr" || p.startsWith("/usr/"))).toBe(false);
   });
 });

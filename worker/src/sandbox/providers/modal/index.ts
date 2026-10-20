@@ -226,11 +226,12 @@ export function createModalProvider(
         return creating;
       }
 
-      async function execute(command: SandboxCommand): Promise<SandboxResult> {
+      async function execute(command: SandboxCommand, signal?: AbortSignal): Promise<SandboxResult> {
         await ensureSandbox();
         const started = Date.now();
         try {
-          await staging!.ensureUploaded(command.readablePaths);
+          // Only the command's inputs travel; the parser runtime comes from the image.
+          await staging!.ensureUploaded(command.inputPaths);
           for (const dir of command.writablePaths) await sandbox!.filesystem.makeDirectory(dir);
           const env: Record<string, string> = {};
           for (const [key, value] of Object.entries(command.env)) if (value !== undefined) env[key] = value;
@@ -253,7 +254,8 @@ export function createModalProvider(
             if (!isExecTimeout(sdk, error)) throw error;
             output = { stdout: "", stderr: "command exceeded its time limit", exitCode: null };
           }
-          await staging!.download(command.writablePaths);
+          // An aborted command's caller has moved on; never write its outputs back.
+          if (!signal?.aborted) await staging!.download(command.writablePaths);
           return { ...output, cpuSeconds: config.cpu * ((Date.now() - started) / 1000) };
         } finally {
           // Always log elapsed Modal time, even when staging or exec failed.
@@ -275,19 +277,25 @@ export function createModalProvider(
         isolation: ISOLATION,
         async run(command, signal) {
           if (closed) throw new Error("modal sandbox session is closed");
-          if (signal?.aborted) {
-            await terminate();
-            throw new Error("modal sandbox command aborted");
-          }
-          const onAbort = () => void terminate().catch(() => {});
-          signal?.addEventListener("abort", onAbort, { once: true });
-          try {
-            return await execute(command);
-          } catch (error) {
-            if (signal?.aborted) throw new Error("modal sandbox command aborted");
+          if (signal?.aborted) throw new Error("modal sandbox command aborted");
+          const execution = execute(command, signal).catch((error: unknown) => {
             throw new Error(`modal sandbox command failed: ${safeMessage(config, error)}`);
+          });
+          if (!signal) return await execution;
+          // An abort ends this command only: other commands in the activity share the sandbox,
+          // which only close() terminates. The SDK cannot kill a single exec, so the caller
+          // stops waiting now and the exec runs on until its own timeoutMs; its result and
+          // outputs are discarded.
+          let onAbort!: () => void;
+          const aborted = new Promise<never>((_, reject) => {
+            onAbort = () => reject(new Error("modal sandbox command aborted"));
+          });
+          signal.addEventListener("abort", onAbort, { once: true });
+          execution.catch(() => {});
+          try {
+            return await Promise.race([execution, aborted]);
           } finally {
-            signal?.removeEventListener("abort", onAbort);
+            signal.removeEventListener("abort", onAbort);
           }
         },
         async close() {
