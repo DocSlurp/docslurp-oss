@@ -5,6 +5,9 @@ import { deferredProfilesEnabled } from "@docslurp/shared";
 import { env } from "../config.js";
 import { batchSearchInputSchema, searchInputSchema, workspaceChatInputSchema } from "../lib/search-input.js";
 import { toolInputJsonSchema } from "./mcp-tool-schemas.js";
+import { apiKeyMayUseEstimateTool, estimateToolDefinitions, jobsGetInputSchema, jobsGetToolDefinition, type EstimateToolName } from "./mcp-estimate-catalog.js";
+
+export { jobsGetInputSchema };
 
 export const workspaceRef = z.string().min(1).max(256).optional().describe('Workspace slug or UUID. Omit or use "default" for the organization default workspace.');
 export const listWorkspacesInput = z.object({
@@ -84,11 +87,18 @@ export interface McpTool {
   inputSchema: Record<string, unknown>;
   /** An API key needs at least one of these scopes to see or call the tool. */
   scopes: McpScope[];
+  /** Replaces the `scopes` check for API keys (scope and key type): estimates mirror the access of the mutation they price. */
+  keyAccess?: (key: { scopes: readonly string[]; keyType?: string }) => boolean;
   annotations: ToolAnnotations;
 }
 
 /** The public MCP catalog, in the product's upload → search → chat order. Tool ids are the public names. */
 export function mcpTools(baseUrl: string): McpTool[] {
+  const estimates: Omit<McpTool, "category" | "endpoint">[] = estimateToolDefinitions.map(({ name, title, description, inputSchema }) => ({
+    id: name, title, description, inputSchema, scopes: ["search", "ingest"],
+    keyAccess: (key) => apiKeyMayUseEstimateTool(name as EstimateToolName, key),
+    annotations: READ_ONLY,
+  }));
   const tools: Omit<McpTool, "category" | "endpoint">[] = [
     { id: "listWorkspaces", title: "List workspaces", scopes: ["search", "ingest"], annotations: READ_ONLY,
       description: "List workspaces you can access, including their IDs, slugs, default workspace, document/page counts and latest processing status. Use a returned slug as workspaceId in upload, search or chat. Does not call AI.",
@@ -119,18 +129,21 @@ export function mcpTools(baseUrl: string): McpTool[] {
       annotations: { readOnly: false, destructive: false, idempotent: false, openWorld: false, consequential: true },
       description: "Parse and index every remaining page of a deferred (map/visual) workspace, or of the listed documents, in the background. Spends credits and is refused unless the key or capability policy allows full-index requests.",
       inputSchema: toolInputJsonSchema(fullIndexInput) }] : []),
+    ...estimates,
+    { id: jobsGetToolDefinition.id, title: jobsGetToolDefinition.title, description: jobsGetToolDefinition.description,
+      inputSchema: jobsGetToolDefinition.inputSchema, scopes: ["search", "ingest"], annotations: READ_ONLY },
   ];
   return tools.map(tool => ({ ...tool, category: "tool", endpoint: `${baseUrl}/v1/mcp/tools/${tool.id}` }));
 }
 
 /** The catalog visible to a caller: session callers see everything, API keys see tools their scopes allow. */
-export function mcpManifest(baseUrl: string, scopes?: string[]) {
+export function mcpManifest(baseUrl: string, scopes?: string[], keyType?: string) {
   return {
     server: {
       id: env.mcpServerId, title: "DocSlurp MCP", version: "0.1.0",
       transports: ["streamable-http", "stdio"], endpoint: `${baseUrl}/v1/mcp`,
       auth: { type: "apiKey", scopes: ["search", "ingest"] },
     },
-    capabilities: mcpTools(baseUrl).filter(tool => !scopes || tool.scopes.some(scope => scopes.includes(scope))),
+    capabilities: mcpTools(baseUrl).filter(tool => !scopes || (tool.keyAccess ? tool.keyAccess({ scopes, keyType }) : tool.scopes.some(scope => scopes.includes(scope)))),
   };
 }

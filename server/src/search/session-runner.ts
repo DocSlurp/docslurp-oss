@@ -66,6 +66,8 @@ export interface SearchSessionRunnerAdapters {
   }): Promise<SearchChunk[]>;
   vectorSearch(args: {
     queryVector: number[];
+    /** The query text, so a previous index can embed it with its own model. */
+    query?: string;
     userId: string;
     workspaceId: string;
     options: SearchOptions;
@@ -257,6 +259,7 @@ async function executeSearchSession(args: Parameters<typeof runSearchSession>[0]
             }),
             {
               query: retrievalQuery,
+              effectiveQuery,
               textQuery,
               queryVector,
               userId,

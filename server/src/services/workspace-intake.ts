@@ -86,6 +86,8 @@ export interface WorkspaceIntakeItem {
   metadata?: Record<string, unknown>;
   /** Logical source identity; a newer completed document with the same ID supersedes older ones. */
   canonicalId?: string | null;
+  /** Folder path inside the upload (no filename). With the filename it is the version key unless `canonicalId` is set. */
+  path?: string | null;
   content: WorkspaceIntakeContent;
 }
 
@@ -138,6 +140,7 @@ export interface StoredIntakeFile {
   sourceKey: string;
   metadata?: Record<string, unknown>;
   canonicalId?: string | null;
+  path?: string | null;
 }
 
 export interface WorkspaceIntakeResult {
@@ -445,6 +448,7 @@ async function storeItem(
     ...(item.metadata ? { metadata: item.metadata } : {}),
     ...(request.tags ? { tags: request.tags } : {}),
     ...(item.canonicalId ? { canonicalId: item.canonicalId } : {}),
+    ...(item.path ? { path: item.path } : {}),
   });
   const { content } = item;
   if ("storedKey" in content) return stored(content.storedKey);

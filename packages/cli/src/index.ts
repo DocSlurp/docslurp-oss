@@ -37,8 +37,12 @@ function resolveIntakeTarget(flags: Record<string, string | boolean>): IntakeTar
 
 function usage(): void {
   console.log(`Usage:
-  docslurp upload <files...> [--workspace <slug|id> | --new-workspace | --workspace-name <name> | --template <key>] [--canonical-id <id>] [--watch] [--api-url <url>]
+  docslurp upload <files...> [--workspace <slug|id> | --new-workspace | --workspace-name <name> | --template <key>] [--canonical-id <id>] [--path <folder>] [--estimate] [--watch] [--api-url <url>]
   docslurp ingest-url <urls...> [--workspace <slug|id> | --new-workspace | --workspace-name <name> | --template <key>] [--watch] [--api-url <url>]
+  docslurp full-index [--workspace <slug|id>] [--document <id>] [--estimate] [--watch]
+  docslurp reprocess <runId> [--stage-from <stage>] [--estimate] [--watch]
+  docslurp jobs get <jobId> [--json]
+  docslurp jobs watch <jobId> [--timeout <seconds>]
   docslurp status <runId> [--api-url <url>] [--watch] [--timeout <seconds>]
   docslurp runs [--api-url <url>]
   docslurp search <query> [--workspace <slug|id>] [--min-score <0..1>] [--json | --context]
@@ -55,6 +59,8 @@ commands use the "default" workspace: your organization's default workspace.
 Workspaces accept a slug (e.g. legal-contracts), a UUID, or "default". Uploads and URL
 ingests create a new workspace only with --new-workspace (self-titled from the content),
 --workspace-name <name> or --template <key>; --workspace always targets an existing one.
+--estimate prints the work estimate (pages, documents, credits, time) for the operation and exits without doing it.
+Mutations that queue background work print their job; follow it with docslurp jobs watch <jobId>.
 --watch waits up to five minutes by default; --timeout sets its limit.
 
 Copyright 2025-2026 DocSlurp, Inc. and contributors. No warranty.
@@ -218,13 +224,13 @@ function parseCliArgs(argv: string[]) {
   let i = 1;
   while (i < argv.length) {
     const arg = argv[i];
-    if (arg === "--watch" || arg === "--json" || arg === "--context") {
+    if (arg === "--watch" || arg === "--json" || arg === "--context" || arg === "--estimate") {
       flags[arg.slice(2)] = true;
       i++;
     } else if (arg === "--new-workspace") {
       flags.newWorkspace = true;
       i++;
-    } else if (arg === "--workspace" || arg === "--api-url" || arg === "--run" || arg === "--api-key" || arg === "--source" || arg === "--out" || arg === "--queries-file" || arg === "--concurrency" || arg === "--min-score" || arg === "--session" || arg === "--canonical-id" || arg === "--workspace-name" || arg === "--template") {
+    } else if (arg === "--workspace" || arg === "--api-url" || arg === "--run" || arg === "--api-key" || arg === "--source" || arg === "--out" || arg === "--queries-file" || arg === "--concurrency" || arg === "--min-score" || arg === "--session" || arg === "--canonical-id" || arg === "--path" || arg === "--workspace-name" || arg === "--template" || arg === "--document" || arg === "--stage-from") {
       const key = arg.replace(/^--/, "").replace(/-([a-z])/g, (_, c: string) => c.toUpperCase());
       flags[key] = argv[i + 1] ?? "";
       i += 2;
@@ -294,6 +300,7 @@ async function uploadDirect(files: Array<{ blob: Blob; name: string }>, fields: 
     files: files.map(({ blob, name }) => ({
       filename: name, mimeType: blob.type || mimeTypeForPath(name), sizeBytes: blob.size,
       ...(field("canonicalId") ? { canonicalId: field("canonicalId") } : {}),
+      ...(typeof flags.path === "string" && flags.path ? { path: flags.path } : {}),
     })),
   }));
   if (!created.ok) return created;
@@ -337,6 +344,13 @@ async function uploadCommand(files: string[], flags: Record<string, string | boo
     return;
   }
 
+  if (flags.estimate === true) {
+    const target = resolveIntakeTarget(flags);
+    const sized = await Promise.all(files.map(async (filePath) => ({ name: basename(filePath), size: (await openAsBlob(filePath)).size })));
+    await runEstimate("/v1/uploads/estimate", { files: sized, ...(target.workspaceId ? { workspaceId: target.workspaceId } : {}) }, flags);
+    return;
+  }
+
   const formData = new FormData();
 
   const target = resolveIntakeTarget(flags);
@@ -348,6 +362,11 @@ async function uploadCommand(files: string[], flags: Record<string, string | boo
     // Re-uploading with the same canonical ID replaces the previous version in search.
     if (files.length !== 1) throw new Error("--canonical-id applies to a single file.");
     formData.append("canonicalId", flags.canonicalId);
+  }
+
+  if (typeof flags.path === "string" && flags.path) {
+    // Same folder path and filename re-uploaded in a workspace is a new version of one document.
+    formData.append("paths", JSON.stringify(files.map(() => flags.path)));
   }
 
   const blobs: Array<{ blob: Blob; name: string }> = [];
@@ -376,13 +395,171 @@ async function uploadCommand(files: string[], flags: Record<string, string | boo
   await printIntakeResult(response, flags);
 }
 
-type IntakeResult = { run: { id: string }; workspace: { id: string; name: string; slug?: string }; documents: unknown[]; warnings?: string[] };
+type CostEstimate = {
+  pages: number; documents: number; billing: "enforced" | "disabled";
+  credits: { low: number; high: number } | null; seconds: { low: number; high: number } | null; basis: string;
+};
+type JobStatus = {
+  id: string; kind: string; status: string; reason?: string; runIds: string[];
+  queue?: { position: number | null; ahead: number | null }; estimate: CostEstimate | null; estimateUrl?: string;
+};
+
+function formatEstimate(estimate: CostEstimate): string {
+  const lines = [`Pages:     ${estimate.pages} across ${estimate.documents} document${estimate.documents === 1 ? "" : "s"}`];
+  lines.push(estimate.credits ? `Credits:   ${estimate.credits.low}–${estimate.credits.high}` : "Credits:   none (billing disabled on this deployment)");
+  if (estimate.seconds) lines.push(`Time:      ${Math.round(estimate.seconds.low)}–${Math.round(estimate.seconds.high)} s`);
+  lines.push(`Basis:     ${estimate.basis}`);
+  return lines.join("\n");
+}
+
+/** POSTs to a `…/estimate` route, prints the estimate (or raw JSON with --json) and leaves the operation undone. */
+async function runEstimate(pathname: string, body: unknown, flags: Record<string, string | boolean>): Promise<void> {
+  const response = await apiFetch(pathname, flags, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  if (!response.ok) {
+    console.error(publicHttpError(response.status));
+    process.exitCode = 1;
+    return;
+  }
+  const result = await response.json() as { estimate: CostEstimate; impact?: { kind: string } };
+  if (flags.json === true) console.log(JSON.stringify(result, null, 2));
+  else {
+    if (result.impact) console.log(`Impact:    ${result.impact.kind}`);
+    console.log(formatEstimate(result.estimate));
+    console.log("Estimate only: nothing was started.");
+  }
+}
+
+function printJob(job: JobStatus): void {
+  const detail = job.reason ? ` (${job.reason})` : "";
+  const queue = job.queue?.position != null ? `, queue position ${job.queue.position}` : "";
+  console.log(`Job ${job.id}: ${job.kind} ${job.status}${detail}${queue}`);
+}
+
+async function fullIndexCommand(flags: Record<string, string | boolean>): Promise<void> {
+  const document = typeof flags.document === "string" && flags.document ? flags.document : undefined;
+  const base = document ? `/v1/documents/${encodeURIComponent(document)}/full-index` : `/v1/workspaces/${encodeURIComponent(resolveWorkspaceId(flags))}/full-index`;
+  if (flags.estimate === true) return runEstimate(`${base}/estimate`, {}, flags);
+  await startWork(base, {}, flags);
+}
+
+async function reprocessCommand(runId: string | undefined, flags: Record<string, string | boolean>): Promise<void> {
+  if (!runId) {
+    console.error("Error: run ID required");
+    process.exitCode = 1;
+    return;
+  }
+  const base = `/v1/runs/${encodeURIComponent(runId)}/reprocess`;
+  const body = typeof flags.stageFrom === "string" && flags.stageFrom ? { stageFrom: flags.stageFrom } : {};
+  if (flags.estimate === true) return runEstimate(`${base}/estimate`, body, flags);
+  await startWork(base, body, flags);
+}
+
+async function startWork(pathname: string, body: unknown, flags: Record<string, string | boolean>): Promise<void> {
+  const response = await apiFetch(pathname, flags, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  if (!response.ok) {
+    console.error(publicHttpError(response.status));
+    process.exitCode = 1;
+    return;
+  }
+  const result = await response.json() as { runId?: string; id?: string; job?: JobStatus };
+  if (flags.json === true) console.log(JSON.stringify(result, null, 2));
+  else {
+    const runId = result.runId ?? result.id;
+    if (runId) console.log(`Run ID:    ${runId}`);
+    if (result.job) printJob(result.job);
+  }
+  const runId = result.runId ?? result.id;
+  if (flags.watch === true && runId) await statusCommand(runId, flags);
+}
+
+const TERMINAL_JOB_STATUSES = new Set(["completed", "failed", "cancelled"]);
+
+async function jobsCommand(action: string | undefined, jobId: string | undefined, flags: Record<string, string | boolean>): Promise<void> {
+  if ((action !== "get" && action !== "watch") || !jobId) {
+    console.error("Usage: docslurp jobs get|watch <jobId>");
+    process.exitCode = 1;
+    return;
+  }
+  const path = `/v1/jobs/${encodeURIComponent(jobId)}`;
+  const fetchJob = async (): Promise<JobStatus | null> => {
+    const response = await apiFetch(path, flags);
+    if (!response.ok) {
+      console.error(publicHttpError(response.status));
+      process.exitCode = 1;
+      return null;
+    }
+    return await response.json() as JobStatus;
+  };
+  if (action === "get") {
+    const job = await fetchJob();
+    if (!job) return;
+    if (flags.json === true) console.log(JSON.stringify(job, null, 2));
+    else {
+      printJob(job);
+      if (job.estimate) console.log(formatEstimate(job.estimate));
+    }
+    return;
+  }
+  // Prefer the SSE stream; poll when it is unavailable or ends early.
+  const timeoutMs = Number(flags.timeout ?? 300) * 1000;
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) throw new Error("--timeout must be a positive number of seconds.");
+  let deadlineAt = Date.now() + timeoutMs;
+  let lastLine = "";
+  const show = (job: JobStatus): boolean => {
+    const line = `${job.status}|${job.reason ?? ""}|${job.queue?.position ?? ""}`;
+    if (line !== lastLine) { printJob(job); lastLine = line; }
+    // A blocked job waits for credits or budget; the timeout only bounds active waits.
+    if (job.status === "blocked") deadlineAt = Date.now() + timeoutMs;
+    return TERMINAL_JOB_STATUSES.has(job.status);
+  };
+  try {
+    const response = await apiFetch(`${path}/events`, flags, { headers: { Accept: "text/event-stream" } }, timeoutMs);
+    if (!response.ok || !response.body || !response.headers.get("content-type")?.includes("text/event-stream")) {
+      await response.body?.cancel().catch(() => undefined);
+    } else {
+      const decoder = new TextDecoder();
+      let buffer = "";
+      for await (const chunk of response.body as unknown as AsyncIterable<Uint8Array>) {
+        buffer += decoder.decode(chunk, { stream: true });
+        let split: number;
+        while ((split = buffer.indexOf("\n\n")) >= 0) {
+          const frame = buffer.slice(0, split);
+          buffer = buffer.slice(split + 2);
+          const data = frame.split("\n").filter((line) => line.startsWith("data:")).map((line) => line.slice(5).trim()).join("\n");
+          if (!data) continue;
+          let parsed: { job?: JobStatus } & Partial<JobStatus>;
+          try { parsed = JSON.parse(data); } catch { continue; } // skip malformed frames; polling covers gaps
+          const job = (parsed?.job ?? parsed) as JobStatus;
+          if (job?.status && show(job)) {
+            await response.body.cancel().catch(() => undefined);
+            process.exitCode = job.status === "completed" ? 0 : 1;
+            return;
+          }
+        }
+      }
+    }
+  } catch {
+    // fall back to polling
+  }
+  while (Date.now() < deadlineAt) {
+    const job = await fetchJob();
+    if (!job) return;
+    if (show(job)) { process.exitCode = job.status === "completed" ? 0 : 1; return; }
+    if (Date.now() >= deadlineAt) break;
+    await new Promise((resolve) => setTimeout(resolve, 2000));
+  }
+  console.error("Timed out waiting for the job; it keeps running.");
+  process.exitCode = 1;
+}
+
+type IntakeResult = { job?: JobStatus; run: { id: string }; workspace: { id: string; name: string; slug?: string }; documents: unknown[]; warnings?: string[] };
 
 async function printIntakeResult(response: Response, flags: Record<string, string | boolean>): Promise<void> {
   const result = await response.json() as IntakeResult;
   console.log(`Workspace: ${result.workspace.name} (${result.workspace.slug ?? result.workspace.id})`);
   console.log(`Run ID:    ${result.run.id}`);
   console.log(`Documents: ${result.documents.length}`);
+  if (result.job) printJob(result.job);
   for (const warning of result.warnings ?? []) console.error(`Warning: ${warning}`);
   if (flags.watch === true) await statusCommand(result.run.id, flags);
 }
@@ -782,6 +959,15 @@ async function main(): Promise<void> {
       break;
     case "ingest-url":
       await ingestUrlCommand(positional, flags);
+      break;
+    case "full-index":
+      await fullIndexCommand(flags);
+      break;
+    case "reprocess":
+      await reprocessCommand(positional[0], flags);
+      break;
+    case "jobs":
+      await jobsCommand(positional[0], positional[1], flags);
       break;
     case "status": {
       const runId = positional[0];

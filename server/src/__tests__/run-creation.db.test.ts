@@ -238,7 +238,7 @@ describe("Run creation versions Documents by lineage", () => {
     expect(third.documents.map((doc) => doc.versionNumber)).toEqual([3, 3]);
     const secondById = new Map(second.documents.map((doc) => [doc.canonicalId, doc.id]));
     expect(third.documents.map((doc) => doc.previousVersionId)).toEqual(third.documents.map((doc) => secondById.get(doc.canonicalId)));
-    expect(third.documents.every((doc) => doc.canonicalId?.startsWith("docslurp:document:"))).toBe(true);
+    expect(third.documents.every((doc) => doc.canonicalId?.startsWith("path:"))).toBe(true);
   });
 
   it("carries the source's size, pages, hash, mime type and source key to the new version", async () => {

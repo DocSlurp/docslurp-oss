@@ -10,5 +10,7 @@ export function sanitizeUploadFilename(filename: string, fallback = "upload.bin"
     .replace(/^-+/, "")
     .slice(0, 180);
 
+  // "." and ".." are path segments, never file names (version keys reject them).
+  if (/^\.+$/.test(cleaned)) return fallback;
   return cleaned || fallback;
 }

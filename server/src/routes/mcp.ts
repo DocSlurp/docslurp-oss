@@ -32,7 +32,7 @@ export const mcpRoutes = new Hono()
   .post("/", async (c) => {
     const actor = c.get("requestActor");
     const dispatch = createMcpDispatcher(actor);
-    const manifest = mcpManifest(new URL(mcpOrigin(c.req.url)).origin, c.get("apiKey").scopes);
+    const manifest = mcpManifest(new URL(mcpOrigin(c.req.url)).origin, c.get("apiKey").scopes, c.get("apiKey").keyType);
     return handleMcpHttp(c.req.raw, manifest, async (path, init) => {
       // Paths are fixed by protocol handlers, not client-controlled URLs.
       return dispatch(path, init);

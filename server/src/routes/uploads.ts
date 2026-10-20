@@ -13,10 +13,12 @@ import {
 import { requestIp, requestUserAgent } from "../lib/request-context.js";
 import {
   canonicalIdsForFiles,
+  normalizeUploadPath,
+  sourcePathsForFiles,
   InvalidCanonicalIdError,
   MAX_CANONICAL_ID_LENGTH,
 } from "../lib/canonical-id.js";
-import { actorHasAnyApiKeyScope, getRequestActor, loadActorScopedWorkspace, requireActorWorkspace } from "../lib/request-actor.js";
+import { actorHasAnyApiKeyScope, apiKeyCanUseWorkspace, getRequestActor, loadActorScopedWorkspace, requireActorWorkspace } from "../lib/request-actor.js";
 import { validationErrorResponse, type ValidationErrorSource, validationHook } from "../lib/validation.js";
 import {
   abortDirectUploadSession,
@@ -45,10 +47,21 @@ import {
 } from "../services/workspace-intake.js";
 import { acceptApiKeys } from "../lib/route-auth.js";
 import { apiErrorResponse, apiStatusError } from "../lib/api-error.js";
+import { findDefaultWorkspace, getWorkspace } from "../services/workspaces.js";
+import { estimateUpload } from "../services/work-estimates.js";
+import { billingState } from "../services/config-change.js";
 
 type Uploadable = File | string | Array<File | string> | undefined;
 
 const canonicalIdSchema = z.string().trim().min(1).max(MAX_CANONICAL_ID_LENGTH);
+
+const sourcePathSchema = z.string().max(1024).superRefine((value, ctx) => {
+  try {
+    normalizeUploadPath(value);
+  } catch (error) {
+    ctx.addIssue({ code: "custom", message: error instanceof Error ? error.message : "Invalid path" });
+  }
+});
 
 const ingestUrlSchema = z.object({
   tags: documentTagsSchema.optional(),
@@ -73,6 +86,8 @@ const directUploadFileSchema = z.object({
   sizeBytes: z.number().int().nonnegative(),
   sha256: z.string().min(16).max(128).optional(),
   canonicalId: canonicalIdSchema.optional(),
+  /** Folder path inside the upload; with the filename it is the version key. */
+  path: sourcePathSchema.optional(),
 });
 
 const createDirectSessionSchema = z.object({
@@ -123,6 +138,15 @@ function parseCanonicalIds(
       canonicalId: body.canonicalId,
       canonicalIds: body.canonicalIds,
     });
+  } catch (error) {
+    if (error instanceof InvalidCanonicalIdError) throw new WorkspaceIntakeError(error.message, 400);
+    throw error;
+  }
+}
+
+function parseSourcePaths(files: File[], body: Record<string, unknown>): string[] {
+  try {
+    return sourcePathsForFiles(files.length, { path: body.path, paths: body.paths });
   } catch (error) {
     if (error instanceof InvalidCanonicalIdError) throw new WorkspaceIntakeError(error.message, 400);
     throw error;
@@ -332,6 +356,7 @@ export const createUploadsRoutes = (ports: WorkspaceIntakePorts = workspaceIntak
     let result;
     try {
       const canonicalIds = parseCanonicalIds(files, body);
+      const paths = parseSourcePaths(files, body);
       const pipeline = parseFormWorkspaceIntakePipeline(body.pipeline);
       result = await createBulkWorkspaceIntake({
         userId,
@@ -345,6 +370,7 @@ export const createUploadsRoutes = (ports: WorkspaceIntakePorts = workspaceIntak
         files,
         canonicalIds,
         tags: parseFormDocumentTags(body.tags),
+        paths,
         idempotencyKey,
         contentLength: c.req.header("content-length"),
         audit: {
@@ -414,3 +440,38 @@ export const createUploadsRoutes = (ports: WorkspaceIntakePorts = workspaceIntak
   ));
 
 export const uploadsRoutes = createUploadsRoutes();
+
+const uploadEstimateSchema = z.object({
+  files: z.array(z.object({
+    name: z.string().min(1).max(1024),
+    size: z.number().int().nonnegative(),
+    pages: z.number().int().positive().optional(),
+  })).min(1).max(1000),
+  workspaceId: z.string().optional(),
+  orgId: z.string().optional(),
+});
+
+/** `POST /v1/uploads/estimate`: what ingesting these files would cost and take, before anything is stored. */
+export const uploadEstimateRoutes = new Hono().post(
+  "/estimate",
+  zValidator("json", uploadEstimateSchema),
+  async (c) => {
+    const userId = c.get("sessionUser").id;
+    const body = c.req.valid("json");
+    const actor = getRequestActor(c);
+    // Same gate as the upload itself: ingest scope, bound to the key's organization and workspaces.
+    if (actor.type === "apiKey" && !actorHasAnyApiKeyScope(actor, ["ingest"])) {
+      return apiErrorResponse(c, 403, "forbidden", "Forbidden");
+    }
+    // Read-only: an estimate never creates the default workspace.
+    const workspace = body.workspaceId
+      ? await getWorkspace(body.workspaceId, userId)
+      : await findDefaultWorkspace({ userId, orgId: actor.type === "apiKey" ? actor.apiKey.orgId : body.orgId });
+    if (!workspace || (actor.type === "apiKey" && !apiKeyCanUseWorkspace(actor.apiKey, workspace))) {
+      return apiErrorResponse(c, 404, "workspace_not_found", "Workspace not found");
+    }
+    const estimate = await estimateUpload({ files: body.files, workspace });
+    return c.json({ estimate, billing: billingState() });
+  },
+);
+acceptApiKeys(uploadEstimateRoutes);

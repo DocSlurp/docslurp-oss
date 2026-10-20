@@ -134,19 +134,13 @@ function mergeRetrievalDefaults(
   return next as WorkspaceSearchSettings["retrievalDefaults"];
 }
 
-export async function updateWorkspaceSearchSettingsForUser(args: {
-  workspaceId: string;
-  userId: string;
-  input: UpdateWorkspaceSearchSettingsInput;
-}): Promise<WorkspaceSearchSettings | null> {
-  const access = await getWorkspaceAccess(args.workspaceId, args.userId);
-  if (!access || !canEditWorkspace(access, args.userId)) {
-    return null;
-  }
-
-  const current = await getWorkspaceSearchSettings(args.workspaceId, args.userId);
-  const parsedInput = updateWorkspaceSearchSettingsSchema.parse(args.input);
-  const next = workspaceSearchSettingsSchema.parse({
+/** The settings a search-settings PATCH would store; pure, shared by the mutation and its estimate. */
+export function mergeWorkspaceSearchSettings(
+  current: WorkspaceSearchSettings,
+  input: UpdateWorkspaceSearchSettingsInput,
+): WorkspaceSearchSettings {
+  const parsedInput = updateWorkspaceSearchSettingsSchema.parse(input);
+  return workspaceSearchSettingsSchema.parse({
     ...current,
     typoTolerance: parsedInput.typoTolerance ?? current.typoTolerance,
     dedupeByFilename: parsedInput.dedupeByFilename ?? current.dedupeByFilename,
@@ -160,6 +154,20 @@ export async function updateWorkspaceSearchSettingsForUser(args: {
       ...(parsedInput.chat ?? {})
     }
   });
+}
+
+export async function updateWorkspaceSearchSettingsForUser(args: {
+  workspaceId: string;
+  userId: string;
+  input: UpdateWorkspaceSearchSettingsInput;
+}): Promise<WorkspaceSearchSettings | null> {
+  const access = await getWorkspaceAccess(args.workspaceId, args.userId);
+  if (!access || !canEditWorkspace(access, args.userId)) {
+    return null;
+  }
+
+  const current = await getWorkspaceSearchSettings(args.workspaceId, args.userId);
+  const next = mergeWorkspaceSearchSettings(current, args.input);
 
   await upsertWorkspaceSearchSettings(next);
   return next;

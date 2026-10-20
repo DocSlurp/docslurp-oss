@@ -78,6 +78,9 @@ export const organizations = pgTable(
   "organizations",
   {
     id: text().primaryKey().notNull(),
+    retainDocumentVersions: integer("retain_document_versions"),
+    retentionChangedAt: timestamp("retention_changed_at", { withTimezone: true }),
+    retentionSweptAt: timestamp("retention_swept_at", { withTimezone: true }),
     name: text().notNull(),
     slug: text(),
     isPersonal: boolean("is_personal").default(false).notNull(),
@@ -372,6 +375,10 @@ export const documents = pgTable(
     supersededByDocumentId: text("superseded_by_document_id"),
     purgedAt: timestamp("purged_at", { withTimezone: true, mode: "string" }),
     indexingMode: text("indexing_mode").default("full").notNull(),
+    sourcePath: text("source_path").default("").notNull(),
+    archivedAt: timestamp("archived_at", { withTimezone: true, mode: "string" }),
+    indexConfigHash: text("index_config_hash"),
+    reindexOf: text("reindex_of"),
     // Chunks fully materialized: keyword search may serve this version before completion.
     lexicalSearchableAt: timestamp("lexical_searchable_at", { withTimezone: true, mode: "string" }),
   },
@@ -1785,6 +1792,11 @@ export const workspaces = pgTable(
   "workspaces",
   {
     id: text().primaryKey().notNull(),
+    retainDocumentVersions: integer("retain_document_versions"),
+    retentionChangedAt: timestamp("retention_changed_at", { withTimezone: true }),
+    retentionSweptAt: timestamp("retention_swept_at", { withTimezone: true }),
+    indexConfigs: jsonb("index_configs"),
+    autoConfirmReindex: boolean("auto_confirm_reindex").default(false).notNull(),
     userId: text("user_id").notNull(),
     name: text().notNull(),
     createdAt: timestamp("created_at", { withTimezone: true, mode: "string" })
@@ -2160,6 +2172,7 @@ export const uploadSessionFiles = pgTable(
     completedParts: jsonb("completed_parts").default([]).notNull(),
     sha256: text(),
     canonicalId: text("canonical_id"),
+    sourcePath: text("source_path").default("").notNull(),
     createdAt: timestamp("created_at", { withTimezone: true, mode: "string" })
       .defaultNow()
       .notNull(),
@@ -2193,6 +2206,8 @@ export const workspaceRuns = pgTable(
     workspaceId: text("workspace_id").notNull(),
     kind: text().notNull(),
     status: text().notNull(),
+    blockedReason: text("blocked_reason"),
+    jobId: text("job_id"),
     stage: text().notNull(),
     totalDocuments: integer("total_documents").default(0).notNull(),
     processedDocuments: integer("processed_documents").default(0).notNull(),

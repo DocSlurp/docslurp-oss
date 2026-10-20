@@ -418,6 +418,14 @@ Environment variables are read once, when the client is created, and only on the
 | `search(input, request?)` | Async iterable of hits; await for `{ results, availability, sessionId, usage }` | `search` |
 | `search({ queries, concurrency? }, options?)` | `{ results: [{ ok, data?, error? }] }` | `search` |
 | `chat({ q, workspaceId?, sessionId? }, request?)` | Answer, citations, availability, session IDs, usage, runtime | `search` |
+| `listDocumentVersions(documentId, request?)` | Version chain, newest first | `artifacts` |
+| `updateWorkspace(id, input, request?)` | `{ workspace, impact?, job? }`; `apply` is `"new-uploads"` or `"reindex"` | `workspaces:manage` |
+| `updateWorkspaceEstimate(id, input, request?)` | `{ estimate, billing, impact }` without changing anything | Server key with `workspaces:manage` |
+| `fullIndexEstimate({ documentId } or { workspaceId?, documentIds? }, request?)` / `uploadEstimate({ files }, request?)` | `{ estimate, billing }` | `ingest` |
+| `estimateIndexingMode(mode, input?, request?)` / `setIndexingModeEstimate(...)` / `rebuildGraphEstimate(input?, request?)` | Pages and credits for switching indexing mode / rebuilding the graph | Server key with `workspaces:manage` |
+| `updateSearchSettingsEstimate(id, input, request?)` / `reprocessEstimate(runId, input?, request?)` | `{ estimate, billing }` | Signed-in session only: the matching mutations accept no API key, so neither do these |
+| `setRetention({ orgId } or { workspaceId? }, versions or null, request?)` | Updated record; 1 to 100 versions kept | `organizations:manage` / `workspaces:manage` |
+| `getJob(jobId, request?)` / `streamJob(jobId, options?)` | `JobStatus` / async iterable of `status`, `progress` (counts merged into `job.progress`) and `done` events (SSE, polling fallback; the timeout never applies while a job is `blocked`) | Same as `getRun` |
 | `getDocument(documentId, request?)` | Typed document viewer envelope (`viewer.document`) | `artifacts` |
 | `listOrganizations(request?)` / `getOrganization(id, request?)` | Organization records | `organizations:read` or `organizations:manage` |
 | `getOrganizationDetails(id, request?)` / `getOrganizationAccess(id, request?)` | Counts and capabilities / actor access | Same as organization reads |

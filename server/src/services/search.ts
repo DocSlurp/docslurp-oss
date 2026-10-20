@@ -26,6 +26,8 @@ import {
 import { sql } from "../db.js";
 import { jsonRecord } from "../lib/json-record.js";
 import { lanceDbVectorSearch } from "../search/lancedb.js";
+import { servedVectorSearch, type IndexServing } from "../search/index-serving.js";
+import { embedQuery } from "../search/session-planner.js";
 import type { SearchFilters } from "../search/filters.js";
 import { type SearchUsageEvent } from "../search/session.js";
 import { searchChunkToResult } from "../search/session-execution.js";
@@ -721,11 +723,12 @@ async function vectorSearch(
   userId: string,
   workspaceId: string,
   options: SearchOptions,
+  serving: IndexServing | null = null,
 ): Promise<SearchChunk[]> {
   const access = await getWorkspaceAccess(workspaceId, userId);
   if (!access) return [];
 
-  const embedding = resolveEmbeddingRoute((await loadWorkspacePipeline(workspaceId)).embedding);
+  const embedding = resolveEmbeddingRoute(serving?.embedding ?? (await loadWorkspacePipeline(workspaceId)).embedding);
   // Persisted model/dimension metadata prevents legacy tables from mixing vector spaces.
   // Dedup copies (same content re-ingested) own no LanceDB rows: their vectors
   // stay keyed by the document that was embedded. Walk deduped_from to that
@@ -750,7 +753,15 @@ async function vectorSearch(
       from chain join documents d on d.id = chain.next
       where chain.depth < 8
     )
-    select distinct on (id) id, node as owner_id from chain order by id, depth desc
+    select distinct on (chain.id) chain.id, chain.node as owner_id
+    from chain
+    join documents owner on owner.id = chain.node
+    where ${serving?.hash
+      ? serving.hash.op === "eq"
+        ? sql`owner.index_config_hash = ${serving.hash.value}`
+        : sql`owner.index_config_hash is distinct from ${serving.hash.value}`
+      : sql`true`}
+    order by chain.id, chain.depth desc
   `;
   const scopedRows = docRows;
   const documentIds = scopedRows.map((row) => row.id);
@@ -1281,8 +1292,19 @@ async function executeHybridSearch(
           chunks,
         ),
       runSearch: hybridSearch,
-      vectorSearch: ({ queryVector, userId, workspaceId, options }) =>
-        timePhase("vector", () => vectorSearch(queryVector, userId, workspaceId, options)),
+      vectorSearch: ({ queryVector, userId, workspaceId, options, query }) =>
+        timePhase("vector", () => servedVectorSearch({
+          workspaceId,
+          pipeline: setup.workspacePipeline,
+          indexConfigs: setup.indexConfigs,
+          queryVector,
+          query,
+          deps: {
+            search: (vector, serving) => vectorSearch(vector, userId, workspaceId, options, serving),
+            embed: (text, embedding) => embedQuery(text, embedding, setup.session, setup.privacyMode, workspaceId),
+            diagnostic: (name, value) => setup.session.recordDiagnostic(name, value as never),
+          },
+        })),
       textSearch: ({ query, userId, options }) =>
         timePhase("text", () => textSearch(query, userId, options)),
       graphNeighborSearch: ({ query, workspaceId, options }) =>

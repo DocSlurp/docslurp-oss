@@ -54,6 +54,16 @@ vi.mock("../services/workspaces.js", () => ({
   },
 }));
 
+vi.mock("../services/config-change.js", () => ({
+  planWorkspaceChange: vi.fn(async (args: { workspaceId: string; input: unknown }) => ({ workspace: { id: args.workspaceId }, input: args.input })),
+  applyWorkspaceChange: vi.fn(async ({ plan, userId, updateOptions }: { plan: { workspace: { id: string }; input: unknown }; userId: string; updateOptions?: unknown }) => {
+    const workspace = await updateWorkspaceMock(plan.workspace.id, userId, plan.input, ...(updateOptions ? [updateOptions] : []));
+    return workspace ? { workspace, plan, job: null, queuedRunIds: [] } : null;
+  }),
+  estimateWorkspaceChange: vi.fn(),
+  billingState: () => "disabled",
+}));
+
 vi.mock("../services/workspace-chat.js", () => ({
   chatWorkspace: chatWorkspaceMock,
   workspaceChatDisabledBody: workspaceChatDisabledBodyMock,

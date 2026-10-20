@@ -17,6 +17,10 @@ describe("capability manifest annotations", () => {
       chat: { readOnly: false, idempotent: false, consequential: false },
       getUploadStatus: { readOnly: true, idempotent: true, consequential: false },
       suggestQueries: { readOnly: true, idempotent: true, consequential: false },
+      // Ingest-scoped keys can price the work they could start, and read background jobs.
+      fullIndexEstimate: { readOnly: true, idempotent: true, consequential: false },
+      uploadEstimate: { readOnly: true, idempotent: true, consequential: false },
+      getJob: { readOnly: true, idempotent: true, consequential: false },
     };
     const tools = manifest.capabilities.filter((capability) => capability.category === "tool");
     expect(new Set(tools.map((tool) => tool.id))).toEqual(new Set(Object.keys(expected)));

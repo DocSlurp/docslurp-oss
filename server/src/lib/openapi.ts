@@ -1,4 +1,5 @@
 import { stateManagementPaths, stateManagementSchemas } from "./state-management-openapi.js";
+import { configChangePaths } from "./config-change-openapi.js";
 import { workspaceGraphPaths, workspaceGraphSchemas } from "./workspace-graph-openapi.js";
 import { simpleServicePaths, simpleServiceSchemas } from "./simple-service-openapi.js";
 import { webhookEventCatalog } from "./webhook-events.js";
@@ -251,6 +252,7 @@ export function buildOpenApiDocument(baseUrl: string) {
       ...simpleServicePaths,
       ...stateManagementPaths,
       ...workspaceGraphPaths,
+      ...configChangePaths,
     }
   };
 }

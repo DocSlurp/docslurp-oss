@@ -46,20 +46,7 @@ Parallel retrieval defaults to at most four in-flight queries; set `concurrency`
 }
 ```
 
-Discover schemas with `tools/list`. `upload` and `completeUpload` require `ingest` scope; `listWorkspaces` and `getUploadStatus` accept `ingest` or `search`; retrieval, chat and suggestions require `search`. New default OAuth consent requests include ingest access; existing read-only connections must reauthorize with ingest scope to discover upload tools. Explicitly requested read-only scopes stay read-only. The `docslurp://capabilities` resource returns the same catalog with each tool's scopes.
-
-## Upload files from an agent
-
-1. Call `upload` with `files` metadata (1–10 files). Omit `workspaceId` for the default workspace, or explicitly request a new one with `workspaceName`:
-
-   ```json
-   {"files":[{"filename":"manual.pdf","mimeType":"application/pdf","sizeBytes":123456}]}
-   ```
-
-2. The response contains `sessionId` and `files`, each with an `id`, `putUrl`, `method`, required `headers`, and `expiresInSeconds`. PUT each file's raw bytes to its URL with its declared `Content-Type`. URLs expire after 15 minutes. Each file gets one URL, including large files (up to 5 GiB, subject to account limits). Keep signed URLs private. Local file paths and base64 are not tool arguments.
-3. After every PUT succeeds, call `completeUpload` with `sessionId` and `fileIds`. The server verifies object sizes and starts ingestion only after all files complete. Use the returned workspace/run IDs with `getUploadStatus`, then `search` or `chat`. An already confirmed session cannot be submitted again.
-
-For files already hosted online, call `upload` with `{"urls":["https://example.com/manual.pdf"]}`. This starts ingestion directly. An optional `idempotencyKey` deduplicates URL-ingestion retries; it does not apply to signed-upload session creation.
+Read-only estimate tools (`updateEstimate`, `searchSettingsEstimate`, `reprocessEstimate`, `fullIndexEstimate`, `indexingModeEstimate`, `graphRebuildEstimate`, `uploadEstimate`) price an operation before you start it, and `getJob` reads a background job; `getJob` needs a `search` or `ingest` key. An estimate tool is listed only to keys that could perform the operation: `updateEstimate`, `indexingModeEstimate` and `graphRebuildEstimate` need `workspaces:manage` on a server key, `fullIndexEstimate` and `uploadEstimate` need `ingest`, and `searchSettingsEstimate` and `reprocessEstimate` are available to signed-in sessions only. See [config-change jobs](config-change-jobs.md).
 
 The remote endpoint supports modern per-request MCP and stateless legacy Streamable HTTP clients. Stdio-only clients can use `docslurp mcp-server` from `@docslurp/cli`; its native REST adapters expose the same tools. Transport and adapter calls share the same authorization and search/chat implementation, without an internal network hop or forwarding credentials.
 

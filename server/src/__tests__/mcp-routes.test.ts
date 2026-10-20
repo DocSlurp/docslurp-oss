@@ -13,6 +13,15 @@ const uploadRequest = vi.fn();
 const loadDirectUploadSession = vi.fn();
 vi.mock("../services/direct-upload-session.js", () => ({ loadDirectUploadSession }));
 
+const forwardInProcess = vi.fn();
+
+// forwardInProcess is mocked, so the route modules it statically mounts only need to exist.
+vi.mock("../routes/workspaces.js", async () => ({ workspacesRoutes: new (await import("hono")).Hono() }));
+vi.mock("../routes/workspace-graph.js", async () => ({ workspaceGraphRoutes: new (await import("hono")).Hono() }));
+vi.mock("../routes/documents.js", async () => ({ documentsRoutes: new (await import("hono")).Hono() }));
+vi.mock("../routes/runs.js", async () => ({ runsRoutes: new (await import("hono")).Hono() }));
+vi.mock("../routes/jobs.js", async () => ({ jobsRoutes: new (await import("hono")).Hono() }));
+vi.mock("../services/mcp-estimate-tools.js", async (importOriginal) => ({ ...(await importOriginal<typeof import("../services/mcp-estimate-tools.js")>()), forwardInProcess }));
 vi.mock("../services/api-keys.js", () => ({
   validateApiKey,
 }));
@@ -26,7 +35,7 @@ vi.mock("../services/workspaces.js", () => ({ resolveWorkspaceRef: vi.fn(async (
 
 vi.mock("../routes/uploads.js", async () => {
   const { Hono } = await import("hono");
-  return { uploadsRoutes: new Hono().post("/*", async (c) => {
+  return { uploadEstimateRoutes: new Hono(), uploadsRoutes: new Hono().post("/*", async (c) => {
     const body = c.req.path.endsWith("/confirm") ? {} : await c.req.json();
     const outcome = uploadRequest({ path: c.req.path, actor: c.get("requestActor"), body, idempotencyKey: c.req.header("Idempotency-Key") });
     if (outcome instanceof Response) return outcome;
@@ -159,7 +168,7 @@ describe("mcpRoutes", () => {
   it("discovers documented workspace tools and advertises only the implemented MCP transport", async () => {
     const response = await app.request("/mcp/tools", { headers: { Authorization: "Bearer dslp_test" } });
     expect(response.status).toBe(200);
-    expect((await response.json()).tools.map((tool: { id: string }) => tool.id)).toEqual(["listWorkspaces", "search", "chat", "getUploadStatus", "suggestQueries"]);
+    expect((await response.json()).tools.map((tool: { id: string }) => tool.id)).toEqual(["listWorkspaces", "search", "chat", "getUploadStatus", "suggestQueries", "getJob"]);
     const manifest = await app.request("/mcp/manifest", { headers: { Authorization: "Bearer dslp_test" } });
     expect((await manifest.json()).server.transports).toEqual(["streamable-http", "stdio"]);
   });
@@ -192,6 +201,65 @@ describe("mcpRoutes", () => {
     expect(JSON.stringify(tools.map((tool) => tool.inputSchema))).not.toMatch(/approve/i);
   });
 
+  it("offers each estimate tool only to keys that could perform its mutation", async () => {
+    const listed = async (key: Partial<ValidatedKey>) => {
+      validateApiKey.mockResolvedValueOnce({ ...validatedKey, ...key });
+      const res = await app.request("/mcp/tools", { headers: { Authorization: "Bearer dslp_test" } });
+      return (await res.json()).tools.map((tool: { id: string }) => tool.id).filter((id: string) => id.endsWith("Estimate"));
+    };
+    expect(await listed({ scopes: ["search", "ingest", "workspaces:manage"], keyType: "server" })).toEqual([
+      "updateEstimate", "fullIndexEstimate", "indexingModeEstimate", "graphRebuildEstimate", "uploadEstimate",
+    ]);
+    expect(await listed({ scopes: ["ingest"] })).toEqual(["fullIndexEstimate", "uploadEstimate"]);
+    expect(await listed({ scopes: ["search"] })).toEqual([]);
+  });
+
+  describe("estimate tools and getJob", () => {
+    const post = (tool: string, body: unknown) => app.request(`/mcp/tools/${tool}`, {
+      method: "POST", headers: { Authorization: "Bearer dslp_test", "Content-Type": "application/json" }, body: JSON.stringify(body),
+    });
+    beforeEach(() => {
+      validateApiKey.mockResolvedValue({ ...validatedKey, scopes: ["search", "ingest", "workspaces:manage"] });
+      forwardInProcess.mockReset();
+      forwardInProcess.mockImplementation(async () => Response.json({ estimate: { pages: 3 }, billing: "disabled" }));
+    });
+
+    it("resolves the workspace and forwards the mutation body to the estimate route", async () => {
+      const response = await post("indexingModeEstimate", { workspaceId: "ws-1", mode: "map" });
+      expect(response.status).toBe(200);
+      expect(await response.json()).toMatchObject({ tool: "indexingModeEstimate", estimate: { pages: 3 } });
+      expect(forwardInProcess).toHaveBeenCalledWith(expect.anything(), "POST", "/v1/workspaces/ws-1/indexing-mode/estimate", { mode: "map" }, expect.anything());
+    });
+
+    it("does not forward for a foreign workspace or invalid input", async () => {
+      expect((await post("graphRebuildEstimate", { workspaceId: "foreign" })).status).toBe(404);
+      expect((await post("indexingModeEstimate", { workspaceId: "ws-1", mode: "bogus" })).status).toBe(400);
+      expect(forwardInProcess).not.toHaveBeenCalled();
+    });
+
+    it("requires the mutation's scope and key type, and never offers session-only estimates to keys", async () => {
+      expect((await post("uploadEstimate", { workspaceId: "ws-1", files: [{ name: "a.pdf", size: 1 }] })).status).toBe(200);
+      validateApiKey.mockResolvedValueOnce({ ...validatedKey, scopes: ["search"] });
+      expect((await post("uploadEstimate", { workspaceId: "ws-1", files: [{ name: "a.pdf", size: 1 }] })).status).toBe(403);
+      validateApiKey.mockResolvedValueOnce({ ...validatedKey, scopes: ["search", "ingest"] });
+      expect((await post("updateEstimate", { workspaceId: "ws-1", changes: {} })).status).toBe(403);
+      // reprocess and search-settings mutations accept no API key, so neither do their estimates.
+      expect((await post("reprocessEstimate", { runId: "r1" })).status).toBe(403);
+      expect((await post("searchSettingsEstimate", { workspaceId: "ws-1", changes: {} })).status).toBe(403);
+      expect(forwardInProcess).toHaveBeenCalledTimes(1);
+    });
+
+    it("getJob forwards to /v1/jobs/:id and surfaces route_unavailable", async () => {
+      forwardInProcess.mockResolvedValueOnce(Response.json({ id: "j1", status: "queued" }));
+      expect(await (await post("getJob", { jobId: "j1" })).json()).toMatchObject({ tool: "getJob", job: { id: "j1" } });
+      expect(forwardInProcess).toHaveBeenCalledWith(expect.anything(), "GET", "/v1/jobs/j1", undefined, expect.anything());
+      forwardInProcess.mockResolvedValueOnce(Response.json({ code: "route_unavailable" }, { status: 501 }));
+      const missing = await post("getJob", { jobId: "j1" });
+      expect(missing.status).toBe(501);
+      expect(await missing.json()).toMatchObject({ code: "route_unavailable" });
+    });
+  });
+
   it("requires a bearer key and enforces search scope", async () => {
     expect((await app.request("/mcp/tools")).status).toBe(401);
     validateApiKey.mockResolvedValueOnce({ ...validatedKey, scopes: ["ingest"] });
@@ -206,8 +274,8 @@ describe("mcpRoutes", () => {
     const client = new Client({ name: "catalog-contract", version: "1" });
     await client.connect(new StreamableHTTPClientTransport(new URL("http://localhost:4321/mcp"), { requestInit: { headers: { Authorization: "Bearer key" } }, fetch: async (url, init) => app.request(new Request(url, init)) }));
     const tools = (await client.listTools()).tools;
-    expect(tools).toHaveLength(7);
-    expect(new Set(tools.map(tool => tool.name)).size).toBe(7);
+    expect(tools).toHaveLength(10);
+    expect(new Set(tools.map(tool => tool.name)).size).toBe(10);
     expect(tools.every(tool => /^[A-Za-z0-9_.-]{1,128}$/.test(tool.name))).toBe(true);
     for (const name of ["upload", "completeUpload", "chat"]) {
       expect(tools.find(tool => tool.name === name)?.annotations).toMatchObject({ readOnlyHint: false, idempotentHint: false });
@@ -278,7 +346,7 @@ describe("mcpRoutes", () => {
   it("does not discover or execute search/chat tools without search scope", async () => {
     validateApiKey.mockResolvedValue({ ...validatedKey, scopes: ["ingest"] });
     const listed = await app.request("/mcp/tools", { headers: { Authorization: "Bearer dslp_test" } });
-    expect((await listed.json()).tools.map((tool: { id: string }) => tool.id)).toEqual(["listWorkspaces", "upload", "completeUpload", "getUploadStatus"]);
+    expect((await listed.json()).tools.map((tool: { id: string }) => tool.id)).toEqual(["listWorkspaces", "upload", "completeUpload", "getUploadStatus", "fullIndexEstimate", "uploadEstimate", "getJob"]);
     for (const name of ["search", "chat"]) {
       expect((await app.request(`/mcp/tools/${name}`, { method: "POST", headers: { Authorization: "Bearer dslp_test", "Content-Type": "application/json" }, body: "{}" })).status).toBe(403);
     }
@@ -352,7 +420,7 @@ describe("session MCP tools", () => {
     expect(tool.inputSchema.properties.urls).toBeDefined();
     expect(tool.inputSchema.properties.files).toBeDefined();
     expect(tool.inputSchema.properties.userId).toBeUndefined();
-    expect(tools.map((tool: { id: string }) => tool.id)).toEqual(["listWorkspaces", "upload", "completeUpload", "search", "chat", "getUploadStatus", "suggestQueries"]);
+    expect(tools.map((tool: { id: string }) => tool.id)).toEqual(["listWorkspaces", "upload", "completeUpload", "search", "chat", "getUploadStatus", "suggestQueries", "updateEstimate", "searchSettingsEstimate", "reprocessEstimate", "fullIndexEstimate", "indexingModeEstimate", "graphRebuildEstimate", "uploadEstimate", "getJob"]);
     expect(response.headers.get("Cache-Control")).toBe("no-store");
   });
 });

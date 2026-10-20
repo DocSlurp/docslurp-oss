@@ -1,3 +1,4 @@
+import { getRetainedVersionStorage } from "../services/billing/retained-storage.js";
 import { reportPublicError } from "../lib/public-errors.js";
 import { Hono, type Context } from "hono";
 import { z } from "zod";
@@ -126,7 +127,8 @@ export const billingRoutes = new Hono()
     if (!org) {
       return apiStatusError(c, 404, "No organization found");
     }
-    return c.json(await getBillingOverview(org.id));
+    const [overview, retainedVersionStorage] = await Promise.all([getBillingOverview(org.id), getRetainedVersionStorage(org.id)]);
+    return c.json({ ...overview, retainedVersionStorage });
   })
   .get("/balance", async (c) => {
     const userId = c.get("sessionUser").id;

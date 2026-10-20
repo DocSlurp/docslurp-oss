@@ -3,7 +3,7 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
-import { resolveLanceDbConfig, VectorNamespaceManager } from "@docslurp/shared";
+import { indexConfigHash, indexConfigOf, resolveLanceDbConfig, VectorNamespaceManager } from "@docslurp/shared";
 import postgres from "postgres";
 
 import type { Config } from "../config.js";
@@ -242,7 +242,8 @@ export class IndexStage implements Stage {
                 bucket: this.storage.bucket,
                 path: key,
                 embeddingModel: artifact.embedding.model,
-                dimension: artifact.embedding.dimensions
+                dimension: artifact.embedding.dimensions,
+                indexConfigHash: indexConfigHash(indexConfigOf(state.run.pipeline))
               } satisfies PipelineVectorIndex);
 
               manifests.push({

@@ -456,6 +456,20 @@
       "when": 1792627200001,
       "tag": "0064_deferred_indexing_modes",
       "breakpoints": true
+    },
+    {
+      "idx": 65,
+      "version": "7",
+      "when": 1792627200002,
+      "tag": "0065_versions_retention_config_jobs",
+      "breakpoints": true
+    },
+    {
+      "idx": 66,
+      "version": "7",
+      "when": 1792627200003,
+      "tag": "0066_upload_session_file_source_path",
+      "breakpoints": true
     }
   ]
 }

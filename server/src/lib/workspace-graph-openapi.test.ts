@@ -12,6 +12,7 @@ describe("workspace graph OpenAPI contract", () => {
       "/v1/workspaces/{workspaceId}/graph/jobs/{jobId}",
       "/v1/workspaces/{workspaceId}/graph/jobs/{jobId}/events",
       "/v1/workspaces/{workspaceId}/graph/jobs/{jobId}/cancel",
+      "/v1/workspaces/{workspaceId}/graph/jobs/estimate",
     ]);
     expect(document.components.schemas.UpdateWorkspaceGraph.properties).toHaveProperty("entityTypes");
     expect(document.components.schemas.WorkspaceGraphStatus.properties).toHaveProperty("estimates");

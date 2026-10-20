@@ -30,15 +30,24 @@ const DAYS_PER_MONTH = 730 / 24;
 
 export type OrgStorage = { objectBytes: number; indexBytes: number; sourceBytes: number; pages: number };
 
-/** Object + index bytes the org is storing, from workspace_corpus_stats (live documents only). */
-export async function getOrgStorage(orgId: string): Promise<OrgStorage> {
-  const [row] = await sql<{ source_bytes: string | number; pages: string | number }[]>`
+/**
+ * Object + index bytes the org is storing: live documents from
+ * workspace_corpus_stats, plus archived superseded versions (their pages and
+ * source stay stored for browsing). Live and archived rows are disjoint
+ * (archived rows are superseded), so nothing is double-counted. Purged rows
+ * are excluded.
+ */
+export async function getOrgStorage(orgId: string, db: typeof sql = sql): Promise<OrgStorage> {
+  const [row] = await db<{ source_bytes: string | number; pages: string | number }[]>`
     select
-      coalesce(sum(s.source_bytes), 0)::text as source_bytes,
-      coalesce(sum(s.page_count), 0)::text as pages
-    from workspace_corpus_stats s
-    join workspaces w on w.id = s.workspace_id
-    where w.org_id = ${orgId}
+      (coalesce((select sum(s.source_bytes) from workspace_corpus_stats s
+        join workspaces w on w.id = s.workspace_id where w.org_id = ${orgId}), 0)
+       + coalesce((select sum(d.file_size) from documents d
+        where d.org_id = ${orgId} and d.archived_at is not null and d.purged_at is null), 0))::text as source_bytes,
+      (coalesce((select sum(s.page_count) from workspace_corpus_stats s
+        join workspaces w on w.id = s.workspace_id where w.org_id = ${orgId}), 0)
+       + coalesce((select sum(d.page_count) from documents d
+        where d.org_id = ${orgId} and d.archived_at is not null and d.purged_at is null), 0))::text as pages
   `;
   const sourceBytes = Number(row?.source_bytes ?? 0);
   const pages = Number(row?.pages ?? 0);

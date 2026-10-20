@@ -65,6 +65,8 @@ type WorkspaceRow = {
   monthly_budget_cents: number | null;
   artifact_retention_days?: number | null;
   run_retention_days?: number | null;
+  retain_document_versions?: number | null;
+  auto_confirm_reindex?: boolean | null;
   document_count: number;
   total_page_count: number;
   indexed_page_count?: number | null;
@@ -287,6 +289,8 @@ function mapWorkspace(row: WorkspaceRow): WorkspaceRecord {
     monthlyBudgetCents: row.monthly_budget_cents ?? null,
     artifactRetentionDays: row.artifact_retention_days ?? null,
     runRetentionDays: row.run_retention_days ?? null,
+    retainDocumentVersions: row.retain_document_versions ?? null,
+    autoConfirmReindex: row.auto_confirm_reindex ?? false,
     documentCount: row.document_count ?? 0,
     totalPageCount: row.total_page_count ?? 0,
     indexingMode: effectiveIndexingMode(row.pipeline?.indexingMode),
@@ -480,6 +484,23 @@ export async function ensureDefaultWorkspace(args: {
 }
 
 /**
+ * Read-only lookup of the organization's default workspace (personal org when `orgId` is omitted). Unlike
+ * `ensureDefaultWorkspace` it creates nothing: null when the org, membership or default workspace is missing.
+ */
+export async function findDefaultWorkspace(args: { userId: string; orgId?: string | null }): Promise<WorkspaceRecord | null> {
+  const [row] = await sql<{ id: string }[]>`
+    select w.id
+    from workspaces w
+    join org_memberships om on om.org_id = w.org_id and om.user_id = ${args.userId}
+    join organizations o on o.id = w.org_id
+    where w.is_default
+      ${args.orgId ? sql`and w.org_id = ${args.orgId}` : sql`and o.personal_owner_user_id = ${args.userId}`}
+    limit 1
+  `;
+  return row ? await getWorkspace(row.id, args.userId) : null;
+}
+
+/**
  * Makes sure a dashboard user's personal organization and its default
  * workspace exist, without loading the workspace. Organizations created after
  * this get their default workspace at creation; this covers users who have
@@ -509,6 +530,8 @@ export async function getWorkspace(workspaceId: string, userId: string): Promise
       w.monthly_budget_cents,
       w.artifact_retention_days,
       w.run_retention_days,
+      w.retain_document_versions,
+      w.auto_confirm_reindex,
       coalesce(cs.document_count, 0)::int as document_count,
       coalesce(cs.page_count, 0)::int as total_page_count,
       greatest(coalesce(cs.page_count, 0)::int - coalesce(idx.unindexed_pages, 0), 0)::int as indexed_page_count,
@@ -615,6 +638,8 @@ export async function listWorkspaces(userId: string, options: { refineNames?: bo
       w.monthly_budget_cents,
       w.artifact_retention_days,
       w.run_retention_days,
+      w.retain_document_versions,
+      w.auto_confirm_reindex,
       coalesce(cs.document_count, 0)::int as document_count,
       coalesce(cs.page_count, 0)::int as total_page_count,
       greatest(coalesce(cs.page_count, 0)::int - coalesce(idx.unindexed_pages, 0), 0)::int as indexed_page_count,
@@ -801,19 +826,29 @@ export async function listWorkspaceBoardRecords(userId: string): Promise<Workspa
   });
 }
 
-export async function updateWorkspace(
-  workspaceId: string,
-  userId: string,
-  input: UpdateWorkspaceInput,
-  options: { indexingMode?: PipelineFeatures["indexingMode"] } = {},
-): Promise<WorkspaceRecord | null> {
-  const parsed = updateWorkspaceSchema.parse(input);
-  const access = await getWorkspaceAccess(workspaceId, userId);
-  const current = await getWorkspace(workspaceId, userId);
-  if (!current || !access || !canEditWorkspace(access, userId)) {
-    return null;
-  }
+type WorkspaceSqlClient = typeof sql;
 
+export type WorkspaceUpdateOptions = {
+  indexingMode?: PipelineFeatures["indexingMode"];
+  /** Run the write on this transaction client (config-change jobs save the config and create runs atomically). */
+  client?: WorkspaceSqlClient;
+  /**
+   * Already-resolved inputs (access checked, pipeline resolved), so a write inside a transaction does not
+   * issue reads on other connections (the caller also validates any indexing-mode switch). With `client` the returned record is `current`, not re-read.
+   */
+  precomputed?: { current: WorkspaceRecord; pipeline: PipelineFeatures };
+};
+
+/**
+ * The pipeline an update would store (template locks applied, indexing mode resolved) without writing
+ * anything. Estimates and the mutation share it so they classify the same change.
+ */
+export async function resolveUpdatedPipeline(
+  workspaceId: string,
+  current: WorkspaceRecord,
+  parsed: UpdateWorkspaceInput,
+  options: Pick<WorkspaceUpdateOptions, "indexingMode"> = {},
+): Promise<PipelineFeatures> {
   const template = parsed.templateKey !== undefined
     ? getWorkspaceTemplate(parsed.templateKey)
     : getWorkspaceTemplate(current.templateKey);
@@ -833,7 +868,31 @@ export async function updateWorkspace(
   `;
   const storedMode = storedRow?.mode ?? "full";
   pipeline.indexingMode = deferredProfilesEnabled() ? (options.indexingMode ?? storedMode) : storedMode;
-  if (deferredProfilesEnabled() && pipeline.indexingMode !== current.pipeline.indexingMode) {
+  return pipeline;
+}
+
+export async function updateWorkspace(
+  workspaceId: string,
+  userId: string,
+  input: UpdateWorkspaceInput,
+  options: WorkspaceUpdateOptions = {},
+): Promise<WorkspaceRecord | null> {
+  const parsed = updateWorkspaceSchema.parse(input);
+  let current: WorkspaceRecord;
+  let pipeline: PipelineFeatures;
+  if (options.precomputed) {
+    ({ current, pipeline } = options.precomputed);
+  } else {
+    const access = await getWorkspaceAccess(workspaceId, userId);
+    const loaded = await getWorkspace(workspaceId, userId);
+    if (!loaded || !access || !canEditWorkspace(access, userId)) {
+      return null;
+    }
+    current = loaded;
+    pipeline = await resolveUpdatedPipeline(workspaceId, current, parsed, options);
+  }
+  // With precomputed inputs the caller already validated the switch (this may run inside its transaction).
+  if (!options.precomputed && deferredProfilesEnabled() && pipeline.indexingMode !== current.pipeline.indexingMode) {
     await validateModeSwitch({ current, nextPipeline: pipeline });
   }
 
@@ -852,8 +911,11 @@ export async function updateWorkspace(
     value === undefined ? fallback : value === null || value === 0 ? null : value;
   const nextArtifactRetention = retention(parsed.artifactRetentionDays, current.artifactRetentionDays);
   const nextRunRetention = retention(parsed.runRetentionDays, current.runRetentionDays);
+  const nextRetainVersions = parsed.retainDocumentVersions === undefined ? current.retainDocumentVersions ?? null : parsed.retainDocumentVersions;
+  const nextAutoConfirm = parsed.autoConfirmReindex ?? current.autoConfirmReindex ?? false;
+  const client = options.client ?? sql;
 
-  await sql`
+  await client`
     with current_month_spend as (
       select coalesce(sum(au.cost_cents), 0)::double precision as spend_cents
       from ${attributedUsage("month")} au
@@ -869,6 +931,8 @@ export async function updateWorkspace(
       monthly_budget_cents = ${nextBudget},
       artifact_retention_days = ${nextArtifactRetention},
       run_retention_days = ${nextRunRetention},
+      retain_document_versions = ${nextRetainVersions},
+      auto_confirm_reindex = ${nextAutoConfirm},
       budget_paused = case
         when ${nextBudget}::integer is null then false
         when (select spend_cents from current_month_spend) < ${nextBudget} then false
@@ -884,7 +948,7 @@ export async function updateWorkspace(
     throw error;
   });
 
-  return await getWorkspace(workspaceId, userId);
+  return options.client ? current : await getWorkspace(workspaceId, userId);
 }
 
 async function mutateWorkspaceArchiveState(args: {

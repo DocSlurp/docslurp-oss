@@ -203,6 +203,8 @@ export async function createBulkWorkspaceIntake(
     files: BulkWorkspaceIntakeFile[];
     /** Aligned with `files`. */
     canonicalIds?: Array<string | null>;
+    /** Folder paths aligned with `files`. */
+    paths?: string[];
     idempotencyKey?: string;
     contentLength?: string | null;
     audit?: WorkspaceIntakeAudit;
@@ -223,10 +225,11 @@ export async function createBulkWorkspaceIntake(
       filename: file.name,
       mimeType: file.type,
       canonicalId: args.canonicalIds?.[index] ?? null,
+      path: args.paths?.[index] ?? "",
       bytes: Buffer.from(await file.arrayBuffer()),
     })),
   );
-  const { files: _files, canonicalIds: _canonicalIds, idempotencyKey, contentLength: _length, audit, ...target } = args;
+  const { files: _files, canonicalIds: _canonicalIds, paths: _paths, idempotencyKey, contentLength: _length, audit, ...target } = args;
   const requestHash = hashIdempotencyPayload({
     ...target,
     templateKey: target.templateKey ?? null,
@@ -234,6 +237,7 @@ export async function createBulkWorkspaceIntake(
       filename: file.filename,
       mimeType: file.mimeType,
       canonicalId: file.canonicalId,
+      path: file.path,
       size: file.bytes.byteLength,
       sha256: createHash("sha256").update(file.bytes).digest("hex"),
     })),
