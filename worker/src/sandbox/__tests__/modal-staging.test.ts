@@ -162,6 +162,21 @@ describe("SessionStaging", () => {
     expect(Buffer.from(remote.files.get(input)!.data).toString()).toBe("input");
   });
 
+  it("never copies back an input uploaded for another command after the snapshot", async () => {
+    const dir = path.join(root, "work");
+    mkdirSync(dir);
+    const snapshot = await staging.snapshot([dir]);
+    const otherInput = path.join(dir, "other-input.txt");
+    writeFileSync(otherInput, "input");
+    await staging.ensureUploaded([otherInput]);
+    // The host replaces its copy; a download must not overwrite it with the uploaded one.
+    writeFileSync(otherInput, "host edit");
+    remote.put(path.join(dir, "out.txt"), "output");
+    await staging.download(snapshot);
+    expect(remote.reads).toEqual([path.join(dir, "out.txt")]);
+    expect(readFileSync(otherInput, "utf8")).toBe("host edit");
+  });
+
   it("does not discard paths a later upload or download put there", async () => {
     const dir = path.join(root, "work");
     await remote.mkdir(dir);
@@ -531,6 +546,56 @@ describe("modal provider session lifecycle", () => {
       expect(readFileSync(path.join(dir, "slow.json"), "utf8")).toBe("{\"done\":true}");
       expect(state.remote.removed).toEqual([path.join(dir, "aborted.json")]);
       expect(state.remote.files.has(path.join(dir, "slow.json"))).toBe(true);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("reports an exec error caused by an abort while the exec starts as an abort", async () => {
+    const controller = new AbortController();
+    const { state, session } = await open({
+      exec: async () => {
+        controller.abort();
+        throw new Error("stream reset while starting exec");
+      },
+    });
+    const opened = await session();
+    const error = await opened.run!(command, controller.signal).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(SandboxRunError);
+    expect((error as Error).message).toBe("modal sandbox command aborted");
+    expect(state.kills).toHaveLength(1);
+    expect(usageLines()).toHaveLength(1);
+  });
+
+  it("drops pending removals once the session is closed", async () => {
+    const dir = mkdtempSync(path.join(tmpdir(), "docslurp-modal-closed-"));
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const processes = new Map<string, ReturnType<typeof running>>();
+      const { state, session } = await open({
+        exec: async ([binary]) => {
+          const proc = running();
+          processes.set(binary, proc);
+          state.remote.put(path.join(dir, `${binary}.json`), "{");
+          return proc.process;
+        },
+        onKill: () => processes.get("aborted")?.end(137),
+      });
+      const opened = await session();
+      const controller = new AbortController();
+      const aborted = opened.run!({ ...command, binary: "aborted", writablePaths: [dir] }, controller.signal).catch(
+        (e: unknown) => e,
+      );
+      await vi.waitFor(() => expect(processes.has("aborted")).toBe(true));
+      const slow = opened.run!({ ...command, binary: "slow", writablePaths: [dir] }).catch((e: unknown) => e);
+      await vi.waitFor(() => expect(processes.has("slow")).toBe(true));
+      controller.abort();
+      await aborted;
+      await opened.close();
+      processes.get("slow")!.end(0);
+      await slow;
+      expect(state.remote.removed).toEqual([]);
+      expect(warn).not.toHaveBeenCalled();
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

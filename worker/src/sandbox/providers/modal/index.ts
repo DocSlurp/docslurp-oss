@@ -11,6 +11,7 @@ import {
   type SandboxResult,
   type SandboxSession,
 } from "../../types.js";
+import { CONTROL_DIR, killArgv, launchArgv } from "./control.js";
 import { SessionStaging, type RemoteEntry, type RemoteFs, type RemoteSnapshot } from "./staging.js";
 
 export type ModalSdk = typeof import("modal");
@@ -107,41 +108,8 @@ function execTimeoutMs(timeoutMs: number): number {
   return Math.max(1, Math.ceil(timeoutMs / 1000)) * 1000;
 }
 
-/** Remote directory holding each command's pid and cancel files; outside every writable path. */
-const CONTROL_DIR = "/tmp/.docslurp-modal-control";
-
-/** How long an abort waits for the killed command's exec to end before cleaning up anyway. */
+/** How long an abort waits for the kill exec, and then for the killed command's exec to end. */
 const KILL_SETTLE_MS = 10_000;
-
-/**
- * Starts a command in its own session when the image's setsid supports -w (util-linux), so
- * one kill reaches every process it spawned. Arguments: the start script, the control path
- * prefix, then the command's argv. Uses only POSIX sh, so it needs no PATH.
- */
-const LAUNCH_SCRIPT = [
-  "start=$1; control=$2; shift 2",
-  "for s in /usr/bin/setsid /bin/setsid; do",
-  '  if [ -x "$s" ] && "$s" -w /bin/sh -c : >/dev/null 2>&1; then exec "$s" -w /bin/sh -c "$start" sh "$control" "$@"; fi',
-  "done",
-  'exec /bin/sh -c "$start" sh "$control" "$@"',
-].join("\n");
-
-/**
- * Records the session leader's pid, then becomes the command. Checking the cancel file after
- * writing the pid closes the race with a kill that lands before the command starts: either
- * the kill reads the pid, or this sees the cancel file.
- */
-const START_SCRIPT = 'echo $$ > "$1.pid"; [ -e "$1.cancel" ] && exit 137; shift; exec "$@"';
-
-/** Marks the command cancelled, then kills its process group (falling back to the pid alone). */
-const KILL_SCRIPT = [
-  ': > "$1.cancel"',
-  'read -r pid 2>/dev/null < "$1.pid" || exit 0',
-  'case $pid in ""|*[!0-9]*) exit 0 ;; esac',
-  'kill -s KILL -- "-$pid" 2>/dev/null',
-  'kill -s KILL "$pid" 2>/dev/null',
-  "exit 0",
-].join("\n");
 
 /** How a remote command ended: it exited on its own, hit its time limit, or was aborted by the caller. */
 type RemoteOutcome =
@@ -326,7 +294,7 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
        */
       async function kill(control: string, settled: Promise<unknown>): Promise<void> {
         try {
-          const killer = await sandbox!.exec(["/bin/sh", "-c", KILL_SCRIPT, "sh", control], { timeoutMs: KILL_SETTLE_MS });
+          const killer = await sandbox!.exec(killArgv(control), { timeoutMs: KILL_SETTLE_MS });
           await killer.wait();
         } catch (error) {
           console.warn(`[parser-sandbox] provider=modal kill failed: ${safeMessage(config, error)}`);
@@ -342,7 +310,7 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
       async function runRemote(command: SandboxCommand, control: string, signal?: AbortSignal): Promise<RemoteOutcome> {
         const env: Record<string, string> = {};
         for (const [key, value] of Object.entries(command.env)) if (value !== undefined) env[key] = value;
-        const argv = ["/bin/sh", "-c", LAUNCH_SCRIPT, "sh", START_SCRIPT, control, command.binary, ...command.args];
+        const argv = launchArgv(control, command.binary, command.args);
         let settled: Promise<{ stdout: string; stderr: string; exitCode: number | null }> = Promise.reject(
           new Error("exec did not start"),
         );
@@ -360,6 +328,8 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
           // Modal enforces the exec timeout provider-side, but may stop only the top process.
           // Every other failure is a provider error and propagates.
           await kill(control, settled);
+          // An abort that lands while the exec is starting can surface as an exec error.
+          if (signal?.aborted) return { kind: "aborted" };
           if (isExecTimeout(sdk, error)) return { kind: "timeout" };
           throw error;
         } finally {
@@ -380,7 +350,8 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
 
       async function runDiscards(): Promise<void> {
         try {
-          while (pendingDiscards.length > 0) {
+          // A closed session's sandbox is gone, and its changes with it.
+          while (pendingDiscards.length > 0 && !closed) {
             try {
               await staging!.discard(pendingDiscards.shift()!);
             } catch (error) {
@@ -399,7 +370,7 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
           return await executeCommand(command, started, signal);
         } finally {
           inFlight--;
-          if (inFlight === 0 && pendingDiscards.length > 0) {
+          if (inFlight === 0 && pendingDiscards.length > 0 && !closed) {
             discarding ??= runDiscards();
             await discarding;
           }
