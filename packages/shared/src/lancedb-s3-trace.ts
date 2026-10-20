@@ -124,6 +124,14 @@ export class LanceS3Stats {
   readonly windowByStatus = new Map<string, number>();
   /** Set by the proxy when the disk cache is on; its counters join the summary line and snapshot. */
   cache: DiskBlockCache | undefined;
+  /** Requests actually sent to the object store, by operation (client requests served from the cache are not included). */
+  readonly upstreamByOperation = new Map<string, number>();
+  windowUpstream = 0;
+  upstreamTotal = 0;
+  upstream(operation: string): void {
+    this.upstreamByOperation.set(operation, (this.upstreamByOperation.get(operation) ?? 0) + 1);
+    this.upstreamTotal++; this.windowUpstream++;
+  }
 
   record(sample: { operation: string; status: number | "error"; bytesIn: number; bytesOut: number; ttfbMs: number; totalMs: number; retry: boolean }): void {
     const bucket = BUCKETS_MS.findIndex((limit) => sample.totalMs <= limit);
@@ -145,7 +153,7 @@ export class LanceS3Stats {
   }
 
   snapshot() {
-    return { ...summarize(this.cumulative), byOperation: Object.fromEntries(this.byOperation), byOperationStatus: Object.fromEntries(this.byStatus), histogramMsBuckets: BUCKETS_MS, histogram: [...this.cumulative.hist], ...(this.cache ? { cache: this.cache.snapshot() } : {}) };
+    return { ...summarize(this.cumulative), byOperation: Object.fromEntries(this.byOperation), byOperationStatus: Object.fromEntries(this.byStatus), histogramMsBuckets: BUCKETS_MS, histogram: [...this.cumulative.hist], upstreamRequests: this.upstreamTotal, upstreamByOperation: Object.fromEntries(this.upstreamByOperation), ...(this.cache ? { cache: this.cache.snapshot() } : {}) };
   }
 
   /** One-line summary of the window since the last call; resets the window. */
@@ -154,8 +162,9 @@ export class LanceS3Stats {
     const fmt = (map: Map<string, number>) => [...map].sort((a, b) => b[1] - a[1]).map(([k, v]) => `${k}=${v}`).join(",") || "none";
     const line = `[lancedb-s3] window=${windowSeconds}s requests=${w.requests} errors=${w.errors} retries=${w.retries} bytes_in=${w.bytesIn} bytes_out=${w.bytesOut} `
       + `avg_ms=${w.avgMs} avg_ttfb_ms=${w.avgTtfbMs} p50_ms=${w.p50Ms} p95_ms=${w.p95Ms} p99_ms=${w.p99Ms} ops=${fmt(this.windowByOperation)} statuses=${fmt(this.windowByStatus)} `
-      + `total_requests=${this.cumulative.requests}${this.cache ? ` ${this.cache.summaryFragment()}` : ""}`;
+      + `total_requests=${this.cumulative.requests} upstream_requests=${this.windowUpstream}${this.cache ? ` ${this.cache.summaryFragment()}` : ""}`;
     this.window = newAggregate();
+    this.windowUpstream = 0;
     this.windowByOperation.clear();
     this.windowByStatus.clear();
     return line;
@@ -220,6 +229,7 @@ export async function startLanceS3Proxy(options: LanceS3ProxyOptions): Promise<L
     /** One signed, fully buffered upstream request for the cache. Only Range is forwarded, never client conditionals. */
     const bufferedUpstream = async (m: "GET" | "HEAD", range?: string): Promise<BufferedUpstream> => {
       const signed = await signUpstreamRequest(m, rawUrl, range ? { range } : {}, target, options.credentials);
+      stats.upstream(m === "GET" ? "GetObject" : "HeadObject");
       return await new Promise<BufferedUpstream>((resolve, reject) => {
         const upstream = send({ agent, protocol: signed.protocol, hostname: signed.hostname, port: signed.port, method: m, path: signed.path, headers: signed.headers }, (response) => {
           const chunks: Buffer[] = [];
@@ -279,6 +289,7 @@ export async function startLanceS3Proxy(options: LanceS3ProxyOptions): Promise<L
         }
       }
       const signed = await signUpstreamRequest(method, rawUrl, req.headers, target, options.credentials);
+      stats.upstream(classified.operation);
       const upstream = send({ agent, protocol: signed.protocol, hostname: signed.hostname, port: signed.port, method, path: signed.path, headers: signed.headers }, (response) => {
         ttfbMs = performance.now() - started;
         status = response.statusCode ?? 502;

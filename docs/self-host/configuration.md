@@ -99,6 +99,7 @@ index inherits `STORAGE_URI` as before.
 | `S3_FORCE_PATH_STYLE` | `STORAGE_URI` `pathStyle` | Overrides path-style addressing. |
 | `S3_MULTIPART_PART_SIZE_MB` | `8` | Part size for streamed server uploads (5-5120). |
 | `LANCEDB_CONNECT_TIMEOUT_SECONDS`, `LANCEDB_REQUEST_TIMEOUT_SECONDS`, `LANCEDB_CLIENT_MAX_RETRIES`, `LANCEDB_POOL_MAX_IDLE_PER_HOST` | Lance | Lance object-store options (`connect_timeout`, `timeout`, `client_max_retries`, `pool_max_idle_per_host`) for `s3://` roots. |
+| `LANCEDB_S3_CACHE_DIR`, `LANCEDB_S3_CACHE_MAX_GB` (10), `LANCEDB_S3_CACHE_BLOCK_KB` (1024) | off | Read-through disk cache for Lance's immutable `data/` and `_indices/` files on `s3://` roots; see [Local disk cache for LanceDB](operations.md#local-disk-cache-for-lancedb). |
 
 Use a shared `s3://` root whenever the server and worker run in separate containers
 or machines. Log URIs only after redaction because `STORAGE_URI` may hold a
