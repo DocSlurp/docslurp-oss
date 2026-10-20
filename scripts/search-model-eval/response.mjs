@@ -40,6 +40,8 @@ export function extractQueries(rawArgs) {
 
 export function normalizeToolCall(raw) {
   const call = object(raw);
+  // Server contract (PR #65): evidencePages [{documentId, pageNumber}] and queries [string] per call.
+  if (Array.isArray(call.evidencePages)) return normalizeToolCall({ ...call, evidencePages: undefined, evidence: call.evidencePages.map((page) => ({ citation: object(page) })) });
   const evidenceSource = ["evidence", "results", "citations", "hits"].find((key) => Array.isArray(call[key]) || Array.isArray(object(call.result)[key]) || Array.isArray(object(call.output)[key]));
   const evidenceItems = evidenceSource ? array(call[evidenceSource] ?? object(call.result)[evidenceSource] ?? object(call.output)[evidenceSource]) : null;
   const error = call.error ?? null;
@@ -49,7 +51,9 @@ export function normalizeToolCall(raw) {
     status: string(call.status),
     runtimeMs: number(call.runtimeMs),
     step: number(call.step ?? call.stepNumber),
-    queries: extractQueries(call.args ?? call.input ?? call.arguments),
+    queries: Array.isArray(call.queries) ? call.queries.filter((query) => typeof query === "string") : extractQueries(call.args ?? call.input ?? call.arguments),
+    zeroHit: typeof call.zeroHit === "boolean" ? call.zeroHit : null,
+    costCents: number(call.costCents),
     resultCount: number(call.resultCount ?? call.hitCount ?? call.hits) ?? (evidenceItems ? evidenceItems.length : null),
     evidence: evidenceItems ? evidenceItems.map(normalizeCitation) : null,
     error: error === null ? null : typeof error === "string" ? error : string(object(error).message) ?? JSON.stringify(error),
@@ -92,7 +96,7 @@ export function extractChatResponse(body) {
     toolCalls: Array.isArray(debug.toolCalls) ? debug.toolCalls.map(normalizeToolCall) : null,
     usage: {
       inputTokens: number(usage.inputTokens), outputTokens: number(usage.outputTokens), totalTokens: number(usage.totalTokens),
-      costCents: number(usage.costCents), costSource: string(usage.costSource),
+      costCents: number(usage.costCents), costSource: string(usage.costSource), toolCostCents: number(usage.toolCostCents),
     },
     runtimeMs: number(object(response.runtime).totalMs),
   };

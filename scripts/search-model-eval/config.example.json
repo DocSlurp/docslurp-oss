@@ -17,5 +17,5 @@
   "budget": { "capUsd": 5, "inputTokensPerTurn": 24000, "outputTokensPerTurn": 2048, "overheadUsdPerCall": 0.002 },
   "timeoutMs": 150000,
   "retry": { "onTimeout": false, "minDelayMs": 1000, "maxDelayMs": 4000 },
-  "sendBaggage": false
+  "sendBaggage": true
 }

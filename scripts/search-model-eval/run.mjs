@@ -137,7 +137,8 @@ export function buildRequest(cell, config, { apiKey, attempt, trace }) {
 
 /** Actual USD from the response: reported costCents, else tokens x list price, else unknown (null). */
 export function actualCostUsd(status, extracted, price) {
-  if (Number.isFinite(extracted?.usage?.costCents)) return { usd: extracted.usage.costCents / 100, source: `response-usage:${extracted.usage.costSource ?? "unspecified"}` };
+  // Agent model calls (costCents) plus nested tool work such as embeddings and rewrites (toolCostCents).
+  if (Number.isFinite(extracted?.usage?.costCents)) return { usd: (extracted.usage.costCents + (extracted.usage.toolCostCents ?? 0)) / 100, source: `response-usage:${extracted.usage.costSource ?? "unspecified"}${Number.isFinite(extracted.usage.toolCostCents) ? "+tools" : ""}` };
   if (Number.isFinite(extracted?.usage?.inputTokens) && (extracted.usage.inputTokens > 0 || extracted.usage.outputTokens > 0)) return { usd: tokenCostUsd(price, extracted.usage.inputTokens, extracted.usage.outputTokens ?? 0), source: "response-tokens-x-list-price" };
   // Auth, validation, spend (402) and rate-limit refusals happen before any model call.
   if (status >= 400 && status < 500) return { usd: 0, source: "http-4xx-before-model" };
