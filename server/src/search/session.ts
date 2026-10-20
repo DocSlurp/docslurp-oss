@@ -163,7 +163,7 @@ class SqlSearchSessionJournal implements SearchSessionJournal {
       const storedQuery = encryptionKey
         ? client`'enc:pgp:v1:' || encode(pgp_sym_encrypt(${input.query}, ${encryptionKey}), 'base64')`
         : redactedSearchQuery(input.query);
-      const sessions = await client<{ id: string }[]>`
+      const sessions = await client<{ id: string; inserted: boolean }[]>`
         insert into search_sessions (id, user_id, query, variant, result_count, metadata)
         values (
           ${this.sessionId},
@@ -180,10 +180,15 @@ class SqlSearchSessionJournal implements SearchSessionJournal {
         where search_sessions.user_id = excluded.user_id
           and search_sessions.metadata ->> 'workspaceId' = excluded.metadata ->> 'workspaceId'
           and search_sessions.metadata ->> 'queryHash' = excluded.metadata ->> 'queryHash'
-        returning id
+        returning id, (xmax = 0) as inserted
       `;
       if (sessions.length === 0) {
         throw new Error("Search session belongs to a different query or scope");
+      }
+      // A reused session id whose latest attempt found results is no longer a
+      // zero-result search. A fresh row cannot have diagnostics yet.
+      if (!sessions[0]!.inserted && input.results.length > 0) {
+        await client`delete from search_zero_results where session_id = ${this.sessionId}`;
       }
 
       // Keep ranks/citations aligned with the latest streamed snapshot, while
