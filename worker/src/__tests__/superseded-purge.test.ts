@@ -99,6 +99,7 @@ const options = (deleteVectorRows: DeleteVectorRows, graceSeconds = 0) => ({
   deleteSources: false,
   lancedbRoot: "/tmp/lance",
   deleteVectorRows,
+  billingEnforced: true,
 });
 
 describe("superseded version purge", () => {

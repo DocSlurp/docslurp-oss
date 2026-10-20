@@ -442,7 +442,7 @@ export interface DocumentSourceEntry {
 export interface DocumentViewerPayload {
   document: DocumentRecord;
   tags: string[];
-  versions: DocumentRecord[];
+  versions: DocumentVersionEntry[];
   changelog: DocumentVersionChangelog;
   stages: DocumentStageRow[];
   artifacts: DocumentArtifactEntry[];
@@ -868,20 +868,91 @@ export async function listDocumentIndexEntries(args: {
   };
 }
 
-export async function getDocumentVersionsWithTags(docId: string, userId: string): Promise<DocumentRecord[]> {
-  const versions: DocumentRecord[] = [];
-  let currentId: string | null = docId;
+/** One version in a document's chain; purged versions are tombstones (listed, not openable). */
+export interface DocumentVersionEntry {
+  documentId: string;
+  versionNumber: number;
+  createdAt: string;
+  status: string;
+  isCurrent: boolean;
+  archived: boolean;
+  purged: boolean;
+  pageCount: number;
+  sourcePath: string;
+  filename: string;
+  sizeBytes: number;
+}
 
-  while (currentId !== null) {
-    const row = await getDocumentRow(currentId, userId);
-    if (!row) {
-      break;
-    }
-    versions.push(mapDocument(row));
-    currentId = row.previous_version_id;
-  }
+type DocumentVersionRow = Pick<
+  DocumentRow,
+  "id" | "version_number" | "created_at" | "status" | "page_count" | "filename" | "superseded_at"
+> & {
+  /** The version a config change re-indexed to produce this row. */
+  reindex_of?: string | null;
+  superseded_by_document_id?: string | null;
+  archived_at: string | Date | null;
+  purged_at: string | Date | null;
+  source_path: string | null;
+  file_size: string | number | null;
+};
 
-  return versions;
+/**
+ * Newest first. The current version is the newest completed live (not superseded, archived or
+ * purged) one, which is what search serves; only when none completed does the newest live row stand in.
+ * A newer processing or failed upload keeps its own status and is never current.
+ */
+export function buildDocumentVersionEntries(rows: DocumentVersionRow[]): DocumentVersionEntry[] {
+  const time = (value: DocumentVersionRow["created_at"]) => new Date(value).getTime() || 0;
+  const sorted = [...rows].sort((a, b) => (b.version_number ?? 1) - (a.version_number ?? 1) || time(b.created_at) - time(a.created_at));
+  const live = sorted.filter((row) => !row.superseded_at && !row.archived_at && !row.purged_at);
+  const currentId = (live.find((row) => row.status === "completed") ?? live[0])?.id ?? null;
+  // A config re-index is not a new document version to a reader: hide the source it replaced and cancelled re-index attempts.
+  const byId = new Map(rows.map((row) => [row.id, row]));
+  const hidden = (row: DocumentVersionRow) =>
+    (row.reindex_of != null && row.status === "cancelled")
+    || (row.superseded_by_document_id != null && byId.get(row.superseded_by_document_id)?.reindex_of === row.id);
+  return sorted.filter((row) => !hidden(row)).map((row) => ({
+    documentId: row.id,
+    versionNumber: row.version_number ?? 1,
+    createdAt: serializeTimestamp(row.created_at),
+    status: row.status,
+    isCurrent: row.id === currentId,
+    archived: row.archived_at != null,
+    purged: row.purged_at != null,
+    pageCount: row.page_count,
+    sourcePath: row.source_path ?? "",
+    filename: row.filename,
+    sizeBytes: Number(row.file_size ?? 0)
+  }));
+}
+
+/**
+ * The whole version chain of a document, newest first, in both directions from `docId`.
+ * Access is checked on the requested document; the chain is a single query on the
+ * `(workspace_id, canonical_id)` index, so it never leaves the document's workspace.
+ */
+export async function getDocumentVersionsWithTags(docId: string, userId: string): Promise<DocumentVersionEntry[]> {
+  const workspaceIds = await listAccessibleWorkspaceIds(userId);
+  if (workspaceIds.length === 0) return [];
+
+  const [target] = await sql<(DocumentVersionRow & { workspace_id: string; canonical_id: string | null })[]>`
+    select id, workspace_id, canonical_id, version_number, created_at, status, page_count, filename,
+           superseded_at, archived_at, purged_at, source_path, file_size, reindex_of, superseded_by_document_id
+    from documents
+    where id = ${docId} and workspace_id = any(${sql.array(workspaceIds)})
+    limit 1
+  `;
+  if (!target) return [];
+  // Rows without a canonical id predate version chains: they are their own single-entry chain.
+  if (target.canonical_id === null) return buildDocumentVersionEntries([target]);
+
+  const rows = await sql<DocumentVersionRow[]>`
+    select id, version_number, created_at, status, page_count, filename, superseded_at,
+           archived_at, purged_at, source_path, file_size, reindex_of, superseded_by_document_id
+    from documents
+    where workspace_id = ${target.workspace_id} and canonical_id = ${target.canonical_id}
+  `;
+  return buildDocumentVersionEntries(rows);
 }
 
 async function loadDocumentTextSnapshot(docId: string, userId: string): Promise<DocumentTextSnapshot | null> {
@@ -934,13 +1005,24 @@ async function loadDocumentTextSnapshot(docId: string, userId: string): Promise<
   };
 }
 
-export async function getDocumentVersionChangelog(docId: string, userId: string): Promise<DocumentVersionChangelog | null> {
+/**
+ * Diff of `docId` against its previous version, or against `baselineOverrideId` when given
+ * ("compare with current": docId is the current version, the override is the older one).
+ * The override must belong to the same version chain.
+ */
+export async function getDocumentVersionChangelog(docId: string, userId: string, baselineOverrideId?: string | null): Promise<DocumentVersionChangelog | null> {
   const current = await loadDocumentTextSnapshot(docId, userId);
   if (!current) {
     return null;
   }
 
-  const baselineId = current.document.previousVersionId;
+  let baselineId = current.document.previousVersionId;
+  if (baselineOverrideId) {
+    const chain = await getDocumentVersionsWithTags(docId, userId);
+    const match = chain.find((entry) => entry.documentId === baselineOverrideId && !entry.purged);
+    if (!match) return null;
+    baselineId = match.documentId;
+  }
   const baseline = baselineId ? await loadDocumentTextSnapshot(baselineId, userId) : null;
   return buildSemanticDocumentChangelog({ current, baseline });
 }
@@ -1283,6 +1365,12 @@ async function deleteDocumentRows(documentIds: string[], userId: string): Promis
       where id = any(${transaction.array(docs.map((doc) => doc.id))})
       returning id, workspace_id, filename, run_id, source_key
     `;
+
+    // Deleting a current version leaves its archived predecessors to the retention sweep.
+    const workspaceIds = [...new Set(deleted.map((row) => row.workspace_id))];
+    if (workspaceIds.length > 0) {
+      await transaction`update workspaces set retention_changed_at = clock_timestamp() where id = any(${transaction.array(workspaceIds)})`;
+    }
 
     return deleted.map((row) => ({
       documentId: row.id,

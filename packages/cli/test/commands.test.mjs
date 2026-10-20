@@ -280,3 +280,46 @@ test("batch search reads a portable query file and reports ordered partial failu
     assert.equal(invalid.requests.length, 0);
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
+
+test("upload --estimate posts file sizes to the estimate route and uploads nothing", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "docslurp-cli-"));
+  try {
+    const file = join(dir, "a.txt");
+    await writeFile(file, "hello");
+    const result = await invoke(["upload", file, "--estimate", "--workspace", "ws"], () => ({ body: {
+      estimate: { pages: 2, documents: 1, billing: "disabled", credits: null, seconds: { low: 1, high: 3 }, basis: "fixture" }, billing: "disabled",
+    } }));
+    assert.equal(result.code, 0, result.stderr);
+    assert.equal(result.requests.length, 1);
+    assert.equal(result.requests[0].url, "/v1/uploads/estimate");
+    assert.deepEqual(JSON.parse(result.requests[0].body), { files: [{ name: "a.txt", size: 5 }], workspaceId: "ws" });
+    assert.match(result.stdout, /billing disabled/);
+    assert.match(result.stdout, /nothing was started/);
+  } finally {
+    await rm(dir, { recursive: true });
+  }
+});
+
+test("full-index and reprocess --estimate hit estimate routes only", async () => {
+  const body = { estimate: { pages: 1, documents: 1, billing: "enforced", credits: { low: 2, high: 4 }, seconds: null, basis: "b" }, billing: "enforced" };
+  const doc = await invoke(["full-index", "--document", "d1", "--estimate"], () => ({ body }));
+  assert.equal(doc.code, 0, doc.stderr);
+  assert.deepEqual(doc.requests.map((r) => [r.method, r.url]), [["POST", "/v1/documents/d1/full-index/estimate"]]);
+  assert.match(doc.stdout, /Credits:   2–4/);
+  const ws = await invoke(["full-index", "--workspace", "w", "--estimate"], () => ({ body }));
+  assert.equal(ws.requests[0].url, "/v1/workspaces/w/full-index/estimate");
+  const re = await invoke(["reprocess", "run1", "--stage-from", "embed", "--estimate"], () => ({ body }));
+  assert.equal(re.requests[0].url, "/v1/runs/run1/reprocess/estimate");
+  assert.deepEqual(JSON.parse(re.requests[0].body), { stageFrom: "embed" });
+});
+
+test("jobs get prints the job and watch polls to completion", async () => {
+  const job = (status) => ({ id: "j1", kind: "reindex", status, runIds: [], queue: { position: null, ahead: null }, estimate: null, statusUrl: "/v1/jobs/j1" });
+  const got = await invoke(["jobs", "get", "j1"], () => ({ body: job("blocked") }));
+  assert.equal(got.requests[0].url, "/v1/jobs/j1");
+  assert.match(got.stdout, /Job j1: reindex blocked/);
+  const watched = await invoke(["jobs", "watch", "j1"], ({ url }) => url.endsWith("/events") ? { status: 404, body: {} } : { body: job("completed") });
+  assert.equal(watched.code, 0, watched.stderr);
+  assert.deepEqual(watched.requests.map((r) => r.url), ["/v1/jobs/j1/events", "/v1/jobs/j1"]);
+  assert.match(watched.stdout, /reindex completed/);
+});

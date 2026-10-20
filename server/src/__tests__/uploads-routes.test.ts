@@ -169,6 +169,18 @@ describe("uploadsRoutes over Workspace Intake", () => {
     expect(fakes.runs.map((run) => run.files.map((file) => file.canonicalId ?? null))).toEqual([["/products"], [null, "/b"]]);
   });
 
+  it("carries folder paths onto stored files and rejects '..' with 400", async () => {
+    const { app, fakes } = setup();
+    let response = await app.request("/uploads/bulk", bulk([text("a.md"), text("b.md")], {
+      workspaceId: "ws-1", paths: JSON.stringify(["docs/a", ""]),
+    }));
+    expect(response.status).toBe(201);
+    expect(fakes.runs[0].files.map((file) => file.path ?? "")).toEqual(["docs/a", ""]);
+    response = await app.request("/uploads/bulk", bulk([text("a.md")], { workspaceId: "ws-1", path: "x/../y" }));
+    expect(response.status).toBe(400);
+    expect(fakes.runs).toHaveLength(1);
+  });
+
   it("rejects canonical IDs that do not line up with the uploaded files", async () => {
     const { app, fakes } = setup();
     const response = await app.request("/uploads/bulk", bulk([text("a.md"), text("b.md")], { workspaceId: "ws-1", canonicalId: "/a" }));

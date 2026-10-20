@@ -1609,6 +1609,7 @@ export class Store {
     return {
       purged: superseded.purged + deleted.purged + prefixes.purged,
       failed: superseded.failed + deleted.failed + prefixes.failed,
+      ...(superseded.archived ? { archived: superseded.archived } : {}),
     };
   }
 
@@ -1682,6 +1683,15 @@ export class Store {
         )}
         on conflict (document_id, backend, embedding_model, dimension)
         do update set bucket = excluded.bucket, path = excluded.path
+      `;
+    }
+    // Search serves each document from the index config it was built with (workspaces.index_configs).
+    const hashes = new Map(vectors.filter((vector) => vector.indexConfigHash).map((vector) => [vector.documentId, vector.indexConfigHash!]));
+    if (hashes.size > 0) {
+      await client`
+        update documents d set index_config_hash = v.hash
+        from unnest(${[...hashes.keys()]}::text[], ${[...hashes.values()]}::text[]) as v(id, hash)
+        where d.id = v.id
       `;
     }
   }

@@ -18,6 +18,12 @@ export type ViewerDocumentRecord = DocumentRecord & {
   createdAt: string;
   updatedAt: string;
 };
+/** One version of a document, newest first. Purged versions are tombstones: listed, not openable. */
+export type DocumentVersionEntry = {
+  documentId: string; versionNumber: number; createdAt: string; status: string;
+  isCurrent: boolean; archived: boolean; purged: boolean;
+  pageCount: number; sourcePath: string; filename: string; sizeBytes: number;
+};
 export type DocumentArtifactEntry = { slot: string; uri: string; url: string };
 export type DocumentSourceEntry = {
   key: string; url: string; filename: string; mimeType: string;
@@ -46,7 +52,7 @@ export type DocumentViewerStage = {
 export type DocumentViewerPayload = {
   document: ViewerDocumentRecord;
   tags: string[];
-  versions: ViewerDocumentRecord[];
+  versions: DocumentVersionEntry[];
   changelog: DocumentVersionChangelog;
   stages: DocumentViewerStage[];
   artifacts: DocumentArtifactEntry[];

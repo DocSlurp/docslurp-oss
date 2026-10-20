@@ -339,6 +339,33 @@ export async function admitRunSpend<T>(
   })) as T;
 }
 
+/** Why a spend block should be shown to users: `credits`, `budget` or `policy`. */
+export function spendBlockJobReason(code: SpendBlockedCode): "credits" | "budget" | "policy" {
+  if (code === "workspace_budget_paused" || code === "org_budget_paused") return "budget";
+  if (code === "plan_not_entitled") return "policy";
+  return "credits";
+}
+
+/**
+ * Admission check for work created inside the caller's transaction (config-change jobs): takes the
+ * org's admission lock and reports why the org may not spend, or null. Unlike `admitRunSpend` it never
+ * throws, so the caller can still save its own change and insert the work as `blocked`.
+ */
+export async function admissionBlock(
+  tx: TransactionSql,
+  orgId: string,
+  workspaceId: string,
+): Promise<{ code: SpendBlockedCode; message: string } | null> {
+  if (spendGuardsSkipped()) return null;
+  await tx`select pg_advisory_xact_lock(spend_admission_lock_key(${orgId}))`;
+  return spendBlockReason(
+    await loadSpendStatus(orgId, workspaceId, {
+      client: tx,
+      runReserveCredits: creditLeasesEnabled() ? 0 : runAdmissionReserveCredits(),
+    }),
+  );
+}
+
 /** JSON 402 body for a blocked spend. */
 export function spendBlockedResponse(c: Context, error: SpendBlockedError) {
   reportPublicError(error, { status: 402 });

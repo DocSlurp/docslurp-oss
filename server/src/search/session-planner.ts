@@ -380,7 +380,7 @@ async function planIterativeMultiHop(args: {
 /** Hosted providers that report actual usage and fail loudly instead of degrading to text-only search. */
 const METERED_EMBEDDING_PROVIDERS = new Set(["openrouter", "perplexity", "deepinfra"]);
 
-async function embedQuery(
+export async function embedQuery(
   query: string,
   embedding: EmbeddingConfig,
   usage: SearchSessionJournal,

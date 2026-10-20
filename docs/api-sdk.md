@@ -184,6 +184,10 @@ curl -X PATCH "$api_url/v1/workspaces/amber-falcon-ridge" \
 | Batch retrieval | `POST /v1/search` with `{ queries }` | `search({ queries })` | `search --queries-file` |
 | Grounded chat | `POST /v1/chat` | `chat` | `chat` |
 | Read a document | `GET /v1/documents/:id` | `getDocument` | Use SDK/HTTP |
+| List document versions | `GET /v1/documents/:id/versions` | `listDocumentVersions` | Use SDK/HTTP |
+| Retention | `PATCH /v1/organizations/:orgId` or `/v1/workspaces/:workspace` with `retainDocumentVersions` | `setRetention` | Use SDK/HTTP |
+| Estimate work before starting it | `POST …/estimate` twins of each work-creating route | `updateWorkspaceEstimate`, `reprocessEstimate`, `fullIndexEstimate`, `uploadEstimate`, … | `--estimate` on `upload`, `full-index`, `reprocess` |
+| Follow a background job | `GET /v1/jobs/:id`, `GET /v1/jobs/:id/events` (SSE) | `getJob` / `streamJob` | `jobs get` / `jobs watch` |
 | List / create organizations | `GET` / `POST /v1/organizations` | `listOrganizations` / `createOrganization` | Use SDK/HTTP |
 | Read / update organization | `GET` / `PATCH /v1/organizations/:orgId` | `getOrganization` / `updateOrganization` | Use SDK/HTTP |
 | Organization details / access | `GET /v1/organizations/:orgId/details` / `access` | `getOrganizationDetails` / `getOrganizationAccess` | Use SDK/HTTP |
@@ -193,7 +197,11 @@ curl -X PATCH "$api_url/v1/workspaces/amber-falcon-ridge" \
 | Leave organization | `POST /v1/organizations/:orgId/leave` | `leaveOrganization` | Use SDK/HTTP |
 | List / revoke organization keys | `GET` / `DELETE /v1/organizations/:orgId/api-keys` | `listOrganizationApiKeys` / `revokeOrganizationApiKeys` | Use SDK/HTTP |
 
-The SDK and CLI use `/v1/chat`. For streamed answers, use the separate [OpenAI-compatible chat API](https://docslurp.io/docs/chat). See [search contracts](https://docslurp.io/docs/search-reference) for retrieval controls and [OpenAPI](https://docslurp.io/openapi.json) for machine-readable request and response schemas. Each deployment's OpenAPI describes that deployment.
+Guides: [document versions and retention](document-versions.md) and [config-change jobs and estimates](config-change-jobs.md).
+
+## API changes
+
+- **2026-10-14, non-breaking.** Responses of work-creating routes (workspace `PATCH`, search-settings `PATCH`, uploads, reprocess, full-index, graph rebuild) gain an optional `job`. New `POST …/estimate` routes, `GET /v1/jobs/:id` and `GET /v1/jobs/:id/events`. Workspaces gain `autoConfirmReindex` and `retainDocumentVersions`; organizations gain `retainDocumentVersions`. Uploads accept `path`. Config `PATCH` requests that succeeded before still succeed and never return `409`; a `reindex-required` change now queues a re-index. See [config-change jobs](config-change-jobs.md).
 
 ## Live ingestion progress
 

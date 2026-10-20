@@ -20,6 +20,9 @@ import { runLifecycle } from "./run-lifecycle.js";
 import { resolveMaterializationPolicy } from "./materialization-policy.js";
 import { IndexingModeError, requestFullIndex } from "./workspace-indexing-mode.js";
 import { indexingModeErrorResponse } from "../lib/indexing-mode-error.js";
+import {
+  apiKeyMayUseEstimateTool, estimateToolUsesWorkspace, forwardInProcess, isEstimateToolName, jobsGetInputSchema, planEstimateTool,
+} from "./mcp-estimate-tools.js";
 import { spendAwareErrorHandler } from "./billing/spend-guard.js";
 import { loadIngestReport, summarizeIngestReport } from "./ingest-report.js";
 
@@ -51,10 +54,10 @@ const mcpAdapterRoutes = new Hono()
   .use("*", publicErrorMiddleware)
   .onError(spendAwareErrorHandler)
   .get("/manifest", async (c) => {
-    return c.json(mcpManifest(routeBaseUrl(c.req.url), getApiKey(c)?.scopes));
+    return c.json(mcpManifest(routeBaseUrl(c.req.url), getApiKey(c)?.scopes, getApiKey(c)?.keyType));
   })
   .get("/tools", async (c) => {
-    const manifest = mcpManifest(routeBaseUrl(c.req.url), getApiKey(c)?.scopes);
+    const manifest = mcpManifest(routeBaseUrl(c.req.url), getApiKey(c)?.scopes, getApiKey(c)?.keyType);
     return c.json({ tools: manifest.capabilities.filter((capability) => capability.category === "tool") });
   })
   .post("/tools/:id", async (c) => {
@@ -63,7 +66,7 @@ const mcpAdapterRoutes = new Hono()
     const toolId = c.req.param("id");
     const tool = mcpTools(routeBaseUrl(c.req.url)).find(item => item.id === toolId);
     if (!tool) return adapterError(c, 404, "Unknown MCP tool");
-    if (apiKey && !apiKeyHasAnyScope(apiKey, tool.scopes)) return adapterError(c, 403, "Forbidden");
+    if (apiKey && !(tool.keyAccess ? tool.keyAccess(apiKey) : apiKeyHasAnyScope(apiKey, tool.scopes))) return adapterError(c, 403, "Forbidden");
     let body: Record<string, unknown>;
     try {
       body = await c.req.json();
@@ -194,6 +197,31 @@ const mcpAdapterRoutes = new Hono()
       return c.json({ tool: toolId, summary: summarizeIngestReport(report), report });
     }
 
+    if (toolId === "getJob") {
+      const parsed = jobsGetInputSchema.safeParse(body);
+      if (!parsed.success) return invalidInput(c, parsed.error);
+      const response = await forwardInProcess(actor, "GET", `/v1/jobs/${encodeURIComponent(parsed.data.jobId)}`, undefined, c.req.raw.signal);
+      if (!response.ok) return response;
+      return c.json({ tool: toolId, job: await response.json() });
+    }
+
+    if (isEstimateToolName(toolId)) {
+      // Estimates are read-only, but a key may only price work it could start (same scope and key type as the mutation).
+      if (apiKey && !apiKeyMayUseEstimateTool(toolId, apiKey)) return adapterError(c, 403, "Forbidden");
+      let workspaceRef = "";
+      if (estimateToolUsesWorkspace(toolId, body)) {
+        const requested = typeof body.workspaceId === "string" ? body.workspaceId : undefined;
+        const workspace = await loadActorScopedWorkspace(await resolveActorWorkspaceId(actor, requested), actor);
+        if (!workspace) return adapterError(c, 404, "Workspace not found", "workspace_not_found");
+        workspaceRef = workspace.id;
+      }
+      const planned = planEstimateTool(toolId, body, workspaceRef);
+      if (!planned.ok) return invalidInput(c, { issues: planned.issues });
+      const response = await forwardInProcess(actor, "POST", planned.plan.path, planned.plan.body, c.req.raw.signal);
+      if (!response.ok) return response;
+      return c.json({ tool: toolId, ...(await response.json() as Record<string, unknown>) });
+    }
+
     if (toolId === "suggestQueries") {
       const parsed = suggestQueriesInput.safeParse(body);
       if (!parsed.success) return invalidInput(c, parsed.error);
@@ -226,7 +254,7 @@ const mcpAdapterRoutes = new Hono()
   })
   .get("/resources/:id", async (c) => {
     if (c.req.param("id") === "capabilities") {
-      return c.json(mcpManifest(routeBaseUrl(c.req.url), getApiKey(c)?.scopes));
+      return c.json(mcpManifest(routeBaseUrl(c.req.url), getApiKey(c)?.scopes, getApiKey(c)?.keyType));
     }
 
     return adapterError(c, 404, "Unknown MCP resource");

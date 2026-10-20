@@ -17,6 +17,7 @@ import { getWorkspaceSearchSettings } from "../services/search-controls.js";
 import type { SearchOptions } from "../services/search.js";
 import { createSearchSessionJournal, type SearchSessionJournal } from "./session.js";
 import { resolveWorkspaceRetrievalControls } from "./workspace-retrieval-session.js";
+import { parseIndexConfigs, type IndexConfigMap } from "./index-serving.js";
 import { earlyLexicalDocument, fullyIndexedDocument, servableInProgressVersion } from "./eligibility.js";
 
 export class MissingWorkspaceScopeError extends Error {
@@ -38,6 +39,8 @@ export interface SearchSetup {
   availabilityRow: SearchAvailabilityRow | undefined;
   resolvedOptions: SearchOptions;
   workspacePipeline: PipelineFeatures;
+  /** Index configs live documents are built with (hash -> config); one entry or none means a single index. */
+  indexConfigs: IndexConfigMap;
   privacyMode: PrivacyMode;
 }
 
@@ -63,6 +66,7 @@ export type SearchAvailabilityRow = {
 
 type WorkspacePipelineRow = {
   pipeline: PipelineFeatures | null;
+  index_configs?: unknown;
 };
 
 export async function resolveSearchSetup(
@@ -75,14 +79,15 @@ export async function resolveSearchSetup(
     scope: normalizedScope,
   });
   // Independent lookups run together: each is a database round trip.
-  const [workspaceSettings, workspacePipeline] = await Promise.all([
+  const [workspaceSettings, workspaceIndexing] = await Promise.all([
     getWorkspaceSearchSettings(normalizedScope.workspaceId, userId).catch(() => ({
       ...defaultWorkspaceSearchSettings,
       workspaceId: normalizedScope.workspaceId,
       userId,
     })),
-    loadWorkspacePipeline(normalizedScope.workspaceId),
+    loadWorkspaceIndexing(normalizedScope.workspaceId),
   ]);
+  const workspacePipeline = workspaceIndexing.pipeline;
   const retrievalControls = resolveWorkspaceRetrievalControls({
     options,
     workspaceId: normalizedScope.workspaceId,
@@ -143,6 +148,7 @@ export async function resolveSearchSetup(
     availabilityRow,
     resolvedOptions,
     workspacePipeline,
+    indexConfigs: workspaceIndexing.indexConfigs,
     privacyMode,
   };
 }
@@ -360,20 +366,27 @@ export async function loadSearchAvailability(args: {
   return row;
 }
 
-export async function loadWorkspacePipeline(
+/** The workspace pipeline and its recorded index configs in one round trip. */
+export async function loadWorkspaceIndexing(
   workspaceId: string,
-): Promise<PipelineFeatures> {
+): Promise<{ pipeline: PipelineFeatures; indexConfigs: IndexConfigMap }> {
   try {
     const [row] = await sql<WorkspacePipelineRow[]>`
-      select pipeline
+      select pipeline, index_configs
       from workspaces
       where id = ${workspaceId}
       limit 1
     `;
-    return normalizePipelineFeatures(row?.pipeline ?? null);
+    return { pipeline: normalizePipelineFeatures(row?.pipeline ?? null), indexConfigs: parseIndexConfigs(row?.index_configs) };
   } catch {
     // Fail closed: an unreadable or invalid pipeline must not fall back to the
     // standard (hosted-allowed) default and leak a private workspace's queries.
-    return { ...normalizePipelineFeatures(null), privacyMode: "local-only" };
+    return { pipeline: { ...normalizePipelineFeatures(null), privacyMode: "local-only" }, indexConfigs: {} };
   }
+}
+
+export async function loadWorkspacePipeline(
+  workspaceId: string,
+): Promise<PipelineFeatures> {
+  return (await loadWorkspaceIndexing(workspaceId)).pipeline;
 }

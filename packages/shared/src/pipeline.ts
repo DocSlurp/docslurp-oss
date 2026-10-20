@@ -36,6 +36,8 @@ export type WorkspaceMemberRole = z.infer<typeof workspaceMemberRoleSchema>;
 
 export const runStatusSchema = z.enum([
   "queued",
+  /** Saved but not admitted (no credits or budget); starts by itself when spend is available. */
+  "blocked",
   "processing",
   "completed",
   "failed",
@@ -1314,7 +1316,20 @@ function selectStages(
     return null;
   }
 
-  const enabledStages = enabled.map((item) => item.stage);
+  return closeStageSelection(selected, enabled.map((item) => item.stage), features, true);
+}
+
+/**
+ * Grow `selected` to the stages `stageDataFlow` forces. With `forceAlwaysRerun`, stages marked `alwaysRerun`
+ * join whenever anything runs (partial reprocess); without it only data dependencies pull stages in
+ * (impact analysis: a summary change must not re-run `index`).
+ */
+function closeStageSelection(
+  selected: Set<PipelineRunStage>,
+  enabledStages: PipelineRunStage[],
+  features: PipelineFeatures,
+  forceAlwaysRerun: boolean,
+): { selected: Set<PipelineRunStage>; addedStages: CompiledPipelinePlan["addedStages"] } {
   const addedStages: CompiledPipelinePlan["addedStages"] = [];
   // Nothing requested is enabled: run nothing rather than only the forced stages.
   if (selected.size === 0) return { selected, addedStages };
@@ -1324,9 +1339,11 @@ function selectStages(
     addedStages.push({ stage, reason });
     return true;
   };
-  for (const stage of enabledStages) {
-    const reason = stageDataFlow[stage].alwaysRerun;
-    if (reason) add(stage, reason);
+  if (forceAlwaysRerun) {
+    for (const stage of enabledStages) {
+      const reason = stageDataFlow[stage].alwaysRerun;
+      if (reason) add(stage, reason);
+    }
   }
   // Fixed point: same-run inputs pull in their producers, and every output a
   // re-run stage writes re-runs the later stages that consume it.
@@ -1424,4 +1441,80 @@ export function parseStoredPipelineFeatures(stored: unknown): PipelineFeatures {
     }
   }
   return normalizePipelineFeatures(null);
+}
+
+/**
+ * Stage of the pipeline each feature field feeds. A change to the field re-runs these stages (when enabled in
+ * the new config) plus whatever consumes their outputs. `[]` means the field never changes stored data.
+ */
+const FIELD_SEED_STAGES: Record<keyof PipelineFeatures, readonly PipelineRunStage[]> = {
+  indexingMode: [],
+  materialization: [],
+  visualPages: [],
+  inferenceLane: [],
+  textGeneration: [],
+  parserPlaybook: ["extract-markdown"],
+  documentExtraction: ["extract-markdown"],
+  visionFallback: ["vision-extract"],
+  vision: ["vision-extract"],
+  htmlExtraction: ["extract-html"],
+  markdownExtraction: ["extract-markdown"],
+  embed: ["embed"],
+  indexVectors: ["index"],
+  embedding: ["embed"],
+  vectorBackends: ["index"],
+  preserveTables: ["extract-markdown"],
+  preserveCode: ["extract-markdown"],
+  preserveImages: ["extract-markdown"],
+  maxCostCents: [],
+  outputSchema: ["structured-extract"],
+  structuredExtraction: ["structured-extract"],
+  pageIndex: ["page-index"],
+  summarize: ["document-summary"],
+  chunkOverlap: ["embed"],
+  contextualChunkPreambles: ["embed"],
+  propositionIndex: ["proposition-index"],
+  graphRag: ["graph-enrich"],
+  graphCommunitySummaries: ["graph-enrich"],
+  entityIndex: ["graph-enrich"],
+  graph: ["graph-enrich"],
+  restartFromStage: [],
+  stageSubset: [],
+  piiPolicy: ["pii-detect"],
+  privacyMode: ["pii-detect", "index"],
+  pdfRegionExtraction: ["extract-markdown"],
+  webhooks: [],
+  pageRouter: ["route-pages"],
+  mediaVideo: ["extract-markdown"],
+};
+
+/**
+ * Minimal stage set that brings an already-ingested document in line with `after`: the stages fed by changed
+ * fields that are enabled in `after`, plus the later stages that consume their outputs (`stageDataFlow`).
+ * Unlike a partial reprocess it does not force `alwaysRerun` stages, so a summary-only change is
+ * `["document-summary"]`. Pure; order follows the pipeline.
+ */
+export function affectedStages(before: PipelineFeatures, after: PipelineFeatures): PipelineRunStage[] {
+  const enabledItems = pipelineStagePlan.filter((item) => item.isEnabled(after));
+  const enabled = enabledItems.map((item) => item.stage);
+  const seeds = new Set<PipelineRunStage>();
+  for (const key of Object.keys(FIELD_SEED_STAGES) as Array<keyof PipelineFeatures>) {
+    if (pipelineValuesEqual(before[key], after[key])) continue;
+    for (const stage of FIELD_SEED_STAGES[key]) if (enabled.includes(stage)) seeds.add(stage);
+  }
+  if (seeds.size === 0) return [];
+  const { selected } = closeStageSelection(seeds, enabled, after, false);
+  return enabled.filter((stage) => selected.has(stage));
+}
+
+function stableJson(value: unknown): string {
+  return JSON.stringify(value, (_key, v) =>
+    v && typeof v === "object" && !Array.isArray(v)
+      ? Object.fromEntries(Object.entries(v as Record<string, unknown>).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)))
+      : v);
+}
+
+/** Deep equality for pipeline feature values, independent of object key order. */
+export function pipelineValuesEqual(a: unknown, b: unknown): boolean {
+  return a === b || stableJson(a) === stableJson(b);
 }

@@ -60,6 +60,8 @@ export type ServicePlan = {
   /** Storage included before metering starts; at most INCLUDED_INDEX_STORAGE_SHARE may be index. */
   includedStorageGb: number;
   support: string;
+  /** Document versions kept per path when neither org nor workspace overrides it (free: always 1). */
+  defaultRetainedVersions: number;
   /** Stripe Price lookup key; prices are synced by the plan sync script. */
   stripeLookupKey: string | null;
   highlights: readonly string[];
@@ -76,6 +78,7 @@ export const SERVICE_PLANS: readonly ServicePlan[] = [
     workers: 50,
     includedStorageGb: 1,
     support: "Community",
+    defaultRetainedVersions: 1,
     stripeLookupKey: null,
     highlights: [
       "250 one-time starter credits",
@@ -93,6 +96,7 @@ export const SERVICE_PLANS: readonly ServicePlan[] = [
     workers: 100,
     includedStorageGb: 10,
     support: "Email, 2 business days",
+    defaultRetainedVersions: 2,
     stripeLookupKey: "docslurp_silver_monthly",
     highlights: [
       "2,000 credits every month",
@@ -111,6 +115,7 @@ export const SERVICE_PLANS: readonly ServicePlan[] = [
     workers: 250,
     includedStorageGb: 50,
     support: "Priority email, 1 business day",
+    defaultRetainedVersions: 2,
     stripeLookupKey: "docslurp_gold_monthly",
     highlights: [
       "5,500 credits every month (+10%)",
@@ -129,6 +134,7 @@ export const SERVICE_PLANS: readonly ServicePlan[] = [
     workers: 1_000,
     includedStorageGb: 1_000,
     support: "Priority, shared Slack channel",
+    defaultRetainedVersions: 2,
     stripeLookupKey: "docslurp_platinum_monthly",
     highlights: [
       "60,000 credits every month (+20%)",
@@ -777,6 +783,14 @@ export type AutoRechargeSettings = z.infer<typeof autoRechargeSettingsSchema>;
 
 export const billingOverviewSchema = z.object({
   orgId: z.string(),
+  /** Archived (retained) document versions still holding files; `monthlyCredits` is null when billing is not enforced. */
+  retainedVersionStorage: z.object({
+    bytes: z.number().nonnegative(),
+    pages: z.number().nonnegative(),
+    monthlyCredits: z.number().nonnegative().nullable(),
+    /** False on self-hosted deployments: retention settings apply on every plan. */
+    billingEnforced: z.boolean().optional(),
+  }).optional(),
   plan: planIdSchema,
   subscriptionStatus: subscriptionStatusValueSchema,
   cancelAtPeriodEnd: z.boolean(),

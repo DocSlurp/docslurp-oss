@@ -74,6 +74,12 @@ Give a single-file upload a `--canonical-id`, such as a URL or site path. Upload
 docslurp upload ./products.pdf --canonical-id '/products' --watch
 ```
 
+Every upload is versioned by workspace, folder path and filename. Re-uploading `report.pdf` supersedes the earlier version, and `--path` keeps same-named files in different folders apart:
+
+```bash
+docslurp upload ./report.pdf --path contracts/2025
+```
+
 ## Built for shell workflows
 
 ### Get full evidence for an LLM
@@ -142,8 +148,11 @@ Run `docslurp` with no arguments, or `docslurp --help`, for built-in usage.
 
 | Command | What it does | Options |
 | --- | --- | --- |
-| `upload <files...>` | Upload files and print the workspace and run IDs | `--workspace`, or `--new-workspace` / `--workspace-name` / `--template`; `--canonical-id` (one file only), `--watch` |
+| `upload <files...>` | Upload files and print the workspace and run IDs | `--workspace`, or `--new-workspace` / `--workspace-name` / `--template`; `--canonical-id` (one file only), `--path <folder>` (same path and filename is a new version), `--estimate` (print pages, credits and time, then exit), `--watch` |
 | `ingest-url <urls...>` | Fetch and ingest URLs, then print the workspace and run IDs | Same workspace options as `upload`, `--watch` |
+| `full-index` | Index every remaining page of a workspace (or one document) | `--workspace`, `--document`, `--estimate`, `--watch` |
+| `reprocess <run-id>` | Re-run a run, optionally from a stage | `--stage-from`, `--estimate`, `--watch` |
+| `jobs get <job-id>` / `jobs watch <job-id>` | Print a background job, or follow it (SSE, polling fallback) until it ends | `--json` (get), `--timeout` (watch; never applies while the job is blocked) |
 | `status <run-id>` | Print progress for a run | `--watch` |
 | `runs` | List the runs you can access | None |
 | `search <query>` | Retrieve cited passages from a workspace | `--workspace`, `--json` or `--context` |

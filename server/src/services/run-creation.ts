@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 
 import {
+  documentVersionKey,
   effectiveIndexingMode,
   pageRouterModeSchema,
   stageSelectionKeys,
@@ -13,6 +14,7 @@ import {
 } from "@docslurp/shared";
 
 import { sql as defaultSql, type SqlClient } from "../db.js";
+import { normalizeUploadPath } from "../lib/canonical-id.js";
 import { sanitizeUploadFilename } from "../lib/filenames.js";
 import { currentRequestId } from "../lib/request-context.js";
 import { getAvailableCredits } from "./billing/credits.js";
@@ -49,6 +51,8 @@ export interface RunSourceFile {
   fileSize?: number;
   metadata?: Record<string, unknown>;
   canonicalId?: string | null;
+  /** Folder path inside the upload; with the filename it is the version key. Empty for single files. */
+  path?: string | null;
   tags?: string[];
 }
 
@@ -641,6 +645,7 @@ export function createRunCreation(deps: RunCreationDeps) {
 
     for (const file of files) {
       const filename = sanitizeUploadFilename(file.filename);
+      const sourcePath = normalizeUploadPath(file.path);
       const documentId = randomUUID();
       let metadata: Awaited<ReturnType<typeof resolveSourceMetadata>>;
       try {
@@ -657,24 +662,21 @@ export function createRunCreation(deps: RunCreationDeps) {
         const client = tx as unknown as SqlClient;
 
         await lockRunCreation(runId, client);
-        const canonicalId = file.canonicalId ?? null;
-        if (canonicalId) {
-          await client`select pg_advisory_xact_lock(hashtextextended(${`${input.workspaceId}:${canonicalId}`}, 0))`;
-        }
-        // Canonical documents version per workspace by logical source; others by filename.
-        const [existing] = canonicalId
-          ? await client<{ id: string; version_number: number }[]>`
-              select id, version_number from documents
-              where workspace_id = ${input.workspaceId} and canonical_id = ${canonicalId}
-              order by version_number desc, created_at desc
-              limit 1
-            `
-          : await client<{ id: string; version_number: number }[]>`
-              select id, version_number from documents
-              where org_id = ${orgId} and filename = ${filename}
-              order by version_number desc
-              limit 1
-            `;
+        // Every upload has a version key: the caller's canonicalId, else workspace + folder path + filename.
+        // Versions chain per (workspace_id, canonical_id) (documents_workspace_canonical_idx).
+        const canonicalId = documentVersionKey({
+          workspaceId: input.workspaceId,
+          path: sourcePath,
+          filename,
+          canonicalId: file.canonicalId,
+        });
+        await client`select pg_advisory_xact_lock(hashtextextended(${`${input.workspaceId}:${canonicalId}`}, 0))`;
+        const [existing] = await client<{ id: string; version_number: number }[]>`
+          select id, version_number from documents
+          where workspace_id = ${input.workspaceId} and canonical_id = ${canonicalId}
+          order by version_number desc, created_at desc
+          limit 1
+        `;
 
         const dedupCandidate = await findDedupCandidate(client, {
           orgId,
@@ -688,7 +690,7 @@ export function createRunCreation(deps: RunCreationDeps) {
             id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key,
             status, extraction_mode, page_count, source_sha256,
             deduped_from_document_id, dedup_scope, version_number, previous_version_id,
-            canonical_id, file_size, metadata, indexing_mode
+            canonical_id, source_path, file_size, metadata, indexing_mode
           )
           values (
             ${documentId},
@@ -710,6 +712,7 @@ export function createRunCreation(deps: RunCreationDeps) {
             ${existing ? existing.version_number + 1 : 1},
             ${existing?.id ?? null},
             ${canonicalId},
+            ${sourcePath},
             ${file.fileSize ?? 0},
             ${JSON.stringify({ ...file.metadata, sourceSizeMeasured: file.fileSize !== undefined })}::text::jsonb,
             ${indexingMode}

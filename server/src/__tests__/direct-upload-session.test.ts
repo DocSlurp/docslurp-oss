@@ -145,6 +145,7 @@ describe("Direct Upload Session Module", () => {
         mimeType: "application/pdf",
         sizeBytes: 42,
         canonicalId: null,
+        path: "",
         content: { storedKey: "user-1/raw/contracts.pdf" },
       },
     ]);

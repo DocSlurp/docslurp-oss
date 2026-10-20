@@ -55,6 +55,15 @@ vi.mock("../services/runs.js", () => ({
   retryRun: retryRunMock
 }));
 
+vi.mock("../services/jobs.js", () => ({
+  inlineEstimate: vi.fn(async () => ({ estimate: null })),
+  jobMetaFor: (id: string, kind: string) => ({ id, kind }),
+  recordJobMeta: vi.fn(async () => undefined),
+  jobStatusForMutation: vi.fn(async (meta: { id: string }) => ({ id: meta.id })),
+}));
+vi.mock("../services/work-estimates.js", () => ({ estimateRunReprocess: vi.fn(async () => null) }));
+vi.mock("../services/config-change.js", () => ({ billingState: () => "disabled" }));
+
 vi.mock("../services/idempotency.js", () => ({
   getCachedIdempotentResponse: vi.fn(),
   hashIdempotencyPayload: vi.fn(() => "request-hash"),

@@ -10,6 +10,8 @@ export type EvidenceAdapterName =
 
 export interface EvidenceRetrievalContext {
   query: string;
+  /** The query actually embedded (after rewrite/HyDE); other index configs embed this same text. */
+  effectiveQuery?: string;
   textQuery: string;
   queryVector: number[] | null;
   userId: string;
@@ -33,6 +35,8 @@ export interface EvidenceRetrievalAdapter {
 export interface EvidenceRetrievalFns {
   vectorSearch(args: {
     queryVector: number[];
+    /** The query text, so a previous index can embed it with its own model. */
+    query?: string;
     userId: string;
     workspaceId: string;
     options: SearchOptions;
@@ -83,7 +87,7 @@ export function createEvidenceRetrievalAdapters(
       retrieve: (context) =>
         context.options.enableGraphExpansion
           ? fns.graphNeighborSearch({
-              query: context.query,
+              query: context.effectiveQuery ?? context.query,
               workspaceId: context.workspaceId,
               options: context.options,
             })
@@ -125,6 +129,7 @@ export function createEvidenceRetrievalAdapters(
         context.queryVector
           ? fns.vectorSearch({
               queryVector: context.queryVector,
+              query: context.query,
               userId: context.userId,
               workspaceId: context.workspaceId,
               options: context.options,

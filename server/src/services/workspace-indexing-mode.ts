@@ -7,6 +7,8 @@ import {
   estimatePageEmbedCredits,
   isBillingEnforced,
   getPrivateModelEndpointRegistry,
+  compilePipelinePlan,
+  type CostEstimate,
   type IndexingMode,
   type MaterializationPolicy,
   type PipelineFeatures,
@@ -14,11 +16,13 @@ import {
 } from "@docslurp/shared";
 
 import { sql } from "../db.js";
+import { nextVersionNumber } from "./version-number.js";
 import type { RequestActor } from "../lib/request-actor.js";
 import { admitRunSpend, canSpend, SpendBlockedError } from "./billing/spend-guard.js";
 import { canEditWorkspace, getWorkspaceAccess } from "./organizations.js";
 import { enforceLiveBudgetCaps } from "./run-creation.js";
 import { assertBackfillReusableMany, isReprocessRejectedError } from "./runs.js";
+import { estimateWork, type EstimateEnv } from "./config-change.js";
 
 /** Domain failure with an HTTP status and machine-readable code. */
 export class IndexingModeError extends Error {
@@ -267,14 +271,16 @@ export async function commitIndexJobs(prepared: PreparedIndexJobs, userId: strin
           ${docs.length}, 0, ${pages}, 0, ${tx.json(JSON.parse(JSON.stringify(batch.pipeline)))}, now(), null)
       `;
       for (const doc of docs) {
+        const canonicalId = doc.canonical_id ?? doc.id;
+        const versionNumber = await nextVersionNumber(tx as unknown as typeof sql, prepared.workspaceId, canonicalId);
         await tx`
           insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status,
             extraction_mode, page_count, canonical_id, version_number, previous_version_id, reused_from_document_id,
-            source_sha256, indexing_mode)
+            source_sha256, indexing_mode, reindex_of)
           values (${randomUUID()}, ${doc.org_id}, ${doc.user_id}, ${doc.workspace_id}, ${runId}, ${doc.filename},
             ${doc.mime_type}, ${doc.source_key}, 'queued', ${doc.extraction_mode}, ${doc.page_count},
-            ${doc.canonical_id ?? doc.id}, ${(doc.version_number ?? 1) + 1}, ${doc.id},
-            ${batch.partial ? doc.id : null}, ${doc.source_sha256 ?? null}, ${batch.mode})
+            ${canonicalId}, ${versionNumber}, ${doc.id},
+            ${batch.partial ? doc.id : null}, ${doc.source_sha256 ?? null}, ${batch.mode}, ${doc.id})
         `;
       }
       result.runIds.push(runId);
@@ -442,3 +448,33 @@ export async function restoreStoredIndexingMode(workspaceId: string, mode: Index
 }
 
 export { SpendBlockedError };
+
+
+/**
+ * Work estimate of a full index over `documentIds` (or every deferred document): the unindexed pages that
+ * are not already being indexed, priced with the workspace's full pipeline. The full-index mutation returns
+ * this same value as `job.estimate`.
+ */
+export async function estimateFullIndex(args: {
+  workspaceId: string;
+  orgId: string;
+  documentIds?: string[];
+  env?: EstimateEnv;
+}): Promise<CostEstimate | null> {
+  const [ws] = await sql<{ pipeline: PipelineFeatures | null }[]>`
+    select pipeline from workspaces where id = ${args.workspaceId} and org_id = ${args.orgId}
+  `;
+  if (!ws?.pipeline) return null;
+  const pending = (await unindexedPages(args.workspaceId, args.documentIds)).filter((row) => row.unindexed > 0);
+  const busy = await inFlightSourceIds(sql as unknown as Client, args.workspaceId, pending.map((row) => row.id), null);
+  const todo = pending.filter((row) => !busy.has(row.id));
+  const features = { ...ws.pipeline, indexingMode: "full" as const } as PipelineFeatures;
+  return await estimateWork({
+    features,
+    stages: compilePipelinePlan(features).stageOrder,
+    documents: todo.length,
+    pages: todo.reduce((sum, row) => sum + row.unindexed, 0),
+    orgId: args.orgId,
+    env: args.env,
+  });
+}

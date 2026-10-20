@@ -96,6 +96,10 @@ export const workspaceSchema = z.object({
   deferredIndexingAvailable: z.boolean().optional(),
   /** False on deployments that do not bill (self-hosted without Stripe): estimates are not prices. */
   billingEnforced: z.boolean().optional(),
+  /** Retained versions per document for this workspace; null inherits the organization's setting. */
+  retainDocumentVersions: z.number().int().min(1).max(100).nullable().default(null),
+  /** Skip the confirm dialog for re-index-queuing changes; recommended changes re-index when `apply` is omitted. */
+  autoConfirmReindex: z.boolean().default(false),
   runCount: z.number().int().nonnegative().default(0),
   searchSessionCount: z.number().int().nonnegative().default(0),
   chatThreadCount: z.number().int().nonnegative().default(0),
@@ -180,6 +184,9 @@ export const organizationSchema = z.object({
   createdByUserId: z.string().nullable(),
   creditBalanceCents: z.number().default(0),
   memberRole: organizationRoleSchema,
+  planId: z.string().nullable().default(null),
+  /** Versions kept per document chain on paid plans; null uses the plan default. */
+  retainDocumentVersions: z.number().int().min(1).max(100).nullable().default(null),
   createdAt: z.string(),
   updatedAt: z.string(),
 });
@@ -701,6 +708,15 @@ export const updateWorkspaceSchema = z.object({
   artifactRetentionDays: z.number().int().min(0).max(3650).nullable().optional(),
   /** Null (or 0) keeps runs indefinitely. */
   runRetentionDays: z.number().int().min(0).max(3650).nullable().optional(),
+  /**
+   * What to do with existing documents when the change affects them. A required re-index always queues;
+   * a recommended one re-indexes on "reindex" (or when omitted and `autoConfirmReindex` is on).
+   */
+  apply: z.enum(["new-uploads", "reindex"]).optional(),
+  /** Skip the confirm dialog for re-index-queuing changes; also the default `apply` for recommended changes. */
+  autoConfirmReindex: z.boolean().optional(),
+  /** Versions kept per document chain (paid plans); null inherits the organization setting. */
+  retainDocumentVersions: z.number().int().min(1).max(100).nullable().optional(),
 });
 export type UpdateWorkspaceInput = z.infer<typeof updateWorkspaceSchema>;
 
