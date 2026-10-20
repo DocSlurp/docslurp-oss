@@ -100,7 +100,7 @@ describe("POST /v1/capabilities", () => {
     actorRef.current = key("server");
     const res = await post({ workspaceIds: ["ws-a"], allowedOrigins: Array.from({ length: 20 }, (_, i) => `https://${"x".repeat(280)}${i}.example`) });
     expect(res.status).toBe(400);
-    expect(((await res.json()) as { code: string }).code).toBe("capability_too_large");
+    expect(((await res.json()) as { error: { details: { category: string } } }).error.details.category).toBe("capability_too_large");
   });
 
   it("refuses client keys with 403 and long ttls with 400", async () => {

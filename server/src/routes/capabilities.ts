@@ -1,5 +1,7 @@
 import { randomUUID } from "node:crypto";
 
+import { apiErrorResponse } from "../lib/api-error.js";
+import { validationHook } from "../lib/validation.js";
 import { zValidator } from "@hono/zod-validator";
 import { Hono } from "hono";
 import { z } from "zod";
@@ -29,15 +31,15 @@ const bodySchema = z.object({
  * client key must never mint, or widen, what it may do. The token's policy is
  * narrowed against the issuer's own at mint time and again at use time.
  */
-export const capabilitiesRoutes = new Hono().post("/", zValidator("json", bodySchema), async (c) => {
-  if (!deferredProfilesEnabled()) return c.json({ error: "Not found", code: "not_found" }, 404);
+export const capabilitiesRoutes = new Hono().post("/", zValidator("json", bodySchema, validationHook), async (c) => {
+  if (!deferredProfilesEnabled()) return apiErrorResponse(c, 404, "not_found", "Not found");
   const actor = getRequestActor(c);
   if (actor.type === "apiKey") {
     if (actor.apiKey.keyType !== "server") {
-      return c.json({ error: "Client keys cannot mint search capabilities", code: "capability_forbidden" }, 403);
+      return apiErrorResponse(c, 403, "forbidden", "Client keys cannot mint search capabilities", { category: "capability_forbidden" });
     }
     if (!actorHasAnyApiKeyScope(actor, ["search"])) {
-      return c.json({ error: "API key needs the search scope", code: "capability_forbidden" }, 403);
+      return apiErrorResponse(c, 403, "forbidden", "API key needs the search scope", { category: "capability_forbidden" });
     }
   }
   const body = c.req.valid("json");
@@ -55,16 +57,16 @@ export const capabilitiesRoutes = new Hono().post("/", zValidator("json", bodySc
   for (const workspaceId of requested) {
     const workspace = await getWorkspace(workspaceId, actor.userId);
     const allowed = workspace && (actor.type !== "apiKey" || apiKeyCanUseWorkspace(actor.apiKey, workspace));
-    if (!workspace || !allowed) return c.json({ error: "Workspace not found", code: "workspace_not_found" }, 404);
+    if (!workspace || !allowed) return apiErrorResponse(c, 404, "workspace_not_found", "Workspace not found");
     if (tokenOrgId && workspace.orgId !== tokenOrgId) {
-      return c.json({ error: "A capability covers one organization", code: "capability_scope" }, 400);
+      return apiErrorResponse(c, 400, "invalid_request", "A capability covers one organization", { category: "capability_scope" });
     }
     tokenOrgId = workspace.orgId;
   }
 
   const issuerPolicy = actor.type === "apiKey" ? actor.apiKey.materializationPolicy : undefined;
   const policy = narrowMaterializationPolicy(DEFAULT_SERVER_MATERIALIZATION_POLICY, issuerPolicy, body.policy);
-  if (!tokenOrgId) return c.json({ error: "Workspace not found", code: "workspace_not_found" }, 404);
+  if (!tokenOrgId) return apiErrorResponse(c, 404, "workspace_not_found", "Workspace not found");
   const exp = Math.floor(Date.now() / 1000) + (body.ttlSeconds ?? CAPABILITY_MAX_TTL_SECONDS);
   const token = sealCapabilityToken({
     v: 1,
@@ -79,7 +81,7 @@ export const capabilitiesRoutes = new Hono().post("/", zValidator("json", bodySc
     jti: randomUUID(),
   });
   if (token.length > CAPABILITY_MAX_TOKEN_CHARS) {
-    return c.json({ error: "Capability is too large; list fewer workspaces or origins", code: "capability_too_large" }, 400);
+    return apiErrorResponse(c, 400, "invalid_request", "Capability is too large; list fewer workspaces or origins", { category: "capability_too_large" });
   }
   return c.json({ token, expiresAt: new Date(exp * 1000).toISOString(), policy });
 });
