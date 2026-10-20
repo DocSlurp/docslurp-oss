@@ -4,6 +4,8 @@ import {
   canonicalDocumentSchema,
   parserPlaybookCatalog,
   resolveVisionRoute,
+  visionListPriceCents,
+  visionModelTokenPricing,
   type AdaptivePageRoutingEntry,
   type ParserPlaybookKey,
   type VisionConfig,
@@ -1038,6 +1040,7 @@ export class VisionExtractStage implements Stage {
           metadata: {
             ...result.costMetadata,
             costSource: result.costMetadata?.costSource ?? (result.costCents !== undefined ? "provider" : "estimate"),
+            ...(result.costCents === undefined ? { pricingSource: this.visionPricingSource(result) } : {}),
             documentId: document.id,
             pageNumber: page.pageNumber,
             rasterArtifactUri: page.artifactUri,
@@ -1266,28 +1269,43 @@ export class VisionExtractStage implements Stage {
     };
   }
 
+  private isBillableVisionRuntime(result: { runtime: string; baseUrl: string | null }): boolean {
+    const normalizedBaseUrl = result.baseUrl?.replace(/\/+$/, "") ?? null;
+    const normalizedOpenAiBaseUrl = this.cfg.openAiBaseUrl.replace(/\/+$/, "");
+    return (
+      result.runtime === "remote-openai" ||
+      (result.runtime === "openai-compatible" &&
+        (normalizedBaseUrl === normalizedOpenAiBaseUrl || Boolean(normalizedBaseUrl?.includes("openrouter.ai"))))
+    );
+  }
+
+  /** How a receipt-less vision call was priced; recorded on the usage event. */
+  private visionPricingSource(result: { model: string; runtime: string; baseUrl: string | null }) {
+    if (!this.isBillableVisionRuntime(result)) return "non-billable-runtime";
+    return visionModelTokenPricing(result.model) ? "vision-catalog-list-price" : "configured-fallback";
+  }
+
   private calculateVisionCost(result: {
     costCents?: number;
+    model: string;
     runtime: string;
     baseUrl: string | null;
     inputTokens: number;
     outputTokens: number;
   }): number {
     if (result.costCents !== undefined) return result.costCents;
-    const normalizedBaseUrl = result.baseUrl?.replace(/\/+$/, "") ?? null;
-    const normalizedOpenAiBaseUrl = this.cfg.openAiBaseUrl.replace(/\/+$/, "");
-    const billableRuntime =
-      result.runtime === "remote-openai" ||
-      (result.runtime === "openai-compatible" &&
-        (normalizedBaseUrl === normalizedOpenAiBaseUrl || normalizedBaseUrl?.includes("openrouter.ai")));
-
-    if (!billableRuntime) {
+    if (!this.isBillableVisionRuntime(result)) {
       return 0;
     }
 
+    // Without a provider charge (OpenAI direct never returns one; OpenRouter BYOK may not), price cataloged
+    // hosted models at their own list price. The generic COST_PER_1K_* fallback is in cents per 1k tokens
+    // (defaults $0.10/M input, $0.30/M output), below every cataloged hosted list price, so this raises
+    // receipt-less charges to list price; it never lowers them.
     return (
-      (result.inputTokens / 1000) * this.cfg.costPer1kInputTokens +
-        (result.outputTokens / 1000) * this.cfg.costPer1kOutputTokens
+      visionListPriceCents(result.model, result) ??
+        (result.inputTokens / 1000) * this.cfg.costPer1kInputTokens +
+          (result.outputTokens / 1000) * this.cfg.costPer1kOutputTokens
     );
   }
 }

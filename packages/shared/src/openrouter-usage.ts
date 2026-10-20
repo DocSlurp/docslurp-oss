@@ -107,6 +107,8 @@ export const OPENROUTER_LOWEST_REASONING: Readonly<Record<string, OpenRouterReas
   "inclusionai/ling-3.0-flash-vl": { effort: "none" }, // EV1: HTTP 200 with zero reasoning tokens on 95+28 pages (2026-10-13)
   "anthropic/claude-haiku-5.5": { enabled: false },
   "anthropic/claude-sonnet-5.5": { effort: "minimal" },
+  // 2026-10-20 probes: both `{ enabled: false }` and effort `none` return HTTP 200 with zero reasoning tokens.
+  "nvidia/nemotron-3.5-super-vl": { enabled: false },
 };
 
 export function lowestOpenRouterReasoning(model: string | undefined): OpenRouterReasoning | undefined {

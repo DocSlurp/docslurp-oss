@@ -462,6 +462,8 @@ export const visionRuntimeSchema = z.enum([
 export type VisionRuntime = z.infer<typeof visionRuntimeSchema>;
 export const OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1";
 export const DEFAULT_OPENROUTER_VISION_MODEL = "google/gemini-3.1-flash-lite";
+/** Opt-in hosted vision route; OpenRouter list price verified 2026-10-20 ($0.15/M input, $0.50/M output). */
+export const NEMOTRON_SUPER_VL_VISION_MODEL = "nvidia/nemotron-3.5-super-vl";
 export const DEFAULT_LOCAL_OCR_MODEL = "microsoft/Florence-2-base-ft";
 export const DEFAULT_IMAGE_CLASSIFICATION_MODEL = "Xenova/clip-vit-base-patch32";
 export const visionBenchmarkProfileSchema = z.enum([
@@ -484,6 +486,7 @@ export const visionModelCatalog = [
     description:
       "Lowest-cost local OCR-style VLM for quick page rescue on CPU/GPU worker nodes.",
     estimatedCostPerPageCents: 0.2,
+    tokenPricing: null,
   },
   {
     id: DEFAULT_LOCAL_OCR_MODEL,
@@ -495,6 +498,7 @@ export const visionModelCatalog = [
     description:
       "Stronger local Florence baseline for OCR and caption extraction when quality matters.",
     estimatedCostPerPageCents: 0.35,
+    tokenPricing: null,
   },
   {
     id: "Qwen/Qwen2-VL-2B-Instruct",
@@ -506,6 +510,7 @@ export const visionModelCatalog = [
     description:
       "Compact local VLM suited to OpenAI-compatible runtimes such as vLLM or Ollama gateways.",
     estimatedCostPerPageCents: 0.45,
+    tokenPricing: null,
   },
   {
     id: "Qwen/Qwen2.5-VL-3B-Instruct",
@@ -517,6 +522,7 @@ export const visionModelCatalog = [
     description:
       "Slightly larger local VLM with better layout fidelity on complex pages.",
     estimatedCostPerPageCents: 0.6,
+    tokenPricing: null,
   },
   {
     id: DEFAULT_OPENROUTER_VISION_MODEL,
@@ -528,6 +534,7 @@ export const visionModelCatalog = [
     description:
       "Default OpenRouter multimodal fallback for low-latency, high-volume page extraction.",
     estimatedCostPerPageCents: 0.5,
+    tokenPricing: { inputUsdPerMillion: 0.25, outputUsdPerMillion: 1.5, checked: "2026-10-20" },
   },
   {
     id: "google/gemini-2.5-flash-lite",
@@ -539,6 +546,21 @@ export const visionModelCatalog = [
     description:
       "Ultra-low-cost OpenRouter multimodal option for lightweight page rescue.",
     estimatedCostPerPageCents: 0.25,
+    tokenPricing: { inputUsdPerMillion: 0.1, outputUsdPerMillion: 0.4, checked: "2026-10-20" },
+  },
+  {
+    id: NEMOTRON_SUPER_VL_VISION_MODEL,
+    uri: `llm://openrouter/${NEMOTRON_SUPER_VL_VISION_MODEL}`,
+    label: "Nemotron 3.5 Super VL",
+    target: "hosted",
+    tags: ["hosted", "cost", "open-weights"],
+    runtime: "openai-compatible",
+    description:
+      "Open-weights NVIDIA multimodal MoE (12B active of 120B) on OpenRouter; opt-in low-cost page extraction.",
+    // Conservative like the Gemini entry. A 3-page smoke measured 0.02-0.07 cents per page (1.2k-3.2k input
+    // tokens: images tile by resolution) against 0.09-0.16 for Gemini 3.1 Flash Lite; refine after the slice run.
+    estimatedCostPerPageCents: 0.2,
+    tokenPricing: { inputUsdPerMillion: 0.15, outputUsdPerMillion: 0.5, checked: "2026-10-20" },
   },
   {
     id: "gpt-4.1-mini",
@@ -550,6 +572,7 @@ export const visionModelCatalog = [
     description:
       "Hosted remote fallback for difficult pages when local models miss the quality bar.",
     estimatedCostPerPageCents: 3,
+    tokenPricing: { inputUsdPerMillion: 0.4, outputUsdPerMillion: 1.6, checked: "2026-10-20" },
   },
 ] as const;
 
@@ -583,12 +606,31 @@ export const visionModelCatalogByUri = Object.fromEntries(
   visionModelCatalog.map((entry) => [entry.uri, entry]),
 ) as Record<string, VisionModelPreset>;
 
+export type VisionTokenPricing = { inputUsdPerMillion: number; outputUsdPerMillion: number; checked: string };
+
+/** List token price of a cataloged hosted vision model (by id or `llm://` URI); null for local or unknown models. */
+export function visionModelTokenPricing(idOrUri: string): VisionTokenPricing | null {
+  const entry = visionModelCatalogByUri[idOrUri] ?? visionModelCatalog.find((spec) => spec.id === idOrUri);
+  return entry?.tokenPricing ?? null;
+}
+
+/** Fractional USD cents for a vision call priced from catalog list prices; null when the model has none. */
+export function visionListPriceCents(
+  idOrUri: string,
+  usage: { inputTokens: number; outputTokens: number },
+): number | null {
+  const pricing = visionModelTokenPricing(idOrUri);
+  if (!pricing) return null;
+  return (usage.inputTokens * pricing.inputUsdPerMillion + usage.outputTokens * pricing.outputUsdPerMillion) / 1e4;
+}
+
 export const visionProfileKeySchema = z.enum([
   "cheapest-local",
   "fastest-local",
   "good-fast-local",
   "cheapest-hosted",
   "good-fast-hosted",
+  "open-weights-hosted",
 ]);
 export type VisionProfileKey = z.infer<typeof visionProfileKeySchema>;
 
@@ -641,6 +683,16 @@ export const visionProfileCatalog = {
       profile: "good-fast-hosted",
       target: "hosted",
       modelUri: `llm://openrouter/${DEFAULT_OPENROUTER_VISION_MODEL}`,
+    },
+  },
+  "open-weights-hosted": {
+    label: "Open-weights hosted",
+    description: "Opt-in NVIDIA Nemotron 3.5 Super VL route through OpenRouter; lower list price than the default.",
+    tags: ["cost", "hosted", "open-weights"],
+    config: {
+      profile: "open-weights-hosted",
+      target: "hosted",
+      modelUri: `llm://openrouter/${NEMOTRON_SUPER_VL_VISION_MODEL}`,
     },
   },
 } as const satisfies Record<VisionProfileKey, {
