@@ -22,6 +22,7 @@ export function resolveSandboxProviderId(env: NodeJS.ProcessEnv, platform: NodeJ
 const PROVIDER_LOADERS: Partial<Record<SandboxProviderId, () => Promise<{ default: ParserSandboxProvider }>>> = {
   bubblewrap: () => import("./providers/bubblewrap/index.js"),
   landlock: () => import("./providers/landlock/index.js"),
+  modal: () => import("./providers/modal/index.js"),
   none: () => import("./providers/none/index.js"),
 };
 

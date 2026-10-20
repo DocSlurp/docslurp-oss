@@ -60,7 +60,8 @@
   },
   "optionalDependencies": {
     "@kreuzberg/node-linux-arm64-gnu": "4.10.2",
-    "@kreuzberg/node-linux-x64-gnu": "4.10.2"
+    "@kreuzberg/node-linux-x64-gnu": "4.10.2",
+    "modal": "0.11.1"
   },
   "devDependencies": {
     "@electric-sql/pglite": "0.5.9",
