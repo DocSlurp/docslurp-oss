@@ -161,3 +161,14 @@ dependencies. Copyright (c) 2023 shadcn; the original MIT notice is retained
 in `LICENSES/shadcn-MIT.txt`. The file header records the package source and
 original stylesheet SHA-256. Other shadcn-derived components retain their
 existing provenance and notices.
+
+## landrun (Landlock sandbox provider, MIT)
+
+The `landlock` parser sandbox provider runs parsers through landrun
+(https://github.com/Zouuup/landrun), a separate process downloaded as a
+prebuilt release binary into the worker images. Pinned version v0.1.17, MIT
+(Copyright (c) 2025 Armin ranjbar; the LICENSE at tag v0.1.17 was checked).
+Releases before v0.1.12 were GPL-2.0 and must not be used. URL and sha256 per
+architecture (amd64, arm64) are pinned in `worker/sandbox-tools.json` and
+verified at image build. The binary needs glibc 2.38 or newer (Debian trixie,
+not bookworm).
