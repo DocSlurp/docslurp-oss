@@ -150,6 +150,12 @@ class OnnxSmallDetector:
         self.session=ort.InferenceSession(onnx_path,sess_options=options,providers=providers)
         if device.startswith('cuda') and self.session.get_providers()[0]!='CUDAExecutionProvider':
             raise RuntimeError('Requested CUDA ONNX provider failed to initialize; refusing full CPU fallback')
+        if device.startswith('cuda'):
+            # ORT1.23.2 Session.run retries EPFail on CPU by default. Fail closed
+            # rather than returning CPU output with the requested CUDA identity.
+            # This does not disable explicit per-node CPU kernels (e.g. NMS).
+            # https://github.com/microsoft/onnxruntime/blob/v1.23.2/onnxruntime/python/onnxruntime_inference_collection.py
+            self.session.disable_fallback()
         self.supported_labels=sorted(set(PADDLE_LABELS.values()))
         self.metadata={'id':'PaddlePaddle/PP-DocLayout-S','revision':revision or 'unknown','runtime':'onnxruntime',
             'graph_sha256':hashlib.sha256(open(onnx_path,'rb').read()).hexdigest(),
