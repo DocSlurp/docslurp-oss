@@ -16,7 +16,7 @@ import { currentRequestApiKeyWorkspaceIds } from "../lib/request-context.js";
 import { getWorkspaceSearchSettings, parseWorkspaceSearchSettingsRow, type SettingsRow } from "../services/search-controls.js";
 import { loadCachedSearchAvailability, searchLanceDbNativeEnabled } from "./eligible-documents.js";
 import type { SearchOptions } from "../services/search.js";
-import { createSearchSessionJournal, type SearchSessionJournal } from "./session.js";
+import { createSearchSessionJournal, searchSessionWriteBehindEnabled, type SearchSessionJournal } from "./session.js";
 import { resolveWorkspaceRetrievalControls } from "./workspace-retrieval-session.js";
 import { parseIndexConfigs, type IndexConfigMap } from "./index-serving.js";
 import { earlyLexicalDocument, fullyIndexedDocument, servableInProgressVersion } from "./eligibility.js";
@@ -100,6 +100,7 @@ export async function resolveSearchSetup(
   const session = createSearchSessionJournal({
     rootSessionId: options.rootSessionId,
     scope: normalizedScope,
+    writeBehind: searchSessionWriteBehindEnabled(lanceNative),
   });
   const workspacePipeline = workspaceIndexing.pipeline;
   const retrievalControls = resolveWorkspaceRetrievalControls({

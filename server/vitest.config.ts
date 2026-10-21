@@ -22,6 +22,7 @@ export default defineConfig({
       "@docslurp/shared/observability": shared("observability"),
       "@docslurp/shared/lancedb-s3-trace": shared("lancedb-s3-trace"),
       "@docslurp/shared/lancedb-session": shared("lancedb-session"),
+      "@docslurp/shared/lancedb-hydration": shared("lancedb-hydration"),
       "@docslurp/shared/lancedb-ddb": shared("lancedb-ddb"),
       "@docslurp/shared/temporal-connection": shared("temporal-connection"),
       "@docslurp/shared/temporal-security": shared("temporal-security"),

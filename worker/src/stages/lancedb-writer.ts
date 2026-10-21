@@ -103,7 +103,7 @@ async function writeLanceDbRecordsNow(
   const attemptTimeoutMs = retry.attemptTimeoutMs ?? lanceWriteAttemptTimeoutMs();
   const db = await connectLanceDb(uri);
   try {
-    const rows = withUniformHydrationColumns(records);
+    const rows = withUniformHydrationColumns(records) as unknown as Array<Record<string, unknown>>;
     const hydrated = rows.some((row) => row.hydration !== undefined);
     for (let attempt = 0; ; attempt += 1) {
       signal?.throwIfAborted();
