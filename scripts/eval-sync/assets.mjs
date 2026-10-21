@@ -91,7 +91,7 @@ export async function syncAssets(api, manifest, datasets) {
   validateAssets(manifest);
   // Check evaluator availability before writing any assets.
   if (manifest.evaluators?.length) await listEvaluators(api);
-  const report = { at: new Date().toISOString(), sourceCommit: manifest.sourceCommit, prompts: [], evaluators: [], datasets: [], failures: [], complete: true, llmCalls: 0, evaluationRulesCreated: 0 };
+  const report = { at: new Date().toISOString(), sourceCommit: manifest.sourceCommit, prompts: [], evaluators: [], datasets: [], failures: [], complete: true, llmCalls: null, llmUsageStatus: "Langfuse may invoke providers during native evaluator validation; API does not return usage", evaluationRulesCreated: 0 };
   for (const prompt of manifest.prompts ?? []) report.prompts.push(await syncPrompt(api, prompt, manifest.sourceCommit));
   for (const dataset of datasets) report.datasets.push(await syncDataset(api, dataset));
   for (const evaluator of manifest.evaluators ?? []) {

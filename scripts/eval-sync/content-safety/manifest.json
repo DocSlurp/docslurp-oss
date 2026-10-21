@@ -16,8 +16,14 @@
       "name": "docslurp/content-safety/reference-evaluator-source",
       "type": "text",
       "promptFile": "decision-evaluator.js",
-      "labels": ["development"],
-      "config": { "assetKind": "code-evaluator-source", "execution": "local-or-native-dispatcher", "notAnLlmPrompt": true }
+      "labels": [
+        "development"
+      ],
+      "config": {
+        "assetKind": "code-evaluator-source",
+        "execution": "local-or-native-dispatcher",
+        "notAnLlmPrompt": true
+      }
     },
     {
       "name": "docslurp/content-safety/mastra-judge",
@@ -47,8 +53,8 @@
       "type": "llm_as_judge",
       "promptFile": "review-judge.txt",
       "modelConfig": {
-        "provider": "openai",
-        "model": "gpt-4.1-mini"
+        "provider": "openrouter",
+        "model": "google/gemini-3.1-flash-lite"
       },
       "variableMapping": [
         {
@@ -64,10 +70,10 @@
         "dataType": "BOOLEAN"
       },
       "pricing": {
-        "source": "https://developers.openai.com/api/docs/models/gpt-4.1-mini",
+        "source": "https://openrouter.ai/api/v1/models",
         "verifiedAt": "2026-10-20",
-        "inputUsdPerMillion": 0.4,
-        "outputUsdPerMillion": 1.6
+        "inputUsdPerMillion": 0.25,
+        "outputUsdPerMillion": 1.5
       }
     }
   ],

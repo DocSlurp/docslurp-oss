@@ -30,6 +30,8 @@ test("repeated assets sync does not duplicate prompts or evaluators; versions re
   const { manifest } = await loadAssets(fixture.pathname);
   const remote = store();
   const first = await syncAssets(remote.api, manifest, []);
+  assert.equal(first.llmCalls, null); // Native validation may invoke providers.
+  assert.match(first.llmUsageStatus, /does not return usage/);
   const writes = remote.writes();
   const second = await syncAssets(remote.api, manifest, []);
   assert.equal(remote.writes(), writes);

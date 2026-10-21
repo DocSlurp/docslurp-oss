@@ -13,9 +13,12 @@ code evaluator, an advisory LLM judge definition, and seven agent-authored synth
 development cases. These cases verify wiring only. They are **not human-reviewed
 holdout evidence**, and cannot support an accuracy or promotion claim. The advisory
 judge uses an explicit modest-cost model as a configurable starting candidate, not
-the winner of the required comparison. No model calls, automatic evaluation rules,
-provider credentials, production prompt labels, or infrastructure changes are made
-by asset sync. A native judge may remain paused until a model connection is available.
+the winner of the required comparison. Native evaluator creation can invoke the
+provider for validation, including billable calls. Langfuse does not return token
+usage in the evaluator API, so sync reports `llmCalls: null`, not zero. No automatic
+evaluation rules, provider credentials, production prompt labels, or infrastructure
+changes are made by asset sync. A native judge may remain paused until a model
+connection is available.
 
 The deterministic evaluator source is also archived as a versioned text asset named
 `reference-evaluator-source`, explicitly marked `notAnLlmPrompt`. This preserves

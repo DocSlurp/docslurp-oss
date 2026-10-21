@@ -1,5 +1,5 @@
 {
-  "at": "2026-10-21T02:03:31.204Z",
+  "at": "2026-10-21T02:24:43.734Z",
   "sourceCommit": "d38681ea8628dc6b8a93635c72c49bfa615b4f16",
   "prompts": [
     {
@@ -22,12 +22,12 @@
   "evaluators": [
     {
       "name": "docslurp/content-safety/advisory-policy-judge",
-      "id": "cmvhe004y0005ms2mwdyg9nwo",
+      "id": "cmvhhokjx000hms2moefmil08",
       "version": 1,
-      "contentSha256": "aba4cf58bcd1055bb73c46e987c73773e30f98d6ac1d0706a395ea53b9d1bc85",
+      "contentSha256": "ca4ce600de025c4d408f26dbc8643a7872218578d8510035a1f7ab13e194511c",
       "status": "active",
       "pausedReason": null,
-      "unchanged": true,
+      "unchanged": false,
       "readbackVerified": true
     }
   ],
@@ -51,7 +51,8 @@
     }
   ],
   "complete": false,
-  "llmCalls": 0,
+  "llmCalls": null,
   "evaluationRulesCreated": 0,
-  "runtimeReady": false
+  "runtimeReady": false,
+  "llmUsageStatus": "Native validation invoked provider; token usage and cost not returned by Langfuse evaluator API"
 }
