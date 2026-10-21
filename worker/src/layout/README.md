@@ -45,3 +45,22 @@ The service keeps one model resident and serializes requests. It is a local opt-
 Add `--visual-classifier siglip2` only when the official SigLIP2 cache/dependencies are installed. The optional stage classifies generic detector `figure` crops into photo/chart/logo/illustration/mind-map or abstains to figure; native chart labels remain untouched. It preserves original `detectorLabel`, `rawLabel` and detector confidence and emits a separate `classification` with uncalibrated cosine score/margin, model and prompt version. Its fixed prompts and abstention threshold require measured evaluation; class availability is not a quality guarantee. It cannot recover regions the detector missed. Official model/license source: [Google SigLIP2 model card](https://huggingface.co/google/siglip2-base-patch16-224), Apache-2.0, checked 2026-10-20.
 
 Runtime packaging is explicit: the standard worker Dockerfiles currently copy `worker/scripts`, not this separate `scripts/layout-eval` directory or its ML dependencies/weights. A source checkout can run the examples after installing the relevant requirements and verified weights; a deployed container needs an explicitly built image or separate loopback service containing these files. This change does not make that deployment or add a public route. For ONNX graph identity, set `expectedArtifactSha256` in endpoint options; `model.artifactSha256` carries the graph digest when available. An `unknown` revision alone does not pin an optimized graph.
+
+Optional geometry configuration is shared by the cold CLI and resident service:
+`modelSize` sets a Transformers input square (32..2048, multiples of 32),
+`orientationOnnxPath` selects a cached orientation graph with optional
+`orientationRevision`/`orientationMinimumScore`, and `rectifyPage` enables the
+light-paper quadrilateral heuristic with `rectifyMaxEdge` (64..4096 probe pixels).
+All remain off by default. Orientation/rectification wrappers inverse-map boxes
+and available polygons into stored source pixels; they do not change the returned
+source dimensions. `diagnostics.detectorMetadata` retains wrapper configuration
+and graph provenance, while `diagnostics.imageTransforms` records actual page
+corrections or abstentions. Native `readingOrder` is optional and is never inferred
+from box array position. CLI diagnostics include `modelLoadMs` and `cold-cli`;
+resident diagnostics distinguish `warm-resident` execution.
+
+The opt-in `heron-custom` model requires an explicit local safetensors checkpoint
+directory. Its model identity and revision differ from the upstream Heron model;
+configure endpoint expectations using the checkpoint's actual artifact digest.
+Training and checkpoint selection remain separate tooling and do not run in the
+worker. See `docs/heron-custom-training-pilot.md` for the frozen pilot recipe.

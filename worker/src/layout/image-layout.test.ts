@@ -20,6 +20,11 @@ describe("image layout transport boundary", () => {
   it.each([[0.9, 0.2, 0.1, 0.8], [-0.1, 0, 1, 1], [0, 0, Infinity, 1], [0, 0, 1]])("rejects invalid source boxes %j", (...bbox) => {
     expect(() => parseImageLayout({ ...payload(), regions: [{ ...payload().regions[0], bbox }] })).toThrow();
   });
+  it("preserves bounded detector and transform diagnostics", () => {
+    const diagnostics = { detectorMetadata: { orientation: { revision: "pinned" } }, imageTransforms: [{ orientation: { correction_angle: 90 } }] };
+    expect(parseImageLayout({ ...payload(), diagnostics }).diagnostics).toEqual(diagnostics);
+    expect(() => parseImageLayout({ ...payload(), diagnostics: [] })).toThrow("object");
+  });
   it("preserves declared geometric coverage and validates visual fingerprints", () => {
     const region = { ...payload().regions[0], imageCoverage: 0.48, coverageKind: "half-page", fingerprint: { algorithm: "dhash-64", value: "0123456789abcdef" } };
     expect(parseImageLayout({ ...payload(), regions: [region] }).regions[0]).toEqual(region);
@@ -42,11 +47,12 @@ describe("image layout transport boundary", () => {
   it("stages bytes, requests the exact device offline, validates provenance, and cleans up", async () => {
     const runtime = await mkdtemp(path.join(tmpdir(), "docslurp-layout-test-"));
     let output = "";
-    const options = { python: path.join(runtime, "bin", "python"), script: path.join(runtime, "infer.py"), cacheDirectory: runtime, model: "heron" as const, device: "cpu" as const };
+    const options = { python: path.join(runtime, "bin", "python"), script: path.join(runtime, "infer.py"), cacheDirectory: runtime, model: "heron" as const, device: "cpu" as const, modelSize: 640, orientationOnnxPath: path.join(runtime, "orientation.onnx"), orientationRevision: "pinned", orientationMinimumScore: 0.8, rectifyPage: true, rectifyMaxEdge: 768 };
     await mkdir(path.join(runtime, "bin"));
     await writeFile(path.join(runtime, "pyvenv.cfg"), "home = /usr/bin\n");
     await writeFile(options.python, "");
     await writeFile(options.script, "");
+    await writeFile(options.orientationOnnxPath, "");
     try {
       const input = await sharp({ create: { width: 20, height: 10, channels: 3, background: "white" } }).png().toBuffer();
       const runner = { run: async (plan: CommandPlan) => {
@@ -54,10 +60,15 @@ describe("image layout transport boundary", () => {
         expect(plan.bundleRoots).toContain(runtime);
         expect(plan.bundleEnv?.HF_HUB_OFFLINE).toBe("1");
         expect(plan.args).toContain("cpu");
+        expect(plan.args).toEqual(expect.arrayContaining(["--model-size", "640", "--orientation-onnx-path", options.orientationOnnxPath, "--orientation-revision", "pinned", "--orientation-minimum-score", "0.8", "--rectify-page", "--rectify-max-edge", "768"]));
+        expect(plan.bundleRoots).toContain(options.orientationOnnxPath);
         output = plan.args[plan.args.indexOf("--output") + 1];
         await writeFile(output, JSON.stringify(payload()));
         return { stdout: "", stderr: "" };
       } };
+      await expect(detectImageLayout(input, { ...options, modelSize: 33 }, runner)).rejects.toThrow("Model size");
+      await expect(detectImageLayout(input, { ...options, orientationMinimumScore: NaN }, runner)).rejects.toThrow("orientation");
+      await expect(detectImageLayout(input, { ...options, rectifyMaxEdge: 8 }, runner)).rejects.toThrow("Rectification");
       const result = await detectImageLayout(input, options, runner);
       expect(result.image.sha256).toMatch(/^[a-f0-9]{64}$/);
       await expect(access(output)).rejects.toThrow();

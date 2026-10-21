@@ -16,6 +16,8 @@ export interface ImageLayoutResult {
   image: { width: number; height: number; sha256?: string };
   coordinateSpace: "normalized-source";
   supportedLabels: ImageLayoutLabel[];
+  /** Bounded JSON metadata from the detector, including transforms and actual runtime timing. */
+  diagnostics?: Record<string, unknown>;
   regions: Array<{
     label: ImageLayoutLabel;
     rawLabel: string;
@@ -114,7 +116,7 @@ export function parseImageLayout(value: unknown): ImageLayoutResult {
     return { label: kind, rawLabel: text(region.rawLabel), confidence: unit(region.confidence), bbox, ...extras };
   });
   return { schemaVersion: 1, model: { id: text(model.id), revision: text(model.revision), ...(model.artifactSha256 ? { artifactSha256: text(model.artifactSha256) } : {}) }, device: result.device,
-    image: { width: dimension(image.width), height: dimension(image.height) }, coordinateSpace: "normalized-source", supportedLabels, regions };
+    image: { width: dimension(image.width), height: dimension(image.height) }, coordinateSpace: "normalized-source", supportedLabels, regions, ...(result.diagnostics !== undefined ? { diagnostics: object(result.diagnostics) } : {}) };
 }
 export interface ImageLayoutCliOptions {
   /** Explicit runtime; never automatically install dependencies or download weights. */
@@ -129,6 +131,12 @@ export interface ImageLayoutCliOptions {
   revision?: string;
   visualClassifier?: "none" | "siglip2";
   processor?: "slow" | "fast";
+  modelSize?: number;
+  orientationOnnxPath?: string;
+  orientationRevision?: string;
+  orientationMinimumScore?: number;
+  rectifyPage?: boolean;
+  rectifyMaxEdge?: number;
   classifierModelPath?: string;
   onnxPath?: string;
   timeoutMs?: number;
@@ -137,7 +145,7 @@ export interface ImageLayoutCliOptions {
 export async function detectImageLayout(input: Buffer, options: ImageLayoutCliOptions, runner: Pick<CommandRunner, "run">, signal?: AbortSignal): Promise<ImageLayoutResult> {
   if (input.byteLength === 0 || input.byteLength > 25 * 1024 * 1024) throw new Error("Layout image payload must be between 1 byte and 25 MiB");
   if (signal?.aborted) throw signal.reason ?? new Error("Layout detection aborted");
-  for (const location of [options.python, options.script, options.cacheDirectory, ...[options.modelPath, options.onnxPath, options.classifierModelPath].filter((value): value is string => value !== undefined)]) {
+  for (const location of [options.python, options.script, options.cacheDirectory, ...[options.modelPath, options.onnxPath, options.classifierModelPath, options.orientationOnnxPath].filter((value): value is string => value !== undefined)]) {
     if (!path.isAbsolute(location)) throw new Error("Layout runtime paths must be absolute");
     await stat(location);
   }
@@ -145,6 +153,11 @@ export async function detectImageLayout(input: Buffer, options: ImageLayoutCliOp
   if (options.model === "heron-custom" && !options.modelPath) throw new Error("heron-custom requires an explicit local modelPath");
   if (options.model === "pp-small" && !options.modelPath) throw new Error("pp-small requires an explicit local modelPath");
   if (options.model === "pp-small-onnx" && !options.onnxPath) throw new Error("pp-small-onnx requires an explicit local onnxPath");
+  if (options.modelSize !== undefined && (!Number.isSafeInteger(options.modelSize) || options.modelSize < 32 || options.modelSize > 2048 || options.modelSize % 32 !== 0 || !["heron", "heron-custom", "ppv3"].includes(options.model))) throw new Error("Model size requires a Transformers detector and a multiple of 32 in 32..2048");
+  if (options.orientationMinimumScore !== undefined && (typeof options.orientationMinimumScore !== "number" || !Number.isFinite(options.orientationMinimumScore) || options.orientationMinimumScore < 0 || options.orientationMinimumScore > 1)) throw new Error("Invalid orientation minimum score");
+  if ((options.orientationRevision !== undefined || options.orientationMinimumScore !== undefined) && !options.orientationOnnxPath) throw new Error("Orientation settings require a local ONNX path");
+  if (options.rectifyPage !== undefined && typeof options.rectifyPage !== "boolean") throw new Error("Invalid page rectification flag");
+  if (options.rectifyMaxEdge !== undefined && (!options.rectifyPage || !Number.isSafeInteger(options.rectifyMaxEdge) || options.rectifyMaxEdge < 64 || options.rectifyMaxEdge > 4096)) throw new Error("Rectification edge requires enabled rectification and 64..4096 pixels");
   const venvRoot = path.dirname(path.dirname(options.python));
   const runtimeRoots = existsSync(path.join(venvRoot, "pyvenv.cfg")) ? [venvRoot] : [];
   const timeoutMs = options.timeoutMs ?? 120_000;
@@ -158,9 +171,9 @@ export async function detectImageLayout(input: Buffer, options: ImageLayoutCliOp
     const output = path.join(directory, "layout.json");
     await writeFile(source, input, { mode: 0o600 });
     await runner.run({ binary: options.python,
-      args: [options.script, "--model", options.model, "--device", options.device, "--image", source, "--output", output, ...(options.modelPath ? ["--model-path", options.modelPath] : []), ...(options.revision ? ["--revision", options.revision] : []), ...(options.onnxPath ? ["--onnx-path", options.onnxPath] : []), ...(options.processor ? ["--processor", options.processor] : []), ...(options.visualClassifier ? ["--visual-classifier", options.visualClassifier] : []), ...(options.classifierModelPath ? ["--classifier-model-path", options.classifierModelPath] : [])],
+      args: [options.script, "--model", options.model, "--device", options.device, "--image", source, "--output", output, ...(options.modelPath ? ["--model-path", options.modelPath] : []), ...(options.revision ? ["--revision", options.revision] : []), ...(options.onnxPath ? ["--onnx-path", options.onnxPath] : []), ...(options.processor ? ["--processor", options.processor] : []), ...(options.modelSize !== undefined ? ["--model-size", String(options.modelSize)] : []), ...(options.orientationOnnxPath ? ["--orientation-onnx-path", options.orientationOnnxPath] : []), ...(options.orientationRevision ? ["--orientation-revision", options.orientationRevision] : []), ...(options.orientationMinimumScore !== undefined ? ["--orientation-minimum-score", String(options.orientationMinimumScore)] : []), ...(options.rectifyPage ? ["--rectify-page"] : []), ...(options.rectifyMaxEdge !== undefined ? ["--rectify-max-edge", String(options.rectifyMaxEdge)] : []), ...(options.visualClassifier ? ["--visual-classifier", options.visualClassifier] : []), ...(options.classifierModelPath ? ["--classifier-model-path", options.classifierModelPath] : [])],
       available: true, pages: 1, timeoutMs,
-      bundleRoots: [options.cacheDirectory, path.dirname(options.script), ...runtimeRoots, ...[options.modelPath, options.onnxPath, options.classifierModelPath].filter((value): value is string => value !== undefined)],
+      bundleRoots: [options.cacheDirectory, path.dirname(options.script), ...runtimeRoots, ...[options.modelPath, options.onnxPath, options.classifierModelPath, options.orientationOnnxPath].filter((value): value is string => value !== undefined)],
       bundleEnv: { HF_HOME: options.cacheDirectory, HF_HUB_OFFLINE: "1", TRANSFORMERS_OFFLINE: "1", PYTHONDONTWRITEBYTECODE: "1" },
     }, signal);
     if ((await stat(output)).size > 10 * 1024 * 1024) throw new Error("Layout output exceeds 10 MiB");
