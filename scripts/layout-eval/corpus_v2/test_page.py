@@ -35,6 +35,23 @@ class SourceContracts(unittest.TestCase):
  def test_long_contact_tokens_wrap_without_losing_original_prose(self):
   p=Page('contact',300,400);address='exchange@northside.example';p.text(address,20,20,95,18)
   block=p.source['text_blocks'][0];self.assertEqual(''.join(block['line_texts']),address);self.assertEqual(block['text'],address);self.assertLessEqual(block['bbox'][2],116);p.finalize(self.root);self.assertIn(address,(self.root/'expected/contact.md').read_text())
+ def test_confidence_is_source_first_ordinal_and_hash_bound(self):
+  p=Page('confidence',300,300);p.text('Measured native source',20,20,250,18)
+  original=Image.Image.save
+  def save(image,path,*args,**kwargs):
+   source=json.loads((self.root/'sources/confidence.json').read_text());axes=source['regions'][0]['annotationConfidence']['axes'];self.assertEqual(axes['geometry']['score'],.5);self.assertEqual(axes['readingOrder']['score'],0);return original(image,path,*args,**kwargs)
+  with patch.object(Image.Image,'save',save):p.finalize(self.root)
+  receipt=json.loads((self.root/'confidence/confidence.json').read_text());self.assertEqual(receipt['scale'],'evidence-ordinal-not-probability');self.assertEqual(receipt['artifacts']['imageSha256'],sha(self.root/'images/confidence.png'))
+  for region in receipt['regions']:
+   for axis in region['axes'].values():
+    self.assertIn(axis['score'],(None,0,.25,.5,.75,1));self.assertTrue(all(key in receipt['evidence'] for key in axis['provenance']))
+    if axis['score'] is None:self.assertTrue(axis['reason'])
+ def test_internal_math_preserves_expression_without_extra_layout_region(self):
+  asset=self.root/'formula.png';Image.new('RGB',(50,20),'white').save(asset)
+  p=Page('component',300,300);p.math_component(asset,[40,40,90,60],'m');p.region('illustration',[20,20,220,150]);row=p.finalize(self.root)
+  self.assertEqual(len(row['regions']),1);self.assertEqual(row['regions'][0]['attributes']['math_components'][0]['source_expression'],'m');self.assertIn('$$\nm\n$$',(self.root/'expected/component.md').read_text())
+ def test_rtl_shaping_arguments_and_source_are_retained(self):
+  p=Page('arabic',500,300);text='الاسم الكامل';p.text(text,30,30,430,27,'arabic',direction='rtl',language='ar');p.finalize(self.root);self.assertEqual(p.source['commands'][0]['layout'],{'direction':'rtl','language':'ar'});self.assertIn(text,(self.root/'expected/arabic.md').read_text())
  def test_invalid_geometry_fails(self):
   with self.assertRaisesRegex(ValueError,'Invalid authored'):Page('bad',100,100).region('photo',[0,0,200,20])
 

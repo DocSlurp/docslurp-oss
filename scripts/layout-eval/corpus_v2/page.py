@@ -6,6 +6,8 @@ import os
 import uuid
 from pathlib import Path
 from PIL import Image, ImageDraw, ImageFont, ImageOps
+try:from .confidence_defaults import defaults,evidence,SCALE
+except ImportError:from confidence_defaults import defaults,evidence,SCALE
 
 FONT_FILES={
  'serif':'/usr/share/fonts/gsfonts/NimbusRoman-Regular.otf',
@@ -17,6 +19,8 @@ FONT_FILES={
  'narrow-bold':'/usr/share/fonts/gsfonts/NimbusSansNarrow-Bold.otf',
  'book':'/usr/share/fonts/gsfonts/URWBookman-Light.otf',
  'book-bold':'/usr/share/fonts/gsfonts/URWBookman-Demi.otf',
+ 'arabic':'/usr/share/fonts/noto/NotoSansArabic-Regular.ttf',
+ 'arabic-bold':'/usr/share/fonts/noto/NotoSansArabic-Bold.ttf',
  'mono':'/usr/share/fonts/gsfonts/NimbusMonoPS-Regular.otf',
 }
 
@@ -43,38 +47,39 @@ class Page:
  def rectangle(self,b,fill,outline=None,width=1):self.source['commands'].append({'op':'rect','bbox':list(b),'fill':fill,'outline':outline,'width':width})
  def line(self,xy,fill='#30302b',width=1):self.source['commands'].append({'op':'line','xy':list(xy),'fill':fill,'width':width})
  def ellipse(self,b,fill,outline=None,width=1):self.source['commands'].append({'op':'ellipse','bbox':list(b),'fill':fill,'outline':outline,'width':width})
- def wrap_lines(self,text,width,size,face):
-  f=self.font(face,size);lines=[]
+ def wrap_lines(self,text,width,size,face,direction=None,language=None):
+  f=self.font(face,size);lines=[];layout={k:v for k,v in {'direction':direction,'language':language}.items() if v is not None}
+  length=lambda text:f.getlength(text,**layout)
   for paragraph in text.split('\n'):
    current=''
    for word in paragraph.split():
-    if f.getlength(word)>width:
+    if length(word)>width:
      if current:lines.append(current);current=''
-     while f.getlength(word)>width:
+     while length(word)>width:
       count=1
-      while count<len(word) and f.getlength(word[:count+1])<=width:count+=1
-      if f.getlength(word[:count])>width:raise ValueError('Text column narrower than one glyph')
+      while count<len(word) and length(word[:count+1])<=width:count+=1
+      if length(word[:count])>width:raise ValueError('Text column narrower than one glyph')
       preferred=[i+1 for i,char in enumerate(word[:count]) if char in '@./-_:' and i+1>=count/2]
       cut=preferred[-1] if preferred else count
       lines.append(word[:cut]);word=word[cut:]
      current=word
     else:
      attempt=(current+' '+word).strip()
-     if f.getlength(attempt)>width and current:lines.append(current);current=word
+     if length(attempt)>width and current:lines.append(current);current=word
      else:current=attempt
    lines.append(current)
   return lines
- def text(self,text,x,y,width,size=20,face='serif',color='#242522',leading=None,label='paragraph',tracking=0,**attrs):
-  f=self.font(face,size);leading=leading or size*1.2;lines=self.wrap_lines(text,width,size,face)
+ def text(self,text,x,y,width,size=20,face='serif',color='#242522',leading=None,label='paragraph',tracking=0,direction=None,language=None,**attrs):
+  f=self.font(face,size);leading=leading or size*1.2;lines=self.wrap_lines(text,width,size,face,direction,language);layout={k:v for k,v in {'direction':direction,'language':language}.items() if v is not None}
   line_boxes=[];block_id=f't{len(self.source["text_blocks"]):03d}';command_start=len(self.source['commands'])
   for i,line in enumerate(lines):
-   pos=[x,y+i*leading];b=list(self.measure.textbbox(pos,line,font=f));line_boxes.append(b)
-   self.source['commands'].append({'op':'text','text':line,'position':pos,'face':face,'size':size,'fill':color,'text_block_id':block_id})
+   pos=[x+width-f.getlength(line,**layout) if direction=='rtl' else x,y+i*leading];b=list(self.measure.textbbox(pos,line,font=f,**layout));line_boxes.append(b)
+   self.source['commands'].append({'op':'text','text':line,'position':pos,'face':face,'size':size,'fill':color,'text_block_id':block_id,'layout':layout})
   boxes=[b for b in line_boxes if b[0]<b[2] and b[1]<b[3]]
   if not boxes:return y+leading*len(lines)
   b=[min(z[0] for z in boxes),min(z[1] for z in boxes),max(z[2] for z in boxes),max(z[3] for z in boxes)]
   if b[2]>self.width or b[3]>self.height or b[0]<0 or b[1]<0:raise ValueError(f'Text outside page: {text[:40]} {b}')
-  self.source['text_blocks'].append({'id':block_id,'text':text,'bbox':b,'line_texts':lines,'line_boxes':line_boxes,'requested_layout_label':label,'command_start':command_start,'command_end':len(self.source['commands']),'font':face,'font_size':size})
+  self.source['text_blocks'].append({'id':block_id,'text':text,'bbox':b,'line_texts':lines,'line_boxes':line_boxes,'requested_layout_label':label,'command_start':command_start,'command_end':len(self.source['commands']),'font':face,'font_size':size,'layout':layout})
   if label:self.region(label,b,text,font=face,font_size=size,line_boxes=line_boxes,extent_policy='exact-rendered-glyph-union',**attrs)
   return y+leading*len(lines)
  def image(self,path,b,label='photo',asset=None,**attrs):
@@ -83,7 +88,14 @@ class Page:
   provenance={}
   for candidate in (Path(str(path)+'.provenance.json'),path.with_suffix('.provenance.json')):
    if candidate.exists():provenance={'generation_provenance':json.loads(candidate.read_text()),'generation_provenance_sha256':sha(candidate)};break
-  self.region(label,b,None,asset={**(asset or {}),**provenance,'path':str(path.resolve()),'sha256':sha(path)},**attrs)
+  asset_record={**(asset or {}),**provenance,'path':str(path.resolve()),'sha256':sha(path)}
+  if label=='formula-component':
+   expression=next((attrs[k] for k in ('latex','source_expression','expected_math','expression') if attrs.get(k)),None)
+   if not expression:raise ValueError('Math component missing source expression')
+   self.source.setdefault('math_components',[]).append({'id':f'mc{len(self.source.get("math_components",[])):03d}','bbox':list(b),'polygon':poly(b),'source_expression':expression,'asset':asset_record,'attributes':attrs})
+  else:self.region(label,b,None,asset=asset_record,**attrs)
+ def math_component(self,path,bbox,expression,asset=None,**attrs):
+  return self.image(path,bbox,label='formula-component',asset=asset,source_expression=expression,**attrs)
  def table(self,b,headers,rows,widths=None,row_height=35,border=False,continuation_id=None,row_offset=0,face='sans',size=17,header_fill='#dbe5df',ink='#263b35'):
   x0,y0,x1,y1=b;cols=len(headers);widths=widths or [1/cols]*cols
   if len(widths)!=cols or abs(sum(widths)-1)>1e-8:raise ValueError('Invalid table widths')
@@ -133,6 +145,11 @@ class Page:
   composite={'table','chart','illustration','mind_map','logo','figure','form'}
   regions=self.source['regions']
   for index,r in enumerate(regions):r['id']=f'r{index:03d}'
+  for component in self.source.get('math_components',[]):
+   a=component['bbox'];candidates=[r for r in regions if r['label'] in composite and a[0]>=r['bbox'][0]-.01 and a[1]>=r['bbox'][1]-.01 and a[2]<=r['bbox'][2]+.01 and a[3]<=r['bbox'][3]+.01]
+   if not candidates:raise ValueError(f'Math component has no containing composite: {component["source_expression"]}')
+   parent=min(candidates,key=lambda r:(r['bbox'][2]-r['bbox'][0])*(r['bbox'][3]-r['bbox'][1]));component['parent_region_id']=parent['id']
+   parent['attributes'].setdefault('math_components',[]).append(component)
   for block in self.source['text_blocks']:
    a=block['bbox'];candidates=[]
    for r in regions:
@@ -162,23 +179,32 @@ class Page:
     if not expression:raise ValueError('Formula missing explicit source expression')
     r['attributes']['source_math_expression']=expression;markdown.append('$$\n'+expression+'\n$$')
    elif content:markdown.append(('# ' if r['label']=='title' else '')+content)
-   contracts.append({'region_id':r['id'],'label':r['label'],'prose_presence':r['attributes']['prose_contract']['presence'],'source_text':content,'text_block_ids':[b['id'] for b in children],'table_cells_applicability':'present' if r['label']=='table' else 'not_applicable','math_applicability':'present' if r['label']=='formula' else 'not_applicable'})
-  ground={'status':'authored-source-derived-silver-awaiting-review','prose_presence':'present' if self.source['text_blocks'] else 'absent','reading_order':'not_validated-do-not-score','paragraph_boundaries':'explicit-authored-region-and-text-block-IDs','line_boundaries':'exact-line-texts-and-glyph-boxes','tables':'present' if any(r['label']=='table' for r in regions) else 'not_applicable','math':'present' if any(r['label']=='formula' for r in regions) else 'not_applicable','absent_layout_labels':sorted(set(labels)-{r['label'] for r in regions}),'embedded_asset_text':'not_annotated-not-eligible-for-prose-evaluation'}
+   has_text=bool(content or cell_text or r['label']=='formula' or r['attributes'].get('math_components'))
+   r['annotationConfidence']=defaults(r,has_text)
+   r['annotationTiers']={'geometry':'native-source-gold','semanticLabel':'authored-unreviewed','textTranscription':'native-source-gold' if has_text else 'not-annotated','visibilityOcclusion':'source-layer-estimate','readingOrder':'not-annotated'}
+   for component in r['attributes'].get('math_components',[]):markdown.append('$$\n'+component['source_expression']+'\n$$')
+   contracts.append({'region_id':r['id'],'label':r['label'],'prose_presence':r['attributes']['prose_contract']['presence'],'source_text':content,'text_block_ids':[b['id'] for b in children],'table_cells_applicability':'present' if r['label']=='table' else 'not_applicable','annotationConfidence':r['annotationConfidence'],'annotationTiers':r['annotationTiers'],'math_applicability':'present' if r['label']=='formula' or r['attributes'].get('math_components') else 'not_applicable'})
+  ground={'status':'source-derived-annotations-awaiting-independent-review','annotation_tiers':{'native_geometry':'source-gold-by-construction','native_text':'source-gold-by-construction','semantic_labels':'authored-unreviewed','manual_imports':'must-be-explicit-manual-silver'},'prose_presence':'present' if self.source['text_blocks'] else 'absent','reading_order':'not_validated-do-not-score','paragraph_boundaries':'explicit-authored-region-and-text-block-IDs','line_boundaries':'exact-line-texts-and-glyph-boxes','tables':'present' if any(r['label']=='table' for r in regions) else 'not_applicable','math':'present' if any(r['label']=='formula' for r in regions) or self.source.get('math_components') else 'not_applicable','absent_layout_labels':sorted(set(labels)-{r['label'] for r in regions}),'embedded_asset_text':'not_annotated-not-eligible-for-prose-evaluation'}
   granularity={'policy':'Authored paragraph/list/title/caption blocks are layout regions. Text drawn inside a chart, table, logo or diagram with label=None is retained as component text inside its enclosing composite region, never separately scored as a paragraph.','internal_text_parent_rule':'smallest containing declared composite region; missing parent fails builder','regions':contracts,'text_blocks':self.source['text_blocks']}
   expected=root/'expected'/f'{self.id}.md';expected.parent.mkdir(exist_ok=True);write_atomic(expected,('\n\n'.join(markdown)+'\n').encode())
   contract=root/'contracts'/f'{self.id}.json';save_json(contract,{'schema':'layout-editorial-prose-contract-v2','ground_truth':ground,'annotation_granularity':granularity})
   self.source['ground_truth']=ground;self.source['expected_markdown']={'path':str(expected.relative_to(root)),'sha256':sha(expected)};self.source['prose_contract']={'path':str(contract.relative_to(root)),'sha256':sha(contract)}
+  self.source['annotation_confidence']={'scale':SCALE,'evidence':evidence(),'receipt_path':f'confidence/{self.id}.json','policy':'Ordinal evidence ratings, not probabilities or review approval. Per-region defaults are recorded before PNG.'}
   save_json(source,self.source)
-  save_json(reference,{'schema':'layout-editorial-pilot-reference-v2','id':self.id,'image':{'width':self.width,'height':self.height},'regions':regions,'ground_truth':ground,'source_sha256':sha(source),'expected_markdown':self.source['expected_markdown'],'prose_contract':self.source['prose_contract']})
+  save_json(reference,{'schema':'layout-editorial-pilot-reference-v2','id':self.id,'image':{'width':self.width,'height':self.height},'regions':regions,'ground_truth':ground,'source_sha256':sha(source),'annotation_confidence':self.source['annotation_confidence'],'expected_markdown':self.source['expected_markdown'],'prose_contract':self.source['prose_contract']})
   image=Image.new('RGB',(self.width,self.height),self.source['paper']);d=ImageDraw.Draw(image)
   for c in self.source['commands']:
-   if c['op']=='text':d.text(c['position'],c['text'],font=self.font(c['face'],c['size']),fill=c['fill'])
+   if c['op']=='text':d.text(c['position'],c['text'],font=self.font(c['face'],c['size']),fill=c['fill'],**c.get('layout',{}))
    elif c['op']=='rect':d.rectangle(c['bbox'],fill=c['fill'],outline=c['outline'],width=c['width'])
    elif c['op']=='line':d.line(c['xy'],fill=c['fill'],width=c['width'])
    elif c['op']=='ellipse':d.ellipse(c['bbox'],fill=c['fill'],outline=c['outline'],width=c['width'])
    elif c['op']=='image':
     b=c['bbox'];picture=ImageOps.fit(Image.open(c['path']).convert('RGB'),(round(b[2]-b[0]),round(b[3]-b[1])),Image.Resampling.LANCZOS);image.paste(picture,(round(b[0]),round(b[1])))
   path=root/'images'/f'{self.id}.png';path.parent.mkdir(exist_ok=True);temporary=path.with_name('.'+path.stem+'.render-'+uuid.uuid4().hex+'.png')
-  try:image.save(temporary,format='PNG',optimize=True);os.replace(temporary,path)
+  try:
+   image.save(temporary,format='PNG',optimize=True)
+   confidence=root/'confidence'/f'{self.id}.json'
+   save_json(confidence,{'schema':'layout-annotation-confidence-v1','scale':SCALE,'pageId':self.id,'artifacts':{'imageSha256':sha(temporary),'sourceSha256':sha(source),'referenceSha256':sha(reference)},'evidence':evidence(),'regions':[{'regionId':r['id'],'axes':r['annotationConfidence']['axes']} for r in regions],'limitations':['Construction defaults only; no independent or human review inferred.','Source-gold geometry/text tier does not imply calibrated certainty or admission.','Embedded asset text remains unannotated unless explicitly supplied.']})
+   os.replace(temporary,path)
   finally:temporary.unlink(missing_ok=True)
-  return {'id':self.id,'image_path':str(path.relative_to(root)),'width':self.width,'height':self.height,'split':'pilot-review','regions':self.source['regions'],'metadata':{'source_path':str(source.relative_to(root)),'reference_path':str(reference.relative_to(root)),'source_id':self.id,'source_family':self.id,'document_id':self.source['document_id'],'page_number':self.source['page_number'],'image_sha256':sha(path),'source_sha256':sha(source),'expected_markdown':self.source['expected_markdown'],'prose_contract':self.source['prose_contract'],'review_status':'awaiting-visual-review-not-benchmark-admitted'}}
+  return {'id':self.id,'image_path':str(path.relative_to(root)),'width':self.width,'height':self.height,'split':'pilot-review','regions':self.source['regions'],'metadata':{'source_path':str(source.relative_to(root)),'reference_path':str(reference.relative_to(root)),'source_id':self.id,'source_family':self.id,'document_id':self.source['document_id'],'page_number':self.source['page_number'],'image_sha256':sha(path),'source_sha256':sha(source),'annotation_confidence':self.source['annotation_confidence'],'expected_markdown':self.source['expected_markdown'],'prose_contract':self.source['prose_contract'],'review_status':'awaiting-visual-review-not-benchmark-admitted'}}
