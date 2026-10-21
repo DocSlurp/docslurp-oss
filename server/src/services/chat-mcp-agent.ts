@@ -341,6 +341,9 @@ export async function runChatMcpAgent(args: {
         "docslurp.chat.usage_source": usageSource, ...(step.generationId ? { "gen_ai.response.id": step.generationId } : {}) });
     } catch (error) {
       console.error("[chat-agent] aborted step usage was not recorded:", error instanceof Error ? error.message : String(error));
+    } finally {
+      // onStepFinish never ends an aborted step's span; a turn that still answers would otherwise leave it open.
+      stepSpans.get(step.stepNumber)?.end(`step aborted: ${reason}`);
     }
   }
 

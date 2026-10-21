@@ -463,6 +463,28 @@ describe("chat agent timers and aborted-step accounting", () => {
     expect(result.debug.stepUsage.map(entry => entry.finishReason)).toEqual(["tool-calls", "aborted", "stop"]);
   });
 
+  it("ends every step span when a deadline turn still answers with 200", async () => {
+    let call = 0;
+    mocks.provider.mockReturnValue(new MockLanguageModelV4({ doStream: async () => {
+      const current = call++;
+      if (current === 0) return toolStep("found");
+      if (current === 1) return stalledStep([{ type: "stream-start", warnings: [] }]);
+      return answerStep("The policy is supported [1].");
+    } }));
+    await runChatMcpAgent({ ...args, timeBudget: budget({ turnDeadlineMs: 2_000, stepTimeoutMs: 150, finalReserveMs: 1_000 }) });
+    const chatSpans = spans.list.filter(span => span.attributes["gen_ai.operation.name"] === "chat");
+    expect(chatSpans).toHaveLength(3);
+    expect(chatSpans.filter(span => !span.ended).map(span => span.attributes["docslurp.chat.step"])).toEqual([]);
+    expect(chatSpans[1]!.attributes["docslurp.chat.usage_source"]).toBe("estimate");
+
+    spans.list.length = 0;
+    mocks.provider.mockReturnValue(new MockLanguageModelV4({ doStream: async () => stalledStep([
+      { type: "stream-start", warnings: [] }, { type: "text-start", id: "t" }, { type: "text-delta", id: "t", delta: "Partly [1]" },
+    ]) }));
+    await runChatMcpAgent({ ...args, limits: { maxSteps: 1, maxToolCalls: 1, searchConcurrency: 1, clamped: [] }, timeBudget: budget({ turnDeadlineMs: 200, finalReserveMs: 100 }) });
+    expect(spans.list.filter(span => !span.ended).map(span => span.name)).toEqual([]);
+  });
+
   it("returns a tool that ignores its signal at the tool budget", async () => {
     mocks.provider.mockReturnValue(new MockLanguageModelV4({ doStream: [toolStep("deaf"), answerStep("Could not check [none].")] }));
     mocks.dispatch.mockImplementation(() => new Promise<Response>(() => undefined));
