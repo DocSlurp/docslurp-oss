@@ -4,6 +4,8 @@ All names, addresses, prices and operational instructions are fictional. Technic
 art is explicitly a source-authored vector illustration, never a surrogate photo.
 No generation count loop or benchmark admission is provided here.
 """
+from decimal import Decimal
+
 try:
     from .page import Page
 except ImportError:
@@ -138,6 +140,11 @@ def invoices():
         ['TB-065','Silicone tubing · per metre','5','6.80','34.00'],
         ['PK-017','Protective return packing','1','18.00','18.00'],
         ['FR-002','Regional freight · tracked','1','32.00','32.00']]
+    carried=sum(Decimal(row[-1]) for row in rows[:7])
+    subtotal=sum(Decimal(row[-1]) for row in rows)
+    tax=(subtotal*Decimal('0.10')).quantize(Decimal('0.01'))
+    total=subtotal+tax
+    money=lambda amount:format(amount,',.2f')
     for number,part in [(1,rows[:7]),(2,rows[7:])]:
         p=Page(f'business-meridian-invoice-{number}',1100,1460,paper='#ffffff',document_id='business-meridian-invoice',page_number=number)
         p.rectangle([0,0,28,1460],teal)
@@ -146,7 +153,7 @@ def invoices():
         p.text('INVOICE',816,73,225,37,'serif-bold',ink,label='title')
         p.text('INV–20481',819,126,220,24,'mono',ink)
         p.text('Meridian Workshop Supply\n17 Foundry Lane\nRiverton RV 4020',72,213,460,21,'sans',ink,leading=29)
-        p.text('Issued  14 October 2026\nDue     13 November 2026\nTerms   Net 30',704,213,340,20,'mono',ink,leading=31)
+        p.text('Issued  14 October 2026\nDue     13 November 2026\nTerms   Net 30 / USD',704,213,340,20,'mono',ink,leading=31)
         p.line([72,327,1035,327],teal,2)
         p.text('BILL TO',72,354,430,16,'sans-bold',teal,label='title')
         p.text('Northbank Coffee Cooperative\nAccounts payable\n82 Market Street\nRiverton RV 4022',72,393,440,22,'serif',ink,leading=29)
@@ -165,12 +172,12 @@ def invoices():
                 command['fill']='#ffffff'
         if number==1:
             p.text('SUBTOTAL CARRIED FORWARD',600,1090,325,18,'sans-bold',teal)
-            p.text('1,052.50',895,1121,140,23,'mono',ink)
+            p.text(money(carried),895,1121,140,23,'mono',ink)
             p.text('Line items continue on page 2. Please include both pages when matching this invoice to your purchase order.',73,1216,919,22,'serif',ink,leading=28)
             p.text('No payment is due against this page alone.',73,1290,920,18,'sans',teal)
         else:
-            p.text('Continued from page 1 · brought forward 1,052.50',73,943,960,18,'serif-italic',ink,label='caption')
-            labels=[('Subtotal','1,330.50'),('Tax · 10%','133.05'),('AMOUNT DUE','1,463.55')]
+            p.text(f'Continued from page 1 · brought forward {money(carried)}',73,943,960,18,'serif-italic',ink,label='caption')
+            labels=[('Subtotal',money(subtotal)),('Tax · 10%',money(tax)),('AMOUNT DUE',money(total))]
             for i,(label,value) in enumerate(labels):
                 yy=1015+i*57
                 if i==2:p.rectangle([592,yy-9,1035,yy+42],'#e5f1ef')
