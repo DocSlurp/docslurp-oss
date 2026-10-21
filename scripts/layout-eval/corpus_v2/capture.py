@@ -115,8 +115,10 @@ def compose(source_image, reference_path, scene_path, calibration_path, output, 
     for region in transformed['regions']:
         if 'annotationConfidence' in region:
             region['source_annotationConfidence']=copy.deepcopy(region['annotationConfidence'])
+            region.setdefault('annotationTiers',{})['geometry']='physical-manual-calibration-silver'
+            region['annotationTiers']['visibilityOcclusion']='physical-manual-mask-estimate'
             axes=region['annotationConfidence']['axes']
-            axes['geometry']={'score':.75,'status':'agent-visually-checked','basis':['Manual print-area corner calibration and projected overlay checked; not independently reviewed physical geometry'],'provenance':['capture-calibration']}
+            axes['geometry']={'score':.75,'status':'visually-reviewed','basis':['Manual print-area corner calibration and projected overlay checked; not independently reviewed physical geometry'],'provenance':['capture-calibration']}
             axes['visibilityOcclusion']={'score':.5,'status':'estimated','basis':['Raster-area visibility from manually traced hand silhouette; silhouette is approximate physical coverage'],'provenance':['capture-calibration']}
         region['visibility']=visible_fraction(region['polygon'],occlusion,scene.size)
         region['attributes']['capture_transcription_scope']='Full authored source text retained for provenance; hand coverage is not character-level transcription masking; do not score as visible-only prose'
