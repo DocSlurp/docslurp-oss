@@ -540,6 +540,20 @@ describe("layout shadow integration", () => {
     expect(artifact.summary).toMatchObject({ selected: 0, auditSelected: 2, auditPool: 3 });
     expect(artifact.pages.every((p) => p.selection === "audit" && p.healthyTextLayer === true)).toBe(true);
   });
+  it("runs audits on their own deadline after routed pages exhaust theirs", async () => {
+    const setup = fixtures({ maxPages: 1, timeoutMs: 20, auditPages: 1 });
+    setup.observer.observe = vi.fn(async ({ payload, signal }) => {
+      if ((setup.observer.observe as ReturnType<typeof vi.fn>).mock.calls.length === 1) {
+        await new Promise((_, reject) => signal?.addEventListener("abort", () => reject(signal.reason), { once: true }));
+      }
+      return { result, cacheHit: false, elapsedMs: 1, inputBytes: payload.length, inferencePerformed: true, inferenceKey: "audit" };
+    });
+    await setup.run();
+    const artifact = setup.storage.putJson.mock.calls.find(([key]) => String(key).includes("layout-shadow"))![1] as
+      { summary: Record<string, unknown>; pages: Record<string, unknown>[] };
+    expect(artifact.summary).toMatchObject({ budgetExhausted: true, auditBudgetExhausted: false, auditObserved: 1 });
+    expect(artifact.pages.map((p) => p.selection)).toEqual(["routed", "audit"]);
+  });
   it("checks admission before rendering so saturation wastes no preprocessing", async () => {
     const setup = fixtures();
     setup.observer.hasCapacity = vi.fn(() => false);

@@ -330,6 +330,7 @@ export class RoutePagesStage implements Stage {
           router: plan.routerId,
           pages: pages.length,
           assignments: plan.assignments.length,
+          needsAttention: plan.attention.length,
           pagesNeedingPixels: nonNative.size,
           estimatedCostUsd: plan.chunkEstimate.totalCostUsd,
           routerCostUsd: plan.chunkEstimate.routerCostUsd,
@@ -367,8 +368,12 @@ export class RoutePagesStage implements Stage {
       ...audit.map((page) => ({ page, selection: "audit" as const })),
     ];
     const started = performance.now();
-    const deadline = AbortSignal.timeout(Math.min(10_000, observer.config.timeoutMs * Math.max(1, work.length)));
-    const boundedSignal = signal ? AbortSignal.any([signal, deadline]) : deadline;
+    // Each selection gets its own deadline, started when its first page begins, so routed pages cannot starve audits.
+    const phaseDeadline = (count: number) => AbortSignal.timeout(Math.min(10_000, observer.config.timeoutMs * count));
+    const exhausted = { routed: false, audit: false };
+    let phase: "routed" | "audit" | undefined;
+    let deadline = AbortSignal.abort();
+    let boundedSignal = deadline;
     const rows: Record<string, unknown>[] = [];
     let errors = 0;
     let observed = 0;
@@ -377,9 +382,18 @@ export class RoutePagesStage implements Stage {
     let artifactResultBytes = 0;
     let artifactBudgetExhausted = false;
     let admissionRejected = 0;
+    let auditObserved = 0;
     for (const { page, selection } of work) {
       signal?.throwIfAborted();
-      if (deadline.aborted) break;
+      if (phase !== selection) {
+        phase = selection;
+        deadline = phaseDeadline(selection === "routed" ? selected.length : audit.length);
+        boundedSignal = signal ? AbortSignal.any([signal, deadline]) : deadline;
+      }
+      if (deadline.aborted) {
+        exhausted[selection] = true;
+        continue;
+      }
       const pageStarted = performance.now();
       let attempted = false;
       let dispatched: { inferenceKey: string; inputBytes: number } | undefined;
@@ -416,6 +430,7 @@ export class RoutePagesStage implements Stage {
         const measured = observation.result.diagnostics?.elapsedMs;
         if (typeof measured === "number" && Number.isFinite(measured) && measured >= 0) serviceElapsedMs = measured;
         observed++;
+        if (selection === "audit") auditObserved++;
         cacheHits += Number(observation.cacheHit);
         row = { ...row, inputBytes: observation.inputBytes, cacheHit: observation.cacheHit,
           observerElapsedMs: observation.elapsedMs, rasterCacheHit: raster.cacheHit, freshBytes: !!fresh,
@@ -443,6 +458,7 @@ export class RoutePagesStage implements Stage {
           });
         }
       }
+      if (deadline.aborted) exhausted[selection] = true;
       const elapsedMs = performance.now() - pageStarted;
       const rowBytes = Buffer.byteLength(JSON.stringify(row));
       if (artifactResultBytes + rowBytes > 16 * 1024 * 1024) {
@@ -457,9 +473,10 @@ export class RoutePagesStage implements Stage {
         tags: ["page-router", "layout", "shadow"], metadata });
       if (artifactBudgetExhausted) break;
     }
-    const summary = { selected: selected.length, auditSelected: audit.length, auditPool: auditPool.length, observed, errors,
+    const summary = { selected: selected.length, auditSelected: audit.length, auditPool: auditPool.length, observed, auditObserved, errors,
       admissionRejected, cacheHits, inputBytes,
-      skipped: pages.length - rows.length, eligible: eligible.length, budgetExhausted: deadline.aborted,
+      skipped: pages.length - rows.length, eligible: eligible.length, budgetExhausted: exhausted.routed || exhausted.audit,
+      auditBudgetExhausted: exhausted.audit,
       artifactResultBytes, artifactBudgetExhausted, elapsedMs: performance.now() - started };
     if (rows.length > 0) {
       const artifactKey = `${document.userId}/${state.run.id}/page-route-layout-shadow/${document.id}.json`;
