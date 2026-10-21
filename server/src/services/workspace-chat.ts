@@ -39,6 +39,8 @@ import {
 import { runWithAiObservability } from "../lib/posthog-ai-observability.js";
 import { recordUsageEvent } from "../lib/ai-usage.js";
 import { assertCanSpend, type SpendKind } from "./billing/spend-guard.js";
+import { beginChatTurn, chatTurnFailureReason } from "./billing/chat-turn-billing.js";
+import { claimChatTurnAnswerId } from "../lib/chat-turn-context.js";
 import { sql } from "../db.js";
 import { reviewUntrustedEvidenceText } from "./prompt-injection.js";
 import {
@@ -1000,7 +1002,29 @@ function chatAbortSignal(): AbortSignal | undefined {
   return currentChatAgentSignal() ?? getDeferredContext()?.signal ?? currentRequestSignal();
 }
 
-export async function chatWorkspace(args: {
+type ChatWorkspaceArgs = Parameters<typeof chatWorkspaceInTurn>[0];
+
+/**
+ * One chat turn. Routes that know whether the answer reached the client start
+ * the turn themselves (`beginChatTurn`, see routes/search.ts) and this call
+ * joins it. Any other caller gets a turn owned here: a turn that throws was
+ * never delivered, so its credits are refunded (chat-turn-billing.ts).
+ */
+export async function chatWorkspace(args: ChatWorkspaceArgs): Promise<WorkspaceChatResponse> {
+  const turn = beginChatTurn();
+  try {
+    const response = await turn.run(() => chatWorkspaceInTurn(args));
+    turn.delivered();
+    return response;
+  } catch (error) {
+    await turn.failed(chatTurnFailureReason(error, args.signal)).catch((refundError: unknown) => {
+      reportPublicError(refundError);
+    });
+    throw error;
+  }
+}
+
+async function chatWorkspaceInTurn(args: {
   workspaceId: string;
   userId: string;
   query: string;
@@ -1080,7 +1104,7 @@ function ingestReportNaturalIntents(): boolean {
  * A chat turn answered with the ingest report: deterministic, no model call
  * and no spend. Composer document filters narrow the report to those files.
  */
-async function answerIngestReportTurn(args: Parameters<typeof chatWorkspace>[0]): Promise<WorkspaceChatResponse> {
+async function answerIngestReportTurn(args: ChatWorkspaceArgs): Promise<WorkspaceChatResponse> {
   const startedAtMs = Date.now();
   const workspace = await getWorkspace(args.workspaceId, args.userId);
   if (!workspace) throw new Error("Workspace not found");
@@ -1108,12 +1132,14 @@ async function answerIngestReportTurn(args: Parameters<typeof chatWorkspace>[0])
 type ChatTurnPolicy = { model: string; failover: boolean; requestedModel: string | null; limits: ChatAgentLimits };
 
 async function chatWorkspaceTurn(
-  args: Parameters<typeof chatWorkspace>[0],
+  args: ChatWorkspaceArgs,
   sessionId: string,
   policy: ChatTurnPolicy,
 ): Promise<WorkspaceChatResponse> {
   const startedAtMs = Date.now();
-  const responseId = randomUUID();
+  // The turn's own answer takes the chat turn id its Usage Events carry; a
+  // nested grounded answer (MCP chat tool inside the agent) gets a fresh id.
+  const responseId = claimChatTurnAnswerId() ?? randomUUID();
   const model = policy.model;
   const workspace = await getWorkspace(args.workspaceId, args.userId);
   // Every hosted call in this turn sees workspace content or the user's query

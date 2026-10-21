@@ -50,6 +50,20 @@ export function middlewareErrorResponse(c: Context, status: ErrorStatus, code: A
   return c.json({ error: message, code, ...details }, status);
 }
 
+const thrownErrorDetails = new WeakMap<object, ApiErrorDetails>();
+
+/**
+ * Attach server-authored details to an error before rethrowing it, so the
+ * envelope built for it (envelopeForError) carries them. The public boundary
+ * still forwards only the allowlisted keys (publicApiErrorDetails).
+ */
+export function withApiErrorDetails<T>(error: T, details: ApiErrorDetails): T {
+  if (error && typeof error === "object") {
+    thrownErrorDetails.set(error, { ...thrownErrorDetails.get(error), ...details });
+  }
+  return error;
+}
+
 const DROPPED_HEADERS = new Set(["content-type", "content-length", "content-encoding", "transfer-encoding"]);
 
 /**
@@ -61,7 +75,8 @@ const DROPPED_HEADERS = new Set(["content-type", "content-length", "content-enco
 export function envelopeForError(c: Context, error: unknown, status: number, originalHeaders?: Headers): Response {
   const { code: named } = error as { code?: unknown };
   const code = isApiErrorCode(named) ? named : apiErrorCodeForStatus(status);
-  const response = apiErrorResponse(c, status as ErrorStatus, code, API_ERROR_PUBLIC_MESSAGES[code]);
+  const details = error && typeof error === "object" ? thrownErrorDetails.get(error) : undefined;
+  const response = apiErrorResponse(c, status as ErrorStatus, code, API_ERROR_PUBLIC_MESSAGES[code], details);
   for (const source of [error instanceof HTTPException ? error.res?.headers : undefined, originalHeaders]) {
     source?.forEach((value, name) => {
       if (!DROPPED_HEADERS.has(name.toLowerCase())) response.headers.set(name, value);
