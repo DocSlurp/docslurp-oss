@@ -1,5 +1,54 @@
 # Langfuse evaluation dataset sync
 
+## Prompts, evaluators and judge assets
+
+`node scripts/eval-sync/assets.mjs --manifest scripts/eval-sync/content-safety/manifest.json`
+validates the complete content-safety asset bundle without network access. Add
+`--write --env-file /private/.env.production --output /private/sync-report.json`
+to synchronize it; `--base-url http://127.0.0.1:PORT` supports an authorized SSH tunnel.
+File paths in this manifest resolve relative to the manifest, not the shell directory.
+
+The bundle contains the Mastra candidate's policy prompt, an independent-reference
+code evaluator, an advisory LLM judge definition, and seven agent-authored synthetic
+development cases. These cases verify wiring only. They are **not human-reviewed
+holdout evidence**, and cannot support an accuracy or promotion claim. The advisory
+judge uses an explicit modest-cost model as a configurable starting candidate, not
+the winner of the required comparison. No model calls, automatic evaluation rules,
+provider credentials, production prompt labels, or infrastructure changes are made
+by asset sync. A native judge may remain paused until a model connection is available.
+
+Prompt versions use a full content-hash label; evaluator definitions use immutable
+content-derived names and return stable native evaluator IDs. Changed source creates
+a new definition rather than mutating a prior experiment's evaluator. Duplicate
+remote evaluator names and prompt drift fail rather than choosing silently. Reads
+verify the actual prompt, evaluator definition, and dataset items after writes.
+The report is the binding record: runtime adapters must pin its prompt version and
+evaluator IDs, not the moving `latest` or `production` labels. Preserve the report
+beside experiment artifacts. Serialize sync jobs per namespace; the remote API does
+not offer atomic name uniqueness for evaluator creation.
+
+The policy prompt's `{{input}}` variable receives only the candidate input, serialized
+as JSON. It must never receive expected labels. Mastra `createScorer` or a custom
+processor should use this same pinned prompt, then deterministic reference scoring
+compares the result with separately held labels. The advisory judge is diagnostic,
+not the ground-truth scorer. Each of the OpenAI, Mastra and cascade arms must retain
+its own model/prompt/policy versions, usage receipts, errors, latency and coverage.
+
+Native evaluator definitions do not automatically enforce content policy or execute
+Mastra. The actual comparison runner and enforcement paths remain separate work.
+Existing shared OTEL tracing remains enabled through its existing configuration;
+asset synchronization is not evidence that an experiment has run. Use the current
+Langfuse experiment SDK or supported OTEL experiment attributes when the runner
+executes; do not create legacy dataset-run-item records or invent historical traces.
+
+Official API contracts checked 2026-10-20:
+[prompts/evaluators OpenAPI](https://cloud.langfuse.com/generated/api/openapi.yml),
+[code evaluator context](https://langfuse.com/docs/evaluation/evaluation-methods/code-evaluators),
+[experiment linkage](https://langfuse.com/integrations/native/opentelemetry/experiments).
+Run `node --test scripts/eval-sync/*.test.mjs` for asset and dataset synchronization tests.
+
+## Existing dataset-only importer
+
 `node scripts/eval-sync/langfuse.mjs --manifest /path/manifest.json` validates and prints counts only. Add `--outbox /private/path/outbox.json` to retain desired writes outside the repository. Add `--env-file /path/.env.production --write --output /path/report.json` to sync. Credentials are loaded only for write mode and are never printed. `--base-url http://127.0.0.1:PORT` supports an existing authorized SSH tunnel; otherwise the configured HTTPS endpoint is used. No LLM calls, traces, scores or experiment runs are created.
 
 Manifest shape:

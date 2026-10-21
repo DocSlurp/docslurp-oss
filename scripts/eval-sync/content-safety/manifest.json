@@ -1,0 +1,46 @@
+{
+  "schemaVersion": 1,
+  "sourceCommit": "content-safety-assets-v1",
+  "namespace": "docslurp/content-safety",
+  "config": {
+    "policyVersion": "documentary-strict-v1",
+    "arms": ["openai-moderation", "mastra-judge", "cascade"],
+    "labelProvenance": "agent-authored synthetic development examples; not human-adjudicated promotion evidence"
+  },
+  "prompts": [{
+    "name": "docslurp/content-safety/mastra-judge",
+    "type": "text",
+    "promptFile": "judge.txt",
+    "labels": ["development"],
+    "config": { "policyVersion": "documentary-strict-v1", "runtime": "mastra", "modelSelection": "pending-comparative-evaluation" }
+  }],
+  "evaluators": [{
+    "name": "docslurp/content-safety/reference-decisions",
+    "description": "Deterministic comparison against independent reference decisions. Synthetic development labels are not promotion evidence.",
+    "type": "code",
+    "sourceCodeLanguage": "TYPESCRIPT",
+    "sourceCodeFile": "decision-evaluator.js"
+  }, {
+    "name": "docslurp/content-safety/advisory-policy-judge",
+    "description": "Advisory judge only; never substitutes for human holdout labels. No automatic evaluation rules are installed.",
+    "type": "llm_as_judge",
+    "promptFile": "review-judge.txt",
+    "modelConfig": { "provider": "openai", "model": "gpt-4.1-mini" },
+    "variableMapping": [{ "variable": "input", "source": "input" }, { "variable": "output", "source": "output" }],
+    "outputDefinition": { "dataType": "BOOLEAN" },
+    "pricing": {
+      "source": "https://developers.openai.com/api/docs/models/gpt-4.1-mini",
+      "verifiedAt": "2026-10-20",
+      "inputUsdPerMillion": 0.4,
+      "outputUsdPerMillion": 1.6
+    }
+  }],
+  "datasets": [{
+    "name": "docslurp/content-safety/development-v1",
+    "split": "development",
+    "cases": "development.json",
+    "exportApproved": true,
+    "humanReviewed": false,
+    "purpose": "synthetic integration smoke cases only; not an accuracy benchmark"
+  }]
+}
