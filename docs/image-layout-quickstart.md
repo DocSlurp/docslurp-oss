@@ -1,5 +1,10 @@
 # Image layout quickstart
 
+The current synthetic campaign corpus is engineering evidence only. Its scores
+are not grounds for model promotion, production quality claims or a final model
+choice. Further acceptance evaluation is suspended pending a representative
+replacement corpus. Runtime smoke tests establish mechanism behavior only.
+
 The explicit CLI, resident local service and worker adapter are usable mechanisms
 for running a cached detector on a single raster image. They return labeled boxes,
 confidence, source dimensions and optional polygons/order/fingerprints. They are

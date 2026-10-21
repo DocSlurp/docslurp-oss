@@ -1,5 +1,10 @@
 # Custom Heron training pilot
 
+The current synthetic campaign corpus is engineering evidence only. Its scores
+are not grounds for model promotion, production quality claims or a final model
+choice. Further acceptance evaluation is suspended pending a representative
+replacement corpus. Runtime smoke tests establish mechanism behavior only.
+
 This is an opt-in experiment, not a trained release or an accuracy claim. It uses
 Heron's pretrained document features and replaces its class head with the 14
 public document-region classes needed by the runtime. The checkpoint identifies
