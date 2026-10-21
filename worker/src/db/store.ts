@@ -2689,13 +2689,6 @@ export class Store {
   }
 
   /**
-   * Remove the graph evidence of a run's documents (chunk mentions, edge
-   * evidence and extraction state) before retention drops their chunks or the
-   * run itself, then re-derive the touched nodes and edges. Facts that other
-   * documents still support survive with recomputed weights and counts;
-   * workspace communities are recounted rather than deleted.
-   */
-  /**
    * Native search's cached eligible sets (server search/eligible-documents.ts,
    * channel `search_eligibility`) drop these workspaces now instead of after
    * their TTL: they serve LanceDB rows without re-reading Postgres.
@@ -2706,6 +2699,13 @@ export class Store {
     await this.sql`select pg_notify('search_eligibility', ${JSON.stringify({ workspaceIds: ids })})`;
   }
 
+  /**
+   * Remove the graph evidence of a run's documents (chunk mentions, edge
+   * evidence and extraction state) before retention drops their chunks or the
+   * run itself, then re-derive the touched nodes and edges. Facts that other
+   * documents still support survive with recomputed weights and counts;
+   * workspace communities are recounted rather than deleted.
+   */
   private async removeRunGraphContributions(workspaceId: string, runId: string): Promise<void> {
     if (!(await this.tableExists("kg_nodes"))) return;
     await this.sql.begin(async (tx) => {

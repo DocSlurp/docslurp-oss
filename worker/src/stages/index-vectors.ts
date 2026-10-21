@@ -364,7 +364,9 @@ export class IndexStage implements Stage {
           ? await this.writeLanceDbQueued(location.uri, location.table, args)
           : await this.writeLanceDb(location.uri, location.table, args.records, args.recordPages, args.signal);
         // An earlier attempt's write still pending in the outbox can land
-        // after the embed stage's delete; this document's write supersedes it.
+        // after the embed stage's delete. The table write lease normally
+        // orders it before this document's write; it is a TTL, so a drainer
+        // that lost it mid-write can still land later (rare, not guarded).
         const written = new Set(args.records.map((record) => record.id));
         const stale = (args.staleIds ?? []).filter((id) => !written.has(id));
         if (stale.length > 0) await this.deleteVectors(location.uri, location.table, stale);
