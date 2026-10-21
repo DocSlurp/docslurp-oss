@@ -200,6 +200,8 @@ export interface ImageLayoutEndpointOptions {
   expectedArtifactSha256?: string;
   device: "cpu" | "cuda";
   timeoutMs?: number;
+  /** Synchronous accounting hook immediately before HTTP dispatch; throwing prevents dispatch. */
+  onRequest?: () => void;
 }
 
 /** Warm transport: raw source bytes, one resident model, no temporary files or per-page model load. */
@@ -216,6 +218,8 @@ export async function detectImageLayoutAtEndpoint(input: Buffer, options: ImageL
   if (!metadata.width || !metadata.height || (metadata.pages ?? 1) !== 1) throw new Error("Layout input must be one raster image");
   if (!["png", "jpeg", "webp", "tiff", "gif", "avif", "heif"].includes(metadata.format ?? "")) throw new Error("Unsupported layout raster format");
   const timeout = AbortSignal.timeout(timeoutMs);
+  signal?.throwIfAborted();
+  options.onRequest?.();
   const response = await fetch(url, {
     method: "POST", headers: { "Content-Type": "application/octet-stream" }, body: new Uint8Array(input),
     redirect: "error", signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
