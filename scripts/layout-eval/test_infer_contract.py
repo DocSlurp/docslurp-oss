@@ -5,7 +5,7 @@ from types import SimpleNamespace
 import tempfile
 import unittest
 from unittest.mock import patch
-from infer import add_detector_arguments,create_detector,build_result
+from infer import add_detector_arguments,create_detector,build_result,inference_profile_sha256
 
 
 def arguments(extra=()):
@@ -13,6 +13,22 @@ def arguments(extra=()):
 
 
 class InferContractTests(unittest.TestCase):
+    def test_profile_hash_is_stable_and_covers_runtime_configuration(self):
+        from copy import deepcopy
+        metadata={'id':'test','revision':'r','graph_sha256':'a'*64,'model_size':640,
+                  'orientation':{'minimum_score':.75},'rectification':{'max_edge':768},
+                  'visual_classifier':{'revision':'classifier-pin'}}
+        detector=SimpleNamespace(metadata=metadata)
+        original=inference_profile_sha256(detector,'cpu',.3)
+        self.assertEqual(len(original),64)
+        self.assertEqual(original,inference_profile_sha256(SimpleNamespace(metadata=dict(reversed(list(metadata.items())))),'cpu',.3))
+        self.assertNotEqual(original,inference_profile_sha256(detector,'cpu',.4))
+        self.assertNotEqual(original,inference_profile_sha256(detector,'cuda',.3))
+        for field,value in [('model_size',320),('orientation',{'minimum_score':.8}),
+                            ('rectification',{'max_edge':1024}),('visual_classifier',{'revision':'changed'})]:
+            changed=deepcopy(metadata);changed[field]=value
+            self.assertNotEqual(original,inference_profile_sha256(SimpleNamespace(metadata=changed),'cpu',.3))
+
     def test_defaults_and_invalid_options(self):
         args=arguments();self.assertFalse(args.rectify_page);self.assertIsNone(args.orientation_onnx_path)
         for extra in (['--model-size','33'],['--model','pp-small-onnx','--model-size','640'],
@@ -56,6 +72,7 @@ class InferContractTests(unittest.TestCase):
                               polygon=[[.1,.2],[.8,.2],[.8,.9]],reading_order=0)]],{}
         data=io.BytesIO();Image.new('RGB',(20,10),'white').save(data,format='PNG')
         result=build_result(Detector(),data.getvalue(),'cpu')
+        self.assertEqual(result['inferenceProfileSha256'],inference_profile_sha256(Detector(),'cpu'))
         self.assertEqual(result['image']['width'],20)
         self.assertEqual(result['regions'][0]['readingOrder'],0)
         self.assertEqual(result['diagnostics']['imageTransforms'][0]['orientation']['correction_angle'],90)
@@ -76,7 +93,11 @@ class ResidentSecurityTests(unittest.TestCase):
             for headers,status in [({},200),({'Host':'127.0.0.1:12345'},200),({'Host':'untrusted.example'},403),({'Origin':'https://untrusted.example'},403)]:
                 connection=http.client.HTTPConnection('127.0.0.1',server.server_port,timeout=2)
                 connection.request('GET','/health',headers=headers)
-                response=connection.getresponse();self.assertEqual(response.status,status);response.read();connection.close()
+                response=connection.getresponse();self.assertEqual(response.status,status)
+                body=response.read();connection.close()
+                if status==200:
+                    import json
+                    self.assertEqual(json.loads(body)['inferenceProfileSha256'],inference_profile_sha256(detector,'cpu',.3))
         finally:server.shutdown();server.server_close();thread.join()
 
     def test_nested_classifier_metadata_and_invalid_crop_geometry(self):

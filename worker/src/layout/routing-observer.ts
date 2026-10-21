@@ -4,6 +4,7 @@ import { detectImageLayoutAtEndpoint, type ImageLayoutEndpointOptions, type Imag
 
 export interface RoutingLayoutObserverConfig extends Omit<ImageLayoutEndpointOptions, "onRequest"> {
   expectedArtifactSha256: string;
+  expectedInferenceProfileSha256: string;
   timeoutMs: number;
   maxPages: number;
   maxBytes: number;
@@ -36,6 +37,8 @@ export function readLayoutObserverConfig(env: NodeJS.ProcessEnv = process.env): 
   }
   const expectedArtifactSha256 = required("ARTIFACT_SHA256");
   if (!/^[0-9a-f]{64}$/.test(expectedArtifactSha256)) throw new Error("Invalid layout artifact SHA256");
+  const expectedInferenceProfileSha256 = required("PROFILE_SHA256");
+  if (!/^[0-9a-f]{64}$/.test(expectedInferenceProfileSha256)) throw new Error("Invalid inference profile SHA256");
   const device = env.PAGE_ROUTER_LAYOUT_DEVICE ?? "cpu";
   if (device !== "cpu" && device !== "cuda") throw new Error("Invalid layout device");
   const rawCost = env.PAGE_ROUTER_LAYOUT_HOURLY_COST_USD;
@@ -44,7 +47,7 @@ export function readLayoutObserverConfig(env: NodeJS.ProcessEnv = process.env): 
     throw new Error("Layout hourly cost must be a positive finite USD amount or omitted");
   }
   return {
-    endpoint, expectedModelId: required("MODEL_ID"), expectedRevision: required("REVISION"), expectedArtifactSha256, device,
+    endpoint, expectedModelId: required("MODEL_ID"), expectedRevision: required("REVISION"), expectedArtifactSha256, expectedInferenceProfileSha256, device,
     timeoutMs: integer(env.PAGE_ROUTER_LAYOUT_TIMEOUT_MS, 2000, 1, 60_000, "layout timeout"),
     maxPages: integer(env.PAGE_ROUTER_LAYOUT_MAX_PAGES, 4, 1, 100, "layout maximum pages"),
     maxBytes: integer(env.PAGE_ROUTER_LAYOUT_MAX_BYTES, 25 * 1024 * 1024, 1, 25 * 1024 * 1024, "layout maximum bytes"),
@@ -67,7 +70,7 @@ export interface RoutingLayoutObservation {
 }
 interface Job {
   inferenceKey: string;
-  onRequest?: (event: { inferenceKey: string; inputBytes: number }) => void;
+  callbacks: Map<symbol, ((event: { inferenceKey: string; inputBytes: number }) => void) | undefined>;
   key: string;
   payload: Buffer;
   controller: AbortController;
@@ -88,9 +91,10 @@ interface Job {
  * Aborting HTTP does not guarantee that the resident Python process stops inference.
  * A cancelled creator has no successful usage receipt; callers must retain failures
  * as unknown compute, and must not interpret absence of a receipt as zero usage.
- * onRequest belongs to the creator and runs once immediately before HTTP dispatch,
- * including attempts that later fail. Cache hits and joining callers do not invoke
- * it. A synchronous callback exception prevents dispatch (accounting fails closed).
+ * onRequest belongs to the earliest still-active caller and runs once before HTTP dispatch,
+ * including attempts that later fail. Joining callers create no extra dispatch;
+ * one may inherit accounting when earlier callers cancel before dispatch. Cache
+ * hits never invoke it. A synchronous callback exception prevents dispatch.
  * maxPages is enforced by the calling stage, since only it knows page ownership.
  */
 export class RoutingLayoutObserver {
@@ -107,6 +111,7 @@ export class RoutingLayoutObserver {
     this.config = Object.freeze(readLayoutObserverConfig({
       PAGE_ROUTER_LAYOUT: "shadow", PAGE_ROUTER_LAYOUT_ENDPOINT: config.endpoint,
       PAGE_ROUTER_LAYOUT_MODEL_ID: config.expectedModelId, PAGE_ROUTER_LAYOUT_REVISION: config.expectedRevision,
+      PAGE_ROUTER_LAYOUT_PROFILE_SHA256: config.expectedInferenceProfileSha256,
       PAGE_ROUTER_LAYOUT_ARTIFACT_SHA256: config.expectedArtifactSha256, PAGE_ROUTER_LAYOUT_DEVICE: config.device,
       PAGE_ROUTER_LAYOUT_TIMEOUT_MS: String(config.timeoutMs), PAGE_ROUTER_LAYOUT_MAX_PAGES: String(config.maxPages),
       PAGE_ROUTER_LAYOUT_MAX_BYTES: String(config.maxBytes), PAGE_ROUTER_LAYOUT_CONCURRENCY: String(config.concurrency),
@@ -136,7 +141,7 @@ export class RoutingLayoutObserver {
       let reject!: Job["reject"];
       const promise = new Promise<string>((yes, no) => { resolve = yes; reject = no; });
       const controller = new AbortController();
-      job = { key, inferenceKey: randomUUID(), onRequest, payload: Buffer.from(payload), controller, promise, resolve, reject, waiters: 0, settled: false,
+      job = { key, inferenceKey: randomUUID(), callbacks: new Map(), payload: Buffer.from(payload), controller, promise, resolve, reject, waiters: 0, settled: false,
         timer: setTimeout(() => controller.abort(new Error("Layout observation deadline exceeded")), this.config.timeoutMs) };
       this.jobs.set(key, job);
       const current = job;
@@ -145,8 +150,10 @@ export class RoutingLayoutObserver {
     }
     const current = job;
     current.waiters++;
+    const waiter = Symbol("layout caller");
+    current.callbacks.set(waiter, onRequest);
     const result = new Promise<string>((resolve, reject) => {
-      const aborted = () => reject(signal?.reason ?? new Error("Layout observation aborted"));
+      const aborted = () => { current.callbacks.delete(waiter); reject(signal?.reason ?? new Error("Layout observation aborted")); };
       signal?.addEventListener("abort", aborted, { once: true });
       current.promise.then(resolve, reject).finally(() => signal?.removeEventListener("abort", aborted));
     });
@@ -155,6 +162,7 @@ export class RoutingLayoutObserver {
       const json = await result;
       return { result: JSON.parse(json) as ImageLayoutResult, cacheHit: false, inferencePerformed, inferenceKey: current.inferenceKey, elapsedMs: performance.now() - started, inputBytes: payload.byteLength };
     } finally {
+      current.callbacks.delete(waiter);
       current.waiters--;
       if (!current.waiters && !current.settled) current.controller.abort(new Error("Layout observation has no remaining callers"));
     }
@@ -165,8 +173,9 @@ export class RoutingLayoutObserver {
       const job = this.queue.shift()!;
       if (job.settled) continue;
       this.active++;
-      void detectImageLayoutAtEndpoint(job.payload, { ...this.config, onRequest: () => job.onRequest?.({ inferenceKey: job.inferenceKey, inputBytes: job.payload.byteLength }) }, job.controller.signal)
-        .then((result) => this.finish(job, JSON.stringify(result)), (error: unknown) => this.finish(job, undefined, error))
+      void detectImageLayoutAtEndpoint(job.payload, { ...this.config, onRequest: () => job.callbacks.values().next().value?.({ inferenceKey: job.inferenceKey, inputBytes: job.payload.byteLength }) }, job.controller.signal)
+        .then((result) => this.finish(job, JSON.stringify(result)))
+        .catch((error: unknown) => this.finish(job, undefined, error))
         .finally(() => { this.active--; this.drain(); });
     }
   }

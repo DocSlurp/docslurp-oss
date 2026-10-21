@@ -10,7 +10,7 @@ from http.server import BaseHTTPRequestHandler,HTTPServer
 import json
 import re
 import time
-from infer import MAX_INPUT_BYTES,add_detector_arguments,build_result,create_detector,encode_result
+from infer import MAX_INPUT_BYTES,add_detector_arguments,build_result,create_detector,encode_result,inference_profile_sha256
 
 
 def make_handler(detector,device,threshold,model_load_ms):
@@ -36,7 +36,7 @@ def make_handler(detector,device,threshold,model_load_ms):
         def do_GET(self):
             if not self.local_request():return
             if self.path!='/health': return self.error(404,'Not found')
-            self.send_bytes(200,json.dumps({'ready':True,'model':detector.metadata,'device':device,
+            self.send_bytes(200,json.dumps({'ready':True,'model':detector.metadata,'device':device,'inferenceProfileSha256':inference_profile_sha256(detector,device,threshold),
               'modelLoadMs':model_load_ms,'execution':'single-flight-resident'}).encode())
         def do_POST(self):
             if not self.local_request():return
@@ -68,7 +68,7 @@ def main():
     if not 1<=args.port<=65535: parser.error('Invalid port')
     start=time.perf_counter(); detector=create_detector(args); load_ms=1000*(time.perf_counter()-start)
     server=HTTPServer(('127.0.0.1',args.port),make_handler(detector,args.device,args.threshold,load_ms))
-    print(json.dumps({'ready':True,'address':server.server_address,'modelLoadMs':load_ms,'model':detector.metadata,'device':args.device}),flush=True)
+    print(json.dumps({'ready':True,'address':server.server_address,'modelLoadMs':load_ms,'model':detector.metadata,'device':args.device,'inferenceProfileSha256':inference_profile_sha256(detector,args.device,args.threshold)}),flush=True)
     try: server.serve_forever()
     except KeyboardInterrupt: pass
     finally: server.server_close()

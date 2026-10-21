@@ -10,6 +10,8 @@ export const imageLayoutLabels = ["paragraph", "title", "list", "table", "chart"
 export type ImageLayoutLabel = typeof imageLayoutLabels[number];
 export interface ImageLayoutResult {
   schemaVersion: 1;
+  /** Hash of complete detector runtime configuration, distinct from graph identity. */
+  inferenceProfileSha256?: string;
   model: { id: string; revision: string; artifactSha256?: string };
   device: "cpu" | "cuda";
   /** Stored raster coordinates: EXIF orientation is not applied. */
@@ -64,6 +66,7 @@ export function parseImageLayout(value: unknown): ImageLayoutResult {
   const result = object(value);
   if (result.schemaVersion !== 1 || result.coordinateSpace !== "normalized-source") throw new Error("Unsupported image layout contract/coordinate space");
   if (result.device !== "cpu" && result.device !== "cuda") throw new Error("Unsupported layout device");
+  if (result.inferenceProfileSha256 !== undefined && !/^[0-9a-f]{64}$/.test(text(result.inferenceProfileSha256))) throw new Error("Invalid inference profile hash");
   const model = object(result.model);
   const image = object(result.image);
   if (image.sha256 !== undefined && !/^[0-9a-f]{64}$/.test(text(image.sha256))) throw new Error("Invalid source image hash");
@@ -116,7 +119,7 @@ export function parseImageLayout(value: unknown): ImageLayoutResult {
     }
     return { label: kind, rawLabel: text(region.rawLabel), confidence: unit(region.confidence), bbox, ...extras };
   });
-  return { schemaVersion: 1, model: { id: text(model.id), revision: text(model.revision), ...(model.artifactSha256 ? { artifactSha256: text(model.artifactSha256) } : {}) }, device: result.device,
+  return { schemaVersion: 1, ...(result.inferenceProfileSha256 ? { inferenceProfileSha256: text(result.inferenceProfileSha256) } : {}), model: { id: text(model.id), revision: text(model.revision), ...(model.artifactSha256 ? { artifactSha256: text(model.artifactSha256) } : {}) }, device: result.device,
     image: { width: dimension(image.width), height: dimension(image.height), ...(image.sha256 ? { sha256: text(image.sha256) } : {}) }, coordinateSpace: "normalized-source", supportedLabels, regions, ...(result.diagnostics !== undefined ? { diagnostics: object(result.diagnostics) } : {}) };
 }
 export interface ImageLayoutCliOptions {
@@ -198,6 +201,7 @@ export interface ImageLayoutEndpointOptions {
   expectedModelId: string;
   expectedRevision: string;
   expectedArtifactSha256?: string;
+  expectedInferenceProfileSha256?: string;
   device: "cpu" | "cuda";
   timeoutMs?: number;
   /** Synchronous accounting hook immediately before HTTP dispatch; throwing prevents dispatch. */
@@ -246,6 +250,7 @@ export async function detectImageLayoutAtEndpoint(input: Buffer, options: ImageL
   }
   const raw: unknown = JSON.parse(Buffer.concat(chunks).toString("utf8"));
   const result = parseImageLayout(raw);
+  if (options.expectedInferenceProfileSha256 && result.inferenceProfileSha256 !== options.expectedInferenceProfileSha256) throw new Error("Layout service inference profile differs from configuration");
   if (result.device !== options.device) throw new Error("Layout service changed requested device");
   if (options.expectedArtifactSha256 && result.model.artifactSha256 !== options.expectedArtifactSha256) throw new Error("Layout service model artifact hash differs from configuration");
   if (result.model.id !== options.expectedModelId || result.model.revision !== options.expectedRevision) throw new Error("Layout service model identity differs from configuration");
