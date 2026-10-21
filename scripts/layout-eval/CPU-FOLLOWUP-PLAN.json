@@ -1,0 +1,16 @@
+{
+  "schema_version": "layout-cpu-followup-plan-v1",
+  "status": "suspended-corpus-v1-rejected",
+  "execution_authorized_by_this_file": false,
+  "reason": "User requires substantially richer human-realistic corpus and qualitative review. Existing results are engineering-only. No finalist or holdout freeze exists.",
+  "admission_requirements": ["Replacement corpus qualitative review accepted", "New dataset and source hashes retained", "Coordinator allocates isolated CPU timing window", "Development settings frozen before any holdout use"],
+  "planned_development_arms": [
+    {"model":"pp-small-onnx","device":"cpu","precision":"fp32","threads":4,"orientation":false,"variant":"original"},
+    {"model":"pp-small-onnx","device":"cpu","precision":"fp32","threads":4,"orientation":true,"variant":"original"},
+    {"model":"pp-small-onnx","device":"cpu","precision":"fp32","threads":4,"orientation":false,"variant":"jpeg-960-q60"},
+    {"model":"pp-small-onnx","device":"cpu","precision":"fp32","threads":4,"orientation":true,"variant":"jpeg-960-q60"}
+  ],
+  "quality_model_cpu_canary": {"models":["heron","ppv3","heron-custom"],"device":"cpu","precision":"fp32","threads":4,"initial_limit":32,"expanded_limit":160,"expand_only_if":"No initialization or inference errors; bounded throughput and RSS judged viable by coordinator; custom checkpoint digest available","runtime":"Pinned separate environments and actual processor backend retained"},
+  "transport_recipe": ["PYTHON","scripts/layout-eval/transport_benchmark.py","--model","pp-small-onnx","--device","cpu","--threads","4","--onnx-path","PINNED_GRAPH","--manifest","REVIEWED_DEV_MANIFEST","--limit","4","--repeats","2","--max-seconds","180","--output-dir","FRESH_EVIDENCE_DIRECTORY"],
+  "future_confirmation_design": {"status":"not-admitted","blocks":3,"paired":true,"cluster_unit":"Metadata-only union of shared source/template/document/exact-image identities","note":"Repeated blocks reuse documents and are not independent document evidence; commands and finalists must be regenerated after reviewed corpus and development freeze."}
+}

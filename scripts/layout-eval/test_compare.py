@@ -19,6 +19,30 @@ class CompareTests(unittest.TestCase):
         self.assertEqual(output['delta_confidence95_percentile']['micro_f1'],{'low':-1,'high':-1})
         self.assertEqual(output['per_family']['table']['sources'],2)
 
+    def test_duplicate_template_join_preserves_family_slices(self):
+        region={'label':'table','bbox':[0,0,1,1]}
+        left={}; right={}
+        for source,family,good in [('a','tables',True),('b','ads',False),('c','other',True)]:
+            row={'truth':[region],'regions':[region] if good else [],
+                'metadata':{'source_id':source,'source_family':family,'template_family':source,
+                            'image_sha256':'shared' if source in ('a','b') else 'unique'}}
+            left[(source,0)]=row; right[(source,0)]=row
+        result=paired_comparison(left,right,replicates=10)
+        self.assertEqual(result['sources'],3); self.assertEqual(result['effective_clusters'],2)
+        self.assertEqual(result['cluster_membership']['a'],result['cluster_membership']['b'])
+        self.assertEqual(result['per_family']['tables']['baseline']['micro_f1'],1)
+        self.assertEqual(result['per_family']['ads']['baseline']['micro_f1'],0)
+
+    def test_authoritative_membership_and_incomplete_artifact(self):
+        row=lambda s:{'truth':[],'regions':[],'metadata':{'source_id':s}}
+        rows={(s,0):row(s) for s in ('a','b')}
+        membership={'schema':'layout-duplicate-aware-clusters-v1','source_to_cluster':{'a':'x','b':'x'},
+                    'clusters':{'x':['a','b']},'join_receipts':{},'policy':'metadata only'}
+        result=paired_comparison(rows,rows,replicates=5,membership=membership)
+        self.assertEqual(result['effective_clusters'],1)
+        membership['source_to_cluster'].pop('b')
+        with self.assertRaises(ValueError): paired_comparison(rows,rows,membership=membership)
+
     def test_mismatched_pairs_and_references_fail(self):
         with self.assertRaises(ValueError): paired_comparison({('a',0):{}},{})
         row={'truth':[],'regions':[],'metadata':{'source_id':'a'}}
