@@ -75,6 +75,13 @@ export class WorkflowState {
   artifacts: Record<string, string>;
   artifactLedger: DocumentArtifactLedger;
   readonly usageLedger = new PipelineUsageEventLedger();
+  /**
+   * Chunk ids the embed stage dropped (a retry that produced fewer chunks),
+   * per document: the index stage deletes their LanceDB rows again once the
+   * document's new rows are committed, so an earlier attempt's pending write
+   * cannot bring them back.
+   */
+  readonly staleVectorIds = new Map<string, string[]>();
   pendingPerformance: PerformanceEvent[];
   pendingParserEvaluations: ParserEvaluation[];
   vectorIndexes: VectorIndex[];

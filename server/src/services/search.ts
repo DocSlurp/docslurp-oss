@@ -884,11 +884,16 @@ async function hydrateNativeHits(args: {
 }): Promise<SearchChunk[]> {
   const rowsByHit = new Map<string, ChunkRow[]>();
   const misses: LanceDbSearchHit[] = [];
+  let stale = 0;
   for (const hit of args.hits) {
     const document = args.documents.get(hit.documentId);
     const hydration = decodeLanceChunkHydration(hit.hydration);
     const copies = args.copiesByOwner.get(hit.documentId);
-    if (document && hydration && typeof hit.text === "string" && hit.chunkIndex !== null && hydration.runId === document.runId) {
+    // A correction reindex rewrites a document's chunks under new ids and
+    // leaves its LanceDB rows stale (lanceStale, from the cached set): those
+    // hits hydrate from Postgres, which drops chunks that no longer exist.
+    if (document?.lanceStale) stale += 1;
+    if (document && !document.lanceStale && hydration && typeof hit.text === "string" && hit.chunkIndex !== null && hydration.runId === document.runId) {
       rowsByHit.set(hit.id, [{
         id: hit.id, document_id: hit.documentId, run_id: hydration.runId, chunk_index: hit.chunkIndex, text: hit.text,
         heading_path: hydration.headingPath, page_number: hydration.pageNumber, token_estimate: hydration.tokenEstimate,
@@ -899,20 +904,7 @@ async function hydrateNativeHits(args: {
       misses.push(hit);
     }
   }
-  // LanceDB rows can outlive their chunk (a correction reindex rewrites a
-  // document's chunks under new ids): keep a hit only while its chunk exists,
-  // as the Postgres path's hydration does. One primary-key read.
-  const fromLance = [...rowsByHit.keys()];
-  if (fromLance.length > 0) {
-    const live = new Set((await sql<{ id: string }[]>`
-      select id from document_chunks where id in (select jsonb_array_elements_text(${sql.json(fromLance)}::jsonb))
-    `).map((row) => row.id));
-    for (const id of fromLance) {
-      if (live.has(id)) continue;
-      rowsByHit.delete(id);
-      countSearchEvent("nativeHydrationStale");
-    }
-  }
+  if (stale > 0) countSearchEvent("nativeHydrationStale");
   if (misses.length > 0) {
     countSearchEvent("nativeHydrationPostgres");
     const fromPostgres = await hydrateHitsFromPostgres(misses, new Set(args.documents.keys()), args.copiesByOwner, args.workspaceId, args.options);

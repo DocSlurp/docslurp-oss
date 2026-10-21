@@ -1,5 +1,6 @@
 import { sql as defaultSql, type SqlClient } from "../db.js";
 import { signalPipelineCancel } from "../lib/temporal.js";
+import { notifySearchEligibilityChanged } from "../search/eligibility-hint.js";
 
 /**
  * Data deletion: the one place that removes a workspace's rows.
@@ -114,5 +115,6 @@ export async function deleteWorkspaceData(
   // Rows a concurrent upload added since the last batch cascade here and are
   // still enqueued by the trigger.
   await deps.sql`delete from workspaces where id = ${workspaceId}`;
+  await notifySearchEligibilityChanged(deps.sql, [workspaceId]);
   return { documents, runs: runs?.count ?? 0 };
 }

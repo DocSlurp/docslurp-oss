@@ -28,8 +28,7 @@ import type { WorkflowState } from "../pipeline/pipeline.js";
 import type { PipelineUsageEventLedger } from "../pipeline/usage-ledger.js";
 import { resolvePolicy } from "../stages/pii-detect.js";
 import { embedTextChunks, estimateTokens, type RemoteEmbeddingUsage, type VectorBackendRecord } from "../stages/embedding-runtime.js";
-import { connectLanceDb } from "../stages/lancedb-connection.js";
-import { writeLanceDbRecords } from "../stages/lancedb-writer.js";
+import { deleteLanceDbRecords, writeLanceDbRecords } from "../stages/lancedb-writer.js";
 import type { CommandRunner } from "../tools/runner.js";
 import type { ArtifactStore } from "../tools/storage.js";
 import { executeVisionRuntime } from "../tools/vision-runtime.js";
@@ -177,22 +176,7 @@ function defaultOps(deps: PageMaterializerDeps): PageMaterializerOps {
       await writeLanceDbRecords(uri, table, records, signal);
     },
     async deleteVectors(uri, table, ids) {
-      if (ids.length === 0) return;
-      const conn = await connectLanceDb(uri);
-      try {
-        if (!(await conn.tableNames()).includes(table)) return;
-        const t = await conn.openTable(table);
-        try {
-          for (let i = 0; i < ids.length; i += 500) {
-            const list = ids.slice(i, i + 500).map((id) => `'${id.replace(/'/g, "''")}'`).join(", ");
-            await t.delete(`id IN (${list})`);
-          }
-        } finally {
-          t.close();
-        }
-      } finally {
-        conn.close();
-      }
+      await deleteLanceDbRecords(uri, table, ids);
     },
   };
 }

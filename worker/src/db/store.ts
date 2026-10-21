@@ -2380,11 +2380,21 @@ export class Store {
    * The document's chunks are replaced by `keepChunkIds`; rows an earlier attempt
    * wrote beyond them are stale. Scoped to this document only.
    */
-  async deleteStaleDocumentChunks(documentId: string, keepChunkIds: readonly string[]): Promise<void> {
-    await this.sql`
-      delete from document_chunks
+  async staleDocumentChunkIds(documentId: string, keepChunkIds: readonly string[]): Promise<string[]> {
+    const rows = await this.sql<{ id: string }[]>`
+      select id from document_chunks
       where document_id = ${documentId} and id <> all(${this.sql.array([...keepChunkIds])}::text[])
     `;
+    return rows.map((row) => row.id);
+  }
+
+  async deleteStaleDocumentChunks(documentId: string, keepChunkIds: readonly string[]): Promise<string[]> {
+    const rows = await this.sql<{ id: string }[]>`
+      delete from document_chunks
+      where document_id = ${documentId} and id <> all(${this.sql.array([...keepChunkIds])}::text[])
+      returning id
+    `;
+    return rows.map((row) => row.id);
   }
 
   /**
@@ -2676,6 +2686,17 @@ export class Store {
   /** Claims and runs queued workspace graph rebuilds (see graph/rebuild-job.ts). */
   async runGraphJobs(options: GraphJobRunnerOptions): Promise<number> {
     return await runGraphJobs(this.sql, options);
+  }
+
+  /**
+   * Native search's cached eligible sets (server search/eligible-documents.ts,
+   * channel `search_eligibility`) drop these workspaces now instead of after
+   * their TTL: they serve LanceDB rows without re-reading Postgres.
+   */
+  private async notifySearchEligibilityChanged(workspaceIds: ReadonlyArray<string | null | undefined>): Promise<void> {
+    const ids = [...new Set(workspaceIds.filter((id): id is string => Boolean(id)))];
+    if (ids.length === 0) return;
+    await this.sql`select pg_notify('search_eligibility', ${JSON.stringify({ workspaceIds: ids })})`;
   }
 
   /**
@@ -3104,6 +3125,7 @@ export class Store {
           updated_at = now()
         where id = ${row.run_id}
       `;
+      await this.notifySearchEligibilityChanged([row.workspace_id]);
 
       await this.appendAuditLog({
         orgId: row.org_id,
@@ -3181,6 +3203,7 @@ export class Store {
         await client`delete from documents where run_id = ${row.run_id}`;
         await client`delete from workspace_runs where id = ${row.run_id}`;
       });
+      await this.notifySearchEligibilityChanged([row.workspace_id]);
     }
   }
 

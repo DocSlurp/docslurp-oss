@@ -15,7 +15,7 @@ import type { ArtifactStore } from "../tools/storage.js";
 import { backendRuntime, resolveVectorBackends } from "../embeddings/resolver.js";
 import type { EmbeddingArtifact, VectorBackendRecord } from "./embedding-runtime.js";
 import { maxInt } from "./utils.js";
-import { chunkFirstPage, planPageWindows, writeLanceDbDocumentInWindows } from "./lancedb-writer.js";
+import { chunkFirstPage, deleteLanceDbRecords, planPageWindows, writeLanceDbDocumentInWindows } from "./lancedb-writer.js";
 import { lanceDbMaintenanceSettings, type LanceDbMaintenanceSettings } from "./lancedb-maintenance.js";
 import { LanceDbWriteQueue, type VectorWriteOutcome } from "./lancedb-write-queue.js";
 import { indexableDocuments } from "../pipeline/pii-gate.js";
@@ -120,7 +120,8 @@ export class IndexStage implements Stage {
   constructor(
     private readonly runner: CommandRunner,
     private readonly storage: ArtifactStore,
-    private readonly config: Config
+    private readonly config: Config,
+    private readonly deleteVectors: (uri: string, table: string, ids: readonly string[]) => Promise<void> = deleteLanceDbRecords
   ) {
     this.lance = lanceDbMaintenanceSettings(config.lancedb?.params ?? new URLSearchParams());
   }
@@ -213,6 +214,7 @@ export class IndexStage implements Stage {
                 records,
                 recordPages,
                 embedding: artifact,
+                staleIds: state.staleVectorIds.get(document.id),
                 signal
               });
 
@@ -347,6 +349,8 @@ export class IndexStage implements Stage {
     records: VectorBackendRecord[];
     recordPages: Array<number | null>;
     embedding: EmbeddingArtifact;
+    /** Chunk ids the embed stage dropped; deleted again after this document's rows commit. */
+    staleIds?: readonly string[];
     signal?: AbortSignal;
   }): Promise<BackendResult> {
     switch (args.backend) {
@@ -356,10 +360,17 @@ export class IndexStage implements Stage {
           resolveLanceDbConfig().root,
           args.orgId, args.embedding.embedding.model, args.embedding.embedding.dimensions,
         );
-        if (this.lance.writeMode === "queued") {
-          return await this.writeLanceDbQueued(location.uri, location.table, args);
-        }
-        return await this.writeLanceDb(location.uri, location.table, args.records, args.recordPages, args.signal);
+        const result = this.lance.writeMode === "queued"
+          ? await this.writeLanceDbQueued(location.uri, location.table, args)
+          : await this.writeLanceDb(location.uri, location.table, args.records, args.recordPages, args.signal);
+        // An earlier attempt's write still pending in the outbox can land
+        // after the embed stage's delete. The table write lease normally
+        // orders it before this document's write; it is a TTL, so a drainer
+        // that lost it mid-write can still land later (rare, not guarded).
+        const written = new Set(args.records.map((record) => record.id));
+        const stale = (args.staleIds ?? []).filter((id) => !written.has(id));
+        if (stale.length > 0) await this.deleteVectors(location.uri, location.table, stale);
+        return result;
       default:
         return await this.writeScriptBackend(args.backend, args.collection, args.records, args.embedding, args.signal);
     }
