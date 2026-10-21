@@ -558,6 +558,7 @@ describe("layout shadow integration", () => {
     const setup = fixtures();
     setup.observer.hasCapacity = vi.fn(() => false);
     await setup.run();
+    expect(setup.observer.hasCapacity).toHaveBeenCalledWith(1024);
     expect(setup.renderSelectedPages).not.toHaveBeenCalled();
     expect(setup.observer.observe).not.toHaveBeenCalled();
     expect(setup.state.pendingPerformance.find((p) => p.metric === "page-route-layout" && p.scope === "document")?.metadata)

@@ -48,6 +48,9 @@ export function readLayoutObserverConfig(env: NodeJS.ProcessEnv = process.env): 
   if (!/^[0-9a-f]{64}$/.test(expectedInferenceProfileSha256)) throw new Error("Invalid inference profile SHA256");
   const device = env.PAGE_ROUTER_LAYOUT_DEVICE ?? "cpu";
   if (device !== "cpu" && device !== "cuda") throw new Error("Invalid layout device");
+  const maxBytes = integer(env.PAGE_ROUTER_LAYOUT_MAX_BYTES, 25 * 1024 * 1024, 1, 25 * 1024 * 1024, "layout maximum bytes");
+  const queueMaxBytes = integer(env.PAGE_ROUTER_LAYOUT_QUEUE_MAX_BYTES, 64 * 1024 * 1024, 1, 1024 * 1024 * 1024, "layout queue maximum bytes");
+  if (queueMaxBytes < maxBytes) throw new Error("Layout queue maximum bytes must be at least the per-request maximum bytes");
   const rawCost = env.PAGE_ROUTER_LAYOUT_HOURLY_COST_USD;
   const hourlyCostUsd = rawCost === undefined ? null : Number(rawCost);
   if (hourlyCostUsd !== null && (!rawCost?.trim() || !Number.isFinite(hourlyCostUsd) || hourlyCostUsd <= 0)) {
@@ -57,10 +60,10 @@ export function readLayoutObserverConfig(env: NodeJS.ProcessEnv = process.env): 
     endpoint, expectedModelId: required("MODEL_ID"), expectedRevision: required("REVISION"), expectedArtifactSha256, expectedInferenceProfileSha256, device,
     timeoutMs: integer(env.PAGE_ROUTER_LAYOUT_TIMEOUT_MS, 2000, 1, 60_000, "layout timeout"),
     maxPages: integer(env.PAGE_ROUTER_LAYOUT_MAX_PAGES, 4, 1, 100, "layout maximum pages"),
-    maxBytes: integer(env.PAGE_ROUTER_LAYOUT_MAX_BYTES, 25 * 1024 * 1024, 1, 25 * 1024 * 1024, "layout maximum bytes"),
+    maxBytes,
     concurrency: integer(env.PAGE_ROUTER_LAYOUT_CONCURRENCY, 1, 1, 8, "layout concurrency"),
     queueCapacity: integer(env.PAGE_ROUTER_LAYOUT_QUEUE_CAPACITY, 8, 0, 64, "layout queue capacity"),
-    queueMaxBytes: integer(env.PAGE_ROUTER_LAYOUT_QUEUE_MAX_BYTES, 64 * 1024 * 1024, 1, 1024 * 1024 * 1024, "layout queue maximum bytes"),
+    queueMaxBytes,
     auditPages: integer(env.PAGE_ROUTER_LAYOUT_AUDIT_PAGES, 1, 0, 16, "layout audit pages"),
     hourlyCostUsd,
   };

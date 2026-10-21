@@ -56,6 +56,13 @@ describe("HeuristicRouter", () => {
     expect(() => routePlanSchema.parse(plan)).not.toThrow();
   });
 
+  it("merges an unavailable-vision flag into the page's existing attention entry", async () => {
+    const scan = { ...makePage({ pageNumber: 1, route: "handwriting-or-degraded", hint: "vision-rescue" }), unusualFeatures: ["javascript"] };
+    const plan = await new HeuristicRouter().plan([scan], catalog.filter((t) => t.kind === "native"), BIG_BUDGET, "cost-quality");
+    expect(plan.attention).toHaveLength(1);
+    expect(plan.attention[0]!.features).toEqual(["javascript", "vision-target-unavailable"]);
+  });
+
   it("falls back to a local OCR target when no vision target exists", async () => {
     const scan = makePage({ pageNumber: 1, route: "handwriting-or-degraded", hint: "vision-rescue" });
     const native = catalog.find((t) => t.kind === "native")!;

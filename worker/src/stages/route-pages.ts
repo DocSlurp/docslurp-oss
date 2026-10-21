@@ -368,8 +368,10 @@ export class RoutePagesStage implements Stage {
       ...audit.map((page) => ({ page, selection: "audit" as const })),
     ];
     const started = performance.now();
-    // Each selection gets its own deadline, started when its first page begins, so routed pages cannot starve audits.
-    const phaseDeadline = (count: number) => AbortSignal.timeout(Math.min(10_000, observer.config.timeoutMs * count));
+    // One 10 s observation budget, with a slice reserved for audits so routed pages cannot starve them.
+    // Each phase's deadline starts when its first page begins.
+    const auditReserveMs = Math.min(2_500, observer.config.timeoutMs * audit.length);
+    const phaseDeadline = (count: number, capMs: number) => AbortSignal.timeout(Math.min(capMs, observer.config.timeoutMs * count));
     const exhausted = { routed: false, audit: false };
     let phase: "routed" | "audit" | undefined;
     let deadline = AbortSignal.abort();
@@ -387,7 +389,7 @@ export class RoutePagesStage implements Stage {
       signal?.throwIfAborted();
       if (phase !== selection) {
         phase = selection;
-        deadline = phaseDeadline(selection === "routed" ? selected.length : audit.length);
+        deadline = selection === "routed" ? phaseDeadline(selected.length, 10_000 - auditReserveMs) : phaseDeadline(audit.length, auditReserveMs);
         boundedSignal = signal ? AbortSignal.any([signal, deadline]) : deadline;
       }
       if (deadline.aborted) {
@@ -405,7 +407,8 @@ export class RoutePagesStage implements Stage {
         row.routedRoles = plan.assignments.filter((a) => a.pageNumber === page.features.pageNumber).map((a) => a.role);
       }
       try {
-        if (!observer.hasCapacity()) {
+        // Payload size is unknown before rendering: reserve the per-request maximum, conservatively.
+        if (!observer.hasCapacity(observer.config.maxBytes)) {
           admissionRejected++;
           throw new Error("Layout observation queue at capacity before render");
         }

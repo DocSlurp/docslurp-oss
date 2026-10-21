@@ -43,7 +43,7 @@ describe("layout observer configuration", () => {
     { PAGE_ROUTER_LAYOUT_MAX_BYTES: "26214401" }, { PAGE_ROUTER_LAYOUT_CONCURRENCY: "0" },
     { PAGE_ROUTER_LAYOUT_TIMEOUT_MS: "NaN" }, { PAGE_ROUTER_LAYOUT_DEVICE: "auto" },
     { PAGE_ROUTER_LAYOUT_HOURLY_COST_USD: "" }, { PAGE_ROUTER_LAYOUT_HOURLY_COST_USD: "0" },
-    { PAGE_ROUTER_LAYOUT_QUEUE_MAX_BYTES: "0" }, { PAGE_ROUTER_LAYOUT_AUDIT_PAGES: "17" },
+    { PAGE_ROUTER_LAYOUT_QUEUE_MAX_BYTES: "0" }, { PAGE_ROUTER_LAYOUT_QUEUE_MAX_BYTES: "1024", PAGE_ROUTER_LAYOUT_MAX_BYTES: "2048" }, { PAGE_ROUTER_LAYOUT_AUDIT_PAGES: "17" },
   ])("rejects unsafe enabled configuration %j", (override) => {
     expect(() => readLayoutObserverConfig({ ...env, ...override })).toThrow();
   });
@@ -124,7 +124,7 @@ describe("bounded routing layout observer", () => {
   it("bounds total held payload bytes and reports capacity before callers render", async () => {
     const fetcher = mockEndpoint({ delay: 30 });
     const payload = await image();
-    const observer = new RoutingLayoutObserver(config({ concurrency: 1, queueCapacity: 8, queueMaxBytes: payload.byteLength * 2 }));
+    const observer = new RoutingLayoutObserver(config({ concurrency: 1, queueCapacity: 8, maxBytes: payload.byteLength, queueMaxBytes: payload.byteLength * 2 }));
     expect(observer.hasCapacity(payload.byteLength)).toBe(true);
     const first = observer.observe({ scopeKey: "a", payload });
     const second = observer.observe({ scopeKey: "b", payload });
@@ -137,7 +137,7 @@ describe("bounded routing layout observer", () => {
   it("releases held bytes when queued work is cancelled before dispatch", async () => {
     mockEndpoint({ delay: 30 });
     const payload = await image();
-    const observer = new RoutingLayoutObserver(config({ concurrency: 1, queueMaxBytes: payload.byteLength * 2 }));
+    const observer = new RoutingLayoutObserver(config({ concurrency: 1, maxBytes: payload.byteLength, queueMaxBytes: payload.byteLength * 2 }));
     const first = observer.observe({ scopeKey: "a", payload });
     const controller = new AbortController();
     const queued = observer.observe({ scopeKey: "b", payload, signal: controller.signal });

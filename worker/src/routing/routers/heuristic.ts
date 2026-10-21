@@ -55,6 +55,18 @@ export function pickOcrTarget(catalog: readonly RoutingTarget[]): RoutingTarget 
     .sort((a, b) => a.c - b.c)[0]?.t;
 }
 
+/** One entry per page: an unresolved requirement joins the page's existing attention entry. */
+function mergeAttention(base: PageAttention[], extra: PageAttention[]): PageAttention[] {
+  const byPage = new Map(base.map((a) => [a.pageNumber, a]));
+  for (const a of extra) {
+    const prior = byPage.get(a.pageNumber);
+    byPage.set(a.pageNumber, prior
+      ? { ...prior, features: [...prior.features, ...a.features], reason: `${prior.reason}; ${a.reason.replace(/^needs-attention: /, "")}` }
+      : a);
+  }
+  return [...byPage.values()].sort((x, y) => x.pageNumber - y.pageNumber);
+}
+
 export class HeuristicRouter implements Router {
   readonly kind = "heuristic" as const;
   readonly id: string;
@@ -122,7 +134,7 @@ export class HeuristicRouter implements Router {
       objective,
       policyVersion: "heuristic:classify-route",
       planned,
-      attention: [...attentionForPages(pages), ...unresolved],
+      attention: mergeAttention(attentionForPages(pages), unresolved),
       budget,
       catalog,
     }).plan;
