@@ -35,6 +35,12 @@ export interface EligibleDocument {
   ownerId: string | null;
   /** The owner's index config hash (index-config serving). */
   ownerIndexConfigHash: string | null;
+  /**
+   * A correction reindex rewrote the document's chunks after its LanceDB rows
+   * were written: their text and hydration are stale, so native keyword
+   * search leaves the document to Postgres FTS.
+   */
+  lanceStale: boolean;
 }
 
 export interface EligibleDocumentSet {
@@ -58,6 +64,7 @@ type EligibleRow = {
   page_only_completed: boolean;
   owner_id: string | null;
   owner_index_config_hash: string | null;
+  lance_stale: boolean;
 };
 
 function falsy(value: string | undefined): boolean {
@@ -178,7 +185,12 @@ async function queryEligibleDocuments(workspaceId: string, embeddingModel: strin
         )) as vector_ready,
         ${lexical} as lexical,
         (d.status = 'completed' and d.superseded_at is null
-          and coalesce(d.chunk_count, 0) = 0 and coalesce(d.stored_page_count, 0) > 0) as page_only_completed
+          and coalesce(d.chunk_count, 0) = 0 and coalesce(d.stored_page_count, 0) > 0) as page_only_completed,
+        exists (
+          select 1 from document_corrections dc
+          join vector_indexes v on v.document_id = d.id and v.backend = 'lancedb'
+          where dc.document_id = d.id and dc.reindex_completed_at > v.created_at
+        ) as lance_stale
       from documents d
       where d.workspace_id = ${workspaceId}
         and ((d.status = 'completed' and d.superseded_at is null) or ${lexical})
@@ -197,7 +209,7 @@ async function queryEligibleDocuments(workspaceId: string, embeddingModel: strin
       from chain join documents owner on owner.id = chain.node
       order by chain.id, chain.depth desc
     )
-    select s.id, s.filename, s.mime_type, s.run_id, s.vector_ready, s.lexical, s.page_only_completed,
+    select s.id, s.filename, s.mime_type, s.run_id, s.vector_ready, s.lexical, s.page_only_completed, s.lance_stale,
       o.owner_id, o.index_config_hash as owner_index_config_hash,
       (select array_agg(t.tag) from document_tags t where t.document_id = s.id) as tags
     from scoped s
@@ -213,6 +225,7 @@ async function queryEligibleDocuments(workspaceId: string, embeddingModel: strin
     lexical: row.lexical,
     ownerId: row.vector_ready ? row.owner_id ?? row.id : null,
     ownerIndexConfigHash: row.owner_index_config_hash,
+    lanceStale: row.lance_stale,
   }));
   return {
     workspaceId,

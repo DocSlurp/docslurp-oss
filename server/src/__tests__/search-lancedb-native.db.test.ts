@@ -221,7 +221,7 @@ describe("SEARCH_LANCEDB_NATIVE", () => {
     expect(native.timings?.nativeLexicalUnindexed).toBeUndefined();
   });
 
-  it("answers a warm search with at most one SQL read", async () => {
+  it("answers a warm search with one SQL read plus chunk-id checks", async () => {
     const queryVector = near("doc5-2");
     // Original documents only: hits serving a dedup copy are hydrated from Postgres by design.
     const filters = { documentIds: ["doc1", "doc2", "doc3", "doc4", "doc5", "doc6"] };
@@ -234,8 +234,11 @@ describe("SEARCH_LANCEDB_NATIVE", () => {
     await session.drainSearchSessionWrites();
     expect(response.results.length).toBeGreaterThan(0);
     // The one: access, settings and pipeline (never cached).
-    expect(reads).toHaveLength(1);
+    // Plus, per retrieval branch (vector, keyword; run in parallel), one primary-key check that the
+    // LanceDB-hydrated hits' chunks still exist.
+    expect(reads.length).toBeLessThanOrEqual(3);
     expect(reads[0]).toMatch(/from workspaces w/);
+    for (const read of reads.slice(1)) expect(read).toMatch(/select id from document_chunks where id in/);
     expect(statements.some((statement) => /insert into search_sessions/.test(statement))).toBe(true);
   });
 
@@ -293,6 +296,36 @@ describe("SEARCH_LANCEDB_NATIVE", () => {
       expect(citations(native)).toEqual(citations(legacy));
     } finally {
       await writeLanceTable({ hydrated: true, fts: true });
+    }
+  });
+
+  it("never serves text a correction reindex replaced (stale LanceDB rows)", async () => {
+    const original = chunks.find((chunk) => chunk.id === "doc4-9")!;
+    const corrected = original.text.replaceAll("cavitation", "corrosion");
+    // What reindexDocumentCorrection does: the chunk comes back under a new id, LanceDB is untouched.
+    await sql`delete from document_chunks where id = 'doc4-9'`;
+    await sql`insert into document_chunks (id, document_id, run_id, user_id, chunk_index, text, heading_path, page_number, token_estimate, metadata)
+      values ('doc4-9-fixed', 'doc4', 'run1', 'u', 9, ${corrected}, ${original.headingPath}, ${original.page}, 12, ${sql.json(original.metadata as postgres.JSONValue)})`;
+    await sql`insert into document_corrections (id, document_id, run_id, user_id, corrected_markdown, reindex_completed_at)
+      values ('fix', 'doc4', 'run1', 'u', 'x', now() + interval '1 second')`;
+    eligible.handleSearchEligibilityHint(JSON.stringify({ workspaceIds: ["w"] }));
+    try {
+      const queryVector = near("doc4-9");
+      for (const query of ["cavitation erosion", "corrosion erosion"]) {
+        const legacy = await run(false, query, { queryVector });
+        const native = await run(true, query, { queryVector });
+        expect(native.results.some((result) => result.text.includes("cavitation"))).toBe(false);
+        expect(citations(native)).toEqual(citations(legacy));
+      }
+      const native = await run(true, "corrosion erosion", { queryVector });
+      expect(native.results.some((result) => result.text === corrected)).toBe(true);
+      expect(native.timings?.nativeHydrationStale).toBe(1);
+    } finally {
+      await sql`delete from document_corrections where id = 'fix'`;
+      await sql`delete from document_chunks where id = 'doc4-9-fixed'`;
+      await sql`insert into document_chunks (id, document_id, run_id, user_id, chunk_index, text, heading_path, page_number, token_estimate, metadata)
+        values ('doc4-9', 'doc4', 'run1', 'u', 9, ${original.text}, ${original.headingPath}, ${original.page}, 12, ${sql.json(original.metadata as postgres.JSONValue)})`;
+      eligible.handleSearchEligibilityHint(JSON.stringify({ workspaceIds: ["w"] }));
     }
   });
 

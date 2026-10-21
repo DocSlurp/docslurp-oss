@@ -899,6 +899,20 @@ async function hydrateNativeHits(args: {
       misses.push(hit);
     }
   }
+  // LanceDB rows can outlive their chunk (a correction reindex rewrites a
+  // document's chunks under new ids): keep a hit only while its chunk exists,
+  // as the Postgres path's hydration does. One primary-key read.
+  const fromLance = [...rowsByHit.keys()];
+  if (fromLance.length > 0) {
+    const live = new Set((await sql<{ id: string }[]>`
+      select id from document_chunks where id in (select jsonb_array_elements_text(${sql.json(fromLance)}::jsonb))
+    `).map((row) => row.id));
+    for (const id of fromLance) {
+      if (live.has(id)) continue;
+      rowsByHit.delete(id);
+      countSearchEvent("nativeHydrationStale");
+    }
+  }
   if (misses.length > 0) {
     countSearchEvent("nativeHydrationPostgres");
     const fromPostgres = await hydrateHitsFromPostgres(misses, new Set(args.documents.keys()), args.copiesByOwner, args.workspaceId, args.options);
@@ -999,8 +1013,9 @@ async function nativeTextSearch(
   const limit = options.limit ?? 20;
   const set = await loadEligibleDocuments({ workspaceId: context.workspaceId, embeddingModel: embedding.model, dimension: embedding.dimensions });
   const inScope = scopeEligibleDocuments(set, options.filters, options.runId);
-  const native = inScope.filter((document) => document.vectorReady);
-  const tail = inScope.filter((document) => document.lexical && !document.vectorReady);
+  const native = inScope.filter((document) => document.vectorReady && !document.lanceStale);
+  // Postgres FTS covers documents not in LanceDB yet (early lexical) and those whose rows are stale.
+  const tail = inScope.filter((document) => (document.lexical && !document.vectorReady) || (document.vectorReady && document.lanceStale));
   let nativeChunks: SearchChunk[] = [];
   if (native.length > 0) {
     const scope = nativeSearchScope(native);
