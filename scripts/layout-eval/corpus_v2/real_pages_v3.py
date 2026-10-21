@@ -13,11 +13,47 @@ import argparse
 import datetime
 import hashlib
 import json
+import re
 from pathlib import Path
+
+UNCERTAIN = re.compile(r'\[[^\]]*\?\]|\[ *\]')
 
 from PIL import Image
 
 REAL = Path('/home/dan/data/docslurp-evals/layout-corpus-v3/assets/real')
+
+# Agent close-up re-reading of each handwritten line against the crowd transcript
+# (2026-10-21). "[?]" marks a reading the agent could not confirm; it is kept rather
+# than guessed, and such regions carry lower transcription evidence.
+CORRECTIONS = {
+    'handwriting-lincoln-papers-andrew-telegram-1862': [
+        ('m007', 'I have the honor', 'I have the Honor', 'capital H is clear'),
+        ('m007', 'sent full reply', 'sent Full reply', 'capital F is clear'),
+    ],
+    'handwriting-barton-diary-1906-12-15': [
+        ('m001', 'a visit on sunday', 'a visit over [?] sunday', 'word reads as "over", not confirmed'),
+        ('m001', 'A L Barber of Belmont', 'A L Barber at [?] Belmont', 'reads as "at", not confirmed'),
+        ('m002', 'first to [Canton Junc.]', 'first to Cabin John', 'legible; Cabin John is near Glen Echo'),
+        ('m002', 'then to train', 'then to town', 'legible'),
+        ('m002', 'Arlington - heads', 'Arlington - back', 'legible'),
+        ('m002', 'Miss [Colkins]', 'Miss [Calkins?]', 'second letter looks like a; still uncertain'),
+        ('m003', '2 [ ] then all friends', '2 [ ] there [?] all friends', 'reads as "there", not confirmed'),
+    ],
+    'handwriting-anthony-cash-account-1872': [
+        ('m002', 'N.Y. State R.Con', 'N.Y. State R. Com [?]', 'final letter looks like m'),
+        ('m002', 'Paid Sister M Lo.', 'Paid Sister M Lo[?]', 'surname overwritten and smudged'),
+        ('m002', 'Miss Larsen for meeting', 'Miss Larsen [?] for meeting', 'vowel could be o'),
+        ('m002', 'Grendine', 'Grenadine [?]', 'fabric name; letters partly unclear'),
+        ('m002', 'Miss Barkus', 'Miss Backus [?]', 'reads as ck; first letter blotted'),
+        ('m002', '2 slap jars', '2 slop [?] jars', 'o/a ambiguous; slop jar is the period item'),
+        ('m002', 'myrrh', 'myrrh [?]', 'not confirmed'),
+        ('m002', 'Lace- wash blouse [?]', 'Lace- wash blonde yd [?]', '"blonde" is clear (blonde lace); trailing mark may be "yd"'),
+        ('m002', 'Carrie over', 'Carried over', 'legible'),
+        ('m003', '11 dozen Pocket h\'ff\'s', '1/2 Doz. Pocket h\'ff\'s', 'clear "1/2 Doz."; Paid 2.50'),
+        ('m003', 'Coloring beaver cloth sargne', 'Color[ing?] Beaver cloth Sacque', 'garment word is Sacque; ending of first word abbreviated'),
+        ('m003', 'blue cashmere for Lasque', 'blk [?] Cashmere for Sacque', 'margin word looks like blk; 15 sits in the Paid dollars column'),
+    ],
+}
 
 PAGES = {
     'historic-omaha-bee-1898-06-01-p1': {
@@ -56,7 +92,7 @@ PAGES = {
             ('paragraph', [855, 290, 1745, 390], 'Handwritten origin and time.', 'Boston 7 35 PM 28th'),
             ('paragraph', [1568, 378, 1748, 452], 'Pencil archival annotation (year).', '1862'),
             ('paragraph', [100, 405, 1110, 550], 'Handwritten addressee line.', 'The Presdt of the US'),
-            ('paragraph', [100, 528, 1772, 962], 'Handwritten message body.', 'I have the honor\nto acknowledge receipt of your\nTelegram I have sent full reply\nby mail'),
+            ('paragraph', [100, 528, 1772, 962], 'Handwritten message body.', 'I have the Honor\nto acknowledge receipt of your\nTelegram I have sent Full reply\nby mail'),
             ('paragraph', [745, 975, 1695, 1135], 'Handwritten signature.', 'John A. Andrew'),
             ('paragraph', [965, 1122, 1215, 1182], 'Handwritten charge note.', '17 Pd'),
             ('number', [98, 2246, 208, 2284], 'Stamped archival folio number.', '17296'),
@@ -69,9 +105,9 @@ PAGES = {
         'transcript_policy': 'Region text split from the Library of Congress By the People transcript at its paragraph indents; bracketed uncertain readings and blanks retained verbatim.',
         'regions': [
             ('number', [138, 138, 248, 202], 'Circled page number.', '31'),
-            ('paragraph', [110, 200, 1345, 430], 'First diary paragraph.', 'Sat Sat Dec 15 - 1906 - In the morning\nprepared for a visit on sunday with Mrs\nA L Barber of Belmont.'),
-            ('paragraph', [110, 452, 1472, 1535], 'Second paragraph, indented first line.', 'At three the large Auto mobile with Mrs\nBarber, A. L.  her daughter Mrs. Bertha\nBarber Mrs               and a friend\ncame for me - We drove first to [Canton Junc.]\nthen to train - then to Arlington - heads\nthrough all the zig zag streets of the Mall\nand home at night - found the pretty\ndaughter in law Mrs Katharine [ ]\nBarber, widow of the late son, an\nAustrian lady- the little Baby girl of 2\nMiss [Colkins] the home keeper - her mother\nan invalid up stairs, & the servants.'),
-            ('paragraph', [118, 1560, 1378, 1812], 'Third paragraph, continues on the next page.', 'Supper - a pleasant evening - and a\nroom fit for a princess - To my amused\nastonishment 2 [ ] then all friends'),
+            ('paragraph', [110, 200, 1345, 430], 'First diary paragraph.', 'Sat Sat Dec 15 - 1906 - In the morning\nprepared for a visit over [?] sunday with Mrs\nA L Barber at [?] Belmont.'),
+            ('paragraph', [110, 452, 1472, 1535], 'Second paragraph, indented first line.', 'At three the large Auto mobile with Mrs\nBarber, A. L.  her daughter Mrs. Bertha\nBarber Mrs               and a friend\ncame for me - We drove first to Cabin John\nthen to town - then to Arlington - back\nthrough all the zig zag streets of the Mall\nand home at night - found the pretty\ndaughter in law Mrs Katharine [ ]\nBarber, widow of the late son, an\nAustrian lady- the little Baby girl of 2\nMiss [Calkins?] the home keeper - her mother\nan invalid up stairs, & the servants.'),
+            ('paragraph', [118, 1560, 1378, 1812], 'Third paragraph, continues on the next page.', 'Supper - a pleasant evening - and a\nroom fit for a princess - To my amused\nastonishment 2 [ ] there [?] all friends'),
         ],
         'excluded': ['Stray margin mark at right (x≈1535, y≈1060).'],
     },
@@ -82,8 +118,8 @@ PAGES = {
         'regions': [
             ('header', [195, 222, 832, 258], 'Printed page heading, left page.', 'CASH ACCOUNT. OCTOBER.'),
             ('header', [1003, 212, 1688, 248], 'Printed page heading, right page.', 'CASH ACCOUNT. NOVEMBER.'),
-            ('table', [132, 268, 958, 1470], 'Printed ruled ledger (Date / Received / Paid) with handwritten entries, struck-through first line and totals; extent is the ruled area in use.', 'Date Received Paid\n8. N.Y. State R.Con 100\nPaid Sister M Lo. 100\n17 Mrs C S Lozier 45\nNational Life In.Co. 25\nMiss Larsen for meeting\nGrendine- Red silk- grey\ntraveling & black silk 44\nthread, lace & trimmings [15] 15\nMiss Barkus, Bonnet. 10\nRepub Fund to Balt & Phila\ndelphia Conventions 65\n2 slap jars 7\ndrilling, myrrh & sundries 5\nwashing & pressing winter dress 1.75\nmarking stamp 1.50\nLace- wash blouse [?] .75\nCarrie over\n210 210'),
-            ('table', [962, 262, 1728, 1490], 'Printed ruled ledger, right page; entries occupy the upper third, ruled rows continue empty below.', 'Date Received Paid\nBrot forward\n11 dozen Pocket h\'ff\'s 2.50\nColoring beaver cloth sargne 1.75\nblue cashmere for Lasque 15\n26 Macedon Center 12.\ndebt- 7.25\n19.25 19.25'),
+            ('table', [132, 268, 958, 1470], 'Printed ruled ledger (Date / Received / Paid) with handwritten entries, struck-through first line and totals; extent is the ruled area in use.', 'Date Received Paid\n8. N.Y. State R. Com [?] 100\nPaid Sister M Lo[?] 100\n17 Mrs C S Lozier 45\nNational Life In.Co. 25\nMiss Larsen [?] for meeting\nGrenadine [?]- Red silk- grey\ntraveling & black silk 44\nthread, lace & trimmings [15] 15\nMiss Backus [?], Bonnet. 10\nRepub Fund to Balt & Phila\ndelphia Conventions 65\n2 slop [?] jars 7\ndrilling, myrrh [?] & sundries 5\nwashing & pressing winter dress 1.75\nmarking stamp 1.50\nLace- wash blonde yd [?] .75\nCarried over\n210 210'),
+            ('table', [962, 262, 1728, 1490], 'Printed ruled ledger, right page; entries occupy the upper third, ruled rows continue empty below.', 'Date Received Paid\nBrot forward\n1/2 Doz. Pocket h\'ff\'s 2.50\nColor[ing?] Beaver cloth Sacque 1.75\nblk [?] Cashmere for Sacque 15\n26 Macedon Center 12.\ndebt- 7.25\n19.25 19.25'),
         ],
         'excluded': ['Book gutter and binding thread.', 'Cell-level structure (not annotated).'],
     },
@@ -136,7 +172,9 @@ def build(root, reviewed_at):
                                                                   'table_cells': 'not-annotated' if label == 'table' else 'not-applicable',
                                                                   'annotationConfidence': {'geometry': {'score': .5, 'status': 'agent-measured', 'basis': ['Boxes read against a 25-100 px coordinate grid on the exact work raster; not independently reviewed']},
                                                                                            'semanticLabel': {'score': .5, 'status': 'agent-assigned'},
-                                                                                           'textTranscription': ({'score': .5, 'status': 'imported-crowd-reviewed', 'basis': ['Library of Congress By the People transcript (transcribed and reviewed by volunteers); region split and spot check by agent']}
+                                                                                           'textTranscription': (({'score': .25, 'status': 'transcript-derived-agent-corrected-uncertain', 'basis': ['By the People transcript re-read line by line by the agent at close-up; contains unconfirmed readings marked [?]']}
+                                                                                                                   if UNCERTAIN.search(text) else
+                                                                                                                   {'score': .5, 'status': 'transcript-derived-agent-corrected', 'basis': ['By the People transcript re-read line by line by the agent at close-up; corrections listed in metadata.transcript_corrections']})
                                                                                                                  if text else {'score': 0, 'status': 'unknown', 'reason': 'Embedded/printed text not transcribed'}),
                                                                                            'readingOrder': {'score': 0, 'status': 'unknown'}}}})
         ocr = REAL / f'{identifier}.ocr.txt'
@@ -149,6 +187,8 @@ def build(root, reviewed_at):
                                                'all-regions; table cells not annotated': 'region classes scorable; table structure/cells not scorable'}.get(spec['label_scope'], 'not scorable; reference only'),
                             'original_sha256': receipt['sha256'], 'work_sha256': receipt.get('work_sha256') or receipt['sha256'], 'image_png_sha256': sha(image),
                             'transcript_policy': spec.get('transcript_policy'),
+                            'transcript_corrections': [{'region_id': r, 'old': o, 'new': n, 'reason': why} for r, o, n, why in CORRECTIONS.get(identifier, [])] if identifier.startswith('handwriting-') else None,
+                            'transcript_status': 'transcript-derived (LoC By the People, public domain), agent-corrected after close-up re-reading; not human-adjudicated' if identifier.startswith('handwriting-') else None,
                             'transcript_source_url': receipt.get('transcript_source_url'),
                             'receipt_path': str(receipt_path), 'receipt_sha256': sha(receipt_path), 'license': receipt['license'],
                             'archive_item_id': receipt['archive_item_id'], 'source_page_url': receipt.get('source_page_url'),

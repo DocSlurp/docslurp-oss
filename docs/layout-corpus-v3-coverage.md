@@ -57,6 +57,8 @@ Authored pages use the unchanged V2 `Page` contract through `page_v3.PageV3`: so
 
 `page.py` changed only by a TTC face index, the spanning-header Markdown rule and registered extra evidence. All 22 reproducible V2 pages re-render byte-identically under a fixed hash seed. (`font_provenance` key order depends on the hash seed, so `render_v3.py` re-executes with `PYTHONHASHSEED=0`.)
 
+Handwriting region text is **transcript-derived and agent-corrected**: the Library of Congress *By the People* crowd transcripts contained clear misreadings (for example "11 dozen" for "1/2 Doz." and "sargne"/"Lasque" for "Sacque" in the cash book, "[Canton Junc.]" for "Cabin John" and "heads" for "back" in the diary). Every handwritten line was re-read at close-up. Corrections are listed old → new in `real-pages/manifest.jsonl` (`metadata.transcript_corrections`, 21 entries). Readings the agent could not confirm stay marked `[?]`, and those regions carry 0.25 transcription evidence instead of 0.5.
+
 Real pages are labelled by the agent against a coordinate grid on the exact work raster (`real_pages_v3.py`). Geometry and semantics are 0.5 evidence. Handwriting text is the archive transcript split by region (0.5, imported crowd-reviewed). Archive OCR for newspapers is kept as unreviewed evidence only.
 
 ## Reproduce
@@ -83,6 +85,8 @@ Tests: `python -m unittest discover -s scripts/layout-eval/corpus_v2 -p "test_*v
 - Spend: USD 0. All generation was local, assets were free public downloads, and no model or image-generation API was called.
 
 ## Known weaknesses
+
+- Rights caveats: the Barton diary's public-domain status rests on the author's death (Clara Barton, 1912), not on an explicit Library of Congress public-domain statement. The railroad-journal engraving carries only a "No restrictions" rights label. The other real assets have explicit public-domain or CC0 statements in their receipts.
 
 - All review is by the authoring agent. Same-author inspection is not independent validation, and reading order is unannotated everywhere.
 - Authored pages are clean digital renders; acquisition difficulty comes only from the 20 procedural variants.
