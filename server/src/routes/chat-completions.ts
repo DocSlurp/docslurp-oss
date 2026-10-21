@@ -18,6 +18,7 @@ import { listWorkspaces } from "../services/workspaces.js";
 import { normalizeExtractedText, type WorkspaceChatResponse, type WorkspaceChatTurn } from "@docslurp/shared";
 import { authenticatedByRoute } from "../lib/route-auth.js";
 import { env } from "../config.js";
+import { isChatTurnDeadlineError } from "../services/chat-turn-deadline.js";
 
 const textContent = z.union([
   z.string().max(64_000),
@@ -171,6 +172,7 @@ export const chatCompletionsRoutes = new Hono()
         });
       } catch (error) {
         if (isSpendBlockedError(error)) return c.json(errorBody(reportPublicError(error), "service_unavailable", error.code), 402);
+        if (isChatTurnDeadlineError(error)) return c.json(errorBody(error.message, "timeout_error", error.code), 504);
         reportPublicError(error, { operation: "chat-completions" });
         return c.json(errorBody("Workspace answer failed. Try again.", "server_error"), 500);
       }

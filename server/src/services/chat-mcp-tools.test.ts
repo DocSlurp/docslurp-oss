@@ -1,15 +1,17 @@
 import { describe, expect, it, vi } from "vitest";
 import type { McpDispatch } from "../lib/mcp-http.js";
 import { asSchema } from "ai";
-import { createChatMcpTools, evidencePages } from "./chat-mcp-tools.js";
+import { createChatMcpTools, evidencePages, TOOL_DEADLINE_RESULT } from "./chat-mcp-tools.js";
 import { mcpManifest } from "./mcp-catalog.js";
+import { currentSearchSignal } from "../search/query-bounds.js";
+import { currentChatAgentSignal } from "../lib/chat-agent-context.js";
 
-function setup(ids = ["search"]) {
+function setup(ids = ["search"], options: { toolBudgetMs?: () => number } = {}) {
   const dispatch = vi.fn<McpDispatch>(async () => Response.json({ results: [] }));
   const onActivity = vi.fn();
   const controller = new AbortController();
   const context = createChatMcpTools({ manifest: { capabilities: ids.map(id => ({ id, title: id, category: "tool", description: id, inputSchema: { type: "object" } })) },
-    dispatch, workspaceId: "selected", signal: controller.signal, onActivity });
+    dispatch, workspaceId: "selected", signal: controller.signal, onActivity, ...options });
   const execute = (name: string, input: unknown = {}, id = "call") => context.tools[name]!.execute!(input, { toolCallId: id, messages: [], context: {} });
   return { ...context, execute, dispatch, onActivity, controller };
 }
@@ -171,5 +173,63 @@ describe("evidence pages", () => {
     t.dispatch.mockResolvedValueOnce(Response.json({ results: [hit("doc", null, [1211, 1212])] }));
     await t.execute("search", { q: "spanning" }, "span");
     expect(t.details.get("span")?.evidencePages).toEqual([{ documentId: "doc", pageNumber: 1211 }, { documentId: "doc", pageNumber: 1212 }]);
+  });
+});
+
+/** A dispatch that never answers on its own; it only settles when its request signal aborts (or never, when `ignoreSignal`). */
+function hangingDispatch(seen: { signal?: AbortSignal; searchSignal?: AbortSignal; chatSignal?: AbortSignal }, ignoreSignal = false): McpDispatch {
+  return async (_path, init) => {
+    seen.signal = init?.signal ?? undefined;
+    seen.searchSignal = currentSearchSignal();
+    seen.chatSignal = currentChatAgentSignal();
+    return await new Promise<Response>((_resolve, reject) => {
+      if (!ignoreSignal) init?.signal?.addEventListener("abort", () => reject(init.signal!.reason), { once: true });
+    });
+  };
+}
+
+describe("chat MCP tool time budgets and cancellation", () => {
+  it("runs nested work under the tool signal and cancels a tool at its budget with a tool_timeout result", async () => {
+    const t = setup(["search"], { toolBudgetMs: () => 40 });
+    const seen: Parameters<typeof hangingDispatch>[0] = {};
+    t.dispatch.mockImplementation(hangingDispatch(seen));
+    await expect(t.execute("search", { q: "slow" })).resolves.toMatchObject({ code: "tool_timeout" });
+    // Nested searches read these before the outer HTTP request's signal (services/search.ts, workspace-chat.ts).
+    expect(seen.searchSignal).toBe(seen.signal);
+    expect(seen.chatSignal).toBe(seen.signal);
+    expect(seen.signal?.aborted).toBe(true);
+    expect(t.details.get("call")).toMatchObject({ status: "error", errorCode: "tool_timeout" });
+    expect(t.counters.timedOut).toBe(1);
+    expect(t.controller.signal.aborted).toBe(false);
+  });
+
+  it("returns at the budget even when the tool ignores its signal", async () => {
+    const t = setup(["search"], { toolBudgetMs: () => 30 });
+    const seen: Parameters<typeof hangingDispatch>[0] = {};
+    t.dispatch.mockImplementation(hangingDispatch(seen, true));
+    const started = Date.now();
+    await expect(t.execute("search", { q: "stuck" })).resolves.toMatchObject({ code: "tool_timeout" });
+    expect(Date.now() - started).toBeLessThan(1_000);
+    expect(seen.signal?.aborted).toBe(true);
+  });
+
+  it("refuses tools once the final-answer reserve has started", async () => {
+    const t = setup(["search"], { toolBudgetMs: () => 0 });
+    await expect(t.execute("search", { q: "late" })).resolves.toEqual(TOOL_DEADLINE_RESULT);
+    expect(t.dispatch).not.toHaveBeenCalled();
+    expect(t.details.get("call")).toMatchObject({ status: "error", errorCode: "deadline" });
+  });
+
+  it("cancels an in-flight tool, its searches and nested calls when the turn aborts", async () => {
+    const t = setup(["search"], { toolBudgetMs: () => 60_000 });
+    const seen: Parameters<typeof hangingDispatch>[0] = {};
+    t.dispatch.mockImplementation(hangingDispatch(seen));
+    const pending = t.execute("search", { q: "abandoned" });
+    await vi.waitFor(() => expect(seen.signal).toBeDefined());
+    t.controller.abort(new Error("client gone"));
+    await expect(pending).rejects.toThrow("client gone");
+    expect(seen.signal?.aborted).toBe(true);
+    expect(seen.searchSignal?.aborted).toBe(true);
+    expect(t.details.get("call")).toMatchObject({ errorCode: "aborted" });
   });
 });
