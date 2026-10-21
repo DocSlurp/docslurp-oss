@@ -115,7 +115,7 @@ def main():
         held=set(rng.sample(sorted(clusters),7))
         # Unique authored continuation-table and glyph-clipped-table mechanisms must be
         # available for development; no independent heldout equivalents exist yet.
-        development_only_sources={'business-meridian-invoice-1','instruments-rainfall-field-log','water-cycle-field-notebook','maple-lantern-1994-takeout-menu'}
+        development_only_sources={'business-meridian-invoice-1','instruments-rainfall-field-log','water-cycle-field-notebook','maple-lantern-1994-takeout-menu','scientific-phase-and-oscillation','northside-exchange-classifieds'}
         if any(development_only_sources.intersection(clusters[c]) for c in held):continue
         dev_labels=set().union(*(labels[c] for c in clusters if c not in held))
         if dev_labels != all_labels:continue
@@ -145,12 +145,12 @@ def main():
     report={'schema':'layout-source-group-split-v2','createdAt':datetime.datetime.now(datetime.timezone.utc).isoformat(),
             'inputs':receipts,'candidateArtifacts':artifacts,'nativeFreezeSha256':sha(freeze),'candidateCount':len(rows),'nativeCount':len(native),
             'clusters':clusters,'source_to_cluster':membership,'join_receipts':joins,'assignment':assignment,
-            'policy':'whole-source/document/exact-image/full-insert/scene transitive closure; 6000 seeded metadata-only candidate assignments, seven heldout groups; retain every label plus unique continuation-table and glyph-clipped-table mechanisms in dev, maximize repeated-label holdout coverage, target10 heldout images; no outcomes read; no train set',
+            'policy':'whole-source/document/exact-image/full-insert/scene transitive closure; 6000 seeded metadata-only candidate assignments, seven heldout groups; retain every label plus unique requested table/capture/menu/rotation/blur development mechanisms in dev, maximize repeated-label holdout coverage, target10 heldout images; no outcomes read; no train set',
             'splitCounts':dict(collections.Counter(r['split'] for r in rows)),
             'groupCounts':dict(collections.Counter(assignment.values())), 'regionLabelCounts':coverage,'missingLabels':gaps,
             'limitations':['Small deliberately authored pilot pool, not representative population or 200 independent pages.',
                             'Unique Chinese-menu, handwritten historic, Arabic-form, mind-map, continuation-table and cropped-table sources cannot each appear in both splits.',
-                            'Continuation-table, glyph-clipped-table, Chinese menu and all shared-scene photographic capture groups are explicitly reserved for development; independent heldout confirmation of these mechanisms is unavailable.',
+                            'Continuation-table, glyph-clipped-table, Chinese menu, rotate90, blur and all shared-scene photographic capture groups are explicitly reserved for development; independent heldout confirmation of these mechanisms is unavailable.',
                             'Shared full-image and scene closure can confound photographic capture with source group.',
                             'No benchmark or publication admission implied. QA/rights/tag overlays are separate hash-pinned artifacts.'],
             'outputs':{n:sha(out/n) for n in ['dev.jsonl','holdout.jsonl','candidates.jsonl']}}
