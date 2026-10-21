@@ -1,4 +1,4 @@
-import { access, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import sharp from "sharp";
@@ -30,13 +30,16 @@ describe("image layout transport boundary", () => {
   it("stages bytes, requests the exact device offline, validates provenance, and cleans up", async () => {
     const runtime = await mkdtemp(path.join(tmpdir(), "docslurp-layout-test-"));
     let output = "";
-    const options = { python: path.join(runtime, "python"), script: path.join(runtime, "infer.py"), cacheDirectory: runtime, model: "heron" as const, device: "cpu" as const };
+    const options = { python: path.join(runtime, "bin", "python"), script: path.join(runtime, "infer.py"), cacheDirectory: runtime, model: "heron" as const, device: "cpu" as const };
+    await mkdir(path.join(runtime, "bin"));
+    await writeFile(path.join(runtime, "pyvenv.cfg"), "home = /usr/bin\n");
     await writeFile(options.python, "");
     await writeFile(options.script, "");
     try {
       const input = await sharp({ create: { width: 20, height: 10, channels: 3, background: "white" } }).png().toBuffer();
       const runner = { run: async (plan: CommandPlan) => {
         expect(plan.timeoutMs).toBe(120_000);
+        expect(plan.bundleRoots).toContain(runtime);
         expect(plan.bundleEnv?.HF_HUB_OFFLINE).toBe("1");
         expect(plan.args).toContain("cpu");
         output = plan.args[plan.args.indexOf("--output") + 1];

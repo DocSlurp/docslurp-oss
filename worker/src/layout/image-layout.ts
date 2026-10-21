@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { existsSync } from "node:fs";
 import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -107,6 +108,8 @@ export async function detectImageLayout(input: Buffer, options: ImageLayoutCliOp
   if (!["cpu", "cuda"].includes(options.device) || !["heron", "ppv3", "pp-small", "pp-small-onnx"].includes(options.model)) throw new Error("Unsupported layout model/device");
   if (options.model === "pp-small" && !options.modelPath) throw new Error("pp-small requires an explicit local modelPath");
   if (options.model === "pp-small-onnx" && !options.onnxPath) throw new Error("pp-small-onnx requires an explicit local onnxPath");
+  const venvRoot = path.dirname(path.dirname(options.python));
+  const runtimeRoots = existsSync(path.join(venvRoot, "pyvenv.cfg")) ? [venvRoot] : [];
   const timeoutMs = options.timeoutMs ?? 120_000;
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0) throw new Error("Invalid layout timeout");
   const metadata = await sharp(input, { limitInputPixels: 100_000_000 }).metadata();
@@ -120,7 +123,7 @@ export async function detectImageLayout(input: Buffer, options: ImageLayoutCliOp
     await runner.run({ binary: options.python,
       args: [options.script, "--model", options.model, "--device", options.device, "--image", source, "--output", output, ...(options.modelPath ? ["--model-path", options.modelPath] : []), ...(options.onnxPath ? ["--onnx-path", options.onnxPath] : [])],
       available: true, pages: 1, timeoutMs,
-      bundleRoots: [options.cacheDirectory, path.dirname(options.script), ...[options.modelPath, options.onnxPath].filter((value): value is string => value !== undefined)],
+      bundleRoots: [options.cacheDirectory, path.dirname(options.script), ...runtimeRoots, ...[options.modelPath, options.onnxPath].filter((value): value is string => value !== undefined)],
       bundleEnv: { HF_HOME: options.cacheDirectory, HF_HUB_OFFLINE: "1", TRANSFORMERS_OFFLINE: "1", PYTHONDONTWRITEBYTECODE: "1" },
     }, signal);
     if ((await stat(output)).size > 10 * 1024 * 1024) throw new Error("Layout output exceeds 10 MiB");
