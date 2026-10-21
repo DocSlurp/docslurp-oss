@@ -18,6 +18,7 @@
     "test:db": "pnpm --filter @docslurp/shared build && tsx db/tests/run.mjs",
     "db:migrate": "node db/migrate.mjs",
     "db:seed": "tsx db/seed.ts",
+    "catalog:feed": "tsx scripts/stripe-catalog-feed.ts",
     "test:watch": "vitest"
   },
   "dependencies": {
