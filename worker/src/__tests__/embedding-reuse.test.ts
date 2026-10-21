@@ -402,21 +402,42 @@ describe("EmbedStage chunk materialization", () => {
     expect(writtenIds).toEqual(result.artifact.chunks.map((chunk) => chunk.id));
   });
 
-  it("deletes the LanceDB rows of chunks a retry dropped, so native search cannot serve them", async () => {
+  it("deletes the LanceDB rows of chunks a retry dropped before their Postgres rows, so native search cannot serve them", async () => {
+    const calls: string[] = [];
     const deleted: Array<{ table: string; ids: readonly string[] }> = [];
     const result = await embedDocument({
       storage: new MemoryStorage(), reuse: new MemoryReuseStore(), runId: "run-orphan", documentId: "orphan",
       storeExtras: {
-        insertChunks: async () => {},
-        deleteStaleDocumentChunks: async () => ["orphan-007", "orphan-008"],
-        markDocumentLexicalSearchable: async () => {},
+        insertChunks: async () => { calls.push("insert"); },
+        staleDocumentChunkIds: async () => ["orphan-007", "orphan-008"],
+        deleteStaleDocumentChunks: async () => { calls.push("prune"); },
+        markDocumentLexicalSearchable: async () => { calls.push("mark"); },
       },
-      deleteVectors: async (_uri, table, ids) => { deleted.push({ table, ids }); },
+      deleteVectors: async (_uri, table, ids) => { calls.push("lance"); deleted.push({ table, ids }); },
     });
+    expect(calls).toEqual(["insert", "lance", "prune", "mark"]);
     expect(deleted).toHaveLength(1);
     expect(deleted[0]!.ids).toEqual(["orphan-007", "orphan-008"]);
     const space = result.artifact.embedding;
     expect(deleted[0]!.table).toBe(VectorNamespaceManager.getEmbeddingLocation("", "o1", space.model, space.dimensions).table);
+    // Handed to the index stage, which deletes them again after its own write commits.
+    expect(result.state.staleVectorIds.get("orphan")).toEqual(["orphan-007", "orphan-008"]);
+  });
+
+  it("keeps the stale Postgres rows when the LanceDB delete fails, so the retry deletes them again", async () => {
+    const calls: string[] = [];
+    const result = await runEmbed({
+      storage: new MemoryStorage(), reuse: new MemoryReuseStore(), runId: "run-fail", documentId: "fail", allowFailure: true,
+      storeExtras: {
+        insertChunks: async () => {},
+        staleDocumentChunkIds: async () => ["fail-009"],
+        deleteStaleDocumentChunks: async () => { calls.push("prune"); },
+        markDocumentLexicalSearchable: async () => { calls.push("mark"); },
+      },
+      deleteVectors: async () => { throw new Error("Too many concurrent writers"); },
+    });
+    expect(result.status).not.toBe("completed");
+    expect(calls).toEqual([]);
   });
 
   it("leaves LanceDB alone when no chunk rows were stale", async () => {
@@ -425,7 +446,8 @@ describe("EmbedStage chunk materialization", () => {
       storage: new MemoryStorage(), reuse: new MemoryReuseStore(), runId: "run-clean", documentId: "clean",
       storeExtras: {
         insertChunks: async () => {},
-        deleteStaleDocumentChunks: async () => [],
+        staleDocumentChunkIds: async () => [],
+        deleteStaleDocumentChunks: async () => {},
         markDocumentLexicalSearchable: async () => {},
       },
       deleteVectors: async (...call) => { deleted.push(call); },

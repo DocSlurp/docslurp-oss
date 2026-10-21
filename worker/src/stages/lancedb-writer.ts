@@ -152,20 +152,39 @@ async function writeLanceDbRecordsNow(
  * inTableQueue). For rows whose chunk is gone: search serves hydrated rows
  * without re-reading Postgres, so a row must not outlive its chunk.
  */
-export async function deleteLanceDbRecords(uri: string, collection: string, ids: readonly string[]): Promise<void> {
+export async function deleteLanceDbRecords(
+  uri: string,
+  collection: string,
+  ids: readonly string[],
+  retry: LanceWriteRetryOptions = {},
+): Promise<void> {
   if (ids.length === 0) return;
+  const retries = retry.retries ?? 10;
+  const baseDelayMs = retry.baseDelayMs ?? 200;
+  const maxDelayMs = retry.maxDelayMs ?? 15_000;
+  const attemptTimeoutMs = retry.attemptTimeoutMs ?? lanceWriteAttemptTimeoutMs();
   await inTableQueue(`${uri}\u0000${collection}`, async () => {
     const db = await connectLanceDb(uri);
     try {
-      if (!(await db.tableNames()).includes(collection)) return;
-      const table = await db.openTable(collection);
-      try {
-        for (let index = 0; index < ids.length; index += 500) {
-          const list = ids.slice(index, index + 500).map((id) => `'${id.replace(/'/g, "''")}'`).join(", ");
-          await table.delete(`id IN (${list})`);
+      if (!(await withAttemptTimeout(db.tableNames(), attemptTimeoutMs)).includes(collection)) return;
+      for (let index = 0; index < ids.length; index += 500) {
+        const list = ids.slice(index, index + 500).map((id) => `'${id.replace(/'/g, "''")}'`).join(", ");
+        // Other machines commit to the same table: retry conflicts like writes do.
+        for (let attempt = 0; ; attempt += 1) {
+          try {
+            const table = await withAttemptTimeout(db.openTable(collection), attemptTimeoutMs);
+            try {
+              await withAttemptTimeout(table.delete(`id IN (${list})`), attemptTimeoutMs);
+            } finally {
+              table.close();
+            }
+            break;
+          } catch (error) {
+            if (attempt >= retries || !isRetryableLanceCommitError(error)) throw error;
+            const cap = Math.min(maxDelayMs, baseDelayMs * 2 ** attempt);
+            await delay(Math.round(cap / 2 + Math.random() * (cap / 2)));
+          }
         }
-      } finally {
-        table.close();
       }
     } finally {
       db.close();
