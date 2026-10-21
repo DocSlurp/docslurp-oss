@@ -1,0 +1,58 @@
+{
+  "at": "2026-10-21T02:24:43.734Z",
+  "sourceCommit": "d38681ea8628dc6b8a93635c72c49bfa615b4f16",
+  "prompts": [
+    {
+      "name": "docslurp/content-safety/reference-evaluator-source",
+      "version": 1,
+      "contentSha256": "344bccde60c49f67ddcc791b8a591f38d797bd51d73b906887b637750446ba82",
+      "label": "sync-344bccde60c49f67ddcc791b8a591f3",
+      "unchanged": true,
+      "readbackVerified": true
+    },
+    {
+      "name": "docslurp/content-safety/mastra-judge",
+      "version": 1,
+      "contentSha256": "5d4b18381829db7ce16785b94d98a31967bb99fbb76a17723ad04f08cdc4b838",
+      "label": "sync-5d4b18381829db7ce16785b94d98a31",
+      "unchanged": true,
+      "readbackVerified": true
+    }
+  ],
+  "evaluators": [
+    {
+      "name": "docslurp/content-safety/advisory-policy-judge",
+      "id": "cmvhhokjx000hms2moefmil08",
+      "version": 1,
+      "contentSha256": "ca4ce600de025c4d408f26dbc8643a7872218578d8510035a1f7ab13e194511c",
+      "status": "active",
+      "pausedReason": null,
+      "unchanged": false,
+      "readbackVerified": true
+    }
+  ],
+  "datasets": [
+    {
+      "name": "docslurp/content-safety/development-v1",
+      "split": "development",
+      "expectedItems": 7,
+      "remoteItems": 7,
+      "created": 0,
+      "updated": 0,
+      "unchanged": 7,
+      "readbackVerified": true
+    }
+  ],
+  "failures": [
+    {
+      "kind": "evaluator",
+      "name": "docslurp/content-safety/reference-decisions",
+      "error": "Langfuse HTTP 412 (response body redacted)"
+    }
+  ],
+  "complete": false,
+  "llmCalls": null,
+  "evaluationRulesCreated": 0,
+  "runtimeReady": false,
+  "llmUsageStatus": "Native validation invoked provider; token usage and cost not returned by Langfuse evaluator API"
+}

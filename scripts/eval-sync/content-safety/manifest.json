@@ -1,0 +1,90 @@
+{
+  "schemaVersion": 1,
+  "sourceCommit": "d38681ea8628dc6b8a93635c72c49bfa615b4f16",
+  "namespace": "docslurp/content-safety",
+  "config": {
+    "policyVersion": "documentary-strict-v1",
+    "arms": [
+      "openai-moderation",
+      "mastra-judge",
+      "cascade"
+    ],
+    "labelProvenance": "agent-authored synthetic development examples; not human-adjudicated promotion evidence"
+  },
+  "prompts": [
+    {
+      "name": "docslurp/content-safety/reference-evaluator-source",
+      "type": "text",
+      "promptFile": "decision-evaluator.js",
+      "labels": [
+        "development"
+      ],
+      "config": {
+        "assetKind": "code-evaluator-source",
+        "execution": "local-or-native-dispatcher",
+        "notAnLlmPrompt": true
+      }
+    },
+    {
+      "name": "docslurp/content-safety/mastra-judge",
+      "type": "text",
+      "promptFile": "judge.txt",
+      "labels": [
+        "development"
+      ],
+      "config": {
+        "policyVersion": "documentary-strict-v1",
+        "runtime": "mastra",
+        "modelSelection": "pending-comparative-evaluation"
+      }
+    }
+  ],
+  "evaluators": [
+    {
+      "name": "docslurp/content-safety/reference-decisions",
+      "description": "Deterministic comparison against independent reference decisions. Synthetic development labels are not promotion evidence.",
+      "type": "code",
+      "sourceCodeLanguage": "TYPESCRIPT",
+      "sourceCodeFile": "decision-evaluator.js"
+    },
+    {
+      "name": "docslurp/content-safety/advisory-policy-judge",
+      "description": "Advisory judge only; never substitutes for human holdout labels. No automatic evaluation rules are installed.",
+      "type": "llm_as_judge",
+      "promptFile": "review-judge.txt",
+      "modelConfig": {
+        "provider": "openrouter",
+        "model": "google/gemini-3.1-flash-lite"
+      },
+      "variableMapping": [
+        {
+          "variable": "input",
+          "source": "input"
+        },
+        {
+          "variable": "output",
+          "source": "output"
+        }
+      ],
+      "outputDefinition": {
+        "dataType": "BOOLEAN"
+      },
+      "pricing": {
+        "source": "https://openrouter.ai/api/v1/models",
+        "verifiedAt": "2026-10-20",
+        "inputUsdPerMillion": 0.25,
+        "outputUsdPerMillion": 1.5
+      }
+    }
+  ],
+  "datasets": [
+    {
+      "name": "docslurp/content-safety/development-v1",
+      "split": "development",
+      "cases": "development.json",
+      "exportApproved": true,
+      "humanReviewed": false,
+      "purpose": "synthetic integration smoke cases only; not an accuracy benchmark"
+    }
+  ]
+}

@@ -39,13 +39,14 @@ export function buildItems({ name, split, cases, gold = null, provenance = null,
 
 export function createClient({ baseUrl, publicKey, secretKey, fetchImpl = fetch }) {
   const url = new URL(baseUrl);
-  if (url.username || url.password || (url.protocol !== "https:" && !["localhost", "127.0.0.1"].includes(url.hostname))) throw new Error("Langfuse requires HTTPS or localhost without URL credentials");
+  if (url.username || url.password || !(url.protocol === "https:" || (url.protocol === "http:" && ["localhost", "127.0.0.1"].includes(url.hostname)))) throw new Error("Langfuse requires HTTPS or localhost without URL credentials");
   const auth = `Basic ${Buffer.from(`${publicKey}:${secretKey}`).toString("base64")}`;
-  return async (path, body) => {
+  return async (path, body, method = body ? "POST" : "GET") => {
+    if (!path.startsWith("/") || path.startsWith("//")) throw new Error("Invalid Langfuse API path");
     let response;
-    try { response = await fetchImpl(`${baseUrl.replace(/\/$/, "")}/api/public${path}`, { method: body ? "POST" : "GET", headers: { Authorization: auth, "Content-Type": "application/json" }, ...(body ? { body: JSON.stringify(body) } : {}), signal: AbortSignal.timeout(30_000), redirect: "error" }); }
+    try { response = await fetchImpl(`${baseUrl.replace(/\/$/, "")}/api/public${path}`, { method, headers: { Authorization: auth, "Content-Type": "application/json" }, ...(body ? { body: JSON.stringify(body) } : {}), signal: AbortSignal.timeout(30_000), redirect: "error" }); }
     catch (error) { const code = error?.cause?.code ?? error?.name; throw new Error(`Langfuse request failed (${typeof code === "string" && /^[A-Z_a-z0-9]+$/.test(code) ? code : "details-redacted"})`); }
-    if (response.status === 404) return null;
+    if (response.status === 404 && method === "GET") return null;
     if (!response.ok) throw new Error(`Langfuse HTTP ${response.status} (response body redacted)`);
     return response.json();
   };
@@ -79,7 +80,7 @@ export async function syncDataset(api, { name, split, items, sourceHashes, commi
   return { name, split, expectedItems: items.length, remoteItems: ids.size, created, updated, unchanged, readbackVerified: true };
 }
 
-async function loadEnv(path) {
+export async function loadEnv(path) {
   const env = { ...process.env };
   if (path) for (const line of (await readFile(path, "utf8")).split(/\r?\n/)) {
     const match = line.match(/^(?:export\s+)?(LANGFUSE_[A-Z_]+)\s*=\s*(.*)$/);

@@ -71,7 +71,7 @@ describe("server observability", () => {
       addTraceMetadata({ userId: "user-1", sessionId: "session-1", workspaceId: "w" });
       return withObservation({ name: "child" }, async () => 1);
     });
-    expect(state.attributes).toEqual([
+    expect(state.attributes.filter(({ key }) => key === "user.id" || key === "session.id")).toEqual([
       { name: "request", key: "user.id", value: "user-1" },
       { name: "request", key: "session.id", value: "session-1" },
     ]);

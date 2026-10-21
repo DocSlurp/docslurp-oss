@@ -37,6 +37,12 @@ test("HTTP failures never expose provider bodies or credentials", async () => {
   assert.throws(() => createClient({ baseUrl: "https://user:secret@example.com", publicKey: "x", secretKey: "y" }), /HTTPS/);
 });
 
+test("404 on mutation is an error, not a successful missing lookup", async () => {
+  const api = createClient({ baseUrl: "https://example.com", publicKey: "x", secretKey: "y", fetchImpl: async () => ({ status: 404, ok: false }) });
+  assert.equal(await api("/missing"), null);
+  await assert.rejects(api("/missing", { name: "asset" }), /HTTP 404/);
+});
+
 test("separate gold fails closed on missing, empty or mismatched labels", () => {
   for (const gold of [[], [{ id: "other", answer: "value" }]]) {
     assert.throws(() => buildItems({ ...spec, gold }), /label every case/);

@@ -1,0 +1,51 @@
+{
+  "at": "2026-10-21T02:26:07.920Z",
+  "projectId": "docslurp",
+  "defaultModel": {
+    "provider": "openrouter",
+    "model": "google/gemini-3.1-flash-lite",
+    "verification": "installed Prisma client readback"
+  },
+  "connections": [
+    {
+      "provider": "openrouter",
+      "adapter": "openai",
+      "baseURL": "https://openrouter.ai/api/v1",
+      "customModels": [
+        "openai/gpt-6-luna",
+        "google/gemini-3.1-flash-lite"
+      ],
+      "withDefaultModels": false,
+      "config": {
+        "useResponsesApi": false
+      }
+    },
+    {
+      "provider": "openai",
+      "adapter": "openai",
+      "baseURL": null,
+      "customModels": [
+        "gpt-6-luna"
+      ],
+      "withDefaultModels": false,
+      "config": {
+        "useResponsesApi": false
+      }
+    }
+  ],
+  "judge": {
+    "id": "cmvhhokjx000hms2moefmil08",
+    "status": "active",
+    "modelConfig": {
+      "provider": "openrouter",
+      "model": "google/gemini-3.1-flash-lite"
+    }
+  },
+  "validation": {
+    "failedLunaAttempts": 3,
+    "successfulGeminiCreations": 1,
+    "tokenUsage": null,
+    "billedCostUsd": null,
+    "evaluationBatches": 0
+  }
+}
