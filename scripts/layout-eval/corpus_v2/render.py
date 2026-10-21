@@ -4,12 +4,12 @@ import argparse,json,sys
 from pathlib import Path
 from PIL import Image,ImageDraw
 sys.path.insert(0,str(Path(__file__).resolve().parent.parent))
-from corpus_v2 import editorial,business,lifestyle,educational,scientific,culture
+from corpus_v2 import editorial,business,lifestyle,educational,scientific,culture,instruments,chinese_menu
 
 def main():
  p=argparse.ArgumentParser();p.add_argument('--output',type=Path,required=True);p.add_argument('--editorial-only',action='store_true');args=p.parse_args();args.output.mkdir(parents=True,exist_ok=True)
  pages=editorial.build()
- if not args.editorial_only:pages+=business.build()+lifestyle.build()+scientific.build()+culture.build()+educational.build(args.output)
+ if not args.editorial_only:pages+=business.build()+lifestyle.build()+scientific.build()+culture.build()+educational.build(args.output)+instruments.build()+chinese_menu.build()
  rows=[page.finalize(args.output) for page in pages]
  with (args.output/'pilot-manifest.jsonl').open('w') as f:
   for row in rows:f.write(json.dumps(row,ensure_ascii=False)+'\n')
