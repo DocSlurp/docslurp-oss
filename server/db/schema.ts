@@ -315,6 +315,10 @@ export const usageEvents = pgTable(
   (table) => [
     index("usage_events_org_created_idx").on(table.orgId, table.createdAt),
     index("usage_events_workspace_created_idx").on(table.workspaceId, table.createdAt),
+    // Chat turn refunds look events up by metadata.chatTurnId (migration 0067).
+    index("usage_events_chat_turn_idx")
+      .on(sql`(${table.metadata} ->> 'chatTurnId')`)
+      .where(sql`(${table.metadata} ->> 'chatTurnId') IS NOT NULL`),
     index("usage_events_run_id_idx").using(
       "btree",
       table.runId.asc().nullsLast().op("text_ops"),

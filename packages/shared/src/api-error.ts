@@ -132,7 +132,8 @@ const SAFE_DETAIL_LABELS = ["category", "policy"] as const;
 
 /**
  * The only details that cross the boundary: validation field paths (issue text
- * may echo input) and server-authored limit metadata. Anything else is dropped.
+ * may echo input), server-authored limit metadata and a failed chat turn's
+ * usage. Anything else is dropped.
  */
 export function publicApiErrorDetails(details: unknown): ApiErrorDetails | undefined {
   if (!details || typeof details !== "object" || Array.isArray(details)) return undefined;
@@ -151,6 +152,8 @@ export function publicApiErrorDetails(details: unknown): ApiErrorDetails | undef
   for (const key of SAFE_DETAIL_LABELS) {
     if (typeof source[key] === "string" && /^[\w:.-]{1,80}$/.test(source[key])) safe[key] = source[key];
   }
+  const usage = publicChatTurnUsage(source.usage);
+  if (usage) safe.usage = usage;
   const direct = source.directUpload;
   if (direct && typeof direct === "object" && !Array.isArray(direct)) {
     const { createSession, maxFileBytes } = direct as Record<string, unknown>;
@@ -159,6 +162,28 @@ export function publicApiErrorDetails(details: unknown): ApiErrorDetails | undef
     }
   }
   return Object.keys(safe).length ? safe : undefined;
+}
+
+const CHAT_TURN_USAGE_NUMBERS = ["providerCostCents", "creditCents", "refundedCreditCents", "chargedCreditCents"] as const;
+
+/**
+ * A failed chat turn's usage (`details.usage`): server-computed cost and
+ * credits, and whether the credits were refunded. Dropped unless every field
+ * has the expected type.
+ */
+function publicChatTurnUsage(value: unknown): Record<string, unknown> | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const usage = value as Record<string, unknown>;
+  if (typeof usage.turnId !== "string" || !/^[\w-]{1,80}$/.test(usage.turnId)) return undefined;
+  if (usage.outcome !== "open" && usage.outcome !== "delivered" && usage.outcome !== "failed") return undefined;
+  if (typeof usage.refunded !== "boolean") return undefined;
+  const safe: Record<string, unknown> = { turnId: usage.turnId, outcome: usage.outcome, refunded: usage.refunded };
+  for (const key of CHAT_TURN_USAGE_NUMBERS) {
+    const number = usage[key];
+    if (typeof number !== "number" || !Number.isFinite(number)) return undefined;
+    safe[key] = number;
+  }
+  return safe;
 }
 
 /**
