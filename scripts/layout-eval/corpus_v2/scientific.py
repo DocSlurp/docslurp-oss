@@ -55,7 +55,7 @@ def equation(p,latex,x,y,width,size=23,display=True,group=None,component=False):
         'expression':latex,'expression_sha256':hashlib.sha256(latex.encode()).hexdigest(),
         'image_sha256':hashlib.sha256(path.read_bytes()).hexdigest(),'original_expression_declaration':'Newly authored formula expression for this original teaching example; standard mathematical identities, no source page raster copied.',
         'renderer':{'name':'matplotlib.mathtext','version':matplotlib.__version__,'fontset':'stix','dpi':144,'point_size':size,'background':background},
-        'fonts':fonts,'license_receipts':license_receipts,'rights':'Original authored raster for user publication; STIX font software uses SIL OFL1.1; retain bundled license receipts.'}
+        'fonts':fonts,'license_receipts':license_receipts,'rights':'Original authored raster for user publication; retain exact bundled STIX Font License (24 May 2010, modified OTF-to-TTF distribution), DejaVu and Matplotlib license receipts. Font binaries are not exported.'}
     Path(str(path)+'.provenance.json').write_text(json.dumps(provenance,indent=2)+'\n')
     with Image.open(path) as im:w,h=im.size
     scale=min(1,width/w);w,h=w*scale,h*scale
