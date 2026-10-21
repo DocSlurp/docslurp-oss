@@ -2,7 +2,7 @@
 import unittest
 import numpy as np
 from PIL import Image, ImageDraw
-from capture import homography, project, transform_geometry, visible_fraction
+from capture import homography, project, transform_geometry, visible_fraction, validate_quad
 
 
 class CaptureGeometryTests(unittest.TestCase):
@@ -35,6 +35,12 @@ class CaptureGeometryTests(unittest.TestCase):
         self.assertAlmostEqual(visible_fraction(polygon,mask,mask.size),0.5)
         ImageDraw.Draw(mask).rectangle([0,0,99,99],fill=255)
         self.assertEqual(visible_fraction(polygon,mask,mask.size),0)
+
+    def test_bad_calibrations_fail_before_render(self):
+        for quad in ([[0,0],[50,50],[50,0],[0,50]], [[-1,0],[40,0],[40,40],[0,40]], [[0,0],[0,0],[10,10],[0,10]]):
+            with self.assertRaises(ValueError):
+                validate_quad(quad,(100,100))
+        validate_quad([[2,2],[90,5],[95,95],[5,90]],(100,100))
 
     def test_degenerate_geometry_rejected(self):
         with self.assertRaises(np.linalg.LinAlgError):

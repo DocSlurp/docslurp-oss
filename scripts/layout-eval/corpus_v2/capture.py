@@ -68,6 +68,18 @@ def visible_fraction(polygon, occlusion, size):
     return float((255-np.asarray(occlusion)[p]).sum()/(255*p.sum())) if p.any() else 0.0
 
 
+def validate_quad(quad, size):
+    points=np.asarray(quad,dtype=float)
+    if points.shape!=(4,2) or not np.isfinite(points).all():
+        raise ValueError('Print quad must contain four finite corner coordinates')
+    if np.any(points<0) or np.any(points>np.array(size)):
+        raise ValueError('Print quad outside scene: clipping visibility is not calibrated')
+    edge=np.roll(points,-1,axis=0)-points
+    cross=edge[:,0]*np.roll(edge,-1,axis=0)[:,1]-edge[:,1]*np.roll(edge,-1,axis=0)[:,0]
+    if not (np.all(cross>1e-6) or np.all(cross< -1e-6)):
+        raise ValueError('Print quad must be convex and ordered without folds')
+
+
 def compose(source_image, reference_path, scene_path, calibration_path, output, capture_id):
     source_image,reference_path,scene_path,calibration_path,output = map(Path,(source_image,reference_path,scene_path,calibration_path,output))
     reference=json.loads(reference_path.read_text()); calibration=json.loads(calibration_path.read_text())
@@ -87,7 +99,8 @@ def compose(source_image, reference_path, scene_path, calibration_path, output, 
         raise ValueError('Scene calibration dimensions disagree')
     if sha(scene_path)!=calibration['scene_sha256']:
         raise ValueError('Scene does not match calibrated plate')
-    w,h=source.size; quad=calibration['print_quad']; matrix=homography([[0,0],[w,0],[w,h],[0,h]],quad)
+    w,h=source.size; quad=calibration['print_quad']; validate_quad(quad,scene.size)
+    matrix=homography([[0,0],[w,0],[w,h],[0,h]],quad)
     inverse=np.linalg.inv(matrix); inverse/=inverse[2,2]
     occlusion=Image.new('L',scene.size)
     # Manual silhouette is calibrated against visible hand boundaries in this plate.
