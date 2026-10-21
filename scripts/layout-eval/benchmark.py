@@ -117,7 +117,7 @@ def parse_args(argv=None):
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--manifest',required=True,type=Path)
     parser.add_argument('--output',required=True,type=Path,help='Fresh JSONL path; existing output is rejected')
-    parser.add_argument('--model',choices=['heron','ppv3','pp-small','pp-small-onnx'],default='heron')
+    parser.add_argument('--model',choices=['heron','ppv3','pp-small','pp-small-onnx','heron-custom'],default='heron')
     parser.add_argument('--device',default='cpu')
     parser.add_argument('--precision',choices=['fp32','fp16'],default='fp32')
     parser.add_argument('--threads',type=int,default=4)
@@ -133,6 +133,8 @@ def parse_args(argv=None):
     parser.add_argument('--paddle-mkldnn',action='store_true')
     parser.add_argument('--model-path')
     parser.add_argument('--revision')
+    parser.add_argument('--rectify-page',action='store_true')
+    parser.add_argument('--rectify-max-edge',type=int,default=768)
     parser.add_argument('--orientation-onnx-path')
     parser.add_argument('--orientation-revision',default='unknown')
     parser.add_argument('--orientation-minimum-score',type=float,default=.75)
@@ -178,6 +180,9 @@ def main(argv=None):
         from orientation import OnnxOrientation,OrientedDetector
         detector=OrientedDetector(detector,OnnxOrientation(args.orientation_onnx_path,threads=args.threads,
             minimum_score=args.orientation_minimum_score,revision=args.orientation_revision))
+    if args.rectify_page:
+        from rectification import RectifiedDetector
+        detector=RectifiedDetector(detector,max_edge=args.rectify_max_edge)
     model_load_ms=1000*(time.perf_counter()-model_start)
     root=args.manifest.parent
     # Warmup uses source image bytes only, never references.

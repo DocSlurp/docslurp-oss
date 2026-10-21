@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Calibrate PP-DocLayout-S ONNX INT8 on development image pixels only.
+"""Calibrate PP-DocLayout-S ONNX INT8 on train image pixels by default.
 
 No labels are read or passed to ORT calibration. Holdout is forbidden. This is an
 experiment, not a presumption that INT8 will be faster or preserve accuracy.
@@ -19,7 +19,11 @@ def main():
     parser.add_argument('--manifest',required=True,type=Path)
     parser.add_argument('--limit',type=int,default=32)
     parser.add_argument('--split',choices=['train','dev'],default='train')
+    parser.add_argument('--activation-type',choices=['uint8','int8'],default='uint8')
+    parser.add_argument('--weight-type',choices=['uint8','int8'],default='int8')
+    parser.add_argument('--reduce-range',action='store_true')
     args=parser.parse_args()
+    if args.activation_type=='int8' and args.weight_type=='uint8': parser.error('S8U8 is not a supported CPU quantization combination')
     if args.output.exists(): raise ValueError('Refuse to overwrite an existing graph')
     from onnxruntime.quantization import CalibrationDataReader,QuantFormat,QuantType,quantize_static
     import numpy as np
@@ -40,13 +44,14 @@ def main():
             return {'image':data.transpose(2,0,1)[None], 'scale_factor':np.array([[480/height,480/width]],dtype=np.float32)}
     args.output.parent.mkdir(parents=True,exist_ok=True)
     started=time.time()
+    types={'uint8':QuantType.QUInt8,'int8':QuantType.QInt8}
     quantize_static(str(args.model),str(args.output),Images(),quant_format=QuantFormat.QDQ,
-                    activation_type=QuantType.QUInt8,weight_type=QuantType.QInt8,
-                    per_channel=True,op_types_to_quantize=['Conv'])
+                    activation_type=types[args.activation_type],weight_type=types[args.weight_type],
+                    reduce_range=args.reduce_range,per_channel=True,op_types_to_quantize=['Conv'])
     metadata={'source_sha256':hashlib.sha256(args.model.read_bytes()).hexdigest(),
               'graph_sha256':hashlib.sha256(args.output.read_bytes()).hexdigest(),
               'calibration_page_ids':[r['id'] for r in rows],'calibration_manifest_sha256':hashlib.sha256(args.manifest.read_bytes()).hexdigest(),
-              'split_policy':args.split+' image pixels only; no reference labels','quantization':'QDQ Conv QUInt8/QInt8 per-channel',
+              'split_policy':args.split+' image pixels only; no reference labels','quantization':{'format':'QDQ','ops':['Conv'],'per_channel':True,'activation':args.activation_type,'weight':args.weight_type,'reduce_range':args.reduce_range},
               'elapsed_seconds':time.time()-started}
     args.output.with_suffix('.provenance.json').write_text(json.dumps(metadata,indent=2)+'\n')
     print(json.dumps(metadata))

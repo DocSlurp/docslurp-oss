@@ -1,6 +1,7 @@
 """Image-only adapters. No reference annotations or corpus metadata accepted."""
 import time
 import math
+import sys
 
 HERON_LABELS={'caption':'caption','footnote':'footnote','formula':'formula','list_item':'list',
  'page_footer':'footer','page_header':'header','picture':'figure','section_header':'title',
@@ -59,7 +60,8 @@ class TransformersDetector:
         self.supported_labels=sorted(set(canonical(str(v),self.mapping) for v in self.model.config.id2label.values()))
         self.revision=getattr(self.model.config,'_commit_hash',None) or revision or 'unknown'
         self.metadata={'id':self.model_id,'revision':self.revision,'runtime':'transformers','precision':precision,
-            'threads':threads,'model_size':model_size,'processor':processor,'processor_class':type(self.processor).__name__,'source_labels':self.model.config.id2label,
+            'threads':threads,'model_size':model_size,'processor':processor,'processor_class':type(self.processor).__name__,'effective_processor_backend':getattr(self.processor,'backend',getattr(self.processor,'_backend',None)),
+            'source_labels':self.model.config.id2label,
             'native_reading_order':model=='ppv3','native_polygons':model=='ppv3','parameter_count':sum(p.numel() for p in self.model.parameters())}
 
     def sync(self):
@@ -176,7 +178,15 @@ class OnnxSmallDetector:
 
 
 def load_detector(model,**kwargs):
-    if model in ('heron','ppv3'): return TransformersDetector(model=model,**kwargs)
-    if model=='pp-small': return PaddleSmallDetector(**kwargs)
-    if model=='pp-small-onnx': return OnnxSmallDetector(**kwargs)
-    raise ValueError(f'Unknown detector {model}')
+    if model in ('heron','ppv3'): detector=TransformersDetector(model=model,**kwargs)
+    elif model=='heron-custom':
+        from custom_layout import CustomLayoutDetector
+        detector=CustomLayoutDetector(**kwargs)
+    elif model=='pp-small': detector=PaddleSmallDetector(**kwargs)
+    elif model=='pp-small-onnx': detector=OnnxSmallDetector(**kwargs)
+    else: raise ValueError(f'Unknown detector {model}')
+    # Read versions of actual imported modules, not potentially shadowed root distributions.
+    detector.metadata['runtime_versions']={name:str(sys.modules[name].__version__)
+        for name in ('torch','transformers','onnxruntime','paddle','paddleocr','paddlex','cv2','numpy','PIL')
+        if name in sys.modules and hasattr(sys.modules[name],'__version__')}
+    return detector

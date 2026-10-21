@@ -63,7 +63,7 @@ def main():
           'calibration':{'split':'train','limit':32,'seed':417,'pixel_only':True},'baseline_jobs':jobs,
           'later_arms':['best eligible runtime on original payload plus orientation','best eligible runtime on declared byte variants'],
           'selection_policy':{'reference':'ort-fp32-t1','require_zero_failures':True,'max_macro_iou50_drop':.02,
-                              'max_family_macro_iou50_drop':.05,'minimize':'consumer_path_ms mean',
+                              'max_family_macro_iou50_drop':.05,'max_localization_f1_drop':.02,'max_localization_recall_drop':.02,'minimize':'consumer_path_ms mean',
                               'maturity':'relative efficiency choice only; does not waive absolute quality gates'},
           'variants':variants,'provenance':'No labels are passed to models or calibration; dev references used only for selection after inference.'}
     (out/'plan.json').write_text(json.dumps(plan,indent=2)+'\n')
@@ -85,19 +85,12 @@ def main():
         if summary.exists(): summaries[job['name']]=json.loads(summary.read_text())['summaries']['original']
     reference=summaries.get('ort-fp32-t1')
     if not reference or reference['failures']: raise RuntimeError('Reference CPU run unavailable; inspect retained errors')
-    def eligible(summary):
-        if summary['failures']: return False
-        score=summary['scores']['iou50']['macro_f1_truth_present']; baseline=reference['scores']['iou50']['macro_f1_truth_present']
-        if score is None or baseline is None or score<baseline-.02: return False
-        for family,ref in reference['per_family'].items():
-            base=ref['iou50']['macro_f1_truth_present']; actual=summary['per_family'][family]['iou50']['macro_f1_truth_present']
-            if base is not None and (actual is None or actual<base-.05): return False
-        return True
-    candidates=[job for job in jobs if job['name'] in summaries and eligible(summaries[job['name']])]
-    if not candidates: raise RuntimeError('No runtime satisfies the declared relative quality policy')
-    winner=min(candidates,key=lambda job:summaries[job['name']]['successful_latency_ms']['consumer_path_ms']['mean'])
-    selection={'selected':winner,'eligible_candidates':[j['name'] for j in candidates],
-               'summary':summaries[winner['name']],'scope':'development runtime selection; not production promotion'}
+    from select_cpu_runtime import select_runtime
+    review=select_runtime(summaries,jobs)
+    winner=review['selected']
+    if winner is None: raise RuntimeError('No runtime satisfies strict and localization quality safeguards')
+    selection={'selected':winner,'review':review,'summary':summaries[winner['name']],
+               'scope':'development runtime selection; not production promotion'}
     (out/'runtime-selection.json').write_text(json.dumps(selection,indent=2)+'\n')
     execute('best-runtime-orientation',benchmark_command(winner,out/'best-runtime-orientation.jsonl',[
         '--orientation-onnx-path',str(root/'models/orientation/inference.onnx'),

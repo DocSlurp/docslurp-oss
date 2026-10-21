@@ -163,12 +163,36 @@ reference annotations. Keep failed parity evidence as well as corrected output.
 
 `cpu_campaign.py` runs serially in an existing CPU Paddle/ORT environment. It
 creates a fresh evidence directory and writes its plan before any model work.
-It calibrates INT8 on32 train images, then compares native FP32, ORT FP32 and ORT
-INT8 at1/2/4/8 threads on the same development screen. Runtime eligibility requires
-zero failures, macroF1 no more than2 percentage points below the FP32 reference and
-no family macro loss greater than5 points. It chooses lowest measured consumer
-mean, then measures orientation and19 declared byte variants on that runtime.
+It calibrates INT8 on 32 train images, then compares native FP32, ORT FP32 and ORT
+INT8 at 1/2/4/8 threads on the same development screen. Runtime eligibility requires
+zero failures, macroF1 no more than 2 percentage points below the FP32 reference and
+no family macro loss greater than 5 points. It chooses lowest measured consumer
+mean, then measures orientation and 19 declared byte variants on that runtime.
 This efficiency choice does not waive absolute quality gates or authorize promotion.
 All subprocess commands, exit codes, logs, raw predictions and digests are saved;
 a wall-time cap terminates the workload. It creates no hosts and performs no
 model downloads. Existing evidence directories cannot be reused.
+
+The CPU selector also requires class-agnostic localization F1 and recall to stay
+within 2 percentage points of the original FP32 reference. This prevents a codec
+from appearing better by deleting coarse visual boxes that strict photo/logo
+labels cannot match. The original CPU campaign's additive safeguard was timestamped
+before byte results were inspected; its independent review is retained separately.
+
+The first per-channel U8S8 quantization recipe failed severely on this checkpoint.
+A bounded continuation tested S8S8, reduced-range U8S8 and U8U8 on the same train
+calibration pixels and development images, following the
+[official ORT quantization guidance](https://onnxruntime.ai/docs/performance/model-optimizations/quantization.html).
+All three remained slower and failed quality gates; signedness/range alone did not
+repair this recipe. These results do not establish that every INT8 method fails.
+Activation-level divergence should be diagnosed before recommending further
+calibration, mixed-precision exclusions or QAT. Every failed graph and provenance
+receipt remains evidence; none is eligible for promotion.
+
+Optional `--rectify-page --rectify-max-edge 768` wraps the image-only light-paper
+quadrilateral prepass and maps predictions back through the inverse homography.
+It remains experimental and must be measured on both phone images and clean pages.
+`--model heron-custom --model-path <checkpoint>` loads an explicit safetensors
+checkpoint with the exact canonical taxonomy contract; it cannot fetch weights or
+read reference manifests during prediction. Custom training and evaluation splits
+must remain isolated under the training workflow's integrity checks.
