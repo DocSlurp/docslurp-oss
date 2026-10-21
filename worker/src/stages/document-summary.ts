@@ -5,13 +5,12 @@ import { generateOpenRouterText } from "../lib/ai.js";
 import { textModelApiKey, textUsageLabels } from "../lib/text-model-route.js";
 import { allowHostedCall, openRouterTextCall } from "../lib/privacy-guard.js";
 import type { Stage, WorkflowState } from "../pipeline/pipeline.js";
-import { runDocumentStage, runDocuments } from "../pipeline/checkpoints.js";
+import { isCostCapExceeded, runDocumentStage, runDocuments } from "../pipeline/checkpoints.js";
 import type { CommandRunner } from "../tools/runner.js";
 import type { ArtifactStore } from "../tools/storage.js";
 import { measureOp } from "../lib/perf-context.js";
 import { buildTrustedDocumentTaskPrompt } from "../lib/trusted-llm-task.js";
 import {
-  extractTextForEmbedding,
   embedTextChunks,
   embeddingCallCostCents,
   estimateTokens,
@@ -21,12 +20,17 @@ import {
   resolveEmbeddingModel,
 } from "../embeddings/resolver.js";
 import { indexableDocuments } from "../pipeline/pii-gate.js";
+import { selectSummaryInput } from "./summary-input.js";
+import { readSummarySource } from "./summary-source.js";
+
+export const SUMMARY_MAX_CONCURRENCY = 4;
+const SUMMARY_DEADLINE_MS = 120_000;
 
 export class DocumentSummaryStage implements Stage {
   readonly name = "document-summary";
 
   constructor(
-    private readonly runner: CommandRunner,
+    _runner: CommandRunner,
     private readonly storage: ArtifactStore,
     private readonly config: Config,
   ) {}
@@ -48,7 +52,7 @@ export class DocumentSummaryStage implements Stage {
 
     await runDocuments(
       indexableDocuments(state),
-      state.docConcurrency,
+      Math.min(state.docConcurrency, SUMMARY_MAX_CONCURRENCY),
       async (document) => {
         const artifactSlot = `${document.id}:document-summary`;
 
@@ -59,13 +63,23 @@ export class DocumentSummaryStage implements Stage {
           artifactSlot,
           "document summary ready",
           async () => {
-            const extracted = await extractTextForEmbedding(
-              document,
-              this.runner,
+            if (isCostCapExceeded(state)) {
+              return { message: "Document summary skipped: run cost cap reached", stats: { summarySkipped: "cost-cap" } };
+            }
+            const deadline = AbortSignal.timeout(SUMMARY_DEADLINE_MS);
+            const summarySignal = signal ? AbortSignal.any([signal, deadline]) : deadline;
+            const extracted = await readSummarySource(
               this.storage,
+              document,
               state.artifactLedger.readDocument(document.id, "markdown"),
-              signal,
+              summarySignal,
             );
+            if (!extracted?.text.trim()) {
+              return { message: "Document summary skipped: no bounded extracted text available", stats: { summarySkipped: "source-unavailable" } };
+            }
+            const selected = selectSummaryInput(extracted.text, extracted.sampled);
+            const sourceStats = { sourceBytes: extracted.sourceBytes, readBytes: extracted.readBytes,
+              inputCharacters: selected.text.length, sampled: selected.sampled };
             const {
               text: summaryText,
               inputTokens: summaryInputTokens,
@@ -74,9 +88,28 @@ export class DocumentSummaryStage implements Stage {
               metadata: costMetadata,
             } = await measureOp(
               "summary-llm-latency",
-              () => this.generateSummary(extracted.text, model, state.run.pipeline.privacyMode, signal, state.run.pipeline.textGeneration),
+              () => this.generateSummary(selected, model, state.run.pipeline.privacyMode, summarySignal, state.run.pipeline.textGeneration),
               { metadata: { documentId: document.id } },
             );
+
+            const summaryCostCents = providerCostCents ?? calculateAiUsageCostCents({
+              inputTokens: summaryInputTokens,
+              outputTokens: summaryOutputTokens,
+              costPer1kInputTokens: this.config.costPer1kInputTokens,
+              costPer1kOutputTokens: this.config.costPer1kOutputTokens,
+            });
+
+            // Account for generation even if embedding or persistence fails later.
+            state.usageLedger.record({
+              ...textUsageLabels(model),
+              metric: "summary-generation",
+              amount: 1,
+              unit: "document",
+              costCents: summaryCostCents,
+              inputTokens: summaryInputTokens,
+              outputTokens: summaryOutputTokens,
+              metadata: { ...costMetadata, documentId: document.id, ...sourceStats },
+            });
 
             const detectedLang = detectLanguage(summaryText);
             const profile = resolveEmbeddingModel(
@@ -89,7 +122,7 @@ export class DocumentSummaryStage implements Stage {
               profile,
               config: this.config,
               privacyMode: state.run.pipeline.privacyMode,
-              signal,
+              signal: summarySignal,
             });
 
             const vector = embedded.vectors[0] ?? [];
@@ -118,6 +151,7 @@ export class DocumentSummaryStage implements Stage {
             await this.storage.putJson(key, {
               documentId: document.id,
               summary: summaryText,
+              sourceSelection: sourceStats,
               tokenEstimate: estimateTokens(summaryText),
               embedding: {
                 model: profile.model,
@@ -129,25 +163,6 @@ export class DocumentSummaryStage implements Stage {
             const embeddingTokens =
               embedded.totalTokens ?? estimateTokens(summaryText);
             const costCents = embeddingCallCostCents(profile, embedded, embeddingTokens, this.config.costPer1kInputTokens);
-            const summaryCostCents = providerCostCents ?? calculateAiUsageCostCents({
-              inputTokens: summaryInputTokens,
-              outputTokens: summaryOutputTokens,
-              costPer1kInputTokens: this.config.costPer1kInputTokens,
-              costPer1kOutputTokens: this.config.costPer1kOutputTokens,
-            });
-
-            state.usageLedger.record({
-                ...textUsageLabels(model),
-                metric: "summary-generation",
-                amount: 1,
-                unit: "document",
-                costCents: summaryCostCents,
-                inputTokens: summaryInputTokens,
-                outputTokens: summaryOutputTokens,
-                metadata: { ...costMetadata, documentId: document.id },
-              },
-            );
-
             state.usageLedger.record({
                 provider: profile.provider,
                 model: profile.model,
@@ -170,6 +185,7 @@ export class DocumentSummaryStage implements Stage {
               stats: {
                 summaryLength: summaryText.length,
                 embeddingDimensions: vector.length,
+                ...sourceStats,
               },
             };
           },
@@ -180,7 +196,7 @@ export class DocumentSummaryStage implements Stage {
   }
 
   private async generateSummary(
-    text: string,
+    selected: { text: string; sampled: boolean },
     model: string,
     privacyMode: PrivacyMode,
     signal?: AbortSignal,
@@ -190,8 +206,9 @@ export class DocumentSummaryStage implements Stage {
       instruction:
         "Generate a one-paragraph summary of this document for use in a search index.",
       outputContract:
-        "Return only the summary paragraph. Be concise and capture the main topics, entities, and purpose.",
-      untrustedContent: text,
+        "Return only the summary paragraph. Be concise and capture the main topics, entities, and purpose."
+        + (selected.sampled ? " The input contains representative excerpts, not the full document. Do not claim exhaustive coverage or infer details from omitted sections." : ""),
+      untrustedContent: selected.text,
       untrustedContentLabel: "document text",
     });
 
@@ -201,7 +218,13 @@ export class DocumentSummaryStage implements Stage {
       privacyMode,
       model,
       maxOutputTokens: 512,
-      textGeneration,
+      textGeneration: {
+        model: textGeneration?.model ?? null,
+        models: textGeneration?.models ?? {},
+        ...textGeneration,
+        maxOutputTokens: { ...textGeneration?.maxOutputTokens,
+          "document-summary": Math.min(512, textGeneration?.maxOutputTokens?.["document-summary"] ?? 512) },
+      },
       deploymentProfile: this.config.textGenerationProfile,
       system: task.system,
       prompt: task.prompt,

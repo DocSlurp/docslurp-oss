@@ -282,6 +282,7 @@ function mapWorkspace(row: WorkspaceRow): WorkspaceRecord {
     name: row.name,
     templateKey: parseWorkspaceTemplateKey(row.template_key),
     systemPrompt: row.system_prompt ?? null,
+    summaries: normalizePipelineFeatures(row.pipeline ?? defaultPipelineFeatures).summarize,
     pipeline: {
       ...normalizePipelineFeatures(row.pipeline ?? defaultPipelineFeatures),
       indexingMode: effectiveIndexingMode(row.pipeline?.indexingMode),
@@ -351,7 +352,10 @@ export async function createWorkspace(input: CreateWorkspaceInput): Promise<Work
   const id = randomUUID();
   const template = getWorkspaceTemplate(parsed.templateKey ?? null);
   const pipeline = applyWorkspaceTemplateLocks(
-    normalizePipelineFeatures(parsed.pipeline ?? template?.pipeline ?? defaultPipelineFeatures),
+    normalizePipelineFeatures({
+      ...(parsed.pipeline ?? template?.pipeline ?? defaultPipelineFeatures),
+      summarize: parsed.summaries,
+    }),
     template,
   );
   const organization = parsed.orgId
@@ -859,6 +863,7 @@ export async function resolveUpdatedPipeline(
         ? template?.pipeline ?? defaultPipelineFeatures
         : current.pipeline),
   );
+  if (parsed.summaries !== undefined) draftPipeline.summarize = parsed.summaries;
   const pipeline = applyWorkspaceTemplateLocks(draftPipeline, template);
   // The schema defaults a missing indexingMode to "full", so a pipeline edit must not
   // flip the mode: only an explicit request (options) changes it. Flag off pins "full".

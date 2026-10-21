@@ -109,6 +109,25 @@ describe("ArtifactStore object inspection", () => {
     });
   }
 
+  it("bounds range reads and rejects ignored, oversized or incomplete responses", async () => {
+    const store = createStore();
+    const body = (chunks: Buffer[]) => ({
+      transformToWebStream: () => Readable.toWeb(Readable.from(chunks)), destroy: vi.fn(),
+    });
+    const send = vi.fn().mockResolvedValue({ ContentRange: "bytes 10-13/100", ContentLength: 4, Body: body([Buffer.from("text")]) });
+    (store as unknown as { client: { send: typeof send } }).client = { send };
+    expect((await store.getByteRange("doc.md", 10, 13)).toString()).toBe("text");
+    expect(send.mock.calls[0]![0].input.Range).toBe("bytes=10-13");
+    const ignoredBody = body([Buffer.alloc(100)]);
+    send.mockResolvedValueOnce({ ContentLength: 100, Body: ignoredBody });
+    await expect(store.getByteRange("doc.md", 10, 13)).rejects.toBeInstanceOf(StorageReadError);
+    expect(ignoredBody.destroy).toHaveBeenCalled();
+    send.mockResolvedValueOnce({ ContentRange: "bytes 10-13/100", Body: body([Buffer.alloc(3), Buffer.alloc(3)]) });
+    await expect(store.getByteRange("doc.md", 10, 13)).rejects.toBeInstanceOf(StorageObjectTooLargeError);
+    send.mockResolvedValueOnce({ ContentRange: "bytes 10-13/100", Body: body([Buffer.alloc(3)]) });
+    await expect(store.getByteRange("doc.md", 10, 13)).rejects.toBeInstanceOf(StorageReadError);
+  });
+
   it("never PUTs a body of unknown length (regression: x-amz-decoded-content-length undefined)", async () => {
     const { writeFile, mkdtemp } = await import("node:fs/promises");
     const { createReadStream } = await import("node:fs");
