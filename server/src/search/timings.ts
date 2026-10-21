@@ -43,3 +43,12 @@ export function countSearchEvent(name: string): void {
   const timings = store.getStore();
   if (timings) timings[name] = (timings[name] ?? 0) + 1;
 }
+
+/**
+ * A search branch hit SEARCH_STATEMENT_TIMEOUT_MS (search.ts counts
+ * `<branch>Timeout` events). Pollers and pending-search retries stop on it:
+ * re-running the same statement would time out again.
+ */
+export function searchHitStatementTimeout(response: { timings?: Record<string, number> }): boolean {
+  return Object.entries(response.timings ?? {}).some(([key, value]) => key.endsWith("Timeout") && value > 0);
+}

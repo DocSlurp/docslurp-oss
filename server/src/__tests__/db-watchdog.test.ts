@@ -90,9 +90,25 @@ describe("pool activity", () => {
     first();
     first();
     expect(activity.snapshot()).toEqual({ inFlight: 1, completed: 1, stalledForMs: 0 });
+    clock.now = 60_000;
+    const third = activity.start();
     clock.now = 70_000;
-    expect(activity.snapshot().stalledForMs).toBe(18_000);
+    expect(activity.snapshot().stalledForMs).toBe(10_000);
     second();
-    expect(activity.snapshot()).toEqual({ inFlight: 0, completed: 2, stalledForMs: 0 });
+    third();
+    expect(activity.snapshot()).toEqual({ inFlight: 0, completed: 3, stalledForMs: 0 });
+  });
+
+  it("does not read a leaked, never-settling query as a stall while the process is idle", () => {
+    const clock = { now: 0 };
+    const activity = new PoolActivity(() => clock.now);
+    activity.start(); // never settles
+    activity.start()();
+    clock.now = 10 * 60_000;
+    expect(activity.snapshot()).toEqual({ inFlight: 1, completed: 1, stalledForMs: 0 });
+    // New demand that also makes no progress is a stall again.
+    activity.start();
+    clock.now += 61_000;
+    expect(activity.snapshot().stalledForMs).toBe(61_000);
   });
 });

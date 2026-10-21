@@ -63,6 +63,25 @@ describe("search limiter", () => {
     expect(searchLimiterStats()).toMatchObject({ running: 0 });
   });
 
+  it("drops a queued search whose client aborts and keeps the slot count exact", async () => {
+    const limiter = new ConcurrencyLimiter({ maxConcurrency: 1, maxQueue: 10, queueTimeoutMs: 5_000 });
+    let release!: () => void;
+    const holder = limiter.run(() => new Promise<void>((resolve) => { release = resolve; }));
+    const controller = new AbortController();
+    let ran = false;
+    const aborted = limiter.run(async () => { ran = true; }, controller.signal);
+    const next = limiter.run(async () => "next");
+    expect(limiter.stats()).toMatchObject({ running: 1, queued: 2 });
+    controller.abort();
+    await expect(aborted).rejects.toMatchObject({ name: "AbortError" });
+    expect(limiter.stats()).toMatchObject({ running: 1, queued: 1 });
+    release();
+    await holder;
+    expect(await next).toBe("next");
+    expect(ran).toBe(false);
+    expect(limiter.stats()).toMatchObject({ running: 0, queued: 0 });
+  });
+
   it("is a pass-through when disabled", async () => {
     const limiter = new ConcurrencyLimiter({ maxConcurrency: 0, maxQueue: 0, queueTimeoutMs: 100 });
     expect(await Promise.all([1, 2, 3].map((n) => limiter.run(async () => n)))).toEqual([1, 2, 3]);

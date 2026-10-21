@@ -73,6 +73,15 @@ export function isSearchBoundError(error: unknown): boolean {
 
 type Cancellable<T> = PromiseLike<T> & { cancel?: () => unknown };
 
+/** Longest wait for a cancel request to reach Postgres before the connection is released anyway. */
+const CANCEL_DELIVERY_WAIT_MS = 2_000;
+
+async function settleWithin(promise: Promise<unknown>, ms: number): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  await Promise.race([promise, new Promise<void>((resolve) => { timer = setTimeout(resolve, ms); timer.unref?.(); })]);
+  clearTimeout(timer);
+}
+
 export async function boundedSearchQuery<T>(
   build: (client: SqlClient) => Cancellable<T>,
   options: { timeoutMs?: number; signal?: AbortSignal } = {},
@@ -87,12 +96,18 @@ export async function boundedSearchQuery<T>(
       if (timeoutMs > 0) await client.unsafe(`set local statement_timeout = ${Math.trunc(timeoutMs)}`);
       if (signal?.aborted) throw new SearchAbortedError();
       const query = build(client);
-      const cancel = () => { void Promise.resolve(query.cancel?.()).catch(() => undefined); };
+      // postgres.js sends the cancel on a separate connection. If the statement
+      // finishes before Postgres acts on it, the cancel could land on whatever
+      // this connection runs next, so the transaction (and the connection's
+      // return to the pool) waits until the cancel request has been delivered.
+      let cancelling: Promise<unknown> | undefined;
+      const cancel = () => { cancelling = Promise.resolve(query.cancel?.()).catch(() => undefined); };
       signal?.addEventListener("abort", cancel, { once: true });
       try {
         return await query;
       } finally {
         signal?.removeEventListener("abort", cancel);
+        if (cancelling) await settleWithin(cancelling, CANCEL_DELIVERY_WAIT_MS);
       }
     }) as T;
   } catch (error) {

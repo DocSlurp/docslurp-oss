@@ -8,12 +8,13 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const statements: string[] = [];
 let settle: (client: { cancel: () => void }) => Promise<unknown>;
 let cancels = 0;
+let cancelDelivered: () => Promise<unknown> = async () => undefined;
 
 function fakeQuery(text: string) {
   statements.push(text);
   let promise: Promise<unknown> | null = null;
   const query = {
-    cancel: () => { cancels++; },
+    cancel: () => { cancels++; return cancelDelivered(); },
     then: (resolve: (value: unknown) => unknown, reject: (error: unknown) => unknown) => (promise ??= settle(query)).then(resolve, reject),
   };
   return query;
@@ -33,6 +34,7 @@ beforeEach(() => {
   statements.length = 0;
   cancels = 0;
   settle = async () => [{ id: "row" }];
+  cancelDelivered = async () => undefined;
 });
 
 describe("bounded search queries", () => {
@@ -62,6 +64,23 @@ describe("bounded search queries", () => {
     expect(cancels).toBe(1);
     expect(bounds.isSearchAborted(error)).toBe(true);
     expect(bounds.isSearchStatementTimeout(error)).toBe(false);
+  });
+
+  it("holds the connection until a cancel that raced the statement's completion is delivered", async () => {
+    const controller = new AbortController();
+    const order: string[] = [];
+    // The statement completes on its own right after the abort; the cancel
+    // request reaches Postgres later and must not hit the next statement.
+    settle = () => new Promise((resolve) => setTimeout(() => { order.push("statement done"); resolve([]); }, 5));
+    cancelDelivered = () => new Promise((resolve) => setTimeout(() => { order.push("cancel delivered"); resolve(undefined); }, 30));
+    const pending = bounds.withSearchSignal(controller.signal, () =>
+      bounds.boundedSearchQuery((client) => client`select fast`, { timeoutMs: 8_000 })).catch((e: unknown) => e);
+    await new Promise((resolve) => setTimeout(resolve, 1));
+    controller.abort();
+    const rows = await pending;
+    order.push("released");
+    expect(order).toEqual(["statement done", "cancel delivered", "released"]);
+    expect(rows).toEqual([]);
   });
 
   it("does not touch the database once the search is aborted", async () => {

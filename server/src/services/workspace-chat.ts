@@ -55,6 +55,7 @@ import type { WorkspaceChatModelId } from "@docslurp/shared/workspace-chat-model
 import type { ChatAgentLimits, ChatAgentLimitsInput } from "@docslurp/shared";
 import { chatEvalAccess, chatTurnNeedsEvalAccess, resolveChatAgentLimits, resolveChatModelRequest } from "../lib/chat-model-policy.js";
 import { currentRequestId, currentRequestSignal } from "../lib/request-context.js";
+import { searchHitStatementTimeout } from "../search/timings.js";
 
 export type ChatSearchActivity = {
   id: string; groupId: string; query: string; status: "loading" | "success" | "error";
@@ -164,9 +165,7 @@ function shouldWaitForPendingSearch(
  * retries kept 1-4 minute FTS statements coming after every client left), so
  * the pending-search loop returns the degraded result instead.
  */
-export function searchHitStatementTimeout(response: { timings?: Record<string, number> }): boolean {
-  return Object.entries(response.timings ?? {}).some(([key, value]) => key.endsWith("Timeout") && value > 0);
-}
+export { searchHitStatementTimeout };
 
 async function sleep(ms: number): Promise<void> {
   if (ms <= 0) {

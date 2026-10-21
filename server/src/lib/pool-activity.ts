@@ -9,6 +9,11 @@
  *
  * "In flight" counts queries from the moment they are awaited, so it includes
  * queries still waiting for a free connection.
+ *
+ * The stall clock starts at the first query issued after the last completion,
+ * not at the completion itself. A query that never settles (a leak) therefore
+ * cannot make an idle process look wedged: with no new demand there is no
+ * stall, and the next query that completes resets the clock.
  */
 export interface PoolActivitySnapshot {
   inFlight: number;
@@ -20,16 +25,14 @@ export interface PoolActivitySnapshot {
 export class PoolActivity {
   private inFlight = 0;
   private completed = 0;
-  private lastProgressAt: number;
+  /** When the first query since the last completion was issued; null until one is. */
+  private waitingSince: number | null = null;
 
-  constructor(private readonly now: () => number = Date.now) {
-    this.lastProgressAt = now();
-  }
+  constructor(private readonly now: () => number = Date.now) {}
 
   /** Hook for instrumentPostgres: marks one query in flight; the returned function settles it (idempotent). */
   readonly start = (): (() => void) => {
-    // Demand arriving at an idle pool starts the stall clock now, not at the last completion.
-    if (this.inFlight === 0) this.lastProgressAt = this.now();
+    this.waitingSince ??= this.now();
     this.inFlight++;
     let settled = false;
     return () => {
@@ -37,7 +40,7 @@ export class PoolActivity {
       settled = true;
       this.inFlight--;
       this.completed++;
-      this.lastProgressAt = this.now();
+      this.waitingSince = null;
     };
   };
 
@@ -45,7 +48,7 @@ export class PoolActivity {
     return {
       inFlight: this.inFlight,
       completed: this.completed,
-      stalledForMs: this.inFlight > 0 ? Math.max(0, now - this.lastProgressAt) : 0,
+      stalledForMs: this.inFlight > 0 && this.waitingSince !== null ? Math.max(0, now - this.waitingSince) : 0,
     };
   }
 }

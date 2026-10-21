@@ -27,6 +27,7 @@ import { publicSearchResponse } from "../lib/search-usage.js";
 import { sql } from "../db.js";
 import { acceptApiKeys } from "../lib/route-auth.js";
 import { currentRequestApiKeyId } from "../lib/request-context.js";
+import { SearchCapacityError } from "../search/search-limiter.js";
 import { env } from "../config.js";
 import { activeTraceparent } from "@docslurp/shared/observability";
 import { chatModelRefused, ChatModelNotAllowedError } from "../lib/chat-model-policy.js";
@@ -186,7 +187,10 @@ function expectedSearchFailure(error: unknown): SearchFailure | null {
   }
   return null;
 }
-function searchError(error: unknown): { code: string; message: string; status: 400 | 403 | 404 | 500 } {
+function searchError(error: unknown): { code: string; message: string; status: 400 | 403 | 404 | 499 | 500 | 503 } {
+  // Load shedding and disconnects are expected outcomes, not internal failures: keep them out of error reports.
+  if (error instanceof SearchCapacityError) return { code: "SEARCH_UNAVAILABLE", message: "Search capacity is full; retry shortly", status: 503 };
+  if (error instanceof Error && error.name === "AbortError") return { code: "REQUEST_ABORTED", message: "Request aborted before search finished", status: 499 };
   return expectedSearchFailure(error) ?? { code: "SEARCH_FAILED", message: reportPublicError(error), status: 500 };
 }
 /**
