@@ -71,7 +71,7 @@ async function runSearchBatch(c: Context, parsed: { queries: SearchInput[]; conc
     }
   }));
   if (!signal.aborted) {
-    await prefetchBatchQueryEmbeddings(inputs.flatMap((input) => input ? [{ query: input.q.replaceAll("\u0000", ""), workspaceId: input.workspaceId, options: searchOptions(input) }] : []), userId);
+    await prefetchBatchQueryEmbeddings(inputs.flatMap((input) => input ? [{ query: input.q.replaceAll("\u0000", ""), workspaceId: input.workspaceId, options: searchOptions(input) }] : []), userId, signal);
   }
   let next = 0;
   async function worker() {

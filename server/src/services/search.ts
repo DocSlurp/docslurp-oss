@@ -979,6 +979,24 @@ async function nativeVectorSearch(
     workspaceId: context.workspaceId, options, score: (hit) => hit.score });
 }
 
+const NATIVE_FALLBACK_LOG_INTERVAL_MS = 10 * 60_000;
+const nativeFallbackLogged = new Map<string, number>();
+
+/**
+ * Native keyword search fell back to Postgres FTS for a whole org (a table
+ * without an FTS index, one that failed to open, ...): logged at most every
+ * ten minutes per org and reason, so a deploy ahead of the backfill shows
+ * which orgs still need it.
+ */
+function logNativeLexicalFallback(orgId: string, reason: string, table: string | undefined): void {
+  const key = `${orgId}\u0000${reason}`;
+  const now = Date.now();
+  if ((nativeFallbackLogged.get(key) ?? 0) > now) return;
+  if (nativeFallbackLogged.size > 10_000) nativeFallbackLogged.clear();
+  nativeFallbackLogged.set(key, now + NATIVE_FALLBACK_LOG_INTERVAL_MS);
+  console.warn(`[search] native keyword search fell back to Postgres FTS org=${orgId} reason=${reason}${table ? ` table=${table}` : ""}`);
+}
+
 /** False for queries using websearch_to_tsquery operators BM25 cannot honour: "quoted phrases" and -negation. */
 export function nativeLexicalQuerySupported(query: string): boolean {
   return !/"[^"]*[^"\s][^"]*"/.test(query) && !/(?:^|\s)-[\p{L}\p{N}"]/u.test(query);
@@ -1032,6 +1050,7 @@ async function nativeTextSearch(
     }
     if (!result.indexed) {
       countSearchEvent("nativeLexicalUnindexed");
+      logNativeLexicalFallback(context.orgId, result.fallback ?? "no-fts-index", result.table);
       return null;
     }
     // OR-semantics BM25: relevance is judged by term coverage, like the Postgres OR backoff.

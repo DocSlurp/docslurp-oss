@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -326,6 +326,35 @@ describe("SEARCH_LANCEDB_NATIVE", () => {
       await sql`insert into document_chunks (id, document_id, run_id, user_id, chunk_index, text, heading_path, page_number, token_estimate, metadata)
         values ('doc4-9', 'doc4', 'run1', 'u', 9, ${original.text}, ${original.headingPath}, ${original.page}, 12, ${sql.json(original.metadata as postgres.JSONValue)})`;
       eligible.handleSearchEligibilityHint(JSON.stringify({ workspaceIds: ["w"] }));
+    }
+  });
+
+  it("falls back to Postgres FTS, without caching the table as missing, when a table fails to open", async () => {
+    expect(lance.isLanceTableNotFound(new Error("Table 'chunks_org_x' was not found"))).toBe(true);
+    expect(lance.isLanceTableNotFound(new Error("lance error: LanceError(IO): does not have sufficient data"))).toBe(false);
+    const location = VectorNamespaceManager.getEmbeddingLocation(lanceDir, "org1", route.model, DIM);
+    const versions = path.join(location.uri.replace(/^file:\/\//, ""), `${location.table}.lance`, "_versions");
+    const manifests = await readdir(versions);
+    const saved = await Promise.all(manifests.map((name) => readFile(path.join(versions, name))));
+    lance.resetLanceDbConnectionForTests();
+    await Promise.all(manifests.map((name) => writeFile(path.join(versions, name), "garbage")));
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const queryVector = near("doc4-9");
+      const legacy = await run(false, "cavitation erosion", { queryVector });
+      const native = await run(true, "cavitation erosion", { queryVector });
+      expect(native.timings?.nativeLexicalUnindexed).toBe(1);
+      expect(native.results.some((result) => result.text.includes("cavitation"))).toBe(true);
+      expect(native.results.map((result) => result.text)).toEqual(expect.arrayContaining(legacy.results.filter((result) => result.text.includes("cavitation")).map((result) => result.text)));
+      expect(warn.mock.calls.some(([line]) => /fell back to Postgres FTS org=org1 reason=open-failed/.test(String(line)))).toBe(true);
+      // Repaired storage is served natively again by the next search: the failure was not cached as "missing".
+      await Promise.all(manifests.map((name, index) => writeFile(path.join(versions, name), saved[index]!)));
+      const recovered = await run(true, "cavitation erosion", { queryVector });
+      expect(recovered.timings?.nativeLexicalUnindexed).toBeUndefined();
+      expect(recovered.results.some((result) => result.text.includes("cavitation"))).toBe(true);
+    } finally {
+      warn.mockRestore();
+      await writeLanceTable({ hydrated: true, fts: true });
     }
   });
 

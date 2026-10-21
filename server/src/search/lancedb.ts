@@ -156,10 +156,24 @@ function getDb(uri: string): Promise<lancedb.Connection> {
   return connection;
 }
 
+/** LanceDB's error for a table that does not exist (as opposed to a storage or network failure). */
+export function isLanceTableNotFound(error: unknown): boolean {
+  return /Table '[^']*' was not found|table .* does not exist/i.test(error instanceof Error ? error.message : String(error));
+}
+
 async function getTable(uri: string, name: string): Promise<lancedb.Table | null> {
+  return (await openTarget(uri, name)).table;
+}
+
+/**
+ * Open a table: `table` null with `failed` false when it does not exist
+ * (cached for MISSING_TABLE_TTL_MS), `failed` true when opening it failed for
+ * another reason (not cached; the next search retries).
+ */
+async function openTarget(uri: string, name: string): Promise<{ table: lancedb.Table | null; failed: boolean }> {
   const key = `${connectionKey(uri)}\u0000${name}`;
   const missingUntil = missingTables.get(key);
-  if (missingUntil && missingUntil > Date.now()) return null;
+  if (missingUntil && missingUntil > Date.now()) return { table: null, failed: false };
   let table = tables.get(key);
   if (!table) {
     table = getDb(uri).then(async (db) => {
@@ -178,11 +192,15 @@ async function getTable(uri: string, name: string): Promise<lancedb.Table | null
   try {
     const opened = await table;
     refreshPrewarm(key, name, opened);
-    return opened;
-  } catch {
-    tables.delete(key);
-    missingTables.set(key, Date.now() + MISSING_TABLE_TTL_MS);
-    return null;
+    return { table: opened, failed: false };
+  } catch (error) {
+    if (tables.get(key) === table) tables.delete(key);
+    if (isLanceTableNotFound(error)) {
+      missingTables.set(key, Date.now() + MISSING_TABLE_TTL_MS);
+      return { table: null, failed: false };
+    }
+    console.warn(`[search] lancedb openTable failed table=${name}: ${error instanceof Error ? error.message.slice(0, 200) : String(error)}`);
+    return { table: null, failed: true };
   }
 }
 
@@ -417,6 +435,9 @@ export async function lanceDbVectorSearch(args: {
   return results;
 }
 
+/** Why a native keyword search handed over to Postgres FTS. */
+export type LanceFtsFallbackReason = "open-failed" | "no-table" | "no-fts-index" | "no-hydration-columns";
+
 /**
  * BM25 full-text search over the chunk `text` column with LanceDB's native
  * FTS index, filtered to the eligible documents before ranking (like the
@@ -433,26 +454,29 @@ export async function lanceDbFullTextSearch(args: {
   legacyDocumentIds?: string[];
   limit: number;
   where?: string | null;
-}): Promise<{ indexed: boolean; hits: LanceDbSearchHit[] }> {
+}): Promise<{ indexed: boolean; hits: LanceDbSearchHit[]; fallback?: LanceFtsFallbackReason; table?: string }> {
   if (!args.orgId.trim() || !args.query.trim() || args.documentIds.length === 0) return { indexed: true, hits: [] };
   const targets = searchTargets(args);
-  const opened = (await Promise.all(targets.map(async (target) => ({ ...target, table: await getTable(target.uri, target.name) }))))
-    .filter((target): target is typeof target & { table: lancedb.Table } => target.table !== null);
+  const states = await Promise.all(targets.map(async (target) => ({ ...target, ...await openTarget(target.uri, target.name) })));
+  const failed = states.find((target) => target.failed);
+  // A table that failed to open may hold the documents' rows: let Postgres FTS answer.
+  if (failed) return { indexed: false, hits: [], fallback: "open-failed", table: failed.name };
+  const opened = states.filter((target): target is typeof target & { table: lancedb.Table } => target.table !== null);
+  // Callers pass vector-ready documents, so their rows should exist somewhere: no table means Postgres.
+  if (opened.length === 0) return { indexed: false, hits: [], fallback: "no-table" };
   const capabilities = await Promise.all(opened.map((target) => lanceTableCapabilities(target.table).catch(() => null)));
-  if (opened.length === 0) return { indexed: true, hits: [] };
-  if (capabilities.some((caps) => !caps?.fullTextIndex || (args.where && !caps.hydrationColumns))) return { indexed: false, hits: [] };
-  const rows = (await Promise.all(opened.map(async ({ uri, name, documentIds, table }, index) => {
+  const unindexed = capabilities.findIndex((caps) => !caps?.fullTextIndex);
+  if (unindexed >= 0) return { indexed: false, hits: [], fallback: "no-fts-index", table: opened[unindexed]!.name };
+  const unhydrated = capabilities.findIndex((caps) => args.where && !caps!.hydrationColumns);
+  if (unhydrated >= 0) return { indexed: false, hits: [], fallback: "no-hydration-columns", table: opened[unhydrated]!.name };
+  // A failing query throws to the caller (Postgres FTS answers); the shared table handle stays open.
+  const rows = (await Promise.all(opened.map(async ({ documentIds, table }, index) => {
     const caps = capabilities[index]!;
-    try {
-      const query = table.query().fullTextSearch(args.query, { columns: "text" })
-        .select(nativeColumns(caps, "_score")).limit(args.limit);
-      const filter = andFilters(documentIdFilter(documentIds), args.where);
-      if (filter) query.where(filter);
-      return filterLanceDbRowsByDocumentIds((await lanceSpan("fts", () => query.toArray())) as LanceDbRow[], documentIds);
-    } catch (error) {
-      dropTable(uri, name);
-      throw error;
-    }
+    const query = table.query().fullTextSearch(args.query, { columns: "text" })
+      .select(nativeColumns(caps, "_score")).limit(args.limit);
+    const filter = andFilters(documentIdFilter(documentIds), args.where);
+    if (filter) query.where(filter);
+    return filterLanceDbRowsByDocumentIds((await lanceSpan("fts", () => query.toArray())) as LanceDbRow[], documentIds);
   }))).flat();
   rows.sort((a, b) => (b._score ?? 0) - (a._score ?? 0));
   const seen = new Set<string>();

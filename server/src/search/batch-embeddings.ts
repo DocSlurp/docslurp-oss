@@ -25,18 +25,20 @@ function embedsQueryText(options: SearchOptions): boolean {
  * strict-privacy), and only for routes with a batch path. The batch call's
  * actual usage is recorded once, scoped to the org and workspace. Any failure
  * leaves the searches to embed one by one, as before. Only workspaces on
- * native search (SEARCH_LANCEDB_NATIVE or SEARCH_LANCEDB_NATIVE_WORKSPACES).
+ * native search (the default; SEARCH_LANCEDB_NATIVE=0 turns it off outside
+ * SEARCH_LANCEDB_NATIVE_WORKSPACES).
  */
 export async function prefetchBatchQueryEmbeddings(
   items: Array<{ query: string; workspaceId: string; options: SearchOptions }>,
   userId: string,
+  signal?: AbortSignal,
 ): Promise<{ prefetched: number; calls: number }> {
   const byWorkspace = new Map<string, typeof items>();
   for (const item of items) byWorkspace.set(item.workspaceId, [...(byWorkspace.get(item.workspaceId) ?? []), item]);
   let prefetched = 0;
   let calls = 0;
   await Promise.all([...byWorkspace].map(async ([workspaceId, group]) => {
-    // Rolls out with native search: workspaces on the default path embed per query, as before.
+    // With native search off for the workspace, each search embeds its own query.
     if (group.length < 2 || !searchLanceDbNativeEnabled(workspaceId)) return;
     try {
       const context = await loadSearchWorkspaceContext(workspaceId, userId);
@@ -62,7 +64,7 @@ export async function prefetchBatchQueryEmbeddings(
         values, runtime: route.runtime, provider: route.provider, model: route.model, dimensions: route.dimensions,
         requestedDimensions: route.requestedDimensions, normalize: route.provider === "deepinfra" ? pipeline.embedding.normalize : true,
         apiKey, baseURL: route.baseUrl ?? process.env.OPENAI_BASE_URL, privacyMode, modelUri: route.modelUri,
-        auditScope: { workspaceId },
+        auditScope: { workspaceId }, signal,
       });
       if (!result || result.embeddings.length !== values.length) return;
       calls += 1;
@@ -71,7 +73,8 @@ export async function prefetchBatchQueryEmbeddings(
         scope: { orgId, workspaceId },
         usage: {
           provider: route.provider, model: route.model, metric: "embed-query", inputTokens: result.usage.inputTokens, logOutputTokens: false,
-          metadata: { usageSource: METERED_EMBEDDING_PROVIDERS.has(route.provider) ? "provider" : "estimate", batchSize: values.length, batch: true },
+          // Every hosted batch path reports actual tokens (OpenAI included); only a zero count is not.
+          metadata: { usageSource: METERED_EMBEDDING_PROVIDERS.has(route.provider) || (route.runtime === "remote" && result.usage.inputTokens > 0) ? "provider" : "estimate", batchSize: values.length, batch: true },
         },
       });
       [...texts.keys()].forEach((key, index) => cache.set(key, result.embeddings[index]!.slice()));

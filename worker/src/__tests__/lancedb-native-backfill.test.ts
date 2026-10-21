@@ -10,7 +10,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
 import { startMigratedPostgres } from "../test/migrated-postgres.js";
 import { buildVectorRecords } from "../stages/index-vectors.js";
-import { backfillWorkspaceLanceHydration } from "../stages/lancedb-native-backfill.js";
+import { backfillAllLanceHydration, backfillOrgLanceHydration, backfillWorkspaceLanceHydration } from "../stages/lancedb-native-backfill.js";
 import { writeLanceDbRecords } from "../stages/lancedb-writer.js";
 
 /**
@@ -132,4 +132,33 @@ describe("lancedb native backfill", () => {
     expect(after.rows.get(`other-doc${DOCS}-0`)!.hydration).toBeNull();
     expect(after.rows.size).toBe(before.rows.size);
   }, 60_000);
+  it("--org and --all also cover the legacy chunks_org table, once per table", async () => {
+    // A legacy table holding one document's rows, written before hydration columns existed.
+    const db = await connect(lanceDir);
+    const legacyName = VectorNamespaceManager.getTableName("org1");
+    const legacyRows = Array.from({ length: 5 }, (_, c) => ({ id: `w-doc0-${c}`, documentId: "w-doc0", text: `pump seal ${c}`, vector: vector(c), metadata: { documentId: "w-doc0" } }));
+    const legacy = await db.createTable(legacyName, legacyRows);
+    legacy.close();
+    try {
+      const lines: string[] = [];
+      const results = await backfillOrgLanceHydration({ sql, orgId: "org1", log: (line) => lines.push(line) });
+      const byKind = Object.fromEntries(results.map((result) => [result.kind, result]));
+      expect(byKind.embedding).toMatchObject({ chunkRows: (DOCS + 1) * CHUNKS, rowsWithoutHydration: 0, ftsPresent: true });
+      expect(byKind["root-embedding"]).toMatchObject({ skipped: "missing" });
+      expect(byKind.legacy).toMatchObject({ ftsBuilt: true, ftsPresent: true, optimized: true, rowsWithoutHydration: 0 });
+      // Both workspaces of the org, and each table once.
+      expect(lines.filter((line) => line.startsWith("[backfill] table=") && line.includes("kind=embedding"))).toHaveLength(1);
+      const reopened = await db.openTable(legacyName);
+      const [row] = await reopened.query().where("id = 'w-doc0-3'").select(["hydration"]).toArray() as Array<{ hydration: string }>;
+      expect(decodeLanceChunkHydration(row!.hydration)?.runId).toBe("run-w");
+      reopened.close();
+
+      const all = await backfillAllLanceHydration({ sql, log: () => {} });
+      expect(all.filter((result) => !result.skipped).map((result) => result.kind).sort()).toEqual(["embedding", "legacy"]);
+      expect(all.every((result) => !result.error)).toBe(true);
+    } finally {
+      await db.dropTable(legacyName);
+      db.close();
+    }
+  }, 120_000);
 });
