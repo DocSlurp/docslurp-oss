@@ -96,7 +96,7 @@ def main(argv=None):
         'source_sha256':digest(Path(__file__).read_bytes()),'adapter_sha256':digest(Path(__file__).with_name('custom_layout.py').read_bytes()),
         'limitations':['Synthetic source/template-instance split; reused assets/primitives do not establish real-document generalization.',
                       'Short fine-tuning pilot is not an accuracy promise. No reading order or masks.'],
-        'steps':0,'checkpoint_selection':'dev macro F1 at IoU .50, threshold .30' if args.dev_manifest else 'last checkpoint; no dev access'}
+        'steps':0,'examples_seen':0,'epochs_completed':0,'checkpoint_selection':'dev macro F1 at IoU .50, threshold .30' if args.dev_manifest else 'last checkpoint; no dev access'}
     torch=None
     def save_receipt():
         receipt['elapsed_seconds']=time.perf_counter()-started
@@ -133,6 +133,7 @@ def main(argv=None):
             for parameter in module.parameters():parameter.requires_grad_(False)
         model.to(args.device)
         receipt['trainable_parameters']=sum(p.numel() for p in model.parameters() if p.requires_grad)
+        receipt['frozen_parameters']=sum(p.numel() for p in model.parameters() if not p.requires_grad)
         receipt['processor_size']=processor.size
         optimizer=torch.optim.AdamW([p for p in model.parameters() if p.requires_grad],lr=args.learning_rate,weight_decay=.0001)
         best=-1.;stop=False
@@ -155,10 +156,13 @@ def main(argv=None):
                 loss.backward();torch.nn.utils.clip_grad_norm_(model.parameters(),10.);optimizer.step()
                 if args.device=='cuda':torch.cuda.synchronize()
                 receipt['steps']+=1
+                receipt['examples_seen']+=len(batch)
+                receipt['epoch_equivalents']=receipt['examples_seen']/len(train)
                 event={'step':receipt['steps'],'epoch':epoch+1,'elapsed_seconds':time.perf_counter()-started,
                        'loss':float(loss.detach()),'components':{key:float(value.detach()) for key,value in losses.items()}}
                 with (args.output/'losses.jsonl').open('a') as stream:stream.write(json.dumps(event)+'\n')
                 save_receipt()
+            if not stop:receipt['epochs_completed']=epoch+1
             model.eval();quality=None
             if dev and not stop and time.perf_counter()-started<args.max_seconds:
                 from scoring import score_pages

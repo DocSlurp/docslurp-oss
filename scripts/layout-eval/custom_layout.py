@@ -45,7 +45,7 @@ def convert_predictions(predictions,images,threshold):
 
 
 class CustomLayoutDetector:
-    def __init__(self,model_path=None,device='cpu',threads=4,precision='fp32',**_):
+    def __init__(self,model_path=None,device='cpu',threads=4,precision='fp32',model_size=None,processor='slow',**_):
         import torch
         from transformers import AutoImageProcessor,AutoModelForObjectDetection
         if not model_path: raise ValueError('Custom detector requires explicit checkpoint directory')
@@ -53,14 +53,19 @@ class CustomLayoutDetector:
             raise ValueError('Requested custom detector device unavailable')
         if precision not in ('fp32','fp16') or (device=='cpu' and precision!='fp32'):
             raise ValueError('Custom detector supports CPU fp32 or CUDA fp32/fp16')
+        if processor not in ('slow','fast'):raise ValueError('Unsupported custom processor')
+        if model_size is not None and (not isinstance(model_size,int) or model_size<32 or model_size>2048 or model_size%32):raise ValueError('Custom model size must be a multiple of32 in32..2048')
+        self.model_size=model_size
         torch.set_num_threads(threads);self.torch,self.device=torch,device
         config=json.loads((Path(model_path)/'config.json').read_text());validate_config(config)
         self.dtype=torch.float16 if precision=='fp16' else torch.float32
-        self.processor=AutoImageProcessor.from_pretrained(model_path,local_files_only=True,use_fast=False)
+        self.processor=AutoImageProcessor.from_pretrained(model_path,local_files_only=True,use_fast=processor=='fast')
         self.model=AutoModelForObjectDetection.from_pretrained(model_path,local_files_only=True,use_safetensors=True).to(device=device,dtype=self.dtype).eval()
         self.supported_labels=list(LABELS);digest=checkpoint_digest(model_path)
         self.metadata={'id':ARCHITECTURE,'revision':digest,'graph_sha256':digest,'runtime':'transformers',
-                       'precision':precision,'model_size':self.processor.size,'threads':threads,
+                       'precision':precision,'model_size':model_size or self.processor.size,'threads':threads,
+                       'processor_requested':processor,'processor_class':type(self.processor).__name__,
+                       'processor_backend':getattr(self.processor,'backend',None),
                        'training':config.get('docslurp_training',{}),'reading_order_supported':False}
 
     def sync(self):
@@ -68,7 +73,9 @@ class CustomLayoutDetector:
 
     def predict(self,images,threshold=.3):
         self.sync();start=time.perf_counter()
-        inputs=self.processor(images=images,return_tensors='pt').to(self.device)
+        kwargs={'size':{'height':self.model_size,'width':self.model_size}} if self.model_size else {}
+        inputs=self.processor(images=images,return_tensors='pt',**kwargs).to(self.device)
+        self.metadata['last_input_tensor_shape']=list(inputs['pixel_values'].shape)
         inputs={key:value.to(dtype=self.dtype) if value.is_floating_point() else value for key,value in inputs.items()}
         self.sync();prepared=time.perf_counter()
         with self.torch.inference_mode(): predictions=self.model(**inputs)
