@@ -3,7 +3,7 @@ import { bodyLimit } from "hono/body-limit";
 import { HTTPException } from "hono/http-exception";
 import { apiError, apiErrorCodeForStatus, API_ERROR_PUBLIC_MESSAGES, isApiErrorCode, type ApiErrorCode, type ApiErrorDetails } from "@docslurp/shared";
 
-type ErrorStatus = 400 | 401 | 402 | 403 | 404 | 409 | 413 | 415 | 422 | 429 | 500 | 502 | 503;
+type ErrorStatus = 400 | 401 | 402 | 403 | 404 | 409 | 413 | 415 | 422 | 429 | 500 | 502 | 503 | 504;
 
 /** Native error envelope response; `publicErrorMiddleware` stamps `requestId` and sanitizes copy. */
 export function apiErrorResponse(c: Context, status: ErrorStatus, code: ApiErrorCode, message: string, details?: ApiErrorDetails): Response {

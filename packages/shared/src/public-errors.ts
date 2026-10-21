@@ -32,6 +32,7 @@ export const PUBLIC_ERROR_MESSAGES = {
   chatDisabled: "Chat is turned off for this workspace. Enable it in workspace settings.",
   searchScope: "Search must stay within a single workspace.",
   modelNotAllowed: "That chat model isn’t available for this request. Omit model to use the default.",
+  chatDeadline: "The chat turn ran out of time before an answer was ready. Retry, or ask a narrower question.",
 } as const;
 
 export function publicErrorForStatus(status: number): string {
