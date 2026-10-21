@@ -1,0 +1,16 @@
+{
+  "schema": "docslurp-evaluation-integrity@v1",
+  "passed": false,
+  "datasetHash": null,
+  "productionHash": null,
+  "gitHead": null,
+  "base": "5fe9ac4e",
+  "scannedFiles": 0,
+  "scannedProductionFiles": 0,
+  "cases": 0,
+  "findings": [
+    {
+      "rule": "unreadable-or-invalid-input"
+    }
+  ]
+}

@@ -1,0 +1,8 @@
+
+> @docslurp/worker@0.1.0 typecheck /home/dan/worktrees/docslurp-oss/layout-image-campaign/worker
+> pnpm --filter @docslurp/shared build && tsc -p tsconfig.json --noEmit
+
+
+> @docslurp/shared@0.1.0 build /home/dan/worktrees/docslurp-oss/layout-image-campaign/packages/shared
+> tsc -p tsconfig.json
+

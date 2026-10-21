@@ -1,0 +1,777 @@
+[worker-memory] container_limit_mb=64222 command_rss_budget_mb=38533
+[checkpoint-debug] document=kreuzberg-tables-invoice stage=route-pages checkpointStatus=none message=page route plan ready
+[checkpoint-debug] document=kreuzberg-tables-invoice stage=route-pages attempt=1/1 strategy=default
+[checkpoint-debug] document=kreuzberg-tables-invoice stage=route-pages completed attempts=1 artifact=s3://local-measurement/local-eval-user/router-local--1-kreuzberg-tables-invoice/page-route/kreuzberg-tables-invoice.json
+[worker-memory] container_limit_mb=64222 command_rss_budget_mb=38533
+[checkpoint-debug] document=kreuzberg-tables-invoice stage=route-pages checkpointStatus=none message=page route plan ready
+[checkpoint-debug] document=kreuzberg-tables-invoice stage=route-pages attempt=1/1 strategy=default
+[checkpoint-debug] document=kreuzberg-tables-invoice stage=route-pages completed attempts=1 artifact=s3://local-measurement/local-eval-user/router-local--1-kreuzberg-tables-invoice/page-route/kreuzberg-tables-invoice.json
+[worker-memory] container_limit_mb=64222 command_rss_budget_mb=38533
+[checkpoint-debug] document=kreuzberg-formulas-math stage=route-pages checkpointStatus=none message=page route plan ready
+[checkpoint-debug] document=kreuzberg-formulas-math stage=route-pages attempt=1/1 strategy=default
+[checkpoint-debug] document=kreuzberg-formulas-math stage=route-pages completed attempts=1 artifact=s3://local-measurement/local-eval-user/router-local--1-kreuzberg-formulas-math/page-route/kreuzberg-formulas-math.json
+[worker-memory] container_limit_mb=64222 command_rss_budget_mb=38533
+[checkpoint-debug] document=kreuzberg-formulas-math stage=route-pages checkpointStatus=none message=page route plan ready
+[checkpoint-debug] document=kreuzberg-formulas-math stage=route-pages attempt=1/1 strategy=default
+[checkpoint-debug] document=kreuzberg-formulas-math stage=route-pages completed attempts=1 artifact=s3://local-measurement/local-eval-user/router-local--1-kreuzberg-formulas-math/page-route/kreuzberg-formulas-math.json
+[worker-memory] container_limit_mb=64222 command_rss_budget_mb=38533
+[checkpoint-debug] document=menu-scan stage=route-pages checkpointStatus=none message=page route plan ready
+[checkpoint-debug] document=menu-scan stage=route-pages attempt=1/1 strategy=default
+[native-pdf] engine loaded source=DOCSLURP_NATIVE_PDF_MODULE version=0.13.0+8709e8c20c5c features=text,markdown,spans,images,drawings,widgets,annotations,links,tables,render:png,render:jpeg,render:webp,scan,fonts,inspect,ocr-fill
+[checkpoint-debug] document=menu-scan stage=route-pages completed attempts=1 artifact=s3://local-measurement/local-eval-user/router-local--1-menu-scan/page-route/menu-scan.json
+[worker-memory] container_limit_mb=64222 command_rss_budget_mb=38533
+[checkpoint-debug] document=menu-scan stage=route-pages checkpointStatus=none message=page route plan ready
+[checkpoint-debug] document=menu-scan stage=route-pages attempt=1/1 strategy=default
+[checkpoint-debug] document=menu-scan stage=route-pages completed attempts=1 artifact=s3://local-measurement/local-eval-user/router-local--1-menu-scan/page-route/menu-scan.json
+[worker-memory] container_limit_mb=64222 command_rss_budget_mb=38533
+[checkpoint-debug] document=kreuzberg-tables-invoice stage=route-pages checkpointStatus=none message=page route plan ready
+[checkpoint-debug] document=kreuzberg-tables-invoice stage=route-pages attempt=1/1 strategy=default
+[checkpoint-debug] document=kreuzberg-tables-invoice stage=route-pages completed attempts=1 artifact=s3://local-measurement/local-eval-user/router-local-0-kreuzberg-tables-invoice/page-route/kreuzberg-tables-invoice.json
+[worker-memory] container_limit_mb=64222 command_rss_budget_mb=38533
+[checkpoint-debug] document=kreuzberg-tables-invoice stage=route-pages checkpointStatus=none message=page route plan ready
+[checkpoint-debug] document=kreuzberg-tables-invoice stage=route-pages attempt=1/1 strategy=default
+[checkpoint-debug] document=kreuzberg-tables-invoice stage=route-pages completed attempts=1 artifact=s3://local-measurement/local-eval-user/router-local-0-kreuzberg-tables-invoice/page-route/kreuzberg-tables-invoice.json
+[worker-memory] container_limit_mb=64222 command_rss_budget_mb=38533
+[checkpoint-debug] document=kreuzberg-formulas-math stage=route-pages checkpointStatus=none message=page route plan ready
+[checkpoint-debug] document=kreuzberg-formulas-math stage=route-pages attempt=1/1 strategy=default
+[checkpoint-debug] document=kreuzberg-formulas-math stage=route-pages completed attempts=1 artifact=s3://local-measurement/local-eval-user/router-local-0-kreuzberg-formulas-math/page-route/kreuzberg-formulas-math.json
+[worker-memory] container_limit_mb=64222 command_rss_budget_mb=38533
+[checkpoint-debug] document=kreuzberg-formulas-math stage=route-pages checkpointStatus=none message=page route plan ready
+[checkpoint-debug] document=kreuzberg-formulas-math stage=route-pages attempt=1/1 strategy=default
+[checkpoint-debug] document=kreuzberg-formulas-math stage=route-pages completed attempts=1 artifact=s3://local-measurement/local-eval-user/router-local-0-kreuzberg-formulas-math/page-route/kreuzberg-formulas-math.json
+[worker-memory] container_limit_mb=64222 command_rss_budget_mb=38533
+[checkpoint-debug] document=menu-scan stage=route-pages checkpointStatus=none message=page route plan ready
+[checkpoint-debug] document=menu-scan stage=route-pages attempt=1/1 strategy=default
+[checkpoint-debug] document=menu-scan stage=route-pages completed attempts=1 artifact=s3://local-measurement/local-eval-user/router-local-0-menu-scan/page-route/menu-scan.json
+[worker-memory] container_limit_mb=64222 command_rss_budget_mb=38533
+[checkpoint-debug] document=menu-scan stage=route-pages checkpointStatus=none message=page route plan ready
+[checkpoint-debug] document=menu-scan stage=route-pages attempt=1/1 strategy=default
+[checkpoint-debug] document=menu-scan stage=route-pages completed attempts=1 artifact=s3://local-measurement/local-eval-user/router-local-0-menu-scan/page-route/menu-scan.json
+[worker-memory] container_limit_mb=64222 command_rss_budget_mb=38533
+[checkpoint-debug] document=kreuzberg-tables-invoice stage=route-pages checkpointStatus=none message=page route plan ready
+[checkpoint-debug] document=kreuzberg-tables-invoice stage=route-pages attempt=1/1 strategy=default
+[checkpoint-debug] document=kreuzberg-tables-invoice stage=route-pages completed attempts=1 artifact=s3://local-measurement/local-eval-user/router-local-1-kreuzberg-tables-invoice/page-route/kreuzberg-tables-invoice.json
+[worker-memory] container_limit_mb=64222 command_rss_budget_mb=38533
+[checkpoint-debug] document=kreuzberg-tables-invoice stage=route-pages checkpointStatus=none message=page route plan ready
+[checkpoint-debug] document=kreuzberg-tables-invoice stage=route-pages attempt=1/1 strategy=default
+[checkpoint-debug] document=kreuzberg-tables-invoice stage=route-pages completed attempts=1 artifact=s3://local-measurement/local-eval-user/router-local-1-kreuzberg-tables-invoice/page-route/kreuzberg-tables-invoice.json
+[worker-memory] container_limit_mb=64222 command_rss_budget_mb=38533
+[checkpoint-debug] document=kreuzberg-formulas-math stage=route-pages checkpointStatus=none message=page route plan ready
+[checkpoint-debug] document=kreuzberg-formulas-math stage=route-pages attempt=1/1 strategy=default
+[checkpoint-debug] document=kreuzberg-formulas-math stage=route-pages completed attempts=1 artifact=s3://local-measurement/local-eval-user/router-local-1-kreuzberg-formulas-math/page-route/kreuzberg-formulas-math.json
+[worker-memory] container_limit_mb=64222 command_rss_budget_mb=38533
+[checkpoint-debug] document=kreuzberg-formulas-math stage=route-pages checkpointStatus=none message=page route plan ready
+[checkpoint-debug] document=kreuzberg-formulas-math stage=route-pages attempt=1/1 strategy=default
+[checkpoint-debug] document=kreuzberg-formulas-math stage=route-pages completed attempts=1 artifact=s3://local-measurement/local-eval-user/router-local-1-kreuzberg-formulas-math/page-route/kreuzberg-formulas-math.json
+[worker-memory] container_limit_mb=64222 command_rss_budget_mb=38533
+[checkpoint-debug] document=menu-scan stage=route-pages checkpointStatus=none message=page route plan ready
+[checkpoint-debug] document=menu-scan stage=route-pages attempt=1/1 strategy=default
+[checkpoint-debug] document=menu-scan stage=route-pages completed attempts=1 artifact=s3://local-measurement/local-eval-user/router-local-1-menu-scan/page-route/menu-scan.json
+[worker-memory] container_limit_mb=64222 command_rss_budget_mb=38533
+[checkpoint-debug] document=menu-scan stage=route-pages checkpointStatus=none message=page route plan ready
+[checkpoint-debug] document=menu-scan stage=route-pages attempt=1/1 strategy=default
+[checkpoint-debug] document=menu-scan stage=route-pages completed attempts=1 artifact=s3://local-measurement/local-eval-user/router-local-1-menu-scan/page-route/menu-scan.json
+[worker-memory] container_limit_mb=64222 command_rss_budget_mb=38533
+[checkpoint-debug] document=kreuzberg-tables-invoice stage=route-pages checkpointStatus=none message=page route plan ready
+[checkpoint-debug] document=kreuzberg-tables-invoice stage=route-pages attempt=1/1 strategy=default
+[checkpoint-debug] document=kreuzberg-tables-invoice stage=route-pages completed attempts=1 artifact=s3://local-measurement/local-eval-user/router-local-2-kreuzberg-tables-invoice/page-route/kreuzberg-tables-invoice.json
+[worker-memory] container_limit_mb=64222 command_rss_budget_mb=38533
+[checkpoint-debug] document=kreuzberg-tables-invoice stage=route-pages checkpointStatus=none message=page route plan ready
+[checkpoint-debug] document=kreuzberg-tables-invoice stage=route-pages attempt=1/1 strategy=default
+[checkpoint-debug] document=kreuzberg-tables-invoice stage=route-pages completed attempts=1 artifact=s3://local-measurement/local-eval-user/router-local-2-kreuzberg-tables-invoice/page-route/kreuzberg-tables-invoice.json
+[worker-memory] container_limit_mb=64222 command_rss_budget_mb=38533
+[checkpoint-debug] document=kreuzberg-formulas-math stage=route-pages checkpointStatus=none message=page route plan ready
+[checkpoint-debug] document=kreuzberg-formulas-math stage=route-pages attempt=1/1 strategy=default
+[checkpoint-debug] document=kreuzberg-formulas-math stage=route-pages completed attempts=1 artifact=s3://local-measurement/local-eval-user/router-local-2-kreuzberg-formulas-math/page-route/kreuzberg-formulas-math.json
+[worker-memory] container_limit_mb=64222 command_rss_budget_mb=38533
+[checkpoint-debug] document=kreuzberg-formulas-math stage=route-pages checkpointStatus=none message=page route plan ready
+[checkpoint-debug] document=kreuzberg-formulas-math stage=route-pages attempt=1/1 strategy=default
+[checkpoint-debug] document=kreuzberg-formulas-math stage=route-pages completed attempts=1 artifact=s3://local-measurement/local-eval-user/router-local-2-kreuzberg-formulas-math/page-route/kreuzberg-formulas-math.json
+[worker-memory] container_limit_mb=64222 command_rss_budget_mb=38533
+[checkpoint-debug] document=menu-scan stage=route-pages checkpointStatus=none message=page route plan ready
+[checkpoint-debug] document=menu-scan stage=route-pages attempt=1/1 strategy=default
+[checkpoint-debug] document=menu-scan stage=route-pages completed attempts=1 artifact=s3://local-measurement/local-eval-user/router-local-2-menu-scan/page-route/menu-scan.json
+[worker-memory] container_limit_mb=64222 command_rss_budget_mb=38533
+[checkpoint-debug] document=menu-scan stage=route-pages checkpointStatus=none message=page route plan ready
+[checkpoint-debug] document=menu-scan stage=route-pages attempt=1/1 strategy=default
+[checkpoint-debug] document=menu-scan stage=route-pages completed attempts=1 artifact=s3://local-measurement/local-eval-user/router-local-2-menu-scan/page-route/menu-scan.json
+[worker-memory] container_limit_mb=64222 command_rss_budget_mb=38533
+[checkpoint-debug] document=kreuzberg-tables-invoice stage=route-pages checkpointStatus=none message=page route plan ready
+[checkpoint-debug] document=kreuzberg-tables-invoice stage=route-pages attempt=1/1 strategy=default
+[checkpoint-debug] document=kreuzberg-tables-invoice stage=route-pages completed attempts=1 artifact=s3://local-measurement/local-eval-user/router-local-3-kreuzberg-tables-invoice/page-route/kreuzberg-tables-invoice.json
+[worker-memory] container_limit_mb=64222 command_rss_budget_mb=38533
+[checkpoint-debug] document=kreuzberg-tables-invoice stage=route-pages checkpointStatus=none message=page route plan ready
+[checkpoint-debug] document=kreuzberg-tables-invoice stage=route-pages attempt=1/1 strategy=default
+[checkpoint-debug] document=kreuzberg-tables-invoice stage=route-pages completed attempts=1 artifact=s3://local-measurement/local-eval-user/router-local-3-kreuzberg-tables-invoice/page-route/kreuzberg-tables-invoice.json
+[worker-memory] container_limit_mb=64222 command_rss_budget_mb=38533
+[checkpoint-debug] document=kreuzberg-formulas-math stage=route-pages checkpointStatus=none message=page route plan ready
+[checkpoint-debug] document=kreuzberg-formulas-math stage=route-pages attempt=1/1 strategy=default
+[checkpoint-debug] document=kreuzberg-formulas-math stage=route-pages completed attempts=1 artifact=s3://local-measurement/local-eval-user/router-local-3-kreuzberg-formulas-math/page-route/kreuzberg-formulas-math.json
+[worker-memory] container_limit_mb=64222 command_rss_budget_mb=38533
+[checkpoint-debug] document=kreuzberg-formulas-math stage=route-pages checkpointStatus=none message=page route plan ready
+[checkpoint-debug] document=kreuzberg-formulas-math stage=route-pages attempt=1/1 strategy=default
+[checkpoint-debug] document=kreuzberg-formulas-math stage=route-pages completed attempts=1 artifact=s3://local-measurement/local-eval-user/router-local-3-kreuzberg-formulas-math/page-route/kreuzberg-formulas-math.json
+[worker-memory] container_limit_mb=64222 command_rss_budget_mb=38533
+[checkpoint-debug] document=menu-scan stage=route-pages checkpointStatus=none message=page route plan ready
+[checkpoint-debug] document=menu-scan stage=route-pages attempt=1/1 strategy=default
+[checkpoint-debug] document=menu-scan stage=route-pages completed attempts=1 artifact=s3://local-measurement/local-eval-user/router-local-3-menu-scan/page-route/menu-scan.json
+[worker-memory] container_limit_mb=64222 command_rss_budget_mb=38533
+[checkpoint-debug] document=menu-scan stage=route-pages checkpointStatus=none message=page route plan ready
+[checkpoint-debug] document=menu-scan stage=route-pages attempt=1/1 strategy=default
+[checkpoint-debug] document=menu-scan stage=route-pages completed attempts=1 artifact=s3://local-measurement/local-eval-user/router-local-3-menu-scan/page-route/menu-scan.json
+[worker-memory] container_limit_mb=64222 command_rss_budget_mb=38533
+[checkpoint-debug] document=kreuzberg-tables-invoice stage=route-pages checkpointStatus=none message=page route plan ready
+[checkpoint-debug] document=kreuzberg-tables-invoice stage=route-pages attempt=1/1 strategy=default
+[checkpoint-debug] document=kreuzberg-tables-invoice stage=route-pages completed attempts=1 artifact=s3://local-measurement/local-eval-user/router-local-4-kreuzberg-tables-invoice/page-route/kreuzberg-tables-invoice.json
+[worker-memory] container_limit_mb=64222 command_rss_budget_mb=38533
+[checkpoint-debug] document=kreuzberg-tables-invoice stage=route-pages checkpointStatus=none message=page route plan ready
+[checkpoint-debug] document=kreuzberg-tables-invoice stage=route-pages attempt=1/1 strategy=default
+[checkpoint-debug] document=kreuzberg-tables-invoice stage=route-pages completed attempts=1 artifact=s3://local-measurement/local-eval-user/router-local-4-kreuzberg-tables-invoice/page-route/kreuzberg-tables-invoice.json
+[worker-memory] container_limit_mb=64222 command_rss_budget_mb=38533
+[checkpoint-debug] document=kreuzberg-formulas-math stage=route-pages checkpointStatus=none message=page route plan ready
+[checkpoint-debug] document=kreuzberg-formulas-math stage=route-pages attempt=1/1 strategy=default
+[checkpoint-debug] document=kreuzberg-formulas-math stage=route-pages completed attempts=1 artifact=s3://local-measurement/local-eval-user/router-local-4-kreuzberg-formulas-math/page-route/kreuzberg-formulas-math.json
+[worker-memory] container_limit_mb=64222 command_rss_budget_mb=38533
+[checkpoint-debug] document=kreuzberg-formulas-math stage=route-pages checkpointStatus=none message=page route plan ready
+[checkpoint-debug] document=kreuzberg-formulas-math stage=route-pages attempt=1/1 strategy=default
+[checkpoint-debug] document=kreuzberg-formulas-math stage=route-pages completed attempts=1 artifact=s3://local-measurement/local-eval-user/router-local-4-kreuzberg-formulas-math/page-route/kreuzberg-formulas-math.json
+[worker-memory] container_limit_mb=64222 command_rss_budget_mb=38533
+[checkpoint-debug] document=menu-scan stage=route-pages checkpointStatus=none message=page route plan ready
+[checkpoint-debug] document=menu-scan stage=route-pages attempt=1/1 strategy=default
+[checkpoint-debug] document=menu-scan stage=route-pages completed attempts=1 artifact=s3://local-measurement/local-eval-user/router-local-4-menu-scan/page-route/menu-scan.json
+[worker-memory] container_limit_mb=64222 command_rss_budget_mb=38533
+[checkpoint-debug] document=menu-scan stage=route-pages checkpointStatus=none message=page route plan ready
+[checkpoint-debug] document=menu-scan stage=route-pages attempt=1/1 strategy=default
+[checkpoint-debug] document=menu-scan stage=route-pages completed attempts=1 artifact=s3://local-measurement/local-eval-user/router-local-4-menu-scan/page-route/menu-scan.json
+[
+  {
+    "block": -1,
+    "arm": "shadow",
+    "id": "kreuzberg-tables-invoice",
+    "ms": 52.08062599999994,
+    "counters": {
+      "getBytes": 0,
+      "putBytes": 0,
+      "putJson": 1
+    },
+    "summary": {
+      "selected": 0,
+      "observed": 0,
+      "errors": 0,
+      "cacheHits": 0,
+      "inputBytes": 0,
+      "skipped": 1,
+      "eligible": 0,
+      "budgetExhausted": false,
+      "artifactResultBytes": 0,
+      "artifactBudgetExhausted": false,
+      "elapsedMs": 0.19553299999995488
+    }
+  },
+  {
+    "block": -1,
+    "arm": "off",
+    "id": "kreuzberg-tables-invoice",
+    "ms": 24.427735000000098,
+    "counters": {
+      "getBytes": 0,
+      "putBytes": 0,
+      "putJson": 1
+    }
+  },
+  {
+    "block": -1,
+    "arm": "shadow",
+    "id": "kreuzberg-formulas-math",
+    "ms": 30.183378999999945,
+    "counters": {
+      "getBytes": 0,
+      "putBytes": 0,
+      "putJson": 1
+    },
+    "summary": {
+      "selected": 0,
+      "observed": 0,
+      "errors": 0,
+      "cacheHits": 0,
+      "inputBytes": 0,
+      "skipped": 1,
+      "eligible": 0,
+      "budgetExhausted": false,
+      "artifactResultBytes": 0,
+      "artifactBudgetExhausted": false,
+      "elapsedMs": 0.038374999999973625
+    }
+  },
+  {
+    "block": -1,
+    "arm": "off",
+    "id": "kreuzberg-formulas-math",
+    "ms": 38.10379499999999,
+    "counters": {
+      "getBytes": 0,
+      "putBytes": 0,
+      "putJson": 1
+    }
+  },
+  {
+    "block": -1,
+    "arm": "shadow",
+    "id": "menu-scan",
+    "ms": 252.38111200000003,
+    "counters": {
+      "getBytes": 0,
+      "putBytes": 1,
+      "putJson": 2
+    },
+    "summary": {
+      "selected": 1,
+      "observed": 1,
+      "errors": 0,
+      "cacheHits": 0,
+      "inputBytes": 1441280,
+      "skipped": 0,
+      "eligible": 1,
+      "budgetExhausted": false,
+      "artifactResultBytes": 19271,
+      "artifactBudgetExhausted": false,
+      "elapsedMs": 194.04391600000008
+    }
+  },
+  {
+    "block": -1,
+    "arm": "off",
+    "id": "menu-scan",
+    "ms": 30.778890000000047,
+    "counters": {
+      "getBytes": 0,
+      "putBytes": 0,
+      "putJson": 1
+    }
+  },
+  {
+    "block": 0,
+    "arm": "off",
+    "id": "kreuzberg-tables-invoice",
+    "ms": 22.005529999999908,
+    "counters": {
+      "getBytes": 0,
+      "putBytes": 0,
+      "putJson": 1
+    }
+  },
+  {
+    "block": 0,
+    "arm": "shadow",
+    "id": "kreuzberg-tables-invoice",
+    "ms": 27.420957000000044,
+    "counters": {
+      "getBytes": 0,
+      "putBytes": 0,
+      "putJson": 1
+    },
+    "summary": {
+      "selected": 0,
+      "observed": 0,
+      "errors": 0,
+      "cacheHits": 0,
+      "inputBytes": 0,
+      "skipped": 1,
+      "eligible": 0,
+      "budgetExhausted": false,
+      "artifactResultBytes": 0,
+      "artifactBudgetExhausted": false,
+      "elapsedMs": 0.04045300000007046
+    }
+  },
+  {
+    "block": 0,
+    "arm": "off",
+    "id": "kreuzberg-formulas-math",
+    "ms": 28.307571000000053,
+    "counters": {
+      "getBytes": 0,
+      "putBytes": 0,
+      "putJson": 1
+    }
+  },
+  {
+    "block": 0,
+    "arm": "shadow",
+    "id": "kreuzberg-formulas-math",
+    "ms": 24.729732999999896,
+    "counters": {
+      "getBytes": 0,
+      "putBytes": 0,
+      "putJson": 1
+    },
+    "summary": {
+      "selected": 0,
+      "observed": 0,
+      "errors": 0,
+      "cacheHits": 0,
+      "inputBytes": 0,
+      "skipped": 1,
+      "eligible": 0,
+      "budgetExhausted": false,
+      "artifactResultBytes": 0,
+      "artifactBudgetExhausted": false,
+      "elapsedMs": 0.03752099999996972
+    }
+  },
+  {
+    "block": 0,
+    "arm": "off",
+    "id": "menu-scan",
+    "ms": 27.685515000000123,
+    "counters": {
+      "getBytes": 0,
+      "putBytes": 0,
+      "putJson": 1
+    }
+  },
+  {
+    "block": 0,
+    "arm": "shadow",
+    "id": "menu-scan",
+    "ms": 185.15690199999995,
+    "counters": {
+      "getBytes": 0,
+      "putBytes": 1,
+      "putJson": 2
+    },
+    "summary": {
+      "selected": 1,
+      "observed": 1,
+      "errors": 0,
+      "cacheHits": 0,
+      "inputBytes": 1441280,
+      "skipped": 0,
+      "eligible": 1,
+      "budgetExhausted": false,
+      "artifactResultBytes": 19259,
+      "artifactBudgetExhausted": false,
+      "elapsedMs": 161.14081699999997
+    }
+  },
+  {
+    "block": 1,
+    "arm": "shadow",
+    "id": "kreuzberg-tables-invoice",
+    "ms": 21.568764999999985,
+    "counters": {
+      "getBytes": 0,
+      "putBytes": 0,
+      "putJson": 1
+    },
+    "summary": {
+      "selected": 0,
+      "observed": 0,
+      "errors": 0,
+      "cacheHits": 0,
+      "inputBytes": 0,
+      "skipped": 1,
+      "eligible": 0,
+      "budgetExhausted": false,
+      "artifactResultBytes": 0,
+      "artifactBudgetExhausted": false,
+      "elapsedMs": 0.035825999999815394
+    }
+  },
+  {
+    "block": 1,
+    "arm": "off",
+    "id": "kreuzberg-tables-invoice",
+    "ms": 20.462649000000056,
+    "counters": {
+      "getBytes": 0,
+      "putBytes": 0,
+      "putJson": 1
+    }
+  },
+  {
+    "block": 1,
+    "arm": "shadow",
+    "id": "kreuzberg-formulas-math",
+    "ms": 26.27728100000013,
+    "counters": {
+      "getBytes": 0,
+      "putBytes": 0,
+      "putJson": 1
+    },
+    "summary": {
+      "selected": 0,
+      "observed": 0,
+      "errors": 0,
+      "cacheHits": 0,
+      "inputBytes": 0,
+      "skipped": 1,
+      "eligible": 0,
+      "budgetExhausted": false,
+      "artifactResultBytes": 0,
+      "artifactBudgetExhausted": false,
+      "elapsedMs": 0.03938700000003337
+    }
+  },
+  {
+    "block": 1,
+    "arm": "off",
+    "id": "kreuzberg-formulas-math",
+    "ms": 23.783400999999913,
+    "counters": {
+      "getBytes": 0,
+      "putBytes": 0,
+      "putJson": 1
+    }
+  },
+  {
+    "block": 1,
+    "arm": "shadow",
+    "id": "menu-scan",
+    "ms": 193.79976299999998,
+    "counters": {
+      "getBytes": 0,
+      "putBytes": 1,
+      "putJson": 2
+    },
+    "summary": {
+      "selected": 1,
+      "observed": 1,
+      "errors": 0,
+      "cacheHits": 0,
+      "inputBytes": 1441280,
+      "skipped": 0,
+      "eligible": 1,
+      "budgetExhausted": false,
+      "artifactResultBytes": 19271,
+      "artifactBudgetExhausted": false,
+      "elapsedMs": 164.29055299999982
+    }
+  },
+  {
+    "block": 1,
+    "arm": "off",
+    "id": "menu-scan",
+    "ms": 26.37754999999993,
+    "counters": {
+      "getBytes": 0,
+      "putBytes": 0,
+      "putJson": 1
+    }
+  },
+  {
+    "block": 2,
+    "arm": "off",
+    "id": "kreuzberg-tables-invoice",
+    "ms": 22.60609599999998,
+    "counters": {
+      "getBytes": 0,
+      "putBytes": 0,
+      "putJson": 1
+    }
+  },
+  {
+    "block": 2,
+    "arm": "shadow",
+    "id": "kreuzberg-tables-invoice",
+    "ms": 25.07478500000002,
+    "counters": {
+      "getBytes": 0,
+      "putBytes": 0,
+      "putJson": 1
+    },
+    "summary": {
+      "selected": 0,
+      "observed": 0,
+      "errors": 0,
+      "cacheHits": 0,
+      "inputBytes": 0,
+      "skipped": 1,
+      "eligible": 0,
+      "budgetExhausted": false,
+      "artifactResultBytes": 0,
+      "artifactBudgetExhausted": false,
+      "elapsedMs": 0.023089000000027227
+    }
+  },
+  {
+    "block": 2,
+    "arm": "off",
+    "id": "kreuzberg-formulas-math",
+    "ms": 29.855015000000094,
+    "counters": {
+      "getBytes": 0,
+      "putBytes": 0,
+      "putJson": 1
+    }
+  },
+  {
+    "block": 2,
+    "arm": "shadow",
+    "id": "kreuzberg-formulas-math",
+    "ms": 32.78423499999985,
+    "counters": {
+      "getBytes": 0,
+      "putBytes": 0,
+      "putJson": 1
+    },
+    "summary": {
+      "selected": 0,
+      "observed": 0,
+      "errors": 0,
+      "cacheHits": 0,
+      "inputBytes": 0,
+      "skipped": 1,
+      "eligible": 0,
+      "budgetExhausted": false,
+      "artifactResultBytes": 0,
+      "artifactBudgetExhausted": false,
+      "elapsedMs": 0.036382999999887033
+    }
+  },
+  {
+    "block": 2,
+    "arm": "off",
+    "id": "menu-scan",
+    "ms": 34.80385700000011,
+    "counters": {
+      "getBytes": 0,
+      "putBytes": 0,
+      "putJson": 1
+    }
+  },
+  {
+    "block": 2,
+    "arm": "shadow",
+    "id": "menu-scan",
+    "ms": 199.38307000000032,
+    "counters": {
+      "getBytes": 0,
+      "putBytes": 1,
+      "putJson": 2
+    },
+    "summary": {
+      "selected": 1,
+      "observed": 1,
+      "errors": 0,
+      "cacheHits": 0,
+      "inputBytes": 1441280,
+      "skipped": 0,
+      "eligible": 1,
+      "budgetExhausted": false,
+      "artifactResultBytes": 19269,
+      "artifactBudgetExhausted": false,
+      "elapsedMs": 166.7618759999998
+    }
+  },
+  {
+    "block": 3,
+    "arm": "shadow",
+    "id": "kreuzberg-tables-invoice",
+    "ms": 23.707442000000356,
+    "counters": {
+      "getBytes": 0,
+      "putBytes": 0,
+      "putJson": 1
+    },
+    "summary": {
+      "selected": 0,
+      "observed": 0,
+      "errors": 0,
+      "cacheHits": 0,
+      "inputBytes": 0,
+      "skipped": 1,
+      "eligible": 0,
+      "budgetExhausted": false,
+      "artifactResultBytes": 0,
+      "artifactBudgetExhausted": false,
+      "elapsedMs": 0.020794000000023516
+    }
+  },
+  {
+    "block": 3,
+    "arm": "off",
+    "id": "kreuzberg-tables-invoice",
+    "ms": 23.9975129999998,
+    "counters": {
+      "getBytes": 0,
+      "putBytes": 0,
+      "putJson": 1
+    }
+  },
+  {
+    "block": 3,
+    "arm": "shadow",
+    "id": "kreuzberg-formulas-math",
+    "ms": 26.749735000000328,
+    "counters": {
+      "getBytes": 0,
+      "putBytes": 0,
+      "putJson": 1
+    },
+    "summary": {
+      "selected": 0,
+      "observed": 0,
+      "errors": 0,
+      "cacheHits": 0,
+      "inputBytes": 0,
+      "skipped": 1,
+      "eligible": 0,
+      "budgetExhausted": false,
+      "artifactResultBytes": 0,
+      "artifactBudgetExhausted": false,
+      "elapsedMs": 0.02086600000029648
+    }
+  },
+  {
+    "block": 3,
+    "arm": "off",
+    "id": "kreuzberg-formulas-math",
+    "ms": 24.47323099999994,
+    "counters": {
+      "getBytes": 0,
+      "putBytes": 0,
+      "putJson": 1
+    }
+  },
+  {
+    "block": 3,
+    "arm": "shadow",
+    "id": "menu-scan",
+    "ms": 195.58083399999987,
+    "counters": {
+      "getBytes": 0,
+      "putBytes": 1,
+      "putJson": 2
+    },
+    "summary": {
+      "selected": 1,
+      "observed": 1,
+      "errors": 0,
+      "cacheHits": 0,
+      "inputBytes": 1441280,
+      "skipped": 0,
+      "eligible": 1,
+      "budgetExhausted": false,
+      "artifactResultBytes": 19269,
+      "artifactBudgetExhausted": false,
+      "elapsedMs": 167.42193399999996
+    }
+  },
+  {
+    "block": 3,
+    "arm": "off",
+    "id": "menu-scan",
+    "ms": 28.642683000000034,
+    "counters": {
+      "getBytes": 0,
+      "putBytes": 0,
+      "putJson": 1
+    }
+  },
+  {
+    "block": 4,
+    "arm": "off",
+    "id": "kreuzberg-tables-invoice",
+    "ms": 21.632043000000067,
+    "counters": {
+      "getBytes": 0,
+      "putBytes": 0,
+      "putJson": 1
+    }
+  },
+  {
+    "block": 4,
+    "arm": "shadow",
+    "id": "kreuzberg-tables-invoice",
+    "ms": 21.6073879999999,
+    "counters": {
+      "getBytes": 0,
+      "putBytes": 0,
+      "putJson": 1
+    },
+    "summary": {
+      "selected": 0,
+      "observed": 0,
+      "errors": 0,
+      "cacheHits": 0,
+      "inputBytes": 0,
+      "skipped": 1,
+      "eligible": 0,
+      "budgetExhausted": false,
+      "artifactResultBytes": 0,
+      "artifactBudgetExhausted": false,
+      "elapsedMs": 0.032145000000127766
+    }
+  },
+  {
+    "block": 4,
+    "arm": "off",
+    "id": "kreuzberg-formulas-math",
+    "ms": 24.793601000000308,
+    "counters": {
+      "getBytes": 0,
+      "putBytes": 0,
+      "putJson": 1
+    }
+  },
+  {
+    "block": 4,
+    "arm": "shadow",
+    "id": "kreuzberg-formulas-math",
+    "ms": 24.692571999999927,
+    "counters": {
+      "getBytes": 0,
+      "putBytes": 0,
+      "putJson": 1
+    },
+    "summary": {
+      "selected": 0,
+      "observed": 0,
+      "errors": 0,
+      "cacheHits": 0,
+      "inputBytes": 0,
+      "skipped": 1,
+      "eligible": 0,
+      "budgetExhausted": false,
+      "artifactResultBytes": 0,
+      "artifactBudgetExhausted": false,
+      "elapsedMs": 0.020786999999927502
+    }
+  },
+  {
+    "block": 4,
+    "arm": "off",
+    "id": "menu-scan",
+    "ms": 28.373307000000295,
+    "counters": {
+      "getBytes": 0,
+      "putBytes": 0,
+      "putJson": 1
+    }
+  },
+  {
+    "block": 4,
+    "arm": "shadow",
+    "id": "menu-scan",
+    "ms": 193.19754000000012,
+    "counters": {
+      "getBytes": 0,
+      "putBytes": 1,
+      "putJson": 2
+    },
+    "summary": {
+      "selected": 1,
+      "observed": 1,
+      "errors": 0,
+      "cacheHits": 0,
+      "inputBytes": 1441280,
+      "skipped": 0,
+      "eligible": 1,
+      "budgetExhausted": false,
+      "artifactResultBytes": 19269,
+      "artifactBudgetExhausted": false,
+      "elapsedMs": 166.22468899999967
+    }
+  }
+]
