@@ -23,6 +23,8 @@ FONT_FILES={
  'arabic-bold':'/usr/share/fonts/noto/NotoSansArabic-Bold.ttf',
  'mono':'/usr/share/fonts/gsfonts/NimbusMonoPS-Regular.otf',
 }
+# Face index inside a font collection (.ttc); faces absent here use index 0.
+FONT_INDEX={}
 
 
 def poly(b):return [[b[0],b[1]],[b[2],b[1]],[b[2],b[3]],[b[0],b[3]]]
@@ -39,7 +41,7 @@ class Page:
   self.id,self.width,self.height=id,width,height
   self.source={'schema':'layout-editorial-pilot-source-v2','id':id,'width':width,'height':height,'paper':paper,'document_id':document_id or id,'page_number':page_number,'commands':[],'regions':[],'text_blocks':[],'review_status':'pilot-awaiting-visual-review','provenance':{'kind':'deliberately-authored-editorial-composition','not_a_real_publication':True,'geometry':'source commands and tightly measured glyph boxes persisted before rasterization'},'limitations':['Authored synthetic editorial content. Visual pilot only; not admitted benchmark gold.']}
   self.measure=ImageDraw.Draw(Image.new('RGB',(1,1)))
- def font(self,face,size):return ImageFont.truetype(FONT_FILES[face],round(size))
+ def font(self,face,size):return ImageFont.truetype(FONT_FILES[face],round(size),index=FONT_INDEX.get(face,0))
  def region(self,label,box,text=None,**attrs):
   if len(box)!=4 or not all(math.isfinite(v) for v in box) or not (0<=box[0]<box[2]<=self.width and 0<=box[1]<box[3]<=self.height):raise ValueError(f'Invalid authored region geometry: {label} {box}')
   r={'id':f'r{len(self.source["regions"]):03d}','label':label,'bbox':list(box),'polygon':poly(box),'text':text,'visibility':1.0,'reading_order':None,'attributes':attrs}
@@ -171,6 +173,10 @@ class Page:
     row_ids=sorted({c['row'] for c in cells});lines=[]
     for index,ri in enumerate(row_ids):
      vals=[str(c['text']).replace('|','\\|') for c in sorted((c for c in cells if c['row']==ri),key=lambda c:c['column'])]
+     if any(c.get('col_span',1)>1 for c in cells if c['row']==ri):
+      # A spanning header occupies its first column; spanned columns stay empty in Markdown.
+      vals=['']*r['attributes']['columns']
+      for c in (c for c in cells if c['row']==ri):vals[c['column']]=str(c['text']).replace('|','\\|')
      lines.append('| '+' | '.join(vals)+' |')
      if index==0:lines.append('| '+' | '.join('---' for _ in vals)+' |')
     markdown.append('\n'.join(lines))
@@ -189,7 +195,7 @@ class Page:
   expected=root/'expected'/f'{self.id}.md';expected.parent.mkdir(exist_ok=True);write_atomic(expected,('\n\n'.join(markdown)+'\n').encode())
   contract=root/'contracts'/f'{self.id}.json';save_json(contract,{'schema':'layout-editorial-prose-contract-v2','ground_truth':ground,'annotation_granularity':granularity})
   self.source['ground_truth']=ground;self.source['expected_markdown']={'path':str(expected.relative_to(root)),'sha256':sha(expected)};self.source['prose_contract']={'path':str(contract.relative_to(root)),'sha256':sha(contract)}
-  self.source['annotation_confidence']={'scale':SCALE,'evidence':evidence(),'receipt_path':f'confidence/{self.id}.json','policy':'Ordinal evidence ratings, not probabilities or review approval. Per-region defaults are recorded before PNG.'}
+  self.source['annotation_confidence']={'scale':SCALE,'evidence':{**evidence(),**self.source.get('extra_evidence',{})},'receipt_path':f'confidence/{self.id}.json','policy':'Ordinal evidence ratings, not probabilities or review approval. Per-region defaults are recorded before PNG.'}
   save_json(source,self.source)
   save_json(reference,{'schema':'layout-editorial-pilot-reference-v2','id':self.id,'image':{'width':self.width,'height':self.height},'regions':regions,'ground_truth':ground,'source_sha256':sha(source),'annotation_confidence':self.source['annotation_confidence'],'expected_markdown':self.source['expected_markdown'],'prose_contract':self.source['prose_contract']})
   image=Image.new('RGB',(self.width,self.height),self.source['paper']);d=ImageDraw.Draw(image)
@@ -204,7 +210,7 @@ class Page:
   try:
    image.save(temporary,format='PNG',optimize=True)
    confidence=root/'confidence'/f'{self.id}.json'
-   save_json(confidence,{'schema':'layout-annotation-confidence-v1','scale':SCALE,'pageId':self.id,'artifacts':{'imageSha256':sha(temporary),'sourceSha256':sha(source),'referenceSha256':sha(reference)},'evidence':evidence(),'regions':[{'regionId':r['id'],'axes':r['annotationConfidence']['axes']} for r in regions],'limitations':['Construction defaults only; no independent or human review inferred.','Source-gold geometry/text tier does not imply calibrated certainty or admission.','Embedded asset text remains unannotated unless explicitly supplied.']})
+   save_json(confidence,{'schema':'layout-annotation-confidence-v1','scale':SCALE,'pageId':self.id,'artifacts':{'imageSha256':sha(temporary),'sourceSha256':sha(source),'referenceSha256':sha(reference)},'evidence':{**evidence(),**self.source.get('extra_evidence',{})},'regions':[{'regionId':r['id'],'axes':r['annotationConfidence']['axes']} for r in regions],'limitations':['Construction defaults only; no independent or human review inferred.','Source-gold geometry/text tier does not imply calibrated certainty or admission.','Embedded asset text remains unannotated unless explicitly supplied.']})
    os.replace(temporary,path)
   finally:temporary.unlink(missing_ok=True)
   return {'id':self.id,'image_path':str(path.relative_to(root)),'width':self.width,'height':self.height,'split':'pilot-review','regions':self.source['regions'],'metadata':{'source_path':str(source.relative_to(root)),'reference_path':str(reference.relative_to(root)),'source_id':self.id,'source_family':self.id,'document_id':self.source['document_id'],'page_number':self.source['page_number'],'image_sha256':sha(path),'source_sha256':sha(source),'annotation_confidence':self.source['annotation_confidence'],'expected_markdown':self.source['expected_markdown'],'prose_contract':self.source['prose_contract'],'review_status':'awaiting-visual-review-not-benchmark-admitted'}}
