@@ -110,15 +110,27 @@ def compose(source_image, reference_path, scene_path, calibration_path, output, 
     occlusion=occlusion.filter(ImageFilter.GaussianBlur(calibration.get('occlusion_feather_px',0.6)))
     transformed=copy.deepcopy(reference)
     transformed.update(schema='layout-photographic-composite-reference-v2',id=capture_id,image={'width':scene.width,'height':scene.height},regions=transform_geometry(reference['regions'],matrix))
+    transformed['annotation_confidence']=copy.deepcopy(reference.get('annotation_confidence',{'evidence':{}}))
+    transformed['annotation_confidence']['evidence']['capture-calibration']={'actor':'capture composition agent','actorType':'agent','model':None,'method':'Manual four-corner inset print-area calibration and hand silhouette, visually inspected composite overlay','scope':'Physical appearance alignment estimate; exact homography arithmetic is not independent physical ground truth','independentOfAuthor':False}
     for region in transformed['regions']:
+        if 'annotationConfidence' in region:
+            region['source_annotationConfidence']=copy.deepcopy(region['annotationConfidence'])
+            axes=region['annotationConfidence']['axes']
+            axes['geometry']={'score':.75,'status':'agent-visually-checked','basis':['Manual print-area corner calibration and projected overlay checked; not independently reviewed physical geometry'],'provenance':['capture-calibration']}
+            axes['visibilityOcclusion']={'score':.5,'status':'estimated','basis':['Raster-area visibility from manually traced hand silhouette; silhouette is approximate physical coverage'],'provenance':['capture-calibration']}
         region['visibility']=visible_fraction(region['polygon'],occlusion,scene.size)
+        region['attributes']['capture_transcription_scope']='Full authored source text retained for provenance; hand coverage is not character-level transcription masking; do not score as visible-only prose'
         region['attributes']['coordinate_space']='capture-pixels; source_* fields retain authored page pixels'
         region['attributes']['occlusion_policy']='full projected polygon retained; visibility is unoccluded raster area fraction; no hidden text deletion'
     transformed['capture']={'kind':'synthetic-photographic-print-composite','source_id':reference['id'],'source_family':reference['id'],'document_id':source_layout['document_id'],'page_number':source_layout['page_number'],'source_image':str(source_image),'source_image_sha256':sha(source_image),'source_reference':str(reference_path),'source_reference_sha256':sha(reference_path),'source_layout':str(source_path),'source_layout_sha256':sha(source_path),'scene':str(scene_path),'scene_sha256':sha(scene_path),'calibration':calibration,'source_to_capture':matrix.tolist(),'capture_to_source':inverse.tolist(),'geometry_policy':'exact planar print quad; visible paper edge curl is scene context outside print quad','illumination':'multiplicative RGB from blank paper plate; retained paper texture and hand shadows','source_expected_markdown':str(source_root/reference['expected_markdown']['path']),'source_prose_contract':str(source_root/reference['prose_contract']['path']),'review_status':'awaiting-visual-review-not-benchmark-admitted'}
+    transformed['ground_truth']['capture_prose_evaluation']='not-admitted; full source transcript is not a visible-only capture transcript'
     for key in ('expected_markdown','prose_contract'):
         transformed[key]={**reference[key],'path':str(source_root/reference[key]['path']),'coordinate_space':'authored-source-page; capture geometry in regions'}
     output.mkdir(parents=True,exist_ok=True)
     refpath=output/f'{capture_id}.reference.json'; maskpath=output/f'{capture_id}.occlusion.png'; imagepath=output/f'{capture_id}.png'
+    confidencepath=output/f'{capture_id}.confidence.json'
+    transformed['annotation_confidence']['receipt_path']=str(confidencepath)
+    confidencepath.write_text(json.dumps({'schema':'layout-capture-confidence-v2','annotation_confidence':transformed['annotation_confidence'],'regions':[{'id':r['id'],'annotationConfidence':r.get('annotationConfidence'),'source_annotationConfidence':r.get('source_annotationConfidence')} for r in transformed['regions']]},indent=2)+'\n')
     # Persist geometry/occlusion BEFORE producing the capture image.
     occlusion.save(maskpath)
     transformed['capture']['occlusion_mask']={'path':str(maskpath),'sha256':sha(maskpath)}
