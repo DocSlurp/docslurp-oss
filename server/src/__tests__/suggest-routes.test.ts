@@ -12,7 +12,12 @@ vi.mock("../lib/request-actor.js", () => ({
   resolveActorWorkspaceId: vi.fn(async (_actor: unknown, workspaceId?: string) => workspaceId ?? "ws-default"),
 }));
 
-const { suggestRoutes } = await import("../routes/suggest.js");
+const suggestedQuestionsMock = vi.fn(async (_args: unknown) => ({ questions: [] as string[], pending: false }));
+vi.mock("../services/workspace-suggested-questions.js", () => ({
+  workspaceSuggestedQuestions: (args: unknown) => suggestedQuestionsMock(args),
+}));
+
+const { suggestRoutes, isGenericHeading } = await import("../routes/suggest.js");
 
 function buildApp() {
   const app = new Hono();
@@ -31,6 +36,7 @@ describe("suggestRoutes", () => {
   beforeEach(() => {
     sqlMock.mockReset();
     sqlMock.mockResolvedValue([]);
+    suggestedQuestionsMock.mockClear();
     app = buildApp();
   });
 
@@ -83,5 +89,31 @@ describe("suggestRoutes", () => {
     });
     const body = await (await app.request("/v1/suggest?workspaceId=ws-1")).json();
     expect(body.suggestions).toEqual(["catalog.pdf"]);
+  });
+
+  it("leads with questions written from the documents, then specific headings", async () => {
+    suggestedQuestionsMock.mockResolvedValueOnce({ questions: ["Which suppliers raised prices in 2025?"], pending: true });
+    sqlMock.mockImplementation(async (strings: TemplateStringsArray) => {
+      const query = strings.join("?");
+      if (query.includes("in_flight_documents")) return [{ indexed_chunk_count: 4, completed_documents: 1, in_flight_documents: 0 }];
+      if (query.includes("as hits")) return [{ heading: "Introduction", hits: 9 }, { heading: "Freight surcharges", hits: 3 }];
+      if (query.includes("order by d.updated_at desc")) return [{ filename: "catalog.pdf" }];
+      return [];
+    });
+    const body = await (await app.request("/v1/suggest?workspaceId=ws-1")).json();
+    expect(suggestedQuestionsMock).toHaveBeenCalledWith({ workspaceId: "ws-1", userId: "user-1", settled: true });
+    expect(body.contextualSuggestions).toEqual([
+      "Which suppliers raised prices in 2025?",
+      "What does Freight surcharges cover?",
+      "Summarize catalog.pdf",
+    ]);
+    expect(body.contextualPending).toBe(true);
+  });
+
+  it("treats boilerplate section names as generic", () => {
+    for (const heading of ["Introduction", "2.1 Methods", "Table of Contents", "Page 3", "Figure 12", "##", "IV. Conclusion"]) {
+      expect(isGenericHeading(heading)).toBe(true);
+    }
+    expect(isGenericHeading("Freight surcharges")).toBe(false);
   });
 });

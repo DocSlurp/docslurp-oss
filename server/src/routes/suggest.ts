@@ -2,9 +2,19 @@ import { Hono } from "hono";
 
 import { sql } from "../db.js";
 import { isProtectedStoredQuery } from "../search/session.js";
+import { workspaceSuggestedQuestions } from "../services/workspace-suggested-questions.js";
 import { actorHasAnyApiKeyScope, getRequestActor, loadActorScopedWorkspace, resolveActorWorkspaceId } from "../lib/request-actor.js";
 import { acceptApiKeys } from "../lib/route-auth.js";
 import { apiStatusError } from "../lib/api-error.js";
+
+// Section names that say nothing about the content ("Introduction", "Page 3").
+const GENERIC_HEADING =
+  /^(?:(?:\d+(?:\.\d+)*\.?|[ivxlc]+\.)\s*)?(?:abstract|introduction|intro|overview|background|summary|conclusions?|discussion|results|methods?|references|bibliography|appendix(?: [a-z0-9]+)?|acknowledg(?:e)?ments?|contents|table of contents|index|glossary|notes?|preface|foreword|copyright|untitled|page \d+|figure \d+|table \d+|chapter \d+|section \d+|part \d+)$/i;
+
+export function isGenericHeading(heading: string): boolean {
+  const text = heading.replace(/^#+\s*/, "").trim();
+  return text.length < 4 || text.length > 80 || !/[a-z]/i.test(text) || GENERIC_HEADING.test(text);
+}
 
 function normalizePrefix(q: string | null): string {
   return (q ?? "").trim().slice(0, 64);
@@ -130,7 +140,7 @@ export const suggestRoutes = new Hono()
             ) headings
             group by heading
             order by hits desc, heading asc
-            limit 4
+            limit 12
           `
         : [];
 
@@ -150,13 +160,20 @@ export const suggestRoutes = new Hono()
           `
         : [];
 
+    const generated = semanticRow && semanticRow.indexed_chunk_count > 0
+      ? await workspaceSuggestedQuestions({ workspaceId, userId, settled: semanticRow.in_flight_documents === 0 })
+          .catch(() => ({ questions: [], pending: false }))
+      : { questions: [], pending: false };
+
+    // Questions written from the documents come first; specific headings and
+    // recent files fill in until they exist (or when no model may read them).
     const contextualSeen = new Set<string>();
     const contextualSuggestions = [
-      ...headingSuggestions.flatMap((row) => [
-        `Summarize ${row.heading}`,
-        `What are the key points in ${row.heading}?`,
-      ]),
-      ...filenameSuggestions.map((row) => `What matters most in ${row.filename}?`),
+      ...generated.questions,
+      ...headingSuggestions
+        .filter((row) => !isGenericHeading(row.heading))
+        .map((row) => `What does ${row.heading.replace(/^#+\s*/, "").trim()} cover?`),
+      ...filenameSuggestions.map((row) => `Summarize ${row.filename}`),
     ].filter((phrase) => {
       const key = phrase.toLowerCase();
       if (contextualSeen.has(key)) {
@@ -178,6 +195,7 @@ export const suggestRoutes = new Hono()
     return c.json({
       suggestions,
       contextualSuggestions,
+      contextualPending: generated.pending,
       semantic: {
         status: semanticStatus,
         indexedChunkCount: semanticRow?.indexed_chunk_count ?? 0,
