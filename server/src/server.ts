@@ -88,6 +88,8 @@ const repoRoot = findRepoRoot(dirname(fileURLToPath(import.meta.url)));
 
 export { IN_PROCESS_ENV_KEY } from "./lib/client-ip.js";
 export { forwardRequest } from "./lib/forward-request.js";
+/** Commit pending write-behind search writes (sessions, usage) before the host exits; resolves after `timeoutMs` at most. */
+export { drainSearchSessionWrites } from "./search/session.js";
 
 export function createApiApp(): Hono {
   const app = new Hono();

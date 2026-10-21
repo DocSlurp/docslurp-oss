@@ -253,14 +253,13 @@ export function scheduleLanceDbMaintenance(uri: string, tableName: string, optio
 const ID_INDEX_MIN_ROWS = 1_000;
 
 /**
- * LANCEDB_FTS_INDEX=1: maintenance also keeps a native full-text (BM25) index
- * on the chunk `text` column, which SEARCH_LANCEDB_NATIVE search queries
- * instead of Postgres FTS. optimize() folds new rows into it like the vector
- * index; rows written since are still searched, by a flat scan. Off by
- * default while native search rolls out.
+ * LANCEDB_FTS_INDEX (on unless 0/false): maintenance also keeps a native
+ * full-text (BM25) index on the chunk `text` column, which native search
+ * queries instead of Postgres FTS. optimize() folds new rows into it like the
+ * vector index; rows written since are still searched, by a flat scan.
  */
 export function lanceDbFtsIndexEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
-  return ["1", "true", "on", "yes"].includes((env.LANCEDB_FTS_INDEX ?? "").trim().toLowerCase());
+  return !["0", "false", "off", "no"].includes((env.LANCEDB_FTS_INDEX ?? "").trim().toLowerCase());
 }
 
 /** The chunk-text FTS index: English stemming and stop words, no positions (no phrase queries). */

@@ -60,17 +60,19 @@ type EligibleRow = {
   owner_index_config_hash: string | null;
 };
 
-function truthy(value: string | undefined): boolean {
-  return ["1", "true", "on", "yes"].includes((value ?? "").trim().toLowerCase());
+function falsy(value: string | undefined): boolean {
+  return ["0", "false", "off", "no"].includes((value ?? "").trim().toLowerCase());
 }
 
 /**
- * SEARCH_LANCEDB_NATIVE=1 serves lexical (BM25), vector and hydration from
- * LanceDB for every workspace; SEARCH_LANCEDB_NATIVE_WORKSPACES=<id,…> turns
- * it on for listed workspaces only. Off by default.
+ * Native search is the default: lexical (BM25), vector and hydration come
+ * from LanceDB, with Postgres fallbacks for tables without an FTS index, rows
+ * without hydration columns and legacy tables. SEARCH_LANCEDB_NATIVE=0 is the
+ * global kill switch; while it is off, SEARCH_LANCEDB_NATIVE_WORKSPACES=<id,…>
+ * still turns native search on for the listed workspaces.
  */
 export function searchLanceDbNativeEnabled(workspaceId: string | undefined, env: NodeJS.ProcessEnv = process.env): boolean {
-  if (truthy(env.SEARCH_LANCEDB_NATIVE)) return true;
+  if (!falsy(env.SEARCH_LANCEDB_NATIVE)) return true;
   if (!workspaceId) return false;
   return (env.SEARCH_LANCEDB_NATIVE_WORKSPACES ?? "").split(",").map((id) => id.trim()).filter(Boolean).includes(workspaceId);
 }

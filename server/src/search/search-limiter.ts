@@ -31,7 +31,8 @@ import { resolveDatabasePoolMax } from "../lib/api-pool.js";
  *   with Retry-After.
  * - SEARCH_FAIR_ADMISSION: serve waiting searches round-robin per tenant (org,
  *   else workspace), so one tenant's fan-out cannot starve others. Defaults to
- *   SEARCH_LANCEDB_NATIVE (process-wide); off, the queue is one FIFO as before.
+ *   the process-wide SEARCH_LANCEDB_NATIVE flag (on unless it is 0); off, the
+ *   queue is one FIFO.
  * - SEARCH_MAX_SLOTS_PER_TURN: slots one chat agent turn or API batch holds at
  *   once (0 = no cap). Default 2 with fair admission, else 0.
  */
@@ -52,9 +53,9 @@ function flag(value: string | undefined): boolean | null {
   return null;
 }
 
-/** SEARCH_FAIR_ADMISSION, defaulting to the process-wide SEARCH_LANCEDB_NATIVE flag. */
+/** SEARCH_FAIR_ADMISSION, defaulting to the process-wide SEARCH_LANCEDB_NATIVE flag (on unless 0). */
 export function searchFairAdmissionEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
-  return flag(env.SEARCH_FAIR_ADMISSION) ?? flag(env.SEARCH_LANCEDB_NATIVE) ?? false;
+  return flag(env.SEARCH_FAIR_ADMISSION) ?? flag(env.SEARCH_LANCEDB_NATIVE) ?? true;
 }
 
 function readInt(value: string | undefined, fallback: number, min: number, max: number): number {

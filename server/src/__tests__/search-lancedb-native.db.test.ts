@@ -53,10 +53,19 @@ const vectors = new Map<string, number[]>();
 type ChunkSeed = { id: string; documentId: string; index: number; text: string; page: number; headingPath: string[]; metadata: Record<string, unknown> };
 const chunks: ChunkSeed[] = [];
 
-async function writeLanceTable(options: { hydrated: boolean; fts: boolean }): Promise<void> {
+/**
+ * `hydrated: false` is an evolved, not yet backfilled table (the columns exist
+ * but hold nulls); `evolved: false` is a table written before the hydration
+ * columns existed; `legacy` writes the pre-embedding-space `chunks_org_…` table
+ * instead of the embedding-space one.
+ */
+async function writeLanceTable(options: { hydrated: boolean; fts: boolean; evolved?: boolean; legacy?: boolean }): Promise<void> {
   const location = VectorNamespaceManager.getEmbeddingLocation(lanceDir, "org1", route.model, DIM);
-  const db = await lancedb.connect(location.uri);
-  if ((await db.tableNames()).includes(location.table)) await db.dropTable(location.table);
+  const legacyName = VectorNamespaceManager.getTableName("org1");
+  const embeddingDb = await lancedb.connect(location.uri);
+  if ((await embeddingDb.tableNames()).includes(location.table)) await embeddingDb.dropTable(location.table);
+  const rootDb = await lancedb.connect(lanceDir);
+  if ((await rootDb.tableNames()).includes(legacyName)) await rootDb.dropTable(legacyName);
   const rows = chunks.map((chunk) => ({
     id: chunk.id, documentId: chunk.documentId, chunkIndex: chunk.index, text: chunk.text, vector: vectors.get(chunk.id)!,
     metadata: { documentId: chunk.documentId, sourceKey: "k", filename: `${chunk.documentId}.pdf` },
@@ -65,12 +74,13 @@ async function writeLanceTable(options: { hydrated: boolean; fts: boolean }): Pr
       hydration: encodeLanceChunkHydration({ runId: "run1", headingPath: chunk.headingPath, pageNumber: chunk.page, tokenEstimate: 12, metadata: chunk.metadata }),
     } : {}),
   }));
-  const table = await db.createTable(location.table, rows);
-  // An evolved, not yet backfilled table: the columns exist but hold nulls.
-  if (!options.hydrated) await table.addColumns(LANCE_HYDRATION_COLUMN_SPECS.map((column) => ({ ...column })));
+  const db = options.legacy ? rootDb : embeddingDb;
+  const table = await db.createTable(options.legacy ? legacyName : location.table, rows);
+  if (!options.hydrated && options.evolved !== false) await table.addColumns(LANCE_HYDRATION_COLUMN_SPECS.map((column) => ({ ...column })));
   if (options.fts) await table.createIndex("text", { config: lancedb.Index.fts({ withPosition: false }) });
   table.close();
-  db.close();
+  embeddingDb.close();
+  rootDb.close();
   lance.resetLanceDbConnectionForTests();
 }
 
@@ -156,6 +166,14 @@ async function run(native: boolean, query: string, options: Record<string, unkno
 const citations = (response: Awaited<ReturnType<typeof run>>) => response.results.map((result) => ({ text: result.text, citation: result.citation }));
 
 describe("SEARCH_LANCEDB_NATIVE", () => {
+  it("is on unless SEARCH_LANCEDB_NATIVE turns it off; listed workspaces stay on when it is off", () => {
+    expect(eligible.searchLanceDbNativeEnabled("w", {})).toBe(true);
+    expect(eligible.searchLanceDbNativeEnabled(undefined, { SEARCH_LANCEDB_NATIVE: "" })).toBe(true);
+    for (const off of ["0", "false", "off", "no"]) expect(eligible.searchLanceDbNativeEnabled("w", { SEARCH_LANCEDB_NATIVE: off })).toBe(false);
+    expect(eligible.searchLanceDbNativeEnabled("w", { SEARCH_LANCEDB_NATIVE: "0", SEARCH_LANCEDB_NATIVE_WORKSPACES: "x, w" })).toBe(true);
+    expect(eligible.searchLanceDbNativeEnabled(undefined, { SEARCH_LANCEDB_NATIVE: "0", SEARCH_LANCEDB_NATIVE_WORKSPACES: "w" })).toBe(false);
+  });
+
   it("returns the Postgres path's citations for vector hits, hydrated from LanceDB", async () => {
     const queryVector = near("doc3-5");
     const legacy = await run(false, "qqqzzz", { queryVector });
@@ -223,6 +241,37 @@ describe("SEARCH_LANCEDB_NATIVE", () => {
       const legacy = await run(false, "cavitation erosion", { queryVector });
       const native = await run(true, "cavitation erosion", { queryVector });
       expect(native.timings?.nativeLexicalUnindexed).toBe(1);
+      expect(citations(native)).toEqual(citations(legacy));
+    } finally {
+      await writeLanceTable({ hydrated: true, fts: true });
+    }
+  });
+
+  it("is on by default and serves an untouched table (no hydration columns, no FTS index) through the Postgres fallbacks", async () => {
+    await writeLanceTable({ hydrated: false, fts: false, evolved: false });
+    try {
+      const queryVector = near("doc4-9");
+      const legacy = await run(false, "cavitation erosion", { queryVector });
+      vi.stubEnv("SEARCH_LANCEDB_NATIVE", undefined);
+      const native = await search.hybridSearch("cavitation erosion", "u", { ...baseOptions, queryVector, filters: { workspaceId: "w" } });
+      await session.drainSearchSessionWrites();
+      expect(native.timings?.nativeLexicalUnindexed).toBe(1);
+      expect(native.timings?.nativeHydrationPostgres).toBe(1);
+      expect(native.results.length).toBeGreaterThan(0);
+      expect(citations(native)).toEqual(citations(legacy));
+    } finally {
+      await writeLanceTable({ hydrated: true, fts: true });
+    }
+  });
+
+  it("falls back to Postgres for a legacy chunks_org table", async () => {
+    await writeLanceTable({ hydrated: false, fts: false, evolved: false, legacy: true });
+    try {
+      const queryVector = near("doc2-3");
+      const legacy = await run(false, "cavitation erosion", { queryVector });
+      const native = await run(true, "cavitation erosion", { queryVector });
+      expect(native.timings?.nativeLexicalUnindexed).toBe(1);
+      expect(native.results.length).toBeGreaterThan(0);
       expect(citations(native)).toEqual(citations(legacy));
     } finally {
       await writeLanceTable({ hydrated: true, fts: true });

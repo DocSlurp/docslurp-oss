@@ -24,7 +24,8 @@ beforeEach(() => {
   vi.resetAllMocks();
   resetEmbeddingCacheForTests();
   vi.stubEnv("OPENROUTER_API_KEY", "test-key");
-  vi.stubEnv("SEARCH_LANCEDB_NATIVE", "");
+  // Native search is on by default; these tests pin it off globally and on for "w" only.
+  vi.stubEnv("SEARCH_LANCEDB_NATIVE", "0");
   vi.stubEnv("SEARCH_LANCEDB_NATIVE_WORKSPACES", "w");
   mocks.recordUsageEvent.mockResolvedValue(null);
   mocks.embedConfiguredTexts.mockImplementation(async ({ values }: { values: string[] }) => ({

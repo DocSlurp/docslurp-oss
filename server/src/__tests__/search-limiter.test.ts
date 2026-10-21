@@ -15,20 +15,25 @@ afterEach(() => resetSearchLimiterForTests());
 
 describe("search limiter", () => {
   it("derives its default from the pool size and honours env overrides", () => {
-    // Flag off: one FIFO queue and no per-turn cap, as before fair admission.
-    expect(resolveSearchLimiterOptions({})).toEqual({ maxConcurrency: 6, maxQueue: 200, queueTimeoutMs: 30_000, maxSlotsPerGroup: 0, fairTenants: false });
+    // Native search (the default) turns on fair admission and the per-turn cap.
+    expect(resolveSearchLimiterOptions({})).toEqual({ maxConcurrency: 6, maxQueue: 200, queueTimeoutMs: 30_000, maxSlotsPerGroup: 2, fairTenants: true });
+    // Flag off: one FIFO queue and no per-turn cap.
+    expect(resolveSearchLimiterOptions({ SEARCH_LANCEDB_NATIVE: "0" })).toEqual({ maxConcurrency: 6, maxQueue: 200, queueTimeoutMs: 30_000, maxSlotsPerGroup: 0, fairTenants: false });
     expect(resolveSearchLimiterOptions({ DATABASE_POOL_MAX: "40" }).maxConcurrency).toBe(13);
     expect(resolveSearchLimiterOptions({ DATABASE_POOL_MAX: "3" }).maxConcurrency).toBe(2);
     expect(resolveSearchLimiterOptions({ SEARCH_MAX_CONCURRENCY: "0", SEARCH_QUEUE_MAX: "5", SEARCH_QUEUE_TIMEOUT_MS: "1000" }))
-      .toEqual({ maxConcurrency: 0, maxQueue: 5, queueTimeoutMs: 1_000, maxSlotsPerGroup: 0, fairTenants: false });
+      .toEqual({ maxConcurrency: 0, maxQueue: 5, queueTimeoutMs: 1_000, maxSlotsPerGroup: 2, fairTenants: true });
   });
 
-  it("turns fair admission on with SEARCH_LANCEDB_NATIVE or SEARCH_FAIR_ADMISSION", () => {
+  it("turns fair admission on with SEARCH_LANCEDB_NATIVE (the default) or SEARCH_FAIR_ADMISSION", () => {
+    expect(resolveSearchLimiterOptions({})).toMatchObject({ maxSlotsPerGroup: 2, fairTenants: true });
     expect(resolveSearchLimiterOptions({ SEARCH_LANCEDB_NATIVE: "1" })).toMatchObject({ maxSlotsPerGroup: 2, fairTenants: true });
+    expect(resolveSearchLimiterOptions({ SEARCH_LANCEDB_NATIVE: "0" })).toMatchObject({ maxSlotsPerGroup: 0, fairTenants: false });
+    expect(resolveSearchLimiterOptions({ SEARCH_LANCEDB_NATIVE: "0", SEARCH_FAIR_ADMISSION: "1" })).toMatchObject({ maxSlotsPerGroup: 2, fairTenants: true });
     expect(resolveSearchLimiterOptions({ SEARCH_FAIR_ADMISSION: "true" })).toMatchObject({ maxSlotsPerGroup: 2, fairTenants: true });
     expect(resolveSearchLimiterOptions({ SEARCH_LANCEDB_NATIVE: "1", SEARCH_FAIR_ADMISSION: "0" })).toMatchObject({ maxSlotsPerGroup: 0, fairTenants: false });
     // A per-workspace trial does not change process-wide admission.
-    expect(resolveSearchLimiterOptions({ SEARCH_LANCEDB_NATIVE_WORKSPACES: "w1" })).toMatchObject({ maxSlotsPerGroup: 0, fairTenants: false });
+    expect(resolveSearchLimiterOptions({ SEARCH_LANCEDB_NATIVE: "0", SEARCH_LANCEDB_NATIVE_WORKSPACES: "w1" })).toMatchObject({ maxSlotsPerGroup: 0, fairTenants: false });
     expect(resolveSearchLimiterOptions({ SEARCH_MAX_SLOTS_PER_TURN: "3" }).maxSlotsPerGroup).toBe(3);
   });
 

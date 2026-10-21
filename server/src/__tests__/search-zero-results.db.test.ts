@@ -96,6 +96,8 @@ beforeEach(async () => {
 });
 
 describe("zero-result diagnostics reference a persisted search session", () => {
+  // Synchronous session writes (write-behind follows native search, which is on by default).
+  beforeEach(() => { vi.stubEnv("SEARCH_SESSION_WRITE_BEHIND", "0"); });
   it("single search", async () => {
     const response = await search.hybridSearch("maintenance", "u", { ...options, filters: zeroHitFilters });
     expect(response.results).toEqual([]);
