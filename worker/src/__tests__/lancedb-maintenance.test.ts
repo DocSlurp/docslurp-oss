@@ -8,6 +8,7 @@ import {
   DEFAULT_LANCEDB_CADENCE,
   LEGACY_OPTIMIZE_EVERY_ROWS,
   createMaintenanceCoordinator,
+  lanceDbFtsIndexEnabled,
   lanceDbMaintenanceDue,
   lanceDbMaintenanceSettings,
   requestLanceDbMaintenance,
@@ -79,6 +80,14 @@ describe("planPageWindows", () => {
 });
 
 const everyWindow: LanceDbCadencePolicy = { optimizeEveryRows: 1, optimizeEveryCommits: 1, optimizeIntervalMs: 0, optimizeMinIntervalMs: 0 };
+
+describe("lanceDbFtsIndexEnabled", () => {
+  it("is on unless LANCEDB_FTS_INDEX turns it off", () => {
+    expect(lanceDbFtsIndexEnabled({})).toBe(true);
+    expect(lanceDbFtsIndexEnabled({ LANCEDB_FTS_INDEX: "1" })).toBe(true);
+    for (const off of ["0", "false", "off", "no"]) expect(lanceDbFtsIndexEnabled({ LANCEDB_FTS_INDEX: off })).toBe(false);
+  });
+});
 
 describe("lanceDbMaintenanceDue", () => {
   const policy: LanceDbCadencePolicy = { optimizeEveryRows: 100, optimizeEveryCommits: 5, optimizeIntervalMs: 60_000, optimizeMinIntervalMs: 10_000 };

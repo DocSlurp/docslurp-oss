@@ -444,13 +444,16 @@ export async function finalizeSearchSessionExecution(
   }
 
   if (recordedZeroResultDiagnostics) {
-    await writeZeroResultDiagnostics({
+    const diagnostics = {
       sessionId: input.session.sessionId,
       userId: input.userId,
       workspaceId: input.workspaceId,
       query: input.query,
       filtersJson: toSearchMetadataRecord(input.filters),
-    });
+    };
+    // Ordered after the session row (#83), inline or behind it when writes are write-behind.
+    const write = () => writeZeroResultDiagnostics(diagnostics);
+    await (input.session.afterWrites ? input.session.afterWrites(write) : write());
   }
 
   return {

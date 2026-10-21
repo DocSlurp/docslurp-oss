@@ -43,6 +43,10 @@ export class TtlLruCache<V> {
     }
   }
 
+  delete(key: string): void {
+    this.entries.delete(key);
+  }
+
   clear(): void {
     this.entries.clear();
     this.hits = 0;

@@ -115,6 +115,8 @@ const { hybridSearch, MissingWorkspaceScopeError, deriveSearchAvailability, part
 
 describe("hybridSearch", () => {
   beforeEach(() => {
+    // These tests script the Postgres path's SQL; native search (the default) is covered by search-lancedb-native.db.test.ts.
+    vi.stubEnv("SEARCH_LANCEDB_NATIVE", "0");
     sqlMock.begin.mockImplementation(async (run) => {
       const client = Object.assign(vi.fn(async (strings, ...values) => {
         const result = await sqlMock(strings, ...values);

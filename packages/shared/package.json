@@ -62,6 +62,10 @@
       "types": "./dist/lancedb-session.d.ts",
       "import": "./dist/lancedb-session.js"
     },
+    "./lancedb-hydration": {
+      "types": "./dist/lancedb-hydration.d.ts",
+      "import": "./dist/lancedb-hydration.js"
+    },
     "./lancedb-s3-trace": {
       "types": "./dist/lancedb-s3-trace.d.ts",
       "import": "./dist/lancedb-s3-trace.js"
