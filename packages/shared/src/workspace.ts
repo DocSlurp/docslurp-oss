@@ -302,16 +302,16 @@ export type WorkspaceChatWholeCorpusDebug = z.infer<
 >;
 
 /** Search-agent budgets for one /v1/chat turn. Non-admin callers may only lower them. */
-export const CHAT_AGENT_LIMIT_DEFAULTS = { maxSteps: 6, maxToolCalls: 12, searchConcurrency: 4 } as const;
+export const CHAT_AGENT_LIMIT_DEFAULTS = { maxSteps: 8, maxToolCalls: 16, searchConcurrency: 6 } as const;
 export const CHAT_AGENT_LIMIT_MAXIMUMS = { maxSteps: 12, maxToolCalls: 24, searchConcurrency: 8 } as const;
 export type ChatAgentLimitName = keyof typeof CHAT_AGENT_LIMIT_DEFAULTS;
 
 export const chatAgentLimitsInputSchema = z.object({
-  /** Model steps (calls), including the final answer step. Default 6. */
+  /** Model steps (calls), including the final answer step. Default 8. */
   maxSteps: z.number().int().min(1).max(CHAT_AGENT_LIMIT_MAXIMUMS.maxSteps).optional(),
-  /** Tool calls across the turn; further calls are refused with `code: "tool_call_limit"`. Default 12. */
+  /** Tool calls across the turn; further calls are refused with `code: "tool_call_limit"`. Default 16. */
   maxToolCalls: z.number().int().min(1).max(CHAT_AGENT_LIMIT_MAXIMUMS.maxToolCalls).optional(),
-  /** Upper bound for the search tool's parallel `queries` concurrency. Default 4. */
+  /** Upper bound for the search tool's parallel `queries` concurrency. Default 6. */
   searchConcurrency: z.number().int().min(1).max(CHAT_AGENT_LIMIT_MAXIMUMS.searchConcurrency).optional(),
 }).strict();
 export type ChatAgentLimitsInput = z.infer<typeof chatAgentLimitsInputSchema>;

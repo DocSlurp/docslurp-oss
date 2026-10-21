@@ -142,7 +142,7 @@ export function createChatMcpTools(args: {
   allowWorkspace?: (workspaceRef: string) => Promise<boolean>;
   /** Tool calls allowed in this turn (default 12); later calls get TOOL_CALL_LIMIT_RESULT. */
   maxToolCalls?: number;
-  /** Ceiling for a search batch's `concurrency`; also its value when the model omits it (default 4). */
+  /** Ceiling for a search batch's `concurrency`; also its value when the model omits it (default 6). */
   searchConcurrency?: number;
   /** Chat session that owns this turn; retrieval spans and search sessions link back to it. */
   chatSessionId?: string;

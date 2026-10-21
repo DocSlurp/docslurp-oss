@@ -78,14 +78,14 @@ describe("chat model resolution", () => {
 });
 
 describe("agent limits", () => {
-  it("defaults to 6 steps, 12 tool calls and search concurrency 4", () => {
-    expect(resolveChatAgentLimits(undefined, false)).toEqual({ maxSteps: 6, maxToolCalls: 12, searchConcurrency: 4, clamped: [] });
+  it("defaults to 8 steps, 16 tool calls and search concurrency 6", () => {
+    expect(resolveChatAgentLimits(undefined, false)).toEqual({ maxSteps: 8, maxToolCalls: 16, searchConcurrency: 6, clamped: [] });
   });
 
   it("lets non-admins lower limits but clamps raised ones to the defaults", () => {
     expect(resolveChatAgentLimits({ maxSteps: 2, maxToolCalls: 3, searchConcurrency: 1 }, false)).toEqual({ maxSteps: 2, maxToolCalls: 3, searchConcurrency: 1, clamped: [] });
     expect(resolveChatAgentLimits({ maxSteps: 12, maxToolCalls: 24, searchConcurrency: 8 }, false))
-      .toEqual({ maxSteps: 6, maxToolCalls: 12, searchConcurrency: 4, clamped: ["maxSteps", "maxToolCalls", "searchConcurrency"] });
+      .toEqual({ maxSteps: 8, maxToolCalls: 16, searchConcurrency: 6, clamped: ["maxSteps", "maxToolCalls", "searchConcurrency"] });
   });
 
   it("gives admins the full range, bounded by the schema maximums", () => {
@@ -134,7 +134,7 @@ describe("eval access lookups", () => {
     expect(chatTurnNeedsEvalAccess("  ")).toBe(false);
     expect(chatTurnNeedsEvalAccess("z-ai/glm-5.3-flash", { maxSteps: 6, maxToolCalls: 2, searchConcurrency: 4 })).toBe(false);
     expect(chatTurnNeedsEvalAccess("inception/mercury-3")).toBe(true);
-    expect(chatTurnNeedsEvalAccess(undefined, { maxSteps: 7 })).toBe(true);
+    expect(chatTurnNeedsEvalAccess(undefined, { maxSteps: 9 })).toBe(true);
     expect(chatTurnNeedsEvalAccess(undefined, { searchConcurrency: 8 })).toBe(true);
   });
 

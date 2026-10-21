@@ -412,11 +412,11 @@ export type ChatInput = {
   model?: string;
   /** Search-agent budgets for this turn; non-admin callers can only lower the defaults. */
   agent?: {
-    /** Model steps, 1-12 (default 6). The last step always answers. */
+    /** Model steps, 1-12 (default 8). The last step always answers. */
     maxSteps?: number;
-    /** Tool calls across the turn, 1-24 (default 12). */
+    /** Tool calls across the turn, 1-24 (default 16). */
     maxToolCalls?: number;
-    /** Cap on parallel search queries, 1-8 (default 4). */
+    /** Cap on parallel search queries, 1-8 (default 6). */
     searchConcurrency?: number;
   };
 };
