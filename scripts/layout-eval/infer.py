@@ -60,7 +60,7 @@ def build_result(detector,data,device,threshold=.3):
         if 'classification' in region: entry['classification']=region['classification']
         if 'detector_label' in region: entry['detectorLabel']=region['detector_label']
         entry.update(describe_region(image,region)); regions.append(entry)
-    return {'schemaVersion':1,'model':{'id':detector.metadata['id'],'revision':detector.metadata['revision']},
+    return {'schemaVersion':1,'model':{'id':detector.metadata['id'],'revision':detector.metadata['revision'],**({'artifactSha256':detector.metadata['graph_sha256']} if detector.metadata.get('graph_sha256') else {})},
         'device':device,'image':{'width':image.width,'height':image.height,'sha256':hashlib.sha256(data).hexdigest()},
         'coordinateSpace':'normalized-source','supportedLabels':detector.supported_labels,'regions':regions,
         'diagnostics':{'timings':timings,'decodeMs':1000*(start-decode_start),'elapsedMs':1000*(time.perf_counter()-decode_start),

@@ -10,7 +10,7 @@ export const imageLayoutLabels = ["paragraph", "title", "list", "table", "chart"
 export type ImageLayoutLabel = typeof imageLayoutLabels[number];
 export interface ImageLayoutResult {
   schemaVersion: 1;
-  model: { id: string; revision: string };
+  model: { id: string; revision: string; artifactSha256?: string };
   device: "cpu" | "cuda";
   /** Stored raster coordinates: EXIF orientation is not applied. */
   image: { width: number; height: number; sha256?: string };
@@ -61,6 +61,7 @@ export function parseImageLayout(value: unknown): ImageLayoutResult {
   if (result.device !== "cpu" && result.device !== "cuda") throw new Error("Unsupported layout device");
   const model = object(result.model);
   const image = object(result.image);
+  if (model.artifactSha256 !== undefined && !/^[0-9a-f]{64}$/.test(text(model.artifactSha256))) throw new Error("Invalid model artifact hash");
   if (!Array.isArray(result.supportedLabels) || !Array.isArray(result.regions)) throw new Error("Missing layout taxonomy or regions");
   const supportedLabels = [...new Set(result.supportedLabels.map(label))];
   const regions = result.regions.map((entry) => {
@@ -98,7 +99,7 @@ export function parseImageLayout(value: unknown): ImageLayoutResult {
     }
     return { label: kind, rawLabel: text(region.rawLabel), confidence: unit(region.confidence), bbox, ...extras };
   });
-  return { schemaVersion: 1, model: { id: text(model.id), revision: text(model.revision) }, device: result.device,
+  return { schemaVersion: 1, model: { id: text(model.id), revision: text(model.revision), ...(model.artifactSha256 ? { artifactSha256: text(model.artifactSha256) } : {}) }, device: result.device,
     image: { width: dimension(image.width), height: dimension(image.height) }, coordinateSpace: "normalized-source", supportedLabels, regions };
 }
 export interface ImageLayoutCliOptions {
@@ -111,6 +112,7 @@ export interface ImageLayoutCliOptions {
   cacheDirectory: string;
   /** Explicit local model directory (required for pp-small), or optional ONNX export. */
   modelPath?: string;
+  revision?: string;
   visualClassifier?: "none" | "siglip2";
   processor?: "slow" | "fast";
   classifierModelPath?: string;
@@ -141,13 +143,14 @@ export async function detectImageLayout(input: Buffer, options: ImageLayoutCliOp
     const output = path.join(directory, "layout.json");
     await writeFile(source, input, { mode: 0o600 });
     await runner.run({ binary: options.python,
-      args: [options.script, "--model", options.model, "--device", options.device, "--image", source, "--output", output, ...(options.modelPath ? ["--model-path", options.modelPath] : []), ...(options.onnxPath ? ["--onnx-path", options.onnxPath] : []), ...(options.processor ? ["--processor", options.processor] : []), ...(options.visualClassifier ? ["--visual-classifier", options.visualClassifier] : []), ...(options.classifierModelPath ? ["--classifier-model-path", options.classifierModelPath] : [])],
+      args: [options.script, "--model", options.model, "--device", options.device, "--image", source, "--output", output, ...(options.modelPath ? ["--model-path", options.modelPath] : []), ...(options.revision ? ["--revision", options.revision] : []), ...(options.onnxPath ? ["--onnx-path", options.onnxPath] : []), ...(options.processor ? ["--processor", options.processor] : []), ...(options.visualClassifier ? ["--visual-classifier", options.visualClassifier] : []), ...(options.classifierModelPath ? ["--classifier-model-path", options.classifierModelPath] : [])],
       available: true, pages: 1, timeoutMs,
       bundleRoots: [options.cacheDirectory, path.dirname(options.script), ...runtimeRoots, ...[options.modelPath, options.onnxPath, options.classifierModelPath].filter((value): value is string => value !== undefined)],
       bundleEnv: { HF_HOME: options.cacheDirectory, HF_HUB_OFFLINE: "1", TRANSFORMERS_OFFLINE: "1", PYTHONDONTWRITEBYTECODE: "1" },
     }, signal);
     if ((await stat(output)).size > 10 * 1024 * 1024) throw new Error("Layout output exceeds 10 MiB");
     const result = parseImageLayout(JSON.parse(await readFile(output, "utf8")));
+    if (options.revision && result.model.revision !== options.revision) throw new Error("Layout detector model revision differs from configuration");
     if (result.device !== options.device) throw new Error("Layout detector silently changed requested device");
     if (result.image.width !== metadata.width || result.image.height !== metadata.height) throw new Error("Layout output dimensions do not match source raster");
     result.image.sha256 = createHash("sha256").update(input).digest("hex");
@@ -162,6 +165,7 @@ export interface ImageLayoutEndpointOptions {
   endpoint: string;
   expectedModelId: string;
   expectedRevision: string;
+  expectedArtifactSha256?: string;
   device: "cpu" | "cuda";
   timeoutMs?: number;
 }
@@ -207,6 +211,7 @@ export async function detectImageLayoutAtEndpoint(input: Buffer, options: ImageL
   const raw: unknown = JSON.parse(Buffer.concat(chunks).toString("utf8"));
   const result = parseImageLayout(raw);
   if (result.device !== options.device) throw new Error("Layout service changed requested device");
+  if (options.expectedArtifactSha256 && result.model.artifactSha256 !== options.expectedArtifactSha256) throw new Error("Layout service model artifact hash differs from configuration");
   if (result.model.id !== options.expectedModelId || result.model.revision !== options.expectedRevision) throw new Error("Layout service model identity differs from configuration");
   if (result.image.width !== metadata.width || result.image.height !== metadata.height) throw new Error("Layout output dimensions do not match source raster");
   const sha256 = createHash("sha256").update(input).digest("hex");
