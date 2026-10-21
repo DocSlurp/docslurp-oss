@@ -19,9 +19,10 @@ import {
   type Router,
 } from "@docslurp/shared";
 
+import type { RoutingLayoutObserver } from "../layout/routing-observer.js";
 import type { Config } from "../config.js";
 import type { Document } from "../models.js";
-import { readRasterEngine, type PdfSourceCache } from "../pipeline/pdf-asset-cache.js";
+import { readRasterEngine, type PdfRasterCache, type PdfSourceCache } from "../pipeline/pdf-asset-cache.js";
 import { loadNativePdfEngine } from "../native-pdf/loader.js";
 import type { NativePdfDocument } from "../native-pdf/types.js";
 import { renderClipNative } from "../native-pdf/render.js";
@@ -69,11 +70,16 @@ import { type ArtifactStore, keyFromStorageUri } from "../tools/storage.js";
 export const PAGE_ROUTE_DECISION_METRIC = "page-route-decision";
 export const PAGE_ROUTE_CHUNK_ESTIMATE_METRIC = "page-route-chunk-estimate";
 export const PAGE_ROUTE_TIMING_METRIC = "page-route-timing";
+export const PAGE_ROUTE_LAYOUT_METRIC = "page-route-layout";
+export const PAGE_ROUTE_LAYOUT_SLOT = "page-route-layout-shadow";
 export const PAGE_ROUTE_ERROR_METRIC = "page-route-error";
 
 /** Test seams; production uses the defaults. */
 export interface RoutePagesDeps {
   probe?: ProbeRunner;
+  /** Operator-enabled, advisory-only local layout observer. */
+  layoutObserver?: Pick<RoutingLayoutObserver, "config" | "observe">;
+  rasterCache?: Pick<PdfRasterCache, "renderSelectedPages">;
   /** Builds the decision client for one document (usage is recorded by the stage). */
   decisionClient?: (args: {
     privacyMode: string;
@@ -123,6 +129,7 @@ interface RoutingTiming {
   insetMs: number;
   triageMs: number;
   planningMs: number;
+  layoutShadowMs: number;
   totalMs: number;
   perPageMs: { probe: number; agreement: number; inset: number; triage: number; planning: number; total: number };
 }
@@ -255,6 +262,7 @@ export class RoutePagesStage implements Stage {
         insetMs,
         triageMs,
         planningMs,
+        layoutShadowMs: 0,
         totalMs,
         perPageMs: {
           probe: probeMs / n,
@@ -278,6 +286,22 @@ export class RoutePagesStage implements Stage {
 
       await this.storage.putJson(key, plan);
       const artifactUri = this.storage.uri(key);
+      const layoutStarted = performance.now();
+      const layoutShadow = this.deps.layoutObserver && this.deps.rasterCache
+        ? await this.shadowLayout(state, document, source.sha256, plan, pages, signal).catch((error: unknown) => {
+          signal?.throwIfAborted();
+          const reason = (error instanceof Error ? error.message : String(error)).slice(0, 200);
+          state.pendingPerformance.push({ documentId: document.id, scope: "document", stageName: this.name,
+            metric: PAGE_ROUTE_LAYOUT_METRIC, value: performance.now() - layoutStarted, unit: "ms",
+            tags: ["page-router", "layout", "shadow", "error"], metadata: { reason } });
+          return { error: reason };
+        })
+        : undefined;
+      if (layoutShadow) {
+        timing.layoutShadowMs = performance.now() - layoutStarted;
+        timing.totalMs += timing.layoutShadowMs;
+        timing.perPageMs.total = timing.totalMs / n;
+      }
       this.recordDecisions(state, document, plan, pages, routerNote, timing, chainReport);
       const tableGate = (this.deps.tableGate ?? readRoutingFlags().tableGate) === "shadow"
         ? await this.shadowTableGate(state, document, source.path, plan, pages, catalog.targets, signal)
@@ -300,11 +324,125 @@ export class RoutePagesStage implements Stage {
           ...(routerNote ? { routerNote } : {}),
           ...(chainReport ? { decisionModel: chainReport.servedBy, decisionChain: chainReport.trace } : {}),
           ...(tableGate ? { tableGate } : {}),
+          ...(layoutShadow ? { layoutShadow } : {}),
         },
       };
     } finally {
       if (thumbDir) await rm(thumbDir, { recursive: true, force: true }).catch(() => undefined);
     }
+  }
+
+  /** Shadow evidence is separate from the authoritative plan and cannot suppress extraction. */
+  private async shadowLayout(
+    state: WorkflowState, document: Document, sourceSha256: string, plan: RoutePlan,
+    pages: PageInput[], signal?: AbortSignal,
+  ): Promise<Record<string, unknown>> {
+    const observer = this.deps.layoutObserver!;
+    const rasters = this.deps.rasterCache!;
+    const needsPixels = new Set(plan.assignments.filter((a) => a.role !== "accept-text" && a.role !== "skip").map((a) => a.pageNumber));
+    const eligible = pages.filter((p) => needsPixels.has(p.features.pageNumber) && !hasHealthyTextLayer(p));
+    const selected = eligible.slice(0, observer.config.maxPages);
+    const started = performance.now();
+    const deadline = AbortSignal.timeout(Math.min(10_000, observer.config.timeoutMs * observer.config.maxPages));
+    const boundedSignal = signal ? AbortSignal.any([signal, deadline]) : deadline;
+    const rows: Record<string, unknown>[] = [];
+    let errors = 0;
+    let observed = 0;
+    let cacheHits = 0;
+    let inputBytes = 0;
+    let artifactResultBytes = 0;
+    let artifactBudgetExhausted = false;
+    for (const page of selected) {
+      signal?.throwIfAborted();
+      if (deadline.aborted) break;
+      const pageStarted = performance.now();
+      let attempted = false;
+      let dispatched: { inferenceKey: string; inputBytes: number } | undefined;
+      let serviceElapsedMs: number | undefined;
+      let succeeded = false;
+      let row: Record<string, unknown> = { pageNumber: page.features.pageNumber, mode: "shadow" };
+      try {
+        let fresh: Buffer | undefined;
+        const [raster] = await withLayoutDeadline(rasters.renderSelectedPages({
+          document, runId: state.run.id, pageNumbers: [page.features.pageNumber], dpi: 150, signal: boundedSignal,
+          onRenderedPage: async (rendered) => { fresh = rendered.bytes; },
+        }), boundedSignal);
+        boundedSignal.throwIfAborted();
+        if (!raster) throw new Error("No raster returned for layout observation");
+        if (raster.sizeBytes > observer.config.maxBytes) throw new Error("Layout raster exceeds configured byte limit");
+        const payload = fresh ?? await withLayoutDeadline(this.storage.getBytes(raster.artifactKey, { maxBytes: observer.config.maxBytes }), boundedSignal);
+        boundedSignal.throwIfAborted();
+        attempted = true;
+        inputBytes += payload.byteLength;
+        row.inputBytes = payload.byteLength;
+        const observation = await withLayoutDeadline(observer.observe({
+          scopeKey: `${state.run.orgId}:${document.userId}:${state.run.id}`, payload, signal: boundedSignal,
+          onRequest: (event) => { dispatched = event; },
+        }), boundedSignal);
+        succeeded = true;
+        const measured = observation.result.diagnostics?.elapsedMs;
+        if (typeof measured === "number" && Number.isFinite(measured) && measured >= 0) serviceElapsedMs = measured;
+        observed++;
+        cacheHits += Number(observation.cacheHit);
+        row = { ...row, inputBytes: observation.inputBytes, cacheHit: observation.cacheHit,
+          observerElapsedMs: observation.elapsedMs, rasterCacheHit: raster.cacheHit, freshBytes: !!fresh,
+          raster: { artifactKey: raster.artifactKey, mimeType: raster.mimeType, engine: raster.engine, dpi: raster.dpi },
+          result: observation.result };
+      } catch (error) {
+        errors++;
+        row = { ...row, error: (error instanceof Error ? error.message : String(error)).slice(0, 200) };
+        if (attempted) state.usageLedger.enqueue({ provider: "local", model: observer.config.expectedModelId,
+          metric: "layout-shadow-failed-observation", amount: 1, unit: "attempt", costCents: 0,
+          metadata: { documentId: document.id, pageNumber: page.features.pageNumber, billable: false, costStatus: "unknown", dispatchStatus: dispatched ? "dispatched" : "not-dispatched" },
+        });
+        signal?.throwIfAborted();
+      } finally {
+        if (dispatched) {
+          const estimatedComputeCostCents = serviceElapsedMs !== undefined && observer.config.hourlyCostUsd !== null
+            ? serviceElapsedMs / 3_600_000 * observer.config.hourlyCostUsd * 100 : null;
+          state.usageLedger.enqueue({ provider: "local", model: observer.config.expectedModelId, metric: "layout-shadow",
+            amount: 1, unit: "request", costCents: 0,
+            metadata: { documentId: document.id, pageNumber: page.features.pageNumber, billable: false,
+              ...dispatched, status: succeeded ? "completed" : "failed-or-cancelled", serviceElapsedMs: serviceElapsedMs ?? null,
+              costStatus: estimatedComputeCostCents === null ? "unknown" : "estimated-service-wall-time",
+              estimatedComputeCostCents, hourlyCostUsd: observer.config.hourlyCostUsd,
+              costBasis: "Service decode/model/fingerprint wall time; excludes queue, idle host and startup; not measured CPU time" },
+          });
+        }
+      }
+      const elapsedMs = performance.now() - pageStarted;
+      const rowBytes = Buffer.byteLength(JSON.stringify(row));
+      if (artifactResultBytes + rowBytes > 16 * 1024 * 1024) {
+        const { result: _omitted, ...boundedRow } = row;
+        row = { ...boundedRow, resultOmitted: true, reason: "document-artifact-byte-budget" };
+        artifactBudgetExhausted = true;
+      } else artifactResultBytes += rowBytes;
+      rows.push({ ...row, elapsedMs });
+      const { result: _result, ...metadata } = row;
+      state.pendingPerformance.push({ documentId: document.id, pageNumber: page.features.pageNumber, scope: "page",
+        stageName: this.name, metric: PAGE_ROUTE_LAYOUT_METRIC, value: elapsedMs, unit: "ms",
+        tags: ["page-router", "layout", "shadow"], metadata });
+      if (artifactBudgetExhausted) break;
+    }
+    const summary = { selected: selected.length, observed, errors, cacheHits, inputBytes,
+      skipped: pages.length - rows.length, eligible: eligible.length, budgetExhausted: deadline.aborted,
+      artifactResultBytes, artifactBudgetExhausted, elapsedMs: performance.now() - started };
+    if (rows.length > 0) {
+      const artifactKey = `${document.userId}/${state.run.id}/page-route-layout-shadow/${document.id}.json`;
+      try {
+        boundedSignal.throwIfAborted();
+        await withLayoutDeadline(this.storage.putJson(artifactKey, { schemaVersion: 1, mode: "shadow", documentId: document.id, runId: state.run.id,
+          sourceSha256, coordinateSpace: "normalized-source-raster", pdfPointTransform: null, summary, pages: rows }), boundedSignal);
+        state.artifactLedger.recordDocument(document.id, PAGE_ROUTE_LAYOUT_SLOT, this.storage.uri(artifactKey));
+      } catch (error) {
+        signal?.throwIfAborted();
+        Object.assign(summary, { persistenceError: (error instanceof Error ? error.message : String(error)).slice(0, 200) });
+      }
+    }
+    state.pendingPerformance.push({ documentId: document.id, scope: "document", stageName: this.name,
+      metric: PAGE_ROUTE_LAYOUT_METRIC, value: performance.now() - started, unit: "ms",
+      tags: ["page-router", "layout", "shadow"], metadata: summary });
+    return summary;
   }
 
   /**
@@ -664,4 +802,14 @@ export class RoutePagesStage implements Stage {
 async function openNativePdfDocument(pdfPath: string, signal?: AbortSignal): Promise<NativePdfDocument | null> {
   const loaded = await loadNativePdfEngine();
   return loaded.ok ? loaded.engine.openPath(pdfPath, { signal }) : null;
+}
+
+/** Bounds unabortable storage waits too; their late settlements remain handled. */
+function withLayoutDeadline<T>(pending: Promise<T>, signal: AbortSignal): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const aborted = () => reject(signal.reason ?? new Error("Layout shadow deadline exceeded"));
+    signal.addEventListener("abort", aborted, { once: true });
+    pending.then(resolve, reject).finally(() => signal.removeEventListener("abort", aborted));
+    if (signal.aborted) aborted();
+  });
 }
