@@ -91,14 +91,51 @@ describe("configured text models reach worker stages and usage records", () => {
     await stage.run(state);
     expect(generate).toHaveBeenCalledOnce();
     const call = generate.mock.calls[0]![0];
-    expect(call.maxOutputTokens).toBe(512);
-    expect(call.textGeneration.maxOutputTokens["document-summary"]).toBe(512);
+    expect(call.maxOutputTokens).toBe(256);
+    expect(call.textGeneration.reasoningEfforts["document-summary"]).toBe("none");
+    expect(call.textGeneration.maxOutputTokens["document-summary"]).toBe(256);
     expect(call.prompt.length).toBeLessThan(26_000);
     expect(call.prompt).toContain("Final findings.");
     expect(call.system).toContain("representative excerpts");
     expect(putJson).toHaveBeenCalledOnce();
     expect(putJson).toHaveBeenCalledWith(expect.stringContaining("/summaries/document.json"), expect.objectContaining({ documentId: "document" }));
     expect(record).toHaveBeenCalledWith(expect.objectContaining({ metric: "summary-generation", amount: 1, unit: "document" }));
+  });
+
+  it("records truncated generation usage but never embeds or saves it, and preserves explicit reasoning overrides", async () => {
+    generate.mockResolvedValue({ text: "Thinking Process: unfinished", finishReason: "length", usage: { inputTokens: 10, outputTokens: 256 } });
+    const state = {
+      run: { id: "run", pipeline: normalizePipelineFeatures({ summarize: true,
+        textGeneration: { reasoningEfforts: { "document-summary": "high" } } }) },
+      documents: [{ id: "document", userId: "user", filename: "document" }],
+      docConcurrency: 1, artifactLedger: { readDocument: () => undefined },
+      usageLedger: { record }, pendingPerformance: [],
+    } as unknown as WorkflowState;
+    const putJson = vi.fn();
+    const stage = new DocumentSummaryStage({} as CommandRunner,
+      { putJson, uri: (key: string) => key } as unknown as ArtifactStore,
+      { ...fromEnv(), openRouterApiKey: "test" });
+    await stage.run(state);
+    expect(putJson).not.toHaveBeenCalled();
+    expect(record).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ metric: "summary-generation", outputTokens: 256 }));
+    expect(generate.mock.calls[0]![0].textGeneration.reasoningEfforts["document-summary"]).toBe("high");
+  });
+
+  it("prefixes sampled summaries with deterministic coverage even when the model omits it", async () => {
+    extract.mockResolvedValue({ text: "Evidence", sampled: true, sourceBytes: 100_000, readBytes: 100,
+      coverage: { totalPages: 5000, pages: [{ pageNumber: 1, clipped: true }, { pageNumber: 5000, clipped: false }], pageReferences: "verified" } });
+    const state = {
+      run: { id: "run", pipeline: normalizePipelineFeatures({ summarize: true }) },
+      documents: [{ id: "document", userId: "user", filename: "document" }],
+      docConcurrency: 1, artifactLedger: { readDocument: () => undefined },
+      usageLedger: { record }, pendingPerformance: [],
+    } as unknown as WorkflowState;
+    const putJson = vi.fn();
+    await new DocumentSummaryStage({} as CommandRunner,
+      { putJson, uri: (key: string) => key } as unknown as ArtifactStore,
+      { ...fromEnv(), openRouterApiKey: "test" }).run(state);
+    expect(putJson.mock.calls[0]![1].summary).toMatch(/^Sampled document overview \(2 of 5000 pages/);
+    expect(putJson.mock.calls[0]![1].sourceSelection.coverage.pages[1].pageNumber).toBe(5000);
   });
 
   it.each([

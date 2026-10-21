@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { buildSummaryEvidence } from "../stages/summary-evidence.js";
 import { readSummarySource, SUMMARY_SOURCE_MAX_BYTES } from "../stages/summary-source.js";
 
 const document = { sourceKey: "source.pdf", mimeType: "application/pdf" };
@@ -21,7 +22,7 @@ describe("bounded summary source reads", () => {
     expect(result?.sampled).toBe(true);
     expect(result?.sourceBytes).toBe(size);
     expect(result?.readBytes).toBe(SUMMARY_SOURCE_MAX_BYTES);
-    expect(storage.getByteRange).toHaveBeenCalledTimes(16);
+    expect(storage.getByteRange).toHaveBeenCalledTimes(4);
     expect(storage.getByteRange.mock.calls[0]?.[1]).toBe(0);
     expect(storage.getByteRange.mock.calls.at(-1)?.[2]).toBe(size - 1);
   });
@@ -40,6 +41,21 @@ describe("bounded summary source reads", () => {
     expect((await readSummarySource(storage, document, "s3://b/manifest.json"))?.text).toBe("text");
     storage.getByteRange.mockResolvedValue(Buffer.from(JSON.stringify({ textArtifactUri: "s3://other/private.md" })));
     expect(await readSummarySource(storage, document, "s3://b/manifest.json")).toBeNull();
+  });
+
+  it("reads only the bounded sidecar and rejects stale document/source bindings", async () => {
+    const artifact = buildSummaryEvidence({ text: "page one\fpage two", pageCount: 2,
+      documentId: "doc", sourceUri: "s3://b/doc.md" });
+    const data = Buffer.from(JSON.stringify(artifact));
+    const storage = { bucket: "b", objectSize: vi.fn(async () => data.length), getByteRange: vi.fn(async () => data) };
+    const result = await readSummarySource(storage, { ...document, id: "doc" }, "s3://b/doc.md", undefined, "s3://b/evidence.json");
+    expect(result?.coverage?.pages.map((p) => p.pageNumber)).toEqual([1, 2]);
+    expect(storage.objectSize).toHaveBeenCalledExactlyOnceWith("evidence.json", undefined);
+    expect(result?.readBytes).toBe(data.length);
+    await expect(readSummarySource(storage, { ...document, id: "other" }, "s3://b/doc.md", undefined, "s3://b/evidence.json")).rejects.toThrow("does not match");
+    await expect(readSummarySource(storage, { ...document, id: "doc" }, "s3://b/old.md", undefined, "s3://b/evidence.json")).rejects.toThrow("does not match");
+    storage.objectSize.mockResolvedValue(20_000);
+    await expect(readSummarySource(storage, { ...document, id: "doc" }, "s3://b/doc.md", undefined, "s3://b/evidence.json")).rejects.toThrow("exceeds");
   });
 
   it("honors cancellation before starting storage work", async () => {

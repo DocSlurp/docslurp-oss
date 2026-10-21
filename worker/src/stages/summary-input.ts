@@ -1,41 +1,27 @@
-/** Bound the one-time summary generation input independently of document size. */
-export const SUMMARY_INPUT_MAX_CHARS = 24_000;
+import { clipUtf8, SUMMARY_INPUT_MAX_BYTES } from "./summary-evidence.js";
+export { SUMMARY_INPUT_MAX_BYTES } from "./summary-evidence.js";
 
-/**
- * Small documents retain their full text. For larger documents, keep a sampled
- * outline and evenly spaced excerpts, including the beginning and end. This
- * deterministic, linear scan avoids another model or embedding call just to
- * choose summary evidence. It is a topic overview, not exhaustive extraction.
- */
+/** Legacy artifacts without extraction-time page evidence use bounded, explicitly unpaged excerpts. */
 export function selectSummaryInput(text: string, sourceSampled = false): { text: string; sampled: boolean } {
-  if (text.length <= SUMMARY_INPUT_MAX_CHARS) return { text, sampled: sourceSampled };
-
-  // Collapse exact repeated dense rows/paragraphs, retaining numbers and codes.
-  // Near-identical catalog entries with changed prices must remain distinct.
+  if (Buffer.byteLength(text) <= SUMMARY_INPUT_MAX_BYTES) return { text, sampled: sourceSampled };
   const seen = new Set<string>();
   text = text.split(/\r?\n/).filter((line) => {
     const key = line.trim().replace(/[\t ]+/g, " ");
     if (key.length < 32) return true;
     if (seen.has(key)) return false;
-    seen.add(key);
-    return true;
+    seen.add(key); return true;
   }).join("\n");
-  if (text.length <= SUMMARY_INPUT_MAX_CHARS) return { text, sampled: sourceSampled };
-
-  const headings = Array.from(text.matchAll(/^#{1,6}[\t ]+\S[^\r\n]*$/gm), (match) => match[0]);
-  const outlineCount = Math.min(headings.length, 24);
-  const outline = Array.from({ length: outlineCount }, (_, index) => {
-    const position = outlineCount === 1 ? 0 : Math.round(index * (headings.length - 1) / (outlineCount - 1));
-    return headings[position]!.slice(0, 160);
-  }).join("\n");
-  const prefix = "Representative excerpts from a longer document; omitted sections are not evidence.\n"
-    + (outline ? `Sampled headings:\n${outline}\n\n` : "");
-  const excerptCount = 12;
-  // Reserve space for position labels and separators as well as the outline.
-  const excerptLength = Math.floor((SUMMARY_INPUT_MAX_CHARS - prefix.length - excerptCount * 100) / excerptCount);
-  const excerpts = Array.from({ length: excerptCount }, (_, index) => {
-    const start = Math.floor(index * (text.length - excerptLength) / (excerptCount - 1));
-    return `[Excerpt ${index + 1}/${excerptCount}, character ${start + 1}]\n${text.slice(start, start + excerptLength)}`;
+  if (Buffer.byteLength(text) <= SUMMARY_INPUT_MAX_BYTES) return { text, sampled: sourceSampled };
+  const headings = Array.from(text.matchAll(/^#{1,6}[\t ]+[^\r\n]+/gm), (match) => match[0]);
+  const outline = [headings[0], headings.at(-1)].filter(Boolean).map((heading) => clipUtf8(heading!, 160)).join("\n");
+  const header = outline + "\nSampled excerpts; page references unavailable. Omitted text is unknown.\n";
+  const allowance = Math.floor((SUMMARY_INPUT_MAX_BYTES - Buffer.byteLength(header) - 200) / 4);
+  const slices = [0, 1, 2, 3].map((i) => {
+    const start = Math.floor(i * Math.max(0, text.length - allowance) / 3);
+    const excerpt = i === 3
+      ? Buffer.from(text.slice(-allowance)).subarray(-allowance).toString("utf8").replace(/^\uFFFD+/u, "")
+      : clipUtf8(text.slice(start, start + allowance), allowance);
+    return `[Character ${(i === 3 ? text.length - excerpt.length : start) + 1}]\n${excerpt}`;
   });
-  return { text: prefix + excerpts.join("\n\n"), sampled: true };
+  return { text: header + slices.join("\n\n"), sampled: true };
 }
