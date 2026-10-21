@@ -8,6 +8,12 @@ vi.mock("../lib/chat-agent-model.js", async importOriginal => ({
   createChatAgentModel: (options: { model: string }) => mocks.provider(options.model),
 }));
 vi.mock("../lib/ai-usage.js", () => ({ recordUsageEvent: mocks.record }));
+// The real search-signal store without the database client query-bounds imports.
+vi.mock("../search/query-bounds.js", async () => {
+  const { AsyncLocalStorage } = await import("node:async_hooks");
+  const store = new AsyncLocalStorage<{ signal?: AbortSignal }>();
+  return { withSearchSignal: <T>(signal: AbortSignal | undefined, fn: () => Promise<T>) => store.run({ signal }, fn), currentSearchSignal: () => store.getStore()?.signal };
+});
 vi.mock("../lib/privacy.js", () => ({ allowHostedCallForWorkspace: vi.fn(async () => true), loadWorkspacePrivacyMode: vi.fn(async () => "standard"), openRouterCall: vi.fn() }));
 vi.mock("./workspaces.js", () => ({ resolveWorkspaceRef: vi.fn(async () => ({ id: "ws" })) }));
 vi.mock("../lib/posthog-ai-observability.js", () => ({ posthogAiTelemetry: () => ({}) }));
@@ -33,6 +39,7 @@ vi.mock("@docslurp/shared/observability", () => ({
   evalBaggageAttributes: () => ({ "eval.run_id": "run-7", "eval.arm": "control" }),
 }));
 const { runChatMcpAgent, classifyChatAgentStop } = await import("./chat-mcp-agent.js");
+const { ChatTurnDeadlineError } = await import("./chat-turn-deadline.js");
 const actor = { type: "session" as const, userId: "user", sessionId: "browser-session", user: { id: "user", name: "User", email: "" } };
 const args = { actor, workspaceId: "ws", orgId: "org", sessionId: "conversation", query: "What is the policy?", history: [], apiKey: "fake", privacyMode: "standard" as const, model: "test", maxOutputTokens: 100 };
 
@@ -285,5 +292,117 @@ describe("chat agent limits, debug and spans", () => {
     expect(agent.ended).toBe(true);
     expect(agent.error).toBeInstanceOf(Error);
     expect(agent.attributes["docslurp.chat.stop_reason"]).toBe("error");
+  });
+});
+
+/** A model step that emits `chunks` and then stalls (never finishes), like a slow provider. */
+function stalledStep(chunks: unknown[]): Awaited<ReturnType<MockLanguageModelV4["doStream"]>> {
+  return { stream: new ReadableStream({ start(controller) { for (const chunk of chunks) controller.enqueue(chunk); } }) } as Awaited<ReturnType<MockLanguageModelV4["doStream"]>>;
+}
+const usageChunk = { inputTokens: { total: 10, noCache: 10, cacheRead: 0, cacheWrite: 0 }, outputTokens: { total: 4, text: 4, reasoning: 0 } };
+const toolStep = (id: string) => ({ stream: simulateReadableStream({ chunks: [
+  { type: "stream-start" as const, warnings: [] }, { type: "response-metadata" as const, id: `gen-${id}`, modelId: "build" },
+  { type: "tool-call" as const, toolCallId: id, toolName: "search", input: '{"q":"policy"}' },
+  { type: "finish" as const, finishReason: { unified: "tool-calls" as const, raw: undefined }, usage: usageChunk },
+], initialDelayInMs: 0, chunkDelayInMs: 0 }) });
+const answerStep = (text: string) => ({ stream: simulateReadableStream({ chunks: [
+  { type: "stream-start" as const, warnings: [] }, { type: "response-metadata" as const, id: "gen-answer", modelId: "build" },
+  { type: "text-start" as const, id: "t" }, { type: "text-delta" as const, id: "t", delta: text }, { type: "text-end" as const, id: "t" },
+  { type: "finish" as const, finishReason: { unified: "stop" as const, raw: undefined }, usage: usageChunk },
+], initialDelayInMs: 0, chunkDelayInMs: 0 }) });
+const budget = (overrides: Partial<{ turnDeadlineMs: number; stepTimeoutMs: number; toolTimeoutMs: number; finalReserveMs: number }>) =>
+  ({ turnDeadlineMs: 600, stepTimeoutMs: 10_000, toolTimeoutMs: 10_000, finalReserveMs: 300, ...overrides });
+/** A dispatch that answers only when its signal aborts, recording what nested work would see. */
+function hangUntilAborted(seen: { signals: AbortSignal[] }) {
+  return async (_path: string, init?: RequestInit) => {
+    seen.signals.push(init!.signal!);
+    return await new Promise<Response>((_resolve, reject) => init!.signal!.addEventListener("abort", () => reject(init!.signal!.reason), { once: true }));
+  };
+}
+const recordedMetadata = () => mocks.record.mock.calls.map(([entry]) => entry.usage.metadata as Record<string, unknown>);
+
+describe("chat agent turn deadline", () => {
+  it("cancels a slow tool, disables tools inside the final reserve and returns a 200 answer with stopReason deadline", async () => {
+    const model = new MockLanguageModelV4({ doStream: [toolStep("slow"), answerStep("From what was found, the policy is unclear.")] });
+    mocks.provider.mockReturnValue(model);
+    const seen = { signals: [] as AbortSignal[] };
+    mocks.dispatch.mockImplementation(hangUntilAborted(seen));
+    const result = await runChatMcpAgent({ ...args, timeBudget: budget({}) });
+    expect(seen.signals).toHaveLength(1);
+    expect(seen.signals[0]!.aborted).toBe(true);
+    expect(model.doStreamCalls[1]!.toolChoice).toEqual({ type: "none" });
+    expect(result.answer).toBe("From what was found, the policy is unclear.");
+    expect(result.toolCalls).toMatchObject([{ status: "error", errorCode: "tool_timeout" }]);
+    expect(result.debug).toMatchObject({ stopReason: "deadline", steps: 2,
+      timeBudget: { turnDeadlineMs: 600, finalAnswer: "forced", toolTimeouts: 1, stepTimeouts: 0 } });
+    expect(mocks.record).toHaveBeenCalledTimes(2);
+  });
+
+  it("answers from the gathered evidence when a model step runs out of time, and records the aborted step", async () => {
+    let call = 0;
+    const model = new MockLanguageModelV4({ doStream: async () => {
+      const current = call++;
+      if (current === 0) return toolStep("found");
+      if (current === 1) return stalledStep([{ type: "stream-start", warnings: [] }, { type: "response-metadata", id: "gen-stalled", modelId: "build" },
+        { type: "reasoning-start", id: "r" }, { type: "reasoning-delta", id: "r", delta: "Thinking about it for a very long time" }]);
+      return answerStep("The policy is supported [1].");
+    } });
+    mocks.provider.mockReturnValue(model);
+    const result = await runChatMcpAgent({ ...args, timeBudget: budget({ turnDeadlineMs: 2_000, stepTimeoutMs: 150, finalReserveMs: 1_000 }) });
+    expect(model.doStreamCalls).toHaveLength(3);
+    expect(model.doStreamCalls[2]!.tools ?? []).toEqual([]);
+    expect(JSON.stringify(model.doStreamCalls[2]!.prompt)).toContain("The policy is supported.");
+    expect(result.answer).toBe("The policy is supported [1].");
+    expect(result.citations).toHaveLength(1);
+    expect(result.debug).toMatchObject({ stopReason: "deadline", timeBudget: { finalAnswer: "from_evidence", stepTimeouts: 1 } });
+    expect(mocks.record).toHaveBeenCalledTimes(3);
+    const aborted = recordedMetadata().find(metadata => metadata.turnOutcome === "aborted")!;
+    expect(aborted).toMatchObject({ abortReason: "step_timeout", usageSource: "estimate", usageEstimated: true, estimateMethod: "chars/4" });
+    const abortedUsage = mocks.record.mock.calls.find(([entry]) => entry.usage.metadata.turnOutcome === "aborted")![0].usage;
+    expect(abortedUsage.inputTokens).toBeGreaterThan(0);
+    expect(abortedUsage.outputTokens).toBe(Math.ceil("Thinking about it for a very long time".length / 4));
+    expect(result.debug.stepUsage.map(step => step.finishReason)).toEqual(["tool-calls", "aborted", "stop"]);
+  });
+
+  it("returns the partial final answer when the deadline cuts it off", async () => {
+    mocks.provider.mockReturnValue(new MockLanguageModelV4({ doStream: async () => stalledStep([
+      { type: "stream-start", warnings: [] }, { type: "text-start", id: "t" }, { type: "text-delta", id: "t", delta: "The policy covers pagers [1], and" },
+    ]) }));
+    const deltas: string[] = [];
+    const result = await runChatMcpAgent({ ...args, onTextDelta: delta => { deltas.push(delta); }, limits: { maxSteps: 1, maxToolCalls: 1, searchConcurrency: 1, clamped: [] },
+      timeBudget: budget({ turnDeadlineMs: 200, finalReserveMs: 100 }) });
+    expect(result.answer).toBe("The policy covers pagers [1], and");
+    expect(deltas.join("")).toBe(result.answer);
+    expect(result.finishReason).toBe("length");
+    expect(result.debug).toMatchObject({ stopReason: "deadline", timeBudget: { finalAnswer: "partial" } });
+    expect(recordedMetadata()).toEqual([expect.objectContaining({ turnOutcome: "aborted", abortReason: "deadline", usageEstimated: true })]);
+  });
+
+  it("fails with a clear 504 error when no answer exists at the deadline", async () => {
+    mocks.provider.mockReturnValue(new MockLanguageModelV4({ doStream: async () => stalledStep([{ type: "stream-start", warnings: [] }]) }));
+    const error = await runChatMcpAgent({ ...args, limits: { maxSteps: 1, maxToolCalls: 1, searchConcurrency: 1, clamped: [] },
+      timeBudget: budget({ turnDeadlineMs: 150, finalReserveMs: 75 }) }).catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(ChatTurnDeadlineError);
+    expect(error).toMatchObject({ code: "chat_deadline_exceeded", statusCode: 504 });
+    expect(spans.list.find(span => span.name === "invoke_agent workspace-chat")!.attributes["docslurp.chat.stop_reason"]).toBe("timeout");
+  });
+});
+
+describe("chat agent client disconnect", () => {
+  it("stops the model loop and in-flight tools, and records the step that was waiting on them", async () => {
+    const model = new MockLanguageModelV4({ doStream: [toolStep("pending"), answerStep("never")] });
+    mocks.provider.mockReturnValue(model);
+    const seen = { signals: [] as AbortSignal[] };
+    mocks.dispatch.mockImplementation(hangUntilAborted(seen));
+    const client = new AbortController();
+    const turn = runChatMcpAgent({ ...args, signal: client.signal, abortedStepLookupDelayMs: 0, timeBudget: budget({ turnDeadlineMs: 60_000, finalReserveMs: 1_000 }) });
+    await vi.waitFor(() => expect(seen.signals).toHaveLength(1));
+    client.abort(new Error("client disconnected"));
+    await expect(turn).rejects.toThrow();
+    expect(seen.signals[0]!.aborted).toBe(true);
+    expect(model.doStreamCalls).toHaveLength(1);
+    expect(mocks.record).toHaveBeenCalledTimes(1);
+    expect(mocks.record.mock.calls[0]![0].usage).toMatchObject({ inputTokens: 10, outputTokens: 4,
+      metadata: { turnOutcome: "aborted", abortReason: "client_disconnect", usageSource: "stream-usage", usageEstimated: false, toolCalls: ["search"] } });
   });
 });

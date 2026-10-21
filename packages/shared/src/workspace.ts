@@ -330,9 +330,11 @@ export type ChatAgentLimits = z.infer<typeof chatAgentLimitsSchema>;
  * - `no_evidence`: every search the agent ran returned zero results.
  * - `step_limit`: the step budget ended the loop while the model was still calling tools.
  * - `tool_call_limit`: at least one tool call was refused by the tool-call budget.
+ * - `deadline`: the turn's time budget ran low, so tools were disabled and the answer
+ *   was forced from the evidence gathered so far (or cut off at the deadline). HTTP 200.
  * - `timeout` / `error`: the turn failed (traces only; the HTTP response is an error).
  */
-export const CHAT_AGENT_STOP_REASONS = ["answered", "answered_without_citations", "no_evidence", "step_limit", "tool_call_limit", "timeout", "error"] as const;
+export const CHAT_AGENT_STOP_REASONS = ["answered", "answered_without_citations", "no_evidence", "step_limit", "tool_call_limit", "deadline", "timeout", "error"] as const;
 export const chatAgentStopReasonSchema = z.enum(CHAT_AGENT_STOP_REASONS);
 export type ChatAgentStopReason = z.infer<typeof chatAgentStopReasonSchema>;
 
@@ -347,6 +349,30 @@ export const chatAgentStepUsageSchema = z.object({
   toolCalls: z.array(z.string()),
 });
 export type ChatAgentStepUsage = z.infer<typeof chatAgentStepUsageSchema>;
+
+/** Search-agent turns: the time budget that applied and how the answer was reached. */
+export const chatAgentTimeBudgetDebugSchema = z.object({
+  turnDeadlineMs: z.number().int().positive(),
+  stepTimeoutMs: z.number().int().positive(),
+  toolTimeoutMs: z.number().int().positive(),
+  finalReserveMs: z.number().int().nonnegative(),
+  /** Time from the request reaching chat to the answer. */
+  elapsedMs: z.number().nonnegative(),
+  /**
+   * `loop`: the agent answered on its own. `forced`: the final-answer reserve
+   * started, so tools were disabled for the last step. `from_evidence`: a model
+   * step ran out of time and one extra no-tools call answered from the evidence.
+   * `partial`: the deadline cut the final answer off; the text so far is returned.
+   */
+  finalAnswer: z.enum(["loop", "forced", "from_evidence", "partial"]),
+  /** Model calls cancelled at their step budget. */
+  stepTimeouts: z.number().int().nonnegative(),
+  /** Tool calls cancelled at their tool budget (the model got a `tool_timeout` result). */
+  toolTimeouts: z.number().int().nonnegative(),
+  /** Tool calls refused because the final-answer reserve had started (`deadline` result). */
+  toolCallsAfterDeadline: z.number().int().nonnegative(),
+});
+export type ChatAgentTimeBudgetDebug = z.infer<typeof chatAgentTimeBudgetDebugSchema>;
 
 export const workspaceChatDebugSchema = z.object({
   /** Search-agent turns only: the `model` the caller asked for (null when omitted). */
@@ -366,6 +392,7 @@ export const workspaceChatDebugSchema = z.object({
   stopReason: chatAgentStopReasonSchema.optional(),
   stepUsage: z.array(chatAgentStepUsageSchema).optional(),
   limits: chatAgentLimitsSchema.optional(),
+  timeBudget: chatAgentTimeBudgetDebugSchema.optional(),
   toolCalls: z.array(z.object({
     id: z.string(), name: z.string(), status: z.enum(["loading", "success", "error"]),
     runtimeMs: z.number().nonnegative().optional(),
@@ -375,7 +402,7 @@ export const workspaceChatDebugSchema = z.object({
     zeroHit: z.boolean().optional(),
     /** Distinct pages of the evidence this call returned. */
     evidencePages: z.array(z.object({ documentId: z.string(), pageNumber: z.number().int().nullable() })).optional(),
-    /** Failed calls: `tool_call_limit`, `invalid_arguments`, `aborted`, `exception`, the tool's error code or `http_<status>`. */
+    /** Failed calls: `tool_call_limit`, `deadline`, `tool_timeout`, `invalid_arguments`, `aborted`, `exception`, the tool's error code or `http_<status>`. */
     errorCode: z.string().optional(),
     /** Provider cost (USD cents) the tool reported for its own work. */
     costCents: z.number().nonnegative().optional(),

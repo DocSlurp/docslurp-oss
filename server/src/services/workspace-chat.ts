@@ -55,6 +55,7 @@ import type { WorkspaceChatModelId } from "@docslurp/shared/workspace-chat-model
 import type { ChatAgentLimits, ChatAgentLimitsInput } from "@docslurp/shared";
 import { chatEvalAccess, chatTurnNeedsEvalAccess, resolveChatAgentLimits, resolveChatModelRequest } from "../lib/chat-model-policy.js";
 import { currentRequestId, currentRequestSignal } from "../lib/request-context.js";
+import { currentChatAgentSignal } from "../lib/chat-agent-context.js";
 import { searchHitStatementTimeout } from "../search/timings.js";
 
 export type ChatSearchActivity = {
@@ -195,8 +196,7 @@ async function searchWorkspaceForChat(args: {
       return retrieved;
     }
     // The client is gone: another attempt would only load the database.
-    const signal = getDeferredContext()?.signal ?? currentRequestSignal();
-    if (signal?.aborted) throw Object.assign(new Error("Chat request aborted"), { name: "AbortError" });
+    if (chatAbortSignal()?.aborted) throw Object.assign(new Error("Chat request aborted"), { name: "AbortError" });
 
     await sleep(retry.intervalMs);
   }
@@ -522,8 +522,9 @@ async function generateWorkspaceChatTextWithFailover(args: {
   maxOutputTokens: number;
   onTextDelta?: TextDeltaHandler;
 }): Promise<WorkspaceChatGeneratedText> {
-  // The streaming client left while pages were materializing: do not pay for an answer nobody reads.
-  if (getDeferredContext()?.signal?.aborted) throw Object.assign(new Error("Chat request aborted"), { name: "AbortError" });
+  // The client left (or the calling agent turn ended) while evidence was loading: do not pay for an answer nobody reads.
+  const signal = chatAbortSignal();
+  if (signal?.aborted) throw Object.assign(new Error("Chat request aborted"), { name: "AbortError" });
   if (args.privateModel) {
     const generated = await generateOpenRouterDocumentText({
       apiKey: args.apiKey,
@@ -535,6 +536,7 @@ async function generateWorkspaceChatTextWithFailover(args: {
       maxOutputTokens: args.maxOutputTokens,
       onTextDelta: args.onTextDelta,
       auditScope: { workspaceId: args.workspaceId ?? null },
+      signal,
     });
     return { ...generated, model: args.privateModel };
   }
@@ -551,6 +553,7 @@ async function generateWorkspaceChatTextWithFailover(args: {
         documents: args.documents,
         maxOutputTokens: args.maxOutputTokens,
         onTextDelta: args.onTextDelta,
+        signal,
       });
 
       return {
@@ -958,7 +961,15 @@ export async function workspaceChatDisabledBody(
 
 /** A disconnected client is not a generation failure: nothing may be persisted on its behalf. */
 function rethrowIfAborted(error: unknown): void {
-  if ((error instanceof Error && error.name === "AbortError") || getDeferredContext()?.signal?.aborted) throw error;
+  if ((error instanceof Error && (error.name === "AbortError" || error.name === "TimeoutError")) || chatAbortSignal()?.aborted) throw error;
+}
+
+/**
+ * Abort signal for chat work: a calling agent turn's tool signal (nested
+ * grounded chat), then the streaming client's, then the HTTP request's.
+ */
+function chatAbortSignal(): AbortSignal | undefined {
+  return currentChatAgentSignal() ?? getDeferredContext()?.signal ?? currentRequestSignal();
 }
 
 export async function chatWorkspace(args: {
@@ -1119,7 +1130,7 @@ async function chatWorkspaceTurn(
         `Answer style: ${searchSettings.chat.answerStyle}. ${searchSettings.chat.citations ? "Use inline evidence citations." : "Do not force citation markers into every sentence."}`,
         `Current search settings: ${JSON.stringify(searchSettings.retrievalDefaults)}. Explicit search configuration requests have already been processed; explain these current values rather than applying the change again.`,
       ].filter(Boolean).join("\n"),
-      maxOutputTokens: args.maxOutputTokens ?? 2048, signal: args.signal,
+      maxOutputTokens: args.maxOutputTokens ?? 2048, signal: args.signal, startedAtMs,
       requestedModel: policy.requestedModel, limits: policy.limits, requestId: currentRequestId(),
       onTextDelta: args.onTextDelta, onToolActivity: args.onToolActivity, onEvidence: args.onEvidence,
     });
