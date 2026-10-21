@@ -1,5 +1,7 @@
 # Completed
 
+- Trace and document conditional Tiny layout placement after native checks and before expensive raster-dependent routing, with direct shared-asset reuse, image-input gaps, preserved extraction obligations and shadow acceptance criteria; no unvalidated production route enabled.
+
 - [x] **Experimental local image-layout detection and frozen research campaign** (2026-10-20): add opt-in CPU/GPU CLI and resident HTTP adapters with source-coordinate boxes, label support and crop fingerprints; preserve 44-case source/annotation/confidence evidence and locked confirmation. Runtime parity and engineering performance measured; general extraction readiness gates failed, so no default pipeline activation or deployment. See [confirmed findings and limitations](docs/image-layout-confirmation-2026-10-20.md) and [quickstart](docs/image-layout-quickstart.md).
 
 - [x] **Close CI gaps left from the archived docslurp#196 port** (2026-10-20): the routing regression eval (`pnpm eval:routing`, deterministic, no hosted AI calls) now runs in the first worker test shard, public packages are tested and import-checked on Node 20 and 22 after the existing build in the typecheck job (engines are `>=20`), and a script test exercises the worker-image build/retry/budget step.

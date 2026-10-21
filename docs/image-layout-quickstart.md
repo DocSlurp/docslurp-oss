@@ -5,7 +5,8 @@ ordinary-document corpus. Frozen held-out confirmation did not meet the declared
 general-readiness thresholds. The [measured findings](image-layout-confirmation-2026-10-20.md)
 separate CPU pool throughput, model quality, service latency and remaining gaps.
 These are experimental mechanisms; the rejected first corpus remains engineering
-history only.
+history only. See the [routing placement decision](image-layout-routing-placement.md)
+for the conditional integration seam and native-path bypass.
 
 The explicit CLI, resident local service and worker adapter are usable mechanisms
 for running a cached detector on a single raster image. They return labeled boxes,

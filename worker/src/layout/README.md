@@ -52,7 +52,7 @@ Optional geometry configuration is shared by the cold CLI and resident service:
 `modelSize` sets a Transformers input square (32..2048, multiples of 32),
 `orientationOnnxPath` selects a cached orientation graph with optional
 `orientationRevision`/`orientationMinimumScore`, and `rectifyPage` enables the
-light-paper quadrilateral heuristic with `rectifyMaxEdge` (64..4096 probe pixels).
+light-paper quadrilateral heuristic with `rectifyMaxEdge` (128..4096 probe pixels).
 All remain off by default. Orientation/rectification wrappers inverse-map boxes
 and available polygons into stored source pixels; they do not change the returned
 source dimensions. `diagnostics.detectorMetadata` retains wrapper configuration
