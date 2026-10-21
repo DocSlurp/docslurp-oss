@@ -8,20 +8,20 @@ Use [the image-layout quickstart](image-layout-quickstart.md) for installation, 
 
 Across the rich and common corpora, the campaign contains 44 cases: 35 native authored pages, 8 derivatives and 1 manual historical page, grouped into 32 source clusters. The locked held-out comparison below covers 12 of those images in 11 clusters; it is not 44 independent confirmation documents.
 
-Finalists were frozen at 2026-10-21T02:56:52Z, before launch at 02:58:30Z. No tuning followed these results. The rich set contains 8held-out images in 7source clusters; the common-document set contains 4held-out images in 4clusters. Three timing blocks repeat these same documents; they do not increase independent sample size. All 24jobs and 144image attempts completed without inference failures.
+Finalists were frozen at 2026-10-21T02:56:52Z, before launch at 02:58:30Z. No tuning followed these results. The rich set contains 8 held-out images in 7 source clusters; the common-document set contains 4 held-out images in 4 clusters. Three timing blocks repeat these same documents; they do not increase independent sample size. All 24 jobs and 144 image attempts completed without inference failures.
 
-The CPU comparison is PP-DocLayout-S ONNX,4threads versus1thread, original bytes. The GPU comparison is PP-DocLayoutV3 FP32, batch1 versus batch4 plus the pinned orientation model, original bytes. All use confidence threshold0.3. Fixed-threshold greedy class-aware IoU0.5 scores are not COCO mAP. Unsupported labels count as misses; supported-only scores cannot replace the literal all-label score.
+The CPU comparison is PP-DocLayout-S ONNX, 4 threads versus 1 thread, original bytes. The GPU comparison is PP-DocLayoutV3 FP32, batch 1 versus batch 4 plus the pinned orientation model, original bytes. All use confidence threshold 0.3. Fixed-threshold greedy class-aware IoU 0.5 scores are not COCO mAP. Unsupported labels count as misses; supported-only scores cannot replace the literal all-label score.
 
-|Held-out set|Model|Literal macro F1|Localization F1 / recall|Macro95% source-cluster interval|
+|Held-out set|Model|Literal macro F1|Localization F1 / recall|Macro 95% source-cluster interval|
 |---|---|---:|---:|---:|
-|Rich:8images/7clusters|Tiny CPU|.3542|.6260 / .6649|[.2854,.4967]|
-|Rich:8images/7clusters|PPv3 GPU|.4416|.7193 / .7135|[.3466,.6376]|
-|Common:4images/4clusters|Tiny CPU|.5826|.6968 / .8571|[.5440,.8800]|
-|Common:4images/4clusters|PPv3 GPU|.5092|.5986 / .6984|[.4587,.7141]|
+|Rich: 8 images / 7 clusters|Tiny CPU|.3542|.6260 / .6649|[.2854,.4967]|
+|Rich: 8 images / 7 clusters|PPv3 GPU|.4416|.7193 / .7135|[.3466,.6376]|
+|Common: 4 images / 4 clusters|Tiny CPU|.5826|.6968 / .8571|[.5440,.8800]|
+|Common: 4 images / 4 clusters|PPv3 GPU|.5092|.5986 / .6984|[.4587,.7141]|
 
-Reference and finalist quality counts are identical for each row. Their paired macro and micro F1 deltas are 0, with percentile bootstrap intervals[0,0] on these observations. That establishes observed parity on these pages, not population equivalence. The intervals use 2000paired source-cluster draws, seed 417, with membership from the frozen split receipts. Sparse class support and development-based selection limit generalization.
+Reference and finalist quality counts are identical for each row. Their paired macro and micro F1 deltas are 0, with percentile bootstrap intervals [0, 0] on these observations. That establishes observed parity on these pages, not population equivalence. The intervals use 2,000 paired source-cluster draws, seed 417, with membership from the frozen split receipts. Sparse class support and development-based selection limit generalization.
 
-The frozen general-readiness requirements were macro F1≥.85 and strict recall≥.90 for **each** critical class: table, photo, chart and paragraph. Missing critical classes cannot pass. Both profiles fail:
+The frozen general-readiness requirements were macro F1 ≥ .85 and strict recall ≥ .90 for **each** critical class: table, photo, chart and paragraph. Missing critical classes cannot pass. Both profiles fail:
 
 |Set/model|Table recall|Photo recall|Chart recall|Paragraph recall|
 |---|---:|---:|---:|---:|
@@ -36,16 +36,16 @@ Rich critical support is only 5 table regions across 4 clusters, 2 photos across
 
 Held-out local mean E2E milliseconds, across the three blocks:
 
-|Set|Tiny4threads →1thread|PPv3 batch1 →batch4+orientation|
+|Set|Tiny 4 threads → 1 thread|PPv3 batch 1 → batch 4 + orientation|
 |---|---:|---:|
-|Rich|52.5 →78.3|77.0 →72.6|
-|Common|51.4 →74.1|78.0 →71.8|
+|Rich|52.5 → 78.3|77.0 → 72.6|
+|Common|51.4 → 74.1|78.0 → 71.8|
 
 One CPU thread is slower for a single worker; it was selected for a separate concurrent-worker profile. GPU batch timings are amortized per image and do not measure single-request queue latency. The held-out sample contains too few sources to establish a universal throughput ranking.
 
-A **separate development pool** used 8CPU workers with1thread each, repeating 16clean development images for 1024jobs per block. Three blocks delivered93.45,95.15 and93.63pages/s, with 1024/1024successful jobs in each and serial prediction audits retained. This is aggregate local pool throughput, not held-out HTTP throughput, new independent documents, or full ingestion throughput. Simultaneous aggregate RSS was not available in these receipts; per-worker maxima must not be mislabeled as a measured simultaneous total.
+A **separate development pool** used 8 CPU workers with 1 thread each, repeating 16 clean development images for 1024 jobs per block. Three blocks delivered 93.45, 95.15 and 93.63 pages/s, with 1,024/1,024 successful jobs in each and serial prediction audits retained. This is aggregate local pool throughput, not held-out HTTP throughput, new independent documents, or full ingestion throughput. Simultaneous aggregate RSS was not available in these receipts; per-worker maxima must not be mislabeled as a measured simultaneous total.
 
-A **separate transport experiment** compared cold CLI launches with a warm resident loopback HTTP service, four development inputs × two repeats per configuration. All 40CLI/HTTP pairs across five configurations passed source identity, region parity and crop-fingerprint verification, with no failures. Mean caller E2E:
+A **separate transport experiment** compared cold CLI launches with a warm resident loopback HTTP service, four development inputs × two repeats per configuration. All 40 CLI/HTTP pairs across five configurations passed source identity, region parity and crop-fingerprint verification, with no failures. Mean caller E2E:
 
 |Configuration|Cold CLI ms|Resident HTTP ms|
 |---|---:|---:|
@@ -63,15 +63,15 @@ These warm-service gains come from reusing the loaded model; they do not improve
 - Whole-form and whole-mind-map annotations deliberately target composite regions. Detected internal text becomes a literal false positive under that policy even when it corresponds to visible content. Keep those errors; a future component-level task would be a different evaluation. Form and mind-map development singletons have no held-out class coverage.
 - Heron's repeated exact boxes were traced to official focal top-k query-by-class alternatives and canonical-label collisions, not established adapter duplication. Original scores were preserved; no post-holdout deduplication was applied.
 - Rotation and blur produce genuine misses, especially for Tiny. PPv3 orientation improved development results, but the locked held-out comparison showed quality parity, not an additional gain.
-- No tested byte transcode improved local producer-plus-consumer E2E. Some PPv3 palette/WebP variants substantially reduced payload while preserving aggregate point guards, but class-specific recall regressed. AVIF failed all 48attempts per model because the encoder route was unavailable; 96failures remain in evidence. Network/storage tradeoffs were not measured.
-- Clean acquisition is not a completeness guarantee. On 16native development images, Tiny achieved 17.33warm serial local pages/s but only .7829localization recall. High-confidence false positives existed, so confidence or box-area coverage alone is not a validated automatic-acceptance gate.
+- No tested byte transcode improved local producer-plus-consumer E2E. Some PPv3 palette/WebP variants substantially reduced payload while preserving aggregate point guards, but class-specific recall regressed. AVIF failed all 48 attempts per model because the encoder route was unavailable; 96 failures remain in evidence. Network/storage tradeoffs were not measured.
+- Clean acquisition is not a completeness guarantee. On 16 native development images, Tiny achieved 17.33 warm serial local pages/s but only .7829 localization recall. High-confidence false positives existed, so confidence or box-area coverage alone is not a validated automatic-acceptance gate.
 
 ## Evidence and reproduction
 
 The durable campaign root is `layout-image-20261020/` in the evaluation run store. Preserve these artifacts together:
 
 - `final-evidence/results/confirmation/finalists-freeze.json`: timestamped model/configuration/dataset/runtime pins before launch.
-- `final-evidence/results/confirmation/`:24raw prediction files, summaries, logs and matching references; originals remain unchanged.
+- `final-evidence/results/confirmation/`: 24 raw prediction files, summaries, logs and matching references; originals remain unchanged.
 - `final-analysis/analyze_locked.py`, `locked-spec.json`, `locked-confirmation.json`: reproducible analysis, exact input hashes, per-class counts, missing support, failure denominators, absolute and paired cluster intervals.
 - `final-evidence/results/v2-cpu-confirm/` and `v2-transport/`: separate pool and transport evidence.
 - `v2-baselines/diagnosis.md`, `clean-dev-diagnosis.md`, `v2-ablations/paired-cluster-report.md`, `v2-bytes/bytes-diagnosis.md`: development diagnosis and rejected configurations.
