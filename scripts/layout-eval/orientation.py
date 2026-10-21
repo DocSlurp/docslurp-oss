@@ -10,6 +10,8 @@ import hashlib
 import math
 import time
 
+MAX_ORIENTATION_RESIZE_PIXELS=16_000_000
+
 
 def inverse_point(x,y,correction):
     if correction==0: return x,y
@@ -52,7 +54,12 @@ class OnnxOrientation:
         start=time.perf_counter(); output=[]
         for image in images:
             width,height=image.size; scale=256/min(width,height)
-            resized=cv2.resize(np.asarray(image),(round(width*scale),round(height*scale)),interpolation=cv2.INTER_LINEAR)
+            resized_size=(round(width*scale),round(height*scale))
+            # A small input can have an extreme aspect ratio: bounding source pixels
+            # does not bound short-edge upscaling. Refuse before allocating the array.
+            if resized_size[0]*resized_size[1]>MAX_ORIENTATION_RESIZE_PIXELS:
+                raise ValueError('Orientation resize exceeds 16 million pixels; unsupported image aspect ratio')
+            resized=cv2.resize(np.asarray(image),resized_size,interpolation=cv2.INTER_LINEAR)
             h,w=resized.shape[:2]; x=(w-224)//2; y=(h-224)//2
             data=resized[y:y+224,x:x+224].astype(np.float32)*(1./255.)
             data=(data-np.array([.485,.456,.406],dtype=np.float32))/np.array([.229,.224,.225],dtype=np.float32)

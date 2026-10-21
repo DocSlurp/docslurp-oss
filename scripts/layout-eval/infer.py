@@ -47,7 +47,7 @@ def create_detector(args):
             raise ValueError('Model size requires Transformers detector, multiple of32 in32..2048')
     if not math.isfinite(args.orientation_minimum_score) or not 0<=args.orientation_minimum_score<=1:
         raise ValueError('Invalid orientation minimum score')
-    if not 64<=args.rectify_max_edge<=4096:raise ValueError('Rectification probe edge must be64..4096')
+    if not 128<=args.rectify_max_edge<=4096:raise ValueError('Rectification probe edge must be128..4096')
     if args.orientation_onnx_path and not Path(args.orientation_onnx_path).is_file():
         raise ValueError('Orientation requires an existing local ONNX file')
     detector=load_detector(args.model,device=args.device,precision=args.precision,threads=args.threads,

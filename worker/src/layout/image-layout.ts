@@ -158,7 +158,7 @@ export async function detectImageLayout(input: Buffer, options: ImageLayoutCliOp
   if (options.orientationMinimumScore !== undefined && (typeof options.orientationMinimumScore !== "number" || !Number.isFinite(options.orientationMinimumScore) || options.orientationMinimumScore < 0 || options.orientationMinimumScore > 1)) throw new Error("Invalid orientation minimum score");
   if ((options.orientationRevision !== undefined || options.orientationMinimumScore !== undefined) && !options.orientationOnnxPath) throw new Error("Orientation settings require a local ONNX path");
   if (options.rectifyPage !== undefined && typeof options.rectifyPage !== "boolean") throw new Error("Invalid page rectification flag");
-  if (options.rectifyMaxEdge !== undefined && (!options.rectifyPage || !Number.isSafeInteger(options.rectifyMaxEdge) || options.rectifyMaxEdge < 64 || options.rectifyMaxEdge > 4096)) throw new Error("Rectification edge requires enabled rectification and 64..4096 pixels");
+  if (options.rectifyMaxEdge !== undefined && (!options.rectifyPage || !Number.isSafeInteger(options.rectifyMaxEdge) || options.rectifyMaxEdge < 128 || options.rectifyMaxEdge > 4096)) throw new Error("Rectification edge requires enabled rectification and 128..4096 pixels");
   const venvRoot = path.dirname(path.dirname(options.python));
   const runtimeRoots = existsSync(path.join(venvRoot, "pyvenv.cfg")) ? [venvRoot] : [];
   const timeoutMs = options.timeoutMs ?? 120_000;

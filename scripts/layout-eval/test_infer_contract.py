@@ -16,11 +16,16 @@ class InferContractTests(unittest.TestCase):
     def test_defaults_and_invalid_options(self):
         args=arguments();self.assertFalse(args.rectify_page);self.assertIsNone(args.orientation_onnx_path)
         for extra in (['--model-size','33'],['--model','pp-small-onnx','--model-size','640'],
-                      ['--orientation-minimum-score','nan'],['--rectify-max-edge','8'],
+                      ['--orientation-minimum-score','nan'],['--rectify-max-edge','8'],['--rectify-max-edge','64'],['--rectify-max-edge','127'],
                       ['--orientation-onnx-path','/missing/graph.onnx']):
             with patch('infer.load_detector') as loader:
                 with self.assertRaises(ValueError):create_detector(arguments(extra))
                 loader.assert_not_called()
+
+    def test_minimum_rectification_edge_is_accepted_at_configuration(self):
+        base=SimpleNamespace(metadata={'id':'test','revision':'r'})
+        with patch('infer.load_detector',return_value=base):
+            self.assertIs(create_detector(arguments(['--rectify-max-edge','128'])),base)
 
     def test_wrappers_preserve_source_model_hash_and_configuration(self):
         class Wrapper:

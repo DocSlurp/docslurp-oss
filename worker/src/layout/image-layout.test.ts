@@ -47,7 +47,7 @@ describe("image layout transport boundary", () => {
   it("stages bytes, requests the exact device offline, validates provenance, and cleans up", async () => {
     const runtime = await mkdtemp(path.join(tmpdir(), "docslurp-layout-test-"));
     let output = "";
-    const options = { python: path.join(runtime, "bin", "python"), script: path.join(runtime, "infer.py"), cacheDirectory: runtime, model: "heron" as const, device: "cpu" as const, modelSize: 640, orientationOnnxPath: path.join(runtime, "orientation.onnx"), orientationRevision: "pinned", orientationMinimumScore: 0.8, rectifyPage: true, rectifyMaxEdge: 768 };
+    const options = { python: path.join(runtime, "bin", "python"), script: path.join(runtime, "infer.py"), cacheDirectory: runtime, model: "heron" as const, device: "cpu" as const, modelSize: 640, orientationOnnxPath: path.join(runtime, "orientation.onnx"), orientationRevision: "pinned", orientationMinimumScore: 0.8, rectifyPage: true, rectifyMaxEdge: 128 };
     await mkdir(path.join(runtime, "bin"));
     await writeFile(path.join(runtime, "pyvenv.cfg"), "home = /usr/bin\n");
     await writeFile(options.python, "");
@@ -60,7 +60,7 @@ describe("image layout transport boundary", () => {
         expect(plan.bundleRoots).toContain(runtime);
         expect(plan.bundleEnv?.HF_HUB_OFFLINE).toBe("1");
         expect(plan.args).toContain("cpu");
-        expect(plan.args).toEqual(expect.arrayContaining(["--model-size", "640", "--orientation-onnx-path", options.orientationOnnxPath, "--orientation-revision", "pinned", "--orientation-minimum-score", "0.8", "--rectify-page", "--rectify-max-edge", "768"]));
+        expect(plan.args).toEqual(expect.arrayContaining(["--model-size", "640", "--orientation-onnx-path", options.orientationOnnxPath, "--orientation-revision", "pinned", "--orientation-minimum-score", "0.8", "--rectify-page", "--rectify-max-edge", "128"]));
         expect(plan.bundleRoots).toContain(options.orientationOnnxPath);
         output = plan.args[plan.args.indexOf("--output") + 1];
         await writeFile(output, JSON.stringify({ ...payload(), model: { id: "docling-project/docling-layout-heron", revision: "test" }, image: { ...payload().image, sha256: createHash("sha256").update(input).digest("hex") } }));
@@ -69,6 +69,7 @@ describe("image layout transport boundary", () => {
       await expect(detectImageLayout(input, { ...options, modelSize: 33 }, runner)).rejects.toThrow("Model size");
       await expect(detectImageLayout(input, { ...options, orientationMinimumScore: NaN }, runner)).rejects.toThrow("orientation");
       await expect(detectImageLayout(input, { ...options, rectifyMaxEdge: 8 }, runner)).rejects.toThrow("Rectification");
+      await expect(detectImageLayout(input, { ...options, rectifyMaxEdge: 127 }, runner)).rejects.toThrow("Rectification");
       const result = await detectImageLayout(input, options, runner);
       expect(result.image.sha256).toMatch(/^[a-f0-9]{64}$/);
       const wrongHash = { run: async (plan: CommandPlan) => {
