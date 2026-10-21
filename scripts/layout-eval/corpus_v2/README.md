@@ -1,0 +1,13 @@
+# Editorial layout pilots V2
+
+These pages are individually composed visual proposals. They are **not an admitted benchmark**, and no quantity or realism approval is inferred from the number of rendered pages. V1 operating-point results remain engineering evidence only after the user rejected its visual realism.
+
+Each source module owns a distinct editorial brief and meaningful copy. It chooses its own typography, hierarchy, density, artwork, tables and page dimensions. Recoloring, parameter jitter and capture variants do not create additional independent source documents. Realistic asset provenance is retained; generated photos remain synthetic evidence.
+
+`page.py` persists source commands, exact glyph-line boxes, expected Markdown, prose/applicability contracts, source hashes and reference geometry **before PNG rendering**. Authored text without a containing layout or composite label fails rendering. Table cells and continued-row identities are explicit. Formula regions require a source expression. Text internal to a chart, table, diagram or logo is retained in the source/prose contract and belongs to the enclosing composite; it is not separately scored as a paragraph. Text embedded inside photographic assets is not annotated and is not eligible for prose evaluation.
+
+`render.py --output <durable-directory>` assembles the available authored pilots and creates a review-only contact sheet. Individual full-resolution images are the review surface; thumbnails cannot establish typography, annotation correctness or realism. Check each page and its source/expected-text contracts before admission. Reading order remains unvalidated and unscored.
+
+Before expanding: select source briefs through visual review; address density, copy, asset reuse and annotation problems; define diversity coverage and independent splits; check duplicate images and related publication/template families; then create new source documents deliberately. Report native-source counts separately from scans, rotations, encodings and camera captures.
+
+Run framework checks with Pillow installed and `TMPDIR`, `TMP`, and `TEMP` pointing at the user-designated agent scratch directory: `python scripts/layout-eval/corpus_v2/test_page.py`.
