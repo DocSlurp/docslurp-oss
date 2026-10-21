@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import { createProbeRunner, parseProbeOutput } from "../page-input.js";
 import { setProbeBindingForTesting, type Box, type ProbeBinding, type ProbeBindingPage } from "./binding.js";
-import { laplacianVariance, parsePages, percentiles, textLayerStatus } from "./features.js";
+import { grayImageStatistics, laplacianVariance, parsePages, percentiles, textLayerStatus } from "./features.js";
 import { probeNativePdf, type NativeProbeRow } from "./probe.js";
 
 const png = await sharp({ create: { width: 612, height: 792, channels: 3, background: { r: 255, g: 255, b: 255 } } }).png().toBuffer();
@@ -168,6 +168,32 @@ describe("native page probe", () => {
 });
 
 describe("probe helpers", () => {
+  it("preserves exact image diagnostics across sparse, flat and noisy pixel distributions", () => {
+    let state = 13841;
+    for (const [width, height] of [[0, 0], [1, 1], [2, 3], [7, 13], [97, 131]]) {
+      for (const kind of ["black", "white", "alternating", "noise"]) {
+        const backing = new Uint8Array(width! * height! + 8);
+        const pixels = backing.subarray(4, backing.length - 4);
+        for (let i = 0; i < pixels.length; i++) {
+          state = (Math.imul(state, 1664525) + 1013904223) >>> 0;
+          pixels[i] = kind === "black" ? 0 : kind === "white" ? 255 : kind === "alternating" ? (i % 2) * 255 : state >>> 24;
+        }
+        const sorted = Array.from(pixels).sort((a, b) => a - b);
+        const percentile = (q: number) => {
+          if (!sorted.length) return 0; // only contrast is meaningful for the empty input
+          const rank = ((sorted.length - 1) * q) / 100;
+          const low = Math.floor(rank);
+          return sorted[low]! + (sorted[Math.ceil(rank)]! - sorted[low]!) * (rank - low);
+        };
+        expect(grayImageStatistics(pixels, width!, height!)).toEqual({
+          blur: laplacianVariance(pixels, width!, height!),
+          contrast: (percentile(99) - percentile(1)) / 255,
+          brightness: pixels.length ? pixels.reduce((sum, v) => sum + v, 0) / pixels.length / 255 : 0,
+        });
+      }
+    }
+  });
+
   it("matches the Python helpers", () => {
     expect(parsePages("1,3-4,9", 5)).toEqual([1, 3, 4]);
     expect(parsePages(undefined, 2)).toEqual([1, 2]);

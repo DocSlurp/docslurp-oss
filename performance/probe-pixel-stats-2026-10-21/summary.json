@@ -1,0 +1,110 @@
+{
+  "kreuzberg-tables-invoice.pdf": {
+    "phase": "screen",
+    "blocks": 5,
+    "pages_per_document": 1,
+    "all_rows_exact": true,
+    "elapsedMs": {
+      "baseline_median_per_page": 34.69085833333338,
+      "candidate_median_per_page": 22.43478099999997,
+      "paired_ratio_median": 0.6200749220204363,
+      "paired_ratio_min": 0.5401630065157323,
+      "paired_ratio_max": 0.6467058492595174
+    },
+    "cpuMs": {
+      "baseline_median_per_page": 36.657666666666664,
+      "candidate_median_per_page": 24.942666666666668,
+      "paired_ratio_median": 0.6604027340223658,
+      "paired_ratio_min": 0.5753683594998334,
+      "paired_ratio_max": 0.6804215580187865
+    },
+    "statsElapsedMs": {
+      "baseline_median_per_page": 16.64665239,
+      "candidate_median_per_page": 2.9466915199999995,
+      "paired_ratio_median": 0.1699398757079575,
+      "paired_ratio_min": 0.15088109212224662,
+      "paired_ratio_max": 0.18309830460753657
+    }
+  },
+  "multicolumn-figures-report.pdf": {
+    "phase": "screen",
+    "blocks": 5,
+    "pages_per_document": 1,
+    "all_rows_exact": true,
+    "elapsedMs": {
+      "baseline_median_per_page": 43.40106333333339,
+      "candidate_median_per_page": 30.77276299999994,
+      "paired_ratio_median": 0.709032466869665,
+      "paired_ratio_min": 0.6161971342516677,
+      "paired_ratio_max": 0.8562471454212586
+    },
+    "cpuMs": {
+      "baseline_median_per_page": 50.50933333333333,
+      "candidate_median_per_page": 35.434666666666665,
+      "paired_ratio_median": 0.7056168438939557,
+      "paired_ratio_min": 0.609643102264928,
+      "paired_ratio_max": 0.8332908599310066
+    },
+    "statsElapsedMs": {
+      "baseline_median_per_page": 15.912327909999998,
+      "candidate_median_per_page": 3.1423126700000013,
+      "paired_ratio_median": 0.1846018795373106,
+      "paired_ratio_min": 0.17172293868486466,
+      "paired_ratio_max": 0.2403076764752067
+    }
+  },
+  "tables-multipage-financials.pdf": {
+    "phase": "confirm",
+    "blocks": 5,
+    "pages_per_document": 3,
+    "all_rows_exact": true,
+    "elapsedMs": {
+      "baseline_median_per_page": 46.56808755555554,
+      "candidate_median_per_page": 23.973002,
+      "paired_ratio_median": 0.548613190967583,
+      "paired_ratio_min": 0.4750666032503713,
+      "paired_ratio_max": 0.6641398856518526
+    },
+    "cpuMs": {
+      "baseline_median_per_page": 57.94522222222221,
+      "candidate_median_per_page": 25.72611111111111,
+      "paired_ratio_median": 0.46022724064660253,
+      "paired_ratio_min": 0.4135148214301426,
+      "paired_ratio_max": 0.5636636738986485
+    },
+    "statsElapsedMs": {
+      "baseline_median_per_page": 17.031160569999997,
+      "candidate_median_per_page": 3.0745448799999986,
+      "paired_ratio_median": 0.1811218750838039,
+      "paired_ratio_min": 0.1636304890198691,
+      "paired_ratio_max": 0.1973980121846142
+    }
+  },
+  "kreuzberg-formulas-math.pdf": {
+    "phase": "confirm",
+    "blocks": 5,
+    "pages_per_document": 1,
+    "all_rows_exact": true,
+    "elapsedMs": {
+      "baseline_median_per_page": 44.85842633333353,
+      "candidate_median_per_page": 28.3921620000001,
+      "paired_ratio_median": 0.6005228559061347,
+      "paired_ratio_min": 0.5382150164088475,
+      "paired_ratio_max": 0.8359105061149197
+    },
+    "cpuMs": {
+      "baseline_median_per_page": 49.425999999999995,
+      "candidate_median_per_page": 34.23166666666666,
+      "paired_ratio_median": 0.590087538272704,
+      "paired_ratio_min": 0.5512764877646937,
+      "paired_ratio_max": 0.8878511208671666
+    },
+    "statsElapsedMs": {
+      "baseline_median_per_page": 18.28984861,
+      "candidate_median_per_page": 3.152086310000004,
+      "paired_ratio_median": 0.19274303722029734,
+      "paired_ratio_min": 0.15715488035227448,
+      "paired_ratio_max": 0.20416315994505813
+    }
+  }
+}
