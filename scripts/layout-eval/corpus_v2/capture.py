@@ -90,6 +90,7 @@ def compose(source_image, reference_path, scene_path, calibration_path, output, 
         if not contract or sha(source_root/contract['path'])!=contract['sha256']:
             raise ValueError(f'Missing or changed source {key}; capture refused')
     source_path=source_root/'sources'/f"{reference['id']}.json"
+    source_layout=json.loads(source_path.read_text())
     if sha(source_path)!=reference['source_sha256']:
         raise ValueError('Source layout changed after reference creation')
     source=Image.open(source_image).convert('RGB'); scene=Image.open(scene_path).convert('RGB')
@@ -113,7 +114,9 @@ def compose(source_image, reference_path, scene_path, calibration_path, output, 
         region['visibility']=visible_fraction(region['polygon'],occlusion,scene.size)
         region['attributes']['coordinate_space']='capture-pixels; source_* fields retain authored page pixels'
         region['attributes']['occlusion_policy']='full projected polygon retained; visibility is unoccluded raster area fraction; no hidden text deletion'
-    transformed['capture']={'kind':'synthetic-photographic-print-composite','source_id':reference['id'],'source_image':str(source_image),'source_image_sha256':sha(source_image),'source_reference':str(reference_path),'source_reference_sha256':sha(reference_path),'source_layout':str(source_path),'source_layout_sha256':sha(source_path),'scene':str(scene_path),'scene_sha256':sha(scene_path),'calibration':calibration,'source_to_capture':matrix.tolist(),'capture_to_source':inverse.tolist(),'geometry_policy':'exact planar print quad; visible paper edge curl is scene context outside print quad','illumination':'multiplicative RGB from blank paper plate; retained paper texture and hand shadows','source_expected_markdown':str(source_root/reference['expected_markdown']['path']),'source_prose_contract':str(source_root/reference['prose_contract']['path']),'review_status':'awaiting-visual-review-not-benchmark-admitted'}
+    transformed['capture']={'kind':'synthetic-photographic-print-composite','source_id':reference['id'],'source_family':reference['id'],'document_id':source_layout['document_id'],'page_number':source_layout['page_number'],'source_image':str(source_image),'source_image_sha256':sha(source_image),'source_reference':str(reference_path),'source_reference_sha256':sha(reference_path),'source_layout':str(source_path),'source_layout_sha256':sha(source_path),'scene':str(scene_path),'scene_sha256':sha(scene_path),'calibration':calibration,'source_to_capture':matrix.tolist(),'capture_to_source':inverse.tolist(),'geometry_policy':'exact planar print quad; visible paper edge curl is scene context outside print quad','illumination':'multiplicative RGB from blank paper plate; retained paper texture and hand shadows','source_expected_markdown':str(source_root/reference['expected_markdown']['path']),'source_prose_contract':str(source_root/reference['prose_contract']['path']),'review_status':'awaiting-visual-review-not-benchmark-admitted'}
+    for key in ('expected_markdown','prose_contract'):
+        transformed[key]={**reference[key],'path':str(source_root/reference[key]['path']),'coordinate_space':'authored-source-page; capture geometry in regions'}
     output.mkdir(parents=True,exist_ok=True)
     refpath=output/f'{capture_id}.reference.json'; maskpath=output/f'{capture_id}.occlusion.png'; imagepath=output/f'{capture_id}.png'
     # Persist geometry/occlusion BEFORE producing the capture image.
