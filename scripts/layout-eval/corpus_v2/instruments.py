@@ -22,7 +22,7 @@ def rainfall_log():
         'interval_start_times_local':times,'interval_end_times_local':end_times,'interval_minutes':15,'rainfall_mm':intervals,'cumulative_mm':totals,
         'measurement_model':'0.2mm per simulated tipping-bucket increment','expected_total_mm':20.6}
     assert totals[-1]==20.6
-    p.source['planned_capture']={'kind':'partial-flatbed-scan','crop_box':[0,0,1200,1458],
+    p.source['planned_capture']={'kind':'partial-flatbed-scan','crop_box':[0,0,1200,1450],
         'purpose':'Bottom edge intersects observation table and text. Keep original full source/expected Markdown; visible-only text contract must distinguish clipped and excluded cells.',
         'review_status':'not_admitted-awaiting-capture-and-visual-review'}
     p.rectangle([0,0,1200,27],navy)
