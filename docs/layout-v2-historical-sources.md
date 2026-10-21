@@ -20,3 +20,12 @@ The [1297 Magna Carta press-kit image](https://www.archives.gov/press/press-kits
 These are four distinct source documents, not feature-count multipliers. They add historical handwriting, legal layout, physical aging, signatures and a seal to a larger mixed corpus. Two near-identical copies of a page should never be counted as two layout designs.
 
 No source transcription, bounding boxes, or reading-order labels were authored in this curation. All assets have `label_tier: unlabeled-reference` and `ground_truth: null`. Any later real-page annotations must be marked reviewed silver with source/hash/region provenance before capture transformations. Synthetic pages inspired by these sources must carry authored text and explicit structure before rendering; do not infer their gold from OCR of these images.
+
+
+## First manual silver review artifact
+
+The Bill of Rights has a separate manual annotation pilot under `/home/dan/data/docslurp-evals/layout-synthetic-v2/historical-silver/`. Its `manualmanifest.jsonl` points to the unchanged source image, 18 coarse manual regions, official transcript provenance and a review overlay. Regions cover the title, opening date, introductory prose, twelve proposed articles and a combined attestation/signature group. The last group uses `illustration` with original semantics retained as attributes; no new production label is introduced.
+
+This pilot is `manual-silver-awaiting-independent-review`, with no benchmark admission. Pixel and normalized boxes are estimates drawn after viewing the real raster, not native construction geometry. The five confidence axes use the campaign ordinal evidence rubric (0, .25, .5, .75, 1), not probabilities: geometry .5, semantic label .75, text transcription .25, visibility/occlusion .75, reading order 0. Each axis records its basis and provenance. Fading is observed; no occluded-area fraction is claimed.
+
+The official [NARA transcription](https://www.archives.gov/founding-docs/bill-of-rights-transcript) is preserved as HTML plus normalized text, with hashes. Text is associated at semantic-block level only; image spelling, punctuation and physical line alignment are not independently verified. Line boundaries remain unknown and transcription evaluation is explicitly disabled. The original four-reference manifest remains unlabeled; manual annotations live in their separate pilot and do not silently upgrade any reference to gold.
