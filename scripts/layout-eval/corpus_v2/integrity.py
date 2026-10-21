@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Prepare typed geometry-only integrity labels from an immutable V2 candidate lock."""
+"""Prepare typed geometry-only integrity labels from an immutable authored-layout candidate lock."""
 import argparse, hashlib, json, re, subprocess
 from pathlib import Path
 
@@ -7,10 +7,12 @@ from pathlib import Path
 def digest(data):return hashlib.sha256(data).hexdigest()
 def encode(value):return (json.dumps(value,ensure_ascii=False,indent=2)+'\n').encode()
 def main():
-    p=argparse.ArgumentParser();p.add_argument('--root',type=Path,required=True);p.add_argument('--repo',type=Path,required=True);p.add_argument('--contract-commit',default='37585134');a=p.parse_args()
-    root=a.root.resolve();repo=a.repo.resolve();lock=root/'frozen-v2/LOCK.json'
+    p=argparse.ArgumentParser();p.add_argument('--root',type=Path,required=True);p.add_argument('--repo',type=Path,required=True);p.add_argument('--contract-commit',default='37585134');p.add_argument('--frozen-directory',default='frozen-v2');a=p.parse_args()
+    root=a.root.resolve();repo=a.repo.resolve();frozen_dir=(root/a.frozen_directory).resolve()
+    if not frozen_dir.is_relative_to(root):raise ValueError('Frozen directory outside corpus root')
+    lock=frozen_dir/'LOCK.json'
     if not lock.exists():raise ValueError('Split must be locked before integrity artifacts are prepared')
-    frozen=json.loads(lock.read_text());manifest=root/'frozen-v2/candidates.jsonl'
+    frozen=json.loads(lock.read_text());manifest=frozen_dir/'candidates.jsonl'
     if digest(manifest.read_bytes())!=frozen['outputs']['candidates.jsonl']:raise ValueError('Candidate manifest differs from lock')
     def git(*args):return subprocess.check_output(['git','-C',str(repo),*args])
     commit=git('rev-parse',a.contract_commit+'^{commit}').decode().strip();contract_path='worker/src/layout/image-layout.ts'
