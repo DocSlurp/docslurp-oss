@@ -85,6 +85,7 @@ import {
 } from "../services/search-controls.js";
 import { hybridSearch } from "../services/search.js";
 import { parseFilters } from "../search/filters.js";
+import { searchHitStatementTimeout } from "../search/timings.js";
 import {
   buildWorkspaceChatAuditMetadata,
   createWorkspaceVersionSnapshot,
@@ -832,7 +833,9 @@ export const workspacesRoutes = new Hono()
         if (
           latestResponse.availability?.status === "complete" ||
           latestResponse.availability?.status === "empty" ||
-          activeRunCount === 0
+          activeRunCount === 0 ||
+          // A statement that hit SEARCH_STATEMENT_TIMEOUT_MS would time out again on the next poll.
+          searchHitStatementTimeout(latestResponse)
         ) {
           break;
         }

@@ -89,6 +89,18 @@ describe("batch retrieval and canonical chat", () => {
     const result = await app().request("/v1/search", json({ queries: queries.slice(0, 3) }));
     expect(await result.json()).toMatchObject({ results: [{ ok: true }, { ok: false, error: { status: 500, message: "We couldn’t complete that request. Please try again in a moment." } }, { ok: true }] });
   });
+  it("reports shed and aborted items as 503/499, not internal failures", async () => {
+    const { SearchCapacityError } = await import("../search/search-limiter.js");
+    mocks.search.mockImplementation(async q => {
+      if (q === "two") throw new SearchCapacityError("full", 8);
+      if (q === "three") throw Object.assign(new Error("Search aborted"), { name: "AbortError" });
+      return response(q);
+    });
+    const result = await app().request("/v1/search", json({ queries: queries.slice(0, 3) }));
+    expect(await result.json()).toMatchObject({ results: [{ ok: true },
+      { ok: false, error: { code: "SEARCH_UNAVAILABLE", status: 503 } },
+      { ok: false, error: { code: "REQUEST_ABORTED", status: 499 } }] });
+  });
   it("stops queued retrieval after request abort, preserving completed items", async () => {
     const controller = new AbortController();
     mocks.search.mockImplementation(async q => { controller.abort(); return response(q); });

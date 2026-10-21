@@ -54,7 +54,8 @@ import { canEditWorkspace, getWorkspaceAccess } from "./organizations.js";
 import type { WorkspaceChatModelId } from "@docslurp/shared/workspace-chat-models";
 import type { ChatAgentLimits, ChatAgentLimitsInput } from "@docslurp/shared";
 import { chatEvalAccess, chatTurnNeedsEvalAccess, resolveChatAgentLimits, resolveChatModelRequest } from "../lib/chat-model-policy.js";
-import { currentRequestId } from "../lib/request-context.js";
+import { currentRequestId, currentRequestSignal } from "../lib/request-context.js";
+import { searchHitStatementTimeout } from "../search/timings.js";
 
 export type ChatSearchActivity = {
   id: string; groupId: string; query: string; status: "loading" | "success" | "error";
@@ -158,6 +159,14 @@ function shouldWaitForPendingSearch(
   return activeWork > 0;
 }
 
+/**
+ * A search branch hit SEARCH_STATEMENT_TIMEOUT_MS. Waiting for indexing and
+ * re-running the same statement would time out again (on 2026-10-20 the
+ * retries kept 1-4 minute FTS statements coming after every client left), so
+ * the pending-search loop returns the degraded result instead.
+ */
+export { searchHitStatementTimeout };
+
 async function sleep(ms: number): Promise<void> {
   if (ms <= 0) {
     return;
@@ -182,9 +191,12 @@ async function searchWorkspaceForChat(args: {
       onSearchActivity: args.onSearchActivity,
     });
 
-    if (attempt >= retry.maxAttempts || !shouldWaitForPendingSearch(retrieved)) {
+    if (attempt >= retry.maxAttempts || !shouldWaitForPendingSearch(retrieved) || searchHitStatementTimeout(retrieved)) {
       return retrieved;
     }
+    // The client is gone: another attempt would only load the database.
+    const signal = getDeferredContext()?.signal ?? currentRequestSignal();
+    if (signal?.aborted) throw Object.assign(new Error("Chat request aborted"), { name: "AbortError" });
 
     await sleep(retry.intervalMs);
   }

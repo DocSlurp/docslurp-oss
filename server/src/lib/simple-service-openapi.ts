@@ -96,7 +96,7 @@ export const simpleServiceSchemas = {
     type: "object", required: ["results"], properties: { results: { type: "array", minItems: 1, maxItems: 20, items: { oneOf: [
       { type: "object", required: ["ok", "data"], properties: { ok: { const: true }, data: ref("SearchResponse") } },
       { type: "object", required: ["ok", "error"], properties: { ok: { const: false }, error: { type: "object", required: ["code", "message", "status"], properties: {
-        code: { enum: ["FORBIDDEN", "WORKSPACE_NOT_FOUND", "INVALID_SEARCH_SCOPE", "SEARCH_FAILED", "REQUEST_ABORTED"] }, message: { type: "string" }, status: { type: "integer" },
+        code: { enum: ["FORBIDDEN", "WORKSPACE_NOT_FOUND", "INVALID_SEARCH_SCOPE", "SEARCH_FAILED", "SEARCH_UNAVAILABLE", "REQUEST_ABORTED"] }, message: { type: "string" }, status: { type: "integer" },
       } } } },
     ] } } },
   },
