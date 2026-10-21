@@ -83,6 +83,8 @@ def render_page(manifest_row,prediction,image_path,output,metadata,supported,pan
     original=image.resize(left.size,Image.Resampling.LANCZOS)
     header=170;footer=120;gap=14;canvas=Image.new('RGB',(panel_width*3+gap*4,left.height+header+footer),'#14222b');d=ImageDraw.Draw(canvas)
     model=metadata.get('model',{});runtime=model.get('runtime') or model.get('detector',{}).get('runtime') or 'see JSON runtime provenance'
+    precision=model.get('precision') or model.get('detector',{}).get('precision') or 'unrecorded'
+    runtime=f'{runtime}/{precision}/batch{metadata.get("batch_size","?")}'
     title=f'{manifest_row["id"]} | {model.get("id","unrecorded model")} | {metadata.get("device","unknown device")}'
     d.text((gap,12),title,font=font(25),fill='#f0f5f5')
     d.text((gap,50),f'POST-SCORE DEV ERROR ANALYSIS | class-aware greedy IoU >= 0.50 | TP {score["tp"]} / FP {score["fp"]} / FN {score["fn"]}',font=font(22),fill='#b5dad3')
