@@ -207,7 +207,7 @@ def closeup_comparison(baseline_report,candidate_report,output,source_roi,displa
         'comparison_image_sha256':digest(output),'source_image_sha256':left['source_image_sha256'],
         'baseline_report':str(baseline_report),'baseline_report_sha256':digest(baseline_report),
         'candidate_report':str(candidate_report),'candidate_report_sha256':digest(candidate_report),
-        'full_page_context_image':str(output.parent/'scientific-rotated90-baseline-vs-orientation.png'),
+        'full_page_context_images':[left['overlay_path'],right['overlay_path']],
         'scope':'Post-score development visualization only; no recomputed ROI quality, no new inference or heldout evidence.'}
     output.with_suffix('.json').write_text(json.dumps(receipt,indent=2)+'\n')
     return receipt
