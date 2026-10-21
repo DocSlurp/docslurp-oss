@@ -18,6 +18,11 @@ describe("image layout transport boundary", () => {
   it.each([[0.9, 0.2, 0.1, 0.8], [-0.1, 0, 1, 1], [0, 0, Infinity, 1], [0, 0, 1]])("rejects invalid source boxes %j", (...bbox) => {
     expect(() => parseImageLayout({ ...payload(), regions: [{ ...payload().regions[0], bbox }] })).toThrow();
   });
+  it("preserves declared geometric coverage and validates visual fingerprints", () => {
+    const region = { ...payload().regions[0], imageCoverage: 0.48, coverageKind: "half-page", fingerprint: { algorithm: "dhash-64", value: "0123456789abcdef" } };
+    expect(parseImageLayout({ ...payload(), regions: [region] }).regions[0]).toEqual(region);
+    expect(() => parseImageLayout({ ...payload(), regions: [{ ...region, fingerprint: { algorithm: "dhash-64", value: "bad" } }] })).toThrow("fingerprint");
+  });
   it("rejects unknown coordinate spaces and nonfinite confidence", () => {
     expect(() => parseImageLayout({ ...payload(), coordinateSpace: "pixels" })).toThrow("coordinate space");
     expect(() => parseImageLayout({ ...payload(), regions: [{ ...payload().regions[0], confidence: NaN }] })).toThrow("finite");

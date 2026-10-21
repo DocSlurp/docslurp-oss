@@ -21,6 +21,11 @@ export interface ImageLayoutResult {
     confidence: number;
     /** x0, y0, x1, y1 in source raster coordinates, not resized model input. */
     bbox: [number, number, number, number];
+    /** Optional geometric coverage and visual crop fingerprint; not semantic identity. */
+    imageCoverage?: number;
+    coverageKind?: "full-page" | "half-page" | "region";
+    fingerprint?: { algorithm: "dhash-64"; value: string };
+    exactCropSha256?: string;
   }>;
 }
 function object(value: unknown): Record<string, unknown> {
@@ -59,7 +64,22 @@ export function parseImageLayout(value: unknown): ImageLayoutResult {
     if (!Array.isArray(region.bbox) || region.bbox.length !== 4) throw new Error("Expected xyxy layout box");
     const bbox = region.bbox.map(unit) as [number, number, number, number];
     if (bbox[0] >= bbox[2] || bbox[1] >= bbox[3]) throw new Error("Layout box must have positive area");
-    return { label: kind, rawLabel: text(region.rawLabel), confidence: unit(region.confidence), bbox };
+    const extras: Pick<ImageLayoutResult["regions"][number], "imageCoverage" | "coverageKind" | "fingerprint" | "exactCropSha256"> = {};
+    if (region.imageCoverage !== undefined) extras.imageCoverage = unit(region.imageCoverage);
+    if (region.coverageKind !== undefined) {
+      if (!["full-page", "half-page", "region"].includes(String(region.coverageKind))) throw new Error("Invalid layout coverage kind");
+      extras.coverageKind = region.coverageKind as "full-page" | "half-page" | "region";
+    }
+    if (region.fingerprint !== undefined) {
+      const fingerprint = object(region.fingerprint);
+      if (fingerprint.algorithm !== "dhash-64" || !/^[0-9a-f]{16}$/.test(text(fingerprint.value))) throw new Error("Invalid crop fingerprint");
+      extras.fingerprint = { algorithm: "dhash-64", value: text(fingerprint.value) };
+    }
+    if (region.exactCropSha256 !== undefined) {
+      if (!/^[0-9a-f]{64}$/.test(text(region.exactCropSha256))) throw new Error("Invalid exact crop hash");
+      extras.exactCropSha256 = text(region.exactCropSha256);
+    }
+    return { label: kind, rawLabel: text(region.rawLabel), confidence: unit(region.confidence), bbox, ...extras };
   });
   return { schemaVersion: 1, model: { id: text(model.id), revision: text(model.revision) }, device: result.device,
     image: { width: dimension(image.width), height: dimension(image.height) }, coordinateSpace: "normalized-source", supportedLabels, regions };
