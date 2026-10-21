@@ -42,7 +42,7 @@ export async function insertDefaultWorkspace(
       ${args.userId},
       ${DEFAULT_WORKSPACE_NAME},
       true,
-      ${query.json(JSON.parse(JSON.stringify(normalizePipelineFeatures(defaultPipelineFeatures))))}
+      ${query.json(JSON.parse(JSON.stringify(normalizePipelineFeatures({ ...defaultPipelineFeatures, summarize: true }))))}
     )
     on conflict (org_id) where is_default do nothing
   `;

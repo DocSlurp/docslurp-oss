@@ -79,6 +79,8 @@ type WorkspaceDocumentSummaryRow = {
   document_id: string;
   filename: string;
   summary: string;
+  total_documents: number;
+  summarized_documents: number;
 };
 
 type WorkspaceChatUsageSummary = {
@@ -708,29 +710,54 @@ function isSummaryIntent(query: string): boolean {
 async function loadWorkspaceSummaryEvidence(args: {
   workspaceId: string;
   hasWorkspaceAccess: boolean;
-  limit?: number;
-}): Promise<SearchResult[]> {
+}): Promise<{ results: SearchResult[]; coverageNotice: string | null }> {
+  const empty = { results: [], coverageNotice: null };
   if (!args.hasWorkspaceAccess) {
-    return [];
+    return empty;
   }
 
   try {
+    // Bound evidence by size, not an arbitrary number of files. The window
+    // budget also bounds the data returned from Postgres for large workspaces.
+    const maxChars = Math.min(wholeCorpusContextLimits.maxChars, wholeCorpusContextLimits.maxTokens * 4);
     const rows = await sql<WorkspaceDocumentSummaryRow[]>`
-      select
-        d.id as document_id,
-        d.filename,
-        ds.summary
-      from document_summaries ds
-      join documents d on d.id = ds.document_id
-      where d.workspace_id = ${args.workspaceId}
-        and d.superseded_at is null
-        and d.status <> 'pii_blocked'
-      order by d.filename asc, ds.created_at desc
-      limit ${args.limit ?? 8}
+      with eligible_documents as (
+        select id, filename from documents
+        where workspace_id = ${args.workspaceId}
+          and superseded_at is null
+          and status <> 'pii_blocked'
+      ), latest_summaries as (
+        select distinct on (d.id) d.id as document_id, d.filename, ds.summary
+        from document_summaries ds
+        join eligible_documents d on d.id = ds.document_id
+        order by d.id, ds.created_at desc, ds.id desc
+      ), summaries as (
+        select * from latest_summaries where length(trim(summary)) > 0
+      ), budgeted as (
+        select *,
+          (select count(*)::int from eligible_documents) as total_documents,
+          count(*) over () as summarized_documents,
+          sum(length(summary) + length(filename) + 512) over (
+            order by filename, document_id
+          ) as context_chars
+        from summaries
+      )
+      select document_id, filename, summary, total_documents, summarized_documents
+      from budgeted
+      where context_chars <= ${maxChars}
+      order by filename, document_id
     `;
 
-    return rows
-      .filter((row) => row.summary.trim().length > 0)
+    const totalDocuments = Number(rows[0]?.total_documents ?? 0);
+    const summarizedDocuments = Number(rows[0]?.summarized_documents ?? 0);
+    const coverageNotice = rows.length > 0 && rows.length < totalDocuments
+      ? `Partial workspace overview: using summaries for ${rows.length} of ${totalDocuments} current documents.`
+        + (summarizedDocuments < totalDocuments
+          ? ` Documents without a stored summary: ${totalDocuments - summarizedDocuments}.` : "")
+        + (rows.length < summarizedDocuments
+          ? ` Summaries omitted by the context budget: ${summarizedDocuments - rows.length}.` : "")
+      : null;
+    const results: SearchResult[] = rows
       .map((row, index) => ({
         text: row.summary,
         parentText: row.summary,
@@ -759,8 +786,9 @@ async function loadWorkspaceSummaryEvidence(args: {
           },
         },
       }));
+    return { results, coverageNotice };
   } catch {
-    return [];
+    return empty;
   }
 }
 
@@ -1159,12 +1187,13 @@ async function chatWorkspaceTurn(
   const openRouterApiKey = chatApiKey ?? (privateChatModel ? "private-endpoint" : undefined);
   const prefersWholeCorpus = searchSettings.chat.mode === "whole-corpus" && !narrowingFilters;
   const summaryIntent = isSummaryIntent(args.query) && !narrowingFilters;
-  const storedSummaryEvidence = summaryIntent && !documentIds
+  const storedSummaryContext = summaryIntent && !documentIds
     ? await loadWorkspaceSummaryEvidence({
         workspaceId: args.workspaceId,
         hasWorkspaceAccess: Boolean(workspace),
       })
-    : [];
+    : { results: [], coverageNotice: null };
+  const storedSummaryEvidence = storedSummaryContext.results;
   const summaryEvidence =
     storedSummaryEvidence.length > 0
       ? storedSummaryEvidence
@@ -1173,8 +1202,9 @@ async function chatWorkspaceTurn(
         : [];
   const summaryContextLabel =
     storedSummaryEvidence.length > 0
-      ? "workspace document summaries"
+      ? `workspace document summaries${storedSummaryContext.coverageNotice ? ` (${storedSummaryContext.coverageNotice} Do not present this as complete workspace coverage.)` : ""}`
       : "full indexed workspace corpus";
+  const summaryPrefix = storedSummaryContext.coverageNotice ? `${storedSummaryContext.coverageNotice}\n\n` : "";
 
   if ((prefersWholeCorpus || documentIds?.length) && !narrowingFilters && wholeCorpus.eligible) {
     args.onEvidence?.(wholeCorpus.results);
@@ -1264,7 +1294,7 @@ async function chatWorkspaceTurn(
   if (summaryEvidence.length > 0) {
     args.onEvidence?.(summaryEvidence);
     if (!openRouterApiKey) {
-      const answer = buildFallbackAnswer(args.query, summaryEvidence, null);
+      const answer = summaryPrefix + buildFallbackAnswer(args.query, summaryEvidence, null);
       const evidenceSpans = buildWorkspaceChatEvidenceSpans(
         answer,
         summaryEvidence,
@@ -1301,6 +1331,7 @@ async function chatWorkspaceTurn(
     }
 
     try {
+      if (summaryPrefix) await args.onTextDelta?.(summaryPrefix);
       const generated = await generateWorkspaceChatTextWithFailover({
         apiKey: openRouterApiKey,
         privacyMode,
@@ -1337,7 +1368,7 @@ async function chatWorkspaceTurn(
         ...generated.usage,
       });
 
-      const answer = requireGeneratedAnswer(generated.text);
+      const answer = summaryPrefix + requireGeneratedAnswer(generated.text);
       const evidenceSpans = buildWorkspaceChatEvidenceSpans(
         answer,
         summaryEvidence,
@@ -1375,7 +1406,7 @@ async function chatWorkspaceTurn(
       };
     } catch (error) {
       rethrowIfAborted(error);
-      const answer = buildFallbackAnswer(args.query, summaryEvidence, null);
+      const answer = summaryPrefix + buildFallbackAnswer(args.query, summaryEvidence, null);
       const evidenceSpans = buildWorkspaceChatEvidenceSpans(
         answer,
         summaryEvidence,

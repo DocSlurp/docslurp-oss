@@ -86,6 +86,7 @@ describe("PATCH /v1/workspaces/:id is non-breaking", () => {
     ["retention days", { artifactRetentionDays: 30, runRetentionDays: 60 }],
     ["clear retention", { artifactRetentionDays: null, runRetentionDays: 0 }],
     ["pipeline summarize", { pipeline: pipeline({ summarize: true }) }],
+    ["workspace summaries", { summaries: true }],
     ["pipeline same", { pipeline: pipeline() }],
     ["pipeline webhooks", { pipeline: pipeline({ webhooks: { enabled: false } as never }) }],
     ["apply new-uploads", { apply: "new-uploads", pipeline: pipeline({ summarize: true }) }],
@@ -101,6 +102,18 @@ describe("PATCH /v1/workspaces/:id is non-breaking", () => {
 });
 
 describe("config-change jobs", () => {
+  it("plans document-summary backfill through the workspace summaries option", async () => {
+    await seed({ credits: 10_000 });
+    const planned = await change.planWorkspaceChange({ workspaceId: "w", userId: "u1", input: { summaries: true } });
+    expect(planned?.impact.kind).toBe("reindex-recommended");
+    expect(planned?.impact.stages).toContain("document-summary");
+    const { applied } = await patch({ summaries: true, apply: "new-uploads" });
+    expect(applied?.workspace.summaries).toBe(true);
+    expect(applied?.job).toBeNull();
+    await seed({ credits: 10_000 });
+    expect((await patch({ summaries: true, apply: "reindex" })).applied?.job).not.toBeNull();
+  });
+
   it("auto-queues a re-index job for an embedding change and records the previous index", async () => {
     await seed({ credits: 10_000 });
     const before = indexConfigOf(pipeline());

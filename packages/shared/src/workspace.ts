@@ -69,6 +69,8 @@ export const workspaceSchema = z.object({
   name: z.string(),
   templateKey: workspaceTemplateKeySchema.nullable().default(null),
   systemPrompt: z.string().max(2000).nullable().default(null),
+  /** Generate reusable document summaries to improve search results. One-time generation and embedding cost per processed document version; reprocessing can incur it again. */
+  summaries: z.boolean().default(true),
   pipeline: pipelineFeaturesSchema.default(defaultPipelineFeatures),
   monthlyBudgetCents: z.number().int().nonnegative().nullable().default(null),
   /** Days before a run's artifacts are purged; null keeps them. */
@@ -692,9 +694,11 @@ export const createWorkspaceSchema = z.object({
   name: z.string().trim().min(1).max(120),
   templateKey: workspaceTemplateKeySchema.optional(),
   systemPrompt: z.string().trim().max(2000).nullable().optional(),
+  /** Enabled by default. Adds a one-time per-document processing cost to improve search results; privacy/template restrictions still apply. */
+  summaries: z.boolean().default(true),
   pipeline: pipelineFeaturesSchema.optional(),
 });
-export type CreateWorkspaceInput = z.infer<typeof createWorkspaceSchema>;
+export type CreateWorkspaceInput = z.input<typeof createWorkspaceSchema>;
 
 export const updateWorkspaceSchema = z.object({
   name: z.string().trim().min(1).max(120).optional(),
@@ -702,6 +706,8 @@ export const updateWorkspaceSchema = z.object({
   slug: z.string().trim().min(3).max(63).optional(),
   templateKey: workspaceTemplateKeySchema.nullable().optional(),
   systemPrompt: z.string().trim().max(2000).nullable().optional(),
+  /** Generate and cache document summaries for better search. Backfill/reprocessing can incur generation and embedding costs; omission preserves the current setting. */
+  summaries: z.boolean().optional(),
   pipeline: pipelineFeaturesSchema.optional(),
   monthlyBudgetCents: z.number().int().min(0).nullable().optional(),
   /** Null (or 0) keeps artifacts indefinitely. */

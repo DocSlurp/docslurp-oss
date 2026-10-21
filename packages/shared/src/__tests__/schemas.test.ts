@@ -686,6 +686,12 @@ describe("canonicalDocumentSchema", () => {
 // ---------------------------------------------------------------------------
 
 describe("createWorkspaceSchema", () => {
+  it("enables summaries by default and accepts an explicit opt-out", () => {
+    expect(createWorkspaceSchema.parse({ name: "Default" }).summaries).toBe(true);
+    expect(createWorkspaceSchema.parse({ name: "Off", summaries: false }).summaries).toBe(false);
+    expect(createWorkspaceSchema.safeParse({ name: "Invalid", summaries: "false" }).success).toBe(false);
+  });
+
   it("parses a valid workspace creation input", () => {
     const result = createWorkspaceSchema.safeParse({ name: "My Workspace" });
     expect(result.success).toBe(true);
