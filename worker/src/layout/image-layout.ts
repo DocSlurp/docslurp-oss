@@ -120,7 +120,7 @@ export interface ImageLayoutCliOptions {
   /** Explicit runtime; never automatically install dependencies or download weights. */
   python: string;
   script: string;
-  model: "heron" | "ppv3" | "pp-small" | "pp-small-onnx";
+  model: "heron" | "heron-custom" | "ppv3" | "pp-small" | "pp-small-onnx";
   device: "cpu" | "cuda";
   /** Pre-populated Hugging Face cache exposed read-only in the parser sandbox. */
   cacheDirectory: string;
@@ -141,7 +141,8 @@ export async function detectImageLayout(input: Buffer, options: ImageLayoutCliOp
     if (!path.isAbsolute(location)) throw new Error("Layout runtime paths must be absolute");
     await stat(location);
   }
-  if (!["cpu", "cuda"].includes(options.device) || !["heron", "ppv3", "pp-small", "pp-small-onnx"].includes(options.model)) throw new Error("Unsupported layout model/device");
+  if (!["cpu", "cuda"].includes(options.device) || !["heron", "heron-custom", "ppv3", "pp-small", "pp-small-onnx"].includes(options.model)) throw new Error("Unsupported layout model/device");
+  if (options.model === "heron-custom" && !options.modelPath) throw new Error("heron-custom requires an explicit local modelPath");
   if (options.model === "pp-small" && !options.modelPath) throw new Error("pp-small requires an explicit local modelPath");
   if (options.model === "pp-small-onnx" && !options.onnxPath) throw new Error("pp-small-onnx requires an explicit local onnxPath");
   const venvRoot = path.dirname(path.dirname(options.python));

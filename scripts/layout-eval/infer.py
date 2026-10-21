@@ -14,7 +14,7 @@ MAX_OUTPUT_BYTES=10*1024*1024
 
 
 def add_detector_arguments(parser):
-    parser.add_argument('--model',choices=['heron','ppv3','pp-small','pp-small-onnx'],default='heron')
+    parser.add_argument('--model',choices=['heron','heron-custom','ppv3','pp-small','pp-small-onnx'],default='heron')
     parser.add_argument('--device',choices=['cpu','cuda'],default='cpu')
     parser.add_argument('--precision',choices=['fp32','fp16'],default='fp32')
     parser.add_argument('--threads',type=int,default=4)
@@ -29,6 +29,8 @@ def add_detector_arguments(parser):
 
 
 def create_detector(args):
+    if args.model=='heron-custom' and not args.model_path:
+        raise ValueError('heron-custom requires --model-path to a local safetensors checkpoint')
     if args.model=='pp-small' and not args.model_path:
         raise ValueError('pp-small inference requires --model-path to a cached Paddle model directory')
     if args.threads<1 or not 0<=args.threshold<=1:
