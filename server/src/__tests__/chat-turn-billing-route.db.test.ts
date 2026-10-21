@@ -6,8 +6,8 @@ import { startMigratedPostgres } from "@docslurp/worker/testing";
 
 /**
  * /v1/chat settles the chat turn's bill: a delivered answer (partial ones
- * included) is charged, an HTTP error or a client gone before the answer was
- * sent is refunded, and error bodies carry the turn's usage.
+ * included) and a turn the client abandoned are charged, a server-side error
+ * or timeout is refunded, and error bodies carry the turn's usage.
  */
 const { chatWorkspace } = vi.hoisted(() => ({ chatWorkspace: vi.fn() }));
 vi.mock("../services/workspace-chat.js", async (original) => ({
@@ -109,16 +109,40 @@ describe("/v1/chat chat turn billing", () => {
     expect(await sql`select 1 from credit_grants where source = 'adjustment'`).toHaveLength(1);
   });
 
-  it("refunds a turn whose client disconnected before the answer was sent", async () => {
+  it("charges a turn whose client disconnected after the answer was generated", async () => {
     const abort = new AbortController();
     turnThat((id) => {
       abort.abort();
-      return { id, sessionId: "s1", answer: "Sent to nobody.", finishReason: "stop", usage: {} };
+      return { id, sessionId: "s1", answer: "Generated, then the client left.", finishReason: "stop", usage: {} };
     });
-    const response = await post({ signal: abort.signal });
-    expect(response.status).toBe(499);
+    await Promise.resolve(post({ signal: abort.signal })).catch(() => undefined);
+    await credits.flushPendingCreditDebits();
+    expect(await available()).toBeLessThan(1000);
+    expect(await sql`select 1 from credit_grants`).toHaveLength(0);
+  });
+
+  it("charges a turn the client aborted mid-generation", async () => {
+    const abort = new AbortController();
+    turnThat(() => {
+      abort.abort();
+      throw new DOMException("The operation was aborted", "AbortError");
+    });
+    const response = await Promise.resolve(post({ signal: abort.signal })).catch(() => undefined);
+    if (response) {
+      const body = await response.json() as { error: { details?: { usage?: Record<string, unknown> } } };
+      expect(body.error.details?.usage).toMatchObject({ outcome: "failed", refunded: false, refundedCreditCents: 0 });
+    }
+    await credits.flushPendingCreditDebits();
+    expect(await available()).toBeLessThan(1000);
+    expect(await sql`select 1 from credit_grants`).toHaveLength(0);
+  });
+
+  it("refunds a server-side timeout", async () => {
+    turnThat(() => { throw new DOMException("The operation timed out", "TimeoutError"); });
+    const response = await post();
+    expect(response.status).toBeGreaterThanOrEqual(500);
     const body = await response.json() as { error: { details?: { usage?: Record<string, unknown> } } };
-    expect(body.error.details?.usage).toMatchObject({ outcome: "failed", refunded: true });
+    expect(body.error.details?.usage).toMatchObject({ outcome: "failed", refunded: true, chargedCreditCents: 0 });
     expect(await available()).toBeCloseTo(1000, 6);
   });
 });

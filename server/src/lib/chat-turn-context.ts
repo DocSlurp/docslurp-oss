@@ -14,6 +14,8 @@ import { randomUUID } from "node:crypto";
 export type ChatTurnStatus = "open" | "delivered" | "failed";
 
 export interface ChatTurnEventRecord {
+  /** The Usage Event's id: the refund voids exactly these rows (by primary key). */
+  id: string;
   /** Customer credits the event debited (0 when non-billable). */
   creditCents: number;
   /** Credits a late event of a failed turn would have billed but did not. */
@@ -31,6 +33,8 @@ export interface ChatTurnContext {
   readonly inflight: Set<Promise<unknown>>;
   /** Every Usage Event this process wrote for the turn. */
   readonly events: ChatTurnEventRecord[];
+  /** Whether a chat answer already took the turn id as its response id (nested answers get their own). */
+  answerIdClaimed: boolean;
 }
 
 const chatTurnStorage = new AsyncLocalStorage<ChatTurnContext>();
@@ -42,6 +46,7 @@ export function createChatTurnContext(options: { id?: string; refundOnFailure: b
     refundOnFailure: options.refundOnFailure,
     inflight: new Set(),
     events: [],
+    answerIdClaimed: false,
   };
 }
 
@@ -59,6 +64,31 @@ export function trackChatTurnWrite<T>(turn: ChatTurnContext, write: Promise<T>):
   const settle = () => { turn.inflight.delete(write); };
   write.then(settle, settle);
   return write;
+}
+
+/**
+ * Track work that writes Usage Events inside its own transaction (a Search
+ * Session's journal flush): the rows are only visible to the refund once that
+ * transaction commits, so the turn must wait for the whole write, not just the
+ * insert statement. No-op outside a chat turn.
+ */
+export function trackCurrentChatTurnWrite<T>(write: Promise<T>): Promise<T> {
+  const turn = currentChatTurn();
+  return turn ? trackChatTurnWrite(turn, write) : write;
+}
+
+/**
+ * The response id for a chat answer produced in the current turn: the turn id
+ * for the first answer (the turn's own), a fresh id for any nested answer (a
+ * grounded MCP chat call inside the agent's tools), so two answers never share
+ * an id. Null outside a chat turn.
+ */
+export function claimChatTurnAnswerId(): string | null {
+  const turn = currentChatTurn();
+  if (!turn) return null;
+  if (turn.answerIdClaimed) return randomUUID();
+  turn.answerIdClaimed = true;
+  return turn.id;
 }
 
 /** Resolves once every usage write started for the turn so far has settled. */

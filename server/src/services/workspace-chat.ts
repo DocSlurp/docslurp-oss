@@ -39,7 +39,8 @@ import {
 import { runWithAiObservability } from "../lib/posthog-ai-observability.js";
 import { recordUsageEvent } from "../lib/ai-usage.js";
 import { assertCanSpend, type SpendKind } from "./billing/spend-guard.js";
-import { beginChatTurn, chatTurnFailureReason, currentChatTurnHandle } from "./billing/chat-turn-billing.js";
+import { beginChatTurn, chatTurnFailureReason } from "./billing/chat-turn-billing.js";
+import { claimChatTurnAnswerId } from "../lib/chat-turn-context.js";
 import { sql } from "../db.js";
 import { reviewUntrustedEvidenceText } from "./prompt-injection.js";
 import {
@@ -1125,8 +1126,9 @@ async function chatWorkspaceTurn(
   policy: ChatTurnPolicy,
 ): Promise<WorkspaceChatResponse> {
   const startedAtMs = Date.now();
-  // The response id is the chat turn id its Usage Events carry.
-  const responseId = currentChatTurnHandle()?.id ?? randomUUID();
+  // The turn's own answer takes the chat turn id its Usage Events carry; a
+  // nested grounded answer (MCP chat tool inside the agent) gets a fresh id.
+  const responseId = claimChatTurnAnswerId() ?? randomUUID();
   const model = policy.model;
   const workspace = await getWorkspace(args.workspaceId, args.userId);
   // Every hosted call in this turn sees workspace content or the user's query

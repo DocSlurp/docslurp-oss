@@ -1,5 +1,5 @@
 import { reportPublicError } from "../lib/public-errors.js";
-import { apiErrorResponse, apiStatusError, nativeApiErrors, withApiErrorDetails } from "../lib/api-error.js";
+import { apiErrorResponse, nativeApiErrors, withApiErrorDetails } from "../lib/api-error.js";
 import { Hono, type Context } from "hono";
 import { batchSearchInputSchema, searchFormError, searchInputSchema, searchOptions, workspaceChatInputSchema, type SearchInput } from "../lib/search-input.js";
 import { streamSSE } from "hono/streaming";
@@ -163,11 +163,9 @@ async function handleWorkspaceChat(c: Context, mode: "public" | "grounded") {
     if (error instanceof ChatModelNotAllowedError) return modelNotAllowed(c);
     throw usage ? withApiErrorDetails(error, { usage }) : error;
   }
-  if (signal.aborted) {
-    // The client left before the answer could be sent: it was never delivered.
-    const usage = await failChatTurn(turn, "aborted");
-    return apiStatusError(c, 499, "Request aborted before the answer was sent", usage ? { details: { usage } } : {});
-  }
+  // The answer was generated for this client: it is charged even if the
+  // client has already left (it is persisted to the chat session, and a
+  // refund here would make disconnecting a way to get answers for free).
   turn.delivered();
   return c.json(response);
 }
@@ -319,7 +317,6 @@ export const searchRoutes = new Hono()
           model
         }));
         await pendingEvents;
-        if (abort.signal.aborted || c.req.raw.signal.aborted) throw new DOMException("Client disconnected", "AbortError");
         await stream.writeSSE({
           event: "message",
           data: JSON.stringify(response)
@@ -328,7 +325,7 @@ export const searchRoutes = new Hono()
         await failChatTurn(turn, chatTurnFailureReason(error, abort.signal.aborted ? abort.signal : c.req.raw.signal));
         throw error;
       }
-      // The answer is on the wire; a later disconnect does not undo delivery.
+      // Generated for this client: charged, whether or not it is still connected.
       turn.delivered();
       await stream.writeSSE({
         event: "done",

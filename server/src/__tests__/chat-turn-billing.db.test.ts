@@ -16,6 +16,7 @@ let sql: postgres.Sql;
 let usage: typeof import("../lib/ai-usage.js");
 let billing: typeof import("../services/billing/chat-turn-billing.js");
 let credits: typeof import("../services/billing/credits.js");
+let context: typeof import("../lib/chat-turn-context.js");
 
 const FREE = "o-free";
 const PAID = "o-paid";
@@ -30,6 +31,7 @@ beforeAll(async () => {
   usage = await import("../lib/ai-usage.js");
   billing = await import("../services/billing/chat-turn-billing.js");
   credits = await import("../services/billing/credits.js");
+  context = await import("../lib/chat-turn-context.js");
 }, 120_000);
 
 afterAll(async () => {
@@ -79,6 +81,10 @@ async function turnEvents(turnId: string) {
   return (await sql<{ cost_cents: string; metadata: Record<string, unknown> }[]>`
     select cost_cents::text, metadata from usage_attribution where metadata ->> 'chatTurnId' = ${turnId} order by created_at`)
     .map((row) => ({ costCents: Number(row.cost_cents), metadata: row.metadata }));
+}
+
+async function turnEventIds(turnId: string) {
+  return (await sql<{ id: string }[]>`select id from usage_events where metadata ->> 'chatTurnId' = ${turnId}`).map((row) => row.id);
 }
 
 async function refundGrants() {
@@ -154,7 +160,8 @@ describe.each([
     expect(await pools(orgId)).toEqual(start);
     const grants = await refundGrants();
     expect(grants).toHaveLength(1);
-    expect(grants[0]).toMatchObject({ external_id: `chat-turn-refund:${turn.id}`, pool: refundPool, org_id: orgId });
+    expect(grants[0]).toMatchObject({ pool: refundPool, org_id: orgId });
+    expect(grants[0]!.external_id).toMatch(new RegExp(`^chat-turn-refund:${turn.id}:${orgId}:[0-9a-f]{16}$`));
     expect(Number(grants[0]!.credits)).toBeCloseTo(result.creditCents / 2, 6);
   });
 
@@ -164,7 +171,7 @@ describe.each([
     await turn.run(async () => { await step(orgId); await step(orgId); });
     await credits.flushPendingCreditDebits();
     const [first, second] = await Promise.all([turn.failed("error"), turn.failed("error")]);
-    const again = await billing.refundChatTurn({ turnId: turn.id, reason: "error" });
+    const again = await billing.refundChatTurn({ turnId: turn.id, eventIds: await turnEventIds(turn.id), reason: "error" });
     await credits.flushPendingCreditDebits();
 
     expect(first).toEqual(second);
@@ -179,11 +186,12 @@ describe.each([
     await turn.run(async () => { await step(orgId); });
     await credits.flushPendingCreditDebits();
     await turn.run(async () => { await step(orgId); await step(orgId); });
+    const eventIds = await turnEventIds(turn.id);
     await Promise.all([
       credits.flushPendingCreditDebits(),
       turn.failed("error"),
       credits.flushPendingCreditDebits(),
-      billing.refundChatTurn({ turnId: turn.id, reason: "error" }),
+      billing.refundChatTurn({ turnId: turn.id, eventIds, reason: "error" }),
       credits.flushPendingCreditDebits(),
     ]);
     await credits.flushPendingCreditDebits();
@@ -230,6 +238,77 @@ describe.each([
     expect(await available(orgId)).toBeCloseTo(before, 6);
   });
 
+  it("keeps a turn the client abandoned charged, including steps finishing after it left", async () => {
+    const before = await available(orgId);
+    const turn = billing.beginChatTurn();
+    await turn.run(async () => { await step(orgId); });
+    await credits.flushPendingCreditDebits();
+    const client = new AbortController();
+    client.abort();
+    const abortError = new DOMException("The operation was aborted", "AbortError");
+    const result = await turn.failed(billing.chatTurnFailureReason(abortError, client.signal));
+    await turn.run(() => step(orgId));
+    await credits.flushPendingCreditDebits();
+
+    expect(result).toMatchObject({ outcome: "failed", refunded: false, refundedCreditCents: 0 });
+    expect(result.chargedCreditCents).toBe(result.creditCents);
+    const events = await turnEvents(turn.id);
+    expect(events).toHaveLength(2);
+    expect(events.every((event) => event.costCents > 0)).toBe(true);
+    expect(await available(orgId)).toBeCloseTo(before - 2 * result.creditCents, 6);
+    expect(await refundGrants()).toEqual([]);
+  });
+
+  it("waits for usage written inside a still-open transaction before refunding", async () => {
+    const before = await available(orgId);
+    const turn = billing.beginChatTurn();
+    let commit!: () => void;
+    let inserted!: () => void;
+    const committed = new Promise<void>((resolve) => { commit = resolve; });
+    const insertDone = new Promise<void>((resolve) => { inserted = resolve; });
+    // A Search Session flushes its usage inside its snapshot transaction (search/session.ts).
+    const write = turn.run(() => context.trackCurrentChatTurnWrite(sql.begin(async (tx) => {
+      await usage.recordUsageEvent({
+        client: tx as unknown as typeof sql,
+        userId: "u1",
+        scope: { orgId, workspaceId: workspaceOf(orgId), sessionId: "search-session" },
+        usage: { provider: "openrouter", model: "test/model", metric: "workspace-chat-tools", inputTokens: 1000, outputTokens: 200, costCents: 10 },
+      });
+      inserted();
+      await committed;
+    })));
+    await insertDone;
+    // The insert statement has settled but its transaction is open: the turn still counts the write in flight.
+    expect(turn.run(() => context.currentChatTurn()!.inflight.size)).toBeGreaterThan(0);
+    const failing = turn.failed("error");
+    commit();
+    const [result] = await Promise.all([failing, write]);
+    await credits.flushPendingCreditDebits();
+
+    expect(result).toMatchObject({ refunded: true, chargedCreditCents: 0 });
+    expect(result.refundedCreditCents).toBeGreaterThan(0);
+    expect((await turnEvents(turn.id)).map((event) => event.costCents)).toEqual([0]);
+    expect(await available(orgId)).toBeCloseTo(before, 6);
+  });
+
+  it("rolls the refund back rather than voiding events without granting their flushed credits", async () => {
+    const turn = billing.beginChatTurn();
+    await turn.run(async () => { await step(orgId); });
+    await credits.flushPendingCreditDebits();
+    const charged = await available(orgId);
+    const eventIds = await turnEventIds(turn.id);
+    const [grantId] = await sql<{ id: string }[]>`select gen_random_uuid()::text as id`;
+    // Simulate a grant that already holds this refund's id (it can only come from an earlier refund of these events).
+    const { createHash } = await import("node:crypto");
+    const hash = createHash("sha256").update([...eventIds].sort().join(",")).digest("hex").slice(0, 16);
+    await sql`insert into credit_grants (id, org_id, source, external_id, credits, pool)
+      values (${grantId!.id}, ${orgId}, 'adjustment', ${`chat-turn-refund:${turn.id}:${orgId}:${hash}`}, 0, 'prepaid')`;
+
+    await expect(billing.refundChatTurn({ turnId: turn.id, eventIds, reason: "error" })).rejects.toThrow(/grant already exists/);
+    expect((await turnEvents(turn.id)).every((event) => event.costCents > 0)).toBe(true);
+    expect(await available(orgId)).toBeCloseTo(charged, 6);
+  });
+
   it("keeps a failed turn charged when CHAT_REFUND_UNDELIVERED_TURNS=false", async () => {
     vi.stubEnv("CHAT_REFUND_UNDELIVERED_TURNS", "false");
     const before = await available(orgId);
@@ -261,5 +340,19 @@ describe("nested chat turns", () => {
     const result = await outer.failed("error");
     expect(result).toMatchObject({ refunded: true, providerCostCents: 20 });
     expect(await available(FREE)).toBeCloseTo(before, 6);
+  });
+
+  it("gives the turn id to the turn's own answer and a fresh id to a nested answer", async () => {
+    const outer = billing.beginChatTurn();
+    const [own, nested, again] = outer.run(() => [
+      context.claimChatTurnAnswerId(),
+      billing.beginChatTurn().run(() => context.claimChatTurnAnswerId()),
+      context.claimChatTurnAnswerId(),
+    ]);
+    expect(own).toBe(outer.id);
+    expect(nested).not.toBe(outer.id);
+    expect(again).not.toBe(outer.id);
+    expect(new Set([own, nested, again]).size).toBe(3);
+    expect(context.claimChatTurnAnswerId()).toBeNull();
   });
 });

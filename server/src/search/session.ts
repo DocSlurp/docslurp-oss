@@ -10,6 +10,7 @@ import {
 } from "../lib/ai-usage.js";
 import type { SearchFilters } from "./filters.js";
 import { currentChatSessionId } from "../lib/chat-agent-context.js";
+import { trackCurrentChatTurnWrite } from "../lib/chat-turn-context.js";
 
 export type SearchUsageEvent = UsageEvent;
 
@@ -140,15 +141,17 @@ class SqlSearchSessionJournal implements SearchSessionJournal {
   }
 
   persist(input: PersistSearchSessionInput): Promise<void> {
-    const pending = this.persistenceTail.then(() => this.persistSnapshot(input));
+    // The usage flush runs in the snapshot's transaction: a failing chat turn
+    // waits for the commit, or its refund would miss these events.
+    const pending = trackCurrentChatTurnWrite(this.persistenceTail.then(() => this.persistSnapshot(input)));
     this.persistenceTail = pending.catch(() => undefined);
     return pending;
   }
 
   flushUsage(userId: string): Promise<void> {
-    const pending = this.persistenceTail.then(async () => {
+    const pending = trackCurrentChatTurnWrite(this.persistenceTail.then(async () => {
       await this.usage.flush({ userId, scope: { ...this.scope, sessionId: this.sessionId } });
-    });
+    }));
     this.persistenceTail = pending.catch(() => undefined);
     return pending;
   }

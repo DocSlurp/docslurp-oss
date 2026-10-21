@@ -356,6 +356,7 @@ async function writeUsageEvent(
     const providerCost = Number(metadata.providerCostCents);
     const refund = metadata.chatTurnRefund as { credits?: unknown } | undefined;
     turn.events.push({
+      id,
       creditCents: metadata.billable === false ? 0 : Math.max(0, event.costCents),
       waivedCreditCents: typeof refund?.credits === "number" ? refund.credits : 0,
       providerCostCents: Number.isFinite(providerCost) ? Math.max(0, providerCost) : 0,
@@ -375,16 +376,20 @@ export interface VoidedChatTurnUsage {
  * Void the credits a chat turn's Usage Events billed: `cost_cents` drops to 0
  * and the original credits move to `metadata.chatTurnRefund`, so spend read
  * through usage_attribution no longer counts them while the provider cost
- * (`metadata.providerCostCents`) stays for our own accounting. Only events
- * that enqueued a debit are touched, and a voided event is never matched
- * again, so a repeated call voids nothing. Run it inside the refund
- * transaction (services/billing/chat-turn-billing.ts), which settles the
- * pending and flushed debits these credits correspond to.
+ * (`metadata.providerCostCents`) stays for our own accounting. Rows are
+ * matched by primary key (the ids the turn wrote, ChatTurnContext.events) and
+ * must also carry the turn id, so no index on the metadata is needed. Only
+ * events that enqueued a debit are touched, and a voided event is never
+ * matched again (concurrent voids serialize on the row lock), so a repeated
+ * call voids nothing. Run it inside the refund transaction
+ * (services/billing/chat-turn-billing.ts), which settles the pending and
+ * flushed debits these credits correspond to.
  */
 export async function voidChatTurnUsage(
   client: UsageClient,
-  args: { turnId: string; reason: string },
+  args: { turnId: string; eventIds: readonly string[]; reason: string },
 ): Promise<VoidedChatTurnUsage[]> {
+  if (args.eventIds.length === 0) return [];
   const rows = await (client as SqlClient)<{ org_id: string; credits: string; event_ids: string[] }[]>`
     with voided as (
       update usage_events ue
@@ -393,7 +398,8 @@ export async function voidChatTurnUsage(
           'billable', false,
           'chatTurnRefund', jsonb_build_object('reason', ${args.reason}::text, 'credits', ue.cost_cents)
         )
-      where ue.metadata ->> 'chatTurnId' = ${args.turnId}
+      where ue.id = any(${[...new Set(args.eventIds)]}::text[])
+        and ue.metadata ->> 'chatTurnId' = ${args.turnId}
         and ue.org_id is not null
         and ue.run_id is null
         and ue.cost_cents > 0
