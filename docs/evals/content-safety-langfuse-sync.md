@@ -8,14 +8,18 @@ advisory LLM judge and seven synthetic development items were synchronized. A
 repeat run verified unchanged prompt versions and judge ID, plus zero dataset
 creates or updates. The source archive is not a native executable evaluator.
 
-Two deployment prerequisites remain explicit:
+One deployment prerequisite remains; the judge connection is now resolved:
 
 - Native code evaluator creation returns HTTP 412: “Code evaluations are not
   enabled for this deployment.” No dispatcher was deployed or insecure execution
   enabled. Local deterministic scoring is tested; native execution is unavailable.
-- The native advisory judge is paused with `LLM_CONNECTION_MISSING`. Automatic
-  approval review rejected persisting the production OpenAI credential in Langfuse
-  without specific authorization to transfer that secret. No credential was copied.
+- After explicit user authorization, the existing production OpenAI credential was
+  stored in the self-hosted project on 2026-10-20 MDT. Non-secret API readback
+  confirmed the OpenAI adapter, `customModels: ["gpt-4.1-mini"]` and
+  `withDefaultModels: false`. Revalidating the unchanged judge definition cleared
+  `LLM_CONNECTION_MISSING`; it is now `active`, still version 1. No evaluation calls
+  or automatic evaluation rules were started. The earlier approval rejection was
+  resolved by the user's specific authorization, not an alternate transfer route.
 
 The stored advisory judge names `openai/gpt-4.1-mini` with verified published pricing
 of $0.40 input and $1.60 output per million tokens on 2026-10-20. It is a configurable

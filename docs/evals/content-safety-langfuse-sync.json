@@ -1,5 +1,5 @@
 {
-  "at": "2026-10-21T00:44:18.816Z",
+  "at": "2026-10-21T02:03:31.204Z",
   "sourceCommit": "d38681ea8628dc6b8a93635c72c49bfa615b4f16",
   "prompts": [
     {
@@ -25,8 +25,8 @@
       "id": "cmvhe004y0005ms2mwdyg9nwo",
       "version": 1,
       "contentSha256": "aba4cf58bcd1055bb73c46e987c73773e30f98d6ac1d0706a395ea53b9d1bc85",
-      "status": "paused",
-      "pausedReason": "LLM_CONNECTION_MISSING",
+      "status": "active",
+      "pausedReason": null,
       "unchanged": true,
       "readbackVerified": true
     }
