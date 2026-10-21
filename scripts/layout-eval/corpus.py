@@ -58,7 +58,7 @@ def table(source, box, rng, rows=8, columns=4, border=True, continuation=None, r
         for c in range(columns):
             b = [x0 + c * (x1-x0)/columns, y0+r*(y1-y0)/rows, x0+(c+1)*(x1-x0)/columns, y0+(r+1)*(y1-y0)/rows]
             text = (["Item", "Units", "Price", "Total", "Notes"][c % 5] if r == 0 else (f"Sample {row_offset+r:02d}" if c == 0 else f"{rng.randint(2, 99)}.{rng.randint(0,99):02d}"))
-            cells.append({"row": r, "column": c, "logical_row": row_offset+r, "text": text, "bbox": b, "polygon": polygon(b), "is_header": r == 0})
+            cells.append({"row": r, "column": c, "logical_row": 0 if r==0 else row_offset+r, "text": text, "bbox": b, "polygon": polygon(b), "is_header": r == 0})
     return add(source, "table", box, None, cells=cells, rows=rows, columns=columns, border=border, continuation_id=continuation, header_repeated=bool(continuation))
 
 
@@ -99,22 +99,26 @@ def build_source(index, seed):
             cols=4+(serial//2)%3; nrows=6+(serial//2)%3
             for col in range(cols):
                 for row in range(nrows):
-                    cw=.92/cols; rh=.754/nrows
-                    x=.045+col*cw; y=.18+row*rh
-                    text("paragraph",(x,y,x+cw-.008,y+rh-.007),f"{['FOR SALE','SERVICES','ROOMS','WANTED'][rng.randrange(4)]}\n{['Garden tools, good condition. Call today.','Repairs and lessons. Friendly local service.','Sunny room near the station. View Saturday.'][rng.randrange(3)]}\n555-{rng.randrange(100,999)}-{rng.randrange(1000,9999)}",9,border=bool(serial%2))
+                    dense=serial%2==0
+                    cw=(.96 if dense else .92)/cols; rh=.754/nrows
+                    x=(.02 if dense else .045)+col*cw; y=.18+row*rh
+                    listing=rng.choice(['Garden tools in excellent condition. Collection available after work. Helpful advice included with every purchase.', 'Repairs, lessons and maintenance by local specialists. Evening appointments welcome. Estimates supplied without obligation.', 'Sunny furnished room near the station and market. Shared kitchen, quiet neighbors, references requested. View Saturday.'])
+                    if dense: listing+=' '+rng.choice(['Call for details and ask about delivery. All enquiries answered promptly.', 'Flexible times available throughout the week. Please leave a clear message.'])
+                    text("paragraph",(x,y,x+cw-(.002 if dense else .008),y+rh-(.002 if dense else .007)),f"{['FOR SALE','SERVICES','ROOMS','WANTED'][rng.randrange(4)]}\n{listing}\n555-{rng.randrange(100,999)}-{rng.randrange(1000,9999)}",14 if dense else 9,border=not dense,density='high' if dense else 'medium')
         elif family == "magazine":
             cols=2+(serial//2)%2; nrows=2+(serial//4)%2; cw=.94/cols; rh=.758/nrows
             for col in range(cols):
                 for row in range(nrows):
-                    x=.035+col*cw; y=.17+row*rh
-                    add(source,"photo",box(x,y,x+cw-.025,y+rh*.57),scene=["cafe","coast","city"][(row+col+serial)%3],extent="advertisement_panel")
-                    text("title",(x,y+rh*.59,x+cw-.025,y+rh*.73),["Make room for adventure","Fresh ideas, daily","Design for real life"][(row+col)%3],16,colorful=True)
-                    text("paragraph",(x,y+rh*.75,x+cw-.025,y+rh*.96),"Local makers. Thoughtful details. Discover the collection this weekend.",11)
+                    dense=serial%4==0
+                    x=(.01 if dense else .035)+col*cw; y=.17+row*rh
+                    add(source,"photo",box(x,y,x+cw-(.004 if dense else .025),y+rh*(.97 if dense else .57)),scene=["cafe","coast","city"][(row+col+serial)%3],extent="advertisement_panel")
+                    text("title",(x,y+rh*.59,x+cw-.025,y+rh*.73),["Make room for adventure","Fresh ideas, daily","Design for real life"][(row+col)%3],16,colorful=True,backdrop=PALETTES[serial%4][2] if dense else None,overlays_photo=dense)
+                    text("paragraph",(x,y+rh*.75,x+cw-.025,y+rh*.96),"Local makers. Thoughtful details. Discover the collection this weekend.",11,backdrop=PALETTES[serial%4][2] if dense else None,overlays_photo=dense)
                     add(source,"logo",box(x+cw*.72,y+rh*.37,x+cw*.93,y+rh*.54),brand=f"NOVA {row+col}")
         elif family in ("financial", "table_continuation"):
             text("paragraph",(.06,.17,.94,.24),TEXT[serial%len(TEXT)],14)
             cont = f"inventory-{serial//2:03d}" if family == "table_continuation" else None
-            table(source,box(.06,.29,.94,.86),rng,rows=13+(serial//2)%5,columns=4+(serial//2)%2,border=serial%2==0,continuation=cont,row_offset=0 if serial%2==0 else 12+(serial//2)%5)
+            table(source,box(.06,.29,.94,.86),rng,rows=13+(serial//2)%5,columns=4+(serial//2)%2,border=(serial//2)%2==0,continuation=cont,row_offset=0 if family!="table_continuation" or serial%2==0 else 12+(serial//2)%5)
             text("caption",(.06,.87,.94,.91),"Table 1. Counts exclude items pending inspection. All amounts are illustrative.",12)
         elif family == "form":
             text("paragraph",(.06,.17,.94,.25),"Please complete the fields below. Use block letters and check all options that apply.",15)
@@ -153,10 +157,13 @@ def build_source(index, seed):
             text("paragraph",(.08,.80,.72,.92),"Bring your ideas, meet your neighbors and help shape the next chapter. Free entry. Everyone is welcome.",20)
             add(source,"logo",box(.77,.81,.92,.92),brand="COMMON")
     source['regions'].sort(key=lambda r: (r['label']=='footer', r['label'] not in ('header','title') if r['bbox'][1]<h*.16 else True, r['reading_order']))
+    photo_index=0
     for region in source['regions']:
         if region['label']=='photo':
             if ASSET_RECORDS:
-                asset=ASSET_RECORDS[(serial+len(source['regions'])+source['regions'].index(region))%len(ASSET_RECORDS)]
+                asset_index=(serial+photo_index) if family=='magazine' else (serial+len(source['regions'])+source['regions'].index(region))
+                asset=ASSET_RECORDS[asset_index%len(ASSET_RECORDS)]
+                photo_index+=1
                 region['attributes']['photographic_asset']=asset
             else:
                 region['label']='illustration'
@@ -208,6 +215,7 @@ def prepare_reference(source):
             f,lines,size=layout_text(r['text'],r['bbox'],r['attributes'].get('font_size',15),r['label']=='title',source['source_family']=='academic')
             r['attributes']['render_font_size']=size
             r['attributes']['layout_bbox']=list(r['bbox'])
+            r['attributes']['text_layout_coordinate_space']='source-page-pixels-before-capture'
             painter=ImageDraw.Draw(Image.new('RGB',(1,1)))
             line_refs=[]
             for i,line in enumerate(lines):
@@ -319,6 +327,7 @@ def render(ref):
             elif a.get('border'): d.rectangle(b,outline='#858b8b')
             size=a['render_font_size']; f=font(size,label=='title',ref['source_family']=='academic')
             x0,y0,_,_=a['layout_bbox']
+            if a.get('backdrop'): d.rectangle(a['layout_bbox'],fill=a['backdrop'])
             for i,line in enumerate(a['lines']):
                 d.text((x0+2,y0+i*size*1.25),line['text'],font=f,fill=accent if label=='title' or a.get('colorful') else '#292b2d')
     return image
@@ -339,9 +348,13 @@ def mapped(poly,matrix):
 def transform(image, ref, mode):
     out=copy.deepcopy(ref); w,h=image.size; rng=random.Random(ref['seed']+9127)
     matrix=np.eye(3); occluder=None
-    if mode in ('skew','rotate90','phone','phone_hand'):
+    if mode in ('skew','rotate90','rotate180','rotate270','phone','phone_hand'):
         if mode=='rotate90':
             image=image.transpose(Image.Transpose.ROTATE_270); matrix=np.array([[0,-1,h],[1,0,0],[0,0,1.]])
+        elif mode=='rotate180':
+            image=image.transpose(Image.Transpose.ROTATE_180); matrix=np.array([[-1,0,w],[0,-1,h],[0,0,1.]])
+        elif mode=='rotate270':
+            image=image.transpose(Image.Transpose.ROTATE_90); matrix=np.array([[0,1,0],[-1,0,w],[0,0,1.]])
         elif mode=='skew':
             angle=(-1 if rng.random()<.5 else 1)*rng.uniform(2,9); radians=math.radians(angle)
             # PIL inverse sampling, fixed canvas; foreground corners retain 8% margin.
@@ -403,7 +416,7 @@ def contact_sheet(rows, root, name, limit=48):
     sheet.save(root/name,quality=85)
 
 
-def generate(root, count=256, seed=20261020, modes=('clean','scan','phone','phone_hand','skew','rotate90','blur','low_resolution')):
+def generate(root, count=256, seed=20261020, modes=('clean','scan','phone','phone_hand','skew','rotate90','rotate180','rotate270','blur','low_resolution'), resume=False, refresh_families=()):
     if count<32: raise ValueError('At least 32 sources are required for paired document coverage')
     root=Path(root); root.mkdir(parents=True,exist_ok=True)
     rows=[]; source_rows=[]; integrity_cases=[]
@@ -414,12 +427,18 @@ def generate(root, count=256, seed=20261020, modes=('clean','scan','phone','phon
         image=render(ref)
         source_rows.append({'id':sid,'source_family':source['source_family'],'split':source['split']})
         for mode in modes:
-            transformed,tref=transform(image,ref,mode); rid=f'{sid}--{mode}'; tref['id']=rid
-            refpath=f'references/{rid}.json'; imagepath=f'images/{rid}.jpg'
+            rid=f'{sid}--{mode}'; refpath=f'references/{rid}.json'; imagepath=f'images/{rid}.jpg'
+            reuse=resume and source['source_family'] not in refresh_families and (root/imagepath).exists() and (root/refpath).exists()
+            if reuse:
+                transformed=Image.open(root/imagepath); tref=json.loads((root/refpath).read_text())
+                for region in tref['regions']:
+                    if 'layout_bbox' in region['attributes']: region['attributes']['text_layout_coordinate_space']='source-page-pixels-before-capture'
+            else: transformed,tref=transform(image,ref,mode)
+            tref['id']=rid
             dump(root/refpath,tref)  # Final coordinates persisted BEFORE final encoded raster.
             (root/'images').mkdir(exist_ok=True)
             quality=45 if mode=='low_resolution' else 72 if mode=='scan' else 88
-            transformed.save(root/imagepath,quality=quality,optimize=True,subsampling=2)
+            if not reuse: transformed.save(root/imagepath,quality=quality,optimize=True,subsampling=2)
             digest=hashlib.sha256((root/imagepath).read_bytes()).hexdigest()
             integrity_path=f'integrity-labels/{rid}.json'
             dump(root/integrity_path,{'labels':[{'name':'layout_regions','expected':[{'label':r['label'],'bbox':r['bbox'],'polygon':r['polygon']} for r in tref['regions']]}]})
@@ -445,7 +464,7 @@ def generate(root, count=256, seed=20261020, modes=('clean','scan','phone','phon
     clean=[r for r in rows if r['metadata']['transform']['mode']=='clean']
     for start in range(0,len(clean),48): contact_sheet(clean[start:start+48],root,f'contact-sources-{start//48+1:02d}.jpg')
     contact_sheet([r for r in rows if r['metadata']['transform']['mode']!='clean'][::max(1,(len(rows)-len(clean))//48)],root,'contact-transforms.jpg')
-    (root/'README.md').write_text(f"# Synthetic layout corpus\n\n{count} authored base pages; {len(rows)} transformed image candidates.\n\nSources and references were written before rendering. Labels are source-derived silver, not human-reviewed gold. See coverage.json for caveats and family split. Table continuation IDs join paired pages. The synthetic artwork/hand scenes do not establish accuracy on real photographs.\n\nReproduce with: python scripts/layout-eval/corpus.py --output <directory> --count {count} --seed {seed}\n")
+    (root/'README.md').write_text(f"# Synthetic layout corpus\n\n{count} authored base pages; {len(rows)} transformed image candidates.\n\nSources and references were written before rendering. Labels are source-derived silver, not human-reviewed gold. See coverage.json for caveats and family split. Table continuation IDs join paired pages. The synthetic artwork/hand scenes do not establish accuracy on real photographs.\n\nReproduce with: python scripts/layout-eval/corpus.py --output <directory> --count {count} --seed {seed} --modes {','.join(modes)}{' --asset-dir ' + str(ASSET_DIR) if ASSET_DIR else ''}\n\nCoordinate spaces: region/cell polygons and boxes use final image pixels. Text layout_bbox/lines are source-page annotations, explicitly labeled; use source_to_image_matrix to map them.\n")
     return coverage
 
 
@@ -464,10 +483,10 @@ def load_assets(directory):
 
 
 def main():
-    parser=argparse.ArgumentParser(description=__doc__); parser.add_argument('--output',type=Path,required=True); parser.add_argument('--asset-dir',type=Path); parser.add_argument('--count',type=int,default=256); parser.add_argument('--seed',type=int,default=20261020); parser.add_argument('--modes',default='clean,scan,phone,phone_hand,skew,rotate90,blur,low_resolution')
+    parser=argparse.ArgumentParser(description=__doc__); parser.add_argument('--output',type=Path,required=True); parser.add_argument('--asset-dir',type=Path); parser.add_argument('--count',type=int,default=256); parser.add_argument('--seed',type=int,default=20261020); parser.add_argument('--resume',action='store_true'); parser.add_argument('--refresh-families',default=''); parser.add_argument('--modes',default='clean,scan,phone,phone_hand,skew,rotate90,rotate180,rotate270,blur,low_resolution')
     args=parser.parse_args()
     if args.asset_dir: load_assets(args.asset_dir)
-    print(json.dumps(generate(args.output,args.count,args.seed,tuple(args.modes.split(','))),indent=2))
+    print(json.dumps(generate(args.output,args.count,args.seed,tuple(args.modes.split(',')),args.resume,tuple(filter(None,args.refresh_families.split(',')))),indent=2))
 
 
 if __name__=='__main__': main()

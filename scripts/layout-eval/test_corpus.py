@@ -26,7 +26,7 @@ class CorpusTests(unittest.TestCase):
         a=corpus.prepare_reference(corpus.build_source(3,64)); b=corpus.prepare_reference(corpus.build_source(3,64))
         self.assertEqual(a,b)
         ia=corpus.render(a); ib=corpus.render(b)
-        for mode in ('phone_hand','scan','skew','rotate90','low_resolution'):
+        for mode in ('phone_hand','scan','skew','rotate90','rotate180','rotate270','low_resolution'):
             xa,ra=corpus.transform(ia,a,mode); xb,rb=corpus.transform(ib,b,mode)
             self.assertEqual(ra,rb); self.assertEqual(xa.tobytes(),xb.tobytes())
     def test_homography_roundtrip(self):
@@ -53,6 +53,13 @@ class CorpusTests(unittest.TestCase):
             ta=next(r for r in a['regions'] if r['label']=='table'); tb=next(r for r in b['regions'] if r['label']=='table')
             self.assertEqual(ta['attributes']['continuation_id'],tb['attributes']['continuation_id'])
             self.assertEqual([a['page_number'],b['page_number']],[1,2])
+            self.assertEqual(ta['attributes']['columns'],tb['attributes']['columns'])
+            self.assertEqual(ta['attributes']['border'],tb['attributes']['border'])
+            self.assertEqual([c['text'] for c in ta['attributes']['cells'] if c['is_header']],[c['text'] for c in tb['attributes']['cells'] if c['is_header']])
+            self.assertEqual({c['logical_row'] for c in tb['attributes']['cells'] if c['is_header']},{0})
+            left={c['logical_row'] for c in ta['attributes']['cells'] if not c['is_header']}
+            right={c['logical_row'] for c in tb['attributes']['cells'] if not c['is_header']}
+            self.assertEqual(max(left)+1,min(right))
     def test_text_reference_tight_bounds_preserve_layout_slot(self):
         src=corpus.build_source(0,2); ref=corpus.prepare_reference(src)
         title=next(r for r in ref['regions'] if r['label']=='title')
