@@ -1,0 +1,252 @@
+{
+  "observedAt": "2026-10-21T04:31:45.723Z",
+  "total": {
+    "n": 150,
+    "errors": 0,
+    "truncated": 0,
+    "outputTokens": {
+      "median": 153,
+      "max": 212
+    },
+    "latencySeconds": {
+      "median": 1.7882702299999946,
+      "p95": 2.6038197789999975,
+      "max": 3.5533301989999893
+    },
+    "inputTokensMean": 1590.68,
+    "providerUsd": 0.021417629999999997,
+    "explicitSamplingLanguage": 43
+  },
+  "byCap": {
+    "256": {
+      "n": 50,
+      "errors": 0,
+      "truncated": 0,
+      "outputTokens": {
+        "median": 154,
+        "max": 212
+      },
+      "latencySeconds": {
+        "median": 1.7882702299999946,
+        "p95": 2.6038197789999975,
+        "max": 3.1905327640000034
+      },
+      "inputTokensMean": 1590.68,
+      "providerUsd": 0.007165209999999999,
+      "explicitSamplingLanguage": 13
+    },
+    "384": {
+      "n": 50,
+      "errors": 0,
+      "truncated": 0,
+      "outputTokens": {
+        "median": 146,
+        "max": 198
+      },
+      "latencySeconds": {
+        "median": 1.7570277319999876,
+        "p95": 2.6046173100000014,
+        "max": 3.532362441000001
+      },
+      "inputTokensMean": 1590.68,
+      "providerUsd": 0.007094750000000001,
+      "explicitSamplingLanguage": 15
+    },
+    "512": {
+      "n": 50,
+      "errors": 0,
+      "truncated": 0,
+      "outputTokens": {
+        "median": 154,
+        "max": 185
+      },
+      "latencySeconds": {
+        "median": 1.8504912869999972,
+        "p95": 2.477641868000006,
+        "max": 3.5533301989999893
+      },
+      "inputTokensMean": 1590.68,
+      "providerUsd": 0.0071576700000000005,
+      "explicitSamplingLanguage": 15
+    }
+  },
+  "byCandidate": {
+    "baseline": {
+      "n": 30,
+      "errors": 0,
+      "truncated": 0,
+      "outputTokens": {
+        "median": 146,
+        "max": 189
+      },
+      "latencySeconds": {
+        "median": 1.6774654390000068,
+        "p95": 2.1842533840000105,
+        "max": 2.46710478400001
+      },
+      "inputTokensMean": 1934,
+      "providerUsd": 0.004929339999999998,
+      "explicitSamplingLanguage": 6
+    },
+    "pages10-bytes10000": {
+      "n": 30,
+      "errors": 0,
+      "truncated": 0,
+      "outputTokens": {
+        "median": 151,
+        "max": 190
+      },
+      "latencySeconds": {
+        "median": 1.766532349999994,
+        "p95": 2.329344487999973,
+        "max": 2.700483229999998
+      },
+      "inputTokensMean": 1093.2,
+      "providerUsd": 0.00330018,
+      "explicitSamplingLanguage": 11
+    },
+    "pages20-bytes10000": {
+      "n": 30,
+      "errors": 0,
+      "truncated": 0,
+      "outputTokens": {
+        "median": 150,
+        "max": 183
+      },
+      "latencySeconds": {
+        "median": 1.8986601329999977,
+        "p95": 2.425611720000001,
+        "max": 2.675320854999998
+      },
+      "inputTokensMean": 1229.8,
+      "providerUsd": 0.0035678500000000004,
+      "explicitSamplingLanguage": 10
+    },
+    "pages10-bytes20000": {
+      "n": 30,
+      "errors": 0,
+      "truncated": 0,
+      "outputTokens": {
+        "median": 155,
+        "max": 212
+      },
+      "latencySeconds": {
+        "median": 1.9517590819999895,
+        "p95": 3.1905327640000034,
+        "max": 3.532362441000001
+      },
+      "inputTokensMean": 1774.8,
+      "providerUsd": 0.004661800000000001,
+      "explicitSamplingLanguage": 5
+    },
+    "pages20-bytes20000": {
+      "n": 30,
+      "errors": 0,
+      "truncated": 0,
+      "outputTokens": {
+        "median": 159,
+        "max": 190
+      },
+      "latencySeconds": {
+        "median": 1.7612463029999998,
+        "p95": 2.411249061000002,
+        "max": 3.5533301989999893
+      },
+      "inputTokensMean": 1921.6,
+      "providerUsd": 0.0049584600000000005,
+      "explicitSamplingLanguage": 11
+    }
+  },
+  "largeDocuments": {
+    "baseline": {
+      "n": 12,
+      "errors": 0,
+      "truncated": 0,
+      "outputTokens": {
+        "median": 161,
+        "max": 189
+      },
+      "latencySeconds": {
+        "median": 1.841567256999988,
+        "p95": 2.037710954,
+        "max": 2.037710954
+      },
+      "inputTokensMean": 4124.5,
+      "providerUsd": 0.003720209999999999,
+      "explicitSamplingLanguage": 6
+    },
+    "pages10-bytes10000": {
+      "n": 12,
+      "errors": 0,
+      "truncated": 0,
+      "outputTokens": {
+        "median": 151,
+        "max": 190
+      },
+      "latencySeconds": {
+        "median": 1.7987383719999999,
+        "p95": 2.043290023000009,
+        "max": 2.043290023000009
+      },
+      "inputTokensMean": 1931,
+      "providerUsd": 0.00198952,
+      "explicitSamplingLanguage": 8
+    },
+    "pages20-bytes10000": {
+      "n": 12,
+      "errors": 0,
+      "truncated": 0,
+      "outputTokens": {
+        "median": 154,
+        "max": 181
+      },
+      "latencySeconds": {
+        "median": 1.9540966530000006,
+        "p95": 2.2210836769999878,
+        "max": 2.2210836769999878
+      },
+      "inputTokensMean": 2272.5,
+      "providerUsd": 0.0022636899999999996,
+      "explicitSamplingLanguage": 9
+    },
+    "pages10-bytes20000": {
+      "n": 12,
+      "errors": 0,
+      "truncated": 0,
+      "outputTokens": {
+        "median": 165,
+        "max": 212
+      },
+      "latencySeconds": {
+        "median": 2.0672502380000006,
+        "p95": 3.532362441000001,
+        "max": 3.532362441000001
+      },
+      "inputTokensMean": 3635,
+      "providerUsd": 0.0033638800000000005,
+      "explicitSamplingLanguage": 3
+    },
+    "pages20-bytes20000": {
+      "n": 12,
+      "errors": 0,
+      "truncated": 0,
+      "outputTokens": {
+        "median": 163,
+        "max": 190
+      },
+      "latencySeconds": {
+        "median": 2.0085517350000153,
+        "p95": 3.5533301989999893,
+        "max": 3.5533301989999893
+      },
+      "inputTokensMean": 4002,
+      "providerUsd": 0.0036387000000000004,
+      "explicitSamplingLanguage": 11
+    }
+  },
+  "limitations": [
+    "Pilot latency excludes S3 reads and embedding. Two repetitions do not estimate production tail latency reliably.",
+    "Sampling-language regex is a transparency indicator, not a factuality or retrieval-quality score.",
+    "Two related catalogs and three synthetic short documents are not a representative benchmark."
+  ]
+}

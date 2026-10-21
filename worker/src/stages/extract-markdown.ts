@@ -1,3 +1,4 @@
+import { buildSummaryEvidence } from "./summary-evidence.js";
 import type { CapacityLeaseStore } from "../media/capacity/types.js";
 import { extractMedia } from "../media/extract.js";
 import type { MediaJournal } from "../media/types.js";
@@ -631,6 +632,14 @@ export class ExtractMarkdownStage implements Stage {
 
                   const artifactUri =
                     critique?.correctedTextUri ?? winningCandidate.textUri;
+                  if (state.run.pipeline.summarize) {
+                    const evidenceKey = `${document.userId}/${state.run.id}/summary-evidence/${document.id}.json`;
+                    await this.storage.putJson(evidenceKey, buildSummaryEvidence({
+                      text: winningText, pageCount: document.pageCount,
+                      documentId: document.id, sourceUri: artifactUri,
+                    }));
+                    state.artifactLedger.recordDocument(document.id, "summary-evidence", this.storage.uri(evidenceKey));
+                  }
                   const manifestUri = this.storage.uri(manifestKey);
                   const canonicalUri = this.storage.uri(canonicalKey);
                   const contractUri = this.storage.uri(contractKey);
