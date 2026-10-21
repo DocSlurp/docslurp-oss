@@ -1,0 +1,289 @@
+#!/usr/bin/env python3
+"""Read-only post-score overlays; holdout requires explicit frozen-profile authorization."""
+import argparse
+from datetime import datetime,timezone
+import hashlib
+import json
+import math
+from pathlib import Path
+import re
+import time
+from PIL import Image,ImageDraw,ImageFont
+from scoring import match_boxes
+
+SHOWCASES=('maple-lantern-1994-takeout-menu','food-feature-diner-mixed-light',
+           'scientific-phase-rotated-90','rainfall-partial-table-bottom')
+FONT='/usr/share/fonts/gsfonts/NimbusSans-Regular.otf'
+COLORS={'TP':'#008663','FP':'#c12548','FN':'#bd6600'}
+
+
+def digest(path):return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+def iso(value):return datetime.fromtimestamp(value,timezone.utc).isoformat()
+def font(size):return ImageFont.truetype(FONT,size)
+
+
+def manifest_scope(path,allow_holdout=False,finalist_freeze=None):
+    """Authorize a strict split before reading image/reference/prediction content."""
+    path=Path(path);freeze=None;freeze_receipt=None
+    if allow_holdout:
+        if finalist_freeze is None:raise ValueError('--allow-holdout requires --finalist-freeze')
+        freeze_path=Path(finalist_freeze);freeze=json.loads(freeze_path.read_text())
+        if freeze.get('schema')!='layout-finalists-freeze-v1' or freeze.get('no_retuning_after_holdout') is not True:
+            raise ValueError('Invalid finalist freeze or missing no-retuning policy')
+        matches=[name for name,data in freeze.get('datasets',{}).items() if data.get('holdout_sha256')==digest(path) and data.get('integrity_passed') is True]
+        if len(matches)!=1:raise ValueError('Heldout manifest hash not uniquely authorized by finalist freeze')
+        freeze_receipt={'path':str(freeze_path),'sha256':digest(freeze_path),'dataset':matches[0],
+            'createdAt':freeze['createdAt'],'no_retuning_after_holdout':True}
+    elif finalist_freeze is not None:raise ValueError('--finalist-freeze requires explicit --allow-holdout')
+    rows=[json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+    split='holdout' if allow_holdout else 'dev'
+    if not rows or any(r.get('split')!=split for r in rows):raise ValueError(f'Only a strict {split}-only manifest is accepted')
+    manifest={r['id']:r for r in rows}
+    if len(manifest)!=len(rows):raise ValueError('Duplicate manifest IDs are not accepted')
+    return manifest,{'split':split,'finalist_freeze':freeze_receipt,
+        'scope':'post-confirmation holdout error review; frozen profiles, no retuning' if allow_holdout else 'post-score development diagnostics; not independent admission QA or heldout confirmation'}
+
+
+def validate_prediction_scope(metadata,summary_path,scope):
+    if metadata.get('split')!=scope['split']:raise ValueError('Prediction split differs from authorized review scope')
+    if scope['split']=='holdout':
+        if not Path(summary_path).exists():raise ValueError('Holdout review requires a completed prediction summary')
+        created=datetime.fromisoformat(scope['finalist_freeze']['createdAt']).timestamp()
+        if not metadata.get('started_unix') or metadata['started_unix']<created:
+            raise ValueError('Holdout prediction predates finalist freeze')
+
+
+def read_selected(path,ids,variant,repeat):
+    selected={}
+    with Path(path).open() as stream:
+        for line in stream:
+            row=json.loads(line)
+            if row['page_id'] not in ids or row['variant']!=variant or row['repeat']!=repeat:continue
+            if row['page_id'] in selected:raise ValueError('Duplicate selected page/variant/repeat')
+            selected[row['page_id']]=row
+    return selected
+
+
+def diagnostics(truth,predicted):
+    pairs=match_boxes(truth,predicted,.5,class_aware=True)
+    return {'tp':len(pairs),'fp':len(predicted)-len(pairs),'fn':len(truth)-len(pairs),
+            'matches':[{'truth_index':ti,'prediction_index':pi,'iou':iou} for ti,pi,iou in pairs]},pairs
+
+
+def annotate(image,regions,statuses,prefix,panel_width,supported=None):
+    scale=panel_width/image.width;height=round(image.height*scale)
+    canvas=image.resize((panel_width,height),Image.Resampling.LANCZOS).convert('RGB');d=ImageDraw.Draw(canvas)
+    for index,(region,status) in enumerate(zip(regions,statuses)):
+        index=region.get('_overlay_index',index)
+        box=region['bbox']
+        if len(box)!=4 or not all(math.isfinite(v) and 0<=v<=1 for v in box) or box[0]>=box[2] or box[1]>=box[3]:
+            raise ValueError('Invalid normalized diagnostic box')
+        pixels=[box[0]*panel_width,box[1]*height,box[2]*panel_width,box[3]*height]
+        color=COLORS[status];d.rectangle(pixels,outline=color,width=3)
+        label=f'{prefix}{index:02d} {region["label"]} {status}'
+        if prefix=='P':label+=f' {region.get("confidence",0):.2f}'
+        elif supported is not None and region['label'] not in supported:label+=' UNSUPPORTED'
+        # Labels can overlap in dense layouts; exact full index retained in JSON.
+        b=d.textbbox((0,0),label,font=font(14));tw=b[2]+7;th=b[3]+6
+        x=min(max(0,pixels[0]),max(0,panel_width-tw));y=max(0,pixels[1]-th)
+        d.rectangle([x,y,x+tw,y+th],fill=color)
+        d.text((x+3,y+1),label,font=font(14),fill='white')
+    return canvas
+
+
+def validate_reference(manifest_row,prediction):
+    width,height=manifest_row['width'],manifest_row['height']
+    reference=[dict(r,bbox=[v/s for v,s in zip(r['bbox'],(width,height,width,height))])
+               for r in manifest_row['regions'] if r.get('visibility',1)>0]
+    if len(reference)!=len(prediction['truth']):raise ValueError('Prediction truth count differs from frozen dev reference')
+    for left,right in zip(reference,prediction['truth']):
+        if left.get('id')!=right.get('id') or left['label']!=right['label'] or any(abs(a-b)>1e-8 for a,b in zip(left['bbox'],right['bbox'])):
+            raise ValueError('Prediction reference differs from frozen dev reference')
+    return reference
+
+
+def render_page(manifest_row,prediction,image_path,output,metadata,supported,panel_width=850):
+    actual=digest(image_path);expected=manifest_row.get('metadata',{}).get('image_sha256')
+    if expected and actual!=expected:raise ValueError('Source raster differs from frozen manifest')
+    if prediction.get('source_sha256') and prediction['source_sha256']!=actual:raise ValueError('Inference source raster differs from displayed raster')
+    truth=validate_reference(manifest_row,prediction);predicted=prediction['regions']
+    with Image.open(image_path) as opened:image=opened.convert('RGB')
+    if image.size!=(manifest_row['width'],manifest_row['height']):raise ValueError('Source size mismatch')
+    score,pairs=diagnostics(truth,predicted);ti={m[0] for m in pairs};pi={m[1] for m in pairs}
+    left=annotate(image,truth,['TP' if i in ti else 'FN' for i in range(len(truth))],'G',panel_width,supported)
+    right=annotate(image,predicted,['TP' if i in pi else 'FP' for i in range(len(predicted))],'P',panel_width)
+    original=image.resize(left.size,Image.Resampling.LANCZOS)
+    header=170;footer=120;gap=14;canvas=Image.new('RGB',(panel_width*3+gap*4,left.height+header+footer),'#14222b');d=ImageDraw.Draw(canvas)
+    model=metadata.get('model',{});runtime=model.get('runtime') or model.get('detector',{}).get('runtime') or 'see JSON runtime provenance'
+    precision=model.get('precision') or model.get('detector',{}).get('precision') or 'unrecorded'
+    runtime=f'{runtime}/{precision}/batch{metadata.get("batch_size","?")}'
+    title=f'{manifest_row["id"]} | {model.get("id","unrecorded model")} | {metadata.get("device","unknown device")}'
+    d.text((gap,12),title,font=font(25),fill='#f0f5f5')
+    review='POST-CONFIRMATION HOLDOUT ERROR REVIEW' if metadata.get('split')=='holdout' else 'POST-SCORE DEV ERROR ANALYSIS'
+    d.text((gap,50),f'{review} | class-aware greedy IoU >= 0.50 | TP {score["tp"]} / FP {score["fp"]} / FN {score["fn"]}',font=font(22),fill='#b5dad3')
+    d.text((gap,86),f'variant={prediction["variant"]}; repeat={prediction["repeat"]}; runtime={runtime}; inference error={prediction.get("error")}',font=font(18),fill='#edf0ed')
+    for i,(panel,label) in enumerate([(original,'SOURCE RASTER'),(left,'REFERENCE: TP green / FN orange'),(right,'PREDICTION: TP green / FP red; confidence is model score')]):
+        x=gap+i*(panel_width+gap);d.text((x,132),label,font=font(19),fill='white');canvas.paste(panel,(x,header))
+    y=header+left.height+14
+    d.text((gap,y),f'Source SHA256 {actual}',font=font(16),fill='#cbd4d5')
+    d.text((gap,y+29),'Reference evidence-ordinal annotation confidence is separate from prediction confidence; no confidence weighting. All classes remain visible.',font=font(18),fill='#cbd4d5')
+    d.text((gap,y+59),'Exact boxes, labels, unsupported classes, matches, source/provenance timestamps and full confidence details: adjacent JSON. No production readiness claim.',font=font(17),fill='#cbd4d5')
+    canvas.save(output,optimize=True)
+    return {'diagnostic':score,'source_image_sha256':actual,'image_dimensions':list(image.size),
+        'unsupported_truth_labels':sorted({r['label'] for r in truth}-set(supported)) if supported is not None else None,
+        'supported_labels':sorted(supported) if supported is not None else None,
+        'truth':truth,'predictions':predicted,'inference_error':prediction.get('error'),
+        'source_manifest_metadata':manifest_row.get('metadata',{}),
+        'timestamp_policy':'File mtimes are filesystem modification times, not physical capture times or per-page inference timestamps.',
+        'source_image_file_mtime_utc':iso(image_path.stat().st_mtime)}
+
+
+def compare_overlay_reports(baseline_report,candidate_report,output,allow_holdout=False,finalist_freeze=None):
+    """Compose a same-source four-panel comparison from verified overlay artifacts."""
+    baseline_report,candidate_report,output=map(Path,(baseline_report,candidate_report,output))
+    if output.exists() or output.with_suffix('.json').exists():raise ValueError('Refuse comparison overwrite')
+    left,right=[json.loads(path.read_text()) for path in (baseline_report,candidate_report)]
+    for key in ('page_id','source_image_sha256','truth','source_manifest_sha256'):
+        if left[key]!=right[key]:raise ValueError(f'Comparison source/reference differs: {key}')
+    _,review_scope=manifest_scope(left['source_manifest_path'],allow_holdout,finalist_freeze)
+    for report in (left,right):validate_prediction_scope(report['model_runtime_metadata'],Path(report['prediction_path']).with_suffix('.summary.json'),review_scope)
+    images=[]
+    for report in (left,right):
+        path=Path(report['overlay_path'])
+        if digest(path)!=report['overlay_sha256']:raise ValueError('Overlay image changed after receipt')
+        images.append(Image.open(path).convert('RGB'))
+    if images[0].size!=images[1].size:raise ValueError('Comparison panel geometry differs')
+    gap,header,footer=14,170,120
+    width=(images[0].width-gap*4)//3;height=images[0].height-header-footer
+    panels=[images[0].crop((gap,header,gap+width,header+height)),
+        images[0].crop((gap*2+width,header,gap*2+width*2,header+height)),
+        images[0].crop((gap*3+width*2,header,gap*3+width*3,header+height)),
+        images[1].crop((gap*3+width*2,header,gap*3+width*3,header+height))]
+    canvas=Image.new('RGB',(width*4+gap*5,height+200),'#14222b');d=ImageDraw.Draw(canvas)
+    d.text((gap,12),left['page_id']+' | '+('POST-CONFIRMATION HOLDOUT REVIEW' if allow_holdout else 'POST-SCORE DEVELOPMENT ABLATION')+' | source and reference unchanged',font=font(26),fill='white')
+    labels=['SOURCE RASTER','REFERENCE: green TP / orange FN (baseline matching)',
+        Path(left['prediction_path']).stem,Path(right['prediction_path']).stem]
+    for index,(panel,label) in enumerate(zip(panels,labels)):
+        x=gap+index*(width+gap);d.text((x,65),label,font=font(20),fill='white')
+        if index>=2:
+            report=(left,right)[index-2];score=report['diagnostic']
+            d.text((x,97),f'TP {score["tp"]} / FP {score["fp"]} / FN {score["fn"]} | literal classes, IoU >= .50',font=font(19),fill='#b5dad3')
+        canvas.paste(panel,(x,134))
+    d.text((gap,height+154),'Prediction confidence is model score; annotation confidence is evidence-ordinal. Raw boxes, runtimes, timestamps, source/reference/prediction hashes and both full reports remain retained.',font=font(18),fill='#cbd4d5')
+    output.parent.mkdir(parents=True,exist_ok=True);canvas.save(output,optimize=True)
+    receipt={'schema':'layout-postscore-dev-ablation-comparison-v1','created_utc':iso(time.time()),'page_id':left['page_id'],
+        'source_image_sha256':left['source_image_sha256'],'comparison_image_sha256':digest(output),
+        'baseline':{'report':str(baseline_report),'sha256':digest(baseline_report),'diagnostic':left['diagnostic']},
+        'candidate':{'report':str(candidate_report),'sha256':digest(candidate_report),'diagnostic':right['diagnostic']},
+        'reference_panel_note':'Reference TP/FN colors use baseline matching only; candidate matching retained in candidate report.',
+        'scope':review_scope['scope'],'finalist_freeze':review_scope['finalist_freeze'],'read_only_no_retuning':True}
+    output.with_suffix('.json').write_text(json.dumps(receipt,indent=2)+'\n')
+    return receipt
+
+
+def closeup_comparison(baseline_report,candidate_report,output,source_roi,display_ccw90=False,allow_holdout=False,finalist_freeze=None):
+    """Display-only post-score ROI; full-page scores and region IDs stay unchanged."""
+    baseline_report,candidate_report,output=map(Path,(baseline_report,candidate_report,output))
+    if output.exists() or output.with_suffix('.json').exists():raise ValueError('Refuse close-up overwrite')
+    left,right=[json.loads(path.read_text()) for path in (baseline_report,candidate_report)]
+    for key in ('page_id','source_image_sha256','truth','source_manifest_sha256'):
+        if left[key]!=right[key]:raise ValueError('Close-up inputs differ')
+    manifest=Path(left['source_manifest_path'])
+    if digest(manifest)!=left['source_manifest_sha256']:raise ValueError('Manifest changed')
+    rows,review_scope=manifest_scope(manifest,allow_holdout,finalist_freeze)
+    for report in (left,right):validate_prediction_scope(report['model_runtime_metadata'],Path(report['prediction_path']).with_suffix('.summary.json'),review_scope)
+    row=rows[left['page_id']];path=Path(row['image_path'])
+    if not path.is_absolute():path=manifest.parent/path
+    if digest(path)!=left['source_image_sha256']:raise ValueError('Source raster changed')
+    x0,y0,x1,y1=source_roi
+    if not 0<=x0<x1<=1 or not 0<=y0<y1<=1:raise ValueError('Invalid normalized source ROI')
+    with Image.open(path) as im:
+        pixels=[round(v*s) for v,s in zip(source_roi,(im.width,im.height,im.width,im.height))]
+        crop=im.convert('RGB').crop(pixels)
+        actual=[v/s for v,s in zip(pixels,(im.width,im.height,im.width,im.height))]
+    x0,y0,x1,y1=actual
+    if display_ccw90:crop=crop.transpose(Image.Transpose.ROTATE_90)
+    def mapped(regions,statuses):
+        selected=[];states=[]
+        for index,(region,status) in enumerate(zip(regions,statuses)):
+            a,b,c,d=region['bbox'];a=max(a,x0);b=max(b,y0);c=min(c,x1);d=min(d,y1)
+            if a>=c or b>=d:continue
+            a,c=(a-x0)/(x1-x0),(c-x0)/(x1-x0);b,d=(b-y0)/(y1-y0),(d-y0)/(y1-y0)
+            box=[b,1-c,d,1-a] if display_ccw90 else [a,b,c,d]
+            selected.append(dict(region,bbox=box,_overlay_index=index));states.append(status)
+        return selected,states
+    lmatches=left['diagnostic']['matches'];rmat=right['diagnostic']['matches']
+    gtids={v['truth_index'] for v in lmatches};lpids={v['prediction_index'] for v in lmatches};rpids={v['prediction_index'] for v in rmat}
+    gt,gs=mapped(left['truth'],['TP' if i in gtids else 'FN' for i in range(len(left['truth']))])
+    lp,ls=mapped(left['predictions'],['TP' if i in lpids else 'FP' for i in range(len(left['predictions']))])
+    rp,rs=mapped(right['predictions'],['TP' if i in rpids else 'FP' for i in range(len(right['predictions']))])
+    width=1000;plain=crop.resize((width,round(crop.height*width/crop.width)),Image.Resampling.LANCZOS)
+    panels=[plain,annotate(crop,gt,gs,'G',width,set(left['supported_labels']) if left['supported_labels'] else None),
+            annotate(crop,lp,ls,'P',width),annotate(crop,rp,rs,'P',width)]
+    height=plain.height;gap=24;top=170;rowheight=height+100
+    canvas=Image.new('RGB',(width*2+gap*3,top+rowheight*2+80),'#14222b');draw=ImageDraw.Draw(canvas)
+    draw.text((gap,18),left['page_id']+(' | POST-CONFIRMATION HOLDOUT CLOSE-UP' if allow_holdout else ' | SAME SOURCE, DISPLAY-ONLY CLOSE-UP'),font=font(29),fill='white')
+    draw.text((gap,67),f'Normalized source ROI {actual}; display CCW90={display_ccw90}. Inference input and full-page scoring unchanged.',font=font(21),fill='#cbd4d5')
+    draw.text((gap,104),'Full-page class-aware IoU >= .50 | model/runtime/timestamps, raw confidence and all region IDs remain in linked reports.',font=font(22),fill='#cbd4d5')
+    labels=['SOURCE RASTER','REFERENCE (baseline TP/FN colors)',Path(left['prediction_path']).stem,Path(right['prediction_path']).stem]
+    for i,(panel,label) in enumerate(zip(panels,labels)):
+        x=gap+(i%2)*(width+gap);y=top+(i//2)*rowheight
+        draw.text((x,y),label,font=font(24),fill='white')
+        if i>=2:
+            record=(left,right)[i-2];s=record['diagnostic'];meta=record['model_runtime_metadata']
+            model=meta.get('model',{});precision=model.get('precision') or model.get('detector',{}).get('precision','unrecorded')
+            draw.text((x,y+36),f'FULL PAGE TP {s["tp"]} / FP {s["fp"]} / FN {s["fn"]} | {meta.get("device")} / {precision} / batch{meta.get("batch_size")}',font=font(23),fill='#b5dad3')
+        canvas.paste(panel,(x,y+80))
+    draw.text((gap,canvas.height-40),('POST-CONFIRMATION HOLDOUT REVIEW. NO RETUNING. ' if allow_holdout else 'Post-score development illustration. ')+'Crop is not a new score or test input; confidence types stay separate.',font=font(21),fill='#cbd4d5')
+    output.parent.mkdir(parents=True,exist_ok=True);canvas.save(output,optimize=True)
+    receipt={'schema':'layout-postscore-dev-closeup-v1','page_id':left['page_id'],'created_utc':iso(time.time()),
+        'source_roi_requested':source_roi,'source_roi_actual':actual,'source_roi_pixels':pixels,'display_ccw90':display_ccw90,
+        'comparison_image_sha256':digest(output),'source_image_sha256':left['source_image_sha256'],
+        'baseline_report':str(baseline_report),'baseline_report_sha256':digest(baseline_report),
+        'candidate_report':str(candidate_report),'candidate_report_sha256':digest(candidate_report),
+        'full_page_context_images':[left['overlay_path'],right['overlay_path']],
+        'scope':review_scope['scope'],'finalist_freeze':review_scope['finalist_freeze'],'read_only_no_retuning':True,'no_recomputed_roi_quality':True}
+    output.with_suffix('.json').write_text(json.dumps(receipt,indent=2)+'\n')
+    return receipt
+
+
+def main(argv=None):
+    p=argparse.ArgumentParser(description=__doc__)
+    p.add_argument('--manifest',type=Path,required=True);p.add_argument('--predictions',type=Path,nargs='+',required=True)
+    p.add_argument('--page-id',action='append');p.add_argument('--variant',default='original');p.add_argument('--repeat',type=int,default=0)
+    p.add_argument('--allow-holdout',action='store_true');p.add_argument('--finalist-freeze',type=Path)
+    p.add_argument('--output-dir',type=Path,required=True);p.add_argument('--panel-width',type=int,default=850)
+    args=p.parse_args(argv)
+    if args.output_dir.exists():raise ValueError('Refuse to overwrite diagnostic evidence')
+    if not 400<=args.panel_width<=1600:raise ValueError('Panel width outside readable bounded range')
+    manifest,review_scope=manifest_scope(args.manifest,args.allow_holdout,args.finalist_freeze)
+    selected=args.page_id or list(SHOWCASES)
+    if set(selected)-set(manifest):raise ValueError('Requested page IDs absent from strict dev manifest')
+    args.output_dir.mkdir(parents=True);records=[]
+    for path in args.predictions:
+        metadata_path=path.with_suffix('.metadata.json');metadata=json.loads(metadata_path.read_text())
+        validate_prediction_scope(metadata,path.with_suffix('.summary.json'),review_scope)
+        if metadata.get('manifest_sha256')!=digest(args.manifest):raise ValueError('Prediction manifest hash does not match strict dev manifest')
+        summary_path=path.with_suffix('.summary.json');supported=None
+        if summary_path.exists():supported=set(json.loads(summary_path.read_text())['summaries'][args.variant]['scores']['supported_labels'])
+        rows=read_selected(path,set(selected),args.variant,args.repeat)
+        for page_id in selected:
+            if page_id not in rows:raise ValueError(f'Missing requested prediction {page_id} in {path}')
+            safe=lambda v:re.sub(r'[^a-zA-Z0-9_.-]','_',v)
+            stem=safe(path.stem)+'--'+safe(page_id)+'--'+safe(args.variant)+f'--r{args.repeat}'
+            output=args.output_dir/(stem+'.png');source=Path(manifest[page_id]['image_path'])
+            if not source.is_absolute():source=args.manifest.parent/source
+            report=render_page(manifest[page_id],rows[page_id],source,output,metadata,supported,args.panel_width)
+            report.update(schema='layout-postscore-dev-overlay-v1',created_utc=iso(time.time()),page_id=page_id,
+                model_runtime_metadata=metadata,source_manifest_path=str(args.manifest),source_manifest_sha256=digest(args.manifest),
+                prediction_path=str(path),prediction_sha256=digest(path),prediction_file_mtime_utc=iso(path.stat().st_mtime),
+                prediction_run_start_utc=iso(metadata['started_unix']) if metadata.get('started_unix') else None,
+                prediction_timestamp_per_page=None,prediction_variant=args.variant,prediction_repeat=args.repeat,
+                overlay_path=str(output),overlay_sha256=digest(output),scope=review_scope['scope'],finalist_freeze=review_scope['finalist_freeze'],read_only_no_retuning=True)
+            output.with_suffix('.json').write_text(json.dumps(report,indent=2)+'\n')
+            records.append({k:report[k] for k in ('page_id','diagnostic','overlay_path','overlay_sha256','unsupported_truth_labels')})
+    (args.output_dir/'index.json').write_text(json.dumps(records,indent=2)+'\n')
+    print(json.dumps({'overlays':len(records),'index':str(args.output_dir/'index.json')}))
+
+
+if __name__=='__main__':main()

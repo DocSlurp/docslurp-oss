@@ -1,0 +1,10 @@
+[
+ {"name":"original","codec":"original"},
+ {"name":"png-1280","codec":"png","max_edge":1280},
+ {"name":"jpeg-1280-q80","codec":"jpeg","max_edge":1280,"quality":80},
+ {"name":"jpeg-960-q60","codec":"jpeg","max_edge":960,"quality":60},
+ {"name":"jpeg-640-q40","codec":"jpeg","max_edge":640,"quality":40},
+ {"name":"jpeg-480-q25","codec":"jpeg","max_edge":480,"quality":25},
+ {"name":"webp-960-q60","codec":"webp","max_edge":960,"quality":60},
+ {"name":"gray-jpeg-960-q60","codec":"jpeg","max_edge":960,"quality":60,"grayscale":true}
+]

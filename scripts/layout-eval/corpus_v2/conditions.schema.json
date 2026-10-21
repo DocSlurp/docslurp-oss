@@ -1,0 +1,430 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://docslurp.io/schemas/layout-condition-tags-v1.json",
+  "title": "Layout condition evidence sidecar",
+  "type": "object",
+  "required": [
+    "schema",
+    "id",
+    "category",
+    "artifacts",
+    "tags",
+    "assertions",
+    "unknown"
+  ],
+  "properties": {
+    "schema": {
+      "const": "layout-condition-tags-v1"
+    },
+    "id": {
+      "type": "string"
+    },
+    "category": {
+      "enum": [
+        "native",
+        "capture-variant",
+        "historical-reference"
+      ]
+    },
+    "artifacts": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/evidence"
+      }
+    },
+    "tags": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "enum": [
+          "digital",
+          "scanned",
+          "picture",
+          "born-digital",
+          "synthetic",
+          "aligned",
+          "skewed",
+          "perspective",
+          "rotated",
+          "warped",
+          "low-res",
+          "blurry",
+          "underexposed",
+          "low-lighting",
+          "shadow",
+          "glare",
+          "uneven-lighting",
+          "noise",
+          "low-contrast",
+          "cropped",
+          "occluded",
+          "borderless",
+          "bordered",
+          "mixed-rules",
+          "header-repeated",
+          "continues",
+          "partial-row",
+          "truncated-cell",
+          "empty-cell",
+          "missing-cell",
+          "row-aligned",
+          "row-misaligned"
+        ]
+      }
+    },
+    "assertions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "tag",
+          "facet",
+          "scope",
+          "evidence",
+          "confidence",
+          "basis",
+          "actor"
+        ],
+        "properties": {
+          "tag": {
+            "enum": [
+              "digital",
+              "scanned",
+              "picture",
+              "born-digital",
+              "synthetic",
+              "aligned",
+              "skewed",
+              "perspective",
+              "rotated",
+              "warped",
+              "low-res",
+              "blurry",
+              "underexposed",
+              "low-lighting",
+              "shadow",
+              "glare",
+              "uneven-lighting",
+              "noise",
+              "low-contrast",
+              "cropped",
+              "occluded",
+              "borderless",
+              "bordered",
+              "mixed-rules",
+              "header-repeated",
+              "continues",
+              "partial-row",
+              "truncated-cell",
+              "empty-cell",
+              "missing-cell",
+              "row-aligned",
+              "row-misaligned"
+            ]
+          },
+          "facet": {
+            "type": "string"
+          },
+          "scope": {
+            "type": "object",
+            "required": [
+              "kind",
+              "id"
+            ],
+            "properties": {
+              "kind": {
+                "enum": [
+                  "page",
+                  "region",
+                  "table",
+                  "row",
+                  "cell"
+                ]
+              },
+              "id": {
+                "type": "string"
+              }
+            }
+          },
+          "evidence": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "$ref": "#/$defs/evidence"
+            }
+          },
+          "confidence": {
+            "enum": [
+              0,
+              0.25,
+              0.5,
+              0.75,
+              1
+            ]
+          },
+          "basis": {
+            "type": "string",
+            "minLength": 1
+          },
+          "actor": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    },
+    "unknown": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "facet",
+          "reason"
+        ],
+        "properties": {
+          "facet": {
+            "type": "string"
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "evidence": {
+      "type": "object",
+      "required": [
+        "path",
+        "sha256"
+      ],
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      }
+    }
+  },
+  "x-taxonomy": {
+    "digital": {
+      "facet": "acquisition",
+      "scopes": [
+        "page"
+      ]
+    },
+    "scanned": {
+      "facet": "acquisition",
+      "scopes": [
+        "page"
+      ]
+    },
+    "picture": {
+      "facet": "acquisition",
+      "scopes": [
+        "page"
+      ]
+    },
+    "born-digital": {
+      "facet": "source-origin",
+      "scopes": [
+        "page"
+      ]
+    },
+    "synthetic": {
+      "facet": "synthesis",
+      "scopes": [
+        "page"
+      ]
+    },
+    "aligned": {
+      "facet": "page-alignment",
+      "scopes": [
+        "page"
+      ]
+    },
+    "skewed": {
+      "facet": "page-alignment",
+      "scopes": [
+        "page"
+      ]
+    },
+    "perspective": {
+      "facet": "page-projection",
+      "scopes": [
+        "page"
+      ]
+    },
+    "rotated": {
+      "facet": "page-rotation",
+      "scopes": [
+        "page"
+      ]
+    },
+    "warped": {
+      "facet": "page-shape",
+      "scopes": [
+        "page"
+      ]
+    },
+    "low-res": {
+      "facet": "resolution",
+      "scopes": [
+        "page",
+        "region",
+        "row",
+        "cell"
+      ]
+    },
+    "blurry": {
+      "facet": "sharpness",
+      "scopes": [
+        "page",
+        "region",
+        "row",
+        "cell"
+      ]
+    },
+    "underexposed": {
+      "facet": "digital-exposure",
+      "scopes": [
+        "page",
+        "region"
+      ]
+    },
+    "low-lighting": {
+      "facet": "exposure",
+      "scopes": [
+        "page",
+        "region"
+      ]
+    },
+    "shadow": {
+      "facet": "illumination",
+      "scopes": [
+        "page",
+        "region"
+      ]
+    },
+    "glare": {
+      "facet": "illumination",
+      "scopes": [
+        "page",
+        "region"
+      ]
+    },
+    "uneven-lighting": {
+      "facet": "illumination",
+      "scopes": [
+        "page",
+        "region"
+      ]
+    },
+    "noise": {
+      "facet": "noise",
+      "scopes": [
+        "page",
+        "region"
+      ]
+    },
+    "low-contrast": {
+      "facet": "contrast",
+      "scopes": [
+        "page",
+        "region"
+      ]
+    },
+    "cropped": {
+      "facet": "extent",
+      "scopes": [
+        "page",
+        "region",
+        "table",
+        "row",
+        "cell"
+      ]
+    },
+    "occluded": {
+      "facet": "visibility",
+      "scopes": [
+        "page",
+        "region",
+        "table",
+        "row",
+        "cell"
+      ]
+    },
+    "borderless": {
+      "facet": "table-rules",
+      "scopes": [
+        "table"
+      ]
+    },
+    "bordered": {
+      "facet": "table-rules",
+      "scopes": [
+        "table"
+      ]
+    },
+    "mixed-rules": {
+      "facet": "table-rules",
+      "scopes": [
+        "table"
+      ]
+    },
+    "header-repeated": {
+      "facet": "table-header",
+      "scopes": [
+        "table"
+      ]
+    },
+    "continues": {
+      "facet": "table-continuation",
+      "scopes": [
+        "table"
+      ]
+    },
+    "partial-row": {
+      "facet": "row-extent",
+      "scopes": [
+        "row"
+      ]
+    },
+    "truncated-cell": {
+      "facet": "cell-extent",
+      "scopes": [
+        "cell"
+      ]
+    },
+    "empty-cell": {
+      "facet": "cell-content",
+      "scopes": [
+        "cell"
+      ]
+    },
+    "missing-cell": {
+      "facet": "cell-content",
+      "scopes": [
+        "cell"
+      ]
+    },
+    "row-aligned": {
+      "facet": "row-alignment",
+      "scopes": [
+        "row"
+      ]
+    },
+    "row-misaligned": {
+      "facet": "row-alignment",
+      "scopes": [
+        "row"
+      ]
+    }
+  },
+  "x-semantic-validation": "condition_tags.validate rejects incompatible exclusive-facet assertions only within the same exact scope; inherit_page keeps page context separate from row/cell assertions."
+}

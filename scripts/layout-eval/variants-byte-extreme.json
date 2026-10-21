@@ -1,0 +1,14 @@
+[
+ {"name":"original","codec":"original"},
+ {"name":"jpeg-240-q25","codec":"jpeg","max_edge":240,"quality":25},
+ {"name":"jpeg-320-q25","codec":"jpeg","max_edge":320,"quality":25},
+ {"name":"jpeg-640-q15","codec":"jpeg","max_edge":640,"quality":15},
+ {"name":"jpeg-960-q25","codec":"jpeg","max_edge":960,"quality":25},
+ {"name":"png-960-palette16","codec":"png","max_edge":960,"palette_colors":16},
+ {"name":"png-960-palette64","codec":"png","max_edge":960,"palette_colors":64},
+ {"name":"png-960-palette256","codec":"png","max_edge":960,"palette_colors":256},
+ {"name":"png-960-bilevel160","codec":"png","max_edge":960,"binary_threshold":160},
+ {"name":"webp-960-lossless","codec":"webp","max_edge":960,"lossless":true},
+ {"name":"webp-640-q25","codec":"webp","max_edge":640,"quality":25},
+ {"name":"avif-960-q45-speed8","codec":"avif","max_edge":960,"quality":45,"speed":8}
+]
