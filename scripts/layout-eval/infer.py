@@ -18,6 +18,7 @@ def add_detector_arguments(parser):
     parser.add_argument('--device',choices=['cpu','cuda'],default='cpu')
     parser.add_argument('--precision',choices=['fp32','fp16'],default='fp32')
     parser.add_argument('--threads',type=int,default=4)
+    parser.add_argument('--processor',choices=['slow','fast'],default='slow')
     parser.add_argument('--threshold',type=float,default=.3)
     parser.add_argument('--model-path')
     parser.add_argument('--onnx-path')
@@ -33,7 +34,7 @@ def create_detector(args):
     if args.threads<1 or not 0<=args.threshold<=1:
         raise ValueError('Invalid thread count or confidence threshold')
     detector=load_detector(args.model,device=args.device,precision=args.precision,threads=args.threads,
-        model_path=args.model_path,onnx_path=args.onnx_path,revision=args.revision,local_files_only=True)
+        model_path=args.model_path,onnx_path=args.onnx_path,revision=args.revision,local_files_only=True,processor=args.processor)
     if args.visual_classifier=='siglip2':
         from visual_classifier import VisualCropClassifier,VisualClassifierDetector
         classifier=VisualCropClassifier(device=args.device,precision=args.precision,threads=args.threads,

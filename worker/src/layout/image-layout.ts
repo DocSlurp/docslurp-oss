@@ -112,6 +112,7 @@ export interface ImageLayoutCliOptions {
   /** Explicit local model directory (required for pp-small), or optional ONNX export. */
   modelPath?: string;
   visualClassifier?: "none" | "siglip2";
+  processor?: "slow" | "fast";
   classifierModelPath?: string;
   onnxPath?: string;
   timeoutMs?: number;
@@ -140,7 +141,7 @@ export async function detectImageLayout(input: Buffer, options: ImageLayoutCliOp
     const output = path.join(directory, "layout.json");
     await writeFile(source, input, { mode: 0o600 });
     await runner.run({ binary: options.python,
-      args: [options.script, "--model", options.model, "--device", options.device, "--image", source, "--output", output, ...(options.modelPath ? ["--model-path", options.modelPath] : []), ...(options.onnxPath ? ["--onnx-path", options.onnxPath] : []), ...(options.visualClassifier ? ["--visual-classifier", options.visualClassifier] : []), ...(options.classifierModelPath ? ["--classifier-model-path", options.classifierModelPath] : [])],
+      args: [options.script, "--model", options.model, "--device", options.device, "--image", source, "--output", output, ...(options.modelPath ? ["--model-path", options.modelPath] : []), ...(options.onnxPath ? ["--onnx-path", options.onnxPath] : []), ...(options.processor ? ["--processor", options.processor] : []), ...(options.visualClassifier ? ["--visual-classifier", options.visualClassifier] : []), ...(options.classifierModelPath ? ["--classifier-model-path", options.classifierModelPath] : [])],
       available: true, pages: 1, timeoutMs,
       bundleRoots: [options.cacheDirectory, path.dirname(options.script), ...runtimeRoots, ...[options.modelPath, options.onnxPath, options.classifierModelPath].filter((value): value is string => value !== undefined)],
       bundleEnv: { HF_HOME: options.cacheDirectory, HF_HUB_OFFLINE: "1", TRANSFORMERS_OFFLINE: "1", PYTHONDONTWRITEBYTECODE: "1" },
