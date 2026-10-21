@@ -1,9 +1,11 @@
 # Image layout quickstart
 
-The current synthetic campaign corpus is engineering evidence only. Its scores
-are not grounds for model promotion, production quality claims or a final model
-choice. Further acceptance evaluation is suspended pending a representative
-replacement corpus. Runtime smoke tests establish mechanism behavior only.
+The replacement campaign completed on 32 varied pages plus a separate 12-page
+ordinary-document corpus. Frozen held-out confirmation did not meet the declared
+general-readiness thresholds. The [measured findings](image-layout-confirmation-2026-10-20.md)
+separate CPU pool throughput, model quality, service latency and remaining gaps.
+These are experimental mechanisms; the rejected first corpus remains engineering
+history only.
 
 The explicit CLI, resident local service and worker adapter are usable mechanisms
 for running a cached detector on a single raster image. They return labeled boxes,
