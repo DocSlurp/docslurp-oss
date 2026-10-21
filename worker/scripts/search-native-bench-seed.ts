@@ -11,9 +11,11 @@
  *   runLanceDbMaintenance with LANCEDB_FTS_INDEX=1 (vector index, id btree, FTS index);
  * - other tenants' chunks (Postgres only) that share the GIN index, as in production;
  * - known-item queries: each plants rare and mid-frequency terms in one target chunk.
- *   "keyword" queries contain only planted terms (Postgres websearch AND matches);
- *   "conversational" queries add stop words and one term the target lacks, so the
- *   Postgres branch falls back to its OR backoff, which matches most of the corpus.
+ *   "keyword" queries are two mid-frequency terms the target holds twice each (Postgres
+ *   websearch AND matches a few thousand chunks); "conversational" queries are a rare and
+ *   two mid-frequency terms the target holds once each, plus stop words and one term the
+ *   target lacks, so the Postgres branch falls back to its OR backoff, which matches tens
+ *   of thousands of chunks. Planted terms are never adjacent (no phrase match).
  * Text is Zipf-distributed pseudo-words; vectors are clustered per document; each query's
  * vector is either near its target ("informative") or random. Deterministic (seeded).
  */
@@ -100,6 +102,9 @@ plannedTargets.forEach((target, i) => {
   targets.set(target.id, { kind, planted: kind === "keyword" ? [mid, mid2] : [rare, mid, mid2] });
 });
 
+function plan(planted: { kind: "keyword" | "conversational"; planted: string[] }): string[] {
+  return planted.kind === "keyword" ? [...planted.planted, ...planted.planted] : planted.planted;
+}
 const vectorsByChunk = new Map<string, number[]>();
 log(`workspace bench-ws: ${DOCS} documents x ${CHUNKS} chunks, ${DIM}-d (${route.model})`);
 const { root } = resolveLanceDbConfig();
@@ -123,7 +128,13 @@ for (let start = 1; start <= DOCS; start += BATCH_DOCS) {
       const id = `${documentId}-${c}`;
       let text = chunkText();
       const planted = targets.get(id);
-      if (planted) text = `${text} ${planted.planted.join(" ")} ${planted.planted.join(" ")} ${planted.planted.join(" ")}`;
+      if (planted) {
+        // Planted terms at separate random positions (never a contiguous phrase):
+        // keyword targets carry each term twice, conversational targets once.
+        const words = text.split(" ");
+        for (const term of plan(planted)) words.splice(Math.floor(rand() * words.length), 0, term);
+        text = words.join(" ");
+      }
       const jitter = noise(1.2);
       const vector = unit(centroid.map((x, k) => x + jitter[k]!));
       if (planted) vectorsByChunk.set(id, vector);

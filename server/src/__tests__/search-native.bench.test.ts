@@ -31,6 +31,9 @@ type Query = { q: string; kind: string; informative: boolean; target: { id: stri
 
 let sql: postgres.Sql;
 let statements = 0;
+let reads = 0;
+/** Session, result, usage and diagnostics writes (inline on the legacy path, write-behind on native). */
+const WRITE = /^\s*(begin|commit|rollback|insert|delete|update|with recorded|savepoint|release)/i;
 let search: typeof import("../services/search.js");
 let session: typeof import("../search/session.js");
 let eligible: typeof import("../search/eligible-documents.js");
@@ -43,7 +46,7 @@ function quantile(values: number[], q: number): number {
 describe.skipIf(!databaseUrl || !qrelsPath)("search native benchmark", () => {
   const qrels = qrelsPath ? JSON.parse(readFileSync(qrelsPath, "utf8")) as { workspaceId: string; userId: string; queries: Query[] } : null;
   beforeAll(async () => {
-    sql = postgres(databaseUrl!, { max: 20, prepare: false, onnotice: () => {}, debug: () => { statements += 1; } });
+    sql = postgres(databaseUrl!, { max: 20, prepare: false, onnotice: () => {}, debug: (_connection, query) => { statements += 1; if (!WRITE.test(query)) reads += 1; } });
     vi.doMock("../db.js", () => ({ sql }));
     search = await import("../services/search.js");
     session = await import("../search/session.js");
@@ -64,13 +67,15 @@ describe.skipIf(!databaseUrl || !qrelsPath)("search native benchmark", () => {
 
   async function one(query: Query) {
     const before = statements;
+    const readsBefore = reads;
     const started = performance.now();
     const response = await search.hybridSearch(query.q, qrels!.userId, { ...options, queryVector: query.vector, filters: { workspaceId: qrels!.workspaceId } });
     const ms = performance.now() - started;
     const onPath = statements - before;
+    const readsOnPath = reads - readsBefore;
     await session.drainSearchSessionWrites();
     const rank = response.results.findIndex((result) => result.citation.documentId === query.target.documentId && result.citation.chunkIndex === query.target.chunkIndex);
-    return { ms, onPath, total: statements - before, rank, timings: response.timings ?? {} };
+    return { ms, onPath, readsOnPath, total: statements - before, rank, timings: response.timings ?? {} };
   }
 
   async function runMode(label: string, env: Record<string, string>) {
@@ -115,6 +120,8 @@ describe.skipIf(!databaseUrl || !qrelsPath)("search native benchmark", () => {
         meanMs: Math.round(sequential.reduce((sum, item) => sum + item.ms, 0) / sequential.length),
         sqlBeforeAnswerMean: Number((sequential.reduce((sum, item) => sum + item.onPath, 0) / sequential.length).toFixed(2)),
         sqlBeforeAnswerP50: quantile(sequential.map((item) => item.onPath), 0.5),
+        sqlReadsBeforeAnswerMean: Number((sequential.reduce((sum, item) => sum + item.readsOnPath, 0) / sequential.length).toFixed(2)),
+        sqlReadsBeforeAnswerMax: Math.max(...sequential.map((item) => item.readsOnPath)),
         sqlTotalMean: Number((sequential.reduce((sum, item) => sum + item.total, 0) / sequential.length).toFixed(2)),
         pgBlocksReadPerSearch: Math.round((io1.read - io0.read) / sequential.length),
         pgBlocksHitPerSearch: Math.round((io1.hit - io0.hit) / sequential.length),
