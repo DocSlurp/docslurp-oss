@@ -211,6 +211,30 @@ describe("write-behind session writes (SEARCH_SESSION_WRITE_BEHIND)", () => {
     expect(reported).toEqual([]);
   });
 
+  it("commits billed usage before it answers; only the session rows wait", async () => {
+    const session = await import("../search/session.js");
+    const journal = session.createSearchSessionJournal({ scope: { workspaceId: "w", orgId: "o" }, writeBehind: true });
+    journal.record({ provider: "openrouter", model: "test/embed", metric: "embed-query", inputTokens: 7, costCents: 0.01 });
+    let release!: () => void;
+    // Hold the background queue so the session row cannot commit first.
+    await journal.afterWrites(() => new Promise<void>((resolve) => { release = resolve; }));
+    const persisted = journal.persist({
+      userId: "u", query: "maintenance", results: [], chunks: [],
+      metadata: { originalQuery: "maintenance", workspaceId: "w", filters: {}, options: {} } as never,
+    });
+    await persisted;
+    const usage = await sql<{ input_tokens: number; workspace_id: string }[]>`
+      select input_tokens, workspace_id from usage_events where metadata ->> 'sessionId' = ${journal.sessionId}`;
+    expect(usage).toEqual([{ input_tokens: 7, workspace_id: "w" }]);
+    expect(await sql`select id from search_sessions where id = ${journal.sessionId}`).toEqual([]);
+    release();
+    await session.drainSearchSessionWrites();
+    expect(await sql`select id from search_sessions where id = ${journal.sessionId}`).toHaveLength(1);
+    // The snapshot's own flush did not write the event again.
+    expect(await sql`select id from usage_events where metadata ->> 'sessionId' = ${journal.sessionId}`).toHaveLength(1);
+    expect(reported).toEqual([]);
+  });
+
   it("waits for its own writes once the backlog is full (SEARCH_WRITE_BEHIND_MAX_PENDING)", async () => {
     vi.stubEnv("SEARCH_WRITE_BEHIND_MAX_PENDING", "0");
     const response = await search.hybridSearch("maintenance", "u", { ...options, filters: zeroHitFilters });

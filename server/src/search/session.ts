@@ -91,9 +91,9 @@ export interface SearchSessionJournal extends UsageRecorder {
 
 /**
  * Write-behind (SEARCH_SESSION_WRITE_BEHIND, on by default with
- * SEARCH_LANCEDB_NATIVE): the session row, result ranks, usage events and
- * zero-result diagnostics are written after the response instead of before
- * it. Writes of one session id stay in order (a reused id's latest attempt
+ * SEARCH_LANCEDB_NATIVE): the session row, result ranks and zero-result
+ * diagnostics are written after the response instead of before it. Usage
+ * events (billing) still commit before the response. Writes of one session id stay in order (a reused id's latest attempt
  * still decides the rows), at most SEARCH_WRITE_BEHIND_CONCURRENCY run at
  * once so they never crowd searches out of the pool, and readers of a
  * session's rows (GET /search/diagnostics) wait for its pending writes with
@@ -204,6 +204,7 @@ class SqlSearchSessionJournal implements SearchSessionJournal {
 
   private readonly usage: UsageLedger = createUsageLedger({});
   private persistenceTail: Promise<void> = Promise.resolve();
+  private usageTail: Promise<void> = Promise.resolve();
   private readonly diagnosticEvents: Record<string, unknown> = {};
   /** The chat turn whose search agent ran this retrieval, if any. */
   private readonly chatSessionId = currentChatSessionId();
@@ -282,16 +283,47 @@ class SqlSearchSessionJournal implements SearchSessionJournal {
     >;
   }
 
-  persist(input: PersistSearchSessionInput): Promise<void> {
+  async persist(input: PersistSearchSessionInput): Promise<void> {
     // Snapshot now: the metadata and duration describe the search as it answered.
     const durationMs = Date.now() - this.startedAtMs;
-    return this.enqueue(() => this.persistSnapshot(input, durationMs), "persist");
+    if (this.writeBehind) {
+      await this.flushUsageInline(input.userId, this.scope.workspaceId ?? input.metadata.workspaceId);
+    }
+    return await this.enqueue(() => this.persistSnapshot(input, durationMs), "persist");
   }
 
-  flushUsage(userId: string): Promise<void> {
-    return this.enqueue(async () => {
+  async flushUsage(userId: string): Promise<void> {
+    if (this.writeBehind) {
+      await this.flushUsageInline(userId, this.scope.workspaceId);
+      return;
+    }
+    return await this.enqueue(async () => {
       await this.usage.flush({ userId, scope: { ...this.scope, sessionId: this.sessionId } });
     }, "usage");
+  }
+
+  /**
+   * Write-behind keeps billed usage out of the background queue: the usage
+   * events (usually one small insert) commit before the response, so a deploy
+   * or crash cannot lose them. Only the session row, result ranks and
+   * zero-result diagnostics wait. Event ids are stable, so a retry, or the
+   * snapshot's own flush picking up an event whose inline write failed,
+   * cannot bill twice.
+   */
+  private flushUsageInline(userId: string, workspaceId: string | null | undefined): Promise<void> {
+    const scope = { sessionId: this.sessionId, workspaceId: workspaceId ?? null, orgId: this.scope.orgId ?? null };
+    const flush = () => this.usage.flush({ userId, scope });
+    const pending = this.usageTail
+      .then(flush)
+      .catch(async () => {
+        await new Promise<void>((resolve) => { setTimeout(resolve, WRITE_BEHIND_RETRY_DELAY_MS); });
+        await flush();
+      })
+      .then(() => undefined)
+      // Still unflushed: the background session write retries it in its transaction.
+      .catch((error) => { reportPublicError(error, { operation: "search-usage-inline", sessionId: this.sessionId }); });
+    this.usageTail = pending;
+    return trackCurrentChatTurnWrite(pending);
   }
 
   private async persistSnapshot(input: PersistSearchSessionInput, durationMs: number): Promise<void> {
