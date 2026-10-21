@@ -99,6 +99,7 @@ class VisualClassifierDetector:
         self.supported_labels=sorted(set(base.supported_labels)|{label for label,_ in PROMPTS})
         self.metadata={'detector':base.metadata,'visual_classifier':classifier.metadata,'id':base.metadata['id'],
                        'revision':base.metadata.get('revision','unknown')}
+        if base.metadata.get('graph_sha256'): self.metadata['graph_sha256']=base.metadata['graph_sha256']
 
     def predict(self,images,threshold=.3):
         predictions,timings=self.base.predict(images,threshold)

@@ -9,7 +9,7 @@ class Image:
 
 class Base:
     supported_labels=['figure','chart']
-    metadata={'id':'test','revision':'test'}
+    metadata={'id':'test','revision':'test','graph_sha256':'0'*64}
     def __init__(self):
         self.regions=[{'label':'figure','raw_label':'picture','confidence':.9,'bbox':[.1,.2,.9,.8]},
                       {'label':'chart','raw_label':'chart','confidence':.8,'bbox':[0,0,.1,.1]}]
@@ -32,6 +32,7 @@ class Tests(unittest.TestCase):
     def test_preserves_detection_and_does_not_reclassify_native_chart(self):
         base=Base(); wrapped=VisualClassifierDetector(base,Classifier())
         result,timing=wrapped.predict([Image()])
+        self.assertEqual(wrapped.metadata['graph_sha256'],'0'*64)
         self.assertEqual(result[0][0]['label'],'photo')
         self.assertEqual(result[0][0]['detector_label'],'figure')
         self.assertEqual(result[0][0]['raw_label'],'picture')
