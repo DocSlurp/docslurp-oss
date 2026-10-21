@@ -80,7 +80,7 @@ Every error from the native JSON API (`/v1/*`, including authentication, rate li
 
 `code` is a closed set you can branch on:
 
-- Request and access: `invalid_request`, `unauthorized`, `forbidden`, `not_found`, `workspace_not_found`, `conflict`, `payload_too_large`, `session_required`, `invalid_search_scope`, `chat_disabled`, `model_not_allowed`.
+- Request and access: `invalid_request`, `unauthorized`, `forbidden`, `not_found`, `workspace_not_found`, `conflict`, `payload_too_large`, `session_required`, `invalid_search_scope`, `chat_disabled`, `model_not_allowed`, `chat_deadline_exceeded` (HTTP 504: a search-agent turn reached its deadline before it had any answer text).
 - Limits: `rate_limited`, `spend_limit_exceeded`, `daily_page_limit`, `ip_temporarily_blocked`.
 - Billing: `payment_required`, `credit_exhausted`, `workspace_budget_paused`, `org_budget_paused`, `minimum_credit_required`, `plan_not_entitled`.
 - Uploads: `unsupported_type`, `file_too_large`, `unreadable_source`.
@@ -125,20 +125,35 @@ Agent responses add these `debug` fields (other turns omit them):
 | `searchCallCount`, `searchQueryCount` | Search tool calls, and retrieval queries counting each item of a parallel batch |
 | `zeroHitSearchCount` | Search calls that returned no results |
 | `stepUsage` | Per step: `{step, model, finishReason, inputTokens, outputTokens, costCents?, toolCalls}` |
-| `toolCalls` | Per tool call, in order (refused calls included): `{id, name, status, runtimeMs, queries?, resultCount?, zeroHit?, evidencePages?, costCents?, errorCode?}`. `queries` are the search strings the model sent (never put on spans); `evidencePages` lists the distinct `{documentId, pageNumber}` of the evidence that call returned; `errorCode` is `tool_call_limit`, `invalid_arguments`, `aborted`, `exception`, the tool's own error code or `http_<status>`. |
+| `toolCalls` | Per tool call, in order (refused calls included): `{id, name, status, runtimeMs, queries?, resultCount?, zeroHit?, evidencePages?, costCents?, errorCode?}`. `queries` are the search strings the model sent (never put on spans); `evidencePages` lists the distinct `{documentId, pageNumber}` of the evidence that call returned; `errorCode` is `tool_call_limit`, `deadline`, `tool_timeout`, `invalid_arguments`, `aborted`, `exception`, the tool's own error code or `http_<status>`. |
 | `limits` | `{maxSteps, maxToolCalls, searchConcurrency, clamped}` as applied |
+| `timeBudget` | `{turnDeadlineMs, stepTimeoutMs, toolTimeoutMs, finalReserveMs, elapsedMs, finalAnswer, stepTimeouts, toolTimeouts, toolCallsAfterDeadline}`. `finalAnswer` is `loop` (the agent answered on its own), `forced` (the final-answer reserve started, so the last step ran without tools), `from_evidence` (a model step ran out of time and one extra no-tools call answered from the evidence already gathered) or `partial` (the deadline cut the answer off; the text so far is returned with `finishReason: "length"`). See [Turn deadline](#turn-deadline). |
 | `stopReason` | See below |
 
 On agent turns, `usage.costCents` is the **provider cost** in USD cents of the agent's own model calls (the OpenRouter receipt, or an estimate from verified list prices when the receipt is missing; `usage.costSource` says `provider`, `estimate` or `mixed`). It is not customer credits; credits are derived from the recorded usage events by the rate card. It excludes tool work: the provider cost the tools report for their own work (query embeddings, rewrites, HyDE, reranking, nested answers) is in `usage.toolCostCents` and per call in `debug.toolCalls[].costCents`, and is recorded as separate usage events. A turn's total provider cost is `costCents + toolCostCents`; cached search responses report 0.
 
 `stopReason` is chosen deterministically, without reading the answer's meaning. The first rule that matches wins:
 
-1. `timeout` (the 120-second agent budget ran out) or `error` (any other failure). Both appear only in traces and metrics, because the HTTP response is then an error.
-2. `tool_call_limit`: at least one tool call was refused.
-3. `step_limit`: the loop ended mid tool call, or the last step ran with tools disabled right after a tool-calling step. With `maxSteps: 1`, tools are disabled from the start, so that does not count as a limit hit.
-4. `no_evidence`: the agent searched and every search returned zero results.
-5. `answered_without_citations`: the agent searched, but the answer has no `[n]` citation.
-6. `answered`: everything else, including answers that needed no search.
+1. `timeout` (the turn reached its deadline with no answer text at all; HTTP 504 `chat_deadline_exceeded`) or `error` (any other failure). Both appear only in traces and metrics, because the HTTP response is then an error.
+2. `deadline`: the turn's time budget ran low, so tools were disabled and the answer was forced from the evidence gathered so far, or the deadline cut the answer off. The response is a normal HTTP 200; `debug.timeBudget.finalAnswer` says which.
+3. `tool_call_limit`: at least one tool call was refused.
+4. `step_limit`: the loop ended mid tool call, or the last step ran with tools disabled right after a tool-calling step. With `maxSteps: 1`, tools are disabled from the start, so that does not count as a limit hit.
+5. `no_evidence`: the agent searched and every search returned zero results.
+6. `answered_without_citations`: the agent searched, but the answer has no `[n]` citation.
+7. `answered`: everything else, including answers that needed no search.
+
+#### Turn deadline
+
+An agent turn has a deadline below the ~120-second timeout of common edge proxies (Cloudflare answers 524 there), so a slow turn still returns its answer instead of an error. The deadline counts from when the request reaches chat, and the last part of it is kept for the answer:
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `CHAT_AGENT_TURN_DEADLINE_MS` | `100000` | Hard stop for the whole turn. Everything the turn started (model calls, tools, nested searches and their SQL, nested answers) is cancelled at it. |
+| `CHAT_AGENT_STEP_TIMEOUT_MS` | `45000` | Longest model call for a step that may still call tools, further capped to end before the final reserve. The final answer step may use all the time left. |
+| `CHAT_AGENT_TOOL_TIMEOUT_MS` | `30000` | Longest tool call, also capped to end before the final reserve. A tool over budget is cancelled and the model gets `{error, code: "tool_timeout"}`; the turn continues. |
+| `CHAT_AGENT_FINAL_RESERVE_MS` | `20000` | Time kept for the answer (at most half the deadline). Inside it, tools are disabled; a tool call there gets `{error, code: "deadline"}` without running. |
+
+If a model step runs out of time while it can still call tools, the agent makes one more call without tools that answers from the evidence listed so far. Steps cancelled mid-flight still record their provider usage: from the stream's usage receipt when the model call had finished, from OpenRouter's generation receipt by id, or as an estimate from the prompt and streamed characters, marked `usageEstimated: true`. These usage events carry `turnOutcome: "aborted"` and `abortReason` (`deadline`, `step_timeout`, `client_disconnect` or `error`). When the client disconnects, the turn stops at once and returns nothing.
 
 ```bash
 curl -sS -X POST "$DOCSLURP_URL/v1/chat" -H "Authorization: Bearer $DOCSLURP_API_KEY" -H "Content-Type: application/json" \
@@ -169,9 +184,9 @@ curl -sS -X POST "$DOCSLURP_URL/v1/chat" -H "Authorization: Bearer $DOCSLURP_API
 
 With OpenTelemetry export on, each agent turn emits spans on the `docslurp.chat` tracer that follow the OpenTelemetry GenAI conventions. Attributes hold ids, counts, enums and scores, never prompt, answer or document text.
 
-- `invoke_agent workspace-chat`: `gen_ai.operation.name=invoke_agent`, `gen_ai.agent.name=workspace-chat`, `gen_ai.provider.name=openrouter`, `gen_ai.request.model`, `gen_ai.response.model`, `gen_ai.request.max_tokens`, summed `gen_ai.usage.input_tokens`/`output_tokens`, `gen_ai.response.finish_reasons`, `gen_ai.conversation.id` (the chat session), `docslurp.chat.steps`, `.tool_calls`, `.tool_calls_refused`, `.search_calls`, `.search_queries`, `.zero_hit_searches`, `.stop_reason`, `.cost_usd`, `.upstream_provider`, `docslurp.chat.limit.max_steps`/`.max_tool_calls`/`.search_concurrency`, and `docslurp.workspaceId`, `docslurp.orgId`, `docslurp.requestId`.
+- `invoke_agent workspace-chat`: `gen_ai.operation.name=invoke_agent`, `gen_ai.agent.name=workspace-chat`, `gen_ai.provider.name=openrouter`, `gen_ai.request.model`, `gen_ai.response.model`, `gen_ai.request.max_tokens`, summed `gen_ai.usage.input_tokens`/`output_tokens`, `gen_ai.response.finish_reasons`, `gen_ai.conversation.id` (the chat session), `docslurp.chat.steps`, `.tool_calls`, `.tool_calls_refused`, `.search_calls`, `.search_queries`, `.zero_hit_searches`, `.stop_reason`, `.cost_usd`, `.upstream_provider`, `.elapsed_ms`, `.final_answer`, `.step_timeouts`, `.tool_timeouts`, `docslurp.chat.limit.max_steps`/`.max_tool_calls`/`.search_concurrency`/`.turn_deadline_ms`, and `docslurp.workspaceId`, `docslurp.orgId`, `docslurp.requestId`.
 - `chat <model>` per model step (child, kind client): `gen_ai.operation.name=chat`, `docslurp.chat.step`, per-step usage, `gen_ai.response.model`, `gen_ai.response.id`, `gen_ai.response.finish_reasons` and `docslurp.chat.cost_usd`.
-- `execute_tool <tool>` per tool call (child): `gen_ai.operation.name=execute_tool`, `gen_ai.tool.name`, `gen_ai.tool.call.id`, `gen_ai.tool.type=function`, `docslurp.chat.session_id`, and `error.type` on failure (`tool_call_limit` for a refused call). Search calls add `docslurp.rag.query_count`, `.concurrency`, `.result_count`, `.top_score`, `.zero_hit`, `.document_count` (distinct documents) and `.search_session_id`.
+- `execute_tool <tool>` per tool call (child): `gen_ai.operation.name=execute_tool`, `gen_ai.tool.name`, `gen_ai.tool.call.id`, `gen_ai.tool.type=function`, `docslurp.chat.session_id`, and `error.type` on failure (`tool_call_limit` for a refused call, `deadline` for a call refused inside the final reserve). Search calls add `docslurp.rag.query_count`, `.concurrency`, `.result_count`, `.top_score`, `.zero_hit`, `.document_count` (distinct documents) and `.search_session_id`.
 
 The agent span also copies the W3C baggage keys `eval.run_id`, `eval.case_id`, `eval.model` and `eval.arm` from the request's `baggage` header (other keys are ignored; values are capped at 128 characters). `/v1/chat` responses carry a `traceparent` header for the request's trace when tracing is on, so clients can join a turn to its trace.
 

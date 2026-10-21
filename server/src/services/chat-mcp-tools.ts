@@ -3,12 +3,20 @@ import { CHAT_AGENT_LIMIT_DEFAULTS, CHAT_MAX_RETRIEVED_PASSAGES, searchResultSch
 import { startTelemetrySpan, type TelemetrySpan } from "@docslurp/shared/observability";
 import type { McpDispatch, McpManifest } from "../lib/mcp-http.js";
 import { runInChatAgentContext } from "../lib/chat-agent-context.js";
+import { withSearchSignal } from "../search/query-bounds.js";
+import { raceAbort } from "./chat-turn-deadline.js";
 
 /** Tool result returned once the turn's tool-call budget is spent; `code` lets callers tell it apart. */
 export const TOOL_CALL_LIMIT_RESULT = {
   error: "Tool call limit reached. Summarize the results already obtained.",
   code: "tool_call_limit",
   limitReached: true,
+} as const;
+
+/** Tool result once the turn's final-answer reserve has started: the tool does not run. */
+export const TOOL_DEADLINE_RESULT = {
+  error: "The turn is nearly out of time, so no more tools can run. Answer now from the evidence already gathered and say what could not be checked.",
+  code: "deadline",
 } as const;
 
 /** One page of a tool call's evidence; pageNumber is null only for a document with no known page. */
@@ -140,13 +148,19 @@ export function createChatMcpTools(args: {
   chatSessionId?: string;
   /** Parent for the `execute_tool` spans (the agent span). */
   traceParent?: TelemetrySpan;
+  /**
+   * Time budget for the next tool call in ms (turn deadline). 0 refuses the call
+   * with TOOL_DEADLINE_RESULT; a call over budget is cancelled and returns a
+   * `tool_timeout` error result. Omitted: tools run until the turn signal aborts.
+   */
+  toolBudgetMs?: () => number;
 }) {
   const citations: SearchResult[] = [];
   const activity = new Map<string, ChatToolActivity>();
   const searchCalls: ChatSearchCallStats[] = [];
   const maxToolCalls = args.maxToolCalls ?? CHAT_AGENT_LIMIT_DEFAULTS.maxToolCalls;
   const searchConcurrency = args.searchConcurrency ?? CHAT_AGENT_LIMIT_DEFAULTS.searchConcurrency;
-  const counters = { executed: 0, refused: 0, byTool: {} as Record<string, number>, toolCostCents: 0 };
+  const counters = { executed: 0, refused: 0, byTool: {} as Record<string, number>, toolCostCents: 0, timedOut: 0, deadlineRefused: 0 };
   const details = new Map<string, ChatToolCallDetail>();
   let calls = 0;
   const tools: ToolSet = {};
@@ -212,6 +226,14 @@ export function createChatMcpTools(args: {
           span.end("tool_call_limit");
           return { ...TOOL_CALL_LIMIT_RESULT };
         }
+        const budgetMs = args.toolBudgetMs?.();
+        if (budgetMs !== undefined && budgetMs <= 0) {
+          counters.deadlineRefused++;
+          detail({ status: "error", errorCode: "deadline" });
+          span.set({ "docslurp.chat.tool_deadline_refused": true });
+          span.end("deadline");
+          return { ...TOOL_DEADLINE_RESULT };
+        }
         if (!input || typeof input !== "object" || Array.isArray(input)) {
           detail({ status: "error", errorCode: "invalid_arguments" });
           span.end("invalid_arguments");
@@ -248,12 +270,28 @@ export function createChatMcpTools(args: {
           args.onActivity?.(event);
         };
         update("loading");
+        // The tool, its nested searches (SQL included) and any nested model call
+        // run under this signal: the turn's (deadline, client disconnect) plus
+        // the tool's own budget. The in-process dispatcher keeps the outer HTTP
+        // request's context, so the signal is also put in the search and chat
+        // agent contexts, which nested work reads before the request signal.
+        const toolAbort = new AbortController();
+        const onTurnAbort = () => toolAbort.abort(args.signal.reason);
+        args.signal.addEventListener("abort", onTurnAbort, { once: true });
+        let toolTimedOut = false;
+        const budgetTimer = budgetMs === undefined ? undefined : setTimeout(() => {
+          toolTimedOut = true;
+          toolAbort.abort(Object.assign(new Error(`Tool exceeded its ${budgetMs} ms budget`), { name: "TimeoutError" }));
+        }, budgetMs);
+        budgetTimer?.unref?.();
+        const toolSignal = toolAbort.signal;
         try {
           const dispatch = () => span.run(() => args.dispatch(`/tools/${encodeURIComponent(definition.id)}`, {
-            method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body), signal: args.signal,
+            method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body), signal: toolSignal,
           }));
-          const response = await (args.chatSessionId ? runInChatAgentContext(args.chatSessionId, dispatch) : dispatch());
-          const result: unknown = await response.json();
+          // Settles at the abort even when nested work ignores the signal.
+          const response = await raceAbort(withSearchSignal(toolSignal, () => runInChatAgentContext(args.chatSessionId ?? null, dispatch, toolSignal)), toolSignal);
+          const result: unknown = await raceAbort(response.json() as Promise<unknown>, toolSignal);
           const returned: SearchResult[] = [];
           if (response.ok) {
             collectEvidence(result, returned);
@@ -291,11 +329,19 @@ export function createChatMcpTools(args: {
           };
         } catch (error) {
           update("error");
-          detail({ status: "error", ...(queries ? { queries } : {}), errorCode: args.signal.aborted ? "aborted" : "exception" });
+          const timedOut = toolTimedOut && !args.signal.aborted;
+          detail({ status: "error", ...(queries ? { queries } : {}), errorCode: args.signal.aborted ? "aborted" : timedOut ? "tool_timeout" : "exception" });
           if (definition.id === "search") searchCalls.push(searchCallStats(toolCallId, false, queryCount, concurrency, null));
           span.end(error ?? "Error");
           args.signal.throwIfAborted();
+          if (timedOut) {
+            counters.timedOut++;
+            return { error: `The ${definition.id} tool ran out of time and was cancelled. Answer from the evidence already gathered, or try one narrower search.`, code: "tool_timeout" };
+          }
           return { error: "Tool execution failed. Do not assume the action succeeded or retry a submission automatically." };
+        } finally {
+          if (budgetTimer) clearTimeout(budgetTimer);
+          args.signal.removeEventListener("abort", onTurnAbort);
         }
       },
     });

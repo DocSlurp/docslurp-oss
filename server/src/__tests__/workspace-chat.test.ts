@@ -674,6 +674,34 @@ describe("chatWorkspace", () => {
     expect(persisted).toBe(false);
   });
 
+  it("runs a nested grounded answer's model call under the calling agent turn's signal", async () => {
+    sqlMock.mockResolvedValue([]);
+    loadWorkspaceWholeCorpusContext.mockResolvedValue({
+      eligible: false, reason: "chunk-limit-exceeded", results: [],
+      stats: { documentCount: 1, chunkCount: 30, tokenEstimate: 15000, charEstimate: 40000, maxDocuments: 12, maxChunks: 24, maxTokens: 12000, maxChars: 60000 },
+    });
+    getWorkspace.mockResolvedValue({ id: "ws-1", systemPrompt: null });
+    hybridSearch.mockResolvedValue({
+      sessionId: "search-1",
+      results: [{
+        text: "workspace excerpt", score: 1, parentText: "workspace excerpt",
+        citation: { documentId: "doc-1", filename: "doc.pdf", pageNumber: 1, pageNumbers: [1], headingPath: [], chunkIndex: 0, blockIds: [], blockTypes: [] },
+      }],
+    });
+    generateAnthropicDocumentText.mockResolvedValue({ text: "answer [1]", usage: { inputTokens: 10, outputTokens: 4 }, sources: [] });
+    process.env.ANTHROPIC_API_KEY = "test-key";
+    const { runInChatAgentContext } = await import("../lib/chat-agent-context.js");
+    const turn = new AbortController();
+    await runInChatAgentContext("chat-turn", () => chatWorkspace({ workspaceId: "ws-1", userId: "user-1", query: "what changed?", allowAgentTools: false }), turn.signal);
+    expect(generateAnthropicDocumentText).toHaveBeenCalledWith(expect.objectContaining({ signal: turn.signal }));
+
+    generateAnthropicDocumentText.mockClear();
+    turn.abort();
+    await expect(runInChatAgentContext("chat-turn", () => chatWorkspace({ workspaceId: "ws-1", userId: "user-1", query: "what changed?", allowAgentTools: false }), turn.signal))
+      .rejects.toMatchObject({ name: "AbortError" });
+    expect(generateAnthropicDocumentText).not.toHaveBeenCalled();
+  });
+
   it("returns processing availability when chat runs before indexes are ready", async () => {
     sqlMock.mockResolvedValue([]);
     loadWorkspaceWholeCorpusContext.mockResolvedValue({
