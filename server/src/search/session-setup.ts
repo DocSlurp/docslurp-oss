@@ -13,9 +13,10 @@ import { hostedApiKeyForWorkspace, openRouterCall } from "../lib/privacy.js";
 import { canSpend } from "../services/billing/spend-guard.js";
 import { getWorkspaceAccess } from "../services/organizations.js";
 import { currentRequestApiKeyWorkspaceIds } from "../lib/request-context.js";
-import { getWorkspaceSearchSettings } from "../services/search-controls.js";
+import { getWorkspaceSearchSettings, parseWorkspaceSearchSettingsRow, type SettingsRow } from "../services/search-controls.js";
+import { loadCachedSearchAvailability, searchLanceDbNativeEnabled } from "./eligible-documents.js";
 import type { SearchOptions } from "../services/search.js";
-import { createSearchSessionJournal, type SearchSessionJournal } from "./session.js";
+import { createSearchSessionJournal, searchSessionWriteBehindEnabled, type SearchSessionJournal } from "./session.js";
 import { resolveWorkspaceRetrievalControls } from "./workspace-retrieval-session.js";
 import { parseIndexConfigs, type IndexConfigMap } from "./index-serving.js";
 import { earlyLexicalDocument, fullyIndexedDocument, servableInProgressVersion } from "./eligibility.js";
@@ -42,6 +43,8 @@ export interface SearchSetup {
   /** Index configs live documents are built with (hash -> config); one entry or none means a single index. */
   indexConfigs: IndexConfigMap;
   privacyMode: PrivacyMode;
+  /** SEARCH_LANCEDB_NATIVE for this workspace: lexical, vector and hydration come from LanceDB. */
+  lanceNative?: boolean;
 }
 
 export type SearchAvailabilityRow = {
@@ -73,20 +76,32 @@ export async function resolveSearchSetup(
   userId: string,
   options: SearchOptions,
 ): Promise<SearchSetup> {
-  const normalizedScope = await normalizeSearchScope({ userId, options });
+  const requestedWorkspaceId = options.filters?.workspaceId?.trim();
+  const lanceNative = searchLanceDbNativeEnabled(requestedWorkspaceId);
+  let normalizedScope: SearchWorkspaceScope;
+  let workspaceSettings: WorkspaceSearchSettings;
+  let workspaceIndexing: { pipeline: PipelineFeatures; indexConfigs: IndexConfigMap };
+  if (lanceNative && requestedWorkspaceId) {
+    // Access, settings and pipeline in one round trip (never cached: they decide authorization and privacy).
+    ({ scope: normalizedScope, settings: workspaceSettings, indexing: workspaceIndexing } =
+      await loadSearchWorkspaceContext(requestedWorkspaceId, userId));
+  } else {
+    normalizedScope = await normalizeSearchScope({ userId, options });
+    // Independent lookups run together: each is a database round trip.
+    [workspaceSettings, workspaceIndexing] = await Promise.all([
+      getWorkspaceSearchSettings(normalizedScope.workspaceId, userId).catch(() => ({
+        ...defaultWorkspaceSearchSettings,
+        workspaceId: normalizedScope.workspaceId,
+        userId,
+      })),
+      loadWorkspaceIndexing(normalizedScope.workspaceId),
+    ]);
+  }
   const session = createSearchSessionJournal({
     rootSessionId: options.rootSessionId,
     scope: normalizedScope,
+    writeBehind: searchSessionWriteBehindEnabled(lanceNative),
   });
-  // Independent lookups run together: each is a database round trip.
-  const [workspaceSettings, workspaceIndexing] = await Promise.all([
-    getWorkspaceSearchSettings(normalizedScope.workspaceId, userId).catch(() => ({
-      ...defaultWorkspaceSearchSettings,
-      workspaceId: normalizedScope.workspaceId,
-      userId,
-    })),
-    loadWorkspaceIndexing(normalizedScope.workspaceId),
-  ]);
   const workspacePipeline = workspaceIndexing.pipeline;
   const retrievalControls = resolveWorkspaceRetrievalControls({
     options,
@@ -96,7 +111,7 @@ export async function resolveSearchSetup(
   });
   session.recordDiagnostic("retrievalControls", retrievalControls.diagnostics);
   const resolvedOptions = retrievalControls.options;
-  const availabilityPromise = loadSearchAvailability({
+  const availabilityPromise = (lanceNative ? loadCachedSearchAvailability : loadSearchAvailability)({
     workspaceId: normalizedScope.workspaceId,
     runId:
       resolvedOptions.runId?.trim() ||
@@ -150,7 +165,59 @@ export async function resolveSearchSetup(
     workspacePipeline,
     indexConfigs: workspaceIndexing.indexConfigs,
     privacyMode,
+    lanceNative,
   };
+}
+
+type SearchWorkspaceContextRow = Partial<SettingsRow> & {
+  workspace_id: string;
+  org_id: string;
+  pipeline: PipelineFeatures | null;
+  index_configs: unknown;
+  settings_workspace_id: string | null;
+};
+
+/**
+ * getWorkspaceAccess + getWorkspaceSearchSettings + loadWorkspaceIndexing as
+ * one query, with the same access rule (G-06) and API-key allowlist.
+ */
+export async function loadSearchWorkspaceContext(workspaceId: string, userId: string): Promise<{
+  scope: SearchWorkspaceScope;
+  settings: WorkspaceSearchSettings;
+  indexing: { pipeline: PipelineFeatures; indexConfigs: IndexConfigMap };
+}> {
+  const [row] = await sql<SearchWorkspaceContextRow[]>`
+    select w.id as workspace_id, w.org_id, w.pipeline, w.index_configs,
+      s.workspace_id as settings_workspace_id, s.user_id, s.typo_tolerance, s.dedupe_by_filename, s.ranking_rules,
+      s.boosts, s.pinned_results, s.synonyms, s.compat_settings, s.rules, s.compat_metadata
+    from workspaces w
+    join organizations o on o.id = w.org_id
+    left join org_memberships om on om.org_id = w.org_id and om.user_id = ${userId}
+    left join workspace_members wm on wm.workspace_id = w.id and wm.user_id = ${userId}
+    left join workspace_search_settings s on s.workspace_id = w.id
+    where w.id = ${workspaceId}
+      and (
+        (om.user_id is not null and (w.user_id = ${userId} or wm.user_id is not null or om.role in ('owner', 'admin') or w.is_default))
+        or (wm.user_id is not null and o.is_personal)
+      )
+    limit 1
+  `;
+  const allowlist = currentRequestApiKeyWorkspaceIds();
+  if (!row || (allowlist && !allowlist.includes(row.workspace_id))) throw new Error("Workspace not found");
+  let settings: WorkspaceSearchSettings;
+  try {
+    settings = parseWorkspaceSearchSettingsRow(row.settings_workspace_id ? row as SettingsRow : undefined, row.workspace_id, userId);
+  } catch {
+    settings = { ...defaultWorkspaceSearchSettings, workspaceId: row.workspace_id, userId };
+  }
+  let indexing: { pipeline: PipelineFeatures; indexConfigs: IndexConfigMap };
+  try {
+    indexing = { pipeline: normalizePipelineFeatures(row.pipeline ?? null), indexConfigs: parseIndexConfigs(row.index_configs) };
+  } catch {
+    // Fail closed, as loadWorkspaceIndexing does.
+    indexing = { pipeline: { ...normalizePipelineFeatures(null), privacyMode: "local-only" }, indexConfigs: {} };
+  }
+  return { scope: { workspaceId: row.workspace_id, orgId: row.org_id }, settings, indexing };
 }
 
 export interface SearchWorkspaceScope {

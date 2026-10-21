@@ -191,6 +191,8 @@ it.each([
       values (${id + '-vector'}, ${id}, 'lancedb', 'test', ${id}, ${embedding.model}, 3)
       on conflict do nothing`;
   }
+  // The fixture adds vectors without the run_events hint a worker sends; drop cached eligibility (native search).
+  (await import("../search/eligible-documents.js")).resetEligibleDocumentCachesForTests();
   lanceDbVectorSearch.mockClear();
   const result = await search.hybridSearch("budget", "u", {
     filters: { workspaceId: "w", tags: ["finance"], ...filters },

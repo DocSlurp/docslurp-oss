@@ -20,6 +20,7 @@ import { resolveMaterializationPolicy } from "../services/materialization-policy
 import { aggregateWorkspaceRagSearch } from "../services/aggregate-rag.js";
 import { WorkspaceAccessError } from "../services/default-workspace.js";
 import { hybridSearch, MissingWorkspaceScopeError } from "../services/search.js";
+import { prefetchBatchQueryEmbeddings } from "../search/batch-embeddings.js";
 import { chatWorkspace, workspaceChatDisabledBody } from "../services/workspace-chat.js";
 import { beginChatTurn, chatTurnFailureReason, type ChatTurn, type ChatTurnUsage } from "../services/billing/chat-turn-billing.js";
 import { parseFilters } from "../search/filters.js";
@@ -28,7 +29,9 @@ import { publicSearchResponse } from "../lib/search-usage.js";
 import { sql } from "../db.js";
 import { acceptApiKeys } from "../lib/route-auth.js";
 import { currentRequestApiKeyId } from "../lib/request-context.js";
-import { SearchCapacityError } from "../search/search-limiter.js";
+import { SearchCapacityError, withSearchAdmissionGroup } from "../search/search-limiter.js";
+import { awaitSearchSessionWrites } from "../search/session.js";
+import { randomUUID } from "node:crypto";
 import { env } from "../config.js";
 import { activeTraceparent } from "@docslurp/shared/observability";
 import { chatModelRefused, ChatModelNotAllowedError } from "../lib/chat-model-policy.js";
@@ -37,39 +40,60 @@ function modelNotAllowed(c: Context): Response {
   return apiErrorResponse(c, 400, "model_not_allowed", new ChatModelNotAllowedError().message);
 }
 
-/** Runs each validated query, preserving input order and per-item errors. */
+/**
+ * Runs each validated query, preserving input order and per-item errors.
+ * The batch is one admission group (at most SEARCH_MAX_SLOTS_PER_TURN
+ * concurrent searches, search/search-limiter.ts), and its query embeddings
+ * are fetched with one provider request per workspace before the searches
+ * start (search/batch-embeddings.ts).
+ */
 async function runSearchBatch(c: Context, parsed: { queries: SearchInput[]; concurrency: number }, userId: string): Promise<BatchResult[]> {
   const { queries, concurrency } = parsed;
   const signal = c.req.raw.signal;
   const results: BatchResult[] = queries.map(() => ({ ok: false,
     error: { code: "REQUEST_ABORTED", message: "Request aborted before search started", status: 499 } }));
+  if (signal.aborted) return results;
+  // Scope and API-key checks first, so embeddings are only prefetched for queries that will run.
+  const inputs = await Promise.all(queries.map(async (query, index) => {
+    try {
+      const input = { ...query, workspaceId: await resolveActorWorkspaceId(getRequestActor(c), query.workspaceId, query.orgId) };
+      const forbidden = await assertApiKeyWorkspaceAccess(c, input.workspaceId, "search");
+      if (forbidden) {
+        results[index] = { ok: false, error: {
+          code: forbidden.status === 403 ? "FORBIDDEN" : "WORKSPACE_NOT_FOUND",
+          message: forbidden.status === 403 ? "Forbidden" : "Workspace not found", status: forbidden.status } };
+        return null;
+      }
+      return input;
+    } catch (error) {
+      results[index] = { ok: false, error: searchError(error) };
+      return null;
+    }
+  }));
+  if (!signal.aborted) {
+    await prefetchBatchQueryEmbeddings(inputs.flatMap((input) => input ? [{ query: input.q.replaceAll("\u0000", ""), workspaceId: input.workspaceId, options: searchOptions(input) }] : []), userId, signal);
+  }
   let next = 0;
   async function worker() {
     while (!signal.aborted && next < queries.length) {
       const index = next++;
-      const query = queries[index]!;
+      const input = inputs[index];
+      if (!input) continue;
       try {
-        const input = { ...query, workspaceId: await resolveActorWorkspaceId(getRequestActor(c), query.workspaceId, query.orgId) };
-        const forbidden = await assertApiKeyWorkspaceAccess(c, input.workspaceId, "search");
-        if (forbidden) {
-          results[index] = { ok: false, error: {
-            code: forbidden.status === 403 ? "FORBIDDEN" : "WORKSPACE_NOT_FOUND",
-            message: forbidden.status === 403 ? "Forbidden" : "Workspace not found", status: forbidden.status } };
-        } else if (!signal.aborted) {
-          const deferred = await deferredRequestContext(c, input.workspaceId);
-          if ("response" in deferred) {
-            const status = deferred.response.status;
-            results[index] = { ok: false, error: { code: status === 401 ? "UNAUTHORIZED" : "FORBIDDEN", message: "Search capability rejected", status } };
-          } else {
-            results[index] = { ok: true, data: await retrieve(input, userId, deferred.context) };
-          }
+        const deferred = await deferredRequestContext(c, input.workspaceId);
+        if ("response" in deferred) {
+          const status = deferred.response.status;
+          results[index] = { ok: false, error: { code: status === 401 ? "UNAUTHORIZED" : "FORBIDDEN", message: "Search capability rejected", status } };
+        } else {
+          results[index] = { ok: true, data: await retrieve(input, userId, deferred.context) };
         }
       } catch (error) {
         results[index] = { ok: false, error: searchError(error) };
       }
     }
   }
-  await Promise.all(Array.from({ length: Math.min(concurrency, queries.length) }, () => worker()));
+  await withSearchAdmissionGroup(`batch:${randomUUID()}`, () =>
+    Promise.all(Array.from({ length: Math.min(concurrency, queries.length) }, () => worker())));
   return results;
 }
 
@@ -482,6 +506,8 @@ export const searchRoutes = new Hono()
       return apiErrorResponse(c, 403, "forbidden", "Forbidden");
     }
 
+    // A write-behind search answers before its result rows commit.
+    await awaitSearchSessionWrites(sessionId);
     await sql`
       update search_session_results
       set clicked = true
@@ -518,6 +544,7 @@ export const searchesRoutes = new Hono().get("/:sessionId/materialization", asyn
   const userId = c.get("sessionUser")?.id;
   if (!userId) return apiErrorResponse(c, 401, "unauthorized", "Missing session");
   const { sessionId } = c.req.param();
+  await awaitSearchSessionWrites(sessionId);
   const [row] = await sql<{ workspace_id: string | null; candidates: unknown; deferred: unknown }[]>`
     select metadata ->> 'workspaceId' as workspace_id,
            metadata -> 'diagnostics' -> 'deferredCandidates' as candidates,

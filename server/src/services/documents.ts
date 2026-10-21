@@ -16,6 +16,7 @@ import {
 
 import { env } from "../config.js";
 import { sql } from "../db.js";
+import { notifySearchEligibilityChanged } from "../search/eligibility-hint.js";
 import { getArtifactText, parseArtifactUri } from "../lib/artifacts.js";
 import { fileUrlForArtifact } from "../lib/file-urls.js";
 import { documentWithholdsUri, withheldArtifactUrisFromMetadata } from "./pii-artifact-guard.js";
@@ -1231,6 +1232,8 @@ export async function setDocumentTags(docId: string, userId: string, tags: strin
     for (const tag of normalized) {
       await tx`insert into document_tags (document_id, user_id, tag) values (${docId}, ${userId}, ${tag})`;
     }
+    // Native search caches each document's tags with its eligibility.
+    await notifySearchEligibilityChanged(tx as unknown as typeof sql, [document.workspace_id]);
   });
 
   return normalized;
@@ -1247,8 +1250,8 @@ export async function addDocumentTags(documentIds: string[], userId: string, tag
     return 0;
   }
 
-  const scopedIds = await sql<{ id: string }[]>`
-    select d.id
+  const scopedIds = await sql<{ id: string; workspace_id: string }[]>`
+    select d.id, d.workspace_id
     from documents d
     where d.id = any(${sql.array(documentIds)})
       and d.workspace_id = any(${sql.array(accessibleWorkspaceIds)})
@@ -1266,10 +1269,13 @@ export async function addDocumentTags(documentIds: string[], userId: string, tag
     return 0;
   }
 
-  await sql`
-    insert into document_tags ${sql(rows)}
-    on conflict (document_id, tag) do nothing
-  `;
+  await sql.begin(async (tx) => {
+    await tx`
+      insert into document_tags ${tx(rows)}
+      on conflict (document_id, tag) do nothing
+    `;
+    await notifySearchEligibilityChanged(tx as unknown as typeof sql, scopedIds.map((row) => row.workspace_id));
+  });
 
   return scopedIds.length;
 }
@@ -1285,8 +1291,8 @@ export async function removeDocumentTags(documentIds: string[], userId: string, 
     return 0;
   }
 
-  const scopedIds = await sql<{ id: string }[]>`
-    select d.id
+  const scopedIds = await sql<{ id: string; workspace_id: string }[]>`
+    select d.id, d.workspace_id
     from documents d
     where d.id = any(${sql.array(documentIds)})
       and d.workspace_id = any(${sql.array(accessibleWorkspaceIds)})
@@ -1296,11 +1302,14 @@ export async function removeDocumentTags(documentIds: string[], userId: string, 
     return 0;
   }
 
-  await sql`
-    delete from document_tags
-    where document_id = any(${sql.array(scopedIds.map((row) => row.id))})
-      and tag = any(${sql.array(normalized)})
-  `;
+  await sql.begin(async (tx) => {
+    await tx`
+      delete from document_tags
+      where document_id = any(${tx.array(scopedIds.map((row) => row.id))})
+        and tag = any(${tx.array(normalized)})
+    `;
+    await notifySearchEligibilityChanged(tx as unknown as typeof sql, scopedIds.map((row) => row.workspace_id));
+  });
 
   return scopedIds.length;
 }
@@ -1370,6 +1379,8 @@ async function deleteDocumentRows(documentIds: string[], userId: string): Promis
     const workspaceIds = [...new Set(deleted.map((row) => row.workspace_id))];
     if (workspaceIds.length > 0) {
       await transaction`update workspaces set retention_changed_at = clock_timestamp() where id = any(${transaction.array(workspaceIds)})`;
+      // Native search caches each workspace's eligible documents; deletes emit no run_events hint.
+      await notifySearchEligibilityChanged(transaction, workspaceIds);
     }
 
     return deleted.map((row) => ({

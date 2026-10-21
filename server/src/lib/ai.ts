@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { withObservation, aiResultDetails, instrumentFetch } from "@docslurp/shared/observability";
 import { createOpenAI } from "@ai-sdk/openai";
 import { defaultEmbeddingConfig, defaultPipelineFeatures, DEEPINFRA_EMBEDDING_BASE_URL, validateDeepInfraEmbedding, fitEmbeddingDimensions, parseLlmModelUri, openRouterEmbeddingRoute, validateHostedEmbeddingVector } from "@docslurp/shared";
-import { embed, generateText, streamText } from "ai";
+import { embed, embedMany, generateText, streamText } from "ai";
 import { embedPerplexity } from "@docslurp/shared";
 
 import {
@@ -568,6 +568,67 @@ export async function embedConfiguredText(args: {
   throw new Error(
     `unsupported embedding runtime/provider for API search: ${args.runtime}/${args.provider}`,
   );
+}
+
+/**
+ * Several query texts in one provider request (batch search). Same providers,
+ * privacy checks and vector validation as embedConfiguredText; returns null
+ * for routes without a batch path here (local and private endpoints), so the
+ * caller embeds per query as before. Usage is the request's actual total.
+ */
+export async function embedConfiguredTexts(args: Omit<Parameters<typeof embedConfiguredText>[0], "value"> & { values: string[] }): Promise<{ embeddings: number[][]; usage: EmbeddingUsage } | null> {
+  if (args.values.length === 0) return { embeddings: [], usage: { inputTokens: 0 } };
+  if (args.provider === PRIVATE_MODEL_PROVIDER || args.runtime === "local") return null;
+  assertProviderAllowed(args.privacyMode, { provider: args.provider, model: args.model ?? "", operation: "api.embedding" });
+  const many = async (provider: ReturnType<typeof createOpenAI>, model: string, name: string, extra: Record<string, unknown> = {}) =>
+    withObservation({ name, type: "embedding", model, input: args.values.join("\n"), result: aiResultDetails }, () => embedMany({
+      model: provider.embedding(model), values: args.values, abortSignal: args.signal, maxRetries: 0, ...extra,
+    }));
+  const exactUsage = async (tokens: number | undefined, label: string): Promise<EmbeddingUsage> => {
+    if (!Number.isSafeInteger(tokens) || !(tokens! > 0)) throw new Error(`${label} embedding response omitted actual usage`);
+    const usage = { inputTokens: tokens! };
+    await args.onUsage?.(usage);
+    return usage;
+  };
+  if (args.provider === "openrouter") {
+    const route = openRouterEmbeddingRoute(args.model ?? "");
+    if (args.dimensions !== undefined && args.dimensions !== route.dimensions) throw new Error("OpenRouter embedding dimensions do not match the registered model");
+    if (!args.apiKey) throw new Error("OPENROUTER_API_KEY is required for remote OpenRouter embeddings");
+    const provider = createOpenAI({ apiKey: args.apiKey, baseURL: OPENROUTER_BASE_URL, fetch: instrumentFetch("openrouter", "embedding") });
+    const result = await many(provider, route.model, "api.embedding.openrouter.batch");
+    const usage = await exactUsage(result.usage.tokens, "OpenRouter");
+    return { embeddings: result.embeddings.map((vector) => validateHostedEmbeddingVector(vector, route.dimensions, args.normalize)), usage };
+  }
+  if (args.provider === "deepinfra") {
+    if (!args.apiKey) throw new Error("DEEPINFRA_API_KEY is required for DeepInfra embeddings");
+    if (args.model !== "BAAI/bge-m3" || (args.dimensions !== undefined && args.dimensions !== 1024) || args.requestedDimensions !== undefined) throw new Error("DeepInfra BGE-M3 requires its native 1024 dimensions");
+    const provider = createOpenAI({ apiKey: args.apiKey, baseURL: DEEPINFRA_EMBEDDING_BASE_URL, fetch: instrumentFetch("deepinfra", "embedding") });
+    const result = await many(provider, args.model, "api.embedding.deepinfra.batch");
+    const usage = await exactUsage(result.usage.tokens, "DeepInfra");
+    return { embeddings: result.embeddings.map((vector) => validateDeepInfraEmbedding(vector, 1024, args.normalize ?? true)), usage };
+  }
+  if (args.provider === "perplexity") {
+    const result = await withObservation({ name: "api.embedding.perplexity.batch", type: "embedding", model: args.model, input: args.values.join("\n"), result: aiResultDetails }, () => embedPerplexity({
+      fetch: instrumentFetch("perplexity", "embedding"), model: args.model ?? "", dimensions: args.dimensions, apiKey: args.apiKey ?? "",
+      values: args.values, normalize: args.normalize, signal: args.signal, onUsage: tokens => args.onUsage?.({ inputTokens: tokens }),
+    }));
+    return { embeddings: result.embeddings, usage: { inputTokens: result.usage.tokens } };
+  }
+  if (args.provider === "openai") {
+    if (!args.apiKey) throw new Error("OPENAI_API_KEY is required for remote OpenAI embeddings");
+    const provider = createOpenAI({ fetch: instrumentFetch("openai", "embedding"), apiKey: args.apiKey, ...(args.baseURL && args.baseURL !== DEFAULT_OPENAI_BASE_URL ? { baseURL: args.baseURL } : {}) });
+    const result = await many(provider, args.model ?? SEARCH_EMBEDDING_MODEL, "api.embedding.openai.batch",
+      typeof args.dimensions === "number" ? { providerOptions: { openai: { dimensions: args.dimensions } } } : {});
+    return { embeddings: result.embeddings, usage: { inputTokens: result.usage.tokens ?? 0 } };
+  }
+  if (["ollama", "vllm", "lmstudio"].includes(args.provider)) {
+    if (!args.baseURL || !args.model) throw new Error(`${args.provider} embeddings require a model and base URL`);
+    const provider = createOpenAI({ fetch: instrumentFetch(args.provider, "embedding"), apiKey: args.apiKey || "local", baseURL: args.baseURL });
+    const result = await many(provider, args.model, "api.embedding.compatible.batch",
+      args.provider === "vllm" && typeof args.requestedDimensions === "number" ? { providerOptions: { openai: { dimensions: args.requestedDimensions } } } : {});
+    return { embeddings: result.embeddings.map((vector) => fitEmbeddingDimensions(vector, args.dimensions, args.normalize)), usage: { inputTokens: result.usage.tokens ?? 0 } };
+  }
+  return null;
 }
 
 async function embedPrivateEndpointText(args: {

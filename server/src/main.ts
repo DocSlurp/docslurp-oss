@@ -1,5 +1,6 @@
 import { serve } from "@hono/node-server";
 import { ensureApiStartup, apiApp } from "./server.js";
+import { drainSearchSessionWrites } from "./search/session.js";
 
 // transformers.js can leave a rejected shared download promise unhandled when the preferred dtype file is
 // missing and the loader falls back (see lib/ai.ts). A standalone server must log that, not exit.
@@ -17,7 +18,10 @@ const server = serve({ fetch: apiApp.fetch, port, hostname: process.env.HOST ?? 
 });
 
 function shutdown(): void {
-  server.close(() => process.exit(0));
+  // Write-behind search sessions carry usage events: commit them before exiting.
+  const closed = new Promise<void>((resolve) => server.close(() => resolve()));
+  void Promise.all([closed.then(() => drainSearchSessionWrites(4_000)), drainSearchSessionWrites(4_500)])
+    .finally(() => process.exit(0));
   setTimeout(() => process.exit(0), 5_000).unref();
 }
 process.on("SIGTERM", shutdown);
