@@ -11,8 +11,9 @@ for the conditional integration seam and native-path bypass.
 The explicit CLI, resident local service and worker adapter are usable mechanisms
 for running a cached detector on a single raster image. They return labeled boxes,
 confidence, source dimensions and optional polygons/order/fingerprints. They are
-not registered in the normal ingestion pipeline, deployed by default, or exposed
-through a public API. Quality depends on the selected model and document class;
+available to a bounded PDF post-plan observer behind operator-only
+`PAGE_ROUTER_LAYOUT=shadow`, default off. They are not deployed by default or
+exposed through a public API; shadow records evidence without changing extraction. Quality depends on the selected model and document class;
 a working runtime or advertised class list is not an accuracy guarantee.
 
 PDF callers render each page first and retain the raster-to-PDF transform. Scans
@@ -129,8 +130,34 @@ provided. The [worker boundary README](../worker/src/layout/README.md) shows the
 CLI fallback through `CommandRunner`, sandbox paths and cost-accounting
 responsibilities. Standard worker Dockerfiles do not package these root-level
 Python scripts or weights: deployment needs an explicitly built runtime image
-or separately managed service. No pipeline feature flag currently calls this
-boundary automatically.
+or separately managed service. The operator-only shadow observer calls this
+boundary when enabled and the existing page-router gates allow the stage.
+See [production integration](image-layout-production-integration.md) for bounds,
+client inheritance, accounting and rollout requirements. There is no new
+workspace layout setting and no active extraction shortcut.
+
+## Enable the PDF shadow observer
+
+Provision and supervise the resident service first. Inspect `/health` and approve
+its model, artifact and `inferenceProfileSha256` against the intended runtime.
+Configure the worker with `PAGE_ROUTER_LAYOUT=shadow`,
+`PAGE_ROUTER_LAYOUT_ENDPOINT=http://127.0.0.1:8769/layout`,
+`PAGE_ROUTER_LAYOUT_MODEL_ID`, `PAGE_ROUTER_LAYOUT_REVISION`,
+`PAGE_ROUTER_LAYOUT_ARTIFACT_SHA256`, `PAGE_ROUTER_LAYOUT_PROFILE_SHA256` and
+explicit `PAGE_ROUTER_LAYOUT_DEVICE=cpu` or `cuda`. The profile pins detector
+metadata, threshold, device and contract version, including preprocessing,
+orientation/rectification and classifier settings. Responses must match. Restart
+the worker when updating the approved sidecar profile so old cached observations
+cannot survive that change.
+
+Existing workspace `pipeline.pageRouter` and operator `PAGE_ROUTER_MODE` gates
+still apply. The observer adds no artifact PUT for documents without eligible
+pages. Aggregate result rows have a 16 MiB budget, with omissions explicit.
+Shadow makes no extraction changes. Its ledger receipts are nonbillable;
+configured hourly pricing plus service elapsed time can produce a separately
+labeled wall-time cost estimate, excluding queue/idle/startup. Otherwise service
+cost stays unknown. This is not a claim of saved OCR/VLM calls or production
+readiness. See the integration guide before any controlled deployment.
 
 ## Geometry options and exported graphs
 

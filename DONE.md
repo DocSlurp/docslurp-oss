@@ -1,5 +1,7 @@
 # Completed
 
+- [x] **Integrate bounded PDF layout shadow evidence** (2026-10-21): operator-only resident observer with model/artifact/inference-profile pins, tenant-scoped bounded cache and queue, fail-open post-plan observations, explicit request accounting and shared fresh-raster bytes. Reuse decoded probe pixels for image statistics. Existing extraction assignments remain unchanged; resident service packaging/deployment and active routing quality promotion remain separate. See [production integration](docs/image-layout-production-integration.md).
+
 - Trace and document conditional Tiny layout placement after native checks and before expensive raster-dependent routing, with direct shared-asset reuse, image-input gaps, preserved extraction obligations and shadow acceptance criteria; no unvalidated production route enabled.
 
 - [x] **Experimental local image-layout detection and frozen research campaign** (2026-10-20): add opt-in CPU/GPU CLI and resident HTTP adapters with source-coordinate boxes, label support and crop fingerprints; preserve 44-case source/annotation/confidence evidence and locked confirmation. Runtime parity and engineering performance measured; general extraction readiness gates failed, so no default pipeline activation or deployment. See [confirmed findings and limitations](docs/image-layout-confirmation-2026-10-20.md) and [quickstart](docs/image-layout-quickstart.md).

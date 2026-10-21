@@ -29,6 +29,8 @@ flowchart TD
 
 [Stage assembly](../worker/src/stages/index.ts) shares the source cache, raster cache and observer within the worker's stage instances. [RoutePagesStage](../worker/src/stages/route-pages.ts) retains existing workspace/platform router gates. It samples pages whose plan needs pixels and that do not satisfy the existing healthy-text predicate. Running after planning establishes observation cost and candidate evidence, not before-paid-call savings.
 
+When no pages are eligible, shadow adds no raster work or observation-artifact PUT; it records a performance summary only. Result rows have an aggregate 16 MiB budget: an oversized result is marked omitted and further page observations stop.
+
 Selection currently takes eligible pages in document order. It is not a randomized quality audit. Audit a model-blind sample of native bypasses before claiming completeness for this selection policy.
 
 ## Configuration and existing integrations
@@ -53,9 +55,12 @@ Existing router shadow mode can execute configured paid decision-model calls. Th
 
 - `PAGE_ROUTER_LAYOUT_ENDPOINT`: `http://127.0.0.1:<port>/layout`, without credentials, query or redirect.
 - `PAGE_ROUTER_LAYOUT_MODEL_ID`, `PAGE_ROUTER_LAYOUT_REVISION` and `PAGE_ROUTER_LAYOUT_ARTIFACT_SHA256`: expected identity and exact artifact digest.
+- `PAGE_ROUTER_LAYOUT_PROFILE_SHA256`: the approved `/health` response's `inferenceProfileSha256`, pinning the inference configuration as well as the model.
 - `PAGE_ROUTER_LAYOUT_DEVICE`: defaults to `cpu`; explicit `cuda` is supported. Response device must match; no silent fallback.
 
 Optional limits are `PAGE_ROUTER_LAYOUT_TIMEOUT_MS` (default 2,000), `PAGE_ROUTER_LAYOUT_MAX_PAGES` (4 per document), `PAGE_ROUTER_LAYOUT_MAX_BYTES` (25 MiB), `PAGE_ROUTER_LAYOUT_CONCURRENCY` (1) and `PAGE_ROUTER_LAYOUT_QUEUE_CAPACITY` (8). The stage bounds its observation phase by the smaller of ten seconds and timeout multiplied by page limit. Cancelling HTTP does not prove the Python process stopped current inference.
+
+The profile digest covers the canonical inference profile, including detector metadata, threshold, device and contract version. Model size, transforms and classifier settings therefore participate in identity. Responses must match the configured profile. Approve the health identity against the intended configuration; do not blindly trust an unexpected service profile. Coordinate service/profile updates with a worker restart: previously cached results cannot detect a sidecar change.
 
 Concurrent identical requests coalesce. The bounded process-local result cache uses tenant/run scope, encoded payload and configured model identity; source bytes are not retained in that result cache. Results use stored-raster coordinates. The artifact explicitly records `pdfPointTransform: null`: these boxes cannot become PDF-point crop coordinates without an exact transform.
 
@@ -80,7 +85,7 @@ Compare unchanged routing against shadow on identical inputs and allocation, cov
 
 The implementation records `page-route-layout` performance events and a separate `page-route-layout-shadow` artifact. Existing journals retain them; detailed dashboard presentation needs an explicit consumer for these metrics.
 
-Requests use the run's usage ledger. Service compute cost remains **unknown** without independent metering: unbilled zero customer charges are not zero supplier cost. Optional `PAGE_ROUTER_LAYOUT_HOURLY_COST_USD` records pricing context, not measured usage. Do not price client queue/transport elapsed time as dedicated CPU time or double-count costs already included in worker allocation. [Dependency tracing](dependency-tracing.md) describes correlation and receipt deduplication.
+Dispatched requests use the run's usage ledger once per service job; completed cache hits and joined requests do not create duplicate dispatch receipts. Failed observations are diagnostic attempts, separate from dispatched-request counts. All shadow receipts remain nonbillable with zero customer charges. When finite service `diagnostics.elapsedMs` and `PAGE_ROUTER_LAYOUT_HOURLY_COST_USD` are available, metadata includes `estimatedComputeCostCents` and `costStatus=estimated-service-wall-time`. This estimates decode/model/fingerprint wall time only; it excludes queueing, idle host and startup and is not measured CPU time. Missing measurements and failed requests retain **unknown** service cost. Do not treat zero customer charges as zero supplier cost, price client queue time as CPU time, or double-count costs included in worker allocation. [Dependency tracing](dependency-tracing.md) describes correlation and receipt deduplication.
 
 ## Rollout and later active integration
 

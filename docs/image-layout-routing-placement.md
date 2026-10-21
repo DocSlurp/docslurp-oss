@@ -2,7 +2,7 @@
 
 Use the Tiny detector as a **lazy, cached page-layout evidence provider after native checks, before expensive pixel-dependent decisions and extraction**. Keep the healthy native-text route ahead of it. Initially collect shadow evidence and region candidates; do not let Tiny authorize `accept-text`, disable OCR, or declare a page complete.
 
-This is a placement decision, not implemented pipeline wiring. It was checked against app/core `b4ee1a58` and experimental PR #88. The reviewed routing files are identical between those checkouts. [The measured findings](image-layout-confirmation-2026-10-20.md) still govern quality: the fast CPU pool is promising, but neither model passed the general-readiness gate.
+This records the initial placement decision, checked against app/core `b4ee1a58` and experimental PR #88 before pipeline wiring. On 2026-10-21, a bounded post-plan PDF observer was implemented behind operator-only `PAGE_ROUTER_LAYOUT=shadow`; see [production integration](image-layout-production-integration.md). That milestone collects evidence without changing the plan. The conditional before-paid-call active design below remains future work, and the runtime is not deployed by default. The reviewed routing files are identical between those checkouts. [The measured findings](image-layout-confirmation-2026-10-20.md) still govern quality: the fast CPU pool is promising, but neither model passed the general-readiness gate.
 
 ## Current execution and costs
 
@@ -71,7 +71,7 @@ Keep final `route-pages` after extraction so it can reconcile actual extracted c
 
 ## Integration acceptance experiment
 
-Start `off`/`shadow`, with a documented flag/config contract to be implemented. Shadow must record observations and a proposed plan without changing extraction or enabling paid calls. Establish an explicit shadow render/CPU budget; generating every page solely for shadow inference would itself be a regression.
+The implemented observer starts `off`/`shadow` through the [operator contract](image-layout-production-integration.md#resident-service-and-bounds). The before-paid-call active provider still needs implementation. Shadow must record observations and a proposed plan without changing extraction or enabling paid calls. Establish an explicit shadow render/CPU budget; generating every page solely for shadow inference would itself be a regression.
 
 Compare the unchanged router against the conditional provider on the same source groups and downstream extraction requirements. Measure:
 

@@ -2,7 +2,7 @@
 
 For executable setup and model pinning instructions, see [image layout quickstart](../../../docs/image-layout-quickstart.md).
 
-`detectImageLayout(bytes, options, runner, signal)` executes a separately installed detector CLI through the existing `CommandRunner`. Nothing registers this in the ingestion pipeline or changes a default. `detectImageLayoutAtEndpoint` connects to the resident service described below; `parseImageLayout` validates the shared response contract.
+`detectImageLayout(bytes, options, runner, signal)` executes a separately installed detector CLI through the existing `CommandRunner`. The cold CLI is not registered in the pipeline. The resident endpoint has a bounded PDF post-plan observer behind operator-only `PAGE_ROUTER_LAYOUT=shadow`, default off; it records separate evidence without changing extraction assignments. See [production integration](../../../docs/image-layout-production-integration.md). `detectImageLayoutAtEndpoint` connects to the resident service described below; `parseImageLayout` validates the shared response contract.
 
 ```ts
 import { CommandRunner } from "../tools/runner.js";
@@ -40,7 +40,7 @@ HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 HF_HOME=/absolute/cache \
   --model heron --device cpu --port 8769
 ```
 
-`GET http://127.0.0.1:8769/health` reports the exact model revision and one-time load duration. Call `detectImageLayoutAtEndpoint(bytes, { endpoint: "http://127.0.0.1:8769/layout", expectedModelId: "docling-project/docling-layout-heron", expectedRevision: "<verified-cache-revision>", device: "cpu" }, signal)` to send original image bytes without base64. The adapter rejects redirects, external hosts, model/device mismatches and a mismatched source hash. It caps input at 25 MiB and streams at most 10 MiB of output before parsing.
+`GET http://127.0.0.1:8769/health` reports the exact model revision, one-time load duration and `inferenceProfileSha256`. The router observer requires `PAGE_ROUTER_LAYOUT_PROFILE_SHA256` in addition to model/revision/artifact pins; the profile covers detector metadata, threshold, device and contract version, including transform/classifier/input-size settings. The direct adapter can enforce it with `expectedInferenceProfileSha256`. Coordinate profile changes with worker restart so cached observations cannot outlive the approved service configuration. Call `detectImageLayoutAtEndpoint(bytes, { endpoint: "http://127.0.0.1:8769/layout", expectedModelId: "docling-project/docling-layout-heron", expectedRevision: "<verified-cache-revision>", device: "cpu" }, signal)` to send original image bytes without base64. The adapter rejects redirects, external hosts, model/device mismatches and a mismatched source hash. It caps input at 25 MiB and streams at most 10 MiB of output before parsing.
 
 The service keeps one model resident and serializes requests. It is a local opt-in utility, not a deployed API or an automatically managed daemon. Use a GPU-capable environment and `--device cuda` explicitly for GPU execution. Process startup/model load, resident idle time and network/client overhead must be counted separately from warm inference. A timed-out client does not interrupt already-started Python inference. The caller must attribute the resident service's compute costs to its normal usage scope; this transport does not pretend an HTTP request has token usage or use the subprocess runner's accounting.
 
