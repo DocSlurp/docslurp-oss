@@ -49,6 +49,7 @@
           "warped",
           "low-res",
           "blurry",
+          "underexposed",
           "low-lighting",
           "shadow",
           "glare",
@@ -99,6 +100,7 @@
               "warped",
               "low-res",
               "blurry",
+              "underexposed",
               "low-lighting",
               "shadow",
               "glare",
@@ -286,6 +288,13 @@
         "region",
         "row",
         "cell"
+      ]
+    },
+    "underexposed": {
+      "facet": "digital-exposure",
+      "scopes": [
+        "page",
+        "region"
       ]
     },
     "low-lighting": {

@@ -13,7 +13,7 @@ TAXONOMY = {
  'aligned': ('page-alignment', ['page']), 'skewed': ('page-alignment', ['page']),
  'perspective': ('page-projection', ['page']), 'rotated': ('page-rotation', ['page']), 'warped': ('page-shape', ['page']),
  'low-res': ('resolution', ['page','region','row','cell']), 'blurry': ('sharpness', ['page','region','row','cell']),
- 'low-lighting': ('exposure', ['page','region']), 'shadow': ('illumination', ['page','region']),
+ 'underexposed': ('digital-exposure', ['page','region']), 'low-lighting': ('exposure', ['page','region']), 'shadow': ('illumination', ['page','region']),
  'glare': ('illumination', ['page','region']), 'uneven-lighting': ('illumination', ['page','region']),
  'noise': ('noise', ['page','region']), 'low-contrast': ('contrast', ['page','region']),
  'cropped': ('extent', ['page','region','table','row','cell']), 'occluded': ('visibility', ['page','region','table','row','cell']),
@@ -107,13 +107,20 @@ def backfill(root, historical=None):
   if image.is_file():arts.append(artifact(image,'image'))
   ev=[arts[0]];a=[];scope={'kind':'page','id':identifier};kind=meta.get('kind')
   a.append(assertion('synthetic',scope,ev,'Capture recipe derives from an authored synthetic source.'))
-  if kind=='synthetic-photographic-print-composite':
+  if kind=='synthetic-photographic-print-composite' or meta.get('scene'):
    a.append(assertion('picture',scope,ev,'Explicit photographic print composite, not an actual camera photograph.'))
    if meta.get('source_to_capture'):a.append(assertion('perspective',scope,ev,'Source-to-capture homography and calibrated quadrilateral recorded.'))
    if meta.get('calibration',{}).get('occlusion_polygons'):a.append(assertion('occluded',scope,ev,'Manual foreground silhouette records hand occlusion; not character-level visibility.'))
    if meta.get('calibration',{}).get('lighting'):a.append(assertion('uneven-lighting',scope,ev,'Calibrated recipe records directional/mixed lighting: '+meta['calibration']['lighting']))
   elif meta.get('crop_box_source_pixels'):
    for tag in ['digital','cropped','aligned']:a.append(assertion(tag,scope,ev,'Deterministic digital crop recipe; identity source transform, not proof of an actual scanner.'))
+  operation=meta.get('quality_operation',{});op=operation.get('kind')
+  if op:
+   if not meta.get('scene'):a.append(assertion('digital',scope,ev,'Deterministic operation on native digital parent; parent acquisition remains separately recorded.'))
+   if op=='stored-pixel-clockwise-90':a.append(assertion('rotated',scope,ev,'Recorded stored-pixel clockwise rotation of 90 degrees; parent aligned tag is not inherited as child orientation.'))
+   elif op=='low-resolution-max-edge' and max(operation.get('output_size',[99999]))<=640:a.append(assertion('low-res',scope,ev,'Predeclared task recipe: output maximum edge <=640 px; output size '+str(operation['output_size'])+'. Not an inferred optical DPI.'))
+   elif op=='gaussian-blur':a.append(assertion('blurry',scope,ev,'Known synthetic Gaussian blur recipe, radius '+str(operation.get('parameter'))+' pixels; not a physical defocus measurement.'))
+   elif 'brightness' in op or 'underexpos' in op:a.append(assertion('underexposed',scope,ev,'Known digital brightness multiplication '+str(operation.get('parameter'))+'; no physical low-light/night claim.'))
   a+=table_assertions(row.get('regions',[]),ev)
   results.append(package(identifier,'capture-variant',arts,a,[{'facet':'sharpness/exposure/resolution','reason':'No thresholded measurement or verified condition assertion. No blur/low-light/low-res guess from recipe aesthetics.'}]))
  if historical:
@@ -121,7 +128,23 @@ def backfill(root, historical=None):
   for record in data.get('assets',[]):
    path=Path(record['path']);arts=[artifact(manifest,'historical-source-manifest'),artifact(path,'image')]
    results.append(package(record['id'],'historical-reference',arts,[],[{'facet':'acquisition/alignment/quality','reason':'Archive reproduction known; actual scanner/camera, orientation measurement and quality thresholds not established by this receipt. Historical age/ink/paper color do not establish blur or low lighting.'}]))
+ frozen=root/'frozen-v2/candidates.jsonl'
+ frozen_rows=[json.loads(line) for line in frozen.read_text().splitlines() if line.strip()] if frozen.is_file() else []
+ known={r['id']:r for r in results}
+ for row in frozen_rows:
+  if row['id'] not in known:
+   image=Path(row['image_path']);meta=row.get('metadata',{});arts=[artifact(image,'image')]
+   for role in ['source_path','reference_path']:
+    path=Path(meta.get(role,'__missing__'))
+    if path.is_file():arts.append(artifact(path,role))
+   item=package(row['id'],'historical-reference',arts,[],[{'facet':'acquisition/alignment/quality','reason':'Manual historical silver; source manifest does not prove actual scanner/camera acquisition or quality thresholds. No condition guessed.'}]);results.append(item);known[item['id']]=item
+ for path in sorted((root/'captures').glob('*.row.json')):
+  row=json.loads(path.read_text());item=known[row['id']];meta=row.get('metadata',{});parent=known.get(meta.get('source_id'))
+  if parent:item['parentContext']={'sourceId':meta['source_id'],'parentId':meta.get('parent_id',meta['source_id']),'assertions':[{**a,'appliesAs':'ancestor-condition-only'} for a in parent['assertions'] if a['scope']['kind']=='page'],'policy':'Ancestor scopes retained; never overwrite current orientation, acquisition or row/cell state.'}
  for result in results:(out/(result['id']+'.conditions.json')).write_text(json.dumps(result,indent=2,ensure_ascii=False)+'\n')
+ if frozen_rows:
+  selection={'schema':'frozen-layout-condition-tags-v1','candidateManifest':artifact(frozen,'frozen-candidates'),'metadataOnly':True,'entries':[{'id':row['id'],'path':str(out/(row['id']+'.conditions.json')),'sha256':sha(out/(row['id']+'.conditions.json')),'tags':known[row['id']]['tags']} for row in frozen_rows]}
+  (out/'frozen-index.json').write_text(json.dumps(selection,indent=2)+'\n')
  summary={'schema':'layout-condition-tags-index-v1','createdAt':datetime.now(timezone.utc).isoformat(),'metadataOnly':True,'count':len(results),'categories':dict(__import__('collections').Counter(r['category'] for r in results)),'entries':[{'id':r['id'],'path':str(out/(r['id']+'.conditions.json')),'sha256':sha(out/(r['id']+'.conditions.json')),'tags':r['tags']} for r in results]}
  (out/'index.json').write_text(json.dumps(summary,indent=2)+'\n');return summary
 

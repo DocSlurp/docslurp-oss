@@ -6,6 +6,9 @@ class ConditionTagsTests(unittest.TestCase):
  def test_conflict_only_within_same_scope(self):
   scope={"kind":"page","id":"p"}
   with self.assertRaises(ValueError):validate([assertion("digital",scope,EV,"known"),assertion("picture",scope,EV,"known")])
+ def test_rotated_child_cannot_also_be_aligned(self):
+  scope={"kind":"page","id":"child"}
+  with self.assertRaises(ValueError):validate([assertion("aligned",scope,EV,"canvas"),assertion("rotated",scope,EV,"recipe")])
  def test_page_alignment_not_row_alignment(self):
   page=assertion("aligned",{"kind":"page","id":"p"},EV,"canvas")
   row=assertion("row-misaligned",{"kind":"row","id":"t/row/1"},EV,"review")

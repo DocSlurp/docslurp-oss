@@ -11,7 +11,7 @@ The first version is grounded in known rendering/capture recipes and reviewed so
 | Acquisition | `digital`, `scanned`, `picture` | Page; mutually exclusive at the same scope. A synthetic photo composite is `picture` plus `synthetic`, with the composite basis explicit. Actual acquisition unknown means no assertion. |
 | Source origin / synthesis | `born-digital`, `synthetic` | Page; independently records authored source versus generated/composited content. |
 | Alignment/projection | `aligned`, `skewed`, `perspective`, `rotated`, `warped` | Page; native upright rendering is aligned. These tags do not mean that every table row or cell aligns. Camera homography is evidence for projection, not a measured OCR quality score. |
-| Quality | `low-res`, `blurry`, `low-lighting`, `shadow`, `glare`, `uneven-lighting`, `noise`, `low-contrast` | Page or region, with resolution/sharpness also usable at row/cell scope. Require a stated measurement/threshold, verified recipe, or explicit visual review; no classification from paper color or historical age. |
+| Quality | `low-res`, `blurry`, `underexposed`, `low-lighting`, `shadow`, `glare`, `uneven-lighting`, `noise`, `low-contrast` | Page or region, with resolution/sharpness also usable at row/cell scope. Require a stated measurement/threshold, verified recipe, or explicit visual review; no classification from paper color or historical age. |
 | Page/region extent | `cropped`, `occluded` | Page, region, table, row or cell; preserve specific extent and visibility evidence. |
 | Table rules | `borderless`, `bordered`, `mixed-rules` | Table; exclusive within that table. `border=False` in our renderer still draws row rules, so it does not establish borderlessness. Inspect commands or visual evidence. |
 | Table structure | `header-repeated`, `continues` | Table; requires explicit continuation/header metadata. |
@@ -47,3 +47,5 @@ The initial historical receipt records archive originals and observed page featu
 [PubTables-1M](https://github.com/microsoft/table-transformer) includes row, column and cell locations, blank cells and header structures. This motivates stable row/cell scopes and the distinction between an empty cell, absent annotation and clipped text.
 
 [DocRes](https://github.com/ZZZHANG-jx/DocRes) treats dewarping, deshadowing, appearance, deblurring and binarization as distinct restoration tasks. We likewise separate geometry, illumination and sharpness; a generic “bad scan” tag would hide those differences.
+
+The four predeclared quality derivatives use stored-pixel clockwise 90° (`rotated`, without child `aligned`), maximum image edge 640 px (`low-res` for this task recipe), Gaussian radius 1.4 px (`blurry`, explicitly synthetic), and digital brightness multiplication 0.45 (`underexposed`, no physical low-lighting claim). Parent scope remains ancestry, not a conflicting child orientation.
