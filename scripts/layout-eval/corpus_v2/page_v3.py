@@ -20,6 +20,7 @@ Pages remain review candidates. Nothing here admits a benchmark.
 import hashlib
 import json
 import math
+import os
 from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageOps
@@ -36,6 +37,7 @@ GENERATED_ASSETS = V3_ROOT / 'assets' / 'generated'
 NOTO = '/usr/share/fonts/noto/'
 CJK = '/usr/share/fonts/noto-cjk/'
 GS = '/usr/share/fonts/gsfonts/'
+KATEX_DEFAULT = '/home/dan/code/17th-street-labs/docslurp-app/node_modules/.pnpm/katex@0.19.0/node_modules/katex'
 
 EXTRA_FONTS = {
     'hebrew': (NOTO + 'NotoSansHebrew-Regular.ttf', 0),
@@ -528,18 +530,128 @@ class PageV3(Page):
         return self.region('chart', box, None, chart_kind=kind, chart_data=data_record, axis_text=True, legend=bool(legend_h))
 
     # ---- math ---------------------------------------------------------------------
-    def equation(self, latex, x, y, width, size=22, display=True, group=None, component=False):
-        """Reuse the V2 mathtext renderer, but keep V3 assets and receipts under the V3 root."""
-        try:
-            from . import scientific
-        except ImportError:
-            import scientific
-        previous = scientific.REFERENCE_ROOT
-        scientific.REFERENCE_ROOT = V3_ROOT / 'assets'
-        try:
-            return scientific.equation(self, latex, x, y, width, size=size, display=display, group=group, component=component)
-        finally:
-            scientific.REFERENCE_ROOT = previous
+    def equation(self, latex, x, y, width, size=22, display=True, group=None, component=False, ink='#172a32', engine='mathtext'):
+        """Typeset with matplotlib mathtext (as scientific.equation) or KaTeX via headless Chromium.
+
+        KaTeX is used where mathtext lacks environments (matrices, cases, aligned). Assets and
+        provenance receipts live under the V3 root; the expression is the region's source.
+        """
+        if engine == 'katex':
+            return self._place_formula(*self._katex_asset(latex, size, display, ink, x, y), x, y, width, latex, display, group, component)
+        import os
+        os.environ.setdefault('MPLCONFIGDIR', str(Path.home() / '.cache/docslurp/matplotlib'))
+        import matplotlib
+        matplotlib.use('Agg')
+        from matplotlib.mathtext import math_to_image
+        from matplotlib.font_manager import FontProperties
+        from PIL import ImageChops
+        background = self.source['paper']
+        for command in self.source['commands']:
+            if command['op'] == 'rect' and command.get('fill'):
+                x0, y0, x1, y1 = command['bbox']
+                if x0 <= x <= x1 and y0 <= y <= y1:
+                    background = command['fill']
+        root = V3_ROOT / 'assets' / 'math'
+        root.mkdir(parents=True, exist_ok=True)
+        key = f'{latex}|{size}|{background}|{ink}|mathtext-{matplotlib.__version__}'
+        path = root / f'{sha_bytes(key.encode())}.png'
+        if not path.exists():
+            with matplotlib.rc_context({'savefig.facecolor': background, 'figure.facecolor': background}):
+                math_to_image('$' + latex + '$', path, dpi=144, format='png', color=ink, prop=FontProperties(size=size, math_fontfamily='stix'))
+            with Image.open(path) as im:
+                im = im.convert('RGB')
+                box = ImageChops.difference(im, Image.new('RGB', im.size, background)).getbbox()
+                if not box:
+                    raise ValueError('Empty formula rendering')
+                im.crop(box).save(path)
+        fontroot = Path(matplotlib.get_data_path()) / 'fonts/ttf'
+        provenance = {'schema': 'authored-formula-raster-provenance-v1', 'kind': 'standard-mathematical-typesetting-not-AI-image-generation',
+                      'expression': latex, 'expression_sha256': sha_bytes(latex.encode()), 'image_sha256': sha_file(path),
+                      'renderer': {'name': 'matplotlib.mathtext', 'version': matplotlib.__version__, 'fontset': 'stix', 'dpi': 144,
+                                   'point_size': size, 'background': background, 'ink': ink},
+                      'fonts': [{'path': str(f), 'sha256': sha_file(f)} for f in sorted(fontroot.glob('STIX*.ttf'))],
+                      'rights': 'Original authored raster; STIX fonts under the SIL OFL as bundled with matplotlib. Font binaries are not exported.'}
+        Path(str(path) + '.provenance.json').write_text(json.dumps(provenance, indent=2) + '\n')
+        asset = {'kind': 'newly-authored-mathtext-typesetting', 'renderer': 'matplotlib.mathtext', 'renderer_version': matplotlib.__version__,
+                 'fontset': 'stix', 'latex': latex, 'dpi': 144, 'provenance_path': str(path) + '.provenance.json'}
+        return self._place_formula(path, asset, x, y, width, latex, display, group, component)
+
+    def _formula_background(self, x, y):
+        background = self.source['paper']
+        for command in self.source['commands']:
+            if command['op'] == 'rect' and command.get('fill'):
+                x0, y0, x1, y1 = command['bbox']
+                if x0 <= x <= x1 and y0 <= y <= y1:
+                    background = command['fill']
+        return background
+
+    def _katex_asset(self, latex, size, display, ink, x, y):
+        import platform
+        import subprocess
+        import tempfile
+        from PIL import ImageChops
+        katex_dir = Path(os.environ.get('DOCSLURP_KATEX_DIR', KATEX_DEFAULT))
+        package = json.loads((katex_dir / 'package.json').read_text())
+        css = katex_dir / 'dist' / 'katex.min.css'
+        background = self._formula_background(x, y)
+        root = V3_ROOT / 'assets' / 'math'
+        root.mkdir(parents=True, exist_ok=True)
+        font_px = round(size * 1.25)
+        key = f'katex|{latex}|{display}|{font_px}|{background}|{ink}|{package["version"]}'
+        path = root / f'{sha_bytes(key.encode())}.png'
+        chromium = subprocess.run(['chromium', '--version'], capture_output=True, text=True).stdout.strip()
+        if not path.exists():
+            scratch = Path(os.environ.get('TMPDIR', str(Path.home() / 'tmp/agents')))
+            with tempfile.TemporaryDirectory(prefix='katex-', dir=scratch) as work:
+                work = Path(work)
+                subprocess.run(['node', str(Path(__file__).with_name('katex_render.mjs')), str(katex_dir), latex, '1' if display else '0',
+                                str(font_px), ink, background, str(work / 'eq.html')], check=True, capture_output=True)
+                subprocess.run(['chromium', '--headless=new', '--disable-gpu', '--no-sandbox', '--hide-scrollbars', f'--user-data-dir={work / "profile"}',
+                                f'--screenshot={work / "eq.png"}', '--window-size=2400,900', (work / 'eq.html').as_uri()],
+                               check=True, capture_output=True, timeout=120)
+                with Image.open(work / 'eq.png') as im:
+                    im = im.convert('RGB')
+                    box = ImageChops.difference(im, Image.new('RGB', im.size, background)).getbbox()
+                    if not box or box[2] >= im.width - 2 or box[3] >= im.height - 2:
+                        raise ValueError('KaTeX rendering empty or clipped')
+                    im.crop(box).save(path)
+        provenance = {'schema': 'authored-formula-raster-provenance-v1', 'kind': 'standard-mathematical-typesetting-not-AI-image-generation',
+                      'expression': latex, 'expression_sha256': sha_bytes(latex.encode()), 'image_sha256': sha_file(path),
+                      'renderer': {'name': 'KaTeX renderToString + headless Chromium screenshot', 'katex_version': package['version'],
+                                   'katex_license': package.get('license'), 'katex_css_sha256': sha_file(css), 'chromium': chromium,
+                                   'node': subprocess.run(['node', '--version'], capture_output=True, text=True).stdout.strip(),
+                                   'host': platform.platform(), 'display_mode': display, 'font_px': font_px, 'background': background, 'ink': ink},
+                      'rights': 'Original authored raster; KaTeX (MIT) with KaTeX fonts (SIL OFL). Font binaries are not exported.'}
+        Path(str(path) + '.provenance.json').write_text(json.dumps(provenance, indent=2) + '\n')
+        asset = {'kind': 'newly-authored-katex-typesetting', 'renderer': 'katex+chromium', 'renderer_version': package['version'],
+                 'latex': latex, 'provenance_path': str(path) + '.provenance.json'}
+        return path, asset
+
+    def _place_formula(self, path, asset, x, y, width, latex, display, group, component):
+        with Image.open(path) as im:
+            w, h = im.size
+        scale = min(1, width / w)
+        box = [x, y, x + w * scale, y + h * scale]
+        if box[2] > self.width or box[3] > self.height:
+            raise ValueError('Formula outside page')
+        if component:
+            self.math_component(path, box, latex, asset=asset, display=display, formula_group=group)
+        else:
+            self.image(path, box, label='formula', asset=asset, latex=latex, display=display, formula_group=group,
+                       extent_policy='cropped-rendered-formula-ink')
+        return box[3]
+
+    def inline_math(self, prefix, latex, suffix, x, y, width, size=20, face='serif', color='#242522', math_size=None, ink=None):
+        """Prose with one inline formula: three regions sharing an inline group (V2 convention)."""
+        group = f'{self.id}-inline-{len(self.source["regions"])}'
+        f = self.font(face, size)
+        self.text(prefix, x, y, width, size, face, color, label='paragraph', inline_group=group)
+        left = x + f.getlength(prefix) + 6
+        before = len(self.source['regions'])
+        self.equation(latex, left, y + 2, width - (left - x), size=math_size or size * .5, display=False, group=group, ink=ink or color)
+        right = self.source['regions'][before]['bbox'][2] + 6
+        self.text(suffix, right, y, width - (right - x), size, face, color, label='paragraph', inline_group=group)
+        return y + size * 1.4
 
 
 def nice_max(v):
