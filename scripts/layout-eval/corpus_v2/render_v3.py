@@ -16,7 +16,7 @@ from pathlib import Path
 from PIL import Image, ImageDraw
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-MODULES = ['v3_multilingual', 'v3_tables', 'v3_charts_slides', 'v3_forms_receipts', 'v3_science', 'v3_photo_pages', 'v3_historic', 'v3_handwriting']
+MODULES = ['v3_multilingual', 'v3_tables', 'v3_charts_slides', 'v3_forms_receipts', 'v3_science', 'v3_photo_pages', 'v3_historic']
 
 
 def contact_sheet(rows, root, path, cols=6, tw=300, th=470):
