@@ -107,6 +107,7 @@ export function searchSessionWriteBehindEnabled(native: boolean, env: NodeJS.Pro
 }
 
 const pendingSessionWrites = new Map<string, Promise<void>>();
+const WRITE_BEHIND_RETRY_DELAY_MS = 250;
 let saturatedWrites = 0;
 function countSaturatedWrite(): void {
   saturatedWrites += 1;
@@ -233,6 +234,12 @@ class SqlSearchSessionJournal implements SearchSessionJournal {
     const previous = pendingSessionWrites.get(this.sessionId) ?? Promise.resolve();
     const pending = Promise.all([previous, this.persistenceTail])
       .then(() => inBackgroundSlot(bound))
+      // One retry, as the inline path retries a failed usage flush: these writes carry billed usage.
+      // A failed attempt rolled back (each write is one transaction), so retrying cannot double it.
+      .catch(async () => {
+        await new Promise<void>((resolve) => { setTimeout(resolve, WRITE_BEHIND_RETRY_DELAY_MS); });
+        await inBackgroundSlot(bound);
+      })
       .catch((error) => { reportPublicError(error, { operation: `search-write-behind:${operation}`, sessionId: this.sessionId }); });
     this.persistenceTail = pending;
     pendingSessionWrites.set(this.sessionId, pending);
