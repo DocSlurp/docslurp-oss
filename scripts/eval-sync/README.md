@@ -88,3 +88,10 @@ Original summaries remain labeled historical evidence in metadata. Their origina
 Official contracts checked 2026-10-16: [OpenAPI](https://raw.githubusercontent.com/langfuse/langfuse/main/web/public/generated/api/openapi.yml), [dataset documentation](https://langfuse.com/docs/evaluation/experiments/datasets), [deprecated API migration](https://langfuse.com/faq/all/deprecated-api-migration), [historical migration limitations](https://langfuse.com/guides/cookbook/example_data_migration). Uses `/api/public/v2/datasets` and `/api/public/dataset-items`; never deprecated `/dataset-run-items`.
 
 Run focused checks with `node --test scripts/eval-sync/langfuse.test.mjs`.
+
+## Guardrail overhead
+
+`guardrail-overhead.mjs estimate INPUT.json OUTPUT.json` produces explicit provider
+cost scenarios. `compare INPUT.json OUTPUT.json` analyzes paired off/moderation/judge/
+cascade observations without treating quick rejection as accepted-work speedup.
+See [measurement contract and current limits](../../docs/evals/guardrail-overhead-and-tracing.md).

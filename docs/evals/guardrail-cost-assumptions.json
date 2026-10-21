@@ -1,0 +1,12 @@
+{
+  "checks": 10000,
+  "inputTokens": 1000,
+  "outputTokens": 100,
+  "inputUsdPerMillion": 0.25,
+  "outputUsdPerMillion": 1.5,
+  "escalationFraction": 0.1,
+  "sources": [
+    { "url": "https://openrouter.ai/api/v1/models", "model": "google/gemini-3.1-flash-lite", "verifiedAt": "2026-10-20" },
+    { "url": "https://developers.openai.com/api/docs/guides/moderation", "model": "omni-moderation-latest", "verifiedAt": "2026-10-20" }
+  ]
+}
