@@ -32,9 +32,11 @@ def audit(root, clearances):
     release_issues = []
     if declaration.get("license") not in ("CC-BY-4.0", "CC0-1.0") or not declaration.get("approved_by") or not declaration.get("attribution") or not declaration.get("original_content_scope"):
         release_issues.append("missing_explicit_original_contribution_release")
-    qa_path = root / "qa/visual-qa-ledger.json"
+    qa_path = root / "qa/final-native-layout-admission.json"
+    if not qa_path.is_file():
+        qa_path = root / "qa/visual-qa-ledger.json"
     qa = json.loads(qa_path.read_text()) if qa_path.is_file() else {}
-    qa_rows = {page["id"]: page for page in qa.get("pages", [])}
+    qa_rows = {page["id"]: {**page, **{role + "_sha256": record.get("sha256") for role, record in page.get("artifacts", {}).items()}} for page in qa.get("pages", [])}
     rows = []
     for source_path in sorted((root / "sources").glob("*.json")):
         source = json.loads(source_path.read_text())
