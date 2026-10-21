@@ -847,7 +847,7 @@ export class Store {
       value: perf.value,
       unit: perf.unit,
       tags: perf.tags,
-      metadata: this.toJsonText(perf.metadata ?? {}),
+      metadata: this.toJsonValue(perf.metadata ?? {}),
     }));
 
     for (const batch of batchedRows(rows)) {
@@ -890,7 +890,7 @@ export class Store {
       page_ratio: parserEval.pageRatio,
       selected: parserEval.selected,
       artifact_uri: parserEval.artifactUri ?? null,
-      metadata: this.toJsonText(parserEval.metadata ?? {}),
+      metadata: this.toJsonValue(parserEval.metadata ?? {}),
     }));
 
     for (const batch of batchedRows(rows)) {
@@ -2730,8 +2730,9 @@ export class Store {
     return this.sql.json(JSON.parse(JSON.stringify(value ?? {})) as JSONValue);
   }
 
-  private toJsonText(value: unknown) {
-    return JSON.stringify(JSON.parse(JSON.stringify(value ?? {})));
+  /** A plain JSON value for jsonb columns: the driver serializes it once (a string here would be stored as a JSON string). */
+  private toJsonValue(value: unknown) {
+    return JSON.parse(JSON.stringify(value ?? {})) as Record<string, unknown>;
   }
 
   /** Whether the app has enforced billing (Stripe configured); false before migration 0026. */
