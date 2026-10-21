@@ -1,5 +1,6 @@
 import { sql } from "../db.js";
 import type { SqlFragment } from "../lib/sql-fragments.js";
+import { SEARCH_ELIGIBILITY_CHANNEL } from "./eligibility-hint.js";
 import { lexicalSearchableDocument } from "./eligibility.js";
 import type { SearchFilters } from "./filters.js";
 import type { HashFilter } from "./index-serving.js";
@@ -129,19 +130,34 @@ export async function invalidateSearchRuns(runIds: string[]): Promise<void> {
 
 let listening: Promise<unknown> | null = null;
 
-/** Subscribe once per process to run_events hints (worker/src/db/run-event-store.ts). Best effort: the TTL still bounds staleness. */
+function stringIds(payload: string, field: "runIds" | "workspaceIds"): string[] {
+  try {
+    const parsed = JSON.parse(payload) as Record<string, unknown>;
+    const ids = parsed[field];
+    return Array.isArray(ids) ? ids.filter((id): id is string => typeof id === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
+/** A search_eligibility hint (search/eligibility-hint.ts): drop the named workspaces. */
+export function handleSearchEligibilityHint(payload: string): void {
+  for (const workspaceId of stringIds(payload, "workspaceIds")) invalidateSearchWorkspace(workspaceId);
+}
+
+/**
+ * Subscribe once per process to run_events hints (worker/src/db/run-event-store.ts)
+ * and search_eligibility hints (API-side deletes). Best effort: the TTL still bounds staleness.
+ */
 function ensureInvalidationListener(): void {
   if (listening || typeof (sql as { listen?: unknown }).listen !== "function") return;
-  listening = sql.listen("run_events", (payload) => {
-    let runIds: string[] = [];
-    try {
-      const parsed = JSON.parse(payload) as { runIds?: unknown };
-      runIds = Array.isArray(parsed.runIds) ? parsed.runIds.filter((id): id is string => typeof id === "string") : [];
-    } catch {
-      return;
-    }
-    if (runIds.length) void invalidateSearchRuns(runIds).catch(() => undefined);
-  }).catch(() => {
+  listening = Promise.all([
+    sql.listen("run_events", (payload) => {
+      const runIds = stringIds(payload, "runIds");
+      if (runIds.length) void invalidateSearchRuns(runIds).catch(() => undefined);
+    }),
+    sql.listen(SEARCH_ELIGIBILITY_CHANNEL, handleSearchEligibilityHint),
+  ]).catch(() => {
     listening = null;
   });
 }

@@ -16,6 +16,7 @@ import {
 
 import { env } from "../config.js";
 import { sql } from "../db.js";
+import { notifySearchEligibilityChanged } from "../search/eligibility-hint.js";
 import { getArtifactText, parseArtifactUri } from "../lib/artifacts.js";
 import { fileUrlForArtifact } from "../lib/file-urls.js";
 import { documentWithholdsUri, withheldArtifactUrisFromMetadata } from "./pii-artifact-guard.js";
@@ -1370,6 +1371,8 @@ async function deleteDocumentRows(documentIds: string[], userId: string): Promis
     const workspaceIds = [...new Set(deleted.map((row) => row.workspace_id))];
     if (workspaceIds.length > 0) {
       await transaction`update workspaces set retention_changed_at = clock_timestamp() where id = any(${transaction.array(workspaceIds)})`;
+      // Native search caches each workspace's eligible documents; deletes emit no run_events hint.
+      await notifySearchEligibilityChanged(transaction, workspaceIds);
     }
 
     return deleted.map((row) => ({

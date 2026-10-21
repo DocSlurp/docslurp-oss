@@ -15,11 +15,36 @@ afterEach(() => resetSearchLimiterForTests());
 
 describe("search limiter", () => {
   it("derives its default from the pool size and honours env overrides", () => {
-    expect(resolveSearchLimiterOptions({})).toEqual({ maxConcurrency: 6, maxQueue: 200, queueTimeoutMs: 30_000, maxSlotsPerGroup: 2 });
+    // Flag off: one FIFO queue and no per-turn cap, as before fair admission.
+    expect(resolveSearchLimiterOptions({})).toEqual({ maxConcurrency: 6, maxQueue: 200, queueTimeoutMs: 30_000, maxSlotsPerGroup: 0, fairTenants: false });
     expect(resolveSearchLimiterOptions({ DATABASE_POOL_MAX: "40" }).maxConcurrency).toBe(13);
     expect(resolveSearchLimiterOptions({ DATABASE_POOL_MAX: "3" }).maxConcurrency).toBe(2);
     expect(resolveSearchLimiterOptions({ SEARCH_MAX_CONCURRENCY: "0", SEARCH_QUEUE_MAX: "5", SEARCH_QUEUE_TIMEOUT_MS: "1000" }))
-      .toEqual({ maxConcurrency: 0, maxQueue: 5, queueTimeoutMs: 1_000, maxSlotsPerGroup: 2 });
+      .toEqual({ maxConcurrency: 0, maxQueue: 5, queueTimeoutMs: 1_000, maxSlotsPerGroup: 0, fairTenants: false });
+  });
+
+  it("turns fair admission on with SEARCH_LANCEDB_NATIVE or SEARCH_FAIR_ADMISSION", () => {
+    expect(resolveSearchLimiterOptions({ SEARCH_LANCEDB_NATIVE: "1" })).toMatchObject({ maxSlotsPerGroup: 2, fairTenants: true });
+    expect(resolveSearchLimiterOptions({ SEARCH_FAIR_ADMISSION: "true" })).toMatchObject({ maxSlotsPerGroup: 2, fairTenants: true });
+    expect(resolveSearchLimiterOptions({ SEARCH_LANCEDB_NATIVE: "1", SEARCH_FAIR_ADMISSION: "0" })).toMatchObject({ maxSlotsPerGroup: 0, fairTenants: false });
+    // A per-workspace trial does not change process-wide admission.
+    expect(resolveSearchLimiterOptions({ SEARCH_LANCEDB_NATIVE_WORKSPACES: "w1" })).toMatchObject({ maxSlotsPerGroup: 0, fairTenants: false });
+    expect(resolveSearchLimiterOptions({ SEARCH_MAX_SLOTS_PER_TURN: "3" }).maxSlotsPerGroup).toBe(3);
+  });
+
+  it("keeps one FIFO queue across tenants and groups when fair admission is off", async () => {
+    const limiter = new ConcurrencyLimiter({ maxConcurrency: 1, maxQueue: 50, queueTimeoutMs: 5_000, maxSlotsPerGroup: 0, fairTenants: false });
+    let release!: () => void;
+    const holder = limiter.run(() => new Promise<void>((resolve) => { release = resolve; }), undefined, { tenant: "org-a" });
+    const order: string[] = [];
+    const runs = [
+      ...["a1", "a2", "a3"].map((label) => limiter.run(async () => { order.push(label); }, undefined, { tenant: "org-a", group: "turn-1" })),
+      limiter.run(async () => { order.push("b1"); }, undefined, { tenant: "org-b", group: "turn-2" }),
+    ];
+    await sleep(1);
+    release();
+    await Promise.all([holder, ...runs]);
+    expect(order).toEqual(["a1", "a2", "a3", "b1"]);
   });
 
   it("runs at most maxConcurrency searches and starts queued ones in order", async () => {

@@ -209,6 +209,29 @@ describe("write-behind session writes (SEARCH_SESSION_WRITE_BEHIND)", () => {
     expect(reported).toEqual([]);
   });
 
+  it("waits for its own writes once the backlog is full (SEARCH_WRITE_BEHIND_MAX_PENDING)", async () => {
+    vi.stubEnv("SEARCH_WRITE_BEHIND_MAX_PENDING", "0");
+    const response = await search.hybridSearch("maintenance", "u", { ...options, filters: zeroHitFilters });
+    // No await on the session: backpressure made the search commit before answering.
+    expect(await zeroResultRows()).toEqual([
+      { session_id: response.sessionId, workspace_id: "w", persisted: true, chat_session_id: null },
+    ]);
+    expect(reported).toEqual([]);
+  });
+
+  it("records a click sent right after the answer", async () => {
+    const session = await import("../search/session.js");
+    const response = await search.hybridSearch("maintenance", "u", { ...options, filters: { workspaceId: "w" } });
+    expect(response.results.length).toBeGreaterThan(0);
+    const clicked = await app().request(`/v1/search/${response.sessionId}/feedback`, {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ clickedChunkId: "d-chunk" }),
+    });
+    expect(clicked.status).toBe(200);
+    await session.drainSearchSessionWrites();
+    const [row] = await sql<{ clicked: boolean }[]>`select clicked from search_session_results where session_id = ${response.sessionId} and chunk_id = 'd-chunk'`;
+    expect(row?.clicked).toBe(true);
+  });
+
   it("keeps a reused session id's attempts in order", async () => {
     const session = await import("../search/session.js");
     const rootSessionId = crypto.randomUUID();

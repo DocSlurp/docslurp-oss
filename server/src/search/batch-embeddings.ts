@@ -4,6 +4,7 @@ import { embedConfiguredTexts } from "../lib/ai.js";
 import { recordUsageEvent } from "../lib/ai-usage.js";
 import type { SearchOptions } from "../services/search.js";
 import { embeddingCache } from "./embedding-cache.js";
+import { searchLanceDbNativeEnabled } from "./eligible-documents.js";
 import { METERED_EMBEDDING_PROVIDERS, queryEmbeddingApiKey, queryEmbeddingCacheKey } from "./session-planner.js";
 import { loadSearchWorkspaceContext } from "./session-setup.js";
 import { resolveWorkspaceRetrievalControls } from "./workspace-retrieval-session.js";
@@ -23,7 +24,8 @@ function embedsQueryText(options: SearchOptions): boolean {
  * vectors it would not use), only when the cache may hold them (not
  * strict-privacy), and only for routes with a batch path. The batch call's
  * actual usage is recorded once, scoped to the org and workspace. Any failure
- * leaves the searches to embed one by one, as before.
+ * leaves the searches to embed one by one, as before. Only workspaces on
+ * native search (SEARCH_LANCEDB_NATIVE or SEARCH_LANCEDB_NATIVE_WORKSPACES).
  */
 export async function prefetchBatchQueryEmbeddings(
   items: Array<{ query: string; workspaceId: string; options: SearchOptions }>,
@@ -34,7 +36,8 @@ export async function prefetchBatchQueryEmbeddings(
   let prefetched = 0;
   let calls = 0;
   await Promise.all([...byWorkspace].map(async ([workspaceId, group]) => {
-    if (group.length < 2) return;
+    // Rolls out with native search: workspaces on the default path embed per query, as before.
+    if (group.length < 2 || !searchLanceDbNativeEnabled(workspaceId)) return;
     try {
       const context = await loadSearchWorkspaceContext(workspaceId, userId);
       const { pipeline } = context.indexing;

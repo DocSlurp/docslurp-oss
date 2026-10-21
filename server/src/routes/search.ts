@@ -29,6 +29,7 @@ import { sql } from "../db.js";
 import { acceptApiKeys } from "../lib/route-auth.js";
 import { currentRequestApiKeyId } from "../lib/request-context.js";
 import { SearchCapacityError, withSearchAdmissionGroup } from "../search/search-limiter.js";
+import { awaitSearchSessionWrites } from "../search/session.js";
 import { randomUUID } from "node:crypto";
 import { env } from "../config.js";
 import { activeTraceparent } from "@docslurp/shared/observability";
@@ -475,6 +476,8 @@ export const searchRoutes = new Hono()
       return apiErrorResponse(c, 403, "forbidden", "Forbidden");
     }
 
+    // A write-behind search answers before its result rows commit.
+    await awaitSearchSessionWrites(sessionId);
     await sql`
       update search_session_results
       set clicked = true
@@ -511,6 +514,7 @@ export const searchesRoutes = new Hono().get("/:sessionId/materialization", asyn
   const userId = c.get("sessionUser")?.id;
   if (!userId) return apiErrorResponse(c, 401, "unauthorized", "Missing session");
   const { sessionId } = c.req.param();
+  await awaitSearchSessionWrites(sessionId);
   const [row] = await sql<{ workspace_id: string | null; candidates: unknown; deferred: unknown }[]>`
     select metadata ->> 'workspaceId' as workspace_id,
            metadata -> 'diagnostics' -> 'deferredCandidates' as candidates,

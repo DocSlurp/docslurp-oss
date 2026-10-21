@@ -29,9 +29,11 @@ import { resolveDatabasePoolMax } from "../lib/api-pool.js";
  *   search fails at once with 503.
  * - SEARCH_QUEUE_TIMEOUT_MS: longest wait for a slot (default 30000); then 503
  *   with Retry-After.
+ * - SEARCH_FAIR_ADMISSION: serve waiting searches round-robin per tenant (org,
+ *   else workspace), so one tenant's fan-out cannot starve others. Defaults to
+ *   SEARCH_LANCEDB_NATIVE (process-wide); off, the queue is one FIFO as before.
  * - SEARCH_MAX_SLOTS_PER_TURN: slots one chat agent turn or API batch holds at
- *   once (default 2, 0 = no cap). Waiting searches are served round-robin per
- *   tenant (org, else workspace), so one tenant's fan-out cannot starve others.
+ *   once (0 = no cap). Default 2 with fair admission, else 0.
  */
 export interface SearchLimiterOptions {
   maxConcurrency: number;
@@ -39,6 +41,20 @@ export interface SearchLimiterOptions {
   queueTimeoutMs: number;
   /** Slots one admission group (a chat agent turn, an API batch) may hold at once; 0 = no cap. */
   maxSlotsPerGroup?: number;
+  /** Round-robin across tenants (default true); false keeps one FIFO queue. */
+  fairTenants?: boolean;
+}
+
+function flag(value: string | undefined): boolean | null {
+  const normalized = (value ?? "").trim().toLowerCase();
+  if (["1", "true", "on", "yes"].includes(normalized)) return true;
+  if (["0", "false", "off", "no"].includes(normalized)) return false;
+  return null;
+}
+
+/** SEARCH_FAIR_ADMISSION, defaulting to the process-wide SEARCH_LANCEDB_NATIVE flag. */
+export function searchFairAdmissionEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  return flag(env.SEARCH_FAIR_ADMISSION) ?? flag(env.SEARCH_LANCEDB_NATIVE) ?? false;
 }
 
 function readInt(value: string | undefined, fallback: number, min: number, max: number): number {
@@ -48,11 +64,13 @@ function readInt(value: string | undefined, fallback: number, min: number, max: 
 
 export function resolveSearchLimiterOptions(env: NodeJS.ProcessEnv = process.env): SearchLimiterOptions {
   const defaultConcurrency = Math.max(2, Math.floor(resolveDatabasePoolMax(env) / 3));
+  const fair = searchFairAdmissionEnabled(env);
   return {
     maxConcurrency: readInt(env.SEARCH_MAX_CONCURRENCY, defaultConcurrency, 0, 1_000),
     maxQueue: readInt(env.SEARCH_QUEUE_MAX, 200, 0, 100_000),
     queueTimeoutMs: readInt(env.SEARCH_QUEUE_TIMEOUT_MS, 30_000, 100, 600_000),
-    maxSlotsPerGroup: readInt(env.SEARCH_MAX_SLOTS_PER_TURN, 2, 0, 1_000),
+    maxSlotsPerGroup: readInt(env.SEARCH_MAX_SLOTS_PER_TURN, fair ? 2 : 0, 0, 1_000),
+    fairTenants: fair,
   };
 }
 
@@ -110,7 +128,8 @@ export class ConcurrencyLimiter {
   async run<T>(fn: () => Promise<T>, signal?: AbortSignal, admission: SearchAdmission = {}): Promise<T> {
     if (this.options.maxConcurrency <= 0) return fn();
     const group = admission.group ?? null;
-    await this.acquire(signal, admission.tenant ?? ANONYMOUS_TENANT, group);
+    const tenant = this.options.fairTenants === false ? ANONYMOUS_TENANT : admission.tenant ?? ANONYMOUS_TENANT;
+    await this.acquire(signal, tenant, group);
     try {
       return await fn();
     } finally {

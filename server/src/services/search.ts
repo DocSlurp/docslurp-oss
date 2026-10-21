@@ -965,6 +965,11 @@ async function nativeVectorSearch(
     workspaceId: context.workspaceId, options, score: (hit) => hit.score });
 }
 
+/** False for queries using websearch_to_tsquery operators BM25 cannot honour: "quoted phrases" and -negation. */
+export function nativeLexicalQuerySupported(query: string): boolean {
+  return !/"[^"]*[^"\s][^"]*"/.test(query) && !/(?:^|\s)-[\p{L}\p{N}"]/u.test(query);
+}
+
 /**
  * Keyword search as BM25 top-k from LanceDB's FTS index over the eligible
  * documents, exact over the whole scope (no candidate sample, unlike the
@@ -981,6 +986,13 @@ async function nativeTextSearch(
   options: SearchOptions,
 ): Promise<SearchChunk[] | null> {
   if (!nativeScopeSupported(options.filters)) return null;
+  // The BM25 index has no positions and its query is plain terms: a quoted
+  // phrase would match its words anywhere and `-term` would boost the term.
+  // websearch_to_tsquery honours both, so those queries keep the Postgres path.
+  if (!nativeLexicalQuerySupported(query)) {
+    countSearchEvent("nativeLexicalOperators");
+    return null;
+  }
   const currentHash = indexConfigHash(indexConfigOf(context.pipeline));
   if (Object.keys(context.indexConfigs).some((hash) => hash !== currentHash)) return null;
   const embedding = resolveEmbeddingRoute(context.pipeline.embedding);

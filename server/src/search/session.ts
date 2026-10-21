@@ -107,12 +107,35 @@ export function searchSessionWriteBehindEnabled(native: boolean, env: NodeJS.Pro
 }
 
 const pendingSessionWrites = new Map<string, Promise<void>>();
+let saturatedWrites = 0;
+function countSaturatedWrite(): void {
+  saturatedWrites += 1;
+  if (saturatedWrites === 1 || saturatedWrites % 100 === 0) {
+    console.warn(`[search] write-behind backlog full (SEARCH_WRITE_BEHIND_MAX_PENDING); ${saturatedWrites} searches waited for their writes`);
+  }
+}
 let activeBackgroundWrites = 0;
 const backgroundQueue: Array<() => void> = [];
 
 function writeBehindConcurrency(): number {
   const parsed = Number(process.env.SEARCH_WRITE_BEHIND_CONCURRENCY);
   return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : 2;
+}
+
+/**
+ * Most writes allowed to wait for a background slot (SEARCH_WRITE_BEHIND_MAX_PENDING,
+ * default 200). Past it a search waits for its own writes, as without write-behind:
+ * the backlog (and the usage a crash could lose, and the spend budgets cannot see
+ * yet) stays bounded instead of growing with load.
+ */
+function writeBehindMaxPending(): number {
+  const parsed = Number(process.env.SEARCH_WRITE_BEHIND_MAX_PENDING);
+  return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : 200;
+}
+
+/** Background session writes queued or running in this process. */
+export function searchSessionWriteBacklog(): { active: number; queued: number } {
+  return { active: activeBackgroundWrites, queued: backgroundQueue.length };
 }
 
 /** Run `task` when a background write slot is free. */
@@ -139,9 +162,15 @@ export async function awaitSearchSessionWrites(sessionId: string, timeoutMs = 5_
   clearTimeout(timer);
 }
 
-/** Tests and shutdown: wait for every queued session write. */
-export async function drainSearchSessionWrites(): Promise<void> {
-  while (pendingSessionWrites.size > 0) await Promise.all([...pendingSessionWrites.values()]);
+/** Tests and shutdown: wait for every queued session write (at most `timeoutMs` when given). */
+export async function drainSearchSessionWrites(timeoutMs?: number): Promise<void> {
+  const drain = (async () => {
+    while (pendingSessionWrites.size > 0) await Promise.all([...pendingSessionWrites.values()]);
+  })();
+  if (timeoutMs === undefined) return await drain;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  await Promise.race([drain, new Promise<void>((resolve) => { timer = setTimeout(resolve, timeoutMs); timer.unref?.(); })]);
+  clearTimeout(timer);
 }
 
 export interface SearchSessionScope {
@@ -199,6 +228,8 @@ class SqlSearchSessionJournal implements SearchSessionJournal {
       return pending;
     }
     const bound = AsyncResource.bind(write);
+    // Backpressure: a full backlog makes this search wait for its own write.
+    const saturated = backgroundQueue.length >= writeBehindMaxPending();
     const previous = pendingSessionWrites.get(this.sessionId) ?? Promise.resolve();
     const pending = Promise.all([previous, this.persistenceTail])
       .then(() => inBackgroundSlot(bound))
@@ -208,7 +239,8 @@ class SqlSearchSessionJournal implements SearchSessionJournal {
     void pending.finally(() => {
       if (pendingSessionWrites.get(this.sessionId) === pending) pendingSessionWrites.delete(this.sessionId);
     });
-    return Promise.resolve();
+    if (saturated) countSaturatedWrite();
+    return saturated ? pending : Promise.resolve();
   }
 
   afterWrites(task: () => Promise<void>): Promise<void> {

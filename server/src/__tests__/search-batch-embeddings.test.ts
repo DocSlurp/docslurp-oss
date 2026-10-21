@@ -24,6 +24,8 @@ beforeEach(() => {
   vi.resetAllMocks();
   resetEmbeddingCacheForTests();
   vi.stubEnv("OPENROUTER_API_KEY", "test-key");
+  vi.stubEnv("SEARCH_LANCEDB_NATIVE", "");
+  vi.stubEnv("SEARCH_LANCEDB_NATIVE_WORKSPACES", "w");
   mocks.recordUsageEvent.mockResolvedValue(null);
   mocks.embedConfiguredTexts.mockImplementation(async ({ values }: { values: string[] }) => ({
     embeddings: values.map((_, index) => [index, 1]), usage: { inputTokens: 5 * values.length },
@@ -56,6 +58,15 @@ describe("batch query embeddings", () => {
     await prefetchBatchQueryEmbeddings([{ query: "a", workspaceId: "w", options: {} }, { query: "b", workspaceId: "w", options: {} }], "u");
     expect(mocks.embedConfiguredTexts).not.toHaveBeenCalled();
     expect(mocks.recordUsageEvent).not.toHaveBeenCalled();
+  });
+
+  it("does nothing for workspaces off native search (flag off keeps per-query embeddings)", async () => {
+    vi.stubEnv("SEARCH_LANCEDB_NATIVE_WORKSPACES", "other");
+    mocks.context.mockResolvedValue(context());
+    expect(await prefetchBatchQueryEmbeddings([{ query: "a", workspaceId: "w", options: {} }, { query: "b", workspaceId: "w", options: {} }], "u"))
+      .toEqual({ prefetched: 0, calls: 0 });
+    expect(mocks.context).not.toHaveBeenCalled();
+    expect(mocks.embedConfiguredTexts).not.toHaveBeenCalled();
   });
 
   it("leaves the searches to embed one by one when the workspace is not readable", async () => {

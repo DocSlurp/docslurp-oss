@@ -24,6 +24,7 @@ vi.mock("../lib/ai.js", async (original) => ({
 }));
 
 const statements: string[] = [];
+const statementParameters: unknown[][] = [];
 let sql: postgres.Sql;
 let stop: () => Promise<void>;
 let lanceDir: string;
@@ -78,7 +79,7 @@ beforeAll(async () => {
   vi.stubEnv("LANCEDB_URI", lanceDir);
   const database = await startMigratedPostgres();
   stop = database.stop;
-  sql = postgres(database.url, { max: 1, prepare: false, onnotice: () => {}, debug: (_connection, query) => { statements.push(query); } });
+  sql = postgres(database.url, { max: 1, prepare: false, onnotice: () => {}, debug: (_connection, query, parameters) => { statements.push(query); statementParameters.push([...(parameters as unknown[])]); } });
   vi.doMock("../db.js", () => ({ sql }));
   await sql`insert into "user" (id, name, email) values ('u', 'User', 'native@example.test')`;
   await sql`insert into organizations (id, name, slug, created_by_user_id) values ('org1', 'Org', 'native', 'u')`;
@@ -226,6 +227,41 @@ describe("SEARCH_LANCEDB_NATIVE", () => {
     } finally {
       await writeLanceTable({ hydrated: true, fts: true });
     }
+  });
+
+  it("keeps quoted phrases and -negation on Postgres FTS, which honours them", async () => {
+    expect(search.nativeLexicalQuerySupported("cavitation erosion")).toBe(true);
+    expect(search.nativeLexicalQuerySupported("state-of-the-art pump")).toBe(true);
+    expect(search.nativeLexicalQuerySupported('"cavitation erosion"')).toBe(false);
+    expect(search.nativeLexicalQuerySupported("cavitation -erosion")).toBe(false);
+    expect(search.nativeLexicalQuerySupported("-erosion cavitation")).toBe(false);
+    for (const query of ['"cavitation erosion"', "cavitation -erosion"]) {
+      const queryVector = near("doc1-2");
+      const legacy = await run(false, query, { queryVector });
+      const native = await run(true, query, { queryVector });
+      expect(native.timings?.nativeLexicalOperators).toBe(1);
+      expect(citations(native)).toEqual(citations(legacy));
+    }
+  });
+
+  it("stops serving a deleted document once the delete commits (no run_events hint)", async () => {
+    await sql`insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status)
+      values ('gone', 'org1', 'u', 'w', 'run1', 'gone.pdf', 'application/pdf', 'kg', 'completed')`;
+    await sql`insert into vector_indexes (id, document_id, backend, bucket, path, embedding_model, dimension)
+      values ('vig', 'gone', 'lancedb', 'b', 'p', ${route.model}, ${DIM})`;
+    const set = await eligible.loadEligibleDocuments({ workspaceId: "w", embeddingModel: route.model, dimension: DIM });
+    expect(set.documents.map((document) => document.id)).toContain("gone");
+    const documents = await import("../services/documents.js");
+    statements.length = 0;
+    statementParameters.length = 0;
+    expect(await documents.deleteDocuments(["gone"], "u")).toBe(1);
+    const hint = statements.findIndex((statement) => /pg_notify/.test(statement));
+    expect(statementParameters[hint]).toEqual(["search_eligibility", JSON.stringify({ workspaceIds: ["w"] })]);
+    // Every API process drops the workspace on the hint (delivered at commit).
+    eligible.handleSearchEligibilityHint(JSON.stringify({ workspaceIds: ["w"] }));
+    const fresh = await eligible.loadEligibleDocuments({ workspaceId: "w", embeddingModel: route.model, dimension: DIM });
+    expect(fresh).not.toBe(set);
+    expect(fresh.documents.map((document) => document.id)).not.toContain("gone");
   });
 
   it("drops cached eligibility when a run_events hint names the workspace's run", async () => {
