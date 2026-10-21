@@ -1,6 +1,6 @@
 # Layout corpus V2: evidence and curation plan
 
-Snapshot: 2026-10-21 01:50 UTC. This is a moving development workspace. Counts below are an inspected snapshot, not benchmark admission or a claim that 200 candidates exist. No model calls, jobs, holdout runs or scoring were performed for this inventory.
+Snapshot: 2026-10-21 01:50 UTC. The V3 expansion against this plan (26 authored pages, 6 real pages, 20 capture variants) is inventoried in [layout-corpus-v3-coverage.md](layout-corpus-v3-coverage.md). This is a moving development workspace. Counts below are an inspected snapshot, not benchmark admission or a claim that 200 candidates exist. No model calls, jobs, holdout runs or scoring were performed for this inventory.
 
 ## What exists
 
