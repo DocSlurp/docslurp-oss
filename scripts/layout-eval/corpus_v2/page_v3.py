@@ -54,6 +54,10 @@ EXTRA_FONTS = {
     'cjk-sc': (CJK + 'NotoSansCJK-Regular.ttc', 2),
     'cjk-sc-bold': (CJK + 'NotoSansCJK-Bold.ttc', 2),
     'cjk-sc-serif': (CJK + 'NotoSerifCJK-Regular.ttc', 2),
+    'lib-sans': ('/usr/share/fonts/liberation/LiberationSans-Regular.ttf', 0),
+    'lib-sans-bold': ('/usr/share/fonts/liberation/LiberationSans-Bold.ttf', 0),
+    'lib-serif': ('/usr/share/fonts/liberation/LiberationSerif-Regular.ttf', 0),
+    'lib-serif-bold': ('/usr/share/fonts/liberation/LiberationSerif-Bold.ttf', 0),
     'noto-serif': (NOTO + 'NotoSerif-Regular.ttf', 0),
     'noto-serif-bold': (NOTO + 'NotoSerif-Bold.ttf', 0),
     'noto-serif-italic': (NOTO + 'NotoSerif-Italic.ttf', 0),
@@ -76,6 +80,13 @@ for _name, (_path, _index) in EXTRA_FONTS.items():
         FONT_INDEX[_name] = _index
 
 _CMAPS = {}
+NO_LINE_START = set('。、，．,.：:；;！!？?）)」』】〕〉》’”ー々ゃゅょっャュョッぁぃぅぇぉァィゥェォ')
+
+
+def is_cjk(char):
+    code = ord(char)
+    return (0x3000 <= code <= 0x30ff or 0x3400 <= code <= 0x4dbf or 0x4e00 <= code <= 0x9fff
+            or 0xff00 <= code <= 0xffef or 0xf900 <= code <= 0xfaff)
 
 
 def missing_glyphs(face, text):
@@ -133,6 +144,39 @@ class PageV3(Page):
         if missing:
             raise ValueError(f'Font {face} lacks glyphs {missing!r} for: {text[:50]}')
         return super().text(text, x, y, width, size, face, color, leading, label, tracking, direction, language, **attrs)
+
+    def wrap_lines(self, text, width, size, face, direction=None, language=None):
+        """Chinese/Japanese break between characters (Latin runs stay whole) with basic kinsoku."""
+        if not language or language.split('-')[0] not in ('ja', 'zh'):
+            return super().wrap_lines(text, width, size, face, direction, language)
+        f = self.font(face, size)
+        lines = []
+        for paragraph in text.split('\n'):
+            tokens = []
+            for char in paragraph:
+                if tokens and not is_cjk(char) and not char.isspace() and not is_cjk(tokens[-1][-1]) and not tokens[-1].isspace():
+                    tokens[-1] += char
+                else:
+                    tokens.append(char)
+            current = []
+            for token in tokens:
+                if f.getlength(''.join(current + [token]).rstrip()) <= width or not current:
+                    current.append(token)
+                    continue
+                if token.isspace():
+                    lines.append(''.join(current).rstrip())
+                    current = []
+                    continue
+                carry = []
+                if token[0] in NO_LINE_START and len(current) > 1:
+                    carry = [current.pop()]
+                lines.append(''.join(current).rstrip())
+                current = carry + [token]
+            lines.append(''.join(current).rstrip())
+        for line in lines:
+            if f.getlength(line) > width + 0.5:
+                raise ValueError(f'CJK line overflow: {line[:30]}')
+        return lines
 
     def text_width(self, text, size, face, direction=None, language=None):
         layout = {k: v for k, v in {'direction': direction, 'language': language}.items() if v is not None}
@@ -222,7 +266,8 @@ class PageV3(Page):
     # ---- tables -----------------------------------------------------------------
     def table_v3(self, box, header_rows, body_rows, widths, rules='none', align=None, row_height=30, header_height=None,
                  face='sans', size=16, header_face=None, ink='#1f2421', rule_color='#3a3a3a', pad=6,
-                 continuation_id=None, row_offset=0, row_roles=None, indent=None, header_fill=None, zebra=None):
+                 continuation_id=None, row_offset=0, row_roles=None, indent=None, header_fill=None, zebra=None,
+                 direction=None, language=None):
         """Explicit-rule table. ``header_rows`` cells are ``(text, colspan)``; body cells are strings.
 
         rules: ``none`` (whitespace only: no lines, no fills), ``booktabs`` (top/mid/bottom rules),
@@ -242,6 +287,14 @@ class PageV3(Page):
         edges = [x0]
         for w in widths:
             edges.append(edges[-1] + (x1 - x0) * w)
+        rtl = direction == 'rtl'
+
+        def span_box(col, span, top, height):
+            # Logical column 0 is leftmost for LTR tables and rightmost for RTL tables.
+            a, b = edges[col], edges[col + span]
+            if rtl:
+                a, b = x0 + x1 - b, x0 + x1 - a
+            return [a, top, b, top + height]
         cells = []
         y = y0
         rule_commands = []
@@ -249,26 +302,28 @@ class PageV3(Page):
         def put(text, cx0, cx1, cy, height, alignment, font_face, level_indent=0):
             if text == '':
                 return
-            text_w = self.text_width(text, size, font_face)
+            text_w = self.text_width(text, size, font_face, direction, language)
             inner = cx1 - cx0 - 2 * pad - level_indent
+            if rtl:
+                alignment = {'left': 'right', 'right': 'left'}.get(alignment, alignment)
             if text_w > inner:
                 # wrap within the cell; still native component text
-                self.text(text, cx0 + pad + level_indent, cy + (height - size * 1.2 * 2) / 2 + 1, inner, size, font_face, ink, leading=size * 1.2, label=None)
+                self.text(text, cx0 + pad + (0 if rtl else level_indent), cy + (height - size * 1.2 * 2) / 2 + 1, inner, size, font_face, ink, leading=size * 1.2, label=None, direction=direction, language=language)
                 return
             if alignment == 'right':
-                left = cx1 - pad - text_w
+                left = cx1 - pad - text_w - (level_indent if rtl else 0)
             elif alignment == 'center':
                 left = (cx0 + cx1 - text_w) / 2
             else:
                 left = cx0 + pad + level_indent
-            self.text(text, left, cy + (height - size) / 2 - 1, text_w + 2, size, font_face, ink, label=None)
+            self.text(text, left, cy + (height - size) / 2 - 1, text_w + 2, size, font_face, ink, label=None, direction=direction, language=language)
 
         for level, header in enumerate(header_rows):
             if header_fill:
                 self.rectangle([x0, y, x1, y + header_height], header_fill)
             col = 0
             for text, span in header:
-                cb = [edges[col], y, edges[col + span], y + header_height]
+                cb = span_box(col, span, y, header_height)
                 alignment = 'center' if span > 1 else align[col]
                 put(text, cb[0], cb[2], y, header_height, alignment, header_face)
                 cells.append({'row': level, 'column': col, 'row_span': 1, 'col_span': span, 'logical_row': 0, 'header_level': level,
@@ -292,7 +347,7 @@ class PageV3(Page):
                 self.rectangle([x0, y, x1, y + row_height], zebra)
             role = roles[index]
             for ci, value in enumerate(row):
-                cb = [edges[ci], y, edges[ci + 1], y + row_height]
+                cb = span_box(ci, 1, y, row_height)
                 level_indent = (indent[index] if indent else 0) if ci == 0 else 0
                 cell_face = header_face if role in ('total', 'subtotal', 'carried-forward', 'brought-forward', 'section') else face
                 put(value, cb[0], cb[2], y, row_height, align[ci], cell_face, level_indent)
@@ -313,13 +368,15 @@ class PageV3(Page):
         if rules == 'grid':
             self.line([x0, y0, x1, y0], rule_color, 1)
             for e in edges:
-                self.line([e, y0, e, y], rule_color, 1)
+                self.line([e, y0, e, y], rule_color, 1)  # mirrored edges coincide with the same set
         tag = {'none': 'borderless', 'grid': 'bordered'}.get(rules, 'mixed-rules')
         return self.region('table', [x0, y0, x1, y], None, cells=cells, columns=cols, rows=len(header_rows) + len(body_rows),
                            header_rows=len(header_rows), border=rules == 'grid', rule_style=rules, rules_condition_tag=tag,
                            fills={'header': header_fill, 'zebra': zebra}, continuation_id=continuation_id,
                            header_repeated=bool(continuation_id) and row_offset > 0, logical_row_offset=row_offset,
-                           multi_level_header=len(header_rows) > 1 or any(span > 1 for h in header_rows for _, span in h))
+                           multi_level_header=len(header_rows) > 1 or any(span > 1 for h in header_rows for _, span in h),
+                           direction=direction or 'ltr', language=language,
+                           column_index_policy='logical columns; column 0 is the rightmost visual column in RTL tables' if rtl else 'logical columns left to right')
 
     # ---- charts -------------------------------------------------------------------
     def chart_v3(self, box, kind, categories, series, title=None, y_label=None, x_label=None, colors=None, panel='#f4f2ea',
@@ -427,7 +484,7 @@ class PageV3(Page):
                         bx = sx + si * bar_w
                         self.rectangle([bx, plot_bottom - hgt, bx + bar_w - 2, plot_bottom], colors[si % len(colors)])
                         if value_labels:
-                            self.line_text(fmt_tick(v), bx + bar_w / 2, plot_bottom - hgt - size - 4, size - 2, face, ink, align='center')
+                            self.line_text(str(v), bx + bar_w / 2, plot_bottom - hgt - size - 4, size - 2, face, ink, align='center')
                 self.line_text(cat, left + i * slot + slot / 2, plot_bottom + 6, size - 1, face, ink, align='center')
         elif kind == 'line':
             for si, name in enumerate(names):
