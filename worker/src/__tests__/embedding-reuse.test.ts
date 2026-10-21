@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 
-import { assertProviderAllowed, normalizePipelineFeatures, type PipelineFeatureOverrides } from "@docslurp/shared";
+import { assertProviderAllowed, normalizePipelineFeatures, type PipelineFeatureOverrides, VectorNamespaceManager } from "@docslurp/shared";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const providerCalls = vi.hoisted(() => ({ embed: [] as string[][], context: 0 }));
@@ -145,6 +145,8 @@ type EmbedArgs = {
   privacyMode?: "local-only" | "strict-privacy";
   /** Extra store methods (e.g. chunk materialization) merged over the checkpoint store. */
   storeExtras?: Record<string, unknown>;
+  /** EmbedStage's LanceDB delete (default: none recorded). */
+  deleteVectors?: (uri: string, table: string, ids: readonly string[]) => Promise<void>;
 };
 
 async function embedDocument(args: EmbedArgs) {
@@ -184,7 +186,7 @@ async function runEmbed(args: EmbedArgs) {
 
   let failure: unknown;
   try {
-    await new EmbedStage({} as CommandRunner, args.storage as unknown as ArtifactStore, config).run(state);
+    await new EmbedStage({} as CommandRunner, args.storage as unknown as ArtifactStore, config, args.deleteVectors ?? (async () => {})).run(state);
   } catch (error) {
     if (!args.allowFailure) throw error;
     failure = error;
@@ -398,6 +400,37 @@ describe("EmbedStage chunk materialization", () => {
     });
     expect(calls).toEqual(["insert", "prune", "mark"]);
     expect(writtenIds).toEqual(result.artifact.chunks.map((chunk) => chunk.id));
+  });
+
+  it("deletes the LanceDB rows of chunks a retry dropped, so native search cannot serve them", async () => {
+    const deleted: Array<{ table: string; ids: readonly string[] }> = [];
+    const result = await embedDocument({
+      storage: new MemoryStorage(), reuse: new MemoryReuseStore(), runId: "run-orphan", documentId: "orphan",
+      storeExtras: {
+        insertChunks: async () => {},
+        deleteStaleDocumentChunks: async () => ["orphan-007", "orphan-008"],
+        markDocumentLexicalSearchable: async () => {},
+      },
+      deleteVectors: async (_uri, table, ids) => { deleted.push({ table, ids }); },
+    });
+    expect(deleted).toHaveLength(1);
+    expect(deleted[0]!.ids).toEqual(["orphan-007", "orphan-008"]);
+    const space = result.artifact.embedding;
+    expect(deleted[0]!.table).toBe(VectorNamespaceManager.getEmbeddingLocation("", "o1", space.model, space.dimensions).table);
+  });
+
+  it("leaves LanceDB alone when no chunk rows were stale", async () => {
+    const deleted: unknown[] = [];
+    await embedDocument({
+      storage: new MemoryStorage(), reuse: new MemoryReuseStore(), runId: "run-clean", documentId: "clean",
+      storeExtras: {
+        insertChunks: async () => {},
+        deleteStaleDocumentChunks: async () => [],
+        markDocumentLexicalSearchable: async () => {},
+      },
+      deleteVectors: async (...call) => { deleted.push(call); },
+    });
+    expect(deleted).toEqual([]);
   });
 
   it("marks the document keyword-searchable only after every chunk row is written", async () => {

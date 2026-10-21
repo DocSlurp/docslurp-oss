@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 
 import { RunPolicyError } from "../lib/document-failure.js";
-import { calculateAiUsageCostCents, buildPricedAiUsageLedgerEvent, resolvePipelineTextModel, pipelineVersionFeatures } from "@docslurp/shared";
+import { calculateAiUsageCostCents, buildPricedAiUsageLedgerEvent, resolvePipelineTextModel, pipelineVersionFeatures, resolveLanceDbConfig, VectorNamespaceManager } from "@docslurp/shared";
 
 import type { Config } from "../config.js";
 import type { Stage, WorkflowState } from "../pipeline/pipeline.js";
@@ -10,6 +10,7 @@ import { checkDedup, completeDocumentPages, emitDocumentPageProgress, hashConten
 import type { CommandRunner } from "../tools/runner.js";
 import type { ArtifactStore } from "../tools/storage.js";
 import { keyFromStorageUri } from "../tools/storage.js";
+import { deleteLanceDbRecords } from "./lancedb-writer.js";
 import { detectLanguage, resolveEmbeddingModel, resolveVectorBackends } from "../embeddings/resolver.js";
 import {
   asEmbeddingReuseStore,
@@ -53,8 +54,8 @@ type ChunkInsertStore = {
     contentHash?: string;
     pipelineVersion?: string;
   }>) => Promise<void>;
-  /** Drops the document's chunk rows outside the replacement set (a retry that produced fewer chunks). */
-  deleteStaleDocumentChunks?: (documentId: string, keepChunkIds: readonly string[]) => Promise<void>;
+  /** Drops the document's chunk rows outside the replacement set (a retry that produced fewer chunks); returns their ids. */
+  deleteStaleDocumentChunks?: (documentId: string, keepChunkIds: readonly string[]) => Promise<string[] | void>;
   markDocumentLexicalSearchable?: (documentId: string) => Promise<void>;
 };
 
@@ -67,7 +68,8 @@ export class EmbedStage implements Stage {
   constructor(
     private readonly runner: CommandRunner,
     private readonly storage: ArtifactStore,
-    private readonly config: Config
+    private readonly config: Config,
+    private readonly deleteVectors: (uri: string, table: string, ids: readonly string[]) => Promise<void> = deleteLanceDbRecords
   ) {}
 
   async run(state: WorkflowState, signal?: AbortSignal): Promise<void> {
@@ -409,7 +411,7 @@ export class EmbedStage implements Stage {
           if (publishBeforeEmbedding) {
             // All source chunks are durable before the readiness marker. Vector
             // availability remains governed by the later index stage.
-            await this.materializeChunks({ state, document, chunks, contentHash, pipelineVersion });
+            await this.materializeChunks({ state, document, chunks, contentHash, pipelineVersion, vectorSpace: tunedProfile });
           }
           const freshVectors = new Map<string, number[]>();
           const embeddedVectors: number[][] = Array.from({ length: embeddingInputs.length });
@@ -669,7 +671,7 @@ export class EmbedStage implements Stage {
           await this.recordReuseRefs(state, this.storage.uri(key), chunks, artifact.documentContext?.key);
 
           if (!publishBeforeEmbedding) {
-            await this.materializeChunks({ state, document, chunks, contentHash, pipelineVersion });
+            await this.materializeChunks({ state, document, chunks, contentHash, pipelineVersion, vectorSpace: tunedProfile });
           }
 
           if (lateChunkingEnabled) {
@@ -863,6 +865,8 @@ export class EmbedStage implements Stage {
     chunks: EmbeddingArtifact["chunks"];
     contentHash: string;
     pipelineVersion: string;
+    /** The embedding space the document's LanceDB rows live in; dedup copies own none. */
+    vectorSpace?: { model: string; dimensions: number };
   }): Promise<void> {
     if (!args.state.store || !("insertChunks" in args.state.store)) {
       return;
@@ -887,7 +891,15 @@ export class EmbedStage implements Stage {
     if (dbChunks.length > 0) {
       // Ids are `<document>-<index>`, so a retry with fewer chunks leaves the old
       // tail behind; drop it before the marker makes the set servable.
-      await store.deleteStaleDocumentChunks?.(args.document.id, dbChunks.map((chunk) => chunk.id));
+      const stale = await store.deleteStaleDocumentChunks?.(args.document.id, dbChunks.map((chunk) => chunk.id));
+      // An earlier attempt may have indexed those chunks: native search serves
+      // LanceDB rows without re-reading Postgres, so drop them there too.
+      if (stale?.length && args.vectorSpace && args.state.run.orgId) {
+        const location = VectorNamespaceManager.getEmbeddingLocation(
+          resolveLanceDbConfig().root, args.state.run.orgId, args.vectorSpace.model, args.vectorSpace.dimensions,
+        );
+        await this.deleteVectors(location.uri, location.table, stale);
+      }
       // Keyword search can serve the chunks from here on, ahead of the index stage.
       await store.markDocumentLexicalSearchable?.(args.document.id);
     }

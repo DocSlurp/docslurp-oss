@@ -148,6 +148,32 @@ async function writeLanceDbRecordsNow(
 }
 
 /**
+ * Delete rows by chunk id, in this process's turn for the table (see
+ * inTableQueue). For rows whose chunk is gone: search serves hydrated rows
+ * without re-reading Postgres, so a row must not outlive its chunk.
+ */
+export async function deleteLanceDbRecords(uri: string, collection: string, ids: readonly string[]): Promise<void> {
+  if (ids.length === 0) return;
+  await inTableQueue(`${uri}\u0000${collection}`, async () => {
+    const db = await connectLanceDb(uri);
+    try {
+      if (!(await db.tableNames()).includes(collection)) return;
+      const table = await db.openTable(collection);
+      try {
+        for (let index = 0; index < ids.length; index += 500) {
+          const list = ids.slice(index, index + 500).map((id) => `'${id.replace(/'/g, "''")}'`).join(", ");
+          await table.delete(`id IN (${list})`);
+        }
+      } finally {
+        table.close();
+      }
+    } finally {
+      db.close();
+    }
+  });
+}
+
+/**
  * A merge-insert source needs one schema. Rows without a run id (legacy outbox
  * rows) get empty hydration values when they share a batch with hydrated rows;
  * search hydrates those from Postgres.

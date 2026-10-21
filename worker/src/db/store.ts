@@ -2380,11 +2380,13 @@ export class Store {
    * The document's chunks are replaced by `keepChunkIds`; rows an earlier attempt
    * wrote beyond them are stale. Scoped to this document only.
    */
-  async deleteStaleDocumentChunks(documentId: string, keepChunkIds: readonly string[]): Promise<void> {
-    await this.sql`
+  async deleteStaleDocumentChunks(documentId: string, keepChunkIds: readonly string[]): Promise<string[]> {
+    const rows = await this.sql<{ id: string }[]>`
       delete from document_chunks
       where document_id = ${documentId} and id <> all(${this.sql.array([...keepChunkIds])}::text[])
+      returning id
     `;
+    return rows.map((row) => row.id);
   }
 
   /**
