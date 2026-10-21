@@ -27,6 +27,11 @@ export interface ImageLayoutResult {
     coverageKind?: "full-page" | "half-page" | "region";
     fingerprint?: { algorithm: "dhash-64"; value: string };
     exactCropSha256?: string;
+    detectorLabel?: ImageLayoutLabel;
+    classification?: {
+      label: ImageLayoutLabel; candidateLabel: ImageLayoutLabel; score: number; margin: number;
+      accepted: boolean; scoreKind: "cosine-similarity-not-probability"; model: string; promptVersion: string;
+    };
   }>;
 }
 function object(value: unknown): Record<string, unknown> {
@@ -65,7 +70,7 @@ export function parseImageLayout(value: unknown): ImageLayoutResult {
     if (!Array.isArray(region.bbox) || region.bbox.length !== 4) throw new Error("Expected xyxy layout box");
     const bbox = region.bbox.map(unit) as [number, number, number, number];
     if (bbox[0] >= bbox[2] || bbox[1] >= bbox[3]) throw new Error("Layout box must have positive area");
-    const extras: Pick<ImageLayoutResult["regions"][number], "imageCoverage" | "coverageKind" | "fingerprint" | "exactCropSha256"> = {};
+    const extras: Pick<ImageLayoutResult["regions"][number], "imageCoverage" | "coverageKind" | "fingerprint" | "exactCropSha256" | "detectorLabel" | "classification"> = {};
     if (region.imageCoverage !== undefined) extras.imageCoverage = unit(region.imageCoverage);
     if (region.coverageKind !== undefined) {
       if (!["full-page", "half-page", "region"].includes(String(region.coverageKind))) throw new Error("Invalid layout coverage kind");
@@ -79,6 +84,17 @@ export function parseImageLayout(value: unknown): ImageLayoutResult {
     if (region.exactCropSha256 !== undefined) {
       if (!/^[0-9a-f]{64}$/.test(text(region.exactCropSha256))) throw new Error("Invalid exact crop hash");
       extras.exactCropSha256 = text(region.exactCropSha256);
+    }
+    if (region.detectorLabel !== undefined) extras.detectorLabel = label(region.detectorLabel);
+    if (region.classification !== undefined) {
+      const classified = object(region.classification);
+      if (typeof classified.score !== "number" || !Number.isFinite(classified.score) || classified.score < -1.00001 || classified.score > 1.00001 ||
+        typeof classified.margin !== "number" || !Number.isFinite(classified.margin) || classified.margin < 0 ||
+        typeof classified.accepted !== "boolean" || classified.scoreKind !== "cosine-similarity-not-probability") throw new Error("Invalid visual classification scores");
+      extras.classification = { label: label(classified.label), candidateLabel: label(classified.candidateLabel),
+        score: classified.score, margin: classified.margin, accepted: classified.accepted,
+        scoreKind: "cosine-similarity-not-probability", model: text(classified.model), promptVersion: text(classified.promptVersion) };
+      if (extras.classification.label !== kind) throw new Error("Visual classification disagrees with region label");
     }
     return { label: kind, rawLabel: text(region.rawLabel), confidence: unit(region.confidence), bbox, ...extras };
   });
@@ -95,13 +111,16 @@ export interface ImageLayoutCliOptions {
   cacheDirectory: string;
   /** Explicit local model directory (required for pp-small), or optional ONNX export. */
   modelPath?: string;
+  visualClassifier?: "none" | "siglip2";
+  classifierModelPath?: string;
   onnxPath?: string;
   timeoutMs?: number;
 }
 /** Opt-in invocation through the worker's bounded, usage-aware parser runner. */
 export async function detectImageLayout(input: Buffer, options: ImageLayoutCliOptions, runner: Pick<CommandRunner, "run">, signal?: AbortSignal): Promise<ImageLayoutResult> {
+  if (input.byteLength === 0 || input.byteLength > 25 * 1024 * 1024) throw new Error("Layout image payload must be between 1 byte and 25 MiB");
   if (signal?.aborted) throw signal.reason ?? new Error("Layout detection aborted");
-  for (const location of [options.python, options.script, options.cacheDirectory, ...[options.modelPath, options.onnxPath].filter((value): value is string => value !== undefined)]) {
+  for (const location of [options.python, options.script, options.cacheDirectory, ...[options.modelPath, options.onnxPath, options.classifierModelPath].filter((value): value is string => value !== undefined)]) {
     if (!path.isAbsolute(location)) throw new Error("Layout runtime paths must be absolute");
     await stat(location);
   }
@@ -121,9 +140,9 @@ export async function detectImageLayout(input: Buffer, options: ImageLayoutCliOp
     const output = path.join(directory, "layout.json");
     await writeFile(source, input, { mode: 0o600 });
     await runner.run({ binary: options.python,
-      args: [options.script, "--model", options.model, "--device", options.device, "--image", source, "--output", output, ...(options.modelPath ? ["--model-path", options.modelPath] : []), ...(options.onnxPath ? ["--onnx-path", options.onnxPath] : [])],
+      args: [options.script, "--model", options.model, "--device", options.device, "--image", source, "--output", output, ...(options.modelPath ? ["--model-path", options.modelPath] : []), ...(options.onnxPath ? ["--onnx-path", options.onnxPath] : []), ...(options.visualClassifier ? ["--visual-classifier", options.visualClassifier] : []), ...(options.classifierModelPath ? ["--classifier-model-path", options.classifierModelPath] : [])],
       available: true, pages: 1, timeoutMs,
-      bundleRoots: [options.cacheDirectory, path.dirname(options.script), ...runtimeRoots, ...[options.modelPath, options.onnxPath].filter((value): value is string => value !== undefined)],
+      bundleRoots: [options.cacheDirectory, path.dirname(options.script), ...runtimeRoots, ...[options.modelPath, options.onnxPath, options.classifierModelPath].filter((value): value is string => value !== undefined)],
       bundleEnv: { HF_HOME: options.cacheDirectory, HF_HUB_OFFLINE: "1", TRANSFORMERS_OFFLINE: "1", PYTHONDONTWRITEBYTECODE: "1" },
     }, signal);
     if ((await stat(output)).size > 10 * 1024 * 1024) throw new Error("Layout output exceeds 10 MiB");
@@ -135,4 +154,62 @@ export async function detectImageLayout(input: Buffer, options: ImageLayoutCliOp
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
+}
+
+export interface ImageLayoutEndpointOptions {
+  /** Resident service is deliberately restricted to literal loopback; redirects are rejected. */
+  endpoint: string;
+  expectedModelId: string;
+  expectedRevision: string;
+  device: "cpu" | "cuda";
+  timeoutMs?: number;
+}
+
+/** Warm transport: raw source bytes, one resident model, no temporary files or per-page model load. */
+export async function detectImageLayoutAtEndpoint(input: Buffer, options: ImageLayoutEndpointOptions, signal?: AbortSignal): Promise<ImageLayoutResult> {
+  const url = new URL(options.endpoint);
+  if (url.protocol !== "http:" || url.hostname !== "127.0.0.1" || url.username || url.password || url.pathname !== "/layout" || url.search || url.hash) {
+    throw new Error("Layout endpoint must be http://127.0.0.1:<port>/layout with no credentials or query");
+  }
+  if (input.byteLength === 0 || input.byteLength > 25 * 1024 * 1024) throw new Error("Layout image payload must be between 1 byte and 25 MiB");
+  const timeoutMs = options.timeoutMs ?? 120_000;
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0 || timeoutMs > 2_147_483_647) throw new Error("Invalid layout timeout");
+  text(options.expectedModelId); text(options.expectedRevision);
+  const metadata = await sharp(input, { limitInputPixels: 100_000_000 }).metadata();
+  if (!metadata.width || !metadata.height || (metadata.pages ?? 1) !== 1) throw new Error("Layout input must be one raster image");
+  if (!["png", "jpeg", "webp", "tiff", "gif", "avif", "heif"].includes(metadata.format ?? "")) throw new Error("Unsupported layout raster format");
+  const timeout = AbortSignal.timeout(timeoutMs);
+  const response = await fetch(url, {
+    method: "POST", headers: { "Content-Type": "application/octet-stream" }, body: new Uint8Array(input),
+    redirect: "error", signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
+  });
+  if (!response.ok) {
+    await response.body?.cancel();
+    throw new Error(`Layout service failed with HTTP ${response.status}`);
+  }
+  if (!response.body) throw new Error("Layout service returned no body");
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  try {
+    while (true) {
+      const next = await reader.read();
+      if (next.done) break;
+      size += next.value.byteLength;
+      if (size > 10 * 1024 * 1024) throw new Error("Layout output exceeds 10 MiB");
+      chunks.push(next.value);
+    }
+  } finally {
+    await reader.cancel();
+    reader.releaseLock();
+  }
+  const raw: unknown = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+  const result = parseImageLayout(raw);
+  if (result.device !== options.device) throw new Error("Layout service changed requested device");
+  if (result.model.id !== options.expectedModelId || result.model.revision !== options.expectedRevision) throw new Error("Layout service model identity differs from configuration");
+  if (result.image.width !== metadata.width || result.image.height !== metadata.height) throw new Error("Layout output dimensions do not match source raster");
+  const sha256 = createHash("sha256").update(input).digest("hex");
+  if (object(object(raw).image).sha256 !== sha256) throw new Error("Layout service source hash does not match request");
+  result.image.sha256 = sha256;
+  return result;
 }

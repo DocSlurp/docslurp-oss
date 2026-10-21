@@ -1,10 +1,12 @@
+import { createHash } from "node:crypto";
+import { createServer } from "node:http";
 import { access, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import sharp from "sharp";
 import { describe, expect, it } from "vitest";
 import type { CommandPlan } from "../tools/runner.js";
-import { detectImageLayout, parseImageLayout } from "./image-layout.js";
+import { detectImageLayout, detectImageLayoutAtEndpoint, parseImageLayout } from "./image-layout.js";
 
 const payload = () => ({ schemaVersion: 1, coordinateSpace: "normalized-source", model: { id: "detector", revision: "test" }, device: "cpu", image: { width: 20, height: 10 }, supportedLabels: ["figure"], regions: [{ label: "figure", rawLabel: "picture", confidence: 0.8, bbox: [0.1, 0.2, 0.9, 0.8] }] });
 
@@ -64,5 +66,35 @@ describe("image layout transport boundary", () => {
       await expect(detectImageLayout(input, options, wrongSize)).rejects.toThrow("dimensions");
       await expect(access(output)).rejects.toThrow();
     } finally { await rm(runtime, { recursive: true, force: true }); }
+  });
+});
+
+
+describe("resident image layout transport", () => {
+  it("sends raw bytes and verifies model identity and source hash", async () => {
+    const input = await sharp({ create: { width: 20, height: 10, channels: 3, background: "white" } }).png().toBuffer();
+    let badHash = false;
+    const server = createServer(async (request, response) => {
+      const chunks: Buffer[] = [];
+      for await (const chunk of request) chunks.push(chunk);
+      expect(Buffer.concat(chunks)).toEqual(input);
+      response.setHeader("Content-Type", "application/json");
+      response.end(JSON.stringify({ ...payload(), image: { width: 20, height: 10, sha256: badHash ? "wrong" : createHash("sha256").update(input).digest("hex") } }));
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    try {
+      const address = server.address();
+      if (!address || typeof address === "string") throw new Error("Missing test listener");
+      const options = { endpoint: `http://127.0.0.1:${address.port}/layout`, expectedModelId: "detector", expectedRevision: "test", device: "cpu" as const };
+      const result = await detectImageLayoutAtEndpoint(input, options);
+      expect(result.regions).toHaveLength(1);
+      await expect(detectImageLayoutAtEndpoint(input, { ...options, expectedRevision: "different" })).rejects.toThrow("model identity");
+      await expect(detectImageLayoutAtEndpoint(input, { ...options, device: "cuda" })).rejects.toThrow("device");
+      badHash = true;
+      await expect(detectImageLayoutAtEndpoint(input, options)).rejects.toThrow("source hash");
+      await expect(detectImageLayoutAtEndpoint(input, { ...options, endpoint: "https://example.com/layout" })).rejects.toThrow("127.0.0.1");
+    } finally {
+      await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    }
   });
 });
