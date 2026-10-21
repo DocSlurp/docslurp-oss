@@ -22,6 +22,9 @@ export interface ImageLayoutResult {
     confidence: number;
     /** x0, y0, x1, y1 in source raster coordinates, not resized model input. */
     bbox: [number, number, number, number];
+    /** Optional model-native polygon and logical order, in stored source coordinates. */
+    polygon?: Array<[number, number]>;
+    readingOrder?: number;
     /** Optional geometric coverage and visual crop fingerprint; not semantic identity. */
     imageCoverage?: number;
     coverageKind?: "full-page" | "half-page" | "region";
@@ -71,7 +74,18 @@ export function parseImageLayout(value: unknown): ImageLayoutResult {
     if (!Array.isArray(region.bbox) || region.bbox.length !== 4) throw new Error("Expected xyxy layout box");
     const bbox = region.bbox.map(unit) as [number, number, number, number];
     if (bbox[0] >= bbox[2] || bbox[1] >= bbox[3]) throw new Error("Layout box must have positive area");
-    const extras: Pick<ImageLayoutResult["regions"][number], "imageCoverage" | "coverageKind" | "fingerprint" | "exactCropSha256" | "detectorLabel" | "classification"> = {};
+    const extras: Pick<ImageLayoutResult["regions"][number], "imageCoverage" | "coverageKind" | "fingerprint" | "exactCropSha256" | "detectorLabel" | "classification" | "polygon" | "readingOrder"> = {};
+    if (region.polygon !== undefined) {
+      if (!Array.isArray(region.polygon) || region.polygon.length < 3) throw new Error("Invalid layout polygon");
+      extras.polygon = region.polygon.map((point) => {
+        if (!Array.isArray(point) || point.length !== 2) throw new Error("Invalid layout polygon point");
+        return [unit(point[0]), unit(point[1])];
+      });
+    }
+    if (region.readingOrder !== undefined) {
+      if (typeof region.readingOrder !== "number" || !Number.isSafeInteger(region.readingOrder) || region.readingOrder < 0) throw new Error("Invalid layout reading order");
+      extras.readingOrder = region.readingOrder;
+    }
     if (region.imageCoverage !== undefined) extras.imageCoverage = unit(region.imageCoverage);
     if (region.coverageKind !== undefined) {
       if (!["full-page", "half-page", "region"].includes(String(region.coverageKind))) throw new Error("Invalid layout coverage kind");

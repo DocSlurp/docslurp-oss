@@ -57,6 +57,8 @@ def build_result(detector,data,device,threshold=.3):
     regions=[]
     for region in predictions[0]:
         entry=dict(label=region['label'],rawLabel=region['raw_label'],confidence=region['confidence'],bbox=region['bbox'])
+        if 'polygon' in region: entry['polygon']=region['polygon']
+        if 'reading_order' in region: entry['readingOrder']=region['reading_order']
         if 'classification' in region: entry['classification']=region['classification']
         if 'detector_label' in region: entry['detectorLabel']=region['detector_label']
         entry.update(describe_region(image,region)); regions.append(entry)
@@ -64,7 +66,7 @@ def build_result(detector,data,device,threshold=.3):
         'device':device,'image':{'width':image.width,'height':image.height,'sha256':hashlib.sha256(data).hexdigest()},
         'coordinateSpace':'normalized-source','supportedLabels':detector.supported_labels,'regions':regions,
         'diagnostics':{'timings':timings,'decodeMs':1000*(start-decode_start),'elapsedMs':1000*(time.perf_counter()-decode_start),
-          'storedPixelOrientation':True,'visualClassifier':detector.metadata.get('visual_classifier'),
+          'storedPixelOrientation':True,'nativeReadingOrder':any('readingOrder' in region for region in regions),'visualClassifier':detector.metadata.get('visual_classifier'),
           'coverageKindSemantics':'bbox area heuristic for visual regions: full-page>=0.90; half-page>=0.40; not a semantic image classifier'}}
 
 

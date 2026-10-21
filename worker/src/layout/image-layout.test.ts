@@ -25,6 +25,16 @@ describe("image layout transport boundary", () => {
     expect(parseImageLayout({ ...payload(), regions: [region] }).regions[0]).toEqual(region);
     expect(() => parseImageLayout({ ...payload(), regions: [{ ...region, fingerprint: { algorithm: "dhash-64", value: "bad" } }] })).toThrow("fingerprint");
   });
+  it("preserves optional model-native polygons and reading order, rejecting malformed metadata", () => {
+    const region = { ...payload().regions[0], polygon: [[0.1, 0.2], [0.9, 0.2], [0.5, 0.8]], readingOrder: 0 };
+    expect(parseImageLayout({ ...payload(), regions: [region] }).regions[0]).toEqual(region);
+    for (const polygon of [[], [[0, 0], [1, 1]], [[0, 0], [1, 1], [NaN, 0]], [[0, 0], [1, 1], [2, 0]], [[0, 0], [1, 1], [0]]]) {
+      expect(() => parseImageLayout({ ...payload(), regions: [{ ...region, polygon }] })).toThrow();
+    }
+    for (const readingOrder of [-1, 0.5, Infinity, "0"]) {
+      expect(() => parseImageLayout({ ...payload(), regions: [{ ...region, readingOrder }] })).toThrow("reading order");
+    }
+  });
   it("rejects unknown coordinate spaces and nonfinite confidence", () => {
     expect(() => parseImageLayout({ ...payload(), coordinateSpace: "pixels" })).toThrow("coordinate space");
     expect(() => parseImageLayout({ ...payload(), regions: [{ ...payload().regions[0], confidence: NaN }] })).toThrow("finite");
