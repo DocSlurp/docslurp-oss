@@ -65,6 +65,32 @@ test("unavailable evaluator API fails before any writes", async () => {
   await assert.rejects(syncAssets(async (_, body) => { if (body) writes++; return null; }, manifest, []), /unavailable/);
   assert.equal(writes, 0);
 });
+test("native prompt normalization and paused status are retained", async () => {
+  const { manifest } = await loadAssets(fixture.pathname);
+  const remote = store();
+  const wrapped = async (path, body) => {
+    const result = await remote.api(path, body);
+    if (result?.type === "llm_as_judge") return { ...result, prompt: [{ role: "user", content: result.prompt }], status: "paused", pausedReason: "LLM_CONNECTION_MISSING" };
+    return result;
+  };
+  const report = await syncAssets(wrapped, manifest, []);
+  assert.equal(report.complete, true);
+  assert.equal(report.runtimeReady, false);
+  assert.equal(report.evaluators[1].pausedReason, "LLM_CONNECTION_MISSING");
+  assert.ok(report.prompts.every(p => p.label.length <= 36));
+});
+test("disabled native code evaluator is reported while other assets continue", async () => {
+  const { manifest } = await loadAssets(fixture.pathname);
+  const remote = store();
+  const report = await syncAssets(async (path, body) => {
+    if (body?.type === "code") throw new Error("Langfuse HTTP 412 (response body redacted)");
+    return remote.api(path, body);
+  }, manifest, []);
+  assert.equal(report.complete, false);
+  assert.equal(report.runtimeReady, false);
+  assert.equal(report.failures.length, 1);
+  assert.equal(report.evaluators.length, 1);
+});
 test("reference scorer does not count abstentions or malformed output as autonomous success", async () => {
   const source = await readFile(new URL("./content-safety/decision-evaluator.js", import.meta.url), "utf8");
   const evaluate = vm.runInNewContext(`${source}; evaluate`);

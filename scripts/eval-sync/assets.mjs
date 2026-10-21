@@ -38,7 +38,9 @@ export function validateAssets(manifest) {
 export async function syncPrompt(api, spec, commit) {
   const content = { type: spec.type, prompt: spec.prompt, config: { ...spec.config, sourceCommit: commit } };
   const sha = digest(content);
-  const label = `sync-${sha}`;
+  // Langfuse deployment labels are limited to 36 characters. Keep the full
+  // digest in the report and compare the complete content on every readback.
+  const label = `sync-${sha.slice(0, 31)}`;
   const path = `/v2/prompts/${encodeURIComponent(spec.name)}?label=${label}&resolve=false`;
   let remote = await api(path);
   const unchanged = Boolean(remote);
@@ -78,18 +80,30 @@ export async function syncEvaluator(api, spec, commit) {
   if (!remote) remote = await api("/v2/evaluators", desired);
   if (!remote?.id) throw new Error("Evaluator creation did not return an ID");
   remote = await api(`/v2/evaluators/${encodeURIComponent(remote.id)}`);
-  if (!fieldsEqual(remote, desired)) throw new Error("Evaluator readback mismatch");
-  return { name: spec.name, id: remote.id, version: remote.version, contentSha256, status: remote.status, unchanged, readbackVerified: true };
+  // The API accepts a user-prompt string shortcut but always returns chat messages.
+  const comparable = { ...remote };
+  if (typeof desired.prompt === "string" && Array.isArray(remote?.prompt) && remote.prompt.length === 1 && remote.prompt[0].role === "user") comparable.prompt = remote.prompt[0].content;
+  if (!fieldsEqual(comparable, desired)) throw new Error("Evaluator readback mismatch");
+  return { name: spec.name, id: remote.id, version: remote.version, contentSha256, status: remote.status, pausedReason: remote.pausedReason ?? null, unchanged, readbackVerified: true };
 }
 
 export async function syncAssets(api, manifest, datasets) {
   validateAssets(manifest);
   // Check evaluator availability before writing any assets.
   if (manifest.evaluators?.length) await listEvaluators(api);
-  const report = { sourceCommit: manifest.sourceCommit, prompts: [], evaluators: [], datasets: [], llmCalls: 0, evaluationRulesCreated: 0 };
+  const report = { at: new Date().toISOString(), sourceCommit: manifest.sourceCommit, prompts: [], evaluators: [], datasets: [], failures: [], complete: true, llmCalls: 0, evaluationRulesCreated: 0 };
   for (const prompt of manifest.prompts ?? []) report.prompts.push(await syncPrompt(api, prompt, manifest.sourceCommit));
-  for (const evaluator of manifest.evaluators ?? []) report.evaluators.push(await syncEvaluator(api, evaluator, manifest.sourceCommit));
   for (const dataset of datasets) report.datasets.push(await syncDataset(api, dataset));
+  for (const evaluator of manifest.evaluators ?? []) {
+    try { report.evaluators.push(await syncEvaluator(api, evaluator, manifest.sourceCommit)); }
+    catch (error) {
+      // A disabled native evaluator runtime must not prevent independent assets
+      // from syncing. Retain an explicit failure, never claim complete success.
+      report.failures.push({ kind: "evaluator", name: evaluator.name, error: error.message });
+      report.complete = false;
+    }
+  }
+  report.runtimeReady = report.complete && report.evaluators.every(item => item.status === "active");
   return report;
 }
 
@@ -129,5 +143,6 @@ async function main() {
   }
   if (option("--output")) await writeFile(option("--output"), JSON.stringify(report, null, 2) + "\n", { mode: 0o600 });
   console.log(JSON.stringify(report, null, 2));
+  if (report.complete === false) process.exitCode = 1;
 }
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) main().catch(error => { console.error(error.message); process.exitCode = 1; });

@@ -17,7 +17,15 @@ the winner of the required comparison. No model calls, automatic evaluation rule
 provider credentials, production prompt labels, or infrastructure changes are made
 by asset sync. A native judge may remain paused until a model connection is available.
 
-Prompt versions use a full content-hash label; evaluator definitions use immutable
+The deterministic evaluator source is also archived as a versioned text asset named
+`reference-evaluator-source`, explicitly marked `notAnLlmPrompt`. This preserves
+reviewable source even if native code evaluators are disabled; it does not pretend
+that uploading source enables execution. Native failures are retained in `failures`,
+produce `complete: false` and a nonzero exit. `runtimeReady` additionally requires
+every synchronized native evaluator to be active. Fix the host prerequisite and
+rerun the same manifest to complete the remaining assets.
+
+Prompt versions use a bounded content-hash label (full hash in the report); evaluator definitions use immutable
 content-derived names and return stable native evaluator IDs. Changed source creates
 a new definition rather than mutating a prior experiment's evaluator. Duplicate
 remote evaluator names and prompt drift fail rather than choosing silently. Reads

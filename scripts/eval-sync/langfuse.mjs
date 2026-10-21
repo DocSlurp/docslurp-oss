@@ -39,7 +39,7 @@ export function buildItems({ name, split, cases, gold = null, provenance = null,
 
 export function createClient({ baseUrl, publicKey, secretKey, fetchImpl = fetch }) {
   const url = new URL(baseUrl);
-  if (url.username || url.password || (url.protocol !== "https:" && !["localhost", "127.0.0.1"].includes(url.hostname))) throw new Error("Langfuse requires HTTPS or localhost without URL credentials");
+  if (url.username || url.password || !(url.protocol === "https:" || (url.protocol === "http:" && ["localhost", "127.0.0.1"].includes(url.hostname)))) throw new Error("Langfuse requires HTTPS or localhost without URL credentials");
   const auth = `Basic ${Buffer.from(`${publicKey}:${secretKey}`).toString("base64")}`;
   return async (path, body, method = body ? "POST" : "GET") => {
     if (!path.startsWith("/") || path.startsWith("//")) throw new Error("Invalid Langfuse API path");

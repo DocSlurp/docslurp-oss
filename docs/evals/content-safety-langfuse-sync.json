@@ -1,0 +1,57 @@
+{
+  "at": "2026-10-21T00:44:18.816Z",
+  "sourceCommit": "d38681ea8628dc6b8a93635c72c49bfa615b4f16",
+  "prompts": [
+    {
+      "name": "docslurp/content-safety/reference-evaluator-source",
+      "version": 1,
+      "contentSha256": "344bccde60c49f67ddcc791b8a591f38d797bd51d73b906887b637750446ba82",
+      "label": "sync-344bccde60c49f67ddcc791b8a591f3",
+      "unchanged": true,
+      "readbackVerified": true
+    },
+    {
+      "name": "docslurp/content-safety/mastra-judge",
+      "version": 1,
+      "contentSha256": "5d4b18381829db7ce16785b94d98a31967bb99fbb76a17723ad04f08cdc4b838",
+      "label": "sync-5d4b18381829db7ce16785b94d98a31",
+      "unchanged": true,
+      "readbackVerified": true
+    }
+  ],
+  "evaluators": [
+    {
+      "name": "docslurp/content-safety/advisory-policy-judge",
+      "id": "cmvhe004y0005ms2mwdyg9nwo",
+      "version": 1,
+      "contentSha256": "aba4cf58bcd1055bb73c46e987c73773e30f98d6ac1d0706a395ea53b9d1bc85",
+      "status": "paused",
+      "pausedReason": "LLM_CONNECTION_MISSING",
+      "unchanged": true,
+      "readbackVerified": true
+    }
+  ],
+  "datasets": [
+    {
+      "name": "docslurp/content-safety/development-v1",
+      "split": "development",
+      "expectedItems": 7,
+      "remoteItems": 7,
+      "created": 0,
+      "updated": 0,
+      "unchanged": 7,
+      "readbackVerified": true
+    }
+  ],
+  "failures": [
+    {
+      "kind": "evaluator",
+      "name": "docslurp/content-safety/reference-decisions",
+      "error": "Langfuse HTTP 412 (response body redacted)"
+    }
+  ],
+  "complete": false,
+  "llmCalls": 0,
+  "evaluationRulesCreated": 0,
+  "runtimeReady": false
+}
