@@ -1,13 +1,13 @@
 import { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { apiErrorEnvelopeSchema, PUBLIC_ERROR_MESSAGES } from "@docslurp/shared";
 import { apiErrorResponse, apiStatusError, nativeApiErrors, nativeBodyLimit, nativeErrorHandler, usesNativeErrorEnvelope } from "../lib/api-error.js";
 import { apiPublicErrorMiddleware, publicErrorMiddleware } from "../lib/public-errors.js";
 import { ApiKeyWorkspaceNotAllowedError } from "../lib/request-actor.js";
 import { WorkspaceAccessError } from "../services/default-workspace.js";
-import { SpendBlockedError, spendAwareErrorHandler } from "../services/billing/spend-guard.js";
+import { SpendBlockedError, spendAwareErrorHandler, spendBlockedResponse } from "../services/billing/spend-guard.js";
 import { validationHook } from "../lib/validation.js";
 import { zValidator } from "@hono/zod-validator";
 import { z } from "zod";
@@ -94,6 +94,91 @@ describe("app-level error handler", () => {
     const response = await app().request("/v1/chat/completions");
     expect(response.status).toBe(402);
     expect(await response.json()).toMatchObject({ error: PUBLIC_ERROR_MESSAGES.unavailable, code: "credit_exhausted" });
+  });
+});
+
+describe("billing and upgrade links on 402", () => {
+  beforeEach(() => {
+    vi.stubEnv("STRIPE_SECRET_KEY", "sk_test_links");
+    vi.stubEnv("APP_URL", "https://docslurp.io/");
+    vi.stubEnv("DOCSLURP_DEPLOYMENT_MODE", "");
+  });
+  afterEach(() => { vi.unstubAllEnvs(); });
+
+  function app() {
+    const hono = new Hono();
+    hono.onError(nativeErrorHandler((error, c) => spendAwareErrorHandler(error, c)));
+    hono.use("*", async (c, next) => { c.set("requestId", "req-links"); await next(); });
+    hono.use("*", apiPublicErrorMiddleware);
+    hono.get("/v1/spend", () => { throw new SpendBlockedError("Out of credits", "credit_exhausted"); });
+    hono.get("/v1/budget", () => { throw new SpendBlockedError("Paused", "org_budget_paused"); });
+    hono.get("/v1/full-index", (c) => apiStatusError(c, 402, "Full indexing needs credits", { details: { category: "credits_required_for_full_index" } }));
+    hono.get("/v1/versions", (c) => apiErrorResponse(c, 402, "plan_not_entitled", "Paid plan needed", { category: "upgrade_required" }));
+    hono.get("/v1/mcp", () => { throw new SpendBlockedError("Out of credits", "credit_exhausted"); });
+    hono.post("/v1/chat/completions", (c) => c.json({ error: { message: "x", type: "service_unavailable", param: null, code: "credit_exhausted", links: { billing: "https://docslurp.io/app/billing" } } }, 402));
+    return hono;
+  }
+
+  it("adds details.links, a Link header and copy that says where to buy credits", async () => {
+    const response = await app().request("/v1/spend");
+    expect(response.status).toBe(402);
+    expect(response.headers.get("Link")).toContain('<https://docslurp.io/pricing>; rel="payment"');
+    const body = await response.json();
+    expect(apiErrorEnvelopeSchema.safeParse(body).success).toBe(true);
+    expect(body).toEqual({ error: {
+      code: "credit_exhausted",
+      message: "Your organization is out of credits. Buy credits or upgrade your plan at https://docslurp.io/app/billing.",
+      details: { links: {
+        billing: "https://docslurp.io/app/billing",
+        buyCredits: "https://docslurp.io/app/billing#bl-topup",
+        upgrade: "https://docslurp.io/pricing",
+        docs: "https://docslurp.io/docs/http#credits-budgets-and-upgrades",
+      } },
+      requestId: "req-links",
+    } });
+  });
+
+  it("links budget pauses to billing and plan gates to the upgrade", async () => {
+    const budget = await (await app().request("/v1/budget")).json();
+    expect(budget.error.message).toBe(`${PUBLIC_ERROR_MESSAGES.budgetPaused} Review spend and budgets at https://docslurp.io/app/billing.`);
+    expect(budget.error.details.links).toEqual({ billing: "https://docslurp.io/app/billing", docs: "https://docslurp.io/docs/http#credits-budgets-and-upgrades" });
+    const versions = await (await app().request("/v1/versions")).json();
+    expect(versions.error).toMatchObject({ code: "plan_not_entitled", details: { category: "upgrade_required", links: { upgrade: "https://docslurp.io/pricing" } } });
+    const fullIndex = await (await app().request("/v1/full-index")).json();
+    expect(fullIndex.error).toMatchObject({ code: "payment_required", details: { links: { buyCredits: "https://docslurp.io/app/billing#bl-topup" } } });
+  });
+
+  it("keeps links on protocol surfaces (MCP's flat body, the OpenAI error object)", async () => {
+    const mcp = await app().request("/v1/mcp");
+    expect(mcp.status).toBe(402);
+    expect(await mcp.json()).toMatchObject({
+      code: "credit_exhausted",
+      error: "Your organization is out of credits. Buy credits or upgrade your plan at https://docslurp.io/app/billing.",
+      links: { upgrade: "https://docslurp.io/pricing" },
+    });
+    const openai = await app().request("/v1/chat/completions", { method: "POST" });
+    expect(await openai.json()).toMatchObject({ error: {
+      message: "Your organization is out of credits. Buy credits or upgrade your plan at https://docslurp.io/app/billing.",
+      code: "credit_exhausted", links: { billing: "https://docslurp.io/app/billing" },
+    } });
+  });
+
+  it("drops links that are not absolute http(s) URLs", async () => {
+    const hono = new Hono();
+    hono.use("*", apiPublicErrorMiddleware);
+    hono.get("/v1/x", (c) => c.json({ error: { code: "credit_exhausted", message: "x", details: { links: { billing: "javascript:alert(1)", docs: "https://docslurp.io/docs" } } } }, 402));
+    const body = await (await hono.request("/v1/x")).json();
+    expect(body.error.details.links).toEqual({ docs: "https://docslurp.io/docs" });
+  });
+
+  it("sends no links or Link header on self-hosted deployments", async () => {
+    vi.stubEnv("DOCSLURP_DEPLOYMENT_MODE", "self-hosted");
+    const response = await app().request("/v1/spend");
+    expect(response.headers.get("Link")).toBeNull();
+    expect(await response.json()).toEqual({ error: { code: "credit_exhausted", message: PUBLIC_ERROR_MESSAGES.creditExhausted, requestId: "req-links" } });
+    const hono = new Hono();
+    hono.get("/x", (c) => spendBlockedResponse(c, new SpendBlockedError("Out", "credit_exhausted")));
+    expect(await (await hono.request("/x")).json()).toEqual({ error: PUBLIC_ERROR_MESSAGES.unavailable, code: "credit_exhausted" });
   });
 });
 

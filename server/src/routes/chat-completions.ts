@@ -1,6 +1,6 @@
 import { reportPublicError } from "../lib/public-errors.js";
 import { randomUUID } from "node:crypto";
-import { Hono, type MiddlewareHandler } from "hono";
+import { Hono, type Context, type MiddlewareHandler } from "hono";
 import { streamSSE } from "hono/streaming";
 import { z } from "zod";
 
@@ -12,7 +12,8 @@ import {
   resolveActorWorkspaceId,
 } from "../lib/request-actor.js";
 import { apiKeyAuth } from "../middleware/api-key-auth.js";
-import { assertCanSpend, isSpendBlockedError } from "../services/billing/spend-guard.js";
+import { assertCanSpend, isSpendBlockedError, type SpendBlockedError } from "../services/billing/spend-guard.js";
+import { upgradeLinkHeader, upgradeLinksFor } from "../lib/upgrade-links.js";
 import { chatWorkspace, workspaceChatDisabledBody } from "../services/workspace-chat.js";
 import { listWorkspaces } from "../services/workspaces.js";
 import { normalizeExtractedText, type WorkspaceChatResponse, type WorkspaceChatTurn } from "@docslurp/shared";
@@ -59,6 +60,15 @@ function contentText(content: z.infer<typeof textContent>): string {
 
 function errorBody(message: string, type = "invalid_request_error", code: string | null = null, param: string | null = null) {
   return { error: { message, type, param, code } };
+}
+
+/** OpenAI-shaped 402 for a blocked spend; `error.links` says where to buy credits or upgrade. */
+function spendBlockedBody(c: Context, error: SpendBlockedError) {
+  const links = upgradeLinksFor(error.code);
+  const header = upgradeLinkHeader(links);
+  if (header) c.header("Link", header);
+  const body = errorBody(reportPublicError(error), "service_unavailable", error.code);
+  return links ? { error: { ...body.error, links } } : body;
 }
 
 function completionFinishReason(response: WorkspaceChatResponse): "stop" | "length" | "content_filter" {
@@ -171,7 +181,7 @@ export const chatCompletionsRoutes = new Hono()
           docslurp: { citations: response.citations, availability: response.availability },
         });
       } catch (error) {
-        if (isSpendBlockedError(error)) return c.json(errorBody(reportPublicError(error), "service_unavailable", error.code), 402);
+        if (isSpendBlockedError(error)) return c.json(spendBlockedBody(c, error), 402);
         if (isChatTurnDeadlineError(error)) return c.json(errorBody(error.message, "timeout_error", error.code), 504);
         reportPublicError(error, { operation: "chat-completions" });
         return c.json(errorBody("Workspace answer failed. Try again.", "server_error"), 500);
@@ -182,7 +192,7 @@ export const chatCompletionsRoutes = new Hono()
       // Pre-check only: chatWorkspace takes the interactive hold.
       await assertCanSpend(null, workspaceId, { kind: "interactive", hold: false });
     } catch (error) {
-      if (isSpendBlockedError(error)) return c.json(errorBody(reportPublicError(error), "service_unavailable", error.code), 402);
+      if (isSpendBlockedError(error)) return c.json(spendBlockedBody(c, error), 402);
       throw error;
     }
     c.header("Cache-Control", "no-cache");

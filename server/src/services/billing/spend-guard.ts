@@ -1,4 +1,5 @@
 import { reportPublicError } from "../../lib/public-errors.js";
+import { upgradeLinkHeader, upgradeLinksFor } from "../../lib/upgrade-links.js";
 import { publicErrorForStatus } from "@docslurp/shared";
 import type { Context } from "hono";
 import { HTTPException } from "hono/http-exception";
@@ -366,10 +367,13 @@ export async function admissionBlock(
   );
 }
 
-/** JSON 402 body for a blocked spend. */
+/** JSON 402 body for a blocked spend, with billing links on hosted deployments. */
 export function spendBlockedResponse(c: Context, error: SpendBlockedError) {
   reportPublicError(error, { status: 402 });
-  return c.json({ error: publicErrorForStatus(402), code: error.code }, 402);
+  const links = upgradeLinksFor(error.code);
+  const header = upgradeLinkHeader(links);
+  if (header) c.header("Link", header);
+  return c.json({ error: publicErrorForStatus(402), code: error.code, ...(links ? { links } : {}) }, 402);
 }
 
 /** Hono onError: 402 for blocked spend, Hono's defaults otherwise. */

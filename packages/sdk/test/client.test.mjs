@@ -269,6 +269,18 @@ test("DocSlurpApiError exposes the native envelope code and request id", async (
   });
 });
 
+test("DocSlurpApiError exposes upgrade and billing links from 402 details", async () => {
+  const links = { billing: "https://docslurp.io/app/billing", buyCredits: "https://docslurp.io/app/billing#bl-topup", upgrade: "https://docslurp.io/pricing", docs: "javascript:alert(1)" };
+  const envelope = { error: { code: "credit_exhausted", message: "Out of credits.", details: { links }, requestId: "req-2" } };
+  const sdk = client(async () => json(envelope, 402));
+  await assert.rejects(sdk.chat({ workspaceId: "workspace", q: "question" }), (error) => {
+    assert.ok(error instanceof DocSlurpApiError);
+    assert.equal(error.code, "credit_exhausted");
+    assert.deepEqual(error.links, { billing: links.billing, buyCredits: links.buyCredits, upgrade: links.upgrade });
+    return true;
+  });
+});
+
 test("DocSlurpApiError leaves code undefined for legacy and non-JSON bodies", async () => {
   for (const response of [() => json({ error: "Forbidden" }, 403), () => json({ error: { issues: [] } }, 403), () => new Response("<h1>bad gateway</h1>", { status: 403 })]) {
     const sdk = client(async () => response());
