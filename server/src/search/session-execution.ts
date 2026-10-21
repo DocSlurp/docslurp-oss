@@ -452,7 +452,8 @@ export async function finalizeSearchSessionExecution(
       filtersJson: toSearchMetadataRecord(input.filters),
     };
     // Ordered after the session row (#83), inline or behind it when writes are write-behind.
-    await input.session.afterWrites(() => writeZeroResultDiagnostics(diagnostics));
+    const write = () => writeZeroResultDiagnostics(diagnostics);
+    await (input.session.afterWrites ? input.session.afterWrites(write) : write());
   }
 
   return {

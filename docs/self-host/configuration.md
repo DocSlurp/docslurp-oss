@@ -139,6 +139,13 @@ trip the watchdog.
 | `SEARCH_MAX_CONCURRENCY` | `max(2, DATABASE_POOL_MAX / 3)` (6) | Concurrent hybrid searches per process. Extra searches wait in the app instead of the pool. `0` disables the limit. Nested searches (decompose, stepback, multi-hop) share their parent's slot. |
 | `SEARCH_QUEUE_MAX` | `200` | Searches allowed to wait for a slot; beyond it a search fails at once with 503. |
 | `SEARCH_QUEUE_TIMEOUT_MS` | `30000` | Longest wait for a slot before a 503 with `Retry-After`. The wait appears as `queueMs` in search timings. |
+| `SEARCH_MAX_SLOTS_PER_TURN` | `2` | Slots one chat agent turn or one batch request (`queries`) holds at once; its other searches wait. Waiting searches are served round-robin per organization, so one tenant's fan-out cannot starve another. `0` removes the per-turn cap. |
+| `SEARCH_LANCEDB_NATIVE` | off | Serve keyword (BM25), vector and citation hydration from LanceDB instead of Postgres: the LanceDB table's full-text index replaces Postgres FTS, the row's hydration columns replace the `document_chunks` read, and the eligible-document set and coverage are cached per workspace. Needs `LANCEDB_FTS_INDEX=1` on workers, or the backfill below, for keyword search; tables without an FTS index keep using Postgres FTS. |
+| `SEARCH_LANCEDB_NATIVE_WORKSPACES` | empty | Comma-separated workspace ids that use native search while `SEARCH_LANCEDB_NATIVE` is off. |
+| `SEARCH_ELIGIBLE_CACHE_TTL_MS` | `15000` | Native search: how long a workspace's eligible documents and coverage are cached. Worker `run_events` hints drop a workspace's entries sooner. |
+| `SEARCH_SESSION_WRITE_BEHIND` | with `SEARCH_LANCEDB_NATIVE` | Write search sessions, result ranks, usage and zero-result diagnostics after the response. Writes for one session stay ordered; `GET /v1/search/diagnostics` waits for them. |
+| `SEARCH_WRITE_BEHIND_CONCURRENCY` | `2` | Background search writes running at once. |
+| `LANCEDB_FTS_INDEX` | off | Worker: LanceDB maintenance also builds and refreshes a full-text index on chunk text, which native search queries. Existing tables: run `worker/scripts/lancedb-native-backfill.ts --workspace <id>` (adds the hydration columns, fills them from Postgres and builds the index; no re-embedding). |
 | `DB_WATCHDOG_INTERVAL_MS` | `15000` | How often the production watchdog probes. |
 | `DB_WATCHDOG_TIMEOUT_MS` | `5000` | Timeout of one probe. |
 | `DB_WATCHDOG_EXIT_AFTER_MS` | `60000` | Exit (and let the platform restart the machine) after the probe connection has failed this long. `0` disables the watchdog. |
