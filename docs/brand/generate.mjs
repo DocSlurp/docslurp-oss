@@ -41,6 +41,10 @@ const tile = (s, r = 0) => {
   return `<rect width="64" height="64" rx="${r}" fill="${P.deck}"/><g transform="translate(${o} ${o}) scale(${s})">${cup(PAPER)}</g>`;
 };
 
+// Product listing images (store and agent catalogs): the mark with generous clear space.
+// Plans use the paper cup on Deck, credit packs the ink cup on Paper, so the two read apart.
+const product = (bg, c) => `<rect width="64" height="64" fill="${bg}"/><g transform="translate(12.8 12.8) scale(0.6)">${cup(c)}</g>`;
+
 // Wordmark: "Doc" in Schibsted Grotesk 500, "Slurp" in 800, outlined so it renders
 // identically everywhere.
 const WX = 62;
@@ -59,6 +63,8 @@ const files = {
   "docslurp-app-icon.svg": svg(tile(0.8)),
   "docslurp-app-icon-rounded.svg": svg(tile(0.92, 14)),
   "docslurp-app-icon-maskable.svg": svg(tile(0.6)),
+  "docslurp-product-plan.svg": svg(product(P.deck, PAPER)),
+  "docslurp-product-credits.svg": svg(product(P.paper, INK)),
   "favicon.svg": svg(adaptive + cup(INK)),
   "docslurp-lockup.svg": svg(adaptive + lock(INK), LOCK_VB),
   "docslurp-lockup-dark.svg": svg(lock(INK, P.ink), LOCK_VB),
