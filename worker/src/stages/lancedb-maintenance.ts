@@ -252,6 +252,26 @@ export function scheduleLanceDbMaintenance(uri: string, tableName: string, optio
 /** Below this many rows a merge-insert scan is cheap and a btree on "id" is not worth building. */
 const ID_INDEX_MIN_ROWS = 1_000;
 
+/**
+ * LANCEDB_FTS_INDEX (on unless 0/false): maintenance also keeps a native
+ * full-text (BM25) index on the chunk `text` column, which native search
+ * queries instead of Postgres FTS. optimize() folds new rows into it like the
+ * vector index; rows written since are still searched, by a flat scan.
+ */
+export function lanceDbFtsIndexEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  return !["0", "false", "off", "no"].includes((env.LANCEDB_FTS_INDEX ?? "").trim().toLowerCase());
+}
+
+/** The chunk-text FTS index: English stemming and stop words, no positions (no phrase queries). */
+export function chunkTextFtsIndex(): Index {
+  return Index.fts({ withPosition: false, language: "English", stem: true, removeStopWords: true, lowercase: true, asciiFolding: true });
+}
+
+/** True when the table has an FTS index on `text`. */
+export function hasChunkTextFtsIndex(indices: Array<{ indexType?: string; columns: string[] }>): boolean {
+  return indices.some((index) => index.columns.includes("text") && /fts|inverted/i.test(index.indexType ?? ""));
+}
+
 /** Choose ANN parameters; L2 matches the app's default vectorSearch distance. */
 function vectorIndexConfig(rows: number): Index {
   // HNSW_SQ needs no PQ training minimum (IVF_PQ requires >= 256 rows) and keeps 8-bit
@@ -307,6 +327,9 @@ export async function runLanceDbMaintenance(
     if (rows >= ID_INDEX_MIN_ROWS && !indices.some((index) => index.columns.includes("id"))) {
       // merge-insert joins on "id"; a btree lets it look keys up instead of scanning the table.
       await table.createIndex("id", { config: Index.btree(), replace: false });
+    }
+    if (lanceDbFtsIndexEnabled() && rows > 0 && !hasChunkTextFtsIndex(indices)) {
+      await table.createIndex("text", { config: chunkTextFtsIndex(), replace: false });
     }
     if (indexCreated || consolidated) {
       indices = await table.listIndices();

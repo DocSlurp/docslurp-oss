@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 
 import { indexConfigHash, indexConfigOf, resolveLanceDbConfig, VectorNamespaceManager } from "@docslurp/shared";
+import { encodeLanceChunkHydration, lancePageNumberValue } from "@docslurp/shared/lancedb-hydration";
 import postgres from "postgres";
 
 import type { Config } from "../config.js";
@@ -73,11 +74,17 @@ export function vectorBackendCollectionName(args: {
   return `${args.runId}_${args.backend}`;
 }
 
-/** Lance rows for one document's embedding artifact (the same shape in direct and queued mode). */
+/**
+ * Lance rows for one document's embedding artifact (the same shape in direct and queued mode).
+ * With a run id the rows also carry the hydration columns (@docslurp/shared/lancedb-hydration),
+ * so search can cite a hit without reading document_chunks: the same heading path, page, token
+ * estimate and metadata the embed stage stored there.
+ */
 export function buildVectorRecords(
   artifact: Pick<EmbeddingArtifact, "chunks">,
   documentId: string,
   metadata: { sourceKey?: unknown; filename?: unknown },
+  runId?: string | null,
 ): VectorBackendRecord[] {
   return artifact.chunks.map<VectorBackendRecord>((chunk) => ({
     id: chunk.id,
@@ -89,7 +96,18 @@ export function buildVectorRecords(
       documentId,
       sourceKey: metadata.sourceKey,
       filename: metadata.filename
-    }
+    },
+    ...(runId ? {
+      runId,
+      pageNumber: lancePageNumberValue(chunk.pageNumber),
+      hydration: encodeLanceChunkHydration({
+        runId,
+        headingPath: chunk.headingPath,
+        pageNumber: chunk.pageNumber,
+        tokenEstimate: chunk.tokenEstimate,
+        metadata: chunk.metadata,
+      }),
+    } : {}),
   }));
 }
 
@@ -121,7 +139,7 @@ export class IndexStage implements Stage {
       sql: this.queueSql,
       loadRecords: async (row) => {
         const artifact = await this.storage.getJson<EmbeddingArtifact>(row.artifactKey, { streamJson: true });
-        return buildVectorRecords(artifact, row.documentId, row.metadata);
+        return buildVectorRecords(artifact, row.documentId, row.metadata, row.runId);
       },
       maintenance: {
         enabled: this.lance.enabled,
@@ -166,7 +184,7 @@ export class IndexStage implements Stage {
           const records = buildVectorRecords(artifact, document.id, {
             sourceKey: document.sourceKey,
             filename: document.filename
-          });
+          }, state.run.id);
           const recordPages = artifact.chunks.map((chunk) => chunkFirstPage(chunk));
 
           const manifests: Array<Record<string, unknown>> = [];

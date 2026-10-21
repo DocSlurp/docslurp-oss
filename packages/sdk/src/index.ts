@@ -412,11 +412,11 @@ export type ChatInput = {
   model?: string;
   /** Search-agent budgets for this turn; non-admin callers can only lower the defaults. */
   agent?: {
-    /** Model steps, 1-12 (default 6). The last step always answers. */
+    /** Model steps, 1-12 (default 8). The last step always answers. */
     maxSteps?: number;
-    /** Tool calls across the turn, 1-24 (default 12). */
+    /** Tool calls across the turn, 1-24 (default 16). */
     maxToolCalls?: number;
-    /** Cap on parallel search queries, 1-8 (default 4). */
+    /** Cap on parallel search queries, 1-8 (default 6). */
     searchConcurrency?: number;
   };
 };
@@ -569,6 +569,14 @@ function deadline(timeoutMs: number, external?: AbortSignal) {
   };
 }
 
+/**
+ * Where to lift a limit, from `error.details.links` on 402 and 429 responses of
+ * hosted DocSlurp (self-hosted servers send none): `billing` (plan, credits,
+ * budgets), `buyCredits`, `upgrade` (plans), `apiKeys` (a key's own limits) and
+ * `docs` for the limit.
+ */
+export type DocSlurpErrorLinks = Partial<Record<"billing" | "buyCredits" | "upgrade" | "apiKeys" | "docs", string>>;
+
 export class DocSlurpApiError extends Error {
   readonly body: unknown;
   readonly status: number;
@@ -576,6 +584,8 @@ export class DocSlurpApiError extends Error {
   readonly code?: string;
   /** Server correlation id (`error.requestId`) to quote in support requests. */
   readonly requestId?: string;
+  /** Upgrade, billing and docs URLs for credit, budget and rate-limit errors. */
+  readonly links?: DocSlurpErrorLinks;
 
   constructor(message: string, status: number, body: unknown) {
     super(message);
@@ -585,18 +595,33 @@ export class DocSlurpApiError extends Error {
     const envelope = apiErrorEnvelope(body);
     if (envelope?.code) this.code = envelope.code;
     if (envelope?.requestId) this.requestId = envelope.requestId;
+    if (envelope?.links) this.links = envelope.links;
   }
 }
 
-/** Reads `{ error: { code, requestId } }`; legacy bodies, OpenAI errors without a string code and text yield nothing. */
-function apiErrorEnvelope(body: unknown): { code?: string; requestId?: string } | null {
+const ERROR_LINK_NAMES = ["billing", "buyCredits", "upgrade", "apiKeys", "docs"] as const;
+
+function errorLinks(value: unknown): DocSlurpErrorLinks | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const links: DocSlurpErrorLinks = {};
+  for (const name of ERROR_LINK_NAMES) {
+    const url = (value as Record<string, unknown>)[name];
+    if (typeof url === "string" && /^https?:\/\//.test(url)) links[name] = url;
+  }
+  return Object.keys(links).length ? links : undefined;
+}
+
+/** Reads `{ error: { code, requestId, details: { links } } }`; legacy bodies, OpenAI errors without a string code and text yield nothing. */
+function apiErrorEnvelope(body: unknown): { code?: string; requestId?: string; links?: DocSlurpErrorLinks } | null {
   if (!body || typeof body !== "object") return null;
   const error = (body as { error?: unknown }).error;
   if (!error || typeof error !== "object") return null;
-  const { code, requestId } = error as { code?: unknown; requestId?: unknown };
+  const { code, requestId, details } = error as { code?: unknown; requestId?: unknown; details?: { links?: unknown } };
+  const links = errorLinks(details?.links);
   return {
     ...(typeof code === "string" && code ? { code } : {}),
     ...(typeof requestId === "string" && requestId ? { requestId } : {}),
+    ...(links ? { links } : {}),
   };
 }
 

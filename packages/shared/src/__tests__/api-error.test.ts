@@ -8,6 +8,8 @@ import {
   apiErrorEnvelopeSchema,
   isApiErrorCode,
   publicApiErrorDetails,
+  publicApiErrorLinks,
+  publicApiErrorMessage,
   publicApiErrorEnvelope,
 } from "../api-error.js";
 import { safeErrorResponse } from "../error-response.js";
@@ -123,5 +125,23 @@ describe("safeErrorResponse for the native API", () => {
   it("leaves the legacy shape alone when not native", async () => {
     const res = await safeErrorResponse(Response.json({ error: "x", code: "workspace_not_found" }, { status: 404 }), "r");
     expect(await res.json()).toMatchObject({ code: "workspace_not_found", requestId: "r" });
+  });
+});
+
+describe("upgrade links", () => {
+  const links = { upgrade: "https://docslurp.io/pricing", billing: "https://docslurp.io/app/billing", docs: "https://docslurp.io/docs/http#rate-limits-and-headers" };
+
+  it("keeps only known keys with absolute http(s) URLs", () => {
+    expect(publicApiErrorLinks({ ...links, evil: "https://x", apiKeys: "javascript:alert(1)", buyCredits: "/app/billing" })).toEqual(links);
+    expect(publicApiErrorLinks({ billing: "https://a b" })).toBeUndefined();
+    expect(publicApiErrorDetails({ links, plan: "free", note: "dropped" })).toEqual({ links, plan: "free" });
+  });
+
+  it("points Free-plan rate limits at the upgrade and falls back to reviewed copy without links", () => {
+    expect(publicApiErrorMessage("rate_limited", { plan: "free", links })).toContain("Paid plans have higher limits: upgrade at https://docslurp.io/pricing");
+    expect(publicApiErrorMessage("credit_exhausted", { links })).toBe("Your organization is out of credits. Buy credits or upgrade your plan at https://docslurp.io/app/billing.");
+    for (const code of ["rate_limited", "credit_exhausted", "org_budget_paused"] as const) {
+      expect(publicApiErrorMessage(code)).toBe(API_ERROR_PUBLIC_MESSAGES[code]);
+    }
   });
 });

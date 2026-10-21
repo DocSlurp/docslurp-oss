@@ -22,7 +22,8 @@ const createApiKeySchema = z.object({
   keyType: apiKeyTypeSchema.optional(),
   allowedDomains: z.array(allowedDomainSchema).optional(),
   scopes: z.array(apiKeyScopeSchema).min(1).optional(),
-  rateLimitRpm: z.number().int().positive().optional(),
+  /** Optional requests-per-minute cap below the plan's limits. Omitted or null: the plan's limits apply. */
+  rateLimitRpm: z.number().int().positive().nullable().optional(),
   rateLimitPpd: z.number().int().positive().optional(),
   rateLimits: apiKeyRateLimitRulesSchema.optional(),
   /** Limit the key to these workspaces (IDs in the key's org). Omitted/empty: all of them. */
@@ -38,7 +39,8 @@ const updateApiKeySchema = z.object({
   keyType: apiKeyTypeSchema.optional(),
   allowedDomains: z.array(allowedDomainSchema).optional(),
   scopes: z.array(apiKeyScopeSchema).min(1).optional(),
-  rateLimitRpm: z.number().int().positive().optional(),
+  /** A number sets the key's requests-per-minute cap; null removes it (plan limits); omitted keeps it. */
+  rateLimitRpm: z.number().int().positive().nullable().optional(),
   rateLimitPpd: z.number().int().positive().optional(),
   rateLimits: apiKeyRateLimitRulesSchema.optional(),
   workspaceIds: workspaceIdsSchema.optional(),

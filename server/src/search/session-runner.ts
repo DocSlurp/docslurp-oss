@@ -29,6 +29,8 @@ import { timePhase } from "./timings.js";
 import { acquisitionDepth, validateRetrievalControls } from "./retrieval-controls.js";
 
 export interface SearchSessionRunnerAdapters {
+  /** Run the retrieval adapters concurrently (native search: they no longer share one database). */
+  parallelRetrieval?: boolean;
   buildAvailability(
     chunks: SearchChunk[],
     options: SearchOptions,
@@ -266,6 +268,7 @@ async function executeSearchSession(args: Parameters<typeof runSearchSession>[0]
               workspaceId: normalizedScope.workspaceId,
               options: { ...effectiveOptions, limit: acquisitionDepth(effectiveOptions, options.limit ?? 20) },
             },
+            { parallel: adapters.parallelRetrieval },
           ));
           const boundedResults = effectiveOptions.candidateDepth === undefined
             ? evidenceResults

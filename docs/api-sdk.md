@@ -487,7 +487,7 @@ curl --fail-with-body --silent --show-error --max-time 30 \
   "$api_url/v1/api-keys" \
   -b "$DOCSLURP_COOKIE_JAR" \
   -H 'Content-Type: application/json' \
-  --data '{"name":"Organization automation","orgId":"org-123","keyType":"server","scopes":["organizations:read","organizations:manage"],"rateLimitRpm":60,"rateLimitPpd":10000}'
+  --data '{"name":"Organization automation","orgId":"org-123","keyType":"server","scopes":["organizations:read","organizations:manage"],"rateLimitPpd":10000}'
 ```
 
 The response is `{ "key": <key metadata>, "rawKey": <the new key> }` with status 201. Store `rawKey` securely; key listings never return it. Existing keys don't gain the new scopes. To change an existing key's `scopes`, send `PATCH /v1/api-keys/:keyId` from a signed-in session; the same role and server-key rules apply. Because creating and updating keys requires a session, a key can't grant itself organization access.
@@ -674,7 +674,7 @@ Owners and admins get `{ "keys": [...] }`, with metadata for active and revoked 
       "scopes": [
         "organizations:manage"
       ],
-      "rateLimitRpm": 60,
+      "rateLimitRpm": null,
       "rateLimitPpd": 10000,
       "lastUsedAt": null,
       "createdAt": "2026-10-06T12:00:00Z",
@@ -763,14 +763,63 @@ X-DocSlurp-Spend: "key-spend-1d";q=500;r=212;w=86400;u=usd-cents
 | Layer | Policy names | Applies to |
 | --- | --- | --- |
 | Per client IP | `ip-<category>`, `ip-burst` | Every request. Categories: `upload`, `search`, `chat-ai`, `read`, `write`, `webhook`. |
-| Per key or signed-in user | `<plan>-<category>` | The plan's per-category limit, capped by the key's requests per minute. |
+| Per key or signed-in user | `<plan>-<category>` | The plan's per-category limit (`free-…` or `paid-…`), capped by the key's requests per minute if it has one. |
 | Custom key windows | `key-requests-<window>` | All endpoints together, e.g. 1,000 requests per hour. |
 | Spend windows | `key-spend-<window>` (`X-DocSlurp-Spend`) | Attributed AI, embedding and processing cost in a rolling window. Once reached, uploads, search and chat return 429; reads keep working. |
 | Daily pages | — | Uploads stop with `daily_page_limit` once the key's pages-per-day cap is used. |
 
 Custom request and spend windows are set per key on the API keys page (under "Permissions and limits", then "Advanced rate limits") or with `rateLimits` on `POST`/`PATCH /v1/api-keys`, e.g. `[{ "metric": "requests", "limit": 1000, "windowSeconds": 3600 }, { "metric": "spend", "limit": 500, "windowSeconds": 86400 }]` (spend in US cents; at most five rules, one per metric and window, windows up to 31 days). Spend is recorded when the work it pays for finishes and is refreshed every few seconds, so a request already running can carry a key slightly past its spend limit.
 
-Every 429 has `Retry-After` and the [error envelope](https://docslurp.io/docs/search-reference#errors) with `error.code` set to `rate_limited` (with `details.category` and `details.policy`), `spend_limit_exceeded`, `daily_page_limit` or `ip_temporarily_blocked`. An IP is blocked for a while after an extreme burst or after repeatedly presenting invalid API keys, so stop and fix credentials rather than retrying 401s in a loop.
+The plan table comes from the organization's billing state, never from the key: an API key gets its organization's plan, and a signed-in user gets the paid table when any organization they belong to is on a paid plan. An organization is paid while it is on Silver, Gold or Platinum and its subscription hasn't lapsed (a past-due subscription keeps paid limits for 7 days). A key's `rateLimitRpm` is an optional cap: omitted or `null` (the default) means the plan's limits apply, and a number lowers every category to at most that many requests a minute. It never raises the plan's limits, so a high value on a Free organization does not unlock paid limits. Set it on create, change it with `PATCH /v1/api-keys/:id`, and send `"rateLimitRpm": null` to remove it. Plan changes take effect within a minute. Default per-minute limits on docslurp.io:
+
+| Category | Free | Paid | Per client IP |
+| --- | ---: | ---: | ---: |
+| `upload` | 60 | 120 | 90 |
+| `search` | 240 | 600 | 240 |
+| `chat-ai` | 60 | 120 | 90 |
+| `read` | 600 | 1,500 | 1,200 |
+| `write` | 300 | 600 | 300 |
+| `webhook` | 120 | 600 | 600 |
+
+These are abuse protection, not a spending control: credits and budgets bound what you spend. Self-hosted deployments use their own, higher table, and operators can set `API_RATE_LIMIT_<PLAN>_<CATEGORY>_MAX` (for example `API_RATE_LIMIT_FREE_SEARCH_MAX`) or `API_RATE_LIMIT_DEFAULT_PROFILE=paid` (every account gets the paid table).
+
+Every 429 has `Retry-After` and the [error envelope](https://docslurp.io/docs/search-reference#errors) with `error.code` set to `rate_limited` (with `details.category`, `details.policy` and `details.plan`), `spend_limit_exceeded`, `daily_page_limit` or `ip_temporarily_blocked`. On docslurp.io the details also carry `links` and the response a `Link` header (`rel="payment"` for upgrades, `rel="help"` for these docs), and the message says where to go. A Free-plan limit says that paid plans get higher limits:
+
+```json
+{
+  "error": {
+    "code": "rate_limited",
+    "message": "Free plan rate limit reached. Paid plans have higher limits: upgrade at https://docslurp.io/pricing, or wait for Retry-After and try again.",
+    "details": {
+      "category": "chat-ai",
+      "policy": "free-chat-ai",
+      "plan": "free",
+      "retryAfterSeconds": 12,
+      "links": {
+        "upgrade": "https://docslurp.io/pricing",
+        "billing": "https://docslurp.io/app/billing",
+        "buyCredits": "https://docslurp.io/app/billing#bl-topup",
+        "docs": "https://docslurp.io/docs/http#rate-limits-and-headers"
+      }
+    },
+    "requestId": "req_123"
+  }
+}
+```
+
+`spend_limit_exceeded` and `daily_page_limit` are the key's own limits, so their `links.apiKeys` points at the API keys page. IP-level limits only link these docs. An IP is blocked for a while after an extreme burst or after repeatedly presenting invalid API keys, so stop and fix credentials rather than retrying 401s in a loop.
+
+### Credits, budgets and upgrades
+
+Work that spends credits (uploads, runs and reprocessing, chat, chat completions and the MCP chat and upload tools) is refused with HTTP 402 when the organization can't pay for it. Optional AI search strategies are skipped instead of failing the search.
+
+| `error.code` | Meaning | `details.links` |
+| --- | --- | --- |
+| `credit_exhausted`, `minimum_credit_required`, `payment_required` | Out of credits. | `billing`, `buyCredits`, `upgrade`, `docs` |
+| `workspace_budget_paused`, `org_budget_paused` | A monthly budget cap was reached and AI processing is paused. | `billing`, `docs` |
+| `plan_not_entitled` | The feature needs a paid plan. | `upgrade`, `billing`, `docs` |
+
+On docslurp.io the message names the page to visit (for example "Your organization is out of credits. Buy credits or upgrade your plan at https://docslurp.io/app/billing."), and the response has the same `Link` header as a 429. Protocol surfaces keep their shapes and add the links too: MCP tool errors and the flat `{error, code}` body carry a top-level `links`, and the OpenAI-compatible API puts them on `error.links` with `error.code` set to the DocSlurp code. In the SDK, `DocSlurpApiError.links` holds them. Self-hosted servers have no billing, so they send no links.
 
 ## Authentication and integration boundaries
 

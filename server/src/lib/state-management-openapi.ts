@@ -49,7 +49,7 @@ const readScopes = "Session workspace access or an organization-bound key with a
 const organizationApiKeySchema = z.object({
   id: z.string(), userId: z.string(), orgId: z.string().nullable(), name: z.string(),
   keyType: z.enum(["server", "client"]), allowedDomains: z.array(z.string()), scopes: z.array(z.string()),
-  rateLimitRpm: z.number(), rateLimitPpd: z.number(), lastUsedAt: z.string().nullable(),
+  rateLimitRpm: z.number().nullable().describe("Optional requests-per-minute cap; null means the plan's per-category limits apply"), rateLimitPpd: z.number(), lastUsedAt: z.string().nullable(),
   createdAt: z.string(), revokedAt: z.string().nullable(), requestsLastMinute: z.number().optional(), pagesToday: z.number().optional(),
 });
 export const stateManagementSchemas = {

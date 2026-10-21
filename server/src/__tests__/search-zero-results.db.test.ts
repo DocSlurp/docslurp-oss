@@ -96,6 +96,8 @@ beforeEach(async () => {
 });
 
 describe("zero-result diagnostics reference a persisted search session", () => {
+  // Synchronous session writes (write-behind follows native search, which is on by default).
+  beforeEach(() => { vi.stubEnv("SEARCH_SESSION_WRITE_BEHIND", "0"); });
   it("single search", async () => {
     const response = await search.hybridSearch("maintenance", "u", { ...options, filters: zeroHitFilters });
     expect(response.results).toEqual([]);
@@ -192,5 +194,84 @@ describe("zero-result diagnostics reference a persisted search session", () => {
     } finally {
       await sql`alter table search_zero_results drop constraint reject_all`;
     }
+  });
+});
+
+describe("write-behind session writes (SEARCH_SESSION_WRITE_BEHIND)", () => {
+  beforeEach(() => { vi.stubEnv("SEARCH_SESSION_WRITE_BEHIND", "1"); });
+
+  it("answers before its rows commit, and a reader that awaits the session sees them", async () => {
+    const session = await import("../search/session.js");
+    const response = await search.hybridSearch("maintenance", "u", { ...options, filters: zeroHitFilters });
+    expect(response.results).toEqual([]);
+    await session.awaitSearchSessionWrites(response.sessionId);
+    expect(await zeroResultRows()).toEqual([
+      { session_id: response.sessionId, workspace_id: "w", persisted: true, chat_session_id: null },
+    ]);
+    expect(reported).toEqual([]);
+  });
+
+  it("commits billed usage before it answers; only the session rows wait", async () => {
+    const session = await import("../search/session.js");
+    const journal = session.createSearchSessionJournal({ scope: { workspaceId: "w", orgId: "o" }, writeBehind: true });
+    journal.record({ provider: "openrouter", model: "test/embed", metric: "embed-query", inputTokens: 7, costCents: 0.01 });
+    let release!: () => void;
+    // Hold the background queue so the session row cannot commit first.
+    await journal.afterWrites(() => new Promise<void>((resolve) => { release = resolve; }));
+    const persisted = journal.persist({
+      userId: "u", query: "maintenance", results: [], chunks: [],
+      metadata: { originalQuery: "maintenance", workspaceId: "w", filters: {}, options: {} } as never,
+    });
+    await persisted;
+    const usage = await sql<{ input_tokens: number; workspace_id: string }[]>`
+      select input_tokens, workspace_id from usage_events where metadata ->> 'sessionId' = ${journal.sessionId}`;
+    expect(usage).toEqual([{ input_tokens: 7, workspace_id: "w" }]);
+    expect(await sql`select id from search_sessions where id = ${journal.sessionId}`).toEqual([]);
+    release();
+    await session.drainSearchSessionWrites();
+    expect(await sql`select id from search_sessions where id = ${journal.sessionId}`).toHaveLength(1);
+    // The snapshot's own flush did not write the event again.
+    expect(await sql`select id from usage_events where metadata ->> 'sessionId' = ${journal.sessionId}`).toHaveLength(1);
+    expect(reported).toEqual([]);
+  });
+
+  it("waits for its own writes once the backlog is full (SEARCH_WRITE_BEHIND_MAX_PENDING)", async () => {
+    vi.stubEnv("SEARCH_WRITE_BEHIND_MAX_PENDING", "0");
+    const response = await search.hybridSearch("maintenance", "u", { ...options, filters: zeroHitFilters });
+    // No await on the session: backpressure made the search commit before answering.
+    expect(await zeroResultRows()).toEqual([
+      { session_id: response.sessionId, workspace_id: "w", persisted: true, chat_session_id: null },
+    ]);
+    expect(reported).toEqual([]);
+  });
+
+  it("records a click sent right after the answer", async () => {
+    const session = await import("../search/session.js");
+    const response = await search.hybridSearch("maintenance", "u", { ...options, filters: { workspaceId: "w" } });
+    expect(response.results.length).toBeGreaterThan(0);
+    const clicked = await app().request(`/v1/search/${response.sessionId}/feedback`, {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ clickedChunkId: "d-chunk" }),
+    });
+    expect(clicked.status).toBe(200);
+    await session.drainSearchSessionWrites();
+    const [row] = await sql<{ clicked: boolean }[]>`select clicked from search_session_results where session_id = ${response.sessionId} and chunk_id = 'd-chunk'`;
+    expect(row?.clicked).toBe(true);
+  });
+
+  it("keeps a reused session id's attempts in order", async () => {
+    const session = await import("../search/session.js");
+    const rootSessionId = crypto.randomUUID();
+    // Three zero-hit attempts, one that finds results, all queued before any write commits.
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      await search.hybridSearch("maintenance", "u", { ...options, filters: zeroHitFilters, rootSessionId });
+    }
+    const found = await search.hybridSearch("maintenance", "u", { ...options, filters: { workspaceId: "w" }, rootSessionId });
+    expect(found.results.length).toBeGreaterThan(0);
+    await session.drainSearchSessionWrites();
+    // The latest attempt decides: results found, so no zero-result row remains.
+    expect(await zeroResultRows()).toEqual([]);
+    const [row] = await sql<{ result_count: number }[]>`select result_count from search_sessions where id = ${rootSessionId}`;
+    expect(row?.result_count).toBe(found.results.length);
+    expect(reported).toEqual([]);
   });
 });

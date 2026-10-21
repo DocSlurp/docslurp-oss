@@ -24,6 +24,7 @@ import {
 } from "@docslurp/shared";
 
 import { sql } from "../db.js";
+import { notifySearchEligibilityChanged } from "../search/eligibility-hint.js";
 import { nextVersionNumber } from "./version-number.js";
 import { validateModeSwitch } from "./workspace-indexing-mode.js";
 import { signalPipelineCancel } from "../lib/temporal.js";
@@ -600,6 +601,8 @@ async function applyPlannedChange(args: {
           and (d.indexing_mode is null or d.indexing_mode = 'full')
           and exists (select 1 from vector_indexes v where v.document_id = d.id)
       `;
+      // Native search caches each document's owner index config hash.
+      await notifySearchEligibilityChanged(tx as unknown as typeof sql, [workspace.id]);
       await tx`
         update workspaces
         set index_configs = jsonb_build_object(${beforeHash}::text, ${tx.json(JSON.parse(JSON.stringify(plan.beforeConfig)))}::jsonb)

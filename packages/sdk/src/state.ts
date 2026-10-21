@@ -79,7 +79,9 @@ export type CreateOrganizationInput = { name: string; slug?: string };
 export type UpdateOrganizationInput = { name?: string; slug?: string | null };
 export type OrganizationApiKey = {
   id: string; userId: string; orgId: string | null; name: string; keyType: "server" | "client";
-  allowedDomains: string[]; scopes: string[]; rateLimitRpm: number; rateLimitPpd: number;
+  allowedDomains: string[]; scopes: string[];
+  /** Optional requests-per-minute cap; null means the plan's per-category limits apply. */
+  rateLimitRpm: number | null; rateLimitPpd: number;
   /** Workspaces the key may use; empty means every workspace in its organization. */
   workspaceIds?: string[];
   lastUsedAt: string | null; createdAt: string; revokedAt: string | null; requestsLastMinute?: number; pagesToday?: number;
