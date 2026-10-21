@@ -36,6 +36,13 @@ class ScoringTests(unittest.TestCase):
         self.assertEqual(match_boxes(truth,pred)[0][0],0)
         self.assertEqual(len(match_boxes(truth,pred)),1)
 
+    def test_macro_includes_unsupported_truth_classes(self):
+        table={'label':'table','bbox':[0,0,1,1]}; photo={'label':'photo','bbox':[0,0,1,1]}
+        score=score_pages([{'truth':[table,photo],'regions':[table]}],['table'])['iou50']
+        self.assertEqual(score['macro_f1_truth_present'],.5)
+        self.assertEqual(score['macro_f1_supported_truth_present'],1.)
+        self.assertEqual(score['unsupported_truth_regions'],1)
+
     def test_missing_predictions_penalized(self):
         score=score_pages([{'truth':[{'label':'table','bbox':[0,0,1,1]}],'regions':[]}],['table'])
         self.assertEqual(score['iou50']['all_classes']['fn'],1)

@@ -60,7 +60,13 @@ def score_pages(pages,supported_labels):
                         order_pairs+=1; order_good+=(a-c)*(b-d)>0
         totals=[sum(v[index] for v in counts.values()) for index in range(3)]
         supported=[sum(v[index] for label,v in counts.items() if label in supported_labels) for index in range(3)]
+        truth_present=[label for label,v in counts.items() if v[0]+v[2]>0]
+        native_truth=[label for label in truth_present if label in supported_labels]
+        macro=lambda labels: sum(metrics(*counts[label])['f1'] or 0. for label in labels)/len(labels) if labels else None
         output[f'iou{int(threshold*100)}']={'all_classes':metrics(*totals),'supported_only':metrics(*supported),
+            'macro_f1_truth_present':macro(truth_present),'macro_f1_supported_truth_present':macro(native_truth),
+            'macro_truth_present_labels':sorted(truth_present),
+            'unsupported_truth_regions':sum(counts[label][0]+counts[label][2] for label in truth_present if label not in supported_labels),
             'class_agnostic_localization':metrics(*agnostic),
             'per_class':{label:dict(metrics(*counts[label]),supported=label in supported_labels) for label in sorted(counts)},
             'matched_mean_iou':sum(overlaps)/len(overlaps) if overlaps else None,

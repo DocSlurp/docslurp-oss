@@ -52,8 +52,8 @@ python scripts/layout-eval/export_pp_small.py \
 ```
 
 The exporter records the resolved upstream revision, upstream file digests,
-command, graph digest and export time. INT8 calibration consumes only train/dev
-image pixels (no references and no holdout):
+command, graph digest and export time. INT8 calibration defaults to train-only
+image pixels (no references and no holdout; explicit `--split dev` is available):
 
 ```bash
 python scripts/layout-eval/quantize_small.py \
@@ -92,7 +92,7 @@ python scripts/layout-eval/benchmark.py --model pp-small --device cpu \
 For ONNX replace `--model pp-small` with `--model pp-small-onnx --onnx-path ...`.
 For GPU replace with `--model heron --device cuda --precision fp16`. Compare
 `--model-size 480`, `640`, and the default separately; some architectures only
-support specific sizes. Explicit failures remain evidence instead of silently
+support specific sizes. `--processor slow|fast` selects the Transformers implementation explicitly and records its real class. Explicit failures remain evidence instead of silently
 falling back. Set hourly price to the actual allocated host rate, including the
 GPU for a CPU run performed on that rented GPU host. A CPU-only host cost estimate
 needs its own verified rate and must be identified as an estimate.
@@ -116,11 +116,21 @@ not instantaneous utilization; Torch CUDA peak allocation excludes driver memory
 
 Scoring uses normalized source-image boxes and deterministic one-to-one global
 IoU-greedy class-aware matching at .50 and .75. It reports per-class P/R/F1,
-all-class and explicitly supported-only micro scores, class-agnostic localization,
+all-class and explicitly supported-only micro scores, truth-present class macro F1, class-agnostic localization,
 matched mean IoU/boundary error, and reading-order pair accuracy when a detector
 actually supplies order. These are fixed-confidence metrics, **not COCO mAP**.
 Ancillary labels and coarse `figure` outputs are preserved. Unsupported photo/logo
 classification remains visible as misses in full-class results.
+
+An optional right-angle correction arm uses the official Apache-2.0
+[PP-LCNet orientation ONNX model](https://huggingface.co/PaddlePaddle/PP-LCNet_x1_0_doc_ori_onnx).
+Pass `--orientation-onnx-path ... --orientation-revision <pinned revision>` to
+benchmark.py. It performs CPU short-edge256/center224 classification, applies the
+predicted counterclockwise correction only above the declared minimum model score,
+and maps every detected box back to the original stored raster coordinates.
+Classification/rotation/inverse-mapping timings are separate. It does not correct
+small skew, perspective, page curvature, or camera occlusion. Inspect per-capture
+scores; improving rotated pages can still worsen clean pages or add too much cost.
 
 `infer.py` also reports DHash-64 and exact RGB crop SHA256 fingerprints. DHash is
 a similarity hint, not semantic recognition or identity. Full/half-page visual
@@ -132,3 +142,17 @@ Run the fast tests without models or network:
 ```bash
 python -m unittest discover -s scripts/layout-eval -p 'test_*.py' -v
 ```
+
+## Runtime compatibility findings
+
+The first native PP-small readiness probe with Paddle3.3.1 and MKLDNN enabled
+failed with `ConvertPirAttribute2RuntimeAttribute ... pir::ArrayAttribute<pir::DoubleAttribute>`
+in oneDNN. `--paddle-mkldnn` is therefore an explicit experimental option rather
+than an assumed fast default. No silent runtime fallback hides this failure.
+
+Native Paddle ndarray input expects BGR. The adapter converts the decoded PIL
+RGB pixels to BGR before PaddleX performs its documented RGB conversion. For
+ONNX the official tiny-model `interp: 2` is OpenCV CUBIC (not LINEAR), verified
+against the installed predictor mapping. `check_small_parity.py` checks the
+path/array predictions and native/ONNX predictions from image bytes without any
+reference annotations. Keep failed parity evidence as well as corrected output.

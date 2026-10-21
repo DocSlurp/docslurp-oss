@@ -10,6 +10,8 @@ import hashlib
 import json
 from pathlib import Path
 import subprocess
+import shutil
+import sys
 import time
 
 
@@ -31,7 +33,8 @@ def main():
     if not source.exists(): source=args.model_dir/'inference.pdmodel'
     if not source.exists() or not (args.model_dir/'inference.pdiparams').exists(): raise ValueError('Missing official Paddle model files')
     args.output.parent.mkdir(parents=True,exist_ok=True)
-    command=['paddle2onnx','--model_dir',str(args.model_dir),'--model_filename',source.name,
+    executable=shutil.which('paddle2onnx') or str(Path(sys.executable).parent/'paddle2onnx')
+    command=[executable,'--model_dir',str(args.model_dir),'--model_filename',source.name,
              '--params_filename','inference.pdiparams','--save_file',str(args.output),'--opset_version','17',
              '--enable_onnx_checker','True']
     started=time.time(); subprocess.run(command,check=True)

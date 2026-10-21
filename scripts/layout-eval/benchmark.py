@@ -68,7 +68,7 @@ def transform_bytes(data,variant):
         image=opened.convert('RGB')
     end=time.perf_counter()
     return image,{'source_decode_ms':1000*(decoded-start),'transform_encode_ms':1000*(encoded-decoded),
-                  'payload_decode_ms':1000*(end-encoded),'source_bytes':len(data),'payload_bytes':len(payload),
+                  'payload_decode_ms':1000*(end-encoded),'source_bytes':len(data),'source_sha256':hashlib.sha256(data).hexdigest(),'payload_bytes':len(payload),
                   'source_size':source_size,'input_size':image.size,'payload_sha256':hashlib.sha256(payload).hexdigest()}
 
 
@@ -85,6 +85,8 @@ def summarize(rows,supported,hourly_usd):
     successful=[row for row in rows if not row.get('error')]
     timing_keys=sorted(set(key for row in successful for key in row['timings']))
     output={'attempts':len(rows),'failures':len(rows)-len(successful),
+            'unique_page_images':len(set(r.get('page_id') for r in rows if r.get('page_id'))),
+            'unique_authored_sources':len(set(r.get('metadata',{}).get('source_id',r.get('page_id')) for r in rows)),
             'successful_latency_ms':{key:stats([r['timings'][key] for r in successful if key in r['timings']]) for key in timing_keys},
             'all_attempt_end_to_end_ms':stats([r['timings']['end_to_end_ms'] for r in rows]),
             'payload_bytes':stats([r['payload_bytes'] for r in successful]),
@@ -103,11 +105,21 @@ def parse_args(argv=None):
     parser.add_argument('--device',default='cpu')
     parser.add_argument('--precision',choices=['fp32','fp16'],default='fp32')
     parser.add_argument('--threads',type=int,default=4)
+    parser.add_argument('--processor',choices=['slow','fast'],default='slow')
+    parser.add_argument('--visual-classifier',choices=['none','siglip2'],default='none')
+    parser.add_argument('--classifier-model-path')
+    parser.add_argument('--classifier-revision')
+    parser.add_argument('--classifier-minimum-margin',type=float,default=.02)
+    parser.add_argument('--classifier-batch-size',type=int,default=16)
     parser.add_argument('--batch-size',type=int,default=1)
     parser.add_argument('--model-size',type=int,help='Transformers model input square size; independent from payload resolution')
     parser.add_argument('--onnx-path')
+    parser.add_argument('--paddle-mkldnn',action='store_true')
     parser.add_argument('--model-path')
     parser.add_argument('--revision')
+    parser.add_argument('--orientation-onnx-path')
+    parser.add_argument('--orientation-revision',default='unknown')
+    parser.add_argument('--orientation-minimum-score',type=float,default=.75)
     parser.add_argument('--local-files-only',action='store_true')
     parser.add_argument('--split',default='dev')
     parser.add_argument('--limit',type=int)
@@ -138,8 +150,18 @@ def main(argv=None):
     if len({v['name'] for v in variants})!=len(variants): raise ValueError('Variant names must be unique')
     model_start=time.perf_counter()
     detector=load_detector(args.model,device=args.device,precision=args.precision,threads=args.threads,
-                           model_size=args.model_size,onnx_path=args.onnx_path,model_path=args.model_path,
-                           revision=args.revision,local_files_only=args.local_files_only)
+                           model_size=args.model_size,paddle_mkldnn=args.paddle_mkldnn,onnx_path=args.onnx_path,model_path=args.model_path,
+                           revision=args.revision,processor=args.processor,local_files_only=args.local_files_only)
+    if args.visual_classifier=='siglip2':
+        from visual_classifier import VisualCropClassifier,VisualClassifierDetector
+        classifier=VisualCropClassifier(device=args.device,precision=args.precision,threads=args.threads,
+            batch_size=args.classifier_batch_size,minimum_margin=args.classifier_minimum_margin,
+            revision=args.classifier_revision,model_path=args.classifier_model_path,local_files_only=args.local_files_only)
+        detector=VisualClassifierDetector(detector,classifier)
+    if args.orientation_onnx_path:
+        from orientation import OnnxOrientation,OrientedDetector
+        detector=OrientedDetector(detector,OnnxOrientation(args.orientation_onnx_path,threads=args.threads,
+            minimum_score=args.orientation_minimum_score,revision=args.orientation_revision))
     model_load_ms=1000*(time.perf_counter()-model_start)
     root=args.manifest.parent
     # Warmup uses source image bytes only, never references.
@@ -168,7 +190,10 @@ def main(argv=None):
                     try:
                         for row in batch:
                             read_start=time.perf_counter(); data=(root/row['image_path']).read_bytes(); read_ms=1000*(time.perf_counter()-read_start)
+                            expected=row.get('metadata',{}).get('image_sha256')
+                            if expected and hashlib.sha256(data).hexdigest()!=expected: raise ValueError('Source image differs from manifest hash')
                             image,detail=transform_bytes(data,variant); detail['read_ms']=read_ms
+                            if tuple(detail['source_size'])!=(row['width'],row['height']): raise ValueError('Source dimensions differ from manifest reference')
                             images.append(image); details.append(detail)
                         predictions,timings=detector.predict(images,args.threshold)
                         if len(predictions)!=len(batch): raise ValueError('Detector result count differs from input batch')
@@ -180,6 +205,8 @@ def main(argv=None):
                     # Load reference only AFTER inference finished, outside all performance timers.
                     for index,(row,regions) in enumerate(zip(batch,predictions)):
                         detail=details[index] if index<len(details) else {}
+                        image_metadata=getattr(detector,'last_image_metadata',[])
+                        if not error and index<len(image_metadata): detail.update(image_metadata[index])
                         amortized={key:value/len(batch) for key,value in timings.items()}
                         timings_out={key:detail[key] for key in ('source_decode_ms','transform_encode_ms','payload_decode_ms','read_ms') if key in detail}
                         timings_out.update(amortized,end_to_end_ms=elapsed/len(batch))
@@ -196,6 +223,10 @@ def main(argv=None):
         summaries[variant['name']]=summarize(selected,detector.supported_labels,args.hourly_usd)
         summaries[variant['name']]['per_family']={family:score_pages([r for r in selected if r.get('source_family')==family],detector.supported_labels)
                                                 for family in sorted(set(r['source_family'] for r in selected if r.get('source_family')))}
+        summaries[variant['name']]['per_capture']={capture:score_pages([r for r in selected if r.get('metadata',{}).get('capture_variant')==capture],detector.supported_labels)
+            for capture in sorted(set(r.get('metadata',{}).get('capture_variant') for r in selected if r.get('metadata',{}).get('capture_variant')))}
+        summaries[variant['name']]['per_difficulty']={difficulty:score_pages([r for r in selected if r.get('metadata',{}).get('difficulty')==difficulty],detector.supported_labels)
+            for difficulty in sorted(set(r.get('metadata',{}).get('difficulty') for r in selected if r.get('metadata',{}).get('difficulty')))}
     report=dict(metadata,elapsed_wall_seconds=time.perf_counter()-campaign_start,
         rss_peak_bytes=resource.getrusage(resource.RUSAGE_SELF).ru_maxrss*1024,
         model_memory=detector.memory(),summaries=summaries,final_model_metadata=detector.metadata)

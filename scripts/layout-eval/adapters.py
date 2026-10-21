@@ -33,7 +33,7 @@ def normalized_region(raw,score,box,size,mapping,**extra):
 
 class TransformersDetector:
     def __init__(self,model='heron',device='cpu',precision='fp32',threads=4,model_size=None,
-                 revision=None,model_path=None,local_files_only=False,**_):
+                 revision=None,model_path=None,local_files_only=False,processor='slow',**_):
         import torch
         from transformers import AutoImageProcessor,AutoModelForObjectDetection
         torch.set_num_threads(threads)
@@ -42,14 +42,14 @@ class TransformersDetector:
         self.model_id={'heron':'docling-project/docling-layout-heron','ppv3':'PaddlePaddle/PP-DocLayoutV3_safetensors'}[model]
         self.mapping=HERON_LABELS if model=='heron' else PADDLE_LABELS
         source=model_path or self.model_id
-        self.processor=AutoImageProcessor.from_pretrained(source,revision=revision,local_files_only=local_files_only)
+        self.processor=AutoImageProcessor.from_pretrained(source,revision=revision,local_files_only=local_files_only,use_fast=processor=='fast')
         self.model=AutoModelForObjectDetection.from_pretrained(source,revision=revision,local_files_only=local_files_only).eval().to(device)
         self.dtype=torch.float16 if precision=='fp16' else torch.float32
         self.model.to(dtype=self.dtype); self.model_size=model_size
         self.supported_labels=sorted(set(canonical(str(v),self.mapping) for v in self.model.config.id2label.values()))
         self.revision=getattr(self.model.config,'_commit_hash',None) or revision or 'unknown'
         self.metadata={'id':self.model_id,'revision':self.revision,'runtime':'transformers','precision':precision,
-            'threads':threads,'model_size':model_size,'parameter_count':sum(p.numel() for p in self.model.parameters())}
+            'threads':threads,'model_size':model_size,'processor':processor,'processor_class':type(self.processor).__name__,'parameter_count':sum(p.numel() for p in self.model.parameters())}
 
     def sync(self):
         if self.device.startswith('cuda'): self.torch.cuda.synchronize(self.device)
@@ -76,22 +76,22 @@ class TransformersDetector:
 
 
 class PaddleSmallDetector:
-    def __init__(self,device='cpu',threads=4,precision='fp32',model_size=None,model_path=None,**_):
+    def __init__(self,device='cpu',threads=4,precision='fp32',model_size=None,model_path=None,revision=None,paddle_mkldnn=False,**_):
         if precision!='fp32' or model_size: raise ValueError('Native PP-small supports fp32/default 480 only')
         from paddleocr import LayoutDetection
         kwargs={'model_dir':model_path} if model_path else {}
         self.device=device
-        self.model=LayoutDetection(model_name='PP-DocLayout-S',device=device.replace('cuda','gpu'),cpu_threads=threads,enable_mkldnn=True,**kwargs)
+        self.model=LayoutDetection(model_name='PP-DocLayout-S',device=device.replace('cuda','gpu'),cpu_threads=threads,enable_mkldnn=paddle_mkldnn,**kwargs)
         self.supported_labels=sorted(set(PADDLE_LABELS.values()))
-        self.metadata={'id':'PaddlePaddle/PP-DocLayout-S','revision':'unknown','runtime':'paddleocr',
-                       'precision':'fp32','threads':threads,'model_size':480}
+        self.metadata={'id':'PaddlePaddle/PP-DocLayout-S','revision':revision or 'unknown','runtime':'paddleocr',
+                       'precision':'fp32','threads':threads,'model_size':480,'mkldnn':paddle_mkldnn,'ndarray_color':'BGR-converted-from-RGB'}
 
     def predict(self,images,threshold=.3):
         import numpy as np
         import paddle
         if self.device.startswith('cuda'): paddle.device.cuda.synchronize()
         start=time.perf_counter()
-        results=list(self.model.predict(input=[np.asarray(im) for im in images],batch_size=len(images),threshold=threshold))
+        results=list(self.model.predict(input=[np.ascontiguousarray(np.asarray(im)[:,:,::-1]) for im in images],batch_size=len(images),threshold=threshold))
         regions=[]
         for image,result in zip(images,results):
             data=result.json
@@ -110,7 +110,7 @@ class OnnxSmallDetector:
     Export an Apache-2.0 upstream checkpoint or supply an audited graph. Its digest
     is recorded. No remote Python or unreviewed model code is executed.
     """
-    def __init__(self,onnx_path=None,device='cpu',threads=4,precision='fp32',**_):
+    def __init__(self,onnx_path=None,device='cpu',threads=4,precision='fp32',revision=None,**_):
         import hashlib
         import onnxruntime as ort
         if not onnx_path: raise ValueError('--onnx-path required')
@@ -120,19 +120,21 @@ class OnnxSmallDetector:
         providers=['CUDAExecutionProvider','CPUExecutionProvider'] if device.startswith('cuda') else ['CPUExecutionProvider']
         if providers[0] not in ort.get_available_providers(): raise RuntimeError(f'Unavailable provider {providers[0]}')
         self.session=ort.InferenceSession(onnx_path,sess_options=options,providers=providers)
+        if device.startswith('cuda') and self.session.get_providers()[0]!='CUDAExecutionProvider':
+            raise RuntimeError('Requested CUDA ONNX provider failed to initialize; refusing full CPU fallback')
         self.supported_labels=sorted(set(PADDLE_LABELS.values()))
-        self.metadata={'id':'PaddlePaddle/PP-DocLayout-S','revision':'unknown','runtime':'onnxruntime',
+        self.metadata={'id':'PaddlePaddle/PP-DocLayout-S','revision':revision or 'unknown','runtime':'onnxruntime',
             'graph_sha256':hashlib.sha256(open(onnx_path,'rb').read()).hexdigest(),
-            'providers':self.session.get_providers(),'precision':'graph-defined','threads':threads,
-            'cuda_cpu_node_fallback_possible':device.startswith('cuda'),'batch_execution':'serial-fixed-1'}
+            'providers':self.session.get_providers(),'provider_options':self.session.get_provider_options(),'precision':'graph-defined','threads':threads,
+            'cuda_cpu_node_fallback_possible':device.startswith('cuda'),'batch_execution':'serial-fixed-1','resize':'opencv-INTER_CUBIC','color':'RGB'}
 
     def predict(self,images,threshold=.3):
         import numpy as np
-        from PIL import Image
+        import cv2
         output=[]; timing={'preprocess_ms':0.,'inference_ms':0.,'postprocess_ms':0.}
         for image in images:
             start=time.perf_counter()
-            data=np.asarray(image.resize((480,480),Image.Resampling.BILINEAR),dtype=np.float32)/255.
+            data=cv2.resize(np.asarray(image),(480,480),interpolation=cv2.INTER_CUBIC).astype(np.float32)/255.
             data=(data-np.array([.485,.456,.406],dtype=np.float32))/np.array([.229,.224,.225],dtype=np.float32)
             feed={'image':data.transpose(2,0,1)[None],'scale_factor':np.array([[480/image.height,480/image.width]],dtype=np.float32)}
             pre=time.perf_counter(); results=self.session.run(None,feed); infer=time.perf_counter()

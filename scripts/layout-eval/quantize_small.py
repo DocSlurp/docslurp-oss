@@ -18,13 +18,15 @@ def main():
     parser.add_argument('--output',required=True,type=Path)
     parser.add_argument('--manifest',required=True,type=Path)
     parser.add_argument('--limit',type=int,default=32)
+    parser.add_argument('--split',choices=['train','dev'],default='train')
     args=parser.parse_args()
     if args.output.exists(): raise ValueError('Refuse to overwrite an existing graph')
     from onnxruntime.quantization import CalibrationDataReader,QuantFormat,QuantType,quantize_static
     import numpy as np
+    import cv2
     from PIL import Image
     from benchmark import read_manifest
-    rows=[r for r in read_manifest(args.manifest) if r['split'] in ('train','dev')]
+    rows=[r for r in read_manifest(args.manifest) if r['split']==args.split]
     random.Random(417).shuffle(rows); rows=rows[:args.limit]
     if not rows: raise ValueError('No train/dev images for calibration')
     class Images(CalibrationDataReader):
@@ -33,7 +35,7 @@ def main():
             row=next(self.rows,None)
             if row is None: return None
             with Image.open(args.manifest.parent/row['image_path']) as im:
-                width,height=im.size; data=np.asarray(im.convert('RGB').resize((480,480),Image.Resampling.BILINEAR),dtype=np.float32)/255.
+                width,height=im.size; data=cv2.resize(np.asarray(im.convert('RGB')),(480,480),interpolation=cv2.INTER_CUBIC).astype(np.float32)/255.
             data=(data-np.array([.485,.456,.406],dtype=np.float32))/np.array([.229,.224,.225],dtype=np.float32)
             return {'image':data.transpose(2,0,1)[None], 'scale_factor':np.array([[480/height,480/width]],dtype=np.float32)}
     args.output.parent.mkdir(parents=True,exist_ok=True)
@@ -44,7 +46,7 @@ def main():
     metadata={'source_sha256':hashlib.sha256(args.model.read_bytes()).hexdigest(),
               'graph_sha256':hashlib.sha256(args.output.read_bytes()).hexdigest(),
               'calibration_page_ids':[r['id'] for r in rows],'calibration_manifest_sha256':hashlib.sha256(args.manifest.read_bytes()).hexdigest(),
-              'split_policy':'train/dev only; no reference labels','quantization':'QDQ Conv QUInt8/QInt8 per-channel',
+              'split_policy':args.split+' image pixels only; no reference labels','quantization':'QDQ Conv QUInt8/QInt8 per-channel',
               'elapsed_seconds':time.time()-started}
     args.output.with_suffix('.provenance.json').write_text(json.dumps(metadata,indent=2)+'\n')
     print(json.dumps(metadata))
