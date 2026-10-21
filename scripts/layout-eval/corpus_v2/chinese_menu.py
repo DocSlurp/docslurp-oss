@@ -67,8 +67,10 @@ def menu(root=None):
             'observation_date': '2026-10-20'},
         'font': {'path': CJK_FONT, 'sha256': hashlib.sha256(Path(CJK_FONT).read_bytes()).hexdigest(),
                  'license': 'OFL-1.1', 'license_evidence': 'Installed Arch package noto-fonts-cjk 20240730-1 metadata; upstream Noto CJK LICENSE',
-                 'upstream': 'https://github.com/notofonts/noto-cjk/blob/main/LICENSE',
+                 'upstream': 'https://github.com/notofonts/noto-cjk/blob/main/Serif/LICENSE',
                  'glyph_coverage': {'checked': CJK_TEXT, 'missing': missing, 'method': 'fontTools cmap check, TTC face 0'},
+                 'local_license_path': '/usr/share/licenses/noto-fonts-cjk/LICENSE',
+                 'local_license_sha256': hashlib.sha256(Path('/usr/share/licenses/noto-fonts-cjk/LICENSE').read_bytes()).hexdigest(),
                  'font_binary_embedded': False}})
     p.rectangle([23, 23, 1177, 1577], None, outline=RED, width=3)
     p.rectangle([30, 30, 1170, 1570], None, outline=RED, width=1)
