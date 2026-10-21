@@ -107,9 +107,11 @@ When the search agent answers (the default for `/v1/chat` with `DOCSLURP_PUBLIC_
 
 | Field | Default | Range | Meaning |
 |---|---|---|---|
-| `maxSteps` | 6 | 1–12 | Model calls in the loop. The last one runs with tools disabled, so the agent always ends with an answer. |
-| `maxToolCalls` | 12 | 1–24 | Tool calls across the turn. Later calls get `{error, code: "tool_call_limit", limitReached: true}` instead of running. |
-| `searchConcurrency` | 4 | 1–8 | Upper bound on the search tool's parallel `queries`, and the value it uses when the model omits `concurrency`. |
+| `maxSteps` | 8 | 1–12 | Model calls in the loop. The last one runs with tools disabled, so the agent always ends with an answer. |
+| `maxToolCalls` | 16 | 1–24 | Tool calls across the turn. Later calls get `{error, code: "tool_call_limit", limitReached: true}` instead of running. |
+| `searchConcurrency` | 6 | 1–8 | Upper bound on the search tool's parallel `queries`, and the value it uses when the model omits `concurrency`. |
+
+The defaults come from a 51-case production eval (2026-10-21): at 4 steps, 25–37% of turns ran out of steps or tool calls; at 8/16/6 correctness rose from about 0.79 to 0.86–0.92 across three models, and 12/24/8 added nothing. The [turn deadline](#turn-deadline) still bounds wall-clock time, so higher step limits cannot make a turn slower than the deadline.
 
 Platform admins, and turns in a `DOCSLURP_CHAT_EVAL_ORG_IDS` organization's workspace, can use the full range. For everyone else, a value above the default is lowered to the default and listed in `debug.limits.clamped`; lower values apply as sent. Out-of-range values or unknown fields return HTTP 400 `invalid_request`.
 

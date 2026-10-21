@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { McpDispatch } from "../lib/mcp-http.js";
+import { CHAT_AGENT_LIMIT_DEFAULTS } from "@docslurp/shared";
 import { asSchema } from "ai";
 import { createChatMcpTools, evidencePages, TOOL_DEADLINE_RESULT } from "./chat-mcp-tools.js";
 import { mcpManifest } from "./mcp-catalog.js";
@@ -38,11 +39,12 @@ describe("chat MCP tools", () => {
 
   it("bounds calls and honors cancellation before dispatch", async () => {
     const t = setup();
-    for (let i = 0; i < 13; i++) await t.execute("search", { q: "repeat" }, `${i}`);
-    expect(t.dispatch).toHaveBeenCalledTimes(12);
+    const max = CHAT_AGENT_LIMIT_DEFAULTS.maxToolCalls;
+    for (let i = 0; i <= max; i++) await t.execute("search", { q: "repeat" }, `${i}`);
+    expect(t.dispatch).toHaveBeenCalledTimes(max);
     t.controller.abort();
     await expect(t.execute("search")).rejects.toThrow();
-    expect(t.dispatch).toHaveBeenCalledTimes(12);
+    expect(t.dispatch).toHaveBeenCalledTimes(max);
   });
 
   it("returns adapter errors and reports failed activity without claiming success", async () => {
