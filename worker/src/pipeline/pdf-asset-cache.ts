@@ -141,6 +141,16 @@ export interface RasterPageArtifact {
   dpi?: number;
 }
 
+/** Fresh encoded bytes, available only after durable storage succeeds. */
+export interface RenderedRasterPage {
+  pageNumber: number;
+  bytes: Buffer;
+  artifactKey: string;
+  mimeType: string;
+  engine?: RasterEngineName;
+  dpi?: number;
+}
+
 type RasterStorage = Pick<ArtifactStore, "objectSize" | "putBytes" | "uri">;
 type RasterRunner = Pick<CommandRunner, "renderPdfPageRange" | "run">;
 
@@ -210,6 +220,13 @@ export class PdfRasterCache {
     pageNumbers: number[];
     dpi?: number;
     signal?: AbortSignal;
+    /**
+     * Consume fresh bytes without downloading their just-written artifact. Awaited
+     * one page at a time; cache hits are not delivered. Consumers must use returned
+     * artifact keys to load cache hits and must not retain unbounded page buffers.
+     * Errors propagate after persistence; they never trigger a renderer fallback.
+     */
+    onRenderedPage?: (page: RenderedRasterPage) => Promise<void>;
   }): Promise<RasterPageArtifact[]> {
     const dpi = clampDpi(args.dpi);
     const pageNumbers = normalizePageNumbers(args.pageNumbers, args.document.pageCount);
@@ -243,25 +260,30 @@ export class PdfRasterCache {
         const bytes = await readFile(source.path);
         await this.storage.putBytes(keys.get(1)!, bytes, outputMimeType);
         generated.set(1, { sizeBytes: bytes.byteLength, widthPx: null, heightPx: null });
+        await args.onRenderedPage?.({ pageNumber: 1, bytes, artifactKey: keys.get(1)!, mimeType: outputMimeType });
       }
       let nativeDone = false;
       if (isPdf && resolved.engine) {
+        let rendered: Awaited<ReturnType<typeof renderPagesNative>> | undefined;
         try {
-          const rendered = await renderPagesNative(resolved.engine, source.path, missing, {
+          rendered = await renderPagesNative(resolved.engine, source.path, missing, {
             dpi,
             concurrency: this.options.concurrency,
             signal: args.signal,
           });
-          if (missing.every((pageNumber) => rendered.has(pageNumber))) {
-            for (const [pageNumber, page] of rendered) {
-              await this.storage.putBytes(keys.get(pageNumber)!, page.bytes, "image/png");
-              generated.set(pageNumber, { sizeBytes: page.bytes.byteLength, widthPx: page.widthPx, heightPx: page.heightPx });
-            }
-            nativeDone = true;
-          }
         } catch (error) {
           if (args.signal?.aborted) throw error;
           console.warn(`[raster] native-pdf render failed, falling back to pdftoppm: ${error instanceof Error ? error.message : String(error)}`);
+        }
+        // Only rendering failures may select another engine. Storage or consumer
+        // failures must not cause duplicate writes or change artifact provenance.
+        if (rendered && missing.every((pageNumber) => rendered?.has(pageNumber))) {
+          for (const [pageNumber, page] of rendered) {
+            await this.storage.putBytes(keys.get(pageNumber)!, page.bytes, "image/png");
+            generated.set(pageNumber, { sizeBytes: page.bytes.byteLength, widthPx: page.widthPx, heightPx: page.heightPx });
+            await args.onRenderedPage?.({ pageNumber, bytes: page.bytes, artifactKey: keys.get(pageNumber)!, mimeType: "image/png", engine: engineName, dpi });
+          }
+          nativeDone = true;
         }
       }
       if (isPdf && !nativeDone && resolved.engine) {
@@ -303,6 +325,7 @@ export class PdfRasterCache {
             const bytes = await readFile(path.join(scratch, filename));
             await this.storage.putBytes(keys.get(pageNumber)!, bytes, "image/png");
             generated.set(pageNumber, { sizeBytes: bytes.byteLength, ...readPngDimensions(bytes) });
+            await args.onRenderedPage?.({ pageNumber, bytes, artifactKey: keys.get(pageNumber)!, mimeType: "image/png", engine: engineName, dpi });
           }
         }
       } finally {
