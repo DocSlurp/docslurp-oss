@@ -21,7 +21,7 @@ python scripts/layout-eval/corpus_v2/publish_audit.py \
 
 Exit 1 means at least one native page failed the rights-evidence gate; the written report still identifies all failures. The gate walks source image commands and region asset inserts, checks actual bytes against recorded hashes, requires reviewed saved rights proof and credits/change notes, and checks each QA record against the current source/image/reference/contract bytes. Changed rights receipts revoke the corresponding clearance. Unknown asset licenses fail closed.
 
-At initial audit, 18 native pages yielded 14 rights-evidence entries; the Met, BHL and two scientific pages remained blocked pending exact saved dependency receipts. This is a dated preparation result, not a frozen final count. It will change as receipts and sources are reconciled.
+At initial audit, 18 native pages yielded 14 rights-evidence entries; the Met, BHL and two scientific pages remained blocked pending exact saved dependency receipts. At 2026-10-21 02:01:53 UTC, reconciliation yielded **20/20 native pages rights-evidence-ready**, including the two original simulated instrument pages. Eighteen had hash-current review/confidence receipts; two had missing/stale label review. Three capture rows remained excluded pending their own transitive audit. These are dated preparation results, not a frozen final count or public release.
 
 ## Rights decisions and actual dependencies
 
