@@ -51,6 +51,8 @@ export const CLIENT_ABORTED = "client_aborted";
 export function chatTurnFailureReason(error: unknown, clientSignal?: AbortSignal): string {
   if (clientSignal?.aborted) return CLIENT_ABORTED;
   if (error instanceof Error && error.name === "TimeoutError") return "timeout";
+  // The agent turn deadline (#91) is a server-side timeout: refundable, recorded as one.
+  if (error instanceof Error && (error as { code?: unknown }).code === "chat_deadline_exceeded") return "timeout";
   if (error instanceof Error && error.name === "AbortError") return "aborted";
   return "error";
 }
