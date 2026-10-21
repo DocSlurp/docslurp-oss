@@ -185,3 +185,20 @@ test('reused manifest patterns preserve findings across files, lines and Unicode
   ]);
   assert.equal(report.passed, false, 'caching does not exempt a generic-looking ontology value');
 });
+
+test('numeric literal screening preserves boundaries, scientific notation and Unicode case folding', (t) => {
+  for (const { expected, text, matches } of [
+    { expected: '12345.6789', text: 'const coordinate = "12345.6789";', matches: true },
+    { expected: '12345.6789', text: 'const coordinate = "prefix12345.6789Suffix";', matches: false },
+    { expected: '12345.6789', text: 'const coordinate = "12345.6780";', matches: false },
+    { expected: '-12345.6789', text: 'const coordinate = "(-12345.6789)";', matches: true },
+    { expected: '1.2345678e+10', text: 'const coordinate = "1.2345678E+10";', matches: true },
+    { expected: 'Kelvin Example', text: 'const answer = "Kelvin Example";', matches: true },
+  ]) {
+    const f = fixture(t), labels = JSON.stringify({ labels: [{ name: 'measured_value', expected }] });
+    writeFileSync(join(f.dataset, 'labels.json'), labels);
+    f.manifest.cases[0].labels.sha256 = sha(labels); f.save();
+    writeFileSync(join(f.repo, 'worker.ts'), text);
+    assert.equal(rules(f.run()).includes('labeled-answer'), matches, expected + ': ' + text);
+  }
+});

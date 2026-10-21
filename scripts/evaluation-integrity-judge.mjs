@@ -117,12 +117,18 @@ export function judgeIntegrity({ dataset, repo = process.cwd(), base = 'HEAD' })
       if (!patternCache.has(value)) patternCache.set(value, pattern(value));
       return patternCache.get(value);
     };
-    const compiledTerms = terms.map((term) => ({ ...term, expression: cachedPattern(term.value) }));
+    const compiledTerms = terms.map((term) => ({
+      ...term, expression: cachedPattern(term.value),
+      // Numeric literals have no Unicode case folds. Absence is a strict miss;
+      // presence still uses the original expression for boundaries and evidence.
+      numericLiteral: /^[0-9.+-]+$/.test(term.value),
+    }));
     const compiledLabels = [...labelNames].map((value) => ({ value, expression: cachedPattern(value) }));
     const compiledWeakAnswers = [...weakAnswers].map((value) => ({ value, expression: cachedPattern(value) }));
     const seen = new Set();
     const match = (file, text, origin) => {
-      for (const { rule, value, expression } of compiledTerms) {
+      for (const { rule, value, expression, numericLiteral } of compiledTerms) {
+        if (numericLiteral && !text.includes(value)) continue;
         const found = expression.exec(text);
         if (!found) continue;
         const key = `${file}:${rule}:${hash(value)}`;
