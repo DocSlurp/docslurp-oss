@@ -3,29 +3,11 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { config as loadEnv } from "dotenv";
+import { findWorkspaceRoot } from "./env-files.js";
 
 let loaded = false;
 
-/**
- * The outermost ancestor holding pnpm-workspace.yaml. When this repository is
- * checked out as a submodule of a larger workspace (the private app repo pins it
- * at core/), the shared .env lives at that outer root, not at core/.
- */
-export function findWorkspaceRoot(startDir: string): string {
-  let root = startDir;
-  let found = false;
-
-  for (let currentDir = startDir; ; currentDir = resolve(currentDir, "..")) {
-    if (existsSync(resolve(currentDir, "pnpm-workspace.yaml"))) {
-      root = currentDir;
-      found = true;
-    }
-
-    if (resolve(currentDir, "..") === currentDir) {
-      return found ? root : startDir;
-    }
-  }
-}
+export { findWorkspaceRoot } from "./env-files.js";
 
 export function loadWorkspaceEnv(fromMetaUrl: string): void {
   if (loaded) {

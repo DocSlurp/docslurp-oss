@@ -1,5 +1,6 @@
 import { writeFile } from "node:fs/promises";
 import { parseArgs } from "node:util";
+import { loadWorkspaceEnvFiles } from "../src/env-files.js";
 
 import { buildCatalogFeedRows, catalogFeedCsv, DEFAULT_CATALOG_IMAGES, fetchStripeCatalogPrices, uploadCatalogFeed } from "../src/services/billing/catalog-feed.js";
 
@@ -7,7 +8,10 @@ import { buildCatalogFeedRows, catalogFeedCsv, DEFAULT_CATALOG_IMAGES, fetchStri
  * Write the Stripe Agentic Commerce product feed and optionally upload it.
  *
  *   pnpm --filter @docslurp/server catalog:feed --out feed.csv
- *   pnpm --filter @docslurp/server catalog:feed --stripe-product prod_123 --upload
+ *   pnpm --filter @docslurp/server catalog:feed --env production --upload --live
+ *
+ * --env production overlays root .env.production on .env. Shell/CI values win.
+ * The default local environment loads only .env.
  *
  * Uses STRIPE_SECRET_KEY (or a restricted key with Product Catalog Imports
  * write, plus Products read for --stripe-product). Live keys also need --live,
@@ -15,10 +19,11 @@ import { buildCatalogFeedRows, catalogFeedCsv, DEFAULT_CATALOG_IMAGES, fetchStri
  */
 const { values } = parseArgs({
   options: {
-    link: { type: "string", default: process.env.STRIPE_CATALOG_LINK },
+    env: { type: "string", default: "local" },
+    link: { type: "string" },
     "plan-image": { type: "string", default: DEFAULT_CATALOG_IMAGES.plan },
     "credits-image": { type: "string", default: DEFAULT_CATALOG_IMAGES.credits },
-    "stripe-product": { type: "string", multiple: true, default: process.env.STRIPE_CATALOG_PRODUCTS?.split(",").map((id) => id.trim()).filter(Boolean) ?? [] },
+    "stripe-product": { type: "string", multiple: true, default: [] },
     out: { type: "string" },
     upload: { type: "boolean", default: false },
     mode: { type: "string", default: "upsert" },
@@ -26,13 +31,19 @@ const { values } = parseArgs({
   },
 });
 
+if (values.env !== "local" && values.env !== "production") throw new Error("--env must be local or production");
+loadWorkspaceEnvFiles(import.meta.url, values.env === "production");
+const link = values.link ?? process.env.STRIPE_CATALOG_LINK;
+const productIds = values["stripe-product"].length ? values["stripe-product"]
+  : process.env.STRIPE_CATALOG_PRODUCTS?.split(",").map((id) => id.trim()).filter(Boolean) ?? [];
+
 if (values.mode !== "upsert" && values.mode !== "replace") throw new Error("--mode must be upsert or replace");
 const live = /^(sk|rk)_live_/.test(process.env.STRIPE_SECRET_KEY?.trim() ?? "");
 if (values.upload && live && !values.live) throw new Error("STRIPE_SECRET_KEY is a live key; validate in a sandbox, then pass --live");
 
-const stripePrices = values["stripe-product"].length ? await fetchStripeCatalogPrices(values["stripe-product"]) : [];
+const stripePrices = productIds.length ? await fetchStripeCatalogPrices(productIds) : [];
 const csv = catalogFeedCsv(buildCatalogFeedRows({
-  images: { plan: values["plan-image"], credits: values["credits-image"] }, stripePrices, ...(values.link && { link: values.link }),
+  images: { plan: values["plan-image"], credits: values["credits-image"] }, stripePrices, ...(link && { link }),
 }));
 if (values.out) await writeFile(values.out, csv);
 else if (!values.upload) process.stdout.write(csv);
