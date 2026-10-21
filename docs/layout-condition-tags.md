@@ -32,7 +32,7 @@ python scripts/layout-eval/corpus_v2/condition_tags.py \
   --historical /home/dan/data/docslurp-evals/reference-inspiration-v2/historical
 ```
 
-The command writes only `tags/*.conditions.json` plus `tags/index.json`. It hashes the current source, image/reference or capture-row bytes and never rerenders or edits originals. Refresh after the final master freeze; hashes expose stale evidence if source or image changes. Historical references remain references, including rights-unverified inspiration; a tag sidecar does not admit or license them.
+The command writes only `tags/*.conditions.json`, `tags/index.json` and, when the frozen candidate manifest exists, `tags/frozen-index.json`. It hashes the current source, image/reference or capture-row bytes and never rerenders or edits originals. Refresh after the final master freeze; hashes expose stale evidence if source or image changes. Historical references remain references, including rights-unverified inspiration; a tag sidecar does not admit or license them.
 
 Native pages get source-backed digital/born-digital/synthetic/aligned assertions. Table rules and continuation come from actual table regions and rendering commands. Capture composites get synthetic/picture, recorded projection, manual foreground occlusion and directional/mixed illumination where recorded. The deterministic rainfall crop is digital/cropped/aligned; its recipe name “scan” does not turn it into a documented physical scanner acquisition. Cropped cells and partial rows use explicit crop metadata. Do not score full-source photo prose as visible-only transcript; hand masks are area approximations, not character-level transcriptions.
 
@@ -49,3 +49,28 @@ The initial historical receipt records archive originals and observed page featu
 [DocRes](https://github.com/ZZZHANG-jx/DocRes) treats dewarping, deshadowing, appearance, deblurring and binarization as distinct restoration tasks. We likewise separate geometry, illumination and sharpness; a generic “bad scan” tag would hide those differences.
 
 The four predeclared quality derivatives use stored-pixel clockwise 90° (`rotated`, without child `aligned`), maximum image edge 640 px (`low-res` for this task recipe), Gaussian radius 1.4 px (`blurry`, explicitly synthetic), and digital brightness multiplication 0.45 (`underexposed`, no physical low-lighting claim). Parent scope remains ancestry, not a conflicting child orientation.
+
+## Frozen readiness and concrete scopes
+
+The final condition allowlist `tags/frozen-index.json` covers **32 candidates: 23 native pages, eight derivatives and one manual historical silver**. Every sidecar pins its actual image/source/reference or capture-row bytes. The broader reference index also includes four historical inspiration images; those are outside this frozen32 allowlist. `publication/FROZEN-PUBLISH-MANIFEST.json` separately records 32/32 rights-evidence checks, staged only, with final independent layout-review receipt hashes. Condition tags neither license an asset nor approve extraction accuracy.
+
+Two actual examples show the scope distinction:
+
+| Candidate / scope | Assertions | Evidence and limits |
+| --- | --- | --- |
+| `rainfall-partial-table-bottom`, page | `synthetic`, `digital`, `cropped`, `aligned` | Deterministic digital crop, identity transform; no actual scanner acquisition claim. |
+| Same candidate, table `r012` | `continues` | Explicit source continuation metadata, independent of page crop. |
+| Same candidate, row `r012/row/10` | `partial-row` | Four explicitly truncated cells. |
+| Same candidate, cells `r012/row/10/column/0` through `/3` | `truncated-cell` | Crop metadata and visible-text contract; clipped/untranscribed text is not `empty-cell`. |
+| `water-cycle-kitchen-window`, page | `synthetic`, `picture`, `perspective`, `occluded`, `uneven-lighting` | AI scene composite, calibrated page homography and manual hand mask. No actual camera-photo, blur or physical low-light claim. |
+
+These condition assertions currently carry **0.5 source/recipe-derived evidence**, with their actual basis and artifact hashes. The photographed-page example's digital/aligned parent stays in `parentContext` with its original ancestor scope; it does not overwrite current picture/perspective conditions. `aligned` at page scope never asserts `row-aligned` for any row.
+
+Focused verification:
+
+```sh
+python -m unittest discover -s scripts/layout-eval/corpus_v2 -p test_condition_tags.py
+python -m unittest discover -s scripts/layout-eval/corpus_v2 -p test_publish_audit.py
+```
+
+Six condition tests cover scoped contradictions, rotated/aligned exclusion, independent row alignment, horizontal-rule versus borderless distinction, clipped/null cell handling and missing evidence. Four publication tests cover missing release declarations, unverified inserts, changed rights receipts and separation of rights readiness from label/public-release readiness. No model or remote jobs are needed for these checks.
