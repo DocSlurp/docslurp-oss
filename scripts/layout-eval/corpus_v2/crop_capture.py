@@ -55,6 +55,7 @@ def crop_capture(source_image,reference_path,crop,output,capture_id):
     for key in ('expected_markdown','prose_contract'):
         if sha(root/reference[key]['path'])!=reference[key]['sha256']:raise ValueError('Changed source contract')
     image=Image.open(source_image);w,h=image.size
+    if (w,h)!=(reference['image']['width'],reference['image']['height']):raise ValueError('Source image/reference dimensions disagree')
     if len(crop)!=4 or any(v!=int(v) for v in crop) or not (0<=crop[0]<crop[2]<=w and 0<=crop[1]<crop[3]<=h):raise ValueError('Crop must be a nonempty integer rectangle within source image')
     regions=[];contracts=[];markdown=[];excluded=[]
     for original in reference['regions']:
@@ -85,9 +86,10 @@ def crop_capture(source_image,reference_path,crop,output,capture_id):
         elif text:markdown.append(('# ' if region['label']=='title' else '')+text)
         contracts.append({'region_id':region['id'],'geometry_visibility_fraction':region['visibility'],'geometry_truncated':region['truncated'],'visible_text':text or None,'lines':receipts})
         if 'annotationConfidence' in region:
+            region['source_annotationConfidence']=copy.deepcopy(region['annotationConfidence'])
             axis=region['annotationConfidence']['axes']
             axis['visibilityOcclusion']={'score':.5,'status':'source-derived','basis':['Exact source polygon clipped to authored integer raster crop; no independent visible-ink review'],'provenance':['deterministic-crop']}
-            axis['textTranscription']={'score':.5,'status':'source-derived','basis':['Only complete source glyph lines included; clipped lines omitted, full source text retained separately'],'provenance':['deterministic-crop']}
+            if receipts:axis['textTranscription']={'score':.5,'status':'source-derived','basis':['Only complete source glyph lines included; clipped lines omitted, full source text retained separately'],'provenance':['deterministic-crop']}
         regions.append(region)
     output.mkdir(parents=True,exist_ok=True);expected=output/f'{capture_id}.visible.md';contract=output/f'{capture_id}.visible-contract.json';refpath=output/f'{capture_id}.reference.json';imagepath=output/f'{capture_id}.png'
     expected.write_text('\n\n'.join(markdown)+'\n');contract.write_text(json.dumps({'schema':'layout-crop-visible-transcription-v2','policy':'Full source text is provenance, not visible transcription. Only entirely visible glyph lines are eligible; partial lines deliberately untranscribed without guessing characters.','regions':contracts,'excluded_source_regions':excluded},indent=2)+'\n')
