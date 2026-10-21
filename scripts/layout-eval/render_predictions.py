@@ -105,6 +105,47 @@ def render_page(manifest_row,prediction,image_path,output,metadata,supported,pan
         'source_image_file_mtime_utc':iso(image_path.stat().st_mtime)}
 
 
+def compare_overlay_reports(baseline_report,candidate_report,output):
+    """Compose a same-source four-panel comparison from verified overlay artifacts."""
+    baseline_report,candidate_report,output=map(Path,(baseline_report,candidate_report,output))
+    if output.exists() or output.with_suffix('.json').exists():raise ValueError('Refuse comparison overwrite')
+    left,right=[json.loads(path.read_text()) for path in (baseline_report,candidate_report)]
+    for key in ('page_id','source_image_sha256','truth','source_manifest_sha256'):
+        if left[key]!=right[key]:raise ValueError(f'Comparison source/reference differs: {key}')
+    images=[]
+    for report in (left,right):
+        path=Path(report['overlay_path'])
+        if digest(path)!=report['overlay_sha256']:raise ValueError('Overlay image changed after receipt')
+        images.append(Image.open(path).convert('RGB'))
+    if images[0].size!=images[1].size:raise ValueError('Comparison panel geometry differs')
+    gap,header,footer=14,170,120
+    width=(images[0].width-gap*4)//3;height=images[0].height-header-footer
+    panels=[images[0].crop((gap,header,gap+width,header+height)),
+        images[0].crop((gap*2+width,header,gap*2+width*2,header+height)),
+        images[0].crop((gap*3+width*2,header,gap*3+width*3,header+height)),
+        images[1].crop((gap*3+width*2,header,gap*3+width*3,header+height))]
+    canvas=Image.new('RGB',(width*4+gap*5,height+200),'#14222b');d=ImageDraw.Draw(canvas)
+    d.text((gap,12),left['page_id']+' | POST-SCORE DEVELOPMENT ABLATION | source and reference unchanged',font=font(26),fill='white')
+    labels=['SOURCE RASTER','REFERENCE: green TP / orange FN (baseline matching)',
+        Path(left['prediction_path']).stem,Path(right['prediction_path']).stem]
+    for index,(panel,label) in enumerate(zip(panels,labels)):
+        x=gap+index*(width+gap);d.text((x,65),label,font=font(20),fill='white')
+        if index>=2:
+            report=(left,right)[index-2];score=report['diagnostic']
+            d.text((x,97),f'TP {score["tp"]} / FP {score["fp"]} / FN {score["fn"]} | literal classes, IoU >= .50',font=font(19),fill='#b5dad3')
+        canvas.paste(panel,(x,134))
+    d.text((gap,height+154),'Prediction confidence is model score; annotation confidence is evidence-ordinal. Raw boxes, runtimes, timestamps, source/reference/prediction hashes and both full reports remain retained.',font=font(18),fill='#cbd4d5')
+    output.parent.mkdir(parents=True,exist_ok=True);canvas.save(output,optimize=True)
+    receipt={'schema':'layout-postscore-dev-ablation-comparison-v1','created_utc':iso(time.time()),'page_id':left['page_id'],
+        'source_image_sha256':left['source_image_sha256'],'comparison_image_sha256':digest(output),
+        'baseline':{'report':str(baseline_report),'sha256':digest(baseline_report),'diagnostic':left['diagnostic']},
+        'candidate':{'report':str(candidate_report),'sha256':digest(candidate_report),'diagnostic':right['diagnostic']},
+        'reference_panel_note':'Reference TP/FN colors use baseline matching only; candidate matching retained in candidate report.',
+        'scope':'Post-score development diagnostic; no annotation changes, no holdout, no model calls.'}
+    output.with_suffix('.json').write_text(json.dumps(receipt,indent=2)+'\n')
+    return receipt
+
+
 def main(argv=None):
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('--manifest',type=Path,required=True);p.add_argument('--predictions',type=Path,nargs='+',required=True)
