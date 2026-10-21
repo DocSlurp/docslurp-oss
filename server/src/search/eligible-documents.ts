@@ -263,10 +263,52 @@ export function nativeScopeSupported(filters: SearchFilters | undefined): boolea
     && filters?.dateRange?.from === undefined && filters?.dateRange?.to === undefined;
 }
 
-/** Postgres ILIKE '%value%' as a case-insensitive regex (`%` and `_` in the value stay wildcards, as in SQL). */
-function ilikeContains(value: string): RegExp {
-  const pattern = value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/%/g, ".*").replace(/_/g, ".");
-  return new RegExp(pattern, "is");
+type LikeToken = { kind: "char"; value: string } | { kind: "one" } | { kind: "any" };
+
+/**
+ * Postgres `filename ILIKE '%' || value || '%'` (the Postgres path's filter) as
+ * a linear-time matcher: `%` matches any run, `_` one character, a backslash
+ * escapes the next character, case-insensitive. A glob match with one
+ * backtrack point (the last `%`), so it is O(pattern x filename) at worst and
+ * a pattern like `%%%%%!` cannot stall the event loop the way a regex can.
+ */
+export function ilikeContainsMatcher(value: string): (text: string) => boolean {
+  const tokens: LikeToken[] = [{ kind: "any" }];
+  const chars = Array.from(value.toLowerCase());
+  for (let index = 0; index < chars.length; index += 1) {
+    const char = chars[index]!;
+    if (char === "\\" && index + 1 < chars.length) tokens.push({ kind: "char", value: chars[++index]! });
+    else if (char === "%") { if (tokens.at(-1)?.kind !== "any") tokens.push({ kind: "any" }); }
+    else if (char === "_") tokens.push({ kind: "one" });
+    else tokens.push({ kind: "char", value: char });
+  }
+  if (tokens.at(-1)?.kind !== "any") tokens.push({ kind: "any" });
+  return (text: string) => {
+    const input = Array.from(text.toLowerCase());
+    let t = 0;
+    let p = 0;
+    let starP = -1;
+    let starT = 0;
+    while (t < input.length) {
+      const token = tokens[p];
+      if (token && token.kind !== "any" && (token.kind === "one" || token.value === input[t])) {
+        t += 1;
+        p += 1;
+      } else if (token?.kind === "any") {
+        starP = p;
+        starT = t;
+        p += 1;
+      } else if (starP >= 0) {
+        p = starP + 1;
+        starT += 1;
+        t = starT;
+      } else {
+        return false;
+      }
+    }
+    while (tokens[p]?.kind === "any") p += 1;
+    return p === tokens.length;
+  };
 }
 
 /** The documents of the set in scope for these filters (document-level filters only; see nativeScopeSupported). */
@@ -277,14 +319,14 @@ export function scopeEligibleDocuments(
 ): EligibleDocument[] {
   if (filters?.workspaceId && filters.workspaceId !== set.workspaceId) return [];
   const ids = new Set([...(filters?.documentId ? [filters.documentId] : []), ...(filters?.documentIds ?? [])]);
-  const filename = filters?.filenameContains ? ilikeContains(filters.filenameContains) : null;
+  const filename = filters?.filenameContains ? ilikeContainsMatcher(filters.filenameContains) : null;
   const mimeTypes = filters?.mimeTypes?.length ? new Set(filters.mimeTypes) : null;
   const tags = filters?.tags?.length ? new Set(filters.tags) : null;
   const runIds = [runId, filters?.runId].filter((id): id is string => Boolean(id));
   return set.documents.filter((document) =>
     (!filters?.documentId || document.id === filters.documentId)
     && (!filters?.documentIds?.length || ids.has(document.id))
-    && (!filename || filename.test(document.filename))
+    && (!filename || filename(document.filename))
     && (!mimeTypes || (document.mimeType !== null && mimeTypes.has(document.mimeType)))
     && (!tags || document.tags.some((tag) => tags.has(tag)))
     && runIds.every((id) => document.runId === id));

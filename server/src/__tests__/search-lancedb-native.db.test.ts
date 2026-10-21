@@ -174,6 +174,24 @@ describe("SEARCH_LANCEDB_NATIVE", () => {
     expect(eligible.searchLanceDbNativeEnabled(undefined, { SEARCH_LANCEDB_NATIVE: "0", SEARCH_LANCEDB_NATIVE_WORKSPACES: "w" })).toBe(false);
   });
 
+  it("matches filenameContains like Postgres ILIKE, in linear time", async () => {
+    const names = ["Report_2024.PDF", "a%b.txt", "back\\slash.md", "naïve résumé.docx", "line\nbreak", "x".repeat(64)];
+    const patterns = ["report", "_2024", "REP%PDF", "a\\%b", "a\\_b", "%", "_", "", "slash", "\\\\", "RÉSUMÉ", "x_x", "%%x%%", "zz", "line_break"];
+    for (const pattern of patterns) {
+      const match = eligible.ilikeContainsMatcher(pattern);
+      for (const name of names) {
+        const [{ hit }] = await sql<{ hit: boolean }[]>`select ${name}::text ilike ${`%${pattern}%`} as hit`;
+        expect([pattern, name, match(name)]).toEqual([pattern, name, hit]);
+      }
+    }
+    const started = performance.now();
+    for (const pattern of ["%%%%%!", "%%%%%%%%!", "%_%_%_%_%_%_%_%_!", "x%x%x%x%x%x%x%x%x%x%!"]) {
+      expect(eligible.ilikeContainsMatcher(pattern)("x".repeat(64))).toBe(false);
+      expect(eligible.ilikeContainsMatcher(pattern)("x".repeat(4_096))).toBe(false);
+    }
+    expect(performance.now() - started).toBeLessThan(500);
+  });
+
   it("returns the Postgres path's citations for vector hits, hydrated from LanceDB", async () => {
     const queryVector = near("doc3-5");
     const legacy = await run(false, "qqqzzz", { queryVector });
