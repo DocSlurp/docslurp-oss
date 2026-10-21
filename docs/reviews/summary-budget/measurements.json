@@ -1,0 +1,444 @@
+{
+  "createdAt": "2026-10-21T04:16:07.658Z",
+  "scope": "offline replay after full pdftotext extraction; selectedSourceBytes models bounded payload reads, not measured production IO; no quality or latency conclusions",
+  "documents": [
+    {
+      "id": "catalog-2023",
+      "file": ".cache/fixtures/pdf/university-catalogs/boulder-2023-24.pdf",
+      "sha256": "fcf72e0769395c1767322abd23ecd0990445224b601fe8a2f4c8e418f505e5e2",
+      "pages": 2648,
+      "extractedBytes": 21296736,
+      "pageBytes": {
+        "min": 156,
+        "median": 8069,
+        "p95": 9422,
+        "max": 12033
+      }
+    },
+    {
+      "id": "catalog-2024",
+      "file": ".cache/fixtures/pdf/university-catalogs/boulder-2024-25.pdf",
+      "sha256": "5e558653b58d108ea0ff123df1f915157b43a7fde29db3821714f68e490ab6c0",
+      "pages": 2721,
+      "extractedBytes": 21861909,
+      "pageBytes": {
+        "min": 157,
+        "median": 8031,
+        "p95": 9476,
+        "max": 11975
+      }
+    },
+    {
+      "id": "invoice",
+      "file": "worker/testdata/pdf-fixtures/kreuzberg-tables-invoice.pdf",
+      "sha256": "3da04fecc8a7f8ae6d0eecaa0be3a6b0c70aa97e2062e875f965caa6423b4b45",
+      "pages": 1,
+      "extractedBytes": 1189,
+      "pageBytes": {
+        "min": 1188,
+        "median": 1188,
+        "p95": 1188,
+        "max": 1188
+      }
+    },
+    {
+      "id": "mixed",
+      "file": "worker/testdata/pdf-fixtures/kreuzberg-mixed-content.pdf",
+      "sha256": "93f20b677d4e7ad81ebf933634b329f78755013d4712dcdc1f04c4a409c38f92",
+      "pages": 1,
+      "extractedBytes": 1545,
+      "pageBytes": {
+        "min": 1544,
+        "median": 1544,
+        "p95": 1544,
+        "max": 1544
+      }
+    },
+    {
+      "id": "academic",
+      "file": "worker/testdata/pdf-fixtures/academic-latex-ligatures.pdf",
+      "sha256": "252890ab640cf226e6a4eb996ad235c5c8a7ba2e8b1ac1f15e31eac70ce9fa2d",
+      "pages": 2,
+      "extractedBytes": 1712,
+      "pageBytes": {
+        "min": 773,
+        "median": 937,
+        "p95": 937,
+        "max": 937
+      }
+    }
+  ],
+  "measurements": [
+    {
+      "document": "catalog-2023",
+      "candidate": "baseline",
+      "selectedSourceBytes": 262144,
+      "inputBytes": 23300,
+      "inputCharacters": 23211
+    },
+    {
+      "document": "catalog-2023",
+      "candidate": "pages10-bytes10000",
+      "pageIds": [
+        1,
+        295,
+        589,
+        883,
+        1177,
+        1472,
+        1766,
+        2060,
+        2354,
+        2648
+      ],
+      "selectedSourceBytes": 9246,
+      "clippedPages": 9,
+      "inputBytes": 10000,
+      "inputCharacters": 9979
+    },
+    {
+      "document": "catalog-2023",
+      "candidate": "pages20-bytes10000",
+      "pageIds": [
+        1,
+        140,
+        280,
+        419,
+        558,
+        698,
+        837,
+        976,
+        1116,
+        1255,
+        1394,
+        1533,
+        1673,
+        1812,
+        1951,
+        2091,
+        2230,
+        2369,
+        2509,
+        2648
+      ],
+      "selectedSourceBytes": 8640,
+      "clippedPages": 19,
+      "inputBytes": 10000,
+      "inputCharacters": 9974
+    },
+    {
+      "document": "catalog-2023",
+      "candidate": "pages10-bytes20000",
+      "pageIds": [
+        1,
+        295,
+        589,
+        883,
+        1177,
+        1472,
+        1766,
+        2060,
+        2354,
+        2648
+      ],
+      "selectedSourceBytes": 19246,
+      "clippedPages": 9,
+      "inputBytes": 20000,
+      "inputCharacters": 19963
+    },
+    {
+      "document": "catalog-2023",
+      "candidate": "pages20-bytes20000",
+      "pageIds": [
+        1,
+        140,
+        280,
+        419,
+        558,
+        698,
+        837,
+        976,
+        1116,
+        1255,
+        1394,
+        1533,
+        1673,
+        1812,
+        1951,
+        2091,
+        2230,
+        2369,
+        2509,
+        2648
+      ],
+      "selectedSourceBytes": 18640,
+      "clippedPages": 19,
+      "inputBytes": 20000,
+      "inputCharacters": 19942
+    },
+    {
+      "document": "catalog-2024",
+      "candidate": "baseline",
+      "selectedSourceBytes": 262144,
+      "inputBytes": 23262,
+      "inputCharacters": 23211
+    },
+    {
+      "document": "catalog-2024",
+      "candidate": "pages10-bytes10000",
+      "pageIds": [
+        1,
+        303,
+        605,
+        908,
+        1210,
+        1512,
+        1814,
+        2117,
+        2419,
+        2721
+      ],
+      "selectedSourceBytes": 9246,
+      "clippedPages": 9,
+      "inputBytes": 10000,
+      "inputCharacters": 9963
+    },
+    {
+      "document": "catalog-2024",
+      "candidate": "pages20-bytes10000",
+      "pageIds": [
+        1,
+        144,
+        287,
+        430,
+        574,
+        717,
+        860,
+        1003,
+        1146,
+        1289,
+        1433,
+        1576,
+        1719,
+        1862,
+        2005,
+        2148,
+        2292,
+        2435,
+        2578,
+        2721
+      ],
+      "selectedSourceBytes": 8639,
+      "clippedPages": 19,
+      "inputBytes": 10000,
+      "inputCharacters": 9975
+    },
+    {
+      "document": "catalog-2024",
+      "candidate": "pages10-bytes20000",
+      "pageIds": [
+        1,
+        303,
+        605,
+        908,
+        1210,
+        1512,
+        1814,
+        2117,
+        2419,
+        2721
+      ],
+      "selectedSourceBytes": 19246,
+      "clippedPages": 8,
+      "inputBytes": 20000,
+      "inputCharacters": 19939
+    },
+    {
+      "document": "catalog-2024",
+      "candidate": "pages20-bytes20000",
+      "pageIds": [
+        1,
+        144,
+        287,
+        430,
+        574,
+        717,
+        860,
+        1003,
+        1146,
+        1289,
+        1433,
+        1576,
+        1719,
+        1862,
+        2005,
+        2148,
+        2292,
+        2435,
+        2578,
+        2721
+      ],
+      "selectedSourceBytes": 18639,
+      "clippedPages": 19,
+      "inputBytes": 20000,
+      "inputCharacters": 19951
+    },
+    {
+      "document": "invoice",
+      "candidate": "baseline",
+      "selectedSourceBytes": 1189,
+      "inputBytes": 1189,
+      "inputCharacters": 1189
+    },
+    {
+      "document": "invoice",
+      "candidate": "pages10-bytes10000",
+      "pageIds": [
+        1
+      ],
+      "selectedSourceBytes": 1188,
+      "clippedPages": 0,
+      "inputBytes": 1390,
+      "inputCharacters": 1390
+    },
+    {
+      "document": "invoice",
+      "candidate": "pages20-bytes10000",
+      "pageIds": [
+        1
+      ],
+      "selectedSourceBytes": 1188,
+      "clippedPages": 0,
+      "inputBytes": 1390,
+      "inputCharacters": 1390
+    },
+    {
+      "document": "invoice",
+      "candidate": "pages10-bytes20000",
+      "pageIds": [
+        1
+      ],
+      "selectedSourceBytes": 1188,
+      "clippedPages": 0,
+      "inputBytes": 1390,
+      "inputCharacters": 1390
+    },
+    {
+      "document": "invoice",
+      "candidate": "pages20-bytes20000",
+      "pageIds": [
+        1
+      ],
+      "selectedSourceBytes": 1188,
+      "clippedPages": 0,
+      "inputBytes": 1390,
+      "inputCharacters": 1390
+    },
+    {
+      "document": "mixed",
+      "candidate": "baseline",
+      "selectedSourceBytes": 1545,
+      "inputBytes": 1545,
+      "inputCharacters": 1545
+    },
+    {
+      "document": "mixed",
+      "candidate": "pages10-bytes10000",
+      "pageIds": [
+        1
+      ],
+      "selectedSourceBytes": 1544,
+      "clippedPages": 0,
+      "inputBytes": 1746,
+      "inputCharacters": 1746
+    },
+    {
+      "document": "mixed",
+      "candidate": "pages20-bytes10000",
+      "pageIds": [
+        1
+      ],
+      "selectedSourceBytes": 1544,
+      "clippedPages": 0,
+      "inputBytes": 1746,
+      "inputCharacters": 1746
+    },
+    {
+      "document": "mixed",
+      "candidate": "pages10-bytes20000",
+      "pageIds": [
+        1
+      ],
+      "selectedSourceBytes": 1544,
+      "clippedPages": 0,
+      "inputBytes": 1746,
+      "inputCharacters": 1746
+    },
+    {
+      "document": "mixed",
+      "candidate": "pages20-bytes20000",
+      "pageIds": [
+        1
+      ],
+      "selectedSourceBytes": 1544,
+      "clippedPages": 0,
+      "inputBytes": 1746,
+      "inputCharacters": 1746
+    },
+    {
+      "document": "academic",
+      "candidate": "baseline",
+      "selectedSourceBytes": 1712,
+      "inputBytes": 1712,
+      "inputCharacters": 1712
+    },
+    {
+      "document": "academic",
+      "candidate": "pages10-bytes10000",
+      "pageIds": [
+        1,
+        2
+      ],
+      "selectedSourceBytes": 1710,
+      "clippedPages": 0,
+      "inputBytes": 1965,
+      "inputCharacters": 1965
+    },
+    {
+      "document": "academic",
+      "candidate": "pages20-bytes10000",
+      "pageIds": [
+        1,
+        2
+      ],
+      "selectedSourceBytes": 1710,
+      "clippedPages": 0,
+      "inputBytes": 1965,
+      "inputCharacters": 1965
+    },
+    {
+      "document": "academic",
+      "candidate": "pages10-bytes20000",
+      "pageIds": [
+        1,
+        2
+      ],
+      "selectedSourceBytes": 1710,
+      "clippedPages": 0,
+      "inputBytes": 1965,
+      "inputCharacters": 1965
+    },
+    {
+      "document": "academic",
+      "candidate": "pages20-bytes20000",
+      "pageIds": [
+        1,
+        2
+      ],
+      "selectedSourceBytes": 1710,
+      "clippedPages": 0,
+      "inputBytes": 1965,
+      "inputCharacters": 1965
+    }
+  ]
+}
