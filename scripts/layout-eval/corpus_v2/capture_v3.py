@@ -97,6 +97,14 @@ def plate(page_size, recipe, seed):
     return out, quad, occlusions, record
 
 
+def lighting_description(recipe):
+    """Recipe facts only (no measured photometry): falloff strength and any cast shadow."""
+    parts = [f"procedural radial light falloff {recipe.get('falloff', 0.25):.2f} from {tuple(recipe.get('light_center', (0.3, 0.2)))}"]
+    if recipe.get('shadow'):
+        parts.append(f"cast shadow band strength {recipe['shadow'].get('strength', .35):.2f}")
+    return '; '.join(parts)
+
+
 def make_variant(root, parent_id, variant_id, recipe, seed, degradations=()):
     """Create one capture variant (plus optional chained quality derivatives) under root/captures."""
     root = Path(root)
@@ -112,6 +120,8 @@ def make_variant(root, parent_id, variant_id, recipe, seed, degradations=()):
     scene.save(scene_path)
     calibration = {'scene_size': list(scene.size), 'scene_sha256': sha(scene_path), 'print_quad': quad,
                    'occlusion_polygons': occlusions, 'occlusion_feather_px': 0.8,
+                   'lighting': lighting_description(recipe),
+                   'occluder_kind': recipe.get('occluder', {}).get('kind', 'object') if occlusions else None,
                    'calibration_method': 'exact: quad and occluder polygons are the generator inputs, not manual tracing',
                    'plate_generation': record}
     calibration_path = plates / f'{variant_id}.calibration.json'
