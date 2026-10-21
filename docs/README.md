@@ -21,6 +21,7 @@ This index lists the documentation published in the public source tree. The file
 | Temporal workflow changes | temporal-workflow-changes.md |
 | Data deletion | data-deletion.md |
 | Evaluation integrity policy | evaluation-integrity.md |
+| Stripe catalog feed and environment selection | [stripe-catalog-feed.md](stripe-catalog-feed.md) |
 | Licensing | licensing.md |
 
 Not published (private or not yet reviewed for export): business and pricing material, evaluation results and research, production operations and deploy runbooks, `releases.md` (mixes public release rules with private deploy steps), and the product docs site.
