@@ -102,5 +102,89 @@ def concert():
  return p
 
 
+def repair_mindmap():
+ p=Page('neighbourhood-repair-day-concept-map',1550,1120,paper='#faf7ed')
+ p.text('COMMON GROUND / ORGANISING TOGETHER',48,34,1440,17,'mono','#617164',label='header')
+ p.text('A repair day starts with people',44,93,1450,66,'serif','#284e47',label='title')
+ p.text('Use this map to plan a small event that people can reach, trust and enjoy.',49,187,1400,25,'serif-italic','#6d7765',label='paragraph')
+ b=[45,275,1050,1035]
+ p.rectangle(b,'#edf0df')
+ nodes=[
+  ('people','PEOPLE','Welcome desk\nSkilled repairers\nA patient queue',[92,316,365,475],'#d7e1ca'),
+  ('tools','TOOLS','Shared tool kits\nSafe power points\nLabelled spare parts',[720,316,1000,475],'#d9e2d8'),
+  ('access','ACCESS','Step-free entrance\nClear bus directions\nQuiet waiting seats',[92,570,365,729],'#e5dac9'),
+  ('safety','SAFETY','Check before plugging in\nAgree limits on each job\nKeep exits unobstructed',[720,570,1000,729],'#e6d8cb'),
+  ('after','AFTERWARDS','Return borrowed tools\nRecord what was fixed\nThank every volunteer',[92,824,365,983],'#d8dfd4'),
+  ('learn','LEARNING','Let owners watch\nExplain each small step\nShare care instructions',[720,824,1000,983],'#e4e3c7'),
+ ]
+ root=[418,566,667,732]
+ links=[]
+ for key,title,body,box,fill in nodes:
+  sx=box[2] if box[0]<400 else box[0];sy=(box[1]+box[3])/2;tx=root[0] if box[0]<400 else root[2];ty=(root[1]+root[3])/2
+  p.line([sx,sy,(sx+tx)/2,sy,(sx+tx)/2,ty,tx,ty],'#8b9e86',4)
+  links.append({'from':'repair-day','to':key,'relation':'requires'})
+ for key,title,body,box,fill in nodes:
+  p.rectangle(box,fill,outline='#b5c0a9',width=1)
+  p.ellipse([box[0]+13,box[1]+13,box[0]+40,box[1]+40],'#697e60')
+  if key=='people':
+   p.ellipse([box[0]+22,box[1]+18,box[0]+30,box[1]+26],'#f7f4e9');p.line([box[0]+26,box[1]+27,box[0]+26,box[1]+36],'#f7f4e9',3)
+  elif key=='tools':p.line([box[0]+20,box[1]+33,box[0]+33,box[1]+20],'#f7f4e9',4)
+  else:p.line([box[0]+19,box[1]+27,box[0]+25,box[1]+33,box[0]+35,box[1]+21],'#f7f4e9',2)
+  p.text(title,box[0]+52,box[1]+18,box[2]-box[0]-65,18,'sans-bold','#40553b',label=None)
+  p.text(body,box[0]+15,box[1]+65,box[2]-box[0]-30,19,'sans','#46573f',leading=27,label=None)
+ p.rectangle(root,'#315d52')
+ p.text('REPAIR DAY',440,600,215,29,'narrow-bold','#faf4df',label=None)
+ p.text('Fix • learn • share',441,661,215,20,'serif-italic','#dce9ca',label=None)
+ p.region('mind_map',b,None,nodes=[{'id':key,'title':title,'body':body,'bbox':box} for key,title,body,box,fill in nodes]+[{'id':'repair-day','title':'REPAIR DAY','body':'Fix • learn • share','bbox':root}],edges=links,component_policy='One concept-map region; all node text retained as source component text. Connectors show relationships, not reading-order arrows.')
+ p.line([1093,278,1093,1031],'#bcc5ae',1)
+ p.text('START SMALL',1130,286,365,18,'sans-bold','#a75d3c',label='title')
+ p.text('Two tables and three reliable volunteers can be enough for a useful first event. Choose repairs that match the team’s skills, then make those limits visible before people arrive.',1130,337,365,25,'serif','#41533e',leading=32)
+ p.text('One owner, one decision',1130,600,365,31,'serif-italic','#315b4e',label='title')
+ p.text('The owner stays involved. Explain the fault, the likely next step and any risk of making things worse. A successful visit can end with good advice even when the item cannot be repaired.',1130,695,365,23,'serif','#526049',leading=30)
+ p.text('PLANNING PROMPT',1130,941,365,16,'sans-bold','#a75d3c',label='title')
+ p.text('Which branch needs a named person before the doors open?',1130,981,365,19,'sans','#5e6d52',leading=25)
+ p.text('COMMON GROUND / ORIGINAL COMMUNITY PLANNING SHEET · 12',49,1072,1420,14,'mono','#718066',label='footer')
+ return p
+
+
+def arabic_registration():
+ p=Page('harbour-learning-bilingual-registration',1200,1600,paper='#fbfaf3')
+ p.source['provenance']['typography']={'shaping':'Pillow libraqm confirmed available; logical Unicode Arabic, explicit direction=rtl, language=ar, right alignment; no manual reversal','font_license_receipt':str(ASSETS/'rights-receipts/arabic-font-license-provenance.json'),'font_binaries_bundled':False}
+ p.source['provenance']['language_review']={'kind':'author lexical/semantic review of short common Modern Standard Arabic form labels','human_native_speaker_review':'not_performed; pilot remains provisional','language_pairs':{'Registration form':'استمارة التسجيل','Full name':'الاسم الكامل','Email':'البريد الإلكتروني','Phone number':'رقم الهاتف','Course':'الدورة','Date':'التاريخ','Signature':'التوقيع'}}
+ p.rectangle([0,0,1200,20],'#326b69')
+ p.text('HARBOUR LEARNING',56,53,720,39,'narrow-bold','#315a59',label='header')
+ p.text('مركز التعلم',811,38,330,35,'arabic-bold','#315a59',label='header',direction='rtl',language='ar')
+ p.text('Registration form',55,147,720,65,'serif','#294f4e',label='title')
+ p.text('استمارة التسجيل',628,220,510,48,'arabic-bold','#294f4e',label='title',direction='rtl',language='ar')
+ p.text('Evening skills workshops / Autumn term',59,245,550,22,'sans','#65766b',label='paragraph')
+ p.line([58,327,1140,327],'#8caaa0',2)
+ p.text('Please write clearly. Return this form to the welcome desk.',59,352,1060,20,'sans','#566f66',label='paragraph')
+ b=[58,414,1140,1440];fields=[]
+ def paired(en,ar,y,box,arx=650,arwidth=465):
+  p.text(en,80,y,495,21,'sans-bold','#3d5e58',label=None)
+  p.text(ar,arx,y-15,arwidth,26,'arabic','#3d5e58',label=None,direction='rtl',language='ar')
+  p.rectangle(box,'#fffef9',outline='#8fa99c',width=1)
+  fields.append({'label_en':en,'label_ar':ar,'bbox':box,'value':None,'value_presence':'blank-authored-input'})
+ paired('Full name','الاسم الكامل',437,[80,485,1117,550])
+ paired('Email','البريد الإلكتروني',590,[80,639,1117,704])
+ paired('Phone number','رقم الهاتف',745,[80,794,1117,859])
+ paired('Course','الدورة',900,[80,950,1117,1015])
+ p.text('Choose one: sewing / bicycle care / everyday computing',96,970,985,20,'serif-italic','#73816e',label=None)
+ p.rectangle([80,1073,110,1103],'#fffef9',outline='#648779',width=2)
+ p.text('I agree to be contacted about this registration.',128,1079,963,20,'sans','#4e655a',label=None)
+ p.text('أوافق على التواصل معي بشأن التسجيل.',130,1118,980,25,'arabic','#4e655a',label=None,direction='rtl',language='ar')
+ paired('Date','التاريخ',1222,[80,1270,420,1330],arx=200,arwidth=200)
+ p.text('Signature',505,1222,300,21,'sans-bold','#3d5e58',label=None)
+ p.text('التوقيع',855,1207,260,26,'arabic','#3d5e58',label=None,direction='rtl',language='ar')
+ p.line([505,1330,1117,1330],'#8fa99c',1)
+ fields.append({'label_en':'Signature','label_ar':'التوقيع','bbox':[505,1270,1117,1330],'value':None,'value_presence':'blank-authored-input'})
+ p.text('Need help? Ask at the welcome desk. We can complete the form with you.',80,1382,1020,19,'serif-italic','#647765',label=None)
+ p.region('form',b,None,fields=fields,checkboxes=[{'bbox':[80,1073,110,1103],'checked':False,'label_en':'I agree to be contacted about this registration.','label_ar':'أوافق على التواصل معي بشأن التسجيل.'}],component_policy='One practical registration form; bilingual labels, instruction text and empty fields are component evidence, not separate paragraph detections.',language=['en','ar'],blank_fields_are_not_missing_ground_truth=True)
+ p.line([58,1480,1140,1480],'#9aaea0',1)
+ p.text('HARBOUR LEARNING / ORIGINAL FICTIONAL COMMUNITY FORM',59,1510,1075,14,'mono','#6c8273',label='footer')
+ p.text('Please do not enter real personal information into this evaluation fixture.',59,1544,1075,15,'sans','#758779',label='footer')
+ return p
+
+
 def build():
- return [exhibition(),fern_archive(),concert()]
+ return [exhibition(),fern_archive(),concert(),repair_mindmap(),arabic_registration()]
