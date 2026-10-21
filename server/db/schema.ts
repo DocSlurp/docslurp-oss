@@ -1211,7 +1211,8 @@ export const apiKeys = pgTable(
     keyType: text("key_type").default("server").notNull(),
     allowedDomains: text("allowed_domains").array().default([]).notNull(),
     scopes: text().array().default(["ingest", "search", "artifacts"]).notNull(),
-    rateLimitRpm: integer("rate_limit_rpm").default(60).notNull(),
+    /** Optional per-key requests-per-minute cap; null means the plan's limits apply. */
+    rateLimitRpm: integer("rate_limit_rpm"),
     rateLimitPpd: integer("rate_limit_ppd").default(10000).notNull(),
     rateLimits: jsonb("rate_limits").default([]).notNull(),
     lastUsedAt: timestamp("last_used_at", {

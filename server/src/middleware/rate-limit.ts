@@ -28,7 +28,7 @@ import { orgRateLimitProfile, resetRateLimitPlanCache, userRateLimitProfile } fr
  *     IP's per-category limit. Bursts over the burst limit and repeated invalid
  *     credentials put the IP in the penalty box.
  *  2. Per API key or user: the plan's per-category limit (capped by the key's
- *     requests-per-minute), the key's custom request windows, its daily page
+ *     requests-per-minute when one is set), the key's custom request windows, its daily page
  *     cap for uploads and its spend windows for cost-incurring requests. The
  *     plan (free or paid table) comes from the organization's billing state
  *     (services/rate-limit-plan.ts): the key's organization, or for a session
@@ -530,7 +530,7 @@ function envOverrideLimit(profile: RateLimitProfile, category: RateLimitCategory
 /**
  * The limit table for a request: the middleware's own profile (IP layer),
  * self-hosted, or the plan of the caller's organization. A key's
- * `rateLimitRpm` never picks the table; it only caps it (resolveLimit).
+ * `rateLimitRpm` never picks the table; when set it only caps it (resolveLimit).
  */
 async function resolveProfile(c: Context, configuredProfile: RateLimitProfile | undefined, now: number): Promise<RateLimitProfile> {
   if (configuredProfile) return configuredProfile;
@@ -560,8 +560,10 @@ function resolveLimit(
     ?? readPositiveOptionalInt(process.env.API_RATE_LIMIT_WINDOW_MS) ?? DEFAULT_WINDOW_MS;
 
   const actor = c.get("requestActor");
-  if (actor?.type === "apiKey" && options.identity === "actor") {
-    maxRequests = Math.min(maxRequests, actor.apiKey.rateLimitRpm);
+  // A key's requests-per-minute is an optional cap: only an explicit value lowers the plan's limit.
+  const keyCap = actor?.type === "apiKey" ? actor.apiKey.rateLimitRpm : null;
+  if (options.identity === "actor" && typeof keyCap === "number" && keyCap > 0) {
+    maxRequests = Math.min(maxRequests, keyCap);
   }
 
   return { maxRequests: Math.max(1, maxRequests), windowMs: Math.max(1, windowMs) };

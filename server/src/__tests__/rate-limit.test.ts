@@ -42,7 +42,7 @@ function buildIpLimitedApp(now: () => number) {
   return app;
 }
 
-function actorForApiKey(keyId: string, rateLimitRpm = 60, extra: Partial<Extract<RequestActor, { type: "apiKey" }>["apiKey"]> = {}): RequestActor {
+function actorForApiKey(keyId: string, rateLimitRpm: number | null = null, extra: Partial<Extract<RequestActor, { type: "apiKey" }>["apiKey"]> = {}): RequestActor {
   return {
     type: "apiKey",
     userId: "user-1",
@@ -250,7 +250,7 @@ describe("api rate limit middleware", () => {
   });
 
   it("uses distinct free, paid, and self-hosted limit profiles", async () => {
-    const freeApp = buildActorLimitedApp(actorForApiKey("free-key", 60), () => currentTime);
+    const freeApp = buildActorLimitedApp(actorForApiKey("free-key"), () => currentTime);
     const paidApp = buildActorLimitedApp(actorForApiKey("paid-key", 1_000, { orgId: "org-paid" }), () => currentTime);
     const selfHostedApp = new Hono();
     selfHostedApp.use("*", async (c, next) => {
@@ -274,9 +274,9 @@ describe("api rate limit middleware", () => {
     const paid = await paidApp.request("/v1/search");
     const selfHosted = await selfHostedApp.request("/v1/documents");
 
-    // The key's default 60 rpm caps the free table's 240 searches a minute.
-    expect(free.headers.get("X-RateLimit-Limit")).toBe("60");
-    expect(free.headers.get("RateLimit-Policy")).toContain('"free-search";q=60');
+    // A key without an rpm cap gets the plan's full table.
+    expect(free.headers.get("X-RateLimit-Limit")).toBe("240");
+    expect(free.headers.get("RateLimit-Policy")).toContain('"free-search";q=240');
     expect(paid.headers.get("X-RateLimit-Limit")).toBe("600");
     expect(paid.headers.get("RateLimit-Policy")).toContain('"paid-search"');
     expect(selfHosted.headers.get("X-RateLimit-Limit")).toBe("6000");
@@ -458,11 +458,27 @@ describe("api rate limit middleware", () => {
       return app;
     }
 
-    it("gives a paid organization's default key the paid table, capped by the key's rpm", async () => {
-      const app = buildActorLimitedApp(actorForApiKey("paid-default", 60, { orgId: "org-paid" }), () => currentTime);
+    it("gives a paid organization's default key the full paid table", async () => {
+      const app = buildActorLimitedApp(actorForApiKey("paid-default", null, { orgId: "org-paid" }), () => currentTime);
       const search = await app.request("/v1/search");
-      expect(search.headers.get("RateLimit-Policy")).toContain('"paid-search";q=60;w=60');
+      expect(search.headers.get("RateLimit-Policy")).toContain('"paid-search";q=600;w=60');
       expect(orgRateLimitProfile).toHaveBeenCalledWith("org-paid", currentTime);
+    });
+
+    it("gives a Free organization's default key search 240 and chat 60 a minute", async () => {
+      const app = buildActorLimitedApp(actorForApiKey("free-default"), () => currentTime);
+      app.post("/v1/chat", (c) => c.json({ ok: true }));
+      expect((await app.request("/v1/search")).headers.get("RateLimit-Policy")).toBe('"free-search";q=240;w=60');
+      expect((await app.request("/v1/chat", { method: "POST" })).headers.get("RateLimit-Policy")).toBe('"free-chat-ai";q=60;w=60');
+    });
+
+    it("lets an explicit key rpm cap every category below the plan", async () => {
+      const app = buildActorLimitedApp(actorForApiKey("capped", 30, { orgId: "org-paid" }), () => currentTime);
+      app.post("/v1/chat", (c) => c.json({ ok: true }));
+      expect((await app.request("/v1/search")).headers.get("RateLimit-Policy")).toBe('"paid-search";q=30;w=60');
+      expect((await app.request("/v1/chat", { method: "POST" })).headers.get("RateLimit-Policy")).toBe('"paid-chat-ai";q=30;w=60');
+      const zero = buildActorLimitedApp(actorForApiKey("zero-cap", 0), () => currentTime);
+      expect((await zero.request("/v1/search")).headers.get("RateLimit-Policy")).toBe('"free-search";q=240;w=60');
     });
 
     it("keeps a free organization on the free table even when its key's rpm is raised", async () => {

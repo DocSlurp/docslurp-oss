@@ -1077,7 +1077,7 @@ Complete illustrative key list. An organization with no keys returns `[]`:
       "ingest",
       "search"
     ],
-    "rateLimitRpm": 60,
+    "rateLimitRpm": null,
     "rateLimitPpd": 10000,
     "lastUsedAt": null,
     "createdAt": "2026-10-01T12:00:00.000Z",

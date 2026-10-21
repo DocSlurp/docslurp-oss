@@ -487,7 +487,7 @@ curl --fail-with-body --silent --show-error --max-time 30 \
   "$api_url/v1/api-keys" \
   -b "$DOCSLURP_COOKIE_JAR" \
   -H 'Content-Type: application/json' \
-  --data '{"name":"Organization automation","orgId":"org-123","keyType":"server","scopes":["organizations:read","organizations:manage"],"rateLimitRpm":60,"rateLimitPpd":10000}'
+  --data '{"name":"Organization automation","orgId":"org-123","keyType":"server","scopes":["organizations:read","organizations:manage"],"rateLimitPpd":10000}'
 ```
 
 The response is `{ "key": <key metadata>, "rawKey": <the new key> }` with status 201. Store `rawKey` securely; key listings never return it. Existing keys don't gain the new scopes. To change an existing key's `scopes`, send `PATCH /v1/api-keys/:keyId` from a signed-in session; the same role and server-key rules apply. Because creating and updating keys requires a session, a key can't grant itself organization access.
@@ -674,7 +674,7 @@ Owners and admins get `{ "keys": [...] }`, with metadata for active and revoked 
       "scopes": [
         "organizations:manage"
       ],
-      "rateLimitRpm": 60,
+      "rateLimitRpm": null,
       "rateLimitPpd": 10000,
       "lastUsedAt": null,
       "createdAt": "2026-10-06T12:00:00Z",
@@ -763,14 +763,14 @@ X-DocSlurp-Spend: "key-spend-1d";q=500;r=212;w=86400;u=usd-cents
 | Layer | Policy names | Applies to |
 | --- | --- | --- |
 | Per client IP | `ip-<category>`, `ip-burst` | Every request. Categories: `upload`, `search`, `chat-ai`, `read`, `write`, `webhook`. |
-| Per key or signed-in user | `<plan>-<category>` | The plan's per-category limit (`free-…` or `paid-…`), capped by the key's requests per minute. |
+| Per key or signed-in user | `<plan>-<category>` | The plan's per-category limit (`free-…` or `paid-…`), capped by the key's requests per minute if it has one. |
 | Custom key windows | `key-requests-<window>` | All endpoints together, e.g. 1,000 requests per hour. |
 | Spend windows | `key-spend-<window>` (`X-DocSlurp-Spend`) | Attributed AI, embedding and processing cost in a rolling window. Once reached, uploads, search and chat return 429; reads keep working. |
 | Daily pages | — | Uploads stop with `daily_page_limit` once the key's pages-per-day cap is used. |
 
 Custom request and spend windows are set per key on the API keys page (under "Permissions and limits", then "Advanced rate limits") or with `rateLimits` on `POST`/`PATCH /v1/api-keys`, e.g. `[{ "metric": "requests", "limit": 1000, "windowSeconds": 3600 }, { "metric": "spend", "limit": 500, "windowSeconds": 86400 }]` (spend in US cents; at most five rules, one per metric and window, windows up to 31 days). Spend is recorded when the work it pays for finishes and is refreshed every few seconds, so a request already running can carry a key slightly past its spend limit.
 
-The plan table comes from the organization's billing state, never from the key: an API key gets its organization's plan, and a signed-in user gets the paid table when any organization they belong to is on a paid plan. An organization is paid while it is on Silver, Gold or Platinum and its subscription hasn't lapsed (a past-due subscription keeps paid limits for 7 days). A key's requests per minute (`rateLimitRpm`, default 60) only lowers the plan's limit: raising it on a Free organization does not unlock paid limits. Plan changes take effect within a minute. Default per-minute limits on docslurp.io:
+The plan table comes from the organization's billing state, never from the key: an API key gets its organization's plan, and a signed-in user gets the paid table when any organization they belong to is on a paid plan. An organization is paid while it is on Silver, Gold or Platinum and its subscription hasn't lapsed (a past-due subscription keeps paid limits for 7 days). A key's `rateLimitRpm` is an optional cap: omitted or `null` (the default) means the plan's limits apply, and a number lowers every category to at most that many requests a minute. It never raises the plan's limits, so a high value on a Free organization does not unlock paid limits. Set it on create, change it with `PATCH /v1/api-keys/:id`, and send `"rateLimitRpm": null` to remove it. Plan changes take effect within a minute. Default per-minute limits on docslurp.io:
 
 | Category | Free | Paid | Per client IP |
 | --- | ---: | ---: | ---: |
@@ -781,7 +781,7 @@ The plan table comes from the organization's billing state, never from the key: 
 | `write` | 300 | 600 | 300 |
 | `webhook` | 120 | 600 | 600 |
 
-These are abuse protection, not a spending control: credits and budgets bound what you spend. With the default 60 requests per minute on a key, the key's cap is the tighter limit for most categories, so raise `rateLimitRpm` on the key if you need more. Self-hosted deployments use their own, higher table, and operators can set `API_RATE_LIMIT_<PLAN>_<CATEGORY>_MAX` (for example `API_RATE_LIMIT_FREE_SEARCH_MAX`) or `API_RATE_LIMIT_DEFAULT_PROFILE=paid` (every account gets the paid table).
+These are abuse protection, not a spending control: credits and budgets bound what you spend. Self-hosted deployments use their own, higher table, and operators can set `API_RATE_LIMIT_<PLAN>_<CATEGORY>_MAX` (for example `API_RATE_LIMIT_FREE_SEARCH_MAX`) or `API_RATE_LIMIT_DEFAULT_PROFILE=paid` (every account gets the paid table).
 
 Every 429 has `Retry-After` and the [error envelope](https://docslurp.io/docs/search-reference#errors) with `error.code` set to `rate_limited` (with `details.category`, `details.policy` and `details.plan`), `spend_limit_exceeded`, `daily_page_limit` or `ip_temporarily_blocked`. On docslurp.io the details also carry `links` and the response a `Link` header (`rel="payment"` for upgrades, `rel="help"` for these docs), and the message says where to go. A Free-plan limit says that paid plans get higher limits:
 

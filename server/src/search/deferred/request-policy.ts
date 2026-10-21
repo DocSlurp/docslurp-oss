@@ -69,7 +69,7 @@ export async function resolveSearchMaterializationPolicy(
     if (keyId) {
       const live = await cachedLiveKey(keyId, deps.lookupKey).catch(() => null);
       if (!live) return FAIL_CLOSED_POLICY;
-      apiKey = { ...live, keyId, userId: "", orgId: null, allowedDomains: [], rateLimitRpm: 0, rateLimitPpd: 0, rateLimits: [] } as ValidatedKey;
+      apiKey = { ...live, keyId, userId: "", orgId: null, allowedDomains: [], rateLimitRpm: null, rateLimitPpd: 0, rateLimits: [] } as ValidatedKey;
     }
   }
   const capability = args.context ? null : deps.capability?.() ?? null;
