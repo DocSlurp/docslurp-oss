@@ -84,7 +84,7 @@ describe.skipIf(!databaseUrl || !qrelsPath)("search native benchmark", () => {
     const queries = qrels!.queries;
     for (const query of queries.slice(0, 10)) await one(query);
     const io0 = await blocks();
-    const sequential = [];
+    const sequential: Array<{ query: Query } & Awaited<ReturnType<typeof one>>> = [];
     for (const query of queries) sequential.push({ query, ...(await one(query)) });
     const io1 = await blocks();
     const concurrency = Number(process.env.SEARCH_NATIVE_BENCH_CONCURRENCY ?? 6);

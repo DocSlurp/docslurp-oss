@@ -102,7 +102,7 @@ beforeAll(async () => {
       chunks.push(chunk);
       vectors.set(id, unit(Array.from({ length: DIM }, () => rand() - 0.5)));
       await sql`insert into document_chunks (id, document_id, run_id, user_id, chunk_index, text, heading_path, page_number, token_estimate, metadata)
-        values (${id}, ${`doc${d}`}, 'run1', 'u', ${c}, ${chunk.text}, ${chunk.headingPath}, ${chunk.page}, 12, ${sql.json(chunk.metadata)})`;
+        values (${id}, ${`doc${d}`}, 'run1', 'u', ${c}, ${chunk.text}, ${chunk.headingPath}, ${chunk.page}, 12, ${sql.json(chunk.metadata as postgres.JSONValue)})`;
     }
   }
   // A dedup copy of doc2: chunks in Postgres only, vectors owned by doc2.
@@ -112,7 +112,7 @@ beforeAll(async () => {
     values ('vic', 'copy2', 'lancedb', 'b', 'p', ${route.model}, ${DIM})`;
   for (const chunk of chunks.filter((item) => item.documentId === "doc2")) {
     await sql`insert into document_chunks (id, document_id, run_id, user_id, chunk_index, text, heading_path, page_number, token_estimate, metadata)
-      values (${`copy2-${chunk.index}`}, 'copy2', 'run1', 'u', ${chunk.index}, ${chunk.text}, ${chunk.headingPath}, ${chunk.page}, 12, ${sql.json(chunk.metadata)})`;
+      values (${`copy2-${chunk.index}`}, 'copy2', 'run1', 'u', ${chunk.index}, ${chunk.text}, ${chunk.headingPath}, ${chunk.page}, 12, ${sql.json(chunk.metadata as postgres.JSONValue)})`;
   }
   search = await import("../services/search.js");
   eligible = await import("../search/eligible-documents.js");
