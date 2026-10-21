@@ -9,7 +9,7 @@
  *   that is not already a column (`id`, `documentId`, `chunkIndex`, `text`).
  *
  * The columns are nullable. Older tables get them with `addColumns` (null
- * values) and are filled by `worker/scripts/lancedb-native-backfill.ts`; rows
+ * values) and are filled by the native backfill (`worker/dist/stages/lancedb-native-backfill-cli.js`); rows
  * whose `hydration` is still null are hydrated from Postgres. Pure: no
  * @lancedb import.
  */

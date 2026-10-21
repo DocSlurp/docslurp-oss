@@ -1,6 +1,6 @@
 /**
  * Prepare a workspace's existing LanceDB tables for SEARCH_LANCEDB_NATIVE search, without
- * re-embedding (CLI: worker/scripts/lancedb-native-backfill.ts):
+ * re-embedding (CLI: lancedb-native-backfill-cli.ts, `node worker/dist/stages/lancedb-native-backfill-cli.js` in the image):
  *
  *   1. add the nullable hydration columns (runId, pageNumber, hydration) when missing
  *      (metadata only: no data files are rewritten);
