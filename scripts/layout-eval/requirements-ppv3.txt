@@ -1,0 +1,3 @@
+# Isolated PPv3 environment; Heron baseline may retain its pinned older runtime.
+-r requirements.txt
+transformers==5.20.2

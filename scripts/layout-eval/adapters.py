@@ -11,7 +11,7 @@ PADDLE_LABELS={'paragraph_title':'title','doc_title':'title','image':'figure','t
  'figure_title':'caption','table_title':'caption','chart_title':'caption','formula':'formula',
  'table':'table','header':'header','footer':'footer','footnote':'footnote','chart':'chart',
  'algorithm':'code','seal':'seal','header_image':'figure','footer_image':'figure',
- 'formula_number':'formula_number','number':'number'}
+ 'formula_number':'formula_number','number':'number','reference_content':'paragraph','vision_footnote':'footnote'}
 PADDLE_SMALL_CLASSES=['paragraph_title','image','text','number','abstract','content','figure_title',
  'formula','table','table_title','reference','doc_title','footnote','header','algorithm','footer',
  'seal','chart_title','chart','formula_number','header_image','footer_image','aside_text']
@@ -31,6 +31,16 @@ def normalized_region(raw,score,box,size,mapping,**extra):
     return dict(label=canonical(raw,mapping),raw_label=raw,confidence=float(score),bbox=normalized,**extra)
 
 
+def normalized_polygon(points,size):
+    if hasattr(points,'tolist'): points=points.tolist()
+    if not points or len(points)<3: return None
+    output=[]
+    for point in points:
+        if len(point)!=2 or not all(math.isfinite(float(v)) for v in point): raise ValueError('Malformed polygon output')
+        output.append([min(1.,max(0.,float(point[0])/size[0])),min(1.,max(0.,float(point[1])/size[1]))])
+    return output
+
+
 class TransformersDetector:
     def __init__(self,model='heron',device='cpu',precision='fp32',threads=4,model_size=None,
                  revision=None,model_path=None,local_files_only=False,processor='slow',**_):
@@ -38,7 +48,7 @@ class TransformersDetector:
         from transformers import AutoImageProcessor,AutoModelForObjectDetection
         torch.set_num_threads(threads)
         if precision=='fp16' and device=='cpu': raise ValueError('CPU fp16 excluded; use fp32 or measured quantized backend')
-        self.torch,self.device=torch,device
+        self.torch,self.device,self.model_family=torch,device,model
         self.model_id={'heron':'docling-project/docling-layout-heron','ppv3':'PaddlePaddle/PP-DocLayoutV3_safetensors'}[model]
         self.mapping=HERON_LABELS if model=='heron' else PADDLE_LABELS
         source=model_path or self.model_id
@@ -49,7 +59,8 @@ class TransformersDetector:
         self.supported_labels=sorted(set(canonical(str(v),self.mapping) for v in self.model.config.id2label.values()))
         self.revision=getattr(self.model.config,'_commit_hash',None) or revision or 'unknown'
         self.metadata={'id':self.model_id,'revision':self.revision,'runtime':'transformers','precision':precision,
-            'threads':threads,'model_size':model_size,'processor':processor,'processor_class':type(self.processor).__name__,'parameter_count':sum(p.numel() for p in self.model.parameters())}
+            'threads':threads,'model_size':model_size,'processor':processor,'processor_class':type(self.processor).__name__,'source_labels':self.model.config.id2label,
+            'native_reading_order':model=='ppv3','native_polygons':model=='ppv3','parameter_count':sum(p.numel() for p in self.model.parameters())}
 
     def sync(self):
         if self.device.startswith('cuda'): self.torch.cuda.synchronize(self.device)
@@ -66,8 +77,17 @@ class TransformersDetector:
         results=self.processor.post_process_object_detection(outputs,threshold=threshold,target_sizes=[(im.height,im.width) for im in images])
         predictions=[]
         for image,result in zip(images,results):
-            predictions.append([normalized_region(str(self.model.config.id2label[int(label)]),score,box,image.size,self.mapping)
-              for score,label,box in zip(result['scores'].tolist(),result['labels'].tolist(),result['boxes'].tolist())])
+            regions=[]
+            for index,(score,label,box) in enumerate(zip(result['scores'].tolist(),result['labels'].tolist(),result['boxes'].tolist())):
+                region=normalized_region(str(self.model.config.id2label[int(label)]),score,box,image.size,self.mapping)
+                if self.model_family=='ppv3':
+                    # Official PPv3 postprocessor returns detections sorted by its predicted logical order.
+                    region['reading_order']=int(result['order_seq'][index]) if 'order_seq' in result else index
+                    if 'polygon_points' not in result: raise ValueError('PPv3 postprocessor omitted native polygons')
+                    polygon=normalized_polygon(result['polygon_points'][index],image.size)
+                    if polygon: region['polygon']=polygon
+                regions.append(region)
+            predictions.append(regions)
         self.sync(); end=time.perf_counter()
         return predictions,{'preprocess_ms':1000*(pre-start),'inference_ms':1000*(infer-pre),'postprocess_ms':1000*(end-infer)}
 
@@ -119,12 +139,19 @@ class OnnxSmallDetector:
         options.graph_optimization_level=ort.GraphOptimizationLevel.ORT_ENABLE_ALL
         providers=['CUDAExecutionProvider','CPUExecutionProvider'] if device.startswith('cuda') else ['CPUExecutionProvider']
         if providers[0] not in ort.get_available_providers(): raise RuntimeError(f'Unavailable provider {providers[0]}')
+        if device.startswith('cuda'):
+            # Reuse installed PyTorch CUDA12/cuDNN libraries when present, per ORT deployment guidance.
+            try:
+                import torch
+            except ImportError:
+                pass
         self.session=ort.InferenceSession(onnx_path,sess_options=options,providers=providers)
         if device.startswith('cuda') and self.session.get_providers()[0]!='CUDAExecutionProvider':
             raise RuntimeError('Requested CUDA ONNX provider failed to initialize; refusing full CPU fallback')
         self.supported_labels=sorted(set(PADDLE_LABELS.values()))
         self.metadata={'id':'PaddlePaddle/PP-DocLayout-S','revision':revision or 'unknown','runtime':'onnxruntime',
             'graph_sha256':hashlib.sha256(open(onnx_path,'rb').read()).hexdigest(),
+            'input_specs':[{'name':v.name,'shape':v.shape,'type':v.type} for v in self.session.get_inputs()],
             'providers':self.session.get_providers(),'provider_options':self.session.get_provider_options(),'precision':'graph-defined','threads':threads,
             'cuda_cpu_node_fallback_possible':device.startswith('cuda'),'batch_execution':'serial-fixed-1','resize':'opencv-INTER_CUBIC','color':'RGB'}
 

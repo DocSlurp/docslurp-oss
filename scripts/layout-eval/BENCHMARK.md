@@ -18,8 +18,9 @@ References are loaded only after image-only prediction finishes, outside timers.
   distinguishes photograph, logo, chart, mind map, or illustration.
 - [PP-DocLayoutV3](https://huggingface.co/PaddlePaddle/PP-DocLayoutV3_safetensors):
   Apache-2.0 checkpoint, Transformers CPU/CUDA adapter. Its image class also stays
-  `figure`; an explicit chart prediction is retained as `chart`. This generic
-  object-detection adapter currently retains boxes only, not segmentation masks.
+  `figure`; an explicit chart prediction is retained as `chart`. Its native postprocessor returns segmentation polygons and logical reading-order
+  ranks; both are retained and normalized to stored source pixels. PPv3 needs the
+  separately pinned Transformers5.20.2 environment (`requirements-ppv3.txt`).
 - [PP-DocLayout-S](https://huggingface.co/PaddlePaddle/PP-DocLayout-S): Apache-2.0,
   around 4.8 MB parameters, 23 source classes. Native PaddleOCR and local ONNX
   Runtime adapters let us test a materially smaller CPU mechanism.
@@ -157,3 +158,17 @@ ONNX the official tiny-model `interp: 2` is OpenCV CUBIC (not LINEAR), verified
 against the installed predictor mapping. `check_small_parity.py` checks the
 path/array predictions and native/ONNX predictions from image bytes without any
 reference annotations. Keep failed parity evidence as well as corrected output.
+
+## Predeclared CPU sweep
+
+`cpu_campaign.py` runs serially in an existing CPU Paddle/ORT environment. It
+creates a fresh evidence directory and writes its plan before any model work.
+It calibrates INT8 on32 train images, then compares native FP32, ORT FP32 and ORT
+INT8 at1/2/4/8 threads on the same development screen. Runtime eligibility requires
+zero failures, macroF1 no more than2 percentage points below the FP32 reference and
+no family macro loss greater than5 points. It chooses lowest measured consumer
+mean, then measures orientation and19 declared byte variants on that runtime.
+This efficiency choice does not waive absolute quality gates or authorize promotion.
+All subprocess commands, exit codes, logs, raw predictions and digests are saved;
+a wall-time cap terminates the workload. It creates no hosts and performs no
+model downloads. Existing evidence directories cannot be reused.

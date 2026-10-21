@@ -5,7 +5,7 @@ from pathlib import Path
 import tempfile
 import unittest
 from scoring import iou,match_boxes,score_pages
-from adapters import canonical,HERON_LABELS,normalized_region
+from adapters import canonical,HERON_LABELS,normalized_region,normalized_polygon
 
 
 class ScoringTests(unittest.TestCase):
@@ -58,6 +58,11 @@ class ScoringTests(unittest.TestCase):
         self.assertEqual(canonical('Picture',HERON_LABELS),'figure')
         self.assertEqual(canonical('List-item',HERON_LABELS),'list')
         self.assertEqual(canonical('Unseen',HERON_LABELS),'unknown')
+
+    def test_native_polygons_preserve_source_normalization(self):
+        self.assertEqual(normalized_polygon([[0,0],[200,0],[200,100],[0,100]],(200,100)),[[0.,0.],[1.,0.],[1.,1.],[0.,1.]])
+        self.assertIsNone(normalized_polygon([],(200,100)))
+        with self.assertRaises(ValueError): normalized_polygon([[0,0],[200,float('nan')],[0,100]],(200,100))
 
     def test_nonfinite_boxes_fail(self):
         with self.assertRaises(ValueError): normalized_region('Table',.9,[0,0,float('nan'),1],(200,100),HERON_LABELS)
