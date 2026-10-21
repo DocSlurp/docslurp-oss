@@ -1013,6 +1013,85 @@ describe("chatWorkspace", () => {
     expect(hybridSearch).not.toHaveBeenCalled();
   });
 
+  it("includes summaries beyond eight files and discloses incomplete coverage", async () => {
+    const { startMigratedPostgres } = await import("@docslurp/worker/testing");
+    const { default: postgres } = await import("postgres");
+    const database = await startMigratedPostgres();
+    const db = postgres(database.url, { max: 1, prepare: false, onnotice: () => {} });
+    try {
+      await db`insert into "user" (id, name, email) values ('user-1', 'Test', 'summary@example.test')`;
+      await db`insert into organizations (id, name, slug, created_by_user_id)
+        values ('org-1', 'Test', 'test', 'user-1')`;
+      await db`insert into workspaces (id, org_id, user_id, name)
+        values ('ws-1', 'org-1', 'user-1', 'Test'), ('ws-2', 'org-1', 'user-1', 'Other')`;
+      await db`insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, pipeline)
+        values ('run-1', 'org-1', 'user-1', 'ws-1', 'upload', 'completed', 'complete', '{}')`;
+      for (let index = 1; index <= 12; index++) {
+        await db`insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status)
+          values (${`doc-${index}`}, 'org-1', 'user-1', 'ws-1', 'run-1',
+            ${`file-${String(index).padStart(2, "0")}.pdf`}, 'application/pdf', ${`raw/${index}`}, 'completed')`;
+        await db`insert into document_summaries (id, document_id, run_id, user_id, summary)
+          values (${`summary-${index}`}, ${`doc-${index}`}, 'run-1', 'user-1', ${`Distinct subject ${index}.`})`;
+      }
+      await db`insert into document_summaries (id, document_id, run_id, user_id, summary, created_at)
+        values ('old-summary', 'doc-12', 'run-1', 'user-1', 'Obsolete subject.', '2000-01-01')`;
+      sqlMock.mockImplementation(async (strings, ...values) => {
+        if (!strings.join(" ").includes("from document_summaries")) return [];
+        const query = strings.reduce((text: string, part: string, index: number) =>
+          text + (index ? `$${index}` : "") + part, "");
+        return await db.unsafe(query, values);
+      });
+      getWorkspace.mockResolvedValue({ id: "ws-1", systemPrompt: null });
+      loadWorkspaceWholeCorpusContext.mockResolvedValue({
+        eligible: false, reason: "chunk-limit-exceeded", results: [],
+        stats: { documentCount: 12, chunkCount: 120, tokenEstimate: 100000, charEstimate: 400000,
+          maxDocuments: 12, maxChunks: 24, maxTokens: 12000, maxChars: 60000 },
+      });
+      generateAnthropicDocumentText.mockResolvedValue({
+        text: "The final document covers distinct subject 12 [12].",
+        usage: { inputTokens: 100, outputTokens: 10 }, sources: [],
+      });
+      process.env.ANTHROPIC_API_KEY = "test-key";
+      const request = { workspaceId: "ws-1", userId: "user-1",
+        query: "Summarize this workspace", allowConfiguration: false };
+      const response = await chatWorkspace(request);
+      expect(response.citations).toHaveLength(12);
+      expect(generateAnthropicDocumentText.mock.calls[0]?.[0].documents.at(-1).text)
+        .toBe("Distinct subject 12.");
+      expect(response.answer).not.toContain("Partial workspace overview");
+      expect(hybridSearch).not.toHaveBeenCalled();
+
+      // Missing and oversized summaries must be disclosed. Excluded documents
+      // must appear in neither the evidence nor its coverage denominator.
+      for (const id of ["missing", "oversized", "blocked", "superseded", "other"]) {
+        await db`insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status, superseded_at)
+          values (${id}, 'org-1', 'user-1', ${id === "other" ? "ws-2" : "ws-1"}, 'run-1',
+            ${`z-${id}.pdf`}, 'application/pdf', ${`raw/${id}`},
+            ${id === "blocked" ? "pii_blocked" : "completed"}, ${id === "superseded" ? new Date() : null})`;
+        await db`insert into document_summaries (id, document_id, run_id, user_id, summary)
+          values (${`summary-${id}`}, ${id}, 'run-1', 'user-1',
+            ${id === "missing" ? "  " : id === "oversized" ? "x".repeat(60_001) : "Excluded content."})`;
+      }
+      const onTextDelta = vi.fn();
+      const partial = await chatWorkspace({ ...request, onTextDelta });
+      expect(partial.citations).toHaveLength(12);
+      expect(partial.answer).toContain("using summaries for 12 of 14 current documents");
+      expect(partial.answer).toContain("Documents without a stored summary: 1");
+      expect(partial.answer).toContain("Summaries omitted by the context budget: 1");
+      expect(onTextDelta.mock.calls[0]?.[0]).toContain("Partial workspace overview");
+      expect(generateAnthropicDocumentText.mock.calls.at(-1)?.[0].system)
+        .toContain("Do not present this as complete workspace coverage");
+
+      generateAnthropicDocumentText.mockRejectedValue(new Error("model unavailable"));
+      const fallback = await chatWorkspace(request);
+      expect(fallback.debug.fallback).toBe(true);
+      expect(fallback.answer).toContain("using summaries for 12 of 14 current documents");
+    } finally {
+      await db.end();
+      await database.stop();
+    }
+  }, 120_000);
+
   it("answers summary prompts from whole indexed corpus when document summaries are unavailable", async () => {
     sqlMock.mockResolvedValue([]);
     loadWorkspaceWholeCorpusContext.mockResolvedValue({

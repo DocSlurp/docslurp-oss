@@ -201,6 +201,7 @@ Guides: [document versions and retention](document-versions.md) and [config-chan
 
 ## API changes
 
+- **2026-10-20.** New workspaces default to `summaries: true`. Create/update bodies and workspace responses expose this document-summary option. It adds a one-time processing cost to improve document search and workspace overviews. See [document summaries, costs and limits](document-summaries.md).
 - **2026-10-14, non-breaking.** Responses of work-creating routes (workspace `PATCH`, search-settings `PATCH`, uploads, reprocess, full-index, graph rebuild) gain an optional `job`. New `POST …/estimate` routes, `GET /v1/jobs/:id` and `GET /v1/jobs/:id/events`. Workspaces gain `autoConfirmReindex` and `retainDocumentVersions`; organizations gain `retainDocumentVersions`. Uploads accept `path`. Config `PATCH` requests that succeeded before still succeed and never return `409`; a `reindex-required` change now queues a re-index. See [config-change jobs](config-change-jobs.md).
 
 ## Live ingestion progress

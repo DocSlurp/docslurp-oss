@@ -69,6 +69,24 @@ async function seedDoc(id: string, workspaceId: string, orgId: string, pages: nu
 }
 
 describe("plan defaults", () => {
+  it("defaults document summaries on, persists opt-outs, and preserves privacy locks", async () => {
+    const enabled = await ws.createWorkspace({ userId: "u1", orgId: "gold", name: "Summaries" });
+    expect(enabled.summaries).toBe(true);
+    expect(enabled.pipeline.summarize).toBe(true);
+    expect(enabled.pipeline.pageIndex).toBe(false);
+    const disabled = await ws.createWorkspace({ userId: "u1", orgId: "gold", name: "No summaries", summaries: false });
+    expect(disabled.summaries).toBe(false);
+    expect(disabled.pipeline.summarize).toBe(false);
+    expect((await ws.updateWorkspace(enabled.id, "u1", { summaries: false }))?.summaries).toBe(false);
+    expect((await ws.updateWorkspace(enabled.id, "u1", { name: "Renamed" }))?.summaries).toBe(false);
+    expect((await ws.updateWorkspace(enabled.id, "u1", { summaries: true }))?.pipeline.summarize).toBe(true);
+    const privateWorkspace = await ws.createWorkspace({ userId: "u1", orgId: "gold", name: "Private", templateKey: "legal-contracts" });
+    expect(privateWorkspace.summaries).toBe(false);
+    expect((await ws.updateWorkspace(privateWorkspace.id, "u1", { summaries: true }))?.summaries).toBe(false);
+    const defaultWorkspace = await ws.ensureDefaultWorkspace({ userId: "u1", orgId: "gold" });
+    expect(defaultWorkspace.summaries).toBe(true);
+  });
+
   it("defaults a free org without purchases to map, paid or funded orgs to full", async () => {
     const mk = (orgId: string) => ws.createWorkspace({ userId: "u1", orgId, name: "W" });
     expect((await mk("free")).pipeline.indexingMode).toBe("map");

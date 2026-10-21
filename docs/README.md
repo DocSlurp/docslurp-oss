@@ -11,6 +11,7 @@ This index lists the documentation published in the public source tree. The file
 | MCP server | mcp.md |
 | Chat voice input | chat-voice.md |
 | Model configuration and private endpoints | model-configuration.md |
+| Document and workspace summaries, costs and limits | document-summaries.md |
 | Worker images and supply chain | worker-image.md |
 | Page router and extraction paths | page-router.md |
 | Extraction feature matrix | extraction-feature-matrix.md |

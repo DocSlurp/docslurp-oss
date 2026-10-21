@@ -193,6 +193,44 @@ export class ArtifactStore {
     return data;
   }
 
+  /** Read an exact bounded range, rejecting endpoints that ignore Range. */
+  async getByteRange(key: string, start: number, end: number, signal?: AbortSignal): Promise<Buffer> {
+    validateStorageKey(key);
+    if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start < 0 || end < start) {
+      throw new RangeError("Invalid storage byte range");
+    }
+    const maxBytes = end - start + 1;
+    const response = await this.client.send(new GetObjectCommand({
+      Bucket: this.bucket, Key: key, Range: `bytes=${start}-${end}`,
+    }), { abortSignal: signal });
+    try {
+      if (!response.ContentRange?.startsWith(`bytes ${start}-${end}/`)) {
+        throw new Error("Storage endpoint did not honor the requested byte range");
+      }
+      if (response.ContentLength !== undefined && response.ContentLength !== maxBytes) {
+        throw new Error("Unexpected storage range length");
+      }
+      const chunks: Buffer[] = [];
+      let received = 0;
+      if (response.Body) {
+        const source = Readable.fromWeb(response.Body.transformToWebStream() as import("node:stream/web").ReadableStream<Uint8Array>, { signal });
+        for await (const chunk of source) {
+          signal?.throwIfAborted();
+          received += chunk.length;
+          assertObjectWithinReadLimit(key, received, maxBytes);
+          chunks.push(chunk);
+        }
+      }
+      if (received !== maxBytes) throw new Error("Incomplete storage range body");
+      return Buffer.concat(chunks, received);
+    } catch (error) {
+      (response.Body as { destroy?: () => void } | undefined)?.destroy?.();
+      if (signal?.aborted) throw signal.reason;
+      if (error instanceof StorageObjectTooLargeError) throw error;
+      throw new StorageReadError(error);
+    }
+  }
+
   async getJson<T>(key: string, options?: StorageReadOptions): Promise<T> {
     if (options?.streamJson) {
       validateStorageKey(key);
@@ -250,10 +288,10 @@ export class ArtifactStore {
     }
   }
 
-  async objectSize(key: string): Promise<number | null> {
+  async objectSize(key: string, signal?: AbortSignal): Promise<number | null> {
     try {
       const response = await this.client.send(
-        new HeadObjectCommand({ Bucket: this.bucket, Key: key }),
+        new HeadObjectCommand({ Bucket: this.bucket, Key: key }), { abortSignal: signal },
       );
       return typeof response.ContentLength === "number" ? response.ContentLength : 0;
     } catch (error) {

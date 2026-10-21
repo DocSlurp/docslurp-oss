@@ -238,7 +238,7 @@ export const postgresIntakeRecords: WorkspaceIntakeRecords = {
     const defaults = await getUserSettings(args.userId).then((settings) => settings.general, () => null);
     const template = getWorkspaceTemplate(args.templateKey ?? null);
     const base = seedPipelineFromProcessingDefaults(
-      normalizePipelineFeatures(template?.pipeline ?? defaultPipelineFeatures),
+      normalizePipelineFeatures(template?.pipeline ?? { ...defaultPipelineFeatures, summarize: true }),
       defaults,
     );
     const pipeline = applyWorkspacePipelineOverrides(base, overrides, template);
@@ -246,6 +246,7 @@ export const postgresIntakeRecords: WorkspaceIntakeRecords = {
     const { indexingMode, ...pipelineWithoutMode } = pipeline;
     const workspace = await createWorkspace({
       ...args,
+      summaries: pipeline.summarize,
       pipeline: overrides?.indexingMode !== undefined ? pipeline : (pipelineWithoutMode as typeof pipeline),
     });
     const searchSeed = seedSearchSettingsFromProcessingDefaults(defaults);
