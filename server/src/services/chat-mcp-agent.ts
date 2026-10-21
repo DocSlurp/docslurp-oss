@@ -446,26 +446,35 @@ export async function runChatMcpAgent(args: {
       signal.throwIfAborted();
       finishReason = await result.finishReason;
     } catch (error) {
-      // The client is gone: nobody reads an answer, so stop and only account for the spend.
+      // The client is gone, or the turn failed: stop and only account for the
+      // spend. The step is recorded in the background (recordAbortedStep never
+      // rejects), so the receipt lookup and its delay do not hold the error
+      // response; the write still runs inside the turn's async context.
       if (deadline.clientAborted) {
-        await recordAbortedStep("client_disconnect", { lookupDelayMs: args.abortedStepLookupDelayMs ?? ABORTED_STEP_LOOKUP_DELAY_MS });
+        void recordAbortedStep("client_disconnect", { lookupDelayMs: args.abortedStepLookupDelayMs ?? ABORTED_STEP_LOOKUP_DELAY_MS });
         throw error;
       }
       if (!deadline.expired && !lastStepTimedOut) {
-        await recordAbortedStep("error", { lookupDelayMs: args.abortedStepLookupDelayMs ?? ABORTED_STEP_LOOKUP_DELAY_MS });
+        void recordAbortedStep("error", { lookupDelayMs: args.abortedStepLookupDelayMs ?? ABORTED_STEP_LOOKUP_DELAY_MS });
         throw error;
       }
       // Out of time: the turn still answers (HTTP 200, stopReason "deadline")
       // from what it has, instead of discarding paid-for evidence with a 500.
-      await recordAbortedStep(deadline.expired ? "deadline" : "step_timeout", { lookupDelayMs: 0 });
-      if (!deadline.expired && deadline.remainingMs() >= Math.min(MIN_FINAL_ANSWER_MS, budget.finalReserveMs / 2) && !finalStepText.trim()) {
-        try {
-          await answerFromEvidence();
-          finalAnswer = "from_evidence";
-        } catch (finalError) {
-          await recordAbortedStep(deadline.clientAborted ? "client_disconnect" : "deadline", { lookupDelayMs: 0 });
-          if (deadline.clientAborted) throw finalError;
+      // The aborted step's receipt lookup runs alongside the final answer
+      // instead of eating into the reserve, and settles before the turn ends.
+      const abortedStep = recordAbortedStep(deadline.expired ? "deadline" : "step_timeout", { lookupDelayMs: 0 });
+      try {
+        if (!deadline.expired && deadline.remainingMs() >= Math.min(MIN_FINAL_ANSWER_MS, budget.finalReserveMs / 2) && !finalStepText.trim()) {
+          try {
+            await answerFromEvidence();
+            finalAnswer = "from_evidence";
+          } catch (finalError) {
+            await recordAbortedStep(deadline.clientAborted ? "client_disconnect" : "deadline", { lookupDelayMs: 0 });
+            if (deadline.clientAborted) throw finalError;
+          }
         }
+      } finally {
+        await abortedStep;
       }
       if (!finalStepText.trim()) throw new ChatTurnDeadlineError(budget.turnDeadlineMs, { cause: error });
       if (finalAnswer !== "from_evidence") finalAnswer = "partial";
@@ -475,6 +484,8 @@ export async function runChatMcpAgent(args: {
     usage.toolCostCents = context.counters.toolCostCents;
     if (!answer.trim()) throw new Error("Chat completed without an answer; check tool status before retrying actions.");
     lastFinishReason = finishReason ?? lastFinishReason;
+    // An aborted step's record can land after a later step's: keep step order.
+    stepUsage.sort((a, b) => a.step - b.step);
     stopReason = classifyChatAgentStop({
       deadline: deadlineForcedAt !== undefined,
       toolCallsRefused: context.counters.refused, maxSteps: limits.maxSteps, searchCalls: context.searchCalls, answer,

@@ -2,7 +2,9 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { MockLanguageModelV4 } from "ai/test";
 import { simulateReadableStream } from "ai";
 
-const mocks = vi.hoisted(() => ({ provider: vi.fn(), record: vi.fn(), dispatch: vi.fn(), createDispatch: vi.fn(), providerName: undefined as string | undefined }));
+const mocks = vi.hoisted(() => ({ provider: vi.fn(), record: vi.fn(), dispatch: vi.fn(), createDispatch: vi.fn(), providerName: undefined as string | undefined,
+  /** Generation ids whose receipt lookup is slow, and whether one is pending. */
+  slowLookups: new Set<string>(), lookupPending: false }));
 vi.mock("../lib/chat-agent-model.js", async importOriginal => ({
   ...await importOriginal<typeof import("../lib/chat-agent-model.js")>(),
   createChatAgentModel: (options: { model: string }) => mocks.provider(options.model),
@@ -24,7 +26,14 @@ vi.mock("./mcp-tools.js", () => ({
 vi.mock("@docslurp/shared", async importOriginal => ({
   ...await importOriginal<typeof import("@docslurp/shared")>(),
   createOpenRouterUsageCapture: () => ({ fetch: vi.fn(), usage: () => undefined, providerName: () => mocks.providerName }),
-  resolveOpenRouterUsage: async ({ usage }: { usage: { inputTokens: number; outputTokens: number } }) => ({ ...usage, costCents: 0.01 }),
+  resolveOpenRouterUsage: async ({ usage, generationId }: { usage: { inputTokens: number; outputTokens: number }; generationId?: string }) => {
+    if (generationId && mocks.slowLookups.has(generationId)) {
+      mocks.lookupPending = true;
+      await new Promise(resolve => setTimeout(resolve, 400));
+      mocks.lookupPending = false;
+    }
+    return { ...usage, costCents: 0.01 };
+  },
 }));
 type RecordedSpan = { tracer: string; name: string; attributes: Record<string, unknown>; parent?: RecordedSpan; kind?: string; ended: boolean; error?: unknown };
 const spans = vi.hoisted(() => ({ list: [] as RecordedSpan[], metrics: [] as unknown[] }));
@@ -54,7 +63,7 @@ function step(toolCall: boolean): Awaited<ReturnType<MockLanguageModelV4["doStre
 }
 
 beforeEach(() => {
-  spans.list.length = 0; spans.metrics.length = 0; mocks.providerName = undefined;
+  spans.list.length = 0; spans.metrics.length = 0; mocks.providerName = undefined; mocks.slowLookups.clear();
   mocks.record.mockReset(); mocks.dispatch.mockReset(); mocks.createDispatch.mockReset();
   mocks.createDispatch.mockReturnValue(mocks.dispatch);
   mocks.dispatch.mockResolvedValue(Response.json({ results: [{ text: "The policy is supported.", score: 1, citation: { filename: "policy.pdf", documentId: "doc", chunkIndex: 0, headingPath: [], pageNumber: 1 } }] }));
@@ -401,8 +410,65 @@ describe("chat agent client disconnect", () => {
     await expect(turn).rejects.toThrow();
     expect(seen.signals[0]!.aborted).toBe(true);
     expect(model.doStreamCalls).toHaveLength(1);
-    expect(mocks.record).toHaveBeenCalledTimes(1);
+    // Recorded in the background so the receipt lookup does not hold the response.
+    await vi.waitFor(() => expect(mocks.record).toHaveBeenCalledTimes(1));
     expect(mocks.record.mock.calls[0]![0].usage).toMatchObject({ inputTokens: 10, outputTokens: 4,
       metadata: { turnOutcome: "aborted", abortReason: "client_disconnect", usageSource: "stream-usage", usageEstimated: false, toolCalls: ["search"] } });
+  });
+});
+
+describe("chat agent timers and aborted-step accounting", () => {
+  const timers = () => process.getActiveResourcesInfo().filter(kind => kind === "Timeout").length;
+
+  it("leaves no timers behind after a normal two-step turn", async () => {
+    mocks.provider.mockReturnValue(new MockLanguageModelV4({ doStream: [step(true), step(false)] }));
+    const before = timers();
+    const result = await runChatMcpAgent({ ...args });
+    expect(result.debug.stopReason).toBe("answered");
+    expect(result.debug.timeBudget.finalAnswer).toBe("loop");
+    expect(timers()).toBeLessThanOrEqual(before);
+  });
+
+  it("does not hold the error response for the aborted-step receipt lookup", async () => {
+    mocks.provider.mockReturnValue(new MockLanguageModelV4({ doStream: async () => ({ stream: new ReadableStream({ start(controller) {
+      controller.enqueue({ type: "stream-start", warnings: [] } as never);
+      controller.enqueue({ type: "response-metadata", id: "gen-broken", modelId: "build" } as never);
+      controller.enqueue({ type: "text-start", id: "t" } as never);
+      controller.enqueue({ type: "text-delta", id: "t", delta: "Partial" } as never);
+      setTimeout(() => controller.error(new Error("upstream reset")), 20);
+    } }) }) as never }));
+    const started = Date.now();
+    await expect(runChatMcpAgent({ ...args, abortedStepLookupDelayMs: 1_500 })).rejects.toThrow("upstream reset");
+    expect(Date.now() - started).toBeLessThan(1_000);
+    await vi.waitFor(() => expect(mocks.record).toHaveBeenCalledTimes(1), { timeout: 3_000 });
+    expect(recordedMetadata()[0]).toMatchObject({ turnOutcome: "aborted", abortReason: "error", usageEstimated: true });
+  });
+
+  it("looks up a timed-out step's receipt alongside the evidence answer, not before it", async () => {
+    mocks.slowLookups.add("gen-stalled");
+    let call = 0;
+    let lookupPendingAtFinalCall: boolean | undefined;
+    const model = new MockLanguageModelV4({ doStream: async () => {
+      const current = call++;
+      if (current === 0) return toolStep("found");
+      if (current === 1) return stalledStep([{ type: "stream-start", warnings: [] }, { type: "response-metadata", id: "gen-stalled", modelId: "build" }]);
+      lookupPendingAtFinalCall = mocks.lookupPending;
+      return answerStep("The policy is supported [1].");
+    } });
+    mocks.provider.mockReturnValue(model);
+    const result = await runChatMcpAgent({ ...args, timeBudget: budget({ turnDeadlineMs: 3_000, stepTimeoutMs: 150, finalReserveMs: 1_000 }) });
+    expect(lookupPendingAtFinalCall).toBe(true);
+    expect(result.debug.timeBudget.finalAnswer).toBe("from_evidence");
+    expect(mocks.record).toHaveBeenCalledTimes(3);
+    expect(result.debug.stepUsage.map(entry => entry.finishReason)).toEqual(["tool-calls", "aborted", "stop"]);
+  });
+
+  it("returns a tool that ignores its signal at the tool budget", async () => {
+    mocks.provider.mockReturnValue(new MockLanguageModelV4({ doStream: [toolStep("deaf"), answerStep("Could not check [none].")] }));
+    mocks.dispatch.mockImplementation(() => new Promise<Response>(() => undefined));
+    const started = Date.now();
+    const result = await runChatMcpAgent({ ...args, timeBudget: budget({ turnDeadlineMs: 5_000, toolTimeoutMs: 200, finalReserveMs: 1_000 }) });
+    expect(Date.now() - started).toBeLessThan(1_500);
+    expect(result.toolCalls).toMatchObject([{ status: "error", errorCode: "tool_timeout" }]);
   });
 });

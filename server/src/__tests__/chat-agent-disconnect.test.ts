@@ -95,7 +95,7 @@ describe("chat agent client disconnect over HTTP", () => {
       expect(nested.searchSignal?.aborted).toBe(true);
       expect(model.doStreamCalls).toHaveLength(1);
       // The step that returned the tool call was billed by the provider; it is still recorded.
-      expect(mocks.record).toHaveBeenCalledTimes(1);
+      await vi.waitFor(() => expect(mocks.record).toHaveBeenCalledTimes(1));
       expect(mocks.record.mock.calls[0]![0].usage.metadata).toMatchObject({ turnOutcome: "aborted", abortReason: "client_disconnect" });
     } finally {
       await new Promise(resolve => server.close(resolve));
