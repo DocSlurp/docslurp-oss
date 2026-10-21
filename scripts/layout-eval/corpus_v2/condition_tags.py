@@ -97,7 +97,7 @@ def backfill(root, historical=None):
    p=root/folder/f'{identifier}.{suffix}'
    if p.is_file():arts.append(artifact(p,role))
   ev=[arts[0]];a=[];scope={'kind':'page','id':identifier}
-  if source.get('provenance',{}).get('kind')=='deliberately-authored-editorial-composition':
+  if source.get('provenance',{}).get('kind') in {'deliberately-authored-editorial-composition','original-fictional-period-menu-composition'}:
    for tag in ['digital','born-digital','synthetic','aligned']:a.append(assertion(tag,scope,ev,'Native authored source commands rendered directly on upright page canvas, without capture transform.'))
   a+=table_assertions(source.get('regions',[]),ev,source.get('commands',[]))
   results.append(package(identifier,'native',arts,a,[{'facet':'image-quality','reason':'No page-level measured quality or independent condition adjudication; embedded asset lighting does not describe native page acquisition.'}]))

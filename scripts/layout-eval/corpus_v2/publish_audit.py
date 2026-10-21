@@ -46,7 +46,7 @@ def audit(root, clearances):
                 issues.append("missing_artifact:" + role)
             else:
                 artifacts[role] = {"path": str(path), "sha256": sha(path)}
-        if source.get("provenance", {}).get("kind") != "deliberately-authored-editorial-composition":
+        if source.get("provenance", {}).get("kind") not in {"deliberately-authored-editorial-composition", "original-fictional-period-menu-composition"}:
             issues.append("missing_reviewed_source_authorship_declaration")
         dependencies = []
         paths = {command["path"] for command in source.get("commands", []) if command.get("op") == "image"}
