@@ -16,7 +16,7 @@ The [original RT-DETRv2 postprocessor](https://github.com/lyuwenyu/RT-DETR/blob/
 also selects across the flattened query/class scores. One-label-per-query decoding
 would be a new output policy, not restoration of the documented behavior.
 
-Retained V2 CPU development predictions, repeat0, all24 images:
+Retained V2 CPU development predictions, repeat 0, all 24 images:
 
 | Model | Predictions | Extra exact boxes | Extra canonical-label/box pairs | Extra raw-label/box pairs |
 |---|---:|---:|---:|---:|
@@ -26,7 +26,7 @@ Retained V2 CPU development predictions, repeat0, all24 images:
 
 “Extra” is count minus distinct count within each page, summed over pages.
 Heron’s 39 apparently same-label repetitions are entirely taxonomy aliases:
-20 `section_header`/`title` combinations map to `title`, and19
+20 `section_header`/`title` combinations map to `title`, and 19
 `document_index`/`table` combinations map to `table`. No Heron exact box repeats
 with the same raw class. This distinction matters when diagnosing precision;
 canonical duplication is not proof that the adapter appended a detection twice.
