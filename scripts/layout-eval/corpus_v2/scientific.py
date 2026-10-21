@@ -19,7 +19,7 @@ OPENSTAX='https://d3bxy9euw4e147.cloudfront.net/oscms-prodcms/media/documents/Un
 NASA='https://ntrs.nasa.gov/api/citations/19960002145/downloads/19960002145.pdf'
 
 
-def equation(p,latex,x,y,width,size=23,display=True,group=None):
+def equation(p,latex,x,y,width,size=23,display=True,group=None,component=False):
     """Render actual mathematical typesetting, preserve expression and tight ink."""
     os.environ.setdefault('MPLCONFIGDIR',str(Path.home()/'.cache/docslurp/matplotlib'))
     import matplotlib
@@ -42,13 +42,32 @@ def equation(p,latex,x,y,width,size=23,display=True,group=None):
         im=Image.open(path).convert('RGB');b=ImageChops.difference(im,Image.new('RGB',im.size,background)).getbbox()
         if not b:raise ValueError('Empty formula rendering')
         im.crop(b).save(path)
+    licenses=REFERENCE_ROOT/'math-rendering-license-receipts';licenses.mkdir(exist_ok=True)
+    fontroot=Path(matplotlib.get_data_path())/'fonts/ttf'
+    mpllicense=Path(matplotlib.__file__).parent.parent/f'matplotlib-{matplotlib.__version__}.dist-info/LICENSE'
+    license_receipts=[]
+    for source in (fontroot/'LICENSE_STIX',fontroot/'LICENSE_DEJAVU',mpllicense):
+        target=licenses/('MATPLOTLIB-LICENSE' if source==mpllicense else source.name)
+        target.write_bytes(source.read_bytes())
+        license_receipts.append({'path':str(target),'sha256':hashlib.sha256(target.read_bytes()).hexdigest()})
+    fonts=[{'path':str(f),'sha256':hashlib.sha256(f.read_bytes()).hexdigest()} for f in sorted(fontroot.glob('STIX*.ttf'))]
+    provenance={'schema':'authored-formula-raster-provenance-v1','kind':'standard-mathematical-typesetting-not-AI-image-generation',
+        'expression':latex,'expression_sha256':hashlib.sha256(latex.encode()).hexdigest(),
+        'image_sha256':hashlib.sha256(path.read_bytes()).hexdigest(),'original_expression_declaration':'Newly authored formula expression for this original teaching example; standard mathematical identities, no source page raster copied.',
+        'renderer':{'name':'matplotlib.mathtext','version':matplotlib.__version__,'fontset':'stix','dpi':144,'point_size':size,'background':background},
+        'fonts':fonts,'license_receipts':license_receipts,'rights':'Original authored raster for user publication; STIX font software uses SIL OFL1.1; retain bundled license receipts.'}
+    Path(str(path)+'.provenance.json').write_text(json.dumps(provenance,indent=2)+'\n')
     with Image.open(path) as im:w,h=im.size
     scale=min(1,width/w);w,h=w*scale,h*scale
     box=[x,y,x+w,y+h]
     if box[2]>p.width or box[3]>p.height:raise ValueError('Formula outside page')
-    p.image(path,box,label='formula',asset={'kind':'newly-authored-mathtext-typesetting','renderer':'matplotlib.mathtext',
-        'renderer_version':matplotlib.__version__,'fontset':'stix','latex':latex,'dpi':144},
-        latex=latex,display=display,formula_group=group,extent_policy='cropped-rendered-formula-ink')
+    asset={'kind':'newly-authored-mathtext-typesetting','renderer':'matplotlib.mathtext',
+        'renderer_version':matplotlib.__version__,'fontset':'stix','latex':latex,'dpi':144,
+        'provenance_path':str(Path(str(path)+'.provenance.json'))}
+    if component:
+        p.math_component(path,box,latex,asset=asset,display=display,formula_group=group)
+    else:
+        p.image(path,box,label='formula',asset=asset,latex=latex,display=display,formula_group=group,extent_policy='cropped-rendered-formula-ink')
     return y+h
 
 
@@ -88,10 +107,10 @@ def oscillation_lesson():
     spring=[]
     for i in range(25):spring.extend([100+i*12,894+(0 if i in (0,24) else (16 if i%2 else -16))])
     p.line(spring,green,3);p.rectangle([390,852,487,940],'#dce8e4',outline=ink,width=3)
-    equation(p,r'm',426,875,45,19,display=False)
+    equation(p,r'm',426,875,45,19,display=False,component=True)
     p.line([95,950,531,950],ink,2);p.line([440,977,550,977],orange,3)
     p.line([550,977,537,969],orange,3);p.line([550,977,537,985],orange,3)
-    equation(p,r'+x',505,991,70,14,display=False)
+    equation(p,r'+x',505,991,70,14,display=False,component=True)
     p.region('illustration',[91,830,578,1030],None,kind='authored-spring-mass-schematic',not_a_photo=True)
     # Waveform has exactly specified axes, data coordinates and equation provenance.
     box=[660,808,1250,1045];p.rectangle(box,'#f3f5f0')
@@ -100,7 +119,7 @@ def oscillation_lesson():
     for i in range(151):
         t=i/150*2*math.pi;coords.extend([707+i/150*513,924-75*math.cos(t+math.pi/4)])
     p.line(coords,green,3)
-    equation(p,r'x/A',672,819,60,12,display=False);equation(p,r'\omega t',1160,1004,65,12,display=False)
+    equation(p,r'x/A',672,819,60,12,display=False,component=True);equation(p,r'\omega t',1160,1004,65,12,display=False,component=True)
     p.region('chart',box,None,chart_kind='cosine-with-initial-phase',function_latex=r'x/A=\cos(\omega t+\pi/4)',domain=[0,2*math.pi],axis_labels=['angular time','normalized displacement'])
     p.text('FIGURE 7.2  A mechanical model and its displacement trace. The origin of time is selected before the positive turning point.',73,1065,1175,20,'sans',orange,label='caption')
     p.text('WORKED EXAMPLE  /  Recovering the phase',72,1142,1170,28,'sans-bold',green,label='title')
@@ -155,7 +174,7 @@ def heat_flux_note():
         p.ellipse([xx-8,1063,xx+8,1079],blue)
         p.line([xx,1060,xx,970],blue,2);p.text(name,xx-16,940,75,19,'sans-bold',blue,label=None)
     p.line([rx+128,1172,rx+333,1172],blue,2)
-    equation(p,r'\Delta x',rx+206,1184,85,14,display=False)
+    equation(p,r'\Delta x',rx+206,1184,85,14,display=False,component=True)
     p.region('illustration',[rx+34,939,rx+472,1225],None,kind='authored-paired-sensor-cross-section',not_a_photo=True)
     p.text('Figure 1. Sensor locations across the plate thickness; diagram not to scale.',rx,1243,w,18,'serif',ink,label='caption')
     p.text('Table 1. Illustrative input values',75,1321,1090,22,'serif-bold',ink,label='caption')
