@@ -107,8 +107,9 @@ measurements. Failures count against recall, delivered throughput, and cost.
 
 E2E includes local read, source decode, producer resizing/encoding, payload decode,
 and detector work. It excludes network transfer: payload byte counts are real,
-network latency is not simulated. Original images are decoded to inspect source
-pixels before the consumer decode; source/producer costs are separately exposed.
+network latency is not simulated. Unmodified original bytes are decoded once with zero producer transformation cost;
+derived payloads expose producer decode/resize/encode separately from the consumer
+decode and model pipeline (`consumer_path_ms`).
 Compute cost excludes idle setup, storage/network and provider billing minima;
 `measured_wall_compute_usd` includes loop/scoring wall time. Host-wide billing must
 be reconciled separately by the remote runner. RSS is process high-water memory,

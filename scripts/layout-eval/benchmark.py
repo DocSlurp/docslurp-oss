@@ -55,7 +55,8 @@ def transform_bytes(data,variant):
         image=image.resize((max(1,round(image.width*scale)),max(1,round(image.height*scale))),Image.Resampling.LANCZOS)
     if variant.get('grayscale'): image=image.convert('L')
     codec=variant.get('codec','original').upper()
-    if codec=='ORIGINAL' and not max_edge and not variant.get('grayscale'):
+    unchanged=codec=='ORIGINAL' and not max_edge and not variant.get('grayscale')
+    if unchanged:
         payload=data
     else:
         if codec=='ORIGINAL': codec='PNG'
@@ -64,11 +65,15 @@ def transform_bytes(data,variant):
             options['subsampling']=variant.get('subsampling',2)
         buffer=io.BytesIO(); image.save(buffer,format=codec,**options); payload=buffer.getvalue()
     encoded=time.perf_counter()
-    with Image.open(io.BytesIO(payload)) as opened:
-        image=opened.convert('RGB')
+    if not unchanged:
+        with Image.open(io.BytesIO(payload)) as opened:
+            image=opened.convert('RGB')
     end=time.perf_counter()
+    producer_ms=0. if unchanged else 1000*(encoded-start)
+    consumer_decode_ms=1000*(decoded-start) if unchanged else 1000*(end-encoded)
     return image,{'source_decode_ms':1000*(decoded-start),'transform_encode_ms':1000*(encoded-decoded),
-                  'payload_decode_ms':1000*(end-encoded),'source_bytes':len(data),'source_sha256':hashlib.sha256(data).hexdigest(),'payload_bytes':len(payload),
+                  'payload_decode_ms':0. if unchanged else 1000*(end-encoded),
+                  'producer_path_ms':producer_ms,'consumer_decode_ms':consumer_decode_ms,'source_bytes':len(data),'source_sha256':hashlib.sha256(data).hexdigest(),'payload_bytes':len(payload),
                   'source_size':source_size,'input_size':image.size,'payload_sha256':hashlib.sha256(payload).hexdigest()}
 
 
@@ -175,7 +180,7 @@ def main(argv=None):
         'python':sys.version,'cpu_count':os.cpu_count(),'batch_size':args.batch_size,'warmup_batches':args.warmup,
         'model_load_ms':model_load_ms,'threshold':args.threshold,'split':args.split,'seed':args.seed,
         'hourly_usd':args.hourly_usd,'cost_exclusions':['storage','network','idle setup','provider minimum billing'],
-        'timer_semantics':'batch stages amortized per image; e2e includes local read+producer transform+payload decode+model; no simulated network',
+        'timer_semantics':'batch model stages amortized per image; original bytes decoded once as consumer; derivatives measure producer decode+resize+encode and consumer decode; e2e includes local read and all measured stages; no network',
         'variants':variants,'selected_page_ids':[r['id'] for r in rows],
         'started_unix':time.time()}
     args.output.with_suffix('.metadata.json').write_text(json.dumps(metadata,indent=2)+'\n')
@@ -208,8 +213,10 @@ def main(argv=None):
                         image_metadata=getattr(detector,'last_image_metadata',[])
                         if not error and index<len(image_metadata): detail.update(image_metadata[index])
                         amortized={key:value/len(batch) for key,value in timings.items()}
-                        timings_out={key:detail[key] for key in ('source_decode_ms','transform_encode_ms','payload_decode_ms','read_ms') if key in detail}
+                        timings_out={key:detail[key] for key in ('source_decode_ms','transform_encode_ms','payload_decode_ms','producer_path_ms','consumer_decode_ms','read_ms') if key in detail}
                         timings_out.update(amortized,end_to_end_ms=elapsed/len(batch))
+                        if not error:
+                            timings_out['consumer_path_ms']=detail['consumer_decode_ms']+sum(amortized.values())
                         truth=normalized_truth(load_reference(row,root))
                         result=dict(page_id=row['id'],variant=variant['name'],repeat=repeat,regions=regions,truth=truth,
                             metadata=row.get('metadata',{}),source_family=row.get('source_family',row.get('metadata',{}).get('source_family')),

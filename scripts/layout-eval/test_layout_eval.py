@@ -70,6 +70,20 @@ class ScoringTests(unittest.TestCase):
 
 @unittest.skipUnless(importlib.util.find_spec('PIL'),'Pillow optional for scoring-only tests')
 class ImageTests(unittest.TestCase):
+    def test_original_payload_decoded_once_and_has_no_producer_cost(self):
+        import io
+        from unittest.mock import patch
+        from PIL import Image
+        from benchmark import transform_bytes
+        buffer=io.BytesIO(); Image.new('RGB',(40,60),'white').save(buffer,format='PNG')
+        with patch('PIL.Image.open',wraps=Image.open) as opened:
+            image,details=transform_bytes(buffer.getvalue(),{'codec':'original'})
+        self.assertEqual(opened.call_count,1)
+        self.assertEqual(details['producer_path_ms'],0.)
+        self.assertEqual(details['payload_decode_ms'],0.)
+        self.assertGreater(details['consumer_decode_ms'],0.)
+        self.assertEqual(image.size,(40,60))
+
     def test_resampling_preserves_normalized_coordinates_and_bytes_are_real(self):
         import io
         from PIL import Image
