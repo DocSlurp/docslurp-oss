@@ -15,11 +15,11 @@ afterEach(() => resetSearchLimiterForTests());
 
 describe("search limiter", () => {
   it("derives its default from the pool size and honours env overrides", () => {
-    expect(resolveSearchLimiterOptions({})).toEqual({ maxConcurrency: 6, maxQueue: 200, queueTimeoutMs: 30_000 });
+    expect(resolveSearchLimiterOptions({})).toEqual({ maxConcurrency: 6, maxQueue: 200, queueTimeoutMs: 30_000, maxSlotsPerGroup: 2 });
     expect(resolveSearchLimiterOptions({ DATABASE_POOL_MAX: "40" }).maxConcurrency).toBe(13);
     expect(resolveSearchLimiterOptions({ DATABASE_POOL_MAX: "3" }).maxConcurrency).toBe(2);
     expect(resolveSearchLimiterOptions({ SEARCH_MAX_CONCURRENCY: "0", SEARCH_QUEUE_MAX: "5", SEARCH_QUEUE_TIMEOUT_MS: "1000" }))
-      .toEqual({ maxConcurrency: 0, maxQueue: 5, queueTimeoutMs: 1_000 });
+      .toEqual({ maxConcurrency: 0, maxQueue: 5, queueTimeoutMs: 1_000, maxSlotsPerGroup: 2 });
   });
 
   it("runs at most maxConcurrency searches and starts queued ones in order", async () => {
@@ -79,6 +79,43 @@ describe("search limiter", () => {
     await holder;
     expect(await next).toBe("next");
     expect(ran).toBe(false);
+    expect(limiter.stats()).toMatchObject({ running: 0, queued: 0 });
+  });
+
+  it("serves waiting tenants round-robin, so one tenant's fan-out cannot starve another", async () => {
+    const limiter = new ConcurrencyLimiter({ maxConcurrency: 1, maxQueue: 50, queueTimeoutMs: 5_000 });
+    let release!: () => void;
+    const holder = limiter.run(() => new Promise<void>((resolve) => { release = resolve; }), undefined, { tenant: "a" });
+    await sleep(1);
+    const order: string[] = [];
+    const work = (label: string, tenant: string) => limiter.run(async () => { order.push(label); await sleep(1); }, undefined, { tenant });
+    // Tenant a queues six searches before tenant b's single search arrives.
+    const runs = [...["a1", "a2", "a3", "a4", "a5", "a6"].map((label) => work(label, "a")), work("b1", "b")];
+    expect(limiter.stats()).toMatchObject({ queued: 7, waitingTenants: 2 });
+    release();
+    await Promise.all([holder, ...runs]);
+    // FIFO would run b1 last; fair admission runs it second.
+    expect(order.indexOf("b1")).toBe(1);
+    expect(order.filter((label) => label.startsWith("a"))).toEqual(["a1", "a2", "a3", "a4", "a5", "a6"]);
+  });
+
+  it("caps one admission group at maxSlotsPerGroup slots and leaves the rest to others", async () => {
+    const limiter = new ConcurrencyLimiter({ maxConcurrency: 6, maxQueue: 50, queueTimeoutMs: 5_000, maxSlotsPerGroup: 2 });
+    let running = 0;
+    let peakTurn = 0;
+    const releases: Array<() => void> = [];
+    const turn = Array.from({ length: 8 }, () => limiter.run(async () => {
+      peakTurn = Math.max(peakTurn, ++running);
+      await new Promise<void>((resolve) => releases.push(resolve));
+      running--;
+    }, undefined, { tenant: "org-a", group: "turn-1" }));
+    await sleep(1);
+    expect(limiter.stats()).toMatchObject({ running: 2, queued: 6 });
+    // Another turn of the same tenant still gets a slot at once.
+    expect(await limiter.run(async () => "other turn", undefined, { tenant: "org-a", group: "turn-2" })).toBe("other turn");
+    while (releases.length) { releases.shift()!(); await sleep(1); }
+    await Promise.all(turn);
+    expect(peakTurn).toBe(2);
     expect(limiter.stats()).toMatchObject({ running: 0, queued: 0 });
   });
 

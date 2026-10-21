@@ -1,0 +1,286 @@
+import { sql } from "../db.js";
+import type { SqlFragment } from "../lib/sql-fragments.js";
+import { lexicalSearchableDocument } from "./eligibility.js";
+import type { SearchFilters } from "./filters.js";
+import type { HashFilter } from "./index-serving.js";
+import { loadSearchAvailability, type SearchAvailabilityRow } from "./session-setup.js";
+import { envInt, TtlLruCache } from "./ttl-lru.js";
+
+/**
+ * Native search (SEARCH_LANCEDB_NATIVE): the per-workspace set of documents
+ * search may serve, loaded with one query and cached for a short TTL, so a
+ * search on a warm cache runs no eligibility or availability SQL. The set is
+ * the LanceDB prefilter (documentId IN …) for vector and full-text queries.
+ *
+ * Freshness: entries live SEARCH_ELIGIBLE_CACHE_TTL_MS (default 15000) and are
+ * dropped early when the worker's `run_events` NOTIFY hint names a run of the
+ * workspace, i.e. when a document or run of the workspace changes state. A
+ * document that completes indexing is therefore searchable within one hint
+ * (or at worst one TTL), and one that is deleted or superseded stops being
+ * served by the same bound; hits are still filtered to this set, never wider.
+ */
+
+export interface EligibleDocument {
+  id: string;
+  filename: string;
+  mimeType: string | null;
+  runId: string;
+  tags: string[];
+  /** Completed, current and registered in LanceDB for the cached embedding space. */
+  vectorReady: boolean;
+  /** Keyword search may serve it (fully indexed, or early lexical). */
+  lexical: boolean;
+  /** Document whose LanceDB rows are keyed by (dedup source); itself when not a copy. */
+  ownerId: string | null;
+  /** The owner's index config hash (index-config serving). */
+  ownerIndexConfigHash: string | null;
+}
+
+export interface EligibleDocumentSet {
+  workspaceId: string;
+  embeddingModel: string;
+  dimension: number;
+  documents: EligibleDocument[];
+  /** Completed documents with stored pages but no chunks: only completed-page search serves them. */
+  pageOnlyCompletedDocuments: number;
+  loadedAt: number;
+}
+
+type EligibleRow = {
+  id: string;
+  filename: string | null;
+  mime_type: string | null;
+  run_id: string;
+  tags: string[] | null;
+  vector_ready: boolean;
+  lexical: boolean;
+  page_only_completed: boolean;
+  owner_id: string | null;
+  owner_index_config_hash: string | null;
+};
+
+function truthy(value: string | undefined): boolean {
+  return ["1", "true", "on", "yes"].includes((value ?? "").trim().toLowerCase());
+}
+
+/**
+ * SEARCH_LANCEDB_NATIVE=1 serves lexical (BM25), vector and hydration from
+ * LanceDB for every workspace; SEARCH_LANCEDB_NATIVE_WORKSPACES=<id,…> turns
+ * it on for listed workspaces only. Off by default.
+ */
+export function searchLanceDbNativeEnabled(workspaceId: string | undefined, env: NodeJS.ProcessEnv = process.env): boolean {
+  if (truthy(env.SEARCH_LANCEDB_NATIVE)) return true;
+  if (!workspaceId) return false;
+  return (env.SEARCH_LANCEDB_NATIVE_WORKSPACES ?? "").split(",").map((id) => id.trim()).filter(Boolean).includes(workspaceId);
+}
+
+export function eligibleCacheTtlMs(env: NodeJS.ProcessEnv = process.env): number {
+  return envInt("SEARCH_ELIGIBLE_CACHE_TTL_MS", 15_000, env);
+}
+
+const MAX_ENTRIES = 500;
+let eligibleCache: TtlLruCache<Promise<EligibleDocumentSet>> | null = null;
+let availabilityCache: TtlLruCache<Promise<SearchAvailabilityRow | undefined>> | null = null;
+/** Workspace of each run seen in a cached set, so a run_events hint can drop the right entries. */
+const runWorkspaces = new Map<string, string>();
+/** Cache keys per workspace, for invalidation. */
+const keysByWorkspace = new Map<string, Set<string>>();
+
+function caches() {
+  eligibleCache ??= new TtlLruCache(MAX_ENTRIES, eligibleCacheTtlMs());
+  availabilityCache ??= new TtlLruCache(MAX_ENTRIES, eligibleCacheTtlMs());
+  return { eligibleCache, availabilityCache };
+}
+
+function remember(workspaceId: string, key: string): void {
+  const keys = keysByWorkspace.get(workspaceId) ?? new Set<string>();
+  keys.add(key);
+  keysByWorkspace.set(workspaceId, keys);
+}
+
+/** Drop every cached eligibility and availability entry of the workspace. */
+export function invalidateSearchWorkspace(workspaceId: string): void {
+  const keys = keysByWorkspace.get(workspaceId);
+  if (!keys) return;
+  keysByWorkspace.delete(workspaceId);
+  for (const key of keys) {
+    eligibleCache?.delete(key);
+    availabilityCache?.delete(key);
+  }
+}
+
+/** A run_events hint: invalidate the workspaces of the hinted runs (unknown runs are looked up off the search path). */
+export async function invalidateSearchRuns(runIds: string[]): Promise<void> {
+  const unknown: string[] = [];
+  for (const runId of runIds) {
+    const workspaceId = runWorkspaces.get(runId);
+    if (workspaceId) invalidateSearchWorkspace(workspaceId);
+    else unknown.push(runId);
+  }
+  if (unknown.length === 0 || keysByWorkspace.size === 0) return;
+  const rows = await sql<{ id: string; workspace_id: string }[]>`
+    select id, workspace_id from workspace_runs where id = any(${sql.array(unknown)})
+  `;
+  for (const row of rows) {
+    if (runWorkspaces.size < 100_000) runWorkspaces.set(row.id, row.workspace_id);
+    invalidateSearchWorkspace(row.workspace_id);
+  }
+}
+
+let listening: Promise<unknown> | null = null;
+
+/** Subscribe once per process to run_events hints (worker/src/db/run-event-store.ts). Best effort: the TTL still bounds staleness. */
+function ensureInvalidationListener(): void {
+  if (listening || typeof (sql as { listen?: unknown }).listen !== "function") return;
+  listening = sql.listen("run_events", (payload) => {
+    let runIds: string[] = [];
+    try {
+      const parsed = JSON.parse(payload) as { runIds?: unknown };
+      runIds = Array.isArray(parsed.runIds) ? parsed.runIds.filter((id): id is string => typeof id === "string") : [];
+    } catch {
+      return;
+    }
+    if (runIds.length) void invalidateSearchRuns(runIds).catch(() => undefined);
+  }).catch(() => {
+    listening = null;
+  });
+}
+
+async function queryEligibleDocuments(workspaceId: string, embeddingModel: string, dimension: number): Promise<EligibleDocumentSet> {
+  const lexical: SqlFragment = lexicalSearchableDocument("d");
+  // The vector part is the per-search `current_docs` CTE of vectorSearch,
+  // including the walk from dedup copies to the document that owns the rows.
+  const rows = await sql<EligibleRow[]>`
+    with recursive scoped as (
+      select d.id, d.filename, d.mime_type, d.run_id,
+        (d.status = 'completed' and d.superseded_at is null and exists (
+          select 1 from vector_indexes v
+          where v.document_id = d.id and v.backend = 'lancedb'
+            and v.embedding_model = ${embeddingModel} and v.dimension = ${dimension}
+        )) as vector_ready,
+        ${lexical} as lexical,
+        (d.status = 'completed' and d.superseded_at is null
+          and coalesce(d.chunk_count, 0) = 0 and coalesce(d.stored_page_count, 0) > 0) as page_only_completed
+      from documents d
+      where d.workspace_id = ${workspaceId}
+        and ((d.status = 'completed' and d.superseded_at is null) or ${lexical})
+    ),
+    chain as (
+      select s.id, d.id as node, d.deduped_from_document_id as next, 0 as depth
+      from scoped s join documents d on d.id = s.id
+      where s.vector_ready
+      union all
+      select chain.id, d.id, d.deduped_from_document_id, chain.depth + 1
+      from chain join documents d on d.id = chain.next
+      where chain.depth < 8
+    ),
+    owners as (
+      select distinct on (chain.id) chain.id, chain.node as owner_id, owner.index_config_hash
+      from chain join documents owner on owner.id = chain.node
+      order by chain.id, chain.depth desc
+    )
+    select s.id, s.filename, s.mime_type, s.run_id, s.vector_ready, s.lexical, s.page_only_completed,
+      o.owner_id, o.index_config_hash as owner_index_config_hash,
+      (select array_agg(t.tag) from document_tags t where t.document_id = s.id) as tags
+    from scoped s
+    left join owners o on o.id = s.id
+  `;
+  const documents = rows.filter((row) => row.vector_ready || row.lexical).map((row) => ({
+    id: row.id,
+    filename: row.filename ?? "",
+    mimeType: row.mime_type,
+    runId: row.run_id,
+    tags: row.tags ?? [],
+    vectorReady: row.vector_ready,
+    lexical: row.lexical,
+    ownerId: row.vector_ready ? row.owner_id ?? row.id : null,
+    ownerIndexConfigHash: row.owner_index_config_hash,
+  }));
+  return {
+    workspaceId,
+    embeddingModel,
+    dimension,
+    documents,
+    pageOnlyCompletedDocuments: rows.filter((row) => row.page_only_completed).length,
+    loadedAt: Date.now(),
+  };
+}
+
+/** The cached eligible set for one workspace and embedding space; one query on a miss, none on a hit. */
+export function loadEligibleDocuments(args: { workspaceId: string; embeddingModel: string; dimension: number }): Promise<EligibleDocumentSet> {
+  ensureInvalidationListener();
+  const { eligibleCache } = caches();
+  const key = JSON.stringify(["eligible", args.workspaceId, args.embeddingModel, args.dimension]);
+  const cached = eligibleCache.get(key);
+  if (cached) return cached;
+  const loading = queryEligibleDocuments(args.workspaceId, args.embeddingModel, args.dimension).then((set) => {
+    for (const document of set.documents) if (runWorkspaces.size < 100_000) runWorkspaces.set(document.runId, set.workspaceId);
+    return set;
+  });
+  // A failed load is not cached.
+  loading.catch(() => eligibleCache.delete(key));
+  eligibleCache.set(key, loading);
+  remember(args.workspaceId, key);
+  return loading;
+}
+
+/** Cached search availability (session-setup loadSearchAvailability) for native search. */
+export function loadCachedSearchAvailability(args: { workspaceId: string; runId?: string }): Promise<SearchAvailabilityRow | undefined> {
+  ensureInvalidationListener();
+  const { availabilityCache } = caches();
+  const key = JSON.stringify(["availability", args.workspaceId, args.runId ?? null]);
+  const cached = availabilityCache.get(key);
+  if (cached) return cached;
+  const loading = loadSearchAvailability(args);
+  loading.catch(() => availabilityCache.delete(key));
+  availabilityCache.set(key, loading);
+  remember(args.workspaceId, key);
+  return loading;
+}
+
+/** Filters native search resolves from the cached set; anything else (chunk-level) uses the Postgres path. */
+export function nativeScopeSupported(filters: SearchFilters | undefined): boolean {
+  return !filters?.language && !filters?.headingPath?.length
+    && filters?.pageRange?.from === undefined && filters?.pageRange?.to === undefined
+    && filters?.dateRange?.from === undefined && filters?.dateRange?.to === undefined;
+}
+
+/** Postgres ILIKE '%value%' as a case-insensitive regex (`%` and `_` in the value stay wildcards, as in SQL). */
+function ilikeContains(value: string): RegExp {
+  const pattern = value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/%/g, ".*").replace(/_/g, ".");
+  return new RegExp(pattern, "is");
+}
+
+/** The documents of the set in scope for these filters (document-level filters only; see nativeScopeSupported). */
+export function scopeEligibleDocuments(
+  set: EligibleDocumentSet,
+  filters: SearchFilters | undefined,
+  runId: string | undefined,
+): EligibleDocument[] {
+  if (filters?.workspaceId && filters.workspaceId !== set.workspaceId) return [];
+  const ids = new Set([...(filters?.documentId ? [filters.documentId] : []), ...(filters?.documentIds ?? [])]);
+  const filename = filters?.filenameContains ? ilikeContains(filters.filenameContains) : null;
+  const mimeTypes = filters?.mimeTypes?.length ? new Set(filters.mimeTypes) : null;
+  const tags = filters?.tags?.length ? new Set(filters.tags) : null;
+  const runIds = [runId, filters?.runId].filter((id): id is string => Boolean(id));
+  return set.documents.filter((document) =>
+    (!filters?.documentId || document.id === filters.documentId)
+    && (!filters?.documentIds?.length || ids.has(document.id))
+    && (!filename || filename.test(document.filename))
+    && (!mimeTypes || (document.mimeType !== null && mimeTypes.has(document.mimeType)))
+    && (!tags || document.tags.some((tag) => tags.has(tag)))
+    && runIds.every((id) => document.runId === id));
+}
+
+/** Index-config serving: keep documents whose owner was indexed under (or not under) the hash. */
+export function matchesServingHash(document: EligibleDocument, hash: HashFilter | null | undefined): boolean {
+  if (!hash) return true;
+  return hash.op === "eq" ? document.ownerIndexConfigHash === hash.value : document.ownerIndexConfigHash !== hash.value;
+}
+
+export function resetEligibleDocumentCachesForTests(): void {
+  eligibleCache = null;
+  availabilityCache = null;
+  runWorkspaces.clear();
+  keysByWorkspace.clear();
+}
