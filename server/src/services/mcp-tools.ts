@@ -9,7 +9,7 @@ import { apiKeyHasAnyScope } from "../lib/api-key-authorization.js";
 import { getApiKey, getRequestActor, loadActorScopedWorkspace, resolveActorWorkspaceId, setRequestActor, type RequestActor } from "../lib/request-actor.js";
 import { listWorkspaces } from "./workspaces.js";
 import { apiKeyCanUseWorkspace } from "../lib/api-key-workspace-scope.js";
-import { completeUploadInput, fullIndexInput, listWorkspacesInput, mcpManifest, mcpTools, suggestQueriesInput, uploadInput, uploadStatusInput } from "./mcp-catalog.js";
+import { buyCreditsInput, completeUploadInput, fullIndexInput, listWorkspacesInput, mcpManifest, mcpTools, suggestQueriesInput, uploadInput, uploadStatusInput } from "./mcp-catalog.js";
 import { mcpOrigin } from "../lib/mcp-origin.js";
 import { groundedWorkspaceChatRoutes, searchRoutes } from "../routes/search.js";
 import { sql } from "../db.js";
@@ -23,6 +23,7 @@ import { indexingModeErrorResponse } from "../lib/indexing-mode-error.js";
 import {
   apiKeyMayUseEstimateTool, estimateToolUsesWorkspace, forwardInProcess, isEstimateToolName, jobsGetInputSchema, planEstimateTool,
 } from "./mcp-estimate-tools.js";
+import { chargeAgentTopUp } from "./billing/machine-payments.js";
 import { spendAwareErrorHandler } from "./billing/spend-guard.js";
 import { loadIngestReport, summarizeIngestReport } from "./ingest-report.js";
 
@@ -73,6 +74,17 @@ const mcpAdapterRoutes = new Hono()
       if (!body || Array.isArray(body) || typeof body !== "object") throw new Error("Expected object");
     } catch {
       return adapterError(c, 400, "Expected a JSON object");
+    }
+
+    if (toolId === "buyCredits") {
+      const parsed = buyCreditsInput.safeParse(body);
+      if (!parsed.success) return invalidInput(c, parsed.error);
+      // Credits belong to the key's organization; people buy theirs through Checkout.
+      const orgId = actor.type === "apiKey" ? actor.apiKey.orgId : null;
+      if (!orgId) return adapterError(c, 403, "buyCredits requires an organization API key");
+      const outcome = await chargeAgentTopUp({ request: c.req.raw, orgId, userId: actor.userId, amountCents: parsed.data.amountCents });
+      if (outcome.status === 402) return outcome.challenge;
+      return outcome.withReceipt(c.json({ tool: toolId, ...outcome.grant }));
     }
 
     if (toolId === "listWorkspaces") {

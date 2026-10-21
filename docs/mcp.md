@@ -50,6 +50,20 @@ Read-only estimate tools (`updateEstimate`, `searchSettingsEstimate`, `reprocess
 
 The remote endpoint supports modern per-request MCP and stateless legacy Streamable HTTP clients. Stdio-only clients can use `docslurp mcp-server` from `@docslurp/cli`; its native REST adapters expose the same tools. Transport and adapter calls share the same authorization and search/chat implementation, without an internal network hop or forwarding credentials.
 
+## Agent-paid credits
+
+When the server enables machine payments, `buyCredits` lets an authenticated agent add prepaid credits to its key's organization and pay for them itself over [MPP](https://mpp.dev) (the Machine Payments Protocol, by Stripe and Tempo). Credits match a Checkout top-up: 1 credit per cent, $5 to $10,000 per call (`{"amountCents":2500}`). Signed-in people keep using Checkout; the chat agent never sees this tool.
+
+The tool follows MPP's MCP transport binding (`draft-payment-transport-mcp-00`):
+
+1. The first call fails with JSON-RPC error `-32042` and `data.challenges`, one per accepted method: `stripe` (a card or Link through a Stripe Shared Payment Token, for example from a [Link agent wallet](https://link.com/agents)) and, when configured, `tempo` (USDC on Tempo, settled to a Stripe deposit address).
+2. The agent's wallet pays one challenge and retries the same call with the signed credential in `params._meta["org.paymentauth/credential"]`.
+3. The result reports the credits granted and carries the receipt in `_meta["org.paymentauth/receipt"]`.
+
+A credential is bound to the organization and amount it was issued for, and each payment grants once; replays fail with `-32043`. The initialize result advertises the accepted methods under `capabilities.experimental.payment`. The REST adapter (`POST /v1/mcp/tools/buyCredits`) speaks the same protocol over HTTP: a `402` with `WWW-Authenticate: Payment`, the credential in `Payment-Authorization` beside the API key's `Authorization`, and a `Payment-Receipt` header.
+
+The stdio adapter (`docslurp mcp-server`) does not list `buyCredits`; use the remote endpoint. Operators enable `buyCredits` with `MACHINE_PAYMENTS_ENABLED=true`, `STRIPE_SECRET_KEY` and `STRIPE_PROFILE_ID` (the account's Stripe profile ID); stablecoins also need `MPP_TEMPO_DEPOSIT_ADDRESS` and Stripe's Stablecoins and Crypto payment method. See [Stripe machine payments](https://docs.stripe.com/payments/machine) for availability.
+
 ## Testing with real clients
 
 `pnpm test:mcp` runs the MCP and OpenAI-compatible client tests. None of them needs

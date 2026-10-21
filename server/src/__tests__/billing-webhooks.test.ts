@@ -245,6 +245,16 @@ describe("dispatchStripeEvent", () => {
     expect(db.find("auto_recharge_consecutive_failures = 0")).toHaveLength(1);
   });
 
+  it("payment_intent.succeeded backstops an agent card top-up under the same PaymentIntent key, never a stablecoin one", async () => {
+    const db = fakeSql((q) => (q.text.includes("grant_org_credits(") ? [{ granted: false }] : []));
+    const metadata = { orgId: "org-1", purpose: "agent_credit_topup", credits: "2500" };
+    await dispatchStripeEvent(db.client, fakeStripe(), event("payment_intent.succeeded", { id: "pi_agent", amount: 2_500, payment_method_types: ["card", "link"], metadata }));
+    expect(db.find("grant_org_credits(")[0]!.values.slice(0, 5)).toEqual(["org-1", "topup", "pi_agent", "prepaid", 2_500]);
+    // Stablecoin grants are keyed by transaction hash at payment time; a PaymentIntent key would grant twice.
+    await dispatchStripeEvent(db.client, fakeStripe(), event("payment_intent.succeeded", { id: "pi_crypto", amount: 2_500, payment_method_types: ["crypto"], metadata }));
+    expect(db.find("grant_org_credits(")).toHaveLength(1);
+  });
+
   it("payment_intent.payment_failed counts an auto-recharge failure once per intent", async () => {
     const db = fakeSql();
     await dispatchStripeEvent(

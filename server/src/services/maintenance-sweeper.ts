@@ -6,6 +6,8 @@ import { enforcePastDueGrace } from "./billing/webhooks.js";
 import { sweepInterruptedConnectorSyncs } from "./connector-sync-recovery.js";
 import { sweepSpendPausedRuns } from "./spend-paused-runs.js";
 import { sweepExpiredCreditLeases } from "./billing/credit-leases.js";
+import { sweepMachinePaymentStore } from "./billing/machine-payment-store.js";
+import { machinePaymentsEnabled } from "./billing/machine-payments.js";
 import { sweepStaleQueuedRuns } from "./stale-queued-runs.js";
 import { resumeOrganizationDeletions } from "./tenant-offboarding.js";
 import { requestWebhookOutboxDrain } from "./webhooks.js";
@@ -42,6 +44,9 @@ const sweeps: Array<[name: string, run: () => Promise<unknown>]> = [
   ["spend-paused-runs", () => sweepSpendPausedRuns()],
   // Credit leases past their TTL (crashed workers) back to the pool, with a wake-up.
   ["credit-lease-expiry", () => sweepExpiredCreditLeases()],
+  // Expired agent-payment challenges and replay markers (grants stay keyed by
+  // payment); a no-op unless machine payments are enabled.
+  ["machine-payment-store", async () => machinePaymentsEnabled() ? sweepMachinePaymentStore() : 0],
   // Finish organization deletions interrupted after their tombstone was written.
   ["tenant-offboarding", () => resumeOrganizationDeletions()],
 ];

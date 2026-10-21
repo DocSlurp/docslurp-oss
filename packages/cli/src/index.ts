@@ -805,6 +805,8 @@ function writeMcpResponse(response: Record<string, unknown>): void {
 
 const MCP_CAPABILITIES_URI = "docslurp://capabilities";
 
+const STDIO_UNSUPPORTED_TOOLS = new Set(["buyCredits"]);
+
 async function mcpFetch(args: {
   apiUrl: string;
   apiKey: string;
@@ -879,7 +881,8 @@ async function mcpServerCommand(flags: Record<string, string | boolean>): Promis
       switch (envelope.method) {
         case "tools/list": {
           const result = await get("/v1/mcp/tools");
-          respond({ tools: result.tools.map((tool: any) => ({
+          // Paid tools need MPP's challenge/credential round trip, which only the remote endpoint relays.
+          respond({ tools: result.tools.filter((tool: any) => !STDIO_UNSUPPORTED_TOOLS.has(tool.id)).map((tool: any) => ({
             name: tool.id, title: tool.title, description: tool.description, inputSchema: tool.inputSchema
           })) });
           break;

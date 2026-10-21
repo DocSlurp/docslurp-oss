@@ -1,5 +1,6 @@
 import { reportPublicError } from "./public-errors.js";
 import { createMcpHandler, ProtocolError, ProtocolErrorCode, Server } from "@modelcontextprotocol/server";
+import { paymentCredentialHeader, paymentCredentialMetaKey, paymentProtocolError, paymentReceiptMeta } from "./mcp-payment.js";
 
 interface Capability {
   id: string;
@@ -13,6 +14,8 @@ interface Capability {
 
 export interface McpManifest {
   capabilities: Capability[];
+  /** MPP methods for paid tools, advertised as `capabilities.experimental.payment`. */
+  payment?: { methods: Record<string, { intents: string[] }> };
 }
 
 export type McpDispatch = (path: string, init?: RequestInit) => Promise<Response>;
@@ -30,7 +33,7 @@ function createServer(manifest: McpManifest, adapterDispatch: McpDispatch, signa
     catch { throw new ProtocolError(ProtocolErrorCode.InternalError, "DocSlurp request failed"); }
   };
   const server = new Server({ name: "docslurp", version: "0.1.0" }, {
-    capabilities: { tools: {}, resources: {}, prompts: {} },
+    capabilities: { tools: {}, resources: {}, prompts: {}, ...(manifest.payment && { experimental: { payment: manifest.payment } }) },
     instructions: "Use listWorkspaces to discover authorized workspaces. Use upload for URLs or up to 10 presigned file PUT URLs. PUT the bytes then call completeUpload before getUploadStatus. Workspace selection is optional: omitted workspaceId uses the organization default. Use search with q for one query or queries for a batch of cited passages to answer with your own model, or chat for a generated grounded answer that incurs AI usage. Respect workspace and cost constraints.",
   });
   const tools = manifest.capabilities.filter((item) => item.category === "tool");
@@ -44,16 +47,24 @@ function createServer(manifest: McpManifest, adapterDispatch: McpDispatch, signa
   }) }));
   server.setRequestHandler("tools/call", async (request, ctx) => {
     if (!tools.some((item) => item.id === request.params.name)) throw new ProtocolError(ProtocolErrorCode.InvalidParams, "Unknown tool");
+    const headers: Record<string, string> = { "Content-Type": "application/json" };
+    const rawCredential = request.params._meta?.[paymentCredentialMetaKey];
+    const credential = rawCredential === undefined ? null : paymentCredentialHeader(rawCredential);
+    if (rawCredential !== undefined && !credential) throw new ProtocolError(ProtocolErrorCode.InvalidParams, "Malformed payment credential");
+    if (credential) headers["Payment-Authorization"] = credential.header;
     const response = await dispatch(`/tools/${encodeURIComponent(request.params.name)}`, {
-      method: "POST", headers: { "Content-Type": "application/json" },
+      method: "POST", headers,
       body: JSON.stringify(request.params.arguments ?? {}),
       signal: AbortSignal.any([signal, ctx.mcpReq.signal]),
     });
+    const paymentError = await paymentProtocolError(response);
+    if (paymentError) throw paymentError;
     // Known adapter errors are safe, structured responses. Unexpected exceptions
     // stay inside the protocol's generic internal-error boundary.
     const result = await response.json();
+    const receipt = paymentReceiptMeta(response, credential?.challengeId);
     return { content: [{ type: "text" as const, text: JSON.stringify(result) }],
-      structuredContent: result as Record<string, unknown>, isError: !response.ok };
+      structuredContent: result as Record<string, unknown>, isError: !response.ok, ...(receipt && { _meta: receipt }) };
   });
   server.setRequestHandler("resources/list", () => ({ resources: [{
     uri: CAPABILITIES_URI, name: "capabilities", title: "DocSlurp capabilities",

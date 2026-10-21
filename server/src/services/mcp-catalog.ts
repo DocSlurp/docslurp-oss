@@ -1,11 +1,12 @@
 import { z } from "zod";
 
-import { deferredProfilesEnabled } from "@docslurp/shared";
+import { deferredProfilesEnabled, MAX_TOPUP_CENTS, MIN_TOPUP_CENTS } from "@docslurp/shared";
 
 import { env } from "../config.js";
 import { batchSearchInputSchema, searchInputSchema, workspaceChatInputSchema } from "../lib/search-input.js";
 import { toolInputJsonSchema } from "./mcp-tool-schemas.js";
 import { apiKeyMayUseEstimateTool, estimateToolDefinitions, jobsGetInputSchema, jobsGetToolDefinition, type EstimateToolName } from "./mcp-estimate-catalog.js";
+import { machinePaymentMethods, machinePaymentsEnabled } from "./billing/machine-payments.js";
 
 export { jobsGetInputSchema };
 
@@ -40,6 +41,9 @@ export const uploadStatusInput = z.object({
 export const fullIndexInput = z.object({
   workspaceId: workspaceRef,
   documentIds: z.array(z.string().min(1)).max(500).optional().describe("Only these documents; omit to index every remaining page in the workspace."),
+}).strict();
+export const buyCreditsInput = z.object({
+  amountCents: z.number().int().min(MIN_TOPUP_CENTS).max(MAX_TOPUP_CENTS).describe("Prepaid credits to buy for this organization, in US cents (1 credit = $0.01)."),
 }).strict();
 export const suggestQueriesInput = z.object({
   workspaceId: z.string().min(1).max(256).optional(),
@@ -129,6 +133,10 @@ export function mcpTools(baseUrl: string): McpTool[] {
       annotations: { readOnly: false, destructive: false, idempotent: false, openWorld: false, consequential: true },
       description: "Parse and index every remaining page of a deferred (map/visual) workspace, or of the listed documents, in the background. Spends credits and is refused unless the key or capability policy allows full-index requests.",
       inputSchema: toolInputJsonSchema(fullIndexInput) }] : []),
+    ...(machinePaymentsEnabled() ? [{ id: "buyCredits", title: "Buy credits", scopes: ["search" as const, "ingest" as const],
+      annotations: { readOnly: false, destructive: false, idempotent: false, openWorld: true, consequential: true },
+      description: "Add prepaid credits to this key's organization, paid by the agent over MPP (the Machine Payments Protocol). The first call returns a payment challenge (JSON-RPC error -32042) offering each accepted method (a card through a Stripe Shared Payment Token and, where enabled, USDC on Tempo); retry the same call with the signed credential in _meta[\"org.paymentauth/credential\"]. The result carries a receipt in _meta[\"org.paymentauth/receipt\"]. Spends real money; confirm the amount with the user first.",
+      inputSchema: toolInputJsonSchema(buyCreditsInput) }] : []),
     ...estimates,
     { id: jobsGetToolDefinition.id, title: jobsGetToolDefinition.title, description: jobsGetToolDefinition.description,
       inputSchema: jobsGetToolDefinition.inputSchema, scopes: ["search", "ingest"], annotations: READ_ONLY },
@@ -138,7 +146,7 @@ export function mcpTools(baseUrl: string): McpTool[] {
 
 /** The catalog visible to a caller: session callers see everything, API keys see tools their scopes allow. */
 export function mcpManifest(baseUrl: string, scopes?: string[], keyType?: string) {
-  return {
+  const manifest = {
     server: {
       id: env.mcpServerId, title: "DocSlurp MCP", version: "0.1.0",
       transports: ["streamable-http", "stdio"], endpoint: `${baseUrl}/v1/mcp`,
@@ -146,4 +154,7 @@ export function mcpManifest(baseUrl: string, scopes?: string[], keyType?: string
     },
     capabilities: mcpTools(baseUrl).filter(tool => !scopes || (tool.keyAccess ? tool.keyAccess({ scopes, keyType }) : tool.scopes.some(scope => scopes.includes(scope)))),
   };
+  if (!manifest.capabilities.some(tool => tool.id === "buyCredits")) return manifest;
+  // MPP MCP transport capability advertisement (draft-payment-transport-mcp-00).
+  return { ...manifest, payment: { methods: Object.fromEntries(machinePaymentMethods().map(method => [method, { intents: ["charge"] }])) } };
 }

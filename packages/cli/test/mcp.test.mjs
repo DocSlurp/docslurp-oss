@@ -10,7 +10,7 @@ async function invoke(lines) {
     let body = "";
     for await (const chunk of req) body += chunk;
     requests.push({ path: req.url, authorization: req.headers.authorization, body });
-    const result = req.url === "/v1/mcp/tools" ? { tools: [{ id: "suggestQueries", title: "Suggest", inputSchema: { type: "object" } }] }
+    const result = req.url === "/v1/mcp/tools" ? { tools: [{ id: "suggestQueries", title: "Suggest", inputSchema: { type: "object" } }, { id: "buyCredits", title: "Buy credits", inputSchema: { type: "object" } }] }
       : req.url === "/v1/mcp/prompts/workspace-grounded-answer" ? { prompt: "Use citations" }
       : req.url === "/v1/mcp/resources/capabilities" ? { capabilities: [] }
       : { suggestions: ["renewal" ] };
@@ -43,7 +43,8 @@ test("MCP stdio lifecycle, discovery, tool content, resources and prompts use pr
   for (const response of responses) assert.equal(response.jsonrpc, "2.0");
   assert.equal(responses[0].result.protocolVersion, "2025-06-18");
   assert.deepEqual(responses[0].result.capabilities, { tools: {}, resources: {}, prompts: {} });
-  assert.equal(responses[1].result.tools[0].name, "suggestQueries");
+  // Paid tools need the remote endpoint's MPP relay.
+  assert.deepEqual(responses[1].result.tools.map(tool => tool.name), ["suggestQueries"]);
   assert.equal(responses[2].result.isError, false);
   assert.deepEqual(JSON.parse(responses[2].result.content[0].text), { suggestions: ["renewal"] });
   assert.equal(responses[3].result.resources[0].uri, "docslurp://capabilities");

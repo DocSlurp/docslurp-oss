@@ -2659,6 +2659,23 @@ export const stripeWebhookEvents = pgTable(
   ],
 );
 
+export const machinePaymentStore = pgTable(
+  "machine_payment_store",
+  {
+    key: text().primaryKey().notNull(),
+    value: text().notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true, mode: "string" })
+      .defaultNow()
+      .notNull(),
+  },
+  (table) => [
+    index("machine_payment_store_updated_at_idx").using(
+      "btree",
+      table.updatedAt.asc().nullsLast().op("timestamptz_ops"),
+    ),
+  ],
+);
+
 export const kgNodes = pgTable(
   "kg_nodes",
   {

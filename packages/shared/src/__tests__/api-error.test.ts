@@ -82,6 +82,22 @@ describe("safeErrorResponse with the native envelope", () => {
   });
 });
 
+describe("safeErrorResponse with MPP payment problems", () => {
+  const problem = (body: Record<string, unknown>) => new Response(JSON.stringify(body), {
+    status: 402, headers: { "content-type": "application/problem+json", "www-authenticate": "Payment id=\"c1\"" },
+  });
+  it("keeps the paymentauth type and fixed title, drops provider detail, and keeps the challenge header", async () => {
+    const res = await safeErrorResponse(problem({ type: "https://paymentauth.org/problems/verification-failed", title: "Verification Failed", status: 402, detail: "Stripe PaymentIntent failed: sk_live_secret" }), "req-3");
+    expect(await res.json()).toEqual({ type: "https://paymentauth.org/problems/verification-failed", title: "Verification Failed", status: 402, requestId: "req-3" });
+    expect(res.headers.get("content-type")).toBe("application/problem+json");
+    expect(res.headers.get("www-authenticate")).toBe("Payment id=\"c1\"");
+  });
+  it("treats any other problem document as an ordinary error", async () => {
+    const res = await safeErrorResponse(problem({ type: "https://example.com/leak", title: "secret" }));
+    expect(JSON.stringify(await res.json())).not.toMatch(/secret|example/);
+  });
+});
+
 describe("publicApiErrorDetails", () => {
   it("forwards field paths and server-authored limit metadata, nothing else", () => {
     expect(publicApiErrorDetails({

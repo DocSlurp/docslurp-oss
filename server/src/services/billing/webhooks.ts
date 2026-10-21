@@ -10,6 +10,7 @@ import {
 import { sql, type SqlClient } from "../../db.js";
 import { recordAutoRechargeFailure, recordAutoRechargeSuccess } from "./auto-recharge.js";
 import { grantOrgCredits } from "./credits.js";
+import { AGENT_TOPUP_PURPOSE } from "./machine-payments.js";
 import { getStripe, stripeId } from "./stripe-client.js";
 
 const STRIPE_WEBHOOK_LOCK_NAMESPACE = 90_102;
@@ -506,6 +507,17 @@ export async function dispatchStripeEvent(client: SqlClient, stripe: Stripe, eve
           source: "auto_recharge",
         });
         await recordAutoRechargeSuccess(client, orgId);
+      } else if (intent.metadata?.purpose === AGENT_TOPUP_PURPOSE && !intent.payment_method_types.includes("crypto")) {
+        // Backstop for an agent card top-up whose synchronous grant failed after
+        // the charge; both key the grant by this PaymentIntent, so it lands once.
+        // Stablecoin grants are keyed by transaction hash and stay synchronous.
+        await grantTopUp(client, {
+          orgId,
+          paymentIntentId: intent.id,
+          credits: numberMetadata(intent.metadata?.credits, intent.amount),
+          source: "topup",
+          extra: { rail: "mpp" },
+        });
       }
       return true;
     }

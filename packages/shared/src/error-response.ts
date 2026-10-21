@@ -19,6 +19,8 @@ export const reportPublicError: PublicErrorReporter = (error, context = {}) => {
 export async function safeErrorResponse(response: Response, requestId?: string, report: PublicErrorReporter = reportPublicError, native = false): Promise<Response> {
   if (response.status < 400) return response;
   const message = publicErrorForStatus(response.status);
+  const paymentProblem = await paymentProblemResponse(response, requestId, report);
+  if (paymentProblem) return paymentProblem;
   let body: Record<string, unknown> = { error: message };
   if (response.headers.get("content-type")?.includes("application/json")) {
     try {
@@ -63,6 +65,30 @@ export async function safeErrorResponse(response: Response, requestId?: string, 
   if (native) return jsonErrorResponse(response, nativeEnvelopeFor(null, response.status, requestId));
   if (requestId) body.requestId = requestId;
   return jsonErrorResponse(response, body);
+}
+
+const PAYMENT_PROBLEM_PREFIX = "https://paymentauth.org/problems/";
+
+/**
+ * MPP (Machine Payments Protocol) problem details keep their protocol shape:
+ * payment clients branch on the closed `type` vocabulary and the fixed
+ * `title`, so both survive; free-text `detail` (which can quote a provider
+ * error) is reported and dropped like any other diagnostic.
+ */
+async function paymentProblemResponse(response: Response, requestId: string | undefined, report: PublicErrorReporter): Promise<Response | null> {
+  if (!response.headers.get("content-type")?.includes("application/problem+json")) return null;
+  const original = await response.clone().json().catch(() => null) as { type?: unknown; title?: unknown; detail?: unknown } | null;
+  const type = typeof original?.type === "string" ? original.type : "";
+  if (!type.startsWith(PAYMENT_PROBLEM_PREFIX) || !/^[a-z0-9/-]{1,80}$/.test(type.slice(PAYMENT_PROBLEM_PREFIX.length))) return null;
+  // A challenge is the protocol's normal first answer, not a failure worth reporting.
+  if (typeof original?.detail === "string" && !type.endsWith("/payment-required")) report(new Error(original.detail), { requestId: requestId ?? "", status: response.status, surface: "payment-problem" });
+  const title = typeof original?.title === "string" && /^[A-Za-z ]{1,60}$/.test(original.title) ? original.title : publicErrorForStatus(response.status);
+  const headers = new Headers(response.headers);
+  headers.set("content-type", "application/problem+json");
+  headers.set("cache-control", "no-store");
+  headers.delete("content-length");
+  headers.delete("content-encoding");
+  return new Response(JSON.stringify({ type, title, status: response.status, ...(requestId && { requestId }) }), { status: response.status, headers });
 }
 
 function jsonErrorResponse(response: Response, body: unknown): Response {
