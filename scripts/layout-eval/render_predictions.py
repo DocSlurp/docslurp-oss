@@ -141,7 +141,8 @@ def main(argv=None):
                 overlay_path=str(output),overlay_sha256=digest(output),scope='post-score development diagnostics; not independent admission QA or heldout confirmation')
             output.with_suffix('.json').write_text(json.dumps(report,indent=2)+'\n')
             records.append({k:report[k] for k in ('page_id','diagnostic','overlay_path','overlay_sha256','unsupported_truth_labels')})
-    (args.output_dir/'index.json').write_text(json.dumps(records,indent=2)+'\n');print(json.dumps(records,indent=2))
+    (args.output_dir/'index.json').write_text(json.dumps(records,indent=2)+'\n')
+    print(json.dumps({'overlays':len(records),'index':str(args.output_dir/'index.json')}))
 
 
 if __name__=='__main__':main()
