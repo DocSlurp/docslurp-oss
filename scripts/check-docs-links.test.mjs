@@ -1,12 +1,17 @@
+import { execFileSync } from "node:child_process";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
-import { test } from "node:test";
-import { checkFile, extractLinks, githubSlug } from "./check-docs-links.mjs";
+import { dirname, join, relative } from "node:path";
+import { after, test } from "node:test";
+import { checkFile, defaultFiles, extractLinks, githubSlug, publicDocsFiles } from "./check-docs-links.mjs";
+
+const fixtures = [];
+after(() => fixtures.forEach((dir) => rmSync(dir, { recursive: true, force: true })));
 
 function fixture(files) {
   const dir = mkdtempSync(join(tmpdir(), "docs-links-"));
+  fixtures.push(dir);
   for (const [name, body] of Object.entries(files)) {
     const full = join(dir, name);
     mkdirSync(dirname(full), { recursive: true });
@@ -70,4 +75,45 @@ test("headings inside fenced blocks are not anchors", () => {
 test("reference-style links are checked", () => {
   const dir = fixture({ "a.md": "[x][ref]\n\n[ref]: nope.md\n[ok]: a.md\n" });
   assert.deepEqual(checkFile(join(dir, "a.md")), [{ line: 3, target: "nope.md" }]);
+});
+
+
+test("discovery covers the repository, includes new docs and skips deleted or ignored files", () => {
+  const dir = fixture({
+    "ROOT.md": "# Root",
+    "performance/run.md": "# Run",
+    "worker/notes.md": "# Worker",
+    "worker/guide.mdx": "# MDX",
+    "worker/guide.markdown": "# Markdown",
+    "docs/superpowers/specs/history.md": "# Historical",
+    "docs/public.md": "# Public",
+    "docs/public.mdx": "# Public MDX",
+    "packages/sdk/README.md": "# SDK",
+    "removed.md": "# Deleted",
+    "file with spaces.md": "# Spaces",
+    "line\nbreak.md": "# Newline",
+    "script.mjs": "",
+    ".gitignore": "ignored/\n",
+  });
+  const git = (...args) => execFileSync("git", args, { cwd: dir, encoding: "utf8" });
+  git("init", "--quiet");
+  git("add", ".");
+  rmSync(join(dir, "removed.md"));
+  mkdirSync(join(dir, "ignored"));
+  writeFileSync(join(dir, "ignored/new.md"), "# Ignored");
+  writeFileSync(join(dir, "ignored/tracked.md"), "# Tracked despite ignore");
+  git("add", "--force", "ignored/tracked.md");
+  writeFileSync(join(dir, "new.md"), "# New");
+  const names = (files) => files.map((file) => relative(dir, file));
+  assert.deepEqual(names(defaultFiles(dir)), [
+    "ROOT.md", "docs/public.md", "docs/public.mdx", "docs/superpowers/specs/history.md",
+    "file with spaces.md", "ignored/tracked.md", "line\nbreak.md", "new.md",
+    "packages/sdk/README.md", "performance/run.md", "worker/guide.markdown", "worker/guide.mdx", "worker/notes.md",
+  ]);
+  assert.deepEqual(names(publicDocsFiles(dir)), ["docs/public.md", "packages/sdk/README.md"]);
+});
+
+test("discovery reports git failures instead of silently checking zero files", () => {
+  const dir = fixture({});
+  assert.throws(() => defaultFiles(dir), /git/);
 });

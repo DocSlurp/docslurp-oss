@@ -1,5 +1,16 @@
 # Metered DeepInfra embedding smoke
 
+> Historical investigation record from the October 2026 retrieval experiments;
+> classified 2026-10-20. Status, deployment, provider prices, available adapters,
+> budgets and agent assignments below describe their original checkpoints. They
+> are not current operating instructions or renewed spending/delegation authority.
+> Current references: [model configuration](../../docs/model-configuration.md) and [evaluation integrity](../../docs/evaluation-integrity.md).
+> Reported checks/results and outstanding work are preserved without rerunning
+> experiments or claiming that pending verification is complete. Any `/tmp` paths
+> are historical external evidence locations; their existence and contents were
+> not verified in this cleanup. They have not been relocated. New scratch work
+> follows the repository's agent-storage guidance.
+
 Succeeded 2026-10-17 05:35:52 UTC through the new worker `embedTextChunks` and query `embedConfiguredText` application functions. `assertCanSpend` ran before each call, active spend protection was checked explicitly, and a scoped `createUsageLedger` flushed actual usage before retaining vectors. The canonical `attributedUsage` reader confirmed both DB events under the verified existing test user/org/workspace. No existing corpus or index changed.
 
 | Application path | Actual input tokens | Returned dimensions | Vector L2 norm | Provider USD | Customer ledger USD |

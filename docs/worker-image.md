@@ -4,6 +4,11 @@ How the production worker image stays well under Fly's image limit, and how the
 heavy optional extractors (Docling, Unstructured) are installed on demand from
 prebuilt, sha256-pinned bundles instead of runtime `pip install`.
 
+Worker Dockerfiles and image publication live in this repository. Hosted Fly
+configuration (`fly.worker.toml`) and production deployment belong to the private
+`DocSlurp/app` repository. Fly measurements below are historical observations.
+See the [self-host guide](self-host/README.md) and [release procedure](releases.md).
+
 ## Fly limits that matter
 
 | Limit | Value | Source |
@@ -16,7 +21,7 @@ and from the deploy error text. The CI image budget (below) is set well under it
 
 ## What is in each image
 
-| | `Dockerfile.lean` (production, `fly.worker.toml`) | `Dockerfile.full` (self-host `--profile full`) |
+| | `Dockerfile.lean` (hosted production profile) | `Dockerfile.full` (self-host `--profile full`) |
 | --- | --- | --- |
 | Node | worker-only production `node_modules` from `pnpm deploy`, pruned | same |
 | System tools | poppler-utils, pandoc, ffmpeg, ClamAV, bubblewrap | adds LibreOffice, Tesseract (eng/fra/deu/spa), ocrmypdf, ghostscript, ImageMagick, qpdf, catdoc, unrtf |
@@ -36,7 +41,7 @@ and from the deploy error text. The CI image budget (below) is set well under it
 | lean, before (origin/main) | 4,935 MiB | 1,516 MiB |
 | **lean, after** | **1,884 MiB** | **615 MiB** |
 | lean with PyMuPDF removed (2026-10-15, `DOCSLURP_NATIVE_PDF=1`, measured against the same build with PyMuPDF: 1,897 to 1,832 MiB) | 1,832 MiB | 629 MB registry content (656 MB before) |
-| production `docslurp-worker` today (measured on a machine) | ~4,280 MiB | 1,082 MiB (registry manifest) |
+| hosted `docslurp-worker` (measured 2026-10-14) | ~4,280 MiB | 1,082 MiB (registry manifest) |
 | full, before (origin/main) | 7,196 MiB, plus about 3.8 GB pip-installed onto the rootfs at first boot | 2,563 MiB |
 | **full, after** (now also includes ffmpeg) | **2,552 MiB** | **873 MiB** |
 | `docling` bundle | 1,743 MiB unpacked | 656 MiB `.tar.zst` |
@@ -189,7 +194,8 @@ docker buildx build -f worker/Dockerfile.bundles --build-arg BUNDLE=docling \
   --target export --output type=local,dest=.scratch/bundles .
 ```
 
-In CI, **Actions → Vendor Bundles** (`workflow_dispatch` only) builds a bundle,
+The historical **Actions → Vendor Bundles** workflow (`workflow_dispatch` only;
+not present in this repository) was documented to build a bundle,
 verifies the archive against its entry, uploads the manifest entry as an
 artifact and, with `publish=true`, uploads `<prefix>/<bundle>/<sha256>.tar.zst`
 (immutable, `Cache-Control: immutable`). It never deploys. To pin the result:
@@ -226,7 +232,8 @@ One-time setup:
    `fly secrets set -a <worker-app> DOCSLURP_VENDOR_BUNDLE_S3_ACCESS_KEY_ID=... DOCSLURP_VENDOR_BUNDLE_S3_SECRET_ACCESS_KEY=...`.
    Non-secret settings (`DOCSLURP_VENDOR_BUNDLE_BASE_URL=s3://docslurp-vendor-bundles`,
    `..._S3_ENDPOINT`, `..._S3_REGION`) go in `fly.worker.toml` `[env]`.
-4. Publish with **Actions → Vendor Bundles** (`publish=true`) or from a workstation:
+4. Publish from a workstation (the historical **Actions → Vendor Bundles** workflow
+   is not present here):
 
    ```sh
    node scripts/vendor-bundles/publish.mjs --entry .scratch/bundles/docling-linux-x64-py3.13.json
@@ -246,3 +253,104 @@ image must stay at or under 2.5 GiB. It also checks that runtime pip is off, tha
 `/app` and the venv are not writable by uid 10001, that the bundle cache is
 writable, and that no pnpm store, pnpm or venv pip ships. The other images keep
 the 6 GiB budget and the "no torch/chromadb baked" check.
+
+## Additional image variants
+
+`worker/Dockerfile.bundles` builds vendor archives using
+`--build-arg BUNDLE=docling|unstructured --target export`.
+`worker/Dockerfile` is the legacy all-in-one image; use lean or full for the
+profiles documented here.
+
+## Locked Python Supply Chain
+
+The worker now carries three Linux-targeted lockfiles generated with `uv pip compile`:
+
+- `worker/requirements-base.lock.txt` - baked into every image's venv (wheel-only) for the base parser stack
+- `worker/requirements.lock.txt` - used for the deferred full parser/tooling install
+- `worker/requirements-fallback.lock.txt` - used when the deferred install falls back to the reduced parser set
+
+`scripts/setup-worker-python-venv.sh` and `scripts/start-worker.sh` default to these lockfiles on Linux `x86_64`, which matches the production container target. Local non-Linux developer machines stay on the looser manifests by default unless you explicitly set `DOCSLURP_WORKER_REQUIREMENTS_MODE=locked`.
+
+## Quarantine Controls
+
+The worker now runs a `quarantine` stage before format detection and normalization. Useful env overrides:
+
+- `QUARANTINE_ENABLED=true|false`
+- `QUARANTINE_FAIL_OPEN_ON_TOOL_MISSING=true|false`
+- `QUARANTINE_MAX_ARCHIVE_ENTRIES`
+- `QUARANTINE_MAX_ARCHIVE_DEPTH`
+- `QUARANTINE_MAX_TOTAL_UNCOMPRESSED_BYTES`
+- `QUARANTINE_MAX_SINGLE_ENTRY_BYTES`
+- `QUARANTINE_MAX_EXPANSION_RATIO`
+
+`QUARANTINE_FAIL_OPEN_ON_TOOL_MISSING` now defaults to `false` when `NODE_ENV=production`, so missing or broken ClamAV tooling blocks ingestion instead of silently downgrading quarantine to a warning. Local development keeps the permissive default unless you explicitly set the env var to `false`.
+
+## ClamAV Health Controls
+
+The worker entrypoint can now manage ClamAV readiness before the Temporal worker starts:
+
+- `DOCSLURP_CLAMAV_ENABLED=true|false`
+- `DOCSLURP_CLAMAV_MANAGE_DAEMON=true|false`
+- `DOCSLURP_CLAMAV_REQUIRE_DAEMON=true|false`
+- `DOCSLURP_CLAMAV_UPDATE_ON_STARTUP=if-stale|true|false` (default `if-stale`)
+- `DOCSLURP_CLAMAV_UPDATE_IF_OLDER_THAN_HOURS=12`
+- `DOCSLURP_CLAMAV_PRIVATE_MIRROR=https://...` (shared signature mirror for large fleets)
+- build arg `DOCSLURP_BAKE_CLAMAV_SIGNATURES=true` (lean image) downloads signatures at build time
+- `DOCSLURP_CLAMAV_FAIL_OPEN_ON_STALE_DB=true|false`
+- `DOCSLURP_CLAMAV_MAX_DB_AGE_HOURS=24`
+- `DOCSLURP_CLAMAV_DB_DIR=/var/lib/clamav`
+- `DOCSLURP_CLAMAV_RUN_DIR=/tmp/clamav`
+- `DOCSLURP_CLAMAV_READY_TIMEOUT_SECONDS=180`
+- `DOCSLURP_CLAMAV_CLAMD_CONF=/etc/clamav/clamd.conf`
+- `DOCSLURP_CLAMAV_FRESHCLAM_CONF=/etc/clamav/freshclam.conf`
+
+Production defaults now prefer `clamdscan`, refresh signatures on startup, and fail the worker start when the signature database is missing or older than the configured max age. The container images place the ClamAV daemon socket under `/tmp/clamav` so the unprivileged worker can recreate runtime state after each boot. Local development defaults stay more permissive unless you explicitly opt into the stricter settings.
+
+## Parser isolation
+
+See [self-host security](self-host/security.md),
+[platform isolation](self-host/platform-isolation.md) and
+[sandbox providers](self-host/sandbox-providers.md) for the current trust boundary,
+provider selection and required container settings.
+
+Parser subprocesses receive a restricted environment. Add extra trusted variables
+only when needed with `DOCSLURP_PARSER_ENV_ALLOWLIST=EXTRA_ONE,EXTRA_TWO` or
+`DOCSLURP_PYTHON_POOL_ENV_ALLOWLIST=EXTRA_ONE,EXTRA_TWO`.
+
+## Deployment and benchmark cost profiles
+
+Worker images declare `DOCSLURP_DEPLOYMENT_PROFILE=lean|heavy` plus their
+allocated vCPU and memory. Local compute Usage Events attach this profile,
+worker class, region, image, and cold/warm command state so benchmark results
+cannot silently compare a local heavy toolchain with the deployed lean lane.
+
+Override the generic image defaults with the actual machine allocation and
+marginal provider rates:
+
+- `DOCSLURP_WORKER_CLASS`
+- `DOCSLURP_WORKER_REGION`
+- `DOCSLURP_WORKER_IMAGE`
+- `DOCSLURP_ALLOCATED_VCPU`
+- `DOCSLURP_ALLOCATED_MEMORY_GB`
+- `DOCSLURP_CPU_CENTS_PER_SECOND`
+- `DOCSLURP_MEMORY_CENTS_PER_GB_SECOND`
+- `DOCSLURP_GPU_CENTS_PER_SECOND`
+- `DOCSLURP_STORAGE_CENTS_PER_GB_MONTH`
+- `DOCSLURP_NETWORK_INGRESS_CENTS_PER_GB`
+- `DOCSLURP_NETWORK_EGRESS_CENTS_PER_GB`
+
+The rate defaults are provider-neutral estimates. Production cost comparisons
+should always set rates for the real worker class and region.
+
+## Local image commands
+
+Run from the repository root:
+
+```sh
+docker build -f worker/Dockerfile.lean -t docslurp-worker:lean .
+docker build -f worker/Dockerfile.full -t docslurp-worker:full .
+```
+
+For the supported Compose deployment commands, profiles and prebuilt images,
+use the [Docker Compose guide](self-host/docker-compose.md). The root development
+`docker-compose.yml` runs infrastructure services, not a worker container.

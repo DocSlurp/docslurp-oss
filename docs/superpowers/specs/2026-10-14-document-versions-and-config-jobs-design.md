@@ -1,6 +1,12 @@
 # Document versions, version retention, and config-change jobs
 
-Date: 2026-10-14. Status: approved 2026-10-14 with the decisions in §9. Branch: `feat/versions-and-config-jobs`.
+> Historical design record, classified 2026-10-20. Implementation landed in
+> [0cd2588c](https://github.com/DocSlurp/docslurp-oss/commit/0cd2588c).
+> Current guidance: [document versions](../../document-versions.md) and [config-change jobs](../../config-change-jobs.md).
+> The original proposal, rollout instructions and test intentions below are
+> retained for context; they are not current implementation or deployment status.
+
+Date: 2026-10-14. Original status: approved 2026-10-14 with the decisions in §9. Branch: `feat/versions-and-config-jobs`.
 
 ## 1. Intent (user requirements)
 
