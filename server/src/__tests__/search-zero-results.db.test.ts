@@ -194,3 +194,35 @@ describe("zero-result diagnostics reference a persisted search session", () => {
     }
   });
 });
+
+describe("write-behind session writes (SEARCH_SESSION_WRITE_BEHIND)", () => {
+  beforeEach(() => { vi.stubEnv("SEARCH_SESSION_WRITE_BEHIND", "1"); });
+
+  it("answers before its rows commit, and a reader that awaits the session sees them", async () => {
+    const session = await import("../search/session.js");
+    const response = await search.hybridSearch("maintenance", "u", { ...options, filters: zeroHitFilters });
+    expect(response.results).toEqual([]);
+    await session.awaitSearchSessionWrites(response.sessionId);
+    expect(await zeroResultRows()).toEqual([
+      { session_id: response.sessionId, workspace_id: "w", persisted: true, chat_session_id: null },
+    ]);
+    expect(reported).toEqual([]);
+  });
+
+  it("keeps a reused session id's attempts in order", async () => {
+    const session = await import("../search/session.js");
+    const rootSessionId = crypto.randomUUID();
+    // Three zero-hit attempts, one that finds results, all queued before any write commits.
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      await search.hybridSearch("maintenance", "u", { ...options, filters: zeroHitFilters, rootSessionId });
+    }
+    const found = await search.hybridSearch("maintenance", "u", { ...options, filters: { workspaceId: "w" }, rootSessionId });
+    expect(found.results.length).toBeGreaterThan(0);
+    await session.drainSearchSessionWrites();
+    // The latest attempt decides: results found, so no zero-result row remains.
+    expect(await zeroResultRows()).toEqual([]);
+    const [row] = await sql<{ result_count: number }[]>`select result_count from search_sessions where id = ${rootSessionId}`;
+    expect(row?.result_count).toBe(found.results.length);
+    expect(reported).toEqual([]);
+  });
+});
