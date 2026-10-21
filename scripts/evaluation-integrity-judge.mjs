@@ -110,18 +110,28 @@ export function judgeIntegrity({ dataset, repo = process.cwd(), base = 'HEAD' })
     const terms = [...identifiers].map((value) => ({ rule: 'fixture-identifier', value }));
     for (const value of sourceHashes) terms.push({ rule: 'source-recognition-hash', value });
     for (const value of expected) terms.push({ rule: 'labeled-answer', value });
+    // Patterns depend only on the frozen manifest, not on the file being scanned.
+    // None has g/y flags, so reusing exec/test preserves matching and line numbers.
+    const patternCache = new Map();
+    const cachedPattern = (value) => {
+      if (!patternCache.has(value)) patternCache.set(value, pattern(value));
+      return patternCache.get(value);
+    };
+    const compiledTerms = terms.map((term) => ({ ...term, expression: cachedPattern(term.value) }));
+    const compiledLabels = [...labelNames].map((value) => ({ value, expression: cachedPattern(value) }));
+    const compiledWeakAnswers = [...weakAnswers].map((value) => ({ value, expression: cachedPattern(value) }));
     const seen = new Set();
     const match = (file, text, origin) => {
-      for (const { rule, value } of terms) {
-        const found = pattern(value).exec(text);
+      for (const { rule, value, expression } of compiledTerms) {
+        const found = expression.exec(text);
         if (!found) continue;
         const key = `${file}:${rule}:${hash(value)}`;
         if (seen.has(key)) continue;
         seen.add(key);
         add(rule, { file, origin, line: text.slice(0, found.index).split('\n').length, evidenceHash: hash(value) });
       }
-      const labels = [...labelNames].filter((value) => pattern(value).test(text));
-      const weakMatches = labels.length >= 2 ? [...weakAnswers].filter((value) => pattern(value).test(text)) : [];
+      const labels = compiledLabels.filter(({ expression }) => expression.test(text)).map(({ value }) => value);
+      const weakMatches = labels.length >= 2 ? compiledWeakAnswers.filter(({ expression }) => expression.test(text)).map(({ value }) => value) : [];
       if (weakMatches.length && !seen.has(`${file}:weak-answers`)) {
         seen.add(`${file}:weak-answers`);
         add('answer-label-combination', { file, origin, labelCount: labels.length, answerCount: weakMatches.length, evidenceHash: hash([...labels, ...weakMatches].sort().join('\0')) });

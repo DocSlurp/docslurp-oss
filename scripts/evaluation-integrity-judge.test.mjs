@@ -168,3 +168,20 @@ test('original case IDs are recognized when source-derived cases receive namespa
   writeFileSync(join(f.repo, 'worker.ts'), 'const known = "sample-01";');
   assert.ok(rules(f.run()).includes('fixture-identifier'));
 });
+
+test('reused manifest patterns preserve findings across files, lines and Unicode boundaries', (t) => {
+  const f = fixture(t);
+  const labels = JSON.stringify({ labels: [{ name: 'layout_regions', expected: ['mind_map', 'ordinaryword'] }] });
+  writeFileSync(join(f.dataset, 'labels.json'), labels);
+  f.manifest.cases[0].labels.sha256 = sha(labels); f.save();
+  writeFileSync(join(f.repo, 'worker.ts'), '// First line\nconst layout = "mind_map";');
+  writeFileSync(join(f.repo, 'second-worker.ts'), '// One\n// Two\nconst layout = "mind_map";');
+  writeFileSync(join(f.repo, 'boundary-worker.ts'), 'const unrelated = "préfixmind_mapSuffix";');
+  const report = f.run();
+  const answers = report.findings.filter((finding) => finding.rule === 'labeled-answer');
+  assert.deepEqual(answers.map(({ file, line, evidenceHash }) => ({ file, line, evidenceHash })), [
+    { file: 'second-worker.ts', line: 3, evidenceHash: sha('mind_map') },
+    { file: 'worker.ts', line: 2, evidenceHash: sha('mind_map') },
+  ]);
+  assert.equal(report.passed, false, 'caching does not exempt a generic-looking ontology value');
+});
