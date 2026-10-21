@@ -10,6 +10,13 @@ export interface RoutingLayoutObserverConfig extends Omit<ImageLayoutEndpointOpt
   maxBytes: number;
   concurrency: number;
   queueCapacity: number;
+  /** Payload bytes held by queued and in-flight jobs; request counts alone do not bound memory. */
+  queueMaxBytes: number;
+  /**
+   * Pages per document sampled from those the router did not send to pixels (accepted text,
+   * healthy layers), spread across page positions. Audits bypass decisions independently of them.
+   */
+  auditPages: number;
   /** Unknown compute pricing must remain null, never silently become free. */
   hourlyCostUsd: number | null;
 }
@@ -53,6 +60,8 @@ export function readLayoutObserverConfig(env: NodeJS.ProcessEnv = process.env): 
     maxBytes: integer(env.PAGE_ROUTER_LAYOUT_MAX_BYTES, 25 * 1024 * 1024, 1, 25 * 1024 * 1024, "layout maximum bytes"),
     concurrency: integer(env.PAGE_ROUTER_LAYOUT_CONCURRENCY, 1, 1, 8, "layout concurrency"),
     queueCapacity: integer(env.PAGE_ROUTER_LAYOUT_QUEUE_CAPACITY, 8, 0, 64, "layout queue capacity"),
+    queueMaxBytes: integer(env.PAGE_ROUTER_LAYOUT_QUEUE_MAX_BYTES, 64 * 1024 * 1024, 1, 1024 * 1024 * 1024, "layout queue maximum bytes"),
+    auditPages: integer(env.PAGE_ROUTER_LAYOUT_AUDIT_PAGES, 1, 0, 16, "layout audit pages"),
     hourlyCostUsd,
   };
 }
@@ -80,6 +89,7 @@ interface Job {
   reject: (reason: unknown) => void;
   waiters: number;
   settled: boolean;
+  bytesHeld: boolean;
 }
 
 /**
@@ -96,6 +106,7 @@ interface Job {
  * one may inherit accounting when earlier callers cancel before dispatch. Cache
  * hits never invoke it. A synchronous callback exception prevents dispatch.
  * maxPages is enforced by the calling stage, since only it knows page ownership.
+ * Callers should check hasCapacity() before rendering so saturation does not waste preprocessing.
  */
 export class RoutingLayoutObserver {
   readonly config: Readonly<RoutingLayoutObserverConfig>;
@@ -105,6 +116,7 @@ export class RoutingLayoutObserver {
   private readonly jobs = new Map<string, Job>();
   private readonly queue: Job[] = [];
   private active = 0;
+  private pendingBytes = 0;
 
   constructor(config: RoutingLayoutObserverConfig) {
     // Validate programmatic construction through the same strict operator boundary.
@@ -116,9 +128,16 @@ export class RoutingLayoutObserver {
       PAGE_ROUTER_LAYOUT_TIMEOUT_MS: String(config.timeoutMs), PAGE_ROUTER_LAYOUT_MAX_PAGES: String(config.maxPages),
       PAGE_ROUTER_LAYOUT_MAX_BYTES: String(config.maxBytes), PAGE_ROUTER_LAYOUT_CONCURRENCY: String(config.concurrency),
       PAGE_ROUTER_LAYOUT_QUEUE_CAPACITY: String(config.queueCapacity),
+      PAGE_ROUTER_LAYOUT_QUEUE_MAX_BYTES: String(config.queueMaxBytes), PAGE_ROUTER_LAYOUT_AUDIT_PAGES: String(config.auditPages),
       ...(config.hourlyCostUsd === null ? {} : { PAGE_ROUTER_LAYOUT_HOURLY_COST_USD: String(config.hourlyCostUsd) }),
     })!);
     this.identity = JSON.stringify(this.config);
+  }
+
+  /** Advisory pre-check: whether a new job of `bytes` would currently be admitted. */
+  hasCapacity(bytes = 0): boolean {
+    const slots = this.active < this.config.concurrency || this.queue.length < this.config.queueCapacity;
+    return slots && this.pendingBytes + bytes <= this.config.queueMaxBytes;
   }
 
   async observe({ scopeKey, payload, signal, onRequest }: { scopeKey: string; payload: Buffer; signal?: AbortSignal; onRequest?: (event: { inferenceKey: string; inputBytes: number }) => void }): Promise<RoutingLayoutObservation> {
@@ -137,12 +156,14 @@ export class RoutingLayoutObserver {
     const inferencePerformed = !job;
     if (!job) {
       if (this.active >= this.config.concurrency && this.queue.length >= this.config.queueCapacity) throw new Error("Layout observation queue is full");
+      if (this.pendingBytes + payload.byteLength > this.config.queueMaxBytes) throw new Error("Layout observation queue byte budget is full");
       let resolve!: Job["resolve"];
       let reject!: Job["reject"];
       const promise = new Promise<string>((yes, no) => { resolve = yes; reject = no; });
       const controller = new AbortController();
-      job = { key, inferenceKey: randomUUID(), callbacks: new Map(), payload: Buffer.from(payload), controller, promise, resolve, reject, waiters: 0, settled: false,
+      job = { key, inferenceKey: randomUUID(), callbacks: new Map(), payload: Buffer.from(payload), controller, promise, resolve, reject, waiters: 0, settled: false, bytesHeld: true,
         timer: setTimeout(() => controller.abort(new Error("Layout observation deadline exceeded")), this.config.timeoutMs) };
+      this.pendingBytes += payload.byteLength;
       this.jobs.set(key, job);
       const current = job;
       controller.signal.addEventListener("abort", () => this.finish(current, undefined, controller.signal.reason), { once: true });
@@ -176,8 +197,15 @@ export class RoutingLayoutObserver {
       void detectImageLayoutAtEndpoint(job.payload, { ...this.config, onRequest: () => job.callbacks.values().next().value?.({ inferenceKey: job.inferenceKey, inputBytes: job.payload.byteLength }) }, job.controller.signal)
         .then((result) => this.finish(job, JSON.stringify(result)))
         .catch((error: unknown) => this.finish(job, undefined, error))
-        .finally(() => { this.active--; this.drain(); });
+        .finally(() => { this.active--; this.release(job); this.drain(); });
     }
+  }
+
+  /** Bytes stay held until a dispatched request settles, since aborting does not free its payload sooner. */
+  private release(job: Job): void {
+    if (!job.bytesHeld) return;
+    job.bytesHeld = false;
+    this.pendingBytes -= job.payload.byteLength;
   }
 
   private finish(job: Job, json?: string, error?: unknown): void {
@@ -186,7 +214,10 @@ export class RoutingLayoutObserver {
     clearTimeout(job.timer);
     if (this.jobs.get(job.key) === job) this.jobs.delete(job.key);
     const queued = this.queue.indexOf(job);
-    if (queued >= 0) this.queue.splice(queued, 1);
+    if (queued >= 0) {
+      this.queue.splice(queued, 1);
+      this.release(job);
+    }
     if (json !== undefined) {
       const bytes = Buffer.byteLength(json);
       if (bytes <= 16 * 1024 * 1024) {

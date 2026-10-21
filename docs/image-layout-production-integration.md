@@ -31,7 +31,9 @@ flowchart TD
 
 When no pages are eligible, shadow adds no raster work or observation-artifact PUT; it records a performance summary only. Result rows have an aggregate 16 MiB budget: an oversized result is marked omitted and further page observations stop.
 
-Selection currently takes eligible pages in document order. It is not a randomized quality audit. Audit a model-blind sample of native bypasses before claiming completeness for this selection policy.
+Routed selection takes eligible pages in document order (`selection: "routed"`). Separately, the stage audits up to `PAGE_ROUTER_LAYOUT_AUDIT_PAGES` pages the router bypassed (accepted text, healthy layers, unassigned pages; locked pages excluded), marked `selection: "audit"` with `healthyTextLayer` and `routedRoles`. Audit pages are spread evenly across page positions with a per-document hash offset, so the choice depends on no model or routing decision. That sample is the only shadow evidence that can reveal wrong native acceptance; it is small per document and becomes meaningful only in aggregate.
+
+Admission is checked before rendering: when the observer has no queue slot or byte budget, the page is recorded as an error with `admissionRejected` counted, and no raster is rendered or uploaded. The evidence write has its own five-second budget, so a later page exhausting the observation deadline does not discard earlier detections.
 
 ## Configuration and existing integrations
 
@@ -58,7 +60,7 @@ Existing router shadow mode can execute configured paid decision-model calls. Th
 - `PAGE_ROUTER_LAYOUT_PROFILE_SHA256`: the approved `/health` response's `inferenceProfileSha256`, pinning the inference configuration as well as the model.
 - `PAGE_ROUTER_LAYOUT_DEVICE`: defaults to `cpu`; explicit `cuda` is supported. Response device must match; no silent fallback.
 
-Optional limits are `PAGE_ROUTER_LAYOUT_TIMEOUT_MS` (default 2,000), `PAGE_ROUTER_LAYOUT_MAX_PAGES` (4 per document), `PAGE_ROUTER_LAYOUT_MAX_BYTES` (25 MiB), `PAGE_ROUTER_LAYOUT_CONCURRENCY` (1) and `PAGE_ROUTER_LAYOUT_QUEUE_CAPACITY` (8). The stage bounds its observation phase by the smaller of ten seconds and timeout multiplied by page limit. Cancelling HTTP does not prove the Python process stopped current inference.
+Optional limits are `PAGE_ROUTER_LAYOUT_TIMEOUT_MS` (default 2,000), `PAGE_ROUTER_LAYOUT_MAX_PAGES` (4 per document), `PAGE_ROUTER_LAYOUT_MAX_BYTES` (25 MiB), `PAGE_ROUTER_LAYOUT_CONCURRENCY` (1), `PAGE_ROUTER_LAYOUT_QUEUE_CAPACITY` (8), `PAGE_ROUTER_LAYOUT_QUEUE_MAX_BYTES` (64 MiB of payload held by queued and in-flight requests) and `PAGE_ROUTER_LAYOUT_AUDIT_PAGES` (1 per document, 0 disables). The stage bounds its observation phase by the smaller of ten seconds and timeout multiplied by the routed-plus-audit page count. Cancelling HTTP does not prove the Python process stopped current inference.
 
 The profile digest covers the canonical inference profile, including detector metadata, threshold, device and contract version. Model size, transforms and classifier settings therefore participate in identity. Responses must match the configured profile. Approve the health identity against the intended configuration; do not blindly trust an unexpected service profile. Coordinate service/profile updates with a worker restart: previously cached results cannot detect a sidecar change.
 

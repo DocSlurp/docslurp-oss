@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -72,13 +73,27 @@ export const PAGE_ROUTE_CHUNK_ESTIMATE_METRIC = "page-route-chunk-estimate";
 export const PAGE_ROUTE_TIMING_METRIC = "page-route-timing";
 export const PAGE_ROUTE_LAYOUT_METRIC = "page-route-layout";
 export const PAGE_ROUTE_LAYOUT_SLOT = "page-route-layout-shadow";
+/** Own budget for the evidence write, so an exhausted observation deadline cannot discard earlier results. */
+const LAYOUT_PERSIST_TIMEOUT_MS = 5_000;
+
+/**
+ * Up to `count` pages spread evenly across `pool` positions, offset by a per-document hash.
+ * Deterministic and model-independent, so audits do not inherit the router's blind spots.
+ */
+export function spreadSample<T>(pool: readonly T[], count: number, seed: string): T[] {
+  const k = Math.min(count, pool.length);
+  if (k === 0) return [];
+  const stride = pool.length / k;
+  const offset = (createHash("sha256").update(seed).digest().readUInt32BE(0) / 2 ** 32) * stride;
+  return Array.from({ length: k }, (_, i) => pool[Math.min(pool.length - 1, Math.floor(offset + i * stride))]!);
+}
 export const PAGE_ROUTE_ERROR_METRIC = "page-route-error";
 
 /** Test seams; production uses the defaults. */
 export interface RoutePagesDeps {
   probe?: ProbeRunner;
   /** Operator-enabled, advisory-only local layout observer. */
-  layoutObserver?: Pick<RoutingLayoutObserver, "config" | "observe">;
+  layoutObserver?: Pick<RoutingLayoutObserver, "config" | "observe" | "hasCapacity">;
   rasterCache?: Pick<PdfRasterCache, "renderSelectedPages">;
   /** Builds the decision client for one document (usage is recorded by the stage). */
   decisionClient?: (args: {
@@ -342,8 +357,17 @@ export class RoutePagesStage implements Stage {
     const needsPixels = new Set(plan.assignments.filter((a) => a.role !== "accept-text" && a.role !== "skip").map((a) => a.pageNumber));
     const eligible = pages.filter((p) => needsPixels.has(p.features.pageNumber) && !hasHealthyTextLayer(p));
     const selected = eligible.slice(0, observer.config.maxPages);
+    // Bypassed pages (accepted text, healthy layers): the only way to find wrong native acceptance.
+    const eligibleSet = new Set(eligible);
+    const locked = new Set(plan.attention.filter((a) => a.outcome === "skipped").map((a) => a.pageNumber));
+    const auditPool = pages.filter((p) => !eligibleSet.has(p) && !locked.has(p.features.pageNumber));
+    const audit = spreadSample(auditPool, observer.config.auditPages, `${sourceSha256}:${document.id}`);
+    const work = [
+      ...selected.map((page) => ({ page, selection: "routed" as const })),
+      ...audit.map((page) => ({ page, selection: "audit" as const })),
+    ];
     const started = performance.now();
-    const deadline = AbortSignal.timeout(Math.min(10_000, observer.config.timeoutMs * observer.config.maxPages));
+    const deadline = AbortSignal.timeout(Math.min(10_000, observer.config.timeoutMs * Math.max(1, work.length)));
     const boundedSignal = signal ? AbortSignal.any([signal, deadline]) : deadline;
     const rows: Record<string, unknown>[] = [];
     let errors = 0;
@@ -352,7 +376,8 @@ export class RoutePagesStage implements Stage {
     let inputBytes = 0;
     let artifactResultBytes = 0;
     let artifactBudgetExhausted = false;
-    for (const page of selected) {
+    let admissionRejected = 0;
+    for (const { page, selection } of work) {
       signal?.throwIfAborted();
       if (deadline.aborted) break;
       const pageStarted = performance.now();
@@ -360,8 +385,16 @@ export class RoutePagesStage implements Stage {
       let dispatched: { inferenceKey: string; inputBytes: number } | undefined;
       let serviceElapsedMs: number | undefined;
       let succeeded = false;
-      let row: Record<string, unknown> = { pageNumber: page.features.pageNumber, mode: "shadow" };
+      let row: Record<string, unknown> = { pageNumber: page.features.pageNumber, mode: "shadow", selection };
+      if (selection === "audit") {
+        row.healthyTextLayer = hasHealthyTextLayer(page);
+        row.routedRoles = plan.assignments.filter((a) => a.pageNumber === page.features.pageNumber).map((a) => a.role);
+      }
       try {
+        if (!observer.hasCapacity()) {
+          admissionRejected++;
+          throw new Error("Layout observation queue at capacity before render");
+        }
         let fresh: Buffer | undefined;
         const [raster] = await withLayoutDeadline(rasters.renderSelectedPages({
           document, runId: state.run.id, pageNumbers: [page.features.pageNumber], dpi: 150, signal: boundedSignal,
@@ -424,15 +457,18 @@ export class RoutePagesStage implements Stage {
         tags: ["page-router", "layout", "shadow"], metadata });
       if (artifactBudgetExhausted) break;
     }
-    const summary = { selected: selected.length, observed, errors, cacheHits, inputBytes,
+    const summary = { selected: selected.length, auditSelected: audit.length, auditPool: auditPool.length, observed, errors,
+      admissionRejected, cacheHits, inputBytes,
       skipped: pages.length - rows.length, eligible: eligible.length, budgetExhausted: deadline.aborted,
       artifactResultBytes, artifactBudgetExhausted, elapsedMs: performance.now() - started };
     if (rows.length > 0) {
       const artifactKey = `${document.userId}/${state.run.id}/page-route-layout-shadow/${document.id}.json`;
+      const persistDeadline = AbortSignal.timeout(LAYOUT_PERSIST_TIMEOUT_MS);
+      const persistSignal = signal ? AbortSignal.any([signal, persistDeadline]) : persistDeadline;
       try {
-        boundedSignal.throwIfAborted();
+        persistSignal.throwIfAborted();
         await withLayoutDeadline(this.storage.putJson(artifactKey, { schemaVersion: 1, mode: "shadow", documentId: document.id, runId: state.run.id,
-          sourceSha256, coordinateSpace: "normalized-source-raster", pdfPointTransform: null, summary, pages: rows }), boundedSignal);
+          sourceSha256, coordinateSpace: "normalized-source-raster", pdfPointTransform: null, summary, pages: rows }), persistSignal);
         state.artifactLedger.recordDocument(document.id, PAGE_ROUTE_LAYOUT_SLOT, this.storage.uri(artifactKey));
       } catch (error) {
         signal?.throwIfAborted();

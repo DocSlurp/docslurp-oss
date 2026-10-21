@@ -33,7 +33,7 @@ afterEach(() => vi.unstubAllGlobals());
 describe("layout observer configuration", () => {
   it("is disabled by default and keeps unknown pricing unknown", () => {
     expect(readLayoutObserverConfig({})).toBeNull();
-    expect(config()).toMatchObject({ timeoutMs: 2000, maxPages: 4, concurrency: 1, queueCapacity: 8, hourlyCostUsd: null });
+    expect(config()).toMatchObject({ timeoutMs: 2000, maxPages: 4, concurrency: 1, queueCapacity: 8, queueMaxBytes: 64 * 1024 * 1024, auditPages: 1, hourlyCostUsd: null });
     expect(readLayoutObserverConfig({ ...env, PAGE_ROUTER_LAYOUT_HOURLY_COST_USD: "0.39" })?.hourlyCostUsd).toBe(0.39);
   });
   it.each([
@@ -43,6 +43,7 @@ describe("layout observer configuration", () => {
     { PAGE_ROUTER_LAYOUT_MAX_BYTES: "26214401" }, { PAGE_ROUTER_LAYOUT_CONCURRENCY: "0" },
     { PAGE_ROUTER_LAYOUT_TIMEOUT_MS: "NaN" }, { PAGE_ROUTER_LAYOUT_DEVICE: "auto" },
     { PAGE_ROUTER_LAYOUT_HOURLY_COST_USD: "" }, { PAGE_ROUTER_LAYOUT_HOURLY_COST_USD: "0" },
+    { PAGE_ROUTER_LAYOUT_QUEUE_MAX_BYTES: "0" }, { PAGE_ROUTER_LAYOUT_AUDIT_PAGES: "17" },
   ])("rejects unsafe enabled configuration %j", (override) => {
     expect(() => readLayoutObserverConfig({ ...env, ...override })).toThrow();
   });
@@ -119,6 +120,31 @@ describe("bounded routing layout observer", () => {
     await expect(observer.observe({ scopeKey: "c", payload })).rejects.toThrow("queue is full");
     await Promise.all([first, second]);
     expect(fetcher).toHaveBeenCalledTimes(2);
+  });
+  it("bounds total held payload bytes and reports capacity before callers render", async () => {
+    const fetcher = mockEndpoint({ delay: 30 });
+    const payload = await image();
+    const observer = new RoutingLayoutObserver(config({ concurrency: 1, queueCapacity: 8, queueMaxBytes: payload.byteLength * 2 }));
+    expect(observer.hasCapacity(payload.byteLength)).toBe(true);
+    const first = observer.observe({ scopeKey: "a", payload });
+    const second = observer.observe({ scopeKey: "b", payload });
+    expect(observer.hasCapacity(1)).toBe(false);
+    await expect(observer.observe({ scopeKey: "c", payload })).rejects.toThrow("byte budget");
+    await Promise.all([first, second]);
+    expect(observer.hasCapacity(payload.byteLength * 2)).toBe(true);
+    expect(fetcher).toHaveBeenCalledTimes(2);
+  });
+  it("releases held bytes when queued work is cancelled before dispatch", async () => {
+    mockEndpoint({ delay: 30 });
+    const payload = await image();
+    const observer = new RoutingLayoutObserver(config({ concurrency: 1, queueMaxBytes: payload.byteLength * 2 }));
+    const first = observer.observe({ scopeKey: "a", payload });
+    const controller = new AbortController();
+    const queued = observer.observe({ scopeKey: "b", payload, signal: controller.signal });
+    controller.abort(new Error("left"));
+    await expect(queued).rejects.toThrow("left");
+    expect(observer.hasCapacity(payload.byteLength)).toBe(true);
+    await first;
   });
   it("deadline includes time waiting in the queue and failed work can retry", async () => {
     const fetcher = mockEndpoint({ delay: 100 });
