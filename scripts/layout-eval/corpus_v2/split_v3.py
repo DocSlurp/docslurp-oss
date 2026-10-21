@@ -146,10 +146,14 @@ def main():
     (out / 'SPLIT-RECEIPT.json').write_text(json.dumps(receipt, indent=2, ensure_ascii=False) + '\n')
     frozen = root / 'frozen-v3'
     frozen.mkdir(exist_ok=True)
-    (frozen / 'candidates.jsonl').write_text(''.join(json.dumps(r, ensure_ascii=False) + '\n' for r in candidates))
+    evaluable = [r for r in candidates if r['regions']]
+    receipt_unlabeled = sorted(r['id'] for r in candidates if not r['regions'])
+    (frozen / 'candidates.jsonl').write_text(''.join(json.dumps(r, ensure_ascii=False) + '\n' for r in evaluable))
     lock = {'schema': 'layout-v3-candidate-lock', 'createdAt': receipt['createdAt'],
             'outputs': {'candidates.jsonl': sha(frozen / 'candidates.jsonl'), **{f'{s}.jsonl': sha(out / f'{s}.jsonl') for s in SPLITS}},
             'splitReceiptSha256': sha(out / 'SPLIT-RECEIPT.json'),
+            'excludedUnlabeledReferences': receipt_unlabeled,
+            'candidatePolicy': 'candidates.jsonl holds rows with at least one labeled region; unlabeled references stay in split files only',
             'software': {p.name: sha(p) for p in sorted(Path(__file__).parent.glob('*.py'))}}
     (frozen / 'LOCK.json').write_text(json.dumps(lock, indent=2) + '\n')
     print(json.dumps(receipt['counts'], indent=1))
