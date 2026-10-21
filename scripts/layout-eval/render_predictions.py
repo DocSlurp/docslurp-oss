@@ -43,6 +43,7 @@ def annotate(image,regions,statuses,prefix,panel_width,supported=None):
     scale=panel_width/image.width;height=round(image.height*scale)
     canvas=image.resize((panel_width,height),Image.Resampling.LANCZOS).convert('RGB');d=ImageDraw.Draw(canvas)
     for index,(region,status) in enumerate(zip(regions,statuses)):
+        index=region.get('_overlay_index',index)
         box=region['bbox']
         if len(box)!=4 or not all(math.isfinite(v) and 0<=v<=1 for v in box) or box[0]>=box[2] or box[1]>=box[3]:
             raise ValueError('Invalid normalized diagnostic box')
@@ -142,6 +143,72 @@ def compare_overlay_reports(baseline_report,candidate_report,output):
         'candidate':{'report':str(candidate_report),'sha256':digest(candidate_report),'diagnostic':right['diagnostic']},
         'reference_panel_note':'Reference TP/FN colors use baseline matching only; candidate matching retained in candidate report.',
         'scope':'Post-score development diagnostic; no annotation changes, no holdout, no model calls.'}
+    output.with_suffix('.json').write_text(json.dumps(receipt,indent=2)+'\n')
+    return receipt
+
+
+def closeup_comparison(baseline_report,candidate_report,output,source_roi,display_ccw90=False):
+    """Display-only post-score ROI; full-page scores and region IDs stay unchanged."""
+    baseline_report,candidate_report,output=map(Path,(baseline_report,candidate_report,output))
+    if output.exists() or output.with_suffix('.json').exists():raise ValueError('Refuse close-up overwrite')
+    left,right=[json.loads(path.read_text()) for path in (baseline_report,candidate_report)]
+    for key in ('page_id','source_image_sha256','truth','source_manifest_sha256'):
+        if left[key]!=right[key]:raise ValueError('Close-up inputs differ')
+    manifest=Path(left['source_manifest_path'])
+    if digest(manifest)!=left['source_manifest_sha256']:raise ValueError('Manifest changed')
+    rows=[json.loads(line) for line in manifest.read_text().splitlines()]
+    if any(row.get('split')!='dev' for row in rows):raise ValueError('Only strict development close-ups')
+    row=next(row for row in rows if row['id']==left['page_id']);path=Path(row['image_path'])
+    if not path.is_absolute():path=manifest.parent/path
+    if digest(path)!=left['source_image_sha256']:raise ValueError('Source raster changed')
+    x0,y0,x1,y1=source_roi
+    if not 0<=x0<x1<=1 or not 0<=y0<y1<=1:raise ValueError('Invalid normalized source ROI')
+    with Image.open(path) as im:
+        pixels=[round(v*s) for v,s in zip(source_roi,(im.width,im.height,im.width,im.height))]
+        crop=im.convert('RGB').crop(pixels)
+        actual=[v/s for v,s in zip(pixels,(im.width,im.height,im.width,im.height))]
+    x0,y0,x1,y1=actual
+    if display_ccw90:crop=crop.transpose(Image.Transpose.ROTATE_90)
+    def mapped(regions,statuses):
+        selected=[];states=[]
+        for index,(region,status) in enumerate(zip(regions,statuses)):
+            a,b,c,d=region['bbox'];a=max(a,x0);b=max(b,y0);c=min(c,x1);d=min(d,y1)
+            if a>=c or b>=d:continue
+            a,c=(a-x0)/(x1-x0),(c-x0)/(x1-x0);b,d=(b-y0)/(y1-y0),(d-y0)/(y1-y0)
+            box=[b,1-c,d,1-a] if display_ccw90 else [a,b,c,d]
+            selected.append(dict(region,bbox=box,_overlay_index=index));states.append(status)
+        return selected,states
+    lmatches=left['diagnostic']['matches'];rmat=right['diagnostic']['matches']
+    gtids={v['truth_index'] for v in lmatches};lpids={v['prediction_index'] for v in lmatches};rpids={v['prediction_index'] for v in rmat}
+    gt,gs=mapped(left['truth'],['TP' if i in gtids else 'FN' for i in range(len(left['truth']))])
+    lp,ls=mapped(left['predictions'],['TP' if i in lpids else 'FP' for i in range(len(left['predictions']))])
+    rp,rs=mapped(right['predictions'],['TP' if i in rpids else 'FP' for i in range(len(right['predictions']))])
+    width=1000;plain=crop.resize((width,round(crop.height*width/crop.width)),Image.Resampling.LANCZOS)
+    panels=[plain,annotate(crop,gt,gs,'G',width,set(left['supported_labels']) if left['supported_labels'] else None),
+            annotate(crop,lp,ls,'P',width),annotate(crop,rp,rs,'P',width)]
+    height=plain.height;gap=24;top=170;rowheight=height+100
+    canvas=Image.new('RGB',(width*2+gap*3,top+rowheight*2+80),'#14222b');draw=ImageDraw.Draw(canvas)
+    draw.text((gap,18),left['page_id']+' | SAME SOURCE, DISPLAY-ONLY CLOSE-UP',font=font(29),fill='white')
+    draw.text((gap,67),f'Normalized source ROI {actual}; display CCW90={display_ccw90}. Inference input and full-page scoring unchanged.',font=font(21),fill='#cbd4d5')
+    draw.text((gap,104),'Full-page class-aware IoU >= .50 | model/runtime/timestamps, raw confidence and all region IDs remain in linked reports.',font=font(22),fill='#cbd4d5')
+    labels=['SOURCE RASTER','REFERENCE (baseline TP/FN colors)',Path(left['prediction_path']).stem,Path(right['prediction_path']).stem]
+    for i,(panel,label) in enumerate(zip(panels,labels)):
+        x=gap+(i%2)*(width+gap);y=top+(i//2)*rowheight
+        draw.text((x,y),label,font=font(24),fill='white')
+        if i>=2:
+            record=(left,right)[i-2];s=record['diagnostic'];meta=record['model_runtime_metadata']
+            model=meta.get('model',{});precision=model.get('precision') or model.get('detector',{}).get('precision','unrecorded')
+            draw.text((x,y+36),f'FULL PAGE TP {s["tp"]} / FP {s["fp"]} / FN {s["fn"]} | {meta.get("device")} / {precision} / batch{meta.get("batch_size")}',font=font(23),fill='#b5dad3')
+        canvas.paste(panel,(x,y+80))
+    draw.text((gap,canvas.height-40),'Post-score development illustration. Crop is not a new score or test input. Source/reference/model confidences remain separate.',font=font(21),fill='#cbd4d5')
+    output.parent.mkdir(parents=True,exist_ok=True);canvas.save(output,optimize=True)
+    receipt={'schema':'layout-postscore-dev-closeup-v1','page_id':left['page_id'],'created_utc':iso(time.time()),
+        'source_roi_requested':source_roi,'source_roi_actual':actual,'source_roi_pixels':pixels,'display_ccw90':display_ccw90,
+        'comparison_image_sha256':digest(output),'source_image_sha256':left['source_image_sha256'],
+        'baseline_report':str(baseline_report),'baseline_report_sha256':digest(baseline_report),
+        'candidate_report':str(candidate_report),'candidate_report_sha256':digest(candidate_report),
+        'full_page_context_image':str(output.parent/'scientific-rotated90-baseline-vs-orientation.png'),
+        'scope':'Post-score development visualization only; no recomputed ROI quality, no new inference or heldout evidence.'}
     output.with_suffix('.json').write_text(json.dumps(receipt,indent=2)+'\n')
     return receipt
 
