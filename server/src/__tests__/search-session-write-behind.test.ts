@@ -7,6 +7,7 @@ vi.mock("../lib/public-errors.js", () => ({
 }));
 
 const { createSearchSessionJournal, drainSearchSessionWrites, searchSessionWriteBacklog } = await import("../search/session.js");
+const turns = await import("../lib/chat-turn-context.js");
 
 beforeEach(() => { reported.length = 0; });
 
@@ -30,6 +31,17 @@ describe("write-behind search session writes", () => {
     await drainSearchSessionWrites();
     expect(attempts).toBe(2);
     expect(reported).toEqual([expect.objectContaining({ operation: "search-write-behind:after-writes" })]);
+  });
+
+  it("is waited for by a failing chat turn before it refunds (#90)", async () => {
+    const turn = turns.createChatTurnContext({ refundOnFailure: true });
+    let committed = false;
+    await turns.runInChatTurnContext(turn, () => createSearchSessionJournal({ writeBehind: true })
+      .afterWrites(async () => { await new Promise((resolve) => setTimeout(resolve, 20)); committed = true; }));
+    // The search answered before the write; the turn still counts it in flight.
+    expect(committed).toBe(false);
+    await turns.settleChatTurnWrites(turn);
+    expect(committed).toBe(true);
   });
 
   it("keeps one session's writes in order", async () => {

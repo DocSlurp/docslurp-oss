@@ -1,5 +1,5 @@
 import { reportPublicError } from "../lib/public-errors.js";
-import { apiErrorResponse, nativeApiErrors } from "../lib/api-error.js";
+import { apiErrorResponse, nativeApiErrors, withApiErrorDetails } from "../lib/api-error.js";
 import { Hono, type Context } from "hono";
 import { batchSearchInputSchema, searchFormError, searchInputSchema, searchOptions, workspaceChatInputSchema, type SearchInput } from "../lib/search-input.js";
 import { streamSSE } from "hono/streaming";
@@ -22,6 +22,7 @@ import { WorkspaceAccessError } from "../services/default-workspace.js";
 import { hybridSearch, MissingWorkspaceScopeError } from "../services/search.js";
 import { prefetchBatchQueryEmbeddings } from "../search/batch-embeddings.js";
 import { chatWorkspace, workspaceChatDisabledBody } from "../services/workspace-chat.js";
+import { beginChatTurn, chatTurnFailureReason, type ChatTurn, type ChatTurnUsage } from "../services/billing/chat-turn-billing.js";
 import { parseFilters } from "../search/filters.js";
 import { InvalidRetrievalQueryError, parseRetrievalQueryFlags } from "../lib/retrieval-query-flags.js";
 import { publicSearchResponse } from "../lib/search-usage.js";
@@ -167,21 +168,42 @@ async function handleWorkspaceChat(c: Context, mode: "public" | "grounded") {
   if (chatDisabled) return apiErrorResponse(c, 403, "chat_disabled", chatDisabled.error);
   const deferred = await deferredRequestContext(c, workspaceId);
   if ("response" in deferred) return deferred.response;
+  // This route knows whether the answer reached the client, so it owns the
+  // chat turn's bill. A nested grounded call joins the agent's turn instead.
+  const turn = beginChatTurn();
+  const signal = c.req.raw.signal;
   let response: Awaited<ReturnType<typeof chatWorkspace>>;
   try {
-    response = await withDeferredContext(deferred.context, () => chatWorkspace({ workspaceId, userId,
+    response = await turn.run(() => withDeferredContext(deferred.context, () => chatWorkspace({ workspaceId, userId,
       query: body.q, sessionId: body.sessionId, model: body.model,
-      actor: getRequestActor(c), signal: c.req.raw.signal,
+      actor: getRequestActor(c), signal,
       ...(mode === "grounded"
         ? { allowAgentTools: false, allowConfiguration: false }
         : { allowAgentTools: env.publicChatAgentEnabled, ...(body.agent ? { agent: body.agent } : {}) }),
       ...(body.retrieval ? { retrieval: body.retrieval } : {}),
-      ...(body.filters ? { filters: body.filters } : {}) }));
+      ...(body.filters ? { filters: body.filters } : {}) })));
   } catch (error) {
+    const usage = await failChatTurn(turn, chatTurnFailureReason(error, signal));
     if (error instanceof ChatModelNotAllowedError) return modelNotAllowed(c);
-    throw error;
+    throw usage ? withApiErrorDetails(error, { usage }) : error;
   }
+  // The answer was generated for this client: it is charged even if the
+  // client has already left (it is persisted to the chat session, and a
+  // refund here would make disconnecting a way to get answers for free).
+  turn.delivered();
   return c.json(response);
+}
+
+/** Refund an undelivered turn; the usage goes in the error body when this request owns the turn. */
+async function failChatTurn(turn: ChatTurn, reason: string): Promise<ChatTurnUsage | null> {
+  if (!turn.owned) return null;
+  try {
+    return await turn.failed(reason);
+  } catch (error) {
+    // A failed refund must not replace the turn's own error; the turn stays charged.
+    reportPublicError(error);
+    return turn.usage();
+  }
 }
 
 const workspaceChatHandler = (c: Context) => handleWorkspaceChat(c, "public");
@@ -290,7 +312,8 @@ export const searchRoutes = new Hono()
     const deferred = await deferredRequestContext(c, workspaceId, (event) => sink(event));
     if ("response" in deferred) return deferred.response;
 
-    return streamSSE(c, async (stream) => {
+    const turn = beginChatTurn();
+    return streamSSE(c, (stream) => turn.run(async () => {
       const abort = new AbortController();
       stream.onAbort(() => abort.abort());
       deferred.context.signal = abort.signal;
@@ -307,20 +330,27 @@ export const searchRoutes = new Hono()
         })
       });
 
-      const response = await withDeferredContext(deferred.context, () => chatWorkspace({
-        workspaceId,
-        userId,
-        query,
-        actor: getRequestActor(c), allowAgentTools: env.publicChatAgentEnabled, signal: c.req.raw.signal,
-        sessionId,
-        model
-      }));
-      await pendingEvents;
-
-      await stream.writeSSE({
-        event: "message",
-        data: JSON.stringify(response)
-      });
+      let response: Awaited<ReturnType<typeof chatWorkspace>>;
+      try {
+        response = await withDeferredContext(deferred.context, () => chatWorkspace({
+          workspaceId,
+          userId,
+          query,
+          actor: getRequestActor(c), allowAgentTools: env.publicChatAgentEnabled, signal: c.req.raw.signal,
+          sessionId,
+          model
+        }));
+        await pendingEvents;
+        await stream.writeSSE({
+          event: "message",
+          data: JSON.stringify(response)
+        });
+      } catch (error) {
+        await failChatTurn(turn, chatTurnFailureReason(error, abort.signal.aborted ? abort.signal : c.req.raw.signal));
+        throw error;
+      }
+      // Generated for this client: charged, whether or not it is still connected.
+      turn.delivered();
       await stream.writeSSE({
         event: "done",
         data: JSON.stringify({
@@ -329,7 +359,7 @@ export const searchRoutes = new Hono()
           searchSessionId: response.searchSessionId
         })
       });
-    });
+    }));
   })
   .post("/chat", workspaceChatHandler)
   .get("/", async (c) => {

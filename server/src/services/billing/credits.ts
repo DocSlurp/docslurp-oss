@@ -127,6 +127,33 @@ export async function enqueueOrgCreditDebit(
 }
 
 /**
+ * Cancel the not-yet-applied debits of some chat-turn Usage Events, so they
+ * are never charged. Takes the org row lock first, the same lock
+ * apply_pending_org_debits takes before it deletes pending rows, so a pending
+ * debit is either applied by a flush or cancelled here, never both: whatever
+ * part of those events' credits is not cancelled here was already applied.
+ * Call it inside the caller's transaction and keep the lock until commit.
+ */
+export async function cancelPendingChatTurnDebits(
+  client: Client,
+  args: { orgId: string; turnId: string; usageEventIds: readonly string[] },
+): Promise<{ credits: number; debits: number }> {
+  if (args.usageEventIds.length === 0) return { credits: 0, debits: 0 };
+  await (client as SqlClient)`select 1 from organizations where id = ${args.orgId} for no key update`;
+  const [row] = await (client as SqlClient)<{ credits: string; debits: number }[]>`
+    with cancelled as (
+      delete from credit_debits_pending p
+      where p.org_id = ${args.orgId}
+        and p.metadata ->> 'chatTurnId' = ${args.turnId}
+        and p.metadata ->> 'usageEventId' = any(${[...args.usageEventIds]}::text[])
+      returning p.credits
+    )
+    select coalesce(sum(credits), 0)::text as credits, count(*)::int as debits from cancelled
+  `;
+  return { credits: Number(row?.credits ?? 0), debits: Number(row?.debits ?? 0) };
+}
+
+/**
  * Apply pending debits, one org per transaction (apply_pending_org_debits).
  * Workers' maintenance leader runs the same flush; concurrent flushes are safe.
  */

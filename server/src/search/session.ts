@@ -12,6 +12,7 @@ import {
 import type { SearchFilters } from "./filters.js";
 import { currentChatSessionId } from "../lib/chat-agent-context.js";
 import { reportPublicError } from "../lib/public-errors.js";
+import { trackCurrentChatTurnWrite } from "../lib/chat-turn-context.js";
 
 export type SearchUsageEvent = UsageEvent;
 
@@ -223,8 +224,11 @@ class SqlSearchSessionJournal implements SearchSessionJournal {
    * journal; the returned promise resolves at once.
    */
   private enqueue(write: () => Promise<void>, operation: string): Promise<void> {
+    // Usage flushes run in the snapshot's transaction: a failing chat turn
+    // (#90) waits for the commit, inline or write-behind, or its refund would
+    // miss these events.
     if (!this.writeBehind) {
-      const pending = this.persistenceTail.then(write);
+      const pending = trackCurrentChatTurnWrite(this.persistenceTail.then(write));
       this.persistenceTail = pending.catch(() => undefined);
       return pending;
     }
@@ -241,6 +245,7 @@ class SqlSearchSessionJournal implements SearchSessionJournal {
         await inBackgroundSlot(bound);
       })
       .catch((error) => { reportPublicError(error, { operation: `search-write-behind:${operation}`, sessionId: this.sessionId }); });
+    trackCurrentChatTurnWrite(pending);
     this.persistenceTail = pending;
     pendingSessionWrites.set(this.sessionId, pending);
     void pending.finally(() => {
