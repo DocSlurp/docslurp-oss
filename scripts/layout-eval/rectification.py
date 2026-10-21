@@ -27,7 +27,18 @@ def find_page_quad(image,max_edge=768,minimum_area=.30):
     import cv2
     import numpy as np
     if max_edge<128: raise ValueError('Boundary probe edge must be at least128')
-    array=np.asarray(image.convert('RGB'))
+    rgb=image if image.mode=='RGB' else image.convert('RGB')
+    # Probe a few border scanlines before allocating/resampling the whole image.
+    # A strict threshold abstains only for clearly border-filling light pages.
+    borders=[np.asarray(rgb.crop(box)).reshape(-1,3) for box in
+             ((0,0,rgb.width,1),(0,rgb.height-1,rgb.width,rgb.height),
+              (0,0,1,rgb.height),(rgb.width-1,0,rgb.width,rgb.height))]
+    border=np.concatenate(borders).astype(np.float32)
+    high,low=border.max(axis=1),border.min(axis=1)
+    neutral=(high>150)&((high-low)*255<75*np.maximum(high,1))
+    if neutral.mean()>.96:
+        return None,{'accepted':False,'reason':'light-page-fills-border','fast_border_probe':True}
+    array=np.asarray(rgb)
     scale=min(1.,max_edge/max(image.size))
     small=cv2.resize(array,(max(1,round(image.width*scale)),max(1,round(image.height*scale))),interpolation=cv2.INTER_AREA)
     height,width=small.shape[:2]
