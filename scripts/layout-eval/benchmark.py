@@ -54,15 +54,26 @@ def transform_bytes(data,variant):
         scale=min(1.,max_edge/max(image.size))
         image=image.resize((max(1,round(image.width*scale)),max(1,round(image.height*scale))),Image.Resampling.LANCZOS)
     if variant.get('grayscale'): image=image.convert('L')
+    if variant.get('palette_colors'):
+        colors=variant['palette_colors']
+        if not isinstance(colors,int) or not 2<=colors<=256: raise ValueError('Palette color count must be 2..256')
+        image=image.convert('RGB').quantize(colors=colors,method=Image.Quantize.MEDIANCUT,dither=Image.Dither.NONE)
+    if 'binary_threshold' in variant:
+        threshold=variant['binary_threshold']
+        if not 0<=threshold<=255: raise ValueError('Binary threshold must be 0..255')
+        image=image.convert('L').point(lambda pixel:255 if pixel>=threshold else 0,mode='1')
     codec=variant.get('codec','original').upper()
-    unchanged=codec=='ORIGINAL' and not max_edge and not variant.get('grayscale')
+    unchanged=codec=='ORIGINAL' and not max_edge and not variant.get('grayscale') and not variant.get('palette_colors') and 'binary_threshold' not in variant
     if unchanged:
         payload=data
     else:
         if codec=='ORIGINAL': codec='PNG'
-        options={'quality':variant.get('quality',80)} if codec in ('JPEG','WEBP') else {}
+        options={'quality':variant.get('quality',80)} if codec in ('JPEG','WEBP','AVIF') else {}
         if codec=='JPEG':
             options['subsampling']=variant.get('subsampling',2)
+            if image.mode not in ('L','RGB'): image=image.convert('RGB')
+        if codec=='WEBP': options['lossless']=bool(variant.get('lossless',False))
+        if codec=='AVIF': options['speed']=variant.get('speed',8)
         buffer=io.BytesIO(); image.save(buffer,format=codec,**options); payload=buffer.getvalue()
     encoded=time.perf_counter()
     if not unchanged:

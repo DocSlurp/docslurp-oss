@@ -113,6 +113,22 @@ class ImageTests(unittest.TestCase):
         text=describe_region(image,{'label':'paragraph','bbox':[0,0,1,1]})
         self.assertNotIn('coverageKind',text)
 
+    def test_palette_bilevel_and_lossless_variants_keep_dimensions(self):
+        import io
+        from PIL import Image
+        from benchmark import transform_bytes
+        image=Image.new('RGB',(160,100),'white'); image.paste('red',(20,20,80,80))
+        stream=io.BytesIO(); image.save(stream,format='PNG')
+        for variant in ({'codec':'png','max_edge':80,'palette_colors':16},
+                        {'codec':'png','max_edge':80,'binary_threshold':160},
+                        {'codec':'webp','max_edge':80,'lossless':True}):
+            result,details=transform_bytes(stream.getvalue(),variant)
+            self.assertEqual(result.size,(80,50))
+            self.assertEqual(details['source_size'],(160,100))
+            self.assertGreater(details['producer_path_ms'],0.)
+            self.assertGreater(details['consumer_decode_ms'],0.)
+            self.assertGreater(details['payload_bytes'],0)
+
     def test_manifest_jsonl_and_json_reference_formats(self):
         from benchmark import read_manifest,load_reference
         # Caller supplies task-owned scratch via TMPDIR; never force RAM-backed /tmp.
