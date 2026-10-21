@@ -51,6 +51,10 @@ def hebrew_clinic_newsletter():
                header_face='lib-sans-bold', direction='rtl', language='he', rule_color='#8aa29e')
     ty = ly + 30 + 6 * 40 + 18
     p.text('השעות נכונות לחודשים תשרי–כסלו ועשויות להשתנות בחגים.', left_x, ty, col_w, 17, 'lib-sans', '#5b6866', label='caption', **he)
+    p.rectangle([left_x, ty + 60, left_x + col_w, ty + 330], '#fdf3e1')
+    p.text('דרושים מתנדבים', left_x + 20, ty + 80, col_w - 40, 24, 'lib-sans-bold', '#8a5a12', label='title', **he)
+    p.text('אנחנו מחפשים מתנדבים לעזרה בקבלת הקהל בימי שישי: הכוונה בתור, חלוקת מספרים ועזרה לקשישים. אפשר להתנדב לשעתיים בלבד.', left_x + 20, ty + 125, col_w - 40, 20, 'lib-serif', '#3a2c12', leading=31, **he)
+    p.text('לפרטים: רונית, בטלפון 03-5550152', left_x + 20, ty + 260, col_w - 40, 19, 'lib-sans-bold', '#3a2c12', label='paragraph', **he)
     p.rectangle([70, 1220, 1170, 1460], '#e6f0ee')
     p.text('שאלות נפוצות', 100, 1245, 1040, 24, 'lib-sans-bold', teal, label='title', **he)
     p.text('האם אפשר לקבל חיסון שפעת וחיסון קורונה באותו ביקור? כן, ברוב המקרים אפשר לקבל את שניהם באותו יום, בשתי זרועות שונות. אם הייתה לכם תגובה חריפה לחיסון בעבר, ספרו על כך לאחות לפני מתן הזריקה.', 100, 1290, 1040, 20, 'lib-serif', '#273332', leading=32, **he)
