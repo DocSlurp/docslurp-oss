@@ -4,6 +4,8 @@ import {
 import type {
   AdaptivePageRoute,
   Assignment,
+  AssignmentRole,
+  PageAttention,
   PageInput,
   Router,
   RoutePlan,
@@ -44,6 +46,15 @@ export function pickVisionTarget(catalog: readonly RoutingTarget[]): RoutingTarg
     .sort((a, b) => a.c - b.c)[0]?.t;
 }
 
+/** Cheapest local OCR target: the render-based fallback when no VLM is configured. */
+export function pickOcrTarget(catalog: readonly RoutingTarget[]): RoutingTarget | undefined {
+  const scope = { kind: "page" } as const;
+  return catalog
+    .filter((t) => t.kind === "local-ocr" && t.roles.includes("ocr"))
+    .map((t) => ({ t, c: estimateTargetCost(t, "ocr", scope).costUsd }))
+    .sort((a, b) => a.c - b.c)[0]?.t;
+}
+
 export class HeuristicRouter implements Router {
   readonly kind = "heuristic" as const;
   readonly id: string;
@@ -58,8 +69,10 @@ export class HeuristicRouter implements Router {
     objective: RoutingObjective,
   ): Promise<RoutePlan> {
     const vision = pickVisionTarget(catalog);
+    const ocr = vision ? undefined : pickOcrTarget(catalog);
     const nativeTarget = catalog.find((t) => t.id === NATIVE_ACCEPT_TARGET_ID);
     const planned: PlannedAssignment[] = [];
+    const unresolved: PageAttention[] = [];
     const scope = { kind: "page" } as const;
     for (const page of pages) {
       if (assessAttention(page).skip) continue; // locked: reported in plan.attention
@@ -67,10 +80,18 @@ export class HeuristicRouter implements Router {
       const entry = text !== undefined ? classifyAdaptivePage(page.features.pageNumber, text) : undefined;
       const route = entry?.route ?? page.features.heuristic.route;
       const hint = entry?.extractorHint ?? page.features.heuristic.extractorHint;
-      const useVision = heuristicWantsVision(route, hint) && !!vision;
-      const target = useVision ? vision! : nativeTarget;
+      const wantsPixels = heuristicWantsVision(route, hint);
+      // Missing render capability must not read as "the text layer is fine": use OCR, or flag the gap.
+      const [target, role]: [RoutingTarget | undefined, AssignmentRole] = !wantsPixels
+        ? [nativeTarget, "accept-text"]
+        : vision ? [vision, "extract-text"] : ocr ? [ocr, "ocr"] : [nativeTarget, "accept-text"];
       if (!target) continue;
-      const role = useVision ? "extract-text" : "accept-text";
+      const useVision = role !== "accept-text";
+      const visionUnavailable = wantsPixels && !useVision;
+      if (visionUnavailable) {
+        unresolved.push({ pageNumber: page.features.pageNumber, outcome: "flagged", features: ["vision-target-unavailable"],
+          reason: "needs-attention: page needs a rendering target but none is configured; native text layer accepted as-is" });
+      }
       const c = estimateTargetCost(target, role, scope, page);
       const p = useVision ? PRIOR_P.vision : PRIOR_P.native;
       const alt: Alternative = {
@@ -87,7 +108,7 @@ export class HeuristicRouter implements Router {
         scope,
         targetId: target.id,
         role,
-        reason: `classify-route route=${route} hint=${hint ?? "none"}`,
+        reason: `classify-route route=${route} hint=${hint ?? "none"}${visionUnavailable ? "; vision-unavailable" : ""}`,
         estimate: { costUsd: c.costUsd, latencyMs: c.latencyP50Ms, pPass: p },
         cascade: [],
       };
@@ -101,7 +122,7 @@ export class HeuristicRouter implements Router {
       objective,
       policyVersion: "heuristic:classify-route",
       planned,
-      attention: attentionForPages(pages),
+      attention: [...attentionForPages(pages), ...unresolved],
       budget,
       catalog,
     }).plan;

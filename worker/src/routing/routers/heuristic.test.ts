@@ -46,4 +46,23 @@ describe("HeuristicRouter", () => {
     const tight = await new HeuristicRouter().plan(pages, catalog, { limitUsd: 0, marginFloor: 0 }, "cost-quality");
     expect(tight.chunkEstimate.overBudgetActions.length).toBeGreaterThan(0);
   });
+  it("never accepts native text silently when vision is wanted but no vision target exists", async () => {
+    const scan = makePage({ pageNumber: 1, route: "handwriting-or-degraded", hint: "vision-rescue" });
+    const nativeOnly = catalog.filter((t) => t.kind === "native");
+    const plan = await new HeuristicRouter().plan([scan], nativeOnly, BIG_BUDGET, "cost-quality");
+    expect(plan.assignments[0]!.role).toBe("accept-text");
+    expect(plan.assignments[0]!.reason).toContain("vision-unavailable");
+    expect(plan.attention).toEqual([expect.objectContaining({ pageNumber: 1, outcome: "flagged", features: ["vision-target-unavailable"] })]);
+    expect(() => routePlanSchema.parse(plan)).not.toThrow();
+  });
+
+  it("falls back to a local OCR target when no vision target exists", async () => {
+    const scan = makePage({ pageNumber: 1, route: "handwriting-or-degraded", hint: "vision-rescue" });
+    const native = catalog.find((t) => t.kind === "native")!;
+    const ocr = { ...native, id: "ocr:local-test", kind: "local-ocr" as const, roles: ["ocr" as const],
+      capabilities: { ...native.capabilities, imageInput: true, usesNativeTextLayer: false } };
+    const plan = await new HeuristicRouter().plan([scan], [native, ocr], BIG_BUDGET, "cost-quality");
+    expect(plan.assignments[0]).toMatchObject({ targetId: "ocr:local-test", role: "ocr" });
+    expect(plan.attention).toEqual([]);
+  });
 });
