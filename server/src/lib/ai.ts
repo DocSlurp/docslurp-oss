@@ -362,6 +362,7 @@ export async function embedOpenAiText(args: {
   return withObservation(
     {
       name: "api.embedding.openai",
+      metadata: { provider: "openai" },
       type: "embedding",
       model: args.model ?? SEARCH_EMBEDDING_MODEL,
       input: args.value,
@@ -417,6 +418,7 @@ async function embedOpenAiCompatibleText(args: {
   return withObservation(
     {
       name: "api.embedding.compatible",
+      metadata: { provider: args.provider },
       type: "embedding",
       model: args.model,
       input: args.value,
@@ -489,7 +491,7 @@ export async function embedConfiguredText(args: {
   if (args.provider === "deepinfra") {
     if (!args.apiKey) throw new Error("DEEPINFRA_API_KEY is required for DeepInfra embeddings");
     if (args.model !== "BAAI/bge-m3" || (args.dimensions !== undefined && args.dimensions !== 1024) || args.requestedDimensions !== undefined) throw new Error("DeepInfra BGE-M3 requires its native 1024 dimensions");
-    return withObservation({ name: "api.embedding.deepinfra", type: "embedding", model: args.model, input: args.value, result: aiResultDetails }, async () => {
+    return withObservation({ name: "api.embedding.deepinfra", metadata: { provider: "deepinfra" }, type: "embedding", model: args.model, input: args.value, result: aiResultDetails }, async () => {
       const provider = createOpenAI({ apiKey: args.apiKey, baseURL: DEEPINFRA_EMBEDDING_BASE_URL, fetch: instrumentFetch("deepinfra", "embedding") });
       const result = await embed({ model: provider.embedding(args.model!), value: args.value, abortSignal: args.signal, maxRetries: 0 });
       if (!Number.isSafeInteger(result.usage.tokens) || result.usage.tokens! < 0) throw new Error("DeepInfra embeddings require actual provider token usage");
@@ -500,7 +502,7 @@ export async function embedConfiguredText(args: {
   }
 
   if (args.provider === "perplexity") {
-    const result = await withObservation({ name: "api.embedding.perplexity", type: "embedding", model: args.model, input: args.value, result: aiResultDetails }, () => embedPerplexity({
+    const result = await withObservation({ name: "api.embedding.perplexity", metadata: { provider: "perplexity" }, type: "embedding", model: args.model, input: args.value, result: aiResultDetails }, () => embedPerplexity({
               fetch: instrumentFetch("perplexity", "embedding"),
       model: args.model ?? "",
       dimensions: args.dimensions,
@@ -517,7 +519,7 @@ export async function embedConfiguredText(args: {
     if (args.dimensions !== undefined && args.dimensions !== route.dimensions) throw new Error("OpenRouter embedding dimensions do not match the registered model");
     if (!args.apiKey) throw new Error("OPENROUTER_API_KEY is required for remote OpenRouter embeddings");
     const provider = createOpenAI({ apiKey: args.apiKey, baseURL: OPENROUTER_BASE_URL, fetch: instrumentFetch("openrouter", "embedding") });
-    const result = await withObservation({ name: "api.embedding.openrouter", type: "embedding", model: route.model, input: args.value, result: aiResultDetails }, () => embed({
+    const result = await withObservation({ name: "api.embedding.openrouter", metadata: { provider: "openrouter" }, type: "embedding", model: route.model, input: args.value, result: aiResultDetails }, () => embed({
       model: provider.embedding(route.model), value: args.value, abortSignal: args.signal, maxRetries: 0,
       ...posthogAiTelemetry({ functionId: "api.embedding.openrouter", provider: "openrouter", context: args.observability }),
     }));
@@ -587,7 +589,7 @@ async function embedPrivateEndpointText(args: {
     auditScope: args.auditScope,
   });
   return withObservation(
-    { name: "api.embedding.private", type: "embedding", model: call.model, input: args.value, result: aiResultDetails },
+    { name: "api.embedding.private", metadata: { provider: PRIVATE_MODEL_PROVIDER }, type: "embedding", model: call.model, input: args.value, result: aiResultDetails },
     async () => {
       const provider = createOpenAI({ apiKey: PRIVATE_ENDPOINT_API_KEY, baseURL: call.baseUrl, fetch: instrumentFetch("private", "inference", call.fetch) });
       const startedAt = Date.now();
@@ -619,7 +621,7 @@ async function embedLocalText(args: {
       type: "embedding",
       model: args.model ?? SEARCH_EMBEDDING_MODEL,
       input: args.value,
-      metadata: { usageSource: "estimated" },
+      metadata: { provider: "local", usageSource: "estimated" },
       result: (result) => ({
         metadata: { estimatedInputTokens: result.usage.inputTokens },
       }),

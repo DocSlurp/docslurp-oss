@@ -3,12 +3,12 @@ import { logs as logsApi } from "@opentelemetry/api-logs";
 // Server-only runtime. One provider owns context; exporters never own app lifecycle.
 import { hostname } from "node:os";
 import { performance } from "node:perf_hooks";
-import { context, createContextKey, propagation, ROOT_CONTEXT, SpanKind, SpanStatusCode, trace, type Attributes, type Histogram } from "@opentelemetry/api";
+import { context, createContextKey, propagation, ROOT_CONTEXT, SpanKind, SpanStatusCode, trace, type Attributes, type Context, type Histogram } from "@opentelemetry/api";
 import { AsyncLocalStorageContextManager } from "@opentelemetry/context-async-hooks";
 import { CompositePropagator, W3CBaggagePropagator, W3CTraceContextPropagator, type ExportResult } from "@opentelemetry/core";
 import { resourceFromAttributes, defaultResource } from "@opentelemetry/resources";
 import { NodeTracerProvider } from "@opentelemetry/sdk-trace-node";
-import { BatchSpanProcessor, ParentBasedSampler, TraceIdRatioBasedSampler, type ReadableSpan, type SpanExporter, type SpanProcessor } from "@opentelemetry/sdk-trace-base";
+import { BatchSpanProcessor, ParentBasedSampler, TraceIdRatioBasedSampler, type ReadableSpan, type SpanExporter, type SpanProcessor, type Span } from "@opentelemetry/sdk-trace-base";
 import { MeterProvider, PeriodicExportingMetricReader } from "@opentelemetry/sdk-metrics";
 import { LoggerProvider, BatchLogRecordProcessor, type LogRecordProcessor } from "@opentelemetry/sdk-logs";
 import { OTLPTraceExporter } from "@opentelemetry/exporter-trace-otlp-proto";
@@ -157,9 +157,10 @@ export function initializeObservability(options: ObservabilityOptions = {}): boo
       // SigNoz's Services environment filter still reads the pre-1.27 semconv key.
       "deployment.environment": environment,
       "telemetry.sdk.language": "nodejs",
+      "service.namespace": "docslurp",
     }));
 
-    const traces = new NodeTracerProvider({ resource, spanProcessors: processors,
+    const traces = new NodeTracerProvider({ resource, spanProcessors: [new ScopeSpanProcessor(), ...processors],
       sampler: new ParentBasedSampler({ root: new TraceIdRatioBasedSampler(sampler === "parentbased_always_on" ? 1 : ratio) }),
       forceFlushTimeoutMillis: timeoutMillis,
     });
@@ -256,10 +257,10 @@ export function emitTelemetryLog(args: { severityText: "info" | "warn" | "error"
   }));
 }
 
-export function observationTelemetry(name: string, type: string, durationSeconds: number, failed: boolean, metadata: Record<string, unknown>): void {
+export function observationTelemetry(name: string, type: string, durationSeconds: number, failed: boolean, metadata: Record<string, unknown>, errorType = "Error"): void {
   const runtime = getRuntime();
   if (!runtime || runtime.shutdown) return;
-  const attributes = { "docslurp.operation.name": name.slice(0, 200), "docslurp.operation.type": type, "error.type": failed ? "Error" : "none" };
+  const attributes = { "docslurp.operation.name": name.slice(0, 200), "docslurp.operation.type": type, ...(failed ? { "error.type": errorType } : {}) };
   bestEffort(() => runtime.operationDuration?.record(durationSeconds, attributes));
   const correlations = Object.fromEntries(Object.entries(metadata).filter(([key, value]) => correlationKeys.has(key) && typeof value === "string").map(([key, value]) => [`docslurp.${key}`, value as string]));
   const media = Object.fromEntries(Object.entries(metadata).filter(([key, value]) =>
@@ -279,7 +280,7 @@ export function observationTelemetry(name: string, type: string, durationSeconds
 export function recordHttpTelemetry(method: string, route: string, status: number, durationSeconds: number): void {
   const runtime = getRuntime();
   if (!runtime || runtime.shutdown) return;
-  const attributes = { "http.request.method": method, "http.route": route, "http.response.status_code": status };
+  const attributes = { "http.request.method": method, "http.route": route, "http.response.status_code": status, ...(status >= 500 ? { "error.type": String(status) } : {}) };
   bestEffort(() => runtime.httpDuration?.record(durationSeconds, attributes));
 }
 
@@ -300,7 +301,7 @@ export async function withHttpSpan<T>(options: { method: string; route: string; 
         bestEffort(() => {
           const status = outcome?.ok === false ? 500 : options.status();
           span.setAttribute("http.response.status_code", status);
-          if (status >= 500) { span.setStatus({ code: SpanStatusCode.ERROR }); span.setAttribute("error.type", "Error"); }
+          if (status >= 500) { span.setStatus({ code: SpanStatusCode.ERROR }); span.setAttribute("error.type", String(status)); }
           recordHttpTelemetry(options.method, options.route, status, (performance.now() - started) / 1000);
         });
         bestEffort(() => span.end());
@@ -362,7 +363,44 @@ export function recordMediaTelemetry(args: { provider: string; model: string; op
 
 const dependencyScopeKey = createContextKey("docslurp.dependency.scope");
 export function withDependencyScope<T>(scope: Record<string, unknown>, run: () => T): T {
-  return context.with(context.active().setValue(dependencyScopeKey, scope), run);
+  const parent = context.active();
+  const inherited = parent.getValue(dependencyScopeKey) as Record<string, unknown> | undefined;
+  return context.with(parent.setValue(dependencyScopeKey, Object.assign(scope, { ...inherited, ...scope })), run);
+}
+
+/** Apply application scope to every SDK/manual child span, never to metric labels. */
+export function scopeTraceAttributes(scope: Record<string, unknown>): Attributes {
+  const attributes: Attributes = {};
+  for (const key of ["requestId", "runId", "documentId", "workspaceId", "orgId", "sessionId", "stageName"]) {
+    const value = scope[key];
+    if (typeof value === "string" && value) attributes[`docslurp.${key}`] = value.slice(0, 200);
+  }
+  if (typeof scope.chatSessionId === "string") attributes["gen_ai.conversation.id"] = scope.chatSessionId.slice(0, 200);
+  for (const [key, attribute] of [
+    ["guardrailMode", "docslurp.guardrail.mode"],
+    ["guardrailPolicyVersion", "docslurp.guardrail.policy.version"],
+    ["guardrailDecision", "docslurp.guardrail.decision"],
+    ["guardrailStage", "docslurp.guardrail.stage"],
+    ["accountTier", "docslurp.account.tier"],
+  ]) {
+    const value = scope[key];
+    if (typeof value === "string" && /^[a-zA-Z0-9_.-]{1,80}$/.test(value)) attributes[attribute] = value;
+  }
+  return attributes;
+}
+
+class ScopeSpanProcessor implements SpanProcessor {
+  onStart(span: Span, parent: Context): void {
+    bestEffort(() => {
+      const scope = parent.getValue(dependencyScopeKey) as Record<string, unknown> | undefined;
+      for (const [key, value] of Object.entries(scopeTraceAttributes(scope ?? {}))) {
+        if (span.attributes[key] === undefined && value !== undefined) span.setAttribute(key, value);
+      }
+    });
+  }
+  onEnd(): void {}
+  async forceFlush(): Promise<void> {}
+  async shutdown(): Promise<void> {}
 }
 
 /** Low-cardinality dependency timing; no URLs, SQL text, keys, bodies or headers. */
@@ -391,7 +429,7 @@ export function startDependencySpan(name: string, attributes: Attributes) {
         // IDs, server names and model names belong on spans, never metric labels.
         const labels = Object.fromEntries(Object.entries(attributes).filter(([key]) =>
           ["docslurp.dependency.type", "docslurp.dependency.operation", "docslurp.dependency.provider", "docslurp.dependency.phase"].includes(key)));
-        runtime?.dependencyDuration?.record((performance.now() - started) / 1000, { ...labels, "error.type": errorType ?? "none" });
+        runtime?.dependencyDuration?.record((performance.now() - started) / 1000, { ...labels, ...(errorType ? { "error.type": errorType } : {}) });
       });
       bestEffort(() => span?.end());
     },
@@ -437,7 +475,7 @@ export function startTelemetrySpan(tracerName: string, name: string, attributes:
       ended = true;
       if (error) bestEffort(() => {
         span?.setStatus({ code: SpanStatusCode.ERROR });
-        span?.setAttribute("error.type", error instanceof Error ? error.name : String(error).slice(0, 64));
+        span?.setAttribute("error.type", error instanceof Error ? error.name : "Error");
       });
       bestEffort(() => span?.end());
     },

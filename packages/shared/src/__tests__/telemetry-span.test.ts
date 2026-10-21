@@ -48,3 +48,28 @@ it("copies only allowlisted eval.* baggage, capped at 128 characters, and expose
   expect(seen.baggage).toEqual({ "eval.run_id": "run-1", "eval.case_id": "x".repeat(128) });
   expect(seen.traceparent).toMatch(/^00-0af7651916cd43dd8448eb211c80319c-[0-9a-f]{16}-01$/);
 });
+
+it("propagates safe scope to SDK and manual spans without crossing concurrent tenants", async () => {
+  const { trace } = await import("@opentelemetry/api");
+  const { addTraceMetadata } = await import("../observability.js");
+  await Promise.all(["one", "two"].map(orgId => withObservation({
+    name: `scope-${orgId}`, metadata: { orgId, guardrailMode: "cascade", guardrailPolicyVersion: "v1", password: "hidden" },
+  }, async () => {
+    addTraceMetadata({ workspaceId: `workspace-${orgId}` });
+    await Promise.resolve();
+    const sdk = trace.getTracer("third-party.sdk").startSpan(`sdk-${orgId}`);
+    sdk.end();
+    const manual = startTelemetrySpan("docslurp.test", `manual-${orgId}`, {});
+    manual.end("private document error text");
+  })));
+  for (const orgId of ["one", "two"]) {
+    for (const prefix of ["scope", "sdk", "manual"]) {
+      const span = exporter.getFinishedSpans().find(s => s.name === `${prefix}-${orgId}`)!;
+      expect(span.attributes).toMatchObject({ "docslurp.orgId": orgId, "docslurp.workspaceId": `workspace-${orgId}`, "docslurp.guardrail.mode": "cascade", "docslurp.guardrail.policy.version": "v1" });
+      expect(span.attributes.password).toBeUndefined();
+    }
+    const manual = exporter.getFinishedSpans().find(s => s.name === `manual-${orgId}`)!;
+    expect(manual.attributes["error.type"]).toBe("Error");
+    expect(JSON.stringify(manual.attributes)).not.toContain("private document");
+  }
+});

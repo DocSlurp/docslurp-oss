@@ -2,7 +2,7 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { SpanStatusCode } from "@opentelemetry/api";
 import { performance } from "node:perf_hooks";
-import { initializeObservability, observationTelemetry, mapsObservationAiUsage, withDependencyScope } from "./telemetry.js";
+import { initializeObservability, observationTelemetry, mapsObservationAiUsage, withDependencyScope, scopeTraceAttributes } from "./telemetry.js";
 export { initializeObservability, flushObservability, shutdownObservability, installObservabilitySignalHandlers, emitTelemetryLog, exportsOtlpLogs, withHttpSpan, withBackgroundSpan, recordMediaTelemetry, startTelemetrySpan, recordChatAgentTelemetry, evalBaggageAttributes, activeTraceparent, EVAL_BAGGAGE_KEYS, type TelemetrySpan } from "./telemetry.js";
 import {
   LangfuseOtelSpanAttributes,
@@ -54,6 +54,9 @@ export function addTraceMetadata(metadata: Metadata): void {
   // Observations started later receive these through propagateAttributes; the
   // already-open owner needs them set directly to stay filterable in v4.
   const span = contextObservations.get(active)?.otelSpan;
+  for (const [key, value] of Object.entries(scopeTraceAttributes(metadata))) {
+    try { if (typeof value === "string") span?.setAttribute(key, value); } catch { /* Best effort. */ }
+  }
   for (const [key, attribute] of [
     ["userId", LangfuseOtelSpanAttributes.TRACE_USER_ID],
     ["sessionId", LangfuseOtelSpanAttributes.TRACE_SESSION_ID],
@@ -74,9 +77,12 @@ function safeUpdate(
 ): void {
   try {
     observation.update(attributes);
+    for (const [key, value] of Object.entries(scopeTraceAttributes(attributes.metadata ?? {}))) {
+      if (typeof value === "string") observation.otelSpan?.setAttribute(key, value);
+    }
     if (attributes.level === "ERROR") {
       observation.otelSpan?.setStatus?.({ code: SpanStatusCode.ERROR });
-      observation.otelSpan?.setAttribute("error.type", "Error");
+      observation.otelSpan?.setAttribute("error.type", typeof attributes.metadata?.errorType === "string" ? attributes.metadata.errorType : "Error");
     }
     const provider = attributes.metadata?.provider;
     if (typeof provider === "string") observation.otelSpan?.setAttribute("gen_ai.provider.name", provider);
@@ -112,6 +118,7 @@ export async function withObservation<T>(
     metadataContext.run(metadata, async () => {
       const started = performance.now();
       let failed = false;
+      let errorType = "Error";
       contextObservations.set(metadata, observation);
       safeUpdate(observation, {
         model: options.model,
@@ -147,6 +154,7 @@ export async function withObservation<T>(
         return savedOutcome;
       } catch (error) {
         failed = true;
+        errorType = error instanceof Error ? error.name : "Error";
         savedOutcome = { ok: false, error };
         safeUpdate(observation, {
           level: "ERROR",
@@ -159,13 +167,13 @@ export async function withObservation<T>(
             : error instanceof Error
               ? error.name
               : "Error",
-          metadata: sanitizeTraceValue(metadata) as Metadata,
+          metadata: sanitizeTraceValue({ ...metadata, errorType }) as Metadata,
         });
         // Rethrow outside the SDK callback so its automatic error handler cannot
         // overwrite our content policy with a raw provider error body.
         return savedOutcome;
       } finally {
-        observationTelemetry(options.name, options.type ?? "span", (performance.now() - started) / 1000, failed, metadata);
+        observationTelemetry(options.name, options.type ?? "span", (performance.now() - started) / 1000, failed, metadata, errorType);
       }
     });
   let outcome;
