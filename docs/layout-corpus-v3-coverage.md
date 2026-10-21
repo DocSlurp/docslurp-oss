@@ -81,7 +81,7 @@ Tests: `python -m unittest discover -s scripts/layout-eval/corpus_v2 -p "test_*v
 ## Results of this snapshot
 
 - `coverage.py`: 26 authored sources, 26 manifest rows, 26 unique rasters, no exact duplicates, no missing sources and no structural issues (exit 0). Declared regions: 143 paragraph, 99 title, 46 header, 39 caption, 36 footer, 24 table, 16 list, 12 photo, 11 logo, 10 formula, 9 formula_number, 9 chart, 9 figure, 8 illustration, 7 form, 6 footnote.
-- Integrity judge (`base e15996da`, head `abb969a2`): passed, 51 cases, 1,759 files scanned (1,084 production), zero findings. The receipt is at `$V/integrity-result.json`.
+- Integrity judge (`base e15996da`, head `7f774730`, after the transcript corrections): passed, 51 cases, 1,763 files scanned (1,085 production), zero findings. The receipt is at `$V/integrity-result.json`; the pre-correction receipt and lock are kept in `$V/receipts/`. The current `frozen-v3/LOCK.json` has SHA-256 `d0cdaaf5…b15c` and `candidates.jsonl` has `f8e6838f…44c7`.
 - Spend: USD 0. All generation was local, assets were free public downloads, and no model or image-generation API was called.
 
 ## Known weaknesses
