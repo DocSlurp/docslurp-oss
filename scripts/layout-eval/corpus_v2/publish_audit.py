@@ -90,14 +90,24 @@ def audit(root, clearances):
         for role in ("source", "image", "reference", "contract"):
             if role not in artifacts or qa_row.get(role + "_sha256") != artifacts[role]["sha256"]:
                 label_issues.append("missing_or_stale_qa_hash:" + role)
+        confidence_path = root / "qa/confidence" / f"{identifier}.json"
         confidence = source.get("ground_truth", {}).get("confidence")
+        confidence_artifact = None
+        if confidence_path.is_file():
+            confidence_receipt = json.loads(confidence_path.read_text())
+            confidence_artifact = {"path": str(confidence_path), "sha256": sha(confidence_path), "evidence_scale": confidence_receipt.get("scale")}
+            for role in ("source", "image", "reference"):
+                if role not in artifacts or confidence_receipt.get("artifacts", {}).get(role + "Sha256") != artifacts[role]["sha256"]:
+                    label_issues.append("stale_confidence_hash:" + role)
+        else:
+            label_issues.append("missing_confidence_receipt")
         rows.append({"id": identifier, "document_id": source.get("document_id", identifier), "artifacts": artifacts,
                      "dependencies": dependencies, "fonts": fonts,
                      "rights_status": "evidence-ready" if not issues else "blocked",
                      "rights_issues": sorted(set(issues)),
                      "label_evidence_status": "hash-current-review-only" if not label_issues else "blocked-or-stale",
                      "label_issues": label_issues,
-                     "confidence": confidence,
+                     "confidence": confidence, "confidence_artifact": confidence_artifact,
                      "confidence_interpretation": "Evidence ratings, where supplied, are not probabilities or measured accuracy.",
                      "qa": qa_row})
     eligible = [row for row in rows if not row["rights_issues"]]
