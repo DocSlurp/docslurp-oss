@@ -297,7 +297,7 @@ describe("chat agent limits, debug and spans", () => {
 
 /** A model step that emits `chunks` and then stalls (never finishes), like a slow provider. */
 function stalledStep(chunks: unknown[]): Awaited<ReturnType<MockLanguageModelV4["doStream"]>> {
-  return { stream: new ReadableStream({ start(controller) { for (const chunk of chunks) controller.enqueue(chunk); } }) } as Awaited<ReturnType<MockLanguageModelV4["doStream"]>>;
+  return { stream: new ReadableStream({ start(controller) { for (const chunk of chunks) controller.enqueue(chunk as never); } }) } as Awaited<ReturnType<MockLanguageModelV4["doStream"]>>;
 }
 const usageChunk = { inputTokens: { total: 10, noCache: 10, cacheRead: 0, cacheWrite: 0 }, outputTokens: { total: 4, text: 4, reasoning: 0 } };
 const toolStep = (id: string) => ({ stream: simulateReadableStream({ chunks: [
