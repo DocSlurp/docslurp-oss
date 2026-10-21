@@ -24,7 +24,8 @@ import {
   normalizePageNumbers,
 } from "@docslurp/shared";
 
-import { sql } from "../db.js";
+import { sql, type SqlClient } from "../db.js";
+import { currentRequestSignal } from "../lib/request-context.js";
 import { jsonRecord } from "../lib/json-record.js";
 import { lanceDbVectorSearch } from "../search/lancedb.js";
 import { servedVectorSearch, type IndexServing } from "../search/index-serving.js";
@@ -49,7 +50,17 @@ import {
   servableInProgressVersion,
 } from "../search/eligibility.js";
 import { queryPhraseWindows } from "../search/relevance.js";
-import { collectSearchTimings, timePhase, type SearchTimings } from "../search/timings.js";
+import { withSearchSlot } from "../search/search-limiter.js";
+import {
+  boundedSearchQuery,
+  currentSearchSignal,
+  isSearchAborted,
+  isSearchBoundError,
+  isSearchStatementTimeout,
+  searchStatementTimeoutMs,
+  withSearchSignal,
+} from "../search/query-bounds.js";
+import { collectSearchTimings, countSearchEvent, recordSearchPhase, timePhase, type SearchTimings } from "../search/timings.js";
 
 export { MissingWorkspaceScopeError } from "../search/session-setup.js";
 
@@ -898,82 +909,106 @@ function buildProgressivePageWhere(filters: SearchFilters | undefined, runId: st
   return retrievalScope({ filters, runId }).progressivePage();
 }
 
+/**
+ * Matches ranked per lexical statement (SEARCH_LEXICAL_CANDIDATES, default
+ * 1000). Ranking every match was the 2026-10-20 incident: a conversational
+ * OR backoff matched most of a 285K-chunk workspace, and each statement read
+ * and sorted every match's tsvector and text for minutes. Now the first N
+ * matches (GIN bitmap order) are ranked by ts_rank_cd and only the top `limit`
+ * fetch their text. Selective queries match fewer than N and rank exactly as
+ * before; very broad ones rank a bounded sample, which the dense branch and
+ * fusion complement.
+ */
+export function lexicalCandidateLimit(env: NodeJS.ProcessEnv = process.env): number {
+  const parsed = Number(env.SEARCH_LEXICAL_CANDIDATES);
+  return env.SEARCH_LEXICAL_CANDIDATES?.trim() && Number.isFinite(parsed)
+    ? Math.min(100_000, Math.max(50, Math.trunc(parsed)))
+    : 1_000;
+}
+
+type LexicalParser = "websearch" | "plain" | "tsquery";
+
+/**
+ * Top `limit` chunks matching `query` (parsed by websearch_to_tsquery,
+ * plainto_tsquery or to_tsquery), ranked over at most lexicalCandidateLimit()
+ * matches. Each parser is a static statement so pg_stat_activity and traces
+ * show which one ran.
+ */
+export function rankedLexicalChunks(client: SqlClient, args: {
+  where: SqlFragment;
+  parser: LexicalParser;
+  query: string;
+  limit: number;
+  candidates?: number;
+}) {
+  const { where, query, limit } = args;
+  const candidates = Math.max(limit, args.candidates ?? lexicalCandidateLimit());
+  const topChunks = client`
+    select c.id, c.document_id, c.run_id, c.chunk_index, c.text, c.heading_path,
+           c.page_number, c.token_estimate, c.metadata, d.filename,
+           row_number() over (order by ranked.score desc, ranked.id) as rank
+    from ranked
+    join document_chunks c on c.id = ranked.id
+    join documents d on d.id = c.document_id
+    order by rank
+  `;
+  switch (args.parser) {
+    case "websearch":
+      return client<ChunkRow[]>`
+        with candidates as materialized (
+          select c.id, c.ts_content from document_chunks c join documents d on d.id = c.document_id
+          where ${where} and c.ts_content @@ websearch_to_tsquery('english', ${query})
+          limit ${candidates}
+        ), ranked as (
+          select id, ts_rank_cd(ts_content, websearch_to_tsquery('english', ${query})) as score
+          from candidates order by score desc, id limit ${limit}
+        )
+        ${topChunks}
+      `;
+    case "plain":
+      return client<ChunkRow[]>`
+        with candidates as materialized (
+          select c.id, c.ts_content from document_chunks c join documents d on d.id = c.document_id
+          where ${where} and c.ts_content @@ plainto_tsquery('english', ${query})
+          limit ${candidates}
+        ), ranked as (
+          select id, ts_rank_cd(ts_content, plainto_tsquery('english', ${query})) as score
+          from candidates order by score desc, id limit ${limit}
+        )
+        ${topChunks}
+      `;
+    case "tsquery":
+      return client<ChunkRow[]>`
+        with candidates as materialized (
+          select c.id, c.ts_content from document_chunks c join documents d on d.id = c.document_id
+          where ${where} and c.ts_content @@ to_tsquery('english', ${query})
+          limit ${candidates}
+        ), ranked as (
+          select id, ts_rank_cd(ts_content, to_tsquery('english', ${query})) as score
+          from candidates order by score desc, id limit ${limit}
+        )
+        ${topChunks}
+      `;
+  }
+}
+
 async function textSearch(
   query: string,
   _userId: string,
   options: SearchOptions,
 ): Promise<SearchChunk[]> {
   const limit = options.limit ?? 20;
-  const whereClause = buildChunkSearchWhere(options.filters, options.runId);
+  const where = buildChunkSearchWhere(options.filters, options.runId);
+  const lexical = (parser: LexicalParser, text: string) =>
+    boundedSearchQuery((client) => rankedLexicalChunks(client, { where, parser, query: text, limit }));
 
   // websearch_to_tsquery handles quoted phrases, AND/OR/-, and is more forgiving than
   // plainto_tsquery on special characters. Fall back to plainto_tsquery on parse errors.
   const lexicalBackoffQuery = buildLexicalBackoffTsQuery(query);
 
   try {
-    const rows = await sql<ChunkRow[]>`
-      select c.id, c.document_id, c.run_id, c.chunk_index, c.text, c.heading_path,
-              c.page_number, c.token_estimate, c.metadata, d.filename,
-              row_number() over (order by ts_rank_cd(c.ts_content, websearch_to_tsquery('english', ${query})) desc) as rank
-       from document_chunks c
-       join documents d on d.id = c.document_id
-       where ${whereClause}
-         and c.ts_content @@ websearch_to_tsquery('english', ${query})
-       order by ts_rank_cd(c.ts_content, websearch_to_tsquery('english', ${query})) desc
-       limit ${limit}
-    `;
-    if (rows.length > 0) {
-      return mapRankedChunkRows(rows);
-    }
-
-    if (!lexicalBackoffQuery) {
-      return [];
-    }
-
-    const lexicalRows = await sql<ChunkRow[]>`
-      select c.id, c.document_id, c.run_id, c.chunk_index, c.text, c.heading_path,
-              c.page_number, c.token_estimate, c.metadata, d.filename,
-              row_number() over (order by ts_rank_cd(c.ts_content, to_tsquery('english', ${lexicalBackoffQuery})) desc) as rank
-       from document_chunks c
-       join documents d on d.id = c.document_id
-       where ${whereClause}
-         and c.ts_content @@ to_tsquery('english', ${lexicalBackoffQuery})
-       order by ts_rank_cd(c.ts_content, to_tsquery('english', ${lexicalBackoffQuery})) desc
-       limit ${limit}
-    `;
-    // Preserve phrase matches in conversational queries: OR backoff alone lets
-    // repeated generic words crowd out the subject of the question.
-    const phrases = queryPhraseWindows(query).map((window) => `"${window}"`).join(" OR ");
-    const phraseRows = phrases ? await sql<ChunkRow[]>`
-      select c.id, c.document_id, c.run_id, c.chunk_index, c.text, c.heading_path,
-        c.page_number, c.token_estimate, c.metadata, d.filename,
-        row_number() over (order by ts_rank_cd(c.ts_content, websearch_to_tsquery('english', ${phrases})) desc) as rank
-      from document_chunks c join documents d on d.id = c.document_id
-      where ${whereClause} and c.ts_content @@ websearch_to_tsquery('english', ${phrases})
-      order by ts_rank_cd(c.ts_content, websearch_to_tsquery('english', ${phrases})) desc
-      limit ${limit}
-    ` : [];
-    const seen = new Set<string>();
-    return mapRankedChunkRows([...phraseRows, ...lexicalRows].filter(row => {
-      if (seen.has(row.id)) return false;
-      seen.add(row.id);
-      return true;
-    }), true, new Set(phraseRows.map((row) => row.id)));
-  } catch {
-    // websearch_to_tsquery can fail on degenerate inputs (all stop words, lone operators).
-    // Fall back to plainto_tsquery which is always safe.
     try {
-      const rows = await sql<ChunkRow[]>`
-        select c.id, c.document_id, c.run_id, c.chunk_index, c.text, c.heading_path,
-                c.page_number, c.token_estimate, c.metadata, d.filename,
-                row_number() over (order by ts_rank_cd(c.ts_content, plainto_tsquery('english', ${query})) desc) as rank
-         from document_chunks c
-         join documents d on d.id = c.document_id
-         where ${whereClause}
-           and c.ts_content @@ plainto_tsquery('english', ${query})
-         order by ts_rank_cd(c.ts_content, plainto_tsquery('english', ${query})) desc
-         limit ${limit}
-      `;
+      const rows = await lexical("websearch", query);
       if (rows.length > 0) {
         return mapRankedChunkRows(rows);
       }
@@ -982,21 +1017,55 @@ async function textSearch(
         return [];
       }
 
-      const lexicalRows = await sql<ChunkRow[]>`
-        select c.id, c.document_id, c.run_id, c.chunk_index, c.text, c.heading_path,
-                c.page_number, c.token_estimate, c.metadata, d.filename,
-                row_number() over (order by ts_rank_cd(c.ts_content, to_tsquery('english', ${lexicalBackoffQuery})) desc) as rank
-         from document_chunks c
-         join documents d on d.id = c.document_id
-         where ${whereClause}
-           and c.ts_content @@ to_tsquery('english', ${lexicalBackoffQuery})
-         order by ts_rank_cd(c.ts_content, to_tsquery('english', ${lexicalBackoffQuery})) desc
-         limit ${limit}
-      `;
-      return mapRankedChunkRows(lexicalRows, true);
-    } catch {
-      return [];
+      const lexicalRows = await lexical("tsquery", lexicalBackoffQuery);
+      // Preserve phrase matches in conversational queries: OR backoff alone lets
+      // repeated generic words crowd out the subject of the question.
+      const phrases = queryPhraseWindows(query).map((window) => `"${window}"`).join(" OR ");
+      const phraseRows = phrases ? await lexical("websearch", phrases) : [];
+      const seen = new Set<string>();
+      return mapRankedChunkRows([...phraseRows, ...lexicalRows].filter(row => {
+        if (seen.has(row.id)) return false;
+        seen.add(row.id);
+        return true;
+      }), true, new Set(phraseRows.map((row) => row.id)));
+    } catch (error) {
+      // A timed-out or aborted statement must not be re-run as a fallback.
+      if (isSearchBoundError(error)) throw error;
+      // websearch_to_tsquery can fail on degenerate inputs (all stop words, lone operators).
+      // Fall back to plainto_tsquery which is always safe.
+      try {
+        const rows = await lexical("plain", query);
+        if (rows.length > 0) {
+          return mapRankedChunkRows(rows);
+        }
+        if (!lexicalBackoffQuery) {
+          return [];
+        }
+        return mapRankedChunkRows(await lexical("tsquery", lexicalBackoffQuery), true);
+      } catch (fallbackError) {
+        if (isSearchBoundError(fallbackError)) throw fallbackError;
+        return [];
+      }
     }
+  } catch (error) {
+    if (isSearchAborted(error)) throw error;
+    // The statement timeout degrades this search to its other branches (dense,
+    // pages); the chat pending-search retry reads `lexicalTimeout` and stops.
+    countSearchEvent("lexicalTimeout");
+    console.warn(`[search] lexical branch timed out after ${searchStatementTimeoutMs()}ms; continuing without keyword results`);
+    return [];
+  }
+}
+
+/** A branch whose statement hit the search timeout contributes nothing; the search continues. */
+async function degradeOnTimeout<T>(branch: string, fallback: T, run: () => Promise<T>): Promise<T> {
+  try {
+    return await run();
+  } catch (error) {
+    if (!isSearchStatementTimeout(error)) throw error;
+    countSearchEvent(`${branch}Timeout`);
+    console.warn(`[search] ${branch} branch timed out after ${searchStatementTimeoutMs()}ms; continuing without it`);
+    return fallback;
   }
 }
 
@@ -1012,7 +1081,7 @@ async function progressivePageSearch(
   const limit = options.limit ?? 20;
   const whereClause = buildProgressivePageWhere(options.filters, options.runId);
 
-  const rows = await sql<ProgressivePageRow[]>`
+  const rows = await degradeOnTimeout<ProgressivePageRow[]>("progressive", [], () => boundedSearchQuery((client) => client<ProgressivePageRow[]>`
     select
         progressive_pages.id,
         progressive_pages.document_id,
@@ -1057,7 +1126,7 @@ async function progressivePageSearch(
         and progressive_pages.ts_content @@ websearch_to_tsquery('english', ${query})
       order by ts_rank_cd(progressive_pages.ts_content, websearch_to_tsquery('english', ${query})) desc
       limit ${limit}
-  `;
+  `));
 
   return rows.map((row) => mapProgressivePageRow(row, 1 / (80 + row.rank)));
 }
@@ -1077,7 +1146,7 @@ async function completedPageSearch(args: {
 
   try {
     const limit = args.options.limit ?? 20;
-    const pageRows = await sql<ProgressivePageRow[]>`
+    const pageRows = await boundedSearchQuery((client) => client<ProgressivePageRow[]>`
       select p.id, p.document_id, p.run_id, p.page_number, p.text,
              p.token_estimate, d.filename,
              row_number() over (order by ts_rank_cd(to_tsvector('english', p.text), websearch_to_tsquery('english', ${args.query})) desc)::int as rank
@@ -1091,12 +1160,14 @@ async function completedPageSearch(args: {
         and to_tsvector('english', p.text) @@ websearch_to_tsquery('english', ${args.query})
       order by rank asc
       limit ${limit}
-    `;
+    `);
 
     return pageRows.map((row) =>
       mapProgressivePageRow(row, 1 / (80 + row.rank)),
     );
-  } catch {
+  } catch (error) {
+    if (isSearchAborted(error)) throw error;
+    if (isSearchStatementTimeout(error)) countSearchEvent("completedPagesTimeout");
     // websearch_to_tsquery may fail on degenerate inputs; skip silently.
     return [];
   }
@@ -1108,7 +1179,7 @@ async function communitySummarySearch(
   options: SearchOptions,
 ): Promise<SearchChunk[]> {
   const limit = options.limit ?? 20;
-  const rows = await sql<CommunitySummaryRow[]>`
+  const rows = await degradeOnTimeout<CommunitySummaryRow[]>("community", [], () => boundedSearchQuery((client) => client<CommunitySummaryRow[]>`
     select
       community.id,
       community.run_id,
@@ -1127,7 +1198,7 @@ async function communitySummarySearch(
         @@ websearch_to_tsquery('english', ${query})
     order by rank asc
     limit ${limit}
-  `;
+  `));
 
   return rows.map((row) => ({
     id: `community:${row.id}`,
@@ -1170,7 +1241,7 @@ async function graphNeighborSearch(
   const hops = Math.max(1, Math.min(options.graphHops ?? 1, 3));
 
   try {
-    const rows = await sql<ChunkRow[]>`
+    const rows = await boundedSearchQuery((client) => client<ChunkRow[]>`
       with recursive seed_nodes as (
         select node.id
         from kg_nodes node
@@ -1224,9 +1295,11 @@ async function graphNeighborSearch(
         and ${retrievalScope({ workspaceId, filters: options.filters, runId: options.runId }).graphChunk()}
       order by rank asc
       limit ${limit}
-    `;
+    `);
     return mapRankedChunkRows(rows);
-  } catch {
+  } catch (error) {
+    if (isSearchAborted(error)) throw error;
+    if (isSearchStatementTimeout(error)) countSearchEvent("graphTimeout");
     return [];
   }
 }
@@ -1234,6 +1307,14 @@ async function graphNeighborSearch(
 /** NUL bytes are valid JSON and UTF-8 but rejected by Postgres text parameters. */
 export function stripNulBytes(value: string): string {
   return value.replaceAll("\u0000", "");
+}
+
+function withSearchSlotTimed<T>(signal: AbortSignal | undefined, fn: () => Promise<T>): Promise<T> {
+  const started = performance.now();
+  return withSearchSlot(signal, () => {
+    recordSearchPhase("queue", performance.now() - started);
+    return fn();
+  });
 }
 
 export async function hybridSearch(rawQuery: string, userId: string, options: SearchOptions = {}): Promise<SearchResponse> {
@@ -1245,7 +1326,11 @@ export async function hybridSearch(rawQuery: string, userId: string, options: Se
   const report = options.onSearchActivity;
   report?.(activity);
   try {
-    const { value: result, timings } = await collectSearchTimings(() => executeHybridSearch(query, userId, { ...options, rootSessionId: activity.groupId }));
+    // Root searches wait for a process-wide slot (search/search-limiter.ts); the wait is timed as `queueMs`.
+    // Search SQL is cancelled when the request (or chat turn) aborts (search/query-bounds.ts).
+    const signal = currentSearchSignal() ?? getDeferredContext()?.signal ?? currentRequestSignal();
+    const { value: result, timings } = await collectSearchTimings(() => withSearchSignal(signal, () =>
+      withSearchSlotTimed(signal, () => executeHybridSearch(query, userId, { ...options, rootSessionId: activity.groupId }))));
     result.timings = timings;
     console.info(`[search-timing] ${Object.entries(timings).map(([key, ms]) => `${key.replace(/Ms$/, "")}=${ms}`).join(" ")} results=${result.results.length}`);
     report?.({ ...activity, status: "success", runtimeMs: Date.now() - started, resultCount: result.results.length,

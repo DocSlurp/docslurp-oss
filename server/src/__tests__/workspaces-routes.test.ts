@@ -584,6 +584,19 @@ describe("workspacesRoutes validation", () => {
     expect(hybridSearchMock).toHaveBeenCalledTimes(1);
   });
 
+  it("stops polling while indexing once a search branch hit the statement timeout", async () => {
+    getWorkspaceMock.mockResolvedValue({ id: "ws-1", orgId: "org-1" });
+    hybridSearchMock.mockResolvedValue({
+      results: [],
+      sessionId: "timed-out",
+      timings: { textMs: 8000, lexicalTimeout: 1 },
+      availability: { status: "pending", coverage: { queuedRuns: 1, processingRuns: 1 } },
+    });
+    const body = await (await app.request("/workspaces/ws-1/search/stream?q=broad")).text();
+    expect(body).toContain("event: done");
+    expect(hybridSearchMock).toHaveBeenCalledTimes(1);
+  });
+
   it("leaves omitted stream search flags to the workspace defaults and honours graph and multi-hop flags", async () => {
     getWorkspaceMock.mockResolvedValue({ id: "ws-1", orgId: "org-1" });
     hybridSearchMock.mockResolvedValue({

@@ -217,7 +217,7 @@ export function aiResultDetails(result: {
   return { output: result.text, usageDetails };
 }
 
-export { instrumentPostgres } from "./dependency-postgres.js";
+export { instrumentPostgres, type PostgresQueryHooks } from "./dependency-postgres.js";
 export { startDependencySpan, withDependencySpan } from "./telemetry.js";
 export { instrumentFetch } from "./dependency-fetch.js";
 export { instrumentS3Client } from "./dependency-s3.js";

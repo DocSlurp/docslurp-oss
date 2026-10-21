@@ -1,5 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+// Search statements run directly on the mocked pool (no per-statement timeout transaction).
+process.env.SEARCH_STATEMENT_TIMEOUT_MS = "0";
+
 const sqlMock = Object.assign(vi.fn(), {
   unsafe: vi.fn(),
   array: vi.fn((value: unknown) => value),

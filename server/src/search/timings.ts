@@ -30,8 +30,25 @@ export async function timePhase<T>(name: string, fn: () => Promise<T>): Promise<
   }
 }
 
+/** Add a measured duration to the current search's timings (no-op outside a search). */
+export function recordSearchPhase(name: string, ms: number): void {
+  const timings = store.getStore();
+  if (!timings) return;
+  const key = `${name}Ms`;
+  timings[key] = Math.round((timings[key] ?? 0) + ms);
+}
+
 /** Count an event (cache hit/miss, …) into the current search's timings (no-op outside a search). */
 export function countSearchEvent(name: string): void {
   const timings = store.getStore();
   if (timings) timings[name] = (timings[name] ?? 0) + 1;
+}
+
+/**
+ * A search branch hit SEARCH_STATEMENT_TIMEOUT_MS (search.ts counts
+ * `<branch>Timeout` events). Pollers and pending-search retries stop on it:
+ * re-running the same statement would time out again.
+ */
+export function searchHitStatementTimeout(response: { timings?: Record<string, number> }): boolean {
+  return Object.entries(response.timings ?? {}).some(([key, value]) => key.endsWith("Timeout") && value > 0);
 }
