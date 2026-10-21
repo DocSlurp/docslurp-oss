@@ -78,7 +78,15 @@ def metadata_value(metadata,key):
 
 def inference_profile_sha256(detector,device,threshold=.3):
     """Pin inference-affecting runtime configuration, independently of graph identity."""
-    profile={'contractVersion':1,'detectorMetadata':detector.metadata,'device':device,'threshold':threshold}
+    # Transformers adapters record this per-request measurement after predict().
+    # It is diagnostic output, not configuration. Strip only this known field,
+    # including nested detector wrappers; retain model-size/processor settings.
+    def configuration(value):
+        if isinstance(value,dict):
+            return {key:configuration(item) for key,item in value.items() if key!='last_input_tensor_shape'}
+        if isinstance(value,(list,tuple)):return [configuration(item) for item in value]
+        return value
+    profile={'contractVersion':1,'detectorMetadata':configuration(detector.metadata),'device':device,'threshold':threshold}
     encoded=json.dumps(profile,sort_keys=True,separators=(',',':'),allow_nan=False).encode('utf-8')
     return hashlib.sha256(encoded).hexdigest()
 

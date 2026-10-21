@@ -29,6 +29,32 @@ class InferContractTests(unittest.TestCase):
             changed=deepcopy(metadata);changed[field]=value
             self.assertNotEqual(original,inference_profile_sha256(SimpleNamespace(metadata=changed),'cpu',.3))
 
+    def test_profile_excludes_observed_tensor_shapes_before_and_after_prediction(self):
+        from PIL import Image
+        class Detector:
+            supported_labels=['paragraph']
+            def __init__(self,nested):
+                self.metadata={'id':'test','revision':'r','model_size':640}
+                self.observed=self.metadata
+                if nested:
+                    self.observed={'id':'base','revision':'r','processor':'fast'}
+                    self.metadata['detector']={'detector':self.observed}
+            def predict(self,images,threshold):
+                self.observed['last_input_tensor_shape']=[1,3,images[0].height,images[0].width]
+                return [[]],{}
+        for nested in (False,True):
+            with self.subTest(nested=nested):
+                detector=Detector(nested)
+                before=inference_profile_sha256(detector,'cpu')
+                for size in ((20,10),(30,20)):
+                    data=io.BytesIO();Image.new('RGB',size,'white').save(data,format='PNG')
+                    result=build_result(detector,data.getvalue(),'cpu')
+                    self.assertEqual(result['inferenceProfileSha256'],before)
+                    self.assertEqual(inference_profile_sha256(detector,'cpu'),before)
+                    self.assertEqual(detector.observed['last_input_tensor_shape'],[1,3,size[1],size[0]])
+                detector.metadata['model_size']=320
+                self.assertNotEqual(inference_profile_sha256(detector,'cpu'),before)
+
     def test_defaults_and_invalid_options(self):
         args=arguments();self.assertFalse(args.rectify_page);self.assertIsNone(args.orientation_onnx_path)
         for extra in (['--model-size','33'],['--model','pp-small-onnx','--model-size','640'],
