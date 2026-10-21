@@ -69,6 +69,13 @@ def create_detector(args):
     return detector
 
 
+def metadata_value(metadata,key):
+    while isinstance(metadata,dict):
+        if key in metadata:return metadata[key]
+        metadata=metadata.get('detector')
+    return None
+
+
 def build_result(detector,data,device,threshold=.3):
     from PIL import Image
     if not data or len(data)>MAX_INPUT_BYTES: raise ValueError('Image payload must be between 1 byte and 25 MiB')
@@ -82,6 +89,11 @@ def build_result(detector,data,device,threshold=.3):
     if len(predictions)!=1: raise ValueError('Detector result count mismatch')
     regions=[]
     for region in predictions[0]:
+        box=region['bbox']
+        if len(box)!=4 or not all(math.isfinite(v) and 0<=v<=1 for v in box) or box[0]>=box[2] or box[1]>=box[3]:
+            raise ValueError('Detector returned invalid source geometry')
+        if not math.isfinite(region['confidence']) or not 0<=region['confidence']<=1:
+            raise ValueError('Detector returned invalid confidence')
         entry=dict(label=region['label'],rawLabel=region['raw_label'],confidence=region['confidence'],bbox=region['bbox'])
         if 'polygon' in region: entry['polygon']=region['polygon']
         if 'reading_order' in region: entry['readingOrder']=region['reading_order']
@@ -93,7 +105,7 @@ def build_result(detector,data,device,threshold=.3):
         'coordinateSpace':'normalized-source','supportedLabels':detector.supported_labels,'regions':regions,
         'diagnostics':{'timings':timings,'decodeMs':1000*(start-decode_start),'elapsedMs':1000*(time.perf_counter()-decode_start),
           'detectorMetadata':detector.metadata,'imageTransforms':getattr(detector,'last_image_metadata',[]),
-          'storedPixelOrientation':True,'nativeReadingOrder':any('readingOrder' in region for region in regions),'visualClassifier':detector.metadata.get('visual_classifier'),
+          'storedPixelOrientation':True,'nativeReadingOrder':any('readingOrder' in region for region in regions),'visualClassifier':metadata_value(detector.metadata,'visual_classifier'),
           'coverageKindSemantics':'bbox area heuristic for visual regions: full-page>=0.90; half-page>=0.40; not a semantic image classifier'}}
 
 

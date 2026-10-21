@@ -66,6 +66,7 @@ export function parseImageLayout(value: unknown): ImageLayoutResult {
   if (result.device !== "cpu" && result.device !== "cuda") throw new Error("Unsupported layout device");
   const model = object(result.model);
   const image = object(result.image);
+  if (image.sha256 !== undefined && !/^[0-9a-f]{64}$/.test(text(image.sha256))) throw new Error("Invalid source image hash");
   if (model.artifactSha256 !== undefined && !/^[0-9a-f]{64}$/.test(text(model.artifactSha256))) throw new Error("Invalid model artifact hash");
   if (!Array.isArray(result.supportedLabels) || !Array.isArray(result.regions)) throw new Error("Missing layout taxonomy or regions");
   const supportedLabels = [...new Set(result.supportedLabels.map(label))];
@@ -116,7 +117,7 @@ export function parseImageLayout(value: unknown): ImageLayoutResult {
     return { label: kind, rawLabel: text(region.rawLabel), confidence: unit(region.confidence), bbox, ...extras };
   });
   return { schemaVersion: 1, model: { id: text(model.id), revision: text(model.revision), ...(model.artifactSha256 ? { artifactSha256: text(model.artifactSha256) } : {}) }, device: result.device,
-    image: { width: dimension(image.width), height: dimension(image.height) }, coordinateSpace: "normalized-source", supportedLabels, regions, ...(result.diagnostics !== undefined ? { diagnostics: object(result.diagnostics) } : {}) };
+    image: { width: dimension(image.width), height: dimension(image.height), ...(image.sha256 ? { sha256: text(image.sha256) } : {}) }, coordinateSpace: "normalized-source", supportedLabels, regions, ...(result.diagnostics !== undefined ? { diagnostics: object(result.diagnostics) } : {}) };
 }
 export interface ImageLayoutCliOptions {
   /** Explicit runtime; never automatically install dependencies or download weights. */
@@ -181,7 +182,10 @@ export async function detectImageLayout(input: Buffer, options: ImageLayoutCliOp
     if (options.revision && result.model.revision !== options.revision) throw new Error("Layout detector model revision differs from configuration");
     if (result.device !== options.device) throw new Error("Layout detector silently changed requested device");
     if (result.image.width !== metadata.width || result.image.height !== metadata.height) throw new Error("Layout output dimensions do not match source raster");
-    result.image.sha256 = createHash("sha256").update(input).digest("hex");
+    const expectedModels = { heron: "docling-project/docling-layout-heron", "heron-custom": "docslurp/heron-custom", ppv3: "PaddlePaddle/PP-DocLayoutV3_safetensors", "pp-small": "PaddlePaddle/PP-DocLayout-S", "pp-small-onnx": "PaddlePaddle/PP-DocLayout-S" };
+    if (result.model.id !== expectedModels[options.model]) throw new Error("Layout detector model identity differs from configuration");
+    const sourceHash = createHash("sha256").update(input).digest("hex");
+    if (result.image.sha256 !== sourceHash) throw new Error("Layout detector source hash does not match request");
     return result;
   } finally {
     await rm(directory, { recursive: true, force: true });

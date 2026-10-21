@@ -8,6 +8,7 @@ model downloads, credentials, or exposure through the public API is configured.
 import argparse
 from http.server import BaseHTTPRequestHandler,HTTPServer
 import json
+import re
 import time
 from infer import MAX_INPUT_BYTES,add_detector_arguments,build_result,create_detector,encode_result
 
@@ -26,11 +27,19 @@ def make_handler(detector,device,threshold,model_load_ms):
             except (BrokenPipeError,ConnectionResetError): pass
         def error(self,status,message):
             self.send_bytes(status,json.dumps({'error':message}).encode())
+        def local_request(self):
+            # Literal Host prevents DNS-rebinding access; no browser-origin client
+            # is part of this local raw-byte service contract.
+            if not re.fullmatch(r'127\.0\.0\.1(?::[0-9]{1,5})?',self.headers.get('Host','')) or self.headers.get('Origin') is not None:
+                self.error(403,'Only literal loopback non-browser clients are supported');return False
+            return True
         def do_GET(self):
+            if not self.local_request():return
             if self.path!='/health': return self.error(404,'Not found')
             self.send_bytes(200,json.dumps({'ready':True,'model':detector.metadata,'device':device,
               'modelLoadMs':model_load_ms,'execution':'single-flight-resident'}).encode())
         def do_POST(self):
+            if not self.local_request():return
             if self.path!='/layout': return self.error(404,'Not found')
             if self.headers.get('Transfer-Encoding'): return self.error(400,'Chunked transfer unsupported; send Content-Length')
             try: length=int(self.headers.get('Content-Length','0'))

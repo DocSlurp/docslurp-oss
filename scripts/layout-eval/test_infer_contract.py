@@ -57,4 +57,32 @@ class InferContractTests(unittest.TestCase):
         self.assertTrue(result['diagnostics']['nativeReadingOrder'])
 
 
+
+class ResidentSecurityTests(unittest.TestCase):
+    def test_literal_host_and_browser_origin_rejected_before_inference(self):
+        from http.server import HTTPServer
+        import http.client
+        import threading
+        from server import make_handler
+        detector=SimpleNamespace(metadata={'id':'test','revision':'r'})
+        server=HTTPServer(('127.0.0.1',0),make_handler(detector,'cpu',.3,1.))
+        thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
+        try:
+            for headers,status in [({},200),({'Host':'127.0.0.1:12345'},200),({'Host':'untrusted.example'},403),({'Origin':'https://untrusted.example'},403)]:
+                connection=http.client.HTTPConnection('127.0.0.1',server.server_port,timeout=2)
+                connection.request('GET','/health',headers=headers)
+                response=connection.getresponse();self.assertEqual(response.status,status);response.read();connection.close()
+        finally:server.shutdown();server.server_close();thread.join()
+
+    def test_nested_classifier_metadata_and_invalid_crop_geometry(self):
+        from infer import metadata_value
+        self.assertEqual(metadata_value({'detector':{'visual_classifier':{'id':'test'}}},'visual_classifier'),{'id':'test'})
+        from PIL import Image
+        class Detector:
+            metadata={'id':'test','revision':'r'};supported_labels=['paragraph']
+            def predict(self,images,threshold):
+                return [[dict(label='paragraph',raw_label='text',confidence=.9,bbox=[.9,.1,.1,.9])]],{}
+        data=io.BytesIO();Image.new('RGB',(20,10),'white').save(data,format='PNG')
+        with self.assertRaisesRegex(ValueError,'geometry'):build_result(Detector(),data.getvalue(),'cpu')
+
 if __name__=='__main__':unittest.main()

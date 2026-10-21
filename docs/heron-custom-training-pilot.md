@@ -44,7 +44,10 @@ used to train, choose thresholds or select checkpoints.
 
 Run only after the coordinator releases the shared CPU/GPU timing window. Use
 the existing PyTorch/Transformers runtime with Pillow, SciPy and safetensors,
-and a populated `HF_HOME` cache for the pinned base checkpoint. First run a
+and a populated `HF_HOME` cache for the pinned base checkpoint. Install
+`scripts/layout-eval/requirements-training.txt` in that inference environment;
+it pins Transformers 4.57.6 and bounds SciPy to 1.17.x. RT-DETR training needs
+SciPy for Hungarian assignment even when ordinary inference already works. First run a
 one-step smoke with the same training-only input and a fresh output directory:
 
 ```sh

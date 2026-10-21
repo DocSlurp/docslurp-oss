@@ -1,6 +1,8 @@
 # Opt-in image layout boundary
 
-`detectImageLayout(bytes, options, runner, signal)` executes a separately installed detector CLI through the existing `CommandRunner`. Nothing registers this in the ingestion pipeline or changes a default. `parseImageLayout` also validates results from a future service transport.
+For executable setup and model pinning instructions, see [image layout quickstart](../../../docs/image-layout-quickstart.md).
+
+`detectImageLayout(bytes, options, runner, signal)` executes a separately installed detector CLI through the existing `CommandRunner`. Nothing registers this in the ingestion pipeline or changes a default. `detectImageLayoutAtEndpoint` connects to the resident service described below; `parseImageLayout` validates the shared response contract.
 
 ```ts
 import { CommandRunner } from "../tools/runner.js";
@@ -10,7 +12,7 @@ const result = await detectImageLayout(imageBytes, {
   python: "/absolute/layout-venv/bin/python",
   script: "/absolute/docslurp/scripts/layout-eval/infer.py",
   cacheDirectory: "/absolute/prepopulated/huggingface",
-  model: "heron", // also ppv3, pp-small, pp-small-onnx
+  model: "heron", // also heron-custom, ppv3, pp-small, pp-small-onnx
   device: "cpu", // explicitly cuda for a GPU-capable runtime
   timeoutMs: 120_000,
 }, new CommandRunner(), signal);

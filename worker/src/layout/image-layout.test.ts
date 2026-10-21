@@ -63,7 +63,7 @@ describe("image layout transport boundary", () => {
         expect(plan.args).toEqual(expect.arrayContaining(["--model-size", "640", "--orientation-onnx-path", options.orientationOnnxPath, "--orientation-revision", "pinned", "--orientation-minimum-score", "0.8", "--rectify-page", "--rectify-max-edge", "768"]));
         expect(plan.bundleRoots).toContain(options.orientationOnnxPath);
         output = plan.args[plan.args.indexOf("--output") + 1];
-        await writeFile(output, JSON.stringify(payload()));
+        await writeFile(output, JSON.stringify({ ...payload(), model: { id: "docling-project/docling-layout-heron", revision: "test" }, image: { ...payload().image, sha256: createHash("sha256").update(input).digest("hex") } }));
         return { stdout: "", stderr: "" };
       } };
       await expect(detectImageLayout(input, { ...options, modelSize: 33 }, runner)).rejects.toThrow("Model size");
@@ -71,6 +71,11 @@ describe("image layout transport boundary", () => {
       await expect(detectImageLayout(input, { ...options, rectifyMaxEdge: 8 }, runner)).rejects.toThrow("Rectification");
       const result = await detectImageLayout(input, options, runner);
       expect(result.image.sha256).toMatch(/^[a-f0-9]{64}$/);
+      const wrongHash = { run: async (plan: CommandPlan) => {
+        await writeFile(plan.args[plan.args.indexOf("--output") + 1], JSON.stringify({ ...payload(), model: { id: "docling-project/docling-layout-heron", revision: "test" }, image: { ...payload().image, sha256: "0".repeat(64) } }));
+        return { stdout: "", stderr: "" };
+      } };
+      await expect(detectImageLayout(input, options, wrongHash)).rejects.toThrow("source hash");
       await expect(access(output)).rejects.toThrow();
       const wrongDevice = { run: async (plan: CommandPlan) => {
         output = plan.args[plan.args.indexOf("--output") + 1];
@@ -100,7 +105,7 @@ describe("resident image layout transport", () => {
       for await (const chunk of request) chunks.push(chunk);
       expect(Buffer.concat(chunks)).toEqual(input);
       response.setHeader("Content-Type", "application/json");
-      response.end(JSON.stringify({ ...payload(), image: { width: 20, height: 10, sha256: badHash ? "wrong" : createHash("sha256").update(input).digest("hex") } }));
+      response.end(JSON.stringify({ ...payload(), image: { width: 20, height: 10, sha256: badHash ? "0".repeat(64) : createHash("sha256").update(input).digest("hex") } }));
     });
     await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
     try {
