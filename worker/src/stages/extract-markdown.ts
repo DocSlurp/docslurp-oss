@@ -249,7 +249,7 @@ export class ExtractMarkdownStage implements Stage {
 
               try {
                 const contentHash = cachedSource.sha256;
-                const existingUri = checkDedup(state, contentHash, artifactSlot);
+                const existingUri = checkDedup(state, contentHash, artifactSlot, retryStrategy);
                 if (existingUri) {
                   console.log(
                     `[extract-debug] document=${document.id} deduplicated=true existingUri=${existingUri}`,
