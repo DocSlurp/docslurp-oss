@@ -27,7 +27,7 @@
     "prepack": "pnpm build"
   },
   "devDependencies": {
-    "@types/node": "^20.19.43",
+    "@types/node": "^26.6.5",
     "typescript": "^6.0.3"
   },
   "engines": {
