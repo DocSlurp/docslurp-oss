@@ -255,13 +255,19 @@ export function createChatMcpTools(args: {
         // send a search into another workspace the user happens to reach.
         // Workspace retrieval controls (including this request's overrides) are
         // also applied after the model's arguments so a tool call cannot widen them.
+        // MCP takes `workspace`; remove the legacy spelling before strict validation.
+        // Apply scope last so model-supplied IDs cannot select another workspace.
+        const pinWorkspace = (value: Record<string, unknown>) => {
+          const { workspaceId: _legacy, workspace: _requested, ...rest } = value;
+          return { ...rest, workspace: args.workspaceId };
+        };
         const body = definition.id === "search"
           ? Array.isArray(supplied.queries)
-            ? { ...supplied, concurrency, queries: supplied.queries.map(q => ({ ...(q && typeof q === "object" && !Array.isArray(q) ? q : {}), ...searchDefaults, workspaceId: args.workspaceId })) }
-            : { ...supplied, ...searchDefaults, workspaceId: args.workspaceId }
+            ? { ...supplied, concurrency, queries: supplied.queries.map(q => pinWorkspace({ ...(q && typeof q === "object" && !Array.isArray(q) ? q : {}), ...searchDefaults })) }
+            : pinWorkspace({ ...supplied, ...searchDefaults })
           : definition.id === "chat" && chatDefaults
-            ? { ...supplied, retrieval: chatDefaults, workspaceId: args.workspaceId }
-            : { ...supplied, workspaceId: args.workspaceId };
+            ? pinWorkspace({ ...supplied, retrieval: chatDefaults })
+            : pinWorkspace(supplied);
         const queries = definition.id === "search" ? modelQueries(supplied) : undefined;
         const update = (status: ChatToolActivity["status"]) => {
           const event: ChatToolActivity = { id: toolCallId, name: definition.id, status,
