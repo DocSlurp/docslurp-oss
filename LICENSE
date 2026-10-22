@@ -18,6 +18,7 @@ MIT exceptions (including their examples, tests and integration code):
   packages/contrib-algolia-server/
   packages/shared/
   packages/contrib-wordpress/
+  plugins/docslurp/
 Each package exception contains its own MIT LICENSE; the WordPress plugin
 license is packages/contrib-wordpress/docslurp-search/LICENSE. File-specific notices and
 third-party licenses take precedence for the material they cover.
