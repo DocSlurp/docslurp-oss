@@ -39,11 +39,6 @@ export const pageKey = (documentId: string, page: number) => `${documentId}:${pa
 const TERMINAL_FAILED = new Set(["failed", "blocked-pii"]);
 
 /**
- * Credits one on-demand page is expected to cost: the page base fee
- * (`DOCSLURP_PAGE_BASE_FEE_USD` x 100) plus the parse/embed estimate
- * (`DOCSLURP_EST_PAGE_MATERIALIZE_CREDITS`, default 0.5). Rate card unchanged.
- */
-/**
  * Credits one materialized page may cost the customer, for per-query budgets: a page read by OCR
  * bills as a Rich page (PRICE_CARD), the worst case; text-layer pages bill less (Fast).
  */

@@ -14,12 +14,14 @@ Design: [deferred search profiles](superpowers/specs/2026-10-12-deferred-search-
 
 `map` and `visual` are PDF-only for now. Indexed pages are never thrown away: a per-page ledger records what is mapped, embedded, parsed and indexed, independent of the mode.
 
-## Plan defaults
+## Defaults
 
-- **Free plan:** `map`. Free accounts can pick `visual` (never a default: no plan, template or credit balance selects it for you). `full` is allowed while the organization can spend credits (including starter credits); otherwise the API returns 402 with `code: "credits_required_for_full_index"`.
-- **Paid plans or purchased credits:** `full`. `map` and `visual` are always available.
+- **Starter organizations** (only the free starter credits): `map`. They can pick `visual` (never a default: no template or credit balance selects it for you). `full` is allowed while the organization can spend credits (including starter credits); otherwise the API returns 402 with `code: "credits_required_for_full_index"`.
+- **Funded organizations** (have bought credits): `full`. `map` and `visual` are always available.
 
-The mode is resolved most-specific first: the upload request's `indexingMode` (those documents only), the workspace setting, the workspace template's recommendation, then the plan default. The mode is stored per document, so one workspace can hold documents ingested under different modes.
+Pages are billed as they are indexed, at the same per-page prices as `full` (5 credits per 1,000 text pages, 250 per 1,000 pages read by OCR or embedded as images). A page is billed once, whether a query or a full index materializes it.
+
+The mode is resolved most-specific first: the upload request's `indexingMode` (those documents only), the workspace setting, the workspace template's recommendation, then the organization default. The mode is stored per document, so one workspace can hold documents ingested under different modes.
 
 ## Switching modes
 
@@ -151,4 +153,4 @@ The query must be embedded by the same model as the pages.
 
 ## Configuration
 
-See `.env.example`: `DOCSLURP_DEFERRED_PROFILES`, `TEMPORAL_MATERIALIZE_TASK_QUEUE`, `WORKER_MATERIALIZE_CONCURRENCY`, `DOCSLURP_PAGE_MAPPED_FEE_USD`, `DOCSLURP_PAGE_EMBEDDED_FEE_USD` (both cost-only and `0` until priced), `DOCSLURP_EST_PAGE_MATERIALIZE_CREDITS`, `DOCSLURP_FULL_INDEX_CREDITS_PER_PAGE` and `GOOGLE_GENERATIVE_AI_API_KEY`.
+See `.env.example`: `DOCSLURP_DEFERRED_PROFILES`, `TEMPORAL_MATERIALIZE_TASK_QUEUE`, `WORKER_MATERIALIZE_CONCURRENCY`, `DOCSLURP_PAGE_MAPPED_FEE_USD` (internal cost only, never billed), `DOCSLURP_EST_PAGE_MATERIALIZE_CREDITS` (per-page budget estimate; defaults to the Rich page price), `DOCSLURP_FULL_INDEX_CREDITS_PER_PAGE` and `GOOGLE_GENERATIVE_AI_API_KEY`.
