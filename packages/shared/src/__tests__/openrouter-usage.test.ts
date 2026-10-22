@@ -34,6 +34,7 @@ describe("lowest accepted reasoning", () => {
   it("uses each model's verified lowest setting", async () => {
     expect(await sent("deepseek/deepseek-v4.1-flash")).toEqual({ effort: "none" });
     expect(await sent("anthropic/claude-haiku-5.5")).toEqual({ enabled: false });
+    expect(await sent("xiaomi/mimo-v2.6-flash")).toEqual({ effort: "none" });
     expect(await sent("vendor/unknown")).toEqual({ enabled: false });
   });
   it("with no effort set, applies the floor only to listed models without an explicit reasoning choice", async () => {

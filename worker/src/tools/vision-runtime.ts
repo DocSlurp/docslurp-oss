@@ -50,6 +50,7 @@ import {
 import type { Config } from "../config.js";
 import { readJsonFile } from "./storage.js";
 import type { CommandRunner } from "./runner.js";
+import { mimoMaxOutputTokens, mimoOpenRouterParams, mimoVisionPrompt, postProcessMimoTranscription } from "./vision-model-mimo.js";
 
 export const visionPromptTemplates = {
   "<OCR>":
@@ -238,7 +239,8 @@ function normalizeVisionConfig(
     baseUrl: selected.runtime === "remote-openai"
       ? cfg.openAiBaseUrl
       : selected.baseUrl,
-    prompt: buildSchemaAwareVisionPrompt(visionPromptKeyForModel(selected.prompt, selected.model), outputSchema),
+    prompt: mimoVisionPrompt(selected.model, selected.prompt)
+      ?? buildSchemaAwareVisionPrompt(visionPromptKeyForModel(selected.prompt, selected.model), outputSchema),
   };
 }
 
@@ -375,11 +377,12 @@ async function runVisionRequest(args: {
             },
           ],
           temperature: 0,
-          max_tokens: visionMaxOutputTokens(args.model),
+          max_tokens: mimoMaxOutputTokens(args.model, visionMaxOutputTokens(args.model)),
           // Page transcription never needs thinking: pin each verified model to its lowest accepted effort.
           ...(args.baseUrl?.includes("openrouter.ai") ? openRouterReasoningParams(args.model) : {}),
           // Per-model routing restricted to providers measured to transcribe faithfully.
           ...(args.baseUrl?.includes("openrouter.ai") ? openRouterProviderParams(args.model) : {}),
+          ...(args.baseUrl?.includes("openrouter.ai") ? mimoOpenRouterParams(args.model) : {}),
         }),
       }, {
         provider: args.providerLabel ?? providerFromBaseUrl(args.baseUrl),
@@ -397,7 +400,7 @@ async function runVisionRequest(args: {
       }
 
       const payload = (await response.json()) as OpenAiCompatibleResponse;
-      const text = readAssistantText(payload.choices?.[0]?.message?.content);
+      const text = postProcessMimoTranscription(args.model, readAssistantText(payload.choices?.[0]?.message?.content));
       (rateLease as ProviderRateLease | null)?.settle(
         payload.usage ? (payload.usage.prompt_tokens ?? 0) + (payload.usage.completion_tokens ?? 0) : null,
       );
