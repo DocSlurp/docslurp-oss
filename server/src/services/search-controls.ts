@@ -173,6 +173,18 @@ export async function updateWorkspaceSearchSettingsForUser(args: {
   return next;
 }
 
+/**
+ * Whether this user may change a workspace's search configuration. The session
+ * route already enforces this (updateWorkspaceSearchSettingsForUser); the
+ * compatibility routes (Algolia/Meilisearch/Typesense/Pagefind) must enforce the
+ * same rule, or a read-only workspace member can rewrite settings through an API
+ * key they are allowed to create. Security finding SEC-2026-10-01.
+ */
+export async function userCanEditWorkspaceSettings(workspaceId: string, userId: string): Promise<boolean> {
+  const access = await getWorkspaceAccess(workspaceId, userId);
+  return access !== null && canEditWorkspace(access, userId);
+}
+
 export function applySearchControls(args: {
   query: string;
   results: SearchResult[];
