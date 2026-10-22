@@ -18,7 +18,7 @@ vi.mock("../db.js", () => ({
 }));
 
 vi.mock("../services/organizations.js", () => ({
-  canEditWorkspace: vi.fn(() => true),
+  canContributeToWorkspace: vi.fn(() => true),
   getWorkspaceAccess: getWorkspaceAccessMock,
   listAccessibleWorkspaceIds: listAccessibleWorkspaceIdsMock
 }));

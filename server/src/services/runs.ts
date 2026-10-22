@@ -43,7 +43,7 @@ import {
   getRunProcessingPreview,
 } from "./run-processing-preview.js";
 import {
-  canEditWorkspace,
+  canContributeToWorkspace,
   getWorkspaceAccess,
   listAccessibleWorkspaceIds,
 } from "./organizations.js";
@@ -555,7 +555,7 @@ export async function reprocessRun(
   const original = await getRun(runId, userId);
   if (!original) return null;
   const access = await getWorkspaceAccess(original.workspaceId, userId);
-  if (!access || !canEditWorkspace(access, userId)) {
+  if (!access || !canContributeToWorkspace(access, userId)) {
     throw new Error("Forbidden");
   }
 
@@ -671,7 +671,7 @@ export async function retryRun(
     return null;
   }
   const access = await getWorkspaceAccess(run.workspaceId, userId);
-  if (!access || !canEditWorkspace(access, userId)) {
+  if (!access || !canContributeToWorkspace(access, userId)) {
     throw new Error("Forbidden");
   }
 
@@ -694,7 +694,7 @@ export async function controlRun(
     return null;
   }
   const access = await getWorkspaceAccess(run.workspaceId, userId);
-  if (!access || !canEditWorkspace(access, userId)) {
+  if (!access || !canContributeToWorkspace(access, userId)) {
     throw new Error("Forbidden");
   }
 
