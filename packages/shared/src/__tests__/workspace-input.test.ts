@@ -34,3 +34,15 @@ describe("slugifyWorkspaceName", () => {
     expect(slugifyWorkspaceName(`${"a".repeat(62)} b`)).toBe("a".repeat(62));
   });
 });
+
+describe("workspace_not_found envelope", () => {
+  it("names the slug it looked for and drops unsafe slug details", async () => {
+    const { publicApiErrorEnvelope } = await import("../api-error.js");
+    const named = publicApiErrorEnvelope({ error: { code: "workspace_not_found", message: "x", details: { workspaceSlug: "legal-contracts" } } }, 404);
+    expect(named?.error.message).toContain('"legal-contracts"');
+    expect(named?.error.details).toEqual({ workspaceSlug: "legal-contracts" });
+    const unsafe = publicApiErrorEnvelope({ error: { code: "workspace_not_found", message: "x", details: { workspaceSlug: "<script>" } } }, 404);
+    expect(unsafe?.error.details).toBeUndefined();
+    expect(unsafe?.error.message).not.toContain("<script>");
+  });
+});
