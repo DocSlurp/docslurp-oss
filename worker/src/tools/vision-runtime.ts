@@ -34,6 +34,7 @@ import {
 import type { Config } from "../config.js";
 import { readJsonFile } from "./storage.js";
 import type { CommandRunner } from "./runner.js";
+import { mimoOpenRouterParams, mimoVisionPrompt } from "./vision-model-mimo.js";
 
 export const visionPromptTemplates = {
   "<OCR>":
@@ -221,7 +222,7 @@ function normalizeVisionConfig(
     baseUrl: selected.runtime === "remote-openai"
       ? cfg.openAiBaseUrl
       : selected.baseUrl,
-    prompt: buildSchemaAwareVisionPrompt(selected.prompt, outputSchema),
+    prompt: mimoVisionPrompt(selected.model, selected.prompt) ?? buildSchemaAwareVisionPrompt(selected.prompt, outputSchema),
   };
 }
 
@@ -361,6 +362,7 @@ async function runVisionRequest(args: {
           max_tokens: VISION_MAX_OUTPUT_TOKENS,
           // Page transcription never needs thinking: pin each verified model to its lowest accepted effort.
           ...(args.baseUrl?.includes("openrouter.ai") ? openRouterReasoningParams(args.model) : {}),
+          ...(args.baseUrl?.includes("openrouter.ai") ? mimoOpenRouterParams(args.model) : {}),
         }),
       }, {
         provider: args.providerLabel ?? providerFromBaseUrl(args.baseUrl),
