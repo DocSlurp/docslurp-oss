@@ -7,6 +7,7 @@ import { openRouterReasoningParams, visionConfigSchema } from "@docslurp/shared"
 
 import type { Config } from "../config.js";
 import { CommandRunner } from "../tools/runner.js";
+import { insertMissingTableDelimiters } from "../tools/vision-table-delimiter.js";
 import { openRouterProviderParams, postProcessVisionText, visionModelProfile, visionOutputCapForModel, visionPromptKeyForModel, visionReasoningParams } from "../tools/vision-model-profiles.js";
 import { executeVisionRuntime, visionPromptTemplates } from "../tools/vision-runtime.js";
 
@@ -62,9 +63,26 @@ describe("GLM 5.3 Flash vision profile", () => {
     expect(visionOutputCapForModel(GLM, { value: 4_096, configured: true })).toBe(4_096);
   });
 
-  it("returns the transcription text unchanged", () => {
-    const text = "A = $x^2$\n\n    indented";
-    expect(postProcessVisionText(GLM, text)).toBe(text);
+  it("inserts a missing delimiter row after the first row of a pipe-table run", () => {
+    expect(insertMissingTableDelimiters("Prices\n\n| Wheat | 82c |\n| Corn | 34c |\n\nEnd")).toBe("Prices\n\n| Wheat | 82c |\n| --- | --- |\n| Corn | 34c |\n\nEnd");
+    expect(insertMissingTableDelimiters("| A \\| B | C | D |\n| 1 | 2 | 3 |")).toBe("| A \\| B | C | D |\n| --- | --- | --- |\n| 1 | 2 | 3 |");
+  });
+
+  it("leaves complete tables, single pipe lines, fenced code and prose unchanged", () => {
+    for (const text of [
+      "| A | B |\n|---|---|\n| 1 | 2 |",
+      "| A | B |\n| :-- | --: |\n| 1 | 2 |",
+      "| only one row |",
+      "```\n| a | b |\n| c | d |\n```",
+      "a | b\nc | d",
+      "A = $x^2$\n\n    indented",
+    ]) expect(insertMissingTableDelimiters(text)).toBe(text);
+  });
+
+  it("applies the delimiter repair to GLM only", () => {
+    const text = "| a | b |\n| c | d |";
+    expect(postProcessVisionText(GLM, text)).toBe("| a | b |\n| --- | --- |\n| c | d |");
+    expect(postProcessVisionText("google/gemini-3.1-flash-lite", text)).toBe(text);
   });
 
   it("matches the golden default-prompt request body", async () => {

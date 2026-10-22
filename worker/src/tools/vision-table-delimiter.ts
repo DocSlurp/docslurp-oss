@@ -1,6 +1,6 @@
 /** General Markdown repair for page transcriptions whose pipe tables lost their header delimiter row. */
 
-const DELIMITER_ROW = /^\s*\|?\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)*\|?\s*$/;
+const DELIMITER_ROW = /^\s*\|?\s*:?-+:?\s*(?:\|\s*:?-+:?\s*)*\|?\s*$/;
 const PIPE_ROW = /^\s*\|.*\|\s*$/;
 
 function cellCount(row: string): number {
