@@ -8,6 +8,14 @@ import { withTestSession } from "./helpers/session-app.js";
 import { createWorkspaceIntakeFakes, fakeWorkspace } from "./helpers/workspace-intake-fakes.js";
 
 // URL safety checks resolve hosts; keep them independent of live DNS.
+
+// safeExternalFetch sends through undici's own fetch; route it to the global
+// that each test stubs.
+vi.mock("undici", async (importOriginal) => ({
+  ...await importOriginal<typeof import("undici")>(),
+  fetch: (...args: Parameters<typeof fetch>) => globalThis.fetch(...args),
+}));
+
 vi.mock("node:dns/promises", () => ({
   lookup: vi.fn(async () => [{ address: "93.184.216.34", family: 4 }]),
 }));
