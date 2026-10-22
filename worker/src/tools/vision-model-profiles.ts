@@ -3,9 +3,9 @@
  * OpenRouter model id. Models without an entry keep the generic defaults.
  */
 
-/** Markdown transcription that asks for LaTeX math and forbids layout padding or paraphrase. */
+/** Markdown transcription that asks for LaTeX math, keeps text inside figures, and forbids layout padding or paraphrase. */
 export const MARKDOWN_LATEX_VISION_PROMPT =
-  "Transcribe this document page into GitHub-flavored Markdown, exactly as written. Copy every word verbatim in reading order; do not paraphrase, summarize, translate, correct or describe the page. Use Markdown headings for headings, GFM tables for tables and lists for lists. Write every mathematical formula in LaTeX: inline math as $...$ and display equations as $$...$$ on their own lines. Do not reproduce column alignment, padding spaces or the page's line wrapping. Output only the Markdown.";
+  "Transcribe this document page into GitHub-flavored Markdown, exactly as written. Copy every word verbatim in reading order; do not paraphrase, summarize, translate, correct or describe the page. Include text, labels and formulas printed inside figures and diagrams. Use Markdown headings for headings, GFM tables for tables and lists for lists. Write every mathematical formula in LaTeX: inline math as $...$ and display equations as $$...$$ on their own lines. Do not reproduce column alignment, padding spaces or the page's line wrapping. Output only the Markdown.";
 
 export interface OpenRouterProviderPreferences {
   order: string[];
@@ -26,6 +26,7 @@ export const VISION_MODEL_PROFILES: Readonly<Record<string, VisionModelProfile>>
   // (`softmax(QK^T / √d_k) V`); the Markdown/LaTeX prompt lifts math partial 0.44 -> 0.86.
   // BaseTen served runaway repetition loops ("| | | …" to the cap) and word substitutions;
   // DeepSeek native and Together had none, so routing is restricted to them.
+  // Asking for text inside figures recovers formulas and labels printed in figures (+0.2 math on those pages).
   // The longest legitimate page was ~3k output tokens, so 8k bounds a runaway's cost.
   "deepseek/deepseek-v4.1-flash-1017": {
     defaultPrompt: "markdown-latex",
