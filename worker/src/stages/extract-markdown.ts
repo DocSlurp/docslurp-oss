@@ -3,7 +3,7 @@ import type { CapacityLeaseStore } from "../media/capacity/types.js";
 import { extractMedia } from "../media/extract.js";
 import type { MediaJournal } from "../media/types.js";
 import { createReadStream, createWriteStream } from "node:fs";
-import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { Writable } from "node:stream";
@@ -970,7 +970,6 @@ export class ExtractMarkdownStage implements Stage {
     return extractor.execute({
       stream: (plan, label, key, abort) => this.extractStreamCandidate(plan, label, key, abort),
       file: (plan, label, key, outputPath, abort) => this.extractFileCandidate(plan, label, key, outputPath, abort),
-      docling: (plan, label, key, source, abort) => this.extractDoclingCandidate(plan, label, key, source, abort),
       liteparse: (candidate, key, source, abort) => this.extractLiteParseCandidate(candidate, key, source, abort),
       graph: (candidate, key, source, abort) => this.extractGraphCandidate(candidate, key, source, graphContext, abort),
       markdownFile: (candidate, key, outputPath) => this.uploadMarkdownFileCandidate(candidate, key, outputPath),
@@ -1130,62 +1129,6 @@ export class ExtractMarkdownStage implements Stage {
       textUri: this.storage.uri(textKey),
       tempTextPath: outputPath,
     };
-  }
-
-  private async extractDoclingCandidate(
-    plan: CommandPlan,
-    label: string,
-    textKey: string,
-    sourceTempFile: string,
-    signal?: AbortSignal,
-  ): Promise<ExtractedCandidate> {
-    await this.runner.run(plan, signal);
-
-    const outputDirectory = path.dirname(sourceTempFile);
-    const generatedFile = await this.findGeneratedDoclingMarkdown(
-      outputDirectory,
-      sourceTempFile,
-    );
-    const upload = this.storage.createMultipartUploadStream(
-      textKey,
-      "text/markdown; charset=utf-8",
-    );
-
-    await pipeline(createReadStream(generatedFile), upload.writable);
-    await upload.done;
-
-    return {
-      label,
-      plan,
-      textKey,
-      textUri: this.storage.uri(textKey),
-      tempTextPath: generatedFile,
-    };
-  }
-
-  private async findGeneratedDoclingMarkdown(
-    outputDirectory: string,
-    sourceTempFile: string,
-  ): Promise<string> {
-    const baseName = path.basename(
-      sourceTempFile,
-      path.extname(sourceTempFile),
-    );
-    const entries = await readdir(outputDirectory, { withFileTypes: true });
-    const candidates = entries
-      .filter((entry) => entry.isFile() && entry.name.endsWith(".md"))
-      .map((entry) => path.join(outputDirectory, entry.name));
-
-    const preferred = candidates.find(
-      (candidate) => path.basename(candidate, ".md") === baseName,
-    );
-    const match = preferred ?? candidates[0];
-    if (!match) {
-      throw new Error(
-        `docling did not produce a markdown file in ${outputDirectory}`,
-      );
-    }
-    return match;
   }
 
   private async sanitizeCandidateArtifact(

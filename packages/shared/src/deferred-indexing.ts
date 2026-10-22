@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-import { CENTS_PER_CREDIT, CREDIT_RATE_CARD, hostedEquivalentListCredits, selfHostedBilledCredits } from "./billing.js";
+import { pageCredits } from "./billing.js";
 import { formatPrivateModelUri, getPrivateModelEndpointRegistry, lookupPrivateModelRoute } from "./private-endpoints.js";
 
 /** How a workspace indexes documents: eagerly (`full`) or deferred until a query needs pages. */
@@ -78,15 +78,11 @@ export function narrowMaterializationPolicy(
 }
 
 /**
- * Free plan without purchased credits defers (`map`); everything else indexes fully.
+ * Starter orgs (never funded) defer (`map`); funded orgs index fully.
  * Never `visual`: page-image embedding is an explicit, priced opt-in.
  */
-export function defaultIndexingModeForPlan(input: {
-  planId: string | null | undefined;
-  hasPurchasedCredits: boolean;
-}): IndexingMode {
-  const isFree = input.planId == null || input.planId === "free";
-  return isFree && !input.hasPurchasedCredits ? "map" : "full";
+export function defaultIndexingModeForOrg(input: { funded: boolean }): IndexingMode {
+  return input.funded ? "full" : "map";
 }
 
 /** Typical image-page token count and Gemini image price, for page-embedding cost estimates. */
@@ -118,18 +114,11 @@ export function pageEmbedRoutesPrivate(route: "auto" | "jina-private" | "gemini"
 }
 
 /**
- * Estimated credits to embed `pages` page images, priced as billing charges them. Hosted Gemini: provider
- * list cost plus the AI markup. Private endpoint (token- or hourly-priced alike): the embedding
- * hosted-equivalent list price, less SELF_HOSTED_DISCOUNT_PERCENT; never the raw GPU or token cost.
+ * Estimated credits to embed `pages` page images. A page a model reads as an image is a Rich page
+ * (PRICE_CARD), whichever route (hosted Gemini or a private endpoint) embeds it.
  */
-export function estimatePageEmbedCredits(pages: number, route: "auto" | "jina-private" | "gemini" = "auto"): number {
-  const count = Math.max(0, pages);
-  if (pageEmbedRoutesPrivate(route)) {
-    const list = hostedEquivalentListCredits({ capability: "embedding", inputTokens: PAGE_EMBED_ESTIMATED_PAGE_TOKENS });
-    return count * selfHostedBilledCredits(list);
-  }
-  const providerCents = (PAGE_EMBED_ESTIMATED_PAGE_TOKENS * GEMINI_IMAGE_USD_PER_MTOK) / 1e6 * 100;
-  return (count * providerCents * (1 + CREDIT_RATE_CARD.aiMarkupPercent / 100)) / CENTS_PER_CREDIT;
+export function estimatePageEmbedCredits(pages: number, _route: "auto" | "jina-private" | "gemini" = "auto"): number {
+  return pageCredits("rich", Math.max(0, pages));
 }
 
 export type QueryTemperature = "cold" | "warm" | "hot";

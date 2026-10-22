@@ -133,11 +133,11 @@ const BLOCK_MESSAGES: Record<string, string> = {
 /**
  * The block code for a status row, mirroring app billing/spend-guard.ts
  * spendBlockReason (kind "job", minus reservations): blocked once available
- * falls below the chat reserve for the org's plan.
+ * falls below the chat reserve for the org (funded or starter).
  */
 export function spendBlockCode(row: {
   org_id?: string | null;
-  plan_id?: string | null;
+  funded?: boolean | null;
   available: number | string;
   workspace_budget_paused: boolean;
   org_budget_paused: boolean;
@@ -147,7 +147,7 @@ export function spendBlockCode(row: {
   if (row.workspace_budget_paused) return "workspace_budget_paused";
   if (row.org_budget_paused) return "org_budget_paused";
   // House orgs (BILLING_EXEMPT_ORG_IDS) are metered but never credit-gated.
-  const reserve = row.plan_id === undefined ? 0 : jobCreditReserve(row.plan_id);
+  const reserve = row.funded === undefined ? 0 : jobCreditReserve(row.funded);
   return Number(row.available) < reserve && !isBillingExemptOrg(row.org_id) ? "credit_exhausted" : null;
 }
 
@@ -165,13 +165,13 @@ export async function enforceRunSpend(
   if (!spendCheckConfig().enabled || !run.orgId) return { blocked: false, paused: false };
   try {
     const [row] = await client<{
-      plan_id: string | null;
+      funded: boolean | null;
       available: string | number;
       workspace_budget_paused: boolean;
       org_budget_paused: boolean;
       workspace_in_org: boolean;
     }[]>`
-      select plan_id, available, workspace_budget_paused, org_budget_paused, workspace_in_org
+      select funded, available, workspace_budget_paused, org_budget_paused, workspace_in_org
       from org_spend_status(${run.orgId}, ${run.workspaceId ?? null}::text, 0)
     `;
     const reason = spendBlockCode(row ? { ...row, org_id: run.orgId } : row);

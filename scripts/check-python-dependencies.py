@@ -43,16 +43,15 @@ def main():
         if args.optional:
             from unstructured.partition.pdf import partition_pdf
             assert text in '\n'.join(str(element) for element in partition_pdf(filename=str(pdf), strategy='fast'))
-            from docling.document_converter import DocumentConverter
             html = root / 'document.html'
             html.write_text(f'<html><body><p>{text}</p></body></html>')
-            assert text in DocumentConverter().convert(html).document.export_to_markdown()
+            assert text in trafilatura.extract(html.read_text())
             # Check imports without model downloads, inference, or API calls.
             import torch
             import transformers
             from sentence_transformers import SentenceTransformer
             assert SentenceTransformer is not None
-            packages += ['docling', 'unstructured', 'torch', 'transformers', 'sentence-transformers']
+            packages += ['unstructured', 'torch', 'transformers', 'sentence-transformers']
         print(json.dumps({'status': 'passed', 'versions': {name: importlib.metadata.version(name) for name in packages}}, sort_keys=True))
 
 

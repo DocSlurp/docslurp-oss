@@ -581,6 +581,7 @@ export class CommandRunner {
     );
   }
 
+  // External comparison benchmarks only; Docling is not a production extractor or dependency.
   async doclingMarkdown(source: string, outdir: string): Promise<CommandPlan> {
     return await this.plan(
       "docling",
@@ -588,36 +589,6 @@ export class CommandRunner {
       "pdf",
       "--to",
       "md",
-      "--output",
-      outdir,
-      source,
-    );
-  }
-
-  async doclingJson(source: string, outdir: string): Promise<CommandPlan> {
-    return await this.plan(
-      "docling",
-      "--from",
-      "pdf",
-      "--to",
-      "json",
-      "--output",
-      outdir,
-      source,
-    );
-  }
-
-  async doclingVlm(source: string, outdir: string): Promise<CommandPlan> {
-    return await this.plan(
-      "docling",
-      "--from",
-      "pdf",
-      "--to",
-      "md",
-      "--pipeline",
-      "vlm",
-      "--vlm-model",
-      "granite_docling",
       "--output",
       outdir,
       source,

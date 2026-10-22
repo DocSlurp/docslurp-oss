@@ -128,18 +128,28 @@ describe("safeErrorResponse for the native API", () => {
   });
 });
 
-describe("upgrade links", () => {
-  const links = { upgrade: "https://docslurp.io/pricing", billing: "https://docslurp.io/app/billing", docs: "https://docslurp.io/docs/http#rate-limits-and-headers" };
+describe("limit links", () => {
+  const links = {
+    buyCredits: "https://docslurp.io/app/billing#buy-credits",
+    autoTopUp: "https://docslurp.io/app/billing#auto-top-up",
+    billing: "https://docslurp.io/app/billing",
+    docs: "https://docslurp.io/docs/http#rate-limits-and-headers",
+  };
 
-  it("keeps only known keys with absolute http(s) URLs", () => {
-    expect(publicApiErrorLinks({ ...links, evil: "https://x", apiKeys: "javascript:alert(1)", buyCredits: "/app/billing" })).toEqual(links);
+  it("keeps only known keys with absolute http(s) URLs and never an upgrade link", () => {
+    expect(publicApiErrorLinks({ ...links, upgrade: "https://docslurp.io/pricing", evil: "https://x", apiKeys: "javascript:alert(1)" })).toEqual(links);
     expect(publicApiErrorLinks({ billing: "https://a b" })).toBeUndefined();
-    expect(publicApiErrorDetails({ links, plan: "free", note: "dropped" })).toEqual({ links, plan: "free" });
+    expect(publicApiErrorDetails({ links, account: "starter", plan: "free", note: "dropped" })).toEqual({ links, account: "starter" });
   });
 
-  it("points Free-plan rate limits at the upgrade and falls back to reviewed copy without links", () => {
-    expect(publicApiErrorMessage("rate_limited", { plan: "free", links })).toContain("Paid plans have higher limits: upgrade at https://docslurp.io/pricing");
-    expect(publicApiErrorMessage("credit_exhausted", { links })).toBe("Your organization is out of credits. Buy credits or upgrade your plan at https://docslurp.io/app/billing.");
+  it("points starter rate limits at buying credits, credit errors at buying credits and auto top-up", () => {
+    expect(publicApiErrorMessage("rate_limited", { account: "starter", links })).toContain("buy credits at https://docslurp.io/app/billing#buy-credits");
+    expect(publicApiErrorMessage("credit_exhausted", { links })).toBe(
+      "Your organization is out of credits. Buy credits at https://docslurp.io/app/billing#buy-credits, or turn on auto top-up at https://docslurp.io/app/billing#auto-top-up.",
+    );
+    expect(publicApiErrorMessage("credit_exhausted", { links: { buyCredits: links.buyCredits } })).toBe(
+      "Your organization is out of credits. Buy credits at https://docslurp.io/app/billing#buy-credits.",
+    );
     for (const code of ["rate_limited", "credit_exhausted", "org_budget_paused"] as const) {
       expect(publicApiErrorMessage(code)).toBe(API_ERROR_PUBLIC_MESSAGES[code]);
     }

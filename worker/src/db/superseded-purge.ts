@@ -1,8 +1,9 @@
 import { setTimeout as delay } from "node:timers/promises";
 
 import {
-  effectiveRetainedVersions,
-  isBillingEnforced,
+  DEFAULT_RETAINED_VERSIONS,
+  MAX_RETAINED_VERSIONS,
+  MIN_RETAINED_VERSIONS,
   resolveLanceDbConfig,
   resolveObjectStorageConfig,
   VectorNamespaceManager,
@@ -87,8 +88,6 @@ export interface SupersededPurgeOptions {
   lancedbRoot: string;
   deleteVectorRows?: DeleteVectorRows;
   dropVectorTable?: DropVectorTable;
-  /** Without billing enforcement retention settings apply on every plan (default 2). Defaults to `billing_runtime` (published by the app) or the env flags. */
-  billingEnforced?: boolean;
   /** Cleanup-queue rows claimed per batch; vector and storage work is grouped per batch. */
   cleanupBatchSize?: number;
 }
@@ -103,22 +102,8 @@ export interface SupersededPurgeResult {
 type RetentionAction = "archive" | "purge";
 
 /**
- * Per-plan retention inputs for the SQL keep rule, derived from `effectiveRetainedVersions` so the TS function stays the source of truth.
- * Without billing enforcement every plan follows the paid rule (settings honoured, default 2).
- */
-function retentionPlanRules(billingEnforced: boolean): Record<string, { fixed: boolean; fallback: number }> {
-  const rules: Record<string, { fixed: boolean; fallback: number }> = {};
-  for (const planId of ["free", "silver", "gold", "platinum"]) {
-    const fallback = effectiveRetainedVersions({ planId, orgSetting: null, workspaceSetting: null, billingEnforced });
-    const fixed = effectiveRetainedVersions({ planId, orgSetting: 100, workspaceSetting: 100, billingEnforced }) === fallback;
-    rules[planId] = { fixed, fallback };
-  }
-  return rules;
-}
-
-/**
  * Chains worth ranking this sweep: those with a superseded version that is not archived yet (still to archive
- * or purge), plus chains in an organization or workspace whose retention setting or plan changed since it was
+ * or purge), plus chains in an organization or workspace whose retention setting changed since it was
  * last fully swept (archived versions may now exceed the keep count). Fully archived chains with unchanged
  * settings are never touched, so a sweep stays proportional to pending work, not to total history.
  */
@@ -170,12 +155,9 @@ export async function retentionActions(
   sql: Sql<Record<string, unknown>>,
   graceSeconds: number,
   limit: number,
-  options: { billingEnforced?: boolean } = {},
 ): Promise<{ id: string; action: RetentionAction }[]> {
-  const rules = JSON.stringify(retentionPlanRules(options.billingEnforced ?? await resolveBillingEnforced(sql)));
   const rows = await sql<{ id: string; action: RetentionAction }[]>`
-    with rules as (select * from jsonb_each(${rules}::text::jsonb) as t(plan_id, rule)),
-    chains as (${retentionCandidateChains(sql)}),
+    with chains as (${retentionCandidateChains(sql)}),
     -- A version replaced by its own re-index (reindex_of) is purged and takes no retention slot:
     -- its replacement occupies the slot, so a config change never evicts an older archived version.
     reindexed as (
@@ -199,14 +181,11 @@ export async function retentionActions(
     ),
     keep as (
       select r.id, r.version_rank, r.archived_at, r.superseded_at,
-        case
-          when (rules.rule->>'fixed')::boolean then (rules.rule->>'fallback')::int
-          else least(100, greatest(1, coalesce(w.retain_document_versions, o.retain_document_versions, (rules.rule->>'fallback')::int)))
-        end as keep_count
+        least(${MAX_RETAINED_VERSIONS}::int, greatest(${MIN_RETAINED_VERSIONS}::int,
+          coalesce(w.retain_document_versions, o.retain_document_versions, ${DEFAULT_RETAINED_VERSIONS}::int))) as keep_count
       from ranked r
       join organizations o on o.id = r.org_id
       left join workspaces w on w.id = r.workspace_id
-      left join rules on rules.plan_id = case when o.plan_id in (select plan_id from rules) then o.plan_id else 'free' end
     )
     select id, action from (
       select id, superseded_at,
@@ -268,17 +247,6 @@ export function purgeConfig(): SupersededPurgeOptions & { intervalMs: number } {
     deleteSources: resolveObjectStorageConfig().purgeSupersededSources,
     lancedbRoot: resolveLanceDbConfig().root,
   };
-}
-
-/**
- * Whether retention follows billing rules. Workers hold no Stripe key; the app publishes enforcement in
- * `billing_runtime`, which this reads, alongside the env flags (`DOCSLURP_BILL_*`) for deployments without Stripe.
- */
-export async function resolveBillingEnforced(sql: Sql<Record<string, unknown>>): Promise<boolean> {
-  if (isBillingEnforced()) return true;
-  if (!(await tableExists(sql, "billing_runtime"))) return false;
-  const [row] = await sql<{ metering_enforced: boolean }[]>`select metering_enforced from billing_runtime where id = true limit 1`;
-  return row?.metering_enforced === true;
 }
 
 /** Deletes documents' rows from a LanceDB table, retrying commit conflicts with concurrent writers. */
@@ -387,7 +355,7 @@ export async function purgeSupersededDocuments(
   const tables = await existingTables(sql);
   const result: SupersededPurgeResult = { purged: 0, failed: 0 };
   const [started] = await sql<{ now: Date }[]>`select clock_timestamp() as now`;
-  const actions = await retentionActions(sql, options.graceSeconds, options.batchSize, { billingEnforced: options.billingEnforced ?? await resolveBillingEnforced(sql) });
+  const actions = await retentionActions(sql, options.graceSeconds, options.batchSize);
   // Nothing left to do: every pending retention setting change is now applied.
   if (actions.length === 0) await markRetentionSwept(sql, started!.now);
   const archiveTables = await existingTables(sql, ARCHIVE_TABLES);

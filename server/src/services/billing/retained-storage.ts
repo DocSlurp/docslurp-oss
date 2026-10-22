@@ -1,16 +1,14 @@
-import { CREDIT_RATE_CARD, isBillingEnforced } from "@docslurp/shared";
+import { isBillingEnforced, storageCreditsPerMonth } from "@docslurp/shared";
 
 import { sql } from "../../db.js";
-
-const BYTES_PER_GB = 1024 ** 3;
 
 export type RetainedVersionStorage = { bytes: number; pages: number; monthlyCredits: number | null; billingEnforced: boolean };
 
 /**
  * Archived (retained, non-current) versions that still hold files: browsable but never searchable.
  * Exposed separately from the storage totals so the billing page can show what retention costs.
- * `monthlyCredits` is the gross object-storage rate (before the plan's included allowance) and is null
- * when the deployment does not bill.
+ * `monthlyCredits` is their source bytes at PRICE_CARD.storageGbMonth and is null when the deployment
+ * does not bill.
  */
 export async function getRetainedVersionStorage(
   orgId: string,
@@ -27,6 +25,6 @@ export async function getRetainedVersionStorage(
     bytes,
     pages,
     billingEnforced: isBillingEnforced(env),
-    monthlyCredits: isBillingEnforced(env) ? (bytes / BYTES_PER_GB) * CREDIT_RATE_CARD.objectStorageGbMonth : null,
+    monthlyCredits: isBillingEnforced(env) ? storageCreditsPerMonth(bytes) : null,
   };
 }

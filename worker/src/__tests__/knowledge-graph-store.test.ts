@@ -357,7 +357,7 @@ describe("workspace graph rebuild jobs", () => {
     expect(await runGraphJobs(sql, { workerId: "test", config, concurrency: 1 })).toBe(0);
   });
 
-  it("persists billed graph tokens when a generated response cannot be parsed", async () => {
+  it("persists graph tokens at provider cost (billing 0 credits) when a generated response cannot be parsed", async () => {
     await seedDocument("d1", "Example System handles documents.");
     await sql`update workspaces set pipeline = ${sql.json({ graphRag: true })} where id = 'w'`;
     vi.mocked(generateOpenRouterText).mockResolvedValue({
@@ -367,13 +367,15 @@ describe("workspace graph rebuild jobs", () => {
     await queueJob("job-usage", "full");
     await runGraphJobs(sql, { workerId: "test", config: { ...config, openRouterApiKey: "mock-only" }, concurrency: 1 });
     const events = await sql`
-      select input_tokens, output_tokens, cost_cents, metadata->>'finishReason' as finish_reason
+      select input_tokens, output_tokens, cost_cents, metadata->>'finishReason' as finish_reason,
+        (metadata->>'providerCostCents')::numeric as provider_cost
       from usage_attribution where metric = 'graphrag-extract' and metadata->>'graphJobId' = 'job-usage'
     `;
     expect(events).toHaveLength(1);
     expect(Number(events[0]!.input_tokens)).toBe(100);
     expect(Number(events[0]!.output_tokens)).toBe(1600);
-    expect(Number(events[0]!.cost_cents)).toBe(0.25);
+    expect(Number(events[0]!.cost_cents)).toBe(0);
+    expect(Number(events[0]!.provider_cost)).toBe(0.25);
     expect(events[0]!.finish_reason).toBe("length");
     expect(await sql`select source from kg_document_state where document_id = 'd1'`).toEqual([{ source: "heuristic" }]);
   });

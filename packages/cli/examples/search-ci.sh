@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Usage: bash search-ci.sh 'How do retries work?'
-# Searches the organization default workspace unless DOCSLURP_WORKSPACE_ID (a slug or UUID) is set.
+# Searches the organization default workspace unless DOCSLURP_WORKSPACE (a workspace ID, slug or name) is set.
 # Requires Node.js 20+, @docslurp/cli, jq, and a search-scoped API key.
 set -euo pipefail
 : "${DOCSLURP_API_KEY:?Set DOCSLURP_API_KEY}"

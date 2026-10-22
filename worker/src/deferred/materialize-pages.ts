@@ -6,6 +6,8 @@ import type { Sql } from "postgres";
 import {
   buildPricedAiUsageLedgerEvent,
   calculateAiUsageCostCents,
+  pageCredits,
+  richPagesForOutputTokens,
   VectorNamespaceManager,
   type MaterializePagesInput,
   type PipelineFeatures,
@@ -276,7 +278,8 @@ export async function materializePageRange(
   const ocrPages: number[] = [];
   for (const page of pages) {
     const text = texts.get(page) ?? "";
-    if (text.replace(/\s+/g, "").length >= MIN_TEXT_LAYER_CHARS) prepared.set(page, { page, text, ocrCostCents: 0 });
+    // Text-layer pages bill as Fast pages (charged by recordMaterializedPageFee).
+    if (text.replace(/\s+/g, "").length >= MIN_TEXT_LAYER_CHARS) prepared.set(page, { page, text, ocrCostCents: pageCredits("fast", 1) });
     else ocrPages.push(page);
   }
   const budgetCents = input.maxCredits > 0 ? input.maxCredits : Infinity; // 1 credit = 1 cent
@@ -299,7 +302,9 @@ export async function materializePageRange(
         outputTokens: ocr.outputTokens,
         metadata: { ...ocr.metadata, documentId, pageNumber: page, materializedBy: input.reason, sessionId: input.sessionId },
       });
-      const cost = event?.costCents ?? ocr.costCents;
+      // Customer credits: an OCR-read page bills Rich (the usage ledger charges it); provider cost is ours.
+      void event;
+      const cost = pageCredits("rich", richPagesForOutputTokens(ocr.outputTokens));
       spentCents += cost;
       if (ocr.text.replace(/\s+/g, "").length === 0) failed.set(page, "empty-page");
       else prepared.set(page, { page, text: ocr.text, ocrCostCents: cost });
@@ -473,9 +478,10 @@ export async function materializePageRange(
   result.indexed.sort((a, b) => a - b);
   result.blocked = blocked.sort((a, b) => a - b);
   for (const [page, reason] of [...failed].sort((a, b) => a[0] - b[0])) result.failed.push({ page, reason });
-  // Total actual spend of the call: all OCR (including pages that then failed) and every
-  // completed embedding batch, even if a later batch threw. 1 credit = 1 cent.
-  result.costCredits = Math.round((spentCents + embeddingCents) * 10_000) / 10_000;
+  // Customer credits of the call: every OCR-read page (Rich, including pages that then failed) and
+  // every text-layer page that indexed (Fast). Embedding batches are provider cost (0 credits).
+  const fastIndexed = result.indexed.filter((page) => !ocrPages.includes(page)).length;
+  result.costCredits = Math.round((spentCents + embeddingCents + pageCredits("fast", fastIndexed)) * 10_000) / 10_000;
 
   const writes: Promise<void>[] = [];
   for (const [credits, group] of indexedByCost) {

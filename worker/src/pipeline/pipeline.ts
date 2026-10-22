@@ -110,7 +110,6 @@ export class WorkflowState {
       artifacts: cloneArtifacts(run.artifacts)
     };
     this.documents = documents;
-    this.usageLedger.planId = run.orgPlanId ?? null;
     this.stage = run.stage;
     this.artifacts = this.run.artifacts;
     this.artifactLedger = DocumentArtifactLedger.create(
@@ -123,6 +122,7 @@ export class WorkflowState {
     this.runStages = new Map();
     this.documentStages = new Map();
     this.totalStages = 0;
+    this.usageLedger.runId = run.id;
   }
 
   static create(run: WorkspaceRun, documents: Document[]): WorkflowState {

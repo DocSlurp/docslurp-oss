@@ -15,13 +15,13 @@ import { buildCatalogFeedRows, catalogFeedCsv, DEFAULT_CATALOG_IMAGES, fetchStri
  *
  * Uses STRIPE_SECRET_KEY (or a restricted key with Product Catalog Imports
  * write, plus Products read for --stripe-product). Live keys also need --live,
- * so a sandbox validates first.
+ * so a sandbox validates first. The feed lists credit packs only; upload once
+ * with --mode replace to drop the retired plan rows from the Stripe catalog.
  */
 const { values } = parseArgs({
   options: {
     env: { type: "string", default: "local" },
     link: { type: "string" },
-    "plan-image": { type: "string", default: DEFAULT_CATALOG_IMAGES.plan },
     "credits-image": { type: "string", default: DEFAULT_CATALOG_IMAGES.credits },
     "stripe-product": { type: "string", multiple: true, default: [] },
     out: { type: "string" },
@@ -43,7 +43,7 @@ if (values.upload && live && !values.live) throw new Error("STRIPE_SECRET_KEY is
 
 const stripePrices = productIds.length ? await fetchStripeCatalogPrices(productIds) : [];
 const csv = catalogFeedCsv(buildCatalogFeedRows({
-  images: { plan: values["plan-image"], credits: values["credits-image"] }, stripePrices, ...(link && { link }),
+  images: { credits: values["credits-image"] }, stripePrices, ...(link && { link }),
 }));
 if (values.out) await writeFile(values.out, csv);
 else if (!values.upload) process.stdout.write(csv);

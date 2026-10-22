@@ -226,7 +226,8 @@ describe("RoutePagesStage", () => {
     expect(usage.length).toBeGreaterThan(0);
     expect(usage.map((e) => e.metric).sort()).toEqual(["page-route-decision", "page-route-decision-canary"]);
     expect(decisions[1]!.metadata).toMatchObject({ decisionServedBy: "cloudflare/clef-flash", decisionChain: [{ model: "cloudflare/clef-flash", outcome: "served" }] });
-    expect(state.usageLedger.pendingBillableCents).toBeGreaterThan(0);
+    expect(usage.some((e) => Number(e.metadata?.providerCostCents) > 0)).toBe(true);
+    expect(state.usageLedger.pendingBillableCents).toBe(0);
   });
 
   it("does not touch rasters, vision selection or other artifacts in shadow", async () => {

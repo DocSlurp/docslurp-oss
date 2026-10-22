@@ -16,6 +16,7 @@ import type { EmbeddingArtifact } from "./embedding-runtime.js";
 import { indexableDocuments } from "../pipeline/pii-gate.js";
 import { allowHostedCall, openRouterTextCall } from "../lib/privacy-guard.js";
 import { textFallbackCost, textModelApiKey, textUsageLabels } from "../lib/text-model-route.js";
+import { chargeDocumentFeature } from "../pipeline/feature-charges.js";
 
 /** Store surface graph enrichment writes through (the Postgres `Store`). */
 export interface KnowledgeGraphStore {
@@ -148,7 +149,12 @@ export class GraphEnrichStage implements Stage {
         },
       });
       windows += graph.windows;
-      if (graph.source === "llm") llmDocuments += 1;
+      if (graph.source === "llm") {
+        llmDocuments += 1;
+        // Price card: knowledge graph per started 10 pages, once per document per run, only when the
+        // model extracted it (heuristic fallback graphs are free). Community summaries are included.
+        chargeDocumentFeature(state, document, "knowledgeGraph");
+      }
 
       // Persist per document: search sees the graph grow during long runs.
       const written = graphStore

@@ -18,12 +18,12 @@ function app() {
   return server;
 }
 const json = (body: unknown) => ({ method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
-const queries = ["one", "two", "three", "four", "five"].map(q => ({ q, workspaceId: "workspace" }));
+const queries = ["one", "two", "three", "four", "five"].map(q => ({ q, workspace: "workspace" }));
 const response = (q: string) => ({ results: [{ text: q, citation: { page: 1 } }], sessionId: q, availability: { status: "complete" } });
 describe("batch retrieval and canonical chat", () => {
   beforeEach(() => { vi.resetAllMocks(); mocks.access.mockResolvedValue(null); mocks.search.mockImplementation(async q => response(q)); });
   it.each([{ queries: [] }, { queries: Array(21).fill(queries[0]) }, { queries, concurrency: 0 }, { queries, concurrency: 9 },
-    { queries: [queries[0], { q: 123, workspaceId: "workspace" }] }, { queries: [{ q: " ", workspaceId: "workspace" }] },
+    { queries: [queries[0], { q: 123, workspace: "workspace" }] }, { queries: [{ q: " ", workspace: "workspace" }] },
     { queries: [{ ...queries[0], limit: 101 }] }, { queries: [{ ...queries[0], tags: [] }] }])("validates the whole envelope before retrieval: %j", async body => {
     expect((await app().request("/v1/search", json(body))).status).toBe(400);
     expect(mocks.search).not.toHaveBeenCalled(); expect(mocks.access).not.toHaveBeenCalled();
@@ -43,7 +43,7 @@ describe("batch retrieval and canonical chat", () => {
     const usage = { inputTokens: 10, outputTokens: 2, totalTokens: 12,
       costCents: 0.003, currency: 'USD', costSource: 'estimate', scope: 'retrieval' };
     for (const request of [
-      app().request('/v1/search?q=one&workspaceId=workspace'),
+      app().request('/v1/search?q=one&workspace=workspace'),
       app().request('/v1/search', json(queries[0])),
     ]) {
       const result = await (await request).json();
@@ -80,7 +80,7 @@ describe("batch retrieval and canonical chat", () => {
   });
   it("returns independent per-item scope failures without retrieving denied workspaces", async () => {
     mocks.access.mockImplementation(async (_c, id) => id === "foreign" ? new Response(null, { status: 404 }) : id === "forbidden" ? new Response(null, { status: 403 }) : null);
-    const result = await app().request("/v1/search", json({ queries: [queries[0], { q: "secret", workspaceId: "foreign" }, { q: "denied", workspaceId: "forbidden" }] }));
+    const result = await app().request("/v1/search", json({ queries: [queries[0], { q: "secret", workspace: "foreign" }, { q: "denied", workspace: "forbidden" }] }));
     expect(await result.json()).toMatchObject({ results: [{ ok: true }, { ok: false, error: { code: "WORKSPACE_NOT_FOUND", status: 404 } }, { ok: false, error: { code: "FORBIDDEN", status: 403 } }] });
     expect(mocks.search).toHaveBeenCalledOnce();
   });
@@ -111,12 +111,12 @@ describe("batch retrieval and canonical chat", () => {
   });
   it.each(["/v1/chat", "/v1/search/chat"])("shares validated native chat at %s", async path => {
     mocks.chat.mockResolvedValue({ answer: "answer", citations: [] });
-    expect((await app().request(path, json({ q: "hello", workspaceId: "workspace", sessionId: "session", model: "model" }))).status).toBe(200);
+    expect((await app().request(path, json({ q: "hello", workspace: "workspace", sessionId: "session", model: "model" }))).status).toBe(200);
     expect(mocks.chat).toHaveBeenCalledWith({ query: "hello", workspaceId: "workspace", userId: "user", sessionId: "session", model: "model",
       actor: undefined, allowAgentTools: true, signal: expect.any(AbortSignal) });
   });
-  it.each([{ q: 7, workspaceId: "workspace" }, { q: "hello", workspaceId: {} }, { q: "hello", workspaceId: "workspace", model: "x".repeat(257) },
-    { q: "hello", workspaceId: "workspace", sessionId: 42 }, { q: "x".repeat(16001), workspaceId: "workspace" }])("rejects malformed chat before service calls: %j", async body => {
+  it.each([{ q: 7, workspace: "workspace" }, { q: "hello", workspace: {} }, { q: "hello", workspace: "workspace", model: "x".repeat(257) },
+    { q: "hello", workspace: "workspace", sessionId: 42 }, { q: "x".repeat(16001), workspace: "workspace" }])("rejects malformed chat before service calls: %j", async body => {
     expect((await app().request("/v1/chat", json(body))).status).toBe(400); expect(mocks.chat).not.toHaveBeenCalled();
   });
   it("enforces chat workspace scope before any model calls", async () => {

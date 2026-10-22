@@ -79,7 +79,7 @@ export const configChangePaths = {
     post: {
       tags: ["ingest"],
       summary: "Estimate an upload",
-      description: "Body `{ files: [{ name, size, pages? }], workspaceId? }`. Pages default to about one per 75 KB.",
+      description: "Body `{ files: [{ name, size, pages? }], workspace? }` (workspace ID, slug or name; omitted: the default workspace). Pages default to about one per 75 KB.",
       security,
       requestBody: body,
       responses: estimateResponses,

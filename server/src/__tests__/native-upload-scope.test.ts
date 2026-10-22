@@ -21,10 +21,10 @@ vi.mock("../services/workspaces.js", () => ({
   getWorkspace: vi.fn(), ensureDefaultWorkspace: vi.fn(async () => ({ id: "ws-default" })),
 }));
 const { uploadsRoutes } = await import("../routes/uploads.js");
-function app(orgId: string | null = "org-a") {
+function app(orgId: string | null = "org-a", workspaceIds: string[] = []) {
   const server = new Hono(); server.use("*", async (c, next) => {
     c.set("sessionUser", { id: "user-a", email: "", name: "" });
-    c.set("apiKey", { orgId, scopes: ["ingest"] } as never); await next();
+    c.set("apiKey", { orgId, scopes: ["ingest"], workspaceIds } as never); await next();
   }); return server.route("/uploads", uploadsRoutes);
 }
 function upload(fields: Record<string, string> = {}) {
@@ -36,16 +36,20 @@ describe("native key ingestion organization isolation", () => {
   beforeEach(() => { vi.clearAllMocks(); mocks.intake.mockResolvedValue({ payload: { ok: true }, status: 201 }); });
   it("binds new workspaces to the key organization", async () => {
     expect((await app().request("/uploads/bulk", upload())).status).toBe(201);
-    expect(mocks.intake).toHaveBeenCalledWith(expect.objectContaining({ orgId: "org-a", workspaceId: null }), expect.anything());
+    expect(mocks.intake).toHaveBeenCalledWith(expect.objectContaining({ orgId: "org-a", workspace: null, allowedWorkspaceIds: null }), expect.anything());
   });
   it("rejects an explicit foreign organization before intake", async () => {
     expect((await app().request("/uploads/bulk", upload({ orgId: "org-b" }))).status).toBe(403);
     expect(mocks.intake).not.toHaveBeenCalled();
   });
-  it("hides foreign workspaces before any ingestion side effect", async () => {
-    mocks.workspace.mockResolvedValue(null);
-    expect((await app().request("/uploads/bulk", upload({ workspaceId: "foreign" }))).status).toBe(404);
-    expect(mocks.intake).not.toHaveBeenCalled();
+  it("resolves the workspace inside the key organization and allowlist, answering intake's 404", async () => {
+    const { WorkspaceAccessError } = await import("../services/default-workspace.js");
+    mocks.intake.mockRejectedValueOnce(new WorkspaceAccessError(404, "workspace_not_found", "Workspace not found"));
+    const response = await app("org-a", ["ws-allowed"]).request("/uploads/bulk", upload({ workspace: "foreign" }));
+    expect(response.status).toBe(404);
+    expect(await response.json()).toMatchObject({ error: { code: "workspace_not_found" } });
+    // The route never pre-resolves the value; intake scopes it to the key's org and allowlist.
+    expect(mocks.intake).toHaveBeenCalledWith(expect.objectContaining({ orgId: "org-a", workspace: "foreign", allowedWorkspaceIds: ["ws-allowed"] }), expect.anything());
   });
   it.each(["/uploads/url", "/uploads/direct/sessions"])("rejects foreign org on JSON intake %s", async path => {
     expect((await app().request(path, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ orgId: "org-b" }) })).status).toBe(403);

@@ -8,7 +8,7 @@ const { sweepSpendPausedRuns } = await import("../services/spend-paused-runs.js"
 
 const text = (strings: unknown) => (Array.isArray(strings) ? strings.join("?") : String(strings));
 const status = (available: number) => ({
-  org_id: "org-1", plan_id: "free", available, reserved: 0,
+  org_id: "org-1", funded: false, available, reserved: 0,
   workspace_budget_paused: false, org_budget_paused: false, workspace_in_org: true,
 });
 

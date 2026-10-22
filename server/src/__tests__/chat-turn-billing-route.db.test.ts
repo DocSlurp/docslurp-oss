@@ -50,24 +50,24 @@ afterAll(async () => {
 
 beforeEach(async () => {
   chatWorkspace.mockReset();
-  usage.clearOrgPlanCache();
   await sql`delete from credit_debits_pending`;
   await sql`delete from credit_ledger`;
   await sql`delete from credit_grants`;
   await sql`delete from usage_events`;
   await sql`delete from workspaces`;
   await sql`delete from organizations`;
-  await sql`insert into organizations(id, name, slug, created_by_user_id, plan_id, credit_balance_cents) values ('o1', 'Org', 'org', 'u1', 'free', 1000)`;
+  await sql`insert into organizations(id, name, slug, created_by_user_id, credit_balance_cents) values ('o1', 'Org', 'org', 'u1', 1000)`;
   await sql`insert into workspaces(id, org_id, user_id, name) values ('w1', 'o1', 'u1', 'W')`;
 });
 
-/** A chat turn that ran one agent step (and flushed it), then answered or failed. */
+/** A chat turn that billed its answer (and flushed it), then answered or failed. */
 function turnThat(outcome: (turnId: string) => unknown) {
   chatWorkspace.mockImplementation(async () => {
-    await usage.recordUsageEvent({
+    const turnId = billing.currentChatTurnHandle()!.id;
+    await usage.recordUnitCharge({
       userId: "u1",
       scope: { orgId: "o1", workspaceId: "w1", sessionId: "s1" },
-      usage: { provider: "openrouter", model: "test/model", metric: "workspace-chat-tools", inputTokens: 1000, outputTokens: 200, costCents: 10 },
+      charge: { id: `chat-answer:${turnId}`, metric: "chat-answer", amount: 1, unit: "answer", credits: 12, metadata: { providerCostCents: 10 } },
     });
     await credits.flushPendingCreditDebits();
     return outcome(billing.currentChatTurnHandle()!.id);
@@ -106,7 +106,7 @@ describe("/v1/chat chat turn billing", () => {
     expect(body.error.details?.usage).toMatchObject({ outcome: "failed", refunded: true, providerCostCents: 10, chargedCreditCents: 0 });
     expect(Number(body.error.details?.usage?.refundedCreditCents)).toBeGreaterThan(0);
     expect(await available()).toBeCloseTo(1000, 6);
-    expect(await sql`select 1 from credit_grants where source = 'adjustment'`).toHaveLength(1);
+    expect(await sql`select 1 from credit_grants where source = 'refund'`).toHaveLength(1);
   });
 
   it("charges a turn whose client disconnected after the answer was generated", async () => {

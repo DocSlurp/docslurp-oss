@@ -127,8 +127,8 @@ async function materializeRange(deps: MaterializeActivityDeps, input: Materializ
       result.blocked.push(...own.blocked);
       result.failed.push(...own.failed);
       result.costCredits += own.costCredits;
-      // Full-index runs pay the page base fee through the normal run path.
-      if (reason !== "full-index") await recordMaterializedPageFee(sql, input.runId, input.documentId, own.indexed);
+      // Full-index runs pay page charges through the normal run path.
+      if (reason !== "full-index") await recordMaterializedPageFee(sql, input.runId, input.documentId, own.indexed, state.usageLedger.richPagesOf(input.documentId));
     } finally {
       if (beat) clearInterval(beat);
       // Persists buffered AI usage even when materialization threw.

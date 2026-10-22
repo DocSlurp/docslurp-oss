@@ -1,265 +1,301 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  BILLABLE_UNIT_METRICS,
+  CHAT_MODEL_TIERS,
+  DOCUMENT_FEATURES,
+  DOCUMENT_FEATURE_METRICS,
+  featureCredits,
+  CREDIT_PACK_CENTS,
   CREDIT_RATE_CARD,
   EXAMPLE_CORPORA,
+  FUNDED_WORKER_SLOTS,
   MAX_PAGE_FANOUT_PER_RUN,
-  SERVICE_PLANS,
+  MAX_TOPUP_CENTS,
+  MIN_TOPUP_CENTS,
+  PRICE_CARD,
   STARTER_CREDITS,
-  autoRechargeSettingsSchema,
-  creditsForSubscriptionPayment,
+  STARTER_WORKER_SLOTS,
+  autoTopUpSettingsSchema,
+  billingForecastSchema,
+  billingPrices,
+  buildBillingForecast,
+  chatAnswerCredits,
+  chatModelTier,
   dailyStorageCredits,
+  daysInUtcMonth,
   estimateIngest,
-  getPlan,
-  getPlanByLookupKey,
-  HOSTED_EQUIVALENT_REFERENCES,
-  ROUTE_FACTOR_PERCENT,
-  SELF_HOSTED_DISCOUNT_PERCENT,
-  SELF_HOSTED_PAGE_TOKENS,
-  aiBonusNeutralFactor,
-  hostedEquivalentListCredits,
-  priceResources,
+  isUnitChargeEvent,
+  mediaRichPages,
+  pageCredits,
   priceAiUsageEvent,
-  selfHostedPageCredits,
-  selfHostedRateCard,
+  priceResources,
+  richPagesForOutputTokens,
+  searchCredits,
+  storageCreditsPerMonth,
+  unitChargeMetadata,
+  workerSlotsFor,
 } from "../billing.js";
 
 const GB = 1024 ** 3;
 
-describe("AI receipt credits", () => {
-  it("keeps provider cost and applies the rate-card markup exactly once", () => {
-    const priced = priceAiUsageEvent({ costCents: 10, metadata: { generationId: "receipt" } });
-    expect(priced.costCents).toBe(12);
-    expect(priced.metadata).toMatchObject({ providerCostCents: 10, aiMarkupPercent: 20, generationId: "receipt" });
-    expect(priceAiUsageEvent(priced)).toEqual(priced);
-  });
-
-  it("retains provider evidence for unbilled AI calls without charging credits", () => {
-    const priced = priceAiUsageEvent({ costCents: 10, metadata: { billable: false } });
-    expect(priced.costCents).toBe(0);
-    expect(priced.metadata).toMatchObject({ providerCostCents: 10, billable: false });
-    expect(priceAiUsageEvent(priced).costCents).toBe(0);
-  });
-});
-
-describe("self-hosted inference pricing", () => {
-  const privateEvent = (overrides: Record<string, unknown> = {}) => ({
-    provider: "private",
-    costCents: 0.01,
-    inputTokens: 1_500,
-    outputTokens: 800,
-    metadata: { capability: "vision", costSource: "private-endpoint-hourly" },
-    ...overrides,
-  });
-
-  it("bills 50% of the hosted-equivalent list price and records the list price", () => {
-    const priced = priceAiUsageEvent(privateEvent());
-    const reference = HOSTED_EQUIVALENT_REFERENCES.vision;
-    const listCents = ((1_500 * reference.inputUsdPerMTok + 800 * reference.outputUsdPerMTok) / 1_000_000) * 100 * 1.2;
-    expect(SELF_HOSTED_DISCOUNT_PERCENT).toBe(50);
-    expect(priced.costCents).toBeCloseTo(listCents / 2, 10);
-    expect(priced.metadata).toMatchObject({
-      providerCostCents: 0.01,
-      selfHosted: { capability: "vision", discountPercent: 50, referenceModel: reference.model },
+describe("price card", () => {
+  it("publishes the owner-approved unit prices", () => {
+    expect(PRICE_CARD).toMatchObject({
+      fastPer1kPages: 5,
+      richPer1kPages: 250,
+      audioMinuteRichPages: 1,
+      videoMinuteRichPages: 3,
+      storageGbMonth: 25,
+      searchPer1k: 10,
+      chatAnswerTiers: { standard: 2.5, advanced: 7.5, premium: 50 },
+      richIncludedOutputTokens: 1_000,
+      richExtraPageOutputTokens: 1_000,
+      llmSearchMultiplier: 10,
+      chatAnswerTokenBlock: 100_000,
     });
-    expect((priced.metadata as unknown as { selfHosted: { hostedEquivalentListCents: number } }).selfHosted.hostedEquivalentListCents).toBeCloseTo(listCents, 10);
-  });
-
-  it("is idempotent and independent of the GPU cost the endpoint reports", () => {
-    const priced = priceAiUsageEvent(privateEvent());
-    expect(priceAiUsageEvent(priced)).toEqual(priced);
-    expect(priceAiUsageEvent(privateEvent({ costCents: 5 })).costCents).toBeCloseTo(priced.costCents, 10);
-  });
-
-  it("bills unpriced private endpoints too, because billing follows tokens not hardware", () => {
-    expect(priceAiUsageEvent(privateEvent({ costCents: 0 })).costCents).toBeGreaterThan(0);
-  });
-
-  it("falls back to provider cost plus markup without a reference capability or tokens", () => {
-    expect(priceAiUsageEvent(privateEvent({ metadata: { capability: "stt" } })).costCents).toBeCloseTo(0.012, 10);
-    expect(priceAiUsageEvent(privateEvent({ inputTokens: 0, outputTokens: 0 })).costCents).toBeCloseTo(0.012, 10);
-    expect(priceAiUsageEvent({ ...privateEvent(), provider: "openrouter" }).costCents).toBeCloseTo(0.012, 10);
-  });
-
-  it("charges nothing for unbilled self-hosted calls", () => {
-    expect(priceAiUsageEvent(privateEvent({ metadata: { capability: "vision", billable: false } })).costCents).toBe(0);
-  });
-
-  it("prices a model-read page at half of the hosted list, about $0.46 per 1,000", () => {
-    const page = selfHostedPageCredits();
-    expect(page.billed).toBeCloseTo(page.list / 2, 12);
-    expect(page.list * 10).toBeCloseTo(0.911, 3);
-    const card = selfHostedRateCard();
-    expect(card.discountPercent).toBe(50);
-    expect(card.per1000Pages.billedCredits).toBeCloseTo(card.per1000Pages.listCredits / 2, 9);
-    expect(hostedEquivalentListCredits({ capability: "vision", ...{ inputTokens: SELF_HOSTED_PAGE_TOKENS.input, outputTokens: SELF_HOSTED_PAGE_TOKENS.output } })).toBeCloseTo(page.list, 12);
-  });
-
-  it("charges embeddings on own hardware at half of hosted embedding list", () => {
-    const priced = priceAiUsageEvent({ provider: "private", costCents: 0, inputTokens: 1_000_000, outputTokens: 0, metadata: { capability: "embedding" } });
-    expect(priced.costCents).toBeCloseTo(2 * 1.2 / 2, 9);
-  });
-});
-
-describe("plan-neutral AI pricing", () => {
-  it("charges bonus plans (1 + bonus) times the credits so a dollar of AI costs the same dollars everywhere", () => {
-    const event = { costCents: 10, metadata: {} };
-    expect(priceAiUsageEvent(event).costCents).toBeCloseTo(12);
-    expect(priceAiUsageEvent(event, { planId: "silver" }).costCents).toBeCloseTo(12);
-    expect(priceAiUsageEvent(event, { planId: "gold" }).costCents).toBeCloseTo(13.2);
-    expect(priceAiUsageEvent(event, { planId: "platinum" }).costCents).toBeCloseTo(14.4);
-    expect(priceAiUsageEvent(event, { planId: "platinum" }).metadata).toMatchObject({ aiPlanCreditFactor: 1.2, providerCostCents: 10 });
-  });
-
-  it("realizes at least a 10% margin after 3% payment fees on every paid plan", () => {
-    for (const plan of SERVICE_PLANS.filter((entry) => entry.monthlyMinimumCents > 0)) {
-      const creditCents = plan.monthlyMinimumCents / plan.includedCreditsPerMonth;
-      const revenue = priceAiUsageEvent({ costCents: 100, metadata: {} }, { planId: plan.id }).costCents * creditCents * 0.97;
-      expect(revenue / 100 - 1, plan.id).toBeGreaterThanOrEqual(0.1);
-    }
-  });
-
-  it("is a no-op without a plan or for unknown plans", () => {
-    expect(aiBonusNeutralFactor(undefined)).toBe(1);
-    expect(aiBonusNeutralFactor("nope")).toBe(1);
-  });
-
-  it("reprices from stored provider cost without compounding the plan factor", () => {
-    const first = priceAiUsageEvent({ costCents: 10, metadata: {} }, { planId: "platinum" });
-    expect(priceAiUsageEvent(first, { planId: "platinum" })).toEqual(first);
-  });
-});
-
-describe("privacy route factors", () => {
-  it("adds 4% for EU-pinned and 1% for zero-retention routes", () => {
-    expect(ROUTE_FACTOR_PERCENT).toEqual({ euPinned: 4, zeroRetention: 1 });
-    const base = priceAiUsageEvent({ costCents: 10, metadata: {} }).costCents;
-    expect(priceAiUsageEvent({ costCents: 10, metadata: { euPinned: true } }).costCents).toBeCloseTo(base * 1.04);
-    expect(priceAiUsageEvent({ costCents: 10, metadata: { zeroRetention: true } }).costCents).toBeCloseTo(base * 1.01);
-    expect(priceAiUsageEvent({ costCents: 10, metadata: { euPinned: true, zeroRetention: true } }).costCents).toBeCloseTo(base * 1.05);
-    expect(priceAiUsageEvent({ costCents: 10, metadata: { euPinned: "yes" } }).costCents).toBeCloseTo(base);
-  });
-});
-
-describe("service plans", () => {
-  it("keeps the one-time starter grant below every paid monthly allowance", () => {
+    expect(CREDIT_PACK_CENTS).toEqual([2_500, 5_000, 10_000]);
+    expect(MIN_TOPUP_CENTS).toBe(1_000);
+    expect(MAX_TOPUP_CENTS).toBe(1_000_000);
     expect(STARTER_CREDITS).toBe(250);
-    for (const plan of SERVICE_PLANS.filter((entry) => entry.monthlyMinimumCents > 0)) {
-      expect(plan.includedCreditsPerMonth).toBeGreaterThan(STARTER_CREDITS);
+  });
+
+  it("prices pages by mode", () => {
+    expect(pageCredits("fast", 1_000)).toBeCloseTo(5);
+    expect(pageCredits("rich", 1_000)).toBeCloseTo(250);
+    expect(pageCredits("rich", 1)).toBeCloseTo(0.25);
+    expect(pageCredits("fast", -5)).toBe(0);
+  });
+
+  it("counts one more Rich page per started 1,000 output tokens beyond the first 1,000", () => {
+    expect(richPagesForOutputTokens(undefined)).toBe(1);
+    expect(richPagesForOutputTokens(884)).toBe(1);
+    expect(richPagesForOutputTokens(1_000)).toBe(1);
+    expect(richPagesForOutputTokens(1_001)).toBe(2);
+    expect(richPagesForOutputTokens(2_000)).toBe(2);
+    expect(richPagesForOutputTokens(2_035)).toBe(3);
+    expect(richPagesForOutputTokens(16_000)).toBe(16);
+  });
+
+  it("charges storage on every byte with no included GB", () => {
+    expect(storageCreditsPerMonth(GB)).toBeCloseTo(25);
+    expect(storageCreditsPerMonth(0)).toBe(0);
+    expect(dailyStorageCredits(10 * GB, 30)).toBeCloseTo(250 / 30);
+    expect(daysInUtcMonth("2026-02-10")).toBe(28);
+    expect(daysInUtcMonth("2028-02-10")).toBe(29);
+    expect(daysInUtcMonth("2026-10-21")).toBe(31);
+  });
+
+  it("charges searches per query and LLM strategies as ten searches", () => {
+    expect(searchCredits(1_000)).toBeCloseTo(10);
+    expect(searchCredits(1)).toBeCloseTo(0.01);
+    expect(searchCredits(1, { llmStrategies: true })).toBeCloseTo(0.1);
+  });
+
+  it("prices chat answers by model tier, with unmapped models premium and a 100k token block", () => {
+    expect(chatModelTier("z-ai/glm-5.3-flash")).toBe("standard");
+    expect(chatModelTier("minimax/minimax-m3.1-flash:free")).toBe("standard");
+    expect(chatModelTier("deepseek/deepseek-v4.1-flash-20261017")).toBe("advanced");
+    expect(chatModelTier("reflection/beam-1.0-501b-a23b")).toBe("advanced");
+    expect(chatModelTier("openai/gpt-6.1-sol")).toBe("premium");
+    expect(chatModelTier("some/new-model")).toBe("premium");
+    expect(chatModelTier(null)).toBe("premium");
+    expect(chatAnswerCredits({ model: "z-ai/glm-5.3-flash" })).toBe(2.5);
+    expect(chatAnswerCredits({ model: "z-ai/glm-5.3-flash", totalTokens: 100_000 })).toBe(2.5);
+    expect(chatAnswerCredits({ model: "z-ai/glm-5.3-flash", totalTokens: 250_000 })).toBe(7.5);
+    expect(chatAnswerCredits({ model: "deepseek/deepseek-v4.1-flash" })).toBe(7.5);
+    expect(chatAnswerCredits({ model: "qwen/qwen3.8-max-prime", totalTokens: 580_000 })).toBe(300);
+    expect(Object.values(CHAT_MODEL_TIERS).every((tier) => tier in PRICE_CARD.chatAnswerTiers)).toBe(true);
+  });
+
+  it("keeps every mapped chat model above its measured mean cost per answer", () => {
+    // SigNoz production traces 2026-10-13..22, [mean, p90] USD per answer.
+    const costUsd: Record<string, [number, number]> = {
+      "z-ai/glm-5.3-flash": [0.0043, 0.0092],
+      "inception/mercury-3": [0.0064, 0.018],
+      "liquid/lfm-2.5-24b-a2b": [0.0037, 0.01],
+      "anthropic/claude-haiku-5.5": [0.0091, 0.011],
+      "xiaomi/mimo-v2.6-flash": [0.0086, 0.023],
+      "deepseek/deepseek-v4.1-flash": [0.0177, 0.042],
+      "reflection/beam-1.0-501b-a23b": [0.0349, 0.085],
+      "openai/gpt-6.1-sol": [0.067, 0.163],
+      "qwen/qwen3.8-max-prime": [0.287, 0.602],
+    };
+    for (const [model, [mean, p90]] of Object.entries(costUsd)) {
+      const credits = chatAnswerCredits({ model });
+      expect(credits, model).toBeGreaterThan(mean * 100);
+      // p90 is above the tier price for beam-1.0-501b ($0.085 vs 7.5) and qwen3.8-max-prime ($0.60 vs 50);
+      // the 100k token-block guard bills part of that tail as extra answers.
+      if (!/beam-1\.0|qwen3\.8/.test(model)) expect(credits, model).toBeGreaterThan(p90 * 100);
     }
-    expect(getPlan("free").highlights).toContain(`${STARTER_CREDITS} one-time starter credits`);
   });
 
-  it("defines the published minimums and worker ceilings", () => {
-    const byId = Object.fromEntries(SERVICE_PLANS.map((plan) => [plan.id, plan]));
-    expect(byId.silver).toMatchObject({ monthlyMinimumCents: 2_000, workers: 100 });
-    expect(byId.free).toMatchObject({ monthlyMinimumCents: 0, workers: 50 });
-    expect(byId.gold).toMatchObject({ monthlyMinimumCents: 5_000, workers: 250 });
-    expect(byId.platinum).toMatchObject({ monthlyMinimumCents: 50_000, workers: 1_000 });
+  it("counts media minutes as Rich pages, rounded up per file", () => {
+    expect(mediaRichPages("audio", 60)).toBe(1);
+    expect(mediaRichPages("audio", 61)).toBe(2);
+    expect(mediaRichPages("video", 90)).toBe(6);
+    expect(mediaRichPages("video", 0)).toBe(0);
   });
 
-  it("grants at least the minimum as credits, plus the advertised bonus", () => {
-    for (const plan of SERVICE_PLANS) {
-      expect(plan.includedCreditsPerMonth).toBe(creditsForSubscriptionPayment(plan.id, plan.monthlyMinimumCents));
-      expect(plan.includedCreditsPerMonth).toBeGreaterThanOrEqual(plan.monthlyMinimumCents);
-    }
+  it("sets worker ceilings by funding", () => {
+    expect(workerSlotsFor(false)).toBe(STARTER_WORKER_SLOTS);
+    expect(workerSlotsFor(true)).toBe(FUNDED_WORKER_SLOTS);
+    expect([STARTER_WORKER_SLOTS, FUNDED_WORKER_SLOTS]).toEqual([50, 250]);
   });
 
-  it("scales prorated grants with the amount actually paid", () => {
-    expect(creditsForSubscriptionPayment("gold", 2_500)).toBe(2_750);
-    expect(creditsForSubscriptionPayment("free", 2_500)).toBe(0);
-    expect(creditsForSubscriptionPayment("silver", -100)).toBe(0);
-  });
-
-  it("falls back to free for unknown ids and resolves lookup keys", () => {
-    expect(getPlan("nope").id).toBe("free");
-    expect(getPlan(null).id).toBe("free");
-    expect(getPlanByLookupKey("docslurp_gold_monthly")?.id).toBe("gold");
-    expect(getPlanByLookupKey("docslurp_unknown")).toBeNull();
+  it("publishes the price list without hardware details", () => {
+    const prices = billingPrices();
+    expect(prices).toMatchObject({ packsCents: [2_500, 5_000, 10_000], minTopUpCents: 1_000, starterCredits: 250, privateDedicatedMonthlyUsd: 2_000 });
+    expect(prices.chatModelTiers["gpt-6.1-sol"]).toBe("premium");
+    expect(JSON.stringify(prices)).not.toMatch(/cpu|memory|gpu|vcpu|gb-hour/i);
   });
 });
 
-describe("rate card", () => {
-  it("prices one vCPU-hour, one GB-hour and one GPU-hour at list", () => {
+describe("optional document features", () => {
+  it("prices a summary per document and the others per started 10 pages", () => {
+    expect(PRICE_CARD).toMatchObject({ documentSummary: 0.5, structuredFieldsPer10Pages: 1, knowledgeGraphPer10Pages: 1.5, propositionsPer10Pages: 1 });
+    expect(featureCredits("documentSummary", 400)).toBe(0.5);
+    expect(featureCredits("structuredFields", 0)).toBe(1);
+    expect(featureCredits("structuredFields", 10)).toBe(1);
+    expect(featureCredits("structuredFields", 11)).toBe(2);
+    expect(featureCredits("knowledgeGraph", 80)).toBe(12);
+    expect(featureCredits("propositions", 25)).toBe(3);
+    expect(DOCUMENT_FEATURES.map((feature) => DOCUMENT_FEATURE_METRICS[feature])).toEqual([
+      "feature-document-summary", "feature-structured-fields", "feature-knowledge-graph", "feature-propositions",
+    ]);
+  });
+
+  it("keeps each feature above its measured cost per document (Langfuse events_full 2026-10)", () => {
+    // Summary: $0.0019 per document on gemini-3.1-flash-lite; graph: ~19 calls x $0.0031 on gemini for a ~10-page document.
+    expect(featureCredits("documentSummary", 10)).toBeGreaterThan(0.19);
+    expect(featureCredits("knowledgeGraph", 10)).toBeGreaterThan(19 * 0.0006 * 100);
+  });
+
+  it("adds enabled features to the estimate, per document, with media minutes counted as pages", () => {
+    const base = estimateIngest({ pages: 100, mix: { text: 1 }, documents: 2 });
+    const withFeatures = estimateIngest({ pages: 100, mix: { text: 1 }, documents: 2, features: { documentSummary: true, knowledgeGraph: true } });
+    expect(withFeatures.featureCredits).toEqual({ documentSummary: 1, knowledgeGraph: 2 * 1.5 * 5 });
+    expect(withFeatures.credits.breakdown.features).toBeCloseTo(16);
+    expect(withFeatures.credits.totalCredits).toBeCloseTo(base.credits.totalCredits + 16);
+    const podcast = estimateIngest({ pages: 0, mix: {}, audioMinutes: 60, documents: 1, features: { structuredFields: true } });
+    expect(podcast.featureCredits.structuredFields).toBe(6);
+  });
+});
+
+describe("billable vs internal cost events", () => {
+  it("records AI provider cost but never debits credits for it", () => {
+    const priced = priceAiUsageEvent({ metric: "page-analysis", costCents: 10, metadata: { generationId: "receipt" } });
+    expect(priced.costCents).toBe(0);
+    expect(priced.metadata).toMatchObject({ providerCostCents: 10, billable: false, costRole: "provider", generationId: "receipt" });
+    expect(priceAiUsageEvent(priced)).toEqual(priced);
+  });
+
+  it("passes billable unit charges through unchanged", () => {
+    const unit = { metric: BILLABLE_UNIT_METRICS.chatAnswer, costCents: 2.5, metadata: unitChargeMetadata({ tier: "standard" }) };
+    expect(isUnitChargeEvent(unit)).toBe(true);
+    expect(priceAiUsageEvent(unit)).toEqual(unit);
+    expect(isUnitChargeEvent({ metric: "page-analysis", metadata: unitChargeMetadata() })).toBe(false);
+    expect(isUnitChargeEvent({ metric: BILLABLE_UNIT_METRICS.search, metadata: {} })).toBe(false);
+  });
+});
+
+describe("billing forecast", () => {
+  it("projects recurring spend and days until empty from visible inputs", () => {
+    const forecast = buildBillingForecast({
+      balanceCredits: 1_000,
+      storageBytes: 4 * GB,
+      searchesLast30d: 10_000,
+      searchCreditsLast30d: 100,
+      chatAnswersLast30d: 40,
+      chatCreditsLast30d: 100,
+      fastPagesLast30d: 20_000,
+      richPagesLast30d: 100,
+      ingestCreditsLast30d: 125,
+    });
+    expect(forecast.storageCreditsPerMonth).toBeCloseTo(100);
+    expect(forecast.recurringCreditsPerMonth).toBeCloseTo(300);
+    expect(forecast.daysUntilEmpty).toBe(100);
+    expect(billingForecastSchema.parse(forecast)).toEqual(forecast);
+  });
+
+  it("has no end date without recurring spend and floors a negative balance at 0 days", () => {
+    const base = { storageBytes: 0, searchesLast30d: 0, searchCreditsLast30d: 0, chatAnswersLast30d: 0, chatCreditsLast30d: 0, fastPagesLast30d: 0, richPagesLast30d: 0, ingestCreditsLast30d: 0 };
+    expect(buildBillingForecast({ ...base, balanceCredits: 50 }).daysUntilEmpty).toBeNull();
+    expect(buildBillingForecast({ ...base, balanceCredits: -5, storageBytes: GB }).daysUntilEmpty).toBe(0);
+  });
+});
+
+describe("internal cost reference", () => {
+  it("prices resources for internal reports", () => {
     const charge = priceResources({ cpuSeconds: 3_600, memoryGbSeconds: 3_600, gpuStandardSeconds: 3_600 });
     expect(charge.breakdown.cpu).toBeCloseTo(CREDIT_RATE_CARD.cpuVcpuHour);
     expect(charge.breakdown.memory).toBeCloseTo(CREDIT_RATE_CARD.memoryGbHour);
     expect(charge.breakdown.gpu).toBeCloseTo(CREDIT_RATE_CARD.gpuStandardHour);
-  });
-
-  it("marks up AI provider cost and ignores invalid inputs", () => {
-    expect(priceResources({ aiProviderCents: 10 }).totalCredits).toBeCloseTo(12);
     expect(priceResources({ cpuSeconds: Number.NaN, aiProviderCents: -5 }).totalCredits).toBe(0);
-  });
-
-  it("charges storage daily and applies the included allowance", () => {
-    const free = dailyStorageCredits({ objectBytes: 5 * GB, indexBytes: 0.5 * GB, includedGb: 10 });
-    expect(free.totalCredits).toBe(0);
-
-    const indexHeavy = dailyStorageCredits({ objectBytes: 0, indexBytes: 100 * GB, includedGb: 1_000 });
-    expect(indexHeavy.billableIndexGb).toBeCloseTo(50);
-
-    const over = dailyStorageCredits({ objectBytes: 40 * GB, indexBytes: 2 * GB, includedGb: 10 });
-    expect(over.billableObjectGb).toBeCloseTo(30);
-    expect(over.billableIndexGb).toBeCloseTo(2);
-    const monthly = over.totalCredits * (730 / 24);
-    expect(monthly).toBeCloseTo(30 * CREDIT_RATE_CARD.objectStorageGbMonth + 2 * CREDIT_RATE_CARD.indexStorageGbMonth);
   });
 });
 
 describe("ingest estimator", () => {
-  const textbook = EXAMPLE_CORPORA.find((example) => example.id === "textbook")!;
-
-  it("gets faster with more workers and never slower", () => {
-    const times = SERVICE_PLANS.map((plan) =>
-      estimateIngest({ pages: textbook.pages, mix: textbook.mix, plan: plan.id }).wallSeconds,
-    );
-    for (let index = 1; index < times.length; index += 1) {
-      expect(times[index]).toBeLessThanOrEqual(times[index - 1]!);
-    }
+  it("prices with the price card: text pages Fast, scans Rich", () => {
+    const text = estimateIngest({ pages: 1_000, mix: { text: 1 }, documents: 1 });
+    expect(text.fastPages).toBe(1_000);
+    expect(text.credits.totalCredits).toBeCloseTo(5);
+    const scanned = estimateIngest({ pages: 1_000, mix: { scanned: 1 }, documents: 1 });
+    expect(scanned.richPages).toBe(1_000);
+    expect(scanned.credits.totalCredits).toBeCloseTo(250);
   });
 
-  it("charges the same credits regardless of plan", () => {
-    const silver = estimateIngest({ pages: textbook.pages, mix: textbook.mix, plan: "silver" });
-    const platinum = estimateIngest({ pages: textbook.pages, mix: textbook.mix, plan: "platinum" });
-    expect(platinum.credits.totalCredits).toBeCloseTo(silver.credits.totalCredits);
+  it("charges small files only for their pages (no per-file minimum) and prices media minutes", () => {
+    const tiny = estimateIngest({ pages: 10, mix: { text: 1 }, documents: 10 });
+    expect(tiny.credits.totalCredits).toBeCloseTo(0.05);
+    expect("perFileMinimum" in PRICE_CARD).toBe(false);
+    const podcast = estimateIngest({ pages: 0, mix: {}, audioMinutes: 60, documents: 1 });
+    expect(podcast.mediaRichPages).toBe(60);
+    expect(podcast.credits.totalCredits).toBeCloseTo(15);
   });
 
-  it("prices own-GPU OCR pages per page at half the hosted list and exposes the struck-through list", () => {
-    const scanned = estimateIngest({ pages: 1_000, mix: { scanned: 1 }, plan: "silver", profile: "standard" });
-    const page = selfHostedPageCredits();
-    expect(scanned.selfHosted.pages).toBe(1_000);
-    expect(scanned.credits.breakdown.selfHosted).toBeCloseTo(1_000 * page.billed, 9);
-    expect(scanned.selfHosted.listCredits).toBeCloseTo(2 * scanned.selfHosted.billedCredits, 9);
-    expect(scanned.credits.breakdown.gpu).toBe(0);
-    const text = estimateIngest({ pages: 1_000, mix: { text: 1 }, plan: "silver", profile: "standard" });
-    expect(text.selfHosted.pages).toBe(0);
+  it("gets faster with more workers and never slower, at the same price", () => {
+    const starter = estimateIngest({ pages: 50_000, mix: { text: 1 }, documents: 100, workerSlots: STARTER_WORKER_SLOTS });
+    const funded = estimateIngest({ pages: 50_000, mix: { text: 1 }, documents: 100 });
+    expect(funded.workers).toBe(FUNDED_WORKER_SLOTS);
+    expect(funded.wallSeconds).toBeLessThan(starter.wallSeconds);
+    expect(funded.credits.totalCredits).toBeCloseTo(starter.credits.totalCredits);
   });
 
   it("caps a single document at the per-run fan-out", () => {
-    const estimate = estimateIngest({ pages: 10_000, mix: { text: 1 }, plan: "platinum", documents: 1 });
-    expect(estimate.effectiveParallelism).toBe(MAX_PAGE_FANOUT_PER_RUN);
-    const batch = estimateIngest({ pages: 10_000, mix: { text: 1 }, plan: "platinum", documents: 20 });
-    expect(batch.effectiveParallelism).toBe(1_000);
+    expect(estimateIngest({ pages: 10_000, mix: { text: 1 }, documents: 1 }).effectiveParallelism).toBe(MAX_PAGE_FANOUT_PER_RUN);
+    expect(estimateIngest({ pages: 10_000, mix: { text: 1 }, documents: 20 }).effectiveParallelism).toBe(FUNDED_WORKER_SLOTS);
   });
 
-  it("orders pipeline profiles by cost", () => {
+  it("charges deep profiles more for complex layouts", () => {
+    const mix = { text: 0.6, complex: 0.3, scanned: 0.1 };
     const [fast, standard, deep] = (["fast", "standard", "deep"] as const).map((profile) =>
-      estimateIngest({ pages: textbook.pages, mix: textbook.mix, plan: "gold", profile }).credits.totalCredits,
+      estimateIngest({ pages: 1_000, mix, profile }).credits.totalCredits,
     );
-    expect(fast).toBeLessThan(standard!);
+    expect(fast).toBeLessThanOrEqual(standard!);
     expect(standard).toBeLessThan(deep!);
   });
 
   it("handles empty input", () => {
-    const estimate = estimateIngest({ pages: 0, mix: {}, plan: "free" });
-    expect(estimate).toMatchObject({ wallSeconds: 0, pagesPerMinute: 0, pagesPerDollar: 0 });
+    expect(estimateIngest({ pages: 0, mix: {} })).toMatchObject({ wallSeconds: 0, pagesPerMinute: 0, pagesPerDollar: 0 });
+  });
+
+  it("prices every example corpus and labels its basis", () => {
+    for (const corpus of EXAMPLE_CORPORA) {
+      const estimate = estimateIngest({ pages: corpus.pages, mix: corpus.mix, documents: corpus.documents, audioMinutes: corpus.audioMinutes });
+      expect(estimate.credits.totalCredits, corpus.id).toBeGreaterThan(0);
+      expect(["measured", "official", "estimate"]).toContain(corpus.basis);
+    }
+    const caselaw = EXAMPLE_CORPORA.find((corpus) => corpus.id === "caselaw-access-project")!;
+    expect(estimateIngest({ pages: caselaw.pages, mix: caselaw.mix, documents: caselaw.documents }).richPages).toBe(caselaw.pages);
   });
 });
 
-describe("auto-recharge settings", () => {
-  it("requires the monthly limit to cover one recharge", () => {
-    expect(autoRechargeSettingsSchema.safeParse({ enabled: true, thresholdCredits: 500, amountCents: 2_000, monthlyLimitCents: 1_000 }).success).toBe(false);
-    expect(autoRechargeSettingsSchema.safeParse({ enabled: true, thresholdCredits: 500, amountCents: 2_000, monthlyLimitCents: 10_000 }).success).toBe(true);
+describe("auto top-up settings", () => {
+  it("requires a monthly cap covering one top-up and at least the minimum top-up", () => {
+    expect(autoTopUpSettingsSchema.safeParse({ enabled: true, thresholdCredits: 500, amountCents: 2_000, monthlyLimitCents: 1_000 }).success).toBe(false);
+    expect(autoTopUpSettingsSchema.safeParse({ enabled: true, thresholdCredits: 500, amountCents: 500, monthlyLimitCents: 10_000 }).success).toBe(false);
+    expect(autoTopUpSettingsSchema.safeParse({ enabled: true, thresholdCredits: 500, amountCents: 2_000 }).success).toBe(false);
+    expect(autoTopUpSettingsSchema.safeParse({ enabled: true, thresholdCredits: 500, amountCents: 2_000, monthlyLimitCents: 10_000 }).success).toBe(true);
   });
 });

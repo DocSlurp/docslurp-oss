@@ -16,6 +16,7 @@ import { assertCanSpend, isSpendBlockedError, type SpendBlockedError } from "../
 import { upgradeLinkHeader, upgradeLinksFor } from "../lib/upgrade-links.js";
 import { chatWorkspace, workspaceChatDisabledBody } from "../services/workspace-chat.js";
 import { listWorkspaces } from "../services/workspaces.js";
+import { WorkspaceAccessError } from "../services/default-workspace.js";
 import { normalizeExtractedText, type WorkspaceChatResponse, type WorkspaceChatTurn } from "@docslurp/shared";
 import { authenticatedByRoute } from "../lib/route-auth.js";
 import { env } from "../config.js";
@@ -62,9 +63,9 @@ function errorBody(message: string, type = "invalid_request_error", code: string
   return { error: { message, type, param, code } };
 }
 
-/** OpenAI-shaped 402 for a blocked spend; `error.links` says where to buy credits or upgrade. */
+/** OpenAI-shaped 402 for a blocked spend; `error.links` says where to buy credits or turn on auto top-up. */
 function spendBlockedBody(c: Context, error: SpendBlockedError) {
-  const links = upgradeLinksFor(error.code);
+  const links = upgradeLinksFor(error.code, { autoTopUpOn: error.autoTopUpOn });
   const header = upgradeLinkHeader(links);
   if (header) c.header("Link", header);
   const body = errorBody(reportPublicError(error), "service_unavailable", error.code);
@@ -146,8 +147,12 @@ export const chatCompletionsRoutes = new Hono()
     }
     const input = parsed.data;
     const actor = getRequestActor(c);
-    const workspaceId = await resolveActorWorkspaceId(actor, input.model.slice("workspace:".length));
-    if (!await loadActorScopedWorkspace(workspaceId, actor)) {
+    // The same resolver as every `workspace` field: UUID, current or former slug, or "default".
+    const workspaceId = await resolveActorWorkspaceId(actor, input.model.slice("workspace:".length)).catch((error: unknown) => {
+      if (error instanceof WorkspaceAccessError) return null;
+      throw error;
+    });
+    if (!workspaceId || !await loadActorScopedWorkspace(workspaceId, actor)) {
       return c.json(errorBody("Workspace model not found", "invalid_request_error", "model_not_found", "model"), 404);
     }
     const chatDisabled = await workspaceChatDisabledBody(workspaceId, actor.userId);

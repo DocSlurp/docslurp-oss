@@ -45,8 +45,8 @@ describe("configured text models reach worker stages and usage records", () => {
     const state = {
       run: { id: "run", pipeline: normalizePipelineFeatures({ summarize: true }) },
       documents: Array.from({ length: 1000 }, (_, index) => ({ id: `doc-${index}`, userId: "user", filename: "short.pdf", pageCount: 2 })),
-      docConcurrency: 1000, artifactLedger: { readDocument: () => undefined },
-      usageLedger: { record }, pendingPerformance: [],
+      docConcurrency: 1000, artifactLedger: { readDocument: () => undefined, read: () => undefined, record: () => undefined },
+      usageLedger: { enqueue: () => null, record }, pendingPerformance: [],
     } as unknown as WorkflowState;
     const storage = { putJson: vi.fn(), uri: (key: string) => key } as unknown as ArtifactStore;
     await new DocumentSummaryStage({} as CommandRunner, storage, { ...fromEnv(), openRouterApiKey: "test" }).run(state);
@@ -58,8 +58,8 @@ describe("configured text models reach worker stages and usage records", () => {
     const state = {
       run: { id: "run", spentCents: 100, pipeline: normalizePipelineFeatures({ summarize: true, maxCostCents: 100 }) },
       documents: [{ id: "doc", userId: "user", filename: "large.pdf" }],
-      docConcurrency: 1, artifactLedger: { readDocument: () => undefined },
-      usageLedger: { record, pendingBillableCents: 0 }, pendingPerformance: [],
+      docConcurrency: 1, artifactLedger: { readDocument: () => undefined, read: () => undefined, record: () => undefined },
+      usageLedger: { enqueue: () => null, record, pendingBillableCents: 0 }, pendingPerformance: [],
     } as unknown as WorkflowState;
     const storage = { putJson: vi.fn(), uri: (key: string) => key } as unknown as ArtifactStore;
     const stage = new DocumentSummaryStage({} as CommandRunner, storage, { ...fromEnv(), openRouterApiKey: "test" });
@@ -77,8 +77,8 @@ describe("configured text models reach worker stages and usage records", () => {
     const state = {
       run: { id: "run", pipeline: normalizePipelineFeatures({ summarize: false }) },
       documents: [{ id: "document", userId: "user", filename: "document", pageCount: 100_000 }],
-      docConcurrency: 1, artifactLedger: { readDocument: () => undefined },
-      usageLedger: { record }, pendingPerformance: [],
+      docConcurrency: 1, artifactLedger: { readDocument: () => undefined, read: () => undefined, record: () => undefined },
+      usageLedger: { enqueue: () => null, record }, pendingPerformance: [],
     } as unknown as WorkflowState;
     const putJson = vi.fn();
     const storage = { putJson, uri: (key: string) => key } as unknown as ArtifactStore;
@@ -108,8 +108,8 @@ describe("configured text models reach worker stages and usage records", () => {
       run: { id: "run", pipeline: normalizePipelineFeatures({ summarize: true,
         textGeneration: { reasoningEfforts: { "document-summary": "high" } } }) },
       documents: [{ id: "document", userId: "user", filename: "document" }],
-      docConcurrency: 1, artifactLedger: { readDocument: () => undefined },
-      usageLedger: { record }, pendingPerformance: [],
+      docConcurrency: 1, artifactLedger: { readDocument: () => undefined, read: () => undefined, record: () => undefined },
+      usageLedger: { enqueue: () => null, record }, pendingPerformance: [],
     } as unknown as WorkflowState;
     const putJson = vi.fn();
     const stage = new DocumentSummaryStage({} as CommandRunner,
@@ -127,8 +127,8 @@ describe("configured text models reach worker stages and usage records", () => {
     const state = {
       run: { id: "run", pipeline: normalizePipelineFeatures({ summarize: true }) },
       documents: [{ id: "document", userId: "user", filename: "document" }],
-      docConcurrency: 1, artifactLedger: { readDocument: () => undefined },
-      usageLedger: { record }, pendingPerformance: [],
+      docConcurrency: 1, artifactLedger: { readDocument: () => undefined, read: () => undefined, record: () => undefined },
+      usageLedger: { enqueue: () => null, record }, pendingPerformance: [],
     } as unknown as WorkflowState;
     const putJson = vi.fn();
     await new DocumentSummaryStage({} as CommandRunner,
@@ -146,8 +146,8 @@ describe("configured text models reach worker stages and usage records", () => {
       run: { id: "run", pipeline: normalizePipelineFeatures({ summarize: true, propositionIndex: true,
         textGeneration: { model: "vendor/workspace", models: { [operation]: "vendor/task" } } }) },
       documents: [{ id: "document", userId: "user", filename: "document" }],
-      docConcurrency: 1, artifactLedger: { readDocument: () => undefined },
-      usageLedger: { record }, pendingPerformance: [],
+      docConcurrency: 1, artifactLedger: { readDocument: () => undefined, read: () => undefined, record: () => undefined },
+      usageLedger: { enqueue: () => null, record }, pendingPerformance: [],
     } as unknown as WorkflowState;
     const storage = { putJson: vi.fn(), uri: (key: string) => key } as unknown as ArtifactStore;
     const stage = new StageClass({} as CommandRunner, storage, { ...fromEnv(), openRouterApiKey: "test", textGenerationModel: "vendor/deployment" });

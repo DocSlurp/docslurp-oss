@@ -57,7 +57,7 @@ import { listWorkspaceTags } from "../services/workspace-tags.js";
 import { getWorkspaceState } from "../services/workspace-state.js";
 import { applyWorkspaceChange, billingState, ConfigConflictError, estimateWorkspaceChange, planWorkspaceChange } from "../services/config-change.js";
 import { mergeWorkspaceSearchSettings } from "../services/search-controls.js";
-import { analyzeSearchSettingsChange, getPlan, isBillingEnforced } from "@docslurp/shared";
+import { analyzeSearchSettingsChange } from "@docslurp/shared";
 import { sql } from "../db.js";
 import {
   applyIngestRecommendation,
@@ -1372,15 +1372,6 @@ export const workspacesRoutes = new Hono()
       }
 
       const input = c.req.valid("json");
-      if (typeof input.retainDocumentVersions === "number" && isBillingEnforced()) {
-        const [org] = await sql<{ plan_id: string | null }[]>`
-          select o.plan_id from workspaces w join organizations o on o.id = w.org_id where w.id = ${workspaceId}
-        `;
-        if (org && getPlan(org.plan_id).id === "free") {
-          return apiErrorResponse(c, 402, "plan_not_entitled", "Keeping extra document versions needs a paid plan.", { category: "upgrade_required" });
-        }
-      }
-
       let applied: Awaited<ReturnType<typeof applyWorkspaceChange>>;
       try {
         const plan = await planWorkspaceChange({

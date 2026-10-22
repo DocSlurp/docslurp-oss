@@ -160,8 +160,14 @@ export function buildPricedAiUsageLedgerEvent(
   };
 }
 
+/**
+ * Whether an event is worth persisting: tokens, a customer charge, or provider
+ * cost (AI events bill 0 credits but keep `metadata.providerCostCents`, e.g.
+ * duration-priced transcription with no token counts).
+ */
 export function hasAiUsageLedgerTokens(event: AiUsageLedgerEvent): boolean {
-  return event.inputTokens !== 0 || event.outputTokens !== 0 || event.costCents > 0;
+  return event.inputTokens !== 0 || event.outputTokens !== 0 || event.costCents > 0
+    || Number(event.metadata?.providerCostCents ?? 0) > 0;
 }
 
 export function calculateAiUsageCostCents(

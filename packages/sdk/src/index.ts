@@ -116,7 +116,8 @@ export type UpdateWorkspaceInput = JsonObject & {
 };
 export type WorkspaceUpdateResponse = { workspace: WorkspaceRecord; impact?: ConfigChangeImpact; job?: JobStatus } & JsonObject;
 
-export type UploadEstimateInput = { files: Array<{ name: string; size: number; pages?: number }>; workspaceId?: string };
+/** `workspace`: ID, slug or name (see {@link DocSlurpClientOptions.workspace}); omitted: the client workspace. */
+export type UploadEstimateInput = { files: Array<{ name: string; size: number; pages?: number }>; workspace?: string };
 
 /** Counts across a job's runs. */
 export type JobProgress = { documents: number; documentsTotal: number; pages: number; pagesTotal: number };
@@ -216,7 +217,7 @@ export type SearchResult = JsonObject & {
 };
 
 /** Reserved workspace ID for the organization's default workspace. */
-export const DEFAULT_WORKSPACE_ID = "default";
+export const DEFAULT_WORKSPACE = "default";
 
 export type DocSlurpClientOptions = {
   /** Defaults to DOCSLURP_API_KEY in server environments. Use an empty string for cookie sessions. */
@@ -224,10 +225,13 @@ export type DocSlurpClientOptions = {
   /** Service origin. Defaults to DOCSLURP_URL, then https://docslurp.io. */
   apiUrl?: string;
   /**
-   * Workspace for ingestion, search and chat. Defaults to DOCSLURP_WORKSPACE_ID
-   * on the server, then "default": the organization's default workspace.
+   * Workspace for ingestion, search and chat: an ID, slug or name. Names match
+   * by slug, so "Legal Contracts" and "legal-contracts" are the same workspace;
+   * an upload into a name that matches nothing creates that workspace. Defaults
+   * to DOCSLURP_WORKSPACE on the server, then "default": the organization's
+   * default workspace.
    */
-  workspaceId?: string;
+  workspace?: string;
   fetch?: DocSlurpFetch;
   /** Total time allowed for one request, including retries. Default: 30 seconds. */
   timeoutMs?: number;
@@ -275,14 +279,13 @@ export type UploadOptions = RequestOptions & {
   directUpload?: "auto" | boolean;
   filename?: string;
   idempotencyKey?: string;
-  /** Create a fresh self-titled workspace instead of using the default one. */
+  /** Without `workspace`: create a fresh self-titled workspace instead of using the client workspace. */
   newWorkspace?: boolean;
   orgId?: string;
-  /** Without workspaceId, creates a new workspace from this template (implies newWorkspace). */
+  /** Template for a workspace this upload creates; without `workspace`, creates a new self-titled one from it. */
   templateKey?: WorkspaceTemplateKey;
-  workspaceId?: string;
-  /** Without workspaceId, creates a new workspace with this name (implies newWorkspace). */
-  workspaceName?: string;
+  /** Workspace ID, slug or name. A name that matches no workspace creates one with that name. */
+  workspace?: string;
 };
 
 export type UploadInput = {
@@ -295,8 +298,8 @@ export type UploadInput = {
   newWorkspace?: boolean;
   orgId?: string;
   templateKey?: WorkspaceTemplateKey;
-  workspaceId?: string;
-  workspaceName?: string;
+  /** Workspace ID, slug or name. A name that matches no workspace creates one with that name. */
+  workspace?: string;
 };
 
 export type RejectedUpload = {
@@ -328,8 +331,8 @@ export type UploadUrlsInput = {
   templateKey?: WorkspaceTemplateKey;
   /** Each URL's canonical ID defaults to the URL; pass an object to map it elsewhere (e.g. "/products"). */
   urls: Array<string | { url: string; canonicalId?: string }>;
-  workspaceId?: string;
-  workspaceName?: string;
+  /** Workspace ID, slug or name. A name that matches no workspace creates one with that name. */
+  workspace?: string;
 };
 
 /** @deprecated Use UploadUrlsInput. */
@@ -347,7 +350,8 @@ export type SearchInput = {
   minScore?: number;
   q: string;
   tags?: string;
-  workspaceId?: string;
+  /** Workspace ID, slug or name; omitted: the client workspace. */
+  workspace?: string;
 };
 
 /** Await the response metadata or iterate its hits; both share one request. */
@@ -404,7 +408,8 @@ export function formatSearchContext(response: SearchResponse): string {
 export type ChatInput = {
   q: string;
   sessionId?: string;
-  workspaceId?: string;
+  /** Workspace ID, slug or name; omitted: the client workspace. */
+  workspace?: string;
   /**
    * Chat model for this request. Omitted: the default. An unavailable model is
    * refused with HTTP 400 `model_not_allowed`, never replaced by the default.
@@ -440,7 +445,8 @@ export type ChatStreamEvent =
   | { event: "done"; data: { id: string; sessionId: string; searchSessionId: string | null } };
 
 export type ListDocumentsInput = {
-  workspaceId?: string;
+  /** Workspace ID, slug or name; omitted: the client workspace. */
+  workspace?: string;
   runId?: string;
   /** Comma-separated tags. */
   tags?: string;
@@ -571,11 +577,11 @@ function deadline(timeoutMs: number, external?: AbortSignal) {
 
 /**
  * Where to lift a limit, from `error.details.links` on 402 and 429 responses of
- * hosted DocSlurp (self-hosted servers send none): `billing` (plan, credits,
- * budgets), `buyCredits`, `upgrade` (plans), `apiKeys` (a key's own limits) and
- * `docs` for the limit.
+ * hosted DocSlurp (self-hosted servers send none): `billing` (credits,
+ * forecast, budgets), `buyCredits`, `autoTopUp` (only while the org's auto
+ * top-up is off), `apiKeys` (a key's own limits) and `docs` for the limit.
  */
-export type DocSlurpErrorLinks = Partial<Record<"billing" | "buyCredits" | "upgrade" | "apiKeys" | "docs", string>>;
+export type DocSlurpErrorLinks = Partial<Record<"billing" | "buyCredits" | "autoTopUp" | "apiKeys" | "docs", string>>;
 
 export class DocSlurpApiError extends Error {
   readonly body: unknown;
@@ -584,7 +590,7 @@ export class DocSlurpApiError extends Error {
   readonly code?: string;
   /** Server correlation id (`error.requestId`) to quote in support requests. */
   readonly requestId?: string;
-  /** Upgrade, billing and docs URLs for credit, budget and rate-limit errors. */
+  /** Buy-credits, auto top-up, billing and docs URLs for credit, budget and rate-limit errors. */
   readonly links?: DocSlurpErrorLinks;
 
   constructor(message: string, status: number, body: unknown) {
@@ -599,7 +605,7 @@ export class DocSlurpApiError extends Error {
   }
 }
 
-const ERROR_LINK_NAMES = ["billing", "buyCredits", "upgrade", "apiKeys", "docs"] as const;
+const ERROR_LINK_NAMES = ["billing", "buyCredits", "autoTopUp", "apiKeys", "docs"] as const;
 
 function errorLinks(value: unknown): DocSlurpErrorLinks | undefined {
   if (!value || typeof value !== "object") return undefined;
@@ -741,7 +747,7 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
   const apiUrl = normalizeApiUrl(options.apiUrl ?? (env?.DOCSLURP_URL?.trim() || "https://docslurp.io"));
   const apiKey = options.apiKey ?? env?.DOCSLURP_API_KEY;
   assertBrowserSafeApiKey(apiKey);
-  const workspaceId = options.workspaceId?.trim() || env?.DOCSLURP_WORKSPACE_ID?.trim() || DEFAULT_WORKSPACE_ID;
+  const clientWorkspace = options.workspace?.trim() || env?.DOCSLURP_WORKSPACE?.trim() || DEFAULT_WORKSPACE;
   const fetchImpl = options.fetch ?? fetch;
 
   const defaultTimeoutMs = positiveDuration(options.timeoutMs ?? 30_000, "timeoutMs");
@@ -950,12 +956,11 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
   function estimateAt(path: string, body: unknown, requestOptions?: RequestOptions): Promise<EstimateResponse> {
     return request<EstimateResponse>(path, jsonRequest("POST", body ?? {}), requestOptions);
   }
-  const wsPath = (id: string | undefined) => `/v1/workspaces/${encodeURIComponent(id?.trim() || workspaceId)}`;
+  const wsPath = (ref: string | undefined) => `/v1/workspaces/${encodeURIComponent(ref?.trim() || clientWorkspace)}`;
 
   /** What switching a workspace to `mode` would cost. */
-  function estimateIndexingMode(mode: IndexingMode, input: { workspaceId?: string } = {}, requestOptions?: RequestOptions): Promise<{ pages: number; estimatedCredits: number | null; billing?: "enforced" | "disabled"; job: "none" | "full-index" | "build-maps" | "embed-pages" }> {
-    const id = input.workspaceId?.trim() || workspaceId;
-    return request(`/v1/workspaces/${encodeURIComponent(id)}/indexing-mode/estimate`, jsonRequest("POST", { mode }), requestOptions);
+  function estimateIndexingMode(mode: IndexingMode, input: { workspace?: string } = {}, requestOptions?: RequestOptions): Promise<{ pages: number; estimatedCredits: number | null; billing?: "enforced" | "disabled"; job: "none" | "full-index" | "build-maps" | "embed-pages" }> {
+    return request(`${wsPath(input.workspace)}/indexing-mode/estimate`, jsonRequest("POST", { mode }), requestOptions);
   }
 
   async function getRunProgress(runId: string, options?: RequestOptions): Promise<RunProgressSnapshot> {
@@ -1043,6 +1048,10 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
       if (bound.signal.aborted && bound.signal.reason instanceof DocSlurpTimeoutError) {
         throw new DocSlurpTimeoutError(`Stopped watching run ${runId} after ${timeout}ms; it may still be queued or processing`, last?.run);
       }
+      // The request's remaining-budget timer can fire before the outer deadline.
+      if (error instanceof DocSlurpTimeoutError && !error.run) {
+        throw new DocSlurpTimeoutError(error.message, last?.run);
+      }
       throw error;
     } finally {
       clearTimeout(idleTimer);
@@ -1070,6 +1079,10 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
       if (bound.signal.aborted && bound.signal.reason instanceof DocSlurpTimeoutError) {
         throw new DocSlurpTimeoutError(`Run ${runId} did not complete within ${timeoutMs}ms; it may still be queued or processing`, run);
       }
+      // The request's remaining-budget timer can fire before the outer deadline.
+      if (error instanceof DocSlurpTimeoutError && !error.run) {
+        throw new DocSlurpTimeoutError(error.message, run);
+      }
       throw error;
     } finally {
       bound.dispose();
@@ -1077,26 +1090,26 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
   }
 
   /**
-   * Where an upload or URL ingest lands. An explicit per-call workspaceId wins.
-   * Otherwise newWorkspace, a workspaceName or a templateKey asks the server to
-   * create a workspace (the name and template would be ignored by an existing
-   * one), and anything else goes to the client default.
+   * Where an upload or URL ingest lands. An explicit per-call workspace wins
+   * (the server finds it by ID, slug or name, or creates it from the name).
+   * Otherwise newWorkspace or a templateKey asks the server for a new
+   * self-titled workspace, and anything else goes to the client workspace.
    */
-  function intakeTarget(input: { newWorkspace?: boolean; templateKey?: string; workspaceId?: string; workspaceName?: string }): { newWorkspace: boolean; workspaceId?: string } {
-    const explicit = input.workspaceId?.trim();
-    if (explicit) return { newWorkspace: Boolean(input.newWorkspace), workspaceId: explicit };
-    if (input.newWorkspace || input.workspaceName?.trim() || input.templateKey) return { newWorkspace: true };
-    return { newWorkspace: false, workspaceId };
+  function intakeTarget(input: { newWorkspace?: boolean; templateKey?: string; workspace?: string }): { newWorkspace: boolean; workspace?: string } {
+    const explicit = input.workspace?.trim();
+    if (explicit) return { newWorkspace: false, workspace: explicit };
+    if (input.newWorkspace || input.templateKey) return { newWorkspace: true };
+    return { newWorkspace: false, workspace: clientWorkspace };
   }
 
-  /** Per-call workspaceId, else the client default ("default" unless configured). */
-  function inWorkspace<T extends { workspaceId?: string }>(input: T): T {
-    return { ...input, workspaceId: input.workspaceId?.trim() || workspaceId };
+  /** Per-call workspace, else the client workspace ("default" unless configured). */
+  function inWorkspace<T extends { workspace?: string }>(input: T): T {
+    return { ...input, workspace: input.workspace?.trim() || clientWorkspace };
   }
 
   function uploadUrls(input: UploadUrlsInput, options?: RequestOptions): Promise<UploadResponse> {
-    const { idempotencyKey, urls, workspaceName, orgId, templateKey } = input;
-    const body = { urls, workspaceName, orgId, templateKey, tags: input.tags, ...intakeTarget(input) };
+    const { idempotencyKey, urls, orgId, templateKey } = input;
+    const body = { urls, orgId, templateKey, tags: input.tags, ...intakeTarget(input) };
     return request("/v1/uploads/url", {
       ...jsonRequest("POST", body),
       headers: { "Content-Type": "application/json", ...(idempotencyKey ? { "Idempotency-Key": idempotencyKey } : {}) },
@@ -1128,11 +1141,10 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
     if (metadata.orgId) fields.orgId = metadata.orgId;
     if (metadata.tags) fields.tags = JSON.stringify(metadata.tags);
     const target = intakeTarget(metadata);
-    if (target.workspaceId) fields.workspaceId = target.workspaceId;
+    if (target.workspace) fields.workspace = target.workspace;
     if (target.newWorkspace) fields.newWorkspace = "true";
     if (options.canonicalId) fields.canonicalId = options.canonicalId;
     if (options.path) fields.path = options.path;
-    if (metadata.workspaceName) fields.workspaceName = metadata.workspaceName;
     if (metadata.templateKey) fields.templateKey = metadata.templateKey;
     if (metadata.indexingMode) fields.indexingMode = metadata.indexingMode;
     const headers = new Headers();
@@ -1194,15 +1206,14 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
     canonicalIds: Array<string | null>;
     paths: string[];
     metadata: UploadOptions | (UploadInput & UploadOptions);
-    target: { newWorkspace: boolean; workspaceId?: string };
+    target: { newWorkspace: boolean; workspace?: string };
   }, options: UploadOptions): Promise<UploadResponse> {
     const { metadata } = args;
     const session = await request<{ sessionId: string; files: DirectUploadDescriptor[] }>("/v1/uploads/direct/sessions", jsonRequest("POST", {
       ...(metadata.orgId ? { orgId: metadata.orgId } : {}),
       ...(metadata.tags ? { tags: metadata.tags } : {}),
-      ...(args.target.workspaceId ? { workspaceId: args.target.workspaceId } : {}),
+      ...(args.target.workspace ? { workspace: args.target.workspace } : {}),
       ...(args.target.newWorkspace ? { newWorkspace: true } : {}),
-      ...(metadata.workspaceName ? { workspaceName: metadata.workspaceName } : {}),
       ...(metadata.templateKey ? { templateKey: metadata.templateKey } : {}),
       files: args.blobs.map((blob, index) => ({
         filename: args.names[index],
@@ -1276,33 +1287,33 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
     reprocessEstimate(runId: string, input: JsonObject = {}, requestOptions?: RequestOptions): Promise<EstimateResponse> {
       return estimateAt(`/v1/runs/${encodeURIComponent(runId)}/reprocess/estimate`, input, requestOptions);
     },
-    /** Cost of fully indexing one document (`{ documentId }`) or a workspace (`{ workspaceId?, documentIds? }`). */
-    fullIndexEstimate(input: { documentId: string } | { workspaceId?: string; documentIds?: string[] } = {}, requestOptions?: RequestOptions): Promise<EstimateResponse> {
+    /** Cost of fully indexing one document (`{ documentId }`) or a workspace (`{ workspace?, documentIds? }`). */
+    fullIndexEstimate(input: { documentId: string } | { workspace?: string; documentIds?: string[] } = {}, requestOptions?: RequestOptions): Promise<EstimateResponse> {
       if ("documentId" in input) return estimateAt(`/v1/documents/${encodeURIComponent(input.documentId)}/full-index/estimate`, {}, requestOptions);
-      return estimateAt(`${wsPath(input.workspaceId)}/full-index/estimate`, { documentIds: input.documentIds }, requestOptions);
+      return estimateAt(`${wsPath(input.workspace)}/full-index/estimate`, { documentIds: input.documentIds }, requestOptions);
     },
-    rebuildGraphEstimate(input: { workspaceId?: string } & JsonObject = {}, requestOptions?: RequestOptions): Promise<EstimateResponse> {
-      const { workspaceId: id, ...body } = input;
-      return estimateAt(`${wsPath(id)}/graph/jobs/estimate`, body, requestOptions);
+    rebuildGraphEstimate(input: { workspace?: string } & JsonObject = {}, requestOptions?: RequestOptions): Promise<EstimateResponse> {
+      const { workspace, ...body } = input;
+      return estimateAt(`${wsPath(typeof workspace === "string" ? workspace : undefined)}/graph/jobs/estimate`, body, requestOptions);
     },
     /** Cost of an upload before sending any bytes. */
     uploadEstimate(input: UploadEstimateInput, requestOptions?: RequestOptions): Promise<EstimateResponse> {
-      return estimateAt("/v1/uploads/estimate", input, requestOptions);
+      return estimateAt("/v1/uploads/estimate", inWorkspace(input), requestOptions);
     },
     /**
      * Sets how many versions of each document are kept (1–100; null clears the override).
-     * Pass `workspaceId` for a workspace override, `orgId` for the organization default.
+     * Pass `workspace` for a workspace override, `orgId` for the organization default.
      */
-    setRetention(target: { orgId: string } | { workspaceId?: string }, retainDocumentVersions: number | null, requestOptions?: RequestOptions): Promise<JsonObject> {
+    setRetention(target: { orgId: string } | { workspace?: string }, retainDocumentVersions: number | null, requestOptions?: RequestOptions): Promise<JsonObject> {
       if (retainDocumentVersions !== null && (!Number.isInteger(retainDocumentVersions) || retainDocumentVersions < 1 || retainDocumentVersions > 100)) {
         throw new RangeError("retainDocumentVersions must be an integer from 1 to 100 (or null to clear).");
       }
-      const path = "orgId" in target ? `/v1/organizations/${encodeURIComponent(target.orgId)}` : wsPath(target.workspaceId);
+      const path = "orgId" in target ? `/v1/organizations/${encodeURIComponent(target.orgId)}` : wsPath(target.workspace);
       return request<JsonObject>(path, jsonRequest("PATCH", { retainDocumentVersions }), requestOptions);
     },
 
-    getWorkspaceState(id: string | undefined = workspaceId, options: WorkspaceStateOptions = {}): Promise<WorkspaceState> {
-      if (!id?.trim()) throw new Error("Set DOCSLURP_WORKSPACE_ID or pass workspaceId for workspace state.");
+    getWorkspaceState(id: string | undefined = clientWorkspace, options: WorkspaceStateOptions = {}): Promise<WorkspaceState> {
+      if (!id?.trim()) throw new Error("Set DOCSLURP_WORKSPACE or pass a workspace for workspace state.");
       const hours = options.recentWindowHours ?? 24;
       if (!Number.isInteger(hours) || hours < 1 || hours > 720) throw new RangeError("recentWindowHours must be an integer from 1 to 720");
       return request<WorkspaceState>(`/v1/workspaces/${encodeURIComponent(id)}/state?recentWindowHours=${hours}`, {}, options, true);
@@ -1313,7 +1324,7 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
      * cost for the workspace (default workspace when none is configured), plus
      * the settings that shaped it and recommendations. No model call.
      */
-    getIngestReport(id: string | undefined = workspaceId, options: IngestReportOptions = {}): Promise<IngestReport> {
+    getIngestReport(id: string | undefined = clientWorkspace, options: IngestReportOptions = {}): Promise<IngestReport> {
       const params = new URLSearchParams();
       if (options.runId) params.set("runId", options.runId);
       if (options.documentIds?.length) {
@@ -1388,7 +1399,7 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
      */
     async *chatStream(input: ChatInput, requestOptions: RequestOptions = {}): AsyncGenerator<ChatStreamEvent> {
       const target = inWorkspace(input);
-      const params = new URLSearchParams({ q: target.q, workspaceId: target.workspaceId ?? workspaceId });
+      const params = new URLSearchParams({ q: target.q, workspace: target.workspace ?? clientWorkspace });
       if (target.sessionId) params.set("sessionId", target.sessionId);
       if (target.model) params.set("model", target.model);
       let completed = false;
@@ -1407,7 +1418,7 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
 
     /** Documents in a workspace (the client default unless one is passed), newest first. */
     async listDocuments(input: ListDocumentsInput = {}, requestOptions?: RequestOptions): Promise<DocumentRecord[]> {
-      const params = new URLSearchParams({ workspaceId: input.workspaceId?.trim() || workspaceId });
+      const params = new URLSearchParams({ workspace: input.workspace?.trim() || clientWorkspace });
       if (input.runId) params.set("runId", input.runId);
       if (input.tags) params.set("tags", input.tags);
       return (await request<{ documents: DocumentRecord[] }>(`/v1/documents?${params.toString()}`, {}, requestOptions, true)).documents;
@@ -1432,7 +1443,7 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
     uploadUrls,
     /** @deprecated Use upload({ urls }) or uploadUrls(). */
     ingestUrls: uploadUrls,
-    async listWorkspaceTags(id: string = workspaceId ?? "default", options?: RequestOptions): Promise<Array<{ tag: string; documentCount: number }>> {
+    async listWorkspaceTags(id: string = clientWorkspace, options?: RequestOptions): Promise<Array<{ tag: string; documentCount: number }>> {
       return (await request<{ tags: Array<{ tag: string; documentCount: number }> }>(`/v1/workspaces/${encodeURIComponent(id)}/tags`, {}, options, true)).tags;
     },
     async listWorkspaces(options?: RequestOptions): Promise<WorkspaceRecord[]> {
@@ -1467,9 +1478,8 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
     },
 
     /** Indexes every unindexed page of a workspace (or the given documents) in the background. */
-    fullIndex(input: { workspaceId?: string; documentIds?: string[] } = {}, requestOptions?: RequestOptions): Promise<FullIndexResponse> {
-      const id = input.workspaceId?.trim() || workspaceId;
-      return request<FullIndexResponse>(`/v1/workspaces/${encodeURIComponent(id)}/full-index`, jsonRequest("POST", { documentIds: input.documentIds }), requestOptions);
+    fullIndex(input: { workspace?: string; documentIds?: string[] } = {}, requestOptions?: RequestOptions): Promise<FullIndexResponse> {
+      return request<FullIndexResponse>(`${wsPath(input.workspace)}/full-index`, jsonRequest("POST", { documentIds: input.documentIds }), requestOptions);
     },
 
     /** Indexes one document in full. */
@@ -1479,7 +1489,7 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
 
     estimateIndexingMode,
     /** Alias of {@link estimateIndexingMode}. */
-    setIndexingModeEstimate(mode: IndexingMode, input: { workspaceId?: string } = {}, requestOptions?: RequestOptions) {
+    setIndexingModeEstimate(mode: IndexingMode, input: { workspace?: string } = {}, requestOptions?: RequestOptions) {
       return estimateIndexingMode(mode, input, requestOptions);
     },
   };

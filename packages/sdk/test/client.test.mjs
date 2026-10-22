@@ -86,14 +86,14 @@ test("browser use needs no process global and ignores browser process shims", as
     .replace(/^import .*$/gm, "").replace(/^export \{[^}]*\} from .*$/gm, "").replace(/^export /gm, "");
   for (const globals of [
     {},
-    { window: {}, process: { env: { DOCSLURP_URL: "https://private.test", DOCSLURP_API_KEY: "private-key", DOCSLURP_WORKSPACE_ID: "private-workspace" } } },
+    { window: {}, process: { env: { DOCSLURP_URL: "https://private.test", DOCSLURP_API_KEY: "private-key", DOCSLURP_WORKSPACE: "private-workspace" } } },
   ]) {
     const factory = runInNewContext(`${compiled}\ncreateDocSlurpClient`, {
       ...globals, Headers, FormData, AbortController, setTimeout, clearTimeout,
       fetch: async (url, init) => {
         assert.equal(url, init.method === "POST" ? "https://docslurp.io/v1/uploads/bulk" : "https://docslurp.io/v1/runs/run/progress");
-        // Browser shims never leak DOCSLURP_WORKSPACE_ID; the default workspace is used.
-        if (init.method === "POST") assert.equal(init.body.get("workspaceId"), "default");
+        // Browser shims never leak DOCSLURP_WORKSPACE; the default workspace is used.
+        if (init.method === "POST") assert.equal(init.body.get("workspace"), "default");
         assert.equal(init.headers.has("authorization"), false);
         assert.equal(init.credentials, "include");
         return json({ run: { id: "run", status: "completed" } });
@@ -107,19 +107,19 @@ test("browser use needs no process global and ignores browser process shims", as
 
 test("ingestion workspace precedence is per-call, client, environment, then the default workspace", async () => {
   for (const environmentWorkspace of [undefined, "env-workspace"]) {
-    await withEnvironment({ DOCSLURP_WORKSPACE_ID: environmentWorkspace }, async () => {
+    await withEnvironment({ DOCSLURP_WORKSPACE: environmentWorkspace }, async () => {
       for (const configuredWorkspace of [undefined, "client-workspace", ""]) {
         for (const perCallWorkspace of [undefined, "call-workspace", ""]) {
           const expected = perCallWorkspace || configuredWorkspace || environmentWorkspace || "default";
           const sdk = client(async (url, init) => {
-            if (url.endsWith("/bulk")) assert.equal(init.body.get("workspaceId"), expected ?? null);
-            else assert.equal(JSON.parse(init.body).workspaceId, expected);
+            if (url.endsWith("/bulk")) assert.equal(init.body.get("workspace"), expected ?? null);
+            else assert.equal(JSON.parse(init.body).workspace, expected);
             return json({ workspace: { id: "returned-workspace" }, run: { id: "run", status: "queued" } });
-          }, { workspaceId: configuredWorkspace });
+          }, { workspace: configuredWorkspace });
           // Repeat calls to prove returned workspaces do not become implicit defaults.
           for (let attempt = 0; attempt < 2; attempt++) {
-            await sdk.upload({ files: [new File(["text"], "note.txt")], workspaceId: perCallWorkspace });
-            await sdk.ingestUrls({ urls: ["https://example.test/note.txt"], workspaceId: perCallWorkspace });
+            await sdk.upload({ files: [new File(["text"], "note.txt")], workspace: perCallWorkspace });
+            await sdk.ingestUrls({ urls: ["https://example.test/note.txt"], workspace: perCallWorkspace });
           }
         }
       }
@@ -127,26 +127,31 @@ test("ingestion workspace precedence is per-call, client, environment, then the 
   }
 });
 
-test("workspaceName or templateKey without workspaceId creates a workspace instead of targeting the default", async () => {
+test("a named workspace is sent as workspace; templateKey or newWorkspace without one asks for a new workspace", async () => {
   const cases = [
-    [{ workspaceName: "Legal contracts" }, { newWorkspace: true, workspaceId: undefined }],
-    [{ templateKey: "legal-contracts" }, { newWorkspace: true, workspaceId: undefined }],
-    [{ newWorkspace: true }, { newWorkspace: true, workspaceId: undefined }],
-    [{ workspaceName: "Legal contracts", workspaceId: "ws-1" }, { newWorkspace: false, workspaceId: "ws-1" }],
-    [{ workspaceName: "   " }, { newWorkspace: false, workspaceId: "client-workspace" }],
-    [{}, { newWorkspace: false, workspaceId: "client-workspace" }],
+    // The server finds a workspace by ID, slug or name, or creates one from the name.
+    [{ workspace: "Legal contracts" }, { newWorkspace: false, workspace: "Legal contracts" }],
+    [{ templateKey: "legal-contracts" }, { newWorkspace: true, workspace: undefined }],
+    [{ newWorkspace: true }, { newWorkspace: true, workspace: undefined }],
+    // An explicit workspace wins over newWorkspace and templateKey.
+    [{ newWorkspace: true, workspace: "ws-1" }, { newWorkspace: false, workspace: "ws-1" }],
+    [{ templateKey: "legal-contracts", workspace: "Legal contracts" }, { newWorkspace: false, workspace: "Legal contracts" }],
+    [{ workspace: "   " }, { newWorkspace: false, workspace: "client-workspace" }],
+    [{}, { newWorkspace: false, workspace: "client-workspace" }],
   ];
   for (const [options, expected] of cases) {
     const seen = [];
     const sdk = client(async (url, init) => {
       if (url.endsWith("/bulk")) {
-        seen.push({ newWorkspace: init.body.get("newWorkspace") === "true", workspaceId: init.body.get("workspaceId") ?? undefined });
+        assert.equal(init.body.has("workspaceName"), false);
+        seen.push({ newWorkspace: init.body.get("newWorkspace") === "true", workspace: init.body.get("workspace") ?? undefined });
       } else {
         const body = JSON.parse(init.body);
-        seen.push({ newWorkspace: Boolean(body.newWorkspace), workspaceId: body.workspaceId });
+        assert.equal("workspaceName" in body, false);
+        seen.push({ newWorkspace: Boolean(body.newWorkspace), workspace: body.workspace });
       }
       return json({ workspace: { id: "returned-workspace" }, run: { id: "run", status: "queued" } });
-    }, { workspaceId: "client-workspace" });
+    }, { workspace: "client-workspace" });
     await sdk.upload({ files: [new File(["text"], "note.txt")], ...options });
     await sdk.upload(new Blob(["text"]), options);
     await sdk.ingestUrls({ urls: ["https://example.test/note.txt"], ...options });
@@ -161,11 +166,11 @@ test("upload sends named file, bearer key and workspace without pipeline options
     assert.equal(init.credentials, "omit");
     assert.equal(init.body.get("files").name, "policy.pdf");
     assert.equal(await init.body.get("files").text(), "PDF bytes");
-    assert.equal(init.body.get("workspaceId"), "workspace");
+    assert.equal(init.body.get("workspace"), "workspace");
     assert.equal(init.body.has("pipeline"), false);
     return json({ run: { id: "run", status: "queued" }, workspace: { id: "workspace" } });
   });
-  const result = await sdk.upload({ files: [{ filename: "policy.pdf", data: new Blob(["PDF bytes"]) }], workspaceId: "workspace" });
+  const result = await sdk.upload({ files: [{ filename: "policy.pdf", data: new Blob(["PDF bytes"]) }], workspace: "workspace" });
   assert.equal(result.run.id, "run");
 });
 
@@ -259,7 +264,7 @@ test("permanent errors and exhausted retries preserve status and body", async ()
 test("DocSlurpApiError exposes the native envelope code and request id", async () => {
   const envelope = { error: { code: "chat_disabled", message: "Chat is turned off.", requestId: "req-1" } };
   const sdk = client(async () => json(envelope, 403));
-  await assert.rejects(sdk.chat({ workspaceId: "workspace", q: "question" }), (error) => {
+  await assert.rejects(sdk.chat({ workspace: "workspace", q: "question" }), (error) => {
     assert.ok(error instanceof DocSlurpApiError);
     assert.equal(error.status, 403);
     assert.equal(error.code, "chat_disabled");
@@ -269,14 +274,14 @@ test("DocSlurpApiError exposes the native envelope code and request id", async (
   });
 });
 
-test("DocSlurpApiError exposes upgrade and billing links from 402 details", async () => {
-  const links = { billing: "https://docslurp.io/app/billing", buyCredits: "https://docslurp.io/app/billing#bl-topup", upgrade: "https://docslurp.io/pricing", docs: "javascript:alert(1)" };
+test("DocSlurpApiError exposes buy-credits, auto top-up and billing links from 402 details", async () => {
+  const links = { billing: "https://docslurp.io/app/billing", buyCredits: "https://docslurp.io/app/billing#bl-topup", autoTopUp: "https://docslurp.io/app/billing#bl-auto-topup", upgrade: "https://docslurp.io/pricing", docs: "javascript:alert(1)" };
   const envelope = { error: { code: "credit_exhausted", message: "Out of credits.", details: { links }, requestId: "req-2" } };
   const sdk = client(async () => json(envelope, 402));
-  await assert.rejects(sdk.chat({ workspaceId: "workspace", q: "question" }), (error) => {
+  await assert.rejects(sdk.chat({ workspace: "workspace", q: "question" }), (error) => {
     assert.ok(error instanceof DocSlurpApiError);
     assert.equal(error.code, "credit_exhausted");
-    assert.deepEqual(error.links, { billing: links.billing, buyCredits: links.buyCredits, upgrade: links.upgrade });
+    assert.deepEqual(error.links, { billing: links.billing, buyCredits: links.buyCredits, autoTopUp: links.autoTopUp });
     return true;
   });
 });
@@ -297,7 +302,7 @@ test("AI calls and unkeyed uploads never retry; keyed upload can retry", async (
   for (const method of ["chat", "search", "upload", "ingestUrls"]) {
     let calls = 0;
     const sdk = client(async () => { calls++; return json({ error: "Busy" }, 503, { "retry-after": "0" }); });
-    const input = method === "upload" ? { files: [new Blob(["data"])] } : { workspaceId: "workspace", q: "question", urls: ["https://example.test/doc"] };
+    const input = method === "upload" ? { files: [new Blob(["data"])] } : { workspace: "workspace", q: "question", urls: ["https://example.test/doc"] };
     await assert.rejects(sdk[method](input), DocSlurpApiError);
     assert.equal(calls, 1, method);
   }
@@ -314,10 +319,10 @@ test("cookie sessions and JSON chat transport remain usable", async () => {
   const sdk = createDocSlurpClient({ apiUrl: "https://example.test", apiKey: "", fetch: async (_url, init) => {
     assert.equal(init.credentials, "include");
     assert.equal(init.headers.get("content-type"), "application/json");
-    assert.deepEqual(JSON.parse(init.body), { workspaceId: "workspace", q: "question" });
+    assert.deepEqual(JSON.parse(init.body), { workspace: "workspace", q: "question" });
     return json({ answer: "answer", citations: [] });
   } });
-  assert.equal((await sdk.chat({ workspaceId: "workspace", q: "question" })).answer, "answer");
+  assert.equal((await sdk.chat({ workspace: "workspace", q: "question" })).answer, "answer");
 });
 
 test("invalid durations fail immediately", async () => {
@@ -355,7 +360,7 @@ test("the actual homepage example uploads, waits and searches over HTTP", { skip
   });
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
   try {
-    await withEnvironment({ DOCSLURP_URL: undefined, DOCSLURP_API_KEY: "test-key", DOCSLURP_WORKSPACE_ID: undefined }, async () => {
+    await withEnvironment({ DOCSLURP_URL: undefined, DOCSLURP_API_KEY: "test-key", DOCSLURP_WORKSPACE: undefined }, async () => {
       const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
       await new AsyncFunction("createDocSlurpClient", "createReadStream", "console", source)(
         (options) => createDocSlurpClient({
@@ -375,9 +380,9 @@ test("the actual homepage example uploads, waits and searches over HTTP", { skip
       assert.ok(requests.every((request) => request.authorization === "Bearer test-key"));
       assert.match(requests[0].body, /filename="handbook.pdf"/);
       assert.match(requests[0].body, /Source document bytes/);
-      assert.match(requests[0].body, /name="workspaceId"\r\n\r\ndefault\r\n/);
+      assert.match(requests[0].body, /name="workspace"\r\n\r\ndefault\r\n/);
       // Upload and search both target the default workspace with no configuration.
-      assert.equal(JSON.parse(requests.at(-1).body).workspaceId, "default");
+      assert.equal(JSON.parse(requests.at(-1).body).workspace, "default");
     });
   } finally { await new Promise((resolve) => server.close(resolve)); }
 });

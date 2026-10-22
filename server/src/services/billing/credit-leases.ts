@@ -59,7 +59,7 @@ export async function grantRunCreditLease(
       ${config.minCredits}::numeric, ${config.maxCredits}::numeric, ${config.initialCredits}::numeric,
       ${config.fraction}::numeric, ${config.horizonSeconds}::numeric, ${config.ttlSeconds}::int,
       ${isBillingExemptOrg(run.orgId)}::boolean,
-      ${reserve.paidReserveCredits}::numeric, ${reserve.freeReserveCredits}::numeric
+      ${reserve.fundedReserveCredits}::numeric, ${reserve.starterReserveCredits}::numeric
     )
   `;
   // grant_credit_lease() always returns one row or raises.

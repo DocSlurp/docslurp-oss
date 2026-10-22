@@ -1,6 +1,6 @@
 import type { Readable } from "node:stream";
 
-import { defaultPipelineFeatures, mergePipelineFeatures, type PipelineFeatureOverrides, type PipelineFeatures, type WorkspaceRecord } from "@docslurp/shared";
+import { defaultPipelineFeatures, mergePipelineFeatures, slugifyWorkspaceName, type PipelineFeatureOverrides, type PipelineFeatures, type WorkspaceRecord } from "@docslurp/shared";
 
 import { AllSourcesUnreadableError, UnreadableSourceError } from "../../services/source-metadata.js";
 import { RUN_START_FAILED_DEFERRED_MESSAGE } from "../../services/run-creation.js";
@@ -52,7 +52,7 @@ export function fakeWorkspace(overrides: Partial<WorkspaceRecord> = {}): Workspa
 export function createWorkspaceIntakeFakes(options: { workspaces?: WorkspaceRecord[] } = {}) {
   const objects = new Map<string, FakeStoredObject>();
   const workspaces = new Map((options.workspaces ?? []).map((workspace) => [workspace.id, workspace]));
-  const createdWorkspaces: Array<{ name: string; orgId?: string; autoNamed: boolean; pipeline?: PipelineFeatureOverrides }> = [];
+  const createdWorkspaces: Array<{ name: string; slug?: string; orgId?: string; autoNamed: boolean; pipeline?: PipelineFeatureOverrides }> = [];
   const runs: FakeRun[] = [];
   const audit: AuditEntry[] = [];
   const started: string[] = [];
@@ -82,8 +82,17 @@ export function createWorkspaceIntakeFakes(options: { workspaces?: WorkspaceReco
       },
     },
     records: {
-      async findWorkspace(workspaceId) {
-        return workspaces.get(workspaceId) ?? null;
+      // Same rules as findWorkspaceForInput: an ID, a slug (fakes use their ID as one) or a name's slug, inside the scope.
+      async findWorkspace(ref, scope) {
+        for (const workspace of workspaces.values()) {
+          if (scope.orgId && workspace.orgId !== scope.orgId) continue;
+          if (scope.allowedWorkspaceIds?.length && !scope.allowedWorkspaceIds.includes(workspace.id)) continue;
+          const matches = ref.kind === "id"
+            ? workspace.id === ref.id
+            : [workspace.slug, workspace.id].includes(ref.slug) || slugifyWorkspaceName(workspace.name) === ref.slug;
+          if (matches) return workspace;
+        }
+        return null;
       },
       async defaultWorkspace({ orgId }) {
         const id = `ws-default-${orgId ?? "personal"}`;
@@ -97,10 +106,11 @@ export function createWorkspaceIntakeFakes(options: { workspaces?: WorkspaceReco
           id: `ws-${workspaces.size + 1}`,
           orgId: args.orgId ?? "org-default",
           name: args.name,
+          slug: args.slug ?? `ws-${workspaces.size + 1}`,
           pipeline: args.pipeline ? mergePipelineFeatures(defaultPipelineFeatures, args.pipeline) : undefined,
         });
         workspaces.set(workspace.id, workspace);
-        createdWorkspaces.push({ name: args.name, orgId: args.orgId, autoNamed: args.autoNamed, pipeline: args.pipeline });
+        createdWorkspaces.push({ name: args.name, ...(args.slug ? { slug: args.slug } : {}), orgId: args.orgId, autoNamed: args.autoNamed, pipeline: args.pipeline });
         return workspace;
       },
       async discardWorkspace(workspaceId) {

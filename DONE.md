@@ -1,5 +1,6 @@
 # Completed
 
+- [x] **Claude plugin and marketplace** (2026-10-21): `plugins/docslurp/` packages the remote MCP server (`https://docslurp.io/v1/mcp`, OAuth) with a `docslurp` skill for search-vs-chat, the presigned upload flow and page citations. The repo root `.claude-plugin/marketplace.json` makes it installable with `claude plugin marketplace add DocSlurp/docslurp-oss` and `claude plugin install docslurp@docslurp`; the same folder is the source for the Anthropic directory submission. MIT, listed in `LICENSE`.
 - [x] Load catalog CLI environment defaults before use, with explicit production overlay and shell/CI precedence; document generation, uploads and the live-key safeguard.
 
 - [x] **Plan-based API rate limits, higher Free limits and upgrade links** (2026-10-21): per-key and per-user limits now follow the organization's billing state (paid plan, live subscription or within the 7-day past-due grace; a session is paid when any of the user's orgs is), cached per process for 60 s, instead of guessing from the key's `rateLimitRpm`, which is now an optional cap (null by default, migration 0067 moves keys at the old default 60 to null). Free limits rise to upload 60, search 240, chat-ai 60, read 600, write 300 per minute. Every 429 and 402 on a hosted, billing deployment carries `details.links` (`billing`, `buyCredits`, `upgrade`, `apiKeys`, `docs`), a `Link` header and copy that says where to go; Free-plan rate limits say paid plans get more. MCP, flat protocol bodies and the OpenAI-compatible API keep the links; self-hosted servers send none. The SDK exposes `DocSlurpApiError.links`.
@@ -40,3 +41,5 @@
 - Reduced new-account starter credits to 250 ($2.50), below Silver’s 2,000 monthly credits; migration preserves existing grants and one-time claims.
 
 - Retire the automation surface: delete the hidden `ai.simple` / `ai.advanced` / `ai.operation.get` MCP tools, `/v1/ai/*`, automation operations and grounded summaries. Migration 0060 drops their tables (`ai_operations`, `ai_operation_events`, `grounded_summaries`) as the follow-up contract step. The MCP catalog now has one definition per public tool name; the internal `workspace.*` ids, alias map and `docslurp://ai/*` resources are gone (`docslurp://capabilities` replaces them).
+
+- 2026-10-21: Refresh app/OSS dependencies, remove the retired Docling extraction backend so all Python environments can use Pillow 13 security fixes, and remove the vulnerable sprintf-js dependency chain.

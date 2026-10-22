@@ -701,7 +701,8 @@ describe("hybridSearch", () => {
 
     sqlMock.mockImplementation(async (strings) => {
       const text = Array.isArray(strings) ? strings.join(" ") : String(strings);
-      if (text.includes("from workspaces w")) {
+      // The search charge's org resolution (lib/ai-usage.ts) also reads workspaces; it is not an access check.
+      if (text.includes("from workspaces w") && !text.trimStart().startsWith("coalesce(")) {
         accessChecks += 1;
         return accessChecks === 1
           ? [

@@ -11,15 +11,14 @@ const { sql, results } = vi.hoisted(() => {
   return { sql, results };
 });
 vi.mock("../db.js", () => ({ sql }));
-vi.mock("../services/billing/webhooks.js", () => ({ PAST_DUE_GRACE_DAYS: 7 }));
 
 const { isPaidRateLimitOrg, orgRateLimitProfile, resetRateLimitPlanCache, userRateLimitProfile } = await import("../services/rate-limit-plan.js");
 
-const row = (overrides: Partial<{ id: string; plan_id: string | null; subscription_status: string | null; past_due_expired: boolean | null }> = {}) => ({
-  id: "org-1", plan_id: "silver", subscription_status: "active", past_due_expired: false, ...overrides,
+const row = (overrides: Partial<{ id: string; funded: boolean | null }> = {}) => ({
+  id: "org-1", funded: true as boolean | null, ...overrides,
 });
 
-describe("plan-based rate-limit profile", () => {
+describe("funding-based rate-limit profile", () => {
   beforeEach(() => {
     vi.unstubAllEnvs();
     sql.mockClear();
@@ -27,25 +26,19 @@ describe("plan-based rate-limit profile", () => {
     resetRateLimitPlanCache();
   });
 
-  it("is paid for a live paid plan, within the past-due grace and for house orgs", () => {
+  it("is paid for funded orgs and house orgs", () => {
     expect(isPaidRateLimitOrg(row())).toBe(true);
-    expect(isPaidRateLimitOrg(row({ subscription_status: "trialing" }))).toBe(true);
-    expect(isPaidRateLimitOrg(row({ subscription_status: "past_due", past_due_expired: false }))).toBe(true);
-    expect(isPaidRateLimitOrg(row({ subscription_status: "none", plan_id: "gold" }))).toBe(true);
     vi.stubEnv("BILLING_EXEMPT_ORG_IDS", "org-house");
-    expect(isPaidRateLimitOrg(row({ id: "org-house", plan_id: "free", subscription_status: "none" }))).toBe(true);
+    expect(isPaidRateLimitOrg(row({ id: "org-house", funded: false }))).toBe(true);
   });
 
-  it("is free on the Free plan, unknown plans, lapsed subscriptions and past the grace", () => {
-    expect(isPaidRateLimitOrg(row({ plan_id: "free" }))).toBe(false);
-    expect(isPaidRateLimitOrg(row({ plan_id: "enterprise-typo" }))).toBe(false);
-    expect(isPaidRateLimitOrg(row({ plan_id: null }))).toBe(false);
-    for (const status of ["canceled", "unpaid", "incomplete_expired"]) expect(isPaidRateLimitOrg(row({ subscription_status: status }))).toBe(false);
-    expect(isPaidRateLimitOrg(row({ subscription_status: "past_due", past_due_expired: true }))).toBe(false);
+  it("is free for starter orgs (never bought credits)", () => {
+    expect(isPaidRateLimitOrg(row({ funded: false }))).toBe(false);
+    expect(isPaidRateLimitOrg(row({ funded: null }))).toBe(false);
   });
 
   it("reads the org once per cache window and refreshes after it", async () => {
-    results.push([row()], [row({ plan_id: "free" })]);
+    results.push([row()], [row({ funded: false })]);
     expect(await orgRateLimitProfile("org-1", 1_000)).toBe("paid");
     expect(await orgRateLimitProfile("org-1", 30_000)).toBe("paid");
     expect(sql.mock.calls.filter(([strings]) => strings.join("").includes("from organizations o where"))).toHaveLength(1);
@@ -53,9 +46,9 @@ describe("plan-based rate-limit profile", () => {
   });
 
   it("is paid for a session when any of the user's organizations is paid", async () => {
-    results.push([row({ id: "personal", plan_id: "free" }), row({ id: "team" })]);
+    results.push([row({ id: "personal", funded: false }), row({ id: "team" })]);
     expect(await userRateLimitProfile("user-1", 1_000)).toBe("paid");
-    results.push([row({ id: "personal", plan_id: "free" })]);
+    results.push([row({ id: "personal", funded: false })]);
     expect(await userRateLimitProfile("user-2", 1_000)).toBe("free");
   });
 

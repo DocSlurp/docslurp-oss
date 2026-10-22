@@ -2,7 +2,6 @@ import { describe, expect, it } from "vitest";
 import { CREDIT_RATE_CARD } from "@docslurp/shared";
 
 import {
-  isComputeBillingEnabled,
   flySharedComputeRates,
   buildLocalComputePerformanceEvents,
   buildLocalComputeUsageEvent,
@@ -77,39 +76,20 @@ describe("Local Compute Cost Module", () => {
     expect(event.metadata?.billable).toBe(false);
   });
 
-  it("bills compute at list rates when DOCSLURP_BILL_COMPUTE=true, keeping infra cost for margin", () => {
+  it("never bills compute: infra cost and the internal list reference are kept for our reports", () => {
     const profile = resolveWorkerDeploymentProfile({ DOCSLURP_DEPLOYMENT_PROFILE: "lean" });
     const observation = { cpuSeconds: 3600, memoryGbSeconds: 7200, gpuSeconds: 360 };
-    const billed = buildLocalComputeUsageEvent({
+    const event = buildLocalComputeUsageEvent({
       metric: "worker-page",
       profile: { ...profile, rates },
       observation,
-      env: { DOCSLURP_BILL_COMPUTE: "true" },
+      env: { DOCSLURP_BILL_COMPUTE: "true", STRIPE_SECRET_KEY: "sk_test" },
     });
-    const expected = CREDIT_RATE_CARD.cpuVcpuHour + 2 * CREDIT_RATE_CARD.memoryGbHour + 0.1 * CREDIT_RATE_CARD.gpuStandardHour;
-    expect(billed.costCents).toBeCloseTo(expected, 9);
-    expect(billed.metadata?.billable).toBe(true);
-    expect(billed.metadata?.infraCostCents).toBe(3600 * 2 + 7200 * 3 + 360 * 5);
-    expect(billed.metadata?.rateCardVersion).toBeTypeOf("string");
-
-    const included = buildLocalComputeUsageEvent({
-      metric: "parser-process",
-      profile: { ...profile, rates },
-      observation,
-      costRollup: "included",
-      env: { DOCSLURP_BILL_COMPUTE: "true" },
-    });
-    expect(included.costCents).toBe(0);
-
-    const unbilled = buildLocalComputeUsageEvent({
-      metric: "worker-page",
-      profile: { ...profile, rates },
-      observation,
-      env: {},
-    });
-    expect(unbilled.metadata?.billable).toBe(false);
-    expect(unbilled.metadata?.infraCostCents).toBeUndefined();
-    expect(unbilled.costCents).toBe(3600 * 2 + 7200 * 3 + 360 * 5);
+    const list = CREDIT_RATE_CARD.cpuVcpuHour + 2 * CREDIT_RATE_CARD.memoryGbHour + 0.1 * CREDIT_RATE_CARD.gpuStandardHour;
+    expect(event.metadata?.billable).toBe(false);
+    expect(event.metadata?.internalListCredits).toBeCloseTo(list, 9);
+    expect(event.metadata?.infraCostCents).toBe(3600 * 2 + 7200 * 3 + 360 * 5);
+    expect(buildLocalComputeUsageEvent({ metric: "parser-process", profile: { ...profile, rates }, observation, costRollup: "included" }).costCents).toBe(0);
   });
 
   it("resolves explicit lean/heavy deployment metadata and rates", () => {
@@ -191,10 +171,4 @@ describe("Local Compute Cost Module", () => {
     expect(event.costCents).toBe(800);
   });
 
-  it("enforces compute billing when the app has Stripe configured, whatever the env flag says", () => {
-    expect(isComputeBillingEnabled({}, false)).toBe(false);
-    expect(isComputeBillingEnabled({ DOCSLURP_BILL_COMPUTE: "true" }, false)).toBe(true);
-    expect(isComputeBillingEnabled({}, true)).toBe(true);
-    expect(isComputeBillingEnabled({ DOCSLURP_BILL_COMPUTE: "false" }, true)).toBe(true);
-  });
 });

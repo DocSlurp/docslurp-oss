@@ -1,7 +1,7 @@
 /**
- * Billing: service plans, the included/prepaid credit pools, Stripe checkout,
- * webhooks, auto-recharge and metering. See docs/pricing-and-credits.md and
- * the modules under ./billing/.
+ * Billing: prepaid credit packs and the single prepaid balance, per-unit
+ * metering (PRICE_CARD), Stripe one-off checkout, webhooks and auto top-up.
+ * See docs/api-sdk.md (Credits) and the modules under ./billing/.
  */
 export {
   BillingNotConfiguredError,
@@ -14,7 +14,8 @@ export {
   getOrgBillingRow,
   grantOrgCredits,
   listCreditLedger,
-  type CreditPools,
+  isFundedOrg,
+  type CreditBalance,
 } from "./billing/credits.js";
 export {
   attachPaymentMethod,
@@ -25,7 +26,7 @@ export {
   listPaymentMethods,
   orgHasPaymentMethod,
 } from "./billing/customers.js";
-export { createPlanCheckout, createPortalSession, createTopUpCheckout } from "./billing/checkout.js";
+export { createPortalSession, createTopUpCheckout } from "./billing/checkout.js";
 export { getBillingOverview, getOrgStorage } from "./billing/overview.js";
 export {
   getAutoRechargeSettings,
@@ -34,7 +35,6 @@ export {
 } from "./billing/auto-recharge.js";
 export {
   StripeWebhookError,
-  enforcePastDueGrace,
   handleStripeWebhookEvent,
   processStripeEvent,
 } from "./billing/webhooks.js";

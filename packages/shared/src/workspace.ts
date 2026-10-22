@@ -186,8 +186,9 @@ export const organizationSchema = z.object({
   createdByUserId: z.string().nullable(),
   creditBalanceCents: z.number().default(0),
   memberRole: organizationRoleSchema,
-  planId: z.string().nullable().default(null),
-  /** Versions kept per document chain on paid plans; null uses the plan default. */
+  /** Has ever received a paid grant (top-up, auto top-up, adjustment, promo). */
+  funded: z.boolean().default(false),
+  /** Versions kept per document chain; null uses DEFAULT_RETAINED_VERSIONS. */
   retainDocumentVersions: z.number().int().min(1).max(100).nullable().default(null),
   createdAt: z.string(),
   updatedAt: z.string(),
@@ -719,6 +720,8 @@ export const createWorkspaceSchema = z.object({
   userId: z.string().default("demo-user"),
   orgId: z.string().optional(),
   name: z.string().trim().min(1).max(120),
+  /** Preferred slug. Invalid or reserved: a generated one; taken by another workspace: suffixed. */
+  slug: z.string().trim().min(1).max(63).optional(),
   templateKey: workspaceTemplateKeySchema.optional(),
   systemPrompt: z.string().trim().max(2000).nullable().optional(),
   /** Enabled by default. Adds a one-time per-document processing cost to improve search results; privacy/template restrictions still apply. */
@@ -748,7 +751,7 @@ export const updateWorkspaceSchema = z.object({
   apply: z.enum(["new-uploads", "reindex"]).optional(),
   /** Skip the confirm dialog for re-index-queuing changes; also the default `apply` for recommended changes. */
   autoConfirmReindex: z.boolean().optional(),
-  /** Versions kept per document chain (paid plans); null inherits the organization setting. */
+  /** Versions kept per document chain; null inherits the organization setting. */
   retainDocumentVersions: z.number().int().min(1).max(100).nullable().optional(),
 });
 export type UpdateWorkspaceInput = z.infer<typeof updateWorkspaceSchema>;

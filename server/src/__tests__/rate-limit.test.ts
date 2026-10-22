@@ -521,24 +521,23 @@ describe("api rate limit middleware", () => {
     });
   });
 
-  describe("upgrade links", () => {
+  describe("limit links", () => {
     beforeEach(() => {
       vi.stubEnv("STRIPE_SECRET_KEY", "sk_test_links");
       vi.stubEnv("APP_URL", "https://docslurp.io");
     });
 
-    it("tells a Free-plan caller that paid plans get higher limits, with links and a Link header", async () => {
+    it("tells a starter caller that buying credits raises the limits, with links and a Link header", async () => {
       const app = buildActorLimitedApp(actorForApiKey("free-links", 1), () => currentTime);
       await app.request("/v1/search");
       const limited = await app.request("/v1/search");
       expect(limited.status).toBe(429);
-      expect(limited.headers.get("Link")).toBe('<https://docslurp.io/pricing>; rel="payment", <https://docslurp.io/app/billing#bl-topup>; rel="payment"; title="Buy credits", <https://docslurp.io/docs/http#rate-limits-and-headers>; rel="help"');
+      expect(limited.headers.get("Link")).toBe('<https://docslurp.io/app/billing>; rel="payment", <https://docslurp.io/app/billing#bl-topup>; rel="payment"; title="Buy credits", <https://docslurp.io/docs/http#rate-limits-and-headers>; rel="help"');
       const body = await limited.json() as { error: { message: string; details: Record<string, unknown> } };
-      expect(body.error.message).toBe("Free plan rate limit reached. Paid plans have higher limits: upgrade at https://docslurp.io/pricing, or wait for Retry-After and try again.");
+      expect(body.error.message).toBe("Starter rate limit reached. Accounts that have bought credits get higher limits: buy credits at https://docslurp.io/app/billing#bl-topup, or wait for Retry-After and try again.");
       expect(body.error.details).toMatchObject({
-        plan: "free", policy: "free-search",
+        account: "starter", policy: "free-search",
         links: {
-          upgrade: "https://docslurp.io/pricing",
           billing: "https://docslurp.io/app/billing",
           buyCredits: "https://docslurp.io/app/billing#bl-topup",
           docs: "https://docslurp.io/docs/http#rate-limits-and-headers",
@@ -546,11 +545,11 @@ describe("api rate limit middleware", () => {
       });
     });
 
-    it("links paid-plan limits to the docs without the Free-plan upsell", async () => {
+    it("links funded-org limits to the docs without the buy-credits nudge", async () => {
       const app = buildActorLimitedApp(actorForApiKey("paid-links", 1, { orgId: "org-paid" }), () => currentTime);
       await app.request("/v1/search");
-      const body = await (await app.request("/v1/search")).json() as { error: { message: string; details: { plan: string } } };
-      expect(body.error.details.plan).toBe("paid");
+      const body = await (await app.request("/v1/search")).json() as { error: { message: string; details: { account: string } } };
+      expect(body.error.details.account).toBe("funded");
       expect(body.error.message).toBe("Please wait a moment before trying again. Rate limits: https://docslurp.io/docs/http#rate-limits-and-headers");
     });
 
@@ -564,7 +563,7 @@ describe("api rate limit middleware", () => {
       apiKeyPagesToday.mockResolvedValue(10);
       const pages = buildActorLimitedApp(actorForApiKey("pages-links", 60, { rateLimitPpd: 10 }), () => currentTime);
       const capped = await (await pages.request("/v1/ingest", { method: "POST" })).json() as { error: { code: string; details: { links: Record<string, string> } } };
-      expect(capped.error).toMatchObject({ code: "daily_page_limit", details: { links: { apiKeys: "https://docslurp.io/app/api-keys", upgrade: "https://docslurp.io/pricing" } } });
+      expect(capped.error).toMatchObject({ code: "daily_page_limit", details: { links: { apiKeys: "https://docslurp.io/app/api-keys", buyCredits: "https://docslurp.io/app/billing#bl-topup" } } });
     });
 
     it("only links the docs for IP-level limits", async () => {
@@ -587,7 +586,7 @@ describe("api rate limit middleware", () => {
       app.all("*", (c) => c.json({ ok: true }));
       await app.request("/v1/chat/completions", { method: "POST" });
       const limited = await app.request("/v1/chat/completions", { method: "POST" });
-      await expect(limited.json()).resolves.toMatchObject({ code: "rate_limited", plan: "free", links: { upgrade: "https://docslurp.io/pricing" } });
+      await expect(limited.json()).resolves.toMatchObject({ code: "rate_limited", account: "starter", links: { buyCredits: "https://docslurp.io/app/billing#bl-topup" } });
     });
 
     it("omits links on self-hosted deployments and on deployments without billing", async () => {

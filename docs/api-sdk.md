@@ -11,7 +11,7 @@ curl https://docslurp.io/v1/search \
   --data '{"q": "How much parental leave do we get?", "limit": 5}'
 ```
 
-Each result has `text`, a `score` and a `citation` with the `filename`, `pageNumber` and `documentId`. Without a `workspaceId`, the request searches your organization's default workspace. To upload documents first, run [the complete HTTP flow](#the-complete-http-flow) below.
+Each result has `text`, a `score` and a `citation` with the `filename`, `pageNumber` and `documentId`. Without a `workspace`, the request searches your organization's default workspace. To upload documents first, run [the complete HTTP flow](#the-complete-http-flow) below.
 
 | Prefer a client library? | Use it for |
 | --- | --- |
@@ -105,13 +105,13 @@ jq '{availability, sessionId, usage, results: [.results[] | {text, score, citati
 
 Check `availability.status` before you treat the result as complete evidence.
 
-With no `workspaceId`, the upload, search and chat all use your organization's default workspace. To use a named workspace, add `-F 'workspaceId=legal-contracts'` to the upload and `workspaceId: "legal-contracts"` to search and chat. To create a new workspace that titles itself from the upload, add `-F 'newWorkspace=true'` (see [Workspaces](#workspaces)).
+With no `workspace`, the upload, search and chat all use your organization's default workspace. To keep documents in their own workspace, add `-F 'workspace=Legal Contracts'` to the upload and `"workspace": "Legal Contracts"` to search and chat: the first upload creates a workspace with that name (slug `legal-contracts`), and every later request finds it by name, slug or ID. To create a new workspace that titles itself from the upload, add `-F 'newWorkspace=true'` instead (see [Workspaces](#workspaces)).
 
 Keep server keys out of browser bundles. The base URL is the service **origin**; the routes below already include `/v1`.
 
 ### Add a grounded answer
 
-Chat uses the same default workspace when `workspaceId` is omitted:
+Chat uses the same default workspace when `workspace` is omitted:
 
 ```bash
 jq -n --arg q 'Summarize the parental leave policy and cite your sources.' '{q: $q}' |
@@ -127,27 +127,34 @@ To follow up, pass the returned `sessionId` in the next chat request. Search doe
 
 ## Workspaces
 
-Workspaces are optional. Every organization has a **default workspace**, created on first use, and any request that omits `workspaceId` uses it. This section explains every way to refer to a workspace; other guides link here.
+Workspaces are optional. Every organization has a **default workspace**, created on first use, and any request that omits `workspace` uses it. This section explains every way to refer to a workspace; other guides link here.
 
-| Reference | Example | Notes |
+Every request that targets a workspace takes one field, `workspace`, whose value can be any of these:
+
+| Value | Example | Notes |
 | --- | --- | --- |
 | Omitted, or `default` | `default` | Your organization's default workspace. Any organization member can read and upload to it; it cannot be archived or deleted. |
-| Slug | `legal-contracts` | Every workspace has a globally unique, URL-safe slug, generated as three words (e.g. `amber-falcon-ridge`) and renamable. Prefer slugs in config and human-facing links. |
+| Name | `Legal Contracts` | Matched by its slug, so `Legal Contracts`, `legal contracts` and `  Légal—Contracts! ` all name the workspace whose slug is `legal-contracts`. If no slug matches, a workspace whose name has that slug matches (oldest first). |
+| Slug | `legal-contracts` | Every workspace has a globally unique, URL-safe slug: the slug of its name when it was created from an upload, otherwise three generated words (e.g. `amber-falcon-ridge`). Slugs are renamable. Prefer them in config and human-facing links. |
 | Former slug | `amber-falcon-ridge` | Every slug a workspace has had keeps resolving to it, like a renamed GitHub repository, and cannot be claimed by another workspace. |
-| UUID | `6f1c2a7e-…` | Also accepted; an absolute reference that never changes. |
+| UUID | `6f1c2a7e-…` | An absolute reference that never changes. |
 
-**Where references are accepted:** `workspaceId` in request bodies and query strings (uploads, URL ingest, direct upload sessions, search GET/POST/batch, chat and chat stream, suggest, MCP `workspace.*` tools); REST paths `/v1/workspaces/:workspace/...`; [compatible search](https://docslurp.io/docs/search-integrations) index/collection names (`/compat/meilisearch/indexes/default/search`); and `model: "workspace:default"` for [OpenAI-compatible chat](https://docslurp.io/docs/chat) (other workspaces use the `workspace:<uuid>` model IDs from `GET /v1/models`).
+Values are matched by slug: the value is lowercased, accents are stripped, every run of characters other than `a-z` and `0-9` becomes one hyphen, and leading and trailing hyphens are dropped (at most 63 characters). A value with no letters or digits left, such as `!!!`, is a `400 invalid_request`. Matching only ever looks at workspaces you can use: your organization's (the API key's organization, or `orgId` for dashboard sessions), and for a key restricted to specific workspaces, only those.
 
-**Which organization:** API keys use their own organization's default workspace. Dashboard sessions use the personal organization unless the request passes `orgId` (body field, or `?orgId=` on query-string and `/v1/workspaces/default/...` requests).
+**When nothing matches:** uploads (`/v1/uploads/bulk`, `/v1/uploads/url`, direct upload sessions, the MCP `upload` tool) create a workspace whose display name is the value as you typed it and whose slug is its slug (with a short suffix if another organization already holds that slug). Every other request answers `404 workspace_not_found` with a message naming the slug it looked for, for example `No workspace matching "legal-contracts" was found` (also in `error.details.workspaceSlug`). A key restricted to specific workspaces cannot create one: such an upload answers `403`.
+
+**Where `workspace` is accepted:** request bodies, query strings and form fields of uploads, URL ingest, direct upload sessions, upload estimates, search GET/POST and each batch query, chat and chat stream, suggest, document and notification listing filters, run previews, and the MCP tools. Aggregate search (`POST /v1/search/aggregate`) takes a `workspaces` array of the same values. REST paths `/v1/workspaces/:workspace/...` accept a UUID, slug, former slug or `default` (a name in a path is matched by its slug). [Compatible search](https://docslurp.io/docs/search-integrations) index/collection names (`/compat/meilisearch/indexes/default/search`) and `model: "workspace:default"` for [OpenAI-compatible chat](https://docslurp.io/docs/chat) (`GET /v1/models` lists `workspace:<uuid>` IDs; `workspace:<slug>` also works) use the same resolver. Responses keep reporting the resolved `workspaceId` (a UUID) and the workspace record with its `slug`.
+
+**Which organization:** API keys use their own organization. Dashboard sessions use the personal organization for the default workspace unless the request passes `orgId` (body field, or `?orgId=` on query-string and `/v1/workspaces/default/...` requests); with `orgId`, names and slugs only match workspaces in that organization.
 
 **Precedence (first match wins):**
 
-- SDK: a per-call `workspaceId`, then `createDocSlurpClient({ workspaceId })`, then `DOCSLURP_WORKSPACE_ID` (server runtimes only; browser builds never read environment variables), then `"default"` (exported as `DEFAULT_WORKSPACE_ID`).
-- CLI: `--workspace`, then `DOCSLURP_WORKSPACE_ID`, then `default`.
+- SDK: a per-call `workspace`, then `createDocSlurpClient({ workspace })`, then `DOCSLURP_WORKSPACE` (server runtimes only; browser builds never read environment variables), then `"default"` (exported as `DEFAULT_WORKSPACE`).
+- CLI: `--workspace`, then `DOCSLURP_WORKSPACE`, then `default`.
 
 So `client.search({ q: "question" })`, `client.getWorkspaceState()` and `docslurp search` work with no workspace configuration.
 
-**New workspaces:** uploads only create a workspace when asked: `newWorkspace: true` (multipart `newWorkspace=true`, CLI `--new-workspace`, SDK `newWorkspace`), a `workspaceName` (CLI `--workspace-name`), or a `templateKey` (CLI `--template`). The SDK and CLI send no `workspaceId` in those cases, so a configured default workspace does not swallow the request. Without a name the new workspace titles itself from the uploaded content. An explicit `workspaceId` (including `default`) wins over these. The upload response's `workspace` record includes `id` and `slug`.
+**New workspaces:** besides naming one that does not exist yet, an upload creates a workspace when it omits `workspace` and sends `newWorkspace: true` (multipart `newWorkspace=true`, CLI `--new-workspace`, SDK `newWorkspace`) or a `templateKey` (CLI `--template`); that workspace titles itself from the uploaded content. The SDK and CLI send no `workspace` in those cases, so a configured client workspace does not swallow the request. An explicit `workspace` (including `default`) wins over `newWorkspace`; a `templateKey` sent with a `workspace` applies only if the upload creates it. The upload response's `workspace` record includes `id` and `slug`.
 
 **Rename a slug** in the dashboard (the gear next to the workspace name, then Workspace) or over HTTP:
 
@@ -200,6 +207,8 @@ curl -X PATCH "$api_url/v1/workspaces/amber-falcon-ridge" \
 Guides: [document versions and retention](document-versions.md) and [config-change jobs and estimates](config-change-jobs.md).
 
 ## API changes
+
+- **2026-10-21, breaking.** One `workspace` request field replaces `workspaceId` and `workspaceName` everywhere a request targets a workspace (bodies, query strings, multipart fields, MCP tool arguments; aggregate search takes `workspaces` instead of `workspaceIds`). It takes a UUID, slug, former slug or name, matched by slug. Uploads into a name that matches nothing create that workspace; other requests answer `404 workspace_not_found` naming the slug. The SDK option and inputs, embed and widget attribute (`workspace`), CLI `--workspace` (`--workspace-name` is removed) and the `DOCSLURP_WORKSPACE` environment variable follow. Responses still carry `workspaceId`. See [Workspaces](#workspaces).
 
 - **2026-10-20.** New workspaces default to `summaries: true`. Create/update bodies and workspace responses expose this document-summary option. It adds a one-time processing cost to improve document search and workspace overviews. See [document summaries, costs and limits](document-summaries.md).
 - **2026-10-14, non-breaking.** Responses of work-creating routes (workspace `PATCH`, search-settings `PATCH`, uploads, reprocess, full-index, graph rebuild) gain an optional `job`. New `POST …/estimate` routes, `GET /v1/jobs/:id` and `GET /v1/jobs/:id/events`. Workspaces gain `autoConfirmReindex` and `retainDocumentVersions`; organizations gain `retainDocumentVersions`. Uploads accept `path`. Config `PATCH` requests that succeeded before still succeed and never return `409`; a `reindex-required` change now queues a re-index. See [config-change jobs](config-change-jobs.md).
@@ -316,7 +325,7 @@ console.log(state.storage.sourceMb, state.storage.documentsWithUnknownSize);
 console.log(state.searches.latencyMs.p95, state.performance.pagesPerMinute);
 ```
 
-Omit the first argument (or pass `undefined` when you also pass options) to use the client's workspace: the `workspaceId` client option, then `DOCSLURP_WORKSPACE_ID`, then `default`. For another workspace, pass a slug such as `"legal-contracts"` or a UUID. `recentWindowHours` is an integer from 1 to 720 and defaults to 24; HTTP enforces the same range. Bearer requests need a server key with the `ingest`, `search`, `artifacts` or `workspaces:manage` scope.
+Omit the first argument (or pass `undefined` when you also pass options) to use the client's workspace: the `workspace` client option, then `DOCSLURP_WORKSPACE`, then `default`. For another workspace, pass a slug such as `"legal-contracts"` or a UUID. `recentWindowHours` is an integer from 1 to 720 and defaults to 24; HTTP enforces the same range. Bearer requests need a server key with the `ingest`, `search`, `artifacts` or `workspaces:manage` scope.
 
 ```bash
 curl --fail-with-body --silent --show-error --max-time 30 \
@@ -763,16 +772,16 @@ X-DocSlurp-Spend: "key-spend-1d";q=500;r=212;w=86400;u=usd-cents
 | Layer | Policy names | Applies to |
 | --- | --- | --- |
 | Per client IP | `ip-<category>`, `ip-burst` | Every request. Categories: `upload`, `search`, `chat-ai`, `read`, `write`, `webhook`. |
-| Per key or signed-in user | `<plan>-<category>` | The plan's per-category limit (`free-…` or `paid-…`), capped by the key's requests per minute if it has one. |
+| Per key or signed-in user | `<table>-<category>` | The per-category limit of the organization's table (`free-…` for starter organizations, `paid-…` once it has bought credits), capped by the key's requests per minute if it has one. |
 | Custom key windows | `key-requests-<window>` | All endpoints together, e.g. 1,000 requests per hour. |
-| Spend windows | `key-spend-<window>` (`X-DocSlurp-Spend`) | Attributed AI, embedding and processing cost in a rolling window. Once reached, uploads, search and chat return 429; reads keep working. |
+| Spend windows | `key-spend-<window>` (`X-DocSlurp-Spend`) | Credits the key's work was charged (pages, storage, searches, chat answers) in a rolling window. Once reached, uploads, search and chat return 429; reads keep working. |
 | Daily pages | — | Uploads stop with `daily_page_limit` once the key's pages-per-day cap is used. |
 
 Custom request and spend windows are set per key on the API keys page (under "Permissions and limits", then "Advanced rate limits") or with `rateLimits` on `POST`/`PATCH /v1/api-keys`, e.g. `[{ "metric": "requests", "limit": 1000, "windowSeconds": 3600 }, { "metric": "spend", "limit": 500, "windowSeconds": 86400 }]` (spend in US cents; at most five rules, one per metric and window, windows up to 31 days). Spend is recorded when the work it pays for finishes and is refreshed every few seconds, so a request already running can carry a key slightly past its spend limit.
 
-The plan table comes from the organization's billing state, never from the key: an API key gets its organization's plan, and a signed-in user gets the paid table when any organization they belong to is on a paid plan. An organization is paid while it is on Silver, Gold or Platinum and its subscription hasn't lapsed (a past-due subscription keeps paid limits for 7 days). A key's `rateLimitRpm` is an optional cap: omitted or `null` (the default) means the plan's limits apply, and a number lowers every category to at most that many requests a minute. It never raises the plan's limits, so a high value on a Free organization does not unlock paid limits. Set it on create, change it with `PATCH /v1/api-keys/:id`, and send `"rateLimitRpm": null` to remove it. Plan changes take effect within a minute. Default per-minute limits on docslurp.io:
+The table comes from the organization's billing state, never from the key: an organization that has only its starter credits is a *starter* organization and gets the `free` table; once it buys credits (a top-up, an auto top-up, or credits added by DocSlurp) it is *funded* and gets the `paid` table, for good. An API key gets its organization's table, and a signed-in user gets the paid table when any organization they belong to is funded. A key's `rateLimitRpm` is an optional cap: omitted or `null` (the default) means the table's limits apply, and a number lowers every category to at most that many requests a minute. It never raises the limits, so a high value on a starter organization does not unlock funded limits. Set it on create, change it with `PATCH /v1/api-keys/:id`, and send `"rateLimitRpm": null` to remove it. Funding takes effect within a minute. Default per-minute limits on docslurp.io:
 
-| Category | Free | Paid | Per client IP |
+| Category | Starter (`free`) | Funded (`paid`) | Per client IP |
 | --- | ---: | ---: | ---: |
 | `upload` | 60 | 120 | 90 |
 | `search` | 240 | 600 | 240 |
@@ -781,22 +790,21 @@ The plan table comes from the organization's billing state, never from the key: 
 | `write` | 300 | 600 | 300 |
 | `webhook` | 120 | 600 | 600 |
 
-These are abuse protection, not a spending control: credits and budgets bound what you spend. Self-hosted deployments use their own, higher table, and operators can set `API_RATE_LIMIT_<PLAN>_<CATEGORY>_MAX` (for example `API_RATE_LIMIT_FREE_SEARCH_MAX`) or `API_RATE_LIMIT_DEFAULT_PROFILE=paid` (every account gets the paid table).
+These are abuse protection, not a spending control: credits and budgets bound what you spend. Self-hosted deployments use their own, higher table, and operators can set `API_RATE_LIMIT_<TABLE>_<CATEGORY>_MAX` (for example `API_RATE_LIMIT_FREE_SEARCH_MAX`) or `API_RATE_LIMIT_DEFAULT_PROFILE=paid` (every account gets the paid table).
 
-Every 429 has `Retry-After` and the [error envelope](https://docslurp.io/docs/search-reference#errors) with `error.code` set to `rate_limited` (with `details.category`, `details.policy` and `details.plan`), `spend_limit_exceeded`, `daily_page_limit` or `ip_temporarily_blocked`. On docslurp.io the details also carry `links` and the response a `Link` header (`rel="payment"` for upgrades, `rel="help"` for these docs), and the message says where to go. A Free-plan limit says that paid plans get higher limits:
+Every 429 has `Retry-After` and the [error envelope](https://docslurp.io/docs/search-reference#errors) with `error.code` set to `rate_limited` (with `details.category`, `details.policy` and `details.account`: `starter`, `funded` or `ip`), `spend_limit_exceeded`, `daily_page_limit` or `ip_temporarily_blocked`. On docslurp.io the details also carry `links` and the response a `Link` header (`rel="payment"` for billing and buying credits, `rel="help"` for these docs), and the message says where to go. A starter organization's limit says that buying credits raises it:
 
 ```json
 {
   "error": {
     "code": "rate_limited",
-    "message": "Free plan rate limit reached. Paid plans have higher limits: upgrade at https://docslurp.io/pricing, or wait for Retry-After and try again.",
+    "message": "Starter rate limit reached. Accounts that have bought credits get higher limits: buy credits at https://docslurp.io/app/billing#bl-topup, or wait for Retry-After and try again.",
     "details": {
       "category": "chat-ai",
       "policy": "free-chat-ai",
-      "plan": "free",
+      "account": "starter",
       "retryAfterSeconds": 12,
       "links": {
-        "upgrade": "https://docslurp.io/pricing",
         "billing": "https://docslurp.io/app/billing",
         "buyCredits": "https://docslurp.io/app/billing#bl-topup",
         "docs": "https://docslurp.io/docs/http#rate-limits-and-headers"
@@ -809,17 +817,39 @@ Every 429 has `Retry-After` and the [error envelope](https://docslurp.io/docs/se
 
 `spend_limit_exceeded` and `daily_page_limit` are the key's own limits, so their `links.apiKeys` points at the API keys page. IP-level limits only link these docs. An IP is blocked for a while after an extreme burst or after repeatedly presenting invalid API keys, so stop and fix credentials rather than retrying 401s in a loop.
 
-### Credits, budgets and upgrades
+### Credits and budgets
 
-Work that spends credits (uploads, runs and reprocessing, chat, chat completions and the MCP chat and upload tools) is refused with HTTP 402 when the organization can't pay for it. Optional AI search strategies are skipped instead of failing the search.
+DocSlurp is prepaid: there are no plans or subscriptions. 1 credit = 1 US cent. Buy a credit pack ($25, $50 or $100) or any amount from $10 to $10,000 on the billing page; credits do not expire while the account exists. Every new account starts with 250 free credits, no card needed. You pay per unit:
+
+| Unit | Credits |
+| --- | --- |
+| Fast page (text-layer PDF, Office, HTML, Markdown, EPUB, text) | 5 per 1,000 pages |
+| Rich page (scanned page, image, or a page read by a vision model) | 250 per 1,000 pages; a page whose model output runs past 1,000 tokens counts once more per extra 1,000 tokens |
+| Audio | 1 Rich page per minute |
+| Video (frames read) | 3 Rich pages per minute |
+| Storage (originals, page images, indexes) | 25 per GB-month, accrued daily |
+| Search | 10 per 1,000 searches; a search that uses LLM query strategies (HyDE, rewrite, stepback, compression, self-query) counts as 10 |
+| Chat answer | 2.5 (standard models), 7.5 (advanced) or 50 (premium) per answer; an answer above 100,000 total tokens counts once more per extra 100,000 |
+| Document summary (`summarize`) | 0.5 per document |
+| Structured fields (`outputSchema`) | 1 per started 10 pages per document |
+| Knowledge graph (`graphRag`, community summaries included) | 1.5 per started 10 pages per document |
+| Propositions (`propositionIndex`, provisional) | 1 per started 10 pages per document |
+
+Optional features are charged once per document each time their stage actually runs (a reprocess that skips the stage pays nothing for it); an audio or video file counts its Rich pages (minutes) as pages. Contextual chunk preambles are part of the page price. A file pays only for its pages and the features it uses: there is no per-file minimum. Reprocessing pays again only for the share of stages that run, and a re-index that only rebuilds indexes pays nothing per page. Searches inside a chat answer are part of the answer. An answer that never reaches you because of an error on our side is refunded. `GET /v1/billing/prices` returns the price card, packs, top-up limits and the tier of each chat model; it needs no authentication.
+
+Organizations that have bought credits (funded) run up to 250 workers at once and get the higher rate limits; starter organizations run up to 50. Larger ceilings and dedicated (private) machines are sold by sales.
+
+Auto top-up is off by default. Turn it on from the billing page with a threshold in credits, a refill amount (a pack or a custom amount of at least $10) and a required monthly cap; every charge emails a receipt and appears in the credit ledger, and it pauses after two failed charges. `GET /v1/billing/overview` returns the balance, funding, worker ceiling, auto top-up settings, this month's spend by category and a monthly forecast built from what you store and the last 30 days of searches, chat answers and pages.
+
+Work that spends credits (uploads, runs and reprocessing, search, chat, chat completions and the MCP chat and upload tools) is refused with HTTP 402 when the organization can't pay for it; a run that has started finishes even if the balance goes slightly negative. Optional AI search strategies are skipped instead of failing the search.
 
 | `error.code` | Meaning | `details.links` |
 | --- | --- | --- |
-| `credit_exhausted`, `minimum_credit_required`, `payment_required` | Out of credits. | `billing`, `buyCredits`, `upgrade`, `docs` |
+| `credit_exhausted`, `minimum_credit_required`, `payment_required` | Out of credits. | `billing`, `buyCredits`, `autoTopUp` (only while auto top-up is off), `docs` |
 | `workspace_budget_paused`, `org_budget_paused` | A monthly budget cap was reached and AI processing is paused. | `billing`, `docs` |
-| `plan_not_entitled` | The feature needs a paid plan. | `upgrade`, `billing`, `docs` |
+| `plan_not_entitled` | The workspace has no billing organization. | `billing`, `docs` |
 
-On docslurp.io the message names the page to visit (for example "Your organization is out of credits. Buy credits or upgrade your plan at https://docslurp.io/app/billing."), and the response has the same `Link` header as a 429. Protocol surfaces keep their shapes and add the links too: MCP tool errors and the flat `{error, code}` body carry a top-level `links`, and the OpenAI-compatible API puts them on `error.links` with `error.code` set to the DocSlurp code. In the SDK, `DocSlurpApiError.links` holds them. Self-hosted servers have no billing, so they send no links.
+On docslurp.io the message names the page to visit (for example "Your organization is out of credits. Buy credits at https://docslurp.io/app/billing#bl-topup, or turn on auto top-up at https://docslurp.io/app/billing#bl-auto-topup."), and the response has the same `Link` header as a 429. Protocol surfaces keep their shapes and add the links too: MCP tool errors and the flat `{error, code}` body carry a top-level `links`, and the OpenAI-compatible API puts them on `error.links` with `error.code` set to the DocSlurp code. In the SDK, `DocSlurpErrorLinks` holds `billing`, `buyCredits`, `autoTopUp`, `apiKeys` and `docs`. Self-hosted servers have no billing, so they send no links.
 
 ## Authentication and integration boundaries
 

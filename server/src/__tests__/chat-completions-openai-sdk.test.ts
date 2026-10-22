@@ -12,12 +12,13 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vites
  * calls or pays a model provider.
  */
 
-const { chatWorkspace, workspaceChatDisabledBody, listWorkspaces, getWorkspace, resolveWorkspaceRef, ensureDefaultWorkspace, validateApiKey } = vi.hoisted(() => ({
+const { chatWorkspace, workspaceChatDisabledBody, listWorkspaces, getWorkspace, resolveWorkspaceRef, findWorkspaceForInput, ensureDefaultWorkspace, validateApiKey } = vi.hoisted(() => ({
   chatWorkspace: vi.fn(),
   workspaceChatDisabledBody: vi.fn(async (): Promise<null> => null),
   listWorkspaces: vi.fn(),
   getWorkspace: vi.fn(),
   resolveWorkspaceRef: vi.fn(),
+  findWorkspaceForInput: vi.fn(),
   ensureDefaultWorkspace: vi.fn(),
   validateApiKey: vi.fn(),
 }));
@@ -27,7 +28,7 @@ vi.mock("../services/billing/spend-guard.js", async (importOriginal) => ({
   canSpend: vi.fn(async () => true),
 }));
 vi.mock("../services/workspace-chat.js", () => ({ chatWorkspace, workspaceChatDisabledBody }));
-vi.mock("../services/workspaces.js", () => ({ listWorkspaces, getWorkspace, resolveWorkspaceRef, ensureDefaultWorkspace }));
+vi.mock("../services/workspaces.js", () => ({ listWorkspaces, getWorkspace, resolveWorkspaceRef, findWorkspaceForInput, ensureDefaultWorkspace }));
 vi.mock("../services/api-keys.js", () => ({ validateApiKey }));
 vi.mock("../middleware/rate-limit.js", () => ({ enforceAuthenticatedApiRateLimit: vi.fn(async () => null) }));
 vi.mock("../lib/auth.js", () => ({ auth: {}, appDbPool: {} }));
@@ -66,6 +67,8 @@ beforeEach(() => {
   listWorkspaces.mockResolvedValue([contracts, manuals]);
   getWorkspace.mockImplementation(async (id: string) => [contracts, manuals].find((workspace) => workspace.id === id) ?? null);
   resolveWorkspaceRef.mockImplementation(async (ref: string) => [contracts, manuals].find((workspace) => workspace.slug === ref) ?? null);
+  findWorkspaceForInput.mockImplementation(async (ref: { kind: string; id?: string; slug?: string }) =>
+    [contracts, manuals].find((workspace) => ref.kind === "id" ? workspace.id === ref.id : workspace.slug === ref.slug) ?? null);
   ensureDefaultWorkspace.mockResolvedValue(contracts);
   chatWorkspace.mockResolvedValue(answer);
 });

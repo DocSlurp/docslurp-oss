@@ -1,0 +1,12 @@
+{
+  "name": "docslurp",
+  "description": "DocSlurp plugins for Claude Code",
+  "owner": { "name": "DocSlurp", "email": "support@docslurp.io" },
+  "plugins": [
+    {
+      "name": "docslurp",
+      "source": "./plugins/docslurp",
+      "description": "Upload documents and media to DocSlurp, then search them with page citations or chat over them."
+    }
+  ]
+}

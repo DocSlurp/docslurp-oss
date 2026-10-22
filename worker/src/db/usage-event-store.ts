@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import type { JSONValue, Sql } from "postgres";
 
 import type { UsageEvent } from "../models.js";
+import { billableCents } from "../pipeline/usage-ledger.js";
 import type { WorkflowState } from "../pipeline/pipeline.js";
 
 function toJson(sql: Sql<Record<string, unknown>>, value: unknown) {
@@ -17,6 +18,21 @@ function batchedRows<T>(rows: T[], batchSize = BULK_WRITE_BATCH_SIZE): T[][] {
     batches.push(rows.slice(index, index + batchSize));
   }
   return batches;
+}
+
+/**
+ * Metadata as persisted: an event that is not a price-card unit charge keeps
+ * its cost as `providerCostCents` (our cost, for internal reports) and is
+ * marked `billable: false`, because it is written at 0 credits.
+ */
+function persistedMetadata(usage: UsageEvent): Record<string, unknown> {
+  if (billableCents(usage) > 0 || usage.metadata?.unitCharge === true) return { ...usage.metadata };
+  const stored = usage.metadata?.providerCostCents;
+  return {
+    ...usage.metadata,
+    providerCostCents: typeof stored === "number" && Number.isFinite(stored) ? stored : Math.max(0, Number(usage.costCents) || 0),
+    billable: false,
+  };
 }
 
 function stringOrNull(value: unknown): string | null {
@@ -64,12 +80,13 @@ export async function persistRunUsageEvents(args: {
     metric: usage.metric,
     amount: usage.amount,
     unit: usage.unit,
-    // Preserve provider sub-cent precision through both the ledger and credit debit.
-    cost_cents: usage.metadata?.billable === false ? 0 : usage.costCents,
+    // Customer credits: only price-card unit charges bill (sub-cent precision kept);
+    // provider and compute cost stay in metadata for our own reports.
+    cost_cents: billableCents(usage),
     input_tokens: usage.inputTokens ?? 0,
     output_tokens: usage.outputTokens ?? 0,
     // runId keeps the event classified as ingest spend after the run is deleted.
-    metadata: toJson(client, { ...usage.metadata, runId: state.run.id }),
+    metadata: toJson(client, { ...persistedMetadata(usage), runId: state.run.id }),
   }));
 
   const inserted: Array<{ id: string; cost_cents: number }> = [];
@@ -100,7 +117,7 @@ export async function persistRunUsageEvents(args: {
     );
   }
 
-  // Unbilled events are written at cost_cents = 0, so this is exactly what
+  // Non-unit events are written at cost_cents = 0, so this is exactly what
   // the usage_events trigger adds to workspace_runs.spent_cents (0056): the
   // run's spend delta for the cap, the credit debit and the credit lease.
   return inserted.reduce((total, row) => total + Number(row.cost_cents ?? 0), 0);
@@ -129,11 +146,11 @@ export async function persistScopedUsageEvents(args: {
     metric: usage.metric,
     amount: usage.amount,
     unit: usage.unit,
-    cost_cents: usage.metadata?.billable === false ? 0 : usage.costCents,
+    cost_cents: billableCents(usage),
     input_tokens: usage.inputTokens ?? 0,
     output_tokens: usage.outputTokens ?? 0,
     metadata: toJson(client, {
-      ...usage.metadata,
+      ...persistedMetadata(usage),
       ...(scope.workspaceId ? { workspaceId: scope.workspaceId } : {}),
       ...(scope.orgId ? { orgId: scope.orgId } : {}),
     }),

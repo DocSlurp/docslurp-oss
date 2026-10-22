@@ -37,8 +37,8 @@ const config: CreditLeaseConfig = {
   renewAt: 0.8,
 };
 
-const noReserve = resolveChatCreditReserveConfig({ CHAT_CREDIT_RESERVE_CREDITS: "0", CHAT_CREDIT_RESERVE_FREE_CREDITS: "0" });
-/** Defaults: 100 credits on Free, 300 on paid plans. */
+const noReserve = resolveChatCreditReserveConfig({ CHAT_CREDIT_RESERVE_CREDITS: "0", CHAT_CREDIT_RESERVE_STARTER_CREDITS: "0" });
+/** Defaults: 100 credits for starter orgs, 300 for funded orgs. */
 const withReserve = resolveChatCreditReserveConfig({});
 
 let db: PGlite;
@@ -256,7 +256,7 @@ describe("chat reserve", () => {
     }
     expect(await outstanding(sql, "small")).toBeLessThanOrEqual(30 + 1e-9);
     expect(await outstanding(sql, "small")).toBeGreaterThan(29);
-    // Spending every lease leaves the Free reserve for chat.
+    // Spending every lease leaves the starter reserve for chat.
     for (const runId of runs) {
       const [lease] = await sql<{ remaining: number }[]>`select greatest(granted - consumed, 0) as remaining from credit_leases where holder_id = ${runId}`;
       if (Number(lease?.remaining ?? 0) > 0) await spend(sql, "small", runId, Number(lease!.remaining));
@@ -268,10 +268,10 @@ describe("chat reserve", () => {
     expect(refused.available).toBeCloseTo(0, 6);
   });
 
-  it("uses the paid reserve on paid plans and none for billing-exempt orgs", async () => {
+  it("uses the funded reserve for funded orgs and none for billing-exempt orgs", async () => {
     setChatReserveConfig(withReserve);
     await seedOrg(sql, "gold", 310);
-    await sql`update organizations set plan_id = 'gold' where id = 'gold'`;
+    await sql`update organizations set funded_at = now() where id = 'gold'`;
     const [goldRun] = await seedRuns(sql, "gold", 1);
     expect((await grantRunCreditLease(sql, runOf("gold", goldRun!), { ...config, fraction: 1, initialCredits: 50 })).remaining).toBeCloseTo(10, 6);
 
@@ -381,7 +381,8 @@ describe("worker checkpoints", () => {
 
   function pageState(orgId: string, runId: string, credits: number): WorkflowState {
     const ledger = new PipelineUsageEventLedger();
-    ledger.enqueue({ provider: "local", model: "cpu", metric: "worker-page", amount: 1, unit: "page", costCents: credits });
+    ledger.enqueue({ provider: "docslurp", model: "price-card", metric: "ingest-page-rich", amount: 1, unit: "page", costCents: credits,
+      metadata: { billable: true, unitCharge: true } });
     return { run: { ...runOf(orgId, runId), stats: {} }, usageLedger: ledger } as unknown as WorkflowState;
   }
 
@@ -593,7 +594,7 @@ describe.skipIf(!realUrl)("credit leases under real concurrency", () => {
     try {
       await grantRunCreditLease(pg, runOf("cc-n", runId!), config);
       await pg`update workspace_runs set control_state = 'paused' where id = ${runId!}`;
-      await pg`select grant_org_credits('cc-n', 'topup', 'cc-n-topup', 'prepaid', 10)`;
+      await pg`select grant_org_credits('cc-n', 'topup', 'cc-n-topup', 10)`;
       await vi.waitFor(() => expect(payloads.length).toBeGreaterThanOrEqual(2));
       const reasons = payloads.map((payload) => JSON.parse(payload) as { orgId: string; reason: string });
       expect(reasons).toEqual(expect.arrayContaining([

@@ -17,7 +17,7 @@ import { fleetSupports, taskQueueForOrgKey } from "./worker-fleet.js";
  * With credit leases (migration 0052) a resume first takes the run's lease:
  * when a small top-up wakes many paused runs, only those that get credits
  * resume, the rest stay paused. `org_spend_changed` notifications (top-ups,
- * auto-recharge, budget and plan changes, released or expired leases) sweep
+ * auto top-up, funding and budget changes, released or expired leases) sweep
  * the org at once; the maintenance sweep stays the fallback.
  */
 

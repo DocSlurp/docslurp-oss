@@ -406,7 +406,7 @@ describe("estimator prices the compiled plan the run will execute", () => {
     if (!plan || !plan.reindex || plan.impact.stages.length === 0) return; // field has no re-index effect in this config
     const compiled = compilePipelinePlan({ ...withoutStageSelection(plan.nextPipeline), stageSubset: [...plan.impact.stages] } as PipelineFeatures).stageOrder;
     expect(plan.impact.stages).toEqual(compiled);
-    const priced = estimatePipelineWork({ features: plan.nextPipeline, stages: compiled, documents: 2, pages: 10, plan: "free", env: process.env });
+    const priced = estimatePipelineWork({ features: plan.nextPipeline, stages: compiled, documents: 2, pages: 10, workerSlots: 50, env: process.env });
     expect(plan.estimate).toEqual(priced);
   });
 

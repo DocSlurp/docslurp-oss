@@ -93,10 +93,9 @@ const mcpAdapterRoutes = new Hono()
       const parsed = uploadInput.safeParse(body);
       if (!parsed.success) return invalidInput(c, parsed.error);
       const input = parsed.data;
-      if (input.workspaceName && apiKey?.workspaceIds?.length) return adapterError(c, 403, "This key cannot create workspaces outside its allowlist");
-      const workspaceId = input.workspaceName ? undefined : await resolveActorWorkspaceId(actor, input.workspaceId);
-      if (workspaceId && !await loadActorScopedWorkspace(workspaceId, actor)) return adapterError(c, 404, "Workspace not found", "workspace_not_found");
-      // Reuse upload authorization, URL validation, admission, spend checks and idempotency.
+      // Reuse upload authorization, workspace resolution (find or create; a
+      // restricted key can do neither outside its allowlist), URL validation,
+      // admission, spend checks and idempotency.
       const { uploadsRoutes } = await import("../routes/uploads.js");
       const native = new Hono().use("*", publicErrorMiddleware).use("*", async (inner, next) => {
         setRequestActor(inner, actor);
@@ -107,7 +106,7 @@ const mcpAdapterRoutes = new Hono()
       if (input.idempotencyKey) headers.set("Idempotency-Key", input.idempotencyKey);
       headers.set("Content-Type", "application/json");
       return native.request(`http://mcp.internal/${input.urls ? "url" : "direct/sessions"}`, {
-        method: "POST", headers, body: JSON.stringify({ workspaceId, workspaceName: input.workspaceName,
+        method: "POST", headers, body: JSON.stringify({ workspace: input.workspace,
           ...(input.urls ? { urls: input.urls } : { files: input.files!.map(file => ({ ...file, singlePart: true })) }),
         }), signal: c.req.raw.signal,
       });
@@ -160,7 +159,7 @@ const mcpAdapterRoutes = new Hono()
     if (toolId === "fullIndex") {
       const parsed = fullIndexInput.safeParse(body);
       if (!parsed.success) return invalidInput(c, parsed.error);
-      const workspace = await loadActorScopedWorkspace(await resolveActorWorkspaceId(actor, parsed.data.workspaceId), actor);
+      const workspace = await loadActorScopedWorkspace(await resolveActorWorkspaceId(actor, parsed.data.workspace), actor);
       if (!workspace) return adapterError(c, 404, "Workspace not found", "workspace_not_found");
       const resolved = await resolveMaterializationPolicy({
         workspacePipeline: workspace.pipeline,
@@ -187,7 +186,7 @@ const mcpAdapterRoutes = new Hono()
       const parsed = uploadStatusInput.safeParse(body);
       if (!parsed.success) return invalidInput(c, parsed.error);
       const workspace = await loadActorScopedWorkspace(
-        await resolveActorWorkspaceId(c.get("requestActor"), parsed.data.workspaceId),
+        await resolveActorWorkspaceId(c.get("requestActor"), parsed.data.workspace),
         actor,
       );
       if (!workspace) return adapterError(c, 404, "Workspace not found", "workspace_not_found");
@@ -210,7 +209,7 @@ const mcpAdapterRoutes = new Hono()
       if (apiKey && !apiKeyMayUseEstimateTool(toolId, apiKey)) return adapterError(c, 403, "Forbidden");
       let workspaceRef = "";
       if (estimateToolUsesWorkspace(toolId, body)) {
-        const requested = typeof body.workspaceId === "string" ? body.workspaceId : undefined;
+        const requested = typeof body.workspace === "string" ? body.workspace : undefined;
         const workspace = await loadActorScopedWorkspace(await resolveActorWorkspaceId(actor, requested), actor);
         if (!workspace) return adapterError(c, 404, "Workspace not found", "workspace_not_found");
         workspaceRef = workspace.id;
@@ -227,7 +226,7 @@ const mcpAdapterRoutes = new Hono()
       if (!parsed.success) return invalidInput(c, parsed.error);
       const suggestBody = parsed.data;
       const workspace = await loadActorScopedWorkspace(
-        await resolveActorWorkspaceId(c.get("requestActor"), suggestBody.workspaceId),
+        await resolveActorWorkspaceId(c.get("requestActor"), suggestBody.workspace),
         actor,
       );
       if (!workspace) return adapterError(c, 404, "Workspace not found", "workspace_not_found");

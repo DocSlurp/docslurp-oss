@@ -28,7 +28,7 @@ describe("lazy python dependencies", () => {
     expect(declared.has("left-pad")).toBe(false);
     // Bundle-only direct-URL wheels (spaCy models) never become PyPI-installable names.
     expect(declared.has("en-core-web-sm")).toBe(false);
-    expect(declared.has("docling")).toBe(true);
+    expect(declared.has("docling")).toBe(false);
     expect(lockedPythonPins().get("trafilatura")).toMatch(/^\d/);
     expect(normalizeDistribution("Python_PPTX")).toBe("python-pptx");
   });

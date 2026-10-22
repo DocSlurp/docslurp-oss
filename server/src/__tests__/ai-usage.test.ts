@@ -10,7 +10,7 @@ vi.mock("../db.js", () => ({
 }));
 
 const { defaultAiUsagePricingCatalog } = await import("@docslurp/shared");
-const { clearOrgPlanCache, createUsageLedger, recordUsageEvent } = await import(
+const { createUsageLedger, recordUnitCharge, recordUsageEvent } = await import(
   "../lib/ai-usage.js"
 );
 
@@ -67,7 +67,7 @@ describe("Usage Event ledger", () => {
     expect(event).toMatchObject({
       metric: "embed-query",
       amount: 42,
-      costCents: (42 / 1000) * 0.002 * 1.2,
+      costCents: 0,
       inputTokens: 42,
       outputTokens: 0,
     });
@@ -81,27 +81,24 @@ describe("Usage Event ledger", () => {
       orgId: "org-1",
       workspaceId: "ws-1",
       costSource: "estimate",
+      providerCostCents: (42 / 1000) * 0.002,
+      billable: false,
     });
+    // The debit statement is guarded by billable: provider cost never debits credits.
     expect(insert?.[0].join(" ")).toContain("enqueue_org_credit_debit");
   });
 
-  it("charges bonus plans the plan-neutral AI factor and persists the repriced receipt once", async () => {
+  it("records a billable unit charge at the price card amount", async () => {
     vi.spyOn(console, "log").mockImplementation(() => undefined);
-    clearOrgPlanCache();
-    sqlMock.mockImplementation(async (strings: TemplateStringsArray) =>
-      strings.join(" ").includes("select o.plan_id") ? [{ plan_id: "platinum" }] : []);
-
-    const event = await recordUsageEvent({
+    const event = await recordUnitCharge({
       userId: "user-1",
-      scope: { orgId: "org-plat" },
-      usage: { provider: "anthropic", model: "model-1", metric: "chat", inputTokens: 2, outputTokens: 3, costCents: 10 },
+      scope: { orgId: "org-1", workspaceId: "ws-1" },
+      charge: { id: "search:1", metric: "search-query", amount: 1, unit: "search", credits: 0.01 },
     });
-
-    expect(event?.costCents).toBeCloseTo(14.4);
+    expect(event).toMatchObject({ provider: "docslurp", metric: "search-query", costCents: 0.01 });
     const [insert] = usageInserts();
-    expect(insert).toContain(event?.costCents);
-    expect(insertedMetadata(insert)).toMatchObject({ providerCostCents: 10, aiPlanCreditFactor: 1.2 });
-    clearOrgPlanCache();
+    expect(insert).toContain(0.01);
+    expect(insertedMetadata(insert)).toMatchObject({ billable: true, unitCharge: true, priceCard: "2026-10-21" });
   });
 
   it("attributes usage to the API key authenticating the request", async () => {
@@ -126,7 +123,7 @@ describe("Usage Event ledger", () => {
     expect(insertedMetadata(withoutKey)).not.toHaveProperty("apiKeyId");
   });
 
-  it("marks up provider cost once and stamps cross-workspace scope", async () => {
+  it("records provider cost without a customer charge and stamps cross-workspace scope", async () => {
     vi.spyOn(console, "log").mockImplementation(() => undefined);
 
     await recordUsageEvent({
@@ -144,15 +141,15 @@ describe("Usage Event ledger", () => {
     });
 
     const [insert] = usageInserts();
-    expect(insert).toContain(8.4);
+    expect(insert).not.toContain(8.4);
     expect(insert).toContain(null); // run_id
     expect(insertedMetadata(insert)).toEqual({
       feature: "chat",
       orgId: "org-1",
       workspaceIds: ["ws-1", "ws-2"],
       providerCostCents: 7,
-      aiMarkupPercent: 20,
-      creditRateCard: "2026-10.3",
+      billable: false,
+      costRole: "provider",
     });
   });
 
@@ -181,9 +178,9 @@ describe("Usage Event ledger", () => {
         metadata: { costSource: "provider", tokenUsageReported: false },
       },
     });
-    expect(event).toMatchObject({ inputTokens: 0, outputTokens: 0, amount: 12.5, unit: "second", costCents: 0.03472222 * 1.2 });
+    expect(event).toMatchObject({ inputTokens: 0, outputTokens: 0, amount: 12.5, unit: "second", costCents: 0 });
     expect(usageInserts()).toHaveLength(1);
-    expect(insertedMetadata(usageInserts()[0])).toMatchObject({ orgId: "org-1", workspaceId: "ws-1", tokenUsageReported: false, providerCostCents: 0.03472222, aiMarkupPercent: 20 });
+    expect(insertedMetadata(usageInserts()[0])).toMatchObject({ orgId: "org-1", workspaceId: "ws-1", tokenUsageReported: false, providerCostCents: 0.03472222, billable: false });
   });
 
   it("buffers on record, adopts child events without logging, persists on flush", async () => {
@@ -257,7 +254,7 @@ describe("Usage Event ledger", () => {
     expect(ledger.events()).toHaveLength(1);
   });
 
-  it("never records a priced model's tokens at zero cost", async () => {
+  it("never records a priced model's tokens at zero provider cost", async () => {
     vi.spyOn(console, "log").mockImplementation(() => undefined);
     const { SEARCH_OPENROUTER_MODEL } = await import("../lib/ai.js");
     const priced = [
@@ -277,7 +274,9 @@ describe("Usage Event ledger", () => {
     expect(inserts).toHaveLength(priced.length);
     for (const call of inserts) {
       expect(Number(call[10]) + Number(call[11]), String(call[5])).toBeGreaterThan(0);
-      expect(Number(call[9]), String(call[5])).toBeGreaterThan(0);
+      // Customers pay price-card units; the provider cost is kept for our own reports.
+      expect(Number(call[9]), String(call[5])).toBe(0);
+      expect(Number(insertedMetadata(call).providerCostCents), String(call[5])).toBeGreaterThan(0);
     }
   });
 });

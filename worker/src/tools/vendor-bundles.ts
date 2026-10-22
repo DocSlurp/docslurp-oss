@@ -505,7 +505,7 @@ export async function ensureVendorBundle(
 const prefetches = new Set<Promise<void>>();
 
 /**
- * Boot-time warm-up (DOCSLURP_VENDOR_BUNDLE_PREFETCH=docling,unstructured): installs the
+ * Boot-time warm-up (DOCSLURP_VENDOR_BUNDLE_PREFETCH=unstructured): installs the
  * listed bundles one after another in the background so the first document does not pay
  * the download and unpack. The promise never rejects, is tracked for tests/shutdown, and
  * callers must not await it on the readiness path.
