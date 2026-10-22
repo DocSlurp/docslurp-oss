@@ -3,7 +3,7 @@ import { reportPublicError } from "../lib/public-errors.js";
 import { Hono, type Context } from "hono";
 import { zValidator } from "@hono/zod-validator";
 import { z } from "zod";
-import { randomUUID, createCipheriv, createDecipheriv, randomBytes } from "node:crypto";
+import { randomUUID } from "node:crypto";
 
 import {
   createConnectorSchema,
@@ -15,7 +15,7 @@ import {
 
 import { sql } from "../db.js";
 import { env } from "../config.js";
-import { getRequiredEncryptionKey } from "../lib/encryption.js";
+import { openSecret, sealSecret } from "../lib/encryption.js";
 import { validationErrorResponse, type ValidationErrorSource } from "../lib/validation.js";
 import { getConnectorAdapter } from "../services/connectors/index.js";
 import { canManageWorkspace, getWorkspaceAccess } from "../services/organizations.js";
@@ -27,33 +27,12 @@ import {
 } from "../services/workspace-intake.js";
 import { apiErrorResponse, apiStatusError } from "../lib/api-error.js";
 
-function getEncryptionKey(): Buffer {
-  return getRequiredEncryptionKey("CREDENTIALS_ENCRYPTION_KEY");
-}
-
 function encryptCredentials(credentials: Record<string, unknown>): string {
-  const key = getEncryptionKey();
-  const iv = randomBytes(16);
-  const cipher = createCipheriv("aes-256-gcm", key, iv);
-  const plaintext = JSON.stringify(credentials);
-  const encrypted = Buffer.concat([cipher.update(plaintext, "utf-8"), cipher.final()]);
-  const tag = cipher.getAuthTag();
-  // Format: iv:tag:ciphertext (all hex)
-  return `${iv.toString("hex")}:${tag.toString("hex")}:${encrypted.toString("hex")}`;
+  return sealSecret("CREDENTIALS_ENCRYPTION_KEY", JSON.stringify(credentials));
 }
 
 function decryptCredentials(encryptedStr: string): Record<string, unknown> {
-  const key = getEncryptionKey();
-  const parts = encryptedStr.split(":");
-  if (parts.length !== 3) throw new Error("Invalid encrypted credentials format");
-  const [ivHex, tagHex, ciphertextHex] = parts as [string, string, string];
-  const iv = Buffer.from(ivHex, "hex");
-  const tag = Buffer.from(tagHex, "hex");
-  const ciphertext = Buffer.from(ciphertextHex, "hex");
-  const decipher = createDecipheriv("aes-256-gcm", key, iv);
-  decipher.setAuthTag(tag);
-  const decrypted = Buffer.concat([decipher.update(ciphertext), decipher.final()]);
-  return JSON.parse(decrypted.toString("utf-8")) as Record<string, unknown>;
+  return JSON.parse(openSecret("CREDENTIALS_ENCRYPTION_KEY", encryptedStr)) as Record<string, unknown>;
 }
 
 // Unknown or unimplemented connector types fail the shared enum here, so they

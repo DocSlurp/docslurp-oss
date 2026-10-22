@@ -12,6 +12,12 @@ vi.mock("../lib/encryption.js", () => ({
   getRequiredEncryptionKey: () => {
     throw new Error("CREDENTIALS_ENCRYPTION_KEY is not configured");
   },
+  sealSecret: () => {
+    throw new Error("CREDENTIALS_ENCRYPTION_KEY is not configured");
+  },
+  openSecret: () => {
+    throw new Error("CREDENTIALS_ENCRYPTION_KEY is not configured");
+  },
 }));
 
 const { runConnectorSync } = await import("../routes/connectors.js");

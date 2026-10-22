@@ -16,7 +16,7 @@ describe("webhook secret storage", () => {
     const encrypted = encryptWebhookSecret(plaintext);
 
     expect(encrypted).not.toBe(plaintext);
-    expect(encrypted).toMatch(/^[0-9a-f]+:[0-9a-f]+:[0-9a-f]+$/);
+    expect(encrypted).toMatch(/^v1:[0-9a-f]+:[0-9a-f]+:[0-9a-f]+$/);
     expect(isEncryptedWebhookSecret(encrypted)).toBe(true);
     expect(decryptWebhookSecret(encrypted)).toBe(plaintext);
   });

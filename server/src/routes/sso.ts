@@ -1,5 +1,5 @@
 import { reportPublicError } from "../lib/public-errors.js";
-import { createCipheriv, createDecipheriv, createHash, createHmac, randomBytes } from "node:crypto";
+import { createHash, createHmac, randomBytes } from "node:crypto";
 
 import { SAML, ValidateInResponseTo, type CacheItem, type CacheProvider } from "@node-saml/node-saml";
 import { zValidator } from "@hono/zod-validator";
@@ -11,7 +11,7 @@ import { z } from "zod";
 
 import { sql } from "../db.js";
 import { auth } from "../lib/auth.js";
-import { getRequiredEncryptionKey } from "../lib/encryption.js";
+import { openSecret, sealSecret } from "../lib/encryption.js";
 import { requestIp } from "../lib/request-context.js";
 import { assertSafeExternalUrl, safeExternalFetch } from "../lib/network-security.js";
 import {
@@ -182,17 +182,8 @@ function validateConfig(config: SsoConfig): string | null {
   return null;
 }
 
-function getSsoSecretEncryptionKey(): Buffer {
-  return getRequiredEncryptionKey("SECRETS_ENCRYPTION_KEY");
-}
-
 function encryptSsoClientSecret(secret: string): string {
-  const key = getSsoSecretEncryptionKey();
-  const iv = randomBytes(16);
-  const cipher = createCipheriv("aes-256-gcm", key, iv);
-  const encrypted = Buffer.concat([cipher.update(secret, "utf8"), cipher.final()]);
-  const tag = cipher.getAuthTag();
-  return `${iv.toString("hex")}:${tag.toString("hex")}:${encrypted.toString("hex")}`;
+  return sealSecret("SECRETS_ENCRYPTION_KEY", secret);
 }
 
 function decryptSsoClientSecret(encrypted: string | null | undefined): string | null {
@@ -200,17 +191,13 @@ function decryptSsoClientSecret(encrypted: string | null | undefined): string | 
     return null;
   }
 
-  const parts = encrypted.split(":");
-  if (parts.length !== 3) {
+  try {
+    return openSecret("SECRETS_ENCRYPTION_KEY", encrypted);
+  } catch {
+    // A malformed or undecryptable value is treated as "no stored secret" so a
+    // bad row cannot take down the SSO config read.
     return null;
   }
-  const [ivHex, tagHex, ciphertextHex] = parts as [string, string, string];
-  const decipher = createDecipheriv("aes-256-gcm", getSsoSecretEncryptionKey(), Buffer.from(ivHex, "hex"));
-  decipher.setAuthTag(Buffer.from(tagHex, "hex"));
-  return Buffer.concat([
-    decipher.update(Buffer.from(ciphertextHex, "hex")),
-    decipher.final()
-  ]).toString("utf8");
 }
 
 function resolveStoredSsoConfig(raw: SsoConfig | null): SsoConfig {

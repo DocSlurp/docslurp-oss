@@ -13,6 +13,8 @@ vi.mock("../db.js", () => ({
 
 vi.mock("../lib/encryption.js", () => ({
   getRequiredEncryptionKey: () => Buffer.alloc(32, 7),
+  sealSecret: (_env: string, plaintext: string) => `sealed:${Buffer.from(plaintext).toString("base64")}`,
+  openSecret: (_env: string, stored: string) => Buffer.from(stored.replace(/^sealed:/, ""), "base64").toString("utf8"),
 }));
 
 vi.mock("../services/organizations.js", () => ({
