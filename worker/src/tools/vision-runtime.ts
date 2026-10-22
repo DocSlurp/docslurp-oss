@@ -5,6 +5,7 @@ import { fetchWithProviderRetry, providerFromBaseUrl } from "../lib/provider-ret
 import {
   MARKDOWN_LATEX_VISION_PROMPT,
   MARKDOWN_TRANSCRIPTION_VISION_PROMPT,
+  MARKDOWN_TRANSCRIPTION_TABLES_VISION_PROMPT,
   type OpenRouterProviderPreferences,
   PAGE_MARKDOWN_LATEX_VISION_PROMPT,
   contentFilterRetryProvider,
@@ -62,6 +63,7 @@ export const visionPromptTemplates = {
     "Extract visible document text faithfully. Preserve reading order, tables, headings, formulas, and code when visible.",
   "markdown-latex": MARKDOWN_LATEX_VISION_PROMPT,
   "markdown-transcription": MARKDOWN_TRANSCRIPTION_VISION_PROMPT,
+  "markdown-transcription-tables": MARKDOWN_TRANSCRIPTION_TABLES_VISION_PROMPT,
   "page-markdown-latex": PAGE_MARKDOWN_LATEX_VISION_PROMPT,
   markdown:
     "Convert the visible document page into concise GitHub-flavored markdown. Preserve tables, headings, lists, formulas, and code blocks.",

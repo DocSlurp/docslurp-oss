@@ -7,6 +7,7 @@ import { openRouterReasoningParams, type OpenRouterReasoning } from "@docslurp/s
 
 import { unwrapWholeMarkdownFence } from "./vision-markdown-fence.js";
 import { normalizeMarkdownMathDelimiters } from "./vision-math-delimiters.js";
+import { insertMissingTableDelimiters } from "./vision-table-delimiter.js";
 
 /** Markdown transcription that asks for LaTeX math, keeps text inside figures, and forbids layout padding or paraphrase. */
 export const MARKDOWN_LATEX_VISION_PROMPT =
@@ -27,6 +28,21 @@ export const MARKDOWN_TRANSCRIPTION_VISION_PROMPT = [
   "Output only the Markdown transcription.",
 ].join("\n");
 
+/**
+ * `markdown-transcription` with a stricter table rule: tables keep their printed orientation (no transposing
+ * label/value tables into one header row) and always carry the GFM delimiter row.
+ */
+export const MARKDOWN_TRANSCRIPTION_TABLES_VISION_PROMPT = [
+  "Transcribe this document page into GitHub-flavored Markdown, exactly as printed and in natural reading order (in multi-column layouts, finish each column before starting the next).",
+  "- Copy every visible word verbatim in its original language and script. Do not translate, summarize or add commentary.",
+  "- Mark titles and section headings with # headings and bulleted or numbered items as Markdown lists.",
+  "- Use a Markdown pipe table only for real tabular data, such as line items, schedules, registers and timetables. Keep each table as printed: one Markdown row per printed row and the printed columns in their order, never transposed, with a | --- | delimiter row after the first row. Do not turn page columns, side-by-side articles, cards, adverts or form fields into tables; write those as ordinary text, one block after another, and form fields as \"Label: value\" lines.",
+  "- Write mathematical formulas and equations in LaTeX: inline formulas inside $...$ and each displayed equation inside its own $$...$$ block on separate lines, one block per printed equation line. Never output a formula without these delimiters. Keep ordinary words, numbers, footnote markers, identifiers and code as plain text.",
+  "- Transcribe the text, labels and formulas printed inside figures, charts and diagrams, then their captions. Do not add image placeholders or describe what a picture shows.",
+  "- Write each paragraph as a single line and separate paragraphs with a blank line.",
+  "Output only the Markdown transcription.",
+].join("\n");
+
 /** Page-wide Markdown transcription with LaTeX math, GFM tables for printed tables, and text inside figures. */
 export const PAGE_MARKDOWN_LATEX_VISION_PROMPT = [
   "Transcribe this document page into GitHub-flavored Markdown. Copy every visible word verbatim in natural reading order: finish each column before starting the next, and keep headers, footers, captions and labels where they appear. Do not summarize, translate, describe or add commentary.",
@@ -37,7 +53,7 @@ export const PAGE_MARKDOWN_LATEX_VISION_PROMPT = [
   "- Do not pad lines with alignment spaces. Output only the Markdown.",
 ].join("\n");
 
-export type VisionProfilePromptKey = "markdown-latex" | "markdown-transcription" | "page-markdown-latex";
+export type VisionProfilePromptKey = "markdown-latex" | "markdown-transcription" | "markdown-transcription-tables" | "page-markdown-latex";
 
 export interface OpenRouterProviderPreferences {
   order: string[];
@@ -137,6 +153,8 @@ export const VISION_MODEL_PROFILES: Readonly<Record<string, VisionModelProfile>>
     // `none` and `{ enabled: false }` ("Reasoning is mandatory"); minimal spends ~1 reasoning token a page.
     reasoning: { effort: "minimal" },
     openRouterProvider: { order: ["wafer/nvfp4", "friendli", "inference-net/fp4"], allow_fallbacks: false },
+    // Some pipe tables arrive without their `| --- |` row and would render as literal text.
+    postProcess: insertMissingTableDelimiters,
   },
 };
 
