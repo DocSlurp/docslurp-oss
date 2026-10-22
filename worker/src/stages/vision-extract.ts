@@ -78,6 +78,10 @@ export interface VisionPageOutput {
   costCents: number;
   /** Provider finish reason (`stop`, `length`, ...) when the runtime reported one. */
   finishReason?: string | null;
+  /** Model id the provider reports having served, when it differs in form from `model` or is the only report. */
+  servedModel?: string;
+  /** Present when the served model differs from the requested one (see `VISION_MODEL_SWAP_POLICY`). */
+  modelSwap?: { requested: string; served: string; provider: string | null };
 }
 
 export class VisionExtractStage implements Stage {
@@ -399,6 +403,8 @@ export class VisionExtractStage implements Stage {
                 fallbackUsed: page.fallbackUsed,
                 fallbackReason: page.fallbackReason,
                 costCents: page.costCents,
+                ...(page.servedModel ? { servedModel: page.servedModel } : {}),
+                ...(page.modelSwap ? { modelSwap: page.modelSwap } : {}),
                 text: page.text,
               })),
             });
@@ -417,6 +423,7 @@ export class VisionExtractStage implements Stage {
                   runtime: page.runtime,
                   model: page.model,
                   fallbackUsed: page.fallbackUsed,
+                  ...(page.modelSwap ? { modelSwap: page.modelSwap } : {}),
                 },
               });
             }
@@ -1027,6 +1034,8 @@ export class VisionExtractStage implements Stage {
         text: result.text,
         costCents: this.calculateVisionCost(result),
         ...(result.finishReason !== undefined ? { finishReason: result.finishReason } : {}),
+        ...(result.servedModel ? { servedModel: result.servedModel } : {}),
+        ...(result.modelSwap ? { modelSwap: result.modelSwap } : {}),
       };
       const usageEvent = state.usageLedger.record({
           provider: result.provider ?? (result.baseUrl?.includes("openrouter.ai") ? "openrouter" : result.runtime === "remote-openai" ? "openai" : "vision-runtime"),
@@ -1049,6 +1058,8 @@ export class VisionExtractStage implements Stage {
             outcome: result.text.trim() ? "completed" : "empty-output",
             fallbackUsed: result.fallbackUsed,
             usageSource: result.usageSource,
+            ...(result.servedModel ? { servedModel: result.servedModel } : {}),
+            ...(result.modelSwap ? { modelSwap: result.modelSwap } : {}),
           },
         },
       );

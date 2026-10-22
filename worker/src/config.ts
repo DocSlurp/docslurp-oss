@@ -97,6 +97,12 @@ export interface Config {
    * Config literals (tests) read as off.
    */
   pageRouterMode?: PageRouterMode;
+  /**
+   * VISION_MODEL_SWAP_POLICY=warn|fail (default warn). When a hosted vision call is
+   * served by a different model snapshot than requested, `warn` logs and flags it;
+   * `fail` throws a retryable provider error. Optional so partial Config literals read as warn.
+   */
+  visionModelSwapPolicy?: "warn" | "fail";
   pythonPoolSize: number;
   parserArtifactTimeoutMs: number;
   unstructuredParserChunkTimeoutMs: number;
@@ -282,6 +288,7 @@ export function fromEnv(): Config {
       process.env.VISION_DENSITY_THRESHOLD ?? "0.25",
     ),
     pageRouterMode: readPageRouterMode(process.env.PAGE_ROUTER_MODE),
+    visionModelSwapPolicy: readEnv(process.env.VISION_MODEL_SWAP_POLICY)?.toLowerCase() === "fail" ? "fail" : "warn",
     pythonPoolSize: readNumber(process.env.WORKER_PYTHON_POOL_SIZE, 2),
     parserArtifactTimeoutMs: readNumber(
       process.env.PARSER_ARTIFACT_TIMEOUT_MS,
