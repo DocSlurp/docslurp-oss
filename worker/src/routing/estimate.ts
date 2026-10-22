@@ -427,10 +427,10 @@ export function applyBudgetGuard(
       actions.push({ action: "skip", pageNumber: a.pageNumber, role: a.role, fromTargetId: a.targetId, toTargetId: "skip", reason: "no-cheaper-target" });
       continue;
     }
-    // Content roles: defer to a later chunk/run, but only when that can restore the budget. If the
-    // router's own (already spent) cost breaks the limit or margin floor even with no assignments,
-    // deferring would just leave pages unrouted without fixing anything.
-    if (!routerAloneOk) break;
+    // Content roles: defer to a later chunk/run. When the router's own (already spent) cost breaks
+    // the margin floor even with no assignments, deferring cannot restore the floor and would just
+    // leave pages unrouted, so stop, but only while the hard spend limit still holds.
+    if (!routerAloneOk && totals().cost <= budget.limitUsd + 1e-12) break;
     planned = planned.filter((p) => p !== target);
     deferred.push(target);
     actions.push({ action: "defer", pageNumber: a.pageNumber, role: a.role, fromTargetId: a.targetId, toTargetId: null, reason: "no-cheaper-target" });

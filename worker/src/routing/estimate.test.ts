@@ -113,6 +113,12 @@ describe("applyBudgetGuard", () => {
     expect(r.deferred).toEqual([]);
     expect(r.withinBudget).toBe(false);
   });
+  it("still defers content past the spend limit even when the router alone breaks the margin floor", () => {
+    const triage = { costUsd: 0.001, billedUsd: 0.0012 };
+    const r = applyBudgetGuard([planned("vlm", "extract-text", 0.05)], triage, { limitUsd: 0.02, marginFloor: 0.5 });
+    expect(r.deferred).toHaveLength(1);
+    expect(r.planned).toEqual([]);
+  });
   it("still defers content when removing it can restore the budget", () => {
     const r = applyBudgetGuard([planned("text", "extract-text", 0.04)], { costUsd: 0.001, billedUsd: 0.01 }, { limitUsd: 0.02, marginFloor: 0.5 });
     expect(r.deferred).toHaveLength(1);
