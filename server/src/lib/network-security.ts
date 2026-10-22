@@ -3,11 +3,10 @@ import { BlockList, isIP } from "node:net";
 import type { TLSSocket } from "node:tls";
 import tls from "node:tls";
 
-import { Agent } from "undici";
-
-type FetchInitWithDispatcher = RequestInit & {
-  dispatcher?: Agent;
-};
+// Use undici's own fetch with its Agent. Node's global fetch bundles a different
+// undici major (v7 on Node 24), whose handler shape the v8 Agent rejects with
+// "invalid onRequestStart method", so every vetted request failed in production.
+import { Agent, fetch as undiciFetch, type RequestInit as UndiciRequestInit } from "undici";
 
 type SafeLookupAddress = {
   address: string;
@@ -223,13 +222,13 @@ export async function safeExternalFetch(rawUrl: string, init: RequestInit = {}):
   const dispatcher = createDnsPinnedDispatcher(parsed.hostname.replace(/^\[|\]$/g, ""));
 
   try {
-    const response = await fetch(parsed.toString(), {
+    const response = await undiciFetch(parsed.toString(), {
       ...init,
       redirect: "error",
       signal: init.signal ? AbortSignal.any([init.signal, AbortSignal.timeout(15_000)]) : AbortSignal.timeout(15_000),
       dispatcher,
-    } as FetchInitWithDispatcher);
-    return responseWithDispatcherCleanup(response, dispatcher);
+    } as UndiciRequestInit);
+    return responseWithDispatcherCleanup(response as unknown as Response, dispatcher);
   } catch (error) {
     void dispatcher.close();
     throw error;
