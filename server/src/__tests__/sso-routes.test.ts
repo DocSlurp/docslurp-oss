@@ -1,4 +1,5 @@
 import { Hono } from "hono";
+import { createHash } from "node:crypto";
 import { exportJWK, generateKeyPair, SignJWT } from "jose";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { withTestSession } from "./helpers/session-app.js";
@@ -249,6 +250,11 @@ function seedRequest(state: string, linkUserId: string | null = null) {
   });
 }
 
+/** The state-binding cookie a callback must carry to prove it returns to the starting browser. */
+function ssoCookie(state: string): { Cookie: string } {
+  return { Cookie: `docslurp_sso_state=${createHash("sha256").update(state).digest("hex")}` };
+}
+
 beforeEach(() => {
   resetDb();
   sqlMock.mockClear();
@@ -474,11 +480,11 @@ describe("SSO callback account binding", () => {
     seedRequest("s1");
     await stubIdp(() => ({ sub: "idp-victim", email: "victim@acme.com", nonce: "nonce-s1" }));
 
-    const response = await buildApp().request("/v1/auth/oidc/org-1/callback?state=s1&code=c");
+    const response = await buildApp().request("/v1/auth/oidc/org-1/callback?state=s1&code=c", { headers: ssoCookie("s1") });
 
     expect(response.status).toBe(302);
     expect(response.headers.get("location")).toContain("authError=");
-    expect(response.headers.get("set-cookie")).toBeNull();
+    expect(response.headers.get("set-cookie") ?? "").not.toContain("better-auth.session_token=");
     expect(createSessionMock).not.toHaveBeenCalled();
   });
 
@@ -488,7 +494,7 @@ describe("SSO callback account binding", () => {
     seedRequest("s2");
     await stubIdp(() => ({ sub: "idp-victim", email: "victim@acme.com", nonce: "nonce-s2" }));
 
-    const response = await buildApp().request("/v1/auth/oidc/org-1/callback?state=s2&code=c");
+    const response = await buildApp().request("/v1/auth/oidc/org-1/callback?state=s2&code=c", { headers: ssoCookie("s2") });
 
     expect(response.status).toBe(302);
     expect(response.headers.get("set-cookie")).toContain("better-auth.session_token=");
@@ -502,7 +508,7 @@ describe("SSO callback account binding", () => {
     seedRequest("s3");
     await stubIdp(() => ({ sub: "idp-victim", email: "victim@acme.com", nonce: "nonce-s3" }));
 
-    const response = await buildApp().request("/v1/auth/oidc/org-1/callback?state=s3&code=c");
+    const response = await buildApp().request("/v1/auth/oidc/org-1/callback?state=s3&code=c", { headers: ssoCookie("s3") });
 
     expect(response.status).toBe(403);
     expect(createSessionMock).not.toHaveBeenCalled();
@@ -515,7 +521,7 @@ describe("SSO callback account binding", () => {
     seedRequest("s4");
     await stubIdp(() => ({ sub: "idp-victim", email: "victim@acme.com", nonce: "nonce-s4" }));
 
-    const response = await buildApp().request("/v1/auth/oidc/org-1/callback?state=s4&code=c");
+    const response = await buildApp().request("/v1/auth/oidc/org-1/callback?state=s4&code=c", { headers: ssoCookie("s4") });
 
     expect(response.status).toBe(403);
     expect(createSessionMock).not.toHaveBeenCalled();
@@ -539,14 +545,14 @@ describe("SSO callback account binding", () => {
     const state = new URL(authorizeUrl).searchParams.get("state")!;
     expect(db.requests.at(-1)).toMatchObject({ state, link_user_id: "victim-1" });
 
-    const linked = await victimApp.request(`/v1/auth/oidc/org-1/callback?state=${state}&code=c`);
+    const linked = await victimApp.request(`/v1/auth/oidc/org-1/callback?state=${state}&code=c`, { headers: { Cookie: started.headers.get("set-cookie")!.split(";")[0]! } });
     expect(linked.status).toBe(302);
     expect(linked.headers.get("location")).toContain("/app/sso?linked=1");
     expect(createSessionMock).not.toHaveBeenCalled();
     expect(db.links).toMatchObject([{ org_id: "org-1", user_id: "victim-1", issuer, subject: "idp-victim" }]);
 
     seedRequest("s5");
-    const signIn = await buildApp().request("/v1/auth/oidc/org-1/callback?state=s5&code=c");
+    const signIn = await buildApp().request("/v1/auth/oidc/org-1/callback?state=s5&code=c", { headers: ssoCookie("s5") });
     expect(createSessionMock).toHaveBeenCalledWith("victim-1");
     expect(signIn.headers.get("set-cookie")).toContain("better-auth.session_token=");
   });
@@ -556,7 +562,7 @@ describe("SSO callback account binding", () => {
     seedRequest("s6", "victim-1");
     await stubIdp(() => ({ sub: "idp-other", email: "other@acme.com", nonce: "nonce-s6" }));
 
-    const response = await buildApp().request("/v1/auth/oidc/org-1/callback?state=s6&code=c");
+    const response = await buildApp().request("/v1/auth/oidc/org-1/callback?state=s6&code=c", { headers: ssoCookie("s6") });
 
     expect(response.status).toBe(403);
     expect(db.links).toHaveLength(0);
@@ -574,5 +580,16 @@ describe("SSO callback account binding", () => {
     });
 
     expect(response.status).toBe(403);
+  });
+
+  it("rejects a callback that arrives without the state-binding cookie (SEC-2026-10-06)", async () => {
+    seedVictim();
+    seedRequest("s7");
+    await stubIdp(() => ({ sub: "idp-victim", email: "victim@acme.com", nonce: "nonce-s7" }));
+
+    const response = await buildApp().request("/v1/auth/oidc/org-1/callback?state=s7&code=c");
+
+    expect(response.status).toBe(400);
+    expect(createSessionMock).not.toHaveBeenCalled();
   });
 });
