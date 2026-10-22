@@ -83,6 +83,29 @@ describe("native resource bearer authentication boundary", () => {
     expect(mocks.session).not.toHaveBeenCalled();
   });
 
+  it("rejects a cross-site cookie mutation and accepts a same-origin one (SEC-2026-10-02)", async () => {
+    mocks.apiKey.mockResolvedValue(null);
+    mocks.session.mockResolvedValue({ type: "session" });
+    const cross = await app().request("/v1/organizations/one/members", {
+      method: "POST",
+      headers: { origin: "https://evil.example", "sec-fetch-site": "cross-site" }
+    });
+    expect(cross.status).toBe(403);
+    const same = await app().request("/v1/organizations/one/members", {
+      method: "POST",
+      headers: { origin: "http://localhost", "sec-fetch-site": "same-origin" }
+    });
+    expect(same.status).toBe(200);
+  });
+
+  it("does not apply the CSRF check to bearer credentials (not CSRFable)", async () => {
+    const res = await app().request("/v1/organizations/one/members", {
+      method: "POST",
+      headers: { ...headers, origin: "https://evil.example", "sec-fetch-site": "cross-site" }
+    });
+    expect(res.status).toBe(200);
+  });
+
   it("delegates hosted MCP to resource authentication without cookie fallback", async () => {
     expect((await app().request("/v1/mcp", { headers: { Cookie: "session=fixture" } })).status).toBe(200);
     expect(mocks.apiKey).not.toHaveBeenCalled();

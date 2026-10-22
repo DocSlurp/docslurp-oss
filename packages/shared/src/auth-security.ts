@@ -141,6 +141,14 @@ export function createBetterAuthSecurityOptions(env: NodeJS.ProcessEnv) {
     },
     advanced: {
       useSecureCookies: isHttpsOrigin(baseURL),
+      // Pin the session cookie policy instead of relying on library defaults:
+      // Lax blocks cross-site sends (the CSRF boundary, SEC-2026-10-02), and
+      // HttpOnly keeps the token out of reach of script.
+      defaultCookieAttributes: {
+        httpOnly: true,
+        sameSite: "lax" as const,
+        secure: isHttpsOrigin(baseURL)
+      },
       trustedProxyHeaders: env.BETTER_AUTH_TRUST_PROXY_HEADERS === "true",
       ipAddress: {
         // Only a header the app sets itself (resolved by

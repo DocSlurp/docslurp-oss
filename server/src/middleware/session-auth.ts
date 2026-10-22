@@ -1,4 +1,4 @@
-import type { MiddlewareHandler } from "hono";
+import type { Context, MiddlewareHandler } from "hono";
 
 import {
   resolveApiKeyActor,
@@ -7,6 +7,35 @@ import {
 } from "../lib/request-actor.js";
 import { routeAuthMode } from "../lib/route-auth.js";
 import { middlewareErrorResponse } from "../lib/api-error.js";
+import { env } from "../config.js";
+
+/**
+ * CSRF guard for cookie-authenticated, state-changing requests (SEC-2026-10-02).
+ *
+ * The session cookie is the only ambient credential on `/v1/*`. A browser
+ * cross-site POST carries `Sec-Fetch-Site: cross-site`; reject it. When the
+ * header is absent, fall back to `Origin` against the CORS allowlist and the
+ * request origin. Non-browser clients send neither header and are not CSRFable,
+ * so they pass. Safe methods are always allowed.
+ */
+function isCookieMutationFromTrustedOrigin(c: Context): boolean {
+  const method = c.req.method.toUpperCase();
+  if (method === "GET" || method === "HEAD" || method === "OPTIONS") return true;
+
+  const fetchSite = c.req.header("sec-fetch-site");
+  if (fetchSite) {
+    return fetchSite === "same-origin" || fetchSite === "same-site" || fetchSite === "none";
+  }
+
+  const origin = c.req.header("origin");
+  if (!origin) return true;
+  if (env.corsAllowedOrigins.includes(origin)) return true;
+  try {
+    return new URL(c.req.url).origin === origin;
+  } catch {
+    return false;
+  }
+}
 
 /**
  * Resolves the active Better Auth session from the incoming request cookies and
@@ -56,6 +85,10 @@ export const sessionAuth: MiddlewareHandler = async (c, next) => {
   const actor = await resolveBetterAuthSessionActor(c.req.raw.headers);
   if (!actor) {
     return middlewareErrorResponse(c, 401, "unauthorized", "Unauthorized");
+  }
+
+  if (!isCookieMutationFromTrustedOrigin(c)) {
+    return middlewareErrorResponse(c, 403, "forbidden", "Cross-site request rejected");
   }
 
   setRequestActor(c, actor);
