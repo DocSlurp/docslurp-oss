@@ -43,7 +43,7 @@ export const visionPromptTemplates = {
     "Transcribe this document page into GitHub-flavored Markdown. Copy every visible word verbatim in natural reading order: finish each column before starting the next, and keep headers, footers, captions and labels where they appear. Do not summarize, translate, describe or add commentary.",
     "- Headings as # headings; lists as - or numbered lists.",
     "- Math: write every formula and equation in LaTeX, inline as $...$ and each equation set on its own line as $$...$$ (keep equation numbers with \\tag{}). Never write math as Unicode symbols, plain text or \\( \\) delimiters.",
-    "- Tables: transcribe content printed as a table (ruled or column-aligned rows) as a GFM pipe table with one row per line that starts and ends with |, keeping header rows and every cell; leave dot leaders out of table cells. Do not turn other content, such as diagrams or label-value lines, into tables.",
+    "- Tables: transcribe content printed as a table (ruled or column-aligned rows) as a GFM pipe table with one row per line, keeping header rows and every cell. Do not turn other content, such as diagrams or label-value lines, into tables.",
     "- Text inside charts, diagrams and figures: transcribe it as plain lines.",
     "- Do not pad lines with alignment spaces. Output only the Markdown.",
   ].join("\n"),
