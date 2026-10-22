@@ -1,7 +1,7 @@
 import type { PGlite } from "@electric-sql/pglite";
 import type { PGLiteSocketServer } from "@electric-sql/pglite-socket";
 import postgres from "postgres";
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { createMigratedDatabase } from "../test/migrated-db.js";
 import { serveOnRandomPort } from "../test/migrated-postgres.js";
@@ -30,6 +30,8 @@ afterAll(async () => {
   await server?.stop();
   await db?.close();
 });
+
+afterEach(() => vi.unstubAllEnvs());
 
 beforeEach(async () => {
   await sql`delete from documents`;
@@ -376,7 +378,13 @@ describe("retention-aware superseded purge", () => {
     await sql`update documents set status = 'completed' where id = 'v3'`;
   }
 
-  it("without an explicit option the sweep follows billing_runtime, not the worker's env", async () => {
+  it("without an explicit option the sweep follows billing_runtime when billing env overrides are absent", async () => {
+    // Earlier billing-service imports can load the developer's .env. Runtime fallback
+    // applies only without Stripe or explicit billing flags, regardless of the host.
+    vi.stubEnv("STRIPE_SECRET_KEY", "");
+    for (const key of Object.keys(process.env).filter((key) => key.startsWith("DOCSLURP_BILL_"))) {
+      vi.stubEnv(key, "false");
+    }
     const run = async () => purgeSupersededDocuments(sql, storage, { graceSeconds: 0, batchSize: 50, deleteSources: false, lancedbRoot: "/tmp/lance", deleteVectorRows: async () => {} });
     await sql`update billing_runtime set metering_enforced = true`;
     await seedChain(3);
