@@ -47,7 +47,7 @@ const options = {
 };
 // A tag nothing carries: retrieval and the whole-corpus fallback both come back empty.
 const zeroHitFilters = { workspaceId: "w", tags: ["nothing-has-this-tag"] };
-const zeroHitBody = { workspaceId: "w", tags: "nothing-has-this-tag", hyde: false, rerank: false, mmr: false,
+const zeroHitBody = { workspace: "w", tags: "nothing-has-this-tag", hyde: false, rerank: false, mmr: false,
   parentRetrieval: false, compression: false, queryRewrite: false, queryDecompose: false, stepback: false,
   selfQuery: false, iterativeMultiHop: false, graphExpansion: false, communityExpansion: false };
 

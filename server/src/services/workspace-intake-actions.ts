@@ -58,7 +58,7 @@ export type BulkWorkspaceIntakeFile = Pick<File, "arrayBuffer" | "name" | "size"
 
 type IntakeTargetArgs = Pick<
   WorkspaceIntakeRequest,
-  "userId" | "orgId" | "workspaceId" | "newWorkspace" | "workspaceName" | "templateKey" | "pipeline" | "tags" | "indexingMode"
+  "userId" | "orgId" | "workspace" | "newWorkspace" | "templateKey" | "allowedWorkspaceIds" | "pipeline" | "tags" | "indexingMode"
 >;
 
 async function requiredIntake(
@@ -174,10 +174,10 @@ export async function confirmDirectUploadWorkspaceIntake(
     {
       userId: args.userId,
       orgId: session.org_id,
-      workspaceId: session.workspace_id,
-      // Sessions resolve the default workspace up front, so no target means "create one".
-      newWorkspace: !session.workspace_id,
-      workspaceName: session.workspace_name,
+      // Sessions resolve the target up front: an existing workspace's ID, or
+      // the name of the workspace to create (neither: a self-titled one).
+      workspace: session.workspace_id ?? session.workspace_name,
+      newWorkspace: !session.workspace_id && !session.workspace_name,
       templateKey: session.template_key
         ? workspaceTemplateKeySchema.parse(session.template_key)
         : undefined,

@@ -20,7 +20,7 @@ Search and chat need only a question:
 {"q":"What are the support hours?"}
 ```
 
-Without `workspaceId`, tools use the organization default workspace. Add `"workspaceId":"legal-contracts"` (a workspace slug; UUIDs, former slugs and `default` are also accepted) to target another workspace. See [Workspaces](https://docslurp.io/docs/http#workspaces).
+Without `workspace`, tools use the organization default workspace. Add `"workspace":"legal-contracts"` (a workspace ID, slug or name: `"Legal Contracts"` finds the same workspace) to target another one. The `upload` tool creates the workspace when a name matches none of yours, so agents should pass a new name only when the user asks for a new workspace; every other tool answers `workspace_not_found`. See [Workspaces](https://docslurp.io/docs/http#workspaces).
 
 Continue a chat by passing its returned `sessionId`. Search is independent of the answer model: pass the returned text and citations to any LLM for your own RAG workflow. Retrieval can incur embedding usage; chat additionally incurs generation usage. These tools require `search` scope and check workspace access against the authenticated organization.
 
@@ -30,12 +30,12 @@ Run multiple retrieval queries in one call:
 {
   "queries": [
     {"q":"Support hours?"},
-    {"workspaceId":"legal-contracts","q":"Escalation process?"}
+    {"workspace":"legal-contracts","q":"Escalation process?"}
   ]
 }
 ```
 
-Parallel retrieval defaults to at most four in-flight queries; set `concurrency` from 1 through 4 when needed. Each query supports optional `workspaceId`, `limit`, `minScore` (relevance floor, 0 disables it; responses carry `noMatch` when nothing relevant remains), `documentId`, `filenameContains`, and comma-separated `tags`. The batch envelope is validated before retrieval starts. Results stay in input order:
+Parallel retrieval defaults to at most four in-flight queries; set `concurrency` from 1 through 4 when needed. Each query supports optional `workspace`, `limit`, `minScore` (relevance floor, 0 disables it; responses carry `noMatch` when nothing relevant remains), `documentId`, `filenameContains`, and comma-separated `tags`. The batch envelope is validated before retrieval starts. Results stay in input order:
 
 ```json
 {

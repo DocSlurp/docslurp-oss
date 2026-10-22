@@ -124,7 +124,8 @@ export const aggregateWorkspaceRagSearchRequestSchema = z
   .object({
     q: z.string().min(1).optional(),
     goal: z.string().min(1).optional(),
-    workspaceIds: z.array(z.string().min(1)).default([]),
+    /** Workspace IDs, slugs or names (see parseWorkspaceInput). Empty: every workspace the caller can search. */
+    workspaces: z.array(z.string().trim().min(1).max(256)).default([]),
     limitPerWorkspace: z.number().int().positive().max(25).default(5),
     maxWorkspaces: z.number().int().positive().max(50).default(12),
     maxCitations: z.number().int().positive().max(50).default(12),
@@ -175,8 +176,8 @@ export type RunProcessingPreviewUrl = z.infer<
 
 export const runProcessingPreviewRequestSchema = z
   .object({
-    /** UUID, slug, former slug or `default`; omitted means the org's default workspace. */
-    workspaceId: z.string().min(1).optional(),
+    /** Workspace ID, slug or name (see parseWorkspaceInput); omitted means the org's default workspace. */
+    workspace: z.string().trim().min(1).max(256).optional(),
     pipeline: pipelineFeaturesSchema.default(defaultPipelineFeatures),
     files: z.array(runProcessingPreviewFileSchema).default([]),
     urls: z.array(runProcessingPreviewUrlSchema).default([]),

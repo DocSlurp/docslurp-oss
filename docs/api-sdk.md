@@ -11,7 +11,7 @@ curl https://docslurp.io/v1/search \
   --data '{"q": "How much parental leave do we get?", "limit": 5}'
 ```
 
-Each result has `text`, a `score` and a `citation` with the `filename`, `pageNumber` and `documentId`. Without a `workspaceId`, the request searches your organization's default workspace. To upload documents first, run [the complete HTTP flow](#the-complete-http-flow) below.
+Each result has `text`, a `score` and a `citation` with the `filename`, `pageNumber` and `documentId`. Without a `workspace`, the request searches your organization's default workspace. To upload documents first, run [the complete HTTP flow](#the-complete-http-flow) below.
 
 | Prefer a client library? | Use it for |
 | --- | --- |
@@ -105,13 +105,13 @@ jq '{availability, sessionId, usage, results: [.results[] | {text, score, citati
 
 Check `availability.status` before you treat the result as complete evidence.
 
-With no `workspaceId`, the upload, search and chat all use your organization's default workspace. To use a named workspace, add `-F 'workspaceId=legal-contracts'` to the upload and `workspaceId: "legal-contracts"` to search and chat. To create a new workspace that titles itself from the upload, add `-F 'newWorkspace=true'` (see [Workspaces](#workspaces)).
+With no `workspace`, the upload, search and chat all use your organization's default workspace. To keep documents in their own workspace, add `-F 'workspace=Legal Contracts'` to the upload and `"workspace": "Legal Contracts"` to search and chat: the first upload creates a workspace with that name (slug `legal-contracts`), and every later request finds it by name, slug or ID. To create a new workspace that titles itself from the upload, add `-F 'newWorkspace=true'` instead (see [Workspaces](#workspaces)).
 
 Keep server keys out of browser bundles. The base URL is the service **origin**; the routes below already include `/v1`.
 
 ### Add a grounded answer
 
-Chat uses the same default workspace when `workspaceId` is omitted:
+Chat uses the same default workspace when `workspace` is omitted:
 
 ```bash
 jq -n --arg q 'Summarize the parental leave policy and cite your sources.' '{q: $q}' |
@@ -127,27 +127,34 @@ To follow up, pass the returned `sessionId` in the next chat request. Search doe
 
 ## Workspaces
 
-Workspaces are optional. Every organization has a **default workspace**, created on first use, and any request that omits `workspaceId` uses it. This section explains every way to refer to a workspace; other guides link here.
+Workspaces are optional. Every organization has a **default workspace**, created on first use, and any request that omits `workspace` uses it. This section explains every way to refer to a workspace; other guides link here.
 
-| Reference | Example | Notes |
+Every request that targets a workspace takes one field, `workspace`, whose value can be any of these:
+
+| Value | Example | Notes |
 | --- | --- | --- |
 | Omitted, or `default` | `default` | Your organization's default workspace. Any organization member can read and upload to it; it cannot be archived or deleted. |
-| Slug | `legal-contracts` | Every workspace has a globally unique, URL-safe slug, generated as three words (e.g. `amber-falcon-ridge`) and renamable. Prefer slugs in config and human-facing links. |
+| Name | `Legal Contracts` | Matched by its slug, so `Legal Contracts`, `legal contracts` and `  Légal—Contracts! ` all name the workspace whose slug is `legal-contracts`. If no slug matches, a workspace whose name has that slug matches (oldest first). |
+| Slug | `legal-contracts` | Every workspace has a globally unique, URL-safe slug: the slug of its name when it was created from an upload, otherwise three generated words (e.g. `amber-falcon-ridge`). Slugs are renamable. Prefer them in config and human-facing links. |
 | Former slug | `amber-falcon-ridge` | Every slug a workspace has had keeps resolving to it, like a renamed GitHub repository, and cannot be claimed by another workspace. |
-| UUID | `6f1c2a7e-…` | Also accepted; an absolute reference that never changes. |
+| UUID | `6f1c2a7e-…` | An absolute reference that never changes. |
 
-**Where references are accepted:** `workspaceId` in request bodies and query strings (uploads, URL ingest, direct upload sessions, search GET/POST/batch, chat and chat stream, suggest, MCP `workspace.*` tools); REST paths `/v1/workspaces/:workspace/...`; [compatible search](https://docslurp.io/docs/search-integrations) index/collection names (`/compat/meilisearch/indexes/default/search`); and `model: "workspace:default"` for [OpenAI-compatible chat](https://docslurp.io/docs/chat) (other workspaces use the `workspace:<uuid>` model IDs from `GET /v1/models`).
+Values are matched by slug: the value is lowercased, accents are stripped, every run of characters other than `a-z` and `0-9` becomes one hyphen, and leading and trailing hyphens are dropped (at most 63 characters). A value with no letters or digits left, such as `!!!`, is a `400 invalid_request`. Matching only ever looks at workspaces you can use: your organization's (the API key's organization, or `orgId` for dashboard sessions), and for a key restricted to specific workspaces, only those.
 
-**Which organization:** API keys use their own organization's default workspace. Dashboard sessions use the personal organization unless the request passes `orgId` (body field, or `?orgId=` on query-string and `/v1/workspaces/default/...` requests).
+**When nothing matches:** uploads (`/v1/uploads/bulk`, `/v1/uploads/url`, direct upload sessions, the MCP `upload` tool) create a workspace whose display name is the value as you typed it and whose slug is its slug (with a short suffix if another organization already holds that slug). Every other request answers `404 workspace_not_found` with a message naming the slug it looked for, for example `No workspace matching "legal-contracts" was found` (also in `error.details.workspaceSlug`). A key restricted to specific workspaces cannot create one: such an upload answers `403`.
+
+**Where `workspace` is accepted:** request bodies, query strings and form fields of uploads, URL ingest, direct upload sessions, upload estimates, search GET/POST and each batch query, chat and chat stream, suggest, document and notification listing filters, run previews, and the MCP tools. Aggregate search (`POST /v1/search/aggregate`) takes a `workspaces` array of the same values. REST paths `/v1/workspaces/:workspace/...` accept a UUID, slug, former slug or `default` (a name in a path is matched by its slug). [Compatible search](https://docslurp.io/docs/search-integrations) index/collection names (`/compat/meilisearch/indexes/default/search`) and `model: "workspace:default"` for [OpenAI-compatible chat](https://docslurp.io/docs/chat) (`GET /v1/models` lists `workspace:<uuid>` IDs; `workspace:<slug>` also works) use the same resolver. Responses keep reporting the resolved `workspaceId` (a UUID) and the workspace record with its `slug`.
+
+**Which organization:** API keys use their own organization. Dashboard sessions use the personal organization for the default workspace unless the request passes `orgId` (body field, or `?orgId=` on query-string and `/v1/workspaces/default/...` requests); with `orgId`, names and slugs only match workspaces in that organization.
 
 **Precedence (first match wins):**
 
-- SDK: a per-call `workspaceId`, then `createDocSlurpClient({ workspaceId })`, then `DOCSLURP_WORKSPACE_ID` (server runtimes only; browser builds never read environment variables), then `"default"` (exported as `DEFAULT_WORKSPACE_ID`).
-- CLI: `--workspace`, then `DOCSLURP_WORKSPACE_ID`, then `default`.
+- SDK: a per-call `workspace`, then `createDocSlurpClient({ workspace })`, then `DOCSLURP_WORKSPACE` (server runtimes only; browser builds never read environment variables), then `"default"` (exported as `DEFAULT_WORKSPACE`).
+- CLI: `--workspace`, then `DOCSLURP_WORKSPACE`, then `default`.
 
 So `client.search({ q: "question" })`, `client.getWorkspaceState()` and `docslurp search` work with no workspace configuration.
 
-**New workspaces:** uploads only create a workspace when asked: `newWorkspace: true` (multipart `newWorkspace=true`, CLI `--new-workspace`, SDK `newWorkspace`), a `workspaceName` (CLI `--workspace-name`), or a `templateKey` (CLI `--template`). The SDK and CLI send no `workspaceId` in those cases, so a configured default workspace does not swallow the request. Without a name the new workspace titles itself from the uploaded content. An explicit `workspaceId` (including `default`) wins over these. The upload response's `workspace` record includes `id` and `slug`.
+**New workspaces:** besides naming one that does not exist yet, an upload creates a workspace when it omits `workspace` and sends `newWorkspace: true` (multipart `newWorkspace=true`, CLI `--new-workspace`, SDK `newWorkspace`) or a `templateKey` (CLI `--template`); that workspace titles itself from the uploaded content. The SDK and CLI send no `workspace` in those cases, so a configured client workspace does not swallow the request. An explicit `workspace` (including `default`) wins over `newWorkspace`; a `templateKey` sent with a `workspace` applies only if the upload creates it. The upload response's `workspace` record includes `id` and `slug`.
 
 **Rename a slug** in the dashboard (the gear next to the workspace name, then Workspace) or over HTTP:
 
@@ -200,6 +207,8 @@ curl -X PATCH "$api_url/v1/workspaces/amber-falcon-ridge" \
 Guides: [document versions and retention](document-versions.md) and [config-change jobs and estimates](config-change-jobs.md).
 
 ## API changes
+
+- **2026-10-21, breaking.** One `workspace` request field replaces `workspaceId` and `workspaceName` everywhere a request targets a workspace (bodies, query strings, multipart fields, MCP tool arguments; aggregate search takes `workspaces` instead of `workspaceIds`). It takes a UUID, slug, former slug or name, matched by slug. Uploads into a name that matches nothing create that workspace; other requests answer `404 workspace_not_found` naming the slug. The SDK option and inputs, embed and widget attribute (`workspace`), CLI `--workspace` (`--workspace-name` is removed) and the `DOCSLURP_WORKSPACE` environment variable follow. Responses still carry `workspaceId`. See [Workspaces](#workspaces).
 
 - **2026-10-20.** New workspaces default to `summaries: true`. Create/update bodies and workspace responses expose this document-summary option. It adds a one-time processing cost to improve document search and workspace overviews. See [document summaries, costs and limits](document-summaries.md).
 - **2026-10-14, non-breaking.** Responses of work-creating routes (workspace `PATCH`, search-settings `PATCH`, uploads, reprocess, full-index, graph rebuild) gain an optional `job`. New `POST …/estimate` routes, `GET /v1/jobs/:id` and `GET /v1/jobs/:id/events`. Workspaces gain `autoConfirmReindex` and `retainDocumentVersions`; organizations gain `retainDocumentVersions`. Uploads accept `path`. Config `PATCH` requests that succeeded before still succeed and never return `409`; a `reindex-required` change now queues a re-index. See [config-change jobs](config-change-jobs.md).
@@ -316,7 +325,7 @@ console.log(state.storage.sourceMb, state.storage.documentsWithUnknownSize);
 console.log(state.searches.latencyMs.p95, state.performance.pagesPerMinute);
 ```
 
-Omit the first argument (or pass `undefined` when you also pass options) to use the client's workspace: the `workspaceId` client option, then `DOCSLURP_WORKSPACE_ID`, then `default`. For another workspace, pass a slug such as `"legal-contracts"` or a UUID. `recentWindowHours` is an integer from 1 to 720 and defaults to 24; HTTP enforces the same range. Bearer requests need a server key with the `ingest`, `search`, `artifacts` or `workspaces:manage` scope.
+Omit the first argument (or pass `undefined` when you also pass options) to use the client's workspace: the `workspace` client option, then `DOCSLURP_WORKSPACE`, then `default`. For another workspace, pass a slug such as `"legal-contracts"` or a UUID. `recentWindowHours` is an integer from 1 to 720 and defaults to 24; HTTP enforces the same range. Bearer requests need a server key with the `ingest`, `search`, `artifacts` or `workspaces:manage` scope.
 
 ```bash
 curl --fail-with-body --silent --show-error --max-time 30 \
