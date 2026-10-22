@@ -28,7 +28,24 @@ MCP requests go to `https://docslurp.io/v1/mcp`:
 
 - **Search and chat** send your query text and any filters you set.
 - **Upload** sends file metadata (name, size, type) to the MCP server, which returns short-lived presigned URLs. Claude then uploads the file bytes directly to DocSlurp's object storage with those URLs. URL ingestion sends the URLs, and DocSlurp fetches them.
-- **Processing** may send document content or queries to the extraction, embedding and model providers selected by your workspace configuration. Storage and retention follow your workspace settings and the service's [privacy policy](https://docslurp.io/privacy) and [terms](https://docslurp.io/terms).
+- **Processing** sends document content and queries to the third-party providers listed below. Storage and retention follow your workspace settings and the service's [privacy policy](https://docslurp.io/privacy) and [terms](https://docslurp.io/terms).
+
+### Third-party data providers
+
+On the hosted service, a workspace in the default `standard` privacy mode uses these providers:
+
+| Provider | Data it receives | When |
+| --- | --- | --- |
+| [Fly.io](https://fly.io) | All service data: the API, workers, the Postgres database and backups | Always (hosting) |
+| [Tigris](https://www.tigrisdata.com) | Uploaded files, extracted pages and artifacts, vector indexes, database backups | Always (object storage) |
+| [OpenRouter](https://openrouter.ai) | Chunk and query text for embeddings; page images and text for vision extraction and page routing; queries for search rewriting; chat prompts with retrieved passages; workspace summaries and structured extraction; chat voice audio | Embeddings, extraction and search rewriting on every workspace; the other steps when used or enabled |
+| Model hosts behind OpenRouter (currently Perplexity, Google, Z.ai and DeepSeek by default; Anthropic and OpenAI when you pick their chat models) | Whatever OpenRouter forwards for that model | Same as OpenRouter |
+| [DeepInfra](https://deepinfra.com) | Audio for transcription and speaker diarization; video frames for description; query text and candidate passages for hosted reranking | Audio and video uploads; hosted reranking when enabled |
+| [Google Gemini API](https://ai.google.dev) | Page images and query text for page-image search | Only when deferred page-image indexing is enabled |
+| [PostHog](https://posthog.com) | AI call metadata and token counts, without prompts or outputs; dashboard analytics | Always |
+| [Stripe](https://stripe.com), [Resend](https://resend.com) | Billing details and account email; no document content | Billing and email |
+
+Workspaces in the `local-only` or `strict-privacy` mode make no hosted model calls: optional hosted steps are skipped and required ones fail. `strict-privacy` also logs every blocked call. Self-hosted deployments use only the providers their operator configures.
 
 The bundle contains no executable scripts, hooks or local MCP server. File uploads can use a local HTTP client to transfer bytes to the returned object-storage host, which may differ from `docslurp.io`. A client without file-transfer capability can use URL ingestion or the DocSlurp upload UI.
 
