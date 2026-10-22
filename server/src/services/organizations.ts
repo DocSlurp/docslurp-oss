@@ -1,6 +1,6 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import type postgres from "postgres";
-import { getPlan, isBillingEnforced, updateOrganizationSchema, type InvitePreview, type OrganizationAccess, type OrganizationDetails, type OrganizationMember, type UpdateOrganizationInput } from "@docslurp/shared";
+import { updateOrganizationSchema, type InvitePreview, type OrganizationAccess, type OrganizationDetails, type OrganizationMember, type UpdateOrganizationInput } from "@docslurp/shared";
 
 import {
   createOrganizationInviteSchema,
@@ -42,7 +42,7 @@ type OrganizationRow = {
   created_by_user_id: string | null;
   credit_balance_cents: number;
   member_role: OrganizationRecord["memberRole"];
-  plan_id?: string | null;
+  funded?: boolean | null;
   retain_document_versions?: number | null;
   created_at: string;
   updated_at: string;
@@ -102,7 +102,7 @@ function mapOrganization(row: OrganizationRow): OrganizationRecord {
     createdByUserId: row.created_by_user_id,
     creditBalanceCents: row.credit_balance_cents,
     memberRole: row.member_role,
-    planId: row.plan_id ?? null,
+    funded: row.funded === true,
     retainDocumentVersions: row.retain_document_versions ?? null,
     createdAt: row.created_at,
     updatedAt: row.updated_at
@@ -180,7 +180,7 @@ export async function ensurePersonalOrganization(userId: string): Promise<Organi
       o.created_by_user_id,
       o.credit_balance_cents,
       om.role as member_role,
-      o.plan_id,
+      o.funded_at is not null as funded,
       o.retain_document_versions,
       o.created_at::text,
       o.updated_at::text
@@ -243,7 +243,7 @@ export async function listOrganizations(userId: string): Promise<OrganizationRec
       o.created_by_user_id,
       o.credit_balance_cents,
       om.role as member_role,
-      o.plan_id,
+      o.funded_at is not null as funded,
       o.retain_document_versions,
       o.created_at::text,
       o.updated_at::text
@@ -267,7 +267,7 @@ export async function getOrganization(orgId: string, userId: string): Promise<Or
       o.created_by_user_id,
       o.credit_balance_cents,
       om.role as member_role,
-      o.plan_id,
+      o.funded_at is not null as funded,
       o.retain_document_versions,
       o.created_at::text,
       o.updated_at::text
@@ -353,13 +353,7 @@ export async function updateOrganization(orgId: string, userId: string, input: U
   try {
     await withOrganizationLock(orgId, userId, async (tx, actor) => {
       if (!organizationCapabilities(actor.role).update) throw new OrganizationError(403, "organization_forbidden", "Organization admin access required");
-      // Self-hosted deployments without billing honour retention on every plan.
-      if (typeof parsed.retainDocumentVersions === "number" && isBillingEnforced()) {
-        const [plan] = await tx<{ plan_id: string | null }[]>`select plan_id from organizations where id = ${orgId}`;
-        if (getPlan(plan?.plan_id).id === "free") {
-          throw new OrganizationError(402, "upgrade_required", "Keeping extra document versions needs a paid plan");
-        }
-      }
+      // Retention is open to every org: archived versions are billed as storage per GB.
       await tx`update organizations set name = coalesce(${parsed.name ?? null}, name),
         slug = case when ${parsed.slug !== undefined} then ${parsed.slug ?? null} else slug end,
         retain_document_versions = case when ${parsed.retainDocumentVersions !== undefined} then ${parsed.retainDocumentVersions ?? null}::integer else retain_document_versions end,

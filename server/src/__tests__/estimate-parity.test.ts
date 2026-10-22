@@ -79,7 +79,7 @@ describe("estimate parity", () => {
   });
 
   it("shared estimator agrees with the service wrapper", async () => {
-    const direct = estimatePipelineWork({ features: defaultPipelineFeatures, stages: ["embed"], pages: 7, documents: 2, plan: "free", env: process.env });
+    const direct = estimatePipelineWork({ features: defaultPipelineFeatures, stages: ["embed"], pages: 7, documents: 2, env: process.env });
     expect(direct.pages).toBe(7);
   });
 });

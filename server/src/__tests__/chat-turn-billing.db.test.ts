@@ -41,7 +41,6 @@ afterAll(async () => {
 
 beforeEach(async () => {
   vi.unstubAllEnvs();
-  usage.clearOrgPlanCache();
   await sql`delete from credit_debits_pending`;
   await sql`delete from credit_ledger`;
   await sql`delete from credit_grants`;

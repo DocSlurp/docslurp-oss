@@ -223,7 +223,7 @@ export const BILLABLE_UNIT_METRICS = {
   richPage: "ingest-page-rich",
   mediaMinutes: "ingest-media-minutes",
   fileMinimum: "ingest-file-minimum",
-  storage: "storage",
+  storage: "storage-daily",
   search: "search-query",
   chatAnswer: "chat-answer",
 } as const;

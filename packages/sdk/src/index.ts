@@ -571,11 +571,11 @@ function deadline(timeoutMs: number, external?: AbortSignal) {
 
 /**
  * Where to lift a limit, from `error.details.links` on 402 and 429 responses of
- * hosted DocSlurp (self-hosted servers send none): `billing` (plan, credits,
- * budgets), `buyCredits`, `upgrade` (plans), `apiKeys` (a key's own limits) and
- * `docs` for the limit.
+ * hosted DocSlurp (self-hosted servers send none): `billing` (credits,
+ * forecast, budgets), `buyCredits`, `autoTopUp` (only while the org's auto
+ * top-up is off), `apiKeys` (a key's own limits) and `docs` for the limit.
  */
-export type DocSlurpErrorLinks = Partial<Record<"billing" | "buyCredits" | "upgrade" | "apiKeys" | "docs", string>>;
+export type DocSlurpErrorLinks = Partial<Record<"billing" | "buyCredits" | "autoTopUp" | "apiKeys" | "docs", string>>;
 
 export class DocSlurpApiError extends Error {
   readonly body: unknown;
@@ -584,7 +584,7 @@ export class DocSlurpApiError extends Error {
   readonly code?: string;
   /** Server correlation id (`error.requestId`) to quote in support requests. */
   readonly requestId?: string;
-  /** Upgrade, billing and docs URLs for credit, budget and rate-limit errors. */
+  /** Buy-credits, auto top-up, billing and docs URLs for credit, budget and rate-limit errors. */
   readonly links?: DocSlurpErrorLinks;
 
   constructor(message: string, status: number, body: unknown) {
@@ -599,7 +599,7 @@ export class DocSlurpApiError extends Error {
   }
 }
 
-const ERROR_LINK_NAMES = ["billing", "buyCredits", "upgrade", "apiKeys", "docs"] as const;
+const ERROR_LINK_NAMES = ["billing", "buyCredits", "autoTopUp", "apiKeys", "docs"] as const;
 
 function errorLinks(value: unknown): DocSlurpErrorLinks | undefined {
   if (!value || typeof value !== "object") return undefined;

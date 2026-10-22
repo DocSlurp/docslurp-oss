@@ -9,7 +9,7 @@ import {
   type ChatTurnContext,
   type ChatTurnStatus,
 } from "../../lib/chat-turn-context.js";
-import { cancelPendingChatTurnDebits, getAvailableCredits, grantOrgCredits } from "./credits.js";
+import { cancelPendingChatTurnDebits, grantOrgCredits } from "./credits.js";
 
 /**
  * Chat turn billing: a turn that fails on our side (an error or a server
@@ -30,7 +30,7 @@ import { cancelPendingChatTurnDebits, getAvailableCredits, grantOrgCredits } fro
  *  3. in one transaction voids the credits of the turn's billed events (by
  *     their ids), cancels their debits that are still pending (under the org
  *     lock the flusher takes), and grants back the part that was already
- *     flushed as one `adjustment` grant per org, external id
+ *     flushed as one `refund` grant per org (never funds the org), external id
  *     `chat-turn-refund:<turnId>:<orgId>:<hash of the voided event ids>`.
  * Voided events never match again, and a grant that collides with an earlier
  * one rolls the whole refund back, so a turn is refunded at most once however
@@ -68,7 +68,7 @@ export interface ChatTurnUsage {
   outcome: ChatTurnStatus;
   /** What providers charged for the turn's model and tool calls, in cents. */
   providerCostCents: number;
-  /** Credits the turn's usage is worth at the rate card, before any refund. */
+  /** Credits the turn's answer and usage are worth at the price card, before any refund. */
   creditCents: number;
   /** Credits returned or never billed because the answer was not delivered. */
   refundedCreditCents: number;
@@ -204,14 +204,11 @@ export async function refundChatTurn(
       credits += org.credits;
       pendingCancelledCredits += pending.credits;
       if (flushed <= 0) continue;
-      // Give credits back to the pool they most recently came from: debits
-      // spend included first, so while included remains the turn spent it.
-      const pools = await getAvailableCredits(org.orgId, db);
+      // A `refund` grant returns the credits without funding the org.
       const granted = await grantOrgCredits(db, {
         orgId: org.orgId,
-        source: "adjustment",
+        source: "refund",
         externalId: refundExternalId(args.turnId, org.orgId, org.eventIds),
-        pool: pools.includedRemaining > 0 ? "included" : "prepaid",
         credits: flushed,
         metadata: {
           kind: "chat-turn-refund",

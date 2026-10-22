@@ -3155,7 +3155,7 @@ export const creditGrants = pgTable(
     unique("credit_grants_source_external_id_key").on(table.source, table.externalId),
     check(
       "credit_grants_source_check",
-      sql`source = ANY (ARRAY['topup'::text, 'auto_recharge'::text, 'starter'::text, 'promo'::text, 'adjustment'::text])`,
+      sql`source = ANY (ARRAY['topup'::text, 'auto_recharge'::text, 'starter'::text, 'promo'::text, 'adjustment'::text, 'refund'::text])`,
     ),
     check("credit_grants_credits_check", sql`credits >= (0)::numeric`),
     check(

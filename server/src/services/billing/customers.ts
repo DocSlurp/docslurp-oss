@@ -182,37 +182,3 @@ export async function detachPaymentMethod(args: {
   }
   await stripe.paymentMethods.detach(args.paymentMethodId);
 }
-
-/**
- * Cancel an org's Stripe subscription immediately (tenant offboarding,
- * docs/data-deletion.md). Outstanding metered usage is invoiced now; unused
- * time is not prorated (credits are prepaid, refunds are manual). A
- * subscription Stripe no longer has counts as cancelled. Without a
- * subscription this is a no-op and needs no Stripe configuration.
- */
-export async function cancelOrgSubscription(
-  orgId: string,
-  stripe?: Stripe,
-): Promise<{ cancelled: boolean; subscriptionId: string | null }> {
-  const org = await getOrgBillingRow(orgId);
-  const subscriptionId = org?.stripe_subscription_id ?? null;
-  if (!subscriptionId || org?.subscription_status === "canceled") {
-    return { cancelled: false, subscriptionId };
-  }
-  const client = stripe ?? getStripe();
-  try {
-    await client.subscriptions.cancel(
-      subscriptionId,
-      { invoice_now: true, prorate: false, cancellation_details: { comment: "Organization deleted" } },
-      { idempotencyKey: `org-delete:${orgId}:${subscriptionId}` },
-    );
-  } catch (error) {
-    if (!isMissingResource(error)) throw error;
-  }
-  await sql`
-    update organizations
-    set subscription_status = 'canceled', cancel_at_period_end = false, scheduled_plan_id = null, updated_at = now()
-    where id = ${orgId}
-  `;
-  return { cancelled: true, subscriptionId };
-}

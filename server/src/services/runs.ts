@@ -720,7 +720,7 @@ export async function controlRun(
       throw new SpendBlockedError(
         code === "credit_exhausted"
           ? "Out of credits: other runs in this organization hold the remaining credits. " +
-            "Buy credits, enable auto-recharge or upgrade your plan at /app/billing to continue."
+            "Buy credits or turn on auto top-up at /app/billing to continue."
           : "AI processing is paused for this workspace or organization. Raise the budget to resume.",
         code,
       );

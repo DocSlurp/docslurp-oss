@@ -73,7 +73,7 @@ ALTER TABLE credit_grants DROP COLUMN IF EXISTS pool;
 ALTER TABLE credit_grants DROP CONSTRAINT IF EXISTS credit_grants_source_check;
 --> statement-breakpoint
 ALTER TABLE credit_grants ADD CONSTRAINT credit_grants_source_check
-  CHECK (source IN ('topup', 'auto_recharge', 'starter', 'promo', 'adjustment'));
+  CHECK (source IN ('topup', 'auto_recharge', 'starter', 'promo', 'adjustment', 'refund'));
 --> statement-breakpoint
 -- 4. Single-pool ledger and balance functions.
 CREATE FUNCTION append_credit_ledger(

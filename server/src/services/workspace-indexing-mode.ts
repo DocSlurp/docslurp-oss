@@ -1,7 +1,8 @@
 import { randomUUID } from "node:crypto";
 
 import {
-  defaultIndexingModeForPlan,
+  defaultIndexingModeForOrg as defaultIndexingModeForFunding,
+  pageCredits,
   deferredProfilesEnabled,
   effectiveIndexingMode,
   estimatePageEmbedCredits,
@@ -49,27 +50,20 @@ export { effectiveIndexingMode };
 /** Credits per page of full indexing, for estimates only; billing uses actual usage. */
 export function fullIndexCreditsPerPage(): number {
   const parsed = Number.parseFloat(process.env.DOCSLURP_FULL_INDEX_CREDITS_PER_PAGE ?? "");
-  return Number.isFinite(parsed) && parsed >= 0 ? parsed : 0.1;
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : pageCredits("fast", 1);
 }
 
 /**
- * Org default for new workspaces: free plan without purchased credits defers
- * (`map`); a paid plan or any purchased (top-up / auto-recharge / subscription)
- * credit grant indexes fully. Starter and promo grants do not count.
+ * Org default for new workspaces: starter orgs (only starter credits) defer
+ * (`map`); funded orgs (any paid grant: top-up, auto top-up, adjustment,
+ * promo; organizations.funded_at) index fully.
  */
 export async function defaultIndexingModeForOrg(orgId: string): Promise<IndexingMode> {
   if (!deferredProfilesEnabled()) return "full";
-  const [row] = await sql<{ plan_id: string | null; purchased: boolean }[]>`
-    select o.plan_id,
-      exists (
-        select 1 from credit_grants g
-        where g.org_id = o.id
-          and g.source in ('subscription', 'topup', 'auto_recharge')
-          and g.credits - g.reversed_credits > 0
-      ) as purchased
-    from organizations o where o.id = ${orgId}
+  const [row] = await sql<{ funded: boolean }[]>`
+    select o.funded_at is not null as funded from organizations o where o.id = ${orgId}
   `;
-  return defaultIndexingModeForPlan({ planId: row?.plan_id, hasPurchasedCredits: row?.purchased ?? false });
+  return defaultIndexingModeForFunding({ funded: row?.funded === true });
 }
 
 export function hasPrivatePageEmbedder(): boolean {
@@ -350,7 +344,7 @@ export type ModeSwitchResult = { runIds: string[]; pipelines: Map<string, Pipeli
 
 /**
  * Validates a requested mode before it is saved: visual needs privacy/PII
- * clearance; `full` on a plan that defaults to deferred needs spendable credits.
+ * clearance; `full` in a starter org (which defaults to deferred) needs spendable credits.
  * `current` is null when creating a workspace.
  */
 export async function validateModeChoice(args: {
@@ -365,7 +359,7 @@ export async function validateModeChoice(args: {
     const mode = await defaultIndexingModeForOrg(args.orgId);
     if (mode === "map" && !(await canSpend(args.orgId, args.workspaceId))) {
       throw new IndexingModeError(
-        "Full indexing needs credits. Add credits or upgrade your plan.",
+        "Full indexing needs credits. Buy credits to index everything up front.",
         402,
         "credits_required_for_full_index",
       );
