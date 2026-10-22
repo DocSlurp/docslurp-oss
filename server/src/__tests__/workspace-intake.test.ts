@@ -11,6 +11,7 @@ import {
   type WorkspaceIntakeRequest,
 } from "../services/workspace-intake.js";
 import { remoteUrlIntakeItems } from "../services/remote-ingest.js";
+import { WorkspaceAccessError } from "../services/default-workspace.js";
 import { createWorkspaceIntakeFakes, fakeWorkspace } from "./helpers/workspace-intake-fakes.js";
 
 // URL safety checks resolve hosts; keep them independent of live DNS.
@@ -26,7 +27,7 @@ function request(overrides: Partial<WorkspaceIntakeRequest> = {}): WorkspaceInta
   return {
     userId: "user-1",
     orgId: "org-1",
-    workspaceId: null,
+    workspace: null,
     newWorkspace: true,
     kind: "bulk-upload",
     items: [bytesItem("contracts.txt")],
@@ -122,28 +123,66 @@ describe("Workspace Intake", () => {
 
   it("treats the reserved \"default\" workspace ID as the organization's default workspace", async () => {
     const fakes = createWorkspaceIntakeFakes();
-    const result = await intakeIntoWorkspace(request({ workspaceId: "default", newWorkspace: true }), fakes.ports);
+    const result = await intakeIntoWorkspace(request({ workspace: "default", newWorkspace: true }), fakes.ports);
     expect(result?.workspace.id).toBe("ws-default-org-1");
     expect(fakes.createdWorkspaces).toEqual([]);
   });
 
   it("creates a workspace when a name or template is given without an explicit flag", async () => {
     const fakes = createWorkspaceIntakeFakes();
-    await intakeIntoWorkspace(request({ newWorkspace: undefined, workspaceName: "Contracts" }), fakes.ports);
+    await intakeIntoWorkspace(request({ newWorkspace: undefined, workspace: "Contracts" }), fakes.ports);
     await intakeIntoWorkspace(request({ newWorkspace: undefined, templateKey: "engineering-docs" }), fakes.ports);
     expect(fakes.createdWorkspaces.map((workspace) => workspace.name)).toEqual(["Contracts", "Contracts"]);
   });
 
   it("keeps a caller-chosen workspace name instead of self-titling", async () => {
     const fakes = createWorkspaceIntakeFakes();
-    await intakeIntoWorkspace(request({ workspaceName: "Contracts" }), fakes.ports);
-    expect(fakes.createdWorkspaces).toEqual([expect.objectContaining({ name: "Contracts", autoNamed: false })]);
+    await intakeIntoWorkspace(request({ workspace: "  Legal Contracts " }), fakes.ports);
+    expect(fakes.createdWorkspaces).toEqual([expect.objectContaining({ name: "Legal Contracts", slug: "legal-contracts", autoNamed: false })]);
+  });
+
+  it("appends to the workspace a name, slug or differently formatted name matches instead of creating another", async () => {
+    const fakes = createWorkspaceIntakeFakes();
+    const created = await intakeIntoWorkspace(request({ workspace: "Legal Contracts" }), fakes.ports);
+    for (const workspace of ["legal-contracts", "  Légal—Contracts!! ", "LEGAL CONTRACTS"]) {
+      const result = await intakeIntoWorkspace(request({ workspace, newWorkspace: undefined }), fakes.ports);
+      expect(result?.workspace.id).toBe(created?.workspace.id);
+    }
+    expect(fakes.createdWorkspaces).toHaveLength(1);
+  });
+
+  it("ignores newWorkspace when an explicit workspace is named", async () => {
+    const fakes = createWorkspaceIntakeFakes({ workspaces: [fakeWorkspace({ id: "ws-legal", name: "Legal Contracts", slug: "legal-contracts" })] });
+    const result = await intakeIntoWorkspace(request({ workspace: "Legal Contracts", newWorkspace: true }), fakes.ports);
+    expect(result?.workspace.id).toBe("ws-legal");
+    expect(fakes.createdWorkspaces).toEqual([]);
+  });
+
+  it("rejects a workspace value with no letters or digits with 400", async () => {
+    const fakes = createWorkspaceIntakeFakes();
+    const error = await rejection(intakeIntoWorkspace(request({ workspace: "!!!" }), fakes.ports));
+    expect(error.statusCode).toBe(400);
+    expect(fakes.createdWorkspaces).toEqual([]);
+  });
+
+  it("never lets a workspace-restricted API key create a workspace or reach one outside its allowlist", async () => {
+    const fakes = createWorkspaceIntakeFakes({ workspaces: [
+      fakeWorkspace({ id: "ws-allowed", name: "Allowed", slug: "allowed" }),
+      fakeWorkspace({ id: "ws-hidden", name: "Hidden", slug: "hidden" }),
+    ] });
+    const restricted = { allowedWorkspaceIds: ["ws-allowed"], newWorkspace: undefined };
+    expect((await intakeIntoWorkspace(request({ ...restricted, workspace: "Allowed" }), fakes.ports))?.workspace.id).toBe("ws-allowed");
+    for (const target of [{ workspace: "Hidden" }, { workspace: "Brand New" }, { newWorkspace: true }]) {
+      const error = await rejection(intakeIntoWorkspace(request({ ...restricted, ...target }), fakes.ports));
+      expect(error.statusCode).toBe(403);
+    }
+    expect(fakes.createdWorkspaces).toEqual([]);
   });
 
   it("appends to an existing workspace and inherits its pipeline", async () => {
     const pipeline = { ...defaultPipelineFeatures, embed: false, indexVectors: false };
     const fakes = createWorkspaceIntakeFakes({ workspaces: [fakeWorkspace({ id: "ws-existing", pipeline })] });
-    const result = await intakeIntoWorkspace(request({ workspaceId: "ws-existing" }), fakes.ports);
+    const result = await intakeIntoWorkspace(request({ workspace: "ws-existing" }), fakes.ports);
 
     expect(fakes.createdWorkspaces).toEqual([]);
     expect(result?.workspace.id).toBe("ws-existing");
@@ -154,7 +193,7 @@ describe("Workspace Intake", () => {
     const pipeline = normalizePipelineFeatures({ summarize: true, graph: { domain: "Supplier contracts", depth: "deep" } });
     const fakes = createWorkspaceIntakeFakes({ workspaces: [fakeWorkspace({ id: "ws-existing", pipeline })] });
     await intakeIntoWorkspace(
-      request({ workspaceId: "ws-existing", pipeline: { pageIndex: true, graph: { depth: "lean" } } }),
+      request({ workspace: "ws-existing", pipeline: { pageIndex: true, graph: { depth: "lean" } } }),
       fakes.ports,
     );
 
@@ -171,7 +210,7 @@ describe("Workspace Intake", () => {
     });
     await intakeIntoWorkspace(
       request({
-        workspaceId: "ws-legal",
+        workspace: "ws-legal",
         pipeline: { summarize: !template.pipeline.summarize, piiPolicy: { enabled: false }, parserPlaybook: "fast", chunkOverlap: true },
       }),
       fakes.ports,
@@ -192,17 +231,22 @@ describe("Workspace Intake", () => {
       yield bytesItem("a.txt");
     }
 
-    const error = await rejection(intakeIntoWorkspace(request({ workspaceId: "missing", items: items() }), fakes.ports));
-    expect(error.statusCode).toBe(404);
+    const error = await intakeIntoWorkspace(request({ workspace: "00000000-0000-4000-8000-00000000dead", items: items() }), fakes.ports).catch((reason: unknown) => reason);
+    expect(error).toBeInstanceOf(WorkspaceAccessError);
+    expect((error as WorkspaceAccessError).status).toBe(404);
     expect(read).not.toHaveBeenCalled();
     expect(fakes.objects.size).toBe(0);
   });
 
   it("refuses a workspace from another organization", async () => {
-    const fakes = createWorkspaceIntakeFakes({ workspaces: [fakeWorkspace({ id: "ws-other", orgId: "org-2" })] });
-    const error = await rejection(intakeIntoWorkspace(request({ workspaceId: "ws-other" }), fakes.ports));
-    expect(error.message).toBe("Workspace does not belong to the requested organization");
-    expect(fakes.runs).toEqual([]);
+    const otherId = "00000000-0000-4000-8000-0000000000b2";
+    const fakes = createWorkspaceIntakeFakes({ workspaces: [fakeWorkspace({ id: otherId, orgId: "org-2", name: "Other", slug: "other" })] });
+    const error = await intakeIntoWorkspace(request({ workspace: otherId }), fakes.ports).catch((reason: unknown) => reason);
+    expect(error).toMatchObject({ status: 404, code: "workspace_not_found" });
+    // A name from another organization is not a match: the upload gets its own workspace in this one.
+    const result = await intakeIntoWorkspace(request({ workspace: "Other" }), fakes.ports);
+    expect(result?.workspace).toMatchObject({ orgId: "org-1", name: "Other" });
+    expect(fakes.runs.map((run) => run.workspaceId)).toEqual([result?.workspace.id]);
   });
 
   it("rejects a lone unsupported file with 415 and creates nothing", async () => {
@@ -292,7 +336,7 @@ describe("Workspace Intake", () => {
 
       const existing = createWorkspaceIntakeFakes({ workspaces: [fakeWorkspace({ id: "ws-existing", orgId: "org-1" })] });
       existing.state.unreadable.add("broken.pdf");
-      await rejection(intakeIntoWorkspace(request({ workspaceId: "ws-existing", newWorkspace: undefined, items: [bytesItem("broken.pdf", "%PDF", "application/pdf")] }), existing.ports));
+      await rejection(intakeIntoWorkspace(request({ workspace: "ws-existing", newWorkspace: undefined, items: [bytesItem("broken.pdf", "%PDF", "application/pdf")] }), existing.ports));
       expect(existing.discardedWorkspaces).toEqual([]);
     });
 
@@ -411,7 +455,7 @@ describe("Workspace Intake", () => {
   it("returns null for a skipping source that yields nothing, and rejects empty sources otherwise", async () => {
     const fakes = createWorkspaceIntakeFakes({ workspaces: [fakeWorkspace()] });
     await expect(
-      intakeIntoWorkspace(request({ workspaceId: "ws-existing", kind: "connector-sync", items: [], mayBeEmpty: true }), fakes.ports),
+      intakeIntoWorkspace(request({ workspace: "ws-existing", kind: "connector-sync", items: [], mayBeEmpty: true }), fakes.ports),
     ).resolves.toBeNull();
     expect((await rejection(intakeIntoWorkspace(request({ items: [] }), fakes.ports))).statusCode).toBe(400);
     expect(fakes.runs).toEqual([]);
@@ -421,7 +465,7 @@ describe("Workspace Intake", () => {
     const fakes = createWorkspaceIntakeFakes({ workspaces: [fakeWorkspace()] });
     await intakeIntoWorkspace(
       request({
-        workspaceId: "ws-existing",
+        workspace: "ws-existing",
         kind: "connector-sync",
         apiKeyId: "key-1",
         items: [{ ...bytesItem("report.txt"), metadata: { connectorId: "conn-1" } }],

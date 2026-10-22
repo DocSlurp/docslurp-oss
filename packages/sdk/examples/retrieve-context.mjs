@@ -1,7 +1,7 @@
 import { createDocSlurpClient, formatSearchContext } from "@docslurp/sdk";
 
 // Usage: node retrieve-context.mjs "How do retries work?"
-// Searches the organization default workspace; set DOCSLURP_WORKSPACE_ID=legal-contracts (a slug) for another.
+// Searches the organization default workspace; set DOCSLURP_WORKSPACE=legal-contracts (an ID, slug or name) for another.
 const q = process.argv.slice(2).join(" ");
 if (!q) throw new Error("Pass a retrieval question.");
 const client = createDocSlurpClient();

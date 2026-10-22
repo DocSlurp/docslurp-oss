@@ -56,7 +56,7 @@ async function runSearchBatch(c: Context, parsed: { queries: SearchInput[]; conc
   // Scope and API-key checks first, so embeddings are only prefetched for queries that will run.
   const inputs = await Promise.all(queries.map(async (query, index) => {
     try {
-      const input = { ...query, workspaceId: await resolveActorWorkspaceId(getRequestActor(c), query.workspaceId, query.orgId) };
+      const input = { ...query, workspaceId: await resolveActorWorkspaceId(getRequestActor(c), query.workspace, query.orgId) };
       const forbidden = await assertApiKeyWorkspaceAccess(c, input.workspaceId, "search");
       if (forbidden) {
         results[index] = { ok: false, error: {
@@ -161,7 +161,7 @@ async function handleWorkspaceChat(c: Context, mode: "public" | "grounded") {
   const body = parsed.data;
   const userId = c.get("sessionUser")?.id;
   if (!userId) return apiErrorResponse(c, 401, "unauthorized", "Missing session");
-  const workspaceId = await resolveActorWorkspaceId(getRequestActor(c), body.workspaceId, body.orgId);
+  const workspaceId = await resolveActorWorkspaceId(getRequestActor(c), body.workspace, body.orgId);
   const forbidden = await denyWorkspaceAccess(c, workspaceId);
   if (forbidden) return forbidden;
   const chatDisabled = await workspaceChatDisabledBody(workspaceId, userId);
@@ -221,6 +221,7 @@ function expectedSearchFailure(error: unknown): SearchFailure | null {
     return { code: "INVALID_RETRIEVAL_QUERY", apiCode: "invalid_request", message: error.message, status: 400 };
   }
   if (error instanceof WorkspaceAccessError) {
+    if (error.status === 400) return { code: "INVALID_WORKSPACE", apiCode: "invalid_request", message: error.message, status: 400 };
     return error.status === 403
       ? { code: "FORBIDDEN", apiCode: "forbidden", message: error.message, status: 403 }
       : { code: "WORKSPACE_NOT_FOUND", apiCode: "workspace_not_found", message: error.message, status: 404 };
@@ -287,13 +288,13 @@ export const searchRoutes = new Hono()
   .use("*", nativeApiErrors)
   .get("/chat/stream", async (c) => {
     const parsed = workspaceChatInputSchema.safeParse({ q: c.req.query("q"),
-      workspaceId: c.req.query("workspaceId") || undefined, orgId: c.req.query("orgId") || undefined,
+      workspace: c.req.query("workspace") || undefined, orgId: c.req.query("orgId") || undefined,
       sessionId: c.req.query("sessionId"), model: c.req.query("model") });
     if (!parsed.success) return apiErrorResponse(c, 400, "invalid_request", "Invalid chat input", { issues: parsed.error.issues });
     const { q: query, sessionId, model } = parsed.data;
 
     const userId = c.get("sessionUser").id;
-    const workspaceId = await resolveActorWorkspaceId(getRequestActor(c), parsed.data.workspaceId, parsed.data.orgId);
+    const workspaceId = await resolveActorWorkspaceId(getRequestActor(c), parsed.data.workspace, parsed.data.orgId);
     const forbidden = await denyWorkspaceAccess(c, workspaceId);
     if (forbidden) return forbidden;
     const chatDisabled = await workspaceChatDisabledBody(workspaceId, userId);
@@ -374,7 +375,7 @@ export const searchRoutes = new Hono()
     }
     const workspaceId = await resolveActorWorkspaceId(
       getRequestActor(c),
-      c.req.query("workspaceId"),
+      c.req.query("workspace"),
       c.req.query("orgId"),
     );
     const forbidden = await denyWorkspaceAccess(c, workspaceId);
@@ -443,7 +444,7 @@ export const searchRoutes = new Hono()
     }
     const userId = c.get("sessionUser")?.id;
     if (!userId) return apiErrorResponse(c, 401, "unauthorized", "Missing session");
-    const workspaceId = await resolveActorWorkspaceId(getRequestActor(c), parsed.data.workspaceId, parsed.data.orgId);
+    const workspaceId = await resolveActorWorkspaceId(getRequestActor(c), parsed.data.workspace, parsed.data.orgId);
     const forbidden = await denyWorkspaceAccess(c, workspaceId);
     if (forbidden) return forbidden;
     const deferred = await deferredRequestContext(c, workspaceId);
@@ -470,14 +471,14 @@ export const searchRoutes = new Hono()
     }
 
     try {
-      // Each listed reference may be a UUID, slug, former slug or `default`;
-      // unknown ones pass through so the service answers 404.
-      const workspaceIds = await Promise.all(
-        parsed.data.workspaceIds.map((workspaceId) => resolveActorWorkspaceId(actor, workspaceId)),
+      // Each listed workspace may be a UUID, slug, former slug, name or
+      // `default`; one that matches nothing answers 404 naming its slug.
+      const workspaces = await Promise.all(
+        parsed.data.workspaces.map((workspace) => resolveActorWorkspaceId(actor, workspace)),
       );
       const response = await aggregateWorkspaceRagSearch({
         userId: actor.userId,
-        request: { ...parsed.data, workspaceIds },
+        request: { ...parsed.data, workspaces },
         apiKey: actor.type === "apiKey" ? actor.apiKey : null,
       });
       return c.json(response);

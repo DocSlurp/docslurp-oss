@@ -31,7 +31,7 @@ vi.mock("../services/search.js", () => ({
   MissingWorkspaceScopeError: class extends Error {},
 }));
 vi.mock("../services/workspace-chat.js", () => ({ chatWorkspace, workspaceChatDisabledBody }));
-vi.mock("../services/workspaces.js", () => ({ resolveWorkspaceRef: vi.fn(async () => null), ensureDefaultWorkspace: vi.fn(async () => ({ id: "default-ws" })), getWorkspace, listWorkspaces }));
+vi.mock("../services/workspaces.js", () => ({ resolveWorkspaceRef: vi.fn(async () => null), findWorkspaceForInput: vi.fn(async (ref: { id?: string; slug?: string }) => ({ id: (ref.id ?? ref.slug)!, orgId: "org-1" })), ensureDefaultWorkspace: vi.fn(async () => ({ id: "default-ws" })), getWorkspace, listWorkspaces }));
 
 vi.mock("../routes/uploads.js", async () => {
   const { Hono } = await import("hono");
@@ -106,20 +106,22 @@ describe("mcpRoutes", () => {
     const headers = { Authorization: "Bearer key", "Content-Type": "application/json" };
     const response = await app.request("/mcp/tools/upload", { method: "POST", headers, body: JSON.stringify({ urls: ["https://example.com/manual.pdf"], idempotencyKey: "retry-1" }) });
     expect(response.status).toBe(201);
-    expect(uploadRequest).toHaveBeenLastCalledWith(expect.objectContaining({ path: "/url", actor: expect.objectContaining({ userId: "user-1", apiKey: expect.objectContaining({ orgId: "org-1" }) }), body: { workspaceId: "default-ws", urls: ["https://example.com/manual.pdf"] }, idempotencyKey: "retry-1" }));
-    const text = await app.request("/mcp/tools/upload", { method: "POST", headers, body: JSON.stringify({ workspaceId: "ws-1", files: Array.from({ length: 10 }, (_, i) => ({ filename: `notes-${i}.pdf`, sizeBytes: 40 * 1024 * 1024, mimeType: "application/pdf" })) }) });
+    expect(uploadRequest).toHaveBeenLastCalledWith(expect.objectContaining({ path: "/url", actor: expect.objectContaining({ userId: "user-1", apiKey: expect.objectContaining({ orgId: "org-1" }) }), body: { urls: ["https://example.com/manual.pdf"] }, idempotencyKey: "retry-1" }));
+    // An omitted workspace is left to the uploads route, which files it into the default workspace.
+    const text = await app.request("/mcp/tools/upload", { method: "POST", headers, body: JSON.stringify({ workspace: "ws-1", files: Array.from({ length: 10 }, (_, i) => ({ filename: `notes-${i}.pdf`, sizeBytes: 40 * 1024 * 1024, mimeType: "application/pdf" })) }) });
     expect(text.status).toBe(201);
     const call = uploadRequest.mock.lastCall![0];
     expect(call.path).toBe("/direct/sessions");
+    expect(call.body.workspace).toBe("ws-1");
     expect(call.body.files).toHaveLength(10);
     expect(call.body.files.every((file: { singlePart: boolean }) => file.singlePart)).toBe(true);
   });
 
   it("preserves an explicitly named new workspace for signed-upload completion", async () => {
     validateApiKey.mockResolvedValue({ ...validatedKey, scopes: ["ingest"] });
-    const response = await app.request("/mcp/tools/upload", { method: "POST", headers: { Authorization: "Bearer key", "Content-Type": "application/json" }, body: JSON.stringify({ workspaceName: "Legal contracts", files: [{ filename: "contract.pdf", sizeBytes: 42, mimeType: "application/pdf" }] }) });
+    const response = await app.request("/mcp/tools/upload", { method: "POST", headers: { Authorization: "Bearer key", "Content-Type": "application/json" }, body: JSON.stringify({ workspace: "Legal contracts", files: [{ filename: "contract.pdf", sizeBytes: 42, mimeType: "application/pdf" }] }) });
     expect(response.status).toBe(201);
-    expect(uploadRequest.mock.lastCall![0].body).toEqual({ workspaceName: "Legal contracts", files: [{ filename: "contract.pdf", sizeBytes: 42, mimeType: "application/pdf", singlePart: true }] });
+    expect(uploadRequest.mock.lastCall![0].body).toEqual({ workspace: "Legal contracts", files: [{ filename: "contract.pdf", sizeBytes: 42, mimeType: "application/pdf", singlePart: true }] });
   });
 
   it("completes every signed file before confirming ingestion, checking ownership and session state", async () => {
@@ -152,10 +154,19 @@ describe("mcpRoutes", () => {
     const request = (body: unknown) => app.request("/mcp/tools/upload", { method: "POST", headers: { Authorization: "Bearer key", "Content-Type": "application/json" }, body: JSON.stringify(body) });
     const input = { urls: ["https://example.com/manual.pdf"] };
     expect((await request(input)).status).toBe(403);
-    validateApiKey.mockResolvedValue({ ...validatedKey, scopes: ["ingest"], workspaceIds: ["ws-1"] });
-    expect((await request({ ...input, workspaceId: "foreign" })).status).toBe(404);
-    expect((await request({ ...input, workspaceName: "New" })).status).toBe(403);
     expect(uploadRequest).not.toHaveBeenCalled();
+    // The uploads route resolves the workspace inside the key's allowlist (a
+    // restricted key can neither reach nor create others); MCP forwards the
+    // value with the restricted actor and passes the route's refusal through.
+    validateApiKey.mockResolvedValue({ ...validatedKey, scopes: ["ingest"], workspaceIds: ["ws-1"] });
+    uploadRequest.mockReturnValueOnce(Response.json({ error: { code: "workspace_not_found" } }, { status: 404 }));
+    expect((await request({ ...input, workspace: "00000000-0000-4000-8000-00000000f0f0" })).status).toBe(404);
+    uploadRequest.mockReturnValueOnce(Response.json({ error: { code: "forbidden" } }, { status: 403 }));
+    expect((await request({ ...input, workspace: "New" })).status).toBe(403);
+    expect(uploadRequest.mock.calls.map(([call]) => [call.body.workspace, call.actor.apiKey.workspaceIds])).toEqual([
+      ["00000000-0000-4000-8000-00000000f0f0", ["ws-1"]],
+      ["New", ["ws-1"]],
+    ]);
   });
 
   it.each([{}, { files: Array.from({ length: 11 }, () => ({ filename: "x.pdf", mimeType: "application/pdf", sizeBytes: 1 })) }, { urls: ["file:///etc/passwd"] }, { urls: ["https://example.com"], files: [{ filename: "x", content: "x" }] }, { urls: ["https://example.com"], userId: "victim" }])("rejects invalid upload arguments: %j", async body => {
@@ -181,14 +192,14 @@ describe("mcpRoutes", () => {
   });
 
   it.each([
-    ["search", { workspaceId: "", q: "query" }],
-    ["search", { workspaceId: "00000000-0000-4000-8000-000000000001", q: " " }],
-    ["suggestQueries", { workspaceId: "00000000-0000-4000-8000-000000000001", limit: -1 }],
+    ["search", { workspace: "", q: "query" }],
+    ["search", { workspace: "00000000-0000-4000-8000-000000000001", q: " " }],
+    ["suggestQueries", { workspace: "00000000-0000-4000-8000-000000000001", limit: -1 }],
     ["getUploadStatus", { documentIds: Array.from({ length: 101 }, (_, index) => `d${index}`) }],
-    ["getUploadStatus", { workspaceId: "ws-1", sql: "drop table documents" }],
-    ["chat", { workspaceId: "ws-1", q: " " }],
+    ["getUploadStatus", { workspace: "ws-1", sql: "drop table documents" }],
+    ["chat", { workspace: "ws-1", q: " " }],
     ["search", { queries: [] }],
-    ["search", { queries: [{ workspaceId: "ws-1", q: "query" }], concurrency: 9 }],
+    ["search", { queries: [{ workspace: "ws-1", q: "query" }], concurrency: 9 }],
   ])("rejects invalid %s arguments before running the tool", async (tool, body) => {
     const response = await app.request(`/mcp/tools/${tool}`, {
       method: "POST", headers: { Authorization: "Bearer dslp_test", "Content-Type": "application/json" }, body: JSON.stringify(body),
@@ -225,27 +236,27 @@ describe("mcpRoutes", () => {
     });
 
     it("resolves the workspace and forwards the mutation body to the estimate route", async () => {
-      const response = await post("indexingModeEstimate", { workspaceId: "ws-1", mode: "map" });
+      const response = await post("indexingModeEstimate", { workspace: "ws-1", mode: "map" });
       expect(response.status).toBe(200);
       expect(await response.json()).toMatchObject({ tool: "indexingModeEstimate", estimate: { pages: 3 } });
       expect(forwardInProcess).toHaveBeenCalledWith(expect.anything(), "POST", "/v1/workspaces/ws-1/indexing-mode/estimate", { mode: "map" }, expect.anything());
     });
 
     it("does not forward for a foreign workspace or invalid input", async () => {
-      expect((await post("graphRebuildEstimate", { workspaceId: "foreign" })).status).toBe(404);
-      expect((await post("indexingModeEstimate", { workspaceId: "ws-1", mode: "bogus" })).status).toBe(400);
+      expect((await post("graphRebuildEstimate", { workspace: "foreign" })).status).toBe(404);
+      expect((await post("indexingModeEstimate", { workspace: "ws-1", mode: "bogus" })).status).toBe(400);
       expect(forwardInProcess).not.toHaveBeenCalled();
     });
 
     it("requires the mutation's scope and key type, and never offers session-only estimates to keys", async () => {
-      expect((await post("uploadEstimate", { workspaceId: "ws-1", files: [{ name: "a.pdf", size: 1 }] })).status).toBe(200);
+      expect((await post("uploadEstimate", { workspace: "ws-1", files: [{ name: "a.pdf", size: 1 }] })).status).toBe(200);
       validateApiKey.mockResolvedValueOnce({ ...validatedKey, scopes: ["search"] });
-      expect((await post("uploadEstimate", { workspaceId: "ws-1", files: [{ name: "a.pdf", size: 1 }] })).status).toBe(403);
+      expect((await post("uploadEstimate", { workspace: "ws-1", files: [{ name: "a.pdf", size: 1 }] })).status).toBe(403);
       validateApiKey.mockResolvedValueOnce({ ...validatedKey, scopes: ["search", "ingest"] });
-      expect((await post("updateEstimate", { workspaceId: "ws-1", changes: {} })).status).toBe(403);
+      expect((await post("updateEstimate", { workspace: "ws-1", changes: {} })).status).toBe(403);
       // reprocess and search-settings mutations accept no API key, so neither do their estimates.
       expect((await post("reprocessEstimate", { runId: "r1" })).status).toBe(403);
-      expect((await post("searchSettingsEstimate", { workspaceId: "ws-1", changes: {} })).status).toBe(403);
+      expect((await post("searchSettingsEstimate", { workspace: "ws-1", changes: {} })).status).toBe(403);
       expect(forwardInProcess).toHaveBeenCalledTimes(1);
     });
 
@@ -300,7 +311,7 @@ describe("mcpRoutes", () => {
       fetch: async (url, init) => app.request(new Request(url, init)),
     }));
     expect((await client.listTools()).tools.map(tool => tool.name)).toContain("search");
-    const called = await client.callTool({ name: "search", arguments: { q: "audience?", workspaceId: "ws-1" } });
+    const called = await client.callTool({ name: "search", arguments: { q: "audience?", workspace: "ws-1" } });
     expect(called.isError).toBe(false);
     expect(hybridSearch).toHaveBeenCalledWith("audience?", "user-1", expect.anything());
     await client.close();
@@ -325,8 +336,8 @@ describe("mcpRoutes", () => {
     const call = (name: string, args: unknown) => app.request(`/mcp/tools/${name}`, {
       method: "POST", headers: { Authorization: "Bearer dslp_test", "Content-Type": "application/json" }, body: JSON.stringify(args),
     });
-    expect(await (await call("search", { workspaceId: "ws-1", q: "Support hours?" })).json()).toMatchObject({ results: [{ text: "Support hours" }], sessionId: "retrieval-1", availability: { status: "ready" } });
-    const chat = await call("chat", { workspaceId: "ws-1", q: "Support hours?", sessionId: "chat-existing" });
+    expect(await (await call("search", { workspace: "ws-1", q: "Support hours?" })).json()).toMatchObject({ results: [{ text: "Support hours" }], sessionId: "retrieval-1", availability: { status: "ready" } });
+    const chat = await call("chat", { workspace: "ws-1", q: "Support hours?", sessionId: "chat-existing" });
     expect(await chat.json()).toMatchObject({ answer: "Weekdays [1]", citations: [{ filename: "guide.txt" }], usage: { outputTokens: 3 } });
     expect(chatWorkspace).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: "ws-1", userId: "user-1", query: "Support hours?", sessionId: "chat-existing" }));
     expect(hybridSearch).toHaveBeenCalledWith("Support hours?", "user-1", expect.objectContaining({ useHyDE: undefined, useRerank: undefined, queryRewrite: undefined }));
@@ -334,7 +345,7 @@ describe("mcpRoutes", () => {
 
   it("keeps parallel retrieval results ordered and denies foreign workspaces before retrieval", async () => {
     const response = await app.request("/mcp/tools/search", {
-      method: "POST", headers: { Authorization: "Bearer dslp_test", "Content-Type": "application/json" }, body: JSON.stringify({ queries: [{ q: "first", workspaceId: "ws-1" }, { q: "private", workspaceId: "foreign" }] }),
+      method: "POST", headers: { Authorization: "Bearer dslp_test", "Content-Type": "application/json" }, body: JSON.stringify({ queries: [{ q: "first", workspace: "ws-1" }, { q: "private", workspace: "foreign" }] }),
     });
     expect(response.status).toBe(200);
     expect(await response.json()).toMatchObject({ results: [{ ok: true, data: { sessionId: "retrieval-1" } }, { ok: false, error: { code: "WORKSPACE_NOT_FOUND", status: 404 } }] });
@@ -360,11 +371,11 @@ describe("mcpRoutes", () => {
     await client.connect(new StreamableHTTPClientTransport(new URL("http://localhost:4321/mcp"), { requestInit: { headers: { Authorization: "Bearer dslp_test" } }, fetch: async (url, init) => app.request(new Request(url, init)) }));
     const tools = (await client.listTools()).tools;
     expect(tools.find(tool => tool.name === "chat")?.annotations?.idempotentHint).toBe(false);
-    const search = await client.callTool({ name: "search", arguments: { q: "Support?", workspaceId: "ws-1" } });
+    const search = await client.callTool({ name: "search", arguments: { q: "Support?", workspace: "ws-1" } });
     expect(search.structuredContent).toMatchObject({ usage: { totalTokens: 7, costCents: 0.001, costSource: "provider" } });
-    const batch = await client.callTool({ name: "search", arguments: { queries: [{ q: "Support?", workspaceId: "ws-1" }] } });
+    const batch = await client.callTool({ name: "search", arguments: { queries: [{ q: "Support?", workspace: "ws-1" }] } });
     expect(batch.structuredContent).toMatchObject({ results: [{ ok: true, data: { results: [{ text: "Support hours" }] } }] });
-    const chat = await client.callTool({ name: "chat", arguments: { q: "Support?", workspaceId: "ws-1" } });
+    const chat = await client.callTool({ name: "chat", arguments: { q: "Support?", workspace: "ws-1" } });
     expect(chat.structuredContent).toMatchObject({ answer: "Weekdays [1]", usage: { outputTokens: 3 } });
     expect(chatWorkspace).toHaveBeenCalledWith(expect.objectContaining({ actor: expect.objectContaining({ type: "apiKey", apiKey: validatedKey }), allowAgentTools: false, allowConfiguration: false }));
     await client.close();
@@ -386,19 +397,19 @@ describe("session MCP tools", () => {
   const headers = { Origin: "http://localhost:4321", "Content-Type": "application/json" };
 
   it("uses the authenticated session identity and preserves workspace access checks", async () => {
-    const response = await app.request("/tools/tools/search", { method: "POST", headers, body: JSON.stringify({ workspaceId: "ws-1", q: "hello" }) });
+    const response = await app.request("/tools/tools/search", { method: "POST", headers, body: JSON.stringify({ workspace: "ws-1", q: "hello" }) });
     expect(response.status).toBe(200);
     expect(hybridSearch).toHaveBeenCalledWith("hello", "user-1", expect.anything());
-    expect((await app.request("/tools/tools/suggestQueries", { method: "POST", headers, body: JSON.stringify({ workspaceId: "foreign" }) })).status).toBe(404);
+    expect((await app.request("/tools/tools/suggestQueries", { method: "POST", headers, body: JSON.stringify({ workspace: "foreign" }) })).status).toBe(404);
   });
 
   it("returns a read-only ingest report for an accessible workspace and hides foreign ones", async () => {
     loadIngestReport.mockClear();
-    const response = await app.request("/tools/tools/getUploadStatus", { method: "POST", headers, body: JSON.stringify({ workspaceId: "ws-1", runId: "run-1" }) });
+    const response = await app.request("/tools/tools/getUploadStatus", { method: "POST", headers, body: JSON.stringify({ workspace: "ws-1", runId: "run-1" }) });
     expect(response.status).toBe(200);
     await expect(response.json()).resolves.toMatchObject({ tool: "getUploadStatus", summary: expect.stringContaining("Ingest report"), report: { workspaceId: "ws-1" } });
     expect(loadIngestReport).toHaveBeenCalledWith(expect.objectContaining({ canEdit: false, runId: "run-1", workspace: expect.objectContaining({ id: "ws-1" }) }));
-    expect((await app.request("/tools/tools/getUploadStatus", { method: "POST", headers, body: JSON.stringify({ workspaceId: "foreign" }) })).status).toBe(404);
+    expect((await app.request("/tools/tools/getUploadStatus", { method: "POST", headers, body: JSON.stringify({ workspace: "foreign" }) })).status).toBe(404);
     expect(loadIngestReport).toHaveBeenCalledTimes(1);
   });
 

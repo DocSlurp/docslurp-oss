@@ -61,7 +61,6 @@ describe("extract markdown PDF routing", () => {
     const stage = new ExtractMarkdownStage(
       {
         extractMarkdown: async () => ({ binary: "pandoc", args: [], available: true }),
-        doclingMarkdown: async () => ({ binary: "docling", args: [], available: true }),
         extractText: popplerText,
         kreuzbergMarkdown: async () => ({ binary: "node", args: [], available: true })
       } as any,
@@ -88,7 +87,6 @@ describe("extract markdown PDF routing", () => {
     const stage = new ExtractMarkdownStage(
       {
         extractMarkdown: async () => ({ binary: "pandoc", args: [], available: true }),
-        doclingMarkdown: async () => ({ binary: "docling", args: [], available: true }),
         extractText: popplerText,
         kreuzbergMarkdown: async () => ({ binary: "node", args: [], available: false })
       } as any,
@@ -115,7 +113,6 @@ it("prefers the native-pdf engine over Poppler when it is installed", async () =
     const stage = new ExtractMarkdownStage(
       {
         extractMarkdown: async () => ({ binary: "pandoc", args: [], available: true }),
-        doclingMarkdown: async () => ({ binary: "docling", args: [], available: true }),
         extractText: popplerText,
         kreuzbergMarkdown: async () => ({ binary: "node", args: [], available: false })
       } as any,
@@ -164,11 +161,10 @@ it("prefers the native-pdf engine over Poppler when it is installed", async () =
     expect(planned.tableAware).toBe(true);
   });
 
-  it("honors docling retry overrides for PDFs", async () => {
+  it("honors Poppler retry overrides for PDFs", async () => {
     const stage = new ExtractMarkdownStage(
       {
         extractMarkdown: async () => ({ binary: "pandoc", args: [], available: true }),
-        doclingMarkdown: async () => ({ binary: "docling", args: [], available: true }),
         extractText: popplerText,
         kreuzbergMarkdown: async () => ({ binary: "node", args: [], available: false })
       } as any,
@@ -181,15 +177,15 @@ it("prefers the native-pdf engine over Poppler when it is installed", async () =
     const planned = await (stage as any).planExtractors({
       tempFile: "/tmp/sample.pdf",
       format: "pdf",
-      order: { pdf: ["kreuzberg", "docling", "poppler-text"] },
+      order: { pdf: ["kreuzberg", "poppler-text"] },
       options: {},
       multiStrategyVoting: false,
       secondaryId: "next-in-order",
       attemptLedger,
     });
 
-    expect(planned.primary.label).toBe("docling");
-    expect(planned.tableAware).toBe(true);
+    expect(planned.primary.label).toBe("poppler-text");
+    expect(planned.tableAware).toBe(false);
   });
 
   it("does not plan an unavailable tool or reattempt a voting candidate on retry", async () => {
@@ -197,7 +193,6 @@ it("prefers the native-pdf engine over Poppler when it is installed", async () =
       {
         kreuzbergMarkdown: async () => ({ binary: "kreuzberg", args: [], available: false }),
         extractText: popplerText,
-        doclingMarkdown: async () => ({ binary: "docling", args: [], available: true }),
       } as any,
       {} as any,
       {} as any,
@@ -214,10 +209,7 @@ it("prefers the native-pdf engine over Poppler when it is installed", async () =
     attemptLedger.reserve(first.primary.label);
     attemptLedger.reserve(first.secondary.label);
     const retry = await (stage as any).planExtractors(args);
-    expect(retry.primary.label).toBe("docling");
-    expect(retry.secondary).toBeNull();
-    attemptLedger.reserve(retry.primary.label);
-    expect(await (stage as any).planExtractors(args)).toBeNull();
+    expect(retry).toBeNull();
   });
 
   it("does not reattempt an explicit voting secondary on retry", async () => {
@@ -225,7 +217,6 @@ it("prefers the native-pdf engine over Poppler when it is installed", async () =
       {
         kreuzbergMarkdown: async () => ({ binary: "kreuzberg", args: [], available: true }),
         extractText: popplerText,
-        doclingMarkdown: async () => ({ binary: "docling", args: [], available: true }),
       } as any,
       {} as any,
       {} as any,
@@ -234,15 +225,14 @@ it("prefers the native-pdf engine over Poppler when it is installed", async () =
     const args = {
       tempFile: "/tmp/sample.pdf", format: "pdf",
       order: { pdf: ["kreuzberg", "poppler-text"] }, options: {},
-      multiStrategyVoting: true, secondaryId: "docling", attemptLedger,
+      multiStrategyVoting: true, secondaryId: "poppler-text", attemptLedger,
     };
     const first = await (stage as any).planExtractors(args);
-    expect([first.primary.label, first.secondary.label]).toEqual(["kreuzberg", "docling"]);
+    expect([first.primary.label, first.secondary.label]).toEqual(["kreuzberg", "poppler-text"]);
     attemptLedger.reserve(first.primary.label);
     attemptLedger.reserve(first.secondary.label);
     const retry = await (stage as any).planExtractors(args);
-    expect(retry.primary.label).toBe("poppler-text");
-    expect(retry.secondary).toBeNull();
+    expect(retry).toBeNull();
   });
 
   it("uploads file-backed extractor output for Kreuzberg candidates", async () => {
@@ -602,7 +592,7 @@ it("prefers the native-pdf engine over Poppler when it is installed", async () =
     };
 
     const [resultA, resultB] = await (stage as any).collectCandidateResults({
-      primary: { label: "docling", plan: { binary: "docling", args: [], available: true }, mode: "docling" },
+      primary: { label: "poppler-text", plan: { binary: "pdftotext", args: [], available: true }, mode: "stream" },
       primaryKey: "primary.md",
       secondary: { label: "kreuzberg", plan: { binary: "node", args: [], available: true }, mode: "file", outputPath: "/tmp/kreuzberg.md" },
       secondaryKey: "secondary.md",
@@ -613,8 +603,8 @@ it("prefers the native-pdf engine over Poppler when it is installed", async () =
     expect(resultB.status).toBe("fulfilled");
     expect(maxActive).toBe(1);
     expect(events).toEqual([
-      "start:docling",
-      "end:docling",
+      "start:poppler-text",
+      "end:poppler-text",
       "start:kreuzberg",
       "end:kreuzberg"
     ]);

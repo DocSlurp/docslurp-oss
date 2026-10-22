@@ -42,8 +42,8 @@ Valid overrides are 1 to 100; `null` clears an override.
 
 ```ts
 await client.setRetention({ orgId }, 5);                       // organization default
-await client.setRetention({ workspaceId: "legal" }, 10);        // workspace override
-await client.setRetention({ workspaceId: "legal" }, null);      // inherit again
+await client.setRetention({ workspace: "legal" }, 10);          // workspace override
+await client.setRetention({ workspace: "legal" }, null);        // inherit again
 ```
 
 Both calls `PATCH` `retainDocumentVersions` on `/v1/organizations/:id` or `/v1/workspaces/:id`. Lowering the value takes effect at the next purge, which archives or purges the extra versions.

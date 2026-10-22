@@ -171,6 +171,9 @@ export function publicApiErrorLinks(value: unknown): ApiErrorLinks | undefined {
  */
 export function publicApiErrorMessage(code: ApiErrorCode, details?: ApiErrorDetails): string {
   const base = API_ERROR_PUBLIC_MESSAGES[code];
+  if (code === "workspace_not_found" && typeof details?.workspaceSlug === "string") {
+    return `No workspace matching "${details.workspaceSlug}" was found. Pass a workspace ID, slug or name from this organization, or omit workspace to use the default workspace.`;
+  }
   const links = publicApiErrorLinks(details?.links);
   if (!links) return base;
   const account = typeof details?.account === "string" ? details.account : undefined;
@@ -220,6 +223,10 @@ export function publicApiErrorDetails(details: unknown): ApiErrorDetails | undef
   }
   for (const key of SAFE_DETAIL_LABELS) {
     if (typeof source[key] === "string" && /^[\w:.-]{1,80}$/.test(source[key])) safe[key] = source[key];
+  }
+  // The slug a `workspace` value was looked up by (lowercase letters, digits and hyphens only).
+  if (typeof source.workspaceSlug === "string" && /^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(source.workspaceSlug) && source.workspaceSlug.length <= 63) {
+    safe.workspaceSlug = source.workspaceSlug;
   }
   const links = publicApiErrorLinks(source.links);
   if (links) safe.links = links;

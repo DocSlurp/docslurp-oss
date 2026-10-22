@@ -9,7 +9,7 @@ vi.mock("../services/notifications.js", () => ({
 }));
 
 vi.mock("../services/workspaces.js", () => ({
-  resolveWorkspaceRef: vi.fn(async () => null),
+  resolveWorkspaceRef: vi.fn(async () => null), findWorkspaceForInput: vi.fn(async (ref: { id?: string; slug?: string }) => ({ id: (ref.id ?? ref.slug)!, orgId: "org-1" })),
   getWorkspace: vi.fn(async (id: string) => ({ id, orgId: "org-1", userId: "user-1" })),
 }));
 
@@ -36,7 +36,7 @@ describe("notificationsRoutes", () => {
     vi.mocked(listNotificationInbox).mockResolvedValue({ deliveries: [], unreadCount: 0 });
 
     const response = await app.request(
-      "/inbox?workspaceId=ws-1&event=plausibility.warning&limit=10"
+      "/inbox?workspace=ws-1&event=plausibility.warning&limit=10"
     );
 
     expect(response.status).toBe(200);
@@ -82,7 +82,7 @@ describe("notificationsRoutes", () => {
       headers: {
         "content-type": "application/json"
       },
-      body: JSON.stringify({ workspaceId: "ws-1" })
+      body: JSON.stringify({ workspace: "ws-1" })
     });
 
     expect(response.status).toBe(200);

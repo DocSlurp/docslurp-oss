@@ -10,13 +10,13 @@ import DocSlurpSearch from "@docslurp/contrib-astro";
 ---
 <!-- PUBLIC_DOCSLURP_CLIENT_KEY holds a browser key, safe to ship in page HTML. -->
 <DocSlurpSearch clientKey={import.meta.env.PUBLIC_DOCSLURP_CLIENT_KEY} />
-<!-- To search a named workspace: <DocSlurpSearch clientKey={...} workspaceId="product-manuals" /> -->
+<!-- To search a named workspace: <DocSlurpSearch clientKey={...} workspace="product-manuals" /> -->
 ```
 
 | Prop | Default | Notes |
 | --- | --- | --- |
 | `clientKey` | Required | A browser key: search-only and restricted to your allowed websites. Server keys are refused in the browser. |
-| `workspaceId` | `default` | A workspace slug (such as `product-manuals`), UUID or `default`, the key organization's default workspace. See [Workspaces](https://docslurp.io/docs/http#workspaces). |
+| `workspace` | `default` | A workspace ID, slug (such as `product-manuals`) or name, or `default`, the key organization's default workspace. See [Workspaces](https://docslurp.io/docs/http#workspaces). |
 | `apiUrl` | `https://docslurp.io` | The service origin. |
 | `placeholder` | `Search documents…` | Search box placeholder. |
 
@@ -42,12 +42,11 @@ integrations: [docslurpDocsIndex({
   site: 'https://docs.example.com',           // Origin used for canonical page URLs.
   apiUrl: 'https://docslurp.io',
   apiKey: process.env.DOCSLURP_API_KEY,       // Server key with the ingest scope.
-  workspaceName: 'Product documentation',
-  // To add to an existing workspace instead: workspaceId: 'existing-workspace-slug',
+  workspace: 'Product documentation',          // ID, slug or name; created on the first build if none matches.
 })]
 ```
 
-Without `apiKey`, the build still writes `.docslurp/docs-index.json` and skips the upload. With a key, any indexing failure fails the build. A successful upload writes `docslurp-docs-search.json` to the client output with the workspace ID, so your search component can find it. Use `renderEnv` to pass environment variables that only the page renderer needs.
+Without `apiKey`, the build still writes `.docslurp/docs-index.json` and skips the upload. With a key, any indexing failure fails the build. A successful upload writes `docslurp-docs-search.json` (`{ "workspace": "<workspace ID>" }`) to the client output, so your search component can find it. Use `renderEnv` to pass environment variables that only the page renderer needs.
 
 Pages are indexed as text: the upload asks for `{ visionFallback: false, preserveImages: false, summarize: true }`, so rendered HTML skips page images and vision and gets per-page summaries. Pass `pipeline` with other pipeline overrides to change that.
 

@@ -12,7 +12,7 @@ function recorder(respond = () => json({ estimate, billing: "disabled" })) {
     calls.push({ url: String(url).replace("https://x.test", ""), method: init.method ?? "GET", body: init.body ? JSON.parse(init.body) : undefined });
     return respond(calls.at(-1));
   };
-  return { calls, client: createDocSlurpClient({ apiUrl: "https://x.test", apiKey: "k", workspaceId: "ws1", fetch }) };
+  return { calls, client: createDocSlurpClient({ apiUrl: "https://x.test", apiKey: "k", workspace: "ws1", fetch }) };
 }
 
 test("estimate methods hit their *-estimate routes with the mutation body", async () => {
@@ -23,9 +23,10 @@ test("estimate methods hit their *-estimate routes with the mutation body", asyn
   await client.reprocessEstimate("run/1", { stages: ["embed"] });
   await client.fullIndexEstimate({ documentId: "d1" });
   await client.fullIndexEstimate({ documentIds: ["d1", "d2"] });
-  await client.rebuildGraphEstimate({ workspaceId: "g" });
+  await client.rebuildGraphEstimate({ workspace: "g" });
   await client.uploadEstimate({ files: [{ name: "a.pdf", size: 10, pages: 4 }] });
   await client.setIndexingModeEstimate("map");
+  await client.uploadEstimate({ files: [{ name: "b.pdf", size: 5 }], workspace: "Legal Contracts" });
   assert.deepEqual(calls.map((c) => [c.method, c.url]), [
     ["POST", "/v1/workspaces/ws1/estimate"],
     ["POST", "/v1/workspaces/other/estimate"],
@@ -36,11 +37,16 @@ test("estimate methods hit their *-estimate routes with the mutation body", asyn
     ["POST", "/v1/workspaces/g/graph/jobs/estimate"],
     ["POST", "/v1/uploads/estimate"],
     ["POST", "/v1/workspaces/ws1/indexing-mode/estimate"],
+    ["POST", "/v1/uploads/estimate"],
   ]);
   assert.deepEqual(calls[0].body, { pipeline: { chunking: "x" }, apply: "reindex" });
   assert.deepEqual(calls[5].body, { documentIds: ["d1", "d2"] });
-  assert.deepEqual(calls[7].body, { files: [{ name: "a.pdf", size: 10, pages: 4 }] });
+  // The workspace selects the route and never leaks into the graph estimate body.
+  assert.deepEqual(calls[6].body, {});
+  // Upload estimates default to the client workspace; a per-call workspace (ID, slug or name) wins.
+  assert.deepEqual(calls[7].body, { files: [{ name: "a.pdf", size: 10, pages: 4 }], workspace: "ws1" });
   assert.deepEqual(calls[8].body, { mode: "map" });
+  assert.deepEqual(calls[9].body, { files: [{ name: "b.pdf", size: 5 }], workspace: "Legal Contracts" });
 });
 
 test("mutations expose the queued job", async () => {
@@ -55,7 +61,7 @@ test("mutations expose the queued job", async () => {
 test("setRetention targets org or workspace and validates the range", async () => {
   const { calls, client } = recorder(() => json({}));
   await client.setRetention({ orgId: "o 1" }, 5);
-  await client.setRetention({ workspaceId: "w" }, null);
+  await client.setRetention({ workspace: "w" }, null);
   await client.setRetention({}, 2);
   assert.deepEqual(calls.map((c) => [c.method, c.url, c.body]), [
     ["PATCH", "/v1/organizations/o%201", { retainDocumentVersions: 5 }],

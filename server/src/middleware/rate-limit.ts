@@ -42,7 +42,9 @@ import { orgRateLimitProfile, resetRateLimitPlanCache, userRateLimitProfile } fr
  * buying credits raises them.
  */
 
-type RedisClient = ReturnType<typeof createClient>;
+// Infer the concrete RESP version selected by redis instead of the generic factory.
+const createRateLimitRedisClient = (url: string) => createClient({ url });
+type RedisClient = ReturnType<typeof createRateLimitRedisClient>;
 
 type RateLimitIdentityMode = "ip" | "actor";
 export type RateLimitCategory = "upload" | "search" | "chat-ai" | "read" | "write" | "webhook";
@@ -340,7 +342,7 @@ class RedisSlidingWindowStore extends FallbackStore {
   private async connect(): Promise<RedisClient> {
     if (this.client?.isOpen) return this.client;
     if (!this.connectPromise) {
-      const client = createClient({ url: this.url });
+      const client = createRateLimitRedisClient(this.url);
       client.on("error", (error) => {
         if (!this.clientErrorLogged) {
           this.clientErrorLogged = true;

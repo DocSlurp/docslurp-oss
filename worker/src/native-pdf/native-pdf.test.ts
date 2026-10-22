@@ -301,11 +301,11 @@ describe("registry integration", () => {
   it("leaves the pdf order unchanged when off and prepends native-pdf in native-pdf mode", () => {
     const registry = new ExtractorRegistry();
     delete process.env.DOCSLURP_PDF_ENGINE;
-    expect(registry.resolve("pdf")).toEqual(["kreuzberg", "native-pdf", "poppler-text", "docling"]);
+    expect(registry.resolve("pdf")).toEqual(["kreuzberg", "native-pdf", "poppler-text"]);
     process.env.DOCSLURP_PDF_ENGINE = "shadow";
     expect(registry.resolve("pdf")[0]).toBe("kreuzberg");
     process.env.DOCSLURP_PDF_ENGINE = "native-pdf";
-    expect(registry.resolve("pdf")).toEqual(["native-pdf", "kreuzberg", "poppler-text", "docling"]);
+    expect(registry.resolve("pdf")).toEqual(["native-pdf", "kreuzberg", "poppler-text"]);
   });
 
   it("marks native-pdf unavailable when no engine is installed so kreuzberg runs", async () => {

@@ -33,8 +33,8 @@ type DocumentViewerPayload = {
 type BaseEmbedProps = {
   /** Default https://docslurp.io. */
   apiUrl?: string;
-  /** UUID, slug or "default" (the key organization's default workspace). Default "default". */
-  workspaceId?: string;
+  /** Workspace ID, slug or name, or "default" (the key organization's default workspace). Default "default". */
+  workspace?: string;
   clientKey?: string;
 };
 
@@ -60,7 +60,7 @@ function buildHeaders(clientKey?: string) {
 
 export function SearchEmbed({
   apiUrl = DEFAULT_API_URL,
-  workspaceId = DEFAULT_WORKSPACE,
+  workspace = DEFAULT_WORKSPACE,
   clientKey,
   placeholder = "Search documents...",
   limit = 8,
@@ -75,8 +75,8 @@ export function SearchEmbed({
   const [status, setStatus] = useState<string | null>(null);
   const [results, setResults] = useState<SearchResult[]>([]);
   const canSearch = useMemo(
-    () => q.trim().length > 0 && Boolean(offline || workspaceId),
-    [offline, q, workspaceId],
+    () => q.trim().length > 0 && Boolean(offline || workspace),
+    [offline, q, workspace],
   );
   const offlineClient = useMemo(() => {
     if (!offline) {
@@ -94,10 +94,10 @@ export function SearchEmbed({
         const nextResults = await offlineClient.search(q, { limit });
         setResults(nextResults);
         setStatus(`Found ${nextResults.length} results offline`);
-      } else if (workspaceId) {
+      } else if (workspace) {
         const params = new URLSearchParams({
           q,
-          workspaceId,
+          workspace,
           limit: String(limit),
         });
         const res = await fetch(
@@ -123,7 +123,7 @@ export function SearchEmbed({
       void run();
     }, 250);
     return () => clearTimeout(id);
-  }, [q, offlineClient, workspaceId, apiUrl, clientKey, limit]);
+  }, [q, offlineClient, workspace, apiUrl, clientKey, limit]);
 
   return (
     <div data-docslurp-surface="search" style={surfaceStyle}>
@@ -168,7 +168,7 @@ export function SearchEmbed({
 
 export function ChatEmbed({
   apiUrl = DEFAULT_API_URL,
-  workspaceId = DEFAULT_WORKSPACE,
+  workspace = DEFAULT_WORKSPACE,
   clientKey,
   placeholder = "Ask about this workspace...",
 }: BaseEmbedProps & {
@@ -181,7 +181,7 @@ export function ChatEmbed({
 
   async function send() {
     const text = q.trim();
-    if (!text || !workspaceId) return;
+    if (!text || !workspace) return;
     setBusy(true);
     setError(null);
     setAnswer(null);
@@ -192,7 +192,7 @@ export function ChatEmbed({
           "Content-Type": "application/json",
           ...buildHeaders(clientKey),
         },
-        body: JSON.stringify({ q: text, workspaceId }),
+        body: JSON.stringify({ q: text, workspace }),
       });
       if (!res.ok) throw new Error("Request failed");
       const json = (await res.json()) as ChatResponse;
@@ -216,7 +216,7 @@ export function ChatEmbed({
       />
       <div style={{ display: "flex", justifyContent: "flex-end" }}>
         <button
-          disabled={busy || !q.trim() || !workspaceId}
+          disabled={busy || !q.trim() || !workspace}
           onClick={() => void send()}
           style={buttonStyle}
           type="button"
@@ -382,7 +382,7 @@ export function defineDocSlurpElements(options?: {
               }
             : undefined
         }
-        workspaceId={element.getAttribute("workspace-id") || undefined}
+        workspace={element.getAttribute("workspace") || undefined}
       />
     ),
   );
@@ -390,7 +390,7 @@ export function defineDocSlurpElements(options?: {
     <ChatEmbed
       clientKey={element.getAttribute("client-key") ?? undefined}
       apiUrl={element.getAttribute("api-url") || undefined}
-      workspaceId={element.getAttribute("workspace-id") || undefined}
+      workspace={element.getAttribute("workspace") || undefined}
     />
   ));
   defineReactElement(

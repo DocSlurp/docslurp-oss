@@ -5,7 +5,7 @@
 Each result has a `score` (rank-based, so the top hit is always near 1) and a `relevance` from 0 to 1: the strength of the match itself, the best of the embedding similarity (rescaled above the embedding model's unrelated-text baseline) and the share of query terms found in the passage. Unlike `score`, `relevance` does not depend on the other hits, so it is comparable across queries.
 
 - `q` (required): the query, up to 16,000 characters.
-- `workspaceId`: omit it, or pass `default`, for your organization's default workspace. Otherwise pass a slug such as `legal-contracts`; UUIDs and former slugs also work ([Workspaces](https://docslurp.io/docs/http#workspaces)).
+- `workspace`: omit it, or pass `default`, for your organization's default workspace. Otherwise pass a workspace ID, slug or name: `Legal Contracts` and `legal-contracts` name the same workspace, and former slugs keep working. A value that matches none of your workspaces answers `404 workspace_not_found` naming the slug it looked for ([Workspaces](https://docslurp.io/docs/http#workspaces)).
 - `limit`: an integer from 1 to 100.
 - `minScore`: the relevance floor, 0 to 1 (default 0.1, or the workspace's retrieval default; `SEARCH_MIN_SCORE` sets the server default; 0 turns it off). Results with a lower raw `relevance` are dropped. When the workspace is searchable but search returns nothing, `results` is empty and the response carries `noMatch: true` with `relevanceFloor: {minScore, dropped}`. That is either because nothing cleared the floor (`dropped` > 0) or because nothing was retrieved at all, for example a filter that matches nothing (`dropped` is 0). A caller can use it to say "no good match" instead of answering from weak passages. `/v1/chat` does this automatically.
 - Filters: `documentId`, `runId`, `filenameContains`, `pageFrom`, `pageTo`, and comma-separated `tags` or `mimeTypes`.
@@ -60,7 +60,7 @@ Chunks reach keyword search once the embed stage has written every chunk row of 
 {
   "queries": [
     {"q": "support hours", "limit": 3},
-    {"q": "urgent incidents", "workspaceId": "operations-runbooks", "tags": "operations"}
+    {"q": "urgent incidents", "workspace": "operations-runbooks", "tags": "operations"}
   ],
   "concurrency": 4
 }
@@ -93,7 +93,7 @@ Protocol surfaces keep the shapes their clients already parse: the OpenAI-compat
 
 ## Grounded chat
 
-`POST /v1/chat` is the canonical workspace chat endpoint. Send `{q, workspaceId?, sessionId?, model?, retrieval?, filters?, agent?}`; an omitted `workspaceId` means your organization's default workspace. `sessionId` and `model` are nonempty strings of at most 256 characters; all fields are checked before model calls. The response includes an answer, citations, and the chat session ID. For streaming, use `/v1/chat/completions` with `stream: true`; omit it for the JSON fallback.
+`POST /v1/chat` is the canonical workspace chat endpoint. Send `{q, workspace?, sessionId?, model?, retrieval?, filters?, agent?}`; an omitted `workspace` means your organization's default workspace (`workspace` takes an ID, slug or name). `sessionId` and `model` are nonempty strings of at most 256 characters; all fields are checked before model calls. The response includes an answer, citations, and the chat session ID. For streaming, use `/v1/chat/completions` with `stream: true`; omit it for the JSON fallback.
 
 ### Model
 
@@ -239,7 +239,7 @@ For an equal-candidate comparison, hold `candidateDepth`, `limit`, filters and f
 ```json
 {
   "q": "pump maintenance interval",
-  "workspaceId": "manuals",
+  "workspace": "manuals",
   "candidateDepth": 100,
   "limit": 10,
   "rerank": false,

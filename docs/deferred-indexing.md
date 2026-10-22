@@ -85,7 +85,7 @@ curl -X POST https://docslurp.io/v1/search \
   -H "Authorization: Bearer $DOCSLURP_CLIENT_KEY" \
   -H "X-DocSlurp-Capability: $TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"q":"limitation of liability","workspaceId":"ws_01hxyz"}'
+  -d '{"q":"limitation of liability","workspace":"ws_01hxyz"}'
 ```
 
 The token is AES-256-GCM sealed and expires within one hour (`ttlSeconds` defaults to and is capped at 3600).

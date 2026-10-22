@@ -59,7 +59,8 @@ const compatRetrievalOptions = {
 
 type CompatImportBody = {
   source?: "algolia" | "elastic" | "legacy-parser";
-  workspaceId?: string;
+  /** Workspace ID, slug or name to import into; falls back to indexName. */
+  workspace?: string;
   indexName?: string;
   synonyms?: unknown;
   rules?: unknown;
@@ -330,7 +331,7 @@ async function persistImport(args: {
     ...(args.settings.compatMetadata ?? {}),
     source,
     importedAt: new Date().toISOString(),
-    sourceIndexName: args.body.indexName ?? args.body.workspaceId ?? args.indexName,
+    sourceIndexName: args.body.indexName ?? args.body.workspace ?? args.indexName,
     schema: args.body.schema ?? {},
     metadata: args.body.metadata ?? {}
   };
@@ -788,9 +789,9 @@ export const algoliaCompatRoutes = new Hono()
     const forbidden = requireServerSearchKey(apiKey);
     if (forbidden) return forbidden;
     const body = await c.req.json<CompatImportBody>();
-    const indexName = body.workspaceId ?? body.indexName ?? "";
+    const indexName = body.workspace ?? body.indexName ?? "";
     if (!indexName) {
-      return c.json({ message: "workspaceId or indexName is required" }, 400);
+      return c.json({ message: "workspace or indexName is required" }, 400);
     }
     const workspace = await loadScopedWorkspace(indexName, apiKey);
     if (!workspace) {

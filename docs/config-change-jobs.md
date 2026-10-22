@@ -36,7 +36,7 @@ Every route that can create work has a `POST …/estimate` twin with the same bo
 | Update search settings | `POST /v1/workspaces/:id/search-settings/estimate` | `updateSearchSettingsEstimate` | Use SDK/HTTP | `searchSettingsEstimate` |
 | Reprocess a run | `POST /v1/runs/:id/reprocess/estimate` | `reprocessEstimate` | `reprocess <runId> --estimate` | `reprocessEstimate` |
 | Full index (document) | `POST /v1/documents/:id/full-index/estimate` | `fullIndexEstimate({ documentId })` | `full-index --document <id> --estimate` | `fullIndexEstimate` |
-| Full index (workspace) | `POST /v1/workspaces/:id/full-index/estimate` | `fullIndexEstimate({ workspaceId })` | `full-index --estimate` | `fullIndexEstimate` |
+| Full index (workspace) | `POST /v1/workspaces/:id/full-index/estimate` | `fullIndexEstimate({ workspace })` | `full-index --estimate` | `fullIndexEstimate` |
 | Indexing mode | `POST /v1/workspaces/:id/indexing-mode/estimate` | `estimateIndexingMode`, `setIndexingModeEstimate` | Use SDK/HTTP | `indexingModeEstimate` |
 | Rebuild graph | `POST /v1/workspaces/:id/graph/jobs/estimate` | `rebuildGraphEstimate` | Use SDK/HTTP | `graphRebuildEstimate` |
 | Upload | `POST /v1/uploads/estimate` `{ files: [{ name, size, pages? }] }` | `uploadEstimate` | `upload <files> --estimate` | `uploadEstimate` |

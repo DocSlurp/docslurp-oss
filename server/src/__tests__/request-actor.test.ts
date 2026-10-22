@@ -15,7 +15,7 @@ vi.mock("../services/api-keys.js", () => ({
   validateApiKey: vi.fn()
 }));
 
-vi.mock("../services/workspaces.js", () => ({ resolveWorkspaceRef: vi.fn(async () => null),
+vi.mock("../services/workspaces.js", () => ({ resolveWorkspaceRef: vi.fn(async () => null), findWorkspaceForInput: vi.fn(async (ref: { id?: string; slug?: string }) => ({ id: (ref.id ?? ref.slug)!, orgId: "org-1" })),
   getWorkspace: vi.fn(),
   ensureDefaultWorkspace: vi.fn(async () => ({ id: "ws-default" }))
 }));

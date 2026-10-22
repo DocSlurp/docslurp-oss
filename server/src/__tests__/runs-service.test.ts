@@ -176,7 +176,7 @@ describe("run preview", () => {
   it("builds a recommended preview profile from file metadata and workspace history", () => {
     const preview = buildRunProcessingPreview({
       request: {
-        workspaceId: "ws-1",
+        workspace: "ws-1",
         pipeline: defaultPipelineFeatures,
         files: [
           {

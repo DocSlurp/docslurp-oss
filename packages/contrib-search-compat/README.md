@@ -11,7 +11,7 @@ Keep your existing search calls and get DocSlurp results with citations. One pac
 | `@docslurp/contrib-search-compat/typesense` | Typesense | `createDocSlurpTypesenseClient()` |
 | `@docslurp/contrib-search-compat/pagefind` | Pagefind | `createDocSlurpPagefind()` |
 
-Requires `@docslurp/sdk` 0.3.0 or newer. The Meilisearch, Typesense and Pagefind subpaths are the same adapters you can import from `@docslurp/sdk/search-adapters`. In the browser, pass a browser key as `clientKey`. Workspace references (`indexName`, `index(...)`, `collections(...)`, `workspaceId`) accept a slug, UUID or `default`.
+Requires `@docslurp/sdk` 0.3.0 or newer. The Meilisearch, Typesense and Pagefind subpaths are the same adapters you can import from `@docslurp/sdk/search-adapters`. In the browser, pass a browser key as `clientKey`. Workspace references (`indexName`, `index(...)`, `collections(...)`, `workspace`) accept a workspace ID, slug or `default`; the `workspace` option also accepts a name.
 
 Renamed from `@docslurp/compat-algolia`, `@docslurp/compat-meilisearch`, `@docslurp/compat-typesense` and `@docslurp/compat-pagefind`; see [`docs/releases.md`](https://github.com/DocSlurp/docslurp-oss/blob/main/docs/releases.md) for the migration.
 
@@ -89,7 +89,7 @@ import { createDocSlurpTypesenseClient } from "@docslurp/contrib-search-compat/t
 
 ## Pagefind
 
-`createDocSlurpPagefind()` supports `search(term)` with lazy `data()` results. It requires `workspaceId` and a `resolveUrl` function that maps each citation to a public page URL.
+`createDocSlurpPagefind()` supports `search(term)` with lazy `data()` results. It requires `workspace` and a `resolveUrl` function that maps each citation to a public page URL.
 
 ```ts
 import { createDocSlurpPagefind } from "@docslurp/contrib-search-compat/pagefind";

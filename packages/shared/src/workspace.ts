@@ -720,6 +720,8 @@ export const createWorkspaceSchema = z.object({
   userId: z.string().default("demo-user"),
   orgId: z.string().optional(),
   name: z.string().trim().min(1).max(120),
+  /** Preferred slug. Invalid or reserved: a generated one; taken by another workspace: suffixed. */
+  slug: z.string().trim().min(1).max(63).optional(),
   templateKey: workspaceTemplateKeySchema.optional(),
   systemPrompt: z.string().trim().max(2000).nullable().optional(),
   /** Enabled by default. Adds a one-time per-document processing cost to improve search results; privacy/template restrictions still apply. */

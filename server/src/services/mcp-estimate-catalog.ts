@@ -6,8 +6,8 @@ import { z } from "zod";
  * work or spend credits, so an agent can price a change before asking for approval.
  */
 
-const WORKSPACE_REF = 'Optional workspace slug, former slug, or UUID. Omit or pass "default" for the organization default workspace.';
-const workspaceId = { type: "string", minLength: 1, maxLength: 256, description: WORKSPACE_REF };
+const WORKSPACE_REF = 'Optional workspace ID, slug or name (names match by slug). Omit for the organization default workspace.';
+const workspace = { type: "string", minLength: 1, maxLength: 256, description: WORKSPACE_REF };
 const freeObject = { type: "object", additionalProperties: true };
 
 export const ESTIMATE_TOOL_NAMES = [
@@ -46,19 +46,19 @@ export function apiKeyMayUseEstimateTool(name: EstimateToolName, key: { scopes: 
 
 export const estimateToolDefinitions: Array<{ name: EstimateToolName; title: string; description: string; inputSchema: Record<string, unknown> }> = [
   { name: "updateEstimate", title: "Estimate Workspace Settings Change", description: "Impact kind and cost of PATCHing workspace settings (pipeline, embedding, chat...), including the re-index it would queue. Read-only; nothing is applied.", inputSchema: {
-    type: "object", properties: { workspaceId, changes: { ...freeObject, description: "The PATCH body you intend to send, for example { pipeline: {...}, apply: \"reindex\" }." } }, required: ["changes"] } },
+    type: "object", properties: { workspace, changes: { ...freeObject, description: "The PATCH body you intend to send, for example { pipeline: {...}, apply: \"reindex\" }." } }, required: ["changes"] } },
   { name: "searchSettingsEstimate", title: "Estimate Search Settings Change", description: "Impact and cost of changing a workspace's search settings. Read-only.", inputSchema: {
-    type: "object", properties: { workspaceId, changes: { ...freeObject, description: "The search-settings PATCH body." } }, required: ["changes"] } },
+    type: "object", properties: { workspace, changes: { ...freeObject, description: "The search-settings PATCH body." } }, required: ["changes"] } },
   { name: "reprocessEstimate", title: "Estimate Run Reprocess", description: "Cost of re-running a run, optionally from a stage. Read-only.", inputSchema: {
     type: "object", properties: { runId: { type: "string", minLength: 1 }, stages: { type: "array", items: { type: "string" } }, stageFrom: { type: "string" } }, required: ["runId"] } },
   { name: "fullIndexEstimate", title: "Estimate Full Index", description: "Cost of fully indexing a deferred workspace, listed documents, or one document (documentId). Read-only.", inputSchema: {
-    type: "object", properties: { workspaceId, documentId: { type: "string", minLength: 1 }, documentIds: { type: "array", items: { type: "string", minLength: 1 }, maxItems: 500 } } } },
+    type: "object", properties: { workspace, documentId: { type: "string", minLength: 1 }, documentIds: { type: "array", items: { type: "string", minLength: 1 }, maxItems: 500 } } } },
   { name: "indexingModeEstimate", title: "Estimate Indexing Mode Switch", description: "Cost of switching a workspace to full, map or visual indexing. Read-only.", inputSchema: {
-    type: "object", properties: { workspaceId, mode: { type: "string", enum: ["full", "map", "visual"] } }, required: ["mode"] } },
+    type: "object", properties: { workspace, mode: { type: "string", enum: ["full", "map", "visual"] } }, required: ["mode"] } },
   { name: "graphRebuildEstimate", title: "Estimate Graph Rebuild", description: "Cost of rebuilding the workspace knowledge graph. Read-only.", inputSchema: {
-    type: "object", properties: { workspaceId } } },
+    type: "object", properties: { workspace } } },
   { name: "uploadEstimate", title: "Estimate Upload", description: "Cost of ingesting files before any bytes are sent. Pass page counts when known; otherwise pages are estimated from size.", inputSchema: {
-    type: "object", properties: { workspaceId, files: { type: "array", minItems: 1, maxItems: 500, items: {
+    type: "object", properties: { workspace, files: { type: "array", minItems: 1, maxItems: 500, items: {
       type: "object", properties: { name: { type: "string", minLength: 1 }, size: { type: "integer", minimum: 0 }, pages: { type: "integer", minimum: 0 } }, required: ["name", "size"] } } }, required: ["files"] } },
 ];
 
@@ -69,7 +69,7 @@ export const jobsGetToolDefinition = {
 };
 export const jobsGetInputSchema = z.object({ jobId: z.string().min(1).max(256) });
 
-const common = { workspaceId: z.string().min(1).max(256).optional() };
+const common = { workspace: z.string().min(1).max(256).optional() };
 const inputSchemas: Record<EstimateToolName, z.ZodType<Record<string, unknown>>> = {
   "updateEstimate": z.object({ ...common, changes: z.record(z.string(), z.unknown()) }),
   "searchSettingsEstimate": z.object({ ...common, changes: z.record(z.string(), z.unknown()) }),
@@ -109,7 +109,7 @@ export function planEstimateTool(
         : { ok: true, plan: { path: `${ws}/full-index/estimate`, body: data.documentIds ? { documentIds: data.documentIds } : {} } };
     case "indexingModeEstimate": return { ok: true, plan: { path: `${ws}/indexing-mode/estimate`, body: { mode: data.mode } } };
     case "graphRebuildEstimate": return { ok: true, plan: { path: `${ws}/graph/jobs/estimate`, body: {} } };
-    case "uploadEstimate": return { ok: true, plan: { path: "/v1/uploads/estimate", body: { files: data.files, workspaceId: workspace } } };
+    case "uploadEstimate": return { ok: true, plan: { path: "/v1/uploads/estimate", body: { files: data.files, workspace } } };
   }
 }
 

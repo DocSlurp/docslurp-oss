@@ -40,6 +40,6 @@ jobs:
           version: '0.13.0'
       - run: uv venv
       - name: Install supported parser stack with CPU wheels
-        run: uv pip install -c worker/requirements.lock.txt -r worker/requirements-base.txt docling 'unstructured[pdf]' sentence-transformers
+        run: uv pip install -c worker/requirements.lock.txt -r worker/requirements-base.txt 'unstructured[pdf]' sentence-transformers
       - name: Exercise PDF and HTML adapters without downloading models
         run: uv run --no-project scripts/check-python-dependencies.py --optional

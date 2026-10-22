@@ -7,15 +7,19 @@ import { hybridSearch } from "../services/search.js";
 import { publicSearchResponse } from "../lib/search-usage.js";
 import { searchOptions } from "../lib/search-input.js";
 import { resolveActorWorkspaceId } from "../lib/request-actor.js";
+import { WorkspaceAccessError } from "../services/default-workspace.js";
 
 async function execute(c: Context, provider: SearchProvider, requestedWorkspaceId: string, params: unknown) {
   adapterQuery(provider, requestedWorkspaceId, params);
   const key = c.get("apiKey");
   if (!apiKeyHasAnyScope(key, ["search"])) return Response.json({ error: "search scope required" }, { status: 403 });
   // Index/collection "default" maps to the key's organization default workspace.
-  const workspaceId = await resolveActorWorkspaceId({ type: "apiKey", userId: key.userId, apiKey: key }, requestedWorkspaceId);
-  const workspace = await loadApiKeyScopedWorkspace(workspaceId, key);
-  if (!workspace) return Response.json({ error: "Workspace not found" }, { status: 404 });
+  const workspaceId = await resolveActorWorkspaceId({ type: "apiKey", userId: key.userId, apiKey: key }, requestedWorkspaceId).catch((error: unknown) => {
+    if (error instanceof WorkspaceAccessError) return null;
+    throw error;
+  });
+  const workspace = workspaceId ? await loadApiKeyScopedWorkspace(workspaceId, key) : null;
+  if (!workspace || !workspaceId) return Response.json({ error: "Workspace not found" }, { status: 404 });
   return await runSearchAdapter(provider, workspaceId, params, async input => publicSearchResponse(await hybridSearch(input.q, key.userId, searchOptions({ ...input, workspaceId, hyde: false, rerank: false, mmr: false, parentRetrieval: false, summarySeed: false, compression: false, queryRewrite: false, queryDecompose: false, stepback: false, selfQuery: false, iterativeMultiHop: false, graphExpansion: false, communityExpansion: false }))));
 }
 export const searchCompatRoutes = new Hono()

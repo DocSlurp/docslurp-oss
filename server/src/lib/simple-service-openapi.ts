@@ -11,14 +11,13 @@ const serviceSecurity = [{ bearerAuth: [] }, { sessionAuth: [] }];
 const keySecurity = [{ bearerAuth: [] }];
 const scopedQuery = z.toJSONSchema(searchInputSchema);
 const minScoreDescription = "Relevance floor, 0..1: drop results whose raw match strength is lower, and report noMatch when none remain. 0 disables it. Omitted: the workspace's retrieval default, else SEARCH_MIN_SCORE (0.1).";
-const workspaceRef = { type: "string", description: "Workspace slug, former slug, UUID, or \"default\". Omitted: the organization default workspace." };
+const workspaceRef = { type: "string", maxLength: 256, description: "Workspace ID, slug or name. Names match by slug, so \"Legal Contracts\", \"legal-contracts\" and \"LEGAL CONTRACTS\" are the same workspace; former slugs of renamed workspaces keep working. Omitted (or \"default\"): the organization default workspace. No match: 404 workspace_not_found naming the slug looked up." };
 const uploadTags = { type: "array", maxItems: 24, items: { type: "string", minLength: 1, maxLength: 100 }, description: "Case-sensitive document labels; trimmed and deduplicated. Commas and NUL are not allowed. Applied to every accepted file." };
 const uploadTarget = {
   tags: uploadTags,
-  workspaceId: { ...workspaceRef, description: "Append to this workspace (slug, former slug, UUID, or \"default\"). Omitted without newWorkspace, workspaceName or templateKey: the organization default workspace." },
-  newWorkspace: { type: "boolean", description: "Create a new self-titled workspace instead of using the default workspace. Multipart sends the string \"true\"." },
-  workspaceName: { type: "string", description: "Create a new workspace with this name." },
-  templateKey: { type: "string", description: "Create a new workspace from this template." },
+  workspace: { ...workspaceRef, description: "Upload into this workspace: an ID, slug or name (names match by slug). A slug or name that matches none of your workspaces creates one with that display name, using its slug when free. Omitted without newWorkspace or templateKey: the organization default workspace." },
+  newWorkspace: { type: "boolean", description: "Without workspace: create a new self-titled workspace instead of using the default workspace. Multipart sends the string \"true\"." },
+  templateKey: { type: "string", description: "Template for a workspace this request creates. Without workspace: create a new self-titled workspace from it." },
   orgId: { type: "string", description: "Session callers only: target this organization's default workspace. API keys use their organization." },
 };
 const errors = {
@@ -159,7 +158,7 @@ const canonicalServicePaths = {
   } },
   "/v1/search": {
     get: { tags: ["search"], summary: "Search a workspace", security: serviceSecurity, parameters: [
-      { in: "query", name: "q", required: true, schema: { type: "string" } }, { in: "query", name: "workspaceId", description: workspaceRef.description, schema: { type: "string" } }, { in: "query", name: "limit", schema: { type: "integer", minimum: 1, maximum: 100 } },
+      { in: "query", name: "q", required: true, schema: { type: "string" } }, { in: "query", name: "workspace", description: workspaceRef.description, schema: { type: "string" } }, { in: "query", name: "limit", schema: { type: "integer", minimum: 1, maximum: 100 } },
       { in: "query", name: "minScore", description: minScoreDescription, schema: { type: "number", minimum: 0, maximum: 1 } },
     ], responses: { "200": response("Cited passages with corpus availability", ref("SearchResponse")), ...errors } },
     post: { tags: ["search"], summary: "Search a workspace", security: serviceSecurity, requestBody: request({ oneOf: [scopedQuery, z.toJSONSchema(batchSearchInputSchema)] }), responses: { "200": response("Single-query passages or ordered batch outcomes", { oneOf: [ref("SearchResponse"), ref("BatchSearchResponse")] }), ...errors } },

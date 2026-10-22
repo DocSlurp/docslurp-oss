@@ -1,7 +1,7 @@
 # Worker image and vendor bundles
 
 How the production worker image stays well under Fly's image limit, and how the
-heavy optional extractors (Docling, Unstructured) are installed on demand from
+heavy optional extractors (Unstructured) are installed on demand from
 prebuilt, sha256-pinned bundles instead of runtime `pip install`.
 
 ## Fly limits that matter
@@ -21,7 +21,7 @@ and from the deploy error text. The CI image budget (below) is set well under it
 | Node | worker-only production `node_modules` from `pnpm deploy`, pruned | same |
 | System tools | poppler-utils, pandoc, ffmpeg, ClamAV, bubblewrap | adds LibreOffice, Tesseract (eng/fra/deu/spa), ocrmypdf, ghostscript, ImageMagick, qpdf, catdoc, unrtf |
 | Python venv `/app/.venv` | base parsers: trafilatura, ebooklib, python-pptx, openpyxl, xlsx2csv, Pillow (wheel-only, read-only) | same, plus pip for the legacy first-boot install |
-| Docling, Unstructured | vendor bundles, fetched on first use | vendor bundles, or the legacy first-boot pip install when no bundle source is configured |
+| Unstructured | vendor bundles, fetched on first use | vendor bundles, or the legacy first-boot pip install when no bundle source is configured |
 | Kreuzberg, LiteParse, mammoth, LanceDB, transformers.js | in `node_modules` | same |
 | Native PDF engine | optional, `DOCSLURP_NATIVE_PDF=1`; PDFs otherwise use Kreuzberg and Poppler (PyMuPDF/pymupdf4llm and the MuPDF `mupdf-tools` apt package were removed 2026-10-15: AGPL) | same |
 | Runtime pip installs | off (`DOCSLURP_PYTHON_LAZY_INSTALL=false`) | on for the first-boot path only |
@@ -88,6 +88,13 @@ Not trimmed yet (candidates):
 
 ## Vendor bundles
 
+Docling was retired on 2026-10-21 because its Pillow <13 constraint prevented
+security fixes. It is no longer installed, advertised, or selected by the worker.
+Use Kreuzberg, native-pdf, or Poppler for PDF extraction. Historical Docling size
+and timing measurements below describe the retired bundle. Only Unstructured
+is supported by the current bundle manifest.
+
+
 A bundle is a relocatable, content-addressed `.tar.zst` containing:
 
 ```text
@@ -101,7 +108,6 @@ Declared bundles (`worker/vendor-bundles.json`):
 
 | Bundle | Provides | Notes |
 | --- | --- | --- |
-| `docling` | `docling` CLI; `docling*`, `torch`, `transformers` modules | layout (heron), TableFormer accurate and RapidOCR torch weights. The VLM pipeline's weights are not included. |
 | `unstructured` | `unstructured`, `unstructured_inference` modules | document extras only (no whisper/triton) plus the default hi_res layout model |
 
 ### Trust and integrity
@@ -136,7 +142,7 @@ Declared bundles (`worker/vendor-bundles.json`):
 - **Timeouts and failures:** each install has its own budget
   (`DOCSLURP_VENDOR_BUNDLE_TIMEOUT_MS`, default 10 min). A caller's step timeout
   only stops that caller waiting; later callers share the same download. A
-  failure is reported as `vendor bundle "docling" unavailable: <reason>` on that
+  failure is reported as `vendor bundle "unstructured" unavailable: <reason>` on that
   extractor candidate, other extractors continue, and the failure is cached for
   5 minutes so each candidate does not download again.
 - **Build supply chain:** bundles are built in `worker/Dockerfile.bundles` from
@@ -155,8 +161,8 @@ Declared bundles (`worker/vendor-bundles.json`):
 | `DOCSLURP_VENDOR_BUNDLE_BASE_URL` | unset (bundles off) | `s3://docslurp-vendor-bundles[/prefix]` (private bucket, authenticated GetObject), `https://…` (public mirror), `file:///dir` (air-gapped or volume), or `http://` on loopback only |
 | `DOCSLURP_VENDOR_BUNDLE_S3_ENDPOINT` / `_REGION` | unset | S3-compatible endpoint (must be `https://`) and region, e.g. `https://s3.us-west-004.backblazeb2.com` / `us-west-004`. Region is required for `s3://`. |
 | `DOCSLURP_VENDOR_BUNDLE_S3_ACCESS_KEY_ID` / `_SECRET_ACCESS_KEY` | unset | Read-only key for the bucket. Set as Fly secrets, never in `fly.worker.toml`. Never passed to bundle env or sandboxed children, and redacted from logs. |
-| `DOCSLURP_VENDOR_BUNDLE_PREFETCH` | unset | Comma list (`docling,unstructured`). Installs those bundles one after another in the background at worker start (unpack takes about 95 s). Never blocks readiness; failures are logged and the on-demand path still works. |
-| `DOCSLURP_VENDOR_BUNDLES` | `on` when a base URL is set | `off` disables every bundle; a comma list (`unstructured`) enables only those bundles. Enabling `docling` puts Docling back among the PDF extraction candidates (`worker/src/extractors/registry.ts`). It is CPU-heavy (about 2 GB RSS per call), so enable it deliberately. |
+| `DOCSLURP_VENDOR_BUNDLE_PREFETCH` | unset | Comma list (`unstructured`). Installs those bundles one after another in the background at worker start (unpack takes about 95 s). Never blocks readiness; failures are logged and the on-demand path still works. |
+| `DOCSLURP_VENDOR_BUNDLES` | `on` when a base URL is set | `off` disables every bundle; a comma list (`unstructured`) enables only those bundles. |
 | `DOCSLURP_VENDOR_BUNDLE_DIR` | image: `/home/docslurp/.cache/docslurp/vendor-bundles`; otherwise `/data/docslurp/vendor-bundles` when `/data` is writable, else `~/.cache/docslurp/vendor-bundles` | Unpack location. It must be writable by the worker user and must not be under `/app`. |
 | `DOCSLURP_VENDOR_BUNDLE_TIMEOUT_MS` | `600000` | Download plus unpack budget per install |
 | `DOCSLURP_VENDOR_BUNDLE_PYTHON` | `3.13` | Python minor version in the platform key |
@@ -185,7 +191,7 @@ base bundle (torch is about 680 MB in each) is a possible follow-up.
 
 ```sh
 # local build (output: .scratch/bundles/<bundle>-<platform>.{tar.zst,json})
-docker buildx build -f worker/Dockerfile.bundles --build-arg BUNDLE=docling \
+docker buildx build -f worker/Dockerfile.bundles --build-arg BUNDLE=unstructured \
   --target export --output type=local,dest=.scratch/bundles .
 ```
 
@@ -195,8 +201,8 @@ artifact and, with `publish=true`, uploads `<prefix>/<bundle>/<sha256>.tar.zst`
 (immutable, `Cache-Control: immutable`). It never deploys. To pin the result:
 
 ```sh
-node scripts/vendor-bundles/update-manifest.mjs --entry docling-linux-x64-py3.13.json
-git commit -am "Pin docling vendor bundle <sha12>"
+node scripts/vendor-bundles/update-manifest.mjs --entry unstructured-linux-x64-py3.13.json
+git commit -am "Pin unstructured vendor bundle <sha12>"
 ```
 
 The next worker deploy ships the new pin. Old objects can stay in the bucket so
@@ -229,7 +235,7 @@ One-time setup:
 4. Publish with **Actions → Vendor Bundles** (`publish=true`) or from a workstation:
 
    ```sh
-   node scripts/vendor-bundles/publish.mjs --entry .scratch/bundles/docling-linux-x64-py3.13.json
+   node scripts/vendor-bundles/publish.mjs --entry .scratch/bundles/unstructured-linux-x64-py3.13.json
    ```
 
    The script uses multipart upload, skips an object that already exists with the same
