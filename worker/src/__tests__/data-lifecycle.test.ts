@@ -29,7 +29,7 @@ beforeAll(async () => {
   store = new Store(pg.url, 60_000);
   sql = (store as unknown as { sql: postgres.Sql<Record<string, unknown>> }).sql;
   await sql`insert into "user"(id, name, email) values ('u1', 'A', 'a@x'), ('u2', 'B', 'b@x')`;
-  await sql`insert into organizations(id, name, slug, created_by_user_id) values ('o1', 'Org', 'org', 'u1')`;
+  await sql`insert into organizations(id, name, slug, created_by_user_id, retain_document_versions) values ('o1', 'Org', 'org', 'u1', 1)`;
 }, 60_000);
 
 afterAll(async () => {
@@ -97,8 +97,7 @@ function fakeExternalStores(keys: string[], vectorRows: Record<string, string[]>
     lancedbRoot: "/tmp/lance",
     deleteVectorRows,
     dropVectorTable,
-    billingEnforced: true,
-  };
+    };
   return { objects, tables, vectorDeleteCalls, storage, options };
 }
 

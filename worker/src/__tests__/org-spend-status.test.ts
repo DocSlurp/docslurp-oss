@@ -14,8 +14,8 @@ describe("org_spend_status", () => {
     db = await createMigratedDatabase();
     await db.exec(`
       insert into "user" (id, name, email) values ('u1', 'U', 'u1@example.com');
-      insert into organizations (id, name, slug, created_by_user_id, credit_balance_cents, included_credits_remaining)
-        values ('org-1', 'One', 'one', 'u1', 3, 0), ('org-2', 'Two', 'two', 'u1', 10, 0);
+      insert into organizations (id, name, slug, created_by_user_id, credit_balance_cents)
+        values ('org-1', 'One', 'one', 'u1', 3), ('org-2', 'Two', 'two', 'u1', 10);
       insert into workspaces (id, org_id, user_id, name) values ('ws-1', 'org-1', 'u1', 'W'), ('ws-2', 'org-2', 'u1', 'X');
       insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, pipeline, input_cost_cents) values
         ('fresh', 'org-1', 'u1', 'ws-1', 'bulk-upload', 'processing', 'embed', '{}', 0),
@@ -40,7 +40,7 @@ describe("org_spend_status", () => {
 
   it("reports available credits net of pending debits, resolving the org from the workspace", async () => {
     expect(await status(null, "ws-1")).toMatchObject({
-      org_id: "org-1", plan_id: "free", reserved: "0",
+      org_id: "org-1", funded: false, reserved: "0",
       workspace_budget_paused: false, org_budget_paused: false, workspace_in_org: true,
     });
     expect(Number((await status(null, "ws-1"))!.available)).toBe(2);

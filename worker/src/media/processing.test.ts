@@ -34,8 +34,8 @@ describe("durable media request execution", () => {
     const f = fixture(); await transcribeChunk(f); await transcribeChunk(f);
     expect(f.provider.transcribe).toHaveBeenCalledTimes(1);
     expect(f.state.usageLedger.snapshot()).toHaveLength(1);
-    expect(f.state.usageLedger.snapshot()[0]).toMatchObject({ id: "receipt-id", amount: 2, unit: "audio-seconds", costCents: .012 });
-    expect(runSpentCents(f.state)).toBe(.012);
+    expect(f.state.usageLedger.snapshot()[0]).toMatchObject({ id: "receipt-id", amount: 2, unit: "audio-seconds", costCents: 0, metadata: { providerCostCents: .01, billable: false } });
+    expect(runSpentCents(f.state)).toBe(0);
   });
   it("keeps cost reserved through a failed checkpoint and retries only persistence", async () => {
     const f = fixture(); vi.mocked(f.state.store!.updateProgress).mockRejectedValueOnce(new Error("database unavailable"));
@@ -81,7 +81,7 @@ describe("durable media request execution", () => {
     const f = fixture(); vi.mocked(f.provider.transcribe).mockRejectedValue(new BilledResponseError("Invalid transcript text", .0005, "req-1"));
     await expect(transcribeChunk(f)).rejects.toThrow("failed");
     expect(f.state.usageLedger.snapshot()).toHaveLength(1);
-    expect(f.state.usageLedger.snapshot()[0]).toMatchObject({ unit: "audio-seconds", costCents: .06, metadata: expect.objectContaining({ providerRequestId: "req-1", costSource: "estimate" }) });
+    expect(f.state.usageLedger.snapshot()[0]).toMatchObject({ unit: "audio-seconds", costCents: 0, metadata: expect.objectContaining({ providerRequestId: "req-1", costSource: "estimate", providerCostCents: .05, billable: false }) });
     await expect(transcribeChunk(f)).rejects.toThrow("reconciliation");
     expect(f.provider.transcribe).toHaveBeenCalledTimes(1);
     expect(f.state.usageLedger.snapshot()).toHaveLength(1);
@@ -94,7 +94,7 @@ describe("durable media request execution", () => {
     await expect(transcribeChunk(f)).rejects.toThrow("reconciliation");
     expect(f.provider.transcribe).toHaveBeenCalledTimes(1);
   });
-  it("labels diarization telemetry/usage and reserves from its own price, not the 100x ASR dispute multiplier", async () => {
+  it("labels diarization telemetry/usage and reserves nothing extra for it: audio minutes bill once, on transcription", async () => {
     const f = fixture();
     const diar = new DeepInfraDiarizationProvider("nvidia/Nemotron-3-Diarization", "k", vi.fn());
     const asr = new DeepInfraMediaProvider("openai/whisper-large-v3-turbo", "k", vi.fn());
@@ -103,8 +103,12 @@ describe("durable media request execution", () => {
     const hour = { bytes: new Uint8Array([1]), durationSeconds: 3600, format: "mp3" as const };
     await transcribeChunk({ ...f, provider: diar, input: hour, metric: "media-diarization" });
     const reserved = vi.mocked(f.journal.admit).mock.calls[0][0].reserveCents;
-    // 60 min * $0.0006 * 100 cents * 1.25 * 2 = 9 cents, 10.8 after the plan margin (the inherited 100x multiplier reserved 540)
-    expect(reserved).toBeCloseTo(10.8, 5);
+    // Customers pay per audio minute (PRICE_CARD), charged with the transcription; diarization holds a token reserve.
+    expect(reserved).toBeCloseTo(0.001, 9);
+    vi.spyOn(asr, "transcribe").mockResolvedValue({ text: "", segments: [], costUsd: .012, costSource: "estimate" });
+    await transcribeChunk({ ...f, provider: asr, input: { ...hour, bytes: new Uint8Array([2]) }, offset: 3600 });
+    // Transcription reserves the customer price of the audio: 60 minutes = 60 Rich pages = 15 credits.
+    expect(vi.mocked(f.journal.admit).mock.calls.at(-1)![0].reserveCents).toBeCloseTo(15, 9);
     expect(diar.reservationMultiplier).toBe(2); expect(asr.reservationMultiplier).toBe(100);
     expect(f.state.usageLedger.snapshot()[0]).toMatchObject({ metric: "media-diarization", amount: 3600 });
     const { recordMediaTelemetry } = await import("@docslurp/shared/observability");

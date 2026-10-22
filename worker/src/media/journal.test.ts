@@ -17,11 +17,11 @@ describe("remote media admission and accounting on migrated Postgres", () => {
     maxRunCostCents: 100, maxConcurrent: 1, dailyBudgetCents: 5 };
   beforeAll(async () => {
     // Admission mechanics at small balances, without the chat reserve.
-    setChatReserveConfig(resolveChatCreditReserveConfig({ CHAT_CREDIT_RESERVE_CREDITS: "0", CHAT_CREDIT_RESERVE_FREE_CREDITS: "0" }));
+    setChatReserveConfig(resolveChatCreditReserveConfig({ CHAT_CREDIT_RESERVE_CREDITS: "0", CHAT_CREDIT_RESERVE_STARTER_CREDITS: "0" }));
     db = await startMigratedPostgres(); sql = postgres(db.url, { max: 1, prepare: false }); journal = new PostgresMediaJournal(sql);
     await sql`insert into "user"(id,name,email) values ('media-u','Media','media-test@example.com')`;
-    await sql`insert into organizations(id,name,slug,created_by_user_id,credit_balance_cents,included_credits_remaining)
-      values ('media-org','Media','media-test','media-u',100,0)`;
+    await sql`insert into organizations(id,name,slug,created_by_user_id,credit_balance_cents)
+      values ('media-org','Media','media-test','media-u',100)`;
     await sql`insert into workspaces(id,org_id,user_id,name) values ('media-ws','media-org','media-u','Media')`;
     await sql`insert into workspace_runs(id,org_id,user_id,workspace_id,kind,status,stage,pipeline)
       values ('media-run','media-org','media-u','media-ws','bulk-upload','processing','extract-markdown','{}')`;
@@ -81,7 +81,7 @@ describe("remote media admission and accounting on migrated Postgres", () => {
     expect(rows).toHaveLength(1); expect(rows[0]).toMatchObject({ org_id: scope.orgId, workspace_id: scope.workspaceId, run_id: scope.runId });
     expect(Number(rows[0].cost_cents)).toBeCloseTo(.5);
   });
-  it("reserves Free video quotas atomically and does not count a retry twice", async () => {
+  it("reserves starter video quotas atomically and does not count a retry twice", async () => {
     await sql`insert into documents(id,user_id,workspace_id,run_id,filename,mime_type,source_key,status)
       values ('media-doc-2','media-u','media-ws','media-run','second.mp4','video/mp4','second','uploaded') on conflict do nothing`;
     const results=await Promise.allSettled([journal.admitVideo(scope,400,40),journal.admitVideo({...scope,documentId:"media-doc-2"},400,40)]);

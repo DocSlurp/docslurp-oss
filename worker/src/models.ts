@@ -13,7 +13,8 @@ export interface WorkspaceRun {
   id: string;
   orgId: string | null;
   /** The billed org's plan, so AI on bonus plans carries the plan-neutral credit factor. */
-  orgPlanId?: string | null;
+  /** Whether the run's org has ever had a paid grant (organizations.funded_at). */
+  orgFunded?: boolean;
   userId: string;
   workspaceId?: string;
   kind: string;

@@ -6,19 +6,27 @@ function candidates(seconds: number, moving=false): VideoCandidate[] {
   return Array.from({length:seconds*2},(_,i)=>({seconds:i/2,delta:moving?.2:0,area:moving?.5:0,tile:moving?.4:0,histogram:moving?.3:0}));
 }
 describe("bounded video policies",()=>{
-  it.each(["silver", "gold", "platinum"])("allows a $10 ceiling only for the %s paid tier", plan => {
-    expect(videoPolicy(plan, 30).maxCostCents).toBe(1000);
-    expect(videoPolicy(plan, 30, { maxCostCents: 2000 }).maxCostCents).toBe(1000);
-    expect(videoPolicy(plan, 30, { maxCostCents: 10 }).maxCostCents).toBe(10);
+  it("allows a $10 ceiling only for funded orgs", () => {
+    expect(videoPolicy(true, 30).maxCostCents).toBe(1000);
+    expect(videoPolicy(true, 30).tier).toBe("funded");
+    expect(videoPolicy(true, 30, { maxCostCents: 2000 }).maxCostCents).toBe(1000);
+    expect(videoPolicy(true, 30, { maxCostCents: 10 }).maxCostCents).toBe(10);
   });
-  it.each(["free", "unknown", "constructor", "__proto__", null, undefined])("keeps %s at the Free ceiling even with a workspace override", plan => {
-    expect(videoPolicy(plan, 30).maxCostCents).toBe(25);
-    expect(videoPolicy(plan, 30, { maxCostCents: 1000 }).maxCostCents).toBe(25);
-    expect(videoPolicy(plan, 30, { maxCostCents: 10 }).maxCostCents).toBe(10);
+  it.each([false, null, undefined])("keeps funded=%s at the starter ceiling even with a workspace override", funded => {
+    expect(videoPolicy(funded, 30).tier).toBe("starter");
+    expect(videoPolicy(funded, 30).maxCostCents).toBe(25);
+    expect(videoPolicy(funded, 30, { maxCostCents: 1000 }).maxCostCents).toBe(25);
+    expect(videoPolicy(funded, 30, { maxCostCents: 10 }).maxCostCents).toBe(10);
+  });
+  it("lets funded orgs process two-hour videos at the priced frame density", () => {
+    const p = videoPolicy(true, 7200);
+    expect(p.frames).toBe(1440);
+    expect(p.frames / (7200 / 60)).toBeLessThanOrEqual(12);
+    expect(() => videoPolicy(true, 7201)).toThrow();
   });
   it("allocates duration-aware budgets without starving late coverage",()=>{
-    expect(videoPolicy("silver",30).frames).toBe(24);
-    const p=videoPolicy("silver",1800); expect(p.frames).toBe(360);
+    expect(videoPolicy(true,30).frames).toBe(24);
+    const p=videoPolicy(true,1800); expect(p.frames).toBe(360);
     const selected=selectVideoFrames(candidates(1800,true),p);
     expect(selected.length).toBeLessThanOrEqual(360);
     expect(selected.at(-1)!.seconds).toBe(1799.5);
@@ -27,14 +35,14 @@ describe("bounded video policies",()=>{
     expect(batches.every(b=>b.length<=8 && b.at(-1)!.seconds-b[0].seconds<=120)).toBe(true);
   });
   it("keeps static coverage without filling the ceiling and finds small changed regions",()=>{
-    const data=candidates(1800); expect(selectVideoFrames(data,videoPolicy("silver",1800))).toHaveLength(181);
+    const data=candidates(1800); expect(selectVideoFrames(data,videoPolicy(true,1800))).toHaveLength(181);
     const short=candidates(30);short[7]={seconds:3.5,delta:0,area:.003,tile:.8,histogram:0};
-    expect(selectVideoFrames(short,videoPolicy("silver",30)).some(f=>f.seconds===3.5)).toBe(true);
+    expect(selectVideoFrames(short,videoPolicy(true,30)).some(f=>f.seconds===3.5)).toBe(true);
   });
   it("clamps workspace settings by tier and bounds total candidate work",()=>{
-    const p=videoPolicy("free",600,{maxFrames:1200,imagesPerCall:32,scanFps:10});expect(p.frames).toBe(60);expect(p.images).toBe(12);
-    expect(videoPolicy("gold",7200,{scanFps:10}).scanFps).toBe(2);
-    expect(()=>videoPolicy("free",601)).toThrow();expect(()=>videoPolicy("silver",30,{scanFps:NaN})).toThrow();
+    const p=videoPolicy(false,600,{maxFrames:1200,imagesPerCall:32,scanFps:10});expect(p.frames).toBe(60);expect(p.images).toBe(12);
+    expect(videoPolicy(true,7200,{scanFps:10}).scanFps).toBe(2);
+    expect(()=>videoPolicy(false,601)).toThrow();expect(()=>videoPolicy(true,30,{scanFps:NaN})).toThrow();
     expect(()=>selectVideoFrames([{seconds:NaN,delta:0,area:0,tile:0,histogram:0}],p)).toThrow();
   });
 });
@@ -65,7 +73,7 @@ it("fails closed on provider rate/context drift before inference",async()=>{
 
 it("applies the selected FPS ceiling to coverage anchors as well as change candidates",()=>{
   for (const moving of [false,true]) {
-    const selected=selectVideoFrames(candidates(30,moving),videoPolicy("silver",30,{maxSelectedFps:.1}));
+    const selected=selectVideoFrames(candidates(30,moving),videoPolicy(true,30,{maxSelectedFps:.1}));
     expect(selected.length).toBeGreaterThan(1);
     expect(selected.slice(1).every((f,i)=>f.seconds-selected[i].seconds >= 10)).toBe(true);
   }

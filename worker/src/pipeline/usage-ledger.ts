@@ -29,9 +29,6 @@ export class PipelineUsageEventLedger {
   private readonly lifetime = { inputTokens: 0, outputTokens: 0, costCents: 0 };
   private pendingBillable = 0;
 
-  /** Plan of the org being billed; bonus plans pay the plan-neutral AI credit factor. */
-  planId: string | null = null;
-
   /** Record an AI/embedding call: price it, log it, buffer it. */
   record(input: WorkerAiUsageInput): UsageEvent | null {
     const event = buildWorkerAiUsageEvent(input);
@@ -120,7 +117,7 @@ export class PipelineUsageEventLedger {
   }
 
   private buffer(event: UsageEvent): UsageEvent {
-    const priced = (event.inputTokens ?? 0) > 0 || (event.outputTokens ?? 0) > 0 ? priceAiUsageEvent(event, { planId: this.planId }) : event;
+    const priced = (event.inputTokens ?? 0) > 0 || (event.outputTokens ?? 0) > 0 ? priceAiUsageEvent(event) : event;
     const stamped = { ...priced, id: event.id ?? randomUUID(), metadata: { ...usageTraceContext(), ...priced.metadata } };
     recordUsageReceipt(stamped);
     this.pending.push(stamped);

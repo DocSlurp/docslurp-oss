@@ -110,7 +110,6 @@ export class WorkflowState {
       artifacts: cloneArtifacts(run.artifacts)
     };
     this.documents = documents;
-    this.usageLedger.planId = run.orgPlanId ?? null;
     this.stage = run.stage;
     this.artifacts = this.run.artifacts;
     this.artifactLedger = DocumentArtifactLedger.create(
