@@ -82,8 +82,47 @@ export const PRICE_CARD = {
   llmSearchMultiplier: 10,
   /** A chat answer counts once more per this many total tokens beyond the first block. */
   chatAnswerTokenBlock: 100_000,
+  /** Optional per-document features (DOCUMENT_FEATURES), charged once per document when the stage runs. */
+  documentSummary: 0.5,
+  structuredFieldsPer10Pages: 1,
+  knowledgeGraphPer10Pages: 1.5,
+  /** Provisional: no production measurements yet. */
+  propositionsPer10Pages: 1,
 } as const;
 export type PriceCard = typeof PRICE_CARD;
+
+/*
+ * Optional per-document features (Langfuse events_full 2026-10, last 30 days,
+ * tokens x live OpenRouter prices: qwen/qwen3.5-flash-02-23 $0.065/$0.26 per M,
+ * gemini-3.1-flash-lite $0.25/$1.50 per M):
+ * - document summary: 1 call per document, avg 4,664 in (p90 17,650) / 498 out
+ *   -> $0.0004 (qwen) to $0.0019 (gemini) per document. Price 0.5 credit.
+ * - knowledge graph extraction: ~19 calls per document (571 calls / 30 traces),
+ *   avg 2,831 in / 1,597 out per call -> ~$0.0006 (qwen) to $0.0031 (gemini) per
+ *   call; community summaries are tiny (244 in / 220 out). Price 1.5 credits per
+ *   started 10 pages.
+ * - structured extraction: 1 sample, 505 in / 246 out on gemini (~$0.0005); it
+ *   scales with document length. Price 1 credit per started 10 pages.
+ * - propositions: no data; 1 credit per started 10 pages is provisional.
+ * - contextual chunk preambles are required and already inside the Fast price.
+ */
+export const DOCUMENT_FEATURES = ["documentSummary", "structuredFields", "knowledgeGraph", "propositions"] as const;
+export type DocumentFeature = (typeof DOCUMENT_FEATURES)[number];
+
+/**
+ * Credits for one optional feature over one document of `pages` pages (media
+ * files pass their Rich-equivalent pages, i.e. minutes x factor). A summary is
+ * a flat price per document; the others are priced per started 10 pages, at
+ * least one block.
+ */
+export function featureCredits(feature: DocumentFeature, pages: number): number {
+  if (feature === "documentSummary") return PRICE_CARD.documentSummary;
+  const blocks = Math.max(1, Math.ceil(Math.max(0, Number.isFinite(pages) ? pages : 0) / 10));
+  const per10 = feature === "structuredFields" ? PRICE_CARD.structuredFieldsPer10Pages
+    : feature === "knowledgeGraph" ? PRICE_CARD.knowledgeGraphPer10Pages
+    : PRICE_CARD.propositionsPer10Pages;
+  return per10 * blocks;
+}
 
 /** Stamped on billable events so a receipt says which price card charged it. */
 export const PRICE_CARD_VERSION = "2026-10-21";
@@ -224,8 +263,20 @@ export const BILLABLE_UNIT_METRICS = {
   storage: "storage-daily",
   search: "search-query",
   chatAnswer: "chat-answer",
+  documentSummary: "feature-document-summary",
+  structuredFields: "feature-structured-fields",
+  knowledgeGraph: "feature-knowledge-graph",
+  propositions: "feature-propositions",
 } as const;
 export type BillableUnitMetric = (typeof BILLABLE_UNIT_METRICS)[keyof typeof BILLABLE_UNIT_METRICS];
+
+/** The unit metric each optional document feature is charged under. */
+export const DOCUMENT_FEATURE_METRICS: Readonly<Record<DocumentFeature, BillableUnitMetric>> = {
+  documentSummary: BILLABLE_UNIT_METRICS.documentSummary,
+  structuredFields: BILLABLE_UNIT_METRICS.structuredFields,
+  knowledgeGraph: BILLABLE_UNIT_METRICS.knowledgeGraph,
+  propositions: BILLABLE_UNIT_METRICS.propositions,
+};
 
 const BILLABLE_UNIT_METRIC_SET: ReadonlySet<string> = new Set(Object.values(BILLABLE_UNIT_METRICS));
 
@@ -646,6 +697,8 @@ export type IngestEstimateInput = {
   documents?: number;
   audioMinutes?: number;
   videoMinutes?: number;
+  /** Optional per-document features to price (DOCUMENT_FEATURES); off unless set. */
+  features?: Partial<Record<DocumentFeature, boolean>>;
 };
 
 export type IngestEstimate = {
@@ -663,8 +716,10 @@ export type IngestEstimate = {
   mediaRichPages: number;
   credits: {
     totalCredits: number;
-    breakdown: { fast: number; rich: number; media: number };
+    breakdown: { fast: number; rich: number; media: number; features: number };
   };
+  /** Credits per enabled optional feature, across all documents. */
+  featureCredits: Partial<Record<DocumentFeature, number>>;
   pagesPerDollar: number;
   creditsPer1000Pages: number;
   storage: {
@@ -721,7 +776,19 @@ export function estimateIngest(input: IngestEstimateInput): IngestEstimate {
   const fast = pageCredits("fast", totals.fastPages);
   const rich = pageCredits("rich", totals.richPages);
   const media = pageCredits("rich", mediaPages);
-  const totalCredits = fast + rich + media;
+  // Optional features are charged per document; spread pages (and media Rich pages) evenly over the files.
+  const pagesPerDocument = (pages + mediaPages) / documents;
+  const featureTotals: Partial<Record<DocumentFeature, number>> = {};
+  let features = 0;
+  if (hasWork) {
+    for (const feature of DOCUMENT_FEATURES) {
+      if (!input.features?.[feature]) continue;
+      const credits = featureCredits(feature, pagesPerDocument) * documents;
+      featureTotals[feature] = credits;
+      features += credits;
+    }
+  }
+  const totalCredits = fast + rich + media + features;
 
   const objectBytes = totals.sourceBytes + totals.artifactBytes;
   const bytes = objectBytes + totals.indexBytes;
@@ -740,7 +807,8 @@ export function estimateIngest(input: IngestEstimateInput): IngestEstimate {
     fastPages: totals.fastPages,
     richPages: totals.richPages,
     mediaRichPages: mediaPages,
-    credits: { totalCredits, breakdown: { fast, rich, media } },
+    credits: { totalCredits, breakdown: { fast, rich, media, features } },
+    featureCredits: featureTotals,
     pagesPerDollar: dollars > 0 ? pages / dollars : 0,
     creditsPer1000Pages: pages > 0 ? (totalCredits / pages) * 1000 : 0,
     storage: { bytes, objectBytes, indexBytes: totals.indexBytes, monthlyCredits: storageCreditsPerMonth(bytes) },

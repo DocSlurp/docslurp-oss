@@ -261,8 +261,17 @@ export function estimatePipelineWork(args: {
   const plannedWeight = [...planned].reduce((sum, stage) => sum + STAGE_WEIGHT[stage], 0);
   const share = selectedWeight <= 0 ? 0 : Math.min(1, selectedWeight / Math.max(plannedWeight, selectedWeight));
 
+  // Optional per-document features are charged in full whenever their stage runs (not by stage share).
+  const features = {
+    documentSummary: selected.includes("document-summary"),
+    structuredFields: selected.includes("structured-extract"),
+    knowledgeGraph: selected.includes("graph-enrich") && Boolean(args.features.graphRag),
+    propositions: selected.includes("proposition-index"),
+  };
   const run = (mix: { text: number; complex: number; scanned: number }) =>
-    estimateIngest({ pages, documents: Math.max(1, documents), mix, profile, ...(args.workerSlots ? { workerSlots: args.workerSlots } : {}) });
+    estimateIngest({ pages, documents: Math.max(1, documents), mix, profile, features, ...(args.workerSlots ? { workerSlots: args.workerSlots } : {}) });
+  const priced = (estimate: ReturnType<typeof run>) =>
+    (estimate.credits.totalCredits - estimate.credits.breakdown.features) * share + estimate.credits.breakdown.features;
   const low = run({ text: 1, complex: 0, scanned: 0 });
   const high = run({ text: 0.2, complex: 0.3, scanned: 0.5 });
   const scaleSeconds = (wall: number) => (share > 0 && pages > 0 ? Math.max(0, wall - FIXED_OVERHEAD_SECONDS) * share + FIXED_OVERHEAD_SECONDS : 0);
@@ -272,8 +281,8 @@ export function estimatePipelineWork(args: {
     documents,
     billing,
     credits: billing === "disabled" ? null : {
-      low: round(low.credits.totalCredits * share),
-      high: round(high.credits.totalCredits * share),
+      low: round(priced(low)),
+      high: round(priced(high)),
     },
     seconds: { low: round(scaleSeconds(low.wallSeconds)), high: round(scaleSeconds(high.wallSeconds)) },
     basis: `${profile} profile, ${selected.length} of ${Math.max(planned.size, selected.length)} stages; `

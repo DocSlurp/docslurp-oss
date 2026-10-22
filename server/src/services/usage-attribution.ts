@@ -164,10 +164,15 @@ export type SpendCategory = "ingest" | "storage" | "search" | "chat" | "other";
 export const STORAGE_USAGE_PROVIDER = UNIT_CHARGE_PROVIDER;
 export const STORAGE_USAGE_METRIC = BILLABLE_UNIT_METRICS.storage;
 
+/** Ingest spend: pages, media minutes and the optional per-document features. */
 const INGEST_UNIT_METRICS = [
   BILLABLE_UNIT_METRICS.fastPage,
   BILLABLE_UNIT_METRICS.richPage,
   BILLABLE_UNIT_METRICS.mediaMinutes,
+  BILLABLE_UNIT_METRICS.documentSummary,
+  BILLABLE_UNIT_METRICS.structuredFields,
+  BILLABLE_UNIT_METRICS.knowledgeGraph,
+  BILLABLE_UNIT_METRICS.propositions,
 ];
 
 /**

@@ -6,6 +6,7 @@ import { textFallbackCost, textModelApiKey, textUsageLabels } from "../lib/text-
 import { allowHostedCall, openRouterTextCall } from "../lib/privacy-guard.js";
 import type { Stage, WorkflowState } from "../pipeline/pipeline.js";
 import { runDocumentStage, runDocuments } from "../pipeline/checkpoints.js";
+import { chargeDocumentFeature } from "../pipeline/feature-charges.js";
 import type { CommandRunner } from "../tools/runner.js";
 import type { ArtifactStore } from "../tools/storage.js";
 import { buildTrustedDocumentTaskPrompt } from "../lib/trusted-llm-task.js";
@@ -202,6 +203,8 @@ export class PropositionIndexStage implements Stage {
                 metadata: { ...generationCost.metadata, documentId: document.id },
               },
             );
+            // Price card (provisional): propositions per started 10 pages, once per document per run.
+            chargeDocumentFeature(state, document, "propositions");
 
             // Record usage for embedding calls
             const embeddingTokens =

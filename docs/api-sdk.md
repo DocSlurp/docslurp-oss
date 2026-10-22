@@ -821,8 +821,12 @@ DocSlurp is prepaid: there are no plans or subscriptions. 1 credit = 1 US cent. 
 | Storage (originals, page images, indexes) | 25 per GB-month, accrued daily |
 | Search | 10 per 1,000 searches; a search that uses LLM query strategies (HyDE, rewrite, stepback, compression, self-query) counts as 10 |
 | Chat answer | 2.5 (standard models), 7.5 (advanced) or 50 (premium) per answer; an answer above 100,000 total tokens counts once more per extra 100,000 |
+| Document summary (`summarize`) | 0.5 per document |
+| Structured fields (`outputSchema`) | 1 per started 10 pages per document |
+| Knowledge graph (`graphRag`, community summaries included) | 1.5 per started 10 pages per document |
+| Propositions (`propositionIndex`, provisional) | 1 per started 10 pages per document |
 
-A file pays only for its pages: there is no per-file minimum. Reprocessing pays again only for the share of stages that run, and a re-index that only rebuilds indexes pays nothing per page. Searches inside a chat answer are part of the answer. An answer that never reaches you because of an error on our side is refunded. `GET /v1/billing/prices` returns the price card, packs, top-up limits and the tier of each chat model; it needs no authentication.
+Optional features are charged once per document each time their stage actually runs (a reprocess that skips the stage pays nothing for it); an audio or video file counts its Rich pages (minutes) as pages. Contextual chunk preambles are part of the page price. A file pays only for its pages and the features it uses: there is no per-file minimum. Reprocessing pays again only for the share of stages that run, and a re-index that only rebuilds indexes pays nothing per page. Searches inside a chat answer are part of the answer. An answer that never reaches you because of an error on our side is refunded. `GET /v1/billing/prices` returns the price card, packs, top-up limits and the tier of each chat model; it needs no authentication.
 
 Organizations that have bought credits (funded) run up to 250 workers at once and get the higher rate limits; starter organizations run up to 50. Larger ceilings and dedicated (private) machines are sold by sales.
 

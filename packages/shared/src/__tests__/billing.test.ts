@@ -3,6 +3,9 @@ import { describe, expect, it } from "vitest";
 import {
   BILLABLE_UNIT_METRICS,
   CHAT_MODEL_TIERS,
+  DOCUMENT_FEATURES,
+  DOCUMENT_FEATURE_METRICS,
+  featureCredits,
   CREDIT_PACK_CENTS,
   CREDIT_RATE_CARD,
   EXAMPLE_CORPORA,
@@ -145,6 +148,37 @@ describe("price card", () => {
     expect(prices).toMatchObject({ packsCents: [2_500, 5_000, 10_000], minTopUpCents: 1_000, starterCredits: 250, privateDedicatedMonthlyUsd: 2_000 });
     expect(prices.chatModelTiers["gpt-6.1-sol"]).toBe("premium");
     expect(JSON.stringify(prices)).not.toMatch(/cpu|memory|gpu|vcpu|gb-hour/i);
+  });
+});
+
+describe("optional document features", () => {
+  it("prices a summary per document and the others per started 10 pages", () => {
+    expect(PRICE_CARD).toMatchObject({ documentSummary: 0.5, structuredFieldsPer10Pages: 1, knowledgeGraphPer10Pages: 1.5, propositionsPer10Pages: 1 });
+    expect(featureCredits("documentSummary", 400)).toBe(0.5);
+    expect(featureCredits("structuredFields", 0)).toBe(1);
+    expect(featureCredits("structuredFields", 10)).toBe(1);
+    expect(featureCredits("structuredFields", 11)).toBe(2);
+    expect(featureCredits("knowledgeGraph", 80)).toBe(12);
+    expect(featureCredits("propositions", 25)).toBe(3);
+    expect(DOCUMENT_FEATURES.map((feature) => DOCUMENT_FEATURE_METRICS[feature])).toEqual([
+      "feature-document-summary", "feature-structured-fields", "feature-knowledge-graph", "feature-propositions",
+    ]);
+  });
+
+  it("keeps each feature above its measured cost per document (Langfuse events_full 2026-10)", () => {
+    // Summary: $0.0019 per document on gemini-3.1-flash-lite; graph: ~19 calls x $0.0031 on gemini for a ~10-page document.
+    expect(featureCredits("documentSummary", 10)).toBeGreaterThan(0.19);
+    expect(featureCredits("knowledgeGraph", 10)).toBeGreaterThan(19 * 0.0006 * 100);
+  });
+
+  it("adds enabled features to the estimate, per document, with media minutes counted as pages", () => {
+    const base = estimateIngest({ pages: 100, mix: { text: 1 }, documents: 2 });
+    const withFeatures = estimateIngest({ pages: 100, mix: { text: 1 }, documents: 2, features: { documentSummary: true, knowledgeGraph: true } });
+    expect(withFeatures.featureCredits).toEqual({ documentSummary: 1, knowledgeGraph: 2 * 1.5 * 5 });
+    expect(withFeatures.credits.breakdown.features).toBeCloseTo(16);
+    expect(withFeatures.credits.totalCredits).toBeCloseTo(base.credits.totalCredits + 16);
+    const podcast = estimateIngest({ pages: 0, mix: {}, audioMinutes: 60, documents: 1, features: { structuredFields: true } });
+    expect(podcast.featureCredits.structuredFields).toBe(6);
   });
 });
 
