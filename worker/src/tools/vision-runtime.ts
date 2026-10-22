@@ -2,6 +2,7 @@ import { openRouterReasoningParams, resolveSupportedModelIdWithWarning } from "@
 import { withObservation } from "@docslurp/shared/observability";
 import type { ProviderRateLease } from "../lib/provider-rate-limit.js";
 import { fetchWithProviderRetry, providerFromBaseUrl } from "../lib/provider-retry.js";
+import { prepareVisionImage, profileVisionPromptKey, visionModelProfile } from "./vision-model-profiles.js";
 
 /** Image plus transcription tokens for a typical page (observed ~1,850 in / ~510 out on Gemini Flash Lite). */
 const VISION_IMAGE_TOKEN_ESTIMATE = 2_200;
@@ -38,6 +39,14 @@ import type { CommandRunner } from "./runner.js";
 export const visionPromptTemplates = {
   "<OCR>":
     "Extract visible document text faithfully. Preserve reading order, tables, headings, formulas, and code when visible.",
+  "page-markdown-latex": [
+    "Transcribe this document page into GitHub-flavored Markdown. Copy every visible word verbatim in natural reading order: finish each column before starting the next, and keep headers, footers, captions and labels where they appear. Do not summarize, translate, describe or add commentary.",
+    "- Headings as # headings; lists as - or numbered lists.",
+    "- Math: write every formula and equation in LaTeX, inline as $...$ and each equation set on its own line as $$...$$ (keep equation numbers with \\tag{}). Never write math as Unicode symbols, plain text or \\( \\) delimiters.",
+    "- Tables: transcribe content printed as a table (ruled or column-aligned rows) as a GFM pipe table with one row per line, keeping header rows and every cell. Do not turn other content, such as diagrams or label-value lines, into tables.",
+    "- Text inside charts, diagrams and figures: transcribe it as plain lines.",
+    "- Do not pad lines with alignment spaces. Output only the Markdown.",
+  ].join("\n"),
   markdown:
     "Convert the visible document page into concise GitHub-flavored markdown. Preserve tables, headings, lists, formulas, and code blocks.",
   layout:
@@ -221,7 +230,7 @@ function normalizeVisionConfig(
     baseUrl: selected.runtime === "remote-openai"
       ? cfg.openAiBaseUrl
       : selected.baseUrl,
-    prompt: buildSchemaAwareVisionPrompt(selected.prompt, outputSchema),
+    prompt: buildSchemaAwareVisionPrompt(profileVisionPromptKey(selected.prompt, selected.model), outputSchema),
   };
 }
 
@@ -326,7 +335,8 @@ async function runVisionRequest(args: {
       }
 
       const startedAt = Date.now();
-      const image = await readFile(args.imagePath);
+      const profile = visionModelProfile(args.model);
+      const image = await prepareVisionImage(await readFile(args.imagePath), args.mimeType, profile);
       // 429/5xx back off honouring Retry-After; exhausted retries throw
       // ProviderRetryableError so the activity retries instead of skipping the page.
       let rateLease: ProviderRateLease | null = null;
@@ -352,6 +362,7 @@ async function runVisionRequest(args: {
                   type: "image_url",
                   image_url: {
                     url: `data:${args.mimeType};base64,${image.toString("base64")}`,
+                    ...(profile?.imageDetail ? { detail: profile.imageDetail } : {}),
                   },
                 },
               ],
