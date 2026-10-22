@@ -21,6 +21,14 @@ const CAPABILITIES_URI = "docslurp://capabilities";
 const MAX_BODY_BYTES = 1_048_576;
 const REQUEST_TIMEOUT_MS = 120_000;
 
+/** Directory listings and client UIs show these; icons and websiteUrl need protocol 2025-11-25. */
+const SERVER_INFO = {
+  name: "docslurp", title: "DocSlurp", version: "0.1.0",
+  description: "Upload documents and media, search them with page citations, and get cited answers from your workspaces.",
+  websiteUrl: "https://docslurp.io/docs/mcp",
+  icons: [{ src: "https://docslurp.io/brand/icon-512.png", mimeType: "image/png", sizes: ["512x512"] }],
+};
+
 /** A capability that declares no hints. Assume it may write, so agents confirm first. */
 const UNKNOWN_ANNOTATIONS = { readOnly: false, destructive: false, idempotent: false, openWorld: false };
 
@@ -29,7 +37,7 @@ function createServer(manifest: McpManifest, adapterDispatch: McpDispatch, signa
     try { return await adapterDispatch(path, init); }
     catch { throw new ProtocolError(ProtocolErrorCode.InternalError, "DocSlurp request failed"); }
   };
-  const server = new Server({ name: "docslurp", version: "0.1.0" }, {
+  const server = new Server(SERVER_INFO, {
     capabilities: { tools: {}, resources: {}, prompts: {} },
     instructions: "Use listWorkspaces to discover authorized workspaces. Use upload for URLs or up to 10 presigned file PUT URLs. PUT the bytes then call completeUpload before getUploadStatus. Workspace selection is optional: omitted workspaceId uses the organization default. Use search with q for one query or queries for a batch of cited passages to answer with your own model, or chat for a generated grounded answer that incurs AI usage. Respect workspace and cost constraints.",
   });
@@ -39,7 +47,7 @@ function createServer(manifest: McpManifest, adapterDispatch: McpDispatch, signa
     return {
       name: item.id, title: item.title, description: item.description,
       inputSchema: item.inputSchema as { type: "object"; [key: string]: unknown },
-      annotations: { readOnlyHint: a.readOnly, destructiveHint: a.destructive, idempotentHint: a.idempotent, openWorldHint: a.openWorld },
+      annotations: { title: item.title, readOnlyHint: a.readOnly, destructiveHint: a.destructive, idempotentHint: a.idempotent, openWorldHint: a.openWorld },
     };
   }) }));
   server.setRequestHandler("tools/call", async (request, ctx) => {
@@ -67,7 +75,7 @@ function createServer(manifest: McpManifest, adapterDispatch: McpDispatch, signa
     return { contents: [{ uri: request.params.uri, mimeType: "application/json", text: await response.text() }] };
   });
   server.setRequestHandler("prompts/list", () => ({ prompts: [{
-    name: "workspace-grounded-answer", description: "Answer from workspace evidence with citations.",
+    name: "workspace-grounded-answer", title: "Workspace grounded answer", description: "Answer from workspace evidence with citations.",
   }] }));
   server.setRequestHandler("prompts/get", async (request) => {
     if (request.params.name !== "workspace-grounded-answer") throw new ProtocolError(ProtocolErrorCode.InvalidParams, "Unknown prompt");
