@@ -253,3 +253,24 @@ test("document reads retain the actual nested viewer envelope over HTTP", async 
     assert.equal(actual.filename, undefined, "the server record is nested, never flattened");
   });
 });
+
+for (const method of ["streamProgress", "waitForRun"]) {
+  test(`${method} retains the last run when a request timeout beats the outer deadline`, async () => {
+    let calls = 0;
+    const client = createDocSlurpClient({
+      apiUrl: "https://example.test", apiKey: "fixture",
+      fetch: async () => {
+        if (++calls > 1) throw new DocSlurpTimeoutError("DocSlurp request timed out");
+        const body = method === "streamProgress" ? snapshot(3) : { run: snapshot(3).run };
+        return new Response(JSON.stringify(body), { headers: { "content-type": "application/json" } });
+      },
+    });
+    await assert.rejects(async () => {
+      const options = { transport: "poll", pollIntervalMs: 1, timeoutMs: 30_000 };
+      if (method === "streamProgress") {
+        for await (const _ of client.streamProgress("run/id", options)) {}
+      } else await client.waitForRun("run/id", options);
+    }, error => error instanceof DocSlurpTimeoutError && error.run?.pagesProcessed === 3);
+    assert.equal(calls, 2);
+  });
+}

@@ -1043,6 +1043,10 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
       if (bound.signal.aborted && bound.signal.reason instanceof DocSlurpTimeoutError) {
         throw new DocSlurpTimeoutError(`Stopped watching run ${runId} after ${timeout}ms; it may still be queued or processing`, last?.run);
       }
+      // The request's remaining-budget timer can fire before the outer deadline.
+      if (error instanceof DocSlurpTimeoutError && !error.run) {
+        throw new DocSlurpTimeoutError(error.message, last?.run);
+      }
       throw error;
     } finally {
       clearTimeout(idleTimer);
@@ -1069,6 +1073,10 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
     } catch (error) {
       if (bound.signal.aborted && bound.signal.reason instanceof DocSlurpTimeoutError) {
         throw new DocSlurpTimeoutError(`Run ${runId} did not complete within ${timeoutMs}ms; it may still be queued or processing`, run);
+      }
+      // The request's remaining-budget timer can fire before the outer deadline.
+      if (error instanceof DocSlurpTimeoutError && !error.run) {
+        throw new DocSlurpTimeoutError(error.message, run);
       }
       throw error;
     } finally {
