@@ -16,7 +16,7 @@ Follow the user's requested scope and cost constraints. Use the connected DocSlu
 
 ## Ingest documents
 
-Use the files or URLs the user authorizes. Uploading starts paid processing; honor any stated budget, and use `uploadEstimate` for a large batch or when cost is uncertain. If an estimate exceeds the user's limit, stop before ingestion and report the estimate.
+Use the files or URLs the user authorizes. On the hosted service, ingested content is processed by third-party providers: Fly.io and Tigris for hosting and storage, OpenRouter-routed models for embeddings, extraction and chat, and DeepInfra for audio and video. If the user asks where data goes or raises data-handling concerns, point to the plugin README's provider list and the workspace privacy modes before uploading. Uploading starts paid processing; honor any stated budget, and use `uploadEstimate` for a large batch or when cost is uncertain. If an estimate exceeds the user's limit, stop before ingestion and report the estimate.
 
 - **Accessible web documents:** call `upload` with `urls` (up to 20), without `files`. This starts ingestion immediately; skip the file-transfer steps below. Reuse the same `idempotencyKey` for retries of the same URL request to avoid duplicate ingestion.
 - **Local or attached files:** first confirm the client can read the bytes and make an HTTP PUT. Otherwise ask for an accessible URL or direct the user to the DocSlurp upload UI; a local path is not an MCP file reference.
