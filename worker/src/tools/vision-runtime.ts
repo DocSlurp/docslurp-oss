@@ -34,7 +34,7 @@ import {
 import type { Config } from "../config.js";
 import { readJsonFile } from "./storage.js";
 import type { CommandRunner } from "./runner.js";
-import { mimoOpenRouterParams, mimoVisionPrompt } from "./vision-model-mimo.js";
+import { mimoOpenRouterParams, mimoVisionPrompt, postProcessMimoTranscription } from "./vision-model-mimo.js";
 
 export const visionPromptTemplates = {
   "<OCR>":
@@ -380,7 +380,7 @@ async function runVisionRequest(args: {
       }
 
       const payload = (await response.json()) as OpenAiCompatibleResponse;
-      const text = readAssistantText(payload.choices?.[0]?.message?.content);
+      const text = postProcessMimoTranscription(args.model, readAssistantText(payload.choices?.[0]?.message?.content));
       (rateLease as ProviderRateLease | null)?.settle(
         payload.usage ? (payload.usage.prompt_tokens ?? 0) + (payload.usage.completion_tokens ?? 0) : null,
       );

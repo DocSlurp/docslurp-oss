@@ -7,7 +7,7 @@ import { visionConfigSchema } from "@docslurp/shared";
 
 import type { Config } from "../config.js";
 import { CommandRunner } from "../tools/runner.js";
-import { MIMO_TRANSCRIPTION_PROMPT, MIMO_VISION_MODEL, mimoOpenRouterParams, mimoVisionPrompt } from "../tools/vision-model-mimo.js";
+import { MIMO_TRANSCRIPTION_PROMPT, MIMO_VISION_MODEL, mimoOpenRouterParams, mimoVisionPrompt, normalizeMimoMathDelimiters, postProcessMimoTranscription } from "../tools/vision-model-mimo.js";
 import { executeVisionRuntime, visionPromptTemplates } from "../tools/vision-runtime.js";
 
 afterEach(() => {
@@ -71,5 +71,46 @@ describe("MiMo vision profile", () => {
     const other = await sentBody({});
     expect(other.messages[1].content[0].text).toBe(visionPromptTemplates["<OCR>"]);
     expect(other.provider).toBeUndefined();
+  });
+});
+
+describe("normalizeMimoMathDelimiters", () => {
+  const norm = normalizeMimoMathDelimiters;
+  it("wraps a stand-alone line of bare structured LaTeX", () => {
+    expect(norm("A = \\begin{bmatrix} a & b \\\\ c & d \\end{bmatrix}")).toBe("$$A = \\begin{bmatrix} a & b \\\\ c & d \\end{bmatrix}$$");
+    expect(norm("Intro\n\np(\\theta \\mid D) = \\frac{a}{b}\n\nAfter")).toBe("Intro\n\n$$p(\\theta \\mid D) = \\frac{a}{b}$$\n\nAfter");
+  });
+  it("wraps a bare multi-line environment through its end", () => {
+    expect(norm("\\begin{aligned}\nx &= 1 \\\\\ny &= 2\n\\end{aligned}")).toBe("$$\n\\begin{aligned}\nx &= 1 \\\\\ny &= 2\n\\end{aligned}\n$$");
+  });
+  it("converts \\( \\) and \\[ \\] delimiters, including multi-line display blocks", () => {
+    expect(norm("with \\(d_k = 64\\) keys")).toBe("with $d_k = 64$ keys");
+    expect(norm("\\[\nf(x) = \\frac{1}{x}\n\\]")).toBe("$$\nf(x) = \\frac{1}{x}\n$$");
+  });
+  it("leaves an inline span that runs across lines verbatim", () => {
+    const text = "\\(f(x)=\\begin{cases}\nx & x \\ge 0\\\\\n-x & x < 0\n\\end{cases}\\)";
+    expect(norm(text)).toBe(text);
+  });
+  it("leaves delimited math, row spacing, code, tables, headings and prose alone", () => {
+    const text = [
+      "# The \\alpha release",
+      "Prose with $x^2$ and a price of $5.",
+      "$$",
+      "c_i = \\begin{cases} a \\\\[4pt] b \\end{cases}",
+      "$$",
+      "$$\\sum_i x_i$$",
+      "| \\alpha | 1 |",
+      "- \\frac{a}{b} in a list",
+      "```",
+      "\\frac{a}{b}",
+      "```",
+      "\\newcommand{\\R}{\\mathbb{R}} \\times {",
+      "int main() { return a \\cdot b; }",
+    ].join("\n");
+    expect(norm(text)).toBe(text);
+  });
+  it("applies only to MiMo", () => {
+    expect(postProcessMimoTranscription(MIMO_VISION_MODEL, "\\frac{a}{b}")).toBe("$$\\frac{a}{b}$$");
+    expect(postProcessMimoTranscription("google/gemini-3.1-flash-lite", "\\frac{a}{b}")).toBe("\\frac{a}{b}");
   });
 });
