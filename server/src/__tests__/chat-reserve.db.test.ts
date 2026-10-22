@@ -5,8 +5,8 @@ import { startMigratedPostgres } from "@docslurp/worker/testing";
 
 /**
  * Chat credit reserve and interactive overdraft (migration 0053) against a
- * migrated database, with the default values: $1 (100 credits) on Free, $3
- * (300) on paid plans, 5-credit holds.
+ * migrated database, with the default values: $1 (100 credits) for starter
+ * orgs, $3 (300) for funded orgs, 5-credit holds.
  */
 let stop: () => Promise<void>;
 let sql: postgres.Sql<Record<string, unknown>>;
@@ -53,11 +53,11 @@ beforeEach(async () => {
 });
 
 async function grantOnce(orgId: string) {
-  await sql`insert into credit_grants(org_id, source, external_id, credits, pool) values (${orgId}, 'starter', ${`starter-${orgId}`}, 2500, 'prepaid')`;
+  await sql`insert into credit_grants(org_id, source, external_id, credits) values (${orgId}, 'starter', ${`starter-${orgId}`}, 2500)`;
 }
 
-const balance = (credits: number, plan = "free") =>
-  sql`update organizations set credit_balance_cents = ${credits}, plan_id = ${plan} where id = 'o1'`;
+const balance = (credits: number, account: "starter" | "funded" = "starter") =>
+  sql`update organizations set credit_balance_cents = ${credits}, funded_at = ${account === "funded" ? new Date() : null} where id = 'o1'`;
 
 async function admit(id: string) {
   return await guard.admitRunSpend("o1", "w", (tx) => tx`
@@ -104,10 +104,10 @@ describe("chat credit reserve", () => {
     expect(await outstanding()).toBeCloseTo(1, 6);
   });
 
-  it("uses the paid reserve on paid plans", async () => {
-    await balance(300, "gold");
+  it("uses the funded reserve for funded orgs", async () => {
+    await balance(300, "funded");
     await expect(admit("run-a")).rejects.toMatchObject({ code: "credit_exhausted" });
-    await balance(310, "gold");
+    await balance(310, "funded");
     await expect(admit("run-a")).resolves.toBeDefined();
     expect(await outstanding()).toBeCloseTo(10, 6);
   });
@@ -132,9 +132,9 @@ describe("interactive overdraft", () => {
   it("stops at the allowance itself", async () => {
     await balance(-100);
     await expect(chat()).rejects.toMatchObject({ code: "credit_exhausted" });
-    await balance(-300, "silver");
+    await balance(-300, "funded");
     await expect(chat()).rejects.toMatchObject({ code: "credit_exhausted" });
-    await balance(-290, "silver");
+    await balance(-290, "funded");
     await expect(chat()).resolves.toBeUndefined();
   });
 
@@ -170,7 +170,7 @@ describe("interactive overdraft", () => {
     await balance(3);
     await expect(chat()).resolves.toBeUndefined();
     // A reversed (refunded) grant does not count either.
-    await sql`insert into credit_grants(org_id, source, external_id, credits, reversed_credits, pool) values ('o1', 'topup', 'pi_1', 500, 500, 'prepaid')`;
+    await sql`insert into credit_grants(org_id, source, external_id, credits, reversed_credits) values ('o1', 'topup', 'pi_1', 500, 500)`;
     await balance(-1);
     await expect(chat()).rejects.toMatchObject({ code: "credit_exhausted" });
   });
@@ -209,7 +209,7 @@ describe("interactive overdraft", () => {
 
   it("a top-up pays the negative balance first", async () => {
     await balance(-80);
-    await sql`select grant_org_credits('o1', 'topup', 'pi_topup', 'prepaid', 500)`;
+    await sql`select grant_org_credits('o1', 'topup', 'pi_topup', 500)`;
     const [org] = await sql<{ available: number }[]>`select available from org_available_credits('o1')`;
     expect(org!.available).toBeCloseTo(420, 6);
     await expect(admit("run-a")).resolves.toBeDefined();

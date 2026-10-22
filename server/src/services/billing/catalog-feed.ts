@@ -1,29 +1,28 @@
 import type Stripe from "stripe";
 
-import { MAX_TOPUP_CENTS, MIN_TOPUP_CENTS, SERVICE_PLANS } from "@docslurp/shared";
+import { CREDIT_PACK_CENTS, MAX_TOPUP_CENTS, MIN_TOPUP_CENTS, PRICE_CARD } from "@docslurp/shared";
 
 import { appUrl, getStripe } from "./stripe-client.js";
 
 /**
  * The Stripe Agentic Commerce catalog feed
- * (docs.stripe.com/agentic-commerce/concepts/catalog-feed): paid plans,
- * prepaid credit packs and any extra Stripe products as CSV rows, plus the
- * Product Catalog Import upload.
+ * (docs.stripe.com/agentic-commerce/concepts/catalog-feed): the prepaid
+ * credit packs (CREDIT_PACK_CENTS) and any extra Stripe products as CSV rows,
+ * plus the Product Catalog Import upload. There are no plans or subscriptions.
  *
  * Every row is discovery-only (`disable_checkout=true`). Agent checkout
  * completes a Checkout Session with no DocSlurp organization attached, so
- * nothing could grant the credits or start the subscription; agents send the
+ * nothing could grant the credits; agents send the
  * buyer to the pricing page instead.
  */
 
 /** Product Catalog Imports are preview-only; the client's pinned version does not serve them. */
 export const CATALOG_IMPORT_API_VERSION = "2026-09-30.preview";
 
-/** Software as a service, business use. Plans and credits are both SaaS access. */
+/** Software as a service, business use. Credits are SaaS access. */
 const SAAS_TAX_CODE = "txcd_10103001";
 
-/** Prepaid credit packs listed for discovery, in cents (1 credit = 1 cent). */
-export const CREDIT_PACK_CENTS = [2_500, 10_000, 50_000] as const;
+export { CREDIT_PACK_CENTS };
 
 export const CATALOG_FEED_COLUMNS = [
   "id", "title", "description", "link", "brand", "mpn", "image_link", "product_category",
@@ -38,14 +37,13 @@ const BRAND_ASSETS = "https://raw.githubusercontent.com/DocSlurp/docslurp-oss/ma
 
 /** Public JPEG or PNG images, at least 800×800, from docs/brand by default. */
 export const DEFAULT_CATALOG_IMAGES = {
-  plan: `${BRAND_ASSETS}/product-plan-1200.png`,
   credits: `${BRAND_ASSETS}/product-credits-1200.png`,
 };
 
 export interface CatalogFeedOptions {
   /** Public landing page for every product. Must answer HTTP 200 without a session. */
   link?: string;
-  images?: { plan: string; credits: string };
+  images?: { credits: string };
   /** Extra Stripe prices to list, each with its product expanded. */
   stripePrices?: readonly Stripe.Price[];
 }
@@ -70,34 +68,24 @@ export function buildCatalogFeedRows(options: CatalogFeedOptions = {}): CatalogF
     availability: "in_stock", inventory_not_tracked: "true", stripe_product_tax_code: SAAS_TAX_CODE,
     tax_behavior: "exclusive", disable_checkout: "true",
   };
-  const plans = SERVICE_PLANS.filter((plan) => plan.stripeLookupKey && plan.monthlyMinimumCents > 0).map((plan): CatalogFeedRow => {
-    const id = `docslurp-plan-${plan.id}`;
-    return {
-      ...shared, id, mpn: id, image_link: images.plan,
-      title: `DocSlurp ${plan.label} plan, monthly`,
-      description: `${plan.tagline} DocSlurp turns documents and media into page-by-page Markdown, chunks, embeddings and structured fields, served through search, RAG context and cited chat. `
-        + `The ${plan.label} plan bills a $${(plan.monthlyMinimumCents / 100).toFixed(2)} monthly minimum in advance and includes ${credits(plan.includedCreditsPerMonth)} credits each month. Support: ${plan.support}.`,
-      item_group_id: "docslurp-plans", item_group_title: "DocSlurp plans",
-      custom_variant_option_name_1: "Plan", custom_variant_option_value_1: plan.label,
-      price: usd(plan.monthlyMinimumCents),
-      product_highlight: JSON.stringify(plan.highlights),
-    };
-  });
   const packs = CREDIT_PACK_CENTS.map((cents): CatalogFeedRow => {
     if (cents < MIN_TOPUP_CENTS || cents > MAX_TOPUP_CENTS) throw new Error(`Credit pack ${cents} is outside the top-up range`);
     const id = `docslurp-credits-${cents}`;
     return {
       ...shared, id, mpn: id,
       title: `DocSlurp ${credits(cents)} prepaid credits`,
-      description: `${credits(cents)} prepaid DocSlurp credits for document ingestion, search and chat (1 credit = $0.01). Credits are added to your organization's prepaid balance.`,
+      description: `${credits(cents)} prepaid DocSlurp credits for document ingestion, search and chat (1 credit = $0.01). `
+        + `Pay per use: ${PRICE_CARD.fastPer1kPages} credits per 1,000 text pages, ${PRICE_CARD.richPer1kPages} per 1,000 scanned or image pages, `
+        + `${PRICE_CARD.storageGbMonth} per GB-month stored, ${PRICE_CARD.searchPer1k} per 1,000 searches, from ${PRICE_CARD.chatAnswerTiers.standard} per chat answer. `
+        + "Credits are added to your organization's prepaid balance and do not expire.",
       item_group_id: "docslurp-credits", item_group_title: "DocSlurp prepaid credits",
       custom_variant_option_name_1: "Credits", custom_variant_option_value_1: credits(cents),
       price: usd(cents),
-      product_highlight: JSON.stringify(["1 credit = $0.01", "Pays for ingestion, search and chat"]),
+      product_highlight: JSON.stringify(["1 credit = $0.01", "Pays for ingestion, storage, search and chat", "Credits do not expire"]),
     };
   });
   const extra = (options.stripePrices ?? []).map((price) => stripePriceRow(price, shared));
-  return [...plans, ...packs, ...extra];
+  return [...packs, ...extra];
 }
 
 /** A Stripe price as a feed row, keyed by its product so the row survives price changes. */

@@ -165,21 +165,17 @@ describe("EmbedStage concurrency", () => {
     expect(result.calls.preamble).toBe(1);
   });
 
-  it("stops sending batches once the run cost cap is reached, billing every batch that was sent", async () => {
+  it("does not stop at the run cost cap: embedding is provider cost, not a customer charge", async () => {
     const result = await embedOnce(
       { EMBED_BATCH_CONCURRENCY: "4", EMBED_PROGRESS_INTERVAL_MS: "0", DOCSLURP_EMBED_MAX_WINDOW_CHUNKS: "5" },
       ["doc"],
       { contextualChunkPreambles: false, maxCostCents: 1e-9 },
       true,
     );
-    expect(String(result.error)).toMatch(/cost cap/);
+    expect(result.error).toBeUndefined();
     const embedEvents = result.state.usageLedger.snapshot().filter((event) => event.metric === "embedding-tokens");
     expect(result.calls.embed).toBeGreaterThanOrEqual(1);
-    // Overshoot is bounded by the requests already in flight when the cap was crossed.
-    expect(result.calls.embed).toBeLessThanOrEqual(4);
     expect(embedEvents).toHaveLength(result.calls.embed);
-    // The failure path still checkpoints, so sent batches reach usage_events even
-    // when the activity is cancelled and rethrows without its own checkpoint.
-    expect(result.calls.progress).toBeGreaterThanOrEqual(1);
+    expect(embedEvents.every((event) => event.costCents === 0 && event.metadata?.billable === false)).toBe(true);
   });
 });

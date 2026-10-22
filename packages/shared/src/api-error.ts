@@ -57,7 +57,7 @@ export function isApiErrorCode(value: unknown): value is ApiErrorCode {
 /**
  * Optional structured context. The boundary only forwards validation `issues`
  * (field paths), limit metadata (`retryAfterSeconds`, `category`, `policy`,
- * `plan`, ...), `links` and a failed chat turn's `usage`.
+ * `account` (`starter` | `funded`), ...), `links` and a failed chat turn's `usage`.
  */
 export type ApiErrorDetails = Record<string, unknown>;
 
@@ -134,15 +134,16 @@ export function apiErrorCodeForStatus(status: number): ApiErrorCode {
 }
 
 const SAFE_DETAIL_NUMBERS = ["retryAfterSeconds", "limitCents", "spentCents", "maxBytes"] as const;
-const SAFE_DETAIL_LABELS = ["category", "policy", "plan"] as const;
+const SAFE_DETAIL_LABELS = ["category", "policy", "account"] as const;
 
 /**
  * Where a caller can lift a limit (`details.links` on 402 and 429 responses):
- * the billing page, its credit top-up section, plan upgrades, the API key's
- * own limits and the docs for the limit. Hosted deployments only; self-hosted
+ * the billing page, its credit top-up section, its auto top-up section (only
+ * while auto top-up is off), the API key's own limits and the docs for the
+ * limit. There is no plan to upgrade: limits rise once an org buys credits. Hosted deployments only; self-hosted
  * servers have no billing and send none.
  */
-export const API_ERROR_LINK_KEYS = ["billing", "buyCredits", "upgrade", "apiKeys", "docs"] as const;
+export const API_ERROR_LINK_KEYS = ["billing", "buyCredits", "autoTopUp", "apiKeys", "docs"] as const;
 export type ApiErrorLinkName = (typeof API_ERROR_LINK_KEYS)[number];
 export type ApiErrorLinks = Partial<Record<ApiErrorLinkName, string>>;
 
@@ -164,8 +165,8 @@ export function publicApiErrorLinks(value: unknown): ApiErrorLinks | undefined {
 
 /**
  * Public copy for `code`, plus where to go next when the details carry links:
- * a Free-plan rate limit points at the upgrade, credit and budget errors at
- * billing, API key limits at the key settings. Without links (self-hosted, or
+ * a starter-account rate limit points at buying credits, credit errors at
+ * buying credits and auto top-up, budget errors at billing, API key limits at the key settings. Without links (self-hosted, or
  * no billing) it is the reviewed copy alone.
  */
 export function publicApiErrorMessage(code: ApiErrorCode, details?: ApiErrorDetails): string {
@@ -175,11 +176,11 @@ export function publicApiErrorMessage(code: ApiErrorCode, details?: ApiErrorDeta
   }
   const links = publicApiErrorLinks(details?.links);
   if (!links) return base;
-  const plan = typeof details?.plan === "string" ? details.plan : undefined;
+  const account = typeof details?.account === "string" ? details.account : undefined;
   switch (code) {
     case "rate_limited":
-      if (plan === "free" && links.upgrade) {
-        return `Free plan rate limit reached. Paid plans have higher limits: upgrade at ${links.upgrade}, or wait for Retry-After and try again.`;
+      if (account === "starter" && links.buyCredits) {
+        return `Starter rate limit reached. Accounts that have bought credits get higher limits: buy credits at ${links.buyCredits}, or wait for Retry-After and try again.`;
       }
       return links.docs ? `${base} Rate limits: ${links.docs}` : base;
     case "ip_temporarily_blocked":
@@ -190,12 +191,12 @@ export function publicApiErrorMessage(code: ApiErrorCode, details?: ApiErrorDeta
     case "credit_exhausted":
     case "minimum_credit_required":
     case "payment_required":
-      return links.billing ? `Your organization is out of credits. Buy credits or upgrade your plan at ${links.billing}.` : base;
+      if (!links.buyCredits && !links.billing) return base;
+      return `Your organization is out of credits. Buy credits at ${links.buyCredits ?? links.billing}`
+        + (links.autoTopUp ? `, or turn on auto top-up at ${links.autoTopUp}.` : ".");
     case "workspace_budget_paused":
     case "org_budget_paused":
       return links.billing ? `${base} Review spend and budgets at ${links.billing}.` : base;
-    case "plan_not_entitled":
-      return links.upgrade ? `${base} Upgrade at ${links.upgrade}.` : base;
     default:
       return base;
   }

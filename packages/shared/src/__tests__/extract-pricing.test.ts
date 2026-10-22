@@ -22,18 +22,15 @@ import {
 const perMTok = (input: number, output: number) => ({ costPer1kInputTokens: input / 10, costPer1kOutputTokens: output / 10 });
 
 describe("flat tier route eligibility", () => {
-  it("caps Extract OCR routes at $0.50 per 1,000 pages on every plan", () => {
+  it("caps Extract OCR routes at $0.50 per 1,000 pages", () => {
     expect(flatTierRouteCostCapUsdPer1kPages("ocr")).toBe(0.5);
-    for (const price of Object.values(EXTRACT_TIERS.ocr.usdPer1kPagesByPlan)) expect(price).toBeGreaterThan(0.5);
+    expect(EXTRACT_TIERS.ocr.usdPer1kPages).toBeGreaterThan(0.5);
   });
 
-  it("holds the margin floor at the cost cap on every tier and plan", () => {
+  it("holds the margin floor at the cost cap on every tier", () => {
     for (const tier of Object.values(EXTRACT_TIERS)) {
-      for (const plan of ["free", "silver", "gold", "platinum"] as const) {
-        expect(flatTierMargin(tier.id, plan)).toBeGreaterThanOrEqual(FLAT_TIER_MIN_MARGIN_AT_CAP);
-      }
+      expect(flatTierMargin(tier.id)).toBeGreaterThanOrEqual(FLAT_TIER_MIN_MARGIN_AT_CAP);
     }
-    expect(EXTRACT_TIERS.ocr.usdPer1kPagesByPlan.free).toBeGreaterThanOrEqual(EXTRACT_TIERS.ocr.usdPer1kPagesByPlan.platinum);
   });
 
   it("admits only measured OCR routes under the cost cap and above the quality floor", () => {
@@ -111,9 +108,8 @@ describe("flat tier route eligibility", () => {
 });
 
 describe("flat tier billing", () => {
-  it("charges the plan's flat price per page: $1.50 per 1,000 OCR pages on Free is 150 credits", () => {
+  it("charges the flat price per page: $1.50 per 1,000 OCR pages is 150 credits", () => {
     expect(priceFlatTierPages({ tier: "ocr", pages: 1_000 }).totalCredits).toBeCloseTo(150);
-    expect(priceFlatTierPages({ tier: "ocr", plan: "gold", pages: 1_000 }).totalCredits).toBeCloseTo(110);
     expect(priceFlatTierPages({ tier: "ocr", pages: 0 }).totalCredits).toBe(0);
   });
 

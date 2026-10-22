@@ -13,12 +13,12 @@ const {
 } = await import("../services/billing/spend-guard.js");
 const { resolveChatCreditReserveConfig } = await import("@docslurp/shared");
 
-// Defaults: $3 reserve/overdraft on paid plans, $1 on Free, 5-credit holds.
+// Defaults: $3 reserve/overdraft for funded orgs, $1 for starter orgs, 5-credit holds.
 const config = resolveChatCreditReserveConfig({});
 
 const status = (overrides: Partial<Parameters<typeof spendBlockReason>[0] & object> = {}) => ({
   orgId: "org-1",
-  planId: "free",
+  funded: false,
   available: 10,
   reserved: 0,
   workspaceBudgetPaused: false,
@@ -28,7 +28,7 @@ const status = (overrides: Partial<Parameters<typeof spendBlockReason>[0] & obje
 });
 
 describe("spend admission rule", () => {
-  const noReserve = resolveChatCreditReserveConfig({ CHAT_CREDIT_RESERVE_CREDITS: "0", CHAT_CREDIT_RESERVE_FREE_CREDITS: "0" });
+  const noReserve = resolveChatCreditReserveConfig({ CHAT_CREDIT_RESERVE_CREDITS: "0", CHAT_CREDIT_RESERVE_STARTER_CREDITS: "0" });
 
   it("allows spend while available credits exceed reservations and nothing is paused", () => {
     expect(spendBlockReason(status(), "job", noReserve)).toBeNull();
@@ -41,13 +41,13 @@ describe("spend admission rule", () => {
     expect(spendBlockReason(status({ available: 2, reserved: 2 }), "job", noReserve)?.code).toBe("credit_exhausted");
   });
 
-  it("keeps the chat reserve away from jobs: $1 on Free, $3 on paid plans", () => {
-    expect(config).toMatchObject({ freeReserveCredits: 100, paidReserveCredits: 300, freeOverdraftCredits: 100, paidOverdraftCredits: 300 });
+  it("keeps the chat reserve away from jobs: $1 for starter orgs, $3 for funded orgs", () => {
+    expect(config).toMatchObject({ starterReserveCredits: 100, fundedReserveCredits: 300, starterOverdraftCredits: 100, fundedOverdraftCredits: 300 });
     expect(spendBlockReason(status({ available: 100 }), "job", config)?.code).toBe("credit_exhausted");
     expect(spendBlockReason(status({ available: 100.5 }), "job", config)).toBeNull();
     expect(spendBlockReason(status({ available: 150, reserved: 50 }), "job", config)?.code).toBe("credit_exhausted");
-    expect(spendBlockReason(status({ planId: "gold", available: 300 }), "job", config)?.code).toBe("credit_exhausted");
-    expect(spendBlockReason(status({ planId: "gold", available: 301 }), "job", config)).toBeNull();
+    expect(spendBlockReason(status({ funded: true, available: 300 }), "job", config)?.code).toBe("credit_exhausted");
+    expect(spendBlockReason(status({ funded: true, available: 301 }), "job", config)).toBeNull();
   });
 
   it("lets interactive spend ignore leases and carry a balance down to the overdraft allowance", () => {
@@ -58,8 +58,8 @@ describe("spend admission rule", () => {
     expect(spendBlockReason(status({ available: 0, reserved: 100, hasCreditGrants: true }), "interactive", config)?.code).toBe("credit_exhausted");
     expect(spendBlockReason(status({ available: -99, hasCreditGrants: true }), "interactive", config)).toBeNull();
     expect(spendBlockReason(status({ available: -100, hasCreditGrants: true }), "interactive", config)?.code).toBe("credit_exhausted");
-    expect(spendBlockReason(status({ planId: "silver", available: -299, hasCreditGrants: true }), "interactive", config)).toBeNull();
-    expect(spendBlockReason(status({ planId: "silver", available: -300, hasCreditGrants: true }), "interactive", config)?.code).toBe("credit_exhausted");
+    expect(spendBlockReason(status({ funded: true, available: -299, hasCreditGrants: true }), "interactive", config)).toBeNull();
+    expect(spendBlockReason(status({ funded: true, available: -300, hasCreditGrants: true }), "interactive", config)?.code).toBe("credit_exhausted");
   });
 
   it("gives orgs that never received credits no overdraft", () => {
@@ -99,7 +99,7 @@ describe("assertCanSpend", () => {
   });
 
   const row = (overrides: Record<string, unknown> = {}) => ({
-    org_id: "org-1", plan_id: "free", available: "500", reserved: "0",
+    org_id: "org-1", funded: false, available: "500", reserved: "0",
     workspace_budget_paused: false, org_budget_paused: false, workspace_in_org: true, has_credit_grants: true, ...overrides,
   });
 

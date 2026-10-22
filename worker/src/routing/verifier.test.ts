@@ -649,7 +649,8 @@ describe("createDecisionVerifier usage recording", () => {
     // 2 canaries + 2 verifier calls, all priced from the catalog (omni 0.15, flash 0.038 USD/MTok)
     expect(fetchImpl).toHaveBeenCalledTimes(4);
     expect(verdict!.costUsd).toBeCloseTo((2000 / 1e6) * (0.15 + 0.038), 9);
-    expect(ledger.pendingBillableCents).toBeGreaterThan(0);
+    expect(ledger.snapshot().some((event) => Number(event.metadata?.providerCostCents) > 0)).toBe(true);
+    expect(ledger.pendingBillableCents).toBe(0);
   });
 
   it("refuses hosted calls outside standard privacy mode and abstains", async () => {

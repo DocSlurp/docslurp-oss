@@ -12,25 +12,26 @@
  * may carry a small negative balance: it is allowed while available - live
  * leases > -overdraft (leases only count once chat has spent credits a job
  * still holds, so the job's remaining spend stays inside the allowance). The
- * next top-up, auto-recharge or plan grant pays the negative balance first.
+ * next top-up or auto top-up pays the negative balance first.
  * Monthly budget caps and entitlement stay hard stops; billing-exempt orgs
  * are never credit-gated either way.
  *
- * 1 credit = 1 US cent. Defaults: $3 reserve and overdraft on paid plans, $1
- * on Free. Set the values to 0 to turn either part off. Only orgs that have
- * received credits at least once (starter, top-up, plan grant) may overdraw,
+ * 1 credit = 1 US cent. Defaults: $3 reserve and overdraft for funded orgs
+ * (ever had a paid grant), $1 for starter orgs. Set the values to 0 to turn
+ * either part off. Only orgs that have received credits at least once
+ * (starter, top-up) may overdraw,
  * so creating extra empty orgs does not mint chat credit.
  */
 
 export interface ChatCreditReserveConfig {
-  /** Credits jobs leave untouched on paid plans. */
-  paidReserveCredits: number;
-  /** Credits jobs leave untouched on Free. */
-  freeReserveCredits: number;
-  /** How far below zero interactive spend may take a paid org. */
-  paidOverdraftCredits: number;
-  /** How far below zero interactive spend may take a Free org. */
-  freeOverdraftCredits: number;
+  /** Credits jobs leave untouched in funded orgs. */
+  fundedReserveCredits: number;
+  /** Credits jobs leave untouched in starter orgs. */
+  starterReserveCredits: number;
+  /** How far below zero interactive spend may take a funded org. */
+  fundedOverdraftCredits: number;
+  /** How far below zero interactive spend may take a starter org. */
+  starterOverdraftCredits: number;
   /**
    * Near or below zero, each interactive call holds this many credits for
    * `holdTtlSeconds`, so concurrent calls cannot all pass on the last of the
@@ -45,8 +46,8 @@ type Env = Record<string, string | undefined>;
 /** Upper bound for every knob: $100. A typo must not hand out real credit. */
 export const CHAT_CREDIT_RESERVE_MAX = 10_000;
 
-export const DEFAULT_PAID_CHAT_RESERVE_CREDITS = 300;
-export const DEFAULT_FREE_CHAT_RESERVE_CREDITS = 100;
+export const DEFAULT_FUNDED_CHAT_RESERVE_CREDITS = 300;
+export const DEFAULT_STARTER_CHAT_RESERVE_CREDITS = 100;
 
 function readCredits(env: Env, name: string, fallback: number, max = CHAT_CREDIT_RESERVE_MAX): number {
   const raw = env[name];
@@ -57,26 +58,21 @@ function readCredits(env: Env, name: string, fallback: number, max = CHAT_CREDIT
 }
 
 export function resolveChatCreditReserveConfig(env: Env = process.env): ChatCreditReserveConfig {
-  const paidReserveCredits = readCredits(env, "CHAT_CREDIT_RESERVE_CREDITS", DEFAULT_PAID_CHAT_RESERVE_CREDITS);
-  const freeReserveCredits = readCredits(env, "CHAT_CREDIT_RESERVE_FREE_CREDITS", DEFAULT_FREE_CHAT_RESERVE_CREDITS);
+  const fundedReserveCredits = readCredits(env, "CHAT_CREDIT_RESERVE_CREDITS", DEFAULT_FUNDED_CHAT_RESERVE_CREDITS);
+  const starterReserveCredits = readCredits(env, "CHAT_CREDIT_RESERVE_STARTER_CREDITS", DEFAULT_STARTER_CHAT_RESERVE_CREDITS);
   return {
-    paidReserveCredits,
-    freeReserveCredits,
-    paidOverdraftCredits: readCredits(env, "CHAT_CREDIT_OVERDRAFT_CREDITS", paidReserveCredits),
-    freeOverdraftCredits: readCredits(env, "CHAT_CREDIT_OVERDRAFT_FREE_CREDITS", freeReserveCredits),
+    fundedReserveCredits,
+    starterReserveCredits,
+    fundedOverdraftCredits: readCredits(env, "CHAT_CREDIT_OVERDRAFT_CREDITS", fundedReserveCredits),
+    starterOverdraftCredits: readCredits(env, "CHAT_CREDIT_OVERDRAFT_STARTER_CREDITS", starterReserveCredits),
     holdCredits: readCredits(env, "CHAT_CREDIT_HOLD_CREDITS", 5, 1_000),
     holdTtlSeconds: Math.round(readCredits(env, "CHAT_CREDIT_HOLD_TTL_SECONDS", 120, 3_600)) || 1,
   };
 }
 
-/** Free (and anything that is not a paid plan) gets the Free values. */
-function isFreePlan(planId: string | null | undefined): boolean {
-  return planId !== "silver" && planId !== "gold" && planId !== "platinum";
-}
-
-/** Credits jobs must leave for chat in an org on `planId`. */
-export function chatCreditReserve(planId: string | null | undefined, config: ChatCreditReserveConfig = resolveChatCreditReserveConfig()): number {
-  return isFreePlan(planId) ? config.freeReserveCredits : config.paidReserveCredits;
+/** Credits jobs must leave for chat in a funded or starter org. */
+export function chatCreditReserve(funded: boolean, config: ChatCreditReserveConfig = resolveChatCreditReserveConfig()): number {
+  return funded ? config.fundedReserveCredits : config.starterReserveCredits;
 }
 
 /**
@@ -84,10 +80,10 @@ export function chatCreditReserve(planId: string | null | undefined, config: Cha
  * credits (`hasGrants` false), so an empty org cannot overdraw.
  */
 export function chatCreditOverdraft(
-  planId: string | null | undefined,
+  funded: boolean,
   hasGrants: boolean,
   config: ChatCreditReserveConfig = resolveChatCreditReserveConfig(),
 ): number {
   if (!hasGrants) return 0;
-  return isFreePlan(planId) ? config.freeOverdraftCredits : config.paidOverdraftCredits;
+  return funded ? config.fundedOverdraftCredits : config.starterOverdraftCredits;
 }

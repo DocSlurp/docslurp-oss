@@ -1,5 +1,4 @@
 import { sha256Hex } from "./hash.js";
-import { getPlan } from "./billing.js";
 
 export const MAX_SOURCE_PATH_LENGTH = 1024;
 export const MIN_RETAINED_VERSIONS = 1;
@@ -42,20 +41,18 @@ export function documentVersionKey(args: {
   return `path:${sha256Hex(`${args.workspaceId}\n${path}/${name}`).slice(0, 32)}`;
 }
 
+/** Versions kept per document chain when neither the workspace nor the org overrides it. */
+export const DEFAULT_RETAINED_VERSIONS = 2;
+
 /**
- * Versions kept per document: free is always 1 when billing is enforced; paid uses workspace override, then org
- * setting, then the plan default. A deployment that does not bill (`billingEnforced` false) honours the settings
- * on every plan and defaults to the paid plan default, so self-hosted installs are never locked to one version.
+ * Versions kept per document: workspace override, then org setting, then DEFAULT_RETAINED_VERSIONS. The same for
+ * every org: storage is billed per GB, so retention is not gated by funding.
  */
 export function effectiveRetainedVersions(args: {
-  planId: string | null;
   orgSetting: number | null;
   workspaceSetting: number | null;
-  billingEnforced: boolean;
 }): number {
-  const plan = args.billingEnforced ? getPlan(args.planId) : getPlan("silver");
-  if (plan.id === "free") return 1;
-  const raw = args.workspaceSetting ?? args.orgSetting ?? plan.defaultRetainedVersions;
-  const whole = Number.isFinite(raw) ? Math.trunc(raw) : plan.defaultRetainedVersions;
+  const raw = args.workspaceSetting ?? args.orgSetting ?? DEFAULT_RETAINED_VERSIONS;
+  const whole = Number.isFinite(raw) ? Math.trunc(raw) : DEFAULT_RETAINED_VERSIONS;
   return Math.min(MAX_RETAINED_VERSIONS, Math.max(MIN_RETAINED_VERSIONS, whole));
 }

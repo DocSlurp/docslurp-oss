@@ -70,14 +70,11 @@ cannot be deleted on its own. It is removed when the account is deleted.
 `purgeOrganization` (`services/tenant-offboarding.ts`) runs these steps in
 order:
 
-1. **Stripe.** `cancelOrgSubscription` (`services/billing/customers.ts`)
-   cancels immediately with `invoice_now: true, prorate: false`. This
-   invoices any outstanding metered usage. There is no prorated refund,
-   because credits are prepaid and refunds are handled manually. If Stripe
-   refuses, the deletion stops before anything is deleted (502). If billing
-   is not configured but a subscription exists, the deletion returns 503.
+1. **Billing.** There is no subscription to cancel: credits are prepaid.
+   Unused credits are not refunded automatically; refunds are handled
+   manually.
 2. **Tombstone and access, in one transaction.** It sets `deleted_at`,
-   disables auto-recharge, deletes memberships and invites, revokes API keys
+   turns off auto top-up (so no further charge can start), deletes memberships and invites, revokes API keys
    and MCP OAuth grants, deletes SSO domains, links and requests, and writes
    an `organization.deleted` audit row.
 3. It cancels in-flight runs through Temporal.
@@ -90,7 +87,7 @@ order:
 7. It deletes org-scoped non-billing rows: AI operations, graph jobs, budget
    alerts, notification preferences and deliveries, and upload sessions.
 8. It anonymizes the tombstone: `name = 'Deleted organization'`, `slug`,
-   SSO config, budgets and auto-recharge cleared, and `offboarded_at` set.
+   SSO config, budgets and auto top-up cleared, and `offboarded_at` set.
 
 The purge is idempotent. If it is interrupted after step 2 (`deleted_at` set,
 `offboarded_at` null), the maintenance sweep resumes it after 5 minutes
@@ -134,8 +131,8 @@ user.
 These records are kept for accounting, tax and audit purposes. They reference
 anonymized tombstones.
 
-- `organizations` tombstone row: Stripe customer and subscription ids, plan,
-  credit pools.
+- `organizations` tombstone row: Stripe customer id, the prepaid credit
+  balance and when the organization was first funded.
 - `credit_ledger`, `credit_grants`, `credit_debits_pending`,
   `storage_meter_days`: the money trail.
 - `usage_events`: the usage behind invoices. `run_id` and `document_id` become

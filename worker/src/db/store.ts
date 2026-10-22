@@ -67,7 +67,7 @@ type WorkspaceRunRow = {
   id: string;
   org_id: string;
   /** Joined from organizations by loadRun; absent from other run queries. */
-  org_plan_id?: string | null;
+  org_funded?: boolean | null;
   workspace_id: string;
   user_id: string;
   kind: string;
@@ -425,7 +425,7 @@ export class Store {
     // The org's plan rides along (no extra round trip): it sets the AI credit
     // factor for bonus plans in the usage ledger.
     const [row] = await this.sql<WorkspaceRunRow[]>`
-      select r.*, (select o.plan_id from organizations o where o.id = r.org_id) as org_plan_id
+      select r.*, (select o.funded_at is not null from organizations o where o.id = r.org_id) as org_funded
       from workspace_runs r
       where r.id = ${runId}
       limit 1
@@ -3580,7 +3580,7 @@ function mapRun(row: WorkspaceRunRow): WorkspaceRun {
   return {
     id: row.id,
     orgId: row.org_id ?? null,
-    ...(row.org_plan_id !== undefined ? { orgPlanId: row.org_plan_id } : {}),
+    ...(row.org_funded !== undefined && row.org_funded !== null ? { orgFunded: row.org_funded } : {}),
     userId: row.user_id,
     workspaceId: row.workspace_id,
     kind: row.kind,

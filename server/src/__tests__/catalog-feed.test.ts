@@ -2,23 +2,20 @@ import { describe, expect, it, vi } from "vitest";
 
 import { buildCatalogFeedRows, CATALOG_FEED_COLUMNS, CATALOG_IMPORT_API_VERSION, catalogFeedCsv, uploadCatalogFeed } from "../services/billing/catalog-feed.js";
 
-const images = { plan: "https://docslurp.example/plan.png", credits: "https://docslurp.example/credits.png" };
+const images = { credits: "https://docslurp.example/credits.png" };
 
 describe("Stripe catalog feed", () => {
-  it("lists paid plans and credit packs as discovery-only SaaS products", () => {
+  it("lists the credit packs (no plans) as discovery-only SaaS products", () => {
     const rows = buildCatalogFeedRows({ images, link: "https://docslurp.example/pricing" });
     expect(rows.map((row) => [row.id, row.price])).toEqual([
-      ["docslurp-plan-silver", "20.00 USD"],
-      ["docslurp-plan-gold", "50.00 USD"],
-      ["docslurp-plan-platinum", "500.00 USD"],
       ["docslurp-credits-2500", "25.00 USD"],
+      ["docslurp-credits-5000", "50.00 USD"],
       ["docslurp-credits-10000", "100.00 USD"],
-      ["docslurp-credits-50000", "500.00 USD"],
     ]);
     for (const row of rows) {
       expect(row).toMatchObject({
         brand: "DocSlurp", mpn: row.id, link: "https://docslurp.example/pricing",
-        image_link: row.id.startsWith("docslurp-plan-") ? images.plan : images.credits,
+        image_link: images.credits,
         availability: "in_stock", inventory_not_tracked: "true", stripe_product_tax_code: "txcd_10103001", disable_checkout: "true",
       });
       // Field limits from the feed spec.
@@ -27,8 +24,9 @@ describe("Stripe catalog feed", () => {
       expect(row.description.length).toBeLessThanOrEqual(5000);
       expect(JSON.parse(row.product_highlight).every((item: string) => item.length <= 150)).toBe(true);
     }
-    expect(rows[1]!.title).toBe("DocSlurp Gold plan, monthly");
-    expect(rows[1]!.description).toContain("$50.00 monthly minimum in advance and includes 5,500 credits each month");
+    expect(rows[1]!.title).toBe("DocSlurp 5,000 prepaid credits");
+    expect(rows[1]!.description).toContain("do not expire");
+    expect(rows[1]!.description).not.toMatch(/cpu|gpu|memory|vcpu/i);
   });
 
   it("lists extra Stripe products from their default price", () => {
@@ -51,7 +49,7 @@ describe("Stripe catalog feed", () => {
     const csv = catalogFeedCsv(buildCatalogFeedRows({ images }));
     const [header, firstRow] = csv.split("\r\n");
     expect(header).toBe(CATALOG_FEED_COLUMNS.join(","));
-    expect(firstRow).toContain(`"[""2,000 credits every month"",`);
+    expect(firstRow).toContain(`"[""1 credit = $0.01"",`);
     expect(csv.endsWith("\r\n")).toBe(true);
   });
 

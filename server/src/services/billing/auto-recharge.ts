@@ -1,33 +1,40 @@
 import type Stripe from "stripe";
 
-import { autoRechargeSettingsSchema, resolveChatCreditReserveConfig, type AutoRechargeSettings } from "@docslurp/shared";
+import { autoTopUpSettingsSchema, resolveChatCreditReserveConfig, type AutoTopUpSettings } from "@docslurp/shared";
 import { sql, type SqlClient } from "../../db.js";
 import { getOrgBillingRow, grantOrgCredits } from "./credits.js";
 import { getDefaultPaymentMethodId } from "./customers.js";
-import { autoRechargeFromRow } from "./overview.js";
+import { autoTopUpFromRow } from "./overview.js";
 import { BillingRequestError, getStripe, isStripeConfigured, stripeId } from "./stripe-client.js";
+
+/**
+ * Auto top-up (stored as auto_recharge_* columns): off by default. The user
+ * sets a threshold in credits, a refill amount (a pack or a custom amount within
+ * the top-up limits) and a required monthly cap. Every charge is a Stripe
+ * PaymentIntent with an emailed receipt and a `grant:auto_recharge` ledger row.
+ */
 
 /** Never more than one attempt per org in this window; also the PaymentIntent idempotency window. */
 export const AUTO_RECHARGE_MIN_INTERVAL_MS = 10 * 60_000;
-/** Auto-recharge pauses after this many consecutive failures until the user re-saves settings. */
+/** Auto top-up pauses after this many consecutive failures until the user re-saves settings. */
 export const AUTO_RECHARGE_MAX_CONSECUTIVE_FAILURES = 2;
 
-export async function getAutoRechargeSettings(orgId: string): Promise<AutoRechargeSettings | null> {
+export async function getAutoRechargeSettings(orgId: string): Promise<AutoTopUpSettings | null> {
   const org = await getOrgBillingRow(orgId);
-  return org ? autoRechargeFromRow(org) : null;
+  return org ? autoTopUpFromRow(org) : null;
 }
 
 /**
- * Save auto-recharge settings. Enabling records who authorized off-session
+ * Save auto top-up settings. Enabling records who authorized off-session
  * charges and when (design gotcha 14), requires a saved payment method, and
  * clears the failure counter so a paused recharge can resume.
  */
 export async function updateAutoRechargeSettings(args: {
   orgId: string;
   userId: string;
-  settings: AutoRechargeSettings;
-}): Promise<AutoRechargeSettings> {
-  const settings = autoRechargeSettingsSchema.parse(args.settings);
+  settings: AutoTopUpSettings;
+}): Promise<AutoTopUpSettings> {
+  const settings = autoTopUpSettingsSchema.parse(args.settings);
   const org = await getOrgBillingRow(args.orgId);
   if (!org) {
     throw new BillingRequestError("Organization not found", "org_not_found");
@@ -40,7 +47,7 @@ export async function updateAutoRechargeSettings(args: {
     const paymentMethod = org.stripe_customer_id ? await getDefaultPaymentMethodId(org.stripe_customer_id) : null;
     if (!paymentMethod) {
       throw new BillingRequestError(
-        "Add a payment method before enabling auto-recharge",
+        "Add a payment method before turning on auto top-up",
         "payment_method_required",
       );
     }
@@ -156,13 +163,13 @@ export async function runAutoRecharge(options: { stripe?: Stripe; now?: Date } =
         and o.auto_recharge_consecutive_failures < ${AUTO_RECHARGE_MAX_CONSECUTIVE_FAILURES}
         and o.auto_recharge_amount_cents is not null
         and o.auto_recharge_threshold_credits is not null
-        -- Same available figure as admission: pools minus pending debits.
-        -- Also recharge once jobs reach the chat reserve (they stop there),
+        -- Same available figure as admission: balance minus pending debits.
+        -- Also top up once jobs reach the chat reserve (they stop there),
         -- even when the threshold is set below it.
-        and o.included_credits_remaining + o.credit_balance_cents - pending_org_debit_credits(o.id)
+        and o.credit_balance_cents - pending_org_debit_credits(o.id)
           < greatest(
             o.auto_recharge_threshold_credits,
-            case when o.plan_id = 'free' then ${reserve.freeReserveCredits}::numeric else ${reserve.paidReserveCredits}::numeric end
+            case when o.funded_at is null then ${reserve.starterReserveCredits}::numeric else ${reserve.fundedReserveCredits}::numeric end
           )
         and (o.auto_recharge_last_attempt_at is null
           or o.auto_recharge_last_attempt_at < ${now}::timestamptz - make_interval(secs => ${intervalSeconds}))
@@ -216,6 +223,11 @@ async function rechargeOrg(stripe: Stripe, org: DueOrg, now: Date): Promise<bool
     return false;
   }
 
+  // Every auto top-up emails a receipt to the billing contact on the Stripe customer.
+  const receiptEmail = await stripe.customers.retrieve(org.stripe_customer_id)
+    .then((customer) => ("deleted" in customer && customer.deleted ? null : customer.email ?? null))
+    .catch(() => null);
+
   let intent: Stripe.PaymentIntent;
   try {
     intent = await stripe.paymentIntents.create(
@@ -226,7 +238,8 @@ async function rechargeOrg(stripe: Stripe, org: DueOrg, now: Date): Promise<bool
         payment_method: paymentMethod,
         off_session: true,
         confirm: true,
-        description: "DocSlurp credits (auto-recharge)",
+        description: "DocSlurp credits (auto top-up)",
+        ...(receiptEmail ? { receipt_email: receiptEmail } : {}),
         metadata: { orgId: org.id, purpose: "auto_recharge", credits: String(amount) },
       },
       { idempotencyKey: attemptRef },
@@ -249,7 +262,6 @@ async function rechargeOrg(stripe: Stripe, org: DueOrg, now: Date): Promise<bool
         orgId: org.id,
         source: "auto_recharge",
         externalId: intent.id,
-        pool: "prepaid",
         credits: amount,
         metadata: { paymentIntentId: intent.id, amountCents: amount },
       });

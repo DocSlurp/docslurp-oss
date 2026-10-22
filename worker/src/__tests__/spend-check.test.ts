@@ -51,7 +51,7 @@ beforeEach(async () => {
   // The cadence path: WORKER_CREDIT_LEASES=off (credit-lease.test.ts covers leases).
   setCreditLeaseConfig(resolveCreditLeaseConfig({ WORKER_CREDIT_LEASES: "off" }));
   // Cadence mechanics without the chat reserve; "chat reserve" below covers it.
-  setChatReserveConfig(resolveChatCreditReserveConfig({ CHAT_CREDIT_RESERVE_CREDITS: "0", CHAT_CREDIT_RESERVE_FREE_CREDITS: "0" }));
+  setChatReserveConfig(resolveChatCreditReserveConfig({ CHAT_CREDIT_RESERVE_CREDITS: "0", CHAT_CREDIT_RESERVE_STARTER_CREDITS: "0" }));
   await sql`delete from workspace_run_events`;
   await sql`delete from page_work_tasks`;
   await sql`delete from documents`;
@@ -156,29 +156,29 @@ describe("enforceRunSpend", () => {
 describe("chat reserve", () => {
   it("pauses a run once available credits fall below the org's reserve", async () => {
     setChatReserveConfig(resolveChatCreditReserveConfig({}));
-    // 5 credits on Free: below the 100-credit reserve.
+    // 5 credits in a starter org: below the 100-credit reserve.
     expect(await enforceRunSpend(sql, { id: "run-1", orgId: "org-1", workspaceId: "ws-1", userId: "u1" }, "stage-boundary"))
       .toMatchObject({ blocked: true, paused: true, reason: "credit_exhausted" });
     await sql`update workspace_runs set control_state = null, pause_reason = null where id = 'run-1'`;
     await sql`update organizations set credit_balance_cents = 150 where id = 'org-1'`;
     expect(await enforceRunSpend(sql, { id: "run-1", orgId: "org-1", workspaceId: "ws-1", userId: "u1" }, "stage-boundary"))
       .toEqual({ blocked: false, paused: false });
-    await sql`update organizations set credit_balance_cents = 150, plan_id = 'silver' where id = 'org-1'`;
+    await sql`update organizations set credit_balance_cents = 150, funded_at = now() where id = 'org-1'`;
     try {
       expect(await enforceRunSpend(sql, { id: "run-1", orgId: "org-1", workspaceId: "ws-1", userId: "u1" }, "stage-boundary"))
         .toMatchObject({ blocked: true, reason: "credit_exhausted" });
     } finally {
-      await sql`update organizations set plan_id = 'free' where id = 'org-1'`;
+      await sql`update organizations set funded_at = null where id = 'org-1'`;
     }
   });
 
-  it("measures the block code against the plan's reserve", async () => {
+  it("measures the block code against the org's reserve", async () => {
     setChatReserveConfig(resolveChatCreditReserveConfig({}));
     const { spendBlockCode } = await import("../db/spend-check.js");
     const row = { org_id: "org-1", available: 150, workspace_budget_paused: false, org_budget_paused: false, workspace_in_org: true };
-    expect(spendBlockCode({ ...row, plan_id: "free" })).toBeNull();
-    expect(spendBlockCode({ ...row, plan_id: "gold" })).toBe("credit_exhausted");
-    expect(spendBlockCode({ ...row, plan_id: "free", available: 99 })).toBe("credit_exhausted");
+    expect(spendBlockCode({ ...row, funded: false })).toBeNull();
+    expect(spendBlockCode({ ...row, funded: true })).toBe("credit_exhausted");
+    expect(spendBlockCode({ ...row, funded: false, available: 99 })).toBe("credit_exhausted");
   });
 });
 

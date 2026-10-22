@@ -274,14 +274,14 @@ test("DocSlurpApiError exposes the native envelope code and request id", async (
   });
 });
 
-test("DocSlurpApiError exposes upgrade and billing links from 402 details", async () => {
-  const links = { billing: "https://docslurp.io/app/billing", buyCredits: "https://docslurp.io/app/billing#bl-topup", upgrade: "https://docslurp.io/pricing", docs: "javascript:alert(1)" };
+test("DocSlurpApiError exposes buy-credits, auto top-up and billing links from 402 details", async () => {
+  const links = { billing: "https://docslurp.io/app/billing", buyCredits: "https://docslurp.io/app/billing#bl-topup", autoTopUp: "https://docslurp.io/app/billing#bl-auto-topup", upgrade: "https://docslurp.io/pricing", docs: "javascript:alert(1)" };
   const envelope = { error: { code: "credit_exhausted", message: "Out of credits.", details: { links }, requestId: "req-2" } };
   const sdk = client(async () => json(envelope, 402));
   await assert.rejects(sdk.chat({ workspace: "workspace", q: "question" }), (error) => {
     assert.ok(error instanceof DocSlurpApiError);
     assert.equal(error.code, "credit_exhausted");
-    assert.deepEqual(error.links, { billing: links.billing, buyCredits: links.buyCredits, upgrade: links.upgrade });
+    assert.deepEqual(error.links, { billing: links.billing, buyCredits: links.buyCredits, autoTopUp: links.autoTopUp });
     return true;
   });
 });

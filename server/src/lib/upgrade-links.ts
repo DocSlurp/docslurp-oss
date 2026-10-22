@@ -4,9 +4,11 @@ import { isBillingEnforced, type ApiErrorCode, type ApiErrorDetails, type ApiErr
  * Where a caller can lift a limit, attached as `details.links` (and a `Link`
  * header) to every 402 and 429. The URLs point at the hosted app (`APP_URL`):
  *
- * - `billing`: `/app/billing`, the plan, credits, spend and budget page.
+ * - `billing`: `/app/billing`, the credits, forecast, spend and budget page.
  * - `buyCredits`: its "Buy credits" section (`/app/billing#bl-topup`).
- * - `upgrade`: `/pricing`, the plan comparison that hands a choice back to billing.
+ * - `autoTopUp`: its auto top-up section (`/app/billing#bl-auto-topup`), only
+ *   while the org's auto top-up is off (callers that know pass
+ *   `details.autoTopUpOn`). There are no plans, so there is no upgrade link.
  * - `apiKeys`: `/app/api-keys`, where a key's own request, page and spend limits live.
  * - `docs`: the HTTP API guide's section for the limit.
  *
@@ -29,7 +31,7 @@ export function isSelfHostedDeployment(env: NodeJS.ProcessEnv = process.env): bo
     || readBoolean(env.SELF_HOSTED);
 }
 
-/** Whether 402/429 responses carry billing and upgrade links. */
+/** Whether 402/429 responses carry billing links. */
 export function upgradeLinksEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
   return !isSelfHostedDeployment(env) && isBillingEnforced(env);
 }
@@ -46,7 +48,7 @@ function appBaseUrl(env: NodeJS.ProcessEnv): string | null {
 }
 
 export const RATE_LIMIT_DOCS_PATH = "/docs/http#rate-limits-and-headers";
-export const CREDITS_DOCS_PATH = "/docs/http#credits-budgets-and-upgrades";
+export const CREDITS_DOCS_PATH = "/docs/http#credits-and-budgets";
 
 const CREDIT_CODES = new Set<ApiErrorCode>(["credit_exhausted", "minimum_credit_required", "payment_required"]);
 const BUDGET_CODES = new Set<ApiErrorCode>(["workspace_budget_paused", "org_budget_paused"]);
@@ -54,8 +56,10 @@ const KEY_LIMIT_CODES = new Set<ApiErrorCode>(["spend_limit_exceeded", "daily_pa
 
 /**
  * Links for an error `code`, or undefined when the code has none or this
- * deployment has no billing. `details.plan` is the rate-limit profile: an
- * IP-level limit (`ip`) only links the docs, since nothing is bought per IP.
+ * deployment has no billing. `details.account` is the rate-limit profile
+ * (`starter`, `funded`, `ip`): an IP-level limit only links the docs, since
+ * nothing is bought per IP. Starter rate limits point at buying credits,
+ * which lifts the org to the funded limits.
  */
 export function upgradeLinksFor(code: ApiErrorCode, details?: ApiErrorDetails, env: NodeJS.ProcessEnv = process.env): ApiErrorLinks | undefined {
   if (!upgradeLinksEnabled(env)) return undefined;
@@ -63,31 +67,37 @@ export function upgradeLinksFor(code: ApiErrorCode, details?: ApiErrorDetails, e
   if (!base) return undefined;
   const billing = `${base}/app/billing`;
   const buyCredits = `${base}/app/billing#bl-topup`;
-  const upgrade = `${base}/pricing`;
+  const autoTopUp = details?.autoTopUpOn === true ? undefined : `${base}/app/billing#bl-auto-topup`;
   const apiKeys = `${base}/app/api-keys`;
-  if (code === "ip_temporarily_blocked" || (code === "rate_limited" && details?.plan === "ip")) {
+  if (code === "ip_temporarily_blocked" || (code === "rate_limited" && details?.account === "ip")) {
     return { docs: `${base}${RATE_LIMIT_DOCS_PATH}` };
   }
-  if (code === "rate_limited") return { upgrade, billing, buyCredits, docs: `${base}${RATE_LIMIT_DOCS_PATH}` };
-  if (KEY_LIMIT_CODES.has(code)) return { apiKeys, billing, buyCredits, upgrade, docs: `${base}${RATE_LIMIT_DOCS_PATH}` };
-  if (CREDIT_CODES.has(code)) return { billing, buyCredits, upgrade, docs: `${base}${CREDITS_DOCS_PATH}` };
+  if (code === "rate_limited") {
+    return details?.account === "starter"
+      ? { buyCredits, billing, docs: `${base}${RATE_LIMIT_DOCS_PATH}` }
+      : { billing, docs: `${base}${RATE_LIMIT_DOCS_PATH}` };
+  }
+  if (KEY_LIMIT_CODES.has(code)) return { apiKeys, billing, buyCredits, docs: `${base}${RATE_LIMIT_DOCS_PATH}` };
+  if (CREDIT_CODES.has(code)) return { billing, buyCredits, ...(autoTopUp ? { autoTopUp } : {}), docs: `${base}${CREDITS_DOCS_PATH}` };
   if (BUDGET_CODES.has(code)) return { billing, docs: `${base}${CREDITS_DOCS_PATH}` };
-  if (code === "plan_not_entitled") return { upgrade, billing, docs: `${base}${CREDITS_DOCS_PATH}` };
+  if (code === "plan_not_entitled") return { billing, docs: `${base}${CREDITS_DOCS_PATH}` };
   return undefined;
 }
 
-/** `details` with `links` added for `code` (route-supplied links win). */
+/** `details` with `links` added for `code` (route-supplied links win). `autoTopUpOn` is an input only. */
 export function withUpgradeLinks(code: ApiErrorCode, details?: ApiErrorDetails): ApiErrorDetails | undefined {
-  if (details?.links) return details;
+  const { autoTopUpOn: _autoTopUpOn, ...rest } = details ?? {};
+  const base = details ? rest : undefined;
+  if (details?.links) return base;
   const links = upgradeLinksFor(code, details);
-  return links ? { ...details, links } : details;
+  return links ? { ...base, links } : base;
 }
 
-/** RFC 8288 `Link` value: `rel="payment"` for upgrade/billing, `rel="help"` for docs. */
+/** RFC 8288 `Link` value: `rel="payment"` for billing and buying credits, `rel="help"` for docs. */
 export function upgradeLinkHeader(links: ApiErrorLinks | undefined): string | null {
   if (!links) return null;
   const parts: string[] = [];
-  const payment = links.upgrade ?? links.billing;
+  const payment = links.billing;
   if (payment) parts.push(`<${payment}>; rel="payment"`);
   if (links.buyCredits && links.buyCredits !== payment) parts.push(`<${links.buyCredits}>; rel="payment"; title="Buy credits"`);
   if (links.docs) parts.push(`<${links.docs}>; rel="help"`);

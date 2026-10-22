@@ -16,6 +16,9 @@ import type {
   WorkspaceChatFallbackReason,
 } from "@docslurp/shared";
 import {
+  BILLABLE_UNIT_METRICS,
+  PRICE_CARD,
+  searchCredits,
   deferredProfilesEnabled,
   citationLocatorSchema,
   indexConfigHash,
@@ -28,6 +31,8 @@ import {
 } from "@docslurp/shared";
 
 import { sql, type SqlClient } from "../db.js";
+import { recordUnitCharge } from "../lib/ai-usage.js";
+import { currentChatTurn } from "../lib/chat-turn-context.js";
 import { currentRequestSignal } from "../lib/request-context.js";
 import { jsonRecord } from "../lib/json-record.js";
 import { lanceDbFullTextSearch, lanceDbVectorSearch, type LanceDbSearchHit } from "../search/lancedb.js";
@@ -1567,6 +1572,10 @@ export async function hybridSearch(rawQuery: string, userId: string, options: Se
       withSearchSlotTimed(signal, () => executeHybridSearch(query, userId, { ...options, rootSessionId: activity.groupId }), searchAdmission(options))));
     result.timings = timings;
     console.info(`[search-timing] ${Object.entries(timings).map(([key, ms]) => `${key.replace(/Ms$/, "")}=${ms}`).join(" ")} results=${result.results.length}`);
+    // Price card: one search per root query (sub-searches of decomposition and
+    // multi-hop are part of it); LLM query strategies count as llmSearchMultiplier.
+    // Searches a chat turn runs are part of the chat answer's price.
+    if (!options.rootSessionId && !currentChatTurn()) await chargeSearch(result, userId, activity.id);
     report?.({ ...activity, status: "success", runtimeMs: Date.now() - started, resultCount: result.results.length,
       inputTokens: result.usageEvents?.reduce((sum, event) => sum + (event.inputTokens ?? 0), 0),
       outputTokens: result.usageEvents?.reduce((sum, event) => sum + (event.outputTokens ?? 0), 0),
@@ -1575,6 +1584,36 @@ export async function hybridSearch(rawQuery: string, userId: string, options: Se
   } catch (error) {
     report?.({ ...activity, status: "error", runtimeMs: Date.now() - started });
     throw error;
+  }
+}
+
+/**
+ * Bill one completed root search (PRICE_CARD.searchPer1k). A search that ran an
+ * LLM query strategy (HyDE, rewrite, stepback, compression, self-query,
+ * decomposition: any call with output tokens) counts as llmSearchMultiplier
+ * searches. Query embeddings and strategy tokens are our cost, recorded
+ * non-billable by the Search Session journal.
+ */
+async function chargeSearch(result: SearchResponse, userId: string, searchId: string): Promise<void> {
+  const workspaceId = result.availability?.scope?.workspaceId;
+  if (!workspaceId) return;
+  const llmStrategies = (result.usageEvents ?? []).some((event) => (event.outputTokens ?? 0) > 0);
+  try {
+    await recordUnitCharge({
+      userId,
+      scope: { workspaceId, sessionId: result.sessionId },
+      charge: {
+        id: `search:${searchId}`,
+        metric: BILLABLE_UNIT_METRICS.search,
+        amount: 1,
+        unit: "search",
+        credits: searchCredits(1, { llmStrategies }),
+        metadata: { llmStrategies, searchUnits: llmStrategies ? PRICE_CARD.llmSearchMultiplier : 1 },
+      },
+    });
+  } catch (error) {
+    // A failed charge never fails the search the user already has.
+    console.error(`[search] charge failed session=${result.sessionId}: ${error instanceof Error ? error.message : String(error)}`);
   }
 }
 

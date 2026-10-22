@@ -204,8 +204,8 @@ describe("isCostCapExceeded", () => {
       costCents: 25, metadata: { billable: false, effectiveCostCents: 25 } });
     expect(runSpentCents(state)).toBe(40);
     expect(isCostCapExceeded(state)).toBe(false);
-    state.usageLedger.enqueue({ provider: "docslurp", model: "page-base-fee", metric: "page-base-fee", amount: 10, unit: "page",
-      costCents: 10, metadata: {} });
+    state.usageLedger.enqueue({ provider: "docslurp", model: "price-card", metric: "ingest-page-rich", amount: 40, unit: "page",
+      costCents: 10, metadata: { billable: true, unitCharge: true } });
     expect(runSpentCents(state)).toBe(50);
     expect(isCostCapExceeded(state)).toBe(true);
     // A committed checkpoint moves the events from pending into spent_cents.

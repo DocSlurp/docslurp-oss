@@ -31,7 +31,7 @@ beforeAll(async () => {
   await sql`insert into org_memberships (org_id,user_id,role) values ('hosted-org','hosted-user','owner')`;
   const pipeline = JSON.parse(JSON.stringify(normalizePipelineFeatures({ privacyMode: "standard" })));
   await sql`insert into workspaces (id,org_id,user_id,name,pipeline) values ('hosted-ws','hosted-org','hosted-user','Ranking',${sql.json(pipeline)})`;
-  await sql`insert into credit_grants (org_id,source,external_id,credits,pool) values ('hosted-org','starter','hosted-test-grant',10000,'prepaid')`;
+  await sql`insert into credit_grants (org_id,source,external_id,credits) values ('hosted-org','starter','hosted-test-grant',10000)`;
   await sql`insert into workspace_runs (id,org_id,user_id,workspace_id,kind,status,stage,pipeline) values ('hosted-run','hosted-org','hosted-user','hosted-ws','bulk-upload','completed','completed','{}')`;
   await sql`insert into documents (id,org_id,user_id,workspace_id,run_id,filename,mime_type,source_key,status,page_count)
     values ('hosted-doc','hosted-org','hosted-user','hosted-ws','hosted-run','manual.txt','text/plain','local/manual','completed',2)`;
@@ -56,8 +56,12 @@ describe("real hybrid search with hosted reranking and actual SQL usage", () => 
     expect(result.results[0].text).toBe("Pump maintenance valve inspection.");
     expect(result.usageEvents).toMatchObject([{ model: "Qwen/Qwen3-Reranker-0.6B", inputTokens: 174 }]);
     const { attributedUsage } = await import("../services/usage-attribution.js");
-    const events = await sql`select org_id,workspace_id,input_tokens,run_id from ${attributedUsage(null)} au where au.metadata->>'sessionId'=${result.sessionId}`;
-    expect(events.map(e => ({ ...e, input_tokens: Number(e.input_tokens) }))).toMatchObject([{ org_id: "hosted-org", workspace_id: "hosted-ws", input_tokens: 174, run_id: null }]);
+    const events = await sql`select org_id,workspace_id,input_tokens,run_id,metric,cost_cents from ${attributedUsage(null)} au where au.metadata->>'sessionId'=${result.sessionId} order by au.metric`;
+    // The rerank call's provider tokens (billing 0) and the billable search unit.
+    expect(events.map(e => ({ ...e, input_tokens: Number(e.input_tokens), cost_cents: Number(e.cost_cents) }))).toMatchObject([
+      { org_id: "hosted-org", workspace_id: "hosted-ws", input_tokens: 174, run_id: null, cost_cents: 0 },
+      { org_id: "hosted-org", workspace_id: "hosted-ws", metric: "search-query", cost_cents: 0.01 },
+    ]);
     const [session] = await sql`select metadata from search_sessions where id=${result.sessionId}`;
     expect(session.metadata.diagnostics.hostedRerank).toMatchObject({ status: "success", inputTokens: 174 });
     expect(forbiddenInference).not.toHaveBeenCalled();

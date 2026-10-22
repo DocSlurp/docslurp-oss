@@ -1,19 +1,17 @@
 import {
-  autoRechargeSettingsSchema,
+  autoTopUpSettingsSchema,
   billingOverviewSchema,
+  buildBillingForecast,
   chatCreditOverdraft,
   chatCreditReserve,
   resolveChatCreditReserveConfig,
-  dailyStorageCredits,
-  getPlan,
-  planIdSchema,
-  subscriptionStatusValueSchema,
-  type AutoRechargeSettings,
+  storageCreditsPerMonth,
+  type AutoTopUpSettings,
   type BillingOverview,
 } from "@docslurp/shared";
 import { sql } from "../../db.js";
-import { orgSpendByCategory } from "../usage-attribution.js";
-import { getOrgBillingRow, toCreditPools, type OrgBillingRow } from "./credits.js";
+import { orgSpendByCategory, orgUnitUsage } from "../usage-attribution.js";
+import { getOrgBillingRow, isFundedOrg, toCreditBalance, type OrgBillingRow } from "./credits.js";
 import { orgHasPaymentMethod } from "./customers.js";
 import { isStripeConfigured } from "./stripe-client.js";
 
@@ -25,8 +23,6 @@ import { isStripeConfigured } from "./stripe-client.js";
  */
 export const ESTIMATED_ARTIFACT_BYTES_PER_PAGE = 96 * 1024;
 export const ESTIMATED_INDEX_BYTES_PER_PAGE = 28 * 1024;
-
-const DAYS_PER_MONTH = 730 / 24;
 
 export type OrgStorage = { objectBytes: number; indexBytes: number; sourceBytes: number; pages: number };
 
@@ -72,7 +68,7 @@ async function getWorkersInUse(orgId: string): Promise<number> {
   return Number(row?.in_use ?? 0);
 }
 
-export function autoRechargeFromRow(row: OrgBillingRow): AutoRechargeSettings | null {
+export function autoTopUpFromRow(row: OrgBillingRow): AutoTopUpSettings | null {
   if (
     row.auto_recharge_threshold_credits == null ||
     row.auto_recharge_amount_cents == null ||
@@ -80,7 +76,7 @@ export function autoRechargeFromRow(row: OrgBillingRow): AutoRechargeSettings | 
   ) {
     return null;
   }
-  const parsed = autoRechargeSettingsSchema.safeParse({
+  const parsed = autoTopUpSettingsSchema.safeParse({
     enabled: row.auto_recharge_enabled,
     thresholdCredits: Number(row.auto_recharge_threshold_credits),
     amountCents: Number(row.auto_recharge_amount_cents),
@@ -89,30 +85,30 @@ export function autoRechargeFromRow(row: OrgBillingRow): AutoRechargeSettings | 
   return parsed.success ? parsed.data : null;
 }
 
-function iso(value: Date | string | null): string | null {
-  if (!value) return null;
-  const date = value instanceof Date ? value : new Date(value);
-  return Number.isNaN(date.getTime()) ? null : date.toISOString();
-}
-
 function startOfUtcMonth(now = new Date()): Date {
   return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
 }
 
-/** Everything the billing page needs in one read. Works without Stripe (`stripeConfigured: false`). */
-export async function getBillingOverview(orgId: string): Promise<BillingOverview> {
+const THIRTY_DAYS_MS = 30 * 24 * 60 * 60 * 1000;
+
+/**
+ * Everything the billing page needs in one read, including the monthly
+ * forecast (stored bytes at the storage price, plus the last 30 days of
+ * searches and chat answers). Works without Stripe (`stripeConfigured: false`).
+ */
+export async function getBillingOverview(orgId: string, now = new Date()): Promise<BillingOverview> {
   const org = await getOrgBillingRow(orgId);
   if (!org) {
     throw new Error("Organization not found");
   }
-  const plan = getPlan(org.plan_id);
-  const periodStart = org.current_period_start ? new Date(org.current_period_start) : startOfUtcMonth();
+  const funded = isFundedOrg(org);
   const stripeConfigured = isStripeConfigured();
 
-  const [storage, inUse, spend, hasPaymentMethod, hasCreditGrants] = await Promise.all([
+  const [storage, inUse, spend, last30d, hasPaymentMethod, hasCreditGrants] = await Promise.all([
     getOrgStorage(orgId),
     getWorkersInUse(orgId).catch(() => 0),
-    orgSpendByCategory(orgId, periodStart),
+    orgSpendByCategory(orgId, startOfUtcMonth(now)),
+    orgUnitUsage(orgId, new Date(now.getTime() - THIRTY_DAYS_MS)),
     stripeConfigured && org.stripe_customer_id
       ? orgHasPaymentMethod(orgId).catch((error: unknown) => {
           console.warn(`[billing] payment method lookup failed orgId=${orgId}: ${error instanceof Error ? error.message : String(error)}`);
@@ -124,50 +120,41 @@ export async function getBillingOverview(orgId: string): Promise<BillingOverview
       .catch(() => false),
   ]);
   const reserveConfig = resolveChatCreditReserveConfig();
-
-  const pools = toCreditPools(org);
-  const dailyStorage = dailyStorageCredits({
-    objectBytes: storage.objectBytes,
-    indexBytes: storage.indexBytes,
-    includedGb: plan.includedStorageGb,
-  });
-  const status = subscriptionStatusValueSchema.safeParse(org.subscription_status);
-  const scheduled = planIdSchema.safeParse(org.scheduled_plan_id);
+  const balance = toCreditBalance(org);
+  const storageBytes = storage.objectBytes + storage.indexBytes;
 
   return billingOverviewSchema.parse({
     orgId,
-    plan: plan.id,
-    subscriptionStatus: status.success ? status.data : "none",
-    cancelAtPeriodEnd: Boolean(org.cancel_at_period_end),
-    currentPeriodStart: iso(org.current_period_start),
-    currentPeriodEnd: iso(org.current_period_end),
-    scheduledPlan: scheduled.success ? scheduled.data : null,
+    funded,
     credits: {
-      includedRemaining: pools.includedRemaining,
-      includedGranted: Number(org.included_credits_granted ?? 0),
-      prepaid: pools.prepaid,
-      pending: pools.pending,
-      available: pools.available,
-      chatReserve: chatCreditReserve(plan.id, reserveConfig),
-      chatOverdraft: chatCreditOverdraft(plan.id, hasCreditGrants, reserveConfig),
+      balance: balance.balance,
+      pending: balance.pending,
+      available: balance.available,
+      chatReserve: chatCreditReserve(funded, reserveConfig),
+      chatOverdraft: chatCreditOverdraft(funded, hasCreditGrants, reserveConfig),
     },
     workers: { limit: Number(org.worker_slots), inUse },
     storage: {
+      bytes: storageBytes,
       objectBytes: storage.objectBytes,
       indexBytes: storage.indexBytes,
       sourceBytes: storage.sourceBytes,
       estimated: storage.pages > 0,
-      includedGb: plan.includedStorageGb,
-      projectedMonthlyCredits: dailyStorage.totalCredits * DAYS_PER_MONTH,
+      monthlyCredits: storageCreditsPerMonth(storageBytes),
     },
-    spendThisPeriod: {
-      compute: spend.compute,
-      ai: spend.ai,
-      storage: spend.storage,
-      other: spend.other,
-      total: spend.total,
-    },
-    autoRecharge: autoRechargeFromRow(org),
+    forecast: buildBillingForecast({
+      balanceCredits: balance.available,
+      storageBytes,
+      searchesLast30d: last30d.searches,
+      searchCreditsLast30d: last30d.searchCredits,
+      chatAnswersLast30d: last30d.chatAnswers,
+      chatCreditsLast30d: last30d.chatCredits,
+      fastPagesLast30d: last30d.fastPages,
+      richPagesLast30d: last30d.richPages,
+      ingestCreditsLast30d: last30d.ingestCredits,
+    }),
+    spendThisMonth: spend,
+    autoTopUp: autoTopUpFromRow(org),
     monthlyBudgetCredits: org.monthly_budget_cents == null ? null : Number(org.monthly_budget_cents),
     stripeConfigured,
     hasPaymentMethod,

@@ -146,9 +146,9 @@ describe("materializeForQuery", () => {
     expect(stats.pendingPages).toBe(1);
   });
 
-  it("includes the page base fee in the credit estimate", () => {
-    expect(estimatedPageMaterializeCredits({ DOCSLURP_PAGE_BASE_FEE_USD: "0.005", DOCSLURP_EST_PAGE_MATERIALIZE_CREDITS: "0.5" })).toBeCloseTo(1);
-    expect(estimatedPageMaterializeCredits({})).toBe(0.5);
+  it("estimates a materialized page at the Rich page price unless overridden", () => {
+    expect(estimatedPageMaterializeCredits({ DOCSLURP_EST_PAGE_MATERIALIZE_CREDITS: "0.5" })).toBeCloseTo(0.5);
+    expect(estimatedPageMaterializeCredits({})).toBeCloseTo(0.25);
   });
 
   it("is warm when some pages are indexed and only materializes the rest", async () => {

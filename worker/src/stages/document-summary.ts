@@ -6,6 +6,7 @@ import { textModelApiKey, textUsageLabels } from "../lib/text-model-route.js";
 import { allowHostedCall, openRouterTextCall } from "../lib/privacy-guard.js";
 import type { Stage, WorkflowState } from "../pipeline/pipeline.js";
 import { isCostCapExceeded, runDocumentStage, runDocuments } from "../pipeline/checkpoints.js";
+import { chargeDocumentFeature } from "../pipeline/feature-charges.js";
 import type { CommandRunner } from "../tools/runner.js";
 import type { ArtifactStore } from "../tools/storage.js";
 import { measureOp } from "../lib/perf-context.js";
@@ -118,6 +119,8 @@ export class DocumentSummaryStage implements Stage {
               return { message: "Document summary skipped: incomplete model output",
                 stats: { summarySkipped: "incomplete-output", finishReason, ...sourceStats } };
             }
+            // Price card: one summary per document per run (provider tokens above bill 0).
+            chargeDocumentFeature(state, document, "documentSummary");
             // Coverage is a product guarantee, not an instruction the model may ignore.
             const coverage = extracted.coverage;
             const notice = selected.sampled

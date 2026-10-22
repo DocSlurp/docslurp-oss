@@ -63,9 +63,9 @@ function errorBody(message: string, type = "invalid_request_error", code: string
   return { error: { message, type, param, code } };
 }
 
-/** OpenAI-shaped 402 for a blocked spend; `error.links` says where to buy credits or upgrade. */
+/** OpenAI-shaped 402 for a blocked spend; `error.links` says where to buy credits or turn on auto top-up. */
 function spendBlockedBody(c: Context, error: SpendBlockedError) {
-  const links = upgradeLinksFor(error.code);
+  const links = upgradeLinksFor(error.code, { autoTopUpOn: error.autoTopUpOn });
   const header = upgradeLinkHeader(links);
   if (header) c.header("Link", header);
   const body = errorBody(reportPublicError(error), "service_unavailable", error.code);

@@ -14,7 +14,7 @@ export function apiErrorResponse(c: Context, status: ErrorStatus, code: ApiError
 
 /**
  * Credit, budget, plan and rate-limit errors carry `details.links` (where to
- * buy credits, upgrade or raise a key's limit) and the matching `Link` header.
+ * buy credits, turn on auto top-up or raise a key's limit) and the matching `Link` header.
  */
 function linkedDetails(c: Context, code: ApiErrorCode, details?: ApiErrorDetails): ApiErrorDetails | undefined {
   const linked = withUpgradeLinks(code, details);
@@ -88,7 +88,10 @@ const DROPPED_HEADERS = new Set(["content-type", "content-length", "content-enco
 export function envelopeForError(c: Context, error: unknown, status: number, originalHeaders?: Headers): Response {
   const { code: named } = error as { code?: unknown };
   const code = isApiErrorCode(named) ? named : apiErrorCodeForStatus(status);
-  const details = withUpgradeLinks(code, error && typeof error === "object" ? thrownErrorDetails.get(error) : undefined);
+  const thrown = error && typeof error === "object" ? thrownErrorDetails.get(error) : undefined;
+  // A blocked spend knows whether the org's auto top-up is on (no "turn on auto top-up" link then).
+  const autoTopUpOn = (error as { autoTopUpOn?: unknown } | null)?.autoTopUpOn === true;
+  const details = withUpgradeLinks(code, autoTopUpOn ? { ...thrown, autoTopUpOn } : thrown);
   const response = apiErrorResponse(c, status as ErrorStatus, code, publicApiErrorMessage(code, details), details);
   for (const source of [error instanceof HTTPException ? error.res?.headers : undefined, originalHeaders]) {
     source?.forEach((value, name) => {

@@ -3,6 +3,9 @@ import { randomUUID } from "node:crypto";
 import type { TransactionSql } from "postgres";
 
 import {
+  UNIT_CHARGE_PROVIDER,
+  unitChargeMetadata,
+  type BillableUnitMetric,
   buildPricedAiUsageLedgerEvent,
   estimateAiUsageCostCents,
   formatAiUsageConsoleLog,
@@ -133,6 +136,48 @@ export async function recordCostEvent(args: {
   return rows.length > 0;
 }
 
+/** A billable price-card unit (search, chat answer). See BILLABLE_UNIT_METRICS. */
+export interface UnitChargeInput {
+  /** Deterministic id makes a retried write idempotent. */
+  id: string;
+  metric: BillableUnitMetric;
+  /** Units the user can see: 1 per search or chat answer, pages for ingest. */
+  amount: number;
+  unit: string;
+  credits: number;
+  metadata?: Record<string, unknown>;
+}
+
+/**
+ * Log and persist one billable unit charge (PRICE_CARD): the only kind of
+ * event that debits customer credits, besides the worker's page charges and
+ * the storage meter. Written through the same path as AI events, so a chat
+ * turn's charges are stamped with the turn and refunded with it when the
+ * answer is never delivered.
+ */
+export async function recordUnitCharge(args: {
+  userId: string;
+  scope: UsageScope;
+  charge: UnitChargeInput;
+  client?: UsageClient;
+}): Promise<UsageEvent> {
+  const { charge } = args;
+  const event: UsageEvent = {
+    id: charge.id,
+    provider: UNIT_CHARGE_PROVIDER,
+    model: "price-card",
+    metric: charge.metric,
+    amount: charge.amount,
+    unit: charge.unit,
+    costCents: Math.max(0, charge.credits),
+    inputTokens: 0,
+    outputTokens: 0,
+    metadata: { ...usageTraceContext(), ...unitChargeMetadata(charge.metadata) },
+  };
+  console.log(`[usage] ${charge.metric} amount=${charge.amount} unit=${charge.unit} credits=${event.costCents}`);
+  return await insertUsageEvent(args.client ?? sql, args.userId, args.scope, event);
+}
+
 export interface UsageLedger extends UsageRecorder {
   /** Buffer events that were already logged elsewhere (e.g. child searches). */
   adopt(events: Iterable<UsageEvent | undefined>): void;
@@ -254,32 +299,6 @@ function logUsage({ id, ...input }: UsageInput): UsageEvent {
   return event;
 }
 
-const ORG_PLAN_TTL_MS = 30_000;
-const orgPlanCache = new Map<string, { planId: string | null; expiresAt: number }>();
-
-/**
- * Plan of the org the event bills, for the plan-neutral AI credit factor on
- * bonus plans. Looked up with the same org resolution the insert uses. A failed
- * lookup bills the base price rather than blocking the usage write.
- */
-async function resolveBilledPlanId(client: UsageClient, scope: UsageScope, columns: ScopeColumns): Promise<string | null> {
-  const cached = scope.orgId ? orgPlanCache.get(scope.orgId) : undefined;
-  if (cached && cached.expiresAt > Date.now()) return cached.planId;
-  try {
-    const rows = await client`select o.plan_id from organizations o where o.id = ${resolvedOrgId(client, scope, columns)}`;
-    const planId = Array.isArray(rows) && typeof rows[0]?.plan_id === "string" ? rows[0].plan_id : null;
-    if (scope.orgId && planId) orgPlanCache.set(scope.orgId, { planId, expiresAt: Date.now() + ORG_PLAN_TTL_MS });
-    return planId;
-  } catch {
-    return null;
-  }
-}
-
-/** Test hook: forget cached org plans. */
-export function clearOrgPlanCache(): void {
-  orgPlanCache.clear();
-}
-
 function insertUsageEvent(
   client: UsageClient,
   userId: string,
@@ -315,8 +334,7 @@ async function writeUsageEvent(
   turn: ChatTurnContext | null,
 ): Promise<UsageEvent> {
   const columns = scopeColumns(scope, stampUsageScope(logged.metadata, scope));
-  const planId = await resolveBilledPlanId(client, scope, columns);
-  const event = stampChatTurn(planId ? { ...priceAiUsageEvent(logged, { planId }), id: logged.id } : logged, turn);
+  const event = stampChatTurn(logged, turn);
   const metadata = stampUsageScope(event.metadata, scope);
   const id = event.id ?? randomUUID();
   await client`

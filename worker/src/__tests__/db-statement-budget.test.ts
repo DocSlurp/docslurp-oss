@@ -205,7 +205,7 @@ describe("database statement budget per page", () => {
       expect(counter.pendingDebits).toBeGreaterThan(0);
       expect(counter.orgRowTouches).toEqual([]);
 
-      // The flusher applies them: pools fall by exactly the run's billable usage.
+      // The flusher applies them: the balance falls by exactly the run's billable unit charges.
       // (Read through the store's connection: PGlite serves one session.)
       const sql = (store as unknown as { sql: postgres.Sql<Record<string, unknown>> }).sql;
       const read = async () => {
@@ -214,7 +214,7 @@ describe("database statement budget per page", () => {
             (select coalesce(sum(cost_cents), 0) from usage_events where run_id in ('run-warm', 'run-1')
               and coalesce(metadata->>'billable', 'true') <> 'false')::text as cost,
             pending_org_debit_credits('o1')::text as pending,
-            (select included_credits_remaining + credit_balance_cents from organizations where id = 'o1')::text as balance`;
+            (select credit_balance_cents from organizations where id = 'o1')::text as balance`;
         return { cost: Number(row!.cost), pending: Number(row!.pending), balance: Number(row!.balance) };
       };
       const before = await read();

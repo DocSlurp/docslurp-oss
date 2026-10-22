@@ -2,17 +2,17 @@ import { readFile } from "node:fs/promises";
 import type { Sql } from "postgres";
 
 /**
- * Minimal credit-pool schema for the standalone verify-* scripts: the pool
- * columns plus the debit functions copied verbatim from migration 0024, so the
+ * Minimal credit schema for the standalone verify-* scripts: the balance
+ * column plus the debit functions read verbatim from migration 0068, so the
  * scripts exercise the same SQL the worker calls in production.
  */
 export async function installCreditPoolSql(sql: Sql<Record<string, unknown>>): Promise<void> {
   const migration = await readFile(
-    new URL("../../server/db/migrations/0024_service_plans_and_credits.sql", import.meta.url),
+    new URL("../../server/db/migrations/0068_credit_packs_no_plans.sql", import.meta.url),
     "utf8",
   );
   for (const statement of migration.split("--> statement-breakpoint")) {
-    if (/CREATE OR REPLACE FUNCTION (append_credit_ledger|debit_org_credits)\(/.test(statement)) {
+    if (/CREATE FUNCTION (append_credit_ledger|debit_org_credits)\(/.test(statement)) {
       await sql.unsafe(statement);
     }
   }
@@ -36,6 +36,6 @@ export async function flushPendingCreditDebits(sql: Sql<Record<string, unknown>>
 }
 
 export const CREDIT_POOL_ORG_COLUMNS =
-  "included_credits_remaining numeric(24,12) not null default 0, created_by_user_id text, last_billable_activity_at timestamptz";
+  "created_by_user_id text";
 export const CREDIT_LEDGER_TABLE =
-  "create table credit_ledger(id text,user_id text,org_id text,pool text,delta numeric(24,12),reason text,metadata jsonb,created_at timestamptz)";
+  "create table credit_ledger(id text,user_id text,org_id text,delta numeric(24,12),reason text,metadata jsonb,created_at timestamptz)";

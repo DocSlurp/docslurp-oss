@@ -1,22 +1,17 @@
 import type Stripe from "stripe";
 
-import {
-  creditsForSubscriptionPayment,
-  getPlan,
-  getPlanByLookupKey,
-  type PlanId,
-  type ServicePlan,
-} from "@docslurp/shared";
 import { sql, type SqlClient } from "../../db.js";
 import { recordAutoRechargeFailure, recordAutoRechargeSuccess } from "./auto-recharge.js";
 import { grantOrgCredits } from "./credits.js";
 import { getStripe, stripeId } from "./stripe-client.js";
 
+/**
+ * Stripe webhooks for prepaid credits. DocSlurp sells no subscriptions: credits
+ * come from one-off Checkout top-ups (packs or custom amounts), off-session auto
+ * top-ups and Stripe Billing credit grants; refunds and lost disputes claw them
+ * back. Subscription and invoice events are ignored.
+ */
 const STRIPE_WEBHOOK_LOCK_NAMESPACE = 90_102;
-/** Past-due subscriptions keep their worker ceiling this long before dropping to the free level. */
-export const PAST_DUE_GRACE_DAYS = 7;
-const LIVE_STATUSES = new Set(["active", "trialing", "past_due"]);
-const FREE_PLAN = getPlan("free");
 
 export class StripeWebhookError extends Error {
   constructor(
@@ -33,100 +28,11 @@ export class StripeWebhookError extends Error {
 // Pure helpers (unit-tested)
 // ---------------------------------------------------------------------------
 
-export function planFromSubscription(sub: Pick<Stripe.Subscription, "items">): ServicePlan | null {
-  for (const item of sub.items?.data ?? []) {
-    const plan = getPlanByLookupKey(item.price?.lookup_key ?? null);
-    if (plan) return plan;
-  }
-  return null;
-}
-
-export function subscriptionIdOfInvoice(invoice: Stripe.Invoice): string | null {
-  return stripeId(invoice.parent?.subscription_details?.subscription ?? null);
-}
-
-/**
- * How a paid subscription invoice converts into included credits. The base is
- * the pre-tax amount actually paid for subscription lines (a proration
- * invoice pays only the difference, so its grant scales down; design gotcha
- * 5). Renewal and first invoices reset the included pool (unused credits
- * expire); anything else (upgrade prorations) adds to it.
- */
-export function subscriptionInvoiceGrant(invoice: Stripe.Invoice): {
-  subscriptionId: string;
-  baseCents: number;
-  resetIncluded: boolean;
-  /** Price on the largest positive subscription line: the plan this invoice bought. */
-  purchasedPriceId: string | null;
-} | null {
-  const subscriptionId = subscriptionIdOfInvoice(invoice);
-  if (!subscriptionId) return null;
-  let subscriptionLines = 0;
-  let purchased: { amount: number; priceId: string | null } | null = null;
-  for (const line of invoice.lines?.data ?? []) {
-    const parentType = line.parent?.type;
-    const fromSubscription =
-      parentType === "subscription_item_details" ||
-      (parentType === "invoice_item_details" && Boolean(line.parent?.invoice_item_details?.subscription)) ||
-      Boolean(line.subscription);
-    if (!fromSubscription) continue;
-    subscriptionLines += line.amount;
-    if (line.amount > 0 && (!purchased || line.amount > purchased.amount)) {
-      purchased = { amount: line.amount, priceId: stripeId(line.pricing?.price_details?.price ?? null) };
-    }
-  }
-  const taxes = (invoice.total_taxes ?? []).reduce((sum, tax) => sum + (tax.amount ?? 0), 0);
-  const paidPreTax = Math.max(0, (invoice.amount_paid ?? 0) - taxes);
-  const baseCents = Math.max(0, Math.min(subscriptionLines, paidPreTax));
-  const resetIncluded = invoice.billing_reason === "subscription_cycle" || invoice.billing_reason === "subscription_create";
-  return { subscriptionId, baseCents, resetIncluded, purchasedPriceId: purchased?.priceId ?? null };
-}
-
-/**
- * The plan an invoice paid for. A webhook can arrive after a later plan
- * change, so the subscription's current price would apply the wrong bonus.
- */
-async function planForInvoice(stripe: Stripe, priceId: string | null, sub: Stripe.Subscription) {
-  if (priceId) {
-    try {
-      const price = await stripe.prices.retrieve(priceId);
-      const plan = getPlanByLookupKey(price.lookup_key);
-      if (plan) return plan;
-    } catch (error) {
-      console.warn(`[billing] price lookup failed price=${priceId}: ${error instanceof Error ? error.message : String(error)}`);
-    }
-  }
-  return planFromSubscription(sub);
-}
-
 /** Cumulative credits to claw back for a (possibly partial) refund of a charge. */
 export function refundTargetCredits(grantCredits: number, amountRefunded: number, amountCharged: number): number {
   if (!(amountCharged > 0) || !(amountRefunded > 0)) return 0;
   const fraction = Math.min(1, amountRefunded / amountCharged);
   return Math.round(grantCredits * fraction * 1e6) / 1e6;
-}
-
-export type SubscriptionState = {
-  planId: PlanId;
-  workerSlots: number;
-  status: string;
-  periodStart: Date | null;
-  periodEnd: Date | null;
-  cancelAtPeriodEnd: boolean;
-};
-
-export function subscriptionState(sub: Stripe.Subscription): SubscriptionState {
-  const plan = planFromSubscription(sub);
-  const effective = LIVE_STATUSES.has(sub.status) && plan ? plan : FREE_PLAN;
-  const item = sub.items?.data?.[0];
-  return {
-    planId: effective.id,
-    workerSlots: effective.workers,
-    status: sub.status,
-    periodStart: item?.current_period_start ? new Date(item.current_period_start * 1000) : null,
-    periodEnd: item?.current_period_end ? new Date(item.current_period_end * 1000) : null,
-    cancelAtPeriodEnd: Boolean(sub.cancel_at_period_end || sub.cancel_at),
-  };
 }
 
 function numberMetadata(value: string | undefined, fallback: number): number {
@@ -138,7 +44,7 @@ function numberMetadata(value: string | undefined, fallback: number): number {
 // Event processing
 // ---------------------------------------------------------------------------
 
-type OrgRef = { id: string; stripe_subscription_id: string | null; plan_id: PlanId };
+type OrgRef = { id: string };
 
 async function findOrg(
   client: SqlClient,
@@ -147,108 +53,17 @@ async function findOrg(
 ): Promise<OrgRef | null> {
   if (customerId) {
     const [row] = await client<OrgRef[]>`
-      select id, stripe_subscription_id, plan_id from organizations where stripe_customer_id = ${customerId} limit 1
+      select id from organizations where stripe_customer_id = ${customerId} limit 1
     `;
     if (row) return row;
   }
   if (fallbackOrgId) {
     const [row] = await client<OrgRef[]>`
-      select id, stripe_subscription_id, plan_id from organizations where id = ${fallbackOrgId} limit 1
+      select id from organizations where id = ${fallbackOrgId} limit 1
     `;
     if (row) return row;
   }
   return null;
-}
-
-async function resolveScheduledPlan(stripe: Stripe, sub: Stripe.Subscription, periodEnd: Date | null): Promise<PlanId | null> {
-  const scheduleId = stripeId(sub.schedule);
-  if (!scheduleId) return null;
-  try {
-    const schedule = await stripe.subscriptionSchedules.retrieve(scheduleId, { expand: ["phases.items.price"] });
-    const boundary = periodEnd ? Math.floor(periodEnd.getTime() / 1000) : Math.floor(Date.now() / 1000);
-    const next = schedule.phases.find((phase) => phase.start_date >= boundary);
-    for (const item of next?.items ?? []) {
-      const price = item.price;
-      if (price && typeof price === "object" && "lookup_key" in price) {
-        const plan = getPlanByLookupKey(price.lookup_key);
-        if (plan) return plan.id;
-      }
-    }
-  } catch (error) {
-    console.warn(`[billing] schedule lookup failed subscription=${sub.id}: ${error instanceof Error ? error.message : String(error)}`);
-  }
-  return null;
-}
-
-/** Mirror a subscription into the org row: plan, worker ceiling, status, period, pending change. */
-export async function applySubscription(
-  client: SqlClient,
-  stripe: Stripe,
-  sub: Stripe.Subscription,
-  fallbackOrgId?: string | null,
-): Promise<string | null> {
-  const org = await findOrg(client, stripeId(sub.customer), fallbackOrgId ?? sub.metadata?.orgId);
-  if (!org) {
-    console.warn(`[billing] subscription ${sub.id} has no matching organization`);
-    return null;
-  }
-  // A stale, non-live subscription must not overwrite the org's current one.
-  if (org.stripe_subscription_id && org.stripe_subscription_id !== sub.id && !LIVE_STATUSES.has(sub.status)) {
-    return org.id;
-  }
-  const state = subscriptionState(sub);
-  const scheduled = state.cancelAtPeriodEnd ? "free" : await resolveScheduledPlan(stripe, sub, state.periodEnd);
-  await client`
-    update organizations
-    set
-      stripe_subscription_id = ${sub.id},
-      stripe_customer_id = coalesce(stripe_customer_id, ${stripeId(sub.customer)}),
-      plan_id = ${state.planId},
-      subscription_status = ${state.status},
-      past_due_since = case
-        when ${state.status} in ('active', 'trialing') then null
-        when ${state.status} = 'past_due' then coalesce(past_due_since, now())
-        else past_due_since
-      end,
-      worker_slots = case
-        when ${state.status} = 'past_due'
-          and coalesce(past_due_since, now()) < now() - make_interval(days => ${PAST_DUE_GRACE_DAYS})
-          then ${FREE_PLAN.workers}::int
-        else ${state.workerSlots}::int
-      end,
-      current_period_start = ${state.periodStart},
-      current_period_end = ${state.periodEnd},
-      cancel_at_period_end = ${state.cancelAtPeriodEnd},
-      scheduled_plan_id = ${scheduled && scheduled !== state.planId ? scheduled : null},
-      updated_at = now()
-    where id = ${org.id}
-  `;
-  console.log(`[billing] subscription orgId=${org.id} subscription=${sub.id} plan=${state.planId} status=${state.status}`);
-  return org.id;
-}
-
-async function endSubscription(client: SqlClient, sub: Stripe.Subscription): Promise<void> {
-  const org = await findOrg(client, stripeId(sub.customer), sub.metadata?.orgId);
-  if (!org) return;
-  if (org.stripe_subscription_id && org.stripe_subscription_id !== sub.id) return;
-  await client`
-    update organizations
-    set
-      stripe_subscription_id = null,
-      plan_id = 'free',
-      worker_slots = ${FREE_PLAN.workers},
-      subscription_status = 'canceled',
-      cancel_at_period_end = false,
-      scheduled_plan_id = null,
-      past_due_since = null,
-      current_period_start = null,
-      current_period_end = null,
-      included_credits_granted = 0,
-      updated_at = now()
-    where id = ${org.id}
-  `;
-  await client`select expire_included_credits(${org.id}, 'included_expired')`;
-  console.log(`[billing] subscription ended orgId=${org.id} subscription=${sub.id}`);
 }
 
 async function grantTopUp(
@@ -259,7 +74,6 @@ async function grantTopUp(
     orgId: args.orgId,
     source: args.source,
     externalId: args.paymentIntentId,
-    pool: "prepaid",
     credits: args.credits,
     metadata: { paymentIntentId: args.paymentIntentId, amountCents: args.credits, ...args.extra },
   });
@@ -268,7 +82,7 @@ async function grantTopUp(
   );
 }
 
-/** Save the card from a top-up Checkout as the default when the customer has none (auto-recharge reuses it). */
+/** Save the card from a top-up Checkout as the default when the customer has none (auto top-up reuses it). */
 async function adoptDefaultPaymentMethod(stripe: Stripe, customerId: string | null, paymentIntentId: string): Promise<void> {
   if (!customerId) return;
   try {
@@ -286,34 +100,23 @@ async function adoptDefaultPaymentMethod(stripe: Stripe, customerId: string | nu
 
 type GrantRow = { id: string; credits: number };
 
-/** The grant a charge paid for: a top-up/auto-recharge by PaymentIntent, else a subscription invoice. */
-async function findGrantForPaymentIntent(client: SqlClient, stripe: Stripe, paymentIntentId: string): Promise<GrantRow | null> {
+/** The grant a charge paid for: a top-up or auto top-up, by PaymentIntent. */
+async function findGrantForPaymentIntent(client: SqlClient, paymentIntentId: string): Promise<GrantRow | null> {
   const [direct] = await client<GrantRow[]>`
     select id, credits from credit_grants
     where (source in ('topup', 'auto_recharge') and external_id = ${paymentIntentId})
        or (metadata ? 'paymentIntentId' and metadata ->> 'paymentIntentId' = ${paymentIntentId})
     limit 1
   `;
-  if (direct) return direct;
-  const payments = await stripe.invoicePayments.list({
-    payment: { type: "payment_intent", payment_intent: paymentIntentId },
-    limit: 1,
-  });
-  const invoiceId = stripeId(payments.data[0]?.invoice ?? null);
-  if (!invoiceId) return null;
-  const [byInvoice] = await client<GrantRow[]>`
-    select id, credits from credit_grants where source = 'subscription' and external_id = ${invoiceId} limit 1
-  `;
-  return byInvoice ?? null;
+  return direct ?? null;
 }
 
 async function clawBack(
   client: SqlClient,
-  stripe: Stripe,
   args: { paymentIntentId: string | null; target: (grantCredits: number) => number; reason: string; metadata: Record<string, unknown> },
 ): Promise<void> {
   if (!args.paymentIntentId) return;
-  const grant = await findGrantForPaymentIntent(client, stripe, args.paymentIntentId);
+  const grant = await findGrantForPaymentIntent(client, args.paymentIntentId);
   if (!grant) {
     console.log(`[billing] ${args.reason} paymentIntentId=${args.paymentIntentId} has no credit grant; nothing to claw back`);
     return;
@@ -367,7 +170,6 @@ export async function mirrorStripeCreditGrant(client: SqlClient, grant: Stripe.B
     orgId: org.id,
     source: "promo",
     externalId: grant.id,
-    pool: "prepaid",
     credits: cents,
     metadata,
   });
@@ -393,97 +195,6 @@ export async function dispatchStripeEvent(client: SqlClient, stripe: Stripe, eve
         await adoptDefaultPaymentMethod(stripe, stripeId(session.customer), paymentIntentId);
         return true;
       }
-      if (session.mode === "subscription") {
-        const subscriptionId = stripeId(session.subscription);
-        if (!subscriptionId) return true;
-        if (orgId) {
-          await client`
-            update organizations
-            set stripe_subscription_id = ${subscriptionId},
-                stripe_customer_id = coalesce(stripe_customer_id, ${stripeId(session.customer)}),
-                updated_at = now()
-            where id = ${orgId}
-          `;
-        }
-        const sub = await stripe.subscriptions.retrieve(subscriptionId);
-        await applySubscription(client, stripe, sub, orgId);
-        return true;
-      }
-      return true;
-    }
-
-    case "customer.subscription.created":
-    case "customer.subscription.updated": {
-      // Events can arrive out of order: always mirror the subscription's current state.
-      const sub = await stripe.subscriptions.retrieve(event.data.object.id);
-      if (sub.status === "canceled" || sub.status === "incomplete_expired") {
-        await endSubscription(client, sub);
-      } else {
-        await applySubscription(client, stripe, sub);
-      }
-      return true;
-    }
-
-    case "customer.subscription.deleted": {
-      await endSubscription(client, event.data.object);
-      return true;
-    }
-
-    case "invoice.paid": {
-      const invoice = event.data.object;
-      const grant = subscriptionInvoiceGrant(invoice);
-      if (!grant || !invoice.id) return true;
-      const sub = await stripe.subscriptions.retrieve(grant.subscriptionId);
-      const orgId = await applySubscription(client, stripe, sub);
-      if (!orgId) return true;
-      const plan = await planForInvoice(stripe, grant.purchasedPriceId, sub);
-      if (!plan) {
-        console.warn(`[billing] invoice ${invoice.id} subscription ${sub.id} has no DocSlurp plan price`);
-        return true;
-      }
-      const credits = creditsForSubscriptionPayment(plan.id, grant.baseCents);
-      const applied = await grantOrgCredits(client, {
-        orgId,
-        source: "subscription",
-        externalId: invoice.id,
-        pool: "included",
-        credits,
-        resetIncluded: grant.resetIncluded,
-        metadata: {
-          invoiceId: invoice.id,
-          subscriptionId: sub.id,
-          planId: plan.id,
-          billingReason: invoice.billing_reason,
-          amountPaidCents: grant.baseCents,
-        },
-      });
-      await client`
-        update organizations
-        set past_due_since = null,
-            worker_slots = case when subscription_status in ('active', 'trialing') then ${plan.workers}::int else worker_slots end,
-            updated_at = now()
-        where id = ${orgId}
-      `;
-      console.log(
-        `[billing] ${applied ? "grant" : "duplicate-grant"} source=subscription orgId=${orgId} invoice=${invoice.id} credits=${credits} reset=${grant.resetIncluded}`,
-      );
-      return true;
-    }
-
-    case "invoice.payment_failed": {
-      const invoice = event.data.object;
-      const subscriptionId = subscriptionIdOfInvoice(invoice);
-      if (!subscriptionId) return true;
-      const org = await findOrg(client, stripeId(invoice.customer));
-      if (!org) return true;
-      await client`
-        update organizations
-        set subscription_status = 'past_due',
-            past_due_since = coalesce(past_due_since, now()),
-            updated_at = now()
-        where id = ${org.id}
-      `;
-      console.warn(`[billing] invoice payment failed orgId=${org.id} invoice=${invoice.id}`);
       return true;
     }
 
@@ -525,7 +236,7 @@ export async function dispatchStripeEvent(client: SqlClient, stripe: Stripe, eve
 
     case "charge.refunded": {
       const charge = event.data.object;
-      await clawBack(client, stripe, {
+      await clawBack(client, {
         paymentIntentId: stripeId(charge.payment_intent),
         target: (credits) => refundTargetCredits(credits, charge.amount_refunded, charge.amount),
         reason: "clawback:refund",
@@ -545,7 +256,7 @@ export async function dispatchStripeEvent(client: SqlClient, stripe: Stripe, eve
           paymentIntentId = stripeId(charge.payment_intent);
         }
       }
-      await clawBack(client, stripe, {
+      await clawBack(client, {
         paymentIntentId,
         target: (credits) => credits,
         reason: "clawback:dispute",
@@ -611,20 +322,4 @@ export async function handleStripeWebhookEvent(
     throw new StripeWebhookError("Invalid Stripe webhook signature", 400, true);
   }
   return processStripeEvent(event, { stripe });
-}
-
-/** Sweeper: past-due orgs past the grace period drop to the free worker ceiling. */
-export async function enforcePastDueGrace(): Promise<number> {
-  const rows = await sql<{ id: string }[]>`
-    update organizations
-    set worker_slots = ${FREE_PLAN.workers}, updated_at = now()
-    where past_due_since is not null
-      and past_due_since < now() - make_interval(days => ${PAST_DUE_GRACE_DAYS})
-      and worker_slots > ${FREE_PLAN.workers}
-    returning id
-  `;
-  for (const row of rows) {
-    console.warn(`[billing] past-due grace expired orgId=${row.id}; worker slots reduced to ${FREE_PLAN.workers}`);
-  }
-  return rows.length;
 }

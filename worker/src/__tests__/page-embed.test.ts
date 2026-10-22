@@ -87,9 +87,10 @@ describe("embedPageImages", () => {
   it("stores bits/int8 per page, marks the ledger, records usage and removes rasters", async () => {
     const f = fixture();
     const usage = new PipelineUsageEventLedger();
+    usage.runId = "run-1";
     const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
     const result = await embedPageImages(
-      { sql, rasters: f.rasters, storage: f.storage, embedder: f.embedder, usage, pageFeeUsd: 0.002 },
+      { sql, rasters: f.rasters, storage: f.storage, embedder: f.embedder, usage },
       { document, pages: [1, 2, 3, 4, 5, 6], run, windowSize: 4 },
     );
     log.mockRestore();
@@ -114,8 +115,11 @@ describe("embedPageImages", () => {
     const events = usage.snapshot();
     const embedEvents = events.filter((e) => e.metric === "page-image-embedding");
     expect(embedEvents.map((e) => e.inputTokens)).toEqual([4 * 258, 2 * 258]);
-    expect(events.filter((e) => e.metric === "page-embedded").reduce((n, e) => n + e.amount, 0)).toBe(6);
-    expect(events.find((e) => e.metric === "page-embedded")!.costCents).toBeCloseTo(0.2 * 4, 10);
+    // Each page embedded as an image bills one Rich page; the embedding tokens bill nothing.
+    const rich = events.filter((e) => e.metric === "ingest-page-rich");
+    expect(rich).toHaveLength(6);
+    expect(rich.reduce((n, e) => n + e.costCents, 0)).toBeCloseTo(6 * 0.25, 10);
+    expect(embedEvents.every((e) => e.costCents === 0)).toBe(true);
     // Spend is read from the ledger (and the run's trigger-maintained spent_cents), not a per-run counter.
     expect(usage.pendingBillableCents).toBeGreaterThan(0);
 
@@ -163,7 +167,7 @@ describe("embedPageImages", () => {
     const spy = vi.spyOn(f.embedder, "embedImages");
     const result = await embedPageImages(
       { sql, rasters: f.rasters, storage: f.storage, embedder: f.embedder, usage: new PipelineUsageEventLedger() },
-      { document, pages: [1, 2, 3, 4], run, windowSize: 4, canAfford: (cents) => cents <= 1 },
+      { document, pages: [1, 2, 3, 4], run, windowSize: 4, canAfford: (cents) => cents <= 0.5 },
     );
     expect(spy).not.toHaveBeenCalled();
     expect(f.renderCalls).toEqual([]);

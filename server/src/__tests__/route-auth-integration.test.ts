@@ -52,6 +52,8 @@ const ROUTE_AUTHENTICATED = [
   "POST /v1/auth/saml/:orgSlug/callback",
   // Public signup capture relayed by the dashboard (routes/frontend.ts); no credential applies.
   "POST /v1/waitlist",
+  // Public price list (routes/billing.ts): prices are readable without signing in.
+  "GET /v1/billing/prices",
 ].sort();
 
 type Operation = { method: string; path: string };

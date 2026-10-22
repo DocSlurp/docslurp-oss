@@ -5,7 +5,7 @@ import { chatCreditReserve, resolveChatCreditReserveConfig, type ChatCreditReser
  * migration 0053): ingestion never spends an org's last `reserve` credits,
  * which stay for chat and search. Credit leases pass the config to
  * grant_credit_lease(); the cadence check and media admission subtract
- * jobCreditReserve(plan) from available credits.
+ * jobCreditReserve(funded) from available credits.
  */
 
 let cachedConfig: ChatCreditReserveConfig | null = null;
@@ -20,7 +20,7 @@ export function setChatReserveConfig(config: ChatCreditReserveConfig | null): vo
   cachedConfig = config;
 }
 
-/** Credits jobs leave for chat in an org on `planId`. */
-export function jobCreditReserve(planId: string | null | undefined): number {
-  return chatCreditReserve(planId, chatReserveConfig());
+/** Credits jobs leave for chat in a funded or starter org. */
+export function jobCreditReserve(funded: boolean | null | undefined): number {
+  return chatCreditReserve(funded === true, chatReserveConfig());
 }

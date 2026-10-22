@@ -1,7 +1,7 @@
 import { reportPublicError } from "../lib/public-errors.js";
 import { getDeferredContext } from "../search/deferred/deferred-context.js";
 import { hostedApiKeyForWorkspace, loadWorkspacePrivacyMode, openRouterCall, privacyModeOf, privateTextModelForWorkspace } from "../lib/privacy.js";
-import { ingestReportFocusPages, parsePrivateModelUri, requestsIngestReport } from "@docslurp/shared";
+import { BILLABLE_UNIT_METRICS, chatAnswerCredits, chatAnswerUnits, chatModelTier, ingestReportFocusPages, parsePrivateModelUri, requestsIngestReport } from "@docslurp/shared";
 import type { PrivacyMode } from "@docslurp/shared";
 import { env } from "../config.js";
 import type { RequestActor } from "../lib/request-actor.js";
@@ -37,10 +37,10 @@ import {
   type TextDeltaHandler,
 } from "../lib/ai.js";
 import { runWithAiObservability } from "../lib/posthog-ai-observability.js";
-import { recordUsageEvent } from "../lib/ai-usage.js";
+import { recordUnitCharge, recordUsageEvent } from "../lib/ai-usage.js";
 import { assertCanSpend, type SpendKind } from "./billing/spend-guard.js";
 import { beginChatTurn, chatTurnFailureReason } from "./billing/chat-turn-billing.js";
-import { claimChatTurnAnswerId } from "../lib/chat-turn-context.js";
+import { claimChatTurnAnswerId, currentChatTurn } from "../lib/chat-turn-context.js";
 import { sql } from "../db.js";
 import { reviewUntrustedEvidenceText } from "./prompt-injection.js";
 import {
@@ -1086,7 +1086,7 @@ async function chatWorkspaceInTurn(args: {
     sessionId: args.sessionId,
   });
 
-  return await runWithAiObservability(
+  const response = await runWithAiObservability(
     {
       distinctId: args.userId,
       sessionId,
@@ -1094,6 +1094,41 @@ async function chatWorkspaceInTurn(args: {
     },
     () => chatWorkspaceTurn(args, sessionId, policy),
   );
+  await chargeChatAnswer(response, args, sessionId, policy);
+  return response;
+}
+
+/**
+ * Bill one chat answer at its model tier (PRICE_CARD.chatAnswerTiers), counted
+ * once more per started 100k total tokens. Only the turn's own answer is
+ * billed (a nested grounded answer inside the agent's tools is part of it), and
+ * it is written inside the chat turn, so an answer that never reaches the
+ * client is refunded with the turn (chat-turn-billing.ts). Model tokens and
+ * tool searches are our cost, recorded non-billable.
+ */
+async function chargeChatAnswer(
+  response: WorkspaceChatResponse,
+  args: ChatWorkspaceArgs,
+  sessionId: string,
+  policy: ChatTurnPolicy,
+): Promise<void> {
+  const turn = currentChatTurn();
+  if (!turn || response.id !== turn.id) return;
+  const model = typeof response.debug?.model === "string" && response.debug.model ? response.debug.model : policy.model;
+  const totalTokens = Number(response.usage?.totalTokens ?? 0) || 0;
+  const tier = chatModelTier(model);
+  await recordUnitCharge({
+    userId: args.userId,
+    scope: { workspaceId: args.workspaceId, sessionId },
+    charge: {
+      id: `chat-answer:${turn.id}`,
+      metric: BILLABLE_UNIT_METRICS.chatAnswer,
+      amount: 1,
+      unit: "answer",
+      credits: chatAnswerCredits({ tier, totalTokens }),
+      metadata: { model, tier, totalTokens, answerUnits: chatAnswerUnits(totalTokens), chatSessionId: sessionId },
+    },
+  });
 }
 
 function ingestReportNaturalIntents(): boolean {

@@ -32,8 +32,9 @@ beforeAll(async () => {
     },
   }));
   await sql`insert into "user"(id, name, email) values ('u1', 'A', 'a@x')`;
+  // "free" is a starter org; "gold" and "broke" are funded (funded_at set by a paid grant).
   const org = (id: string, plan: string, cents: number) =>
-    sql`insert into organizations(id, name, slug, created_by_user_id, credit_balance_cents, plan_id) values (${id}, ${id}, ${id}, 'u1', ${cents}, ${plan})`;
+    sql`insert into organizations(id, name, slug, created_by_user_id, credit_balance_cents, funded_at) values (${id}, ${id}, ${id}, 'u1', ${cents}, ${plan === "free" ? null : new Date()})`;
   await org("free", "free", 0);
   await org("gold", "gold", 1000);
   await org("broke", "gold", 0);

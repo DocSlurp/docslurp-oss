@@ -51,7 +51,6 @@ beforeAll(async () => {
 }, 120_000);
 
 afterEach(() => {
-  delete process.env.DOCSLURP_PAGE_BASE_FEE_USD;
 });
 
 afterAll(async () => {
@@ -79,7 +78,6 @@ const input = (runId: string, stageName: string) => ({ stageName, runId, totalSt
 
 describe("run cost cap figure", () => {
   it("equals the billed ledger total across every event kind, shards, a retried stage and duplicate inserts", { timeout: 60_000 }, async () => {
-    process.env.DOCSLURP_PAGE_BASE_FEE_USD = "0.005";
     let failOnce = true;
     let replayed: UsageEvent | null = null;
     const stages: Stage[] = [
@@ -88,7 +86,7 @@ describe("run cost cap figure", () => {
         async run(state) {
           for (const document of state.documents) {
             state.usageLedger.record({ provider: "openrouter", model: "google/gemini-3.1-flash-lite", metric: "page-analysis",
-              inputTokens: 1_150, outputTokens: 520, metadata: { documentId: document.id } });
+              inputTokens: 1_150, outputTokens: 520, metadata: { documentId: document.id, pageNumber: 1 } });
             await store.updateProgress(state);
           }
         },
@@ -101,7 +99,7 @@ describe("run cost cap figure", () => {
               inputTokens: 2_100, outputTokens: 96, metadata: { documentId: document.id } });
             state.usageLedger.record({ provider: "openai", model: "text-embedding-3-small", metric: "embedding-tokens",
               inputTokens: 6_700, logOutputTokens: false, metadata: { documentId: document.id } });
-            // Billed worker compute counts; the unbilled estimate is persisted at 0 and does not.
+            // Worker compute never bills customers, even when an event claims to be billable.
             state.usageLedger.enqueue({ provider: "local-compute", model: "w", metric: "parser-process", amount: 0.3, unit: "cent",
               costCents: 0.3, metadata: { billable: true, costRollup: "authoritative", effectiveCostCents: 0.1 } });
             state.usageLedger.enqueue({ provider: "local-compute", model: "w", metric: "parser-process", amount: 0.2, unit: "cent",
@@ -140,11 +138,13 @@ describe("run cost cap figure", () => {
     const billed = await billedLedgerCents("r1");
     const metrics = await db.query<{ metric: string }>("select distinct metric from usage_events where run_id = 'r1' order by 1");
     expect(metrics.rows.map((row) => row.metric)).toEqual([
-      "contextual-chunk-preamble", "document-summary", "embedding-tokens", "page-analysis", "page-base-fee", "parser-process", "worker-stage",
+      "contextual-chunk-preamble", "document-summary", "embedding-tokens", "ingest-page-fast", "ingest-page-rich", "page-analysis", "parser-process", "worker-stage",
     ]);
-    expect(await scalar("select count(*)::text as v from usage_events where run_id = 'r1' and metric = 'page-base-fee'")).toBe(1);
+    expect(await scalar("select count(*)::text as v from usage_events where run_id = 'r1' and metric = 'ingest-page-fast'")).toBe(1);
     expect(await scalar("select (count(*) - count(distinct id))::text as v from usage_events where run_id = 'r1'")).toBe(0);
-    expect(billed).toBeGreaterThan(0.4 * 4 + 4 * 2 * 0.005 * 100 - 1e-9);
+    // Only price-card units bill: one Rich page per vision-read document (0.25 each) plus Fast pages.
+    expect(await scalar("select coalesce(sum(cost_cents), 0)::text as v from usage_events where run_id = 'r1' and metric not like 'ingest-page-%'")).toBe(0);
+    expect(billed).toBeGreaterThanOrEqual(4 * 0.25 - 1e-9);
     expect(await spentCents("r1")).toBeCloseTo(billed, 9);
 
     // A fresh activity checks the cap against exactly that total.
@@ -158,7 +158,8 @@ describe("run cost cap figure", () => {
     state.usageLedger.enqueue({ provider: "local-compute", model: "w", metric: "worker-stage", amount: 5, unit: "cent",
       costCents: 5, metadata: { billable: false } });
     expect(isCostCapExceeded(state)).toBe(false);
-    state.usageLedger.enqueue({ provider: "docslurp", model: "x", metric: "fee", amount: 1, unit: "cent", costCents: 1e-6 });
+    state.usageLedger.enqueue({ provider: "docslurp", model: "x", metric: "ingest-page-fast", amount: 1, unit: "page", costCents: 1e-6,
+      metadata: { billable: true, unitCharge: true } });
     expect(isCostCapExceeded(state)).toBe(true);
   });
 
@@ -175,8 +176,8 @@ describe("run cost cap figure", () => {
             stopped++;
             return;
           }
-          state.usageLedger.enqueue({ provider: "docslurp", model: "batch", metric: "embedding-tokens", amount: 1, unit: "batch",
-            costCents: unit, metadata: { documentId: state.documents[0]?.id } });
+          state.usageLedger.enqueue({ provider: "docslurp", model: "batch", metric: "ingest-page-rich", amount: 1, unit: "page",
+            costCents: unit, metadata: { documentId: state.documents[0]?.id, billable: true, unitCharge: true } });
           await store.updateProgress(state);
         }
       },

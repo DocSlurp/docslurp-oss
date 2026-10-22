@@ -27,18 +27,19 @@ import { orgRateLimitProfile, resetRateLimitPlanCache, userRateLimitProfile } fr
  *  1. Per IP: a temporary block (penalty box), a short burst window and the
  *     IP's per-category limit. Bursts over the burst limit and repeated invalid
  *     credentials put the IP in the penalty box.
- *  2. Per API key or user: the plan's per-category limit (capped by the key's
+ *  2. Per API key or user: the per-category limit of the org's table (capped by the key's
  *     requests-per-minute when one is set), the key's custom request windows, its daily page
  *     cap for uploads and its spend windows for cost-incurring requests. The
- *     plan (free or paid table) comes from the organization's billing state
+ *     table (free = starter orgs, paid = funded orgs) comes from the organization's billing state
  *     (services/rate-limit-plan.ts): the key's organization, or for a session
  *     any organization the user belongs to. A key's own settings only lower it.
  *
  * Responses carry the IETF `RateLimit-Policy` / `RateLimit` fields
  * (draft-ietf-httpapi-ratelimit-headers) for every policy that applied, plus
  * the widely used `X-RateLimit-Limit/Remaining/Reset` for the tightest one.
- * Every 429 on a hosted deployment carries `details.links` (upgrade, billing,
- * docs) and a `Link` header; Free-plan limits say that paid plans get more.
+ * Every 429 on a hosted deployment carries `details.links` (billing, docs, and
+ * for starter orgs buyCredits) and a `Link` header; starter limits say that
+ * buying credits raises them.
  */
 
 // Infer the concrete RESP version selected by redis instead of the generic factory.
@@ -633,7 +634,7 @@ type RateLimitCode = Extract<ApiErrorCode, "rate_limited" | "spend_limit_exceede
 
 /**
  * 429 in the error envelope (the legacy `{ error, code }` body on protocol
- * surfaces) with `Retry-After`, plus upgrade/billing links and the copy that
+ * surfaces) with `Retry-After`, plus billing links and the copy that
  * points at them on hosted deployments.
  */
 function tooManyRequests(c: Context, code: RateLimitCode, message: string, details: { retryAfterSeconds: number } & Record<string, unknown>): Response {
@@ -669,10 +670,15 @@ async function consumeCounters(
     const penaltyMs = counters[result.denied]?.penaltyMs ?? 0;
     if (penaltyMs > 0) return blockedResponse(c, penaltyMs);
     return tooManyRequests(c, "rate_limited", "Too many requests", {
-      category: args.category, policy: state.name, plan: args.profile, retryAfterSeconds: state.retryAfterSeconds,
+      category: args.category, policy: state.name, account: rateLimitAccountLabel(args.profile), retryAfterSeconds: state.retryAfterSeconds,
     });
   }
   return null;
+}
+
+/** Public label for a limit table: starter (never bought credits) or funded orgs, or the IP / self-hosted layers. */
+export function rateLimitAccountLabel(profile: RateLimitProfile): string {
+  return profile === "free" ? "starter" : profile === "paid" ? "funded" : profile;
 }
 
 function keyPrefixFor(options: RateLimitOptions): string {

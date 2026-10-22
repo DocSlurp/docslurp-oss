@@ -1,6 +1,6 @@
 # Stripe catalog feed
 
-Generate a discovery-only CSV of paid plans, prepaid credit packs and optional Stripe products with the server's `catalog:feed` command. All rows disable agent checkout and link buyers to the pricing page; this command does not create organization-scoped subscriptions or credit purchases.
+Generate a discovery-only CSV of the prepaid credit packs ($25, $50 and $100; `CREDIT_PACK_CENTS` in `packages/shared/src/billing.ts`) and optional Stripe products with the server's `catalog:feed` command. DocSlurp sells no plans or subscriptions. All rows disable agent checkout and link buyers to the pricing page; this command does not create organization-scoped credit purchases. After the move from plans to packs, upload once with `--mode replace` so the retired plan rows leave the Stripe catalog.
 
 ## Environment files and precedence
 
@@ -27,7 +27,7 @@ pnpm --filter @docslurp/server catalog:feed --out feed.csv
 pnpm --filter @docslurp/server catalog:feed --env production --out feed.csv
 ```
 
-Without `--upload`, no catalog import is created. Configured extra products still trigger Stripe reads to retrieve their default prices. Check the CSV's destination links, prices, images and product selection before uploading. `--plan-image` and `--credits-image` override the default public image URLs.
+Without `--upload`, no catalog import is created. Configured extra products still trigger Stripe reads to retrieve their default prices. Check the CSV's destination links, prices, images and product selection before uploading. `--credits-image` overrides the default public image URL.
 
 ## Upload
 

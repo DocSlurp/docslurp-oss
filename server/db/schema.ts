@@ -41,8 +41,6 @@ export const creditLedger = pgTable(
     id: text().primaryKey().notNull(),
     userId: text("user_id").notNull(),
     orgId: text("org_id"),
-    /** Which credit pool moved: "included" (plan allowance) or "prepaid". */
-    pool: text(),
     /** Dollars (credits / 100). */
     delta: numeric({ precision: 24, scale: 12 }).notNull(),
     reason: text().notNull(),
@@ -67,7 +65,6 @@ export const creditLedger = pgTable(
       table.orgId.asc().nullsLast().op("text_ops"),
       table.createdAt.desc().nullsFirst().op("timestamptz_ops"),
     ),
-    check("credit_ledger_pool_check", sql`(pool IS NULL) OR (pool = ANY (ARRAY['included'::text, 'prepaid'::text]))`),
     uniqueIndex("credit_ledger_starter_credit_user_idx")
       .on(table.userId)
       .where(sql`${table.reason} = 'new-account-starter-credit'`),
@@ -88,18 +85,10 @@ export const organizations = pgTable(
     createdByUserId: text("created_by_user_id").notNull(),
     /** Prepaid credit pool (1 credit = 1 cent): top-ups, auto-recharge, starter. May go negative. */
     creditBalanceCents: numeric("credit_balance_cents", { precision: 24, scale: 12, mode: "number" }).default(0).notNull(),
-    planId: text("plan_id").default("free").notNull(),
-    /** Org-wide concurrency ceiling; follows the plan, drops to free after the past-due grace. */
+    /** First paid grant (top-up, auto top-up, adjustment, promo); null for starter orgs (migration 0068). */
+    fundedAt: timestamp("funded_at", { withTimezone: true, mode: "string" }),
+    /** Org-wide concurrency ceiling: 50 starter, raised to 250 on first funding (STARTER/FUNDED_WORKER_SLOTS). */
     workerSlots: integer("worker_slots").default(50).notNull(),
-    /** Plan allowance for the current period; spent before prepaid, expires at renewal. */
-    includedCreditsRemaining: numeric("included_credits_remaining", { precision: 24, scale: 12, mode: "number" }).default(0).notNull(),
-    includedCreditsGranted: numeric("included_credits_granted", { precision: 24, scale: 12, mode: "number" }).default(0).notNull(),
-    subscriptionStatus: text("subscription_status").default("none").notNull(),
-    currentPeriodStart: timestamp("current_period_start", { withTimezone: true, mode: "string" }),
-    currentPeriodEnd: timestamp("current_period_end", { withTimezone: true, mode: "string" }),
-    cancelAtPeriodEnd: boolean("cancel_at_period_end").default(false).notNull(),
-    scheduledPlanId: text("scheduled_plan_id"),
-    pastDueSince: timestamp("past_due_since", { withTimezone: true, mode: "string" }),
     autoRechargeEnabled: boolean("auto_recharge_enabled").default(false).notNull(),
     autoRechargeThresholdCredits: integer("auto_recharge_threshold_credits"),
     autoRechargeAmountCents: integer("auto_recharge_amount_cents"),
@@ -109,7 +98,6 @@ export const organizations = pgTable(
     autoRechargeLastFailureRef: text("auto_recharge_last_failure_ref"),
     autoRechargeAuthorizedAt: timestamp("auto_recharge_authorized_at", { withTimezone: true, mode: "string" }),
     autoRechargeAuthorizedByUserId: text("auto_recharge_authorized_by_user_id"),
-    lastBillableActivityAt: timestamp("last_billable_activity_at", { withTimezone: true, mode: "string" }),
     monthlyBudgetCents: integer("monthly_budget_cents"),
     budgetAlertThresholdPercent: integer("budget_alert_threshold_percent")
       .default(80)
@@ -126,7 +114,6 @@ export const organizations = pgTable(
       .defaultNow()
       .notNull(),
     stripeCustomerId: text("stripe_customer_id"),
-    stripeSubscriptionId: text("stripe_subscription_id"),
     budgetPaused: boolean("budget_paused").default(false).notNull(),
     ssoConfig: jsonb("sso_config").default({}).notNull(),
   },
@@ -151,24 +138,12 @@ export const organizations = pgTable(
     index("organizations_auto_recharge_idx")
       .using("btree", table.id.asc().nullsLast().op("text_ops"))
       .where(sql`auto_recharge_enabled`),
-    index("organizations_past_due_idx")
-      .using("btree", table.pastDueSince.asc().nullsLast().op("timestamptz_ops"))
-      .where(sql`(past_due_since IS NOT NULL)`),
     foreignKey({
       columns: [table.autoRechargeAuthorizedByUserId],
       foreignColumns: [user.id],
       name: "organizations_auto_recharge_authorized_by_fkey",
     }).onDelete("set null"),
-    check(
-      "organizations_plan_id_check",
-      sql`plan_id = ANY (ARRAY['free'::text, 'silver'::text, 'gold'::text, 'platinum'::text])`,
-    ),
-    check(
-      "organizations_scheduled_plan_id_check",
-      sql`(scheduled_plan_id IS NULL) OR (scheduled_plan_id = ANY (ARRAY['free'::text, 'silver'::text, 'gold'::text, 'platinum'::text]))`,
-    ),
     check("organizations_worker_slots_check", sql`worker_slots > 0`),
-    check("organizations_included_credits_check", sql`included_credits_remaining >= (0)::numeric`),
     check(
       "organizations_budget_alert_threshold_percent_check",
       sql`(budget_alert_threshold_percent >= 1) AND (budget_alert_threshold_percent <= 100)`,
@@ -3157,7 +3132,6 @@ export const creditGrants = pgTable(
     source: text().notNull(),
     externalId: text("external_id"),
     credits: numeric({ precision: 24, scale: 12, mode: "number" }).notNull(),
-    pool: text().notNull(),
     reversedCredits: numeric("reversed_credits", { precision: 24, scale: 12, mode: "number" }).default(0).notNull(),
     metadata: jsonb().default({}).notNull(),
     createdAt: timestamp("created_at", { withTimezone: true, mode: "string" })
@@ -3181,9 +3155,8 @@ export const creditGrants = pgTable(
     unique("credit_grants_source_external_id_key").on(table.source, table.externalId),
     check(
       "credit_grants_source_check",
-      sql`source = ANY (ARRAY['subscription'::text, 'topup'::text, 'auto_recharge'::text, 'starter'::text, 'promo'::text, 'adjustment'::text])`,
+      sql`source = ANY (ARRAY['topup'::text, 'auto_recharge'::text, 'starter'::text, 'promo'::text, 'adjustment'::text, 'refund'::text])`,
     ),
-    check("credit_grants_pool_check", sql`pool = ANY (ARRAY['included'::text, 'prepaid'::text])`),
     check("credit_grants_credits_check", sql`credits >= (0)::numeric`),
     check(
       "credit_grants_reversed_check",
@@ -3322,9 +3295,9 @@ export const workerSlotTokens = pgTable("worker_slot_tokens", {
   check("worker_slot_tokens_lease_check", sql`(${table.leaseId} IS NULL) = (${table.expiresAt} IS NULL)`)]);
 
 /**
- * Credit debits not yet applied to the org's pools
+ * Credit debits not yet applied to the org's balance
  * (server/db/migrations/0030_pending_credit_debits.sql). Insert-only on the hot path;
- * apply_pending_org_debits() moves them into the pools and the ledger.
+ * apply_pending_org_debits() moves them into the balance and the ledger.
  */
 export const creditDebitsPending = pgTable("credit_debits_pending", {
   id: uuid("id").primaryKey().defaultRandom().notNull(),

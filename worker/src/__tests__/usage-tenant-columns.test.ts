@@ -120,10 +120,13 @@ describe("worker usage writers", () => {
       client: sql,
       state,
       usageEvents: [
-        { id: "w-1", provider: "openrouter", model: "m", metric: "vision", amount: 1, unit: "page", costCents: 3 },
+        { id: "w-1", provider: "docslurp", model: "price-card", metric: "ingest-page-rich", amount: 12, unit: "page", costCents: 3, metadata: { billable: true, unitCharge: true } },
+        // Provider AI cost is stamped too but bills nothing.
+        { id: "w-2", provider: "openrouter", model: "m", metric: "vision", amount: 1, unit: "page", costCents: 3 },
       ],
     });
     expect(cost).toBe(3);
+    expect((await sqlColumns(sql))["w-2"]).toEqual({ org_id: "org-1", workspace_id: "ws-a", api_key_id: "key-run" });
     expect((await sqlColumns(sql))["w-1"]).toEqual({ org_id: "org-1", workspace_id: "ws-a", api_key_id: "key-run" });
   });
 
@@ -133,7 +136,8 @@ describe("worker usage writers", () => {
       userId: "u1",
       scope: { orgId: "org-2", workspaceId: "ws-c" },
       usageEvents: [
-        { id: "g-1", provider: "openrouter", model: "m", metric: "graph-extract", amount: 10, unit: "token", costCents: 2, inputTokens: 10 },
+        { id: "g-1", provider: "docslurp", model: "price-card", metric: "ingest-page-fast", amount: 400, unit: "page", costCents: 2, metadata: { billable: true, unitCharge: true } },
+        { id: "g-2", provider: "openrouter", model: "m", metric: "graph-extract", amount: 10, unit: "token", costCents: 2, inputTokens: 10 },
       ],
     });
     expect(cost).toBe(2);

@@ -7,16 +7,17 @@ export interface VideoPolicy {
   selectedFps: number; clipSeconds: number; visualTokens: number; maxCostCents: number;
 }
 const tiers: Record<string, { duration: number; frames: number; images: number; scanFps: number; selectedFps: number; interval: number; minimum: number; clipSeconds: number; visualTokens: number }> = {
-  free: { duration: 600, frames: 60, images: 12, scanFps: 1, selectedFps: 1, interval: 10, minimum: 12, clipSeconds: 120, visualTokens: 8192 },
-  silver: { duration: 1800, frames: 360, images: 24, scanFps: 2, selectedFps: 2, interval: 5, minimum: 24, clipSeconds: 120, visualTokens: 16384 },
-  gold: { duration: 7200, frames: 1200, images: 32, scanFps: 2, selectedFps: 4, interval: 2, minimum: 48, clipSeconds: 60, visualTokens: 24576 },
-  platinum: { duration: 7200, frames: 1200, images: 32, scanFps: 2, selectedFps: 4, interval: 2, minimum: 48, clipSeconds: 60, visualTokens: 24576 },
+  // Starter orgs (never funded) keep the former Free caps. Funded orgs get the former Silver frame density
+  // (<= 12 frames/minute, the density PRICE_CARD.videoMinuteRichPages is priced for) up to 2 hours.
+  starter: { duration: 600, frames: 60, images: 12, scanFps: 1, selectedFps: 1, interval: 10, minimum: 12, clipSeconds: 120, visualTokens: 8192 },
+  funded: { duration: 7200, frames: 1440, images: 24, scanFps: 2, selectedFps: 2, interval: 5, minimum: 24, clipSeconds: 120, visualTokens: 16384 },
 };
-export function videoPolicy(plan: string | null | undefined, duration: number, settings: VideoSettings = {}): VideoPolicy {
-  const tier = plan && Object.hasOwn(tiers, plan) ? plan : "free"; const preset = tiers[tier];
+export type VideoTier = "starter" | "funded";
+export function videoPolicy(funded: boolean | null | undefined, duration: number, settings: VideoSettings = {}): VideoPolicy {
+  const tier: VideoTier = funded === true ? "funded" : "starter"; const preset = tiers[tier];
   if (!Number.isFinite(duration) || duration <= 0 || duration > preset.duration) throw new Error("Video duration exceeds organization tier limit");
   for (const [name, value] of Object.entries(settings)) if (name !== "enabled" && value !== undefined && (typeof value !== "number" || !Number.isFinite(value) || value <= 0)) throw new Error(`Invalid video setting: ${name}`);
-  const maxCostCents = tier === "free" ? 25 : 1000;
+  const maxCostCents = tier === "starter" ? 25 : 1000;
   return { tier, duration, frames: Math.min(settings.maxFrames ?? preset.frames, preset.frames, Math.max(preset.minimum, Math.ceil(duration / preset.interval))),
     images: Math.min(settings.imagesPerCall ?? preset.images, preset.images),
     scanFps: Math.min(settings.scanFps ?? preset.scanFps, 10, 14400 / duration),
