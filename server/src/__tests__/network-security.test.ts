@@ -7,6 +7,9 @@ const mocks = vi.hoisted(() => ({
   tlsConnect: vi.fn(),
   agentOptions: [] as Array<{ connect: Function }>,
   agentClose: vi.fn(),
+  // Delegates to the (stubbable) global so the response-shaping tests below can
+  // drive it, while still recording that undici's own fetch was used.
+  undiciFetch: vi.fn((...args: Parameters<typeof fetch>) => globalThis.fetch(...args)),
 }));
 
 vi.mock("node:dns/promises", () => ({
@@ -20,6 +23,7 @@ vi.mock("node:tls", () => ({
 }));
 
 vi.mock("undici", () => ({
+  fetch: mocks.undiciFetch,
   Agent: class Agent {
     constructor(options: { connect: Function }) {
       mocks.agentOptions.push(options);
@@ -40,7 +44,18 @@ describe("network-security", () => {
     mocks.tlsConnect.mockReset();
     mocks.agentOptions.length = 0;
     mocks.agentClose.mockReset();
+    mocks.undiciFetch.mockClear();
     vi.unstubAllGlobals();
+  });
+
+  it("sends through undici's fetch with the pinned Agent, not Node's global fetch", async () => {
+    // Node 24's global fetch bundles undici 7, whose handlers the undici 8 Agent
+    // rejects ("invalid onRequestStart method"); pairing them broke all egress.
+    mocks.lookup.mockResolvedValue([{ address: "93.184.216.34", family: 4 }]);
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("ok")));
+    await (await safeExternalFetch("https://example.com/file")).text();
+    expect(mocks.undiciFetch).toHaveBeenCalledTimes(1);
+    expect(mocks.undiciFetch.mock.calls[0]![1]).toMatchObject({ redirect: "error", dispatcher: expect.any(Object) });
   });
 
   afterEach(() => {
