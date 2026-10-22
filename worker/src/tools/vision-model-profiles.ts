@@ -11,6 +11,8 @@ export interface VisionModelProfile {
   imageDetail?: "auto" | "low" | "high";
   /** Downscale page images whose longer side exceeds this many pixels before sending them. */
   maxImageLongSide?: number;
+  /** Strip a ```markdown / ```md fence that wraps the whole transcription (seen on ~1 in 2,000 Luna pages). */
+  unwrapMarkdownFence?: boolean;
 }
 
 /** The generic default template key; a per-model `defaultPrompt` replaces only this. */
@@ -19,7 +21,7 @@ export const GENERIC_VISION_PROMPT_KEY = "<OCR>";
 export const VISION_MODEL_PROFILES: Readonly<Record<string, VisionModelProfile>> = {
   // 2026-10-21 tuning (tune split, 68 pages x 2): the LaTeX/table template lifts math and content F1;
   // detail "high" plus a 1,600 px long side cuts image tokens ~20% at equal quality (1,280 px lost math).
-  "openai/gpt-6-luna": { defaultPrompt: "page-markdown-latex", imageDetail: "high", maxImageLongSide: 1_600 },
+  "openai/gpt-6-luna": { defaultPrompt: "page-markdown-latex", imageDetail: "high", maxImageLongSide: 1_600, unwrapMarkdownFence: true },
 };
 
 export function visionModelProfile(model: string | undefined): VisionModelProfile | undefined {
@@ -53,4 +55,17 @@ export async function prepareVisionImage(
   } catch {
     return image;
   }
+}
+
+const WHOLE_MARKDOWN_FENCE = /^```(?:markdown|md|gfm)[ \t]*\r?\n([\s\S]*?)\r?\n?```[ \t]*$/i;
+
+/**
+ * Removes one Markdown-tagged fence around the entire output when the profile asks for it. Untagged
+ * or other-language fences (a page that is a code listing) and outputs with inner fences are kept.
+ */
+export function postProcessVisionText(text: string, profile: VisionModelProfile | undefined): string {
+  if (!profile?.unwrapMarkdownFence) return text;
+  const match = WHOLE_MARKDOWN_FENCE.exec(text.trim());
+  if (!match || match[1]!.includes("\n```")) return text;
+  return match[1]!.trim();
 }

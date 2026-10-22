@@ -8,7 +8,7 @@ import { visionConfigSchema } from "@docslurp/shared";
 
 import type { Config } from "../config.js";
 import { CommandRunner } from "../tools/runner.js";
-import { prepareVisionImage, profileVisionPromptKey, visionModelProfile } from "../tools/vision-model-profiles.js";
+import { postProcessVisionText, prepareVisionImage, profileVisionPromptKey, visionModelProfile } from "../tools/vision-model-profiles.js";
 import { executeVisionRuntime, visionPromptTemplates } from "../tools/vision-runtime.js";
 
 const LUNA = "openai/gpt-6-luna";
@@ -66,6 +66,17 @@ describe("vision model profiles", () => {
     const junk = Buffer.from([0x89, 0x50, 0x4e, 0x47]);
     expect(await prepareVisionImage(junk, "image/png", profile)).toBe(junk);
     expect(await prepareVisionImage(big, "image/jpeg", undefined)).toBe(big);
+  });
+
+  it("unwraps only a Markdown-tagged fence around the whole transcription", () => {
+    const profile = { unwrapMarkdownFence: true };
+    expect(postProcessVisionText("```markdown\n# Receipt\n\n| A | B |\n|---|---|\n```", profile)).toBe("# Receipt\n\n| A | B |\n|---|---|");
+    const listing = "```\nint main() {}\n```";
+    expect(postProcessVisionText(listing, profile)).toBe(listing);
+    const nested = "```md\nIntro\n```js\nx()\n```\n```";
+    expect(postProcessVisionText(nested, profile)).toBe(nested);
+    expect(postProcessVisionText("# Page\n\n```js\nx()\n```", profile)).toBe("# Page\n\n```js\nx()\n```");
+    expect(postProcessVisionText("```markdown\n# Page\n```", undefined)).toBe("```markdown\n# Page\n```");
   });
 
   it("sends GPT-6 Luna its template, reasoning floor, high detail and a 1,600 px page", async () => {

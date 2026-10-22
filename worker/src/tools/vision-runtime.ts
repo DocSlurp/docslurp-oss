@@ -2,7 +2,7 @@ import { openRouterReasoningParams, resolveSupportedModelIdWithWarning } from "@
 import { withObservation } from "@docslurp/shared/observability";
 import type { ProviderRateLease } from "../lib/provider-rate-limit.js";
 import { fetchWithProviderRetry, providerFromBaseUrl } from "../lib/provider-retry.js";
-import { prepareVisionImage, profileVisionPromptKey, visionModelProfile } from "./vision-model-profiles.js";
+import { postProcessVisionText, prepareVisionImage, profileVisionPromptKey, visionModelProfile } from "./vision-model-profiles.js";
 
 /** Image plus transcription tokens for a typical page (observed ~1,850 in / ~510 out on Gemini Flash Lite). */
 const VISION_IMAGE_TOKEN_ESTIMATE = 2_200;
@@ -389,7 +389,7 @@ async function runVisionRequest(args: {
       }
 
       const payload = (await response.json()) as OpenAiCompatibleResponse;
-      const text = readAssistantText(payload.choices?.[0]?.message?.content);
+      const text = postProcessVisionText(readAssistantText(payload.choices?.[0]?.message?.content), profile);
       (rateLease as ProviderRateLease | null)?.settle(
         payload.usage ? (payload.usage.prompt_tokens ?? 0) + (payload.usage.completion_tokens ?? 0) : null,
       );
