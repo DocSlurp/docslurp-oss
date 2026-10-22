@@ -84,7 +84,10 @@ export interface WorkspaceAccess {
   workspaceId: string;
   orgId: string;
   workspaceOwnerUserId: string;
-  /** Every org member may read and write the org's default workspace. */
+  /**
+   * Every org member may read the org's default workspace and add content to it
+   * (`canContributeToWorkspace`); changing its settings still needs edit rights.
+   */
   isDefaultWorkspace?: boolean;
   orgRole: OrganizationRecord["memberRole"] | null;
   workspaceRole: WorkspaceMemberRecord["role"] | null;
@@ -685,12 +688,23 @@ export async function getWorkspaceAccess(workspaceId: string, userId: string): P
   };
 }
 
+/** May change the workspace's settings, search and chat configuration, and spend-heavy builds. */
 export function canEditWorkspace(access: WorkspaceAccess, userId: string): boolean {
   return access.workspaceOwnerUserId === userId
-    || (access.isDefaultWorkspace === true && access.orgRole !== null)
     || (access.orgRole !== null && elevatedWorkspaceOrgRoles.has(access.orgRole))
     || access.workspaceRole === "admin"
     || access.workspaceRole === "editor";
+}
+
+/**
+ * May upload into the workspace and manage those runs. Any org member may add
+ * to the org's default workspace unless they were explicitly made a viewer of
+ * it; that membership alone never grants settings changes
+ * (SEC-2026-10-PROD-14).
+ */
+export function canContributeToWorkspace(access: WorkspaceAccess, userId: string): boolean {
+  return canEditWorkspace(access, userId)
+    || (access.isDefaultWorkspace === true && access.orgRole !== null && access.workspaceRole !== "viewer");
 }
 
 export function canManageWorkspace(access: WorkspaceAccess, userId: string): boolean {

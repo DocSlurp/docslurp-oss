@@ -23,7 +23,7 @@ import {
   SpendBlockedError,
   type SpendBlockedCode,
 } from "./billing/spend-guard.js";
-import { canEditWorkspace, getWorkspaceAccess } from "./organizations.js";
+import { canContributeToWorkspace, getWorkspaceAccess } from "./organizations.js";
 import { attributedUsage } from "./usage-attribution.js";
 import { buildRunProcessingPreview } from "./run-processing-preview.js";
 import { runLifecycle, type RunLifecycleRun, type RunStartOutcome } from "./run-lifecycle.js";
@@ -844,7 +844,7 @@ export function createRunCreation(deps: RunCreationDeps) {
   async function create(input: CreateRunInput): Promise<CreatedRun> {
     const access = await getWorkspaceAccess(input.workspaceId, input.userId);
     if (!access) throw new Error("Workspace not found");
-    if (!canEditWorkspace(access, input.userId)) throw new Error("Forbidden");
+    if (!canContributeToWorkspace(access, input.userId)) throw new Error("Forbidden");
 
     const { sources } = input;
     let sourceDocuments: SourceDocumentRow[] = [];

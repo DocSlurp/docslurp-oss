@@ -11,6 +11,12 @@ describe("email authentication policy", () => {
   });
 });
 
+describe("session revocation", () => {
+  it("checks the session row on every request instead of trusting a cached session cookie", () => {
+    expect(createBetterAuthSecurityOptions({}).session.cookieCache).toEqual({ enabled: false });
+  });
+});
+
 describe("resolveBetterAuthBaseUrl", () => {
   it("prefers the explicit Better Auth URL", () => {
     expect(resolveBetterAuthBaseUrl({

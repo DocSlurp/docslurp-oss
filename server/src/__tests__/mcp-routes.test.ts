@@ -419,6 +419,25 @@ describe("session MCP tools", () => {
     expect(hybridSearch).not.toHaveBeenCalled();
   });
 
+  it.each([
+    [{ Origin: "https://foreign.example" }],
+    [{ Origin: "null" }],
+    [{ "Sec-Fetch-Site": "cross-site" }],
+    [{ "Sec-Fetch-Site": "same-site" }],
+  ])("rejects a cross-origin read of the tool catalog: %o", async extra => {
+    const response = await app.request("/tools/tools", { headers: extra });
+    expect(response.status).toBe(403);
+  });
+
+  it.each([
+    [{}],
+    [{ Origin: "http://localhost:4321" }],
+    [{ "Sec-Fetch-Site": "same-origin" }],
+  ])("allows same-origin reads of the tool catalog: %o", async extra => {
+    const response = await app.request("/tools/tools", { headers: extra });
+    expect(response.status).toBe(200);
+  });
+
   it("does not accept bearer credentials on the browser adapter", async () => {
     const response = await app.request("/tools/tools", { headers: { Authorization: "Bearer invalid" } });
     expect(response.status).toBe(401);
