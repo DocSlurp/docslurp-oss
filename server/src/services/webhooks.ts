@@ -203,7 +203,8 @@ export function decryptWebhookSecret(storedSecret: string): string {
 }
 
 export function isEncryptedWebhookSecret(storedSecret: string): boolean {
-  // Current envelope is `v1:<iv>:<tag>:<ciphertext>`; legacy rows are
+  if (/^v[0-9]+:/.test(storedSecret)) return true; // Never treat malformed envelopes as plaintext.
+  // Previous envelope is `v1:<iv>:<tag>:<ciphertext>`; legacy rows are
   // `iv:tag:ciphertext`. Anything else is a pre-encryption plaintext secret.
   if (/^v1:[0-9a-f]+:[0-9a-f]+:[0-9a-f]+$/i.test(storedSecret)) return true;
   return /^[0-9a-f]+:[0-9a-f]+:[0-9a-f]+$/i.test(storedSecret);

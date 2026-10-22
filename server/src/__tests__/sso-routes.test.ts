@@ -294,6 +294,17 @@ describe("ssoRoutes security hardening", () => {
     expect(origin).toBe("https://api.docslurp.example");
   });
 
+  it("uses the public TLS origin for the SSO state cookie behind an HTTP proxy", async () => {
+    seedOrg(oidcConfig);
+    verifiedDomain("org-1");
+    await stubIdp(() => ({}));
+    process.env.PUBLIC_API_URL = "https://api.docslurp.example";
+    const response = await buildApp().request("http://internal.local/v1/auth/oidc/org-1/init");
+    expect(response.status).toBe(302);
+    expect(response.headers.get("set-cookie")).toContain("Secure");
+    expect(response.headers.get("set-cookie")).toContain("SameSite=None");
+  });
+
   it("rejects OIDC metadata that points token or JWKS endpoints at untrusted hosts", async () => {
     seedOrg(oidcConfig);
     vi.mocked(fetch).mockResolvedValueOnce(Response.json({

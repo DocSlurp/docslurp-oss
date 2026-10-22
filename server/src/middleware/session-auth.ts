@@ -12,29 +12,30 @@ import { env } from "../config.js";
 /**
  * CSRF guard for cookie-authenticated, state-changing requests (SEC-2026-10-02).
  *
- * The session cookie is the only ambient credential on `/v1/*`. A browser
- * cross-site POST carries `Sec-Fetch-Site: cross-site`; reject it. When the
- * header is absent, fall back to `Origin` against the CORS allowlist and the
- * request origin. Non-browser clients send neither header and are not CSRFable,
- * so they pass. Safe methods are always allowed.
+ * Origin must match the CORS allowlist or request origin, including same-site
+ * sibling requests. Without Origin, browser fetch metadata must establish a
+ * same-origin or user-initiated request. Non-browser clients omit both headers.
+ * Safe methods and explicit bearer credentials do not use this guard.
  */
 function isCookieMutationFromTrustedOrigin(c: Context): boolean {
   const method = c.req.method.toUpperCase();
   if (method === "GET" || method === "HEAD" || method === "OPTIONS") return true;
 
-  const fetchSite = c.req.header("sec-fetch-site");
-  if (fetchSite) {
-    return fetchSite === "same-origin" || fetchSite === "same-site" || fetchSite === "none";
-  }
-
+  // Origin is authoritative even for same-site siblings: a compromised sibling
+  // subdomain must not acquire the API's ambient cookie authority.
   const origin = c.req.header("origin");
-  if (!origin) return true;
-  if (env.corsAllowedOrigins.includes(origin)) return true;
-  try {
-    return new URL(c.req.url).origin === origin;
-  } catch {
-    return false;
+  if (origin) {
+    if (env.corsAllowedOrigins.includes(origin)) return true;
+    try {
+      return new URL(c.req.url).origin === origin;
+    } catch {
+      return false;
+    }
   }
+  const fetchSite = c.req.header("sec-fetch-site");
+  // Non-browser clients omit both headers. A browser sibling/cross-site request
+  // without Origin cannot establish trust.
+  return !fetchSite || fetchSite === "same-origin" || fetchSite === "none";
 }
 
 /**

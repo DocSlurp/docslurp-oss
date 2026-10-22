@@ -1,4 +1,5 @@
 import "./env.js";
+import { validateEncryptionConfiguration } from "./lib/encryption.js";
 
 import { existsSync } from "node:fs";
 
@@ -128,6 +129,10 @@ function validateProductionSecrets(): void {
   assertProductionSecret("BETTER_AUTH_SECRET", process.env.BETTER_AUTH_SECRET, { minLength: 32 });
   assertProductionSecret("CREDENTIALS_ENCRYPTION_KEY", process.env.CREDENTIALS_ENCRYPTION_KEY, { minLength: 32 });
   assertProductionSecret("SECRETS_ENCRYPTION_KEY", process.env.SECRETS_ENCRYPTION_KEY, { minLength: 32 });
+  if (process.env.NODE_ENV === "production") {
+    validateEncryptionConfiguration("CREDENTIALS_ENCRYPTION_KEY");
+    validateEncryptionConfiguration("SECRETS_ENCRYPTION_KEY");
+  }
   assertProductionSecret("OAUTH_TOKEN_ENCRYPTION_KEY", process.env.OAUTH_TOKEN_ENCRYPTION_KEY, {
     required: Boolean(process.env.GITHUB_CLIENT_ID || process.env.GOOGLE_CLIENT_ID),
     minLength: 32,

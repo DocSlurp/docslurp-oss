@@ -549,7 +549,7 @@ function ssoStateDigest(state: string): string {
  * SameSite=None to survive it; Lax is the dev/http fallback.
  */
 function setSsoStateCookie(c: Context, state: string): void {
-  const secure = new URL(c.req.url).protocol === "https:";
+  const secure = new URL(inferApiOrigin(c.req.raw)).protocol === "https:";
   setCookie(c, SSO_STATE_COOKIE, ssoStateDigest(state), {
     httpOnly: true,
     sameSite: secure ? "None" : "Lax",
