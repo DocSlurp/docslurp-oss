@@ -22,7 +22,6 @@ import {
   dailyStorageCredits,
   daysInUtcMonth,
   estimateIngest,
-  fileMinimumTopUpCredits,
   isUnitChargeEvent,
   mediaRichPages,
   pageCredits,
@@ -47,7 +46,6 @@ describe("price card", () => {
       storageGbMonth: 25,
       searchPer1k: 10,
       chatAnswerTiers: { standard: 2.5, advanced: 7.5, premium: 50 },
-      perFileMinimum: 0.1,
       richIncludedOutputTokens: 1_000,
       richExtraPageOutputTokens: 1_000,
       llmSearchMultiplier: 10,
@@ -136,11 +134,6 @@ describe("price card", () => {
     expect(mediaRichPages("video", 0)).toBe(0);
   });
 
-  it("tops a file up to the per-file minimum", () => {
-    expect(fileMinimumTopUpCredits(0.005)).toBeCloseTo(0.095);
-    expect(fileMinimumTopUpCredits(0.25)).toBe(0);
-  });
-
   it("sets worker ceilings by funding", () => {
     expect(workerSlotsFor(false)).toBe(STARTER_WORKER_SLOTS);
     expect(workerSlotsFor(true)).toBe(FUNDED_WORKER_SLOTS);
@@ -218,10 +211,10 @@ describe("ingest estimator", () => {
     expect(scanned.credits.totalCredits).toBeCloseTo(250);
   });
 
-  it("applies the per-file minimum and prices media minutes", () => {
+  it("charges small files only for their pages (no per-file minimum) and prices media minutes", () => {
     const tiny = estimateIngest({ pages: 10, mix: { text: 1 }, documents: 10 });
-    expect(tiny.credits.breakdown.fileMinimum).toBeCloseTo(10 * (0.1 - 0.005));
-    expect(tiny.credits.totalCredits).toBeCloseTo(1);
+    expect(tiny.credits.totalCredits).toBeCloseTo(0.05);
+    expect("perFileMinimum" in PRICE_CARD).toBe(false);
     const podcast = estimateIngest({ pages: 0, mix: {}, audioMinutes: 60, documents: 1 });
     expect(podcast.mediaRichPages).toBe(60);
     expect(podcast.credits.totalCredits).toBeCloseTo(15);

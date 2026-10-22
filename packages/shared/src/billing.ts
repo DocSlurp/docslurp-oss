@@ -53,6 +53,12 @@ export function dollarsToCredits(dollars: number): number {
  *   .0086/.023, minimax-m3.1-flash:free 0, deepseek-v4.1-flash .0177/.042,
  *   beam-1.0-501b .0349/.085, gpt-6.1-sol .067/.163, qwen3.8-max-prime .287/.602.
  *   p95 tokens per answer run 130k-580k, so the 100k token-block multiplier stays.
+ *
+ * No per-file minimum (owner decision 2026-10-21): a file pays only for its
+ * pages, fractional credits included. Our per-document overhead (queue,
+ * workflow, object writes; ~$0.0005 typical, cost-basis.md section 6) is
+ * absorbed, so workloads of very small files (1-10 Fast pages each) run below
+ * cost. The fix for those is batching small files, not a fee.
  */
 export const PRICE_CARD = {
   /** Text-layer PDF, Office, HTML, Markdown, EPUB, text. */
@@ -68,8 +74,6 @@ export const PRICE_CARD = {
   searchPer1k: 10,
   /** Credits per chat answer by model tier (CHAT_MODEL_TIERS). */
   chatAnswerTiers: { standard: 2.5, advanced: 7.5, premium: 50 },
-  /** Minimum ingest charge per file. */
-  perFileMinimum: 0.1,
   /** Vision output tokens one Rich page includes. */
   richIncludedOutputTokens: 1_000,
   /** Each further block of this many output tokens counts as one more Rich page (rounded up). */
@@ -208,11 +212,6 @@ export function mediaRichPages(kind: "audio" | "video", seconds: number): number
   return minutes * (kind === "video" ? PRICE_CARD.videoMinuteRichPages : PRICE_CARD.audioMinuteRichPages);
 }
 
-/** What a file must still pay to reach the per-file minimum, given what its pages already paid. */
-export function fileMinimumTopUpCredits(chargedCredits: number): number {
-  return Math.max(0, PRICE_CARD.perFileMinimum - nonNegative(chargedCredits));
-}
-
 /**
  * Metric names of the billable unit events. These, and only these, debit
  * customer credits; every other usage event (provider tokens, compute,
@@ -222,7 +221,6 @@ export const BILLABLE_UNIT_METRICS = {
   fastPage: "ingest-page-fast",
   richPage: "ingest-page-rich",
   mediaMinutes: "ingest-media-minutes",
-  fileMinimum: "ingest-file-minimum",
   storage: "storage-daily",
   search: "search-query",
   chatAnswer: "chat-answer",
@@ -563,7 +561,7 @@ export function priceAiUsageEvent<T extends PriceableAiEvent>(event: T): T {
 // Ingest estimator
 //
 // Planning model, not a quote. Prices come from PRICE_CARD (Fast vs Rich page
-// mix, media minutes, per-file minimum); timing from per-page worker-second
+// mix, media minutes); timing from per-page worker-second
 // assumptions anchored to internal measurements. Observed runs are
 // authoritative.
 // ---------------------------------------------------------------------------
@@ -665,7 +663,7 @@ export type IngestEstimate = {
   mediaRichPages: number;
   credits: {
     totalCredits: number;
-    breakdown: { fast: number; rich: number; media: number; fileMinimum: number };
+    breakdown: { fast: number; rich: number; media: number };
   };
   pagesPerDollar: number;
   creditsPer1000Pages: number;
@@ -723,10 +721,7 @@ export function estimateIngest(input: IngestEstimateInput): IngestEstimate {
   const fast = pageCredits("fast", totals.fastPages);
   const rich = pageCredits("rich", totals.richPages);
   const media = pageCredits("rich", mediaPages);
-  // Per-file minimum, assuming the batch spreads evenly over its files.
-  const perFile = (fast + rich + media) / documents;
-  const fileMinimum = hasWork ? fileMinimumTopUpCredits(perFile) * documents : 0;
-  const totalCredits = fast + rich + media + fileMinimum;
+  const totalCredits = fast + rich + media;
 
   const objectBytes = totals.sourceBytes + totals.artifactBytes;
   const bytes = objectBytes + totals.indexBytes;
@@ -745,7 +740,7 @@ export function estimateIngest(input: IngestEstimateInput): IngestEstimate {
     fastPages: totals.fastPages,
     richPages: totals.richPages,
     mediaRichPages: mediaPages,
-    credits: { totalCredits, breakdown: { fast, rich, media, fileMinimum } },
+    credits: { totalCredits, breakdown: { fast, rich, media } },
     pagesPerDollar: dollars > 0 ? pages / dollars : 0,
     creditsPer1000Pages: pages > 0 ? (totalCredits / pages) * 1000 : 0,
     storage: { bytes, objectBytes, indexBytes: totals.indexBytes, monthlyCredits: storageCreditsPerMonth(bytes) },
