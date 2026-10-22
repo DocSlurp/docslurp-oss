@@ -1,5 +1,6 @@
 import { createHmac } from "node:crypto";
 import { serialize, type CookieOptions } from "hono/utils/cookie";
+import { safeRedirectPath } from "./safe-redirect.js";
 
 /** Where a signed-in browser lands. Mirrors the app's `APP_ROOT_PATH`. */
 export const AUTH_APP_ROOT_PATH = "/app";
@@ -53,10 +54,7 @@ export function jsonResponse(body: Record<string, unknown>, status = 200): Respo
 }
 
 export function normalizeRedirectTarget(value: FormDataEntryValue | string | null | undefined): string {
-  if (typeof value !== "string") return AUTH_APP_ROOT_PATH;
-  const trimmed = value.trim();
-  if (!trimmed.startsWith("/") || trimmed.startsWith("//")) return AUTH_APP_ROOT_PATH;
-  return trimmed;
+  return safeRedirectPath(value, AUTH_APP_ROOT_PATH);
 }
 
 export function buildAuthFailureUrl(requestUrl: string, error: string): URL {

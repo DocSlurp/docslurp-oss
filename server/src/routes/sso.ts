@@ -26,6 +26,7 @@ import {
 import { authenticatedByRoute } from "../lib/route-auth.js";
 import { apiStatusError } from "../lib/api-error.js";
 import { validationHook } from "../lib/validation.js";
+import { safeRedirectPath } from "../lib/safe-redirect.js";
 
 const ssoConfigSchema = z.object({
   providerType: z.enum(["saml", "oidc"]).nullable().optional(),
@@ -776,14 +777,7 @@ function redirectToApp(c: any, path = "/"): Response {
 }
 
 function sanitizeRedirectPath(value: string | null | undefined): string {
-  const trimmed = value?.trim();
-  if (!trimmed) {
-    return "/";
-  }
-  if (!trimmed.startsWith("/") || trimmed.startsWith("//")) {
-    return "/";
-  }
-  return trimmed;
+  return safeRedirectPath(value, "/");
 }
 
 async function testOidcConnection(metadataUrl: string): Promise<{ ok: boolean; error?: string }> {
