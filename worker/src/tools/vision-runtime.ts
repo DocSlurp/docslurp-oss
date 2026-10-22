@@ -1,7 +1,7 @@
 import { resolveSupportedModelIdWithWarning } from "@docslurp/shared";
 import { withObservation } from "@docslurp/shared/observability";
 import type { ProviderRateLease } from "../lib/provider-rate-limit.js";
-import { fetchWithProviderRetry, providerFromBaseUrl } from "../lib/provider-retry.js";
+import { fetchWithProviderRetry, ProviderRetryableError, providerFromBaseUrl } from "../lib/provider-retry.js";
 import {
   MARKDOWN_LATEX_VISION_PROMPT,
   MARKDOWN_TRANSCRIPTION_VISION_PROMPT,
@@ -100,9 +100,49 @@ export interface VisionExecutionResult {
   fallbackReason: string | null;
   /** Provider finish reason of the (first) choice; undefined for local runtimes. */
   finishReason?: string | null;
+  /** Model id the provider reports having served (`payload.model`); undefined when the runtime omits it. */
+  servedModel?: string;
+  /** Upstream provider that served the request (OpenRouter's `payload.provider`). */
+  servedProvider?: string;
+  /** Set when the served model is a different version, snapshot or family than requested. */
+  modelSwap?: VisionModelSwap;
+}
+
+export interface VisionModelSwap {
+  requested: string;
+  served: string;
+  provider: string | null;
+}
+
+/** `VISION_MODEL_SWAP_POLICY`: `warn` logs and flags a swap, `fail` throws a retryable error. */
+export type VisionModelSwapPolicy = "warn" | "fail";
+
+export function readVisionModelSwapPolicy(value: string | undefined): VisionModelSwapPolicy {
+  return value?.trim().toLowerCase() === "fail" ? "fail" : "warn";
+}
+
+/**
+ * Reduces a model id to the identity that selects weights: lower-case, no
+ * provider prefix (`deepseek/`), no routing variant (`:free`, `:nitro`).
+ * Version or snapshot suffixes (`-1017`) are kept on purpose.
+ */
+export function normalizeModelIdentity(model: string): string {
+  const lower = model.trim().toLowerCase();
+  const name = lower.slice(lower.lastIndexOf("/") + 1);
+  const colon = name.indexOf(":");
+  return colon === -1 ? name : name.slice(0, colon);
+}
+
+/** Returns the swap when `served` selects different weights than `requested`, else null. */
+export function detectModelSwap(requested: string, served: string | undefined, provider: string | null): VisionModelSwap | null {
+  if (!served?.trim()) return null;
+  if (normalizeModelIdentity(requested) === normalizeModelIdentity(served)) return null;
+  return { requested, served, provider };
 }
 
 interface OpenAiCompatibleResponse {
+  model?: unknown;
+  provider?: unknown;
   usage?: {
     cost?: number;
     prompt_tokens?: number;
@@ -187,7 +227,7 @@ async function runRouteVisionRequest(
     prompt,
   };
   if (route.provider !== PRIVATE_MODEL_PROVIDER) {
-    return await runVisionRequest({ ...base, model: route.model, baseUrl: route.baseUrl, apiKey: resolveVisionApiKey(route.runtime, route.baseUrl, args.cfg) });
+    return await runVisionRequest({ ...base, model: route.model, baseUrl: route.baseUrl, apiKey: resolveVisionApiKey(route.runtime, route.baseUrl, args.cfg), swapPolicy: args.cfg.visionModelSwapPolicy });
   }
   const call = await authorizePrivateModelCall({ privacyMode: args.privacyMode, modelUri: route.modelUri, capability: "vision", operation: "worker.vision" });
   const result = await runVisionRequest({ ...base, runtime: "openai-compatible", model: call.model, baseUrl: call.baseUrl, apiKey: "", fetchImpl: call.fetch, providerLabel: `private:${call.route.alias}` });
@@ -270,7 +310,7 @@ export function resolveVisionPromptTemplate(
   return visionPromptTemplates[key] ?? visionPromptTemplates["<OCR>"];
 }
 
-async function runVisionRequest(args: {
+export async function runVisionRequest(args: {
   imagePath: string;
   mimeType: string;
   outputPath: string;
@@ -283,6 +323,7 @@ async function runVisionRequest(args: {
   apiKey: string;
   fetchImpl?: typeof fetch;
   providerLabel?: string;
+  swapPolicy?: VisionModelSwapPolicy;
 }): Promise<VisionExecutionResult> {
   args = { ...args, model: resolveSupportedModelIdWithWarning(args.model) };
   return withObservation(
@@ -292,7 +333,7 @@ async function runVisionRequest(args: {
       model: args.model,
       input: { prompt: args.prompt, mimeType: args.mimeType },
       metadata: { runtime: args.runtime },
-      result: (result) => ({
+      result: (result: VisionExecutionResult) => ({
         output: result.text,
         usageDetails:
           result.usageSource === "provider"
@@ -305,10 +346,13 @@ async function runVisionRequest(args: {
           usageSource: result.usageSource,
           reportedInputTokens: result.inputTokens,
           reportedOutputTokens: result.outputTokens,
+          ...(result.servedModel ? { servedModel: result.servedModel } : {}),
+          ...(result.servedProvider ? { servedProvider: result.servedProvider } : {}),
+          ...(result.modelSwap ? { modelSwapDetected: true, modelSwap: result.modelSwap } : {}),
         },
       }),
     },
-    async () => {
+    async (): Promise<VisionExecutionResult> => {
       if (args.runtime === "local-cli") {
         const plan = await args.runner.florence2(
           args.imagePath,
@@ -420,12 +464,35 @@ async function runVisionRequest(args: {
       const payload = retryProvider ? mergeFilteredUsage(first, await send(retryProvider)) : first;
       const text = postProcessVisionText(args.model, readAssistantText(payload.choices?.[0]?.message?.content));
 
+      const servedModel = typeof payload.model === "string" && payload.model.trim() ? payload.model.trim() : undefined;
+      const servedProvider = readServedProvider(payload.provider);
+      // Only OpenRouter aliases route to snapshots we pin evals against; other
+      // OpenAI-compatible servers echo dated or local ids that are not swaps.
+      const modelSwap = args.baseUrl?.includes("openrouter.ai")
+        ? detectModelSwap(args.model, servedModel, servedProvider ?? null)
+        : null;
+      if (modelSwap) {
+        console.warn(`[vision-model-swap] requested=${modelSwap.requested} served=${modelSwap.served} provider=${modelSwap.provider ?? "unknown"} policy=${args.swapPolicy ?? "warn"}`);
+        if (args.swapPolicy === "fail") {
+          throw new ProviderRetryableError(
+            `vision model swap: requested ${modelSwap.requested} but ${modelSwap.provider ?? "provider"} served ${modelSwap.served}`,
+            args.providerLabel ?? providerFromBaseUrl(args.baseUrl),
+            null,
+            null,
+            1,
+          );
+        }
+      }
+
       return {
         runtime: args.runtime,
         model: args.model,
         prompt: args.prompt,
         text,
         raw: payload,
+        ...(servedModel ? { servedModel } : {}),
+        ...(servedProvider ? { servedProvider } : {}),
+        ...(modelSwap ? { modelSwap } : {}),
         costCents: readProviderCharge(payload.usage).costCents,
         costMetadata: readProviderCharge(payload.usage).metadata,
         latencyMs: Date.now() - startedAt,
@@ -457,6 +524,12 @@ function mergeFilteredUsage(filtered: OpenAiCompatibleResponse, retry: OpenAiCom
   if (typeof a.cost === "number" && typeof b.cost === "number") usage.cost = a.cost + b.cost;
   else delete usage.cost;
   return { ...retry, usage, contentFilterRetry: { filteredUsage: a } } as OpenAiCompatibleResponse;
+}
+
+function readServedProvider(value: unknown): string | undefined {
+  if (typeof value === "string" && value.trim()) return value.trim();
+  const name = (value as { name?: unknown } | null)?.name;
+  return typeof name === "string" && name.trim() ? name.trim() : undefined;
 }
 
 function resolveChatCompletionsUrl(baseUrl: string | null): string {
