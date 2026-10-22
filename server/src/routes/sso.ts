@@ -13,7 +13,7 @@ import { sql } from "../db.js";
 import { auth } from "../lib/auth.js";
 import { openSecret, sealSecret } from "../lib/encryption.js";
 import { requestIp } from "../lib/request-context.js";
-import { assertSafeExternalUrl, safeExternalFetch } from "../lib/network-security.js";
+import { assertSafeExternalUrl, safeExternalFetch, UnsafeExternalUrlError } from "../lib/network-security.js";
 import {
   claimSsoDomain,
   loadOrgSsoDomain,
@@ -247,15 +247,29 @@ async function requireOrgAdmin(orgId: string, userId: string): Promise<void> {
   }
 }
 
+/**
+ * The IdP metadata (fetched from an admin-supplied URL) failed a check. The
+ * message describes the IdP's public document, so it is safe to return to the
+ * org admin who configured it.
+ */
+class SsoMetadataError extends Error {
+  override name = "SsoMetadataError";
+}
+
 async function fetchOidcMetadata(metadataUrl: string): Promise<OidcMetadata> {
   const safeMetadataUrl = await assertSafeExternalUrl(metadataUrl);
   const resp = await safeExternalFetch(safeMetadataUrl, { signal: AbortSignal.timeout(8_000) });
   if (!resp.ok) {
-    throw new Error(`Metadata endpoint returned HTTP ${resp.status}`);
+    throw new SsoMetadataError(`Metadata endpoint returned HTTP ${resp.status}`);
   }
-  const json = (await resp.json()) as Partial<OidcMetadata>;
-  if (!json.issuer || !json.authorization_endpoint || !json.token_endpoint || !json.jwks_uri) {
-    throw new Error("Metadata document missing required OIDC fields (issuer, authorization_endpoint, token_endpoint, jwks_uri)");
+  let json: Partial<OidcMetadata>;
+  try {
+    json = (await resp.json()) as Partial<OidcMetadata>;
+  } catch {
+    throw new SsoMetadataError("Metadata URL did not return a JSON OpenID Connect discovery document");
+  }
+  if (!json || typeof json !== "object" || !json.issuer || !json.authorization_endpoint || !json.token_endpoint || !json.jwks_uri) {
+    throw new SsoMetadataError("Metadata document missing required OIDC fields (issuer, authorization_endpoint, token_endpoint, jwks_uri)");
   }
   return await assertSafeOidcEndpoints({
     issuer: json.issuer,
@@ -273,15 +287,15 @@ function pemFromX509(value: string): string {
 
 function assertSafeSamlMetadataXml(xml: string): void {
   if (Buffer.byteLength(xml, "utf8") > samlMetadataMaxBytes) {
-    throw new Error("SAML metadata document is too large");
+    throw new SsoMetadataError("SAML metadata document is too large");
   }
   if (/<!\s*(doctype|entity)\b/i.test(xml)) {
-    throw new Error("SAML metadata must not contain DTD or entity declarations");
+    throw new SsoMetadataError("SAML metadata must not contain DTD or entity declarations");
   }
 
   const disallowedEntity = /&(?!(?:amp|lt|gt|apos|quot|#\d+|#x[0-9a-fA-F]+);)[A-Za-z_][\w.-]*;/;
   if (disallowedEntity.test(xml)) {
-    throw new Error("SAML metadata contains unsupported entity references");
+    throw new SsoMetadataError("SAML metadata contains unsupported entity references");
   }
 }
 
@@ -289,7 +303,7 @@ async function fetchSamlMetadata(metadataUrl: string): Promise<SamlMetadata> {
   const safeMetadataUrl = await assertSafeExternalUrl(metadataUrl);
   const resp = await safeExternalFetch(safeMetadataUrl, { signal: AbortSignal.timeout(8_000) });
   if (!resp.ok) {
-    throw new Error(`Metadata endpoint returned HTTP ${resp.status}`);
+    throw new SsoMetadataError(`Metadata endpoint returned HTTP ${resp.status}`);
   }
 
   const xml = await resp.text();
@@ -301,6 +315,8 @@ async function fetchSamlMetadata(metadataUrl: string): Promise<SamlMetadata> {
     normalize: false,
     normalizeTags: false,
     trim: true
+  }).catch(() => {
+    throw new SsoMetadataError("Metadata URL did not return a well-formed SAML metadata XML document");
   })) as {
     EntityDescriptor?: Array<{
       $?: { entityID?: string };
@@ -328,7 +344,7 @@ async function fetchSamlMetadata(metadataUrl: string): Promise<SamlMetadata> {
     .map((cert) => pemFromX509(cert));
 
   if (!entryPoint || certificates.length === 0) {
-    throw new Error("SAML metadata missing SingleSignOnService location or X509Certificate");
+    throw new SsoMetadataError("SAML metadata missing SingleSignOnService location or X509Certificate");
   }
 
   return {
@@ -378,7 +394,7 @@ function endpointHost(url: string): string {
 function assertTrustedOidcEndpointHost(endpointUrl: string, allowedHosts: Set<string>): void {
   const host = endpointHost(endpointUrl);
   if (!allowedHosts.has(host)) {
-    throw new Error("OIDC metadata endpoint host is not trusted");
+    throw new SsoMetadataError(`OIDC metadata endpoint host ${host} is not the issuer's host or a trusted endpoint host`);
   }
 }
 
@@ -394,10 +410,12 @@ function assertIssuerMatchesMetadataUrl(issuer: string, metadataUrl: string): vo
     const parsed = new URL(metadataUrl);
     actual = `${parsed.origin}${parsed.pathname}`;
   } catch {
-    throw new Error("OIDC metadata issuer is invalid");
+    throw new SsoMetadataError("OIDC metadata issuer is invalid");
   }
   if (expected !== actual) {
-    throw new Error("OIDC metadata issuer does not match the metadata URL");
+    throw new SsoMetadataError(
+      `OIDC metadata issuer ${issuer} does not match the metadata URL; expected the URL to be ${expected}`
+    );
   }
 }
 
@@ -780,12 +798,54 @@ function sanitizeRedirectPath(value: string | null | undefined): string {
   return safeRedirectPath(value, "/");
 }
 
+const publicNetworkErrorCodes = new Set([
+  "ENOTFOUND", "EAI_AGAIN", "ECONNREFUSED", "ECONNRESET", "ETIMEDOUT", "EHOSTUNREACH", "ENETUNREACH",
+  "CERT_HAS_EXPIRED", "DEPTH_ZERO_SELF_SIGNED_CERT", "SELF_SIGNED_CERT_IN_CHAIN", "UNABLE_TO_VERIFY_LEAF_SIGNATURE",
+  "ERR_TLS_CERT_ALTNAME_INVALID", "UND_ERR_CONNECT_TIMEOUT", "UND_ERR_SOCKET"
+]);
+
+function errorCode(err: unknown): string | null {
+  for (let current: unknown = err, depth = 0; current && depth < 4; current = (current as { cause?: unknown }).cause, depth += 1) {
+    const code = (current as { code?: unknown }).code;
+    if (typeof code === "string") return code;
+  }
+  return null;
+}
+
+/**
+ * The connection test exists to tell an admin what is wrong with their IdP
+ * settings, so known failure classes keep their reason. Policy and metadata
+ * errors name only public facts; network failures are reduced to an error code.
+ * Anything else is reported and replaced with the generic public message.
+ */
+function ssoConnectionTestError(err: unknown): string {
+  if (err instanceof SsoMetadataError) {
+    return err.message;
+  }
+  if (err instanceof UnsafeExternalUrlError) {
+    return `Metadata URL rejected: ${err.message}`;
+  }
+  const name = (err as { name?: unknown } | null)?.name;
+  if (name === "TimeoutError" || name === "AbortError") {
+    return "Timed out fetching the metadata URL";
+  }
+  const code = errorCode(err);
+  // fetch(redirect: "error") fails with TypeError("fetch failed", { cause: Error("unexpected redirect") }).
+  if (err instanceof TypeError && /redirect/i.test(String((err.cause as { message?: unknown } | undefined)?.message ?? ""))) {
+    return "Metadata URL redirected; use the final metadata URL (redirects are not followed)";
+  }
+  if (code && publicNetworkErrorCodes.has(code)) {
+    return `Could not fetch the metadata URL (${code})`;
+  }
+  return reportPublicError(err);
+}
+
 async function testOidcConnection(metadataUrl: string): Promise<{ ok: boolean; error?: string }> {
   try {
     await fetchOidcMetadata(metadataUrl);
     return { ok: true };
   } catch (err) {
-    return { ok: false, error: reportPublicError(err) };
+    return { ok: false, error: ssoConnectionTestError(err) };
   }
 }
 
@@ -794,7 +854,7 @@ async function testSamlConnection(metadataUrl: string): Promise<{ ok: boolean; e
     await fetchSamlMetadata(metadataUrl);
     return { ok: true };
   } catch (err) {
-    return { ok: false, error: reportPublicError(err) };
+    return { ok: false, error: ssoConnectionTestError(err) };
   }
 }
 
@@ -963,10 +1023,12 @@ export const ssoRoutes = new Hono()
 
     const patch = c.req.valid("json");
     const current = resolveStoredSsoConfig(org.sso_config);
+    // Omitted or the "***" placeholder keeps the stored secret; explicit null
+    // (or an empty string) clears it; any other value replaces it.
     const resolvedSecret =
-      patch.clientSecret === "***"
+      patch.clientSecret === undefined || patch.clientSecret === "***"
         ? (current.clientSecret ?? null)
-        : (patch.clientSecret ?? current.clientSecret ?? null);
+        : (patch.clientSecret || null);
 
     const merged: SsoConfig = {
       providerType: patch.providerType !== undefined ? patch.providerType : (current.providerType ?? null),
@@ -984,6 +1046,20 @@ export const ssoRoutes = new Hono()
     const validationError = validateConfig(merged);
     if (validationError) {
       return apiStatusError(c, 422, validationError);
+    }
+
+    // Vet a new metadata URL at write time (https, no credentials/ports, public
+    // addresses only) instead of waiting for the first fetch, so a disabled
+    // config can't hold an internal URL that a later enable or test would hit.
+    if (merged.metadataUrl && merged.metadataUrl !== (current.metadataUrl ?? null)) {
+      try {
+        await assertSafeExternalUrl(merged.metadataUrl);
+      } catch (err) {
+        if (err instanceof UnsafeExternalUrlError) {
+          return apiStatusError(c, 422, `metadataUrl rejected: ${err.message}`);
+        }
+        return apiStatusError(c, 422, reportPublicError(err));
+      }
     }
 
     let domainRow: Awaited<ReturnType<typeof claimSsoDomain>> | null = null;

@@ -163,4 +163,52 @@ describe("network-security", () => {
     }));
     expect(callbackSocket).toBe(socket);
   });
+
+  it("dials 443 when undici passes an empty default port", async () => {
+    mocks.lookup.mockResolvedValue([{ address: "93.184.216.34", family: 4 }]);
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("ok")));
+    const socket = new EventEmitter();
+    mocks.tlsConnect.mockReturnValue(socket);
+
+    await safeExternalFetch("https://example.com/file");
+    const connect = mocks.agentOptions[0]!.connect;
+    const connected = new Promise<void>((resolve) => {
+      connect({ hostname: "example.com", protocol: "https:", port: "" }, () => resolve());
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    socket.emit("secureConnect");
+    await connected;
+
+    expect(mocks.tlsConnect).toHaveBeenCalledWith(expect.objectContaining({ host: "93.184.216.34", port: 443 }));
+  });
+
+  it("falls back to the next vetted address when the first one fails to connect", async () => {
+    mocks.lookup.mockResolvedValue([
+      { address: "2606:4700::1111", family: 6 },
+      { address: "93.184.216.34", family: 4 },
+    ]);
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("ok")));
+    const unreachable = Object.assign(new EventEmitter(), { destroy: vi.fn() });
+    const reachable = new EventEmitter();
+    mocks.tlsConnect.mockReturnValueOnce(unreachable).mockReturnValueOnce(reachable);
+
+    await safeExternalFetch("https://example.com/file");
+    const connect = mocks.agentOptions[0]!.connect;
+    let result: { error: Error | null; socket: unknown } | undefined;
+    const connected = new Promise<void>((resolve) => {
+      connect({ hostname: "example.com", protocol: "https:", port: "" }, (error: Error | null, socket: unknown) => {
+        result = { error, socket };
+        resolve();
+      });
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    unreachable.emit("error", Object.assign(new Error("connect ENETUNREACH"), { code: "ENETUNREACH" }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    reachable.emit("secureConnect");
+    await connected;
+
+    expect(unreachable.destroy).toHaveBeenCalled();
+    expect(mocks.tlsConnect).toHaveBeenLastCalledWith(expect.objectContaining({ host: "93.184.216.34", port: 443 }));
+    expect(result).toEqual({ error: null, socket: reachable });
+  });
 });

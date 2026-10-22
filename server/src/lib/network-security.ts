@@ -26,6 +26,15 @@ type ConnectorOptions = {
 type ConnectorCallback = (...args: [null, TLSSocket] | [Error, null]) => void;
 type ConnectorDone = (error: Error | null, socket: TLSSocket | null) => void;
 
+/**
+ * A URL was refused by the outbound-request policy (scheme, credentials, port,
+ * or a non-public address). The message is safe to show to the caller: it
+ * names the rule, never the resolved addresses.
+ */
+export class UnsafeExternalUrlError extends Error {
+  override name = "UnsafeExternalUrlError";
+}
+
 // BlockList normalizes IPv6, including hexadecimal IPv4-mapped addresses.
 const nonPublicAddresses = new BlockList();
 for (const [address, prefix] of [
@@ -57,17 +66,17 @@ function assertSafeExternalUrlShape(rawUrl: string): URL {
   try {
     parsed = new URL(rawUrl);
   } catch {
-    throw new Error("Invalid URL");
+    throw new UnsafeExternalUrlError("Invalid URL");
   }
 
   if (parsed.protocol !== "https:") {
-    throw new Error("Only https URLs are allowed");
+    throw new UnsafeExternalUrlError("Only https URLs are allowed");
   }
   if (parsed.username || parsed.password) {
-    throw new Error("URLs with embedded credentials are not allowed");
+    throw new UnsafeExternalUrlError("URLs with embedded credentials are not allowed");
   }
   if (parsed.port && parsed.port !== "443") {
-    throw new Error("Custom URL ports are not allowed");
+    throw new UnsafeExternalUrlError("Custom URL ports are not allowed");
   }
 
   return parsed;
@@ -76,7 +85,7 @@ function assertSafeExternalUrlShape(rawUrl: string): URL {
 async function resolveSafeExternalHostname(hostname: string): Promise<SafeLookupAddress[]> {
   if (isIP(hostname)) {
     if (isPrivateIp(hostname)) {
-      throw new Error("Private or loopback IP addresses are not allowed");
+      throw new UnsafeExternalUrlError("Private or loopback IP addresses are not allowed");
     }
     return [{
       address: hostname,
@@ -84,12 +93,14 @@ async function resolveSafeExternalHostname(hostname: string): Promise<SafeLookup
     }];
   }
 
-  const addresses = await lookup(hostname, { all: true, verbatim: true });
+  const addresses = await lookup(hostname, { all: true, verbatim: true }).catch(() => {
+    throw new UnsafeExternalUrlError("Unable to resolve URL host");
+  });
   if (addresses.length === 0) {
-    throw new Error("Unable to resolve URL host");
+    throw new UnsafeExternalUrlError("Unable to resolve URL host");
   }
   if (addresses.some((entry) => isPrivateIp(entry.address))) {
-    throw new Error("URL resolves to a private or loopback address");
+    throw new UnsafeExternalUrlError("URL resolves to a private or loopback address");
   }
 
   return addresses.map((entry) => ({
@@ -125,20 +136,39 @@ function createDnsPinnedDispatcher(hostname: string): Agent {
       const done = onceConnectorCallback(callback);
       void (async () => {
         const addresses = await resolveSafeExternalHostname(hostname);
-        const selected = addresses[0];
-        if (!selected) {
+        if (addresses.length === 0) {
           throw new Error("Unable to resolve URL host");
         }
+        // undici passes `port: ""` when the URL uses the scheme's default port.
+        // `Number("")` is 0, so a nullish fallback would dial port 0 and hang
+        // until the caller's timeout; treat any empty/invalid port as 443.
+        const port = Number(options.port) || 443;
 
-        const socket = tls.connect({
-          ...options,
-          host: selected.address,
-          port: Number(options.port ?? 443),
-          servername: hostname,
-        });
-
-        socket.once("secureConnect", () => done(null, socket));
-        socket.once("error", (error) => done(error, null));
+        // Try each vetted address in resolver order so a host whose first answer
+        // is unreachable here (commonly IPv6 without an IPv6 route) still works.
+        let lastError: Error | null = null;
+        for (const selected of addresses) {
+          try {
+            const socket = await new Promise<TLSSocket>((resolve, reject) => {
+              const attempt = tls.connect({
+                ...options,
+                host: selected.address,
+                port,
+                servername: hostname,
+              });
+              attempt.once("secureConnect", () => resolve(attempt));
+              attempt.once("error", (error) => {
+                attempt.destroy?.();
+                reject(error);
+              });
+            });
+            done(null, socket);
+            return;
+          } catch (error) {
+            lastError = error instanceof Error ? error : new Error(String(error));
+          }
+        }
+        throw lastError ?? new Error("Unable to connect to URL host");
       })().catch((error) => {
         done(error instanceof Error ? error : new Error(String(error)), null);
       });

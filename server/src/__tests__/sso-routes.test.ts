@@ -143,9 +143,12 @@ vi.mock("../db.js", () => ({
   sql: sqlMock
 }));
 
+class FakeUnsafeExternalUrlError extends Error {}
+
 vi.mock("../lib/network-security.js", () => ({
   assertSafeExternalUrl: assertSafeExternalUrlMock,
-  safeExternalFetch: safeExternalFetchMock
+  safeExternalFetch: safeExternalFetchMock,
+  UnsafeExternalUrlError: FakeUnsafeExternalUrlError
 }));
 
 vi.mock("../lib/auth.js", () => ({
@@ -316,7 +319,10 @@ describe("ssoRoutes security hardening", () => {
 
     const response = await buildApp().request("/v1/organizations/org-1/sso/test", { method: "POST" });
 
-    expect(await response.json()).toEqual({ ok: false, error: "We couldn’t complete that request. Please try again in a moment." });
+    expect(await response.json()).toEqual({
+      ok: false,
+      error: "OIDC metadata endpoint host token.attacker.example is not the issuer's host or a trusted endpoint host"
+    });
   });
 
   it("rejects OIDC metadata whose issuer is not the discovery URL's issuer", async () => {
@@ -330,7 +336,10 @@ describe("ssoRoutes security hardening", () => {
 
     const response = await buildApp().request("/v1/organizations/org-1/sso/test", { method: "POST" });
 
-    expect(await response.json()).toEqual({ ok: false, error: "We couldn’t complete that request. Please try again in a moment." });
+    expect(await response.json()).toEqual({
+      ok: false,
+      error: `OIDC metadata issuer https://login.attacker.example does not match the metadata URL; expected the URL to be https://login.attacker.example/.well-known/openid-configuration`
+    });
   });
 
   it("rejects SAML metadata with DTD or entity declarations before xml2js parses it", async () => {
@@ -348,8 +357,40 @@ describe("ssoRoutes security hardening", () => {
 
     expect(await response.json()).toEqual({
       ok: false,
-      error: "We couldn’t complete that request. Please try again in a moment."
+      error: "SAML metadata must not contain DTD or entity declarations"
     });
+  });
+
+  it("tests a well-formed OIDC IdP successfully", async () => {
+    seedOrg(oidcConfig);
+    await stubIdp(() => ({}));
+
+    const response = await buildApp().request("/v1/organizations/org-1/sso/test", { method: "POST" });
+
+    expect(await response.json()).toEqual({ ok: true });
+  });
+
+  it("explains metadata URL policy rejections, timeouts and redirects in the connection test", async () => {
+    seedOrg(oidcConfig);
+    const test = async () => (await buildApp().request("/v1/organizations/org-1/sso/test", { method: "POST" })).json();
+
+    assertSafeExternalUrlMock.mockRejectedValueOnce(new FakeUnsafeExternalUrlError("URL resolves to a private or loopback address"));
+    expect(await test()).toEqual({ ok: false, error: "Metadata URL rejected: URL resolves to a private or loopback address" });
+
+    vi.mocked(fetch).mockRejectedValueOnce(new DOMException("The operation was aborted due to timeout", "TimeoutError"));
+    expect(await test()).toEqual({ ok: false, error: "Timed out fetching the metadata URL" });
+
+    vi.mocked(fetch).mockRejectedValueOnce(new TypeError("fetch failed", { cause: new Error("unexpected redirect") }));
+    expect(await test()).toEqual({ ok: false, error: "Metadata URL redirected; use the final metadata URL (redirects are not followed)" });
+
+    vi.mocked(fetch).mockRejectedValueOnce(new TypeError("fetch failed", { cause: Object.assign(new Error("certificate has expired"), { code: "CERT_HAS_EXPIRED" }) }));
+    expect(await test()).toEqual({ ok: false, error: "Could not fetch the metadata URL (CERT_HAS_EXPIRED)" });
+
+    vi.mocked(fetch).mockResolvedValueOnce(new Response("<html>login</html>", { headers: { "Content-Type": "text/html" } }));
+    expect(await test()).toEqual({ ok: false, error: "Metadata URL did not return a JSON OpenID Connect discovery document" });
+
+    vi.mocked(fetch).mockRejectedValueOnce(new Error("internal detail at 10.0.0.5"));
+    expect(await test()).toEqual({ ok: false, error: "We couldn’t complete that request. Please try again in a moment." });
   });
 
   it("rate limits repeated SSO auth endpoint requests", async () => {
@@ -474,6 +515,45 @@ describe("SSO domain verification", () => {
 
     expect(response.status).toBe(200);
     expect(db.links).toHaveLength(0);
+  });
+
+  it("vets a new metadata URL at write time even while SSO is disabled", async () => {
+    seedOrg();
+    assertSafeExternalUrlMock.mockRejectedValueOnce(new FakeUnsafeExternalUrlError("Only https URLs are allowed"));
+
+    const response = await putSso(buildApp(), { providerType: "oidc", metadataUrl: "http://169.254.169.254/latest/meta-data" });
+
+    expect(response.status).toBe(422);
+    expect(JSON.stringify(await response.json())).toContain("metadataUrl rejected: Only https URLs are allowed");
+    expect(assertSafeExternalUrlMock).toHaveBeenCalledWith("http://169.254.169.254/latest/meta-data");
+    expect(db.orgs[0]!.sso_config).toEqual({});
+  });
+
+  it("does not re-vet an unchanged metadata URL", async () => {
+    seedOrg({ ...oidcConfig, enabled: false });
+
+    const response = await putSso(buildApp(), { metadataUrl, clientId: "client-2" });
+
+    expect(response.status).toBe(200);
+    expect(assertSafeExternalUrlMock).not.toHaveBeenCalled();
+  });
+
+  it("keeps the client secret when omitted or masked and clears it on explicit null", async () => {
+    seedOrg({ providerType: "oidc", metadataUrl, clientId: "client-id", clientSecret: "client-secret" });
+    const app = buildApp();
+    const storedSecret = () => (db.orgs[0]!.sso_config as { clientSecretEncrypted?: string | null }).clientSecretEncrypted ?? null;
+
+    const omitted = await (await putSso(app, { clientId: "client-id" })).json() as { ssoConfig: { clientSecret: string | null } };
+    expect(omitted.ssoConfig.clientSecret).toBe("***");
+    expect(storedSecret()).not.toBeNull();
+
+    const masked = await (await putSso(app, { clientSecret: "***" })).json() as { ssoConfig: { clientSecret: string | null } };
+    expect(masked.ssoConfig.clientSecret).toBe("***");
+    expect(storedSecret()).not.toBeNull();
+
+    const cleared = await (await putSso(app, { clientSecret: null })).json() as { ssoConfig: { clientSecret: string | null } };
+    expect(cleared.ssoConfig.clientSecret).toBeNull();
+    expect(storedSecret()).toBeNull();
   });
 });
 
