@@ -34,6 +34,7 @@ import {
 } from "../services/documents.js";
 import { acceptApiKeys } from "../lib/route-auth.js";
 import { apiErrorResponse, apiStatusError } from "../lib/api-error.js";
+import { reportPublicError } from "../lib/public-errors.js";
 import { indexingModeErrorResponse } from "../lib/indexing-mode-error.js";
 import { validationHook } from "../lib/validation.js";
 import { deferredProfilesEnabled } from "@docslurp/shared";
@@ -226,7 +227,16 @@ export const documentsRoutes = new Hono()
   })
   .delete("/:docId", async (c) => {
     const userId = c.get("sessionUser").id;
-    const deleted = await deleteDocument(c.req.param("docId"), userId);
+    let deleted;
+    try {
+      deleted = await deleteDocument(c.req.param("docId"), userId);
+    } catch (error) {
+      // Deleting a document whose run is still processing races the pipeline
+      // (FK/trigger) and currently surfaces as a 500. Answer 409 so clients
+      // retry instead. Robustness finding SEC-2026-10-PROD-06.
+      reportPublicError(error, { surface: "documents.delete" });
+      return apiErrorResponse(c, 409, "conflict", "The document is still processing. Try again shortly.");
+    }
 
     if (!deleted) {
       return apiStatusError(c, 404, "Document not found");

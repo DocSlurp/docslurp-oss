@@ -1,5 +1,5 @@
 import { apiPublicErrorMiddleware } from "./lib/public-errors.js";
-import { nativeBodyLimit, nativeErrorHandler } from "./lib/api-error.js";
+import { apiErrorResponse, nativeBodyLimit, nativeErrorHandler } from "./lib/api-error.js";
 import { sessionToolRoutes } from "./routes/session-tools.js";
 import { existsSync } from "node:fs";
 import { initializeObservability } from "@docslurp/shared/observability";
@@ -70,6 +70,9 @@ import { warmDefaultLocalEmbedding } from "./lib/ai.js";
 import { rejectNulBytes } from "./lib/reject-nul.js";
 
 const execFileAsync = promisify(execFile);
+
+/** Largest declared JSON body accepted before validation on non-upload `/v1/*` routes. */
+const JSON_BODY_MAX_BYTES = 8 * 1024 * 1024;
 /**
  * The repository root is the nearest ancestor holding drizzle.config.ts, or a
  * core/ checkout of it (the private app repo pins this repository as a submodule
@@ -126,6 +129,21 @@ export function createApiApp(): Hono {
     "/v1/uploads/*",
     nativeBodyLimit(env.maxUploadBytes)
   );
+
+  // Non-upload JSON routes have no per-route body limit, so a single request
+  // could buffer tens of MB before validation. Cap declared JSON bodies only;
+  // multipart/binary uploads keep their own (larger) limits above.
+  // Security finding SEC-2026-10-PROD-05.
+  app.use("/v1/*", async (c, next) => {
+    const contentType = c.req.header("content-type") ?? "";
+    if (contentType.includes("application/json")) {
+      const declared = Number(c.req.header("content-length") ?? "0");
+      if (Number.isFinite(declared) && declared > JSON_BODY_MAX_BYTES) {
+        return apiErrorResponse(c, 413, "payload_too_large", "Request body is too large");
+      }
+    }
+    await next();
+  });
 
   app.use(
     "/webhooks/stripe",
