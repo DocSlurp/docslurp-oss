@@ -128,7 +128,8 @@ describe("materializePageRange", () => {
     expect(result.indexed).toEqual([1, 2]);
     const ledger = (h.usage as unknown as { pending: Array<{ metric: string; unit: string }> }).pending;
     expect(ledger.filter((e) => e.metric === "page-analysis" && e.unit === "page")).toHaveLength(1);
-    expect(result.costCredits).toBeGreaterThanOrEqual(2);
+    // Customer credits: the OCR-read page bills Rich, the text-layer page Fast; provider cost is not billed.
+    expect(result.costCredits).toBeCloseTo(0.25 + 0.005, 6);
   });
 
   it("never chunks or writes a PII-blocked page", async () => {
@@ -240,12 +241,13 @@ describe("materializePageRange", () => {
       },
     });
     const result = await materializePageRange(h.deps, input(h, [1, 2, 3]));
-    // page 2 OCR (empty -> failed) + two embedding batches; page 3 threw before billing.
+    // page 2 OCR (empty -> failed) + two embedding batches; page 3 threw before indexing.
     const recorded = (h.usage as unknown as { pending: Array<{ metric: string; costCents: number }> }).pending;
     expect(recorded.filter((e) => e.metric === "embedding-tokens")).toHaveLength(2);
     expect(recorded.filter((e) => e.metric === "page-analysis")).toHaveLength(1);
-    expect(result.costCredits).toBeCloseTo(recorded.reduce((sum, e) => sum + e.costCents, 0), 4);
-    expect(result.costCredits).toBeGreaterThan(5 + 7 + 7 - 0.001);
+    // Provider events bill 0; the OCR-read page bills one Rich page even though it then failed.
+    expect(recorded.reduce((sum, e) => sum + e.costCents, 0)).toBe(0);
+    expect(result.costCredits).toBeCloseTo(0.25, 6);
     expect(result.indexed).toEqual([]);
     expect(result.failed.map((f) => f.page)).toEqual([1, 2, 3]);
   });

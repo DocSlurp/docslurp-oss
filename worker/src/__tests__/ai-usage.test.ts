@@ -25,10 +25,10 @@ describe("worker AI usage Module", () => {
     ).toMatchObject({
       amount: 16,
       unit: "token",
-      costCents: 2.4,
+      costCents: 0,
       inputTokens: 12,
       outputTokens: 4,
-      metadata: { providerCostCents: 2 },
+      metadata: { providerCostCents: 2, billable: false },
     });
   });
 
@@ -61,35 +61,37 @@ describe("worker AI usage Module", () => {
     );
   });
 
-  it("charges bonus plans the plan-neutral AI credit factor and never compounds it", () => {
-    vi.spyOn(console, "log").mockImplementation(() => undefined);
-    const input = { provider: "anthropic", model: "model-1", metric: "structured-extract", inputTokens: 12, outputTokens: 4, costCents: 10 };
-    const silver = new PipelineUsageEventLedger();
-    silver.planId = "silver";
-    const platinum = new PipelineUsageEventLedger();
-    platinum.planId = "platinum";
-
-    expect(silver.record(input)?.costCents).toBeCloseTo(12);
-    const priced = platinum.record(input);
-    expect(priced?.costCents).toBeCloseTo(14.4);
-    expect(priced?.metadata).toMatchObject({ providerCostCents: 10, aiPlanCreditFactor: 1.2 });
-    expect(platinum.totals().costCents).toBeCloseTo(14.4);
-  });
-
-  it("bills a private-endpoint call at half the hosted-equivalent list, whatever the GPU cost", () => {
+  it("records AI provider cost without billing it", () => {
     vi.spyOn(console, "log").mockImplementation(() => undefined);
     const ledger = new PipelineUsageEventLedger();
-    const event = ledger.record({
-      provider: "private",
-      model: "gpu1/ocr-model",
-      metric: "vision-page",
-      inputTokens: 1_500,
-      outputTokens: 800,
-      costCents: 0.002,
-      metadata: { capability: "vision", costSource: "private-endpoint-hourly" },
+    const event = ledger.record({ provider: "anthropic", model: "model-1", metric: "structured-extract", inputTokens: 12, outputTokens: 4, costCents: 10 });
+    expect(event).toMatchObject({ costCents: 0, metadata: { providerCostCents: 10, billable: false, costRole: "provider" } });
+    expect(ledger.totals().costCents).toBe(0);
+    expect(ledger.pendingBillableCents).toBe(0);
+  });
+
+  it("charges a page read by a vision/OCR model as one Rich page, once per run, plus token blocks", () => {
+    vi.spyOn(console, "log").mockImplementation(() => undefined);
+    const ledger = new PipelineUsageEventLedger();
+    ledger.runId = "run-1";
+    const read = (pageNumber: number, outputTokens: number) => ledger.record({
+      provider: "openrouter", model: "google/gemini-3.1-flash-lite", metric: "page-analysis",
+      inputTokens: 1_149, outputTokens, costCents: 0.12, metadata: { documentId: "doc-1", pageNumber },
     });
-    expect(event?.costCents).toBeCloseTo(0.0455, 3);
-    expect(event?.metadata).toMatchObject({ providerCostCents: 0.002, selfHosted: { discountPercent: 50 } });
+    read(1, 884);
+    read(1, 900); // a retry of the same page in the same run: not charged again
+    read(2, 2_035); // dense page: 3 Rich pages
+    const charges = ledger.snapshot().filter((event) => event.metric === "ingest-page-rich");
+    expect(charges.map((event) => [event.id, event.amount, event.costCents])).toEqual([
+      ["rich:run-1:doc-1:1", 1, 0.25],
+      ["rich:run-1:doc-1:2", 3, 0.75],
+    ]);
+    expect(charges[0]!.metadata).toMatchObject({ billable: true, unitCharge: true, readBy: "page-analysis" });
+    expect(ledger.pendingBillableCents).toBeCloseTo(1);
+    expect([...ledger.richPagesOf("doc-1")].sort()).toEqual([1, 2]);
+    // A local OCR read with no tokens or cost still bills the page.
+    ledger.record({ provider: "vision-runtime", model: "local", metric: "ocr-native-pdf", amount: 1, unit: "image", costCents: 0, inputTokens: 0, outputTokens: 0, metadata: { documentId: "doc-1", pageNumber: 3 } });
+    expect(ledger.richPagesOf("doc-1").has(3)).toBe(true);
   });
 
   it("does not record empty AI usage", () => {
@@ -126,11 +128,12 @@ describe("worker AI usage Module", () => {
     };
     const fee: UsageEvent = {
       provider: "docslurp",
-      model: "page-base-fee",
-      metric: "page-base-fee",
+      model: "price-card",
+      metric: "ingest-page-fast",
       amount: 3,
       unit: "page",
-      costCents: 1.5,
+      costCents: 0.015,
+      metadata: { billable: true, unitCharge: true },
     };
     const failedAttempt: UsageEvent = {
       provider: "openai",
@@ -145,7 +148,7 @@ describe("worker AI usage Module", () => {
     };
 
     expect(ledger.enqueue(localCompute)).toMatchObject({ id: expect.any(String), amount: 0.001 });
-    expect(ledger.enqueue(fee)).toMatchObject({ costCents: 1.5 });
+    expect(ledger.enqueue(fee)).toMatchObject({ costCents: 0.015 });
     expect(ledger.enqueue(failedAttempt, { logAiUsage: true })).toMatchObject({ metric: "page-analysis-attempt" });
     expect(
       ledger.enqueue({ ...localCompute, metric: "empty", amount: 0 }),
@@ -153,7 +156,7 @@ describe("worker AI usage Module", () => {
 
     expect(ledger.snapshot().map((event) => event.metric)).toEqual([
       "parser-process",
-      "page-base-fee",
+      "ingest-page-fast",
       "page-analysis-attempt",
     ]);
     // Only the AI attempt writes an [ai-usage] line; compute and fees do not.
@@ -210,41 +213,23 @@ describe("worker AI usage Module", () => {
       metadata: {},
     });
 
-    expect(ledger.totals()).toEqual({
-      inputTokens: 30,
-      outputTokens: 5,
-      costCents: expect.closeTo(3.6, 12),
-    });
+    // Provider cost is recorded, not billed.
+    expect(ledger.totals()).toEqual({ inputTokens: 30, outputTokens: 5, costCents: 0 });
     expect(ledger.snapshot()).toHaveLength(2);
   });
 
-  it("keeps a running billable total of buffered usage for the run cost cap", () => {
+  it("keeps a running billable total of buffered unit charges for the run cost cap", () => {
     const ledger = new PipelineUsageEventLedger();
+    ledger.runId = "run-1";
     vi.spyOn(console, "log").mockImplementation(() => undefined);
-
-    ledger.record({
-        provider: "anthropic",
-        model: "model-1",
-        metric: "page-analysis",
-        inputTokens: 100,
-        outputTokens: 12,
-        costCents: 3,
-      },
-    );
-
-    ledger.record({
-        provider: "anthropic",
-        model: "model-1",
-        metric: "provider-charge-without-tokens",
-        costCents: 99,
-      },
-    );
-
-    expect(ledger.snapshot()).toHaveLength(2);
-    expect(ledger.pendingBillableCents).toBeCloseTo(3.6 + 118.8);
+    ledger.record({ provider: "anthropic", model: "model-1", metric: "page-analysis", inputTokens: 100, outputTokens: 12, costCents: 3, metadata: { documentId: "d", pageNumber: 1 } });
+    ledger.record({ provider: "anthropic", model: "model-1", metric: "provider-charge-without-tokens", costCents: 99 });
+    // The AI events bill nothing; the Rich page read bills 0.25.
+    expect(ledger.snapshot()).toHaveLength(3);
+    expect(ledger.pendingBillableCents).toBeCloseTo(0.25);
     const batch = ledger.checkpoint();
-    ledger.record({ provider: "anthropic", model: "model-1", metric: "late", costCents: 1 });
+    ledger.record({ provider: "anthropic", model: "model-1", metric: "page-analysis", inputTokens: 1, costCents: 1, metadata: { documentId: "d", pageNumber: 2 } });
     batch.commit();
-    expect(ledger.pendingBillableCents).toBeCloseTo(1.2);
+    expect(ledger.pendingBillableCents).toBeCloseTo(0.25);
   });
 });

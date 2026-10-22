@@ -204,33 +204,10 @@ export function setMeteringEnforced(value: boolean): void {
 }
 
 /**
- * Worker CPU/RAM/GPU is billed at list (rate card) prices when the app has
- * enforced metering (Stripe configured), or when `DOCSLURP_BILL_COMPUTE=true`
- * turns it on without Stripe. An explicit `false` cannot disable enforcement.
- */
-export function isComputeBillingEnabled(
-  env: NodeJS.ProcessEnv = process.env,
-  enforced: boolean = meteringEnforced,
-): boolean {
-  const flag = env.DOCSLURP_BILL_COMPUTE?.trim().toLowerCase();
-  if (enforced) {
-    if (flag === "false" && !warnedOverride) {
-      warnedOverride = true;
-      console.warn("[billing] DOCSLURP_BILL_COMPUTE=false ignored: metering is enforced while Stripe is configured");
-    }
-    return true;
-  }
-  return flag === "true";
-}
-
-/**
- * Local compute as a Usage Event. By default it records raw infrastructure
- * cost for telemetry only (`billable: false`, persisted at 0). With
- * DOCSLURP_BILL_COMPUTE=true the same observation is priced in credits by the
- * shared rate card, billed, and the infrastructure cost is kept in
- * `metadata.infraCostCents` for margin reporting. GPU seconds are priced at
- * the standard (24 GB class) rate. `costRollup: "included"` events stay at 0
- * either way: their compute is already counted by an authoritative event.
+ * Local compute as a Usage Event: raw infrastructure cost for our own cost
+ * reports only (`billable: false`, persisted at 0 credits). Customers pay
+ * PRICE_CARD units (pages, minutes), never CPU, memory or GPU time. The
+ * internal list-rate reference is kept in `metadata.internalListCredits`.
  */
 export function buildLocalComputeUsageEvent(args: {
   metric: string;
@@ -242,15 +219,12 @@ export function buildLocalComputeUsageEvent(args: {
 }): UsageEvent {
   const profile = args.profile ?? resolveWorkerDeploymentProfile();
   const cost = calculateLocalComputeCost(args.observation, profile.rates);
-  const billed = isComputeBillingEnabled(args.env);
-  const listCharge = billed
-    ? priceResources({
-        cpuSeconds: args.observation.cpuSeconds,
-        memoryGbSeconds: args.observation.memoryGbSeconds,
-        gpuStandardSeconds: args.observation.gpuSeconds,
-      })
-    : null;
-  const chargedCents = listCharge ? listCharge.totalCredits : cost.totalCents;
+  const listCharge = priceResources({
+    cpuSeconds: args.observation.cpuSeconds,
+    memoryGbSeconds: args.observation.memoryGbSeconds,
+    gpuStandardSeconds: args.observation.gpuSeconds,
+  });
+  const chargedCents = cost.totalCents;
 
   return {
     provider: "local-compute",
@@ -272,17 +246,14 @@ export function buildLocalComputeUsageEvent(args: {
       costBreakdownCents: cost.breakdown,
       effectiveCostCents: cost.totalCents,
       costRollup: args.costRollup ?? "authoritative",
-      billable: billed,
+      billable: false,
+      costRole: "provider",
       costSource: "estimate",
       rateCard: process.env.DOCSLURP_COMPUTE_RATE_CARD ?? "configured-or-generic",
       rateObservedAt: new Date().toISOString(),
-      ...(listCharge
-        ? {
-            infraCostCents: cost.totalCents,
-            rateCardVersion: CREDIT_RATE_CARD.version,
-            listCreditBreakdown: listCharge.breakdown,
-          }
-        : {}),
+      infraCostCents: cost.totalCents,
+      internalListCredits: listCharge.totalCredits,
+      rateCardVersion: CREDIT_RATE_CARD.version,
       ...args.metadata,
     },
   };

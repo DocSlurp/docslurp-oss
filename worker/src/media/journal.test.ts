@@ -77,9 +77,11 @@ describe("remote media admission and accounting on migrated Postgres", () => {
     expect(cost).toBeCloseTo(.005);
     await leases.deleted(lease, lease.createdAt + 120000);
     expect(await leases.outstanding()).toHaveLength(0);
-    const rows = await sql`select org_id,workspace_id,run_id,cost_cents from usage_events where id = ${lease.id}`;
+    const rows = await sql`select org_id,workspace_id,run_id,cost_cents,(metadata->>'providerCostCents')::numeric as provider_cost from usage_events where id = ${lease.id}`;
     expect(rows).toHaveLength(1); expect(rows[0]).toMatchObject({ org_id: scope.orgId, workspace_id: scope.workspaceId, run_id: scope.runId });
-    expect(Number(rows[0].cost_cents)).toBeCloseTo(.5);
+    // Capacity cost is ours: recorded once, billed 0 credits (customers pay per media minute).
+    expect(Number(rows[0].cost_cents)).toBe(0);
+    expect(Number(rows[0].provider_cost)).toBeCloseTo(.5);
   });
   it("reserves starter video quotas atomically and does not count a retry twice", async () => {
     await sql`insert into documents(id,user_id,workspace_id,run_id,filename,mime_type,source_key,status)

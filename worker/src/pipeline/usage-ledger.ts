@@ -1,6 +1,14 @@
 import { recordUsageReceipt, usageTraceContext } from "@docslurp/shared/observability";
 import { randomUUID } from "node:crypto";
-import { priceAiUsageEvent } from "@docslurp/shared";
+import {
+  BILLABLE_UNIT_METRICS,
+  UNIT_CHARGE_PROVIDER,
+  isUnitChargeEvent,
+  pageCredits,
+  priceAiUsageEvent,
+  richPagesForOutputTokens,
+  unitChargeMetadata,
+} from "@docslurp/shared";
 
 import type { UsageEvent } from "../models.js";
 import {
@@ -9,6 +17,19 @@ import {
   logWorkerAiUsage,
   type WorkerAiUsageInput,
 } from "../lib/ai-usage.js";
+
+/**
+ * Usage metrics that mean a vision or OCR model read one page (hosted vision,
+ * local OCR, page mapping OCR, image labelling). Each such page bills as a Rich
+ * page (PRICE_CARD), once per run, plus one more per extra 1,000 output tokens.
+ * A Fast-mode page that falls back to vision is billed Rich the same way.
+ */
+export const RICH_PAGE_READ_METRICS: ReadonlySet<string> = new Set([
+  "page-analysis",
+  "document-map-ocr",
+  "ocr-native-pdf",
+  "image-label",
+]);
 
 /** Events taken for one checkpoint write; `commit()` once it has persisted. */
 export interface PipelineUsageBatch {
@@ -23,15 +44,27 @@ export interface PipelineUsageBatch {
  * double insert), and hands checkpoints a batch that is only dropped from the
  * buffer once the write commits. Events recorded while a checkpoint is in
  * flight stay buffered for the next one.
+ *
+ * Billing: AI and compute events are recorded at provider cost but bill 0
+ * credits (priceAiUsageEvent). The billable events are price-card units: a
+ * page read by a vision/OCR model adds an `ingest-page-rich` charge here
+ * (deterministic id per run and page); Fast pages are charged when the run
+ * completes (db/page-base-fee.ts) and media minutes by the media stage.
  */
 export class PipelineUsageEventLedger {
   private readonly pending: UsageEvent[] = [];
   private readonly lifetime = { inputTokens: 0, outputTokens: 0, costCents: 0 };
   private pendingBillable = 0;
+  /** Rich pages charged by this ledger, by `documentId:pageNumber`. */
+  private readonly richCharged = new Map<string, number>();
+
+  /** Run being billed; set by WorkflowState. Rich page charges need it for their idempotent ids. */
+  runId: string | null = null;
 
   /** Record an AI/embedding call: price it, log it, buffer it. */
   record(input: WorkerAiUsageInput): UsageEvent | null {
     const event = buildWorkerAiUsageEvent(input);
+    this.chargeRichPageRead(event);
     if (!hasWorkerAiUsage(event)) {
       return null;
     }
@@ -56,10 +89,55 @@ export class PipelineUsageEventLedger {
         metadata: event.metadata ?? {},
       });
     }
+    this.chargeRichPageRead(event);
     if (!hasUsageToPersist(event)) {
       return null;
     }
     return this.buffer(event);
+  }
+
+  /** Pages of a document this ledger charged as Rich (so Fast charges skip them). */
+  richPagesOf(documentId: string): Set<number> {
+    const pages = new Set<number>();
+    for (const key of this.richCharged.keys()) {
+      const split = key.lastIndexOf(":");
+      if (key.slice(0, split) === documentId) pages.add(Number(key.slice(split + 1)));
+    }
+    return pages;
+  }
+
+  /** Charge a page a model read as an image (page-image embedding) as a Rich page, once per run. */
+  chargeRichPage(args: { documentId: string; pageNumber: number; readBy: string; model?: string; outputTokens?: number }): void {
+    this.chargeRichPageRead({ metric: args.readBy, model: args.model, outputTokens: args.outputTokens ?? 0,
+      metadata: { documentId: args.documentId, pageNumber: args.pageNumber } }, true);
+  }
+
+  /**
+   * A vision/OCR read of a page: buffer one billable Rich page charge for it
+   * (once per page per run; the id makes a retried checkpoint a no-op).
+   */
+  private chargeRichPageRead(event: { metric: string; model?: string; outputTokens?: number | null; metadata?: Record<string, unknown> | null }, force = false): void {
+    if (!this.runId || (!force && !RICH_PAGE_READ_METRICS.has(event.metric))) return;
+    const documentId = event.metadata?.documentId;
+    const pageNumber = event.metadata?.pageNumber;
+    if (typeof documentId !== "string" || typeof pageNumber !== "number" || !Number.isInteger(pageNumber)) return;
+    const key = `${documentId}:${pageNumber}`;
+    if (this.richCharged.has(key)) return;
+    const outputTokens = Math.max(0, Number(event.outputTokens ?? 0) || 0);
+    const pages = richPagesForOutputTokens(outputTokens);
+    this.richCharged.set(key, pages);
+    this.buffer({
+      id: `rich:${this.runId}:${key}`,
+      provider: UNIT_CHARGE_PROVIDER,
+      model: "price-card",
+      metric: BILLABLE_UNIT_METRICS.richPage,
+      amount: pages,
+      unit: "page",
+      costCents: pageCredits("rich", pages),
+      inputTokens: 0,
+      outputTokens: 0,
+      metadata: unitChargeMetadata({ documentId, pageNumber, readBy: event.metric, model: event.model, outputTokens }),
+    });
   }
 
   /** Number of events buffered since the last committed checkpoint. */
@@ -124,14 +202,17 @@ export class PipelineUsageEventLedger {
     this.pendingBillable += billableCents(stamped);
     this.lifetime.inputTokens += stamped.inputTokens ?? 0;
     this.lifetime.outputTokens += stamped.outputTokens ?? 0;
-    this.lifetime.costCents += stamped.metadata?.billable === false ? 0 : stamped.costCents;
+    this.lifetime.costCents += billableCents(stamped);
     return stamped;
   }
 }
 
-/** What the checkpoint persists as cost_cents for an event (usage-event-store.ts), floored at 0. */
-function billableCents(event: UsageEvent): number {
-  return event.metadata?.billable === false ? 0 : Math.max(0, Number(event.costCents) || 0);
+/**
+ * What the checkpoint persists as cost_cents for an event (usage-event-store.ts),
+ * floored at 0: only price-card unit charges bill customers.
+ */
+export function billableCents(event: UsageEvent): number {
+  return isUnitChargeEvent(event) && event.metadata?.billable !== false ? Math.max(0, Number(event.costCents) || 0) : 0;
 }
 
 function hasUsageToPersist(event: UsageEvent): boolean {

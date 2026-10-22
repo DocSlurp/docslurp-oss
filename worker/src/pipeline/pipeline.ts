@@ -122,6 +122,7 @@ export class WorkflowState {
     this.runStages = new Map();
     this.documentStages = new Map();
     this.totalStages = 0;
+    this.usageLedger.runId = run.id;
   }
 
   static create(run: WorkspaceRun, documents: Document[]): WorkflowState {

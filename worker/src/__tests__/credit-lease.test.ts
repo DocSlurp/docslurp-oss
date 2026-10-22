@@ -381,7 +381,8 @@ describe("worker checkpoints", () => {
 
   function pageState(orgId: string, runId: string, credits: number): WorkflowState {
     const ledger = new PipelineUsageEventLedger();
-    ledger.enqueue({ provider: "local", model: "cpu", metric: "worker-page", amount: 1, unit: "page", costCents: credits });
+    ledger.enqueue({ provider: "docslurp", model: "price-card", metric: "ingest-page-rich", amount: 1, unit: "page", costCents: credits,
+      metadata: { billable: true, unitCharge: true } });
     return { run: { ...runOf(orgId, runId), stats: {} }, usageLedger: ledger } as unknown as WorkflowState;
   }
 
