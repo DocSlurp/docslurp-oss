@@ -56,9 +56,10 @@ try {
   const startTotals = await orgUsageTotals(config.orgId, null);
   report.startLedgerUsd = startTotals.costCents / 100;
   // Billing policy is checked from DB and exact observed event charges after each batch.
-  const [organization] = await sql`select plan_id from organizations where id=${config.orgId}`;
+  // Since the price card (2026-10-21) provider calls bill 0 credits, so the factor is 0 and a frozen
+  // forecast made under the old AI markup fails here on purpose.
   const { priceAiUsageEvent } = await import("../../packages/shared/src/billing.ts");
-  const factor = priceAiUsageEvent({ provider: "deepinfra", costCents: 100, metadata: {} }, { planId: organization.plan_id }).costCents / 100;
+  const factor = priceAiUsageEvent({ provider: "deepinfra", costCents: 100, metadata: {} }).costCents / 100;
   // The frozen receipt records the actual policy multiplier used by this test org.
   if (factor !== null && factor !== config.expectedLedgerFactor) throw new Error("Billing policy differs from frozen forecast");
   report.ledgerForecastWithReserveUsd = frozen.providerCapWith20PercentReserveUsd * config.expectedLedgerFactor;
