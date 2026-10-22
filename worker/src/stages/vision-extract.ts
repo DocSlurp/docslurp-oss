@@ -1013,6 +1013,7 @@ export class VisionExtractStage implements Stage {
         imagePath,
         mimeType: page.mimeType,
         privacyMode: state.run.pipeline.privacyMode,
+        planId: state.run.orgPlanId,
         outputPath,
         vision,
         cfg: this.cfg,

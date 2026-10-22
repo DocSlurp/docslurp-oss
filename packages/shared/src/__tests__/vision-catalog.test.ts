@@ -39,7 +39,7 @@ describe("hosted vision catalog", () => {
 
   it("catalogs the tuned opt-in models with list prices and never a Pro/Ultra or :free variant", () => {
     const tuned = {
-      "deepseek/deepseek-v4.1-flash-1017": { input: 0.15, output: 0.6, perPage: 0.056 },
+      "deepseek/deepseek-v4.1-flash-1017": { input: 0.3, output: 1.2, perPage: 0.103 },
       "xiaomi/mimo-v2.6-flash": { input: 0.14, output: 0.28, perPage: 0.056 },
       "openai/gpt-6-luna": { input: 0.1, output: 0.5, perPage: 0.061 },
       "z-ai/glm-5.3-flash": { input: 0.0113, output: 0.1589, perPage: 0.013 },

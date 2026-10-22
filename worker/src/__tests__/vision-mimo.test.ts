@@ -90,7 +90,7 @@ describe("MiMo vision profile", () => {
   it("keeps an explicit template for MiMo and leaves other models unchanged", async () => {
     const explicit = await sentBody({ modelUri: `llm://openrouter/${MIMO_VISION_MODEL}`, prompt: "layout" });
     expect(explicit.messages[1].content[0].text).toBe(visionPromptTemplates.layout);
-    const other = await sentBody({});
+    const other = await sentBody({ modelUri: "llm://openrouter/google/gemini-3.1-flash-lite" });
     expect(other.messages[1].content[0].text).toBe(visionPromptTemplates["<OCR>"]);
     expect(other.provider).toBeUndefined();
   });

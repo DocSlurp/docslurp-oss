@@ -428,7 +428,8 @@ export class DocumentMapStage implements Stage {
       try {
         const result = await executeVisionRuntime({
           imagePath, mimeType: artifact.mimeType, outputPath: `${imagePath}.vision.json`, vision: state.run.pipeline.vision,
-          cfg: this.config, runner: this.runner, privacyMode: state.run.pipeline.privacyMode, signal: args.signal,
+          cfg: this.config, runner: this.runner, privacyMode: state.run.pipeline.privacyMode,
+          planId: state.run.orgPlanId, signal: args.signal,
         });
         const cents = result.costCents ?? calculateAiUsageCostCents({ inputTokens: result.inputTokens, outputTokens: result.outputTokens, costPer1kInputTokens: this.config.costPer1kInputTokens, costPer1kOutputTokens: this.config.costPer1kOutputTokens });
         costCents += cents;

@@ -153,6 +153,8 @@ export async function executeVisionRuntime(args: {
   outputSchema?: Record<string, unknown> | null;
   /** Workspace privacy mode; hosted vision routes are refused outside `standard`. */
   privacyMode: PrivacyMode;
+  /** The org's plan id; selects plan-specific OpenRouter routing (see `freePlanOpenRouterProvider`). */
+  planId?: string | null;
   signal?: AbortSignal;
 }): Promise<VisionExecutionResult> {
   const selected = normalizeVisionConfig(args.vision, args.cfg, args.outputSchema);
@@ -202,7 +204,7 @@ export async function executeVisionRuntime(args: {
 async function runRouteVisionRequest(
   route: VisionExecutionConfig,
   prompt: string,
-  args: { imagePath: string; mimeType?: string; outputPath: string; runner: CommandRunner; signal?: AbortSignal; cfg: Config; privacyMode: PrivacyMode },
+  args: { imagePath: string; mimeType?: string; outputPath: string; runner: CommandRunner; signal?: AbortSignal; cfg: Config; privacyMode: PrivacyMode; planId?: string | null },
 ): Promise<VisionExecutionResult> {
   const base = {
     imagePath: args.imagePath,
@@ -214,7 +216,7 @@ async function runRouteVisionRequest(
     prompt,
   };
   if (route.provider !== PRIVATE_MODEL_PROVIDER) {
-    return await runVisionRequest({ ...base, model: route.model, baseUrl: route.baseUrl, apiKey: resolveVisionApiKey(route.runtime, route.baseUrl, args.cfg), swapPolicy: args.cfg.visionModelSwapPolicy, ...streamGuard(args.cfg) });
+    return await runVisionRequest({ ...base, model: route.model, baseUrl: route.baseUrl, apiKey: resolveVisionApiKey(route.runtime, route.baseUrl, args.cfg), planId: args.planId, swapPolicy: args.cfg.visionModelSwapPolicy, ...streamGuard(args.cfg) });
   }
   const call = await authorizePrivateModelCall({ privacyMode: args.privacyMode, modelUri: route.modelUri, capability: "vision", operation: "worker.vision" });
   const result = await runVisionRequest({ ...base, runtime: "openai-compatible", model: call.model, baseUrl: call.baseUrl, apiKey: "", fetchImpl: call.fetch, providerLabel: `private:${call.route.alias}`, ...streamGuard(args.cfg) });
@@ -328,6 +330,7 @@ export async function runVisionRequest(args: {
   fetchImpl?: typeof fetch;
   providerLabel?: string;
   swapPolicy?: VisionModelSwapPolicy;
+  planId?: string | null;
   streaming?: boolean;
   estimateCostCents?: (usage: { inputTokens: number; outputTokens: number }) => number | undefined;
 }): Promise<VisionExecutionResult> {
@@ -433,7 +436,7 @@ export async function runVisionRequest(args: {
         // Page transcription never needs thinking: pin each verified model to its lowest accepted effort.
         ...(isOpenRouter ? visionReasoningParams(args.model) : {}),
         // Per-model routing restricted to providers measured to transcribe faithfully.
-        ...(isOpenRouter ? openRouterProviderParams(args.model) : {}),
+        ...(isOpenRouter ? openRouterProviderParams(args.model, args.planId) : {}),
       };
       const result = await runGuardedChatCompletion({
         url: resolveChatCompletionsUrl(args.baseUrl),

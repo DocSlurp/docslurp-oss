@@ -466,7 +466,9 @@ export const OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1";
  * change here: the profile label and description, the default config and the default-derived values follow.
  * It must be a hosted `visionModelCatalog` id (checked by the catalog tests).
  */
-export const DEFAULT_OPENROUTER_VISION_MODEL = "google/gemini-3.1-flash-lite";
+// Tuned DeepSeek V4.1 Flash 1017 (US-hosted routes): best quality tier, fastest and cheaper per page than Gemini 3.1
+// Flash Lite on the 2026-10-22 vision holdout. Roll back without a deploy via DOCSLURP_VISION_MODEL_URI (app and worker).
+export const DEFAULT_OPENROUTER_VISION_MODEL = "deepseek/deepseek-v4.1-flash-1017";
 /** Opt-in hosted vision route; OpenRouter list price verified 2026-10-20 ($0.15/M input, $0.50/M output). */
 export const NEMOTRON_SUPER_VL_VISION_MODEL = "nvidia/nemotron-3.5-super-vl";
 export const DEFAULT_LOCAL_OCR_MODEL = "microsoft/Florence-2-base-ft";
@@ -577,9 +579,9 @@ export const visionModelCatalog = [
     tags: ["hosted", "cost", "open-weights"],
     runtime: "openai-compatible",
     description:
-      "Open-weights (MIT) DeepSeek multimodal snapshot on OpenRouter; opt-in low-cost page extraction with Markdown/LaTeX transcription.",
-    estimatedCostPerPageCents: 0.056,
-    tokenPricing: { inputUsdPerMillion: 0.15, outputUsdPerMillion: 0.6, checked: "2026-10-22" },
+      "Open-weights (MIT) DeepSeek multimodal snapshot via US-hosted providers; Markdown/LaTeX page transcription.",
+    estimatedCostPerPageCents: 0.103,
+    tokenPricing: { inputUsdPerMillion: 0.3, outputUsdPerMillion: 1.2, checked: "2026-10-22" },
   },
   {
     id: "xiaomi/mimo-v2.6-flash",

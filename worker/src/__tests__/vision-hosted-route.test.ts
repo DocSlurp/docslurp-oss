@@ -3,11 +3,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { DEFAULT_OPENROUTER_VISION_MODEL, NEMOTRON_SUPER_VL_VISION_MODEL, OPENROUTER_BASE_URL, openRouterReasoningParams, visionConfigSchema } from "@docslurp/shared";
+import { DEFAULT_OPENROUTER_VISION_MODEL, NEMOTRON_SUPER_VL_VISION_MODEL, OPENROUTER_BASE_URL, visionConfigSchema } from "@docslurp/shared";
 
 import type { Config } from "../config.js";
 import { CommandRunner } from "../tools/runner.js";
 import { executeVisionRuntime } from "../tools/vision-runtime.js";
+import { visionReasoningParams } from "../tools/vision-model-profiles.js";
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -71,6 +72,6 @@ describe("hosted OpenRouter vision request shape", () => {
       privacyMode: "standard",
     });
     expect(bodies[0]!.model).toBe(DEFAULT_OPENROUTER_VISION_MODEL);
-    expect(bodies[0]!.reasoning).toEqual(openRouterReasoningParams(DEFAULT_OPENROUTER_VISION_MODEL).reasoning);
+    expect(bodies[0]!.reasoning).toEqual(visionReasoningParams(DEFAULT_OPENROUTER_VISION_MODEL).reasoning);
   });
 });
