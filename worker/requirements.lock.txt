@@ -106,6 +106,7 @@ dateparser==1.4.3
     # via htmldate
 defusedxml==0.7.1
     # via
+    #   -r worker/requirements-base.txt
     #   docling-core
     #   docling-slim
 deprecation==2.1.0

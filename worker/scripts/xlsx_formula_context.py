@@ -3,7 +3,7 @@
 import argparse
 import posixpath
 import zipfile
-import xml.etree.ElementTree as ET
+from defusedxml import ElementTree as ET
 
 NS = {'s': 'http://schemas.openxmlformats.org/spreadsheetml/2006/main',
       'r': 'http://schemas.openxmlformats.org/officeDocument/2006/relationships'}
@@ -14,15 +14,7 @@ MAX_FORMULAS = 100_000
 def read_xml(archive, name):
     if archive.getinfo(name).file_size > MAX_XML_BYTES:
         raise ValueError('Workbook XML exceeds formula context limit')
-    return ET.fromstring(_reject_doctype(archive.read(name)))
-
-
-def _reject_doctype(data):
-    """Refuse a DTD/entity declaration before parsing (entity-expansion DoS)."""
-    head = data[:4096].upper()
-    if b'<!DOCTYPE' in head or b'<!ENTITY' in head:
-        raise ValueError('Workbook XML declares a DTD or entities')
-    return data
+    return ET.fromstring(archive.read(name), forbid_dtd=True)
 
 
 def escape(value):
@@ -41,7 +33,7 @@ def formula_cells(archive, name):
         row_tag = '{%s}row' % NS['s']
         cell_tag = '{%s}c' % NS['s']
         formula_tag = '{%s}f' % NS['s']
-        for _, element in ET.iterparse(source, events=('end',)):
+        for _, element in ET.iterparse(source, events=('end',), forbid_dtd=True):
             if element.tag == row_tag:
                 for cell in element:
                     if cell.tag == cell_tag and cell.find(formula_tag) is not None:

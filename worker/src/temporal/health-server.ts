@@ -73,7 +73,7 @@ export function startWorkerHealthServer(args: {
       // (SEC-2026-10-10).
       const required = (args.metricsSecret ?? process.env.WORKER_METRICS_SECRET ?? "").trim();
       if (required) {
-        const provided = (req.headers["authorization"] ?? "").replace(/^Bearer\s+/i, "");
+        const provided = /^Bearer\s+(.+)$/i.exec(req.headers["authorization"] ?? "")?.[1] ?? "";
         const a = Buffer.from(provided);
         const b = Buffer.from(required);
         if (a.length !== b.length || !timingSafeEqual(a, b)) {

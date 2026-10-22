@@ -14,6 +14,8 @@ courlan==1.4.0
     # via trafilatura
 dateparser==1.4.3
     # via htmldate
+defusedxml==0.7.1
+    # via -r worker/requirements-base.txt
 ebooklib==0.20
     # via -r worker/requirements-base.txt
 et-xmlfile==2.0.0
