@@ -305,6 +305,8 @@ export async function resolveActorWorkspaceId(
   if (lookup.ref.kind !== "default") {
     const found = "workspace" in lookup ? lookup.workspace : null;
     if (!found) throw workspaceInputNotFoundError(lookup.ref.kind === "slug" ? { slug: lookup.ref.slug } : { id: lookup.ref.id });
+    // The lookup is already scoped to the key's allowlist; checked again here as the request boundary.
+    if (actor.type === "apiKey" && !apiKeyAllowsWorkspace(actor.apiKey, found.id)) throw new ApiKeyWorkspaceNotAllowedError();
     return found.id;
   }
   if (actor.type === "apiKey") {

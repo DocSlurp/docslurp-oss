@@ -15,7 +15,7 @@ export const suggestRoutes = new Hono()
     const userId = c.get("sessionUser").id as string;
     const workspaceId = await resolveActorWorkspaceId(
       getRequestActor(c),
-      c.req.query("workspaceId"),
+      c.req.query("workspace"),
       c.req.query("orgId"),
     );
     const q = normalizePrefix(c.req.query("q") ?? null);

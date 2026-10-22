@@ -17,7 +17,7 @@ vi.mock("../services/billing/spend-guard.js", () => ({
   canSpend: vi.fn(async () => true),
 }));
 vi.mock("../services/workspaces.js", () => ({
-  resolveWorkspaceRef: vi.fn(async () => null),
+  resolveWorkspaceRef: vi.fn(async () => null), findWorkspaceForInput: vi.fn(async (ref: { id?: string; slug?: string }) => ({ id: (ref.id ?? ref.slug)!, orgId: "org-1" })),
   ensureDefaultWorkspace: vi.fn(async () => ({ id: "ws-1" })),
   getWorkspace: vi.fn(),
 }));

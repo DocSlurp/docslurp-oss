@@ -30,6 +30,10 @@ vi.mock("../services/workspaces.js", () => ({
     if (ref === "old-legal") return { id: WS_ID, slug: "legal", renamedFrom: "old-legal" };
     return null;
   }),
+  findWorkspaceForInput: vi.fn(async (ref: { kind: string; id?: string; slug?: string }) => {
+    if (ref.kind === "id") return ref.id === WS_ID || ref.id === DEFAULT_ID ? { id: ref.id, orgId: "org-1" } : null;
+    return ref.slug === "legal" || ref.slug === "old-legal" ? { id: WS_ID, orgId: "org-1" } : null;
+  }),
   ensureDefaultWorkspace: mocks.ensureDefaultWorkspace,
   getWorkspace: vi.fn(async (id: string) =>
     id === WS_ID || id === DEFAULT_ID ? { id, orgId: "org-1", userId: "user-1", pipeline: {} } : null),

@@ -100,7 +100,7 @@ export const documentsRoutes = new Hono()
   .get("/", async (c) => {
     const userId = c.get("sessionUser").id;
     const apiKey = c.get("apiKey");
-    const workspaceId = await resolveActorWorkspaceFilter(getRequestActor(c), c.req.query("workspaceId"), c.req.query("orgId"));
+    const workspaceId = await resolveActorWorkspaceFilter(getRequestActor(c), c.req.query("workspace"), c.req.query("orgId"));
     const tagQuery = c.req.query("tags");
     const tags = tagQuery
       ? tagQuery.split(",").map((value) => value.trim()).filter(Boolean)
@@ -192,7 +192,7 @@ export const documentsRoutes = new Hono()
   .get("/index", async (c) => {
     const userId = c.get("sessionUser").id;
     const apiKey = c.get("apiKey");
-    const workspaceId = await resolveActorWorkspaceFilter(getRequestActor(c), c.req.query("workspaceId"), c.req.query("orgId"));
+    const workspaceId = await resolveActorWorkspaceFilter(getRequestActor(c), c.req.query("workspace"), c.req.query("orgId"));
     const tagQuery = c.req.query("tags");
     const tags = tagQuery
       ? tagQuery.split(",").map((value) => value.trim()).filter(Boolean)
@@ -216,7 +216,7 @@ export const documentsRoutes = new Hono()
       userId,
       orgId: c.get("apiKey")?.orgId ?? undefined,
       runId: c.req.query("runId") ?? undefined,
-      workspaceId: await resolveActorWorkspaceFilter(getRequestActor(c), c.req.query("workspaceId"), c.req.query("orgId")),
+      workspaceId: await resolveActorWorkspaceFilter(getRequestActor(c), c.req.query("workspace"), c.req.query("orgId")),
       sort:
         sort === "cost" || sort === "org" || sort === "failure-mode" || sort === "severity"
           ? sort

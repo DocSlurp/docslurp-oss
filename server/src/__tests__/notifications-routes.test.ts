@@ -9,7 +9,7 @@ vi.mock("../services/notifications.js", () => ({
 }));
 
 vi.mock("../services/workspaces.js", () => ({
-  resolveWorkspaceRef: vi.fn(async () => null),
+  resolveWorkspaceRef: vi.fn(async () => null), findWorkspaceForInput: vi.fn(async (ref: { id?: string; slug?: string }) => ({ id: (ref.id ?? ref.slug)!, orgId: "org-1" })),
   getWorkspace: vi.fn(async (id: string) => ({ id, orgId: "org-1", userId: "user-1" })),
 }));
 

@@ -28,7 +28,7 @@ vi.mock("../services/aggregate-rag.js", () => ({
 
 const getWorkspace = vi.fn();
 const ensureDefaultWorkspace = vi.fn(async () => ({ id: "ws-default" }));
-vi.mock("../services/workspaces.js", () => ({ resolveWorkspaceRef: vi.fn(async () => null),
+vi.mock("../services/workspaces.js", () => ({ resolveWorkspaceRef: vi.fn(async () => null), findWorkspaceForInput: vi.fn(async (ref: { id?: string; slug?: string }) => ({ id: (ref.id ?? ref.slug)!, orgId: "org-1" })),
   ensureDefaultWorkspace,
   getWorkspace,
 }));

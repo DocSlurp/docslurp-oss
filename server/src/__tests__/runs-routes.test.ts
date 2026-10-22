@@ -98,7 +98,7 @@ vi.mock("../lib/request-context.js", async () => {
   };
 });
 
-vi.mock("../services/workspaces.js", () => ({ resolveWorkspaceRef: vi.fn(async () => null), getWorkspace: getWorkspaceMock }));
+vi.mock("../services/workspaces.js", () => ({ resolveWorkspaceRef: vi.fn(async () => null), findWorkspaceForInput: vi.fn(async (ref: { id?: string; slug?: string }) => ({ id: (ref.id ?? ref.slug)!, orgId: "org-1" })), getWorkspace: getWorkspaceMock }));
 
 const { runsRoutes } = await import("../routes/runs.js");
 

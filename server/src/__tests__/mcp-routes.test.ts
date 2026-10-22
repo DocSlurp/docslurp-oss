@@ -31,7 +31,7 @@ vi.mock("../services/search.js", () => ({
   MissingWorkspaceScopeError: class extends Error {},
 }));
 vi.mock("../services/workspace-chat.js", () => ({ chatWorkspace, workspaceChatDisabledBody }));
-vi.mock("../services/workspaces.js", () => ({ resolveWorkspaceRef: vi.fn(async () => null), ensureDefaultWorkspace: vi.fn(async () => ({ id: "default-ws" })), getWorkspace, listWorkspaces }));
+vi.mock("../services/workspaces.js", () => ({ resolveWorkspaceRef: vi.fn(async () => null), findWorkspaceForInput: vi.fn(async (ref: { id?: string; slug?: string }) => ({ id: (ref.id ?? ref.slug)!, orgId: "org-1" })), ensureDefaultWorkspace: vi.fn(async () => ({ id: "default-ws" })), getWorkspace, listWorkspaces }));
 
 vi.mock("../routes/uploads.js", async () => {
   const { Hono } = await import("hono");
