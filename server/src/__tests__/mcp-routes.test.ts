@@ -56,6 +56,10 @@ vi.mock("../services/ingest-report.js", () => ({
 }));
 
 const { mcpRoutes } = await import("../routes/mcp.js");
+const { resetApiRateLimitBuckets } = await import("../middleware/rate-limit.js");
+
+// Each case represents an independent client, not cumulative production traffic.
+beforeEach(() => resetApiRateLimitBuckets());
 
 const validatedKey: ValidatedKey = {
   keyId: "key-1",
