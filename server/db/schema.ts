@@ -1793,7 +1793,7 @@ export const workspaces = pgTable(
       mode: "string",
     }),
     artifactRetentionDays: integer("artifact_retention_days"),
-    runRetentionDays: integer("run_retention_days"),
+    runRetentionDays: integer("run_retention_days").default(30),
     pipeline: jsonb().default({}).notNull(),
     systemPrompt: text("system_prompt"),
     budgetPaused: boolean("budget_paused").default(false).notNull(),
