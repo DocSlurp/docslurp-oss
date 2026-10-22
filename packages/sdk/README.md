@@ -50,7 +50,7 @@ for await (const hit of client.search({
 
 **Processing happens after `upload()` returns.** `upload()` returns the workspace, run and document records before indexing finishes. `waitForRun()` waits for that one run, while a search's `availability` describes the whole workspace, which may still have other uploads in progress. No results from a partly indexed workspace doesn't mean the answer isn't there.
 
-With no workspace configured, uploads, search and chat all use your organization's default workspace (`"default"`, exported as `DEFAULT_WORKSPACE_ID`), so most integrations never need a workspace ID. To keep documents separate, pass a workspace slug such as `workspaceId: "legal-contracts"` (or set `DOCSLURP_WORKSPACE_ID`). To upload into a new workspace that titles itself from its content, pass `newWorkspace: true`; pass `workspaceName` or `templateKey` (without `workspaceId`) to create a named or templated one. UUIDs and former slugs also work; see [Workspaces](https://docslurp.io/docs/http#workspaces).
+With no workspace configured, uploads, search and chat all use your organization's default workspace (`"default"`, exported as `DEFAULT_WORKSPACE`), so most integrations never need one. To keep documents separate, pass `workspace` (or set `DOCSLURP_WORKSPACE`) with a workspace ID, slug or name: `workspace: "Legal Contracts"` and `workspace: "legal-contracts"` are the same workspace, and the first upload into a name that matches nothing creates it. To upload into a new workspace that titles itself from its content, pass `newWorkspace: true` (or a `templateKey`) without `workspace`. Former slugs also work; see [Workspaces](https://docslurp.io/docs/http#workspaces).
 
 ### Re-index a page without duplicates
 
@@ -75,7 +75,7 @@ for await (const event of client.streamActivity({ types: ["document.replaced"] }
 }
 ```
 
-`streamActivity()` is a server-sent event stream that ends after `timeoutMs` (default one hour), so reconnect to keep listening. Its `workspaceId` filter matches the workspace UUID, not a slug. Where long-lived connections aren't practical, subscribe a webhook to `document.replaced` instead.
+`streamActivity()` is a server-sent event stream that ends after `timeoutMs` (default one hour), so reconnect to keep listening. Its `workspaceId` filter matches the workspace UUID (as reported on events), not a slug or name. Where long-lived connections aren't practical, subscribe a webhook to `document.replaced` instead.
 
 [Download the runnable quickstart](https://docslurp.io/docs/examples/quickstart.mjs). The npm package also includes the `examples/` directory.
 
@@ -105,7 +105,7 @@ console.log(usage.totalTokens, usage.costCents);
 ```js
 import { createDocSlurpClient, formatSearchContext } from "@docslurp/sdk";
 
-// Searches your organization's default workspace unless DOCSLURP_WORKSPACE_ID is set.
+// Searches your organization's default workspace unless DOCSLURP_WORKSPACE is set.
 const client = createDocSlurpClient();
 const evidence = await client.search({ q: "How are urgent incidents escalated?" });
 if (evidence.availability?.status !== "complete") {
@@ -148,7 +148,7 @@ const files = await Promise.all(["handbook.pdf", "benefits.pdf"].map(async (file
 })));
 const accepted = await client.upload({
   files,
-  workspaceId: "legal-contracts", // Optional; omit to use the default workspace.
+  workspace: "Legal contracts", // Optional ID, slug or name (created if none matches); omit for the default workspace.
   // One key per upload job. Reuse it only to retry the same files, so a retry can't upload twice.
   idempotencyKey: "handbook-import-2026-10-v1",
 });
@@ -173,7 +173,7 @@ DocSlurp must be able to reach the URLs. URL ingestion is retried only when you 
 ```js
 const batch = await client.search({ queries: [
   { q: "leave eligibility" },
-  { workspaceId: "legal-contracts", q: "notice requirements", filenameContains: "handbook" },
+  { workspace: "legal-contracts", q: "notice requirements", filenameContains: "handbook" },
 ], concurrency: 2 }, { signal: AbortSignal.timeout(30_000) });
 
 for (const [index, result] of batch.results.entries()) {
@@ -218,7 +218,7 @@ Limit the watch with these options:
 
 `getRunProgress` returns the same full snapshot without opening a stream. `streamRun` is the raw stream of run, stage and document events; it has no polling fallback and no replay.
 
-`getWorkspaceState` needs a signed-in session or a server key with the `ingest`, `search`, `artifacts` or `workspaces:manage` scope. Without an ID, it uses the client's workspace (the `workspaceId` option, then `DOCSLURP_WORKSPACE_ID`, then `default`). `recentWindowHours` is an integer from 1 to 720 and defaults to 24.
+`getWorkspaceState` needs a signed-in session or a server key with the `ingest`, `search`, `artifacts` or `workspaces:manage` scope. Without one, it uses the client's workspace (the `workspace` option, then `DOCSLURP_WORKSPACE`, then `default`). `recentWindowHours` is an integer from 1 to 720 and defaults to 24.
 
 - Indexed pages are unique page numbers with nonblank page or chunk text in completed documents' current runs, capped at each document's known page count. They don't measure vector embedding coverage.
 - Documents with unknown page counts are counted separately, not guessed.
@@ -267,7 +267,7 @@ Add DocSlurp search, chat and a document viewer to your site as React components
 | `createOfflineSearchBundle()` | Builds a JSON bundle (and optionally a LanceDB table) for offline search. |
 | `createOfflineSearchClient()` | Searches that bundle in the browser or in Node. |
 
-Every component takes `apiUrl` (default `https://docslurp.io`) and `clientKey`. Search and chat also take `workspaceId` (a slug, UUID or `default`; default `default`), and the viewer takes `documentId`. On public pages, pass a browser key: it is search-only and works only on your allowed websites.
+Every component takes `apiUrl` (default `https://docslurp.io`) and `clientKey`. Search and chat also take `workspace` (an ID, slug or name, or `default`; default `default`; the custom elements' attribute is also `workspace`), and the viewer takes `documentId`. On public pages, pass a browser key: it is search-only and works only on your allowed websites.
 
 ### Offline search
 
@@ -374,7 +374,7 @@ To change colors, set these CSS variables on a parent element. The widget's own 
 const client = createDocSlurpClient({
   apiKey: process.env.DOCSLURP_API_KEY,
   apiUrl: "https://docslurp.io", // Service origin. Don't add /v1.
-  workspaceId: "legal-contracts", // Optional. Defaults to DOCSLURP_WORKSPACE_ID, then "default".
+  workspace: "legal-contracts", // Optional ID, slug or name. Defaults to DOCSLURP_WORKSPACE, then "default".
   timeoutMs: 30_000,
 });
 ```
@@ -383,13 +383,13 @@ const client = createDocSlurpClient({
 | --- | --- |
 | API key | `apiKey`, then `DOCSLURP_API_KEY` on the server |
 | Service origin | `apiUrl`, then `DOCSLURP_URL`, then `https://docslurp.io` |
-| Workspace | Per-call `workspaceId`, then the client option, then `DOCSLURP_WORKSPACE_ID`, then `"default"` (the organization's default workspace). Accepts slugs, former slugs, UUIDs and `default`. |
+| Workspace | Per-call `workspace`, then the client option, then `DOCSLURP_WORKSPACE`, then `"default"` (the organization's default workspace). Accepts IDs, slugs, former slugs, names (matched by slug) and `default`. |
 | Request deadline | Per-call `timeoutMs`, then the client option, then 30 seconds |
 | Run wait and stream lifetime | Per-call `timeoutMs`, then 5 minutes (one hour for `streamActivity`). The client's request deadline doesn't apply. |
 | Polling interval | `pollIntervalMs`, then 1 second |
 | HTTP transport | The `fetch` option, then the global `fetch` |
 
-Environment variables are read once, when the client is created, and only on the server. An empty or blank `workspaceId` falls through to the next setting. For file and URL uploads, `newWorkspace: true`, a `workspaceName` or a `templateKey` creates a new workspace instead of using the configured one, unless you also pass a per-call `workspaceId` (which then wins, and the name and template are ignored).
+Environment variables are read once, when the client is created, and only on the server. An empty or blank `workspace` falls through to the next setting. For file and URL uploads, `newWorkspace: true` or a `templateKey` creates a new self-titled workspace instead of using the configured one, unless you also pass a per-call `workspace` (which then wins; the server finds it or creates it from the name, applying `templateKey` only when it creates it). Other methods answer HTTP 404 `workspace_not_found` for a workspace that matches nothing.
 
 **In the browser:** never put a server key in public code; call DocSlurp through your backend instead. Inside a signed-in DocSlurp dashboard session, `createDocSlurpClient({ apiUrl: "" })` uses same-origin cookies. Browser clients don't read environment variables. On the server, `apiKey: ""` turns off the environment key. You can pass browser `File` objects straight to `upload()`. Releases after 0.2.0 throw `UnsafeApiKeyError` if a `dslp_priv_` server key is used in a browser.
 
@@ -410,21 +410,21 @@ Environment variables are read once, when the client is created, and only on the
 | `getRun(runId, request?)` | Run record (not the progress envelope) | Any of `ingest`, `search`, `artifacts` |
 | `getRunProgress(runId, request?)` | Full typed progress snapshot | Same as `getRun` |
 | `streamProgress(runId, options?)` | Async iterable of full snapshots with polling fallback | Same as `getRun` |
-| `getWorkspaceState(workspaceId?, options?)` | Current workspace counts, MB, searches, recent performance and usage | Server key with any of `ingest`, `search`, `artifacts`, `workspaces:manage` |
-| `getIngestReport(workspaceId?, { runId?, documentIds? })` | How files processed: pages, bytes and text per page, images, vision, searchable pages with reasons, settings and recommendations (no AI) | Server key with any of `ingest`, `search`, `artifacts`, `workspaces:manage` |
+| `getWorkspaceState(workspace?, options?)` | Current workspace counts, MB, searches, recent performance and usage | Server key with any of `ingest`, `search`, `artifacts`, `workspaces:manage` |
+| `getIngestReport(workspace?, { runId?, documentIds? })` | How files processed: pages, bytes and text per page, images, vision, searchable pages with reasons, settings and recommendations (no AI) | Server key with any of `ingest`, `search`, `artifacts`, `workspaces:manage` |
 | `waitForRun(runId, options?)` | Completed run, or throws | Same as `getRun` |
 | `streamRun(runId, options?)` | Async iterable of `{ event, id?, data }` | Same as `getRun` |
 | `streamActivity(options?)` | Async iterable of account activity events, filtered by `types` and workspace UUID | Same as `getRun` |
 | `search(input, request?)` | Async iterable of hits; await for `{ results, availability, sessionId, usage }` | `search` |
 | `search({ queries, concurrency? }, options?)` | `{ results: [{ ok, data?, error? }] }` | `search` |
-| `chat({ q, workspaceId?, sessionId? }, request?)` | Answer, citations, availability, session IDs, usage, runtime | `search` |
+| `chat({ q, workspace?, sessionId? }, request?)` | Answer, citations, availability, session IDs, usage, runtime | `search` |
 | `listDocumentVersions(documentId, request?)` | Version chain, newest first | `artifacts` |
 | `updateWorkspace(id, input, request?)` | `{ workspace, impact?, job? }`; `apply` is `"new-uploads"` or `"reindex"` | `workspaces:manage` |
 | `updateWorkspaceEstimate(id, input, request?)` | `{ estimate, billing, impact }` without changing anything | Server key with `workspaces:manage` |
-| `fullIndexEstimate({ documentId } or { workspaceId?, documentIds? }, request?)` / `uploadEstimate({ files }, request?)` | `{ estimate, billing }` | `ingest` |
+| `fullIndexEstimate({ documentId } or { workspace?, documentIds? }, request?)` / `uploadEstimate({ files, workspace? }, request?)` | `{ estimate, billing }` | `ingest` |
 | `estimateIndexingMode(mode, input?, request?)` / `setIndexingModeEstimate(...)` / `rebuildGraphEstimate(input?, request?)` | Pages and credits for switching indexing mode / rebuilding the graph | Server key with `workspaces:manage` |
 | `updateSearchSettingsEstimate(id, input, request?)` / `reprocessEstimate(runId, input?, request?)` | `{ estimate, billing }` | Signed-in session only: the matching mutations accept no API key, so neither do these |
-| `setRetention({ orgId } or { workspaceId? }, versions or null, request?)` | Updated record; 1 to 100 versions kept | `organizations:manage` / `workspaces:manage` |
+| `setRetention({ orgId } or { workspace? }, versions or null, request?)` | Updated record; 1 to 100 versions kept | `organizations:manage` / `workspaces:manage` |
 | `getJob(jobId, request?)` / `streamJob(jobId, options?)` | `JobStatus` / async iterable of `status`, `progress` (counts merged into `job.progress`) and `done` events (SSE, polling fallback; the timeout never applies while a job is `blocked`) | Same as `getRun` |
 | `getDocument(documentId, request?)` | Typed document viewer envelope (`viewer.document`) | `artifacts` |
 | `listOrganizations(request?)` / `getOrganization(id, request?)` | Organization records | `organizations:read` or `organizations:manage` |
@@ -441,8 +441,8 @@ Environment variables are read once, when the client is created, and only on the
 | `formatSearchContext(searchResponse)` | Numbered source excerpts as a string | None (no request) |
 | `buildDocumentPreviewPages({ documentId, artifacts, manifest })` | Page images for a document viewer, by page number (after 0.2.0) | None (no request) |
 
-- **`SearchInput`:** `q` (required); optional `workspaceId` (slug, former slug, UUID or `default`), `limit` (1 to 100), `minScore` (relevance floor from 0 to 1; 0 disables it), `documentId`, `filenameContains` and `tags` (a string). The response has `noMatch: true` when the workspace is searchable but search returns nothing (nothing cleared the floor, or nothing was retrieved at all).
-- **Upload metadata:** `workspaceId`, `newWorkspace`, `workspaceName`, `orgId`, `templateKey`, `idempotencyKey`, and `canonicalId` (in upload options for one file, or on each `{ data, filename, canonicalId }` entry). URL ingestion takes the same metadata except `idempotencyKey`; set canonical IDs per URL.
+- **`SearchInput`:** `q` (required); optional `workspace` (ID, slug, former slug, name or `default`), `limit` (1 to 100), `minScore` (relevance floor from 0 to 1; 0 disables it), `documentId`, `filenameContains` and `tags` (a string). The response has `noMatch: true` when the workspace is searchable but search returns nothing (nothing cleared the floor, or nothing was retrieved at all).
+- **Upload metadata:** `workspace` (ID, slug or name; created when none matches), `newWorkspace`, `orgId`, `templateKey`, `idempotencyKey`, and `canonicalId` (in upload options for one file, or on each `{ data, filename, canonicalId }` entry). URL ingestion takes the same metadata except `idempotencyKey`; set canonical IDs per URL.
 - **Template keys:** `legal-contracts`, `medical-records`, `financial-reports`, `engineering-docs`, `meeting-notes`.
 - **Citations:** `documentId`, `filename`, `pageNumber`, `pageNumbers`, `headingPath`, `chunkIndex`, `blockIds` and `source`. Some formats have no meaningful page numbers; when the list is empty, don't invent a page.
 - **Locators:** `citation.locator` says exactly where the evidence is, keyed by `kind`: `page` (`pageNumber`, `charStart`/`charEnd`, normalized `boxes`), `slide` (`slideNumber`, `notes`, `boxes`), `sheet` (`sheetName`, A1 `range`, `headerRow`), `media` (`startSeconds`, `endSeconds`, `mode` of `said` or `shown`, `speaker`, `timing` of `word`, `segment` or `chunk`) and `image` (`boxes`). It is `null` or absent for content indexed before locators existed (re-index to get them); for recordings, decks and sheets branch on `kind` rather than `pageNumber`. The `CitationLocator` type is exported.
@@ -460,8 +460,8 @@ All outputs below are **illustrative**, not measurements or IDs from a real acco
 ```js
 const accepted = await client.upload(new Blob(["Policy text"]), { filename: "policy.txt" }); // Default workspace.
 // The same upload as a file list, into the "policies" workspace:
-await client.upload({ files: [{ data: new Blob(["Policy text"]), filename: "policy.txt" }], workspaceId: "policies" });
-const remote = await client.upload({ urls: ["https://files.example/policy.pdf"], workspaceId: "policies" });
+await client.upload({ files: [{ data: new Blob(["Policy text"]), filename: "policy.txt" }], workspace: "policies" });
+const remote = await client.upload({ urls: ["https://files.example/policy.pdf"], workspace: "policies" });
 ```
 
 Both methods return the same shape. Illustrative **excerpt**:
@@ -619,9 +619,9 @@ Raw `streamRun` can also yield `snapshot` and `heartbeat` frames, and event data
 ### Workspace state response
 
 ```js
-// The client's workspace: the workspaceId option, then DOCSLURP_WORKSPACE_ID, then "default".
+// The client's workspace: the workspace option, then DOCSLURP_WORKSPACE, then "default".
 const defaultState = await client.getWorkspaceState();
-// Any workspace, by slug, former slug or UUID:
+// Any workspace, by ID, slug, former slug or name:
 const state = await client.getWorkspaceState("legal-contracts", { recentWindowHours: 24 });
 ```
 
@@ -711,7 +711,7 @@ Complete illustrative response:
 ### Search, batches, chat and formatting
 
 ```js
-const result = await client.search({ q: "leave notice", workspaceId: "policies", limit: 5, filenameContains: "policy", tags: "hr" });
+const result = await client.search({ q: "leave notice", workspace: "policies", limit: 5, filenameContains: "policy", tags: "hr" });
 for await (const hit of client.search({ q: "leave notice" })) console.log(hit.citation);
 ```
 
@@ -760,7 +760,7 @@ Illustrative full search response with one hit (every hit field shown):
 Pass `documentId` to search a single document. A search with no hits still returns `sessionId`, `usage` and `availability`, with `results: []`, and iterating it yields nothing. Hits can include `parentText`, and `availability` can be `null`.
 
 ```js
-const batch = await client.search({ queries: [{ q: "leave notice" }, { q: "eligibility", workspaceId: "policies" }], concurrency: 2 });
+const batch = await client.search({ queries: [{ q: "leave notice" }, { q: "eligibility", workspace: "policies" }], concurrency: 2 });
 ```
 
 Illustrative **excerpt**. Each successful `data` is a full search response like the one above:
@@ -1077,7 +1077,7 @@ Complete illustrative key list. An organization with no keys returns `[]`:
       "ingest",
       "search"
     ],
-    "rateLimitRpm": 60,
+    "rateLimitRpm": null,
     "rateLimitPpd": 10000,
     "lastUsedAt": null,
     "createdAt": "2026-10-01T12:00:00.000Z",
@@ -1153,13 +1153,13 @@ Pre-release: APIs may change, so pin the version you validate in production. MIT
 
 ### Workspace discovery and signed uploads
 
-`listWorkspaces()` returns the accessible workspace records. Pass a returned ID to `getWorkspace(id)` for details. Upload, search and chat use the default workspace when none is supplied. `upload({ files, workspaceName: "Product manuals" })` or `upload({ urls, workspaceName: "Product manuals" })` explicitly creates a named workspace.
+`listWorkspaces()` returns the accessible workspace records. Pass a returned ID to `getWorkspace(id)` for details. Upload, search and chat use the default workspace when none is supplied. `upload({ files, workspace: "Product manuals" })` or `upload({ urls, workspace: "Product manuals" })` uploads into the workspace with that name, creating it on first use.
 
 For normal file uploads, `upload()` handles storage transfer and ingestion automatically. Agents that transfer bytes separately can use:
 
 ```js
 const session = await client.createUploadSession({
-  workspaceName: "Product manuals",
+  workspace: "Product manuals",
   files: [{ filename: "manual.pdf", mimeType: "application/pdf", sizeBytes: bytes.byteLength, singlePart: true }],
 });
 const file = session.files[0];

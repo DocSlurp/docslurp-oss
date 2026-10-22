@@ -4,8 +4,8 @@ import { z } from "zod";
 import { zValidator } from "@hono/zod-validator";
 import {
   documentTagsSchema,
-  isDefaultWorkspaceAlias,
   pipelineFeatureOverridesSchema,
+  WORKSPACE_INPUT_MAX_LENGTH,
   workspaceTemplateKeySchema,
   indexingModeSchema,
 } from "@docslurp/shared";
@@ -18,7 +18,7 @@ import {
   InvalidCanonicalIdError,
   MAX_CANONICAL_ID_LENGTH,
 } from "../lib/canonical-id.js";
-import { actorHasAnyApiKeyScope, apiKeyCanUseWorkspace, getRequestActor, loadActorScopedWorkspace, requireActorWorkspace } from "../lib/request-actor.js";
+import { actorHasAnyApiKeyScope, apiKeyCanUseWorkspace, getRequestActor, lookupActorWorkspace, requireActorWorkspace, type RequestActor } from "../lib/request-actor.js";
 import { validationErrorResponse, type ValidationErrorSource, validationHook } from "../lib/validation.js";
 import {
   abortDirectUploadSession,
@@ -41,19 +41,27 @@ import {
 } from "../services/workspace-intake-actions.js";
 import {
   WorkspaceIntakeError,
-  wantsNewWorkspace,
   workspaceIntakePorts,
   type WorkspaceIntakePorts,
 } from "../services/workspace-intake.js";
 import { acceptApiKeys } from "../lib/route-auth.js";
 import { apiErrorResponse, apiStatusError } from "../lib/api-error.js";
 import { findDefaultWorkspace, getWorkspace } from "../services/workspaces.js";
+import { workspaceInputNotFoundError } from "../services/default-workspace.js";
 import { estimateUpload } from "../services/work-estimates.js";
 import { billingState } from "../services/config-change.js";
 
 type Uploadable = File | string | Array<File | string> | undefined;
 
 const canonicalIdSchema = z.string().trim().min(1).max(MAX_CANONICAL_ID_LENGTH);
+
+/** The public `workspace` field: a workspace UUID, slug, former slug or name; created when no workspace matches. */
+const workspaceInputSchema = z.string().max(WORKSPACE_INPUT_MAX_LENGTH);
+
+/** A restricted API key's workspace allowlist (null for sessions and unrestricted keys). */
+function actorAllowedWorkspaceIds(actor: RequestActor): readonly string[] | null {
+  return actor.type === "apiKey" && actor.apiKey.workspaceIds?.length ? actor.apiKey.workspaceIds : null;
+}
 
 const sourcePathSchema = z.string().max(1024).superRefine((value, ctx) => {
   try {
@@ -66,9 +74,8 @@ const sourcePathSchema = z.string().max(1024).superRefine((value, ctx) => {
 const ingestUrlSchema = z.object({
   tags: documentTagsSchema.optional(),
   orgId: z.string().optional(),
-  workspaceId: z.string().optional(),
+  workspace: workspaceInputSchema.optional(),
   newWorkspace: z.boolean().optional(),
-  workspaceName: z.string().optional(),
   templateKey: workspaceTemplateKeySchema.optional(),
   indexingMode: indexingModeSchema.optional(),
   /** Plain URLs default their canonical ID to the URL; objects may override it. */
@@ -93,9 +100,8 @@ const directUploadFileSchema = z.object({
 const createDirectSessionSchema = z.object({
   tags: documentTagsSchema.optional(),
   orgId: z.string().optional(),
-  workspaceId: z.string().optional(),
+  workspace: workspaceInputSchema.optional(),
   newWorkspace: z.boolean().optional(),
-  workspaceName: z.string().optional(),
   templateKey: workspaceTemplateKeySchema.optional(),
   pipeline: pipelineFeatureOverridesSchema.optional(),
   files: z.array(directUploadFileSchema).min(1),
@@ -176,7 +182,7 @@ function workspaceIntakeErrorResponse(
   error: unknown,
 ): Response | null {
   if (error instanceof WorkspaceAccessError) {
-    return apiStatusError(c, error.status, error.message, { code: error.code });
+    return apiStatusError(c, error.status, error.message, { code: error.code, details: error.details });
   }
   if (error instanceof UnreadableSourceError) {
     return apiStatusError(c, error.statusCode, error.message, { code: error.code });
@@ -225,11 +231,7 @@ export const createUploadsRoutes = (ports: WorkspaceIntakePorts = workspaceIntak
         if (typeof body.orgId === "string" && body.orgId.trim() && body.orgId.trim() !== actor.apiKey.orgId) {
           return apiStatusError(c, 403, "Forbidden");
         }
-        if (typeof body.workspaceId === "string" && body.workspaceId
-          && !isDefaultWorkspaceAlias(body.workspaceId)
-          && !await loadActorScopedWorkspace(body.workspaceId, actor)) {
-          return apiErrorResponse(c, 404, "workspace_not_found", "Workspace not found");
-        }
+        // The `workspace` value itself is resolved inside the key's org and allowlist by intake.
       }
     }
     await next();
@@ -243,22 +245,16 @@ export const createUploadsRoutes = (ports: WorkspaceIntakePorts = workspaceIntak
       const orgId = c.get("apiKey")?.orgId ?? input.orgId ?? null;
 
       try {
-        if (wantsNewWorkspace(input) && !input.workspaceId && !apiKeyMayCreateWorkspace(c)) {
-          return apiStatusError(c, 403, "Workspace-scoped API keys cannot create new workspaces", { code: "workspace_scope_forbidden" });
-        }
-        // Resolve the target now (UUID, slug, former slug, `default` or the
-        // default for an omitted ID): confirm treats a null target as "create one".
-        const workspace = wantsNewWorkspace(input) && !input.workspaceId
-          ? null
-          : await requireActorWorkspace(getRequestActor(c), input.workspaceId, orgId);
-        const workspaceId = workspace?.id ?? null;
+        // Resolve the target now: an existing workspace's ID, or the name of
+        // the workspace confirm creates (none: a self-titled one).
+        const target = await directUploadTarget(getRequestActor(c), input, orgId);
         // Overrides only; confirm merges them onto the workspace pipeline and its template locks.
         const pipeline = parseWorkspaceIntakePipeline(input.pipeline);
         const session = await createDirectUploadSession({
           userId,
           orgId,
-          workspaceId,
-          workspaceName: input.workspaceName ?? null,
+          workspaceId: target.workspaceId,
+          workspaceName: target.workspaceName,
           templateKey: input.templateKey ?? null,
           pipeline,
           files: input.files,
@@ -353,20 +349,15 @@ export const createUploadsRoutes = (ports: WorkspaceIntakePorts = workspaceIntak
         ? body.orgId.trim()
         : c.get("apiKey")?.orgId ?? undefined;
     const files = normalizeFiles(body.files ?? body.file);
-    const requestedWorkspaceId =
-      typeof body.workspaceId === "string" && body.workspaceId.length > 0
-        ? body.workspaceId
+    const requestedWorkspace =
+      typeof body.workspace === "string" && body.workspace.trim().length > 0
+        ? body.workspace.slice(0, WORKSPACE_INPUT_MAX_LENGTH)
         : null;
     const requestedNewWorkspace = body.newWorkspace === "true";
-    const requestedWorkspaceName =
-      typeof body.workspaceName === "string" &&
-      body.workspaceName.trim().length > 0
-        ? body.workspaceName.trim()
-        : null;
     const requestedTemplateKey =
       parseWorkspaceIntakeTemplateKey(body.templateKey);
 
-    if (wantsNewWorkspace({ newWorkspace: requestedNewWorkspace, workspaceName: requestedWorkspaceName, templateKey: requestedTemplateKey }) && !requestedWorkspaceId && !apiKeyMayCreateWorkspace(c)) {
+    if (!requestedWorkspace && (requestedNewWorkspace || requestedTemplateKey) && !apiKeyMayCreateWorkspace(c)) {
       return apiStatusError(c, 403, "Workspace-scoped API keys cannot create new workspaces", { code: "workspace_scope_forbidden" });
     }
 
@@ -378,10 +369,10 @@ export const createUploadsRoutes = (ports: WorkspaceIntakePorts = workspaceIntak
       result = await createBulkWorkspaceIntake({
         userId,
         orgId,
-        workspaceId: requestedWorkspaceId,
+        workspace: requestedWorkspace,
         newWorkspace: requestedNewWorkspace,
-        workspaceName: requestedWorkspaceName,
         templateKey: requestedTemplateKey,
+        allowedWorkspaceIds: actorAllowedWorkspaceIds(getRequestActor(c)),
         indexingMode: indexingModeSchema.safeParse(body.indexingMode).data,
         pipeline,
         files,
@@ -418,7 +409,7 @@ export const createUploadsRoutes = (ports: WorkspaceIntakePorts = workspaceIntak
       const userId = c.get("sessionUser").id;
       const body = c.req.valid("json");
       const idempotencyKey = c.req.header("Idempotency-Key")?.trim();
-      if (wantsNewWorkspace(body) && !body.workspaceId && !apiKeyMayCreateWorkspace(c)) {
+      if (!body.workspace?.trim() && (body.newWorkspace || body.templateKey) && !apiKeyMayCreateWorkspace(c)) {
         return apiStatusError(c, 403, "Workspace-scoped API keys cannot create new workspaces", { code: "workspace_scope_forbidden" });
       }
       let result;
@@ -426,10 +417,10 @@ export const createUploadsRoutes = (ports: WorkspaceIntakePorts = workspaceIntak
         result = await createRemoteUrlWorkspaceIntake({
           userId,
           orgId: c.get("apiKey")?.orgId ?? body.orgId,
-          workspaceId: body.workspaceId ?? null,
+          workspace: body.workspace?.trim() || null,
           newWorkspace: body.newWorkspace,
-          workspaceName: body.workspaceName?.trim() || null,
           templateKey: body.templateKey,
+          allowedWorkspaceIds: actorAllowedWorkspaceIds(getRequestActor(c)),
           indexingMode: body.indexingMode,
           pipeline: body.pipeline,
           tags: body.tags,
@@ -461,13 +452,42 @@ export const createUploadsRoutes = (ports: WorkspaceIntakePorts = workspaceIntak
 
 export const uploadsRoutes = createUploadsRoutes();
 
+/**
+ * Where a direct upload session lands, decided at session creation: an
+ * existing workspace's ID, or the name of the workspace to create at confirm
+ * (neither: a self-titled one). Same rules as intakeIntoWorkspace.
+ */
+async function directUploadTarget(
+  actor: RequestActor,
+  input: { workspace?: string; newWorkspace?: boolean; templateKey?: string },
+  orgId: string | null,
+): Promise<{ workspaceId: string | null; workspaceName: string | null }> {
+  const lookup = await lookupActorWorkspace(actor, input.workspace, orgId);
+  const restricted = actorAllowedWorkspaceIds(actor) !== null;
+  const create = (workspaceName: string | null) => {
+    if (restricted) throw new WorkspaceIntakeError("This API key is limited to specific workspaces and cannot create new ones.", 403);
+    return { workspaceId: null, workspaceName };
+  };
+  if (lookup.ref.kind === "default") {
+    const explicit = Boolean(input.workspace?.trim());
+    if (!explicit && (input.newWorkspace || input.templateKey)) return create(null);
+    return { workspaceId: (await requireActorWorkspace(actor, null, orgId)).id, workspaceName: null };
+  }
+  const found = "workspace" in lookup ? lookup.workspace : null;
+  if (lookup.ref.kind === "id") {
+    if (!found) throw workspaceInputNotFoundError({ id: lookup.ref.id });
+    return { workspaceId: found.id, workspaceName: null };
+  }
+  return found ? { workspaceId: found.id, workspaceName: null } : create(lookup.ref.name);
+}
+
 const uploadEstimateSchema = z.object({
   files: z.array(z.object({
     name: z.string().min(1).max(1024),
     size: z.number().int().nonnegative(),
     pages: z.number().int().positive().optional(),
   })).min(1).max(1000),
-  workspaceId: z.string().optional(),
+  workspace: workspaceInputSchema.optional(),
   orgId: z.string().optional(),
 });
 
@@ -483,9 +503,13 @@ export const uploadEstimateRoutes = new Hono().post(
     if (actor.type === "apiKey" && !actorHasAnyApiKeyScope(actor, ["ingest"])) {
       return apiErrorResponse(c, 403, "forbidden", "Forbidden");
     }
-    // Read-only: an estimate never creates the default workspace.
-    const workspace = body.workspaceId
-      ? await getWorkspace(body.workspaceId, userId)
+    // Read-only: an estimate never creates a workspace, the default one included.
+    const lookup = await lookupActorWorkspace(actor, body.workspace, body.orgId);
+    if (lookup.ref.kind !== "default" && "workspace" in lookup && !lookup.workspace) {
+      throw workspaceInputNotFoundError(lookup.ref.kind === "slug" ? { slug: lookup.ref.slug } : { id: lookup.ref.id });
+    }
+    const workspace = "workspace" in lookup && lookup.workspace
+      ? await getWorkspace(lookup.workspace.id, userId)
       : await findDefaultWorkspace({ userId, orgId: actor.type === "apiKey" ? actor.apiKey.orgId : body.orgId });
     if (!workspace || (actor.type === "apiKey" && !apiKeyCanUseWorkspace(actor.apiKey, workspace))) {
       return apiErrorResponse(c, 404, "workspace_not_found", "Workspace not found");

@@ -280,7 +280,7 @@ describe("chatWorkspace", () => {
         model: "inception/mercury-3", agent: { maxSteps: 10, searchConcurrency: 8 },
         actor: { type: "session", userId: "user-1", sessionId: "s", user: { id: "user-1", email: "", name: "Admin", isAdmin: true } } });
       expect(runChatMcpAgent).toHaveBeenCalledWith(expect.objectContaining({ model: "inception/mercury-3", requestedModel: "inception/mercury-3",
-        limits: { maxSteps: 10, maxToolCalls: 12, searchConcurrency: 8, clamped: [] } }));
+        limits: { maxSteps: 10, maxToolCalls: 16, searchConcurrency: 8, clamped: [] } }));
       expect(response.debug).toMatchObject({ model: "inception/mercury-3", ...agentDebug });
     } finally {
       if (previous.key === undefined) delete process.env.OPENROUTER_API_KEY; else process.env.OPENROUTER_API_KEY = previous.key;
@@ -314,7 +314,7 @@ describe("chatWorkspace", () => {
         await expect(turn("inception/mercury-3")).rejects.toMatchObject({ status: 400, code: "model_not_allowed" });
         await turn();
         expect(runChatMcpAgent).toHaveBeenLastCalledWith(expect.objectContaining({
-          limits: { maxSteps: 6, maxToolCalls: 12, searchConcurrency: 4, clamped: ["maxSteps", "maxToolCalls", "searchConcurrency"] } }));
+          limits: { maxSteps: 8, maxToolCalls: 16, searchConcurrency: 6, clamped: ["maxSteps", "maxToolCalls", "searchConcurrency"] } }));
       }
     } finally {
       for (const [name, value] of [["OPENROUTER_API_KEY", previous.key], ["DOCSLURP_CHAT_EVAL_MODELS", previous.models], ["DOCSLURP_CHAT_EVAL_ORG_IDS", previous.orgs]] as const) {
@@ -538,13 +538,16 @@ describe("chatWorkspace", () => {
     const usageInserts = sqlMock.mock.calls.filter(([strings]) =>
       Array.isArray(strings) && strings.join(" ").includes("insert into usage_events"),
     );
-    expect(usageInserts).toHaveLength(2);
+    expect(usageInserts).toHaveLength(3);
     expect(usageInserts.map((call) => [call[6], call[10], call[11]])).toEqual([
       ["embed-query", 7, 0],
       ["workspace-chat", 10, 4],
+      // The billable unit: one chat answer at its model tier (provider events above bill 0).
+      ["chat-answer", 0, 0],
     ]);
-    // Both search and chat spend are stamped with the org scope.
-    for (const call of usageInserts) {
+    expect(JSON.parse(String(usageInserts[2]![12]))).toMatchObject({ billable: true, unitCharge: true, workspaceId: "ws-1" });
+    // Both search and chat provider spend are stamped with the org scope.
+    for (const call of usageInserts.slice(0, 2)) {
       expect(JSON.parse(String(call[12]))).toMatchObject({
         workspaceId: "ws-1",
         orgId: "org-1",

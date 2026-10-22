@@ -108,7 +108,7 @@ How it behaves:
 [sandbox-usage] provider=modal cpu_seconds=<n> memory_gb_seconds=<n> activity=<id>
 ```
 
-The Modal SDK does not report actual usage. The figures are the requested CPU and memory multiplied by wall time, which is what Modal bills. For each command, including one that fails or is aborted, the worker also records one usage event with provider `modal` and metric `sandbox_compute` in the running stage's usage ledger, tagged with the stage's scope. The event carries the estimated provider cost in `metadata.effectiveCostCents` and is marked `costRollup: "included"` and `billable: false`, so it never adds customer credits, even with `DOCSLURP_BILL_COMPUTE=true`. A command run outside a pipeline stage (for example from a CLI) only logs the line.
+The Modal SDK does not report actual usage. The figures are the requested CPU and memory multiplied by wall time, which is what Modal bills. For each command, including one that fails or is aborted, the worker also records one usage event with provider `modal` and metric `sandbox_compute` in the running stage's usage ledger, tagged with the stage's scope. The event carries the estimated provider cost in `metadata.effectiveCostCents` and is marked `costRollup: "included"` and `billable: false`, so it never adds customer credits (compute is never billed; customers pay per page). A command run outside a pipeline stage (for example from a CLI) only logs the line.
 
 While a Modal command runs, the worker reports progress to the stage's stall watchdog every 30 seconds, up to the command's own time limit. Long remote parses are not aborted as hung. Remote stdout and stderr are capped at `WORKER_COMMAND_MAX_OUTPUT_BYTES`, as local commands are.
 

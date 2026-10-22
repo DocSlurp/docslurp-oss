@@ -176,7 +176,7 @@ export async function runConnectorSync(row: ConnectorRow, syncLogId: string): Pr
     await intakeIntoWorkspace({
       userId: wsInfo.user_id,
       orgId: wsInfo.org_id,
-      workspaceId: row.workspace_id,
+      workspace: row.workspace_id,
       pipeline: wsInfo.pipeline ?? defaultPipelineFeatures,
       kind: "connector-sync",
       items: connectorItems(),

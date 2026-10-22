@@ -5,7 +5,7 @@
 Each result has a `score` (rank-based, so the top hit is always near 1) and a `relevance` from 0 to 1: the strength of the match itself, the best of the embedding similarity (rescaled above the embedding model's unrelated-text baseline) and the share of query terms found in the passage. Unlike `score`, `relevance` does not depend on the other hits, so it is comparable across queries.
 
 - `q` (required): the query, up to 16,000 characters.
-- `workspaceId`: omit it, or pass `default`, for your organization's default workspace. Otherwise pass a slug such as `legal-contracts`; UUIDs and former slugs also work ([Workspaces](https://docslurp.io/docs/http#workspaces)).
+- `workspace`: omit it, or pass `default`, for your organization's default workspace. Otherwise pass a workspace ID, slug or name: `Legal Contracts` and `legal-contracts` name the same workspace, and former slugs keep working. A value that matches none of your workspaces answers `404 workspace_not_found` naming the slug it looked for ([Workspaces](https://docslurp.io/docs/http#workspaces)).
 - `limit`: an integer from 1 to 100.
 - `minScore`: the relevance floor, 0 to 1 (default 0.1, or the workspace's retrieval default; `SEARCH_MIN_SCORE` sets the server default; 0 turns it off). Results with a lower raw `relevance` are dropped. When the workspace is searchable but search returns nothing, `results` is empty and the response carries `noMatch: true` with `relevanceFloor: {minScore, dropped}`. That is either because nothing cleared the floor (`dropped` > 0) or because nothing was retrieved at all, for example a filter that matches nothing (`dropped` is 0). A caller can use it to say "no good match" instead of answering from weak passages. `/v1/chat` does this automatically.
 - Filters: `documentId`, `runId`, `filenameContains`, `pageFrom`, `pageTo`, and comma-separated `tags` or `mimeTypes`.
@@ -60,7 +60,7 @@ Chunks reach keyword search once the embed stage has written every chunk row of 
 {
   "queries": [
     {"q": "support hours", "limit": 3},
-    {"q": "urgent incidents", "workspaceId": "operations-runbooks", "tags": "operations"}
+    {"q": "urgent incidents", "workspace": "operations-runbooks", "tags": "operations"}
   ],
   "concurrency": 4
 }
@@ -93,7 +93,7 @@ Protocol surfaces keep the shapes their clients already parse: the OpenAI-compat
 
 ## Grounded chat
 
-`POST /v1/chat` is the canonical workspace chat endpoint. Send `{q, workspaceId?, sessionId?, model?, retrieval?, filters?, agent?}`; an omitted `workspaceId` means your organization's default workspace. `sessionId` and `model` are nonempty strings of at most 256 characters; all fields are checked before model calls. The response includes an answer, citations, and the chat session ID. For streaming, use `/v1/chat/completions` with `stream: true`; omit it for the JSON fallback.
+`POST /v1/chat` is the canonical workspace chat endpoint. Send `{q, workspace?, sessionId?, model?, retrieval?, filters?, agent?}`; an omitted `workspace` means your organization's default workspace (`workspace` takes an ID, slug or name). `sessionId` and `model` are nonempty strings of at most 256 characters; all fields are checked before model calls. The response includes an answer, citations, and the chat session ID. For streaming, use `/v1/chat/completions` with `stream: true`; omit it for the JSON fallback.
 
 ### Model
 
@@ -107,9 +107,11 @@ When the search agent answers (the default for `/v1/chat` with `DOCSLURP_PUBLIC_
 
 | Field | Default | Range | Meaning |
 |---|---|---|---|
-| `maxSteps` | 6 | 1–12 | Model calls in the loop. The last one runs with tools disabled, so the agent always ends with an answer. |
-| `maxToolCalls` | 12 | 1–24 | Tool calls across the turn. Later calls get `{error, code: "tool_call_limit", limitReached: true}` instead of running. |
-| `searchConcurrency` | 4 | 1–8 | Upper bound on the search tool's parallel `queries`, and the value it uses when the model omits `concurrency`. |
+| `maxSteps` | 8 | 1–12 | Model calls in the loop. The last one runs with tools disabled, so the agent always ends with an answer. |
+| `maxToolCalls` | 16 | 1–24 | Tool calls across the turn. Later calls get `{error, code: "tool_call_limit", limitReached: true}` instead of running. |
+| `searchConcurrency` | 6 | 1–8 | Upper bound on the search tool's parallel `queries`, and the value it uses when the model omits `concurrency`. |
+
+The defaults come from a 51-case production eval (2026-10-21): at 4 steps, 25–37% of turns ran out of steps or tool calls; at 8/16/6 correctness rose from about 0.79 to 0.86–0.92 across three models, and 12/24/8 added nothing. The [turn deadline](#turn-deadline) still bounds wall-clock time, so higher step limits cannot make a turn slower than the deadline.
 
 Platform admins, and turns in a `DOCSLURP_CHAT_EVAL_ORG_IDS` organization's workspace, can use the full range. For everyone else, a value above the default is lowered to the default and listed in `debug.limits.clamped`; lower values apply as sent. Out-of-range values or unknown fields return HTTP 400 `invalid_request`.
 
@@ -130,7 +132,7 @@ Agent responses add these `debug` fields (other turns omit them):
 | `timeBudget` | `{turnDeadlineMs, stepTimeoutMs, toolTimeoutMs, finalReserveMs, elapsedMs, finalAnswer, stepTimeouts, toolTimeouts, toolCallsAfterDeadline}`. `finalAnswer` is `loop` (the agent answered on its own), `forced` (the final-answer reserve started, so the last step ran without tools), `from_evidence` (a model step ran out of time and one extra no-tools call answered from the evidence already gathered) or `partial` (the deadline cut the answer off; the text so far is returned with `finishReason: "length"`). See [Turn deadline](#turn-deadline). |
 | `stopReason` | See below |
 
-On agent turns, `usage.costCents` is the **provider cost** in USD cents of the agent's own model calls (the OpenRouter receipt, or an estimate from verified list prices when the receipt is missing; `usage.costSource` says `provider`, `estimate` or `mixed`). It is not customer credits; credits are derived from the recorded usage events by the rate card. It excludes tool work: the provider cost the tools report for their own work (query embeddings, rewrites, HyDE, reranking, nested answers) is in `usage.toolCostCents` and per call in `debug.toolCalls[].costCents`, and is recorded as separate usage events. A turn's total provider cost is `costCents + toolCostCents`; cached search responses report 0.
+On agent turns, `usage.costCents` is the **provider cost** in USD cents of the agent's own model calls (the OpenRouter receipt, or an estimate from verified list prices when the receipt is missing; `usage.costSource` says `provider`, `estimate` or `mixed`). It is not customer credits: a delivered answer is billed per answer by its model tier (`GET /v1/billing/prices`), and provider cost is recorded only for our own accounting. It excludes tool work: the provider cost the tools report for their own work (query embeddings, rewrites, HyDE, reranking, nested answers) is in `usage.toolCostCents` and per call in `debug.toolCalls[].costCents`, and is recorded as separate usage events. A turn's total provider cost is `costCents + toolCostCents`; cached search responses report 0.
 
 A turn that fails on our side is not charged. When `/v1/chat` fails with an error after the turn started (any 4xx/5xx, including the agent timeout), the turn's credits are refunded: debits not yet applied are cancelled, and credits already applied come back as one `grant:adjustment` ledger entry per organization (`externalId` `chat-turn-refund:<id>:<orgId>:<hash>`). Provider cost stays recorded for accounting. A turn the client abandons (it disconnects or aborts, before or after the answer is generated) is charged: the work was done for that client and the answer is kept in the chat session. A partial answer that is sent is a delivered turn and is charged. The error body reports the turn in `error.details.usage`: `{turnId, outcome, providerCostCents, creditCents, refundedCreditCents, chargedCreditCents, refunded}`. The turn id is the response `id` of a successful turn and is stamped on every usage event the turn records (`metadata.chatTurnId`); a nested grounded answer inside the turn gets its own response id. The streaming endpoint follows the same rule. The OpenAI-compatible, MCP and dashboard chat surfaces refund turns that fail with a server error. Operators can turn refunds off with `CHAT_REFUND_UNDELIVERED_TURNS=false`.
 
@@ -237,7 +239,7 @@ For an equal-candidate comparison, hold `candidateDepth`, `limit`, filters and f
 ```json
 {
   "q": "pump maintenance interval",
-  "workspaceId": "manuals",
+  "workspace": "manuals",
   "candidateDepth": 100,
   "limit": 10,
   "rerank": false,

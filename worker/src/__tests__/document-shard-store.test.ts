@@ -56,7 +56,8 @@ describe("document shard checkpoints", () => {
     const [a, b] = await Promise.all([shardState("run-big", ["doc-1"]), shardState("run-big", ["doc-2"])]);
     a.artifactLedger.record("doc-1:embeddings", "s3://e1");
     const spend = (state: WorkflowState, costCents: number) => state.usageLedger.enqueue({
-      provider: "docslurp", model: "page-base-fee", metric: "page-base-fee", amount: 1, unit: "page", costCents });
+      provider: "docslurp", model: "price-card", metric: "ingest-page-fast", amount: 1, unit: "page", costCents,
+      metadata: { billable: true, unitCharge: true } });
     expect(a.run.spentCents).toBe(10);
     spend(a, 3);
     b.artifactLedger.record("doc-2:embeddings", "s3://e2");
@@ -90,7 +91,8 @@ describe("document shard checkpoints", () => {
     await sql`insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, pipeline, artifacts)
       values ('run-cost', 'small', 'u1', 'ws', 'bulk-upload', 'completed', 'index', '{}', '{}')`;
     const state = await shardState("run-cost", ["doc-9"]);
-    state.usageLedger.enqueue({ provider: "docslurp", model: "local-compute", metric: "worker-stage", amount: 1, unit: "stage", costCents: 5 });
+    state.usageLedger.enqueue({ provider: "docslurp", model: "price-card", metric: "ingest-page-rich", amount: 20, unit: "page", costCents: 5,
+      metadata: { billable: true, unitCharge: true } });
     // Each delta is taken against the last committed checkpoint, so overlapping
     // checkpoints of one state must not both add it.
     await Promise.all([store.updateProgress(state), store.updateProgress(state), store.finishShard(state)]);

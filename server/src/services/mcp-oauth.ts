@@ -104,7 +104,7 @@ export async function validateMcpToken(raw: string, resource: string): Promise<V
   return {
     keyId: row.api_key_id, userId: row.user_id, orgId: row.org_id,
     keyType: "server", allowedDomains: [], scopes: row.scopes,
-    rateLimitRpm: 120, rateLimitPpd: 10000, rateLimits: parseApiKeyRateLimits(row.key_rate_limits),
+    rateLimitRpm: null, rateLimitPpd: 10000, rateLimits: parseApiKeyRateLimits(row.key_rate_limits),
     workspaceIds: Array.isArray(row.key_workspace_ids) ? row.key_workspace_ids : [],
   };
 }

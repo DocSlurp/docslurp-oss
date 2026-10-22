@@ -1,4 +1,4 @@
-import { priceAiUsageEvent } from "@docslurp/shared";
+import { PRICE_CARD, pageCredits, priceAiUsageEvent } from "@docslurp/shared";
 import { emitTelemetryLog } from "./telemetry.js";
 import { createHash } from "node:crypto";
 import { withObservation, recordMediaTelemetry } from "@docslurp/shared/observability";
@@ -29,7 +29,8 @@ export async function transcribeChunk(args: {
   args.signal?.throwIfAborted();
   await provider.prepare?.();
   const admission = await journal.admit({ scope, key, provider: provider.id, model: provider.model,
-    reserveCents: priceAiUsageEvent({ costCents: Math.max(0.001, input.durationSeconds / 60 * provider.priceUsdPerMinute * 100 * 1.25 * (provider.reservationMultiplier ?? 1)) }, { planId: state.run.orgPlanId }).costCents,
+    // Reserve what the customer is billed for these seconds (media minutes as Rich pages); provider cost is ours.
+    reserveCents: operation === "diarize" ? 0.001 : Math.max(0.001, pageCredits("rich", input.durationSeconds / 60 * PRICE_CARD.audioMinuteRichPages)),
     maxRunCostCents: state.run.pipeline.maxCostCents ?? null, maxDocumentCostCents: args.maxDocumentCostCents, maxConcurrent: config.maxConcurrent, dailyBudgetCents: config.dailyBudgetCents });
   const id = admission.receipt.id;
   if (!admission.acquired && admission.receipt.status !== "completed") {
@@ -49,7 +50,7 @@ export async function transcribeChunk(args: {
       amount: input.durationSeconds, unit: "audio-seconds", costCents,
       inputTokens: result.inputTokens, outputTokens: result.outputTokens,
       metadata: { ...scope, mediaJobId: id, providerRequestId: result.requestId, costSource: result.costSource,
-        accounting: result.accounting, providerCostUsd: result.costUsd, pricingMismatch: result.pricingMismatch, expectedCostUsd: result.expectedCostUsd, offsetSeconds: args.offset, priceUsdPerMinute: provider.priceUsdPerMinute } }, { planId: state.run.orgPlanId }),
+        accounting: result.accounting, providerCostUsd: result.costUsd, pricingMismatch: result.pricingMismatch, expectedCostUsd: result.expectedCostUsd, offsetSeconds: args.offset, priceUsdPerMinute: provider.priceUsdPerMinute } }),
       // Audio-seconds events log too (`[ai-usage] <metric> model=... input_tokens=0 output_tokens=0`), per the repo usage-logging rule.
       { logAiUsage: true });
     state.artifactLedger.record(`media-usage:${id}`, resultKey);
@@ -95,7 +96,7 @@ export async function transcribeChunk(args: {
     // within reserved exposure does not globally stop unrelated organizations.
     const exceedsReserve = (result.accounting?.reportedCostUsd ?? result.costUsd) >
       Math.max(.00001, input.durationSeconds / 60 * provider.priceUsdPerMinute * 1.25 * (provider.reservationMultiplier ?? 1));
-    await journal.complete(id, resultKey, result.costUsd * 100, exceedsReserve, result.accounting, priceAiUsageEvent({ costCents: result.costUsd * 100 }, { planId: state.run.orgPlanId }).costCents);
+    await journal.complete(id, resultKey, result.costUsd * 100, exceedsReserve, result.accounting, 0);
     completed = true;
     await recordUsage(result);
     if (result.pricingMismatch) emitTelemetryLog({ severityText: "error", body: "media.pricing.reconciliation_required",

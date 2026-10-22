@@ -47,7 +47,7 @@ test("uploads above the threshold go through a direct session, never multipart /
   ]);
   const session = JSON.parse(api.calls[0].body);
   assert.deepEqual(session.files, [{ filename: "big.pdf", mimeType: "application/pdf", sizeBytes: big.size, canonicalId: "/manual" }]);
-  assert.equal(session.workspaceId, "default");
+  assert.equal(session.workspace, "default");
   // Presigned storage URLs never receive the API key.
   assert.equal(api.calls[1].auth, null);
   assert.equal(api.calls[1].contentType, "application/pdf");

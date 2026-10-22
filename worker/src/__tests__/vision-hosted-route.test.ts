@@ -3,11 +3,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { NEMOTRON_SUPER_VL_VISION_MODEL, OPENROUTER_BASE_URL, visionConfigSchema } from "@docslurp/shared";
+import { DEFAULT_OPENROUTER_VISION_MODEL, NEMOTRON_SUPER_VL_VISION_MODEL, OPENROUTER_BASE_URL, visionConfigSchema } from "@docslurp/shared";
 
 import type { Config } from "../config.js";
 import { CommandRunner } from "../tools/runner.js";
 import { executeVisionRuntime } from "../tools/vision-runtime.js";
+import { visionReasoningParams } from "../tools/vision-model-profiles.js";
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -55,7 +56,7 @@ describe("hosted OpenRouter vision request shape", () => {
     expect(result.costCents).toBeCloseTo(0.047, 10);
   });
 
-  it("leaves the default Gemini route without a reasoning override", async () => {
+  it("sends the default route with its catalog reasoning params", async () => {
     const bodies: Array<Record<string, any>> = [];
     vi.stubGlobal("fetch", vi.fn(async (_url: string, init: RequestInit) => {
       bodies.push(JSON.parse(String(init.body)));
@@ -70,7 +71,7 @@ describe("hosted OpenRouter vision request shape", () => {
       runner: new CommandRunner(),
       privacyMode: "standard",
     });
-    expect(bodies[0]!.model).toBe("google/gemini-3.1-flash-lite");
-    expect(bodies[0]!.reasoning).toBeUndefined();
+    expect(bodies[0]!.model).toBe(DEFAULT_OPENROUTER_VISION_MODEL);
+    expect(bodies[0]!.reasoning).toEqual(visionReasoningParams(DEFAULT_OPENROUTER_VISION_MODEL).reasoning);
   });
 });

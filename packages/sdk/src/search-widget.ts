@@ -1,7 +1,7 @@
 /**
  * Framework-free search widget. Calling this function in SSR is a safe no-op.
  * Attributes: client-key (required unless search-endpoint proxies), optional
- * workspace-id (UUID, slug or "default"; default "default", the key
+ * workspace (ID, slug or name, or "default"; default "default", the key
  * organization's default workspace), api-url (default https://docslurp.io),
  * search-endpoint, placeholder. Server keys (dslp_priv_…) are refused: use a
  * search-only client key (dslp_pub_…) or a search-endpoint proxy.
@@ -38,7 +38,7 @@ export function defineDocSlurpSearch() {
           const proxy = this.getAttribute("search-endpoint");
           const apiUrl = this.getAttribute("api-url")?.trim() || "https://docslurp.io";
           const key = this.getAttribute("client-key");
-          const workspaceId = this.getAttribute("workspace-id")?.trim() || "default";
+          const workspace = this.getAttribute("workspace")?.trim() || "default";
           if (!proxy && !key) throw new Error("Missing search configuration");
           // Inline (not imported from ./keys) so the widget stays one self-contained file for WordPress.
           if (!proxy && key?.startsWith("dslp_priv_")) {
@@ -46,7 +46,7 @@ export function defineDocSlurpSearch() {
             status.textContent = "Search is misconfigured.";
             return;
           }
-          const response = await fetch(proxy ?? `${apiUrl.replace(/\/$/, "")}/v1/search`, { method: "POST", credentials: "omit", signal: request.signal, headers: { "Content-Type": "application/json", ...(!proxy && key ? { Authorization: `Bearer ${key}` } : {}) }, body: JSON.stringify(proxy ? { q } : { q, workspaceId, limit: 6 }) });
+          const response = await fetch(proxy ?? `${apiUrl.replace(/\/$/, "")}/v1/search`, { method: "POST", credentials: "omit", signal: request.signal, headers: { "Content-Type": "application/json", ...(!proxy && key ? { Authorization: `Bearer ${key}` } : {}) }, body: JSON.stringify(proxy ? { q } : { q, workspace, limit: 6 }) });
           if (!response.ok) throw new Error("Search unavailable");
           const body = await response.json();
           if (request.signal.aborted || this.request !== request) return;

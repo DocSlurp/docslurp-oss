@@ -91,12 +91,20 @@ export interface Config {
   workerAdaptiveTuning: boolean;
   serializePdfCandidateExtraction: boolean;
   visionDensityThreshold: number;
+  /** VISION_STREAMING=on|off (default on): stream hosted vision responses so degenerate output can be aborted early. */
+  visionStreaming?: boolean;
   /**
    * PAGE_ROUTER_MODE=off|shadow|active (default off). Ceiling over each workspace's
    * `pageRouter.mode`: nothing routes unless both opt in. Optional so partial
    * Config literals (tests) read as off.
    */
   pageRouterMode?: PageRouterMode;
+  /**
+   * VISION_MODEL_SWAP_POLICY=warn|fail (default warn). When a hosted vision call is
+   * served by a different model snapshot than requested, `warn` logs and flags it;
+   * `fail` throws a retryable provider error. Optional so partial Config literals read as warn.
+   */
+  visionModelSwapPolicy?: "warn" | "fail";
   pythonPoolSize: number;
   parserArtifactTimeoutMs: number;
   unstructuredParserChunkTimeoutMs: number;
@@ -281,7 +289,9 @@ export function fromEnv(): Config {
     visionDensityThreshold: Number.parseFloat(
       process.env.VISION_DENSITY_THRESHOLD ?? "0.25",
     ),
+    visionStreaming: readBoolean(process.env.VISION_STREAMING, true),
     pageRouterMode: readPageRouterMode(process.env.PAGE_ROUTER_MODE),
+    visionModelSwapPolicy: readEnv(process.env.VISION_MODEL_SWAP_POLICY)?.toLowerCase() === "fail" ? "fail" : "warn",
     pythonPoolSize: readNumber(process.env.WORKER_PYTHON_POOL_SIZE, 2),
     parserArtifactTimeoutMs: readNumber(
       process.env.PARSER_ARTIFACT_TIMEOUT_MS,

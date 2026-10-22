@@ -32,8 +32,9 @@ beforeAll(async () => {
     },
   }));
   await sql`insert into "user"(id, name, email) values ('u1', 'A', 'a@x')`;
+  // "free" is a starter org; "gold" and "broke" are funded (funded_at set by a paid grant).
   const org = (id: string, plan: string, cents: number) =>
-    sql`insert into organizations(id, name, slug, created_by_user_id, credit_balance_cents, plan_id) values (${id}, ${id}, ${id}, 'u1', ${cents}, ${plan})`;
+    sql`insert into organizations(id, name, slug, created_by_user_id, credit_balance_cents, funded_at) values (${id}, ${id}, ${id}, 'u1', ${cents}, ${plan === "free" ? null : new Date()})`;
   await org("free", "free", 0);
   await org("gold", "gold", 1000);
   await org("broke", "gold", 0);
@@ -206,14 +207,14 @@ describe("full-index routes", () => {
   it("MCP fullIndex: happy path and policy denial", async () => {
     await seedWorkspace("t-mcp", "gold", "map");
     await seedDoc("t-mcp-a", "t-mcp", "gold", 5, 2);
-    const ok = await dispatch("/tools/fullIndex", json("POST", { workspaceId: "t-mcp" }));
+    const ok = await dispatch("/tools/fullIndex", json("POST", { workspace: "t-mcp" }));
     expect(ok.status).toBe(202);
     expect(await ok.json()).toMatchObject({ tool: "fullIndex", pages: 3 });
     await seedWorkspace("t-mcp2", "gold", "map", { materialization: { allowFullIndexRequest: false } });
     await seedDoc("t-mcp2-a", "t-mcp2", "gold", 5, 2);
-    const denied = await dispatch("/tools/fullIndex", json("POST", { workspaceId: "t-mcp2" }));
+    const denied = await dispatch("/tools/fullIndex", json("POST", { workspace: "t-mcp2" }));
     expect(denied.status).toBe(403);
     process.env.DOCSLURP_DEFERRED_PROFILES = "0";
-    expect((await dispatch("/tools/fullIndex", json("POST", { workspaceId: "t-mcp" }))).status).toBe(404);
+    expect((await dispatch("/tools/fullIndex", json("POST", { workspace: "t-mcp" }))).status).toBe(404);
   });
 });

@@ -386,7 +386,25 @@ export function embeddingCacheBypassReason(privacyMode: PrivacyMode, orgId: stri
 }
 
 /** Hosted providers that report actual usage and fail loudly instead of degrading to text-only search. */
-const METERED_EMBEDDING_PROVIDERS = new Set(["openrouter", "perplexity", "deepinfra"]);
+export const METERED_EMBEDDING_PROVIDERS = new Set(["openrouter", "perplexity", "deepinfra"]);
+
+/** The embedding-cache key embedQuery uses for this query, or null when it would bypass the cache. */
+export function queryEmbeddingCacheKey(query: string, embedding: EmbeddingConfig, privacyMode: PrivacyMode, orgId: string | undefined): string | null {
+  const route = resolveEmbeddingRoute(embedding);
+  const normalize = route.provider === "deepinfra" ? embedding.normalize : true;
+  if (!embeddingCache().enabled || embeddingCacheBypassReason(privacyMode, orgId) || !orgId) return null;
+  return embeddingCacheKey({ orgId, provider: route.provider, runtime: route.runtime, model: route.model, modelUri: route.modelUri,
+    baseUrl: route.baseUrl, dimensions: route.dimensions, requestedDimensions: route.requestedDimensions, normalize: Boolean(normalize) }, query);
+}
+
+/** Provider API key for a query-embedding route (undefined for local and keyless routes). */
+export function queryEmbeddingApiKey(route: { runtime: string; provider: string }): string | undefined {
+  return route.runtime === "remote" && route.provider === "openai"
+    ? process.env.OPENAI_API_KEY
+    : route.provider === "openrouter" ? process.env.OPENROUTER_API_KEY ?? process.env.OPENROUTER_KEY
+      : route.provider === "perplexity" ? process.env.PERPLEXITY_API_KEY ?? process.env.PERPLEXITYAI_API_KEY
+        : route.provider === "deepinfra" ? process.env.DEEPINFRA_API_KEY : undefined;
+}
 
 export async function embedQuery(
   query: string,
@@ -409,9 +427,7 @@ export async function embedQuery(
   // hit would skip that audit row. Without an org there is no safe cache scope.
   const cache = embeddingCache();
   const bypassReason = embeddingCacheBypassReason(privacyMode, orgId);
-  const cacheKey = cache.enabled && !bypassReason && orgId
-    ? embeddingCacheKey({ orgId, provider, runtime, model, modelUri: route.modelUri, baseUrl, dimensions, requestedDimensions, normalize: Boolean(normalize) }, query)
-    : null;
+  const cacheKey = queryEmbeddingCacheKey(query, embedding, privacyMode, orgId);
   if (cache.enabled) {
     const cached = cacheKey ? cache.get(cacheKey) : undefined;
     startDependencySpan("embed.cache", {
@@ -433,12 +449,7 @@ export async function embedQuery(
       return cached.slice();
     }
   }
-  const apiKey =
-    runtime === "remote" && provider === "openai"
-      ? process.env.OPENAI_API_KEY
-      : provider === "openrouter" ? process.env.OPENROUTER_API_KEY ?? process.env.OPENROUTER_KEY
-        : provider === "perplexity" ? process.env.PERPLEXITY_API_KEY ?? process.env.PERPLEXITYAI_API_KEY
-          : provider === "deepinfra" ? process.env.DEEPINFRA_API_KEY : undefined;
+  const apiKey = queryEmbeddingApiKey(route);
   if (runtime === "remote" && provider === "openai" && !apiKey) {
     return null;
   }

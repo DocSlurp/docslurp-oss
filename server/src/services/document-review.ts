@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { splitTextIntoPages as splitDocumentPages } from "@docslurp/shared";
 
 import { sql } from "../db.js";
+import { notifySearchEligibilityChanged } from "../search/eligibility-hint.js";
 import { getArtifactJson, getArtifactText } from "../lib/artifacts.js";
 import { listAccessibleWorkspaceIds } from "./organizations.js";
 import { getDocumentViewerPayload, setDocumentTags } from "./documents.js";
@@ -1191,6 +1192,9 @@ export async function reindexDocumentCorrection(args: {
           updated_at = now()
       where id = ${args.docId}
     `;
+    // The document's LanceDB rows now carry stale text: native search drops
+    // the cached eligibility (lanceStale) on commit and serves it from Postgres.
+    await notifySearchEligibilityChanged(transaction, [document.workspace_id]);
   });
 
   return {

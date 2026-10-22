@@ -6,6 +6,7 @@ import { textModelApiKey, textUsageLabels } from "../lib/text-model-route.js";
 import { allowHostedCall, openRouterTextCall } from "../lib/privacy-guard.js";
 import type { Stage, WorkflowState } from "../pipeline/pipeline.js";
 import { isCostCapExceeded, runDocumentStage, runDocuments } from "../pipeline/checkpoints.js";
+import { chargeDocumentFeature } from "../pipeline/feature-charges.js";
 import type { CommandRunner } from "../tools/runner.js";
 import type { ArtifactStore } from "../tools/storage.js";
 import { measureOp } from "../lib/perf-context.js";
@@ -73,15 +74,18 @@ export class DocumentSummaryStage implements Stage {
               document,
               state.artifactLedger.readDocument(document.id, "markdown"),
               summarySignal,
+              state.artifactLedger.readDocument(document.id, "summary-evidence"),
             );
             if (!extracted?.text.trim()) {
               return { message: "Document summary skipped: no bounded extracted text available", stats: { summarySkipped: "source-unavailable" } };
             }
             const selected = selectSummaryInput(extracted.text, extracted.sampled);
             const sourceStats = { sourceBytes: extracted.sourceBytes, readBytes: extracted.readBytes,
-              inputCharacters: selected.text.length, sampled: selected.sampled };
+              inputCharacters: selected.text.length, inputBytes: Buffer.byteLength(selected.text), sampled: selected.sampled,
+              coverage: extracted.coverage ?? { totalPages: document.pageCount || null, pages: [], pageReferences: "unavailable" } };
             const {
-              text: summaryText,
+              text: generatedSummary,
+              finishReason,
               inputTokens: summaryInputTokens,
               outputTokens: summaryOutputTokens,
               costCents: providerCostCents,
@@ -111,6 +115,20 @@ export class DocumentSummaryStage implements Stage {
               metadata: { ...costMetadata, documentId: document.id, ...sourceStats },
             });
 
+            if (finishReason === "length" || !generatedSummary.trim()) {
+              return { message: "Document summary skipped: incomplete model output",
+                stats: { summarySkipped: "incomplete-output", finishReason, ...sourceStats } };
+            }
+            // Price card: one summary per document per run (provider tokens above bill 0).
+            chargeDocumentFeature(state, document, "documentSummary");
+            // Coverage is a product guarantee, not an instruction the model may ignore.
+            const coverage = extracted.coverage;
+            const notice = selected.sampled
+              ? coverage?.pageReferences === "verified"
+                ? `Sampled document overview (${coverage.pages.length} of ${coverage.totalPages} pages; excerpts may be clipped). `
+                : "Sampled document overview (page references unavailable). "
+              : "";
+            const summaryText = notice + generatedSummary.trim();
             const detectedLang = detectLanguage(summaryText);
             const profile = resolveEmbeddingModel(
               this.config,
@@ -201,7 +219,7 @@ export class DocumentSummaryStage implements Stage {
     privacyMode: PrivacyMode,
     signal?: AbortSignal,
     textGeneration?: TextGenerationConfig,
-  ): Promise<{ text: string; inputTokens: number; outputTokens: number; costCents?: number; metadata?: Record<string, unknown> }> {
+  ): Promise<{ text: string; finishReason: string; inputTokens: number; outputTokens: number; costCents?: number; metadata?: Record<string, unknown> }> {
     const task = buildTrustedDocumentTaskPrompt({
       instruction:
         "Generate a one-paragraph summary of this document for use in a search index.",
@@ -217,13 +235,15 @@ export class DocumentSummaryStage implements Stage {
       apiKey: textModelApiKey(this.config.openRouterApiKey, model),
       privacyMode,
       model,
-      maxOutputTokens: 512,
+      maxOutputTokens: 256,
       textGeneration: {
         model: textGeneration?.model ?? null,
         models: textGeneration?.models ?? {},
         ...textGeneration,
+        reasoningEfforts: { ...textGeneration?.reasoningEfforts,
+          "document-summary": textGeneration?.reasoningEfforts?.["document-summary"] ?? textGeneration?.reasoningEffort ?? "none" },
         maxOutputTokens: { ...textGeneration?.maxOutputTokens,
-          "document-summary": Math.min(512, textGeneration?.maxOutputTokens?.["document-summary"] ?? 512) },
+          "document-summary": Math.min(256, textGeneration?.maxOutputTokens?.["document-summary"] ?? 256) },
       },
       deploymentProfile: this.config.textGenerationProfile,
       system: task.system,
@@ -233,6 +253,7 @@ export class DocumentSummaryStage implements Stage {
 
     return {
       text: result.text,
+      finishReason: result.finishReason,
       ...result.usage,
     };
   }

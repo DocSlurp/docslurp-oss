@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 
 import { sql } from "../db.js";
-import { isProtectedStoredQuery } from "../search/session.js";
+import { awaitSearchSessionWrites, isProtectedStoredQuery } from "../search/session.js";
 import { actorHasAnyApiKeyScope, getRequestActor, loadActorScopedWorkspace, resolveActorWorkspaceId } from "../lib/request-actor.js";
 import { acceptApiKeys } from "../lib/route-auth.js";
 import { apiStatusError } from "../lib/api-error.js";
@@ -15,7 +15,7 @@ export const suggestRoutes = new Hono()
     const userId = c.get("sessionUser").id as string;
     const workspaceId = await resolveActorWorkspaceId(
       getRequestActor(c),
-      c.req.query("workspaceId"),
+      c.req.query("workspace"),
       c.req.query("orgId"),
     );
     const q = normalizePrefix(c.req.query("q") ?? null);
@@ -194,6 +194,8 @@ export const suggestRoutes = new Hono()
       return apiStatusError(c, 403, "Forbidden");
     }
 
+    // A write-behind search answers before its diagnostics row commits.
+    await awaitSearchSessionWrites(sessionId);
     const [row] = await sql<{ reason: string; suggestions: unknown; created_at: string; workspace_id: string }[]>`
       select z.reason, z.suggestions, z.created_at, z.workspace_id
       from search_zero_results z

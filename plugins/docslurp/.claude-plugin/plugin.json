@@ -1,0 +1,26 @@
+{
+  "name": "docslurp",
+  "displayName": "DocSlurp",
+  "version": "0.1.0",
+  "description": "Upload PDFs, Office files, EPUBs, images, audio and video to DocSlurp, then search them with page citations or get cited answers from your workspace.",
+  "author": {
+    "name": "DocSlurp",
+    "email": "support@docslurp.io",
+    "url": "https://docslurp.io"
+  },
+  "homepage": "https://docslurp.io/docs/mcp",
+  "repository": "https://github.com/DocSlurp/docslurp-oss",
+  "license": "MIT",
+  "icon": ".claude-plugin/icon.png",
+  "privacyPolicyUrl": "https://docslurp.io/privacy",
+  "termsOfServiceUrl": "https://docslurp.io/terms",
+  "keywords": [
+    "documents",
+    "rag",
+    "search",
+    "citations",
+    "pdf",
+    "ingestion",
+    "mcp"
+  ]
+}

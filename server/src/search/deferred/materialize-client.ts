@@ -1,3 +1,4 @@
+import { pageCredits } from "@docslurp/shared";
 import { randomUUID } from "node:crypto";
 
 import {
@@ -38,15 +39,12 @@ export const pageKey = (documentId: string, page: number) => `${documentId}:${pa
 const TERMINAL_FAILED = new Set(["failed", "blocked-pii"]);
 
 /**
- * Credits one on-demand page is expected to cost: the page base fee
- * (`DOCSLURP_PAGE_BASE_FEE_USD` x 100) plus the parse/embed estimate
- * (`DOCSLURP_EST_PAGE_MATERIALIZE_CREDITS`, default 0.5). Rate card unchanged.
+ * Credits one materialized page may cost the customer, for per-query budgets: a page read by OCR
+ * bills as a Rich page (PRICE_CARD), the worst case; text-layer pages bill less (Fast).
  */
 export function estimatedPageMaterializeCredits(env: NodeJS.ProcessEnv = process.env): number {
   const estimate = Number.parseFloat(env.DOCSLURP_EST_PAGE_MATERIALIZE_CREDITS ?? "");
-  const baseFeeUsd = Number.parseFloat(env.DOCSLURP_PAGE_BASE_FEE_USD ?? "");
-  return (Number.isFinite(estimate) && estimate >= 0 ? estimate : 0.5)
-    + (Number.isFinite(baseFeeUsd) && baseFeeUsd > 0 ? baseFeeUsd * 100 : 0);
+  return Number.isFinite(estimate) && estimate >= 0 ? estimate : pageCredits("rich", 1);
 }
 
 export const defaultMaterializeDeps: MaterializeDeps = {

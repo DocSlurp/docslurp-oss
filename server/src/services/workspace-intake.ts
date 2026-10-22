@@ -21,8 +21,9 @@ import {
   applyWorkspacePipelineOverrides,
   defaultPipelineFeatures,
   getWorkspaceTemplate,
-  isDefaultWorkspaceAlias,
   normalizePipelineFeatures,
+  parseWorkspaceInput,
+  type WorkspaceInputRef,
   type PipelineFeatureOverrides,
   type PipelineFeatures,
   type WorkspaceRecord,
@@ -44,7 +45,8 @@ import { seedPipelineFromProcessingDefaults, seedSearchSettingsFromProcessingDef
 import { updateWorkspaceSearchSettingsForUser } from "./search-controls.js";
 import { getUserSettings } from "./user-settings.js";
 import { deleteWorkspaceData } from "./data-deletion.js";
-import { createWorkspace, ensureDefaultWorkspace, getWorkspace, resolveWorkspaceRef } from "./workspaces.js";
+import { workspaceInputNotFoundError } from "./default-workspace.js";
+import { createWorkspace, ensureDefaultWorkspace, findWorkspaceForInput, getWorkspace, type WorkspaceInputScope } from "./workspaces.js";
 
 /** The run kind doubles as the source kind; it picks the validation policy. */
 export type WorkspaceIntakeKind =
@@ -53,7 +55,7 @@ export type WorkspaceIntakeKind =
   | "url-ingest"
   | "connector-sync";
 
-export type WorkspaceIntakeStatusCode = 400 | 404 | 409 | 413 | 415 | 422 | 500;
+export type WorkspaceIntakeStatusCode = 400 | 403 | 404 | 409 | 413 | 415 | 422 | 500;
 
 export class WorkspaceIntakeError extends Error {
   constructor(
@@ -102,14 +104,22 @@ export interface WorkspaceIntakeRequest {
   userId: string;
   orgId?: string | null;
   /**
-   * Append to this workspace. When null, the org's default workspace receives
-   * the items unless `newWorkspace`, `workspaceName`, or `templateKey` asks for
-   * a fresh self-titled workspace.
+   * The public `workspace` value: a workspace UUID, slug, former slug or name
+   * (see parseWorkspaceInput). A UUID must exist; a slug or name that matches
+   * none of the caller's workspaces creates one with that display name and
+   * slug. Omitted: the org's default workspace, unless `newWorkspace` or
+   * `templateKey` asks for a fresh self-titled workspace. "default" always
+   * means the default workspace.
    */
-  workspaceId: string | null;
+  workspace?: string | null;
+  /** Without `workspace`: a fresh self-titled workspace instead of the default. Ignored when `workspace` is given. */
   newWorkspace?: boolean;
-  workspaceName?: string | null;
   templateKey?: WorkspaceTemplateKey;
+  /**
+   * An API key's workspace allowlist. A restricted key only ever resolves
+   * workspaces inside it and can never create one.
+   */
+  allowedWorkspaceIds?: readonly string[] | null;
   /**
    * Per-request overrides, merged onto the workspace pipeline. Template-locked
    * settings always keep the template's value.
@@ -181,12 +191,18 @@ export interface RawSourceStorage {
 }
 
 export interface WorkspaceIntakeRecords {
-  findWorkspace(workspaceId: string, userId: string): Promise<WorkspaceRecord | null>;
+  /** A workspace the scope may use that a UUID, slug or name names (see findWorkspaceForInput). */
+  findWorkspace(
+    ref: Extract<WorkspaceInputRef, { kind: "id" } | { kind: "slug" }>,
+    scope: WorkspaceInputScope,
+  ): Promise<WorkspaceRecord | null>;
   defaultWorkspace(args: { userId: string; orgId?: string | null }): Promise<WorkspaceRecord>;
   createWorkspace(args: {
     userId: string;
     orgId?: string;
     name: string;
+    /** Preferred slug (a `workspace` value's slug); suffixed when another workspace holds it. */
+    slug?: string;
     templateKey?: WorkspaceTemplateKey;
     /** Upload overrides for the new workspace's pipeline (merged onto its template). */
     pipeline?: PipelineFeatureOverrides;
@@ -227,9 +243,9 @@ export const objectStorage: RawSourceStorage = {
 };
 
 export const postgresIntakeRecords: WorkspaceIntakeRecords = {
-  async findWorkspace(workspaceRef, userId) {
-    const ref = await resolveWorkspaceRef(workspaceRef);
-    return await getWorkspace(ref?.id ?? workspaceRef, userId);
+  async findWorkspace(ref, scope) {
+    const found = await findWorkspaceForInput(ref, scope);
+    return found ? await getWorkspace(found.id, scope.userId) : null;
   },
   defaultWorkspace: ensureDefaultWorkspace,
   async createWorkspace({ autoNamed, pipeline: overrides, ...args }) {
@@ -483,16 +499,41 @@ async function storeItem(
   return stored(key, measuredBytes);
 }
 
-async function findTargetWorkspace(
-  request: WorkspaceIntakeRequest & { workspaceId: string },
+/**
+ * The workspace an intake lands in, resolved before any bytes are read: an
+ * existing workspace, or what to create (name and preferred slug) when the
+ * request asks for a new one or names one that does not exist yet.
+ */
+async function resolveIntakeTarget(
+  request: WorkspaceIntakeRequest,
   records: WorkspaceIntakeRecords,
-): Promise<WorkspaceRecord> {
-  const workspace = await records.findWorkspace(request.workspaceId, request.userId);
-  if (!workspace) throw new WorkspaceIntakeError("Workspace not found.", 404);
-  if (request.orgId && workspace.orgId !== request.orgId) {
-    throw new WorkspaceIntakeError("Workspace does not belong to the requested organization", 404);
+): Promise<{ existing: WorkspaceRecord } | { create: { name?: string; slug?: string } }> {
+  const ref = parseWorkspaceInput(request.workspace);
+  if (ref.kind === "invalid") {
+    throw new WorkspaceIntakeError(ref.message, 400, [{ path: "workspace", message: "workspace must contain a letter or digit", code: "invalid_value" }]);
   }
-  return workspace;
+  const scope: WorkspaceInputScope = { userId: request.userId, orgId: request.orgId ?? null, allowedWorkspaceIds: request.allowedWorkspaceIds ?? null };
+  const restricted = (request.allowedWorkspaceIds?.length ?? 0) > 0;
+  const create = (target: { name?: string; slug?: string }) => {
+    if (restricted) {
+      throw new WorkspaceIntakeError("This API key is limited to specific workspaces and cannot create new ones.", 403);
+    }
+    return { create: target };
+  };
+
+  if (ref.kind === "default") {
+    // An explicit "default" always means the default workspace; an omitted one unless a new workspace is asked for.
+    const explicit = Boolean(request.workspace?.trim());
+    if (!explicit && (request.newWorkspace || request.templateKey)) return create({});
+    return { existing: await records.defaultWorkspace({ userId: request.userId, orgId: request.orgId }) };
+  }
+  if (ref.kind === "id") {
+    const existing = await records.findWorkspace(ref, scope);
+    if (!existing) throw workspaceInputNotFoundError({ id: ref.id });
+    return { existing };
+  }
+  const existing = await records.findWorkspace(ref, scope);
+  return existing ? { existing } : create({ name: ref.name, slug: ref.slug });
 }
 
 /** Every file was rejected: fail the request, naming each file. */
@@ -503,12 +544,6 @@ function allRejectedError(rejected: RejectedIntakeFile[]): WorkspaceIntakeError 
     ? rejected[0]!.message
     : `None of the ${rejected.length} files could be accepted: ${rejected.map((file) => `${file.filename} (${file.message})`).join("; ")}`;
   return new WorkspaceIntakeError(message, statusCode, rejected.map((file) => ({ path: file.filename, message: file.message, code: file.code })));
-}
-
-export function wantsNewWorkspace(
-  request: Pick<WorkspaceIntakeRequest, "newWorkspace" | "workspaceName" | "templateKey">,
-): boolean {
-  return Boolean(request.newWorkspace || request.workspaceName || request.templateKey);
 }
 
 /**
@@ -531,16 +566,10 @@ export async function intakeIntoWorkspace(
   let created: CreatedRun;
 
   try {
-    // An explicit target is checked before any bytes are read or stored. The
-    // reserved "default" ID always means the org's default workspace.
-    const explicitWorkspaceId = isDefaultWorkspaceAlias(request.workspaceId) ? null : request.workspaceId;
-    const existing = explicitWorkspaceId
-      ? await findTargetWorkspace({ ...request, workspaceId: explicitWorkspaceId }, records)
-      : isDefaultWorkspaceAlias(request.workspaceId)
-        ? await records.defaultWorkspace({ userId: request.userId, orgId: request.orgId })
-      : wantsNewWorkspace(request)
-        ? null
-        : await records.defaultWorkspace({ userId: request.userId, orgId: request.orgId });
+    // The target is resolved before any bytes are read or stored.
+    const target = await resolveIntakeTarget(request, records);
+    const existing = "existing" in target ? target.existing : null;
+    const toCreate = "create" in target ? target.create : {};
 
     const files: StoredIntakeFile[] = [];
     for await (const item of request.items) {
@@ -565,13 +594,14 @@ export async function intakeIntoWorkspace(
         userId: request.userId,
         orgId: request.orgId ?? undefined,
         name:
-          request.workspaceName ??
+          toCreate.name ??
           (request.urls?.length
             ? inferWorkspaceTitleFromUrls(request.urls)
             : inferWorkspaceTitleFromFilenames(files.map((file) => file.filename))),
+        ...(toCreate.slug ? { slug: toCreate.slug } : {}),
         templateKey: request.templateKey,
         pipeline: request.indexingMode ? { ...request.pipeline, indexingMode: request.indexingMode } : request.pipeline,
-        autoNamed: !request.workspaceName,
+        autoNamed: !toCreate.name,
       }));
     if (!existing) createdWorkspaceId = workspace.id;
     // A new workspace already carries the overrides; an existing one merges them.

@@ -11,38 +11,31 @@ import type { AiUsagePricing } from "./usage.js";
 
 export type ExtractTierId = "text" | "ocr" | "structured";
 
-export type ExtractPlanId = "free" | "silver" | "gold" | "platinum";
-
 export type ExtractTier = {
   id: ExtractTierId;
   label: string;
-  /** Flat price per 1,000 pages on the Free plan (pay as you go), compute included. */
+  /** Flat price per 1,000 pages, compute included. Holds the margin floor at the route cost cap. */
   usdPer1kPages: number;
-  /** Flat price per 1,000 pages by plan. Paid plans pay less; every price holds the margin floor at the route cost cap. */
-  usdPer1kPagesByPlan: Record<ExtractPlanId, number>;
   /**
    * Our own cost ceiling, in dollars per 1,000 pages, for a route that may serve
-   * a page sold at this tier. Same cap on every plan.
+   * a page sold at this tier.
    */
   maxRouteCostUsdPer1kPages: number;
 };
 
-const sameOnEveryPlan = (usd: number): Record<ExtractPlanId, number> => ({ free: usd, silver: usd, gold: usd, platinum: usd });
-
 export const EXTRACT_TIERS: Record<ExtractTierId, ExtractTier> = {
-  text: { id: "text", label: "Extract Text", usdPer1kPages: 0.5, usdPer1kPagesByPlan: sameOnEveryPlan(0.5), maxRouteCostUsdPer1kPages: 0.25 },
+  text: { id: "text", label: "Extract Text", usdPer1kPages: 0.5, maxRouteCostUsdPer1kPages: 0.25 },
   // Free matches the plain-OCR median of $1.50 per 1,000 pages (the three big
   // clouds and Upstage); markdown-grade parsers have a median near $3.75
-  // (internal research notes, checked 2026-10-13). Platinum
-  // still earns 47% after card fees at the $0.50 cost cap.
+  // (internal research notes, checked 2026-10-13). One price for every
+  // account since plans were removed (2026-10-21).
   ocr: {
     id: "ocr",
     label: "Extract OCR",
     usdPer1kPages: 1.5,
-    usdPer1kPagesByPlan: { free: 1.5, silver: 1.25, gold: 1.1, platinum: 1 },
     maxRouteCostUsdPer1kPages: 0.5,
   },
-  structured: { id: "structured", label: "Extract Structured", usdPer1kPages: 5, usdPer1kPagesByPlan: sameOnEveryPlan(5), maxRouteCostUsdPer1kPages: 2.5 },
+  structured: { id: "structured", label: "Extract Structured", usdPer1kPages: 5, maxRouteCostUsdPer1kPages: 2.5 },
 };
 
 /** Card and payment fees taken from every flat-tier charge. */
@@ -52,8 +45,8 @@ export const FLAT_TIER_PAYMENT_FEE = 0.03;
 export const FLAT_TIER_MIN_MARGIN_AT_CAP = 0.4;
 
 /** Gross margin after payment fees when a route costs `routeCostUsdPer1kPages`. */
-export function flatTierMargin(tier: ExtractTierId, plan: ExtractPlanId, routeCostUsdPer1kPages: number = EXTRACT_TIERS[tier].maxRouteCostUsdPer1kPages): number {
-  const price = EXTRACT_TIERS[tier].usdPer1kPagesByPlan[plan];
+export function flatTierMargin(tier: ExtractTierId, routeCostUsdPer1kPages: number = EXTRACT_TIERS[tier].maxRouteCostUsdPer1kPages): number {
+  const price = EXTRACT_TIERS[tier].usdPer1kPages;
   return (price * (1 - FLAT_TIER_PAYMENT_FEE) - routeCostUsdPer1kPages) / price;
 }
 
@@ -61,7 +54,7 @@ export function flatTierMargin(tier: ExtractTierId, plan: ExtractPlanId, routeCo
  * A flat tier is a fixed price, so a route that costs more than the cap loses
  * money on every page (Sonnet 5.5 -645%, Gemini 3.5 Flash -1,401% and Flash-Lite
  * -2% on the old $2 OCR price). Extract OCR routes must cost us at most $0.50
- * per 1,000 pages on every plan (decided 2026-10-13, down from $1.00), and
+ * per 1,000 pages (decided 2026-10-13, down from $1.00), and
  * must also clear the quality floor below.
  */
 export function flatTierRouteCostCapUsdPer1kPages(tier: ExtractTierId): number {
@@ -208,8 +201,6 @@ export function filterFlatTierRoutes<T extends { route: FlatTierRoute }>(tier: E
  */
 export function priceFlatTierPages(args: {
   tier: ExtractTierId;
-  /** Plan whose flat price applies; defaults to Free. */
-  plan?: ExtractPlanId;
   pages: number;
   /** Provider list cost, in cents, of calls made on routes that are not flat-tier eligible. */
   escalatedProviderCents?: number;
@@ -217,7 +208,7 @@ export function priceFlatTierPages(args: {
 }): { flatCredits: number; escalationCredits: number; totalCredits: number } {
   const card = args.card ?? CREDIT_RATE_CARD;
   const pages = Math.max(0, Number.isFinite(args.pages) ? args.pages : 0);
-  const usdPer1k = EXTRACT_TIERS[args.tier].usdPer1kPagesByPlan[args.plan ?? "free"];
+  const usdPer1k = EXTRACT_TIERS[args.tier].usdPer1kPages;
   const flatCredits = ((pages / 1000) * usdPer1k * 100) / CENTS_PER_CREDIT;
   const escalated = Math.max(0, Number.isFinite(args.escalatedProviderCents) ? args.escalatedProviderCents ?? 0 : 0);
   const escalationCredits = (escalated / CENTS_PER_CREDIT) * (1 + card.aiMarkupPercent / 100);

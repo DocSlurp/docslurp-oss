@@ -33,6 +33,7 @@ const env = {
   min: process.env.DOCSLURP_EMBED_MIN_BATCH_SIZE,
 };
 afterEach(() => {
+  vi.restoreAllMocks();
   poolMock.embed.mockReset();
   poolMock.queueDelayMs = 0;
   for (const [key, value] of [["DOCSLURP_EMBED_SLOW_BATCH_MS", env.slow], ["DOCSLURP_EMBED_FAST_BATCH_MS", env.fast], ["DOCSLURP_EMBED_MIN_BATCH_SIZE", env.min]] as const) {
@@ -41,8 +42,12 @@ afterEach(() => {
 });
 
 function installPool(thread: { loadMs: number; runMs: number; cacheHit?: boolean }) {
+  // Advance the clock at the pool boundary: real timers can fire a millisecond
+  // early, and this test measures accounting rather than timer precision.
+  let now = 0;
+  vi.spyOn(Date, "now").mockImplementation(() => now);
   poolMock.embed.mockImplementation(async (request: { texts: string[] }) => {
-    await new Promise((resolve) => setTimeout(resolve, poolMock.queueDelayMs));
+    now += poolMock.queueDelayMs;
     const rows = request.texts.length;
     return {
       data: new Float32Array(rows * 4).fill(1), dims: [rows, 4], dtype: "q8",
@@ -94,7 +99,7 @@ describe("local embedding timing on the thread pool", () => {
     expect(result.usage.model_load_ms).toBe(7);
     expect(result.usage.cache_hit).toBe(false);
     expect(result.usage.inference_run_ms).toBe(5);
-    expect(result.usage.inference_ms).toBeGreaterThanOrEqual(120);
+    expect(result.usage.inference_ms).toBe(120);
   }, 30_000);
 
   it("counts a load a batch triggered on a cold thread as load, not inference", async () => {

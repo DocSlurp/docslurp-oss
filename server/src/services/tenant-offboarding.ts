@@ -2,7 +2,6 @@ import { randomUUID } from "node:crypto";
 
 import { sql as defaultSql, type SqlClient } from "../db.js";
 import { signalPipelineCancel } from "../lib/temporal.js";
-import { cancelOrgSubscription } from "./billing/customers.js";
 import { cancelWorkspaceRuns, deleteWorkspaceData, type DataDeletionDeps } from "./data-deletion.js";
 
 /**
@@ -31,14 +30,11 @@ export class OffboardingError extends Error {
 }
 
 export interface OffboardingDeps extends DataDeletionDeps {
-  /** Cancels the org's Stripe subscription; must be a no-op when there is none. */
-  cancelSubscription: (orgId: string) => Promise<unknown>;
 }
 
 export const defaultOffboardingDeps: OffboardingDeps = {
   sql: defaultSql,
   cancelWorkflow: (runId) => signalPipelineCancel(runId),
-  cancelSubscription: (orgId) => cancelOrgSubscription(orgId),
 };
 
 export const DELETED_ORGANIZATION_NAME = "Deleted organization";
@@ -107,18 +103,9 @@ export async function purgeOrganization(
   options: { skipBilling?: boolean } = {},
 ): Promise<OrganizationDeletionResult> {
   const { sql } = deps;
-  // Billing first: if Stripe refuses, nothing has been deleted yet.
-  if (!options.skipBilling) {
-    try {
-      await deps.cancelSubscription(orgId);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      if (message === "billing_not_configured") {
-        throw new OffboardingError(503, "billing_not_configured", "Billing is not configured, so the subscription cannot be cancelled");
-      }
-      throw new OffboardingError(502, "subscription_cancel_failed", `Could not cancel the subscription: ${message}`);
-    }
-  }
+  // No subscription to cancel (prepaid credits only). Auto top-up is turned off
+  // with the tombstone below, so no further charge can start.
+  void options;
 
   // Tombstone and access removal in one transaction: the org disappears for
   // every member and credential at once.

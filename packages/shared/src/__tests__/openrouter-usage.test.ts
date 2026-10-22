@@ -21,6 +21,16 @@ describe("OpenRouter thinking controls", () => {
     expect(baseFetch.mock.calls[0][1]).toBe(init);
   });
 });
+describe("GPT-6 Luna chat reasoning", () => {
+  // Luna's vision floor lives in the vision profile; the shared chat table must not change chat requests.
+  it("leaves a reasoning-less chat body untouched", async () => {
+    const baseFetch = vi.fn<typeof fetch>().mockResolvedValue(new Response("{}"));
+    const init = { method: "POST", body: JSON.stringify({ model: "openai/gpt-6-luna", messages: [{ role: "user", content: "hi" }] }) };
+    await createOpenRouterReasoningFetch(baseFetch)("https://openrouter.ai/api/v1/chat/completions", init);
+    expect(baseFetch.mock.calls[0][1]).toBe(init);
+    expect(lowestOpenRouterReasoning("openai/gpt-6-luna")).toBeUndefined();
+  });
+});
 describe("lowest accepted reasoning", () => {
   const sent = async (model: string) => {
     const baseFetch = vi.fn<typeof fetch>().mockResolvedValue(new Response("{}"));
@@ -47,6 +57,15 @@ describe("lowest accepted reasoning", () => {
     expect((await call({ model: "google/gemini-3.5-flash" })).reasoning).toBeUndefined();
     expect((await call({ model: "z-ai/glm-5.3-flash", reasoning_effort: "high" })).reasoning).toBeUndefined();
     expect((await call({ model: "z-ai/glm-5.3-flash", reasoning: { effort: "high" } })).reasoning).toEqual({ effort: "high" });
+  });
+  it("leaves reasoning-less chat requests for vision-tuned models untouched (their floors live in the vision profiles)", async () => {
+    for (const model of ["xiaomi/mimo-v2.6-flash", "deepseek/deepseek-v4.1-flash-1017"]) {
+      const baseFetch = vi.fn<typeof fetch>().mockResolvedValue(new Response("{}"));
+      const body = { model, messages: [{ role: "user", content: "hi" }] };
+      await createOpenRouterReasoningFetch(baseFetch)("https://openrouter.ai/api/v1/chat/completions", { method: "POST", body: JSON.stringify(body) });
+      expect(JSON.parse(baseFetch.mock.calls[0][1]!.body as string)).toEqual(body);
+      expect(lowestOpenRouterReasoning(model)).toBeUndefined();
+    }
   });
   it("adds a reasoning body fragment only for verified models", () => {
     expect(openRouterReasoningParams("z-ai/glm-5.3-flash")).toEqual({ reasoning: { effort: "minimal" } });

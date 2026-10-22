@@ -285,7 +285,7 @@ export async function aggregateWorkspaceRagSearch(args: {
   const workspaces = await resolveAggregateWorkspaces({
     userId: args.userId,
     apiKey: args.apiKey,
-    workspaceIds: request.workspaceIds,
+    workspaceIds: request.workspaces,
     maxWorkspaces: request.maxWorkspaces,
   });
 

@@ -176,7 +176,7 @@ describe("run preview", () => {
   it("builds a recommended preview profile from file metadata and workspace history", () => {
     const preview = buildRunProcessingPreview({
       request: {
-        workspaceId: "ws-1",
+        workspace: "ws-1",
         pipeline: defaultPipelineFeatures,
         files: [
           {
@@ -215,6 +215,27 @@ describe("run preview", () => {
     expect(preview.recommended.parserPlaybook).toBe("layout-aware");
     expect(preview.options.some((option) => option.recommended)).toBe(true);
     expect(preview.topSignals).toContain("table-heavy inputs favor layout-aware extraction");
+  });
+
+  it("prices the DOCSLURP_VISION_MODEL_URI override like the worker does", () => {
+    const request = {
+      workspaceId: "ws-1",
+      pipeline: defaultPipelineFeatures,
+      files: [{ filename: "scan.pdf", mimeType: "application/pdf", sizeBytes: 3_000_000 }],
+      urls: [],
+    };
+    const cost = () => buildRunProcessingPreview({ request, historyRows: [] }).recommended;
+    const baseline = cost();
+    vi.stubEnv("DOCSLURP_VISION_MODEL_URI", "llm://openrouter/z-ai/glm-5.3-flash");
+    try {
+      const overridden = cost();
+      expect(overridden.estimatedCost.maxCents).toBeLessThan(baseline.estimatedCost.maxCents);
+      // An invalid value is ignored and the default pricing stays.
+      vi.stubEnv("DOCSLURP_VISION_MODEL_URI", "llm://openrouter/vendor/uncataloged");
+      expect(cost().estimatedCost.maxCents).toBe(baseline.estimatedCost.maxCents);
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 });
 

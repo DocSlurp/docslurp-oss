@@ -6,6 +6,7 @@ import {
   INGEST_REPORT_MAX_PAGES,
   INGEST_REPORT_NEAR_ZERO_TEXT_BYTES,
   INGEST_REPORT_TEXT_BYTE_EDGES,
+  applyDefaultVisionOverride,
   mergePipelineFeatures,
   parserPlaybookCatalog,
   visionModelCatalogByUri,
@@ -151,7 +152,8 @@ function formatCents(cents: number): string {
 
 /** Model URI the workspace's vision stage calls (explicit, else the profile's). */
 export function visionModelUri(pipeline: PipelineFeatures): string {
-  return pipeline.vision.modelUri ?? visionProfileCatalog[pipeline.vision.profile]?.config.modelUri ?? "";
+  // Includes the DOCSLURP_VISION_MODEL_URI override, matching the model the worker calls.
+  return applyDefaultVisionOverride(pipeline).vision.modelUri ?? visionProfileCatalog[pipeline.vision.profile]?.config.modelUri ?? "";
 }
 
 /** Pages per file vision may read: forceAllPages uses vision.maxPagesPerDocument, otherwise the playbook's cap wins. */

@@ -63,6 +63,19 @@ describe("hosted MCP transport", () => {
     expect(tools.find((tool: any) => tool.name === "suggestQueries").annotations).toMatchObject({ readOnlyHint: true });
   });
 
+  it("gives directory listings a title on every tool and on the server", async () => {
+    const client = new Client({ name: "docslurp-test", version: "1" });
+    await client.connect(transport());
+    try {
+      const [tool] = (await client.listTools()).tools;
+      expect(tool).toMatchObject({ title: "Suggestions", annotations: { title: "Suggestions", readOnlyHint: true, destructiveHint: false } });
+      expect(client.getServerVersion()).toMatchObject({ name: "docslurp", title: "DocSlurp", websiteUrl: "https://docslurp.io/docs/mcp" });
+      expect((await client.listPrompts()).prompts[0]?.title).toBe("Workspace grounded answer");
+    } finally {
+      await client.close();
+    }
+  });
+
   it("interoperates with the official modern client over HTTP without sessions", async () => {
     const client = new Client({ name: "docslurp-test", version: "1" });
     const http = transport();

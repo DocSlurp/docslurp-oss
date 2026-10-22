@@ -50,3 +50,38 @@ export function workspaceSlugProblem(slug: string): string | null {
   if (isWorkspaceUuid(slug)) return "Workspace slugs cannot look like workspace IDs";
   return null;
 }
+
+/** Longest `workspace` request value accepted (a display name, slug or UUID). */
+export const WORKSPACE_INPUT_MAX_LENGTH = 256;
+/** Longest workspace display name; longer `workspace` values are cut to it when an upload creates one. */
+export const WORKSPACE_NAME_MAX_LENGTH = 120;
+
+/**
+ * What a public `workspace` request value refers to. Every request that targets
+ * a workspace takes one string: a workspace UUID, a slug (current or former), or
+ * a name, which is matched by its slug, so "Legal Contracts", "legal-contracts"
+ * and "  LÉGAL—contracts! " all mean the same workspace.
+ *
+ * - `default`: omitted, blank, or the reserved "default" alias.
+ * - `id`: a workspace UUID.
+ * - `slug`: anything else; `name` is the trimmed input as typed, used as the
+ *   display name when an upload creates the workspace.
+ * - `invalid`: nothing usable is left after slugifying (e.g. "!!!").
+ */
+export type WorkspaceInputRef =
+  | { kind: "default" }
+  | { kind: "id"; id: string }
+  | { kind: "slug"; slug: string; name: string }
+  | { kind: "invalid"; input: string; message: string };
+
+export function parseWorkspaceInput(value: string | null | undefined): WorkspaceInputRef {
+  const input = value?.trim() ?? "";
+  if (!input) return { kind: "default" };
+  if (isWorkspaceUuid(input)) return { kind: "id", id: input.toLowerCase() };
+  const slug = slugifyWorkspaceName(input);
+  if (!slug) {
+    return { kind: "invalid", input, message: `workspace "${input}" has no letters or digits; pass a workspace ID, slug or name` };
+  }
+  if (slug === "default") return { kind: "default" };
+  return { kind: "slug", slug, name: input.slice(0, WORKSPACE_NAME_MAX_LENGTH).trim() };
+}

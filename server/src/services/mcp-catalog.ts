@@ -9,14 +9,13 @@ import { apiKeyMayUseEstimateTool, estimateToolDefinitions, jobsGetInputSchema, 
 
 export { jobsGetInputSchema };
 
-export const workspaceRef = z.string().min(1).max(256).optional().describe('Workspace slug or UUID. Omit or use "default" for the organization default workspace.');
+export const workspaceRef = z.string().min(1).max(256).optional().describe('Workspace ID, slug or name (names match by slug, so "Legal Contracts" finds legal-contracts). Omit for the organization default workspace.');
 export const listWorkspacesInput = z.object({
   limit: z.number().int().min(1).max(100).default(50),
   offset: z.number().int().nonnegative().default(0),
 }).strict();
 export const uploadInput = z.object({
-  workspaceId: workspaceRef,
-  workspaceName: z.string().trim().min(1).max(120).optional().describe("Create a new workspace with this name only when the user asks for one."),
+  workspace: z.string().min(1).max(256).optional().describe('Workspace ID, slug or name. A name that matches no workspace creates one with that name, so only pass a new name when the user asks for a new workspace. Omit for the organization default workspace.'),
   urls: z.array(z.url().refine(url => /^https?:\/\//i.test(url), "Use HTTP or HTTPS URLs")).min(1).max(20).optional(),
   files: z.array(z.object({
     filename: z.string().min(1).max(512),
@@ -24,8 +23,7 @@ export const uploadInput = z.object({
     mimeType: z.string().min(1).max(256).describe("Content-Type to send with the signed PUT request."),
   }).strict()).min(1).max(10).optional(),
   idempotencyKey: z.string().min(1).max(200).optional().describe("For URL ingestion only: reuse the same key when retrying this exact request to avoid duplicate ingestion."),
-}).strict().refine(value => Boolean(value.urls) !== Boolean(value.files), "Supply either urls or files, not both")
-  .refine(value => !(value.workspaceId && value.workspaceName), "Choose an existing workspaceId or a new workspaceName");
+}).strict().refine(value => Boolean(value.urls) !== Boolean(value.files), "Supply either urls or files, not both");
 
 export const completeUploadInput = z.object({
   sessionId: z.string().uuid(),
@@ -33,16 +31,16 @@ export const completeUploadInput = z.object({
 }).strict();
 
 export const uploadStatusInput = z.object({
-  workspaceId: z.string().min(1).max(256).optional(),
+  workspace: workspaceRef,
   runId: z.string().trim().min(1).max(128).optional(),
   documentIds: z.array(z.string().min(1).max(128)).max(100).optional(),
 }).strict();
 export const fullIndexInput = z.object({
-  workspaceId: workspaceRef,
+  workspace: workspaceRef,
   documentIds: z.array(z.string().min(1)).max(500).optional().describe("Only these documents; omit to index every remaining page in the workspace."),
 }).strict();
 export const suggestQueriesInput = z.object({
-  workspaceId: z.string().min(1).max(256).optional(),
+  workspace: workspaceRef,
   q: z.string().max(10_000).optional(),
   limit: z.number().int().min(1).max(25).optional(),
 });
@@ -101,12 +99,12 @@ export function mcpTools(baseUrl: string): McpTool[] {
   }));
   const tools: Omit<McpTool, "category" | "endpoint">[] = [
     { id: "listWorkspaces", title: "List workspaces", scopes: ["search", "ingest"], annotations: READ_ONLY,
-      description: "List workspaces you can access, including their IDs, slugs, default workspace, document/page counts and latest processing status. Use a returned slug as workspaceId in upload, search or chat. Does not call AI.",
+      description: "List workspaces you can access, including their IDs, slugs, default workspace, document/page counts and latest processing status. Pass a returned slug (or the name) as workspace in upload, search or chat. Does not call AI.",
       inputSchema: toolInputJsonSchema(listWorkspacesInput) },
     { id: "upload", title: "Upload documents", scopes: ["ingest"],
       annotations: { readOnly: false, destructive: false, idempotent: false, openWorld: true, consequential: true },
-      description: "Upload documents using either fetchable HTTP(S) urls or files metadata, never both. For files, generate one presigned PUT URL per file, up to 10 files (5 GiB each, subject to account limits). PUT the raw bytes to each putUrl with the declared Content-Type, then call completeUpload with sessionId and file IDs. Never send file bytes or local paths as tool arguments. URLs start ingestion immediately; files start only on completion. Omit workspaceId for the default workspace; workspaceName explicitly creates a new one (do not send both). Ingestion can incur cost. idempotencyKey applies to URL ingestion retries.",
-      // Flat like every tool schema: uploadInput's refinements enforce urls XOR files and workspaceId XOR workspaceName.
+      description: "Upload documents using either fetchable HTTP(S) urls or files metadata, never both. For files, generate one presigned PUT URL per file, up to 10 files (5 GiB each, subject to account limits). PUT the raw bytes to each putUrl with the declared Content-Type, then call completeUpload with sessionId and file IDs. Never send file bytes or local paths as tool arguments. URLs start ingestion immediately; files start only on completion. Omit workspace for the default workspace; workspace takes an ID, slug or name, and a name that matches no workspace creates it. Ingestion can incur cost. idempotencyKey applies to URL ingestion retries.",
+      // Flat like every tool schema: uploadInput's refinement enforces urls XOR files.
       inputSchema: toolInputJsonSchema(uploadInput) },
     { id: "completeUpload", title: "Complete upload", scopes: ["ingest"],
       annotations: { readOnly: false, destructive: false, idempotent: false, openWorld: false, consequential: true },

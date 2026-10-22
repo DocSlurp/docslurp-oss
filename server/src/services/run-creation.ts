@@ -889,7 +889,7 @@ export function createRunCreation(deps: RunCreationDeps) {
     run.pagesTotal = published.pagesTotal;
     run.costForecast = buildRunProcessingPreview({
       request: {
-        workspaceId: input.workspaceId,
+        workspace: input.workspaceId,
         pipeline: input.pipeline,
         files: Array.from({ length: published.documents.length }, (_, index) => ({
           filename: `document-${index + 1}.pdf`,

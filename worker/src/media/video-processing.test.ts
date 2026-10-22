@@ -19,11 +19,11 @@ function fixture(){
   const state=new WorkflowState({id:"r",userId:"u",orgId:"o",workspaceId:"w",stats:{},artifacts:{},spentCents: 0,pipeline:{}} as WorkspaceRun,[]);
   state.store={updateProgress:vi.fn(async()=>{})} as unknown as NonNullable<WorkflowState["store"]>;
   const storage={putJson:vi.fn(async(_key:string,r:VisionResult)=>{saved=r;}),getJson:vi.fn(async()=>saved)} as unknown as ArtifactStore;
-  return{state,journal,provider,storage,scope:{orgId:"o",workspaceId:"w",runId:"r",documentId:"d"},frames:[{seconds:0,bytes:new Uint8Array([1])}],policy:videoPolicy("silver",30),config:mediaConfig({})};
+  return{state,journal,provider,storage,scope:{orgId:"o",workspaceId:"w",runId:"r",documentId:"d"},frames:[{seconds:0,bytes:new Uint8Array([1])}],policy:videoPolicy(true,30),config:mediaConfig({})};
 }
 it("replays a completed visual receipt without paying or charging twice",async()=>{
   const f=fixture();await describeVideoChunk(f);await describeVideoChunk(f);
-  expect(f.provider.describe).toHaveBeenCalledTimes(1);expect(f.state.usageLedger.snapshot()).toHaveLength(1);expect(runSpentCents(f.state)).toBeCloseTo(.12);
+  expect(f.provider.describe).toHaveBeenCalledTimes(1);expect(f.state.usageLedger.snapshot()).toHaveLength(1);expect(runSpentCents(f.state)).toBe(0);expect(f.state.usageLedger.snapshot()[0]).toMatchObject({metadata:{providerCostCents:.1,billable:false}});
 });
 it("retries a failed checkpoint without resending visual inputs",async()=>{
   const f=fixture();vi.mocked(f.state.store!.updateProgress).mockRejectedValueOnce(new Error("db"));

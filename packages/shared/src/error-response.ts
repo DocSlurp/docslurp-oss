@@ -1,6 +1,6 @@
 import { friendlyErrorMessage, publicErrorForStatus, PUBLIC_ERROR_MESSAGES } from "./public-errors.js";
 import { reportException } from "./error-reporting.js";
-import { API_ERROR_PUBLIC_MESSAGES, apiErrorCodeForStatus, isApiErrorCode, publicApiErrorDetails, publicApiErrorEnvelope } from "./api-error.js";
+import { apiErrorCodeForStatus, isApiErrorCode, publicApiErrorDetails, publicApiErrorEnvelope, publicApiErrorLinks, publicApiErrorMessage } from "./api-error.js";
 
 export type PublicErrorReporter = (error: unknown, context?: Record<string, string | number | boolean>) => string;
 
@@ -36,10 +36,18 @@ export async function safeErrorResponse(response: Response, requestId?: string, 
         const code = typeof original.code === "string" && /^[a-zA-Z0-9_:-]{1,80}$/.test(original.code) ? original.code : undefined;
         if (code) body.code = code;
         if (typeof original.message === "string") body.message = message;
-        if (typeof original.error === "object" && original.error !== null && "message" in original.error) {
-          body.error = { message, type: response.status >= 500 ? "server_error" : "invalid_request_error", code: null, param: null };
+        // Upgrade and billing links (402/429) survive with copy composed from the closed code.
+        const nestedError = typeof original.error === "object" && original.error !== null ? original.error as Record<string, unknown> : null;
+        const links = publicApiErrorLinks(original.links ?? nestedError?.links);
+        const linkedCode = isApiErrorCode(original.code) ? original.code : isApiErrorCode(nestedError?.code) ? nestedError.code : undefined;
+        const linked = links && linkedCode ? { code: linkedCode, links, message: publicApiErrorMessage(linkedCode, { links, plan: original.plan }) } : null;
+        if (nestedError && "message" in nestedError) {
+          body.error = linked
+            ? { message: linked.message, type: response.status >= 500 ? "server_error" : "invalid_request_error", code: linked.code, param: null, links: linked.links }
+            : { message, type: response.status >= 500 ? "server_error" : "invalid_request_error", code: null, param: null };
         } else if (typeof original.error === "string") {
-          body.error = friendlyErrorMessage(original.error, message);
+          body.error = linked ? linked.message : friendlyErrorMessage(original.error, message);
+          if (linked) body.links = linked.links;
         }
         if (original.jsonrpc === "2.0" && original.error && typeof original.error.code === "number") {
           body = { jsonrpc: "2.0", id: typeof original.id === "string" || typeof original.id === "number" ? original.id : null,
@@ -80,5 +88,5 @@ function nativeEnvelopeFor(original: Record<string, unknown> | null, status: num
   const named = original?.code ?? nested?.code;
   const code = isApiErrorCode(named) ? named : apiErrorCodeForStatus(status);
   const details = publicApiErrorDetails(original?.details ?? nested?.details ?? (Array.isArray(original?.issues) ? original : nested));
-  return { error: { code, message: API_ERROR_PUBLIC_MESSAGES[code], ...(details ? { details } : {}), ...(requestId ? { requestId } : {}) } };
+  return { error: { code, message: publicApiErrorMessage(code, details), ...(details ? { details } : {}), ...(requestId ? { requestId } : {}) } };
 }

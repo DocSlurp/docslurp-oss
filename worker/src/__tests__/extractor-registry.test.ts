@@ -5,6 +5,8 @@ import type { CommandRunner } from "../tools/runner.js";
 describe("document extractor registry", () => {
   it("resolves configured IDs in order and rejects unknown or incompatible IDs", () => {
     expect(documentExtractorRegistry.resolve("pdf", ["native-pdf", "kreuzberg"])).toEqual(["native-pdf", "kreuzberg"]);
+    expect(documentExtractorRegistry.list().some((entry) => entry.id === "docling")).toBe(false);
+    expect(() => documentExtractorRegistry.resolve("pdf", ["docling"])).toThrow(/unknown extractor/);
     expect(() => documentExtractorRegistry.resolve("pdf", ["unknown"])).toThrow(/unknown extractor/);
     expect(() => documentExtractorRegistry.resolve("office-word", ["native-pdf"])).toThrow(/does not support/);
     expect(documentExtractorRegistry.resolve("office-excel")).toEqual(["kreuzberg"]);

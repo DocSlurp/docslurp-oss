@@ -33,20 +33,20 @@ test("direct Node streams preserve ranges, infer filenames, and set workspace op
     const path = join(dir, "handbook.pdf");
     await writeFile(path, "prefixDOCUMENTsuffix");
     await withServer(async (apiUrl, requests) => {
-      const client = createDocSlurpClient({ apiUrl, apiKey: "key", workspaceId: "client-default" });
+      const client = createDocSlurpClient({ apiUrl, apiKey: "key", workspace: "client-default" });
       const source = createReadStream(path, { start: 6, end: 13, highWaterMark: 2 });
-      assert.equal((await client.upload(source, { workspaceId: "override", tags: ["streamed"] })).run.id, "run");
+      assert.equal((await client.upload(source, { workspace: "override", tags: ["streamed"] })).run.id, "run");
       assert.equal(requests[0].get("files").name, "handbook.pdf");
       assert.equal(await requests[0].get("files").text(), "DOCUMENT");
-      assert.equal(requests[0].get("workspaceId"), "override");
+      assert.equal(requests[0].get("workspace"), "override");
       assert.deepEqual(JSON.parse(requests[0].get("tags")), ["streamed"]);
       assert.equal(source.destroyed, true);
-      await client.upload(createReadStream(path, { encoding: "hex", start: 6, end: 7 }), { filename: 'named"\r\n.pdf', workspaceId: "" });
+      await client.upload(createReadStream(path, { encoding: "hex", start: 6, end: 7 }), { filename: 'named"\r\n.pdf', workspace: "" });
       assert.equal(await requests[1].get("files").text(), Buffer.from("DO").toString("hex"));
       assert.equal(requests[1].get("files").name, 'named"\r\n.pdf');
       assert.match(requests[1].raw, /filename="named%22%0D%0A.pdf"/);
       // An empty per-call ID falls back to the client's workspace.
-      assert.equal(requests[1].get("workspaceId"), "client-default");
+      assert.equal(requests[1].get("workspace"), "client-default");
       const handle = await open(path);
       try {
         await client.upload(createReadStream(join(dir, "not-present.txt"), { fd: handle.fd, autoClose: false, start: 6, end: 7 }));

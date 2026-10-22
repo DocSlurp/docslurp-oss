@@ -137,7 +137,7 @@ describe("workspace retrieval session options", () => {
     const pipeline = { graphRag: false, entityIndex: false, graphCommunitySummaries: false };
 
     const omitted = resolveWorkspaceRetrievalControls({
-      options: searchOptions({ ...searchInputSchema.parse({ q: "support hours", workspaceId: "ws-1" }), workspaceId: "ws-1" }),
+      options: searchOptions({ ...searchInputSchema.parse({ q: "support hours", workspace: "ws-1" }), workspaceId: "ws-1" }),
       workspaceId: "ws-1",
       settings,
       pipeline,
@@ -146,7 +146,7 @@ describe("workspace retrieval session options", () => {
     expect(omitted).toMatchObject({ useRerank: true, parentRetrieval: true, limit: 8, useHyDE: false, queryRewrite: false });
 
     const explicit = resolveWorkspaceRetrievalControls({
-      options: searchOptions({ ...searchInputSchema.parse({ q: "support hours", workspaceId: "ws-1", rerank: false, hyde: true }), workspaceId: "ws-1" }),
+      options: searchOptions({ ...searchInputSchema.parse({ q: "support hours", workspace: "ws-1", rerank: false, hyde: true }), workspaceId: "ws-1" }),
       workspaceId: "ws-1",
       settings,
       pipeline,

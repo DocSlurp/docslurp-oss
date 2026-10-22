@@ -90,7 +90,7 @@ async function seed() {
   await sql`delete from workspaces`;
   await sql`delete from org_memberships`;
   await sql`delete from organizations`;
-  await sql`insert into organizations(id, name, slug, created_by_user_id, credit_balance_cents, plan_id) values ('o1', 'Org', 'org', 'u1', 100000, 'silver'), ('o2', 'Other', 'other', 'u2', 100000, 'silver')`;
+  await sql`insert into organizations(id, name, slug, created_by_user_id, credit_balance_cents, funded_at) values ('o1', 'Org', 'org', 'u1', 100000, now()), ('o2', 'Other', 'other', 'u2', 100000, now())`;
   await sql`insert into org_memberships(org_id, user_id, role) values ('o1', 'u1', 'owner'), ('o1', 'u2', 'member'), ('o2', 'u2', 'owner')`;
   await sql`insert into workspaces(id, org_id, user_id, name, slug, pipeline, is_default)
     values ('w', 'o1', 'u1', 'W', 'w-slug', ${sql.json(JSON.parse(JSON.stringify(graphPipeline)))}, false),
@@ -217,9 +217,9 @@ describe("estimate twins enforce the mutation's authorization", () => {
   it("upload estimate needs ingest, respects the key's workspaces and never creates a default workspace", async () => {
     const files = { files: [{ name: "a.pdf", size: 1000 }] };
     expect((await post(appFor("u1", server({ scopes: ["search"] })), "/v1/uploads/estimate", files)).status).toBe(403);
-    expect((await post(appFor("u1", server({ workspaceIds: ["other"] })), "/v1/uploads/estimate", { ...files, workspaceId: "w" })).status).toBe(404);
-    expect((await post(appFor("u1", server({ orgId: "o2" })), "/v1/uploads/estimate", { ...files, workspaceId: "w" })).status).toBe(404);
-    expect((await post(appFor("u1", server()), "/v1/uploads/estimate", { ...files, workspaceId: "w" })).status).toBe(200);
+    expect((await post(appFor("u1", server({ workspaceIds: ["other"] })), "/v1/uploads/estimate", { ...files, workspace: "w" })).status).toBe(404);
+    expect((await post(appFor("u1", server({ orgId: "o2" })), "/v1/uploads/estimate", { ...files, workspace: "w" })).status).toBe(404);
+    expect((await post(appFor("u1", server()), "/v1/uploads/estimate", { ...files, workspace: "w" })).status).toBe(200);
     expect((await post(appFor("u1"), "/v1/uploads/estimate", files)).status).toBe(200);
 
     // u2's personal org has no default workspace: 404, and nothing is created.
@@ -242,7 +242,7 @@ describe("estimate twins enforce the mutation's authorization", () => {
       ["workspace full-index estimate", "/v1/workspaces/w/full-index/estimate", {}],
       ["document full-index estimate", "/v1/documents/d1/full-index/estimate", {}],
       ["graph rebuild estimate", "/v1/workspaces/w/graph/jobs/estimate", {}],
-      ["upload estimate", "/v1/uploads/estimate", { files: [{ name: "a.pdf", size: 1 }], workspaceId: "w" }],
+      ["upload estimate", "/v1/uploads/estimate", { files: [{ name: "a.pdf", size: 1 }], workspace: "w" }],
     ];
     for (const [name, path, body] of denied) {
       const res = await post(key, path, body);
@@ -299,21 +299,13 @@ describe("PATCH /v1/workspaces/:id through the real route stays non-breaking", (
     expect(await res.json()).toMatchObject({ id: "w" });
   });
 
-  it("rejects a retention override on a free plan with 402 upgrade_required, but accepts null", async () => {
+  it("accepts a retention override for a starter org while billing is enforced (no plan gate)", async () => {
     vi.stubEnv("STRIPE_SECRET_KEY", "sk_test_x");
-    await sql`update organizations set plan_id = 'free' where id = 'o1'`;
+    await sql`update organizations set funded_at = null where id = 'o1'`;
     const app = appFor("u1");
     const patch = (body: unknown) => app.request("/v1/workspaces/w", { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
-    const denied = await patch({ retainDocumentVersions: 3 });
-    expect(denied.status).toBe(402);
-    expect(await denied.json()).toMatchObject({ error: { details: { category: "upgrade_required" } } });
+    expect((await patch({ retainDocumentVersions: 3 })).status).toBe(200);
     expect((await patch({ retainDocumentVersions: null })).status).toBe(200);
-  });
-
-  it("accepts a retention override on a free plan when billing is not enforced", async () => {
-    vi.stubEnv("STRIPE_SECRET_KEY", "");
-    await sql`update organizations set plan_id = 'free' where id = 'o1'`;
-    const res = await appFor("u1").request("/v1/workspaces/w", { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ retainDocumentVersions: 3 }) });
-    expect(res.status).toBe(200);
+    vi.unstubAllEnvs();
   });
 });

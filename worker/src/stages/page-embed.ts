@@ -1,6 +1,6 @@
 import type postgres from "postgres";
 import sharp from "sharp";
-import { l2Normalize, packSignBits, quantizeInt8 } from "@docslurp/shared";
+import { l2Normalize, packSignBits, pageCredits, quantizeInt8 } from "@docslurp/shared";
 
 import { ensurePageRows, markPagesEmbedded } from "../deferred/page-ledger.js";
 import {
@@ -29,8 +29,6 @@ export interface PageEmbedDeps {
   storage: Pick<ArtifactStore, "getBytes" | "deleteKeys">;
   embedder: PageImageEmbedder;
   usage: PipelineUsageEventLedger;
-  /** Cost-only per-page fee in USD (defaults to `DOCSLURP_PAGE_EMBEDDED_FEE_USD`, else 0). */
-  pageFeeUsd?: number;
 }
 
 export interface EmbedPageImagesResult {
@@ -41,11 +39,6 @@ export interface EmbedPageImagesResult {
   costCents: number;
 }
 
-function pageFeeUsd(deps: PageEmbedDeps): number {
-  if (deps.pageFeeUsd !== undefined) return deps.pageFeeUsd;
-  const parsed = Number(process.env.DOCSLURP_PAGE_EMBEDDED_FEE_USD ?? 0);
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
-}
 
 /** Downscales to <= 1024 px on the long edge (never upscaling) and encodes JPEG q85. */
 export async function toPageJpeg(bytes: Uint8Array): Promise<Uint8Array> {
@@ -114,13 +107,8 @@ export async function embedPageImages(
     }
   };
 
-  const feeUsd = pageFeeUsd(deps);
-  const estimate = (windowPages: number) => {
-    const perPage = result.embeddedPages.length > 0
-      ? result.costCents / result.embeddedPages.length
-      : (deps.embedder.estimatedCostCentsPerPage ?? 0);
-    return perPage * windowPages;
-  };
+  // Customer credits: a page embedded as an image is read by a model, so it bills as a Rich page (PRICE_CARD).
+  const estimate = (windowPages: number) => pageCredits("rich", windowPages);
   if (args.canAfford && !args.canAfford(estimate(windows[0]!.length))) {
     result.stoppedBy = "cost-cap";
     return result;
@@ -157,15 +145,9 @@ export async function embedPageImages(
         metadata: { documentId: document.id, pages: currentWindow.pages.length, dims: deps.embedder.dims, tokenSource: "api" },
       }
     );
-    deps.usage.enqueue({
-      provider: "docslurp",
-      model: "page-embedded",
-      metric: "page-embedded",
-      amount: currentWindow.pages.length,
-      unit: "page",
-      costCents: feeUsd * 100 * currentWindow.pages.length,
-      metadata: { documentId: document.id, embeddingModel: deps.embedder.model },
-    });
+    for (const pageNumber of currentWindow.pages) {
+      deps.usage.chargeRichPage({ documentId: document.id, pageNumber, readBy: "page-image-embedding", model: deps.embedder.model });
+    }
 
     const rows = currentWindow.pages.map((pageNumber, i) => {
       const unit = l2Normalize(embedded.vectors[i]!);

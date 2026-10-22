@@ -18,7 +18,7 @@
     "test": "pnpm test:packages && pnpm --filter @docslurp/worker test && pnpm --filter @docslurp/server test",
     "test:packages": "pnpm -r --filter @docslurp/cli --filter @docslurp/contrib-astro --filter @docslurp/contrib-search-compat --filter @docslurp/sdk --filter @docslurp/shared test && pnpm test:scripts",
     "test:mcp": "pnpm --filter @docslurp/shared build && pnpm --filter @docslurp/server exec vitest run src/lib/mcp-http.test.ts src/lib/mcp-pi.test.ts src/__tests__/mcp-oauth.test.ts src/__tests__/mcp-routes.test.ts src/__tests__/mcp-oauth-client.db.test.ts src/__tests__/mcp-pi-agent.db.test.ts src/__tests__/chat-completions.test.ts src/__tests__/chat-completions-openai-sdk.test.ts",
-    "test:scripts": "node --test scripts/*.test.mjs scripts/lib/*.test.mjs packages/contrib-astro/*.test.mjs",
+    "test:scripts": "node scripts/node-test.mjs scripts/*.test.mjs scripts/lib/*.test.mjs packages/contrib-astro/*.test.mjs",
     "dev:api": "pnpm --filter @docslurp/server dev",
     "start:api": "pnpm --filter @docslurp/server start",
     "dev": "pnpm dev:api",
@@ -56,7 +56,11 @@
       "@modelcontextprotocol/sdk": "^1.31.0",
       "source-map-js": "^1.2.2",
       "smol-toml": "^1.9.0",
-      "katex": "^0.19.0"
+      "katex": "^0.19.0",
+      "@opentelemetry/api": "1.9.1",
+      "mammoth>argparse": "^2.0.1",
+      "@opentelemetry/otlp-exporter-base": "0.223.0",
+      "@opentelemetry/exporter-trace-otlp-http": "0.223.0"
     },
     "onlyBuiltDependencies": [
       "@prisma/engines",
@@ -70,8 +74,8 @@
     ]
   },
   "devDependencies": {
-    "@aws-sdk/client-s3": "^3.1150.0",
-    "dotenv": "^18.0.7",
+    "@aws-sdk/client-s3": "^3.1154.0",
+    "dotenv": "^18.0.8",
     "drizzle-kit": "^0.31.11",
     "drizzle-orm": "^0.45.4",
     "pg": "^8.23.1",
@@ -80,7 +84,7 @@
     "vite": "^8.3.4"
   },
   "dependencies": {
-    "better-auth": "^1.7.7",
+    "better-auth": "^1.7.12",
     "postgres": "^3.4.9"
   }
 }

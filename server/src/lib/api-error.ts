@@ -1,13 +1,26 @@
 import type { Context, MiddlewareHandler } from "hono";
 import { boundedBodyLimit } from "./bounded-body-limit.js";
 import { HTTPException } from "hono/http-exception";
-import { apiError, apiErrorCodeForStatus, API_ERROR_PUBLIC_MESSAGES, isApiErrorCode, type ApiErrorCode, type ApiErrorDetails } from "@docslurp/shared";
+import { apiError, apiErrorCodeForStatus, isApiErrorCode, publicApiErrorLinks, publicApiErrorMessage, type ApiErrorCode, type ApiErrorDetails } from "@docslurp/shared";
+import { upgradeLinkHeader, withUpgradeLinks } from "./upgrade-links.js";
 
 type ErrorStatus = 400 | 401 | 402 | 403 | 404 | 409 | 413 | 415 | 422 | 429 | 500 | 502 | 503 | 504;
 
 /** Native error envelope response; `publicErrorMiddleware` stamps `requestId` and sanitizes copy. */
 export function apiErrorResponse(c: Context, status: ErrorStatus, code: ApiErrorCode, message: string, details?: ApiErrorDetails): Response {
-  return c.json(apiError(code, message, details), status);
+  const linked = linkedDetails(c, code, details);
+  return c.json(apiError(code, message, linked), status);
+}
+
+/**
+ * Credit, budget, plan and rate-limit errors carry `details.links` (where to
+ * buy credits, turn on auto top-up or raise a key's limit) and the matching `Link` header.
+ */
+function linkedDetails(c: Context, code: ApiErrorCode, details?: ApiErrorDetails): ApiErrorDetails | undefined {
+  const linked = withUpgradeLinks(code, details);
+  const header = upgradeLinkHeader(publicApiErrorLinks(linked?.links));
+  if (header) c.header("Link", header);
+  return linked;
 }
 
 /**
@@ -44,7 +57,7 @@ export function usesNativeErrorEnvelope(path: string): boolean {
  */
 export function middlewareErrorResponse(c: Context, status: ErrorStatus, code: ApiErrorCode, message: string, details?: ApiErrorDetails): Response {
   if (usesNativeErrorEnvelope(c.req.path)) return apiErrorResponse(c, status, code, message, details);
-  return c.json({ error: message, code, ...details }, status);
+  return c.json({ error: message, code, ...linkedDetails(c, code, details) }, status);
 }
 
 const thrownErrorDetails = new WeakMap<object, ApiErrorDetails>();
@@ -72,8 +85,11 @@ const DROPPED_HEADERS = new Set(["content-type", "content-length", "content-enco
 export function envelopeForError(c: Context, error: unknown, status: number, originalHeaders?: Headers): Response {
   const { code: named } = error as { code?: unknown };
   const code = isApiErrorCode(named) ? named : apiErrorCodeForStatus(status);
-  const details = error && typeof error === "object" ? thrownErrorDetails.get(error) : undefined;
-  const response = apiErrorResponse(c, status as ErrorStatus, code, API_ERROR_PUBLIC_MESSAGES[code], details);
+  const thrown = error && typeof error === "object" ? thrownErrorDetails.get(error) : undefined;
+  // A blocked spend knows whether the org's auto top-up is on (no "turn on auto top-up" link then).
+  const autoTopUpOn = (error as { autoTopUpOn?: unknown } | null)?.autoTopUpOn === true;
+  const details = withUpgradeLinks(code, autoTopUpOn ? { ...thrown, autoTopUpOn } : thrown);
+  const response = apiErrorResponse(c, status as ErrorStatus, code, publicApiErrorMessage(code, details), details);
   for (const source of [error instanceof HTTPException ? error.res?.headers : undefined, originalHeaders]) {
     source?.forEach((value, name) => {
       if (!DROPPED_HEADERS.has(name.toLowerCase())) response.headers.set(name, value);

@@ -12,7 +12,7 @@ import {
 import { sql } from "../db.js";
 import { canEditWorkspace, getWorkspaceAccess } from "./organizations.js";
 
-type SettingsRow = {
+export type SettingsRow = {
   workspace_id: string;
   user_id: string;
   typo_tolerance: boolean;
@@ -34,6 +34,11 @@ export async function getWorkspaceSearchSettings(workspaceId: string, userId: st
     limit 1
   `;
 
+  return parseWorkspaceSearchSettingsRow(row, workspaceId, userId);
+}
+
+/** Settings from a workspace_search_settings row (defaults without one); shared with the one-query search setup. */
+export function parseWorkspaceSearchSettingsRow(row: SettingsRow | undefined, workspaceId: string, userId: string): WorkspaceSearchSettings {
   if (!row) {
     return workspaceSearchSettingsSchema.parse({
       ...defaultWorkspaceSearchSettings,

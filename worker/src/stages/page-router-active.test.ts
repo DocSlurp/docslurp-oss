@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { defaultPageRouterConfig, type Assignment, type PageRouterMode, type RoutePlan } from "@docslurp/shared";
+import { DEFAULT_OPENROUTER_VISION_MODEL, defaultPageRouterConfig, type Assignment, type PageRouterMode, type RoutePlan } from "@docslurp/shared";
 
 import type { Config } from "../config.js";
 import type { Document, WorkspaceRun } from "../models.js";
@@ -44,7 +44,7 @@ function stateWith(plan: RoutePlan | null, mode: PageRouterMode | undefined, ext
     id: "run", orgId: "org", spentCents: 0, artifacts: {}, stats: {},
     pipeline: {
       preserveImages: true, visionFallback: true, privacyMode: "standard", maxCostCents: null,
-      vision: { forceAllPages: false, maxPagesPerDocument: 4, modelUri: "llm://openrouter/google/gemini-3.1-flash-lite" },
+      vision: { forceAllPages: false, maxPagesPerDocument: 4, modelUri: `llm://openrouter/${DEFAULT_OPENROUTER_VISION_MODEL}` },
       pageRouter: { ...defaultPageRouterConfig, mode },
       ...extra,
     },

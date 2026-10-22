@@ -54,7 +54,11 @@ export function isApiErrorCode(value: unknown): value is ApiErrorCode {
   return typeof value === "string" && (API_ERROR_CODES as readonly string[]).includes(value);
 }
 
-/** Optional structured context. The boundary only forwards `issues` (validation field paths). */
+/**
+ * Optional structured context. The boundary only forwards validation `issues`
+ * (field paths), limit metadata (`retryAfterSeconds`, `category`, `policy`,
+ * `account` (`starter` | `funded`), ...), `links` and a failed chat turn's `usage`.
+ */
 export type ApiErrorDetails = Record<string, unknown>;
 
 export type ApiErrorBody = { error: { code: ApiErrorCode; message: string; details?: ApiErrorDetails } };
@@ -101,12 +105,12 @@ export const API_ERROR_PUBLIC_MESSAGES: Record<ApiErrorCode, string> = {
   unsupported_type: PUBLIC_ERROR_MESSAGES.unsupportedType,
   file_too_large: PUBLIC_ERROR_MESSAGES.tooLarge,
   unreadable_source: PUBLIC_ERROR_MESSAGES.unreadableSource,
-  payment_required: PUBLIC_ERROR_MESSAGES.unavailable,
-  credit_exhausted: PUBLIC_ERROR_MESSAGES.unavailable,
-  workspace_budget_paused: PUBLIC_ERROR_MESSAGES.unavailable,
-  org_budget_paused: PUBLIC_ERROR_MESSAGES.unavailable,
-  minimum_credit_required: PUBLIC_ERROR_MESSAGES.unavailable,
-  plan_not_entitled: PUBLIC_ERROR_MESSAGES.unavailable,
+  payment_required: PUBLIC_ERROR_MESSAGES.creditExhausted,
+  credit_exhausted: PUBLIC_ERROR_MESSAGES.creditExhausted,
+  workspace_budget_paused: PUBLIC_ERROR_MESSAGES.budgetPaused,
+  org_budget_paused: PUBLIC_ERROR_MESSAGES.budgetPaused,
+  minimum_credit_required: PUBLIC_ERROR_MESSAGES.creditExhausted,
+  plan_not_entitled: PUBLIC_ERROR_MESSAGES.planRequired,
   chat_disabled: PUBLIC_ERROR_MESSAGES.chatDisabled,
   model_not_allowed: PUBLIC_ERROR_MESSAGES.modelNotAllowed,
   chat_deadline_exceeded: PUBLIC_ERROR_MESSAGES.chatDeadline,
@@ -130,12 +134,78 @@ export function apiErrorCodeForStatus(status: number): ApiErrorCode {
 }
 
 const SAFE_DETAIL_NUMBERS = ["retryAfterSeconds", "limitCents", "spentCents", "maxBytes"] as const;
-const SAFE_DETAIL_LABELS = ["category", "policy"] as const;
+const SAFE_DETAIL_LABELS = ["category", "policy", "account"] as const;
+
+/**
+ * Where a caller can lift a limit (`details.links` on 402 and 429 responses):
+ * the billing page, its credit top-up section, its auto top-up section (only
+ * while auto top-up is off), the API key's own limits and the docs for the
+ * limit. There is no plan to upgrade: limits rise once an org buys credits. Hosted deployments only; self-hosted
+ * servers have no billing and send none.
+ */
+export const API_ERROR_LINK_KEYS = ["billing", "buyCredits", "autoTopUp", "apiKeys", "docs"] as const;
+export type ApiErrorLinkName = (typeof API_ERROR_LINK_KEYS)[number];
+export type ApiErrorLinks = Partial<Record<ApiErrorLinkName, string>>;
+
+/** Server-authored absolute http(s) URLs only; anything else is dropped. */
+export function publicApiErrorLinks(value: unknown): ApiErrorLinks | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const source = value as Record<string, unknown>;
+  const links: ApiErrorLinks = {};
+  for (const key of API_ERROR_LINK_KEYS) {
+    const url = source[key];
+    if (typeof url !== "string" || url.length > 300 || !/^https?:\/\/[^\s"'<>\\]+$/.test(url)) continue;
+    try {
+      const parsed = new URL(url);
+      if (parsed.protocol === "https:" || parsed.protocol === "http:") links[key] = url;
+    } catch { /* not a URL */ }
+  }
+  return Object.keys(links).length ? links : undefined;
+}
+
+/**
+ * Public copy for `code`, plus where to go next when the details carry links:
+ * a starter-account rate limit points at buying credits, credit errors at
+ * buying credits and auto top-up, budget errors at billing, API key limits at the key settings. Without links (self-hosted, or
+ * no billing) it is the reviewed copy alone.
+ */
+export function publicApiErrorMessage(code: ApiErrorCode, details?: ApiErrorDetails): string {
+  const base = API_ERROR_PUBLIC_MESSAGES[code];
+  if (code === "workspace_not_found" && typeof details?.workspaceSlug === "string") {
+    return `No workspace matching "${details.workspaceSlug}" was found. Pass a workspace ID, slug or name from this organization, or omit workspace to use the default workspace.`;
+  }
+  const links = publicApiErrorLinks(details?.links);
+  if (!links) return base;
+  const account = typeof details?.account === "string" ? details.account : undefined;
+  switch (code) {
+    case "rate_limited":
+      if (account === "starter" && links.buyCredits) {
+        return `Starter rate limit reached. Accounts that have bought credits get higher limits: buy credits at ${links.buyCredits}, or wait for Retry-After and try again.`;
+      }
+      return links.docs ? `${base} Rate limits: ${links.docs}` : base;
+    case "ip_temporarily_blocked":
+      return links.docs ? `${base} Rate limits: ${links.docs}` : base;
+    case "spend_limit_exceeded":
+    case "daily_page_limit":
+      return links.apiKeys ? `${base} Change the key's limits at ${links.apiKeys}.` : base;
+    case "credit_exhausted":
+    case "minimum_credit_required":
+    case "payment_required":
+      if (!links.buyCredits && !links.billing) return base;
+      return `Your organization is out of credits. Buy credits at ${links.buyCredits ?? links.billing}`
+        + (links.autoTopUp ? `, or turn on auto top-up at ${links.autoTopUp}.` : ".");
+    case "workspace_budget_paused":
+    case "org_budget_paused":
+      return links.billing ? `${base} Review spend and budgets at ${links.billing}.` : base;
+    default:
+      return base;
+  }
+}
 
 /**
  * The only details that cross the boundary: validation field paths (issue text
- * may echo input), server-authored limit metadata and a failed chat turn's
- * usage. Anything else is dropped.
+ * may echo input), server-authored limit metadata, upgrade/billing `links` and
+ * a failed chat turn's usage. Anything else is dropped.
  */
 export function publicApiErrorDetails(details: unknown): ApiErrorDetails | undefined {
   if (!details || typeof details !== "object" || Array.isArray(details)) return undefined;
@@ -154,6 +224,12 @@ export function publicApiErrorDetails(details: unknown): ApiErrorDetails | undef
   for (const key of SAFE_DETAIL_LABELS) {
     if (typeof source[key] === "string" && /^[\w:.-]{1,80}$/.test(source[key])) safe[key] = source[key];
   }
+  // The slug a `workspace` value was looked up by (lowercase letters, digits and hyphens only).
+  if (typeof source.workspaceSlug === "string" && /^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(source.workspaceSlug) && source.workspaceSlug.length <= 63) {
+    safe.workspaceSlug = source.workspaceSlug;
+  }
+  const links = publicApiErrorLinks(source.links);
+  if (links) safe.links = links;
   const usage = publicChatTurnUsage(source.usage);
   if (usage) safe.usage = usage;
   const direct = source.directUpload;
@@ -201,5 +277,5 @@ export function publicApiErrorEnvelope(original: unknown, status: number, reques
   if (typeof candidate.code !== "string" || typeof candidate.message !== "string" || "type" in candidate || "param" in candidate) return null;
   const code = isApiErrorCode(candidate.code) ? candidate.code : apiErrorCodeForStatus(status);
   const details = publicApiErrorDetails(candidate.details);
-  return { error: { code, message: API_ERROR_PUBLIC_MESSAGES[code], ...(details ? { details } : {}), ...(requestId ? { requestId } : {}) } };
+  return { error: { code, message: publicApiErrorMessage(code, details), ...(details ? { details } : {}), ...(requestId ? { requestId } : {}) } };
 }

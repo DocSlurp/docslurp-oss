@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { normalizePipelineFeatures, PrivacyModeViolationError, type PipelineFeatureOverrides } from "@docslurp/shared";
+import { DEFAULT_VISION_PROFILE, normalizePipelineFeatures, PrivacyModeViolationError, type PipelineFeatureOverrides } from "@docslurp/shared";
 
 import { fromEnv } from "../config.js";
 import type { WorkflowState } from "../pipeline/pipeline.js";
@@ -101,7 +101,7 @@ describe("privacyMode enforcement in worker stages", () => {
   });
 
   it("skips hosted vision fallback under strict-privacy and audits it", async () => {
-    const { state, audit } = stateFor({ privacyMode: "strict-privacy", visionFallback: true, vision: { profile: "good-fast-hosted" } });
+    const { state, audit } = stateFor({ privacyMode: "strict-privacy", visionFallback: true, vision: { profile: DEFAULT_VISION_PROFILE } });
     await new VisionExtractStage({} as CommandRunner, storage, config, {} as PdfRasterCache).run(state);
     expect(providerFetch).not.toHaveBeenCalled();
     expect(storage.putJson).not.toHaveBeenCalled();

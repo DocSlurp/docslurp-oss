@@ -26,7 +26,7 @@ beforeAll(async () => {
     sql = postgres(`postgres://postgres@127.0.0.1:${served.port}/postgres`, { max: 1, prepare: false, onnotice: () => {} });
   }
   await sql`insert into "user"(id, name, email) values ('u1', 'A', 'a@x')`;
-  await sql`insert into organizations(id, name, slug, created_by_user_id) values ('o1', 'Org', 'org', 'u1')`;
+  await sql`insert into organizations(id, name, slug, created_by_user_id, retain_document_versions) values ('o1', 'Org', 'org', 'u1', 1)`;
   await sql`insert into workspaces(id, org_id, user_id, name) values ('w', 'o1', 'u1', 'W')`;
 }, 60_000);
 
@@ -99,7 +99,6 @@ const options = (deleteVectorRows: DeleteVectorRows, graceSeconds = 0) => ({
   deleteSources: false,
   lancedbRoot: "/tmp/lance",
   deleteVectorRows,
-  billingEnforced: true,
 });
 
 describe("superseded version purge", () => {

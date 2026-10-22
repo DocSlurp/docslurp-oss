@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { Hono } from "hono";
 import { nativeApiErrors, nativeErrorHandler } from "../lib/api-error.js";
 import { ChatTurnDeadline, ChatTurnDeadlineError, chatTurnTimeBudget, CHAT_TURN_TIME_BUDGET_DEFAULTS, isChatTurnTimeout, raceAbort } from "./chat-turn-deadline.js";
@@ -45,6 +45,24 @@ describe("chat turn time budget", () => {
     expect(step.timedOut()).toBe(false);
     step.dispose();
     other.dispose();
+  });
+
+  it("uses only the turn timer when a child can use all remaining time", async () => {
+    vi.useFakeTimers();
+    const deadline = new ChatTurnDeadline({ turnDeadlineMs: 200, stepTimeoutMs: 100, toolTimeoutMs: 100, finalReserveMs: 50 });
+    const child = deadline.child("step", deadline.stepBudgetMs(true));
+    try {
+      // Two independent timers for the same boundary can fire in either order.
+      expect(vi.getTimerCount()).toBe(1);
+      await vi.advanceTimersByTimeAsync(200);
+      expect(child.signal.reason).toBe(deadline.signal.reason);
+      expect(deadline.expired).toBe(true);
+      expect(child.timedOut()).toBe(false);
+    } finally {
+      child.dispose();
+      deadline.dispose();
+      vi.useRealTimers();
+    }
   });
 
   it("raceAbort settles at the abort even when the work never does", async () => {

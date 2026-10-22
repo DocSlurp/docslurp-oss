@@ -140,8 +140,13 @@ export class ChatTurnDeadline {
     const onAbort = () => controller.abort(this.signal.reason);
     if (this.signal.aborted) controller.abort(this.signal.reason);
     else this.signal.addEventListener("abort", onAbort, { once: true });
-    const timer = setTimeout(() => controller.abort(reason), Math.max(0, ms));
-    timer.unref?.();
+    // If the turn itself is the tighter bound, inherit its abort and reason.
+    // A second timer for the final answer can fire just before the turn timer
+    // and incorrectly account for a deadline as a step timeout.
+    const timer = ms < this.remainingMs()
+      ? setTimeout(() => controller.abort(reason), Math.max(0, ms))
+      : undefined;
+    timer?.unref?.();
     return {
       signal: controller.signal,
       timedOut: () => controller.signal.reason === reason,

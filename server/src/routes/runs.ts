@@ -49,7 +49,7 @@ const controlRunSchema = z.object({
 /** Maps workspace resolution and access failures to 403/404; rethrows anything else. */
 function workspaceErrorResponse(c: Context, error: unknown): Response {
   if (error instanceof WorkspaceAccessError) {
-    return apiStatusError(c, error.status === 403 ? 403 : 404, error.message, { code: error.code });
+    return apiStatusError(c, error.status, error.message, { code: error.code, details: error.details });
   }
   if (error instanceof Error && error.message === "Workspace not found") {
     return apiErrorResponse(c, 404, "workspace_not_found", "Workspace not found");
@@ -276,7 +276,7 @@ export const runsRoutes = new Hono()
     const userId = c.get("sessionUser").id;
     const body = c.req.valid("json");
     try {
-      const workspace = await requireActorWorkspace(getRequestActor(c), body.workspaceId);
+      const workspace = await requireActorWorkspace(getRequestActor(c), body.workspace);
       const preview = await getRunProcessingPreview({ ...body, workspaceId: workspace.id }, userId);
       return c.json(preview);
     } catch (error) {

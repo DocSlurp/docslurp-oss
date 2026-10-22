@@ -71,6 +71,10 @@ export interface VectorBackendRecord {
   text: string;
   vector: number[];
   metadata: Record<string, unknown>;
+  /** LanceDB hydration columns (@docslurp/shared/lancedb-hydration); other backends ignore them. */
+  runId?: string;
+  pageNumber?: number;
+  hydration?: string;
 }
 
 const DEFAULT_LOCAL_TRANSFORMERSJS_DTYPE = "q8";

@@ -98,7 +98,7 @@ vi.mock("../lib/request-context.js", async () => {
   };
 });
 
-vi.mock("../services/workspaces.js", () => ({ resolveWorkspaceRef: vi.fn(async () => null), getWorkspace: getWorkspaceMock }));
+vi.mock("../services/workspaces.js", () => ({ resolveWorkspaceRef: vi.fn(async () => null), findWorkspaceForInput: vi.fn(async (ref: { id?: string; slug?: string }) => ({ id: (ref.id ?? ref.slug)!, orgId: "org-1" })), getWorkspace: getWorkspaceMock }));
 
 const { runsRoutes } = await import("../routes/runs.js");
 
@@ -264,7 +264,7 @@ describe("API-key run reads", () => {
     listRunsMock.mockReset();
     getRunMock.mockResolvedValue({ id: "run-1", workspaceId: "ws-1", orgId: "org-1" });
     getWorkspaceMock.mockResolvedValue({ id: "ws-1", orgId: "org-1" });
-    getRunProgressMock.mockResolvedValue({ run: { id: "run-1", status: "completed" } });
+    getRunProgressMock.mockResolvedValue({ run: { id: "run-1", workspaceId: "ws-1", status: "completed" } });
   });
   it("allows an ingest key to observe its run completion", async () => {
     const response = await keyApp().request("/runs/run-1/progress");

@@ -75,6 +75,13 @@ export class WorkflowState {
   artifacts: Record<string, string>;
   artifactLedger: DocumentArtifactLedger;
   readonly usageLedger = new PipelineUsageEventLedger();
+  /**
+   * Chunk ids the embed stage dropped (a retry that produced fewer chunks),
+   * per document: the index stage deletes their LanceDB rows again once the
+   * document's new rows are committed, so an earlier attempt's pending write
+   * cannot bring them back.
+   */
+  readonly staleVectorIds = new Map<string, string[]>();
   pendingPerformance: PerformanceEvent[];
   pendingParserEvaluations: ParserEvaluation[];
   vectorIndexes: VectorIndex[];
@@ -103,7 +110,6 @@ export class WorkflowState {
       artifacts: cloneArtifacts(run.artifacts)
     };
     this.documents = documents;
-    this.usageLedger.planId = run.orgPlanId ?? null;
     this.stage = run.stage;
     this.artifacts = this.run.artifacts;
     this.artifactLedger = DocumentArtifactLedger.create(
@@ -116,6 +122,7 @@ export class WorkflowState {
     this.runStages = new Map();
     this.documentStages = new Map();
     this.totalStages = 0;
+    this.usageLedger.runId = run.id;
   }
 
   static create(run: WorkspaceRun, documents: Document[]): WorkflowState {

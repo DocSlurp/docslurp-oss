@@ -9,7 +9,7 @@ import { WorkerSlotStore, resolveWorkerSlotOptions, tryMaintenanceLease, type Wo
 import { randomUUID, createHmac } from "node:crypto";
 
 import postgres, { type JSONValue, type Sql } from "postgres";
-import { defaultPipelineFeatures, PII_BLOCKED_DOCUMENT_STATUS, planRunFailure, type PrivacyAuditEntry } from "@docslurp/shared";
+import { applyDefaultVisionOverride, defaultPipelineFeatures, PII_BLOCKED_DOCUMENT_STATUS, planRunFailure, type PrivacyAuditEntry } from "@docslurp/shared";
 
 import { mergePipelineFeatures } from "../models.js";
 import { adoptBackfillDocuments } from "../deferred/backfill-adoption.js";
@@ -67,7 +67,7 @@ type WorkspaceRunRow = {
   id: string;
   org_id: string;
   /** Joined from organizations by loadRun; absent from other run queries. */
-  org_plan_id?: string | null;
+  org_funded?: boolean | null;
   workspace_id: string;
   user_id: string;
   kind: string;
@@ -425,7 +425,7 @@ export class Store {
     // The org's plan rides along (no extra round trip): it sets the AI credit
     // factor for bonus plans in the usage ledger.
     const [row] = await this.sql<WorkspaceRunRow[]>`
-      select r.*, (select o.plan_id from organizations o where o.id = r.org_id) as org_plan_id
+      select r.*, (select o.funded_at is not null from organizations o where o.id = r.org_id) as org_funded
       from workspace_runs r
       where r.id = ${runId}
       limit 1
@@ -2380,11 +2380,21 @@ export class Store {
    * The document's chunks are replaced by `keepChunkIds`; rows an earlier attempt
    * wrote beyond them are stale. Scoped to this document only.
    */
-  async deleteStaleDocumentChunks(documentId: string, keepChunkIds: readonly string[]): Promise<void> {
-    await this.sql`
-      delete from document_chunks
+  async staleDocumentChunkIds(documentId: string, keepChunkIds: readonly string[]): Promise<string[]> {
+    const rows = await this.sql<{ id: string }[]>`
+      select id from document_chunks
       where document_id = ${documentId} and id <> all(${this.sql.array([...keepChunkIds])}::text[])
     `;
+    return rows.map((row) => row.id);
+  }
+
+  async deleteStaleDocumentChunks(documentId: string, keepChunkIds: readonly string[]): Promise<string[]> {
+    const rows = await this.sql<{ id: string }[]>`
+      delete from document_chunks
+      where document_id = ${documentId} and id <> all(${this.sql.array([...keepChunkIds])}::text[])
+      returning id
+    `;
+    return rows.map((row) => row.id);
   }
 
   /**
@@ -2676,6 +2686,17 @@ export class Store {
   /** Claims and runs queued workspace graph rebuilds (see graph/rebuild-job.ts). */
   async runGraphJobs(options: GraphJobRunnerOptions): Promise<number> {
     return await runGraphJobs(this.sql, options);
+  }
+
+  /**
+   * Native search's cached eligible sets (server search/eligible-documents.ts,
+   * channel `search_eligibility`) drop these workspaces now instead of after
+   * their TTL: they serve LanceDB rows without re-reading Postgres.
+   */
+  private async notifySearchEligibilityChanged(workspaceIds: ReadonlyArray<string | null | undefined>): Promise<void> {
+    const ids = [...new Set(workspaceIds.filter((id): id is string => Boolean(id)))];
+    if (ids.length === 0) return;
+    await this.sql`select pg_notify('search_eligibility', ${JSON.stringify({ workspaceIds: ids })})`;
   }
 
   /**
@@ -3104,6 +3125,7 @@ export class Store {
           updated_at = now()
         where id = ${row.run_id}
       `;
+      await this.notifySearchEligibilityChanged([row.workspace_id]);
 
       await this.appendAuditLog({
         orgId: row.org_id,
@@ -3181,6 +3203,7 @@ export class Store {
         await client`delete from documents where run_id = ${row.run_id}`;
         await client`delete from workspace_runs where id = ${row.run_id}`;
       });
+      await this.notifySearchEligibilityChanged([row.workspace_id]);
     }
   }
 
@@ -3557,7 +3580,7 @@ function mapRun(row: WorkspaceRunRow): WorkspaceRun {
   return {
     id: row.id,
     orgId: row.org_id ?? null,
-    ...(row.org_plan_id !== undefined ? { orgPlanId: row.org_plan_id } : {}),
+    ...(row.org_funded !== undefined && row.org_funded !== null ? { orgFunded: row.org_funded } : {}),
     userId: row.user_id,
     workspaceId: row.workspace_id,
     kind: row.kind,
@@ -3568,7 +3591,8 @@ function mapRun(row: WorkspaceRunRow): WorkspaceRun {
     pagesTotal: row.pages_total,
     pagesProcessed: row.pages_processed,
     spentCents: Number(row.spent_cents ?? 0) || 0,
-    pipeline: mergePipelineFeatures(row.pipeline ?? defaultPipelineFeatures),
+    // DOCSLURP_VISION_MODEL_URI replaces the built-in default vision model at run time, never in stored settings.
+    pipeline: applyDefaultVisionOverride(mergePipelineFeatures(row.pipeline ?? defaultPipelineFeatures)),
     error: row.error,
     stats: row.stats ?? {},
     artifacts: row.artifacts ?? {},

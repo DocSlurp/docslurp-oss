@@ -20,7 +20,7 @@ beforeAll(async () => {
   process.env.WORKER_CREDIT_LEASES = "on";
   // Lease mechanics with no chat reserve; chat-reserve.db.test.ts covers it.
   process.env.CHAT_CREDIT_RESERVE_CREDITS = "0";
-  process.env.CHAT_CREDIT_RESERVE_FREE_CREDITS = "0";
+  process.env.CHAT_CREDIT_RESERVE_STARTER_CREDITS = "0";
   const pg = await startMigratedPostgres();
   stop = pg.stop;
   sql = postgres(pg.url, {
@@ -40,7 +40,7 @@ beforeAll(async () => {
 afterAll(async () => {
   delete process.env.WORKER_CREDIT_LEASES;
   delete process.env.CHAT_CREDIT_RESERVE_CREDITS;
-  delete process.env.CHAT_CREDIT_RESERVE_FREE_CREDITS;
+  delete process.env.CHAT_CREDIT_RESERVE_STARTER_CREDITS;
   await sql?.end();
   await stop?.();
 });

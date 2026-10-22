@@ -6,6 +6,7 @@ import { allowHostedCall, openRouterTextCall } from "../lib/privacy-guard.js";
 import { measureOp } from "../lib/perf-context.js";
 import { buildTrustedDocumentTaskPrompt } from "../lib/trusted-llm-task.js";
 import type { Stage, WorkflowState } from "../pipeline/pipeline.js";
+import { chargeDocumentFeature } from "../pipeline/feature-charges.js";
 import {
   runDocumentStage,
   runDocuments,
@@ -574,6 +575,9 @@ Do not include explanations. Use short evidence snippets that appear verbatim in
                 overallPolicy,
               },
             });
+            // Price card: structured fields per started 10 pages, once per document per run
+            // (charged even on a policy reject: the extraction ran).
+            chargeDocumentFeature(state, document, "structuredFields");
 
             // Fail the stage on hard reject so it enters the review queue with schema_errors
             if (overallPolicy === "reject") {

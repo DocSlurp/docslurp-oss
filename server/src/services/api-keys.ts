@@ -16,7 +16,7 @@ type ApiKeyRow = {
   key_type: string | null;
   allowed_domains: string[] | null;
   scopes: string[];
-  rate_limit_rpm: number;
+  rate_limit_rpm: number | null;
   rate_limit_ppd: number;
   rate_limits: unknown;
   workspace_ids: string[] | null;
@@ -46,7 +46,8 @@ export interface ApiKey {
   keyType: ApiKeyType;
   allowedDomains: string[];
   scopes: string[];
-  rateLimitRpm: number;
+  /** Optional requests-per-minute cap below the plan's per-category limits; null means the plan's limits. */
+  rateLimitRpm: number | null;
   rateLimitPpd: number;
   /** Custom request and spend limits; see packages/shared/src/rate-limits.ts. */
   rateLimits: ApiKeyRateLimitRule[];
@@ -184,7 +185,8 @@ export async function createApiKey(
   userId: string,
   name: string,
   limits?: {
-    rpm?: number;
+    /** Requests-per-minute cap; omitted or null leaves the key on the plan's limits. */
+    rpm?: number | null;
     ppd?: number;
     rateLimits?: ApiKeyRateLimitRule[];
     scopes?: string[];
@@ -217,7 +219,7 @@ export async function createApiKey(
     const [row] = await tx<ApiKeyRow[]>`
       insert into api_keys (id, user_id, org_id, key_hash, name, key_type, allowed_domains, scopes, rate_limit_rpm, rate_limit_ppd, rate_limits, workspace_ids, materialization_policy)
       values (${id}, ${userId}, ${orgId}, ${keyHash}, ${name}, ${keyType}, ${tx.array(allowedDomains)},
-        ${tx.array(scopes)}, ${limits?.rpm ?? 60}, ${limits?.ppd ?? 10000},
+        ${tx.array(scopes)}, ${limits?.rpm ?? null}, ${limits?.ppd ?? 10000},
         ${tx.json(apiKeyRateLimitRulesSchema.parse(limits?.rateLimits ?? []) as never)}, ${tx.array(workspaceIds)},
         ${tx.json(materializationPolicyOverridesSchema.parse(limits?.materializationPolicy ?? {}) as never)})
       returning *`;
@@ -379,7 +381,7 @@ export class ApiKeyTypeChangeError extends Error {
 }
 
 export async function updateApiKey(id: string, userId: string, updates: {
-  name?: string; scopes?: string[]; rateLimitRpm?: number; rateLimitPpd?: number; rateLimits?: ApiKeyRateLimitRule[]; keyType?: ApiKeyType; allowedDomains?: string[];
+  name?: string; scopes?: string[]; rateLimitRpm?: number | null; rateLimitPpd?: number; rateLimits?: ApiKeyRateLimitRule[]; keyType?: ApiKeyType; allowedDomains?: string[];
   workspaceIds?: string[]; allowClientSensitiveScopes?: boolean; materializationPolicy?: Partial<MaterializationPolicy>;
 }): Promise<ApiKey | null> {
   return await withOwnedKeyLock(id, userId, async (tx, existing, role) => {
@@ -402,7 +404,7 @@ export async function updateApiKey(id: string, userId: string, updates: {
       name = coalesce(${updates.name ?? null}, name), allowed_domains = coalesce(${normalizedAllowedDomains ? tx.array(normalizedAllowedDomains) : null}, allowed_domains),
       scopes = coalesce(${updates.scopes ? tx.array(nextScopes) : null}, scopes),
       workspace_ids = ${tx.array(nextWorkspaceIds)},
-      rate_limit_rpm = coalesce(${updates.rateLimitRpm ?? null}, rate_limit_rpm), rate_limit_ppd = coalesce(${updates.rateLimitPpd ?? null}, rate_limit_ppd),
+      rate_limit_rpm = case when ${updates.rateLimitRpm !== undefined} then ${updates.rateLimitRpm ?? null}::int else rate_limit_rpm end, rate_limit_ppd = coalesce(${updates.rateLimitPpd ?? null}, rate_limit_ppd),
       rate_limits = coalesce(${updates.rateLimits ? tx.json(apiKeyRateLimitRulesSchema.parse(updates.rateLimits) as never) : null}::jsonb, rate_limits),
       materialization_policy = coalesce(${updates.materializationPolicy ? tx.json(materializationPolicyOverridesSchema.parse(updates.materializationPolicy) as never) : null}::jsonb, materialization_policy)
       where id = ${id} and user_id = ${userId} and revoked_at is null returning *`;
@@ -437,7 +439,8 @@ export interface ValidatedKey {
   keyType: ApiKeyType;
   allowedDomains: string[];
   scopes: string[];
-  rateLimitRpm: number;
+  /** Optional requests-per-minute cap; null (or 0) means the plan's limits apply. */
+  rateLimitRpm: number | null;
   rateLimitPpd: number;
   rateLimits: ApiKeyRateLimitRule[];
   /** Workspace allowlist; empty means every workspace the owner can reach in `orgId`. */

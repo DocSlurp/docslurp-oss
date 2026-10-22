@@ -6,7 +6,6 @@ import {
   deferredProfilesEnabled,
   effectiveIndexingMode,
   estimatePipelineWork,
-  getPlan,
   indexConfigHash,
   indexConfigOf,
   isBillingEnforced,
@@ -24,6 +23,7 @@ import {
 } from "@docslurp/shared";
 
 import { sql } from "../db.js";
+import { notifySearchEligibilityChanged } from "../search/eligibility-hint.js";
 import { nextVersionNumber } from "./version-number.js";
 import { validateModeSwitch } from "./workspace-indexing-mode.js";
 import { signalPipelineCancel } from "../lib/temporal.js";
@@ -143,9 +143,10 @@ async function hasVectorizedDocuments(client: typeof sql | Tx, workspaceId: stri
   return Boolean(row?.present);
 }
 
-async function orgPlanId(orgId: string): Promise<string | null> {
-  const [row] = await sql<{ plan_id: string | null }[]>`select plan_id from organizations where id = ${orgId}`;
-  return row?.plan_id ?? null;
+/** The org's concurrent worker ceiling (starter 50, funded 250, or a raised custom value). */
+async function orgWorkerSlots(orgId: string): Promise<number | undefined> {
+  const [row] = await sql<{ worker_slots: number | null }[]>`select worker_slots from organizations where id = ${orgId}`;
+  return row?.worker_slots ? Number(row.worker_slots) : undefined;
 }
 
 /** Prices `stages` over the given documents; shared by every estimate route and mutation. */
@@ -162,7 +163,7 @@ export async function estimateWork(args: {
     stages: args.stages,
     documents: args.documents,
     pages: args.pages,
-    plan: getPlan(await orgPlanId(args.orgId)).id,
+    workerSlots: await orgWorkerSlots(args.orgId),
     env: args.env ?? process.env,
   });
 }
@@ -600,6 +601,8 @@ async function applyPlannedChange(args: {
           and (d.indexing_mode is null or d.indexing_mode = 'full')
           and exists (select 1 from vector_indexes v where v.document_id = d.id)
       `;
+      // Native search caches each document's owner index config hash.
+      await notifySearchEligibilityChanged(tx as unknown as typeof sql, [workspace.id]);
       await tx`
         update workspaces
         set index_configs = jsonb_build_object(${beforeHash}::text, ${tx.json(JSON.parse(JSON.stringify(plan.beforeConfig)))}::jsonb)

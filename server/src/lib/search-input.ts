@@ -12,12 +12,12 @@ const dateFilter = z.string().trim().max(64).optional()
   });
 // A query of only NUL bytes is empty once they are stripped before the Postgres lookups.
 const query = z.string().trim().min(1).max(16000).refine((value) => value.replaceAll("\u0000", "").trim().length > 0);
-const workspaceRef = id.optional().describe("Workspace slug, former slug, UUID, or \"default\". Omitted: the organization default workspace.");
+const workspaceRef = id.optional().describe("Workspace ID, slug or name (names match by slug, so \"Legal Contracts\" finds legal-contracts). Omitted: the organization default workspace.");
 
 export const searchInputSchema = z.object({
   q: query,
   /** Omitted: the organization's default workspace. */
-  workspaceId: workspaceRef,
+  workspace: workspaceRef,
   orgId: id.optional(),
   runId: id.optional(),
   documentId: id.optional(),
@@ -73,7 +73,7 @@ export function searchFormError(input: Record<string, unknown>): string | undefi
 }
 export const workspaceChatInputSchema = z.object({
   q: query,
-  workspaceId: workspaceRef,
+  workspace: workspaceRef,
   orgId: id.optional(),
   sessionId: id.optional(),
   model: id.optional(),

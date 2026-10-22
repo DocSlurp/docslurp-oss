@@ -16,68 +16,11 @@ permissions:
 
 # Public CI: no deploys, no hosted evals, no paid provider keys, no secrets.
 jobs:
-  typecheck:
-    name: Typecheck and build
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
-        with:
-          node-version-file: .nvmrc
-          cache: 'pnpm'
-      - run: pnpm install --frozen-lockfile
-      - name: Check migrations are expand/contract safe
-        run: node scripts/check-migration-safety.mjs
-      - name: Check doc links
-        run: node scripts/check-docs-links.mjs
-      - name: Check Mermaid diagrams
-        run: node scripts/check-docs-mermaid.mjs
-        env:
-          # Use the runner's Chrome instead of downloading one through npx.
-          PUPPETEER_EXECUTABLE_PATH: /usr/bin/google-chrome
-          PUPPETEER_SKIP_DOWNLOAD: "1"
-      - run: pnpm typecheck
-      - run: pnpm build
-      # Imports every released package export and enforces the server/ import boundary.
-      - name: Import public packages
-        run: node scripts/check-package-imports.mjs
-      # The public packages promise engines >=20 while the repo builds on Node 24.
-      # Reuse this job's install and build, then test the built packages on each
-      # older supported Node (no extra checkout, install or build).
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
-        with:
-          node-version: '20'
-          package-manager-cache: false
-      - name: Test and import public packages on Node 20
-        run: |
-          node --version
-          (cd packages/sdk && node --test test/*.test.mjs)
-          (cd packages/cli && node --test test/*.test.mjs)
-          (cd packages/contrib-astro && node --test index-docs.test.mjs)
-          (cd packages/contrib-search-compat && node --test test/*.test.mjs)
-          node scripts/check-package-imports.mjs
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
-        with:
-          node-version: '22'
-          package-manager-cache: false
-      - name: Test and import public packages on Node 22
-        run: |
-          node --version
-          (cd packages/sdk && node --test test/*.test.mjs)
-          (cd packages/cli && node --test test/*.test.mjs)
-          (cd packages/contrib-astro && node --test index-docs.test.mjs)
-          (cd packages/contrib-search-compat && node --test test/*.test.mjs)
-          node scripts/check-package-imports.mjs
-
   # `pnpm test` runs worker then server serially (pnpm -r follows the dependency
   # graph). Split them across runners and shard the worker suite so the slowest
   # lane, not the sum of every suite, sets the wall-clock time.
   test:
-    name: Tests (${{ matrix.suite }})
+    name: ${{ matrix.suite }}
     timeout-minutes: 20
     # Native Kreuzberg requires newer glibc; enable unprivileged namespaces only
     # on this disposable CI runner so the real parser sandbox remains exercised.
@@ -86,6 +29,7 @@ jobs:
       fail-fast: true
       matrix:
         include:
+          - suite: typecheck and build
           - suite: worker 1/2
             run: pnpm --filter @docslurp/worker test --shard=1/2
             worker-tools: true
@@ -137,14 +81,76 @@ jobs:
         if: matrix.worker-tools
         run: pnpm worker:check --profile=test --sandbox
       - run: ${{ matrix.run }}
+        if: matrix.run
       # Deterministic, local-only routing regression gate: no hosted AI calls, no spend.
       - name: Document routing regression eval
         if: matrix.suite == 'worker 1/2'
         run: pnpm eval:routing
 
+      - name: Check migrations are expand/contract safe
+        if: matrix.suite == 'typecheck and build'
+        run: node scripts/check-migration-safety.mjs
+      - name: Check doc links
+        if: matrix.suite == 'typecheck and build'
+        run: node scripts/check-docs-links.mjs
+      - name: Prepare Mermaid renderer
+        if: matrix.suite == 'typecheck and build'
+        timeout-minutes: 5
+        run: |
+          mermaid_version=$(node --input-type=module -e 'import { MERMAID_CLI_VERSION } from "./scripts/check-docs-mermaid.mjs"; console.log(MERMAID_CLI_VERSION)')
+          npx --yes "@mermaid-js/mermaid-cli@$mermaid_version" --version
+        env:
+          PUPPETEER_SKIP_DOWNLOAD: "1"
+      - name: Check Mermaid diagrams
+        if: matrix.suite == 'typecheck and build'
+        run: node scripts/check-docs-mermaid.mjs
+        env:
+          # Use the runner's Chrome instead of downloading one through npx.
+          PUPPETEER_EXECUTABLE_PATH: /usr/bin/google-chrome
+          PUPPETEER_SKIP_DOWNLOAD: "1"
+      - run: pnpm typecheck
+        if: matrix.suite == 'typecheck and build'
+      - run: pnpm build
+        if: matrix.suite == 'typecheck and build'
+      # Imports every released package export and enforces the server/ import boundary.
+      - name: Import public packages
+        if: matrix.suite == 'typecheck and build'
+        run: node scripts/check-package-imports.mjs
+      # The public packages promise engines >=20 while the repo builds on Node 24.
+      # Reuse this job's install and build, then test the built packages on each
+      # older supported Node (no extra checkout, install or build).
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        if: matrix.suite == 'typecheck and build'
+        with:
+          node-version: '20'
+          package-manager-cache: false
+      - name: Test and import public packages on Node 20
+        if: matrix.suite == 'typecheck and build'
+        run: |
+          node --version
+          (cd packages/sdk && node ../../scripts/node-test.mjs test/*.test.mjs)
+          (cd packages/cli && node ../../scripts/node-test.mjs test/*.test.mjs)
+          (cd packages/contrib-astro && node ../../scripts/node-test.mjs index-docs.test.mjs)
+          (cd packages/contrib-search-compat && node ../../scripts/node-test.mjs test/*.test.mjs)
+          node scripts/check-package-imports.mjs
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        if: matrix.suite == 'typecheck and build'
+        with:
+          node-version: '22'
+          package-manager-cache: false
+      - name: Test and import public packages on Node 22
+        if: matrix.suite == 'typecheck and build'
+        run: |
+          node --version
+          (cd packages/sdk && node ../../scripts/node-test.mjs test/*.test.mjs)
+          (cd packages/cli && node ../../scripts/node-test.mjs test/*.test.mjs)
+          (cd packages/contrib-astro && node ../../scripts/node-test.mjs index-docs.test.mjs)
+          (cd packages/contrib-search-compat && node ../../scripts/node-test.mjs test/*.test.mjs)
+          node scripts/check-package-imports.mjs
+
   ci-success:
     # A stable required check. Never mask failures.
-    needs: [typecheck, test]
+    needs: [test]
     if: always()
     runs-on: ubuntu-slim
     timeout-minutes: 1

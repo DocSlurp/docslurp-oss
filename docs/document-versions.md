@@ -32,17 +32,18 @@ HTTP, MCP and drag-and-drop folder uploads carry the same `path`.
 
 Retention is the number of versions kept per document, counting the current one.
 
-| Plan | Effective value |
+| Setting | Effective value |
 | --- | --- |
-| Free | 1 (current only), always. Settings are ignored. |
-| Silver, Gold, Platinum | Workspace override, else organization setting, else the plan default of 2 (current plus one earlier version). |
+| Workspace override | Used when set. |
+| Organization setting | Used when the workspace has no override. |
+| Default | 2 (current plus one earlier version), for every organization. |
 
 Valid overrides are 1 to 100; `null` clears an override.
 
 ```ts
 await client.setRetention({ orgId }, 5);                       // organization default
-await client.setRetention({ workspaceId: "legal" }, 10);        // workspace override
-await client.setRetention({ workspaceId: "legal" }, null);      // inherit again
+await client.setRetention({ workspace: "legal" }, 10);          // workspace override
+await client.setRetention({ workspace: "legal" }, null);        // inherit again
 ```
 
 Both calls `PATCH` `retainDocumentVersions` on `/v1/organizations/:id` or `/v1/workspaces/:id`. Lowering the value takes effect at the next purge, which archives or purges the extra versions.
@@ -59,7 +60,7 @@ Retained page text and Markdown count toward index storage.
 
 Only completed versions take a retention slot. A superseded failed, cancelled or blocked version is always purged, and a queued or in-flight re-index never evicts an archived version.
 
-On a deployment that does not bill (no Stripe key and no `DOCSLURP_BILL_*` flag), retention settings apply on every plan and the default is 2 versions. When billing is enforced the free plan always keeps only the current version, and setting a retention value there returns `402 upgrade_required`.
+Retention works the same for every organization, on hosted and self-hosted deployments: there are no plans. Archived versions still hold their files, so on docslurp.io they are billed as storage (25 credits per GB-month); the billing page shows what retained versions cost.
 
 ## Upgrading existing data
 
