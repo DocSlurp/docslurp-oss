@@ -79,12 +79,12 @@ describe("vision model profiles", () => {
     expect(postProcessVisionText("```markdown\n# Page\n```", undefined)).toBe("```markdown\n# Page\n```");
   });
 
-  it("sends GPT-6 Luna its template, reasoning floor, high detail and a 1,600 px page", async () => {
+  it("sends GPT-6 Luna its template, reasoning floor and high detail at full page size", async () => {
     const { body, text, imageUrl, meta } = await sendPage(LUNA);
     expect(body.reasoning).toEqual({ effort: "none" });
     expect(text).toBe(visionPromptTemplates["page-markdown-latex"]);
     expect(imageUrl.detail).toBe("high");
-    expect([meta.width, meta.height]).toEqual([1236, 1600]);
+    expect([meta.width, meta.height]).toEqual([1530, 1980]);
   });
 
   it("keeps an explicitly chosen template for GPT-6 Luna", async () => {

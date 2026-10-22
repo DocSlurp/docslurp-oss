@@ -25,8 +25,9 @@ export const GENERIC_VISION_PROMPT_KEY = "<OCR>";
 
 export const VISION_MODEL_PROFILES: Readonly<Record<string, VisionModelProfile>> = {
   // 2026-10-21 tuning (tune split, 68 pages x 2): the LaTeX/table template lifts math and content F1;
-  // detail "high" plus a 1,600 px long side cuts image tokens ~20% at equal quality (1,280 px lost math).
-  "openai/gpt-6-luna": { defaultPrompt: "page-markdown-latex", imageDetail: "high", maxImageLongSide: 1_600, unwrapMarkdownFence: true,
+  // detail "high" caps image tokens ~7% below the default. A 1,600 px long side saved another ~13% on tune
+  // but blurred dense non-Latin script on select (Hebrew content F1 0.99 -> 0.95), so pages go at full size.
+  "openai/gpt-6-luna": { defaultPrompt: "page-markdown-latex", imageDetail: "high", unwrapMarkdownFence: true,
     // OpenAI's output filter deterministically stops some ordinary published pages (corporate filings,
     // government guidance) mid-page; Bedrock and Azure US transcribed them. Bedrock lists $0.11/$0.55 per M.
     contentFilterRetryProviders: ["amazon-bedrock/us-east-1", "azure/us"] },
