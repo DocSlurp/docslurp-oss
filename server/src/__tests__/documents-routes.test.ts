@@ -105,6 +105,15 @@ describe("documentsRoutes bulk actions", () => {
     expect(removeDocumentTagsMock).toHaveBeenCalledWith(["doc-1", "doc-2"], "user-1", ["legal", "invoice"]);
   });
 
+  it.each([
+    new Error("database connection failed"),
+    Object.assign(new Error("foreign key violation"), { code: "23503", constraint_name: "remote_media_jobs_document_id_fkey" }),
+  ])("preserves unexpected delete failures as server errors", async error => {
+    app.onError(() => new Response("Internal Server Error", { status: 500 }));
+    deleteDocumentMock.mockRejectedValue(error);
+    expect((await app.request("/documents/doc-1", { method: "DELETE" })).status).toBe(500);
+  });
+
   it("deletes a single document through the dedicated route", async () => {
     deleteDocumentMock.mockResolvedValue({
       documentId: "doc-1",

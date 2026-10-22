@@ -1,7 +1,7 @@
 import type { PGlite } from "@electric-sql/pglite";
 import type { PGLiteSocketServer } from "@electric-sql/pglite-socket";
 import postgres from "postgres";
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { createMigratedDatabase } from "../test/migrated-db.js";
 import { serveOnRandomPort } from "../test/migrated-postgres.js";
@@ -30,6 +30,8 @@ afterAll(async () => {
   await server?.stop();
   await db?.close();
 });
+
+afterEach(() => vi.unstubAllEnvs());
 
 beforeEach(async () => {
   await sql`delete from documents`;
@@ -327,6 +329,24 @@ describe("retention-aware superseded purge", () => {
     await insertVersion("v3", "queued", "2026-01-03");
     await sql`update documents set status = 'completed' where id = 'v3'`;
   }
+
+  it("retention follows organization settings regardless of billing environment overrides", async () => {
+    // Billing-service imports can load the developer's .env. Retention is now
+    // independent of billing, so neither override mode may change the keep count.
+    await sql`update organizations set retain_document_versions = 3 where id = 'o1'`;
+    for (const enforced of [false, true]) {
+      vi.stubEnv("STRIPE_SECRET_KEY", enforced ? "test-retention-key" : "");
+      for (const key of Object.keys(process.env).filter((key) => key.startsWith("DOCSLURP_BILL_"))) {
+        vi.stubEnv(key, String(enforced));
+      }
+      vi.stubEnv("DOCSLURP_BILL_COMPUTE", String(enforced));
+      await sql`delete from documents`;
+      await seedChain(4);
+      await sweep();
+      const s = await states();
+      expect([s.v1!.purged, s.v2!.archived, s.v3!.archived, s.v4!.archived]).toEqual([true, true, true, false]);
+    }
+  });
 
   it("purges archived predecessors after the current version is deleted", async () => {
     await seedChain(2);

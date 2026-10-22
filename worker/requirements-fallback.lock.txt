@@ -96,6 +96,8 @@ cymem==2.0.13
     #   thinc
 dateparser==1.4.3
     # via htmldate
+defusedxml==0.7.1
+    # via -r worker/requirements-base.txt
 deprecation==2.1.0
     # via lancedb
 durationpy==0.11

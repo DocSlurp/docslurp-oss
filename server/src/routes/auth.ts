@@ -57,7 +57,7 @@ authRoutes.post("/api/session/sign-in", async (c) => {
   }));
   if (!result.ok) {
     const payload = await result.json().catch(() => null) as { message?: string } | null;
-    return Response.redirect(buildAuthFailureUrl(request.url, payload?.message ?? "Unable to sign in", email), 302);
+    return Response.redirect(buildAuthFailureUrl(request.url, payload?.message ?? "Unable to sign in"), 302);
   }
   const response = new Response(null, { status: 302, headers: { location: new URL(redirectTo, request.url).toString() } });
   for (const cookie of result.headers.getSetCookie()) response.headers.append("set-cookie", cookie);

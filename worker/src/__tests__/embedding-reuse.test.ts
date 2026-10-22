@@ -366,7 +366,11 @@ describe("EmbedStage chunk materialization", () => {
             markDocumentLexicalSearchable: async () => {},
           },
         });
-        return { rows, artifact: result.artifact, usage: result.state.usageLedger.snapshot().map(({ id: _id, ...event }) => event) };
+        return { rows, artifact: result.artifact, usage: result.state.usageLedger.snapshot().map(({ id: _id, metadata, ...event }) => {
+          // Each activity has its own trace; compare usage and pricing, not tracing identity.
+          const { traceId: _traceId, spanId: _spanId, ...usageMetadata } = metadata ?? {};
+          return { ...event, metadata: usageMetadata };
+        }) };
       } finally { vi.unstubAllEnvs(); }
     };
 

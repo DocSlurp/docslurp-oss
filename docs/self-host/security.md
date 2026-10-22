@@ -72,7 +72,7 @@ The scan policy comes from `resolveMalwareScanPolicy` in `worker/src/tools/runne
 
 ## Secrets and encryption keys
 
-`node scripts/selfhost-init.mjs` generates distinct random values and writes them to `.env.selfhost`, which Git ignores. Back this file up somewhere private. If you lose it, or change an encryption key, stored data protected by that key becomes unreadable.
+`node scripts/selfhost-init.mjs` generates distinct random values and writes them to `.env.selfhost`, which Git ignores. Back this file up somewhere private. Losing the encryption keys makes stored data unreadable. Use the procedure below when changing AES-GCM keys.
 
 | Variable | What it protects |
 | --- | --- |
@@ -84,7 +84,19 @@ The scan policy comes from `resolveMalwareScanPolicy` in `worker/src/tools/runne
 | `SECRETS_ENCRYPTION_KEY` | Workspace secrets stored at rest. It is also the first fallback root for file proxy URL tokens. |
 | `METRICS_SECRET` | Access to the metrics endpoint. |
 
-Rotation caveat: the three `*_ENCRYPTION_KEY` values encrypt data already in Postgres, and this repository documents no re-encryption procedure. Replacing a key makes the rows encrypted under the old key unreadable. Do not rotate them casually. If you must replace one, take a backup first.
+### Rotate AES-GCM at-rest keys
+
+This procedure covers `SECRETS_ENCRYPTION_KEY` (workspace secrets, webhook signing secrets, organization SSO client secrets) and `CREDENTIALS_ENCRYPTION_KEY` (workspace connectors and user MCP service credentials). It does **not** rotate PostgreSQL PGP encryption, including `OAUTH_TOKEN_ENCRYPTION_KEY` or search history. Back up the database and keys first; protect those backups as secrets.
+
+1. Use a maintenance window for the initial envelope upgrade: stop API and worker processes, deploy code supporting `v2:<key-id>:<iv>:<tag>:<ciphertext>` everywhere, then restart with the existing key and ID. New code immediately writes v2, so do not mix old readers with new writers. Existing `v1` and unversioned AES-GCM rows remain readable. Keep the current key and ID unchanged during this rollout.
+2. For each key being replaced, generate a random 32-byte hex key (`openssl rand -hex 32`), set `<ENV_NAME>_ID` to a new unique ID, and put the previous key in `<ENV_NAME>_PREVIOUS_KEYS`, a JSON object such as `{"default":"<previous 64 hex characters>"}`. Old deployments without an explicit ID used `default`. IDs permit letters, digits, `_` and `-`, up to 64 characters. Never reuse an ID for different key material. Keyrings accept at most 16 old keys; use real 32-byte hex/base64 values even outside production. If the old development key was a passphrase, supply its SHA-256 digest as the legacy key.
+3. Restart **all** API and worker processes with the same current key and keyring. New writes now use the new ID; old keys are read-only. Do not let old writers continue during retirement.
+4. From the core root, run `pnpm --filter @docslurp/server exec tsx scripts/rotate-at-rest-secrets.ts --dry-run --limit=100`. Dry-run decrypts candidates without updating rows. Logs contain counts only. Then run the same command with `--apply`. Each invocation visits at most the limit per store (default 100, maximum 10000); rerun until every store reports zero candidates. Failed decryptions stop the run; preserve all old keys and investigate. Applied rows remain safely resumable. Concurrent changes are skipped using compare-and-update and reported as conflicts; rerun for those rows. Legacy plaintext webhook and SSO secrets are encrypted too. Empty credential fields are skipped.
+5. Verify normal reads and take a fresh backup, then remove old keys from every process only after all stores report zero candidates and all writers use the new ID. Retain old keys securely for any database backups that still need them. Counts describe the bounded candidate pass, not a full integrity scan of already-current rows. The command does not rotate the underlying provider/webhook credentials.
+
+Set `FILE_TOKEN_SECRET` independently before rotating `SECRETS_ENCRYPTION_KEY` if existing short-lived file capability URLs must remain usable. Without it, file URL signing falls back to the secrets key (then Better Auth secret), and changing that root invalidates outstanding URLs. The AES-GCM keyring does not preserve those signing tokens. Search capability tokens use the same fallback root and also require reissuance when it changes. Set `SEARCH_QUERY_ENCRYPTION_KEY` to the **old** secrets-key value before changing that root if search-history PGP encryption previously used its fallback; restart all writers with that explicit value. The rotation command does not migrate search-history PGP ciphertext.
+
+`OAUTH_TOKEN_ENCRYPTION_KEY` protects separate PostgreSQL PGP ciphertext and has no rotation command here; preserve that key until a separate migration is implemented.
 
 Provider keys (`OPENAI_API_KEY`, `OPENROUTER_API_KEY`, `ANTHROPIC_API_KEY`, `GOOGLE_GENERATIVE_AI_API_KEY`) and OAuth client secrets are optional and live in the same file. See [Configuration](configuration.md).
 

@@ -63,6 +63,10 @@ describe("thrown errors inside a native router", () => {
 });
 
 describe("app-level error handler", () => {
+  // This group checks protocol shape without hosted billing decoration;
+  // the billing-links group below covers the hosted response and its links.
+  beforeEach(() => { vi.stubEnv("DOCSLURP_DEPLOYMENT_MODE", "self-hosted"); });
+  afterEach(() => { vi.unstubAllEnvs(); });
   function app() {
     const hono = new Hono();
     hono.onError(nativeErrorHandler((error, c) => spendAwareErrorHandler(error, c)));

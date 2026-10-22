@@ -7,6 +7,7 @@ vi.mock("../lib/request-actor.js", () => ({
   resolveBetterAuthSessionActor: mocks.session,
   setRequestActor: (c: any, actor: any) => c.set("requestActor", actor),
 }));
+const { env } = await import("../config.js");
 const { sessionAuth } = await import("../middleware/session-auth.js");
 const { acceptApiKeys, authenticatedByRoute } = await import("../lib/route-auth.js");
 
@@ -81,6 +82,56 @@ describe("native resource bearer authentication boundary", () => {
     expect((await app().request("/v1/auth/saml/acme/init")).status).toBe(200);
     expect(mocks.apiKey).not.toHaveBeenCalled();
     expect(mocks.session).not.toHaveBeenCalled();
+  });
+
+  it("rejects a cross-site cookie mutation and accepts a same-origin one (SEC-2026-10-02)", async () => {
+    mocks.apiKey.mockResolvedValue(null);
+    mocks.session.mockResolvedValue({ type: "session" });
+    const cross = await app().request("/v1/organizations/one/members", {
+      method: "POST",
+      headers: { origin: "https://evil.example", "sec-fetch-site": "cross-site" }
+    });
+    expect(cross.status).toBe(403);
+    const same = await app().request("/v1/organizations/one/members", {
+      method: "POST",
+      headers: { origin: "http://localhost", "sec-fetch-site": "same-origin" }
+    });
+    expect(same.status).toBe(200);
+  });
+
+  it.each(["same-site", "same-origin", "none"])("rejects untrusted Origin despite %s fetch metadata", async (site) => {
+    mocks.session.mockResolvedValue({ type: "session" });
+    expect((await app().request("/v1/organizations/one/members", {
+      method: "POST", headers: { origin: "http://sibling.localhost", "sec-fetch-site": site }
+    })).status).toBe(403);
+  });
+
+  it("accepts nonbrowser mutations and refuses an originless same-site browser mutation", async () => {
+    mocks.session.mockResolvedValue({ type: "session" });
+    expect((await app().request("/v1/organizations/one/members", { method: "POST" })).status).toBe(200);
+    expect((await app().request("/v1/organizations/one/members", {
+      method: "POST", headers: { "sec-fetch-site": "same-site" }
+    })).status).toBe(403);
+  });
+
+  it("accepts an explicitly trusted cross-site UI Origin", async () => {
+    mocks.session.mockResolvedValue({ type: "session" });
+    env.corsAllowedOrigins.push("https://trusted-ui.example");
+    try {
+      expect((await app().request("/v1/organizations/one/members", {
+        method: "POST", headers: { origin: "https://trusted-ui.example", "sec-fetch-site": "cross-site" }
+      })).status).toBe(200);
+    } finally {
+      env.corsAllowedOrigins.splice(env.corsAllowedOrigins.indexOf("https://trusted-ui.example"), 1);
+    }
+  });
+
+  it("does not apply the CSRF check to bearer credentials (not CSRFable)", async () => {
+    const res = await app().request("/v1/organizations/one/members", {
+      method: "POST",
+      headers: { ...headers, origin: "https://evil.example", "sec-fetch-site": "cross-site" }
+    });
+    expect(res.status).toBe(200);
   });
 
   it("delegates hosted MCP to resource authentication without cookie fallback", async () => {

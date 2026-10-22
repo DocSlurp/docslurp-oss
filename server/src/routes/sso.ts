@@ -1,17 +1,17 @@
 import { reportPublicError } from "../lib/public-errors.js";
-import { createCipheriv, createDecipheriv, createHash, createHmac, randomBytes } from "node:crypto";
+import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 
 import { SAML, ValidateInResponseTo, type CacheItem, type CacheProvider } from "@node-saml/node-saml";
 import { zValidator } from "@hono/zod-validator";
-import { Hono } from "hono";
-import { setCookie } from "hono/cookie";
+import { Hono, type Context } from "hono";
+import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import { createRemoteJWKSet, customFetch, jwtVerify } from "jose";
 import { parseStringPromise } from "xml2js";
 import { z } from "zod";
 
 import { sql } from "../db.js";
 import { auth } from "../lib/auth.js";
-import { getRequiredEncryptionKey } from "../lib/encryption.js";
+import { openSecret, sealSecret } from "../lib/encryption.js";
 import { requestIp } from "../lib/request-context.js";
 import { assertSafeExternalUrl, safeExternalFetch } from "../lib/network-security.js";
 import {
@@ -182,17 +182,8 @@ function validateConfig(config: SsoConfig): string | null {
   return null;
 }
 
-function getSsoSecretEncryptionKey(): Buffer {
-  return getRequiredEncryptionKey("SECRETS_ENCRYPTION_KEY");
-}
-
 function encryptSsoClientSecret(secret: string): string {
-  const key = getSsoSecretEncryptionKey();
-  const iv = randomBytes(16);
-  const cipher = createCipheriv("aes-256-gcm", key, iv);
-  const encrypted = Buffer.concat([cipher.update(secret, "utf8"), cipher.final()]);
-  const tag = cipher.getAuthTag();
-  return `${iv.toString("hex")}:${tag.toString("hex")}:${encrypted.toString("hex")}`;
+  return sealSecret("SECRETS_ENCRYPTION_KEY", secret);
 }
 
 function decryptSsoClientSecret(encrypted: string | null | undefined): string | null {
@@ -200,17 +191,13 @@ function decryptSsoClientSecret(encrypted: string | null | undefined): string | 
     return null;
   }
 
-  const parts = encrypted.split(":");
-  if (parts.length !== 3) {
+  try {
+    return openSecret("SECRETS_ENCRYPTION_KEY", encrypted);
+  } catch {
+    // A malformed or undecryptable value is treated as "no stored secret" so a
+    // bad row cannot take down the SSO config read.
     return null;
   }
-  const [ivHex, tagHex, ciphertextHex] = parts as [string, string, string];
-  const decipher = createDecipheriv("aes-256-gcm", getSsoSecretEncryptionKey(), Buffer.from(ivHex, "hex"));
-  decipher.setAuthTag(Buffer.from(tagHex, "hex"));
-  return Buffer.concat([
-    decipher.update(Buffer.from(ciphertextHex, "hex")),
-    decipher.final()
-  ]).toString("utf8");
 }
 
 function resolveStoredSsoConfig(raw: SsoConfig | null): SsoConfig {
@@ -550,6 +537,40 @@ async function consumeSsoRequest(state: string, provider: "oidc" | "saml"): Prom
   return rows[0] ?? null;
 }
 
+const SSO_STATE_COOKIE = "docslurp_sso_state";
+
+function ssoStateDigest(state: string): string {
+  return createHash("sha256").update(state).digest("hex");
+}
+
+/**
+ * Binds an SSO flow to the browser that started it (SEC-2026-10-06). The SAML
+ * POST binding is a cross-site form POST, so over HTTPS the cookie must be
+ * SameSite=None to survive it; Lax is the dev/http fallback.
+ */
+function setSsoStateCookie(c: Context, state: string): void {
+  const secure = new URL(inferApiOrigin(c.req.raw)).protocol === "https:";
+  setCookie(c, SSO_STATE_COOKIE, ssoStateDigest(state), {
+    httpOnly: true,
+    sameSite: secure ? "None" : "Lax",
+    secure,
+    path: "/",
+    maxAge: 600,
+  });
+}
+
+/** True only when the callback returns to the browser that started the flow; consumes the cookie. */
+function ssoStateMatchesCookie(c: Context, state: string): boolean {
+  const cookie = getCookie(c, SSO_STATE_COOKIE);
+  if (!cookie) return false;
+  const expected = ssoStateDigest(state);
+  const provided = Buffer.from(cookie);
+  const wanted = Buffer.from(expected);
+  const ok = provided.length === wanted.length && timingSafeEqual(provided, wanted);
+  if (ok) deleteCookie(c, SSO_STATE_COOKIE, { path: "/" });
+  return ok;
+}
+
 interface SsoAssertedIdentity {
   orgId: string;
   provider: "oidc" | "saml";
@@ -859,7 +880,7 @@ function isSamlReady(config: SsoConfig): boolean {
 async function beginSsoFlow(c: any, org: OrgRow, config: SsoConfig, options: {
   redirectPath: string | null;
   linkUserId?: string | null;
-}): Promise<string> {
+}): Promise<{ url: string; state: string }> {
   const state = createStateToken();
   if (config.providerType === "oidc") {
     const metadata = await fetchOidcMetadata(config.metadataUrl!);
@@ -885,7 +906,7 @@ async function beginSsoFlow(c: any, org: OrgRow, config: SsoConfig, options: {
     authorizeUrl.searchParams.set("code_challenge", createPkceChallenge(codeVerifier));
     authorizeUrl.searchParams.set("code_challenge_method", "S256");
     if (options.linkUserId) authorizeUrl.searchParams.set("prompt", "login");
-    return authorizeUrl.toString();
+    return { url: authorizeUrl.toString(), state };
   }
 
   const samlMetadata = await fetchSamlMetadata(config.metadataUrl!);
@@ -896,7 +917,8 @@ async function beginSsoFlow(c: any, org: OrgRow, config: SsoConfig, options: {
     redirectPath: options.redirectPath,
     linkUserId: options.linkUserId ?? null
   });
-  return await createSamlClient(c, org, samlMetadata, state).getAuthorizeUrlAsync(state, undefined, {});
+  const url = await createSamlClient(c, org, samlMetadata, state).getAuthorizeUrlAsync(state, undefined, {});
+  return { url, state };
 }
 
 async function requireVerifiedSsoDomain(org: OrgRow, config: SsoConfig, email: string): Promise<string | null> {
@@ -1111,7 +1133,8 @@ export const ssoRoutes = new Hono()
     }
     const body = (await c.req.json().catch(() => ({}))) as { redirect?: unknown };
     const redirectPath = sanitizeRedirectPath(typeof body.redirect === "string" ? body.redirect : "/app/sso?linked=1");
-    const authorizeUrl = await beginSsoFlow(c, org, config, { redirectPath, linkUserId: user.id });
+    const { url: authorizeUrl, state } = await beginSsoFlow(c, org, config, { redirectPath, linkUserId: user.id });
+    setSsoStateCookie(c, state);
     return c.json({ authorizeUrl });
   })
   .delete("/:orgId/sso/link", async (c) => {
@@ -1135,7 +1158,8 @@ export const samlCallbackRoutes = new Hono()
       return apiStatusError(c, 400, "OIDC SSO is not fully configured for this organization");
     }
 
-    const url = await beginSsoFlow(c, org, config, { redirectPath: sanitizeRedirectPath(c.req.query("redirect")) });
+    const { url, state } = await beginSsoFlow(c, org, config, { redirectPath: sanitizeRedirectPath(c.req.query("redirect")) });
+    setSsoStateCookie(c, state);
     return c.redirect(url, 302);
   })
   .get("/oidc/:orgId/callback", async (c) => {
@@ -1143,6 +1167,10 @@ export const samlCallbackRoutes = new Hono()
     const code = c.req.query("code");
     if (!state || !code) {
       return apiStatusError(c, 400, "Missing OIDC code/state callback parameters");
+    }
+
+    if (!ssoStateMatchesCookie(c, state)) {
+      return apiStatusError(c, 400, "Invalid or expired OIDC state");
     }
 
     const requestRow = await consumeSsoRequest(state, "oidc");
@@ -1236,7 +1264,8 @@ export const samlCallbackRoutes = new Hono()
       return apiStatusError(c, 400, "SAML SSO is not fully configured for this organization");
     }
 
-    const url = await beginSsoFlow(c, org, config, { redirectPath: sanitizeRedirectPath(c.req.query("redirect")) });
+    const { url, state } = await beginSsoFlow(c, org, config, { redirectPath: sanitizeRedirectPath(c.req.query("redirect")) });
+    setSsoStateCookie(c, state);
     return c.redirect(url, 302);
   })
   .post("/saml/:orgSlug/callback", async (c) => {
@@ -1256,6 +1285,10 @@ export const samlCallbackRoutes = new Hono()
     const relayState = formData?.get("RelayState");
     if (typeof samlResponse !== "string" || typeof relayState !== "string") {
       return apiStatusError(c, 400, "Missing required SAML callback parameters");
+    }
+
+    if (!ssoStateMatchesCookie(c, relayState)) {
+      return apiStatusError(c, 400, "Invalid or expired SAML RelayState");
     }
 
     const requestRow = await consumeSsoRequest(relayState, "saml");

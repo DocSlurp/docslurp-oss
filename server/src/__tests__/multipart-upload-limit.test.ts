@@ -41,6 +41,27 @@ describe("multipart upload cap", () => {
     expect(reached).not.toHaveBeenCalled();
   });
 
+  it("rejects multipart streamed without Content-Length before parsing", async () => {
+    const { hono, reached } = app(64 * 1024);
+    const encoded = new Request("http://localhost", { method: "POST", body: form(200 * 1024) });
+    const bytes = new Uint8Array(await encoded.arrayBuffer());
+    let offset = 0;
+    const body = new ReadableStream({ pull(controller) {
+      if (offset === bytes.byteLength) { controller.close(); return; }
+      const next = Math.min(offset + 16 * 1024, bytes.byteLength);
+      controller.enqueue(bytes.slice(offset, next));
+      offset = next;
+    } });
+    const request = new Request("http://localhost/v1/ingest/bulk", {
+      method: "POST", headers: { "content-type": encoded.headers.get("content-type")! }, body, duplex: "half",
+    } as RequestInit);
+    expect(request.headers.has("content-length")).toBe(false);
+    const response = await hono.request(request);
+    expect(response.status).toBe(413);
+    expect(await response.json()).toMatchObject({ error: { code: "payload_too_large", details: { maxBytes: 64 * 1024 } } });
+    expect(reached).not.toHaveBeenCalled();
+  });
+
   it("reports the limit in MB", () => {
     expect(multipartTooLarge(25 * 1024 * 1024).message).toContain("25 MB");
   });

@@ -34,6 +34,7 @@ import {
 } from "../services/documents.js";
 import { acceptApiKeys } from "../lib/route-auth.js";
 import { apiErrorResponse, apiStatusError } from "../lib/api-error.js";
+import { reportPublicError } from "../lib/public-errors.js";
 import { indexingModeErrorResponse } from "../lib/indexing-mode-error.js";
 import { validationHook } from "../lib/validation.js";
 import { deferredProfilesEnabled } from "@docslurp/shared";

@@ -1,4 +1,4 @@
-import { createCipheriv, randomBytes } from "node:crypto";
+import { createCipheriv, createDecipheriv, randomBytes } from "node:crypto";
 import postgres from "postgres";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { startMigratedPostgres } from "@docslurp/worker/testing";
@@ -27,7 +27,25 @@ beforeAll(async () => {
   stop = pg.stop;
   sql = postgres(pg.url, { max: 1, prepare: false, onnotice: () => {} });
   vi.doMock("../db.js", () => ({ sql }));
-  vi.doMock("../lib/encryption.js", () => ({ getRequiredEncryptionKey: () => key }));
+  vi.doMock("../lib/encryption.js", () => ({
+    getRequiredEncryptionKey: () => key,
+    // Centralized at-rest seals (lib/encryption.ts): implement the same
+    // versioned envelope so the connector sync path round-trips under the mock.
+    sealSecret: (_envName: string, plaintext: string) => {
+      const iv = randomBytes(12);
+      const cipher = createCipheriv("aes-256-gcm", key, iv);
+      const data = Buffer.concat([cipher.update(plaintext, "utf-8"), cipher.final()]);
+      return `v1:${iv.toString("hex")}:${cipher.getAuthTag().toString("hex")}:${data.toString("hex")}`;
+    },
+    openSecret: (_envName: string, stored: string) => {
+      const parts = stored.split(":");
+      const body = parts[0] === "v1" ? parts.slice(1) : parts;
+      const [ivHex, tagHex, ctHex] = body as [string, string, string];
+      const decipher = createDecipheriv("aes-256-gcm", key, Buffer.from(ivHex, "hex"));
+      decipher.setAuthTag(Buffer.from(tagHex, "hex"));
+      return Buffer.concat([decipher.update(Buffer.from(ctHex, "hex")), decipher.final()]).toString("utf-8");
+    },
+  }));
   vi.doMock("../services/connectors/index.js", () => ({
     getConnectorAdapter: () => ({ listFiles, downloadFile: async () => Buffer.from("%PDF") }),
   }));

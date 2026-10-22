@@ -1,13 +1,14 @@
 import { once } from "node:events";
 import type { AddressInfo } from "node:net";
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi, afterEach } from "vitest";
 
 import { evaluateWorkerHealth, resolveWorkerHealthPort, startWorkerHealthServer, type WorkerStatusLike } from "../temporal/health-server.js";
 
 const running: WorkerStatusLike = { runState: "RUNNING", workflowPollerState: "POLLING", activityPollerState: "POLLING", numInFlightActivities: 2 };
 
 describe("worker health", () => {
+  afterEach(() => vi.unstubAllEnvs());
   it("is healthy only while every Temporal worker runs with live pollers", () => {
     expect(evaluateWorkerHealth([running, running])).toMatchObject({ ok: true, inFlightActivities: 4 });
     expect(evaluateWorkerHealth([])).toMatchObject({ ok: false, state: "starting" });
@@ -25,6 +26,7 @@ describe("worker health", () => {
   it("serves 200/503 on /health and Prometheus text on /metrics", async () => {
     let healthy = true;
     const server = startWorkerHealthServer({
+      metricsSecret: "",
       port: 0,
       host: "127.0.0.1",
       health: () => evaluateWorkerHealth(healthy ? [running] : [{ ...running, runState: "STOPPED" }]),
@@ -44,4 +46,48 @@ describe("worker health", () => {
       server.close();
     }
   });
+
+  it("requires a bearer credential when WORKER_METRICS_SECRET is configured", async () => {
+    vi.stubEnv("WORKER_METRICS_SECRET", "worker-secret");
+    const metrics = vi.fn(async () => "worker_jobs 2\n");
+    const server = startWorkerHealthServer({
+      port: 0, host: "127.0.0.1", health: () => evaluateWorkerHealth([running]), metrics,
+    });
+    try {
+      if (!server.listening) await once(server, "listening");
+      const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+      // Authentication does not interfere with the machine's liveness probe.
+      expect((await fetch(`${base}/health`)).status).toBe(200);
+      for (const authorization of [undefined, "Bearer wrong-secret", "Bearer x", "worker-secret", "Basic worker-secret"]) {
+        const response = await fetch(`${base}/metrics`, { headers: authorization ? { authorization } : {} });
+        expect(response.status).toBe(401);
+      }
+      expect(metrics).not.toHaveBeenCalled();
+      const response = await fetch(`${base}/metrics`, { headers: { authorization: "Bearer worker-secret" } });
+      expect(response.status).toBe(200);
+      expect(await response.text()).toBe("worker_jobs 2\n");
+      expect(metrics).toHaveBeenCalledTimes(1);
+      const head = await fetch(`${base}/metrics`, { method: "HEAD", headers: { authorization: "Bearer worker-secret" } });
+      expect(head.status).toBe(200);
+      expect(await head.text()).toBe("");
+    } finally {
+      server.close();
+    }
+  });
+
+  it("allows the scraper when WORKER_METRICS_SECRET is absent", async () => {
+    vi.stubEnv("WORKER_METRICS_SECRET", undefined);
+    const server = startWorkerHealthServer({
+      port: 0, host: "127.0.0.1", health: () => evaluateWorkerHealth([running]),
+      metrics: async () => "worker_jobs 1\n",
+    });
+    try {
+      if (!server.listening) await once(server, "listening");
+      const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+      expect((await fetch(`${base}/metrics`)).status).toBe(200);
+    } finally {
+      server.close();
+    }
+  });
+
 });

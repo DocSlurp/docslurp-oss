@@ -358,9 +358,10 @@ export function admitIntakeFile(
   return verdict;
 }
 
-/** The one raw-object key layout. `filename` must already be sanitized. */
+/** The one raw-object key layout. The filename is sanitized here so a caller that forgets cannot inject `..` segments. */
 export function rawSourceKey(userId: string, filename: string): string {
-  return `${userId}/${randomUUID()}/raw/${randomUUID()}-${filename}`;
+  const safe = sanitizeUploadFilename(filename, "upload.bin");
+  return `${userId}/${randomUUID()}/raw/${randomUUID()}-${safe}`;
 }
 
 // ---------------------------------------------------------------------------

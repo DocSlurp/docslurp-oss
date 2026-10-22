@@ -1,5 +1,5 @@
 import type { Context, MiddlewareHandler } from "hono";
-import { bodyLimit } from "hono/body-limit";
+import { boundedBodyLimit } from "./bounded-body-limit.js";
 import { HTTPException } from "hono/http-exception";
 import { apiError, apiErrorCodeForStatus, isApiErrorCode, publicApiErrorLinks, publicApiErrorMessage, type ApiErrorCode, type ApiErrorDetails } from "@docslurp/shared";
 import { upgradeLinkHeader, withUpgradeLinks } from "./upgrade-links.js";
@@ -35,10 +35,7 @@ export function apiStatusError(c: Context, status: number, message: string, opti
 
 /** Request body cap that answers 413 in the native envelope (with the cap as `details.maxBytes`). */
 export function nativeBodyLimit(maxSize: number): MiddlewareHandler {
-  return bodyLimit({
-    maxSize,
-    onError: (c) => apiErrorResponse(c, 413, "payload_too_large", `Request body exceeds ${maxSize} bytes`, { maxBytes: maxSize }),
-  });
+  return boundedBodyLimit(maxSize, (c) => middlewareErrorResponse(c, 413, "payload_too_large", `Request body exceeds ${maxSize} bytes`, { maxBytes: maxSize }));
 }
 
 /**

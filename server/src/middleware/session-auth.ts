@@ -1,4 +1,4 @@
-import type { MiddlewareHandler } from "hono";
+import type { Context, MiddlewareHandler } from "hono";
 
 import {
   resolveApiKeyActor,
@@ -7,6 +7,36 @@ import {
 } from "../lib/request-actor.js";
 import { routeAuthMode } from "../lib/route-auth.js";
 import { middlewareErrorResponse } from "../lib/api-error.js";
+import { env } from "../config.js";
+
+/**
+ * CSRF guard for cookie-authenticated, state-changing requests (SEC-2026-10-02).
+ *
+ * Origin must match the CORS allowlist or request origin, including same-site
+ * sibling requests. Without Origin, browser fetch metadata must establish a
+ * same-origin or user-initiated request. Non-browser clients omit both headers.
+ * Safe methods and explicit bearer credentials do not use this guard.
+ */
+function isCookieMutationFromTrustedOrigin(c: Context): boolean {
+  const method = c.req.method.toUpperCase();
+  if (method === "GET" || method === "HEAD" || method === "OPTIONS") return true;
+
+  // Origin is authoritative even for same-site siblings: a compromised sibling
+  // subdomain must not acquire the API's ambient cookie authority.
+  const origin = c.req.header("origin");
+  if (origin) {
+    if (env.corsAllowedOrigins.includes(origin)) return true;
+    try {
+      return new URL(c.req.url).origin === origin;
+    } catch {
+      return false;
+    }
+  }
+  const fetchSite = c.req.header("sec-fetch-site");
+  // Non-browser clients omit both headers. A browser sibling/cross-site request
+  // without Origin cannot establish trust.
+  return !fetchSite || fetchSite === "same-origin" || fetchSite === "none";
+}
 
 /**
  * Resolves the active Better Auth session from the incoming request cookies and
@@ -56,6 +86,10 @@ export const sessionAuth: MiddlewareHandler = async (c, next) => {
   const actor = await resolveBetterAuthSessionActor(c.req.raw.headers);
   if (!actor) {
     return middlewareErrorResponse(c, 401, "unauthorized", "Unauthorized");
+  }
+
+  if (!isCookieMutationFromTrustedOrigin(c)) {
+    return middlewareErrorResponse(c, 403, "forbidden", "Cross-site request rejected");
   }
 
   setRequestActor(c, actor);

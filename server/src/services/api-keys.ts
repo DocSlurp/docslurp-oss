@@ -302,6 +302,12 @@ function assertOrganizationKeyScopes(keyType: ApiKeyType, scopes: string[], role
   if (keyType === "client" && scopes.includes("workspaces:manage")) {
     throw new OrganizationError(400, "invalid_key_scope", "Client API keys cannot manage workspaces");
   }
+  // `workspaces:manage` changes workspace configuration, so a key that carries it
+  // must be minted by an organization owner/admin. The per-workspace edit check
+  // on the route is the second layer. Security finding SEC-2026-10-01.
+  if (keyType !== "client" && scopes.includes("workspaces:manage") && !["owner", "admin"].includes(role)) {
+    throw new OrganizationError(403, "organization_forbidden", "Workspace management keys require organization admin access");
+  }
   if (!scopes.some(scope => scope.startsWith("organizations:"))) return;
   if (keyType === "client") throw new OrganizationError(400, "invalid_key_scope", "Client API keys cannot access organizations");
   if (scopes.includes("organizations:manage") && !["owner", "admin"].includes(role))

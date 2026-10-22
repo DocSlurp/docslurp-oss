@@ -6,3 +6,4 @@ Pillow>=13.0.0,<14
 python-pptx
 trafilatura
 xlsx2csv==0.8.6
+defusedxml==0.7.1

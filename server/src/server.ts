@@ -8,7 +8,6 @@ import { promisify } from "node:util";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { bodyLimit } from "hono/body-limit";
 import { searchCompatRoutes } from "./routes/search-compat.js";
 import { serviceCors } from "./middleware/widget-cors.js";
 import { Hono } from "hono";
@@ -70,6 +69,9 @@ import { warmDefaultLocalEmbedding } from "./lib/ai.js";
 import { rejectNulBytes } from "./lib/reject-nul.js";
 
 const execFileAsync = promisify(execFile);
+
+/** Largest declared JSON body accepted before validation on non-upload `/v1/*` routes. */
+const JSON_BODY_MAX_BYTES = 8 * 1024 * 1024;
 /**
  * The repository root is the nearest ancestor holding drizzle.config.ts, or a
  * core/ checkout of it (the private app repo pins this repository as a submodule
@@ -106,38 +108,30 @@ export function createApiApp(): Hono {
   app.use("*", requestContextMiddleware);
   app.use("*", apiPublicErrorMiddleware);
   app.use("*", apiIpRateLimit);
-  app.use("*", rejectNulBytes);
   app.use("*", serviceCors(env.corsAllowedOrigins));
-  app.use("/v1/mcp", bodyLimit({ maxSize: 1024 * 1024 }));
-  app.use("/oauth/mcp/*", bodyLimit({ maxSize: 16 * 1024 }));
-  // The bulk path buffers multipart bodies in memory (parseBody); keep it small
-  // and send large files to direct upload sessions (upload-policy.ts).
-  app.use(
-    "/v1/ingest/bulk",
-    multipartBodyLimit(env.maxMultipartUploadBytes)
-  );
-  app.use(
-    "/v1/ingest/*",
-    nativeBodyLimit(env.maxUploadBytes)
-  );
-  app.use(
-    "/v1/uploads/bulk",
-    multipartBodyLimit(env.maxMultipartUploadBytes)
-  );
-  app.use(
-    "/v1/uploads/*",
-    nativeBodyLimit(env.maxUploadBytes)
-  );
-
-  app.use(
-    "/webhooks/stripe",
-    bodyLimit({
-      maxSize: 1024 * 1024
-    })
-  );
   app.use("/dashboard/*", sessionAuth);
   app.use("/v1/*", sessionAuth);
   app.use("/v1/*", apiActorRateLimit);
+  app.use("/v1/mcp", nativeBodyLimit(1024 * 1024));
+  app.use("/oauth/mcp/*", nativeBodyLimit(16 * 1024));
+  // Bound actual bytes before NUL inspection or any route reader. Select the
+  // smallest applicable cap first, so JSON uploads cannot buffer the file cap.
+  app.use("/v1/*", async (c, next) => {
+    if (c.req.path === "/v1/mcp") return next(); // protocol-specific cap above
+    const upload = /^\/v1\/(?:uploads|ingest)(?:\/|$)/.test(c.req.path);
+    const json = /\bjson\b/i.test(c.req.header("content-type") ?? "");
+    if (upload && !json) {
+      if (/\/bulk\/?$/.test(c.req.path)) return multipartBodyLimit(env.maxMultipartUploadBytes)(c, next);
+      return nativeBodyLimit(env.maxUploadBytes)(c, next);
+    }
+    return nativeBodyLimit(JSON_BODY_MAX_BYTES)(c, next);
+  });
+
+  app.use(
+    "/webhooks/stripe",
+    nativeBodyLimit(1024 * 1024)
+  );
+  app.use("*", rejectNulBytes);
   // `/v1/workspaces/:slug|default/...` → resolved workspace UUID routes.
   const workspaceRefs = workspaceRefPath([workspacesRoutes, connectorsRoutes, secretsRoutes, workspaceGraphRoutes]);
   app.use("/v1/workspaces/:workspaceRef", workspaceRefs);

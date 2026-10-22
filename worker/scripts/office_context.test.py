@@ -3,6 +3,7 @@ from pathlib import Path
 import tempfile
 import unittest
 import zipfile
+from defusedxml.common import DTDForbidden
 
 spec = importlib.util.spec_from_file_location('office_context', Path(__file__).with_name('office_context.py'))
 module = importlib.util.module_from_spec(spec)
@@ -41,6 +42,27 @@ class OfficeContextTests(unittest.TestCase):
         })
         for expected in ['hidden', 'Area', 'Data!B1', 'https://example.test/', 'Yes,No', 'Data!A1', 'Reviewer note']:
             self.assertIn(expected, text)
+
+    def test_rejects_dtd_in_tree_and_streaming_paths(self):
+        for encoding in ('utf-8', 'utf-16'):
+            for padding in ('', ' ' * 8192):
+                for part in ('docProps/core.xml', 'xl/worksheets/sheet1.xml'):
+                    with self.subTest(encoding=encoding, padding=len(padding), part=part):
+                        parts = {
+                            'xl/workbook.xml': f'<workbook xmlns="{module.S}" xmlns:r="{module.R}"><sheets><sheet name="Data" r:id="r1"/></sheets></workbook>',
+                            'xl/_rels/workbook.xml.rels': '<Relationships><Relationship Id="r1" Target="worksheets/sheet1.xml"/></Relationships>',
+                            'xl/worksheets/sheet1.xml': f'<worksheet xmlns="{module.S}"/>',
+                        }
+                        parts[part] = (padding + '<!DOCTYPE root [<!ENTITY payload "expanded">]><root>&payload;</root>').encode(encoding)
+                        with self.assertRaises(DTDForbidden):
+                            self.extract(parts)
+
+    def test_utf16_metadata_is_preserved(self):
+        text = self.extract({
+            'word/document.xml': '<document/>',
+            'docProps/core.xml': '<properties><title>Résumé context</title></properties>'.encode('utf-16'),
+        })
+        self.assertIn('Résumé context', text)
 
     def test_parent_escape_is_rejected(self):
         with self.assertRaises(ValueError):

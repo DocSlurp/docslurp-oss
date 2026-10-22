@@ -34,7 +34,7 @@ export class ConfluenceConnectorAdapter implements ConnectorAdapter {
     }
 
     do {
-      const url = `${baseUrl.replace(/\/+$/, "")}/rest/api/content?spaceKey=${config.spaceKey}&expand=version${typeFilter}&start=${start}&limit=${limit}`;
+      const url = `${baseUrl.replace(/\/+$/, "")}/rest/api/content?spaceKey=${encodeURIComponent(config.spaceKey)}&expand=version${typeFilter}&start=${start}&limit=${limit}`;
       const response = await safeExternalFetch(url, {
         headers: {
           Authorization: this.authHeader(creds),
