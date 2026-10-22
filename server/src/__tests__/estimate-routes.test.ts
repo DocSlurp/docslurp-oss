@@ -217,9 +217,9 @@ describe("estimate twins enforce the mutation's authorization", () => {
   it("upload estimate needs ingest, respects the key's workspaces and never creates a default workspace", async () => {
     const files = { files: [{ name: "a.pdf", size: 1000 }] };
     expect((await post(appFor("u1", server({ scopes: ["search"] })), "/v1/uploads/estimate", files)).status).toBe(403);
-    expect((await post(appFor("u1", server({ workspaceIds: ["other"] })), "/v1/uploads/estimate", { ...files, workspaceId: "w" })).status).toBe(404);
-    expect((await post(appFor("u1", server({ orgId: "o2" })), "/v1/uploads/estimate", { ...files, workspaceId: "w" })).status).toBe(404);
-    expect((await post(appFor("u1", server()), "/v1/uploads/estimate", { ...files, workspaceId: "w" })).status).toBe(200);
+    expect((await post(appFor("u1", server({ workspaceIds: ["other"] })), "/v1/uploads/estimate", { ...files, workspace: "w" })).status).toBe(404);
+    expect((await post(appFor("u1", server({ orgId: "o2" })), "/v1/uploads/estimate", { ...files, workspace: "w" })).status).toBe(404);
+    expect((await post(appFor("u1", server()), "/v1/uploads/estimate", { ...files, workspace: "w" })).status).toBe(200);
     expect((await post(appFor("u1"), "/v1/uploads/estimate", files)).status).toBe(200);
 
     // u2's personal org has no default workspace: 404, and nothing is created.
@@ -242,7 +242,7 @@ describe("estimate twins enforce the mutation's authorization", () => {
       ["workspace full-index estimate", "/v1/workspaces/w/full-index/estimate", {}],
       ["document full-index estimate", "/v1/documents/d1/full-index/estimate", {}],
       ["graph rebuild estimate", "/v1/workspaces/w/graph/jobs/estimate", {}],
-      ["upload estimate", "/v1/uploads/estimate", { files: [{ name: "a.pdf", size: 1 }], workspaceId: "w" }],
+      ["upload estimate", "/v1/uploads/estimate", { files: [{ name: "a.pdf", size: 1 }], workspace: "w" }],
     ];
     for (const [name, path, body] of denied) {
       const res = await post(key, path, body);

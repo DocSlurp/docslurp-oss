@@ -105,8 +105,8 @@ const post = (body: Record<string, unknown>): RequestInit => ({
   headers: { "content-type": "application/json" },
   body: JSON.stringify(body),
 });
-const withRef = (ref: string | undefined) => (ref === undefined ? {} : { workspaceId: ref });
-const query = (ref: string | undefined) => (ref === undefined ? "" : `?workspaceId=${encodeURIComponent(ref)}`);
+const withRef = (ref: string | undefined) => (ref === undefined ? {} : { workspace: ref });
+const query = (ref: string | undefined) => (ref === undefined ? "" : `?workspace=${encodeURIComponent(ref)}`);
 
 type Boundary = {
   route: string;
@@ -148,8 +148,8 @@ const boundaries: Boundary[] = [
   {
     route: "POST /search/aggregate",
     omitted: "unfiltered",
-    call: (app, ref) => app.request("/search/aggregate", post({ q: "terms", workspaceIds: ref === undefined ? [] : [ref] })),
-    received: () => mocks.aggregateWorkspaceRagSearch.mock.calls[0]?.[0]?.request.workspaceIds[0],
+    call: (app, ref) => app.request("/search/aggregate", post({ q: "terms", workspaces: ref === undefined ? [] : [ref] })),
+    received: () => mocks.aggregateWorkspaceRagSearch.mock.calls[0]?.[0]?.request.workspaces[0],
   },
   {
     route: "POST /runs/preview",
@@ -205,7 +205,7 @@ describe("workspace reference boundaries", () => {
         expect(boundary.received()).toBe(expected(boundary));
       });
 
-      if (boundary.route !== "POST /search/aggregate") {
+      if (boundary.route !== "POST /ingest/direct/sessions") {
         it("answers 404 for an unknown reference", async () => {
           const response = await boundary.call(buildApp(), "no-such-workspace");
           expect(response.status).toBe(404);
@@ -213,6 +213,18 @@ describe("workspace reference boundaries", () => {
       }
     });
   }
+
+  it("creates an unknown named workspace on direct upload, but 404s an unknown UUID", async () => {
+    const files = [{ filename: "a.txt", mimeType: "text/plain", sizeBytes: 5 }];
+    const named = await buildApp().request("/ingest/direct/sessions", post({ workspace: "No Such Workspace", files }));
+    expect(named.status).toBe(201);
+    expect(mocks.createDirectUploadSession).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: null, workspaceName: "No Such Workspace" }));
+    mocks.createDirectUploadSession.mockClear();
+    const unknownId = await buildApp().request("/ingest/direct/sessions", post({ workspace: "33333333-3333-4333-8333-333333333333", files }));
+    expect(unknownId.status).toBe(404);
+    await expect(unknownId.json()).resolves.toMatchObject({ error: { code: "workspace_not_found" } });
+    expect(mocks.createDirectUploadSession).not.toHaveBeenCalled();
+  });
 
   it("answers 404, not 500, when the default workspace's organization is not the caller's", async () => {
     mocks.ensureDefaultWorkspace.mockRejectedValue(

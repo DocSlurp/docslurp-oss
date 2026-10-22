@@ -12,7 +12,7 @@ vi.mock("../services/billing/spend-guard.js", async (importOriginal) => ({
 }));
 
 vi.mock("../services/workspace-chat.js", () => ({ chatWorkspace, workspaceChatDisabledBody }));
-vi.mock("../services/workspaces.js", () => ({ listWorkspaces, getWorkspace }));
+vi.mock("../services/workspaces.js", () => ({ listWorkspaces, getWorkspace, findWorkspaceForInput: vi.fn(async (ref: { id?: string; slug?: string }) => ({ id: (ref.id ?? ref.slug)!, orgId: "org-1" })) }));
 vi.mock("../services/api-keys.js", () => ({ validateApiKey }));
 vi.mock("../middleware/rate-limit.js", () => ({ enforceAuthenticatedApiRateLimit }));
 vi.mock("../lib/auth.js", () => ({ auth: {}, appDbPool: {} }));
@@ -88,6 +88,14 @@ describe("OpenAI-compatible workspace chat", () => {
   it("does not execute inaccessible workspace models", async () => {
     getWorkspace.mockResolvedValueOnce({ ...workspace, orgId: "org-2" });
     expect((await request(input())).status).toBe(404);
+    expect(chatWorkspace).not.toHaveBeenCalled();
+  });
+  it("answers an unknown workspace reference with an OpenAI-shaped model_not_found", async () => {
+    const { findWorkspaceForInput } = await import("../services/workspaces.js");
+    vi.mocked(findWorkspaceForInput).mockResolvedValueOnce(null);
+    const response = await request(input({ model: "workspace:no-such-workspace" }));
+    expect(response.status).toBe(404);
+    expect(await response.json()).toMatchObject({ error: { type: "invalid_request_error", code: "model_not_found", param: "model" } });
     expect(chatWorkspace).not.toHaveBeenCalled();
   });
   it.each([{ tools: [] }, { messages: [{ role: "user", content: [{ type: "image_url", image_url: { url: "https://example.com/image" } }] }] }, { n: 2 }, { max_tokens: 10, max_completion_tokens: 10 }, { messages: [{ role: "assistant", content: "hi" }] }])("rejects unsupported or invalid inputs: %j", async (extra) => {

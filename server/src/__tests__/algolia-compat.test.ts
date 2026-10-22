@@ -382,7 +382,7 @@ describe("algolia compat", () => {
       },
       body: JSON.stringify({
         source: "elastic",
-        workspaceId: "ws-1",
+        workspace: "ws-1",
         settings: {
           searchableAttributes: ["body", "title"]
         },

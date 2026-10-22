@@ -209,6 +209,8 @@ export async function loadActorScopedWorkspace(
   workspaceRef: string,
   actor: RequestActor,
 ): Promise<WorkspaceRecord | null> {
+  // A blank reference (e.g. a missing stored ID) is never the default workspace here.
+  if (!workspaceRef?.trim()) return null;
   const ref = parseWorkspaceInput(workspaceRef);
   const workspaceId = ref.kind === "id"
     ? ref.id

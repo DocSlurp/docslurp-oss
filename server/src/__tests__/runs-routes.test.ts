@@ -264,7 +264,7 @@ describe("API-key run reads", () => {
     listRunsMock.mockReset();
     getRunMock.mockResolvedValue({ id: "run-1", workspaceId: "ws-1", orgId: "org-1" });
     getWorkspaceMock.mockResolvedValue({ id: "ws-1", orgId: "org-1" });
-    getRunProgressMock.mockResolvedValue({ run: { id: "run-1", status: "completed" } });
+    getRunProgressMock.mockResolvedValue({ run: { id: "run-1", workspaceId: "ws-1", status: "completed" } });
   });
   it("allows an ingest key to observe its run completion", async () => {
     const response = await keyApp().request("/runs/run-1/progress");

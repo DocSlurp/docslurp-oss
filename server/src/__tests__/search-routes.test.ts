@@ -69,7 +69,7 @@ describe("searchRoutes", () => {
     sqlMock.mockReset();
   });
 
-  it("passes workspaceId through as a search filter on GET /search", async () => {
+  it("passes workspace through as a search filter on GET /search", async () => {
     hybridSearch.mockResolvedValueOnce({
       results: [],
       sessionId: "session-1",
@@ -101,7 +101,7 @@ describe("searchRoutes", () => {
       }
     });
 
-    const response = await app.request("/search?q=test&workspaceId=ws-1");
+    const response = await app.request("/search?q=test&workspace=ws-1");
 
     expect(response.status).toBe(200);
     await expect(response.json()).resolves.toMatchObject({
@@ -126,14 +126,14 @@ describe("searchRoutes", () => {
   it("rejects an invalid minScore on GET /search with 400, like POST", async () => {
     hybridSearch.mockClear();
     for (const bad of ["abc", "7", "-1"]) {
-      const response = await app.request(`/search?q=test&workspaceId=ws-1&minScore=${bad}`);
+      const response = await app.request(`/search?q=test&workspace=ws-1&minScore=${bad}`);
       expect(response.status, bad).toBe(400);
       await expect(response.json()).resolves.toMatchObject({ error: { code: "invalid_request", message: expect.stringContaining("minScore") } });
     }
     expect(hybridSearch).not.toHaveBeenCalled();
   });
 
-  it("searches the default workspace when GET /search omits workspaceId", async () => {
+  it("searches the default workspace when GET /search omits workspace", async () => {
     hybridSearch.mockResolvedValueOnce({ results: [], sessionId: "session-default" });
     const response = await app.request("/search?q=test");
 
@@ -144,7 +144,7 @@ describe("searchRoutes", () => {
     }));
   });
 
-  it("passes workspaceId through as a search filter on POST /search", async () => {
+  it("passes workspace through as a search filter on POST /search", async () => {
     hybridSearch.mockResolvedValueOnce({
       results: [],
       sessionId: "session-2",
@@ -181,7 +181,7 @@ describe("searchRoutes", () => {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         q: "test",
-        workspaceId: "ws-2",
+        workspace: "ws-2",
       }),
     });
 
@@ -215,7 +215,7 @@ describe("searchRoutes", () => {
         usageEvents: [{ inputTokens: 6, outputTokens: 0, costCents: 0.01, metadata: { costSource: "provider" } }],
       });
       const search = async (q: string, workspaceId = "ws-2"): Promise<any> =>
-        (await app.request("/search", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ q, workspaceId }) })).json();
+        (await app.request("/search", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ q, workspace: workspaceId }) })).json();
       const first = await search("rate limits");
       const second = await search("  rate   limits ");
       expect(hybridSearch).toHaveBeenCalledTimes(1);
@@ -232,7 +232,7 @@ describe("searchRoutes", () => {
     }
   });
 
-  it("searches the default workspace when POST /search omits workspaceId", async () => {
+  it("searches the default workspace when POST /search omits workspace", async () => {
     hybridSearch.mockResolvedValueOnce({ results: [], sessionId: "session-default" });
     const response = await app.request("/search", {
       method: "POST",
@@ -307,7 +307,7 @@ describe("searchRoutes", () => {
     const actor = { type: "apiKey" as const, userId: "user-1", apiKey: { keyId: "key", userId: "user-1", orgId: "org", keyType: "server" as const, allowedDomains: [], scopes: ["search"], rateLimitRpm: 60, rateLimitPpd: 1000, rateLimits: [], workspaceIds: ["ws-chat"] } };
     getWorkspace.mockResolvedValue({ id: "ws-chat", orgId: "org" });
     chatWorkspace.mockResolvedValue({ answer: "Supported" });
-    const request = () => buildApp(actor).request("/search/chat", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ q: "Question", workspaceId: "ws-chat" }) });
+    const request = () => buildApp(actor).request("/search/chat", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ q: "Question", workspace: "ws-chat" }) });
     expect((await request()).status).toBe(200);
     expect(chatWorkspace).toHaveBeenCalledWith(expect.objectContaining({ actor, allowAgentTools: true }));
     chatWorkspace.mockClear();
@@ -326,7 +326,7 @@ describe("searchRoutes", () => {
     env.publicChatAgentEnabled = false;
     try {
       chatWorkspace.mockResolvedValueOnce({ answer: "Supported" });
-      const response = await buildApp().request("/search/chat", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ q: "Question", workspaceId: "ws-chat" }) });
+      const response = await buildApp().request("/search/chat", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ q: "Question", workspace: "ws-chat" }) });
       expect(response.status).toBe(200);
       expect(chatWorkspace).toHaveBeenCalledWith(expect.objectContaining({ allowAgentTools: false }));
       expect(chatWorkspace.mock.calls.at(-1)?.[0]).not.toHaveProperty("allowConfiguration");
@@ -336,12 +336,12 @@ describe("searchRoutes", () => {
   });
 
   it("rejects public attempts to set the internal agent permission", async () => {
-    const response = await app.request("/search/chat", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ q: "Question", workspaceId: "ws-chat", allowAgentTools: true }) });
+    const response = await app.request("/search/chat", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ q: "Question", workspace: "ws-chat", allowAgentTools: true }) });
     expect(response.status).toBe(400);
     expect(chatWorkspace).not.toHaveBeenCalled();
   });
 
-  it("requires workspaceId for chat POST and forwards it to workspace chat", async () => {
+  it("requires workspace for chat POST and forwards it to workspace chat", async () => {
     chatWorkspace.mockResolvedValueOnce({
       id: "resp-1",
       sessionId: "chat-1",
@@ -375,7 +375,7 @@ describe("searchRoutes", () => {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         q: "test",
-        workspaceId: "ws-chat",
+        workspace: "ws-chat",
       }),
     });
 
@@ -396,24 +396,24 @@ describe("searchRoutes", () => {
     traceparent.value = "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01";
     try {
       chatWorkspace.mockResolvedValueOnce({ answer: "Supported" });
-      const response = await app.request("/search/chat", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ q: "Question", workspaceId: "ws-chat" }) });
+      const response = await app.request("/search/chat", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ q: "Question", workspace: "ws-chat" }) });
       expect(response.headers.get("traceparent")).toBe(traceparent.value);
     } finally {
       traceparent.value = null;
     }
     chatWorkspace.mockResolvedValueOnce({ answer: "Supported" });
-    const untraced = await app.request("/search/chat", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ q: "Question", workspaceId: "ws-chat" }) });
+    const untraced = await app.request("/search/chat", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ q: "Question", workspace: "ws-chat" }) });
     expect(untraced.headers.get("traceparent")).toBeNull();
   });
 
   it("forwards per-request agent limits and rejects out-of-range ones", async () => {
     chatWorkspace.mockResolvedValueOnce({ answer: "Supported" });
     const post = (body: unknown) => app.request("/search/chat", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
-    expect((await post({ q: "Question", workspaceId: "ws-chat", agent: { maxSteps: 3, maxToolCalls: 2, searchConcurrency: 1 } })).status).toBe(200);
+    expect((await post({ q: "Question", workspace: "ws-chat", agent: { maxSteps: 3, maxToolCalls: 2, searchConcurrency: 1 } })).status).toBe(200);
     expect(chatWorkspace).toHaveBeenCalledWith(expect.objectContaining({ agent: { maxSteps: 3, maxToolCalls: 2, searchConcurrency: 1 } }));
     chatWorkspace.mockClear();
     for (const agent of [{ maxSteps: 13 }, { maxToolCalls: 0 }, { searchConcurrency: 9 }, { unknown: 1 }]) {
-      const response = await post({ q: "Question", workspaceId: "ws-chat", agent });
+      const response = await post({ q: "Question", workspace: "ws-chat", agent });
       expect(response.status).toBe(400);
       expect(await response.json()).toMatchObject({ error: { code: "invalid_request" } });
     }
@@ -423,11 +423,11 @@ describe("searchRoutes", () => {
   it("answers 400 model_not_allowed for a refused model on chat POST and before the chat stream opens", async () => {
     const { ChatModelNotAllowedError } = await import("../lib/chat-model-policy.js");
     chatWorkspace.mockRejectedValueOnce(new ChatModelNotAllowedError());
-    const post = await app.request("/search/chat", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ q: "Question", workspaceId: "ws-chat", model: "unknown/model" }) });
+    const post = await app.request("/search/chat", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ q: "Question", workspace: "ws-chat", model: "unknown/model" }) });
     expect(post.status).toBe(400);
     expect(await post.json()).toMatchObject({ error: { code: "model_not_allowed" } });
     chatWorkspace.mockClear();
-    const stream = await app.request("/search/chat/stream?q=test&workspaceId=ws-chat&model=inception/mercury-3");
+    const stream = await app.request("/search/chat/stream?q=test&workspace=ws-chat&model=inception/mercury-3");
     expect(stream.status).toBe(400);
     expect(await stream.json()).toMatchObject({ error: { code: "model_not_allowed" } });
     expect(chatWorkspace).not.toHaveBeenCalled();
@@ -439,12 +439,12 @@ describe("searchRoutes", () => {
       const post = await app.request("/search/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ q: "test", workspaceId: "ws-chat" }),
+        body: JSON.stringify({ q: "test", workspace: "ws-chat" }),
       });
       expect(post.status).toBe(403);
       expect(await post.json()).toMatchObject({ error: { code: "chat_disabled", message: "Chat is turned off for this workspace." } });
 
-      const stream = await app.request("/search/chat/stream?q=test&workspaceId=ws-chat");
+      const stream = await app.request("/search/chat/stream?q=test&workspace=ws-chat");
       expect(stream.status).toBe(403);
       expect(await stream.json()).toMatchObject({ error: { code: "chat_disabled" } });
       expect(chatWorkspace).not.toHaveBeenCalled();
@@ -481,7 +481,7 @@ describe("searchRoutes", () => {
     });
 
     it("answers a missing q, an unparseable body and a missing feedback chunk with invalid_request", async () => {
-      expect(await (await app.request("/search?workspaceId=ws-1")).json()).toMatchObject({ error: { code: "invalid_request" } });
+      expect(await (await app.request("/search?workspace=ws-1")).json()).toMatchObject({ error: { code: "invalid_request" } });
       const unparseable = await app.request("/search/aggregate", { method: "POST", body: "{nope" });
       expect(unparseable.status).toBe(400);
       expect(await unparseable.json()).toMatchObject({ error: { code: "invalid_request" } });
@@ -492,24 +492,24 @@ describe("searchRoutes", () => {
 
     it("answers invalid retrieval syntax with 400 in single and batch search", async () => {
       hybridSearch.mockRejectedValueOnce(new InvalidRetrievalQueryError("Tag syntax needs search wording"));
-      const single = await post("/search", { q: "tag:finance", workspaceId: "ws-1", selfQuery: true });
+      const single = await post("/search", { q: "tag:finance", workspace: "ws-1", selfQuery: true });
       expect(single.status).toBe(400);
       expect(await single.json()).toMatchObject({ error: { code: "invalid_request" } });
 
       hybridSearch.mockRejectedValueOnce(new InvalidRetrievalQueryError("Tag syntax needs search wording"));
-      const batch = await post("/search", { queries: [{ q: "tag:finance", workspaceId: "ws-1", selfQuery: true }] });
+      const batch = await post("/search", { queries: [{ q: "tag:finance", workspace: "ws-1", selfQuery: true }] });
       expect(batch.status).toBe(200);
       expect(await batch.json()).toMatchObject({ results: [{ ok: false, error: { status: 400, code: "INVALID_RETRIEVAL_QUERY" } }] });
     });
 
     it("keeps the envelope for thrown spend blocks and unexpected failures", async () => {
       hybridSearch.mockRejectedValueOnce(Object.assign(new Error("credits"), { statusCode: 402, code: "credit_exhausted" }));
-      const blocked = await post("/search", { q: "test", workspaceId: "ws-1" });
+      const blocked = await post("/search", { q: "test", workspace: "ws-1" });
       expect(blocked.status).toBe(402);
       expect(await blocked.json()).toMatchObject({ error: { code: "credit_exhausted" } });
 
       hybridSearch.mockRejectedValueOnce(new Error("postgres password=secret"));
-      const failed = await post("/search", { q: "test", workspaceId: "ws-1" });
+      const failed = await post("/search", { q: "test", workspace: "ws-1" });
       expect(failed.status).toBe(500);
       const json = await failed.json();
       expect(json).toMatchObject({ error: { code: "internal" } });
@@ -522,7 +522,7 @@ describe("searchRoutes", () => {
       guarded.use("*", publicErrorMiddleware);
       guarded.route("/", app);
       workspaceChatDisabledBody.mockResolvedValueOnce({ error: "internal wording", code: "chat_disabled" });
-      const response = await guarded.request("/search/chat", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ q: "test", workspaceId: "ws-chat" }) });
+      const response = await guarded.request("/search/chat", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ q: "test", workspace: "ws-chat" }) });
       expect(response.status).toBe(403);
       const json = await response.json();
       expect(apiErrorEnvelopeSchema.parse(json)).toEqual({ error: { code: "chat_disabled", message: PUBLIC_ERROR_MESSAGES.chatDisabled, requestId: "req-env-1" } });
