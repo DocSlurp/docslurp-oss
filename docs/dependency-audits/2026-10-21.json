@@ -410,5 +410,46 @@
     "Torch CPU wheel local-version suffixes are not recognized by pip-audit; matching upstream torch/torchvision versions were audited separately with no findings",
     "Existing content-addressed Unstructured bundles are unchanged and must be rebuilt/published separately to refresh their embedded packages",
     "No full ML environment installation, model download, production deployment, or hosted quality evaluation was run"
-  ]
+  ],
+  "validation": {
+    "observedAt": "2026-10-22T04:04:00Z",
+    "typecheck": "passed",
+    "build": "passed",
+    "sharedTests": {
+      "passed": 588
+    },
+    "coreScriptTests": {
+      "passed": 62
+    },
+    "serverTests": {
+      "passed": 2067,
+      "skipped": 41,
+      "failed": 1,
+      "failure": "5-second timeout under concurrent load",
+      "isolatedRerun": {
+        "passed": 13,
+        "testTimeoutMs": 30000
+      }
+    },
+    "workerTests": {
+      "passed": 1726,
+      "skipped": 66,
+      "failed": 7,
+      "setupFailure": "database beforeAll hook timed out at 10 seconds",
+      "failures": "optional Pandoc lazy provisioning timed out; all failing files passed after provisioning scratch Pandoc and rerunning with larger timeouts",
+      "reruns": [
+        {
+          "passed": 12,
+          "scope": "local artifact adapters, graph extraction, extractor registry"
+        },
+        {
+          "passed": 12,
+          "scope": "local graph runner, LanceDB write queue",
+          "hookTimeoutMs": 60000
+        }
+      ]
+    },
+    "pythonBaseSmoke": "Pillow PNG/JPEG/TIFF/WebP, XLSX, PPTX, HTML round-trips and check-python-dependencies.py passed",
+    "remainingBundleResolution": "Unstructured resolves on Python 3.13 against the Pillow 13 base lock"
+  }
 }
