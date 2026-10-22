@@ -47,7 +47,10 @@ Catalog IDs and built-in defaults remain centralized configuration values;
 individual text stages no longer choose a fixed model.
 
 The default vision route stays `llm://openrouter/google/gemini-3.1-flash-lite`
-(profile `good-fast-hosted`). NVIDIA Nemotron 3.5 Super VL is an opt-in hosted
+(profile `good-fast-hosted`). The default is one constant,
+`DEFAULT_OPENROUTER_VISION_MODEL` in `packages/shared/src/embedding.ts`; the
+profile label, description and default config are derived from its catalog entry.
+NVIDIA Nemotron 3.5 Super VL is an opt-in hosted
 route: set `pipeline.vision.modelUri` to
 `llm://openrouter/nvidia/nemotron-3.5-super-vl` or `pipeline.vision.profile` to
 `open-weights-hosted`. Its OpenRouter list price, verified on 2026-10-20, is
@@ -56,6 +59,44 @@ OpenRouter providers range from $0.10 to $0.25 input and $0.40 to $1.25 output).
 Page transcription sends it `reasoning: { enabled: false }`. The provider-reported
 charge is recorded when present. Otherwise cataloged hosted vision models fall back
 to their own list price instead of the generic `COST_PER_1K_*` rates.
+
+### Opt-in tuned vision models
+
+These hosted models are in the vision catalog (OpenRouter list prices checked
+2026-10-22) and can be selected per workspace with `pipeline.vision.modelUri`.
+Per-model prompt, output cap, routing and reasoning settings live in
+`worker/src/tools/vision-model-profiles.ts`; an explicit prompt other than
+`<OCR>` is kept. Costs are per page.
+
+| Model URI | List $/M in / out | Est. cost/page | Profile behaviour |
+| --- | --- | --- | --- |
+| `llm://openrouter/deepseek/deepseek-v4.1-flash-1017` | 0.15 / 0.60 | 0.056 cents | Markdown + LaTeX prompt, 8,192 output cap, reasoning effort `none`, routed to DeepSeek then Together with no fallbacks |
+| `llm://openrouter/xiaomi/mimo-v2.6-flash` | 0.14 / 0.28 | 0.056 cents | Markdown transcription prompt, output cap ceiling 8,192, reasoning `none`, routed to Relace then DeepInfra with fallbacks, math delimiters normalized |
+| `llm://openrouter/openai/gpt-6-luna` | 0.10 / 0.50 | 0.061 cents | Page Markdown + LaTeX prompt, image detail `high`, reasoning `none`, whole-page code fence removed, content-filter retry on Bedrock then Azure US |
+| `llm://openrouter/z-ai/glm-5.3-flash` | 0.0113 / 0.1589 | 0.013 cents (computed from about 3,000 input and 560 output tokens) | Generic defaults; no per-model profile |
+
+The first three per-page costs are measured; GLM's is computed from list price.
+DeepSeek, MiMo and GLM weights are MIT; Luna is proprietary-hosted.
+
+### Global default override and kill switch
+
+`DOCSLURP_VISION_MODEL_URI` (for example
+`llm://openrouter/google/gemini-3.1-flash-lite`) replaces the built-in default
+hosted vision model without a deploy of code. Set it on both the API/app and the
+worker so the cost preview matches what the worker calls. It applies only to
+pipelines whose vision config is still the default (profile `good-fast-hosted`
+with its own model URI), is applied when a run or preview reads the pipeline,
+and is never saved into workspace settings. So unsetting it restores the
+built-in default for every workspace.
+
+- Explicit `pipeline.vision.modelUri`, `model` or a non-default `profile` win.
+  A stored config that is identical to the default cannot be told apart from
+  an untouched workspace and follows the override.
+- Pipelines with `privacyMode` other than `standard` are never changed.
+- The value must be an `llm://` URI of a hosted model in the vision catalog, so
+  spend is priced from list prices rather than the generic fallback. Anything
+  else is logged once as an error (`[config] DOCSLURP_VISION_MODEL_URI=... ignored`)
+  and ignored.
 
 Text generation also accepts an optional `profile`, a common `reasoningEffort`,
 per-task `reasoningEfforts`, and per-task `maxOutputTokens`. For the calibrated

@@ -4,9 +4,11 @@ import { tmpdir } from "node:os";
 
 import type { VisionConfig, VisionRuntime } from "@docslurp/shared";
 import {
+  DEFAULT_VISION_PROFILE,
   defaultVisionConfig,
   resolveVisionRoute,
   visionConfigSchema,
+  visionProfileCatalog,
 } from "@docslurp/shared";
 
 import type { Config } from "../config.js";
@@ -84,9 +86,7 @@ export async function runVisionBenchmarks(args: VisionBenchmarkArgs): Promise<{
           selectedPrimary,
           {
             ...defaultVisionConfig,
-            profile: "good-fast-hosted",
-            target: "hosted",
-            modelUri: "llm://openrouter/google/gemini-3.1-flash-lite"
+            ...visionProfileCatalog[DEFAULT_VISION_PROFILE].config
           }
         ]
   );
