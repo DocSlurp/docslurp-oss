@@ -10,7 +10,7 @@ vi.mock("../services/workspace-intake-actions.js", () => ({
   createBulkWorkspaceIntake: mocks.intake, createRemoteUrlWorkspaceIntake: mocks.intake,
   parseFormWorkspaceIntakePipeline: vi.fn(), parseWorkspaceIntakePipeline: vi.fn(),
   parseFormDocumentTags: vi.fn(),
-  parseWorkspaceIntakeTemplateKey: vi.fn(), confirmDirectUploadWorkspaceIntake: vi.fn(),
+  parseWorkspaceIntakeTemplateKey: vi.fn(value => value), confirmDirectUploadWorkspaceIntake: vi.fn(),
 }));
 vi.mock("../services/direct-upload-session.js", () => ({
   createDirectUploadSession: mocks.direct, directUploadSessionBelongsToOrganization: mocks.sessionAccess,
@@ -21,19 +21,33 @@ vi.mock("../services/workspaces.js", () => ({
   getWorkspace: vi.fn(), ensureDefaultWorkspace: vi.fn(async () => ({ id: "ws-default" })),
 }));
 const { uploadsRoutes } = await import("../routes/uploads.js");
-function app(orgId: string | null = "org-a") {
+function app(orgId: string | null = "org-a", workspaceIds: string[] = []) {
   const server = new Hono(); server.use("*", async (c, next) => {
     c.set("sessionUser", { id: "user-a", email: "", name: "" });
-    c.set("apiKey", { orgId, scopes: ["ingest"] } as never); await next();
+    c.set("apiKey", { orgId, workspaceIds, scopes: ["ingest"] } as never); await next();
   }); return server.route("/uploads", uploadsRoutes);
 }
-function upload(fields: Record<string, string> = {}) {
+function upload(fields: Record<string, string | undefined> = {}) {
   const form = new FormData(); form.append("files", new File(["authored text"], "note.txt"));
-  for (const [key, value] of Object.entries(fields)) form.append(key, value);
+  for (const [key, value] of Object.entries(fields)) if (value !== undefined) form.append(key, value);
   return { method: "POST", body: form };
 }
 describe("native key ingestion organization isolation", () => {
   beforeEach(() => { vi.clearAllMocks(); mocks.intake.mockResolvedValue({ payload: { ok: true }, status: 201 }); });
+  it.each([
+    { newWorkspace: "true" }, { workspaceName: "New workspace" }, { templateKey: "legal-contracts" },
+  ])("rejects every bulk workspace creation signal for scoped keys: %j", async fields => {
+    expect((await app("org-a", ["ws-a"]).request("/uploads/bulk", upload(fields))).status).toBe(403);
+    expect(mocks.intake).not.toHaveBeenCalled();
+  });
+  it.each([{ newWorkspace: true }, { workspaceName: "New workspace" }, { templateKey: "legal-contracts" }])("rejects URL workspace creation for scoped keys: %j", async fields => {
+    const response = await app("org-a", ["ws-a"]).request("/uploads/url", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ ...fields, urls: ["https://example.com/doc.pdf"] }),
+    });
+    expect(response.status).toBe(403);
+    expect(mocks.intake).not.toHaveBeenCalled();
+  });
   it("binds new workspaces to the key organization", async () => {
     expect((await app().request("/uploads/bulk", upload())).status).toBe(201);
     expect(mocks.intake).toHaveBeenCalledWith(expect.objectContaining({ orgId: "org-a", workspaceId: null }), expect.anything());

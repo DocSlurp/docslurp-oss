@@ -67,6 +67,68 @@ async function envelope(response: Response) {
 }
 
 describe("one error shape for the native API (real middleware stack)", () => {
+  it.each([
+    ["/v1/uploads/url", "application/json"],
+    ["/v1/uploads/bulk", "application/json"],
+    ["/v1/chat", "application/json"],
+    ["/v1/chat", "text/plain"],
+  ])("caps chunked %s (%s) before reading beyond the JSON limit", async (path, contentType) => {
+    mocks.validateApiKey.mockClear();
+    let produced = 0;
+    let cancelled = false;
+    const chunk = new TextEncoder().encode("x".repeat(1024 * 1024));
+    const body = new ReadableStream({
+      pull(controller) {
+        if (produced === 12) controller.close();
+        else { produced++; controller.enqueue(chunk); }
+      },
+      cancel() { cancelled = true; },
+    });
+    const request = new Request(`http://localhost${path}`, {
+      method: "POST", headers: { ...bearer, "content-type": contentType }, body, duplex: "half",
+    } as RequestInit);
+    expect(request.headers.has("content-length")).toBe(false);
+    const response = await app.request(request);
+    expect(response.status).toBe(413);
+    expect(await envelope(response)).toMatchObject({ code: "payload_too_large", details: { maxBytes: 8 * 1024 * 1024 } });
+    expect(cancelled).toBe(true);
+    expect(produced).toBeLessThan(12);
+  });
+
+  it("rejects anonymous binary uploads without reading the incoming stream", async () => {
+    let reads = 0;
+    const body = new ReadableStream({ pull(controller) {
+      reads++;
+      controller.enqueue(new Uint8Array(1024 * 1024));
+    } }, { highWaterMark: 0 });
+    const response = await app.request(new Request("http://localhost/v1/uploads/direct/sessions", {
+      method: "POST", headers: { ...ip, "content-type": "application/octet-stream" }, body, duplex: "half",
+    } as RequestInit));
+    expect(response.status).toBe(401);
+    expect(reads).toBe(0);
+    await body.cancel();
+  });
+
+  it("leaves a valid chunked MCP initialize request readable by the raw transport", async () => {
+    const json = JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: {
+      protocolVersion: "2025-11-25", capabilities: {}, clientInfo: { name: "body-limit-test", version: "1" },
+    } });
+    const chunks = [json.slice(0, 37), json.slice(37)];
+    const body = new ReadableStream({ pull(controller) {
+      const chunk = chunks.shift();
+      if (chunk === undefined) controller.close();
+      else controller.enqueue(new TextEncoder().encode(chunk));
+    } });
+    const response = await app.request(new Request("http://localhost/v1/mcp", {
+      method: "POST", headers: { ...bearer, "content-type": "application/json", accept: "application/json, text/event-stream" },
+      body, duplex: "half",
+    } as RequestInit));
+    expect(response.status).toBe(200);
+    const text = await response.text();
+    expect(text).toContain('"serverInfo"');
+    expect(text).toContain('"docslurp"');
+  });
+
   it("answers missing and invalid credentials with unauthorized", async () => {
     expect((await envelope(await app.request("/v1/workspaces/board", { headers: ip }))).code).toBe("unauthorized");
     expect((await envelope(await app.request("/dashboard/bootstrap", { headers: ip }))).code).toBe("unauthorized");

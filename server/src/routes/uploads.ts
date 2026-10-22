@@ -366,7 +366,7 @@ export const createUploadsRoutes = (ports: WorkspaceIntakePorts = workspaceIntak
     const requestedTemplateKey =
       parseWorkspaceIntakeTemplateKey(body.templateKey);
 
-    if (requestedNewWorkspace && !requestedWorkspaceId && !apiKeyMayCreateWorkspace(c)) {
+    if (wantsNewWorkspace({ newWorkspace: requestedNewWorkspace, workspaceName: requestedWorkspaceName, templateKey: requestedTemplateKey }) && !requestedWorkspaceId && !apiKeyMayCreateWorkspace(c)) {
       return apiStatusError(c, 403, "Workspace-scoped API keys cannot create new workspaces", { code: "workspace_scope_forbidden" });
     }
 
@@ -418,7 +418,7 @@ export const createUploadsRoutes = (ports: WorkspaceIntakePorts = workspaceIntak
       const userId = c.get("sessionUser").id;
       const body = c.req.valid("json");
       const idempotencyKey = c.req.header("Idempotency-Key")?.trim();
-      if (body.newWorkspace && !body.workspaceId && !apiKeyMayCreateWorkspace(c)) {
+      if (wantsNewWorkspace(body) && !body.workspaceId && !apiKeyMayCreateWorkspace(c)) {
         return apiStatusError(c, 403, "Workspace-scoped API keys cannot create new workspaces", { code: "workspace_scope_forbidden" });
       }
       let result;

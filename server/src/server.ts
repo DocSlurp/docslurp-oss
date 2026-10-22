@@ -1,5 +1,5 @@
 import { apiPublicErrorMiddleware } from "./lib/public-errors.js";
-import { apiErrorResponse, nativeBodyLimit, nativeErrorHandler } from "./lib/api-error.js";
+import { nativeBodyLimit, nativeErrorHandler } from "./lib/api-error.js";
 import { sessionToolRoutes } from "./routes/session-tools.js";
 import { existsSync } from "node:fs";
 import { initializeObservability } from "@docslurp/shared/observability";
@@ -8,7 +8,6 @@ import { promisify } from "node:util";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { bodyLimit } from "hono/body-limit";
 import { searchCompatRoutes } from "./routes/search-compat.js";
 import { serviceCors } from "./middleware/widget-cors.js";
 import { Hono } from "hono";
@@ -107,53 +106,30 @@ export function createApiApp(): Hono {
   app.use("*", requestContextMiddleware);
   app.use("*", apiPublicErrorMiddleware);
   app.use("*", apiIpRateLimit);
-  app.use("*", rejectNulBytes);
   app.use("*", serviceCors(env.corsAllowedOrigins));
-  app.use("/v1/mcp", bodyLimit({ maxSize: 1024 * 1024 }));
-  app.use("/oauth/mcp/*", bodyLimit({ maxSize: 16 * 1024 }));
-  // The bulk path buffers multipart bodies in memory (parseBody); keep it small
-  // and send large files to direct upload sessions (upload-policy.ts).
-  app.use(
-    "/v1/ingest/bulk",
-    multipartBodyLimit(env.maxMultipartUploadBytes)
-  );
-  app.use(
-    "/v1/ingest/*",
-    nativeBodyLimit(env.maxUploadBytes)
-  );
-  app.use(
-    "/v1/uploads/bulk",
-    multipartBodyLimit(env.maxMultipartUploadBytes)
-  );
-  app.use(
-    "/v1/uploads/*",
-    nativeBodyLimit(env.maxUploadBytes)
-  );
-
-  // Non-upload JSON routes have no per-route body limit, so a single request
-  // could buffer tens of MB before validation. Cap declared JSON bodies only;
-  // multipart/binary uploads keep their own (larger) limits above.
-  // Security finding SEC-2026-10-PROD-05.
+  app.use("/dashboard/*", sessionAuth);
+  app.use("/v1/*", sessionAuth);
+  app.use("/v1/*", apiActorRateLimit);
+  app.use("/v1/mcp", nativeBodyLimit(1024 * 1024));
+  app.use("/oauth/mcp/*", nativeBodyLimit(16 * 1024));
+  // Bound actual bytes before NUL inspection or any route reader. Select the
+  // smallest applicable cap first, so JSON uploads cannot buffer the file cap.
   app.use("/v1/*", async (c, next) => {
-    const contentType = c.req.header("content-type") ?? "";
-    if (contentType.includes("application/json")) {
-      const declared = Number(c.req.header("content-length") ?? "0");
-      if (Number.isFinite(declared) && declared > JSON_BODY_MAX_BYTES) {
-        return apiErrorResponse(c, 413, "payload_too_large", "Request body is too large");
-      }
+    if (c.req.path === "/v1/mcp") return next(); // protocol-specific cap above
+    const upload = /^\/v1\/(?:uploads|ingest)(?:\/|$)/.test(c.req.path);
+    const json = /\bjson\b/i.test(c.req.header("content-type") ?? "");
+    if (upload && !json) {
+      if (/\/bulk\/?$/.test(c.req.path)) return multipartBodyLimit(env.maxMultipartUploadBytes)(c, next);
+      return nativeBodyLimit(env.maxUploadBytes)(c, next);
     }
-    await next();
+    return nativeBodyLimit(JSON_BODY_MAX_BYTES)(c, next);
   });
 
   app.use(
     "/webhooks/stripe",
-    bodyLimit({
-      maxSize: 1024 * 1024
-    })
+    nativeBodyLimit(1024 * 1024)
   );
-  app.use("/dashboard/*", sessionAuth);
-  app.use("/v1/*", sessionAuth);
-  app.use("/v1/*", apiActorRateLimit);
+  app.use("*", rejectNulBytes);
   // `/v1/workspaces/:slug|default/...` → resolved workspace UUID routes.
   const workspaceRefs = workspaceRefPath([workspacesRoutes, connectorsRoutes, secretsRoutes, workspaceGraphRoutes]);
   app.use("/v1/workspaces/:workspaceRef", workspaceRefs);

@@ -227,16 +227,7 @@ export const documentsRoutes = new Hono()
   })
   .delete("/:docId", async (c) => {
     const userId = c.get("sessionUser").id;
-    let deleted;
-    try {
-      deleted = await deleteDocument(c.req.param("docId"), userId);
-    } catch (error) {
-      // Deleting a document whose run is still processing races the pipeline
-      // (FK/trigger) and currently surfaces as a 500. Answer 409 so clients
-      // retry instead. Robustness finding SEC-2026-10-PROD-06.
-      reportPublicError(error, { surface: "documents.delete" });
-      return apiErrorResponse(c, 409, "conflict", "The document is still processing. Try again shortly.");
-    }
+    const deleted = await deleteDocument(c.req.param("docId"), userId);
 
     if (!deleted) {
       return apiStatusError(c, 404, "Document not found");
