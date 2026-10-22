@@ -6,7 +6,7 @@ const response = { results: hits, sessionId: 'session', availability: null, usag
 test('Meilisearch pagination maps ranked passages and keeps bounded counts explicit', async () => {
   let input;
   const r = await runSearchAdapter('meilisearch', 'ws', { q: 'guide', offset: 20, limit: 10 }, async value => { input = value; return response; });
-  assert.equal(input.workspaceId,'ws'); assert.equal(input.limit,100);
+  assert.equal(input.workspace,'ws'); assert.equal(input.limit,100);
   assert.equal(r.hits[0].id,'doc-20:20'); assert.equal(r.estimatedTotalHits,32);
   assert.equal(r.docslurp.countIsExact,false); assert.deepEqual(r.docslurp.usage,response.usage);
 });
@@ -27,7 +27,7 @@ test('empty queries do not trigger usage; Typesense preserves nested documents',
   assert.equal(r.hits[0].document.id,'doc-10:10'); assert.equal(r.page,2);
 });
 test('Pagefind data() resolves source metadata and HTML-escaped excerpts', async () => {
-  const pagefind = createDocSlurpPagefind({apiUrl:'https://example.test',clientKey:'public',workspaceId:'ws',resolveUrl:hit=>`/guides/${hit.citation.documentId}`,fetch:async(url,init)=>{
+  const pagefind = createDocSlurpPagefind({apiUrl:'https://example.test',clientKey:'public',workspace:'ws',resolveUrl:hit=>`/guides/${hit.citation.documentId}`,fetch:async(url,init)=>{
     assert.equal(url,'https://example.test/v1/search');assert.equal(init.headers.Authorization,'Bearer public');return Response.json(response);
   }});
   const r=await pagefind.search('x'); const hit=await r.results[0].data();

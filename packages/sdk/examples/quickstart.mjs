@@ -6,7 +6,7 @@ const [filename, q = "What are the key points in this document?"] = process.argv
 if (!filename) throw new Error("Pass a document path: node quickstart.mjs ./handbook.pdf");
 if (!process.env.DOCSLURP_API_KEY) throw new Error("Set DOCSLURP_API_KEY first.");
 
-// Without DOCSLURP_WORKSPACE_ID, upload and search use your organization's default workspace.
+// Without DOCSLURP_WORKSPACE, upload and search use your organization's default workspace.
 const client = createDocSlurpClient();
 const { workspace, run, warnings } = await client.upload(createReadStream(filename));
 // Save these IDs before waiting: processing can outlive this process.

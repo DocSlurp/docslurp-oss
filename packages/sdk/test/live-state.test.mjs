@@ -11,7 +11,7 @@ const snapshot = (completed, status = "processing") => ({
 async function http(handler, task) {
   const server = createServer(handler);
   await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
-  const client = createDocSlurpClient({ apiUrl: `http://127.0.0.1:${server.address().port}`, apiKey: "fixture", workspaceId: "work/id" });
+  const client = createDocSlurpClient({ apiUrl: `http://127.0.0.1:${server.address().port}`, apiKey: "fixture", workspace: "work/id" });
   try { await task(client); } finally { server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); }
 }
 function json(response, body, status = 200) { response.writeHead(status, { "content-type": "application/json" }); response.end(JSON.stringify(body)); }
