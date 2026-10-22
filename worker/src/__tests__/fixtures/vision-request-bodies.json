@@ -221,8 +221,9 @@
     },
     "provider": {
       "order": [
-        "deepseek",
-        "together"
+        "together",
+        "fireworks",
+        "parasail"
       ],
       "allow_fallbacks": false
     },
@@ -261,8 +262,9 @@
     },
     "provider": {
       "order": [
-        "deepseek",
-        "together"
+        "together",
+        "fireworks",
+        "parasail"
       ],
       "allow_fallbacks": false
     },

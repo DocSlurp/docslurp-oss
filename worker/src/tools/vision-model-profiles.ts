@@ -81,7 +81,9 @@ export const VISION_MODEL_PROFILES: Readonly<Record<string, VisionModelProfile>>
   // 2026-10-21 tune split (68 pages): with `<OCR>` this snapshot writes plain-text math
   // (`softmax(QK^T / √d_k) V`); the Markdown/LaTeX prompt lifts math partial 0.44 -> 0.86.
   // BaseTen served runaway repetition loops ("| | | …" to the cap) and word substitutions;
-  // DeepSeek native and Together had none, so routing is restricted to them.
+  // DeepSeek native and Together had none. Routing is restricted to US-hosted providers measured on the
+  // 2026-10-22 select split (Together p50 2.2 s, Fireworks 4.1 s, Parasail 3.6 s; equal quality, 0 failures);
+  // DeepSeek's own China-hosted endpoint is excluded for customer documents.
   // Asking for text inside figures recovers formulas and labels printed in figures (+0.2 math on those pages).
   // The longest legitimate page was ~3k output tokens, so 8k bounds a runaway's cost.
   "deepseek/deepseek-v4.1-flash-1017": {
@@ -89,7 +91,7 @@ export const VISION_MODEL_PROFILES: Readonly<Record<string, VisionModelProfile>>
     maxOutputTokens: 8_192,
     // Effort `none` returns zero reasoning tokens; `low` cost 6.4x per page and lowered math.
     reasoning: { effort: "none" },
-    openRouterProvider: { order: ["deepseek", "together"], allow_fallbacks: false },
+    openRouterProvider: { order: ["together", "fireworks", "parasail"], allow_fallbacks: false },
   },
   // 2026-10-21 tune: with `<OCR>` MiMo writes plain text: tables flatten into runs of cells, standalone
   // formulas come back as bare LaTeX with no `$`/`$$`, and figure text becomes an image placeholder.

@@ -86,11 +86,11 @@ const filtered = (provider: string) => sse([
 describe("per-model provider preferences survive the generic retry", () => {
   it("DeepSeek-1017 retries on the remaining order entry only", async () => {
     const { bodies, result } = await run(DEEPSEEK, [
-      filtered("DeepSeek"),
-      sse([{ id: "g", model: DEEPSEEK, provider: "Together", choices: [{ delta: { content: "# Page" }, finish_reason: "stop" }], usage: { prompt_tokens: 1000, completion_tokens: 20 } }]),
+      filtered("Together"),
+      sse([{ id: "g", model: DEEPSEEK, provider: "Fireworks", choices: [{ delta: { content: "# Page" }, finish_reason: "stop" }], usage: { prompt_tokens: 1000, completion_tokens: 20 } }]),
     ]);
-    expect(bodies[0]!.provider).toEqual({ order: ["deepseek", "together"], allow_fallbacks: false });
-    expect(bodies[1]!.provider).toEqual({ order: ["together"], allow_fallbacks: false, ignore: ["DeepSeek"] });
+    expect(bodies[0]!.provider).toEqual({ order: ["together", "fireworks", "parasail"], allow_fallbacks: false });
+    expect(bodies[1]!.provider).toEqual({ order: ["fireworks", "parasail"], allow_fallbacks: false, ignore: ["Together"] });
     expect(result).toMatchObject({ text: "# Page", attempts: 2, inputTokens: 1400, outputTokens: 23 });
   });
 

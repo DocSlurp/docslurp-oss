@@ -48,7 +48,7 @@ describe("per-model vision profiles", () => {
     expect(body.max_tokens).toBe(8_192);
     expect(body.temperature).toBe(0);
     expect(body.reasoning).toEqual({ effort: "none" });
-    expect(body.provider).toEqual({ order: ["deepseek", "together"], allow_fallbacks: false });
+    expect(body.provider).toEqual({ order: ["together", "fireworks", "parasail"], allow_fallbacks: false });
   });
 
   it("keeps an explicit non-default template for the snapshot", async () => {
