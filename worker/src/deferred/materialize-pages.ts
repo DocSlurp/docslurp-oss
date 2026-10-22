@@ -63,7 +63,7 @@ export interface PageMaterializerOps {
   /** Text layer for pages first..last (inclusive), one string per page. */
   extractText(document: Document, range: { first: number; last: number }, signal?: AbortSignal): Promise<string[]>;
   /** Rasterize + vision-OCR one page. */
-  ocrPage(document: Document, page: number, ctx: { runId: string; pipeline: PipelineFeatures; planId?: string | null; signal?: AbortSignal }): Promise<OcrPageResult>;
+  ocrPage(document: Document, page: number, ctx: { runId: string; pipeline: PipelineFeatures; funded?: boolean; signal?: AbortSignal }): Promise<OcrPageResult>;
   embed(args: {
     chunks: string[];
     profile: EmbeddingProfile;
@@ -142,7 +142,7 @@ function defaultOps(deps: PageMaterializerDeps): PageMaterializerOps {
           cfg: deps.config,
           runner: deps.runner,
           privacyMode: ctx.pipeline.privacyMode,
-          planId: ctx.planId,
+          funded: ctx.funded,
           signal: ctx.signal,
         });
         const costCents = result.costCents ?? calculateAiUsageCostCents({
@@ -290,7 +290,7 @@ export async function materializePageRange(
       return;
     }
     try {
-      const ocr = await ops.ocrPage(document, page, { runId: input.runId, pipeline, planId: run.orgPlanId });
+      const ocr = await ops.ocrPage(document, page, { runId: input.runId, pipeline, funded: run.orgFunded });
       const event = deps.usage.record({
         provider: ocr.provider ?? "vision-runtime",
         model: ocr.model,

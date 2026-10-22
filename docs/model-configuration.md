@@ -46,8 +46,11 @@ use `pipeline.embedding.modelUri`. Chat uses its existing model selector.
 Catalog IDs and built-in defaults remain centralized configuration values;
 individual text stages no longer choose a fixed model.
 
-The default vision route stays `llm://openrouter/google/gemini-3.1-flash-lite`
-(profile `good-fast-hosted`). The default is one constant,
+The default vision route is `llm://openrouter/deepseek/deepseek-v4.1-flash-1017`
+(profile `good-fast-hosted`), tuned as described below. On the 2026-10-22 vision
+holdout it was in the best quality tier, the fastest (p50 2.5 s) and cheaper per
+page than the previous default, `google/gemini-3.1-flash-lite`, which stays in the
+catalog. The default is one constant,
 `DEFAULT_OPENROUTER_VISION_MODEL` in `packages/shared/src/embedding.ts`; the
 profile label, description and default config are derived from its catalog entry.
 NVIDIA Nemotron 3.5 Super VL is an opt-in hosted
@@ -60,9 +63,9 @@ Page transcription sends it `reasoning: { enabled: false }`. The provider-report
 charge is recorded when present. Otherwise cataloged hosted vision models fall back
 to their own list price instead of the generic `COST_PER_1K_*` rates.
 
-### Opt-in tuned vision models
+### Tuned vision models
 
-These hosted models are in the vision catalog (OpenRouter list prices checked
+The default and these opt-in hosted models are in the vision catalog (OpenRouter list prices checked
 2026-10-22) and can be selected per workspace with `pipeline.vision.modelUri`.
 Per-model prompt, output cap, routing and reasoning settings live in
 `worker/src/tools/vision-model-profiles.ts`; an explicit prompt other than
@@ -70,10 +73,10 @@ Per-model prompt, output cap, routing and reasoning settings live in
 
 | Model URI | List $/M in / out | Est. cost/page | Profile behaviour |
 | --- | --- | --- | --- |
-| `llm://openrouter/deepseek/deepseek-v4.1-flash-1017` | 0.15 / 0.60 | 0.056 cents | Markdown + LaTeX prompt, 8,192 output cap, reasoning effort `none`, routed to DeepSeek then Together with no fallbacks |
+| `llm://openrouter/deepseek/deepseek-v4.1-flash-1017` (default) | 0.30 / 1.20 (US hosts) | 0.103 cents | Markdown + LaTeX prompt, 8,192 output cap, reasoning effort `none`. Funded orgs: Together, Fireworks, Parasail (US), no other fallbacks. Unfunded starter orgs: DeepSeek's own China-hosted endpoint first ($0.15 / $0.60, about 0.04 cents a page), then the US hosts |
 | `llm://openrouter/xiaomi/mimo-v2.6-flash` | 0.14 / 0.28 | 0.056 cents | Markdown transcription prompt, output cap ceiling 8,192, reasoning `none`, routed to Relace then DeepInfra with fallbacks, math delimiters normalized |
 | `llm://openrouter/openai/gpt-6-luna` | 0.10 / 0.50 | 0.061 cents | Page Markdown + LaTeX prompt, image detail `high`, reasoning `none`, whole-page code fence removed, content-filter retry on Bedrock then Azure US |
-| `llm://openrouter/z-ai/glm-5.3-flash` | 0.0113 / 0.1589 | 0.013 cents (computed from about 3,000 input and 560 output tokens) | Generic defaults; no per-model profile |
+| `llm://openrouter/z-ai/glm-5.3-flash` | 0.0113 / 0.1589 | 0.013 cents (computed from about 3,000 input and 560 output tokens) | Markdown transcription prompt, output cap ceiling 8,192, reasoning `minimal`, routed to Wafer, Friendli then InferenceNet with no other fallbacks, missing table delimiter rows repaired |
 
 The first three per-page costs are measured; GLM's is computed from list price.
 DeepSeek, MiMo and GLM weights are MIT; Luna is proprietary-hosted.
@@ -81,7 +84,7 @@ DeepSeek, MiMo and GLM weights are MIT; Luna is proprietary-hosted.
 ### Global default override and kill switch
 
 `DOCSLURP_VISION_MODEL_URI` (for example
-`llm://openrouter/google/gemini-3.1-flash-lite`) replaces the built-in default
+`llm://openrouter/google/gemini-3.1-flash-lite` to roll back to the previous default) replaces the built-in default
 hosted vision model without a deploy of code. Set it on both the API/app and the
 worker so the cost preview matches what the worker calls. It applies only to
 pipelines whose vision config is still the default (profile `good-fast-hosted`

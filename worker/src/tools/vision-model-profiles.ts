@@ -58,10 +58,10 @@ export interface VisionModelProfile {
   /** OpenRouter routing for this model. */
   openRouterProvider?: OpenRouterProviderPreferences;
   /**
-   * Routing for orgs on the Free plan, in place of `openRouterProvider`. Only an explicit `free` plan id selects
-   * it; paid and unknown plans keep `openRouterProvider`.
+   * Routing for unfunded (starter) orgs, in place of `openRouterProvider`. Only an explicit `funded: false`
+   * selects it; funded orgs and unknown funding keep `openRouterProvider`.
    */
-  freePlanOpenRouterProvider?: OpenRouterProviderPreferences;
+  unfundedOpenRouterProvider?: OpenRouterProviderPreferences;
   /**
    * Reasoning control for page transcription. Kept here, not in the shared chat floor table, so it
    * never changes how the same model reasons in chat. Models without one fall back to `openRouterReasoningParams`.
@@ -96,10 +96,10 @@ export const VISION_MODEL_PROFILES: Readonly<Record<string, VisionModelProfile>>
     maxOutputTokens: 8_192,
     // Effort `none` returns zero reasoning tokens; `low` cost 6.4x per page and lowered math.
     reasoning: { effort: "none" },
-    // Paid plans stay on US-hosted providers. Free orgs try DeepSeek's own (China-hosted) endpoint first at half
-    // the token price, with the US hosts as fallbacks.
+    // Funded orgs stay on US-hosted providers. Unfunded (free starter) orgs try DeepSeek's own (China-hosted)
+    // endpoint first: same select-split quality, 62% lower cost per page, +0.8 s p50 (2026-10-22 smoke).
     openRouterProvider: { order: ["together", "fireworks", "parasail"], allow_fallbacks: false },
-    freePlanOpenRouterProvider: { order: ["deepseek", "together", "fireworks", "parasail"], allow_fallbacks: false },
+    unfundedOpenRouterProvider: { order: ["deepseek", "together", "fireworks", "parasail"], allow_fallbacks: false },
   },
   // 2026-10-21 tune: with `<OCR>` MiMo writes plain text: tables flatten into runs of cells, standalone
   // formulas come back as bare LaTeX with no `$`/`$$`, and figure text becomes an image placeholder.
@@ -166,9 +166,9 @@ export function visionPromptKeyForModel(prompt: string | undefined, model: strin
 }
 
 /** Request-body fragment with the profile's OpenRouter routing, or nothing. */
-export function openRouterProviderParams(model: string | undefined, planId?: string | null): { provider?: OpenRouterProviderPreferences } {
+export function openRouterProviderParams(model: string | undefined, funded?: boolean): { provider?: OpenRouterProviderPreferences } {
   const profile = visionModelProfile(model);
-  const provider = (planId === "free" ? profile?.freePlanOpenRouterProvider : undefined) ?? profile?.openRouterProvider;
+  const provider = (funded === false ? profile?.unfundedOpenRouterProvider : undefined) ?? profile?.openRouterProvider;
   return provider ? { provider: { order: [...provider.order], allow_fallbacks: provider.allow_fallbacks } } : {};
 }
 

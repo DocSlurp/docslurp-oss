@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { defaultPipelineFeatures, ingestReportSchema, mergePipelineFeatures, requestsIngestReport, ingestReportFocusPages, type PipelineFeatures } from "@docslurp/shared";
+import { DEFAULT_OPENROUTER_VISION_MODEL, defaultPipelineFeatures, visionModelCatalogById, ingestReportSchema, mergePipelineFeatures, requestsIngestReport, ingestReportFocusPages, type PipelineFeatures } from "@docslurp/shared";
 
 vi.mock("../db.js", () => ({ sql: vi.fn() }));
 vi.mock("./usage-attribution.js", () => ({ workspaceRunsUsageCost: vi.fn(async () => ({ costCents: 0, billedCostCents: 0, computeEstimated: false })) }));
@@ -97,10 +97,11 @@ describe("ingest report: observed content", () => {
     const rec = report.recommendations[0]!;
     expect(rec).toMatchObject({ id: "turn-on-vision", severity: "high", affectedPages: 3, affectedDocuments: 1, reprocessDocumentIds: ["scan"] });
     expect(rec.patch).toEqual({ visionFallback: true, vision: { forceAllPages: true, maxPagesPerDocument: 4 } });
-    // Default Gemini Flash Lite catalog price: 0.5¢ per page.
-    expect(rec.cost.centsPer100Pages).toBe(50);
-    // Observed 2¢ / 3 pages for the re-run plus 3 vision pages at 0.5¢.
-    expect(rec.cost.reprocessCents).toBeCloseTo(2 + 1.5, 5);
+    // Default vision model's catalog price per page.
+    const perPage = visionModelCatalogById[DEFAULT_OPENROUTER_VISION_MODEL].estimatedCostPerPageCents;
+    expect(rec.cost.centsPer100Pages).toBeCloseTo(perPage * 100, 2);
+    // Observed 2¢ / 3 pages for the re-run plus 3 vision pages at the catalog price.
+    expect(rec.cost.reprocessCents).toBeCloseTo(2 + 3 * perPage, 2);
     expect(report.config.find((item) => item.key === "visionFallback")?.value).toBe("Off");
   });
 

@@ -16,7 +16,7 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-async function send(model: string, prompt?: string, planId?: string | null) {
+async function send(model: string, prompt?: string, funded?: boolean) {
   const bodies: Array<Record<string, any>> = [];
   vi.stubGlobal("fetch", vi.fn(async (_url: string, init: RequestInit) => {
     bodies.push(JSON.parse(String(init.body)));
@@ -35,7 +35,7 @@ async function send(model: string, prompt?: string, planId?: string | null) {
     cfg: { openRouterApiKey: "or-key", openAiApiKey: "", openAiBaseUrl: "https://api.openai.com/v1" } as Config,
     runner: new CommandRunner(),
     privacyMode: "standard",
-    planId,
+    funded,
   });
   const body = bodies[0]!;
   return { body, userText: body.messages[1].content[0].text as string };
@@ -52,18 +52,18 @@ describe("per-model vision profiles", () => {
     expect(body.provider).toEqual({ order: ["together", "fireworks", "parasail"], allow_fallbacks: false });
   });
 
-  it("routes Free-plan orgs to DeepSeek's endpoint first, with the US hosts as fallbacks", async () => {
-    const { body } = await send(SNAPSHOT, undefined, "free");
+  it("routes unfunded orgs to DeepSeek's endpoint first, with the US hosts as fallbacks", async () => {
+    const { body } = await send(SNAPSHOT, undefined, false);
     expect(body.provider).toEqual({ order: ["deepseek", "together", "fireworks", "parasail"], allow_fallbacks: false });
   });
 
-  it.each(["silver", "gold", "platinum", null, undefined, "unknown"])("keeps plan %s on US-hosted providers only", async planId => {
-    const { body } = await send(SNAPSHOT, undefined, planId);
+  it.each([true, undefined])("keeps funded=%s on US-hosted providers only", async funded => {
+    const { body } = await send(SNAPSHOT, undefined, funded);
     expect(body.provider).toEqual({ order: ["together", "fireworks", "parasail"], allow_fallbacks: false });
   });
 
-  it("uses the shared route for models without a Free-plan override", async () => {
-    const { body } = await send("xiaomi/mimo-v2.6-flash", undefined, "free");
+  it("uses the shared route for models without an unfunded override", async () => {
+    const { body } = await send("xiaomi/mimo-v2.6-flash", undefined, false);
     expect(body.provider).toEqual({ order: ["relace", "deepinfra"], allow_fallbacks: true });
   });
 
