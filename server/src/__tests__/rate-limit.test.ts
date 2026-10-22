@@ -88,6 +88,12 @@ describe("api rate limit middleware", () => {
   beforeEach(() => {
     currentTime = 1_000;
     vi.unstubAllEnvs();
+    // Generic limiter assertions exercise unbilled copy. The hosted billing
+    // links group below explicitly enables Stripe and verifies decorated copy.
+    vi.stubEnv("STRIPE_SECRET_KEY", "");
+    for (const key of Object.keys(process.env)) {
+      if (key.startsWith("DOCSLURP_BILL_")) vi.stubEnv(key, "false");
+    }
     vi.stubEnv("API_RATE_LIMIT_REDIS_REST_URL", "");
     vi.stubEnv("API_RATE_LIMIT_REDIS_REST_TOKEN", "");
     vi.stubEnv("API_RATE_LIMIT_REDIS_URL", "");
