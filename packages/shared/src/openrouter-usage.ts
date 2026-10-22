@@ -109,6 +109,8 @@ export const OPENROUTER_LOWEST_REASONING: Readonly<Record<string, OpenRouterReas
   "anthropic/claude-sonnet-5.5": { effort: "minimal" },
   // 2026-10-20 probes: both `{ enabled: false }` and effort `none` return HTTP 200 with zero reasoning tokens.
   "nvidia/nemotron-3.5-super-vl": { enabled: false },
+  // 2026-10-21 probes: reasons by default; `{ effort: "none" }` and `{ enabled: false }` both return 0 reasoning tokens.
+  "xiaomi/mimo-v2.6-flash": { effort: "none" },
 };
 
 export function lowestOpenRouterReasoning(model: string | undefined): OpenRouterReasoning | undefined {
