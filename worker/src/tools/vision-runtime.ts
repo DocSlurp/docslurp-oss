@@ -2,6 +2,12 @@ import { openRouterReasoningParams, resolveSupportedModelIdWithWarning } from "@
 import { withObservation } from "@docslurp/shared/observability";
 import type { ProviderRateLease } from "../lib/provider-rate-limit.js";
 import { fetchWithProviderRetry, providerFromBaseUrl } from "../lib/provider-retry.js";
+import {
+  MARKDOWN_LATEX_VISION_PROMPT,
+  openRouterProviderParams,
+  visionModelProfile,
+  visionPromptKeyForModel,
+} from "./vision-model-profiles.js";
 
 /** Image plus transcription tokens for a typical page (observed ~1,850 in / ~510 out on Gemini Flash Lite). */
 const VISION_IMAGE_TOKEN_ESTIMATE = 2_200;
@@ -14,6 +20,16 @@ export const VISION_MAX_OUTPUT_TOKENS = (() => {
   const configured = Number(process.env.VISION_MAX_OUTPUT_TOKENS);
   return Number.isInteger(configured) && configured >= 1_024 ? configured : 16_384;
 })();
+const VISION_MAX_OUTPUT_TOKENS_CONFIGURED = (() => {
+  const configured = Number(process.env.VISION_MAX_OUTPUT_TOKENS);
+  return Number.isInteger(configured) && configured >= 1_024;
+})();
+
+/** Output cap for `model`: VISION_MAX_OUTPUT_TOKENS when set, else the model profile's cap, else 16k. */
+export function visionMaxOutputTokens(model: string | undefined): number {
+  if (VISION_MAX_OUTPUT_TOKENS_CONFIGURED) return VISION_MAX_OUTPUT_TOKENS;
+  return visionModelProfile(model)?.maxOutputTokens ?? VISION_MAX_OUTPUT_TOKENS;
+}
 import { readFile } from "node:fs/promises";
 
 import {
@@ -38,6 +54,7 @@ import type { CommandRunner } from "./runner.js";
 export const visionPromptTemplates = {
   "<OCR>":
     "Extract visible document text faithfully. Preserve reading order, tables, headings, formulas, and code when visible.",
+  "markdown-latex": MARKDOWN_LATEX_VISION_PROMPT,
   markdown:
     "Convert the visible document page into concise GitHub-flavored markdown. Preserve tables, headings, lists, formulas, and code blocks.",
   layout:
@@ -221,7 +238,7 @@ function normalizeVisionConfig(
     baseUrl: selected.runtime === "remote-openai"
       ? cfg.openAiBaseUrl
       : selected.baseUrl,
-    prompt: buildSchemaAwareVisionPrompt(selected.prompt, outputSchema),
+    prompt: buildSchemaAwareVisionPrompt(visionPromptKeyForModel(selected.prompt, selected.model), outputSchema),
   };
 }
 
@@ -358,9 +375,11 @@ async function runVisionRequest(args: {
             },
           ],
           temperature: 0,
-          max_tokens: VISION_MAX_OUTPUT_TOKENS,
+          max_tokens: visionMaxOutputTokens(args.model),
           // Page transcription never needs thinking: pin each verified model to its lowest accepted effort.
           ...(args.baseUrl?.includes("openrouter.ai") ? openRouterReasoningParams(args.model) : {}),
+          // Per-model routing restricted to providers measured to transcribe faithfully.
+          ...(args.baseUrl?.includes("openrouter.ai") ? openRouterProviderParams(args.model) : {}),
         }),
       }, {
         provider: args.providerLabel ?? providerFromBaseUrl(args.baseUrl),
