@@ -23,7 +23,11 @@
       }
     ],
     "temperature": 0,
-    "max_tokens": 16384
+    "max_tokens": 16384,
+    "stream": true,
+    "stream_options": {
+      "include_usage": true
+    }
   },
   "google/gemini-3.1-flash-lite|layout": {
     "model": "google/gemini-3.1-flash-lite",
@@ -49,7 +53,11 @@
       }
     ],
     "temperature": 0,
-    "max_tokens": 16384
+    "max_tokens": 16384,
+    "stream": true,
+    "stream_options": {
+      "include_usage": true
+    }
   },
   "nvidia/nemotron-3.5-super-vl|": {
     "model": "nvidia/nemotron-3.5-super-vl",
@@ -78,6 +86,10 @@
     "max_tokens": 16384,
     "reasoning": {
       "enabled": false
+    },
+    "stream": true,
+    "stream_options": {
+      "include_usage": true
     }
   },
   "nvidia/nemotron-3.5-super-vl|layout": {
@@ -107,6 +119,10 @@
     "max_tokens": 16384,
     "reasoning": {
       "enabled": false
+    },
+    "stream": true,
+    "stream_options": {
+      "include_usage": true
     }
   },
   "deepseek/deepseek-v4.1-flash|": {
@@ -136,6 +152,10 @@
     "max_tokens": 16384,
     "reasoning": {
       "effort": "none"
+    },
+    "stream": true,
+    "stream_options": {
+      "include_usage": true
     }
   },
   "deepseek/deepseek-v4.1-flash|layout": {
@@ -165,6 +185,10 @@
     "max_tokens": 16384,
     "reasoning": {
       "effort": "none"
+    },
+    "stream": true,
+    "stream_options": {
+      "include_usage": true
     }
   },
   "deepseek/deepseek-v4.1-flash-1017|": {
@@ -201,6 +225,10 @@
         "together"
       ],
       "allow_fallbacks": false
+    },
+    "stream": true,
+    "stream_options": {
+      "include_usage": true
     }
   },
   "deepseek/deepseek-v4.1-flash-1017|layout": {
@@ -237,6 +265,10 @@
         "together"
       ],
       "allow_fallbacks": false
+    },
+    "stream": true,
+    "stream_options": {
+      "include_usage": true
     }
   },
   "xiaomi/mimo-v2.6-flash|": {
@@ -273,6 +305,10 @@
         "deepinfra"
       ],
       "allow_fallbacks": true
+    },
+    "stream": true,
+    "stream_options": {
+      "include_usage": true
     }
   },
   "xiaomi/mimo-v2.6-flash|layout": {
@@ -309,6 +345,10 @@
         "deepinfra"
       ],
       "allow_fallbacks": true
+    },
+    "stream": true,
+    "stream_options": {
+      "include_usage": true
     }
   }
 }

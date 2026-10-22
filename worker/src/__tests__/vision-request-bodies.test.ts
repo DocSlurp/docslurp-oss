@@ -53,6 +53,21 @@ describe("vision request bodies", () => {
     for (const key of Object.keys(golden)) expect(actual[key], key).toEqual(golden[key]);
   });
 
+  // The pre-stream fixtures are the bodies captured before the stream guard; streaming must change nothing else.
+  it.each(["vision-request-bodies", "vision-request-bodies-luna"])("%s: the streaming golden differs from the pre-stream golden only by stream and stream_options", async (name) => {
+    const read = async (file: string) => JSON.parse(await readFile(join(import.meta.dirname, "fixtures", file), "utf8")) as Record<string, Record<string, unknown>>;
+    const before = await read(`${name}.pre-stream.json`);
+    const after = await read(`${name}.json`);
+    expect(Object.keys(after)).toEqual(Object.keys(before));
+    for (const key of Object.keys(before)) {
+      const { stream, stream_options: streamOptions, ...rest } = after[key]!;
+      expect(stream, key).toBe(true);
+      expect(streamOptions, key).toEqual({ include_usage: true });
+      expect(rest, key).toEqual(before[key]);
+      expect(before[key], key).not.toHaveProperty("stream");
+    }
+  });
+
   it("keeps effort none on the vision requests for both tuned models", async () => {
     for (const model of ["xiaomi/mimo-v2.6-flash", "deepseek/deepseek-v4.1-flash-1017"]) {
       expect((await requestBody(model)).reasoning).toEqual({ effort: "none" });

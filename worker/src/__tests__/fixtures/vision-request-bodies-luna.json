@@ -27,6 +27,10 @@
     "max_tokens": 16384,
     "reasoning": {
       "effort": "none"
+    },
+    "stream": true,
+    "stream_options": {
+      "include_usage": true
     }
   }
 }
