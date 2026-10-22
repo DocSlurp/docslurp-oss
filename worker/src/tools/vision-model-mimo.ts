@@ -30,6 +30,18 @@ export const MIMO_TRANSCRIPTION_PROMPT = [
  */
 export const MIMO_PROVIDER_ORDER = ["relace", "deepinfra"] as const;
 
+/**
+ * Output cap for one MiMo page. The longest complete page seen in 2,490 calls was
+ * 2,509 tokens; a repetition loop on a low-resource script ran to the 16k cap
+ * (48 s). Capping at 8k keeps 3x headroom and halves a runaway's time and cost.
+ */
+export const MIMO_MAX_OUTPUT_TOKENS = 8_192;
+
+/** The model's page output cap, never above the shared cap; the shared cap for other models. */
+export function mimoMaxOutputTokens(model: string | undefined, sharedCap: number): number {
+  return model === MIMO_VISION_MODEL ? Math.min(sharedCap, MIMO_MAX_OUTPUT_TOKENS) : sharedCap;
+}
+
 /** The prompt MiMo uses in place of the default `<OCR>` template; undefined for other models or explicit templates. */
 export function mimoVisionPrompt(model: string | undefined, promptKey: string | undefined): string | undefined {
   if (model !== MIMO_VISION_MODEL) return undefined;

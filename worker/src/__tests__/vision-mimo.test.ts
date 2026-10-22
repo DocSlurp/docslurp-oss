@@ -7,7 +7,7 @@ import { visionConfigSchema } from "@docslurp/shared";
 
 import type { Config } from "../config.js";
 import { CommandRunner } from "../tools/runner.js";
-import { MIMO_TRANSCRIPTION_PROMPT, MIMO_VISION_MODEL, mimoOpenRouterParams, mimoVisionPrompt, normalizeMimoMathDelimiters, postProcessMimoTranscription } from "../tools/vision-model-mimo.js";
+import { MIMO_TRANSCRIPTION_PROMPT, MIMO_VISION_MODEL, mimoOpenRouterParams, mimoVisionPrompt, normalizeMimoMathDelimiters, postProcessMimoTranscription, mimoMaxOutputTokens } from "../tools/vision-model-mimo.js";
 import { executeVisionRuntime, visionPromptTemplates } from "../tools/vision-runtime.js";
 
 afterEach(() => {
@@ -63,6 +63,13 @@ describe("MiMo vision profile", () => {
     expect(body.provider).toEqual({ order: ["relace", "deepinfra"], allow_fallbacks: true });
     expect(body.reasoning).toEqual({ effort: "none" });
     expect(body.temperature).toBe(0);
+    expect(body.max_tokens).toBe(8_192);
+  });
+
+  it("caps MiMo output at 8k without raising a lower shared cap or touching other models", () => {
+    expect(mimoMaxOutputTokens(MIMO_VISION_MODEL, 16_384)).toBe(8_192);
+    expect(mimoMaxOutputTokens(MIMO_VISION_MODEL, 4_096)).toBe(4_096);
+    expect(mimoMaxOutputTokens("deepseek/deepseek-v4.1-flash", 16_384)).toBe(16_384);
   });
 
   it("keeps an explicit template for MiMo and leaves other models unchanged", async () => {

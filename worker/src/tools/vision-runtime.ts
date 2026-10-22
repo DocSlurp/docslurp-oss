@@ -34,7 +34,7 @@ import {
 import type { Config } from "../config.js";
 import { readJsonFile } from "./storage.js";
 import type { CommandRunner } from "./runner.js";
-import { mimoOpenRouterParams, mimoVisionPrompt, postProcessMimoTranscription } from "./vision-model-mimo.js";
+import { mimoMaxOutputTokens, mimoOpenRouterParams, mimoVisionPrompt, postProcessMimoTranscription } from "./vision-model-mimo.js";
 
 export const visionPromptTemplates = {
   "<OCR>":
@@ -359,7 +359,7 @@ async function runVisionRequest(args: {
             },
           ],
           temperature: 0,
-          max_tokens: VISION_MAX_OUTPUT_TOKENS,
+          max_tokens: mimoMaxOutputTokens(args.model, VISION_MAX_OUTPUT_TOKENS),
           // Page transcription never needs thinking: pin each verified model to its lowest accepted effort.
           ...(args.baseUrl?.includes("openrouter.ai") ? openRouterReasoningParams(args.model) : {}),
           ...(args.baseUrl?.includes("openrouter.ai") ? mimoOpenRouterParams(args.model) : {}),
