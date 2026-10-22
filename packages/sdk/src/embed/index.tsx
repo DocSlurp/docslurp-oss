@@ -1,3 +1,4 @@
+import { assertBrowserSafeApiKey, assertSecureApiOrigin } from "../keys.js";
 import type React from "react";
 import { useEffect, useMemo, useState } from "react";
 import { createRoot, type Root } from "react-dom/client";
@@ -50,7 +51,9 @@ type OfflineSearchEmbedOptions = Omit<
   client?: OfflineSearchClient;
 };
 
-function buildHeaders(clientKey?: string) {
+function buildHeaders(clientKey?: string, apiUrl = DEFAULT_API_URL) {
+  assertBrowserSafeApiKey(clientKey, true);
+  assertSecureApiOrigin(apiUrl);
   const headers: Record<string, string> = {};
   if (clientKey) {
     headers.Authorization = `Bearer ${clientKey}`;
@@ -103,7 +106,7 @@ export function SearchEmbed({
         const res = await fetch(
           `${apiUrl.replace(/\/$/, "")}/v1/search?${params.toString()}`,
           {
-            headers: buildHeaders(clientKey),
+            headers: buildHeaders(clientKey, apiUrl),
           },
         );
         if (!res.ok) throw new Error("Request failed");
@@ -190,7 +193,7 @@ export function ChatEmbed({
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          ...buildHeaders(clientKey),
+          ...buildHeaders(clientKey, apiUrl),
         },
         body: JSON.stringify({ q: text, workspace }),
       });
@@ -255,10 +258,13 @@ export function ViewerEmbed({
     let cancelled = false;
     async function load() {
       try {
+        if (clientKey) throw new Error("ViewerEmbed requires a same-origin authenticated proxy; client keys cannot access private artifacts.");
+        assertSecureApiOrigin(apiUrl);
+        if (typeof location !== "undefined" && new URL(apiUrl, location.href).origin !== location.origin) throw new Error("ViewerEmbed requires a same-origin authenticated proxy.");
         const res = await fetch(
           `${apiUrl.replace(/\/$/, "")}/v1/documents/${encodeURIComponent(documentId)}`,
           {
-            headers: buildHeaders(clientKey),
+            headers: buildHeaders(clientKey, apiUrl),
           },
         );
         if (!res.ok) throw new Error("Request failed");
@@ -266,7 +272,7 @@ export function ViewerEmbed({
         if (!cancelled) setPayload(json);
       } catch (err) {
         if (!cancelled)
-          setError("We couldn’t open this document. Please try again.");
+          setError(clientKey ? "Document viewing requires a same-origin authenticated proxy. Never put a server key in this embed." : "We couldn’t open this document. Check your authenticated viewer proxy.");
       }
     }
     void load();

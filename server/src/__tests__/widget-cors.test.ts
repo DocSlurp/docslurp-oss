@@ -11,6 +11,14 @@ function app() {
   return app;
 }
 describe("widget CORS", () => {
+  it("does not reflect origins when a keyed widget request is rejected downstream", async () => {
+    const rejected = new Hono().use("*", serviceCors([trusted]));
+    rejected.post("/v1/search", c => c.json({ error: "Rejected key" }, 403));
+    const response = await rejected.request("/v1/search", { method: "POST", headers: { Origin: "https://customer.example", Authorization: "Bearer dslp_pub_rejected" } });
+    expect(response.status).toBe(403);
+    expect(response.headers.get("Access-Control-Allow-Origin")).toBeNull();
+    expect(response.headers.get("Access-Control-Allow-Credentials")).toBeNull();
+  });
   it("treats the app's own origin as first-party on hostnames outside the allowlist", async () => {
     const own = new Hono().use("*", serviceCors([trusted]));
     own.post("/v1/ingest/bulk", (c) => c.json({ ok: true }));

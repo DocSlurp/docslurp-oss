@@ -24,10 +24,21 @@ const inBrowser = () => typeof window !== "undefined" && typeof document !== "un
  * client-side, so a `dslp_priv_` key in a bundle fails loudly in development instead of
  * leaking in production.
  */
-export function assertBrowserSafeApiKey(key: string | null | undefined): void {
-  if (key && inBrowser() && apiKeyKind(key) === "private") {
+export function assertBrowserSafeApiKey(key: string | null | undefined, browser = inBrowser()): void {
+  if (key && browser && apiKeyKind(key) !== "public") {
     throw new UnsafeApiKeyError(
-      "DocSlurp server keys (dslp_priv_…) must never be used in browser code. Use a search-only, domain-restricted client key (dslp_pub_…), or call DocSlurp from your server.",
+      "DocSlurp server and legacy keys must never be used in browser code. Use a search-only, domain-restricted client key (dslp_pub_…), or call DocSlurp from your server.",
     );
+  }
+}
+
+/** Refuse bearer transport over cleartext except explicit loopback development. */
+export function assertSecureApiOrigin(value: string): void {
+  // Empty origin is a relative same-origin client; Node fetch rejects relative URLs itself.
+  if (!value) return;
+  const url = new URL(value, typeof location !== "undefined" ? location.href : undefined);
+  const loopback = ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname);
+  if (url.username || url.password || (url.protocol !== "https:" && !(url.protocol === "http:" && loopback))) {
+    throw new Error("DocSlurp API URLs require HTTPS (HTTP is allowed only on localhost for development).");
   }
 }

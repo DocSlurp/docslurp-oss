@@ -8,9 +8,10 @@ import { loadMediaEvidence } from "./media-evidence.js";
 beforeEach(() => { mocks.sql.mockReset(); mocks.read.mockReset(); });
 describe("media evidence", () => {
   it("returns cited extracted frame descriptions even for a one-page video", async () => {
-    mocks.sql.mockResolvedValue([{ filename: "tour.mp4", text: "[00:03] On screen: a wide shot of a room.", total_chars: 50000, artifacts: null, metadata: {} }]);
+    mocks.sql.mockResolvedValue([{ filename: "tour.mp4", document_summary: "A room tour with timestamped frame descriptions.", text: "[00:03] On screen: a wide shot of a room.", total_chars: 50000, artifacts: null, metadata: {} }]);
     const result = await loadMediaEvidence("selected", "video", 10);
     expect(result?.results[0].text).toContain("On screen:");
+    expect(result?.documentSummary).toBe("A room tour with timestamped frame descriptions.");
     expect(searchResultSchema.safeParse(result?.results[0]).success).toBe(true);
     expect(result?.nextOffset).toBe(10 + result!.results[0].text.length);
     const [strings, ...params] = mocks.sql.mock.calls[0];

@@ -95,6 +95,16 @@ export function createBetterAuthSecurityOptions(env: NodeJS.ProcessEnv) {
   const baseURL = resolveBetterAuthBaseUrl(env);
 
   return {
+    account: {
+      accountLinking: {
+        enabled: true,
+        disableImplicitLinking: false,
+        allowDifferentEmails: false,
+        requireLocalEmailVerified: false,
+        // Never bypass the OAuth provider's verified-email assertion.
+        trustedProviders: [] as string[],
+      },
+    },
     emailAndPassword: {
       enabled: true,
       disableSignUp: !isEmailAuthConfigured(env),

@@ -10,6 +10,7 @@ import { admitConfiguredAdminUser } from "./admin-emails.js";
 import { createAuthEmailOptions } from "./auth-email.js";
 import { developmentTrustedOrigins } from "./dev-auth-access.js";
 import { withTrustedAuthClientIp } from "./client-ip.js";
+import { beforeOAuthAccountCreate } from "./oauth-account-linking.js";
 
 const globalPool = globalThis as typeof globalThis & { __docslurpAuthPool?: Pool };
 
@@ -143,6 +144,7 @@ export const auth = betterAuth({
     },
     account: {
       create: {
+        before: beforeOAuthAccountCreate,
         after: async (account) => {
           const oauthProviders = new Set(["github", "google"]);
           if (!oauthProviders.has(account.providerId)) return;

@@ -17,7 +17,7 @@ test('server keys are allowed on the server', () => {
   assert.doesNotThrow(() => createDocSlurpClient({ apiKey: priv }));
 });
 
-test('server keys throw before any browser request; public and legacy keys do not', async () => {
+test('server keys throw before any browser request; only public keys are allowed', async () => {
   globalThis.window = globalThis; globalThis.document = {};
   try {
     let fetched = false;
@@ -26,8 +26,17 @@ test('server keys throw before any browser request; public and legacy keys do no
     assert.throws(() => createDocSlurpMeilisearchClient({ apiUrl: 'https://example.test', clientKey: priv, fetch }), UnsafeApiKeyError);
     assert.equal(fetched, false);
     assert.doesNotThrow(() => createDocSlurpClient({ apiKey: pub, fetch }));
-    assert.doesNotThrow(() => createDocSlurpMeilisearchClient({ apiUrl: 'https://example.test', clientKey: 'dslp_legacy', fetch }));
+    assert.throws(() => createDocSlurpMeilisearchClient({ apiUrl: 'https://example.test', clientKey: 'dslp_legacy', fetch }), UnsafeApiKeyError);
   } finally {
     delete globalThis.window; delete globalThis.document;
   }
+});
+
+test('rejects insecure remote API origins before sending credentials', () => {
+  for (const apiUrl of ['http://example.test', 'http://10.0.0.1', 'ftp://example.test']) {
+    assert.throws(() => createDocSlurpClient({ apiUrl, apiKey: priv }), /HTTPS/);
+  }
+  assert.doesNotThrow(() => createDocSlurpClient({ apiUrl: 'http://127.0.0.1:8787', apiKey: priv }));
+  assert.throws(() => assertBrowserSafeApiKey(priv, true), UnsafeApiKeyError);
+  assert.throws(() => assertBrowserSafeApiKey('dslp_legacy', true), UnsafeApiKeyError);
 });

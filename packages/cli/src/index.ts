@@ -9,7 +9,10 @@ import { createInterface } from "node:readline";
 const DEFAULT_API_URL = "https://docslurp.io";
 
 function resolveApiUrl(flags: Record<string, string | boolean>): string {
-  return String(flags.apiUrl ?? (process.env.DOCSLURP_URL?.trim() || DEFAULT_API_URL)).replace(/\/+$/, "");
+  const value = String(flags.apiUrl ?? (process.env.DOCSLURP_URL?.trim() || DEFAULT_API_URL)).replace(/\/+$/, "");
+  const url = new URL(value);
+  if (url.username || url.password || (url.protocol !== "https:" && !(url.protocol === "http:" && ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname)))) throw new Error("API URL requires HTTPS; HTTP is allowed only on localhost for development.");
+  return value;
 }
 
 /**
