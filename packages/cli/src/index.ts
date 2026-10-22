@@ -874,7 +874,7 @@ async function mcpServerCommand(flags: Record<string, string | boolean>): Promis
         respond({
           protocolVersion: ["2024-11-05", "2025-03-26", "2025-06-18"].includes(envelope.params.protocolVersion)
             ? envelope.params.protocolVersion : "2025-06-18",
-          serverInfo: { name: "docslurp-mcp", version },
+          serverInfo: { name: "docslurp-mcp", title: "DocSlurp", version },
           capabilities: { tools: {}, resources: {}, prompts: {} }
         });
         continue;
@@ -885,7 +885,11 @@ async function mcpServerCommand(flags: Record<string, string | boolean>): Promis
         case "tools/list": {
           const result = await get("/v1/mcp/tools");
           respond({ tools: result.tools.map((tool: any) => ({
-            name: tool.id, title: tool.title, description: tool.description, inputSchema: tool.inputSchema
+            name: tool.id, title: tool.title, description: tool.description, inputSchema: tool.inputSchema,
+            ...(tool.annotations && { annotations: {
+              title: tool.title, readOnlyHint: tool.annotations.readOnly, destructiveHint: tool.annotations.destructive,
+              idempotentHint: tool.annotations.idempotent, openWorldHint: tool.annotations.openWorld
+            } })
           })) });
           break;
         }
@@ -925,7 +929,7 @@ async function mcpServerCommand(flags: Record<string, string | boolean>): Promis
           break;
         }
         case "prompts/list":
-          respond({ prompts: [{ name: "workspace-grounded-answer", description: "Answer using workspace evidence and citations" }] });
+          respond({ prompts: [{ name: "workspace-grounded-answer", title: "Workspace grounded answer", description: "Answer using workspace evidence and citations" }] });
           break;
         case "prompts/get": {
           if (envelope.params?.name !== "workspace-grounded-answer") { invalid("Unknown prompt name"); break; }
