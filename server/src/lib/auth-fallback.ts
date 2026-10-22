@@ -59,10 +59,11 @@ export function normalizeRedirectTarget(value: FormDataEntryValue | string | nul
   return trimmed;
 }
 
-export function buildAuthFailureUrl(requestUrl: string, error: string, email?: string): URL {
+export function buildAuthFailureUrl(requestUrl: string, error: string): URL {
   const url = new URL(AUTH_APP_ROOT_PATH, requestUrl);
   url.searchParams.set("authError", error);
-  if (email?.trim()) url.searchParams.set("authEmail", email.trim());
+  // The attempted email is deliberately not echoed back: it would land in
+  // server/access logs, browser history and Referer (SEC-2026-10-13).
   return url;
 }
 

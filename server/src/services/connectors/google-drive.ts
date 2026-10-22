@@ -114,7 +114,7 @@ export class GoogleDriveConnectorAdapter implements ConnectorAdapter {
     const accessToken = await this.getAccessToken(creds);
 
     const response = await fetch(
-      `https://www.googleapis.com/drive/v3/files/${fileRef.id}?alt=media`,
+      `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileRef.id)}?alt=media`,
       { headers: { Authorization: `Bearer ${accessToken}` } }
     );
 

@@ -209,7 +209,7 @@ export async function runConnectorSync(row: ConnectorRow, syncLogId: string): Pr
     await sql`
       update connector_sync_log
       set status = 'failed', finished_at = now(), files_added = ${filesAdded}, files_updated = ${filesUpdated},
-          error_message = ${error instanceof Error ? error.message : String(error)}
+          error_message = ${"connector sync failed"}
       where id = ${syncLogId}
     `;
     await sql`
@@ -390,8 +390,9 @@ export const connectorsRoutes = new Hono()
     }
 
     // Kick off sync asynchronously
-    void runConnectorSync(row, syncLogId).catch(async (err) => {
-      console.error(`[connector-sync] connector=${connectorId} error=${err instanceof Error ? err.message : String(err)}`);
+    void runConnectorSync(row, syncLogId).catch(() => {
+      // Provider error bodies can carry tenant data; log the event, not the message.
+      console.error(`[connector-sync] connector=${connectorId} failed`);
     });
 
     return c.json({ syncLogId, status: "running" }, 202);

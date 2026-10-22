@@ -14,7 +14,15 @@ MAX_FORMULAS = 100_000
 def read_xml(archive, name):
     if archive.getinfo(name).file_size > MAX_XML_BYTES:
         raise ValueError('Workbook XML exceeds formula context limit')
-    return ET.fromstring(archive.read(name))
+    return ET.fromstring(_reject_doctype(archive.read(name)))
+
+
+def _reject_doctype(data):
+    """Refuse a DTD/entity declaration before parsing (entity-expansion DoS)."""
+    head = data[:4096].upper()
+    if b'<!DOCTYPE' in head or b'<!ENTITY' in head:
+        raise ValueError('Workbook XML declares a DTD or entities')
+    return data
 
 
 def escape(value):

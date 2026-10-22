@@ -188,6 +188,16 @@ function workspaceIntakeErrorResponse(
   return apiStatusError(c, error.statusCode, error.message, error.issues ? { details: { issues: error.issues } } : {});
 }
 
+/**
+ * A workspace-scoped API key may target its allowlisted workspaces but must not
+ * create a new one (which would land outside the allowlist). Session users are
+ * unrestricted. Security finding SEC-2026-10-07.
+ */
+function apiKeyMayCreateWorkspace(c: Context): boolean {
+  const apiKey = c.get("apiKey");
+  return !apiKey || (apiKey.workspaceIds ?? []).length === 0;
+}
+
 /** `ports` lets tests drive the real routes against fake storage, records, and workflow start. */
 export const createUploadsRoutes = (ports: WorkspaceIntakePorts = workspaceIntakePorts) => acceptApiKeys(new Hono()
   .use("*", async (c, next) => {
@@ -233,6 +243,9 @@ export const createUploadsRoutes = (ports: WorkspaceIntakePorts = workspaceIntak
       const orgId = c.get("apiKey")?.orgId ?? input.orgId ?? null;
 
       try {
+        if (wantsNewWorkspace(input) && !input.workspaceId && !apiKeyMayCreateWorkspace(c)) {
+          return apiStatusError(c, 403, "Workspace-scoped API keys cannot create new workspaces", { code: "workspace_scope_forbidden" });
+        }
         // Resolve the target now (UUID, slug, former slug, `default` or the
         // default for an omitted ID): confirm treats a null target as "create one".
         const workspace = wantsNewWorkspace(input) && !input.workspaceId
@@ -353,6 +366,10 @@ export const createUploadsRoutes = (ports: WorkspaceIntakePorts = workspaceIntak
     const requestedTemplateKey =
       parseWorkspaceIntakeTemplateKey(body.templateKey);
 
+    if (requestedNewWorkspace && !requestedWorkspaceId && !apiKeyMayCreateWorkspace(c)) {
+      return apiStatusError(c, 403, "Workspace-scoped API keys cannot create new workspaces", { code: "workspace_scope_forbidden" });
+    }
+
     let result;
     try {
       const canonicalIds = parseCanonicalIds(files, body);
@@ -401,6 +418,9 @@ export const createUploadsRoutes = (ports: WorkspaceIntakePorts = workspaceIntak
       const userId = c.get("sessionUser").id;
       const body = c.req.valid("json");
       const idempotencyKey = c.req.header("Idempotency-Key")?.trim();
+      if (body.newWorkspace && !body.workspaceId && !apiKeyMayCreateWorkspace(c)) {
+        return apiStatusError(c, 403, "Workspace-scoped API keys cannot create new workspaces", { code: "workspace_scope_forbidden" });
+      }
       let result;
       try {
         result = await createRemoteUrlWorkspaceIntake({
