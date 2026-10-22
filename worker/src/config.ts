@@ -91,6 +91,8 @@ export interface Config {
   workerAdaptiveTuning: boolean;
   serializePdfCandidateExtraction: boolean;
   visionDensityThreshold: number;
+  /** VISION_STREAMING=on|off (default on): stream hosted vision responses so degenerate output can be aborted early. */
+  visionStreaming?: boolean;
   /**
    * PAGE_ROUTER_MODE=off|shadow|active (default off). Ceiling over each workspace's
    * `pageRouter.mode`: nothing routes unless both opt in. Optional so partial
@@ -281,6 +283,7 @@ export function fromEnv(): Config {
     visionDensityThreshold: Number.parseFloat(
       process.env.VISION_DENSITY_THRESHOLD ?? "0.25",
     ),
+    visionStreaming: readBoolean(process.env.VISION_STREAMING, true),
     pageRouterMode: readPageRouterMode(process.env.PAGE_ROUTER_MODE),
     pythonPoolSize: readNumber(process.env.WORKER_PYTHON_POOL_SIZE, 2),
     parserArtifactTimeoutMs: readNumber(
