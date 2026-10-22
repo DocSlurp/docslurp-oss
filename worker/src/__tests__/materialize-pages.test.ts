@@ -222,7 +222,7 @@ describe("materializePageRange", () => {
     expect(result.costCredits).toBeGreaterThanOrEqual(1.5);
     const events = (h.usage as unknown as { pending: Array<{ metric: string; model: string; inputTokens: number; outputTokens: number; costCents: number; metadata: Record<string, unknown> }> }).pending;
     const event = events.find((e) => e.metric === "page-analysis-attempt");
-    expect(event).toMatchObject({ model: "vision-x", inputTokens: 2400, outputTokens: 640, metadata: { outcome: "rejected", documentId: "d1", pageNumber: 2 } });
+    expect(event).toMatchObject({ model: "vision-x", inputTokens: 2400, outputTokens: 640, metadata: { outcome: "rejected", billable: false, documentId: "d1", pageNumber: 2 } });
     expect(event!.costCents).toBeGreaterThan(0);
     expect(log.mock.calls.filter(([l]) => String(l).startsWith("[ai-usage]") && String(l).includes("model=vision-x"))).toHaveLength(1);
     log.mockRestore();

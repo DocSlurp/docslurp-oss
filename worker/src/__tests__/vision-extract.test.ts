@@ -216,7 +216,7 @@ describe("shouldFailOpenVisionError", () => {
     expect(events).toHaveLength(1);
     expect(events[0]).toMatchObject({
       metric: "page-analysis-attempt", model: "google/gemini-3.1-flash-lite", inputTokens: 2400, outputTokens: 640,
-      metadata: { outcome: "rejected", documentId: "doc-1", pageNumber: 3 },
+      metadata: { outcome: "rejected", billable: false, documentId: "doc-1", pageNumber: 3 },
     });
     expect(events[0]!.costCents).toBeGreaterThan(0);
     expect(state.usageLedger.totals()).toMatchObject({ inputTokens: 2400, outputTokens: 640 });

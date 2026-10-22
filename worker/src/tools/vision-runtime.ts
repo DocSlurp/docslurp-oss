@@ -528,6 +528,9 @@ export function rejectedVisionUsageInput(error: VisionOutputRejectedError, costC
     outputTokens: error.outputTokens,
     metadata: {
       outcome: "rejected",
+      // Our provider spend is recorded, but a page that produced no output is not charged to the customer
+      // (billing.ts zeroes credits for billable=false), matching refunds for undelivered chat turns.
+      billable: false,
       reason: error.message,
       attempts: error.attempts.map((attempt) => ({ ...attempt })),
       usageSource: error.attempts.every((attempt) => attempt.usageSource === "provider") ? "provider" : "estimated",
