@@ -233,6 +233,18 @@ export class VisionOutputRejectedError extends Error {
     super(message);
     this.name = "VisionOutputRejectedError";
   }
+
+  /** Requested model and usage-ledger provider; set by `runVisionRequest` so callers can record the spend. */
+  route?: { model: string; provider: string };
+}
+
+/** The rejection behind `error` (it may be wrapped as a `cause`), whose summed usage was billed but produced no page. */
+export function findVisionOutputRejected(error: unknown): VisionOutputRejectedError | null {
+  for (let cur: unknown = error, depth = 0; cur && depth < 8; depth += 1) {
+    if (cur instanceof VisionOutputRejectedError) return cur;
+    cur = (cur as { cause?: unknown }).cause;
+  }
+  return null;
 }
 
 export interface AttemptSummary {

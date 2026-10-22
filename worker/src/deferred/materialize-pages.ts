@@ -31,7 +31,8 @@ import { embedTextChunks, estimateTokens, type RemoteEmbeddingUsage, type Vector
 import { deleteLanceDbRecords, writeLanceDbRecords } from "../stages/lancedb-writer.js";
 import type { CommandRunner } from "../tools/runner.js";
 import type { ArtifactStore } from "../tools/storage.js";
-import { executeVisionRuntime } from "../tools/vision-runtime.js";
+import { executeVisionRuntime, rejectedVisionUsageInput } from "../tools/vision-runtime.js";
+import { findVisionOutputRejected } from "../tools/vision-stream.js";
 import { isMissingDocumentError } from "../db/missing-document.js";
 import { markPages } from "./page-ledger.js";
 
@@ -302,6 +303,21 @@ export async function materializePageRange(
       if (ocr.text.replace(/\s+/g, "").length === 0) failed.set(page, "empty-page");
       else prepared.set(page, { page, text: ocr.text, ocrCostCents: cost });
     } catch (error) {
+      // A page rejected on every attempt was still billed: record the summed spend and count it against the budget.
+      const rejected = findVisionOutputRejected(error);
+      if (rejected) {
+        const usage = rejectedVisionUsageInput(rejected, rejected.costCents ?? calculateAiUsageCostCents({
+          inputTokens: rejected.inputTokens,
+          outputTokens: rejected.outputTokens,
+          costPer1kInputTokens: deps.config.costPer1kInputTokens,
+          costPer1kOutputTokens: deps.config.costPer1kOutputTokens,
+        }), "vision-runtime");
+        const event = deps.usage.record({
+          ...usage,
+          metadata: { ...usage.metadata, documentId, pageNumber: page, materializedBy: input.reason, sessionId: input.sessionId },
+        });
+        spentCents += event?.costCents ?? usage.costCents;
+      }
       failed.set(page, error instanceof Error ? error.message : String(error));
     }
   });

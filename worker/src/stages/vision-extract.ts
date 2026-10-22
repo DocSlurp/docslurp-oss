@@ -33,7 +33,8 @@ import {
   cleanupTempFile,
   keyFromStorageUri,
 } from "../tools/storage.js";
-import { executeVisionRuntime, visionCall } from "../tools/vision-runtime.js";
+import { executeVisionRuntime, rejectedVisionUsageInput, visionCall } from "../tools/vision-runtime.js";
+import { findVisionOutputRejected } from "../tools/vision-stream.js";
 import { allowHostedCall } from "../lib/privacy-guard.js";
 import { trustedTempDownloadPattern } from "../lib/temp-file-names.js";
 import { maxInt } from "./utils.js";
@@ -953,7 +954,7 @@ export class VisionExtractStage implements Stage {
         return { output, error: null };
       } catch (error) {
         const message = toError(error).message;
-        this.recordFailedVisionAttempt(state, document, vision, page, message);
+        this.recordFailedVisionAttempt(state, document, vision, page, message, error);
         return { output: null, error };
       } finally {
         await cleanupTempFile(imagePath);
@@ -1077,9 +1078,28 @@ export class VisionExtractStage implements Stage {
     vision: VisionConfig,
     page: RasterPageArtifact,
     reason: string,
+    error?: unknown,
   ): void {
     const route = resolveVisionRoute(vision);
-    state.usageLedger.enqueue(
+    // Both attempts of a rejected page were billed: record that spend (one [ai-usage] line) instead of a zero-cost marker.
+    const rejected = findVisionOutputRejected(error);
+    if (rejected) {
+      const costCents = rejected.costCents ?? this.calculateVisionCost({
+        model: route.model, runtime: route.runtime, baseUrl: route.baseUrl,
+        inputTokens: rejected.inputTokens, outputTokens: rejected.outputTokens,
+      });
+      const input = rejectedVisionUsageInput(rejected, costCents, route.model);
+      state.usageLedger.record({
+        ...input,
+        metadata: {
+          ...input.metadata,
+          documentId: document.id,
+          pageNumber: page.pageNumber,
+          rasterArtifactUri: page.artifactUri,
+          runtime: route.runtime,
+        },
+      });
+    } else state.usageLedger.enqueue(
       buildFailedVisionAttemptUsage({
         documentId: document.id,
         pageNumber: page.pageNumber,

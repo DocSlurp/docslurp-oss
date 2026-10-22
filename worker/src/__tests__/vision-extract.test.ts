@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { visionModelCatalog } from "@docslurp/shared";
 
 import {
@@ -9,6 +9,8 @@ import {
 import { buildAdaptiveRoutingDecisionSurface } from "../stages/classify-route.js";
 import { resolveVisionPromptTemplate } from "../tools/vision-runtime.js";
 import { buildSchemaAwareVisionPrompt } from "../tools/vision-runtime.js";
+import { VisionOutputRejectedError } from "../tools/vision-stream.js";
+import { PipelineUsageEventLedger } from "../pipeline/usage-ledger.js";
 import { DocumentArtifactLedger } from "../pipeline/artifact-ledger.js";
 import type { WorkflowState } from "../pipeline/pipeline.js";
 import type { Document } from "../models.js";
@@ -198,6 +200,32 @@ describe("shouldFailOpenVisionError", () => {
         billable: false,
       },
     });
+  });
+
+  it("records the summed spend of a page rejected on every attempt through the usage ledger", () => {
+    const stage = new VisionExtractStage({} as CommandRunner, {} as ArtifactStore,
+      { openAiBaseUrl: "https://api.openai.com/v1", costPer1kInputTokens: 0.01, costPer1kOutputTokens: 0.03 } as Config, {} as never);
+    const record = (stage as unknown as { recordFailedVisionAttempt(...args: unknown[]): void }).recordFailedVisionAttempt.bind(stage);
+    const rejected = new VisionOutputRejectedError("rejected after 2 attempts", [], 2400, 640, 1.5);
+    rejected.route = { model: "google/gemini-3.1-flash-lite", provider: "openrouter" };
+    const state = { usageLedger: new PipelineUsageEventLedger(), pendingPerformance: [] } as unknown as WorkflowState;
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const vision = { target: "remote", modelUri: "llm://openrouter/google/gemini-3.1-flash-lite" };
+    record(state, { id: "doc-1" }, vision, { pageNumber: 3, artifactUri: "s3://bucket/p3.png" }, rejected.message, new Error("wrapped", { cause: rejected }));
+    const events = state.usageLedger.snapshot();
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      metric: "page-analysis-attempt", model: "google/gemini-3.1-flash-lite", inputTokens: 2400, outputTokens: 640,
+      metadata: { outcome: "rejected", documentId: "doc-1", pageNumber: 3 },
+    });
+    expect(events[0]!.costCents).toBeGreaterThan(0);
+    expect(state.usageLedger.totals()).toMatchObject({ inputTokens: 2400, outputTokens: 640 });
+    expect(log.mock.calls.filter(([l]) => String(l).startsWith("[ai-usage]"))).toHaveLength(1);
+    // A plain failure keeps the non-billable zero-cost marker.
+    const plain = { usageLedger: new PipelineUsageEventLedger(), pendingPerformance: [] } as unknown as WorkflowState;
+    record(plain, { id: "doc-1" }, vision, { pageNumber: 4, artifactUri: "x" }, "boom", new Error("boom"));
+    expect(plain.usageLedger.snapshot()).toMatchObject([{ costCents: 0, metadata: { outcome: "failure", billable: false } }]);
+    log.mockRestore();
   });
 
   it("fails open when the remote vision provider is out of quota", () => {

@@ -13,7 +13,7 @@ import {
   visionReasoningParams,
   visionPromptKeyForModel,
 } from "./vision-model-profiles.js";
-import { estimateTokens, runGuardedChatCompletion, type DegenerateSignal } from "./vision-stream.js";
+import { estimateTokens, runGuardedChatCompletion, VisionOutputRejectedError, type DegenerateSignal } from "./vision-stream.js";
 
 /** Image plus transcription tokens for a typical page (observed ~1,850 in / ~510 out on Gemini Flash Lite). */
 const VISION_IMAGE_TOKEN_ESTIMATE = 2_200;
@@ -453,6 +453,15 @@ export async function runVisionRequest(args: {
         estimateCostCents: args.estimateCostCents,
         // Profiles that measured a refusal-free route send refused or filtered pages there on the single retry.
         preferredRetryRoute: contentFilterRetryProvider(args.model),
+      }).catch((error: unknown) => {
+        // Both attempts were billed even though no page came out: tell the caller whom to attribute it to.
+        if (error instanceof VisionOutputRejectedError) {
+          error.route = {
+            model: args.model,
+            provider: isOpenRouter ? "openrouter" : args.runtime === "remote-openai" ? "openai" : "vision-runtime",
+          };
+        }
+        throw error;
       });
       const text = postProcessVisionText(args.model, result.text);
 
@@ -499,6 +508,32 @@ export async function runVisionRequest(args: {
       };
     },
   );
+}
+
+/**
+ * Usage-ledger input for a page whose every attempt was rejected: the provider still billed those calls,
+ * so the spend (summed over attempts) is recorded as a `page-analysis-attempt` rather than lost.
+ * `costCents` is the caller's resolved price (the provider charge when present, else its pricing fallback).
+ */
+export function rejectedVisionUsageInput(error: VisionOutputRejectedError, costCents: number, model: string) {
+  const route = error.route;
+  return {
+    provider: route?.provider ?? "vision-runtime",
+    model: route?.model ?? model,
+    metric: "page-analysis-attempt",
+    amount: 1,
+    unit: "attempt",
+    costCents,
+    inputTokens: error.inputTokens,
+    outputTokens: error.outputTokens,
+    metadata: {
+      outcome: "rejected",
+      reason: error.message,
+      attempts: error.attempts.map((attempt) => ({ ...attempt })),
+      usageSource: error.attempts.every((attempt) => attempt.usageSource === "provider") ? "provider" : "estimated",
+      ...(error.degenerate ? { degenerate: { ...error.degenerate } } : {}),
+    },
+  };
 }
 
 function resolveChatCompletionsUrl(baseUrl: string | null): string {
