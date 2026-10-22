@@ -62,6 +62,15 @@ for (const { src, e, dir, fmt } of imageSources) {
   items.push({ source: `image-from-${src}`, id: e.id, file: path.basename(file), sha256: sha(file), pages: 1, kind: "image", documentClass: e.documentClass, tags: e.tags, reference: e.reference ? path.join(dir, e.reference.path) : null });
 }
 
-const manifest = { schema: "router-e2e-corpus@v1", rule: "development splits only; deterministic sorted selection; no held-out or test items", documents: items.length, pages: items.reduce((n, i) => n + i.pages, 0), byKind: Object.fromEntries([...new Set(items.map((i) => i.kind))].map((k) => [k, { documents: items.filter((i) => i.kind === k).length, pages: items.filter((i) => i.kind === k).reduce((n, i) => n + i.pages, 0) }])), items };
+// Warmup (excluded from results): first calibration-split routing case of tier 1 and tier 4.
+const warmup = [];
+for (const tier of [1, 4]) {
+  const e = entries(routing).filter((x) => x.split === "calibration" && x.tier === tier && x.asset.format === "pdf").sort((a, b) => a.id.localeCompare(b.id))[0];
+  const name = `warmup__${e.id}.pdf`;
+  copyFileSync(path.join(routing, e.asset.path), path.join(out, "files", name));
+  warmup.push({ source: "routing-suite-v1-calibration", id: e.id, file: name, pages: e.pages, kind: "warmup" });
+}
+
+const manifest = { schema: "router-e2e-corpus@v1", warmup, rule: "development splits only; deterministic sorted selection; no held-out or test items", documents: items.length, pages: items.reduce((n, i) => n + i.pages, 0), byKind: Object.fromEntries([...new Set(items.map((i) => i.kind))].map((k) => [k, { documents: items.filter((i) => i.kind === k).length, pages: items.filter((i) => i.kind === k).reduce((n, i) => n + i.pages, 0) }])), items };
 writeFileSync(path.join(out, "corpus.json"), JSON.stringify(manifest, null, 2));
 console.log(JSON.stringify({ documents: manifest.documents, pages: manifest.pages, byKind: manifest.byKind }, null, 2));
