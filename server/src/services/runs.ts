@@ -960,7 +960,23 @@ export async function getRunProgress(
 export interface RunExportManifest {
   runId: string;
   exportedAt: string;
-  artifacts: Array<{ slot: string; uri: string; url: string }>;
+  /**
+   * Each artifact as its slot and a session/key-bound `/v1/files/…` proxy URL.
+   * The raw storage URI (bucket and `<userId>/<runId>/…` key layout) is
+   * deliberately not part of the manifest.
+   */
+  artifacts: Array<{ slot: string; url: string }>;
+}
+
+/** Export entries for a run's artifacts, minus withheld ones, as proxy URLs only. */
+export function runExportArtifacts(
+  artifacts: Record<string, string>,
+  withheld: ReadonlySet<string>,
+): RunExportManifest["artifacts"] {
+  return Object.entries(artifacts)
+    .filter(([, uri]) => !withheld.has(uri))
+    // Session/key-bound proxy URL; the bucket is never exposed (lib/file-urls.ts).
+    .map(([slot, uri]) => ({ slot, url: fileUrlForArtifact(uri).url }));
 }
 
 export async function exportRun(
@@ -970,19 +986,12 @@ export async function exportRun(
   const run = await getRun(runId, userId);
   if (!run) return null;
 
-  const artifacts: RunExportManifest["artifacts"] = [];
   const withheld = await loadWithheldArtifactUrisForRun(run.id);
-
-  for (const [slot, uri] of Object.entries(run.artifacts)) {
-    if (withheld.has(uri)) continue;
-    // Session/key-bound proxy URL; the bucket is never exposed (lib/file-urls.ts).
-    artifacts.push({ slot, uri, url: fileUrlForArtifact(uri).url });
-  }
 
   return {
     runId,
     exportedAt: new Date().toISOString(),
-    artifacts,
+    artifacts: runExportArtifacts(run.artifacts, withheld),
   };
 }
 

@@ -27,6 +27,13 @@ vi.mock("../lib/request-context.js", () => ({
   currentRequestId: currentRequestIdMock
 }));
 
+vi.mock("../lib/file-urls.js", () => ({
+  fileUrlForArtifact: (uri: string) => ({
+    url: `/v1/files/sealed-${Buffer.from(uri).length}/${uri.split("/").pop()}`,
+    expiresAt: "2026-01-01T00:00:00.000Z"
+  })
+}));
+
 vi.mock("../services/billing/credits.js", () => ({
   getAvailableCredits: getAvailableCreditsMock
 }));
@@ -45,6 +52,7 @@ const {
   buildRunProcessingPreview,
   shouldFailStaleProcessingRun,
   listRuns,
+  runExportArtifacts,
   summarizeRunUsageCost,
   summarizeStageResources,
 } = await import("../services/runs.js");
@@ -334,5 +342,24 @@ describe("run resource and cost rollups", () => {
       computeEstimated: true, workerClasses: ["shared-cpu-2x"], regions: ["iad"],
     });
     expect(summarizeRunUsageCost(null).costCents).toBe(0);
+  });
+});
+
+describe("runExportArtifacts", () => {
+  it("returns proxy URLs only, never the raw storage URI or key layout", () => {
+    const artifacts = runExportArtifacts({
+      "doc-1:markdown": "s3://docslurp-artifacts/user-1/run-1/doc-1/document.md",
+      "doc-1:page-1": "s3://docslurp-artifacts/user-1/run-1/doc-1/page-0001.png",
+      "doc-2:markdown": "s3://docslurp-artifacts/user-1/run-1/doc-2/document.md"
+    }, new Set(["s3://docslurp-artifacts/user-1/run-1/doc-2/document.md"]));
+
+    expect(artifacts).toEqual([
+      { slot: "doc-1:markdown", url: expect.stringMatching(/^\/v1\/files\//) },
+      { slot: "doc-1:page-1", url: expect.stringMatching(/^\/v1\/files\//) }
+    ]);
+    const serialized = JSON.stringify(artifacts);
+    expect(serialized).not.toContain("s3://");
+    expect(serialized).not.toContain("docslurp-artifacts");
+    expect(serialized).not.toContain("user-1/run-1");
   });
 });
