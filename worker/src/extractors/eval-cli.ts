@@ -49,7 +49,6 @@ async function main(): Promise<void> {
         prediction = await readFile(outputPath, "utf8");
         return resultFrom(candidate.plan, candidate.label, prediction);
       },
-      async docling() { throw new Error("docling eval executor not implemented"); },
       async liteparse() { throw new Error("liteparse eval executor not implemented"); },
       async graph(candidate, _key, sourcePath) {
         const infoPlan = await runner.pdfInfo(sourcePath);

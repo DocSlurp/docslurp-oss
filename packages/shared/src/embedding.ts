@@ -903,7 +903,7 @@ export const parserPlaybookCatalog: Record<
   "layout-aware": {
     label: "Dynamic",
     description:
-      "Prefer docling/native-pdf; align blocks with parser geometry.",
+      "Prefer kreuzberg/native-pdf; align blocks with parser geometry.",
     est: { costCentsPer100Pages: 10, latencySecPer100Pages: 180 },
     guidance: {
       preferLayoutMarkdown: true,

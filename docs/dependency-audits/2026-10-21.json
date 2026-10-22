@@ -1,0 +1,414 @@
+{
+  "observedAt": "2026-10-22T03:58:00Z",
+  "sources": [
+    "npm registry audit API via pnpm audit",
+    "PyPI via uv pip compile --upgrade",
+    "PyPI advisory service via pip-audit"
+  ],
+  "npmUpdates": [
+    {
+      "package": "docslurp-oss",
+      "dependency": "better-auth",
+      "before": "^1.7.7",
+      "after": "^1.7.12"
+    },
+    {
+      "package": "docslurp-oss",
+      "dependency": "@aws-sdk/client-s3",
+      "before": "^3.1150.0",
+      "after": "^3.1154.0"
+    },
+    {
+      "package": "docslurp-oss",
+      "dependency": "dotenv",
+      "before": "^18.0.7",
+      "after": "^18.0.8"
+    },
+    {
+      "package": "@docslurp/cli",
+      "dependency": "@types/node",
+      "before": "^20.19.43",
+      "after": "^26.6.5"
+    },
+    {
+      "package": "@docslurp/sdk",
+      "dependency": "@types/node",
+      "before": "^20.19.43",
+      "after": "^26.6.5"
+    },
+    {
+      "package": "@docslurp/sdk",
+      "dependency": "react",
+      "before": "19.3.0",
+      "after": "19.3.1"
+    },
+    {
+      "package": "@docslurp/sdk",
+      "dependency": "react-dom",
+      "before": "19.3.0",
+      "after": "19.3.1"
+    },
+    {
+      "package": "@docslurp/shared",
+      "dependency": "@langfuse/otel",
+      "before": "^5.13.1",
+      "after": "^6.0.1"
+    },
+    {
+      "package": "@docslurp/shared",
+      "dependency": "@langfuse/tracing",
+      "before": "^5.13.1",
+      "after": "^6.0.1"
+    },
+    {
+      "package": "@docslurp/shared",
+      "dependency": "ai",
+      "before": "7.0.138",
+      "after": "7.0.148"
+    },
+    {
+      "package": "@docslurp/shared",
+      "dependency": "vitest",
+      "before": "^5.0.4",
+      "after": "^5.0.5"
+    },
+    {
+      "package": "@docslurp/server",
+      "dependency": "@ai-sdk/openai",
+      "before": "4.0.92",
+      "after": "4.0.99"
+    },
+    {
+      "package": "@docslurp/server",
+      "dependency": "@ai-sdk/otel",
+      "before": "^1.0.138",
+      "after": "^1.0.148"
+    },
+    {
+      "package": "@docslurp/server",
+      "dependency": "@aws-sdk/client-s3",
+      "before": "^3.1150.0",
+      "after": "^3.1154.0"
+    },
+    {
+      "package": "@docslurp/server",
+      "dependency": "@aws-sdk/s3-request-presigner",
+      "before": "^3.1150.0",
+      "after": "^3.1154.0"
+    },
+    {
+      "package": "@docslurp/server",
+      "dependency": "@hono/node-server",
+      "before": "^2.1.4",
+      "after": "^2.1.5"
+    },
+    {
+      "package": "@docslurp/server",
+      "dependency": "@mastra/ai-sdk",
+      "before": "^1.11.0",
+      "after": "^1.11.2"
+    },
+    {
+      "package": "@docslurp/server",
+      "dependency": "@mastra/core",
+      "before": "^1.76.0",
+      "after": "^1.79.0"
+    },
+    {
+      "package": "@docslurp/server",
+      "dependency": "@posthog/ai",
+      "before": "^8.13.5",
+      "after": "^8.14.3"
+    },
+    {
+      "package": "@docslurp/server",
+      "dependency": "ai",
+      "before": "7.0.138",
+      "after": "7.0.148"
+    },
+    {
+      "package": "@docslurp/server",
+      "dependency": "better-auth",
+      "before": "^1.7.7",
+      "after": "^1.7.12"
+    },
+    {
+      "package": "@docslurp/server",
+      "dependency": "dotenv",
+      "before": "^18.0.7",
+      "after": "^18.0.8"
+    },
+    {
+      "package": "@docslurp/server",
+      "dependency": "jose",
+      "before": "^6.2.12",
+      "after": "^6.2.13"
+    },
+    {
+      "package": "@docslurp/server",
+      "dependency": "redis",
+      "before": "^5.12.1",
+      "after": "^6.3.0"
+    },
+    {
+      "package": "@docslurp/server",
+      "dependency": "undici",
+      "before": "8.11.2",
+      "after": "8.12.3"
+    },
+    {
+      "package": "@docslurp/server",
+      "dependency": "@ai-sdk/react",
+      "before": "^4.0.141",
+      "after": "^4.0.152"
+    },
+    {
+      "package": "@docslurp/server",
+      "dependency": "typebox",
+      "before": "1.3.37",
+      "after": "1.4.2"
+    },
+    {
+      "package": "@docslurp/server",
+      "dependency": "vitest",
+      "before": "^5.0.4",
+      "after": "^5.0.5"
+    },
+    {
+      "package": "@docslurp/worker",
+      "dependency": "@ai-sdk/anthropic",
+      "before": "4.0.79",
+      "after": "4.0.85"
+    },
+    {
+      "package": "@docslurp/worker",
+      "dependency": "@ai-sdk/openai",
+      "before": "4.0.92",
+      "after": "4.0.99"
+    },
+    {
+      "package": "@docslurp/worker",
+      "dependency": "@aws-sdk/client-s3",
+      "before": "^3.1150.0",
+      "after": "^3.1154.0"
+    },
+    {
+      "package": "@docslurp/worker",
+      "dependency": "ai",
+      "before": "7.0.138",
+      "after": "7.0.148"
+    },
+    {
+      "package": "@docslurp/worker",
+      "dependency": "dotenv",
+      "before": "^18.0.7",
+      "after": "^18.0.8"
+    },
+    {
+      "package": "@docslurp/worker",
+      "dependency": "redis",
+      "before": "^5.12.1",
+      "after": "^6.3.0"
+    },
+    {
+      "package": "@docslurp/worker",
+      "dependency": "@electric-sql/pglite",
+      "before": "0.5.9",
+      "after": "0.5.10"
+    },
+    {
+      "package": "@docslurp/worker",
+      "dependency": "@electric-sql/pglite-pgvector",
+      "before": "0.0.10",
+      "after": "0.0.11"
+    },
+    {
+      "package": "@docslurp/worker",
+      "dependency": "@electric-sql/pglite-socket",
+      "before": "0.2.12",
+      "after": "0.2.13"
+    },
+    {
+      "package": "@docslurp/worker",
+      "dependency": "vitest",
+      "before": "^5.0.4",
+      "after": "^5.0.5"
+    }
+  ],
+  "audits": {
+    "npmBefore": {
+      "vulnerabilities": {
+        "info": 0,
+        "low": 0,
+        "moderate": 1,
+        "high": 0,
+        "critical": 0
+      },
+      "dependencies": 1069,
+      "devDependencies": 0,
+      "optionalDependencies": 0,
+      "totalDependencies": 1069
+    },
+    "npmAfter": {
+      "vulnerabilities": {
+        "info": 0,
+        "low": 0,
+        "moderate": 0,
+        "high": 0,
+        "critical": 0
+      },
+      "dependencies": 1061,
+      "devDependencies": 0,
+      "optionalDependencies": 0,
+      "totalDependencies": 1061
+    },
+    "pythonBase": {
+      "dependencies": 28,
+      "findings": [],
+      "skipped": []
+    },
+    "pythonFallback": {
+      "dependencies": 189,
+      "findings": [
+        {
+          "name": "chromadb",
+          "version": "1.5.9",
+          "advisories": [
+            {
+              "id": "PYSEC-2026-311",
+              "aliases": [
+                "GHSA-f4j7-r4q5-qw2c",
+                "CVE-2026-45829"
+              ],
+              "fix_versions": []
+            },
+            {
+              "id": "PYSEC-2026-311",
+              "aliases": [
+                "GHSA-f4j7-r4q5-qw2c",
+                "CVE-2026-45829"
+              ],
+              "fix_versions": []
+            },
+            {
+              "id": "PYSEC-2026-3814",
+              "aliases": [
+                "GHSA-36p7-vc44-83pf",
+                "CVE-2026-45833"
+              ],
+              "fix_versions": []
+            },
+            {
+              "id": "PYSEC-2026-3815",
+              "aliases": [
+                "CVE-2026-45831",
+                "GHSA-xph7-9rjv-w5fr"
+              ],
+              "fix_versions": []
+            },
+            {
+              "id": "PYSEC-2026-3813",
+              "aliases": [
+                "GHSA-2wm9-hf6c-p5cr",
+                "CVE-2026-45830"
+              ],
+              "fix_versions": []
+            }
+          ]
+        }
+      ],
+      "skipped": [
+        {
+          "name": "torch",
+          "reason": "Dependency not found on PyPI and could not be audited: torch (2.14.1+cpu)"
+        },
+        {
+          "name": "torchvision",
+          "reason": "Dependency not found on PyPI and could not be audited: torchvision (0.29.1+cpu)"
+        }
+      ]
+    },
+    "pythonFull": {
+      "dependencies": 204,
+      "findings": [
+        {
+          "name": "chromadb",
+          "version": "1.5.9",
+          "advisories": [
+            {
+              "id": "PYSEC-2026-311",
+              "aliases": [
+                "GHSA-f4j7-r4q5-qw2c",
+                "CVE-2026-45829"
+              ],
+              "fix_versions": []
+            },
+            {
+              "id": "PYSEC-2026-311",
+              "aliases": [
+                "GHSA-f4j7-r4q5-qw2c",
+                "CVE-2026-45829"
+              ],
+              "fix_versions": []
+            },
+            {
+              "id": "PYSEC-2026-3814",
+              "aliases": [
+                "CVE-2026-45833",
+                "GHSA-36p7-vc44-83pf"
+              ],
+              "fix_versions": []
+            },
+            {
+              "id": "PYSEC-2026-3815",
+              "aliases": [
+                "CVE-2026-45831",
+                "GHSA-xph7-9rjv-w5fr"
+              ],
+              "fix_versions": []
+            },
+            {
+              "id": "PYSEC-2026-3813",
+              "aliases": [
+                "GHSA-2wm9-hf6c-p5cr",
+                "CVE-2026-45830"
+              ],
+              "fix_versions": []
+            }
+          ]
+        }
+      ],
+      "skipped": [
+        {
+          "name": "torch",
+          "reason": "Dependency not found on PyPI and could not be audited: torch (2.14.1+cpu)"
+        },
+        {
+          "name": "torchvision",
+          "reason": "Dependency not found on PyPI and could not be audited: torchvision (0.29.1+cpu)"
+        }
+      ]
+    },
+    "pythonCpu": {
+      "dependencies": 2,
+      "findings": [],
+      "skipped": []
+    }
+  },
+  "compatibilityHolds": {
+    "typescript": "6.0.3: Astro check supports TypeScript 5/6, not 7",
+    "openai": "6.49.0: @posthog/ai 8.14.3 requires OpenAI 6",
+    "opentelemetry": "2.12/0.223/API 1.9.1: Langfuse 6 requires SDK 2; broad exporter peers constrained to this family"
+  },
+  "securityChanges": [
+    "Remove sprintf-js by targeting mammoth>argparse 2; Mammoth CLI --help passes",
+    "Remove production Docling registration, discovery and vendor bundle; keep external benchmark command for historical comparisons",
+    "Pillow 13.0.0 in every Python lock; base/fallback/full dependency resolution succeeds"
+  ],
+  "limitations": [
+    "ChromaDB 1.5.9 has four distinct advisories without published fixes (pip-audit repeats one PYSEC ID); DocSlurp uses HttpClient/PersistentClient, not the Chroma HTTP server",
+    "Torch CPU wheel local-version suffixes are not recognized by pip-audit; matching upstream torch/torchvision versions were audited separately with no findings",
+    "Existing content-addressed Unstructured bundles are unchanged and must be rebuilt/published separately to refresh their embedded packages",
+    "No full ML environment installation, model download, production deployment, or hosted quality evaluation was run"
+  ]
+}
