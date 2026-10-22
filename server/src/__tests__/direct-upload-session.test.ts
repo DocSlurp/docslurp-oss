@@ -6,7 +6,7 @@ const getUploadedObjectMetadata = vi.hoisted(() => vi.fn());
 const deleteUploadedObject = vi.hoisted(() => vi.fn(async () => {}));
 const createMultipartUpload = vi.hoisted(() => vi.fn());
 vi.mock("../lib/storage.js", async (importOriginal) => ({ ...await importOriginal<typeof import("../lib/storage.js")>(), signSingleUploadPut, createMultipartUpload, getUploadedObjectMetadata, deleteUploadedObject }));
-vi.mock("../db.js", () => ({ sql: sqlMock }));
+vi.mock("../db.js", async (importOriginal) => ({ ...await importOriginal<typeof import("../db.js")>(), sql: sqlMock }));
 
 import {
   createDirectUploadSession,

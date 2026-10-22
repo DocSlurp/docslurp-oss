@@ -16,7 +16,6 @@ import { CAPABILITY_MAX_TOKEN_CHARS, CAPABILITY_MAX_TTL_SECONDS, sealCapabilityT
 import { actorHasAnyApiKeyScope, apiKeyCanUseWorkspace, getRequestActor } from "../lib/request-actor.js";
 import { acceptApiKeys } from "../lib/route-auth.js";
 import { ensureDefaultWorkspace, getWorkspace } from "../services/workspaces.js";
-import { canEditWorkspace, getWorkspaceAccess } from "../services/organizations.js";
 
 const bodySchema = z.object({
   workspaceIds: z.array(z.string().min(1).max(200)).min(1).max(20).optional(),
@@ -59,16 +58,6 @@ export const capabilitiesRoutes = new Hono().post("/", zValidator("json", bodySc
     const workspace = await getWorkspace(workspaceId, actor.userId);
     const allowed = workspace && (actor.type !== "apiKey" || apiKeyCanUseWorkspace(actor.apiKey, workspace));
     if (!workspace || !allowed) return apiErrorResponse(c, 404, "workspace_not_found", "Workspace not found");
-    // A capability can widen materialization (a real org cost), so a session
-    // must be able to edit the workspace to mint one. API keys are already
-    // scope-gated and narrowed against the key's own policy.
-    // Security finding SEC-2026-10-08.
-    if (actor.type === "session") {
-      const access = await getWorkspaceAccess(workspaceId, actor.userId);
-      if (!access || !canEditWorkspace(access, actor.userId)) {
-        return apiErrorResponse(c, 403, "forbidden", "Workspace edit access is required to mint a search capability", { category: "capability_forbidden" });
-      }
-    }
     if (tokenOrgId && workspace.orgId !== tokenOrgId) {
       return apiErrorResponse(c, 400, "invalid_request", "A capability covers one organization", { category: "capability_scope" });
     }
