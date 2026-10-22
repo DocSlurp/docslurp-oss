@@ -98,4 +98,50 @@ describe("vision model profiles", () => {
     expect(imageUrl.detail).toBeUndefined();
     expect([meta.width, meta.height]).toEqual([1530, 1980]);
   });
+
+  it("resends a content-filtered GPT-6 Luna page to the pinned retry endpoints and bills both calls", async () => {
+    const bodies: Array<Record<string, any>> = [];
+    vi.stubGlobal("fetch", vi.fn(async (_url: string, init: RequestInit) => {
+      bodies.push(JSON.parse(String(init.body)));
+      const filtered = bodies.length === 1;
+      return new Response(JSON.stringify(filtered
+        ? { provider: "OpenAI", choices: [{ message: { content: "Partial" }, finish_reason: "content_filter" }], usage: { prompt_tokens: 400, completion_tokens: 0, cost: 0.00004 } }
+        : { provider: "Amazon Bedrock", choices: [{ message: { content: "# Full page" }, finish_reason: "stop" }], usage: { prompt_tokens: 2000, completion_tokens: 600, cost: 0.00055 } }),
+      { status: 200, headers: { "content-type": "application/json" } });
+    }));
+    const imagePath = await pngPage(800, 1000);
+    const result = await executeVisionRuntime({
+      imagePath,
+      outputPath: `${imagePath}.json`,
+      vision: visionConfigSchema.parse({ modelUri: `llm://openrouter/${LUNA}` }),
+      cfg: { openRouterApiKey: "or-key", openAiApiKey: "", openAiBaseUrl: "https://api.openai.com/v1" } as Config,
+      runner: new CommandRunner(),
+      privacyMode: "standard",
+    });
+    expect(bodies).toHaveLength(2);
+    expect(bodies[0]!.provider).toBeUndefined();
+    expect(bodies[1]!.provider).toEqual({ order: visionModelProfile(LUNA)!.contentFilterRetryProviders, allow_fallbacks: false });
+    expect(result).toMatchObject({ text: "# Full page", finishReason: "stop", inputTokens: 2400, outputTokens: 600 });
+    expect(result.costCents).toBeCloseTo(0.059, 10);
+  });
+
+  it("does not resend content-filtered pages for unprofiled models", async () => {
+    let calls = 0;
+    vi.stubGlobal("fetch", vi.fn(async () => {
+      calls += 1;
+      return new Response(JSON.stringify({ choices: [{ message: { content: "Partial" }, finish_reason: "content_filter" }], usage: { prompt_tokens: 400, completion_tokens: 0, cost: 0.00004 } }),
+        { status: 200, headers: { "content-type": "application/json" } });
+    }));
+    const imagePath = await pngPage(800, 1000);
+    const result = await executeVisionRuntime({
+      imagePath,
+      outputPath: `${imagePath}.json`,
+      vision: visionConfigSchema.parse({ modelUri: "llm://openrouter/google/gemini-3.1-flash-lite" }),
+      cfg: { openRouterApiKey: "or-key", openAiApiKey: "", openAiBaseUrl: "https://api.openai.com/v1" } as Config,
+      runner: new CommandRunner(),
+      privacyMode: "standard",
+    });
+    expect(calls).toBe(1);
+    expect(result.finishReason).toBe("content_filter");
+  });
 });

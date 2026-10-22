@@ -11,8 +11,13 @@ export interface VisionModelProfile {
   imageDetail?: "auto" | "low" | "high";
   /** Downscale page images whose longer side exceeds this many pixels before sending them. */
   maxImageLongSide?: number;
-  /** Strip a ```markdown / ```md fence that wraps the whole transcription (seen on ~1 in 2,000 Luna pages). */
+  /** Strip a ```markdown / ```md fence that wraps the whole transcription (rare on Luna). */
   unwrapMarkdownFence?: boolean;
+  /**
+   * OpenRouter endpoints (pinned, no fallbacks) to resend a page to when the first endpoint's output
+   * filter stops it (`finish_reason: content_filter`). Filters differ per host for the same model.
+   */
+  contentFilterRetryProviders?: readonly string[];
 }
 
 /** The generic default template key; a per-model `defaultPrompt` replaces only this. */
@@ -21,7 +26,10 @@ export const GENERIC_VISION_PROMPT_KEY = "<OCR>";
 export const VISION_MODEL_PROFILES: Readonly<Record<string, VisionModelProfile>> = {
   // 2026-10-21 tuning (tune split, 68 pages x 2): the LaTeX/table template lifts math and content F1;
   // detail "high" plus a 1,600 px long side cuts image tokens ~20% at equal quality (1,280 px lost math).
-  "openai/gpt-6-luna": { defaultPrompt: "page-markdown-latex", imageDetail: "high", maxImageLongSide: 1_600, unwrapMarkdownFence: true },
+  "openai/gpt-6-luna": { defaultPrompt: "page-markdown-latex", imageDetail: "high", maxImageLongSide: 1_600, unwrapMarkdownFence: true,
+    // OpenAI's output filter deterministically stops some ordinary published pages (corporate filings,
+    // government guidance) mid-page; Bedrock and Azure US transcribed them. Bedrock lists $0.11/$0.55 per M.
+    contentFilterRetryProviders: ["amazon-bedrock/us-east-1", "azure/us"] },
 };
 
 export function visionModelProfile(model: string | undefined): VisionModelProfile | undefined {
