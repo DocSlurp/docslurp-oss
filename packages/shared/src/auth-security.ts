@@ -107,10 +107,12 @@ export function createBetterAuthSecurityOptions(env: NodeJS.ProcessEnv) {
       expiresIn: 60 * 60 * 24 * 7,
       updateAge: 60 * 60 * 24,
       freshAge: 60 * 60,
+      // A cached `session_data` cookie authorizes on its own until it expires, so
+      // a revoked or signed-out session would keep working on another device for
+      // the cache lifetime (SEC-2026-10-PROD-15). Every request checks the
+      // session row instead.
       cookieCache: {
-        enabled: true,
-        maxAge: 60 * 5,
-        strategy: "jwe" as const
+        enabled: false
       }
     },
     rateLimit: {
