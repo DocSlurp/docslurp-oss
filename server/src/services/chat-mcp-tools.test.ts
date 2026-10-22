@@ -3,7 +3,7 @@ import type { McpDispatch } from "../lib/mcp-http.js";
 import { CHAT_AGENT_LIMIT_DEFAULTS } from "@docslurp/shared";
 import { asSchema } from "ai";
 import { createChatMcpTools, evidencePages, TOOL_DEADLINE_RESULT } from "./chat-mcp-tools.js";
-import { mcpManifest, uploadStatusInput } from "./mcp-catalog.js";
+import { mcpManifest, uploadStatusInput, mediaEvidenceInput } from "./mcp-catalog.js";
 import { searchInputSchema, batchSearchInputSchema, workspaceChatInputSchema } from "../lib/search-input.js";
 import { currentSearchSignal } from "../search/query-bounds.js";
 import { currentChatAgentSignal } from "../lib/chat-agent-context.js";
@@ -24,6 +24,7 @@ describe("chat MCP tools", () => {
     ["search", { queries: [{ q: "question", workspace: "foreign", workspaceId: "legacy" }] }, batchSearchInputSchema],
     ["chat", { q: "question", workspace: "foreign", workspaceId: "legacy" }, workspaceChatInputSchema],
     ["getUploadStatus", { workspace: "foreign", workspaceId: "legacy" }, uploadStatusInput],
+    ["getMediaEvidence", { documentId: "video", workspace: "foreign", workspaceId: "legacy" }, mediaEvidenceInput],
   ] as const)("dispatches %s with valid MCP arguments pinned to the selected workspace", async (name, input, schema) => {
     const t = setup([name]);
     await t.execute(name, input);

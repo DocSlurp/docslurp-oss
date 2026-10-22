@@ -35,6 +35,11 @@ export const uploadStatusInput = z.object({
   runId: z.string().trim().min(1).max(128).optional(),
   documentIds: z.array(z.string().min(1).max(128)).max(100).optional(),
 }).strict();
+export const mediaEvidenceInput = z.object({
+  workspace: workspaceRef,
+  documentId: z.string().min(1).max(128),
+  offset: z.number().int().min(0).max(10_000_000).default(0).describe("Character offset from nextOffset; omit for the beginning."),
+}).strict();
 export const fullIndexInput = z.object({
   workspace: workspaceRef,
   documentIds: z.array(z.string().min(1)).max(500).optional().describe("Only these documents; omit to index every remaining page in the workspace."),
@@ -120,6 +125,9 @@ export function mcpTools(baseUrl: string): McpTool[] {
     { id: "getUploadStatus", title: "Get upload status", scopes: ["search", "ingest"], annotations: READ_ONLY,
       description: "Check uploaded files and ingestion progress in a workspace, optionally for a runId returned by upload. Reports searchable pages, failures, costs and processing speed without AI calls. Use before search or chat when files are still processing.",
       inputSchema: toolInputJsonSchema(uploadStatusInput) },
+    { id: "getMediaEvidence", title: "Read video and audio evidence", scopes: ["search"], annotations: READ_ONLY,
+      description: "Read an indexed video or audio document's extracted transcript, timestamped frame descriptions and media summary. Use a documentId from getUploadStatus or search. Returns cited text and nextOffset for bounded continuation; does not run new AI or play raw video. Use this before claiming you cannot inspect an uploaded video. One logical page can contain many sampled frames.",
+      inputSchema: toolInputJsonSchema(mediaEvidenceInput) },
     { id: "suggestQueries", title: "Suggest queries", scopes: ["search"], annotations: READ_ONLY,
       description: "Read prior queries and suggestions without AI calls.",
       inputSchema: toolInputJsonSchema(suggestQueriesInput) },
