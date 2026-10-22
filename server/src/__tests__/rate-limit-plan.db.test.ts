@@ -27,20 +27,18 @@ beforeEach(async () => {
   await sql`delete from org_memberships`;
   await sql`delete from organizations`;
   await sql`
-    insert into organizations(id, name, slug, created_by_user_id, plan_id, subscription_status, past_due_since) values
-      ('free', 'Free', 'free', 'u1', 'free', 'none', null),
-      ('gold', 'Gold', 'gold', 'u1', 'gold', 'active', null),
-      ('grace', 'Grace', 'grace', 'u1', 'silver', 'past_due', now() - interval '2 days'),
-      ('lapsed', 'Lapsed', 'lapsed', 'u1', 'silver', 'past_due', now() - interval '9 days')
+    insert into organizations(id, name, slug, created_by_user_id, funded_at) values
+      ('free', 'Free', 'free', 'u1', null),
+      ('gold', 'Gold', 'gold', 'u1', now()),
+      ('lapsed', 'Lapsed', 'lapsed', 'u1', null)
   `;
   await sql`insert into org_memberships(org_id, user_id, role) values ('free', 'u1', 'owner'), ('gold', 'u1', 'member'), ('free', 'u2', 'member'), ('lapsed', 'u2', 'owner')`;
 });
 
 describe("rate-limit plan lookup", () => {
-  it("resolves an organization's plan, honoring the past-due grace", async () => {
+  it("gives funded organizations the paid table and starter organizations the free table", async () => {
     expect(await plan.orgRateLimitProfile("free")).toBe("free");
     expect(await plan.orgRateLimitProfile("gold")).toBe("paid");
-    expect(await plan.orgRateLimitProfile("grace")).toBe("paid");
     expect(await plan.orgRateLimitProfile("lapsed")).toBe("free");
     expect(await plan.orgRateLimitProfile("missing")).toBe("free");
   });

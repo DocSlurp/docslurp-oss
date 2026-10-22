@@ -123,7 +123,7 @@ describe("Usage Event ledger", () => {
     expect(insertedMetadata(withoutKey)).not.toHaveProperty("apiKeyId");
   });
 
-  it("marks up provider cost once and stamps cross-workspace scope", async () => {
+  it("records provider cost without a customer charge and stamps cross-workspace scope", async () => {
     vi.spyOn(console, "log").mockImplementation(() => undefined);
 
     await recordUsageEvent({
@@ -141,15 +141,15 @@ describe("Usage Event ledger", () => {
     });
 
     const [insert] = usageInserts();
-    expect(insert).toContain(8.4);
+    expect(insert).not.toContain(8.4);
     expect(insert).toContain(null); // run_id
     expect(insertedMetadata(insert)).toEqual({
       feature: "chat",
       orgId: "org-1",
       workspaceIds: ["ws-1", "ws-2"],
       providerCostCents: 7,
-      aiMarkupPercent: 20,
-      creditRateCard: "2026-10.3",
+      billable: false,
+      costRole: "provider",
     });
   });
 
@@ -254,7 +254,7 @@ describe("Usage Event ledger", () => {
     expect(ledger.events()).toHaveLength(1);
   });
 
-  it("never records a priced model's tokens at zero cost", async () => {
+  it("never records a priced model's tokens at zero provider cost", async () => {
     vi.spyOn(console, "log").mockImplementation(() => undefined);
     const { SEARCH_OPENROUTER_MODEL } = await import("../lib/ai.js");
     const priced = [
@@ -274,7 +274,9 @@ describe("Usage Event ledger", () => {
     expect(inserts).toHaveLength(priced.length);
     for (const call of inserts) {
       expect(Number(call[10]) + Number(call[11]), String(call[5])).toBeGreaterThan(0);
-      expect(Number(call[9]), String(call[5])).toBeGreaterThan(0);
+      // Customers pay price-card units; the provider cost is kept for our own reports.
+      expect(Number(call[9]), String(call[5])).toBe(0);
+      expect(Number(insertedMetadata(call).providerCostCents), String(call[5])).toBeGreaterThan(0);
     }
   });
 });

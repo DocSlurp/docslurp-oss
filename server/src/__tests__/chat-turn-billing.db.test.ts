@@ -1,3 +1,5 @@
+import { randomUUID } from "node:crypto";
+
 import postgres from "postgres";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -47,22 +49,26 @@ beforeEach(async () => {
   await sql`delete from usage_events`;
   await sql`delete from workspaces`;
   await sql`delete from organizations`;
-  // Free: a prepaid balance only. Paid (silver): an included allowance, no prepaid.
-  await sql`insert into organizations(id, name, slug, created_by_user_id, plan_id, credit_balance_cents)
-    values (${FREE}, 'Free', 'free', 'u1', 'free', 1000)`;
-  await sql`insert into organizations(id, name, slug, created_by_user_id, plan_id, credit_balance_cents, included_credits_remaining, included_credits_granted)
-    values (${PAID}, 'Paid', 'paid', 'u1', 'silver', 0, 5000, 5000)`;
+  // A starter org and a funded org (one prepaid balance each).
+  await sql`insert into organizations(id, name, slug, created_by_user_id, credit_balance_cents)
+    values (${FREE}, 'Free', 'free', 'u1', 1000)`;
+  await sql`insert into organizations(id, name, slug, created_by_user_id, credit_balance_cents, funded_at)
+    values (${PAID}, 'Paid', 'paid', 'u1', 5000, now())`;
   for (const orgId of [FREE, PAID]) {
     await sql`insert into workspaces(id, org_id, user_id, name) values (${workspaceOf(orgId)}, ${orgId}, 'u1', 'W')`;
   }
 });
 
-/** One completed agent step: provider cost 10 cents. */
-function step(orgId: string) {
-  return usage.recordUsageEvent({
+/**
+ * One billable charge in the turn (a chat answer unit, 12 credits) that cost
+ * us 10 cents at the provider. Provider AI events themselves bill 0 credits.
+ */
+function step(orgId: string, client?: typeof sql) {
+  return usage.recordUnitCharge({
     userId: "u1",
     scope: { orgId, workspaceId: workspaceOf(orgId), sessionId: "chat-session" },
-    usage: { provider: "openrouter", model: "test/model", metric: "workspace-chat-tools", inputTokens: 1000, outputTokens: 200, costCents: 10 },
+    charge: { id: randomUUID(), metric: "chat-answer", amount: 1, unit: "answer", credits: 12, metadata: { providerCostCents: 10 } },
+    ...(client ? { client } : {}),
   });
 }
 
@@ -71,9 +77,9 @@ async function available(orgId: string) {
 }
 
 async function pools(orgId: string) {
-  const [row] = await sql<{ included: string; prepaid: string }[]>`
-    select included_credits_remaining::text as included, credit_balance_cents::text as prepaid from organizations where id = ${orgId}`;
-  return { included: Number(row!.included), prepaid: Number(row!.prepaid) };
+  const [row] = await sql<{ prepaid: string; funded: boolean }[]>`
+    select credit_balance_cents::text as prepaid, funded_at is not null as funded from organizations where id = ${orgId}`;
+  return { prepaid: Number(row!.prepaid), funded: row!.funded };
 }
 
 async function turnEvents(turnId: string) {
@@ -87,14 +93,14 @@ async function turnEventIds(turnId: string) {
 }
 
 async function refundGrants() {
-  return await sql<{ external_id: string; credits: string; pool: string; org_id: string }[]>`
-    select external_id, credits::text, pool, org_id from credit_grants where source = 'adjustment' order by created_at`;
+  return await sql<{ external_id: string; credits: string; source: string; org_id: string }[]>`
+    select external_id, credits::text, source, org_id from credit_grants where source = 'refund' order by created_at`;
 }
 
 describe.each([
-  { plan: "free", orgId: FREE, refundPool: "prepaid" },
-  { plan: "paid", orgId: PAID, refundPool: "included" },
-])("chat turn billing on the $plan plan", ({ orgId, refundPool }) => {
+  { account: "starter", orgId: FREE },
+  { account: "funded", orgId: PAID },
+])("chat turn billing for a $account org", ({ orgId }) => {
   it("charges a delivered turn", async () => {
     const before = await available(orgId);
     const turn = billing.beginChatTurn();
@@ -144,7 +150,7 @@ describe.each([
     expect(events.every((event) => event.metadata.billable === false)).toBe(true);
   });
 
-  it("grants back a failed turn's already-flushed debits once, into the pool they came from", async () => {
+  it("grants back a failed turn's already-flushed debits once, without funding the org", async () => {
     const start = await pools(orgId);
     const turn = billing.beginChatTurn();
     await turn.run(async () => { await step(orgId); });
@@ -155,11 +161,11 @@ describe.each([
     const result = await turn.failed("timeout");
 
     expect(result.refunded).toBe(true);
-    expect(charged).toBeLessThan(start.included + start.prepaid);
+    expect(charged).toBeLessThan(start.prepaid);
     expect(await pools(orgId)).toEqual(start);
     const grants = await refundGrants();
     expect(grants).toHaveLength(1);
-    expect(grants[0]).toMatchObject({ pool: refundPool, org_id: orgId });
+    expect(grants[0]).toMatchObject({ source: "refund", org_id: orgId });
     expect(grants[0]!.external_id).toMatch(new RegExp(`^chat-turn-refund:${turn.id}:${orgId}:[0-9a-f]{16}$`));
     expect(Number(grants[0]!.credits)).toBeCloseTo(result.creditCents / 2, 6);
   });
@@ -219,7 +225,6 @@ describe.each([
   });
 
   it("refunds a billable step whose write is still in flight when the turn fails", async () => {
-    // Warm the plan cache (outside any turn) so the step is priced and stamped before its insert runs.
     await step(orgId);
     const before = await available(orgId);
     const turn = billing.beginChatTurn();
@@ -267,12 +272,7 @@ describe.each([
     const insertDone = new Promise<void>((resolve) => { inserted = resolve; });
     // A Search Session flushes its usage inside its snapshot transaction (search/session.ts).
     const write = turn.run(() => context.trackCurrentChatTurnWrite(sql.begin(async (tx) => {
-      await usage.recordUsageEvent({
-        client: tx as unknown as typeof sql,
-        userId: "u1",
-        scope: { orgId, workspaceId: workspaceOf(orgId), sessionId: "search-session" },
-        usage: { provider: "openrouter", model: "test/model", metric: "workspace-chat-tools", inputTokens: 1000, outputTokens: 200, costCents: 10 },
-      });
+      await step(orgId, tx as unknown as typeof sql);
       inserted();
       await committed;
     })));
@@ -300,8 +300,8 @@ describe.each([
     // Simulate a grant that already holds this refund's id (it can only come from an earlier refund of these events).
     const { createHash } = await import("node:crypto");
     const hash = createHash("sha256").update([...eventIds].sort().join(",")).digest("hex").slice(0, 16);
-    await sql`insert into credit_grants (id, org_id, source, external_id, credits, pool)
-      values (${grantId!.id}, ${orgId}, 'adjustment', ${`chat-turn-refund:${turn.id}:${orgId}:${hash}`}, 0, 'prepaid')`;
+    await sql`insert into credit_grants (id, org_id, source, external_id, credits)
+      values (${grantId!.id}, ${orgId}, 'refund', ${`chat-turn-refund:${turn.id}:${orgId}:${hash}`}, 0)`;
 
     await expect(billing.refundChatTurn({ turnId: turn.id, eventIds, reason: "error" })).rejects.toThrow(/grant already exists/);
     expect((await turnEvents(turn.id)).every((event) => event.costCents > 0)).toBe(true);

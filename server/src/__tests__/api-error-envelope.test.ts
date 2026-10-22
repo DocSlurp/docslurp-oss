@@ -97,7 +97,7 @@ describe("app-level error handler", () => {
   });
 });
 
-describe("billing and upgrade links on 402", () => {
+describe("billing links on 402", () => {
   beforeEach(() => {
     vi.stubEnv("STRIPE_SECRET_KEY", "sk_test_links");
     vi.stubEnv("APP_URL", "https://docslurp.io/");
@@ -122,28 +122,30 @@ describe("billing and upgrade links on 402", () => {
   it("adds details.links, a Link header and copy that says where to buy credits", async () => {
     const response = await app().request("/v1/spend");
     expect(response.status).toBe(402);
-    expect(response.headers.get("Link")).toContain('<https://docslurp.io/pricing>; rel="payment"');
+    expect(response.headers.get("Link")).toContain('<https://docslurp.io/app/billing>; rel="payment"');
+    expect(response.headers.get("Link")).not.toContain("/pricing");
     const body = await response.json();
     expect(apiErrorEnvelopeSchema.safeParse(body).success).toBe(true);
     expect(body).toEqual({ error: {
       code: "credit_exhausted",
-      message: "Your organization is out of credits. Buy credits or upgrade your plan at https://docslurp.io/app/billing.",
+      message: "Your organization is out of credits. Buy credits at https://docslurp.io/app/billing#bl-topup, or turn on auto top-up at https://docslurp.io/app/billing#bl-auto-topup.",
       details: { links: {
         billing: "https://docslurp.io/app/billing",
         buyCredits: "https://docslurp.io/app/billing#bl-topup",
-        upgrade: "https://docslurp.io/pricing",
-        docs: "https://docslurp.io/docs/http#credits-budgets-and-upgrades",
+        autoTopUp: "https://docslurp.io/app/billing#bl-auto-topup",
+        docs: "https://docslurp.io/docs/http#credits-and-budgets",
       } },
       requestId: "req-links",
     } });
   });
 
-  it("links budget pauses to billing and plan gates to the upgrade", async () => {
+  it("links budget pauses and entitlement errors to billing, never to an upgrade", async () => {
     const budget = await (await app().request("/v1/budget")).json();
     expect(budget.error.message).toBe(`${PUBLIC_ERROR_MESSAGES.budgetPaused} Review spend and budgets at https://docslurp.io/app/billing.`);
-    expect(budget.error.details.links).toEqual({ billing: "https://docslurp.io/app/billing", docs: "https://docslurp.io/docs/http#credits-budgets-and-upgrades" });
+    expect(budget.error.details.links).toEqual({ billing: "https://docslurp.io/app/billing", docs: "https://docslurp.io/docs/http#credits-and-budgets" });
     const versions = await (await app().request("/v1/versions")).json();
-    expect(versions.error).toMatchObject({ code: "plan_not_entitled", details: { category: "upgrade_required", links: { upgrade: "https://docslurp.io/pricing" } } });
+    expect(versions.error).toMatchObject({ code: "plan_not_entitled", details: { category: "upgrade_required", links: { billing: "https://docslurp.io/app/billing" } } });
+    expect(versions.error.details.links.upgrade).toBeUndefined();
     const fullIndex = await (await app().request("/v1/full-index")).json();
     expect(fullIndex.error).toMatchObject({ code: "payment_required", details: { links: { buyCredits: "https://docslurp.io/app/billing#bl-topup" } } });
   });
@@ -153,12 +155,12 @@ describe("billing and upgrade links on 402", () => {
     expect(mcp.status).toBe(402);
     expect(await mcp.json()).toMatchObject({
       code: "credit_exhausted",
-      error: "Your organization is out of credits. Buy credits or upgrade your plan at https://docslurp.io/app/billing.",
-      links: { upgrade: "https://docslurp.io/pricing" },
+      error: "Your organization is out of credits. Buy credits at https://docslurp.io/app/billing#bl-topup, or turn on auto top-up at https://docslurp.io/app/billing#bl-auto-topup.",
+      links: { buyCredits: "https://docslurp.io/app/billing#bl-topup", autoTopUp: "https://docslurp.io/app/billing#bl-auto-topup" },
     });
     const openai = await app().request("/v1/chat/completions", { method: "POST" });
     expect(await openai.json()).toMatchObject({ error: {
-      message: "Your organization is out of credits. Buy credits or upgrade your plan at https://docslurp.io/app/billing.",
+      message: "Your organization is out of credits. Buy credits at https://docslurp.io/app/billing.",
       code: "credit_exhausted", links: { billing: "https://docslurp.io/app/billing" },
     } });
   });

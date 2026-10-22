@@ -28,7 +28,7 @@ const status = (overrides: Partial<Parameters<typeof spendBlockReason>[0] & obje
 });
 
 describe("spend admission rule", () => {
-  const noReserve = resolveChatCreditReserveConfig({ CHAT_CREDIT_RESERVE_CREDITS: "0", CHAT_CREDIT_RESERVE_FREE_CREDITS: "0" });
+  const noReserve = resolveChatCreditReserveConfig({ CHAT_CREDIT_RESERVE_CREDITS: "0", CHAT_CREDIT_RESERVE_STARTER_CREDITS: "0" });
 
   it("allows spend while available credits exceed reservations and nothing is paused", () => {
     expect(spendBlockReason(status(), "job", noReserve)).toBeNull();
@@ -42,7 +42,7 @@ describe("spend admission rule", () => {
   });
 
   it("keeps the chat reserve away from jobs: $1 for starter orgs, $3 for funded orgs", () => {
-    expect(config).toMatchObject({ freeReserveCredits: 100, paidReserveCredits: 300, freeOverdraftCredits: 100, paidOverdraftCredits: 300 });
+    expect(config).toMatchObject({ starterReserveCredits: 100, fundedReserveCredits: 300, starterOverdraftCredits: 100, fundedOverdraftCredits: 300 });
     expect(spendBlockReason(status({ available: 100 }), "job", config)?.code).toBe("credit_exhausted");
     expect(spendBlockReason(status({ available: 100.5 }), "job", config)).toBeNull();
     expect(spendBlockReason(status({ available: 150, reserved: 50 }), "job", config)?.code).toBe("credit_exhausted");

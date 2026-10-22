@@ -538,13 +538,16 @@ describe("chatWorkspace", () => {
     const usageInserts = sqlMock.mock.calls.filter(([strings]) =>
       Array.isArray(strings) && strings.join(" ").includes("insert into usage_events"),
     );
-    expect(usageInserts).toHaveLength(2);
+    expect(usageInserts).toHaveLength(3);
     expect(usageInserts.map((call) => [call[6], call[10], call[11]])).toEqual([
       ["embed-query", 7, 0],
       ["workspace-chat", 10, 4],
+      // The billable unit: one chat answer at its model tier (provider events above bill 0).
+      ["chat-answer", 0, 0],
     ]);
-    // Both search and chat spend are stamped with the org scope.
-    for (const call of usageInserts) {
+    expect(JSON.parse(String(usageInserts[2]![12]))).toMatchObject({ billable: true, unitCharge: true, workspaceId: "ws-1" });
+    // Both search and chat provider spend are stamped with the org scope.
+    for (const call of usageInserts.slice(0, 2)) {
       expect(JSON.parse(String(call[12]))).toMatchObject({
         workspaceId: "ws-1",
         orgId: "org-1",
