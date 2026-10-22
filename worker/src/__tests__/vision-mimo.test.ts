@@ -7,8 +7,17 @@ import { visionConfigSchema } from "@docslurp/shared";
 
 import type { Config } from "../config.js";
 import { CommandRunner } from "../tools/runner.js";
-import { MIMO_TRANSCRIPTION_PROMPT, MIMO_VISION_MODEL, mimoOpenRouterParams, mimoVisionPrompt, normalizeMimoMathDelimiters, postProcessMimoTranscription, mimoMaxOutputTokens } from "../tools/vision-model-mimo.js";
+import { normalizeMarkdownMathDelimiters } from "../tools/vision-math-delimiters.js";
+import {
+  MARKDOWN_TRANSCRIPTION_VISION_PROMPT,
+  openRouterProviderParams,
+  postProcessVisionText,
+  visionOutputCapForModel,
+  visionPromptKeyForModel,
+} from "../tools/vision-model-profiles.js";
 import { executeVisionRuntime, visionPromptTemplates } from "../tools/vision-runtime.js";
+
+const MIMO_VISION_MODEL = "xiaomi/mimo-v2.6-flash";
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -36,30 +45,31 @@ async function sentBody(vision: Record<string, unknown>) {
 
 describe("MiMo vision profile", () => {
   it("replaces only the default <OCR> template for the exact MiMo id", () => {
-    expect(mimoVisionPrompt(MIMO_VISION_MODEL, undefined)).toBe(MIMO_TRANSCRIPTION_PROMPT);
-    expect(mimoVisionPrompt(MIMO_VISION_MODEL, "<OCR>")).toBe(MIMO_TRANSCRIPTION_PROMPT);
-    expect(mimoVisionPrompt(MIMO_VISION_MODEL, "markdown")).toBeUndefined();
-    expect(mimoVisionPrompt(MIMO_VISION_MODEL, "form-fields")).toBeUndefined();
-    expect(mimoVisionPrompt("xiaomi/mimo-v2.6-pro", "<OCR>")).toBeUndefined();
-    expect(mimoVisionPrompt("google/gemini-3.1-flash-lite", "<OCR>")).toBeUndefined();
+    expect(visionPromptKeyForModel(undefined, MIMO_VISION_MODEL)).toBe("markdown-transcription");
+    expect(visionPromptKeyForModel("<OCR>", MIMO_VISION_MODEL)).toBe("markdown-transcription");
+    expect(visionPromptKeyForModel("markdown", MIMO_VISION_MODEL)).toBe("markdown");
+    expect(visionPromptKeyForModel("form-fields", MIMO_VISION_MODEL)).toBe("form-fields");
+    expect(visionPromptKeyForModel("<OCR>", "xiaomi/mimo-v2.6-pro")).toBe("<OCR>");
+    expect(visionPromptKeyForModel("<OCR>", "google/gemini-3.1-flash-lite")).toBe("<OCR>");
+    expect(visionPromptTemplates["markdown-transcription"]).toBe(MARKDOWN_TRANSCRIPTION_VISION_PROMPT);
   });
 
   it("asks for delimited LaTeX and real Markdown tables", () => {
-    expect(MIMO_TRANSCRIPTION_PROMPT).toContain("$$...$$");
-    expect(MIMO_TRANSCRIPTION_PROMPT).toContain("pipe table");
-    expect(MIMO_TRANSCRIPTION_PROMPT.length).toBeLessThan(2_000);
+    expect(MARKDOWN_TRANSCRIPTION_VISION_PROMPT).toContain("$$...$$");
+    expect(MARKDOWN_TRANSCRIPTION_VISION_PROMPT).toContain("pipe table");
+    expect(MARKDOWN_TRANSCRIPTION_VISION_PROMPT.length).toBeLessThan(2_000);
   });
 
   it("prefers the fast endpoints with fallbacks allowed, and only for MiMo", () => {
-    expect(mimoOpenRouterParams(MIMO_VISION_MODEL)).toEqual({ provider: { order: ["relace", "deepinfra"], allow_fallbacks: true } });
-    expect(mimoOpenRouterParams("deepseek/deepseek-v4.1-flash")).toEqual({});
-    expect(mimoOpenRouterParams(undefined)).toEqual({});
+    expect(openRouterProviderParams(MIMO_VISION_MODEL)).toEqual({ provider: { order: ["relace", "deepinfra"], allow_fallbacks: true } });
+    expect(openRouterProviderParams("deepseek/deepseek-v4.1-flash")).toEqual({});
+    expect(openRouterProviderParams(undefined)).toEqual({});
   });
 
   it("sends MiMo the transcription prompt, provider preference and reasoning floor", async () => {
     const body = await sentBody({ modelUri: `llm://openrouter/${MIMO_VISION_MODEL}` });
     expect(body.model).toBe(MIMO_VISION_MODEL);
-    expect(body.messages[1].content[0].text).toBe(MIMO_TRANSCRIPTION_PROMPT);
+    expect(body.messages[1].content[0].text).toBe(MARKDOWN_TRANSCRIPTION_VISION_PROMPT);
     expect(body.provider).toEqual({ order: ["relace", "deepinfra"], allow_fallbacks: true });
     expect(body.reasoning).toEqual({ effort: "none" });
     expect(body.temperature).toBe(0);
@@ -67,9 +77,14 @@ describe("MiMo vision profile", () => {
   });
 
   it("caps MiMo output at 8k without raising a lower shared cap or touching other models", () => {
-    expect(mimoMaxOutputTokens(MIMO_VISION_MODEL, 16_384)).toBe(8_192);
-    expect(mimoMaxOutputTokens(MIMO_VISION_MODEL, 4_096)).toBe(4_096);
-    expect(mimoMaxOutputTokens("deepseek/deepseek-v4.1-flash", 16_384)).toBe(16_384);
+    const cap = (model: string, value: number, configured: boolean) => visionOutputCapForModel(model, { value, configured });
+    expect(cap(MIMO_VISION_MODEL, 16_384, false)).toBe(8_192);
+    expect(cap(MIMO_VISION_MODEL, 4_096, true)).toBe(4_096);
+    expect(cap(MIMO_VISION_MODEL, 32_768, true)).toBe(8_192);
+    expect(cap("deepseek/deepseek-v4.1-flash", 16_384, false)).toBe(16_384);
+    // DeepSeek's profile cap is a default: the env overrides it in either direction.
+    expect(cap("deepseek/deepseek-v4.1-flash-1017", 16_384, false)).toBe(8_192);
+    expect(cap("deepseek/deepseek-v4.1-flash-1017", 32_768, true)).toBe(32_768);
   });
 
   it("keeps an explicit template for MiMo and leaves other models unchanged", async () => {
@@ -81,8 +96,8 @@ describe("MiMo vision profile", () => {
   });
 });
 
-describe("normalizeMimoMathDelimiters", () => {
-  const norm = normalizeMimoMathDelimiters;
+describe("normalizeMarkdownMathDelimiters", () => {
+  const norm = normalizeMarkdownMathDelimiters;
   it("wraps a stand-alone line of bare structured LaTeX", () => {
     expect(norm("A = \\begin{bmatrix} a & b \\\\ c & d \\end{bmatrix}")).toBe("$$A = \\begin{bmatrix} a & b \\\\ c & d \\end{bmatrix}$$");
     expect(norm("Intro\n\np(\\theta \\mid D) = \\frac{a}{b}\n\nAfter")).toBe("Intro\n\n$$p(\\theta \\mid D) = \\frac{a}{b}$$\n\nAfter");
@@ -117,7 +132,7 @@ describe("normalizeMimoMathDelimiters", () => {
     expect(norm(text)).toBe(text);
   });
   it("applies only to MiMo", () => {
-    expect(postProcessMimoTranscription(MIMO_VISION_MODEL, "\\frac{a}{b}")).toBe("$$\\frac{a}{b}$$");
-    expect(postProcessMimoTranscription("google/gemini-3.1-flash-lite", "\\frac{a}{b}")).toBe("\\frac{a}{b}");
+    expect(postProcessVisionText(MIMO_VISION_MODEL, "\\frac{a}{b}")).toBe("$$\\frac{a}{b}$$");
+    expect(postProcessVisionText("google/gemini-3.1-flash-lite", "\\frac{a}{b}")).toBe("\\frac{a}{b}");
   });
 });

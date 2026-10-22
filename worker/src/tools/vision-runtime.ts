@@ -4,8 +4,10 @@ import type { ProviderRateLease } from "../lib/provider-rate-limit.js";
 import { fetchWithProviderRetry, providerFromBaseUrl } from "../lib/provider-retry.js";
 import {
   MARKDOWN_LATEX_VISION_PROMPT,
+  MARKDOWN_TRANSCRIPTION_VISION_PROMPT,
   openRouterProviderParams,
-  visionModelProfile,
+  postProcessVisionText,
+  visionOutputCapForModel,
   visionPromptKeyForModel,
 } from "./vision-model-profiles.js";
 
@@ -25,10 +27,9 @@ const VISION_MAX_OUTPUT_TOKENS_CONFIGURED = (() => {
   return Number.isInteger(configured) && configured >= 1_024;
 })();
 
-/** Output cap for `model`: VISION_MAX_OUTPUT_TOKENS when set, else the model profile's cap, else 16k. */
+/** Output cap for `model`: the shared cap (VISION_MAX_OUTPUT_TOKENS or 16k) adjusted by the model profile. */
 export function visionMaxOutputTokens(model: string | undefined): number {
-  if (VISION_MAX_OUTPUT_TOKENS_CONFIGURED) return VISION_MAX_OUTPUT_TOKENS;
-  return visionModelProfile(model)?.maxOutputTokens ?? VISION_MAX_OUTPUT_TOKENS;
+  return visionOutputCapForModel(model, { value: VISION_MAX_OUTPUT_TOKENS, configured: VISION_MAX_OUTPUT_TOKENS_CONFIGURED });
 }
 import { readFile } from "node:fs/promises";
 
@@ -50,12 +51,12 @@ import {
 import type { Config } from "../config.js";
 import { readJsonFile } from "./storage.js";
 import type { CommandRunner } from "./runner.js";
-import { mimoMaxOutputTokens, mimoOpenRouterParams, mimoVisionPrompt, postProcessMimoTranscription } from "./vision-model-mimo.js";
 
 export const visionPromptTemplates = {
   "<OCR>":
     "Extract visible document text faithfully. Preserve reading order, tables, headings, formulas, and code when visible.",
   "markdown-latex": MARKDOWN_LATEX_VISION_PROMPT,
+  "markdown-transcription": MARKDOWN_TRANSCRIPTION_VISION_PROMPT,
   markdown:
     "Convert the visible document page into concise GitHub-flavored markdown. Preserve tables, headings, lists, formulas, and code blocks.",
   layout:
@@ -239,8 +240,7 @@ function normalizeVisionConfig(
     baseUrl: selected.runtime === "remote-openai"
       ? cfg.openAiBaseUrl
       : selected.baseUrl,
-    prompt: mimoVisionPrompt(selected.model, selected.prompt)
-      ?? buildSchemaAwareVisionPrompt(visionPromptKeyForModel(selected.prompt, selected.model), outputSchema),
+    prompt: buildSchemaAwareVisionPrompt(visionPromptKeyForModel(selected.prompt, selected.model), outputSchema),
   };
 }
 
@@ -377,12 +377,11 @@ async function runVisionRequest(args: {
             },
           ],
           temperature: 0,
-          max_tokens: mimoMaxOutputTokens(args.model, visionMaxOutputTokens(args.model)),
+          max_tokens: visionMaxOutputTokens(args.model),
           // Page transcription never needs thinking: pin each verified model to its lowest accepted effort.
           ...(args.baseUrl?.includes("openrouter.ai") ? openRouterReasoningParams(args.model) : {}),
           // Per-model routing restricted to providers measured to transcribe faithfully.
           ...(args.baseUrl?.includes("openrouter.ai") ? openRouterProviderParams(args.model) : {}),
-          ...(args.baseUrl?.includes("openrouter.ai") ? mimoOpenRouterParams(args.model) : {}),
         }),
       }, {
         provider: args.providerLabel ?? providerFromBaseUrl(args.baseUrl),
@@ -400,7 +399,7 @@ async function runVisionRequest(args: {
       }
 
       const payload = (await response.json()) as OpenAiCompatibleResponse;
-      const text = postProcessMimoTranscription(args.model, readAssistantText(payload.choices?.[0]?.message?.content));
+      const text = postProcessVisionText(args.model, readAssistantText(payload.choices?.[0]?.message?.content));
       (rateLease as ProviderRateLease | null)?.settle(
         payload.usage ? (payload.usage.prompt_tokens ?? 0) + (payload.usage.completion_tokens ?? 0) : null,
       );
