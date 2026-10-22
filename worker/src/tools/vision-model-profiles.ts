@@ -120,6 +120,24 @@ export const VISION_MODEL_PROFILES: Readonly<Record<string, VisionModelProfile>>
     // government guidance) mid-page; Bedrock and Azure US transcribed them. Bedrock lists $0.11/$0.55 per M.
     contentFilterRetryProvider: { order: ["amazon-bedrock/us-east-1", "azure/us"], allow_fallbacks: false },
   },
+  // 2026-10-21 tune split (68 pages): with `<OCR>` GLM writes math as Unicode prose and matrices as
+  // box-drawing art, and describes figures ("[Figure: plot of …]"); the template lifts content F1 0.922 -> 0.963,
+  // reading order 0.781 -> 0.838 and math 0.837 -> 0.988 at the same token cost.
+  // Routing: quality was flat across 15 endpoints (fp4 matched fp8), except OpenInference, which drops the
+  // image (~590 input tokens a page) and invents the page. Wafer was fastest and about half Friendli's
+  // reported cost; Friendli and InferenceNet back it up. Fallbacks stay off so a page never reaches an
+  // endpoint that ignores the image.
+  // Output: the longest complete page was ~2.4k tokens; rare separator loops (`- - -`, `_ _ _`) ran to the
+  // 16k cap, so 8k bounds their cost and latency and can only lower a smaller shared cap.
+  "z-ai/glm-5.3-flash": {
+    defaultPrompt: "markdown-transcription",
+    maxOutputTokens: 8_192,
+    maxOutputTokensMode: "ceiling",
+    // Same as the shared chat floor, pinned here so chat changes never move vision. Its endpoints reject
+    // `none` and `{ enabled: false }` ("Reasoning is mandatory"); minimal spends ~1 reasoning token a page.
+    reasoning: { effort: "minimal" },
+    openRouterProvider: { order: ["wafer/nvfp4", "friendli", "inference-net/fp4"], allow_fallbacks: false },
+  },
 };
 
 export function visionModelProfile(model: string | undefined): VisionModelProfile | undefined {
