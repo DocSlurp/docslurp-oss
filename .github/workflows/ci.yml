@@ -34,6 +34,13 @@ jobs:
         run: node scripts/check-migration-safety.mjs
       - name: Check doc links
         run: node scripts/check-docs-links.mjs
+      - name: Prepare Mermaid renderer
+        timeout-minutes: 5
+        run: |
+          mermaid_version=$(node --input-type=module -e 'import { MERMAID_CLI_VERSION } from "./scripts/check-docs-mermaid.mjs"; console.log(MERMAID_CLI_VERSION)')
+          npx --yes "@mermaid-js/mermaid-cli@$mermaid_version" --version
+        env:
+          PUPPETEER_SKIP_DOWNLOAD: "1"
       - name: Check Mermaid diagrams
         run: node scripts/check-docs-mermaid.mjs
         env:
