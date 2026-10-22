@@ -33,144 +33,304 @@ export function dollarsToCredits(dollars: number): number {
 }
 
 // ---------------------------------------------------------------------------
-// Service plans
+// Price card (spec: performance/pricing-2026-10-21/spec.md in DocSlurp/app)
+//
+// Customers buy prepaid credit packs and pay per unit: a page (Fast or Rich),
+// a GB-month of storage, a search, a chat answer. Every billable usage event
+// is built from these numbers (`unitChargeMetadata`); provider tokens and
+// compute are recorded for our own cost reports but never debit credits.
+// Credits do not expire while the account exists.
 // ---------------------------------------------------------------------------
 
-export const planIdSchema = z.enum(["free", "silver", "gold", "platinum"]);
-export type PlanId = z.infer<typeof planIdSchema>;
+/*
+ * Calibration (SigNoz production traces 2026-10-13..22):
+ * - Rich pages (Gemini 3.1 Flash Lite vision): 1,149 input tokens; output p50 884 /
+ *   p95 1,759 / p99 2,035 tokens. Break-even at 250 credits/1k is ~1,390 output
+ *   tokens, so each 1,000 output tokens beyond the first 1,000 count as one more
+ *   Rich page (rounded up).
+ * - Chat cost per answer, mean / p90 USD: glm-5.3-flash .0043/.0092, mercury-3
+ *   .0064/.018, lfm-2.5-24b .0037/.010, claude-haiku-5.5 .0091/.011, mimo-v2.6-flash
+ *   .0086/.023, minimax-m3.1-flash:free 0, deepseek-v4.1-flash .0177/.042,
+ *   beam-1.0-501b .0349/.085, gpt-6.1-sol .067/.163, qwen3.8-max-prime .287/.602.
+ *   p95 tokens per answer run 130k-580k, so the 100k token-block multiplier stays.
+ */
+export const PRICE_CARD = {
+  /** Text-layer PDF, Office, HTML, Markdown, EPUB, text. */
+  fastPer1kPages: 5,
+  /** Scanned, image, or complex layout read by a vision/OCR model. */
+  richPer1kPages: 250,
+  /** One audio minute counts as this many Rich pages. */
+  audioMinuteRichPages: 1,
+  /** One video minute counts as this many Rich pages. */
+  videoMinuteRichPages: 3,
+  /** Originals, page images and indexes. */
+  storageGbMonth: 25,
+  searchPer1k: 10,
+  /** Credits per chat answer by model tier (CHAT_MODEL_TIERS). */
+  chatAnswerTiers: { standard: 2.5, advanced: 7.5, premium: 50 },
+  /** Minimum ingest charge per file. */
+  perFileMinimum: 0.1,
+  /** Vision output tokens one Rich page includes. */
+  richIncludedOutputTokens: 1_000,
+  /** Each further block of this many output tokens counts as one more Rich page (rounded up). */
+  richExtraPageOutputTokens: 1_000,
+  /** A search that runs LLM query strategies counts as this many searches. */
+  llmSearchMultiplier: 10,
+  /** A chat answer counts once more per this many total tokens beyond the first block. */
+  chatAnswerTokenBlock: 100_000,
+} as const;
+export type PriceCard = typeof PRICE_CARD;
 
-export const paidPlanIdSchema = z.enum(["silver", "gold", "platinum"]);
-export type PaidPlanId = z.infer<typeof paidPlanIdSchema>;
+/** Stamped on billable events so a receipt says which price card charged it. */
+export const PRICE_CARD_VERSION = "2026-10-21";
 
-/** Hard ceiling on page tasks one run fans out to, whatever the plan allows. */
-export const MAX_PAGE_FANOUT_PER_RUN = 128;
+/** Per dedicated machine, sold by sales, not self-serve. */
+export const PRIVATE_DEDICATED_MONTHLY_USD = 2_000;
 
-export type ServicePlan = {
-  id: PlanId;
-  label: string;
-  tagline: string;
-  /** Monthly minimum commitment, billed in advance. 0 for free. */
-  monthlyMinimumCents: number;
-  /** Credits granted each paid period (minimum converted 1:1, plus bonus). */
-  includedCreditsPerMonth: number;
-  /** Bonus credits as a percentage of the minimum. */
-  bonusPercent: number;
-  /** Org-wide ceiling on concurrently running worker slots. */
-  workers: number;
-  /** Storage included before metering starts; at most INCLUDED_INDEX_STORAGE_SHARE may be index. */
-  includedStorageGb: number;
-  support: string;
-  /** Document versions kept per path when neither org nor workspace overrides it (free: always 1). */
-  defaultRetainedVersions: number;
-  /** Stripe Price lookup key; prices are synced by the plan sync script. */
-  stripeLookupKey: string | null;
-  highlights: readonly string[];
-};
+/** Self-serve credit packs: $25 / $50 / $100. */
+export const CREDIT_PACK_CENTS = [2_500, 5_000, 10_000] as const;
+/** $10: card fees make smaller top-ups uneconomic. */
+export const MIN_TOPUP_CENTS = 1_000;
+/** $10,000. */
+export const MAX_TOPUP_CENTS = 1_000_000;
+/** One-time, no card. */
+export const STARTER_CREDITS = 250;
 
-export const SERVICE_PLANS: readonly ServicePlan[] = [
-  {
-    id: "free",
-    label: "Free",
-    tagline: "Kick the tires with real documents.",
-    monthlyMinimumCents: 0,
-    includedCreditsPerMonth: 0,
-    bonusPercent: 0,
-    workers: 50,
-    includedStorageGb: 1,
-    support: "Community",
-    defaultRetainedVersions: 1,
-    stripeLookupKey: null,
-    highlights: [
-      "250 one-time starter credits",
-      "50 concurrent workers",
-      "1 GB storage included (50 MB index)",
-    ],
-  },
-  {
-    id: "silver",
-    label: "Silver",
-    tagline: "Steady ingestion for a team or a product.",
-    monthlyMinimumCents: 2_000,
-    includedCreditsPerMonth: 2_000,
-    bonusPercent: 0,
-    workers: 100,
-    includedStorageGb: 10,
-    support: "Email, 2 business days",
-    defaultRetainedVersions: 2,
-    stripeLookupKey: "docslurp_silver_monthly",
-    highlights: [
-      "2,000 credits every month",
-      "100 concurrent workers",
-      "10 GB storage included (500 MB index)",
-      "Auto-recharge",
-    ],
-  },
-  {
-    id: "gold",
-    label: "Gold",
-    tagline: "Back-catalog imports and busy pipelines.",
-    monthlyMinimumCents: 5_000,
-    includedCreditsPerMonth: 5_500,
-    bonusPercent: 10,
-    workers: 250,
-    includedStorageGb: 50,
-    support: "Priority email, 1 business day",
-    defaultRetainedVersions: 2,
-    stripeLookupKey: "docslurp_gold_monthly",
-    highlights: [
-      "5,500 credits every month (+10%)",
-      "250 concurrent workers",
-      "50 GB storage included (2.5 GB index)",
-      "Auto-recharge",
-    ],
-  },
-  {
-    id: "platinum",
-    label: "Platinum",
-    tagline: "Archive-scale ingestion with room to burst.",
-    monthlyMinimumCents: 50_000,
-    includedCreditsPerMonth: 60_000,
-    bonusPercent: 20,
-    workers: 1_000,
-    includedStorageGb: 1_000,
-    support: "Priority, shared Slack channel",
-    defaultRetainedVersions: 2,
-    stripeLookupKey: "docslurp_platinum_monthly",
-    highlights: [
-      "60,000 credits every month (+20%)",
-      "1,000 concurrent workers",
-      "1 TB storage included (50 GB index)",
-      "Auto-recharge",
-    ],
-  },
-] as const;
+/**
+ * Org-wide concurrent worker ceiling. "Funded" = the org has ever received a
+ * paid grant (top-up, auto top-up, adjustment, promo); starter-only orgs are
+ * "starter". Above the funded ceiling is Enterprise.
+ */
+export const STARTER_WORKER_SLOTS = 50;
+export const FUNDED_WORKER_SLOTS = 250;
 
-export function getPlan(id: string | null | undefined): ServicePlan {
-  return SERVICE_PLANS.find((plan) => plan.id === id) ?? SERVICE_PLANS[0]!;
+/** Grant sources that make an org funded (credit_grants.source). `starter` never does. */
+export const FUNDED_GRANT_SOURCES = ["topup", "auto_recharge", "adjustment", "promo"] as const;
+
+export function workerSlotsFor(funded: boolean): number {
+  return funded ? FUNDED_WORKER_SLOTS : STARTER_WORKER_SLOTS;
 }
 
-export function getPlanByLookupKey(lookupKey: string | null | undefined): ServicePlan | null {
-  if (!lookupKey) return null;
-  return SERVICE_PLANS.find((plan) => plan.stripeLookupKey === lookupKey) ?? null;
+export type PageMode = "fast" | "rich";
+
+const BYTES_PER_GB = 1024 ** 3;
+
+function nonNegative(value: number | undefined): number {
+  return Number.isFinite(value) ? Math.max(0, value ?? 0) : 0;
+}
+
+/** Credits for `pages` pages in `mode` (fractional; balances keep fractions). */
+export function pageCredits(mode: PageMode, pages: number): number {
+  const per1k = mode === "rich" ? PRICE_CARD.richPer1kPages : PRICE_CARD.fastPer1kPages;
+  return (nonNegative(pages) * per1k) / 1_000;
 }
 
 /**
- * Credits granted for a paid subscription amount. Proration invoices pay a
- * fraction of the minimum, so the grant scales with what was actually paid.
+ * Rich pages one vision/OCR read of a page counts as: 1, plus one more per
+ * started `richExtraPageOutputTokens` beyond `richIncludedOutputTokens`
+ * (1,000 tokens: 1; 1,001-2,000: 2; 2,500: 3). Unknown token counts count as 1.
  */
-export function creditsForSubscriptionPayment(planId: PlanId, amountPaidCents: number): number {
-  const plan = getPlan(planId);
-  if (plan.monthlyMinimumCents <= 0 || amountPaidCents <= 0) return 0;
-  const credits = (amountPaidCents / CENTS_PER_CREDIT) * (1 + plan.bonusPercent / 100);
-  return Math.round(credits * 100) / 100;
+export function richPagesForOutputTokens(outputTokens: number | null | undefined): number {
+  const extra = nonNegative(outputTokens ?? 0) - PRICE_CARD.richIncludedOutputTokens;
+  return 1 + (extra > 0 ? Math.ceil(extra / PRICE_CARD.richExtraPageOutputTokens) : 0);
 }
 
-export const STARTER_CREDITS = 250;
-export const MIN_TOPUP_CENTS = 500;
-export const MAX_TOPUP_CENTS = 1_000_000;
+/** Monthly storage credits for `bytes` stored (object + index). No included GB. */
+export function storageCreditsPerMonth(bytes: number): number {
+  return (nonNegative(bytes) / BYTES_PER_GB) * PRICE_CARD.storageGbMonth;
+}
+
+/** Storage credits for one day of a month with `daysInMonth` days (the daily meter). */
+export function dailyStorageCredits(bytes: number, daysInMonth: number): number {
+  const days = Number.isFinite(daysInMonth) && daysInMonth > 0 ? daysInMonth : 30;
+  return storageCreditsPerMonth(bytes) / days;
+}
+
+/** Days in the UTC month containing `day` (YYYY-MM-DD or Date). */
+export function daysInUtcMonth(day: string | Date): number {
+  const date = typeof day === "string" ? new Date(`${day.slice(0, 10)}T00:00:00Z`) : day;
+  return new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth() + 1, 0)).getUTCDate();
+}
+
+/** Credits for `searches` searches; LLM query strategies count each as `llmSearchMultiplier`. */
+export function searchCredits(searches: number, opts: { llmStrategies?: boolean } = {}): number {
+  const multiplier = opts.llmStrategies ? PRICE_CARD.llmSearchMultiplier : 1;
+  return (nonNegative(searches) * multiplier * PRICE_CARD.searchPer1k) / 1_000;
+}
+
+/** Chat answers one turn counts as: 1, plus one per extra `chatAnswerTokenBlock` total tokens. */
+export function chatAnswerUnits(totalTokens?: number | null): number {
+  return Math.max(1, Math.ceil(nonNegative(totalTokens ?? 0) / PRICE_CARD.chatAnswerTokenBlock));
+}
+
+export type ChatAnswerTier = keyof PriceCard["chatAnswerTiers"];
+
+/**
+ * Chat model -> answer tier, keyed by model name without the provider prefix.
+ * Entries ending in `*` match by prefix (dated snapshots). Unmapped models are
+ * premium, so a newly added expensive model is never sold below cost.
+ */
+export const CHAT_MODEL_TIERS: Readonly<Record<string, ChatAnswerTier>> = {
+  "glm-5.3-flash": "standard",
+  "mercury-3": "standard",
+  "lfm-2.5-24b-a2b": "standard",
+  "claude-haiku-5.5": "standard",
+  "mimo-v2.6-flash": "standard",
+  "minimax-m3.1-flash:free": "standard",
+  "deepseek-v4.1-flash*": "advanced",
+  "beam-1.0-501b-a23b": "advanced",
+  "gpt-6.1-sol": "premium",
+  "qwen3.8-max-prime": "premium",
+};
+
+/** Tier of a chat model id (`provider/model`, bare `model`, or a `workspace:` alias resolved by the caller). */
+export function chatModelTier(model: string | null | undefined): ChatAnswerTier {
+  const raw = (model ?? "").trim().toLowerCase();
+  if (!raw) return "premium";
+  const bare = raw.includes("/") ? raw.slice(raw.lastIndexOf("/") + 1) : raw;
+  const exact = CHAT_MODEL_TIERS[bare];
+  if (exact) return exact;
+  for (const [key, tier] of Object.entries(CHAT_MODEL_TIERS)) {
+    if (key.endsWith("*") && bare.startsWith(key.slice(0, -1))) return tier;
+  }
+  return "premium";
+}
+
+/** Credits for one delivered chat answer: the model tier's price x token blocks (min 1). */
+export function chatAnswerCredits(opts: { model?: string | null; tier?: ChatAnswerTier; totalTokens?: number | null } = {}): number {
+  const tier = opts.tier ?? chatModelTier(opts.model);
+  return PRICE_CARD.chatAnswerTiers[tier] * chatAnswerUnits(opts.totalTokens);
+}
+
+/** Rich pages a media file counts as: its duration rounded up to whole minutes, times the kind's factor. */
+export function mediaRichPages(kind: "audio" | "video", seconds: number): number {
+  const minutes = Math.ceil(nonNegative(seconds) / 60);
+  return minutes * (kind === "video" ? PRICE_CARD.videoMinuteRichPages : PRICE_CARD.audioMinuteRichPages);
+}
+
+/** What a file must still pay to reach the per-file minimum, given what its pages already paid. */
+export function fileMinimumTopUpCredits(chargedCredits: number): number {
+  return Math.max(0, PRICE_CARD.perFileMinimum - nonNegative(chargedCredits));
+}
+
+/**
+ * Metric names of the billable unit events. These, and only these, debit
+ * customer credits; every other usage event (provider tokens, compute,
+ * embeddings) is written with `billable: false` and cost 0.
+ */
+export const BILLABLE_UNIT_METRICS = {
+  fastPage: "ingest-page-fast",
+  richPage: "ingest-page-rich",
+  mediaMinutes: "ingest-media-minutes",
+  fileMinimum: "ingest-file-minimum",
+  storage: "storage",
+  search: "search-query",
+  chatAnswer: "chat-answer",
+} as const;
+export type BillableUnitMetric = (typeof BILLABLE_UNIT_METRICS)[keyof typeof BILLABLE_UNIT_METRICS];
+
+const BILLABLE_UNIT_METRIC_SET: ReadonlySet<string> = new Set(Object.values(BILLABLE_UNIT_METRICS));
+
+export function isBillableUnitMetric(metric: string | null | undefined): metric is BillableUnitMetric {
+  return typeof metric === "string" && BILLABLE_UNIT_METRIC_SET.has(metric);
+}
+
+/** Provider recorded on billable unit events. */
+export const UNIT_CHARGE_PROVIDER = "docslurp";
+
+/** Metadata every billable unit event carries. */
+export function unitChargeMetadata(extra: Record<string, unknown> = {}): Record<string, unknown> {
+  return { ...extra, billable: true, unitCharge: true, priceCard: PRICE_CARD_VERSION };
+}
+
+/** Whether an event is a billable unit charge (as opposed to an internal cost event). */
+export function isUnitChargeEvent(event: { metric?: string | null; metadata?: Record<string, unknown> | null }): boolean {
+  return event.metadata?.unitCharge === true && isBillableUnitMetric(event.metric);
+}
+
+/** Monthly forecast shown on the billing page; every input is something the user can see. */
+export type BillingForecast = {
+  storageBytes: number;
+  storageCreditsPerMonth: number;
+  searchesLast30d: number;
+  searchCreditsPer30d: number;
+  chatAnswersLast30d: number;
+  chatCreditsPer30d: number;
+  fastPagesLast30d: number;
+  richPagesLast30d: number;
+  ingestCreditsLast30d: number;
+  /** storage + searches + chat at last-30-day pace; ingest shown separately because it is lumpy. */
+  recurringCreditsPerMonth: number;
+  /** Days until balance reaches 0 at recurring pace (null when recurring is 0). Ignores auto top-up. */
+  daysUntilEmpty: number | null;
+};
+
+/**
+ * Build the forecast from what the billing page shows: stored bytes, and the
+ * credits and units the last 30 days actually charged (read through
+ * usage attribution, so search and chat multipliers are already included).
+ */
+export function buildBillingForecast(input: {
+  balanceCredits: number;
+  storageBytes: number;
+  searchesLast30d: number;
+  searchCreditsLast30d: number;
+  chatAnswersLast30d: number;
+  chatCreditsLast30d: number;
+  fastPagesLast30d: number;
+  richPagesLast30d: number;
+  ingestCreditsLast30d: number;
+}): BillingForecast {
+  const storageMonthly = storageCreditsPerMonth(input.storageBytes);
+  const searchCreditsPer30d = nonNegative(input.searchCreditsLast30d);
+  const chatCreditsPer30d = nonNegative(input.chatCreditsLast30d);
+  const recurring = storageMonthly + searchCreditsPer30d + chatCreditsPer30d;
+  const daysUntilEmpty = recurring > 0
+    ? Math.max(0, Math.floor((Math.max(0, input.balanceCredits) / recurring) * 30))
+    : null;
+  return {
+    storageBytes: nonNegative(input.storageBytes),
+    storageCreditsPerMonth: storageMonthly,
+    searchesLast30d: nonNegative(input.searchesLast30d),
+    searchCreditsPer30d,
+    chatAnswersLast30d: nonNegative(input.chatAnswersLast30d),
+    chatCreditsPer30d,
+    fastPagesLast30d: nonNegative(input.fastPagesLast30d),
+    richPagesLast30d: nonNegative(input.richPagesLast30d),
+    ingestCreditsLast30d: nonNegative(input.ingestCreditsLast30d),
+    recurringCreditsPerMonth: recurring,
+    daysUntilEmpty,
+  };
+}
+
+/** Public price list (`GET /v1/billing/prices`). */
+export function billingPrices() {
+  return {
+    priceCard: PRICE_CARD,
+    priceCardVersion: PRICE_CARD_VERSION,
+    packsCents: [...CREDIT_PACK_CENTS],
+    minTopUpCents: MIN_TOPUP_CENTS,
+    maxTopUpCents: MAX_TOPUP_CENTS,
+    starterCredits: STARTER_CREDITS,
+    privateDedicatedMonthlyUsd: PRIVATE_DEDICATED_MONTHLY_USD,
+    workerSlots: { starter: STARTER_WORKER_SLOTS, funded: FUNDED_WORKER_SLOTS },
+    /** Model (without provider prefix; `*` = prefix match) -> tier; unmapped models are premium. */
+    chatModelTiers: { ...CHAT_MODEL_TIERS },
+  };
+}
+export type BillingPrices = ReturnType<typeof billingPrices>;
+
+/** Hard ceiling on page tasks one run fans out to, whatever the org ceiling allows. */
+export const MAX_PAGE_FANOUT_PER_RUN = 128;
 
 // ---------------------------------------------------------------------------
-// Rate card (list prices in credits)
+// Internal cost reference (NOT a customer price)
+//
+// Customers pay PRICE_CARD units only. The resource rates below remain as our
+// internal cost model: compute and AI usage events are still recorded (and
+// priced here for internal cost reports and capacity planning), but they are
+// written non-billable, so they never debit customer credits. Public copy
+// never names CPU, memory, GPU or machine classes.
 // ---------------------------------------------------------------------------
 
 export type CreditRateCard = {
@@ -188,8 +348,8 @@ export type CreditRateCard = {
 };
 
 /**
- * Every line must satisfy RESOURCE_CLASS_POLICY (infra-costs.ts) against the
- * latest infra observations; run the internal pricing validation before changing it.
+ * Internal resource cost reference. Every line must satisfy RESOURCE_CLASS_POLICY
+ * (infra-costs.ts) against the latest infra observations.
  * 2026-10.2: CPU/memory rebalanced to Fly's cost structure (RAM dominates),
  * storage raised to cover Tigris/Neon, large GPU restricted to A100 80 GB.
  * 2026-10.3: pages read by our own models are billed per page at 50% of the
@@ -212,27 +372,8 @@ export const CREDIT_RATE_CARD: CreditRateCard = {
   aiMarkupPercent: 20,
 };
 
-export type RateCardLine = {
-  key: keyof Omit<CreditRateCard, "version" | "effectiveDate">;
-  resource: string;
-  unit: string;
-  detail: string;
-};
-
-export const RATE_CARD_LINES: readonly RateCardLine[] = [
-  { key: "cpuVcpuHour", resource: "CPU", unit: "vCPU-hour", detail: "Parsing, layout, chunking, CPU OCR. Metered per second." },
-  { key: "memoryGbHour", resource: "Memory", unit: "GB-hour", detail: "RAM allocated to the worker while it holds your task. RAM is the larger share of worker cost." },
-  { key: "gpuStandardHour", resource: "GPU · standard", unit: "GPU-hour", detail: "24 GB class (L4, RTX 4090, RTX 3090). For GPU work with no per-page price. Model-read pages on our own GPUs are priced per page, below." },
-  { key: "gpuLargeHour", resource: "GPU · large", unit: "GPU-hour", detail: "80 GB class (A100 80 GB). Large models with no per-page price." },
-  { key: "objectStorageGbMonth", resource: "Object storage", unit: "GB-month", detail: "Source files, Markdown, page images. Accrued daily." },
-  { key: "indexStorageGbMonth", resource: "Index storage", unit: "GB-month", detail: "Vectors, full-text and graph indexes. Accrued daily." },
-  { key: "egressGb", resource: "Egress", unit: "GB", detail: "Downloads of originals and exports." },
-  { key: "aiMarkupPercent", resource: "AI models", unit: "% over provider list", detail: "LLM, vision and embedding tokens at provider list price plus markup." },
-];
-
 const SECONDS_PER_HOUR = 3_600;
 const HOURS_PER_MONTH = 730;
-const BYTES_PER_GB = 1024 ** 3;
 
 export type MeteredResources = {
   cpuSeconds?: number;
@@ -264,9 +405,6 @@ export type CreditCharge = {
   selfHostedListCredits: number;
 };
 
-function nonNegative(value: number | undefined): number {
-  return Number.isFinite(value) ? Math.max(0, value ?? 0) : 0;
-}
 
 /** Price metered compute/AI resources in credits at list rates. */
 export function priceResources(
@@ -291,7 +429,10 @@ export function priceResources(
 }
 
 // ---------------------------------------------------------------------------
-// Self-hosted inference
+// Self-hosted inference (internal cost reference)
+//
+// Kept for internal cost reports of private endpoints; customers pay
+// PRICE_CARD units whichever model read a page.
 //
 // Pages read by models on our own GPUs (private endpoints, single-tenant
 // boxes) are billed at SELF_HOSTED_DISCOUNT_PERCENT of the hosted-equivalent
@@ -378,66 +519,13 @@ export function selfHostedPageCredits(card: CreditRateCard = CREDIT_RATE_CARD): 
   return { list, billed: selfHostedBilledCredits(list) };
 }
 
-/** Published self-hosted prices for the rate-card API and pricing page. */
-export function selfHostedRateCard(card: CreditRateCard = CREDIT_RATE_CARD) {
-  const page = selfHostedPageCredits(card);
-  return {
-    discountPercent: SELF_HOSTED_DISCOUNT_PERCENT,
-    references: Object.values(HOSTED_EQUIVALENT_REFERENCES),
-    pageTokens: SELF_HOSTED_PAGE_TOKENS,
-    /** Credits to read 1,000 pages with a model on our own GPUs. */
-    per1000Pages: { listCredits: page.list * 1000, billedCredits: page.billed * 1000 },
-  };
-}
 
 // ---------------------------------------------------------------------------
-// Plan-neutral AI pricing
-//
-// A bonus plan's credits are worth less than a cent each: Platinum pays $500
-// for 60,000 credits, so a credit realizes 0.833 cents and AI charged at
-// provider list + 20% in credits returns 1.2 x 0.833 = 1.00 of provider cost,
-// before the 3% payment fee (a loss; Gold earns 5%). Bonus credits are meant
-// for compute and storage, so AI on a bonus plan is charged (1 + bonus) times
-// the credits: the same dollars on every plan, with the bonus still buying
-// extra compute and storage.
+// Internal cost events
 // ---------------------------------------------------------------------------
-
-/** Credits charged per list-priced AI credit on a plan: 1 + its bonus. */
-export function aiBonusNeutralFactor(planId: string | null | undefined): number {
-  if (!planId) return 1;
-  return 1 + getPlan(planId).bonusPercent / 100;
-}
-
-// ---------------------------------------------------------------------------
-// Privacy routing factors
-//
-// EU-pinned and zero-retention routes cost more per token for the same model
-// (+42% OVHcloud vs DeepInfra, +26% Together ZDR vs DeepInfra, 2026-10-12), so
-// they carry an explicit factor on the AI charge. An event is stamped
-// `euPinned: true` / `zeroRetention: true` by whichever routing code selected
-// the EU or zero-retention route; no deployment mode sets them yet.
-// ---------------------------------------------------------------------------
-
-export const ROUTE_FACTOR_PERCENT = { euPinned: 4, zeroRetention: 1 } as const;
-
-export function routeFactorPercent(flags: { euPinned?: unknown; zeroRetention?: unknown } | null | undefined): number {
-  return (flags?.euPinned === true ? ROUTE_FACTOR_PERCENT.euPinned : 0) + (flags?.zeroRetention === true ? ROUTE_FACTOR_PERCENT.zeroRetention : 0);
-}
-
-/**
- * Prices beyond the metered lines, published beside the rate card
- * (`GET /v1/billing/plans`): self-hosted pages, the AI credit factor each plan
- * pays, and the privacy route factors.
- */
-export function rateCardExtras(card: CreditRateCard = CREDIT_RATE_CARD) {
-  return {
-    selfHosted: selfHostedRateCard(card),
-    aiCreditFactorByPlan: Object.fromEntries(SERVICE_PLANS.map((plan) => [plan.id, aiBonusNeutralFactor(plan.id)])) as Record<PlanId, number>,
-    routeFactorPercent: ROUTE_FACTOR_PERCENT,
-  };
-}
 
 type PriceableAiEvent = {
+  metric?: string | null;
   costCents: number;
   provider?: string | null;
   inputTokens?: number | null;
@@ -445,108 +533,39 @@ type PriceableAiEvent = {
   metadata?: Record<string, unknown> | null;
 };
 
-export type AiPricingContext = {
-  /** Plan of the org being billed; bonus plans pay the plan-neutral AI factor. */
-  planId?: string | null;
-};
-
-function selfHostedBilling(event: PriceableAiEvent): { capability: HostedEquivalentCapability; listCredits: number; billedCredits: number } | null {
-  if (event.provider !== PRIVATE_MODEL_PROVIDER) return null;
-  const capability = event.metadata?.capability;
-  if (!isHostedEquivalentCapability(capability)) return null;
-  const inputTokens = nonNegative(event.inputTokens ?? 0);
-  const outputTokens = nonNegative(event.outputTokens ?? 0);
-  if (inputTokens + outputTokens <= 0) return null;
-  const listCredits = hostedEquivalentListCredits({ capability, inputTokens, outputTokens });
-  return { capability, listCredits, billedCredits: selfHostedBilledCredits(listCredits) };
-}
-
 /**
- * Price an AI receipt, preserving provider cost for audit. Hosted calls are
- * provider list plus markup. Calls served by our own models (private
- * endpoints) are the hosted-equivalent list price less the self-hosted
- * discount. Bonus plans pay the plan-neutral factor and privacy routes their
- * factor. Repricing an adopted/retried receipt uses its original provider cost
- * and its tokens, so the markup is never compounded. Compute/storage events
- * use their own rates.
+ * Turn an AI receipt into an internal cost event. Provider cost is preserved
+ * (`metadata.providerCostCents`) for our own cost reports and the `[ai-usage]`
+ * line; the customer debit is 0 (`billable: false`), because customers pay
+ * PRICE_CARD units (pages, searches, chat answers) instead. Billable unit
+ * events (`unitChargeMetadata`) pass through unchanged. Idempotent: repricing
+ * keeps the original provider cost.
  */
-export function priceAiUsageEvent<T extends PriceableAiEvent>(event: T, context: AiPricingContext = {}): T {
+export function priceAiUsageEvent<T extends PriceableAiEvent>(event: T): T {
+  if (isUnitChargeEvent(event)) return event;
   const storedProviderCost = event.metadata?.providerCostCents;
   const providerCostCents = typeof storedProviderCost === "number" && Number.isFinite(storedProviderCost) && storedProviderCost >= 0
     ? storedProviderCost
-    : event.costCents;
-  const selfHosted = selfHostedBilling(event);
-  if (!selfHosted && !(providerCostCents > 0)) return event;
-  const planFactor = aiBonusNeutralFactor(context.planId);
-  const routeFactor = routeFactorPercent(event.metadata);
-  const listCredits = selfHosted ? selfHosted.listCredits : providerCostCents * (1 + CREDIT_RATE_CARD.aiMarkupPercent / 100);
-  const baseCredits = selfHosted ? selfHosted.billedCredits : listCredits;
-  const multiplier = planFactor * (1 + routeFactor / 100);
+    : Math.max(0, Number(event.costCents) || 0);
   return {
     ...event,
-    costCents: event.metadata?.billable === false ? 0 : baseCredits * multiplier,
+    costCents: 0,
     metadata: {
       ...event.metadata,
-      providerCostCents: Math.max(0, providerCostCents),
-      aiMarkupPercent: CREDIT_RATE_CARD.aiMarkupPercent,
-      creditRateCard: CREDIT_RATE_CARD.version,
-      ...(planFactor !== 1 ? { aiPlanCreditFactor: planFactor } : {}),
-      ...(routeFactor > 0 ? { routeFactorPercent: routeFactor } : {}),
-      ...(selfHosted
-        ? {
-            selfHosted: {
-              capability: selfHosted.capability,
-              discountPercent: SELF_HOSTED_DISCOUNT_PERCENT,
-              referenceModel: HOSTED_EQUIVALENT_REFERENCES[selfHosted.capability].model,
-              hostedEquivalentListCents: selfHosted.listCredits * multiplier,
-            },
-          }
-        : {}),
+      providerCostCents,
+      billable: false,
+      costRole: "provider",
     },
   };
-}
-
-/**
- * Share of a plan's included storage that may cover index storage. Index GB
- * cost ~15x object GB, so an uncapped allowance lets a Platinum org hold
- * $350/month of index for its $500 minimum.
- */
-export const INCLUDED_INDEX_STORAGE_SHARE = 0.05;
-
-/**
- * Storage credits for one day. Included storage is subtracted from object
- * storage first (the larger, cheaper pool), then from index storage, which
- * can use at most INCLUDED_INDEX_STORAGE_SHARE of the allowance.
- */
-export function dailyStorageCredits(args: {
-  objectBytes: number;
-  indexBytes: number;
-  includedGb: number;
-  card?: CreditRateCard;
-}): { objectCredits: number; indexCredits: number; totalCredits: number; billableObjectGb: number; billableIndexGb: number } {
-  const card = args.card ?? CREDIT_RATE_CARD;
-  const objectGb = nonNegative(args.objectBytes) / BYTES_PER_GB;
-  const indexGb = nonNegative(args.indexBytes) / BYTES_PER_GB;
-  let included = nonNegative(args.includedGb);
-  const billableObjectGb = Math.max(0, objectGb - included);
-  included = Math.min(
-    Math.max(0, included - objectGb),
-    nonNegative(args.includedGb) * INCLUDED_INDEX_STORAGE_SHARE,
-  );
-  const billableIndexGb = Math.max(0, indexGb - included);
-  const perDay = HOURS_PER_MONTH / 24;
-  const objectCredits = (billableObjectGb * card.objectStorageGbMonth) / perDay;
-  const indexCredits = (billableIndexGb * card.indexStorageGbMonth) / perDay;
-  return { objectCredits, indexCredits, totalCredits: objectCredits + indexCredits, billableObjectGb, billableIndexGb };
 }
 
 // ---------------------------------------------------------------------------
 // Ingest estimator
 //
-// Planning model, not a quote. Per-page resource figures are engineering
-// assumptions anchored to internal measurements (text-layer parsing, CPU
-// layout analysis, ~160 pages/min OCR on one 24 GB GPU, ~0.3¢/page vision
-// models). Real documents vary; observed run metrics are authoritative.
+// Planning model, not a quote. Prices come from PRICE_CARD (Fast vs Rich page
+// mix, media minutes, per-file minimum); timing from per-page worker-second
+// assumptions anchored to internal measurements. Observed runs are
+// authoritative.
 // ---------------------------------------------------------------------------
 
 export const pageClassSchema = z.enum(["text", "complex", "scanned"]);
@@ -558,13 +577,8 @@ export type PipelineProfileId = z.infer<typeof pipelineProfileIdSchema>;
 export type PageCost = {
   /** Seconds one worker slot is busy with the page. */
   workerSeconds: number;
-  vcpu: number;
-  memoryGb: number;
-  gpuStandardSeconds: number;
-  /** 1 when a model on our own GPUs reads the page; priced per page as self-hosted inference, not per GPU-second. */
-  selfHostedModelPages: number;
-  /** AI provider list cost per page in cents (embeddings, vision, LLM). */
-  aiProviderCents: number;
+  /** How the page is billed in this profile. */
+  mode: PageMode;
   sourceBytes: number;
   artifactBytes: number;
   indexBytes: number;
@@ -583,31 +597,31 @@ export const PIPELINE_PROFILES: Record<PipelineProfileId, PipelineProfile> = {
   fast: {
     id: "fast",
     label: "Fast",
-    description: "Text layer and CPU OCR, chunk, embed. Best for born-digital prose.",
+    description: "Text layer and OCR where needed, chunk, embed. Best for born-digital prose.",
     pages: {
-      text: { workerSeconds: 0.3, vcpu: 1, memoryGb: 1, gpuStandardSeconds: 0, selfHostedModelPages: 0, aiProviderCents: 0.0012, sourceBytes: 30 * KB, artifactBytes: 24 * KB, indexBytes: 20 * KB },
-      complex: { workerSeconds: 0.8, vcpu: 1, memoryGb: 1, gpuStandardSeconds: 0, selfHostedModelPages: 0, aiProviderCents: 0.0015, sourceBytes: 120 * KB, artifactBytes: 40 * KB, indexBytes: 24 * KB },
-      scanned: { workerSeconds: 3, vcpu: 1, memoryGb: 2, gpuStandardSeconds: 0, selfHostedModelPages: 0, aiProviderCents: 0.0012, sourceBytes: 250 * KB, artifactBytes: 40 * KB, indexBytes: 20 * KB },
+      text: { workerSeconds: 0.3, mode: "fast", sourceBytes: 30 * KB, artifactBytes: 24 * KB, indexBytes: 20 * KB },
+      complex: { workerSeconds: 0.8, mode: "fast", sourceBytes: 120 * KB, artifactBytes: 40 * KB, indexBytes: 24 * KB },
+      scanned: { workerSeconds: 3, mode: "rich", sourceBytes: 250 * KB, artifactBytes: 40 * KB, indexBytes: 20 * KB },
     },
   },
   standard: {
     id: "standard",
     label: "Standard",
-    description: "Layout-aware tables and figures, GPU OCR where pages need it, page images.",
+    description: "Layout-aware tables and figures, model reading where pages need it, page images.",
     pages: {
-      text: { workerSeconds: 0.5, vcpu: 1, memoryGb: 1, gpuStandardSeconds: 0, selfHostedModelPages: 0, aiProviderCents: 0.0012, sourceBytes: 30 * KB, artifactBytes: 64 * KB, indexBytes: 25 * KB },
-      complex: { workerSeconds: 4, vcpu: 2, memoryGb: 4, gpuStandardSeconds: 0, selfHostedModelPages: 0, aiProviderCents: 0.0015, sourceBytes: 120 * KB, artifactBytes: 160 * KB, indexBytes: 30 * KB },
-      scanned: { workerSeconds: 1.5, vcpu: 1, memoryGb: 2, gpuStandardSeconds: 0.4, selfHostedModelPages: 1, aiProviderCents: 0.0012, sourceBytes: 250 * KB, artifactBytes: 160 * KB, indexBytes: 25 * KB },
+      text: { workerSeconds: 0.5, mode: "fast", sourceBytes: 30 * KB, artifactBytes: 64 * KB, indexBytes: 25 * KB },
+      complex: { workerSeconds: 4, mode: "fast", sourceBytes: 120 * KB, artifactBytes: 160 * KB, indexBytes: 30 * KB },
+      scanned: { workerSeconds: 1.5, mode: "rich", sourceBytes: 250 * KB, artifactBytes: 160 * KB, indexBytes: 25 * KB },
     },
   },
   deep: {
     id: "deep",
     label: "Deep",
-    description: "Standard plus vision-model reading of figures and scans, summaries and knowledge graph.",
+    description: "Standard plus vision-model reading of figures, complex layouts and scans, summaries and knowledge graph.",
     pages: {
-      text: { workerSeconds: 0.8, vcpu: 1, memoryGb: 1, gpuStandardSeconds: 0, selfHostedModelPages: 0, aiProviderCents: 0.04, sourceBytes: 30 * KB, artifactBytes: 72 * KB, indexBytes: 32 * KB },
-      complex: { workerSeconds: 6, vcpu: 2, memoryGb: 4, gpuStandardSeconds: 0, selfHostedModelPages: 0, aiProviderCents: 0.35, sourceBytes: 120 * KB, artifactBytes: 180 * KB, indexBytes: 40 * KB },
-      scanned: { workerSeconds: 6, vcpu: 1, memoryGb: 2, gpuStandardSeconds: 0.4, selfHostedModelPages: 1, aiProviderCents: 0.35, sourceBytes: 250 * KB, artifactBytes: 180 * KB, indexBytes: 35 * KB },
+      text: { workerSeconds: 0.8, mode: "fast", sourceBytes: 30 * KB, artifactBytes: 72 * KB, indexBytes: 32 * KB },
+      complex: { workerSeconds: 6, mode: "rich", sourceBytes: 120 * KB, artifactBytes: 180 * KB, indexBytes: 40 * KB },
+      scanned: { workerSeconds: 6, mode: "rich", sourceBytes: 250 * KB, artifactBytes: 180 * KB, indexBytes: 35 * KB },
     },
   },
 };
@@ -616,6 +630,10 @@ export const PIPELINE_PROFILES: Record<PipelineProfileId, PipelineProfile> = {
 export const PARALLEL_EFFICIENCY = 0.85;
 /** Fixed per-batch latency: upload, quarantine, index finalization. */
 export const FIXED_OVERHEAD_SECONDS = 15;
+/** Worker seconds per media minute (transcription, frames), planning figure. */
+export const MEDIA_WORKER_SECONDS_PER_MINUTE = { audio: 2, video: 6 } as const;
+/** Stored bytes per media minute (source plus transcript artifacts), planning figure. */
+export const MEDIA_BYTES_PER_MINUTE = { audio: 1_000 * KB, video: 15_000 * KB } as const;
 
 export type PageMix = Record<PageClass, number>;
 
@@ -624,15 +642,16 @@ export type IngestEstimateInput = {
   /** Fractions of pages per class; normalized, so any positive weights work. */
   mix: Partial<PageMix>;
   profile?: PipelineProfileId;
-  plan: PlanId;
+  /** Org concurrent worker ceiling (default FUNDED_WORKER_SLOTS). */
+  workerSlots?: number;
   /** Number of files in the batch. Each run fans out to at most MAX_PAGE_FANOUT_PER_RUN workers. */
   documents?: number;
-  card?: CreditRateCard;
+  audioMinutes?: number;
+  videoMinutes?: number;
 };
 
 export type IngestEstimate = {
   pages: number;
-  plan: PlanId;
   profile: PipelineProfileId;
   workers: number;
   effectiveParallelism: number;
@@ -640,15 +659,20 @@ export type IngestEstimate = {
   wallSeconds: number;
   pagesPerMinute: number;
   minutesPer100Pages: number;
-  credits: CreditCharge;
-  /** Pages read by models on our own GPUs, at the self-hosted price (list is struck through). */
-  selfHosted: { pages: number; listCredits: number; billedCredits: number; discountPercent: number };
+  fastPages: number;
+  richPages: number;
+  /** Rich pages counted for audio and video minutes. */
+  mediaRichPages: number;
+  credits: {
+    totalCredits: number;
+    breakdown: { fast: number; rich: number; media: number; fileMinimum: number };
+  };
   pagesPerDollar: number;
   creditsPer1000Pages: number;
   storage: {
+    bytes: number;
     objectBytes: number;
     indexBytes: number;
-    /** Monthly storage credits before any plan allowance. */
     monthlyCredits: number;
   };
 };
@@ -663,185 +687,193 @@ function normalizeMix(mix: Partial<PageMix>): PageMix {
 }
 
 export function estimateIngest(input: IngestEstimateInput): IngestEstimate {
-  const card = input.card ?? CREDIT_RATE_CARD;
   const profile = PIPELINE_PROFILES[input.profile ?? "standard"];
-  const plan = getPlan(input.plan);
+  const workers = Math.max(1, Math.round(nonNegative(input.workerSlots ?? FUNDED_WORKER_SLOTS)) || FUNDED_WORKER_SLOTS);
   const pages = Math.max(0, Math.round(nonNegative(input.pages)));
   const documents = Math.max(1, Math.round(nonNegative(input.documents ?? 1)));
+  const audioMinutes = Math.ceil(nonNegative(input.audioMinutes));
+  const videoMinutes = Math.ceil(nonNegative(input.videoMinutes));
   const mix = normalizeMix(input.mix);
 
-  const totals = { workerSeconds: 0, cpuSeconds: 0, memoryGbSeconds: 0, gpuStandardSeconds: 0, selfHostedPages: 0, aiProviderCents: 0, sourceBytes: 0, artifactBytes: 0, indexBytes: 0 };
+  const totals = { workerSeconds: 0, fastPages: 0, richPages: 0, sourceBytes: 0, artifactBytes: 0, indexBytes: 0 };
   let slowestPageSeconds = 0;
   for (const pageClass of pageClassSchema.options) {
     const count = pages * mix[pageClass];
     if (count <= 0) continue;
     const cost = profile.pages[pageClass];
     totals.workerSeconds += count * cost.workerSeconds;
-    totals.cpuSeconds += count * cost.workerSeconds * cost.vcpu;
-    totals.memoryGbSeconds += count * cost.workerSeconds * cost.memoryGb;
-    totals.gpuStandardSeconds += count * cost.gpuStandardSeconds;
-    totals.selfHostedPages += count * cost.selfHostedModelPages;
-    totals.aiProviderCents += count * cost.aiProviderCents;
+    if (cost.mode === "rich") totals.richPages += count;
+    else totals.fastPages += count;
     totals.sourceBytes += count * cost.sourceBytes;
     totals.artifactBytes += count * cost.artifactBytes;
     totals.indexBytes += count * cost.indexBytes;
     slowestPageSeconds = Math.max(slowestPageSeconds, cost.workerSeconds);
   }
+  const mediaPages = mediaRichPages("audio", audioMinutes * 60) + mediaRichPages("video", videoMinutes * 60);
+  totals.workerSeconds += audioMinutes * MEDIA_WORKER_SECONDS_PER_MINUTE.audio + videoMinutes * MEDIA_WORKER_SECONDS_PER_MINUTE.video;
+  totals.sourceBytes += audioMinutes * MEDIA_BYTES_PER_MINUTE.audio + videoMinutes * MEDIA_BYTES_PER_MINUTE.video;
 
-  const effectiveParallelism = Math.max(1, Math.min(plan.workers, documents * MAX_PAGE_FANOUT_PER_RUN, Math.max(1, pages)));
-  const wallSeconds = pages === 0
+  const units = Math.max(1, pages + audioMinutes + videoMinutes);
+  const effectiveParallelism = Math.max(1, Math.min(workers, documents * MAX_PAGE_FANOUT_PER_RUN, units));
+  const hasWork = pages > 0 || audioMinutes > 0 || videoMinutes > 0;
+  const wallSeconds = !hasWork
     ? 0
     : Math.max(slowestPageSeconds, totals.workerSeconds / (effectiveParallelism * PARALLEL_EFFICIENCY)) + FIXED_OVERHEAD_SECONDS;
 
-  const credits = priceResources({
-    cpuSeconds: totals.cpuSeconds,
-    memoryGbSeconds: totals.memoryGbSeconds,
-    selfHostedPages: totals.selfHostedPages,
-    aiProviderCents: totals.aiProviderCents,
-  }, card);
+  const fast = pageCredits("fast", totals.fastPages);
+  const rich = pageCredits("rich", totals.richPages);
+  const media = pageCredits("rich", mediaPages);
+  // Per-file minimum, assuming the batch spreads evenly over its files.
+  const perFile = (fast + rich + media) / documents;
+  const fileMinimum = hasWork ? fileMinimumTopUpCredits(perFile) * documents : 0;
+  const totalCredits = fast + rich + media + fileMinimum;
 
   const objectBytes = totals.sourceBytes + totals.artifactBytes;
-  const monthlyStorageCredits = (objectBytes / BYTES_PER_GB) * card.objectStorageGbMonth
-    + (totals.indexBytes / BYTES_PER_GB) * card.indexStorageGbMonth;
+  const bytes = objectBytes + totals.indexBytes;
   const pagesPerMinute = wallSeconds > 0 ? pages / (wallSeconds / 60) : 0;
-  const dollars = creditsToDollars(credits.totalCredits);
+  const dollars = creditsToDollars(totalCredits);
 
   return {
     pages,
-    plan: plan.id,
     profile: profile.id,
-    workers: plan.workers,
+    workers,
     effectiveParallelism,
     workerSeconds: totals.workerSeconds,
     wallSeconds,
     pagesPerMinute,
     minutesPer100Pages: pagesPerMinute > 0 ? 100 / pagesPerMinute : 0,
-    credits,
-    selfHosted: {
-      pages: totals.selfHostedPages,
-      listCredits: credits.selfHostedListCredits,
-      billedCredits: credits.breakdown.selfHosted,
-      discountPercent: SELF_HOSTED_DISCOUNT_PERCENT,
-    },
+    fastPages: totals.fastPages,
+    richPages: totals.richPages,
+    mediaRichPages: mediaPages,
+    credits: { totalCredits, breakdown: { fast, rich, media, fileMinimum } },
     pagesPerDollar: dollars > 0 ? pages / dollars : 0,
-    creditsPer1000Pages: pages > 0 ? (credits.totalCredits / pages) * 1000 : 0,
-    storage: { objectBytes, indexBytes: totals.indexBytes, monthlyCredits: monthlyStorageCredits },
+    creditsPer1000Pages: pages > 0 ? (totalCredits / pages) * 1000 : 0,
+    storage: { bytes, objectBytes, indexBytes: totals.indexBytes, monthlyCredits: storageCreditsPerMonth(bytes) },
   };
 }
+
+export type CorpusBasis = "measured" | "official" | "estimate";
 
 export type ExampleCorpus = {
   id: string;
   title: string;
   detail: string;
+  /** Pages; prose without a print edition uses page-equivalents (words / 500). */
   pages: number;
   documents: number;
   mix: PageMix;
+  profile?: PipelineProfileId;
+  audioMinutes?: number;
+  /** How the size was obtained; estimates must be labelled as estimates. */
+  basis: CorpusBasis;
+  source: string;
 };
 
-/** Reference inputs for pricing pages. Page counts are typical print editions. */
+/**
+ * Real corpora for the pricing page (research 2026-10-21, corpora.md in the
+ * pricing evidence). Price them with estimateIngest; sizes marked `estimate`
+ * must be shown as estimates.
+ */
 export const EXAMPLE_CORPORA: readonly ExampleCorpus[] = [
-  { id: "annual-report", title: "A 10-K annual report", detail: "~120 pages, a third of them financial tables", pages: 120, documents: 1, mix: { text: 0.65, complex: 0.35, scanned: 0 } },
-  { id: "moby-dick", title: "Moby-Dick", detail: "~210k words, ~625 pages of prose", pages: 625, documents: 1, mix: { text: 1, complex: 0, scanned: 0 } },
-  { id: "textbook", title: "A 1,000-page textbook", detail: "Figures, tables, equations, a few scanned plates", pages: 1_000, documents: 1, mix: { text: 0.6, complex: 0.3, scanned: 0.1 } },
-  { id: "war-and-peace", title: "War and Peace", detail: "~587k words, ~1,300 pages of prose", pages: 1_300, documents: 1, mix: { text: 1, complex: 0, scanned: 0 } },
-  { id: "proust", title: "In Search of Lost Time", detail: "All seven volumes, ~4,200 pages", pages: 4_200, documents: 7, mix: { text: 1, complex: 0, scanned: 0 } },
-  { id: "archive", title: "A scanned case archive", detail: "100,000 pages across 2,000 files, mostly scans", pages: 100_000, documents: 2_000, mix: { text: 0.1, complex: 0.2, scanned: 0.7 } },
+  { id: "crime-and-punishment", title: "Crime and Punishment", detail: "203,634 words, ~407 page-equivalents (Gutenberg, Garnett translation)", pages: 407, documents: 1, mix: { text: 1, complex: 0, scanned: 0 }, basis: "measured", source: "Project Gutenberg #2554, word count" },
+  { id: "dostoevsky-four-novels", title: "Dostoevsky's four major novels", detail: "1,049,610 words, ~2,099 page-equivalents", pages: 2_099, documents: 4, mix: { text: 1, complex: 0, scanned: 0 }, basis: "measured", source: "Project Gutenberg #2554, #28054, #2638, #8117" },
+  { id: "apple-10k-2025", title: "Apple 10-K (FY2025)", detail: "80 pages of text and financial tables", pages: 80, documents: 1, mix: { text: 0.65, complex: 0.35, scanned: 0 }, basis: "measured", source: "As-filed PDF, pdfinfo" },
+  { id: "us-code-2024", title: "US Code (2024 edition)", detail: "53 titles, 53,380 printed pages of dense two-column legal text", pages: 53_380, documents: 53, mix: { text: 0.95, complex: 0.05, scanned: 0 }, basis: "measured", source: "govinfo title PDFs, pdfinfo" },
+  { id: "all-10ks-2025", title: "Every 10-K filed in 2025", detail: "6,690 filings, ~600,000 pages of text and tables", pages: 600_000, documents: 6_690, mix: { text: 0.7, complex: 0.3, scanned: 0 }, basis: "estimate", source: "EDGAR full index 2025 (filing count measured; pages estimated)" },
+  { id: "company-kb-250", title: "A 250-person company's knowledge base", detail: "~8,000 docs, ~40,000 pages of wiki, policies, specs and decks", pages: 40_000, documents: 8_000, mix: { text: 0.7, complex: 0.2, scanned: 0.1 }, basis: "estimate", source: "Working assumption: 20-50 docs per employee, ~5 pages each" },
+  { id: "english-wikipedia", title: "English Wikipedia", detail: "7,254,087 articles, 5.3B words, ~10.6M page-equivalents", pages: 10_600_000, documents: 7_254_087, mix: { text: 0.9, complex: 0.1, scanned: 0 }, basis: "official", source: "MediaWiki siteinfo API (articles, words); pages = words / 500" },
+  { id: "caselaw-access-project", title: "Caselaw Access Project", detail: ">40M scanned pages from ~40,000 bound volumes", pages: 40_000_000, documents: 40_000, mix: { text: 0, complex: 0, scanned: 1 }, basis: "official", source: "Harvard Library Innovation Lab" },
+  { id: "huberman-lab", title: "Huberman Lab podcast", detail: "451 episodes, 856.9 audio hours", pages: 0, documents: 451, mix: { text: 1, complex: 0, scanned: 0 }, audioMinutes: 51_414, basis: "measured", source: "RSS itunes:duration sum" },
 ];
 
 // ---------------------------------------------------------------------------
 // API shapes
 // ---------------------------------------------------------------------------
 
-export const subscriptionStatusValueSchema = z.enum([
-  "none",
-  "active",
-  "trialing",
-  "past_due",
-  "unpaid",
-  "canceled",
-  "incomplete",
-  "incomplete_expired",
-  "paused",
-]);
-export type SubscriptionStatusValue = z.infer<typeof subscriptionStatusValueSchema>;
-
-export const autoRechargeSettingsSchema = z
+export const autoTopUpSettingsSchema = z
   .object({
+    /** Off by default; turning it on requires a saved card and a monthly cap. */
     enabled: z.boolean(),
-    /** Recharge when available credits fall below this. */
+    /** Top up when available credits fall below this. */
     thresholdCredits: z.number().int().min(100).max(1_000_000),
-    /** Amount charged per recharge. */
+    /** Amount charged per top-up: a pack or a custom amount within the top-up limits. */
     amountCents: z.number().int().min(MIN_TOPUP_CENTS).max(MAX_TOPUP_CENTS),
-    /** Hard ceiling on auto-recharge spend per calendar month. */
+    /** Required ceiling on auto top-up spend per calendar month. */
     monthlyLimitCents: z.number().int().min(MIN_TOPUP_CENTS).max(10_000_000),
   })
   .refine((value) => value.monthlyLimitCents >= value.amountCents, {
-    message: "Monthly limit must be at least one recharge amount",
+    message: "Monthly limit must be at least one top-up amount",
     path: ["monthlyLimitCents"],
   });
-export type AutoRechargeSettings = z.infer<typeof autoRechargeSettingsSchema>;
+export type AutoTopUpSettings = z.infer<typeof autoTopUpSettingsSchema>;
+
+export const billingForecastSchema = z.object({
+  storageBytes: z.number().nonnegative(),
+  storageCreditsPerMonth: z.number().nonnegative(),
+  searchesLast30d: z.number().nonnegative(),
+  searchCreditsPer30d: z.number().nonnegative(),
+  chatAnswersLast30d: z.number().nonnegative(),
+  chatCreditsPer30d: z.number().nonnegative(),
+  fastPagesLast30d: z.number().nonnegative(),
+  richPagesLast30d: z.number().nonnegative(),
+  ingestCreditsLast30d: z.number().nonnegative(),
+  recurringCreditsPerMonth: z.number().nonnegative(),
+  daysUntilEmpty: z.number().int().nonnegative().nullable(),
+}) satisfies z.ZodType<BillingForecast>;
+
+export const billingSpendSchema = z.object({
+  ingest: z.number(),
+  storage: z.number(),
+  search: z.number(),
+  chat: z.number(),
+  other: z.number(),
+  total: z.number(),
+});
+export type BillingSpend = z.infer<typeof billingSpendSchema>;
 
 export const billingOverviewSchema = z.object({
   orgId: z.string(),
-  /** Archived (retained) document versions still holding files; `monthlyCredits` is null when billing is not enforced. */
-  retainedVersionStorage: z.object({
-    bytes: z.number().nonnegative(),
-    pages: z.number().nonnegative(),
-    monthlyCredits: z.number().nonnegative().nullable(),
-    /** False on self-hosted deployments: retention settings apply on every plan. */
-    billingEnforced: z.boolean().optional(),
-  }).optional(),
-  plan: planIdSchema,
-  subscriptionStatus: subscriptionStatusValueSchema,
-  cancelAtPeriodEnd: z.boolean(),
-  currentPeriodStart: z.string().nullable(),
-  currentPeriodEnd: z.string().nullable(),
-  /** Pending plan change scheduled for the period end, if any. */
-  scheduledPlan: planIdSchema.nullable(),
+  /** Has ever received a paid grant (top-up, auto top-up, adjustment, promo). */
+  funded: z.boolean(),
   credits: z.object({
-    includedRemaining: z.number(),
-    includedGranted: z.number(),
-    /** Purchased + starter + promotional; may be negative after overrun. */
-    prepaid: z.number(),
-    /**
-     * Usage recorded but not yet applied to the pools (applied within seconds).
-     * includedRemaining and prepaid already have it subtracted.
-     */
-    pending: z.number().default(0),
-    /** Included + prepaid − pending: the real balance, never minus holds. May be negative. */
+    /** Prepaid balance (purchases + starter + promotional); may be negative after a run overdraws. */
+    balance: z.number(),
+    /** Usage recorded but not yet applied to the balance (applied within seconds). */
+    pending: z.number(),
+    /** balance − pending: the real balance. May be negative. */
     available: z.number(),
-    /**
-     * Credits kept for chat and search: uploads and automation stop once the
-     * balance reaches this (chat-reserve.ts).
-     */
-    chatReserve: z.number().default(0),
+    /** Credits kept for chat and search: uploads and automation stop once the balance reaches this. */
+    chatReserve: z.number(),
     /** How far below zero chat and search may take the balance (0: not at all). */
-    chatOverdraft: z.number().default(0),
+    chatOverdraft: z.number(),
   }),
   workers: z.object({
+    /** Concurrent worker ceiling: STARTER_WORKER_SLOTS or FUNDED_WORKER_SLOTS unless raised. */
     limit: z.number().int(),
     inUse: z.number().int(),
   }),
   storage: z.object({
-    /** Source bytes (measured) plus derived artifacts estimated from page counts. */
+    /** objectBytes + indexBytes, the billed figure. */
+    bytes: z.number(),
     objectBytes: z.number(),
-    /** Estimated from page counts; there is no measured index size yet. */
     indexBytes: z.number(),
     /** Measured source-file bytes, the exact part of objectBytes. */
     sourceBytes: z.number().optional(),
-    /** True while objectBytes/indexBytes include per-page planning estimates. */
+    /** True while the byte counts include per-page planning estimates. */
     estimated: z.boolean().optional(),
-    includedGb: z.number(),
-    projectedMonthlyCredits: z.number(),
+    monthlyCredits: z.number(),
   }),
-  spendThisPeriod: z.object({
-    compute: z.number(),
-    ai: z.number(),
-    storage: z.number(),
-    other: z.number(),
-    total: z.number(),
-  }),
-  autoRecharge: autoRechargeSettingsSchema.nullable(),
+  /** Archived document versions still holding files; `monthlyCredits` is null when billing is not enforced. */
+  retainedVersionStorage: z.object({
+    bytes: z.number().nonnegative(),
+    pages: z.number().nonnegative(),
+    monthlyCredits: z.number().nonnegative().nullable(),
+    billingEnforced: z.boolean().optional(),
+  }).optional(),
+  forecast: billingForecastSchema,
+  /** Credits charged since the start of the UTC month, by category. */
+  spendThisMonth: billingSpendSchema,
+  autoTopUp: autoTopUpSettingsSchema.nullable(),
   monthlyBudgetCredits: z.number().nullable(),
   stripeConfigured: z.boolean(),
   hasPaymentMethod: z.boolean(),
@@ -853,7 +885,6 @@ export const creditLedgerEntrySchema = z.object({
   createdAt: z.string(),
   deltaCredits: z.number(),
   reason: z.string(),
-  pool: z.enum(["included", "prepaid"]).nullable(),
   metadata: z.record(z.string(), z.unknown()),
 });
 export type CreditLedgerEntry = z.infer<typeof creditLedgerEntrySchema>;

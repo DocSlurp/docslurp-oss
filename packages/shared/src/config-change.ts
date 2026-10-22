@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-import { FIXED_OVERHEAD_SECONDS, estimateIngest, isBillingEnforced, type PipelineProfileId, type PlanId } from "./billing.js";
+import { FIXED_OVERHEAD_SECONDS, estimateIngest, isBillingEnforced, type PipelineProfileId } from "./billing.js";
 import { sha256Hex } from "./hash.js";
 import { embeddingModelCatalogByUri, embeddingProfileCatalog } from "./embedding.js";
 import { costEstimateSchema, type CostEstimate } from "./jobs.js";
@@ -231,8 +231,6 @@ const STAGE_WEIGHT: Record<PipelineRunStage, number> = {
   index: 0.04,
 };
 
-/** Per-document fixed cost in credits (cents), from the worker forecast. */
-const OVERHEAD_CREDITS_PER_DOCUMENT = 0.01;
 
 const profileFor = (features: PipelineFeatures): PipelineProfileId =>
   features.parserPlaybook === "fast" ? "fast" : features.parserPlaybook === "agentic" || features.parserPlaybook === "review-grade" ? "deep" : "standard";
@@ -248,7 +246,8 @@ export function estimatePipelineWork(args: {
   stages: readonly PipelineRunStage[];
   pages: number;
   documents: number;
-  plan?: PlanId;
+  /** Org concurrent worker ceiling (default FUNDED_WORKER_SLOTS). */
+  workerSlots?: number;
   /** Required: the caller decides which environment decides billing. Browsers pass their server-reported env. */
   env: Record<string, string | undefined>;
 }): CostEstimate {
@@ -263,10 +262,9 @@ export function estimatePipelineWork(args: {
   const share = selectedWeight <= 0 ? 0 : Math.min(1, selectedWeight / Math.max(plannedWeight, selectedWeight));
 
   const run = (mix: { text: number; complex: number; scanned: number }) =>
-    estimateIngest({ pages, documents: Math.max(1, documents), mix, profile, plan: args.plan ?? "free" });
+    estimateIngest({ pages, documents: Math.max(1, documents), mix, profile, ...(args.workerSlots ? { workerSlots: args.workerSlots } : {}) });
   const low = run({ text: 1, complex: 0, scanned: 0 });
   const high = run({ text: 0.2, complex: 0.3, scanned: 0.5 });
-  const overhead = documents * OVERHEAD_CREDITS_PER_DOCUMENT * (share > 0 ? 1 : 0);
   const scaleSeconds = (wall: number) => (share > 0 && pages > 0 ? Math.max(0, wall - FIXED_OVERHEAD_SECONDS) * share + FIXED_OVERHEAD_SECONDS : 0);
 
   return costEstimateSchema.parse({
@@ -274,8 +272,8 @@ export function estimatePipelineWork(args: {
     documents,
     billing,
     credits: billing === "disabled" ? null : {
-      low: round(low.credits.totalCredits * share + overhead),
-      high: round(high.credits.totalCredits * share + overhead),
+      low: round(low.credits.totalCredits * share),
+      high: round(high.credits.totalCredits * share),
     },
     seconds: { low: round(scaleSeconds(low.wallSeconds)), high: round(scaleSeconds(high.wallSeconds)) },
     basis: `${profile} profile, ${selected.length} of ${Math.max(planned.size, selected.length)} stages; `

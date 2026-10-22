@@ -33,9 +33,9 @@ export const PUBLIC_ERROR_MESSAGES = {
   searchScope: "Search must stay within a single workspace.",
   modelNotAllowed: "That chat model isn’t available for this request. Omit model to use the default.",
   chatDeadline: "The chat turn ran out of time before an answer was ready. Retry, or ask a narrower question.",
-  creditExhausted: "Your organization is out of credits. Buy credits or upgrade your plan to continue.",
+  creditExhausted: "Your organization is out of credits. Buy credits to continue.",
   budgetPaused: "The monthly budget cap has been reached, so AI processing is paused. Raise the budget to resume.",
-  planRequired: "This isn’t included in your current plan.",
+  planRequired: "This isn’t available to your organization.",
 } as const;
 
 export function publicErrorForStatus(status: number): string {

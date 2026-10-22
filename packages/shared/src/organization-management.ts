@@ -17,7 +17,7 @@ export type OrganizationMember = z.infer<typeof organizationMemberSchema>;
 export const updateOrganizationSchema = z.object({
   name: z.string().trim().min(1).max(120).optional(),
   slug: z.string().trim().min(2).max(120).regex(/^[a-z0-9-]+$/).nullable().optional(),
-  /** Paid plans only; null returns to the plan default. */
+  /** Null returns to DEFAULT_RETAINED_VERSIONS. */
   retainDocumentVersions: z.number().int().min(1).max(100).nullable().optional(),
 }).strict().refine(value => Object.keys(value).length > 0, "Supply name, slug or retainDocumentVersions");
 export type UpdateOrganizationInput = z.infer<typeof updateOrganizationSchema>;
