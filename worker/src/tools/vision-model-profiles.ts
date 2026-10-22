@@ -5,6 +5,7 @@
 
 import { openRouterReasoningParams, type OpenRouterReasoning } from "@docslurp/shared";
 
+import { unwrapWholeMarkdownFence } from "./vision-markdown-fence.js";
 import { normalizeMarkdownMathDelimiters } from "./vision-math-delimiters.js";
 
 /** Markdown transcription that asks for LaTeX math, keeps text inside figures, and forbids layout padding or paraphrase. */
@@ -26,7 +27,17 @@ export const MARKDOWN_TRANSCRIPTION_VISION_PROMPT = [
   "Output only the Markdown transcription.",
 ].join("\n");
 
-export type VisionProfilePromptKey = "markdown-latex" | "markdown-transcription";
+/** Page-wide Markdown transcription with LaTeX math, GFM tables for printed tables, and text inside figures. */
+export const PAGE_MARKDOWN_LATEX_VISION_PROMPT = [
+  "Transcribe this document page into GitHub-flavored Markdown. Copy every visible word verbatim in natural reading order: finish each column before starting the next, and keep headers, footers, captions and labels where they appear. Do not summarize, translate, describe or add commentary.",
+  "- Headings as # headings; lists as - or numbered lists.",
+  "- Math: write every formula and equation in LaTeX, inline as $...$ and each equation set on its own line as $$...$$ (keep equation numbers with \\tag{}). Never write math as Unicode symbols, plain text or \\( \\) delimiters.",
+  "- Tables: transcribe content printed as a table (ruled or column-aligned rows) as a GFM pipe table with one row per line, keeping header rows and every cell. Do not turn other content, such as diagrams or label-value lines, into tables.",
+  "- Text inside charts, diagrams and figures: transcribe it as plain lines.",
+  "- Do not pad lines with alignment spaces. Output only the Markdown.",
+].join("\n");
+
+export type VisionProfilePromptKey = "markdown-latex" | "markdown-transcription" | "page-markdown-latex";
 
 export interface OpenRouterProviderPreferences {
   order: string[];
@@ -50,6 +61,16 @@ export interface VisionModelProfile {
    * never changes how the same model reasons in chat. Models without one fall back to `openRouterReasoningParams`.
    */
   reasoning?: OpenRouterReasoning;
+  /** OpenAI-style `image_url.detail` sent with the page image. Unset sends no `detail`. */
+  imageDetail?: "low" | "high" | "auto";
+  /**
+   * OpenRouter routing for a single retry when the first endpoint's output filter stops the page
+   * (`finish_reason: "content_filter"`); filters differ per host for the same model. The retry's text is kept
+   * and usage and cost are summed over both calls.
+   * TODO: pending unification into the generic retry-on-refusal/length/content-filter mechanism (other branch);
+   * fold this field into it then.
+   */
+  contentFilterRetryProvider?: OpenRouterProviderPreferences;
   /** Repair applied to the model's transcription text. */
   postProcess?: (text: string) => string;
 }
@@ -84,6 +105,20 @@ export const VISION_MODEL_PROFILES: Readonly<Record<string, VisionModelProfile>>
     reasoning: { effort: "none" },
     openRouterProvider: { order: ["relace", "deepinfra"], allow_fallbacks: true },
     postProcess: normalizeMarkdownMathDelimiters,
+  },
+  // 2026-10-21 tuning (tune split, 68 pages x 2): the LaTeX/table template lifts math and content F1;
+  // detail "high" caps image tokens ~7% below the default. Downscaling to a 1,600 px long side saved another ~13%
+  // but blurred dense non-Latin script (Hebrew content F1 0.99 -> 0.95), so pages go at full size.
+  // Probes: effort none, minimal and `{ enabled: false }` all return 200; unset spends ~240 reasoning tokens on a page.
+  "openai/gpt-6-luna": {
+    defaultPrompt: "page-markdown-latex",
+    imageDetail: "high",
+    reasoning: { effort: "none" },
+    // Rare: some models wrap the whole page in a ```markdown fence.
+    postProcess: unwrapWholeMarkdownFence,
+    // OpenAI's output filter deterministically stops some ordinary published pages (corporate filings,
+    // government guidance) mid-page; Bedrock and Azure US transcribed them. Bedrock lists $0.11/$0.55 per M.
+    contentFilterRetryProvider: { order: ["amazon-bedrock/us-east-1", "azure/us"], allow_fallbacks: false },
   },
 };
 
@@ -124,4 +159,16 @@ export function postProcessVisionText(model: string | undefined, text: string): 
 export function visionReasoningParams(model: string | undefined): { reasoning?: OpenRouterReasoning } {
   const reasoning = visionModelProfile(model)?.reasoning;
   return reasoning ? { reasoning: { ...reasoning } } : openRouterReasoningParams(model);
+}
+
+/** `image_url` fields beyond `url` for `model` (currently the profile's `detail`). */
+export function visionImageUrlOptions(model: string | undefined): { detail?: "low" | "high" | "auto" } {
+  const detail = visionModelProfile(model)?.imageDetail;
+  return detail ? { detail } : {};
+}
+
+/** Provider routing for the one content-filter retry of `model`, or undefined when it has none. */
+export function contentFilterRetryProvider(model: string | undefined): OpenRouterProviderPreferences | undefined {
+  const provider = visionModelProfile(model)?.contentFilterRetryProvider;
+  return provider ? { order: [...provider.order], allow_fallbacks: provider.allow_fallbacks } : undefined;
 }

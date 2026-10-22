@@ -21,6 +21,16 @@ describe("OpenRouter thinking controls", () => {
     expect(baseFetch.mock.calls[0][1]).toBe(init);
   });
 });
+describe("GPT-6 Luna chat reasoning", () => {
+  // Luna's vision floor lives in the vision profile; the shared chat table must not change chat requests.
+  it("leaves a reasoning-less chat body untouched", async () => {
+    const baseFetch = vi.fn<typeof fetch>().mockResolvedValue(new Response("{}"));
+    const init = { method: "POST", body: JSON.stringify({ model: "openai/gpt-6-luna", messages: [{ role: "user", content: "hi" }] }) };
+    await createOpenRouterReasoningFetch(baseFetch)("https://openrouter.ai/api/v1/chat/completions", init);
+    expect(baseFetch.mock.calls[0][1]).toBe(init);
+    expect(lowestOpenRouterReasoning("openai/gpt-6-luna")).toBeUndefined();
+  });
+});
 describe("lowest accepted reasoning", () => {
   const sent = async (model: string) => {
     const baseFetch = vi.fn<typeof fetch>().mockResolvedValue(new Response("{}"));
