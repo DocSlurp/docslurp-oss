@@ -81,7 +81,7 @@ describe("GPT-6 Luna vision profile", () => {
     expect(body.messages[1].content[1].image_url.detail).toBe("high");
     expect(body.max_tokens).toBe(16384);
     expect(body.temperature).toBe(0);
-    expect(Object.keys(body).sort()).toEqual(["max_tokens", "messages", "model", "reasoning", "temperature"]);
+    expect(Object.keys(body).sort()).toEqual(["max_tokens", "messages", "model", "reasoning", "stream", "stream_options", "temperature"]);
   });
 
   it("matches the golden default-prompt request body", async () => {
@@ -107,7 +107,7 @@ describe("GPT-6 Luna vision profile", () => {
     expect(bodies[0]!.messages[1].content[1].image_url.detail).toBeUndefined();
   });
 
-  it("resends a content-filtered page once to the pinned endpoints, keeps the retry text and sums both calls", async () => {
+  it("retries a content-filtered page once on the profile's preferred route, keeps the retry text and sums both calls", async () => {
     const { bodies, result } = await run(LUNA, undefined, [
       { provider: "OpenAI", choices: [{ message: { content: "Partial" }, finish_reason: "content_filter" }], usage: { prompt_tokens: 400, completion_tokens: 0, cost: 0.00004 } },
       { provider: "Amazon Bedrock", choices: [{ message: { content: "# Full page" }, finish_reason: "stop" }], usage: { prompt_tokens: 2000, completion_tokens: 600, cost: 0.00055 } },
@@ -115,21 +115,26 @@ describe("GPT-6 Luna vision profile", () => {
     expect(bodies).toHaveLength(2);
     expect(bodies[0]!.provider).toBeUndefined();
     expect(bodies[1]!.provider).toEqual({ order: ["amazon-bedrock/us-east-1", "azure/us"], allow_fallbacks: false });
-    expect(result).toMatchObject({ text: "# Full page", finishReason: "stop", inputTokens: 2400, outputTokens: 600 });
+    expect(result).toMatchObject({ text: "# Full page", finishReason: "stop", inputTokens: 2400, outputTokens: 600, attempts: 2 });
     expect(result.costCents).toBeCloseTo(0.059, 10);
   });
 
-  it("does not retry a second content filter, or other finish reasons", async () => {
+  it("rejects a page filtered on both routes with the summed spend, and does not retry other finish reasons twice", async () => {
     const filtered = { choices: [{ message: { content: "Partial" }, finish_reason: "content_filter" }], usage: { prompt_tokens: 400, completion_tokens: 0, cost: 0.00004 } };
-    expect((await run(LUNA, undefined, [filtered, filtered])).bodies).toHaveLength(2);
-    expect((await run(LUNA, undefined, [{ ...ok, choices: [{ message: { content: "x" }, finish_reason: "length" }] }])).bodies).toHaveLength(1);
+    const error = await run(LUNA, undefined, [filtered, filtered]).catch((e) => e);
+    expect(error).toMatchObject({ name: "VisionOutputRejectedError", inputTokens: 800, outputTokens: 0 });
+    expect(error.costCents).toBeCloseTo(0.008, 10);
+    const length = { ...ok, choices: [{ message: { content: "x" }, finish_reason: "length" }] };
+    expect((await run(LUNA, undefined, [length, ok])).bodies).toHaveLength(2);
   });
 
-  it("does not resend content-filtered pages for unprofiled models", async () => {
+  it("retries a content-filtered page for unprofiled models by ignoring the failing provider", async () => {
     const { bodies, result } = await run("google/gemini-3.1-flash-lite", undefined, [
-      { choices: [{ message: { content: "Partial" }, finish_reason: "content_filter" }], usage: { prompt_tokens: 400, completion_tokens: 0 } },
+      { provider: "Google AI Studio", choices: [{ message: { content: "Partial" }, finish_reason: "content_filter" }], usage: { prompt_tokens: 400, completion_tokens: 0 } },
+      ok,
     ]);
-    expect(bodies).toHaveLength(1);
-    expect(result.finishReason).toBe("content_filter");
+    expect(bodies).toHaveLength(2);
+    expect(bodies[1]!.provider).toEqual({ ignore: ["Google AI Studio"] });
+    expect(result.finishReason).toBe("stop");
   });
 });
