@@ -218,7 +218,9 @@ describe("shouldFailOpenVisionError", () => {
       metric: "page-analysis-attempt", model: "google/gemini-3.1-flash-lite", inputTokens: 2400, outputTokens: 640,
       metadata: { outcome: "rejected", billable: false, documentId: "doc-1", pageNumber: 3 },
     });
-    expect(events[0]!.costCents).toBeGreaterThan(0);
+    // Provider spend is kept for cost accounting; the customer is not charged for a page with no output.
+    expect(events[0]!.costCents).toBe(0);
+    expect(events[0]!.metadata?.providerCostCents).toBeGreaterThan(0);
     expect(state.usageLedger.totals()).toMatchObject({ inputTokens: 2400, outputTokens: 640 });
     expect(log.mock.calls.filter(([l]) => String(l).startsWith("[ai-usage]"))).toHaveLength(1);
     // A plain failure keeps the non-billable zero-cost marker.

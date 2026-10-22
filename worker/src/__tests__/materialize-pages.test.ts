@@ -219,11 +219,12 @@ describe("materializePageRange", () => {
     const log = vi.spyOn(console, "log").mockImplementation(() => {});
     const result = await materializePageRange(h.deps, input(h, [1, 2]));
     expect(result.failed).toEqual([{ page: 2, reason: "rejected after 2 attempts" }]);
-    expect(result.costCredits).toBeGreaterThanOrEqual(1.5);
+    expect(result.costCredits).toBeLessThan(1.5); // the rejected page adds no customer charge; its provider spend stays in metadata
     const events = (h.usage as unknown as { pending: Array<{ metric: string; model: string; inputTokens: number; outputTokens: number; costCents: number; metadata: Record<string, unknown> }> }).pending;
     const event = events.find((e) => e.metric === "page-analysis-attempt");
     expect(event).toMatchObject({ model: "vision-x", inputTokens: 2400, outputTokens: 640, metadata: { outcome: "rejected", billable: false, documentId: "d1", pageNumber: 2 } });
-    expect(event!.costCents).toBeGreaterThan(0);
+    expect(event!.costCents).toBe(0);
+    expect(event!.metadata?.providerCostCents).toBeGreaterThanOrEqual(1.5);
     expect(log.mock.calls.filter(([l]) => String(l).startsWith("[ai-usage]") && String(l).includes("model=vision-x"))).toHaveLength(1);
     log.mockRestore();
   });
