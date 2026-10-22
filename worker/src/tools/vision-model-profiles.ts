@@ -3,6 +3,8 @@
  * OpenRouter model id. Models without an entry keep the generic defaults.
  */
 
+import { openRouterReasoningParams, type OpenRouterReasoning } from "@docslurp/shared";
+
 import { normalizeMarkdownMathDelimiters } from "./vision-math-delimiters.js";
 
 /** Markdown transcription that asks for LaTeX math, keeps text inside figures, and forbids layout padding or paraphrase. */
@@ -43,6 +45,11 @@ export interface VisionModelProfile {
   maxOutputTokensMode?: "default" | "ceiling";
   /** OpenRouter routing for this model. */
   openRouterProvider?: OpenRouterProviderPreferences;
+  /**
+   * Reasoning control for page transcription. Kept here, not in the shared chat floor table, so it
+   * never changes how the same model reasons in chat. Models without one fall back to `openRouterReasoningParams`.
+   */
+  reasoning?: OpenRouterReasoning;
   /** Repair applied to the model's transcription text. */
   postProcess?: (text: string) => string;
 }
@@ -58,6 +65,8 @@ export const VISION_MODEL_PROFILES: Readonly<Record<string, VisionModelProfile>>
   "deepseek/deepseek-v4.1-flash-1017": {
     defaultPrompt: "markdown-latex",
     maxOutputTokens: 8_192,
+    // Effort `none` returns zero reasoning tokens; `low` cost 6.4x per page and lowered math.
+    reasoning: { effort: "none" },
     openRouterProvider: { order: ["deepseek", "together"], allow_fallbacks: false },
   },
   // 2026-10-21 tune: with `<OCR>` MiMo writes plain text: tables flatten into runs of cells, standalone
@@ -71,6 +80,8 @@ export const VISION_MODEL_PROFILES: Readonly<Record<string, VisionModelProfile>>
     defaultPrompt: "markdown-transcription",
     maxOutputTokens: 8_192,
     maxOutputTokensMode: "ceiling",
+    // Reasons by default; `{ effort: "none" }` and `{ enabled: false }` both return 0 reasoning tokens.
+    reasoning: { effort: "none" },
     openRouterProvider: { order: ["relace", "deepinfra"], allow_fallbacks: true },
     postProcess: normalizeMarkdownMathDelimiters,
   },
@@ -107,4 +118,10 @@ export function visionOutputCapForModel(model: string | undefined, shared: { val
 /** Post-process a hosted page transcription with the model's profile repair; other models are returned unchanged. */
 export function postProcessVisionText(model: string | undefined, text: string): string {
   return visionModelProfile(model)?.postProcess?.(text) ?? text;
+}
+
+/** Request-body fragment with the reasoning control for `model`: the profile's, else the shared verified floor. */
+export function visionReasoningParams(model: string | undefined): { reasoning?: OpenRouterReasoning } {
+  const reasoning = visionModelProfile(model)?.reasoning;
+  return reasoning ? { reasoning: { ...reasoning } } : openRouterReasoningParams(model);
 }

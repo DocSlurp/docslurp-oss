@@ -52,4 +52,10 @@ describe("vision request bodies", () => {
     expect(Object.keys(actual)).toEqual(Object.keys(golden));
     for (const key of Object.keys(golden)) expect(actual[key], key).toEqual(golden[key]);
   });
+
+  it("keeps effort none on the vision requests for both tuned models", async () => {
+    for (const model of ["xiaomi/mimo-v2.6-flash", "deepseek/deepseek-v4.1-flash-1017"]) {
+      expect((await requestBody(model)).reasoning).toEqual({ effort: "none" });
+    }
+  });
 });

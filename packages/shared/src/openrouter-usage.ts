@@ -103,16 +103,12 @@ export type OpenRouterReasoning = { enabled: false } | { effort: "none" | "minim
  */
 export const OPENROUTER_LOWEST_REASONING: Readonly<Record<string, OpenRouterReasoning>> = {
   "deepseek/deepseek-v4.1-flash": { effort: "none" },
-  // 2026-10-21: effort `none` returns zero reasoning tokens; `low` cost 6.4x per page and lowered math.
-  "deepseek/deepseek-v4.1-flash-1017": { effort: "none" },
   "z-ai/glm-5.3-flash": { effort: "minimal" },
   "inclusionai/ling-3.0-flash-vl": { effort: "none" }, // EV1: HTTP 200 with zero reasoning tokens on 95+28 pages (2026-10-13)
   "anthropic/claude-haiku-5.5": { enabled: false },
   "anthropic/claude-sonnet-5.5": { effort: "minimal" },
   // 2026-10-20 probes: both `{ enabled: false }` and effort `none` return HTTP 200 with zero reasoning tokens.
   "nvidia/nemotron-3.5-super-vl": { enabled: false },
-  // 2026-10-21 probes: reasons by default; `{ effort: "none" }` and `{ enabled: false }` both return 0 reasoning tokens.
-  "xiaomi/mimo-v2.6-flash": { effort: "none" },
 };
 
 export function lowestOpenRouterReasoning(model: string | undefined): OpenRouterReasoning | undefined {

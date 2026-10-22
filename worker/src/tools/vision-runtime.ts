@@ -1,4 +1,4 @@
-import { openRouterReasoningParams, resolveSupportedModelIdWithWarning } from "@docslurp/shared";
+import { resolveSupportedModelIdWithWarning } from "@docslurp/shared";
 import { withObservation } from "@docslurp/shared/observability";
 import type { ProviderRateLease } from "../lib/provider-rate-limit.js";
 import { fetchWithProviderRetry, providerFromBaseUrl } from "../lib/provider-retry.js";
@@ -8,6 +8,7 @@ import {
   openRouterProviderParams,
   postProcessVisionText,
   visionOutputCapForModel,
+  visionReasoningParams,
   visionPromptKeyForModel,
 } from "./vision-model-profiles.js";
 
@@ -379,7 +380,7 @@ async function runVisionRequest(args: {
           temperature: 0,
           max_tokens: visionMaxOutputTokens(args.model),
           // Page transcription never needs thinking: pin each verified model to its lowest accepted effort.
-          ...(args.baseUrl?.includes("openrouter.ai") ? openRouterReasoningParams(args.model) : {}),
+          ...(args.baseUrl?.includes("openrouter.ai") ? visionReasoningParams(args.model) : {}),
           // Per-model routing restricted to providers measured to transcribe faithfully.
           ...(args.baseUrl?.includes("openrouter.ai") ? openRouterProviderParams(args.model) : {}),
         }),

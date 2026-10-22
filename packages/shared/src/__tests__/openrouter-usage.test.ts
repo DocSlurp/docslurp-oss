@@ -34,7 +34,6 @@ describe("lowest accepted reasoning", () => {
   it("uses each model's verified lowest setting", async () => {
     expect(await sent("deepseek/deepseek-v4.1-flash")).toEqual({ effort: "none" });
     expect(await sent("anthropic/claude-haiku-5.5")).toEqual({ enabled: false });
-    expect(await sent("xiaomi/mimo-v2.6-flash")).toEqual({ effort: "none" });
     expect(await sent("vendor/unknown")).toEqual({ enabled: false });
   });
   it("with no effort set, applies the floor only to listed models without an explicit reasoning choice", async () => {
@@ -48,6 +47,15 @@ describe("lowest accepted reasoning", () => {
     expect((await call({ model: "google/gemini-3.5-flash" })).reasoning).toBeUndefined();
     expect((await call({ model: "z-ai/glm-5.3-flash", reasoning_effort: "high" })).reasoning).toBeUndefined();
     expect((await call({ model: "z-ai/glm-5.3-flash", reasoning: { effort: "high" } })).reasoning).toEqual({ effort: "high" });
+  });
+  it("leaves reasoning-less chat requests for vision-tuned models untouched (their floors live in the vision profiles)", async () => {
+    for (const model of ["xiaomi/mimo-v2.6-flash", "deepseek/deepseek-v4.1-flash-1017"]) {
+      const baseFetch = vi.fn<typeof fetch>().mockResolvedValue(new Response("{}"));
+      const body = { model, messages: [{ role: "user", content: "hi" }] };
+      await createOpenRouterReasoningFetch(baseFetch)("https://openrouter.ai/api/v1/chat/completions", { method: "POST", body: JSON.stringify(body) });
+      expect(JSON.parse(baseFetch.mock.calls[0][1]!.body as string)).toEqual(body);
+      expect(lowestOpenRouterReasoning(model)).toBeUndefined();
+    }
   });
   it("adds a reasoning body fragment only for verified models", () => {
     expect(openRouterReasoningParams("z-ai/glm-5.3-flash")).toEqual({ reasoning: { effort: "minimal" } });
