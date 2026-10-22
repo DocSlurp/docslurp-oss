@@ -1,5 +1,5 @@
 import type { Sql } from "postgres";
-import { mergePipelineFeatures, type MaterializePagesInput } from "@docslurp/shared";
+import { applyDefaultVisionOverride, mergePipelineFeatures, type MaterializePagesInput } from "@docslurp/shared";
 
 import { isMissingDocumentError } from "../db/missing-document.js";
 import { recordMaterializedPageFee } from "../db/page-base-fee.js";
@@ -59,7 +59,7 @@ async function withSourcePipeline<R extends { id: string; kind?: string; pipelin
   if (!source?.pipeline) {
     throw new Error(`materialize run ${run.id} has no pipeline and document ${documentId} has no source pipeline; refusing to run on defaults`);
   }
-  return { ...run, pipeline: mergePipelineFeatures(source.pipeline as never) };
+  return { ...run, pipeline: applyDefaultVisionOverride(mergePipelineFeatures(source.pipeline as never)) };
 }
 
 /**

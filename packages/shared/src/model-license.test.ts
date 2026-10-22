@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
 import { buildDecisionModelCatalog, buildRoutingTargetCatalog } from "./routing-targets.js";
-import { licenseClassOfModel, readDisableNonFreeSoftware, resetDisableNonFreeSoftwareWarnings } from "./model-license.js";
+import { licenseClassOfModel, lookupModelLicense, readDisableNonFreeSoftware, resetDisableNonFreeSoftwareWarnings } from "./model-license.js";
 import {
   MEASURED_OCR_ROUTES,
   filterFlatTierRoutes,
@@ -152,5 +152,22 @@ describe("flat tier route policy", () => {
     expect(licenseClassOfModel("Qwen/Qwen3-VL-8B-Instruct")).toBe("free");
     expect(licenseClassOfModel("jinaai/jina-embeddings-v5-omni-small")).toBe("non-free");
     expect(licenseClassOfModel("llm://openai/gpt-4.1-mini")).toBe("proprietary-hosted");
+  });
+});
+
+describe("licence classes of the tuned hosted vision models", () => {
+  it("records MIT weights as free and Luna as proprietary-hosted, by URI and by id", () => {
+    for (const id of ["deepseek/deepseek-v4.1-flash", "deepseek/deepseek-v4.1-flash-1017", "xiaomi/mimo-v2.6-flash", "z-ai/glm-5.3-flash"]) {
+      expect(lookupModelLicense(id)).toMatchObject({ licenseClass: "free", id: "mit" });
+      expect(licenseClassOfModel(`llm://openrouter/${id}`)).toBe("free");
+    }
+    expect(lookupModelLicense("openai/gpt-6-luna")).toMatchObject({ licenseClass: "proprietary-hosted" });
+    expect(licenseClassOfModel("llm://openrouter/openai/gpt-6-luna")).toBe("proprietary-hosted");
+  });
+
+  it("gives every opt-in entry a source", () => {
+    for (const id of ["deepseek/deepseek-v4.1-flash-1017", "xiaomi/mimo-v2.6-flash", "openai/gpt-6-luna"]) {
+      expect(lookupModelLicense(id)?.source).toBeTruthy();
+    }
   });
 });

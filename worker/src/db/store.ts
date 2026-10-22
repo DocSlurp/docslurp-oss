@@ -9,7 +9,7 @@ import { WorkerSlotStore, resolveWorkerSlotOptions, tryMaintenanceLease, type Wo
 import { randomUUID, createHmac } from "node:crypto";
 
 import postgres, { type JSONValue, type Sql } from "postgres";
-import { defaultPipelineFeatures, PII_BLOCKED_DOCUMENT_STATUS, planRunFailure, type PrivacyAuditEntry } from "@docslurp/shared";
+import { applyDefaultVisionOverride, defaultPipelineFeatures, PII_BLOCKED_DOCUMENT_STATUS, planRunFailure, type PrivacyAuditEntry } from "@docslurp/shared";
 
 import { mergePipelineFeatures } from "../models.js";
 import { adoptBackfillDocuments } from "../deferred/backfill-adoption.js";
@@ -3591,7 +3591,8 @@ function mapRun(row: WorkspaceRunRow): WorkspaceRun {
     pagesTotal: row.pages_total,
     pagesProcessed: row.pages_processed,
     spentCents: Number(row.spent_cents ?? 0) || 0,
-    pipeline: mergePipelineFeatures(row.pipeline ?? defaultPipelineFeatures),
+    // DOCSLURP_VISION_MODEL_URI replaces the built-in default vision model at run time, never in stored settings.
+    pipeline: applyDefaultVisionOverride(mergePipelineFeatures(row.pipeline ?? defaultPipelineFeatures)),
     error: row.error,
     stats: row.stats ?? {},
     artifacts: row.artifacts ?? {},

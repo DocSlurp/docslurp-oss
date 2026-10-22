@@ -2,7 +2,7 @@ import type { PGlite } from "@electric-sql/pglite";
 import type { PGLiteSocketServer } from "@electric-sql/pglite-socket";
 import type { Sql } from "postgres";
 import { defaultPipelineFeatures } from "@docslurp/shared";
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { Config } from "../config.js";
 import { ensurePageRows } from "../deferred/page-ledger.js";
@@ -10,6 +10,7 @@ import { materializePageRange, type PageMaterializerDeps, type PageMaterializerO
 import { Store } from "../db/store.js";
 import type { Document } from "../models.js";
 import { PipelineUsageEventLedger } from "../pipeline/usage-ledger.js";
+import { VisionOutputRejectedError } from "../tools/vision-stream.js";
 import { createMigratedDatabase } from "../test/migrated-db.js";
 import { serveOnRandomPort } from "../test/migrated-postgres.js";
 
@@ -210,6 +211,23 @@ describe("materializePageRange", () => {
     expect(result.failed).toEqual([{ page: 2, reason: "vision down" }]);
     const state = await db.query<{ state: string; failure_reason: string }>(`select state, failure_reason from document_page_states where page_number = 2`);
     expect(state.rows[0]).toEqual({ state: "failed", failure_reason: "vision down" });
+  });
+
+  it("records the summed spend of a page rejected on every attempt in the usage ledger", async () => {
+    const rejected = new VisionOutputRejectedError("rejected after 2 attempts", [], 2400, 640, 1.5);
+    rejected.route = { model: "vision-x", provider: "openrouter" };
+    const h = harness({ 1: LONG, 2: "" }, { async ocrPage() { throw rejected; } });
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const result = await materializePageRange(h.deps, input(h, [1, 2]));
+    expect(result.failed).toEqual([{ page: 2, reason: "rejected after 2 attempts" }]);
+    expect(result.costCredits).toBeLessThan(1.5); // the rejected page adds no customer charge; its provider spend stays in metadata
+    const events = (h.usage as unknown as { pending: Array<{ metric: string; model: string; inputTokens: number; outputTokens: number; costCents: number; metadata: Record<string, unknown> }> }).pending;
+    const event = events.find((e) => e.metric === "page-analysis-attempt");
+    expect(event).toMatchObject({ model: "vision-x", inputTokens: 2400, outputTokens: 640, metadata: { outcome: "rejected", billable: false, documentId: "d1", pageNumber: 2 } });
+    expect(event!.costCents).toBe(0);
+    expect(event!.metadata?.providerCostCents).toBeGreaterThanOrEqual(1.5);
+    expect(log.mock.calls.filter(([l]) => String(l).startsWith("[ai-usage]") && String(l).includes("model=vision-x"))).toHaveLength(1);
+    log.mockRestore();
   });
 
   it("removes stale chunk rows when a page re-chunks to fewer chunks", async () => {

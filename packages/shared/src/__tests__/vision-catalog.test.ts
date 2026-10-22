@@ -1,11 +1,17 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import {
   DEFAULT_OPENROUTER_VISION_MODEL,
+  DEFAULT_VISION_PROFILE,
   NEMOTRON_SUPER_VL_VISION_MODEL,
   OPENROUTER_BASE_URL,
+  applyDefaultVisionOverride,
   defaultVisionConfig,
   normalizePipelineFeatures,
+  readVisionModelUriOverride,
+  resetVisionModelUriOverrideReports,
+  visionModelCatalogById,
+  visionProfileCatalog,
   openRouterReasoningParams,
   resolveVisionRoute,
   visionConfigSchema,
@@ -17,10 +23,91 @@ import {
 const NEMOTRON_URI = `llm://openrouter/${NEMOTRON_SUPER_VL_VISION_MODEL}`;
 
 describe("hosted vision catalog", () => {
-  it("keeps Gemini 3.1 Flash Lite as the default and Nemotron opt-in", () => {
-    expect(defaultVisionConfig.profile).toBe("good-fast-hosted");
-    expect(defaultVisionConfig.modelUri).toBe(`llm://openrouter/${DEFAULT_OPENROUTER_VISION_MODEL}`);
-    expect(visionConfigSchema.parse({}).modelUri).toBe(`llm://openrouter/${DEFAULT_OPENROUTER_VISION_MODEL}`);
+  const defaultUri = `llm://openrouter/${DEFAULT_OPENROUTER_VISION_MODEL}`;
+
+  it("derives the default config, profile text and catalog entry from DEFAULT_OPENROUTER_VISION_MODEL", () => {
+    const entry = visionModelCatalogById[DEFAULT_OPENROUTER_VISION_MODEL];
+    expect(entry).toMatchObject({ target: "hosted", uri: defaultUri });
+    expect(entry.tokenPricing).not.toBeNull();
+    expect(defaultVisionConfig.profile).toBe(DEFAULT_VISION_PROFILE);
+    expect(defaultVisionConfig.modelUri).toBe(defaultUri);
+    expect(visionConfigSchema.parse({}).modelUri).toBe(defaultUri);
+    expect(visionProfileCatalog[DEFAULT_VISION_PROFILE].config.modelUri).toBe(defaultUri);
+    expect(visionProfileCatalog[DEFAULT_VISION_PROFILE].description).toContain(entry.label);
+    expect(new Set(visionModelCatalog.map((model) => model.id)).size).toBe(visionModelCatalog.length);
+  });
+
+  it("catalogs the tuned opt-in models with list prices and never a Pro/Ultra or :free variant", () => {
+    const tuned = {
+      "deepseek/deepseek-v4.1-flash-1017": { input: 0.3, output: 1.2, perPage: 0.103 },
+      "xiaomi/mimo-v2.6-flash": { input: 0.14, output: 0.28, perPage: 0.056 },
+      "openai/gpt-6-luna": { input: 0.1, output: 0.5, perPage: 0.061 },
+      "z-ai/glm-5.3-flash": { input: 0.0113, output: 0.1589, perPage: 0.013 },
+    };
+    for (const [id, expected] of Object.entries(tuned)) {
+      const uri = `llm://openrouter/${id}`;
+      expect(visionModelCatalogById[id as keyof typeof visionModelCatalogById], id).toMatchObject({
+        uri,
+        target: "hosted",
+        estimatedCostPerPageCents: expected.perPage,
+      });
+      expect(visionModelTokenPricing(uri), id).toEqual({
+        inputUsdPerMillion: expected.input,
+        outputUsdPerMillion: expected.output,
+        checked: "2026-10-22",
+      });
+      expect(visionConfigSchema.parse({ modelUri: uri }).modelUri).toBe(uri);
+    }
+    // GLM: ~3,000 input + 560 output tokens at list price, rounded up.
+    expect(visionListPriceCents("z-ai/glm-5.3-flash", { inputTokens: 3_000, outputTokens: 560 })).toBeCloseTo(0.01229, 4);
+    for (const entry of visionModelCatalog) expect(entry.id, entry.id).not.toMatch(/-pro|-ultra|:free/i);
+  });
+
+  describe("DOCSLURP_VISION_MODEL_URI", () => {
+    const luna = "llm://openrouter/openai/gpt-6-luna";
+    const pipeline = (vision = defaultVisionConfig, privacyMode = "standard") => ({ vision, privacyMode });
+
+    it("replaces only the built-in default vision model", () => {
+      const env = { DOCSLURP_VISION_MODEL_URI: luna };
+      const out = applyDefaultVisionOverride(pipeline(), env);
+      expect(out.vision).toMatchObject({ modelUri: luna, target: "hosted", profile: DEFAULT_VISION_PROFILE });
+      expect(resolveVisionRoute(out.vision)).toMatchObject({ provider: "openrouter", model: "openai/gpt-6-luna" });
+      // Unset env and an override equal to the default change nothing.
+      const base = pipeline();
+      expect(applyDefaultVisionOverride(base, {})).toBe(base);
+      expect(applyDefaultVisionOverride(base, { DOCSLURP_VISION_MODEL_URI: defaultUri })).toBe(base);
+    });
+
+    it("lets an explicit workspace model, profile or privacy mode win", () => {
+      const env = { DOCSLURP_VISION_MODEL_URI: luna };
+      const explicitModel = pipeline(visionConfigSchema.parse({ modelUri: NEMOTRON_URI }));
+      const explicitProfile = pipeline(visionConfigSchema.parse({ profile: "cheapest-hosted" }));
+      const local = pipeline(visionConfigSchema.parse({ profile: "cheapest-local" }));
+      for (const input of [explicitModel, explicitProfile, local]) expect(applyDefaultVisionOverride(input, env)).toBe(input);
+      for (const mode of ["local-only", "strict-privacy"]) {
+        const strict = pipeline(defaultVisionConfig, mode);
+        expect(applyDefaultVisionOverride(strict, env)).toBe(strict);
+      }
+    });
+
+    it("ignores invalid values with one error each", () => {
+      resetVisionModelUriOverrideReports();
+      const onError = vi.fn();
+      for (const value of [
+        "not a uri",
+        "llm://openrouter/vendor/uncataloged-model",
+        "llm://local-cli/microsoft/Florence-2-base-ft",
+        "openai/gpt-6-luna",
+      ]) {
+        expect(readVisionModelUriOverride({ DOCSLURP_VISION_MODEL_URI: value }, onError), value).toBeNull();
+        readVisionModelUriOverride({ DOCSLURP_VISION_MODEL_URI: value }, onError);
+      }
+      expect(onError).toHaveBeenCalledTimes(4);
+      expect(onError.mock.calls[0]![0]).toContain("DOCSLURP_VISION_MODEL_URI");
+      expect(readVisionModelUriOverride({ DOCSLURP_VISION_MODEL_URI: "  " }, onError)).toBeNull();
+      expect(onError).toHaveBeenCalledTimes(4);
+      expect(readVisionModelUriOverride({ DOCSLURP_VISION_MODEL_URI: ` ${luna} ` }, onError)).toBe(luna);
+    });
   });
 
   it("resolves the opt-in profile and an explicit model URI to the OpenRouter route", () => {

@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import { forecastRunCost } from "../pipeline/cost-forecast.js";
 import type { Document } from "../models.js";
 import type { PipelineFeatures } from "@docslurp/shared";
-import { defaultPipelineFeatures } from "@docslurp/shared";
+import { applyDefaultVisionOverride, defaultPipelineFeatures } from "@docslurp/shared";
 import type { WorkerDeploymentProfile } from "../pipeline/local-compute-cost.js";
 
 const profile: WorkerDeploymentProfile = {
@@ -148,5 +148,13 @@ describe("forecastRunCost", () => {
     expect(result.breakdown.localCompute).toBeGreaterThan(0);
     expect(result.minCents).toBeGreaterThan(result.breakdown.overhead);
     expect(result.deploymentProfile).toBe(profile.id);
+  });
+
+  it("forecasts the DOCSLURP_VISION_MODEL_URI model, matching the server preview", () => {
+    const docs = [makeDoc(10)];
+    const base = forecast(docs, defaultPipelineFeatures);
+    const overridden = applyDefaultVisionOverride(defaultPipelineFeatures, { DOCSLURP_VISION_MODEL_URI: "llm://openrouter/z-ai/glm-5.3-flash" });
+    expect(overridden.vision.modelUri).toBe("llm://openrouter/z-ai/glm-5.3-flash");
+    expect(forecast(docs, overridden).maxCents).toBeLessThan(base.maxCents);
   });
 });

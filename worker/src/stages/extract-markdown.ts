@@ -1291,6 +1291,7 @@ export class ExtractMarkdownStage implements Stage {
             imagePath,
             outputPath: `${imagePath}.json`,
             privacyMode: args.state.run.pipeline.privacyMode,
+            funded: args.state.run.orgFunded,
             vision: {
               ...args.state.run.pipeline.vision,
               prompt: buildCritiquePrompt(
