@@ -130,7 +130,8 @@ export const billingRoutes = new Hono()
     const userId = c.get("sessionUser").id;
     const org = await resolveBillingOrganization(userId, c.req.query("orgId"));
     if (!org) {
-      return c.json({ creditBalanceCents: 0 });
+      // Same answer as /overview and /ledger: a foreign or unknown org is not found.
+      return apiStatusError(c, 404, "No organization found");
     }
     const credits = await getAvailableCredits(org.id);
     return c.json({ creditBalanceCents: credits.available, orgId: org.id });
