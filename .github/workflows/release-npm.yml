@@ -75,7 +75,7 @@ jobs:
           # which can predate script changes (v0.2.0 does).
           NODE_OPTIONS: --max-old-space-size=4096
       - run: pnpm --filter @docslurp/sdk --filter @docslurp/cli test
-      - run: node --test scripts/package-release.test.mjs scripts/check-package-contents.test.mjs scripts/retire-packages.test.mjs scripts/deprecated-shims/build.test.mjs
+      - run: node scripts/node-test.mjs scripts/package-release.test.mjs scripts/check-package-contents.test.mjs scripts/retire-packages.test.mjs scripts/deprecated-shims/build.test.mjs
       # Published packages promise engines >=20; prove it on the tagged build.
       # CI runs only the .nvmrc LTS; this release-time step is the Node 20 floor check.
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
@@ -88,9 +88,9 @@ jobs:
           for package in $(node scripts/package-release.mjs list); do
             pnpm --dir "$package" run --if-present build
           done
-          (cd packages/sdk && node --test test/*.test.mjs)
-          (cd packages/cli && node --test test/*.test.mjs)
-          (cd packages/contrib-search-compat && node --test test/*.test.mjs)
+          (cd packages/sdk && node ../../scripts/node-test.mjs test/*.test.mjs)
+          (cd packages/cli && node ../../scripts/node-test.mjs test/*.test.mjs)
+          (cd packages/contrib-search-compat && node ../../scripts/node-test.mjs test/*.test.mjs)
           # Tags before the import check existed still release.
           if [ -f scripts/check-package-imports.mjs ]; then node scripts/check-package-imports.mjs; fi
       - name: Pack verified packages
