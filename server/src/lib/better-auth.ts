@@ -50,8 +50,24 @@ if (process.env.GITHUB_CLIENT_ID?.trim() && process.env.GITHUB_CLIENT_SECRET?.tr
 if (process.env.GOOGLE_CLIENT_ID?.trim() && process.env.GOOGLE_CLIENT_SECRET?.trim()) {
   socialProviders.google = {
     clientId: process.env.GOOGLE_CLIENT_ID,
-    clientSecret: process.env.GOOGLE_CLIENT_SECRET
+    clientSecret: process.env.GOOGLE_CLIENT_SECRET,
+    // Let people signed in to several Google accounts pick one instead of
+    // silently reusing the browser's current account.
+    prompt: "select_account"
   };
+}
+
+const socialSignInProviders = new Set(["github", "google"]);
+const signInTokenFields = ["accessToken", "refreshToken", "idToken"] as const;
+
+/** Nulls whichever sign-in tokens an account update carries; other fields pass through. */
+export function withoutSocialSignInTokens<T extends Record<string, unknown>>(update: T): T {
+  if (!signInTokenFields.some((field) => update[field] != null)) return update;
+  const stripped: Record<string, unknown> = { ...update };
+  for (const field of signInTokenFields) {
+    if (field in stripped) stripped[field] = null;
+  }
+  return stripped as T;
 }
 
 export const configuredSocialProviders = Object.freeze({
@@ -142,10 +158,15 @@ export const auth = betterAuth({
       }
     },
     account: {
+      update: {
+        // Sign-in tokens are only kept encrypted in oauth_accounts (see create
+        // below). Better Auth rewrites them onto the account row on every
+        // repeat sign-in, so strip them there too.
+        before: async (account) => ({ data: withoutSocialSignInTokens(account) })
+      },
       create: {
         after: async (account) => {
-          const oauthProviders = new Set(["github", "google"]);
-          if (!oauthProviders.has(account.providerId)) return;
+          if (!socialSignInProviders.has(account.providerId)) return;
 
           if (!oauthTokenEncryptionKey) {
             console.warn("[oauth] OAUTH_TOKEN_ENCRYPTION_KEY is not set; skipping OAuth token persistence");
