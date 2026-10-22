@@ -108,6 +108,27 @@ describe("planner on real catalog/prior pack", () => {
     expect(roles[0]!.scope.kind).toBe("page");
   });
 
+  it.each([0.2, 0.65])("keeps native prose and OCRs an unknown embedded image at coverage %s", coverage => {
+    const page = makePage({ words: 400, images: [{ coverage }] });
+    const roles = rolesForPage(needsFromFeatures(page), DEFAULT_PLANNER_CONFIG);
+    expect(roles.map(r => r.role)).toEqual(["accept-text", "ocr"]);
+    expect(roles[1].scope).toEqual({ kind: "image", imageIndex: 0, bbox: page.images[0].bbox });
+  });
+
+  it("skips proven blank pages but does not discard vector-only or annotated pages", () => {
+    const blank = makePage({ words: 0 });
+    expect(rolesForPage(needsFromFeatures(blank), DEFAULT_PLANNER_CONFIG)).toMatchObject([{ role: "skip" }]);
+    for (const page of [makePage({ words: 0, vectors: 10 }), { ...blank, unusualFeatures: ["annotation-freetext"] }]) {
+      expect(rolesForPage(needsFromFeatures(page), DEFAULT_PLANNER_CONFIG).map(r => r.role)).not.toContain("skip");
+    }
+  });
+
+  it("does not OCR each tile again after scheduling OCR for a scanned page", () => {
+    const page = makePage({ words: 0, images: [{ coverage: 0.45 }, { coverage: 0.45 }] });
+    expect(rolesForPage(needsFromFeatures(page), DEFAULT_PLANNER_CONFIG)).toMatchObject([{ role: "ocr", scope: { kind: "page" } }]);
+    expect(rolesForPage(needsFromFeatures(page), DEFAULT_PLANNER_CONFIG)).toHaveLength(1);
+  });
+
   it("objective monotonicity on real estimates: cost-quality <= quality in cost; quality >= in pPass", () => {
     const page = makePage({ pageNumber: 6 });
     const a = answers({ trust_text_layer: 0.2, needs_math_extraction: 0.9, text_layer_ok: 0.3 });

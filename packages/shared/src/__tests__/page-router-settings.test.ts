@@ -15,7 +15,7 @@ describe("page router workspace settings", () => {
     expect(features.pageRouter.mode).toBeUndefined();
     expect(features.pageRouter).toMatchObject({
       objective: "cost-quality",
-      router: "decision-model",
+      router: "baseline",
       triageFormat: "per-page",
       pagesPerCall: 1,
       tilePx: 384,
