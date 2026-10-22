@@ -1,7 +1,7 @@
 import { deferredProfilesEnabled, isBillingEnforced, PUBLIC_ERROR_MESSAGES, publicDiagnostics, publicDocumentError } from "@docslurp/shared";
 import { refineWorkspaceNames } from "./workspace-naming.js";
 import { jsonRecord } from "../lib/json-record.js";
-import { randomUUID } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 
 import {
   applyWorkspaceTemplateLocks,
@@ -10,6 +10,9 @@ import {
   getWorkspaceTemplate,
   isWorkspaceUuid,
   normalizePipelineFeatures,
+  slugifyWorkspaceName,
+  WORKSPACE_SLUG_MAX_LENGTH,
+  type WorkspaceInputRef,
   withoutStageSelection,
   updateWorkspaceSchema,
   workspaceSlugProblem,
@@ -379,8 +382,8 @@ export async function createWorkspace(input: CreateWorkspaceInput): Promise<Work
     await validateModeChoice({ orgId: organization.id, workspaceId: null, currentMode: null, nextPipeline: pipeline });
   }
 
-  const [row] = await sql<WorkspaceRow[]>`
-    insert into workspaces (id, org_id, user_id, name, template_key, system_prompt, pipeline)
+  const insert = (slug: string | null) => sql<WorkspaceRow[]>`
+    insert into workspaces (id, org_id, user_id, name, template_key, system_prompt, pipeline, slug)
     values (
       ${id},
       ${organization.id},
@@ -388,7 +391,8 @@ export async function createWorkspace(input: CreateWorkspaceInput): Promise<Work
       ${parsed.name},
       ${parsed.templateKey ?? null},
       ${parsed.systemPrompt ?? null},
-      ${sql.json(JSON.parse(JSON.stringify(withoutStageSelection(pipeline))))}
+      ${sql.json(JSON.parse(JSON.stringify(withoutStageSelection(pipeline))))},
+      coalesce(${slug}::text, generate_workspace_slug())
     )
     returning
       id,
@@ -418,7 +422,31 @@ export async function createWorkspace(input: CreateWorkspaceInput): Promise<Work
       updated_at::text
   `;
 
-  return mapWorkspace(row);
+  let row: WorkspaceRow | undefined;
+  for (const slug of preferredSlugCandidates(parsed.slug)) {
+    try {
+      [row] = await insert(slug);
+      break;
+    } catch (error) {
+      // Slugs are globally unique and never reused, so a taken one gets a suffix.
+      if (slug === null || (error as { code?: string }).code !== "23505") throw error;
+    }
+  }
+
+  return mapWorkspace(row!);
+}
+
+/**
+ * Slugs to try, in order, for a new workspace that prefers `slug`: the slug
+ * itself, then suffixed variants, then a generated three-word slug. Invalid
+ * or reserved slugs (too short, "default", ...) go straight to a generated one.
+ */
+function preferredSlugCandidates(preferred: string | undefined): Array<string | null> {
+  const slug = preferred ? slugifyWorkspaceName(preferred) : "";
+  if (!slug || workspaceSlugProblem(slug)) return [null];
+  const base = slug.slice(0, WORKSPACE_SLUG_MAX_LENGTH - 7).replace(/-+$/g, "");
+  const suffixed = Array.from({ length: 3 }, () => `${base}-${randomBytes(3).toString("hex")}`);
+  return [slug, ...suffixed, null];
 }
 
 export { DEFAULT_WORKSPACE_NAME, WorkspaceAccessError } from "./default-workspace.js";
@@ -443,14 +471,74 @@ export async function resolveWorkspaceRef(ref: string): Promise<WorkspaceRef | n
     const [row] = await sql<{ id: string; slug: string }[]>`select id, slug from workspaces where id = ${trimmed}`;
     return row ? { id: row.id, slug: row.slug, renamedFrom: null } : null;
   }
+  const slug = slugifyWorkspaceName(trimmed);
+  if (!slug) return null;
   const [row] = await sql<{ id: string; slug: string }[]>`
     select w.id, w.slug
     from workspace_slugs s
     join workspaces w on w.id = s.workspace_id
-    where s.slug = ${trimmed.toLowerCase()}
+    where s.slug = ${slug}
   `;
   if (!row) return null;
-  return { id: row.id, slug: row.slug, renamedFrom: row.slug === trimmed.toLowerCase() ? null : trimmed.toLowerCase() };
+  return { id: row.id, slug: row.slug, renamedFrom: row.slug === slug ? null : slug };
+}
+
+/** Who is resolving a public `workspace` value, and where it may land. */
+export interface WorkspaceInputScope {
+  userId: string;
+  /** Only workspaces in this organization: an API key's org or an explicit `orgId`. */
+  orgId?: string | null;
+  /** An API key's workspace allowlist; empty or null means unrestricted. */
+  allowedWorkspaceIds?: readonly string[] | null;
+}
+
+/**
+ * Finds the workspace a public `workspace` value (see parseWorkspaceInput)
+ * names among those the caller can use: a UUID by ID; anything else by its
+ * slug, current or former (renamed workspaces keep their old slugs). Slugs are
+ * globally unique, so a slug that is taken elsewhere, reserved or too short
+ * cannot name the caller's workspace; those fall back to the caller's
+ * workspace whose name slugifies to the same slug (oldest first), which keeps
+ * `workspace: "Legal Contracts"` pointing at the workspace an upload created
+ * for it. Workspaces outside the caller's access, the scope's organization or
+ * the key allowlist are never returned, so the answer never reveals them.
+ */
+export async function findWorkspaceForInput(
+  ref: Extract<WorkspaceInputRef, { kind: "id" } | { kind: "slug" }>,
+  scope: WorkspaceInputScope,
+): Promise<{ id: string; orgId: string } | null> {
+  const usable = async (workspaceId: string) => {
+    const access = await getWorkspaceAccess(workspaceId, scope.userId);
+    if (!access) return null;
+    if (scope.orgId && access.orgId !== scope.orgId) return null;
+    const allowlist = scope.allowedWorkspaceIds ?? [];
+    if (allowlist.length > 0 && !allowlist.includes(workspaceId)) return null;
+    return { id: workspaceId, orgId: access.orgId };
+  };
+  if (ref.kind === "id") return await usable(ref.id);
+
+  const [bySlug] = await sql<{ workspace_id: string }[]>`
+    select workspace_id from workspace_slugs where slug = ${ref.slug}
+  `;
+  if (bySlug) {
+    const workspace = await usable(bySlug.workspace_id);
+    if (workspace) return workspace;
+  }
+
+  const named = await sql<{ id: string; name: string }[]>`
+    select w.id, w.name
+    from workspaces w
+    join org_memberships om on om.org_id = w.org_id and om.user_id = ${scope.userId}
+    where (${scope.orgId ?? null}::text is null or w.org_id = ${scope.orgId ?? null})
+      and w.id <> ${bySlug?.workspace_id ?? ""}
+    order by (w.archived_at is not null), w.created_at, w.id
+  `;
+  for (const row of named) {
+    if (slugifyWorkspaceName(row.name) !== ref.slug) continue;
+    const workspace = await usable(row.id);
+    if (workspace) return workspace;
+  }
+  return null;
 }
 
 /**

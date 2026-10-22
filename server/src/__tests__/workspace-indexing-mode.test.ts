@@ -308,7 +308,7 @@ describe("upload indexingMode", () => {
     const fakes = createWorkspaceIntakeFakes({ workspaces: [fakeWorkspace({ pipeline: { ...defaultPipelineFeatures, indexingMode: "full" } })] });
     const run = async () => {
       await intake.intakeIntoWorkspace({
-        userId: "u1", workspaceId: "ws-existing", kind: "bulk-upload", indexingMode: "visual",
+        userId: "u1", workspace: "ws-existing", kind: "bulk-upload", indexingMode: "visual",
         items: [{ filename: "a.pdf", mimeType: "application/pdf", content: { bytes: Buffer.from("x") } }],
       }, fakes.ports);
       return fakes.runs.at(-1)!;
