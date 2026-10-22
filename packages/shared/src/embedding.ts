@@ -461,6 +461,11 @@ export const visionRuntimeSchema = z.enum([
 ]);
 export type VisionRuntime = z.infer<typeof visionRuntimeSchema>;
 export const OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1";
+/**
+ * The hosted vision model behind the default profile (`good-fast-hosted`). Switching the default is a one-line
+ * change here: the profile label and description, the default config and the default-derived values follow.
+ * It must be a hosted `visionModelCatalog` id (checked by the catalog tests).
+ */
 export const DEFAULT_OPENROUTER_VISION_MODEL = "google/gemini-3.1-flash-lite";
 /** Opt-in hosted vision route; OpenRouter list price verified 2026-10-20 ($0.15/M input, $0.50/M output). */
 export const NEMOTRON_SUPER_VL_VISION_MODEL = "nvidia/nemotron-3.5-super-vl";
@@ -525,14 +530,14 @@ export const visionModelCatalog = [
     tokenPricing: null,
   },
   {
-    id: DEFAULT_OPENROUTER_VISION_MODEL,
-    uri: `llm://openrouter/${DEFAULT_OPENROUTER_VISION_MODEL}`,
+    id: "google/gemini-3.1-flash-lite",
+    uri: "llm://openrouter/google/gemini-3.1-flash-lite",
     label: "Gemini 3.1 Flash Lite",
     target: "hosted",
     tags: ["hosted", "speed", "quality"],
     runtime: "openai-compatible",
     description:
-      "Default OpenRouter multimodal fallback for low-latency, high-volume page extraction.",
+      "OpenRouter multimodal model for low-latency, high-volume page extraction.",
     estimatedCostPerPageCents: 0.5,
     tokenPricing: { inputUsdPerMillion: 0.25, outputUsdPerMillion: 1.5, checked: "2026-10-20" },
   },
@@ -561,6 +566,57 @@ export const visionModelCatalog = [
     // tokens: images tile by resolution) against 0.09-0.16 for Gemini 3.1 Flash Lite; refine after the slice run.
     estimatedCostPerPageCents: 0.2,
     tokenPricing: { inputUsdPerMillion: 0.15, outputUsdPerMillion: 0.5, checked: "2026-10-20" },
+  },
+  // Opt-in tuned candidates (see worker/src/tools/vision-model-profiles.ts for their per-model prompt, routing and
+  // reasoning settings). List prices from OpenRouter's /api/v1/models, checked 2026-10-22; per-page costs are measured.
+  {
+    id: "deepseek/deepseek-v4.1-flash-1017",
+    uri: "llm://openrouter/deepseek/deepseek-v4.1-flash-1017",
+    label: "DeepSeek V4.1 Flash 1017",
+    target: "hosted",
+    tags: ["hosted", "cost", "open-weights"],
+    runtime: "openai-compatible",
+    description:
+      "Open-weights (MIT) DeepSeek multimodal snapshot on OpenRouter; opt-in low-cost page extraction with Markdown/LaTeX transcription.",
+    estimatedCostPerPageCents: 0.056,
+    tokenPricing: { inputUsdPerMillion: 0.15, outputUsdPerMillion: 0.6, checked: "2026-10-22" },
+  },
+  {
+    id: "xiaomi/mimo-v2.6-flash",
+    uri: "llm://openrouter/xiaomi/mimo-v2.6-flash",
+    label: "MiMo V2.6 Flash",
+    target: "hosted",
+    tags: ["hosted", "cost", "open-weights"],
+    runtime: "openai-compatible",
+    description:
+      "Open-weights (MIT) Xiaomi MiMo multimodal model on OpenRouter; opt-in low-cost page extraction with pinned fast routing.",
+    estimatedCostPerPageCents: 0.056,
+    tokenPricing: { inputUsdPerMillion: 0.14, outputUsdPerMillion: 0.28, checked: "2026-10-22" },
+  },
+  {
+    id: "openai/gpt-6-luna",
+    uri: "llm://openrouter/openai/gpt-6-luna",
+    label: "GPT-6 Luna",
+    target: "hosted",
+    tags: ["hosted", "cost", "quality"],
+    runtime: "openai-compatible",
+    description:
+      "OpenAI GPT-6 Luna on OpenRouter; opt-in low-cost page extraction with high-detail images and a content-filter retry route.",
+    estimatedCostPerPageCents: 0.061,
+    tokenPricing: { inputUsdPerMillion: 0.1, outputUsdPerMillion: 0.5, checked: "2026-10-22" },
+  },
+  {
+    id: "z-ai/glm-5.3-flash",
+    uri: "llm://openrouter/z-ai/glm-5.3-flash",
+    label: "GLM 5.3 Flash",
+    target: "hosted",
+    tags: ["hosted", "cost", "open-weights"],
+    runtime: "openai-compatible",
+    description:
+      "Open-weights (MIT) Z.ai GLM multimodal model on OpenRouter; opt-in lowest-list-price page extraction.",
+    // Computed, not measured: ~3,000 input + 560 output tokens at list price = 0.0123 cents, rounded up.
+    estimatedCostPerPageCents: 0.013,
+    tokenPricing: { inputUsdPerMillion: 0.0113, outputUsdPerMillion: 0.1589, checked: "2026-10-22" },
   },
   {
     id: "gpt-4.1-mini",
@@ -624,6 +680,9 @@ export function visionListPriceCents(
   return (usage.inputTokens * pricing.inputUsdPerMillion + usage.outputTokens * pricing.outputUsdPerMillion) / 1e4;
 }
 
+/** The profile a workspace gets when it picks no vision model or profile. */
+export const DEFAULT_VISION_PROFILE = "good-fast-hosted" satisfies VisionProfileKey;
+
 export const visionProfileKeySchema = z.enum([
   "cheapest-local",
   "fastest-local",
@@ -677,7 +736,8 @@ export const visionProfileCatalog = {
   },
   "good-fast-hosted": {
     label: "Good + fast hosted",
-    description: "Default hosted Gemini route balancing extraction quality and latency.",
+    // Derived from the default model's catalog entry so switching DEFAULT_OPENROUTER_VISION_MODEL needs no copy edits.
+    description: `Default hosted route (${visionModelCatalogById[DEFAULT_OPENROUTER_VISION_MODEL].label}) balancing extraction quality and latency.`,
     tags: ["quality", "speed", "hosted"],
     config: {
       profile: "good-fast-hosted",
@@ -1009,7 +1069,7 @@ export const defaultEmbeddingConfig: EmbeddingConfig = {
 
 export const visionConfigSchema = z
   .object({
-    profile: visionProfileKeySchema.default("good-fast-hosted"),
+    profile: visionProfileKeySchema.default(DEFAULT_VISION_PROFILE),
     target: modelTargetSchema.optional(),
     modelUri: llmModelUriSchema.optional(),
     prompt: z.string().trim().min(1).max(200).default("<OCR>"),
@@ -1067,13 +1127,67 @@ export const visionConfigSchema = z
 export type VisionConfig = z.infer<typeof visionConfigSchema>;
 
 export const defaultVisionConfig: VisionConfig = {
-  ...visionProfileCatalog["good-fast-hosted"].config,
+  ...visionProfileCatalog[DEFAULT_VISION_PROFILE].config,
   prompt: "<OCR>",
   maxPagesPerDocument: 4,
   forceAllPages: false,
   remoteFallbackModelUri: null,
   benchmarkProfile: "difficult-pages",
 };
+
+/** Env var that replaces the default hosted vision model (a global switch and kill switch). */
+export const VISION_MODEL_URI_ENV = "DOCSLURP_VISION_MODEL_URI";
+
+const reportedVisionOverrideErrors = new Set<string>();
+
+/**
+ * The validated `DOCSLURP_VISION_MODEL_URI` value, or null when unset or invalid. It must be an `llm://` URI of a
+ * hosted model in `visionModelCatalog`: uncataloged models would be priced at the generic fallback rates and
+ * under-count spend. An invalid value is reported once and ignored, so a typo never breaks ingestion.
+ */
+export function readVisionModelUriOverride(
+  env: Record<string, string | undefined> = process.env,
+  onError: (message: string) => void = (message) => console.error(message),
+): string | null {
+  const raw = env[VISION_MODEL_URI_ENV]?.trim();
+  if (!raw) return null;
+  const entry = llmModelUriSchema.safeParse(raw).success ? visionModelCatalogByUri[raw] : undefined;
+  if (entry?.target === "hosted") return entry.uri;
+  if (!reportedVisionOverrideErrors.has(raw)) {
+    reportedVisionOverrideErrors.add(raw);
+    onError(
+      `[config] ${VISION_MODEL_URI_ENV}=${raw} ignored: expected one of ${
+        visionModelCatalog.filter((model) => model.target === "hosted").map((model) => model.uri).join(", ")
+      }`,
+    );
+  }
+  return null;
+}
+
+export function resetVisionModelUriOverrideReports(): void {
+  reportedVisionOverrideErrors.clear();
+}
+
+/**
+ * Applies `DOCSLURP_VISION_MODEL_URI` to a pipeline whose vision config is still the built-in default (default
+ * profile, its own model URI). A non-default profile or any other model URI is an explicit choice and wins, and
+ * non-standard privacy modes are left untouched. Call where a run or preview consumes a stored pipeline; never
+ * before persisting one, or the override would be saved as if the workspace had chosen it.
+ */
+export function applyDefaultVisionOverride<T extends { vision: VisionConfig; privacyMode?: string }>(
+  pipeline: T,
+  env: Record<string, string | undefined> = process.env,
+  onError?: (message: string) => void,
+): T {
+  const override = readVisionModelUriOverride(env, onError);
+  if (!override) return pipeline;
+  if (pipeline.privacyMode && pipeline.privacyMode !== "standard") return pipeline;
+  const defaults = visionProfileCatalog[DEFAULT_VISION_PROFILE].config;
+  const { vision } = pipeline;
+  if (vision.profile !== DEFAULT_VISION_PROFILE || vision.modelUri !== defaults.modelUri) return pipeline;
+  if (override === vision.modelUri) return pipeline;
+  return { ...pipeline, vision: { ...vision, modelUri: override, target: "hosted" } };
+}
 
 export type VisionExecutionConfig = {
   target: ModelTarget;

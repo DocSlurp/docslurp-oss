@@ -1331,8 +1331,9 @@ export class VisionExtractStage implements Stage {
 
     // Without a provider charge (OpenAI direct never returns one; OpenRouter BYOK may not), price cataloged
     // hosted models at their own list price. The generic COST_PER_1K_* fallback is in cents per 1k tokens
-    // (defaults $0.10/M input, $0.30/M output), below every cataloged hosted list price, so this raises
-    // receipt-less charges to list price; it never lowers them.
+    // (defaults $0.10/M input, $0.30/M output), below most cataloged hosted list prices, so this usually raises
+    // receipt-less charges to list price; the cheapest entries (GLM 5.3 Flash) list below the fallback and
+    // are priced at their real, lower list price.
     return (
       visionListPriceCents(result.model, result) ??
         (result.inputTokens / 1000) * this.cfg.costPer1kInputTokens +

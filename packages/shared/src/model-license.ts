@@ -84,6 +84,10 @@ export const MODEL_LICENSES: Readonly<Record<string, ModelLicenseEntry>> = {
   // ---- open-weight models we call only through a hosted API (weights licence verified)
   "inclusionai/ling-3.0-flash-vl": { licenseClass: "free", id: "mit", source: hub("inclusionAI/Ling-3.0-Flash-VL") },
   "deepseek/deepseek-v4.1-flash": { licenseClass: "free", id: "mit", source: hub("deepseek-ai/DeepSeek-V4.1-Flash") },
+  "deepseek/deepseek-v4.1-flash-1017": { licenseClass: "free", id: "mit", source: "huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash-1017 model card, verified 2026-10-22" },
+  // OpenRouter maps xiaomi/mimo-v2.6-flash to the MiMo-V2.6-Flash-RL checkpoint.
+  "xiaomi/mimo-v2.6-flash": { licenseClass: "free", id: "mit", source: "huggingface.co/XiaomiMiMo/MiMo-V2.6-Flash-RL model card, verified 2026-10-22" },
+  "openai/gpt-6-luna": { licenseClass: "proprietary-hosted", id: "proprietary", source: "OpenAI API terms" },
   "z-ai/glm-5.3-flash": { licenseClass: "free", id: "mit", source: hub("zai-org/GLM-5.3-Flash") },
   // ---- native engines
   "native:accept-text-layer": { licenseClass: "free", id: "internal", source: "DocSlurp code" },

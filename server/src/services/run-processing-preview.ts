@@ -1,4 +1,5 @@
 import {
+  applyDefaultVisionOverride,
   defaultPipelineFeatures,
   parserPlaybookCatalog,
   runProcessingPreviewRequestSchema,
@@ -418,7 +419,8 @@ export function buildRunProcessingPreview(args: {
     (total, source) => total + source.sizeBytes,
     0,
   );
-  const pipeline = request.pipeline ?? defaultPipelineFeatures;
+  // Same run-time override the worker applies, so the preview prices the model the worker will call.
+  const pipeline = applyDefaultVisionOverride(request.pipeline ?? defaultPipelineFeatures);
   const history = summarizePreviewHistory(args.historyRows ?? []);
   const signals = estimateComplexitySignals(sources);
 
