@@ -1,5 +1,7 @@
 -- Credit packs and per-unit prices; no subscription plans (2026-10-21).
 --
+-- destructive-migration: owner-approved plan removal (pricing spec 2026-10-21, pre-release; DB resets are acceptable). Release N-1 reads plan_id, included credits and the old function signatures, so this release must replace every app and worker machine together (no N-1 overlap, no rollback onto this schema) or start from a reset database.
+--
 -- One prepaid pool (organizations.credit_balance_cents). The included plan
 -- allowance, plans, subscriptions, billing periods, past-due state and the
 -- unimplemented 12-month inactivity lapse are removed: credits do not expire.
