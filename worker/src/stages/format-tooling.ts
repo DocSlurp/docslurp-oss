@@ -55,7 +55,6 @@ export class FormatToolingStage implements Stage {
         { tool: "pdftotext", profile: "fast-text-layer", plan: () => this.runner.extractText(sourceKey) },
         { tool: "pdftohtml", profile: "fast-text-layer", plan: () => this.runner.extractHtml(sourceKey) },
         { tool: "native-pdf", profile: "layout-aware-markdown", plan: async () => ({ available: (await resolveNativePdfEngine(this.runner)) !== null }) },
-        { tool: "docling", profile: "layout-aware-markdown", plan: () => this.runner.doclingMarkdown(sourceKey, ".") },
         { tool: "ocrmypdf", profile: "ocr-rescue", plan: () => this.runner.ocrPdf(sourceKey, "out.pdf") }
       );
     } else if (format === "office-word" || format === "office-other") {

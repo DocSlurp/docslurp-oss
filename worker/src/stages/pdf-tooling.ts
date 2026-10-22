@@ -68,7 +68,7 @@ export class PdfToolingStage implements Stage {
               {
                 id: "layout-aware-markdown",
                 summary: "Use layout-preserving extractors when markdown fidelity matters.",
-                tools: ["native-pdf", "docling", "unstructured"]
+                tools: ["native-pdf", "unstructured"]
               },
               {
                 id: "ocr-rescue",
@@ -205,9 +205,6 @@ export class PdfToolingStage implements Stage {
       ocrPdf,
       unstructuredFast,
       unstructuredHiRes,
-      doclingMarkdown,
-      doclingJson,
-      doclingVlm,
       nativePdf,
       unpdfExtract,
       transformersJsClip,
@@ -222,9 +219,6 @@ export class PdfToolingStage implements Stage {
       this.runner.ocrPdf(document.sourceKey, "ocr-output.pdf"),
       this.runner.unstructuredPartition(document.sourceKey, "unstructured-fast.json", "fast"),
       this.runner.unstructuredPartition(document.sourceKey, "unstructured-hi-res.json", "hi_res"),
-      this.runner.doclingMarkdown(document.sourceKey, "docling"),
-      this.runner.doclingJson(document.sourceKey, "docling"),
-      this.runner.doclingVlm(document.sourceKey, "docling-vlm"),
       this.nativePdfPlan(),
       this.runner.unpdfExtract(document.sourceKey, "unpdf.json"),
       this.runner.transformersJsClip(
@@ -270,18 +264,6 @@ export class PdfToolingStage implements Stage {
         commands: {
           "partition-fast": unstructuredFast,
           "partition-hi-res": unstructuredHiRes
-        }
-      },
-      {
-        id: "docling",
-        tier: "layout-markdown",
-        kind: "python-cli",
-        bestFor: ["document structure", "markdown/json export", "optional VLM path"],
-        tradeoffs: ["larger dependency footprint", "VLM mode is slower than the standard pipeline"],
-        commands: {
-          markdown: doclingMarkdown,
-          json: doclingJson,
-          vlm: doclingVlm
         }
       },
       {

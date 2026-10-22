@@ -40,20 +40,21 @@ blis==1.3.3
     # via thinc
 build==1.6.1
     # via chromadb
-cachetools==7.2.1
+cachetools==7.2.4
     # via pymilvus
 catalogue==2.0.10
     # via
     #   spacy
     #   srsly
     #   thinc
-certifi==2026.7.22
+certifi==2026.10.19
     # via
     #   httpcore
     #   httpx
     #   kubernetes
     #   requests
     #   trafilatura
+    #   unstructured
 cffi==2.1.1
     # via cryptography
 charset-normalizer==3.5.2
@@ -114,7 +115,7 @@ filetype==1.2.0
     # via unstructured
 flatbuffers==25.12.19
     # via onnxruntime
-fonttools==4.66.1
+fonttools==4.67.0
     # via matplotlib
 frozenlist==1.8.0
     # via
@@ -162,7 +163,7 @@ httpcore==1.0.9
     # via
     #   httpx
     #   unstructured-client
-httpcore2==2.13.1
+httpcore2==2.16.0
     # via httpx2
 httptools==0.9.0
     # via uvicorn
@@ -171,7 +172,7 @@ httpx==0.28.1
     #   chromadb
     #   unstructured-client
     #   weasel
-httpx2==2.13.1
+httpx2==2.16.0
     # via huggingface-hub
 huggingface-hub==2.2.0
     # via
@@ -352,7 +353,7 @@ pi-heif==1.4.0
     # via unstructured
 pikepdf==10.17.0
     # via unstructured
-pillow==12.3.0
+pillow==13.0.0
     # via
     #   -r worker/requirements-base.txt
     #   matplotlib
@@ -412,7 +413,7 @@ pydantic==2.14.1
     #   weasel
 pydantic-core==2.50.1
     # via pydantic
-pydantic-settings==2.15.0
+pydantic-settings==2.16.1
     # via chromadb
 pygments==2.21.0
     # via rich
@@ -420,7 +421,7 @@ pymilvus==3.0.2
     # via -r worker/requirements-fallback.txt
 pyparsing==3.3.3
     # via matplotlib
-pypdf==6.20.1
+pypdf==6.21.2
     # via
     #   unstructured
     #   unstructured-client
@@ -432,7 +433,7 @@ pypika==0.51.1
     # via chromadb
 pyproject-hooks==1.3.3
     # via build
-python-dateutil==2.9.0.post0
+python-dateutil==3.0.0
     # via
     #   dateparser
     #   htmldate
@@ -505,7 +506,7 @@ safetensors==0.8.0
     #   transformers
 scipy==1.17.1
     # via unstructured-inference
-setuptools==84.0.0
+setuptools==84.2.1
     # via
     #   spacy
     #   thinc
@@ -518,7 +519,7 @@ six==1.17.0
     #   html5lib
     #   langdetect
     #   python-dateutil
-smart-open==8.0.3
+smart-open==8.0.4
     # via weasel
 soupsieve==2.10
     # via beautifulsoup4
@@ -565,7 +566,7 @@ tqdm==4.70.1
     #   unstructured
 trafilatura==2.3.1
     # via -r worker/requirements-base.txt
-transformers==5.19.0
+transformers==5.20.2
     # via unstructured-inference
 truststore==0.10.5
     # via
@@ -596,6 +597,7 @@ typing-extensions==4.16.0
     #   opentelemetry-semantic-conventions
     #   pydantic
     #   pydantic-core
+    #   pydantic-settings
     #   python-oxmsg
     #   python-pptx
     #   referencing
@@ -606,13 +608,15 @@ typing-inspection==0.4.4
     # via
     #   pydantic
     #   pydantic-settings
+tzdata==2026.5
+    # via python-dateutil
 tzlocal==5.4.4
     # via dateparser
-unstructured==0.27.25
+unstructured==0.27.33
     # via -r worker/requirements-fallback.txt
-unstructured-client==0.46.2
+unstructured-client==0.46.4
     # via unstructured
-unstructured-inference==1.6.13
+unstructured-inference==1.6.14
     # via unstructured
 unstructured-pytesseract==0.3.15
     # via unstructured
@@ -641,15 +645,15 @@ webencodings==0.6.1
     # via html5lib
 websocket-client==1.9.2
     # via kubernetes
-websockets==17.2
+websockets==17.3
     # via uvicorn
-wrapt==2.5.0
+wrapt==2.5.1
     # via
     #   smart-open
     #   unstructured
 xlsx2csv==0.8.6
     # via -r worker/requirements-base.txt
-xlsxwriter==3.2.9
+xlsxwriter==3.3.0
     # via python-pptx
 yarl==1.25.1
     # via aiohttp

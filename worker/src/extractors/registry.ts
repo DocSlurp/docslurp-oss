@@ -25,7 +25,6 @@ export interface ExtractedCandidate {
 export interface CandidateExecutors {
   stream(plan: CommandPlan, label: string, textKey: string, signal?: AbortSignal): Promise<ExtractedCandidate>;
   file(plan: CommandPlan, label: string, textKey: string, outputPath: string, signal?: AbortSignal): Promise<ExtractedCandidate>;
-  docling(plan: CommandPlan, label: string, textKey: string, sourcePath: string, signal?: AbortSignal): Promise<ExtractedCandidate>;
   liteparse(candidate: PreparedExtractor, textKey: string, sourcePath: string, signal?: AbortSignal): Promise<ExtractedCandidate>;
   graph?(candidate: PreparedExtractor, textKey: string, sourcePath: string, signal?: AbortSignal): Promise<ExtractedCandidate>;
   /** Publish Markdown an in-process extractor already wrote to `outputPath`. */
@@ -57,8 +56,6 @@ const stream: Execution = (candidate, executors, key, _source, signal) =>
   executors.stream(candidate.plan, candidate.label, key, signal);
 const file: Execution = (candidate, executors, key, _source, signal) =>
   executors.file(candidate.plan, candidate.label, key, candidate.outputPath!, signal);
-const docling: Execution = (candidate, executors, key, source, signal) =>
-  executors.docling(candidate.plan, candidate.label, key, source, signal);
 const liteparse: Execution = (candidate, executors, key, source, signal) =>
   executors.liteparse(candidate, key, source, signal);
 const graph: Execution = (candidate, executors, key, source, signal) => {
@@ -129,8 +126,6 @@ const registered = [
     prepare: (runner, source) => runner.extractMarkdown(source) }),
   definition({ id: "liteparse", outputSuffix: ".liteparse.json", execute: liteparse,
     prepare: (runner, source) => runner.liteParseExtract(source, `${source}.liteparse.json`, false) }),
-  definition({ id: "docling", tableAware: true, execute: docling,
-    prepare: (runner, source) => runner.doclingMarkdown(source, path.dirname(source)) }),
   definition({ id: "poppler-text", execute: stream,
     prepare: (runner, source) => runner.extractText(source, true) }),
   definition({ id: "graph-local", execute: graph,
@@ -152,7 +147,7 @@ const registered = [
 ];
 
 export const defaultDocumentExtractorOrder: Record<string, string[]> = {
-  pdf: ["kreuzberg", "native-pdf", "poppler-text", "docling"],
+  pdf: ["kreuzberg", "native-pdf", "poppler-text"],
   "structured-json": ["json"],
   default: ["kreuzberg", "pandoc"],
 };
