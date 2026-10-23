@@ -505,6 +505,13 @@
       "when": 1792792800001,
       "tag": "0071_stripe_credit_grant_terminal_state",
       "breakpoints": true
+    },
+    {
+      "idx": 72,
+      "version": "7",
+      "when": 1792792800002,
+      "tag": "0072_document_text_byte_counters",
+      "breakpoints": true
     }
   ]
 }
