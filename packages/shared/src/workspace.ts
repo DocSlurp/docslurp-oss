@@ -72,7 +72,7 @@ export const workspaceSchema = z.object({
   /** Generate reusable document summaries to improve search results. One-time generation and embedding cost per processed document version; reprocessing can incur it again. */
   summaries: z.boolean().default(true),
   pipeline: pipelineFeaturesSchema.default(defaultPipelineFeatures),
-  monthlyBudgetCents: z.number().int().nonnegative().nullable().default(null),
+  monthlyBudgetCents: z.number().int().nonnegative().max(2_147_483_647).nullable().default(null),
   /** Days before a run's artifacts are purged; null keeps them. */
   artifactRetentionDays: z.number().int().positive().nullable().default(null),
   /** Days from ingestion before documents, artifacts and their run expire; null keeps them indefinitely. */
@@ -739,7 +739,7 @@ export const updateWorkspaceSchema = z.object({
   /** Generate and cache document summaries for better search. Backfill/reprocessing can incur generation and embedding costs; omission preserves the current setting. */
   summaries: z.boolean().optional(),
   pipeline: pipelineFeaturesSchema.optional(),
-  monthlyBudgetCents: z.number().int().min(0).nullable().optional(),
+  monthlyBudgetCents: z.number().int().min(0).max(2_147_483_647).nullable().optional(),
   /** Null (or 0) keeps artifacts indefinitely. */
   artifactRetentionDays: z.number().int().min(0).max(3650).nullable().optional(),
   /** Null (or 0) keeps runs indefinitely. */

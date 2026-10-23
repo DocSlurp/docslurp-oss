@@ -250,24 +250,25 @@ export function createChatMcpTools(args: {
             ? Math.max(1, Math.min(Math.trunc(supplied.concurrency), searchConcurrency))
             : searchConcurrency
           : 1;
-        // G-04: the user-selected workspace is the only scope. It is applied
-        // after the model's arguments, so a prompt-injected workspaceId can't
-        // send a search into another workspace the user happens to reach.
-        // Workspace retrieval controls (including this request's overrides) are
-        // also applied after the model's arguments so a tool call cannot widen them.
-        // MCP takes `workspace`; remove the legacy spelling before strict validation.
-        // Apply scope last so model-supplied IDs cannot select another workspace.
-        const pinWorkspace = (value: Record<string, unknown>) => {
-          const { workspaceId: _legacy, workspace: _requested, ...rest } = value;
-          return { ...rest, workspace: args.workspaceId };
+        // G-04: the user-selected workspace is the only scope. The model's own
+        // workspace/workspaceId arguments are stripped, then the resolved
+        // workspace is applied, so a prompt-injected workspace key can't send a
+        // search into another workspace and the strict route schema never sees a
+        // stray field. Workspace retrieval controls (including this request's
+        // overrides) are applied after the model's arguments too.
+        const withoutWorkspace = (value: unknown): Record<string, unknown> => {
+          if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+          const { workspace: _workspace, workspaceId: _workspaceId, ...rest } = value as Record<string, unknown>;
+          return rest;
         };
+        const modelSupplied = withoutWorkspace(supplied);
         const body = definition.id === "search"
           ? Array.isArray(supplied.queries)
-            ? { ...supplied, concurrency, queries: supplied.queries.map(q => pinWorkspace({ ...(q && typeof q === "object" && !Array.isArray(q) ? q : {}), ...searchDefaults })) }
-            : pinWorkspace({ ...supplied, ...searchDefaults })
+            ? { ...modelSupplied, concurrency, queries: (supplied.queries as unknown[]).map(q => ({ ...withoutWorkspace(q), ...searchDefaults, workspace: args.workspaceId })) }
+            : { ...modelSupplied, ...searchDefaults, workspace: args.workspaceId }
           : definition.id === "chat" && chatDefaults
-            ? pinWorkspace({ ...supplied, retrieval: chatDefaults })
-            : pinWorkspace(supplied);
+            ? { ...modelSupplied, retrieval: chatDefaults, workspace: args.workspaceId }
+            : { ...modelSupplied, workspace: args.workspaceId };
         const queries = definition.id === "search" ? modelQueries(supplied) : undefined;
         const update = (status: ChatToolActivity["status"]) => {
           const event: ChatToolActivity = { id: toolCallId, name: definition.id, status,

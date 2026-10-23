@@ -287,6 +287,12 @@ describe("API-key run reads", () => {
     expect((await keyApp([]).request("/runs/run-1/progress")).status).toBe(403);
     expect(getRunProgressMock).not.toHaveBeenCalled();
   });
+  it("rejects a browser/client key on run reads even with a service scope (SEC-2026-10-ROUND3-01)", async () => {
+    expect((await keyApp(["search"], "client").request("/runs")).status).toBe(403);
+    expect((await keyApp(["search"], "client").request("/runs/activity/stream")).status).toBe(403);
+    expect((await keyApp(["search"], "client").request("/runs/run-1/progress")).status).toBe(403);
+    expect(listRunsMock).not.toHaveBeenCalled();
+  });
   it("filters run lists to the key organization", async () => {
     listRunsMock.mockResolvedValue([{ id: "own", orgId: "org-1" }, { id: "foreign", orgId: "org-2" }]);
     const response = await keyApp().request("/runs");
