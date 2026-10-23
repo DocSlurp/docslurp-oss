@@ -1157,7 +1157,11 @@ Pre-release: APIs may change, so pin the version you validate in production. MIT
 
 `listWorkspaces()` returns the accessible workspace records. Pass a returned ID to `getWorkspace(id)` for details. Upload, search and chat use the default workspace when none is supplied. `upload({ files, workspace: "Product manuals" })` or `upload({ urls, workspace: "Product manuals" })` uploads into the workspace with that name, creating it on first use.
 
-For normal file uploads, `upload()` handles storage transfer and ingestion automatically. Agents that transfer bytes separately can use:
+`upload()` transfers known-size files with presigned storage PUTs (a single PUT for small files, multipart for large files). The server verifies stored bytes and starts ingestion automatically; the SDK waits for the accepted run response. No completion call is needed. `directUpload: false` selects the size-limited multipart HTTP compatibility transport.
+
+Unknown-size Node streams, async byte iterables and single `{ data: readableStream, filename }` inputs use multipart storage uploads. The SDK buffers one part at a time, keeps at most three PUTs active, retries transient storage failures with replayable part bytes, and sends the ordered end-of-stream manifest only after every PUT succeeds. Source errors, cancellation and timeouts abort the storage session. Upload browser `ReadableStream` files individually; batches containing unknown-size streams are rejected before transfer. `timeoutMs` bounds the stream transfer and acceptance wait; it defaults to 30 minutes.
+
+Agents that transfer bytes separately can use:
 
 ```js
 const session = await client.createUploadSession({
@@ -1167,11 +1171,15 @@ const session = await client.createUploadSession({
 const file = session.files[0];
 const stored = await fetch(file.putUrl, { method: "PUT", headers: file.headers, body: bytes });
 if (!stored.ok) throw new Error("Storage upload failed");
-await client.completeUploadFile(session.sessionId, { fileId: file.id });
-const accepted = await client.completeUploadSession(session.sessionId);
+let current;
+do {
+  current = await client.getUploadSession(session.sessionId);
+  if (!current.result) await new Promise(resolve => setTimeout(resolve, 250));
+} while (!current.result);
+const accepted = current.result;
 await client.waitForRun(accepted.run.id);
 ```
 
-Signed URLs expire after 15 minutes. Treat them as credentials and never attach the DocSlurp API key to a storage request. `getUploadSession(sessionId)` refreshes pending transfer URLs. Complete every file before completing the session; the server checks stored sizes before starting ingestion. Use `abortUploadSession(sessionId)` to clean up an abandoned session. Session completion is not retry-idempotent.
+Signed URLs expire after 15 minutes. Treat them as credentials and never attach the DocSlurp API key to a storage request. `getUploadSession(sessionId)` refreshes pending transfer URLs. Known-size sessions reconcile automatically. For an unknown-size file, omit `sizeBytes` at creation, use `signUploadParts(sessionId, fileId, partNumbers)` as bytes arrive, and call `completeUploadFile(sessionId, { fileId, sizeBytes, parts })` at end of stream. `parts` contains ordered `{ partNumber, etag }` entries. Poll `getUploadSession()` for its persisted `result`. Use `abortUploadSession(sessionId)` to clean up an abandoned session.
 
 The HTTP upload prefix is `/v1/uploads`. `POST /v1/search` accepts either `{ q, ...filters }` or `{ queries, concurrency? }`. Use `search` for retrieval and `upload` for files or public URLs.
