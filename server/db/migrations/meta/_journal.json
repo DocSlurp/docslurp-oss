@@ -517,7 +517,42 @@
       "idx": 73,
       "version": "7",
       "when": 1792792800003,
-      "tag": "0073_automatic_upload_finalization",
+      "tag": "0073_retire_superseded_pending_documents",
+      "breakpoints": true
+    },
+    {
+      "idx": 74,
+      "version": "7",
+      "when": 1792792800004,
+      "tag": "0074_document_page_renders",
+      "breakpoints": true
+    },
+    {
+      "idx": 75,
+      "version": "7",
+      "when": 1792792800005,
+      "tag": "0075_backfill_verified_upload_source_bytes",
+      "breakpoints": true
+    },
+    {
+      "idx": 76,
+      "version": "7",
+      "when": 1792792800006,
+      "tag": "0076_retire_replaced_pending_versions",
+      "breakpoints": true
+    },
+    {
+      "idx": 77,
+      "version": "7",
+      "when": 1792792800007,
+      "tag": "0077_page_render_quality",
+      "breakpoints": true
+    },
+    {
+      "idx": 78,
+      "version": "7",
+      "when": 1792792800008,
+      "tag": "0078_automatic_upload_finalization",
       "breakpoints": true
     }
   ]

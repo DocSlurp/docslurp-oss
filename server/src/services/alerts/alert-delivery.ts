@@ -100,8 +100,11 @@ export async function deliverAlert(
   const line = formatAlertLogLine(notification, config);
   if (notification.status === "firing") console.error(line);
   else console.log(line);
-  if (config.telegram) await deliverTelegram(notification, config, config.telegram, fetchImpl);
-  if (!config.webhookUrl) return;
+  const telegramDelivered = !config.telegram || await deliverTelegram(notification, config, config.telegram, fetchImpl);
+  if (!config.webhookUrl) {
+    if (!telegramDelivered) throw new Error("Telegram alert delivery incomplete");
+    return;
+  }
   try {
     const response = await fetchImpl(config.webhookUrl, {
       method: "POST",
@@ -115,6 +118,7 @@ export async function deliverAlert(
   } catch (error) {
     console.error(`[alert] webhook delivery failed id=${notification.id} error=${quote(error instanceof Error ? error.message : String(error))}`);
   }
+  if (!telegramDelivered) throw new Error("Telegram alert delivery incomplete");
 }
 
 /** Plain-text Telegram message; failures are logged without the token-bearing URL. */
@@ -123,7 +127,7 @@ async function deliverTelegram(
   config: AlertDeliveryConfig,
   telegram: { token: string; chatId: string },
   fetchImpl: typeof fetch,
-): Promise<void> {
+): Promise<boolean> {
   const text = formatAlertPayload(notification, { ...config, format: "slack" }).text;
   try {
     const response = await fetchImpl(`https://api.telegram.org/bot${telegram.token}/sendMessage`, {
@@ -132,9 +136,13 @@ async function deliverTelegram(
       body: JSON.stringify({ chat_id: telegram.chatId, text: String(text).replace(/[*`]/g, "").slice(0, 4096), disable_web_page_preview: true }),
       signal: AbortSignal.timeout(config.timeoutMs),
     });
-    if (!response.ok) console.error(`[alert] telegram delivery failed id=${notification.id} status=${response.status}`);
+    const result = await response.json().catch(() => null) as { ok?: boolean } | null;
+    if (!response.ok || result?.ok !== true) console.error(`[alert] telegram delivery failed id=${notification.id} status=${response.status}`);
+    else console.log(`[alert] telegram delivered id=${notification.id} status=${notification.status}`);
+    return response.ok && result?.ok === true;
   } catch {
     // The request URL carries the bot token: never log the error.
     console.error(`[alert] telegram delivery failed id=${notification.id}`);
+    return false;
   }
 }

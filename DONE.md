@@ -1,6 +1,13 @@
 # Completed
 
 - Automatically finalize direct object uploads and ingest their verified bytes with persisted results, authenticated Tigris notifications, multipart reconciliation, unknown-length stream signing, concurrent-session fencing and interrupted-run recovery (2026-10-23). Retain explicit completion/confirmation compatibility and expire abandoned uploads.
+- Retire original unflagged pending canonical history after a newer same-organization/workspace/source replacement completes, repair existing terminal-run backlog, and serialize retirement with retries without blocking canonical locks (2026-10-23; migration 0076).
+
+- Render native PDF pages on demand through authorized, deduplicated and bounded Temporal jobs; persist page artifacts and scoped compute receipts atomically. Distinguish expected missing Lance compatibility tables from real storage failures, and let existing readers drain before the document counter migration acquires its lock (2026-10-23).
+
+- Preserve verified direct-upload byte accounting, backfill only ownership-matched completed upload receipts, give duplicate embedding artifacts document-local chunks/citation evidence, clear empty replacements, and retire superseded pending history without retry resurrection (2026-10-23; migrations 0073/0075).
+
+- Preserve safe credit-pause reasons and reserve facts, retry funding resumes transactionally, and emit deduplicated credit/deferred-resume alerts through existing Telegram/SigNoz logging (2026-10-23).
 
 - Remove repeated chunk/page heap scans from workspace board byte totals using exact statement-triggered document counters; preserve indexed-byte output and existing search counters (2026-10-23). Local paired confirmation is 79.5% faster; production rollout remains unmeasured.
 
@@ -53,3 +60,5 @@
 - Retire the automation surface: delete the hidden `ai.simple` / `ai.advanced` / `ai.operation.get` MCP tools, `/v1/ai/*`, automation operations and grounded summaries. Migration 0060 drops their tables (`ai_operations`, `ai_operation_events`, `grounded_summaries`) as the follow-up contract step. The MCP catalog now has one definition per public tool name; the internal `workspace.*` ids, alias map and `docslurp://ai/*` resources are gone (`docslurp://capabilities` replaces them).
 
 - 2026-10-21: Refresh app/OSS dependencies, remove the retired Docling extraction backend so all Python environments can use Pillow 13 security fixes, and remove the vulnerable sprintf-js dependency chain.
+
+- Add bounded 200 DPI selected PDF reader renders and explicit 300 DPI lossless PNG exports, with quality/version-specific caches, demand and compute receipts.

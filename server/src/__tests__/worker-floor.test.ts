@@ -64,13 +64,13 @@ describe("telegram alert delivery", () => {
     const sent: Array<{ url: string; body: { chat_id: string; text: string } }> = [];
     const fetchImpl = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
       sent.push({ url: String(url), body: JSON.parse(String(init?.body)) });
-      return new Response("ok");
+      return new Response(JSON.stringify({ ok: true }));
     });
     const config = resolveAlertDeliveryConfig({ TELEGRAM_BOT_TOKEN: "bot-secret", TELEGRAM_CHAT_ID: "42" });
     await deliverAlert(notification, config, fetchImpl as unknown as typeof fetch);
     expect(sent[0]?.body.chat_id).toBe("42");
     expect(sent[0]?.body.text).toContain("[FIRING] worker-pollers-missing");
-    await deliverAlert(notification, config, (async () => { throw new Error("fetch https://api.telegram.org/botbot-secret failed"); }) as unknown as typeof fetch);
+    await expect(deliverAlert(notification, config, (async () => { throw new Error("fetch https://api.telegram.org/botbot-secret failed"); }) as unknown as typeof fetch)).rejects.toThrow("Telegram alert delivery incomplete");
     expect(error.mock.calls.flat().join("\n")).not.toContain("bot-secret");
     error.mockRestore();
   });

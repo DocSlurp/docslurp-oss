@@ -1,3 +1,4 @@
+import { renderDocumentPage } from "../deferred/render-page.js";
 import { runPageBundle } from "./page-bundle.js";
 import { VisionExtractStage } from "../stages/vision-extract.js";
 import type { VisionPageTask } from "./shared.js";
@@ -178,6 +179,13 @@ export function createActivities(deps: ActivityDependencies) {
   const slotsEnabled = resolveWorkerSlotOptions().enabled;
 
   const activities = {
+    async renderDocumentPageActivity(input: import("@docslurp/shared").RenderDocumentPageInput): Promise<void> {
+      if (!deps.runner) throw ApplicationFailure.nonRetryable("Page rendering requires a command runner");
+      const context = Context.current();
+      const timer = setInterval(() => context.heartbeat(), 10_000);
+      try { await renderDocumentPage({ store, storage: deps.storage, runner: deps.runner }, input, context.cancellationSignal); }
+      finally { clearInterval(timer); }
+    },
     /** One contiguous page range of a materializePages workflow. */
     async materializePageRangeActivity(input: MaterializePagesInput): Promise<MaterializeResult> {
       const context = Context.current();

@@ -78,7 +78,7 @@ export class WorkspaceIntakeError extends Error {
 export type WorkspaceIntakeContent =
   | { bytes: Buffer }
   | { stream: Readable; contentLength?: number }
-  | { storedKey: string }
+  | { storedKey: string; /** Object-store size verified by the server, never a client declaration. */ verifiedSizeBytes?: number }
   | { rejected: WorkspaceIntakeError };
 
 export interface WorkspaceIntakeItem {
@@ -473,7 +473,7 @@ async function storeItem(
     ...(item.path ? { path: item.path } : {}),
   });
   const { content } = item;
-  if ("storedKey" in content) return stored(content.storedKey);
+  if ("storedKey" in content) return stored(content.storedKey, content.verifiedSizeBytes);
 
   const key = rawSourceKey(request.userId, admitted.filename);
   written.push(key);
