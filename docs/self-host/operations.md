@@ -3,6 +3,71 @@
 Commands on this page run from the repository root, with the stack started as
 described in [Docker Compose install](docker-compose.md).
 
+## Automatic upload completion and Tigris notifications
+
+Direct upload sessions finalize automatically. For known-size multipart uploads,
+the API reconciler lists stored parts, checks every part number and size, and
+assembles the object. Unknown-size streams must send an end-of-stream completion
+with their final byte count; the SDK does this after every part succeeds. The SDK
+then polls session status for the ingestion result. There is no separate client
+confirmation required to start ingestion.
+
+The API runs the reconciler every 15 seconds, in bounded batches, with per-session
+backoff (up to 30 seconds for incomplete uploads, five minutes after errors) and a 24-hour abandonment deadline. It also verifies single-PUT objects,
+so self-hosted S3/MinIO installations do not require webhooks. Keep the API process
+running; a process that sleeps between requests cannot execute background sweeps.
+
+For a bucket-specific custom domain, set
+`DOCSLURP_STORAGE_PUBLIC_BUCKET_URL=https://f.docslurp.io` (or your own HTTPS
+bucket origin). Upload URLs are signed for that host and omit the bucket name
+from their path. Internal storage access continues using the configured S3
+endpoint. The web app permits this origin in its upload connection policy.
+Keep the custom-domain CNAME DNS-only, pointing directly to Tigris, as required
+for Tigris TLS issuance/renewal. This storage URL is separate from the API's
+webhook receiver URL.
+
+For Tigris, notifications bring a pending session forward in the reconciliation
+schedule. Configure these **after applying migrations and deploying the receiver**:
+
+1. Set `DOCSLURP_TIGRIS_UPLOAD_WEBHOOK_SECRET` to a long random secret in the API
+   runtime. Use the same value as the notification token; do not use an S3 admin
+   key as the webhook token.
+2. Open the bucket's **Settings → Notifications** in the
+   [Tigris console](https://console.storage.dev/).
+3. Set the webhook URL to `https://YOUR_API_HOST/webhooks/tigris/uploads`.
+   The hosted DocSlurp URL is `https://docslurp.io/webhooks/tigris/uploads`.
+4. Select **Token authentication**, using the configured secret.
+5. Set this filter to exclude generated artifacts and unrelated events:
+
+   ```sql
+   WHERE `key` REGEXP "^[^/]+/[^/]+/raw/" AND (`Event-Type` = "OBJECT_CREATED_PUT" OR `Event-Type` = "OBJECT_CREATED_MULTIPART")
+   ```
+
+6. Enable notifications and save. Upload a small file and a multipart file;
+   verify their session results point to a single ingestion run each. A repeated
+   notification must not create another run.
+
+The receiver authenticates the bearer token, matches the configured storage
+bucket and registered source keys, and persists a reconciliation nudge before
+acknowledging. It never trusts notification byte counts as proof of completion.
+Do not configure a localhost URL in Tigris; use a publicly reachable development
+API or rely on reconciliation locally. Missing secret returns 503; invalid token
+returns 401. A successful authenticated empty `{"events":[]}` request returns
+200 and can check receiver reachability without ingesting anything.
+
+Poll `GET /v1/uploads/direct/sessions/:sessionId?statusOnly=true` for `status`,
+`error`, per-file state and `result`. A timeout after bytes were uploaded does
+not imply failure: retain the session ID and check it before submitting again.
+Look for `[upload-reconcile]` errors when handoff stalls. Configure the bucket's
+incomplete-multipart lifecycle expiry as a final safety net: a process crash
+between provider multipart creation and saving its upload ID can leave an orphan
+that the database cannot identify. Normal expired/failed sessions abort known
+multipart IDs and queue delayed raw-object cleanup.
+
+Tigris delivers at least once, may deliver out of order, and retries requests
+that do not receive a 2xx response within ten seconds. See the official
+[object notification documentation](https://www.tigrisdata.com/docs/buckets/object-notifications/).
+
 ## Backups and restore
 
 Three things hold your data:

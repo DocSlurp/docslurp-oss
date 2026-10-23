@@ -202,7 +202,7 @@ const mcpAdapterRoutes = new Hono()
           (loaded.session.workspace_id ? !await loadActorScopedWorkspace(loaded.session.workspace_id, actor) : Boolean(apiKey.workspaceIds?.length))))) {
           return adapterError(c, 404, "Upload session not found");
         }
-        return c.json({ tool: toolId, ...await describeDirectUploadSession(loaded) });
+        return c.json({ tool: toolId, ...await describeDirectUploadSession(loaded, true) });
       }
       const workspace = await loadActorScopedWorkspace(
         await resolveActorWorkspaceId(c.get("requestActor"), parsed.data.workspace),
