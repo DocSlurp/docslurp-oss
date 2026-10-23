@@ -1,13 +1,14 @@
 import { publicErrorMiddleware } from "../lib/public-errors.js";
 import { apiErrorResponse, apiStatusError, usesNativeErrorEnvelope } from "../lib/api-error.js";
 import { mapValidationIssues, type ValidationErrorSource } from "../lib/validation.js";
-import { Hono, type Context } from "hono";
+import { Hono, type Context, type MiddlewareHandler } from "hono";
 
 import type { ApiErrorCode } from "@docslurp/shared";
 
 import { apiKeyHasAnyScope } from "../lib/api-key-authorization.js";
 import { getApiKey, getRequestActor, loadActorScopedWorkspace, resolveActorWorkspaceId, setRequestActor, type RequestActor } from "../lib/request-actor.js";
 import { listWorkspaces } from "./workspaces.js";
+import { listEditableWorkspaceIds } from "./organizations.js";
 import { apiKeyCanUseWorkspace } from "../lib/api-key-workspace-scope.js";
 import { completeUploadInput, mediaEvidenceInput, fullIndexInput, listWorkspacesInput, mcpManifest, mcpTools, openUploaderInput, suggestQueriesInput, uploadInput, uploadStatusInput } from "./mcp-catalog.js";
 import { UPLOAD_UI_URI } from "../lib/mcp-ui-resources.js";
@@ -33,9 +34,23 @@ function routeBaseUrl(_url: string): string {
   return mcpOrigin(_url);
 }
 
-/** WebMCP (the cookie-authenticated native-envelope surface) never offers the uploader: it renders in MCP Apps hosts only. */
+declare module "hono" {
+  interface ContextVariableMap {
+    /** Set by the cookie-authenticated WebMCP mount; absent on the bearer `/v1/mcp` surface. */
+    mcpSurface?: "session-tools";
+  }
+}
+
+/** Mount-time marker: WebMCP (`/v1/session-tools`) never offers the uploader, which renders in MCP Apps hosts only. */
+export const markSessionToolsSurface: MiddlewareHandler = async (c, next) => {
+  c.set("mcpSurface", "session-tools");
+  await next();
+};
+
+const uploaderHidden = (c: Context) => c.get("mcpSurface") === "session-tools";
+
 function withoutUploader<T extends { capabilities: { id: string }[] }>(c: Context, manifest: T): T {
-  return usesNativeErrorEnvelope(c.req.path) ? { ...manifest, capabilities: manifest.capabilities.filter(item => item.id !== "openUploader") } : manifest;
+  return uploaderHidden(c) ? { ...manifest, capabilities: manifest.capabilities.filter(item => item.id !== "openUploader") } : manifest;
 }
 
 // The protocol and compatibility REST adapters share authorization and handlers.
@@ -71,7 +86,7 @@ const mcpAdapterRoutes = new Hono()
     const apiKey = getApiKey(c);
     const toolId = c.req.param("id");
     const tool = mcpTools(routeBaseUrl(c.req.url)).find(item => item.id === toolId);
-    if (!tool || (toolId === "openUploader" && usesNativeErrorEnvelope(c.req.path))) return adapterError(c, 404, "Unknown MCP tool");
+    if (!tool || (toolId === "openUploader" && uploaderHidden(c))) return adapterError(c, 404, "Unknown MCP tool");
     if (apiKey && !(tool.keyAccess ? tool.keyAccess(apiKey) : apiKeyHasAnyScope(apiKey, tool.scopes))) return adapterError(c, 403, "Forbidden");
     let body: Record<string, unknown>;
     try {
@@ -101,8 +116,12 @@ const mcpAdapterRoutes = new Hono()
       // Read-only: resolves a target for the widget and never creates a workspace or returns upload URLs.
       const workspace = await loadActorScopedWorkspace(await resolveActorWorkspaceId(actor, parsed.data.workspace), actor);
       if (!workspace) return adapterError(c, 404, "Workspace not found", "workspace_not_found");
+      // Same rule as the upload route's run creation (canContributeToWorkspace): editors and admins of a
+      // workspace, plus any org member for the default workspace. Read-only shares are not offered.
+      const editable = new Set(await listEditableWorkspaceIds(actor.userId));
+      if (!editable.has(workspace.id)) return adapterError(c, 403, "You do not have permission to upload to this workspace", "forbidden");
       const accessible = (await listWorkspaces(actor.userId, { refineNames: false }))
-        .filter(item => !apiKey || apiKeyCanUseWorkspace(apiKey, item));
+        .filter(item => editable.has(item.id) && (!apiKey || apiKeyCanUseWorkspace(apiKey, item)));
       const summary = (item: { id: string; slug: string; name: string; isDefault: boolean }) => ({ id: item.id, slug: item.slug, name: item.name, isDefault: item.isDefault });
       return c.json({
         workspace: summary(accessible.find(item => item.id === workspace.id) ?? { ...workspace, isDefault: false }),

@@ -902,6 +902,11 @@ async function mcpServerCommand(flags: Record<string, string | boolean>): Promis
           if (typeof name !== "string" || !/^[a-zA-Z0-9_.-]+$/.test(name) || !args || Array.isArray(args) || typeof args !== "object") {
             invalid("A tool name and object arguments are required"); break;
           }
+          // The uploader is an MCP Apps widget; a stdio client has no UI host to render it.
+          if (name === "openUploader") {
+            respond({ content: [{ type: "text", text: "openUploader needs an MCP Apps host. Use upload with urls, or presigned files, from this client." }], isError: true });
+            break;
+          }
           try {
             const result = await mcpFetch({ apiUrl, apiKey, pathname: `/v1/mcp/tools/${encodeURIComponent(name)}`, method: "POST", body: args });
             respond({ content: [{ type: "text", text: JSON.stringify(result) }], isError: false });

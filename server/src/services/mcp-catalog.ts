@@ -1,5 +1,6 @@
 import { z } from "zod";
 
+import { uploadBundleAvailable } from "../lib/mcp-ui-resources.js";
 import { deferredProfilesEnabled } from "@docslurp/shared";
 
 import { env } from "../config.js";
@@ -115,7 +116,7 @@ export function mcpTools(baseUrl: string): McpTool[] {
       description: "Upload documents using either fetchable HTTP(S) urls or files metadata, never both. For files, generate one presigned PUT URL per file, up to 10 files (5 GiB each, subject to account limits). PUT the raw bytes to each putUrl with the declared Content-Type, then call completeUpload with sessionId and file IDs. Never send file bytes or local paths as tool arguments. URLs start ingestion immediately; files start only on completion. Omit workspace for the default workspace; workspace takes an ID, slug or name, and a name that matches no workspace creates it. Ingestion can incur cost. idempotencyKey applies to URL ingestion retries.",
       // Flat like every tool schema: uploadInput's refinement enforces urls XOR files.
       inputSchema: toolInputJsonSchema(uploadInput) },
-    ...(env.mcpAppsUiEnabled ? [{ id: "openUploader", title: "Open uploader", scopes: ["ingest" as const], annotations: READ_ONLY,
+    ...(env.mcpAppsUiEnabled && uploadBundleAvailable() ? [{ id: "openUploader", title: "Open uploader", scopes: ["ingest" as const], annotations: READ_ONLY,
       description: "Show an upload widget so the user can drop local files you cannot read. Returns the target workspace and limits only; the widget uploads and reports progress itself. Never creates a workspace: omit workspace for the default. Hosts without MCP Apps support: use upload with urls instead.",
       inputSchema: toolInputJsonSchema(openUploaderInput) }] : []),
     { id: "completeUpload", title: "Complete upload", scopes: ["ingest"],

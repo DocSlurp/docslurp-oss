@@ -1,5 +1,6 @@
-import { UPLOADER_TOOL_ID, UPLOAD_UI_URI, uploadUiResource, uploaderToolMeta, type UploadUiOptions } from "./mcp-ui-resources.js";
+import { UPLOADER_TOOL_ID, uploadUiResource, uploaderToolMeta, type UploadUiOptions } from "./mcp-ui-resources.js";
 import { reportPublicError } from "./public-errors.js";
+import { addTraceMetadata } from "@docslurp/shared/observability";
 import { createMcpHandler, ProtocolError, ProtocolErrorCode, Server } from "@modelcontextprotocol/server";
 
 interface Capability {
@@ -33,6 +34,22 @@ const SERVER_INFO = {
 /** A capability that declares no hints. Assume it may write, so agents confirm first. */
 const UNKNOWN_ANNOTATIONS = { readOnly: false, destructive: false, idempotent: false, openWorld: false };
 
+const WIDGET_ORIGINS = new Set(["mcp-app-upload"]);
+const WIDGET_VERSION = /^[0-9A-Za-z._-]{1,16}$/;
+
+/**
+ * Tags calls the bundled widget makes (params._meta, never the arguments) so operators can tell widget
+ * polling from model traffic in logs and traces. Only whitelisted values are recorded.
+ */
+function logWidgetOrigin(tool: string, meta: unknown): void {
+  if (!meta || typeof meta !== "object") return;
+  const { "docslurp/origin": origin, "docslurp/widgetVersion": version } = meta as Record<string, unknown>;
+  if (typeof origin !== "string" || !WIDGET_ORIGINS.has(origin)) return;
+  const widgetVersion = typeof version === "string" && WIDGET_VERSION.test(version) ? version : "unknown";
+  addTraceMetadata({ widgetOrigin: origin, widgetVersion });
+  console.info(`[mcp] widget tool call tool=${tool} origin=${origin} widget_version=${widgetVersion}`);
+}
+
 function createServer(manifest: McpManifest, adapterDispatch: McpDispatch, signal: AbortSignal, ui: UploadUiOptions): Server {
   const dispatch: McpDispatch = async (path, init) => {
     try { return await adapterDispatch(path, init); }
@@ -51,11 +68,12 @@ function createServer(manifest: McpManifest, adapterDispatch: McpDispatch, signa
       name: item.id, title: item.title, description: item.description,
       inputSchema: item.inputSchema as { type: "object"; [key: string]: unknown },
       annotations: { title: item.title, readOnlyHint: a.readOnly, destructiveHint: a.destructive, idempotentHint: a.idempotent, openWorldHint: a.openWorld },
-      ...(item.id === UPLOADER_TOOL_ID && { _meta: uploaderToolMeta }),
+      ...(item.id === UPLOADER_TOOL_ID && uploader && { _meta: uploaderToolMeta(uploader.uri) }),
     };
   }) }));
   server.setRequestHandler("tools/call", async (request, ctx) => {
     if (!tools.some((item) => item.id === request.params.name)) throw new ProtocolError(ProtocolErrorCode.InvalidParams, "Unknown tool");
+    logWidgetOrigin(request.params.name, request.params._meta);
     const response = await dispatch(`/tools/${encodeURIComponent(request.params.name)}`, {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify(request.params.arguments ?? {}),
@@ -73,7 +91,7 @@ function createServer(manifest: McpManifest, adapterDispatch: McpDispatch, signa
   }, ...(uploader ? [uploader.listing] : [])] }));
   server.setRequestHandler("resources/templates/list", () => ({ resourceTemplates: [] }));
   server.setRequestHandler("resources/read", async (request, ctx) => {
-    if (uploader && request.params.uri === UPLOAD_UI_URI) return { contents: [uploader.content] };
+    if (uploader && request.params.uri === uploader.uri) return { contents: [uploader.content] };
     if (request.params.uri !== CAPABILITIES_URI) throw new ProtocolError(ProtocolErrorCode.InvalidParams, "Unknown resource URI");
     const response = await dispatch("/resources/capabilities", { signal: AbortSignal.any([signal, ctx.mcpReq.signal]) });
     if (!response.ok) throw new ProtocolError(ProtocolErrorCode.InvalidParams, "Resource unavailable");

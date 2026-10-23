@@ -16,4 +16,4 @@ section of the old page went.
 
 ## MCP Apps uploader and MinIO
 
-The optional MCP Apps uploader (`DOCSLURP_MCP_APPS_UI_ENABLED`) makes the browser PUT files to presigned storage URLs. In the default Compose stack those URLs point at `http://minio:9000`, which browsers cannot reach, so the uploader does not work there. Use R2, Tigris or S3 for `STORAGE_URI`, or publish MinIO on its own https hostname and add a PUT-only CORS rule. Details: [mcp.md](mcp.md#mcp-apps-uploader-openuploader). A separate `STORAGE_PUBLIC_ENDPOINT` for signing is planned.
+The optional MCP Apps uploader (`DOCSLURP_MCP_APPS_UI_ENABLED`) makes the browser PUT files to presigned storage URLs. In the default Compose stack those URLs point at `http://minio:9000`, which browsers cannot reach, so the uploader does not work there. Use R2, Tigris or S3 for `STORAGE_URI`, or publish MinIO on its own https hostname and add a PUT-only CORS rule. Details: [mcp.md](mcp.md#mcp-apps-uploader-openuploader). A separate `STORAGE_PUBLIC_ENDPOINT` for signing is planned, not implemented.

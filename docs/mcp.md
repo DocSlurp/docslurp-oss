@@ -13,7 +13,7 @@ Choose a tool based on the result you need:
 | `search` | Portable text passages with document/page citation metadata | None |
 | `chat` | Grounded answer, citations, conversation session and usage | Workspace-configured model |
 | `openUploader` | MCP Apps upload widget; only listed when `DOCSLURP_MCP_APPS_UI_ENABLED=true` ([details](#mcp-apps-uploader-openuploader)) | None |
-| `getUploadStatus` | How the workspace's files processed: pages, text and images per page, vision, searchable pages with reasons, settings and recommendations | None |
+| `getUploadStatus` | How the workspace's files processed: pages, text and images per page, vision, searchable pages with reasons, settings and recommendations. With a `runId` the report also has `files.items` (up to 50 files, newest first: `documentId`, `filename`, `mimeType`, `status`, `pages`, `searchablePages`, and `error` as `Failed during <stage>` or `Processing failed`) and `run` (`id`, `status`, `durationMs` once terminal) | None |
 
 Search and chat need only a question:
 
@@ -59,19 +59,28 @@ Which hosts render it: hosts that implement the MCP Apps extension (`io.modelcon
 
 What it does:
 
-- `openUploader` is read-only. It resolves an existing workspace (default if omitted), lists up to 50 accessible workspaces and returns the limits (10 files per batch, 5 GiB per file). It never creates a workspace and never returns upload URLs. An unknown workspace name fails with `Workspace not found`.
-- The widget calls `uploadEstimate` and `upload` through the host, PUTs each file directly to the presigned URL from the browser, then calls `completeUpload` and polls `getUploadStatus`. Files that `upload` would send as multipart (larger than a single PUT) are shown as unsupported; use the CLI or SDK for those.
-- Presigned URLs live 15 minutes. The widget does not send file bytes through DocSlurp or the MCP endpoint.
-- Widget tool calls carry `_meta` `docslurp/origin: "mcp-app-upload"` for log filtering. Hosts may strip it.
+- `openUploader` is read-only. It resolves an existing workspace (default if omitted), lists up to 50 workspaces the caller may upload to and returns the limits (10 files per batch, 5 GiB per file). It never creates a workspace and never returns upload URLs. An unknown workspace name fails with `Workspace not found`.
+- The workspace list and the resolved workspace follow the same rule as the upload route: members who can write to a workspace, and viewers of the default workspace, may upload. Viewers of other read-only shares may not, and those workspaces are not listed.
+- The widget calls `uploadEstimate` and `upload` through the host, PUTs each file directly to the presigned URL from the browser, then calls `completeUpload` and polls `getUploadStatus`. MCP `upload` always requests single-part uploads (`singlePart: true`), so every file is one PUT and the 32 MiB multipart threshold does not apply. The server rejects a single-part file over 5 GiB, so larger files fail at `upload`; use the CLI or SDK for those.
+- Presigned URLs live 15 minutes (900 s). The widget does not send file bytes through DocSlurp or the MCP endpoint.
+- Widget tool calls carry `_meta` `docslurp/origin: "mcp-app-upload"` and `docslurp/widgetVersion`. The server records both values in the MCP request log and span, so widget traffic can be told apart from model traffic. Only these two whitelisted values are recorded, never tool arguments. Hosts may strip `_meta`; a missing tag means the origin is unknown, not that the call came from the model.
 
 ### Enable it
 
 | Variable | Default | Effect |
 | --- | --- | --- |
 | `DOCSLURP_MCP_APPS_UI_ENABLED` | `false` | When `false`, `openUploader` is missing from `tools/list` and the REST manifest, and `ui://docslurp/upload` is missing from `resources/list` and `resources/read`. Existing tools are unchanged. |
-| `MCP_UI_CONNECT_DOMAINS` | empty | Comma-separated extra `http(s)` origins added to the widget's `connectDomains`. |
+| `MCP_UI_CONNECT_DOMAINS` | empty | Comma-separated extra `http(s)` origins added to the widget's `connectDomains`. Entries that are not valid `http(s)` origins are dropped with a one-time warning in the server log. |
 
-Set the flag to `true` and restart. To turn it off, unset it or set it to `false` and restart; no redeploy is needed. Hosts cache widget templates, so a host may keep showing a widget it already loaded until its cache expires.
+The flag accepts `1/true/yes/on` and `0/false/no/off`; other values count as off.
+
+Set the flag to `true` and restart. To turn it off, unset it or set it to `false` and restart; no redeploy is needed. Hosts cache widget templates, so a host may keep showing a widget it already loaded until its cache expires. The resource URI is versioned by content: `ui://docslurp/upload/<first 12 hex characters of the SHA-256 of the widget source>`. Any widget change produces a new URI, the tool `_meta` points at it, and `resources/read` serves only the current URI, so hosts fetch the new widget on their next `tools/list`.
+
+If the flag is on but the widget bundle is unavailable, `openUploader` is hidden on every surface (MCP, REST manifest, `/tools`, `POST /tools/openUploader`) rather than listed and broken.
+
+### Changing the widget (contributors)
+
+`server/src/mcp-ui/upload.html` is the authored source. The server serves a generated module, `server/src/mcp-ui/upload-bundle.generated.ts`, so it works when server code is bundled and no HTML file sits beside it. After editing `upload.html`, run `pnpm -C server build:mcp-ui` and commit both files; a test fails if they are out of sync. The widget's connect-src is a placeholder in the source and is filled in per request from the connect domains below (an empty list becomes `'none'`).
 
 ### Content Security Policy
 
@@ -80,6 +89,7 @@ The server returns `_meta.ui.csp.connectDomains` on the `ui://docslurp/upload` r
 - With an `endpoint` parameter, the endpoint's origin. If `pathStyle=false`, also the bucket virtual-host origin (`https://<bucket>.<endpoint host>`).
 - AWS S3 without `endpoint`: the regional origin (`https://s3.<region>.amazonaws.com`) and the virtual-hosted origin (`https://<bucket>.s3.<region>.amazonaws.com`).
 - Plus every origin in `MCP_UI_CONNECT_DOMAINS`.
+- If `STORAGE_URI` has an `endpoint` that is not a valid URL, the server logs it once and derives no storage domains; it does not fail other MCP requests.
 
 The API and MCP origins are never included, and `*` is never used. The widget has no external scripts, fonts or images, so no `resourceDomains` are declared.
 
@@ -171,7 +181,7 @@ Self-hosted MinIO caveat: the Compose stack signs URLs against `http://minio:900
 
 ### Rate limits
 
-Every widget tool call is one POST to `/v1/mcp`, which counts against the same `search` rate limit as the model's own searches. The widget polls `getUploadStatus` every 2 s at first, backing off to 5 s, pauses while the widget is hidden, and stops after 30 minutes or when the run finishes. One open widget uses roughly 12 to 30 calls per minute while polling. Uploads themselves go to the bucket and do not touch the limiter. Moving status polling into the `read` bucket is a planned follow-up.
+Every widget tool call is one POST to `/v1/mcp`. The limiter classifies by URL path, and every `/v1/mcp` path falls in the `search` bucket (`classifyRateLimitCategory`), so widget calls share the limit with the model's own searches. The widget polls `getUploadStatus` every 2 s at first, backing off to 5 s, pauses while the widget is hidden, and stops after 30 minutes or when the run finishes. One open widget uses roughly 12 to 30 calls per minute while polling. A 429 makes the widget back off for longer. Uploads themselves go to the bucket and do not touch the limiter. Moving status polling into the `read` bucket is a planned follow-up.
 
 ## Testing with real clients
 

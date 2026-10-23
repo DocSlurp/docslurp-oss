@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 import { env } from "../config.js";
 import { getRequestActor } from "../lib/request-actor.js";
-import { mcpAdapterRoutes } from "../services/mcp-tools.js";
+import { markSessionToolsSurface, mcpAdapterRoutes } from "../services/mcp-tools.js";
 import { apiStatusError, nativeBodyLimit } from "../lib/api-error.js";
 
 /** Cookie-authenticated adapter. Remote MCP remains bearer-only. */
@@ -34,4 +34,5 @@ export const sessionToolRoutes = new Hono()
     }
     await next();
   })
+  .use("*", markSessionToolsSurface)
   .route("/", mcpAdapterRoutes);
