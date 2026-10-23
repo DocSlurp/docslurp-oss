@@ -31,6 +31,7 @@ export const completeUploadInput = z.object({
 }).strict();
 
 export const uploadStatusInput = z.object({
+  sessionId: z.string().uuid().optional().describe("Upload session returned by upload; use this to follow storage upload and automatic ingestion handoff."),
   workspace: workspaceRef,
   runId: z.string().trim().min(1).max(128).optional(),
   documentIds: z.array(z.string().min(1).max(128)).max(100).optional(),
@@ -108,12 +109,12 @@ export function mcpTools(baseUrl: string): McpTool[] {
       inputSchema: toolInputJsonSchema(listWorkspacesInput) },
     { id: "upload", title: "Upload documents", scopes: ["ingest"],
       annotations: { readOnly: false, destructive: false, idempotent: false, openWorld: true, consequential: true },
-      description: "Upload documents using either fetchable HTTP(S) urls or files metadata, never both. For files, generate one presigned PUT URL per file, up to 10 files (5 GiB each, subject to account limits). PUT the raw bytes to each putUrl with the declared Content-Type, then call completeUpload with sessionId and file IDs. Never send file bytes or local paths as tool arguments. URLs start ingestion immediately; files start only on completion. Omit workspace for the default workspace; workspace takes an ID, slug or name, and a name that matches no workspace creates it. Ingestion can incur cost. idempotencyKey applies to URL ingestion retries.",
+      description: "Upload documents using either fetchable HTTP(S) urls or files metadata, never both. For files, return direct storage upload targets for up to 10 files (5 GiB each, subject to account limits). Small files use putUrl with the declared Content-Type; large files use multipart pendingParts URLs with byte slices determined by partNumber, partSize and sizeBytes. Upload every part. Storage notifications and background reconciliation automatically complete known-size uploads and start ingestion; no completeUpload call is needed. Follow getUploadStatus with sessionId. Never send file bytes or local paths as tool arguments. Omit workspace for the default workspace; a name that matches no workspace creates it. Ingestion can incur cost. idempotencyKey applies to URL ingestion retries.",
       // Flat like every tool schema: uploadInput's refinement enforces urls XOR files.
       inputSchema: toolInputJsonSchema(uploadInput) },
     { id: "completeUpload", title: "Complete upload", scopes: ["ingest"],
       annotations: { readOnly: false, destructive: false, idempotent: false, openWorld: false, consequential: true },
-      description: "After all presigned PUT requests succeed, verify uploaded files and start ingestion. Pass sessionId and fileIds from upload. Returns workspace and run IDs for getUploadStatus. File size is verified before ingestion; do not call before uploading the bytes.",
+      description: "Legacy fallback for single-PUT sessions: verify uploaded files and start ingestion after every PUT succeeds. Normal uploads complete automatically; use getUploadStatus with sessionId instead. Pass sessionId and fileIds from upload. Do not use for multipart uploads.",
       inputSchema: toolInputJsonSchema(completeUploadInput) },
     { id: "search", title: "Search documents", scopes: ["search"], annotations: READ_ONLY,
       description: "Retrieve cited passages for one query (q) or up to 20 independent queries (queries). Supply exactly one form: q with top-level options, or queries (each item has its own q and options) with optional concurrency; a call with both is rejected. Batch results stay in input order with per-query errors; each query can select a workspace; concurrency (1-8, default 4) bounds parallel retrieval. Omitted workspace uses the default. Does not generate answers.",
@@ -123,7 +124,7 @@ export function mcpTools(baseUrl: string): McpTool[] {
       description: "Generate a grounded answer with citations and token usage using the workspace's configured model. This calls AI and can incur cost; use search for your own LLM.",
       inputSchema: toolInputJsonSchema(workspaceChatInputSchema.omit({ agent: true })) },
     { id: "getUploadStatus", title: "Get upload status", scopes: ["search", "ingest"], annotations: READ_ONLY,
-      description: "Check uploaded files and ingestion progress in a workspace, optionally for a runId returned by upload. Reports searchable pages, failures, costs and processing speed without AI calls. Use before search or chat when files are still processing.",
+      description: "Pass sessionId from upload to check file upload state and retrieve the automatic ingestion result containing workspace and run IDs. Then check ingestion progress with workspace and optional runId. Reports searchable pages, failures, costs and processing speed without AI calls. Use before search or chat when files are still processing.",
       inputSchema: toolInputJsonSchema(uploadStatusInput) },
     { id: "getMediaEvidence", title: "Read video and audio evidence", scopes: ["search"], annotations: READ_ONLY,
       description: "Read an indexed video or audio document's extracted transcript, timestamped frame descriptions and media summary. Use a documentId from getUploadStatus or search. Returns cited text and nextOffset for bounded continuation; does not run new AI or play raw video. Use this before claiming you cannot inspect an uploaded video. One logical page can contain many sampled frames.",
