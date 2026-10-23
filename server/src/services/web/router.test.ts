@@ -66,6 +66,25 @@ describe("WebRouter", () => {
     expect(jina.calls).not.toHaveBeenCalled();
   });
 
+  it("passes over an empty map to the next provider, keeping every paid attempt", async () => {
+    const map = (id: WebProviderId, usd: number, urls: string[]): WebProviderAdapter => ({ id, keyEnv: "",
+      capabilities: { map: { estimateUsd: () => usd, run: async () => ({ data: { urls }, costUsd: usd, costSource: "estimated" }) } } });
+    const r = new WebRouter({ adapters: [map("firecrawl", 0.001, []), map("tavily", 0.008, ["https://a.test/1"])],
+      keys: { firecrawl: "k", tavily: "k" }, strategy: "cheapest", order: ["firecrawl", "tavily"], maxAttempts: 3 });
+    const routed = await r.run("map", { url: "https://a.test/", limit: 10, includeSubdomains: false }, { signal: new AbortController().signal, deadlineAt: Date.now() + 30_000 });
+    expect(routed.provider).toBe("tavily");
+    expect(routed.attempts.map((a) => a.outcome)).toEqual(["empty", "ok"]);
+    expect(routed.paid.map((p) => p.costUsd)).toEqual([0.001, 0.008]);
+
+    // A site every provider finds empty costs at most two attempts, never the whole provider list.
+    const third = map("exa", 0.02, ["https://a.test/never"]);
+    const stubborn = new WebRouter({ adapters: [map("firecrawl", 0.001, []), map("tavily", 0.008, []), third],
+      keys: { firecrawl: "k", tavily: "k", exa: "k" }, strategy: "cheapest", order: ["firecrawl", "tavily", "exa"], maxAttempts: 3 });
+    const gaveUp = await stubborn.run("map", { url: "https://a.test/", limit: 10, includeSubdomains: false }, { signal: new AbortController().signal, deadlineAt: Date.now() + 30_000 });
+    expect(gaveUp.attempts.map((a) => a.outcome)).toEqual(["empty", "empty"]);
+    expect(gaveUp.result.data).toEqual({ urls: [] });
+  });
+
   it("reports unavailability with a retry hint when every provider is cooling down", async () => {
     const jina = adapter("jina", 0.001, async () => { throw new WebProviderError("auth", "jina responded 401", 401); });
     const r = router([jina]);

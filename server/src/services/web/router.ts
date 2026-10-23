@@ -29,7 +29,7 @@ export interface WebRouterOptions {
 
 export interface WebAttempt {
   provider: WebProviderId;
-  outcome: "ok" | WebProviderErrorKind | "error";
+  outcome: "ok" | "empty" | WebProviderErrorKind | "error";
   runtimeMs: number;
   httpStatus?: number;
 }
@@ -38,6 +38,19 @@ export interface WebRouteResult<C extends WebCapability> {
   result: ProviderResult<WebOutput<C>>;
   provider: WebProviderId;
   attempts: WebAttempt[];
+  /** Every attempt that returned (and so cost money), including empty map/crawl results that were passed over. */
+  paid: Array<{ provider: WebProviderId; costUsd: number; costSource: ProviderResult<unknown>["costSource"]; units?: ProviderResult<unknown>["units"] }>;
+}
+
+/**
+ * An empty map or crawl can be a provider quirk (one maps only base domains),
+ * so the router asks one more provider, never more. Search and fetch results
+ * are taken as returned.
+ */
+function emptyTraversal(capability: WebCapability, data: unknown): boolean {
+  if (capability === "map") return !(data as WebOutput<"map">).urls.length;
+  if (capability === "crawl") return !(data as WebOutput<"crawl">).pages.length;
+  return false;
 }
 
 /** Per-attempt time limits; crawl uses the caller's remaining deadline. */
@@ -114,6 +127,8 @@ export class WebRouter {
         waits.length ? Math.ceil(Math.min(...waits) / 1000) : undefined);
     }
     const attempts: WebAttempt[] = [];
+    const paid: WebRouteResult<C>["paid"] = [];
+    let empty: WebRouteResult<C> | undefined;
     let lastError: unknown;
     for (const [index, adapter] of candidates.entries()) {
       args.signal.throwIfAborted();
@@ -130,11 +145,17 @@ export class WebRouter {
       try {
         const result = await span.run(() => handler.run(input, { apiKey: this.options.keys[adapter.id]!, signal, fetch: this.fetchImpl, deadlineMs: timeoutMs }));
         const runtimeMs = this.now() - started;
-        attempts.push({ provider: adapter.id, outcome: "ok", runtimeMs });
-        span.set({ "docslurp.web.outcome": "ok", "docslurp.web.runtime_ms": runtimeMs, "docslurp.web.cost_usd": result.costUsd,
+        const isEmpty = emptyTraversal(capability, result.data);
+        attempts.push({ provider: adapter.id, outcome: isEmpty ? "empty" : "ok", runtimeMs });
+        paid.push({ provider: adapter.id, costUsd: result.costUsd, costSource: result.costSource, units: result.units });
+        span.set({ "docslurp.web.outcome": isEmpty ? "empty" : "ok", "docslurp.web.runtime_ms": runtimeMs, "docslurp.web.cost_usd": result.costUsd,
           "docslurp.web.cost_source": result.costSource });
         span.end();
-        return { result, provider: adapter.id, attempts };
+        if (!isEmpty) return { result, provider: adapter.id, attempts, paid };
+        // One second opinion at most: two empty traversals mean the site, not the provider. Stop paying.
+        if (empty) return empty;
+        empty = { result, provider: adapter.id, attempts, paid };
+        continue;
       } catch (error) {
         const runtimeMs = this.now() - started;
         if (args.signal.aborted) {
@@ -157,6 +178,7 @@ export class WebRouter {
         if (!failure.failover) break;
       }
     }
+    if (empty) return empty;
     const failure = lastError instanceof WebProviderError ? lastError : undefined;
     if (failure?.kind === "invalid_request") {
       throw Object.assign(new WebToolError(400, "invalid_request", `The web ${capability} request was rejected. Check the query or URLs and try again.`), { attempts });

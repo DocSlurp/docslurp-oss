@@ -150,6 +150,24 @@ function admitOrgCall(orgKey: string, now: number, perMinute: number): number | 
   return null;
 }
 
+function cents(usd: number): number {
+  return Math.round(Math.max(0, usd * 100) * 1e6) / 1e6;
+}
+
+/** Providers can return the same page twice (redirects, trailing slashes); keep the first. */
+function dedupe<C extends WebCapability>(capability: C, output: WebOutput<C>): WebOutput<C> {
+  const seen = new Set<string>();
+  const first = (url: string) => {
+    const key = url.replace(/#.*$/, "").replace(/\/+$/, "");
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  };
+  if (capability === "map") return { urls: (output as WebOutput<"map">).urls.filter(first) } as WebOutput<C>;
+  if (capability === "search") return { results: (output as WebOutput<"search">).results.filter((item) => first(item.url)) } as WebOutput<C>;
+  return { ...output, pages: (output as WebOutput<"fetch">).pages.filter((item) => first(item.url)) } as WebOutput<C>;
+}
+
 // --- Billing ---
 
 function chargeFor<C extends WebCapability>(capability: C, input: WebInput<C>, output: WebOutput<C>): { metric: string; amount: number; unit: string; credits: number } | null {
@@ -258,21 +276,22 @@ export async function runWebCapability<C extends WebCapability>(
         output = routed.result.data;
         provider = routed.provider;
         attempts = routed.attempts;
-        const costCents = Math.round(Math.max(0, routed.result.costUsd * 100) * 1e6) / 1e6;
+        output = dedupe(capability, output);
+        const costCents = cents(routed.paid.reduce((sum, item) => sum + item.costUsd, 0));
         Object.assign(fields, { "docslurp.web.provider": provider, "docslurp.web.cost_cents": costCents,
           "docslurp.web.cost_source": routed.result.costSource, "docslurp.web.attempts": attempts.length });
-        // Provider cost is our cost: an internal, non-debiting event. The model column
-        // names only the capability, since run cost breakdowns show models to customers.
-        await d.recordCost({
+        // Provider cost is our cost: internal, non-debiting events, one per paid attempt. The model
+        // column names only the capability, since run cost breakdowns show models to customers.
+        await Promise.all(routed.paid.map((spent, index) => d.recordCost({
           userId: ctx.userId,
           scope: { orgId: ctx.orgId, workspaceId: ctx.workspaceId },
           event: {
-            id: `web-cost:${callId}`, provider, model: `web-${capability}`, metric: `web-${capability}`,
-            amount: routed.result.units?.amount ?? 1, unit: routed.result.units?.unit ?? "request", costCents,
-            metadata: { capability, surface: ctx.surface, callId, costSource: routed.result.costSource,
+            id: `web-cost:${callId}:${index}`, provider: spent.provider, model: `web-${capability}`, metric: `web-${capability}`,
+            amount: spent.units?.amount ?? 1, unit: spent.units?.unit ?? "request", costCents: cents(spent.costUsd),
+            metadata: { capability, surface: ctx.surface, callId, costSource: spent.costSource, served: spent.provider === provider,
               attempts: attempts.map((attempt) => ({ provider: attempt.provider, outcome: attempt.outcome, runtimeMs: attempt.runtimeMs })) },
           },
-        }).catch((error) => console.error(`[web] cost record failed call=${callId}: ${error instanceof Error ? error.message : String(error)}`));
+        }).catch((error) => console.error(`[web] cost record failed call=${callId}: ${error instanceof Error ? error.message : String(error)}`))));
         if (cacheable) cachePut(key, output, d.now(), d.config);
       } catch (error) {
         const failed = (error as { attempts?: WebAttempt[] }).attempts;
