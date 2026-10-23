@@ -12,6 +12,8 @@
 export type AlertSeverity = "critical" | "warning";
 
 export type AlertId =
+  | `credits-running-low:${string}`
+  | `credit-resume-delayed:${string}`
   | "database-unreachable"
   | "queued-run-age"
   | "stale-leases"

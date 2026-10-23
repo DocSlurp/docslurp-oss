@@ -1,5 +1,7 @@
 # Completed
 
+- Preserve safe credit-pause reasons and reserve facts, retry funding resumes transactionally, and emit deduplicated credit/deferred-resume alerts through existing Telegram/SigNoz logging (2026-10-23).
+
 - Remove repeated chunk/page heap scans from workspace board byte totals using exact statement-triggered document counters; preserve indexed-byte output and existing search counters (2026-10-23). Local paired confirmation is 79.5% faster; production rollout remains unmeasured.
 
 - Add platform administrator promotional credit API with durable request receipts, Stripe grant mirroring, audit events and timeout/replay recovery (2026-10-23). Organization administrators and API keys cannot issue grants.

@@ -85,7 +85,9 @@ const DROPPED_HEADERS = new Set(["content-type", "content-length", "content-enco
 export function envelopeForError(c: Context, error: unknown, status: number, originalHeaders?: Headers): Response {
   const { code: named } = error as { code?: unknown };
   const code = isApiErrorCode(named) ? named : apiErrorCodeForStatus(status);
-  const thrown = error && typeof error === "object" ? thrownErrorDetails.get(error) : undefined;
+  const spendDetails = (error as { spendDetails?: unknown } | null)?.spendDetails;
+  const thrown = { ...(spendDetails && typeof spendDetails === "object" ? spendDetails : {}),
+    ...(error && typeof error === "object" ? thrownErrorDetails.get(error) : undefined) };
   // A blocked spend knows whether the org's auto top-up is on (no "turn on auto top-up" link then).
   const autoTopUpOn = (error as { autoTopUpOn?: unknown } | null)?.autoTopUpOn === true;
   const details = withUpgradeLinks(code, autoTopUpOn ? { ...thrown, autoTopUpOn } : thrown);
