@@ -616,3 +616,19 @@ export async function describeTemporalNamespace(timeoutMs = 2_000): Promise<void
     client.workflowService.describeNamespace({ namespace: temporal.namespace })
   );
 }
+
+/** A deterministic exact-page workflow coalesces concurrent browser requests. */
+export async function startPageRenderWorkflow(input: import("@docslurp/shared").RenderDocumentPageInput): Promise<void> {
+  const { PAGE_RENDER_WORKFLOW, DEFAULT_PAGE_RENDER_TASK_QUEUE, pageRenderWorkflowId } = await import("@docslurp/shared");
+  const client = await getClient();
+  try {
+    await client.workflow.start(PAGE_RENDER_WORKFLOW, {
+      taskQueue: process.env.TEMPORAL_PAGE_RENDER_TASK_QUEUE?.trim() || DEFAULT_PAGE_RENDER_TASK_QUEUE,
+      workflowId: pageRenderWorkflowId(input), args: [input],
+      workflowExecutionTimeout: "5 minutes",
+      workflowIdReusePolicy: WorkflowIdReusePolicy.ALLOW_DUPLICATE_FAILED_ONLY,
+    });
+  } catch (error) {
+    if (!(error instanceof WorkflowExecutionAlreadyStartedError)) throw error;
+  }
+}
