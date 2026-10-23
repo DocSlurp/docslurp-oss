@@ -1,5 +1,7 @@
 # Completed
 
+- Render native PDF pages on demand through authorized, deduplicated and bounded Temporal jobs; persist page artifacts and scoped compute receipts atomically. Distinguish expected missing Lance compatibility tables from real storage failures, and let existing readers drain before the document counter migration acquires its lock (2026-10-23).
+
 - Preserve verified direct-upload byte accounting, backfill only ownership-matched completed upload receipts, give duplicate embedding artifacts document-local chunks/citation evidence, clear empty replacements, and retire superseded pending history without retry resurrection (2026-10-23; migrations 0073/0075).
 
 - Preserve safe credit-pause reasons and reserve facts, retry funding resumes transactionally, and emit deduplicated credit/deferred-resume alerts through existing Telegram/SigNoz logging (2026-10-23).
