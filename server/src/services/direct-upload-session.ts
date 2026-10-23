@@ -4,6 +4,7 @@ import type { PipelineFeatureOverrides, WorkspaceTemplateKey } from "@docslurp/s
 
 import { sql } from "../db.js";
 import { env } from "../config.js";
+import { reserveDirectUploadLockConnection } from "../lib/direct-upload-locks.js";
 import { normalizeUploadPath } from "../lib/canonical-id.js";
 import {
   abortMultipartUpload,
@@ -358,13 +359,13 @@ export async function getDirectUploadSessionDescription(
 
 /** Cross-process serialization: the dedicated connection owns the lock until release. */
 export async function withDirectUploadLock<T>(sessionId: string, run: () => Promise<T>): Promise<T> {
-  const connection = await sql.reserve();
+  const { connection, release } = await reserveDirectUploadLockConnection();
   try {
     const [lock] = await connection`select pg_try_advisory_lock(hashtextextended(${`upload:${sessionId}`}, 0)) as acquired`;
     if (!lock?.acquired) throw new WorkspaceIntakeError("Upload session is being finalized; retry shortly", 409);
     try { return await run(); }
     finally { await connection`select pg_advisory_unlock(hashtextextended(${`upload:${sessionId}`}, 0))`; }
-  } finally { connection.release(); }
+  } finally { release(); }
 }
 
 export function validMultipartLayout(parts: Array<{ partNumber: number; sizeBytes: number }>, size: number, partSize: number): boolean {
@@ -434,14 +435,6 @@ async function abortDirectUploadSessionUnlocked(
   }
 
   if (loaded.session.status === "confirmed" || loaded.session.status === "ingesting") throw new WorkspaceIntakeError("Ingested uploads cannot be aborted", 409);
-  for (const file of loaded.files) {
-    if (file.upload_mode === "multipart" && file.upload_id) {
-      await abortMultipartUpload({
-        key: file.source_key,
-        uploadId: file.upload_id,
-      }).catch(() => undefined);
-    }
-  }
 
   await sql`
     update upload_session_files
@@ -599,6 +592,16 @@ function multipartCompletionError(error: unknown, filename: string): unknown {
 
 /** Wait out outstanding signed PUTs before deleting abandoned raw objects. */
 export async function queueAbandonedDirectUploadCleanup(sessionId: string): Promise<void> {
+  const files = await sql<Array<{ source_key: string; upload_id: string }>>`
+    select f.source_key, f.upload_id from upload_session_files f join upload_sessions s on s.id = f.session_id
+    where s.id = ${sessionId} and s.status in ('aborted', 'failed') and f.upload_id is not null`;
+  for (const file of files) {
+    // Abort is idempotent at the service boundary; an assembled or already
+    // aborted MPU may legitimately return NoSuchUpload.
+    await abortMultipartUpload({ key: file.source_key, uploadId: file.upload_id }).catch(error => {
+      if (storageErrorName(error) !== "NoSuchUpload") console.error(`[upload-cleanup] multipart abort failed session=${sessionId}`);
+    });
+  }
   await sql`insert into storage_cleanup_queue (kind, org_id, target, payload, artifact_uris, reason, not_before)
     select 'storage_prefix', coalesce(s.org_id, ''), s.user_id || '/' || s.id || '/',
       jsonb_build_object('workspaceId', s.workspace_id), array_agg(f.source_key), 'abandoned_upload', now() + interval '16 minutes'

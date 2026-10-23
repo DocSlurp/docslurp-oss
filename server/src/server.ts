@@ -1,3 +1,4 @@
+import { closeDirectUploadLockPool } from "./lib/direct-upload-locks.js";
 import { tigrisUploadWebhookRoutes } from "./routes/tigris-upload-webhook.js";
 import { startDirectUploadReconciler, stopDirectUploadReconciler } from "./services/direct-upload-reconciler.js";
 import { apiPublicErrorMiddleware } from "./lib/public-errors.js";
@@ -217,6 +218,7 @@ let startupPromise: Promise<void> | null = null;
 async function stopApiBackgroundTasks(): Promise<void> {
   stopMaintenanceSweeper();
   stopDirectUploadReconciler();
+  await closeDirectUploadLockPool();
   stopAlertEvaluator();
   stopCreditDebitFlusher();
   stopRunStartRecovery();

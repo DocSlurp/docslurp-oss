@@ -4,16 +4,19 @@ const lockMock = vi.hoisted(() => Object.assign(vi.fn(async () => [{ acquired: t
 const sqlMock = vi.hoisted(() => Object.assign(vi.fn(), { json: (value: unknown) => value, array: (value: unknown) => value, reserve: async () => lockMock }));
 const listMultipartUploadParts = vi.hoisted(() => vi.fn());
 const completeMultipartUpload = vi.hoisted(() => vi.fn());
+const abortMultipartUpload = vi.hoisted(() => vi.fn());
 const signSingleUploadPut = vi.hoisted(() => vi.fn(async ({ key }: { key: string }) => `https://storage.example/${key}`));
 const getUploadedObjectMetadata = vi.hoisted(() => vi.fn());
 const deleteUploadedObject = vi.hoisted(() => vi.fn(async () => {}));
 const createMultipartUpload = vi.hoisted(() => vi.fn());
-vi.mock("../lib/storage.js", async (importOriginal) => ({ ...await importOriginal<typeof import("../lib/storage.js")>(), signSingleUploadPut, createMultipartUpload, getUploadedObjectMetadata, deleteUploadedObject, listMultipartUploadParts, completeMultipartUpload }));
+vi.mock("../lib/direct-upload-locks.js", () => ({ reserveDirectUploadLockConnection: async () => ({ connection: lockMock, release: lockMock.release }) }));
+vi.mock("../lib/storage.js", async (importOriginal) => ({ ...await importOriginal<typeof import("../lib/storage.js")>(), signSingleUploadPut, createMultipartUpload, getUploadedObjectMetadata, deleteUploadedObject, listMultipartUploadParts, completeMultipartUpload, abortMultipartUpload }));
 vi.mock("../db.js", async (importOriginal) => ({ ...await importOriginal<typeof import("../db.js")>(), sql: sqlMock }));
 
 import {
   createDirectUploadSession,
   validMultipartLayout,
+  queueAbandonedDirectUploadCleanup,
   finalizeDirectUploadFile,
   withDirectUploadLock,
   describeDirectUploadSession,
@@ -167,6 +170,14 @@ describe("Direct Upload Session Module", () => {
     const result = await describeDirectUploadSession(directUploadSessionFixture({session:{status:"confirmed",result:{payload,status:201,temporalDeferred:false}}}));
     expect(result.result).toEqual(payload);
     expect(signSingleUploadPut).not.toHaveBeenCalled();
+  });
+
+  it("aborts known abandoned multiparts idempotently and waits out signed PUTs for object cleanup", async () => {
+    sqlMock.mockReset().mockResolvedValueOnce([{source_key:"raw/a",upload_id:"mpu-a"}]).mockResolvedValue([]);
+    abortMultipartUpload.mockRejectedValueOnce(Object.assign(new Error("gone"),{name:"NoSuchUpload"}));
+    await expect(queueAbandonedDirectUploadCleanup("session-1")).resolves.toBeUndefined();
+    expect(abortMultipartUpload).toHaveBeenCalledWith({key:"raw/a",uploadId:"mpu-a"});
+    expect(sqlMock.mock.calls.some(([strings]) => strings.join("").includes("interval '16 minutes'"))).toBe(true);
   });
 
   it("computes multipart part counts at the protocol seam", () => {

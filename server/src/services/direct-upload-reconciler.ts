@@ -5,6 +5,7 @@ import { confirmDirectUploadWorkspaceIntake } from "./workspace-intake-actions.j
 
 let timer: ReturnType<typeof setInterval> | undefined;
 let running = false;
+let stopped = false;
 
 /** Durable schedule plus cross-process session locks make missed webhooks harmless. */
 export async function reconcileDirectUploads(): Promise<void> {
@@ -16,6 +17,7 @@ export async function reconcileDirectUploads(): Promise<void> {
       where (status in ('pending', 'uploading', 'ingesting') or (status = 'initializing' and expires_at < now())) and next_reconcile_at <= now()
       order by next_reconcile_at limit 25`;
     for (const session of sessions) {
+      if (stopped) break;
       let retryCapSeconds = 30;
       try {
         if (session.expired && session.status !== "ingesting") {
@@ -31,7 +33,7 @@ export async function reconcileDirectUploads(): Promise<void> {
           }
           return ready;
         });
-        if (ready) await confirmDirectUploadWorkspaceIntake({ sessionId: session.id, userId: session.user_id });
+        if (ready && !stopped) await confirmDirectUploadWorkspaceIntake({ sessionId: session.id, userId: session.user_id });
       } catch (error) {
         retryCapSeconds = 300;
         // Keep retrying recoverable storage/database failures until abandonment.
@@ -53,12 +55,14 @@ export async function reconcileDirectUploads(): Promise<void> {
 
 export function startDirectUploadReconciler(): void {
   if (timer) return;
+  stopped = false;
   const tick = () => void reconcileDirectUploads().catch(error => console.error("[upload-reconcile] sweep failed", error instanceof Error ? error.name : "unknown"));
   timer = setInterval(tick, 15_000);
   timer.unref?.();
   tick();
 }
 export function stopDirectUploadReconciler(): void {
+  stopped = true;
   if (timer) clearInterval(timer);
   timer = undefined;
 }
