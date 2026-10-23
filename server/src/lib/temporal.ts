@@ -548,12 +548,14 @@ export async function signalPipelinePause(runId: string): Promise<void> {
   await handle.signal("pause");
 }
 
-export async function signalPipelineResume(runId: string): Promise<void> {
+export async function signalPipelineResume(runId: string, timeoutMs = 5_000): Promise<void> {
   const client = await getClient();
   const handle = client.workflow.getHandle(
     `${WORKFLOW_ID_PREFIX}${runId}`
   );
-  await handle.signal("resume");
+  // Resume runs inside the funding transaction: bound the actual gRPC call,
+  // not just connection establishment or a detached Promise.race waiter.
+  await client.connection.withDeadline(Date.now() + timeoutMs, () => handle.signal("resume"));
 }
 
 export interface TaskQueuePoller {

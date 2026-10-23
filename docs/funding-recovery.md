@@ -25,10 +25,13 @@ A successful resume writes one progress event; repeated sweeps see an unpaused
 run and do nothing. Manual resume keeps the existing workspace access checks and
 cannot fall through to the operator resume when delivery is deferred.
 
-The transaction includes signal delivery, so a slow Temporal service can hold a
-run row lock until the RPC finishes or fails. An ambiguous successful signal
-followed by a database rollback is retried idempotently; durable pause state
-remains the recovery source of truth.
+The transaction includes signal delivery. The actual Temporal resume RPC uses
+`client.connection.withDeadline` with a five-second gRPC deadline, in addition to
+the existing two-second connection-establishment bound. Expiry cancels the RPC
+and reaches the rollback/deferred path; it is not a detached Promise.race timer.
+An ambiguous signal accepted just before cancellation or followed by a database
+rollback is retried idempotently. Durable pause state remains the recovery source
+of truth.
 
 ## Operator alerts
 
