@@ -272,14 +272,14 @@ export class EmbedStage implements Stage {
             }
           }
           if (existingUri) {
-            await this.materializeChunksFromArtifact({
+            const artifactUri = await this.materializeChunksFromArtifact({
               state,
               document,
               artifactUri: existingUri,
               contentHash
             });
             return {
-              artifactUri: existingUri,
+              artifactUri,
               stats: { deduplicated: true }
             };
           }
@@ -829,24 +829,33 @@ export class EmbedStage implements Stage {
     }
   }
 
-  // TODO(chunk-id ownership, pre-existing, flag-independent): a deduplicated artifact
-  // carries the chunk ids of the document that first produced it (`<sourceDoc>-NNN`),
-  // and materializeChunks upserts them `on conflict (id) do update set document_id`,
-  // so this document's rows take over (steal) the source document's chunk rows
-  // instead of getting `<thisDoc>-NNN` ids. Fix by rewriting the id prefix (as the
-  // embedding-reuse path does for artifact.chunks) before materializing.
+  /** Reuse vectors while keeping artifact, chunk and citation ownership document-local. */
   private async materializeChunksFromArtifact(args: {
     state: WorkflowState;
     document: WorkflowState["documents"][number];
     artifactUri: string;
     contentHash: string;
-  }): Promise<void> {
+  }): Promise<string> {
     const key = keyFromStorageUri(args.artifactUri, this.storage.bucket);
     if (!key) {
       throw new Error(`unable to materialize deduplicated chunks from external artifact URI: ${args.artifactUri}`);
     }
 
-    const artifact = await this.storage.getJson<EmbeddingArtifact>(key);
+    const original = await this.storage.getJson<EmbeddingArtifact>(key);
+    const canonicalDocumentUri = args.state.artifactLedger.readDocument(args.document.id, "canonical-document") ?? null;
+    const artifact: EmbeddingArtifact = {
+      ...original,
+      documentId: args.document.id,
+      source: { ...original.source, filename: args.document.filename, mimeType: args.document.mimeType },
+      chunks: original.chunks.map((chunk) => ({
+        ...chunk,
+        id: `${args.document.id}-${chunk.index.toString().padStart(3, "0")}`,
+        canonicalDocumentUri,
+        metadata: { ...chunk.metadata, documentId: args.document.id },
+      })),
+    };
+    const ownKey = `${args.document.userId}/${args.state.run.id}/embeddings/${args.document.id}.json`;
+    await this.storage.putJson(ownKey, artifact);
     const pipelineVersion = createHash("sha256")
       .update(JSON.stringify(pipelineVersionFeatures(args.state.run.pipeline)))
       .digest("hex")
@@ -857,8 +866,10 @@ export class EmbedStage implements Stage {
       document: args.document,
       chunks: artifact.chunks,
       contentHash: args.contentHash,
-      pipelineVersion
+      pipelineVersion,
+      vectorSpace: artifact.embedding,
     });
+    return this.storage.uri(ownKey);
   }
 
   private async materializeChunks(args: {
@@ -867,7 +878,7 @@ export class EmbedStage implements Stage {
     chunks: EmbeddingArtifact["chunks"];
     contentHash: string;
     pipelineVersion: string;
-    /** The embedding space the document's LanceDB rows live in; dedup copies own none. */
+    /** The embedding space the document's LanceDB rows live in. */
     vectorSpace?: { model: string; dimensions: number };
   }): Promise<void> {
     if (!args.state.store || !("insertChunks" in args.state.store)) {

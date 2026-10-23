@@ -97,7 +97,13 @@ async function embedOnce(env: Record<string, string>, documents = ["doc"], pipel
   } as unknown as WorkspaceRun;
   const state = WorkflowState.create(run, docs);
   state.docConcurrency = 1;
-  state.store = store() as unknown as WorkflowState["store"];
+  const materialized = new Map<string, { id: string; documentId: string; metadata: Record<string, unknown> }>();
+  state.store = {
+    ...store(),
+    insertChunks: async (chunks: Array<{ id: string; documentId: string; metadata: Record<string, unknown> }>) => {
+      for (const chunk of chunks) materialized.set(chunk.id, structuredClone(chunk));
+    },
+  } as unknown as WorkflowState["store"];
   let error: unknown;
   await new EmbedStage({} as CommandRunner, storage as unknown as ArtifactStore, { ...fromEnv(), openRouterApiKey: "k", openAiApiKey: "k" })
     .run(state).catch((caught: unknown) => { error = caught; });
@@ -107,7 +113,7 @@ async function embedOnce(env: Record<string, string>, documents = ["doc"], pipel
     ? await storage.getJson<{ chunks: Array<{ id: string; text: string; vector: number[]; metadata: Record<string, unknown> }> }>(
       artifactUri.replace("s3://t/", ""))
     : { chunks: [] };
-  return { state, artifact, error, calls: { ...calls, pages: calls.pages.map((pages) => [...pages]) } };
+  return { state, artifact, materialized, objects: storage.objects, error, calls: { ...calls, pages: calls.pages.map((pages) => [...pages]) } };
 }
 
 const ENV_KEYS = ["EMBED_BATCH_CONCURRENCY", "EMBED_PREAMBLE_MODE", "EMBED_PROGRESS_INTERVAL_MS", "DOCSLURP_EMBED_MAX_WINDOW_CHUNKS"];
@@ -120,6 +126,25 @@ afterEach(() => {
 });
 
 describe("EmbedStage concurrency", () => {
+  it("gives in-run duplicates their own chunk ids and indexable artifact without changing the original", async () => {
+    const result = await embedOnce({ EMBED_PREAMBLE_MODE: "inline" }, ["first", "second"], { contextualChunkPreambles: false });
+    const rows = [...result.materialized.values()];
+    const first = rows.filter(chunk => chunk.documentId === "first");
+    const second = rows.filter(chunk => chunk.documentId === "second");
+    expect(first.length).toBeGreaterThan(0);
+    expect(second).toHaveLength(first.length);
+    expect(first.every(chunk => chunk.id.startsWith("first-") && chunk.metadata.documentId === "first")).toBe(true);
+    expect(second.every(chunk => chunk.id.startsWith("second-") && chunk.metadata.documentId === "second")).toBe(true);
+    const copied = JSON.parse(result.objects.get("u1/run/embeddings/second.json")!);
+    expect(copied.documentId).toBe("second");
+    expect(copied.chunks.map((chunk: { id: string }) => chunk.id)).toEqual(second.map(chunk => chunk.id));
+    const original = JSON.parse(result.objects.get("u1/run/embeddings/first.json")!);
+    expect(original.documentId).toBe("first");
+    expect(original.chunks.every((chunk: { id: string }) => chunk.id.startsWith("first-"))).toBe(true);
+    expect(result.state.artifactLedger.readDocument("second", "embeddings")).toBe("s3://t/u1/run/embeddings/second.json");
+    expect(result.state.documentStage("second", "embed")?.stats).toMatchObject({ deduplicated: true });
+  });
+
   it("produces the same chunks, ids and vectors at any concurrency, completing pages in order", async () => {
     const serial = await embedOnce({ EMBED_BATCH_CONCURRENCY: "1", EMBED_PREAMBLE_MODE: "inline", EMBED_PROGRESS_INTERVAL_MS: "0", DOCSLURP_EMBED_MAX_WINDOW_CHUNKS: "5" });
     const parallel = await embedOnce({ EMBED_BATCH_CONCURRENCY: "4", EMBED_PREAMBLE_MODE: "concurrent", EMBED_PROGRESS_INTERVAL_MS: "10000", DOCSLURP_EMBED_MAX_WINDOW_CHUNKS: "5" });
