@@ -1,5 +1,7 @@
 # Completed
 
+- [x] **MCP Apps upload widget** (2026-10-22, `feat/mcp-app-upload`, behind `DOCSLURP_MCP_APPS_UI_ENABLED`, default off): `openUploader` tool plus the `ui://docslurp/upload` resource let MCP Apps hosts show a drag-and-drop uploader that PUTs files directly to presigned storage URLs, completes the upload and shows per-file processing status from `getUploadStatus`. `connectDomains` is derived from `STORAGE_URI` (plus `MCP_UI_CONNECT_DOMAINS`), never the API origin. Needs a PUT-only bucket CORS rule; see [docs/mcp.md](docs/mcp.md#mcp-apps-uploader-openuploader).
+
 - Default new page-router settings to free feature routing; retain native prose, OCR substantial unknown embedded images, avoid duplicate image OCR on scanned pages, and skip proven blank pages (2026-10-22). Active deployment remains gated; 321 routing/stage tests pass.
 
 - Harden browser key boundaries, connector creation/update URL validation, HTTPS client transports, rejected-widget CORS, and actionable remote-format errors (2026-10-22). Reject duplicate password signups explicitly and link provider-verified OAuth email without a second confirmation; remove an unverified signup credential before linking.

@@ -124,7 +124,7 @@ export interface ChatToolActivity {
  * Chat never exposes ingestion tools: upload fetches arbitrary URLs and starts
  * paid ingestion, and the model's arguments can be steered by document text (G-04).
  */
-const CHAT_EXCLUDED_TOOLS = new Set(["upload", "completeUpload", "listWorkspaces"]);
+const CHAT_EXCLUDED_TOOLS = new Set(["upload", "completeUpload", "listWorkspaces", "openUploader"]);
 
 /** A turn owns its tool budget and citation numbering; no global user state. */
 export function createChatMcpTools(args: {

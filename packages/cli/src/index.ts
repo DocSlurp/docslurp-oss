@@ -887,7 +887,7 @@ async function mcpServerCommand(flags: Record<string, string | boolean>): Promis
       switch (envelope.method) {
         case "tools/list": {
           const result = await get("/v1/mcp/tools");
-          respond({ tools: result.tools.map((tool: any) => ({
+          respond({ tools: result.tools.filter((tool: any) => tool.id !== "openUploader").map((tool: any) => ({
             name: tool.id, title: tool.title, description: tool.description, inputSchema: tool.inputSchema,
             ...(tool.annotations && { annotations: {
               title: tool.title, readOnlyHint: tool.annotations.readOnly, destructiveHint: tool.annotations.destructive,

@@ -148,6 +148,10 @@ export const env = {
   /** Public chat APIs (/v1/search/chat, /v1/chat, chat completions) may run the bounded search agent. */
   publicChatAgentEnabled: readBoolean(process.env.DOCSLURP_PUBLIC_CHAT_AGENT_ENABLED, true),
   webMcpEnabled: readBoolean(process.env.DOCSLURP_WEBMCP_ENABLED, true),
+  /** MCP Apps: the openUploader tool and its ui:// widget resource. Off removes both from every MCP surface. */
+  mcpAppsUiEnabled: readBoolean(process.env.DOCSLURP_MCP_APPS_UI_ENABLED, false),
+  /** Extra http(s) origins the widget sandbox may connect to (comma list), appended to the storage origins. */
+  mcpUiConnectDomains: process.env.MCP_UI_CONNECT_DOMAINS ?? "",
   port: readNumber(process.env.PORT, 8787),
   databaseUrl: resolveDatabaseUrl(),
   apiUrl: process.env.API_URL ?? process.env.APP_URL ?? "http://localhost:4321",

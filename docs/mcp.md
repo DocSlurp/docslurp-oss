@@ -12,6 +12,7 @@ Choose a tool based on the result you need:
 | `suggestQueries` | Prior queries and suggestions | None |
 | `search` | Portable text passages with document/page citation metadata | None |
 | `chat` | Grounded answer, citations, conversation session and usage | Workspace-configured model |
+| `openUploader` | MCP Apps upload widget; only listed when `DOCSLURP_MCP_APPS_UI_ENABLED=true` ([details](#mcp-apps-uploader-openuploader)) | None |
 | `getUploadStatus` | How the workspace's files processed: pages, text and images per page, vision, searchable pages with reasons, settings and recommendations | None |
 
 Search and chat need only a question:
@@ -49,6 +50,128 @@ Parallel retrieval defaults to at most four in-flight queries; set `concurrency`
 Read-only estimate tools (`updateEstimate`, `searchSettingsEstimate`, `reprocessEstimate`, `fullIndexEstimate`, `indexingModeEstimate`, `graphRebuildEstimate`, `uploadEstimate`) price an operation before you start it, and `getJob` reads a background job; `getJob` needs a `search` or `ingest` key. An estimate tool is listed only to keys that could perform the operation: `updateEstimate`, `indexingModeEstimate` and `graphRebuildEstimate` need `workspaces:manage` on a server key, `fullIndexEstimate` and `uploadEstimate` need `ingest`, and `searchSettingsEstimate` and `reprocessEstimate` are available to signed-in sessions only. See [config-change jobs](config-change-jobs.md).
 
 The remote endpoint supports modern per-request MCP and stateless legacy Streamable HTTP clients. Stdio-only clients can use `docslurp mcp-server` from `@docslurp/cli`; its native REST adapters expose the same tools. Transport and adapter calls share the same authorization and search/chat implementation, without an internal network hop or forwarding credentials.
+
+## MCP Apps uploader (`openUploader`)
+
+`openUploader` shows a file-upload widget inside hosts that render MCP Apps. The user drops local files into it, the widget uploads them straight to your object storage and shows processing progress. Use it when the user has files the model cannot read, such as attachments on their own machine.
+
+Which hosts render it: hosts that implement the MCP Apps extension (`io.modelcontextprotocol/ui`), such as Claude on the web and desktop, and ChatGPT. Support varies by host and version, so check the host's own documentation. Hosts without MCP Apps support ignore the widget and keep working: the model falls back to `upload` with `urls`, or to the presigned PUT flow (`upload`, PUT, `completeUpload`).
+
+What it does:
+
+- `openUploader` is read-only. It resolves an existing workspace (default if omitted), lists up to 50 accessible workspaces and returns the limits (10 files per batch, 5 GiB per file). It never creates a workspace and never returns upload URLs. An unknown workspace name fails with `Workspace not found`.
+- The widget calls `uploadEstimate` and `upload` through the host, PUTs each file directly to the presigned URL from the browser, then calls `completeUpload` and polls `getUploadStatus`. Files that `upload` would send as multipart (larger than a single PUT) are shown as unsupported; use the CLI or SDK for those.
+- Presigned URLs live 15 minutes. The widget does not send file bytes through DocSlurp or the MCP endpoint.
+- Widget tool calls carry `_meta` `docslurp/origin: "mcp-app-upload"` for log filtering. Hosts may strip it.
+
+### Enable it
+
+| Variable | Default | Effect |
+| --- | --- | --- |
+| `DOCSLURP_MCP_APPS_UI_ENABLED` | `false` | When `false`, `openUploader` is missing from `tools/list` and the REST manifest, and `ui://docslurp/upload` is missing from `resources/list` and `resources/read`. Existing tools are unchanged. |
+| `MCP_UI_CONNECT_DOMAINS` | empty | Comma-separated extra `http(s)` origins added to the widget's `connectDomains`. |
+
+Set the flag to `true` and restart. To turn it off, unset it or set it to `false` and restart; no redeploy is needed. Hosts cache widget templates, so a host may keep showing a widget it already loaded until its cache expires.
+
+### Content Security Policy
+
+The server returns `_meta.ui.csp.connectDomains` on the `ui://docslurp/upload` resource. The host enforces it; without it, a widget has no network access. The list contains only the origins your presigned URLs point at, derived from `STORAGE_URI`:
+
+- With an `endpoint` parameter, the endpoint's origin. If `pathStyle=false`, also the bucket virtual-host origin (`https://<bucket>.<endpoint host>`).
+- AWS S3 without `endpoint`: the regional origin (`https://s3.<region>.amazonaws.com`) and the virtual-hosted origin (`https://<bucket>.s3.<region>.amazonaws.com`).
+- Plus every origin in `MCP_UI_CONNECT_DOMAINS`.
+
+The API and MCP origins are never included, and `*` is never used. The widget has no external scripts, fonts or images, so no `resourceDomains` are declared.
+
+### Bucket CORS rule
+
+The browser PUT is cross-origin, so the bucket must answer CORS preflight. Without a rule, the widget's uploads fail in the browser even though everything else works. Use one rule:
+
+- `AllowedMethods`: `PUT` only.
+- `AllowedHeaders`: `content-type` only. The widget sends the exact `Content-Type` that was signed.
+- `ExposeHeaders`: `ETag`.
+- No credentials. Presigned URLs need none.
+- `AllowedOrigins`: either `*`, or an allowlist of host sandbox origins.
+
+Why `*` is acceptable: CORS only controls which pages a browser lets read or send cross-origin requests. The presigned signature authorizes the write: it covers one object key and one `Content-Type` and expires after 15 minutes. Anyone holding a URL can already PUT with `curl`, so a wildcard origin gives nobody without a URL any new ability. Keep the rule PUT-only, and keep the bucket private for reads.
+
+Tighter option: list the host sandbox origins. Claude renders MCP Apps on `*.claudemcpcontent.com` (the subdomain is derived from the MCP server URL), so `https://*.claudemcpcontent.com` covers it. ChatGPT's sandbox domain (documented as `*.oaiusercontent.com`) is unverified; confirm it against OpenAI's current documentation before relying on it. Desktop and IDE hosts may send an opaque `null` origin, which an allowlist cannot match; use `*` if you need those. Add your dashboard origin if the dashboard uploads to the same bucket, since it already PUTs presigned URLs from the browser.
+
+Examples. The R2, Tigris and S3 syntax below comes from each provider's documentation; adjust bucket names and origins.
+
+**Cloudflare R2** (`cors.json` for the dashboard JSON tab; this uses the PascalCase S3-style fields):
+
+```json
+[
+  {
+    "AllowedOrigins": ["*"],
+    "AllowedMethods": ["PUT"],
+    "AllowedHeaders": ["content-type"],
+    "ExposeHeaders": ["ETag"],
+    "MaxAgeSeconds": 600
+  }
+]
+```
+
+Wrangler uses a different, lowercase file shape (`{"rules":[{"allowed":{"origins":[...],"methods":[...]}}]}`) and `npx wrangler r2 bucket cors set <BUCKET> --file cors.json`. R2's page documents only `origins` and `methods` for that shape, so set headers in the dashboard if you need to restrict them.
+
+**Tigris** (S3 API; Tigris documents `PutBucketCors` through the AWS CLI with an `--endpoint-url https://fly.storage.tigris.dev`):
+
+```bash
+aws s3api put-bucket-cors --bucket YOUR_BUCKET \
+  --endpoint-url https://fly.storage.tigris.dev \
+  --cors-configuration '{"CORSRules":[{"AllowedOrigins":["*"],"AllowedMethods":["PUT"],"AllowedHeaders":["content-type"],"ExposeHeaders":["ETag"],"MaxAgeSeconds":600}]}'
+```
+
+Tigris evaluates rules in order and returns headers from the first match. Replacing the configuration replaces all rules, so include any existing rule (for example your app origin) in the same call. Tigris's page does not list `ExposeHeaders` in its field list; check with `aws s3api get-bucket-cors` that it was kept.
+
+**AWS S3** (`cors.json`; the S3 console takes the bare array, `put-bucket-cors` takes the `CORSRules` wrapper):
+
+```json
+{
+  "CORSRules": [
+    {
+      "AllowedOrigins": ["*"],
+      "AllowedMethods": ["PUT"],
+      "AllowedHeaders": ["content-type"],
+      "ExposeHeaders": ["ETag"],
+      "MaxAgeSeconds": 600
+    }
+  ]
+}
+```
+
+```bash
+aws s3api put-bucket-cors --bucket YOUR_BUCKET --cors-configuration file://cors.json
+```
+
+To allowlist instead, replace `"*"` with `["https://*.claudemcpcontent.com"]` (S3 allows one `*` per origin string).
+
+**MinIO**: MinIO documents bucket CORS for AIStor with an XML file; I could not confirm the same command on community builds, so run `mc cors set --help` first.
+
+```xml
+<CORSConfiguration>
+  <CORSRule>
+    <AllowedOrigin>*</AllowedOrigin>
+    <AllowedMethod>PUT</AllowedMethod>
+    <AllowedHeader>content-type</AllowedHeader>
+    <ExposeHeader>ETag</ExposeHeader>
+    <MaxAgeSeconds>600</MaxAgeSeconds>
+  </CORSRule>
+</CORSConfiguration>
+```
+
+```bash
+mc cors set myminio/YOUR_BUCKET cors.xml
+```
+
+Otherwise use the server-wide setting `MINIO_API_CORS_ALLOW_ORIGIN` (comma-separated origins, default `*`).
+
+Self-hosted MinIO caveat: the Compose stack signs URLs against `http://minio:9000`, which only exists inside the Docker network. A browser cannot reach it, and an https widget cannot call plain http. Until `STORAGE_PUBLIC_ENDPOINT` ships (a separate signing endpoint that browsers can reach), the uploader does not work against the default self-host stack. Using R2, Tigris or S3 for `STORAGE_URI`, or exposing MinIO on its own public https hostname, makes the signed URLs reachable.
+
+### Rate limits
+
+Every widget tool call is one POST to `/v1/mcp`, which counts against the same `search` rate limit as the model's own searches. The widget polls `getUploadStatus` every 2 s at first, backing off to 5 s, pauses while the widget is hidden, and stops after 30 minutes or when the run finishes. One open widget uses roughly 12 to 30 calls per minute while polling. Uploads themselves go to the bucket and do not touch the limiter. Moving status polling into the `read` bucket is a planned follow-up.
 
 ## Testing with real clients
 

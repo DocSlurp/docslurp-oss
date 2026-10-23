@@ -121,6 +121,31 @@ describe("mcpRoutes", () => {
     expect(listWorkspaces).toHaveBeenCalledWith("user-1", { refineNames: false });
   });
 
+  it("resolves the uploader target read-only and hides the tool while the MCP Apps flag is off", async () => {
+    validateApiKey.mockResolvedValue({ ...validatedKey, scopes: ["ingest"] });
+    listWorkspaces.mockResolvedValue([
+      { id: "default-ws", orgId: "org-1", slug: "main", name: "Main", isDefault: true, systemPrompt: "private" },
+      { id: "ws-2", orgId: "org-1", slug: "legal", name: "Legal", isDefault: false },
+    ]);
+    const call = (body: object) => app.request("/mcp/tools/openUploader", { method: "POST", headers: { Authorization: "Bearer key", "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    expect((await call({})).status).toBe(404);
+    const { env } = await import("../config.js");
+    env.mcpAppsUiEnabled = true;
+    try {
+      const defaulted = await (await call({})).json();
+      expect(defaulted).toEqual({
+        workspace: { id: "default-ws", slug: "main", name: "Main", isDefault: true },
+        workspaces: [{ id: "default-ws", slug: "main", name: "Main", isDefault: true }, { id: "ws-2", slug: "legal", name: "Legal", isDefault: false }],
+        limits: { maxFiles: 10, maxFileBytes: 5368709120 },
+        uploader: { resourceUri: "ui://docslurp/upload" },
+        hint: expect.any(String),
+      });
+      expect((await (await call({ workspace: "ws-2" })).json()).workspace.id).toBe("ws-2");
+      expect((await call({ extra: 1 })).status).toBe(400);
+      expect(uploadRequest).not.toHaveBeenCalled();
+    } finally { env.mcpAppsUiEnabled = false; }
+  });
+
   it("uploads URLs and requests up to ten single-part signed uploads with actor, default scope and retry key", async () => {
     validateApiKey.mockResolvedValue({ ...validatedKey, scopes: ["ingest"] });
     const headers = { Authorization: "Bearer key", "Content-Type": "application/json" };

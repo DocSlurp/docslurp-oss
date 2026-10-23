@@ -28,10 +28,18 @@ export type IngestReportRecommendation = {
   patch: Record<string, unknown> | null;
   reprocessDocumentIds: string[];
 };
+export type IngestReportFileItem = {
+  documentId: string; filename: string; mimeType: string; status: "queued" | "processing" | "completed" | "failed";
+  pages: number | null; searchablePages: number | null; error: string | null;
+};
 export type IngestReport = {
   workspaceId: string; workspaceName: string; generatedAt: string;
   scope: { runId: string | null; documentIds: string[] | null; matchedDocuments: number; documents: number; pageDetailDocuments: number; truncated: boolean };
-  files: { total: number; byType: Array<{ type: string; files: number; pages: number; bytes: number }>; byStatus: { completed: number; processing: number; queued: number; failed: number; other: number } };
+  files: { total: number; byType: Array<{ type: string; files: number; pages: number; bytes: number }>; byStatus: { completed: number; processing: number; queued: number; failed: number; other: number };
+    /** Run-scoped reports only (at most 50, newest first). */
+    items?: IngestReportFileItem[] };
+  /** Run-scoped reports only. */
+  run?: { id: string; status: string; durationMs: number | null } | null;
   pages: { total: number; avgPerFile: number | null };
   bytes: { total: number; avgPerFile: number | null; avgPerPage: number | null; unknownSizeFiles: number; perFile: IngestReportHistogram };
   text: { recordedPages: number; avgBytesPerPage: number | null; zeroTextPages: number; nearZeroTextPages: number; perPage: IngestReportHistogram; indexedAvgBytesPerPage: number | null; indexedPerPage: IngestReportHistogram };
