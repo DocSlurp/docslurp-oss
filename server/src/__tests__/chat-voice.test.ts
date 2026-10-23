@@ -14,7 +14,17 @@ const { chatVoiceRoutes } = await import("../routes/chat-voice.js");
 const usage = { seconds: 12.5, input_tokens: 0, output_tokens: 0, cost: 0.0003472222 };
 const providerFetch = vi.fn();
 const context = { userId: "user", scope: { workspaceId: "ws", orgId: "org" } };
-const audio = () => new Blob(["recorded bytes"], { type: "audio/wav" });
+/** 16 kHz mono 16-bit PCM WAV with `samples` of silence: the only format the hosted model accepts. */
+function wav(samples = 1600): Uint8Array<ArrayBuffer> {
+  const out = Buffer.alloc(44 + samples * 2);
+  out.write("RIFF", 0); out.writeUInt32LE(36 + samples * 2, 4); out.write("WAVE", 8);
+  out.write("fmt ", 12); out.writeUInt32LE(16, 16); out.writeUInt16LE(1, 20); out.writeUInt16LE(1, 22);
+  out.writeUInt32LE(16_000, 24); out.writeUInt32LE(32_000, 28); out.writeUInt16LE(2, 32); out.writeUInt16LE(16, 34);
+  out.write("data", 36); out.writeUInt32LE(samples * 2, 40);
+  return new Uint8Array(out);
+}
+const wavBytes = wav();
+const audio = () => new Blob([wavBytes], { type: "audio/wav" });
 
 beforeEach(() => {
   vi.stubEnv("OPENROUTER_API_KEY", "test-key");
@@ -34,7 +44,7 @@ describe("Mastra workspace speech input", () => {
     expect(url).toBe("https://openrouter.ai/api/v1/audio/transcriptions");
     expect(JSON.parse(options.body)).toEqual({
       model: CHAT_VOICE_MODEL,
-      input_audio: { data: Buffer.from("recorded bytes").toString("base64"), format: "wav" },
+      input_audio: { data: Buffer.from(wavBytes).toString("base64"), format: "wav" },
       response_format: "json",
     });
     expect(mocks.record).toHaveBeenCalledWith({ ...context, usage: expect.objectContaining({
@@ -44,9 +54,23 @@ describe("Mastra workspace speech input", () => {
     }) });
   });
 
-  it.each([['audio/webm;codecs=opus', 'webm'], ['audio/mp4', 'm4a']])("sends native %s recordings without PCM expansion", async (mime, format) => {
-    await new WorkspaceChatVoice(context, "standard").listen(new Blob(["compressed bytes"], { type: mime }));
-    expect(JSON.parse(providerFetch.mock.calls[0][1].body).input_audio).toEqual({ data: Buffer.from("compressed bytes").toString("base64"), format });
+  // The hosted model answers webm/m4a with a provider 400 (a paid round-trip that surfaced as a 502).
+  it.each([
+    ["webm", new Blob([Buffer.from("1a45dfa3", "hex")], { type: "audio/webm;codecs=opus" })],
+    ["m4a", new Blob([Buffer.from("0000001c66747970", "hex")], { type: "audio/mp4" })],
+    ["ogg", new Blob([Buffer.from("OggS")], { type: "audio/ogg" })],
+    ["webm labelled as wav", new Blob([Buffer.from("1a45dfa3", "hex")], { type: "audio/wav" })],
+    ["wav bytes without a wav type", new Blob([wavBytes], { type: "application/octet-stream" })],
+  ])("rejects %s recordings with 415 before any privacy, spend or provider work", async (_label, recording) => {
+    await expect(new WorkspaceChatVoice(context, "standard").listen(recording)).rejects.toMatchObject({ status: 415 });
+    expect(mocks.spend).not.toHaveBeenCalled();
+    expect(providerFetch).not.toHaveBeenCalled();
+    expect(mocks.record).not.toHaveBeenCalled();
+  });
+
+  it.each(["audio/wav", "audio/x-wav", "audio/wave", "audio/wav;codecs=1"])("accepts %s recordings", async (type) => {
+    await new WorkspaceChatVoice(context, "standard").listen(new Blob([wavBytes], { type }));
+    expect(JSON.parse(providerFetch.mock.calls[0][1].body).input_audio.format).toBe("wav");
   });
 
   it("preserves actual token counts and includes separate BYOK charges", async () => {
@@ -108,6 +132,15 @@ describe("workspace transcription route", () => {
     return server.route("/workspaces", chatVoiceRoutes);
   }
   function upload() { const form = new FormData(); form.set("audio", audio(), "recording.wav"); return form; }
+
+  it("answers non-WAV uploads with an actionable 415 and no provider call", async () => {
+    const form = new FormData();
+    form.set("audio", new Blob([Buffer.from("1a45dfa3", "hex")], { type: "audio/webm" }), "recording.webm");
+    const response = await app().request("/workspaces/ws/chat/transcribe", { method: "POST", body: form });
+    expect(response.status).toBe(415);
+    expect(await response.json()).toEqual({ error: { code: "unsupported_type", message: "This file type isn’t supported." } });
+    expect(providerFetch).not.toHaveBeenCalled();
+  });
 
   it("checks workspace access before calling the provider", async () => {
     mocks.workspace.mockResolvedValue(null);

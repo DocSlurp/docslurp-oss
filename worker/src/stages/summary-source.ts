@@ -22,14 +22,20 @@ export async function readSummarySource(
     if (size && size <= SUMMARY_EVIDENCE_MAX_BYTES) {
       const bytes = await storage.getByteRange(evidenceKey, 0, size - 1, signal);
       const evidence = parseEvidence(JSON.parse(bytes.toString("utf8")));
-      if (evidence.documentId !== document.id || evidence.sourceUri !== artifactUri) {
-        throw new Error("Summary evidence does not match the current document artifact");
+      if (evidence.documentId !== document.id) {
+        throw new Error("Summary evidence does not match the current document");
       }
-      return { text: evidence.text, sourceBytes: evidence.sourceBytes, readBytes: bytes.length,
-        sampled: evidence.sampled, coverage: { totalPages: evidence.totalPages,
-          pages: evidence.pages, pageReferences: evidence.pageReferences } };
+      if (evidence.sourceUri === artifactUri) {
+        return { text: evidence.text, sourceBytes: evidence.sourceBytes, readBytes: bytes.length,
+          sampled: evidence.sampled, coverage: { totalPages: evidence.totalPages,
+            pages: evidence.pages, pageReferences: evidence.pageReferences } };
+      }
+      // A later stage replaced the markdown without refreshing the evidence:
+      // it describes superseded text, so summarize the current artifact instead.
+      console.warn(`[document-summary] stale_summary_evidence document=${document.id} evidence_source=${evidence.sourceUri} markdown=${artifactUri ?? "none"}`);
+    } else if (size) {
+      throw new Error("Summary evidence exceeds the byte budget");
     }
-    if (size) throw new Error("Summary evidence exceeds the byte budget");
   }
   let key = artifactUri ? keyFromStorageUri(artifactUri, storage.bucket) : null;
   if (!artifactUri && document.mimeType?.startsWith("text/")) key = document.sourceKey;

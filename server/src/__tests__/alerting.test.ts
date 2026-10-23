@@ -242,6 +242,17 @@ describe("alert evaluator", () => {
     return { instance, deps, delivered, advance: (ms: number) => { now += ms; } };
   }
 
+  it("retries failed Telegram delivery on the next evaluation without a new alert transition", async () => {
+    const deliver = vi.fn().mockRejectedValueOnce(new Error("Telegram failed")).mockResolvedValue(undefined);
+    const { instance, advance } = evaluator({ deliver });
+    await instance.tick(); advance(60000); await instance.tick();
+    expect(deliver).toHaveBeenCalledTimes(1);
+    advance(60000); await instance.tick();
+    expect(deliver).toHaveBeenCalledTimes(2);
+    advance(60000); await instance.tick();
+    expect(deliver).toHaveBeenCalledTimes(2);
+  });
+
   it("notifies once after consecutive failures and resolves when the queue drains", async () => {
     const { instance, deps, delivered, advance } = evaluator();
     await instance.tick();

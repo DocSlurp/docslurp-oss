@@ -449,6 +449,7 @@ export class Store {
       select *
       from documents
       where run_id = ${runId}
+        and superseded_at is null and status <> 'cancelled'
       order by created_at asc
     `;
 
@@ -939,11 +940,20 @@ export class Store {
       // Mode-switch backfills re-key their artifacts onto the source document and retire themselves
       // (see backfill-adoption.ts); they must not supersede the source version.
       const adopted = new Set(state.run.kind === "full-index" ? await adoptBackfillDocuments(client, state.run.id) : []);
+      await client`select retire_replaced_pending_documents(${state.run.id})`;
+      // Legacy retries may already contain obsolete queued rows. They were not
+      // hydrated or processed; retire them instead of declaring them completed.
+      await client`
+        update documents set status = 'cancelled', lexical_searchable_at = null, updated_at = now()
+        where run_id = ${state.run.id} and superseded_at is not null
+          and status in ('queued', 'processing')
+      `;
       const completed = await client<{ id: string }[]>`
         update documents
         set status = 'completed',
             updated_at = now()
         where run_id = ${state.run.id}
+          and superseded_at is null
           and status not in ('failed', 'cancelled', 'pii_blocked')
           and not exists (
             select 1 from document_run_stage_states stage_state
@@ -1020,6 +1030,7 @@ export class Store {
       return;
     }
 
+    await this.sql`select retire_replaced_pending_documents(${runId})`;
     await this.failProcessingDocumentStages(runId, stage, message);
     await this.failUnfinishedDocumentsForRun(runId);
 
@@ -1089,6 +1100,7 @@ export class Store {
     await this.sql`
       update documents d
       set status = case
+            when d.superseded_at is not null then 'cancelled'
             when exists (
               select 1 from document_run_stage_states s
               where s.document_id = d.id and s.run_id = d.run_id and s.status = 'failed'
@@ -1097,7 +1109,7 @@ export class Store {
           end,
           updated_at = now()
       where d.run_id = ${runId}
-        and d.status not in ('completed', 'failed', 'pii_blocked')
+        and d.status not in ('completed', 'failed', 'pii_blocked', 'cancelled')
     `;
   }
 

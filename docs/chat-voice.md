@@ -32,8 +32,14 @@ this change does not establish a comparative quality benchmark on user recording
 ## API and accounting
 
 `POST /v1/workspaces/:workspaceId/chat/transcribe` accepts a multipart `audio`
-file in PCM WAV format and returns `{ text, model }`. It uses the dashboard session, checks workspace
-access, and inherits the API's `chat-ai` rate limits. It is a dashboard endpoint,
+file in PCM WAV format and returns `{ text, model }`. The file must be typed
+`audio/wav` (or `audio/x-wav`, `audio/wave`) and start with a RIFF/WAVE header;
+anything else, including WebM and M4A, gets `415 unsupported_type` before any
+spend check or provider call, because the hosted model rejects those formats.
+It uses the dashboard session, checks workspace
+access, and inherits the API's `chat-ai` rate limits (per user: 60/min on
+starter organizations, 120/min on funded ones; per IP: 90/min), which it shares
+with chat turns in the same window. It is a dashboard endpoint,
 not an API-key or public embed endpoint. It is registered before `/chat/:agentId`.
 
 The server sends base64 audio to [OpenRouter's transcription endpoint](https://openrouter.ai/docs/guides/overview/multimodal/stt).

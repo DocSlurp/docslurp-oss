@@ -19,6 +19,7 @@ import {
   type QueueSnapshot,
   type TaskQueuePollerSnapshot,
 } from "./alert-rules.js";
+import { creditAlertChecks, readCreditSnapshots, type CreditSnapshot } from "./credit-alerts.js";
 import { AlertTracker } from "./alert-tracker.js";
 import { WorkerFloorFallback } from "./worker-floor.js";
 
@@ -138,6 +139,7 @@ export interface AlertEvaluatorDeps {
   readQueue: () => Promise<QueueSnapshot>;
   readMigrations: () => Promise<MigrationSnapshot | null>;
   readTemporal: () => Promise<AlertObservation["temporal"]>;
+  readCredits?: () => Promise<CreditSnapshot[]>;
   readHttp: (windowMs: number, now: number) => { total: number; errors5xx: number };
   deliver: (notification: Parameters<typeof deliverAlert>[0], config: AlertDeliveryConfig) => Promise<void>;
   now: () => number;
@@ -157,6 +159,7 @@ const defaultDeps: AlertEvaluatorDeps = {
     return rows.length > 0;
   },
   readQueue: readQueueSnapshot,
+  readCredits: readCreditSnapshots,
   readMigrations: readMigrationSnapshot,
   readTemporal: readTemporalSnapshot,
   readHttp: (windowMs, now) => httpResponseStats.window(windowMs, now),
@@ -196,6 +199,7 @@ export class AlertEvaluator {
   private readonly workerHistory = new WorkerIdentityHistory();
   private leader = false;
   private running = false;
+  private readonly pendingDeliveries = new Map<string, Parameters<typeof deliverAlert>[0]>();
   lastChecks: AlertCheck[] = [];
   lastEvaluatedAt: number | null = null;
 
@@ -227,7 +231,10 @@ export class AlertEvaluator {
       if (leader !== this.leader && database === null) {
         console.log(`[alert] evaluator_leader=${leader} instance=${this.options.instance}`);
         // The new leader owns fleet alerts now; forget ours without a resolved notice.
-        if (!leader) this.tracker.drop((id) => id !== "http-5xx-rate" && id !== "database-unreachable");
+        if (!leader) {
+          this.tracker.drop((id) => id !== "http-5xx-rate" && id !== "database-unreachable");
+          for (const id of this.pendingDeliveries.keys()) if (id !== "http-5xx-rate" && id !== "database-unreachable") this.pendingDeliveries.delete(id);
+        }
       }
       this.leader = leader;
       // The lease query answered, so the database is reachable even when another instance leads.
@@ -251,10 +258,22 @@ export class AlertEvaluator {
         http: { ...this.deps.readHttp(windowMs, now), windowMs },
       };
       const checks = evaluateAlertRules(observation, this.options.thresholds, leader ? this.workerHistory : undefined);
+      if (leader && this.deps.readCredits) {
+        try { checks.push(...creditAlertChecks(await this.deps.readCredits())); }
+        catch { console.error("[alert] credit_snapshot_unavailable=true existing_alerts_preserved=true"); }
+      }
       this.lastChecks = checks;
       this.lastEvaluatedAt = now;
-      for (const notification of this.tracker.update(checks, now)) {
-        await this.deps.deliver(notification, this.options.delivery);
+      for (const notification of this.tracker.update(checks, now)) this.pendingDeliveries.set(notification.id, notification);
+      // Failed Telegram sends retry at most once per evaluation, including
+      // recovery messages; a new transition replaces any obsolete pending one.
+      for (const notification of [...this.pendingDeliveries.values()]) {
+        try {
+          await this.deps.deliver(notification, this.options.delivery);
+          this.pendingDeliveries.delete(notification.id);
+        } catch {
+          console.error(`[alert] delivery_pending=true id=${notification.id} status=${notification.status}`);
+        }
       }
       if (leader && this.deps.workerFloor) {
         await this.deps.workerFloor(checks).catch(() => null);
@@ -280,7 +299,7 @@ export function startAlertEvaluator(env: NodeJS.ProcessEnv = process.env): Alert
   const instance = evaluator;
   console.log(
     `[alert] evaluator started intervalMs=${options.intervalMs} webhook=${options.delivery.webhookUrl ? options.delivery.format : "none"} ` +
-    `env=${options.delivery.environment} instance=${options.instance}`,
+    `telegram=${options.delivery.telegram ? "configured" : "unavailable"} env=${options.delivery.environment} instance=${options.instance}`,
   );
   timer = setInterval(() => {
     withBackgroundSpan("api.alert-evaluation", () => instance.tick()).catch((error) => console.error(`[alert] evaluation failed: ${errorMessage(error)}`));

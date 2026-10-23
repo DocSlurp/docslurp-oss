@@ -329,6 +329,9 @@ export const documents = pgTable(
     chunkCount: integer("chunk_count").default(0).notNull(),
     /** document_pages rows; trigger-maintained (migration 0063). */
     storedPageCount: integer("stored_page_count").default(0).notNull(),
+    /** Exact indexed text bytes; statement-trigger-maintained (migration 0072). */
+    chunkTextBytes: bigint("chunk_text_bytes", { mode: "number" }).default(0).notNull(),
+    storedPageTextBytes: bigint("stored_page_text_bytes", { mode: "number" }).default(0).notNull(),
     createdAt: timestamp("created_at", { withTimezone: true, mode: "string" })
       .defaultNow()
       .notNull(),

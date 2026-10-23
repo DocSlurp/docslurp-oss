@@ -55,13 +55,14 @@ export class AlertTracker {
         };
         if (next.consecutiveFiring === 0) next.firstFiringAt = now;
         next.consecutiveFiring += 1;
+        const escalated = next.active && next.severity !== "critical" && check.severity === "critical";
         next.severity = check.severity;
         const base = { id: check.id, severity: check.severity, summary: check.summary, details: check.details, startedAt: next.firstFiringAt, at: now };
         if (!next.active && next.consecutiveFiring >= Math.max(1, this.options.pendingEvaluations)) {
           next.active = true;
           next.lastNotifiedAt = now;
           notifications.push({ ...base, status: "firing", repeat: false });
-        } else if (next.active && this.options.repeatIntervalMs > 0 && now - next.lastNotifiedAt >= this.options.repeatIntervalMs) {
+        } else if (next.active && (escalated || (this.options.repeatIntervalMs > 0 && now - next.lastNotifiedAt >= this.options.repeatIntervalMs))) {
           next.lastNotifiedAt = now;
           notifications.push({ ...base, status: "firing", repeat: true });
         }

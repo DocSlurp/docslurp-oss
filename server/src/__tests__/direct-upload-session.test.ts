@@ -17,7 +17,8 @@ import {
   toDirectUploadPartCount,
   type LoadedDirectUploadSession,
 } from "../services/direct-upload-session.js";
-import { WorkspaceIntakeError } from "../services/workspace-intake.js";
+import { intakeIntoWorkspace, WorkspaceIntakeError } from "../services/workspace-intake.js";
+import { createWorkspaceIntakeFakes } from "./helpers/workspace-intake-fakes.js";
 
 function directUploadSessionFixture(
   overrides: {
@@ -56,6 +57,15 @@ function directUploadSessionFixture(
 }
 
 describe("Direct Upload Session Module", () => {
+  it("preserves verified object bytes through direct-upload intake into run creation", async () => {
+    const fakes = createWorkspaceIntakeFakes();
+    await intakeIntoWorkspace({
+      userId: "user-1", orgId: "org-1", kind: "direct-upload", newWorkspace: true,
+      items: directUploadIntakeItems(directUploadSessionFixture()),
+    }, fakes.ports);
+    expect(fakes.runs[0].files[0].fileSize).toBe(42);
+  });
+
   it("normalizes PostgreSQL bigint sizes before matching and verifying browser files", async () => {
     const fixture = directUploadSessionFixture();
     sqlMock.mockResolvedValueOnce([fixture.session]).mockResolvedValueOnce([
@@ -146,7 +156,7 @@ describe("Direct Upload Session Module", () => {
         sizeBytes: 42,
         canonicalId: null,
         path: "",
-        content: { storedKey: "user-1/raw/contracts.pdf" },
+        content: { storedKey: "user-1/raw/contracts.pdf", verifiedSizeBytes: 42 },
       },
     ]);
   });
@@ -179,7 +189,7 @@ describe("Direct Upload Session Module", () => {
         files: [completed, { ...completed, filename: "late.pdf", status: "pending" }],
       }),
     );
-    expect(done?.content).toEqual({ storedKey: "user-1/raw/contracts.pdf" });
+    expect(done?.content).toEqual({ storedKey: "user-1/raw/contracts.pdf", verifiedSizeBytes: 42 });
     expect(unfinished?.content).toEqual({ rejected: expect.any(WorkspaceIntakeError) });
     expect((unfinished?.content as { rejected: WorkspaceIntakeError }).rejected).toMatchObject({
       statusCode: 409,

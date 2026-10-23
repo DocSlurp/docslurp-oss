@@ -204,6 +204,11 @@ export async function queryWorkerScalerSnapshot(sql: ScalerSql, params: WorkerSc
             where (r.status = 'queued' and coalesce(r.control_state,'') not in ('paused','cancelled'))
               or (r.status = 'processing' and coalesce(r.control_state,'') not in ('paused','cancel_requested','cancelled')
                 and coalesce(r.lease_expires_at, now()) >= now())
+            union all
+            select p.org_id as org_key, coalesce(o.worker_slots, ${params.defaultOrgSlots}) as slots,
+              0 as shard_demand, 2 as fanout_cap, 1 as page_demand
+            from document_page_renders p left join organizations o on o.id=p.org_id
+            where p.expires_at > now()
           ) runs
           group by org_key
         ) d) as org_demand,

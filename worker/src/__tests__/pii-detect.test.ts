@@ -9,6 +9,8 @@ import { indexableDocuments, isPiiBlockedDocument } from "../pipeline/pii-gate.j
 import { WorkflowState } from "../pipeline/pipeline.js";
 import { EmbedStage } from "../stages/embed.js";
 import { extractTextForEmbedding } from "../stages/embedding-runtime.js";
+import { buildSummaryEvidence } from "../stages/summary-evidence.js";
+import { readSummarySource } from "../stages/summary-source.js";
 import { PiiDetectStage, type PiiDetectionArtifact, type PiiDetectionSink, type PiiDocumentOutcome } from "../stages/pii-detect.js";
 import type { CommandRunner } from "../tools/runner.js";
 import type { ArtifactStore } from "../tools/storage.js";
@@ -31,6 +33,9 @@ class MemoryStore {
   async getJson<T>(key: string): Promise<T> { return JSON.parse((await this.getBytes(key)).toString("utf8")) as T; }
   async putJson(key: string, value: unknown) { this.objects.set(key, JSON.stringify(value)); }
   async streamText(key: string, text: string) { this.objects.set(key, text); }
+  async deleteKeys(keys: string[]) { for (const key of keys) this.objects.delete(key); }
+  async objectSize(key: string) { const value = this.objects.get(key); return value === undefined ? null : Buffer.byteLength(value); }
+  async getByteRange(key: string, start: number, end: number) { return (await this.getBytes(key)).subarray(start, end + 1); }
   json<T>(key: string): T { return JSON.parse(this.objects.get(key) ?? "null") as T; }
 }
 
@@ -306,5 +311,47 @@ describe("piiPolicy withheld debug artifacts", () => {
     const { sink, state, stage } = setup("redact_artifacts", { withExtraction: false, sourceText: `Mail ${EMAIL}` });
     await stage.run(state);
     expect(sink.outcomes[0]?.outcome.withheldArtifactUris).toEqual(["s3://test-bucket/u1/run-1/source/doc-1"]);
+  });
+});
+
+describe("piiPolicy redact_artifacts and summary evidence", () => {
+  function withEvidence(options: Parameters<typeof setup>[1] = {}) {
+    const ctx = setup("redact_artifacts", options);
+    const markdownUri = ctx.state.artifactLedger.readDocument(ctx.documentId, "markdown")!;
+    const evidenceKey = `${ctx.prefix}/summary-evidence/${ctx.documentId}.json`;
+    // Extraction cut the evidence from the unredacted text, bound to the markdown URI.
+    ctx.storage.objects.set(evidenceKey, JSON.stringify(buildSummaryEvidence({
+      text: `Contact ${EMAIL} about payroll.\fJane ${SSN}`, pageCount: 2, documentId: ctx.documentId, sourceUri: markdownUri,
+    })));
+    ctx.state.artifactLedger.recordDocument(ctx.documentId, "summary-evidence", ctx.storage.uri(evidenceKey));
+    return { ...ctx, evidenceKey };
+  }
+
+  it("rebuilds the evidence from the redacted markdown so the summary never sees the raw values", async () => {
+    const { storage, state, stage, document, documentId, evidenceKey, sink } = withEvidence();
+    await stage.run(state);
+
+    const evidence = storage.objects.get(evidenceKey)!;
+    expect(evidence).not.toContain(SSN);
+    expect(evidence).not.toContain(EMAIL);
+    expect(evidence).toContain("[REDACTED:ssn]");
+    expect(sink.outcomes[0]?.outcome).toMatchObject({ redacted: true });
+    const source = await readSummarySource(storage, document, state.artifactLedger.readDocument(documentId, "markdown"),
+      undefined, state.artifactLedger.readDocument(documentId, "summary-evidence"));
+    expect(source?.text).toContain("[REDACTED:email]");
+    expect(source?.text).not.toContain(SSN);
+  });
+
+  it("deletes the evidence when the redacted markdown cannot be read back", async () => {
+    const { storage, state, stage, document, documentId, prefix, evidenceKey } = withEvidence();
+    // Markdown slot points at a non-UTF-8 object: there is no text to rebuild from.
+    storage.objects.set(`${prefix}/markdown/candidate-a.md`, "\uFFFD");
+    const getBytes = storage.getBytes.bind(storage);
+    storage.getBytes = async (key: string) => key.endsWith("candidate-a.md") ? Buffer.from([0xff, 0xfe, 0xfd]) : getBytes(key);
+    await stage.run(state);
+
+    expect(storage.objects.has(evidenceKey)).toBe(false);
+    expect(await readSummarySource(storage, document, undefined, undefined,
+      state.artifactLedger.readDocument(documentId, "summary-evidence"))).toBeNull();
   });
 });
