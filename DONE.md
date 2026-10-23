@@ -1,13 +1,16 @@
 # Completed
 
+- Keep customer funding/resume status in the product and remove its operator notifications. Alert only on actual configured-platform vendor billing/quota errors, including bounded upstream SSE error frames; emit sanitized telemetry and deduplicated Telegram warning/recovery with exact credential scope (2026-10-23). Coverage and transport limits: `docs/vendor-balance-alerts.md`.
+
 - Automatically finalize direct object uploads and ingest their verified bytes with persisted results, authenticated Tigris notifications, multipart reconciliation, unknown-length stream signing, concurrent-session fencing and interrupted-run recovery (2026-10-23). Retain explicit completion/confirmation compatibility and expire abandoned uploads.
+
 - Retire original unflagged pending canonical history after a newer same-organization/workspace/source replacement completes, repair existing terminal-run backlog, and serialize retirement with retries without blocking canonical locks (2026-10-23; migration 0076).
 
 - Render native PDF pages on demand through authorized, deduplicated and bounded Temporal jobs; persist page artifacts and scoped compute receipts atomically. Distinguish expected missing Lance compatibility tables from real storage failures, and let existing readers drain before the document counter migration acquires its lock (2026-10-23).
 
 - Preserve verified direct-upload byte accounting, backfill only ownership-matched completed upload receipts, give duplicate embedding artifacts document-local chunks/citation evidence, clear empty replacements, and retire superseded pending history without retry resurrection (2026-10-23; migrations 0073/0075).
 
-- Preserve safe credit-pause reasons and reserve facts, retry funding resumes transactionally, and emit deduplicated credit/deferred-resume alerts through existing Telegram/SigNoz logging (2026-10-23).
+- Preserve safe credit-pause reasons and reserve facts, retry funding resumes transactionally (2026-10-23). Customer-credit operator alerts were subsequently removed in favor of vendor billing/quota evidence.
 
 - Remove repeated chunk/page heap scans from workspace board byte totals using exact statement-triggered document counters; preserve indexed-byte output and existing search counters (2026-10-23). Local paired confirmation is 79.5% faster; production rollout remains unmeasured.
 

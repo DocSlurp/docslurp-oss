@@ -1,3 +1,4 @@
+import { instrumentFetch } from "@docslurp/shared/observability";
 import { PUBLIC_ERROR_MESSAGES, publicDiagnostics } from "@docslurp/shared";
 import { randomUUID } from "node:crypto";
 
@@ -157,7 +158,7 @@ async function deliverEmail(args: {
     };
   }
 
-  const response = await fetch("https://api.resend.com/emails", {
+  const response = await instrumentFetch("resend", "email")("https://api.resend.com/emails", {
     method: "POST",
     headers: {
       Authorization: `Bearer ${resendApiKey}`,
