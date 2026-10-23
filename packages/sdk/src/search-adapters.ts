@@ -1,5 +1,5 @@
 import type { SearchInput, SearchResponse, SearchResult } from "./index.js";
-import { assertBrowserSafeApiKey } from "./keys.js";
+import { assertBrowserSafeApiKey, assertSecureApiOrigin } from "./keys.js";
 
 export type SearchProvider = "meilisearch" | "typesense" | "pagefind";
 export type AdapterSearch = (input: SearchInput) => Promise<SearchResponse>;
@@ -77,6 +77,7 @@ export async function runSearchAdapter(provider: SearchProvider, workspaceRef: s
 function transport(options: SearchAdapterOptions) {
   if (!options.apiUrl || !options.clientKey) throw new Error("apiUrl and clientKey are required.");
   assertBrowserSafeApiKey(options.clientKey);
+  assertSecureApiOrigin(options.apiUrl);
   const fetchImpl = options.fetch ?? globalThis.fetch;
   return async <T>(path: string, body: unknown): Promise<T> => {
     const response = await fetchImpl(`${options.apiUrl.replace(/\/$/, "")}${path}`, { method: "POST", signal: AbortSignal.timeout(30_000), headers: { Authorization: `Bearer ${options.clientKey}`, "Content-Type": "application/json" }, body: JSON.stringify(body) });

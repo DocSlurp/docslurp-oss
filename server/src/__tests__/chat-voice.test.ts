@@ -2,7 +2,8 @@ import { Hono } from "hono";
 import { beforeEach, afterEach, describe, expect, it, vi } from "vitest";
 import { CHAT_VOICE_MAX_BYTES, CHAT_VOICE_MODEL } from "@docslurp/shared/chat-voice";
 
-const mocks = vi.hoisted(() => ({ record: vi.fn(), workspace: vi.fn(), sql: vi.fn((..._args: unknown[]) => Promise.resolve([])) }));
+const mocks = vi.hoisted(() => ({ spend: vi.fn(), record: vi.fn(), workspace: vi.fn(), sql: vi.fn((..._args: unknown[]) => Promise.resolve([])) }));
+vi.mock("../services/billing/spend-guard.js", () => ({ assertCanSpend: mocks.spend }));
 vi.mock("../db.js", () => ({ sql: mocks.sql }));
 vi.mock("../lib/ai-usage.js", () => ({ recordUsageEvent: mocks.record }));
 vi.mock("../lib/ai.js", () => ({ resolveOpenRouterApiKey: () => process.env.OPENROUTER_API_KEY }));
@@ -19,6 +20,7 @@ beforeEach(() => {
   vi.stubEnv("OPENROUTER_API_KEY", "test-key");
   vi.stubGlobal("fetch", providerFetch);
   providerFetch.mockReset().mockResolvedValue(Response.json({ text: " My question? ", usage }, { headers: { "x-generation-id": "gen-1" } }));
+  mocks.spend.mockReset().mockResolvedValue(undefined);
   mocks.record.mockReset().mockResolvedValue({});
   mocks.workspace.mockReset().mockResolvedValue({ id: "ws", orgId: "org" });
 });
@@ -40,6 +42,11 @@ describe("Mastra workspace speech input", () => {
       inputTokens: 0, outputTokens: 0, amount: 12.5, unit: "second", costCents: usage.cost * 100,
       metadata: expect.objectContaining({ generationId: "gen-1", costSource: "provider" }),
     }) });
+  });
+
+  it.each([['audio/webm;codecs=opus', 'webm'], ['audio/mp4', 'm4a']])("sends native %s recordings without PCM expansion", async (mime, format) => {
+    await new WorkspaceChatVoice(context, "standard").listen(new Blob(["compressed bytes"], { type: mime }));
+    expect(JSON.parse(providerFetch.mock.calls[0][1].body).input_audio).toEqual({ data: Buffer.from("compressed bytes").toString("base64"), format });
   });
 
   it("preserves actual token counts and includes separate BYOK charges", async () => {
@@ -79,6 +86,13 @@ describe("Mastra workspace speech input", () => {
     providerFetch.mockResolvedValue(Response.json({ text: "Hello" }));
     await expect(voice.listen(audio())).rejects.toMatchObject({ status: 502 });
     expect(mocks.record).not.toHaveBeenCalled();
+  });
+
+  it("checks the workspace spend limit before submitting any audio", async () => {
+    mocks.spend.mockRejectedValue(new Error("Budget exhausted"));
+    await expect(new WorkspaceChatVoice(context, "standard").listen(audio())).rejects.toThrow("Budget exhausted");
+    expect(mocks.spend).toHaveBeenCalledWith("org", "ws");
+    expect(providerFetch).not.toHaveBeenCalled();
   });
 
   it("does not return a transcript if usage persistence fails", async () => {

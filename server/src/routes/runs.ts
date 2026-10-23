@@ -85,6 +85,12 @@ const runValidationHook = (result: { success: boolean; error?: ValidationErrorSo
 };
 
 export const runsRoutes = new Hono()
+  .use("*", async (c, next) => {
+    const actor = getRequestActor(c);
+    // Run history and events contain configuration, costs and internal diagnostics.
+    if (actor.type === "apiKey" && actor.apiKey.keyType !== "server") return apiStatusError(c, 403, "Server API key required");
+    await next();
+  })
   .get("/", async (c) => {
     const userId = c.get("sessionUser").id;
     const actor = getRequestActor(c);

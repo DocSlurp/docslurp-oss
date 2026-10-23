@@ -16,6 +16,7 @@ describe("capability manifest annotations", () => {
       search: { readOnly: true, idempotent: true, consequential: false },
       chat: { readOnly: false, idempotent: false, consequential: false },
       getUploadStatus: { readOnly: true, idempotent: true, consequential: false },
+      getMediaEvidence: { readOnly: true, idempotent: true, consequential: false },
       suggestQueries: { readOnly: true, idempotent: true, consequential: false },
       // Ingest-scoped keys can price the work they could start, and read background jobs.
       fullIndexEstimate: { readOnly: true, idempotent: true, consequential: false },

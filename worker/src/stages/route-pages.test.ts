@@ -178,7 +178,7 @@ describe("RoutePagesStage", () => {
 
   it("shadow writes the plan artifact, per-page decision rows and one chunk estimate, and records decision usage", async () => {
     const storage = makeStorage();
-    const state = makeState({ mode: "shadow", pageRouter: fitted });
+    const state = makeState({ mode: "shadow", pageRouter: { ...fitted, marginFloor: 0 } });
     const client = fakeClient();
     await new RoutePagesStage(storage, envCfg("shadow"), sources, undefined, {
       probe, catalog, health: health(), decisionClient: ({ onUsage }) => ({
@@ -267,7 +267,7 @@ describe("RoutePagesStage", () => {
     expect(ask).not.toHaveBeenCalled();
     const plan = routePlanSchema.parse(storage.putJson.mock.calls[0]![1]);
     expect(plan.routerKind).toBe("baseline");
-    expect(plan.assignments.every((a) => !a.targetId.startsWith("vlm:"))).toBe(true);
+    expect(plan.assignments.every((a) => testCatalog().find(t => t.id === a.targetId)?.availability.privacyClass !== "hosted")).toBe(true);
   });
 
   it("fails open: a probe error records page-route-error and writes no plan", async () => {

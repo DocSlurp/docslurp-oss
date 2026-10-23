@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { PrivacyModeViolationError, setPrivateModelEndpointRegistryForTests } from "@docslurp/shared";
 
 const mocks = vi.hoisted(() => ({ record: vi.fn(), sql: vi.fn((..._args: unknown[]) => Promise.resolve([])) }));
+vi.mock("../services/billing/spend-guard.js", () => ({ assertCanSpend: vi.fn() }));
 vi.mock("../db.js", () => ({ sql: mocks.sql }));
 vi.mock("../lib/ai-usage.js", () => ({ recordUsageEvent: mocks.record }));
 

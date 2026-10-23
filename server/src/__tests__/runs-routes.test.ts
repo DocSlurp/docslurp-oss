@@ -250,7 +250,7 @@ describe("API-key run reads", () => {
     const app = new Hono();
     app.use("*", async (c, next) => {
       c.set("sessionUser", { id: "user-1", email: "", name: "API key" });
-      c.set("apiKey", { userId: "user-1", orgId: "org-1", keyType, scopes } as never);
+      c.set("apiKey", { userId: "user-1", orgId: "org-1", scopes, keyType } as never);
       await next();
     });
     return app.route("/runs", runsRoutes);
@@ -265,6 +265,12 @@ describe("API-key run reads", () => {
     getRunMock.mockResolvedValue({ id: "run-1", workspaceId: "ws-1", orgId: "org-1" });
     getWorkspaceMock.mockResolvedValue({ id: "ws-1", orgId: "org-1" });
     getRunProgressMock.mockResolvedValue({ run: { id: "run-1", workspaceId: "ws-1", status: "completed" } });
+  });
+  it.each(["/runs", "/runs/activity/stream", "/runs/run-1/progress", "/runs/run-1/events"])("rejects public-key metadata access at %s", async (path) => {
+    const response = await keyApp(["search"], "public").request(path);
+    expect(response.status).toBe(403);
+    expect(listRunsMock).not.toHaveBeenCalled();
+    expect(getRunMock).not.toHaveBeenCalled();
   });
   it("allows an ingest key to observe its run completion", async () => {
     const response = await keyApp().request("/runs/run-1/progress");

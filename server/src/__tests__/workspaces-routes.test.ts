@@ -1192,6 +1192,10 @@ describe("workspacesRoutes validation", () => {
 
 
 describe("workspace bearer resource reads", () => {
+  it.each(["/workspaces", "/workspaces/one"])("rejects public keys before reading metadata at %s", async (path) => {
+    const response = await buildApp({ orgId: "org-a", scopes: ["search"], keyType: "public" }).request(path);
+    expect(response.status).toBe(403);
+  });
   it("filters listings to the key organization", async () => {
     listWorkspacesMock.mockResolvedValueOnce([{ id: "one", orgId: "org-a" }, { id: "two", orgId: "org-b" }] as never);
     const response = await buildApp({ orgId: "org-a", scopes: ["search"] }).request("/workspaces");

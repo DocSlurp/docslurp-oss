@@ -652,7 +652,7 @@ export const workspacesRoutes = new Hono()
   })
   .get("/:workspaceId/tags", async (c) => {
     const actor = getRequestActor(c);
-    if (actor.type === "apiKey" && !actorHasAnyApiKeyScope(actor, ["ingest", "search", "artifacts", "workspaces:manage"])) {
+    if (actor.type === "apiKey" && (actor.apiKey.keyType !== "server" || !actorHasAnyApiKeyScope(actor, ["ingest", "search", "artifacts", "workspaces:manage"]))) {
       return apiStatusError(c, 403, "Forbidden");
     }
     const workspace = await getWorkspace(c.req.param("workspaceId"), actor.userId);
@@ -756,7 +756,7 @@ export const workspacesRoutes = new Hono()
   .get("/:workspaceId", async (c) => {
     const userId = c.get("sessionUser").id;
     const actor = getRequestActor(c);
-    if (actor.type === "apiKey" && !actorHasAnyApiKeyScope(actor, ["ingest", "search", "artifacts", "workspaces:manage"])) {
+    if (actor.type === "apiKey" && (actor.apiKey.keyType !== "server" || !actorHasAnyApiKeyScope(actor, ["ingest", "search", "artifacts", "workspaces:manage"]))) {
       return apiStatusError(c, 403, "Forbidden");
     }
     const workspace = await getWorkspace(c.req.param("workspaceId"), userId);

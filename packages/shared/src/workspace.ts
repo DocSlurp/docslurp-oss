@@ -75,8 +75,8 @@ export const workspaceSchema = z.object({
   monthlyBudgetCents: z.number().int().nonnegative().max(2_147_483_647).nullable().default(null),
   /** Days before a run's artifacts are purged; null keeps them. */
   artifactRetentionDays: z.number().int().positive().nullable().default(null),
-  /** Days before a run record is deleted (after its artifacts are purged); null keeps it. */
-  runRetentionDays: z.number().int().positive().nullable().default(null),
+  /** Days from ingestion before documents, artifacts and their run expire; null keeps them indefinitely. */
+  runRetentionDays: z.number().int().positive().nullable().default(30),
   /**
    * Current corpus: completed documents that have not been superseded by a
    * newer version (what search serves). A re-ingest never double counts.

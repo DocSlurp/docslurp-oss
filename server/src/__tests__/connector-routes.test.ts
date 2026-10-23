@@ -4,6 +4,8 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { connectorTypes } from "@docslurp/shared";
 
 const sqlMock = vi.fn();
+const lookupMock = vi.hoisted(() => vi.fn());
+vi.mock("node:dns/promises", () => ({ lookup: lookupMock }));
 
 vi.mock("../db.js", () => ({
   sql: Object.assign(sqlMock, {
@@ -39,7 +41,7 @@ function createConnector(type: string) {
   return buildApp().request("/v1/workspaces/ws-1/connectors", {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ type, name: "Source", credentials: { token: "x" } }),
+    body: JSON.stringify({ type, name: "Source", credentials: { accessKeyId: "x", secretAccessKey: "x" }, config: { bucket: "docs" } }),
   });
 }
 
@@ -47,6 +49,8 @@ describe("connector creation", () => {
   beforeEach(() => {
     sqlMock.mockReset();
     sqlMock.mockResolvedValue([]);
+    lookupMock.mockReset();
+    lookupMock.mockResolvedValue([{ address: "127.0.0.1", family: 4 }]);
   });
 
   it.each(["sharepoint", "dropbox", "imap", "ftp"])("rejects %s, which has no sync adapter", async (type) => {
@@ -79,6 +83,44 @@ describe("connector creation", () => {
 
     expect(response.status).toBe(201);
     expect(sqlMock).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(['https://127.0.0.1/', 'https://169.254.169.254/', 'http://10.0.0.1/', 'https://[::1]/', 'https://127.0.0.1.sslip.io/'])("rejects unsafe endpoints before persistence: %s", async (endpoint) => {
+    const response = await buildApp().request('/v1/workspaces/ws-1/connectors', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ type: 's3', name: 'Source', config: { bucket: 'docs', endpoint }, credentials: { accessKeyId: 'x', secretAccessKey: 'x' } }),
+    });
+    expect(response.status).toBe(422);
+    expect(sqlMock).not.toHaveBeenCalled();
+  });
+
+  it("rejects a private Confluence base URL before persistence", async () => {
+    const response = await buildApp().request('/v1/workspaces/ws-1/connectors', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ type: 'confluence', name: 'Source', config: {}, credentials: { baseUrl: 'https://169.254.169.254/', email: 'admin@example.com', apiToken: 'test' } }),
+    });
+    expect(response.status).toBe(422);
+    expect(sqlMock).not.toHaveBeenCalled();
+  });
+
+  it("rejects oversized config before persistence", async () => {
+    const response = await buildApp().request('/v1/workspaces/ws-1/connectors', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ type: 's3', name: 'Source', config: { bucket: 'docs', extra: 'x'.repeat(17000) }, credentials: { accessKeyId: 'x', secretAccessKey: 'x' } }),
+    });
+    expect(response.status).toBe(422);
+    expect(sqlMock).not.toHaveBeenCalled();
+  });
+
+  it("validates a changed endpoint before any update", async () => {
+    sqlMock.mockResolvedValueOnce([{ type: 's3', config: { bucket: 'docs' }, credentials_encrypted: `sealed:${Buffer.from(JSON.stringify({ accessKeyId: 'x', secretAccessKey: 'x' })).toString('base64')}` }]);
+    const response = await buildApp().request('/v1/workspaces/ws-1/connectors/conn-1', {
+      method: 'PATCH', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ name: 'Changed', config: { bucket: 'docs', endpoint: 'https://127.0.0.1/' } }),
+    });
+    expect(response.status).toBe(422);
+    expect(sqlMock).toHaveBeenCalledTimes(1);
+    expect(sqlMock.mock.calls[0][0].join('')).toContain('select');
   });
 
   it("registers an adapter for every accepted connector type", () => {
