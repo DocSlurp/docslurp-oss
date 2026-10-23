@@ -181,7 +181,7 @@ Self-hosted MinIO caveat: the Compose stack signs URLs against `http://minio:900
 
 ### Rate limits
 
-Every widget tool call is one POST to `/v1/mcp`. The limiter classifies by URL path, and every `/v1/mcp` path falls in the `search` bucket (`classifyRateLimitCategory`), so widget calls share the limit with the model's own searches. The widget polls `getUploadStatus` every 2 s at first, backing off to 5 s, pauses while the widget is hidden, and stops after 30 minutes or when the run finishes. One open widget uses roughly 12 to 30 calls per minute while polling. A 429 makes the widget back off for longer. Uploads themselves go to the bucket and do not touch the limiter. Moving status polling into the `read` bucket is a planned follow-up.
+Every widget tool call is one POST to `/v1/mcp`. The limiter classifies by URL path, and every `/v1/mcp` path falls in the `search` bucket (`classifyRateLimitCategory`), so widget calls share the limit with the model's own searches. The widget polls `getUploadStatus` every 2 s at first, backing off to 5 s, pauses while the widget is hidden, and stops after 30 minutes or when the run finishes. One open widget uses roughly 12 to 30 calls per minute while polling. A 429, or a run paused for credits, slows polling to every 30 s; other transient errors back off up to 15 s. Uploads themselves go to the bucket and do not touch the limiter. Moving status polling into the `read` bucket is a planned follow-up.
 
 ## Testing with real clients
 
