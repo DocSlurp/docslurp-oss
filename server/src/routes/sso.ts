@@ -85,6 +85,14 @@ const oidcTrustedEndpointHosts = new Set(
     .map((host) => host.trim().toLowerCase())
     .filter(Boolean)
 );
+/**
+ * Endpoint hosts that well-known IdPs publish on a different host from their
+ * issuer. They are trusted only for that issuer, so another IdP's metadata
+ * can't borrow them. Microsoft Entra keeps its endpoints on the issuer's host.
+ */
+const knownIssuerEndpointHosts: Record<string, readonly string[]> = {
+  "https://accounts.google.com": ["oauth2.googleapis.com", "www.googleapis.com"]
+};
 const ssoRateLimitWindowMs = Number.parseInt(process.env.SSO_RATE_LIMIT_WINDOW_MS ?? "60000", 10);
 const ssoRateLimitMax = Number.parseInt(process.env.SSO_RATE_LIMIT_MAX ?? "30", 10);
 const ssoRateLimitBuckets = new Map<string, { resetAt: number; count: number }>();
@@ -413,6 +421,11 @@ function assertIssuerMatchesMetadataUrl(issuer: string, metadataUrl: string): vo
     throw new SsoMetadataError("OIDC metadata issuer is invalid");
   }
   if (expected !== actual) {
+    if (issuer.includes("{tenantid}")) {
+      throw new SsoMetadataError(
+        "Microsoft multi-tenant metadata (common/organizations) is not supported; use https://login.microsoftonline.com/<tenant-id>/v2.0/.well-known/openid-configuration"
+      );
+    }
     throw new SsoMetadataError(
       `OIDC metadata issuer ${issuer} does not match the metadata URL; expected the URL to be ${expected}`
     );
@@ -431,8 +444,9 @@ function assertIssuerMatchesMetadataUrl(issuer: string, metadataUrl: string): vo
  * pointed at, so a metadata document can't send our client secret, PKCE
  * verifier or id_token verification to an unrelated host, or reach internal
  * hosts (assertSafeExternalUrl/safeExternalFetch: https only, public IPs).
- * Endpoints must be on the issuer's host, or on a host the operator lists in
- * OIDC_TRUSTED_ENDPOINT_HOSTS (e.g. Google's split token/JWKS hosts).
+ * Endpoints must be on the issuer's host, on a host knownIssuerEndpointHosts
+ * lists for that issuer (Google's split token/JWKS hosts), or on a host the
+ * operator lists in OIDC_TRUSTED_ENDPOINT_HOSTS.
  */
 async function assertSafeOidcEndpoints(metadata: OidcMetadata, metadataUrl: string): Promise<OidcMetadata> {
   assertIssuerMatchesMetadataUrl(metadata.issuer, metadataUrl);
@@ -444,6 +458,7 @@ async function assertSafeOidcEndpoints(metadata: OidcMetadata, metadataUrl: stri
   ]);
   const allowedHosts = new Set([
     endpointHost(safeIssuerUrl),
+    ...(knownIssuerEndpointHosts[metadata.issuer.replace(/\/+$/, "")] ?? []),
     ...oidcTrustedEndpointHosts
   ]);
 

@@ -22,9 +22,9 @@ describe("workspace edit and contribute rights", () => {
     expect(canEditWorkspace(member, userId)).toBe(false);
   });
 
-  it("keeps an explicit viewer of the default workspace read-only", () => {
+  it("lets an explicit viewer of the default workspace add to it but not change its settings", () => {
     const viewer = access({ isDefaultWorkspace: true, workspaceRole: "viewer" });
-    expect(canContributeToWorkspace(viewer, userId)).toBe(false);
+    expect(canContributeToWorkspace(viewer, userId)).toBe(true);
     expect(canEditWorkspace(viewer, userId)).toBe(false);
   });
 

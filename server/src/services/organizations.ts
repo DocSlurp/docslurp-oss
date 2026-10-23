@@ -697,14 +697,13 @@ export function canEditWorkspace(access: WorkspaceAccess, userId: string): boole
 }
 
 /**
- * May upload into the workspace and manage those runs. Any org member may add
- * to the org's default workspace unless they were explicitly made a viewer of
- * it; that membership alone never grants settings changes
- * (SEC-2026-10-PROD-14).
+ * May upload into the workspace and manage those runs. Every org member may add
+ * to the org's default workspace, including one listed as a viewer of it; that
+ * membership alone never grants settings changes (SEC-2026-10-PROD-14).
  */
 export function canContributeToWorkspace(access: WorkspaceAccess, userId: string): boolean {
   return canEditWorkspace(access, userId)
-    || (access.isDefaultWorkspace === true && access.orgRole !== null && access.workspaceRole !== "viewer");
+    || (access.isDefaultWorkspace === true && access.orgRole !== null);
 }
 
 export function canManageWorkspace(access: WorkspaceAccess, userId: string): boolean {

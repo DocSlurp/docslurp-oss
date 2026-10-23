@@ -325,6 +325,42 @@ describe("ssoRoutes security hardening", () => {
     });
   });
 
+  it("accepts Google's split token and JWKS hosts for the Google issuer only", async () => {
+    const googleIssuer = "https://accounts.google.com";
+    const googleMetadata = {
+      issuer: googleIssuer,
+      authorization_endpoint: `${googleIssuer}/o/oauth2/v2/auth`,
+      token_endpoint: "https://oauth2.googleapis.com/token",
+      jwks_uri: "https://www.googleapis.com/oauth2/v3/certs"
+    };
+    seedOrg({ ...oidcConfig, metadataUrl: `${googleIssuer}/.well-known/openid-configuration` });
+    vi.mocked(fetch).mockResolvedValueOnce(Response.json(googleMetadata));
+    const accepted = await buildApp().request("/v1/organizations/org-1/sso/test", { method: "POST" });
+    expect(await accepted.json()).toMatchObject({ ok: true });
+
+    seedOrg(oidcConfig, "org-2");
+    vi.mocked(fetch).mockResolvedValueOnce(Response.json({ ...googleMetadata, issuer, authorization_endpoint: `${issuer}/authorize` }));
+    const borrowed = await buildApp().request("/v1/organizations/org-2/sso/test", { method: "POST" });
+    expect(await borrowed.json()).toEqual({
+      ok: false,
+      error: "OIDC metadata endpoint host oauth2.googleapis.com is not the issuer's host or a trusted endpoint host"
+    });
+  });
+
+  it("explains that Microsoft multi-tenant metadata needs a tenant-specific URL", async () => {
+    seedOrg({ ...oidcConfig, metadataUrl: "https://login.microsoftonline.com/common/v2.0/.well-known/openid-configuration" });
+    vi.mocked(fetch).mockResolvedValueOnce(Response.json({
+      issuer: "https://login.microsoftonline.com/{tenantid}/v2.0",
+      authorization_endpoint: "https://login.microsoftonline.com/common/oauth2/v2.0/authorize",
+      token_endpoint: "https://login.microsoftonline.com/common/oauth2/v2.0/token",
+      jwks_uri: "https://login.microsoftonline.com/common/discovery/v2.0/keys"
+    }));
+
+    const response = await buildApp().request("/v1/organizations/org-1/sso/test", { method: "POST" });
+
+    expect(JSON.stringify(await response.json())).toContain("use https://login.microsoftonline.com/<tenant-id>/v2.0");
+  });
+
   it("rejects OIDC metadata whose issuer is not the discovery URL's issuer", async () => {
     seedOrg(oidcConfig);
     vi.mocked(fetch).mockResolvedValueOnce(Response.json({
