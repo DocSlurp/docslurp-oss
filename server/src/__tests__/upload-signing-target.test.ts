@@ -17,7 +17,10 @@ describe("custom bucket upload signing", () => {
         new PutObjectCommand({ Bucket: target.bucket, Key: "u/raw/a b.pdf", ContentType: "application/pdf" }),
         new UploadPartCommand({ Bucket: target.bucket, Key: "u/raw/a b.pdf", UploadId: "upload-one", PartNumber: 2 }),
       ]) {
-        const url = new URL(await getSignedUrl(client, command, { expiresIn: 900 }));
+        const signed = command instanceof UploadPartCommand
+          ? await getSignedUrl(client, command, { expiresIn: 900 })
+          : await getSignedUrl(client, command, { expiresIn: 900 });
+        const url = new URL(signed);
         expect(url.origin).toBe("https://f.docslurp.io");
         expect(url.pathname).toBe("/u/raw/a%20b.pdf");
         expect(url.searchParams.has("X-Amz-Signature")).toBe(true);

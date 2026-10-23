@@ -54,6 +54,7 @@ const entries: Array<[path: string, method: Method, tag: string, summary: string
   ["/v1/uploads/direct/sessions", "post", "ingest", "Start a direct-to-storage upload session", "ingest", "Upload session with presigned targets", jsonBody],
   ["/v1/uploads/direct/sessions/{sessionId}", "get", "ingest", "Get a direct upload session", "ingest", "Upload session"],
   ["/v1/uploads/direct/sessions/{sessionId}/files/complete", "post", "ingest", "Mark files in a direct upload session as uploaded", "ingest", "Files recorded", jsonBody],
+  ["/v1/uploads/direct/sessions/{sessionId}/files/{fileId}/parts/sign", "post", "ingest", "Sign additional multipart upload parts", "ingest", "Presigned part URLs", jsonBody],
   ["/v1/uploads/direct/sessions/{sessionId}/abort", "post", "ingest", "Abort a direct upload session", "ingest", "Session aborted"],
   ["/v1/uploads/direct/sessions/{sessionId}/confirm", "post", "ingest", "Confirm a direct upload session and start its run", "ingest", "Run started"],
   ["/v1/artifacts/preview", "get", "artifacts", "Preview an artifact's content", "artifacts", "Artifact preview"],
