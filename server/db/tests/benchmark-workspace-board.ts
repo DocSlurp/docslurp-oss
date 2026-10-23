@@ -2,7 +2,7 @@ import postgres from "postgres";
 import { readFileSync } from "node:fs";
 import { performance } from "node:perf_hooks";
 import { deepStrictEqual } from "node:assert";
-import { startMigratedPostgres } from "../../worker/src/test/migrated-postgres.js";
+import { startMigratedPostgres } from "@docslurp/worker/testing";
 
 const database = await startMigratedPostgres();
 const sql = postgres(database.url, { max: 1, prepare: false, onnotice: () => {} });
@@ -19,7 +19,7 @@ try {
     select 'c' || i, 'd' || (1 + i % 20), 'r', 'u', i,
       (select string_agg(md5(i::text || ':' || j::text), ' ') from generate_series(1, 32) j)
     from generate_series(1, 20000) i`;
-  const source = readFileSync(new URL("../../server/src/services/workspace-board-telemetry.ts", import.meta.url), "utf8");
+  const source = readFileSync(new URL("../../src/services/workspace-board-telemetry.ts", import.meta.url), "utf8");
   const candidate = source.split('const rows = await sql<WorkspaceBoardSummaryRow[]>`')[1].split('`;')[0]
     .replace('${sql.json(workspaceIds)}', `'["w"]'`)
     .replace('${attributedUsage(null)}', 'usage_attribution');
@@ -39,7 +39,7 @@ try {
     }
     deepStrictEqual(outputs.candidate, outputs.baseline);
   }
-  const legacyMigration = readFileSync(new URL("../db/migrations/0063_document_chunk_page_counters.sql", import.meta.url), "utf8");
+  const legacyMigration = readFileSync(new URL("../migrations/0063_document_chunk_page_counters.sql", import.meta.url), "utf8");
   const legacyInsert = legacyMigration.split("--> statement-breakpoint").find(statement => statement.includes("CREATE OR REPLACE FUNCTION count_document_chunks_inserted()"))!;
   const insertRuns: Array<{ pair: number; arm: string; ms: number }> = [];
   for (let pair = -1; pair < 5; pair++) {
