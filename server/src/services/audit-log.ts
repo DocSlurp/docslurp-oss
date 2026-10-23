@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 
-import { sql } from "../db.js";
+import { sql, type SqlClient } from "../db.js";
 import { currentRequestId } from "../lib/request-context.js";
 import { andSqlFragments, type SqlFragment } from "../lib/sql-fragments.js";
 
@@ -85,14 +85,14 @@ export async function appendAuditLog(args: {
   resourceId?: string | null;
   ipAddress?: string | null;
   metadata?: Record<string, unknown>;
-}): Promise<AuditLogEntry> {
+}, client: SqlClient = sql): Promise<AuditLogEntry> {
   const requestId = currentRequestId();
   const metadata = {
     ...(args.metadata ?? {}),
     ...(requestId ? { requestId } : {})
   };
 
-  const [row] = await sql<AuditLogRow[]>`
+  const [row] = await client<AuditLogRow[]>`
     insert into audit_log (
       id,
       org_id,

@@ -10,6 +10,9 @@ import { PUBLIC_ERROR_MESSAGES } from "./public-errors.js";
  */
 export const API_ERROR_CODES = [
   "invalid_request",
+  "credit_request_rejected",
+  "credit_reconciliation_required",
+  "idempotency_conflict",
   "unauthorized",
   "forbidden",
   "not_found",
@@ -82,6 +85,9 @@ export const apiErrorEnvelopeSchema = z.object({
 /** Reviewed copy per code. The boundary sends this instead of route-authored text. */
 export const API_ERROR_PUBLIC_MESSAGES: Record<ApiErrorCode, string> = {
   invalid_request: PUBLIC_ERROR_MESSAGES.invalid,
+  credit_request_rejected: "Credit request rejected before issuance. Correct the recipient or request and try again.",
+  credit_reconciliation_required: "Credit outcome requires operator reconciliation. Preserve this request ID; do not create a replacement.",
+  idempotency_conflict: "This credit request ID belongs to different parameters or an administrator. Reconcile the original request.",
   unauthorized: PUBLIC_ERROR_MESSAGES.unauthorized,
   forbidden: PUBLIC_ERROR_MESSAGES.forbidden,
   not_found: PUBLIC_ERROR_MESSAGES.missing,

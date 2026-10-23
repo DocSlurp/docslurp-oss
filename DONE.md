@@ -1,5 +1,9 @@
 # Completed
 
+- Remove repeated chunk/page heap scans from workspace board byte totals using exact statement-triggered document counters; preserve indexed-byte output and existing search counters (2026-10-23). Local paired confirmation is 79.5% faster; production rollout remains unmeasured.
+
+- Add platform administrator promotional credit API with durable request receipts, Stripe grant mirroring, audit events and timeout/replay recovery (2026-10-23). Organization administrators and API keys cannot issue grants.
+
 - Default new page-router settings to free feature routing; retain native prose, OCR substantial unknown embedded images, avoid duplicate image OCR on scanned pages, and skip proven blank pages (2026-10-22). Active deployment remains gated; 321 routing/stage tests pass.
 
 - Harden browser key boundaries, connector creation/update URL validation, HTTPS client transports, rejected-widget CORS, and actionable remote-format errors (2026-10-22). Reject duplicate password signups explicitly and link provider-verified OAuth email without a second confirmation; remove an unverified signup credential before linking.
