@@ -877,8 +877,8 @@ export class EmbedStage implements Stage {
           sourceTrace: {
             ...current.sourceTrace,
             canonicalDocumentUri,
-            parserArtifactUri: args.extracted.canonicalDocument?.source.parserArtifactUri ?? null,
-            sourceArtifactUri: args.extracted.canonicalDocument?.source.artifactUri ?? null,
+            parserArtifactUri: current.sourceTrace?.parserArtifactUri ?? args.extracted.canonicalDocument?.source.parserArtifactUri ?? null,
+            sourceArtifactUri: current.sourceTrace?.sourceArtifactUri ?? args.extracted.canonicalDocument?.source.artifactUri ?? null,
             blockIds: current.blockIds,
             pageNumbers: current.pageNumbers,
             extractor: args.extracted.extractor,
