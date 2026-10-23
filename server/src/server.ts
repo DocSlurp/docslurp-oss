@@ -217,7 +217,7 @@ let startupPromise: Promise<void> | null = null;
 /** Stops this module instance's timers and LISTEN subscription. */
 async function stopApiBackgroundTasks(): Promise<void> {
   stopMaintenanceSweeper();
-  stopDirectUploadReconciler();
+  await stopDirectUploadReconciler();
   await closeDirectUploadLockPool();
   stopAlertEvaluator();
   stopCreditDebitFlusher();

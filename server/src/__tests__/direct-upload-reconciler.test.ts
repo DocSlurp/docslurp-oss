@@ -10,7 +10,7 @@ vi.mock("../services/direct-upload-session.js", () => ({
 }));
 vi.mock("../services/workspace-intake-actions.js", () => ({ confirmDirectUploadWorkspaceIntake: mocks.confirm }));
 vi.mock("../services/workspace-intake.js", () => ({ WorkspaceIntakeError: class extends Error { constructor(message: string, public statusCode: number) { super(message); } } }));
-import { reconcileDirectUploads } from "../services/direct-upload-reconciler.js";
+import { reconcileDirectUploads, stopDirectUploadReconciler } from "../services/direct-upload-reconciler.js";
 import { WorkspaceIntakeError } from "../services/workspace-intake.js";
 const session = { id: "session-1", user_id: "user-1", expired: false, status: "pending" };
 let scheduled: typeof session[];
@@ -68,4 +68,21 @@ describe("automatic upload reconciler", () => {
     resume();
     await first;
   });
+  it("waits for active provider work and prevents another reservation during shutdown", async () => {
+    let resume!: () => void;
+    scheduled = [{...session},{...session,id:"session-2"}];
+    mocks.finalize.mockReturnValueOnce(new Promise(resolve => { resume = () => resolve(true); }));
+    const sweep = reconcileDirectUploads();
+    await vi.waitFor(() => expect(mocks.finalize).toHaveBeenCalledOnce());
+    let stopped = false;
+    const stopping = stopDirectUploadReconciler().then(() => { stopped = true; });
+    await Promise.resolve();
+    expect(stopped).toBe(false);
+    resume();
+    await Promise.all([sweep,stopping]);
+    expect(stopped).toBe(true);
+    expect(mocks.confirm).not.toHaveBeenCalled();
+    expect(mocks.load).toHaveBeenCalledOnce();
+  });
+
 });

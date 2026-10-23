@@ -6,11 +6,14 @@ import { confirmDirectUploadWorkspaceIntake } from "./workspace-intake-actions.j
 let timer: ReturnType<typeof setInterval> | undefined;
 let running = false;
 let stopped = false;
+let sweepCompletion: Promise<void> | null = null;
+let resolveSweepCompletion: (() => void) | null = null;
 
 /** Durable schedule plus cross-process session locks make missed webhooks harmless. */
 export async function reconcileDirectUploads(): Promise<void> {
   if (running) return;
   running = true;
+  sweepCompletion = new Promise<void>(resolve => { resolveSweepCompletion = resolve; });
   try {
     const sessions = await sql<Array<{ id: string; user_id: string; expired: boolean; status: string }>>`
       select id, user_id, status, expires_at < now() as expired from upload_sessions
@@ -50,7 +53,7 @@ export async function reconcileDirectUploads(): Promise<void> {
           where id = ${session.id} and status in ('pending', 'uploading', 'ingesting')`;
       }
     }
-  } finally { running = false; }
+  } finally { running = false; resolveSweepCompletion?.(); resolveSweepCompletion = null; sweepCompletion = null; }
 }
 
 export function startDirectUploadReconciler(): void {
@@ -61,8 +64,9 @@ export function startDirectUploadReconciler(): void {
   timer.unref?.();
   tick();
 }
-export function stopDirectUploadReconciler(): void {
+export async function stopDirectUploadReconciler(): Promise<void> {
   stopped = true;
   if (timer) clearInterval(timer);
   timer = undefined;
+  await sweepCompletion;
 }
