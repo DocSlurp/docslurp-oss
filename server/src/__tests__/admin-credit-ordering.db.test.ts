@@ -2,8 +2,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { Hono } from "hono";
 import postgres from "postgres";
 import type Stripe from "stripe";
-import { createMigratedDatabase } from "../../../worker/src/test/migrated-db.js";
-import { serveOnRandomPort } from "../../../worker/src/test/migrated-postgres.js";
+import { createMigratedDatabase, serveOnRandomPort } from "@docslurp/worker/testing";
 
 let sql: ReturnType<typeof postgres>;
 let database: Awaited<ReturnType<typeof createMigratedDatabase>>;
