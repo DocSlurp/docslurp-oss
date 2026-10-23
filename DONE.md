@@ -59,3 +59,5 @@
 - Retire the automation surface: delete the hidden `ai.simple` / `ai.advanced` / `ai.operation.get` MCP tools, `/v1/ai/*`, automation operations and grounded summaries. Migration 0060 drops their tables (`ai_operations`, `ai_operation_events`, `grounded_summaries`) as the follow-up contract step. The MCP catalog now has one definition per public tool name; the internal `workspace.*` ids, alias map and `docslurp://ai/*` resources are gone (`docslurp://capabilities` replaces them).
 
 - 2026-10-21: Refresh app/OSS dependencies, remove the retired Docling extraction backend so all Python environments can use Pillow 13 security fixes, and remove the vulnerable sprintf-js dependency chain.
+
+- Add bounded 200 DPI selected PDF reader renders and explicit 300 DPI lossless PNG exports, with quality/version-specific caches, demand and compute receipts.

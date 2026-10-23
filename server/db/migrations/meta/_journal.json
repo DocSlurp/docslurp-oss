@@ -540,6 +540,13 @@
       "when": 1792792800006,
       "tag": "0076_retire_replaced_pending_versions",
       "breakpoints": true
+    },
+    {
+      "idx": 77,
+      "version": "7",
+      "when": 1792792800007,
+      "tag": "0077_page_render_quality",
+      "breakpoints": true
     }
   ]
 }
