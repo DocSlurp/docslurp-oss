@@ -1,8 +1,11 @@
 import type Stripe from "stripe";
 
 import { sql } from "../../db.js";
+
 import { getOrgBillingRow } from "./credits.js";
 import { BillingRequestError, getStripe, stripeId } from "./stripe-client.js";
+
+type ReservedConnection = Awaited<ReturnType<typeof sql.reserve>>;
 
 const STRIPE_CUSTOMER_LOCK_NAMESPACE = 90_101;
 
@@ -30,9 +33,9 @@ async function liveCustomerId(stripe: ReturnType<typeof getStripe>, customerId: 
  * requests cannot fork it. A stored customer that no longer exists is
  * replaced (callers are user-initiated billing flows, so the extra retrieve is cheap).
  */
-export async function ensureStripeCustomer(orgId: string): Promise<string> {
+export async function ensureStripeCustomer(orgId: string, connection?: ReservedConnection): Promise<string> {
   const stripe = getStripe();
-  const reserved = await sql.reserve();
+  const reserved = connection ?? await sql.reserve();
   let lockAcquired = false;
 
   try {
@@ -78,7 +81,7 @@ export async function ensureStripeCustomer(orgId: string): Promise<string> {
         `;
       }
     } finally {
-      reserved.release();
+      if (!connection) reserved.release();
     }
   }
 }

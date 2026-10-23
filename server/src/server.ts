@@ -47,6 +47,7 @@ import { algoliaCompatRoutes } from "./routes/algolia-compat.js";
 import { authRoutes } from "./routes/auth.js";
 import { samlCallbackRoutes, ssoRoutes } from "./routes/sso.js";
 import { connectorsRoutes } from "./routes/connectors.js";
+import { adminBillingRoutes } from "./routes/admin-billing.js";
 import { billingRoutes } from "./routes/billing.js";
 import { stripeWebhookRoutes } from "./routes/stripe-webhook.js";
 import { secretsRoutes } from "./routes/secrets.js";
@@ -174,6 +175,7 @@ export function createApiApp(): Hono {
   app.route("/v1/auth", samlCallbackRoutes);
   app.route("/v1/workspaces", connectorsRoutes);
   app.route("/v1/billing", billingRoutes);
+  app.route("/v1/admin/billing", adminBillingRoutes);
   app.route("/v1/workspaces", secretsRoutes);
   app.route("/v1/workspaces", workspaceGraphRoutes);
   app.route("/v1/user-settings", userSettingsRoutes);
