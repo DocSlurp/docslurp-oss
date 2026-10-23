@@ -65,6 +65,19 @@ function readBoolean(value: string | undefined, fallback: boolean): boolean {
   return fallback;
 }
 
+/** STORAGE_PUBLIC_ENDPOINT: an http(s) URL without path, query or credentials. */
+function readPublicEndpoint(value: string | undefined): string | null {
+  const raw = value?.trim();
+  if (!raw) return null;
+  let url: URL;
+  try { url = new URL(raw); }
+  catch { throw new Error(`Invalid STORAGE_PUBLIC_ENDPOINT: ${raw}`); }
+  if (!/^https?:$/.test(url.protocol) || url.username || url.password || url.search || url.hash || url.pathname !== "/") {
+    throw new Error(`STORAGE_PUBLIC_ENDPOINT must be a bare http(s) origin such as https://storage.example.com: ${raw}`);
+  }
+  return url.origin;
+}
+
 function readOrigins(value: string | undefined, fallback: string[]): string[] {
   const raw = value?.trim();
   const candidates = raw
@@ -163,6 +176,12 @@ export const env = {
   ]),
   /** Object storage from STORAGE_URI (see @docslurp/shared connection-uri). */
   storage,
+  /**
+   * Browser-reachable endpoint that presigned upload URLs are signed against, for when
+   * STORAGE_URI's endpoint only resolves inside the deployment (e.g. http://minio:9000).
+   * Server-side storage calls keep using STORAGE_URI.
+   */
+  storagePublicEndpoint: readPublicEndpoint(process.env.STORAGE_PUBLIC_ENDPOINT),
   s3Bucket: storage.bucket,
   /** LanceDB root and storage options from LANCEDB_URI. */
   lancedb: resolveLanceDbConfig(process.env, storage),

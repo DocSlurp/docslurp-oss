@@ -177,7 +177,7 @@ mc cors set myminio/YOUR_BUCKET cors.xml
 
 Otherwise use the server-wide setting `MINIO_API_CORS_ALLOW_ORIGIN` (comma-separated origins, default `*`).
 
-Self-hosted MinIO caveat: the Compose stack signs URLs against `http://minio:9000`, which only exists inside the Docker network. A browser cannot reach it, and an https widget cannot call plain http. Until `STORAGE_PUBLIC_ENDPOINT` ships (a separate signing endpoint that browsers can reach), the uploader does not work against the default self-host stack. Using R2, Tigris or S3 for `STORAGE_URI`, or exposing MinIO on its own public https hostname, makes the signed URLs reachable.
+Self-hosted MinIO caveat: the Compose stack signs URLs against `http://minio:9000`, which only exists inside the Docker network. A browser cannot reach it, and an https widget cannot call plain http. Set `STORAGE_PUBLIC_ENDPOINT` to a browser-reachable origin that proxies to MinIO (for example `https://storage.example.com`). Upload URLs are then signed against that origin, and the widget's `connectDomains` uses it instead of `STORAGE_URI`'s endpoint. Server-side reads and writes still use `STORAGE_URI`. The proxy must pass the `Host` header through unchanged, because the signature covers it. The value must be a bare http(s) origin; anything else fails at startup. An https host (Claude, ChatGPT) cannot PUT to plain `http://`, so use https outside local testing.
 
 ### Rate limits
 

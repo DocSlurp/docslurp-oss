@@ -1,7 +1,5 @@
 # TODO
 
-- MCP Apps uploader: add `STORAGE_PUBLIC_ENDPOINT` so upload URLs are signed against a browser-reachable endpoint; self-hosted MinIO (`http://minio:9000`) does not work with the uploader until then.
-
 - MCP Apps uploader: script to apply the PUT-only bucket CORS rule (R2, Tigris, S3, MinIO) idempotently.
 
 - MCP Apps uploader: multipart uploads for files over 5 GiB. MCP `upload` forces single-part and the server rejects larger single-part files, so such files must use the CLI or SDK today.

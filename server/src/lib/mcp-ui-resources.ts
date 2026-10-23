@@ -52,11 +52,13 @@ function warnOnce(key: string, message: string) {
 
 /**
  * Origins the sandbox may PUT to: storage signing hosts only, never the API or MCP origin and never "*".
+ * Uses STORAGE_PUBLIC_ENDPOINT when set, since upload URLs are signed against it.
  * Path-style S3 signs against the endpoint; virtual-hosted signs against <bucket>.<host>.
  * Never throws: an unparseable storage endpoint is logged once and contributes no origin.
  */
 export function uploadUiConnectDomains(
-  storage: Pick<ObjectStorageConfig, "bucket" | "endpoint" | "region" | "forcePathStyle"> = env.storage,
+  storage: Pick<ObjectStorageConfig, "bucket" | "endpoint" | "region" | "forcePathStyle"> =
+    env.storagePublicEndpoint ? { ...env.storage, endpoint: env.storagePublicEndpoint } : env.storage,
   extra: string = env.mcpUiConnectDomains,
 ): string[] {
   const origins: string[] = [];

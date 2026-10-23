@@ -15,9 +15,19 @@ import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import type { Readable } from "node:stream";
 
 import { env } from "../config.js";
-import { resolveS3ClientTuning, s3ClientConfig } from "@docslurp/shared";
+import { resolveS3ClientTuning, s3ClientConfig, type ObjectStorageConfig } from "@docslurp/shared";
 
 const s3Client = instrumentS3Client(new S3Client(s3ClientConfig(env.storage)), env.storage.endpoint);
+
+/** Storage config for signing browser-facing URLs: STORAGE_PUBLIC_ENDPOINT replaces the endpoint when set. */
+export function presignStorageConfig(storage: ObjectStorageConfig, publicEndpoint: string | null): ObjectStorageConfig {
+  return publicEndpoint ? { ...storage, endpoint: publicEndpoint } : storage;
+}
+
+// Signing is local (no request is sent), so this client never needs to reach the public endpoint.
+const presignClient = env.storagePublicEndpoint
+  ? new S3Client(s3ClientConfig(presignStorageConfig(env.storage, env.storagePublicEndpoint)))
+  : s3Client;
 
 let bucketReadyPromise: Promise<void> | null = null;
 
@@ -185,7 +195,7 @@ export async function signMultipartUploadPart(args: {
 }): Promise<string> {
   await ensureBucketExists();
   return await getSignedUrl(
-    s3Client,
+    presignClient,
     new UploadPartCommand({
       Bucket: env.s3Bucket,
       Key: args.key,
@@ -203,7 +213,7 @@ export async function signSingleUploadPut(args: {
 }): Promise<string> {
   await ensureBucketExists();
   return await getSignedUrl(
-    s3Client,
+    presignClient,
     new PutObjectCommand({
       Bucket: env.s3Bucket,
       Key: args.key,
