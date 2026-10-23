@@ -15,7 +15,7 @@ const usage = { seconds: 12.5, input_tokens: 0, output_tokens: 0, cost: 0.000347
 const providerFetch = vi.fn();
 const context = { userId: "user", scope: { workspaceId: "ws", orgId: "org" } };
 /** 16 kHz mono 16-bit PCM WAV with `samples` of silence: the only format the hosted model accepts. */
-function wav(samples = 1600): Uint8Array {
+function wav(samples = 1600): Uint8Array<ArrayBuffer> {
   const out = Buffer.alloc(44 + samples * 2);
   out.write("RIFF", 0); out.writeUInt32LE(36 + samples * 2, 4); out.write("WAVE", 8);
   out.write("fmt ", 12); out.writeUInt32LE(16, 16); out.writeUInt16LE(1, 20); out.writeUInt16LE(1, 22);

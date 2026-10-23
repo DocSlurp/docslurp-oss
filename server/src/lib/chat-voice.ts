@@ -76,7 +76,7 @@ export function isWavRecording(bytes: Uint8Array): boolean {
   return view.getUint32(0, false) === 0x52494646 && view.getUint32(8, false) === 0x57415645;
 }
 
-async function validateRecording(audio: unknown): Promise<{ audio: Blob; bytes: Uint8Array }> {
+async function validateRecording(audio: unknown): Promise<{ audio: Blob; bytes: Uint8Array<ArrayBuffer> }> {
   if (!(audio instanceof Blob) || audio.size === 0) throw new ChatVoiceError("Record some audio first.", 400);
   if (audio.size > CHAT_VOICE_MAX_BYTES) throw new ChatVoiceError("Recording exceeds the 8 MB limit.", 413);
   const unsupported = () => new ChatVoiceError("Unsupported recording format. Send 16-bit PCM WAV audio (audio/wav).", 415);
@@ -193,7 +193,7 @@ export class WorkspaceChatVoice extends MastraVoice {
    * OpenAI-compatible `/audio/transcriptions` on the operator's private
    * endpoint (multipart upload). Strict-privacy writes the audit row first.
    */
-  private async listenPrivate(audio: Blob, bytes: Uint8Array, modelUri: string): Promise<string> {
+  private async listenPrivate(audio: Blob, bytes: Uint8Array<ArrayBuffer>, modelUri: string): Promise<string> {
     let call: Awaited<ReturnType<typeof authorizePrivateModelCall>>;
     try {
       call = await authorizePrivateModelCall({
