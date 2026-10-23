@@ -37,10 +37,18 @@ customer, Stripe grant ID and completion time, including after account deletion.
 Audit log events record requested and completed attempts. The server rejects
 request IDs reused with different parameters or administrators. Concurrent
 requests serialize on the normalized UUID. Webhook delivery before or after
-synchronous mirroring cannot double the local credit.
+synchronous mirroring cannot double the local credit. Migration 0071 serializes
+reconciliation by grant ID in a transaction and persists terminal void tombstones,
+including voids that precede any local grant. Stale create responses or delayed
+created webhooks cannot resurrect a voided allocation. Audit metadata keeps
+`creditRequestId` separate from the HTTP `requestId`.
 
-The browser saves an unfinished request before sending it, and restores it after
-reload. On any timeout or incomplete response, retry the **same request ID** and
+The browser saves unfinished requests under separate UUID keys before sending,
+exposes every unfinished entry after reload and removes only the successful UUID.
+Concurrent tabs cannot overwrite or delete another request's recovery receipt.
+A server `credit_request_rejected` response proves the organization was absent
+before any receipt or issuance; only that rejection unlocks the form automatically.
+All uncertain outcomes remain recoverable. On any timeout or incomplete response, retry the **same request ID** and
 payload. Do not create another request to bypass an uncertain result. Stripe
 idempotency keys can be removed after 24 hours, so an uncertain request with no
 recorded grant ID stops automatic retries after 20 hours. A request with a saved

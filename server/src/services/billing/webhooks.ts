@@ -141,39 +141,21 @@ async function clawBack(
  * DocSlurp sells no metered Stripe prices, so Stripe itself never applies
  * the grant to an invoice: DocSlurp's ledger is the only place it counts.
  */
-export async function mirrorStripeCreditGrant(client: SqlClient, grant: Stripe.Billing.CreditGrant): Promise<void> {
+export async function mirrorStripeCreditGrant(client: SqlClient, grant: Stripe.Billing.CreditGrant): Promise<"granted" | "voided" | "ignored"> {
   const monetary = grant.amount.type === "monetary" ? grant.amount.monetary : null;
   const cents = monetary?.currency === "usd" ? Math.trunc(Number(monetary.value)) : 0;
-  if (!(cents > 0)) {
-    console.warn(`[billing] credit grant ${grant.id} is not a positive USD amount; ignored`);
-    return;
-  }
+  if (!(cents > 0) && !grant.voided_at) return "ignored";
   const org = await findOrg(client, stripeId(grant.customer));
-  if (!org) {
-    console.warn(`[billing] credit grant ${grant.id} customer=${stripeId(grant.customer)} matches no org; ignored`);
-    return;
-  }
   const metadata = { stripeCreditGrantId: grant.id, category: grant.category, name: grant.name, amountCents: cents };
-  if (grant.voided_at) {
-    const [granted] = await client<GrantRow[]>`
-      select id, credits from credit_grants where source = 'promo' and external_id = ${grant.id} limit 1
-    `;
-    if (!granted) return;
-    const [row] = await client<{ reversed: number }[]>`
-      select reverse_credit_grant(${granted.id}, ${Number(granted.credits)}, 'stripe_credit_grant_voided',
-        ${JSON.stringify(metadata)}::text::jsonb) as reversed
-    `;
-    console.log(`[billing] credit grant voided orgId=${org.id} grant=${grant.id} reversedCredits=${row?.reversed ?? 0}`);
-    return;
-  }
-  const applied = await grantOrgCredits(client, {
-    orgId: org.id,
-    source: "promo",
-    externalId: grant.id,
-    credits: cents,
-    metadata,
-  });
-  console.log(`[billing] ${applied ? "grant" : "duplicate-grant"} source=stripe_credit_grant orgId=${org.id} credits=${cents} grant=${grant.id}`);
+  // One database transaction serializes every writer by grant ID and retains
+  // terminal voids, including a void delivered before the first allocation.
+  const [row] = await client<{ outcome: "granted" | "voided" | "ignored" }[]>`
+    select reconcile_stripe_credit_grant(${grant.id}, ${org?.id ?? null}, ${cents}, ${Boolean(grant.voided_at)},
+      ${JSON.stringify(metadata)}::text::jsonb) as outcome
+  `;
+  const outcome = row?.outcome ?? "ignored";
+  console.log(`[billing] stripe_credit_grant orgId=${org?.id ?? "unknown"} credits=${cents} grant=${grant.id} outcome=${outcome}`);
+  return outcome;
 }
 
 /** Apply one verified Stripe event. Returns false for event types we ignore. */

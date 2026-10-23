@@ -38,6 +38,14 @@ describe("platform administrator credit boundary", () => {
     expect((await as(admin).request("/admin/credits", post({ ...body, amountCents }))).status).toBe(400);
     expect(mocks.issue).not.toHaveBeenCalled();
   });
+  it("marks only a proven absent-organization pre-issuance rejection safe to release", async () => {
+    mocks.issue.mockRejectedValue(new BillingRequestError("Organization not found", "organization_not_found"));
+    const response = await as(admin).request("/admin/credits", post());
+    expect(response.status).toBe(400);
+    expect((await response.json()).error.code).toBe("credit_request_rejected");
+    const invalid = await as(admin).request("/admin/credits", post({ ...body, amountCents: 0 }));
+    expect((await invalid.json()).error.code).toBe("invalid_request");
+  });
   it("reports changed replay payload as conflict", async () => {
     mocks.issue.mockRejectedValue(new BillingRequestError("Request changed", "idempotency_conflict"));
     expect((await as(admin).request("/admin/credits", post())).status).toBe(409);

@@ -498,6 +498,13 @@
       "when": 1792792800000,
       "tag": "0070_admin_credit_requests",
       "breakpoints": true
+    },
+    {
+      "idx": 71,
+      "version": "7",
+      "when": 1792792800001,
+      "tag": "0071_stripe_credit_grant_terminal_state",
+      "breakpoints": true
     }
   ]
 }

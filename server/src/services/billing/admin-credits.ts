@@ -51,7 +51,7 @@ export async function issueAdminCredit(input: AdminCreditRequest, actorUserId: s
       // Stripe may prune keys after 24h. Never guess whether an old timeout created a grant.
       throw new BillingRequestError("Uncertain old request: reconcile its requestId in Stripe before retrying", "credit_reconciliation_required");
     }
-    await appendAuditLog({ orgId: input.orgId, userId: actorUserId, action: "billing.admin_credit.requested", resourceType: "organization", resourceId: input.orgId, metadata: { ...input } }, client);
+    await appendAuditLog({ orgId: input.orgId, userId: actorUserId, action: "billing.admin_credit.requested", resourceType: "organization", resourceId: input.orgId, metadata: { creditRequestId: input.requestId, orgId: input.orgId, amountCents: input.amountCents, reason: input.reason } }, client);
     const grant = receipt.stripe_grant_id
       ? await stripe.billing.creditGrants.retrieve(receipt.stripe_grant_id)
       : await stripe.billing.creditGrants.create({
@@ -68,8 +68,9 @@ export async function issueAdminCredit(input: AdminCreditRequest, actorUserId: s
     if (!owner || grant.voided_at) {
       throw new BillingRequestError("Grant requires reconciliation: customer ownership changed or grant was voided", "credit_reconciliation_required");
     }
-    await mirrorStripeCreditGrant(client, grant);
-    await appendAuditLog({ orgId: input.orgId, userId: actorUserId, action: "billing.admin_credit.completed", resourceType: "organization", resourceId: input.orgId, metadata: { ...input, stripeGrantId: grant.id } }, client);
+    const outcome = await mirrorStripeCreditGrant(client, grant);
+    if (outcome === "voided") throw new BillingRequestError("Stripe grant was voided; reconcile this request", "credit_reconciliation_required");
+    await appendAuditLog({ orgId: input.orgId, userId: actorUserId, action: "billing.admin_credit.completed", resourceType: "organization", resourceId: input.orgId, metadata: { creditRequestId: input.requestId, orgId: input.orgId, amountCents: input.amountCents, reason: input.reason, stripeGrantId: grant.id } }, client);
     await reserved`update admin_credit_requests set completed_at = now() where request_id = ${input.requestId}`;
     return { requestId: input.requestId, stripeGrantId: grant.id, completed: true };
   } finally {

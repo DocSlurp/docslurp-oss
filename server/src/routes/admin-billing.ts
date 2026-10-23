@@ -41,6 +41,7 @@ adminBillingRoutes.post("/credits", async (c) => {
     return c.json(await issueAdminCredit(parsed.data, actor.userId));
   } catch (error) {
     if (error instanceof BillingNotConfiguredError) return apiStatusError(c, 503, "billing_not_configured");
+    if (error instanceof BillingRequestError && error.code === "organization_not_found") return apiStatusError(c, 400, error.message, { code: "credit_request_rejected" });
     if (error instanceof BillingRequestError) return apiStatusError(c, error.code === "idempotency_conflict" ? 409 : 400, error.message, { code: error.code });
     console.error("[billing] admin credit failed", error);
     return apiStatusError(c, 502, "Credit request did not complete. Retry with the same request ID.");
