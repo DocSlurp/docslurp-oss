@@ -1,5 +1,5 @@
 import { reportPublicError } from "../lib/public-errors.js";
-import { publicErrorForStatus } from "@docslurp/shared";
+import { PUBLIC_ERROR_MESSAGES, publicErrorForStatus } from "@docslurp/shared";
 import { Hono } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import { CHAT_VOICE_MAX_BYTES, CHAT_VOICE_MODEL } from "@docslurp/shared/chat-voice";
@@ -33,7 +33,8 @@ export const chatVoiceRoutes = new Hono()
     } catch (error) {
       if (error instanceof ChatVoiceError) {
         reportPublicError(error, { operation: "chat-transcription", workspaceId: workspace.id });
-        return apiStatusError(c, error.status, publicErrorForStatus(error.status));
+        // 415 is actionable for the client (re-encode as WAV), so name it rather than "invalid".
+        return apiStatusError(c, error.status, error.status === 415 ? PUBLIC_ERROR_MESSAGES.unsupportedType : publicErrorForStatus(error.status));
       }
       throw error;
     }

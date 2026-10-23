@@ -38,6 +38,7 @@ import { findVisionOutputRejected } from "../tools/vision-stream.js";
 import { allowHostedCall } from "../lib/privacy-guard.js";
 import { trustedTempDownloadPattern } from "../lib/temp-file-names.js";
 import { maxInt } from "./utils.js";
+import { refreshSummaryEvidence } from "./summary-evidence-refresh.js";
 import {
   reconcileCanonicalArtifacts,
   type CanonicalReconciliationDecision,
@@ -1289,6 +1290,11 @@ export class VisionExtractStage implements Stage {
       "markdown",
       this.storage.uri(reconciledMarkdownKey),
     );
+    // Summary evidence was cut from the pre-reconciliation markdown; rebuild it from this one.
+    await refreshSummaryEvidence({
+      storage: this.storage, ledger: state.artifactLedger, document,
+      text: reconciled.markdown, sourceUri: this.storage.uri(reconciledMarkdownKey),
+    });
     state.artifactLedger.recordDocument(
       document.id,
       "canonical-reconciliation",

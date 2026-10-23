@@ -21,6 +21,7 @@ import {
 import { createPiiTextScanner, redactCanonicalDocument, redactJsonText, type PiiTextScanner } from "../lib/pii-redaction.js";
 import { measureOp, pushPerfMetric } from "../lib/perf-context.js";
 import { extractTextForEmbedding } from "./embedding-runtime.js";
+import { refreshSummaryEvidence } from "./summary-evidence-refresh.js";
 
 export interface PiiDetectionArtifact {
   documentId: string;
@@ -330,6 +331,20 @@ export class PiiDetectStage implements Stage {
         redactedArtifacts.push("markdown");
         servableUris.add(this.storage.uri(key));
       }
+      // Summary evidence holds excerpts of the pre-redaction extraction. Rebuild
+      // it from the redacted markdown now in the slot (or delete it when that
+      // text is unreadable) so unredacted text never reaches the summary model
+      // or survives in storage.
+      const currentMarkdown = fallbackResult && fallbackResult.matches.length > 0
+        ? fallbackResult.redacted
+        : markdown
+          ? (markdownResult && markdownResult.matches.length > 0 ? markdownResult.redacted : markdown.text)
+          : null;
+      const evidence = await refreshSummaryEvidence({
+        storage: this.storage, ledger, document,
+        text: currentMarkdown, sourceUri: ledger.readDocument(document.id, "markdown"),
+      });
+      if (evidence !== "absent") redactedArtifacts.push("summary-evidence");
     }
 
     // Under redact_artifacts the scanned sources are now clean (redacted or
