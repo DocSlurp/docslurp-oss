@@ -105,13 +105,14 @@ describe("documentsRoutes bulk actions", () => {
     expect(removeDocumentTagsMock).toHaveBeenCalledWith(["doc-1", "doc-2"], "user-1", ["legal", "invoice"]);
   });
 
-  it.each([
-    new Error("database connection failed"),
-    Object.assign(new Error("foreign key violation"), { code: "23503", constraint_name: "remote_media_jobs_document_id_fkey" }),
-  ])("preserves unexpected delete failures as server errors", async error => {
+  it("preserves unexpected delete failures as server errors", async () => {
     app.onError(() => new Response("Internal Server Error", { status: 500 }));
-    deleteDocumentMock.mockRejectedValue(error);
+    deleteDocumentMock.mockRejectedValue(new Error("database connection failed"));
     expect((await app.request("/documents/doc-1", { method: "DELETE" })).status).toBe(500);
+  });
+  it("answers 409 when a foreign key still references the document (SEC-2026-10-PROD-06)", async () => {
+    deleteDocumentMock.mockRejectedValue(Object.assign(new Error("foreign key violation"), { code: "23503", constraint_name: "remote_media_jobs_document_id_fkey" }));
+    expect((await app.request("/documents/doc-1", { method: "DELETE" })).status).toBe(409);
   });
 
   it("deletes a single document through the dedicated route", async () => {

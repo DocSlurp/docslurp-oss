@@ -567,7 +567,10 @@ export const workspacesRoutes = new Hono()
   .get("/", async (c) => {
     const userId = c.get("sessionUser").id;
     const actor = getRequestActor(c);
-    if (actor.type === "apiKey" && !actorHasAnyApiKeyScope(actor, ["ingest", "search", "artifacts", "workspaces:manage"])) {
+    // The workspace list exposes org internals (pipeline config, budgets,
+    // systemPrompt), so a browser/client key must not read it even though it is
+    // scope-compatible. Security finding SEC-2026-10-ROUND3-01.
+    if (actor.type === "apiKey" && (actor.apiKey.keyType !== "server" || !actorHasAnyApiKeyScope(actor, ["ingest", "search", "artifacts", "workspaces:manage"]))) {
       return apiStatusError(c, 403, "Forbidden");
     }
     if (actor.type === "session") await ensurePersonalDefaultWorkspace(userId);

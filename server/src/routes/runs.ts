@@ -9,7 +9,7 @@ import {
   runProcessingPreviewRequestSchema
 } from "@docslurp/shared";
 
-import { actorHasAnyApiKeyScope, getRequestActor, loadActorScopedWorkspace, requireActorWorkspace } from "../lib/request-actor.js";
+import { actorHasAnyApiKeyScope, getRequestActor, loadActorScopedWorkspace, requireActorWorkspace, type RequestActor } from "../lib/request-actor.js";
 import { WorkspaceAccessError } from "../services/default-workspace.js";
 import { validationErrorResponse, type ValidationErrorSource, validationHook } from "../lib/validation.js";
 import { requestIp, requestUserAgent } from "../lib/request-context.js";
@@ -37,6 +37,18 @@ import { apiErrorResponse, apiStatusError } from "../lib/api-error.js";
 import { inlineEstimate, jobMetaFor, jobStatusForMutation, recordJobMeta } from "../services/jobs.js";
 import { billingState } from "../services/config-change.js";
 import { estimateRunReprocess } from "../services/work-estimates.js";
+
+/**
+ * Runs and run telemetry are operator surfaces. A browser/client API key is
+ * search-only by design, so it must not read them even though it carries the
+ * `search` scope (which the runs router also accepts). Security finding
+ * SEC-2026-10-ROUND3-01: a public `dslp_pub_` key could list org runs and
+ * workspace internals.
+ */
+function apiKeyMayReadRuns(actor: RequestActor): boolean {
+  return actor.type !== "apiKey"
+    || (actor.apiKey.keyType === "server" && actorHasAnyApiKeyScope(actor, ["ingest", "search", "artifacts"]));
+}
 
 const STREAM_HEARTBEAT_MS = 4_000;
 const STREAM_RECONCILE_MS = 30_000;
@@ -76,7 +88,7 @@ export const runsRoutes = new Hono()
   .get("/", async (c) => {
     const userId = c.get("sessionUser").id;
     const actor = getRequestActor(c);
-    if (actor.type === "apiKey" && !actorHasAnyApiKeyScope(actor, ["ingest", "search", "artifacts"])) {
+    if (!apiKeyMayReadRuns(actor)) {
       return apiStatusError(c, 403, "Forbidden");
     }
     const runs = c.req.query("activity") === "true" ? await listRuns(userId, true) : await listRuns(userId);
@@ -86,7 +98,7 @@ export const runsRoutes = new Hono()
   .get("/activity/stream", async (c) => {
     const userId = c.get("sessionUser").id;
     const actor = getRequestActor(c);
-    if (actor.type === "apiKey" && !actorHasAnyApiKeyScope(actor, ["ingest", "search", "artifacts"])) {
+    if (!apiKeyMayReadRuns(actor)) {
       return apiStatusError(c, 403, "Forbidden");
     }
     const orgId = actor.type === "apiKey" ? actor.apiKey.orgId : null;
@@ -131,7 +143,7 @@ export const runsRoutes = new Hono()
     const userId = c.get("sessionUser").id;
     const actor = getRequestActor(c);
     if (actor.type === "apiKey") {
-      if (!actorHasAnyApiKeyScope(actor, ["ingest", "search", "artifacts"])) {
+      if (actor.apiKey.keyType !== "server" || !actorHasAnyApiKeyScope(actor, ["ingest", "search", "artifacts"])) {
         return apiStatusError(c, 403, "Forbidden");
       }
       const run = await getRun(c.req.param("runId"), userId, { cost: false });
@@ -150,7 +162,7 @@ export const runsRoutes = new Hono()
   .get("/:runId/progress/stream", async (c) => {
     const actor = getRequestActor(c);
     const runId = c.req.param("runId");
-    if (actor.type === "apiKey" && !actorHasAnyApiKeyScope(actor, ["ingest", "search", "artifacts"])) {
+    if (!apiKeyMayReadRuns(actor)) {
       return apiStatusError(c, 403, "Forbidden");
     }
     const run = await getRun(runId, actor.userId, { cost: false });
@@ -198,7 +210,7 @@ export const runsRoutes = new Hono()
     const userId = c.get("sessionUser").id;
     const actor = getRequestActor(c);
     if (actor.type === "apiKey") {
-      if (!actorHasAnyApiKeyScope(actor, ["ingest", "search", "artifacts"])) {
+      if (actor.apiKey.keyType !== "server" || !actorHasAnyApiKeyScope(actor, ["ingest", "search", "artifacts"])) {
         return apiStatusError(c, 403, "Forbidden");
       }
       const run = await getRun(c.req.param("runId"), userId, { cost: false });
@@ -222,7 +234,7 @@ export const runsRoutes = new Hono()
     const run = await getRun(runId, userId, { cost: false });
 
     const actor = getRequestActor(c);
-    if (actor.type === "apiKey" && !actorHasAnyApiKeyScope(actor, ["ingest", "search", "artifacts"])) {
+    if (!apiKeyMayReadRuns(actor)) {
       return apiStatusError(c, 403, "Forbidden");
     }
     if (!run || (actor.type === "apiKey" && !await loadActorScopedWorkspace(run.workspaceId, actor))) {

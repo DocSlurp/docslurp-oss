@@ -246,11 +246,11 @@ describe("runsRoutes validation", () => {
 
 
 describe("API-key run reads", () => {
-  function keyApp(scopes = ["ingest"]) {
+  function keyApp(scopes = ["ingest"], keyType = "server") {
     const app = new Hono();
     app.use("*", async (c, next) => {
       c.set("sessionUser", { id: "user-1", email: "", name: "API key" });
-      c.set("apiKey", { userId: "user-1", orgId: "org-1", scopes } as never);
+      c.set("apiKey", { userId: "user-1", orgId: "org-1", keyType, scopes } as never);
       await next();
     });
     return app.route("/runs", runsRoutes);
@@ -280,6 +280,12 @@ describe("API-key run reads", () => {
   it("requires a service scope for run reads", async () => {
     expect((await keyApp([]).request("/runs/run-1/progress")).status).toBe(403);
     expect(getRunProgressMock).not.toHaveBeenCalled();
+  });
+  it("rejects a browser/client key on run reads even with a service scope (SEC-2026-10-ROUND3-01)", async () => {
+    expect((await keyApp(["search"], "client").request("/runs")).status).toBe(403);
+    expect((await keyApp(["search"], "client").request("/runs/activity/stream")).status).toBe(403);
+    expect((await keyApp(["search"], "client").request("/runs/run-1/progress")).status).toBe(403);
+    expect(listRunsMock).not.toHaveBeenCalled();
   });
   it("filters run lists to the key organization", async () => {
     listRunsMock.mockResolvedValue([{ id: "own", orgId: "org-1" }, { id: "foreign", orgId: "org-2" }]);

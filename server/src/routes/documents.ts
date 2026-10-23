@@ -227,7 +227,20 @@ export const documentsRoutes = new Hono()
   })
   .delete("/:docId", async (c) => {
     const userId = c.get("sessionUser").id;
-    const deleted = await deleteDocument(c.req.param("docId"), userId);
+    let deleted;
+    try {
+      deleted = await deleteDocument(c.req.param("docId"), userId);
+    } catch (error) {
+      // Deleting a document whose run is still processing races the pipeline and
+      // hits a foreign-key violation (the run's rows still reference it). Answer
+      // 409 so clients retry; every other failure keeps its 500 contract.
+      // Security finding SEC-2026-10-PROD-06 (regressed in the merge).
+      if ((error as { code?: string } | null)?.code === "23503") {
+        reportPublicError(error, { surface: "documents.delete" });
+        return apiErrorResponse(c, 409, "conflict", "The document is still being processed by a run. Try again shortly.");
+      }
+      throw error;
+    }
 
     if (!deleted) {
       return apiStatusError(c, 404, "Document not found");
