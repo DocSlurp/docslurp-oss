@@ -1,5 +1,7 @@
 # Completed
 
+- Preserve verified direct-upload byte accounting, backfill only ownership-matched completed upload receipts, give duplicate embedding artifacts document-local chunks/citation evidence, clear empty replacements, and retire superseded pending history without retry resurrection (2026-10-23; migrations 0073/0075).
+
 - Preserve safe credit-pause reasons and reserve facts, retry funding resumes transactionally, and emit deduplicated credit/deferred-resume alerts through existing Telegram/SigNoz logging (2026-10-23).
 
 - Remove repeated chunk/page heap scans from workspace board byte totals using exact statement-triggered document counters; preserve indexed-byte output and existing search counters (2026-10-23). Local paired confirmation is 79.5% faster; production rollout remains unmeasured.
