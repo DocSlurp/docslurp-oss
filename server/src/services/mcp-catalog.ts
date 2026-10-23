@@ -1,5 +1,6 @@
 import { z } from "zod";
 
+import { uploadBundleAvailable } from "../lib/mcp-ui-resources.js";
 import { deferredProfilesEnabled } from "@docslurp/shared";
 
 import { env } from "../config.js";
@@ -24,6 +25,10 @@ export const uploadInput = z.object({
   }).strict()).min(1).max(10).optional(),
   idempotencyKey: z.string().min(1).max(200).optional().describe("For URL ingestion only: reuse the same key when retrying this exact request to avoid duplicate ingestion."),
 }).strict().refine(value => Boolean(value.urls) !== Boolean(value.files), "Supply either urls or files, not both");
+
+export const openUploaderInput = z.object({
+  workspace: workspaceRef,
+}).strict();
 
 export const completeUploadInput = z.object({
   sessionId: z.string().uuid(),
@@ -111,6 +116,9 @@ export function mcpTools(baseUrl: string): McpTool[] {
       description: "Upload documents using either fetchable HTTP(S) urls or files metadata, never both. For files, generate one presigned PUT URL per file, up to 10 files (5 GiB each, subject to account limits). PUT the raw bytes to each putUrl with the declared Content-Type, then call completeUpload with sessionId and file IDs. Never send file bytes or local paths as tool arguments. URLs start ingestion immediately; files start only on completion. Omit workspace for the default workspace; workspace takes an ID, slug or name, and a name that matches no workspace creates it. Ingestion can incur cost. idempotencyKey applies to URL ingestion retries.",
       // Flat like every tool schema: uploadInput's refinement enforces urls XOR files.
       inputSchema: toolInputJsonSchema(uploadInput) },
+    ...(env.mcpAppsUiEnabled && uploadBundleAvailable() ? [{ id: "openUploader", title: "Open uploader", scopes: ["ingest" as const], annotations: READ_ONLY,
+      description: "Show an upload widget so the user can drop local files you cannot read. Returns the target workspace and limits only; the widget uploads and reports progress itself. Never creates a workspace: omit workspace for the default. Hosts without MCP Apps support: use upload with urls instead.",
+      inputSchema: toolInputJsonSchema(openUploaderInput) }] : []),
     { id: "completeUpload", title: "Complete upload", scopes: ["ingest"],
       annotations: { readOnly: false, destructive: false, idempotent: false, openWorld: false, consequential: true },
       description: "After all presigned PUT requests succeed, verify uploaded files and start ingestion. Pass sessionId and fileIds from upload. Returns workspace and run IDs for getUploadStatus. File size is verified before ingestion; do not call before uploading the bytes.",

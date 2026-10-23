@@ -5,6 +5,7 @@ import { rejectNulBytes } from "./reject-nul.js";
 import { describe, expect, it, vi } from "vitest";
 
 import { handleMcpHttp, type McpDispatch } from "./mcp-http.js";
+import { uploadUiResource, type UploadUiOptions } from "./mcp-ui-resources.js";
 
 const manifest = { capabilities: [{
   id: "suggestQueries", title: "Suggestions", description: "No AI suggestions", category: "tool",
@@ -132,5 +133,74 @@ describe("hosted MCP transport", () => {
     expect(downstream?.aborted).toBe(true);
     const response = await pending;
     await response.body?.cancel();
+  });
+
+  describe("MCP Apps uploader", () => {
+    const uploaderManifest = { capabilities: [...manifest.capabilities, { ...manifest.capabilities[0]!, id: "openUploader", title: "Open uploader",
+      annotations: { readOnly: true, destructive: false, idempotent: true, openWorld: false } }] };
+    const ui = { bundle: () => "<!doctype html><title>up</title><meta content=\"connect-src __DOCSLURP_CONNECT_SRC__\">", connectDomains: () => ["https://s3.test", "https://b.s3.test"] };
+    const uri = uploadUiResource(ui)!.uri;
+    async function connect(m: typeof uploaderManifest, options: UploadUiOptions) {
+      const client = new Client({ name: "docslurp-test", version: "1" });
+      await client.connect(new StreamableHTTPClientTransport(new URL("http://localhost/v1/mcp"), {
+        fetch: async (url, init) => handleMcpHttp(new Request(url, init), m, dispatch, options),
+      }));
+      return client;
+    }
+
+    it("advertises the tool with ui meta and serves the versioned widget resource with csp", async () => {
+      const client = await connect(uploaderManifest, ui);
+      try {
+        expect(uri).toMatch(/^ui:\/\/docslurp\/upload\/[0-9a-f]{12}$/);
+        const tool = (await client.listTools()).tools.find(item => item.name === "openUploader");
+        expect(tool?._meta).toEqual({ ui: { resourceUri: uri }, "ui/resourceUri": uri });
+        const listed = (await client.listResources()).resources.find(item => item.uri === uri);
+        expect(listed).toMatchObject({ mimeType: "text/html;profile=mcp-app", _meta: { ui: { csp: { connectDomains: ["https://s3.test", "https://b.s3.test"] }, prefersBorder: false } } });
+        const [content] = (await client.readResource({ uri })).contents;
+        expect(content).toMatchObject({ uri, mimeType: "text/html;profile=mcp-app", text: "<!doctype html><title>up</title><meta content=\"connect-src https://s3.test https://b.s3.test\">" });
+        expect(client.getInstructions()).toContain("openUploader");
+        // Only the current versioned URI is readable.
+        await expect(client.readResource({ uri: "ui://docslurp/upload" })).rejects.toThrow("Unknown resource");
+        await expect(client.readResource({ uri: "ui://docslurp/upload/000000000000" })).rejects.toThrow("Unknown resource");
+      } finally { await client.close(); }
+    });
+
+    it("substitutes 'none' into connect-src when there are no storage origins", async () => {
+      const client = await connect(uploaderManifest, { ...ui, connectDomains: () => [] });
+      try {
+        const [content] = (await client.readResource({ uri })).contents;
+        expect((content as { text: string }).text).toContain("connect-src 'none'");
+      } finally { await client.close(); }
+    });
+
+    it("logs the widget origin tag from params._meta, whitelisted values only, never arguments", async () => {
+      const info = vi.spyOn(console, "info").mockImplementation(() => {});
+      const client = await connect(uploaderManifest, ui);
+      try {
+        await client.callTool({ name: "suggestQueries", arguments: { workspaceId: "SECRET-WS" }, _meta: { "docslurp/origin": "mcp-app-upload", "docslurp/widgetVersion": "3" } });
+        await client.callTool({ name: "suggestQueries", arguments: { workspaceId: "x" }, _meta: { "docslurp/origin": "evil\nforged=1", "docslurp/widgetVersion": "3" } });
+        await client.callTool({ name: "suggestQueries", arguments: { workspaceId: "x" } });
+        const lines = info.mock.calls.map(call => String(call[0])).filter(line => line.startsWith("[mcp] widget"));
+        expect(lines).toEqual(["[mcp] widget tool call tool=suggestQueries origin=mcp-app-upload widget_version=3"]);
+        expect(lines.join()).not.toContain("SECRET-WS");
+      } finally { await client.close(); info.mockRestore(); }
+    });
+
+    it("hides the tool and resource when the flag removed it from the manifest", async () => {
+      const client = await connect(manifest as typeof uploaderManifest, ui);
+      try {
+        expect((await client.listTools()).tools.map(item => item.name)).toEqual(["suggestQueries"]);
+        expect((await client.listResources()).resources.map(item => item.uri)).toEqual(["docslurp://capabilities"]);
+        await expect(client.readResource({ uri })).rejects.toThrow("Unknown resource");
+      } finally { await client.close(); }
+    });
+
+    it("omits the uploader while the widget bundle is not built", async () => {
+      const client = await connect(uploaderManifest, { ...ui, bundle: () => null });
+      try {
+        expect((await client.listTools()).tools.map(item => item.name)).toEqual(["suggestQueries"]);
+        await expect(client.readResource({ uri })).rejects.toThrow("Unknown resource");
+      } finally { await client.close(); }
+    });
   });
 });

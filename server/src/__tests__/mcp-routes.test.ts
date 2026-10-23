@@ -17,6 +17,8 @@ const loadMediaEvidence = vi.fn();
 vi.mock("../services/media-evidence.js", () => ({ loadMediaEvidence }));
 
 const forwardInProcess = vi.fn();
+const listEditableWorkspaceIds = vi.fn(async (_userId: string): Promise<string[]> => []);
+vi.mock("../services/organizations.js", async (importOriginal) => ({ ...(await importOriginal<typeof import("../services/organizations.js")>()), listEditableWorkspaceIds }));
 
 // forwardInProcess is mocked, so the route modules it statically mounts only need to exist.
 vi.mock("../routes/workspaces.js", async () => ({ workspacesRoutes: new (await import("hono")).Hono() }));
@@ -56,6 +58,9 @@ vi.mock("../services/ingest-report.js", () => ({
 }));
 
 const { mcpRoutes } = await import("../routes/mcp.js");
+const { markSessionToolsSurface, mcpAdapterRoutes } = await import("../services/mcp-tools.js");
+const { setRequestActor } = await import("../lib/request-actor.js");
+const { UPLOAD_UI_URI } = await import("../lib/mcp-ui-resources.js");
 const { resetApiRateLimitBuckets } = await import("../middleware/rate-limit.js");
 
 // Each case represents an independent client, not cumulative production traffic.
@@ -87,6 +92,8 @@ describe("mcpRoutes", () => {
     validateApiKey.mockReset();
     validateApiKey.mockResolvedValue(validatedKey);
     listWorkspaces.mockReset();
+    listEditableWorkspaceIds.mockReset();
+    listEditableWorkspaceIds.mockResolvedValue(["default-ws", "ws-2"]);
     loadMediaEvidence.mockReset();
     uploadRequest.mockReset();
     loadDirectUploadSession.mockReset();
@@ -119,6 +126,87 @@ describe("mcpRoutes", () => {
     const response = await app.request("/mcp/tools/listWorkspaces", { method: "POST", headers: { Authorization: "Bearer key", "Content-Type": "application/json" }, body: '{"limit":1}' });
     expect(await response.json()).toEqual({ workspaces: [{ id: "allowed", slug: "manuals", name: "Manuals", isDefault: true }], total: 1, nextOffset: null });
     expect(listWorkspaces).toHaveBeenCalledWith("user-1", { refineNames: false });
+  });
+
+  it("resolves the uploader target read-only and hides the tool while the MCP Apps flag is off", async () => {
+    validateApiKey.mockResolvedValue({ ...validatedKey, scopes: ["ingest"] });
+    listWorkspaces.mockResolvedValue([
+      { id: "default-ws", orgId: "org-1", slug: "main", name: "Main", isDefault: true, systemPrompt: "private" },
+      { id: "ws-2", orgId: "org-1", slug: "legal", name: "Legal", isDefault: false },
+    ]);
+    const call = (body: object) => app.request("/mcp/tools/openUploader", { method: "POST", headers: { Authorization: "Bearer key", "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    expect((await call({})).status).toBe(404);
+    const { env } = await import("../config.js");
+    env.mcpAppsUiEnabled = true;
+    try {
+      const defaulted = await (await call({})).json();
+      expect(defaulted).toEqual({
+        workspace: { id: "default-ws", slug: "main", name: "Main", isDefault: true },
+        workspaces: [{ id: "default-ws", slug: "main", name: "Main", isDefault: true }, { id: "ws-2", slug: "legal", name: "Legal", isDefault: false }],
+        limits: { maxFiles: 10, maxFileBytes: 5368709120 },
+        uploader: { resourceUri: UPLOAD_UI_URI },
+        hint: expect.any(String),
+      });
+      expect((await (await call({ workspace: "ws-2" })).json()).workspace.id).toBe("ws-2");
+      expect((await call({ extra: 1 })).status).toBe(400);
+      expect(uploadRequest).not.toHaveBeenCalled();
+    } finally { env.mcpAppsUiEnabled = false; }
+  });
+
+  it("offers the uploader only workspaces the user may upload to, matching the upload route's viewer rule", async () => {
+    validateApiKey.mockResolvedValue({ ...validatedKey, scopes: ["ingest"] });
+    listWorkspaces.mockResolvedValue([
+      { id: "default-ws", orgId: "org-1", slug: "main", name: "Main", isDefault: true },
+      { id: "ws-2", orgId: "org-1", slug: "legal", name: "Legal", isDefault: false },
+      { id: "shared-view", orgId: "org-1", slug: "shared", name: "Shared (viewer)", isDefault: false },
+    ]);
+    const call = (body: object) => app.request("/mcp/tools/openUploader", { method: "POST", headers: { Authorization: "Bearer key", "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    const { env } = await import("../config.js");
+    env.mcpAppsUiEnabled = true;
+    try {
+      const listed = await (await call({})).json();
+      expect(listed.workspaces.map((item: { id: string }) => item.id)).toEqual(["default-ws", "ws-2"]);
+      // A read-only share is not a valid target even when asked for by id.
+      expect((await call({ workspace: "shared-view" })).status).toBe(403);
+      // Default-workspace viewers may upload (listEditableWorkspaceIds includes the default for org members).
+      listEditableWorkspaceIds.mockResolvedValue(["default-ws"]);
+      const viewer = await (await call({})).json();
+      expect(viewer.workspace.id).toBe("default-ws");
+      expect(viewer.workspaces.map((item: { id: string }) => item.id)).toEqual(["default-ws"]);
+      expect(listEditableWorkspaceIds).toHaveBeenCalledWith("user-1");
+    } finally { env.mcpAppsUiEnabled = false; }
+  });
+
+  it("hides the uploader on every WebMCP (session-tools) surface via the explicit surface flag, not the path", async () => {
+    const { env } = await import("../config.js");
+    env.mcpAppsUiEnabled = true;
+    try {
+      const mount = (session: boolean) => new Hono()
+        .use("*", async (c, next) => { setRequestActor(c, { type: "session", userId: "user-1", sessionId: "s", user: { id: "user-1", email: "", name: "" } }); await next(); })
+        .route("/any/prefix", new Hono().use("*", session ? markSessionToolsSurface : async (_c, next) => { await next(); }).route("/", mcpAdapterRoutes));
+      const hidden = mount(true);
+      const shown = mount(false);
+      const ids = async (app: Hono, path: string) => (await (await app.request(`/any/prefix/${path}`)).json())[path === "manifest" ? "capabilities" : "tools"].map((item: { id: string }) => item.id);
+      for (const path of ["manifest", "tools"]) {
+        expect(await ids(hidden, path)).not.toContain("openUploader");
+        expect(await ids(shown, path)).toContain("openUploader");
+      }
+      const post = (app: Hono) => app.request("/any/prefix/tools/openUploader", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
+      expect((await post(hidden)).status).toBe(404);
+    } finally { env.mcpAppsUiEnabled = false; }
+  });
+
+  it("answers 404 when the uploader target workspace does not exist", async () => {
+    validateApiKey.mockResolvedValue({ ...validatedKey, scopes: ["ingest"] });
+    listWorkspaces.mockResolvedValue([]);
+    getWorkspace.mockResolvedValue(null);
+    const { env } = await import("../config.js");
+    env.mcpAppsUiEnabled = true;
+    try {
+      const response = await app.request("/mcp/tools/openUploader", { method: "POST", headers: { Authorization: "Bearer key", "Content-Type": "application/json" }, body: JSON.stringify({ workspace: "ghost" }) });
+      expect(response.status).toBe(404);
+      expect(listEditableWorkspaceIds).not.toHaveBeenCalled();
+    } finally { env.mcpAppsUiEnabled = false; }
   });
 
   it("uploads URLs and requests up to ten single-part signed uploads with actor, default scope and retry key", async () => {

@@ -887,7 +887,7 @@ async function mcpServerCommand(flags: Record<string, string | boolean>): Promis
       switch (envelope.method) {
         case "tools/list": {
           const result = await get("/v1/mcp/tools");
-          respond({ tools: result.tools.map((tool: any) => ({
+          respond({ tools: result.tools.filter((tool: any) => tool.id !== "openUploader").map((tool: any) => ({
             name: tool.id, title: tool.title, description: tool.description, inputSchema: tool.inputSchema,
             ...(tool.annotations && { annotations: {
               title: tool.title, readOnlyHint: tool.annotations.readOnly, destructiveHint: tool.annotations.destructive,
@@ -901,6 +901,11 @@ async function mcpServerCommand(flags: Record<string, string | boolean>): Promis
           const args = envelope.params?.arguments ?? {};
           if (typeof name !== "string" || !/^[a-zA-Z0-9_.-]+$/.test(name) || !args || Array.isArray(args) || typeof args !== "object") {
             invalid("A tool name and object arguments are required"); break;
+          }
+          // The uploader is an MCP Apps widget; a stdio client has no UI host to render it.
+          if (name === "openUploader") {
+            respond({ content: [{ type: "text", text: "openUploader needs an MCP Apps host. Use upload with urls, or presigned files, from this client." }], isError: true });
+            break;
           }
           try {
             const result = await mcpFetch({ apiUrl, apiKey, pathname: `/v1/mcp/tools/${encodeURIComponent(name)}`, method: "POST", body: args });
