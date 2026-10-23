@@ -9,11 +9,14 @@ Direct upload sessions finalize automatically. For known-size multipart uploads,
 the API reconciler lists stored parts, checks every part number and size, and
 assembles the object. Unknown-size streams must send an end-of-stream completion
 with their final byte count; the SDK does this after every part succeeds. The SDK
-then polls session status for the ingestion result. There is no separate client
+then polls session status for the accepted run. Acceptance means ingestion has
+started or is queued; it does not mean extraction has finished. There is no separate client
 confirmation required to start ingestion.
 
 The API runs the reconciler every 15 seconds, in bounded batches, with per-session
-backoff (up to 30 seconds for incomplete uploads, five minutes after errors) and a 24-hour abandonment deadline. It also verifies single-PUT objects,
+backoff (up to 30 seconds for incomplete uploads, five minutes after errors).
+Unfinished transfers expire after 24 hours and become `aborted`; sessions already
+starting ingestion continue recovery. It also verifies single-PUT objects,
 so self-hosted S3/MinIO installations do not require webhooks. Keep the API process
 running; a process that sleeps between requests cannot execute background sweeps.
 Allow up to two additional on-demand database connections per API process for
@@ -73,6 +76,8 @@ multipart IDs and queue delayed raw-object cleanup.
 Tigris delivers at least once, may deliver out of order, and retries requests
 that do not receive a 2xx response within ten seconds. See the official
 [object notification documentation](https://www.tigrisdata.com/docs/buckets/object-notifications/).
+
+For client examples and recovery behavior, see [upload completion](../api-sdk.md#upload-completion).
 
 ## Backups and restore
 
