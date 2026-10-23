@@ -15,6 +15,9 @@ import {
 } from "@temporalio/common";
 import {
   DEFAULT_MATERIALIZE_TASK_QUEUE,
+  DEFAULT_PAGE_RENDER_TASK_QUEUE,
+  PAGE_RENDER_WORKFLOW,
+  pageRenderWorkflowId,
   MATERIALIZE_WORKFLOW,
   MAX_PAGE_FANOUT_PER_RUN,
   deferredProfilesEnabled,
@@ -621,7 +624,6 @@ export async function describeTemporalNamespace(timeoutMs = 2_000): Promise<void
 
 /** A deterministic exact-page workflow coalesces concurrent browser requests. */
 export async function startPageRenderWorkflow(input: import("@docslurp/shared").RenderDocumentPageInput): Promise<void> {
-  const { PAGE_RENDER_WORKFLOW, DEFAULT_PAGE_RENDER_TASK_QUEUE, pageRenderWorkflowId } = await import("@docslurp/shared");
   const client = await getClient();
   try {
     await client.workflow.start(PAGE_RENDER_WORKFLOW, {
