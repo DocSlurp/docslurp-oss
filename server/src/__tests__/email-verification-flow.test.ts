@@ -26,7 +26,15 @@ function setup(enabled: boolean, oauthVerified = true) {
     socialProviders: { google: {
       clientId: "local-test", clientSecret: "local-test",
       verifyIdToken: async token => token === "signed-test-token",
-      getUserInfo: async () => ({ user: { id: "google-owner", email: account.email, name: account.name, emailVerified: oauthVerified }, data: { sub: "google-owner" } }),
+      getUserInfo: async () => ({
+        user: { email: account.email, name: account.name, emailVerified: oauthVerified },
+        data: {
+          sub: "google-owner", aud: "local-test", azp: "local-test",
+          iss: "https://accounts.google.com", iat: 1_790_000_000, exp: 1_790_003_600,
+          email: account.email, email_verified: oauthVerified, name: account.name,
+          given_name: "Verification", family_name: "check", picture: "",
+        },
+      }),
     } },
     databaseHooks: { account: { create: { before: beforeOAuthAccountCreate } } },
   });
