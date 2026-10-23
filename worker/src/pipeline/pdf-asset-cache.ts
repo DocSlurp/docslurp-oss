@@ -12,7 +12,7 @@ import { trustedTempDownloadPattern } from "../lib/temp-file-names.js";
 import { loadNativePdfEngine } from "../native-pdf/loader.js";
 import { renderClipNative, renderPagesNative } from "../native-pdf/render.js";
 import type { Bbox, NativePdfEngine } from "../native-pdf/types.js";
-import { boundedRasterDpi } from "../lib/raster-bounds.js";
+import { boundedRasterDpi, boundedRasterEdge } from "../lib/raster-bounds.js";
 
 export type RasterEngineName = "pdftoppm" | "native-pdf";
 
@@ -296,6 +296,7 @@ export class PdfRasterCache {
             range.first,
             range.last,
             renderDpi,
+            boundedRasterEdge(Number(size[1]), Number(size[2]), renderDpi),
           );
           if (!plan.available) throw new Error("pdftoppm unavailable for selected-page rasterization");
           await this.runner.run(plan, args.signal);
