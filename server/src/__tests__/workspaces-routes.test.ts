@@ -1228,6 +1228,17 @@ describe("workspace rename via API keys", () => {
     expect(updateWorkspaceMock).not.toHaveBeenCalled();
   });
 
+  it("rejects a prohibited pipeline model selection (SEC-2026-10-ROUND4-01)", async () => {
+    const app = buildApp({ orgId: "org-1", scopes: ["workspaces:manage"] });
+    const response = await app.request("/workspaces/amber-falcon-ridge", {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ pipeline: { textGeneration: { model: "openai/gpt-5.1-pro" } } }),
+    });
+    expect(response.status).toBe(400);
+    expect(updateWorkspaceMock).not.toHaveBeenCalled();
+  });
+
   it("stays inside the key organization", async () => {
     const response = await patch(buildApp({ orgId: "org-2", scopes: ["workspaces:manage"] }));
     expect(response.status).toBe(404);

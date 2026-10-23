@@ -27,6 +27,7 @@ import {
   applyIngestRecommendationSchema,
   ingestReportQuerySchema,
   reprocessIngestRecommendationSchema,
+  isProhibitedRoutingModelId,
 } from "@docslurp/shared";
 
 import { chatModelRefused, ChatModelNotAllowedError } from "../lib/chat-model-policy.js";
@@ -531,6 +532,31 @@ function workspaceMutationError(c: Context, error: unknown): Response {
   return apiStatusError(c, originalMessage === "Forbidden" ? 403 : 400, message);
 }
 
+/**
+ * Reject pipeline model selections the project prohibits (Pro/Ultra ids and
+ * models priced at or above the output-token ceiling). The chat model path
+ * enforces this in lib/chat-model-policy.ts; the workspace pipeline write path
+ * must too, or an operator/client can pin a prohibited model to a stage.
+ * Security finding SEC-2026-10-ROUND4-01.
+ */
+function findProhibitedModelId(value: unknown): string | null {
+  if (typeof value === "string") return isProhibitedRoutingModelId(value) ? value : null;
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const found = findProhibitedModelId(item);
+      if (found) return found;
+    }
+    return null;
+  }
+  if (value && typeof value === "object") {
+    for (const item of Object.values(value as Record<string, unknown>)) {
+      const found = findProhibitedModelId(item);
+      if (found) return found;
+    }
+  }
+  return null;
+}
+
 export const workspacesRoutes = new Hono()
   .route("/", chatVoiceRoutes)
   .post(
@@ -933,6 +959,10 @@ export const workspacesRoutes = new Hono()
   .post("/", zValidator("json", createWorkspaceSchema, validationHook), async (c) => {
     const userId = c.get("sessionUser").id;
     const valid = c.req.valid("json");
+    const prohibitedModel = findProhibitedModelId(valid.pipeline);
+    if (prohibitedModel) {
+      return apiErrorResponse(c, 400, "invalid_request", `Model "${prohibitedModel}" is not permitted in pipeline configuration`);
+    }
     // The schema defaults a missing pipeline.indexingMode to "full"; only an explicit
     // mode in the raw body may override the plan default.
     const raw = await c.req.json().catch(() => null) as { pipeline?: { indexingMode?: unknown } } | null;
@@ -1342,6 +1372,10 @@ export const workspacesRoutes = new Hono()
         if (!current || !apiKeyCanUseWorkspace(actor.apiKey, current)) {
           return apiErrorResponse(c, 404, "workspace_not_found", "Workspace not found");
         }
+      }
+      const prohibitedModel = findProhibitedModelId(c.req.valid("json").pipeline);
+      if (prohibitedModel) {
+        return apiErrorResponse(c, 400, "invalid_request", `Model "${prohibitedModel}" is not permitted in pipeline configuration`);
       }
       // The schema defaults a missing pipeline.indexingMode to "full", so read the raw body
       // to tell an explicit mode change (and `indexAll`) from an unrelated pipeline edit.
