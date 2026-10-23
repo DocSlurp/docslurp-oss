@@ -1,0 +1,1245 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<!--
+  Defence in depth only: the MCP Apps host enforces the real policy from the
+  resource's _meta.ui.csp (connectDomains = storage origins) and may only narrow
+  this further. Static HTML cannot know the storage origin, so connect-src allows
+  https plus loopback http (local MinIO); the host CSP is the floor. There are no
+  external scripts, fonts or images, and no way to call the DocSlurp API directly:
+  every DocSlurp call goes through the host's tools/call bridge.
+-->
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:; font-src data:; connect-src https: http://localhost:* http://127.0.0.1:*; base-uri 'none'; form-action 'none'">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>DocSlurp uploader</title>
+<style>
+/*
+  Theme. The host supplies --color-*, --font-*, --border-radius-* through
+  ui/initialize and host-context-changed (applied to :root by the script). Every
+  widget colour reads a host variable first and falls back to --f-* below, which
+  follows the host's theme flag, then prefers-color-scheme. The three accents are
+  widget-owned (hosts do not provide brand colours), one meaning each:
+  teal = ready and the primary action, orange = in progress, violet = AI hand-off,
+  red = failure.
+*/
+:root {
+  --f-bg: #ffffff; --f-bg2: #f5f5f4; --f-t1: #1c1917; --f-t2: #57534e; --f-t3: #78716c;
+  --f-line: #e7e5e4; --f-line2: #d6d3d1; --f-bad: #b91c1c; --f-bad-bg: #fef2f2; --f-ring: #1c1917;
+  --ready: #0f766e; --work: #b45309; --ai: #6d28d9; --on-ready: #ffffff; --on-ai: #ffffff;
+  color-scheme: light;
+}
+:root[data-theme="dark"] {
+  --f-bg: #1f1f1e; --f-bg2: #2a2a28; --f-t1: #f5f5f4; --f-t2: #c4c0bb; --f-t3: #a29d97;
+  --f-line: #363432; --f-line2: #4a4845; --f-bad: #f87171; --f-bad-bg: #3a1d1d; --f-ring: #f5f5f4;
+  --ready: #2dd4bf; --work: #fb923c; --ai: #a78bfa; --on-ready: #04201c; --on-ai: #150a33;
+  color-scheme: dark;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme]) {
+    --f-bg: #1f1f1e; --f-bg2: #2a2a28; --f-t1: #f5f5f4; --f-t2: #c4c0bb; --f-t3: #a29d97;
+    --f-line: #363432; --f-line2: #4a4845; --f-bad: #f87171; --f-bad-bg: #3a1d1d; --f-ring: #f5f5f4;
+    --ready: #2dd4bf; --work: #fb923c; --ai: #a78bfa; --on-ready: #04201c; --on-ai: #150a33;
+    color-scheme: dark;
+  }
+}
+:root {
+  --bg: var(--color-background-primary, var(--f-bg));
+  --bg2: var(--color-background-secondary, var(--f-bg2));
+  --t1: var(--color-text-primary, var(--f-t1));
+  --t2: var(--color-text-secondary, var(--f-t2));
+  --t3: var(--color-text-tertiary, var(--f-t3));
+  --line: var(--color-border-secondary, var(--f-line));
+  --line2: var(--color-border-primary, var(--f-line2));
+  --bad: var(--color-text-danger, var(--f-bad));
+  --bad-bg: var(--color-background-danger, var(--f-bad-bg));
+  --ring: var(--color-ring-primary, var(--f-ring));
+  --r: var(--border-radius-md, 8px);
+  --sans: var(--font-sans, system-ui, -apple-system, "Segoe UI", sans-serif);
+  --inset-t: 0px; --inset-r: 0px; --inset-b: 0px; --inset-l: 0px;
+}
+
+* { box-sizing: border-box; }
+html, body { margin: 0; background: transparent; }
+body {
+  font: 400 var(--font-text-sm-size, 13px)/1.4 var(--sans);
+  color: var(--t1);
+  padding: calc(12px + var(--inset-t)) calc(16px + var(--inset-r)) calc(16px + var(--inset-b)) calc(16px + var(--inset-l));
+  position: relative;
+}
+.w { max-width: 440px; }
+.num { font-variant-numeric: tabular-nums; font-feature-settings: "tnum"; }
+
+.head { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; color: var(--t2); font-size: 12px; min-height: 20px; }
+.head .dest { color: var(--t1); font-weight: 500; }
+.head .right { white-space: nowrap; }
+.dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; margin-right: 6px; vertical-align: 1px; background: var(--t3); }
+.dot.work { background: var(--work); }
+.dot.ready { background: var(--ready); }
+.dot.bad { background: var(--bad); }
+select.dest-select {
+  font: inherit; font-weight: 500; color: var(--t1); background: var(--bg); max-width: 220px;
+  border: 1px solid var(--line2); border-radius: var(--r); padding: 2px 4px; text-overflow: ellipsis;
+}
+
+/* one primary number per state */
+.big { display: flex; align-items: baseline; gap: 8px; margin: 8px 0; }
+.big b { font-size: 34px; line-height: 1; font-weight: 650; letter-spacing: -0.02em; }
+.big span { color: var(--t2); font-size: 14px; }
+.big .of { color: var(--t3); }
+.big b.dim { color: var(--t3); }
+
+/* flat partition of pages: searchable / not searchable / pending (the remainder) */
+.meter { display: flex; height: 6px; border-radius: 2px; background: var(--bg2); outline: 1px solid var(--line); overflow: hidden; }
+.meter i { display: block; height: 100%; transition: width 0.4s linear; }
+.meter .ok { background: var(--ready); }
+.meter .fail { background: var(--bad); }
+.legend { display: flex; flex-wrap: wrap; gap: 4px 14px; margin-top: 6px; color: var(--t2); font-size: 12px; }
+.legend .sw { display: inline-block; width: 8px; height: 8px; margin-right: 5px; border-radius: 1px; vertical-align: -0.5px; }
+
+/* readout: hairline-separated, not tiles */
+.read { display: flex; margin: 12px 0 0; padding: 8px 0 0; border-top: 1px solid var(--line); }
+.read.flush { margin-top: 0; }
+.read > div { flex: 1; min-width: 0; }
+.read > div + div { padding-left: 12px; border-left: 1px solid var(--line); }
+.read dt { font-size: 11px; color: var(--t3); margin: 0; }
+.read dd { margin: 1px 0 0; font-size: 15px; font-weight: 600; }
+.read dd small { font-weight: 400; color: var(--t2); font-size: 12px; }
+
+.note { margin: 8px 0 0; color: var(--t2); font-size: 12px; overflow-wrap: anywhere; }
+.note.bad { color: var(--bad); }
+
+ul.files { list-style: none; margin: 8px 0 0; padding: 0; border-top: 1px solid var(--line); }
+ul.files li { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 2px 12px; padding: 6px 0; border-bottom: 1px solid var(--line); align-items: baseline; }
+ul.files .n { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+ul.files .m { color: var(--t2); font-size: 12px; text-align: right; white-space: nowrap; }
+ul.files .m.bad { color: var(--bad); }
+ul.files .m.ok { color: var(--ready); }
+ul.files .sub { grid-column: 1 / -1; color: var(--t2); font-size: 12px; overflow-wrap: anywhere; }
+ul.files .sub.bad { color: var(--bad); }
+ul.files .bar { grid-column: 1 / -1; height: 3px; background: var(--bg2); border-radius: 1px; overflow: hidden; }
+ul.files .bar i { display: block; height: 100%; background: var(--t2); }
+
+.drop { margin: 8px 0 0; border: 1px dashed var(--line2); border-radius: var(--r); padding: 18px 12px; text-align: center; color: var(--t2); cursor: pointer; }
+.drop strong { display: block; color: var(--t1); font-size: 14px; font-weight: 600; margin-bottom: 2px; }
+.drop.over { border-style: solid; border-color: var(--ready); background: var(--bg2); }
+
+.actions { display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap; }
+button {
+  font: 600 13px/1 var(--sans); height: 32px; padding: 0 12px; max-width: 100%;
+  border-radius: var(--r); border: 1px solid var(--line2); background: transparent; color: var(--t1);
+  cursor: pointer; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+button:hover:not(:disabled) { background: var(--bg2); }
+button:disabled { opacity: 0.5; cursor: default; }
+button.p { background: var(--ready); border-color: var(--ready); color: var(--on-ready); }
+button.p:hover:not(:disabled) { background: var(--ready); filter: brightness(1.08); }
+button.ai { background: var(--ai); border-color: var(--ai); color: var(--on-ai); }
+button.ai:hover:not(:disabled) { background: var(--ai); filter: brightness(1.08); }
+button.lnk { border-color: transparent; color: var(--t2); text-decoration: underline; padding: 0 4px; height: auto; font-weight: 500; font-size: 12px; }
+button.lnk:hover:not(:disabled) { background: transparent; color: var(--t1); }
+button:focus-visible, select:focus-visible, summary:focus-visible, .drop:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
+
+.alert { margin-top: 8px; padding: 8px 10px; border-radius: var(--r); background: var(--bad-bg); color: var(--bad); border: 1px solid var(--line2); }
+.alert b { display: block; color: var(--t1); font-weight: 600; margin-bottom: 2px; }
+.alert span { color: var(--t1); font-size: 12px; overflow-wrap: anywhere; }
+details { margin-top: 8px; color: var(--t2); font-size: 12px; }
+summary { cursor: pointer; width: max-content; }
+details p { margin: 4px 0 0; overflow-wrap: anywhere; }
+.plain { margin: 0; color: var(--t2); }
+
+.sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+@media (prefers-reduced-motion: reduce) { .meter i { transition: none; } }
+</style>
+</head>
+<body>
+<div class="w" id="app"></div>
+<div class="sr" id="live" role="status" aria-live="polite"></div>
+<input type="file" id="picker" multiple hidden>
+<script>
+(function () {
+  'use strict';
+
+  /*
+    DocSlurp MCP Apps uploader.
+
+    A hand-written MCP Apps view speaking raw JSON-RPC over postMessage
+    (spec 2026-01-26, github.com/modelcontextprotocol/ext-apps). It never touches
+    the DocSlurp API directly. Flow: ui/initialize -> tool-result (openUploader:
+    workspace, workspaces, limits) -> pick files -> uploadEstimate -> upload ->
+    XHR PUT each file to its presigned URL -> completeUpload -> poll
+    getUploadStatus -> ui/update-model-context and ui/message.
+
+    Every string that came from outside (file names, workspace names, tool and
+    error text) reaches the DOM through textContent / text nodes only.
+  */
+
+  var PROTOCOL_VERSION = '2026-01-26';
+  var WIDGET_VERSION = '1';
+  var CALL_META = { 'docslurp/origin': 'mcp-app-upload', 'docslurp/widgetVersion': WIDGET_VERSION };
+  var DEFAULT_LIMITS = { maxFiles: 10, maxFileBytes: 5 * 1024 * 1024 * 1024 };
+  var INIT_TIMEOUT_MS = 5000;
+  var TOOL_TIMEOUT_MS = 120000;
+  var MESSAGE_TIMEOUT_MS = 30000;
+  var POLL_MAX_MS = 30 * 60 * 1000;
+  var PUT_CONCURRENCY = 3;
+  var TERMINAL_RUN = { completed: 1, failed: 1, cancelled: 1, canceled: 1, partial: 1, completed_with_errors: 1 };
+  var MIME_BY_EXT = {
+    md: 'text/markdown', markdown: 'text/markdown', txt: 'text/plain', csv: 'text/csv', html: 'text/html', htm: 'text/html',
+    json: 'application/json', pdf: 'application/pdf', epub: 'application/epub+zip',
+    docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    pptx: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+    png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', webp: 'image/webp', gif: 'image/gif',
+    mp3: 'audio/mpeg', wav: 'audio/wav', m4a: 'audio/mp4', mp4: 'video/mp4', mov: 'video/quicktime', webm: 'video/webm'
+  };
+
+  // ---------------------------------------------------------------- state
+
+  var S = {
+    phase: 'connecting', // connecting | nohost | cancelled | idle | confirm | uploading | processing | error
+    hostContext: {},
+    limits: { maxFiles: DEFAULT_LIMITS.maxFiles, maxFileBytes: DEFAULT_LIMITS.maxFileBytes },
+    workspaces: [],
+    workspaceId: null,
+    workspaceName: null,
+    bootError: null,
+    files: [],          // { key, file, name, size, mime, problem, sent, state }
+    notice: null,
+    estimate: null,     // { pages, seconds, credits, basis } | null
+    estimating: false,
+    estimateSeq: 0,
+    session: null,      // { sessionId }
+    sentFiles: [],      // files of the last accepted batch, for "Re-upload"
+    run: null,          // { id, workspaceId, workspaceName, startedAt, expectedDocs, rejected: [] }
+    status: null,       // derived from getUploadStatus
+    statusStale: false,
+    statusError: null,
+    asked: null,        // null | 'sending' | 'sent' | 'failed'
+    error: null,        // { title, detail, technical }
+    dragging: false
+  };
+
+  var nextId = 1;
+  var pending = {};
+  var xhrs = [];
+  var uploadRunId = 0;
+  var poll = { timer: null, count: 0, startedAt: 0, failures: 0, running: false };
+  var renderTimer = null;
+  var lastLive = '';
+  var lastPct = -1;
+  var meterWidths = {};
+  var fileKeySeq = 1;
+
+  var $app = document.getElementById('app');
+  var $live = document.getElementById('live');
+  var $picker = document.getElementById('picker');
+
+  // ---------------------------------------------------------------- helpers
+
+  function h(tag, attrs) {
+    var el = document.createElement(tag);
+    if (attrs) {
+      Object.keys(attrs).forEach(function (name) {
+        var value = attrs[name];
+        if (value === null || value === undefined || value === false) return;
+        if (name === 'class') el.className = value;
+        else if (name.slice(0, 2) === 'on' && typeof value === 'function') el.addEventListener(name.slice(2), value);
+        else el.setAttribute(name, value === true ? '' : String(value));
+      });
+    }
+    for (var i = 2; i < arguments.length; i += 1) append(el, arguments[i]);
+    return el;
+  }
+
+  function append(el, child) {
+    if (child === null || child === undefined || child === false) return;
+    if (Array.isArray(child)) { child.forEach(function (c) { append(el, c); }); return; }
+    el.appendChild(typeof child === 'object' ? child : document.createTextNode(String(child)));
+  }
+
+  function isObject(v) { return v !== null && typeof v === 'object' && !Array.isArray(v); }
+  function num(v) { return typeof v === 'number' && isFinite(v) ? v : 0; }
+  function numOrNull(v) { return typeof v === 'number' && isFinite(v) ? v : null; }
+  function str(v, max) { return typeof v === 'string' ? v.slice(0, max || 500) : ''; }
+  function plural(n, one, many) { return n.toLocaleString('en-US') + ' ' + (n === 1 ? one : (many || one + 's')); }
+
+  function fmtBytes(n) {
+    if (n < 1000) return n + ' B';
+    if (n < 1e6) return (n / 1e3).toFixed(n < 1e4 ? 1 : 0) + ' kB';
+    if (n < 1e9) return (n / 1e6).toFixed(1) + ' MB';
+    return (n / 1e9).toFixed(2) + ' GB';
+  }
+  function byteUnit(n) { return n < 1e3 ? 'B' : n < 1e6 ? 'kB' : n < 1e9 ? 'MB' : 'GB'; }
+  function scaleBytes(n, unit) {
+    var div = unit === 'GB' ? 1e9 : unit === 'MB' ? 1e6 : unit === 'kB' ? 1e3 : 1;
+    return unit === 'B' ? String(Math.round(n)) : (n / div).toFixed(unit === 'GB' ? 2 : 1);
+  }
+  function fmtLimit(bytes) {
+    var gib = bytes / (1024 * 1024 * 1024);
+    if (gib >= 1) return (gib === Math.floor(gib) ? gib : gib.toFixed(1)) + ' GiB';
+    var mib = bytes / (1024 * 1024);
+    return (mib === Math.floor(mib) ? mib : mib.toFixed(1)) + ' MiB';
+  }
+  function fmtDuration(ms) {
+    var s = Math.max(0, Math.round(ms / 1000));
+    if (s < 60) return s + 's';
+    var m = Math.floor(s / 60);
+    return m < 60 ? m + 'm ' + (s % 60) + 's' : Math.floor(m / 60) + 'h ' + (m % 60) + 'm';
+  }
+  function fmtRangeSeconds(range) {
+    var lo = Math.max(1, Math.round(range.low / 60));
+    var hi = Math.max(1, Math.round(range.high / 60));
+    if (range.high < 60) return { text: Math.round(range.low) + (range.high > range.low ? '–' + Math.round(range.high) : ''), unit: 'sec' };
+    return { text: lo === hi ? String(lo) : lo + '–' + hi, unit: 'min' };
+  }
+  function fmtCents(cents) {
+    if (cents > 0 && cents < 1) return '<$0.01';
+    return '$' + (cents / 100).toFixed(2);
+  }
+  function sum(list, key) { return list.reduce(function (a, f) { return a + f[key]; }, 0); }
+  function validFiles() { return S.files.filter(function (f) { return !f.problem; }); }
+  function destName() { return S.workspaceName || 'Default workspace'; }
+
+  // ---------------------------------------------------------------- JSON-RPC over postMessage
+
+  function post(message) {
+    try { window.parent.postMessage(message, '*'); } catch (e) { /* host went away */ }
+  }
+
+  function request(method, params, timeoutMs) {
+    return new Promise(function (resolve, reject) {
+      var id = nextId++;
+      var timer = setTimeout(function () {
+        delete pending[id];
+        reject(new Error('The host did not answer (' + method + ').'));
+      }, timeoutMs || TOOL_TIMEOUT_MS);
+      pending[id] = { resolve: resolve, reject: reject, timer: timer };
+      post({ jsonrpc: '2.0', id: id, method: method, params: params });
+    });
+  }
+
+  function notify(method, params) {
+    post({ jsonrpc: '2.0', method: method, params: params || {} });
+  }
+
+  function respond(id, result) { post({ jsonrpc: '2.0', id: id, result: result }); }
+  function respondError(id, code, message) { post({ jsonrpc: '2.0', id: id, error: { code: code, message: message } }); }
+
+  function onResponse(m) {
+    var entry = pending[m.id];
+    if (!entry) return;
+    delete pending[m.id];
+    if (entry.timer) clearTimeout(entry.timer);
+    if (m.error) entry.reject(new Error(str(isObject(m.error) ? m.error.message : m.error, 300) || 'Host error'));
+    else entry.resolve(m.result);
+  }
+
+  /** Tool result -> { data, error }. data = structuredContent, else the first text block parsed as JSON. */
+  function unwrapToolResult(result) {
+    if (!isObject(result)) return { data: null, error: 'The tool returned no result.' };
+    var data = isObject(result.structuredContent) ? result.structuredContent : null;
+    var text = '';
+    if (Array.isArray(result.content)) {
+      for (var i = 0; i < result.content.length; i += 1) {
+        var block = result.content[i];
+        if (isObject(block) && block.type === 'text' && typeof block.text === 'string') { text = block.text; break; }
+      }
+    }
+    if (!data && text) { try { var parsed = JSON.parse(text); if (isObject(parsed)) data = parsed; } catch (e) { /* plain text */ } }
+    if (result.isError) {
+      var message = '';
+      if (data) {
+        if (typeof data.error === 'string') message = data.error;
+        else if (isObject(data.error) && typeof data.error.message === 'string') message = data.error.message;
+        else if (typeof data.message === 'string') message = data.message;
+      }
+      return { data: data, error: str(message || (data ? '' : text) || 'The tool call failed.', 300) };
+    }
+    return { data: data, error: null };
+  }
+
+  function callTool(name, args) {
+    return request('tools/call', { name: name, arguments: args, _meta: CALL_META }, TOOL_TIMEOUT_MS).then(function (result) {
+      var out = unwrapToolResult(result);
+      if (out.error) { var e = new Error(out.error); e.toolError = true; throw e; }
+      return out.data || {};
+    });
+  }
+
+  // ---------------------------------------------------------------- host context / theme
+
+  function applyHostContext(ctx) {
+    if (!isObject(ctx)) return;
+    S.hostContext = Object.assign({}, S.hostContext, ctx);
+    var root = document.documentElement;
+    if (ctx.theme === 'light' || ctx.theme === 'dark') root.setAttribute('data-theme', ctx.theme);
+    if (isObject(ctx.styles) && isObject(ctx.styles.variables)) {
+      Object.keys(ctx.styles.variables).forEach(function (name) {
+        var value = ctx.styles.variables[name];
+        if (/^--[a-z0-9-]+$/i.test(name) && typeof value === 'string' && value.length < 400) root.style.setProperty(name, value);
+      });
+    }
+    if (isObject(ctx.styles) && isObject(ctx.styles.css) && typeof ctx.styles.css.fonts === 'string') {
+      var fonts = document.getElementById('host-fonts');
+      if (!fonts) { fonts = document.createElement('style'); fonts.id = 'host-fonts'; document.head.appendChild(fonts); }
+      fonts.textContent = ctx.styles.css.fonts;
+    }
+    if (isObject(ctx.safeAreaInsets)) {
+      ['top', 'right', 'bottom', 'left'].forEach(function (side) {
+        var v = ctx.safeAreaInsets[side];
+        if (typeof v === 'number' && isFinite(v) && v >= 0) root.style.setProperty('--inset-' + side[0], Math.min(v, 100) + 'px');
+      });
+    }
+  }
+
+  var sizeTimer = null;
+  var lastHeight = 0;
+  function reportSize() {
+    var height = Math.ceil(document.documentElement.getBoundingClientRect().height || document.body.scrollHeight || 0);
+    if (!height || Math.abs(height - lastHeight) < 1) return;
+    lastHeight = height;
+    notify('ui/notifications/size-changed', { height: height });
+  }
+  function scheduleSize() {
+    if (sizeTimer) return;
+    sizeTimer = setTimeout(function () { sizeTimer = null; reportSize(); }, 50);
+  }
+
+  // ---------------------------------------------------------------- inbound messages
+
+  function onNotification(m) {
+    var p = isObject(m.params) ? m.params : {};
+    switch (m.method) {
+      case 'ui/notifications/tool-result': onToolResult(p); break;
+      case 'ui/notifications/host-context-changed': applyHostContext(p); render(); break;
+      case 'ui/notifications/tool-cancelled':
+        if (S.phase === 'connecting' || S.phase === 'idle') { S.phase = 'cancelled'; render(); }
+        break;
+      default: break; // tool-input, tool-input-partial and unknown notifications are ignored
+    }
+  }
+
+  function onRequest(m) {
+    if (m.method === 'ping') return respond(m.id, {});
+    if (m.method === 'ui/resource-teardown') { teardown(); return respond(m.id, {}); }
+    return respondError(m.id, -32601, 'Method not found');
+  }
+
+  function teardown() {
+    uploadRunId += 1;
+    xhrs.slice().forEach(function (x) { try { x.abort(); } catch (e) { /* already done */ } });
+    xhrs = [];
+    stopPolling();
+  }
+
+  window.addEventListener('message', function (event) {
+    if (event.source !== window.parent) return;
+    var m = event.data;
+    if (!isObject(m) || m.jsonrpc !== '2.0') return;
+    if (typeof m.method === 'string') {
+      if (m.id !== undefined && m.id !== null) onRequest(m); else onNotification(m);
+    } else if (m.id !== undefined) onResponse(m);
+  });
+
+  function onToolResult(result) {
+    var out = unwrapToolResult(result);
+    if (out.error && !out.data) {
+      S.bootError = out.error;
+      if (S.phase === 'idle' || S.phase === 'connecting') render();
+      return;
+    }
+    if (out.error) { S.bootError = out.error; render(); return; }
+    var d = out.data || {};
+    S.bootError = null;
+    if (isObject(d.limits)) {
+      var maxFiles = d.limits.maxFiles, maxBytes = d.limits.maxFileBytes;
+      if (typeof maxFiles === 'number' && maxFiles >= 1 && maxFiles <= 100) S.limits.maxFiles = Math.floor(maxFiles);
+      if (typeof maxBytes === 'number' && maxBytes >= 1) S.limits.maxFileBytes = maxBytes;
+    }
+    if (Array.isArray(d.workspaces)) {
+      S.workspaces = d.workspaces.filter(function (w) { return isObject(w) && typeof w.id === 'string' && typeof w.name === 'string'; })
+        .slice(0, 50).map(function (w) { return { id: str(w.id, 128), name: str(w.name, 200), isDefault: w.isDefault === true }; });
+    }
+    var chosen = isObject(d.workspace) && typeof d.workspace.id === 'string' ? d.workspace : null;
+    if (chosen && (S.phase === 'idle' || S.phase === 'connecting' || S.phase === 'confirm' || S.phase === 'nohost')) {
+      S.workspaceId = str(chosen.id, 128);
+      S.workspaceName = str(chosen.name, 200) || null;
+      if (S.phase === 'confirm') requestEstimate();
+    } else if (!S.workspaceId) {
+      var def = S.workspaces.filter(function (w) { return w.isDefault; })[0];
+      if (def) { S.workspaceId = def.id; S.workspaceName = def.name; }
+    }
+    render();
+  }
+
+  // ---------------------------------------------------------------- init handshake
+
+  function start() {
+    window.addEventListener('resize', scheduleSize);
+    if (typeof ResizeObserver === 'function') new ResizeObserver(scheduleSize).observe(document.body);
+    if (window.parent === window) { S.phase = 'nohost'; render(); return; }
+    render();
+    var id = nextId++;
+    pending[id] = {
+      timer: null,
+      reject: function () {},
+      resolve: function (result) {
+        // A late answer (after the timeout message was shown) still recovers the widget.
+        if (!isObject(result)) return;
+        S.protocolVersion = typeof result.protocolVersion === 'string' ? result.protocolVersion : null;
+        S.hostCaps = isObject(result.hostCapabilities) ? result.hostCapabilities : {};
+        applyHostContext(result.hostContext);
+        notify('ui/notifications/initialized', {});
+        if (S.phase === 'connecting' || S.phase === 'nohost') S.phase = S.files.length ? 'confirm' : 'idle';
+        render();
+        scheduleSize();
+      }
+    };
+    post({
+      jsonrpc: '2.0', id: id, method: 'ui/initialize',
+      params: {
+        appInfo: { name: 'docslurp-uploader', version: WIDGET_VERSION },
+        appCapabilities: {},
+        protocolVersion: PROTOCOL_VERSION
+      }
+    });
+    setTimeout(function () {
+      if (S.phase === 'connecting') { S.phase = 'nohost'; render(); }
+    }, INIT_TIMEOUT_MS);
+  }
+
+  // ---------------------------------------------------------------- picking files
+
+  function guessMime(file) {
+    if (file.type) return file.type;
+    var ext = (file.name.split('.').pop() || '').toLowerCase();
+    return MIME_BY_EXT[ext] || 'application/octet-stream';
+  }
+
+  function addFiles(list) {
+    var incoming = Array.prototype.slice.call(list || []);
+    if (!incoming.length) return;
+    var skipped = 0;
+    incoming.forEach(function (file) {
+      var dup = S.files.some(function (f) { return f.name === file.name && f.size === file.size && f.file.lastModified === file.lastModified; });
+      if (dup) return;
+      if (S.files.length >= S.limits.maxFiles) { skipped += 1; return; }
+      var problem = null;
+      if (!file.size) problem = 'Empty file';
+      else if (file.size > S.limits.maxFileBytes) problem = 'Over the ' + fmtLimit(S.limits.maxFileBytes) + ' limit';
+      else if (file.name.length > 512) problem = 'File name too long';
+      S.files.push({ key: 'f' + (fileKeySeq++), file: file, name: file.name, size: file.size, mime: guessMime(file), problem: problem, sent: 0, state: 'queued' });
+    });
+    S.notice = skipped ? 'Up to ' + S.limits.maxFiles + ' files per upload. ' + plural(skipped, 'file') + ' not added.' : null;
+    if (!S.files.length) { render(); return; }
+    S.phase = 'confirm';
+    S.error = null;
+    requestEstimate();
+    render();
+  }
+
+  function removeFile(key) {
+    S.files = S.files.filter(function (f) { return f.key !== key; });
+    S.notice = null;
+    if (!S.files.length) { S.phase = 'idle'; S.estimate = null; render(); return; }
+    requestEstimate();
+    render();
+  }
+
+  function clearFiles() {
+    S.files = []; S.estimate = null; S.notice = null; S.estimating = false; S.estimateSeq += 1;
+    S.phase = 'idle'; S.error = null;
+    render();
+  }
+
+  function requestEstimate() {
+    var files = validFiles();
+    var seq = ++S.estimateSeq;
+    S.estimate = null;
+    if (!files.length) { S.estimating = false; return; }
+    S.estimating = true;
+    var args = { files: files.map(function (f) { return { name: f.name, size: f.size }; }) };
+    if (S.workspaceId) args.workspace = S.workspaceId;
+    callTool('uploadEstimate', args).then(function (data) {
+      if (seq !== S.estimateSeq) return;
+      var e = isObject(data.estimate) ? data.estimate : null;
+      S.estimate = e ? {
+        pages: numOrNull(e.pages),
+        seconds: isObject(e.seconds) && numOrNull(e.seconds.low) !== null && numOrNull(e.seconds.high) !== null ? e.seconds : null,
+        credits: isObject(e.credits) && numOrNull(e.credits.low) !== null && numOrNull(e.credits.high) !== null ? e.credits : null,
+        basis: str(e.basis, 300)
+      } : null;
+    }).catch(function () {
+      if (seq === S.estimateSeq) S.estimate = null; // an estimate is optional
+    }).then(function () {
+      if (seq !== S.estimateSeq) return;
+      S.estimating = false;
+      render();
+    });
+  }
+
+  // ---------------------------------------------------------------- upload
+
+  function setError(title, detail, technical) {
+    S.phase = 'error';
+    S.error = { title: title, detail: detail, technical: technical || '' };
+    render();
+  }
+
+  function startUpload() {
+    var files = validFiles();
+    if (!files.length || S.phase !== 'confirm') return;
+    var run = ++uploadRunId;
+    files.forEach(function (f) { f.sent = 0; f.state = 'queued'; });
+    S.phase = 'uploading';
+    S.error = null; S.status = null; S.asked = null;
+    render();
+    var args = { files: files.map(function (f) { return { filename: f.name, mimeType: f.mime, sizeBytes: f.size }; }) };
+    if (S.workspaceId) args.workspace = S.workspaceId;
+
+    callTool('upload', args).then(function (data) {
+      if (run !== uploadRunId) return;
+      var descs = Array.isArray(data.files) ? data.files.filter(isObject) : [];
+      var sessionId = str(data.sessionId, 64);
+      var plan = matchDescriptors(files, descs);
+      if (!sessionId || !plan) {
+        return setError('Upload could not start', 'The server did not return an upload target for every file. Nothing was sent.', 'Missing sessionId or single-part putUrl');
+      }
+      S.session = { sessionId: sessionId };
+      return putAll(files, plan, run).then(function () {
+        if (run !== uploadRunId) return;
+        return finishUpload(files, plan, sessionId, run);
+      });
+    }).catch(function (err) {
+      if (run !== uploadRunId) return;
+      if (err && err.putError) return setError(err.title, err.detail, err.technical);
+      setError('Upload stopped', (err && err.message) || 'The upload failed.', err && err.toolError ? 'Tool error' : 'Host error');
+    });
+  }
+
+  /** Pair each local file with the server's descriptor (same name and size), falling back to order. */
+  function matchDescriptors(files, descs) {
+    if (descs.length !== files.length) return null;
+    var used = {};
+    var plan = [];
+    for (var i = 0; i < files.length; i += 1) {
+      var f = files[i];
+      var idx = -1;
+      for (var j = 0; j < descs.length; j += 1) {
+        if (!used[j] && descs[j].filename === f.name && descs[j].sizeBytes === f.size) { idx = j; break; }
+      }
+      if (idx < 0 && !used[i]) idx = i;
+      if (idx < 0) return null;
+      used[idx] = true;
+      var d = descs[idx];
+      if (typeof d.id !== 'string' || typeof d.putUrl !== 'string' || (d.mode && d.mode !== 'single')) return null;
+      if (!/^https?:\/\//i.test(d.putUrl)) return null;
+      plan.push({ file: f, id: d.id, putUrl: d.putUrl, headers: isObject(d.headers) ? d.headers : { 'Content-Type': f.mime } });
+    }
+    return plan;
+  }
+
+  function putAll(files, plan, run) {
+    return new Promise(function (resolve, reject) {
+      var next = 0, active = 0, failed = false;
+      function pump() {
+        if (failed || run !== uploadRunId) return;
+        if (next >= plan.length && active === 0) return resolve();
+        while (active < PUT_CONCURRENCY && next < plan.length) {
+          (function (item) {
+            active += 1;
+            putOne(item, run).then(function () {
+              active -= 1; pump();
+            }, function (err) {
+              if (failed) return;
+              failed = true;
+              teardownXhrs();
+              reject(err);
+            });
+          })(plan[next++]);
+        }
+      }
+      pump();
+    });
+  }
+
+  function teardownXhrs() {
+    xhrs.slice().forEach(function (x) { try { x.abort(); } catch (e) { /* done */ } });
+    xhrs = [];
+  }
+
+  function putOne(item, run) {
+    return new Promise(function (resolve, reject) {
+      var f = item.file;
+      var xhr = new XMLHttpRequest();
+      xhrs.push(xhr);
+      function done() { xhrs = xhrs.filter(function (x) { return x !== xhr; }); }
+      function fail(title, detail, technical) {
+        done(); f.state = 'failed';
+        reject({ putError: true, title: title, detail: detail, technical: technical });
+      }
+      f.state = 'sending';
+      xhr.open('PUT', item.putUrl, true);
+      Object.keys(item.headers).forEach(function (name) {
+        if (typeof item.headers[name] === 'string') xhr.setRequestHeader(name, item.headers[name]);
+      });
+      xhr.upload.onprogress = function (ev) {
+        if (run !== uploadRunId) return;
+        f.sent = Math.min(f.size, ev.lengthComputable ? ev.loaded : f.sent);
+        renderSoon();
+      };
+      xhr.onload = function () {
+        if (run !== uploadRunId) return;
+        if (xhr.status >= 200 && xhr.status < 300) {
+          done(); f.state = 'sent'; f.sent = f.size; renderSoon(); resolve();
+        } else {
+          fail('Upload stopped', 'Storage rejected ' + f.name + ' (HTTP ' + xhr.status + '). Nothing was ingested.',
+            'PUT ' + f.name + ' returned HTTP ' + xhr.status + '. The signed link may have expired.');
+        }
+      };
+      xhr.onerror = function () {
+        if (run !== uploadRunId) return;
+        fail('Your chat app blocked the direct upload',
+          'The storage address is not on this app’s allowed list, or the bucket does not allow uploads from here. No files were created.',
+          'PUT to the storage origin failed before any response (network, CORS or CSP).');
+      };
+      xhr.ontimeout = xhr.onerror;
+      xhr.onabort = function () { done(); };
+      xhr.send(f.file);
+    });
+  }
+
+  function finishUpload(files, plan, sessionId, run) {
+    return callTool('completeUpload', { sessionId: sessionId, fileIds: plan.map(function (p) { return p.id; }) }).then(function (data) {
+      if (run !== uploadRunId) return;
+      var ws = isObject(data.workspace) ? data.workspace : {};
+      var runInfo = isObject(data.run) ? data.run : {};
+      var runId = str(runInfo.id, 128);
+      var documents = Array.isArray(data.documents) ? data.documents : [];
+      var rejected = (Array.isArray(data.rejected) ? data.rejected : []).filter(isObject).slice(0, 20).map(function (r) {
+        return { filename: str(r.filename, 512), message: str(r.message, 300) || 'Not accepted' };
+      });
+      if (!runId) {
+        return setError('Upload finished without a run', 'The files were stored but no ingestion run was reported. Ask the assistant to check the workspace.', 'completeUpload returned no run id');
+      }
+      S.run = {
+        id: runId,
+        workspaceId: str(ws.id, 128) || S.workspaceId,
+        workspaceName: str(ws.name, 200) || destName(),
+        startedAt: Date.now(),
+        expectedDocs: documents.length || Math.max(1, files.length - rejected.length),
+        fileCount: files.length,
+        rejected: rejected
+      };
+      S.sentFiles = files.slice();
+      S.status = null; S.statusStale = false; S.statusError = null;
+      S.phase = 'processing';
+      S.files = [];
+      render();
+      sendModelContext();
+      startPolling();
+    }).catch(function (err) {
+      if (run !== uploadRunId) return;
+      setError('Upload sent, but could not be started', (err && err.message) || 'completeUpload failed.', 'The bytes were uploaded; the server did not confirm the session.');
+    });
+  }
+
+  function cancelUpload() {
+    if (S.phase !== 'uploading') return;
+    uploadRunId += 1;
+    teardownXhrs();
+    S.files.forEach(function (f) { f.sent = 0; f.state = 'queued'; });
+    S.phase = 'confirm';
+    S.notice = 'Upload cancelled. Nothing was ingested.';
+    render();
+  }
+
+  // ---------------------------------------------------------------- status polling
+
+  function startPolling() {
+    stopPolling();
+    poll.count = 0; poll.failures = 0; poll.startedAt = Date.now(); poll.running = true;
+    S.statusStale = false; S.statusError = null;
+    pollOnce();
+  }
+
+  function stopPolling() {
+    poll.running = false;
+    if (poll.timer) { clearTimeout(poll.timer); poll.timer = null; }
+  }
+
+  function nextDelay() {
+    var base = Math.min(5000, 2000 + Math.max(0, poll.count - 3) * 500);
+    return poll.failures ? Math.min(15000, base * (1 + poll.failures)) : base;
+  }
+
+  function schedulePoll() {
+    if (!poll.running) return;
+    if (Date.now() - poll.startedAt > POLL_MAX_MS) {
+      poll.running = false; S.statusStale = true; render(); return;
+    }
+    poll.timer = setTimeout(pollOnce, nextDelay());
+  }
+
+  function pollOnce() {
+    poll.timer = null;
+    if (!poll.running || !S.run) return;
+    if (document.hidden) return; // resumes from visibilitychange
+    var runId = S.run.id;
+    callTool('getUploadStatus', { workspace: S.run.workspaceId || undefined, runId: runId }).then(function (data) {
+      if (!poll.running || !S.run || S.run.id !== runId) return;
+      poll.count += 1; poll.failures = 0; S.statusError = null;
+      applyStatus(data);
+      if (S.status && S.status.terminal) { stopPolling(); render(); sendModelContext(); return; }
+      render();
+      schedulePoll();
+    }).catch(function (err) {
+      if (!poll.running) return;
+      poll.failures += 1;
+      S.statusError = poll.failures >= 3 ? ((err && err.message) || 'Status is unavailable.') : null;
+      render();
+      schedulePoll();
+    });
+  }
+
+  document.addEventListener('visibilitychange', function () {
+    if (!document.hidden && poll.running && !poll.timer) pollOnce();
+  });
+
+  function applyStatus(data) {
+    var report = isObject(data.report) ? data.report : null;
+    if (!report) return;
+    var files = isObject(report.files) ? report.files : {};
+    var by = isObject(files.byStatus) ? files.byStatus : {};
+    var pages = isObject(report.pages) ? report.pages : {};
+    var sr = isObject(report.searchability) ? report.searchability : {};
+    var perf = isObject(report.performance) ? report.performance : {};
+    var runInfo = isObject(report.run) ? report.run : null;
+    var counts = { completed: num(by.completed), processing: num(by.processing), queued: num(by.queued), failed: num(by.failed), other: num(by.other) };
+    var active = counts.processing + counts.queued + counts.other;
+    var total = num(files.total);
+    var items = null;
+    if (Array.isArray(files.items)) {
+      items = files.items.filter(isObject).slice(0, 50).map(function (it) {
+        return {
+          documentId: str(it.documentId, 128), filename: str(it.filename, 512),
+          status: str(it.status, 20), pages: numOrNull(it.pages), searchablePages: numOrNull(it.searchablePages), error: str(it.error, 300) || null
+        };
+      });
+    }
+    var runDone = runInfo && typeof runInfo.status === 'string' && TERMINAL_RUN[runInfo.status] === 1;
+    S.status = {
+      total: num(pages.total),
+      searchable: num(sr.searchablePages),
+      unsearchable: num(sr.unsearchablePages),
+      pending: num(sr.pendingPages),
+      files: counts,
+      fileTotal: total,
+      items: items,
+      speed: numOrNull(perf.pagesPerMinute),
+      per100: numOrNull(perf.minutesPer100Pages),
+      costCents: numOrNull(perf.costCents),
+      computeEstimated: perf.computeEstimated === true,
+      durationMs: runInfo ? numOrNull(runInfo.durationMs) : null,
+      terminal: Boolean(runDone) || (total > 0 && total >= S.run.expectedDocs && active === 0)
+    };
+  }
+
+  // ---------------------------------------------------------------- hand-off to the model
+
+  function failedRows() {
+    var rows = [];
+    var st = S.status;
+    if (st && st.items) {
+      st.items.forEach(function (it) { if (it.status === 'failed') rows.push({ name: it.filename, detail: it.error || 'Processing failed' }); });
+    } else if (st && st.files.failed > 0) {
+      rows.push({ name: plural(st.files.failed, 'file') + ' failed', detail: null });
+    }
+    if (S.run) S.run.rejected.forEach(function (r) { rows.push({ name: r.filename, detail: r.message }); });
+    return rows;
+  }
+
+  function sendModelContext() {
+    if (!S.run) return;
+    var st = S.status;
+    var files = st && st.items ? st.items.map(function (it) { return { filename: it.filename, status: it.status }; })
+      : S.sentFiles.map(function (f) { return { filename: f.name, status: st ? 'unknown' : 'queued' }; });
+    var searchable = st ? st.searchable : 0, total = st ? st.total : null;
+    var text = 'DocSlurp uploader: ' + plural(S.run.fileCount, 'file') + ' sent to workspace "' + S.run.workspaceName + '" (run ' + S.run.id + '). ' +
+      (st ? searchable + ' of ' + total + ' pages searchable' + (st.terminal ? ', processing finished.' : ', still processing.') : 'Processing started.');
+    request('ui/update-model-context', {
+      content: [{ type: 'text', text: text }],
+      structuredContent: {
+        workspace: { id: S.run.workspaceId, name: S.run.workspaceName },
+        runId: S.run.id, files: files, pagesSearchable: searchable, pagesTotal: total
+      }
+    }, MESSAGE_TIMEOUT_MS).catch(function () { /* context is best effort */ });
+  }
+
+  function askAboutFiles() {
+    if (!S.run || S.asked === 'sending') return;
+    var st = S.status;
+    var names = (st && st.items ? st.items.filter(function (it) { return it.status === 'completed'; }).map(function (it) { return it.filename; })
+      : S.sentFiles.map(function (f) { return f.name; })).slice(0, 5);
+    var text = 'I just uploaded ' + (names.length ? names.join(', ') : 'files') + ' to the DocSlurp workspace "' + S.run.workspaceName +
+      '". Search them and tell me what they contain, with page citations.';
+    S.asked = 'sending'; render();
+    request('ui/message', { role: 'user', content: [{ type: 'text', text: text }] }, MESSAGE_TIMEOUT_MS).then(function (result) {
+      S.asked = isObject(result) && result.isError ? 'failed' : 'sent'; render();
+    }).catch(function () { S.asked = 'failed'; render(); });
+  }
+
+  function askForLinkFallback() {
+    request('ui/message', { role: 'user', content: [{ type: 'text', text:
+      'The DocSlurp file uploader was blocked in this app, so my local files were not uploaded. I will share links to the files instead; please ingest them with the upload tool using urls.' }] },
+      MESSAGE_TIMEOUT_MS).then(function () { S.notice = 'Message sent.'; render(); }).catch(function () { S.notice = 'The app did not accept the message.'; render(); });
+  }
+
+  // ---------------------------------------------------------------- views
+
+  function dot(kind) { return h('span', { class: 'dot ' + kind }); }
+
+  function destEl(editable) {
+    if (editable && S.workspaces.length > 1) {
+      return h('select', {
+        class: 'dest-select', 'data-k': 'dest', 'aria-label': 'Destination workspace',
+        onchange: function (ev) {
+          var chosen = S.workspaces.filter(function (w) { return w.id === ev.target.value; })[0];
+          if (!chosen) return;
+          S.workspaceId = chosen.id; S.workspaceName = chosen.name;
+          if (S.phase === 'confirm') requestEstimate();
+          render();
+        }
+      }, S.workspaces.map(function (w) {
+        return h('option', { value: w.id, selected: w.id === S.workspaceId }, w.name + (w.isDefault ? ' (default)' : ''));
+      }));
+    }
+    return h('span', { class: 'dest' }, destName());
+  }
+
+  function head(left, right) {
+    return h('div', { class: 'head' }, h('span', null, left), right ? h('span', { class: 'right num' }, right) : null);
+  }
+
+  function meter(label, now, max, valueText, segments) {
+    var bar = h('div', {
+      class: 'meter', role: 'progressbar', 'aria-label': label, 'aria-valuemin': 0, 'aria-valuemax': Math.max(1, Math.round(max)),
+      'aria-valuenow': Math.round(Math.min(now, max)), 'aria-valuetext': valueText
+    });
+    segments.forEach(function (seg) {
+      var pct = max > 0 ? Math.max(0, Math.min(100, (seg.value / max) * 100)) : 0;
+      var el = h('i', { class: seg.cls });
+      var previous = meterWidths[seg.key];
+      el.style.width = (previous === undefined ? pct : previous) + '%';
+      if (previous !== pct) {
+        (window.requestAnimationFrame || setTimeout)(function () { el.style.width = pct + '%'; });
+      }
+      meterWidths[seg.key] = pct;
+      bar.appendChild(el);
+    });
+    return bar;
+  }
+
+  function readout(entries, flush) {
+    var shown = entries.filter(Boolean);
+    if (!shown.length) return null;
+    return h('dl', { class: 'read' + (flush ? ' flush' : '') }, shown.map(function (e) {
+      return h('div', null, h('dt', null, e.label), h('dd', { class: 'num' }, e.value, e.unit ? [' ', h('small', null, e.unit)] : null));
+    }));
+  }
+
+  function viewNoHost(message) {
+    return h('p', { class: 'plain' }, message);
+  }
+
+  function viewIdle() {
+    var limitNote = 'Up to ' + S.limits.maxFiles + ' files per upload, ' + fmtLimit(S.limits.maxFileBytes) + ' each. PDF, Office, EPUB, HTML, images, audio, video.';
+    return [
+      head(['Upload to ', destEl(true)]),
+      S.bootError ? h('div', { class: 'alert', role: 'alert' }, h('b', null, 'The uploader could not load its settings'), h('span', null, S.bootError)) : null,
+      h('div', {
+        class: 'drop' + (S.dragging ? ' over' : ''), tabindex: 0, role: 'button', 'data-k': 'drop',
+        'aria-label': 'Drop files here or press Enter to choose files',
+        onclick: openPicker,
+        onkeydown: function (ev) { if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); openPicker(); } }
+      }, h('strong', null, 'Drop files here'), 'or choose from your computer'),
+      h('p', { class: 'note' }, limitNote),
+      S.notice ? h('p', { class: 'note bad' }, S.notice) : null,
+      h('div', { class: 'actions' }, h('button', { class: 'p', 'data-k': 'choose', onclick: openPicker }, 'Choose files'))
+    ];
+  }
+
+  function fileRow(f, mode) {
+    var meta;
+    var extra = null;
+    if (mode === 'confirm') {
+      meta = f.problem
+        ? h('span', { class: 'm bad' }, f.problem, ' ', h('button', { class: 'lnk', 'data-k': 'rm-' + f.key, 'aria-label': 'Remove ' + f.name, onclick: function () { removeFile(f.key); } }, 'Remove'))
+        : h('span', { class: 'm num' }, fmtBytes(f.size), ' ', h('button', { class: 'lnk', 'data-k': 'rm-' + f.key, 'aria-label': 'Remove ' + f.name, onclick: function () { removeFile(f.key); } }, 'Remove'));
+    } else if (f.state === 'sent') {
+      meta = h('span', { class: 'm ok num' }, 'Sent');
+    } else if (f.state === 'sending') {
+      meta = h('span', { class: 'm num' }, fmtBytes(f.sent), ' of ', fmtBytes(f.size));
+      extra = h('span', { class: 'bar' }, meterBar(f));
+    } else if (f.state === 'failed') {
+      meta = h('span', { class: 'm bad' }, 'Failed');
+    } else {
+      meta = h('span', { class: 'm num' }, 'Waiting');
+    }
+    return h('li', null, h('span', { class: 'n', title: f.name }, f.name), meta, extra);
+  }
+
+  function meterBar(f) {
+    var i = h('i');
+    i.style.width = (f.size ? Math.min(100, (f.sent / f.size) * 100) : 0) + '%';
+    return i;
+  }
+
+  function viewConfirm() {
+    var files = validFiles();
+    var bytes = sum(files, 'size');
+    var est = S.estimate;
+    var n = files.length;
+    var big;
+    if (est && est.pages !== null) {
+      big = h('div', { class: 'big' }, h('b', { class: 'num' }, '≈ ' + Math.round(est.pages).toLocaleString('en-US')), h('span', null, 'pages to index'));
+    } else if (S.estimating) {
+      big = h('div', { class: 'big' }, h('b', { class: 'num dim' }, '—'), h('span', null, 'estimating pages'));
+    } else {
+      big = h('div', { class: 'big' }, h('b', { class: 'num' }, fmtBytes(bytes)), h('span', null, 'to upload'));
+    }
+    var time = est && est.seconds ? fmtRangeSeconds(est.seconds) : null;
+    var credits = est && est.credits ? (Math.round(est.credits.low) === Math.round(est.credits.high)
+      ? Math.round(est.credits.low).toLocaleString('en-US') : Math.round(est.credits.low).toLocaleString('en-US') + '–' + Math.round(est.credits.high).toLocaleString('en-US')) : null;
+    return [
+      head(['Upload to ', destEl(true)], plural(S.files.length, 'file') + ' · ' + fmtBytes(sum(S.files, 'size'))),
+      big,
+      readout([time ? { label: 'Time', value: time.text, unit: time.unit } : null, credits ? { label: 'Credits', value: credits } : null], true),
+      h('p', { class: 'note' }, (est && est.basis ? est.basis + ' ' : '') + 'Nothing is sent until you upload.'),
+      S.notice ? h('p', { class: 'note bad' }, S.notice) : null,
+      h('ul', { class: 'files' }, S.files.map(function (f) { return fileRow(f, 'confirm'); })),
+      h('div', { class: 'actions' },
+        h('button', { class: 'p', 'data-k': 'upload', disabled: n === 0, onclick: startUpload }, n === 0 ? 'Upload' : 'Upload ' + plural(n, 'file')),
+        h('button', { 'data-k': 'clear', onclick: clearFiles }, 'Clear'))
+    ];
+  }
+
+  function viewUploading() {
+    var files = validFiles();
+    var total = sum(files, 'size');
+    var sent = Math.min(total, sum(files, 'sent'));
+    var unit = byteUnit(total);
+    var sentCount = files.filter(function (f) { return f.state === 'sent'; }).length;
+    return [
+      head([dot('work'), 'Uploading to ', h('span', { class: 'dest' }, destName())], sentCount + ' of ' + files.length + ' sent'),
+      h('div', { class: 'big' }, h('b', { class: 'num' }, scaleBytes(sent, unit)), h('span', null, 'of ' + fmtBytes(total))),
+      meter('Upload progress', sent, total, fmtBytes(sent) + ' of ' + fmtBytes(total), [{ key: 'up', cls: 'ok', value: sent }]),
+      h('ul', { class: 'files' }, files.map(function (f) { return fileRow(f, 'upload'); })),
+      h('div', { class: 'actions' }, h('button', { 'data-k': 'cancel', onclick: cancelUpload }, 'Cancel'))
+    ];
+  }
+
+  function viewError() {
+    var e = S.error || { title: 'Upload stopped', detail: '', technical: '' };
+    return [
+      head([dot('bad'), 'Upload stopped']),
+      h('div', { class: 'alert', role: 'alert' }, h('b', null, e.title), h('span', null, e.detail)),
+      S.notice ? h('p', { class: 'note' }, S.notice) : null,
+      h('div', { class: 'actions' },
+        h('button', { class: 'p', 'data-k': 'retry', onclick: function () { S.phase = S.files.length ? 'confirm' : 'idle'; S.error = null; S.notice = null; render(); } }, 'Try again'),
+        h('button', { 'data-k': 'link', onclick: askForLinkFallback }, 'Use a link instead')),
+      e.technical ? h('details', null, h('summary', { 'data-k': 'details' }, 'Details'), h('p', { class: 'num' }, e.technical)) : null
+    ];
+  }
+
+  function viewProcessing() {
+    var st = S.status;
+    var run = S.run;
+    var finished = Boolean(st && st.terminal);
+    var failed = failedRows();
+    var okFiles = st ? st.files.completed : 0;
+    var hasFailures = failed.length > 0 || (st && st.unsearchable > 0);
+    var total = st ? st.total : 0;
+    var searchable = st ? st.searchable : 0;
+    var elapsed = st && st.durationMs ? st.durationMs : (finished ? Date.now() - run.startedAt : null);
+    var wsName = run.workspaceName;
+
+    var title, kind;
+    if (!finished) { title = 'Processing in '; kind = 'work'; }
+    else if (okFiles === 0 && failed.length) { title = 'Processing failed in '; kind = 'bad'; }
+    else { title = 'Ready in '; kind = 'ready'; }
+
+    var parts = [
+      head([dot(kind), title, h('span', { class: 'dest' }, wsName)], finished && elapsed ? fmtDuration(elapsed) : plural(run.fileCount, 'file'))
+    ];
+
+    if (!st) {
+      parts.push(h('div', { class: 'big' }, h('b', { class: 'num dim' }, '—'), h('span', null, 'waiting for the first status')));
+    } else {
+      var ofText = (total > searchable || hasFailures) ? h('span', { class: 'of num' }, 'of ' + total.toLocaleString('en-US')) : null;
+      parts.push(h('div', { class: 'big' }, h('b', { class: 'num' }, searchable.toLocaleString('en-US')),
+        h('span', null, ofText, ofText ? ' ' : null, 'pages searchable')));
+      var valueText = searchable + ' of ' + total + ' pages searchable' + (st.unsearchable ? ', ' + st.unsearchable + ' not searchable' : '');
+      parts.push(meter('Pages searchable', searchable, total, valueText, [
+        { key: 'ok', cls: 'ok', value: searchable }, { key: 'fail', cls: 'fail', value: st.unsearchable }
+      ]));
+      var legend = [h('span', null, h('i', { class: 'sw', style: 'background:var(--ready)' }), searchable.toLocaleString('en-US') + ' searchable')];
+      if (st.unsearchable) legend.push(h('span', null, h('i', { class: 'sw', style: 'background:var(--bad)' }), st.unsearchable.toLocaleString('en-US') + ' not searchable'));
+      if (st.pending) legend.push(h('span', null, h('i', { class: 'sw', style: 'background:var(--bg2);outline:1px solid var(--line2)' }), st.pending.toLocaleString('en-US') + ' pending'));
+      parts.push(h('div', { class: 'legend num' }, legend));
+
+      var spent = st.costCents !== null ? { label: 'Spent', value: fmtCents(st.costCents) } : null;
+      if (!finished) {
+        parts.push(readout([
+          st.speed !== null ? { label: 'Speed', value: String(Math.round(st.speed)), unit: 'pages/min' } : null,
+          st.per100 !== null ? { label: 'Per 100 pages', value: fmtDuration(st.per100 * 60000) } : null,
+          spent
+        ]));
+        var inFlight = st.files.processing + st.files.queued + st.files.other;
+        parts.push(h('p', { class: 'note num' }, plural(st.files.completed, 'file') + ' indexed · ' + inFlight + ' processing.' + (st.speed !== null ? ' Speed includes queue time.' : '')));
+      } else {
+        parts.push(readout([
+          { label: 'Files', value: String(st.fileTotal || run.fileCount) },
+          st.speed !== null ? { label: 'Speed', value: String(Math.round(st.speed)), unit: 'pages/min' } : null,
+          spent
+        ]));
+        if (st.computeEstimated && st.costCents !== null) parts.push(h('p', { class: 'note' }, 'Spend includes estimated compute.'));
+      }
+    }
+
+    if (failed.length) {
+      parts.push(h('ul', { class: 'files' }, failed.map(function (row) {
+        return h('li', null, h('span', { class: 'n', title: row.name }, row.name), h('span', { class: 'm bad' }, 'Failed'),
+          row.detail ? h('span', { class: 'sub bad' }, row.detail) : null);
+      })));
+      if (finished && okFiles > 0) parts.push(h('p', { class: 'note num' }, plural(okFiles, 'file') + ' fully searchable. Other files are unaffected.'));
+    }
+    if (S.statusError) parts.push(h('p', { class: 'note bad' }, 'Status updates are failing: ' + S.statusError));
+    if (S.statusStale) parts.push(h('p', { class: 'note' }, 'Still processing after 30 minutes. Updates have stopped.'));
+    if (S.asked === 'failed') parts.push(h('p', { class: 'note bad' }, 'The app did not accept the message.'));
+    if (S.asked === 'sent') parts.push(h('p', { class: 'note' }, 'Message sent to the chat.'));
+
+    var actions = [];
+    var canAsk = st && searchable > 0;
+    if (canAsk) {
+      var label = finished && failed.length && okFiles > 0 ? 'Ask about the ' + plural(okFiles, 'indexed file') : 'Ask about these files';
+      actions.push(h('button', { class: 'ai', 'data-k': 'ask', disabled: S.asked === 'sending', onclick: askAboutFiles }, label));
+    }
+    if (S.statusStale) actions.push(h('button', { 'data-k': 'check', onclick: startPolling }, 'Check again'));
+    if (finished) {
+      var retry = retryFiles();
+      if (retry.length) {
+        actions.push(h('button', { 'data-k': 'reupload', onclick: reuploadFailed },
+          retry.length === 1 ? 'Re-upload ' + retry[0].name : 'Re-upload ' + retry.length + ' files'));
+      }
+      actions.push(h('button', { 'data-k': 'more', onclick: addMore }, 'Add more'));
+    }
+    if (actions.length) parts.push(h('div', { class: 'actions' }, actions));
+    return parts;
+  }
+
+  function retryFiles() {
+    var names = {};
+    failedRows().forEach(function (row) { names[row.name] = true; });
+    return S.sentFiles.filter(function (f) { return names[f.name]; });
+  }
+
+  function resetForNewBatch() {
+    stopPolling();
+    S.run = null; S.status = null; S.files = []; S.estimate = null; S.notice = null; S.asked = null; S.error = null;
+    S.statusStale = false; S.statusError = null; meterWidths = {};
+  }
+
+  function addMore() { resetForNewBatch(); S.phase = 'idle'; render(); }
+
+  function reuploadFailed() {
+    var retry = retryFiles();
+    resetForNewBatch();
+    retry.forEach(function (f) { f.sent = 0; f.state = 'queued'; f.problem = null; });
+    S.files = retry;
+    S.phase = 'confirm';
+    requestEstimate();
+    render();
+  }
+
+  // ---------------------------------------------------------------- render
+
+  function liveText() {
+    switch (S.phase) {
+      case 'nohost': return 'This uploader needs an app that supports MCP Apps.';
+      case 'idle': return 'Ready to upload.';
+      case 'confirm': return plural(validFiles().length, 'file') + ' ready to upload.';
+      case 'uploading': return 'Uploading.';
+      case 'error': return S.error ? S.error.title : 'Upload stopped.';
+      case 'processing':
+        if (!S.status) return 'Processing started.';
+        if (S.status.terminal) return 'Finished. ' + S.status.searchable + ' of ' + S.status.total + ' pages searchable.';
+        return 'Processing.';
+      default: return '';
+    }
+  }
+
+  function render() {
+    if (renderTimer) { clearTimeout(renderTimer); renderTimer = null; }
+    var active = document.activeElement;
+    var focusKey = active && active.getAttribute ? active.getAttribute('data-k') : null;
+    var tree;
+    switch (S.phase) {
+      case 'connecting': tree = [h('p', { class: 'plain' }, 'Connecting to your chat app…')]; break;
+      case 'nohost': tree = [viewNoHost('This uploader runs inside a chat app that supports MCP Apps, and no app answered. Ask the assistant to upload by link with the upload tool, or try a different app.')]; break;
+      case 'cancelled': tree = [viewNoHost('The uploader was cancelled by the app.')]; break;
+      case 'idle': tree = viewIdle(); break;
+      case 'confirm': tree = viewConfirm(); break;
+      case 'uploading': tree = viewUploading(); break;
+      case 'error': tree = viewError(); break;
+      case 'processing': tree = viewProcessing(); break;
+      default: tree = [];
+    }
+    while ($app.firstChild) $app.removeChild($app.firstChild);
+    append($app, tree);
+    if (focusKey) {
+      var again = $app.querySelector('[data-k="' + focusKey + '"]');
+      if (again && again.focus) again.focus();
+    }
+    // Live region: on phase change, and in 10% steps while processing.
+    var live = liveText();
+    if (S.phase === 'processing' && S.status && !S.status.terminal && S.status.total > 0) {
+      var pct = Math.floor((S.status.searchable / S.status.total) * 10) * 10;
+      if (pct !== lastPct) { lastPct = pct; live = pct + '% of pages searchable.'; }
+    }
+    if (live !== lastLive && live) { lastLive = live; $live.textContent = live; }
+    scheduleSize();
+  }
+
+  function renderSoon() {
+    if (renderTimer) return;
+    renderTimer = setTimeout(render, 120);
+  }
+
+  // ---------------------------------------------------------------- wiring
+
+  function openPicker() { $picker.value = ''; $picker.click(); }
+  $picker.addEventListener('change', function () { addFiles($picker.files); });
+
+  function canAccept() { return S.phase === 'idle' || S.phase === 'confirm'; }
+  function setDragging(on) {
+    if (S.dragging === on) return;
+    S.dragging = on;
+    var zone = $app.querySelector('.drop');
+    if (zone) zone.className = 'drop' + (on ? ' over' : '');
+  }
+  document.addEventListener('dragover', function (ev) { if (!canAccept()) return; ev.preventDefault(); setDragging(true); });
+  document.addEventListener('dragleave', function (ev) { if (!ev.relatedTarget) setDragging(false); });
+  document.addEventListener('drop', function (ev) {
+    ev.preventDefault();
+    setDragging(false);
+    if (canAccept() && ev.dataTransfer) addFiles(ev.dataTransfer.files);
+  });
+
+  start();
+})();
+</script>
+</body>
+</html>
