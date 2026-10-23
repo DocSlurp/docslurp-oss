@@ -8,7 +8,7 @@ import { searchInputSchema, batchSearchInputSchema, workspaceChatInputSchema } f
 import { currentSearchSignal } from "../search/query-bounds.js";
 import { currentChatAgentSignal } from "../lib/chat-agent-context.js";
 
-function setup(ids = ["search"], options: { toolBudgetMs?: () => number } = {}) {
+function setup(ids = ["search"], options: { toolBudgetMs?: () => number; webTools?: boolean; userText?: string[] } = {}) {
   const dispatch = vi.fn<McpDispatch>(async () => Response.json({ results: [] }));
   const onActivity = vi.fn();
   const controller = new AbortController();
@@ -52,6 +52,27 @@ describe("chat MCP tools", () => {
   it("does not offer ingestion tools that fetch URLs or start paid work (G-04)", () => {
     const t = setup(["search", "upload", "completeUpload", "listWorkspaces"]);
     expect(Object.keys(t.tools)).toEqual(["search"]);
+  });
+
+  it("offers only webSearch and webFetch to chat, and only when the turn allows web tools", () => {
+    const ids = ["search", "webSearch", "webFetch", "webMap", "webCrawl", "ingestWebsite"];
+    expect(Object.keys(setup(ids).tools)).toEqual(["search"]);
+    expect(Object.keys(setup(ids, { webTools: true }).tools)).toEqual(["search", "webSearch", "webFetch"]);
+  });
+
+  it("lets webFetch read only URLs from the user's messages or this turn's web search results", async () => {
+    const t = setup(["webSearch", "webFetch"], { webTools: true, userText: ["Summarize https://docs.example.com/guide/, please."] });
+    expect(await t.execute("webFetch", { urls: ["https://attacker.example/?q=secret"] }, "a")).toMatchObject({ code: "url_not_allowed" });
+    expect(t.dispatch).not.toHaveBeenCalled();
+
+    await t.execute("webFetch", { urls: ["https://docs.example.com/guide#intro"] }, "b");
+    expect(t.dispatch).toHaveBeenCalledOnce();
+
+    t.dispatch.mockResolvedValueOnce(Response.json({ results: [{ url: "https://news.example.org/story" }] }));
+    await t.execute("webSearch", { query: "story" }, "c");
+    await t.execute("webFetch", { urls: ["https://news.example.org/story/"] }, "d");
+    expect(t.dispatch).toHaveBeenCalledTimes(3);
+    expect(JSON.parse(t.dispatch.mock.calls[2]![1]!.body as string).workspace).toBe("selected");
   });
 
   it("bounds calls and honors cancellation before dispatch", async () => {

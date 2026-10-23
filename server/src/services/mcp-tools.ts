@@ -25,6 +25,7 @@ import {
 } from "./mcp-estimate-tools.js";
 import { spendAwareErrorHandler } from "./billing/spend-guard.js";
 import { loadIngestReport, summarizeIngestReport } from "./ingest-report.js";
+import { dispatchWebTool, isWebToolId } from "./web/mcp-web-tools.js";
 
 export { mcpManifest };
 
@@ -267,6 +268,8 @@ const mcpAdapterRoutes = new Hono()
       `;
       return c.json({ tool: toolId, suggestions: suggestions.map((r) => r.phrase).filter((phrase) => !isProtectedStoredQuery(phrase)) });
     }
+
+    if (isWebToolId(toolId)) return dispatchWebTool(c, toolId, body, actor);
 
     return adapterError(c, 404, "Unknown MCP tool");
   })

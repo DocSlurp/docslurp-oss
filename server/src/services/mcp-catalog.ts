@@ -5,6 +5,7 @@ import { deferredProfilesEnabled } from "@docslurp/shared";
 import { env } from "../config.js";
 import { batchSearchInputSchema, searchInputSchema, workspaceChatInputSchema } from "../lib/search-input.js";
 import { toolInputJsonSchema } from "./mcp-tool-schemas.js";
+import { webMcpTools } from "./web/mcp-web-tools.js";
 import { apiKeyMayUseEstimateTool, estimateToolDefinitions, jobsGetInputSchema, jobsGetToolDefinition, type EstimateToolName } from "./mcp-estimate-catalog.js";
 
 export { jobsGetInputSchema };
@@ -123,6 +124,7 @@ export function mcpTools(baseUrl: string): McpTool[] {
       annotations: { readOnly: false, destructive: false, idempotent: false, openWorld: false, consequential: false },
       description: "Generate a grounded answer with citations and token usage using the workspace's configured model. This calls AI and can incur cost; use search for your own LLM.",
       inputSchema: toolInputJsonSchema(workspaceChatInputSchema.omit({ agent: true })) },
+    ...webMcpTools(),
     { id: "getUploadStatus", title: "Get upload status", scopes: ["search", "ingest"], annotations: READ_ONLY,
       description: "Pass sessionId from upload to check file upload state and retrieve the automatic ingestion result containing workspace and run IDs. Then check ingestion progress with workspace and optional runId. Reports searchable pages, failures, costs and processing speed without AI calls. Use before search or chat when files are still processing.",
       inputSchema: toolInputJsonSchema(uploadStatusInput) },

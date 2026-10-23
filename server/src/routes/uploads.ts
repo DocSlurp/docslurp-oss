@@ -172,7 +172,7 @@ function normalizeFiles(entry: Uploadable): File[] {
   return entry instanceof File ? [entry] : [];
 }
 
-function runCreationErrorResponse(c: Context, error: unknown): Response | null {
+export function runCreationErrorResponse(c: Context, error: unknown): Response | null {
   if (!isRunCreationBlockedError(error)) {
     return null;
   }
@@ -180,7 +180,7 @@ function runCreationErrorResponse(c: Context, error: unknown): Response | null {
   return apiStatusError(c, error.statusCode, error.message, { code: error.code });
 }
 
-function workspaceIntakeErrorResponse(
+export function workspaceIntakeErrorResponse(
   c: Context,
   error: unknown,
 ): Response | null {
