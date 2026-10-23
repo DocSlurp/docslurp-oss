@@ -97,6 +97,8 @@ export async function deliverAlert(
   config: AlertDeliveryConfig,
   fetchImpl: typeof fetch = fetch,
 ): Promise<void> {
+  // Tenant funding belongs in its dashboard, never in operator channels.
+  if (notification.id.startsWith("credits-running-low:") || notification.id.startsWith("credit-resume-delayed:")) return;
   const line = formatAlertLogLine(notification, config);
   if (notification.status === "firing") console.error(line);
   else console.log(line);
