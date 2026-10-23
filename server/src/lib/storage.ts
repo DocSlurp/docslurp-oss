@@ -17,8 +17,11 @@ import type { Readable } from "node:stream";
 
 import { env } from "../config.js";
 import { resolveS3ClientTuning, s3ClientConfig } from "@docslurp/shared";
+import { uploadSigningTarget } from "./upload-signing-target.js";
 
 const s3Client = instrumentS3Client(new S3Client(s3ClientConfig(env.storage)), env.storage.endpoint);
+const uploadTarget = uploadSigningTarget(env.storage, process.env.DOCSLURP_STORAGE_PUBLIC_BUCKET_URL);
+const presignClient = process.env.DOCSLURP_STORAGE_PUBLIC_BUCKET_URL ? new S3Client(uploadTarget.config) : s3Client;
 
 let bucketReadyPromise: Promise<void> | null = null;
 
@@ -186,9 +189,9 @@ export async function signMultipartUploadPart(args: {
 }): Promise<string> {
   await ensureBucketExists();
   return await getSignedUrl(
-    s3Client,
+    presignClient,
     new UploadPartCommand({
-      Bucket: env.s3Bucket,
+      Bucket: uploadTarget.bucket,
       Key: args.key,
       UploadId: args.uploadId,
       PartNumber: args.partNumber
@@ -204,9 +207,9 @@ export async function signSingleUploadPut(args: {
 }): Promise<string> {
   await ensureBucketExists();
   return await getSignedUrl(
-    s3Client,
+    presignClient,
     new PutObjectCommand({
-      Bucket: env.s3Bucket,
+      Bucket: uploadTarget.bucket,
       Key: args.key,
       ContentType: args.contentType
     }),
