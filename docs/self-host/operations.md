@@ -40,7 +40,9 @@ schedule. Configure these **after applying migrations and deploying the receiver
    [Tigris console](https://console.storage.dev/).
 3. Set the webhook URL to `https://YOUR_API_HOST/webhooks/tigris/uploads`.
    The hosted DocSlurp URL is `https://docslurp.io/webhooks/tigris/uploads`.
-4. Select **Token authentication**, using the configured secret.
+4. Select **Token authentication**, entering only the configured secret in the
+   token field. Tigris sends it as the standard `Authorization: Bearer <token>`
+   header; no custom HTTP headers are required.
 5. Set this filter to exclude generated artifacts and unrelated events:
 
    ```sql
