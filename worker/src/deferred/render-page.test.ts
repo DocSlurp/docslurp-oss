@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const mocks = vi.hoisted(() => ({ render: vi.fn(), persist: vi.fn(), clear: vi.fn(), receipts: [] as any[] }));
 vi.mock("../pipeline/pdf-asset-cache.js", () => ({ PdfRasterCache: class { renderSelectedPages = mocks.render; }, PdfSourceCache: class { clear = mocks.clear; } }));
 vi.mock("../db/usage-event-store.js", () => ({ persistScopedUsageEvents: mocks.persist }));
@@ -15,7 +15,8 @@ function setup(options: { withheld?: boolean; deleted?: boolean; failCommit?: bo
   }), { json: (value: unknown) => value, begin: vi.fn(async (fn: (sql: unknown) => Promise<void>) => { if (options.failCommit) throw new Error("transaction failed"); await fn(sql); }) });
   return { artifacts, deps: { store: { stageSql: sql, loadDocument: vi.fn(async () => document) }, runner: {}, storage: {} } as never };
 }
-beforeEach(() => { vi.clearAllMocks(); mocks.receipts.length = 0; mocks.persist.mockImplementation(async (input: unknown) => { mocks.receipts.push(structuredClone({ ...(input as any), client: undefined })); }); vi.stubEnv("STRIPE_SECRET_KEY", ""); vi.stubEnv("DOCSLURP_BILL_COMPUTE", "false"); vi.stubEnv("DOCSLURP_BILL_STORAGE", "false"); mocks.render.mockImplementation(async ({ pageNumbers }: { pageNumbers: number[] }) => { await new Promise(resolve => setTimeout(resolve, 5)); return [{ artifactUri: `s3://page-${pageNumbers[0]}`, cacheHit: false }]; }); });
+beforeEach(() => { let now = 1000; vi.spyOn(Date, "now").mockImplementation(() => now += 25); vi.clearAllMocks(); mocks.receipts.length = 0; mocks.persist.mockImplementation(async (input: unknown) => { mocks.receipts.push(structuredClone({ ...(input as any), client: undefined })); }); vi.stubEnv("STRIPE_SECRET_KEY", ""); vi.stubEnv("DOCSLURP_BILL_COMPUTE", "false"); vi.stubEnv("DOCSLURP_BILL_STORAGE", "false"); mocks.render.mockImplementation(async ({ pageNumbers }: { pageNumbers: number[] }) => { return [{ artifactUri: `s3://page-${pageNumbers[0]}`, cacheHit: false }]; }); });
+afterEach(() => { vi.restoreAllMocks(); vi.unstubAllEnvs(); });
 describe("lazy PDF worker rendering", () => {
   it("refuses withheld, missing and out-of-bounds pages before rasterizing", async () => {
     await expect(renderDocumentPage(setup({ withheld: true }).deps, { documentId: "doc", runId: "run", pageNumber: 1 })).rejects.toThrow("unavailable");
