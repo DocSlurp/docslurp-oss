@@ -53,9 +53,30 @@ describe("bounded summary source reads", () => {
     expect(storage.objectSize).toHaveBeenCalledExactlyOnceWith("evidence.json", undefined);
     expect(result?.readBytes).toBe(data.length);
     await expect(readSummarySource(storage, { ...document, id: "other" }, "s3://b/doc.md", undefined, "s3://b/evidence.json")).rejects.toThrow("does not match");
-    await expect(readSummarySource(storage, { ...document, id: "doc" }, "s3://b/old.md", undefined, "s3://b/evidence.json")).rejects.toThrow("does not match");
     storage.objectSize.mockResolvedValue(20_000);
     await expect(readSummarySource(storage, { ...document, id: "doc" }, "s3://b/doc.md", undefined, "s3://b/evidence.json")).rejects.toThrow("exceeds");
+  });
+
+  it("summarizes the current markdown when a later stage replaced it after the evidence was cut", async () => {
+    const evidence = Buffer.from(JSON.stringify(buildSummaryEvidence({ text: "stale extraction text", pageCount: 1,
+      documentId: "doc", sourceUri: "s3://b/extracted.md" })));
+    const current = Buffer.from("reconciled markdown text");
+    const storage = { bucket: "b",
+      objectSize: vi.fn(async (key: string) => key === "evidence.json" ? evidence.length : current.length),
+      getByteRange: vi.fn(async (key: string) => key === "evidence.json" ? evidence : current) };
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const result = await readSummarySource(storage, { ...document, id: "doc" }, "s3://b/reconciled.md", undefined, "s3://b/evidence.json");
+    expect(result).toMatchObject({ text: "reconciled markdown text", sampled: false });
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining("stale_summary_evidence document=doc"));
+    warn.mockRestore();
+  });
+
+  it("falls back to the markdown when the evidence object was deleted", async () => {
+    const current = Buffer.from("redacted markdown");
+    const storage = { bucket: "b", objectSize: vi.fn(async (key: string) => key === "evidence.json" ? null : current.length),
+      getByteRange: vi.fn(async () => current) };
+    expect((await readSummarySource(storage, { ...document, id: "doc" }, "s3://b/doc.md", undefined, "s3://b/evidence.json"))?.text)
+      .toBe("redacted markdown");
   });
 
   it("honors cancellation before starting storage work", async () => {
