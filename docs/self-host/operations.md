@@ -16,6 +16,10 @@ The API runs the reconciler every 15 seconds, in bounded batches, with per-sessi
 backoff (up to 30 seconds for incomplete uploads, five minutes after errors) and a 24-hour abandonment deadline. It also verifies single-PUT objects,
 so self-hosted S3/MinIO installations do not require webhooks. Keep the API process
 running; a process that sleeps between requests cannot execute background sweeps.
+Allow up to two additional on-demand database connections per API process for
+upload advisory locks, beyond `DATABASE_POOL_MAX` and existing listener/probe
+connections. These locks use a separate pool so finalization cannot exhaust the
+query pool while waiting for its own queries.
 
 For a bucket-specific custom domain, set
 `DOCSLURP_STORAGE_PUBLIC_BUCKET_URL=https://f.docslurp.io` (or your own HTTPS
