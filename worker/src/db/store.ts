@@ -449,6 +449,7 @@ export class Store {
       select *
       from documents
       where run_id = ${runId}
+        and superseded_at is null and status <> 'cancelled'
       order by created_at asc
     `;
 
@@ -1089,6 +1090,7 @@ export class Store {
     await this.sql`
       update documents d
       set status = case
+            when d.superseded_at is not null then 'cancelled'
             when exists (
               select 1 from document_run_stage_states s
               where s.document_id = d.id and s.run_id = d.run_id and s.status = 'failed'
@@ -1097,7 +1099,7 @@ export class Store {
           end,
           updated_at = now()
       where d.run_id = ${runId}
-        and d.status not in ('completed', 'failed', 'pii_blocked')
+        and d.status not in ('completed', 'failed', 'pii_blocked', 'cancelled')
     `;
   }
 

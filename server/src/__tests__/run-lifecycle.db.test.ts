@@ -35,7 +35,7 @@ async function withSchema(run: (sql: SqlClient) => Promise<void>): Promise<void>
         lease_expires_at timestamptz, last_heartbeat_at timestamptz,
         created_at timestamptz not null default now(), updated_at timestamptz not null default now()
       );
-      create table documents (id text primary key, run_id text not null, status text not null, updated_at timestamptz);
+      create table documents (id text primary key, run_id text not null, status text not null, updated_at timestamptz, superseded_at timestamptz);
       create table workspace_run_stage_states (run_id text, stage_name text, status text, primary key (run_id, stage_name));
       create table document_run_stage_states (
         run_id text, document_id text, stage_name text, status text, error text, updated_at timestamptz
@@ -61,7 +61,7 @@ describe.skipIf(!isLocal)("Run Lifecycle (local Postgres)", () => {
   it("fails a stuck Run with worker-equivalent bookkeeping and dead-letters at the threshold", async () => {
     await withSchema(async (sql) => {
       await sql`insert into workspace_runs (id, user_id, status, stage, stats) values ('run-1', 'user-1', 'queued', 'queued', '{"old":true}')`;
-      await sql`insert into documents values ('doc-done', 'run-1', 'completed', now()), ('doc-open', 'run-1', 'queued', now())`;
+      await sql`insert into documents (id, run_id, status, updated_at) values ('doc-done', 'run-1', 'completed', now()), ('doc-open', 'run-1', 'queued', now())`;
 
       const failed = await lifecycle(sql).fail("run-1", {
         stage: "queued",
@@ -117,7 +117,7 @@ describe.skipIf(!isLocal)("Run Lifecycle (local Postgres)", () => {
         insert into workspace_runs (id, user_id, status, stage, error, failure_count, control_state, dead_letter_reason)
         values ('run-f', 'user-1', 'failed', 'parse', 'boom', 3, 'dead-letter', 'boom')
       `;
-      await sql`insert into documents values ('doc-a', 'run-f', 'completed', now()), ('doc-b', 'run-f', 'failed', now())`;
+      await sql`insert into documents (id, run_id, status, updated_at) values ('doc-a', 'run-f', 'completed', now()), ('doc-b', 'run-f', 'failed', now())`;
       await sql`insert into workspace_run_stage_states values ('run-f', 'fetch', 'completed'), ('run-f', 'parse', 'failed')`;
 
       const startWorkflow = vi.fn(async () => {});

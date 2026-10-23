@@ -61,6 +61,17 @@ async function statuses(runId: string) {
 }
 
 describe("partial Document failure in the store", () => {
+  it("does not resurrect cancelled or superseded documents when a run fails", async () => {
+    await seedRun("run-history");
+    await db.exec(`update documents set status = 'cancelled' where id = 'run-history-bad';
+      update documents set superseded_at = now() where id = 'run-history-mid'`);
+    await withStore(async (store) => {
+      await store.failRun("run-history", "embed", "lost worker");
+      expect((await store.loadDocumentsForRun("run-history")).map(document => document.id)).toEqual(["run-history-new"]);
+    });
+    expect(await statuses("run-history")).toEqual({ bad: "cancelled", mid: "cancelled", new: "queued" });
+  });
+
   it("a failed Run fails only Documents with a failed stage and leaves the rest queued for retry", async () => {
     await withStore(async (store) => {
       const state = await loadRunState(store, "run-fail");
