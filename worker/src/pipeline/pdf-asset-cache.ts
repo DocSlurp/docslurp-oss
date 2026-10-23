@@ -139,6 +139,7 @@ export interface RasterPageArtifact {
   mimeType: string;
   /** Engine that produced (or, on a cache hit, would have produced) this raster. */
   engine?: RasterEngineName;
+  /** Requested density; oversized pages are bounded before allocation. */
   dpi?: number;
 }
 
