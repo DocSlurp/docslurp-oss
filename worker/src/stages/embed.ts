@@ -901,28 +901,26 @@ export class EmbedStage implements Stage {
     }));
     const store = args.state.store as ChunkInsertStore;
     await store.insertChunks(dbChunks);
-    if (dbChunks.length > 0) {
-      // Ids are `<document>-<index>`, so a retry with fewer chunks leaves the old
-      // tail behind; drop it before the marker makes the set servable.
-      const keep = dbChunks.map((chunk) => chunk.id);
-      // An earlier attempt may have indexed those chunks: native search serves
-      // LanceDB rows without re-reading Postgres, so drop them there first.
-      // A failed delete fails the stage while Postgres still lists the ids, so
-      // the retry deletes them again.
-      const stale = args.vectorSpace && args.state.run.orgId
-        ? await store.staleDocumentChunkIds?.(args.document.id, keep) ?? []
-        : [];
-      if (stale.length > 0 && args.vectorSpace && args.state.run.orgId) {
-        const location = VectorNamespaceManager.getEmbeddingLocation(
-          resolveLanceDbConfig().root, args.state.run.orgId, args.vectorSpace.model, args.vectorSpace.dimensions,
-        );
-        await this.deleteVectors(location.uri, location.table, stale);
-        args.state.staleVectorIds.set(args.document.id, stale);
-      }
-      await store.deleteStaleDocumentChunks?.(args.document.id, keep);
-      // Keyword search can serve the chunks from here on, ahead of the index stage.
-      await store.markDocumentLexicalSearchable?.(args.document.id);
+    // Ids are `<document>-<index>`, so a retry with fewer or zero chunks leaves the old
+    // tail behind; drop it before the marker makes the set servable.
+    const keep = dbChunks.map((chunk) => chunk.id);
+    // An earlier attempt may have indexed those chunks: native search serves
+    // LanceDB rows without re-reading Postgres, so drop them there first.
+    // A failed delete fails the stage while Postgres still lists the ids, so
+    // the retry deletes them again.
+    const stale = args.vectorSpace && args.state.run.orgId
+      ? await store.staleDocumentChunkIds?.(args.document.id, keep) ?? []
+      : [];
+    if (stale.length > 0 && args.vectorSpace && args.state.run.orgId) {
+      const location = VectorNamespaceManager.getEmbeddingLocation(
+        resolveLanceDbConfig().root, args.state.run.orgId, args.vectorSpace.model, args.vectorSpace.dimensions,
+      );
+      await this.deleteVectors(location.uri, location.table, stale);
+      args.state.staleVectorIds.set(args.document.id, stale);
     }
+    await store.deleteStaleDocumentChunks?.(args.document.id, keep);
+    // Keyword search can serve the chunks from here on, ahead of the index stage.
+    if (dbChunks.length > 0) await store.markDocumentLexicalSearchable?.(args.document.id);
   }
 }
 
