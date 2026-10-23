@@ -940,11 +940,19 @@ export class Store {
       // Mode-switch backfills re-key their artifacts onto the source document and retire themselves
       // (see backfill-adoption.ts); they must not supersede the source version.
       const adopted = new Set(state.run.kind === "full-index" ? await adoptBackfillDocuments(client, state.run.id) : []);
+      // Legacy retries may already contain obsolete queued rows. They were not
+      // hydrated or processed; retire them instead of declaring them completed.
+      await client`
+        update documents set status = 'cancelled', lexical_searchable_at = null, updated_at = now()
+        where run_id = ${state.run.id} and superseded_at is not null
+          and status in ('queued', 'processing')
+      `;
       const completed = await client<{ id: string }[]>`
         update documents
         set status = 'completed',
             updated_at = now()
         where run_id = ${state.run.id}
+          and superseded_at is null
           and status not in ('failed', 'cancelled', 'pii_blocked')
           and not exists (
             select 1 from document_run_stage_states stage_state

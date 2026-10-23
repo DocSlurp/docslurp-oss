@@ -61,6 +61,17 @@ async function statuses(runId: string) {
 }
 
 describe("partial Document failure in the store", () => {
+  it("retires pending superseded history instead of promoting it when a run completes", async () => {
+    await seedRun("run-closed-history");
+    await db.exec(`update documents set status = 'cancelled' where id = 'run-closed-history-bad';
+      update documents set superseded_at = now() where id = 'run-closed-history-mid'`);
+    await withStore(async (store) => {
+      const state = await loadRunState(store, "run-closed-history");
+      await store.completeRun(state);
+    });
+    expect(await statuses("run-closed-history")).toEqual({ bad: "cancelled", mid: "cancelled", new: "completed" });
+  });
+
   it("does not resurrect cancelled or superseded documents when a run fails", async () => {
     await seedRun("run-history");
     await db.exec(`update documents set status = 'cancelled' where id = 'run-history-bad';
