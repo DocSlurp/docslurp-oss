@@ -940,6 +940,7 @@ export class Store {
       // Mode-switch backfills re-key their artifacts onto the source document and retire themselves
       // (see backfill-adoption.ts); they must not supersede the source version.
       const adopted = new Set(state.run.kind === "full-index" ? await adoptBackfillDocuments(client, state.run.id) : []);
+      await client`select retire_replaced_pending_documents(${state.run.id})`;
       // Legacy retries may already contain obsolete queued rows. They were not
       // hydrated or processed; retire them instead of declaring them completed.
       await client`
@@ -1029,6 +1030,7 @@ export class Store {
       return;
     }
 
+    await this.sql`select retire_replaced_pending_documents(${runId})`;
     await this.failProcessingDocumentStages(runId, stage, message);
     await this.failUnfinishedDocumentsForRun(runId);
 

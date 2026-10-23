@@ -40,6 +40,7 @@ async function withSchema(run: (sql: SqlClient) => Promise<void>): Promise<void>
       create table document_run_stage_states (
         run_id text, document_id text, stage_name text, status text, error text, updated_at timestamptz
       );
+      create function retire_replaced_pending_documents(text) returns void language plpgsql as $$ begin return; end; $$;
       create table workspace_run_events (
         id text primary key, user_id text, run_id text, document_id text, stage_name text, event_type text,
         status text, message text, progress jsonb, stats jsonb, payload jsonb, created_at timestamptz

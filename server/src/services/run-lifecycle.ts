@@ -424,6 +424,7 @@ export function createRunLifecycle(deps: RunLifecycleDeps) {
     `;
     if (!row) return null;
 
+    await sql`select retire_replaced_pending_documents(${runId})`;
     await sql`
       update document_run_stage_states
       set status = 'failed', error = ${input.message}, updated_at = now()

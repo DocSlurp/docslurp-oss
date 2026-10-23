@@ -533,6 +533,13 @@
       "when": 1792792800005,
       "tag": "0075_backfill_verified_upload_source_bytes",
       "breakpoints": true
+    },
+    {
+      "idx": 76,
+      "version": "7",
+      "when": 1792792800006,
+      "tag": "0076_retire_replaced_pending_versions",
+      "breakpoints": true
     }
   ]
 }
