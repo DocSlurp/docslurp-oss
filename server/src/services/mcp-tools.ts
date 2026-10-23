@@ -9,7 +9,7 @@ import { apiKeyHasAnyScope } from "../lib/api-key-authorization.js";
 import { getApiKey, getRequestActor, loadActorScopedWorkspace, resolveActorWorkspaceId, setRequestActor, type RequestActor } from "../lib/request-actor.js";
 import { listWorkspaces } from "./workspaces.js";
 import { apiKeyCanUseWorkspace } from "../lib/api-key-workspace-scope.js";
-import { completeUploadInput, fullIndexInput, listWorkspacesInput, mcpManifest, mcpTools, suggestQueriesInput, uploadInput, uploadStatusInput } from "./mcp-catalog.js";
+import { completeUploadInput, mediaEvidenceInput, fullIndexInput, listWorkspacesInput, mcpManifest, mcpTools, suggestQueriesInput, uploadInput, uploadStatusInput } from "./mcp-catalog.js";
 import { mcpOrigin } from "../lib/mcp-origin.js";
 import { groundedWorkspaceChatRoutes, searchRoutes } from "../routes/search.js";
 import { sql } from "../db.js";
@@ -154,6 +154,16 @@ const mcpAdapterRoutes = new Hono()
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body), signal: c.req.raw.signal,
       });
+    }
+
+    if (toolId === "getMediaEvidence") {
+      const parsed = mediaEvidenceInput.safeParse(body);
+      if (!parsed.success) return invalidInput(c, parsed.error);
+      const workspace = await loadActorScopedWorkspace(await resolveActorWorkspaceId(actor, parsed.data.workspace), actor);
+      if (!workspace) return adapterError(c, 404, "Workspace not found", "workspace_not_found");
+      const { loadMediaEvidence } = await import("./media-evidence.js");
+      const evidence = await loadMediaEvidence(workspace.id, parsed.data.documentId, parsed.data.offset);
+      return evidence ? c.json(evidence) : adapterError(c, 404, "Indexed media not found");
     }
 
     if (toolId === "fullIndex") {

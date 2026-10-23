@@ -1,4 +1,5 @@
 ---
+import { assertBrowserSafeApiKey, assertSecureApiOrigin } from "@docslurp/sdk";
 /**
  * Browser key only: restrict it to this site's origin and the search scope.
  * workspace takes an ID, slug or name, or "default" (the key organization's default
@@ -6,6 +7,8 @@
  */
 interface Props { clientKey: string; workspace?: string; apiUrl?: string; placeholder?: string; }
 const { clientKey, workspace = 'default', apiUrl = 'https://docslurp.io', placeholder = 'Search documents…' } = Astro.props;
+assertBrowserSafeApiKey(clientKey, true);
+assertSecureApiOrigin(apiUrl);
 ---
 <docslurp-search-box api-url={apiUrl} workspace={workspace} client-key={clientKey} placeholder={placeholder}></docslurp-search-box>
 <noscript><p>Enable JavaScript to search the document collection.</p></noscript>

@@ -35,7 +35,8 @@ export async function safeErrorResponse(response: Response, requestId?: string, 
         if (native) return jsonErrorResponse(response, nativeEnvelopeFor(original, response.status, requestId));
         const code = typeof original.code === "string" && /^[a-zA-Z0-9_:-]{1,80}$/.test(original.code) ? original.code : undefined;
         if (code) body.code = code;
-        if (typeof original.message === "string") body.message = message;
+        if (typeof original.message === "string") body.message = code === "EMAIL_ALREADY_REGISTERED"
+          ? "This email is already registered. Sign in or reset your password." : message;
         // Upgrade and billing links (402/429) survive with copy composed from the closed code.
         const nestedError = typeof original.error === "object" && original.error !== null ? original.error as Record<string, unknown> : null;
         const links = publicApiErrorLinks(original.links ?? nestedError?.links);

@@ -171,6 +171,22 @@ describe("run retention", () => {
       deleteExpiredRuns(batchSize: number): Promise<void>;
     };
 
+  it("defaults new workspaces to 30-day document expiry and supports keeping indefinitely", async () => {
+    expect((await sql`select run_retention_days from workspaces where id = 'w'`)[0].run_retention_days).toBe(30);
+    await seedRun("old");
+    await seedRun("recent");
+    await seedDocument("d-old", "old");
+    await seedDocument("d-recent", "recent");
+    await sql`update workspace_runs set created_at = now() - interval '31 days' where id = 'old'`;
+    await sql`update workspace_runs set created_at = now() - interval '29 days' where id = 'recent'`;
+    await retention().deleteExpiredRuns(10);
+    expect(await sql`select id from documents order by id`).toEqual([{ id: "d-recent" }]);
+    await sql`update workspaces set run_retention_days = null where id = 'w'`;
+    await sql`update workspace_runs set created_at = now() - interval '100 days' where id = 'recent'`;
+    await retention().deleteExpiredRuns(10);
+    expect(await sql`select id from documents`).toEqual([{ id: "d-recent" }]);
+  });
+
   it("deletes expired runs with their documents and enqueues cleanup even without artifact retention", async () => {
     await seedRun("old");
     await seedRun("new");

@@ -55,6 +55,8 @@ export interface ImageNeed {
 /** What a page needs, independent of how it was decided. */
 export interface PageNeeds {
   pageNumber: number;
+  /** Probe found no glyphs, images, vectors or appearance-only content. */
+  blank?: boolean;
   /** P(native text layer is a faithful transcription) — first decision per page. */
   pTrustTextLayer: number;
   pNeedsMath: number;
@@ -155,7 +157,10 @@ export function guessImageKind(
   if (image.coverage >= 0.8 && f.native.wordCount < 30) return { kind: "scanned-text", confidence: 0.6 };
   if (image.coverage < tiny) return { kind: "logo", confidence: 0.5 };
   if (f.raster.vectorDrawingCount > 20 && image.coverage < 0.5) return { kind: "chart-graph", confidence: 0.35 };
-  return { kind: "decorative-photo", confidence: 0.4 };
+  // Size alone cannot establish that an image is decorative. Read unknown
+  // substantial insets as text; only a content-aware decision may skip/caption
+  // them. This preserves screenshots and raster tables beside native prose.
+  return { kind: "scanned-text", confidence: 0.4 };
 }
 
 /**
@@ -189,6 +194,9 @@ export function needsFromFeatures(
   });
   return {
     pageNumber: f.pageNumber,
+    blank: f.native.charCount === 0 && page.images.length === 0 && f.raster.imageCoverage === 0
+      && f.raster.vectorDrawingCount === 0 && f.raster.uncoveredVectorRatio === 0
+      && !assessAttention(page).renderNeeded && !(page.unusualFeatures?.length),
     pTrustTextLayer: trust,
     pNeedsMath: needsMath,
     pNeedsTables: needsTables,
@@ -237,6 +245,7 @@ export function needsFromDecisions(
   });
   return {
     pageNumber: base.pageNumber,
+    blank: base.blank,
     pTrustTextLayer: trust,
     pNeedsMath: math,
     pNeedsTables: tables,
@@ -280,6 +289,7 @@ const IMAGE_ROLE: Partial<Record<ImageKind, AssignmentRole>> = {
 export function rolesForPage(needs: PageNeeds, cfg: PlannerConfig): RoleRequest[] {
   const out: RoleRequest[] = [];
   const page: AssignmentScope = { kind: "page" };
+  if (needs.blank) return [{ role: "skip", scope: page, reason: "probe:blank-page" }];
   const needMath = needs.pNeedsMath >= cfg.needThreshold;
   const needTables = needs.pNeedsTables >= cfg.needThreshold;
   const trusted = needs.pTrustTextLayer >= cfg.trustThreshold;
@@ -312,9 +322,11 @@ export function rolesForPage(needs: PageNeeds, cfg: PlannerConfig): RoleRequest[
   }
 
   for (const img of needs.images) {
-    if (pageImage && img.index === pageImage.index) continue;
     const role = IMAGE_ROLE[img.kind];
     if (!role) continue;
+    // Whole-page OCR already reads every image in a tiled scan. Conversely, a
+    // trusted text layer does not cover a large embedded text image.
+    if (role === "ocr" && scanned && !needMath && !needTables) continue;
     // Equation/table images are already covered by a page-level math/table need.
     if ((role === "math" && needMath) || (role === "table" && needTables)) continue;
     out.push({

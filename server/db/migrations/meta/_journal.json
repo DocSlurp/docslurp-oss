@@ -484,6 +484,13 @@
       "when": 1792627200005,
       "tag": "0068_credit_packs_no_plans",
       "breakpoints": true
+    },
+    {
+      "idx": 69,
+      "version": "7",
+      "when": 1792706400000,
+      "tag": "0069_default_document_retention",
+      "breakpoints": true
     }
   ]
 }

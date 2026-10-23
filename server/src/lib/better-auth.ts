@@ -10,6 +10,7 @@ import { admitConfiguredAdminUser } from "./admin-emails.js";
 import { createAuthEmailOptions } from "./auth-email.js";
 import { developmentTrustedOrigins } from "./dev-auth-access.js";
 import { withTrustedAuthClientIp } from "./client-ip.js";
+import { beforeOAuthAccountCreate } from "./oauth-account-linking.js";
 
 const globalPool = globalThis as typeof globalThis & { __docslurpAuthPool?: Pool };
 
@@ -165,6 +166,7 @@ export const auth = betterAuth({
         before: async (account) => ({ data: withoutSocialSignInTokens(account) })
       },
       create: {
+        before: beforeOAuthAccountCreate,
         after: async (account) => {
           if (!socialSignInProviders.has(account.providerId)) return;
 

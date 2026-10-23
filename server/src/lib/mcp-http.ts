@@ -39,7 +39,7 @@ function createServer(manifest: McpManifest, adapterDispatch: McpDispatch, signa
   };
   const server = new Server(SERVER_INFO, {
     capabilities: { tools: {}, resources: {}, prompts: {} },
-    instructions: "Use listWorkspaces to discover authorized workspaces. Use upload for URLs or up to 10 presigned file PUT URLs. PUT the bytes then call completeUpload before getUploadStatus. Workspace selection is optional: omitted workspaceId uses the organization default. Use search with q for one query or queries for a batch of cited passages to answer with your own model, or chat for a generated grounded answer that incurs AI usage. Respect workspace and cost constraints.",
+    instructions: "Use listWorkspaces to discover authorized workspaces. Use upload for URLs or up to 10 presigned file PUT URLs. PUT the bytes then call completeUpload before getUploadStatus. Workspace selection is optional: omitted workspace uses the organization default. Use search with q for one query or queries for a batch of cited passages to answer with your own model, or chat for a generated grounded answer that incurs AI usage. Respect workspace and cost constraints.",
   });
   const tools = manifest.capabilities.filter((item) => item.category === "tool");
   server.setRequestHandler("tools/list", () => ({ tools: tools.map((item) => {

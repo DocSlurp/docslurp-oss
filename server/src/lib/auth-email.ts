@@ -1,10 +1,18 @@
 import { isEmailAuthConfigured } from "@docslurp/shared/auth-security";
 import { emailOTP } from "better-auth/plugins";
+import { APIError } from "better-auth/api";
 
 export function createAuthEmailOptions(env: NodeJS.ProcessEnv) {
   const enabled = isEmailAuthConfigured(env);
   return {
-    emailAndPassword: { enabled: true, disableSignUp: !enabled, requireEmailVerification: true },
+    emailAndPassword: {
+      enabled: true, disableSignUp: !enabled, requireEmailVerification: true,
+      // Product policy: an existing account must sign in or recover access,
+      // rather than receiving Better Auth's synthetic successful signup ID.
+      customSyntheticUser: (): never => {
+        throw new APIError("CONFLICT", { code: "EMAIL_ALREADY_REGISTERED", message: "This email is already registered. Sign in or reset your password." });
+      },
+    },
     emailVerification: { sendOnSignUp: enabled, sendOnSignIn: enabled, autoSignInAfterVerification: true },
     plugins: enabled ? [emailOTP({
       overrideDefaultEmailVerification: true,

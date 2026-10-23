@@ -191,7 +191,7 @@ function workspaceIntakeErrorResponse(
     return null;
   }
 
-  return apiStatusError(c, error.statusCode, error.message, error.issues ? { details: { issues: error.issues } } : {});
+  return apiStatusError(c, error.statusCode, error.message, { ...(error.code ? { code: error.code } : {}), ...(error.issues ? { details: { issues: error.issues } } : {}) });
 }
 
 /**

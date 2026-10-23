@@ -89,7 +89,7 @@ test("browser use needs no process global and ignores browser process shims", as
     { window: {}, process: { env: { DOCSLURP_URL: "https://private.test", DOCSLURP_API_KEY: "private-key", DOCSLURP_WORKSPACE: "private-workspace" } } },
   ]) {
     const factory = runInNewContext(`${compiled}\ncreateDocSlurpClient`, {
-      ...globals, Headers, FormData, AbortController, setTimeout, clearTimeout,
+      ...globals, URL, Headers, FormData, AbortController, setTimeout, clearTimeout,
       fetch: async (url, init) => {
         assert.equal(url, init.method === "POST" ? "https://docslurp.io/v1/uploads/bulk" : "https://docslurp.io/v1/runs/run/progress");
         // Browser shims never leak DOCSLURP_WORKSPACE; the default workspace is used.

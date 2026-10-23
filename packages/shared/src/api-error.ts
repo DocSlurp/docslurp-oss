@@ -32,6 +32,7 @@ export const API_ERROR_CODES = [
   "ip_temporarily_blocked",
   "session_required",
   "unsupported_type",
+  "remote_format_disabled",
   "file_too_large",
   "unreadable_source",
   "payment_required",
@@ -103,6 +104,7 @@ export const API_ERROR_PUBLIC_MESSAGES: Record<ApiErrorCode, string> = {
   ip_temporarily_blocked: PUBLIC_ERROR_MESSAGES.ipBlocked,
   session_required: PUBLIC_ERROR_MESSAGES.sessionRequired,
   unsupported_type: PUBLIC_ERROR_MESSAGES.unsupportedType,
+  remote_format_disabled: "This remote file requires complex-format parsing, which is disabled on this deployment. Upload the file directly, or ask an administrator to enable complex remote formats.",
   file_too_large: PUBLIC_ERROR_MESSAGES.tooLarge,
   unreadable_source: PUBLIC_ERROR_MESSAGES.unreadableSource,
   payment_required: PUBLIC_ERROR_MESSAGES.creditExhausted,
@@ -126,6 +128,7 @@ export function apiErrorCodeForStatus(status: number): ApiErrorCode {
   if (status === 403) return "forbidden";
   if (status === 404) return "not_found";
   if (status === 409) return "conflict";
+  if (status === 415) return "unsupported_type";
   if (status === 413) return "payload_too_large";
   if (status === 429) return "rate_limited";
   if (status === 503) return "unavailable";

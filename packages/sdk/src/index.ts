@@ -1,6 +1,6 @@
 import { readSse } from "./sse.js";
-import { assertBrowserSafeApiKey } from "./keys.js";
-export { apiKeyKind, assertBrowserSafeApiKey, PRIVATE_API_KEY_PREFIX, PUBLIC_API_KEY_PREFIX, UnsafeApiKeyError, type ApiKeyKind } from "./keys.js";
+import { assertBrowserSafeApiKey, assertSecureApiOrigin } from "./keys.js";
+export { apiKeyKind, assertBrowserSafeApiKey, assertSecureApiOrigin, PRIVATE_API_KEY_PREFIX, PUBLIC_API_KEY_PREFIX, UnsafeApiKeyError, type ApiKeyKind } from "./keys.js";
 import type { RunProgressSnapshot, WorkspaceState, OrganizationRecord, OrganizationDetails, OrganizationAccess, OrganizationMembership, OrganizationMember, OrganizationRole, OrganizationApiKey, CreateOrganizationInput, UpdateOrganizationInput, OrganizationInvite, CreateOrganizationInviteInput } from "./state.js";
 export type * from "./state.js";
 import type { IngestReport } from "./ingest-report.js";
@@ -747,6 +747,7 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
   const apiUrl = normalizeApiUrl(options.apiUrl ?? (env?.DOCSLURP_URL?.trim() || "https://docslurp.io"));
   const apiKey = options.apiKey ?? env?.DOCSLURP_API_KEY;
   assertBrowserSafeApiKey(apiKey);
+  assertSecureApiOrigin(apiUrl);
   const clientWorkspace = options.workspace?.trim() || env?.DOCSLURP_WORKSPACE?.trim() || DEFAULT_WORKSPACE;
   const fetchImpl = options.fetch ?? fetch;
 

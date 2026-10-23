@@ -496,6 +496,21 @@ describe("Workspace Intake", () => {
 });
 
 describe("Workspace Intake from remote URLs", () => {
+  it.each(["gzip", "br", "deflate"])("does not forward the encoded length of a %s response to storage", async (encoding) => {
+    const decoded = "Decoded source text ".repeat(30);
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(decoded, {
+      headers: { "content-type": "text/plain", "content-encoding": encoding, "content-length": "42" },
+    })));
+    const fakes = createWorkspaceIntakeFakes();
+    const put = vi.spyOn(fakes.ports.storage, "put");
+    const urls = ["https://example.com/notes.txt"];
+    await intakeIntoWorkspace(request({ kind: "url-ingest", items: remoteUrlIntakeItems(urls), urls }), fakes.ports);
+    expect(put.mock.calls[0]![1]).toMatchObject({ contentLength: undefined });
+    const [file] = fakes.runs[0].files;
+    expect(fakes.objects.get(file.sourceKey)?.body).toEqual(Buffer.from(decoded));
+    expect(file.fileSize).toBe(Buffer.byteLength(decoded));
+  });
+
   it("streams fetched bodies into storage, titles from the URL, and audits only origins", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => new Response("hello from upstream", {
       status: 200,

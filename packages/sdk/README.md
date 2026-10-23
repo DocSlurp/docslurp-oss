@@ -262,12 +262,14 @@ Add DocSlurp search, chat and a document viewer to your site as React components
 | --- | --- |
 | `SearchEmbed` | Search box with cited results. Calls `GET /v1/search`. |
 | `ChatEmbed` | Chat over a workspace. Calls `POST /v1/chat`. |
-| `ViewerEmbed` | Shows one document. Calls `GET /v1/documents/:id`, which needs a key with the `artifacts` scope. |
+| `ViewerEmbed` | Shows one document through a same-origin authenticated session or backend proxy. Public keys cannot read private artifacts. |
 | `defineDocSlurpElements()` | Registers `<docslurp-search>`, `<docslurp-chat>` and `<docslurp-viewer>`. |
 | `createOfflineSearchBundle()` | Builds a JSON bundle (and optionally a LanceDB table) for offline search. |
 | `createOfflineSearchClient()` | Searches that bundle in the browser or in Node. |
 
-Every component takes `apiUrl` (default `https://docslurp.io`) and `clientKey`. Search and chat also take `workspace` (an ID, slug or name, or `default`; default `default`; the custom elements' attribute is also `workspace`), and the viewer takes `documentId`. On public pages, pass a browser key: it is search-only and works only on your allowed websites.
+Search and chat take `apiUrl` (default `https://docslurp.io`), a `dslp_pub_` browser `clientKey`, and `workspace` (an ID, slug or name, or `default`; default `default`; the custom elements' attribute is also `workspace`). Browser integrations reject server and untyped legacy keys. API origins must use HTTPS, except exact localhost/loopback addresses for development.
+
+For `ViewerEmbed`, pass `apiUrl=""` for the same-origin API and `documentId`, with no `clientKey`. On your own site, authenticate users in a backend proxy and authorize each requested document there. Keep the server key in that backend. Proxy both document metadata and artifact URLs (rewrite artifact URLs to same-origin authenticated routes): the viewer iframe uses cookies and cannot attach a bearer header. Never put server credentials into an embed or an artifact URL.
 
 ### Offline search
 

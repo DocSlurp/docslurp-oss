@@ -163,7 +163,7 @@ describe("uploadsRoutes over Workspace Intake", () => {
     const { app } = setup();
     const response = await app.request("/uploads/url", json({ workspace: "ws-1", urls: ["https://example.com/report.docx"] }));
     expect(response.status).toBe(415);
-    await expect(response.json()).resolves.toMatchObject({ error: { code: "invalid_request", message: expect.stringContaining("REMOTE_INGEST_COMPLEX_FORMATS_ENABLED=true") } });
+    await expect(response.json()).resolves.toMatchObject({ error: { code: "remote_format_disabled", message: expect.stringContaining("REMOTE_INGEST_COMPLEX_FORMATS_ENABLED=true") } });
   });
 
   it("reports what URL ingest fetched", async () => {

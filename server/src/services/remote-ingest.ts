@@ -51,7 +51,12 @@ export async function* remoteUrlIntakeItems(
       }
       const filename = path.basename(new URL(safeUrl).pathname) || `remote-${randomUUID()}`;
       const mimeType = inferMimeType(url, response.headers.get("content-type"));
-      const contentLength = parseKnownContentLength(response.headers.get("content-length"));
+      // Fetch decodes compressed responses but retains their wire headers. The
+      // encoded length is not the length of the stream we send to object storage.
+      const encoding = response.headers.get("content-encoding")?.trim().toLowerCase();
+      const contentLength = encoding && encoding !== "identity"
+        ? undefined
+        : parseKnownContentLength(response.headers.get("content-length"));
 
       yield {
         filename,

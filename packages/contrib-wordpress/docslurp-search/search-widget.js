@@ -54,11 +54,14 @@ export function defineDocSlurpSearch() {
                     if (!proxy && !key)
                         throw new Error("Missing search configuration");
                     // Inline (not imported from ./keys) so the widget stays one self-contained file for WordPress.
-                    if (!proxy && key?.startsWith("dslp_priv_")) {
+                    if (!proxy && key && !key.startsWith("dslp_pub_")) {
                         console.error("docslurp-search-box: refusing to send a server key (dslp_priv_…) from the browser. Use a search-only client key (dslp_pub_…) or a search-endpoint proxy.");
                         status.textContent = "Search is misconfigured.";
                         return;
                     }
+                    const target = new URL(proxy ?? apiUrl, location.href);
+                    if (target.protocol !== "https:" && !(target.protocol === "http:" && ["localhost", "127.0.0.1", "[::1]"].includes(target.hostname)))
+                        throw new Error("HTTPS required");
                     const response = await fetch(proxy ?? `${apiUrl.replace(/\/$/, "")}/v1/search`, { method: "POST", credentials: "omit", signal: request.signal, headers: { "Content-Type": "application/json", ...(!proxy && key ? { Authorization: `Bearer ${key}` } : {}) }, body: JSON.stringify(proxy ? { q } : { q, workspace, limit: 6 }) });
                     if (!response.ok)
                         throw new Error("Search unavailable");

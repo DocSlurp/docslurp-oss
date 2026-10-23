@@ -1,5 +1,9 @@
 # Completed
 
+- Default new page-router settings to free feature routing; retain native prose, OCR substantial unknown embedded images, avoid duplicate image OCR on scanned pages, and skip proven blank pages (2026-10-22). Active deployment remains gated; 321 routing/stage tests pass.
+
+- Harden browser key boundaries, connector creation/update URL validation, HTTPS client transports, rejected-widget CORS, and actionable remote-format errors (2026-10-22). Reject duplicate password signups explicitly and link provider-verified OAuth email without a second confirmation; remove an unverified signup credential before linking.
+
 - [x] **Claude plugin and marketplace** (2026-10-21): `plugins/docslurp/` packages the remote MCP server (`https://docslurp.io/v1/mcp`, OAuth) with a `docslurp` skill for search-vs-chat, the presigned upload flow and page citations. The repo root `.claude-plugin/marketplace.json` makes it installable with `claude plugin marketplace add DocSlurp/docslurp-oss` and `claude plugin install docslurp@docslurp`; the same folder is the source for the Anthropic directory submission. MIT, listed in `LICENSE`.
 - [x] Load catalog CLI environment defaults before use, with explicit production overlay and shell/CI precedence; document generation, uploads and the live-key safeguard.
 

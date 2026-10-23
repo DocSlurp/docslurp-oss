@@ -1,3 +1,4 @@
+import { assertSafeExternalUrl } from "../lib/network-security.js";
 import { PUBLIC_ERROR_MESSAGES } from "@docslurp/shared";
 import { reportPublicError } from "../lib/public-errors.js";
 import { Hono, type Context } from "hono";
@@ -7,6 +8,8 @@ import { randomUUID } from "node:crypto";
 
 import {
   createConnectorSchema,
+  s3ConfigSchema, s3CredentialsSchema, googleDriveConfigSchema, googleDriveCredentialsSchema,
+  notionConfigSchema, notionCredentialsSchema, confluenceConfigSchema, confluenceCredentialsSchema,
   defaultPipelineFeatures,
   updateConnectorSchema,
   type PipelineFeatures,
@@ -61,6 +64,23 @@ function toSqlJson(value: unknown): Parameters<typeof sql.json>[0] {
   return JSON.parse(JSON.stringify(value ?? {})) as Parameters<typeof sql.json>[0];
 }
 
+const connectorSchemas = {
+  s3: { config: s3ConfigSchema, credentials: s3CredentialsSchema },
+  'google-drive': { config: googleDriveConfigSchema, credentials: googleDriveCredentialsSchema },
+  notion: { config: notionConfigSchema, credentials: notionCredentialsSchema },
+  confluence: { config: confluenceConfigSchema, credentials: confluenceCredentialsSchema },
+};
+
+async function validatedSettings(type: string, config: Record<string, unknown>, credentials: Record<string, unknown>) {
+  const schemas = connectorSchemas[type as keyof typeof connectorSchemas];
+  if (!schemas) throw new Error("Unsupported connector type");
+  const parsedConfig = schemas.config.parse(config);
+  const parsedCredentials = schemas.credentials.parse(credentials);
+  if ('endpoint' in parsedConfig && parsedConfig.endpoint) await assertSafeExternalUrl(parsedConfig.endpoint);
+  if ('baseUrl' in parsedCredentials) await assertSafeExternalUrl(parsedCredentials.baseUrl);
+  return { config: parsedConfig, credentials: parsedCredentials };
+}
+
 function rowToConnector(row: ConnectorRow): WorkspaceConnector {
   return {
     id: row.id,
@@ -68,7 +88,7 @@ function rowToConnector(row: ConnectorRow): WorkspaceConnector {
     type: row.type as WorkspaceConnector["type"],
     name: row.name,
     status: row.status as WorkspaceConnector["status"],
-    config: row.config ?? {},
+    config: connectorSchemas[row.type as keyof typeof connectorSchemas]?.config.safeParse(row.config).data ?? {},
     lastSyncAt: row.last_sync_at,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
@@ -297,11 +317,14 @@ export const connectorsRoutes = new Hono()
       return apiErrorResponse(c, access.status, access.code, access.message);
     }
 
-    const credentialsEncrypted = encryptCredentials(body.credentials);
+    let settings;
+    try { settings = await validatedSettings(body.type, body.config, body.credentials); }
+    catch { return apiStatusError(c, 422, "Invalid connector settings: use valid credentials and a public HTTPS endpoint", { code: "invalid_request" }); }
+    const credentialsEncrypted = encryptCredentials(settings.credentials);
 
     const rows = await sql<ConnectorRow[]>`
       insert into workspace_connectors (id, workspace_id, type, name, credentials_encrypted, config, status)
-      values (${randomUUID()}, ${workspaceId}, ${body.type}, ${body.name}, ${credentialsEncrypted}, ${sql.json(toSqlJson(body.config))}, 'active')
+      values (${randomUUID()}, ${workspaceId}, ${body.type}, ${body.name}, ${credentialsEncrypted}, ${sql.json(toSqlJson(settings.config))}, 'active')
       returning id, workspace_id, type, name, credentials_encrypted, config, status, last_sync_at, created_at, updated_at
     `;
 
@@ -318,16 +341,23 @@ export const connectorsRoutes = new Hono()
       return apiErrorResponse(c, access.status, access.code, access.message);
     }
 
+    const existing = await sql<ConnectorRow[]>`select * from workspace_connectors where id = ${connectorId} and workspace_id = ${workspaceId}`;
+    if (!existing[0]) return apiStatusError(c, 404, "Connector not found");
+    let settings;
+    try {
+      settings = await validatedSettings(existing[0].type, body.config ?? existing[0].config,
+        body.credentials ?? decryptCredentials(existing[0].credentials_encrypted));
+    } catch { return apiStatusError(c, 422, "Invalid connector settings: use valid credentials and a public HTTPS endpoint", { code: "invalid_request" }); }
     const now = new Date().toISOString();
     if (body.name !== undefined) {
       await sql`update workspace_connectors set name = ${body.name}, updated_at = ${now} where id = ${connectorId} and workspace_id = ${workspaceId}`;
     }
     if (body.credentials !== undefined) {
-      const enc = encryptCredentials(body.credentials);
+      const enc = encryptCredentials(settings.credentials);
       await sql`update workspace_connectors set credentials_encrypted = ${enc}, updated_at = ${now} where id = ${connectorId} and workspace_id = ${workspaceId}`;
     }
     if (body.config !== undefined) {
-      await sql`update workspace_connectors set config = ${sql.json(toSqlJson(body.config))}, updated_at = ${now} where id = ${connectorId} and workspace_id = ${workspaceId}`;
+      await sql`update workspace_connectors set config = ${sql.json(toSqlJson(settings.config))}, updated_at = ${now} where id = ${connectorId} and workspace_id = ${workspaceId}`;
     }
     if (body.status !== undefined) {
       await sql`update workspace_connectors set status = ${body.status}, updated_at = ${now} where id = ${connectorId} and workspace_id = ${workspaceId}`;

@@ -356,7 +356,8 @@ export type PageRouterMode = z.infer<typeof pageRouterModeSchema>;
 export const pageRouterConfigSchema = z.object({
   mode: pageRouterModeSchema.optional(),
   objective: routingObjectiveSchema.default("cost-quality"),
-  router: z.enum(["heuristic", "baseline", "decision-model"]).default("decision-model"),
+  // Free feature routing by default; paid decision-model triage remains opt-in.
+  router: z.enum(["heuristic", "baseline", "decision-model"]).default("baseline"),
   /**
    * One decision model id, or an ordered fallback chain. Each entry is used only while it is healthy
    * (known-answer canary + runtime degeneracy checks) and the policy pack has calibrations for it;
