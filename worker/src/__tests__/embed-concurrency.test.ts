@@ -85,7 +85,7 @@ async function embedOnce(env: Record<string, string>, documents = ["doc"], pipel
   const artifacts: Record<string, string> = {};
   for (const id of documents) {
     const key = `u1/run/canonical/${id}.json`;
-    await storage.putJson(key, buildCanonicalDocumentFromMarkdown({ documentId: "same", text: markdown, pageCount: PAGES, extractor: "test" }));
+    await storage.putJson(key, buildCanonicalDocumentFromMarkdown({ documentId: id, text: markdown, pageCount: PAGES, extractor: "test" }));
     artifacts[`${id}:canonical-document`] = storage.uri(key);
     docs.push({ id, userId: "u1", runId: "run", filename: "manual.pdf", mimeType: "application/pdf", sourceKey: "unused",
       status: "processing", extractionMode: "hybrid", pageCount: PAGES, createdAt: new Date(), updatedAt: new Date() });
@@ -137,6 +137,12 @@ describe("EmbedStage concurrency", () => {
     expect(second.every(chunk => chunk.id.startsWith("second-") && chunk.metadata.documentId === "second")).toBe(true);
     const copied = JSON.parse(result.objects.get("u1/run/embeddings/second.json")!);
     expect(copied.documentId).toBe("second");
+    const secondCanonical = JSON.parse(result.objects.get("u1/run/canonical/second.json")!);
+    const secondBlockIds = new Set(secondCanonical.blocks.map((block: { id: string }) => block.id));
+    for (const chunk of copied.chunks) {
+      expect(chunk.blockIds.every((id: string) => secondBlockIds.has(id))).toBe(true);
+      expect(chunk.metadata.canonicalDocumentUri).toBe("s3://t/u1/run/canonical/second.json");
+    }
     expect(copied.chunks.map((chunk: { id: string }) => chunk.id)).toEqual(second.map(chunk => chunk.id));
     const original = JSON.parse(result.objects.get("u1/run/embeddings/first.json")!);
     expect(original.documentId).toBe("first");

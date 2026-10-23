@@ -276,7 +276,9 @@ export class EmbedStage implements Stage {
               state,
               document,
               artifactUri: existingUri,
-              contentHash
+              contentHash,
+              chunkDrafts,
+              extracted,
             });
             return {
               artifactUri,
@@ -835,6 +837,8 @@ export class EmbedStage implements Stage {
     document: WorkflowState["documents"][number];
     artifactUri: string;
     contentHash: string;
+    chunkDrafts: CanonicalChunk[];
+    extracted: Awaited<ReturnType<typeof extractTextForEmbedding>>;
   }): Promise<string> {
     const key = keyFromStorageUri(args.artifactUri, this.storage.bucket);
     if (!key) {
@@ -847,12 +851,47 @@ export class EmbedStage implements Stage {
       ...original,
       documentId: args.document.id,
       source: { ...original.source, filename: args.document.filename, mimeType: args.document.mimeType },
-      chunks: original.chunks.map((chunk) => ({
-        ...chunk,
-        id: `${args.document.id}-${chunk.index.toString().padStart(3, "0")}`,
-        canonicalDocumentUri,
-        metadata: { ...chunk.metadata, documentId: args.document.id },
-      })),
+      chunks: original.chunks.map((chunk) => {
+        const current = args.chunkDrafts[chunk.index];
+        if (!current) throw new Error(`deduplicated chunk ${chunk.index} has no current source chunk`);
+        // Vectors and contextualized text are reusable. Locations and evidence
+        // belong to this extraction, even when the visible text is identical.
+        const evidence = {
+          headingPath: current.headingPath,
+          pageNumber: current.pageNumber,
+          pageNumbers: current.pageNumbers,
+          blockIds: current.blockIds,
+          blockTypes: current.blockTypes,
+          evidenceType: current.evidenceType,
+          canonicalDocumentUri,
+          tableGranularity: current.tableGranularity ?? null,
+          tableRowIndex: current.tableRowIndex ?? null,
+          tableRowCount: current.tableRowCount ?? null,
+          tableColumnNames: current.tableColumnNames ?? [],
+          tableColumnTypes: current.tableColumnTypes ?? [],
+          tableCells: current.tableCells ?? [],
+          tableCell: current.tableCell ?? null,
+          regionBoxes: current.regionBoxes ?? [],
+          regions: current.regions ?? current.regionBoxes ?? [],
+          regionCoordinateSpace: current.regionCoordinateSpace ?? null,
+          sourceTrace: {
+            ...current.sourceTrace,
+            canonicalDocumentUri,
+            parserArtifactUri: args.extracted.canonicalDocument?.source.parserArtifactUri ?? null,
+            sourceArtifactUri: args.extracted.canonicalDocument?.source.artifactUri ?? null,
+            blockIds: current.blockIds,
+            pageNumbers: current.pageNumbers,
+            extractor: args.extracted.extractor,
+          },
+        };
+        return {
+          ...chunk,
+          ...evidence,
+          id: `${args.document.id}-${chunk.index.toString().padStart(3, "0")}`,
+          metadata: { ...chunk.metadata, ...evidence, documentId: args.document.id,
+            source: args.extracted.extractor, locator: current.locator ?? null, overlapIndex: current.overlapIndex ?? 0 },
+        };
+      }),
     };
     const ownKey = `${args.document.userId}/${args.state.run.id}/embeddings/${args.document.id}.json`;
     await this.storage.putJson(ownKey, artifact);
