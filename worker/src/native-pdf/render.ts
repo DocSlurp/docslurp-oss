@@ -2,6 +2,7 @@ import { availableParallelism } from "node:os";
 
 import type { NativePdfDocument, NativePdfEngine, Bbox } from "./types.js";
 import { NativePdfError } from "./types.js";
+import { boundedRasterDpi } from "../lib/raster-bounds.js";
 
 /**
  * Raster helper for the `native-pdf` engine: renders selected pages (and clipped
@@ -61,8 +62,12 @@ export async function renderPagesNative(
       while (cursor < pages.length) {
         throwIfAborted(options.signal);
         const pageNumber = pages[cursor++]!;
-        const bytes = await doc.page(pageNumber - 1).render({
-          dpi: options.dpi,
+        const page = doc.page(pageNumber - 1);
+        const size = await page.size();
+        const dpi = boundedRasterDpi(size.widthPt, size.heightPt, options.dpi);
+        const bytes = await page.render({
+          dpi,
+          maxEdgePx: Math.ceil(Math.max(size.widthPt, size.heightPt) * dpi / 72),
           format,
           ...(options.gray ? { gray: true } : {}),
         });
