@@ -132,6 +132,7 @@ export interface WorkspaceIntakeRequest {
    * (treated as `full`) while DOCSLURP_DEFERRED_PROFILES is off.
    */
   indexingMode?: IndexingMode;
+  runId?: string;
   apiKeyId?: string | null;
   kind: WorkspaceIntakeKind;
   items: Iterable<WorkspaceIntakeItem> | AsyncIterable<WorkspaceIntakeItem>;
@@ -215,7 +216,8 @@ export interface WorkspaceIntakeRecords {
     workspaceId: string;
     kind: WorkspaceIntakeKind;
     pipeline: PipelineFeatures;
-    apiKeyId?: string | null;
+    runId?: string;
+  apiKeyId?: string | null;
     files: StoredIntakeFile[];
   }): Promise<CreatedRun>;
   /** Remove a workspace this request created when intake failed before any run existed. */
@@ -624,6 +626,7 @@ export async function intakeIntoWorkspace(
         kind: request.kind,
         pipeline,
         apiKeyId: request.apiKeyId,
+        runId: request.runId,
         files,
       });
     } catch (error) {

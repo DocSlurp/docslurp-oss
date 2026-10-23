@@ -3,13 +3,14 @@ import { randomUUID } from "node:crypto";
 import type { PipelineFeatureOverrides, WorkspaceTemplateKey } from "@docslurp/shared";
 
 import { sql } from "../db.js";
+import { env } from "../config.js";
 import { normalizeUploadPath } from "../lib/canonical-id.js";
 import {
   abortMultipartUpload,
   completeMultipartUpload,
   createMultipartUpload,
-  deleteUploadedObject,
   getUploadedObjectMetadata,
+  listMultipartUploadParts,
   signMultipartUploadPart,
   signSingleUploadPut,
 } from "../lib/storage.js";
@@ -27,7 +28,7 @@ const MULTIPART_PART_SIZE_BYTES = 8 * 1024 * 1024;
 export interface DirectUploadSessionFileInput {
   filename: string;
   mimeType: string;
-  sizeBytes: number;
+  sizeBytes?: number;
   sha256?: string;
   canonicalId?: string | null;
   /** Request one signed PUT instead of multipart (maximum 5 GiB). */
@@ -36,6 +37,8 @@ export interface DirectUploadSessionFileInput {
 }
 
 export interface CreateDirectUploadSessionInput {
+  apiKeyId?: string | null;
+  allowedWorkspaceIds?: readonly string[] | null;
   tags?: string[];
   userId: string;
   orgId?: string | null;
@@ -52,10 +55,15 @@ export interface CompleteDirectUploadFileInput {
   userId: string;
   fileId: string;
   etag?: string;
+  sizeBytes?: number;
   parts?: Array<{ partNumber: number; etag: string }>;
 }
 
 export type UploadSessionRow = {
+  result?: unknown;
+  last_error?: string | null;
+  api_key_id?: string | null;
+  allowed_workspace_ids?: string[] | null;
   tags?: string[];
   id: string;
   user_id: string;
@@ -73,6 +81,7 @@ export type UploadSessionFileRow = {
   filename: string;
   mime_type: string;
   size_bytes: number;
+  unknown_size?: boolean;
   source_key: string;
   upload_mode: string;
   upload_id: string | null;
@@ -105,7 +114,7 @@ export async function loadDirectUploadSession(
   userId: string,
 ): Promise<LoadedDirectUploadSession | null> {
   const [session] = await sql<UploadSessionRow[]>`
-    select id, user_id, org_id, workspace_id, workspace_name, template_key, pipeline, tags, status
+    select id, user_id, org_id, workspace_id, workspace_name, template_key, pipeline, tags, status, result, last_error, api_key_id, allowed_workspace_ids
     from upload_sessions
     where id = ${sessionId} and user_id = ${userId}
     limit 1
@@ -132,7 +141,8 @@ export async function loadDirectUploadSession(
       status,
       completed_parts,
       canonical_id,
-      source_path
+      source_path,
+      unknown_size
     from upload_session_files
     where session_id = ${sessionId}
     order by created_at asc
@@ -149,6 +159,7 @@ export async function loadDirectUploadSession(
 }
 
 export async function buildDirectUploadFileDescriptor(file: UploadSessionFileRow) {
+  if (file.status === "completed" || file.status === "aborted") return { id: file.id, filename: file.filename, mimeType: file.mime_type, sizeBytes: file.size_bytes, mode: file.upload_mode as "single" | "multipart", status: file.status };
   if (file.upload_mode === "single") {
     return {
       id: file.id,
@@ -169,7 +180,7 @@ export async function buildDirectUploadFileDescriptor(file: UploadSessionFileRow
   }
 
   const partSize = file.part_size ?? MULTIPART_PART_SIZE_BYTES;
-  const partCount = toDirectUploadPartCount(file.size_bytes, partSize);
+  const partCount = file.unknown_size ? 0 : toDirectUploadPartCount(file.size_bytes, partSize);
   if (!file.upload_id) {
     throw new Error(`Multipart session missing upload id for ${file.id}`);
   }
@@ -210,20 +221,23 @@ export async function buildDirectUploadFileDescriptor(file: UploadSessionFileRow
     uploadId: file.upload_id,
     partSize,
     partCount,
+    unknownSize: Boolean(file.unknown_size),
     pendingParts,
     completedParts: file.completed_parts ?? [],
   };
 }
 
 export async function createDirectUploadSession(input: CreateDirectUploadSessionInput) {
-  if (input.files.some(file => file.singlePart && file.sizeBytes > 5 * 1024 ** 3)) {
+  if (input.files.some(file => file.singlePart && (file.sizeBytes === undefined || file.sizeBytes > 5 * 1024 ** 3))) {
     throw new WorkspaceIntakeError("Single-part uploads cannot exceed 5 GiB", 400);
   }
   // Workspace Intake's policy screens declared files before any upload target exists.
   const files = input.files.map((file) => ({
     ...file,
+    unknownSize: file.sizeBytes === undefined,
+    sizeBytes: file.sizeBytes ?? 0,
     ...admitIntakeFile(
-      { filename: file.filename, mimeType: file.mimeType, sizeBytes: file.sizeBytes },
+      { filename: file.filename, mimeType: file.mimeType, sizeBytes: file.sizeBytes ?? 0 },
       "direct-upload",
     ),
   }));
@@ -239,6 +253,8 @@ export async function createDirectUploadSession(input: CreateDirectUploadSession
       template_key,
       pipeline,
       tags,
+      api_key_id,
+      allowed_workspace_ids,
       status
     )
     values (
@@ -250,13 +266,15 @@ export async function createDirectUploadSession(input: CreateDirectUploadSession
       ${input.templateKey ?? null},
       ${sql.json(JSON.parse(JSON.stringify(input.pipeline)))},
       ${sql.array(input.tags ?? [])},
-      'pending'
+      ${input.apiKeyId ?? null},
+      ${input.allowedWorkspaceIds ? sql.array([...input.allowedWorkspaceIds]) : null},
+      'initializing'
     )
   `;
 
   for (const file of files) {
     const sourceKey = rawSourceKey(input.userId, file.filename);
-    const isMultipart = !file.singlePart && file.sizeBytes >= MULTIPART_THRESHOLD_BYTES;
+    const isMultipart = file.unknownSize || (!file.singlePart && file.sizeBytes >= MULTIPART_THRESHOLD_BYTES);
     const partSize = isMultipart ? MULTIPART_PART_SIZE_BYTES : null;
     const uploadId = isMultipart
       ? await createMultipartUpload(sourceKey, file.mimeType)
@@ -277,7 +295,8 @@ export async function createDirectUploadSession(input: CreateDirectUploadSession
         status,
         sha256,
         canonical_id,
-        source_path
+        source_path,
+        unknown_size
       )
       values (
         ${fileId},
@@ -292,11 +311,13 @@ export async function createDirectUploadSession(input: CreateDirectUploadSession
         'pending',
         ${file.sha256 ?? null},
         ${file.canonicalId ?? null},
-        ${normalizeUploadPath(file.path)}
+        ${normalizeUploadPath(file.path)},
+        ${file.unknownSize}
       )
     `;
   }
 
+  await sql`update upload_sessions set status = 'pending', next_reconcile_at = now() where id = ${sessionId}`;
   const loaded = await loadDirectUploadSession(sessionId, input.userId);
   if (!loaded) {
     throw new WorkspaceIntakeError("Upload session not found", 404);
@@ -306,102 +327,104 @@ export async function createDirectUploadSession(input: CreateDirectUploadSession
 
 export async function describeDirectUploadSession(
   loaded: LoadedDirectUploadSession,
+  statusOnly = false,
 ) {
   const files = await Promise.all(
-    loaded.files.map(async (file) => await buildDirectUploadFileDescriptor(file)),
+    loaded.files.map(async (file) => statusOnly || ["confirmed", "failed", "aborted"].includes(loaded.session.status) ? { id: file.id, filename: file.filename, mimeType: file.mime_type, sizeBytes: file.size_bytes, mode: file.upload_mode as "single" | "multipart", status: file.status } : await buildDirectUploadFileDescriptor(file)),
   );
   return {
     sessionId: loaded.session.id,
     status: loaded.session.status,
+    result: (loaded.session.result as { payload?: unknown } | null)?.payload ?? null,
+    error: loaded.session.last_error ?? null,
     files,
   };
 }
 
 /** A native key may only operate on sessions created in its organization. */
-export async function directUploadSessionBelongsToOrganization(sessionId: string, userId: string, orgId: string): Promise<boolean> {
+export async function directUploadSessionBelongsToOrganization(sessionId: string, userId: string, orgId: string, allowedWorkspaceIds?: readonly string[] | null): Promise<boolean> {
   const loaded = await loadDirectUploadSession(sessionId, userId);
-  return loaded?.session.org_id === orgId;
+  return loaded?.session.org_id === orgId && (!allowedWorkspaceIds?.length || Boolean(loaded.session.workspace_id && allowedWorkspaceIds.includes(loaded.session.workspace_id)));
 }
 
 export async function getDirectUploadSessionDescription(
   sessionId: string,
   userId: string,
+  statusOnly = false,
 ) {
   const loaded = await loadDirectUploadSession(sessionId, userId);
-  return loaded ? await describeDirectUploadSession(loaded) : null;
+  return loaded ? await describeDirectUploadSession(loaded, statusOnly) : null;
+}
+
+/** Cross-process serialization: the dedicated connection owns the lock until release. */
+export async function withDirectUploadLock<T>(sessionId: string, run: () => Promise<T>): Promise<T> {
+  const connection = await sql.reserve();
+  try {
+    const [lock] = await connection`select pg_try_advisory_lock(hashtextextended(${`upload:${sessionId}`}, 0)) as acquired`;
+    if (!lock?.acquired) throw new WorkspaceIntakeError("Upload session is being finalized; retry shortly", 409);
+    try { return await run(); }
+    finally { await connection`select pg_advisory_unlock(hashtextextended(${`upload:${sessionId}`}, 0))`; }
+  } finally { connection.release(); }
+}
+
+export function validMultipartLayout(parts: Array<{ partNumber: number; sizeBytes: number }>, size: number, partSize: number): boolean {
+  if (!Number.isSafeInteger(size) || size < 0 || parts.length !== toDirectUploadPartCount(size, partSize) || parts.length > 10_000) return false;
+  return parts.every((part, i) => part.partNumber === i + 1 && part.sizeBytes === Math.min(partSize, size - i * partSize));
+}
+
+/** Storage is authoritative: never assemble a caller's unverified part manifest. */
+export async function finalizeDirectUploadFile(file: UploadSessionFileRow, finalSize?: number): Promise<boolean> {
+  if (file.status === "completed") return true;
+  if (file.status !== "pending") return false;
+  if (file.unknown_size && finalSize === undefined) return false;
+  if (finalSize !== undefined) {
+    if (!file.unknown_size && finalSize !== file.size_bytes) throw new WorkspaceIntakeError("Declared upload size cannot change", 400);
+    admitIntakeFile({ filename: file.filename, mimeType: file.mime_type, sizeBytes: finalSize }, "direct-upload");
+    file = { ...file, size_bytes: finalSize };
+    // Persist EOS before provider completion so recovery can verify an already assembled object.
+    await sql`update upload_session_files set size_bytes = ${finalSize}, unknown_size = false where id = ${file.id}`;
+  }
+  try {
+    await verifyCompletedDirectUpload(file);
+  } catch (error) {
+    if (!isStorageNotFound(error) && !(error instanceof WorkspaceIntakeError && error.message.startsWith("No object found"))) throw error;
+    if (file.upload_mode !== "multipart" || !file.upload_id) return false;
+    const parts = await listMultipartUploadParts({ key: file.source_key, uploadId: file.upload_id });
+    if (!validMultipartLayout(parts, file.size_bytes, file.part_size ?? MULTIPART_PART_SIZE_BYTES)) return false;
+    try { await completeMultipartUpload({ key: file.source_key, uploadId: file.upload_id, parts }); }
+    catch (error) { throw multipartCompletionError(error, file.filename); }
+    await verifyCompletedDirectUpload(file);
+    await sql`update upload_session_files set completed_parts = ${sql.json(parts)} where id = ${file.id}`;
+  }
+  await sql`update upload_session_files set status = 'completed', updated_at = now() where id = ${file.id}`;
+  return true;
 }
 
 export async function completeDirectUploadFile(input: CompleteDirectUploadFileInput) {
-  const loaded = await loadDirectUploadSession(input.sessionId, input.userId);
-  if (!loaded) {
-    throw new WorkspaceIntakeError("Upload session not found", 404);
-  }
-
-  const file = loaded.files.find((item) => item.id === input.fileId);
-  if (!file) {
-    throw new WorkspaceIntakeError("Upload file not found", 404);
-  }
-
-  if (file.upload_mode === "multipart") {
-    if (!file.upload_id) {
-      throw new WorkspaceIntakeError(
-        "Multipart upload session file has no upload id; create a new upload session",
-        400,
-      );
-    }
-    if (!input.parts || input.parts.length === 0) {
-      throw new WorkspaceIntakeError(
-        "Multipart completion requires the parts array (partNumber and etag for every uploaded part)",
-        400,
-      );
-    }
-    const expectedParts = toDirectUploadPartCount(
-      file.size_bytes,
-      file.part_size ?? MULTIPART_PART_SIZE_BYTES,
-    );
-    if (input.parts.length !== expectedParts) {
-      throw new WorkspaceIntakeError(
-        `Multipart completion received ${input.parts.length} parts but ${file.filename} needs ${expectedParts}`,
-        400,
-      );
-    }
-    try {
-      await completeMultipartUpload({
-        key: file.source_key,
-        uploadId: file.upload_id,
-        parts: input.parts,
-      });
-    } catch (error) {
-      throw multipartCompletionError(error, file.filename);
-    }
-    await verifyCompletedDirectUpload(file);
-    await sql`
-      update upload_session_files
-      set status = 'completed',
-          completed_parts = ${sql.json(input.parts)}::jsonb,
-          updated_at = now()
-      where id = ${file.id}
-    `;
-  } else {
-    const verified = await verifyCompletedDirectUpload(file);
-    await sql`
-      update upload_session_files
-      set status = 'completed',
-          etag = ${verified.etag ?? input.etag ?? null},
-          updated_at = now()
-      where id = ${file.id}
-    `;
-  }
-
-  await sql`
-    update upload_sessions
-    set status = 'uploading',
-        updated_at = now()
-    where id = ${input.sessionId}
-  `;
+  await withDirectUploadLock(input.sessionId, async () => {
+    const loaded = await loadDirectUploadSession(input.sessionId, input.userId);
+    if (!loaded) throw new WorkspaceIntakeError("Upload session not found", 404);
+    if (["aborted", "failed"].includes(loaded.session.status)) throw new WorkspaceIntakeError("Upload session is closed", 409);
+    const file = loaded.files.find(item => item.id === input.fileId);
+    if (!file) throw new WorkspaceIntakeError("Upload file not found", 404);
+    if (!await finalizeDirectUploadFile(file, input.sizeBytes)) throw new WorkspaceIntakeError("Upload parts are incomplete or have incorrect sizes", 409);
+    await sql`update upload_sessions set next_reconcile_at = now() where id = ${input.sessionId}`;
+  });
 }
 
-export async function abortDirectUploadSession(
+export async function signDirectUploadParts(sessionId: string, userId: string, fileId: string, partNumbers: number[]) {
+  const loaded = await loadDirectUploadSession(sessionId, userId);
+  if (!loaded) throw new WorkspaceIntakeError("Upload session not found", 404);
+  if (!["pending", "uploading"].includes(loaded.session.status)) throw new WorkspaceIntakeError("Upload session is closed", 409);
+  const file = loaded.files.find(item => item.id === fileId);
+  if (!file || file.status !== "pending" || !file.upload_id) throw new WorkspaceIntakeError("Open multipart file not found", 404);
+  return { parts: await Promise.all(partNumbers.map(async partNumber => {
+    if (!Number.isInteger(partNumber) || partNumber < 1 || partNumber > 10_000 || partNumber > Math.max(1, Math.ceil(env.maxUploadBytes / (file.part_size ?? MULTIPART_PART_SIZE_BYTES))) || (!file.unknown_size && partNumber > toDirectUploadPartCount(file.size_bytes, file.part_size ?? MULTIPART_PART_SIZE_BYTES))) throw new WorkspaceIntakeError("Invalid part number", 400);
+    return { partNumber, url: await signMultipartUploadPart({ key: file.source_key, uploadId: file.upload_id!, partNumber }) };
+  })) };
+}
+
+async function abortDirectUploadSessionUnlocked(
   sessionId: string,
   userId: string,
 ): Promise<boolean> {
@@ -410,6 +433,7 @@ export async function abortDirectUploadSession(
     return false;
   }
 
+  if (loaded.session.status === "confirmed" || loaded.session.status === "ingesting") throw new WorkspaceIntakeError("Ingested uploads cannot be aborted", 409);
   for (const file of loaded.files) {
     if (file.upload_mode === "multipart" && file.upload_id) {
       await abortMultipartUpload({
@@ -432,7 +456,12 @@ export async function abortDirectUploadSession(
     where id = ${sessionId}
   `;
 
+  await queueAbandonedDirectUploadCleanup(sessionId);
   return true;
+}
+
+export async function abortDirectUploadSession(sessionId: string, userId: string): Promise<boolean> {
+  return withDirectUploadLock(sessionId, () => abortDirectUploadSessionUnlocked(sessionId, userId));
 }
 
 export function assertDirectUploadSessionReadyForIntake(
@@ -445,7 +474,7 @@ export function assertDirectUploadSessionReadyForIntake(
     );
   }
 
-  if (loaded.session.status === "aborted") {
+  if (["aborted", "failed"].includes(loaded.session.status)) {
     throw new WorkspaceIntakeError("Upload session has been aborted", 409);
   }
 
@@ -532,7 +561,6 @@ async function verifyCompletedDirectUpload(
     "direct-upload",
   );
   if (actualSize !== file.size_bytes) {
-    await deleteUploadedObject(file.source_key).catch(() => undefined);
     throw new WorkspaceIntakeError(
       `Uploaded size for ${file.filename} (${actualSize} bytes) did not match the declared size (${file.size_bytes} bytes)`,
       400,
@@ -567,4 +595,16 @@ function multipartCompletionError(error: unknown, filename: string): unknown {
     default:
       return error;
   }
+}
+
+/** Wait out outstanding signed PUTs before deleting abandoned raw objects. */
+export async function queueAbandonedDirectUploadCleanup(sessionId: string): Promise<void> {
+  await sql`insert into storage_cleanup_queue (kind, org_id, target, payload, artifact_uris, reason, not_before)
+    select 'storage_prefix', coalesce(s.org_id, ''), s.user_id || '/' || s.id || '/',
+      jsonb_build_object('workspaceId', s.workspace_id), array_agg(f.source_key), 'abandoned_upload', now() + interval '16 minutes'
+    from upload_sessions s join upload_session_files f on f.session_id = s.id
+    where s.id = ${sessionId} and s.status in ('aborted', 'failed')
+    group by s.id
+    on conflict (kind, target) do update set artifact_uris = excluded.artifact_uris,
+      not_before = greatest(storage_cleanup_queue.not_before, excluded.not_before)`;
 }

@@ -8,6 +8,7 @@ import {
   HeadBucketCommand,
   HeadObjectCommand,
   PutObjectCommand,
+  paginateListParts,
   S3Client,
   UploadPartCommand
 } from "@aws-sdk/client-s3";
@@ -280,4 +281,20 @@ export async function abortMultipartUpload(args: { key: string; uploadId: string
 /** Readiness probe (`/ready`): HEAD the bucket without creating it. */
 export async function headStorageBucket(signal?: AbortSignal): Promise<void> {
   await s3Client.send(new HeadBucketCommand({ Bucket: env.s3Bucket }), { abortSignal: signal });
+}
+
+/** Consume every provider page; multipart sessions can contain up to 10,000 parts. */
+export async function listMultipartUploadParts(args: { key: string; uploadId: string }) {
+  const parts: Array<{ partNumber: number; etag: string; sizeBytes: number }> = [];
+  for await (const page of paginateListParts({ client: s3Client }, {
+    Bucket: env.s3Bucket, Key: args.key, UploadId: args.uploadId,
+  })) {
+    for (const part of page.Parts ?? []) {
+      if (part.PartNumber === undefined || !part.ETag || part.Size === undefined) {
+        throw new Error("Storage returned incomplete multipart metadata");
+      }
+      parts.push({ partNumber: part.PartNumber, etag: part.ETag, sizeBytes: part.Size });
+    }
+  }
+  return parts;
 }
