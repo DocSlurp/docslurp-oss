@@ -13,6 +13,15 @@ SELECT document_id, sum(octet_length(text))::bigint AS n FROM document_chunks GR
 CREATE TEMP TABLE backfill_document_page_bytes ON COMMIT DROP AS
 SELECT document_id, sum(octet_length(text))::bigint AS n FROM document_pages GROUP BY document_id;
 --> statement-breakpoint
+-- Existing board reads take up to 28s on production's pre-counter schema.
+-- Drain those readers before taking the brief DDL/backfill lock; source scans
+-- above still run without blocking document reads. Keep a bounded acquisition.
+SET LOCAL lock_timeout = '45s';
+--> statement-breakpoint
+LOCK TABLE documents IN ACCESS EXCLUSIVE MODE;
+--> statement-breakpoint
+SET LOCAL lock_timeout = '10s';
+--> statement-breakpoint
 ALTER TABLE documents ADD COLUMN IF NOT EXISTS chunk_text_bytes bigint DEFAULT 0 NOT NULL;
 --> statement-breakpoint
 ALTER TABLE documents ADD COLUMN IF NOT EXISTS stored_page_text_bytes bigint DEFAULT 0 NOT NULL;

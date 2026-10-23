@@ -713,7 +713,7 @@ export async function controlRun(
     // leases it resumes only if it gets a lease; a refusal must not fall
     // through to the operator resume below.
     const outcome = await resumeSpendPausedRunOutcome(run.id);
-    if (outcome.status === "resumed") return getRun(run.id, userId);
+    if (outcome.status === "resumed" || outcome.status === "deferred") return getRun(run.id, userId);
     if (outcome.status === "blocked") {
       const code = (["workspace_budget_paused", "org_budget_paused", "plan_not_entitled"] as const)
         .find((candidate) => candidate === outcome.reason) ?? "credit_exhausted";

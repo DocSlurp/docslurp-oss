@@ -1,5 +1,6 @@
 import { afterEach, expect, it, vi } from "vitest";
 
+const signal = vi.fn();
 const query = vi.fn();
 const describe = vi.fn();
 const withDeadline = vi.fn(async (_deadline: number, fn: () => Promise<unknown>) => fn());
@@ -7,10 +8,10 @@ vi.mock("@temporalio/client", () => ({
   Connection: { connect: vi.fn(async () => ({ withDeadline })) },
   Client: class {
     connection = { withDeadline };
-    workflow = { getHandle: () => ({ query, describe }) };
+    workflow = { getHandle: () => ({ query, describe, signal }) };
   },
 }));
-const { queryPipelineProgress, describePipelineWorkflow } = await import("../lib/temporal.js");
+const { queryPipelineProgress, describePipelineWorkflow, signalPipelineResume } = await import("../lib/temporal.js");
 
 afterEach(() => vi.clearAllMocks());
 
@@ -30,4 +31,12 @@ it("bounds workflow descriptions and retains available progress", async () => {
   withDeadline.mockRejectedValueOnce(new Error("DEADLINE_EXCEEDED"));
   expect(await describePipelineWorkflow("run-1")).toBeNull();
   expect(withDeadline).toHaveBeenCalledTimes(2);
+});
+
+it("bounds the actual resume RPC to five seconds by default", async () => {
+  const start = Date.now();
+  await signalPipelineResume("run-resume");
+  expect(signal).toHaveBeenCalledWith("resume");
+  expect(withDeadline.mock.calls[0]?.[0]).toBeGreaterThanOrEqual(start + 5_000);
+  expect(withDeadline.mock.calls[0]?.[0]).toBeLessThanOrEqual(start + 5_100);
 });

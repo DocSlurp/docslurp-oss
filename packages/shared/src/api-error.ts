@@ -142,8 +142,8 @@ export function apiErrorCodeForStatus(status: number): ApiErrorCode {
   return "internal";
 }
 
-const SAFE_DETAIL_NUMBERS = ["retryAfterSeconds", "limitCents", "spentCents", "maxBytes"] as const;
-const SAFE_DETAIL_LABELS = ["category", "policy", "account"] as const;
+const SAFE_DETAIL_NUMBERS = ["retryAfterSeconds", "limitCents", "spentCents", "maxBytes", "availableCredits", "heldCredits", "chatReserveCredits"] as const;
+const SAFE_DETAIL_LABELS = ["category", "policy", "account", "spendKind"] as const;
 
 /**
  * Where a caller can lift a limit (`details.links` on 402 and 429 responses):

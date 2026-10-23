@@ -1,3 +1,5 @@
+import { requestDocumentPageRender } from "../services/document-page-render.js";
+import { isSpendBlockedError, spendBlockedResponse } from "../services/billing/spend-guard.js";
 import { Hono } from "hono";
 import type { Context } from "hono";
 import { z } from "zod";
@@ -97,6 +99,25 @@ export const documentsRoutes = new Hono()
       return apiStatusError(c, 403, "This endpoint requires a dashboard session or server-side document API");
     }
     await next();
+  })
+  .on(["GET", "POST"],"/:documentId/pages/:pageNumber/image", async (c) => {
+    c.header("Cache-Control", "private, no-store");
+    const raw = c.req.param("pageNumber");
+    if (!/^[1-9][0-9]{0,5}$/.test(raw)) return apiStatusError(c, 404, "Document page not found");
+    try {
+      const result = await requestDocumentPageRender(c.req.param("documentId"), Number(raw), c.get("sessionUser").id, c.req.method === "POST",
+        document => assertApiKeyWorkspaceScope(c.get("apiKey"), document));
+      if (result.status === "busy") { c.header("Retry-After", "5"); return apiStatusError(c, 429, "Page image queue is busy"); }
+      if (result.status === "missing") return apiStatusError(c, 404, "Document page not found");
+      if (result.status === "unavailable") return apiStatusError(c, 409, "Page image unavailable");
+      if (result.status === "pending") { c.header("Retry-After", "2"); return c.json(result, 202); }
+      return c.json(result);
+    } catch (error) {
+      if (isSpendBlockedError(error)) return spendBlockedResponse(c, error);
+      // Scoped keys get the same response as a nonexistent document.
+      if (c.get("apiKey")) return apiStatusError(c, 404, "Document page not found");
+      throw error;
+    }
   })
   .get("/", async (c) => {
     const userId = c.get("sessionUser").id;

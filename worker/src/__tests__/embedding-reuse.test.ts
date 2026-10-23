@@ -139,6 +139,7 @@ type EmbedArgs = {
   text?: string;
   pipeline?: PipelineFeatureOverrides;
   seedEmbeddingsUri?: string;
+  dedupHashes?: ReadonlyMap<string, string>;
   openRouter?: boolean;
   allowFailure?: boolean;
   /** Applied after validation: a pipeline whose hosted route predates a privacy switch. */
@@ -179,6 +180,7 @@ async function runEmbed(args: EmbedArgs) {
     stage: "embed", status: "processing", pipeline, stats: {}, artifacts, spentCents: 0,
   } as unknown as WorkspaceRun;
   const state = WorkflowState.create(run, [document]);
+  for (const [hash, uri] of args.dedupHashes ?? []) state.contentHashes.set(hash, uri);
   if (args.reuse) state.store = { ...checkpointStore(args.reuse), ...args.storeExtras } as unknown as WorkflowState["store"];
   const config = { ...fromEnv(), openRouterApiKey: args.openRouter ? "test-key" : "" };
   const embedCallsBefore = providerCalls.embed.length;
@@ -289,6 +291,28 @@ describe("EmbeddingReuseLookup", () => {
 });
 
 describe("EmbedStage chunk materialization", () => {
+  it("removes stale native and Postgres chunks when reusing an empty embedding artifact", async () => {
+    const storage = new MemoryStorage();
+    const reuse = new MemoryReuseStore();
+    const original = await embedDocument({ storage, reuse, runId: "original", documentId: "original" });
+    // Empty artifacts remain a valid stored shape (for example an earlier parser
+    // result); materializing one is a replacement, not permission to keep old rows.
+    await storage.putJson(original.artifactUri.replace(`s3://${BUCKET}/`, ""), { ...original.artifact, chunks: [] });
+    const calls: string[] = [];
+    const result = await embedDocument({
+      storage, reuse, runId: "run-empty", documentId: "empty", dedupHashes: original.state.contentHashes,
+      storeExtras: {
+        insertChunks: async (chunks: unknown[]) => { calls.push(`insert:${chunks.length}`); },
+        staleDocumentChunkIds: async (_id: string, keep: readonly string[]) => { expect(keep).toEqual([]); return ["empty-000"]; },
+        deleteStaleDocumentChunks: async (_id: string, keep: readonly string[]) => { expect(keep).toEqual([]); calls.push("prune"); },
+        markDocumentLexicalSearchable: async () => { calls.push("mark"); },
+      },
+      deleteVectors: async (_uri, _table, ids) => { expect(ids).toEqual(["empty-000"]); calls.push("lance"); },
+    });
+    expect(result.artifact.chunks).toEqual([]);
+    expect(calls).toEqual(["insert:0", "lance", "prune"]);
+  });
+
   it("publishes complete keyword chunks before embedding when early publication is enabled", async () => {
     vi.stubEnv("DOCSLURP_EARLY_LEXICAL_CHUNKS", "on");
     const calls: string[] = [];

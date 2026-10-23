@@ -105,6 +105,33 @@ describe("credit leases (app)", () => {
     expect(await paused.sweepSpendPausedRuns({ sql: sql as never, signals, orgId: "other" })).toEqual({ resumed: 0, stillBlocked: 0 });
   });
 
+  it("keeps the durable pause and lease unchanged after failed resume delivery, then retries once", async () => {
+    await sql`insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, pipeline, control_state, pause_reason)
+      values ('delivery', 'o1', 'u1', 'w', 'bulk-upload', 'processing', 'vision-extract', '{}', 'paused', 'credit_exhausted')`;
+    signals.resume.mockRejectedValueOnce(new Error("Temporal unavailable"));
+    expect(await paused.resumeSpendPausedRunOutcome("delivery", { sql: sql as never, signals })).toEqual({ status: "deferred" });
+    expect((await sql`select control_state, pause_reason from workspace_runs where id = 'delivery'`)[0]).toMatchObject({ control_state: "paused", pause_reason: "credit_exhausted" });
+    expect(await outstanding()).toBe(0);
+    expect(await sql`select id from workspace_run_events where run_id = 'delivery'`).toHaveLength(0);
+    expect(await paused.resumeSpendPausedRunOutcome("delivery", { sql: sql as never, signals })).toEqual({ status: "resumed" });
+    expect(await paused.resumeSpendPausedRunOutcome("delivery", { sql: sql as never, signals })).toEqual({ status: "not-spend-paused" });
+    expect(signals.resume).toHaveBeenCalledTimes(2);
+    expect(await sql`select id from workspace_run_events where run_id = 'delivery'`).toHaveLength(1);
+  });
+
+  it("observes funding and paused-run recovery through the real alert snapshot query", async () => {
+    const before = process.env.DOCSLURP_BILL_STORAGE;
+    process.env.DOCSLURP_BILL_STORAGE = "true";
+    try {
+      await sql`select grant_org_credits('o1', 'promo', 'funding-recovery-snapshot', 1000, 'u1', '{}'::jsonb)`;
+      const { readCreditSnapshots } = await import("../services/alerts/credit-alerts.js");
+      expect(await readCreditSnapshots()).toEqual(expect.arrayContaining([expect.objectContaining({ orgId: "o1", funded: true, available: 1000.6, pausedRuns: 0 })]));
+    } finally {
+      if (before === undefined) delete process.env.DOCSLURP_BILL_STORAGE;
+      else process.env.DOCSLURP_BILL_STORAGE = before;
+    }
+  });
+
   it("parses org_spend_changed payloads defensively", () => {
     expect(paused.orgIdFromSpendChangedPayload(JSON.stringify({ orgId: "o1", reason: "org" }))).toBe("o1");
     expect(paused.orgIdFromSpendChangedPayload("not json")).toBeNull();

@@ -9,6 +9,7 @@ import { createRequire } from "node:module";
 import { existsSync, readFileSync } from "node:fs";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import { migrationFailureDetail } from "./migration-error.mjs";
 
 const MIGRATION_LOCK_KEY = 7_142_771_001; // arbitrary, stable app-wide key
 
@@ -98,8 +99,7 @@ try {
   if (output) console.log(output.split("\n").filter((line) => !/applying migrations\.\.\./.test(line)).join("\n"));
   console.log(`[migrate] complete in ${Date.now() - started}ms`);
 } catch (error) {
-  const detail = error && typeof error === "object" && "stderr" in error ? String(error.stderr) : "";
-  console.error(`[migrate] failed: ${error instanceof Error ? error.message : String(error)}${detail ? `\n${detail}` : ""}`);
+  console.error(`[migrate] failed: ${migrationFailureDetail(error)}`);
   process.exitCode = 1;
 } finally {
   await client.query("select pg_advisory_unlock($1)", [MIGRATION_LOCK_KEY]).catch(() => {});

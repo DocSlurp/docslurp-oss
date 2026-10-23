@@ -1,5 +1,4 @@
 import {
-  PUBLIC_ERROR_MESSAGES,
   publicDocumentError,
   parseStoredPipelineFeatures,
   defaultPipelineFeatures,
@@ -117,7 +116,7 @@ export function mapWorkspaceRun(row: WorkspaceRunRow, cost?: Pick<RunUsageCostSu
     status: row.status,
     priority: row.priority ?? 0,
     controlState: row.control_state ?? null,
-    pauseReason: row.pause_reason ? PUBLIC_ERROR_MESSAGES.paused : null,
+    pauseReason: ["credit_exhausted", "workspace_budget_paused", "org_budget_paused", "plan_not_entitled"].includes(row.pause_reason ?? "") ? row.pause_reason : null,
     controlRequestedAt: serializeOptionalTimestamp(row.control_requested_at),
     stage: row.stage,
     totalDocuments: row.total_documents,
