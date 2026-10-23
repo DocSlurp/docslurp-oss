@@ -11,7 +11,8 @@ const getWorkspace = vi.fn();
 const listWorkspaces = vi.fn();
 const uploadRequest = vi.fn();
 const loadDirectUploadSession = vi.fn();
-vi.mock("../services/direct-upload-session.js", () => ({ loadDirectUploadSession }));
+const describeDirectUploadSession = vi.fn();
+vi.mock("../services/direct-upload-session.js", () => ({ loadDirectUploadSession, describeDirectUploadSession }));
 
 const loadMediaEvidence = vi.fn();
 vi.mock("../services/media-evidence.js", () => ({ loadMediaEvidence }));
@@ -134,14 +135,14 @@ describe("mcpRoutes", () => {
     expect(call.path).toBe("/direct/sessions");
     expect(call.body.workspace).toBe("ws-1");
     expect(call.body.files).toHaveLength(10);
-    expect(call.body.files.every((file: { singlePart: boolean }) => file.singlePart)).toBe(true);
+    expect(call.body.files.every((file: { singlePart?: boolean }) => file.singlePart === undefined)).toBe(true);
   });
 
   it("preserves an explicitly named new workspace for signed-upload completion", async () => {
     validateApiKey.mockResolvedValue({ ...validatedKey, scopes: ["ingest"] });
     const response = await app.request("/mcp/tools/upload", { method: "POST", headers: { Authorization: "Bearer key", "Content-Type": "application/json" }, body: JSON.stringify({ workspace: "Legal contracts", files: [{ filename: "contract.pdf", sizeBytes: 42, mimeType: "application/pdf" }] }) });
     expect(response.status).toBe(201);
-    expect(uploadRequest.mock.lastCall![0].body).toEqual({ workspace: "Legal contracts", files: [{ filename: "contract.pdf", sizeBytes: 42, mimeType: "application/pdf", singlePart: true }] });
+    expect(uploadRequest.mock.lastCall![0].body).toEqual({ workspace: "Legal contracts", files: [{ filename: "contract.pdf", sizeBytes: 42, mimeType: "application/pdf" }] });
   });
 
   it("completes every signed file before confirming ingestion, checking ownership and session state", async () => {
@@ -168,6 +169,22 @@ describe("mcpRoutes", () => {
     loadDirectUploadSession.mockResolvedValue({ ...loaded, files: [...loaded.files, { id: "missing", upload_mode: "single" }] });
     expect((await request()).status).toBe(400);
     expect(uploadRequest).not.toHaveBeenCalled();
+  });
+
+  it("follows automatic upload sessions without exposing foreign sessions", async () => {
+    const sessionId = "11111111-1111-4111-8111-111111111111";
+    const loaded = { session: { id: sessionId, user_id: "user-1", org_id: "org-1", workspace_id: "ws-1", status: "confirmed" }, files: [] };
+    loadDirectUploadSession.mockResolvedValue(loaded);
+    describeDirectUploadSession.mockResolvedValue({ sessionId, status: "confirmed", result: { workspace: { id: "ws-1" }, run: { id: "run-1" } }, files: [] });
+    const request = () => app.request("/mcp/tools/getUploadStatus", { method: "POST", headers: { Authorization: "Bearer key", "Content-Type": "application/json" }, body: JSON.stringify({ sessionId }) });
+    const response = await request();
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ sessionId, result: { run: { id: "run-1" } } });
+    expect(loadDirectUploadSession).toHaveBeenCalledWith(sessionId, "user-1");
+    loadDirectUploadSession.mockResolvedValue({ ...loaded, session: { ...loaded.session, org_id: "foreign" } });
+    expect((await request()).status).toBe(404);
+    loadDirectUploadSession.mockResolvedValue({ ...loaded, session: { ...loaded.session, workspace_id: "foreign" } });
+    expect((await request()).status).toBe(404);
   });
 
   it("refuses upload without ingest scope or outside the credential workspace allowlist", async () => {

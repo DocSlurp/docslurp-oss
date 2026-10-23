@@ -107,7 +107,7 @@ const mcpAdapterRoutes = new Hono()
       headers.set("Content-Type", "application/json");
       return native.request(`http://mcp.internal/${input.urls ? "url" : "direct/sessions"}`, {
         method: "POST", headers, body: JSON.stringify({ workspace: input.workspace,
-          ...(input.urls ? { urls: input.urls } : { files: input.files!.map(file => ({ ...file, singlePart: true })) }),
+          ...(input.urls ? { urls: input.urls } : { files: input.files }),
         }), signal: c.req.raw.signal,
       });
     }
@@ -195,6 +195,15 @@ const mcpAdapterRoutes = new Hono()
     if (toolId === "getUploadStatus") {
       const parsed = uploadStatusInput.safeParse(body);
       if (!parsed.success) return invalidInput(c, parsed.error);
+      if (parsed.data.sessionId) {
+        const { loadDirectUploadSession, describeDirectUploadSession } = await import("./direct-upload-session.js");
+        const loaded = await loadDirectUploadSession(parsed.data.sessionId, actor.userId);
+        if (!loaded || (apiKey && (loaded.session.org_id !== apiKey.orgId ||
+          (loaded.session.workspace_id ? !await loadActorScopedWorkspace(loaded.session.workspace_id, actor) : Boolean(apiKey.workspaceIds?.length))))) {
+          return adapterError(c, 404, "Upload session not found");
+        }
+        return c.json({ tool: toolId, ...await describeDirectUploadSession(loaded) });
+      }
       const workspace = await loadActorScopedWorkspace(
         await resolveActorWorkspaceId(c.get("requestActor"), parsed.data.workspace),
         actor,
