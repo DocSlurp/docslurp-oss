@@ -269,12 +269,10 @@ export type UploadOptions = RequestOptions & {
   path?: string;
   indexingMode?: IndexingMode;
   /**
-   * How files reach storage. "auto" (default) sends uploads larger than
-   * DIRECT_UPLOAD_THRESHOLD_BYTES through a direct upload session (presigned
-   * PUTs straight to object storage); smaller ones use one multipart request
-   * to /v1/uploads/bulk, which the server caps at MAX_MULTIPART_UPLOAD_BYTES
-   * (25 MB by default). Streams always use multipart. Direct sessions ignore
-   * idempotencyKey.
+   * "auto" (default) uses presigned storage PUTs: single PUT for small files,
+   * multipart for large files and unknown-size streams. The server starts
+   * ingestion automatically. false uses the size-limited /v1/uploads/bulk
+   * compatibility transport. Direct sessions ignore idempotencyKey.
    */
   directUpload?: "auto" | boolean;
   filename?: string;
@@ -632,8 +630,8 @@ function apiErrorEnvelope(body: unknown): { code?: string; requestId?: string; l
 }
 
 /**
- * Uploads above this total size go through a direct upload session instead of
- * multipart /v1/uploads/bulk (server cap: MAX_MULTIPART_UPLOAD_BYTES, 25 MB).
+ * Legacy bulk-transport cutoff retained for callers that use this constant.
+ * Automatic uploads now use direct sessions for every known-size file.
  */
 export const DIRECT_UPLOAD_THRESHOLD_BYTES = 20 * 1024 * 1024;
 
@@ -652,10 +650,10 @@ export type DirectUploadDescriptor = {
 };
 
 export type UploadSessionInput = Omit<UploadInput, "files" | "idempotencyKey"> & {
-  files: Array<{ filename: string; mimeType: string; sizeBytes: number; canonicalId?: string; singlePart?: boolean }>;
+  files: Array<{ filename: string; mimeType: string; sizeBytes?: number; canonicalId?: string; singlePart?: boolean }>;
 };
-export type UploadSession = { sessionId: string; status: string; files: DirectUploadDescriptor[] };
-export type CompleteUploadFileInput = { fileId: string; etag?: string; parts?: Array<{ partNumber: number; etag: string }> };
+export type UploadSession = { sessionId: string; status: string; files: DirectUploadDescriptor[]; result?: UploadResponse | null };
+export type CompleteUploadFileInput = { fileId: string; sizeBytes?: number; etag?: string; parts?: Array<{ partNumber: number; etag: string }> };
 
 function normalizeApiUrl(apiUrl: string): string {
   return apiUrl.replace(/\/+$/, "");
@@ -1138,6 +1136,17 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
     if ("urls" in input) return uploadUrls({ ...input, ...options }, options);
     if (Array.isArray(input)) input = { files: input };
     const metadata = "files" in input ? { ...input, ...options } : options;
+    if ("data" in input && input.data instanceof ReadableStream && options.directUpload !== false) {
+      const reader = input.data.getReader();
+      const source: UploadByteStream = {
+        async *[Symbol.asyncIterator]() {
+          try { while (true) { const next = await reader.read(); if (next.done) break; yield next.value; } }
+          finally { await reader.cancel().catch(() => {}); reader.releaseLock(); }
+        },
+        destroy() { void reader.cancel().catch(() => {}); },
+      };
+      return uploadStreamDirect(source, metadata, { ...options, filename: options.filename ?? input.filename, canonicalId: options.canonicalId ?? input.canonicalId, path: options.path ?? input.path });
+    }
     const fields: Record<string, string> = {};
     if (metadata.orgId) fields.orgId = metadata.orgId;
     if (metadata.tags) fields.tags = JSON.stringify(metadata.tags);
@@ -1150,6 +1159,9 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
     if (metadata.indexingMode) fields.indexingMode = metadata.indexingMode;
     const headers = new Headers();
     if (metadata.idempotencyKey) headers.set("Idempotency-Key", metadata.idempotencyKey);
+    if (Symbol.asyncIterator in input && options.directUpload !== false) {
+      return uploadStreamDirect(input, metadata, options);
+    }
     if (Symbol.asyncIterator in input) {
       const stream = multipartStream(input, options.filename ?? streamFilename(input), fields);
       try {
@@ -1160,13 +1172,18 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
       } finally { stream.dispose(); }
     }
     const files = "files" in input ? input.files : [input];
+    if (files.length === 1 && "data" in files[0] && files[0].data instanceof ReadableStream && options.directUpload !== false) {
+      return upload(files[0], { ...metadata, ...options });
+    }
+    if (options.directUpload !== false && files.some((file) => "data" in file && file.data instanceof ReadableStream)) {
+      throw new TypeError("Upload ReadableStream files individually to keep transfers bounded in memory.");
+    }
     const blobs = await Promise.all(files.map((file) => fileDataFor(file)));
     const names = files.map((file, index) => options.filename ?? fileNameFor(file, index));
     const canonicalIds = files.map((file) => ("data" in file && file.canonicalId) || null);
     const paths = files.map((file, index) => ("data" in file && file.path) || (index === 0 && files.length === 1 ? options.path ?? "" : ""));
-    const totalBytes = blobs.reduce((sum, blob) => sum + blob.size, 0);
     const mode = options.directUpload ?? "auto";
-    if (mode === true || (mode === "auto" && totalBytes > DIRECT_UPLOAD_THRESHOLD_BYTES)) {
+    if (mode !== false) {
       return uploadDirect({ blobs, names, canonicalIds: canonicalIds.map((id, index) => id || (index === 0 && files.length === 1 ? options.canonicalId ?? null : null)), paths, metadata, target }, options);
     }
     const form = new FormData();
@@ -1178,20 +1195,125 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
     return request<UploadResponse>("/v1/uploads/bulk", { body: form, headers, method: "POST" }, options, Boolean(metadata.idempotencyKey));
   }
 
+  async function waitUploadSession(path: string, options: UploadOptions): Promise<UploadResponse> {
+    const bound = deadline(options.timeoutMs ?? 30 * 60_000, options.signal);
+    try {
+      while (true) {
+        const session = await request<UploadSession>(`${path}?statusOnly=true`, {}, { ...options, signal: bound.signal }, true);
+        if (session.result) return session.result;
+        if (["failed", "aborted", "expired"].includes(session.status)) throw new Error(`Upload session ${session.status}`);
+        await sleep(250, bound.signal);
+      }
+    } finally { bound.dispose(); }
+  }
+
+  async function uploadStreamDirect(source: UploadByteStream, metadata: UploadOptions, options: UploadOptions): Promise<UploadResponse> {
+    const bound = deadline(options.timeoutMs ?? 30 * 60_000, options.signal);
+    const stopped = new AbortController();
+    const signal = AbortSignal.any([bound.signal, stopped.signal]);
+    const transferOptions = { ...options, signal };
+    const iterator = source[Symbol.asyncIterator]();
+    const close = () => { source.destroy?.(); void iterator.return?.().catch(() => {}); };
+    signal.addEventListener("abort", close, { once: true });
+    const observable = source as UploadByteStream & { on?: (event: string, listener: (error: Error) => void) => unknown; off?: (event: string, listener: (error: Error) => void) => unknown };
+    const onSourceError = (error: Error) => stopped.abort(error);
+    observable.on?.("error", onSourceError);
+    let sessionPath: string | undefined;
+    const active = new Set<Promise<void>>();
+    let failure: unknown;
+    try {
+      signal.throwIfAborted();
+      const session = await request<UploadSession>("/v1/uploads/direct/sessions", jsonRequest("POST", {
+        ...intakeTarget(metadata), orgId: metadata.orgId, tags: metadata.tags,
+        templateKey: metadata.templateKey, indexingMode: metadata.indexingMode,
+        files: [{ filename: options.filename ?? streamFilename(source), mimeType: "application/octet-stream",
+          canonicalId: options.canonicalId, path: options.path }],
+      }), transferOptions);
+      sessionPath = `/v1/uploads/direct/sessions/${encodeURIComponent(session.sessionId)}`;
+      const descriptor = session.files[0];
+      if (!descriptor || descriptor.mode !== "multipart") throw new Error("Stream upload requires a multipart session");
+      const partSize = descriptor.partSize ?? 8 * 1024 * 1024;
+      if (!Number.isSafeInteger(partSize) || partSize < 1) throw new Error("Invalid upload part size");
+      const parts: Array<{ partNumber: number; etag: string }> = [];
+      let buffer = new Uint8Array(partSize);
+      let used = 0;
+      let sizeBytes = 0;
+      let partNumber = 0;
+      const send = async (bytes: Uint8Array) => {
+        if (failure) throw failure;
+        signal.throwIfAborted();
+        const number = ++partNumber;
+        if (number > 10_000) throw new RangeError("Stream exceeds the multipart upload part limit");
+        const signed = await request<{ parts: Array<{ partNumber: number; url: string }> }>(`${sessionPath}/files/${encodeURIComponent(descriptor.id)}/parts/sign`, jsonRequest("POST", { partNumbers: [number] }), transferOptions);
+        const url = signed.parts.find((part) => part.partNumber === number)?.url;
+        if (!url) throw new Error(`No upload URL for part ${number}`);
+        const task = putToStorage(url, new Blob([bytes as Uint8Array<ArrayBuffer>]), undefined, transferOptions).then((etag) => {
+          if (!etag) throw new Error(`Storage returned no ETag for part ${number}`);
+          parts.push({ partNumber: number, etag });
+        }).catch((error) => { failure ??= error; }).finally(() => { active.delete(task); });
+        active.add(task);
+        if (active.size >= 3) await Promise.race(active);
+        if (failure) throw failure;
+      };
+      while (true) {
+        // Abort even when a custom source's next() never resolves.
+        const next = await new Promise<IteratorResult<Uint8Array | string>>((resolve, reject) => {
+          const abort = () => reject(signal.reason);
+          signal.addEventListener("abort", abort, { once: true });
+          if (signal.aborted) abort();
+          else Promise.resolve(iterator.next()).then(resolve, reject).finally(() => signal.removeEventListener("abort", abort));
+        });
+        if (next.done) break;
+        if (typeof next.value !== "string" && !(next.value instanceof Uint8Array)) throw new TypeError("Upload stream must yield strings or Uint8Array chunks.");
+        const bytes = typeof next.value === "string" ? new TextEncoder().encode(next.value) : next.value;
+        for (let offset = 0; offset < bytes.length;) {
+          const count = Math.min(partSize - used, bytes.length - offset);
+          buffer.set(bytes.subarray(offset, offset + count), used);
+          used += count; offset += count; sizeBytes += count;
+          if (used === partSize) { await send(buffer); buffer = new Uint8Array(partSize); used = 0; }
+        }
+      }
+      if (used || !partNumber) await send(buffer.subarray(0, used));
+      await Promise.all(active);
+      if (failure) throw failure;
+      parts.sort((a, b) => a.partNumber - b.partNumber);
+      await request(`${sessionPath}/files/complete`, jsonRequest("POST", { fileId: descriptor.id, sizeBytes, parts }), transferOptions);
+      return await waitUploadSession(sessionPath, transferOptions);
+    } catch (error) {
+      stopped.abort(error);
+      close();
+      await Promise.all(active);
+      if (sessionPath) await request(`${sessionPath}/abort`, { method: "POST" }, { timeoutMs: 10_000 }).catch(() => {});
+      throw error;
+    } finally { close(); observable.off?.("error", onSourceError); signal.removeEventListener("abort", close); bound.dispose(); }
+  }
+
   /** PUT to a presigned storage URL: no API credentials, its own long deadline. */
   async function putToStorage(url: string, body: Blob, contentType: string | undefined, options: UploadOptions): Promise<string | null> {
     const bound = deadline(positiveDuration(options.timeoutMs ?? 30 * 60_000, "timeoutMs"), options.signal);
     try {
-      const response = await fetchImpl(url, {
-        method: "PUT",
-        body,
-        credentials: "omit",
-        headers: contentType ? { "Content-Type": contentType } : undefined,
-        signal: bound.signal,
-      });
-      if (!response.ok) throw new DocSlurpApiError(publicHttpError(response.status), response.status, await response.text().catch(() => ""));
-      await response.body?.cancel().catch(() => {});
-      return response.headers.get("etag");
+      for (let attempt = 0; ; attempt++) {
+        let response: Response;
+        try { response = await fetchImpl(url, {
+          method: "PUT",
+          body,
+          credentials: "omit",
+          headers: contentType ? { "Content-Type": contentType } : undefined,
+          signal: bound.signal,
+        }); } catch (error) {
+          if (attempt >= 2 || bound.signal.aborted) throw error;
+          await sleep(250 * 2 ** attempt, bound.signal);
+          continue;
+        }
+        if (attempt < 2 && [408, 429, 500, 502, 503, 504].includes(response.status)) {
+          await response.body?.cancel().catch(() => {});
+          await sleep(250 * 2 ** attempt, bound.signal);
+          continue;
+        }
+        if (!response.ok) throw new DocSlurpApiError(publicHttpError(response.status), response.status, await response.text().catch(() => ""));
+        await response.body?.cancel().catch(() => {});
+        return response.headers.get("etag");
+      }
     } catch (error) {
       if (bound.signal.aborted) throw bound.signal.reason;
       throw error;
@@ -1200,7 +1322,7 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
     }
   }
 
-  /** Large uploads: create a session, PUT each file (or its parts) to storage, then confirm. */
+  /** Transfer known-size files; the server reconciles storage and starts ingestion. */
   async function uploadDirect(args: {
     blobs: Blob[];
     names: string[];
@@ -1213,6 +1335,7 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
     const session = await request<{ sessionId: string; files: DirectUploadDescriptor[] }>("/v1/uploads/direct/sessions", jsonRequest("POST", {
       ...(metadata.orgId ? { orgId: metadata.orgId } : {}),
       ...(metadata.tags ? { tags: metadata.tags } : {}),
+      ...(metadata.indexingMode ? { indexingMode: metadata.indexingMode } : {}),
       ...(args.target.workspace ? { workspace: args.target.workspace } : {}),
       ...(args.target.newWorkspace ? { newWorkspace: true } : {}),
       ...(metadata.templateKey ? { templateKey: metadata.templateKey } : {}),
@@ -1232,20 +1355,16 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
         const source = at < 0 ? undefined : remaining.splice(at, 1)[0];
         if (!source) throw new Error(`Direct upload session returned an unknown file: ${descriptor.filename}`);
         if (descriptor.mode === "single") {
-          const etag = await putToStorage(descriptor.putUrl ?? "", source.blob, descriptor.mimeType, options);
-          await request(`${sessionPath}/files/complete`, jsonRequest("POST", { fileId: descriptor.id, ...(etag ? { etag } : {}) }), options);
+          await putToStorage(descriptor.putUrl ?? "", source.blob, descriptor.mimeType, options);
           continue;
         }
-        const parts: Array<{ partNumber: number; etag: string }> = [];
         for (const part of descriptor.pendingParts ?? []) {
           const start = (part.partNumber - 1) * (descriptor.partSize ?? part.sizeBytes);
-          const etag = await putToStorage(part.url, source.blob.slice(start, start + part.sizeBytes), undefined, options);
-          if (!etag) throw new Error(`Storage returned no ETag for ${descriptor.filename} part ${part.partNumber}`);
-          parts.push({ partNumber: part.partNumber, etag });
+          await putToStorage(part.url, source.blob.slice(start, start + part.sizeBytes), undefined, options);
         }
-        await request(`${sessionPath}/files/complete`, jsonRequest("POST", { fileId: descriptor.id, parts }), options);
+
       }
-      return await request<UploadResponse>(`${sessionPath}/confirm`, { method: "POST" }, options);
+      return await waitUploadSession(sessionPath, options);
     } catch (error) {
       await request(`${sessionPath}/abort`, { method: "POST" }, { timeoutMs: 10_000 }).catch(() => {});
       throw error;
@@ -1461,6 +1580,9 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
     },
     completeUploadFile(sessionId: string, input: CompleteUploadFileInput, options?: RequestOptions): Promise<{ ok: boolean }> {
       return request(`/v1/uploads/direct/sessions/${encodeURIComponent(sessionId)}/files/complete`, jsonRequest("POST", input), options);
+    },
+    signUploadParts(sessionId: string, fileId: string, partNumbers: number[], options?: RequestOptions): Promise<{ parts: Array<{ partNumber: number; url: string }> }> {
+      return request(`/v1/uploads/direct/sessions/${encodeURIComponent(sessionId)}/files/${encodeURIComponent(fileId)}/parts/sign`, jsonRequest("POST", { partNumbers }), options);
     },
     completeUploadSession(sessionId: string, options?: RequestOptions): Promise<UploadResponse> {
       return request(`/v1/uploads/direct/sessions/${encodeURIComponent(sessionId)}/confirm`, { method: "POST" }, options);

@@ -101,7 +101,7 @@ test("browser use needs no process global and ignores browser process shims", as
     });
     const sdk = factory();
     await sdk.getRun("run");
-    await sdk.upload({ files: [new File(["text"], "note.txt")] });
+    await sdk.upload({ files: [new File(["text"], "note.txt")] }, { directUpload: false });
   }
 });
 
@@ -118,7 +118,7 @@ test("ingestion workspace precedence is per-call, client, environment, then the 
           }, { workspace: configuredWorkspace });
           // Repeat calls to prove returned workspaces do not become implicit defaults.
           for (let attempt = 0; attempt < 2; attempt++) {
-            await sdk.upload({ files: [new File(["text"], "note.txt")], workspace: perCallWorkspace });
+            await sdk.upload({ files: [new File(["text"], "note.txt")], workspace: perCallWorkspace }, { directUpload: false });
             await sdk.ingestUrls({ urls: ["https://example.test/note.txt"], workspace: perCallWorkspace });
           }
         }
@@ -152,8 +152,8 @@ test("a named workspace is sent as workspace; templateKey or newWorkspace withou
       }
       return json({ workspace: { id: "returned-workspace" }, run: { id: "run", status: "queued" } });
     }, { workspace: "client-workspace" });
-    await sdk.upload({ files: [new File(["text"], "note.txt")], ...options });
-    await sdk.upload(new Blob(["text"]), options);
+    await sdk.upload({ files: [new File(["text"], "note.txt")], ...options }, { directUpload: false });
+    await sdk.upload(new Blob(["text"]), { ...options, directUpload: false });
     await sdk.ingestUrls({ urls: ["https://example.test/note.txt"], ...options });
     assert.deepEqual(seen, [expected, expected, expected], JSON.stringify(options));
   }
@@ -170,7 +170,7 @@ test("upload sends named file, bearer key and workspace without pipeline options
     assert.equal(init.body.has("pipeline"), false);
     return json({ run: { id: "run", status: "queued" }, workspace: { id: "workspace" } });
   });
-  const result = await sdk.upload({ files: [{ filename: "policy.pdf", data: new Blob(["PDF bytes"]) }], workspace: "workspace" });
+  const result = await sdk.upload({ files: [{ filename: "policy.pdf", data: new Blob(["PDF bytes"]) }], workspace: "workspace" }, { directUpload: false });
   assert.equal(result.run.id, "run");
 });
 
@@ -180,9 +180,9 @@ test("upload accepts a file array, a single file input and streamed data", async
     uploads.push(await Promise.all(init.body.getAll("files").map(async (f) => [f.name, await f.text()])));
     return json({ run: { id: "run" } });
   });
-  await sdk.upload([new Blob(["a"]), { filename: "b.txt", data: new Blob(["b"]) }]);
-  await sdk.upload({ filename: "c.txt", data: new Blob(["c"]) });
-  await sdk.upload({ filename: "d.txt", data: new Blob(["streamed"]).stream() });
+  await sdk.upload([new Blob(["a"]), { filename: "b.txt", data: new Blob(["b"]) }], { directUpload: false });
+  await sdk.upload({ filename: "c.txt", data: new Blob(["c"]) }, { directUpload: false });
+  await sdk.upload({ filename: "d.txt", data: new Blob(["streamed"]).stream() }, { directUpload: false });
   assert.deepEqual(uploads, [
     [["document-1", "a"], ["b.txt", "b"]],
     [["c.txt", "c"]],
@@ -311,7 +311,7 @@ test("AI calls and unkeyed uploads never retry; keyed upload can retry", async (
     assert.equal(init.headers.get("idempotency-key"), "once");
     return ++calls === 1 ? json({}, 503, { "retry-after": "0" }) : json({ run: { id: "run" } });
   });
-  await sdk.upload({ files: [new Blob(["data"])], idempotencyKey: "once" });
+  await sdk.upload({ files: [new Blob(["data"])], idempotencyKey: "once" }, { directUpload: false });
   assert.equal(calls, 2);
 });
 

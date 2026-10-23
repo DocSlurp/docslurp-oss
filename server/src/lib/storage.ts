@@ -8,6 +8,7 @@ import {
   HeadBucketCommand,
   HeadObjectCommand,
   PutObjectCommand,
+  paginateListParts,
   S3Client,
   UploadPartCommand
 } from "@aws-sdk/client-s3";
@@ -16,8 +17,11 @@ import type { Readable } from "node:stream";
 
 import { env } from "../config.js";
 import { resolveS3ClientTuning, s3ClientConfig } from "@docslurp/shared";
+import { uploadSigningTarget } from "./upload-signing-target.js";
 
 const s3Client = instrumentS3Client(new S3Client(s3ClientConfig(env.storage)), env.storage.endpoint);
+const uploadTarget = uploadSigningTarget(env.storage, process.env.DOCSLURP_STORAGE_PUBLIC_BUCKET_URL);
+const presignClient = process.env.DOCSLURP_STORAGE_PUBLIC_BUCKET_URL ? new S3Client(uploadTarget.config) : s3Client;
 
 let bucketReadyPromise: Promise<void> | null = null;
 
@@ -185,9 +189,9 @@ export async function signMultipartUploadPart(args: {
 }): Promise<string> {
   await ensureBucketExists();
   return await getSignedUrl(
-    s3Client,
+    presignClient,
     new UploadPartCommand({
-      Bucket: env.s3Bucket,
+      Bucket: uploadTarget.bucket,
       Key: args.key,
       UploadId: args.uploadId,
       PartNumber: args.partNumber
@@ -203,9 +207,9 @@ export async function signSingleUploadPut(args: {
 }): Promise<string> {
   await ensureBucketExists();
   return await getSignedUrl(
-    s3Client,
+    presignClient,
     new PutObjectCommand({
-      Bucket: env.s3Bucket,
+      Bucket: uploadTarget.bucket,
       Key: args.key,
       ContentType: args.contentType
     }),
@@ -280,4 +284,20 @@ export async function abortMultipartUpload(args: { key: string; uploadId: string
 /** Readiness probe (`/ready`): HEAD the bucket without creating it. */
 export async function headStorageBucket(signal?: AbortSignal): Promise<void> {
   await s3Client.send(new HeadBucketCommand({ Bucket: env.s3Bucket }), { abortSignal: signal });
+}
+
+/** Consume every provider page; multipart sessions can contain up to 10,000 parts. */
+export async function listMultipartUploadParts(args: { key: string; uploadId: string }) {
+  const parts: Array<{ partNumber: number; etag: string; sizeBytes: number }> = [];
+  for await (const page of paginateListParts({ client: s3Client }, {
+    Bucket: env.s3Bucket, Key: args.key, UploadId: args.uploadId,
+  })) {
+    for (const part of page.Parts ?? []) {
+      if (part.PartNumber === undefined || !part.ETag || part.Size === undefined) {
+        throw new Error("Storage returned incomplete multipart metadata");
+      }
+      parts.push({ partNumber: part.PartNumber, etag: part.ETag, sizeBytes: part.Size });
+    }
+  }
+  return parts;
 }

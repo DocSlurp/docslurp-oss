@@ -15,6 +15,11 @@ import {
   type WorkspaceTemplateKey,
 } from "@docslurp/shared";
 
+import { sql } from "../db.js";
+import { discardUnstartedRun } from "./run-creation.js";
+import { mapDocument, mapWorkspaceRun, type DocumentRow, type WorkspaceRunRow } from "./run-records.js";
+import { getWorkspace } from "./workspaces.js";
+
 import { enforceRequestContentLength } from "../lib/upload-policy.js";
 import {
   getCachedIdempotentResponse,
@@ -22,8 +27,9 @@ import {
   storeIdempotentResponse,
 } from "./idempotency.js";
 import {
-  markDirectUploadSessionConfirmed,
   prepareDirectUploadWorkspaceIntake,
+  loadDirectUploadSession,
+  withDirectUploadLock,
 } from "./direct-upload-session.js";
 import { remoteUrlIntakeItems } from "./remote-ingest.js";
 import {
@@ -169,33 +175,64 @@ export async function confirmDirectUploadWorkspaceIntake(
   args: { sessionId: string; userId: string; audit?: WorkspaceIntakeAudit },
   ports: WorkspaceIntakePorts = workspaceIntakePorts,
 ): Promise<WorkspaceIntakeActionResult> {
-  const { session, items } = await prepareDirectUploadWorkspaceIntake(args.sessionId, args.userId);
-  const intake = await requiredIntake(
-    {
+  return withDirectUploadLock(args.sessionId, async () => {
+    const loaded = await loadDirectUploadSession(args.sessionId, args.userId);
+    if (!loaded) throw new WorkspaceIntakeError("Upload session not found", 404);
+    if (["aborted", "failed"].includes(loaded.session.status)) throw new WorkspaceIntakeError("Upload session is closed", 409);
+    if (loaded.session.result) return loaded.session.result as WorkspaceIntakeActionResult;
+    if (!loaded.files.every(file => file.status === "completed")) throw new WorkspaceIntakeError("Upload session still has incomplete files", 409);
+
+    // Run identity is chosen before intake. A process crash after publication can
+    // recover the same manifest rather than creating a second billable run.
+    const [existing] = await sql<Array<WorkspaceRunRow & { creation_ready_at?: string | null }>>`select * from workspace_runs where id = ${args.sessionId} and user_id = ${args.userId}`;
+    if (existing && existing.creation_ready_at) {
+      const workspace = await getWorkspace(existing.workspace_id, args.userId);
+      if (!workspace) throw new WorkspaceIntakeError("Upload workspace is no longer accessible", 403);
+      const documents = await sql<DocumentRow[]>`select * from documents where run_id = ${args.sessionId} order by created_at, id`;
+      const result = actionResult({ workspace, run: mapWorkspaceRun(existing), documents: documents.map(mapDocument), pipeline: existing.pipeline, deferredReason: null, rejected: [] });
+      await persistDirectUploadResult(args.sessionId, result);
+      return result;
+    }
+    if (existing) await discardUnstartedRun(args.sessionId);
+    const { session, items } = await prepareDirectUploadWorkspaceIntake(args.sessionId, args.userId);
+    await sql`update upload_sessions set status = 'ingesting' where id = ${args.sessionId}`;
+    const intakePorts: WorkspaceIntakePorts = { ...ports, records: {
+      ...ports.records,
+      async discardWorkspace(workspaceId) {
+        await ports.records.discardWorkspace(workspaceId);
+        await sql`update upload_sessions set workspace_id = null where id = ${args.sessionId} and workspace_id = ${workspaceId}`;
+      },
+      async createWorkspace(input) {
+        const workspace = await ports.records.createWorkspace(input);
+        await sql`update upload_sessions set workspace_id = ${workspace.id}, org_id = ${workspace.orgId} where id = ${args.sessionId}`;
+        return workspace;
+      },
+    } };
+    const intake = await requiredIntake({
       userId: args.userId,
       orgId: session.org_id,
-      // Sessions resolve the target up front: an existing workspace's ID, or
-      // the name of the workspace to create (neither: a self-titled one).
       workspace: session.workspace_id ?? session.workspace_name,
       newWorkspace: !session.workspace_id && !session.workspace_name,
-      templateKey: session.template_key
-        ? workspaceTemplateKeySchema.parse(session.template_key)
-        : undefined,
+      templateKey: session.template_key ? workspaceTemplateKeySchema.parse(session.template_key) : undefined,
       pipeline: session.pipeline ?? undefined,
       tags: session.tags ?? [],
+      apiKeyId: session.api_key_id,
+      allowedWorkspaceIds: session.allowed_workspace_ids,
+      runId: args.sessionId,
       kind: "direct-upload",
       items,
       audit: args.audit,
-    },
-    ports,
-  );
-
-  await markDirectUploadSessionConfirmed({
-    sessionId: args.sessionId,
-    workspaceId: intake.workspace.id,
-    orgId: intake.workspace.orgId,
+    }, intakePorts);
+    const result = actionResult(intake);
+    await persistDirectUploadResult(args.sessionId, result);
+    return result;
   });
-  return actionResult(intake);
+}
+
+async function persistDirectUploadResult(sessionId: string, result: WorkspaceIntakeActionResult) {
+  await sql`update upload_sessions set status = 'confirmed', result = ${sql.json(JSON.parse(JSON.stringify(result)))},
+    workspace_id = ${result.payload.workspace.id}, org_id = ${result.payload.workspace.orgId}, last_error = null, updated_at = now()
+    where id = ${sessionId}`;
 }
 
 export async function createBulkWorkspaceIntake(

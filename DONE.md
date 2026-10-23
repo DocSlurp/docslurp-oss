@@ -1,5 +1,6 @@
 # Completed
 
+- Automatically finalize direct object uploads and ingest their verified bytes with persisted results, authenticated Tigris notifications, multipart reconciliation, unknown-length stream signing, concurrent-session fencing and interrupted-run recovery (2026-10-23). Retain explicit completion/confirmation compatibility and expire abandoned uploads.
 - Retire original unflagged pending canonical history after a newer same-organization/workspace/source replacement completes, repair existing terminal-run backlog, and serialize retirement with retries without blocking canonical locks (2026-10-23; migration 0076).
 
 - Render native PDF pages on demand through authorized, deduplicated and bounded Temporal jobs; persist page artifacts and scoped compute receipts atomically. Distinguish expected missing Lance compatibility tables from real storage failures, and let existing readers drain before the document counter migration acquires its lock (2026-10-23).

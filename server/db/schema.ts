@@ -2088,6 +2088,13 @@ export const parserEvalResults = pgTable(
 export const uploadSessions = pgTable(
   "upload_sessions",
   {
+    apiKeyId: text("api_key_id"),
+    allowedWorkspaceIds: text("allowed_workspace_ids").array(),
+    result: jsonb(),
+    lastError: text("last_error"),
+    reconcileAttempts: integer("reconcile_attempts").default(0).notNull(),
+    nextReconcileAt: timestamp("next_reconcile_at", { withTimezone: true, mode: "string" }).defaultNow().notNull(),
+    expiresAt: timestamp("expires_at", { withTimezone: true, mode: "string" }).default(sql`now() + interval '24 hours'`).notNull(),
     tags: text().array().default([]).notNull(),
     id: text().primaryKey().notNull(),
     userId: text("user_id").notNull(),
@@ -2136,6 +2143,7 @@ export const uploadSessions = pgTable(
 export const uploadSessionFiles = pgTable(
   "upload_session_files",
   {
+    unknownSize: boolean("unknown_size").default(false).notNull(),
     id: text().primaryKey().notNull(),
     sessionId: text("session_id").notNull(),
     filename: text().notNull(),

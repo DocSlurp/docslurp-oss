@@ -318,13 +318,24 @@ export async function forgetEmbeddingReuseRefsForKeys(
 }
 
 /** Purge storage whose deletes also forget embedding reuse refs into the deleted artifacts. */
-function forgettingEmbeddingReuseRefs(sql: Sql<Record<string, unknown>>, storage: PurgeStorage): PurgeStorage {
+function forgettingEmbeddingReuseRefs(sql: Sql<Record<string, unknown>>, storage: PurgeStorage, purgingDocumentId: string | null = null): PurgeStorage {
   return {
     bucket: storage.bucket,
     listKeys: (options) => storage.listKeys(options),
     deleteKeys: async (keys) => {
-      await forgetEmbeddingReuseRefsForKeys(sql, storage.bucket, keys);
-      await storage.deleteKeys(keys);
+      // A recovered upload may reuse its raw key in a new document after the
+      // old run's cleanup was queued. Recheck ownership at deletion time.
+      const sources = keys.filter(key => key.includes("/raw/"));
+      const retained = new Set(sources.length ? (await sql<{ source_key: string }[]>`
+        select source_key from documents where source_key = any(${sql.array(sources)})
+          and purged_at is null and id is distinct from ${purgingDocumentId}
+        union
+        select f.source_key from upload_session_files f join upload_sessions s on s.id = f.session_id
+        where f.source_key = any(${sql.array(sources)}) and s.status in ('initializing', 'pending', 'uploading', 'ingesting')
+      `).map(row => row.source_key) : []);
+      const deletable = keys.filter(key => !retained.has(key));
+      await forgetEmbeddingReuseRefsForKeys(sql, storage.bucket, deletable);
+      await storage.deleteKeys(deletable);
     },
   };
 }
@@ -365,7 +376,7 @@ export async function purgeSupersededDocuments(
       await sql.begin(async (tx) => {
         const client = tx as unknown as Sql<Record<string, unknown>>;
         // Deletes in this transaction also drop embedding reuse refs into deleted artifacts.
-        const txStorage = forgettingEmbeddingReuseRefs(client, storage);
+        const txStorage = forgettingEmbeddingReuseRefs(client, storage, candidateId);
         const [doc] = await client<ClaimedDocument[]>`
           select d.id, d.workspace_id, d.org_id, d.user_id, d.run_id, d.source_key, d.superseded_by_document_id,
             replacement.run_id as replacement_run_id,
@@ -998,6 +1009,22 @@ export async function drainStorageCleanupQueue(
         claimed = row;
         if (row.kind === "storage_prefix") {
           if (!SAFE_RUN_PREFIX.test(row.target)) throw new Error(`Refusing unsafe storage prefix: ${row.target}`);
+          // Direct-upload recovery deliberately reuses the session ID as its
+          // run ID. An old cleanup record must not remove the recovered run's
+          // new artifacts, or sources while intake is between attempts.
+          const runId = row.target.split("/")[1]!;
+          const [owner] = await client`
+            select 1 from workspace_runs where id = ${runId}
+            union all
+            select 1 from upload_sessions where id = ${runId}
+              and status in ('initializing', 'pending', 'uploading', 'ingesting')
+            limit 1
+          `;
+          if (owner) {
+            await client`update storage_cleanup_queue set not_before = now() + interval '1 day' where id = ${row.id}`;
+            result.purged += 1;
+            return;
+          }
           const workspaceId = typeof row.payload.workspaceId === "string" ? row.payload.workspaceId : null;
           const kept = await referencedDocumentsUnderPrefix(client, txStorage, workspaceId, row.target);
           const keep = (key: string) => [...kept].some((documentId) => belongsToDocument(key, documentId));

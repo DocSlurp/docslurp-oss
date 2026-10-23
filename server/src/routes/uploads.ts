@@ -26,6 +26,7 @@ import {
   createDirectUploadSession,
   getDirectUploadSessionDescription,
   directUploadSessionBelongsToOrganization,
+  signDirectUploadParts,
 } from "../services/direct-upload-session.js";
 import { isRunCreationBlockedError } from "../services/runs.js";
 import { UnreadableSourceError } from "../services/source-metadata.js";
@@ -90,7 +91,7 @@ const directUploadFileSchema = z.object({
   singlePart: z.boolean().optional(),
   filename: z.string().min(1).max(512),
   mimeType: z.string().min(1).max(256),
-  sizeBytes: z.number().int().nonnegative(),
+  sizeBytes: z.number().int().nonnegative().optional(),
   sha256: z.string().min(16).max(128).optional(),
   canonicalId: canonicalIdSchema.optional(),
   /** Folder path inside the upload; with the filename it is the version key. */
@@ -98,6 +99,7 @@ const directUploadFileSchema = z.object({
 });
 
 const createDirectSessionSchema = z.object({
+  indexingMode: indexingModeSchema.optional(),
   tags: documentTagsSchema.optional(),
   orgId: z.string().optional(),
   workspace: workspaceInputSchema.optional(),
@@ -109,6 +111,7 @@ const createDirectSessionSchema = z.object({
 
 const completeDirectFileSchema = z.object({
   fileId: z.string().min(1),
+  sizeBytes: z.number().int().nonnegative().optional(),
   etag: z.string().optional(),
   parts: z
     .array(
@@ -215,7 +218,7 @@ export const createUploadsRoutes = (ports: WorkspaceIntakePorts = workspaceIntak
     if (actor.type === "apiKey") {
       if (!actor.apiKey.orgId) return apiStatusError(c, 403, "Forbidden");
       const sessionMatch = c.req.path.match(/\/direct\/sessions\/([^/]+)(?:\/|$)/);
-      if (sessionMatch && !await directUploadSessionBelongsToOrganization(sessionMatch[1], actor.userId, actor.apiKey.orgId)) {
+      if (sessionMatch && !await directUploadSessionBelongsToOrganization(sessionMatch[1], actor.userId, actor.apiKey.orgId, actorAllowedWorkspaceIds(actor))) {
         return apiStatusError(c, 404, "Upload session not found");
       }
       if (c.req.method === "POST" && /\/(bulk|url|direct\/sessions)\/?$/.test(c.req.path)) {
@@ -249,10 +252,12 @@ export const createUploadsRoutes = (ports: WorkspaceIntakePorts = workspaceIntak
         // the workspace confirm creates (none: a self-titled one).
         const target = await directUploadTarget(getRequestActor(c), input, orgId);
         // Overrides only; confirm merges them onto the workspace pipeline and its template locks.
-        const pipeline = parseWorkspaceIntakePipeline(input.pipeline);
+        const pipeline = parseWorkspaceIntakePipeline({ ...input.pipeline, ...(input.indexingMode ? { indexingMode: input.indexingMode } : {}) });
         const session = await createDirectUploadSession({
           userId,
           orgId,
+          apiKeyId: c.get("apiKey")?.keyId ?? null,
+          allowedWorkspaceIds: actorAllowedWorkspaceIds(getRequestActor(c)),
           workspaceId: target.workspaceId,
           workspaceName: target.workspaceName,
           templateKey: input.templateKey ?? null,
@@ -271,12 +276,18 @@ export const createUploadsRoutes = (ports: WorkspaceIntakePorts = workspaceIntak
   .get("/direct/sessions/:sessionId", async (c) => {
     const userId = c.get("sessionUser").id;
     const sessionId = c.req.param("sessionId");
-    const session = await getDirectUploadSessionDescription(sessionId, userId);
+    const session = await getDirectUploadSessionDescription(sessionId, userId, c.req.query("statusOnly") === "true");
     if (!session) {
       return apiStatusError(c, 404, "Upload session not found");
     }
     return c.json(session);
   })
+  .post("/direct/sessions/:sessionId/files/:fileId/parts/sign",
+    zValidator("json", z.object({ partNumbers: z.array(z.number().int().min(1).max(10000)).min(1).max(100) }), validationHook),
+    async c => {
+      try { return c.json(await signDirectUploadParts(c.req.param("sessionId"), c.get("sessionUser").id, c.req.param("fileId"), c.req.valid("json").partNumbers)); }
+      catch (error) { return workspaceIntakeErrorResponse(c, error) ?? apiStatusError(c, 500, reportPublicError(error)); }
+    })
   .post(
     "/direct/sessions/:sessionId/files/complete",
     zValidator("json", completeDirectFileSchema, validationHook),
@@ -290,6 +301,7 @@ export const createUploadsRoutes = (ports: WorkspaceIntakePorts = workspaceIntak
           userId,
           fileId: body.fileId,
           etag: body.etag,
+          sizeBytes: body.sizeBytes,
           parts: body.parts,
         });
       } catch (error) {

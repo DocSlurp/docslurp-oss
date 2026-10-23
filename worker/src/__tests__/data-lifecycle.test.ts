@@ -38,6 +38,7 @@ afterAll(async () => {
 });
 
 beforeEach(async () => {
+  await sql`delete from upload_sessions`;
   await sql`delete from workspaces`;
   await sql`delete from document_cleanup_queue`;
   await sql`delete from storage_cleanup_queue`;
@@ -107,6 +108,40 @@ async function drainAll(stores: ReturnType<typeof fakeExternalStores>) {
 }
 
 describe("delete triggers enqueue external cleanup", () => {
+  it("defers old run cleanup while an upload recovers, then protects the recovered run", async () => {
+    const source = "u1/upload/raw/source.pdf";
+    await sql`insert into upload_sessions (id, user_id, org_id, status) values ('recover', 'u1', 'o1', 'ingesting')`;
+    await sql`insert into upload_session_files (id, session_id, filename, mime_type, source_key, upload_mode)
+      values ('recover-file', 'recover', 'source.pdf', 'application/pdf', ${source}, 'single')`;
+    await sql`insert into storage_cleanup_queue (kind, org_id, target, artifact_uris, reason)
+      values ('storage_prefix', 'o1', 'u1/recover/', ${sql.array([source])}, 'run_creation')`;
+    const stores = fakeExternalStores([source, 'u1/recover/markdown/new.md'], {});
+    await drainAll(stores);
+    expect([...stores.objects]).toEqual([source, 'u1/recover/markdown/new.md']);
+    await seedRun('recover');
+    await sql`update upload_sessions set status = 'confirmed' where id = 'recover'`;
+    await sql`update storage_cleanup_queue set not_before = now()`;
+    await drainAll(stores);
+    expect([...stores.objects]).toEqual([source, 'u1/recover/markdown/new.md']);
+    await sql`delete from workspace_runs where id = 'recover'`;
+    await sql`update storage_cleanup_queue set not_before = now()`;
+    await drainAll(stores);
+    expect([...stores.objects]).toEqual([]);
+  });
+
+  it("keeps registered upload bytes when an old partial document is cleaned", async () => {
+    await seedRun('partial');
+    await seedDocument('partial-doc', 'partial');
+    const source = 'u1/up-partial-doc/raw/partial-doc.pdf';
+    await sql`insert into upload_sessions (id, user_id, org_id, status) values ('retry', 'u1', 'o1', 'ingesting')`;
+    await sql`insert into upload_session_files (id, session_id, filename, mime_type, source_key, upload_mode)
+      values ('retry-file', 'retry', 'source.pdf', 'application/pdf', ${source}, 'single')`;
+    const stores = fakeExternalStores([source], {});
+    await sql`delete from documents where id = 'partial-doc'`;
+    await drainAll(stores);
+    expect([...stores.objects]).toEqual([source]);
+  });
+
   it("records a deleted document's vectors, artifacts, source and graph nodes before cascades remove them", async () => {
     await seedRun("r1");
     await seedDocument("d1", "r1");
