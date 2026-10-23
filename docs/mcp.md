@@ -7,12 +7,12 @@ Choose a tool based on the result you need:
 | Tool | Result | AI generation |
 | --- | --- | --- |
 | `listWorkspaces` | Authorized workspaces, slugs, default, document/page counts and processing status | None |
-| `upload` | Up to 10 presigned file PUT URLs, or start ingestion from remote URLs | Workspace ingestion settings |
-| `completeUpload` | Verify uploaded files and start ingestion | Workspace ingestion settings |
+| `upload` | Storage transfer descriptors for up to 10 files, or ingestion from remote URLs | Workspace ingestion settings |
+| `completeUpload` | Optional single-PUT completion fallback; normal uploads finalize automatically | Workspace ingestion settings |
 | `suggestQueries` | Prior queries and suggestions | None |
 | `search` | Portable text passages with document/page citation metadata | None |
 | `chat` | Grounded answer, citations, conversation session and usage | Workspace-configured model |
-| `getUploadStatus` | How the workspace's files processed: pages, text and images per page, vision, searchable pages with reasons, settings and recommendations | None |
+| `getUploadStatus` | Session acceptance with `sessionId`, or how the workspace's files processed: pages, text and images per page, vision, searchable pages with reasons, settings and recommendations | None |
 
 Search and chat need only a question:
 
@@ -49,6 +49,23 @@ Parallel retrieval defaults to at most four in-flight queries; set `concurrency`
 Read-only estimate tools (`updateEstimate`, `searchSettingsEstimate`, `reprocessEstimate`, `fullIndexEstimate`, `indexingModeEstimate`, `graphRebuildEstimate`, `uploadEstimate`) price an operation before you start it, and `getJob` reads a background job; `getJob` needs a `search` or `ingest` key. An estimate tool is listed only to keys that could perform the operation: `updateEstimate`, `indexingModeEstimate` and `graphRebuildEstimate` need `workspaces:manage` on a server key, `fullIndexEstimate` and `uploadEstimate` need `ingest`, and `searchSettingsEstimate` and `reprocessEstimate` are available to signed-in sessions only. See [config-change jobs](config-change-jobs.md).
 
 The remote endpoint supports modern per-request MCP and stateless legacy Streamable HTTP clients. Stdio-only clients can use `docslurp mcp-server` from `@docslurp/cli`; its native REST adapters expose the same tools. Transport and adapter calls share the same authorization and search/chat implementation, without an internal network hop or forwarding credentials.
+
+## Upload files and follow completion
+
+Call `upload` with file metadata, including the exact `sizeBytes`. Save its
+`sessionId` and transfer bytes using the returned descriptors: one PUT for
+`mode: "single"`, or the listed part URLs and byte ranges for `mode: "multipart"`.
+Never send your DocSlurp API key or OAuth token to storage.
+
+Call `getUploadStatus({ sessionId: "UPLOAD_SESSION_ID" })` until the session has
+an accepted `result`, or reports `failed` or `aborted`. The server assembles
+known-size multipart files and starts ingestion automatically. `completeUpload`
+is an optional fallback for single-PUT sessions; it is not a required next step.
+
+Acceptance means a run exists, not that extraction has finished. Follow the
+returned run ID for processing progress. If a status request times out, check
+the same session before starting another upload. For unknown-size streams, use
+the SDK's `upload()` or the [HTTP stream completion flow](https://docslurp.io/docs/http#streams-without-a-known-size).
 
 ## Testing with real clients
 
@@ -118,7 +135,7 @@ for authentication boundaries, feature flags and the API parity roadmap.
 
 ## Protocol and file-handling conventions
 
-These are application tools over standard MCP, not a custom transport or a proposed MCP file-upload method. Metadata stays in bounded JSON tool arguments; file bytes go directly to storage. Signed PUT URLs are short-lived, per-object write credentials, not readable MCP resource links. Do not log or share them. Native intake sanitizes filenames, applies file-type and size policy, isolates storage keys and verifies stored size before ingestion. A completion call verifies the whole batch; it does not trust an agent's claim that PUT succeeded.
+These are application tools over standard MCP, not a custom transport or a proposed MCP file-upload method. Metadata stays in bounded JSON tool arguments; file bytes go directly to storage. Signed PUT URLs are short-lived, per-object write credentials, not readable MCP resource links. Do not log or share them. Native intake sanitizes filenames, applies file-type and size policy, isolates storage keys and verifies stored size before ingestion. The server verifies stored files before starting ingestion; it does not trust an agent's claim that PUT succeeded.
 
 The catalog uses valid case-sensitive tool names, deterministic scope-filtered discovery, JSON Schema inputs, mutation annotations, structured results with text fallback, and `isError` for execution failures. Authorization remains enforced server-side independently of annotations; OAuth tokens are not forwarded to storage.
 

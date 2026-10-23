@@ -175,7 +175,7 @@ curl -X PATCH "$api_url/v1/workspaces/amber-falcon-ridge" \
 
 | Operation | HTTP endpoint | SDK | CLI |
 | --- | --- | --- | --- |
-| Upload files | `POST /v1/uploads/bulk` (multipart `files`, up to `MAX_MULTIPART_UPLOAD_BYTES`, 25 MB by default) or a direct upload session (`POST /v1/uploads/direct/sessions`, presigned PUTs, `.../confirm`) for larger files | `upload` (direct session above 20 MB) | `upload` (direct session above 20 MB) |
+| Upload files | `POST /v1/uploads/direct/sessions`, storage PUTs, then poll the session; `POST /v1/uploads/bulk` is the size-limited HTTP fallback | `upload` (direct storage by default) | `upload` (uses the SDK) |
 | Ingest URLs | `POST /v1/uploads/url` | `upload({ urls })` | Use SDK/HTTP |
 | Full run progress | `GET /v1/runs/:runId/progress` | `getRunProgress`; `getRun` returns only `run` | `status`, `status --watch` |
 | Live progress snapshots | `GET /v1/runs/:runId/progress/stream` | `streamProgress` | Watch uses polling |
@@ -205,6 +205,98 @@ curl -X PATCH "$api_url/v1/workspaces/amber-falcon-ridge" \
 | List / revoke organization keys | `GET` / `DELETE /v1/organizations/:orgId/api-keys` | `listOrganizationApiKeys` / `revokeOrganizationApiKeys` | Use SDK/HTTP |
 
 Guides: [document versions and retention](document-versions.md) and [config-change jobs and estimates](config-change-jobs.md).
+
+## Upload completion
+
+A successful storage PUT means the bytes reached storage. It does not mean the
+document has been processed. Direct uploads have three milestones:
+
+| Milestone | Evidence | Next step |
+| --- | --- | --- |
+| Bytes stored | Each storage PUT succeeds | Wait for the session result |
+| Ingestion accepted | The session has a non-null `result` containing `run.id` | Follow that run |
+| Processing finished | The run reaches `completed` | Read the extracted content or search it |
+
+### Known-size files
+
+1. Create a session with `POST /v1/uploads/direct/sessions`. For each file, send
+   `filename`, `mimeType` and the exact `sizeBytes`. Save the returned `sessionId`.
+2. Transfer each file using its returned `mode`. For `single`, PUT the bytes to
+   `putUrl` with the supplied `headers`. For `multipart`, PUT each byte range to
+   its `pendingParts[].url`; the range starts at
+   `(partNumber - 1) * partSize` and contains that part's `sizeBytes`.
+3. Poll `GET /v1/uploads/direct/sessions/:sessionId?statusOnly=true` until
+   `result` is non-null, or the session becomes `failed` or `aborted`.
+4. Follow `result.run.id` through the run status or progress endpoints.
+
+The server uses a single PUT below 32 MiB and multipart at or above 32 MiB,
+with 8 MiB parts. Use the returned descriptors rather than hard-coding those
+values. The reconciler reads storage's part list, checks the part numbers and
+sizes, assembles the object, and verifies the stored file. It starts ingestion
+after all files in the session are ready. Clients do not need to call
+`/files/complete` or `/confirm` for known-size files.
+
+The API checks pending sessions every 15 seconds in bounded batches, with
+backoff between attempts. This is not a completion-time guarantee. A Tigris
+object notification makes a session eligible for the next check; polling still
+works without notifications. A webhook does not replace multipart assembly or
+prove that an unknown-size stream has ended.
+
+### Streams without a known size
+
+`client.upload(stream, { filename, mimeType })` handles multipart transfer and
+completion. At EOF, it waits for every part PUT to succeed, sends the final byte
+count and ordered part manifest, then waits for the accepted ingestion response.
+You do not call a completion method yourself when using `upload()`.
+
+For a custom HTTP client:
+
+1. Omit `sizeBytes` when creating the file's session entry.
+2. Request signed part URLs from
+   `POST /v1/uploads/direct/sessions/:sessionId/files/:fileId/parts/sign` with
+   `{ "partNumbers": [1, 2] }`. Upload parts using the returned `partSize` from
+   session creation; only the final part may be shorter.
+3. After EOF and successful PUTs, send
+   `POST /v1/uploads/direct/sessions/:sessionId/files/complete` with
+   `{ "fileId": "FILE_ID", "sizeBytes": 12345, "parts": [{ "partNumber": 1, "etag": "STORAGE_ETAG" }] }`.
+   Use the actual final byte count and the ETag returned by each PUT.
+4. Poll the session for `result`, then follow `result.run.id`.
+
+The server verifies the stored parts. It cannot infer EOF from an idle stream
+or from its current byte total. The `/confirm` endpoint remains available as an
+explicit fallback, but automatic ingestion does not require it.
+
+### Timeouts, retries and abandoned uploads
+
+Keep the session ID when implementing your own transfer. A polling timeout is
+not proof that ingestion failed: check the same session before creating another
+upload. Repeated status reads and duplicate notifications reuse that session's
+accepted result. A new session is a new upload, not a retry of the old one. Direct sessions do
+not support `Idempotency-Key`; that key applies to HTTP bulk and URL ingestion.
+
+Signed URLs expire after 15 minutes. A session GET without `statusOnly=true`
+returns fresh transfer URLs for pending files; use `statusOnly=true` when you only
+need status. Treat signed URLs as credentials. Send your DocSlurp bearer key to
+the API, never to storage.
+
+`failed` and `aborted` sessions are terminal. Read the session's `error` field;
+a retry message on a pending session is not a terminal failure. To abandon a
+session, POST to its `/abort` endpoint. Aborting after ingestion has started
+returns 409; follow the run instead. Unfinished transfers expire after 24 hours
+and are marked `aborted`; sessions already starting ingestion continue recovery.
+
+The SDK attempts to abort its session on transfer or acceptance-wait errors.
+That cleanup can lose a race with ingestion, so an SDK timeout alone does not
+prove that no run was created. Use the low-level session methods when you need
+to retain a session ID and control recovery yourself.
+
+`POST /v1/uploads/bulk` remains available for multipart/form-data through the
+API, with a default 25 MB limit (`MAX_MULTIPART_UPLOAD_BYTES`). This is a separate
+transport from object-storage multipart. In the SDK, select it with
+`directUpload: false`.
+
+Self-hosters: see [automatic completion and Tigris setup](self-host/operations.md#automatic-upload-completion-and-tigris-notifications)
+for the reconciler, Token authentication, bucket filter and deployment order.
 
 ## API changes
 
