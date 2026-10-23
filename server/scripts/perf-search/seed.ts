@@ -1,7 +1,7 @@
 /**
  * Perf-search corpus seeder (local measurement tooling, not product code).
  * Builds a Postgres + LanceDB corpus from ordinary markdown files (npm package READMEs/docs),
- * embedded with a local transformers.js model, and writes a source-derived query set.
+ * embedded with a deterministic feature-hashing model (hash-embed.mjs; local CPU was too contended for transformers.js), and writes a source-derived query set.
  * Usage: tsx seed.ts <corpusRoot> <outDir> [maxChunks]
  */
 import { createHash } from "node:crypto";
@@ -17,7 +17,7 @@ import { chunkTextFtsIndex } from "../../../worker/src/stages/lancedb-maintenanc
 
 const [root, outDir, maxChunksArg] = process.argv.slice(2);
 const MAX_CHUNKS = Number(maxChunksArg ?? 20000);
-const MODEL = "Xenova/all-MiniLM-L6-v2";
+const MODEL = "hash384";
 const ORG = "perforg";
 mkdirSync(outDir, { recursive: true });
 
@@ -50,23 +50,13 @@ for (const file of files) {
 }
 console.log(`docs=${docs.length} chunks=${total}`);
 
-const { pipeline } = await import("@huggingface/transformers");
-const { homedir } = await import("node:os");
-const tf = await import("@huggingface/transformers");
-tf.env.cacheDir = path.join(homedir(), ".cache", "docslurp", "transformers");
-const extractor: any = await pipeline("feature-extraction", MODEL, { dtype: "q8" } as any);
+const { hashEmbed } = await import("./hash-embed.mjs");
+const MODEL_URI = "llm://vllm/hash384?baseUrl=http://127.0.0.1:18700/v1";
+const extractor = async (texts: string[]) => ({ dims: [texts.length, 384], data: Float32Array.from(texts.flatMap((t) => hashEmbed(t))) });
 const flat = docs.flatMap((d) => d.chunks.map((c, i) => ({ doc: d, c, i })));
-const vectors: number[][] = [];
-const t0 = Date.now();
-for (let i = 0; i < flat.length; i += 64) {
-  const batch = flat.slice(i, i + 64).map((x) => x.c.text.slice(0, 1500));
-  const out = await extractor(batch, { pooling: "mean", normalize: true });
-  const dims = out.dims[1];
-  for (let j = 0; j < batch.length; j++) vectors.push(Array.from(out.data.slice(j * dims, (j + 1) * dims) as Float32Array));
-  if ((i / 64) % 20 === 0) console.log(`embedded ${i}/${flat.length} ${(Date.now() - t0) / 1000}s`);
-}
+const vectors: number[][] = flat.map((x) => hashEmbed(x.c.text.slice(0, 1500)));
 
-const route = resolveEmbeddingRoute(normalizePipelineFeatures({ embedding: { modelUri: `llm://transformers.js/${MODEL}`, target: "local" } } as never).embedding);
+const route = resolveEmbeddingRoute(normalizePipelineFeatures({ embedding: { modelUri: MODEL_URI, target: "local", dimensions: 384 } } as never).embedding);
 console.log("route", route.provider, route.model, route.dimensions);
 const DIM = route.dimensions;
 
@@ -75,7 +65,7 @@ await sql`delete from document_chunks where document_id like 'd%'`;
 await sql`insert into "user" (id, name, email) values ('perfu', 'Perf', 'perf@example.test') on conflict do nothing`;
 await sql`insert into organizations (id, name, slug, created_by_user_id) values (${ORG}, 'Perf', 'perf', 'perfu') on conflict do nothing`;
 await sql`insert into org_memberships (org_id, user_id, role) values (${ORG}, 'perfu', 'owner') on conflict do nothing`;
-const pipelineJson = { embedding: { modelUri: `llm://transformers.js/${MODEL}`, target: "local" } };
+const pipelineJson = { embedding: { modelUri: MODEL_URI, target: "local", dimensions: 384 } };
 await sql`insert into workspaces (id, org_id, user_id, name, pipeline) values ('perfw', ${ORG}, 'perfu', 'Perf', ${sql.json(pipelineJson as never)}) on conflict (id) do update set pipeline = excluded.pipeline`;
 await sql`insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, pipeline) values ('perfrun', ${ORG}, 'perfu', 'perfw', 'bulk-upload', 'completed', 'completed', '{}') on conflict do nothing`;
 for (const d of docs) {
@@ -133,7 +123,7 @@ const allq = [...dev, ...held];
 const qv: Record<string, number[]> = {};
 for (let i = 0; i < allq.length; i += 64) {
   const b = allq.slice(i, i + 64);
-  const out = await extractor(b.map((x) => x.q), { pooling: "mean", normalize: true });
+  const out: any = await extractor(b.map((x) => x.q));
   const dims = out.dims[1];
   b.forEach((x, j) => { qv[x.id] = Array.from(out.data.slice(j * dims, (j + 1) * dims) as Float32Array); });
 }
