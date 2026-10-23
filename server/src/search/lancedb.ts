@@ -18,6 +18,8 @@ import { formatLanceSessionLog, resolveLanceSessionConfig, type LanceSessionConf
 
 import { lanceDbQueryTuning } from "./lancedb-query-tuning.js";
 import { prewarmTable } from "./lancedb-prewarm.js";
+import { isLanceTableNotFound, lanceOpenFailure, openLanceTable } from "./lancedb-open.js";
+export { isLanceTableNotFound } from "./lancedb-open.js";
 import { resultCache, resultCacheKey } from "./result-cache.js";
 import { countSearchEvent } from "./timings.js";
 
@@ -156,11 +158,6 @@ function getDb(uri: string): Promise<lancedb.Connection> {
   return connection;
 }
 
-/** LanceDB's error for a table that does not exist (as opposed to a storage or network failure). */
-export function isLanceTableNotFound(error: unknown): boolean {
-  return /Table '[^']*' was not found|table .* does not exist/i.test(error instanceof Error ? error.message : String(error));
-}
-
 async function getTable(uri: string, name: string): Promise<lancedb.Table | null> {
   return (await openTarget(uri, name)).table;
 }
@@ -177,7 +174,7 @@ async function openTarget(uri: string, name: string): Promise<{ table: lancedb.T
   let table = tables.get(key);
   if (!table) {
     table = getDb(uri).then(async (db) => {
-      const opened = await lanceSpan("openTable", () => db.openTable(name));
+      const opened = await openLanceTable(name, () => db.openTable(name));
       const { config } = lanceSession();
       if (config.prewarmIndex || config.prewarmData) {
         lastPrewarm.set(key, Date.now());
@@ -199,7 +196,7 @@ async function openTarget(uri: string, name: string): Promise<{ table: lancedb.T
       missingTables.set(key, Date.now() + MISSING_TABLE_TTL_MS);
       return { table: null, failed: false };
     }
-    console.warn(`[search] lancedb openTable failed table=${name}: ${error instanceof Error ? error.message.slice(0, 200) : String(error)}`);
+    console.warn(`[search] lancedb openTable failed table=${name}: ${lanceOpenFailure(error)}`);
     return { table: null, failed: true };
   }
 }

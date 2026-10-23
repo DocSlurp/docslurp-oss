@@ -152,7 +152,7 @@ describe("API private endpoint speech-to-text", () => {
     expect(privateSttModelFor("standard")).toBeUndefined();
     const voice = new WorkspaceChatVoice(context, "strict-privacy");
     expect(await voice.getListener()).toEqual({ enabled: true });
-    expect(await voice.listen(new Blob(["RIFF"], { type: "audio/wav" }))).toBe("Private question?");
+    expect(await voice.listen(new Blob([Buffer.concat([Buffer.from("RIFF"), Buffer.alloc(4), Buffer.from("WAVE")])], { type: "audio/wav" }))).toBe("Private question?");
     const [url, init] = serverFetch.mock.calls[0]! as [string, RequestInit];
     expect(url).toBe(`${BASE_URL}/audio/transcriptions`);
     expect(authOf([url, init])).toBe("Bearer app-secret");

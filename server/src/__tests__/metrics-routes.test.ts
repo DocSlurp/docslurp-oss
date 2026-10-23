@@ -336,10 +336,11 @@ describe("healthRoutes /metrics", () => {
 
     sqlMock
       .mockResolvedValueOnce([stuckRun])
-      // Run Lifecycle fail: read current, compare-and-set update, stage
-      // states, documents, run.failed event.
+      // Run Lifecycle fail: read current, compare-and-set update, retire
+      // replaced pending history, stage states, documents, run.failed event.
       .mockResolvedValueOnce([{ status: "queued", control_state: null, stats: null, failure_count: 0 }])
       .mockResolvedValueOnce([{ id: "run-stuck", user_id: "user-1" }])
+      .mockResolvedValueOnce([])
       .mockResolvedValueOnce([])
       .mockResolvedValueOnce([])
       .mockResolvedValueOnce([])
@@ -362,7 +363,9 @@ describe("healthRoutes /metrics", () => {
 
     expect(response.status).toBe(200);
     expect(startPipelineWorkflowMock).not.toHaveBeenCalled();
-    expect(sqlMock).toHaveBeenCalledTimes(7);
+    expect(sqlMock).toHaveBeenCalledTimes(8);
+    expect((sqlMock.mock.calls[3][0] as TemplateStringsArray).join("")).toContain("retire_replaced_pending_documents");
+    expect(sqlMock.mock.calls[3][1]).toBe(stuckRun.id);
     expect(body).toContain("docslurp_worker_target_machines 0");
   });
 });

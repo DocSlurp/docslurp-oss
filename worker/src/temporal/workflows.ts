@@ -581,3 +581,12 @@ export async function materializePages(input: MaterializePagesInput): Promise<Ma
   await materializeActivities.completeMaterializeRun({ runId: input.runId, result });
   return result;
 }
+
+const pageRenderActivities = proxyActivities<Activities>({
+  startToCloseTimeout: "2 minutes", heartbeatTimeout: "30 seconds",
+  retry: { maximumAttempts: 3, initialInterval: "2s", maximumInterval: "15s" },
+});
+/** A new workflow type, independent of documentPipeline replay history. */
+export async function renderDocumentPage(input: import("@docslurp/shared").RenderDocumentPageInput): Promise<void> {
+  await pageRenderActivities.renderDocumentPageActivity(input);
+}

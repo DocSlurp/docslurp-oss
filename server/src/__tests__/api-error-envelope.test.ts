@@ -79,6 +79,15 @@ describe("app-level error handler", () => {
     return hono;
   }
 
+  it("keeps structured reserve facts while stripping arbitrary provider details", async () => {
+    const hono = app().get("/v1/reserve", () => {
+      throw new SpendBlockedError("provider-private-text", "credit_exhausted", false, { account: "starter", spendKind: "job", availableCredits: 80, chatReserveCredits: 100, secret: "private" });
+    });
+    const body = await (await hono.request("/v1/reserve")).json();
+    expect(body.error.details).toMatchObject({ account: "starter", spendKind: "job", availableCredits: 80, chatReserveCredits: 100 });
+    expect(JSON.stringify(body)).not.toContain("private");
+  });
+
   it("answers blocked spend, access errors and crashes in the envelope on native paths", async () => {
     const hono = app();
     const spend = await hono.request("/v1/spend");

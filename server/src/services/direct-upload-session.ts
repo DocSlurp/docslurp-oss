@@ -501,7 +501,7 @@ export function directUploadIntakeItems(
     canonicalId: file.canonical_id ?? null,
     path: file.source_path ?? "",
     content: file.status === "completed"
-      ? { storedKey: file.source_key }
+      ? { storedKey: file.source_key, verifiedSizeBytes: file.size_bytes }
       : { rejected: new WorkspaceIntakeError(`${file.filename} did not finish uploading`, 409) },
   }));
 }

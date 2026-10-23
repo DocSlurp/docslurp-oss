@@ -15,6 +15,9 @@ import {
 } from "@temporalio/common";
 import {
   DEFAULT_MATERIALIZE_TASK_QUEUE,
+  DEFAULT_PAGE_RENDER_TASK_QUEUE,
+  PAGE_RENDER_WORKFLOW,
+  pageRenderWorkflowId,
   MATERIALIZE_WORKFLOW,
   MAX_PAGE_FANOUT_PER_RUN,
   deferredProfilesEnabled,
@@ -548,12 +551,14 @@ export async function signalPipelinePause(runId: string): Promise<void> {
   await handle.signal("pause");
 }
 
-export async function signalPipelineResume(runId: string): Promise<void> {
+export async function signalPipelineResume(runId: string, timeoutMs = 5_000): Promise<void> {
   const client = await getClient();
   const handle = client.workflow.getHandle(
     `${WORKFLOW_ID_PREFIX}${runId}`
   );
-  await handle.signal("resume");
+  // Resume runs inside the funding transaction: bound the actual gRPC call,
+  // not just connection establishment or a detached Promise.race waiter.
+  await client.connection.withDeadline(Date.now() + timeoutMs, () => handle.signal("resume"));
 }
 
 export interface TaskQueuePoller {
@@ -615,4 +620,19 @@ export async function describeTemporalNamespace(timeoutMs = 2_000): Promise<void
   await client.connection.withDeadline(Date.now() + timeoutMs, () =>
     client.workflowService.describeNamespace({ namespace: temporal.namespace })
   );
+}
+
+/** A deterministic exact-page workflow coalesces concurrent browser requests. */
+export async function startPageRenderWorkflow(input: import("@docslurp/shared").RenderDocumentPageInput): Promise<void> {
+  const client = await getClient();
+  try {
+    await client.workflow.start(PAGE_RENDER_WORKFLOW, {
+      taskQueue: process.env.TEMPORAL_PAGE_RENDER_TASK_QUEUE?.trim() || DEFAULT_PAGE_RENDER_TASK_QUEUE,
+      workflowId: pageRenderWorkflowId(input), args: [input],
+      workflowExecutionTimeout: "5 minutes",
+      workflowIdReusePolicy: WorkflowIdReusePolicy.ALLOW_DUPLICATE_FAILED_ONLY,
+    });
+  } catch (error) {
+    if (!(error instanceof WorkflowExecutionAlreadyStartedError)) throw error;
+  }
 }

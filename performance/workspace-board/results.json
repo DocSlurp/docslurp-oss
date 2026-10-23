@@ -1,0 +1,125 @@
+{
+  "runtime": "v26.8.2",
+  "fixture": {
+    "documents": 20,
+    "bytes": "21100000",
+    "chunks": "20000"
+  },
+  "outputEqual": true,
+  "runs": [
+    {
+      "pair": 0,
+      "arm": "candidate",
+      "ms": 10.35083399999894
+    },
+    {
+      "pair": 0,
+      "arm": "baseline",
+      "ms": 43.281003000000055
+    },
+    {
+      "pair": 1,
+      "arm": "baseline",
+      "ms": 40.46163799999886
+    },
+    {
+      "pair": 1,
+      "arm": "candidate",
+      "ms": 7.689381999998659
+    },
+    {
+      "pair": 2,
+      "arm": "candidate",
+      "ms": 8.356509999999616
+    },
+    {
+      "pair": 2,
+      "arm": "baseline",
+      "ms": 38.59919700000137
+    },
+    {
+      "pair": 3,
+      "arm": "baseline",
+      "ms": 39.60193100000106
+    },
+    {
+      "pair": 3,
+      "arm": "candidate",
+      "ms": 8.105994999999893
+    },
+    {
+      "pair": 4,
+      "arm": "candidate",
+      "ms": 7.950996999999916
+    },
+    {
+      "pair": 4,
+      "arm": "baseline",
+      "ms": 36.46003400000154
+    }
+  ],
+  "insertRuns": [
+    {
+      "pair": 0,
+      "arm": "candidate",
+      "ms": 1060.274358999999
+    },
+    {
+      "pair": 0,
+      "arm": "baseline",
+      "ms": 1107.791509999999
+    },
+    {
+      "pair": 1,
+      "arm": "baseline",
+      "ms": 1399.9988870000016
+    },
+    {
+      "pair": 1,
+      "arm": "candidate",
+      "ms": 1114.1484229999987
+    },
+    {
+      "pair": 2,
+      "arm": "candidate",
+      "ms": 1034.6045989999984
+    },
+    {
+      "pair": 2,
+      "arm": "baseline",
+      "ms": 1030.3790580000023
+    },
+    {
+      "pair": 3,
+      "arm": "baseline",
+      "ms": 990.8879880000022
+    },
+    {
+      "pair": 3,
+      "arm": "candidate",
+      "ms": 1023.3886139999995
+    },
+    {
+      "pair": 4,
+      "arm": "candidate",
+      "ms": 1035.7206469999983
+    },
+    {
+      "pair": 4,
+      "arm": "baseline",
+      "ms": 1053.273799999999
+    }
+  ],
+  "plans": {
+    "baseline": {
+      "executionMs": 154.573,
+      "planningMs": 5.03,
+      "sharedHitBlocks": 37231
+    },
+    "candidate": {
+      "executionMs": 1.372,
+      "planningMs": 6.126,
+      "sharedHitBlocks": 7
+    }
+  }
+}

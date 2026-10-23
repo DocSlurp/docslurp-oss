@@ -205,6 +205,13 @@ async function main(): Promise<void> {
     }));
     console.log(`[temporal-worker] materialize queue=${materializeQueue} concurrency=${cfg.materializeConcurrency}`);
   }
+  // UI raster requests have a small independent budget, even when deferred indexing is off.
+  workers.push(await Worker.create({
+    ...common, ...workflowOptions,
+    activities: { renderDocumentPageActivity: activities.renderDocumentPageActivity },
+    maxConcurrentActivityTaskExecutions: 2, maxConcurrentActivityTaskPolls: 2,
+    taskQueue: process.env.TEMPORAL_PAGE_RENDER_TASK_QUEUE?.trim() || "docslurp-page-render",
+  }));
   // A machine the autoscaler just started should be ready to embed when its first shard arrives.
   const defaultEmbedding = resolveEmbeddingModel(cfg, defaultPipelineFeatures);
   if (defaultEmbedding.runtime === "local" && process.env.LOCAL_EMBEDDING_WARMUP !== "false") {

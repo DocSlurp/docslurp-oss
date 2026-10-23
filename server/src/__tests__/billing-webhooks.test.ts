@@ -93,14 +93,14 @@ describe("dispatchStripeEvent", () => {
   it("a Stripe credit grant adds its USD amount as prepaid credits, keyed by the grant id", async () => {
     const db = fakeSql((q) => {
       if (q.text.includes("from organizations where stripe_customer_id")) return [orgRow];
-      if (q.text.includes("grant_org_credits(")) return [{ granted: true }];
+      if (q.text.includes("reconcile_stripe_credit_grant(")) return [{ outcome: "granted" }];
       return [];
     });
     const grant = { id: "credgr_1", customer: "cus_1", category: "promotional", name: "DocSlurp credits", voided_at: null,
       amount: { type: "monetary", monetary: { currency: "usd", value: 100_000 } } };
     expect(await dispatchStripeEvent(db.client, fakeStripe(), event("billing.credit_grant.created", grant))).toBe(true);
-    const [granted] = db.find("grant_org_credits(");
-    expect(granted!.values.slice(0, 4)).toEqual(["org-1", "promo", "credgr_1", 100_000]);
+    const [granted] = db.find("reconcile_stripe_credit_grant(");
+    expect(granted!.values.slice(0, 4)).toEqual(["credgr_1", "org-1", 100_000, false]);
   });
 
   it("a voided Stripe credit grant reverses it, and non-USD or unknown-customer grants grant nothing", async () => {
@@ -112,13 +112,13 @@ describe("dispatchStripeEvent", () => {
     const base = { id: "credgr_1", customer: "cus_1", category: "promotional", name: null,
       amount: { type: "monetary", monetary: { currency: "usd", value: 100_000 } } };
     await dispatchStripeEvent(db.client, fakeStripe(), event("billing.credit_grant.updated", { ...base, voided_at: 1_792_000_000 }));
-    const [reversal] = db.find("reverse_credit_grant(");
-    expect(reversal!.values.slice(0, 2)).toEqual(["grant-9", 100_000]);
+    const [reversal] = db.find("reconcile_stripe_credit_grant(");
+    expect(reversal!.values.slice(0, 4)).toEqual(["credgr_1", "org-1", 100_000, true]);
 
     await dispatchStripeEvent(db.client, fakeStripe(), event("billing.credit_grant.created",
       { ...base, id: "credgr_eur", voided_at: null, amount: { type: "monetary", monetary: { currency: "eur", value: 5_000 } } }));
     await dispatchStripeEvent(db.client, fakeStripe(), event("billing.credit_grant.created", { ...base, id: "credgr_x", customer: "cus_other", voided_at: null }));
-    expect(db.find("grant_org_credits(")).toHaveLength(0);
+    expect(db.find("reconcile_stripe_credit_grant(").map(q => q.values.slice(0, 4))).toEqual([["credgr_1", "org-1", 100_000, true], ["credgr_x", null, 100_000, false]]);
   });
 
   it("an unpaid top-up checkout grants nothing", async () => {
