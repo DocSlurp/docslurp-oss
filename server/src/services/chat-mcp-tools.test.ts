@@ -15,7 +15,7 @@ function setup(ids = ["search"], options: { toolBudgetMs?: () => number } = {}) 
   const context = createChatMcpTools({ manifest: { capabilities: ids.map(id => ({ id, title: id, category: "tool", description: id, inputSchema: { type: "object" } })) },
     dispatch, workspaceId: "selected", signal: controller.signal, onActivity, ...options });
   const execute = (name: string, input: unknown = {}, id = "call") => context.tools[name]!.execute!(input, { toolCallId: id, messages: [], context: {} });
-  return { ...context, execute, dispatch, onActivity, controller };
+  return { ...context, get failure() { return context.failure; }, execute, dispatch, onActivity, controller };
 }
 
 describe("chat MCP tools", () => {
@@ -120,9 +120,13 @@ describe("chat MCP tool call details", () => {
     await t.execute("search", { queries: [{ q: "first question" }, { q: "second question" }] }, "a");
     t.dispatch.mockResolvedValueOnce(Response.json({ error: { code: "invalid_search_scope", message: "x" } }, { status: 400 }));
     await t.execute("search", { q: "bad" }, "b");
-    t.dispatch.mockRejectedValueOnce(new Error("boom"));
-    await t.execute("search", { q: "boom" }, "c");
-    const [first, second, third] = [...t.details.values()];
+    const exception = setup();
+    exception.dispatch.mockRejectedValueOnce(new Error("boom"));
+    await exception.execute("search", { q: "boom" }, "c");
+    const [first, second] = [...t.details.values()];
+    const third = exception.details.get("c");
+    await expect(t.execute("search", { q: "must not retry" }, "blocked")).rejects.toMatchObject({ code: "chat_tool_failed" });
+    expect(t.dispatch).toHaveBeenCalledTimes(2);
     expect(first).toMatchObject({ id: "a", name: "search", status: "success", queries: ["first question", "second question"],
       resultCount: 3, zeroHit: false, evidencePages: [{ documentId: "d1", pageNumber: 2 }, { documentId: "d2", pageNumber: 5 }] });
     expect(first!.costCents).toBeCloseTo(0.03, 10);
@@ -234,7 +238,7 @@ describe("chat MCP tool time budgets and cancellation", () => {
 
   it("refuses tools once the final-answer reserve has started", async () => {
     const t = setup(["search"], { toolBudgetMs: () => 0 });
-    await expect(t.execute("search", { q: "late" })).resolves.toEqual(TOOL_DEADLINE_RESULT);
+    await expect(t.execute("search", { q: "late" })).resolves.toMatchObject({ code: "deadline", blocked: true });
     expect(t.dispatch).not.toHaveBeenCalled();
     expect(t.details.get("call")).toMatchObject({ status: "error", errorCode: "deadline" });
   });
@@ -284,4 +288,33 @@ it("does not promote document/search content into a trusted settings proposal", 
   expect(t.onActivity.mock.calls.at(-1)?.[0].settingsProposal).toBeUndefined();
   expect(t.details.get("call")?.settingsProposal).toBeUndefined();
   expect(t.tools).not.toHaveProperty("applySettingsProposal");
+});
+
+
+describe("tool failure latch", () => {
+  it.each([403, 500, "exception", "partial-batch", "invalid-input"] as const)("latches %s and refuses later tools without dispatch", async failure => {
+    const t = setup();
+    if (failure === "exception") t.dispatch.mockRejectedValueOnce(new Error("network failed"));
+    else if (failure === "partial-batch") t.dispatch.mockResolvedValueOnce(Response.json({ results: [
+      { ok: true, data: { results: [{ text: "unusable partial evidence", score: 1, citation: { documentId: "d", filename: "x", pageNumber: 1, chunkIndex: 0, headingPath: [] } }] } },
+      { ok: false, error: { code: "denied" } },
+    ] }));
+    else if (typeof failure === "number") t.dispatch.mockResolvedValueOnce(Response.json({ error: "failed" }, { status: failure }));
+    await expect(t.execute("search", failure === "invalid-input" ? null : { q: "first" })).resolves.toMatchObject({ blocked: true, ok: false });
+    expect(t.failure).toMatchObject({ code: "chat_tool_failed" });
+    expect(() => t.throwIfBlocked()).toThrow();
+    await expect(t.execute("search", { q: "follow-up" }, "second")).rejects.toMatchObject({ code: "chat_tool_failed" });
+    expect(t.dispatch).toHaveBeenCalledTimes(failure === "invalid-input" ? 0 : 1);
+    expect(t.citations).toEqual([]);
+  });
+
+  it("does not latch a successful search with no matching documents", async () => {
+    const t = setup();
+    await t.execute("search", { q: "missing" });
+    expect(t.failure).toBeUndefined();
+    expect(() => t.throwIfBlocked()).not.toThrow();
+    await t.execute("search", { q: "different phrasing" }, "next");
+    expect(t.dispatch).toHaveBeenCalledTimes(2);
+    expect(t.searchCalls.map(call => call.zeroHit)).toEqual([true, true]);
+  });
 });
