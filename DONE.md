@@ -1,6 +1,7 @@
 # Completed
 
 - Close account enumeration through the unauthenticated `GET /api/sso-lookup` (2026-10-24): the enforce-SSO answer now depends only on the email's verified domain, not on whether that mailbox has an SSO link; the route runs the API per-IP rate limit; and an unlinked user refused at the SSO callback gets a 15-minute, email-bound signed pass so their next password sign-in can proceed and link SSO.
+- Add least-privilege Postgres roles (2026-10-24): `docslurp_app` (DML, no DDL), `docslurp_worker` (DML on the tables workers use, column-level reads of `user`, `webhooks` and `workspace_secrets`, no auth/credential/billing tables) and `docslurp_backup` (`pg_read_all_data`), with `docslurp` kept as owner for migrations. `migrate.mjs` reconciles grants after every run when the roles exist and refuses to migrate as a non-owner; a test fails when a migration adds a table the worker list does not classify. See `docs/self-host/database-roles.md`.
 
 - Cut the worker's serial Postgres round trips per page by 55 to 65% (2026-10-23): parameter-type cache patch for `postgres.js` (unnamed statements no longer cost two round trips), single-flight pipelined checkpoint transactions, one-statement document stage completion, and stage groups that read control state and the next stage's reads in the completion checkpoint. Adds `DOCSLURP_DB_TRACE_FILE`, a Postgres wire counter and a round-trip budget test. See `docs/db-round-trips.md`.
 
