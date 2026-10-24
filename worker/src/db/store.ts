@@ -363,6 +363,60 @@ async function supersededInThisTransaction(
   return mapSuperseded(await supersededInThisTransactionQuery(client, documentIds));
 }
 
+type StageStateRows = (StageStateRow & { scope: "run" | "document" })[];
+
+function runRowQuery(client: Sql<Record<string, unknown>>, runId: string) {
+  // The org's plan rides along (no extra round trip): it sets the AI credit
+  // factor for bonus plans in the usage ledger.
+  return client<WorkspaceRunRow[]>`
+    select r.*, (select o.funded_at is not null from organizations o where o.id = r.org_id) as org_funded
+    from workspace_runs r
+    where r.id = ${runId}
+    limit 1
+  `;
+}
+
+function runDocumentRowsQuery(client: Sql<Record<string, unknown>>, runId: string) {
+  return client<DocumentRow[]>`
+    select *
+    from documents
+    where run_id = ${runId}
+      and superseded_at is null and status <> 'cancelled'
+    order by created_at asc
+  `;
+}
+
+function stageStateRowsQuery(client: Sql<Record<string, unknown>>, runId: string) {
+  // Run and document checkpoints in one round trip; run rows have no document_id.
+  return client<StageStateRows>`
+    select 'run' as scope, run_id, null::text as document_id, stage_name, status, attempts, artifact_uri, stats, error,
+      started_at, completed_at, updated_at
+    from workspace_run_stage_states
+    where run_id = ${runId}
+    union all
+    select 'document' as scope, run_id, document_id, stage_name, status, attempts, artifact_uri, stats, error,
+      started_at, completed_at, updated_at
+    from document_run_stage_states
+    where run_id = ${runId}
+    order by updated_at asc
+  `;
+}
+
+/** The three reads that open a stage activity, mapped; a stage-completion checkpoint can fetch them for the next stage. */
+export type PreloadedRunState = { run: WorkspaceRun; documents: Document[]; stageStates: StageStateRows };
+
+/** What a checkpoint reports back to the stage boundary. */
+type ProgressWrite = {
+  unspentSinceCheck: boolean;
+  lease?: { observation: LeaseObservation | null };
+  /** The run's pause/cancel request, read in the checkpoint's own transaction (options.readControlState). */
+  controlRequested?: boolean;
+  /** The next stage's opening reads, read in the checkpoint's own transaction (options.preloadRunState). */
+  preloaded?: PreloadedRunState;
+};
+
+const CONTROL_REQUEST_STATES = ["pause_requested", "paused", "cancel_requested", "cancelled"];
+
 export class Store {
   private readonly sql: Sql<Record<string, unknown>>;
   capacityLeaseStore(providerIds: string[]) { return new PostgresCapacityLeaseStore(this.sql, (id) => this.loadRun(id).catch(() => null), providerIds); }
@@ -436,14 +490,7 @@ export class Store {
   }
 
   async loadRun(runId: string): Promise<WorkspaceRun> {
-    // The org's plan rides along (no extra round trip): it sets the AI credit
-    // factor for bonus plans in the usage ledger.
-    const [row] = await this.sql<WorkspaceRunRow[]>`
-      select r.*, (select o.funded_at is not null from organizations o where o.id = r.org_id) as org_funded
-      from workspace_runs r
-      where r.id = ${runId}
-      limit 1
-    `;
+    const [row] = await runRowQuery(this.sql, runId);
 
     if (!row) {
       throw new Error(`run not found: ${runId}`);
@@ -459,35 +506,15 @@ export class Store {
   }
 
   async loadDocumentsForRun(runId: string): Promise<Document[]> {
-    const rows = await this.sql<DocumentRow[]>`
-      select *
-      from documents
-      where run_id = ${runId}
-        and superseded_at is null and status <> 'cancelled'
-      order by created_at asc
-    `;
-
-    return rows.map(mapDocument);
+    return (await runDocumentRowsQuery(this.sql, runId)).map(mapDocument);
   }
 
   /** The run's stage checkpoints (run and document rows), for loadRunState to read beside the run. */
-  readStageStates(runId: string): Promise<(StageStateRow & { scope: "run" | "document" })[]> {
-    // Run and document checkpoints in one round trip; run rows have no document_id.
-    return this.sql<(StageStateRow & { scope: "run" | "document" })[]>`
-      select 'run' as scope, run_id, null::text as document_id, stage_name, status, attempts, artifact_uri, stats, error,
-        started_at, completed_at, updated_at
-      from workspace_run_stage_states
-      where run_id = ${runId}
-      union all
-      select 'document' as scope, run_id, document_id, stage_name, status, attempts, artifact_uri, stats, error,
-        started_at, completed_at, updated_at
-      from document_run_stage_states
-      where run_id = ${runId}
-      order by updated_at asc
-    `;
+  readStageStates(runId: string): Promise<StageStateRows> {
+    return stageStateRowsQuery(this.sql, runId);
   }
 
-  async hydrateState(state: WorkflowState, stageStates?: Promise<(StageStateRow & { scope: "run" | "document" })[]>): Promise<void> {
+  async hydrateState(state: WorkflowState, stageStates?: Promise<StageStateRows> | StageStateRows): Promise<void> {
     state.store = this;
     state.runStages.clear();
     state.documentStages.clear();
@@ -633,8 +660,8 @@ export class Store {
   private writeProgress(
     state: WorkflowState,
     prelude?: (client: Sql<Record<string, unknown>>) => readonly PendingQuery<any>[],
-    options: { stageBoundary?: boolean } = {},
-  ): Promise<{ unspentSinceCheck: boolean; lease?: { observation: LeaseObservation | null } }> {
+    options: { stageBoundary?: boolean; readControlState?: boolean; preloadRunState?: boolean } = {},
+  ): Promise<ProgressWrite> {
     const previous = this.progressQueues.get(state) ?? Promise.resolve();
     const next = previous.then(() => this.writeProgressGuarded(state, prelude, options));
     const tail = next.catch(() => undefined);
@@ -648,8 +675,8 @@ export class Store {
   private async writeProgressGuarded(
     state: WorkflowState,
     prelude: ((client: Sql<Record<string, unknown>>) => readonly PendingQuery<any>[]) | undefined,
-    options: { stageBoundary?: boolean },
-  ): Promise<{ unspentSinceCheck: boolean; lease?: { observation: LeaseObservation | null } }> {
+    options: { stageBoundary?: boolean; readControlState?: boolean; preloadRunState?: boolean },
+  ): Promise<ProgressWrite> {
     try {
       return await this.writeProgressNow(state, prelude, options);
     } catch (error) {
@@ -682,8 +709,8 @@ export class Store {
   private async writeProgressNow(
     state: WorkflowState,
     prelude: ((client: Sql<Record<string, unknown>>) => readonly PendingQuery<any>[]) | undefined,
-    options: { stageBoundary?: boolean },
-  ): Promise<{ unspentSinceCheck: boolean; lease?: { observation: LeaseObservation | null } }> {
+    options: { stageBoundary?: boolean; readControlState?: boolean; preloadRunState?: boolean },
+  ): Promise<ProgressWrite> {
     state.run.artifacts = state.artifacts;
     const usageBatch = state.usageLedger.checkpoint();
     const vectors = state.vectorIndexes.slice();
@@ -700,6 +727,8 @@ export class Store {
     );
     let spendCheckDue = false;
     let unspentSinceCheck = true;
+    let controlRequested: boolean | undefined;
+    let preloaded: PreloadedRunState | undefined;
     // Credit leases (credit-lease.ts) replace the cadence counters when on:
     // the checkpoint consumes the run's lease with the credits it debits.
     const leases = await this.creditLeases.active();
@@ -731,6 +760,8 @@ export class Store {
       let usageTo = 0;
       let usageCost: (results: readonly unknown[][]) => number = () => 0;
       let counterPath = false;
+      let controlIndex = -1;
+      let preloadIndex = -1;
       const insertedCost = (results: readonly unknown[]) => usageCost(results.slice(usageFrom, usageTo) as unknown[][]);
       const results = await pipelineTransaction(this.sql, (client) => {
         const statements: PendingQuery<any>[] = [];
@@ -814,6 +845,14 @@ export class Store {
         statements.push(...this.vectorIndexStatements(vectors, client));
         statements.push(...this.performanceRowStatements(client, state, performance));
         statements.push(...this.parserEvaluationStatements(client, parserEvaluations));
+        if (options.readControlState) {
+          controlIndex = statements.length;
+          statements.push(client<{ control_state: string | null }[]>`select control_state from workspace_runs where id = ${state.run.id}`);
+        }
+        if (options.preloadRunState) {
+          preloadIndex = statements.length;
+          statements.push(runRowQuery(client, state.run.id), runDocumentRowsQuery(client, state.run.id), stageStateRowsQuery(client, state.run.id));
+        }
         return statements;
       }, leases ? async (client, rows) => {
         // Same transaction as the debit: available and the lease fall together.
@@ -830,6 +869,11 @@ export class Store {
         unspentSinceCheck = runRow?.no_unchecked_spend === true;
       }
       spentCents = (Number(runRow?.spent_cents ?? state.run.spentCents) || 0) + insertedCost(results);
+      if (preloadIndex >= 0) {
+        const [runRows, documentRows, stageRows] = results.slice(preloadIndex, preloadIndex + 3) as [WorkspaceRunRow[], DocumentRow[], StageStateRows];
+        if (runRows[0]) preloaded = { run: mapRun(runRows[0]), documents: documentRows.map(mapDocument), stageStates: stageRows };
+      }
+      if (controlIndex >= 0) controlRequested = CONTROL_REQUEST_STATES.includes((results[controlIndex] as { control_state: string | null }[])[0]?.control_state ?? "");
     });
 
     // Synchronously together: the committed events leave the pending sum as
@@ -857,7 +901,7 @@ export class Store {
       return { unspentSinceCheck: true };
     }
     // After a check the counters are 0 too: the stage boundary has nothing new to check.
-    return { unspentSinceCheck: spendCheckDue || unspentSinceCheck };
+    return { unspentSinceCheck: spendCheckDue || unspentSinceCheck, controlRequested, preloaded };
   }
 
   private performanceRowStatements(
@@ -1241,7 +1285,8 @@ export class Store {
     stage: string,
     artifactUri: string,
     stats: Record<string, unknown>,
-  ): Promise<void> {
+    options: { readControlState?: boolean; preloadRunState?: boolean } = {},
+  ): Promise<{ controlRequested?: boolean; preloaded?: PreloadedRunState } | void> {
     state.setRunStage({
       runId: state.run.id,
       stageName: stage,
@@ -1267,7 +1312,7 @@ export class Store {
             updated_at = now()
         where run_id = ${state.run.id} and stage_name = ${stage}
       `,
-    ], { stageBoundary: true });
+    ], { stageBoundary: true, readControlState: options.readControlState, preloadRunState: options.preloadRunState });
 
     await this.appendEvent({
       userId: state.run.userId,
@@ -1287,8 +1332,16 @@ export class Store {
     // add no statement.
     // With credit leases the boundary only queries the org when the run's
     // lease is exhausted, expired or missing (credit-lease.ts).
-    if (progress.lease) await this.creditLeases.afterConsume(state.run, progress.lease.observation, "stage-boundary");
-    else if (!progress.unspentSinceCheck) await enforceRunSpend(this.sql, state.run, "stage-boundary");
+    if (progress.lease) {
+      await this.creditLeases.afterConsume(state.run, progress.lease.observation, "stage-boundary");
+      return {};
+    }
+    if (!progress.unspentSinceCheck) {
+      await enforceRunSpend(this.sql, state.run, "stage-boundary");
+      // The spend check may pause the run after the checkpoint read; the caller reads again.
+      return {};
+    }
+    return { controlRequested: progress.controlRequested, preloaded: progress.preloaded };
   }
 
   /**

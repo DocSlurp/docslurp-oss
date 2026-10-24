@@ -1,4 +1,5 @@
 import { reportException, initializeWorkerErrorReporting } from "@docslurp/shared/error-reporting";
+import type { PreloadedRunState } from "../db/store.js";
 import { extendDbTraceLabel } from "../lib/db-trace.js";
 import { compilePipelinePlan, deferredProfilesEnabled, getPipelineStageOrder } from "@docslurp/shared";
 import { withObservation, flushObservability } from "@docslurp/shared/observability";
@@ -93,6 +94,17 @@ export interface StageRuntime {
    * to the unsharded stage activity that follows the shards.
    */
   documentIds?: readonly string[];
+  /**
+   * Read the run's pause/cancel request in the stage-completion checkpoint and report it as
+   * StageOutput.controlRequested, so a stage group does not spend a round trip asking between stages.
+   */
+  readControlState?: boolean;
+  /**
+   * Read the next stage's opening reads (run, documents, checkpoints) in the stage-completion checkpoint
+   * and report them as StageOutput.preloaded; a stage group passes them to its next stage as `preloaded`.
+   */
+  preloadRunState?: boolean;
+  preloaded?: PreloadedRunState;
   /** Called after a failure checkpoint with the stage's ordinary failure total. */
   onStageFailure?(failure: { classification: StageFailureClass; ordinaryFailures: number | undefined }): void;
 }
@@ -107,6 +119,8 @@ export type LoadRunOptions = {
   docConcurrency?: number;
   /** Workflow-accumulated artifacts that fill gaps in the persisted Run (DB wins). */
   artifacts?: Record<string, string>;
+  /** The run, documents and checkpoints already read at the previous stage's completion (same activity). */
+  preloaded?: PreloadedRunState;
 };
 
 /**
@@ -131,9 +145,13 @@ export async function loadRunState(
 ): Promise<WorkflowState> {
   // The checkpoint read needs only the run id: issue it with the other two reads (one
   // round trip on separate pooled connections instead of two in sequence).
-  const stageStates = options.hydrate !== false ? store.readStageStates?.(runId) : undefined;
+  const stageStates = options.preloaded
+    ? Promise.resolve(options.preloaded.stageStates)
+    : options.hydrate !== false ? store.readStageStates?.(runId) : undefined;
   stageStates?.catch(() => undefined);
-  const [run, documents] = await Promise.all([store.loadRun(runId), store.loadDocumentsForRun(runId)]);
+  const [run, documents] = options.preloaded
+    ? [options.preloaded.run, options.preloaded.documents]
+    : await Promise.all([store.loadRun(runId), store.loadDocumentsForRun(runId)]);
   const state = WorkflowState.create(coerceIndexingModeForFlag(run), documents);
   if (options.docConcurrency !== undefined) state.docConcurrency = options.docConcurrency;
   if (options.totalStages !== undefined) state.totalStages = options.totalStages;
@@ -270,6 +288,7 @@ export function createStageExecution(deps: {
       docConcurrency: config.workerDocConcurrency,
       totalStages: input.totalStages,
       artifacts,
+      preloaded: runtime.preloaded,
     });
     const shard = runtime.documentIds !== undefined;
     if (runtime.documentIds) state.beginShard(runtime.documentIds);
@@ -538,7 +557,10 @@ export function createStageExecution(deps: {
       }
 
       // Also checkpoints progress (and this stage's usage) in the same transaction.
-      await store.completeRunStage(state, stageName, "", stageStats);
+      const completion = await store.completeRunStage(state, stageName, "", stageStats,
+        runtime.readControlState || runtime.preloadRunState
+          ? { readControlState: runtime.readControlState, preloadRunState: runtime.preloadRunState }
+          : undefined) as { controlRequested?: boolean; preloaded?: PreloadedRunState } | undefined;
 
       // Emit a run.progress event on stage completion so dashboard gets a fresh snapshot
       await store.appendEvent(
@@ -556,6 +578,8 @@ export function createStageExecution(deps: {
         artifacts: newArtifacts,
         usage,
         stats: stageStats,
+        ...(completion?.controlRequested === undefined ? {} : { controlRequested: completion.controlRequested }),
+        ...(completion?.preloaded ? { preloaded: completion.preloaded } : {}),
       };
     } catch (caught) {
       // A stall abort surfaces as whatever the stage threw on abort; report the hang itself.

@@ -312,9 +312,12 @@ export function createActivities(deps: ActivityDependencies) {
               }
               merged.stagesRun = resumeAt;
             }
+            // The previous stage's completion checkpoint already read the control state.
+            let controlRequested: boolean | undefined;
+            let preloaded: import("../db/store.js").PreloadedRunState | undefined;
             for (const [position, stageName] of input.stageNames.entries()) {
               if (position < resumeAt) continue;
-              if (position > resumeAt && input.yieldToControl && await store.hasRunControlRequest(input.runId)) {
+              if (position > resumeAt && input.yieldToControl && (controlRequested ?? await store.hasRunControlRequest(input.runId))) {
                 console.log(`[temporal] run=${input.runId} stage group yields before ${stageName}: control request`);
                 break;
               }
@@ -324,8 +327,14 @@ export function createActivities(deps: ActivityDependencies) {
                 heartbeat: (details) => context.heartbeat(details),
                 attempt: context.info.attempt,
                 classifyError: classify,
+                readControlState: input.yieldToControl === true,
+                // The next stage of this group opens with the reads this checkpoint already made.
+                preloadRunState: position < input.stageNames.length - 1,
+                preloaded,
                 onStageFailure: (failure) => { ordinaryFailures = failure.ordinaryFailures; },
               });
+              controlRequested = output.controlRequested;
+              preloaded = output.preloaded;
               artifacts = { ...artifacts, ...output.artifacts };
               Object.assign(merged.artifacts, output.artifacts);
               merged.usage.inputTokens += output.usage.inputTokens;
