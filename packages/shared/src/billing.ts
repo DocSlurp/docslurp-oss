@@ -668,13 +668,83 @@ export type PipelineProfile = {
 
 const KB = 1024;
 
+/**
+ * Deployment assumptions behind the per-page `workerSeconds` below: seconds one
+ * worker slot is held by a page task. Every field is a named parameter with its
+ * provenance; none is baked into a profile constant, so a fleet change means
+ * editing this object (and re-measuring), not hunting through the profiles.
+ * The rate-card slot model (`WORKER_SLOT`, 8 per host) is a separate, billing-side
+ * unit and is not changed here.
+ */
+export const PIPELINE_PROFILE_BASIS = {
+  /** Worker slots per machine. Source: fly.worker.toml DOCSLURP_WORKER_SLOTS_PER_MACHINE (shared-cpu-8x / 16 GB), 2026-10-24. */
+  slotsPerHost: 2,
+  /**
+   * Slot tuner. Source: fly.worker.toml WORKER_SLOT_TUNER = resource (min 1, max 2, 5 s ramp), 2026-10-24.
+   * Under review: it may become `fixed`. Load tests showed `fixed` and `resource` per-page busy seconds within
+   * noise (0.22-0.36 vs 0.14-0.23 text/complex), so the values below hold for both; only throughput differs.
+   */
+  slotTuner: "resource",
+  /** Worker class the figures were measured against (or its closest equivalent). Source: fly.worker.toml DOCSLURP_WORKER_CLASS. */
+  workerClass: "shared-cpu-8x-16gb-slot",
+  /**
+   * Planned floor worker: one shared-cpu-2x / 4 GB machine. NOT measured; fewer vCPUs per slot could raise
+   * busy seconds (a 0.5-vCPU-per-slot arm measured 3.4 s per text page). Re-measure before adopting.
+   */
+  plannedFloorWorkerClass: "shared-cpu-2x-4gb",
+  /** Re-measured 2026-10-23/24; see the provenance notes on PIPELINE_PROFILES. */
+  measuredAt: "2026-10-24",
+} as const;
+
+/*
+ * Provenance of `workerSeconds` (re-measured 2026-10-24). Numbers only; no
+ * production identifiers.
+ *
+ * text (fast 0.3 -> 0.2, standard 0.5 -> 0.3), `measured + production`:
+ * - Load test, self-hosted stack, standard profile, 65% text / 35% complex mix,
+ *   10-page synthetic PDFs, local MiniLM or a zero-CPU hosted-embedder stand-in:
+ *   0.22-0.31 busy-s per text page on 1-2 slots, 0.22-0.36 on production-shaped
+ *   2-slot workers (fixed and `resource` tuner), 0.18-0.22 with the hosted
+ *   embedder stand-in on 8-16 slots.
+ * - Production, text-native PDFs with hosted embeddings (fast configuration, no
+ *   page images): whole-worker allocation of 0.07 slot-s per page on 4,000-page
+ *   files and 0.27 slot-s per page on ~330-page files. These include idle slot
+ *   time, so they bound busy time from above.
+ * - Not representative, so excluded: oversubscribed runs (16+ slots on 16 CPUs
+ *   with local ONNX embedding: 1.4-3 s per page because of intra-op thread spin)
+ *   and a CPU-starved 0.5-vCPU arm (3.4 s). Production is moving to one ONNX
+ *   intra-op thread per embed worker (DOCSLURP_LOCAL_EMBED_INTRA_OP_THREADS=1).
+ * - Standard 0.3 is the top of the production-shaped range rounded up; fast 0.2
+ *   drops the page-image stage and sits at the top of the hosted-embedder range.
+ *
+ * complex (unchanged: fast 0.8, standard 4, deep 6), `unmeasured`:
+ * - The load test measured 0.14-0.28 s on synthetic table pages through the
+ *   kreuzberg extraction path without any model call, not the native PDF engine
+ *   production uses, and with vision off. That is a floor for layout-aware
+ *   extraction, not a measurement of it. Production shows a model-read page
+ *   (`worker.vision` spans) at p50 4.1 s, p95 32 s, which is the order of
+ *   magnitude the standard and deep values assume. Revisit with a real-corpus
+ *   run on the native engine.
+ *
+ * scanned (standard 1.5 -> 4.2; fast 3 and deep 6 unchanged), `production`:
+ * - Not exercised by the load test. Production `worker.vision` spans hold a
+ *   slot for p50 4.1 s per page, and an earlier vision load test measured 4.28
+ *   worker-s per page. A 1.5 s standard scan was below a single vision call and
+ *   below the fast profile; 4.2 restores fast <= standard <= deep.
+ *
+ * deep text (0.8 unchanged): summaries and graph enrichment hold slots while
+ * waiting on models (graph-enrich is about a fifth of production stage-seconds)
+ * and were not part of the load test.
+ *
+ * Byte columns (sourceBytes, artifactBytes, indexBytes) are unchanged.
+ */
 export const PIPELINE_PROFILES: Record<PipelineProfileId, PipelineProfile> = {
   fast: {
     id: "fast",
     label: "Fast",
     description: "Text layer and OCR where needed, chunk, embed. Best for born-digital prose.",
     pages: {
-      text: { workerSeconds: 0.3, mode: "fast", sourceBytes: 30 * KB, artifactBytes: 24 * KB, indexBytes: 20 * KB },
+      text: { workerSeconds: 0.2, mode: "fast", sourceBytes: 30 * KB, artifactBytes: 24 * KB, indexBytes: 20 * KB },
       complex: { workerSeconds: 0.8, mode: "fast", sourceBytes: 120 * KB, artifactBytes: 40 * KB, indexBytes: 24 * KB },
       scanned: { workerSeconds: 3, mode: "rich", sourceBytes: 250 * KB, artifactBytes: 40 * KB, indexBytes: 20 * KB },
     },
@@ -684,9 +754,9 @@ export const PIPELINE_PROFILES: Record<PipelineProfileId, PipelineProfile> = {
     label: "Standard",
     description: "Layout-aware tables and figures, model reading where pages need it, page images.",
     pages: {
-      text: { workerSeconds: 0.5, mode: "fast", sourceBytes: 30 * KB, artifactBytes: 64 * KB, indexBytes: 25 * KB },
+      text: { workerSeconds: 0.3, mode: "fast", sourceBytes: 30 * KB, artifactBytes: 64 * KB, indexBytes: 25 * KB },
       complex: { workerSeconds: 4, mode: "fast", sourceBytes: 120 * KB, artifactBytes: 160 * KB, indexBytes: 30 * KB },
-      scanned: { workerSeconds: 1.5, mode: "rich", sourceBytes: 250 * KB, artifactBytes: 160 * KB, indexBytes: 25 * KB },
+      scanned: { workerSeconds: 4.2, mode: "rich", sourceBytes: 250 * KB, artifactBytes: 160 * KB, indexBytes: 25 * KB },
     },
   },
   deep: {
