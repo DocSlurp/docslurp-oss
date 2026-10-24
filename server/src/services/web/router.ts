@@ -147,7 +147,7 @@ export class WebRouter {
       const signal = AbortSignal.any([args.signal, AbortSignal.timeout(timeoutMs)]);
       try {
         // Async jobs (crawl) get a soft deadline well before the hard abort, so they can stop and return what they have.
-        const softDeadlineMs = capability === "crawl" ? Math.max(5_000, timeoutMs - CRAWL_DEADLINE_MARGIN_MS) : timeoutMs;
+        const softDeadlineMs = capability === "crawl" ? Math.max(Math.min(5_000, timeoutMs / 2), timeoutMs - CRAWL_DEADLINE_MARGIN_MS) : timeoutMs;
         const result = await span.run(() => handler.run(input, { apiKey: this.options.keys[adapter.id]!, signal, fetch: this.fetchImpl, deadlineMs: softDeadlineMs }));
         const runtimeMs = this.now() - started;
         const isEmpty = emptyTraversal(capability, result.data);

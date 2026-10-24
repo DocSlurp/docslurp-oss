@@ -98,7 +98,8 @@ function createWebRoutes(surface: WebSurface) {
       const result = await createWebsiteWorkspaceIntake({
         userId: actor.userId,
         orgId: scope.orgId,
-        workspace: body.workspace?.trim() || null,
+        // Intake's default branch is the org default; a restricted key's default is its own (preflighted) workspace.
+        workspace: body.workspace?.trim() || (restricted ? scope.id : null),
         newWorkspace: body.newWorkspace,
         allowedWorkspaceIds: restricted && actor.type === "apiKey" ? actor.apiKey.workspaceIds! : null,
         tags: body.tags,

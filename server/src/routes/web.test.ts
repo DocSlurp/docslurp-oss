@@ -45,6 +45,19 @@ describe("POST /v1/web/ingest preflight", () => {
     expect(run).not.toHaveBeenCalled();
   });
 
+  it("ingests a restricted key's default into its own allowlisted workspace, never the org default", async () => {
+    crawlSpy();
+    lookup.mockResolvedValueOnce({ ref: { kind: "default" } });
+    scoped.mockResolvedValueOnce({ id: "ws-allowed", orgId: "org-1" });
+    const intake = vi.spyOn(await import("../services/workspace-intake-actions.js"), "createWebsiteWorkspaceIntake")
+      .mockResolvedValueOnce({ payload: {} as never, status: 201, temporalDeferred: false });
+    const response = await webRoutesFor(restrictedKey, "mcp").request("http://mcp.internal/ingest", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ url: "https://a.test/" }),
+    });
+    expect(response.status).toBe(201);
+    expect(intake).toHaveBeenCalledWith(expect.objectContaining({ workspace: "ws-allowed", allowedWorkspaceIds: ["ws-allowed"] }));
+  });
+
   it("refuses an unknown workspace ID before crawling", async () => {
     const run = crawlSpy();
     lookup.mockResolvedValueOnce({ ref: { kind: "id", id: "00000000-0000-4000-8000-000000000000" }, workspace: null });

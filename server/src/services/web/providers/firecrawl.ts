@@ -133,12 +133,18 @@ export function createFirecrawlAdapter(options: { usdPerCredit: number }): WebPr
             if (!finished) await ctx.fetch(`${BASE}/crawl/${encodeURIComponent(id)}`, { method: "DELETE", headers: auth(ctx.apiKey) }).catch(() => undefined);
           }
           const items = [...(status.data ?? [])];
-          // Large results are paginated (`next`, ~10 MB per page); follow while under the limit.
+          // Large results are paginated (`next`, ~10 MB per page). Follow while under the limit and the
+          // soft deadline; a failed or late page keeps what was collected instead of losing the crawl.
           let next = str(status.next);
-          while (next && items.length < input.limit && next.startsWith(`${BASE}/`)) {
-            const more = await providerJson<Status>("firecrawl", ctx, next, { method: "GET", headers: auth(ctx.apiKey) });
-            items.push(...(more.data ?? []));
-            next = str(more.next);
+          while (next && items.length < input.limit && next.startsWith(`${BASE}/`) && Date.now() - started < ctx.deadlineMs - POLL_MS) {
+            try {
+              const more = await providerJson<Status>("firecrawl", ctx, next, { method: "GET", headers: auth(ctx.apiKey) });
+              items.push(...(more.data ?? []));
+              next = str(more.next);
+            } catch (error) {
+              if (ctx.signal.aborted && !items.length) throw Object.assign(error as object, { costUsd: spent() });
+              break;
+            }
           }
           const pages = items.flatMap((item) => scrapedPage(item, input.maxCharacters) ?? []).slice(0, input.limit);
           return cost({ pages }, status.creditsUsed, Math.max(1, pages.length));
