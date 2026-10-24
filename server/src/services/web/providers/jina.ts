@@ -36,7 +36,9 @@ export function createJinaAdapter(options: { usdPerMillionTokens: number }): Web
     capabilities: {
       search: {
         estimateUsd: (input) => usd(SEARCH_MIN_TOKENS + (input.includeContent ? input.limit * PAGE_TOKENS_ESTIMATE : 0)),
-        accepts: (input) => !input.recency && !input.excludeDomains?.length && input.limit <= 10,
+        // Content searches read every result before responding (~10-20 s measured 2026-10-24): too slow for
+        // chat, so those route to the next provider. Snippet searches stay here (cheapest, ~1.5 s).
+        accepts: (input) => !input.includeContent && !input.recency && !input.excludeDomains?.length && input.limit <= 10,
         run: async (input, ctx) => {
           const params = new URLSearchParams({ q: input.query.slice(0, 500) });
           for (const domain of input.includeDomains ?? []) params.append("site", domain);

@@ -52,6 +52,7 @@ describe("web provider adapters", () => {
   it("Jina search declines inputs it cannot honour so the router picks another provider", () => {
     const jina = createJinaAdapter({ usdPerMillionTokens: 0.05 }).capabilities.search!;
     expect(jina.accepts!({ ...search, recency: "week" })).toBe(false);
+    expect(jina.accepts!({ ...search, includeContent: true })).toBe(false);
     expect(jina.accepts!(search)).toBe(true);
   });
 
