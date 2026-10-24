@@ -511,7 +511,7 @@ export const pipelineFeaturesSchema = z
     /**
      * Web tools (web search, page fetch, site map, crawl, website ingest) for
      * this workspace's REST, MCP and chat calls. On by default and written
-     * explicitly into every workspace's pipeline (migration 0079); set false to
+     * explicitly into every workspace's pipeline (migration 0080); set false to
      * opt the workspace out. Queries go to a hosted web provider, so privacy
      * modes that forbid hosted calls block web tools regardless.
      */

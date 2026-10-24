@@ -39,7 +39,7 @@ them, and pages are capped at 6,000 characters.
   Each tool is listed only while some configured provider supports it.
   `WEB_TOOLS_CHAT_ENABLED=false` keeps web tools out of chat.
 - **Workspace:** the workspace pipeline's `webTools` setting, default `true`.
-  Migration 0079 writes `webTools: true` into every existing workspace. Set
+  Migration 0080 writes `webTools: true` into every existing workspace. Set
   `pipeline.webTools: false` through the workspace settings API to opt a
   workspace out.
 - **Privacy:** `local-only` and `strict-privacy` workspaces never use web

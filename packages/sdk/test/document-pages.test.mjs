@@ -27,6 +27,8 @@ test('keeps quality cache identities out of page enumeration', () => {
   const pages = buildDocumentPreviewPages({ documentId: 'doc', artifacts: [
     { slot: 'doc:page-3', uri: 's3://bucket/v2-200dpi/page-3.png', url: '/reader.png' },
     { slot: 'doc:raster-v2-reader-page-3', uri: 's3://bucket/v2-200dpi/page-3.png', url: '/reader-copy.png' },
+    { slot: 'doc:raster-v3-reader-120dpi-page-3', uri: 's3://bucket/v3-120dpi/page-3.png', url: '/v3-reader-copy.png' },
+    { slot: 'doc:raster-v3-export-250dpi-page-3', uri: 's3://bucket/v3-250dpi/page-3.png', url: '/v3-export.png' },
     { slot: 'doc:raster-v2-export-page-3', uri: 's3://bucket/v2-300dpi/page-3.png', url: '/export.png' },
   ], manifest: null });
   assert.equal(pages.length, 1);

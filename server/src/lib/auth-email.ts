@@ -1,3 +1,4 @@
+import { instrumentFetch } from "@docslurp/shared/observability";
 import { isEmailAuthConfigured } from "@docslurp/shared/auth-security";
 import { emailOTP } from "better-auth/plugins";
 import { APIError } from "better-auth/api";
@@ -29,7 +30,7 @@ export function createAuthEmailOptions(env: NodeJS.ProcessEnv) {
 /** Authentication delivery must succeed; codes are never printed to logs. */
 export async function sendAuthEmailCode({ email, otp }: { email: string; otp: string }): Promise<void> {
   if (!isEmailAuthConfigured(process.env)) throw new Error("Email authentication is disabled");
-  const response = await fetch("https://api.resend.com/emails", {
+  const response = await instrumentFetch("resend", "email")("https://api.resend.com/emails", {
     method: "POST",
     signal: AbortSignal.timeout(10_000),
     headers: { Authorization: `Bearer ${process.env.RESEND_API_KEY!.trim()}`, "Content-Type": "application/json" },

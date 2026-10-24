@@ -26,10 +26,22 @@ The worker uses the sandboxed PDF raster cache, rechecks source/privacy eligibil
 
 ## Resolution and export
 
-The selected reader page requests a 200 DPI lossless PNG, even when ingestion or an older reader already cached a 120/150 DPI image. Only opening a page upgrades it; no neighbouring pages are rasterized. An explicit export requests the exact selected page at up to 300 DPI. The original PDF link retains vector quality.
+New reader rasters default to 120 DPI for every account, including funded accounts. Existing authorized canonical or reader images are reused rather than rendered again for a downgrade; their DPI may be unknown. Only an explicit Sharper image or PNG export requests higher resolution: 250 DPI when the document’s own organization has `funded_at` or is billing-exempt, otherwise 120 DPI. Membership in another funded organization never grants this quality. No intermediate 200-DPI demand tier is introduced. The original PDF link retains vector quality.
 
 Both native and Poppler paths inspect page dimensions before raster allocation. Resolution is reduced when needed to stay within a 4096-pixel long edge and 16 million pixels; an unknown or invalid page size fails closed. Poppler renders the same CropBox measured by `pdfinfo`, rather than the potentially much larger MediaBox. Both paths also receive an independent preallocation long-edge cap of at most 4000 pixels (4000² = 16 million), so the pixel-product limit remains safe even if geometry, rotation or UserUnit interpretation differs. Normal pages retain their requested resolution below this cap. Native adapters must honor `maxEdgePx` before allocating raster memory; the optional native binary must be validated separately from adapter-double tests. Raster cache keys are versioned independently from ingestion-era pixels.
 
-Add `?quality=reader` (default) or `?quality=export` to the image endpoint. GET remains read-only; POST requires a session and workspace edit access, including cached responses. Reader/export demand rows, workflow IDs, artifact slots and deterministic compute receipts are distinct. Both qualities share the existing eight-request organization limit and two activity slots. Migration 0077 adds the demand quality key. Reader publication also updates the canonical page slot so existing citations continue to work; export artifacts are excluded from ordinary preview-page enumeration.
+Add `?quality=reader` (default) or `?quality=export` to the image endpoint. GET remains read-only; POST requires a session and workspace edit access, including cached responses. Reader/export demand rows, workflow IDs, artifact slots and deterministic compute receipts include effective DPI; version 3 identities cannot mistake a free 120-DPI export for a later funded 250-DPI export. GET and POST ready/pending responses include `capabilities: { sharperImage, exportDpi }`; known-policy images include `dpi`, while reused legacy images omit it. Both qualities share the existing eight-request organization limit and two activity slots. Migration 0077 adds the demand quality key; 0079 adds DPI (120/250) to its primary key, retaining existing demands conservatively at 120. The worker validates the document-owned policy independently, including before publication. An admitted 120-DPI snapshot remains valid after funding; unauthorized 250-DPI work fails nonretryably. Exact DPI cleanup cannot erase another active quality tier. Reader publication also updates the canonical page slot so existing citations continue to work; export artifacts are excluded from ordinary preview-page enumeration.
 
 Browser export fetches and validates the renderer's PNG bytes before downloading them. It never captures the DOM. Native image documents retain their existing preview and original-file link; this export endpoint is for completed PDFs.
+
+### Rollout order
+
+Apply migration 0079 before starting the new renderer. Upgrade and verify **all**
+workers polling the page-render task queue before enabling the new API/UI policy;
+drain or stop old workers first. Old workers ignore the approved DPI argument,
+use the previous render policy and delete demand by quality alone. Do not run
+mixed old/new page-render consumers against newly admitted DPI-specific jobs.
+The manual production deployment upgrades workers before the API and verifies
+worker readiness; confirm every page-render consumer uses the new image, and
+check queued/in-flight page renders, before advancing the API/UI. Demand expires
+after ten minutes as a fallback, so retained legacy rows do not need deletion.

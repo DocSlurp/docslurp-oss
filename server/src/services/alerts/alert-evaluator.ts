@@ -19,7 +19,6 @@ import {
   type QueueSnapshot,
   type TaskQueuePollerSnapshot,
 } from "./alert-rules.js";
-import { creditAlertChecks, readCreditSnapshots, type CreditSnapshot } from "./credit-alerts.js";
 import { AlertTracker } from "./alert-tracker.js";
 import { WorkerFloorFallback } from "./worker-floor.js";
 
@@ -139,7 +138,6 @@ export interface AlertEvaluatorDeps {
   readQueue: () => Promise<QueueSnapshot>;
   readMigrations: () => Promise<MigrationSnapshot | null>;
   readTemporal: () => Promise<AlertObservation["temporal"]>;
-  readCredits?: () => Promise<CreditSnapshot[]>;
   readHttp: (windowMs: number, now: number) => { total: number; errors5xx: number };
   deliver: (notification: Parameters<typeof deliverAlert>[0], config: AlertDeliveryConfig) => Promise<void>;
   now: () => number;
@@ -159,7 +157,6 @@ const defaultDeps: AlertEvaluatorDeps = {
     return rows.length > 0;
   },
   readQueue: readQueueSnapshot,
-  readCredits: readCreditSnapshots,
   readMigrations: readMigrationSnapshot,
   readTemporal: readTemporalSnapshot,
   readHttp: (windowMs, now) => httpResponseStats.window(windowMs, now),
@@ -258,10 +255,6 @@ export class AlertEvaluator {
         http: { ...this.deps.readHttp(windowMs, now), windowMs },
       };
       const checks = evaluateAlertRules(observation, this.options.thresholds, leader ? this.workerHistory : undefined);
-      if (leader && this.deps.readCredits) {
-        try { checks.push(...creditAlertChecks(await this.deps.readCredits())); }
-        catch { console.error("[alert] credit_snapshot_unavailable=true existing_alerts_preserved=true"); }
-      }
       this.lastChecks = checks;
       this.lastEvaluatedAt = now;
       for (const notification of this.tracker.update(checks, now)) this.pendingDeliveries.set(notification.id, notification);
