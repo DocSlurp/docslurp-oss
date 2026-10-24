@@ -4,7 +4,7 @@ import postgres from "postgres";
 import { instrumentPostgres } from "@docslurp/shared/observability";
 
 import { PoolActivity } from "./pool-activity.js";
-import { DEFAULT_RESUME_GAP_MS, resilientSql } from "./resilient-sql.js";
+import { DEFAULT_RESUME_GAP_MS, DEFAULT_RESUME_LOG_GAP_MS, resilientSql } from "./resilient-sql.js";
 
 export const DEFAULT_DATABASE_POOL_MAX = 20;
 
@@ -69,6 +69,11 @@ export function resolveResumeGapMs(env: NodeJS.ProcessEnv = process.env): number
   return readInt(env.DATABASE_RESUME_GAP_MS, DEFAULT_RESUME_GAP_MS, 0, 3_600_000);
 }
 
+/** Shortest idle gap whose pool recycle is logged (DATABASE_RESUME_LOG_GAP_MS); shorter, routine ones are silent. */
+export function resolveResumeLogGapMs(env: NodeJS.ProcessEnv = process.env): number {
+  return readInt(env.DATABASE_RESUME_LOG_GAP_MS, DEFAULT_RESUME_LOG_GAP_MS, 0, 86_400_000);
+}
+
 function postgresOptions(options: { max: number; applicationName: string }) {
   return {
     max: options.max,
@@ -101,6 +106,7 @@ export function createApiPool(
     () => instrumentPostgres(createPostgres(databaseUrl, { max, applicationName }), databaseUrl, { onQueryStart: activity.start }),
     {
       gapMs: options.resumeGapMs ?? resolveResumeGapMs(),
+      logGapMs: resolveResumeLogGapMs(),
       now: options.now,
       onResume: () => reconnectListeners(),
     },
