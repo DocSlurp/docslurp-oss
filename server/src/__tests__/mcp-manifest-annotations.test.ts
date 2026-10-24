@@ -10,6 +10,7 @@ describe("capability manifest annotations", () => {
   it("declares hints for every exposed MCP tool", () => {
     const manifest = mcpManifest("https://example.test", ["search", "ingest"]);
     const expected: Record<string, { readOnly: boolean; idempotent: boolean; consequential: boolean }> = {
+      getWorkspaceSettings: { readOnly: true, idempotent: true, consequential: false },
       listWorkspaces: { readOnly: true, idempotent: true, consequential: false },
       upload: { readOnly: false, idempotent: false, consequential: true },
       completeUpload: { readOnly: false, idempotent: false, consequential: true },
@@ -23,6 +24,9 @@ describe("capability manifest annotations", () => {
       uploadEstimate: { readOnly: true, idempotent: true, consequential: false },
       getJob: { readOnly: true, idempotent: true, consequential: false },
     };
+    const managed = mcpManifest("https://example.test", ["search", "workspaces:manage"], "server");
+    expect(managed.capabilities.find(tool => tool.id === "proposeWorkspaceSettings")?.annotations).toMatchObject({ readOnly: true, idempotent: true, consequential: false });
+    expect(managed.capabilities.some(tool => tool.id === "applySettingsProposal")).toBe(false);
     const tools = manifest.capabilities.filter((capability) => capability.category === "tool");
     expect(new Set(tools.map((tool) => tool.id))).toEqual(new Set(Object.keys(expected)));
     for (const tool of tools) {
