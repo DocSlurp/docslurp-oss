@@ -238,6 +238,9 @@ counts `lanceTableMissing` and logs `[search] lancedb table missing`).
    replacing rows already in the workspace database, then builds the vector
    and full-text indexes. Reruns converge. Rows of deleted documents and
    replaced chunks stay behind (`orphan_rows`, `stale_rows`).
+   It registers every table it maintains for the maintenance sweep; after
+   changing `vectorIndexMinRows`, rerun with `--maintain-all` to index tables
+   that already crossed the new threshold.
 3. Resume ingest, check search in a few workspaces, then rerun with
    `--drop-legacy` to delete the org-level tables (they hold chunk text). It
    drops only after a run that read every row and had no error. Deleting an

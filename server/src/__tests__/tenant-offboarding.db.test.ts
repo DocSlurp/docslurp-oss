@@ -116,6 +116,7 @@ describe("organization deletion", () => {
     expect(await sql`select kind, target from storage_cleanup_queue order by kind, target`).toEqual([
       { kind: "storage_prefix", target: "member/ws-done/" },
       { kind: "storage_prefix", target: "member/ws-live/" },
+      { kind: "vector_prefix", target: "team|ws" },
       { kind: "vector_table", target: "team|legacy" },
       { kind: "vector_table", target: "team|legacy|model-x|4" },
       { kind: "vector_table", target: "team|ws|model-x|4" },

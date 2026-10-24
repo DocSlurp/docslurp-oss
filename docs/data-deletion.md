@@ -26,7 +26,11 @@ Every workspace has its own LanceDB database per embedding space
 (`<LANCEDB_URI>/<orgId>/<workspaceId>/vectors-<model>-<dimensions>`). Workspace
 deletion (`deleteWorkspaceData`, which organization deletion also runs for each
 workspace) queues `vector_table` entries for them first, so they are dropped
-whole instead of being deleted one document at a time. While documents are
+whole instead of being deleted one document at a time, then a `vector_prefix`
+entry that removes everything left under `<LANCEDB_URI>/<orgId>/<workspaceId>/`
+(tables of models no document indexes any more, the directories). A local root
+is removed directly; an object-storage root must live in the artifact bucket,
+otherwise only the known tables are dropped and the sweep logs a warning. While documents are
 still in flight the drop waits out the same 15-minute grace as their cleanup.
 
 Org-level tables from before per-workspace databases are deleted by the

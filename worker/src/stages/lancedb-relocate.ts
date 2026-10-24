@@ -22,7 +22,8 @@
  *      source was read (count verified) and the run had no error.
  *
  * Rows of documents that no longer exist are not moved; the legacy drop
- * removes them. Read-only on Postgres. Run it with ingest stopped or drained
+ * removes them. On Postgres it only registers maintained tables in
+ * vector_index_tables (for the maintenance sweep). Run it with ingest stopped or drained
  * (see the operations guide): a worker writing the same chunk id between the
  * existing-id read and the append would leave a duplicate row.
  */
@@ -52,6 +53,12 @@ export interface LanceRelocateOptions {
   /** Rows buffered across all destinations before the largest buffer is flushed (default 20,000). */
   maxPendingRows?: number;
   skipMaintenance?: boolean;
+  /**
+   * Also maintain workspace databases this run wrote nothing to (rows already
+   * relocated): builds a vector index on tables that crossed a lowered
+   * vectorIndexMinRows without new writes to trigger maintenance.
+   */
+  maintainAll?: boolean;
   log?: (line: string) => void;
   /** Test seams. */
   existingIds?: (location: VectorLocation) => Promise<Set<string>>;
@@ -74,6 +81,8 @@ export interface LanceRelocateResult {
   /** Rows of a cross-workspace copy's source without a matching chunk on the copy. */
   unmatchedCopyRows: number;
   droppedLegacy: VectorLocation[];
+  /** Workspace databases maintained (vector index, FTS, optimize) and registered for the sweep. */
+  maintained: VectorLocation[];
   errors: string[];
 }
 
@@ -162,7 +171,7 @@ export async function relocateOrgVectors(options: LanceRelocateOptions): Promise
   const drop = options.drop ?? dropLanceDbTable;
   const { root } = resolveLanceDbConfig();
   const result: LanceRelocateResult = {
-    orgId, sources: [], written: [], skippedExisting: 0, orphanRows: 0, staleRows: 0, unmatchedCopyRows: 0, droppedLegacy: [], errors: [],
+    orgId, sources: [], written: [], skippedExisting: 0, orphanRows: 0, staleRows: 0, unmatchedCopyRows: 0, droppedLegacy: [], maintained: [], errors: [],
   };
 
   try {
@@ -350,9 +359,22 @@ export async function relocateOrgVectors(options: LanceRelocateOptions): Promise
 
     if (!dryRun && !options.skipMaintenance) {
       const maintenance = lanceDbMaintenanceSettings(resolveLanceDbConfig().params);
-      for (const target of result.written) {
+      const targets = options.maintainAll
+        ? [...destinations.values()].filter((entry) => entry.rows > 0 || entry.seen.size > 0).map((entry) => entry.location)
+        : result.written;
+      for (const target of targets) {
         const outcome = await runLanceDbMaintenance(target.uri, target.table, maintenance);
-        if (!outcome.ok) result.errors.push(`maintenance ${target.uri}: ${outcome.error ?? "failed"}`);
+        if (!outcome.ok) {
+          result.errors.push(`maintenance ${target.uri}: ${outcome.error ?? "failed"}`);
+          continue;
+        }
+        // Known to the maintenance sweep from now on, with nothing pending.
+        await sql`
+          insert into vector_index_tables (table_key, lance_uri, lance_table, last_optimized_at, updated_at)
+          values (${`${target.uri}#${target.table}`}, ${target.uri}, ${target.table}, now(), now())
+          on conflict (table_key) do update set lance_uri = excluded.lance_uri, lance_table = excluded.lance_table, updated_at = now()
+        `;
+        result.maintained.push({ uri: target.uri, table: target.table });
       }
     }
 

@@ -116,6 +116,16 @@ async function enqueueWorkspaceVectorTableDrops(sql: DataDeletionDeps["sql"], wo
     where w.id = ${workspaceId}
     on conflict (kind, target) do nothing
   `;
+  // Then everything else under <root>/<org>/<workspace>/: tables of models no
+  // document indexes any more, and the directories themselves.
+  await sql`
+    insert into storage_cleanup_queue (kind, org_id, target, payload, reason, not_before)
+    select 'vector_prefix', w.org_id, w.org_id || '|' || w.id, jsonb_build_object('workspaceId', w.id),
+      'workspace_deleted', now() + make_interval(secs => ${graceSeconds})
+    from workspaces w
+    where w.id = ${workspaceId}
+    on conflict (kind, target) do nothing
+  `;
 }
 
 export interface DeletedWorkspaceData {
