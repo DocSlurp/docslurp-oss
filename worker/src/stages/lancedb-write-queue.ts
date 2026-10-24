@@ -368,6 +368,7 @@ export class LanceDbWriteQueue {
     }, Math.max(1_000, Math.floor(this.settings.leaseTtlMs / 3)));
     renew.unref?.();
     try {
+      let renewBeforeNextBatch = false;
       while (!leaseLost) {
         const pending = await this.sql<{
           id: string | number; generation: number; document_id: string; run_id: string | null; org_id: string | null;
@@ -379,6 +380,7 @@ export class LanceDbWriteQueue {
           order by id
           limit ${this.settings.maxBatchDocuments}`;
         if (pending.length === 0) break;
+        if (renewBeforeNextBatch && !(await this.renewWriteLease(tableKey, holder))) break;
         const batch: VectorOutboxRow[] = [];
         let records = 0;
         for (const row of pending) {
@@ -399,7 +401,8 @@ export class LanceDbWriteQueue {
         documents += await this.commitBatch(tableKey, uri, table, batch);
         batches += 1;
         if (Date.now() - started >= this.settings.maxLeadMs) break;
-        if (!(await this.renewWriteLease(tableKey, holder))) break;
+        // Renew only when another batch is waiting; the empty read below ends the drain without a renewal.
+        renewBeforeNextBatch = true;
       }
     } finally {
       clearInterval(renew);
@@ -460,11 +463,14 @@ export class LanceDbWriteQueue {
     const ids = rows.map((row) => row.id);
     const generations = rows.map((row) => row.generation);
     // A row re-enqueued (generation bumped) during the write stays pending for the next batch.
+    // One statement: rows are marked and the table's counters advance together.
     await this.sql`
-      update vector_index_outbox o set status = 'written', written_at = now(), attempts = o.attempts + 1, last_error = null
-      from (select unnest(${ids}::bigint[]) as id, unnest(${generations}::int[]) as generation) v
-      where o.id = v.id and o.generation = v.generation and o.status = 'pending'`;
-    await this.sql`
+      with written as (
+        update vector_index_outbox o set status = 'written', written_at = now(), attempts = o.attempts + 1, last_error = null
+        from (select unnest(${ids}::bigint[]) as id, unnest(${generations}::int[]) as generation) v
+        where o.id = v.id and o.generation = v.generation and o.status = 'pending'
+        returning 1
+      )
       update vector_index_tables set
         rows_since_optimize = rows_since_optimize + ${records},
         commits_since_optimize = commits_since_optimize + 1,
