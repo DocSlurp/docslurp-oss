@@ -13,7 +13,8 @@ import * as lancedb from "@lancedb/lancedb";
 import postgres from "postgres";
 import { normalizePipelineFeatures, resolveEmbeddingRoute, resolveLanceDbConfig, VectorNamespaceManager } from "@docslurp/shared";
 import { encodeLanceChunkHydration } from "@docslurp/shared/lancedb-hydration";
-import { chunkTextFtsIndex } from "../../../worker/src/stages/lancedb-maintenance.js";
+// Mirrors worker chunkTextFtsIndex(); servers must not deep-import worker sources.
+const chunkTextFtsIndex = () => lancedb.Index.fts({ withPosition: false, language: "English", stem: true, removeStopWords: true, lowercase: true, asciiFolding: true });
 
 const [root, outDir, maxChunksArg] = process.argv.slice(2);
 const MAX_CHUNKS = Number(maxChunksArg ?? 20000);
