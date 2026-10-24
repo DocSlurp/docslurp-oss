@@ -669,15 +669,29 @@ export type PipelineProfile = {
 const KB = 1024;
 
 /**
- * Basis for the per-page `workerSeconds` below: seconds one worker slot is held
- * by a page task, on a production worker machine (fly.worker.toml:
- * shared-cpu-8x / 16 GB, 2 slots per machine, `resource` slot tuner with min 1,
- * max 2, 5 s ramp). The rate-card slot model (`WORKER_SLOT`, 8 per host) is a
- * different, billing-side unit and is not changed here.
+ * Deployment assumptions behind the per-page `workerSeconds` below: seconds one
+ * worker slot is held by a page task. Every field is a named parameter with its
+ * provenance; none is baked into a profile constant, so a fleet change means
+ * editing this object (and re-measuring), not hunting through the profiles.
+ * The rate-card slot model (`WORKER_SLOT`, 8 per host) is a separate, billing-side
+ * unit and is not changed here.
  */
 export const PIPELINE_PROFILE_BASIS = {
+  /** Worker slots per machine. Source: fly.worker.toml DOCSLURP_WORKER_SLOTS_PER_MACHINE (shared-cpu-8x / 16 GB), 2026-10-24. */
   slotsPerHost: 2,
+  /**
+   * Slot tuner. Source: fly.worker.toml WORKER_SLOT_TUNER = resource (min 1, max 2, 5 s ramp), 2026-10-24.
+   * Under review: it may become `fixed`. Load tests showed `fixed` and `resource` per-page busy seconds within
+   * noise (0.22-0.36 vs 0.14-0.23 text/complex), so the values below hold for both; only throughput differs.
+   */
   slotTuner: "resource",
+  /** Worker class the figures were measured against (or its closest equivalent). Source: fly.worker.toml DOCSLURP_WORKER_CLASS. */
+  workerClass: "shared-cpu-8x-16gb-slot",
+  /**
+   * Planned floor worker: one shared-cpu-2x / 4 GB machine. NOT measured; fewer vCPUs per slot could raise
+   * busy seconds (a 0.5-vCPU-per-slot arm measured 3.4 s per text page). Re-measure before adopting.
+   */
+  plannedFloorWorkerClass: "shared-cpu-2x-4gb",
   /** Re-measured 2026-10-23/24; see the provenance notes on PIPELINE_PROFILES. */
   measuredAt: "2026-10-24",
 } as const;
