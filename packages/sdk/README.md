@@ -265,7 +265,7 @@ Add DocSlurp search, chat and a document viewer to your site as React components
 | `createOfflineSearchBundle()` | Builds a JSON bundle (and optionally a LanceDB table) for offline search. |
 | `createOfflineSearchClient()` | Searches that bundle in the browser or in Node. |
 
-Search and chat take `apiUrl` (default `https://docslurp.io`), a `dslp_pub_` browser `clientKey`, and `workspace` (an ID, slug or name, or `default`; default `default`; the custom elements' attribute is also `workspace`). Browser integrations reject server and untyped legacy keys. API origins must use HTTPS, except exact localhost/loopback addresses for development.
+Search and chat take `apiUrl` (default `https://docslurp.io`), a `dslp_pub_` browser `clientKey` (with the `search` scope; chat and the embed widget also need `chat`), and `workspace` (an ID, slug or name, or `default`; default `default`; the custom elements' attribute is also `workspace`). Browser integrations reject server and untyped legacy keys. API origins must use HTTPS, except exact localhost/loopback addresses for development.
 
 For `ViewerEmbed`, pass `apiUrl=""` for the same-origin API and `documentId`, with no `clientKey`. On your own site, authenticate users in a backend proxy and authorize each requested document there. Keep the server key in that backend. Proxy both document metadata and artifact URLs (rewrite artifact URLs to same-origin authenticated routes): the viewer iframe uses cookies and cannot attach a bearer header. Never put server credentials into an embed or an artifact URL.
 
@@ -1104,7 +1104,7 @@ Complete illustrative result when there are no active keys:
 
 When keys are revoked, `keys` lists them in the shape above with `revokedAt` set, and `revokedCount` is how many. Revoking needs an owner or admin, and keys need `organizations:manage`. It also revokes the key making the request.
 
-Organization scopes are opt-in and never part of the default `ingest`, `search` and `artifacts` set. To grant one, create or update a server key on the [API keys](https://docslurp.io/app/api-keys) page, or from a signed-in session with `POST /v1/api-keys` or `PATCH /v1/api-keys/:id`. Use `scopes: ["organizations:read"]` to read, or `["organizations:manage"]` to read and make changes. Only owners and admins can grant `organizations:manage`, and browser keys can't have organization scopes. The SDK has no methods for creating keys; see the [HTTP reference](https://docslurp.io/docs/http).
+Organization scopes are opt-in and never part of the default `ingest`, `search`, `chat` and `artifacts` set. To grant one, create or update a server key on the [API keys](https://docslurp.io/app/api-keys) page, or from a signed-in session with `POST /v1/api-keys` or `PATCH /v1/api-keys/:id`. Use `scopes: ["organizations:read"]` to read, or `["organizations:manage"]` to read and make changes. Only owners and admins can grant `organizations:manage`, and browser keys can't have organization scopes. The SDK has no methods for creating keys; see the [HTTP reference](https://docslurp.io/docs/http).
 
 ## Timeouts, cancellation, and errors
 

@@ -68,7 +68,7 @@ const validatedKey: ValidatedKey = {
   orgId: "org-1",
   keyType: "server",
   allowedDomains: [],
-  scopes: ["search"],
+  scopes: ["search", "chat"],
   rateLimitRpm: 60,
   rateLimitPpd: 10_000,
   rateLimits: [], workspaceIds: [],
@@ -337,7 +337,7 @@ describe("mcpRoutes", () => {
   });
 
   it("advertises safe names, explicit upload alternatives and mutation annotations", async () => {
-    validateApiKey.mockResolvedValue({ ...validatedKey, scopes: ["search", "ingest"] });
+    validateApiKey.mockResolvedValue({ ...validatedKey, scopes: ["search", "chat", "ingest"] });
     const client = new Client({ name: "catalog-contract", version: "1" });
     await client.connect(new StreamableHTTPClientTransport(new URL("http://localhost:4321/mcp"), { requestInit: { headers: { Authorization: "Bearer key" } }, fetch: async (url, init) => app.request(new Request(url, init)) }));
     const tools = (await client.listTools()).tools;

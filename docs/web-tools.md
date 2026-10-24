@@ -16,7 +16,9 @@ a call.
 | `POST /v1/web/crawl` | `webCrawl` | Up to 100 same-site pages, 3 link hops, returned and not stored | 0.25 per page read |
 | `POST /v1/web/ingest` | `ingestWebsite` | Crawl, then ingest each page as a Markdown document | 0.25 per page, plus normal ingestion |
 
-API keys need the `search` scope (`ingest` for `/v1/web/ingest`). Every
+Server API keys need the `search` scope (`ingest` for `/v1/web/ingest`).
+Browser (client) keys also need the opt-in `web` scope, which requires a
+workspace allowlist; without it they get `403 web_scope_required`. Every
 response carries `cached` and `usage.credits`. An identical request within the
 cache window is served without a new provider call and is still charged.
 

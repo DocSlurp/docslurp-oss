@@ -304,7 +304,7 @@ describe("searchRoutes", () => {
   });
 
   it("forwards a verified API actor and preserves scope and workspace denials", async () => {
-    const actor = { type: "apiKey" as const, userId: "user-1", apiKey: { keyId: "key", userId: "user-1", orgId: "org", keyType: "server" as const, allowedDomains: [], scopes: ["search"], rateLimitRpm: 60, rateLimitPpd: 1000, rateLimits: [], workspaceIds: ["ws-chat"] } };
+    const actor = { type: "apiKey" as const, userId: "user-1", apiKey: { keyId: "key", userId: "user-1", orgId: "org", keyType: "server" as const, allowedDomains: [], scopes: ["search", "chat"], rateLimitRpm: 60, rateLimitPpd: 1000, rateLimits: [], workspaceIds: ["ws-chat"] } };
     getWorkspace.mockResolvedValue({ id: "ws-chat", orgId: "org" });
     chatWorkspace.mockResolvedValue({ answer: "Supported" });
     const request = () => buildApp(actor).request("/search/chat", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ q: "Question", workspace: "ws-chat" }) });
@@ -313,8 +313,11 @@ describe("searchRoutes", () => {
     chatWorkspace.mockClear();
     actor.apiKey.scopes = ["ingest"];
     expect((await request()).status).toBe(403);
-    expect(chatWorkspace).not.toHaveBeenCalled();
+    // Passages are not answers: a search-only key cannot generate one.
     actor.apiKey.scopes = ["search"];
+    expect((await request()).status).toBe(403);
+    expect(chatWorkspace).not.toHaveBeenCalled();
+    actor.apiKey.scopes = ["search", "chat"];
     actor.apiKey.workspaceIds = ["other"];
     expect((await request()).status).toBe(404);
     expect(chatWorkspace).not.toHaveBeenCalled();

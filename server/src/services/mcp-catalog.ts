@@ -76,7 +76,7 @@ function searchToolInputSchema() {
   };
 }
 
-export type McpScope = "search" | "ingest";
+export type McpScope = "search" | "chat" | "ingest";
 // Agent-safety hints live with the tool definition so every surface (remote MCP,
 // stdio, chat tools, WebMCP) reads the same values instead of inferring them per surface.
 // `consequential` (WebMCP's consequentialHint) marks calls a person should confirm:
@@ -128,7 +128,7 @@ export function mcpTools(baseUrl: string): McpTool[] {
     { id: "search", title: "Search documents", scopes: ["search"], annotations: READ_ONLY,
       description: "Retrieve cited passages for one query (q) or up to 20 independent queries (queries). Supply exactly one form: q with top-level options, or queries (each item has its own q and options) with optional concurrency; a call with both is rejected. Batch results stay in input order with per-query errors; each query can select a workspace; concurrency (1-8, default 4) bounds parallel retrieval. Omitted workspace uses the default. Does not generate answers.",
       inputSchema: searchToolInputSchema() },
-    { id: "chat", title: "Chat with workspace", scopes: ["search"],
+    { id: "chat", title: "Chat with workspace", scopes: ["chat"],
       annotations: { readOnly: false, destructive: false, idempotent: false, openWorld: false, consequential: false },
       description: "Generate a grounded answer with citations and token usage using the workspace's configured model. This calls AI and can incur cost; use search for your own LLM.",
       inputSchema: toolInputJsonSchema(workspaceChatInputSchema.omit({ agent: true })) },

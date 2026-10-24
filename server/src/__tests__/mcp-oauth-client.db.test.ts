@@ -163,7 +163,7 @@ describe("MCP OAuth with the official MCP client SDK", () => {
   it("advertises discovery metadata the client can follow", async () => {
     const challenge = await fetch(endpoint, { method: "POST", headers: { "content-type": "application/json", accept: "application/json, text/event-stream" }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "ping" }) });
     expect(challenge.status).toBe(401);
-    expect(challenge.headers.get("www-authenticate")).toBe(`Bearer resource_metadata="${origin}/.well-known/oauth-protected-resource/v1/mcp", scope="search read ingest"`);
+    expect(challenge.headers.get("www-authenticate")).toBe(`Bearer resource_metadata="${origin}/.well-known/oauth-protected-resource/v1/mcp", scope="search chat read ingest"`);
     const resource = await (await fetch(`${origin}/.well-known/oauth-protected-resource/v1/mcp`)).json();
     expect(resource).toMatchObject({ resource: `${origin}/v1/mcp`, authorization_servers: [origin], bearer_methods_supported: ["header"] });
     const metadata = await (await fetch(`${origin}/.well-known/oauth-authorization-server`)).json();
@@ -186,7 +186,7 @@ describe("MCP OAuth with the official MCP client SDK", () => {
     expect(provider.stored?.access_token).toMatch(/^dsmcp_/);
     expect(provider.stored?.refresh_token).toMatch(/^dsmcpr_/);
     // The 401 challenge's scope is authoritative for the client (MCP authorization, scope selection).
-    expect(provider.stored?.scope).toBe("search read ingest");
+    expect(provider.stored?.scope).toBe("search chat read ingest");
     // Hashed at rest: no raw token is stored.
     const hashes = (await pool.current!.query<{ hash: string }>("select hash from mcp_oauth_tokens")).rows.map((row) => row.hash);
     expect(hashes).not.toContain(provider.stored!.access_token);
@@ -203,7 +203,7 @@ describe("MCP OAuth with the official MCP client SDK", () => {
     expect(chat.structuredContent).toMatchObject({ answer: "Renewal is annual [1]." });
     const grant = (await pool.current!.query<{ api_key_id: string }>("select api_key_id from mcp_oauth_grants")).rows[0]!;
     expect(dispatched.map((call) => call.path)).toEqual(["/tools/search", "/tools/chat"]);
-    expect(dispatched.every((call) => call.keyId === grant.api_key_id && call.scopes.join(" ") === "search read ingest")).toBe(true);
+    expect(dispatched.every((call) => call.keyId === grant.api_key_id && call.scopes.join(" ") === "search chat read ingest")).toBe(true);
 
     // The access token expires: the SDK refreshes on 401 and retries transparently.
     const before = { ...provider.stored! };
