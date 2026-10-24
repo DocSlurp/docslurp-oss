@@ -575,6 +575,13 @@
       "when": 1792792800020,
       "tag": "0081_api_key_chat_scope",
       "breakpoints": true
+    },
+    {
+      "idx": 82,
+      "version": "7",
+      "when": 1792792800030,
+      "tag": "0082_workspace_vector_databases",
+      "breakpoints": true
     }
   ]
 }

@@ -4,8 +4,8 @@ import { startDependencySpan, withDependencySpan } from "@docslurp/shared/observ
  *
  * Connects to LanceDB (local filesystem or S3-backed; see LANCEDB_URI in
  * @docslurp/shared connection-uri),
- * opens the exact per-org table derived from trusted workspace access,
- * and runs cosine similarity search inside that storage boundary.
+ * opens the exact per-workspace database derived from trusted workspace
+ * access, and runs cosine similarity search inside that storage boundary.
  */
 import * as lancedb from "@lancedb/lancedb";
 
@@ -33,7 +33,7 @@ import { countSearchEvent, recordSearchPhase } from "./timings.js";
  * - Tables check for new versions at most every LANCEDB_READ_CONSISTENCY_SECONDS
  *   (default 10), so newly indexed rows appear within that interval.
  * - A table that does not exist yet is remembered for MISSING_TABLE_TTL_MS
- *   (5 min), so absent legacy tables don't cost S3 round trips on queries.
+ *   (5 min), so a workspace with no vectors yet doesn't cost S3 round trips.
  * - A handle that errors is dropped and reopened on the next search.
  */
 let sessionState: { config: LanceSessionConfig; session: lancedb.Session; timer: NodeJS.Timeout } | undefined;
@@ -264,21 +264,10 @@ function hydratedFields(row: LanceDbRow): Pick<LanceDbSearchHit, "text" | "runId
 
 interface LanceTarget { uri: string; name: string; documentIds?: string[] }
 
-/** The exact tables a search may read for this org and embedding space; never a prefix scan. */
-function searchTargets(args: { orgId: string; embeddingModel?: string; dimension: number; documentIds?: string[]; legacyDocumentIds?: string[] }): LanceTarget[] {
-  const { root } = resolveLanceDbConfig();
-  const targets: LanceTarget[] = [];
-  if (args.embeddingModel) {
-    const location = VectorNamespaceManager.getEmbeddingLocation(root, args.orgId, args.embeddingModel, args.dimension);
-    targets.push({ uri: location.uri, name: location.table, documentIds: args.documentIds });
-    targets.push({ uri: root, name: VectorNamespaceManager.getEmbeddingTableName(args.orgId, args.embeddingModel, args.dimension), documentIds: args.documentIds });
-    if (args.legacyDocumentIds?.length) {
-      targets.push({ uri: root, name: VectorNamespaceManager.getTableName(args.orgId), documentIds: args.legacyDocumentIds });
-    }
-  } else {
-    targets.push({ uri: root, name: VectorNamespaceManager.getTableName(args.orgId), documentIds: args.documentIds });
-  }
-  return targets;
+/** The one table a search may read: this workspace's database for the query's embedding space. */
+function searchTarget(args: { orgId: string; workspaceId: string; embeddingModel: string; dimension: number; documentIds?: string[] }): LanceTarget {
+  const location = VectorNamespaceManager.getEmbeddingLocation(resolveLanceDbConfig().root, args.orgId, args.workspaceId, args.embeddingModel, args.dimension);
+  return { uri: location.uri, name: location.table, documentIds: args.documentIds };
 }
 
 function documentIdSet(documentIds?: string[]): Set<string> | null {
@@ -304,16 +293,13 @@ export function filterLanceDbRowsByDocumentIds(
  * open the handle, refresh a stale version and load the schema/capabilities, so the nearest-neighbour
  * query that follows does not start with those storage round trips. Best effort; never throws.
  */
-export async function warmLanceDbSearch(args: { orgId: string; embeddingModel: string; dimension: number; hydrate?: boolean }): Promise<void> {
-  if (!args.orgId.trim()) return;
+export async function warmLanceDbSearch(args: { orgId: string; workspaceId: string; embeddingModel: string; dimension: number; hydrate?: boolean }): Promise<void> {
+  if (!args.orgId.trim() || !args.workspaceId.trim()) return;
   const started = performance.now();
   try {
-    const targets = searchTargets({ orgId: args.orgId, embeddingModel: args.embeddingModel, dimension: args.dimension });
-    await Promise.all(targets.map(async (target) => {
-      const table = await getTable(target.uri, target.name);
-      if (!table) return;
-      await Promise.all([table.version(), args.hydrate ? lanceTableCapabilities(table) : resultColumns(table)]);
-    }));
+    const target = searchTarget(args);
+    const table = await getTable(target.uri, target.name);
+    if (table) await Promise.all([table.version(), args.hydrate ? lanceTableCapabilities(table) : resultColumns(table)]);
     countSearchEvent("lanceWarm");
   } catch {
     // The search itself reopens or drops the handle on failure.
@@ -323,17 +309,17 @@ export async function warmLanceDbSearch(args: { orgId: string; embeddingModel: s
 }
 
 /**
- * Search the exact LanceDB table for a given organization.
+ * Search one workspace's LanceDB database.
  *
- * The table name is derived from the authoritative org id resolved from
- * workspace access. Callers cannot provide a namespace or table prefix, so a
- * malformed/missing namespace cannot widen the ANN scan to another tenant.
+ * The location is derived from the authoritative org and workspace ids
+ * resolved from workspace access. Callers cannot provide a namespace or table
+ * prefix, so a malformed/missing namespace cannot widen the ANN scan to
+ * another workspace or tenant.
  */
 export async function lanceDbVectorSearch(args: {
   orgId: string;
-  embeddingModel?: string;
-  /** Only documents whose persisted index matches the query model/dimension. */
-  legacyDocumentIds?: string[];
+  workspaceId: string;
+  embeddingModel: string;
   queryVector: number[];
   documentIds?: string[];
   limit: number;
@@ -344,7 +330,7 @@ export async function lanceDbVectorSearch(args: {
   /** Extra Lance SQL filter, e.g. a page range; only applied to tables with hydration columns. */
   where?: string | null;
 }): Promise<LanceDbSearchHit[]> {
-  if (!args.orgId.trim()) {
+  if (!args.orgId.trim() || !args.workspaceId.trim()) {
     return [];
   }
 
@@ -353,8 +339,8 @@ export async function lanceDbVectorSearch(args: {
   lanceDbQueryTuning(args.limit, 0, refineFactor);
 
   // Read per search so tests and config reloads see the current LANCEDB_URI.
-  // Exact previous layouts only; no prefix scans or cross-tenant discovery.
-  const targets = searchTargets({ ...args, dimension: args.queryVector.length });
+  // One exact workspace database; no prefix scans or cross-tenant discovery.
+  const targets = [searchTarget({ ...args, dimension: args.queryVector.length })];
   const variant = args.hydrate || args.where ? JSON.stringify([args.hydrate ?? false, args.where ?? null]) : undefined;
   const opened = await Promise.all(targets.map(async (target) => ({ ...target, table: await getTable(target.uri, target.name) })));
 
@@ -411,8 +397,8 @@ export async function lanceDbVectorSearch(args: {
     if (!table) return [];
     try {
       // Filter before nearest-neighbor selection. Overfetching a global top-k
-      // and filtering afterward can miss every scoped document when another
-      // workspace occupies the first 1,000 neighbors in this org's table.
+      // and filtering afterward can miss every scoped document when other
+      // documents (another run, tag or folder) occupy the first neighbors.
       const capabilities = args.hydrate || args.where ? await lanceTableCapabilities(table) : null;
       // A page filter needs the pageNumber column; a table without it cannot honor the filter.
       if (args.where && !capabilities?.hydrationColumns) return [];
@@ -467,16 +453,16 @@ export type LanceFtsFallbackReason = "open-failed" | "no-table" | "no-fts-index"
  */
 export async function lanceDbFullTextSearch(args: {
   orgId: string;
+  workspaceId: string;
   embeddingModel: string;
   dimension: number;
   query: string;
   documentIds: string[];
-  legacyDocumentIds?: string[];
   limit: number;
   where?: string | null;
 }): Promise<{ indexed: boolean; hits: LanceDbSearchHit[]; fallback?: LanceFtsFallbackReason; table?: string }> {
-  if (!args.orgId.trim() || !args.query.trim() || args.documentIds.length === 0) return { indexed: true, hits: [] };
-  const targets = searchTargets(args);
+  if (!args.orgId.trim() || !args.workspaceId.trim() || !args.query.trim() || args.documentIds.length === 0) return { indexed: true, hits: [] };
+  const targets = [searchTarget(args)];
   const states = await Promise.all(targets.map(async (target) => ({ ...target, ...await openTarget(target.uri, target.name) })));
   const failed = states.find((target) => target.failed);
   // A table that failed to open may hold the documents' rows: let Postgres FTS answer.
@@ -509,10 +495,6 @@ export async function lanceDbFullTextSearch(args: {
     if (hits.length >= args.limit) break;
   }
   return { indexed: true, hits };
-}
-
-export function getOrgLanceDbPrefix(orgId: string): string {
-  return VectorNamespaceManager.getTableName(orgId);
 }
 
 function lanceSpan<T>(operation: string, run: () => Promise<T>): Promise<T> {

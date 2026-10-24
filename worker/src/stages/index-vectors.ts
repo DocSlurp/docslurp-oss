@@ -4,7 +4,7 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
-import { indexConfigHash, indexConfigOf, resolveLanceDbConfig, VectorNamespaceManager } from "@docslurp/shared";
+import { indexConfigHash, indexConfigOf, LANCEDB_CHUNKS_TABLE } from "@docslurp/shared";
 import { encodeLanceChunkHydration, lancePageNumberValue } from "@docslurp/shared/lancedb-hydration";
 import postgres from "postgres";
 
@@ -16,6 +16,8 @@ import type { ArtifactStore } from "../tools/storage.js";
 import { backendRuntime, resolveVectorBackends } from "../embeddings/resolver.js";
 import type { EmbeddingArtifact, VectorBackendRecord } from "./embedding-runtime.js";
 import { maxInt } from "./utils.js";
+import { workspaceVectorLocation } from "./lancedb-location.js";
+import { keyFromStorageUri } from "../tools/storage.js";
 import { chunkFirstPage, deleteLanceDbRecords, planPageWindows, writeLanceDbDocumentInWindows } from "./lancedb-writer.js";
 import { lanceDbMaintenanceSettings, type LanceDbMaintenanceSettings } from "./lancedb-maintenance.js";
 import { LanceDbWriteQueue, type VectorWriteOutcome } from "./lancedb-write-queue.js";
@@ -60,16 +62,15 @@ export function buildVectorIndexSearchMetadata(recordCount: number): {
 export function vectorBackendCollectionName(args: {
   backend: string;
   orgId: string | null;
+  workspaceId?: string | null;
   runId: string;
-  embedding?: { model: string; dimensions: number };
 }): string {
   if (args.backend === "lancedb") {
-    if (!args.orgId?.trim()) {
-      throw new Error("LanceDB vector indexing requires a run orgId for tenant isolation");
+    // The workspace's database (its URI) is the namespace; the table name is fixed.
+    if (!args.orgId?.trim() || !args.workspaceId?.trim()) {
+      throw new Error("LanceDB vector indexing requires the run's orgId and workspaceId for tenant isolation");
     }
-    return args.embedding
-      ? VectorNamespaceManager.getEmbeddingLocation("", args.orgId, args.embedding.model, args.embedding.dimensions).table
-      : VectorNamespaceManager.getTableName(args.orgId);
+    return LANCEDB_CHUNKS_TABLE;
   }
 
   return `${args.runId}_${args.backend}`;
@@ -80,15 +81,23 @@ export function vectorBackendCollectionName(args: {
  * With a run id the rows also carry the hydration columns (@docslurp/shared/lancedb-hydration),
  * so search can cite a hit without reading document_chunks: the same heading path, page, token
  * estimate and metadata the embed stage stored there.
+ *
+ * A dedup copy in another workspace than its source indexes the source's artifact: its rows are
+ * rebound to the copy (run creation gives the copy's chunks the source's ids with the copy's
+ * document id as prefix), so the copy owns them in its own workspace's database.
  */
 export function buildVectorRecords(
-  artifact: Pick<EmbeddingArtifact, "chunks">,
+  artifact: Pick<EmbeddingArtifact, "chunks"> & { documentId?: string },
   documentId: string,
   metadata: { sourceKey?: unknown; filename?: unknown },
   runId?: string | null,
 ): VectorBackendRecord[] {
+  const source = artifact.documentId && artifact.documentId !== documentId ? artifact.documentId : null;
+  const chunkId = (id: string) => (source && id.startsWith(source) ? `${documentId}${id.slice(source.length)}` : id);
+  const chunkMetadata = (value: Record<string, unknown> | undefined) =>
+    source && value ? { ...value, documentId } : value;
   return artifact.chunks.map<VectorBackendRecord>((chunk) => ({
-    id: chunk.id,
+    id: chunkId(chunk.id),
     documentId,
     chunkIndex: chunk.index,
     text: chunk.text,
@@ -106,7 +115,7 @@ export function buildVectorRecords(
         headingPath: chunk.headingPath,
         pageNumber: chunk.pageNumber,
         tokenEstimate: chunk.tokenEstimate,
-        metadata: chunk.metadata,
+        metadata: chunkMetadata(chunk.metadata),
       }),
     } : {}),
   }));
@@ -181,7 +190,11 @@ export class IndexStage implements Stage {
         artifactSlot,
         "vector index manifests ready",
         async () => {
-          const embeddingKey = `${document.userId}/${state.run.id}/embeddings/${document.id}.json`;
+          // The embed checkpoint names the artifact: this document's own, or for a dedup
+          // copy in another workspace than its source, the source's (rebound below).
+          const embedUri = state.documentStage(document.id, "embed")?.artifactUri;
+          const embeddingKey = (embedUri ? keyFromStorageUri(embedUri, this.storage.bucket) : null)
+            ?? `${document.userId}/${state.run.id}/embeddings/${document.id}.json`;
           const artifact = await this.storage.getJson<EmbeddingArtifact>(embeddingKey, { streamJson: true });
           const records = buildVectorRecords(artifact, document.id, {
             sourceKey: document.sourceKey,
@@ -201,12 +214,13 @@ export class IndexStage implements Stage {
               const collection = vectorBackendCollectionName({
                 backend,
                 orgId: state.run.orgId,
+                workspaceId: state.run.workspaceId,
                 runId: state.run.id,
-                embedding: artifact.embedding,
               });
               const result = await this.writeBackend({
                 backend,
                 orgId: state.run.orgId,
+                workspaceId: state.run.workspaceId ?? null,
                 runId: state.run.id,
                 documentId: document.id,
                 embeddingKey,
@@ -342,6 +356,7 @@ export class IndexStage implements Stage {
   private async writeBackend(args: {
     backend: string;
     orgId: string | null;
+    workspaceId: string | null;
     runId: string;
     documentId: string;
     embeddingKey: string;
@@ -356,11 +371,7 @@ export class IndexStage implements Stage {
   }): Promise<BackendResult> {
     switch (args.backend) {
       case "lancedb":
-        if (!args.orgId) throw new Error("LanceDB indexing requires orgId");
-        const location = VectorNamespaceManager.getEmbeddingLocation(
-          resolveLanceDbConfig().root,
-          args.orgId, args.embedding.embedding.model, args.embedding.embedding.dimensions,
-        );
+        const location = workspaceVectorLocation(args, args.embedding.embedding);
         const result = this.lance.writeMode === "queued"
           ? await this.writeLanceDbQueued(location.uri, location.table, args)
           : await this.writeLanceDb(location.uri, location.table, args.records, args.recordPages, args.signal);

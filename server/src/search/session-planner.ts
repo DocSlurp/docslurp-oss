@@ -227,8 +227,8 @@ export async function prepareSearchSessionRetrievalPlan(args: {
     : timePhase("embed", () => embedQuery(effectiveQuery, embedding, session, privacyMode, workspaceId, orgId));
   queryVector.catch(() => undefined);
 
-  // An explicit document selection already defines the retrieval scope. Org-wide
-  // summary seeds must never replace it with unrelated documents.
+  // An explicit document selection already defines the retrieval scope. Summary
+  // seeds must never replace it with unrelated documents.
   const hasDocumentSelection = Boolean(
     effectiveOptions.filters?.documentId || effectiveOptions.filters?.documentIds?.length,
   );
@@ -236,8 +236,11 @@ export async function prepareSearchSessionRetrievalPlan(args: {
   if (seedVector) {
     const access = await getWorkspaceAccess(workspaceId, userId);
     if (access) {
+      // Seeds come from this workspace's own database only.
       const seedHits = await lanceDbVectorSearch({
         orgId: access.orgId,
+        workspaceId,
+        embeddingModel: resolveEmbeddingRoute(embedding).model,
         queryVector: seedVector,
         limit: 50,
         privacyMode,

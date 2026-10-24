@@ -227,6 +227,11 @@ type ClaimedDocument = {
   replacement_run_id: string | null;
   replacement_user_id: string | null;
   shared_with_dedup_copies: boolean;
+  /**
+   * A live dedup copy in the same workspace still serves this version's LanceDB
+   * rows. Copies in other workspaces have their own rows in their own database.
+   */
+  vectors_shared: boolean;
   /** A partial reprocess still reads this version's storage artifacts. */
   artifacts_reused: boolean;
   source_shared: boolean;
@@ -387,6 +392,11 @@ export async function purgeSupersededDocuments(
             ) as shared_with_dedup_copies,
             exists (
               select 1 from documents copy
+              where copy.deduped_from_document_id = d.id and copy.purged_at is null
+                and copy.workspace_id = d.workspace_id
+            ) as vectors_shared,
+            exists (
+              select 1 from documents copy
               where copy.reused_from_document_id = d.id and copy.purged_at is null
             ) as artifacts_reused,
             exists (
@@ -416,26 +426,15 @@ export async function purgeSupersededDocuments(
           return;
         }
 
-        // Dedup copies reuse this version's artifacts and vectors; keep those
-        // until the last copy is gone. Its own derived rows are still removed.
-        if (!doc.shared_with_dedup_copies) {
-          const vectors = await client<VectorIndexRow[]>`
-            select distinct backend, embedding_model, dimension
-            from vector_indexes where document_id = ${doc.id}
-          `;
-          for (const vector of vectors) {
-            if (vector.backend !== "lancedb") continue;
-            const location = VectorNamespaceManager.getEmbeddingLocation(
-              options.lancedbRoot, doc.org_id, vector.embedding_model, vector.dimension,
-            );
-            await deleteVectorRows({ uri: location.uri, table: location.table, documentIds: [doc.id] });
-          }
-          // Partial reprocesses copy stage outputs but point at this version's
-          // storage artifacts; their vectors are their own, so only the
-          // artifacts stay.
-          if (!doc.artifacts_reused) {
-            await txStorage.deleteKeys(await artifactKeys(client, txStorage, doc, options.deleteSources));
-          }
+        // Dedup copies reuse this version's artifacts (any workspace) and, in
+        // its own workspace, its vectors; keep those until the last such copy
+        // is gone. Its own derived rows are still removed.
+        if (!doc.vectors_shared) await deleteDocumentVectors(client, doc, options, deleteVectorRows);
+        // Partial reprocesses copy stage outputs but point at this version's
+        // storage artifacts; their vectors are their own, so only the
+        // artifacts stay.
+        if (!doc.shared_with_dedup_copies && !doc.artifacts_reused) {
+          await txStorage.deleteKeys(await artifactKeys(client, txStorage, doc, options.deleteSources));
         }
 
         const kgNodeIds = await knowledgeGraphNodesForDocument(client, doc.id);
@@ -486,11 +485,30 @@ export async function purgeSupersededDocuments(
   return result;
 }
 
+/** Deletes a document's rows from its workspace's LanceDB database(s). */
+async function deleteDocumentVectors(
+  client: Sql<Record<string, unknown>>,
+  doc: ClaimedDocument,
+  options: SupersededPurgeOptions,
+  deleteVectorRows: DeleteVectorRows,
+): Promise<void> {
+  const vectors = await client<VectorIndexRow[]>`
+    select distinct backend, embedding_model, dimension from vector_indexes where document_id = ${doc.id}
+  `;
+  for (const vector of vectors) {
+    if (vector.backend !== "lancedb") continue;
+    const location = VectorNamespaceManager.getEmbeddingLocation(
+      options.lancedbRoot, doc.org_id, doc.workspace_id, vector.embedding_model, vector.dimension,
+    );
+    await deleteVectorRows({ uri: location.uri, table: location.table, documentIds: [doc.id] });
+  }
+}
+
 /**
  * Archives a retained superseded version: removes everything search reads
  * (chunks, vectors, graph evidence, staleness, deferred page vectors/maps)
  * and keeps pages, artifacts and page images for browsing. Vector rows shared
- * with live dedup copies stay until the last copy is gone.
+ * with live dedup copies in the same workspace stay until the last copy is gone.
  */
 async function archiveDocument(
   client: Sql<Record<string, unknown>>,
@@ -499,18 +517,7 @@ async function archiveDocument(
   deleteVectorRows: DeleteVectorRows,
   archiveTables: readonly string[],
 ): Promise<void> {
-  if (!doc.shared_with_dedup_copies) {
-    const vectors = await client<VectorIndexRow[]>`
-      select distinct backend, embedding_model, dimension from vector_indexes where document_id = ${doc.id}
-    `;
-    for (const vector of vectors) {
-      if (vector.backend !== "lancedb") continue;
-      const location = VectorNamespaceManager.getEmbeddingLocation(
-        options.lancedbRoot, doc.org_id, vector.embedding_model, vector.dimension,
-      );
-      await deleteVectorRows({ uri: location.uri, table: location.table, documentIds: [doc.id] });
-    }
-  }
+  if (!doc.vectors_shared) await deleteDocumentVectors(client, doc, options, deleteVectorRows);
   const kgNodeIds = await knowledgeGraphNodesForDocument(client, doc.id);
   for (const table of archiveTables) {
     await client`delete from ${client(table)} where document_id = ${doc.id}`;
@@ -644,13 +651,20 @@ type CleanupRow = {
 
 type VectorLocation = { uri: string; table: string };
 
-const SAFE_ORG_ID = /^[A-Za-z0-9_-]+$/;
+const SAFE_ID = /^[A-Za-z0-9_-]+$/;
 
-function resolveVectorLocation(lancedbRoot: string, orgId: string, target: VectorTarget): VectorLocation | null {
+/** A queued vector target in its workspace's LanceDB database; null when it cannot be resolved safely. */
+function resolveVectorLocation(lancedbRoot: string, orgId: string, workspaceId: string, target: VectorTarget): VectorLocation | null {
   if (target.backend !== "lancedb") return null;
   if ("uri" in target && target.uri && target.table) return { uri: target.uri, table: target.table };
-  if (!("embeddingModel" in target) || !SAFE_ORG_ID.test(orgId)) return null;
-  return VectorNamespaceManager.getEmbeddingLocation(lancedbRoot, orgId, target.embeddingModel, target.dimension);
+  if (!("embeddingModel" in target) || !SAFE_ID.test(orgId) || !SAFE_ID.test(workspaceId)) return null;
+  return VectorNamespaceManager.getEmbeddingLocation(lancedbRoot, orgId, workspaceId, target.embeddingModel, target.dimension);
+}
+
+/** vector_table queue payloads name the workspace whose database holds the table. */
+function payloadWorkspaceId(payload: object): string {
+  const workspaceId = (payload as { workspaceId?: unknown }).workspaceId;
+  return typeof workspaceId === "string" ? workspaceId : "";
 }
 
 const locationKey = (location: VectorLocation) => `${location.uri}#${location.table}`;
@@ -776,8 +790,8 @@ async function cleanDeletedDocuments(
   // Deletes in this transaction also drop embedding reuse refs into deleted artifacts.
   const storage = forgettingEmbeddingReuseRefs(client, rawStorage);
   const deleteVectorRows = options.deleteVectorRows ?? deleteLanceDbDocumentRows;
-  // Dedup copies share vectors and artifacts; a partial reprocess shares only
-  // artifacts (its vectors are its own).
+  // Dedup copies share artifacts, and in the same workspace vectors too; a
+  // partial reprocess shares only artifacts (its vectors are its own).
   const vectorOwners = rows.filter((row) => !row.shares_vectors);
   const owned = rows.filter((row) => !row.keep_shared_artifacts);
 
@@ -788,14 +802,14 @@ async function cleanDeletedDocuments(
       select payload, org_id from storage_cleanup_queue
       where kind = 'vector_table' and org_id = any(${client.array(orgIds)})
     `).flatMap((row) => {
-      const location = resolveVectorLocation(options.lancedbRoot, row.org_id ?? "", { ...row.payload, backend: "lancedb" });
+      const location = resolveVectorLocation(options.lancedbRoot, row.org_id ?? "", payloadWorkspaceId(row.payload), { ...row.payload, backend: "lancedb" });
       return location ? [locationKey(location)] : [];
     }),
   );
   const byTable = new Map<string, { location: VectorLocation; documentIds: Set<string> }>();
   for (const row of vectorOwners) {
     for (const target of row.vector_targets) {
-      const location = resolveVectorLocation(options.lancedbRoot, row.org_id, target);
+      const location = resolveVectorLocation(options.lancedbRoot, row.org_id, row.workspace_id, target);
       if (!location || droppedTables.has(locationKey(location))) continue;
       const group = byTable.get(locationKey(location)) ?? { location, documentIds: new Set<string>() };
       group.documentIds.add(row.document_id);
@@ -976,7 +990,7 @@ const SAFE_RUN_PREFIX = /^[A-Za-z0-9_.@-]+\/[A-Za-z0-9_-]+\/$/;
 /**
  * Drains storage_cleanup_queue: whole run prefixes (every artifact of a deleted
  * run in one listing loop, instead of one listing per document) and whole
- * LanceDB tables (an org's vector tables after org deletion). Entries for runs
+ * LanceDB tables (a workspace's vector tables after workspace or org deletion). Entries for runs
  * that were still in flight wait out `not_before` so late writes are caught.
  */
 export async function drainStorageCleanupQueue(
@@ -1041,7 +1055,7 @@ export async function drainStorageCleanupQueue(
             return;
           }
         } else {
-          const location = resolveVectorLocation(options.lancedbRoot, row.org_id ?? "", {
+          const location = resolveVectorLocation(options.lancedbRoot, row.org_id ?? "", payloadWorkspaceId(row.payload), {
             ...(row.payload as VectorTarget),
             backend: "lancedb",
           });

@@ -151,27 +151,8 @@ export async function purgeOrganization(
     `;
   }
 
-  // Drop the org's LanceDB tables whole instead of deleting rows document by
-  // document; the per-document sweep skips tables queued here.
-  await sql`
-    insert into storage_cleanup_queue (kind, org_id, target, payload, reason)
-    select 'vector_table', ${orgId}, ${orgId} || '|' || vi.embedding_model || '|' || vi.dimension,
-      jsonb_build_object('embeddingModel', vi.embedding_model, 'dimension', vi.dimension), ${reason}
-    from vector_indexes vi
-    join documents d on d.id = vi.document_id
-    join workspaces w on w.id = d.workspace_id
-    where w.org_id = ${orgId} and vi.backend = 'lancedb'
-    group by vi.embedding_model, vi.dimension
-    on conflict (kind, target) do nothing
-  `;
-  await sql`
-    insert into storage_cleanup_queue (kind, org_id, target, payload, reason)
-    select distinct 'vector_table', ${orgId}, o.table_key, jsonb_build_object('uri', o.lance_uri, 'table', o.lance_table), ${reason}
-    from vector_index_outbox o
-    where o.org_id = ${orgId}
-    on conflict (kind, target) do nothing
-  `;
-
+  // Each workspace's LanceDB databases are queued for a whole drop by
+  // deleteWorkspaceData; the per-document sweep skips tables queued there.
   let documents = 0;
   for (const workspaceId of workspaceIds) {
     documents += (await deleteWorkspaceData(workspaceId, deps)).documents;

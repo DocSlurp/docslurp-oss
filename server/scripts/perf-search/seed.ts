@@ -86,7 +86,7 @@ for (let i = 0; i < pgRows.length; i += 1000) await sql`insert into document_chu
 await sql.end();
 
 const cfg = resolveLanceDbConfig();
-const location = VectorNamespaceManager.getEmbeddingLocation(cfg.root, ORG, route.model, DIM);
+const location = VectorNamespaceManager.getEmbeddingLocation(cfg.root, ORG, "perfw", route.model, DIM);
 console.log("lance", location.uri);
 const db = await lancedb.connect(location.uri, cfg.storageOptions ? { storageOptions: cfg.storageOptions } : undefined);
 if ((await db.tableNames()).includes(location.table)) await db.dropTable(location.table);
