@@ -54,7 +54,8 @@ function totalFloorDropped(responses: SearchResponse[]): number {
 export interface SearchSessionRetrievalPlan {
   effectiveQuery: string;
   effectiveOptions: SearchOptions;
-  queryVector: number[] | null;
+  /** Resolves with the query embedding; already started, so non-vector legs can run while it is in flight. */
+  queryVector: Promise<number[] | null>;
   textQuery: string;
   selfQueryReasons: string[];
 }
@@ -220,22 +221,24 @@ export async function prepareSearchSessionRetrievalPlan(args: {
     effectiveQuery = expandedQuery || effectiveQuery;
   }
 
-  let queryVector = options.queryVector ?? null;
-  if (!queryVector) {
-    queryVector = await timePhase("embed", () => embedQuery(effectiveQuery, embedding, session, privacyMode, workspaceId, orgId));
-  }
+  // Started now, awaited only by the vector leg: lexical and page legs overlap the (remote) embedding call.
+  const queryVector: Promise<number[] | null> = options.queryVector
+    ? Promise.resolve(options.queryVector)
+    : timePhase("embed", () => embedQuery(effectiveQuery, embedding, session, privacyMode, workspaceId, orgId));
+  queryVector.catch(() => undefined);
 
   // An explicit document selection already defines the retrieval scope. Org-wide
   // summary seeds must never replace it with unrelated documents.
   const hasDocumentSelection = Boolean(
     effectiveOptions.filters?.documentId || effectiveOptions.filters?.documentIds?.length,
   );
-  if (effectiveOptions.summarySeed && queryVector && !hasDocumentSelection) {
+  const seedVector = effectiveOptions.summarySeed && !hasDocumentSelection ? await queryVector : null;
+  if (seedVector) {
     const access = await getWorkspaceAccess(workspaceId, userId);
     if (access) {
       const seedHits = await lanceDbVectorSearch({
         orgId: access.orgId,
-        queryVector,
+        queryVector: seedVector,
         limit: 50,
         privacyMode,
       });

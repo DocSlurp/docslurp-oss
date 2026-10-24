@@ -21,7 +21,7 @@ import { prewarmTable } from "./lancedb-prewarm.js";
 import { isLanceTableNotFound, lanceOpenFailure, openLanceTable } from "./lancedb-open.js";
 export { isLanceTableNotFound } from "./lancedb-open.js";
 import { resultCache, resultCacheKey } from "./result-cache.js";
-import { countSearchEvent } from "./timings.js";
+import { countSearchEvent, recordSearchPhase } from "./timings.js";
 
 /**
  * Connections and table handles are reused across searches. Opening them per
@@ -297,6 +297,29 @@ export function filterLanceDbRowsByDocumentIds(
     return rows;
   }
   return rows.filter((row) => allowedDocumentIds.has(row.documentId));
+}
+
+/**
+ * Warm the tables a vector search will read while the query is still being embedded (or rewritten):
+ * open the handle, refresh a stale version and load the schema/capabilities, so the nearest-neighbour
+ * query that follows does not start with those storage round trips. Best effort; never throws.
+ */
+export async function warmLanceDbSearch(args: { orgId: string; embeddingModel: string; dimension: number; hydrate?: boolean }): Promise<void> {
+  if (!args.orgId.trim()) return;
+  const started = performance.now();
+  try {
+    const targets = searchTargets({ orgId: args.orgId, embeddingModel: args.embeddingModel, dimension: args.dimension });
+    await Promise.all(targets.map(async (target) => {
+      const table = await getTable(target.uri, target.name);
+      if (!table) return;
+      await Promise.all([table.version(), args.hydrate ? lanceTableCapabilities(table) : resultColumns(table)]);
+    }));
+    countSearchEvent("lanceWarm");
+  } catch {
+    // The search itself reopens or drops the handle on failure.
+  } finally {
+    recordSearchPhase("lanceWarm", performance.now() - started);
+  }
 }
 
 /**

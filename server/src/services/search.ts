@@ -35,7 +35,7 @@ import { recordUnitCharge } from "../lib/ai-usage.js";
 import { currentChatTurn } from "../lib/chat-turn-context.js";
 import { currentRequestSignal } from "../lib/request-context.js";
 import { jsonRecord } from "../lib/json-record.js";
-import { lanceDbFullTextSearch, lanceDbVectorSearch, type LanceDbSearchHit } from "../search/lancedb.js";
+import { lanceDbFullTextSearch, lanceDbVectorSearch, warmLanceDbSearch, type LanceDbSearchHit } from "../search/lancedb.js";
 import { decodeLanceChunkHydration } from "@docslurp/shared/lancedb-hydration";
 import {
   loadEligibleDocuments,
@@ -957,12 +957,12 @@ async function nativeVectorSearch(
 ): Promise<SearchChunk[] | null> {
   if (!nativeScopeSupported(options.filters)) return null;
   const embedding = resolveEmbeddingRoute(serving?.embedding ?? context.pipeline.embedding);
-  const set = await loadEligibleDocuments({ workspaceId: context.workspaceId, embeddingModel: embedding.model, dimension: queryVector.length });
+  const set = await timePhase("vecEligible", () => loadEligibleDocuments({ workspaceId: context.workspaceId, embeddingModel: embedding.model, dimension: queryVector.length }));
   const documents = scopeEligibleDocuments(set, options.filters, options.runId)
     .filter((document) => document.vectorReady && matchesServingHash(document, serving?.hash));
   if (documents.length === 0) return [];
   const scope = nativeSearchScope(documents);
-  const hits = await lanceDbVectorSearch({
+  const hits = await timePhase("vecLance", () => lanceDbVectorSearch({
     orgId: context.orgId,
     embeddingModel: embedding.model,
     legacyDocumentIds: scope.searchDocumentIds,
@@ -971,9 +971,9 @@ async function nativeVectorSearch(
     limit: options.limit ?? 20,
     privacyMode: context.privacyMode,
     hydrate: true,
-  });
-  return await hydrateNativeHits({ hits, documents: scope.byId, copiesByOwner: scope.copiesByOwner,
-    workspaceId: context.workspaceId, options, score: (hit) => hit.score });
+  }));
+  return await timePhase("vecHydrate", () => hydrateNativeHits({ hits, documents: scope.byId, copiesByOwner: scope.copiesByOwner,
+    workspaceId: context.workspaceId, options, score: (hit) => hit.score }));
 }
 
 const NATIVE_FALLBACK_LOG_INTERVAL_MS = 10 * 60_000;
@@ -1665,6 +1665,10 @@ async function executeHybridSearch(
     setup,
     adapters: {
       parallelRetrieval: Boolean(native),
+      warmVectorIndex: native && process.env.SEARCH_LANCE_WARM !== "0" ? () => {
+        const embedding = resolveEmbeddingRoute(native.pipeline.embedding);
+        void warmLanceDbSearch({ orgId: native.orgId, embeddingModel: embedding.model, dimension: embedding.dimensions, hydrate: true });
+      } : undefined,
       buildAvailability: (chunks, effectiveOptions) =>
         buildSearchAvailability(
           setup.availabilityRow,

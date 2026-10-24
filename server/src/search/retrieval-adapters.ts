@@ -13,7 +13,8 @@ export interface EvidenceRetrievalContext {
   /** The query actually embedded (after rewrite/HyDE); other index configs embed this same text. */
   effectiveQuery?: string;
   textQuery: string;
-  queryVector: number[] | null;
+  /** May still be in flight: only the vector leg waits for it. */
+  queryVector: number[] | null | Promise<number[] | null>;
   userId: string;
   workspaceId: string;
   options: SearchOptions;
@@ -125,16 +126,18 @@ export function createEvidenceRetrievalAdapters(
     },
     {
       name: "vector",
-      retrieve: (context) =>
-        context.queryVector
+      retrieve: async (context) => {
+        const queryVector = await context.queryVector;
+        return queryVector
           ? fns.vectorSearch({
-              queryVector: context.queryVector,
+              queryVector,
               query: context.query,
               userId: context.userId,
               workspaceId: context.workspaceId,
               options: context.options,
             })
-          : Promise.resolve([]),
+          : [];
+      },
     },
   ];
 }

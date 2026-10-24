@@ -4,6 +4,7 @@ import { startMigratedPostgres } from "@docslurp/worker/testing";
 
 // LanceDB is an external storage adapter; keep SQL scope and hydration real.
 vi.mock("../search/lancedb.js", () => ({
+  warmLanceDbSearch: vi.fn(async () => {}),
   lanceDbVectorSearch: vi.fn(async (args: { documentIds?: string[] }) => args.documentIds
     ? []
     : [{ id: "other-chunk", documentId: "other", chunkIndex: 0, score: 1 }]),

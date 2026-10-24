@@ -237,7 +237,9 @@ async function main(): Promise<void> {
   // a stale WORKER_ACTIVITY_CONCURRENCY=1 secret once left every machine running
   // one activity while the scaler counted eight.
   const assumedSlots = resolveWorkerScalerConfig(process.env, cfg.workerActivityConcurrency).slotsPerMachine;
-  if (assumedSlots !== slotTuning.nominalSlots) {
+  // WORKER_ALLOW_SLOT_MISMATCH=true is for the small always-on floor machine (fly.worker.toml), which runs
+  // fewer slots than the burst fleet on purpose and is outside the autoscaler's sizing.
+  if (assumedSlots !== slotTuning.nominalSlots && process.env.WORKER_ALLOW_SLOT_MISMATCH !== "true") {
     console.error(
       `[temporal-worker] WORKER_ACTIVITY_CONCURRENCY=${slotTuning.nominalSlots} but the autoscaler assumes ` +
         `${assumedSlots} slots per machine (DOCSLURP_WORKER_SLOTS_PER_MACHINE); the fleet will be mis-sized. ` +
