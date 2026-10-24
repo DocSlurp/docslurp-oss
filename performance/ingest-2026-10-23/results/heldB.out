@@ -1,0 +1,2 @@
+{"label":"heldB","status":"completed","pages":171,"wallS":252.142,"pagesPerMin":40.69,"cpuS":229,"xacts":2491,"rssMb":4368}
+quarantine:1.52s(sum 2.84)  format-detect:3.86s(sum 1.23)  to-canonical:3.77s(sum 1.19)  format-tooling:0.72s(sum 1.14)  normalize:0.63s(sum 0.85)  pdf-tooling:2.71s(sum 1.85)  split-pages:1.41s(sum 3.64)  extract-markdown:13.74s(sum 44.48)  classify-route:5.46s(sum 4.89)  render-images:7.65s(sum 13.73)  embed:164.25s(sum 456.88)  index:12.93s(sum 26.76)
