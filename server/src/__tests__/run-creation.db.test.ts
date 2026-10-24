@@ -301,6 +301,39 @@ describe("Run creation reuses completed outputs for exact-source duplicates", ()
   });
 });
 
+describe("Dedup copies and per-workspace LanceDB databases", () => {
+  it("shares the source's vectors only inside its workspace and leaves indexing to the worker elsewhere", async () => {
+    await sql`insert into workspaces (id, org_id, user_id, name) values ('w-dedup', 'o', 'u', 'W dedup') on conflict do nothing`;
+    const first = await runCreation.create({ ...input, sources: { kind: "files", files: files.slice(0, 1) } });
+    const source = first.documents[0]!.id;
+    await sql`update workspace_runs set status = 'completed' where id = ${first.run.id}`;
+    await sql`update documents set status = 'completed' where run_id = ${first.run.id}`;
+    for (const stage of ["embed", "index"]) {
+      await sql`insert into document_run_stage_states (run_id, document_id, stage_name, status, artifact_uri)
+        values (${first.run.id}, ${source}, ${stage}, 'completed', ${`s3://b/u/${first.run.id}/${stage}/${source}.json`})`;
+    }
+    await sql`insert into document_chunks (id, document_id, run_id, user_id, chunk_index, text)
+      values (${`${source}-000`}, ${source}, ${first.run.id}, 'u', 0, 'hello')`;
+    await sql`insert into vector_indexes (id, document_id, backend, bucket, path, embedding_model, dimension)
+      values ('vi-source', ${source}, 'lancedb', 'b', 'p', 'm', 4)`;
+
+    const seeded = async (documentId: string) => ({
+      stages: (await sql<{ stage_name: string }[]>`select stage_name from document_run_stage_states where document_id = ${documentId} order by stage_name`).map((row) => row.stage_name),
+      chunks: (await sql<{ id: string }[]>`select id from document_chunks where document_id = ${documentId}`).map((row) => row.id),
+      vectorIndexes: (await sql<{ count: number }[]>`select count(*)::int as count from vector_indexes where document_id = ${documentId}`)[0]!.count,
+    });
+
+    const sameWorkspace = (await runCreation.create({ ...input, sources: { kind: "files", files: [{ ...files[1]!, filename: "copy.pdf" }] } })).documents[0]!;
+    expect(sameWorkspace).toMatchObject({ dedupedFromDocumentId: source, dedupScope: "workspace" });
+    expect(await seeded(sameWorkspace.id)).toEqual({ stages: ["embed", "index"], chunks: [`${sameWorkspace.id}-000`], vectorIndexes: 1 });
+
+    const otherWorkspace = (await runCreation.create({ ...input, workspaceId: "w-dedup", sources: { kind: "files", files: [{ ...files[1]!, filename: "copy.pdf" }] } })).documents[0]!;
+    expect(otherWorkspace).toMatchObject({ dedupedFromDocumentId: source, dedupScope: "org" });
+    // No index checkpoint or vector index: the worker writes the copy's own rows into w-dedup's database.
+    expect(await seeded(otherWorkspace.id)).toEqual({ stages: ["embed"], chunks: [`${otherWorkspace.id}-000`], vectorIndexes: 0 });
+  });
+});
+
 describe("Run creation admits spend the same way for every source", () => {
   const floor = process.env.MIN_CREDIT_BALANCE_CENTS;
   afterEach(() => { if (floor === undefined) delete process.env.MIN_CREDIT_BALANCE_CENTS; else process.env.MIN_CREDIT_BALANCE_CENTS = floor; });

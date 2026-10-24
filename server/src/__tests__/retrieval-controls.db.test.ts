@@ -52,7 +52,7 @@ beforeAll(async () => {
   await sql`insert into document_chunks (id, document_id, run_id, user_id, chunk_index, text, heading_path, token_estimate, page_number, metadata)
     values ('foreign-chunk', 'foreign-doc', 'foreign-run', 'rank-user', 0, 'Pump maintenance cobalt calibration', '{}', 10, 1, '{}'::jsonb)`;
   await sql`insert into vector_indexes (id, document_id, backend, bucket, path, embedding_model, dimension) values ('rank-index', 'rank-doc', 'lancedb', 'local', 'local/rank', ${model}, 3), ('foreign-index', 'foreign-doc', 'lancedb', 'local', 'local/foreign', ${model}, 3)`;
-  const location = VectorNamespaceManager.getEmbeddingLocation(directory, 'rank-org', model, 3);
+  const location = VectorNamespaceManager.getEmbeddingLocation(directory, 'rank-org', 'rank-ws', model, 3);
   const db = await lancedb.connect(location.uri);
   const table = await db.createTable(location.table, [
     ...rows.map((r, i) => ({ id: r.id, documentId: r.document_id, chunkIndex: i, vector: [1 - i / 100, i / 100, 0] })),
@@ -65,7 +65,7 @@ beforeAll(async () => {
   ({ hybridSearch } = await import("../services/search.js"));
   const lance = await import("../search/lancedb.js");
   resetLanceDbConnectionForTests = lance.resetLanceDbConnectionForTests;
-  expect(await lance.lanceDbVectorSearch({ orgId: "rank-org", embeddingModel: model, queryVector: [1, 0, 0], documentIds: ["rank-doc"], limit: 50 })).toHaveLength(50);
+  expect(await lance.lanceDbVectorSearch({ orgId: "rank-org", workspaceId: "rank-ws", embeddingModel: model, queryVector: [1, 0, 0], documentIds: ["rank-doc"], limit: 50 })).toHaveLength(50);
 }, 120_000);
 
 afterAll(async () => {

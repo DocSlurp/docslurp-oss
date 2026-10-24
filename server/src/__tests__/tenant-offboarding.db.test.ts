@@ -114,7 +114,7 @@ describe("organization deletion", () => {
     expect(await sql`select kind, target from storage_cleanup_queue order by kind, target`).toEqual([
       { kind: "storage_prefix", target: "member/ws-done/" },
       { kind: "storage_prefix", target: "member/ws-live/" },
-      { kind: "vector_table", target: "team|model-x|4" },
+      { kind: "vector_table", target: "team|ws|model-x|4" },
     ]);
     const [org] = await sql`select name, slug, deleted_at is not null as deleted, offboarded_at is not null as offboarded,
       stripe_customer_id, auto_recharge_enabled from organizations where id = 'team'`;
@@ -131,7 +131,7 @@ describe("organization deletion", () => {
     await sql`update document_cleanup_queue set not_before = now() - interval '1 second'`;
 
     const objects = new Set(["member/ws-done/markdown/ws-doc.md", "member/ws-live/vision/late.json", "member/up-ws/raw/a.pdf", "other/keep.json"]);
-    const tables = new Set(["/lance/team/vectors/model-x/4#chunks"]);
+    const tables = new Set(["/lance/team/ws/vectors-model-x-4#chunks", "/lance/team/other-ws/vectors-model-x-4#chunks"]);
     const vectorRowDeletes: string[][] = [];
     const storage = {
       bucket: "b",
@@ -151,7 +151,8 @@ describe("organization deletion", () => {
     await drainStorageCleanupQueue(db, storage, options);
 
     expect([...objects]).toEqual(["other/keep.json"]);
-    expect([...tables]).toEqual([]);
+    // Only the deleted org's workspace databases go.
+    expect([...tables]).toEqual(["/lance/team/other-ws/vectors-model-x-4#chunks"]);
     // The table is dropped whole, so no per-document vector deletes.
     expect(vectorRowDeletes).toEqual([]);
     expect(await sql`select count(*)::int as count from storage_cleanup_queue`).toEqual([{ count: 0 }]);

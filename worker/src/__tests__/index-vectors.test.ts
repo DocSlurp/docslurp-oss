@@ -1,9 +1,13 @@
 import { describe, expect, it } from "vitest";
 
+import { decodeLanceChunkHydration } from "@docslurp/shared/lancedb-hydration";
+
 import {
   buildVectorIndexSearchMetadata,
+  buildVectorRecords,
   vectorBackendCollectionName
 } from "../stages/index-vectors.js";
+import { workspaceVectorLocation } from "../stages/lancedb-location.js";
 
 describe("buildVectorIndexSearchMetadata", () => {
   it("marks vector manifests as fully indexed search surfaces", () => {
@@ -16,33 +20,17 @@ describe("buildVectorIndexSearchMetadata", () => {
 });
 
 describe("vectorBackendCollectionName", () => {
-  it("uses a plain chunks table inside the org/model/dimension directory", () => {
+  it("uses a plain chunks table inside the workspace's database", () => {
     expect(vectorBackendCollectionName({
-      backend: "lancedb", orgId: "org-a", runId: "run",
-      embedding: { model: "small", dimensions: 384 },
+      backend: "lancedb", orgId: "org-a", workspaceId: "ws-1", runId: "run",
     })).toBe("chunks");
   });
 
-  it("uses the per-org LanceDB table instead of a run namespace", () => {
-    const collection = vectorBackendCollectionName({
-      backend: "lancedb",
-      orgId: "org-123",
-      runId: "run-123"
-    });
-
-    expect(collection).toMatch(/^chunks_org_[0-9a-f]{32}$/);
-    expect(collection).not.toContain("org-123");
-    expect(collection).not.toContain("run-123");
-  });
-
-  it("fails closed when LanceDB indexing has no org id", () => {
-    expect(() =>
-      vectorBackendCollectionName({
-        backend: "lancedb",
-        orgId: null,
-        runId: "run-123"
-      })
-    ).toThrow("LanceDB vector indexing requires a run orgId");
+  it("fails closed when LanceDB indexing has no org or workspace id", () => {
+    for (const scope of [{ orgId: null, workspaceId: "ws-1" }, { orgId: "org-a", workspaceId: null }, { orgId: "org-a" }]) {
+      expect(() => vectorBackendCollectionName({ backend: "lancedb", runId: "run-123", ...scope }))
+        .toThrow("LanceDB vector indexing requires the run's orgId and workspaceId");
+    }
   });
 
   it("keeps non-LanceDB backends run-scoped", () => {
@@ -53,5 +41,34 @@ describe("vectorBackendCollectionName", () => {
         runId: "run-123"
       })
     ).toBe("run-123_orama");
+  });
+});
+
+describe("workspaceVectorLocation", () => {
+  it("resolves the run's workspace database and fails closed without its ids", () => {
+    expect(workspaceVectorLocation({ orgId: "org-a", workspaceId: "ws-1" }, { model: "m/x", dimensions: 4 }, "/data"))
+      .toEqual({ uri: "/data/org-a/ws-1/vectors-m%2Fx-4", table: "chunks" });
+    expect(() => workspaceVectorLocation({ orgId: "org-a" }, { model: "m", dimensions: 4 }, "/data")).toThrow();
+    expect(() => workspaceVectorLocation({ workspaceId: "ws-1", orgId: " " }, { model: "m", dimensions: 4 }, "/data")).toThrow();
+  });
+});
+
+describe("buildVectorRecords", () => {
+  const chunk = (documentId: string, index: number) => ({
+    id: `${documentId}-${index.toString().padStart(3, "0")}`, index, text: `text ${index}`, vector: [index, 1],
+    tokenEstimate: 3, headingPath: ["H"], pageNumber: 2, metadata: { documentId, locator: "x" },
+  });
+
+  it("keeps a document's own artifact ids", () => {
+    const records = buildVectorRecords({ documentId: "doc", chunks: [chunk("doc", 0)] }, "doc", {}, "run-1");
+    expect(records[0]).toMatchObject({ id: "doc-000", documentId: "doc", runId: "run-1" });
+  });
+
+  it("rebinds a dedup source's artifact to the copy that indexes it in another workspace", () => {
+    const records = buildVectorRecords({ documentId: "src", chunks: [chunk("src", 0), chunk("src", 7)] }, "copy", { filename: "c.pdf" }, "run-copy");
+    expect(records.map((record) => record.id)).toEqual(["copy-000", "copy-007"]);
+    expect(records.every((record) => record.documentId === "copy" && record.runId === "run-copy")).toBe(true);
+    expect(records[0]!.metadata).toMatchObject({ documentId: "copy", filename: "c.pdf" });
+    expect(decodeLanceChunkHydration(records[1]!.hydration)).toMatchObject({ runId: "run-copy", metadata: { documentId: "copy", locator: "x" } });
   });
 });

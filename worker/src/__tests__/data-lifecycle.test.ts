@@ -47,7 +47,9 @@ beforeEach(async () => {
 });
 
 const MODEL = { backend: "lancedb", embeddingModel: "model/x", dimension: 4 };
-const TABLE_URI = "/tmp/lance/o1/vectors/model%2Fx/4";
+/** Workspace w's database for MODEL; every workspace has its own. */
+const TABLE_URI = "/tmp/lance/o1/w/vectors-model%2Fx-4";
+const KEEP_TABLE_URI = "/tmp/lance/o1/keep/vectors-model%2Fx-4";
 
 async function seedRun(id: string, workspaceId = "w", status = "completed") {
   await sql`
@@ -276,14 +278,15 @@ describe("cleanup sweep", () => {
         "u1/up-d1/raw/d1.pdf", "u1/up-d2/raw/d2.pdf", "u1/up-d3/raw/d3.pdf",
         "u1/rk/markdown/dk.md", "u1/up-dk/raw/dk.pdf",
       ],
-      { [`${TABLE_URI}#chunks`]: ["d1", "d2", "d3", "dk"] },
+      { [`${TABLE_URI}#chunks`]: ["d1", "d2", "d3"], [`${KEEP_TABLE_URI}#chunks`]: ["dk"] },
     );
 
     await sql`delete from workspaces where id = 'w'`;
     await drainAll(stores);
 
     expect([...stores.objects].sort()).toEqual(["u1/rk/markdown/dk.md", "u1/up-dk/raw/dk.pdf"]);
-    expect([...stores.tables.get(`${TABLE_URI}#chunks`)!]).toEqual(["dk"]);
+    expect([...stores.tables.get(`${TABLE_URI}#chunks`)!]).toEqual([]);
+    expect([...stores.tables.get(`${KEEP_TABLE_URI}#chunks`)!]).toEqual(["dk"]);
     expect(stores.vectorDeleteCalls).toEqual([{ table: `${TABLE_URI}#chunks`, documentIds: ["d1", "d2", "d3"] }]);
     expect(await sql`select count(*)::int as count from document_cleanup_queue`).toEqual([{ count: 0 }]);
     expect(await sql`select count(*)::int as count from storage_cleanup_queue`).toEqual([{ count: 0 }]);
@@ -314,19 +317,21 @@ describe("cleanup sweep", () => {
     expect([...stores.objects]).toEqual([]);
   });
 
-  it("drops a whole org vector table instead of deleting its documents row by row", async () => {
+  it("drops a whole workspace vector table instead of deleting its documents row by row", async () => {
     await seedRun("r1");
     await seedDocument("d1", "r1");
+    await seedRun("rk", "keep");
+    await seedDocument("dk", "rk", "keep");
     await sql`insert into storage_cleanup_queue (kind, org_id, target, payload, reason)
-      values ('vector_table', 'o1', 'o1|model/x|4', ${sql.json({ embeddingModel: "model/x", dimension: 4 })}, 'org_deleted')`;
+      values ('vector_table', 'o1', 'o1|w|model/x|4', ${sql.json({ workspaceId: "w", embeddingModel: "model/x", dimension: 4 })}, 'workspace_deleted')`;
     await sql`insert into vector_index_tables (table_key) values (${`${TABLE_URI}#chunks`})`;
-    const stores = fakeExternalStores([], { [`${TABLE_URI}#chunks`]: ["d1"] });
+    const stores = fakeExternalStores([], { [`${TABLE_URI}#chunks`]: ["d1"], [`${KEEP_TABLE_URI}#chunks`]: ["dk"] });
 
     await sql`delete from workspaces where id = 'w'`;
     await drainAll(stores);
 
     expect(stores.vectorDeleteCalls).toEqual([]);
-    expect(stores.tables.size).toBe(0);
+    expect([...stores.tables.keys()]).toEqual([`${KEEP_TABLE_URI}#chunks`]);
     expect(await sql`select table_key from vector_index_tables`).toEqual([]);
   });
 
