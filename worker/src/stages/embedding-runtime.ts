@@ -25,6 +25,7 @@ import type { Document, EmbeddingProfile } from "../models.js";
 import { chunkTextWithMeta } from "../pipeline/chunking.js";
 import type { CommandRunner } from "../tools/runner.js";
 import { localEmbeddingThreadEnabled, sharedLocalEmbeddingPool } from "./local-embedding-thread.js";
+import { stripLeadingFrontmatter } from "../lib/markdown-structure.js";
 import {
   type ArtifactStore,
   cleanupTempFile,
@@ -1312,7 +1313,7 @@ async function buildDocumentContextSummary(args: {
 
   try {
     const sourceExcerpt = truncateText(
-      normalizeWhitespace(args.documentText),
+      normalizeWhitespace(stripLeadingFrontmatter(args.documentText).markdown),
       CONTEXTUAL_SOURCE_LIMIT,
     );
     const task = buildTrustedDocumentTaskPrompt({
@@ -1373,11 +1374,23 @@ async function buildDocumentContextSummary(args: {
   }
 }
 
-function buildHeuristicDocumentSummary(
+/**
+ * Body text for a heuristic summary: no metadata block and no heading lines
+ * (the preamble already names the document and section), so the first
+ * sentence is prose rather than `--- ## title: … # Heading`.
+ */
+function summarySourceText(documentText: string): string {
+  return stripLeadingFrontmatter(documentText).markdown
+    .split("\n")
+    .filter((line) => !/^#{1,6}\s/.test(line))
+    .join("\n");
+}
+
+export function buildHeuristicDocumentSummary(
   documentTitle: string,
   documentText: string,
 ): string {
-  const normalized = normalizeWhitespace(documentText);
+  const normalized = normalizeWhitespace(summarySourceText(documentText));
   if (!normalized) {
     return `Content from ${documentTitle}`;
   }

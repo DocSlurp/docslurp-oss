@@ -1,3 +1,5 @@
+import { stripLeadingFrontmatter } from "./markdown-structure.js";
+
 const MARKDOWN_TABLE_BLOCK =
   /(^|\n)(?<table>(?:\|.*\|\n)+)(?=\n|$)/g;
 
@@ -16,18 +18,24 @@ export type SanitizedExtractedMarkdown = {
   markdown: string;
   strippedDataUriCount: number;
   strippedDataUriBytes: number;
+  /** Lines of a leading metadata block (`---` … `---`) removed from the body. */
+  strippedFrontmatterLines: number;
 };
 
 /**
  * Binary payloads are artifacts, not document text. Keeping them in Markdown
  * corrupts yield metrics and can put megabytes of base64 into chunks/search.
+ * A leading metadata block (HTML converters emit `---\ntitle: …` from
+ * `<title>`/`<meta>`) is likewise dropped so it cannot become a heading,
+ * a chunk or chunk context.
  */
 export function sanitizeExtractedMarkdown(
   markdown: string,
 ): SanitizedExtractedMarkdown {
   let strippedDataUriCount = 0;
   let strippedDataUriBytes = 0;
-  const sanitized = markdown.replace(DATA_URI, (match) => {
+  const body = stripLeadingFrontmatter(markdown);
+  const sanitized = body.markdown.replace(DATA_URI, (match) => {
     strippedDataUriCount += 1;
     strippedDataUriBytes += Buffer.byteLength(match);
     return "artifact://externalized-data-uri";
@@ -37,6 +45,7 @@ export function sanitizeExtractedMarkdown(
     markdown: sanitized,
     strippedDataUriCount,
     strippedDataUriBytes,
+    strippedFrontmatterLines: body.strippedLines,
   };
 }
 
