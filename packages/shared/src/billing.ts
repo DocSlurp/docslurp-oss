@@ -712,7 +712,8 @@ export const PIPELINE_PROFILE_BASIS = {
  *   time, so they bound busy time from above.
  * - Not representative, so excluded: oversubscribed runs (16+ slots on 16 CPUs
  *   with local ONNX embedding: 1.4-3 s per page because of intra-op thread spin)
- *   and a CPU-starved 0.5-vCPU arm (3.4 s). Production pins one embed thread.
+ *   and a CPU-starved 0.5-vCPU arm (3.4 s). Production is moving to one ONNX
+ *   intra-op thread per embed worker (DOCSLURP_LOCAL_EMBED_INTRA_OP_THREADS=1).
  * - Standard 0.3 is the top of the production-shaped range rounded up; fast 0.2
  *   drops the page-image stage and sits at the top of the hosted-embedder range.
  *
