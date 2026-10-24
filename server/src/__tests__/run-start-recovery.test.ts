@@ -64,6 +64,42 @@ describe("run-start recovery wiring", () => {
     expect(claimFlags()).toEqual([false, true, false]);
   });
 
+  it("keeps sweeping every interval after the database drops mid-sweep, then re-admits queued runs", async () => {
+    vi.useFakeTimers();
+    const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    let down = true;
+    mocks.sql.mockImplementation(async () => {
+      if (down) throw Object.assign(new Error("read ECONNRESET"), { code: "ECONNRESET" });
+      return [] as unknown[];
+    });
+    try {
+      startRunStartRecovery();
+      await vi.advanceTimersByTimeAsync(15_000); // boot pass plus three failing ticks
+      expect(claimFlags()).toEqual([]);
+      expect(errors.mock.calls.some(([line]) => String(line).includes("sweep failed"))).toBe(true);
+      down = false;
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(claimFlags().length).toBeGreaterThan(0);
+    } finally {
+      mocks.sql.mockImplementation(async () => [] as unknown[]);
+      errors.mockRestore();
+    }
+  });
+
+  it("survives a synchronous throw from the Temporal reconnect on a tick", async () => {
+    vi.useFakeTimers();
+    mocks.connected.value = false;
+    mocks.warm.mockImplementationOnce(async () => { throw new Error("boom"); });
+    try {
+      startRunStartRecovery();
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(claimFlags().length).toBeGreaterThanOrEqual(2);
+    } finally {
+      mocks.connected.value = true;
+      mocks.warm.mockImplementation(async () => true);
+    }
+  });
+
   it("takes over the stale-queued sweep when the maintenance sweeper is disabled", async () => {
     vi.useFakeTimers();
     mocks.maintenanceEnabled.value = false;

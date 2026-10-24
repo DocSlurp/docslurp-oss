@@ -55,15 +55,23 @@ export function isMaintenanceSweepEnabled(): boolean {
   return MAINTENANCE_SWEEP_INTERVAL_MS > 0;
 }
 
-export function startMaintenanceSweeper(): void {
-  if (timer || MAINTENANCE_SWEEP_INTERVAL_MS === 0) return;
-  timer = setInterval(() => {
-    for (const [name, run] of sweeps) {
-      withBackgroundSpan(`maintenance.${name}`, run).catch((error) => {
+/**
+ * One pass over every sweep. Each sweep is isolated: a rejection (ECONNRESET) or a
+ * synchronous throw in one neither skips the others nor stops the next tick.
+ */
+export function runMaintenanceSweepsOnce(list: ReadonlyArray<[name: string, run: () => Promise<unknown>]> = sweeps): void {
+  for (const [name, run] of list) {
+    Promise.resolve()
+      .then(() => withBackgroundSpan(`maintenance.${name}`, run))
+      .catch((error) => {
         console.error(`[${name}] sweep failed: ${error instanceof Error ? error.message : String(error)}`);
       });
-    }
-  }, MAINTENANCE_SWEEP_INTERVAL_MS);
+  }
+}
+
+export function startMaintenanceSweeper(): void {
+  if (timer || MAINTENANCE_SWEEP_INTERVAL_MS === 0) return;
+  timer = setInterval(runMaintenanceSweepsOnce, MAINTENANCE_SWEEP_INTERVAL_MS);
   timer.unref?.();
 }
 

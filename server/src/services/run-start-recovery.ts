@@ -220,14 +220,16 @@ let unsubscribe: (() => void) | null = null;
 export function startRunStartRecovery(): void {
   if (unsubscribe) return;
   const kick = (options?: { ignoreBackoff?: boolean }) => {
-    withBackgroundSpan("api.run-start-recovery", () => runStartRecovery.kick(options)).catch(logSweepError("run-start-recovery"));
+    Promise.resolve()
+      .then(() => withBackgroundSpan("api.run-start-recovery", () => runStartRecovery.kick(options)))
+      .catch(logSweepError("run-start-recovery"));
   };
   unsubscribe = onTemporalClientConnected(() => kick({ ignoreBackoff: true }));
 
   void (async () => {
     // A connected client makes the boot pass's starts succeed (and the
     // connect listener already kicks it); the pass also covers Temporal-down boots.
-    await warmTemporalClient();
+    await warmTemporalClient().catch(logSweepError("temporal-warm"));
     kick();
     sweepStaleQueuedRuns().catch(logSweepError("stale-queued-run-sweep"));
   })();
@@ -236,12 +238,18 @@ export function startRunStartRecovery(): void {
   const staleEveryTicks = Math.max(1, Math.round(60_000 / config.intervalMs));
   let tick = 0;
   timer = setInterval(() => {
-    tick += 1;
-    // Reconnect in the background so a recovered Temporal fires the connect kick.
-    if (!isTemporalClientConnected()) void warmTemporalClient();
-    kick();
-    if (!isMaintenanceSweepEnabled() && tick % staleEveryTicks === 0) {
-      withBackgroundSpan("api.stale-queued-run-sweep", () => sweepStaleQueuedRuns()).catch(logSweepError("stale-queued-run-sweep"));
+    // A throw here would be an uncaught exception, and the loop is what re-admits queued Runs
+    // once Temporal or the database returns: every tick is isolated.
+    try {
+      tick += 1;
+      // Reconnect in the background so a recovered Temporal fires the connect kick.
+      if (!isTemporalClientConnected()) void warmTemporalClient().catch(logSweepError("temporal-warm"));
+      kick();
+      if (!isMaintenanceSweepEnabled() && tick % staleEveryTicks === 0) {
+        withBackgroundSpan("api.stale-queued-run-sweep", () => sweepStaleQueuedRuns()).catch(logSweepError("stale-queued-run-sweep"));
+      }
+    } catch (error) {
+      logSweepError("run-start-recovery")(error);
     }
   }, config.intervalMs);
   timer.unref?.();
