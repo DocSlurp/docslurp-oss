@@ -135,9 +135,11 @@ When the search agent answers (the default for `/v1/chat` with `DOCSLURP_PUBLIC_
 
 #### Suggestions mode
 
-With `agent: {suggestions: true}` the agent looks for ingestion and search problems while it answers: searches with no or weak results, files that failed or are still processing, garbled or incomplete extracted text, and search settings too narrow for the question. When it finds one, it adds a short section after the answer that names the likely cause and the evidence, and can prepare a specific change with `proposeWorkspaceSettings` (see [Workspace settings from chat](agent-workspace-settings.md)). A proposal never changes anything by itself: a person applies it with **Apply** in the app, or the authenticated apply endpoint.
+With `agent: {suggestions: true}` the agent watches the turn's own tool results for ingestion and search problems: a search with no results or only unrelated passages for something the workspace should contain, files reported as failed or still processing (current versions only), and passage text that is garbled, cut off or missing the table or page the question needs. When it sees one, it adds a short section after the answer that names the likely cause and the evidence, and can prepare up to two specific changes with `proposeWorkspaceSettings` (see [Workspace settings from chat](agent-workspace-settings.md)). A turn with no such signal gets no suggestions section. A proposal never changes anything by itself: a person applies it with **Apply** in the app, or the authenticated apply endpoint. A proposal that cannot be prepared never fails the turn; the answer stands and says so.
 
-It is off by default for API, SDK, MCP and OpenAI-compatible callers, so their answers stay answer-only and the proposal tool is not offered. The DocSlurp web app turns it on by default and has a **Suggestions** toggle in the composer. `getWorkspaceSettings` stays available either way.
+Without suggestions mode the agent still prepares a proposal when the user asks to change a setting, but never volunteers one.
+
+Suggestions mode and `agent.web` are set per request on `POST /v1/chat` (and the SDK's `chat`). They are not available on `GET /v1/chat/stream`, the MCP `chat` tool or `/v1/chat/completions`, which always run with suggestions off and the workspace's web setting. The DocSlurp web app turns suggestions on by default and has **Web** (default off) and **Suggestions** toggles in the composer.
 
 ```bash
 curl -sS -X POST "$DOCSLURP_URL/v1/chat" -H "Authorization: Bearer $DOCSLURP_API_KEY" -H "Content-Type: application/json" \
@@ -162,7 +164,7 @@ Agent responses add these `debug` fields (other turns omit them):
 | `stepUsage` | Per step: `{step, model, finishReason, inputTokens, outputTokens, costCents?, toolCalls}` |
 | `toolCalls` | Per tool call, in order (refused calls included): `{id, name, status, runtimeMs, queries?, resultCount?, zeroHit?, evidencePages?, costCents?, errorCode?}`. `queries` are the search strings the model sent (never put on spans); `evidencePages` lists the distinct `{documentId, pageNumber}` of the evidence that call returned; `errorCode` is `tool_call_limit`, `deadline`, `tool_timeout`, `invalid_arguments`, `aborted`, `exception`, the tool's own error code or `http_<status>`. |
 | `limits` | `{maxSteps, maxToolCalls, searchConcurrency, clamped}` as applied |
-| `modes` | `{web, suggestions}` as applied. `web` is `on`, `off` (the request turned it off) or `unavailable` (policy blocked it); `suggestions` is `true` only when the proposal tool was offered |
+| `modes` | `{web, suggestions}` as applied. `web` is `on`, `off` (the request turned it off) or `unavailable` (policy blocked it); `suggestions` is `true` only when it was requested and the actor can use the settings tools |
 | `timeBudget` | `{turnDeadlineMs, stepTimeoutMs, toolTimeoutMs, finalReserveMs, elapsedMs, finalAnswer, stepTimeouts, toolTimeouts, toolCallsAfterDeadline}`. `finalAnswer` is `loop` (the agent answered on its own), `forced` (the final-answer reserve started, so the last step ran without tools), the historical values `from_evidence` and `partial` are no longer emitted: failures block the turn. See [Turn deadline](#turn-deadline). |
 | `stopReason` | See below |
 

@@ -47,7 +47,7 @@ vi.mock("@docslurp/shared/observability", () => ({
   recordChatAgentTelemetry: (metric: unknown) => { spans.metrics.push(metric); },
   evalBaggageAttributes: () => ({ "eval.run_id": "run-7", "eval.arm": "control" }),
 }));
-const { runChatMcpAgent, classifyChatAgentStop, createToolMarkupGuard, FINAL_ANSWER_INSTRUCTION, SUGGESTIONS_INSTRUCTION } = await import("./chat-mcp-agent.js");
+const { runChatMcpAgent, classifyChatAgentStop, createToolMarkupGuard, FINAL_ANSWER_INSTRUCTION, SETTINGS_ON_REQUEST_INSTRUCTION } = await import("./chat-mcp-agent.js");
 const { ChatTurnDeadlineError } = await import("./chat-turn-deadline.js");
 const actor = { type: "session" as const, userId: "user", sessionId: "browser-session", user: { id: "user", name: "User", email: "" } };
 const args = { actor, workspaceId: "ws", orgId: "org", sessionId: "conversation", query: "What is the policy?", history: [], apiKey: "fake", privacyMode: "standard" as const, model: "test", maxOutputTokens: 100 };
@@ -535,33 +535,47 @@ describe("failed tool turns are blocked by code", () => {
 describe("agent modes", () => {
   const systemText = (model: MockLanguageModelV4) => JSON.stringify(model.doStreamCalls[0]!.prompt.filter(message => message.role === "system"));
 
-  it("keeps suggestions off by default: no proposal tool or diagnosis instruction, settings stay readable", async () => {
+  it("keeps suggestions off by default: proposals stay available on request, but are never volunteered", async () => {
     mocks.manifestIds = ["search", "getWorkspaceSettings", "proposeWorkspaceSettings"];
     const model = new MockLanguageModelV4({ doStream: [answerStep("Ready")] });
     mocks.provider.mockReturnValue(model);
     const result = await runChatMcpAgent(args);
-    expect(model.doStreamCalls[0]!.tools?.map(tool => tool.name)).toEqual(["search", "getWorkspaceSettings"]);
-    expect(systemText(model)).not.toContain(SUGGESTIONS_INSTRUCTION);
+    expect(model.doStreamCalls[0]!.tools?.map(tool => tool.name)).toEqual(["search", "getWorkspaceSettings", "proposeWorkspaceSettings"]);
+    expect(systemText(model)).toContain(SETTINGS_ON_REQUEST_INSTRUCTION);
+    expect(systemText(model)).not.toContain("Suggestions mode is on");
+    expect(systemText(model)).not.toContain("Proactively");
     expect(result.debug.modes.suggestions).toBe(false);
   });
 
-  it("suggestions mode offers proposals and teaches the model to diagnose ingest and search problems", async () => {
+  it("suggestions mode teaches evidence-based diagnosis instead of the on-request rule", async () => {
     mocks.manifestIds = ["search", "getUploadStatus", "getWorkspaceSettings", "proposeWorkspaceSettings"];
     const model = new MockLanguageModelV4({ doStream: [answerStep("Ready")] });
     mocks.provider.mockReturnValue(model);
     const result = await runChatMcpAgent({ ...args, suggestions: true, workspaceInventory: { searchableDocuments: 4, processingDocuments: 1, failedDocuments: 2 } });
-    expect(model.doStreamCalls[0]!.tools?.map(tool => tool.name)).toContain("proposeWorkspaceSettings");
-    expect(systemText(model)).toContain(SUGGESTIONS_INSTRUCTION);
-    expect(systemText(model)).toContain("2 failed to ingest");
+    const text = systemText(model);
+    expect(text).toContain("Suggestions mode is on");
+    expect(text).toContain("add no suggestions section and no proposal");
+    expect(text).toContain("getUploadStatus when file processing state is in question");
+    expect(text).not.toContain(SETTINGS_ON_REQUEST_INSTRUCTION);
+    expect(text).toContain("2 failed to ingest");
     expect(result.debug.modes.suggestions).toBe(true);
   });
 
-  it("reports suggestions off when the actor cannot see the proposal tool", async () => {
+  it("names only supplied tools in the suggestions instruction", async () => {
+    mocks.manifestIds = ["search", "getWorkspaceSettings", "proposeWorkspaceSettings"];
+    const model = new MockLanguageModelV4({ doStream: [answerStep("Ready")] });
+    mocks.provider.mockReturnValue(model);
+    await runChatMcpAgent({ ...args, suggestions: true });
+    expect(systemText(model)).toContain("Suggestions mode is on");
+    expect(systemText(model)).not.toContain("getUploadStatus");
+  });
+
+  it("reports suggestions off when the actor cannot see the settings tools", async () => {
     mocks.manifestIds = ["search"];
     const model = new MockLanguageModelV4({ doStream: [answerStep("Ready")] });
     mocks.provider.mockReturnValue(model);
     const result = await runChatMcpAgent({ ...args, suggestions: true });
-    expect(systemText(model)).not.toContain(SUGGESTIONS_INSTRUCTION);
+    expect(systemText(model)).not.toContain("Suggestions mode is on");
     expect(result.debug.modes.suggestions).toBe(false);
   });
 

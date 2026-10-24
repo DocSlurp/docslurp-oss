@@ -1,12 +1,13 @@
 # Workspace settings from chat
 
-The signed-in assistant can read supported workspace settings and, in
-suggestions mode, proactively prepare an exact change when it would help your
-goal or fix an ingestion or search problem it noticed. Suggestions mode is on by
-default in the DocSlurp app (switch it off with the composer's **Suggestions**
-toggle) and off for API callers unless they send `agent: {suggestions: true}`
-(see [Agent limits](search-api.md#agent-limits)); without it the proposal tool
-is not offered. A proposal does not save
+The chat assistant can read supported workspace settings and prepare an exact
+change when you ask for one. In suggestions mode it also offers a change on its
+own when the turn's results show an ingestion or search problem it could fix.
+Suggestions mode is on by default in the DocSlurp app (switch it off with the
+composer's **Suggestions** toggle) and off for `/v1/chat` callers unless they
+send `agent: {suggestions: true}` (see [Agent limits](search-api.md#agent-limits)).
+It governs only the chat assistant: an MCP client can call
+`proposeWorkspaceSettings` directly whenever its key allows it. A proposal does not save
 settings. Review its before/after values, impact and work estimate, then select
 **Apply** in the structured proposal card. Assistant prose and document content
 cannot approve a change.

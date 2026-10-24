@@ -687,6 +687,41 @@ describe("workspacesRoutes validation", () => {
     expect(chatWorkspaceMock).toHaveBeenLastCalledWith(expect.objectContaining({ agent: { web: false, suggestions: true } }));
   });
 
+  it("keeps suggestions opt-in for API keys calling the dashboard chat routes", async () => {
+    getWorkspaceMock.mockResolvedValue({ id: "ws-1", orgId: "org-1" });
+    chatWorkspaceMock.mockResolvedValue({ id: "answer", debug: { model: null, fallback: true }, citations: [] });
+    const keyApp = buildApp({ orgId: "org-1", scopes: ["search"] });
+    const send = (body: Record<string, unknown>) => keyApp.request("/workspaces/ws-1/chat", { method: "POST",
+      headers: { "Content-Type": "application/json" }, body: JSON.stringify({ q: "hi", ...body }) });
+    chatWorkspaceMock.mockClear();
+    await send({});
+    expect(chatWorkspaceMock).toHaveBeenLastCalledWith(expect.objectContaining({ agent: { web: false, suggestions: false } }));
+    await send({ suggestions: true });
+    expect(chatWorkspaceMock).toHaveBeenLastCalledWith(expect.objectContaining({ agent: { web: false, suggestions: true } }));
+  });
+
+  it("streams the turn's agent modes in workspace metadata", async () => {
+    getWorkspaceMock.mockResolvedValue({ id: "ws-1", orgId: "org-1" });
+    chatWorkspaceMock.mockResolvedValue({
+      id: "answer-3", sessionId: "session-3", searchSessionId: null, answer: "Done.",
+      citations: [], evidenceSpans: [], availability: null,
+      usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2, costCents: 0 },
+      runtime: { startedAt: "2026-10-24T00:00:00.000Z", completedAt: "2026-10-24T00:00:00.010Z", totalMs: 10 },
+      debug: { citations: 0, model: "m", fallback: false, historyTurns: 0, mode: "retrieval", modes: { web: "unavailable", suggestions: true },
+        wholeCorpus: { attempted: false, eligible: false, documentCount: null, chunkCount: null, tokenEstimate: null, charEstimate: null, maxDocuments: 1, maxChunks: 1, maxTokens: 1, maxChars: 1, fallbackReason: null } },
+    });
+    const transport = new DefaultChatTransport<WorkspaceChatUIMessage>({
+      api: "http://localhost/workspaces/ws-1/chat/workspace-agent",
+      body: { webTools: true },
+      fetch: async (input, init) => app.request(new Request(input, init as RequestInit)),
+    });
+    const chat = new Chat<WorkspaceChatUIMessage>({ id: "thread-3", messages: [], transport, dataPartSchemas: workspaceChatDataPartSchemas });
+    await chat.sendMessage({ text: "Search the web for pricing" });
+    expect(chat.error).toBeUndefined();
+    expect(getWorkspaceMeta(chat.messages.at(-1)!)?.modes).toEqual({ web: "unavailable", suggestions: true });
+    expect(chatWorkspaceMock).toHaveBeenLastCalledWith(expect.objectContaining({ agent: { web: true, suggestions: true } }));
+  });
+
   it("returns 403 from workspace chat routes when the workspace turned chat off", async () => {
     getWorkspaceMock.mockResolvedValue({ id: "ws-1", orgId: "org-1" });
     workspaceChatDisabledBodyMock.mockResolvedValue({ error: "Chat is turned off for this workspace.", code: "chat_disabled" });

@@ -6,7 +6,6 @@ import type { PrivacyMode } from "@docslurp/shared";
 import { env } from "../config.js";
 import type { RequestActor } from "../lib/request-actor.js";
 import type { ChatToolActivity } from "./chat-mcp-tools.js";
-import type { ChatWorkspaceInventory } from "./chat-mcp-agent.js";
 import {
   configureSearchFromChat,
   loadChatSessionSearchOverrides,
@@ -43,6 +42,7 @@ import { assertCanSpend, type SpendKind } from "./billing/spend-guard.js";
 import { beginChatTurn, chatTurnFailureReason } from "./billing/chat-turn-billing.js";
 import { claimChatTurnAnswerId, currentChatTurn } from "../lib/chat-turn-context.js";
 import { sql } from "../db.js";
+import { loadChatWorkspaceInventory } from "./chat-workspace-inventory.js";
 import { reviewUntrustedEvidenceText } from "./prompt-injection.js";
 import {
   hybridSearch,
@@ -1164,21 +1164,6 @@ async function answerIngestReportTurn(args: ChatWorkspaceArgs): Promise<Workspac
     debug: { citations: 0, model: null, fallback: false, historyTurns: 0, mode: "retrieval", wholeCorpus: buildWholeCorpusDebug() },
     ingestReport: report,
   };
-}
-
-/**
- * Grounded corpus counts for the agent prompt; the searchable and processing
- * reads use workspace indexes. The failed count scans the workspace's documents,
- * so it runs only in suggestions mode, where it is a diagnosis signal.
- */
-async function loadChatWorkspaceInventory(workspaceId: string, includeFailed: boolean): Promise<ChatWorkspaceInventory> {
-  const [counts] = await sql<{ searchable: number; processing: number; failed: number }[]>`
-    select coalesce((select document_count from workspace_corpus_stats where workspace_id = ${workspaceId}), 0)::int as searchable,
-      (select count(*)::int from documents where workspace_id = ${workspaceId}
-        and status not in ('completed', 'failed', 'cancelled', 'pii_blocked')) as processing,
-      ${includeFailed ? sql`(select count(*)::int from documents where workspace_id = ${workspaceId} and status = 'failed')` : sql`0`} as failed
-  `;
-  return { searchableDocuments: counts?.searchable ?? 0, processingDocuments: counts?.processing ?? 0, failedDocuments: counts?.failed ?? 0 };
 }
 
 type ChatTurnPolicy = { model: string; failover: boolean; requestedModel: string | null; limits: ChatAgentLimits };

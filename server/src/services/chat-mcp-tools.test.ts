@@ -8,7 +8,7 @@ import { searchInputSchema, batchSearchInputSchema, workspaceChatInputSchema } f
 import { currentSearchSignal } from "../search/query-bounds.js";
 import { currentChatAgentSignal } from "../lib/chat-agent-context.js";
 
-function setup(ids = ["search"], options: { toolBudgetMs?: () => number; webTools?: boolean; userText?: string[] } = {}) {
+function setup(ids = ["search"], options: { toolBudgetMs?: () => number; webTools?: boolean; userText?: string[]; maxToolCalls?: number } = {}) {
   const dispatch = vi.fn<McpDispatch>(async () => Response.json({ results: [] }));
   const onActivity = vi.fn();
   const controller = new AbortController();
@@ -364,6 +364,27 @@ describe("tool failure latch", () => {
     await expect(t.execute("search", { q: "follow-up" }, "second")).rejects.toMatchObject({ code: "chat_tool_failed" });
     expect(t.dispatch).toHaveBeenCalledTimes(failure === "invalid-input" ? 0 : 1);
     expect(t.citations).toEqual([]);
+  });
+
+  it.each([403, 500, "exception", "invalid-input"] as const)("never latches a failed settings proposal (%s): the answer stands", async failure => {
+    const t = setup(["search", "proposeWorkspaceSettings"]);
+    if (failure === "exception") t.dispatch.mockRejectedValueOnce(new Error("network failed"));
+    else if (typeof failure === "number") t.dispatch.mockResolvedValueOnce(Response.json({ error: { code: "no_change" } }, { status: failure }));
+    const result = await t.execute("proposeWorkspaceSettings", failure === "invalid-input" ? null : { changes: { retrieval: { resultCount: 8 } } });
+    expect(result).toMatchObject({ ok: false, blocked: false });
+    expect((result as { error: string }).error).toMatch(/could not be prepared/);
+    expect(t.failure).toBeUndefined();
+    expect(() => t.throwIfBlocked()).not.toThrow();
+    // Later tools still run.
+    await t.execute("search", { q: "follow-up" }, "second");
+    expect(t.dispatch).toHaveBeenCalledTimes(failure === "invalid-input" ? 1 : 2);
+  });
+
+  it("does not latch a settings proposal refused by the tool-call budget", async () => {
+    const t = setup(["search", "proposeWorkspaceSettings"], { maxToolCalls: 1 });
+    await t.execute("search", { q: "first" }, "a");
+    await expect(t.execute("proposeWorkspaceSettings", { changes: {} }, "b")).resolves.toMatchObject({ code: "tool_call_limit", blocked: false });
+    expect(t.failure).toBeUndefined();
   });
 
   it("does not latch a successful search with no matching documents", async () => {
