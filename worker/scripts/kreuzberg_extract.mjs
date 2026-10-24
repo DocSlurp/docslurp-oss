@@ -8,6 +8,7 @@ import { writeFile } from "node:fs/promises";
 import { parseArgs } from "node:util";
 
 import { insertPageMarkers } from "./kreuzberg_page_markers.mjs";
+import { missingTableMarkdown } from "./kreuzberg_tables.mjs";
 
 const { values } = parseArgs({
   options: {
@@ -52,15 +53,10 @@ try {
     else process.stderr.write(`[kreuzberg] page markers unavailable pages=${pageCount}; keeping unpaged markdown\n`);
   }
 
-  // Append tables if kreuzberg surfaces them separately from the main content
-  if (Array.isArray(result.tables) && result.tables.length > 0) {
-    const embeddedTableText = markdown.toLowerCase();
-    const extraTables = result.tables
-      .filter((t) => t.markdown && !embeddedTableText.includes(t.markdown.slice(0, 40).toLowerCase()))
-      .map((t) => t.markdown);
-    if (extraTables.length > 0) {
-      markdown = `${markdown}\n\n${extraTables.join("\n\n")}`;
-    }
+  // Append tables kreuzberg surfaces separately and the main content lacks.
+  const extraTables = missingTableMarkdown(markdown, result.tables);
+  if (extraTables.length > 0) {
+    markdown = `${markdown}\n\n${extraTables.join("\n\n")}`;
   }
 
   if ([".docx", ".xlsx"].includes(path.extname(values.input).toLowerCase())) {
