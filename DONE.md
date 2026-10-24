@@ -1,5 +1,6 @@
 # Completed
 
+- Add web tools (2026-10-23; migration 0079): web search, page fetch, site map, crawl and website ingest over REST (`/v1/web/*`), MCP and guarded chat. Tavily, Exa, Firecrawl and Jina adapters sit behind one generic interface with cheapest-first, round-robin or ordered routing, failover and provider benching. Provider identity stays internal. Calls are billed as `web-search`/`web-page`/`web-map` credits, workspaces opt in through `pipeline.webTools` (default on) and every call is traced. See `docs/web-tools.md`.
 - Automatically finalize direct object uploads and ingest their verified bytes with persisted results, authenticated Tigris notifications, multipart reconciliation, unknown-length stream signing, concurrent-session fencing and interrupted-run recovery (2026-10-23). Retain explicit completion/confirmation compatibility and expire abandoned uploads.
 - Retire original unflagged pending canonical history after a newer same-organization/workspace/source replacement completes, repair existing terminal-run backlog, and serialize retirement with retries without blocking canonical locks (2026-10-23; migration 0076).
 
