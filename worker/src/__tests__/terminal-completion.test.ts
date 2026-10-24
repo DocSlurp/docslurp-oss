@@ -17,12 +17,8 @@ async function complete(statuses: string[]) {
     id: `doc-${index}`, userId: run.userId, runId: run.id, filename: "text.txt", mimeType: "text/plain", sourceKey: `raw/${index}`,
     status, extractionMode: "text", pageCount: 1, createdAt: new Date(), updatedAt: new Date(),
   }));
-  // Lazy like postgres.js queries: pipelineTransaction starts them with execute().
-  const lazy = (rows: unknown[] = []) => Object.assign(Promise.resolve(rows), { execute() { return this; } });
-  const reserved = Object.assign(vi.fn(() => lazy()), { unsafe: () => lazy(), array: (values: unknown[]) => values, release() {} });
   const sql = Object.assign(vi.fn(async () => []), {
     begin: async (callback: (tx: unknown) => Promise<unknown>) => await callback(sql),
-    reserve: async () => reserved,
     array: (values: unknown[]) => values,
   });
   const persisted: Array<{ stats: unknown; statuses: string[]; processedDocuments: number; pagesProcessed: number }> = [];

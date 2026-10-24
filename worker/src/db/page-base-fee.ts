@@ -11,8 +11,7 @@ import {
 } from "@docslurp/shared";
 import type { WorkflowState } from "../pipeline/pipeline.js";
 import { retryTransaction } from "./transaction-retry.js";
-import { pipelineTransaction } from "./transaction-pipeline.js";
-import { debitRunUsageCredits, persistRunUsageEvents, runUsageEventStatements } from "./usage-event-store.js";
+import { debitRunUsageCredits, persistRunUsageEvents } from "./usage-event-store.js";
 
 /**
  * Ingest page charges (PRICE_CARD). Pages a vision/OCR model read are charged
@@ -51,15 +50,14 @@ export type RunPageCharges = { fastPages: number; richPages: number; multiplier:
 export async function recordPageBaseFee(sql: Sql<Record<string, unknown>>, state: WorkflowState): Promise<RunPageCharges> {
   const multiplier = pageBaseFeeMultiplier(compilePipelinePlan(state.run.pipeline));
   let charges: RunPageCharges = { fastPages: 0, richPages: 0, multiplier, credits: 0 };
-  const charged = await retryTransaction(`page-charges run=${state.run.id}`, async () => {
-    let total = 0;
-    await pipelineTransaction(sql, (client) => [
-      // FOR NO KEY UPDATE: serializes charge recording without blocking FK checks on child rows.
-      client<{ spent_cents: number | string }[]>`select spent_cents from workspace_runs where id = ${state.run.id} for no key update`,
-      // A full-index run re-indexes documents whose pages may already have paid through query
-      // materialization (stamped on the source version's ledger). Those pages are not charged twice.
-      // Rich reads are read through usage_attribution (the one spend reader the worker may use).
-      client<{ document_id: string; image: boolean; pages: number; rich_read: number; scanned: number }[]>`
+  const charged = await retryTransaction(`page-charges run=${state.run.id}`, () => sql.begin(async tx => {
+    const client = tx as unknown as typeof sql;
+    // FOR NO KEY UPDATE: serializes charge recording without blocking FK checks on child rows.
+    const [locked] = await client<{ spent_cents: number | string }[]>`select spent_cents from workspace_runs where id = ${state.run.id} for no key update`;
+    // A full-index run re-indexes documents whose pages may already have paid through query
+    // materialization (stamped on the source version's ledger). Those pages are not charged twice.
+    // Rich reads are read through usage_attribution (the one spend reader the worker may use).
+    const rows = await client<{ document_id: string; image: boolean; pages: number; rich_read: number; scanned: number }[]>`
       with docs as (
         select d.id, coalesce(d.mime_type, '') like 'image/%' as image,
           greatest(0, d.page_count - case when ${state.run.kind === "full-index"} then (
@@ -77,46 +75,41 @@ export async function recordPageBaseFee(sql: Sql<Record<string, unknown>>, state
         coalesce((select count(*) from document_page_facts f
           where f.document_id = docs.id and coalesce(f.text_bytes, 0) = 0 and coalesce(f.image_count, 0) > 0), 0)::int as scanned
       from docs
-    `,
-    ], async (client, [lockedRows, rows]) => {
-      const locked = lockedRows[0];
-      let fastPages = 0;
-      let richPages = 0;
-      const documents: Record<string, { fast: number; rich: number }> = {};
-      for (const row of rows) {
-        const remaining = Math.max(0, Number(row.pages) - Number(row.rich_read));
-        // Image files are read as images; scanned PDF pages without a vision read still bill Rich.
-        const rich = row.image ? remaining : Math.min(remaining, Math.max(0, Number(row.scanned) - Number(row.rich_read)));
-        const fast = remaining - rich;
-        fastPages += fast;
-        richPages += rich;
-        if (fast > 0 || rich > 0) documents[row.document_id] = { fast, rich };
-      }
-      const fastCredits = pageCredits("fast", fastPages) * multiplier;
-      const richCredits = pageCredits("rich", richPages) * multiplier;
-      charges = { fastPages, richPages, multiplier, credits: fastCredits + richCredits };
-      const base = { workspaceId: state.run.workspaceId, multiplier, documents: Object.keys(documents).length <= 200 ? documents : undefined };
-      // The insert and its pending debit (for exactly the rows it inserted) are one statement.
-      const usage = runUsageEventStatements({ client, state, usageEvents: [
-        // A fixed id per run also records a zero-page decision, so a retry cannot change it.
-        {
-          id: `fast:${state.run.id}`, provider: UNIT_CHARGE_PROVIDER, model: "price-card", metric: BILLABLE_UNIT_METRICS.fastPage,
-          amount: fastPages, unit: "page", costCents: fastCredits, metadata: unitChargeMetadata({ ...base, pages: fastPages }),
-        },
-        ...(richPages > 0 ? [{
-          id: `rich-scan:${state.run.id}`, provider: UNIT_CHARGE_PROVIDER, model: "price-card", metric: BILLABLE_UNIT_METRICS.richPage,
-          amount: richPages, unit: "page", costCents: richCredits, metadata: unitChargeMetadata({ ...base, pages: richPages, readBy: "scan-or-image" }),
-        }] : []),
-      ] });
-      const inserted = usage.cost(await Promise.all(usage.statements.map((statement) => statement.execute())));
-      // The usage_events trigger added `inserted` to spent_cents (0056).
-      // Pending debit, applied to the org's balance by the flusher.
-      // No credit-lease consumption: the charge is recorded in completeRun after
-      // the run turned completed, which already released its lease (0052).
-      total = (Number(locked?.spent_cents ?? 0) || 0) + inserted;
-    });
-    return total;
-  });
+    `;
+    let fastPages = 0;
+    let richPages = 0;
+    const documents: Record<string, { fast: number; rich: number }> = {};
+    for (const row of rows) {
+      const remaining = Math.max(0, Number(row.pages) - Number(row.rich_read));
+      // Image files are read as images; scanned PDF pages without a vision read still bill Rich.
+      const rich = row.image ? remaining : Math.min(remaining, Math.max(0, Number(row.scanned) - Number(row.rich_read)));
+      const fast = remaining - rich;
+      fastPages += fast;
+      richPages += rich;
+      if (fast > 0 || rich > 0) documents[row.document_id] = { fast, rich };
+    }
+    const fastCredits = pageCredits("fast", fastPages) * multiplier;
+    const richCredits = pageCredits("rich", richPages) * multiplier;
+    charges = { fastPages, richPages, multiplier, credits: fastCredits + richCredits };
+    const base = { workspaceId: state.run.workspaceId, multiplier, documents: Object.keys(documents).length <= 200 ? documents : undefined };
+    const inserted = await persistRunUsageEvents({ client, state, usageEvents: [
+      // A fixed id per run also records a zero-page decision, so a retry cannot change it.
+      {
+        id: `fast:${state.run.id}`, provider: UNIT_CHARGE_PROVIDER, model: "price-card", metric: BILLABLE_UNIT_METRICS.fastPage,
+        amount: fastPages, unit: "page", costCents: fastCredits, metadata: unitChargeMetadata({ ...base, pages: fastPages }),
+      },
+      ...(richPages > 0 ? [{
+        id: `rich-scan:${state.run.id}`, provider: UNIT_CHARGE_PROVIDER, model: "price-card", metric: BILLABLE_UNIT_METRICS.richPage,
+        amount: richPages, unit: "page", costCents: richCredits, metadata: unitChargeMetadata({ ...base, pages: richPages, readBy: "scan-or-image" }),
+      }] : []),
+    ] });
+    // The usage_events trigger added `inserted` to spent_cents (0056).
+    // Pending debit, applied to the org's balance by the flusher.
+    await debitRunUsageCredits({ client, state, costCents: inserted });
+    // No credit-lease consumption: the charge is recorded in completeRun after
+    // the run turned completed, which already released its lease (0052).
+    return (Number(locked?.spent_cents ?? 0) || 0) + inserted;
+  }));
   state.run.spentCents = charged;
   return charges;
 }

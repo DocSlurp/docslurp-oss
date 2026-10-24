@@ -59,8 +59,6 @@ type ChunkInsertStore = {
   /** Drops the document's chunk rows outside the replacement set; returns their ids. */
   deleteStaleDocumentChunks?: (documentId: string, keepChunkIds: readonly string[]) => Promise<string[] | void>;
   markDocumentLexicalSearchable?: (documentId: string) => Promise<void>;
-  /** deleteStaleDocumentChunks and markDocumentLexicalSearchable as one transaction in one round trip. */
-  finalizeDocumentChunks?: (documentId: string, keepChunkIds: readonly string[], markSearchable: boolean) => Promise<void>;
 };
 
 const DEFAULT_MAX_EMBED_WINDOW_PAGES = 100;
@@ -941,20 +939,17 @@ export class EmbedStage implements Stage {
       pipelineVersion: args.pipelineVersion
     }));
     const store = args.state.store as ChunkInsertStore;
+    await store.insertChunks(dbChunks);
     // Ids are `<document>-<index>`, so a retry with fewer or zero chunks leaves the old
     // tail behind; drop it before the marker makes the set servable.
     const keep = dbChunks.map((chunk) => chunk.id);
     // An earlier attempt may have indexed those chunks: native search serves
     // LanceDB rows without re-reading Postgres, so drop them there first.
     // A failed delete fails the stage while Postgres still lists the ids, so
-    // the retry deletes them again. The stale read does not depend on the insert
-    // (kept ids are excluded from it), so both go out in one round trip.
-    const [, stale] = await Promise.all([
-      store.insertChunks(dbChunks),
-      args.vectorSpace && args.state.run.orgId
-        ? store.staleDocumentChunkIds?.(args.document.id, keep).then((ids) => ids ?? [])
-        : undefined,
-    ]).then(([inserted, ids]) => [inserted, ids ?? []] as const);
+    // the retry deletes them again.
+    const stale = args.vectorSpace && args.state.run.orgId
+      ? await store.staleDocumentChunkIds?.(args.document.id, keep) ?? []
+      : [];
     if (stale.length > 0 && args.vectorSpace && args.state.run.orgId) {
       const location = VectorNamespaceManager.getEmbeddingLocation(
         resolveLanceDbConfig().root, args.state.run.orgId, args.vectorSpace.model, args.vectorSpace.dimensions,
@@ -962,12 +957,8 @@ export class EmbedStage implements Stage {
       await this.deleteVectors(location.uri, location.table, stale);
       args.state.staleVectorIds.set(args.document.id, stale);
     }
-    // Keyword search can serve the chunks from here on, ahead of the index stage.
-    if (store.finalizeDocumentChunks) {
-      await store.finalizeDocumentChunks(args.document.id, keep, dbChunks.length > 0);
-      return;
-    }
     await store.deleteStaleDocumentChunks?.(args.document.id, keep);
+    // Keyword search can serve the chunks from here on, ahead of the index stage.
     if (dbChunks.length > 0) await store.markDocumentLexicalSearchable?.(args.document.id);
   }
 }
