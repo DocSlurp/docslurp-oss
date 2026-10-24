@@ -14,7 +14,7 @@ import { createExaAdapter } from "./providers/exa.js";
 import { createFirecrawlAdapter } from "./providers/firecrawl.js";
 import { createJinaAdapter } from "./providers/jina.js";
 import { createTavilyAdapter } from "./providers/tavily.js";
-import { WebRouter, type WebAttempt, type WebRouteResult } from "./router.js";
+import { WebRouter, type WebAttempt, type WebPaidAttempt } from "./router.js";
 import {
   WEB_PROVIDER_IDS, WebToolError,
   type WebCapability, type WebInput, type WebOutput, type WebPage, type WebProviderId,
@@ -51,7 +51,9 @@ export interface WebServiceDeps {
 /** Whole-call deadlines (failovers included); crawl uses the request's own timeout. */
 const CALL_DEADLINE_MS: Record<Exclude<WebCapability, "crawl">, number> = { search: 30_000, fetch: 60_000, map: 60_000 };
 /** Chat tool results go to a hosted model; keep each page small. */
-const CHAT_PAGE_CHARACTERS = 6_000;
+const CHAT_PAGE_CHARACTERS = 10_000;
+/** Appended to a page cut for chat. Worded to pass the prompt-injection screen (no fetch/URL instructions). */
+export const CHAT_SHORTENED_NOTE = "[Page shortened for chat. The remaining text is not available in this conversation; search for the specific section instead.]";
 
 function isProviderId(value: string): value is WebProviderId {
   return (WEB_PROVIDER_IDS as readonly string[]).includes(value);
@@ -74,6 +76,9 @@ export function createWebRouter(config: WebConfig, fetchImpl?: typeof fetch): We
       map: ids(config.perCapability.map), crawl: ids(config.perCapability.crawl),
     },
     maxAttempts: config.maxAttempts,
+    maxCostRatio: config.maxCostRatio,
+    transientRetries: config.transientRetries,
+    disabledOptions: config.disabledOptions,
     fetch: fetchImpl,
   });
 }
@@ -170,7 +175,7 @@ function admitOrgCall(orgKey: string, now: number, perMinute: number): number | 
   return null;
 }
 
-type PaidAttempt = WebRouteResult<WebCapability>["paid"][number];
+type PaidAttempt = WebPaidAttempt;
 
 /**
  * Provider cost is our cost, never customer spend: written like priced AI
@@ -188,8 +193,10 @@ async function recordProviderCosts(d: WebServiceDeps, ctx: WebCallContext, capab
       amount: spent.units?.amount ?? 1, unit: spent.units?.unit ?? "request", costCents: 0,
       metadata: {
         providerCostCents: cents(spent.costUsd), billable: false, costRole: "provider",
+        // Per-option cost tracking: which render level was paid for, and at what tier.
+        option: spent.option, tier: spent.tier, optionKey: `${spent.provider}.${spent.option}`,
         capability, surface: ctx.surface, callId, costSource: spent.costSource, served: spent.provider === served,
-        attempts: attempts.map((attempt) => ({ provider: attempt.provider, outcome: attempt.outcome, runtimeMs: attempt.runtimeMs })),
+        attempts: attempts.map((attempt) => ({ provider: attempt.provider, option: attempt.option, tier: attempt.tier, outcome: attempt.outcome, runtimeMs: attempt.runtimeMs })),
       },
     },
   }).catch((error) => console.error(`[web] cost record failed call=${callId}: ${error instanceof Error ? error.message : String(error)}`))));
@@ -239,8 +246,10 @@ function resultCount<C extends WebCapability>(capability: C, output: WebOutput<C
 
 /** Web text is untrusted: instruction-like lines are suppressed before a model reads it. */
 function forChat(page: WebPage): WebPage {
+  // The page text is screened first and our note appended after, so the screen never removes the note.
+  // Saying plainly that the rest is unavailable matters: a bare "[truncated]" made the model refetch the page.
   const clean = (text: string | undefined, max: number) => text === undefined ? undefined
-    : reviewUntrustedEvidenceText(text.length > max ? `${text.slice(0, max)}\n\n[truncated]` : text).text;
+    : text.length > max ? `${reviewUntrustedEvidenceText(text.slice(0, max)).text}\n\n${CHAT_SHORTENED_NOTE}` : reviewUntrustedEvidenceText(text).text;
   return { ...page, title: clean(page.title, 300), snippet: clean(page.snippet, 1_000), markdown: clean(page.markdown, CHAT_PAGE_CHARACTERS) };
 }
 
@@ -325,8 +334,11 @@ export async function runWebCapability<C extends WebCapability>(
         attempts = routed.attempts;
         output = dedupe(capability, output);
         const costCents = cents(routed.paid.reduce((sum, item) => sum + item.costUsd, 0));
-        Object.assign(fields, { "docslurp.web.provider": provider, "docslurp.web.cost_cents": costCents,
-          "docslurp.web.cost_source": routed.result.costSource, "docslurp.web.attempts": attempts.length });
+        Object.assign(fields, { "docslurp.web.provider": provider, "docslurp.web.option": routed.option, "docslurp.web.cost_cents": costCents,
+          "docslurp.web.cost_source": routed.result.costSource, "docslurp.web.attempts": attempts.length,
+          "docslurp.web.options_paid": routed.paid.map((item) => `${item.provider}.${item.option}`).join(","),
+          "docslurp.web.max_tier": Math.max(...routed.paid.map((item) => item.tier), 0),
+          ...(routed.priceBlocked.length ? { "docslurp.web.price_blocked": routed.priceBlocked.join(",") } : {}) });
         // Provider cost is our cost: internal, non-debiting events, one per paid attempt. The model
         // column names only the capability, since run cost breakdowns show models to customers.
         await recordProviderCosts(d, ctx, capability, callId, routed.paid, attempts, provider);
@@ -371,6 +383,6 @@ export async function runWebCapability<C extends WebCapability>(
     span.set({ ...fields, "docslurp.web.outcome": outcome, "docslurp.web.runtime_ms": runtimeMs });
     span.end(outcome === "ok" ? undefined : outcome);
     // Internal log line (SigNoz): provider named here only.
-    console.log(`[web] call capability=${capability} surface=${ctx.surface} outcome=${outcome} provider=${fields["docslurp.web.provider"] ?? "-"} cache=${fields["docslurp.web.cache_hit"] ?? false} results=${fields["docslurp.web.result_count"] ?? 0} cost_cents=${fields["docslurp.web.cost_cents"] ?? 0} credits=${fields["docslurp.web.credits"] ?? 0} attempts=${fields["docslurp.web.attempts"] ?? 0} ms=${runtimeMs} call=${callId} org=${ctx.orgId ?? "-"} workspace=${ctx.workspaceId}`);
+    console.log(`[web] call capability=${capability} surface=${ctx.surface} outcome=${outcome} provider=${fields["docslurp.web.provider"] ?? "-"} option=${fields["docslurp.web.option"] ?? "-"} paid=${fields["docslurp.web.options_paid"] ?? "-"} blocked=${fields["docslurp.web.price_blocked"] ?? "-"} cache=${fields["docslurp.web.cache_hit"] ?? false} results=${fields["docslurp.web.result_count"] ?? 0} cost_cents=${fields["docslurp.web.cost_cents"] ?? 0} credits=${fields["docslurp.web.credits"] ?? 0} attempts=${fields["docslurp.web.attempts"] ?? 0} ms=${runtimeMs} call=${callId} org=${ctx.orgId ?? "-"} workspace=${ctx.workspaceId}`);
   }
 }

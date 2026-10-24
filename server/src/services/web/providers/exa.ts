@@ -1,5 +1,5 @@
-import type { ProviderResult, WebProviderAdapter, WebRecency } from "../types.js";
-import { clip, num, page, providerJson, str } from "./http.js";
+import type { ProviderCallContext, ProviderResult, WebProviderAdapter, WebRecency } from "../types.js";
+import { clip, num, page, providerJson, str, targetStatusReason } from "./http.js";
 
 const BASE = "https://api.exa.ai";
 // Price sheet (USD), used for routing and when costDollars is missing.
@@ -26,6 +26,31 @@ export function createExaAdapter(): WebProviderAdapter {
   // Snippet searches request highlights, which measured at no extra cost (2026-10-23); text adds per page.
   const searchEstimate = (deep: boolean, includeContent: boolean, limit: number) =>
     (deep ? SEARCH_AUTO : SEARCH_LITE) + (includeContent ? limit * CONTENT_PER_PAGE : 0);
+
+  /** Per-URL errors arrive on HTTP 200 as statuses[].error.tag; new tags may appear, so unknown ones are "unreadable". */
+  function reasonForTag(tag: unknown): string {
+    const value = typeof tag === "string" ? tag : "";
+    const http = /^CRAWL_HTTP_(\d{3})$/.exec(value);
+    if (http) return targetStatusReason(Number(http[1])) ?? "unreadable";
+    if (/TIMEOUT/.test(value)) return "timeout";
+    return "unreadable";
+  }
+
+  async function contents(input: { urls: string[]; maxCharacters: number }, ctx: ProviderCallContext, mode: "cached" | "live") {
+    const body = await providerJson<ExaCost & { results?: Array<Record<string, unknown>>; statuses?: Array<Record<string, unknown>> }>(
+      "exa", ctx, `${BASE}/contents`, {
+        headers: headers(ctx.apiKey),
+        body: { urls: input.urls, text: { maxCharacters: input.maxCharacters }, ...(mode === "live" ? { maxAgeHours: 0, livecrawlTimeout: 30_000 } : {}) },
+      });
+    const pages = (body.results ?? []).flatMap((item) => {
+      const url = str(item.url);
+      const markdown = clip(item.text, input.maxCharacters);
+      return url && markdown ? [page({ url, title: str(item.title), publishedAt: str(item.publishedDate), markdown })] : [];
+    });
+    const failed = (body.statuses ?? []).flatMap((status) => status.status === "error" && str(status.id)
+      ? [{ url: str(status.id)!, reason: reasonForTag((status.error as { tag?: unknown } | undefined)?.tag) }] : []);
+    return cost({ pages, failed }, body, pages.length * CONTENT_PER_PAGE);
+  }
 
   return {
     id: "exa",
@@ -57,22 +82,14 @@ export function createExaAdapter(): WebProviderAdapter {
         },
       },
       fetch: {
+        // `cached` reads Exa's index copy; `live` forces a fresh crawl (no documented surcharge).
+        optionId: "cached",
+        tier: 0,
         estimateUsd: (input) => input.urls.length * CONTENT_PER_PAGE,
-        run: async (input, ctx) => {
-          const body = await providerJson<ExaCost & { results?: Array<Record<string, unknown>>; statuses?: Array<Record<string, unknown>> }>(
-            "exa", ctx, `${BASE}/contents`, {
-              headers: headers(ctx.apiKey),
-              body: { urls: input.urls, text: { maxCharacters: input.maxCharacters }, ...(input.depth === "deep" ? { maxAgeHours: 0 } : {}) },
-            });
-          const pages = (body.results ?? []).flatMap((item) => {
-            const url = str(item.url);
-            const markdown = clip(item.text, input.maxCharacters);
-            return url && markdown ? [page({ url, title: str(item.title), publishedAt: str(item.publishedDate), markdown })] : [];
-          });
-          const failed = (body.statuses ?? []).flatMap((status) => status.status === "error" && str(status.id)
-            ? [{ url: str(status.id)!, reason: "unreadable" }] : []);
-          return cost({ pages, failed }, body, pages.length * CONTENT_PER_PAGE);
-        },
+        run: (input, ctx) => contents(input, ctx, "cached"),
+        variants: [
+          { id: "live", tier: 2, estimateUsd: (input) => input.urls.length * CONTENT_PER_PAGE, run: (input, ctx) => contents(input, ctx, "live") },
+        ],
       },
     },
   };
