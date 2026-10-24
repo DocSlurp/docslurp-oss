@@ -292,6 +292,17 @@ async function findDedupCandidate(
         d.workspace_id = ${args.workspaceId}
         or d.org_id = ${args.orgId}
       )
+      -- A copy in another workspace than the vector owner is indexed from the
+      -- owner's embedding artifact. Pages materialized on demand (deferred
+      -- indexing) have vectors outside that artifact, so such a source is
+      -- only reused inside its own workspace.
+      and (
+        coalesce(owner.workspace_id, d.workspace_id) = ${args.workspaceId}
+        or not exists (
+          select 1 from document_chunks deferred
+          where deferred.document_id = d.id and deferred.id like '%:p%:c%'
+        )
+      )
     order by
       case when d.workspace_id = ${args.workspaceId} then 0 else 1 end,
       d.updated_at desc,
@@ -390,8 +401,8 @@ async function seedDeduplicatedDocument(
       parent_page_id
     )
     select
-      -- The source's id with this document as prefix (<document>-<index>), so
-      -- the worker can rebind the source's embedding artifact to these chunks.
+      -- The source's id with this document as prefix (<document>-<index>). The
+      -- worker rebinds the source's embedding artifact to these chunks by index.
       case when starts_with(chunks.id, ${args.sourceDocumentId}::text)
         then ${args.targetDocumentId}::text || substr(chunks.id, length(${args.sourceDocumentId}::text) + 1)
         else gen_random_uuid()::text

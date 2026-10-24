@@ -82,22 +82,24 @@ export function vectorBackendCollectionName(args: {
  * so search can cite a hit without reading document_chunks: the same heading path, page, token
  * estimate and metadata the embed stage stored there.
  *
- * A dedup copy in another workspace than its source indexes the source's artifact: its rows are
- * rebound to the copy (run creation gives the copy's chunks the source's ids with the copy's
- * document id as prefix), so the copy owns them in its own workspace's database.
+ * A document whose embed checkpoint names another document's artifact (a dedup copy in another
+ * workspace than its source, a partial reprocess reusing embed) is rebound to its own chunks:
+ * `chunkIds` maps chunk index to this document's `document_chunks` id (chunks without one are
+ * skipped), so the rows are this document's own, in its own workspace's database.
  */
 export function buildVectorRecords(
   artifact: Pick<EmbeddingArtifact, "chunks"> & { documentId?: string },
   documentId: string,
   metadata: { sourceKey?: unknown; filename?: unknown },
   runId?: string | null,
+  chunkIds?: ReadonlyMap<number, string>,
 ): VectorBackendRecord[] {
-  const source = artifact.documentId && artifact.documentId !== documentId ? artifact.documentId : null;
-  const chunkId = (id: string) => (source && id.startsWith(source) ? `${documentId}${id.slice(source.length)}` : id);
+  const foreign = isForeignArtifact(artifact, documentId);
   const chunkMetadata = (value: Record<string, unknown> | undefined) =>
-    source && value ? { ...value, documentId } : value;
-  return artifact.chunks.map<VectorBackendRecord>((chunk) => ({
-    id: chunkId(chunk.id),
+    foreign && value ? { ...value, documentId } : value;
+  const chunks = foreign && chunkIds ? artifact.chunks.filter((chunk) => chunkIds.has(chunk.index)) : artifact.chunks;
+  return chunks.map<VectorBackendRecord>((chunk) => ({
+    id: foreign && chunkIds ? chunkIds.get(chunk.index)! : chunk.id,
     documentId,
     chunkIndex: chunk.index,
     text: chunk.text,
@@ -121,6 +123,14 @@ export function buildVectorRecords(
   }));
 }
 
+/** The artifact was embedded for another document, so its chunk ids are not this document's. */
+export function isForeignArtifact(artifact: { documentId?: string }, documentId: string): boolean {
+  return Boolean(artifact.documentId) && artifact.documentId !== documentId;
+}
+
+/** This document's chunk ids by chunk index, for rebinding a foreign artifact. */
+export type ChunkIdLoader = (documentId: string) => Promise<ReadonlyMap<number, string>>;
+
 export class IndexStage implements Stage {
   readonly name = "index";
   private readonly lance: LanceDbMaintenanceSettings;
@@ -131,14 +141,34 @@ export class IndexStage implements Stage {
     private readonly runner: CommandRunner,
     private readonly storage: ArtifactStore,
     private readonly config: Config,
-    private readonly deleteVectors: (uri: string, table: string, ids: readonly string[]) => Promise<void> = deleteLanceDbRecords
+    private readonly deleteVectors: (uri: string, table: string, ids: readonly string[]) => Promise<void> = deleteLanceDbRecords,
+    loadChunkIds?: ChunkIdLoader,
   ) {
+    this.loadChunkIds = loadChunkIds ?? (async (documentId) => {
+      const rows = await this.sql()<{ chunk_index: number; id: string }[]>`
+        select chunk_index, id from document_chunks where document_id = ${documentId}
+      `;
+      return new Map(rows.map((row) => [row.chunk_index, row.id]));
+    });
     this.lance = lanceDbMaintenanceSettings(config.lancedb?.params ?? new URLSearchParams());
   }
 
-  /** One queue (and a small pooled client) per worker process, created on first LanceDB write. */
-  private writeQueue(): LanceDbWriteQueue {
-    if (this.queue) return this.queue;
+  private readonly loadChunkIds: ChunkIdLoader;
+
+  /** Records for one document's artifact, rebound to its own chunk ids when the artifact is another document's. */
+  private async documentRecords(
+    artifact: EmbeddingArtifact,
+    documentId: string,
+    metadata: { sourceKey?: unknown; filename?: unknown },
+    runId: string | null,
+  ): Promise<VectorBackendRecord[]> {
+    const chunkIds = isForeignArtifact(artifact, documentId) ? await this.loadChunkIds(documentId) : undefined;
+    return buildVectorRecords(artifact, documentId, metadata, runId, chunkIds);
+  }
+
+  /** A small pooled client per worker process, created on first use. */
+  private sql(): ReturnType<typeof postgres> {
+    if (this.queueSql) return this.queueSql;
     this.queueSql = instrumentPostgres(postgres(this.config.databaseUrl, {
       max: Math.max(1, Number.parseInt(process.env.WORKER_VECTOR_QUEUE_DB_POOL_MAX ?? "2", 10) || 2),
       // Transaction-mode poolers (Neon pooler, PgBouncer) cannot route prepared statements.
@@ -146,11 +176,17 @@ export class IndexStage implements Stage {
       idle_timeout: 20,
       connect_timeout: 10,
     }), this.config.databaseUrl, { onStatement: dbTraceStatementHook() });
+    return this.queueSql;
+  }
+
+  /** One queue per worker process, created on first LanceDB write. */
+  private writeQueue(): LanceDbWriteQueue {
+    if (this.queue) return this.queue;
     this.queue = new LanceDbWriteQueue({
-      sql: this.queueSql,
+      sql: this.sql(),
       loadRecords: async (row) => {
         const artifact = await this.storage.getJson<EmbeddingArtifact>(row.artifactKey, { streamJson: true });
-        return buildVectorRecords(artifact, row.documentId, row.metadata, row.runId);
+        return await this.documentRecords(artifact, row.documentId, row.metadata, row.runId);
       },
       maintenance: {
         enabled: this.lance.enabled,
@@ -196,11 +232,12 @@ export class IndexStage implements Stage {
           const embeddingKey = (embedUri ? keyFromStorageUri(embedUri, this.storage.bucket) : null)
             ?? `${document.userId}/${state.run.id}/embeddings/${document.id}.json`;
           const artifact = await this.storage.getJson<EmbeddingArtifact>(embeddingKey, { streamJson: true });
-          const records = buildVectorRecords(artifact, document.id, {
+          const records = await this.documentRecords(artifact, document.id, {
             sourceKey: document.sourceKey,
             filename: document.filename
           }, state.run.id);
-          const recordPages = artifact.chunks.map((chunk) => chunkFirstPage(chunk));
+          const pageByChunk = new Map(artifact.chunks.map((chunk) => [chunk.index, chunkFirstPage(chunk)]));
+          const recordPages = records.map((record) => pageByChunk.get(record.chunkIndex) ?? null);
 
           const manifests: Array<Record<string, unknown>> = [];
           const CONCURRENCY = Math.min(backends.length, 4);

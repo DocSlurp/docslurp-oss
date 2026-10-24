@@ -96,7 +96,10 @@ describe("IndexStage per-workspace databases", () => {
   it("writes a document's own rows into its run's workspace database only", async () => {
     const objects = new Map<string, unknown>([["u/run-a/embeddings/src.json", embeddingArtifact("src")]]);
     const state = runState({ runId: "run-a", workspaceId: "ws-a", documentId: "src" });
-    await new IndexStage({} as CommandRunner, memoryStorage(objects), config).run(state);
+    const loadChunkIds = vi.fn(async () => new Map<number, string>());
+    await new IndexStage({} as CommandRunner, memoryStorage(objects), config, undefined, loadChunkIds).run(state);
+    // Its own artifact keeps its ids: no chunk lookup.
+    expect(loadChunkIds).not.toHaveBeenCalled();
 
     expect(await rows("ws-a")).toEqual([
       { id: "src-000", documentId: "src", runId: "run-a" },
@@ -114,11 +117,14 @@ describe("IndexStage per-workspace databases", () => {
       runId: "run-b", documentId: "copy", stageName: "embed", status: "completed", attempts: 1,
       artifactUri: "s3://b/u/run-a/embeddings/src.json",
     } as Parameters<WorkflowState["setDocumentStage"]>[0]);
-    await new IndexStage({} as CommandRunner, memoryStorage(objects), config).run(state);
+    // The copy's own chunk ids, which need not share the source's (partial reprocesses use random ids).
+    const loadChunkIds = vi.fn(async () => new Map([[0, "copy-000"], [1, "c1-uuid"]]));
+    await new IndexStage({} as CommandRunner, memoryStorage(objects), config, undefined, loadChunkIds).run(state);
 
+    expect(loadChunkIds).toHaveBeenCalledWith("copy");
     expect(await rows("ws-b")).toEqual([
+      { id: "c1-uuid", documentId: "copy", runId: "run-b" },
       { id: "copy-000", documentId: "copy", runId: "run-b" },
-      { id: "copy-001", documentId: "copy", runId: "run-b" },
     ]);
     expect(await rows("ws-a")).toEqual([]);
   });
@@ -127,7 +133,10 @@ describe("IndexStage per-workspace databases", () => {
     const objects = new Map<string, unknown>([["u/run-a/embeddings/src.json", embeddingArtifact("src")]]);
     const state = runState({ runId: "run-a", workspaceId: "ws-a", documentId: "src" });
     state.run.workspaceId = undefined;
-    await new IndexStage({} as CommandRunner, memoryStorage(objects), config).run(state).catch(() => undefined);
+    const outcome = await new IndexStage({} as CommandRunner, memoryStorage(objects), config).run(state).then(() => null, (error: Error) => error);
+    // Either the stage throws or the document stage records the failure; both name the missing tenant id.
+    const failure = outcome?.message ?? String(state.documentStage("src", "index")?.error ?? "");
+    expect(failure).toMatch(/requires the run's orgId and workspaceId/);
     expect(state.vectorIndexes).toEqual([]);
     expect(await rows("ws-a")).toEqual([]);
   });

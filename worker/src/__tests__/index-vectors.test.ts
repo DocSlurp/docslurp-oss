@@ -64,11 +64,13 @@ describe("buildVectorRecords", () => {
     expect(records[0]).toMatchObject({ id: "doc-000", documentId: "doc", runId: "run-1" });
   });
 
-  it("rebinds a dedup source's artifact to the copy that indexes it in another workspace", () => {
-    const records = buildVectorRecords({ documentId: "src", chunks: [chunk("src", 0), chunk("src", 7)] }, "copy", { filename: "c.pdf" }, "run-copy");
-    expect(records.map((record) => record.id)).toEqual(["copy-000", "copy-007"]);
-    expect(records.every((record) => record.documentId === "copy" && record.runId === "run-copy")).toBe(true);
+  it("rebinds another document's artifact to this document's own chunk ids by chunk index", () => {
+    // A partial reprocess or older copy has random chunk ids; index 7 has no chunk here.
+    const chunkIds = new Map([[0, "9b2f-uuid"]]);
+    const records = buildVectorRecords({ documentId: "src", chunks: [chunk("src", 0), chunk("src", 7)] }, "copy", { filename: "c.pdf" }, "run-copy", chunkIds);
+    expect(records.map((record) => record.id)).toEqual(["9b2f-uuid"]);
+    expect(records[0]).toMatchObject({ documentId: "copy", runId: "run-copy", chunkIndex: 0 });
     expect(records[0]!.metadata).toMatchObject({ documentId: "copy", filename: "c.pdf" });
-    expect(decodeLanceChunkHydration(records[1]!.hydration)).toMatchObject({ runId: "run-copy", metadata: { documentId: "copy", locator: "x" } });
+    expect(decodeLanceChunkHydration(records[0]!.hydration)).toMatchObject({ runId: "run-copy", metadata: { documentId: "copy", locator: "x" } });
   });
 });

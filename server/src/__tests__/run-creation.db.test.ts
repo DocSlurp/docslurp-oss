@@ -331,6 +331,15 @@ describe("Dedup copies and per-workspace LanceDB databases", () => {
     expect(otherWorkspace).toMatchObject({ dedupedFromDocumentId: source, dedupScope: "org" });
     // No index checkpoint or vector index: the worker writes the copy's own rows into w-dedup's database.
     expect(await seeded(otherWorkspace.id)).toEqual({ stages: ["embed"], chunks: [`${otherWorkspace.id}-000`], vectorIndexes: 0 });
+
+    // Pages materialized on demand have vectors outside the embed artifact: no cross-workspace reuse.
+    await sql`insert into document_chunks (id, document_id, run_id, user_id, chunk_index, text)
+      values (${`${source}:p2:c0`}, ${source}, ${first.run.id}, 'u', 1, 'page two')`;
+    await sql`delete from documents where id in (${sameWorkspace.id}, ${otherWorkspace.id})`;
+    const elsewhere = (await runCreation.create({ ...input, workspaceId: "w-dedup", sources: { kind: "files", files: [{ ...files[1]!, filename: "again.pdf" }] } })).documents[0]!;
+    expect(elsewhere).toMatchObject({ dedupedFromDocumentId: null, dedupScope: null });
+    const inside = (await runCreation.create({ ...input, sources: { kind: "files", files: [{ ...files[1]!, filename: "again.pdf" }] } })).documents[0]!;
+    expect(inside).toMatchObject({ dedupedFromDocumentId: source, dedupScope: "workspace" });
   });
 });
 
