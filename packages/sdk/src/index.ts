@@ -413,7 +413,7 @@ export type ChatInput = {
    * refused with HTTP 400 `model_not_allowed`, never replaced by the default.
    */
   model?: string;
-  /** Search-agent budgets for this turn; non-admin callers can only lower the defaults. */
+  /** Search-agent budgets and modes for this turn (`chat()` only; `chatStream` ignores them); non-admin callers can only lower the budgets. */
   agent?: {
     /** Model steps, 1-12 (default 8). The last step always answers. */
     maxSteps?: number;

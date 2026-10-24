@@ -190,11 +190,22 @@ const CHAT_WEB_TOOLS = new Set(["webSearch", "webFetch"]);
  */
 const NON_BLOCKING_TOOLS = new Set(["proposeWorkspaceSettings"]);
 
+/**
+ * Read-only checks suggestions mode adds to a turn. Their refusals (tool-call
+ * budget, deadline reserve) do not block in that mode: the user asked a document
+ * question, and a skipped diagnosis must not cost them the answer. Their real
+ * failures (an error response, a timeout) still block, as for any read.
+ */
+const SUGGESTIONS_DIAGNOSTIC_TOOLS = new Set(["getUploadStatus", "getWorkspaceSettings"]);
+const REFUSAL_CODES = new Set(["tool_call_limit", "deadline"]);
+
 /** Result for a failed non-blocking tool: the answer stands; the extra is reported as unavailable. */
-export function nonBlockingToolFailure(code: string) {
+export function nonBlockingToolFailure(code: string, toolId = "proposeWorkspaceSettings") {
   return {
     ok: false, code, blocked: false,
-    error: "The settings proposal could not be prepared. Keep your answer, say the suggested change could not be prepared, and do not claim it is ready to apply or retry it.",
+    error: toolId === "proposeWorkspaceSettings"
+      ? "The settings proposal could not be prepared. Keep your answer, say the suggested change could not be prepared, and do not claim it is ready to apply or retry it."
+      : "This check did not run: the turn is out of tool calls or time. Answer from the evidence already gathered, say the check was skipped, and do not claim its result.",
   } as const;
 }
 
@@ -257,6 +268,8 @@ export function createChatMcpTools(args: {
   webTools?: boolean;
   /** The user's own messages, whose URLs webFetch may read. */
   userText?: string[];
+  /** Suggestions mode: budget and deadline refusals of its diagnostic reads do not block the turn. */
+  suggestions?: boolean;
 }) {
   let failure: ChatToolBlockedError | undefined;
   const blocked = new AbortController();
@@ -272,7 +285,8 @@ export function createChatMcpTools(args: {
   const searchCalls: ChatSearchCallStats[] = [];
   const maxToolCalls = args.maxToolCalls ?? CHAT_AGENT_LIMIT_DEFAULTS.maxToolCalls;
   const searchConcurrency = args.searchConcurrency ?? CHAT_AGENT_LIMIT_DEFAULTS.searchConcurrency;
-  const counters = { executed: 0, refused: 0, byTool: {} as Record<string, number>, toolCostCents: 0, timedOut: 0, deadlineRefused: 0 };
+  // `refused`: blocking budget refusals (a `tool_call_limit` stop). `softRefused`: refusals of optional calls, which still answer normally.
+  const counters = { executed: 0, refused: 0, softRefused: 0, byTool: {} as Record<string, number>, toolCostCents: 0, timedOut: 0, deadlineRefused: 0 };
   const details = new Map<string, ChatToolCallDetail>();
   let calls = 0;
   const tools: ToolSet = {};
@@ -330,12 +344,14 @@ export function createChatMcpTools(args: {
           "docslurp.workspaceId": args.workspaceId,
         }, { parent: args.traceParent });
         const started = Date.now();
-        const fail = (code: string) => NON_BLOCKING_TOOLS.has(definition.id) ? nonBlockingToolFailure(code) : block(definition.id, code);
+        const nonBlocking = (code: string) => NON_BLOCKING_TOOLS.has(definition.id)
+          || (args.suggestions === true && SUGGESTIONS_DIAGNOSTIC_TOOLS.has(definition.id) && REFUSAL_CODES.has(code));
+        const fail = (code: string) => nonBlocking(code) ? nonBlockingToolFailure(code, definition.id) : block(definition.id, code);
         const detail = (fields: Omit<ChatToolCallDetail, "id" | "name" | "runtimeMs">) => {
           details.set(toolCallId, { id: toolCallId, name: definition.id, runtimeMs: Date.now() - started, ...fields });
         };
         if (++calls > maxToolCalls) {
-          counters.refused++;
+          if (nonBlocking("tool_call_limit")) counters.softRefused++; else counters.refused++;
           detail({ status: "error", errorCode: "tool_call_limit" });
           span.set({ "docslurp.chat.tool_call_refused": true });
           span.end("tool_call_limit");
@@ -427,7 +443,8 @@ export function createChatMcpTools(args: {
           const response = await raceAbort(withSearchSignal(toolSignal, () => runInChatAgentContext(args.chatSessionId ?? null, dispatch, toolSignal)), toolSignal);
           const result: unknown = await raceAbort(response.json() as Promise<unknown>, toolSignal);
           throwIfBlocked();
-          const ok = response.ok && !resultFailed(result);
+          let ok = response.ok && !resultFailed(result);
+          let failureCode: string | undefined;
           const returned: SearchResult[] = [];
           if (ok) {
             collectEvidence(result, returned);
@@ -445,6 +462,8 @@ export function createChatMcpTools(args: {
           if (ok && definition.id === "proposeWorkspaceSettings") {
             const parsed = workspaceSettingsProposalSchema.safeParse((result as { settingsProposal?: unknown })?.settingsProposal);
             if (parsed.success) settingsProposal = parsed.data;
+            // No card can render, so the model must not say a proposal is ready (or see a raw token).
+            else { ok = false; failureCode = "invalid_proposal"; }
           }
           update(ok ? "success" : "error");
           const pages = evidencePages(returned);
@@ -454,7 +473,7 @@ export function createChatMcpTools(args: {
           detail({ status: ok ? "success" : "error", ...(queries ? { queries } : {}),
             ...(stats ? { resultCount: stats.resultCount, zeroHit: stats.zeroHit } : {}),
             evidencePages: pages, ...(ok ? { costCents } : {}), ...(settingsProposal ? { settingsProposal } : {}),
-            ...(ok ? {} : { errorCode: responseErrorCode(result, response.status) }) });
+            ...(ok ? {} : { errorCode: failureCode ?? responseErrorCode(result, response.status) }) });
           if (stats) {
             searchCalls.push(stats);
             span.set({
@@ -467,7 +486,7 @@ export function createChatMcpTools(args: {
           }
           span.set({ "docslurp.tool.status_code": response.status });
           span.end(ok ? undefined : `http_${response.status}`);
-          if (!ok) return { ...fail(responseErrorCode(result, response.status)), status: response.status };
+          if (!ok) return { ...fail(failureCode ?? responseErrorCode(result, response.status)), status: response.status };
           // Another concurrent tool may have failed while this one was running.
           throwIfBlocked();
           const modelResult = settingsProposal ? { settingsProposal: { ...settingsProposal, token: undefined } } : result;

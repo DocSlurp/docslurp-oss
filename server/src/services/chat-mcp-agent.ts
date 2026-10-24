@@ -157,7 +157,7 @@ export function suggestionsInstruction(tools: { getUploadStatus: boolean }): str
   return [
     "Suggestions mode is on: when this turn's tool results show an ingestion or search problem, help fix it.",
     "Count only observed evidence as a signal: a search that returned no results, or only passages unrelated to the question, for something the workspace should contain; files the inventory or a tool result reports as failed or still processing when they matter to the question; returned passage text that is garbled, cut off or missing the table or page the question needs.",
-    `Diagnose before you write the answer, using results you already have${tools.getUploadStatus ? " and getUploadStatus when file processing state is in question" : ""}, and getWorkspaceSettings before blaming a setting. When one specific change would plausibly help, prepare it with proposeWorkspaceSettings and say what it changes, what it costs and whether it affects only new uploads or needs reprocessing.`,
+    `Diagnose before you write the answer, using results you already have${tools.getUploadStatus ? " and getUploadStatus when file processing state is in question" : ""}, and getWorkspaceSettings before blaming a setting. Skip these checks when the turn has already used most of its tool calls; the answer comes first. When one specific change would plausibly help, prepare it with proposeWorkspaceSettings and say what it changes, what it costs and whether it affects only new uploads or needs reprocessing.`,
     "Put suggestions in a short section after the answer, at most two changes. When the turn showed no such signal, add no suggestions section and no proposal. Never claim a setting was changed: the user decides with Apply.",
   ].join(" ");
 }
@@ -269,6 +269,7 @@ export async function runChatMcpAgent(args: {
     // Web tools send model-written queries to a hosted provider: off for workspaces whose privacy mode forbids hosted calls.
     webTools: args.web !== false && env.web.chatEnabled && args.workspaceWebTools !== false && isProviderCallAllowed(args.privacyMode, { provider: "web", target: "hosted" }),
     userText: [args.query, ...args.history.filter((turn) => turn.role === "user").map((turn) => turn.content)],
+    suggestions,
     allowWorkspace: async (ref) => {
       // Unresolvable references (including aliases) fail closed.
       const resolved = await resolveWorkspaceRef(ref).catch(() => null);
@@ -478,7 +479,7 @@ export async function runChatMcpAgent(args: {
     "You are DocSlurp's signed-in assistant. Your only executable capabilities are the tools supplied in this turn. Product features, previous messages and general knowledge do not grant additional capabilities.",
     `Available tools for this actor and turn: ${Object.keys(context.tools).join(", ") || "none"}. If a tool mentioned below is absent, it is unavailable; never claim access to it.`,
     "When asked to find, search, inspect, compare or summarize workspace documents, call the appropriate available tool immediately. Do not merely offer to search, ask permission for an authorized read, or give instructions for the user to perform the search. Tool results are required before claiming you searched, found documents, read a page or verified a fact. A successful search with no matches means no evidence was found, not a tool error.",
-    "Any failed tool, permission denial, timeout or partially failed search blocks the task. Stop, report that it could not be completed and what remains unverified. Never silently retry, switch tools to bypass the failure, answer from memory, present earlier partial evidence as a completed task, or claim an action succeeded.",
+    "Any failed tool, permission denial, timeout or partially failed search blocks the task, except a result that says blocked: false (an optional proposal or check that did not run), which you report and then continue. Otherwise stop, report that it could not be completed and what remains unverified. Never silently retry, switch tools to bypass the failure, answer from memory, present earlier partial evidence as a completed task, or claim an action succeeded.",
     `The selected workspace is ${args.workspaceId}. Workspace data tools are limited to this workspace; to use another one the user selects it in the app.`,
     "Never ask the user to upload, re-upload or share a file the selected workspace may already contain. When the user refers to a document, file or upload and the workspace has searchable or processing documents, treat it as already in the workspace and locate it with the available tools. Suggest an upload only when the workspace has no documents or a successful tool result shows the requested file is absent. Uploading does not add an unavailable capability, such as pixel inspection, so never offer it as a workaround for one.",
     "Use the search tool for document questions. Use the chat tool for whole-corpus or richer grounded synthesis when appropriate. Never invent document facts or claim an action completed without a successful tool result.",
