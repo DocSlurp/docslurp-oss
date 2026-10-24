@@ -3,6 +3,23 @@ vi.mock("../telemetry.js", () => ({ emitTelemetryLog: vi.fn() }));
 import { platformVendorScope, vendorBillingReason, VendorBalanceMonitor, vendorBalanceMonitor, VendorErrorFrames } from "../vendor-balance-alerts.js";
 
 describe("vendor billing evidence", () => {
+  it.each(["development", "test", "preview", "staging", undefined])("never sends vendor Telegram outside production (%s)", async (nodeEnv) => {
+    vi.stubEnv("NODE_ENV", nodeEnv);
+    vi.stubEnv("TELEGRAM_BOT_TOKEN", "test-token");
+    vi.stubEnv("TELEGRAM_CHAT_ID", "test-chat");
+    vi.stubEnv("ALERT_TELEGRAM", "on");
+    const transport = vi.fn().mockResolvedValue(new Response('{"ok":true}'));
+    vi.stubGlobal("fetch", transport);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      vendorBalanceMonitor.observe(`nonproduction-${nodeEnv}`, "openai", "chat", 402);
+      await vendorBalanceMonitor.settled();
+      expect(transport).not.toHaveBeenCalled();
+    } finally {
+      warn.mockRestore(); vi.unstubAllGlobals(); vi.unstubAllEnvs();
+    }
+  });
+
   it("distinguishes billing failure from normal rate limits", () => {
     expect(vendorBillingReason(402, "")).toBe("payment_required");
     expect(vendorBillingReason(429, '{"error":{"code":"insufficient_quota"}}')).toBe("billing_quota_exhausted");
@@ -128,6 +145,7 @@ describe("vendor billing evidence", () => {
     expect(oversized.uninspectable).toBe(true);
   });
   it("never leaks token URLs or provider error bodies when actual Telegram transport throws", async () => {
+    vi.stubEnv("NODE_ENV", "production");
     vi.stubEnv("TELEGRAM_BOT_TOKEN", "secret-bot-token");
     vi.stubEnv("TELEGRAM_CHAT_ID", "qa-chat");
     vi.stubEnv("ALERT_TELEGRAM", "on");

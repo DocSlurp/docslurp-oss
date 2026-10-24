@@ -58,6 +58,8 @@ export async function notifySignup({
   name?: string | null;
   useCase?: string | null;
 }): Promise<void> {
+  if (process.env.NODE_ENV !== "production") return;
+
   const lines = [
     `New DocSlurp ${kind} signup`,
     `Environment: ${process.env.NODE_ENV ?? "unknown"}`,
