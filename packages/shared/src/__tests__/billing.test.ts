@@ -25,6 +25,8 @@ import {
   dailyStorageCredits,
   daysInUtcMonth,
   estimateIngest,
+  PIPELINE_PROFILES,
+  PIPELINE_PROFILE_BASIS,
   isUnitChargeEvent,
   mediaRichPages,
   pageCredits,
@@ -274,6 +276,19 @@ describe("ingest estimator", () => {
     );
     expect(fast).toBeLessThanOrEqual(standard!);
     expect(standard).toBeLessThan(deep!);
+  });
+
+  it("keeps profile worker seconds ordered and on the production slot basis", () => {
+    expect(PIPELINE_PROFILE_BASIS).toMatchObject({ slotsPerHost: 2, slotTuner: "resource" });
+    for (const pageClass of ["text", "complex", "scanned"] as const) {
+      const [fast, standard, deep] = (["fast", "standard", "deep"] as const).map((id) => PIPELINE_PROFILES[id].pages[pageClass].workerSeconds);
+      expect(fast, pageClass).toBeLessThanOrEqual(standard!);
+      expect(standard, pageClass).toBeLessThanOrEqual(deep!);
+    }
+    // Measured 2026-10: text pages hold a slot for roughly 0.2-0.4 s, a model-read page for about 4 s.
+    expect(PIPELINE_PROFILES.standard.pages.text.workerSeconds).toBeGreaterThanOrEqual(0.22);
+    expect(PIPELINE_PROFILES.standard.pages.text.workerSeconds).toBeLessThanOrEqual(0.4);
+    expect(PIPELINE_PROFILES.standard.pages.scanned.workerSeconds).toBeGreaterThanOrEqual(4);
   });
 
   it("handles empty input", () => {

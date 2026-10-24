@@ -668,13 +668,68 @@ export type PipelineProfile = {
 
 const KB = 1024;
 
+/**
+ * Basis for the per-page `workerSeconds` below: seconds one worker slot is held
+ * by a page task, on a production worker machine (fly.worker.toml:
+ * shared-cpu-8x / 16 GB, 2 slots per machine, `resource` slot tuner with min 1,
+ * max 2, 5 s ramp). The rate-card slot model (`WORKER_SLOT`, 8 per host) is a
+ * different, billing-side unit and is not changed here.
+ */
+export const PIPELINE_PROFILE_BASIS = {
+  slotsPerHost: 2,
+  slotTuner: "resource",
+  /** Re-measured 2026-10-23/24; see the provenance notes on PIPELINE_PROFILES. */
+  measuredAt: "2026-10-24",
+} as const;
+
+/*
+ * Provenance of `workerSeconds` (re-measured 2026-10-24). Numbers only; no
+ * production identifiers.
+ *
+ * text (fast 0.3 -> 0.2, standard 0.5 -> 0.3), `measured + production`:
+ * - Load test, self-hosted stack, standard profile, 65% text / 35% complex mix,
+ *   10-page synthetic PDFs, local MiniLM or a zero-CPU hosted-embedder stand-in:
+ *   0.22-0.31 busy-s per text page on 1-2 slots, 0.22-0.36 on production-shaped
+ *   2-slot workers (fixed and `resource` tuner), 0.18-0.22 with the hosted
+ *   embedder stand-in on 8-16 slots.
+ * - Production, text-native PDFs with hosted embeddings (fast configuration, no
+ *   page images): whole-worker allocation of 0.07 slot-s per page on 4,000-page
+ *   files and 0.27 slot-s per page on ~330-page files. These include idle slot
+ *   time, so they bound busy time from above.
+ * - Not representative, so excluded: oversubscribed runs (16+ slots on 16 CPUs
+ *   with local ONNX embedding: 1.4-3 s per page because of intra-op thread spin)
+ *   and a CPU-starved 0.5-vCPU arm (3.4 s). Production pins one embed thread.
+ * - Standard 0.3 is the top of the production-shaped range rounded up; fast 0.2
+ *   drops the page-image stage and sits at the top of the hosted-embedder range.
+ *
+ * complex (unchanged: fast 0.8, standard 4, deep 6), `unmeasured`:
+ * - The load test measured 0.14-0.28 s on synthetic table pages through the
+ *   kreuzberg extraction path without any model call, not the native PDF engine
+ *   production uses, and with vision off. That is a floor for layout-aware
+ *   extraction, not a measurement of it. Production shows a model-read page
+ *   (`worker.vision` spans) at p50 4.1 s, p95 32 s, which is the order of
+ *   magnitude the standard and deep values assume. Revisit with a real-corpus
+ *   run on the native engine.
+ *
+ * scanned (standard 1.5 -> 4.2; fast 3 and deep 6 unchanged), `production`:
+ * - Not exercised by the load test. Production `worker.vision` spans hold a
+ *   slot for p50 4.1 s per page, and an earlier vision load test measured 4.28
+ *   worker-s per page. A 1.5 s standard scan was below a single vision call and
+ *   below the fast profile; 4.2 restores fast <= standard <= deep.
+ *
+ * deep text (0.8 unchanged): summaries and graph enrichment hold slots while
+ * waiting on models (graph-enrich is about a fifth of production stage-seconds)
+ * and were not part of the load test.
+ *
+ * Byte columns (sourceBytes, artifactBytes, indexBytes) are unchanged.
+ */
 export const PIPELINE_PROFILES: Record<PipelineProfileId, PipelineProfile> = {
   fast: {
     id: "fast",
     label: "Fast",
     description: "Text layer and OCR where needed, chunk, embed. Best for born-digital prose.",
     pages: {
-      text: { workerSeconds: 0.3, mode: "fast", sourceBytes: 30 * KB, artifactBytes: 24 * KB, indexBytes: 20 * KB },
+      text: { workerSeconds: 0.2, mode: "fast", sourceBytes: 30 * KB, artifactBytes: 24 * KB, indexBytes: 20 * KB },
       complex: { workerSeconds: 0.8, mode: "fast", sourceBytes: 120 * KB, artifactBytes: 40 * KB, indexBytes: 24 * KB },
       scanned: { workerSeconds: 3, mode: "rich", sourceBytes: 250 * KB, artifactBytes: 40 * KB, indexBytes: 20 * KB },
     },
@@ -684,9 +739,9 @@ export const PIPELINE_PROFILES: Record<PipelineProfileId, PipelineProfile> = {
     label: "Standard",
     description: "Layout-aware tables and figures, model reading where pages need it, page images.",
     pages: {
-      text: { workerSeconds: 0.5, mode: "fast", sourceBytes: 30 * KB, artifactBytes: 64 * KB, indexBytes: 25 * KB },
+      text: { workerSeconds: 0.3, mode: "fast", sourceBytes: 30 * KB, artifactBytes: 64 * KB, indexBytes: 25 * KB },
       complex: { workerSeconds: 4, mode: "fast", sourceBytes: 120 * KB, artifactBytes: 160 * KB, indexBytes: 30 * KB },
-      scanned: { workerSeconds: 1.5, mode: "rich", sourceBytes: 250 * KB, artifactBytes: 160 * KB, indexBytes: 25 * KB },
+      scanned: { workerSeconds: 4.2, mode: "rich", sourceBytes: 250 * KB, artifactBytes: 160 * KB, indexBytes: 25 * KB },
     },
   },
   deep: {
