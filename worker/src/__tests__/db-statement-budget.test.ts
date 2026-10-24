@@ -12,7 +12,7 @@ import { createStageExecution } from "../pipeline/stage-execution.js";
 import { withWorkerSlot } from "../temporal/activities.js";
 import { createMigratedDatabase } from "../test/migrated-db.js";
 import { serveOnRandomPort } from "../test/migrated-postgres.js";
-import { startPgWireProxy } from "../../scripts/pg-wire-proxy.mjs";
+import { startPgWireProxy } from "../test/pg-wire-proxy.mjs";
 
 /**
  * Counts the Postgres transactions and statements one document run costs on

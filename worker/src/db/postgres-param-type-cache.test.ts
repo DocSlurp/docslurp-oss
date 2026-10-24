@@ -3,7 +3,7 @@ import type { PGLiteSocketServer } from "@electric-sql/pglite-socket";
 import postgres from "postgres";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
-import { startPgWireProxy } from "../../scripts/pg-wire-proxy.mjs";
+import { startPgWireProxy } from "../test/pg-wire-proxy.mjs";
 import { createMigratedDatabase } from "../test/migrated-db.js";
 import { serveOnRandomPort } from "../test/migrated-postgres.js";
 

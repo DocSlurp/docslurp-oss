@@ -34,7 +34,7 @@ round trips, not CPU, set the latency of small runs.
 
 - `DOCSLURP_DB_TRACE_FILE=/path/trace.jsonl` appends one JSON line per statement the worker sends,
   labelled with its activity and stage.
-- `node worker/scripts/pg-wire-proxy.mjs <listen> <host> <port> [oneWayDelayMs]` sits in front of
+- `node worker/src/test/pg-wire-proxy.mjs <listen> <host> <port> [oneWayDelayMs]` sits in front of
   Postgres, counts statements and serial round trips ("flights") on the wire and can add a fixed
   delay (15 ms each way is about 30 ms RTT). `GET :<listen+1000>/stats`, `POST /reset`.
 - `worker/src/__tests__/db-statement-budget.test.ts` runs a 10-page document through the stage
