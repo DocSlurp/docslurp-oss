@@ -1,7 +1,7 @@
 {
   "name": "docslurp",
   "displayName": "DocSlurp",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Upload PDFs, Office files, EPUBs, images, audio and video to DocSlurp, then search them with page citations or get cited answers from your workspace.",
   "author": {
     "name": "DocSlurp",
