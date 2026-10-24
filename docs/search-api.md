@@ -101,15 +101,35 @@ Omit `model` to use the default (`z-ai/glm-5.3-flash`). Any workspace chat catal
 
 Operators can list extra OpenRouter ids in `DOCSLURP_CHAT_EVAL_MODELS` (comma-separated; `:free` suffixes allowed) for model evaluations. Only platform admins can request them: a session whose verified email is in `ADMIN_EMAILS`, or a server API key owned by such a user. Client (publishable) keys and organization owners or admins do not qualify. For an evaluation account that should not be a platform admin, list its organization in `DOCSLURP_CHAT_EVAL_ORG_IDS` (comma-separated org ids): a turn whose workspace is owned by a listed organization may then use the eval models and the full `agent` limit range, from a session or a server API key (never a client key). The workspace's owning organization decides, not the caller's memberships, and the setting grants nothing else. When the configuration loads, the server logs and drops ids that match the Pro/Ultra prohibition, ids without a verified price in `packages/shared/src/chat-model-prices.ts` (mirrored from `scripts/lib/model-prices.json`), and ids whose output price is $50 per million tokens or more. An eval model answers on its own: if it fails, chat does not fail over to another model.
 
+### Direct answers
+
+By default a `/v1/chat` turn runs the search agent: the model decides which workspace tools to call (search, web, settings) before it answers. That is the most thorough path, but it costs extra model steps before the first answer token. For a quick cited answer, such as an "Ask" box in a docs search palette, turn the agent off for the request:
+
+- `/v1/chat`: send `agent: {tools: false}`. The turn does one retrieval and one model call, the same path a request with type, tag or date `filters` takes. The step and tool-call limits do not apply, and the response has no agent `debug` fields.
+- `/v1/chat/completions`: send the standard `tool_choice: "none"`. `"auto"` (the default) keeps the agent. Streaming works the same either way. DocSlurp runs its own workspace tools, so client-defined `tools` and other `tool_choice` forms (`"required"`, a named function, `allowed_tools`) are rejected with HTTP 400 and `error.param` naming the field.
+
+Retrieval overrides also shrink the prompt. `retrieval.parentRetrieval: false` cites the matched chunks without attaching each hit's whole parent page text. That cuts prompt tokens and retrieval time on long pages, at the cost of less surrounding context. `/v1/chat` takes `retrieval` directly. `/v1/chat/completions` takes the same object under the `docslurp` request extension (`extra_body` in the OpenAI SDKs):
+
+```bash
+curl -N https://docslurp.io/v1/chat/completions \
+  -H "Authorization: Bearer $DOCSLURP_API_KEY" -H "Content-Type: application/json" \
+  -d '{"model": "workspace:default", "stream": true, "tool_choice": "none",
+       "docslurp": {"retrieval": {"parentRetrieval": false, "resultCount": 6}},
+       "messages": [{"role": "user", "content": "How do I rotate an API key?"}]}'
+```
+
+`retrieval` accepts `candidateDepth`, `resultOrder`, `resultCount` (1–12), `useHyDE`, `useRerank`, `useMmr`, `mmrLambda`, `iterativeMultiHop`, `enableGraphExpansion`, `enableCommunityExpansion`, `graphHops` and `parentRetrieval`. Any retrieval override answers from retrieved passages rather than the workspace's whole-corpus chat mode. Workspace defaults stay as they are.
+
 ### Agent limits
 
 When the search agent answers (the default for `/v1/chat` with `DOCSLURP_PUBLIC_CHAT_AGENT_ENABLED` on and no document, type, tag or date filters), `agent` bounds that turn:
 
 | Field | Default | Range | Meaning |
 |---|---|---|---|
-| `maxSteps` | 8 | 1–12 | Model calls in the loop. The last one runs with tools disabled, so the agent always ends with an answer. |
+| `maxSteps` | 8 | 1–12 | Model calls in the loop. The last one runs with tools disabled and is told to answer, so the agent always ends with an answer. When no earlier step called a tool (always with `maxSteps: 1`), that step is sent without tool definitions. Tool-call markup a model writes as text is never included in the answer. |
 | `maxToolCalls` | 16 | 1–24 | Tool calls across the turn. Later calls get `{error, code: "tool_call_limit", limitReached: true}` instead of running. |
 | `searchConcurrency` | 6 | 1–8 | Upper bound on the search tool's parallel `queries`, and the value it uses when the model omits `concurrency`. |
+| `tools` | `true` | boolean | `false` skips the agent for a [direct answer](#direct-answers). |
 
 The defaults come from a 51-case production eval (2026-10-21): at 4 steps, 25–37% of turns ran out of steps or tool calls; at 8/16/6 correctness rose from about 0.79 to 0.86–0.92 across three models, and 12/24/8 added nothing. The [turn deadline](#turn-deadline) still bounds wall-clock time, so higher step limits cannot make a turn slower than the deadline.
 

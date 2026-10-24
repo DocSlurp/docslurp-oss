@@ -156,6 +156,22 @@ describe("OpenAI-compatible chat with the official openai SDK", () => {
       tools: [{ type: "function", function: { name: "lookup", parameters: { type: "object" } } }],
     }).catch((caught: unknown) => caught);
     expect(tools).toBeInstanceOf(OpenAI.BadRequestError);
+    expect(tools).toMatchObject({ param: "tools", code: "unsupported_parameter" });
+    const required = await client().chat.completions.create({ model: "workspace:default", messages: [{ role: "user", content: "hi" }], tool_choice: "required" }).catch((caught: unknown) => caught);
+    expect(required).toBeInstanceOf(OpenAI.BadRequestError);
+    expect(required).toMatchObject({ param: "tool_choice" });
     expect(chatWorkspace).not.toHaveBeenCalled();
+  });
+
+  it("streams a direct answer for tool_choice none with docslurp retrieval overrides from extra body", async () => {
+    chatWorkspace.mockImplementationOnce(async (args: { onTextDelta: (text: string) => Promise<void> }) => { await args.onTextDelta("Renewal is annual [1]."); return answer; });
+    // The DocSlurp request extension rides along as an extra body field.
+    const body = { model: "workspace:default", messages: [{ role: "user", content: "When does it renew?" }], stream: true, tool_choice: "none",
+      docslurp: { retrieval: { parentRetrieval: false } } } as OpenAI.ChatCompletionCreateParamsStreaming;
+    const stream = await client().chat.completions.create(body);
+    let text = "";
+    for await (const chunk of stream) text += chunk.choices[0]?.delta.content ?? "";
+    expect(text).toContain("Renewal is annual [1].");
+    expect(chatWorkspace).toHaveBeenCalledWith(expect.objectContaining({ allowAgentTools: false, retrieval: { parentRetrieval: false } }));
   });
 });

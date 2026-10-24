@@ -249,6 +249,26 @@ describe("chatWorkspace", () => {
     }
   });
 
+  it("answers directly with agent.tools false and passes parentRetrieval through to retrieval", async () => {
+    sqlMock.mockResolvedValue([]);
+    getWorkspace.mockResolvedValue({ id: "ws-1", orgId: "org-1", systemPrompt: null });
+    getWorkspaceSearchSettings.mockResolvedValue(buildSearchSettings());
+    hybridSearch.mockResolvedValue({ sessionId: "search-1", results: [] });
+    loadWorkspaceWholeCorpusContext.mockResolvedValue({ eligible: false, results: [], reason: "empty-workspace", stats: { documentCount: 0, chunkCount: 0, tokenEstimate: 0, charEstimate: 0, maxDocuments: 12, maxChunks: 24, maxTokens: 12000, maxChars: 60000 } });
+    const previous = process.env.OPENROUTER_API_KEY;
+    process.env.OPENROUTER_API_KEY = "fake";
+    try {
+      await chatWorkspace({ workspaceId: "ws-1", userId: "user-1", query: "Find evidence", history: [], allowAgentTools: true, allowConfiguration: false,
+        agent: { tools: false }, retrieval: { parentRetrieval: false },
+        actor: { type: "session", userId: "user-1", sessionId: "s", user: { id: "user-1", email: "", name: "User" } } });
+      expect(runChatMcpAgent).not.toHaveBeenCalled();
+      expect(hybridSearch).toHaveBeenCalledOnce();
+      expect(hybridSearch).toHaveBeenCalledWith(expect.any(String), "user-1", expect.objectContaining({ parentRetrieval: false }));
+    } finally {
+      if (previous === undefined) delete process.env.OPENROUTER_API_KEY; else process.env.OPENROUTER_API_KEY = previous;
+    }
+  });
+
   it("refuses an unknown or non-admin eval model before spending or opening a session", async () => {
     getWorkspaceSearchSettings.mockResolvedValue(buildSearchSettings());
     const previous = process.env.DOCSLURP_CHAT_EVAL_MODELS;

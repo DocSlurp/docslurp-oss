@@ -47,7 +47,7 @@ vi.mock("@docslurp/shared/observability", () => ({
   recordChatAgentTelemetry: (metric: unknown) => { spans.metrics.push(metric); },
   evalBaggageAttributes: () => ({ "eval.run_id": "run-7", "eval.arm": "control" }),
 }));
-const { runChatMcpAgent, classifyChatAgentStop } = await import("./chat-mcp-agent.js");
+const { runChatMcpAgent, classifyChatAgentStop, createToolMarkupGuard, FINAL_ANSWER_INSTRUCTION } = await import("./chat-mcp-agent.js");
 const { ChatTurnDeadlineError } = await import("./chat-turn-deadline.js");
 const actor = { type: "session" as const, userId: "user", sessionId: "browser-session", user: { id: "user", name: "User", email: "" } };
 const args = { actor, workspaceId: "ws", orgId: "org", sessionId: "conversation", query: "What is the policy?", history: [], apiKey: "fake", privacyMode: "standard" as const, model: "test", maxOutputTokens: 100 };
@@ -568,4 +568,61 @@ it("omits the inventory line when the caller has none, keeping the upload rule",
   const instructions = JSON.stringify(model.doStreamCalls[0]!.prompt.filter(message => message.role === "system"));
   expect(instructions).not.toContain("Selected workspace inventory");
   expect(instructions).toContain("Suggest an upload only when the workspace has no documents");
+});
+
+describe("final-step answers never leak tool-call markup", () => {
+  /** A step that streams `deltas` as answer text, as a model writing its tool call as text would. */
+  const textStep = (deltas: string[]) => ({ stream: simulateReadableStream({ chunks: [
+    { type: "stream-start" as const, warnings: [] },
+    { type: "text-start" as const, id: "t" },
+    ...deltas.map(delta => ({ type: "text-delta" as const, id: "t", delta })),
+    { type: "text-end" as const, id: "t" },
+    ...finish(false),
+  ], initialDelayInMs: 0, chunkDelayInMs: 0 }) });
+
+  it("drops a text-serialized tool call split across deltas, keeping the text before it", () => {
+    const guard = createToolMarkupGuard();
+    const out = [guard.push("Let me check the docs."), guard.push(" <tool"), guard.push("_call>webSearch{\"query\": \"x\"}"), guard.push(" more")].join("");
+    // Whitespace streamed before the marker began may remain; the markup never does.
+    expect((out + guard.endStep()).trimEnd()).toBe("Let me check the docs.");
+    expect(guard.suppressedSteps).toBe(1);
+    // The next step streams normally again.
+    expect(guard.push("Answer [1].") + guard.endStep()).toBe("Answer [1].");
+  });
+
+  it("holds back a possible marker prefix and releases it when it is ordinary text", () => {
+    const guard = createToolMarkupGuard();
+    expect(guard.push("a < b and <")).toBe("a < b and ");
+    expect(guard.push("p>text</p>")).toBe("<p>text</p>");
+    expect(guard.push("x <")).toBe("x ");
+    expect(guard.endStep()).toBe("<");
+    expect(guard.suppressedSteps).toBe(0);
+  });
+
+  it("with maxSteps 1 sends no tool definitions, tells the model to answer, and strips leaked markup", async () => {
+    mocks.manifestIds = ["search", "webSearch"];
+    const model = new MockLanguageModelV4({ doStream: [textStep(["Let me check the docs first.", "<tool_call>webSearch{\"query\": \"policy\"}</tool_call>"])] });
+    mocks.provider.mockReturnValue(model);
+    const deltas: string[] = [];
+    const result = await runChatMcpAgent({ ...args, limits: { maxSteps: 1, maxToolCalls: 16, searchConcurrency: 6, clamped: [] },
+      onTextDelta: (delta) => { deltas.push(delta); } });
+    const call = model.doStreamCalls[0]!;
+    expect(call.tools ?? []).toEqual([]);
+    expect(JSON.stringify(call.prompt.filter(message => message.role === "system"))).toContain(FINAL_ANSWER_INSTRUCTION);
+    expect(result.answer).toBe("Let me check the docs first.");
+    expect(deltas.join("")).toBe(result.answer);
+    expect(result.answer).not.toContain("tool_call");
+    expect(mocks.dispatch).not.toHaveBeenCalled();
+  });
+
+  it("keeps tool definitions for history on a forced final step after tool calls, still with tool_choice none", async () => {
+    const { model, seenToolChoice } = scripted([{ tools: [{ id: "a", input: { q: "a" } }] }, { text: "Supported [1]." }]);
+    mocks.provider.mockReturnValue(model);
+    const result = await runChatMcpAgent({ ...args, limits: { maxSteps: 2, maxToolCalls: 12, searchConcurrency: 4, clamped: [] } });
+    expect(seenToolChoice).toEqual(["auto", "none"]);
+    expect(model.doStreamCalls[1]!.tools?.map(tool => tool.name)).toEqual(["search"]);
+    expect(JSON.stringify(model.doStreamCalls[1]!.prompt.filter(message => message.role === "system"))).toContain(FINAL_ANSWER_INSTRUCTION);
+    expect(JSON.stringify(model.doStreamCalls[0]!.prompt.filter(message => message.role === "system"))).not.toContain(FINAL_ANSWER_INSTRUCTION);
+    expect(result.answer).toBe("Supported [1].");
+  });
 });

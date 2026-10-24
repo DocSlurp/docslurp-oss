@@ -112,6 +112,44 @@ describe("OpenAI-compatible workspace chat", () => {
     expect(await response.json()).toMatchObject({ error: { type: "invalid_request_error" } });
     expect(chatWorkspace).not.toHaveBeenCalled();
   });
+  it.each([undefined, "auto"])("keeps the workspace agent for tool_choice %s", async (toolChoice) => {
+    expect((await request(input(toolChoice ? { tool_choice: toolChoice } : {}))).status).toBe(200);
+    expect(chatWorkspace).toHaveBeenCalledWith(expect.objectContaining({ allowAgentTools: true }));
+  });
+  it.each([false, true])("answers directly without agent tools for tool_choice none (stream=%s)", async (stream) => {
+    chatWorkspace.mockImplementationOnce(async (args) => { if (args.onTextDelta) await args.onTextDelta(answer.answer); return answer; });
+    const response = await request(input({ tool_choice: "none", stream }));
+    expect(response.status).toBe(200);
+    expect(await response.text()).toContain("Renewal is annual [1].");
+    expect(chatWorkspace).toHaveBeenCalledOnce();
+    expect(chatWorkspace).toHaveBeenCalledWith(expect.objectContaining({ allowAgentTools: false, allowConfiguration: false }));
+    if (stream) expect(chatWorkspace.mock.calls[0]![0].onTextDelta).toEqual(expect.any(Function));
+  });
+  it.each(["required", { type: "function", function: { name: "search" } }, { type: "allowed_tools", allowed_tools: { mode: "auto", tools: [] } }, ""])("rejects unsupported tool_choice %j naming the param", async (toolChoice) => {
+    const response = await request(input({ tool_choice: toolChoice }));
+    expect(response.status).toBe(400);
+    const body = await response.json();
+    expect(body).toMatchObject({ error: { type: "invalid_request_error", param: "tool_choice" } });
+    expect(body.error.message).toContain('"auto" or "none"');
+    expect(chatWorkspace).not.toHaveBeenCalled();
+  });
+  it("names client-defined tools as an unsupported parameter", async () => {
+    const response = await request(input({ tools: [{ type: "function", function: { name: "lookup", parameters: {} } }] }));
+    expect(response.status).toBe(400);
+    const body = await response.json();
+    expect(body).toMatchObject({ error: { type: "invalid_request_error", param: "tools", code: "unsupported_parameter" } });
+    expect(body.error.message).toContain('tool_choice "none"');
+  });
+  it("passes docslurp.retrieval overrides to the workspace answer and validates them", async () => {
+    expect((await request(input({ docslurp: { retrieval: { parentRetrieval: false, resultCount: 6 } } }))).status).toBe(200);
+    expect(chatWorkspace).toHaveBeenCalledWith(expect.objectContaining({ retrieval: { parentRetrieval: false, resultCount: 6 } }));
+    for (const docslurp of [{ retrieval: { parentRetrieval: "no" } }, { retrieval: { secret: true } }, { filters: {} }]) {
+      const response = await request(input({ docslurp }));
+      expect(response.status).toBe(400);
+      expect((await response.json()).error.param).toMatch(/^docslurp\./);
+    }
+    expect(chatWorkspace).toHaveBeenCalledOnce();
+  });
   it("streams data-only deltas, usage and DONE with one stable completion id", async () => {
     chatWorkspace.mockImplementationOnce(async (args) => {
       await args.onTextDelta("Renewal is ");

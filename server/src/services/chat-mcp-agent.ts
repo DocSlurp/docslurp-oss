@@ -25,6 +25,75 @@ const CHARS_PER_TOKEN_ESTIMATE = 4;
 export { chatAgentProviderOptions };
 
 /**
+ * Text-serialized tool calls. Some upstream models (GLM, Qwen, DeepSeek,
+ * Mistral) write their native tool-call syntax as plain text when a request
+ * still describes tools but `tool_choice: "none"` forbids calling them, or
+ * when the upstream ignores tool_choice. That markup is never an answer.
+ */
+const TOOL_CALL_MARKERS = ["<tool_call", "<|tool_call", "<｜tool▁call", "<tool_use", "<function_call", "<|function_call", "<function=", "[tool_calls]", "<|python_tag|>"];
+const LONGEST_MARKER = Math.max(...TOOL_CALL_MARKERS.map(marker => marker.length));
+
+/** Index of the first tool-call marker in `text`, or -1. */
+function toolMarkupIndex(text: string): number {
+  const lower = text.toLowerCase();
+  let first = -1;
+  for (const marker of TOOL_CALL_MARKERS) {
+    const index = lower.indexOf(marker);
+    if (index !== -1 && (first === -1 || index < first)) first = index;
+  }
+  return first;
+}
+
+/** Length of the longest suffix of `text` that could still grow into a marker. */
+function partialMarkerSuffix(text: string): number {
+  const lower = text.toLowerCase();
+  for (let length = Math.min(LONGEST_MARKER - 1, lower.length); length > 0; length--) {
+    const tail = lower.slice(-length);
+    if (TOOL_CALL_MARKERS.some(marker => marker.startsWith(tail))) return length;
+  }
+  return 0;
+}
+
+/**
+ * Streams one model step's text while dropping text-serialized tool calls:
+ * from the first marker on, the rest of the step is suppressed. A suffix that
+ * might begin a marker is held back until the next delta or the step's end.
+ */
+export function createToolMarkupGuard() {
+  let held = "";
+  let suppressed = false;
+  let suppressedSteps = 0;
+  return {
+    /** The text safe to emit now. */
+    push(delta: string): string {
+      if (suppressed) return "";
+      const text = held + delta;
+      const index = toolMarkupIndex(text);
+      if (index !== -1) {
+        suppressed = true;
+        suppressedSteps++;
+        held = "";
+        return text.slice(0, index).trimEnd();
+      }
+      const keep = partialMarkerSuffix(text);
+      held = keep ? text.slice(-keep) : "";
+      return keep ? text.slice(0, -keep) : text;
+    },
+    /** Ends the step: returns held text that turned out not to be a marker. */
+    endStep(): string {
+      const rest = suppressed ? "" : held;
+      held = "";
+      suppressed = false;
+      return rest;
+    },
+    get suppressedSteps() { return suppressedSteps; },
+  };
+}
+
+/** Appended to the system prompt for the step that must answer without tools. */
+export const FINAL_ANSWER_INSTRUCTION = "Tools are not available for this response. Answer now from the evidence already gathered in this turn and say what remains unverified. Do not write tool calls, function calls or tool markup, and do not say you will search or check further.";
+
+/**
  * Deterministic stop classification; it never interprets answer wording.
  * Precedence: failure, time budget, refused tool calls, step budget, then evidence shape.
  * `deadline` means the turn's time budget ended tool use: the answer was forced
@@ -395,20 +464,27 @@ export async function runChatMcpAgent(args: {
   ];
 
   let answer = "";
-  /** Streams model text only, never raw tool outputs or document instructions. */
+  const markupGuard = createToolMarkupGuard();
+  /** Streams model text only, never raw tool outputs, tool-call markup or document instructions. */
   async function consume(result: { fullStream: AsyncIterable<{ type: string; text?: string; error?: unknown; toolName?: string }> }) {
     let separateStep = answer.length > 0;
+    const emit = async (text: string) => {
+      if (!text || context.failure) return;
+      const delta = `${separateStep ? "\n\n" : ""}${text}`;
+      separateStep = false;
+      answer += delta;
+      await args.onTextDelta?.(delta);
+    };
     for await (const part of result.fullStream) {
       if (part.type === "error") throw part.error;
       if (part.type === "tool-error") context.block(part.toolName ?? "unavailable_tool", "invalid_tool_call");
-      if (part.type === "finish-step" && answer) separateStep = true;
-      if (part.type === "text-delta" && part.text && !context.failure) {
-        const delta = `${separateStep ? "\n\n" : ""}${part.text}`;
-        separateStep = false;
-        answer += delta;
-        await args.onTextDelta?.(delta);
+      if (part.type === "finish-step") {
+        await emit(markupGuard.endStep());
+        if (answer) separateStep = true;
       }
+      if (part.type === "text-delta" && part.text) await emit(markupGuard.push(part.text));
     }
+    await emit(markupGuard.endStep());
   }
 
   const deadlineStop: StopCondition<ToolSet> = ({ steps }) => deadlineForcedAt !== undefined && steps.length > deadlineForcedAt;
@@ -432,7 +508,7 @@ export async function runChatMcpAgent(args: {
         stopWhen: [stepCountIs(limits.maxSteps), deadlineStop, () => context.failure !== undefined],
         // The last step must answer: tools are disabled once the step budget is
         // reached, or once the turn is inside its final-answer time reserve.
-        prepareStep: ({ stepNumber }) => {
+        prepareStep: ({ stepNumber, steps }) => {
           context.throwIfBlocked();
           openStepSpan(stepNumber);
           const lastByCount = stepNumber >= limits.maxSteps - 1;
@@ -442,7 +518,14 @@ export async function runChatMcpAgent(args: {
           }
           const final = lastByCount || deadlineForcedAt !== undefined;
           nextStep = { number: stepNumber, final };
-          return final ? { toolChoice: "none" as const } : {};
+          if (!final) return {};
+          // tool_choice "none" alone is advisory upstream: with tool definitions
+          // still in the request, some models write a tool call as text. Drop the
+          // definitions when no earlier step called a tool (some providers need
+          // them to read tool history), and tell the model to answer now.
+          const toolHistory = steps.some(previous => previous.toolCalls.length > 0);
+          return { toolChoice: "none" as const, instructions: `${system}\n${FINAL_ANSWER_INSTRUCTION}`,
+            ...(toolHistory ? {} : { activeTools: [] }) };
         },
         maxOutputTokens,
         maxRetries: 0,
@@ -511,6 +594,7 @@ export async function runChatMcpAgent(args: {
       "docslurp.chat.stop_reason": stopReason, "docslurp.chat.cost_usd": usage.costCents / 100,
       "docslurp.chat.elapsed_ms": deadline.elapsedMs(), "docslurp.chat.final_answer": finalAnswer,
       "docslurp.chat.step_timeouts": stepTimeouts, "docslurp.chat.tool_timeouts": context.counters.timedOut,
+      "docslurp.chat.tool_markup_suppressed": markupGuard.suppressedSteps,
       ...(resolvedProvider ? { "docslurp.chat.upstream_provider": resolvedProvider } : {}),
     });
     agentSpan.end(failure);

@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { batchSearchInputSchema, searchInputSchema, workspaceChatInputSchema } from "./search-input.js";
 import { apiErrorOpenApiResponse } from "./api-error-openapi.js";
-import { searchResultSchema, workspaceChatResponseSchema } from "@docslurp/shared";
+import { chatRetrievalOverridesSchema, searchResultSchema, workspaceChatResponseSchema } from "@docslurp/shared";
 
 const ref = (name: string) => ({ $ref: `#/components/schemas/${name}` });
 const json = (schema: object) => ({ "application/json": { schema } });
@@ -36,6 +36,12 @@ const openAiErrors = {
   "404": { description: "Resource not found in your organization" },
   "429": { description: "Rate limit reached" },
 };
+
+/** A zod schema as a nested JSON Schema (without the top-level `$schema` marker). */
+function nestedSchema(schema: z.ZodType) {
+  const { $schema: _marker, ...rest } = z.toJSONSchema(schema) as Record<string, unknown>;
+  return rest;
+}
 
 export const simpleServiceSchemas = {
   SearchResult: z.toJSONSchema(searchResultSchema),
@@ -117,6 +123,10 @@ export const simpleServiceSchemas = {
       max_completion_tokens: { type: "integer", minimum: 1, maximum: 16384 },
       max_tokens: { type: "integer", minimum: 1, maximum: 16384, description: "Alias; cannot be combined with max_completion_tokens" },
       n: { const: 1 }, user: { type: "string", maxLength: 256 },
+      tool_choice: { enum: ["auto", "none"], default: "auto", description: "auto: the workspace agent may call its own search, web and settings tools before answering. none: a direct grounded answer from one retrieval and one model call (lower latency and fewer tokens; still streams). Client-defined tools are not supported, so `tools` and other tool_choice forms are rejected with 400." },
+      docslurp: { type: "object", additionalProperties: false, description: "DocSlurp extension (extra_body in OpenAI SDKs).", properties: {
+        retrieval: { ...nestedSchema(chatRetrievalOverridesSchema), description: "Retrieval overrides for this request only, as retrieval on POST /v1/chat. Example: { \"parentRetrieval\": false } cites matched chunks without whole parent pages." },
+      } },
     },
   },
   ChatCompletion: {

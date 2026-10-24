@@ -315,6 +315,13 @@ export const chatAgentLimitsInputSchema = z.object({
   maxToolCalls: z.number().int().min(1).max(CHAT_AGENT_LIMIT_MAXIMUMS.maxToolCalls).optional(),
   /** Upper bound for the search tool's parallel `queries` concurrency. Default 6. */
   searchConcurrency: z.number().int().min(1).max(CHAT_AGENT_LIMIT_MAXIMUMS.searchConcurrency).optional(),
+  /**
+   * false: answer directly from one retrieval and one model call, without the
+   * agent's tool loop (no search, web or settings tools). Fastest and cheapest;
+   * the step and tool-call limits then do not apply. Omitted or true: the
+   * agent decides which tools to call.
+   */
+  tools: z.boolean().optional(),
 }).strict();
 export type ChatAgentLimitsInput = z.infer<typeof chatAgentLimitsInputSchema>;
 
@@ -497,6 +504,8 @@ export const chatRetrievalOverridesSchema = z.object({
   enableGraphExpansion: z.boolean().optional(),
   enableCommunityExpansion: z.boolean().optional(),
   graphHops: z.number().int().min(1).max(3).optional(),
+  /** false: cite matched chunks only, without attaching each hit's whole parent page text. Smaller prompts and faster retrieval. */
+  parentRetrieval: z.boolean().optional(),
 }).strict();
 export type ChatRetrievalOverrides = z.infer<typeof chatRetrievalOverridesSchema>;
 

@@ -338,6 +338,16 @@ describe("searchRoutes", () => {
     }
   });
 
+  it("accepts agent.tools and retrieval.parentRetrieval on chat and forwards them", async () => {
+    chatWorkspace.mockResolvedValueOnce({ answer: "Supported" });
+    const body = { q: "Question", workspace: "ws-chat", agent: { tools: false }, retrieval: { parentRetrieval: false } };
+    const response = await app.request("/search/chat", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    expect(response.status).toBe(200);
+    expect(chatWorkspace).toHaveBeenCalledWith(expect.objectContaining({ agent: { tools: false }, retrieval: { parentRetrieval: false } }));
+    const invalid = await app.request("/search/chat", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...body, agent: { tools: "off" } }) });
+    expect(invalid.status).toBe(400);
+  });
+
   it("rejects public attempts to set the internal agent permission", async () => {
     const response = await app.request("/search/chat", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ q: "Question", workspace: "ws-chat", allowAgentTools: true }) });
     expect(response.status).toBe(400);

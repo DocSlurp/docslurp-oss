@@ -421,6 +421,19 @@ export type ChatInput = {
     maxToolCalls?: number;
     /** Cap on parallel search queries, 1-8 (default 6). */
     searchConcurrency?: number;
+    /** false: a direct answer from one retrieval and one model call, without the agent's tools. */
+    tools?: boolean;
+  };
+  /** Retrieval overrides for this request only; workspace defaults stay as they are. */
+  retrieval?: {
+    /** Passages retrieved for the answer, 1-12. */
+    resultCount?: number;
+    useHyDE?: boolean;
+    useRerank?: boolean;
+    useMmr?: boolean;
+    mmrLambda?: number;
+    /** false: cite matched chunks without attaching whole parent page text (smaller, faster prompts). */
+    parentRetrieval?: boolean;
   };
 };
 

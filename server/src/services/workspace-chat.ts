@@ -1218,7 +1218,8 @@ async function chatWorkspaceTurn(
   const history = args.history ?? await listRecentTurns(sessionId, 20);
   if (workspace && args.allowConfiguration !== false && history.length === 0) await refineWorkspaceNames([args.workspaceId], args.query);
   // Filtered questions take direct retrieval so the filters are guaranteed to apply.
-  if (args.allowAgentTools !== false && args.actor && env.chatMcpEnabled && chatApiKey && !filterDocumentIds && !narrowingFilters) {
+  // `agent.tools: false` (or tool_choice "none" on /v1/chat/completions) asks for it too.
+  if (args.allowAgentTools !== false && args.agent?.tools !== false && args.actor && env.chatMcpEnabled && chatApiKey && !filterDocumentIds && !narrowingFilters) {
     if (!workspace) throw new Error("Workspace not found");
     const [{ runChatMcpAgent }, workspaceInventory] = await Promise.all([
       import("./chat-mcp-agent.js"),
