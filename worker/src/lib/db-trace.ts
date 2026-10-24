@@ -26,5 +26,5 @@ export function extendDbTraceLabel<T>(suffix: string, fn: () => T): T {
 
 export function dbTraceStatementHook(): ((fingerprint: string) => void) | undefined {
   if (!file) return undefined;
-  return (sql) => appendFileSync(file, `${JSON.stringify({ label: labels.getStore() ?? "-", sql })}\n`);
+  return (sql) => appendFileSync(file, `${JSON.stringify({ t: Date.now(), label: labels.getStore() ?? "-", sql })}\n`);
 }
