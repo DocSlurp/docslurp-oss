@@ -14,7 +14,8 @@ export interface AlertDeliveryConfig {
   webhookUrl: string | null;
   /**
    * Telegram (the signup-notification bot): TELEGRAM_BOT_TOKEN plus
-   * ALERT_TELEGRAM_CHAT_ID, else TELEGRAM_CHAT_ID. ALERT_TELEGRAM=off disables.
+   * ALERT_TELEGRAM_CHAT_ID, else TELEGRAM_CHAT_ID. Requires NODE_ENV=production.
+   * ALERT_TELEGRAM=off disables even in production.
    */
   telegram?: { token: string; chatId: string } | null;
   format: AlertWebhookFormat;
@@ -32,7 +33,7 @@ export function resolveAlertDeliveryConfig(env: NodeJS.ProcessEnv = process.env,
   const telegramOff = ["0", "false", "off", "no"].includes(env.ALERT_TELEGRAM?.trim().toLowerCase() ?? "");
   return {
     webhookUrl: env.ALERT_WEBHOOK_URL?.trim() || null,
-    telegram: telegramToken && telegramChat && !telegramOff ? { token: telegramToken, chatId: telegramChat } : null,
+    telegram: env.NODE_ENV === "production" && telegramToken && telegramChat && !telegramOff ? { token: telegramToken, chatId: telegramChat } : null,
     format: format === "json" ? "json" : "slack",
     environment: env.ALERT_ENVIRONMENT?.trim() || env.FLY_APP_NAME?.trim() || env.NODE_ENV?.trim() || "development",
     instance,
