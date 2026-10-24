@@ -31,7 +31,7 @@ function fakeClient(id: number, behaviour: (sqlText: string, attempt: number) =>
 }
 
 const reset = () => Object.assign(new Error("read ECONNRESET"), { code: "ECONNRESET" });
-const quiet = { warn: () => undefined };
+const quiet = { warn: () => undefined, info: () => undefined };
 
 describe("isRetryableRead", () => {
   it.each([
@@ -72,6 +72,24 @@ describe("resilientSql", () => {
     clock = 1_400;
     await (sql as any)`select 1 from t`;
     expect(create).toHaveBeenCalledTimes(1);
+  });
+
+  it("recycles silently after a routine idle gap and logs only suspend-length gaps", async () => {
+    let clock = 0;
+    const clients = [1, 2, 3].map((id) => fakeClient(id, () => [{ ok: id }]));
+    const create = vi.fn(() => clients[create.mock.calls.length - 1]!);
+    const log = { warn: vi.fn(), info: vi.fn() };
+    const { sql } = resilientSql(create as any, { gapMs: 1_000, logGapMs: 60_000, now: () => clock, log });
+    clock = 5_000; // idle gap: recycled, not logged
+    await (sql as any)`select 1 from t`;
+    expect(create).toHaveBeenCalledTimes(2);
+    expect(log.info).not.toHaveBeenCalled();
+    clock += 120_000; // suspend-length gap: recycled and logged once
+    await (sql as any)`select 1 from t`;
+    expect(create).toHaveBeenCalledTimes(3);
+    expect(log.info).toHaveBeenCalledTimes(1);
+    expect(log.info.mock.calls[0]![0]).toMatch(/^\[db-pool\] no database activity for 120s/);
+    expect(log.warn).not.toHaveBeenCalled();
   });
 
   it("replaces the pool after an activity gap and runs the query on the new one", async () => {

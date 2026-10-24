@@ -17,7 +17,11 @@ import { beforeOAuthAccountCreate } from "./oauth-account-linking.js";
  * sockets the network reset. After an idle gap, destroy the idle clients before
  * handing one out (public API only: connect() pops an idle client, release(true) destroys it).
  */
-function guardPoolAgainstResume(target: Pool, gapMs = Number(process.env.DATABASE_RESUME_GAP_MS ?? 30_000)): void {
+function guardPoolAgainstResume(
+  target: Pool,
+  gapMs = Number(process.env.DATABASE_RESUME_GAP_MS ?? 30_000),
+  resumeLogGapMs = Number(process.env.DATABASE_RESUME_LOG_GAP_MS ?? 5 * 60_000),
+): void {
   if (!(gapMs > 0)) return;
   const raw = target as unknown as Record<"connect" | "query", (...args: unknown[]) => unknown>;
   if (typeof raw.connect !== "function" || typeof raw.query !== "function") return; // partial pg mocks in tests
@@ -31,7 +35,7 @@ function guardPoolAgainstResume(target: Pool, gapMs = Number(process.env.DATABAS
     const gap = at - lastSeen;
     lastSeen = at;
     if (gap < gapMs) return Promise.resolve();
-    console.warn(`[db-pool] auth pool idle for ${Math.round(gap / 1000)}s; discarding ${target.idleCount} idle connections`);
+    if (gap >= resumeLogGapMs) console.info(`[db-pool] auth pool idle for ${Math.round(gap / 1000)}s (likely a suspend); discarding ${target.idleCount} idle connections`);
     return discarding = (async () => {
       for (let idle = target.idleCount; idle > 0; idle -= 1) {
         ((await connect()) as { release(destroy?: boolean): void }).release(true);

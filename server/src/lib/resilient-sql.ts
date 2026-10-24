@@ -37,7 +37,12 @@ export interface ResilientSqlOptions {
   now?: () => number;
   /** Runs once per detected resume, before the pool is recycled (e.g. reconnect LISTEN). */
   onResume?: (gapMs: number) => void | Promise<void>;
-  log?: Pick<Console, "warn">;
+  /**
+   * Shortest gap worth logging (DATABASE_RESUME_LOG_GAP_MS). Routine recycles after ordinary idle
+   * gaps are silent; a gap this long is most likely a machine suspend, which is worth seeing.
+   */
+  logGapMs?: number;
+  log?: Pick<Console, "warn" | "info">;
 }
 
 export interface ResilientSql<T> {
@@ -49,6 +54,8 @@ export interface ResilientSql<T> {
 }
 
 export const DEFAULT_RESUME_GAP_MS = 30_000;
+/** Idle gaps below this recycle silently: an idle app machine crosses DEFAULT_RESUME_GAP_MS every minute or so. */
+export const DEFAULT_RESUME_LOG_GAP_MS = 5 * 60_000;
 
 const CONNECTION_ERROR_CODES = new Set([
   "ECONNRESET",
@@ -95,6 +102,7 @@ export function resilientSql<T extends (...args: any[]) => any>(create: () => T,
   const drainTimeoutS = options.drainTimeoutS ?? 5;
   const now = options.now ?? Date.now;
   const log = options.log ?? console;
+  const logGapMs = options.logGapMs ?? DEFAULT_RESUME_LOG_GAP_MS;
   let lastSeen = now();
   let recycling: Promise<void> | null = null;
   const settled = Promise.resolve();
@@ -111,7 +119,7 @@ export function resilientSql<T extends (...args: any[]) => any>(create: () => T,
     const gap = at - lastSeen;
     lastSeen = at;
     if (gapMs <= 0 || gap < gapMs) return settled;
-    log.warn(`[db-pool] no database activity for ${Math.round(gap / 1000)}s (process suspended or idle); recycling pooled connections before the next query`);
+    if (gap >= logGapMs) log.info(`[db-pool] no database activity for ${Math.round(gap / 1000)}s (likely a suspend); recycling pooled connections before the next query`);
     recycling = (async () => {
       try { await options.onResume?.(gap); } catch (error) {
         log.warn(`[db-pool] resume hook failed: ${error instanceof Error ? error.message : String(error)}`);
