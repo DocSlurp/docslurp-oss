@@ -1,4 +1,5 @@
 import { reportException, initializeWorkerErrorReporting } from "@docslurp/shared/error-reporting";
+import { extendDbTraceLabel } from "../lib/db-trace.js";
 import { compilePipelinePlan, deferredProfilesEnabled, getPipelineStageOrder } from "@docslurp/shared";
 import { withObservation, flushObservability } from "@docslurp/shared/observability";
 import { ApplicationFailure } from "@temporalio/common";
@@ -244,7 +245,11 @@ export function createStageExecution(deps: {
    * A failed stage is checkpointed as failed and rethrown; worker
    * interruptions are rethrown without a failure checkpoint so a retry resumes.
    */
-  async function runStage(input: StageInput, runtime: StageRuntime): Promise<StageOutput> {
+  function runStage(input: StageInput, runtime: StageRuntime): Promise<StageOutput> {
+    return extendDbTraceLabel(input.stageName, () => runStageUntraced(input, runtime));
+  }
+
+  async function runStageUntraced(input: StageInput, runtime: StageRuntime): Promise<StageOutput> {
     const { stageName, runId, artifacts } = input;
 
     const stage = stageMap.get(stageName);

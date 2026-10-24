@@ -1,4 +1,5 @@
 import { instrumentPostgres } from "@docslurp/shared/observability";
+import { dbTraceStatementHook } from "../lib/db-trace.js";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -135,7 +136,7 @@ export class IndexStage implements Stage {
       prepare: false,
       idle_timeout: 20,
       connect_timeout: 10,
-    }), this.config.databaseUrl);
+    }), this.config.databaseUrl, { onStatement: dbTraceStatementHook() });
     this.queue = new LanceDbWriteQueue({
       sql: this.queueSql,
       loadRecords: async (row) => {

@@ -16,6 +16,7 @@ import { runWithPrivacyAuditScope } from "../lib/privacy-guard.js";
  */
 
 import { Context } from "@temporalio/activity";
+import { dbTraceEnabled, withDbTraceLabel } from "../lib/db-trace.js";
 import { ApplicationFailure } from "@temporalio/common";
 
 import type { Config } from "../config.js";
@@ -391,6 +392,12 @@ export function createActivities(deps: ActivityDependencies) {
       await execution.failRun(input);
     },
   };
+
+  if (dbTraceEnabled) {
+    for (const [name, fn] of Object.entries(activities)) {
+      (activities as Record<string, unknown>)[name] = (...args: unknown[]) => withDbTraceLabel(name, () => (fn as (...a: unknown[]) => unknown)(...args));
+    }
+  }
 
   async function runVisionPage(task: VisionPageTask, allocationFraction: number): Promise<UsageSummary> {
       const stage = stageMap.get("vision-extract");

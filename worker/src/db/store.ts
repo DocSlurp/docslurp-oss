@@ -1,5 +1,6 @@
 import { instrumentFetch } from "@docslurp/shared/observability";
 import { instrumentPostgres } from "@docslurp/shared/observability";
+import { dbTraceStatementHook } from "../lib/db-trace.js";
 import { PostgresCapacityLeaseStore } from "../media/capacity/store.js";
 import { PostgresMediaJournal } from "../media/journal.js";
 import { PUBLIC_ERROR_MESSAGES } from "@docslurp/shared";
@@ -395,7 +396,7 @@ export class Store {
       types: { numeric: { to: 1700, from: [1700], serialize: (value: unknown) => String(value), parse: (value: string): unknown => Number(value) } },
       idle_timeout: 20,
       connect_timeout: 10,
-    }), databaseUrl);
+    }), databaseUrl, { onStatement: dbTraceStatementHook() });
     this.plausibilityWarningThreshold =
       options?.plausibilityWarningThreshold ?? 0.3;
     this.apiKeyUsageRetentionDays = Math.max(
