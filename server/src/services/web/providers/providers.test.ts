@@ -26,11 +26,11 @@ describe("web provider adapters", () => {
     expect(t.body(0)).toMatchObject({ search_depth: "basic", max_results: 3, include_usage: true, include_raw_content: false });
   });
 
-  it("Tavily extract: falls back to the price sheet when amortized usage reads zero", async () => {
+  it("Tavily extract: falls back to the price sheet (per started block of 5 URLs) when usage reads zero", async () => {
     const t = context([Response.json({ results: [{ url: "https://a.test/", raw_content: "# Page" }], failed_results: [{ url: "https://b.test/", error: "x" }], usage: { credits: 0 } })]);
     const result = await createTavilyAdapter({ usdPerCredit: 0.008 }).capabilities.fetch!.run({ urls: ["https://a.test/", "https://b.test/"], depth: "fast", maxCharacters: 1000 }, t.ctx);
     expect(result.data).toEqual({ pages: [{ url: "https://a.test/", markdown: "# Page" }], failed: [{ url: "https://b.test/", reason: "unreadable" }] });
-    expect(result).toMatchObject({ costSource: "estimated", costUsd: 0.2 * 0.008 });
+    expect(result).toMatchObject({ costSource: "estimated", costUsd: 0.008 }); // one started block of 5 URLs
   });
 
   it("Exa search: uses reported costDollars and requests text only when content is wanted", async () => {
@@ -52,6 +52,7 @@ describe("web provider adapters", () => {
   it("Jina search declines inputs it cannot honour so the router picks another provider", () => {
     const jina = createJinaAdapter({ usdPerMillionTokens: 0.05 }).capabilities.search!;
     expect(jina.accepts!({ ...search, recency: "week" })).toBe(false);
+    expect(jina.accepts!({ ...search, includeContent: true })).toBe(false);
     expect(jina.accepts!(search)).toBe(true);
   });
 
@@ -74,6 +75,53 @@ describe("web provider adapters", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("Jina page reads: direct fetch first, browser variants render JavaScript", async () => {
+    const jina = createJinaAdapter({ usdPerMillionTokens: 0.05 }).capabilities.fetch!;
+    const ok = () => Response.json({ data: { url: "https://j.test/", title: "J", content: "# J\n\nbody", usage: { tokens: 400 } } });
+    for (const [option, expected] of [["standard", { "X-Engine": "direct" }], ["browser", {}], ["browser-wait", { "X-Engine": "browser", "X-With-Shadow-Dom": "true", "X-No-Cache": "true" }]] as const) {
+      const t = context([ok()]);
+      const run = option === "standard" ? jina.run : jina.variants!.find((item) => item.id === option)!.run;
+      await run({ urls: ["https://j.test/"], depth: "fast", maxCharacters: 1000 }, t.ctx);
+      const headers = t.fetch.mock.calls[0]![1]!.headers as Record<string, string>;
+      expect(headers).toMatchObject(expected);
+      if (option === "browser") expect(headers["X-Engine"]).toBeUndefined();
+    }
+    expect(jina.tier).toBe(0);
+    expect(jina.variants!.map((item) => [item.id, item.tier])).toEqual([["browser", 1], ["browser-wait", 2]]);
+  });
+
+  it("Firecrawl page reads: a target-site 403 is a blocked page that was still billed", async () => {
+    const t = context([Response.json({ success: true, data: { markdown: "Access denied", metadata: { sourceURL: "https://f.test/", statusCode: 403 } } })]);
+    const result = await createFirecrawlAdapter({ usdPerCredit: 0.001 }).capabilities.fetch!.run({ urls: ["https://f.test/"], depth: "fast", maxCharacters: 1000 }, t.ctx);
+    expect(result.data).toEqual({ pages: [], failed: [{ url: "https://f.test/", reason: "blocked" }] });
+    expect(result.costUsd).toBe(0.001);
+    expect(t.body(0)).toMatchObject({ proxy: "auto" });
+    const wait = context([Response.json({ success: true, data: { markdown: "# Loaded\n\nlazy content", metadata: { sourceURL: "https://f.test/", statusCode: 200 } } })]);
+    await createFirecrawlAdapter({ usdPerCredit: 0.001 }).capabilities.fetch!.variants![0]!.run({ urls: ["https://f.test/"], depth: "fast", maxCharacters: 1000 }, wait.ctx);
+    expect(wait.body(0)).toMatchObject({ maxAge: 0, waitFor: 2_500, actions: [{ type: "scroll" }, { type: "wait" }] });
+  });
+
+  it("Exa page reads: live crawl on demand, and error tags become escalation reasons", async () => {
+    const exa = createExaAdapter().capabilities.fetch!;
+    const t = context([Response.json({ results: [], statuses: [
+      { id: "https://e.test/a", status: "error", error: { tag: "CRAWL_HTTP_403" } },
+      { id: "https://e.test/b", status: "error", error: { tag: "CRAWL_LIVECRAWL_TIMEOUT" } },
+      { id: "https://e.test/c", status: "error", error: { tag: "SOMETHING_NEW" } },
+    ], costDollars: { total: 0 } })]);
+    const result = await exa.variants![0]!.run({ urls: ["https://e.test/a", "https://e.test/b", "https://e.test/c"], depth: "fast", maxCharacters: 1000 }, t.ctx);
+    expect(result.data.failed.map((item) => item.reason)).toEqual(["blocked", "timeout", "unreadable"]);
+    expect(t.body(0)).toMatchObject({ maxAgeHours: 0, livecrawlTimeout: 30_000 });
+  });
+
+  it("Tavily page reads: advanced extraction costs double and renders JavaScript", async () => {
+    const tavily = createTavilyAdapter({ usdPerCredit: 0.008 }).capabilities.fetch!;
+    const advanced = tavily.variants![0]!;
+    expect(advanced.estimateUsd({ urls: ["https://t.test/"], depth: "fast", maxCharacters: 1000 })).toBeCloseTo(2 * tavily.estimateUsd({ urls: ["https://t.test/"], depth: "fast", maxCharacters: 1000 }));
+    const t = context([Response.json({ results: [{ url: "https://t.test/", raw_content: "# T\n\nbody" }], failed_results: [], usage: { credits: 0 } })]);
+    await advanced.run({ urls: ["https://t.test/"], depth: "fast", maxCharacters: 1000 }, t.ctx);
+    expect(t.body(0)).toMatchObject({ extract_depth: "advanced", timeout: 30 });
   });
 
   it("maps provider statuses to failover kinds", async () => {
