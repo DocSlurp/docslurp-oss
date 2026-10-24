@@ -1,3 +1,4 @@
+import { instrumentFetch } from "@docslurp/shared/observability";
 import type { AlertCheck } from "./alert-rules.js";
 
 /**
@@ -80,14 +81,14 @@ export class WorkerFloorFallback {
     this.running = true;
     const base = `${config.apiBase}/v1/apps/${encodeURIComponent(config.app)}/machines`;
     try {
-      const list = await this.fetchImpl(base, { headers: { authorization: authorization(config.token) }, signal: AbortSignal.timeout(15_000) });
+      const list = await instrumentFetch("fly", "machines.list", this.fetchImpl)(base, { headers: { authorization: authorization(config.token) }, signal: AbortSignal.timeout(15_000) });
       if (!list.ok) throw new Error(`list machines: HTTP ${list.status}`);
       const pick = pickWorkerToStart((await list.json()) as FlyMachine[]);
       if ("skip" in pick) {
         this.log(`[worker-floor] runs waiting without worker pollers; not starting a machine: ${pick.skip}`);
         return null;
       }
-      const started = await this.fetchImpl(`${base}/${encodeURIComponent(pick.machineId)}/start`, {
+      const started = await instrumentFetch("fly", "machines.start", this.fetchImpl)(`${base}/${encodeURIComponent(pick.machineId)}/start`, {
         method: "POST",
         headers: { authorization: authorization(config.token) },
         signal: AbortSignal.timeout(30_000),

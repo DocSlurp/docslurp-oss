@@ -66,6 +66,8 @@ export type RunSources =
   | { kind: "versionsOf"; documentIds: string[]; reuse?: boolean };
 
 export interface CreateRunInput {
+  /** Internal durable intake identity; never accepted from HTTP input. */
+  runId?: string;
   /** The requester: access is checked against them and the Run belongs to them. */
   userId: string;
   workspaceId: string;
@@ -862,7 +864,7 @@ export function createRunCreation(deps: RunCreationDeps) {
     await assertCreditFloor(access.orgId);
     await enforceLiveBudgetCaps(input.workspaceId, access.orgId);
 
-    const runId = randomUUID();
+    const runId = input.runId ?? randomUUID();
     const reuse = sources.kind === "versionsOf" && sources.reuse === true;
     const row = await insertRun({
       id: runId,

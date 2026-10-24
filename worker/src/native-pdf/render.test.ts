@@ -28,6 +28,7 @@ function fakeEngine(opts: { fail?: boolean } = {}) {
         metadata: async () => ({ encrypted: false }),
         close: async () => { stats.closed += 1; },
         page: (index: number) => ({
+          size: async () => ({ widthPt: 612, heightPt: 792, rotation: 0 }),
           render: async (o: NativePdfRenderOptions) => {
             stats.active += 1;
             stats.maxActive = Math.max(stats.maxActive, stats.active);
@@ -105,11 +106,13 @@ describe("PdfRasterCache with PDF_RASTER_ENGINE=native-pdf", () => {
     };
     let pdftoppmCalls = 0;
     const runner = {
+      async pdfPageSizes() { return { binary: "pdfinfo", args: [], available: true }; },
       async renderPdfPageRange(_s: string, prefix: string, first: number, last: number) {
         pdftoppmCalls += 1;
         return { binary: "pdftoppm", args: [prefix, String(first), String(last)], available: true };
       },
-      async run(plan: { args: string[] }) {
+      async run(plan: { binary?: string; args: string[] }) {
+        if (plan.binary === "pdfinfo") return { stdout: "Page 1 size: 612 x 792 pts", stderr: "" };
         const [prefix, a, b] = plan.args;
         for (let p = Number(a); p <= Number(b); p += 1) await writeFile(`${prefix}-${p}.png`, png(1275, 1650));
         return { stdout: "", stderr: "" };
@@ -130,7 +133,7 @@ describe("PdfRasterCache with PDF_RASTER_ENGINE=native-pdf", () => {
     expect(calls()).toBe(0);
     expect(first.map((p) => [p.engine, p.dpi, p.widthPx, p.heightPx, p.cacheHit])).toEqual([
       ["native-pdf", 150, 1275, 1650, false], ["native-pdf", 150, 1275, 1650, false]]);
-    expect(first[0]!.artifactKey).toContain("/150dpi-native-pdf/");
+    expect(first[0]!.artifactKey).toContain("/v2-150dpi-native-pdf/");
     expect(store.size).toBe(2);
     const second = await cache.renderSelectedPages({ document, runId: "r", pageNumbers: [2, 3] });
     expect(second.every((p) => p.cacheHit && p.engine === "native-pdf")).toBe(true);
@@ -141,13 +144,13 @@ describe("PdfRasterCache with PDF_RASTER_ENGINE=native-pdf", () => {
     const absent = await setup(null);
     const a = await absent.cache.renderSelectedPages({ document, runId: "r", pageNumbers: [1] });
     expect(a[0]).toMatchObject({ engine: "pdftoppm" });
-    expect(a[0]!.artifactKey).toContain("/150dpi/");
+    expect(a[0]!.artifactKey).toContain("/v2-150dpi/");
     await absent.sources.clear();
 
     const failing = await setup(fakeEngine({ fail: true }).engine);
     const b = await failing.cache.renderSelectedPages({ document, runId: "r", pageNumbers: [1, 2] });
     expect(b.map((p) => p.engine)).toEqual(["pdftoppm", "pdftoppm"]);
-    expect(failing.calls()).toBe(1);
+    expect(failing.calls()).toBe(2);
     await failing.sources.clear();
   });
 

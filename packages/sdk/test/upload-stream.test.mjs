@@ -35,13 +35,13 @@ test("direct Node streams preserve ranges, infer filenames, and set workspace op
     await withServer(async (apiUrl, requests) => {
       const client = createDocSlurpClient({ apiUrl, apiKey: "key", workspace: "client-default" });
       const source = createReadStream(path, { start: 6, end: 13, highWaterMark: 2 });
-      assert.equal((await client.upload(source, { workspace: "override", tags: ["streamed"] })).run.id, "run");
+      assert.equal((await client.upload(source, { directUpload: false, workspace: "override", tags: ["streamed"] })).run.id, "run");
       assert.equal(requests[0].get("files").name, "handbook.pdf");
       assert.equal(await requests[0].get("files").text(), "DOCUMENT");
       assert.equal(requests[0].get("workspace"), "override");
       assert.deepEqual(JSON.parse(requests[0].get("tags")), ["streamed"]);
       assert.equal(source.destroyed, true);
-      await client.upload(createReadStream(path, { encoding: "hex", start: 6, end: 7 }), { filename: 'named"\r\n.pdf', workspace: "" });
+      await client.upload(createReadStream(path, { encoding: "hex", start: 6, end: 7 }), { directUpload: false, filename: 'named"\r\n.pdf', workspace: "" });
       assert.equal(await requests[1].get("files").text(), Buffer.from("DO").toString("hex"));
       assert.equal(requests[1].get("files").name, 'named"\r\n.pdf');
       assert.match(requests[1].raw, /filename="named%22%0D%0A.pdf"/);
@@ -49,7 +49,7 @@ test("direct Node streams preserve ranges, infer filenames, and set workspace op
       assert.equal(requests[1].get("workspace"), "client-default");
       const handle = await open(path);
       try {
-        await client.upload(createReadStream(join(dir, "not-present.txt"), { fd: handle.fd, autoClose: false, start: 6, end: 7 }));
+        await client.upload(createReadStream(join(dir, "not-present.txt"), { fd: handle.fd, autoClose: false, start: 6, end: 7 }), { directUpload: false });
         assert.equal(await requests[2].get("files").text(), "DO");
         assert.equal(requests[2].get("files").name, "document-1");
       } finally { await handle.close().catch((error) => { if (error.code !== "EBADF") throw error; }); }
@@ -64,8 +64,8 @@ test("direct browser File and Blob use replayable FormData transport", async () 
     assert.equal(await init.body.get("files").text(), "Actual bytes");
     return json({ run: { id: "run" } });
   } });
-  await client.upload(new File(["Actual bytes"], "policy.txt"));
-  await client.upload(new Blob(["Actual bytes"]), { filename: "policy.txt" });
+  await client.upload(new File(["Actual bytes"], "policy.txt"), { directUpload: false });
+  await client.upload(new Blob(["Actual bytes"]), { directUpload: false, filename: "policy.txt" });
 });
 
 test("streaming requests emit bounded chunks without retrying consumed sources", async () => {
@@ -86,7 +86,7 @@ test("streaming requests emit bounded chunks without retrying consumed sources",
     assert.ok(bytes > 1024 * 1024);
     return json({ error: "Busy" }, 503);
   } });
-  await assert.rejects(client.upload(source, { idempotencyKey: "one-shot" }), DocSlurpApiError);
+  await assert.rejects(client.upload(source, { directUpload: false, idempotencyKey: "one-shot" }), DocSlurpApiError);
   assert.equal(calls, 1);
   assert.equal(source.destroyed, true);
 });
@@ -94,7 +94,7 @@ test("streaming requests emit bounded chunks without retrying consumed sources",
 test("early API rejection closes unopened streams and cancellation releases active sources", async () => {
   const unopened = new Readable({ read() { throw new Error("Source must not be consumed"); } });
   const rejecting = createDocSlurpClient({ fetch: async () => json({ error: "Forbidden" }, 403) });
-  await assert.rejects(rejecting.upload(unopened), (error) => error instanceof DocSlurpApiError && error.status === 403);
+  await assert.rejects(rejecting.upload(unopened, { directUpload: false }), (error) => error instanceof DocSlurpApiError && error.status === 403);
   assert.equal(unopened.destroyed, true);
   const controller = new AbortController();
   const reason = new Error("Cancel upload");
@@ -106,7 +106,7 @@ test("early API rejection closes unopened streams and cancellation releases acti
     controller.abort(reason);
     return reader.read();
   } });
-  await assert.rejects(aborting.upload(active, { signal: controller.signal }), (error) => error === reason);
+  await assert.rejects(aborting.upload(active, { directUpload: false, signal: controller.signal }), (error) => error === reason);
   assert.equal(active.destroyed, true);
 });
 
@@ -118,7 +118,7 @@ test("request timeouts close idle stream sources", async () => {
     while (!(await reader.read()).done);
     throw new Error("Idle source unexpectedly completed");
   } });
-  await assert.rejects(client.upload(source, { timeoutMs: 20 }), (error) => error.name === "DocSlurpTimeoutError");
+  await assert.rejects(client.upload(source, { directUpload: false, timeoutMs: 20 }), (error) => error.name === "DocSlurpTimeoutError");
   assert.equal(source.destroyed, true);
 });
 
@@ -129,6 +129,6 @@ test("source open errors reject transport cleanly without unhandled stream error
     await new Response(init.body).arrayBuffer();
     return json({ run: { id: "run" } });
   } });
-  await assert.rejects(client.upload(source), (error) => error.code === "ENOENT");
+  await assert.rejects(client.upload(source, { directUpload: false }), (error) => error.code === "ENOENT");
   assert.equal(source.destroyed, true);
 });

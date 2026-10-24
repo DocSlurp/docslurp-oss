@@ -1,3 +1,4 @@
+import { workspaceSettingsProposalSchema } from "./workspace-settings-proposal.js";
 import type { UIMessage } from "ai";
 import { z } from "zod";
 import { citationLocatorSchema } from "./citation-locator.js";
@@ -19,6 +20,7 @@ export const workspaceChatStatusSchema = z.object({
   tools: z.array(z.object({
     id: z.string(), name: z.string(), status: z.enum(["loading", "success", "error"]),
     runtimeMs: z.number().nonnegative().optional(),
+    settingsProposal: workspaceSettingsProposalSchema.optional(),
   })).optional(),
   searches: z.array(z.object({
     id: z.string(), groupId: z.string(), query: z.string(), aggregate: z.boolean().optional(),
@@ -228,3 +230,6 @@ export function getWorkspaceCitations(
 export function getIngestReport(message: WorkspaceChatUIMessage): IngestReport | null {
   return getDataPart<WorkspaceChatIngestReport>(message, "data-ingestReport")?.report ?? null;
 }
+
+export { workspaceSettingsProposalSchema } from "./workspace-settings-proposal.js";
+export type { WorkspaceSettingsProposal } from "./workspace-settings-proposal.js";

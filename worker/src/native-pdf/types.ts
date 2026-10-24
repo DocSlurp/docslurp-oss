@@ -114,6 +114,7 @@ export interface NativePdfPageScan {
 
 export interface NativePdfRenderOptions {
   dpi?: number;
+  /** Must constrain the raster before allocation, including rotation and UserUnit scaling. */
   maxEdgePx?: number;
   clip?: Bbox;
   format?: "png" | "jpeg" | "webp";

@@ -451,11 +451,20 @@ export class CommandRunner {
     firstPage: number,
     lastPage: number,
     dpi = 150,
+    maxEdgePx = 4000,
   ): Promise<CommandPlan> {
+    // pdfinfo reports CropBox size. Select that same box, and scale before
+    // Splash allocates pixels rather than trusting DPI/metadata alone.
+    if (!Number.isInteger(maxEdgePx) || maxEdgePx < 1 || maxEdgePx > 4000) {
+      throw new Error("Invalid bounded PDF raster edge");
+    }
     return await this.planDocumentTool({
       binary: "pdftoppm",
       args: [
         "-png",
+        "-cropbox",
+        "-scale-to",
+        String(maxEdgePx),
         "-r",
         String(dpi),
         "-f",
@@ -465,7 +474,7 @@ export class CommandRunner {
         source,
         prefix,
       ],
-      fileArgIndexes: [7, 8],
+      fileArgIndexes: [10, 11],
       supportsDoubleDash: true,
     });
   }

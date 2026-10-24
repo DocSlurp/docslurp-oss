@@ -1,12 +1,23 @@
 # Completed
 
+- Preserve exact source/page citation indices and avoid invented alternative product workflows when chat capabilities are unavailable; add claim-bound attribution screening and development cases (2026-10-24).
+
+- Ground chat capability instructions in the current actor-scoped tool catalog, direct document requests to tools, and block failed/refused tools, partial batches and timeouts without model retry or fallback success. Add runtime/transport regressions and separate capability/fault eval cases (2026-10-24).
+- Add web tools (2026-10-23; migration 0080): web search, page fetch, site map, crawl and website ingest over REST (`/v1/web/*`), MCP and guarded chat. Tavily, Exa, Firecrawl and Jina adapters sit behind one generic interface with cheapest-first, round-robin or ordered routing, failover and provider benching. Provider identity stays internal. Calls are billed as `web-search`/`web-page`/`web-map` credits, workspaces opt in through `pipeline.webTools` (default on) and every call is traced. See `docs/web-tools.md`.
+
+- Use measured 120-DPI initial PDF rendering for every account, reuse existing authorized pixels, and request 250-DPI sharpening/export only explicitly for funded or billing-exempt document organizations. Bind demand, cache, workflow and usage identities to effective DPI; retain capacity and raster bounds (2026-10-23; migration 0079).
+
+- Keep customer funding/resume status in the product and remove its operator notifications. Alert only on actual configured-platform vendor billing/quota errors, including bounded upstream SSE error frames; emit sanitized telemetry and deduplicated Telegram warning/recovery with exact credential scope (2026-10-23). Coverage and transport limits: `docs/vendor-balance-alerts.md`.
+
+- Automatically finalize direct object uploads and ingest their verified bytes with persisted results, authenticated Tigris notifications, multipart reconciliation, unknown-length stream signing, concurrent-session fencing and interrupted-run recovery (2026-10-23). Retain explicit completion/confirmation compatibility and expire abandoned uploads.
+
 - Retire original unflagged pending canonical history after a newer same-organization/workspace/source replacement completes, repair existing terminal-run backlog, and serialize retirement with retries without blocking canonical locks (2026-10-23; migration 0076).
 
 - Render native PDF pages on demand through authorized, deduplicated and bounded Temporal jobs; persist page artifacts and scoped compute receipts atomically. Distinguish expected missing Lance compatibility tables from real storage failures, and let existing readers drain before the document counter migration acquires its lock (2026-10-23).
 
 - Preserve verified direct-upload byte accounting, backfill only ownership-matched completed upload receipts, give duplicate embedding artifacts document-local chunks/citation evidence, clear empty replacements, and retire superseded pending history without retry resurrection (2026-10-23; migrations 0073/0075).
 
-- Preserve safe credit-pause reasons and reserve facts, retry funding resumes transactionally, and emit deduplicated credit/deferred-resume alerts through existing Telegram/SigNoz logging (2026-10-23).
+- Preserve safe credit-pause reasons and reserve facts, retry funding resumes transactionally (2026-10-23). Customer-credit operator alerts were subsequently removed in favor of vendor billing/quota evidence.
 
 - Remove repeated chunk/page heap scans from workspace board byte totals using exact statement-triggered document counters; preserve indexed-byte output and existing search counters (2026-10-23). Local paired confirmation is 79.5% faster; production rollout remains unmeasured.
 
@@ -59,3 +70,9 @@
 - Retire the automation surface: delete the hidden `ai.simple` / `ai.advanced` / `ai.operation.get` MCP tools, `/v1/ai/*`, automation operations and grounded summaries. Migration 0060 drops their tables (`ai_operations`, `ai_operation_events`, `grounded_summaries`) as the follow-up contract step. The MCP catalog now has one definition per public tool name; the internal `workspace.*` ids, alias map and `docslurp://ai/*` resources are gone (`docslurp://capabilities` replaces them).
 
 - 2026-10-21: Refresh app/OSS dependencies, remove the retired Docling extraction backend so all Python environments can use Pillow 13 security fixes, and remove the vulnerable sprintf-js dependency chain.
+
+- Add bounded 200 DPI selected PDF reader renders and explicit 300 DPI lossless PNG exports, with quality/version-specific caches, demand and compute receipts.
+
+- Enable video frame reading by default for omitted workspace settings, honor explicit disable for silent and narrated video, and retain platform, privacy, budget and quota gates without automatic reprocessing.
+
+- Let workspace chat propose allowlisted pipeline, chat and retrieval settings with exact changes and cost/work disclosure; apply only through an actor-bound trusted UI action with fresh permissions, conflict checks, explicit reprocessing consent and atomic audit.

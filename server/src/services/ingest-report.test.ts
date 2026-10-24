@@ -174,8 +174,17 @@ describe("ingest report: observed content", () => {
     expect(report.recommendations[0]!.reprocessDocumentIds).toEqual(["new"]);
   });
 
+  it("defaults video workspace policy on without claiming frames were processed", () => {
+    const report = build({ documents: [doc("video", { filename: "video.mp4", mimeType: "video/mp4" })] });
+    const setting = report.config.find((item) => item.key === "mediaVideo.enabled");
+    expect(setting?.value).toBe("On");
+    expect(setting?.note).toContain("not evidence that frames were processed");
+    expect(report.recommendations.some((item) => item.id === "turn-on-video")).toBe(false);
+  });
+
   it("audio: counts media, flags a recording without a transcript", () => {
     const report = build({
+      pipeline: pipeline({ mediaVideo: { enabled: false } }),
       documents: [
         doc("call", { filename: "call.mp3", mimeType: "audio/mpeg", pageCount: 1, chunkTotal: 0 }),
         doc("talk", { filename: "talk.mp4", mimeType: "video/mp4", pageCount: 1, chunkTotal: 3, chunkUnattributed: 3 }),

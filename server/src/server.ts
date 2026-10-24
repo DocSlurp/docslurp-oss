@@ -1,3 +1,6 @@
+import { closeDirectUploadLockPool } from "./lib/direct-upload-locks.js";
+import { tigrisUploadWebhookRoutes } from "./routes/tigris-upload-webhook.js";
+import { startDirectUploadReconciler, stopDirectUploadReconciler } from "./services/direct-upload-reconciler.js";
 import { apiPublicErrorMiddleware } from "./lib/public-errors.js";
 import { nativeBodyLimit, nativeErrorHandler } from "./lib/api-error.js";
 import { sessionToolRoutes } from "./routes/session-tools.js";
@@ -33,6 +36,7 @@ import { webhooksRoutes } from "./routes/webhooks.js";
 import { workspacesRoutes } from "./routes/workspaces.js";
 import { apiKeysRoutes } from "./routes/api-keys.js";
 import { searchRoutes, searchesRoutes, workspaceChatRoutes } from "./routes/search.js";
+import { webRoutes } from "./routes/web.js";
 import { indexStalenessRoutes } from "./routes/index-staleness.js";
 import { workspaceGraphRoutes } from "./routes/workspace-graph.js";
 import { artifactsRoutes } from "./routes/artifacts.js";
@@ -132,6 +136,7 @@ export function createApiApp(): Hono {
     "/webhooks/stripe",
     nativeBodyLimit(1024 * 1024)
   );
+  app.use("/webhooks/tigris/uploads", nativeBodyLimit(1024 * 1024));
   app.use("*", rejectNulBytes);
   // `/v1/workspaces/:slug|default/...` → resolved workspace UUID routes.
   const workspaceRefs = workspaceRefPath([workspacesRoutes, connectorsRoutes, secretsRoutes, workspaceGraphRoutes]);
@@ -163,6 +168,7 @@ export function createApiApp(): Hono {
   app.route("/v1/capabilities", capabilitiesRoutes);
   app.route("/v1/notifications", notificationsRoutes);
   app.route("/v1/search", searchRoutes);
+  app.route("/v1/web", webRoutes);
   app.route("/v1/searches", searchesRoutes);
   app.route("/v1/chat", workspaceChatRoutes);
   app.route("/v1", chatCompletionsRoutes);
@@ -181,6 +187,7 @@ export function createApiApp(): Hono {
   app.route("/v1/user-settings", userSettingsRoutes);
   app.route("/v1/account", accountRoutes);
   app.route("/webhooks", stripeWebhookRoutes);
+  app.route("/webhooks", tigrisUploadWebhookRoutes);
 
   return app;
 }
@@ -212,6 +219,8 @@ let startupPromise: Promise<void> | null = null;
 /** Stops this module instance's timers and LISTEN subscription. */
 async function stopApiBackgroundTasks(): Promise<void> {
   stopMaintenanceSweeper();
+  await stopDirectUploadReconciler();
+  await closeDirectUploadLockPool();
   stopAlertEvaluator();
   stopCreditDebitFlusher();
   stopRunStartRecovery();
@@ -243,6 +252,7 @@ export function ensureApiStartup(): Promise<void> {
       // they would keep running (and querying) alongside the new ones.
       await replaceProcessTask("api-background-tasks", stopApiBackgroundTasks)?.();
       startMaintenanceSweeper();
+      startDirectUploadReconciler();
       // Leader-elected alert checks; logs [alert] lines and posts ALERT_WEBHOOK_URL.
       startAlertEvaluator();
       // Apply workers' pending credit debits to org pools every few seconds.

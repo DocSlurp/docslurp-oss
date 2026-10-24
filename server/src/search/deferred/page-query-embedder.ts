@@ -1,3 +1,4 @@
+import { instrumentFetch } from "@docslurp/shared/observability";
 import {
   authorizePrivateModelCall,
   isPrivateModelUri,
@@ -87,7 +88,7 @@ async function embedWithGemini(
   if (!apiKey) return null;
   const modelId = args.model.split("/").pop() ?? "gemini-embedding-2";
   // One batch request: its response carries usageMetadata (token counts) for text too.
-  const response = await (deps.fetchImpl ?? fetch)(`${GEMINI_ENDPOINT}/${modelId}:batchEmbedContents`, {
+  const response = await instrumentFetch("google", "embedding", deps.fetchImpl ?? fetch)(`${GEMINI_ENDPOINT}/${modelId}:batchEmbedContents`, {
     method: "POST",
     headers: { "content-type": "application/json", "x-goog-api-key": apiKey },
     // No task prefix: Gemini Embedding 2 query text is embedded as-is.

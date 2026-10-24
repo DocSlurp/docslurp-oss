@@ -24,3 +24,8 @@ export function currentChatSessionId(): string | null {
 export function currentChatAgentSignal(): AbortSignal | undefined {
   return chatAgentContext.getStore()?.signal;
 }
+
+/** Whether the current call runs inside a chat agent turn's tool dispatch (vs. an external MCP client). */
+export function inChatAgentContext(): boolean {
+  return chatAgentContext.getStore() !== undefined;
+}
