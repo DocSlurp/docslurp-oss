@@ -35,7 +35,7 @@ import { headStorageBucket } from "../lib/storage.js";
 import { describeTemporalNamespace } from "../lib/temporal.js";
 import { loadMigrationJournal } from "./alerts/alert-evaluator.js";
 
-export type ReadinessCheckName = "database" | "migrations" | "storage" | "temporal";
+export type ReadinessCheckName = "database" | "pool" | "migrations" | "storage" | "temporal";
 
 export interface ReadinessCheck {
   name: ReadinessCheckName;
@@ -58,6 +58,7 @@ export type ProbeResult = { ok: true; detail?: string } | { ok: false; detail: s
 
 export interface ReadinessProbes {
   database: (signal: AbortSignal) => Promise<ProbeResult>;
+  pool: (signal: AbortSignal) => Promise<ProbeResult>;
   migrations: (signal: AbortSignal) => Promise<ProbeResult>;
   storage: (signal: AbortSignal) => Promise<ProbeResult>;
   temporal: (signal: AbortSignal) => Promise<ProbeResult>;
@@ -65,6 +66,7 @@ export interface ReadinessProbes {
 
 const CRITICAL: Record<ReadinessCheckName, boolean> = {
   database: true,
+  pool: true,
   migrations: true,
   storage: true,
   temporal: false,
@@ -97,6 +99,21 @@ export const defaultReadinessProbes: ReadinessProbes = {
     const probe = await sharedDbProbe().ping(readinessTimeoutMs());
     if (!probe.ok) return { ok: false, detail: probe.detail };
     return { ok: true, detail: `${probe.latencyMs}ms; ${loadDetail()}` };
+  },
+  async pool() {
+    // The request pool itself, not the dedicated probe: after a suspend/resume
+    // its sockets can be dead while the probe connection is fresh. The pool
+    // recycles stale connections and retries reads, so a pass means requests
+    // will work. Saturation (a timeout) is the `database` check's business
+    // (2026-10-20: busy pools must not fail readiness), so it is reported, not failed.
+    try {
+      return { ok: true, detail: `${await apiPool.ping(readinessTimeoutMs())}ms` };
+    } catch (error) {
+      if (error instanceof Error && error.message.startsWith("pool query timed out")) {
+        return { ok: true, detail: `${error.message}; pool busy: ${loadDetail()}` };
+      }
+      throw error;
+    }
   },
   async migrations() {
     const journal = loadMigrationJournal();

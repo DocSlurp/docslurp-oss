@@ -1,5 +1,5 @@
 import { withBackgroundSpan } from "@docslurp/shared/observability";
-import { sql as defaultSql, type SqlClient } from "../db.js";
+import { apiPool, sql as defaultSql, type SqlClient } from "../db.js";
 import { signalPipelinePause, signalPipelineResume } from "../lib/temporal.js";
 import { RUN_EVENTS_CHANNEL } from "./run-event-hub.js";
 import { loadSpendStatus, spendBlockReason, spendGuardsSkipped } from "./billing/spend-guard.js";
@@ -186,9 +186,14 @@ export function orgIdFromSpendChangedPayload(payload: string): string | null {
 /** LISTEN org_spend_changed and resume the org's spend-paused runs as soon as it may spend. */
 export async function startOrgSpendChangedListener(): Promise<void> {
   if (orgSpendListener) return;
-  orgSpendListener = await defaultSql.listen(ORG_SPEND_CHANGED_CHANNEL, (payload) => {
+  orgSpendListener = await apiPool.listen(ORG_SPEND_CHANGED_CHANNEL, (payload) => {
     const orgId = orgIdFromSpendChangedPayload(payload);
     if (orgId) requestOrgSpendSweep(orgId);
+  }, () => {
+    // Re-subscribed after a suspend/resume: sweep everything, since notifications may have been missed.
+    void sweepSpendPausedRuns().catch((error: unknown) => {
+      console.error(`[spend-paused-runs] catch-up sweep failed: ${error instanceof Error ? error.message : String(error)}`);
+    });
   });
 }
 

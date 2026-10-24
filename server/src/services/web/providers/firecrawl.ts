@@ -1,5 +1,5 @@
 import { WebProviderError, type ProviderCallContext, type ProviderResult, type WebPage, type WebProviderAdapter, type WebRecency } from "../types.js";
-import { clip, num, page, providerJson, sleep, str } from "./http.js";
+import { clip, num, page, pageFailureReason, providerJson, sleep, str, targetStatusReason } from "./http.js";
 
 const BASE = "https://api.firecrawl.dev/v2";
 const TBS: Record<WebRecency, string> = { day: "qdr:d", week: "qdr:w", month: "qdr:m", year: "qdr:y" };
@@ -31,12 +31,47 @@ export function createFirecrawlAdapter(options: { usdPerCredit: number }): WebPr
   const scrapeOptions = { formats: ["markdown"], onlyMainContent: true, removeBase64Images: true, blockAds: true };
   const searchCredits = (limit: number, includeContent: boolean) => Math.ceil(limit / 10) * 2 + (includeContent ? limit : 0);
 
-  async function scrape(url: string, input: { depth: string; maxCharacters: number }, ctx: ProviderCallContext) {
+  /**
+   * `standard` renders JavaScript with the auto proxy (basic, retried once on
+   * enhanced when the site answers 401/403/429, at no surcharge). `rendered-wait`
+   * also waits, scrolls to trigger lazy content and skips the cache; actions
+   * add no credits. A returned document costs 1 credit even when the site
+   * answered with an error, so those count toward cost and fail the page.
+   */
+  async function scrape(url: string, mode: "standard" | "rendered-wait", maxCharacters: number, ctx: ProviderCallContext) {
     const body = await providerJson<Credits & { data?: Record<string, unknown> }>("firecrawl", ctx, `${BASE}/scrape`, {
       headers: auth(ctx.apiKey),
-      body: { url, ...scrapeOptions, ...(input.depth === "deep" ? { maxAge: 0, waitFor: 1_000 } : {}) },
+      body: { url, ...scrapeOptions, proxy: "auto",
+        ...(mode === "rendered-wait" ? { maxAge: 0, waitFor: 2_500, timeout: 40_000,
+          actions: [{ type: "scroll", direction: "down" }, { type: "wait", milliseconds: 1_500 }] } : {}) },
     });
-    return body.data ? scrapedPage(body.data, input.maxCharacters) : null;
+    if (!body.data) return { page: null, charged: false, reason: "unreadable" };
+    const metadata = (body.data.metadata && typeof body.data.metadata === "object" ? body.data.metadata : {}) as Record<string, unknown>;
+    const reason = targetStatusReason(num(metadata.statusCode));
+    if (reason) return { page: null, charged: true, reason };
+    const scraped = scrapedPage(body.data, maxCharacters);
+    return { page: scraped, charged: true, reason: scraped ? null : "unreadable" };
+  }
+
+  async function scrapeAll(input: { urls: string[]; maxCharacters: number }, ctx: ProviderCallContext, mode: "standard" | "rendered-wait") {
+    const settled = await Promise.allSettled(input.urls.map((url) => scrape(url, mode, input.maxCharacters, ctx)));
+    const pages: WebPage[] = [];
+    const failed: Array<{ url: string; reason: string }> = [];
+    let charged = 0;
+    settled.forEach((result, index) => {
+      if (result.status === "fulfilled") {
+        if (result.value.charged) charged++;
+        if (result.value.page) pages.push(result.value.page);
+        else failed.push({ url: input.urls[index]!, reason: result.value.reason ?? "unreadable" });
+      } else {
+        failed.push({ url: input.urls[index]!, reason: pageFailureReason(result.reason) });
+      }
+    });
+    // Every URL failing on a provider-level error (quota, rate limit, outage) is a provider failure, not unreadable pages.
+    const providerFailure = settled.find((result): result is PromiseRejectedResult => result.status === "rejected"
+      && result.reason instanceof WebProviderError && ["quota_exhausted", "rate_limited", "unavailable", "auth"].includes(result.reason.kind));
+    if (!charged && providerFailure && settled.every((result) => result.status === "rejected")) throw providerFailure.reason;
+    return cost({ pages, failed }, undefined, charged);
   }
 
   return {
@@ -67,21 +102,12 @@ export function createFirecrawlAdapter(options: { usdPerCredit: number }): WebPr
         },
       },
       fetch: {
+        tier: 1,
         estimateUsd: (input) => usd(input.urls.length),
-        run: async (input, ctx) => {
-          const settled = await Promise.allSettled(input.urls.map((url) => scrape(url, input, ctx)));
-          const pages: WebPage[] = [];
-          const failed: Array<{ url: string; reason: string }> = [];
-          settled.forEach((result, index) => {
-            if (result.status === "fulfilled" && result.value) pages.push(result.value);
-            else failed.push({ url: input.urls[index]!, reason: "unreadable" });
-          });
-          // Every URL failing on a provider-level error (quota, auth) is a provider failure, not unreadable pages.
-          const providerFailure = settled.find((result): result is PromiseRejectedResult => result.status === "rejected"
-            && result.reason instanceof WebProviderError && result.reason.kind !== "invalid_request");
-          if (!pages.length && providerFailure) throw providerFailure.reason;
-          return cost({ pages, failed }, undefined, pages.length);
-        },
+        run: (input, ctx) => scrapeAll(input, ctx, "standard"),
+        variants: [
+          { id: "rendered-wait", tier: 2, estimateUsd: (input) => usd(input.urls.length), run: (input, ctx) => scrapeAll(input, ctx, "rendered-wait") },
+        ],
       },
       map: {
         estimateUsd: () => usd(1),

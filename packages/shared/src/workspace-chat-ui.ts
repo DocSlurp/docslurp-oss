@@ -11,6 +11,31 @@ export const workspaceChatStatusStageSchema = z.enum([
   "error",
 ]);
 
+/**
+ * What a chat web tool call shows while it runs and after: the model's query or
+ * the URLs it reads, then the results (domain, title) and credits charged.
+ * Provider-neutral by construction: no provider, cost or raw payload fields.
+ */
+export const webToolActivitySchema = z.object({
+  kind: z.enum(["search", "fetch"]),
+  query: z.string().max(400).optional(),
+  urls: z.array(z.string().max(2048)).max(10).optional(),
+  /** How many URLs the call asked for (urls lists at most five). */
+  requestedCount: z.number().int().nonnegative().optional(),
+  results: z.array(z.object({
+    url: z.string().max(2048),
+    domain: z.string().max(253),
+    title: z.string().max(300).optional(),
+    publishedAt: z.string().max(40).optional(),
+  })).max(10).optional(),
+  resultCount: z.number().int().nonnegative().optional(),
+  /** URLs fetch could not read. */
+  failedCount: z.number().int().nonnegative().optional(),
+  cached: z.boolean().optional(),
+  credits: z.number().nonnegative().optional(),
+});
+export type WebToolActivity = z.infer<typeof webToolActivitySchema>;
+
 export const workspaceChatStatusSchema = z.object({
   stage: workspaceChatStatusStageSchema,
   status: z.enum(["loading", "success", "error"]),
@@ -21,6 +46,7 @@ export const workspaceChatStatusSchema = z.object({
     id: z.string(), name: z.string(), status: z.enum(["loading", "success", "error"]),
     runtimeMs: z.number().nonnegative().optional(),
     settingsProposal: workspaceSettingsProposalSchema.optional(),
+    web: webToolActivitySchema.optional(),
   })).optional(),
   searches: z.array(z.object({
     id: z.string(), groupId: z.string(), query: z.string(), aggregate: z.boolean().optional(),

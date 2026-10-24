@@ -12,14 +12,14 @@ const { evaluateReadiness, migrationReadiness } = await import("../services/read
 type Probes = Parameters<typeof evaluateReadiness>[0] & object;
 
 const ok = async () => ({ ok: true as const });
-const healthy: Probes = { database: ok, migrations: ok, storage: ok, temporal: ok };
+const healthy: Probes = { database: ok, pool: ok, migrations: ok, storage: ok, temporal: ok };
 
 describe("readiness", () => {
   it("is ready and serving when every dependency answers", async () => {
     const report = await evaluateReadiness(healthy, { timeoutMs: 100 });
     expect(report.ok).toBe(true);
     expect(report.serving).toBe(true);
-    expect(report.checks.map((check) => check.name)).toEqual(["database", "migrations", "storage", "temporal"]);
+    expect(report.checks.map((check) => check.name)).toEqual(["database", "pool", "migrations", "storage", "temporal"]);
   });
 
   it("stops serving when a critical dependency fails, with the reason", async () => {

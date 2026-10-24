@@ -1,4 +1,4 @@
-import type { ProviderResult, WebProviderAdapter } from "../types.js";
+import type { ProviderCallContext, ProviderResult, WebProviderAdapter } from "../types.js";
 import { clip, num, page, providerJson, str } from "./http.js";
 
 const BASE = "https://api.tavily.com";
@@ -19,7 +19,28 @@ export function createTavilyAdapter(options: { usdPerCredit: number }): WebProvi
   };
   const auth = (apiKey: string) => ({ Authorization: `Bearer ${apiKey}` });
   const searchCredits = (depth: string) => depth === "deep" ? 2 : 1;
-  const extractCredits = (urls: number, depth: string) => urls * 0.2 * (depth === "deep" ? 2 : 1);
+  // Billed per started block of 5 successful URLs: one URL costs a full credit (measured 2026-10-24).
+  const extractCredits = (urls: number, depth: string) => Math.ceil(urls / 5) * (depth === "deep" ? 2 : 1);
+
+  /** Failed URLs are not billed; check failed_results even on HTTP 200. */
+  async function extract(input: { urls: string[]; maxCharacters: number }, ctx: ProviderCallContext, depth: "basic" | "advanced") {
+    const body = await providerJson<TavilyUsage & { results?: Array<Record<string, unknown>>; failed_results?: Array<Record<string, unknown>> }>(
+      "tavily", ctx, `${BASE}/extract`, {
+        headers: auth(ctx.apiKey),
+        body: { urls: input.urls, extract_depth: depth, format: "markdown", include_usage: true, timeout: depth === "advanced" ? 30 : 10 },
+      });
+    const pages = (body.results ?? []).flatMap((item) => {
+      const url = str(item.url);
+      const markdown = clip(item.raw_content, input.maxCharacters);
+      return url && markdown ? [page({ url, title: str(item.title), markdown })] : [];
+    });
+    const read = new Set(pages.map((item) => item.url));
+    const failed = [
+      ...(body.failed_results ?? []).flatMap((item) => str(item.url) ? [{ url: str(item.url)!, reason: "unreadable" }] : []),
+      ...input.urls.filter((url) => !read.has(url) && !(body.failed_results ?? []).some((item) => item.url === url)).map((url) => ({ url, reason: "unreadable" })),
+    ];
+    return cost({ pages, failed }, body, extractCredits(pages.length, depth === "advanced" ? "deep" : "fast"));
+  }
 
   return {
     id: "tavily",
@@ -48,21 +69,14 @@ export function createTavilyAdapter(options: { usdPerCredit: number }): WebProvi
         },
       },
       fetch: {
-        estimateUsd: (input) => extractCredits(input.urls.length, input.depth) * options.usdPerCredit,
-        run: async (input, ctx) => {
-          const body = await providerJson<TavilyUsage & { results?: Array<Record<string, unknown>>; failed_results?: Array<Record<string, unknown>> }>(
-            "tavily", ctx, `${BASE}/extract`, {
-              headers: auth(ctx.apiKey),
-              body: { urls: input.urls, extract_depth: input.depth === "deep" ? "advanced" : "basic", format: "markdown", include_usage: true },
-            });
-          const pages = (body.results ?? []).flatMap((item) => {
-            const url = str(item.url);
-            const markdown = clip(item.raw_content, input.maxCharacters);
-            return url && markdown ? [page({ url, title: str(item.title), markdown })] : [];
-          });
-          const failed = (body.failed_results ?? []).flatMap((item) => str(item.url) ? [{ url: str(item.url)!, reason: "unreadable" }] : []);
-          return cost({ pages, failed }, body, extractCredits(pages.length, input.depth));
-        },
+        // `basic` extracts static HTML; `advanced` (2x credits) renders JavaScript and handles tables and embeds.
+        optionId: "basic",
+        tier: 0,
+        estimateUsd: (input) => extractCredits(input.urls.length, "fast") * options.usdPerCredit,
+        run: (input, ctx) => extract(input, ctx, "basic"),
+        variants: [
+          { id: "advanced", tier: 1, estimateUsd: (input) => extractCredits(input.urls.length, "deep") * options.usdPerCredit, run: (input, ctx) => extract(input, ctx, "advanced") },
+        ],
       },
       map: {
         estimateUsd: (input) => Math.ceil(input.limit / 10) * options.usdPerCredit,

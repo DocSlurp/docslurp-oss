@@ -77,12 +77,39 @@ describe("chat MCP tools", () => {
     expect(JSON.parse(t.dispatch.mock.calls[2]![1]!.body as string).workspace).toBe("selected");
   });
 
+  it("reports web tool progress: the query while running, then result domains, count, cache and credits", async () => {
+    const t = setup(["webSearch"], { webTools: true });
+    t.dispatch.mockResolvedValueOnce(Response.json({
+      results: [{ url: "https://www.nodejs.org/en/blog", title: "Node.js blog", snippet: "long page text", markdown: "# body" }, { url: "https://github.com/nodejs/node" }],
+      cached: false, usage: { credits: 1 },
+    }));
+    await t.execute("webSearch", { query: "node 24 release" });
+    const [loading, done] = t.onActivity.mock.calls.map(([event]) => event);
+    expect(loading).toMatchObject({ name: "webSearch", status: "loading", web: { kind: "search", query: "node 24 release" } });
+    expect(done.web).toEqual({ kind: "search", query: "node 24 release", resultCount: 2, cached: false, credits: 1, results: [
+      { url: "https://www.nodejs.org/en/blog", domain: "nodejs.org", title: "Node.js blog" },
+      { url: "https://github.com/nodejs/node", domain: "github.com" },
+    ] });
+  });
+
   it("blocks partially failed web fetches instead of presenting the successful pages as completion", async () => {
     const t = setup(["webFetch"], { webTools: true, userText: ["https://example.com/a https://example.com/b"] });
     t.dispatch.mockResolvedValueOnce(Response.json({ pages: [{ url: "https://example.com/a", markdown: "Partial content" }], failed: [{ url: "https://example.com/b", reason: "timeout" }] }));
     await expect(t.execute("webFetch", { urls: ["https://example.com/a", "https://example.com/b"] })).resolves.toMatchObject({ blocked: true, code: "partial_failure" });
     expect(t.failure).toMatchObject({ code: "chat_tool_failed" });
     expect(t.citations).toEqual([]);
+  });
+
+  it("streams only short http(s) source URLs and still reports a partially failed fetch", async () => {
+    const long = `https://example.com/${"a".repeat(3_000)}`;
+    const t = setup(["webFetch"], { webTools: true, userText: [`https://example.com/a https://example.com/b ${long}`] });
+    t.dispatch.mockResolvedValueOnce(Response.json({ pages: [{ url: "https://example.com/a", title: "A" }, { url: "javascript:alert(1)" }],
+      failed: [{ url: "https://example.com/b", reason: "unreadable" }], usage: { credits: 0.25 } }));
+    await t.execute("webFetch", { urls: ["https://example.com/a", "https://example.com/b", long] });
+    const [loading, done] = t.onActivity.mock.calls.map(([event]) => event);
+    expect(loading.web).toEqual({ kind: "fetch", urls: ["https://example.com/a", "https://example.com/b"], requestedCount: 3 });
+    expect(done.status).toBe("error");
+    expect(done.web).toMatchObject({ failedCount: 1, credits: 0.25, results: [{ url: "https://example.com/a", domain: "example.com", title: "A" }] });
   });
 
   it("bounds calls and honors cancellation before dispatch", async () => {

@@ -45,6 +45,48 @@ them, and pages are capped at 6,000 characters.
 - **Privacy:** `local-only` and `strict-privacy` workspaces never use web
   tools, because queries go to a hosted provider.
 
+## Render ladder for page reads
+
+Each provider offers its page reads at one or more render tiers:
+
+| Tier | Option | What it does | Provider cost per page (2026-10-24) |
+|---|---|---|---|
+| 0, plain | `jina.direct` | HTTP fetch, no browser | ~$0.00023 (tokens) |
+| 0 | `exa.cached` | Exa's index copy | $0.001 |
+| 0 | `tavily.basic` | Static HTML extract | $0.008 per started block of 5 URLs |
+| 1, JavaScript | `jina.browser` | Headless browser | ~$0.00036 (tokens) |
+| 1 | `firecrawl.standard` | Browser, auto proxy (retries blocked sites on an enhanced proxy) | $0.00099 |
+| 1 | `tavily.advanced` | JavaScript render, tables and embeds | $0.016 per started block of 5 URLs |
+| 2, heavy | `jina.browser-wait` | Longer wait, shadow DOM and iframes, no cache | ~$0.0003 (tokens) |
+| 2 | `firecrawl.rendered-wait` | Waits, scrolls for lazy content, no cache | $0.00099 |
+| 2 | `exa.live` | Forces a fresh live crawl | $0.001; nothing when it fails |
+
+A read starts at the lowest tier, or at tier 1 for `depth: "deep"`, using the
+cheapest eligible option. Only the pages that come back unreadable, blocked
+(401, 403, 429 or 451 from the site), timed out or thin (a JavaScript shell,
+anti-bot wall or near-empty text) are retried, at the next tier. A provider
+error such as a rate limit or outage fails over within the same tier instead.
+Pages already read are kept, and a thin page is returned when nothing better
+turns up.
+
+- **Price guard:** an option whose estimate is `WEB_MAX_COST_RATIO` (default 15)
+  times the cheapest eligible option's estimate, or more, is never tried. It is
+  listed in the call's trace as `docslurp.web.price_blocked`.
+- **Learned costs:** estimates follow what each option has actually billed. An
+  exponentially weighted ratio of reported cost to estimate applies after 3
+  samples, so ordering and the price guard track real bills.
+- **Retries:** a transient failure (5xx, dropped connection) is retried once on
+  the same option (`WEB_TRANSIENT_RETRIES`, default 1), unless the provider
+  already billed for the job. `WEB_PROVIDER_MAX_ATTEMPTS` (default 4) bounds the
+  provider calls per web call, failovers and escalations included.
+- **Switching options off:** `WEB_DISABLED_OPTIONS=exa.live,firecrawl.rendered-wait`
+  disables those options.
+- **Cost tracking:** every paid provider call is its own internal cost event,
+  carrying `option`, `tier` and `optionKey` (`provider.option`) in its
+  metadata. Spans carry `docslurp.web.option`, `docslurp.web.tier`,
+  `docslurp.web.estimate_usd` and `docslurp.web.cost_usd`, and the call span
+  lists `docslurp.web.options_paid` and `docslurp.web.max_tier`.
+
 ## Routing and cost
 
 `WEB_PROVIDER_STRATEGY` chooses the provider order for each call:
