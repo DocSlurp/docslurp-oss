@@ -94,7 +94,7 @@ export const LEGACY_OPTIMIZE_EVERY_ROWS = 20_000;
 
 /**
  * Maintenance and write-path tuning from LANCEDB_URI, e.g.
- * s3://bucket/lancedb?vectorIndexMinRows=5000&versionRetentionMinutes=10&writeMode=queued.
+ * s3://bucket/lancedb?vectorIndexMinRows=1000&versionRetentionMinutes=10&writeMode=queued.
  * Environment variables override the URI: LANCEDB_WRITE_MODE, LANCEDB_MAINTENANCE_MODE,
  * LANCEDB_OPTIMIZE_EVERY_ROWS, LANCEDB_OPTIMIZE_EVERY_COMMITS, LANCEDB_OPTIMIZE_INTERVAL_SECONDS,
  * LANCEDB_OPTIMIZE_MIN_INTERVAL_SECONDS, LANCEDB_MAX_INDEX_SEGMENTS, LANCEDB_CONSOLIDATE_MAX_ROWS.
@@ -123,7 +123,7 @@ export function lanceDbMaintenanceSettings(
     enabled: !/^(0|false|no|off)$/i.test(params.get("maintenance") ?? ""),
     mode: inline ? "inline" : "background",
     reindexPages: positive("reindexPages", 20),
-    vectorIndexMinRows: positive("vectorIndexMinRows", 5_000),
+    vectorIndexMinRows: positive("vectorIndexMinRows", 1_000),
     writeMode: mode === "direct" ? "direct" : "queued",
     versionRetentionMs: positive("versionRetentionMinutes", 10) * 60_000,
     optimizeEveryRows: positive("optimizeEveryRows", inline ? LEGACY_OPTIMIZE_EVERY_ROWS : d.optimizeEveryRows, "LANCEDB_OPTIMIZE_EVERY_ROWS"),

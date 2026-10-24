@@ -4,11 +4,14 @@
  * safety notes.
  *
  *   DATABASE_URL=… LANCEDB_URI=… node worker/dist/stages/lancedb-relocate-cli.js \
- *     (--org <id> | --all) [--batch-rows 2000] [--dry-run] [--skip-maintenance] [--drop-legacy]
+ *     (--org <id> | --all) [--batch-rows 2000] [--dry-run] [--skip-maintenance] [--maintain-all] [--drop-legacy]
+ *
+ * --maintain-all also maintains workspace databases whose rows were already
+ * relocated (e.g. to build vector indexes after lowering vectorIndexMinRows).
  *
  * Run once after deploying per-workspace databases: first with --dry-run, then
- * without, verify search, then again with --drop-legacy (idempotent upserts,
- * so the rerun converges and then drops). Exits 1 when any org reported an error.
+ * without, verify search, then again with --drop-legacy (append-only, so the
+ * rerun converges and then drops). Exits 1 when any org reported an error.
  */
 import postgres from "postgres";
 
@@ -31,6 +34,7 @@ const options = {
   dryRun: process.argv.includes("--dry-run"),
   skipMaintenance: process.argv.includes("--skip-maintenance"),
   dropLegacy: process.argv.includes("--drop-legacy"),
+  maintainAll: process.argv.includes("--maintain-all"),
 };
 let results: LanceRelocateResult[] = [];
 try {

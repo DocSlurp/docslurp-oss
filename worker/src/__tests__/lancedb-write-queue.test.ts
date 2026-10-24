@@ -291,7 +291,7 @@ describe("lanceDbMaintenanceSettings write-path tuning", () => {
   it("defaults to the queued writer with 10-minute version retention", async () => {
     const { lanceDbMaintenanceSettings, DEFAULT_LANCEDB_CADENCE } = await import("../stages/lancedb-maintenance.js");
     const defaults = lanceDbMaintenanceSettings(new URLSearchParams(), {});
-    expect(defaults).toMatchObject({ writeMode: "queued", versionRetentionMs: 600_000, optimizeEveryRows: DEFAULT_LANCEDB_CADENCE.optimizeEveryRows, queueBatchDocuments: 256 });
+    expect(defaults).toMatchObject({ writeMode: "queued", versionRetentionMs: 600_000, vectorIndexMinRows: 1_000, optimizeEveryRows: DEFAULT_LANCEDB_CADENCE.optimizeEveryRows, queueBatchDocuments: 256 });
     const tuned = lanceDbMaintenanceSettings(new URLSearchParams("writeMode=direct&versionRetentionMinutes=30&queueBatchRecords=5000"), {});
     expect(tuned).toMatchObject({ writeMode: "direct", versionRetentionMs: 1_800_000, queueBatchRecords: 5_000 });
     expect(lanceDbMaintenanceSettings(new URLSearchParams("writeMode=direct"), { LANCEDB_WRITE_MODE: "queued" }).writeMode).toBe("queued");
