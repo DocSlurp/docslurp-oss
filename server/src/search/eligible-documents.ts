@@ -206,7 +206,9 @@ async function queryEligibleDocuments(workspaceId: string, embeddingModel: strin
       union all
       select chain.id, d.id, d.deduped_from_document_id, chain.depth + 1
       from chain join documents d on d.id = chain.next
-      where chain.depth < 8
+      -- Rows live in this workspace's database: a source in another workspace
+      -- is not the owner (the copy was indexed as its own rows).
+      where chain.depth < 8 and d.workspace_id = ${workspaceId}
     ),
     owners as (
       select distinct on (chain.id) chain.id, chain.node as owner_id, owner.index_config_hash

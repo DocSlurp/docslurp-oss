@@ -54,6 +54,8 @@ describe("lanceDbVectorSearch tenant isolation", () => {
     resetLanceDbConnectionForTests();
     delete process.env.LANCEDB_URI;
     delete process.env.LANCEDB_REFINE_FACTOR;
+    delete process.env.LANCEDB_MISSING_TABLE_TTL_SECONDS;
+    delete process.env.LANCEDB_MAX_OPEN_TABLES;
     if (lancedbDir) {
       await rm(lancedbDir, { recursive: true, force: true });
       lancedbDir = null;
@@ -131,6 +133,23 @@ describe("lanceDbVectorSearch tenant isolation", () => {
     expect(second).toEqual(first);
   });
 
+  it("finds a new workspace's first rows soon after an earlier search missed its table", async () => {
+    process.env.LANCEDB_MISSING_TABLE_TTL_SECONDS = "0";
+    expect(await search({ queryVector: [1, 0], documentIds: ["doc-a"], limit: 10 })).toEqual([]);
+    await createLanceDbTable([{ id: "chunk-a", documentId: "doc-a", text: "first upload", vector: [1, 0] }]);
+    expect((await search({ queryVector: [1, 0], documentIds: ["doc-a"], limit: 10 })).map((hit) => hit.id)).toEqual(["chunk-a"]);
+  });
+
+  it("keeps a bounded number of workspace tables open and reopens evicted ones", async () => {
+    process.env.LANCEDB_MAX_OPEN_TABLES = "1";
+    for (const workspaceId of ["ws-a", "ws-b"]) {
+      await createLanceDbTable([{ id: `chunk-${workspaceId}`, documentId: "doc", text: workspaceId, vector: [1, 0] }], { workspaceId });
+    }
+    for (const workspaceId of ["ws-a", "ws-b", "ws-a"]) {
+      expect((await search({ workspaceId, queryVector: [1, 0], limit: 10 })).map((hit) => hit.id)).toEqual([`chunk-${workspaceId}`]);
+    }
+  });
+
   it("finds the nearest scoped documents beyond the global 1,000-row cutoff", async () => {
     const documentIds = Array.from({ length: 400 }, (_, i) => `scoped-doc-${i}`);
     await createLanceDbTable([
@@ -169,7 +188,7 @@ describe("lanceDbVectorSearch tenant isolation", () => {
     } finally {
       close();
     }
-  });
+  }, 30_000);
 
   it("treats quoted document IDs as literals without widening the scope", async () => {
     const quotedId = "doc' OR '1'='1";

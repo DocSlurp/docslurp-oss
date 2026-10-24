@@ -205,6 +205,6 @@ it.each([
   expect(result.results.some((hit) => hit.text.includes("Selected evidence"))).toBe(true);
   expect(lanceDbVectorSearch).toHaveBeenCalledOnce();
   expect(lanceDbVectorSearch).toHaveBeenCalledWith(expect.objectContaining({
-    documentIds: ["selected"], legacyDocumentIds: ["selected"], queryVector: [1, 0, 0],
+    documentIds: ["selected"], workspaceId: "w", queryVector: [1, 0, 0],
   }));
 });
