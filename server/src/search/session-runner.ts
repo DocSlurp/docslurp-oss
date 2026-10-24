@@ -245,7 +245,7 @@ async function executeSearchSession(args: Parameters<typeof runSearchSession>[0]
           // Runs alongside normal retrieval, not before it: the hot path adds no
           // latency, and a cold one overlaps materialization with retrieval.
           const deferredPromise = adapters.deferredPageSearch
-            ? queryVector.then((resolvedVector) => adapters.deferredPageSearch!({
+            ? Promise.resolve(queryVector).then((resolvedVector) => adapters.deferredPageSearch!({
                 query,
                 textQuery,
                 queryVector: resolvedVector,
