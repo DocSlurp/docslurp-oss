@@ -52,6 +52,8 @@ export interface WebServiceDeps {
 const CALL_DEADLINE_MS: Record<Exclude<WebCapability, "crawl">, number> = { search: 30_000, fetch: 60_000, map: 60_000 };
 /** Chat tool results go to a hosted model; keep each page small. */
 const CHAT_PAGE_CHARACTERS = 10_000;
+/** Appended to a page cut for chat. Worded to pass the prompt-injection screen (no fetch/URL instructions). */
+export const CHAT_SHORTENED_NOTE = "[Page shortened for chat. The remaining text is not available in this conversation; search for the specific section instead.]";
 
 function isProviderId(value: string): value is WebProviderId {
   return (WEB_PROVIDER_IDS as readonly string[]).includes(value);
@@ -239,9 +241,10 @@ function resultCount<C extends WebCapability>(capability: C, output: WebOutput<C
 
 /** Web text is untrusted: instruction-like lines are suppressed before a model reads it. */
 function forChat(page: WebPage): WebPage {
+  // The page text is screened first and our note appended after, so the screen never removes the note.
+  // Saying plainly that the rest is unavailable matters: a bare "[truncated]" made the model refetch the page.
   const clean = (text: string | undefined, max: number) => text === undefined ? undefined
-    // Say plainly that the rest is unavailable: a bare "[truncated]" made the model refetch the same page.
-    : reviewUntrustedEvidenceText(text.length > max ? `${text.slice(0, max)}\n\n[Page shortened for chat. The rest is not available here; do not fetch this URL again. Search for the specific section instead.]` : text).text;
+    : text.length > max ? `${reviewUntrustedEvidenceText(text.slice(0, max)).text}\n\n${CHAT_SHORTENED_NOTE}` : reviewUntrustedEvidenceText(text).text;
   return { ...page, title: clean(page.title, 300), snippet: clean(page.snippet, 1_000), markdown: clean(page.markdown, CHAT_PAGE_CHARACTERS) };
 }
 

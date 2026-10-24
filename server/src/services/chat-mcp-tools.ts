@@ -139,9 +139,22 @@ function domainOf(url: string): string {
 }
 
 /** The web tool's request as shown while it runs (model-written query or URLs). */
+/** Sources shown per web call; the UI shows five, and the full tools list is resent on every status update. */
+const WEB_ACTIVITY_SOURCES = 5;
+const WEB_ACTIVITY_URL_MAX = 512;
+
+/** An http(s) URL short enough to stream and link; anything else is dropped rather than cut into a broken link. */
+function streamableUrl(value: unknown): value is string {
+  if (typeof value !== "string" || value.length > WEB_ACTIVITY_URL_MAX) return false;
+  try { return ["http:", "https:"].includes(new URL(value).protocol); } catch { return false; }
+}
+
 function webActivityRequest(id: string, supplied: Record<string, unknown>): WebToolActivity | undefined {
   if (id === "webSearch") return { kind: "search", ...(typeof supplied.query === "string" ? { query: supplied.query.slice(0, 400) } : {}) };
-  if (id === "webFetch") return { kind: "fetch", urls: (Array.isArray(supplied.urls) ? supplied.urls : []).filter((url): url is string => typeof url === "string").slice(0, 10) };
+  if (id === "webFetch") {
+    const urls = Array.isArray(supplied.urls) ? supplied.urls : [];
+    return { kind: "fetch", urls: urls.filter(streamableUrl).slice(0, WEB_ACTIVITY_SOURCES), requestedCount: urls.length };
+  }
   return undefined;
 }
 
@@ -150,12 +163,11 @@ function webActivityResult(request: WebToolActivity, result: unknown): WebToolAc
   const body = (result && typeof result === "object" ? result : {}) as { results?: unknown; pages?: unknown; failed?: unknown; cached?: unknown; usage?: { credits?: unknown } };
   const items = (Array.isArray(request.kind === "search" ? body.results : body.pages) ? (request.kind === "search" ? body.results : body.pages) as unknown[] : []);
   const results = items.flatMap((item) => {
-    const entry = item as { url?: unknown; title?: unknown; publishedAt?: unknown };
-    if (typeof entry?.url !== "string") return [];
-    return [{ url: entry.url.slice(0, 2048), domain: domainOf(entry.url).slice(0, 253),
-      ...(typeof entry.title === "string" && entry.title ? { title: entry.title.slice(0, 300) } : {}),
-      ...(typeof entry.publishedAt === "string" ? { publishedAt: entry.publishedAt.slice(0, 40) } : {}) }];
-  }).slice(0, 10);
+    const entry = item as { url?: unknown; title?: unknown };
+    if (!streamableUrl(entry?.url)) return [];
+    return [{ url: entry.url, domain: domainOf(entry.url).slice(0, 253),
+      ...(typeof entry.title === "string" && entry.title ? { title: entry.title.slice(0, 300) } : {}) }];
+  }).slice(0, WEB_ACTIVITY_SOURCES);
   return { ...request, results, resultCount: items.length,
     ...(Array.isArray(body.failed) ? { failedCount: body.failed.length } : {}),
     ...(typeof body.cached === "boolean" ? { cached: body.cached } : {}),
@@ -411,7 +423,8 @@ export function createChatMcpTools(args: {
               }
             }
           }
-          if (ok && web) web = webActivityResult(web, result);
+          // A partial fetch failure still reports what was read and how many pages failed.
+          if (response.ok && web) web = webActivityResult(web, result);
           if (ok && definition.id === "proposeWorkspaceSettings") {
             const parsed = workspaceSettingsProposalSchema.safeParse((result as { settingsProposal?: unknown })?.settingsProposal);
             if (parsed.success) settingsProposal = parsed.data;

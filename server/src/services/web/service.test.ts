@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { env } from "../../config.js";
 import { WebRouter } from "./router.js";
-import { runWebCapability, setWebServiceDeps, type WebServiceDeps } from "./service.js";
+import { CHAT_SHORTENED_NOTE, runWebCapability, setWebServiceDeps, type WebServiceDeps } from "./service.js";
 import type { WebInput, WebProviderAdapter } from "./types.js";
 
 const search: WebInput<"search"> = { query: "solar output", limit: 5, depth: "fast", includeContent: false, maxCharacters: 1000 };
@@ -97,6 +97,14 @@ describe("runWebCapability", () => {
     const t = setup({ assertCanSpend: async () => { throw Object.assign(new Error("Out of credits"), { statusCode: 402 }); } });
     await expect(runWebCapability("search", search, ctx)).rejects.toMatchObject({ statusCode: 402 });
     expect(t.run).not.toHaveBeenCalled();
+  });
+
+  it("keeps the shortened-page note intact for the chat model", async () => {
+    const t = setup();
+    t.run.mockResolvedValueOnce({ data: { results: [{ url: "https://example.com/long", markdown: "word ".repeat(5_000) }] } as never, costUsd: 0.001, costSource: "reported" as const });
+    const result = await runWebCapability("search", { ...search, query: "long page", includeContent: true }, { ...ctx, surface: "chat" });
+    expect(result.results[0]!.markdown).toContain(CHAT_SHORTENED_NOTE);
+    expect(result.results[0]!.markdown).not.toContain("suppressed");
   });
 
   it("suppresses instruction-like web text before a chat model reads it", async () => {

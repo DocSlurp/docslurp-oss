@@ -100,6 +100,18 @@ describe("chat MCP tools", () => {
     expect(t.citations).toEqual([]);
   });
 
+  it("streams only short http(s) source URLs and still reports a partially failed fetch", async () => {
+    const long = `https://example.com/${"a".repeat(3_000)}`;
+    const t = setup(["webFetch"], { webTools: true, userText: [`https://example.com/a https://example.com/b ${long}`] });
+    t.dispatch.mockResolvedValueOnce(Response.json({ pages: [{ url: "https://example.com/a", title: "A" }, { url: "javascript:alert(1)" }],
+      failed: [{ url: "https://example.com/b", reason: "unreadable" }], usage: { credits: 0.25 } }));
+    await t.execute("webFetch", { urls: ["https://example.com/a", "https://example.com/b", long] });
+    const [loading, done] = t.onActivity.mock.calls.map(([event]) => event);
+    expect(loading.web).toEqual({ kind: "fetch", urls: ["https://example.com/a", "https://example.com/b"], requestedCount: 3 });
+    expect(done.status).toBe("error");
+    expect(done.web).toMatchObject({ failedCount: 1, credits: 0.25, results: [{ url: "https://example.com/a", domain: "example.com", title: "A" }] });
+  });
+
   it("bounds calls and honors cancellation before dispatch", async () => {
     const t = setup();
     const max = CHAT_AGENT_LIMIT_DEFAULTS.maxToolCalls;

@@ -20,6 +20,8 @@ export const webToolActivitySchema = z.object({
   kind: z.enum(["search", "fetch"]),
   query: z.string().max(400).optional(),
   urls: z.array(z.string().max(2048)).max(10).optional(),
+  /** How many URLs the call asked for (urls lists at most five). */
+  requestedCount: z.number().int().nonnegative().optional(),
   results: z.array(z.object({
     url: z.string().max(2048),
     domain: z.string().max(253),
