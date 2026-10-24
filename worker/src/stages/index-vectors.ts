@@ -163,7 +163,16 @@ export class IndexStage implements Stage {
     runId: string | null,
   ): Promise<VectorBackendRecord[]> {
     const chunkIds = isForeignArtifact(artifact, documentId) ? await this.loadChunkIds(documentId) : undefined;
-    return buildVectorRecords(artifact, documentId, metadata, runId, chunkIds);
+    const records = buildVectorRecords(artifact, documentId, metadata, runId, chunkIds);
+    if (chunkIds && records.length < artifact.chunks.length) {
+      // The document lacks chunks the artifact has: those vectors are not indexed for it.
+      console.warn(`[index] rebound artifact of ${artifact.documentId} to document=${documentId}: `
+        + `${records.length}/${artifact.chunks.length} chunks matched by index`);
+      if (records.length === 0 && artifact.chunks.length > 0) {
+        throw new Error(`document ${documentId} has none of the ${artifact.chunks.length} chunks of the embedding artifact it reuses`);
+      }
+    }
+    return records;
   }
 
   /** A small pooled client per worker process, created on first use. */

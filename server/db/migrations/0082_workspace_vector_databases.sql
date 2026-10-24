@@ -109,3 +109,14 @@ WHERE o.id = moved.id
     SELECT 1 FROM vector_index_outbox other
     WHERE other.table_key = moved.lance_uri || '#' || o.lance_table AND other.document_id = o.document_id
   );
+--> statement-breakpoint
+-- A copy in another workspace than its source is now the owner of its rows
+-- (search stops the owner walk at the workspace boundary): give relocated
+-- copies their source's index identity, as the index stage does for new ones.
+UPDATE documents copy
+SET index_config_hash = source.index_config_hash
+FROM documents source
+WHERE copy.deduped_from_document_id = source.id
+  AND copy.workspace_id <> source.workspace_id
+  AND copy.index_config_hash IS NULL
+  AND source.index_config_hash IS NOT NULL;

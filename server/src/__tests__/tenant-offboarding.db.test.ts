@@ -6,6 +6,8 @@ import {
   startMigratedPostgres,
   drainDocumentCleanupQueue,
   drainStorageCleanupQueue,
+  legacyEmbeddingLocations,
+  legacyOrgTable,
   type SupersededPurgeOptions,
 } from "@docslurp/worker/testing";
 
@@ -114,6 +116,8 @@ describe("organization deletion", () => {
     expect(await sql`select kind, target from storage_cleanup_queue order by kind, target`).toEqual([
       { kind: "storage_prefix", target: "member/ws-done/" },
       { kind: "storage_prefix", target: "member/ws-live/" },
+      { kind: "vector_table", target: "team|legacy" },
+      { kind: "vector_table", target: "team|legacy|model-x|4" },
       { kind: "vector_table", target: "team|ws|model-x|4" },
     ]);
     const [org] = await sql`select name, slug, deleted_at is not null as deleted, offboarded_at is not null as offboarded,
@@ -131,7 +135,9 @@ describe("organization deletion", () => {
     await sql`update document_cleanup_queue set not_before = now() - interval '1 second'`;
 
     const objects = new Set(["member/ws-done/markdown/ws-doc.md", "member/ws-live/vision/late.json", "member/up-ws/raw/a.pdf", "other/keep.json"]);
-    const tables = new Set(["/lance/team/ws/vectors-model-x-4#chunks", "/lance/team/other-ws/vectors-model-x-4#chunks"]);
+    const legacy = [...legacyEmbeddingLocations("/lance", "team", "model-x", 4), legacyOrgTable("/lance", "team")]
+      .map((location) => `${location.uri}#${location.table}`);
+    const tables = new Set(["/lance/team/ws/vectors-model-x-4#chunks", "/lance/team/other-ws/vectors-model-x-4#chunks", ...legacy]);
     const vectorRowDeletes: string[][] = [];
     const storage = {
       bucket: "b",

@@ -184,7 +184,7 @@ async function getTable(uri: string, name: string): Promise<lancedb.Table | null
 
 /**
  * Open a table: `table` null with `failed` false when it does not exist
- * (cached for MISSING_TABLE_TTL_MS), `failed` true when opening it failed for
+ * (cached for missingTableTtlMs()), `failed` true when opening it failed for
  * another reason (not cached; the next search retries).
  */
 async function openTarget(uri: string, name: string): Promise<{ table: lancedb.Table | null; failed: boolean }> {
@@ -217,6 +217,8 @@ async function openTarget(uri: string, name: string): Promise<{ table: lancedb.T
     return { table: opened, failed: false };
   } catch (error) {
     if (tables.get(key) === table) tables.delete(key);
+    // A workspace without a table keeps no connection open either.
+    releaseConnectionIfUnused(key);
     if (isLanceTableNotFound(error)) {
       if (missingTables.size >= 4 * maxOpenTables()) pruneMissingTables();
       missingTables.set(key, Date.now() + missingTableTtlMs());
@@ -235,20 +237,32 @@ function refreshPrewarm(key: string, name: string, table: lancedb.Table): void {
   void prewarmTable(table, name, { prewarmIndex: true, prewarmData: false });
 }
 
+/**
+ * Searches already holding an evicted or dropped handle may still be querying
+ * it: close it (and its connection) only after they have had time to finish.
+ */
+const CLOSE_GRACE_MS = 60_000;
+function closeLater(close: () => void): void {
+  setTimeout(close, CLOSE_GRACE_MS).unref();
+}
+
+/** One table per workspace database: a connection with no cached table goes too. */
+function releaseConnectionIfUnused(tableKey: string): void {
+  const connKey = tableKey.slice(0, tableKey.lastIndexOf("\u0000"));
+  const connection = connections.get(connKey);
+  if (!connection || [...tables.keys()].some((other) => other.startsWith(`${connKey}\u0000`))) return;
+  connections.delete(connKey);
+  closeLater(() => void connection.then((db) => db.close()).catch(() => undefined));
+}
+
 function evictLeastRecentlyUsed(): void {
   const max = maxOpenTables();
   for (const [key, table] of tables) {
     if (tables.size <= max) return;
     tables.delete(key);
     lastPrewarm.delete(key);
-    void table.then((handle) => handle.close()).catch(() => undefined);
-    // One table per workspace database: its connection goes with it.
-    const connKey = key.slice(0, key.lastIndexOf("\u0000"));
-    const connection = connections.get(connKey);
-    if (connection && ![...tables.keys()].some((other) => other.startsWith(`${connKey}\u0000`))) {
-      connections.delete(connKey);
-      void connection.then((db) => db.close()).catch(() => undefined);
-    }
+    closeLater(() => void table.then((handle) => handle.close()).catch(() => undefined));
+    releaseConnectionIfUnused(key);
   }
 }
 
@@ -267,12 +281,17 @@ function noteMissingTableWithDocuments(uri: string, documents: number): void {
   console.warn(`[search] lancedb table missing for ${documents} vector-ready documents namespace=${lanceNamespace(uri)}`);
 }
 
-function dropTable(uri: string, name: string): void {
+/** Drops the handle a failed query used, unless another search already reopened it. */
+function dropTable(uri: string, name: string, failed: lancedb.Table): void {
   const key = `${connectionKey(uri)}\u0000${name}`;
   const table = tables.get(key);
-  tables.delete(key);
-  lastPrewarm.delete(key);
-  void table?.then((handle) => handle.close()).catch(() => undefined);
+  if (!table) return;
+  void table.then((handle) => {
+    if (handle !== failed || tables.get(key) !== table) return;
+    tables.delete(key);
+    lastPrewarm.delete(key);
+    closeLater(() => handle.close());
+  }).catch(() => undefined);
 }
 
 export function resetLanceDbConnectionForTests(): void {
@@ -473,7 +492,7 @@ export async function lanceDbVectorSearch(args: {
       return filterLanceDbRowsByDocumentIds((await lanceSpan("search", () => query.toArray(), uri)) as LanceDbRow[], documentIds);
     } catch {
       failed = true;
-      dropTable(uri, name);
+      dropTable(uri, name, table);
       return [];
     }
   }))).flat();

@@ -232,12 +232,16 @@ counts `lanceTableMissing` and logs `[search] lancedb table missing`).
    workspace database and marks old org-deletion cleanup rows.
 2. Move the rows, without re-embedding, from the worker image:
    `node worker/dist/stages/lancedb-relocate-cli.js --all --dry-run`, then
-   without `--dry-run`. It routes each row to its document's workspace (dedup
-   copies in another workspace get their own rebound rows), builds the vector
-   and full-text indexes and is idempotent. Rows of deleted documents stay
-   behind as `orphan_rows`.
-3. Check search in a few workspaces, then rerun with `--drop-legacy` to delete
-   the org-level tables. It drops only after a run without errors.
+   without `--dry-run`, with ingest still stopped. It routes each row to its
+   document's workspace (dedup copies in another workspace get their own
+   rebound rows), keeps only rows whose chunk still exists, appends without
+   replacing rows already in the workspace database, then builds the vector
+   and full-text indexes. Reruns converge. Rows of deleted documents and
+   replaced chunks stay behind (`orphan_rows`, `stale_rows`).
+3. Resume ingest, check search in a few workspaces, then rerun with
+   `--drop-legacy` to delete the org-level tables (they hold chunk text). It
+   drops only after a run that read every row and had no error. Deleting an
+   org queues its org-level tables for the cleanup sweep too.
 
 Rolling back the code reads the org-level tables again, which miss anything
 indexed after the upgrade: keep them until step 3 and reprocess documents

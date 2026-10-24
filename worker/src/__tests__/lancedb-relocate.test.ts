@@ -54,6 +54,17 @@ async function readRows(uri: string, table = "chunks") {
   } finally { db.close(); }
 }
 
+async function texts(uri: string) {
+  const db = await connect(uri);
+  try {
+    const table = await db.openTable("chunks");
+    try {
+      const rows = await table.query().select(["id", "text"]).toArray() as Array<{ id: string; text: string }>;
+      return Object.fromEntries(rows.map((entry) => [entry.id, entry.text]).sort());
+    } finally { table.close(); }
+  } finally { db.close(); }
+}
+
 const workspaceUri = (workspaceId: string) => VectorNamespaceManager.getEmbeddingLocation(lanceDir, "org1", workspaceId, MODEL, DIM).uri;
 
 beforeAll(async () => {
@@ -82,16 +93,26 @@ beforeAll(async () => {
     await sql`insert into vector_indexes (id, document_id, backend, bucket, path, embedding_model, dimension)
       values (${`vi-${document.id}`}, ${document.id}, 'lancedb', 'b', 'p', ${MODEL}, ${DIM})`;
   }
-  // The cross-workspace copy was seeded with random chunk ids; it has no chunk 1.
-  await sql`insert into document_chunks (id, document_id, run_id, user_id, chunk_index, text)
-    values ('cross-uuid-0', 'cross-copy', 'run-w2', 'u', 0, 'text')`;
+  // Current chunks. The cross-workspace copy was seeded with random chunk ids and has no chunk 1;
+  // a-002 was replaced by a reprocess (its legacy row is stale).
+  for (const [id, documentId, runId, index] of [
+    ["a-000", "a", "run-w1", 0], ["a-001", "a", "run-w1", 1], ["b-000", "b", "run-w2", 0], ["b-old", "b", "run-w2", 5],
+    ["cross-uuid-0", "cross-copy", "run-w2", 0],
+  ] as const) {
+    await sql`insert into document_chunks (id, document_id, run_id, user_id, chunk_index, text)
+      values (${id}, ${documentId}, ${runId}, 'u', ${index}, 'text')`;
+  }
+  await sql`update documents set source_key = 'copy-key', filename = 'copy.pdf' where id = 'cross-copy'`;
 
   const [embedding] = legacyEmbeddingLocations(lanceDir, "org1", MODEL, DIM);
   await createTable(embedding!.uri, embedding!.table, [
-    row("a-000", "a", 0, 1), row("a-001", "a", 1, 2), row("b-000", "b", 0, 3), row("gone-000", "gone", 0, 4),
+    row("a-000", "a", 0, 1), row("a-001", "a", 1, 2), row("a-002", "a", 2, 9), row("b-000", "b", 0, 3), row("gone-000", "gone", 0, 4),
   ]);
+  // The org-wide table is the oldest layout: its stale copy of a-000 must not win.
   const org = legacyOrgTable(lanceDir, "org1");
-  await createTable(org.uri, org.table, [row("b-old", "b", 5, 5)]);
+  await createTable(org.uri, org.table, [{ ...row("b-old", "b", 5, 5), chunkIndex: null }, { ...row("a-000", "a", 0, 1), text: "older a-000" }]);
+  // Written by the worker after the upgrade: relocation never replaces it.
+  await createTable(workspaceUri("w2"), "chunks", [{ ...row("b-000", "b", 0, 3, "run-new"), text: "reindexed" }]);
 }, 180_000);
 
 afterAll(async () => {
@@ -104,8 +125,8 @@ afterAll(async () => {
 describe("lancedb relocate", () => {
   it("changes nothing on a dry run", async () => {
     const result = await relocateOrgVectors({ sql, orgId: "org1", dryRun: true, log: () => {} });
-    expect(result).toMatchObject({ orphanRows: 1, unmatchedCopyRows: 1, errors: [], droppedLegacy: [] });
-    expect(result.sources.map((source) => source.rows).sort()).toEqual([1, 4]);
+    expect(result).toMatchObject({ orphanRows: 1, staleRows: 1, unmatchedCopyRows: 1, skippedExisting: 3, errors: [], droppedLegacy: [] });
+    expect(result.sources.map((source) => [source.rows, source.read])).toEqual([[5, 5], [2, 2]]);
     expect(await readRows(workspaceUri("w1"))).toBeNull();
   }, 60_000);
 
@@ -120,12 +141,16 @@ describe("lancedb relocate", () => {
     expect(w2!.map((entry) => [entry.id, entry.documentId])).toEqual([
       ["b-000", "b"], ["b-old", "b"], ["cross-uuid-0", "cross-copy"],
     ]);
+    expect(w2!.find((entry) => entry.id === "b-000")!.runId).toBe("run-new");
     const copy = w2!.find((entry) => entry.id === "cross-uuid-0")!;
     expect(copy.runId).toBe("run-w2");
     expect(decodeLanceChunkHydration(copy.hydration)).toMatchObject({ runId: "run-w2", metadata: { documentId: "cross-copy" } });
+    expect(await texts(workspaceUri("w1"))).toEqual({ "a-000": "text a-000", "a-001": "text a-001" });
+    expect((await texts(workspaceUri("w2")))["cross-uuid-0"]).toBe("text a-000");
 
     const again = await relocateOrgVectors({ sql, orgId: "org1", log: () => {} });
     expect(again.errors).toEqual([]);
+    expect(again.written).toEqual([]);
     expect((await readRows(workspaceUri("w2")))!.map((entry) => entry.id)).toEqual(w2!.map((entry) => entry.id));
   }, 120_000);
 
@@ -142,7 +167,7 @@ describe("lancedb relocate", () => {
   it("points pending vector writes queued with the org-level layout at the workspace database", async () => {
     const migration = await readFile(path.join(path.dirname(fileURLToPath(import.meta.url)),
       "../../../server/db/migrations/0082_workspace_vector_databases.sql"), "utf8");
-    const rewrite = migration.split("--> statement-breakpoint").at(-1)!;
+    const rewrite = migration.split("--> statement-breakpoint").find((statement) => statement.includes("UPDATE vector_index_outbox"))!;
     const oldUri = `${lanceDir}/org1/vectors/provider%2Fmodel%2Ev1/4`;
     await sql`insert into vector_index_outbox (table_key, lance_uri, lance_table, org_id, document_id, run_id, artifact_key, metadata, record_count)
       values (${`${oldUri}#chunks`}, ${oldUri}, 'chunks', 'org1', 'b', 'run-w2', 'k', '{}', 1)`;
