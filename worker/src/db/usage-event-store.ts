@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 
-import type { JSONValue, Sql } from "postgres";
+import type { JSONValue, PendingQuery, Sql } from "postgres";
 
 import type { UsageEvent } from "../models.js";
 import { billableCents } from "../pipeline/usage-ledger.js";
@@ -52,22 +52,9 @@ export function runUsageScope(state: WorkflowState): {
   };
 }
 
-/**
- * Insert a run's usage events (ON CONFLICT (id) DO NOTHING) and return the
- * cost of the rows actually inserted.
- */
-export async function persistRunUsageEvents(args: {
-  client: Sql<Record<string, unknown>>;
-  state: WorkflowState;
-  usageEvents: UsageEvent[];
-}): Promise<number> {
-  const { client, state, usageEvents } = args;
-  if (usageEvents.length === 0) {
-    return 0;
-  }
-
+function runUsageRows(client: Sql<Record<string, unknown>>, state: WorkflowState, usageEvents: UsageEvent[]) {
   const scope = runUsageScope(state);
-  const rows = usageEvents.map((usage) => ({
+  return usageEvents.map((usage) => ({
     id: usage.id ?? randomUUID(),
     user_id: state.run.userId,
     run_id: state.run.id,
@@ -88,29 +75,33 @@ export async function persistRunUsageEvents(args: {
     // runId keeps the event classified as ingest spend after the run is deleted.
     metadata: toJson(client, { ...persistedMetadata(usage), runId: state.run.id }),
   }));
+}
 
+const USAGE_EVENT_COLUMNS = [
+  "id", "user_id", "run_id", "provider", "model", "metric", "amount", "unit",
+  "cost_cents", "input_tokens", "output_tokens", "metadata", "org_id", "workspace_id", "api_key_id",
+] as const;
+
+/**
+ * Insert a run's usage events (ON CONFLICT (id) DO NOTHING) and return the
+ * cost of the rows actually inserted.
+ */
+export async function persistRunUsageEvents(args: {
+  client: Sql<Record<string, unknown>>;
+  state: WorkflowState;
+  usageEvents: UsageEvent[];
+}): Promise<number> {
+  const { client, state, usageEvents } = args;
+  if (usageEvents.length === 0) {
+    return 0;
+  }
+
+  const rows = runUsageRows(client, state, usageEvents);
   const inserted: Array<{ id: string; cost_cents: number }> = [];
   for (const batch of batchedRows(rows)) {
     inserted.push(
       ...(await client<{ id: string; cost_cents: number }[]>`
-        insert into usage_events ${client(
-          batch,
-          "id",
-          "user_id",
-          "run_id",
-          "provider",
-          "model",
-          "metric",
-          "amount",
-          "unit",
-          "cost_cents",
-          "input_tokens",
-          "output_tokens",
-          "metadata",
-          "org_id",
-          "workspace_id",
-          "api_key_id",
-        )}
+        insert into usage_events ${client(batch, ...USAGE_EVENT_COLUMNS)}
         on conflict (id) do nothing
         returning id, cost_cents
       `),
@@ -121,6 +112,43 @@ export async function persistRunUsageEvents(args: {
   // the usage_events trigger adds to workspace_runs.spent_cents (0056): the
   // run's spend delta for the cap, the credit debit and the credit lease.
   return inserted.reduce((total, row) => total + Number(row.cost_cents ?? 0), 0);
+}
+
+/**
+ * persistRunUsageEvents plus debitRunUsageCredits as independent statements for
+ * pipelineTransaction. Each batch is one statement: the insert, and (when the
+ * run has an org) the pending debit for exactly the rows it newly inserted, so
+ * a retried checkpoint debits nothing. `cost` reads the inserted cost back from
+ * the statements' results.
+ */
+export function runUsageEventStatements(args: {
+  client: Sql<Record<string, unknown>>;
+  state: WorkflowState;
+  usageEvents: UsageEvent[];
+}): { statements: PendingQuery<any>[]; cost: (results: readonly unknown[][]) => number } {
+  const { client, state, usageEvents } = args;
+  const orgId = state.run.orgId;
+  const statements = batchedRows(runUsageRows(client, state, usageEvents)).map((batch) => orgId
+    ? client`
+      with inserted as (
+        insert into usage_events ${client(batch, ...USAGE_EVENT_COLUMNS)}
+        on conflict (id) do nothing
+        returning id, cost_cents
+      ), total as (select coalesce(sum(cost_cents), 0) as cents from inserted),
+      debit as (
+        select enqueue_org_credit_debit(
+          ${orgId}, total.cents, ${state.run.userId}, 'usage', ${state.run.id}, ${state.run.workspaceId ?? null}, '{}'::jsonb
+        ) from total
+      )
+      select id, cost_cents, (select count(*) from debit) as debits from inserted`
+    : client`
+      insert into usage_events ${client(batch, ...USAGE_EVENT_COLUMNS)}
+      on conflict (id) do nothing
+      returning id, cost_cents`);
+  return {
+    statements,
+    cost: (results) => results.reduce((sum: number, rows) => sum + rows.reduce((inner: number, row) => inner + Number((row as { cost_cents?: unknown }).cost_cents ?? 0), 0), 0),
+  };
 }
 
 /**

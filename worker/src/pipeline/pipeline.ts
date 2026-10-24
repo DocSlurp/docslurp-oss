@@ -18,8 +18,9 @@ export interface CheckpointStore {
     state: WorkflowState,
     stage: string,
     artifactUri: string,
-    stats: Record<string, unknown>
-  ): Promise<void>;
+    stats: Record<string, unknown>,
+    options?: { readControlState?: boolean },
+  ): Promise<{ controlRequested?: boolean } | void>;
   /** Returns the stage's ordinary failure total when the store tracks it. */
   failRunStage(state: WorkflowState, stage: string, message: string, options?: { countFailure?: boolean }): Promise<number | void>;
   startDocumentStage(state: WorkflowState, documentId: string, stage: string): Promise<void>;

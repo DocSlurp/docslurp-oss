@@ -18,4 +18,15 @@ describe("worker Dockerfiles", () => {
       expect(dockerfile).not.toMatch(/\nUSER root\b/);
     },
   );
+
+  it.each(["worker/Dockerfile", "worker/Dockerfile.lean", "worker/Dockerfile.full", "server/Dockerfile"])(
+    "%s copies pnpm patches wherever it copies the lockfile",
+    async (filename) => {
+      const dockerfile = await readFile(path.join(root, "..", filename), "utf8");
+      const copies = dockerfile.split("\n").filter((line) => line.startsWith("COPY package.json pnpm-lock.yaml"));
+      expect(copies.length).toBeGreaterThan(0);
+      // pnpm install --frozen-lockfile fails with ENOENT on a patchedDependencies entry whose file is missing.
+      expect(dockerfile.match(/^COPY patches \.\/patches$/gm)?.length ?? 0).toBe(copies.length);
+    },
+  );
 });

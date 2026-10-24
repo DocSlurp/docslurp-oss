@@ -17,6 +17,7 @@ ENV ONNXRUNTIME_NODE_INSTALL_CUDA=skip
 WORKDIR /app
 RUN corepack enable
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml tsconfig.base.json ./
+COPY patches ./patches
 COPY packages ./packages
 COPY worker/package.json worker/tsconfig.json worker/LICENSE ./worker/
 RUN \

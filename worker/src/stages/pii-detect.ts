@@ -1,4 +1,5 @@
 import { instrumentPostgres } from "@docslurp/shared/observability";
+import { dbTraceStatementHook } from "../lib/db-trace.js";
 import { isUtf8 } from "node:buffer";
 
 import postgres from "postgres";
@@ -89,7 +90,7 @@ export function createPostgresPiiDetectionSink(databaseUrl: string): PiiDetectio
     prepare: false,
     idle_timeout: 20,
     connect_timeout: 10,
-  }), databaseUrl);
+  }), databaseUrl, { onStatement: dbTraceStatementHook() });
   return {
     async recordDetections(documentId, runId, matches, redacted) {
       // A rescan of the same run replaces its detections instead of duplicating them.

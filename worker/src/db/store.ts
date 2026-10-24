@@ -1,5 +1,7 @@
 import { instrumentFetch } from "@docslurp/shared/observability";
 import { instrumentPostgres } from "@docslurp/shared/observability";
+import { dbTraceStatementHook } from "../lib/db-trace.js";
+import { pipelineTransaction } from "./transaction-pipeline.js";
 import { PostgresCapacityLeaseStore } from "../media/capacity/store.js";
 import { PostgresMediaJournal } from "../media/journal.js";
 import { PUBLIC_ERROR_MESSAGES } from "@docslurp/shared";
@@ -9,7 +11,7 @@ import { PageTaskStore } from "./page-task-store.js";
 import { WorkerSlotStore, resolveWorkerSlotOptions, tryMaintenanceLease, type WorkerSlotOptions } from "./worker-slot-store.js";
 import { randomUUID, createHmac } from "node:crypto";
 
-import postgres, { type JSONValue, type Sql } from "postgres";
+import postgres, { type JSONValue, type PendingQuery, type Sql } from "postgres";
 import { applyDefaultVisionOverride, defaultPipelineFeatures, PII_BLOCKED_DOCUMENT_STATUS, planRunFailure, type PrivacyAuditEntry } from "@docslurp/shared";
 
 import { mergePipelineFeatures } from "../models.js";
@@ -62,6 +64,7 @@ import {
   debitRunUsageCredits,
   flushPendingCreditDebits,
   persistRunUsageEvents,
+  runUsageEventStatements,
 } from "./usage-event-store.js";
 
 type WorkspaceRunRow = {
@@ -321,12 +324,11 @@ function indexedInRun(client: Sql<Record<string, unknown>>, runId: string, docum
  * Versions the supersede trigger replaced in the current transaction. The
  * trigger stamps superseded_at = now(), which is the transaction start time.
  */
-async function supersededInThisTransaction(
+function supersededInThisTransactionQuery(
   client: Sql<Record<string, unknown>>,
   documentIds: string[],
-): Promise<CanonicalReplacement[]> {
-  if (documentIds.length === 0) return [];
-  const rows = await client<{
+) {
+  return client<{
     document_id: string;
     canonical_id: string;
     previous_version_id: string | null;
@@ -342,12 +344,113 @@ async function supersededInThisTransaction(
       and old.superseded_at = now()
     group by live.id, live.canonical_id, live.previous_version_id
   `;
+}
+
+function mapSuperseded(rows: { document_id: string; canonical_id: string; previous_version_id: string | null; replaced_ids: string[] }[]): CanonicalReplacement[] {
   return rows.map((row) => ({
     documentId: row.document_id,
     canonicalId: row.canonical_id,
     previousVersionId: row.previous_version_id,
     replacedDocumentIds: row.replaced_ids,
   }));
+}
+
+async function supersededInThisTransaction(
+  client: Sql<Record<string, unknown>>,
+  documentIds: string[],
+): Promise<CanonicalReplacement[]> {
+  if (documentIds.length === 0) return [];
+  return mapSuperseded(await supersededInThisTransactionQuery(client, documentIds));
+}
+
+type StageStateRows = (StageStateRow & { scope: "run" | "document" })[];
+
+function runRowQuery(client: Sql<Record<string, unknown>>, runId: string) {
+  // The org's plan rides along (no extra round trip): it sets the AI credit
+  // factor for bonus plans in the usage ledger.
+  return client<WorkspaceRunRow[]>`
+    select r.*, (select o.funded_at is not null from organizations o where o.id = r.org_id) as org_funded
+    from workspace_runs r
+    where r.id = ${runId}
+    limit 1
+  `;
+}
+
+function runDocumentRowsQuery(client: Sql<Record<string, unknown>>, runId: string) {
+  return client<DocumentRow[]>`
+    select *
+    from documents
+    where run_id = ${runId}
+      and superseded_at is null and status <> 'cancelled'
+    order by created_at asc
+  `;
+}
+
+function stageStateRowsQuery(client: Sql<Record<string, unknown>>, runId: string) {
+  // Run and document checkpoints in one round trip; run rows have no document_id.
+  return client<StageStateRows>`
+    select 'run' as scope, run_id, null::text as document_id, stage_name, status, attempts, artifact_uri, stats, error,
+      started_at, completed_at, updated_at
+    from workspace_run_stage_states
+    where run_id = ${runId}
+    union all
+    select 'document' as scope, run_id, document_id, stage_name, status, attempts, artifact_uri, stats, error,
+      started_at, completed_at, updated_at
+    from document_run_stage_states
+    where run_id = ${runId}
+    order by updated_at asc
+  `;
+}
+
+/** The three reads that open a stage activity, mapped; a stage-completion checkpoint can fetch them for the next stage. */
+export type PreloadedRunState = { run: WorkspaceRun; documents: Document[]; stageStates: StageStateRows };
+
+/** What a checkpoint reports back to the stage boundary. */
+type ProgressWrite = {
+  unspentSinceCheck: boolean;
+  lease?: { observation: LeaseObservation | null };
+  /** The run's pause/cancel request, read in the checkpoint's own transaction (options.readControlState). */
+  controlRequested?: boolean;
+  /** The next stage's opening reads, read in the checkpoint's own transaction (options.preloadRunState). */
+  preloaded?: PreloadedRunState;
+};
+
+const CONTROL_REQUEST_STATES = ["pause_requested", "paused", "cancel_requested", "cancelled"];
+
+/** The documents of a completing run: retire obsolete rows, then mark the healthy ones completed. */
+function completeRunDocumentStatements(client: Sql<Record<string, unknown>>, runId: string) {
+  return [
+    client`select retire_replaced_pending_documents(${runId})`,
+    // Legacy retries may already contain obsolete queued rows. They were not
+    // hydrated or processed; retire them instead of declaring them completed.
+    client`
+      update documents set status = 'cancelled', lexical_searchable_at = null, updated_at = now()
+      where run_id = ${runId} and superseded_at is not null
+        and status in ('queued', 'processing')
+    `,
+    client<{ id: string }[]>`
+      update documents
+      set status = 'completed',
+          updated_at = now()
+      where run_id = ${runId}
+        and superseded_at is null
+        and status not in ('failed', 'cancelled', 'pii_blocked')
+        and not exists (
+          select 1 from document_run_stage_states stage_state
+          where stage_state.document_id = documents.id
+            and stage_state.run_id = documents.run_id
+            and stage_state.status = 'failed'
+        )
+      returning id
+    `,
+  ] as const;
+}
+
+async function completeRunDocuments(client: Sql<Record<string, unknown>>, runId: string): Promise<string[]> {
+  const [retire, cancel, completed] = completeRunDocumentStatements(client, runId);
+  await retire;
+  await cancel;
+  return (await completed).map((row) => row.id);
 }
 
 export class Store {
@@ -395,7 +498,7 @@ export class Store {
       types: { numeric: { to: 1700, from: [1700], serialize: (value: unknown) => String(value), parse: (value: string): unknown => Number(value) } },
       idle_timeout: 20,
       connect_timeout: 10,
-    }), databaseUrl);
+    }), databaseUrl, { onStatement: dbTraceStatementHook() });
     this.plausibilityWarningThreshold =
       options?.plausibilityWarningThreshold ?? 0.3;
     this.apiKeyUsageRetentionDays = Math.max(
@@ -423,14 +526,7 @@ export class Store {
   }
 
   async loadRun(runId: string): Promise<WorkspaceRun> {
-    // The org's plan rides along (no extra round trip): it sets the AI credit
-    // factor for bonus plans in the usage ledger.
-    const [row] = await this.sql<WorkspaceRunRow[]>`
-      select r.*, (select o.funded_at is not null from organizations o where o.id = r.org_id) as org_funded
-      from workspace_runs r
-      where r.id = ${runId}
-      limit 1
-    `;
+    const [row] = await runRowQuery(this.sql, runId);
 
     if (!row) {
       throw new Error(`run not found: ${runId}`);
@@ -446,18 +542,15 @@ export class Store {
   }
 
   async loadDocumentsForRun(runId: string): Promise<Document[]> {
-    const rows = await this.sql<DocumentRow[]>`
-      select *
-      from documents
-      where run_id = ${runId}
-        and superseded_at is null and status <> 'cancelled'
-      order by created_at asc
-    `;
-
-    return rows.map(mapDocument);
+    return (await runDocumentRowsQuery(this.sql, runId)).map(mapDocument);
   }
 
-  async hydrateState(state: WorkflowState): Promise<void> {
+  /** The run's stage checkpoints (run and document rows), for loadRunState to read beside the run. */
+  readStageStates(runId: string): Promise<StageStateRows> {
+    return stageStateRowsQuery(this.sql, runId);
+  }
+
+  async hydrateState(state: WorkflowState, stageStates?: Promise<StageStateRows> | StageStateRows): Promise<void> {
     state.store = this;
     state.runStages.clear();
     state.documentStages.clear();
@@ -465,19 +558,7 @@ export class Store {
     state.run.artifacts = state.run.artifacts ?? {};
     state.replaceArtifacts(state.run.artifacts);
 
-    // Run and document checkpoints in one round trip; run rows have no document_id.
-    const rows = await this.sql<(StageStateRow & { scope: "run" | "document" })[]>`
-      select 'run' as scope, run_id, null::text as document_id, stage_name, status, attempts, artifact_uri, stats, error,
-        started_at, completed_at, updated_at
-      from workspace_run_stage_states
-      where run_id = ${state.run.id}
-      union all
-      select 'document' as scope, run_id, document_id, stage_name, status, attempts, artifact_uri, stats, error,
-        started_at, completed_at, updated_at
-      from document_run_stage_states
-      where run_id = ${state.run.id}
-      order by updated_at asc
-    `;
+    const rows = await (stageStates ?? this.readStageStates(state.run.id));
 
     for (const row of rows) {
       if (row.scope !== "run") continue;
@@ -614,9 +695,9 @@ export class Store {
    */
   private writeProgress(
     state: WorkflowState,
-    prelude?: (client: Sql<Record<string, unknown>>) => Promise<void>,
-    options: { stageBoundary?: boolean } = {},
-  ): Promise<{ unspentSinceCheck: boolean; lease?: { observation: LeaseObservation | null } }> {
+    prelude?: (client: Sql<Record<string, unknown>>) => readonly PendingQuery<any>[],
+    options: { stageBoundary?: boolean; readControlState?: boolean; preloadRunState?: boolean } = {},
+  ): Promise<ProgressWrite> {
     const previous = this.progressQueues.get(state) ?? Promise.resolve();
     const next = previous.then(() => this.writeProgressGuarded(state, prelude, options));
     const tail = next.catch(() => undefined);
@@ -629,9 +710,9 @@ export class Store {
 
   private async writeProgressGuarded(
     state: WorkflowState,
-    prelude: ((client: Sql<Record<string, unknown>>) => Promise<void>) | undefined,
-    options: { stageBoundary?: boolean },
-  ): Promise<{ unspentSinceCheck: boolean; lease?: { observation: LeaseObservation | null } }> {
+    prelude: ((client: Sql<Record<string, unknown>>) => readonly PendingQuery<any>[]) | undefined,
+    options: { stageBoundary?: boolean; readControlState?: boolean; preloadRunState?: boolean },
+  ): Promise<ProgressWrite> {
     try {
       return await this.writeProgressNow(state, prelude, options);
     } catch (error) {
@@ -663,9 +744,9 @@ export class Store {
 
   private async writeProgressNow(
     state: WorkflowState,
-    prelude: ((client: Sql<Record<string, unknown>>) => Promise<void>) | undefined,
-    options: { stageBoundary?: boolean },
-  ): Promise<{ unspentSinceCheck: boolean; lease?: { observation: LeaseObservation | null } }> {
+    prelude: ((client: Sql<Record<string, unknown>>) => readonly PendingQuery<any>[]) | undefined,
+    options: { stageBoundary?: boolean; readControlState?: boolean; preloadRunState?: boolean },
+  ): Promise<ProgressWrite> {
     state.run.artifacts = state.artifacts;
     const usageBatch = state.usageLedger.checkpoint();
     const vectors = state.vectorIndexes.slice();
@@ -682,6 +763,8 @@ export class Store {
     );
     let spendCheckDue = false;
     let unspentSinceCheck = true;
+    let controlRequested: boolean | undefined;
+    let preloaded: PreloadedRunState | undefined;
     // Credit leases (credit-lease.ts) replace the cadence counters when on:
     // the checkpoint consumes the run's lease with the credits it debits.
     const leases = await this.creditLeases.active();
@@ -701,108 +784,133 @@ export class Store {
 
     // Postgres rolls a deadlock victim back whole; every assignment below is
     // reset per attempt and the usage batch commits only after success.
-    await retryTransaction(`checkpoint run=${state.run.id}`, () => this.sql.begin(async (tx) => {
+    // The independent writes go out as one pipelined transaction (one round
+    // trip, transaction-pipeline.ts); only the credit lease needs a result.
+    await retryTransaction(`checkpoint run=${state.run.id}`, async () => {
       spendCheckDue = false;
       unspentSinceCheck = true;
       leaseConsumed = false;
       leaseObservation = null;
-      const client = tx as unknown as typeof this.sql;
-      if (prelude) await prelude(client);
+      let runUpdateIndex = 0;
+      let usageFrom = 0;
+      let usageTo = 0;
+      let usageCost: (results: readonly unknown[][]) => number = () => 0;
+      let counterPath = false;
+      let controlIndex = -1;
+      let preloadIndex = -1;
+      const insertedCost = (results: readonly unknown[]) => usageCost(results.slice(usageFrom, usageTo) as unknown[][]);
+      const results = await pipelineTransaction(this.sql, (client) => {
+        const statements: PendingQuery<any>[] = [];
+        if (prelude) statements.push(...prelude(client));
 
-      const counter = leases
-        ? null
-        : spendCounterSql(
-          client,
-          state.run.id,
-          shard ? client`0` : client`greatest(0, ${state.run.pagesProcessed}::int - spend_prev.pages_processed)`,
-          batchCredits,
-        );
-      // A late activity may settle paid usage after another actor terminates
-      // the run. Keep its terminal outcome and lease state while inserting usage.
-      // An explicit retry resets the row to queued before checkpoints resume.
-      const runAssignments = shardDelta
-        ? client`
-          stage = case when workspace_runs.status in ('completed', 'failed') then workspace_runs.stage else ${state.stage} end,
-          processed_documents = greatest(workspace_runs.processed_documents, ${state.run.processedDocuments}),
-          pages_processed = greatest(workspace_runs.pages_processed, ${state.run.pagesProcessed}),
-          artifacts = coalesce(workspace_runs.artifacts, '{}'::jsonb) || ${this.toJson(shardDelta.artifacts)}::jsonb`
-        : client`
-          status = case when workspace_runs.status in ('completed', 'failed') then workspace_runs.status else ${state.run.status} end,
-          stage = case when workspace_runs.status in ('completed', 'failed') then workspace_runs.stage else ${state.stage} end,
-          processed_documents = ${state.run.processedDocuments},
-          pages_total = ${state.run.pagesTotal},
-          pages_processed = ${state.run.pagesProcessed},
-          stats = ${this.toJson(state.run.stats ?? {})}::jsonb,
-          artifacts = ${this.toJson(state.run.artifacts ?? {})}::jsonb`;
-      // The run row is locked from this update to commit, so spent_cents
-      // changes only by the trigger on this checkpoint's own usage inserts.
-      let spentBefore: number;
-      if (counter) {
-        const [runRow] = await client<{ spend_check_due: boolean; no_unchecked_spend: boolean; spent_cents: number | string }[]>`
-          update workspace_runs
-          set
-            ${counter.assignments},
-            ${runAssignments},
-            last_heartbeat_at = case when workspace_runs.status in ('completed', 'failed') then workspace_runs.last_heartbeat_at else now() end,
-            lease_expires_at = case
-              when workspace_runs.status in ('completed', 'failed') then workspace_runs.lease_expires_at
-              when workspace_runs.kind = 'materialize'
-                then greatest(coalesce(workspace_runs.lease_expires_at, now()), now() + (${this.leaseTtlMs} * interval '1 millisecond'))
-              else now() + (${this.leaseTtlMs} * interval '1 millisecond') end,
-            updated_at = now()
-          from ${counter.from}
-          where workspace_runs.id = spend_prev.id
-          returning ${counter.checkDue} as spend_check_due,
-            workspace_runs.spend_unchecked_credits = 0 as no_unchecked_spend,
-            workspace_runs.spent_cents
-        `;
+        const counter = leases
+          ? null
+          : spendCounterSql(
+            client,
+            state.run.id,
+            shard ? client`0` : client`greatest(0, ${state.run.pagesProcessed}::int - spend_prev.pages_processed)`,
+            batchCredits,
+          );
+        // A late activity may settle paid usage after another actor terminates
+        // the run. Keep its terminal outcome and lease state while inserting usage.
+        // An explicit retry resets the row to queued before checkpoints resume.
+        const runAssignments = shardDelta
+          ? client`
+            stage = case when workspace_runs.status in ('completed', 'failed') then workspace_runs.stage else ${state.stage} end,
+            processed_documents = greatest(workspace_runs.processed_documents, ${state.run.processedDocuments}),
+            pages_processed = greatest(workspace_runs.pages_processed, ${state.run.pagesProcessed}),
+            artifacts = coalesce(workspace_runs.artifacts, '{}'::jsonb) || ${this.toJson(shardDelta.artifacts)}::jsonb`
+          : client`
+            status = case when workspace_runs.status in ('completed', 'failed') then workspace_runs.status else ${state.run.status} end,
+            stage = case when workspace_runs.status in ('completed', 'failed') then workspace_runs.stage else ${state.stage} end,
+            processed_documents = ${state.run.processedDocuments},
+            pages_total = ${state.run.pagesTotal},
+            pages_processed = ${state.run.pagesProcessed},
+            stats = ${this.toJson(state.run.stats ?? {})}::jsonb,
+            artifacts = ${this.toJson(state.run.artifacts ?? {})}::jsonb`;
+        // The run row is locked from this update to commit, so spent_cents
+        // changes only by the trigger on this checkpoint's own usage inserts.
+        const runUpdate = counter
+          ? client<{ spend_check_due: boolean; no_unchecked_spend: boolean; spent_cents: number | string }[]>`
+            update workspace_runs
+            set
+              ${counter.assignments},
+              ${runAssignments},
+              last_heartbeat_at = case when workspace_runs.status in ('completed', 'failed') then workspace_runs.last_heartbeat_at else now() end,
+              lease_expires_at = case
+                when workspace_runs.status in ('completed', 'failed') then workspace_runs.lease_expires_at
+                when workspace_runs.kind = 'materialize'
+                  then greatest(coalesce(workspace_runs.lease_expires_at, now()), now() + (${this.leaseTtlMs} * interval '1 millisecond'))
+                else now() + (${this.leaseTtlMs} * interval '1 millisecond') end,
+              updated_at = now()
+            from ${counter.from}
+            where workspace_runs.id = spend_prev.id
+            returning ${counter.checkDue} as spend_check_due,
+              workspace_runs.spend_unchecked_credits = 0 as no_unchecked_spend,
+              workspace_runs.spent_cents
+          `
+          : client<{ spent_cents: number | string }[]>`
+            update workspace_runs
+            set
+              ${runAssignments},
+              last_heartbeat_at = case when workspace_runs.status in ('completed', 'failed') then workspace_runs.last_heartbeat_at else now() end,
+              lease_expires_at = case
+                when workspace_runs.status in ('completed', 'failed') then workspace_runs.lease_expires_at
+                when workspace_runs.kind = 'materialize'
+                  then greatest(coalesce(workspace_runs.lease_expires_at, now()), now() + (${this.leaseTtlMs} * interval '1 millisecond'))
+                else now() + (${this.leaseTtlMs} * interval '1 millisecond') end,
+              updated_at = now()
+            where id = ${state.run.id}
+            returning spent_cents
+          `;
+        counterPath = counter !== null;
+        statements.push(runUpdate);
+        runUpdateIndex = statements.length - 1;
+
+        // The one per-checkpoint spend delta: newly inserted events only (ON
+        // CONFLICT DO NOTHING), so a retried checkpoint or duplicate id adds 0.
+        // spent_cents (trigger), the credit debit and the lease all take it.
+        // Each insert statement appends the pending debit (the org row is
+        // debited by the flusher) for exactly the rows it inserted.
+        const usage = runUsageEventStatements({ client, state, usageEvents: usageBatch.events });
+        usageFrom = statements.length;
+        statements.push(...usage.statements);
+        usageTo = statements.length;
+        usageCost = usage.cost;
+
+        statements.push(...this.vectorIndexStatements(vectors, client));
+        statements.push(...this.performanceRowStatements(client, state, performance));
+        statements.push(...this.parserEvaluationStatements(client, parserEvaluations));
+        if (options.readControlState) {
+          controlIndex = statements.length;
+          statements.push(client<{ control_state: string | null }[]>`select control_state from workspace_runs where id = ${state.run.id}`);
+        }
+        if (options.preloadRunState) {
+          preloadIndex = statements.length;
+          statements.push(runRowQuery(client, state.run.id), runDocumentRowsQuery(client, state.run.id), stageStateRowsQuery(client, state.run.id));
+        }
+        return statements;
+      }, leases ? async (client, rows) => {
+        // Same transaction as the debit: available and the lease fall together.
+        const cost = insertedCost(rows);
+        if (cost > 0 || options.stageBoundary) {
+          leaseConsumed = true;
+          leaseObservation = await consumeRunCreditLease(client as unknown as typeof this.sql, state.run, cost);
+        }
+      } : undefined);
+
+      const runRow = (results[runUpdateIndex] as { spend_check_due?: boolean; no_unchecked_spend?: boolean; spent_cents?: number | string }[])[0];
+      if (counterPath) {
         spendCheckDue = runRow?.spend_check_due === true;
         unspentSinceCheck = runRow?.no_unchecked_spend === true;
-        spentBefore = Number(runRow?.spent_cents ?? state.run.spentCents) || 0;
-      } else {
-        const [runRow] = await client<{ spent_cents: number | string }[]>`
-          update workspace_runs
-          set
-            ${runAssignments},
-            last_heartbeat_at = case when workspace_runs.status in ('completed', 'failed') then workspace_runs.last_heartbeat_at else now() end,
-            lease_expires_at = case
-              when workspace_runs.status in ('completed', 'failed') then workspace_runs.lease_expires_at
-              when workspace_runs.kind = 'materialize'
-                then greatest(coalesce(workspace_runs.lease_expires_at, now()), now() + (${this.leaseTtlMs} * interval '1 millisecond'))
-              else now() + (${this.leaseTtlMs} * interval '1 millisecond') end,
-            updated_at = now()
-          where id = ${state.run.id}
-          returning spent_cents
-        `;
-        spentBefore = Number(runRow?.spent_cents ?? state.run.spentCents) || 0;
       }
-
-      // The one per-checkpoint spend delta: newly inserted events only (ON
-      // CONFLICT DO NOTHING), so a retried checkpoint or duplicate id adds 0.
-      // spent_cents (trigger), the credit debit and the lease all take it.
-      const insertedUsageCostCents = await persistRunUsageEvents({
-        client,
-        state,
-        usageEvents: usageBatch.events,
-      });
-      spentCents = spentBefore + insertedUsageCostCents;
-
-      await this.insertVectorIndexes(vectors, client);
-      await this.insertPerformanceRows(client, state, performance);
-      await this.insertParserEvaluationRows(client, parserEvaluations);
-
-      // Appends a pending debit; the org row is debited by the flusher.
-      await debitRunUsageCredits({
-        client,
-        state,
-        costCents: insertedUsageCostCents,
-      });
-      // Same transaction as the debit: available and the lease fall together.
-      if (leases && (insertedUsageCostCents > 0 || options.stageBoundary)) {
-        leaseConsumed = true;
-        leaseObservation = await consumeRunCreditLease(client, state.run, insertedUsageCostCents);
+      spentCents = (Number(runRow?.spent_cents ?? state.run.spentCents) || 0) + insertedCost(results);
+      if (preloadIndex >= 0) {
+        const [runRows, documentRows, stageRows] = results.slice(preloadIndex, preloadIndex + 3) as [WorkspaceRunRow[], DocumentRow[], StageStateRows];
+        if (runRows[0]) preloaded = { run: mapRun(runRows[0]), documents: documentRows.map(mapDocument), stageStates: stageRows };
       }
-    }));
+      if (controlIndex >= 0) controlRequested = CONTROL_REQUEST_STATES.includes((results[controlIndex] as { control_state: string | null }[])[0]?.control_state ?? "");
+    });
 
     // Synchronously together: the committed events leave the pending sum as
     // spent_cents takes them, so runSpentCents never counts them twice or 0 times.
@@ -824,19 +932,19 @@ export class Store {
     if (spendCheckDue) await enforceRunSpend(this.sql, state.run, "checkpoint-interval");
     if (leaseConsumed) {
       // The stage boundary handles its lease after the stage.completed event.
-      if (options.stageBoundary) return { unspentSinceCheck: true, lease: { observation: leaseObservation } };
+      if (options.stageBoundary) return { unspentSinceCheck: true, lease: { observation: leaseObservation }, controlRequested, preloaded };
       await this.creditLeases.afterConsume(state.run, leaseObservation, "checkpoint-interval");
-      return { unspentSinceCheck: true };
+      return { unspentSinceCheck: true, controlRequested, preloaded };
     }
     // After a check the counters are 0 too: the stage boundary has nothing new to check.
-    return { unspentSinceCheck: spendCheckDue || unspentSinceCheck };
+    return { unspentSinceCheck: spendCheckDue || unspentSinceCheck, controlRequested, preloaded };
   }
 
-  private async insertPerformanceRows(
+  private performanceRowStatements(
     client: Sql<Record<string, unknown>>,
     state: WorkflowState,
     performance: WorkflowState["pendingPerformance"],
-  ): Promise<void> {
+  ): PendingQuery<any>[] {
     const rows = performance.map((perf) => ({
       id: randomUUID(),
       user_id: state.run.userId,
@@ -852,8 +960,7 @@ export class Store {
       metadata: this.toJsonText(perf.metadata ?? {}),
     }));
 
-    for (const batch of batchedRows(rows)) {
-      await client`
+    return batchedRows(rows).map((batch) => client`
         insert into performance_log ${client(
           batch,
           "id",
@@ -869,14 +976,21 @@ export class Store {
           "tags",
           "metadata",
         )}
-      `;
-    }
+      `);
   }
 
-  private async insertParserEvaluationRows(
+  private async insertPerformanceRows(
+    client: Sql<Record<string, unknown>>,
+    state: WorkflowState,
+    performance: WorkflowState["pendingPerformance"],
+  ): Promise<void> {
+    for (const statement of this.performanceRowStatements(client, state, performance)) await statement;
+  }
+
+  private parserEvaluationStatements(
     client: Sql<Record<string, unknown>>,
     parserEvaluations: WorkflowState["pendingParserEvaluations"],
-  ): Promise<void> {
+  ): PendingQuery<any>[] {
     const rows = parserEvaluations.map((parserEval) => ({
       id: randomUUID(),
       user_id: parserEval.userId,
@@ -895,8 +1009,7 @@ export class Store {
       metadata: this.toJsonText(parserEval.metadata ?? {}),
     }));
 
-    for (const batch of batchedRows(rows)) {
-      await client`
+    return batchedRows(rows).map((batch) => client`
         insert into parser_eval_results ${client(
           batch,
           "id",
@@ -915,8 +1028,14 @@ export class Store {
           "artifact_uri",
           "metadata",
         )}
-      `;
-    }
+      `);
+  }
+
+  private async insertParserEvaluationRows(
+    client: Sql<Record<string, unknown>>,
+    parserEvaluations: WorkflowState["pendingParserEvaluations"],
+  ): Promise<void> {
+    for (const statement of this.parserEvaluationStatements(client, parserEvaluations)) await statement;
   }
 
   async completeRun(state: WorkflowState): Promise<void> {
@@ -936,36 +1055,21 @@ export class Store {
 
     await recordPageBaseFee(this.sql, state);
 
-    const cutover = await this.sql.begin(async (tx) => {
-      const client = tx as unknown as typeof this.sql;
-      // Mode-switch backfills re-key their artifacts onto the source document and retire themselves
-      // (see backfill-adoption.ts); they must not supersede the source version.
-      const adopted = new Set(state.run.kind === "full-index" ? await adoptBackfillDocuments(client, state.run.id) : []);
-      await client`select retire_replaced_pending_documents(${state.run.id})`;
-      // Legacy retries may already contain obsolete queued rows. They were not
-      // hydrated or processed; retire them instead of declaring them completed.
-      await client`
-        update documents set status = 'cancelled', lexical_searchable_at = null, updated_at = now()
-        where run_id = ${state.run.id} and superseded_at is not null
-          and status in ('queued', 'processing')
-      `;
-      const completed = await client<{ id: string }[]>`
-        update documents
-        set status = 'completed',
-            updated_at = now()
-        where run_id = ${state.run.id}
-          and superseded_at is null
-          and status not in ('failed', 'cancelled', 'pii_blocked')
-          and not exists (
-            select 1 from document_run_stage_states stage_state
-            where stage_state.document_id = documents.id
-              and stage_state.run_id = documents.run_id
-              and stage_state.status = 'failed'
-          )
-        returning id
-      `;
-      return await supersededInThisTransaction(client, completed.map((row) => row.id).filter((id) => !adopted.has(id)));
-    });
+    let replacements: CanonicalReplacement[] = [];
+    const cutover = state.run.kind === "full-index"
+      ? await this.sql.begin(async (tx) => {
+        const client = tx as unknown as typeof this.sql;
+        // Mode-switch backfills re-key their artifacts onto the source document and retire themselves
+        // (see backfill-adoption.ts) before anything below, and must not supersede the source version.
+        const adopted = new Set(await adoptBackfillDocuments(client, state.run.id));
+        const completed = await completeRunDocuments(client, state.run.id);
+        return await supersededInThisTransaction(client, completed.filter((id) => !adopted.has(id)));
+      })
+      // Independent statements go out in one burst; the supersede read needs the completed ids.
+      : await pipelineTransaction(this.sql, (client) => completeRunDocumentStatements(client, state.run.id),
+        async (client, [, , completed]) => {
+          replacements = await supersededInThisTransaction(client, completed.map((row) => row.id));
+        }).then(() => replacements);
     await this.announceReplacements(state, cutover);
 
     await this.sql`
@@ -1145,9 +1249,9 @@ export class Store {
 
   /** A shard's final checkpoint, then one shard less of fleet demand. */
   async finishShard(state: WorkflowState): Promise<void> {
-    await this.writeProgress(state, async (client) => {
-      await client`update workspace_runs set shard_demand = greatest(0, shard_demand - 1) where id = ${state.run.id}`;
-    });
+    await this.writeProgress(state, (client) => [
+      client`update workspace_runs set shard_demand = greatest(0, shard_demand - 1) where id = ${state.run.id}`,
+    ]);
   }
 
   /** Marks a run stage processing and checkpoints run progress in the same transaction. */
@@ -1166,8 +1270,8 @@ export class Store {
     });
     state.refreshStats();
 
-    await this.writeProgress(state, async (client) => {
-      await client`
+    await this.writeProgress(state, (client) => [
+      client`
         insert into workspace_run_stage_states (run_id, stage_name, status, attempts, stats, started_at, updated_at)
         values (${state.run.id}, ${stage}, 'processing', 1, '{}'::jsonb, now(), now())
         on conflict (run_id, stage_name) do update
@@ -1177,10 +1281,10 @@ export class Store {
             started_at = now(),
             completed_at = null,
             updated_at = now()
-      `;
+      `,
       // The stage's own pass starts once its shards are done.
-      await client`update workspace_runs set shard_demand = 0 where id = ${state.run.id} and shard_demand <> 0`;
-    });
+      client`update workspace_runs set shard_demand = 0 where id = ${state.run.id} and shard_demand <> 0`,
+    ]);
 
     await this.appendEvent({
       userId: state.run.userId,
@@ -1202,7 +1306,8 @@ export class Store {
     stage: string,
     artifactUri: string,
     stats: Record<string, unknown>,
-  ): Promise<void> {
+    options: { readControlState?: boolean; preloadRunState?: boolean } = {},
+  ): Promise<{ controlRequested?: boolean; preloaded?: PreloadedRunState } | void> {
     state.setRunStage({
       runId: state.run.id,
       stageName: stage,
@@ -1217,8 +1322,8 @@ export class Store {
     });
     state.refreshStats();
 
-    const progress = await this.writeProgress(state, async (client) => {
-      await client`
+    const progress = await this.writeProgress(state, (client) => [
+      client`
         update workspace_run_stage_states
         set status = 'completed',
             artifact_uri = ${artifactUri || null},
@@ -1227,8 +1332,8 @@ export class Store {
             completed_at = now(),
             updated_at = now()
         where run_id = ${state.run.id} and stage_name = ${stage}
-      `;
-    }, { stageBoundary: true });
+      `,
+    ], { stageBoundary: true, readControlState: options.readControlState, preloadRunState: options.preloadRunState });
 
     await this.appendEvent({
       userId: state.run.userId,
@@ -1248,8 +1353,14 @@ export class Store {
     // add no statement.
     // With credit leases the boundary only queries the org when the run's
     // lease is exhausted, expired or missing (credit-lease.ts).
-    if (progress.lease) await this.creditLeases.afterConsume(state.run, progress.lease.observation, "stage-boundary");
-    else if (!progress.unspentSinceCheck) await enforceRunSpend(this.sql, state.run, "stage-boundary");
+    // A spend check that paused or blocked the run changed what the checkpoint read; the caller reads again.
+    const check = progress.lease
+      ? await this.creditLeases.afterConsume(state.run, progress.lease.observation, "stage-boundary")
+      : !progress.unspentSinceCheck
+        ? await enforceRunSpend(this.sql, state.run, "stage-boundary")
+        : null;
+    if (check && (check.paused || check.blocked)) return {};
+    return { controlRequested: progress.controlRequested, preloaded: progress.preloaded };
   }
 
   /**
@@ -1406,10 +1517,7 @@ export class Store {
     // One transaction: vectors are registered before the status flips, and the
     // supersede trigger swaps the previous canonical version out atomically, so
     // search always sees exactly one fully indexed version.
-    const cutover = await retryTransaction(`complete-document-stage run=${state.run.id} stage=${stage}`, () => this.sql.begin(async (tx) => {
-      const client = tx as unknown as typeof this.sql;
-      await this.insertVectorIndexes(vectors, client);
-      await client`
+    const stageStateUpdate = (client: Sql<Record<string, unknown>>) => client`
         update document_run_stage_states
         set status = 'completed',
             artifact_uri = ${artifactUri || null},
@@ -1417,20 +1525,44 @@ export class Store {
             error = null,
             completed_at = now(),
             updated_at = now()
-        where run_id = ${state.run.id} and document_id = ${documentId} and stage_name = ${stage}
-      `;
-      await client`
+        where run_id = ${state.run.id} and document_id = ${documentId} and stage_name = ${stage}`;
+    let cutover: CanonicalReplacement[] = [];
+    if (completesDocument) {
+      cutover = await retryTransaction(`complete-document-stage run=${state.run.id} stage=${stage}`, async () => {
+        const results = await pipelineTransaction(this.sql, (client) => [
+          ...this.vectorIndexStatements(vectors, client),
+          stageStateUpdate(client),
+          client`
+            update documents
+            set status = case
+                  when status = 'pii_blocked' then status
+                  when status = 'completed' and ${indexedInRun(client, state.run.id, documentId)} then status
+                  else 'completed'
+                end,
+                updated_at = now()
+            where id = ${documentId}`,
+          supersededInThisTransactionQuery(client, [documentId]),
+        ]);
+        return mapSuperseded(results.at(-1) as Parameters<typeof mapSuperseded>[0]);
+      });
+    } else {
+      // Another stage's checkpoint row cannot change what `indexedInRun` reads (the 'index' row),
+      // so the stage state and the document status land in one statement: one commit, one round trip.
+      await retryTransaction(`complete-document-stage run=${state.run.id} stage=${stage}`, () => this.sql`
+        with checkpoint as (
+          ${stageStateUpdate(this.sql)}
+          returning 1
+        )
         update documents
         set status = case
               when status = 'pii_blocked' then status
-              when status = 'completed' and ${indexedInRun(client, state.run.id, documentId)} then status
-              else ${completesDocument ? "completed" : stage}
+              when status = 'completed' and ${indexedInRun(this.sql, state.run.id, documentId)} then status
+              else ${stage}
             end,
             updated_at = now()
         where id = ${documentId}
-      `;
-      return completesDocument ? await supersededInThisTransaction(client, [documentId]) : [];
-    }));
+      `.then(() => undefined));
+    }
     if (vectors.length > 0) {
       state.vectorIndexes = state.vectorIndexes.filter((vector) => !vectors.includes(vector));
     }
@@ -1664,12 +1796,12 @@ export class Store {
     await this.triggerDocumentWebhooks(state, replacements);
   }
 
-  private async insertVectorIndexes(
+  private vectorIndexStatements(
     vectors: VectorIndex[],
     client: Sql<Record<string, unknown>> = this.sql,
-  ): Promise<void> {
+  ): PendingQuery<any>[] {
     if (vectors.length === 0) {
-      return;
+      return [];
     }
 
     const rows = vectors.map((vector) => ({
@@ -1682,31 +1814,37 @@ export class Store {
       dimension: vector.dimension,
     }));
 
-    for (const batch of batchedRows(rows)) {
-      await client`
-        insert into vector_indexes ${client(
-          batch,
-          "id",
-          "document_id",
-          "backend",
-          "bucket",
-          "path",
-          "embedding_model",
-          "dimension",
-        )}
-        on conflict (document_id, backend, embedding_model, dimension)
-        do update set bucket = excluded.bucket, path = excluded.path
-      `;
-    }
+    const statements: PendingQuery<any>[] = batchedRows(rows).map((batch) => client`
+      insert into vector_indexes ${client(
+        batch,
+        "id",
+        "document_id",
+        "backend",
+        "bucket",
+        "path",
+        "embedding_model",
+        "dimension",
+      )}
+      on conflict (document_id, backend, embedding_model, dimension)
+      do update set bucket = excluded.bucket, path = excluded.path
+    `);
     // Search serves each document from the index config it was built with (workspaces.index_configs).
     const hashes = new Map(vectors.filter((vector) => vector.indexConfigHash).map((vector) => [vector.documentId, vector.indexConfigHash!]));
     if (hashes.size > 0) {
-      await client`
+      statements.push(client`
         update documents d set index_config_hash = v.hash
         from unnest(${[...hashes.keys()]}::text[], ${[...hashes.values()]}::text[]) as v(id, hash)
         where d.id = v.id
-      `;
+      `);
     }
+    return statements;
+  }
+
+  private async insertVectorIndexes(
+    vectors: VectorIndex[],
+    client: Sql<Record<string, unknown>> = this.sql,
+  ): Promise<void> {
+    for (const statement of this.vectorIndexStatements(vectors, client)) await statement;
   }
 
   /**
@@ -2408,6 +2546,24 @@ export class Store {
       returning id
     `;
     return rows.map((row) => row.id);
+  }
+
+  /**
+   * deleteStaleDocumentChunks, then (when the replacement set is non-empty) markDocumentLexicalSearchable,
+   * in one transaction and one round trip: the marker never precedes the tail drop.
+   */
+  async finalizeDocumentChunks(documentId: string, keepChunkIds: readonly string[], markSearchable: boolean): Promise<void> {
+    await pipelineTransaction(this.sql, (client) => [
+      client`
+        delete from document_chunks
+        where document_id = ${documentId} and id <> all(${client.array([...keepChunkIds])}::text[])
+      `,
+      ...(markSearchable ? [client`
+        update documents
+        set lexical_searchable_at = coalesce(lexical_searchable_at, now())
+        where id = ${documentId}
+      `] : []),
+    ]);
   }
 
   /**
