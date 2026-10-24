@@ -1,0 +1,26 @@
+# Grype policy for the worker supply-chain gate (.github/workflows/worker-supply-chain.yml).
+# The gate fails on critical findings. Ignore a finding here only when the
+# vulnerable code path is not reachable in DocSlurp, pin the exact package
+# version so an upgrade forces a fresh review, and record why. Never ignore by
+# severity, package alone, or wildcard.
+ignore:
+  # CVE-2026-45829: pre-auth code injection in the Chroma *server* HTTP API
+  # (/api/v2/.../collections with trust_remote_code). DocSlurp only uses chromadb
+  # as a client (HttpClient / PersistentClient in worker/scripts/vector_backend_write.py),
+  # never runs or exposes a Chroma server, and creates collections by name with
+  # no embedding-function configuration. No fixed release exists yet; operators
+  # running their own Chroma server must patch that server.
+  - vulnerability: GHSA-f4j7-r4q5-qw2c
+    include-aliases: true
+    reason: chromadb is used client-only; the vulnerable server endpoint is never run or exposed
+    package:
+      name: chromadb
+      version: 1.5.9
+  # CVE-2026-45833: authenticated code injection through the same server-side
+  # collection-update endpoint. Not reachable for the same reason as above.
+  - vulnerability: GHSA-36p7-vc44-83pf
+    include-aliases: true
+    reason: chromadb is used client-only; the vulnerable server endpoint is never run or exposed
+    package:
+      name: chromadb
+      version: 1.5.9

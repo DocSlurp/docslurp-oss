@@ -20,6 +20,7 @@ export interface ModalConfig {
   tokenId: string;
   tokenSecret: string;
   app: string;
+  /** Image reference sandboxes run; `repo@sha256:<digest>` when a digest is configured. */
   image: string;
   /** Name of a Modal Secret with REGISTRY_USERNAME/REGISTRY_PASSWORD for a private image. */
   registrySecret?: string;
@@ -46,8 +47,17 @@ const configSchema: SandboxConfigSchema = {
       type: "string",
       description:
         "Container image sandboxes run, which must contain the parser binaries. Defaults to " +
-        "ghcr.io/docslurp/worker-full:<DOCSLURP_VERSION> in release images; required otherwise.",
+        "ghcr.io/docslurp/worker-full:<DOCSLURP_VERSION> in release images; required otherwise. " +
+        "Accepts a digest-pinned reference (repo@sha256:<digest>).",
       env: "DOCSLURP_MODAL_IMAGE",
+    },
+    imageDigest: {
+      type: "string",
+      description:
+        "Optional sha256:<digest> that pins the image (the default or DOCSLURP_MODAL_IMAGE) by digest " +
+        "instead of its mutable tag. Copy it from the worker-images.yml run summary after verifying " +
+        "the signature with cosign.",
+      env: "DOCSLURP_MODAL_IMAGE_DIGEST",
     },
     registrySecret: {
       type: "string",
@@ -83,6 +93,37 @@ function defaultModalImage(env: NodeJS.ProcessEnv): string {
     "Invalid sandbox configuration; missing required: DOCSLURP_MODAL_IMAGE (DOCSLURP_VERSION is unset, " +
       "so there is no published worker image to default to; release images set it)",
   );
+}
+
+const DIGEST = /^sha256:[0-9a-f]{64}$/;
+
+/**
+ * The image reference sandboxes pull. A configured digest replaces the tag
+ * (`repo:tag` becomes `repo@sha256:...`), so a re-pushed tag cannot change what
+ * runs; a digest already in the reference must be a well-formed sha256 and agree
+ * with DOCSLURP_MODAL_IMAGE_DIGEST when both are set.
+ */
+export function resolveModalImage(image: string, digest?: string): string {
+  const at = image.indexOf("@");
+  const pinned = at >= 0 ? image.slice(at + 1) : undefined;
+  if (pinned !== undefined && !DIGEST.test(pinned)) {
+    throw new SandboxConfigError("Invalid sandbox configuration; invalid: DOCSLURP_MODAL_IMAGE (digest must be sha256:<64 hex>)");
+  }
+  if (digest === undefined) return image;
+  if (!DIGEST.test(digest)) {
+    throw new SandboxConfigError("Invalid sandbox configuration; invalid: DOCSLURP_MODAL_IMAGE_DIGEST (expected sha256:<64 hex>)");
+  }
+  if (pinned !== undefined && pinned !== digest) {
+    throw new SandboxConfigError(
+      "Invalid sandbox configuration; invalid: DOCSLURP_MODAL_IMAGE_DIGEST (does not match the digest in DOCSLURP_MODAL_IMAGE)",
+    );
+  }
+  const name = at >= 0 ? image.slice(0, at) : image;
+  // Drop a tag (a ':' after the last '/'; a registry port comes before it).
+  const slash = name.lastIndexOf("/");
+  const colon = name.lastIndexOf(":");
+  const repository = colon > slash ? name.slice(0, colon) : name;
+  return `${repository}@${digest}`;
 }
 
 /** Error text with secret config values removed. Never forward raw SDK errors. */
@@ -223,8 +264,10 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
     description: "Runs each parser in a remote Modal sandbox with files staged in and out per activity.",
     configSchema,
     readConfig: (env) => {
-      const config = readSandboxConfig<Omit<ModalConfig, "image"> & { image?: string }>(configSchema, env);
-      return { ...config, image: config.image ?? defaultModalImage(env) };
+      const { imageDigest, ...config } = readSandboxConfig<
+        Omit<ModalConfig, "image"> & { image?: string; imageDigest?: string }
+      >(configSchema, env);
+      return { ...config, image: resolveModalImage(config.image ?? defaultModalImage(env), imageDigest) };
     },
     async probe(config) {
       let client: Awaited<ReturnType<typeof loadClient>>["client"] | undefined;
