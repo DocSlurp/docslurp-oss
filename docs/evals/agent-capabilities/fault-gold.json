@@ -1,6 +1,26 @@
 [
-  {"id":"required-tool-server-failure-v1","execution":"scripted-fault-injection","expectedStatus":502,"expectedErrorCode":"chat_tool_failed"},
-  {"id":"required-tool-timeout-v1","execution":"scripted-fault-injection","expectedStatus":504,"expectedErrorCode":"chat_tool_failed"},
-  {"id":"required-tool-access-denied-v1","execution":"scripted-fault-injection","expectedStatus":502,"expectedErrorCode":"chat_tool_failed"},
-  {"id":"model-deadline-without-answer-v1","execution":"scripted-fault-injection","expectedStatus":504,"expectedErrorCode":"chat_deadline_exceeded"}
+  {
+    "id": "required-tool-server-failure-v1",
+    "execution": "scripted-fault-injection",
+    "expectedStatus": 424,
+    "expectedErrorCode": "chat_tool_failed"
+  },
+  {
+    "id": "required-tool-timeout-v1",
+    "execution": "scripted-fault-injection",
+    "expectedStatus": 424,
+    "expectedErrorCode": "chat_tool_failed"
+  },
+  {
+    "id": "required-tool-access-denied-v1",
+    "execution": "scripted-fault-injection",
+    "expectedStatus": 424,
+    "expectedErrorCode": "chat_tool_failed"
+  },
+  {
+    "id": "model-deadline-without-answer-v1",
+    "execution": "scripted-fault-injection",
+    "expectedStatus": 424,
+    "expectedErrorCode": "chat_deadline_exceeded"
+  }
 ]

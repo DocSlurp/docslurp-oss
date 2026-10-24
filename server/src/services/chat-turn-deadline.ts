@@ -1,3 +1,6 @@
+import { PUBLIC_ERROR_MESSAGES } from "@docslurp/shared";
+import { HTTPException } from "hono/http-exception";
+
 /**
  * Time budget for one search-agent chat turn.
  *
@@ -16,7 +19,7 @@
  *   the reserve. The final answer step may use all of the remaining time.
  * - `toolTimeoutMs` (CHAT_AGENT_TOOL_TIMEOUT_MS, default 30 000): longest tool
  *   call, also capped to end before the reserve. A tool over budget is cancelled
- *   and returns an error result to the model; the turn continues.
+ *   and blocks the turn; no fallback answer is attempted.
  * - `finalReserveMs` (CHAT_AGENT_FINAL_RESERVE_MS, default 20 000, at most half
  *   the deadline): time kept for the final answer.
  */
@@ -48,13 +51,13 @@ export function chatTurnTimeBudget(env: NodeJS.ProcessEnv = process.env): ChatTu
   };
 }
 
-/** The turn ran out of time before any answer text existed. Routes answer 504 `chat_deadline_exceeded`. */
-export class ChatTurnDeadlineError extends Error {
+/** The turn ran out of time before any answer text existed. Routes answer 424 `chat_deadline_exceeded`. */
+export class ChatTurnDeadlineError extends HTTPException {
   readonly code = "chat_deadline_exceeded";
-  readonly statusCode = 504;
+  readonly statusCode = 424;
 
   constructor(readonly deadlineMs: number, options?: { cause?: unknown }) {
-    super(`The chat turn reached its ${Math.round(deadlineMs / 1000)} s deadline before an answer could be produced`, options);
+    super(424, { message: PUBLIC_ERROR_MESSAGES.chatDeadline, cause: options?.cause });
     this.name = "ChatTurnDeadlineError";
   }
 }

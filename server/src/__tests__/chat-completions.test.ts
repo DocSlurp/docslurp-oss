@@ -151,7 +151,7 @@ describe("OpenAI-compatible workspace chat", () => {
     chatWorkspace.mockRejectedValueOnce(new ChatToolBlockedError("search", "http_503"));
     const response = await request(input({ stream }));
     if (!stream) {
-      expect(response.status).toBe(502);
+      expect(response.status).toBe(424);
       expect(await response.json()).toMatchObject({ error: { code: "chat_tool_failed" } });
     } else {
       const text = await response.text();

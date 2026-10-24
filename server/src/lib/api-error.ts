@@ -4,7 +4,7 @@ import { HTTPException } from "hono/http-exception";
 import { apiError, apiErrorCodeForStatus, isApiErrorCode, publicApiErrorLinks, publicApiErrorMessage, type ApiErrorCode, type ApiErrorDetails } from "@docslurp/shared";
 import { upgradeLinkHeader, withUpgradeLinks } from "./upgrade-links.js";
 
-type ErrorStatus = 400 | 401 | 402 | 403 | 404 | 409 | 413 | 415 | 422 | 429 | 500 | 502 | 503 | 504;
+type ErrorStatus = 400 | 401 | 402 | 403 | 404 | 409 | 413 | 415 | 422 | 424 | 429 | 500 | 502 | 503 | 504;
 
 /** Native error envelope response; `publicErrorMiddleware` stamps `requestId` and sanitizes copy. */
 export function apiErrorResponse(c: Context, status: ErrorStatus, code: ApiErrorCode, message: string, details?: ApiErrorDetails): Response {
