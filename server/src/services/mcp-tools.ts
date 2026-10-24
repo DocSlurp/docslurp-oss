@@ -1,3 +1,8 @@
+import { getWorkspaceSearchSettings } from "./search-controls.js";
+import { workspaceSettingsPipelinePatchSchema } from "./workspace-settings-proposal-input.js";
+import { workspaceSettingsProposalInputSchema } from "./workspace-settings-proposal-input.js";
+import { currentChatSessionId } from "../lib/chat-agent-context.js";
+import { proposeWorkspaceSettings, SettingsProposalError } from "./workspace-settings-proposals.js";
 import { publicErrorMiddleware } from "../lib/public-errors.js";
 import { apiErrorResponse, apiStatusError, usesNativeErrorEnvelope } from "../lib/api-error.js";
 import { mapValidationIssues, type ValidationErrorSource } from "../lib/validation.js";
@@ -73,6 +78,32 @@ const mcpAdapterRoutes = new Hono()
       if (!body || Array.isArray(body) || typeof body !== "object") throw new Error("Expected object");
     } catch {
       return adapterError(c, 400, "Expected a JSON object");
+    }
+
+    if (toolId === "getWorkspaceSettings") {
+      if (Object.keys(body).some(key => key !== "workspace") || (body.workspace !== undefined && typeof body.workspace !== "string")) return adapterError(c, 400, "Invalid settings request");
+      const workspace = await loadActorScopedWorkspace(await resolveActorWorkspaceId(actor, typeof body.workspace === "string" ? body.workspace : undefined), actor);
+      if (!workspace) return adapterError(c, 404, "Workspace not found", "workspace_not_found");
+      const settings = await getWorkspaceSearchSettings(workspace.id, actor.userId);
+      return c.json({ workspaceId: workspace.id,
+        pipeline: Object.fromEntries(Object.keys(workspaceSettingsPipelinePatchSchema.shape).map(key => [key, key === "mediaVideo" ? { enabled: workspace.pipeline.mediaVideo?.enabled !== false } : workspace.pipeline[key as keyof typeof workspace.pipeline]])),
+        chat: settings.chat, retrieval: settings.retrievalDefaults });
+    }
+
+    if (toolId === "proposeWorkspaceSettings") {
+      const parsed = workspaceSettingsProposalInputSchema.safeParse(body);
+      if (!parsed.success) return invalidInput(c, parsed.error);
+      const sessionId = currentChatSessionId();
+      if (!sessionId) return adapterError(c, 403, "Settings proposals require a workspace chat session");
+      const workspace = await loadActorScopedWorkspace(await resolveActorWorkspaceId(actor, parsed.data.workspace), actor);
+      if (!workspace) return adapterError(c, 404, "Workspace not found", "workspace_not_found");
+      try {
+        const settingsProposal = await proposeWorkspaceSettings({ actor, workspaceId: workspace.id, sessionId, changes: parsed.data.changes });
+        return c.json({ settingsProposal });
+      } catch (error) {
+        if (error instanceof SettingsProposalError) return adapterError(c, error.status, error.message);
+        throw error;
+      }
     }
 
     if (toolId === "listWorkspaces") {

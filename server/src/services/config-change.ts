@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 
 import {
+  mergePipelineFeatures, type PipelineFeatureOverrides,
   analyzePipelineChange,
   compilePipelinePlan,
   deferredProfilesEnabled,
@@ -215,12 +216,15 @@ export async function planWorkspaceChange(args: {
   env?: EstimateEnv;
   /** Inline-estimate budget in ms (default 150). */
   budgetMs?: number;
+  /** Merge a narrow trusted proposal against the same workspace snapshot this plan versions. */
+  pipelineOverrides?: PipelineFeatureOverrides;
 }): Promise<WorkspaceChangePlan | null> {
   const input = updateWorkspaceSchema.parse(args.input);
   // Read before the workspace: a change landing in between only makes apply re-plan, never apply stale data.
   const rowVersion = await workspaceRowVersion(sql, args.workspaceId);
   const workspace = await getWorkspace(args.workspaceId, args.userId);
   if (!workspace) return null;
+  if (args.pipelineOverrides) input.pipeline = mergePipelineFeatures(workspace.pipeline, args.pipelineOverrides);
   const nextPipeline = await resolveUpdatedPipeline(workspace.id, workspace, input, { indexingMode: args.indexingMode });
   const base = analyzePipelineChange(workspace.pipeline, nextPipeline, { documents: 0, pages: 0 });
   const reindex: ReindexMode | null =
@@ -505,11 +509,16 @@ export async function applyWorkspaceChange(args: {
   env?: EstimateEnv;
   /** Plan-and-apply attempts before giving up with a retryable conflict (default 5). */
   maxAttempts?: number;
+  /** Trusted approval callers recheck authorization while holding the config lock. */
+  authorize?: (client: typeof sql) => Promise<void>;
+  afterSave?: (client: typeof sql) => Promise<void>;
+  expectedTargetSignature?: string;
 }): Promise<AppliedWorkspaceChange | null> {
   let plan = args.plan;
   for (let attempt = 0; attempt < (args.maxAttempts ?? MAX_REPLANS); attempt += 1) {
     const applied = await applyPlannedChange({ ...args, plan });
     if (applied !== STALE_PLAN) return applied;
+    if (attempt + 1 >= (args.maxAttempts ?? MAX_REPLANS)) break;
     // A concurrent change was saved after planning: plan again from what is stored now, so neither change is lost.
     const replanned = await planWorkspaceChange({
       workspaceId: plan.workspace.id, userId: args.userId, input: plan.input, indexingMode: args.updateOptions?.indexingMode, env: args.env,
@@ -525,6 +534,9 @@ async function applyPlannedChange(args: {
   userId: string;
   updateOptions?: Omit<WorkspaceUpdateOptions, "client">;
   env?: EstimateEnv;
+  authorize?: (client: typeof sql) => Promise<void>;
+  afterSave?: (client: typeof sql) => Promise<void>;
+  expectedTargetSignature?: string;
 }): Promise<AppliedWorkspaceChange | null | typeof STALE_PLAN> {
   const { plan, userId } = args;
   const { workspace } = plan;
@@ -539,11 +551,14 @@ async function applyPlannedChange(args: {
     const saved = await sql.begin(async (tx) => {
       await lock(tx);
       if (await workspaceRowVersion(tx, workspace.id) !== plan.rowVersion) return STALE_PLAN;
-      return await updateWorkspace(workspace.id, userId, plan.input, {
+      await args.authorize?.(tx as unknown as typeof sql);
+      const updated = await updateWorkspace(workspace.id, userId, plan.input, {
         ...args.updateOptions,
         client: tx as unknown as typeof sql,
         precomputed: { current: workspace, pipeline: plan.nextPipeline },
       });
+      if (updated) await args.afterSave?.(tx as unknown as typeof sql);
+      return updated;
     });
     if (saved === STALE_PLAN) return STALE_PLAN;
     if (!saved) return null;
@@ -585,6 +600,13 @@ async function applyPlannedChange(args: {
   const result = await sql.begin(async (tx) => {
     await lock(tx);
     if (await workspaceRowVersion(tx, workspace.id) !== plan.rowVersion) return STALE_PLAN;
+    await args.authorize?.(tx as unknown as typeof sql);
+    if (args.expectedTargetSignature !== undefined) {
+      const approvedTargets = await loadTargets(tx, workspace.id, {
+        hashNot: plan.reindex === "required" && plan.hashChanged ? afterHash : null, ignoreReindexRuns: supersedesInFlight,
+      });
+      if (reindexTargetSignature(approvedTargets) !== args.expectedTargetSignature) throw new ConfigConflictError();
+    }
     const carry: StageCarry = supersedesInFlight ? await loadStageCarry(tx, workspace.id) : new Map();
     const cancelled = supersedesInFlight ? await cancelInFlightReindexRuns(tx, workspace.id) : { all: [], processing: [] };
     const saved = await updateWorkspace(workspace.id, userId, plan.input, {
@@ -593,6 +615,7 @@ async function applyPlannedChange(args: {
       precomputed: { current: workspace, pipeline: plan.nextPipeline },
     });
     if (!saved) return null;
+    await args.afterSave?.(tx as unknown as typeof sql);
     if (plan.recordsIndexChange) {
       // Documents indexed before hashes were recorded belong to the config that was current until now.
       await tx`
@@ -617,6 +640,7 @@ async function applyPlannedChange(args: {
       hashNot: plan.reindex === "required" && plan.hashChanged ? afterHash : null,
       ignoreReindexRuns: supersedesInFlight,
     });
+    if (args.expectedTargetSignature !== undefined && reindexTargetSignature(targets) !== args.expectedTargetSignature) throw new ConfigConflictError();
     if (targets.length === 0) return { runs: null as ReindexRunResult | null, cancelled };
     // Documents that appeared since planning re-run in full (their reusability was not checked).
     const split: ReusableSplit = { partial: [], full: [] };
@@ -686,3 +710,8 @@ export async function canChangeWorkspace(workspaceId: string, userId: string): P
 }
 
 export { INLINE_ESTIMATE_BUDGET_MS, recordJobMeta };
+
+/** Frozen approval work identity; ignores index hashes which this transaction intentionally stamps. */
+export function reindexTargetSignature(targets: readonly ReindexTarget[]): string {
+  return JSON.stringify(targets.map(d => [d.id, d.page_count, d.run_id, d.source_key, d.source_sha256]).sort((a, b) => String(a[0]).localeCompare(String(b[0]))));
+}

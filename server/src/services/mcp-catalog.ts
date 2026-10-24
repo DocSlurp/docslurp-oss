@@ -1,3 +1,4 @@
+import { workspaceSettingsProposalInputSchema } from "./workspace-settings-proposal-input.js";
 import { z } from "zod";
 
 import { deferredProfilesEnabled } from "@docslurp/shared";
@@ -104,6 +105,13 @@ export function mcpTools(baseUrl: string): McpTool[] {
     annotations: READ_ONLY,
   }));
   const tools: Omit<McpTool, "category" | "endpoint">[] = [
+    { id: "getWorkspaceSettings", title: "Read workspace settings", scopes: ["search", "ingest"], annotations: READ_ONLY,
+      description: "Read current supported pipeline toggles, chat settings and retrieval defaults for the selected workspace. Use before proposing changes and to verify what is actually saved after the user applies a proposal. Does not expose secrets or change settings.",
+      inputSchema: toolInputJsonSchema(z.object({ workspace: workspaceRef }).strict()) },
+    { id: "proposeWorkspaceSettings", title: "Propose workspace settings", scopes: ["search", "ingest"],
+      keyAccess: key => key.keyType === "server" && key.scopes.includes("workspaces:manage"), annotations: READ_ONLY,
+      description: "Prepare an exact workspace-settings change and impact for the signed-in chat's Apply card. Does not save settings or start work. Requires workspace editor access. Call proactively when configuration would help the user's goal, including enabling video frames. Safe chat changes (changes.chat): enabled, mode, answerStyle, citations, searchInstructions. Safe retrieval changes (changes.retrieval): resultCount, useRerank, useMmr, mmrLambda, candidateDepth, resultOrder. Allowed pipeline toggles: mediaVideo.enabled, chunkOverlap, summarize, embed, indexVectors, preserveTables, preserveCode, preserveImages, pdfRegionExtraction, visionFallback. Example: {changes:{pipeline:{mediaVideo:{enabled:true}}}}. The user applies the structured card; never claim the proposal has been applied. Existing-document reprocessing requires separate explicit consent. Available inside a workspace chat session only.",
+      inputSchema: toolInputJsonSchema(workspaceSettingsProposalInputSchema) },
     { id: "listWorkspaces", title: "List workspaces", scopes: ["search", "ingest"], annotations: READ_ONLY,
       description: "List workspaces you can access, including their IDs, slugs, default workspace, document/page counts and latest processing status. Pass a returned slug (or the name) as workspace in upload, search or chat. Does not call AI.",
       inputSchema: toolInputJsonSchema(listWorkspacesInput) },
