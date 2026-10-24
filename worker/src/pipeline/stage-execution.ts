@@ -100,7 +100,8 @@ export interface StageRuntime {
 export type StageFailureClass = "interruption" | "cancelled" | "throttled" | "hung" | "ordinary";
 
 export type LoadRunOptions = {
-  totalStages?: number;
+  /** Fixed, or derived from the loaded run (e.g. its pipeline's stage count). */
+  totalStages?: number | ((run: WorkflowState["run"]) => number);
   /** Hydrate stage checkpoints from the store (default true). */
   hydrate?: boolean;
   /** Apply the worker's configured document concurrency. */
@@ -136,7 +137,9 @@ export async function loadRunState(
   const [run, documents] = await Promise.all([store.loadRun(runId), store.loadDocumentsForRun(runId)]);
   const state = WorkflowState.create(coerceIndexingModeForFlag(run), documents);
   if (options.docConcurrency !== undefined) state.docConcurrency = options.docConcurrency;
-  if (options.totalStages !== undefined) state.totalStages = options.totalStages;
+  if (options.totalStages !== undefined) {
+    state.totalStages = typeof options.totalStages === "function" ? options.totalStages(state.run) : options.totalStages;
+  }
   for (const [key, value] of Object.entries(options.artifacts ?? {})) {
     if (!state.artifactLedger.read(key)) {
       state.artifactLedger.record(key, value);
@@ -190,13 +193,21 @@ export function createStageExecution(deps: {
    */
   async function startRun(input: InitRunInput): Promise<InitRunOutput> {
     const loadOptions = { docConcurrency: config.workerDocConcurrency, hydrate: false };
+    // Checkpoints are read beside the run and documents; seeding reused stages rewrites them, so
+    // a partial run reads them again afterwards.
+    const prefetch = (store as { readStageStates?(runId: string): Promise<unknown> }).readStageStates;
+    let stageStates = prefetch?.call(store, input.runId);
+    stageStates?.catch(() => undefined);
     let state = await loadRunState(store, input.runId, loadOptions);
     const plan = compilePipelinePlan(state.run.pipeline);
     if (plan.reusedStages.length > 0) {
       await seedReusedStages(input.runId, plan);
       state = await loadRunState(store, input.runId, loadOptions);
+      stageStates = undefined;
     }
-    await store.hydrateState(state);
+    await (stageStates
+      ? (store.hydrateState as (state: WorkflowState, stageStates?: unknown) => Promise<void>)(state, stageStates)
+      : store.hydrateState(state));
     const { run, documents } = state;
 
     // Mark run as processing
@@ -620,9 +631,7 @@ export function createStageExecution(deps: {
 
   /** Mark a Run completed, emit run.completed, and notify emails/webhooks. */
   async function completeRun(input: CompleteRunInput): Promise<void> {
-    const state = await loadRunState(store, input.runId, { hydrate: false });
-    state.totalStages = getPipelineStageOrder(state.run.pipeline).length;
-    await store.hydrateState(state);
+    const state = await loadRunState(store, input.runId, { totalStages: (run) => getPipelineStageOrder(run.pipeline).length });
 
     // A Run with some failed Documents still completes (the count is in its
     // stats). It fails only when no Document could succeed.

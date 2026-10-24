@@ -363,6 +363,42 @@ async function supersededInThisTransaction(
   return mapSuperseded(await supersededInThisTransactionQuery(client, documentIds));
 }
 
+/** The documents of a completing run: retire obsolete rows, then mark the healthy ones completed. */
+function completeRunDocumentStatements(client: Sql<Record<string, unknown>>, runId: string) {
+  return [
+    client`select retire_replaced_pending_documents(${runId})`,
+    // Legacy retries may already contain obsolete queued rows. They were not
+    // hydrated or processed; retire them instead of declaring them completed.
+    client`
+      update documents set status = 'cancelled', lexical_searchable_at = null, updated_at = now()
+      where run_id = ${runId} and superseded_at is not null
+        and status in ('queued', 'processing')
+    `,
+    client<{ id: string }[]>`
+      update documents
+      set status = 'completed',
+          updated_at = now()
+      where run_id = ${runId}
+        and superseded_at is null
+        and status not in ('failed', 'cancelled', 'pii_blocked')
+        and not exists (
+          select 1 from document_run_stage_states stage_state
+          where stage_state.document_id = documents.id
+            and stage_state.run_id = documents.run_id
+            and stage_state.status = 'failed'
+        )
+      returning id
+    `,
+  ] as const;
+}
+
+async function completeRunDocuments(client: Sql<Record<string, unknown>>, runId: string): Promise<string[]> {
+  const [retire, cancel, completed] = completeRunDocumentStatements(client, runId);
+  await retire;
+  await cancel;
+  return (await completed).map((row) => row.id);
+}
+
 export class Store {
   private readonly sql: Sql<Record<string, unknown>>;
   capacityLeaseStore(providerIds: string[]) { return new PostgresCapacityLeaseStore(this.sql, (id) => this.loadRun(id).catch(() => null), providerIds); }
@@ -975,36 +1011,21 @@ export class Store {
 
     await recordPageBaseFee(this.sql, state);
 
-    const cutover = await this.sql.begin(async (tx) => {
-      const client = tx as unknown as typeof this.sql;
-      // Mode-switch backfills re-key their artifacts onto the source document and retire themselves
-      // (see backfill-adoption.ts); they must not supersede the source version.
-      const adopted = new Set(state.run.kind === "full-index" ? await adoptBackfillDocuments(client, state.run.id) : []);
-      await client`select retire_replaced_pending_documents(${state.run.id})`;
-      // Legacy retries may already contain obsolete queued rows. They were not
-      // hydrated or processed; retire them instead of declaring them completed.
-      await client`
-        update documents set status = 'cancelled', lexical_searchable_at = null, updated_at = now()
-        where run_id = ${state.run.id} and superseded_at is not null
-          and status in ('queued', 'processing')
-      `;
-      const completed = await client<{ id: string }[]>`
-        update documents
-        set status = 'completed',
-            updated_at = now()
-        where run_id = ${state.run.id}
-          and superseded_at is null
-          and status not in ('failed', 'cancelled', 'pii_blocked')
-          and not exists (
-            select 1 from document_run_stage_states stage_state
-            where stage_state.document_id = documents.id
-              and stage_state.run_id = documents.run_id
-              and stage_state.status = 'failed'
-          )
-        returning id
-      `;
-      return await supersededInThisTransaction(client, completed.map((row) => row.id).filter((id) => !adopted.has(id)));
-    });
+    let replacements: CanonicalReplacement[] = [];
+    const cutover = state.run.kind === "full-index"
+      ? await this.sql.begin(async (tx) => {
+        const client = tx as unknown as typeof this.sql;
+        // Mode-switch backfills re-key their artifacts onto the source document and retire themselves
+        // (see backfill-adoption.ts) before anything below, and must not supersede the source version.
+        const adopted = new Set(await adoptBackfillDocuments(client, state.run.id));
+        const completed = await completeRunDocuments(client, state.run.id);
+        return await supersededInThisTransaction(client, completed.filter((id) => !adopted.has(id)));
+      })
+      // Independent statements go out in one burst; the supersede read needs the completed ids.
+      : await pipelineTransaction(this.sql, (client) => completeRunDocumentStatements(client, state.run.id),
+        async (client, [, , completed]) => {
+          replacements = await supersededInThisTransaction(client, completed.map((row) => row.id));
+        }).then(() => replacements);
     await this.announceReplacements(state, cutover);
 
     await this.sql`
@@ -2474,6 +2495,24 @@ export class Store {
       returning id
     `;
     return rows.map((row) => row.id);
+  }
+
+  /**
+   * deleteStaleDocumentChunks, then (when the replacement set is non-empty) markDocumentLexicalSearchable,
+   * in one transaction and one round trip: the marker never precedes the tail drop.
+   */
+  async finalizeDocumentChunks(documentId: string, keepChunkIds: readonly string[], markSearchable: boolean): Promise<void> {
+    await pipelineTransaction(this.sql, (client) => [
+      client`
+        delete from document_chunks
+        where document_id = ${documentId} and id <> all(${client.array([...keepChunkIds])}::text[])
+      `,
+      ...(markSearchable ? [client`
+        update documents
+        set lexical_searchable_at = coalesce(lexical_searchable_at, now())
+        where id = ${documentId}
+      `] : []),
+    ]);
   }
 
   /**
