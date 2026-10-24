@@ -70,3 +70,43 @@ describe("POST /v1/web/ingest preflight", () => {
     expect(scoped).not.toHaveBeenCalled();
   });
 });
+
+describe("web tools and public client keys", () => {
+  const clientKey = (scopes: string[]) => ({ type: "apiKey", userId: "user-1", apiKey: { id: "key-pub", userId: "user-1", orgId: "org-1", keyType: "client", scopes, workspaceIds: ["ws-allowed"] } }) as never;
+  const fetchSpy = () => {
+    const run = vi.fn(async () => ({ data: { pages: [], failed: [] }, costUsd: 0, costSource: "reported" as const }));
+    setWebServiceDeps({
+      config: { ...env.web, enabled: true },
+      router: new WebRouter({ adapters: [{ id: "firecrawl", keyEnv: "", capabilities: { fetch: { estimateUsd: () => 0.001, run } } }],
+        keys: { firecrawl: "k" }, strategy: "cheapest", order: ["firecrawl"], maxAttempts: 1 }),
+      assertSafeUrl: async (url) => url, workspaceAccess: async () => "allowed", assertCanSpend: async () => undefined,
+      recordCost: vi.fn(async () => true), recordCharge: vi.fn(async () => ({}) as never),
+    });
+    return run;
+  };
+  const post = (actor: never, path: string, body: unknown) => webRoutesFor(actor, "mcp").request(`http://mcp.internal${path}`, {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+  });
+
+  it("refuses a search-scoped client key before any provider call", async () => {
+    const run = fetchSpy();
+    const response = await post(clientKey(["search", "chat"]), "/fetch", { urls: ["https://a.test/"] });
+    expect(response.status).toBe(403);
+    expect(await response.json()).toMatchObject({ error: { code: "web_scope_required" } });
+    expect(run).not.toHaveBeenCalled();
+  });
+
+  it("refuses website ingestion to a client key with ingest but no web scope", async () => {
+    const run = crawlSpy();
+    const response = await post(clientKey(["search", "ingest"]), "/ingest", { url: "https://a.test/" });
+    expect(response.status).toBe(403);
+    expect(run).not.toHaveBeenCalled();
+  });
+
+  it("lets a client key that opted in to web reach the capability", async () => {
+    fetchSpy();
+    scoped.mockResolvedValueOnce({ id: "ws-allowed", orgId: "org-1" });
+    const response = await post(clientKey(["search", "web"]), "/fetch", { urls: ["https://a.test/"] });
+    expect(response.status).not.toBe(403);
+  });
+});

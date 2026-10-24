@@ -39,8 +39,12 @@ There are two kinds of API key. The prefix tells you, and secret scanners, where
 
 | Prefix | Type | Where it may live | Can do |
 | --- | --- | --- | --- |
-| `dslp_priv_` | Server key | Backend secrets, CI, agent configuration | The scopes you grant: `ingest`, `search`, `artifacts`, and opt-in organization/workspace management |
-| `dslp_pub_` | Browser key | Page HTML and browser bundles | `search` only, and only from your allowed websites |
+| `dslp_priv_` | Server key | Backend secrets, CI, agent configuration | The scopes you grant: `ingest`, `search`, `chat`, `artifacts`, and opt-in organization/workspace management |
+| `dslp_pub_` | Browser key | Page HTML and browser bundles | `search` by default, and only from your allowed websites. Add `chat` for an answer widget; `web`, `ingest` and `artifacts` need an explicit opt-in and a workspace allowlist |
+
+`search` returns passages. `chat` generates answers on your credits: `/v1/chat`, `/v1/chat/stream`, `/v1/chat/completions` (and its `/v1/models` list) and the MCP `chat` tool need it. Keys created before `chat` existed kept chat access wherever they had `search`.
+
+Web tools (`/v1/web/*` and the MCP and chat-agent web tools) make paid calls to the open web. Server keys use them with `search` (`ingest` for website ingestion). Browser keys never get them by default: grant the `web` scope only to a key limited to specific workspaces, because anyone can copy a browser key from your page source.
 
 A key's type is fixed when you create it; to switch, create a new key. Keys issued before typed prefixes (`dslp_<hex>`) keep working. Create and rotate keys on the [API keys](https://docslurp.io/app/api-keys) page.
 

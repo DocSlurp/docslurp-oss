@@ -22,7 +22,7 @@ Search and chat need only a question:
 
 Without `workspace`, tools use the organization default workspace. Add `"workspace":"legal-contracts"` (a workspace ID, slug or name: `"Legal Contracts"` finds the same workspace) to target another one. The `upload` tool creates the workspace when a name matches none of yours, so agents should pass a new name only when the user asks for a new workspace; every other tool answers `workspace_not_found`. See [Workspaces](https://docslurp.io/docs/http#workspaces).
 
-Continue a chat by passing its returned `sessionId`. Search is independent of the answer model: pass the returned text and citations to any LLM for your own RAG workflow. Retrieval can incur embedding usage; chat additionally incurs generation usage. These tools require `search` scope and check workspace access against the authenticated organization.
+Continue a chat by passing its returned `sessionId`. Search is independent of the answer model: pass the returned text and citations to any LLM for your own RAG workflow. Retrieval can incur embedding usage; chat additionally incurs generation usage. `search` requires the `search` scope and `chat` requires the `chat` scope; both check workspace access against the authenticated organization. OAuth clients get both unless they request narrower scopes (`search`, `chat`, `read`, `ingest`).
 
 Run multiple retrieval queries in one call:
 

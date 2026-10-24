@@ -22,7 +22,7 @@ export function buildOpenApiDocument(baseUrl: string) {
     ],
     components: {
       securitySchemes: {
-        bearerAuth: { type: "http", scheme: "bearer", description: "DocSlurp API key. Server keys start with dslp_priv_ and must stay secret; browser/embed client keys start with dslp_pub_ and are search-only and domain-restricted. Keys issued before typed prefixes (dslp_...) remain valid." },
+        bearerAuth: { type: "http", scheme: "bearer", description: "DocSlurp API key. Server keys start with dslp_priv_ and must stay secret; browser/embed client keys start with dslp_pub_, are domain-restricted and search-only unless granted chat (answers) or, with a workspace allowlist, web, ingest or artifacts. Keys issued before typed prefixes (dslp_...) remain valid." },
         sessionAuth: { type: "apiKey", in: "cookie", name: "better-auth.session_token", description: "Authenticated dashboard session" },
       },
       schemas: { ApiError: apiErrorSchema, ...simpleServiceSchemas, ...stateManagementSchemas, ...workspaceGraphSchemas, ...searchCompatibilitySchemas },
