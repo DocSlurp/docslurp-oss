@@ -1,9 +1,0 @@
-chunks	model	n	name	p50	rt	toks	tot_s
-0	text-embedding-3-small	1445	worker.embedding.batch	8759		72295431	13820
-1871	Xenova/bge-m3	148	worker.embedding.local	6924	local	0	7532
-2642	Xenova/bge-m3	99	worker.embedding.local	622	"local"	0	4366
-359504	perplexity/pplx-embed-v1-0.6b	5404	worker.embedding.batch	700		103086637	4201
-0		4850	openrouter.embedding	701		0	3813
-0	Xenova/bge-m3	71	worker.embedding.local	2635		0	1048
-114266	pplx-embed-v1-0.6b	3410	worker.embedding.batch	241		69911798	900
-0		2129	perplexity.embedding	251		0	590

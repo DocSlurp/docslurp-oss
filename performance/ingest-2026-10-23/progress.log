@@ -1,6 +1,6 @@
 Fri Oct 23 04:39:15 PM MDT 2026
 start track C
-2026-10-23T16:41:21-06:00 signoz prod baseline pulled (prod/worker-spans-7d.tsv, runs-top40.tsv); tunnel pid 2772876
+2026-10-23T16:41:21-06:00 signoz prod baseline pulled
 2026-10-23T16:56:35-06:00 merged core ecc94a48 clean; local stack up (api 8797, worker, db docslurp_perf_ingest, bucket perf-ingest, ns perf-ingest); fixtures frozen (fixtures.sha256); first baseline dev-fast running. NOTE other agents (perf-search) share CPU: noise
 2026-10-23T17:26:26-06:00 machine load avg ~39 on 8 cores (other agents): wall unreliable -> use worker CPU-seconds + DB xacts as primary; first clean baseline dev-small running (embed-dominated)
 2026-10-23T18:11:35-06:00 expA-r1 (prod-like cfg, 31ms DB latency, MiniLM, 6 docs/49pp): wall 113.9s 25.8 pp/min xacts 1403; expB-r1 (group+index-before-enrich): 74.1s 39.7 pp/min xacts 946. microbench exp01-03 done (see results/). need paired repeats

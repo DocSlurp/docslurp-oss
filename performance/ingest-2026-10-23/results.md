@@ -3,7 +3,7 @@
 Branch: core worktree /home/dan/worktrees/docslurp-oss/perf-ingest, `perf/ingest-2026-10-23` (base 62abb757, merged ecc94a48 cleanly).
 Caveat: the host ran at load average 20-40 on 8 cores (other agents), so wall times carry +-20-50% noise. CPU-seconds and DB transactions are the primary metrics. No AI spend (local MiniLM/bge-m3 only, vision off). Costs are CPU only, not AI/API.
 
-## Production attribution (SigNoz, 7 d; prod/*.tsv)
+## Production attribution (SigNoz, 7 d; raw exports not published)
 Stage-seconds share: embed 39.3% (local bge-m3 + hosted batches), graph-enrich 20.8%, extract-markdown 18.6%, index 5.8%, route-pages 3.2%, document-summary 3.2%, quarantine 2.8%, rest <2%.
 Light stages (format-detect, to-canonical, normalize, pdf-tooling) p50 ~0.3-0.45 s each (fixed overhead); quarantine p50 2.5 s. Postgres spans p50 12 ms (SELECT/UPDATE), begin p50 34 ms; S3 Head p50 28 ms, GetObject p50 85 ms (p95 6 s). Embedding models in use: text-embedding-3-small (batch p50 8.8 s), pplx-embed hosted (p50 0.7 s), local bge-m3 (p50 0.6-6.9 s per doc). Temporal schedule-to-start is not exported to SigNoz; run wall minus stage sum is 0-40 s for typical runs.
 
