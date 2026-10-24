@@ -1,5 +1,6 @@
 import { dynamicTool, jsonSchema, type ToolSet } from "ai";
 import { workspaceSettingsProposalSchema, type WorkspaceSettingsProposal, CHAT_AGENT_LIMIT_DEFAULTS, CHAT_MAX_RETRIEVED_PASSAGES, searchResultSchema, type SearchResult, type WorkspaceSearchRetrievalDefaults } from "@docslurp/shared";
+import type { WebToolActivity } from "@docslurp/shared/workspace-chat-ui";
 import { startTelemetrySpan, type TelemetrySpan } from "@docslurp/shared/observability";
 import type { McpDispatch, McpManifest } from "../lib/mcp-http.js";
 import { runInChatAgentContext } from "../lib/chat-agent-context.js";
@@ -119,6 +120,35 @@ export interface ChatToolActivity {
   status: "loading" | "success" | "error";
   runtimeMs?: number;
   settingsProposal?: WorkspaceSettingsProposal;
+  web?: WebToolActivity;
+}
+
+function domainOf(url: string): string {
+  try { return new URL(url).hostname.replace(/^www\./, ""); } catch { return ""; }
+}
+
+/** The web tool's request as shown while it runs (model-written query or URLs). */
+function webActivityRequest(id: string, supplied: Record<string, unknown>): WebToolActivity | undefined {
+  if (id === "webSearch") return { kind: "search", ...(typeof supplied.query === "string" ? { query: supplied.query.slice(0, 400) } : {}) };
+  if (id === "webFetch") return { kind: "fetch", urls: (Array.isArray(supplied.urls) ? supplied.urls : []).filter((url): url is string => typeof url === "string").slice(0, 10) };
+  return undefined;
+}
+
+/** The web tool's outcome: results by domain and title, never page text or provider fields. */
+function webActivityResult(request: WebToolActivity, result: unknown): WebToolActivity {
+  const body = (result && typeof result === "object" ? result : {}) as { results?: unknown; pages?: unknown; failed?: unknown; cached?: unknown; usage?: { credits?: unknown } };
+  const items = (Array.isArray(request.kind === "search" ? body.results : body.pages) ? (request.kind === "search" ? body.results : body.pages) as unknown[] : []);
+  const results = items.flatMap((item) => {
+    const entry = item as { url?: unknown; title?: unknown; publishedAt?: unknown };
+    if (typeof entry?.url !== "string") return [];
+    return [{ url: entry.url.slice(0, 2048), domain: domainOf(entry.url).slice(0, 253),
+      ...(typeof entry.title === "string" && entry.title ? { title: entry.title.slice(0, 300) } : {}),
+      ...(typeof entry.publishedAt === "string" ? { publishedAt: entry.publishedAt.slice(0, 40) } : {}) }];
+  }).slice(0, 10);
+  return { ...request, results, resultCount: items.length,
+    ...(Array.isArray(body.failed) ? { failedCount: body.failed.length } : {}),
+    ...(typeof body.cached === "boolean" ? { cached: body.cached } : {}),
+    ...(typeof body.usage?.credits === "number" ? { credits: body.usage.credits } : {}) };
 }
 
 /**
@@ -316,9 +346,11 @@ export function createChatMcpTools(args: {
             : { ...modelSupplied, workspace: args.workspaceId };
         const queries = definition.id === "search" ? modelQueries(supplied) : undefined;
         let settingsProposal: WorkspaceSettingsProposal | undefined;
+        let web = webActivityRequest(definition.id, supplied);
         const update = (status: ChatToolActivity["status"]) => {
           const event: ChatToolActivity = { id: toolCallId, name: definition.id, status,
-            ...(status !== "loading" ? { runtimeMs: Date.now() - started } : {}), ...(settingsProposal ? { settingsProposal } : {}) };
+            ...(status !== "loading" ? { runtimeMs: Date.now() - started } : {}), ...(settingsProposal ? { settingsProposal } : {}),
+            ...(web ? { web } : {}) };
           activity.set(toolCallId, event);
           args.onActivity?.(event);
         };
@@ -357,6 +389,7 @@ export function createChatMcpTools(args: {
               }
             }
           }
+          if (response.ok && web) web = webActivityResult(web, result);
           if (response.ok && definition.id === "proposeWorkspaceSettings") {
             const parsed = workspaceSettingsProposalSchema.safeParse((result as { settingsProposal?: unknown })?.settingsProposal);
             if (parsed.success) settingsProposal = parsed.data;

@@ -75,6 +75,21 @@ describe("chat MCP tools", () => {
     expect(JSON.parse(t.dispatch.mock.calls[2]![1]!.body as string).workspace).toBe("selected");
   });
 
+  it("reports web tool progress: the query while running, then result domains, count, cache and credits", async () => {
+    const t = setup(["webSearch"], { webTools: true });
+    t.dispatch.mockResolvedValueOnce(Response.json({
+      results: [{ url: "https://www.nodejs.org/en/blog", title: "Node.js blog", snippet: "long page text", markdown: "# body" }, { url: "https://github.com/nodejs/node" }],
+      cached: false, usage: { credits: 1 },
+    }));
+    await t.execute("webSearch", { query: "node 24 release" });
+    const [loading, done] = t.onActivity.mock.calls.map(([event]) => event);
+    expect(loading).toMatchObject({ name: "webSearch", status: "loading", web: { kind: "search", query: "node 24 release" } });
+    expect(done.web).toEqual({ kind: "search", query: "node 24 release", resultCount: 2, cached: false, credits: 1, results: [
+      { url: "https://www.nodejs.org/en/blog", domain: "nodejs.org", title: "Node.js blog" },
+      { url: "https://github.com/nodejs/node", domain: "github.com" },
+    ] });
+  });
+
   it("bounds calls and honors cancellation before dispatch", async () => {
     const t = setup();
     const max = CHAT_AGENT_LIMIT_DEFAULTS.maxToolCalls;
