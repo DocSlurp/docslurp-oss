@@ -24,7 +24,7 @@ function setup(overrides: Partial<WebServiceDeps> = {}, config: Partial<typeof e
       if (/169\.254|localhost/.test(url)) throw new Error("blocked");
       return url;
     },
-    allowWorkspace: async () => true,
+    workspaceAccess: async () => "allowed" as const,
     assertCanSpend: async () => undefined,
     recordCost, recordCharge,
     ...overrides,
@@ -63,7 +63,7 @@ describe("runWebCapability", () => {
     expect(t.recordCharge).toHaveBeenCalledWith(expect.objectContaining({ charge: expect.objectContaining({ credits: 2 }) }));
   });
 
-  it("refuses when disabled, for private URLs, for privacy-restricted workspaces and over the org rate limit", async () => {
+  it("refuses when disabled, for private URLs, for opted-out or privacy-restricted workspaces and over the org rate limit", async () => {
     setup({}, { enabled: false });
     await expect(runWebCapability("search", search, ctx)).rejects.toMatchObject({ status: 404, code: "web_disabled" });
 
@@ -71,8 +71,11 @@ describe("runWebCapability", () => {
     await expect(runWebCapability("fetch", { urls: ["http://169.254.169.254/latest"], depth: "fast", maxCharacters: 1000 }, ctx))
       .rejects.toMatchObject({ status: 400, code: "url_blocked" });
 
-    setup({ allowWorkspace: async () => false });
+    setup({ workspaceAccess: async () => "privacy" as const });
     await expect(runWebCapability("search", search, ctx)).rejects.toMatchObject({ status: 403, code: "privacy_mode_blocked" });
+
+    setup({ workspaceAccess: async () => "disabled" as const });
+    await expect(runWebCapability("search", search, ctx)).rejects.toMatchObject({ status: 403, code: "web_disabled" });
 
     const t = setup();
     for (const query of ["a", "b", "c"]) await runWebCapability("search", { ...search, query }, ctx);

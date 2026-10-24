@@ -6,7 +6,8 @@ import { startTelemetrySpan, type TelemetrySpan } from "@docslurp/shared/observa
 import { env } from "../../config.js";
 import { recordCostEvent, recordUnitCharge } from "../../lib/ai-usage.js";
 import { assertSafeExternalUrl } from "../../lib/network-security.js";
-import { allowHostedCallForWorkspace, loadWorkspacePrivacyMode } from "../../lib/privacy.js";
+import { allowHostedCallForWorkspace } from "../../lib/privacy.js";
+import { loadWorkspacePipeline } from "../../search/session-setup.js";
 import { assertCanSpend } from "../billing/spend-guard.js";
 import { reviewUntrustedEvidenceText } from "../prompt-injection.js";
 import { createExaAdapter } from "./providers/exa.js";
@@ -40,7 +41,8 @@ export interface WebServiceDeps {
   router: WebRouter;
   now: () => number;
   assertSafeUrl: (url: string) => Promise<string>;
-  allowWorkspace: (workspaceId: string, capability: WebCapability) => Promise<boolean>;
+  /** The workspace's own opt-out (`pipeline.webTools`) first, then its privacy mode. */
+  workspaceAccess: (workspaceId: string, capability: WebCapability) => Promise<"allowed" | "disabled" | "privacy">;
   assertCanSpend: (orgId: string | null, workspaceId: string) => Promise<void>;
   recordCost: typeof recordCostEvent;
   recordCharge: typeof recordUnitCharge;
@@ -83,12 +85,16 @@ function deps(): WebServiceDeps {
     router: createWebRouter(env.web),
     now: Date.now,
     assertSafeUrl: assertSafeExternalUrl,
-    allowWorkspace: async (workspaceId, capability) => await allowHostedCallForWorkspace({
-      privacyMode: await loadWorkspacePrivacyMode(workspaceId),
-      workspaceId,
-      // Generic descriptor: privacy audit rows never name the provider.
-      call: { provider: "web", model: capability, operation: `api.web.${capability}`, target: "hosted" },
-    }),
+    workspaceAccess: async (workspaceId, capability) => {
+      const pipeline = await loadWorkspacePipeline(workspaceId);
+      if (pipeline.webTools === false) return "disabled";
+      return await allowHostedCallForWorkspace({
+        privacyMode: pipeline.privacyMode,
+        workspaceId,
+        // Generic descriptor: privacy audit rows never name the provider.
+        call: { provider: "web", model: capability, operation: `api.web.${capability}`, target: "hosted" },
+      }) ? "allowed" : "privacy";
+    },
     assertCanSpend: (orgId, workspaceId) => assertCanSpend(orgId, workspaceId, { kind: "interactive" }),
     recordCost: recordCostEvent,
     recordCharge: recordUnitCharge,
@@ -253,9 +259,9 @@ export async function runWebCapability<C extends WebCapability>(
       input = withUrls(capability, rawInput, safe);
     }
 
-    if (!await d.allowWorkspace(ctx.workspaceId, capability)) {
-      throw new WebToolError(403, "privacy_mode_blocked", "This workspace's privacy mode does not allow web tools.");
-    }
+    const access = await d.workspaceAccess(ctx.workspaceId, capability);
+    if (access === "disabled") throw new WebToolError(403, "web_disabled", "Web tools are turned off for this workspace.");
+    if (access === "privacy") throw new WebToolError(403, "privacy_mode_blocked", "This workspace's privacy mode does not allow web tools.");
     const retryAfter = admitOrgCall(ctx.orgId ?? `user:${ctx.userId}`, started, d.config.orgPerMinute);
     if (retryAfter !== null) {
       throw new WebToolError(429, "rate_limited", "Too many web tool calls. Try again shortly.", retryAfter);

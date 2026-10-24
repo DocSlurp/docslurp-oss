@@ -1213,6 +1213,7 @@ async function chatWorkspaceTurn(
     const generated = await runChatMcpAgent({
       actor: args.actor, workspaceId: args.workspaceId, orgId: workspace.orgId, sessionId,
       query: args.query, history, apiKey: chatApiKey, privacyMode, model,
+      workspaceWebTools: (workspace.pipeline as { webTools?: unknown } | null)?.webTools !== false,
       retrievalDefaults: searchSettings.retrievalDefaults,
       workspaceInstructions: [
         workspace.systemPrompt ? `Workspace ingest instruction: ${workspace.systemPrompt}` : "",

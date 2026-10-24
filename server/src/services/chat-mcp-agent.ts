@@ -108,6 +108,8 @@ export async function runChatMcpAgent(args: {
   /** The caller's explicit `model`, reported back in debug; null when omitted. */
   requestedModel?: string | null;
   limits?: ChatAgentLimits;
+  /** The workspace's `pipeline.webTools` opt-in (default on). */
+  workspaceWebTools?: boolean;
   /** Correlation for the agent span. */
   requestId?: string | null;
   workspaceInstructions?: string;
@@ -147,7 +149,7 @@ export async function runChatMcpAgent(args: {
     toolBudgetMs: () => deadline.toolBudgetMs(),
     onActivity: args.onToolActivity, onEvidence: args.onEvidence,
     // Web tools send model-written queries to a hosted provider: off for workspaces whose privacy mode forbids hosted calls.
-    webTools: env.web.chatEnabled && isProviderCallAllowed(args.privacyMode, { provider: "web", target: "hosted" }),
+    webTools: env.web.chatEnabled && args.workspaceWebTools !== false && isProviderCallAllowed(args.privacyMode, { provider: "web", target: "hosted" }),
     userText: [args.query, ...args.history.filter((turn) => turn.role === "user").map((turn) => turn.content)],
     allowWorkspace: async (ref) => {
       // Unresolvable references (including aliases) fail closed.
