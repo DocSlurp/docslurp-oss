@@ -1,3 +1,4 @@
+import { instrumentFetch } from "@docslurp/shared/observability";
 import { instrumentPostgres } from "@docslurp/shared/observability";
 import { PostgresCapacityLeaseStore } from "../media/capacity/store.js";
 import { PostgresMediaJournal } from "../media/journal.js";
@@ -3460,7 +3461,7 @@ export class Store {
       );
     } else {
       provider = "resend";
-      const response = await fetch("https://api.resend.com/emails", {
+      const response = await instrumentFetch("resend", "email")("https://api.resend.com/emails", {
         method: "POST",
         headers: {
           Authorization: `Bearer ${resendApiKey}`,

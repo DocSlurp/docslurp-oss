@@ -92,7 +92,7 @@ describe("native key ingestion organization isolation", () => {
   it.each(["/uploads/direct/sessions/foreign", "/uploads/direct/sessions/foreign/abort", "/uploads/direct/sessions/foreign/confirm", "/uploads/direct/sessions/foreign/files/complete"])("hides foreign direct-upload sessions at %s", async path => {
     mocks.sessionAccess.mockResolvedValue(false);
     expect((await app().request(path, { method: path.endsWith("/foreign") ? "GET" : "POST" })).status).toBe(404);
-    expect(mocks.sessionAccess).toHaveBeenCalledWith("foreign", "user-a", "org-a");
+    expect(mocks.sessionAccess).toHaveBeenCalledWith("foreign", "user-a", "org-a", null);
   });
   it("rejects keys without an organization", async () => {
     expect((await app(null).request("/uploads/bulk", upload())).status).toBe(403);

@@ -145,11 +145,11 @@ describe("/v1/chat chat turn billing", () => {
     expect(body.error.details?.usage).toMatchObject({ outcome: "failed", refunded: true, chargedCreditCents: 0 });
     expect(await available()).toBeCloseTo(1000, 6);
   });
-  it("refunds a turn that hit the agent deadline (504 chat_deadline_exceeded)", async () => {
+  it("refunds a turn that hit the agent deadline (424 chat_deadline_exceeded)", async () => {
     const { ChatTurnDeadlineError } = await import("../services/chat-turn-deadline.js");
     turnThat(() => { throw new ChatTurnDeadlineError(100_000); });
     const response = await post();
-    expect(response.status).toBe(504);
+    expect(response.status).toBe(424);
     const body = await response.json() as { error: { code?: string; details?: { usage?: Record<string, unknown> } } };
     expect(body.error.details?.usage).toMatchObject({ outcome: "failed", refunded: true, chargedCreditCents: 0 });
     expect(await available()).toBeCloseTo(1000, 6);

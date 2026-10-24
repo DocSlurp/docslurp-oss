@@ -76,3 +76,5 @@ export * from "./frontend-api.js";
 export { documentTagsSchema } from "./document-tags.js";
 
 export * from "./page-render.js";
+
+export * from "./workspace-settings-proposal.js";

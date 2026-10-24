@@ -1,21 +1,33 @@
 import { dynamicTool, jsonSchema, type ToolSet } from "ai";
-import { CHAT_AGENT_LIMIT_DEFAULTS, CHAT_MAX_RETRIEVED_PASSAGES, searchResultSchema, type SearchResult, type WorkspaceSearchRetrievalDefaults } from "@docslurp/shared";
+import { workspaceSettingsProposalSchema, type WorkspaceSettingsProposal, CHAT_AGENT_LIMIT_DEFAULTS, CHAT_MAX_RETRIEVED_PASSAGES, searchResultSchema, type SearchResult, type WorkspaceSearchRetrievalDefaults } from "@docslurp/shared";
+import type { WebToolActivity } from "@docslurp/shared/workspace-chat-ui";
 import { startTelemetrySpan, type TelemetrySpan } from "@docslurp/shared/observability";
 import type { McpDispatch, McpManifest } from "../lib/mcp-http.js";
 import { runInChatAgentContext } from "../lib/chat-agent-context.js";
 import { withSearchSignal } from "../search/query-bounds.js";
 import { raceAbort } from "./chat-turn-deadline.js";
 
+import { ChatToolBlockedError } from "./chat-tool-error.js";
+export { ChatToolBlockedError } from "./chat-tool-error.js";
+
+/** Batch endpoints may return HTTP 200 with failed items. Never treat that as success. */
+function resultFailed(value: unknown): boolean {
+  if (!value || typeof value !== "object") return false;
+  const body = value as { ok?: unknown; error?: unknown; results?: unknown; failed?: unknown };
+  return body.ok === false || body.error != null || (Array.isArray(body.failed) && body.failed.length > 0) || (Array.isArray(body.results)
+    && body.results.some(item => item && typeof item === "object" && "ok" in item && resultFailed(item)));
+}
+
 /** Tool result returned once the turn's tool-call budget is spent; `code` lets callers tell it apart. */
 export const TOOL_CALL_LIMIT_RESULT = {
-  error: "Tool call limit reached. Summarize the results already obtained.",
+  error: "Tool call limit reached. The task is blocked.",
   code: "tool_call_limit",
   limitReached: true,
 } as const;
 
 /** Tool result once the turn's final-answer reserve has started: the tool does not run. */
 export const TOOL_DEADLINE_RESULT = {
-  error: "The turn is nearly out of time, so no more tools can run. Answer now from the evidence already gathered and say what could not be checked.",
+  error: "No tool time remains. The task is blocked.",
   code: "deadline",
 } as const;
 
@@ -58,7 +70,7 @@ function reportedToolCostCents(result: unknown): number {
 function responseErrorCode(result: unknown, status: number): string {
   const error = result && typeof result === "object" ? (result as { error?: unknown }).error : undefined;
   const code = error && typeof error === "object" ? (error as { code?: unknown }).code : undefined;
-  return typeof code === "string" && /^[a-z0-9_]{1,64}$/i.test(code) ? code : `http_${status}`;
+  return typeof code === "string" && /^[a-z0-9_]{1,64}$/i.test(code) ? code : status < 400 ? "partial_failure" : `http_${status}`;
 }
 
 /**
@@ -118,13 +130,84 @@ export interface ChatToolActivity {
   name: string;
   status: "loading" | "success" | "error";
   runtimeMs?: number;
+  settingsProposal?: WorkspaceSettingsProposal;
+  web?: WebToolActivity;
+}
+
+function domainOf(url: string): string {
+  try { return new URL(url).hostname.replace(/^www\./, ""); } catch { return ""; }
+}
+
+/** The web tool's request as shown while it runs (model-written query or URLs). */
+/** Sources shown per web call; the UI shows five, and the full tools list is resent on every status update. */
+const WEB_ACTIVITY_SOURCES = 5;
+const WEB_ACTIVITY_URL_MAX = 512;
+
+/** An http(s) URL short enough to stream and link; anything else is dropped rather than cut into a broken link. */
+function streamableUrl(value: unknown): value is string {
+  if (typeof value !== "string" || value.length > WEB_ACTIVITY_URL_MAX) return false;
+  try { return ["http:", "https:"].includes(new URL(value).protocol); } catch { return false; }
+}
+
+function webActivityRequest(id: string, supplied: Record<string, unknown>): WebToolActivity | undefined {
+  if (id === "webSearch") return { kind: "search", ...(typeof supplied.query === "string" ? { query: supplied.query.slice(0, 400) } : {}) };
+  if (id === "webFetch") {
+    const urls = Array.isArray(supplied.urls) ? supplied.urls : [];
+    return { kind: "fetch", urls: urls.filter(streamableUrl).slice(0, WEB_ACTIVITY_SOURCES), requestedCount: urls.length };
+  }
+  return undefined;
+}
+
+/** The web tool's outcome: results by domain and title, never page text or provider fields. */
+function webActivityResult(request: WebToolActivity, result: unknown): WebToolActivity {
+  const body = (result && typeof result === "object" ? result : {}) as { results?: unknown; pages?: unknown; failed?: unknown; cached?: unknown; usage?: { credits?: unknown } };
+  const items = (Array.isArray(request.kind === "search" ? body.results : body.pages) ? (request.kind === "search" ? body.results : body.pages) as unknown[] : []);
+  const results = items.flatMap((item) => {
+    const entry = item as { url?: unknown; title?: unknown };
+    if (!streamableUrl(entry?.url)) return [];
+    return [{ url: entry.url, domain: domainOf(entry.url).slice(0, 253),
+      ...(typeof entry.title === "string" && entry.title ? { title: entry.title.slice(0, 300) } : {}) }];
+  }).slice(0, WEB_ACTIVITY_SOURCES);
+  return { ...request, results, resultCount: items.length,
+    ...(Array.isArray(body.failed) ? { failedCount: body.failed.length } : {}),
+    ...(typeof body.cached === "boolean" ? { cached: body.cached } : {}),
+    ...(typeof body.usage?.credits === "number" ? { credits: body.usage.credits } : {}) };
 }
 
 /**
  * Chat never exposes ingestion tools: upload fetches arbitrary URLs and starts
  * paid ingestion, and the model's arguments can be steered by document text (G-04).
  */
-const CHAT_EXCLUDED_TOOLS = new Set(["upload", "completeUpload", "listWorkspaces"]);
+const CHAT_EXCLUDED_TOOLS = new Set(["upload", "completeUpload", "listWorkspaces", "webMap", "webCrawl", "ingestWebsite"]);
+/** Web tools chat may use when the turn allows them (`webTools`). */
+const CHAT_WEB_TOOLS = new Set(["webSearch", "webFetch"]);
+
+/** Comparable form of a URL: no fragment, no trailing slash, lowercase host. */
+function urlKey(raw: string): string | null {
+  try {
+    const url = new URL(raw);
+    if (url.protocol !== "http:" && url.protocol !== "https:") return null;
+    url.hash = "";
+    return url.toString().replace(/\/+$/, "");
+  } catch {
+    return null;
+  }
+}
+
+/** HTTP(S) URLs written in user text (the only URLs webFetch may read before a web search). */
+export function urlsInText(text: string): string[] {
+  return [...text.matchAll(/https?:\/\/[^\s<>"'`)\]]+/gi)].map((match) => match[0].replace(/[.,;:!?]+$/, ""));
+}
+
+/**
+ * Exfiltration guard: in chat, webFetch reads only URLs the user wrote or that
+ * webSearch returned in this turn. Document or web text cannot make the model
+ * fetch an attacker URL carrying workspace data in its query string.
+ */
+export const WEB_FETCH_URL_REFUSED = {
+  error: "webFetch can only read URLs from the user's messages or from webSearch results in this turn. This request is blocked.",
+  code: "url_not_allowed",
+} as const;
 
 /** A turn owns its tool budget and citation numbering; no global user state. */
 export function createChatMcpTools(args: {
@@ -154,7 +237,20 @@ export function createChatMcpTools(args: {
    * `tool_timeout` error result. Omitted: tools run until the turn signal aborts.
    */
   toolBudgetMs?: () => number;
+  /** Offer webSearch/webFetch (when the catalog has them). Off: no web tools at all. */
+  webTools?: boolean;
+  /** The user's own messages, whose URLs webFetch may read. */
+  userText?: string[];
 }) {
+  let failure: ChatToolBlockedError | undefined;
+  const blocked = new AbortController();
+  const block = (toolName: string, code: string) => {
+    failure ??= new ChatToolBlockedError(toolName, code);
+    blocked.abort(failure);
+    return { ok: false, error: failure.message, code: failure.toolCode, blocked: true };
+  };
+  const throwIfBlocked = () => { if (failure) throw failure; };
+  const allowedWebUrls = new Set((args.userText ?? []).flatMap(urlsInText).map(urlKey).filter((key): key is string => Boolean(key)));
   const citations: SearchResult[] = [];
   const activity = new Map<string, ChatToolActivity>();
   const searchCalls: ChatSearchCallStats[] = [];
@@ -200,7 +296,8 @@ export function createChatMcpTools(args: {
     for (const key of ["results", "citations", "data", "response"]) collectEvidence(object[key], returned);
   }
 
-  for (const definition of args.manifest.capabilities.filter(item => item.category === "tool" && !CHAT_EXCLUDED_TOOLS.has(item.id))) {
+  const offered = (id: string) => !CHAT_EXCLUDED_TOOLS.has(id) && (!id.startsWith("web") || (args.webTools === true && CHAT_WEB_TOOLS.has(id)));
+  for (const definition of args.manifest.capabilities.filter(item => item.category === "tool" && offered(item.id))) {
     // OpenAI-compatible providers restrict function names to letters, numbers, _ and -.
     const name = definition.id.replace(/[^a-zA-Z0-9_-]/g, "_");
     if (tools[name]) throw new Error("Duplicate model tool name");
@@ -209,6 +306,7 @@ export function createChatMcpTools(args: {
       inputSchema: jsonSchema(definition.inputSchema),
       execute: async (input, { toolCallId }) => {
         args.signal.throwIfAborted();
+        throwIfBlocked();
         const span = startTelemetrySpan("docslurp.chat", `execute_tool ${definition.id}`, {
           "gen_ai.operation.name": "execute_tool", "gen_ai.tool.name": definition.id,
           "gen_ai.tool.call.id": toolCallId, "gen_ai.tool.type": "function",
@@ -224,7 +322,7 @@ export function createChatMcpTools(args: {
           detail({ status: "error", errorCode: "tool_call_limit" });
           span.set({ "docslurp.chat.tool_call_refused": true });
           span.end("tool_call_limit");
-          return { ...TOOL_CALL_LIMIT_RESULT };
+          return { ...TOOL_CALL_LIMIT_RESULT, ...block(definition.id, "tool_call_limit") };
         }
         const budgetMs = args.toolBudgetMs?.();
         if (budgetMs !== undefined && budgetMs <= 0) {
@@ -232,16 +330,25 @@ export function createChatMcpTools(args: {
           detail({ status: "error", errorCode: "deadline" });
           span.set({ "docslurp.chat.tool_deadline_refused": true });
           span.end("deadline");
-          return { ...TOOL_DEADLINE_RESULT };
+          return { ...TOOL_DEADLINE_RESULT, ...block(definition.id, "deadline") };
         }
         if (!input || typeof input !== "object" || Array.isArray(input)) {
           detail({ status: "error", errorCode: "invalid_arguments" });
           span.end("invalid_arguments");
-          return { error: "Expected object arguments" };
+          return block(definition.id, "invalid_arguments");
+        }
+        const supplied = input as Record<string, unknown>;
+        if (definition.id === "webFetch") {
+          const urls = Array.isArray(supplied.urls) ? supplied.urls : [];
+          if (!urls.length || urls.some((url) => typeof url !== "string" || !allowedWebUrls.has(urlKey(url) ?? ""))) {
+            detail({ status: "error", errorCode: WEB_FETCH_URL_REFUSED.code });
+            span.set({ "docslurp.chat.web_fetch_refused": true });
+            span.end(WEB_FETCH_URL_REFUSED.code);
+            return { ...WEB_FETCH_URL_REFUSED, ...block(definition.id, WEB_FETCH_URL_REFUSED.code) };
+          }
         }
         counters.executed++;
         counters.byTool[definition.id] = (counters.byTool[definition.id] ?? 0) + 1;
-        const supplied = input as Record<string, unknown>;
         const batch = definition.id === "search" && Array.isArray(supplied.queries);
         const queryCount = batch ? (supplied.queries as unknown[]).length : 1;
         // The turn's concurrency is the ceiling, and the value when the model omits it.
@@ -270,9 +377,12 @@ export function createChatMcpTools(args: {
             ? { ...modelSupplied, retrieval: chatDefaults, workspace: args.workspaceId }
             : { ...modelSupplied, workspace: args.workspaceId };
         const queries = definition.id === "search" ? modelQueries(supplied) : undefined;
+        let settingsProposal: WorkspaceSettingsProposal | undefined;
+        let web = webActivityRequest(definition.id, supplied);
         const update = (status: ChatToolActivity["status"]) => {
           const event: ChatToolActivity = { id: toolCallId, name: definition.id, status,
-            ...(status !== "loading" ? { runtimeMs: Date.now() - started } : {}) };
+            ...(status !== "loading" ? { runtimeMs: Date.now() - started } : {}), ...(settingsProposal ? { settingsProposal } : {}),
+            ...(web ? { web } : {}) };
           activity.set(toolCallId, event);
           args.onActivity?.(event);
         };
@@ -291,7 +401,7 @@ export function createChatMcpTools(args: {
           toolAbort.abort(Object.assign(new Error(`Tool exceeded its ${budgetMs} ms budget`), { name: "TimeoutError" }));
         }, budgetMs);
         budgetTimer?.unref?.();
-        const toolSignal = toolAbort.signal;
+        const toolSignal = AbortSignal.any([toolAbort.signal, blocked.signal]);
         try {
           const dispatch = () => span.run(() => args.dispatch(`/tools/${encodeURIComponent(definition.id)}`, {
             method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body), signal: toolSignal,
@@ -299,20 +409,35 @@ export function createChatMcpTools(args: {
           // Settles at the abort even when nested work ignores the signal.
           const response = await raceAbort(withSearchSignal(toolSignal, () => runInChatAgentContext(args.chatSessionId ?? null, dispatch, toolSignal)), toolSignal);
           const result: unknown = await raceAbort(response.json() as Promise<unknown>, toolSignal);
+          throwIfBlocked();
+          const ok = response.ok && !resultFailed(result);
           const returned: SearchResult[] = [];
-          if (response.ok) {
+          if (ok) {
             collectEvidence(result, returned);
             args.onEvidence?.([...citations]);
+            if (definition.id === "webSearch") {
+              const found = (result as { results?: Array<{ url?: unknown }> } | null)?.results ?? [];
+              for (const item of found) {
+                const key = typeof item?.url === "string" ? urlKey(item.url) : null;
+                if (key) allowedWebUrls.add(key);
+              }
+            }
           }
-          update(response.ok ? "success" : "error");
+          // A partial fetch failure still reports what was read and how many pages failed.
+          if (response.ok && web) web = webActivityResult(web, result);
+          if (ok && definition.id === "proposeWorkspaceSettings") {
+            const parsed = workspaceSettingsProposalSchema.safeParse((result as { settingsProposal?: unknown })?.settingsProposal);
+            if (parsed.success) settingsProposal = parsed.data;
+          }
+          update(ok ? "success" : "error");
           const pages = evidencePages(returned);
-          const costCents = response.ok ? reportedToolCostCents(result) : 0;
+          const costCents = ok ? reportedToolCostCents(result) : 0;
           counters.toolCostCents += costCents;
-          const stats = definition.id === "search" ? searchCallStats(toolCallId, response.ok, queryCount, concurrency, result) : undefined;
-          detail({ status: response.ok ? "success" : "error", ...(queries ? { queries } : {}),
+          const stats = definition.id === "search" ? searchCallStats(toolCallId, ok, queryCount, concurrency, result) : undefined;
+          detail({ status: ok ? "success" : "error", ...(queries ? { queries } : {}),
             ...(stats ? { resultCount: stats.resultCount, zeroHit: stats.zeroHit } : {}),
-            evidencePages: pages, ...(response.ok ? { costCents } : {}),
-            ...(response.ok ? {} : { errorCode: responseErrorCode(result, response.status) }) });
+            evidencePages: pages, ...(ok ? { costCents } : {}), ...(settingsProposal ? { settingsProposal } : {}),
+            ...(ok ? {} : { errorCode: responseErrorCode(result, response.status) }) });
           if (stats) {
             searchCalls.push(stats);
             span.set({
@@ -324,11 +449,15 @@ export function createChatMcpTools(args: {
             });
           }
           span.set({ "docslurp.tool.status_code": response.status });
-          span.end(response.ok ? undefined : `http_${response.status}`);
-          const serialized = JSON.stringify(result);
+          span.end(ok ? undefined : `http_${response.status}`);
+          if (!ok) return { ...block(definition.id, responseErrorCode(result, response.status)), status: response.status };
+          // Another concurrent tool may have failed while this one was running.
+          throwIfBlocked();
+          const modelResult = settingsProposal ? { settingsProposal: { ...settingsProposal, token: undefined } } : result;
+          const serialized = JSON.stringify(modelResult);
           return {
-            ok: response.ok, status: response.status,
-            result: serialized.length <= 40_000 ? result : { truncated: true, preview: serialized.slice(0, 40_000) },
+            ok, status: response.status,
+            result: serialized.length <= 40_000 ? modelResult : { truncated: true, preview: serialized.slice(0, 40_000) },
             // Local citation numbers in a nested answer must not overwrite the outer turn's numbering.
             evidence: citations.map((citation, index) => ({ citationIndex: index + 1,
               filename: citation.citation.filename, documentId: citation.citation.documentId,
@@ -343,9 +472,9 @@ export function createChatMcpTools(args: {
           args.signal.throwIfAborted();
           if (timedOut) {
             counters.timedOut++;
-            return { error: `The ${definition.id} tool ran out of time and was cancelled. Answer from the evidence already gathered, or try one narrower search.`, code: "tool_timeout" };
+            return block(definition.id, "tool_timeout");
           }
-          return { error: "Tool execution failed. Do not assume the action succeeded or retry a submission automatically." };
+          return block(definition.id, "exception");
         } finally {
           if (budgetTimer) clearTimeout(budgetTimer);
           args.signal.removeEventListener("abort", onTurnAbort);
@@ -353,5 +482,5 @@ export function createChatMcpTools(args: {
       },
     });
   }
-  return { tools, citations, activity, details, searchCalls, counters };
+  return { tools, citations, activity, details, searchCalls, counters, block, throwIfBlocked, get failure() { return failure; } };
 }

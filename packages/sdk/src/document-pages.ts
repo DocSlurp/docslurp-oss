@@ -55,6 +55,7 @@ export function buildDocumentPreviewPages(args: {
 }): DocumentPreviewPage[] {
   const { artifacts, documentId, manifest } = args;
   const imageArtifacts = artifacts
+    .filter(artifact => !/:raster-v\d+-/.test(artifact.slot))
     .filter((artifact) => artifact.slot.startsWith(`${documentId}:`) || /^(?:page|p)[-_:\s]?\d/i.test(artifact.slot))
     .filter((artifact) => isImageArtifact(artifact))
     .map((artifact) => ({

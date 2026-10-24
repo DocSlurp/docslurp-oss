@@ -13,8 +13,8 @@ import {
   type PipelineRunStage,
 } from "./pipeline.js";
 
-export const configChangeKindSchema = z.enum(["none", "search-only", "new-uploads", "reindex-recommended", "reindex-required"]);
-export type ConfigChangeKind = z.infer<typeof configChangeKindSchema>;
+export { configChangeKindSchema, type ConfigChangeKind } from "./config-change-kind.js";
+import { configChangeKindSchema, type ConfigChangeKind } from "./config-change-kind.js";
 
 export type ConfigChangeImpact = {
   kind: ConfigChangeKind;
@@ -138,6 +138,8 @@ export const PIPELINE_FIELD_IMPACT: Record<keyof PipelineFeatures, FieldImpact> 
   pageRouter: "new-uploads",
   mediaVideo: "new-uploads",
   webhooks: "new-uploads",
+  // Query-time only: web tools never touch stored documents.
+  webTools: "none",
   // Indexing-mode switching has its own flow (#199); these never re-run stored documents here.
   indexingMode: "new-uploads",
   materialization: "new-uploads",

@@ -1,3 +1,4 @@
+import { ChatToolBlockedError } from "../services/chat-tool-error.js";
 import { Hono } from "hono";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -146,6 +147,20 @@ describe("OpenAI-compatible workspace chat", () => {
     expect(response.status).toBe(400);
     expect(getWorkspace).not.toHaveBeenCalled();
   });
+  it.each([false, true])("blocks tool failures without a successful completion (stream=%s)", async (stream) => {
+    chatWorkspace.mockRejectedValueOnce(new ChatToolBlockedError("search", "http_503"));
+    const response = await request(input({ stream }));
+    if (!stream) {
+      expect(response.status).toBe(424);
+      expect(await response.json()).toMatchObject({ error: { code: "chat_tool_failed" } });
+    } else {
+      const text = await response.text();
+      expect(text).toContain('"code":"chat_tool_failed"');
+      expect(text).not.toContain('"finish_reason":"stop"');
+      expect(text).not.toContain("[DONE]");
+    }
+  });
+
   it("reports midstream failure without a false successful finish", async () => {
     chatWorkspace.mockImplementationOnce(async (args) => { await args.onTextDelta("partial"); throw new Error("provider failed"); });
     const response = await request(input({ stream: true }));

@@ -36,11 +36,25 @@ export interface DbProbe {
   close(): Promise<void>;
 }
 
+/** Longer than the probe's 5 s idle_timeout and the 15 s watchdog interval. */
+const STALE_PROBE_MS = 30_000;
+
 export function createDbProbe(databaseUrl: string, options: { applicationName?: string } = {}): DbProbe {
   let client: ProbeClient | null = null;
   const applicationName = `${(options.applicationName ?? apiApplicationName()).slice(0, 57)}:probe`;
 
-  const open = (timeoutMs: number): ProbeClient => client ??= postgres(databaseUrl, {
+  // Probe timers freeze with a suspended machine too: a connection unused for
+  // longer than the idle timeout can only be a socket the network has dropped.
+  let lastUsed = Date.now();
+
+  const open = (timeoutMs: number): ProbeClient => {
+    const at = Date.now();
+    if (client && at - lastUsed > STALE_PROBE_MS) discard(client);
+    lastUsed = at;
+    return client ??= connect(timeoutMs);
+  };
+
+  const connect = (timeoutMs: number): ProbeClient => postgres(databaseUrl, {
     max: 1,
     prepare: false,
     idle_timeout: 5,
