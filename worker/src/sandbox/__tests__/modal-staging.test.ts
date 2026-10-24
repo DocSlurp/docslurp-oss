@@ -737,6 +737,33 @@ describe("modal image default", () => {
     );
   });
 
+  const digest = `sha256:${"ab".repeat(32)}`;
+
+  it("pins the default release image by digest when DOCSLURP_MODAL_IMAGE_DIGEST is set", () => {
+    expect(provider.readConfig({ ...tokens, DOCSLURP_VERSION: "1.2.3", DOCSLURP_MODAL_IMAGE_DIGEST: digest }).image).toBe(
+      `ghcr.io/docslurp/worker-full@${digest}`,
+    );
+  });
+
+  it("accepts digest-pinned images and keeps registry ports", () => {
+    expect(provider.readConfig({ ...tokens, DOCSLURP_MODAL_IMAGE: `ghcr.io/docslurp/worker-full@${digest}` }).image).toBe(
+      `ghcr.io/docslurp/worker-full@${digest}`,
+    );
+    expect(provider.readConfig({ ...tokens, DOCSLURP_MODAL_IMAGE: "registry.local:5000/parsers:1", DOCSLURP_MODAL_IMAGE_DIGEST: digest }).image).toBe(
+      `registry.local:5000/parsers@${digest}`,
+    );
+    expect(provider.readConfig({ ...tokens, DOCSLURP_MODAL_IMAGE: "registry.local:5000/parsers" }).image).toBe("registry.local:5000/parsers");
+  });
+
+  it("rejects malformed or conflicting digests without echoing values", () => {
+    const read = (env: Record<string, string>) => () => provider.readConfig({ ...tokens, DOCSLURP_VERSION: "1.2.3", ...env });
+    expect(read({ DOCSLURP_MODAL_IMAGE_DIGEST: "sha256:short" })).toThrow(/invalid: DOCSLURP_MODAL_IMAGE_DIGEST/);
+    expect(read({ DOCSLURP_MODAL_IMAGE: "example/parsers@md5:abc" })).toThrow(/invalid: DOCSLURP_MODAL_IMAGE /);
+    expect(
+      read({ DOCSLURP_MODAL_IMAGE: `example/parsers@sha256:${"cd".repeat(32)}`, DOCSLURP_MODAL_IMAGE_DIGEST: digest }),
+    ).toThrow(/does not match/);
+  });
+
   it("requires DOCSLURP_MODAL_IMAGE when DOCSLURP_VERSION is unset", () => {
     const read = () => provider.readConfig({ ...tokens });
     expect(read).toThrow(SandboxConfigError);
