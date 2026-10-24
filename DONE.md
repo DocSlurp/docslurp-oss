@@ -1,5 +1,7 @@
 # Completed
 
+- Use measured 120-DPI initial PDF rendering for every account, reuse existing authorized pixels, and request 250-DPI sharpening/export only explicitly for funded or billing-exempt document organizations. Bind demand, cache, workflow and usage identities to effective DPI; retain capacity and raster bounds (2026-10-23; migration 0079).
+
 - Keep customer funding/resume status in the product and remove its operator notifications. Alert only on actual configured-platform vendor billing/quota errors, including bounded upstream SSE error frames; emit sanitized telemetry and deduplicated Telegram warning/recovery with exact credential scope (2026-10-23). Coverage and transport limits: `docs/vendor-balance-alerts.md`.
 
 - Automatically finalize direct object uploads and ingest their verified bytes with persisted results, authenticated Tigris notifications, multipart reconciliation, unknown-length stream signing, concurrent-session fencing and interrupted-run recovery (2026-10-23). Retain explicit completion/confirmation compatibility and expire abandoned uploads.

@@ -554,6 +554,13 @@
       "when": 1792792800008,
       "tag": "0078_automatic_upload_finalization",
       "breakpoints": true
+    },
+    {
+      "idx": 79,
+      "version": "7",
+      "when": 1792792800009,
+      "tag": "0079_page_render_dpi",
+      "breakpoints": true
     }
   ]
 }
