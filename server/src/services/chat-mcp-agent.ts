@@ -1,9 +1,10 @@
+import { env } from "../config.js";
 import { allowHostedCallForWorkspace, loadWorkspacePrivacyMode, openRouterCall } from "../lib/privacy.js";
 import { resolveWorkspaceRef } from "./workspaces.js";
 import { chatAgentProviderOptions, createChatAgentModel } from "../lib/chat-agent-model.js";
 import { streamText, stepCountIs, wrapLanguageModel, type ModelMessage, type StopCondition, type ToolSet } from "ai";
 import { performance } from "node:perf_hooks";
-import { assertProviderAllowed, CHAT_AGENT_LIMIT_DEFAULTS, createOpenRouterUsageCapture, resolveOpenRouterUsage, type ChatAgentLimits, type ChatAgentStepUsage, type ChatAgentStopReason, type ChatAgentTimeBudgetDebug, type PrivacyMode, type WorkspaceChatTurn } from "@docslurp/shared";
+import { assertProviderAllowed, isProviderCallAllowed, CHAT_AGENT_LIMIT_DEFAULTS, createOpenRouterUsageCapture, resolveOpenRouterUsage, type ChatAgentLimits, type ChatAgentStepUsage, type ChatAgentStopReason, type ChatAgentTimeBudgetDebug, type PrivacyMode, type WorkspaceChatTurn } from "@docslurp/shared";
 import { evalBaggageAttributes, recordChatAgentTelemetry, startTelemetrySpan, type TelemetrySpan } from "@docslurp/shared/observability";
 import type { RequestActor } from "../lib/request-actor.js";
 import { recordUsageEvent } from "../lib/ai-usage.js";
@@ -107,6 +108,8 @@ export async function runChatMcpAgent(args: {
   /** The caller's explicit `model`, reported back in debug; null when omitted. */
   requestedModel?: string | null;
   limits?: ChatAgentLimits;
+  /** The workspace's `pipeline.webTools` opt-in (default on). */
+  workspaceWebTools?: boolean;
   /** Correlation for the agent span. */
   requestId?: string | null;
   workspaceInstructions?: string;
@@ -145,6 +148,9 @@ export async function runChatMcpAgent(args: {
     chatSessionId: args.sessionId, traceParent: agentSpan,
     toolBudgetMs: () => deadline.toolBudgetMs(),
     onActivity: args.onToolActivity, onEvidence: args.onEvidence,
+    // Web tools send model-written queries to a hosted provider: off for workspaces whose privacy mode forbids hosted calls.
+    webTools: env.web.chatEnabled && args.workspaceWebTools !== false && isProviderCallAllowed(args.privacyMode, { provider: "web", target: "hosted" }),
+    userText: [args.query, ...args.history.filter((turn) => turn.role === "user").map((turn) => turn.content)],
     allowWorkspace: async (ref) => {
       // Unresolvable references (including aliases) fail closed.
       const resolved = await resolveWorkspaceRef(ref).catch(() => null);

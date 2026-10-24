@@ -125,7 +125,36 @@ export interface ChatToolActivity {
  * Chat never exposes ingestion tools: upload fetches arbitrary URLs and starts
  * paid ingestion, and the model's arguments can be steered by document text (G-04).
  */
-const CHAT_EXCLUDED_TOOLS = new Set(["upload", "completeUpload", "listWorkspaces"]);
+const CHAT_EXCLUDED_TOOLS = new Set(["upload", "completeUpload", "listWorkspaces", "webMap", "webCrawl", "ingestWebsite"]);
+/** Web tools chat may use when the turn allows them (`webTools`). */
+const CHAT_WEB_TOOLS = new Set(["webSearch", "webFetch"]);
+
+/** Comparable form of a URL: no fragment, no trailing slash, lowercase host. */
+function urlKey(raw: string): string | null {
+  try {
+    const url = new URL(raw);
+    if (url.protocol !== "http:" && url.protocol !== "https:") return null;
+    url.hash = "";
+    return url.toString().replace(/\/+$/, "");
+  } catch {
+    return null;
+  }
+}
+
+/** HTTP(S) URLs written in user text (the only URLs webFetch may read before a web search). */
+export function urlsInText(text: string): string[] {
+  return [...text.matchAll(/https?:\/\/[^\s<>"'`)\]]+/gi)].map((match) => match[0].replace(/[.,;:!?]+$/, ""));
+}
+
+/**
+ * Exfiltration guard: in chat, webFetch reads only URLs the user wrote or that
+ * webSearch returned in this turn. Document or web text cannot make the model
+ * fetch an attacker URL carrying workspace data in its query string.
+ */
+export const WEB_FETCH_URL_REFUSED = {
+  error: "webFetch can only read URLs from the user's messages or from webSearch results in this turn. Search first, or ask the user for the URL.",
+  code: "url_not_allowed",
+} as const;
 
 /** A turn owns its tool budget and citation numbering; no global user state. */
 export function createChatMcpTools(args: {
@@ -155,7 +184,12 @@ export function createChatMcpTools(args: {
    * `tool_timeout` error result. Omitted: tools run until the turn signal aborts.
    */
   toolBudgetMs?: () => number;
+  /** Offer webSearch/webFetch (when the catalog has them). Off: no web tools at all. */
+  webTools?: boolean;
+  /** The user's own messages, whose URLs webFetch may read. */
+  userText?: string[];
 }) {
+  const allowedWebUrls = new Set((args.userText ?? []).flatMap(urlsInText).map(urlKey).filter((key): key is string => Boolean(key)));
   const citations: SearchResult[] = [];
   const activity = new Map<string, ChatToolActivity>();
   const searchCalls: ChatSearchCallStats[] = [];
@@ -201,7 +235,8 @@ export function createChatMcpTools(args: {
     for (const key of ["results", "citations", "data", "response"]) collectEvidence(object[key], returned);
   }
 
-  for (const definition of args.manifest.capabilities.filter(item => item.category === "tool" && !CHAT_EXCLUDED_TOOLS.has(item.id))) {
+  const offered = (id: string) => !CHAT_EXCLUDED_TOOLS.has(id) && (!id.startsWith("web") || (args.webTools === true && CHAT_WEB_TOOLS.has(id)));
+  for (const definition of args.manifest.capabilities.filter(item => item.category === "tool" && offered(item.id))) {
     // OpenAI-compatible providers restrict function names to letters, numbers, _ and -.
     const name = definition.id.replace(/[^a-zA-Z0-9_-]/g, "_");
     if (tools[name]) throw new Error("Duplicate model tool name");
@@ -240,9 +275,18 @@ export function createChatMcpTools(args: {
           span.end("invalid_arguments");
           return { error: "Expected object arguments" };
         }
+        const supplied = input as Record<string, unknown>;
+        if (definition.id === "webFetch") {
+          const urls = Array.isArray(supplied.urls) ? supplied.urls : [];
+          if (!urls.length || urls.some((url) => typeof url !== "string" || !allowedWebUrls.has(urlKey(url) ?? ""))) {
+            detail({ status: "error", errorCode: WEB_FETCH_URL_REFUSED.code });
+            span.set({ "docslurp.chat.web_fetch_refused": true });
+            span.end(WEB_FETCH_URL_REFUSED.code);
+            return { ...WEB_FETCH_URL_REFUSED };
+          }
+        }
         counters.executed++;
         counters.byTool[definition.id] = (counters.byTool[definition.id] ?? 0) + 1;
-        const supplied = input as Record<string, unknown>;
         const batch = definition.id === "search" && Array.isArray(supplied.queries);
         const queryCount = batch ? (supplied.queries as unknown[]).length : 1;
         // The turn's concurrency is the ceiling, and the value when the model omits it.
@@ -305,6 +349,13 @@ export function createChatMcpTools(args: {
           if (response.ok) {
             collectEvidence(result, returned);
             args.onEvidence?.([...citations]);
+            if (definition.id === "webSearch") {
+              const found = (result as { results?: Array<{ url?: unknown }> } | null)?.results ?? [];
+              for (const item of found) {
+                const key = typeof item?.url === "string" ? urlKey(item.url) : null;
+                if (key) allowedWebUrls.add(key);
+              }
+            }
           }
           if (response.ok && definition.id === "proposeWorkspaceSettings") {
             const parsed = workspaceSettingsProposalSchema.safeParse((result as { settingsProposal?: unknown })?.settingsProposal);

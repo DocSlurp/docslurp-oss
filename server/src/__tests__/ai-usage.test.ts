@@ -9,7 +9,7 @@ vi.mock("../db.js", () => ({
   sql: sqlMock,
 }));
 
-const { defaultAiUsagePricingCatalog } = await import("@docslurp/shared");
+const { defaultAiUsagePricingCatalog, PRICE_CARD_VERSION } = await import("@docslurp/shared");
 const { createUsageLedger, recordUnitCharge, recordUsageEvent } = await import(
   "../lib/ai-usage.js"
 );
@@ -98,7 +98,7 @@ describe("Usage Event ledger", () => {
     expect(event).toMatchObject({ provider: "docslurp", metric: "search-query", costCents: 0.01 });
     const [insert] = usageInserts();
     expect(insert).toContain(0.01);
-    expect(insertedMetadata(insert)).toMatchObject({ billable: true, unitCharge: true, priceCard: "2026-10-21" });
+    expect(insertedMetadata(insert)).toMatchObject({ billable: true, unitCharge: true, priceCard: PRICE_CARD_VERSION });
   });
 
   it("attributes usage to the API key authenticating the request", async () => {

@@ -31,6 +31,7 @@ import {
   loadDirectUploadSession,
   withDirectUploadLock,
 } from "./direct-upload-session.js";
+import { canonicalIdForUrl } from "../lib/canonical-id.js";
 import { remoteUrlIntakeItems } from "./remote-ingest.js";
 import {
   intakeIntoWorkspace,
@@ -51,6 +52,8 @@ export type WorkspaceIntakePayload = {
   rejected?: WorkspaceIntakeResult["rejected"];
   pipeline?: PipelineFeatures;
   ingested?: Array<{ filename: string; mimeType: string }>;
+  /** Website ingestion: pages read by the crawl and the credits it was charged (ingest is billed separately). */
+  crawl?: { startUrl: string; pages: number; credits: number };
 };
 
 export type WorkspaceIntakeActionResult = {
@@ -332,6 +335,69 @@ export async function createRemoteUrlWorkspaceIntake(
           mimeType: document.mimeType,
         })),
         pipeline: intake.pipeline,
+      });
+    },
+  );
+}
+
+/** A crawled page becomes a Markdown document named after its URL path. */
+function webPageFilename(rawUrl: string): string {
+  const url = new URL(rawUrl);
+  const slug = `${url.hostname}${url.pathname}`.replace(/\/+$/, "").replace(/[^a-zA-Z0-9._-]+/g, "-").replace(/^-+|-+$/g, "");
+  return `${(slug || url.hostname).slice(0, 180)}.md`;
+}
+
+/**
+ * Website ingestion: crawl a site through Web Capabilities, then ingest every
+ * page as a Markdown document whose canonical ID is the page URL, so a re-crawl
+ * supersedes the previous version. The crawl runs inside the idempotency
+ * window, so a retried request neither re-crawls nor re-charges.
+ */
+export async function createWebsiteWorkspaceIntake(
+  args: IntakeTargetArgs & {
+    startUrl: string;
+    crawl: () => Promise<{ pages: Array<{ url: string; title?: string; markdown?: string }>; credits: number }>;
+    crawlOptions: Record<string, unknown>;
+    idempotencyKey?: string;
+    audit?: WorkspaceIntakeAudit;
+  },
+  ports: WorkspaceIntakePorts = workspaceIntakePorts,
+): Promise<WorkspaceIntakeActionResult> {
+  const { idempotencyKey, audit, crawl, crawlOptions, startUrl, ...target } = args;
+  return await idempotently(
+    {
+      idempotencyKey,
+      routeKey: "web.ingest",
+      requestHash: hashIdempotencyPayload({ ...target, startUrl, crawlOptions, idempotencyKey }),
+      userId: args.userId,
+    },
+    async () => {
+      const crawled = await crawl();
+      const pages = crawled.pages.filter((page) => page.markdown?.trim());
+      if (!pages.length) throw new WorkspaceIntakeError("The crawl found no readable pages at this URL.", 422);
+      const intake = await requiredIntake(
+        {
+          ...target,
+          kind: "url-ingest",
+          items: pages.map((page) => {
+            const body = page.title && !page.markdown!.trimStart().startsWith("#") ? `# ${page.title}\n\n${page.markdown}` : page.markdown!;
+            return {
+              filename: webPageFilename(page.url),
+              mimeType: "text/markdown",
+              canonicalId: canonicalIdForUrl(page.url),
+              metadata: { sourceUrl: page.url, source: "website-crawl", crawlStartUrl: startUrl },
+              content: { bytes: Buffer.from(body, "utf8") },
+            };
+          }),
+          urls: [startUrl],
+          audit,
+        },
+        ports,
+      );
+      return actionResult(intake, {
+        ingested: intake.documents.map((document) => ({ filename: document.filename, mimeType: document.mimeType })),
+        pipeline: intake.pipeline,
+        crawl: { startUrl, pages: pages.length, credits: crawled.credits },
       });
     },
   );

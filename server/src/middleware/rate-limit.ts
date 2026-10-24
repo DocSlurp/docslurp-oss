@@ -506,6 +506,7 @@ export function classifyRateLimitCategory(method: string, path: string): RateLim
   }
   if (
     normalizedPath.startsWith("/v1/search")
+    || normalizedPath.startsWith("/v1/web/")
     || normalizedPath.startsWith("/v1/suggest")
     || normalizedPath.startsWith("/compat/algolia")
     || normalizedPath.startsWith("/v1/mcp")

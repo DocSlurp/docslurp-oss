@@ -508,6 +508,14 @@ export const pipelineFeaturesSchema = z
      * delivery to a subset (empty means every subscribed event).
      */
     webhooks: workspaceWebhookSettingsSchema.default(defaultWorkspaceWebhookSettings),
+    /**
+     * Web tools (web search, page fetch, site map, crawl, website ingest) for
+     * this workspace's REST, MCP and chat calls. On by default and written
+     * explicitly into every workspace's pipeline (migration 0080); set false to
+     * opt the workspace out. Queries go to a hosted web provider, so privacy
+     * modes that forbid hosted calls block web tools regardless.
+     */
+    webTools: z.boolean().default(true),
     /** Per-page decision-model router (shadow/active); off unless `mode` is set. */
     pageRouter: pageRouterConfigSchema.default(defaultPageRouterConfig),
     /**
@@ -664,6 +672,7 @@ export const defaultPipelineFeatures: PipelineFeatures = {
   privacyMode: "standard",
   pdfRegionExtraction: false,
   webhooks: defaultWorkspaceWebhookSettings,
+  webTools: true,
   pageRouter: defaultPageRouterConfig,
   mediaVideo: { enabled: true },
 };
@@ -1486,6 +1495,7 @@ const FIELD_SEED_STAGES: Record<keyof PipelineFeatures, readonly PipelineRunStag
   privacyMode: ["pii-detect", "index"],
   pdfRegionExtraction: ["extract-markdown"],
   webhooks: [],
+  webTools: [],
   pageRouter: ["route-pages"],
   mediaVideo: ["extract-markdown"],
 };
