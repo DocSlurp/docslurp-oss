@@ -122,10 +122,17 @@ export function coerceIndexingModeForFlag<T extends { pipeline: { indexingMode?:
 
 /** The one Run hydration path for every activity entry point. */
 export async function loadRunState(
-  store: Pick<StageExecutionStore, "loadRun" | "loadDocumentsForRun" | "hydrateState">,
+  store: Pick<StageExecutionStore, "loadRun" | "loadDocumentsForRun" | "hydrateState"> & {
+    /** Reads the run's stage checkpoints so they travel beside the run and document reads. */
+    readStageStates?(runId: string): Promise<unknown>;
+  },
   runId: string,
   options: LoadRunOptions = {},
 ): Promise<WorkflowState> {
+  // The checkpoint read needs only the run id: issue it with the other two reads (one
+  // round trip on separate pooled connections instead of two in sequence).
+  const stageStates = options.hydrate !== false ? store.readStageStates?.(runId) : undefined;
+  stageStates?.catch(() => undefined);
   const [run, documents] = await Promise.all([store.loadRun(runId), store.loadDocumentsForRun(runId)]);
   const state = WorkflowState.create(coerceIndexingModeForFlag(run), documents);
   if (options.docConcurrency !== undefined) state.docConcurrency = options.docConcurrency;
@@ -135,7 +142,7 @@ export async function loadRunState(
       state.artifactLedger.record(key, value);
     }
   }
-  if (options.hydrate !== false) await store.hydrateState(state);
+  if (options.hydrate !== false) await (stageStates ? (store.hydrateState as (state: WorkflowState, stageStates?: unknown) => Promise<void>)(state, stageStates) : store.hydrateState(state));
   return state;
 }
 

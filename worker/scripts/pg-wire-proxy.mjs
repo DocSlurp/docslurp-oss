@@ -1,6 +1,6 @@
 // Postgres wire proxy for round-trip diagnostics: counts statements (Sync/simple Query messages) and
-// serial round trips ("flights": a client send while no earlier statement is outstanding on that
-// connection), and can add a fixed one-way delay in each direction (15 ms => ~30 ms RTT, like a managed
+// serial round trips ("flights": a client send while nothing earlier is awaiting an answer on that
+// connection; a parameterized statement without cached types is two flights), and can add a fixed one-way delay in each direction (15 ms => ~30 ms RTT, like a managed
 // Postgres reached across regions).
 // CLI: node pg-wire-proxy.mjs <listenPort> <targetHost> <targetPort> [oneWayDelayMs=0] [controlPort=listenPort+1000]
 //   Control: GET /stats -> {connections, statements, flights, bySql}, POST /reset.
@@ -41,7 +41,10 @@ export async function startPgWireProxy({ listenPort = 0, targetHost = "127.0.0.1
     const upstream = net.connect(Number(targetPort), targetHost);
     sockets.add(client); sockets.add(upstream);
     client.setNoDelay(true); upstream.setNoDelay(true);
-    let outstanding = 0, lastSql = "";
+    // outstanding: client messages awaiting the server's answer (Sync -> ReadyForQuery; Flush after a
+    // Describe -> RowDescription/NoData). A client send while none is outstanding starts a new flight,
+    // i.e. one serial network round trip.
+    let outstanding = 0, flushes = 0, lastSql = "";
     const fromClient = frames((type, body) => {
       if (type === "P" || type === "Q") {
         const text = type === "Q" ? body.toString("utf8", 0, body.length - 1) : body.toString("utf8", body.indexOf(0) + 1, body.indexOf(0, body.indexOf(0) + 1));
@@ -53,8 +56,15 @@ export async function startPgWireProxy({ listenPort = 0, targetHost = "127.0.0.1
         outstanding += 1;
         stats.bySql[lastSql] = (stats.bySql[lastSql] ?? 0) + 1;
       }
+      if (type === "H") {
+        if (outstanding === 0) stats.flights += 1;
+        outstanding += 1; flushes += 1;
+      }
     }, true);
-    const fromServer = frames((type) => { if (type === "Z" && outstanding > 0) outstanding -= 1; }, false);
+    const fromServer = frames((type) => {
+      if (type === "Z" && outstanding > 0) outstanding -= 1;
+      else if ((type === "T" || type === "n") && flushes > 0) { flushes -= 1; if (outstanding > 0) outstanding -= 1; }
+    }, false);
     const pipe = (from, to, parse) => {
       from.on("data", (buf) => { parse(buf); if (delayMs > 0) setTimeout(() => { if (!to.destroyed) to.write(buf); }, delayMs); else if (!to.destroyed) to.write(buf); });
       from.on("end", () => setTimeout(() => to.end(), delayMs));

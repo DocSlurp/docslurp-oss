@@ -1,4 +1,4 @@
-import type { PendingQuery, Row, Sql } from "postgres";
+import type { PendingQuery, Sql } from "postgres";
 
 type Client = Sql<Record<string, unknown>>;
 
@@ -20,7 +20,7 @@ type Client = Sql<Record<string, unknown>>;
  * (it costs one more round trip for the commit); omit it for a one-flight
  * transaction.
  */
-export async function pipelineTransaction<T extends readonly PendingQuery<Row[]>[]>(
+export async function pipelineTransaction<T extends readonly PendingQuery<any>[]>(
   sql: Client,
   statements: (tx: Client) => readonly [...T],
   after?: (tx: Client, results: { [K in keyof T]: Awaited<T[K]> }) => Promise<void>,
