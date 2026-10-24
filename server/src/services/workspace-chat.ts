@@ -6,6 +6,7 @@ import type { PrivacyMode } from "@docslurp/shared";
 import { env } from "../config.js";
 import type { RequestActor } from "../lib/request-actor.js";
 import type { ChatToolActivity } from "./chat-mcp-tools.js";
+import type { ChatWorkspaceInventory } from "./chat-mcp-agent.js";
 import {
   configureSearchFromChat,
   loadChatSessionSearchOverrides,
@@ -1165,6 +1166,27 @@ async function answerIngestReportTurn(args: ChatWorkspaceArgs): Promise<Workspac
   };
 }
 
+/** Grounded corpus facts for the agent prompt; both reads use workspace indexes. */
+async function loadChatWorkspaceInventory(workspaceId: string): Promise<ChatWorkspaceInventory> {
+  const [[counts], recent] = await Promise.all([
+    sql<{ searchable: number; processing: number }[]>`
+      select coalesce((select document_count from workspace_corpus_stats where workspace_id = ${workspaceId}), 0)::int as searchable,
+        (select count(*)::int from documents where workspace_id = ${workspaceId}
+          and status not in ('completed', 'failed', 'cancelled', 'pii_blocked')) as processing
+    `,
+    sql<{ filename: string }[]>`
+      select filename from documents
+      where workspace_id = ${workspaceId} and status = 'completed' and superseded_at is null
+      order by created_at desc limit 5
+    `,
+  ]);
+  return {
+    searchableDocuments: counts?.searchable ?? 0,
+    processingDocuments: counts?.processing ?? 0,
+    recentFilenames: recent.map(row => row.filename.slice(0, 120)),
+  };
+}
+
 type ChatTurnPolicy = { model: string; failover: boolean; requestedModel: string | null; limits: ChatAgentLimits };
 
 async function chatWorkspaceTurn(
@@ -1209,12 +1231,14 @@ async function chatWorkspaceTurn(
   // Filtered questions take direct retrieval so the filters are guaranteed to apply.
   if (args.allowAgentTools !== false && args.actor && env.chatMcpEnabled && chatApiKey && !filterDocumentIds && !narrowingFilters) {
     if (!workspace) throw new Error("Workspace not found");
-    const { runChatMcpAgent } = await import("./chat-mcp-agent.js");
+    const [{ runChatMcpAgent }, workspaceInventory] = await Promise.all([
+      import("./chat-mcp-agent.js"), loadChatWorkspaceInventory(args.workspaceId),
+    ]);
     const generated = await runChatMcpAgent({
       actor: args.actor, workspaceId: args.workspaceId, orgId: workspace.orgId, sessionId,
       query: args.query, history, apiKey: chatApiKey, privacyMode, model,
       workspaceWebTools: (workspace.pipeline as { webTools?: unknown } | null)?.webTools !== false,
-      retrievalDefaults: searchSettings.retrievalDefaults,
+      retrievalDefaults: searchSettings.retrievalDefaults, workspaceInventory,
       workspaceInstructions: [
         workspace.systemPrompt ? `Workspace ingest instruction: ${workspace.systemPrompt}` : "",
         searchSettings.chat.searchInstructions ? `Workspace search instruction: ${searchSettings.chat.searchInstructions}` : "",

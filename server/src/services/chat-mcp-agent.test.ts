@@ -545,3 +545,26 @@ it("forbids invented product alternatives and preserves exact outer citation ide
   expect(instructions).not.toContain("automations are started from the app");
   expect(model.doStreamCalls[0]!.tools?.map(tool => tool.name)).toEqual(["search"]);
 });
+
+it("grounds upload guidance in the workspace inventory and requires per-item overview citations", async () => {
+  mocks.manifestIds = ["search"];
+  const model = new MockLanguageModelV4({ doStream: [answerStep("Ready")] });
+  mocks.provider.mockReturnValue(model);
+  await runChatMcpAgent({ ...args, workspaceInventory: { searchableDocuments: 3, processingDocuments: 1, recentFilenames: ["type-specimen.pdf"] } });
+  const instructions = JSON.stringify(model.doStreamCalls[0]!.prompt.filter(message => message.role === "system"));
+  expect(instructions).toContain("3 searchable documents, 1 still processing");
+  expect(instructions).toContain("type-specimen.pdf");
+  expect(instructions).toContain("Never ask the user to upload, re-upload or share a file");
+  expect(instructions).toContain("never offer it as a workaround");
+  expect(instructions).toContain("needs a supporting citation beside each named item");
+});
+
+it("omits the inventory line when the caller has none, keeping the upload rule", async () => {
+  mocks.manifestIds = ["search"];
+  const model = new MockLanguageModelV4({ doStream: [answerStep("Ready")] });
+  mocks.provider.mockReturnValue(model);
+  await runChatMcpAgent(args);
+  const instructions = JSON.stringify(model.doStreamCalls[0]!.prompt.filter(message => message.role === "system"));
+  expect(instructions).not.toContain("Selected workspace inventory");
+  expect(instructions).toContain("Suggest an upload only when the workspace has no documents");
+});

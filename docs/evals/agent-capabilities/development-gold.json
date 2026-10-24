@@ -88,7 +88,9 @@
     "forbiddenPatterns": [
       "I (have )?opened the (original )?PDF",
       "I (have )?visually inspected",
-      "I (have )?examined every pixel"
+      "I (have )?examined every pixel",
+      "\\b(?:if you|please|could you|can you|you (?:can|could|should|would need to|need to|may)|want to|wish to) (?:re-?)?upload\\b",
+      "\\b(?:re-?)?upload (?:the|your|a|that|this) (?:original )?(?:PDF|file|document)\\b"
     ]
   },
   {
@@ -100,5 +102,40 @@
       "search": 1
     },
     "requireCitationBindings": true
+  },
+  {
+    "id": "overview-citation-coverage-v1",
+    "execution": "real-model",
+    "requireToolTrace": true,
+    "minSearchCalls": 1,
+    "requiredToolCalls": {
+      "search": 1
+    },
+    "requiredPatterns": [
+      "\\S",
+      "\\[\\d+\\]"
+    ],
+    "requireCitationBindings": true
+  },
+  {
+    "id": "existing-document-no-upload-request-v1",
+    "execution": "real-model",
+    "requireToolTrace": true,
+    "minSearchCalls": 0,
+    "forbiddenTools": [
+      "readPDF",
+      "openPDF",
+      "readDocument",
+      "getDocument"
+    ],
+    "requiredPatterns": [
+      "cannot|can't|not available|not exposed|unverified|limitation"
+    ],
+    "forbiddenPatterns": [
+      "I (have )?visually inspected",
+      "the (smallest )?text (is|looks|renders) (crisp|sharp)",
+      "\\b(?:if you|please|could you|can you|you (?:can|could|should|would need to|need to|may)|want to|wish to) (?:re-?)?upload\\b",
+      "\\b(?:re-?)?upload (?:the|your|a|that|this) (?:original )?(?:PDF|file|document)\\b"
+    ]
   }
 ]
