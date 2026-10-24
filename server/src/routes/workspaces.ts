@@ -1,3 +1,4 @@
+import { ChatToolBlockedError } from "../services/chat-tool-error.js";
 import { applyWorkspaceSettingsProposalSchema } from "@docslurp/shared";
 import { applySettingsProposal, SettingsProposalError } from "../services/workspace-settings-proposals.js";
 import { reportPublicError } from "../lib/public-errors.js";
@@ -520,7 +521,8 @@ async function createWorkspaceAgentChatResponse(c: Context) {
       },
       onError: (error) => {
         console.error("Chat stream error:", error);
-        return reportPublicError(error);
+        const message = reportPublicError(error);
+        return error instanceof ChatToolBlockedError ? error.message : message;
       },
     }),
   });
