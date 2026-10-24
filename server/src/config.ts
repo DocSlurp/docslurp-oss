@@ -74,7 +74,14 @@ function resolveWebConfig() {
       map: readList(process.env.WEB_PROVIDERS_MAP),
       crawl: readList(process.env.WEB_PROVIDERS_CRAWL),
     },
-    maxAttempts: Math.max(1, Math.min(4, readNumber(process.env.WEB_PROVIDER_MAX_ATTEMPTS, 3))),
+    /** Provider calls per web call (failover and render escalation steps). */
+    maxAttempts: Math.max(1, Math.min(6, readNumber(process.env.WEB_PROVIDER_MAX_ATTEMPTS, 4))),
+    /** Never try an option estimated at this many times the cheapest eligible option, or more. */
+    maxCostRatio: Math.max(1, readNumber(process.env.WEB_MAX_COST_RATIO, 15)),
+    /** Same-option retries after a transient (5xx/network) failure. */
+    transientRetries: Math.max(0, Math.min(3, readNumber(process.env.WEB_TRANSIENT_RETRIES, 1))),
+    /** Options switched off, as provider.option (e.g. "exa.live,firecrawl.rendered-wait"). */
+    disabledOptions: readList(process.env.WEB_DISABLED_OPTIONS) ?? [],
     keys: {
       tavily: readEnv(process.env.TAVILY_API_KEY),
       exa: readEnv(process.env.EXA_API_KEY),

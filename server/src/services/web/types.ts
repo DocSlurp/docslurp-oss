@@ -42,6 +42,11 @@ export interface WebFetchInput {
   depth: WebDepth;
   maxCharacters: number;
 }
+/**
+ * `failed` reasons: "unreadable" (no content), "blocked" (anti-bot, captcha,
+ * 401/403/429 from the site), "thin" (a JavaScript shell or near-empty page),
+ * or "http_<status>".
+ */
 export interface WebFetchOutput { pages: WebPage[]; failed: Array<{ url: string; reason: string }> }
 
 export interface WebMapInput {
@@ -92,11 +97,44 @@ export interface ProviderCallContext {
 
 export type ProviderHandler<C extends WebCapability> = (input: WebInput<C>, ctx: ProviderCallContext) => Promise<ProviderResult<WebOutput<C>>>;
 
+/**
+ * Rendering tiers, cheapest work first. The router escalates a page that a
+ * lower tier could not read to the next tier, never sideways at the same tier.
+ * 0: plain fetch or provider cache. 1: headless browser (runs JavaScript).
+ * 2: browser with waits/scrolling, anti-bot proxies or a forced live fetch.
+ */
+export type WebRenderTier = 0 | 1 | 2;
+
+/** One way a provider can serve a capability, with its own tier, price estimate and request shape. */
+export interface ProviderOption<C extends WebCapability> {
+  /** Stable internal name, e.g. "direct", "browser", "live". Recorded on cost events and spans; never sent to callers. */
+  id: string;
+  tier: WebRenderTier;
+  estimateUsd(input: WebInput<C>): number;
+  /** False when this option cannot honour the input (the router skips it). */
+  accepts?(input: WebInput<C>): boolean;
+  run: ProviderHandler<C>;
+}
+
+/**
+ * The provider's default way of serving a capability (option id "standard",
+ * at `tier`, default 0), plus optional `variants` at other tiers.
+ */
 export interface ProviderCapability<C extends WebCapability> {
+  /** Name of the default option on cost events and spans (default "standard"). */
+  optionId?: string;
+  tier?: WebRenderTier;
   estimateUsd(input: WebInput<C>): number;
   /** False when the provider cannot honour an option in this input (the router skips it). */
   accepts?(input: WebInput<C>): boolean;
   run: ProviderHandler<C>;
+  variants?: Array<ProviderOption<C>>;
+}
+
+/** Every option of a capability: the default first, then its variants. */
+export function capabilityOptions<C extends WebCapability>(capability: ProviderCapability<C>): Array<ProviderOption<C>> {
+  return [{ id: capability.optionId ?? "standard", tier: capability.tier ?? 0, estimateUsd: capability.estimateUsd, accepts: capability.accepts, run: capability.run },
+    ...(capability.variants ?? [])];
 }
 
 /**

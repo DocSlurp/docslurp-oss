@@ -85,3 +85,17 @@ export function sleep(ms: number, signal: AbortSignal): Promise<void> {
     signal.addEventListener("abort", onAbort, { once: true });
   });
 }
+
+/** Why a single page could not be read, from the per-URL error: drives tier escalation and is shown as "unreadable". */
+export function pageFailureReason(error: unknown): string {
+  const status = error instanceof WebProviderError ? error.status : undefined;
+  if (status === 401 || status === 403 || status === 429 || status === 451) return "blocked";
+  if (error instanceof WebProviderError && error.kind === "timeout") return "timeout";
+  return status ? `http_${status}` : "unreadable";
+}
+
+/** Reasons from a provider's own per-URL status (target site HTTP code). */
+export function targetStatusReason(status: number | undefined): string | null {
+  if (!status || status < 400) return null;
+  return status === 401 || status === 403 || status === 429 || status === 451 ? "blocked" : `http_${status}`;
+}
