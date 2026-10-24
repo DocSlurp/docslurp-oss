@@ -7,7 +7,12 @@
 -- remains. vector_table cleanup payloads now carry the workspaceId whose
 -- database holds the table (workspace and org deletion).
 --
--- Pre-release: existing org-level LanceDB tables are not migrated; reindex.
+-- Existing org-level LanceDB tables are moved by the relocation CLI
+-- (worker/src/stages/lancedb-relocate-cli.ts), without re-embedding.
+-- This migration only fixes queued rows that still name the old layout:
+-- vector_table cleanup rows of deleted orgs are marked legacyLayout (the sweep
+-- drops their org-level tables by their legacy names), and pending vector
+-- writes are pointed at their document's workspace database.
 CREATE OR REPLACE FUNCTION enqueue_document_cleanup() RETURNS trigger
 LANGUAGE plpgsql AS $$
 BEGIN
@@ -84,3 +89,23 @@ BEGIN
   RETURN OLD;
 END;
 $$;
+--> statement-breakpoint
+UPDATE storage_cleanup_queue
+SET payload = payload || '{"legacyLayout": true}'::jsonb, attempts = 0, last_error = NULL
+WHERE kind = 'vector_table' AND NOT (payload ? 'workspaceId') AND NOT (payload ? 'uri');
+--> statement-breakpoint
+-- <root>/<org>/vectors/<model>/<dims> -> <root>/<org>/<workspace>/vectors-<model>-<dims>
+UPDATE vector_index_outbox o
+SET lance_uri = moved.lance_uri, table_key = moved.lance_uri || '#' || o.lance_table
+FROM (
+  SELECT o2.id,
+    regexp_replace(o2.lance_uri, '/' || o2.org_id || '/vectors/([^/]+)/([0-9]+)$', '/' || o2.org_id || '/' || d.workspace_id || '/vectors-\1-\2') AS lance_uri
+  FROM vector_index_outbox o2
+  JOIN documents d ON d.id = o2.document_id
+  WHERE o2.org_id IS NOT NULL AND o2.lance_uri ~ ('/' || o2.org_id || '/vectors/[^/]+/[0-9]+$')
+) moved
+WHERE o.id = moved.id
+  AND NOT EXISTS (
+    SELECT 1 FROM vector_index_outbox other
+    WHERE other.table_key = moved.lance_uri || '#' || o.lance_table AND other.document_id = o.document_id
+  );

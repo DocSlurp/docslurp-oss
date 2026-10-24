@@ -217,6 +217,32 @@ server and worker start. Watch its exit status and the server logs. Breaking sch
 changes are possible while DocSlurp is pre-release; read release notes before
 upgrading and keep a rollback backup (see [Backups and restore](#backups-and-restore)).
 
+### Moving to per-workspace LanceDB databases (migration 0082)
+
+Vectors used to live in org-level tables
+(`<LANCEDB_URI>/<orgId>/vectors/<model>/<dims>`, `chunks_org_…`). Every
+workspace now has its own database,
+`<LANCEDB_URI>/<orgId>/<workspaceId>/vectors-<model>-<dims>`, and search reads
+only that one. Until existing rows are moved, vector search returns nothing
+for documents indexed before the upgrade (keyword search still works; the API
+counts `lanceTableMissing` and logs `[search] lancedb table missing`).
+
+1. Stop ingest (or let runs finish), then upgrade the server and worker
+   together. Migration 0082 repoints pending queued vector writes at their
+   workspace database and marks old org-deletion cleanup rows.
+2. Move the rows, without re-embedding, from the worker image:
+   `node worker/dist/stages/lancedb-relocate-cli.js --all --dry-run`, then
+   without `--dry-run`. It routes each row to its document's workspace (dedup
+   copies in another workspace get their own rebound rows), builds the vector
+   and full-text indexes and is idempotent. Rows of deleted documents stay
+   behind as `orphan_rows`.
+3. Check search in a few workspaces, then rerun with `--drop-legacy` to delete
+   the org-level tables. It drops only after a run without errors.
+
+Rolling back the code reads the org-level tables again, which miss anything
+indexed after the upgrade: keep them until step 3 and reprocess documents
+uploaded since.
+
 ## Monitoring
 
 - `GET /health` returns `{"ok":true,...}` while the server process is up. The

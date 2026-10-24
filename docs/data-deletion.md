@@ -29,6 +29,11 @@ workspace) queues `vector_table` entries for them first, so they are dropped
 whole instead of being deleted one document at a time. While documents are
 still in flight the drop waits out the same 15-minute grace as their cleanup.
 
+Org-level tables from before per-workspace databases are deleted by the
+relocation CLI's `--drop-legacy` step (see [operations](self-host/operations.md#moving-to-per-workspace-lancedb-databases-migration-0082));
+cleanup rows queued for them before migration 0082 drop them by their legacy
+names.
+
 A dedup copy shares its source's LanceDB rows only inside the source's
 workspace. A copy in another workspace has its own rows, so deleting the source
 removes the source's rows even while that copy lives; the shared storage

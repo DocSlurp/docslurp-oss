@@ -118,6 +118,8 @@ answers searches. Instead the server re-prewarms open tables every
 | `LANCEDB_PREWARM_REFRESH_SECONDS` | `60` | With `LANCEDB_PREWARM_INDEX=true`, re-prewarm open tables this often. `0` disables. |
 | `LANCEDB_PREWARM_DATA` | `false` | Also load the `vector`, `id` and `documentId` columns, so refine and `documentId` filters read memory. Costs RAM of that size. |
 | `LANCEDB_READ_CONSISTENCY_SECONDS` | `30` | How often an open table checks for a new version. Higher means fewer manifest reads, but new rows take that long to become searchable. While documents are being ingested, a longer interval avoids re-reading each new unindexed fragment (see the benchmark in the PR). `0` checks on every query. |
+| `LANCEDB_MISSING_TABLE_TTL_SECONDS` | `15` | API: how long a workspace database that does not exist yet is remembered as missing. The worker creates a new workspace's table in another process, so its first documents become searchable at most this long after they are indexed. |
+| `LANCEDB_MAX_OPEN_TABLES` | `512` | API: open LanceDB table handles (one per active workspace and embedding model) kept in memory; the least recently searched is closed beyond this. |
 
 The server logs `[lancedb-session] created ...` at startup with the configured sizes.
 

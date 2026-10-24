@@ -14,6 +14,7 @@ import { lockWorkspaceGraph, refreshGraphElements } from "../graph/graph-store.j
 import { appendWorkspaceRunEvent } from "./run-event-store.js";
 import { keyFromStorageUri } from "../tools/storage.js";
 import { connectLanceDb } from "../stages/lancedb-connection.js";
+import { legacyEmbeddingLocations, legacyOrgTable } from "../stages/lancedb-legacy-layout.js";
 import { lanceDbMaintenanceSettings, requestLanceDbMaintenance } from "../stages/lancedb-maintenance.js";
 
 /**
@@ -661,6 +662,16 @@ function resolveVectorLocation(lancedbRoot: string, orgId: string, workspaceId: 
   return VectorNamespaceManager.getEmbeddingLocation(lancedbRoot, orgId, workspaceId, target.embeddingModel, target.dimension);
 }
 
+function legacyLocationsFor(lancedbRoot: string, orgId: string, payload: Record<string, unknown>): VectorLocation[] {
+  if (!orgId.trim()) return [];
+  const model = typeof payload.embeddingModel === "string" ? payload.embeddingModel : null;
+  const dimension = typeof payload.dimension === "number" ? payload.dimension : null;
+  return [
+    ...(model && dimension ? legacyEmbeddingLocations(lancedbRoot, orgId, model, dimension) : []),
+    legacyOrgTable(lancedbRoot, orgId),
+  ];
+}
+
 /** vector_table queue payloads name the workspace whose database holds the table. */
 function payloadWorkspaceId(payload: object): string {
   const workspaceId = (payload as { workspaceId?: unknown }).workspaceId;
@@ -1055,14 +1066,20 @@ export async function drainStorageCleanupQueue(
             return;
           }
         } else {
-          const location = resolveVectorLocation(options.lancedbRoot, row.org_id ?? "", payloadWorkspaceId(row.payload), {
-            ...(row.payload as VectorTarget),
-            backend: "lancedb",
-          });
-          if (!location) throw new Error(`Unresolvable vector table: ${row.target}`);
-          await dropVectorTable(location);
-          await client`delete from vector_index_outbox where table_key = ${locationKey(location)}`;
-          await client`delete from vector_index_tables where table_key = ${locationKey(location)}`;
+          // Queued before workspaces had their own databases (migration 0082 marks them):
+          // a deleted org's org-level tables, dropped with their legacy names.
+          const locations = row.payload.legacyLayout === true
+            ? legacyLocationsFor(options.lancedbRoot, row.org_id ?? "", row.payload)
+            : [resolveVectorLocation(options.lancedbRoot, row.org_id ?? "", payloadWorkspaceId(row.payload), {
+                ...(row.payload as VectorTarget),
+                backend: "lancedb",
+              })];
+          if (locations.length === 0 || locations.some((location) => !location)) throw new Error(`Unresolvable vector table: ${row.target}`);
+          for (const location of locations as VectorLocation[]) {
+            await dropVectorTable(location);
+            await client`delete from vector_index_outbox where table_key = ${locationKey(location)}`;
+            await client`delete from vector_index_tables where table_key = ${locationKey(location)}`;
+          }
         }
         await client`delete from storage_cleanup_queue where id = ${row.id}`;
         result.purged += 1;

@@ -1,4 +1,5 @@
 import postgres from "postgres";
+import { legacyEmbeddingLocations, legacyOrgTable } from "../stages/lancedb-legacy-layout.js";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
 import { Store } from "../db/store.js";
@@ -333,6 +334,19 @@ describe("cleanup sweep", () => {
     expect(stores.vectorDeleteCalls).toEqual([]);
     expect([...stores.tables.keys()]).toEqual([`${KEEP_TABLE_URI}#chunks`]);
     expect(await sql`select table_key from vector_index_tables`).toEqual([]);
+  });
+
+  it("drops a deleted org's legacy org-level tables from cleanup rows queued before workspace databases", async () => {
+    const legacy = [...legacyEmbeddingLocations("/tmp/lance", "o1", "model/x", 4), legacyOrgTable("/tmp/lance", "o1")];
+    // Migration 0082 marks rows queued with the old payload shape.
+    await sql`insert into storage_cleanup_queue (kind, org_id, target, payload, reason)
+      values ('vector_table', 'o1', 'o1|model/x|4', ${sql.json({ embeddingModel: "model/x", dimension: 4, legacyLayout: true })}, 'org_deleted')`;
+    const stores = fakeExternalStores([], Object.fromEntries([...legacy.map((location) => [`${location.uri}#${location.table}`, ["d1"]]), [`${KEEP_TABLE_URI}#chunks`, ["dk"]]]));
+
+    await drainAll(stores);
+
+    expect([...stores.tables.keys()]).toEqual([`${KEEP_TABLE_URI}#chunks`]);
+    expect(await sql`select count(*)::int as count from storage_cleanup_queue`).toEqual([{ count: 0 }]);
   });
 
   it("keeps artifacts a partial reprocess still reuses, then reclaims them with the last reference", async () => {
