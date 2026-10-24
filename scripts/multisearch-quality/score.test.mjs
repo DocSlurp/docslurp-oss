@@ -182,5 +182,8 @@ test('existing-document gold rejects upload requests while accepting an honest l
     assert.equal(answer('I cannot inspect pixels. Want to upload the PDF so I can check its text?'), false, id);
     assert.equal(answer('I cannot inspect pixels, but if you upload the original file I can read it.'), false, id);
     assert.equal(answer('That is not available. Please re-upload the document.'), false, id);
+    assert.equal(answer('I cannot inspect pixels. Could you share the PDF with me directly?'), false, id);
+    assert.equal(answer("I'm unable to inspect rendered pixels. You can upload new files later if you want to compare versions."), true, id);
+    assert.equal(answer("I can't verify whether the smallest text is crisp; I don't have pixel access."), true, id);
   }
 });

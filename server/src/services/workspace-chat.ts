@@ -1166,25 +1166,14 @@ async function answerIngestReportTurn(args: ChatWorkspaceArgs): Promise<Workspac
   };
 }
 
-/** Grounded corpus facts for the agent prompt; both reads use workspace indexes. */
+/** Grounded corpus counts for the agent prompt; both reads use workspace indexes. */
 async function loadChatWorkspaceInventory(workspaceId: string): Promise<ChatWorkspaceInventory> {
-  const [[counts], recent] = await Promise.all([
-    sql<{ searchable: number; processing: number }[]>`
-      select coalesce((select document_count from workspace_corpus_stats where workspace_id = ${workspaceId}), 0)::int as searchable,
-        (select count(*)::int from documents where workspace_id = ${workspaceId}
-          and status not in ('completed', 'failed', 'cancelled', 'pii_blocked')) as processing
-    `,
-    sql<{ filename: string }[]>`
-      select filename from documents
-      where workspace_id = ${workspaceId} and status = 'completed' and superseded_at is null
-      order by created_at desc limit 5
-    `,
-  ]);
-  return {
-    searchableDocuments: counts?.searchable ?? 0,
-    processingDocuments: counts?.processing ?? 0,
-    recentFilenames: recent.map(row => row.filename.slice(0, 120)),
-  };
+  const [counts] = await sql<{ searchable: number; processing: number }[]>`
+    select coalesce((select document_count from workspace_corpus_stats where workspace_id = ${workspaceId}), 0)::int as searchable,
+      (select count(*)::int from documents where workspace_id = ${workspaceId}
+        and status not in ('completed', 'failed', 'cancelled', 'pii_blocked')) as processing
+  `;
+  return { searchableDocuments: counts?.searchable ?? 0, processingDocuments: counts?.processing ?? 0 };
 }
 
 type ChatTurnPolicy = { model: string; failover: boolean; requestedModel: string | null; limits: ChatAgentLimits };
@@ -1232,7 +1221,12 @@ async function chatWorkspaceTurn(
   if (args.allowAgentTools !== false && args.actor && env.chatMcpEnabled && chatApiKey && !filterDocumentIds && !narrowingFilters) {
     if (!workspace) throw new Error("Workspace not found");
     const [{ runChatMcpAgent }, workspaceInventory] = await Promise.all([
-      import("./chat-mcp-agent.js"), loadChatWorkspaceInventory(args.workspaceId),
+      import("./chat-mcp-agent.js"),
+      // The inventory is a prompt hint: without it the agent still runs, just without counts.
+      loadChatWorkspaceInventory(args.workspaceId).catch((error: unknown) => {
+        console.warn("[chat-agent] workspace inventory unavailable:", error instanceof Error ? error.message : String(error));
+        return undefined;
+      }),
     ]);
     const generated = await runChatMcpAgent({
       actor: args.actor, workspaceId: args.workspaceId, orgId: workspace.orgId, sessionId,

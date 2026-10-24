@@ -550,10 +550,11 @@ it("grounds upload guidance in the workspace inventory and requires per-item ove
   mocks.manifestIds = ["search"];
   const model = new MockLanguageModelV4({ doStream: [answerStep("Ready")] });
   mocks.provider.mockReturnValue(model);
-  await runChatMcpAgent({ ...args, workspaceInventory: { searchableDocuments: 3, processingDocuments: 1, recentFilenames: ["type-specimen.pdf"] } });
+  await runChatMcpAgent({ ...args, workspaceInventory: { searchableDocuments: 3, processingDocuments: 1 } });
   const instructions = JSON.stringify(model.doStreamCalls[0]!.prompt.filter(message => message.role === "system"));
   expect(instructions).toContain("3 searchable documents, 1 still processing");
-  expect(instructions).toContain("type-specimen.pdf");
+  // Filenames are user/crawl-controlled and must never reach the system role.
+  expect(instructions).not.toMatch(/filename|\.pdf/i);
   expect(instructions).toContain("Never ask the user to upload, re-upload or share a file");
   expect(instructions).toContain("never offer it as a workaround");
   expect(instructions).toContain("needs a supporting citation beside each named item");
