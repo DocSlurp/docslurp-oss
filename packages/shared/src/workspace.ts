@@ -1,3 +1,4 @@
+import { workspaceSettingsProposalSchema } from "./workspace-settings-proposal.js";
 import { z } from "zod";
 import { documentTagsSchema } from "./document-tags.js";
 import { indexingModeSchema } from "./deferred-indexing.js";
@@ -399,6 +400,7 @@ export const workspaceChatDebugSchema = z.object({
   toolCalls: z.array(z.object({
     id: z.string(), name: z.string(), status: z.enum(["loading", "success", "error"]),
     runtimeMs: z.number().nonnegative().optional(),
+    settingsProposal: workspaceSettingsProposalSchema.optional(),
     /** Search calls: the query strings the model sent (its own words, never document text). */
     queries: z.array(z.string()).optional(),
     resultCount: z.number().int().nonnegative().optional(),

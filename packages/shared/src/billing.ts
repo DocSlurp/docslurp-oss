@@ -88,6 +88,14 @@ export const PRICE_CARD = {
   knowledgeGraphPer10Pages: 1.5,
   /** Provisional: no production measurements yet. */
   propositionsPer10Pages: 1,
+  /** One web search (fast, snippets only). Provider cost $0.0005-0.008 (docs/research/web-providers-2026-10.md). */
+  webSearch: 1,
+  /** A deep web search, or one that returns page content, counts as this many web searches. Provider cost up to $0.017. */
+  webSearchDeepMultiplier: 2,
+  /** One web page read to Markdown (fetch or crawl). Provider cost $0.00025-0.0024 per page. */
+  webPage: 0.25,
+  /** One site map: 1 credit per started block of this many discovered URLs. */
+  webMapUrlsPerCredit: 50,
 } as const;
 export type PriceCard = typeof PRICE_CARD;
 
@@ -125,7 +133,7 @@ export function featureCredits(feature: DocumentFeature, pages: number): number 
 }
 
 /** Stamped on billable events so a receipt says which price card charged it. */
-export const PRICE_CARD_VERSION = "2026-10-21";
+export const PRICE_CARD_VERSION = "2026-10-23";
 
 /** Per dedicated machine, sold by sales, not self-serve. */
 export const PRIVATE_DEDICATED_MONTHLY_USD = 2_000;
@@ -201,6 +209,21 @@ export function searchCredits(searches: number, opts: { llmStrategies?: boolean 
   return (nonNegative(searches) * multiplier * PRICE_CARD.searchPer1k) / 1_000;
 }
 
+/** Credits for one web search; deep or content-returning searches count `webSearchDeepMultiplier` times. */
+export function webSearchCredits(opts: { deep?: boolean; includeContent?: boolean } = {}): number {
+  return PRICE_CARD.webSearch * (opts.deep || opts.includeContent ? PRICE_CARD.webSearchDeepMultiplier : 1);
+}
+
+/** Credits for web pages read to Markdown (fetched or crawled). */
+export function webPageCredits(pages: number): number {
+  return nonNegative(pages) * PRICE_CARD.webPage;
+}
+
+/** Credits for one site map that discovered `urls` URLs (at least one block). */
+export function webMapCredits(urls: number): number {
+  return Math.max(1, Math.ceil(nonNegative(urls) / PRICE_CARD.webMapUrlsPerCredit));
+}
+
 /** Chat answers one turn counts as: 1, plus one per extra `chatAnswerTokenBlock` total tokens. */
 export function chatAnswerUnits(totalTokens?: number | null): number {
   return Math.max(1, Math.ceil(nonNegative(totalTokens ?? 0) / PRICE_CARD.chatAnswerTokenBlock));
@@ -267,6 +290,9 @@ export const BILLABLE_UNIT_METRICS = {
   structuredFields: "feature-structured-fields",
   knowledgeGraph: "feature-knowledge-graph",
   propositions: "feature-propositions",
+  webSearch: "web-search",
+  webPage: "web-page",
+  webMap: "web-map",
 } as const;
 export type BillableUnitMetric = (typeof BILLABLE_UNIT_METRICS)[keyof typeof BILLABLE_UNIT_METRICS];
 

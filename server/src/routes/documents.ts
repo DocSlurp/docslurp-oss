@@ -102,11 +102,13 @@ export const documentsRoutes = new Hono()
   })
   .on(["GET", "POST"],"/:documentId/pages/:pageNumber/image", async (c) => {
     c.header("Cache-Control", "private, no-store");
+    const quality = c.req.query("quality") ?? "reader";
+    if (quality !== "reader" && quality !== "export") return apiStatusError(c, 400, "Invalid image quality");
     const raw = c.req.param("pageNumber");
     if (!/^[1-9][0-9]{0,5}$/.test(raw)) return apiStatusError(c, 404, "Document page not found");
     try {
       const result = await requestDocumentPageRender(c.req.param("documentId"), Number(raw), c.get("sessionUser").id, c.req.method === "POST",
-        document => assertApiKeyWorkspaceScope(c.get("apiKey"), document));
+        document => assertApiKeyWorkspaceScope(c.get("apiKey"), document), quality);
       if (result.status === "busy") { c.header("Retry-After", "5"); return apiStatusError(c, 429, "Page image queue is busy"); }
       if (result.status === "missing") return apiStatusError(c, 404, "Document page not found");
       if (result.status === "unavailable") return apiStatusError(c, 409, "Page image unavailable");

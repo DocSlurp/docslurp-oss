@@ -1,5 +1,6 @@
 /** Browser-safe, closed vocabulary. Never use an exception's text as public copy. */
 export const PUBLIC_ERROR_MESSAGES = {
+  chatToolFailed: "A required tool failed. The task is blocked. No successful answer or action has been confirmed. Try again after resolving the error.",
   noSpeech: "No speech was detected. Try again.",
   noAudio: "No audio was recorded. Try again.",
   recordingTooLarge: "Recording is too large. Try a shorter question.",
@@ -22,7 +23,7 @@ export const PUBLIC_ERROR_MESSAGES = {
   unsupportedType: "This file type isn’t supported.",
   unreadableSource: "This file couldn’t be read. It may be corrupt, truncated or password-protected.",
   processing: "We couldn’t finish processing this document. Please try again.",
-  silentVideo: "This video has no audio track, and reading video frames is turned off on this server.",
+  silentVideo: "This video has no audio track, and video frame reading is disabled for this workspace or server.",
   paused: "Processing is paused. Your workspace administrator can help you resume it.",
   workspaceMissing: "We couldn’t find that workspace. It may have been moved or removed.",
   personalOrganization: "Personal organizations can’t be changed this way.",
@@ -32,7 +33,7 @@ export const PUBLIC_ERROR_MESSAGES = {
   chatDisabled: "Chat is turned off for this workspace. Enable it in workspace settings.",
   searchScope: "Search must stay within a single workspace.",
   modelNotAllowed: "That chat model isn’t available for this request. Omit model to use the default.",
-  chatDeadline: "The chat turn ran out of time before an answer was ready. Retry, or ask a narrower question.",
+  chatDeadline: "The chat turn reached its time limit. The task is blocked; no successful answer or action has been confirmed.",
   creditExhausted: "Your organization is out of credits. Buy credits to continue.",
   budgetPaused: "The monthly budget cap has been reached, so AI processing is paused. Raise the budget to resume.",
   planRequired: "This isn’t available to your organization.",
@@ -91,7 +92,7 @@ export function publicDiagnostics(value: unknown): unknown {
  * to the generic processing message.
  */
 export const DOCUMENT_FAILURE_MARKERS = {
-  silentVideo: "Video has no audio track and MEDIA_VIDEO_ENABLED is off",
+  silentVideo: "Video has no audio track and video frame reading is disabled",
 } as const;
 
 /** Public copy for a stored Document, stage or Run error. Never echoes the raw text. */

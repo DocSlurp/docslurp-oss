@@ -11,7 +11,8 @@ const getWorkspace = vi.fn();
 const listWorkspaces = vi.fn();
 const uploadRequest = vi.fn();
 const loadDirectUploadSession = vi.fn();
-vi.mock("../services/direct-upload-session.js", () => ({ loadDirectUploadSession }));
+const describeDirectUploadSession = vi.fn();
+vi.mock("../services/direct-upload-session.js", () => ({ loadDirectUploadSession, describeDirectUploadSession }));
 
 const loadMediaEvidence = vi.fn();
 vi.mock("../services/media-evidence.js", () => ({ loadMediaEvidence }));
@@ -134,14 +135,14 @@ describe("mcpRoutes", () => {
     expect(call.path).toBe("/direct/sessions");
     expect(call.body.workspace).toBe("ws-1");
     expect(call.body.files).toHaveLength(10);
-    expect(call.body.files.every((file: { singlePart: boolean }) => file.singlePart)).toBe(true);
+    expect(call.body.files.every((file: { singlePart?: boolean }) => file.singlePart === undefined)).toBe(true);
   });
 
   it("preserves an explicitly named new workspace for signed-upload completion", async () => {
     validateApiKey.mockResolvedValue({ ...validatedKey, scopes: ["ingest"] });
     const response = await app.request("/mcp/tools/upload", { method: "POST", headers: { Authorization: "Bearer key", "Content-Type": "application/json" }, body: JSON.stringify({ workspace: "Legal contracts", files: [{ filename: "contract.pdf", sizeBytes: 42, mimeType: "application/pdf" }] }) });
     expect(response.status).toBe(201);
-    expect(uploadRequest.mock.lastCall![0].body).toEqual({ workspace: "Legal contracts", files: [{ filename: "contract.pdf", sizeBytes: 42, mimeType: "application/pdf", singlePart: true }] });
+    expect(uploadRequest.mock.lastCall![0].body).toEqual({ workspace: "Legal contracts", files: [{ filename: "contract.pdf", sizeBytes: 42, mimeType: "application/pdf" }] });
   });
 
   it("completes every signed file before confirming ingestion, checking ownership and session state", async () => {
@@ -168,6 +169,22 @@ describe("mcpRoutes", () => {
     loadDirectUploadSession.mockResolvedValue({ ...loaded, files: [...loaded.files, { id: "missing", upload_mode: "single" }] });
     expect((await request()).status).toBe(400);
     expect(uploadRequest).not.toHaveBeenCalled();
+  });
+
+  it("follows automatic upload sessions without exposing foreign sessions", async () => {
+    const sessionId = "11111111-1111-4111-8111-111111111111";
+    const loaded = { session: { id: sessionId, user_id: "user-1", org_id: "org-1", workspace_id: "ws-1", status: "confirmed" }, files: [] };
+    loadDirectUploadSession.mockResolvedValue(loaded);
+    describeDirectUploadSession.mockResolvedValue({ sessionId, status: "confirmed", result: { workspace: { id: "ws-1" }, run: { id: "run-1" } }, files: [] });
+    const request = () => app.request("/mcp/tools/getUploadStatus", { method: "POST", headers: { Authorization: "Bearer key", "Content-Type": "application/json" }, body: JSON.stringify({ sessionId }) });
+    const response = await request();
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ sessionId, result: { run: { id: "run-1" } } });
+    expect(loadDirectUploadSession).toHaveBeenCalledWith(sessionId, "user-1");
+    loadDirectUploadSession.mockResolvedValue({ ...loaded, session: { ...loaded.session, org_id: "foreign" } });
+    expect((await request()).status).toBe(404);
+    loadDirectUploadSession.mockResolvedValue({ ...loaded, session: { ...loaded.session, workspace_id: "foreign" } });
+    expect((await request()).status).toBe(404);
   });
 
   it("refuses upload without ingest scope or outside the credential workspace allowlist", async () => {
@@ -199,9 +216,28 @@ describe("mcpRoutes", () => {
   it("discovers documented workspace tools and advertises only the implemented MCP transport", async () => {
     const response = await app.request("/mcp/tools", { headers: { Authorization: "Bearer dslp_test" } });
     expect(response.status).toBe(200);
-    expect((await response.json()).tools.map((tool: { id: string }) => tool.id)).toEqual(["listWorkspaces", "search", "chat", "getUploadStatus", "getMediaEvidence", "suggestQueries", "getJob"]);
+    expect((await response.json()).tools.map((tool: { id: string }) => tool.id)).toEqual(["getWorkspaceSettings", "listWorkspaces", "search", "chat", "getUploadStatus", "getMediaEvidence", "suggestQueries", "getJob"]);
     const manifest = await app.request("/mcp/manifest", { headers: { Authorization: "Bearer dslp_test" } });
     expect((await manifest.json()).server.transports).toEqual(["streamable-http", "stdio"]);
+  });
+
+  it.each([
+    { keyType: "server" as const, scopes: ["search"], mayPropose: false },
+    { keyType: "server" as const, scopes: ["search", "workspaces:manage"], mayPropose: true },
+    { keyType: "client" as const, scopes: ["search", "workspaces:manage"], mayPropose: false },
+  ])("discovers proposals only for manage-scoped server keys: %j", async ({ keyType, scopes, mayPropose }) => {
+    validateApiKey.mockResolvedValue({ ...validatedKey, keyType, scopes });
+    const response = await app.request("/mcp/tools", { headers: { Authorization: "Bearer dslp_test" } });
+    if (keyType === "client") {
+      expect(response.status).toBe(403);
+      return;
+    }
+    expect(response.status).toBe(200);
+    const ids = (await response.json()).tools.map((tool: { id: string }) => tool.id);
+    expect(ids).toContain("getWorkspaceSettings");
+    expect(ids.includes("proposeWorkspaceSettings")).toBe(mayPropose);
+    expect(ids).not.toContain("applyWorkspaceSettings");
+    expect(ids).not.toContain("applySettingsProposal");
   });
 
   it.each(["null", "[]", "{", '"string"'])("rejects malformed tool bodies with HTTP 400: %s", async (body) => {
@@ -305,8 +341,8 @@ describe("mcpRoutes", () => {
     const client = new Client({ name: "catalog-contract", version: "1" });
     await client.connect(new StreamableHTTPClientTransport(new URL("http://localhost:4321/mcp"), { requestInit: { headers: { Authorization: "Bearer key" } }, fetch: async (url, init) => app.request(new Request(url, init)) }));
     const tools = (await client.listTools()).tools;
-    expect(tools).toHaveLength(11);
-    expect(new Set(tools.map(tool => tool.name)).size).toBe(11);
+    expect(tools).toHaveLength(12);
+    expect(new Set(tools.map(tool => tool.name)).size).toBe(12);
     expect(tools.every(tool => /^[A-Za-z0-9_.-]{1,128}$/.test(tool.name))).toBe(true);
     for (const name of ["upload", "completeUpload", "chat"]) {
       expect(tools.find(tool => tool.name === name)?.annotations).toMatchObject({ readOnlyHint: false, idempotentHint: false });
@@ -377,7 +413,7 @@ describe("mcpRoutes", () => {
   it("does not discover or execute search/chat tools without search scope", async () => {
     validateApiKey.mockResolvedValue({ ...validatedKey, scopes: ["ingest"] });
     const listed = await app.request("/mcp/tools", { headers: { Authorization: "Bearer dslp_test" } });
-    expect((await listed.json()).tools.map((tool: { id: string }) => tool.id)).toEqual(["listWorkspaces", "upload", "completeUpload", "getUploadStatus", "fullIndexEstimate", "uploadEstimate", "getJob"]);
+    expect((await listed.json()).tools.map((tool: { id: string }) => tool.id)).toEqual(["getWorkspaceSettings", "listWorkspaces", "upload", "completeUpload", "getUploadStatus", "fullIndexEstimate", "uploadEstimate", "getJob"]);
     for (const name of ["search", "chat"]) {
       expect((await app.request(`/mcp/tools/${name}`, { method: "POST", headers: { Authorization: "Bearer dslp_test", "Content-Type": "application/json" }, body: "{}" })).status).toBe(403);
     }
@@ -470,7 +506,7 @@ describe("session MCP tools", () => {
     expect(tool.inputSchema.properties.urls).toBeDefined();
     expect(tool.inputSchema.properties.files).toBeDefined();
     expect(tool.inputSchema.properties.userId).toBeUndefined();
-    expect(tools.map((tool: { id: string }) => tool.id)).toEqual(["listWorkspaces", "upload", "completeUpload", "search", "chat", "getUploadStatus", "getMediaEvidence", "suggestQueries", "updateEstimate", "searchSettingsEstimate", "reprocessEstimate", "fullIndexEstimate", "indexingModeEstimate", "graphRebuildEstimate", "uploadEstimate", "getJob"]);
+    expect(tools.map((tool: { id: string }) => tool.id)).toEqual(["getWorkspaceSettings", "proposeWorkspaceSettings", "listWorkspaces", "upload", "completeUpload", "search", "chat", "getUploadStatus", "getMediaEvidence", "suggestQueries", "updateEstimate", "searchSettingsEstimate", "reprocessEstimate", "fullIndexEstimate", "indexingModeEstimate", "graphRebuildEstimate", "uploadEstimate", "getJob"]);
     expect(response.headers.get("Cache-Control")).toBe("no-store");
   });
 });

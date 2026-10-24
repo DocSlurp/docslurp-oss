@@ -1,3 +1,4 @@
+import { instrumentFetch } from "@docslurp/shared/observability";
 import {
   authorizePrivateModelCall,
   getPrivateModelEndpointRegistry,
@@ -53,7 +54,7 @@ function toFloat32(values: unknown, label: string): Float32Array {
 
 export function createGeminiPageEmbedder(args: { apiKey: string; dims?: 3072; fetchImpl?: typeof fetch }): PageImageEmbedder {
   const dims = args.dims ?? 3072;
-  const doFetch = args.fetchImpl ?? fetch;
+  const doFetch = instrumentFetch("google", "embedding", args.fetchImpl ?? fetch);
   const url = `${GEMINI_ENDPOINT}/models/${GEMINI_PAGE_EMBED_MODEL}:batchEmbedContents?key=${encodeURIComponent(args.apiKey)}`;
 
   async function post(parts: Array<Record<string, unknown>>, signal?: AbortSignal) {
