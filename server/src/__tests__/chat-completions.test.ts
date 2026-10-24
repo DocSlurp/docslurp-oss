@@ -25,7 +25,7 @@ const answer = {
   citations: [{ text: "annual", score: 1, citation: { filename: "contract.pdf", documentId: "doc-1", pageNumber: 2 } }],
   availability: null, usage: { inputTokens: 19, outputTokens: 7, totalTokens: 26 },
 };
-const key = { userId: "user-1", orgId: "org-1", scopes: ["search"], keyType: "server", keyId: "key-1" };
+const key = { userId: "user-1", orgId: "org-1", scopes: ["search", "chat"], keyType: "server", keyId: "key-1" };
 function app() { return new Hono().route("/v1", chatCompletionsRoutes); }
 function request(body: unknown) {
   return app().request("/v1/chat/completions", { method: "POST", headers: { Authorization: "Bearer dslp_test", "Content-Type": "application/json" }, body: JSON.stringify(body) });
@@ -47,12 +47,19 @@ describe("OpenAI-compatible workspace chat", () => {
     const host = app().get("/v1/unrelated", (c) => c.json({ ok: true }));
     expect((await host.request("/v1/unrelated")).status).toBe(200);
   });
-  it("requires a bearer key and search access", async () => {
+  it("requires a bearer key and chat access", async () => {
     const response = await app().request("/v1/models");
     expect(response.status).toBe(401);
     expect(await response.json()).toMatchObject({ error: { type: "authentication_error" } });
     validateApiKey.mockResolvedValueOnce({ ...key, scopes: ["ingest"] });
     expect((await request(input())).status).toBe(403);
+    expect(chatWorkspace).not.toHaveBeenCalled();
+  });
+  it("refuses search-only keys: answers need the chat scope", async () => {
+    validateApiKey.mockResolvedValueOnce({ ...key, scopes: ["search"] });
+    const response = await request(input());
+    expect(response.status).toBe(403);
+    expect(await response.json()).toMatchObject({ error: { type: "permission_error", code: "insufficient_scope", message: "API key needs chat access" } });
     expect(chatWorkspace).not.toHaveBeenCalled();
   });
   it("reports throttling as a rate limit rather than invalid credentials", async () => {

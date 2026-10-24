@@ -8,7 +8,7 @@ import { mcpManifest } from "../services/mcp-tools.js";
  */
 describe("capability manifest annotations", () => {
   it("declares hints for every exposed MCP tool", () => {
-    const manifest = mcpManifest("https://example.test", ["search", "ingest"]);
+    const manifest = mcpManifest("https://example.test", ["search", "chat", "ingest"]);
     const expected: Record<string, { readOnly: boolean; idempotent: boolean; consequential: boolean }> = {
       getWorkspaceSettings: { readOnly: true, idempotent: true, consequential: false },
       listWorkspaces: { readOnly: true, idempotent: true, consequential: false },

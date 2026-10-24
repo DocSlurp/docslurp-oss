@@ -104,9 +104,9 @@ function clampSearchLimit(value: number | undefined): number | undefined {
   return Math.max(1, Math.min(100, Math.floor(value)));
 }
 
-/** API-key scope and workspace checks, answered in the native error envelope. */
-async function denyWorkspaceAccess(c: Context, workspaceId: string): Promise<Response | null> {
-  const denied = await assertApiKeyWorkspaceAccess(c, workspaceId, "search");
+/** API-key scope and workspace checks, answered in the native error envelope. Answers need `chat`; passages need `search`. */
+async function denyWorkspaceAccess(c: Context, workspaceId: string, scope: "search" | "chat" = "search"): Promise<Response | null> {
+  const denied = await assertApiKeyWorkspaceAccess(c, workspaceId, scope);
   if (!denied) return null;
   return denied.status === 403
     ? apiErrorResponse(c, 403, "forbidden", "Forbidden")
@@ -162,7 +162,7 @@ async function handleWorkspaceChat(c: Context, mode: "public" | "grounded") {
   const userId = c.get("sessionUser")?.id;
   if (!userId) return apiErrorResponse(c, 401, "unauthorized", "Missing session");
   const workspaceId = await resolveActorWorkspaceId(getRequestActor(c), body.workspace, body.orgId);
-  const forbidden = await denyWorkspaceAccess(c, workspaceId);
+  const forbidden = await denyWorkspaceAccess(c, workspaceId, "chat");
   if (forbidden) return forbidden;
   const chatDisabled = await workspaceChatDisabledBody(workspaceId, userId);
   if (chatDisabled) return apiErrorResponse(c, 403, "chat_disabled", chatDisabled.error);
@@ -295,7 +295,7 @@ export const searchRoutes = new Hono()
 
     const userId = c.get("sessionUser").id;
     const workspaceId = await resolveActorWorkspaceId(getRequestActor(c), parsed.data.workspace, parsed.data.orgId);
-    const forbidden = await denyWorkspaceAccess(c, workspaceId);
+    const forbidden = await denyWorkspaceAccess(c, workspaceId, "chat");
     if (forbidden) return forbidden;
     const chatDisabled = await workspaceChatDisabledBody(workspaceId, userId);
     if (chatDisabled) return apiErrorResponse(c, 403, "chat_disabled", chatDisabled.error);

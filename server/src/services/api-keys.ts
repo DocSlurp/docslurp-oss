@@ -28,13 +28,23 @@ type ApiKeyRow = {
   pages_today?: number;
 };
 
-export const defaultApiKeyScopes = ["ingest", "search", "artifacts"] as const;
-/** Client (browser) keys are search-only unless the creator opts in to more. */
+/**
+ * `search` returns passages; `chat` generates answers (a model call on the
+ * owner's credits) through /v1/chat, /v1/chat/completions and the MCP chat tool.
+ */
+export const defaultApiKeyScopes = ["ingest", "search", "chat", "artifacts"] as const;
+/** Client (browser) keys are search-only unless the creator opts in to more (`chat`, or the sensitive scopes below). */
 export const defaultClientApiKeyScopes = ["search"] as const;
-/** Scopes a public client key may hold only with an explicit opt-in and a workspace allowlist. */
-export const sensitiveClientApiKeyScopes = ["ingest", "artifacts"] as const;
-/** Opt-in scopes; never granted by default. workspaces:manage renames workspaces and changes their settings. */
-export const supportedApiKeyScopes = [...defaultApiKeyScopes, "organizations:read", "organizations:manage", "workspaces:manage"] as const;
+/**
+ * Scopes a public client key may hold only with an explicit opt-in and a workspace allowlist.
+ * `web` lets a client key use the paid web tools (search, fetch, map, crawl); see lib/web-tool-access.ts.
+ */
+export const sensitiveClientApiKeyScopes = ["ingest", "artifacts", "web"] as const;
+/**
+ * Opt-in scopes; never granted by default. workspaces:manage renames workspaces and changes their settings.
+ * `web` is client-key only: server keys use web tools through `search`.
+ */
+export const supportedApiKeyScopes = [...defaultApiKeyScopes, "web", "organizations:read", "organizations:manage", "workspaces:manage"] as const;
 export const apiKeyTypes = ["server", "client"] as const;
 export type ApiKeyType = (typeof apiKeyTypes)[number];
 
@@ -299,6 +309,9 @@ export async function revokeOrganizationApiKeys(orgId: string, userId: string): 
 
 function assertOrganizationKeyScopes(keyType: ApiKeyType, scopes: string[], role: string) {
   if (scopes.some(scope => !(supportedApiKeyScopes as readonly string[]).includes(scope))) throw new OrganizationError(400, "invalid_key_scope", "Unsupported API key scope");
+  if (keyType !== "client" && scopes.includes("web")) {
+    throw new OrganizationError(400, "invalid_key_scope", "The web scope applies to client API keys; server keys use web tools with search");
+  }
   if (keyType === "client" && scopes.includes("workspaces:manage")) {
     throw new OrganizationError(400, "invalid_key_scope", "Client API keys cannot manage workspaces");
   }
@@ -317,7 +330,7 @@ function assertOrganizationKeyScopes(keyType: ApiKeyType, scopes: string[], role
 type KeyTransaction = postgres.TransactionSql<Record<string, postgres.PostgresType>>;
 
 /**
- * A public client key that can upload or read raw artifacts is a standing
+ * A public client key that can upload, read raw artifacts or spend credits on web tools is a standing
  * credential in someone's page source. Allow it only when the creator opts in
  * and binds the key to specific workspaces.
  */

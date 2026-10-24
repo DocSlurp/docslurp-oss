@@ -109,8 +109,9 @@ const compatibleChatAuth: MiddlewareHandler = async (c, next) => {
     c.header("WWW-Authenticate", 'Bearer realm="docslurp"');
     return c.json(errorBody("A valid DocSlurp API key is required", "authentication_error", "invalid_api_key"), 401);
   }
-  if (!actorHasAnyApiKeyScope(getRequestActor(c), ["search"])) {
-    return c.json(errorBody("API key needs search access", "permission_error", "insufficient_scope"), 403);
+  // Workspace models generate answers: the key needs `chat`, not just `search`.
+  if (!actorHasAnyApiKeyScope(getRequestActor(c), ["chat"])) {
+    return c.json(errorBody("API key needs chat access", "permission_error", "insufficient_scope"), 403);
   }
   await next();
 };

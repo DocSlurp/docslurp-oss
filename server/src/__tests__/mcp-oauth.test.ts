@@ -18,7 +18,7 @@ function token(values: Record<string, string | undefined>) {
 beforeEach(() => { vi.stubEnv("NODE_ENV", "test"); vi.stubEnv("MCP_PUBLIC_URL", url); query.mockReset(); query.mockResolvedValue({ rows: [], rowCount: 1 }); });
 describe("MCP OAuth", () => {
   it("requests upload access in new default consent while respecting explicit read-only scopes", () => {
-    expect(parseScopes(null)).toEqual(["search", "read", "ingest"]);
+    expect(parseScopes(null)).toEqual(["search", "chat", "read", "ingest"]);
     expect(parseScopes("search read")).toEqual(["search", "read"]);
   });
   it("advertises PKCE and path-specific protected resource metadata", async () => { const res = await app.request(`${url}/.well-known/oauth-authorization-server`); expect((await res.json()).code_challenge_methods_supported).toEqual(["S256"]); expect((await (await app.request(`${url}/.well-known/oauth-protected-resource/v1/mcp`)).json()).resource).toBe(`${url}/v1/mcp`); });
@@ -106,7 +106,7 @@ describe("MCP OAuth", () => {
     expect(bearerToken("bearer dsmcp_abc")).toBe("dsmcp_abc");
     expect(bearerToken("Bearer  dsmcp_abc ")).toBe("dsmcp_abc");
     expect(bearerToken("Basic abc")).toBe("");
-    expect(mcpBearerChallenge(url, false)).toBe(`Bearer resource_metadata="${url}/.well-known/oauth-protected-resource/v1/mcp", scope="search read ingest"`);
+    expect(mcpBearerChallenge(url, false)).toBe(`Bearer resource_metadata="${url}/.well-known/oauth-protected-resource/v1/mcp", scope="search chat read ingest"`);
     expect(mcpBearerChallenge(url, true)).toMatch(/^Bearer error="invalid_token", error_description="[^"]+", resource_metadata=/);
   });
 

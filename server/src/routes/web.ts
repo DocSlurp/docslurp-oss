@@ -5,6 +5,7 @@ import { apiStatusError, nativeApiErrors } from "../lib/api-error.js";
 import { requestIp, requestUserAgent } from "../lib/request-context.js";
 import { actorHasAnyApiKeyScope, getRequestActor, loadActorScopedWorkspace, lookupActorWorkspace, resolveActorWorkspaceId, setRequestActor, type RequestActor } from "../lib/request-actor.js";
 import { acceptApiKeys } from "../lib/route-auth.js";
+import { apiKeyCanUseWebTools } from "../lib/web-tool-access.js";
 import { assertCanSpend, spendAwareErrorHandler } from "../services/billing/spend-guard.js";
 import { WorkspaceIntakeError } from "../services/workspace-intake.js";
 import { validationHook } from "../lib/validation.js";
@@ -58,7 +59,8 @@ async function handle<C extends WebCapability>(c: Context, capability: C, body: 
 /**
  * Web Capabilities over REST: search the public web, read pages as Markdown,
  * map a site's URLs, crawl a site, and ingest a crawled site into a workspace.
- * API keys need `search` (ingest needs `ingest`). Each call is charged credits.
+ * API keys need `search` (ingest needs `ingest`); public client keys also need
+ * the opt-in `web` scope. Each call is charged credits.
  */
 function createWebRoutes(surface: WebSurface) {
   return new Hono()
@@ -66,7 +68,11 @@ function createWebRoutes(surface: WebSurface) {
   .use("*", async (c, next) => {
     const actor = getRequestActor(c);
     const ingest = c.req.path.endsWith("/ingest");
-    if (actor.type === "apiKey" && !actorHasAnyApiKeyScope(actor, [ingest ? "ingest" : "search"])) return apiStatusError(c, 403, "Forbidden");
+    if (actor.type === "apiKey" && !apiKeyCanUseWebTools(actor.apiKey, ingest)) {
+      return actor.apiKey.keyType === "client" && actorHasAnyApiKeyScope(actor, [ingest ? "ingest" : "search"])
+        ? apiStatusError(c, 403, "Client API keys need the web scope to use web tools", { code: "web_scope_required" })
+        : apiStatusError(c, 403, "Forbidden");
+    }
     await next();
   })
   .post("/search", zValidator("json", webSearchInput, validationHook), (c) => handle(c, "search", c.req.valid("json"), surface))
