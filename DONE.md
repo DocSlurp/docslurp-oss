@@ -1,5 +1,6 @@
 # Completed
 
+- Close account enumeration through the unauthenticated `GET /api/sso-lookup` (2026-10-24): the enforce-SSO answer now depends only on the email's verified domain, not on whether that mailbox has an SSO link; the route runs the API per-IP rate limit; and an unlinked user refused at the SSO callback gets a 15-minute, email-bound signed pass so their next password sign-in can proceed and link SSO.
 - Add least-privilege Postgres roles (2026-10-24): `docslurp_app` (DML, no DDL), `docslurp_worker` (DML on the tables workers use, column-level reads of `user`, `webhooks` and `workspace_secrets`, no auth/credential/billing tables) and `docslurp_backup` (`pg_read_all_data`), with `docslurp` kept as owner for migrations. `migrate.mjs` reconciles grants after every run when the roles exist and refuses to migrate as a non-owner; a test fails when a migration adds a table the worker list does not classify. See `docs/self-host/database-roles.md`.
 
 - Cut the worker's serial Postgres round trips per page by 55 to 65% (2026-10-23): parameter-type cache patch for `postgres.js` (unnamed statements no longer cost two round trips), single-flight pipelined checkpoint transactions, one-statement document stage completion, and stage groups that read control state and the next stage's reads in the completion checkpoint. Adds `DOCSLURP_DB_TRACE_FILE`, a Postgres wire counter and a round-trip budget test. See `docs/db-round-trips.md`.
@@ -82,3 +83,5 @@
 - Enable video frame reading by default for omitted workspace settings, honor explicit disable for silent and narrated video, and retain platform, privacy, budget and quota gates without automatic reprocessing.
 
 - Let workspace chat propose allowlisted pipeline, chat and retrieval settings with exact changes and cost/work disclosure; apply only through an actor-bound trusted UI action with fresh permissions, conflict checks, explicit reprocessing consent and atomic audit.
+
+- Harden the worker image supply chain: worker-images.yml pushes max-mode provenance and SBOMs, signs each digest with keyless cosign and a GitHub provenance attestation in a separate id-token job; worker Python locks carry sha256 hashes and every install path uses --require-hashes; Grype fails on critical findings (justified exceptions in .grype.yaml); the Modal provider can pin its image by digest (DOCSLURP_MODAL_IMAGE_DIGEST).

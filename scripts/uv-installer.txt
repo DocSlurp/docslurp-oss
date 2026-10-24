@@ -1,0 +1,4 @@
+# Installer pin for worker image builds (setup-cli-docker.sh, vendor bundles).
+# Keep in step with the setup-uv version in .github/workflows; regenerate the
+# lock with the command at the top of uv-installer.lock.txt.
+uv==0.13.0

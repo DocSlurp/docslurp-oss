@@ -5,14 +5,17 @@
 // failing the extraction, a command that dies with "No module named X" (or the
 // scripts' own "missing dependency: pip install X") installs X into the worker
 // venv and is retried once. Only distributions declared in
-// worker/requirements*.txt can be installed, pinned to worker/requirements.lock.txt.
+// worker/requirements*.txt can be installed, pinned to worker/requirements.lock.txt
+// and, when the lock records hashes for the whole dependency closure, installed
+// in pip's --require-hashes mode.
 // Binaries that ship as wheels (pandoc) are provisioned the same way.
 //
 // Disable with DOCSLURP_PYTHON_LAZY_INSTALL=false (e.g. air-gapped hosts).
 
 import { spawn } from "node:child_process";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
-import { mkdir, rm, stat, symlink } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -94,22 +97,122 @@ export function declaredPythonDistributions(root = workerRoot()): Set<string> {
   return names;
 }
 
+/** One `name==version` entry of a uv-compiled lock file. */
+interface LockEntry {
+  version: string;
+  /** The requirement line plus its `--hash=` options, without comments. */
+  requirement: string;
+  hashed: boolean;
+  /** Distributions this entry requires (inverted from the lock's "# via" annotations). */
+  dependencies: Set<string>;
+}
+
+let lockEntries: Map<string, LockEntry> | null = null;
+
+/** Parse a `uv pip compile` lock: pins, hash options and the dependency graph. */
+export function parseLockFile(text: string): Map<string, LockEntry> {
+  const entries = new Map<string, LockEntry>();
+  const requiredBy = new Map<string, Set<string>>();
+  let current: { name: string; lines: string[]; continued: boolean } | null = null;
+  let inVia = false;
+  const finish = () => {
+    if (!current) return;
+    const requirement = current.lines.join(" \\\n    ");
+    const match = /^([A-Za-z0-9_.-]+)==([^\s;\\]+)/.exec(current.lines[0]!);
+    if (match) {
+      entries.set(current.name, {
+        version: match[2]!,
+        requirement,
+        hashed: /--hash=sha256:[0-9a-f]{64}/.test(requirement),
+        dependencies: new Set(),
+      });
+    }
+    current = null;
+  };
+  for (const raw of text.split("\n")) {
+    const line = raw.trim();
+    if (current?.continued) {
+      const continued = line.endsWith("\\");
+      const body = line.replace(/\\$/, "").trim();
+      if (body) current.lines.push(body);
+      current.continued = continued;
+      continue;
+    }
+    if (/^[A-Za-z0-9]/.test(raw)) {
+      finish();
+      inVia = false;
+      const name = /^([A-Za-z0-9_.-]+)/.exec(line)?.[1];
+      if (!name) continue;
+      current = { name: normalizeDistribution(name), lines: [line.replace(/\\$/, "").trim()], continued: line.endsWith("\\") };
+      continue;
+    }
+    const via = /^#\s+via(?:\s+(.+))?$/.exec(line);
+    if (via && current) {
+      inVia = true;
+      if (via[1]) addParent(via[1]);
+      continue;
+    }
+    const parent = /^#\s+(\S.*)$/.exec(line);
+    if (inVia && parent && current && raw.startsWith("    #   ")) addParent(parent[1]!);
+  }
+  finish();
+  for (const [child, parents] of requiredBy) {
+    for (const parent of parents) entries.get(parent)?.dependencies.add(child);
+  }
+  return entries;
+
+  function addParent(value: string) {
+    if (!current || value.startsWith("-")) return;
+    const parentName = normalizeDistribution(value.split(/[\s[]/)[0]!);
+    const parents = requiredBy.get(current.name) ?? new Set<string>();
+    parents.add(parentName);
+    requiredBy.set(current.name, parents);
+  }
+}
+
+function readLockEntries(root = workerRoot()): Map<string, LockEntry> {
+  if (lockEntries && root === workerRoot()) return lockEntries;
+  const lock = path.join(root, "requirements.lock.txt");
+  const result = existsSync(lock) ? parseLockFile(readFileSync(lock, "utf8")) : new Map<string, LockEntry>();
+  if (root === workerRoot()) lockEntries = result;
+  return result;
+}
+
 /** Exact versions from the lock file, used to pin lazy installs. */
 export function lockedPythonPins(root = workerRoot()): Map<string, string> {
   if (pins && root === workerRoot()) return pins;
   const result = new Map<string, string>();
-  const lock = path.join(root, "requirements.lock.txt");
-  if (existsSync(lock)) {
-    for (const line of readFileSync(lock, "utf8").split("\n")) {
-      const match = /^([A-Za-z0-9_.-]+)==([^\s;]+)/.exec(line.trim());
-      if (match) result.set(normalizeDistribution(match[1]!), match[2]!);
-    }
-  }
+  for (const [name, entry] of readLockEntries(root)) result.set(name, entry.version);
   // pypandoc-binary ships the same version as the locked pypandoc wrapper.
   const pypandoc = result.get("pypandoc");
   if (pypandoc && !result.has("pypandoc-binary")) result.set("pypandoc-binary", pypandoc);
   if (root === workerRoot()) pins = result;
   return result;
+}
+
+/**
+ * Hash-pinned requirements (pip --require-hashes input) for `distributions` and
+ * everything they depend on according to the lock, or null when any of them is
+ * missing from the lock or has no recorded hash.
+ */
+export function hashedLockClosure(distributions: string[], root = workerRoot()): string[] | null {
+  const entries = readLockEntries(root);
+  const seen = new Set<string>();
+  const queue = distributions.map(normalizeDistribution);
+  while (queue.length > 0) {
+    const name = queue.shift()!;
+    if (seen.has(name)) continue;
+    const entry = entries.get(name);
+    if (!entry?.hashed) return null;
+    seen.add(name);
+    queue.push(...entry.dependencies);
+  }
+  return [...seen].sort().map((name) => entries.get(name)!.requirement);
+}
+
+/** The lock's exact pins without hashes (a hashed constraints file would force hash mode on unlocked names). */
+function lockPinsAsConstraints(root = workerRoot()): string[] {
+  return [...readLockEntries(root)].map(([name, entry]) => `${name}==${entry.version}`);
 }
 
 function run(command: string, args: string[], timeoutMs: number): Promise<{ code: number | null; output: string }> {
@@ -234,9 +337,27 @@ async function installDistributions(distributions: string[], venvBin: string): P
     // The full lock targets the image's Python; other interpreters may lack
     // compatible wheels for an optional transitive pin.
     const lockFile = path.join(workerRoot(), "requirements.lock.txt");
-    let result = existsSync(lockFile)
-      ? await run(python, [...pip, "-c", lockFile, ...specs], 15 * 60_000)
-      : { code: 1, output: "no lock file" };
+    let result: { code: number | null; output: string } = { code: 1, output: "no lock file" };
+    if (existsSync(lockFile)) {
+      const scratch = await mkdtemp(path.join(tmpdir(), "docslurp-python-deps-"));
+      try {
+        const closure = hashedLockClosure(distributions);
+        if (closure) {
+          // Every distribution and its locked dependencies carry sha256 hashes:
+          // install them in hash-checking mode so a substituted artifact fails.
+          const hashed = path.join(scratch, "requirements.lock.txt");
+          await writeFile(hashed, `${closure.join("\n")}\n`);
+          result = await run(python, [...pip, "--require-hashes", "-r", hashed], 15 * 60_000);
+        } else {
+          // Not fully locked (for example pypandoc-binary): exact pins only.
+          const constraints = path.join(scratch, "requirements.lock.txt");
+          await writeFile(constraints, `${lockPinsAsConstraints().join("\n")}\n`);
+          result = await run(python, [...pip, "-c", constraints, ...specs], 15 * 60_000);
+        }
+      } finally {
+        await rm(scratch, { recursive: true, force: true });
+      }
+    }
     if (result.code !== 0) {
       console.warn(`[python-deps] locked install failed, retrying without lock constraints specs=${specs.join(",")}`);
       result = await run(python, [...pip, ...specs], 15 * 60_000);

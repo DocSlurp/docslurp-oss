@@ -100,6 +100,42 @@ Set `FILE_TOKEN_SECRET` independently before rotating `SECRETS_ENCRYPTION_KEY` i
 
 Provider keys (`OPENAI_API_KEY`, `OPENROUTER_API_KEY`, `ANTHROPIC_API_KEY`, `GOOGLE_GENERATIVE_AI_API_KEY`) and OAuth client secrets are optional and live in the same file. See [Configuration](configuration.md).
 
+## Verifying worker images
+
+`.github/workflows/worker-images.yml` publishes `ghcr.io/docslurp/worker-lean` and `ghcr.io/docslurp/worker-full` on each release tag. Every pushed image index carries:
+
+- BuildKit SLSA provenance in `mode=max` (sources, build arguments and materials) and an SPDX SBOM, as attestation manifests in the index.
+- A keyless cosign signature on the image digest. The Fulcio certificate names this repository's `worker-images.yml` workflow and the ref it ran on, and the signature is logged in the public Rekor transparency log.
+- A GitHub build provenance attestation for the same digest, also pushed to the registry.
+
+Tags such as `1.2.3` are mutable. Resolve the tag to a digest once, verify that digest, then run only the digest. The workflow run summary lists each pushed digest, or resolve it yourself:
+
+```sh
+docker buildx imagetools inspect ghcr.io/docslurp/worker-full:1.2.3 --format '{{.Manifest.Digest}}'
+```
+
+Verify the signature with cosign 3 or later. The identity must be this repository's workflow on a release tag or on `main` (manual republish); a signature from any other workflow, repository or branch fails:
+
+```sh
+cosign verify ghcr.io/docslurp/worker-full@sha256:<digest> \
+  --certificate-identity-regexp '^https://github\.com/DocSlurp/docslurp-oss/\.github/workflows/worker-images\.yml@refs/(tags/v[0-9].*|heads/main)$' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+```
+
+For one release, pin the identity exactly with `--certificate-identity https://github.com/DocSlurp/docslurp-oss/.github/workflows/worker-images.yml@refs/tags/v1.2.3`.
+
+Check the GitHub provenance attestation and read the SBOM and BuildKit provenance:
+
+```sh
+gh attestation verify oci://ghcr.io/docslurp/worker-full@sha256:<digest> --repo DocSlurp/docslurp-oss
+docker buildx imagetools inspect ghcr.io/docslurp/worker-full@sha256:<digest> --format '{{json .SBOM}}'
+docker buildx imagetools inspect ghcr.io/docslurp/worker-full@sha256:<digest> --format '{{json .Provenance}}'
+```
+
+Then run the digest, not the tag. For the Modal parser sandbox, set `DOCSLURP_MODAL_IMAGE_DIGEST=sha256:<digest>` to pin the default `worker-full` release image, or set `DOCSLURP_MODAL_IMAGE=ghcr.io/docslurp/worker-full@sha256:<digest>` ([Parser sandbox providers](sandbox-providers.md#modal)). Elsewhere, reference `ghcr.io/docslurp/worker-<profile>@sha256:<digest>` in your deployment.
+
+Inside the images, the worker's Python dependencies are installed with `pip`/`uv --require-hashes` from lock files that record a sha256 for every artifact (`worker/requirements*.lock.txt`, regenerated with `uv pip compile --generate-hashes`; the command is at the top of each file). CI rejects a lock without hashes and fails on critical vulnerabilities in the worker's source SBOM; the only accepted exceptions are listed, with reasons, in `.grype.yaml`.
+
 ## Network exposure
 
 The Compose file publishes only the server, on `${SERVER_BIND_ADDRESS:-127.0.0.1}:${SERVER_PORT:-8787}`. Do not publish the Postgres, Redis, MinIO or Temporal ports, and do not add `ports:` entries for them. None of them is meant to face the internet or an untrusted network. If you run a reverse proxy on another host, bind the server to an address that only your private network can reach and firewall the port.

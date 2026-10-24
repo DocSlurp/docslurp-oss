@@ -56,7 +56,8 @@ else
   exit 1
 fi
 
-pip3 install uv --break-system-packages
+# Pinned, hash-checked installer (scripts/uv-installer.lock.txt, copied by the Dockerfile).
+pip3 install --break-system-packages --no-cache-dir --only-binary=:all: --require-hashes -r /tmp/uv-installer.lock.txt
 
 # Bake only the common parser dependencies into the image. start-worker.sh installs
 # the larger toolchains on first startup, outside the image layers.

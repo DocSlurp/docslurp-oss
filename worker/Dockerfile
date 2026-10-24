@@ -62,10 +62,11 @@ COPY worker/requirements-base.txt ./worker/requirements-base.txt
 COPY worker/requirements-base.lock.txt ./worker/requirements-base.lock.txt
 COPY worker/requirements-heavy.txt ./worker/requirements-heavy.txt
 COPY scripts/setup-cli-docker.sh /tmp/setup-cli-docker.sh
+COPY scripts/uv-installer.lock.txt /tmp/uv-installer.lock.txt
 COPY scripts/setup-worker-python-venv.sh /tmp/setup-worker-python-venv.sh
 RUN sh /tmp/setup-cli-docker.sh \
     && chown -R 10001:10001 /app/.venv \
-    && rm /tmp/setup-cli-docker.sh
+    && rm -f /tmp/setup-cli-docker.sh /tmp/uv-installer.lock.txt
 
 # Install production Node.js dependencies only
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml tsconfig.base.json ./
