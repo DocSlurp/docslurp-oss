@@ -8,7 +8,6 @@ import {
   calculateAiUsageCostCents,
   pageCredits,
   richPagesForOutputTokens,
-  VectorNamespaceManager,
   type MaterializePagesInput,
   type PipelineFeatures,
 } from "@docslurp/shared";
@@ -27,6 +26,7 @@ import {
   PdfSourceCache,
 } from "../pipeline/pdf-asset-cache.js";
 import type { WorkflowState } from "../pipeline/pipeline.js";
+import { workspaceVectorLocation } from "../stages/lancedb-location.js";
 import type { PipelineUsageEventLedger } from "../pipeline/usage-ledger.js";
 import { resolvePolicy } from "../stages/pii-detect.js";
 import { embedTextChunks, estimateTokens, type RemoteEmbeddingUsage, type VectorBackendRecord } from "../stages/embedding-runtime.js";
@@ -428,8 +428,7 @@ export async function materializePageRange(
       await deps.store.insertChunks(dbChunks);
       await deps.store.linkChunksToPages(documentId, document.runId);
 
-      if (!run.orgId) throw new Error("page indexing requires a run orgId for tenant isolation");
-      const location = VectorNamespaceManager.getEmbeddingLocation(deps.config.lancedb.root, run.orgId, profile.model, dims);
+      const location = workspaceVectorLocation(run, { model: profile.model, dimensions: dims }, deps.config.lancedb.root);
       await ops.writeVectors(location.uri, location.table, chunks.map((c, i) => ({
         id: c.id, documentId, chunkIndex: c.index, text: c.text, vector: vectors[i]!,
         metadata: { documentId, sourceKey: document.sourceKey, filename: document.filename, pageNumber: c.page },
@@ -457,8 +456,8 @@ export async function materializePageRange(
       `;
       const stale = existing.map((r) => r.id).filter((id) => !keep.has(id));
       if (stale.length > 0) {
-        if (run.orgId) {
-          const loc = VectorNamespaceManager.getEmbeddingLocation(deps.config.lancedb.root, run.orgId, profile.model, dims);
+        if (run.orgId && run.workspaceId) {
+          const loc = workspaceVectorLocation(run, { model: profile.model, dimensions: dims }, deps.config.lancedb.root);
           await ops.deleteVectors(loc.uri, loc.table, stale);
         }
         await deps.sql`delete from document_chunks where document_id = ${documentId} and id = any(${stale}::text[])`;

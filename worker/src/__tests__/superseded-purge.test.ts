@@ -152,7 +152,7 @@ describe("superseded version purge", () => {
 
     expect(result).toEqual({ purged: 1, failed: 0 });
     expect(deleted.sort()).toEqual(["u1/run-1/images/v1/150dpi/page-1.png", "u1/run-1/markdown/v1.md"]);
-    expect(vectorDeletes).toEqual([{ uri: "/tmp/lance/o1/vectors/model%2Fx/4", table: "chunks", documentIds: ["v1"] }]);
+    expect(vectorDeletes).toEqual([{ uri: "/tmp/lance/o1/w/vectors-model%2Fx-4", table: "chunks", documentIds: ["v1"] }]);
     const [v1] = await sql`select purged_at is not null as purged, superseded_by_document_id from documents where id = 'v1'`;
     expect(v1).toEqual({ purged: true, superseded_by_document_id: "v2" });
     expect(await sql`select document_id from document_chunks order by document_id`).toEqual([{ document_id: "v2" }]);
@@ -207,6 +207,33 @@ describe("superseded version purge", () => {
     expect(deleted).toEqual([]);
     expect(vectorDeletes).toBe(0);
     expect(await sql`select document_id from document_chunks where document_id = 'v1'`).toEqual([]);
+  });
+
+  it("deletes a version's vectors when only a copy in another workspace remains, but keeps its artifacts", async () => {
+    await seedRun("run-1");
+    await seedRun("run-2");
+    await sql`insert into workspaces(id, org_id, user_id, name) values ('w2', 'o1', 'u1', 'W2') on conflict do nothing`;
+    await sql`
+      insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, total_documents, pipeline)
+      values ('run-w2', 'o1', 'u1', 'w2', 'bulk-upload', 'completed', 'completed', 1, '{}'::jsonb)
+    `;
+    await seedVersion({ id: "v1", runId: "run-1", createdAt: "2026-01-01" });
+    await sql`update documents set status = 'completed' where id = 'v1'`;
+    // The copy owns its own rows in w2's database.
+    await sql`
+      insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status, deduped_from_document_id)
+      values ('copy', 'o1', 'u1', 'w2', 'run-w2', 'products.mdx', 'text/markdown', 'k', 'completed', 'v1')
+    `;
+    await seedVersion({ id: "v2", runId: "run-2", createdAt: "2026-01-02" });
+    await sql`update documents set status = 'completed' where id = 'v2'`;
+
+    const vectorDeletes: Array<{ uri: string; documentIds: readonly string[] }> = [];
+    const { storage, deleted } = fakeStorage(["u1/run-1/markdown/v1.md"]);
+    expect(await purgeSupersededDocuments(sql, storage, options(async ({ uri, documentIds }) => { vectorDeletes.push({ uri, documentIds }); })))
+      .toEqual({ purged: 1, failed: 0 });
+    expect(vectorDeletes).toEqual([{ uri: "/tmp/lance/o1/w/vectors-model%2Fx-4", documentIds: ["v1"] }]);
+    // The copy's stage states still point at v1's artifacts.
+    expect(deleted).toEqual([]);
   });
 
   it("keeps storage artifacts a partial reprocess reuses but deletes the old vectors", async () => {
@@ -366,7 +393,7 @@ describe("superseded version purge", () => {
     expect(await drainDocumentCleanupQueue(sql, storage, options(async (args) => { vectorDeletes.push(args); })))
       .toEqual({ purged: 1, failed: 0 });
     expect(deleted.sort()).toEqual(["u1/run-1/images/deleted/page-1.png", "u1/run-1/markdown/deleted.md", "u1/src/raw/deleted.pdf"]);
-    expect(vectorDeletes).toEqual([{ uri: "/tmp/lance/o1/vectors/model%2Fx/4", table: "chunks", documentIds: ["deleted"] }]);
+    expect(vectorDeletes).toEqual([{ uri: "/tmp/lance/o1/w/vectors-model%2Fx-4", table: "chunks", documentIds: ["deleted"] }]);
     expect(await sql`select id from kg_nodes`).toEqual([]);
     expect(await sql`select document_id from document_cleanup_queue`).toEqual([]);
   });

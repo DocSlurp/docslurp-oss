@@ -81,8 +81,13 @@ describe("workspace delete", () => {
       { document_id: "d1", vector_targets: [{ backend: "lancedb", embeddingModel: "m", dimension: 4 }] },
       { document_id: "d2", vector_targets: [{ backend: "lancedb", embeddingModel: "m", dimension: 4 }] },
     ]);
-    expect(await sql`select target from storage_cleanup_queue order by target`)
-      .toEqual([{ target: "owner/done/" }, { target: "owner/live/" }]);
+    // The workspace's LanceDB database is dropped whole, after the in-flight grace.
+    expect(await sql`select kind, target, payload, reason, not_before > now() + interval '10 minutes' as deferred
+      from storage_cleanup_queue order by target`).toEqual([
+      { kind: "vector_table", target: "org|ws|m|4", payload: { workspaceId: "ws", embeddingModel: "m", dimension: 4 }, reason: "workspace_deleted", deferred: true },
+      { kind: "storage_prefix", target: "owner/done/", payload: { workspaceId: "ws" }, reason: "run_deleted", deferred: false },
+      { kind: "storage_prefix", target: "owner/live/", payload: { workspaceId: "ws" }, reason: "run_deleted", deferred: false },
+    ]);
   });
 
   it("deletes in batches without losing documents", async () => {

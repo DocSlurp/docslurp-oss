@@ -26,7 +26,7 @@ export type LanceDbMaintenanceOptions = {
 };
 
 /**
- * How documents reach the per-org table. `queued` (default): enqueue to the Postgres
+ * How documents reach a workspace table. `queued` (default): enqueue to the Postgres
  * outbox and let the table's single write-lease holder commit pending documents in one
  * batch. `direct`: every document commits its own merge-insert (optimistic, conflicts
  * under concurrency; kept as a fallback for setups without the worker database).

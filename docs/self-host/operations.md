@@ -217,6 +217,36 @@ server and worker start. Watch its exit status and the server logs. Breaking sch
 changes are possible while DocSlurp is pre-release; read release notes before
 upgrading and keep a rollback backup (see [Backups and restore](#backups-and-restore)).
 
+### Moving to per-workspace LanceDB databases (migration 0082)
+
+Vectors used to live in org-level tables
+(`<LANCEDB_URI>/<orgId>/vectors/<model>/<dims>`, `chunks_org_…`). Every
+workspace now has its own database,
+`<LANCEDB_URI>/<orgId>/<workspaceId>/vectors-<model>-<dims>`, and search reads
+only that one. Until existing rows are moved, vector search returns nothing
+for documents indexed before the upgrade (keyword search still works; the API
+counts `lanceTableMissing` and logs `[search] lancedb table missing`).
+
+1. Stop ingest (or let runs finish), then upgrade the server and worker
+   together. Migration 0082 repoints pending queued vector writes at their
+   workspace database and marks old org-deletion cleanup rows.
+2. Move the rows, without re-embedding, from the worker image:
+   `node worker/dist/stages/lancedb-relocate-cli.js --all --dry-run`, then
+   without `--dry-run`, with ingest still stopped. It routes each row to its
+   document's workspace (dedup copies in another workspace get their own
+   rebound rows), keeps only rows whose chunk still exists, appends without
+   replacing rows already in the workspace database, then builds the vector
+   and full-text indexes. Reruns converge. Rows of deleted documents and
+   replaced chunks stay behind (`orphan_rows`, `stale_rows`).
+3. Resume ingest, check search in a few workspaces, then rerun with
+   `--drop-legacy` to delete the org-level tables (they hold chunk text). It
+   drops only after a run that read every row and had no error. Deleting an
+   org queues its org-level tables for the cleanup sweep too.
+
+Rolling back the code reads the org-level tables again, which miss anything
+indexed after the upgrade: keep them until step 3 and reprocess documents
+uploaded since.
+
 ## Monitoring
 
 - `GET /health` returns `{"ok":true,...}` while the server process is up. The

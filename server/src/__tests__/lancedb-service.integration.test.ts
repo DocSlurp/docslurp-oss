@@ -42,7 +42,7 @@ beforeAll(async () => {
   await sql`insert into documents(id,user_id,workspace_id,run_id,filename,mime_type,source_key,status,org_id,page_count) values('refine-doc','refine-user','refine-ws','refine-run','local.txt','text/plain','local','completed','refine-org',2)`;
   await sql`insert into vector_indexes(id,document_id,backend,bucket,path,embedding_model,dimension) values('refine-index','refine-doc','lancedb','local','local','text-embedding-3-small',1536)`;
   await sql`insert into document_chunks(id,document_id,run_id,user_id,chunk_index,text,page_number) values('refine-chunk','refine-doc','refine-run','refine-user',0,'Authoritative hydrated content',1)`;
-  const location = VectorNamespaceManager.getEmbeddingLocation(directory, "refine-org", "text-embedding-3-small", 1536);
+  const location = VectorNamespaceManager.getEmbeddingLocation(directory, "refine-org", "refine-ws", "text-embedding-3-small", 1536);
   db = await lance.connect(location.uri);
   table = await db.createTable(location.table, [
     { id: "refine-chunk", documentId: "refine-doc", chunkIndex: 0, vector },
@@ -65,7 +65,7 @@ it("hydrates authoritative SQL content/citations and rejects stale or out-of-sco
   const { resolveEmbeddingRoute } = await import("@docslurp/shared");
   expect(resolveEmbeddingRoute((await loadWorkspacePipeline("refine-ws")).embedding).model).toBe("text-embedding-3-small");
   const adapter = await import("../search/lancedb.js");
-  expect(await adapter.lanceDbVectorSearch({ orgId: "refine-org", embeddingModel: "text-embedding-3-small", queryVector: vector, documentIds: ["refine-doc"], limit: 10 })).not.toHaveLength(0);
+  expect(await adapter.lanceDbVectorSearch({ orgId: "refine-org", workspaceId: "refine-ws", embeddingModel: "text-embedding-3-small", queryVector: vector, documentIds: ["refine-doc"], limit: 10 })).not.toHaveLength(0);
   const response = await search("zzmissinglexicalterm", "refine-user", options);
   expect(response.results).toHaveLength(1);
   expect(response.results[0]?.text).toBe("Authoritative hydrated content");

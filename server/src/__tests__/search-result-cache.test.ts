@@ -41,8 +41,9 @@ describe("result cache keys", () => {
 describe("lanceDbVectorSearch result cache", () => {
   let dir: string;
   const rec = (id: string, documentId: string, vector: number[]) => ({ id, documentId, text: id, vector });
-  const search = (orgId = "org-a", documentIds?: string[]) => collectSearchTimings(() =>
-    lanceDbVectorSearch({ orgId, queryVector: [1, 0], documentIds, limit: 5 }));
+  const location = (workspaceId: string) => VectorNamespaceManager.getEmbeddingLocation(dir, "org-a", workspaceId, "m", 2);
+  const search = (workspaceId = "ws-a", documentIds?: string[]) => collectSearchTimings(() =>
+    lanceDbVectorSearch({ orgId: "org-a", workspaceId, embeddingModel: "m", queryVector: [1, 0], documentIds, limit: 5 }));
 
   beforeEach(async () => {
     dir = await mkdtemp(path.join(tmpdir(), "docslurp-result-cache-"));
@@ -50,9 +51,11 @@ describe("lanceDbVectorSearch result cache", () => {
     process.env.SEARCH_RESULT_CACHE_MAX_ENTRIES = "50";
     resetLanceDbConnectionForTests();
     resetResultCacheForTests();
-    const db = await lancedb.connect(dir);
-    await db.createTable(VectorNamespaceManager.getTableName("org-a"), [rec("a1", "d1", [1, 0]), rec("a2", "d2", [0.9, 0.1])]);
-    await db.createTable(VectorNamespaceManager.getTableName("org-b"), [rec("b1", "d9", [1, 0])]);
+    for (const [workspaceId, rows] of [["ws-a", [rec("a1", "d1", [1, 0]), rec("a2", "d2", [0.9, 0.1])]], ["ws-b", [rec("b1", "d9", [1, 0])]]] as const) {
+      const db = await lancedb.connect(location(workspaceId).uri);
+      (await db.createTable(location(workspaceId).table, [...rows])).close();
+      db.close();
+    }
   });
   afterEach(async () => {
     resetLanceDbConnectionForTests();
@@ -62,20 +65,20 @@ describe("lanceDbVectorSearch result cache", () => {
     await rm(dir, { recursive: true, force: true });
   });
 
-  it("serves the second identical query from cache, per org", async () => {
+  it("serves the second identical query from cache, per workspace", async () => {
     const first = await search();
     expect(first.timings.resultCacheMiss).toBe(1);
     const second = await search();
     expect(second.timings.resultCacheHit).toBe(1);
     expect(second.value).toEqual(first.value);
-    const other = await search("org-b");
+    const other = await search("ws-b");
     expect(other.timings.resultCacheMiss).toBe(1);
     expect(other.value.map((h) => h.id)).toEqual(["b1"]);
   });
 
   it("never reads or writes the cache in strict-privacy mode", async () => {
     const strict = () => collectSearchTimings(() =>
-      lanceDbVectorSearch({ orgId: "org-a", queryVector: [1, 0], limit: 5, privacyMode: "strict-privacy" }));
+      lanceDbVectorSearch({ orgId: "org-a", workspaceId: "ws-a", embeddingModel: "m", queryVector: [1, 0], limit: 5, privacyMode: "strict-privacy" }));
     const first = await strict();
     const second = await strict();
     expect(first.timings.resultCacheBypass).toBe(1);
@@ -89,15 +92,15 @@ describe("lanceDbVectorSearch result cache", () => {
 
   it("misses when the scope changes", async () => {
     await search();
-    const scoped = await search("org-a", ["d2"]);
+    const scoped = await search("ws-a", ["d2"]);
     expect(scoped.timings.resultCacheMiss).toBe(1);
     expect(scoped.value.map((h) => h.id)).toEqual(["a2"]);
   });
 
   it("misses after a table write bumps the version", async () => {
     await search();
-    const db = await lancedb.connect(dir);
-    const table = await db.openTable(VectorNamespaceManager.getTableName("org-a"));
+    const db = await lancedb.connect(location("ws-a").uri);
+    const table = await db.openTable(location("ws-a").table);
     await table.add([rec("a3", "d3", [1, 0])]);
     // Open handles re-check the manifest at most every 10 s; reopen to see the write now.
     // The result cache is deliberately kept: only the version in the key can invalidate it.

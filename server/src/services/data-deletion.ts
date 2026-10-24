@@ -79,22 +79,63 @@ export async function cancelWorkspaceRuns(
   return { cancelled: runs.length, unreachable };
 }
 
+/**
+ * Every workspace has its own LanceDB database per embedding space
+ * (@docslurp/shared vector-namespace): deleting the workspace drops them whole
+ * instead of deleting rows document by document. Payloads resolve under the
+ * worker's LanceDB root; outbox rows name their table directly. Documents
+ * still in flight get the same grace as their per-document cleanup, so a late
+ * write lands before the drop.
+ */
+async function enqueueWorkspaceVectorTableDrops(sql: DataDeletionDeps["sql"], workspaceId: string): Promise<void> {
+  const [inFlight] = await sql<{ active: boolean }[]>`
+    select exists (
+      select 1 from documents where workspace_id = ${workspaceId} and status in ('queued', 'processing')
+    ) as active
+  `;
+  const graceSeconds = inFlight?.active ? 15 * 60 : 0;
+  await sql`
+    insert into storage_cleanup_queue (kind, org_id, target, payload, reason, not_before)
+    select 'vector_table', w.org_id, w.org_id || '|' || w.id || '|' || vi.embedding_model || '|' || vi.dimension,
+      jsonb_build_object('workspaceId', w.id, 'embeddingModel', vi.embedding_model, 'dimension', vi.dimension),
+      'workspace_deleted', now() + make_interval(secs => ${graceSeconds})
+    from vector_indexes vi
+    join documents d on d.id = vi.document_id
+    join workspaces w on w.id = d.workspace_id
+    where w.id = ${workspaceId} and vi.backend = 'lancedb'
+    group by w.org_id, w.id, vi.embedding_model, vi.dimension
+    on conflict (kind, target) do nothing
+  `;
+  await sql`
+    insert into storage_cleanup_queue (kind, org_id, target, payload, reason, not_before)
+    select distinct 'vector_table', w.org_id, o.table_key, jsonb_build_object('uri', o.lance_uri, 'table', o.lance_table),
+      'workspace_deleted', now() + make_interval(secs => ${graceSeconds})
+    from vector_index_outbox o
+    join documents d on d.id = o.document_id
+    join workspaces w on w.id = d.workspace_id
+    where w.id = ${workspaceId}
+    on conflict (kind, target) do nothing
+  `;
+}
+
 export interface DeletedWorkspaceData {
   documents: number;
   runs: number;
 }
 
 /**
- * Delete one workspace and everything in it. Documents go in batches (each
- * batch enqueues its own cleanup through the trigger), then the workspace row,
- * whose FK cascades take the runs (enqueuing their storage prefixes) and the
- * remaining per-workspace rows.
+ * Delete one workspace and everything in it. Its LanceDB databases are queued
+ * for a whole drop first, so the per-document sweep skips their row deletes.
+ * Documents go in batches (each batch enqueues its own cleanup through the
+ * trigger), then the workspace row, whose FK cascades take the runs (enqueuing
+ * their storage prefixes) and the remaining per-workspace rows.
  */
 export async function deleteWorkspaceData(
   workspaceId: string,
   deps: DataDeletionDeps = defaultDataDeletionDeps,
 ): Promise<DeletedWorkspaceData> {
   const batchSize = Math.max(1, deps.documentBatchSize ?? 500);
+  await enqueueWorkspaceVectorTableDrops(deps.sql, workspaceId);
   let documents = 0;
   for (;;) {
     const deleted = await deps.sql<{ id: string }[]>`

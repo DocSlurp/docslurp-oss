@@ -15,10 +15,12 @@ export function lanceOpenFailure(error: unknown): "not_found" | "permission_deni
 }
 
 /** Record outcome and trusted hashed table name, never storage URLs or native error text. */
-export async function openLanceTable<T>(name: string, open: () => Promise<T>): Promise<T> {
+export async function openLanceTable<T>(name: string, open: () => Promise<T>, namespace?: string): Promise<T> {
   const span = startDependencySpan("lancedb.openTable", {
     "db.system.name": "lancedb",
     "db.collection.name": name,
+    // Every workspace database holds a table named "chunks": the namespace says whose.
+    ...(namespace ? { "db.namespace": namespace } : {}),
     "docslurp.dependency.type": "vector",
     "docslurp.dependency.provider": "lancedb",
     "docslurp.dependency.operation": "openTable",

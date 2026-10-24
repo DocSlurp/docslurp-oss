@@ -108,7 +108,7 @@ function plan(planted: { kind: "keyword" | "conversational"; planted: string[] }
 const vectorsByChunk = new Map<string, number[]>();
 log(`workspace bench-ws: ${DOCS} documents x ${CHUNKS} chunks, ${DIM}-d (${route.model})`);
 const { root } = resolveLanceDbConfig();
-const location = VectorNamespaceManager.getEmbeddingLocation(root, "benchorg", route.model, DIM);
+const location = VectorNamespaceManager.getEmbeddingLocation(root, "benchorg", "bench-ws", route.model, DIM);
 const BATCH_DOCS = 20;
 let pendingLance: ReturnType<typeof buildVectorRecords> = [];
 for (let start = 1; start <= DOCS; start += BATCH_DOCS) {

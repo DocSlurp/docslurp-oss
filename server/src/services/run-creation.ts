@@ -247,8 +247,13 @@ type DedupScope = "workspace" | "org";
 
 type DedupCandidateRow = {
   id: string;
-  /** The document whose LanceDB rows the candidate's vectors are (itself unless it is a copy). */
+  /** The document that was embedded (itself unless it is a copy); a new copy points here. */
   vector_owner_id: string;
+  /**
+   * The owner's LanceDB rows live in the owner's workspace database. A copy
+   * elsewhere cannot share them: its index stage runs and writes its own.
+   */
+  shares_owner_vectors: boolean;
   dedup_scope: DedupScope;
 };
 
@@ -265,11 +270,13 @@ async function findDedupCandidate(
     select
       d.id,
       coalesce(d.deduped_from_document_id, d.id) as vector_owner_id,
+      coalesce(owner.workspace_id, d.workspace_id) = ${args.workspaceId} as shares_owner_vectors,
       case
         when d.workspace_id = ${args.workspaceId} then 'workspace'
         else 'org'
       end as dedup_scope
     from documents d
+    left join documents owner on owner.id = d.deduped_from_document_id
     join workspace_runs runs on runs.id = d.run_id
     join workspace_runs target_run on target_run.id = ${args.runId}
     where d.org_id = ${args.orgId}
@@ -284,6 +291,17 @@ async function findDedupCandidate(
       and (
         d.workspace_id = ${args.workspaceId}
         or d.org_id = ${args.orgId}
+      )
+      -- A copy in another workspace than the vector owner is indexed from the
+      -- owner's embedding artifact. Pages materialized on demand (deferred
+      -- indexing) have vectors outside that artifact, so such a source is
+      -- only reused inside its own workspace.
+      and (
+        coalesce(owner.workspace_id, d.workspace_id) = ${args.workspaceId}
+        or not exists (
+          select 1 from document_chunks deferred
+          where deferred.document_id = d.id and deferred.id like '%:p%:c%'
+        )
       )
     order by
       case when d.workspace_id = ${args.workspaceId} then 0 else 1 end,
@@ -300,6 +318,8 @@ async function seedDeduplicatedDocument(
   args: {
     sourceDocumentId: string;
     dedupScope: DedupScope;
+    /** False: the copy is indexed into its own workspace's LanceDB database by the worker. */
+    sharesOwnerVectors: boolean;
     targetDocumentId: string;
     targetRunId: string;
     targetUserId: string;
@@ -339,6 +359,7 @@ async function seedDeduplicatedDocument(
     where drss.document_id = ${args.sourceDocumentId}
       and drss.status = 'completed'
       and drss.stage_name <> 'quarantine'
+      and (${args.sharesOwnerVectors}::boolean or drss.stage_name <> 'index')
   `;
 
   await client`
@@ -380,7 +401,12 @@ async function seedDeduplicatedDocument(
       parent_page_id
     )
     select
-      gen_random_uuid()::text,
+      -- The source's id with this document as prefix (<document>-<index>). The
+      -- worker rebinds the source's embedding artifact to these chunks by index.
+      case when starts_with(chunks.id, ${args.sourceDocumentId}::text)
+        then ${args.targetDocumentId}::text || substr(chunks.id, length(${args.sourceDocumentId}::text) + 1)
+        else gen_random_uuid()::text
+      end,
       ${args.targetDocumentId},
       ${args.targetRunId},
       ${args.targetUserId},
@@ -463,6 +489,7 @@ async function seedDeduplicatedDocument(
       dimension
     from vector_indexes
     where document_id = ${args.sourceDocumentId}
+      and ${args.sharesOwnerVectors}::boolean
   `;
 }
 
@@ -731,6 +758,7 @@ export function createRunCreation(deps: RunCreationDeps) {
           await seedDeduplicatedDocument(client, {
             sourceDocumentId: dedupCandidate.id,
             dedupScope: dedupCandidate.dedup_scope,
+            sharesOwnerVectors: dedupCandidate.shares_owner_vectors,
             targetDocumentId: documentId,
             targetRunId: runId,
             targetUserId: input.userId,
