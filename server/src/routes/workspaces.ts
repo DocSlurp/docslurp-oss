@@ -34,7 +34,7 @@ import {
 } from "@docslurp/shared";
 
 import { chatModelRefused, ChatModelNotAllowedError } from "../lib/chat-model-policy.js";
-import { actorHasAnyApiKeyScope, getRequestActor, apiKeyCanUseWorkspace, loadActorScopedWorkspace } from "../lib/request-actor.js";
+import { actorHasAnyApiKeyScope, getRequestActor, apiKeyCanUseWorkspace, loadActorScopedWorkspace, type RequestActor } from "../lib/request-actor.js";
 import { requestIp, requestUserAgent } from "../lib/request-context.js";
 import { isWorkspaceChatAgent } from "../lib/mastra.js";
 import { chatVoiceRoutes } from "./chat-voice.js";
@@ -161,7 +161,23 @@ type WorkspaceChatPostBody = {
   retrieval?: unknown;
   /** Composer filters (documents, types, tags, dates). */
   filters?: unknown;
+  /** Composer web toggle: web tools for this turn. Default off. */
+  webTools?: unknown;
+  /** Composer suggestions toggle. Default on for the signed-in app, off for API keys. */
+  suggestions?: unknown;
 };
+
+/**
+ * Agent modes from the composer toggles. Web tools are off unless the user
+ * turns them on. Suggestions mode is on for the signed-in app unless switched
+ * off, and opt-in for API keys calling these routes, matching /v1/chat.
+ */
+function composerAgentModes(body: { webTools?: unknown; suggestions?: unknown }, actor: RequestActor) {
+  return {
+    web: body.webTools === true,
+    suggestions: actor.type === "session" ? body.suggestions !== false : body.suggestions === true,
+  };
+}
 
 /** Parses the composer's per-thread search scope; undefined when absent, null when invalid. */
 function parseChatScope(body: { retrieval?: unknown; filters?: unknown }) {
@@ -372,6 +388,7 @@ async function createWorkspaceAgentChatResponse(c: Context) {
             query,
             actor: getRequestActor(c), signal: c.req.raw.signal,
             answerIngestReport: getRequestActor(c).type === "session",
+            agent: composerAgentModes(body, getRequestActor(c)),
             onToolActivity: (activity) => {
               tools.set(activity.id, activity);
               writer.write({ type: "data-workspaceStatus", id: "workspace-status", data: {
@@ -495,6 +512,7 @@ async function createWorkspaceAgentChatResponse(c: Context) {
             startedAt: response.runtime.startedAt,
             completedAt: response.runtime.completedAt,
             availability: response.availability,
+            ...(response.debug.modes ? { modes: response.debug.modes } : {}),
           },
         });
         writer.write({
@@ -1253,6 +1271,8 @@ export const workspacesRoutes = new Hono()
       retrievalOnly?: boolean;
       retrieval?: unknown;
       filters?: unknown;
+      webTools?: unknown;
+      suggestions?: unknown;
     }>();
     if (!body.q) {
       return apiStatusError(c, 400, "Missing q");
@@ -1277,6 +1297,7 @@ export const workspacesRoutes = new Hono()
         actor: body.retrievalOnly === true ? undefined : getRequestActor(c), signal: c.req.raw.signal,
         allowConfiguration: body.retrievalOnly === true ? false : undefined,
         answerIngestReport: getRequestActor(c).type === "session",
+        agent: composerAgentModes(body, getRequestActor(c)),
         sessionId: body.sessionId,
         model: body.model,
         ...(scope.retrieval ? { retrieval: scope.retrieval } : {}),

@@ -241,6 +241,8 @@ export function createChatMcpTools(args: {
   webTools?: boolean;
   /** The user's own messages, whose URLs webFetch may read. */
   userText?: string[];
+  /** Offer proposeWorkspaceSettings (suggestions mode). Default true; getWorkspaceSettings stays either way. */
+  settingsProposals?: boolean;
 }) {
   let failure: ChatToolBlockedError | undefined;
   const blocked = new AbortController();
@@ -296,7 +298,9 @@ export function createChatMcpTools(args: {
     for (const key of ["results", "citations", "data", "response"]) collectEvidence(object[key], returned);
   }
 
-  const offered = (id: string) => !CHAT_EXCLUDED_TOOLS.has(id) && (!id.startsWith("web") || (args.webTools === true && CHAT_WEB_TOOLS.has(id)));
+  const offered = (id: string) => !CHAT_EXCLUDED_TOOLS.has(id)
+    && (!id.startsWith("web") || (args.webTools === true && CHAT_WEB_TOOLS.has(id)))
+    && (id !== "proposeWorkspaceSettings" || args.settingsProposals !== false);
   for (const definition of args.manifest.capabilities.filter(item => item.category === "tool" && offered(item.id))) {
     // OpenAI-compatible providers restrict function names to letters, numbers, _ and -.
     const name = definition.id.replace(/[^a-zA-Z0-9_-]/g, "_");

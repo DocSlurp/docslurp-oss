@@ -1166,14 +1166,19 @@ async function answerIngestReportTurn(args: ChatWorkspaceArgs): Promise<Workspac
   };
 }
 
-/** Grounded corpus counts for the agent prompt; both reads use workspace indexes. */
-async function loadChatWorkspaceInventory(workspaceId: string): Promise<ChatWorkspaceInventory> {
-  const [counts] = await sql<{ searchable: number; processing: number }[]>`
+/**
+ * Grounded corpus counts for the agent prompt; the searchable and processing
+ * reads use workspace indexes. The failed count scans the workspace's documents,
+ * so it runs only in suggestions mode, where it is a diagnosis signal.
+ */
+async function loadChatWorkspaceInventory(workspaceId: string, includeFailed: boolean): Promise<ChatWorkspaceInventory> {
+  const [counts] = await sql<{ searchable: number; processing: number; failed: number }[]>`
     select coalesce((select document_count from workspace_corpus_stats where workspace_id = ${workspaceId}), 0)::int as searchable,
       (select count(*)::int from documents where workspace_id = ${workspaceId}
-        and status not in ('completed', 'failed', 'cancelled', 'pii_blocked')) as processing
+        and status not in ('completed', 'failed', 'cancelled', 'pii_blocked')) as processing,
+      ${includeFailed ? sql`(select count(*)::int from documents where workspace_id = ${workspaceId} and status = 'failed')` : sql`0`} as failed
   `;
-  return { searchableDocuments: counts?.searchable ?? 0, processingDocuments: counts?.processing ?? 0 };
+  return { searchableDocuments: counts?.searchable ?? 0, processingDocuments: counts?.processing ?? 0, failedDocuments: counts?.failed ?? 0 };
 }
 
 type ChatTurnPolicy = { model: string; failover: boolean; requestedModel: string | null; limits: ChatAgentLimits };
@@ -1224,7 +1229,7 @@ async function chatWorkspaceTurn(
     const [{ runChatMcpAgent }, workspaceInventory] = await Promise.all([
       import("./chat-mcp-agent.js"),
       // The inventory is a prompt hint: without it the agent still runs, just without counts.
-      loadChatWorkspaceInventory(args.workspaceId).catch((error: unknown) => {
+      loadChatWorkspaceInventory(args.workspaceId, args.agent?.suggestions === true).catch((error: unknown) => {
         console.warn("[chat-agent] workspace inventory unavailable:", error instanceof Error ? error.message : String(error));
         return undefined;
       }),
@@ -1233,6 +1238,7 @@ async function chatWorkspaceTurn(
       actor: args.actor, workspaceId: args.workspaceId, orgId: workspace.orgId, sessionId,
       query: args.query, history, apiKey: chatApiKey, privacyMode, model,
       workspaceWebTools: (workspace.pipeline as { webTools?: unknown } | null)?.webTools !== false,
+      web: args.agent?.web, suggestions: args.agent?.suggestions,
       retrievalDefaults: searchSettings.retrievalDefaults, workspaceInventory,
       workspaceInstructions: [
         workspace.systemPrompt ? `Workspace ingest instruction: ${workspace.systemPrompt}` : "",

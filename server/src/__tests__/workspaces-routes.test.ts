@@ -673,6 +673,20 @@ describe("workspacesRoutes validation", () => {
     expect(chatWorkspaceMock).toHaveBeenCalledWith(expect.objectContaining({ actor: undefined, allowConfiguration: false }));
   });
 
+  it("maps composer toggles to agent modes: web off and suggestions on unless the user changes them", async () => {
+    getWorkspaceMock.mockResolvedValue({ id: "ws-1", orgId: "org-1" });
+    chatWorkspaceMock.mockResolvedValue({ id: "answer", debug: { model: null, fallback: true }, citations: [] });
+    const send = (body: Record<string, unknown>) => app.request("/workspaces/ws-1/chat", { method: "POST",
+      headers: { "Content-Type": "application/json" }, body: JSON.stringify({ q: "hi", ...body }) });
+    await send({});
+    expect(chatWorkspaceMock).toHaveBeenLastCalledWith(expect.objectContaining({ agent: { web: false, suggestions: true } }));
+    await send({ webTools: true, suggestions: false });
+    expect(chatWorkspaceMock).toHaveBeenLastCalledWith(expect.objectContaining({ agent: { web: true, suggestions: false } }));
+    // Only a literal true turns web tools on.
+    await send({ webTools: "yes" });
+    expect(chatWorkspaceMock).toHaveBeenLastCalledWith(expect.objectContaining({ agent: { web: false, suggestions: true } }));
+  });
+
   it("returns 403 from workspace chat routes when the workspace turned chat off", async () => {
     getWorkspaceMock.mockResolvedValue({ id: "ws-1", orgId: "org-1" });
     workspaceChatDisabledBodyMock.mockResolvedValue({ error: "Chat is turned off for this workspace.", code: "chat_disabled" });
