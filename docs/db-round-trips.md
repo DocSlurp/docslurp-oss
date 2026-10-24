@@ -41,6 +41,6 @@ round trips, not CPU, set the latency of small runs.
   pipeline against an in-memory Postgres behind that counter and budgets statements and serial round
   trips per page (deterministic; independent of machine load).
 
-Round trips per page are dominated by per-run and per-document-stage checkpoints, not pages:
-statements per page fall from about 33 for a single 10-page document to about 5 for 40-page
-documents.
+Statements per page are dominated by per-run and per-document-stage checkpoints, not pages: about
+34 for a single 10-page document run, about 14 for a run of twelve 10-page documents and about 5 for
+two 40-page documents.
