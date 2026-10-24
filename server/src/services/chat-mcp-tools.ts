@@ -1,5 +1,5 @@
 import { dynamicTool, jsonSchema, type ToolSet } from "ai";
-import { CHAT_AGENT_LIMIT_DEFAULTS, CHAT_MAX_RETRIEVED_PASSAGES, searchResultSchema, type SearchResult, type WorkspaceSearchRetrievalDefaults } from "@docslurp/shared";
+import { workspaceSettingsProposalSchema, type WorkspaceSettingsProposal, CHAT_AGENT_LIMIT_DEFAULTS, CHAT_MAX_RETRIEVED_PASSAGES, searchResultSchema, type SearchResult, type WorkspaceSearchRetrievalDefaults } from "@docslurp/shared";
 import { startTelemetrySpan, type TelemetrySpan } from "@docslurp/shared/observability";
 import type { McpDispatch, McpManifest } from "../lib/mcp-http.js";
 import { runInChatAgentContext } from "../lib/chat-agent-context.js";
@@ -118,6 +118,7 @@ export interface ChatToolActivity {
   name: string;
   status: "loading" | "success" | "error";
   runtimeMs?: number;
+  settingsProposal?: WorkspaceSettingsProposal;
 }
 
 /**
@@ -270,9 +271,10 @@ export function createChatMcpTools(args: {
             ? { ...modelSupplied, retrieval: chatDefaults, workspace: args.workspaceId }
             : { ...modelSupplied, workspace: args.workspaceId };
         const queries = definition.id === "search" ? modelQueries(supplied) : undefined;
+        let settingsProposal: WorkspaceSettingsProposal | undefined;
         const update = (status: ChatToolActivity["status"]) => {
           const event: ChatToolActivity = { id: toolCallId, name: definition.id, status,
-            ...(status !== "loading" ? { runtimeMs: Date.now() - started } : {}) };
+            ...(status !== "loading" ? { runtimeMs: Date.now() - started } : {}), ...(settingsProposal ? { settingsProposal } : {}) };
           activity.set(toolCallId, event);
           args.onActivity?.(event);
         };
@@ -304,6 +306,10 @@ export function createChatMcpTools(args: {
             collectEvidence(result, returned);
             args.onEvidence?.([...citations]);
           }
+          if (response.ok && definition.id === "proposeWorkspaceSettings") {
+            const parsed = workspaceSettingsProposalSchema.safeParse((result as { settingsProposal?: unknown })?.settingsProposal);
+            if (parsed.success) settingsProposal = parsed.data;
+          }
           update(response.ok ? "success" : "error");
           const pages = evidencePages(returned);
           const costCents = response.ok ? reportedToolCostCents(result) : 0;
@@ -311,7 +317,7 @@ export function createChatMcpTools(args: {
           const stats = definition.id === "search" ? searchCallStats(toolCallId, response.ok, queryCount, concurrency, result) : undefined;
           detail({ status: response.ok ? "success" : "error", ...(queries ? { queries } : {}),
             ...(stats ? { resultCount: stats.resultCount, zeroHit: stats.zeroHit } : {}),
-            evidencePages: pages, ...(response.ok ? { costCents } : {}),
+            evidencePages: pages, ...(response.ok ? { costCents } : {}), ...(settingsProposal ? { settingsProposal } : {}),
             ...(response.ok ? {} : { errorCode: responseErrorCode(result, response.status) }) });
           if (stats) {
             searchCalls.push(stats);
@@ -325,10 +331,11 @@ export function createChatMcpTools(args: {
           }
           span.set({ "docslurp.tool.status_code": response.status });
           span.end(response.ok ? undefined : `http_${response.status}`);
-          const serialized = JSON.stringify(result);
+          const modelResult = settingsProposal ? { settingsProposal: { ...settingsProposal, token: undefined } } : result;
+          const serialized = JSON.stringify(modelResult);
           return {
             ok: response.ok, status: response.status,
-            result: serialized.length <= 40_000 ? result : { truncated: true, preview: serialized.slice(0, 40_000) },
+            result: serialized.length <= 40_000 ? modelResult : { truncated: true, preview: serialized.slice(0, 40_000) },
             // Local citation numbers in a nested answer must not overwrite the outer turn's numbering.
             evidence: citations.map((citation, index) => ({ citationIndex: index + 1,
               filename: citation.citation.filename, documentId: citation.citation.documentId,

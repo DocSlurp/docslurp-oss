@@ -84,10 +84,10 @@ export async function extractMedia(args: { state: WorkflowState; document: Docum
     const source = await storage.downloadToTempFile(document.sourceKey, "source.media", { maxBytes: config.maxSourceBytes });
     try {
       const { duration, hasAudio, hasVideo } = await inspectMedia(runner, source, config, signal);
-      // A silent video (screen recording) has nothing to transcribe, so its frames are the only evidence:
-      // read them without the workspace opt-in. Videos with audio still need pipeline.mediaVideo.enabled.
+      // Missing workspace configuration opts in; explicit false wins even for silent video.
+      // Platform, privacy, budget and durable quota checks still apply.
       const visualEnabled = process.env.MEDIA_VIDEO_ENABLED === "true" && hasVideo
-        && (state.run.pipeline.mediaVideo?.enabled === true || !hasAudio);
+        && state.run.pipeline.mediaVideo?.enabled !== false;
       if (!hasAudio && !visualEnabled) throw new Error(DOCUMENT_FAILURE_MARKERS.silentVideo);
       const policy = hasVideo ? videoPolicy(state.run.orgFunded, duration, state.run.pipeline.mediaVideo) : undefined;
       if (policy) {

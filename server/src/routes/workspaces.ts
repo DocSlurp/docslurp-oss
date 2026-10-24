@@ -1,3 +1,5 @@
+import { applyWorkspaceSettingsProposalSchema } from "@docslurp/shared";
+import { applySettingsProposal, SettingsProposalError } from "../services/workspace-settings-proposals.js";
 import { reportPublicError } from "../lib/public-errors.js";
 import type { ChatToolActivity } from "../services/chat-mcp-tools.js";
 import { Hono, type Context } from "hono";
@@ -558,6 +560,15 @@ function findProhibitedModelId(value: unknown): string | null {
 }
 
 export const workspacesRoutes = new Hono()
+  .post("/:workspaceId/settings-proposals/apply", zValidator("json", applyWorkspaceSettingsProposalSchema, validationHook), async c => {
+    try {
+      const result = await applySettingsProposal({ actor: getRequestActor(c), workspaceId: String(c.req.param("workspaceId")), ...c.req.valid("json") });
+      return c.json(result);
+    } catch (error) {
+      if (error instanceof SettingsProposalError) return apiStatusError(c, error.status, error.message, { details: { category: error.category } });
+      throw error;
+    }
+  })
   .route("/", chatVoiceRoutes)
   .post(
     "/invites/:token/accept",
@@ -1668,4 +1679,4 @@ export const workspacesRoutes = new Hono()
   );
 
 // Workspace reads and rename/settings updates (the PATCH requires workspaces:manage).
-acceptApiKeys(workspacesRoutes, ["GET /", "GET /:workspaceId", "GET /:workspaceId/tags", "GET /:workspaceId/state", "GET /:workspaceId/ingest-report", "PATCH /:workspaceId", "POST /:workspaceId/estimate", "POST /:workspaceId/full-index", "POST /:workspaceId/full-index/estimate", "POST /:workspaceId/indexing-mode/estimate"]);
+acceptApiKeys(workspacesRoutes, ["POST /:workspaceId/settings-proposals/apply", "GET /", "GET /:workspaceId", "GET /:workspaceId/tags", "GET /:workspaceId/state", "GET /:workspaceId/ingest-report", "PATCH /:workspaceId", "POST /:workspaceId/estimate", "POST /:workspaceId/full-index", "POST /:workspaceId/full-index/estimate", "POST /:workspaceId/indexing-mode/estimate"]);

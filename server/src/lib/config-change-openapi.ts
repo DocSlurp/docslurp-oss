@@ -34,6 +34,29 @@ export const configChangePaths = {
       responses: { "200": { description: "text/event-stream" }, "404": { description: "Job not found" } },
     },
   },
+  "/v1/workspaces/{workspaceId}/settings-proposals/apply": {
+    post: {
+      tags: ["workspaces"],
+      summary: "Apply a trusted workspace settings proposal",
+      description: "Explicit approval action for a proposal prepared in the same actor's workspace conversation. Requires workspace editor access; server API keys also need workspaces:manage and matching organization/workspace scope. This operation is never exposed as an MCP/model tool. The opaque token binds the exact changes, actor, conversation, workspace and current state, expires after ten minutes and cannot be reused after settings change. Existing-document work requires separate reprocessExisting consent; required reindex proposals reject false. Refresh expired or stale proposals instead of retrying them automatically.",
+      security,
+      parameters: [workspaceRefParameter],
+      requestBody: { required: true, content: { "application/json": { schema: {
+        type: "object", additionalProperties: false, required: ["token"], properties: {
+          token: { type: "string", minLength: 1, maxLength: 32768 },
+          reprocessExisting: { type: "boolean", default: false },
+        },
+      } } } },
+      responses: {
+        "200": { description: "Settings saved: { applied: true, workspaceId, reprocess: { requested, status: queued | not-requested | blocked, jobId? } }. Queued does not imply work completed." },
+        "400": { description: "Invalid token input or unavailable reprocessing" },
+        "401": { description: "Authentication required" },
+        "403": { description: "Actor, workspace, conversation, permission or key scope mismatch" },
+        "409": { description: "Stale proposal or required reprocessing consent missing" },
+        "410": { description: "Proposal expired; request a fresh proposal" },
+      },
+    },
+  },
   "/v1/workspaces/{workspaceId}/estimate": {
     post: {
       tags: ["workspaces"],

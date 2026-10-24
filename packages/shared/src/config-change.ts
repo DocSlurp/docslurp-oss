@@ -13,8 +13,8 @@ import {
   type PipelineRunStage,
 } from "./pipeline.js";
 
-export const configChangeKindSchema = z.enum(["none", "search-only", "new-uploads", "reindex-recommended", "reindex-required"]);
-export type ConfigChangeKind = z.infer<typeof configChangeKindSchema>;
+export { configChangeKindSchema, type ConfigChangeKind } from "./config-change-kind.js";
+import { configChangeKindSchema, type ConfigChangeKind } from "./config-change-kind.js";
 
 export type ConfigChangeImpact = {
   kind: ConfigChangeKind;
