@@ -5,6 +5,7 @@ ENV ONNXRUNTIME_NODE_INSTALL_CUDA=skip
 WORKDIR /app
 RUN corepack enable
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml tsconfig.base.json ./
+COPY patches ./patches
 COPY packages ./packages
 COPY worker/package.json worker/tsconfig.json worker/LICENSE ./worker/
 RUN pnpm install --frozen-lockfile
@@ -68,6 +69,7 @@ RUN sh /tmp/setup-cli-docker.sh \
 
 # Install production Node.js dependencies only
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml tsconfig.base.json ./
+COPY patches ./patches
 COPY packages/shared/package.json packages/shared/tsconfig.json packages/shared/LICENSE packages/shared/NOTICE ./packages/shared/
 COPY worker/package.json worker/tsconfig.json worker/LICENSE ./worker/
 RUN pnpm install --filter @docslurp/worker... --prod --frozen-lockfile

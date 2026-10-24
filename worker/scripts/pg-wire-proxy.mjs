@@ -71,15 +71,21 @@ export async function startPgWireProxy({ listenPort = 0, targetHost = "127.0.0.1
       from.on("error", () => to.destroy());
     };
     pipe(client, upstream, fromClient); pipe(upstream, client, fromServer);
-    client.on("close", () => { sockets.delete(client); upstream.destroy(); });
-    upstream.on("close", () => { sockets.delete(upstream); client.destroy(); });
+    // Let bytes still in the delay queue (Terminate) reach the other side before it is torn down.
+    client.on("close", () => { sockets.delete(client); setTimeout(() => upstream.destroy(), delayMs + 10); });
+    upstream.on("close", () => { sockets.delete(upstream); setTimeout(() => client.destroy(), delayMs + 10); });
   });
   await new Promise((resolve) => server.listen(Number(listenPort), "127.0.0.1", resolve));
   return {
     port: server.address().port,
     stats: () => ({ ...stats, bySql: { ...stats.bySql } }),
     reset,
-    close: async () => { for (const socket of sockets) socket.destroy(); await new Promise((resolve) => server.close(resolve)); },
+    close: async () => {
+      for (const socket of sockets) socket.end();
+      await new Promise((resolve) => setTimeout(resolve, delayMs + 20));
+      for (const socket of sockets) socket.destroy();
+      await new Promise((resolve) => server.close(resolve));
+    },
   };
 }
 

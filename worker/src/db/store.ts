@@ -932,9 +932,9 @@ export class Store {
     if (spendCheckDue) await enforceRunSpend(this.sql, state.run, "checkpoint-interval");
     if (leaseConsumed) {
       // The stage boundary handles its lease after the stage.completed event.
-      if (options.stageBoundary) return { unspentSinceCheck: true, lease: { observation: leaseObservation } };
+      if (options.stageBoundary) return { unspentSinceCheck: true, lease: { observation: leaseObservation }, controlRequested, preloaded };
       await this.creditLeases.afterConsume(state.run, leaseObservation, "checkpoint-interval");
-      return { unspentSinceCheck: true };
+      return { unspentSinceCheck: true, controlRequested, preloaded };
     }
     // After a check the counters are 0 too: the stage boundary has nothing new to check.
     return { unspentSinceCheck: spendCheckDue || unspentSinceCheck, controlRequested, preloaded };
@@ -1353,15 +1353,13 @@ export class Store {
     // add no statement.
     // With credit leases the boundary only queries the org when the run's
     // lease is exhausted, expired or missing (credit-lease.ts).
-    if (progress.lease) {
-      await this.creditLeases.afterConsume(state.run, progress.lease.observation, "stage-boundary");
-      return {};
-    }
-    if (!progress.unspentSinceCheck) {
-      await enforceRunSpend(this.sql, state.run, "stage-boundary");
-      // The spend check may pause the run after the checkpoint read; the caller reads again.
-      return {};
-    }
+    // A spend check that paused or blocked the run changed what the checkpoint read; the caller reads again.
+    const check = progress.lease
+      ? await this.creditLeases.afterConsume(state.run, progress.lease.observation, "stage-boundary")
+      : !progress.unspentSinceCheck
+        ? await enforceRunSpend(this.sql, state.run, "stage-boundary")
+        : null;
+    if (check && (check.paused || check.blocked)) return {};
     return { controlRequested: progress.controlRequested, preloaded: progress.preloaded };
   }
 
