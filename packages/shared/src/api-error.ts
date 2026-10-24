@@ -49,6 +49,9 @@ export const API_ERROR_CODES = [
   "chat_deadline_exceeded",
   "chat_tool_failed",
   "invalid_search_scope",
+  "web_disabled",
+  "url_blocked",
+  "privacy_mode_blocked",
   "unavailable",
   "internal",
 ] as const;
@@ -125,6 +128,9 @@ export const API_ERROR_PUBLIC_MESSAGES: Record<ApiErrorCode, string> = {
   chat_deadline_exceeded: PUBLIC_ERROR_MESSAGES.chatDeadline,
   chat_tool_failed: "A required tool failed, so this task is blocked. No successful answer or action has been confirmed. Try again after resolving the error.",
   invalid_search_scope: PUBLIC_ERROR_MESSAGES.searchScope,
+  web_disabled: "Web tools are turned off for this server or workspace.",
+  url_blocked: "This URL can't be fetched. Use a public HTTP or HTTPS address.",
+  privacy_mode_blocked: "This workspace's privacy mode doesn't allow web tools.",
   unavailable: PUBLIC_ERROR_MESSAGES.unavailable,
   internal: PUBLIC_ERROR_MESSAGES.unexpected,
 };

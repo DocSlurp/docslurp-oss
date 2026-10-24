@@ -561,6 +561,13 @@
       "when": 1792792800009,
       "tag": "0079_page_render_dpi",
       "breakpoints": true
+    },
+    {
+      "idx": 80,
+      "version": "7",
+      "when": 1792792800010,
+      "tag": "0080_workspace_web_tools",
+      "breakpoints": true
     }
   ]
 }

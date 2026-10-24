@@ -4,7 +4,7 @@ Repository-authored **development** cases, not heldout evidence. No paid run or 
 
 ## Scope and preconditions
 
-The current catalog exposes `search`, `chat`, `getUploadStatus`, `getMediaEvidence`, `getWorkspaceSettings`, and `proposeWorkspaceSettings` to applicable chat actors. A scoped manifest may omit tools. There is no generic `readPDF` / original-PDF visual inspection tool. These cases test acting through available tools and honestly describing absent capabilities, not inventing a new tool.
+The current catalog exposes `search`, `chat`, `getUploadStatus`, `getMediaEvidence`, `getWorkspaceSettings`, and `proposeWorkspaceSettings` to applicable chat actors, plus optional `webSearch`/`webFetch` when the workspace, deployment and privacy policy allow them. A scoped manifest may omit tools. There is no generic `readPDF` / original-PDF visual inspection tool. These cases test acting through available tools and honestly describing absent capabilities, not inventing a new tool.
 
 Prepare an isolated, authorized workspace with a policy containing a renewal-notice passage and an indexed video/audio document with extracted transcript and sampled frame descriptions. Freeze corpus hashes, document IDs, page identities, actual extracted evidence, model/provider route and catalog. Copy development cases to an external private run directory and replace `{{mediaDocumentId}}` with the real document ID before running. The runner refuses unresolved placeholders. Supply a frozen document map `{ "actual-id": { "sourceId": "authored-source-id", "pages": [1,2] } }`; add actual supporting `premises` to external gold when checking specific facts. No gold, scenario label or expected tool name is sent to the model: only question and model are submitted.
 
