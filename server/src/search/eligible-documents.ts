@@ -159,13 +159,17 @@ export function handleSearchEligibilityHint(payload: string): void {
  * and search_eligibility hints (API-side deletes). Best effort: the TTL still bounds staleness.
  */
 function ensureInvalidationListener(): void {
-  if (listening || typeof (apiPool as { listen?: unknown } | undefined)?.listen !== "function") return;
+  if (listening) return;
+  // Tests replace ../db.js with partial mocks; without a pool there is nothing to listen on.
+  let pool: typeof apiPool | undefined;
+  try { pool = apiPool; } catch { /* mocked module without apiPool */ }
+  if (typeof pool?.listen !== "function") return;
   listening = Promise.all([
-    apiPool.listen("run_events", (payload) => {
+    pool.listen("run_events", (payload) => {
       const runIds = stringIds(payload, "runIds");
       if (runIds.length) void invalidateSearchRuns(runIds).catch(() => undefined);
     }),
-    apiPool.listen(SEARCH_ELIGIBILITY_CHANNEL, handleSearchEligibilityHint),
+    pool.listen(SEARCH_ELIGIBILITY_CHANNEL, handleSearchEligibilityHint),
   ]).catch(() => {
     listening = null;
   });

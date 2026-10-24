@@ -20,6 +20,7 @@ import { beforeOAuthAccountCreate } from "./oauth-account-linking.js";
 function guardPoolAgainstResume(target: Pool, gapMs = Number(process.env.DATABASE_RESUME_GAP_MS ?? 30_000)): void {
   if (!(gapMs > 0)) return;
   const raw = target as unknown as Record<"connect" | "query", (...args: unknown[]) => unknown>;
+  if (typeof raw.connect !== "function" || typeof raw.query !== "function") return; // partial pg mocks in tests
   const connect = raw.connect.bind(target);
   const query = raw.query.bind(target);
   let lastSeen = Date.now();
