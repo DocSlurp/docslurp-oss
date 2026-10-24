@@ -38,6 +38,7 @@ vi.mock("../search/rrf.js", () => ({
 
 vi.mock("../search/lancedb.js", () => ({
   lanceDbVectorSearch,
+  warmLanceDbSearch: vi.fn(async () => {}),
 }));
 
 vi.mock("../search/contextual-compression.js", () => ({
