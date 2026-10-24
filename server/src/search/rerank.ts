@@ -23,13 +23,19 @@ export function tokenize(text: string): string[] {
  */
 function bm25Score(
   queryTerms: string[],
-  tf: Map<string, number>,
-  dl: number,
+  docTerms: string[],
   avgDl: number,
   idf: Map<string, number>,
 ): number {
   const k1 = 1.5;
   const b = 0.75;
+  const dl = docTerms.length;
+
+  // Build term frequency map for the document
+  const tf = new Map<string, number>();
+  for (const term of docTerms) {
+    tf.set(term, (tf.get(term) ?? 0) + 1);
+  }
 
   let score = 0;
   for (const qt of queryTerms) {
@@ -46,10 +52,6 @@ function bm25Score(
 /**
  * Re-rank chunks using BM25-style term overlap scoring.
  * Returns chunks sorted by crossScore descending.
- *
- * Term frequencies are built once per chunk and shared by the IDF, BM25 and adjacent-pair bonus steps;
- * the pair scan only runs when the chunk contains both words. Scores are bit-identical to the
- * straightforward per-step implementation (same arithmetic order).
  */
 export function rerankBM25(query: string, chunks: RankedChunk[]): RankedChunk[] {
   if (chunks.length === 0) return [];
@@ -57,36 +59,23 @@ export function rerankBM25(query: string, chunks: RankedChunk[]): RankedChunk[] 
   const queryTokens = tokenize(query);
   const queryTerms = [...new Set(queryTokens)];
   const docTokens = chunks.map((c) => tokenize(c.text));
-  const docTf = docTokens.map((tokens) => {
-    const tf = new Map<string, number>();
-    for (const term of tokens) tf.set(term, (tf.get(term) ?? 0) + 1);
-    return tf;
-  });
   const avgDl =
     docTokens.reduce((sum, tokens) => sum + tokens.length, 0) / chunks.length;
 
   const idf = new Map(queryTerms.map(term => {
-    let frequency = 0;
-    for (const tf of docTf) if (tf.has(term)) frequency++;
+    const frequency = docTokens.filter(tokens => tokens.includes(term)).length;
     return [term, Math.log(1 + (chunks.length - frequency + 0.5) / (frequency + 0.5))];
   }));
   return chunks
-    .map((chunk, i) => {
-      const tokens = docTokens[i];
-      const tf = docTf[i];
-      let bonus = 0;
-      for (let index = 0; index < queryTokens.length - 1; index++) {
-        const previous = queryTokens[index];
-        const term = queryTokens[index + 1];
-        if (!tf.has(previous) || !tf.has(term)) continue;
-        let adjacent = false;
-        for (let offset = 0; offset < tokens.length - 1; offset++) {
-          if (tokens[offset] === previous && tokens[offset + 1] === term) { adjacent = true; break; }
-        }
-        if (adjacent) bonus += (idf.get(previous) ?? 0) + (idf.get(term) ?? 0);
-      }
-      return { ...chunk, crossScore: bm25Score(queryTerms, tf, tokens.length, avgDl || 1, idf) + bonus };
-    })
+    .map((chunk, i) => ({
+      ...chunk,
+      crossScore: bm25Score(queryTerms, docTokens[i], avgDl || 1, idf) +
+        queryTokens.slice(1).reduce((bonus, term, index) => {
+          const previous = queryTokens[index];
+          const adjacent = docTokens[i].some((token, offset) => token === previous && docTokens[i][offset + 1] === term);
+          return bonus + (adjacent ? (idf.get(previous) ?? 0) + (idf.get(term) ?? 0) : 0);
+        }, 0),
+    }))
     .sort((a, b) => (b.crossScore ?? 0) - (a.crossScore ?? 0));
 }
 
