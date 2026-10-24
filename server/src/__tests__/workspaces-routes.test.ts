@@ -227,13 +227,18 @@ describe("workspacesRoutes validation", () => {
     expect(loadIngestReportMock).not.toHaveBeenCalled();
   });
 
-  it("gives API keys a read-only report (never edit rights)", async () => {
+  it("gives a search-only key a read-only report and an ingest key the editor's actions", async () => {
     getWorkspaceMock.mockResolvedValue({ id: "ws-1", orgId: "org-1" });
     loadIngestReportMock.mockResolvedValue({ workspaceId: "ws-1" });
     const response = await buildApp({ orgId: "org-1", scopes: ["search"] }).request("/workspaces/ws-1/ingest-report");
     expect(response.status).toBe(200);
-    expect(loadIngestReportMock).toHaveBeenCalledWith(expect.objectContaining({ canEdit: false }));
-    expect(getWorkspaceAccessMock).not.toHaveBeenCalled();
+    expect(loadIngestReportMock).toHaveBeenLastCalledWith(expect.objectContaining({ canEdit: false }));
+    await buildApp({ orgId: "org-1", scopes: ["ingest"] }).request("/workspaces/ws-1/ingest-report");
+    expect(loadIngestReportMock).toHaveBeenLastCalledWith(expect.objectContaining({ canEdit: true }));
+    // The key never exceeds its user's role.
+    canEditWorkspaceMock.mockReturnValueOnce(false);
+    await buildApp({ orgId: "org-1", scopes: ["ingest"] }).request("/workspaces/ws-1/ingest-report");
+    expect(loadIngestReportMock).toHaveBeenLastCalledWith(expect.objectContaining({ canEdit: false }));
   });
 
   it("applies a recommendation, audits it and maps editor and conflict errors", async () => {
@@ -264,12 +269,41 @@ describe("workspacesRoutes validation", () => {
     expect(injected.status).toBe(400);
   });
 
-  it("accepts API keys only on the read-only report, never on apply or reprocess", async () => {
+  it("accepts API keys on the report and its actions", async () => {
     const { listRouteAuthModes } = await import("../lib/route-auth.js");
     const modes = Object.fromEntries(listRouteAuthModes(workspacesRoutes).map((route) => [`${route.method} ${route.path}`, route.mode]));
     expect(modes["GET /:workspaceId/ingest-report"]).toBe("apiKey");
-    expect(modes["POST /:workspaceId/ingest-report/apply"]).toBe("session");
-    expect(modes["POST /:workspaceId/ingest-report/reprocess"]).toBe("session");
+    expect(modes["POST /:workspaceId/ingest-report/apply"]).toBe("apiKey");
+    expect(modes["POST /:workspaceId/ingest-report/reprocess"]).toBe("apiKey");
+    expect(modes["POST /:workspaceId/documents/bulk/estimate"]).toBe("apiKey");
+  });
+
+  it("lets an ingest server key reprocess findings and a workspaces:manage key apply them, in its own workspaces only", async () => {
+    getWorkspaceMock.mockResolvedValue({ id: "ws-1", orgId: "org-1" });
+    reprocessIngestRecommendationMock.mockResolvedValue({ runs: [{ id: "run-2" }], documentIds: ["d1"], skippedDocuments: 0, estimatedCents: 1 });
+    applyIngestRecommendationMock.mockResolvedValue({
+      workspace: { id: "ws-1", orgId: "org-1", pipeline: {} }, recommendation: { patch: { preserveTables: true } }, pipeline: { preserveTables: true },
+    });
+    const post = (key: Parameters<typeof buildApp>[0], action: "apply" | "reprocess") => buildApp(key).request(`/workspaces/ws-1/ingest-report/${action}`, {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ recommendationId: "preserve-tables" }),
+    });
+    for (const [key, action, status] of [
+      [{ orgId: "org-1", scopes: ["search"] }, "reprocess", 403],
+      [{ orgId: "org-1", scopes: ["ingest"], keyType: "client" }, "reprocess", 403],
+      [{ orgId: "other-org", scopes: ["ingest"] }, "reprocess", 404],
+      [{ orgId: "org-1", scopes: ["ingest"] }, "apply", 403],
+      [{ orgId: "org-1", scopes: ["workspaces:manage"], keyType: "client" }, "apply", 403],
+      [{ orgId: "other-org", scopes: ["workspaces:manage"] }, "apply", 404],
+    ] as const) {
+      expect((await post({ ...key, scopes: [...key.scopes] }, action)).status, `${action} ${JSON.stringify(key)}`).toBe(status);
+    }
+    expect(reprocessIngestRecommendationMock).not.toHaveBeenCalled();
+    expect(applyIngestRecommendationMock).not.toHaveBeenCalled();
+
+    expect((await post({ orgId: "org-1", scopes: ["ingest"], keyId: "key-1" }, "reprocess")).status).toBe(201);
+    expect(appendAuditLogMock).toHaveBeenLastCalledWith(expect.objectContaining({ action: "documents.bulk_reprocessed", apiKeyId: "key-1" }));
+    expect((await post({ orgId: "org-1", scopes: ["workspaces:manage"], keyId: "key-2" }, "apply")).status).toBe(200);
+    expect(appendAuditLogMock).toHaveBeenLastCalledWith(expect.objectContaining({ action: "workspace.updated", apiKeyId: "key-2" }));
   });
 
   it("reprocesses a recommendation's files and audits the runs", async () => {

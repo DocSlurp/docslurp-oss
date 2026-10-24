@@ -156,3 +156,26 @@ test("streamJob keeps waiting while blocked but times out otherwise", async () =
   const stuck = recorder(({ url }) => url.endsWith("/events") ? json({}, 404) : json(job));
   await assert.rejects(async () => { for await (const _ of stuck.client.streamJob("j1", { pollIntervalMs: 5, timeoutMs: 20 })); }, { name: "DocSlurpTimeoutError" });
 });
+
+test("content updates hit their routes and reprocessRun returns one shape for started and deferred runs", async () => {
+  const run = { id: "run-2", status: "queued" };
+  let deferred = false;
+  const { calls, client } = recorder((call) => call.url.endsWith("/reprocess")
+    ? json(deferred ? { run, warnings: ["Temporal unavailable"], job } : { ...run, job }, 201)
+    : json({ ok: true }));
+  assert.deepEqual(await client.reprocessRun("run/1", { stageFrom: "extract-markdown" }), { run, job, warnings: [] });
+  deferred = true;
+  assert.deepEqual(await client.reprocessRun("run/1"), { run, job, warnings: ["Temporal unavailable"] });
+  await client.setDocumentTags("d/1", ["docs"]);
+  await client.bulkDocuments({ action: "delete", documentIds: ["d1", "d2"] });
+  await client.reprocessIngestRecommendation(undefined, { recommendationId: "vision-all-pages" });
+  await client.applyIngestRecommendation("other", { recommendationId: "preserve-tables", runId: "r1" });
+  assert.deepEqual(calls.map((c) => [c.method, c.url, c.body]), [
+    ["POST", "/v1/runs/run%2F1/reprocess", { stageFrom: "extract-markdown" }],
+    ["POST", "/v1/runs/run%2F1/reprocess", {}],
+    ["PUT", "/v1/documents/d%2F1/tags", { tags: ["docs"] }],
+    ["POST", "/v1/documents/bulk", { action: "delete", documentIds: ["d1", "d2"] }],
+    ["POST", "/v1/workspaces/ws1/ingest-report/reprocess", { recommendationId: "vision-all-pages" }],
+    ["POST", "/v1/workspaces/other/ingest-report/apply", { recommendationId: "preserve-tables", runId: "r1" }],
+  ]);
+});

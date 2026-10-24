@@ -472,6 +472,22 @@ export type DeletedDocument = JsonObject & {
   sourceKey?: string;
 };
 
+/** Input of {@link DocSlurpClient.reprocessRun}: all stages, from one stage on, or only the listed stages. */
+export type ReprocessRunInput = { stageFrom?: string; stages?: string[] };
+/** The run created by {@link DocSlurpClient.reprocessRun}, its job, and warnings when its start was deferred. */
+export type ReprocessRunResult = { run: WorkspaceRun; job?: JobStatus; warnings: string[] };
+export type BulkDocumentsInput = {
+  action: "reprocess" | "apply-tags" | "remove-tags" | "delete" | "export-artifacts";
+  documentIds: string[];
+  tags?: string[];
+};
+/** Per action: `{ runs, failed, warnings, job? }` (reprocess), `{ updated, documentIds }` (tags), `{ deleted, documentIds }` or `{ artifacts }`. */
+export type BulkDocumentsResult = JsonObject;
+/** Names an ingest report recommendation, optionally scoped like the report it came from. */
+export type IngestRecommendationInput = { recommendationId: string; runId?: string; documentIds?: string[] };
+export type IngestRecommendationReprocessResult = JsonObject & { runs: Array<{ id: string }>; documentIds: string[]; skippedDocuments: number; estimatedCents: number | null };
+export type IngestRecommendationApplyResult = JsonObject & { recommendationId: string; patch: JsonObject | null; pipeline: JsonObject };
+
 export type RequestOptions = {
   signal?: AbortSignal;
   timeoutMs?: number;
@@ -1416,7 +1432,21 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
     updateSearchSettingsEstimate(id: string | undefined, input: JsonObject, requestOptions?: RequestOptions): Promise<EstimateResponse> {
       return estimateAt(`${wsPath(id)}/search-settings/estimate`, input, requestOptions);
     },
-    /** What re-running a run (optionally from given stages) would cost. Session-only: the reprocess mutation accepts no API key. */
+    /**
+     * Re-runs a run's documents as new versions (all stages, `stageFrom` on, or only `stages`). Server keys need
+     * `ingest`. Re-extracts files whose bytes did not change, which a re-upload would not (identical bytes reuse
+     * the earlier extraction). Spends credits; price it with {@link reprocessEstimate}.
+     */
+    async reprocessRun(runId: string, input: ReprocessRunInput = {}, requestOptions?: RequestOptions): Promise<ReprocessRunResult> {
+      const body = await request<WorkspaceRun & { run?: WorkspaceRun; job?: JobStatus; warnings?: string[] }>(
+        `/v1/runs/${encodeURIComponent(runId)}/reprocess`, jsonRequest("POST", input), requestOptions,
+      );
+      // A deferred start answers { run, warnings, job }; a started one answers the run itself plus job.
+      if (body.run) return { run: body.run, job: body.job, warnings: body.warnings ?? [] };
+      const { job, warnings: _warnings, ...run } = body;
+      return { run: run as WorkspaceRun, job, warnings: [] };
+    },
+    /** What {@link reprocessRun} would cost, without starting it. Server keys need `ingest`. */
     reprocessEstimate(runId: string, input: JsonObject = {}, requestOptions?: RequestOptions): Promise<EstimateResponse> {
       return estimateAt(`/v1/runs/${encodeURIComponent(runId)}/reprocess/estimate`, input, requestOptions);
     },
@@ -1457,6 +1487,14 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
      * cost for the workspace (default workspace when none is configured), plus
      * the settings that shaped it and recommendations. No model call.
      */
+    /** Re-runs a recommendation's affected files (up to 100) with the workspace's current settings. Server keys need `ingest`. */
+    reprocessIngestRecommendation(id: string | undefined, input: IngestRecommendationInput, options?: RequestOptions): Promise<IngestRecommendationReprocessResult> {
+      return request(`/v1/workspaces/${encodeURIComponent(id?.trim() || clientWorkspace)}/ingest-report/reprocess`, jsonRequest("POST", input), options);
+    },
+    /** Applies a recommendation's own settings patch to the workspace. Server keys need `workspaces:manage`. */
+    applyIngestRecommendation(id: string | undefined, input: IngestRecommendationInput, options?: RequestOptions): Promise<IngestRecommendationApplyResult> {
+      return request(`/v1/workspaces/${encodeURIComponent(id?.trim() || clientWorkspace)}/ingest-report/apply`, jsonRequest("POST", input), options);
+    },
     getIngestReport(id: string | undefined = clientWorkspace, options: IngestReportOptions = {}): Promise<IngestReport> {
       const params = new URLSearchParams();
       if (options.runId) params.set("runId", options.runId);
@@ -1566,11 +1604,21 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
 
     /**
      * Delete a document and return the identities of the removed record.
-     * Requires a signed-in session: documents accept API-key authentication for
-     * reads only, so key-authenticated calls to this method receive 403.
+     * Server keys need `ingest`; browser keys can't delete. 409 while a run is still processing the document.
      */
     deleteDocument(documentId: string, requestOptions?: RequestOptions): Promise<DeletedDocument> {
       return request<DeletedDocument>(`/v1/documents/${encodeURIComponent(documentId)}`, { method: "DELETE" }, requestOptions);
+    },
+    /** Replaces a document's tags (no re-ingestion). Server keys need `ingest`. */
+    setDocumentTags(documentId: string, tags: string[], requestOptions?: RequestOptions): Promise<{ documentId: string; tags: string[] }> {
+      return request(`/v1/documents/${encodeURIComponent(documentId)}/tags`, jsonRequest("PUT", { tags }), requestOptions);
+    },
+    /**
+     * Reprocesses, retags, deletes or exports many documents at once. Server keys need `ingest` (`artifacts` for
+     * `export-artifacts`), and every document must be in a workspace the key can use (404 before any change otherwise).
+     */
+    bulkDocuments(input: BulkDocumentsInput, requestOptions?: RequestOptions): Promise<BulkDocumentsResult> {
+      return request(`/v1/documents/bulk`, jsonRequest("POST", input), requestOptions);
     },
 
     uploadUrls,
