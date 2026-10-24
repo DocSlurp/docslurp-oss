@@ -1,3 +1,4 @@
+import { rm } from "node:fs/promises";
 import { setTimeout as delay } from "node:timers/promises";
 
 import {
@@ -988,7 +989,7 @@ async function referencedDocumentsUnderPrefix(
 
 type StorageCleanupRow = {
   id: string;
-  kind: "storage_prefix" | "vector_table";
+  kind: "storage_prefix" | "vector_table" | "vector_prefix";
   org_id: string | null;
   target: string;
   payload: Record<string, unknown>;
@@ -1065,6 +1066,8 @@ export async function drainStorageCleanupQueue(
             result.purged += 1;
             return;
           }
+        } else if (row.kind === "vector_prefix") {
+          await purgeWorkspaceVectorPrefix(client, storage, options.lancedbRoot, row.org_id ?? "", payloadWorkspaceId(row.payload));
         } else {
           // Queued before workspaces had their own databases (migration 0082 marks them):
           // a deleted org's org-level tables, dropped with their legacy names.
@@ -1105,6 +1108,55 @@ export async function drainStorageCleanupQueue(
     console.log(`[storage-cleanup] cleaned=${result.purged} failed=${result.failed}`);
   }
   return result;
+}
+
+/**
+ * Removes everything under a deleted workspace's LanceDB root
+ * (`<root>/<orgId>/<workspaceId>/`): the vector_table drops before it cover the
+ * tables Postgres knew about; this also takes tables of models no document
+ * indexes any more and the directories. Object-storage roots must live in the
+ * artifact bucket (the sweep has no client for another one); other roots are
+ * left to their table drops with a warning.
+ */
+async function purgeWorkspaceVectorPrefix(
+  client: Sql<Record<string, unknown>>,
+  storage: PurgeStorage,
+  lancedbRoot: string,
+  orgId: string,
+  workspaceId: string,
+): Promise<void> {
+  const root = VectorNamespaceManager.getWorkspaceRoot(lancedbRoot, orgId, workspaceId);
+  const target = workspaceVectorPrefixTarget(root, storage.bucket);
+  if (target.kind === "local") {
+    await rm(target.path, { recursive: true, force: true });
+  } else if (target.kind === "bucket") {
+    await purgePrefix(storage, target.prefix, () => false);
+  } else {
+    console.warn(`[storage-cleanup] cannot purge ${root}: not a local path or the artifact bucket; known tables were dropped`);
+  }
+  // Their write and maintenance bookkeeping go with them.
+  await client`delete from vector_index_outbox where lance_uri like ${`${root}/%`}`;
+  await client`delete from vector_index_tables where lance_uri like ${`${root}/%`} or table_key like ${`${root}/%`}`;
+}
+
+/** Where a workspace root lives: a local directory, a key prefix in the artifact bucket, or elsewhere. */
+export function workspaceVectorPrefixTarget(
+  root: string,
+  bucket: string,
+): { kind: "local"; path: string } | { kind: "bucket"; prefix: string } | { kind: "unsupported" } {
+  const scheme = /^([a-z0-9+]+):\/\//i.exec(root)?.[1]?.toLowerCase();
+  if (!scheme) return { kind: "local", path: root };
+  if (scheme === "file") return { kind: "local", path: decodeURIComponent(new URL(root).pathname) };
+  if (scheme === "s3" || scheme === "s3a" || scheme === "s3+ddb") {
+    const rest = root.slice(scheme.length + 3);
+    const slash = rest.indexOf("/");
+    const rootBucket = slash < 0 ? rest : rest.slice(0, slash);
+    const key = slash < 0 ? "" : rest.slice(slash + 1).replace(/\/+$/, "");
+    // Two safe segments at least (<org>/<workspace>), never a bucket root.
+    if (rootBucket !== bucket || key.split("/").length < 2) return { kind: "unsupported" };
+    return { kind: "bucket", prefix: `${key}/` };
+  }
+  return { kind: "unsupported" };
 }
 
 /** Lists and deletes every key under a prefix, except kept ones, until none remain. */

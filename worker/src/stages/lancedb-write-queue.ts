@@ -196,7 +196,7 @@ export class LanceDbWriteQueue {
       }
       if (state.leaseFree) {
         const holder = `${this.workerId}:${randomUUID()}`;
-        if (await this.tryAcquireWriteLease(tableKey, holder)) {
+        if (await this.tryAcquireWriteLease(tableKey, holder, job.uri, job.table)) {
           const drained = await this.lead(tableKey, job.uri, job.table, holder);
           outcome.drains += 1;
           outcome.batches += drained.batches;
@@ -247,14 +247,15 @@ export class LanceDbWriteQueue {
    */
   async sweepDueMaintenance(limit = 50): Promise<number> {
     if (!this.deps.maintenance.enabled) return 0;
+    // The table's own location; the outbox only for rows registered before migration 0083.
     const rows = await this.sql<{ table_key: string; lance_uri: string; lance_table: string }[]>`
-      select t.table_key, o.lance_uri, o.lance_table
+      select t.table_key, coalesce(t.lance_uri, o.lance_uri) as lance_uri, coalesce(t.lance_table, o.lance_table) as lance_table
       from vector_index_tables t
-      cross join lateral (
+      left join lateral (
         select lance_uri, lance_table from vector_index_outbox o
-        where o.table_key = t.table_key order by o.id desc limit 1
-      ) o
-      where ${this.dueSql()}
+        where t.lance_uri is null and o.table_key = t.table_key order by o.id desc limit 1
+      ) o on true
+      where ${this.dueSql()} and coalesce(t.lance_uri, o.lance_uri) is not null
       order by t.last_optimized_at nulls first
       limit ${limit}`;
     let scheduled = 0;
@@ -329,12 +330,14 @@ export class LanceDbWriteQueue {
     };
   }
 
-  private async tryAcquireWriteLease(tableKey: string, holder: string): Promise<boolean> {
+  /** Also records where the table lives, so the maintenance sweep can find it without the outbox. */
+  private async tryAcquireWriteLease(tableKey: string, holder: string, uri: string, table: string): Promise<boolean> {
     const rows = await this.sql`
-      insert into vector_index_tables (table_key, write_holder, write_expires_at, updated_at)
-      values (${tableKey}, ${holder}, now() + (${this.settings.leaseTtlMs} * interval '1 millisecond'), now())
+      insert into vector_index_tables (table_key, lance_uri, lance_table, write_holder, write_expires_at, updated_at)
+      values (${tableKey}, ${uri}, ${table}, ${holder}, now() + (${this.settings.leaseTtlMs} * interval '1 millisecond'), now())
       on conflict (table_key) do update set
-        write_holder = excluded.write_holder, write_expires_at = excluded.write_expires_at, updated_at = now()
+        write_holder = excluded.write_holder, write_expires_at = excluded.write_expires_at,
+        lance_uri = excluded.lance_uri, lance_table = excluded.lance_table, updated_at = now()
       where vector_index_tables.write_expires_at < now()
       returning table_key`;
     return rows.length > 0;
