@@ -67,3 +67,5 @@
 - 2026-10-21: Refresh app/OSS dependencies, remove the retired Docling extraction backend so all Python environments can use Pillow 13 security fixes, and remove the vulnerable sprintf-js dependency chain.
 
 - Add bounded 200 DPI selected PDF reader renders and explicit 300 DPI lossless PNG exports, with quality/version-specific caches, demand and compute receipts.
+
+- Enable video frame reading by default for omitted workspace settings, honor explicit disable for silent and narrated video, and retain platform, privacy, budget and quota gates without automatic reprocessing.

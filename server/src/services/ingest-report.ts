@@ -556,8 +556,8 @@ export function buildConfigItems(pipeline: PipelineFeatures, observed: Observed)
   });
   if (kinds.has("video") || kinds.has("audio")) {
     items.push({
-      key: "mediaVideo.enabled", label: "Video frames", value: onOff(pipeline.mediaVideo?.enabled),
-      note: "Audio transcription is a platform setting; video frame reading is per workspace and also needs platform video support.",
+      key: "mediaVideo.enabled", label: "Video frames", value: onOff(pipeline.mediaVideo?.enabled !== false),
+      note: "Workspace policy only, not evidence that frames were processed. Video also requires platform support, privacy permission and available budget/quota; audio transcription is a platform setting.",
     });
   }
   if (pipeline.outputSchema && Object.keys(pipeline.outputSchema).length > 0) {
@@ -707,11 +707,11 @@ export function recommendIngestChanges(pipeline: PipelineFeatures, observed: Obs
   }
 
   const videos = observed.mediaDocs.filter((doc) => fileKind(doc.mimeType, doc.filename) === "video");
-  if (videos.length > 0 && !pipeline.mediaVideo?.enabled) {
+  if (videos.length > 0 && pipeline.mediaVideo?.enabled === false) {
     recs.push({
       id: "turn-on-video", severity: "medium",
       title: "Read video frames",
-      reason: `${plural(videos.length, "video file")} were ingested from audio only; on-screen text and slides are not indexed.`,
+      reason: `${plural(videos.length, "video file")} have video frame reading disabled in this workspace; on-screen text and slides may not be indexed.`,
       effect: "Selected frames are read with a vision model alongside the transcript. Applies to new uploads and needs platform video support.",
       affectedPages: 0, affectedDocuments: videos.length,
       cost: { centsPer100Pages: null, reprocessCents: null, basis: "Depends on video length and frame selection; mediaVideo.maxCostCents bounds it per file." },

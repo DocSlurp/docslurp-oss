@@ -512,10 +512,10 @@ export const pipelineFeaturesSchema = z
     pageRouter: pageRouterConfigSchema.default(defaultPageRouterConfig),
     /**
      * Read sampled video frames with a vision model (needs MEDIA_VIDEO_ENABLED on the worker).
-     * A video without an audio track is always read from frames, since there is nothing to transcribe.
+     * Enabled by default; an explicit false also disables silent-video frames.
      */
     mediaVideo: z.object({
-      enabled: z.boolean().default(false),
+      enabled: z.boolean().default(true),
       scanFps: z.number().min(.1).max(10).optional(),
       maxSelectedFps: z.number().min(.1).max(10).optional(),
       maxFrames: z.number().int().min(1).max(1200).optional(),
@@ -523,7 +523,7 @@ export const pipelineFeaturesSchema = z
       maxVisualTokensPerCall: z.number().int().min(2048).max(24576).optional(),
       maxClipSeconds: z.number().min(1).max(120).optional(),
       maxCostCents: z.number().positive().max(10000).optional(),
-    }).optional(),
+    }).default({ enabled: true }),
   })
   .superRefine((value, ctx) => {
     if (value.privacyMode !== "standard") {
@@ -665,6 +665,7 @@ export const defaultPipelineFeatures: PipelineFeatures = {
   pdfRegionExtraction: false,
   webhooks: defaultWorkspaceWebhookSettings,
   pageRouter: defaultPageRouterConfig,
+  mediaVideo: { enabled: true },
 };
 
 const alwaysEnabled = () => true;
