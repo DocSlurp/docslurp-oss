@@ -5,7 +5,7 @@ import { randomUUID, createHmac } from "node:crypto";
 
 import { workspaceAllowsWebhookEvent } from "@docslurp/shared";
 
-import { sql } from "../db.js";
+import { apiPool, sql } from "../db.js";
 import { assertSafeExternalUrl, safeExternalFetch } from "../lib/network-security.js";
 import { findWebhookEvent } from "../lib/webhook-events.js";
 import { decryptSecret, encryptSecret } from "./secrets.js";
@@ -590,9 +590,9 @@ export function requestWebhookOutboxDrain(): Promise<void> {
 
 export async function startWebhookOutboxListener(): Promise<void> {
   if (outboxListener) return;
-  outboxListener = await sql.listen("webhook_outbox", () => {
-    void withBackgroundSpan("api.webhook-outbox-drain", () => requestWebhookOutboxDrain());
-  });
+  const drain = () => { void withBackgroundSpan("api.webhook-outbox-drain", () => requestWebhookOutboxDrain()); };
+  // The listener is rebuilt after a suspend/resume; draining on every (re)subscribe catches up notifications missed while it was dead.
+  outboxListener = await apiPool.listen("webhook_outbox", drain, drain);
   void requestWebhookOutboxDrain();
 }
 
