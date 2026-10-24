@@ -1393,6 +1393,19 @@ async function deleteDocumentRows(documentIds: string[], userId: string): Promis
   });
 }
 
+/** The workspace and organization of each listed document the user can read, so API key routes can check key scope. */
+export async function listDocumentOwners(documentIds: string[], userId: string): Promise<Array<{ id: string; workspaceId: string; orgId: string }>> {
+  if (documentIds.length === 0) return [];
+  const workspaceIds = await listAccessibleWorkspaceIds(userId);
+  if (workspaceIds.length === 0) return [];
+  const rows = await sql<{ id: string; workspace_id: string; org_id: string }[]>`
+    select d.id, d.workspace_id, w.org_id
+    from documents d join workspaces w on w.id = d.workspace_id
+    where d.workspace_id = any(${sql.array(workspaceIds)}) and d.id = any(${sql.array(documentIds)})
+  `;
+  return rows.map((row) => ({ id: row.id, workspaceId: row.workspace_id, orgId: row.org_id }));
+}
+
 export async function deleteDocument(docId: string, userId: string): Promise<DeletedDocumentResult | null> {
   const [deleted] = await deleteDocumentRows([docId], userId);
   return deleted ?? null;

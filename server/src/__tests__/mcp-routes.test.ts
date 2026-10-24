@@ -275,9 +275,9 @@ describe("mcpRoutes", () => {
       return (await res.json()).tools.map((tool: { id: string }) => tool.id).filter((id: string) => id.endsWith("Estimate"));
     };
     expect(await listed({ scopes: ["search", "ingest", "workspaces:manage"], keyType: "server" })).toEqual([
-      "updateEstimate", "fullIndexEstimate", "indexingModeEstimate", "graphRebuildEstimate", "uploadEstimate",
+      "updateEstimate", "reprocessEstimate", "fullIndexEstimate", "indexingModeEstimate", "graphRebuildEstimate", "uploadEstimate",
     ]);
-    expect(await listed({ scopes: ["ingest"] })).toEqual(["fullIndexEstimate", "uploadEstimate"]);
+    expect(await listed({ scopes: ["ingest"] })).toEqual(["reprocessEstimate", "fullIndexEstimate", "uploadEstimate"]);
     expect(await listed({ scopes: ["search"] })).toEqual([]);
   });
 
@@ -310,8 +310,9 @@ describe("mcpRoutes", () => {
       expect((await post("uploadEstimate", { workspace: "ws-1", files: [{ name: "a.pdf", size: 1 }] })).status).toBe(403);
       validateApiKey.mockResolvedValueOnce({ ...validatedKey, scopes: ["search", "ingest"] });
       expect((await post("updateEstimate", { workspace: "ws-1", changes: {} })).status).toBe(403);
-      // reprocess and search-settings mutations accept no API key, so neither do their estimates.
+      validateApiKey.mockResolvedValueOnce({ ...validatedKey, scopes: ["search"] });
       expect((await post("reprocessEstimate", { runId: "r1" })).status).toBe(403);
+      // The search-settings mutation accepts no API key, so neither does its estimate.
       expect((await post("searchSettingsEstimate", { workspace: "ws-1", changes: {} })).status).toBe(403);
       expect(forwardInProcess).toHaveBeenCalledTimes(1);
     });
@@ -341,8 +342,8 @@ describe("mcpRoutes", () => {
     const client = new Client({ name: "catalog-contract", version: "1" });
     await client.connect(new StreamableHTTPClientTransport(new URL("http://localhost:4321/mcp"), { requestInit: { headers: { Authorization: "Bearer key" } }, fetch: async (url, init) => app.request(new Request(url, init)) }));
     const tools = (await client.listTools()).tools;
-    expect(tools).toHaveLength(12);
-    expect(new Set(tools.map(tool => tool.name)).size).toBe(12);
+    expect(tools).toHaveLength(13);
+    expect(new Set(tools.map(tool => tool.name)).size).toBe(13);
     expect(tools.every(tool => /^[A-Za-z0-9_.-]{1,128}$/.test(tool.name))).toBe(true);
     for (const name of ["upload", "completeUpload", "chat"]) {
       expect(tools.find(tool => tool.name === name)?.annotations).toMatchObject({ readOnlyHint: false, idempotentHint: false });
@@ -413,7 +414,7 @@ describe("mcpRoutes", () => {
   it("does not discover or execute search/chat tools without search scope", async () => {
     validateApiKey.mockResolvedValue({ ...validatedKey, scopes: ["ingest"] });
     const listed = await app.request("/mcp/tools", { headers: { Authorization: "Bearer dslp_test" } });
-    expect((await listed.json()).tools.map((tool: { id: string }) => tool.id)).toEqual(["getWorkspaceSettings", "listWorkspaces", "upload", "completeUpload", "getUploadStatus", "fullIndexEstimate", "uploadEstimate", "getJob"]);
+    expect((await listed.json()).tools.map((tool: { id: string }) => tool.id)).toEqual(["getWorkspaceSettings", "listWorkspaces", "upload", "completeUpload", "getUploadStatus", "reprocessEstimate", "fullIndexEstimate", "uploadEstimate", "getJob"]);
     for (const name of ["search", "chat"]) {
       expect((await app.request(`/mcp/tools/${name}`, { method: "POST", headers: { Authorization: "Bearer dslp_test", "Content-Type": "application/json" }, body: "{}" })).status).toBe(403);
     }

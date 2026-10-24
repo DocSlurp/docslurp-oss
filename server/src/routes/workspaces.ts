@@ -99,6 +99,7 @@ import {
   type WorkspaceChatUIMessage,
 } from "@docslurp/shared/workspace-chat-ui";
 import { acceptApiKeys } from "../lib/route-auth.js";
+import { apiKeyCanUpdateContent, CONTENT_UPDATE_SCOPE_MESSAGE } from "../lib/content-update-access.js";
 import { apiErrorResponse, apiStatusError } from "../lib/api-error.js";
 import { indexingModeErrorResponse } from "../lib/indexing-mode-error.js";
 import { getRun } from "../services/runs.js";
@@ -699,18 +700,25 @@ export const workspacesRoutes = new Hono()
       return apiErrorResponse(c, 404, "workspace_not_found", "Workspace not found");
     }
     const query = c.req.valid("query");
-    const access = actor.type === "apiKey" ? null : await getWorkspaceAccess(workspace.id, actor.userId);
+    const access = await getWorkspaceAccess(workspace.id, actor.userId);
+    // A key can act on findings when it could call the matching action endpoints.
+    const keyCanAct = actor.type !== "apiKey" || apiKeyCanUpdateContent(actor.apiKey) || actorHasAnyApiKeyScope(actor, ["workspaces:manage"]);
     return c.json(await loadIngestReport({
       workspace,
-      canEdit: Boolean(access && canEditWorkspace(access, actor.userId)),
+      canEdit: Boolean(keyCanAct && access && canEditWorkspace(access, actor.userId)),
       runId: query.runId ?? null,
       documentIds: query.documentIds ?? null,
     }));
   })
   .post("/:workspaceId/ingest-report/apply", zValidator("json", applyIngestRecommendationSchema, validationHook), async (c) => {
     const userId = c.get("sessionUser").id;
+    const actor = getRequestActor(c);
+    // Applying a finding changes workspace settings, so keys need the same scope as PATCH /:workspaceId.
+    if (actor.type === "apiKey" && (actor.apiKey.keyType !== "server" || !actorHasAnyApiKeyScope(actor, ["workspaces:manage"]))) {
+      return apiStatusError(c, 403, "This endpoint requires a server API key with the workspaces:manage scope");
+    }
     const workspace = await getWorkspace(c.req.param("workspaceId"), userId);
-    if (!workspace) return apiErrorResponse(c, 404, "workspace_not_found", "Workspace not found");
+    if (!workspace || (actor.type === "apiKey" && !apiKeyCanUseWorkspace(actor.apiKey, workspace))) return apiErrorResponse(c, 404, "workspace_not_found", "Workspace not found");
     const body = c.req.valid("json");
     try {
       const result = await applyIngestRecommendation({ workspace, userId, recommendationId: body.recommendationId, runId: body.runId ?? null, documentIds: body.documentIds ?? null });
@@ -718,6 +726,7 @@ export const workspacesRoutes = new Hono()
         orgId: workspace.orgId,
         userId,
         workspaceId: workspace.id,
+        apiKeyId: actor.type === "apiKey" ? actor.apiKey.keyId : null,
         action: "workspace.updated",
         resourceType: "workspace",
         resourceId: workspace.id,
@@ -738,8 +747,10 @@ export const workspacesRoutes = new Hono()
   })
   .post("/:workspaceId/ingest-report/reprocess", zValidator("json", reprocessIngestRecommendationSchema, validationHook), async (c) => {
     const userId = c.get("sessionUser").id;
+    const actor = getRequestActor(c);
+    if (actor.type === "apiKey" && !apiKeyCanUpdateContent(actor.apiKey)) return apiStatusError(c, 403, CONTENT_UPDATE_SCOPE_MESSAGE);
     const workspace = await getWorkspace(c.req.param("workspaceId"), userId);
-    if (!workspace) return apiErrorResponse(c, 404, "workspace_not_found", "Workspace not found");
+    if (!workspace || (actor.type === "apiKey" && !apiKeyCanUseWorkspace(actor.apiKey, workspace))) return apiErrorResponse(c, 404, "workspace_not_found", "Workspace not found");
     const body = c.req.valid("json");
     try {
       const result = await reprocessIngestRecommendation({ workspace, userId, recommendationId: body.recommendationId, runId: body.runId ?? null, documentIds: body.documentIds ?? null });
@@ -747,6 +758,7 @@ export const workspacesRoutes = new Hono()
         orgId: workspace.orgId,
         userId,
         workspaceId: workspace.id,
+        apiKeyId: actor.type === "apiKey" ? actor.apiKey.keyId : null,
         action: "documents.bulk_reprocessed",
         resourceType: "document-bulk",
         resourceId: result.documentIds.join(","),
@@ -1633,8 +1645,10 @@ export const workspacesRoutes = new Hono()
     })),
     async (c) => {
       const userId = c.get("sessionUser").id;
+      const actor = getRequestActor(c);
+      if (actor.type === "apiKey" && !apiKeyCanUpdateContent(actor.apiKey)) return apiStatusError(c, 403, CONTENT_UPDATE_SCOPE_MESSAGE);
       const workspace = await getWorkspace(c.req.param("workspaceId"), userId);
-      if (!workspace) return apiErrorResponse(c, 404, "workspace_not_found", "Workspace not found");
+      if (!workspace || (actor.type === "apiKey" && !apiKeyCanUseWorkspace(actor.apiKey, workspace))) return apiErrorResponse(c, 404, "workspace_not_found", "Workspace not found");
       const body = c.req.valid("json");
       const estimate = body.action === "reprocess"
         ? await estimateDocumentReprocess({ documentIds: body.documentIds, userId, workspaceId: workspace.id })
@@ -1681,4 +1695,4 @@ export const workspacesRoutes = new Hono()
   );
 
 // Workspace reads and rename/settings updates (the PATCH requires workspaces:manage).
-acceptApiKeys(workspacesRoutes, ["POST /:workspaceId/settings-proposals/apply", "GET /", "GET /:workspaceId", "GET /:workspaceId/tags", "GET /:workspaceId/state", "GET /:workspaceId/ingest-report", "PATCH /:workspaceId", "POST /:workspaceId/estimate", "POST /:workspaceId/full-index", "POST /:workspaceId/full-index/estimate", "POST /:workspaceId/indexing-mode/estimate"]);
+acceptApiKeys(workspacesRoutes, ["POST /:workspaceId/settings-proposals/apply", "GET /", "GET /:workspaceId", "GET /:workspaceId/tags", "GET /:workspaceId/state", "GET /:workspaceId/ingest-report", "POST /:workspaceId/ingest-report/apply", "POST /:workspaceId/ingest-report/reprocess", "POST /:workspaceId/documents/bulk/estimate", "PATCH /:workspaceId", "POST /:workspaceId/estimate", "POST /:workspaceId/full-index", "POST /:workspaceId/full-index/estimate", "POST /:workspaceId/indexing-mode/estimate"]);

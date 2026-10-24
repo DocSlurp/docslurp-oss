@@ -563,7 +563,34 @@ Video frame reading defaults to enabled for new workspaces and configurations th
 
 Recommendation rules: read every page with vision when scanned-looking pages have no searchable text or vision stopped at the per-file page limit (`turn-on-vision` when vision is off, `vision-all-pages` otherwise; the patch sets `vision.forceAllPages` and a page limit of up to 32); retry pages where vision failed; raise the run cost cap when it stopped vision; keep tables when table-heavy pages were flattened (`preserveTables`); turn on embeddings; read video frames (`mediaVideo.enabled`); flag audio or video without a transcript (a platform setting); reprocess pages that have text but no chunks; retry failed files; and suggest a multilingual embedding profile for non-English files. Vision cost uses this workspace's observed vision spend per page when at least three pages were read, otherwise the model's catalog price.
 
-In the dashboard, ask "how did my files process?", "why can't it find page 4?" or type `/status` in chat, or use the Report button in the composer. Only the signed-in dashboard chat answers this way (`CHAT_INGEST_REPORT_NATURAL=false` keeps just `/status`); `/v1/chat`, MCP `chat` and `/v1/chat/completions` treat these as ordinary questions, so API clients read the endpoint above. Workspace editors can apply a recommendation (`POST /v1/workspaces/:workspace/ingest-report/apply` with `recommendationId` and the report's `runId`/`documentIds`, session only) after a confirmation that shows the cost; the server recomputes the report and merges the recommendation's own patch onto the stored pipeline through the regular workspace update and audit log, so a request cannot carry arbitrary settings. `POST …/ingest-report/reprocess` re-runs up to 100 affected files with the workspace's current settings.
+In the dashboard, ask "how did my files process?", "why can't it find page 4?" or type `/status` in chat, or use the Report button in the composer. Only the signed-in dashboard chat answers this way (`CHAT_INGEST_REPORT_NATURAL=false` keeps just `/status`); `/v1/chat`, MCP `chat` and `/v1/chat/completions` treat these as ordinary questions, so API clients read the endpoint above. Workspace editors can apply a recommendation (`POST /v1/workspaces/:workspace/ingest-report/apply` with `recommendationId` and the report's `runId`/`documentIds`; API keys need a server key with `workspaces:manage`) after a confirmation that shows the cost; the server recomputes the report and merges the recommendation's own patch onto the stored pipeline through the regular workspace update and audit log, so a request cannot carry arbitrary settings. `POST …/ingest-report/reprocess` re-runs up to 100 affected files with the workspace's current settings (server keys need `ingest`). The report's `permissions.canEdit` tells you whether the caller may do either.
+
+## Keep workspace content current
+
+A server key with the `ingest` scope can keep the documents it uploads current without a dashboard session. Use it from CI to reindex a docs site, drop pages you removed, or pick up extraction improvements.
+
+| Operation | HTTP endpoint | SDK |
+| --- | --- | --- |
+| Reprocess a run's documents as new versions | `POST /v1/runs/:runId/reprocess` with optional `stageFrom` or `stages` | `reprocessRun` |
+| Price it first | `POST /v1/runs/:runId/reprocess/estimate` | `reprocessEstimate` |
+| Delete a document | `DELETE /v1/documents/:docId` | `deleteDocument` |
+| Replace a document's tags | `PUT /v1/documents/:docId/tags` with `{ tags }` | `setDocumentTags` |
+| Reprocess, retag or delete many documents | `POST /v1/documents/bulk` with `{ action, documentIds, tags? }` | `bulkDocuments` |
+| Act on an ingest report recommendation | `POST /v1/workspaces/:workspace/ingest-report/reprocess` (`ingest`) or `…/apply` (`workspaces:manage`) | `reprocessIngestRecommendation` / `applyIngestRecommendation` |
+
+- Browser keys never get these, whatever their scopes.
+- A key never exceeds its user's role: the user must be able to edit the workspace. Keys restricted to specific workspaces reach only documents and runs in those workspaces. A request naming anything outside them answers 404 before any change, including bulk requests where only one document is out of scope.
+- The bulk `export-artifacts` action is a read and needs `artifacts` instead.
+- Reprocessing and recommendations spend credits; budgets and spend caps apply as for uploads. The audit log records the key that made each change.
+- Uploading identical bytes again reuses the earlier extraction, so a re-upload doesn't pick up extraction improvements. Reprocess the run (`stageFrom: "extract-markdown"` re-extracts and reindexes) instead.
+
+```ts
+const client = createDocSlurpClient({ apiKey: process.env.DOCSLURP_API_KEY });
+// Re-extract a docs ingestion with the current worker.
+const { job } = await client.reprocessRun(runId, { stageFrom: "extract-markdown" });
+// Drop documents for pages the site no longer has.
+await client.bulkDocuments({ action: "delete", documentIds: removedIds });
+```
 
 ## Organization access and management
 
@@ -951,7 +978,7 @@ On docslurp.io the message names the page to visit (for example "Your organizati
 
 ## Authentication and integration boundaries
 
-- Create and revoke keys on the [API keys](https://docslurp.io/app/api-keys) page, or with the session key API above. `ingest` allows uploads and URL ingestion, `search` allows search and chat, and `artifacts` allows document reads. Run progress accepts any of these scopes. Workspace state also requires a server key.
+- Create and revoke keys on the [API keys](https://docslurp.io/app/api-keys) page, or with the session key API above. `ingest` allows uploads and URL ingestion and, on server keys, [keeping that content current](#keep-workspace-content-current) (reprocess, retag, delete). `search` allows search, `chat` generated answers, and `artifacts` document reads. Run progress accepts any of these scopes. Workspace state also requires a server key.
 - Organization scopes are opt-in. `organizations:manage` also allows organization reads, but doesn't bypass role, organization, personal-membership or last-owner checks.
 - Send `Authorization: Bearer <key>`. Keep server keys on the server. Route frontend requests through your own authenticated backend and enforce your application's access rules there.
 - Allowed websites restrict where a browser key works. They don't make a server key safe to use in a browser.
@@ -959,13 +986,7 @@ On docslurp.io the message names the page to visit (for example "Your organizati
 - `formatSearchContext` formats search results as evidence for any LLM. Keep document text separate from your instructions, and keep the structured citations.
 - The Node SDK and CLI need Node.js 20+ and are ESM. From other languages, use HTTP; there is no Python SDK.
 
-## Primary sponsor
-
-[![17th Street Labs logo](https://docslurp.io/sponsors/17th-street-labs-readme.svg)](https://17thstreetlabs.com)
-
-[17th Street Labs](https://17thstreetlabs.com) is DocSlurp's primary sponsor.
-
-### Document tags
+## Document tags
 
 Apply tags to every accepted document in an upload, including streamed, URL, and direct-to-storage uploads:
 
@@ -981,4 +1002,10 @@ JSON upload and direct-session requests accept `tags: string[]`. Multipart `/v1/
 
 `GET /v1/workspaces/{workspaceId}/tags` returns `{ "tags": [{ "tag": "finance", "documentCount": 2 }] }`, sorted by tag. Counts cover current, non-superseded documents, including pending uploads. The workspace accepts a UUID, slug, former slug, or `default`. Session callers need workspace access; API keys additionally need one of `search`, `ingest`, `artifacts`, or `workspaces:manage`, and stay within their organization and workspace restrictions. An empty workspace returns `{"tags":[]}`.
 
-Document listing and search accept comma-separated `tags`; matching any supplied tag is sufficient. Chat accepts an array in `filters.tags`. Existing dashboard-session endpoints `PUT /v1/documents/{docId}/tags` and `POST /v1/documents/bulk` (`apply-tags`/`remove-tags`) edit labels with workspace edit access. Tag changes take effect without re-ingestion.
+Document listing and search accept comma-separated `tags`; matching any supplied tag is sufficient. Chat accepts an array in `filters.tags`. `PUT /v1/documents/{docId}/tags` and `POST /v1/documents/bulk` (`apply-tags`/`remove-tags`) edit labels with workspace edit access, from a session or a server key with `ingest`. Tag changes take effect without re-ingestion.
+
+## Primary sponsor
+
+[![17th Street Labs logo](https://docslurp.io/sponsors/17th-street-labs-readme.svg)](https://17thstreetlabs.com)
+
+[17th Street Labs](https://17thstreetlabs.com) is DocSlurp's primary sponsor.

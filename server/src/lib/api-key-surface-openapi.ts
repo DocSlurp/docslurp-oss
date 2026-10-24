@@ -2,8 +2,8 @@ import { apiErrorOpenApiResponse } from "./api-error-openapi.js";
 /**
  * OpenAPI entries for API-key routes that had no documentation of their own
  * (document reads, direct uploads, run events and search
- * helpers). Document writes stay session-only: the documents router rejects
- * non-GET API key requests.
+ * helpers). Of the document writes, only content updates (delete, retag,
+ * bulk, run reprocess) accept a key: a server key with the `ingest` scope.
  * `route-auth-integration.test.ts` requires the bearerAuth operations in the
  * OpenAPI document to match the routes declared with `acceptApiKeys` exactly.
  */
@@ -50,6 +50,12 @@ const entries: Array<[path: string, method: Method, tag: string, summary: string
   ["/v1/documents/{docId}/structured", "get", "documents", "Get a document's structured extraction output", "artifacts", "Structured output"],
   ["/v1/documents/{docId}/versions", "get", "documents", "List a document's versions and tags", "artifacts", "Document versions"],
   ["/v1/documents/{docId}/changelog", "get", "documents", "Get the changelog between document versions", "artifacts", "Version changelog"],
+  ["/v1/documents/{docId}", "delete", "documents", "Delete a document. Server keys only; the key's user must be able to edit the workspace. 409 while a run is still processing it", "ingest", "Identities of the deleted document"],
+  ["/v1/documents/{docId}/tags", "put", "documents", "Replace a document's tags. Server keys only", "ingest", "Document ID and tags", jsonBody],
+  ["/v1/documents/bulk", "post", "documents", "Act on up to many documents at once: reprocess (new versions with each run's pipeline; spends credits), apply-tags, remove-tags, delete, or export-artifacts. Server keys only; export-artifacts needs artifacts instead of ingest. Every document must be in a workspace the key can use (404 otherwise, before any change)", "ingest", "Per-action result: runs, updated or deleted counts, or artifacts", jsonBody],
+  ["/v1/workspaces/{workspaceId}/documents/bulk/estimate", "post", "documents", "What a bulk document action would cost, without starting it. Server keys only", "ingest", "{ estimate, billing }", jsonBody],
+  ["/v1/runs/{runId}/reprocess", "post", "runs", "Re-run a run's documents as new versions, all stages or from stageFrom / only stages. Server keys only; spends credits. Use it to pick up extraction fixes for files whose bytes did not change (uploads of identical bytes reuse the earlier extraction)", "ingest", "The new run and its job", jsonBody],
+  ["/v1/runs/{runId}/reprocess/estimate", "post", "runs", "What reprocessing a run would cost, without starting it. Server keys only", "ingest", "{ estimate, billing }", jsonBody],
   ["/v1/documents/{docId}/correction-workbench", "get", "documents", "Get the correction workbench for a document", "artifacts", "Correction workbench"],
   ["/v1/web/search", "post", "web", "Search the public web. Returns ranked URLs, titles and snippets (optionally page Markdown); charged web-search credits", "search", "Web results, cache flag and credits charged", jsonBody],
   ["/v1/web/fetch", "post", "web", "Read up to 10 public web pages as Markdown; charged per page read", "search", "Pages, unreadable URLs and credits charged", jsonBody],

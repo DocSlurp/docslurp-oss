@@ -469,14 +469,15 @@ async function startWork(pathname: string, body: unknown, flags: Record<string, 
     process.exitCode = 1;
     return;
   }
-  const result = await response.json() as { runId?: string; id?: string; job?: JobStatus };
+  // Reprocess answers the run itself, or { run, warnings } when its start was deferred.
+  const result = await response.json() as { runId?: string; id?: string; run?: { id?: string }; job?: JobStatus };
   if (flags.json === true) console.log(JSON.stringify(result, null, 2));
   else {
-    const runId = result.runId ?? result.id;
+    const runId = result.runId ?? result.id ?? result.run?.id;
     if (runId) console.log(`Run ID:    ${runId}`);
     if (result.job) printJob(result.job);
   }
-  const runId = result.runId ?? result.id;
+  const runId = result.runId ?? result.id ?? result.run?.id;
   if (flags.watch === true && runId) await statusCommand(runId, flags);
 }
 

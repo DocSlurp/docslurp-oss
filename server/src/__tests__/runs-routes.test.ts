@@ -293,6 +293,27 @@ describe("API-key run reads", () => {
     expect((await keyApp(["search"], "client").request("/runs/run-1/progress")).status).toBe(403);
     expect(listRunsMock).not.toHaveBeenCalled();
   });
+  it("lets an ingest server key reprocess its own runs, and nobody else", async () => {
+    reprocessRunMock.mockReset();
+    reprocessRunMock.mockResolvedValue({ run: { id: "run-2", orgId: "org-1", workspaceId: "ws-1" }, deferredReason: null });
+    const post = (app: ReturnType<typeof keyApp>, path = "/runs/run-1/reprocess") => app.request(path, {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ stageFrom: "extract-markdown" }),
+    });
+    expect((await post(keyApp(["search"]))).status).toBe(403);
+    expect((await post(keyApp(["artifacts"]))).status).toBe(403);
+    expect((await post(keyApp(["ingest"], "client"))).status).toBe(403);
+    getWorkspaceMock.mockResolvedValueOnce({ id: "ws-1", orgId: "org-2" });
+    expect((await post(keyApp())).status).toBe(404);
+    expect(reprocessRunMock).not.toHaveBeenCalled();
+    expect((await post(keyApp())).status).toBe(201);
+    expect(reprocessRunMock).toHaveBeenCalledWith("run-1", "user-1", { stageFrom: "extract-markdown" });
+    expect((await post(keyApp(["search"]), "/runs/run-1/reprocess/estimate")).status).toBe(403);
+    const { listRouteAuthModes } = await import("../lib/route-auth.js");
+    const modes = Object.fromEntries(listRouteAuthModes(runsRoutes).map((route) => [`${route.method} ${route.path}`, route.mode]));
+    expect(modes["POST /:runId/reprocess"]).toBe("apiKey");
+    expect(modes["POST /:runId/reprocess/estimate"]).toBe("apiKey");
+    expect(modes["POST /:runId/control"] ?? "session").toBe("session");
+  });
   it("filters run lists to the key organization", async () => {
     listRunsMock.mockResolvedValue([{ id: "own", orgId: "org-1" }, { id: "foreign", orgId: "org-2" }]);
     const response = await keyApp().request("/runs");

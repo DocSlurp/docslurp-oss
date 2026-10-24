@@ -46,8 +46,9 @@ describe("MCP estimate tools", () => {
     expect(ids(["ingest"])).not.toContain("updateEstimate");
     expect(ids(["workspaces:manage"])).toEqual(expect.arrayContaining(["updateEstimate", "indexingModeEstimate", "graphRebuildEstimate"]));
     expect(ids(["workspaces:manage"], "client")).not.toContain("updateEstimate");
+    expect(ids(["ingest"])).toContain("reprocessEstimate");
+    expect(ids(["ingest"], "client")).not.toContain("reprocessEstimate");
     // Session-only estimates are never offered to keys, whatever their scopes.
-    expect(ids(["search", "ingest", "workspaces:manage"])).not.toContain("reprocessEstimate");
     expect(ids(["search", "ingest", "workspaces:manage"])).not.toContain("searchSettingsEstimate");
   });
 });
