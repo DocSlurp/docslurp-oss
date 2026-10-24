@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { exportJWK, generateKeyPair, SignJWT } from "jose";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { withTestSession } from "./helpers/session-app.js";
+import { hasValidSsoUnlinkedPass } from "../lib/sso-unlinked-pass.js";
 
 process.env.SSO_RATE_LIMIT_MAX = "1000";
 process.env.SSO_RATE_LIMIT_WINDOW_MS = "60000";
@@ -613,6 +614,13 @@ describe("SSO callback account binding", () => {
     expect(response.headers.get("location")).toContain("authError=");
     expect(response.headers.get("set-cookie") ?? "").not.toContain("better-auth.session_token=");
     expect(createSessionMock).not.toHaveBeenCalled();
+    // The IdP proved this email is unlinked: this browser may now sign in with
+    // its password (and link) without being bounced back to the IdP.
+    const passCookie = /docslurp\.sso_unlinked=([^;]+)/.exec(response.headers.get("set-cookie") ?? "")?.[1];
+    expect(passCookie).toBeTruthy();
+    expect(response.headers.get("set-cookie")).toMatch(/docslurp\.sso_unlinked=[^;]+;.*HttpOnly/i);
+    expect(hasValidSsoUnlinkedPass("test-secret", passCookie, "victim@acme.com")).toBe(true);
+    expect(hasValidSsoUnlinkedPass("test-secret", passCookie, "someone-else@acme.com")).toBe(false);
   });
 
   it("signs in a linked account", async () => {
@@ -625,6 +633,7 @@ describe("SSO callback account binding", () => {
 
     expect(response.status).toBe(302);
     expect(response.headers.get("set-cookie")).toContain("better-auth.session_token=");
+    expect(response.headers.get("set-cookie")).not.toContain("docslurp.sso_unlinked=");
     expect(createSessionMock).toHaveBeenCalledWith("victim-1");
   });
 

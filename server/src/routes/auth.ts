@@ -18,23 +18,50 @@ import {
 import { isInProcessEnv } from "../lib/client-ip.js";
 import { isDevSeedRequestAllowed } from "../lib/dev-auth-access.js";
 import { resolveSsoRedirect, ssoBaseUrl } from "../lib/sso-lookup.js";
+import { hasValidSsoUnlinkedPass, ssoUnlinkedPassFromCookieHeader } from "../lib/sso-unlinked-pass.js";
+import { apiIpRateLimit } from "../middleware/rate-limit.js";
 
 /**
  * Authentication endpoints, served at the same public URLs the app has always
  * used. Mounted before the API's global middleware (see `createApiApp`): these
- * paths never went through the API IP rate limit, request context or widget
- * CORS, and Better Auth applies its own rate limits and trusted-origin checks.
+ * paths skip request context and widget CORS, and Better Auth applies its own
+ * rate limits and trusted-origin checks. `/api/sso-lookup` is the exception
+ * that runs the API's per-IP limit itself: it is unauthenticated and queries
+ * the database on every call.
  */
 export const authRoutes = new Hono();
+
+/**
+ * The enforce-SSO redirect for a password sign-in, or null to continue with
+ * the password. Domain-only (see `resolveSsoRedirect`), except that a browser
+ * holding an unlinked pass for this email, minted by the SSO callback after
+ * the IdP authenticated it, is let through so the user can sign in and link.
+ */
+async function enforcedSsoRedirect(request: Request, email: string): Promise<string | null> {
+  const ssoUrl = await resolveSsoRedirect(email, ssoBaseUrl(request));
+  if (!ssoUrl) return null;
+  const pass = ssoUnlinkedPassFromCookieHeader(request.headers.get("cookie"));
+  if (pass && hasValidSsoUnlinkedPass((await auth.$context).secret, pass, email)) return null;
+  return ssoUrl;
+}
 
 // Better Auth's router: sign-in/up, OAuth callbacks, sessions, OTP, password reset...
 authRoutes.all("/api/auth/*", (c) => handleAuthRequest(c.req.raw, { trustedInternal: isInProcessEnv(c.env) }));
 
-/** GET /api/sso-lookup?email=...  ->  { ssoUrl: string | null } */
-authRoutes.get("/api/sso-lookup", async (c) => {
+/**
+ * GET /api/sso-lookup?email=...[&explicit=1]  ->  { ssoUrl: string | null }
+ *
+ * Unauthenticated, so the answer depends only on the email's domain: two
+ * addresses at the same domain get the same response whether or not either
+ * has an account or SSO link. `explicit=1` ("Continue with company SSO")
+ * returns any enabled provider; without it only an enforcing org redirects.
+ */
+authRoutes.get("/api/sso-lookup", apiIpRateLimit, async (c) => {
   const email = c.req.query("email")?.trim();
   if (!email || !email.includes("@")) return jsonResponse({ ssoUrl: null });
-  const ssoUrl = await resolveSsoRedirect(email, ssoBaseUrl(c.req.raw), c.req.query("explicit") !== "1");
+  const ssoUrl = c.req.query("explicit") === "1"
+    ? await resolveSsoRedirect(email, ssoBaseUrl(c.req.raw), false)
+    : await enforcedSsoRedirect(c.req.raw, email);
   return jsonResponse({ ssoUrl });
 });
 
@@ -47,7 +74,7 @@ authRoutes.post("/api/session/sign-in", async (c) => {
   const email = typeof form.get("email") === "string" ? String(form.get("email")).trim() : "";
   const password = typeof form.get("password") === "string" ? String(form.get("password")) : "";
   const redirectTo = normalizeRedirectTarget(form.get("redirectTo"));
-  const ssoUrl = await resolveSsoRedirect(email, ssoBaseUrl(request));
+  const ssoUrl = await enforcedSsoRedirect(request, email);
   if (ssoUrl) return Response.redirect(ssoUrl, 302);
   const headers = new Headers(request.headers);
   headers.set("content-type", "application/json");
