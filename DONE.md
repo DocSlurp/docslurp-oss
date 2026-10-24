@@ -1,5 +1,7 @@
 # Completed
 
+- Cut the worker's serial Postgres round trips per page by 55 to 65% (2026-10-23): parameter-type cache patch for `postgres.js` (unnamed statements no longer cost two round trips), single-flight pipelined checkpoint transactions, one-statement document stage completion, and stage groups that read control state and the next stage's reads in the completion checkpoint. Adds `DOCSLURP_DB_TRACE_FILE`, a Postgres wire counter and a round-trip budget test. See `docs/db-round-trips.md`.
+
 - Preserve exact source/page citation indices and avoid invented alternative product workflows when chat capabilities are unavailable; add claim-bound attribution screening and development cases (2026-10-24).
 
 - Ground chat capability instructions in the current actor-scoped tool catalog, direct document requests to tools, and block failed/refused tools, partial batches and timeouts without model retry or fallback success. Add runtime/transport regressions and separate capability/fault eval cases (2026-10-24).
