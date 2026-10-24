@@ -10,6 +10,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { migrationFailureDetail } from "./migration-error.mjs";
+import { assertMigrationOwner, reconcileRoleGrants } from "./roles.mjs";
 
 const MIGRATION_LOCK_KEY = 7_142_771_001; // arbitrary, stable app-wide key
 
@@ -86,6 +87,9 @@ try {
     await new Promise((resolve) => setTimeout(resolve, 1_000));
   }
   console.log(`[migrate] lock acquired after ${Date.now() - started}ms; applying server/db/migrations`);
+  // Fail clearly when the URL is a restricted runtime role (docslurp_app,
+  // docslurp_worker) instead of the owner: set MIGRATION_DATABASE_URL.
+  const migrator = await assertMigrationOwner(client);
   // Call the installed binary directly: images and hosts may not have pnpm on PATH.
   // It is a root devDependency, so it sits in the nearest node_modules/.bin at or
   // above this repo: /app/core/... in the private app image installs it at /app.
@@ -97,6 +101,11 @@ try {
   );
   const output = `${stdout}\n${stderr}`.replace(/\x1b\[[0-9;]*[A-Za-z]/g, "").trim();
   if (output) console.log(output.split("\n").filter((line) => !/applying migrations\.\.\./.test(line)).join("\n"));
+  // Grants for the least-privilege roles, when they exist (server/db/roles.mjs).
+  // Still under the migration lock, so the new tables are granted before any
+  // runtime role can be handed code that uses them.
+  const reconciled = await reconcileRoleGrants(client);
+  if (reconciled.length === 0) console.log(`[migrate] no least-privilege roles found; ${migrator} remains the only role in use`);
   console.log(`[migrate] complete in ${Date.now() - started}ms`);
 } catch (error) {
   console.error(`[migrate] failed: ${migrationFailureDetail(error)}`);

@@ -1,5 +1,7 @@
 # Completed
 
+- Add least-privilege Postgres roles (2026-10-24): `docslurp_app` (DML, no DDL), `docslurp_worker` (DML on the tables workers use, column-level reads of `user`, `webhooks` and `workspace_secrets`, no auth/credential/billing tables) and `docslurp_backup` (`pg_read_all_data`), with `docslurp` kept as owner for migrations. `migrate.mjs` reconciles grants after every run when the roles exist and refuses to migrate as a non-owner; a test fails when a migration adds a table the worker list does not classify. See `docs/self-host/database-roles.md`.
+
 - Cut the worker's serial Postgres round trips per page by 55 to 65% (2026-10-23): parameter-type cache patch for `postgres.js` (unnamed statements no longer cost two round trips), single-flight pipelined checkpoint transactions, one-statement document stage completion, and stage groups that read control state and the next stage's reads in the completion checkpoint. Adds `DOCSLURP_DB_TRACE_FILE`, a Postgres wire counter and a round-trip budget test. See `docs/db-round-trips.md`.
 
 - Give chat grounded workspace document counts (searchable and processing; filenames stay out of the system role) so it locates existing files instead of asking for uploads, and never offers uploads as a workaround for missing capabilities. Require a supporting citation beside each item an overview sentence names. Add development eval cases and offline scorer regressions; the recorded 2026-10-24 production pixel answer fails as a negative control (2026-10-24).
