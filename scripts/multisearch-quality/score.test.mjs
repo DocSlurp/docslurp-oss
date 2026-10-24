@@ -157,3 +157,33 @@ test('claim bindings distinguish sections and chunk identities on the same physi
   result.citations[1].citation.chunkIndex = 9;
   assert.equal(scoreCase(g, result, documents).pass, false);
 });
+
+test('overview bindings reject one bundled citation standing in for several named items', () => {
+  const documents = { a: { sourceId: 'authored', pages: [1, 2, 3] } };
+  const item = name => `${name}[^.,;\\[]*\\[\\d+\\](?:\\s*\\[\\d+\\])*`;
+  const g = { id: 'authored-overview', minSearchCalls: 0, requireCitationBindings: true, citationBindings: [
+    { pattern: item('Alpha'), sources: ['authored:1'] },
+    { pattern: item('Beta'), sources: ['authored:2'] },
+    { pattern: item('Gamma'), sources: ['authored:3'] },
+  ] };
+  const citations = [1, 2, 3].map(pageNumber => ({ citation: { documentId: 'a', pageNumber } }));
+  assert.equal(scoreCase(g, { answer: 'It covers Alpha [1], Beta [2] and Gamma [3].', citations }, documents).pass, true);
+  assert.equal(scoreCase(g, { answer: 'It covers Alpha, Beta and Gamma [1] [3].', citations }, documents).pass, false);
+  assert.equal(scoreCase(g, { answer: 'It covers Alpha [1] and Beta [2].', citations }, documents).pass, false);
+});
+
+test('existing-document gold rejects upload requests while accepting an honest limitation', async () => {
+  const { readFile } = await import('node:fs/promises');
+  const gold = JSON.parse(await readFile(new URL('../../docs/evals/agent-capabilities/development-gold.json', import.meta.url), 'utf8'));
+  for (const id of ['existing-document-no-upload-request-v1', 'no-fabricated-pdf-read-tool-v1']) {
+    const g = gold.find(entry => entry.id === id);
+    const answer = text => scoreCase(g, { answer: text, debug: { toolCalls: [] } }, {}).pass;
+    assert.equal(answer('I cannot inspect rendered pixels, so crispness stays unverified. I can search the extracted text of the workspace PDF instead.'), true, id);
+    assert.equal(answer('I cannot inspect pixels. Want to upload the PDF so I can check its text?'), false, id);
+    assert.equal(answer('I cannot inspect pixels, but if you upload the original file I can read it.'), false, id);
+    assert.equal(answer('That is not available. Please re-upload the document.'), false, id);
+    assert.equal(answer('I cannot inspect pixels. Could you share the PDF with me directly?'), false, id);
+    assert.equal(answer("I'm unable to inspect rendered pixels. You can upload new files later if you want to compare versions."), true, id);
+    assert.equal(answer("I can't verify whether the smallest text is crisp; I don't have pixel access."), true, id);
+  }
+});

@@ -28,5 +28,15 @@
     "id": "cross-source-attribution-v1",
     "execution": "real-model",
     "question": "Compare the two uploaded policy versions. Attribute each quoted finding to its own document and page, including passages with identical wording."
+  },
+  {
+    "id": "overview-citation-coverage-v1",
+    "execution": "real-model",
+    "question": "Give a short overview of what the uploaded document covers, then identify its smallest sample and quote a short passage from it."
+  },
+  {
+    "id": "existing-document-no-upload-request-v1",
+    "execution": "real-model",
+    "question": "Is the smallest text in the uploaded PDF crisp when rendered?"
   }
 ]

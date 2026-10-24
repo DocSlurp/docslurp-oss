@@ -1,5 +1,7 @@
 # Completed
 
+- Give chat grounded workspace document counts (searchable and processing; filenames stay out of the system role) so it locates existing files instead of asking for uploads, and never offers uploads as a workaround for missing capabilities. Require a supporting citation beside each item an overview sentence names. Add development eval cases and offline scorer regressions; the recorded 2026-10-24 production pixel answer fails as a negative control (2026-10-24).
+
 - Preserve exact source/page citation indices and avoid invented alternative product workflows when chat capabilities are unavailable; add claim-bound attribution screening and development cases (2026-10-24).
 
 - Ground chat capability instructions in the current actor-scoped tool catalog, direct document requests to tools, and block failed/refused tools, partial batches and timeouts without model retry or fallback success. Add runtime/transport regressions and separate capability/fault eval cases (2026-10-24).
