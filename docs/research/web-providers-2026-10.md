@@ -151,3 +151,32 @@ Sources are official docs and pricing pages only. No provider API was called. "U
   - Firecrawl: use `creditsUsed` for search and crawl, and fall back to rate-card credits for scrape and map.
   - Jina: read `usage.tokens` with `Accept: application/json`, then multiply by the configured $/1M.
 - Tavily extract and map billing is amortized: usage can read 0 for the first <5 URLs or <10 pages. Record the reported value and keep a rate-card estimate alongside it.
+
+## Live check and price-card margins (2026-10-23)
+
+These are single live calls through the adapters with production keys. Each
+cost is the one the provider reported, or the price-sheet estimate where marked
+"est.".
+
+| Call | Jina | Firecrawl | Exa | Tavily |
+|---|---|---|---|---|
+| Search, 3 results, snippets | $0.0005 (10k tokens) | $0.00198 (2 credits) | $0.004 | $0.008 (1 credit) |
+| Fetch, 1 page | $0.00002 (341 tokens) | $0.00099 est. | $0.001 | $0.0016 est. (amortized 0) |
+| Map, 5 URLs | n/a | $0.00099 est. (sub-path: 0 URLs) | n/a | $0.008 est. |
+| Crawl, 2 pages | n/a | $0.00198 (2 credits) | n/a | $0.0024 est. |
+
+The `pnpm pricing:validate` command named in the repo instructions does not
+exist in either repository. Margins were checked by hand against the live
+costs above, since 1 credit = $0.01:
+
+| Price-card unit | Charge | Cost with cheapest routing | Worst case on failover |
+|---|---|---|---|
+| `web-search` (fast) | 1 credit = $0.01 | $0.0005 | $0.008 (Tavily basic) |
+| `web-search` (deep or content) | 2 credits = $0.02 | ~$0.005 | $0.017 (Exa auto with 10 pages of text) |
+| `web-page` (fetch or crawl) | 0.25 credit = $0.0025 | $0.00002–0.001 | $0.0024 (Tavily crawl) |
+| `web-map` | 1 credit per 50 URLs | $0.001 | $0.016 (Tavily, limited to 20 URLs) |
+
+- Every unit stays at or above provider cost in the worst case, except a Tavily
+  map that is used only when Firecrawl is unavailable. That map is capped at 20
+  URLs: about $0.016 of cost against $0.01 charged.
+- Cache hits are charged without a provider call.
