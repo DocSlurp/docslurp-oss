@@ -84,6 +84,7 @@ describe("workspace delete", () => {
     // The workspace's LanceDB database is dropped whole, after the in-flight grace.
     expect(await sql`select kind, target, payload, reason, not_before > now() + interval '10 minutes' as deferred
       from storage_cleanup_queue order by target`).toEqual([
+      { kind: "vector_prefix", target: "org|ws", payload: { workspaceId: "ws" }, reason: "workspace_deleted", deferred: true },
       { kind: "vector_table", target: "org|ws|m|4", payload: { workspaceId: "ws", embeddingModel: "m", dimension: 4 }, reason: "workspace_deleted", deferred: true },
       { kind: "storage_prefix", target: "owner/done/", payload: { workspaceId: "ws" }, reason: "run_deleted", deferred: false },
       { kind: "storage_prefix", target: "owner/live/", payload: { workspaceId: "ws" }, reason: "run_deleted", deferred: false },
@@ -103,7 +104,7 @@ describe("workspace delete", () => {
     await seedRun("live", "processing");
     cancelWorkflow.mockRejectedValueOnce(new Error("connect ECONNREFUSED"));
     await workspaces.deleteWorkspace("ws", "owner", "Contracts");
-    expect(await sql`select target from storage_cleanup_queue`).toEqual([{ target: "owner/live/" }]);
+    expect(await sql`select target from storage_cleanup_queue order by target`).toEqual([{ target: "org|ws" }, { target: "owner/live/" }]);
   });
 });
 

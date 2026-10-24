@@ -154,6 +154,19 @@ describe("lancedb relocate", () => {
     expect((await readRows(workspaceUri("w2")))!.map((entry) => entry.id)).toEqual(w2!.map((entry) => entry.id));
   }, 120_000);
 
+  it("registers maintained tables for the sweep, and --maintain-all also maintains already-relocated ones", async () => {
+    const keys = async () => (await sql<{ table_key: string; lance_uri: string }[]>`select table_key, lance_uri from vector_index_tables order by 1`)
+      .map((entry) => entry.lance_uri);
+    expect(await keys()).toEqual([workspaceUri("w1"), workspaceUri("w2")].sort());
+    await sql`delete from vector_index_tables`;
+    const quiet = await relocateOrgVectors({ sql, orgId: "org1", log: () => {} });
+    expect(quiet.maintained).toEqual([]);
+    const all = await relocateOrgVectors({ sql, orgId: "org1", maintainAll: true, log: () => {} });
+    expect(all.errors).toEqual([]);
+    expect(all.maintained.map((entry) => entry.uri).sort()).toEqual([workspaceUri("w1"), workspaceUri("w2")].sort());
+    expect(await keys()).toEqual([workspaceUri("w1"), workspaceUri("w2")].sort());
+  }, 120_000);
+
   it("drops the legacy tables only with --drop-legacy, after a clean run", async () => {
     const results = await relocateAllOrgVectors({ sql, dropLegacy: true, log: () => {} });
     expect(results).toHaveLength(1);

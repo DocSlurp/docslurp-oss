@@ -587,7 +587,14 @@
       "idx": 83,
       "version": "7",
       "when": 1792792800040,
-      "tag": "0083_documents_workspace_failed_idx",
+      "tag": "0083_lancedb_workspace_followups",
+      "breakpoints": true
+    },
+    {
+      "idx": 84,
+      "version": "7",
+      "when": 1792792800050,
+      "tag": "0084_documents_workspace_failed_idx",
       "breakpoints": true
     }
   ]

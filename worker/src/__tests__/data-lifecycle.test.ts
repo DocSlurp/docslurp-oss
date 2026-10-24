@@ -1,3 +1,7 @@
+import { mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
+
 import postgres from "postgres";
 import { legacyEmbeddingLocations, legacyOrgTable } from "../stages/lancedb-legacy-layout.js";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
@@ -6,6 +10,7 @@ import { Store } from "../db/store.js";
 import {
   drainDocumentCleanupQueue,
   drainStorageCleanupQueue,
+  workspaceVectorPrefixTarget,
   type DeleteVectorRows,
   type DropVectorTable,
   type SupersededPurgeOptions,
@@ -347,6 +352,38 @@ describe("cleanup sweep", () => {
 
     expect([...stores.tables.keys()]).toEqual([`${KEEP_TABLE_URI}#chunks`]);
     expect(await sql`select count(*)::int as count from storage_cleanup_queue`).toEqual([{ count: 0 }]);
+  });
+
+  it("purges everything under a deleted workspace's LanceDB root, and only that workspace's", async () => {
+    const root = await mkdtemp(path.join(process.env.TMPDIR ?? tmpdir(), "lance-prefix-"));
+    try {
+      for (const file of ["o1/w/vectors-old%2Fmodel-8/chunks.lance/data.lance", "o1/w/vectors-model%2Fx-4/chunks.lance/x", "o1/keep/vectors-model%2Fx-4/chunks.lance/x"]) {
+        await mkdir(path.dirname(path.join(root, file)), { recursive: true });
+        await writeFile(path.join(root, file), "x");
+      }
+      const tableUri = `${root}/o1/w/vectors-model%2Fx-4`;
+      await sql`insert into vector_index_tables (table_key, lance_uri, lance_table) values (${`${tableUri}#chunks`}, ${tableUri}, 'chunks')`;
+      await sql`insert into storage_cleanup_queue (kind, org_id, target, payload, reason)
+        values ('vector_prefix', 'o1', 'o1|w', ${sql.json({ workspaceId: "w" })}, 'workspace_deleted')`;
+      const stores = fakeExternalStores([], {});
+      await drainStorageCleanupQueue(sql, stores.storage, { ...stores.options, lancedbRoot: root });
+
+      expect(await readdir(path.join(root, "o1"))).toEqual(["keep"]);
+      expect(await sql`select count(*)::int as count from vector_index_tables`).toEqual([{ count: 0 }]);
+      expect(await sql`select count(*)::int as count from storage_cleanup_queue`).toEqual([{ count: 0 }]);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("resolves a workspace root to a local directory or a prefix in the artifact bucket only", () => {
+    expect(workspaceVectorPrefixTarget("/data/lance/o1/w", "b")).toEqual({ kind: "local", path: "/data/lance/o1/w" });
+    expect(workspaceVectorPrefixTarget("file:///data/lance/o1/w", "b")).toEqual({ kind: "local", path: "/data/lance/o1/w" });
+    expect(workspaceVectorPrefixTarget("s3://b/lancedb/o1/w", "b")).toEqual({ kind: "bucket", prefix: "lancedb/o1/w/" });
+    expect(workspaceVectorPrefixTarget("s3+ddb://b/o1/w", "b")).toEqual({ kind: "bucket", prefix: "o1/w/" });
+    expect(workspaceVectorPrefixTarget("s3://other/lancedb/o1/w", "b")).toEqual({ kind: "unsupported" });
+    expect(workspaceVectorPrefixTarget("s3://b/w", "b")).toEqual({ kind: "unsupported" });
+    expect(workspaceVectorPrefixTarget("gs://b/lancedb/o1/w", "b")).toEqual({ kind: "unsupported" });
   });
 
   it("keeps artifacts a partial reprocess still reuses, then reclaims them with the last reference", async () => {

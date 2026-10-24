@@ -120,6 +120,7 @@ answers searches. Instead the server re-prewarms open tables every
 | `LANCEDB_READ_CONSISTENCY_SECONDS` | `30` | How often an open table checks for a new version. Higher means fewer manifest reads, but new rows take that long to become searchable. While documents are being ingested, a longer interval avoids re-reading each new unindexed fragment (see the benchmark in the PR). `0` checks on every query. |
 | `LANCEDB_MISSING_TABLE_TTL_SECONDS` | `15` | API: how long a workspace database that does not exist yet is remembered as missing. The worker creates a new workspace's table in another process, so its first documents become searchable at most this long after they are indexed. |
 | `LANCEDB_MAX_OPEN_TABLES` | `512` | API: open LanceDB table handles (one per active workspace and embedding model) kept in memory; the least recently searched is closed beyond this. |
+| `LANCEDB_URI` `?vectorIndexMinRows=` | `1000` | Worker: rows a workspace table needs before maintenance builds its HNSW vector index; smaller tables are scanned exactly. Over 1,000 rows the index keeps about 98% top-10 recall of an exact scan and reads a fraction of the vectors. Tables that already crossed a raised or lowered threshold get their index at their next write, or at once with `lancedb-relocate-cli --all --maintain-all`. |
 
 The server logs `[lancedb-session] created ...` at startup with the configured sizes.
 
