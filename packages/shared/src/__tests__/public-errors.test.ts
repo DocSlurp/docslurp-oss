@@ -50,3 +50,10 @@ it("does not label successful routing diagnostics as processing failures", () =>
   });
   expect(raw.stats.message).toContain("secret");
 });
+
+
+it("preserves only the approved blocked-chat copy through browser sanitization", () => {
+  expect(friendlyErrorMessage(PUBLIC_ERROR_MESSAGES.chatToolFailed)).toBe(PUBLIC_ERROR_MESSAGES.chatToolFailed);
+  expect(friendlyErrorMessage(PUBLIC_ERROR_MESSAGES.chatDeadline)).toBe(PUBLIC_ERROR_MESSAGES.chatDeadline);
+  expect(friendlyErrorMessage("A required tool failed: private upstream response and secret")).toBe(PUBLIC_ERROR_MESSAGES.unexpected);
+});

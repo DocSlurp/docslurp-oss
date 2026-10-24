@@ -1,5 +1,7 @@
 # Completed
 
+- Preserve exact source/page citation indices and avoid invented alternative product workflows when chat capabilities are unavailable; add claim-bound attribution screening and development cases (2026-10-24).
+
 - Ground chat capability instructions in the current actor-scoped tool catalog, direct document requests to tools, and block failed/refused tools, partial batches and timeouts without model retry or fallback success. Add runtime/transport regressions and separate capability/fault eval cases (2026-10-24).
 - Add web tools (2026-10-23; migration 0080): web search, page fetch, site map, crawl and website ingest over REST (`/v1/web/*`), MCP and guarded chat. Tavily, Exa, Firecrawl and Jina adapters sit behind one generic interface with cheapest-first, round-robin or ordered routing, failover and provider benching. Provider identity stays internal. Calls are billed as `web-search`/`web-page`/`web-map` credits, workspaces opt in through `pipeline.webTools` (default on) and every call is traced. See `docs/web-tools.md`.
 

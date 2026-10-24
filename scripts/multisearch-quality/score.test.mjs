@@ -69,8 +69,8 @@ test('failed tool cannot be scored as a successful grounded answer or soft abste
   }
 });
 test('typed blocking errors score separately from model evidence; unexpected status, missing and duplicate cases fail', () => {
-  const g = [{ id: 'timeout', execution: 'scripted-fault-injection', expectedStatus: 504, expectedErrorCode: 'chat_tool_failed' }];
-  const r = { id: 'timeout', execution: 'scripted-fault-injection', status: 504, raw: JSON.stringify({ error: { code: 'chat_tool_failed', message: 'Tool timed out.' } }) };
+  const g = [{ id: 'timeout', execution: 'scripted-fault-injection', expectedStatus: 424, expectedErrorCode: 'chat_tool_failed' }];
+  const r = { id: 'timeout', execution: 'scripted-fault-injection', status: 424, raw: JSON.stringify({ error: { code: 'chat_tool_failed', message: 'Tool timed out.' } }) };
   const report = scoreRecords(g, [r], {});
   assert.equal(report.pass, true);
   assert.deepEqual(report.byExecution, { 'scripted-fault-injection': { passed: 1, total: 1 } });
@@ -118,4 +118,42 @@ test('malformed gold cannot turn negative bounds or empty batches into a pass', 
   assert.throws(() => scoreRecords([], [], {}), /Nonempty/);
   assert.throws(() => scoreRecords([{ id: 'case', minSearchCalls: -1 }], [], {}), /Invalid/);
   assert.throws(() => scoreRecords([{ id: 'case', requiredToolCalls: { search: -1 } }], [], {}), /Invalid/);
+});
+
+
+test('claim bindings reject swapped sources even when both pages and identical quotes are valid', () => {
+  const documents = { a: { sourceId: 'north', pages: [2] }, b: { sourceId: 'south', pages: [4] } };
+  const g = { id: 'authored-attribution', minSearchCalls: 0, citationBindings: [
+    { pattern: 'North reports the shared wording \"Ready for review\" \\[\\d+\\]', sources: ['north:2'] },
+    { pattern: 'South reports the shared wording \"Ready for review\" \\[\\d+\\]', sources: ['south:4'] },
+  ] };
+  const result = { answer: 'North reports the shared wording "Ready for review" [2]. South reports the shared wording "Ready for review" [1].',
+    citations: [{ citation: { documentId: 'b', pageNumber: 4 } }, { citation: { documentId: 'a', pageNumber: 2 } }] };
+  assert.equal(scoreCase(g, result, documents).pass, true);
+  result.answer = 'North reports the shared wording "Ready for review" [1]. South reports the shared wording "Ready for review" [2].';
+  assert.equal(scoreCase(g, result, documents).pass, false);
+  result.answer = 'Both reports say "Ready for review" [1] [2].';
+  assert.equal(scoreCase(g, result, documents).pass, false);
+});
+
+
+test('claim bindings distinguish sections and chunk identities on the same physical page', () => {
+  const documents = { a: { sourceId: 'authored', pages: [2] } };
+  const g = { id: 'same-page-attribution', minSearchCalls: 0, citationBindings: [
+    { pattern: 'The release section says ready \\[\\d+\\]', sources: ['authored:2'],
+      locators: [{ sourceId: 'authored', page: 2, headingPath: ['Release'], chunkIndex: 7 }] },
+  ] };
+  const result = { answer: 'The release section says ready [2].', citations: [
+    { citation: { documentId: 'a', pageNumber: 2, headingPath: ['Draft'], chunkIndex: 3 } },
+    { citation: { documentId: 'a', pageNumber: 2, headingPath: ['Release'], chunkIndex: 7 } },
+  ] };
+  assert.equal(scoreCase(g, result, documents).pass, true);
+  result.answer = 'The release section says ready [1].';
+  assert.equal(scoreCase(g, result, documents).pass, false);
+  result.answer = 'The release section says ready [2].';
+  result.citations[1].citation.headingPath = ['Draft'];
+  assert.equal(scoreCase(g, result, documents).pass, false);
+  result.citations[1].citation.headingPath = ['Release'];
+  result.citations[1].citation.chunkIndex = 9;
+  assert.equal(scoreCase(g, result, documents).pass, false);
 });

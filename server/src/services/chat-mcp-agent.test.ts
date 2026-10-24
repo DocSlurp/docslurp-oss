@@ -377,12 +377,12 @@ describe("chat agent turn deadline", () => {
     await vi.waitFor(() => expect(recordedMetadata()).toEqual([expect.objectContaining({ turnOutcome: "aborted", abortReason: "deadline", usageEstimated: true })]));
   });
 
-  it("fails with a clear 504 error when no answer exists at the deadline", async () => {
+  it("fails with a clear 424 error when no answer exists at the deadline", async () => {
     mocks.provider.mockReturnValue(new MockLanguageModelV4({ doStream: async () => stalledStep([{ type: "stream-start", warnings: [] }]) }));
     const error = await runChatMcpAgent({ ...args, limits: { maxSteps: 1, maxToolCalls: 1, searchConcurrency: 1, clamped: [] },
       timeBudget: budget({ turnDeadlineMs: 150, finalReserveMs: 75 }) }).catch((caught: unknown) => caught);
     expect(error).toBeInstanceOf(ChatTurnDeadlineError);
-    expect(error).toMatchObject({ code: "chat_deadline_exceeded", statusCode: 504 });
+    expect(error).toMatchObject({ code: "chat_deadline_exceeded", statusCode: 424 });
     expect(spans.list.find(span => span.name === "invoke_agent workspace-chat")!.attributes["docslurp.chat.stop_reason"]).toBe("timeout");
   });
 });
@@ -530,4 +530,18 @@ describe("failed tool turns are blocked by code", () => {
     expect(instructions).toContain("proposeWorkspaceSettings");
     expect(model.doStreamCalls[0]!.tools?.map(tool => tool.name)).toEqual(mocks.manifestIds);
   });
+});
+
+
+it("forbids invented product alternatives and preserves exact outer citation identities", async () => {
+  mocks.manifestIds = ["search"];
+  const model = new MockLanguageModelV4({ doStream: [answerStep("Ready")] });
+  mocks.provider.mockReturnValue(model);
+  await runChatMcpAgent(args);
+  const instructions = JSON.stringify(model.doStreamCalls[0]!.prompt.filter(message => message.role === "system"));
+  expect(instructions).toContain("Never renumber");
+  expect(instructions).toContain("Identical wording");
+  expect(instructions).toContain("Do not invent alternative product capabilities");
+  expect(instructions).not.toContain("automations are started from the app");
+  expect(model.doStreamCalls[0]!.tools?.map(tool => tool.name)).toEqual(["search"]);
 });

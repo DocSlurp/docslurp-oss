@@ -1,5 +1,6 @@
 /** Browser-safe, closed vocabulary. Never use an exception's text as public copy. */
 export const PUBLIC_ERROR_MESSAGES = {
+  chatToolFailed: "A required tool failed. The task is blocked. No successful answer or action has been confirmed. Try again after resolving the error.",
   noSpeech: "No speech was detected. Try again.",
   noAudio: "No audio was recorded. Try again.",
   recordingTooLarge: "Recording is too large. Try a shorter question.",
@@ -32,7 +33,7 @@ export const PUBLIC_ERROR_MESSAGES = {
   chatDisabled: "Chat is turned off for this workspace. Enable it in workspace settings.",
   searchScope: "Search must stay within a single workspace.",
   modelNotAllowed: "That chat model isn’t available for this request. Omit model to use the default.",
-  chatDeadline: "The chat turn ran out of time before an answer was ready. Retry, or ask a narrower question.",
+  chatDeadline: "The chat turn reached its time limit. The task is blocked; no successful answer or action has been confirmed.",
   creditExhausted: "Your organization is out of credits. Buy credits to continue.",
   budgetPaused: "The monthly budget cap has been reached, so AI processing is paused. Raise the budget to resume.",
   planRequired: "This isn’t available to your organization.",

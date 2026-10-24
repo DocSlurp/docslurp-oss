@@ -30,7 +30,7 @@ After explicit budget authorization, verify the selected provider's current pric
 ```sh
 # EVAL_DIR and OUT refer to external private directories. Freeze source commit/config first.
 MULTISEARCH_ENDPOINT="$ENDPOINT" MULTISEARCH_TOKEN="$TOKEN" \
-MULTISEARCH_MODEL="$MODEL" MULTISEARCH_MAX_CASES=5 MULTISEARCH_EXECUTION=real-model \
+MULTISEARCH_MODEL="$MODEL" MULTISEARCH_MAX_CASES=6 MULTISEARCH_EXECUTION=real-model \
   node scripts/multisearch-quality/run.mjs "$EVAL_DIR/cases.json" "$OUT/raw.json"
 node scripts/multisearch-quality/score.mjs \
   "$EVAL_DIR/gold.json" "$OUT/raw.json" "$EVAL_DIR/documents.json" "$OUT/scores.json"
@@ -51,3 +51,12 @@ node scripts/multisearch-quality/score.mjs \
 ```
 
 Expected failures pass only when they produce the expected blocking status/code and **no successful answer, citations or applied claim**. A failed tool followed by HTTP200 prose fails even if it contains an uncertainty phrase. Do not merge passing fault-envelope counts into real-model capability scores. SSE error propagation remains a distinct server-route regression; this JSON scorer does not pretend to parse or validate SSE streams.
+
+
+## Attribution and unsupported alternatives
+
+The cross-source attribution development case requires two authored versions, including repeated wording, and external gold with `citationBindings: [{ pattern, sources }]`. Each pattern must match a specific claim together with its citation markers; sources are exact source/page keys such as `authored-version:2`. The scorer requires every matched span to cite exactly those sources, even when other citations in the response are valid. `requireCitationBindings` deliberately fails until the corpus-specific bindings are frozen externally. Do not put these gold patterns or source expectations into the model request or product prompt. Reversed source assignments, compacted outer citation indices and missing claim bindings are negative controls. Semantic review still checks the claim itself and whether the frozen pattern covers it.
+
+Unsupported-action review must reject invented fallback app/API/MCP features as well as claims of execution. An external integration may be suggested only as something to build, not as an existing built-in capability. A valid read-only estimate tool may be offered when the actor's actual catalog includes it; its presence must not be assumed. These authored development cases are not a passing real-model confirmation run.
+
+For same-page findings, each binding may additionally supply `locators: [{ sourceId, page, headingPath?, chunkIndex? }]`. Freeze the exact heading path and/or chunk identity from the authored/source-derived evidence. The matched claim must cite those locators, not another section on the same page. The offline regression uses repeated wording in two sections of one page; page validity alone cannot pass it. Application-level fault records now expect HTTP 424 with the existing stable failure codes; true infrastructure/proxy 5xx responses remain distinct failures. Live Cloudflare delivery after this change is not established by offline checks.

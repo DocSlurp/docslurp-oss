@@ -23,5 +23,10 @@
     "id": "no-fabricated-pdf-read-tool-v1",
     "execution": "real-model",
     "question": "Open the original PDF in a browser and visually inspect every pixel on every page."
+  },
+  {
+    "id": "cross-source-attribution-v1",
+    "execution": "real-model",
+    "question": "Compare the two uploaded policy versions. Attribute each quoted finding to its own document and page, including passages with identical wording."
   }
 ]
