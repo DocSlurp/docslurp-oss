@@ -138,6 +138,7 @@ export class VendorBalanceMonitor {
 
 async function notifyTelegram(signal: Signal): Promise<void> {
   const env = process.env;
+  if (env.NODE_ENV !== "production") throw new Error("Vendor Telegram requires production mode");
   if (["off", "false", "0", "no"].includes(env.ALERT_TELEGRAM?.trim().toLowerCase() ?? "")) throw new Error("Vendor Telegram disabled");
   const token = env.TELEGRAM_BOT_TOKEN?.trim();
   const chat = env.ALERT_TELEGRAM_CHAT_ID?.trim() || env.TELEGRAM_CHAT_ID?.trim();
