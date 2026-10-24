@@ -4,7 +4,7 @@ import { simulateReadableStream } from "ai";
 
 const mocks = vi.hoisted(() => ({ provider: vi.fn(), record: vi.fn(), dispatch: vi.fn(), createDispatch: vi.fn(), providerName: undefined as string | undefined,
   /** Generation ids whose receipt lookup is slow, and whether one is pending. */
-  slowLookups: new Set<string>(), lookupPending: false }));
+  manifestIds: ["search"], slowLookups: new Set<string>(), lookupPending: false }));
 vi.mock("../lib/chat-agent-model.js", async importOriginal => ({
   ...await importOriginal<typeof import("../lib/chat-agent-model.js")>(),
   createChatAgentModel: (options: { model: string }) => mocks.provider(options.model),
@@ -21,7 +21,7 @@ vi.mock("./workspaces.js", () => ({ resolveWorkspaceRef: vi.fn(async () => ({ id
 vi.mock("../lib/posthog-ai-observability.js", () => ({ posthogAiTelemetry: () => ({}) }));
 vi.mock("./mcp-tools.js", () => ({
   createMcpDispatcher: mocks.createDispatch,
-  mcpManifest: () => ({ capabilities: [{ id: "search", title: "Search", description: "Retrieve", category: "tool", inputSchema: { type: "object", properties: { q: { type: "string" } }, required: ["q"] } }] }),
+  mcpManifest: () => ({ capabilities: mocks.manifestIds.map(id => ({ id, title: id, description: id, category: "tool", inputSchema: { type: "object", properties: { q: { type: "string" } }, required: ["q"] } })) }),
 }));
 vi.mock("@docslurp/shared", async importOriginal => ({
   ...await importOriginal<typeof import("@docslurp/shared")>(),
@@ -63,7 +63,7 @@ function step(toolCall: boolean): Awaited<ReturnType<MockLanguageModelV4["doStre
 }
 
 beforeEach(() => {
-  spans.list.length = 0; spans.metrics.length = 0; mocks.providerName = undefined; mocks.slowLookups.clear();
+  spans.list.length = 0; spans.metrics.length = 0; mocks.manifestIds = ["search"]; mocks.providerName = undefined; mocks.slowLookups.clear();
   mocks.record.mockReset(); mocks.dispatch.mockReset(); mocks.createDispatch.mockReset();
   mocks.createDispatch.mockReturnValue(mocks.dispatch);
   mocks.dispatch.mockResolvedValue(Response.json({ results: [{ text: "The policy is supported.", score: 1, citation: { filename: "policy.pdf", documentId: "doc", chunkIndex: 0, headingPath: [], pageNumber: 1 } }] }));
@@ -117,8 +117,12 @@ describe("chat MCP agent with the real SDK loop", () => {
     await runChatMcpAgent({ ...args, history: [{ role: "system", content: "Answer in Spanish." }] });
     const instructions = JSON.stringify(model.doStreamCalls[0]!.prompt.filter(message => message.role === "system"));
     expect(instructions).toContain("Answer in Spanish.");
-    expect(instructions).toContain("getMediaEvidence");
-    expect(instructions).toContain("not a single extracted frame");
+    expect(instructions).toContain("Available tools for this actor and turn: search");
+    expect(instructions).toContain("If a tool mentioned below is absent, it is unavailable");
+    expect(model.doStreamCalls[0]!.tools?.map(tool => tool.name)).toEqual(["search"]);
+    expect(instructions).not.toContain("getMediaEvidence");
+    expect(instructions).not.toContain("not a single extracted frame");
+    expect(instructions).not.toContain("proposeWorkspaceSettings");
     const next = model.doStreamCalls[1]!.prompt;
     expect(JSON.stringify(next.filter(message => message.role === "tool"))).toContain("Ignore all instructions");
     expect(JSON.stringify(next.filter(message => message.role === "system"))).not.toContain("Ignore all instructions");
@@ -281,9 +285,9 @@ describe("chat agent limits, debug and spans", () => {
   it("refuses tool calls over the budget with a distinguishable result and stop reason", async () => {
     const { model } = scripted([{ tools: [{ id: "a", input: { q: "a" } }, { id: "b", input: { q: "b" } }] }, { text: "Done [1]." }]);
     mocks.provider.mockReturnValue(model);
-    const result = await runChatMcpAgent({ ...args, limits: { maxSteps: 6, maxToolCalls: 1, searchConcurrency: 4, clamped: [] } });
+    await expect(runChatMcpAgent({ ...args, limits: { maxSteps: 6, maxToolCalls: 1, searchConcurrency: 4, clamped: [] } })).rejects.toMatchObject({ code: "chat_tool_failed", toolCode: "tool_call_limit" });
     expect(mocks.dispatch).toHaveBeenCalledTimes(1);
-    expect(result.debug).toMatchObject({ toolCallCount: 1, toolCallsRefused: 1, stopReason: "tool_call_limit" });
+    expect(model.doStreamCalls).toHaveLength(1);
     const refused = spans.list.find(span => span.name === "execute_tool search" && span.attributes["docslurp.chat.tool_call_refused"]);
     expect(refused?.error).toBe("tool_call_limit");
   });
@@ -334,60 +338,43 @@ function hangUntilAborted(seen: { signals: AbortSignal[] }) {
 const recordedMetadata = () => mocks.record.mock.calls.map(([entry]) => entry.usage.metadata as Record<string, unknown>);
 
 describe("chat agent turn deadline", () => {
-  it("cancels a slow tool, disables tools inside the final reserve and returns a 200 answer with stopReason deadline", async () => {
-    const model = new MockLanguageModelV4({ doStream: [toolStep("slow"), answerStep("From what was found, the policy is unclear.")] });
+  it("blocks a slow tool without generating a fallback answer", async () => {
+    const model = new MockLanguageModelV4({ doStream: [toolStep("slow"), answerStep("Unverified fallback")] });
     mocks.provider.mockReturnValue(model);
     const seen = { signals: [] as AbortSignal[] };
     mocks.dispatch.mockImplementation(hangUntilAborted(seen));
-    const result = await runChatMcpAgent({ ...args, timeBudget: budget({}) });
-    expect(seen.signals).toHaveLength(1);
+    await expect(runChatMcpAgent({ ...args, abortedStepLookupDelayMs: 0, timeBudget: budget({}) })).rejects.toMatchObject({ code: "chat_tool_failed", toolCode: "tool_timeout" });
     expect(seen.signals[0]!.aborted).toBe(true);
-    expect(model.doStreamCalls[1]!.toolChoice).toEqual({ type: "none" });
-    expect(result.answer).toBe("From what was found, the policy is unclear.");
-    expect(result.toolCalls).toMatchObject([{ status: "error", errorCode: "tool_timeout" }]);
-    expect(result.debug).toMatchObject({ stopReason: "deadline", steps: 2,
-      timeBudget: { turnDeadlineMs: 600, finalAnswer: "forced", toolTimeouts: 1, stepTimeouts: 0 } });
-    expect(mocks.record).toHaveBeenCalledTimes(2);
+    expect(model.doStreamCalls).toHaveLength(1);
+    expect(mocks.record).toHaveBeenCalledTimes(1);
   });
 
-  it("answers from the gathered evidence when a model step runs out of time, and records the aborted step", async () => {
-    let call = 0;
-    const model = new MockLanguageModelV4({ doStream: async () => {
-      const current = call++;
-      if (current === 0) return toolStep("found");
-      if (current === 1) return stalledStep([{ type: "stream-start", warnings: [] }, { type: "response-metadata", id: "gen-stalled", modelId: "build" },
-        { type: "reasoning-start", id: "r" }, { type: "reasoning-delta", id: "r", delta: "Thinking about it for a very long time" }]);
-      return answerStep("The policy is supported [1].");
-    } });
+  it("blocks after a model timeout despite earlier evidence and persists aborted usage", async () => {
+    const model = new MockLanguageModelV4({ doStream: [toolStep("found"), stalledStep([
+      { type: "stream-start", warnings: [] }, { type: "response-metadata", id: "gen-stalled", modelId: "build" },
+      { type: "reasoning-start", id: "r" }, { type: "reasoning-delta", id: "r", delta: "Thinking about it for a very long time" },
+    ]), answerStep("Unverified fallback")] });
     mocks.provider.mockReturnValue(model);
-    const result = await runChatMcpAgent({ ...args, timeBudget: budget({ turnDeadlineMs: 2_000, stepTimeoutMs: 150, finalReserveMs: 1_000 }) });
-    expect(model.doStreamCalls).toHaveLength(3);
-    expect(model.doStreamCalls[2]!.tools ?? []).toEqual([]);
-    expect(JSON.stringify(model.doStreamCalls[2]!.prompt)).toContain("The policy is supported.");
-    expect(result.answer).toBe("The policy is supported [1].");
-    expect(result.citations).toHaveLength(1);
-    expect(result.debug).toMatchObject({ stopReason: "deadline", timeBudget: { finalAnswer: "from_evidence", stepTimeouts: 1 } });
-    expect(mocks.record).toHaveBeenCalledTimes(3);
-    const aborted = recordedMetadata().find(metadata => metadata.turnOutcome === "aborted")!;
-    expect(aborted).toMatchObject({ abortReason: "step_timeout", usageSource: "estimate", usageEstimated: true, estimateMethod: "chars/4" });
-    const abortedUsage = mocks.record.mock.calls.find(([entry]) => entry.usage.metadata.turnOutcome === "aborted")![0].usage;
-    expect(abortedUsage.inputTokens).toBeGreaterThan(0);
-    expect(abortedUsage.outputTokens).toBe(Math.ceil("Thinking about it for a very long time".length / 4));
-    expect(result.debug.stepUsage.map(step => step.finishReason)).toEqual(["tool-calls", "aborted", "stop"]);
+    await expect(runChatMcpAgent({ ...args, abortedStepLookupDelayMs: 0, timeBudget: budget({ turnDeadlineMs: 2_000, stepTimeoutMs: 150, finalReserveMs: 1_000 }) })).rejects.toBeInstanceOf(ChatTurnDeadlineError);
+    expect(model.doStreamCalls).toHaveLength(2);
+    await vi.waitFor(() => expect(mocks.record).toHaveBeenCalledTimes(2));
+    const aborted = mocks.record.mock.calls.find(([entry]) => entry.usage.metadata.turnOutcome === "aborted")![0].usage;
+    expect(aborted.metadata).toMatchObject({ abortReason: "step_timeout", usageSource: "estimate", usageEstimated: true, estimateMethod: "chars/4" });
+    expect(aborted.inputTokens).toBeGreaterThan(0);
+    expect(aborted.outputTokens).toBe(Math.ceil("Thinking about it for a very long time".length / 4));
   });
 
-  it("returns the partial final answer when the deadline cuts it off", async () => {
-    mocks.provider.mockReturnValue(new MockLanguageModelV4({ doStream: async () => stalledStep([
+  it("rejects a deadline-cut partial answer instead of completing it successfully", async () => {
+    const model = new MockLanguageModelV4({ doStream: async () => stalledStep([
       { type: "stream-start", warnings: [] }, { type: "text-start", id: "t" }, { type: "text-delta", id: "t", delta: "The policy covers pagers [1], and" },
-    ]) }));
+    ]) });
+    mocks.provider.mockReturnValue(model);
     const deltas: string[] = [];
-    const result = await runChatMcpAgent({ ...args, onTextDelta: delta => { deltas.push(delta); }, limits: { maxSteps: 1, maxToolCalls: 1, searchConcurrency: 1, clamped: [] },
-      timeBudget: budget({ turnDeadlineMs: 200, finalReserveMs: 100 }) });
-    expect(result.answer).toBe("The policy covers pagers [1], and");
-    expect(deltas.join("")).toBe(result.answer);
-    expect(result.finishReason).toBe("length");
-    expect(result.debug).toMatchObject({ stopReason: "deadline", timeBudget: { finalAnswer: "partial" } });
-    expect(recordedMetadata()).toEqual([expect.objectContaining({ turnOutcome: "aborted", abortReason: "deadline", usageEstimated: true })]);
+    await expect(runChatMcpAgent({ ...args, onTextDelta: delta => { deltas.push(delta); }, limits: { maxSteps: 1, maxToolCalls: 1, searchConcurrency: 1, clamped: [] },
+      timeBudget: budget({ turnDeadlineMs: 200, finalReserveMs: 100 }) })).rejects.toBeInstanceOf(ChatTurnDeadlineError);
+    expect(deltas.join("")).toBe("The policy covers pagers [1], and");
+    expect(model.doStreamCalls).toHaveLength(1);
+    await vi.waitFor(() => expect(recordedMetadata()).toEqual([expect.objectContaining({ turnOutcome: "aborted", abortReason: "deadline", usageEstimated: true })]));
   });
 
   it("fails with a clear 504 error when no answer exists at the deadline", async () => {
@@ -447,53 +434,100 @@ describe("chat agent timers and aborted-step accounting", () => {
     expect(recordedMetadata()[0]).toMatchObject({ turnOutcome: "aborted", abortReason: "error", usageEstimated: true });
   });
 
-  it("looks up a timed-out step's receipt alongside the evidence answer, not before it", async () => {
+  it("returns a timeout error without waiting for receipt lookup or making a fallback model call", async () => {
     mocks.slowLookups.add("gen-stalled");
-    let call = 0;
-    let lookupPendingAtFinalCall: boolean | undefined;
-    const model = new MockLanguageModelV4({ doStream: async () => {
-      const current = call++;
-      if (current === 0) return toolStep("found");
-      if (current === 1) return stalledStep([{ type: "stream-start", warnings: [] }, { type: "response-metadata", id: "gen-stalled", modelId: "build" }]);
-      lookupPendingAtFinalCall = mocks.lookupPending;
-      return answerStep("The policy is supported [1].");
-    } });
+    const model = new MockLanguageModelV4({ doStream: [toolStep("found"), stalledStep([
+      { type: "stream-start", warnings: [] }, { type: "response-metadata", id: "gen-stalled", modelId: "build" },
+    ]), answerStep("Unverified fallback")] });
     mocks.provider.mockReturnValue(model);
-    const result = await runChatMcpAgent({ ...args, timeBudget: budget({ turnDeadlineMs: 3_000, stepTimeoutMs: 150, finalReserveMs: 1_000 }) });
-    expect(lookupPendingAtFinalCall).toBe(true);
-    expect(result.debug.timeBudget.finalAnswer).toBe("from_evidence");
-    expect(mocks.record).toHaveBeenCalledTimes(3);
-    expect(result.debug.stepUsage.map(entry => entry.finishReason)).toEqual(["tool-calls", "aborted", "stop"]);
+    await expect(runChatMcpAgent({ ...args, abortedStepLookupDelayMs: 0, timeBudget: budget({ turnDeadlineMs: 3_000, stepTimeoutMs: 150, finalReserveMs: 1_000 }) })).rejects.toBeInstanceOf(ChatTurnDeadlineError);
+    expect(model.doStreamCalls).toHaveLength(2);
+    expect(mocks.lookupPending).toBe(true);
+    await vi.waitFor(() => expect(mocks.record).toHaveBeenCalledTimes(2));
   });
 
-  it("ends every step span when a deadline turn still answers with 200", async () => {
-    let call = 0;
-    mocks.provider.mockReturnValue(new MockLanguageModelV4({ doStream: async () => {
-      const current = call++;
-      if (current === 0) return toolStep("found");
-      if (current === 1) return stalledStep([{ type: "stream-start", warnings: [] }]);
-      return answerStep("The policy is supported [1].");
-    } }));
-    await runChatMcpAgent({ ...args, timeBudget: budget({ turnDeadlineMs: 2_000, stepTimeoutMs: 150, finalReserveMs: 1_000 }) });
+  it("ends every step span when a timeout blocks the turn", async () => {
+    mocks.provider.mockReturnValue(new MockLanguageModelV4({ doStream: [toolStep("found"), stalledStep([{ type: "stream-start", warnings: [] }])] }));
+    await expect(runChatMcpAgent({ ...args, abortedStepLookupDelayMs: 0, timeBudget: budget({ turnDeadlineMs: 2_000, stepTimeoutMs: 150, finalReserveMs: 1_000 }) })).rejects.toBeInstanceOf(ChatTurnDeadlineError);
+    await vi.waitFor(() => expect(spans.list.filter(span => !span.ended).map(span => span.name)).toEqual([]));
     const chatSpans = spans.list.filter(span => span.attributes["gen_ai.operation.name"] === "chat");
-    expect(chatSpans).toHaveLength(3);
-    expect(chatSpans.filter(span => !span.ended).map(span => span.attributes["docslurp.chat.step"])).toEqual([]);
-    expect(chatSpans[1]!.attributes["docslurp.chat.usage_source"]).toBe("estimate");
-
-    spans.list.length = 0;
-    mocks.provider.mockReturnValue(new MockLanguageModelV4({ doStream: async () => stalledStep([
-      { type: "stream-start", warnings: [] }, { type: "text-start", id: "t" }, { type: "text-delta", id: "t", delta: "Partly [1]" },
-    ]) }));
-    await runChatMcpAgent({ ...args, limits: { maxSteps: 1, maxToolCalls: 1, searchConcurrency: 1, clamped: [] }, timeBudget: budget({ turnDeadlineMs: 200, finalReserveMs: 100 }) });
-    expect(spans.list.filter(span => !span.ended).map(span => span.name)).toEqual([]);
+    expect(chatSpans).toHaveLength(2);
+    await vi.waitFor(() => expect(recordedMetadata()).toEqual(expect.arrayContaining([
+      expect.objectContaining({ turnOutcome: "aborted", usageSource: "estimate" }),
+    ])));
   });
 
-  it("returns a tool that ignores its signal at the tool budget", async () => {
-    mocks.provider.mockReturnValue(new MockLanguageModelV4({ doStream: [toolStep("deaf"), answerStep("Could not check [none].")] }));
+  it("blocks a tool that ignores its signal at the tool budget", async () => {
+    const model = new MockLanguageModelV4({ doStream: [toolStep("deaf"), answerStep("Unverified fallback")] });
+    mocks.provider.mockReturnValue(model);
     mocks.dispatch.mockImplementation(() => new Promise<Response>(() => undefined));
     const started = Date.now();
-    const result = await runChatMcpAgent({ ...args, timeBudget: budget({ turnDeadlineMs: 5_000, toolTimeoutMs: 200, finalReserveMs: 1_000 }) });
+    await expect(runChatMcpAgent({ ...args, abortedStepLookupDelayMs: 0, timeBudget: budget({ turnDeadlineMs: 5_000, toolTimeoutMs: 200, finalReserveMs: 1_000 }) })).rejects.toMatchObject({ code: "chat_tool_failed", toolCode: "tool_timeout" });
     expect(Date.now() - started).toBeLessThan(1_500);
-    expect(result.toolCalls).toMatchObject([{ status: "error", errorCode: "tool_timeout" }]);
+    expect(model.doStreamCalls).toHaveLength(1);
+  });
+
+});
+
+
+describe("failed tool turns are blocked by code", () => {
+  it.each([403, 500, "exception", "partial-batch"] as const)("never asks for a follow-up model answer after %s", async failure => {
+    const model = new MockLanguageModelV4({ doStream: [step(true), answerStep("Everything succeeded")] });
+    mocks.provider.mockReturnValue(model);
+    if (failure === "exception") mocks.dispatch.mockRejectedValueOnce(new Error("transport failed"));
+    else if (failure === "partial-batch") mocks.dispatch.mockResolvedValueOnce(Response.json({ results: [{ ok: true, data: { results: [] } }, { ok: false, error: { code: "search_failed" } }] }));
+    else mocks.dispatch.mockResolvedValueOnce(Response.json({ error: "denied or unavailable" }, { status: failure }));
+    const deltas: string[] = [];
+    await expect(runChatMcpAgent({ ...args, onTextDelta: delta => { deltas.push(delta); } })).rejects.toMatchObject({ code: "chat_tool_failed" });
+    expect(model.doStreamCalls).toHaveLength(1);
+    expect(mocks.dispatch).toHaveBeenCalledTimes(1);
+    expect(deltas).toEqual([]);
+    expect(mocks.record).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects a later failure instead of answering from earlier successful evidence", async () => {
+    const { model } = scripted([{ tools: [{ id: "first", input: { q: "premise" } }] }, { tools: [{ id: "second", input: { q: "missing premise" } }] }, { text: "Both premises verified [1]." }]);
+    mocks.provider.mockReturnValue(model);
+    mocks.dispatch.mockResolvedValueOnce(Response.json({ results: [{ text: "Only the first premise", score: 1, citation: { documentId: "d", filename: "p.pdf", pageNumber: 1, chunkIndex: 0, headingPath: [] } }] }))
+      .mockResolvedValueOnce(Response.json({ error: "second lookup failed" }, { status: 500 }));
+    await expect(runChatMcpAgent(args)).rejects.toMatchObject({ code: "chat_tool_failed" });
+    expect(model.doStreamCalls).toHaveLength(2);
+    expect(mocks.dispatch).toHaveBeenCalledTimes(2);
+    expect(mocks.record).toHaveBeenCalledTimes(2);
+  });
+
+  it("blocks an unknown model tool before any answer or dispatcher call", async () => {
+    const invalid = { stream: simulateReadableStream({ chunks: [
+      { type: "stream-start" as const, warnings: [] }, { type: "tool-call" as const, toolCallId: "invented", toolName: "inventedMutation", input: "{}" }, ...finish(true),
+    ], initialDelayInMs: 0, chunkDelayInMs: 0 }) };
+    const model = new MockLanguageModelV4({ doStream: [invalid, answerStep("Done")] });
+    mocks.provider.mockReturnValue(model);
+    await expect(runChatMcpAgent(args)).rejects.toMatchObject({ code: "chat_tool_failed", toolCode: "invalid_tool_call" });
+    expect(model.doStreamCalls).toHaveLength(1);
+    expect(mocks.dispatch).not.toHaveBeenCalled();
+    expect(mocks.record).toHaveBeenCalledTimes(1);
+  });
+
+  it("allows a successful zero-hit search to report missing evidence", async () => {
+    const model = new MockLanguageModelV4({ doStream: [step(true), answerStep("No supporting evidence was found.")] });
+    mocks.provider.mockReturnValue(model);
+    mocks.dispatch.mockResolvedValueOnce(Response.json({ results: [] }));
+    const result = await runChatMcpAgent(args);
+    expect(result.answer).toBe("No supporting evidence was found.");
+    expect(result.citations).toEqual([]);
+    expect(model.doStreamCalls).toHaveLength(2);
+    expect(mocks.record).toHaveBeenCalledTimes(2);
+  });
+
+  it("only teaches media and settings actions when their tools are actually supplied", async () => {
+    mocks.manifestIds = ["search", "getMediaEvidence", "getUploadStatus", "getWorkspaceSettings", "proposeWorkspaceSettings"];
+    const model = new MockLanguageModelV4({ doStream: [answerStep("Ready")] });
+    mocks.provider.mockReturnValue(model);
+    await runChatMcpAgent(args);
+    const instructions = JSON.stringify(model.doStreamCalls[0]!.prompt.filter(message => message.role === "system"));
+    expect(instructions).toContain("getMediaEvidence");
+    expect(instructions).toContain("not a single extracted frame");
+    expect(instructions).toContain("proposeWorkspaceSettings");
+    expect(model.doStreamCalls[0]!.tools?.map(tool => tool.name)).toEqual(mocks.manifestIds);
   });
 });

@@ -7,16 +7,27 @@ import { runInChatAgentContext } from "../lib/chat-agent-context.js";
 import { withSearchSignal } from "../search/query-bounds.js";
 import { raceAbort } from "./chat-turn-deadline.js";
 
+import { ChatToolBlockedError } from "./chat-tool-error.js";
+export { ChatToolBlockedError } from "./chat-tool-error.js";
+
+/** Batch endpoints may return HTTP 200 with failed items. Never treat that as success. */
+function resultFailed(value: unknown): boolean {
+  if (!value || typeof value !== "object") return false;
+  const body = value as { ok?: unknown; error?: unknown; results?: unknown; failed?: unknown };
+  return body.ok === false || body.error != null || (Array.isArray(body.failed) && body.failed.length > 0) || (Array.isArray(body.results)
+    && body.results.some(item => item && typeof item === "object" && "ok" in item && resultFailed(item)));
+}
+
 /** Tool result returned once the turn's tool-call budget is spent; `code` lets callers tell it apart. */
 export const TOOL_CALL_LIMIT_RESULT = {
-  error: "Tool call limit reached. Summarize the results already obtained.",
+  error: "Tool call limit reached. The task is blocked.",
   code: "tool_call_limit",
   limitReached: true,
 } as const;
 
 /** Tool result once the turn's final-answer reserve has started: the tool does not run. */
 export const TOOL_DEADLINE_RESULT = {
-  error: "The turn is nearly out of time, so no more tools can run. Answer now from the evidence already gathered and say what could not be checked.",
+  error: "No tool time remains. The task is blocked.",
   code: "deadline",
 } as const;
 
@@ -59,7 +70,7 @@ function reportedToolCostCents(result: unknown): number {
 function responseErrorCode(result: unknown, status: number): string {
   const error = result && typeof result === "object" ? (result as { error?: unknown }).error : undefined;
   const code = error && typeof error === "object" ? (error as { code?: unknown }).code : undefined;
-  return typeof code === "string" && /^[a-z0-9_]{1,64}$/i.test(code) ? code : `http_${status}`;
+  return typeof code === "string" && /^[a-z0-9_]{1,64}$/i.test(code) ? code : status < 400 ? "partial_failure" : `http_${status}`;
 }
 
 /**
@@ -182,7 +193,7 @@ export function urlsInText(text: string): string[] {
  * fetch an attacker URL carrying workspace data in its query string.
  */
 export const WEB_FETCH_URL_REFUSED = {
-  error: "webFetch can only read URLs from the user's messages or from webSearch results in this turn. Search first, or ask the user for the URL.",
+  error: "webFetch can only read URLs from the user's messages or from webSearch results in this turn. This request is blocked.",
   code: "url_not_allowed",
 } as const;
 
@@ -219,6 +230,14 @@ export function createChatMcpTools(args: {
   /** The user's own messages, whose URLs webFetch may read. */
   userText?: string[];
 }) {
+  let failure: ChatToolBlockedError | undefined;
+  const blocked = new AbortController();
+  const block = (toolName: string, code: string) => {
+    failure ??= new ChatToolBlockedError(toolName, code);
+    blocked.abort(failure);
+    return { ok: false, error: failure.message, code: failure.toolCode, blocked: true };
+  };
+  const throwIfBlocked = () => { if (failure) throw failure; };
   const allowedWebUrls = new Set((args.userText ?? []).flatMap(urlsInText).map(urlKey).filter((key): key is string => Boolean(key)));
   const citations: SearchResult[] = [];
   const activity = new Map<string, ChatToolActivity>();
@@ -275,6 +294,7 @@ export function createChatMcpTools(args: {
       inputSchema: jsonSchema(definition.inputSchema),
       execute: async (input, { toolCallId }) => {
         args.signal.throwIfAborted();
+        throwIfBlocked();
         const span = startTelemetrySpan("docslurp.chat", `execute_tool ${definition.id}`, {
           "gen_ai.operation.name": "execute_tool", "gen_ai.tool.name": definition.id,
           "gen_ai.tool.call.id": toolCallId, "gen_ai.tool.type": "function",
@@ -290,7 +310,7 @@ export function createChatMcpTools(args: {
           detail({ status: "error", errorCode: "tool_call_limit" });
           span.set({ "docslurp.chat.tool_call_refused": true });
           span.end("tool_call_limit");
-          return { ...TOOL_CALL_LIMIT_RESULT };
+          return { ...TOOL_CALL_LIMIT_RESULT, ...block(definition.id, "tool_call_limit") };
         }
         const budgetMs = args.toolBudgetMs?.();
         if (budgetMs !== undefined && budgetMs <= 0) {
@@ -298,12 +318,12 @@ export function createChatMcpTools(args: {
           detail({ status: "error", errorCode: "deadline" });
           span.set({ "docslurp.chat.tool_deadline_refused": true });
           span.end("deadline");
-          return { ...TOOL_DEADLINE_RESULT };
+          return { ...TOOL_DEADLINE_RESULT, ...block(definition.id, "deadline") };
         }
         if (!input || typeof input !== "object" || Array.isArray(input)) {
           detail({ status: "error", errorCode: "invalid_arguments" });
           span.end("invalid_arguments");
-          return { error: "Expected object arguments" };
+          return block(definition.id, "invalid_arguments");
         }
         const supplied = input as Record<string, unknown>;
         if (definition.id === "webFetch") {
@@ -312,7 +332,7 @@ export function createChatMcpTools(args: {
             detail({ status: "error", errorCode: WEB_FETCH_URL_REFUSED.code });
             span.set({ "docslurp.chat.web_fetch_refused": true });
             span.end(WEB_FETCH_URL_REFUSED.code);
-            return { ...WEB_FETCH_URL_REFUSED };
+            return { ...WEB_FETCH_URL_REFUSED, ...block(definition.id, WEB_FETCH_URL_REFUSED.code) };
           }
         }
         counters.executed++;
@@ -369,7 +389,7 @@ export function createChatMcpTools(args: {
           toolAbort.abort(Object.assign(new Error(`Tool exceeded its ${budgetMs} ms budget`), { name: "TimeoutError" }));
         }, budgetMs);
         budgetTimer?.unref?.();
-        const toolSignal = toolAbort.signal;
+        const toolSignal = AbortSignal.any([toolAbort.signal, blocked.signal]);
         try {
           const dispatch = () => span.run(() => args.dispatch(`/tools/${encodeURIComponent(definition.id)}`, {
             method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body), signal: toolSignal,
@@ -377,8 +397,10 @@ export function createChatMcpTools(args: {
           // Settles at the abort even when nested work ignores the signal.
           const response = await raceAbort(withSearchSignal(toolSignal, () => runInChatAgentContext(args.chatSessionId ?? null, dispatch, toolSignal)), toolSignal);
           const result: unknown = await raceAbort(response.json() as Promise<unknown>, toolSignal);
+          throwIfBlocked();
+          const ok = response.ok && !resultFailed(result);
           const returned: SearchResult[] = [];
-          if (response.ok) {
+          if (ok) {
             collectEvidence(result, returned);
             args.onEvidence?.([...citations]);
             if (definition.id === "webSearch") {
@@ -389,20 +411,20 @@ export function createChatMcpTools(args: {
               }
             }
           }
-          if (response.ok && web) web = webActivityResult(web, result);
-          if (response.ok && definition.id === "proposeWorkspaceSettings") {
+          if (ok && web) web = webActivityResult(web, result);
+          if (ok && definition.id === "proposeWorkspaceSettings") {
             const parsed = workspaceSettingsProposalSchema.safeParse((result as { settingsProposal?: unknown })?.settingsProposal);
             if (parsed.success) settingsProposal = parsed.data;
           }
-          update(response.ok ? "success" : "error");
+          update(ok ? "success" : "error");
           const pages = evidencePages(returned);
-          const costCents = response.ok ? reportedToolCostCents(result) : 0;
+          const costCents = ok ? reportedToolCostCents(result) : 0;
           counters.toolCostCents += costCents;
-          const stats = definition.id === "search" ? searchCallStats(toolCallId, response.ok, queryCount, concurrency, result) : undefined;
-          detail({ status: response.ok ? "success" : "error", ...(queries ? { queries } : {}),
+          const stats = definition.id === "search" ? searchCallStats(toolCallId, ok, queryCount, concurrency, result) : undefined;
+          detail({ status: ok ? "success" : "error", ...(queries ? { queries } : {}),
             ...(stats ? { resultCount: stats.resultCount, zeroHit: stats.zeroHit } : {}),
-            evidencePages: pages, ...(response.ok ? { costCents } : {}), ...(settingsProposal ? { settingsProposal } : {}),
-            ...(response.ok ? {} : { errorCode: responseErrorCode(result, response.status) }) });
+            evidencePages: pages, ...(ok ? { costCents } : {}), ...(settingsProposal ? { settingsProposal } : {}),
+            ...(ok ? {} : { errorCode: responseErrorCode(result, response.status) }) });
           if (stats) {
             searchCalls.push(stats);
             span.set({
@@ -414,11 +436,14 @@ export function createChatMcpTools(args: {
             });
           }
           span.set({ "docslurp.tool.status_code": response.status });
-          span.end(response.ok ? undefined : `http_${response.status}`);
+          span.end(ok ? undefined : `http_${response.status}`);
+          if (!ok) return { ...block(definition.id, responseErrorCode(result, response.status)), status: response.status };
+          // Another concurrent tool may have failed while this one was running.
+          throwIfBlocked();
           const modelResult = settingsProposal ? { settingsProposal: { ...settingsProposal, token: undefined } } : result;
           const serialized = JSON.stringify(modelResult);
           return {
-            ok: response.ok, status: response.status,
+            ok, status: response.status,
             result: serialized.length <= 40_000 ? modelResult : { truncated: true, preview: serialized.slice(0, 40_000) },
             // Local citation numbers in a nested answer must not overwrite the outer turn's numbering.
             evidence: citations.map((citation, index) => ({ citationIndex: index + 1,
@@ -434,9 +459,9 @@ export function createChatMcpTools(args: {
           args.signal.throwIfAborted();
           if (timedOut) {
             counters.timedOut++;
-            return { error: `The ${definition.id} tool ran out of time and was cancelled. Answer from the evidence already gathered, or try one narrower search.`, code: "tool_timeout" };
+            return block(definition.id, "tool_timeout");
           }
-          return { error: "Tool execution failed. Do not assume the action succeeded or retry a submission automatically." };
+          return block(definition.id, "exception");
         } finally {
           if (budgetTimer) clearTimeout(budgetTimer);
           args.signal.removeEventListener("abort", onTurnAbort);
@@ -444,5 +469,5 @@ export function createChatMcpTools(args: {
       },
     });
   }
-  return { tools, citations, activity, details, searchCalls, counters };
+  return { tools, citations, activity, details, searchCalls, counters, block, throwIfBlocked, get failure() { return failure; } };
 }

@@ -20,6 +20,7 @@ import { WorkspaceAccessError } from "../services/default-workspace.js";
 import { normalizeExtractedText, type WorkspaceChatResponse, type WorkspaceChatTurn } from "@docslurp/shared";
 import { authenticatedByRoute } from "../lib/route-auth.js";
 import { env } from "../config.js";
+import { ChatToolBlockedError } from "../services/chat-tool-error.js";
 import { isChatTurnDeadlineError } from "../services/chat-turn-deadline.js";
 
 const textContent = z.union([
@@ -187,6 +188,7 @@ export const chatCompletionsRoutes = new Hono()
         });
       } catch (error) {
         if (isSpendBlockedError(error)) return c.json(spendBlockedBody(c, error), 402);
+        if (error instanceof ChatToolBlockedError) return c.json(errorBody(error.message, "server_error", error.code), error.statusCode as 502 | 504);
         if (isChatTurnDeadlineError(error)) return c.json(errorBody(error.message, "timeout_error", error.code), 504);
         reportPublicError(error, { operation: "chat-completions" });
         return c.json(errorBody("Workspace answer failed. Try again.", "server_error"), 500);
@@ -236,7 +238,10 @@ export const chatCompletionsRoutes = new Hono()
         await stream.writeSSE({ data: "[DONE]" });
       } catch (error) {
         reportPublicError(error, { operation: "chat-completions-stream" });
-        if (!disconnected) await stream.writeSSE({ data: JSON.stringify(errorBody("Workspace stream failed. Retry without streaming.", "server_error")) });
+        if (!disconnected) await stream.writeSSE({ data: JSON.stringify(error instanceof ChatToolBlockedError
+          ? errorBody(error.message, "server_error", error.code)
+          : isChatTurnDeadlineError(error) ? errorBody(error.message, "timeout_error", error.code)
+          : errorBody("Workspace stream failed. Retry without streaming.", "server_error")) });
       }
     });
   });
