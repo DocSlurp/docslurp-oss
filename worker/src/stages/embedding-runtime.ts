@@ -831,7 +831,12 @@ async function embedLocalChunks(args: {
         minBatchSize,
         maxBatchSize,
       );
-      const vectors: number[][] = [];
+      const vectors: number[][] = new Array(args.chunks.length);
+      // Batches are padded to their longest text, so mixing short and long chunks wastes
+      // compute on padding. Embedding in length order (and restoring input order
+      // below) packs similar lengths together; vectors are unchanged up to float noise.
+      const order = args.chunks.map((_, i) => i);
+      if (sortByLengthEnabled()) order.sort((a, b) => args.chunks[a]!.length - args.chunks[b]!.length);
 
       for (let index = 0; index < args.chunks.length;) {
         if (args.signal?.aborted) {
@@ -840,14 +845,13 @@ async function embedLocalChunks(args: {
             : new Error("aborted");
         }
 
-        const batch = args.chunks.slice(index, index + batchSize);
+        const ids = order.slice(index, index + batchSize);
+        const batch = ids.map((i) => args.chunks[i]!);
         const output = await runner.run(batch);
         runMsTotal += output.runMs;
-        vectors.push(
-          ...readEmbeddingVectors(output, batch.length).map((vector) =>
-            fitEmbeddingDimensions(vector, args.profile.dimensions, args.profile.normalize),
-          ),
-        );
+        readEmbeddingVectors(output, batch.length).forEach((vector, k) => {
+          vectors[ids[k]!] = fitEmbeddingDimensions(vector, args.profile.dimensions, args.profile.normalize);
+        });
         index += batch.length;
 
         // The thread's own inference time: wall time here would also count queueing behind
@@ -894,6 +898,11 @@ async function embedLocalChunks(args: {
       };
     },
   );
+}
+
+/** DOCSLURP_EMBED_SORT_BY_LENGTH=on embeds local batches in length order (opt-in: q8 vectors shift up to ~1.4% cosine with batch composition, so enabling it needs a retrieval-quality check). */
+function sortByLengthEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  return ["on", "true", "1", "yes"].includes((env.DOCSLURP_EMBED_SORT_BY_LENGTH ?? "off").trim().toLowerCase());
 }
 
 function clampBatchSize(value: number, min: number, max: number): number {

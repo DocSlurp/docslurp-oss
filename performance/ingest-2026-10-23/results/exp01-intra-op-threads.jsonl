@@ -1,0 +1,6 @@
+{"batch":8,"sort":"none","poolSize":1,"intra":8,"dtype":"q8","concurrency":1,"chunks":24,"chars":27055,"wallMs":86538,"cpuMs":246826,"cpuMsPerChunk":10284,"runMs":86492,"chunksPerMin":16.6,"minCos":null,"meanCos":null}
+{"batch":8,"sort":"none","poolSize":1,"intra":4,"dtype":"q8","concurrency":1,"chunks":24,"chars":27055,"wallMs":113640,"cpuMs":202443,"cpuMsPerChunk":8435,"runMs":113629,"chunksPerMin":12.7,"minCos":null,"meanCos":null}
+{"batch":8,"sort":"none","poolSize":1,"intra":2,"dtype":"q8","concurrency":1,"chunks":24,"chars":27055,"wallMs":136471,"cpuMs":161211,"cpuMsPerChunk":6717,"runMs":136467,"chunksPerMin":10.6,"minCos":null,"meanCos":null}
+{"batch":8,"sort":"none","poolSize":1,"intra":1,"dtype":"q8","concurrency":1,"chunks":24,"chars":27055,"wallMs":187067,"cpuMs":134223,"cpuMsPerChunk":5593,"runMs":187059,"chunksPerMin":7.7,"minCos":null,"meanCos":null}
+
+[exited with code 0]

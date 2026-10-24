@@ -7,7 +7,7 @@ import { startMigratedPostgres } from "@docslurp/worker/testing";
 const { lanceDbVectorSearch } = vi.hoisted(() => ({
   lanceDbVectorSearch: vi.fn<typeof import("../search/lancedb.js").lanceDbVectorSearch>().mockResolvedValue([]),
 }));
-vi.mock("../search/lancedb.js", () => ({ lanceDbVectorSearch }));
+vi.mock("../search/lancedb.js", () => ({ lanceDbVectorSearch, warmLanceDbSearch: vi.fn(async () => {}) }));
 
 let sql: postgres.Sql;
 let stop: () => Promise<void>;

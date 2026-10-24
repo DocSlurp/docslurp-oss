@@ -15,7 +15,7 @@ const { lanceDbVectorSearch, reported } = vi.hoisted(() => ({
   lanceDbVectorSearch: vi.fn<typeof import("../search/lancedb.js").lanceDbVectorSearch>().mockResolvedValue([]),
   reported: [] as unknown[],
 }));
-vi.mock("../search/lancedb.js", () => ({ lanceDbVectorSearch }));
+vi.mock("../search/lancedb.js", () => ({ lanceDbVectorSearch, warmLanceDbSearch: vi.fn(async () => {}) }));
 vi.mock("../lib/ai.js", async (original) => ({
   ...await original<typeof import("../lib/ai.js")>(),
   resolveOpenRouterApiKey: () => undefined,

@@ -29,6 +29,7 @@ import { ArtifactStore } from "../tools/storage.js";
 import { createStages } from "../stages/index.js";
 import { createActivities } from "./activities.js";
 import { resolveWorkerVersioning } from "./worker-versioning.js";
+import { FatalWorkerError, installWorkerProcessGuards, logWorkerFatal, runWorkerGroup, superviseTemporalWorkers, type SupervisedSession } from "./worker-supervisor.js";
 import { evaluateWorkerHealth, resolveWorkerHealthPort, startWorkerHealthServer } from "./health-server.js";
 import { ScalerPublisher } from "./scaler-publisher.js";
 import { UtilizationMeter } from "./utilization.js";
@@ -65,6 +66,7 @@ function readPositiveIntegerEnv(name: string, fallback: number): number {
 }
 
 async function main(): Promise<void> {
+  installWorkerProcessGuards({ report: (error, attributes) => reportException(error, attributes) });
   const cfg = fromEnv();
   initializeObservability({ serviceName: "docslurp-worker" });
   initializeWorkerErrorReporting();
@@ -100,9 +102,15 @@ async function main(): Promise<void> {
     poolMax: cfg.workerDbPoolMax,
   });
   // Invalid private endpoint config fails startup; the /models probe never blocks it.
-  initializePrivateModelEndpoints((entries) => store.recordPrivacyAudit(entries));
+  try {
+    initializePrivateModelEndpoints((entries) => store.recordPrivacyAudit(entries));
+  } catch (error) {
+    throw new FatalWorkerError("startup", `private model endpoint configuration is invalid: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
+  }
   // Fail before connecting if the parser sandbox is unavailable or violates the production policy.
-  const sandbox = await initializeParserSandbox(process.env, process.platform);
+  const sandbox = await initializeParserSandbox(process.env, process.platform).catch((error) => {
+    throw new FatalWorkerError("startup", `parser sandbox unavailable: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
+  });
   // Every CommandRunner in this process (stages, local-artifact adapters) shares this provider.
   setDefaultParserSandbox(sandbox);
   const openSession = (activityId: string) => sandbox.provider.openSession(sandbox.config, { activityId });
@@ -112,29 +120,6 @@ async function main(): Promise<void> {
 
   // Create activity implementations with injected dependencies
   const activities = createActivities({ store, storage, stages, config: cfg, runner });
-
-  // Connect to Temporal server
-  let connection: NativeConnection | null = null;
-  try {
-    connection = await retryTemporalConnect(() =>
-      NativeConnection.connect({
-        address: temporal.address,
-        tls: temporal.tls,
-      })
-    );
-  } catch (error) {
-    throw new Error(
-      formatTemporalConnectionError(
-        {
-          address: temporal.address,
-          namespace: temporal.namespace,
-          taskQueue: temporal.taskQueue,
-        },
-        "Temporal worker",
-        error
-      )
-    );
-  }
 
   const workerIdentity = readOptionalEnv("TEMPORAL_WORKER_IDENTITY") ?? defaultWorkerIdentity();
   // Build ID = image git SHA; versioned routing stays opt-in (docs/temporal-workflow-changes.md).
@@ -152,66 +137,113 @@ async function main(): Promise<void> {
   const activityTaskQueue = cfg.temporalActivityTaskQueue && cfg.temporalActivityTaskQueue !== temporal.taskQueue
     ? cfg.temporalActivityTaskQueue
     : null;
-  const common = {
-    connection,
-    namespace: temporal.namespace,
-    identity: workerIdentity,
-    ...versioning.options,
-    interceptors: { activity: [createSandboxActivityInterceptor(openSession)] },
-    // Drain in-flight activities on SIGTERM / max runtime; Fly kill_timeout must exceed this.
-    shutdownGraceTime: cfg.workerShutdownGraceMs,
-  } satisfies Partial<WorkerOptions>;
-  const workflowOptions = {
-    workflowsPath: workflowsUrl.pathname,
-    // Keep bounded sticky workflow state instead of replaying every page completion.
-    maxCachedWorkflows: Math.max(0, Math.min(128, Number.parseInt(process.env.WORKER_CACHED_WORKFLOWS ?? "32", 10) || 0)),
-    reuseV8Context: true,
-    maxConcurrentWorkflowTaskExecutions: workflowTaskSlots,
-    maxConcurrentWorkflowTaskPolls: workflowTaskPollers,
-  } satisfies Partial<WorkerOptions>;
-  const activityOptions = {
-    activities,
-    // Let the shared queue distribute pages instead of reserving them on the workflow host.
-    maxEagerActivityReservationsPerWorkflowTask: 0,
-    // One activity execution = one worker slot (docs/scaling-1000-workers.md).
-    ...activitySlotOptions(slotTuning, activityTaskQueue ? undefined : workflowTaskSlots),
-    maxConcurrentActivityTaskPolls: activityTaskPollers,
-  } satisfies Partial<WorkerOptions>;
-  // A tuner owns every slot type, so a combined worker drops the fixed workflow slot count.
-  const { maxConcurrentWorkflowTaskExecutions: _workflowSlots, ...workflowOptionsForTuner } = workflowOptions;
-  const combinedWorkflowOptions = "tuner" in activityOptions ? workflowOptionsForTuner : workflowOptions;
-  // With TEMPORAL_ACTIVITY_TASK_QUEUE set, workflow tasks never queue behind
-  // page activities (and vice versa): one worker per queue, same process.
-  const workers: Worker[] = activityTaskQueue
-    ? [
-        await Worker.create({ ...common, ...workflowOptions, taskQueue: temporal.taskQueue }),
-        await Worker.create({ ...common, ...activityOptions, taskQueue: activityTaskQueue }),
-      ]
-    : [await Worker.create({ ...common, ...combinedWorkflowOptions, ...activityOptions, taskQueue: temporal.taskQueue })];
-  // Deferred indexing: materializePages runs on its own queue and slot budget so
-  // on-demand page work never starves (or is starved by) the main pipeline.
-  if (deferredProfilesEnabled()) {
-    const materializeQueue = cfg.temporalMaterializeTaskQueue ?? DEFAULT_MATERIALIZE_TASK_QUEUE;
-    workers.push(await Worker.create({
-      ...common,
-      ...workflowOptions,
-      activities: {
-        materializePageRangeActivity: activities.materializePageRangeActivity,
-        completeMaterializeRun: activities.completeMaterializeRun,
-      },
-      maxConcurrentActivityTaskExecutions: cfg.materializeConcurrency,
-      maxConcurrentActivityTaskPolls: Math.min(cfg.materializeConcurrency, 2),
-      taskQueue: materializeQueue,
-    }));
-    console.log(`[temporal-worker] materialize queue=${materializeQueue} concurrency=${cfg.materializeConcurrency}`);
-  }
-  // UI raster requests have a small independent budget, even when deferred indexing is off.
-  workers.push(await Worker.create({
-    ...common, ...workflowOptions,
-    activities: { renderDocumentPageActivity: activities.renderDocumentPageActivity },
-    maxConcurrentActivityTaskExecutions: 2, maxConcurrentActivityTaskPolls: 2,
-    taskQueue: process.env.TEMPORAL_PAGE_RENDER_TASK_QUEUE?.trim() || "docslurp-page-render",
-  }));
+  interface TemporalSession extends SupervisedSession { workers: Worker[]; activityWorkers: Worker[] }
+  // One connection plus its workers. The supervisor builds a fresh session after any
+  // non-fatal stop (worker-supervisor.ts); everything else in main() lives for the process.
+  const createSession = async (): Promise<TemporalSession> => {
+    // Connect to Temporal server
+    let connection: NativeConnection;
+    try {
+      connection = await retryTemporalConnect(() =>
+        NativeConnection.connect({
+          address: temporal.address,
+          tls: temporal.tls,
+        })
+      );
+    } catch (error) {
+      throw new Error(
+        formatTemporalConnectionError(
+          {
+            address: temporal.address,
+            namespace: temporal.namespace,
+            taskQueue: temporal.taskQueue,
+          },
+          "Temporal worker",
+          error
+        )
+      );
+    }
+
+    try {
+      const common = {
+        connection,
+        namespace: temporal.namespace,
+        identity: workerIdentity,
+        ...versioning.options,
+        interceptors: { activity: [createSandboxActivityInterceptor(openSession)] },
+        // Drain in-flight activities on SIGTERM / max runtime; Fly kill_timeout must exceed this.
+        shutdownGraceTime: cfg.workerShutdownGraceMs,
+      } satisfies Partial<WorkerOptions>;
+      const workflowOptions = {
+        workflowsPath: workflowsUrl.pathname,
+        // Keep bounded sticky workflow state instead of replaying every page completion.
+        maxCachedWorkflows: Math.max(0, Math.min(128, Number.parseInt(process.env.WORKER_CACHED_WORKFLOWS ?? "32", 10) || 0)),
+        reuseV8Context: true,
+        maxConcurrentWorkflowTaskExecutions: workflowTaskSlots,
+        maxConcurrentWorkflowTaskPolls: workflowTaskPollers,
+      } satisfies Partial<WorkerOptions>;
+      const activityOptions = {
+        activities,
+        // Let the shared queue distribute pages instead of reserving them on the workflow host.
+        maxEagerActivityReservationsPerWorkflowTask: 0,
+        // One activity execution = one worker slot (docs/scaling-1000-workers.md).
+        ...activitySlotOptions(slotTuning, activityTaskQueue ? undefined : workflowTaskSlots),
+        maxConcurrentActivityTaskPolls: activityTaskPollers,
+      } satisfies Partial<WorkerOptions>;
+      // A tuner owns every slot type, so a combined worker drops the fixed workflow slot count.
+      const { maxConcurrentWorkflowTaskExecutions: _workflowSlots, ...workflowOptionsForTuner } = workflowOptions;
+      const combinedWorkflowOptions = "tuner" in activityOptions ? workflowOptionsForTuner : workflowOptions;
+      // With TEMPORAL_ACTIVITY_TASK_QUEUE set, workflow tasks never queue behind
+      // page activities (and vice versa): one worker per queue, same process.
+      const workers: Worker[] = activityTaskQueue
+        ? [
+            await Worker.create({ ...common, ...workflowOptions, taskQueue: temporal.taskQueue }),
+            await Worker.create({ ...common, ...activityOptions, taskQueue: activityTaskQueue }),
+          ]
+        : [await Worker.create({ ...common, ...combinedWorkflowOptions, ...activityOptions, taskQueue: temporal.taskQueue })];
+      // Deferred indexing: materializePages runs on its own queue and slot budget so
+      // on-demand page work never starves (or is starved by) the main pipeline.
+      if (deferredProfilesEnabled()) {
+        const materializeQueue = cfg.temporalMaterializeTaskQueue ?? DEFAULT_MATERIALIZE_TASK_QUEUE;
+        workers.push(await Worker.create({
+          ...common,
+          ...workflowOptions,
+          activities: {
+            materializePageRangeActivity: activities.materializePageRangeActivity,
+            completeMaterializeRun: activities.completeMaterializeRun,
+          },
+          maxConcurrentActivityTaskExecutions: cfg.materializeConcurrency,
+          maxConcurrentActivityTaskPolls: Math.min(cfg.materializeConcurrency, 2),
+          taskQueue: materializeQueue,
+        }));
+        console.log(`[temporal-worker] materialize queue=${materializeQueue} concurrency=${cfg.materializeConcurrency}`);
+      }
+      // UI raster requests have a small independent budget, even when deferred indexing is off.
+      workers.push(await Worker.create({
+        ...common, ...workflowOptions,
+        activities: { renderDocumentPageActivity: activities.renderDocumentPageActivity },
+        maxConcurrentActivityTaskExecutions: 2, maxConcurrentActivityTaskPolls: 2,
+        taskQueue: process.env.TEMPORAL_PAGE_RENDER_TASK_QUEUE?.trim() || "docslurp-page-render",
+      }));
+      const activityWorkers = activityTaskQueue ? workers.slice(1) : workers;
+      return {
+        workers,
+        activityWorkers,
+        run: () => runWorkerGroup(workers),
+        shutdown: () => { for (const worker of workers) { try { worker.shutdown(); } catch { /* already stopping */ } } },
+        close: () => connection.close().catch((err) => {
+          console.error("temporal connection shutdown failed:", err instanceof Error ? err.message : String(err));
+        }),
+      };
+    } catch (error) {
+      await connection.close().catch(() => undefined);
+      throw error;
+    }
+  };
+  // The live session, or null while connecting / reconnecting (health reports "starting").
+  let activeSession: TemporalSession | null = null;
+  const currentWorkers = (): Worker[] => activeSession?.workers ?? [];
+
   // A machine the autoscaler just started should be ready to embed when its first shard arrives.
   const defaultEmbedding = resolveEmbeddingModel(cfg, defaultPipelineFeatures);
   if (defaultEmbedding.runtime === "local" && process.env.LOCAL_EMBEDDING_WARMUP !== "false") {
@@ -237,7 +269,9 @@ async function main(): Promise<void> {
   // a stale WORKER_ACTIVITY_CONCURRENCY=1 secret once left every machine running
   // one activity while the scaler counted eight.
   const assumedSlots = resolveWorkerScalerConfig(process.env, cfg.workerActivityConcurrency).slotsPerMachine;
-  if (assumedSlots !== slotTuning.nominalSlots) {
+  // WORKER_ALLOW_SLOT_MISMATCH=true is for the small always-on floor machine (fly.worker.toml), which runs
+  // fewer slots than the burst fleet on purpose and is outside the autoscaler's sizing.
+  if (assumedSlots !== slotTuning.nominalSlots && process.env.WORKER_ALLOW_SLOT_MISMATCH !== "true") {
     console.error(
       `[temporal-worker] WORKER_ACTIVITY_CONCURRENCY=${slotTuning.nominalSlots} but the autoscaler assumes ` +
         `${assumedSlots} slots per machine (DOCSLURP_WORKER_SLOTS_PER_MACHINE); the fleet will be mis-sized. ` +
@@ -245,10 +279,9 @@ async function main(): Promise<void> {
     );
   }
   // Slot and CPU utilization of this machine (utilization.ts), on /metrics and in a log line a minute.
-  const activityWorkers = activityTaskQueue ? workers.slice(1) : workers;
   // Capacity is the nominal slot count the autoscaler plans with; resource-tuned machines may run above it.
   const utilization = new UtilizationMeter(slotTuning.nominalSlots,
-    () => activityWorkers.reduce((sum, worker) => sum + worker.getStatus().numInFlightActivities, 0));
+    () => (activeSession?.activityWorkers ?? []).reduce((sum, worker) => sum + worker.getStatus().numInFlightActivities, 0));
   setInterval(() => utilization.sample(), 1_000).unref();
   setInterval(() => console.log(`[worker-utilization] ${JSON.stringify(utilization.snapshot())}`), 60_000).unref();
   // Liveness for the Fly machine check and the post-deploy assertion; /metrics for Fly's scraper.
@@ -256,19 +289,10 @@ async function main(): Promise<void> {
   const healthServer = healthPort
     ? startWorkerHealthServer({
         port: healthPort,
-        health: () => evaluateWorkerHealth(workers.map((worker) => worker.getStatus())),
+        health: () => evaluateWorkerHealth(currentWorkers().map((worker) => worker.getStatus())),
         metrics: async () => `${await scaler.metrics()}${utilization.metricLines().join("\n")}\n`,
       })
     : null;
-  const shutdownWorkers = () => {
-    for (const worker of workers) {
-      try {
-        worker.shutdown();
-      } catch {
-        // Already stopping.
-      }
-    }
-  };
   const maxRuntimeTimer = cfg.workerMaxRuntimeMs > 0
     ? setTimeout(() => {
         console.warn(
@@ -276,7 +300,7 @@ async function main(): Promise<void> {
           `action=drain graceMs=${cfg.workerShutdownGraceMs}`
         );
         markWorkerShuttingDown("max-runtime");
-        shutdownWorkers();
+        controller.abort(new Error("max-runtime"));
       }, cfg.workerMaxRuntimeMs)
     : null;
 
@@ -498,19 +522,14 @@ async function main(): Promise<void> {
         .catch(() => {});
     }
 
-    // A failing worker stops its siblings, but resources stay open until every
-    // worker has finished draining. Preserve the first failure for the caller.
-    let workerFailed = false;
-    let firstWorkerError: unknown;
-    await Promise.allSettled(workers.map((worker) => Promise.resolve().then(() => worker.run()).catch((error) => {
-      if (!workerFailed) {
-        workerFailed = true;
-        firstWorkerError = error;
-      }
-      shutdownWorkers();
-      throw error;
-    })));
-    if (workerFailed) throw firstWorkerError;
+    // Recreate the connection and workers after any non-fatal stop (connection loss, poller
+    // failure, a worker run() that returned unasked); only fatal states throw out of here.
+    await superviseTemporalWorkers({
+      createSession,
+      signal: controller.signal,
+      onSession: (session) => { activeSession = session; },
+      onRestart: ({ error, reason, attempt }) => reportException(error, { operation: "worker-restart", reason, attempt }),
+    });
   } finally {
     if (maxRuntimeTimer) {
       clearTimeout(maxRuntimeTimer);
@@ -547,16 +566,14 @@ async function main(): Promise<void> {
     await flushErrorReporting();
     await capabilityRegistry.stop();
     await store.close();
-    await connection?.close().catch((err) => {
-      console.error(
-        "temporal connection shutdown failed:",
-        err instanceof Error ? err.message : String(err)
-      );
-    });
   }
 }
 
+// Non-fatal failures never reach here: superviseTemporalWorkers retries them. An error that
+// escapes main() is fatal by definition (worker-supervisor.ts), so exit non-zero and let the
+// platform restart policy take over.
 main().catch(async (error) => {
+  logWorkerFatal(error, { phase: "main" });
   initializeWorkerErrorReporting();
   reportException(error, { operation: "worker-startup-or-shutdown" });
   await flushErrorReporting();

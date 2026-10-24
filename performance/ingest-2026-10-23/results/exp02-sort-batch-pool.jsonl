@@ -1,0 +1,3 @@
+{"batch":8,"sort":"length","poolSize":1,"intra":2,"dtype":"q8","concurrency":1,"chunks":24,"chars":27055,"wallMs":122298,"cpuMs":133186,"cpuMsPerChunk":5549,"runMs":122291,"chunksPerMin":11.8,"minCos":null,"meanCos":null}
+{"batch":2,"sort":"none","poolSize":1,"intra":2,"dtype":"q8","concurrency":1,"chunks":24,"chars":27055,"wallMs":123562,"cpuMs":116674,"cpuMsPerChunk":4861,"runMs":123535,"chunksPerMin":11.7,"minCos":null,"meanCos":null}
+{"batch":8,"sort":"none","poolSize":4,"intra":2,"dtype":"q8","concurrency":4,"chunks":24,"chars":27055,"wallMs":92134,"cpuMs":192364,"cpuMsPerChunk":8015,"runMs":241037,"chunksPerMin":15.6,"minCos":null,"meanCos":null}
