@@ -66,7 +66,7 @@ COPY scripts/uv-installer.lock.txt /tmp/uv-installer.lock.txt
 COPY scripts/setup-worker-python-venv.sh /tmp/setup-worker-python-venv.sh
 RUN sh /tmp/setup-cli-docker.sh \
     && chown -R 10001:10001 /app/.venv \
-    && rm /tmp/setup-cli-docker.sh /tmp/uv-installer.lock.txt
+    && rm -f /tmp/setup-cli-docker.sh /tmp/uv-installer.lock.txt
 
 # Install production Node.js dependencies only
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml tsconfig.base.json ./
