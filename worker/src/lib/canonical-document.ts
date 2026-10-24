@@ -13,6 +13,7 @@ import {
   type CitationLocator
 } from "@docslurp/shared";
 import { buildChunkLocator, evidenceBoundary, mergeLocators } from "./chunk-locator.js";
+import { leadingFrontmatterLineCount, plainHeadingText } from "./markdown-structure.js";
 
 export interface CanonicalChunk {
   text: string;
@@ -62,7 +63,8 @@ export function buildCanonicalDocumentFromMarkdown(args: {
   for (let pageIndex = 0; pageIndex < pages.length; pageIndex++) {
     const pageText = pages[pageIndex] ?? "";
     const lines = pageText.split("\n");
-    let lineIndex = 0;
+    // A leading metadata block (`---` … `---`) describes the document; it is not a heading or content.
+    let lineIndex = pageIndex === 0 ? leadingFrontmatterLineCount(lines) : 0;
     const pageFirstBlock = blocks.length;
 
     while (lineIndex < lines.length) {
@@ -106,7 +108,7 @@ export function buildCanonicalDocumentFromMarkdown(args: {
       const headingMatch = line.match(HEADING_RE);
       if (headingMatch) {
         const level = headingMatch[1]?.length ?? 1;
-        const headingText = headingMatch[2]?.trim() ?? line.trim();
+        const headingText = plainHeadingText(headingMatch[2] ?? line);
         while (headingStack.length > 0 && headingStack[headingStack.length - 1]!.level >= level) {
           headingStack.pop();
         }
@@ -508,7 +510,7 @@ function withOverlap(
 }
 
 function activeHeadingPath(headingStack: Array<{ level: number; text: string }>): string[] {
-  return headingStack.map((entry) => entry.text);
+  return headingStack.map((entry) => entry.text).filter(Boolean);
 }
 
 function countBlocks(blocks: CanonicalBlock[], type: CanonicalBlockType): number {

@@ -1136,7 +1136,7 @@ export class ExtractMarkdownStage implements Stage {
   ): Promise<string> {
     const original = await readFile(candidate.tempTextPath, "utf8");
     const sanitized = sanitizeExtractedMarkdown(original);
-    if (sanitized.strippedDataUriCount === 0) {
+    if (sanitized.strippedDataUriCount === 0 && sanitized.strippedFrontmatterLines === 0) {
       return original;
     }
 
@@ -1148,7 +1148,8 @@ export class ExtractMarkdownStage implements Stage {
     );
     console.log(
       `[extract-sanitize] extractor=${candidate.label} ` +
-        `dataUris=${sanitized.strippedDataUriCount} bytes=${sanitized.strippedDataUriBytes}`,
+        `dataUris=${sanitized.strippedDataUriCount} bytes=${sanitized.strippedDataUriBytes} ` +
+        `frontmatterLines=${sanitized.strippedFrontmatterLines}`,
     );
     return sanitized.markdown;
   }
