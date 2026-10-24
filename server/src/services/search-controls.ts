@@ -166,13 +166,22 @@ export async function updateWorkspaceSearchSettingsForUser(args: {
   userId: string;
   input: UpdateWorkspaceSearchSettingsInput;
 }): Promise<WorkspaceSearchSettings | null> {
+  return mutateWorkspaceSearchSettingsForUser({ ...args, mutate: current => mergeWorkspaceSearchSettings(current, args.input) });
+}
+
+/** Serialize every read/merge/write, including first inserts, with proposal Apply. */
+export async function mutateWorkspaceSearchSettingsForUser(args: {
+  workspaceId: string;
+  userId: string;
+  mutate: (current: WorkspaceSearchSettings) => WorkspaceSearchSettings;
+}): Promise<WorkspaceSearchSettings | null> {
   return await sql.begin(async tx => {
     const client = tx as unknown as typeof sql;
     await client`select pg_advisory_xact_lock(hashtextextended(${`config-change:${args.workspaceId}`}, 0))`;
     const access = await getWorkspaceAccess(args.workspaceId, args.userId, client);
     if (!access || !canEditWorkspace(access, args.userId)) return null;
     const current = await getWorkspaceSearchSettings(args.workspaceId, args.userId, client);
-    const next = mergeWorkspaceSearchSettings(current, args.input);
+    const next = args.mutate(current);
     await upsertWorkspaceSearchSettings(next, client);
     await client`update workspaces set updated_at=now() where id=${args.workspaceId}`;
     return next;

@@ -11,8 +11,9 @@ let service: typeof import("../services/workspace-settings-proposals.js");
 let counter = 0;
 beforeAll(async () => {
   vi.stubEnv("BETTER_AUTH_SECRET", "settings-proposal-test-secret-with-enough-entropy");
-  const db = await startMigratedPostgres(); stop = db.stop;
-  sql = postgres(db.url, { max: 1, prepare: false, onnotice: () => {} });
+  const nativeUrl = process.env.SETTINGS_LOCK_TEST_DATABASE_URL;
+  const db = nativeUrl ? { url: nativeUrl, stop: async () => {} } : await startMigratedPostgres(); stop = db.stop;
+  sql = postgres(db.url, { max: nativeUrl ? 4 : 1, prepare: false, onnotice: () => {} });
   vi.doMock("../db.js", () => ({ sql }));
   vi.doMock("../services/run-lifecycle.js", () => ({ runLifecycle: { start: vi.fn() } }));
   vi.doMock("../lib/temporal.js", () => ({ signalPipelinePause: vi.fn(), signalPipelineResume: vi.fn(), signalPipelineCancel: vi.fn() }));
@@ -141,4 +142,63 @@ it("rejects a change racing between planner version capture and workspace snapsh
   read.mockRestore();
   await expect(service.applySettingsProposal({ ...f, token: proposal.token, reprocessExisting: false })).rejects.toMatchObject({ status: 409 });
   expect((await saved(f.id)).preserveTables).toBe(false);
+});
+
+
+it("serializes an initial compatibility insert with proposal versioning", async () => {
+  const f = await fixture();
+  const proposal = await service.proposeWorkspaceSettings({ ...f, changes: { chat: { answerStyle: "detailed" } } });
+  const { mutateWorkspaceSearchSettingsForUser } = await import("../services/search-controls.js");
+  await mutateWorkspaceSearchSettingsForUser({ ...f, mutate: current => ({ ...current, synonyms: { handbook: ["manual"] } }) });
+  await expect(service.applySettingsProposal({ ...f, token: proposal.token, reprocessExisting: false })).rejects.toMatchObject({ status: 409 });
+  const [row] = await sql`select synonyms from workspace_search_settings where workspace_id=${f.id}`;
+  expect(row.synonyms).toEqual({ handbook: ["manual"] });
+});
+
+it("reads compatibility merge state inside the lock and preserves newly approved fields", async () => {
+  const f = await fixture();
+  const controls = await import("../services/search-controls.js");
+  // A compatibility request may begin before Apply, but must not carry this old snapshot into its write.
+  const stale = await controls.getWorkspaceSearchSettings(f.id, f.userId);
+  const proposal = await service.proposeWorkspaceSettings({ ...f, changes: { chat: { answerStyle: "detailed" }, retrieval: { resultCount: 6 } } });
+  await service.applySettingsProposal({ ...f, token: proposal.token, reprocessExisting: false });
+  const saved = await controls.mutateWorkspaceSearchSettingsForUser({ ...f, mutate: current => ({ ...current,
+    compatSettings: { ...current.compatSettings, searchableAttributes: ["title"] } }) });
+  expect(stale.chat.answerStyle).toBe("balanced");
+  expect(saved?.chat.answerStyle).toBe("detailed");
+  expect(saved?.retrievalDefaults.resultCount).toBe(6);
+  expect(saved?.compatSettings.searchableAttributes).toEqual(["title"]);
+});
+
+
+it.skipIf(!process.env.SETTINGS_LOCK_TEST_DATABASE_URL)("blocks an initial compatibility insert until real Apply commits, then merges its approved fields", async () => {
+  const f = await fixture();
+  const proposal = await service.proposeWorkspaceSettings({ ...f, changes: { chat: { answerStyle: "detailed" }, retrieval: { resultCount: 6 } } });
+  const audit = await import("../services/audit-log.js");
+  const original = audit.appendAuditLog;
+  let entered!: () => void, release!: () => void;
+  const inside = new Promise<void>(resolve => { entered = resolve; });
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const write = vi.spyOn(audit, "appendAuditLog").mockImplementationOnce(async (...args) => { entered(); await gate; return original(...args); });
+  const apply = service.applySettingsProposal({ ...f, token: proposal.token, reprocessExisting: false });
+  await inside;
+  const controls = await import("../services/search-controls.js");
+  const merge = vi.fn(current => ({ ...current, synonyms: { handbook: ["manual"] } }));
+  const compat = controls.mutateWorkspaceSearchSettingsForUser({ ...f, mutate: merge });
+  try {
+    const deadline = Date.now() + 3000;
+    let waiting = false;
+    while (Date.now() < deadline) {
+      const [row] = await sql`select exists(select 1 from pg_locks where locktype='advisory' and not granted and database=(select oid from pg_database where datname=current_database())) waiting`;
+      if (row.waiting) { waiting = true; break; }
+      await sql`select pg_sleep(0.01)`;
+    }
+    expect(waiting).toBe(true);
+    expect(merge).not.toHaveBeenCalled();
+  } finally { release(); write.mockRestore(); }
+  await apply;
+  const saved = await compat;
+  expect(saved?.chat.answerStyle).toBe("detailed");
+  expect(saved?.retrievalDefaults.resultCount).toBe(6);
+  expect(saved?.synonyms).toEqual({ handbook: ["manual"] });
 });
