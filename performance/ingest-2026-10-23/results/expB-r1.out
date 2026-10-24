@@ -1,0 +1,2 @@
+{"label":"expB-r1","status":"completed","pages":49,"wallS":74.056,"pagesPerMin":39.7,"cpuS":7.6,"xacts":946,"rssMb":862}
+quarantine:1.13s(sum 2.33)  format-detect:1.67s(sum 0.65)  to-canonical:1.73s(sum 0.59)  format-tooling:0.48s(sum 0.83)  normalize:0.4s(sum 0.49)  pdf-tooling:0.56s(sum 1.02)  split-pages:0.98s(sum 2.33)  extract-markdown:11.7s(sum 30.96)  classify-route:2.44s(sum 1.21)  render-images:2.07s(sum 3.52)  embed:6.99s(sum 12.62)  index:9.01s(sum 24.1)

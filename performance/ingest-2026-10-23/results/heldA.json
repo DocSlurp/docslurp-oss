@@ -1,0 +1,229 @@
+{
+ "label": "heldA",
+ "runId": "97362939-737c-4680-bf21-8722327ded10",
+ "files": [
+  "depot-pdf-10p.pdf",
+  "docx-wiki07.docx",
+  "epub-wiki17.epub",
+  "html-wiki-11.html",
+  "html-wiki-12.html",
+  "html-wiki-13.html",
+  "html-wiki-14.html",
+  "image-harbor150.png",
+  "scanned-pdf-3p.pdf",
+  "tables-pdf-3p.pdf",
+  "text-pdf-21p.pdf",
+  "xlsx-book.xlsx"
+ ],
+ "status": "completed",
+ "runStatus": "completed",
+ "pages": 171,
+ "docs": 12,
+ "wallS": 187.846,
+ "uploadMs": 1461,
+ "runRowS": 187.378999,
+ "startLagS": 0.705503,
+ "pagesPerMin": 54.62,
+ "min100pages": 1.83,
+ "workerCpuS": 161.1,
+ "peakRssMb": 4636,
+ "dbXacts": 2151,
+ "dbXactsPerDoc": 179.3,
+ "spentCents": 1.085,
+ "stages": [
+  {
+   "name": "quarantine",
+   "docs": 12,
+   "spanS": 1.12,
+   "sumDocS": 2.64,
+   "first": "2026-10-24 00:16:14.38072+00"
+  },
+  {
+   "name": "format-detect",
+   "docs": 12,
+   "spanS": 3.82,
+   "sumDocS": 1.23,
+   "first": "2026-10-24 00:16:16.786457+00"
+  },
+  {
+   "name": "to-canonical",
+   "docs": 12,
+   "spanS": 3.49,
+   "sumDocS": 1,
+   "first": "2026-10-24 00:16:21.836269+00"
+  },
+  {
+   "name": "format-tooling",
+   "docs": 12,
+   "spanS": 1.2,
+   "sumDocS": 2.6,
+   "first": "2026-10-24 00:16:26.565457+00"
+  },
+  {
+   "name": "normalize",
+   "docs": 12,
+   "spanS": 0.67,
+   "sumDocS": 0.98,
+   "first": "2026-10-24 00:16:29.097055+00"
+  },
+  {
+   "name": "pdf-tooling",
+   "docs": 12,
+   "spanS": 4.11,
+   "sumDocS": 1.79,
+   "first": "2026-10-24 00:16:30.865758+00"
+  },
+  {
+   "name": "split-pages",
+   "docs": 12,
+   "spanS": 1.61,
+   "sumDocS": 4.4,
+   "first": "2026-10-24 00:16:36.446316+00"
+  },
+  {
+   "name": "extract-markdown",
+   "docs": 12,
+   "spanS": 15.04,
+   "sumDocS": 62.61,
+   "first": "2026-10-24 00:16:39.0922+00"
+  },
+  {
+   "name": "classify-route",
+   "docs": 12,
+   "spanS": 5.16,
+   "sumDocS": 3.94,
+   "first": "2026-10-24 00:16:56.990698+00"
+  },
+  {
+   "name": "render-images",
+   "docs": 12,
+   "spanS": 6.68,
+   "sumDocS": 10.71,
+   "first": "2026-10-24 00:17:07.57741+00"
+  },
+  {
+   "name": "embed",
+   "docs": 12,
+   "spanS": 95.42,
+   "sumDocS": 283.3,
+   "first": "2026-10-24 00:17:23.356077+00"
+  },
+  {
+   "name": "index",
+   "docs": 11,
+   "spanS": 14.83,
+   "sumDocS": 29.88,
+   "first": "2026-10-24 00:19:02.721072+00"
+  }
+ ],
+ "quality": [
+  {
+   "filename": "depot-pdf-10p.pdf",
+   "status": "completed",
+   "pages": 10,
+   "chunks": 10,
+   "pagesMd5": "d41d8cd98f00b204e9800998ecf8427e",
+   "chunksMd5": "9357e88c480e93a516b76a2cd01f3dce",
+   "pageVectors": 0
+  },
+  {
+   "filename": "docx-wiki07.docx",
+   "status": "completed",
+   "pages": 1,
+   "chunks": 220,
+   "pagesMd5": "d41d8cd98f00b204e9800998ecf8427e",
+   "chunksMd5": "b5ef4e11556f93eb37201c54ba5150de",
+   "pageVectors": 0
+  },
+  {
+   "filename": "epub-wiki17.epub",
+   "status": "completed",
+   "pages": 1,
+   "chunks": 1,
+   "pagesMd5": "d41d8cd98f00b204e9800998ecf8427e",
+   "chunksMd5": "51b9f18908b341b83a8ea975706dca64",
+   "pageVectors": 0
+  },
+  {
+   "filename": "html-wiki-11.html",
+   "status": "completed",
+   "pages": 14,
+   "chunks": 23,
+   "pagesMd5": "d41d8cd98f00b204e9800998ecf8427e",
+   "chunksMd5": "344fdc0ed1d8541d76cbdbdb1dfb0287",
+   "pageVectors": 0
+  },
+  {
+   "filename": "html-wiki-12.html",
+   "status": "completed",
+   "pages": 7,
+   "chunks": 10,
+   "pagesMd5": "d41d8cd98f00b204e9800998ecf8427e",
+   "chunksMd5": "010e18ed72b55cf80e706510031e9d65",
+   "pageVectors": 0
+  },
+  {
+   "filename": "html-wiki-13.html",
+   "status": "completed",
+   "pages": 9,
+   "chunks": 13,
+   "pagesMd5": "d41d8cd98f00b204e9800998ecf8427e",
+   "chunksMd5": "0332215a5977688fde0e3dbe1187c50f",
+   "pageVectors": 0
+  },
+  {
+   "filename": "html-wiki-14.html",
+   "status": "completed",
+   "pages": 100,
+   "chunks": 80,
+   "pagesMd5": "d41d8cd98f00b204e9800998ecf8427e",
+   "chunksMd5": "b9570dd7c11758cffab9f252f361c0fa",
+   "pageVectors": 0
+  },
+  {
+   "filename": "image-harbor150.png",
+   "status": "completed",
+   "pages": 1,
+   "chunks": 1,
+   "pagesMd5": "d41d8cd98f00b204e9800998ecf8427e",
+   "chunksMd5": "fa7e1d07e4b6129f9d6b6065ac6e8f29",
+   "pageVectors": 0
+  },
+  {
+   "filename": "scanned-pdf-3p.pdf",
+   "status": "failed",
+   "pages": 3,
+   "chunks": 0,
+   "pagesMd5": "d41d8cd98f00b204e9800998ecf8427e",
+   "chunksMd5": "d41d8cd98f00b204e9800998ecf8427e",
+   "pageVectors": 0
+  },
+  {
+   "filename": "tables-pdf-3p.pdf",
+   "status": "completed",
+   "pages": 3,
+   "chunks": 9,
+   "pagesMd5": "d41d8cd98f00b204e9800998ecf8427e",
+   "chunksMd5": "86aadb5a3b9293fb0c70c4c7b372dadc",
+   "pageVectors": 0
+  },
+  {
+   "filename": "text-pdf-21p.pdf",
+   "status": "completed",
+   "pages": 21,
+   "chunks": 926,
+   "pagesMd5": "d41d8cd98f00b204e9800998ecf8427e",
+   "chunksMd5": "290985eac00fae943d8c07d7123f21d5",
+   "pageVectors": 0
+  },
+  {
+   "filename": "xlsx-book.xlsx",
+   "status": "completed",
+   "pages": 1,
+   "chunks": 26,
+   "pagesMd5": "d41d8cd98f00b204e9800998ecf8427e",
+   "chunksMd5": "9754c2981da40eb7427cb8358df57d58",
+   "pageVectors": 0
+  }
+ ]
+}
