@@ -51,7 +51,7 @@ export interface WebServiceDeps {
 /** Whole-call deadlines (failovers included); crawl uses the request's own timeout. */
 const CALL_DEADLINE_MS: Record<Exclude<WebCapability, "crawl">, number> = { search: 30_000, fetch: 60_000, map: 60_000 };
 /** Chat tool results go to a hosted model; keep each page small. */
-const CHAT_PAGE_CHARACTERS = 6_000;
+const CHAT_PAGE_CHARACTERS = 10_000;
 
 function isProviderId(value: string): value is WebProviderId {
   return (WEB_PROVIDER_IDS as readonly string[]).includes(value);
@@ -240,7 +240,8 @@ function resultCount<C extends WebCapability>(capability: C, output: WebOutput<C
 /** Web text is untrusted: instruction-like lines are suppressed before a model reads it. */
 function forChat(page: WebPage): WebPage {
   const clean = (text: string | undefined, max: number) => text === undefined ? undefined
-    : reviewUntrustedEvidenceText(text.length > max ? `${text.slice(0, max)}\n\n[truncated]` : text).text;
+    // Say plainly that the rest is unavailable: a bare "[truncated]" made the model refetch the same page.
+    : reviewUntrustedEvidenceText(text.length > max ? `${text.slice(0, max)}\n\n[Page shortened for chat. The rest is not available here; do not fetch this URL again. Search for the specific section instead.]` : text).text;
   return { ...page, title: clean(page.title, 300), snippet: clean(page.snippet, 1_000), markdown: clean(page.markdown, CHAT_PAGE_CHARACTERS) };
 }
 
