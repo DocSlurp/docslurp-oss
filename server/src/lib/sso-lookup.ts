@@ -25,9 +25,15 @@ export function ssoBaseUrl(request: Request): string {
  *
  * Only an org that DNS-verified the domain (sso_domains.verified_at) routes
  * it, and a verified domain belongs to one org. With requireEnforced, the
- * redirect also needs the email's account to be linked to that org's SSO:
- * an unlinked user must still be able to sign in normally and link SSO, and
- * the SSO callback refuses unlinked accounts.
+ * org must also enforce SSO.
+ *
+ * The answer depends only on the email's domain, never on whether that
+ * mailbox has an account or an SSO link: this backs the unauthenticated
+ * `GET /api/sso-lookup`, and a per-user answer there would let anyone list
+ * which addresses at a company have linked accounts. Unlinked users sent to
+ * the IdP are refused at the SSO callback, which then grants that browser an
+ * unlinked pass (see sso-unlinked-pass.ts) so they can sign in normally and
+ * link SSO.
  */
 export async function resolveSsoRedirect(email: string, apiUrl: string, requireEnforced = true): Promise<string | null> {
   const domain = email.split("@")[1]?.trim().toLowerCase();
@@ -45,21 +51,10 @@ export async function resolveSsoRedirect(email: string, apiUrl: string, requireE
         where
           d.domain = $1
           and (o.sso_config->>'enabled')::boolean = true
-          and (
-            $2::boolean = false
-            or (
-              (o.sso_config->>'enforceSso')::boolean = true
-              and exists (
-                select 1
-                from sso_identity_links l
-                join "user" u on u.id = l.user_id
-                where l.org_id = o.id and lower(u.email) = lower($3)
-              )
-            )
-          )
+          and ($2::boolean = false or (o.sso_config->>'enforceSso')::boolean = true)
         limit 1
       `,
-      [domain, requireEnforced, email.trim()]
+      [domain, requireEnforced]
     );
 
     const org = rows.rows[0];

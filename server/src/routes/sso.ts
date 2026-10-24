@@ -27,6 +27,7 @@ import { authenticatedByRoute } from "../lib/route-auth.js";
 import { apiStatusError } from "../lib/api-error.js";
 import { validationHook } from "../lib/validation.js";
 import { safeRedirectPath } from "../lib/safe-redirect.js";
+import { createSsoUnlinkedPass, SSO_UNLINKED_PASS_COOKIE, SSO_UNLINKED_PASS_TTL_SECONDS } from "../lib/sso-unlinked-pass.js";
 
 const ssoConfigSchema = z.object({
   providerType: z.enum(["saml", "oidc"]).nullable().optional(),
@@ -616,7 +617,7 @@ interface SsoAssertedIdentity {
 type SsoCompletion =
   | { kind: "signed-in"; userId: string }
   | { kind: "linked"; userId: string }
-  | { kind: "refused"; status: 403; error: string; userFacing?: boolean };
+  | { kind: "refused"; status: 403; error: string; userFacing?: boolean; unlinked?: boolean };
 
 export const ssoNotLinkedMessage =
   "This company sign-in isn't linked to a DocSlurp account yet. Sign in the way you usually do, then link company SSO from the SSO settings page.";
@@ -698,7 +699,7 @@ async function completeSsoAssertion(identity: SsoAssertedIdentity, requestRow: S
     limit 1
   `;
   if (!link) {
-    return { kind: "refused", status: 403, error: ssoNotLinkedMessage, userFacing: true };
+    return { kind: "refused", status: 403, error: ssoNotLinkedMessage, userFacing: true, unlinked: true };
   }
   if (!(await isOrgMember(identity.orgId, link.user_id))) {
     return { kind: "refused", status: 403, error: "SSO user is not a member of this organization" };
@@ -714,6 +715,10 @@ async function completeSsoAssertion(identity: SsoAssertedIdentity, requestRow: S
 async function finishSsoCallback(c: any, identity: SsoAssertedIdentity, requestRow: SsoRequestRow): Promise<Response> {
   const result = await completeSsoAssertion(identity, requestRow);
   if (result.kind === "refused") {
+    // The IdP just proved this email, and it has no link: let this browser's
+    // next password sign-in skip the domain-wide enforce-SSO redirect so the
+    // user can sign in and link (see sso-unlinked-pass.ts).
+    if (result.unlinked) await setSsoUnlinkedPassCookie(c, identity.email);
     if (result.userFacing) {
       return redirectToApp(c, `/app?authError=${encodeURIComponent(result.error)}&authEmail=${encodeURIComponent(identity.email)}`);
     }
@@ -724,6 +729,22 @@ async function finishSsoCallback(c: any, identity: SsoAssertedIdentity, requestR
   }
   await issueBetterAuthSession(c, result.userId);
   return redirectToApp(c, requestRow.redirect_path ?? "/");
+}
+
+async function setSsoUnlinkedPassCookie(c: any, email: string): Promise<void> {
+  const authContext = (await auth.$context) as {
+    secret: string;
+    authCookies: { sessionToken: { attributes: { domain?: string; secure: boolean } } };
+  };
+  const { domain, secure } = authContext.authCookies.sessionToken.attributes;
+  setCookie(c, SSO_UNLINKED_PASS_COOKIE, createSsoUnlinkedPass(authContext.secret, email), {
+    httpOnly: true,
+    secure,
+    sameSite: "Lax",
+    path: "/",
+    ...(domain ? { domain } : {}),
+    maxAge: SSO_UNLINKED_PASS_TTL_SECONDS,
+  });
 }
 
 async function issueBetterAuthSession(c: any, userId: string): Promise<void> {

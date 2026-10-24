@@ -1,5 +1,7 @@
 # Completed
 
+- Close account enumeration through the unauthenticated `GET /api/sso-lookup` (2026-10-24): the enforce-SSO answer now depends only on the email's verified domain, not on whether that mailbox has an SSO link; the route runs the API per-IP rate limit; and an unlinked user refused at the SSO callback gets a 15-minute, email-bound signed pass so their next password sign-in can proceed and link SSO.
+
 - Cut the worker's serial Postgres round trips per page by 55 to 65% (2026-10-23): parameter-type cache patch for `postgres.js` (unnamed statements no longer cost two round trips), single-flight pipelined checkpoint transactions, one-statement document stage completion, and stage groups that read control state and the next stage's reads in the completion checkpoint. Adds `DOCSLURP_DB_TRACE_FILE`, a Postgres wire counter and a round-trip budget test. See `docs/db-round-trips.md`.
 
 - Give chat grounded workspace document counts (searchable and processing; filenames stay out of the system role) so it locates existing files instead of asking for uploads, and never offers uploads as a workaround for missing capabilities. Require a supporting citation beside each item an overview sentence names. Add development eval cases and offline scorer regressions; the recorded 2026-10-24 production pixel answer fails as a negative control (2026-10-24).
