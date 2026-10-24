@@ -63,6 +63,7 @@ import { startMaintenanceSweeper, stopMaintenanceSweeper } from "./services/main
 import { startAlertEvaluator, stopAlertEvaluator } from "./services/alerts/alert-evaluator.js";
 import { startWorkerFleetRefresher, stopWorkerFleetRefresher } from "./services/worker-fleet.js";
 import { startRunStartRecovery, stopRunStartRecovery } from "./services/run-start-recovery.js";
+import { startWithRetry, type StartWithRetry } from "./lib/start-with-retry.js";
 import { startWebhookOutboxListener, stopWebhookOutboxListener } from "./services/webhooks.js";
 import { startOrgSpendChangedListener, stopOrgSpendChangedListener } from "./services/spend-paused-runs.js";
 import { replaceProcessTask } from "./lib/process-singleton.js";
@@ -215,9 +216,13 @@ function shouldRunStartupMigrations(): boolean {
 }
 
 let startupPromise: Promise<void> | null = null;
+// LISTEN subscriptions retry until their dependency returns (lib/start-with-retry.ts).
+let listenerStarts: StartWithRetry[] = [];
 
 /** Stops this module instance's timers and LISTEN subscription. */
 async function stopApiBackgroundTasks(): Promise<void> {
+  for (const pending of listenerStarts) pending.stop();
+  listenerStarts = [];
   stopMaintenanceSweeper();
   await stopDirectUploadReconciler();
   await closeDirectUploadLockPool();
@@ -261,14 +266,12 @@ export function ensureApiStartup(): Promise<void> {
       startRunStartRecovery();
       // Worker capability handshake: keep the fleet view warm for gated flags (services/worker-fleet.ts).
       startWorkerFleetRefresher();
-      await startWebhookOutboxListener().catch((error: unknown) => {
-        console.error(`[webhook-outbox] listener failed; relying on the maintenance sweep: ${error instanceof Error ? error.message : String(error)}`);
-      });
+      // Not awaited: a database that is down at boot must not block startup, and the
+      // listener keeps retrying with backoff while the maintenance sweep covers the gap.
+      listenerStarts.push(startWithRetry("webhook-outbox", startWebhookOutboxListener));
       // Top-ups, auto-recharge, budget/plan changes and released leases resume
       // spend-paused runs at once (the maintenance sweep is the fallback).
-      await startOrgSpendChangedListener().catch((error: unknown) => {
-        console.error(`[spend-paused-runs] listener failed; relying on the maintenance sweep: ${error instanceof Error ? error.message : String(error)}`);
-      });
+      listenerStarts.push(startWithRetry("spend-paused-runs", startOrgSpendChangedListener));
 
       // Restart the machine when the DB pool hangs on dead sockets (services/db-watchdog.ts).
       if (process.env.NODE_ENV === "production") startDbWatchdog();
@@ -293,7 +296,12 @@ export function ensureApiStartup(): Promise<void> {
           startup_migrations_enabled: shouldRunStartupMigrations(),
         },
       });
-    })();
+    })().catch((error: unknown) => {
+      // A transient failure (database restarting during migrations or seeding) must not
+      // wedge every later call on one rejected promise: let the next caller retry.
+      startupPromise = null;
+      throw error;
+    });
   }
 
   return startupPromise;

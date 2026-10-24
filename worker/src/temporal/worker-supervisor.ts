@@ -27,6 +27,10 @@
  * `[worker-fatal] reason=<reason> ...` so the cause is greppable.
  */
 
+import { causeChain, isTransientNetworkError } from "../lib/transient-errors.js";
+
+export { isTransientNetworkError };
+
 export type FatalWorkerReason = "config" | "auth" | "schema-behind" | "native-crash" | "startup";
 
 export class FatalWorkerError extends Error {
@@ -47,16 +51,6 @@ const CONFIG_ERROR_NAMES = new Set(["TypeError", "ValueError", "RangeError", "Re
 /** Postgres undefined_table / undefined_column: the schema is older than the code. */
 const SCHEMA_BEHIND_CODES = new Set(["42P01", "42703"]);
 
-function* causeChain(error: unknown): Generator<unknown> {
-  const seen = new Set<unknown>();
-  let current: unknown = error;
-  while (current && !seen.has(current) && seen.size < 8) {
-    seen.add(current);
-    yield current;
-    current = typeof current === "object" ? (current as { cause?: unknown }).cause : undefined;
-  }
-}
-
 function describe(error: unknown): string {
   if (error instanceof Error) return error.message;
   return String(error);
@@ -75,20 +69,6 @@ export function classifyWorkerFailure(error: unknown): WorkerFailureClass {
     if (CONFIG_ERROR_NAMES.has(name) && !isTransientNetworkError(link)) return { fatal: true, reason: "config" };
   }
   return { fatal: false, reason: describe(error).split("\n")[0]!.slice(0, 300) };
-}
-
-const TRANSIENT_NETWORK_CODES = new Set([
-  "ECONNRESET", "ECONNREFUSED", "ECONNABORTED", "EPIPE", "ETIMEDOUT", "EAI_AGAIN", "ENETUNREACH", "EHOSTUNREACH",
-  "57P01", "57P02", "57P03", "08000", "08003", "08006", "CONNECTION_CLOSED", "CONNECTION_DESTROYED", "CONNECT_TIMEOUT",
-]);
-
-export function isTransientNetworkError(error: unknown): boolean {
-  for (const link of causeChain(error)) {
-    const code = typeof link === "object" && link !== null ? (link as { code?: unknown }).code : undefined;
-    if (typeof code === "string" && TRANSIENT_NETWORK_CODES.has(code)) return true;
-    if (/econnreset|connection terminated|socket hang up|connection refused|timed out|connection closed/i.test(describe(link))) return true;
-  }
-  return false;
 }
 
 /** Log the line operators grep for before a deliberate non-zero exit. */
