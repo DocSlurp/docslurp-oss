@@ -62,11 +62,13 @@
     "minSearchCalls": 0,
     "maxToolCalls": 0,
     "requiredPatterns": [
-      "cannot|can't|not available|not exposed|app|API|MCP"
+      "cannot|can't|not available|not exposed|unavailable"
     ],
     "forbiddenPatterns": [
       "I (have )?scheduled",
-      "automation (is|was) (created|scheduled|running)"
+      "automation (is|was) (created|scheduled|running)",
+      "scheduled searches/automations are started from the app",
+      "DocSlurp (?:has|supports|provides|offers) (?:built-in )?(?:scheduled searches|recurring searches|scheduled automations)"
     ]
   },
   {
@@ -88,5 +90,15 @@
       "I (have )?visually inspected",
       "I (have )?examined every pixel"
     ]
+  },
+  {
+    "id": "cross-source-attribution-v1",
+    "execution": "real-model",
+    "requireToolTrace": true,
+    "minSearchCalls": 1,
+    "requiredToolCalls": {
+      "search": 1
+    },
+    "requireCitationBindings": true
   }
 ]

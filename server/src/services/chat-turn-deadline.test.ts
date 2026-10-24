@@ -72,12 +72,12 @@ describe("chat turn time budget", () => {
     await expect(pending).rejects.toThrow("stop");
   });
 
-  it("answers a turn that produced nothing with 504 chat_deadline_exceeded", async () => {
+  it("answers a turn that produced nothing with 424 chat_deadline_exceeded", async () => {
     const app = new Hono();
     app.onError(nativeErrorHandler((_error, c) => c.json({ error: "internal" }, 500)));
     app.route("/v1/chat", new Hono().use("*", nativeApiErrors).post("/", () => { throw new ChatTurnDeadlineError(100_000); }));
     const response = await app.request("/v1/chat", { method: "POST" });
-    expect(response.status).toBe(504);
+    expect(response.status).toBe(424);
     expect(await response.json()).toMatchObject({ error: { code: "chat_deadline_exceeded" } });
   });
 });

@@ -135,9 +135,9 @@ trip the watchdog.
 | --- | --- | --- |
 | `DATABASE_POOL_MAX` | `20` | Request pool connections per API process. Budget `DATABASE_POOL_MAX + 12` per process against Postgres `max_connections` (LISTEN, the probe and Better Auth's own pool of 10), and double it for deploys that overlap old and new machines. |
 | `SEARCH_STATEMENT_TIMEOUT_MS` | `8000` | `SET LOCAL statement_timeout` for each search statement (lexical, page, community and graph branches). A timed-out branch contributes no results and the search continues with the others; `0` disables. Search SQL is also cancelled when the client disconnects. |
-| `CHAT_AGENT_TURN_DEADLINE_MS` | `100000` | Deadline for one search-agent chat turn, kept below the ~120 s edge proxy timeout. Near it, tools are disabled and the turn answers from the evidence it has (`stopReason: "deadline"`, HTTP 200); if a model/turn deadline expires it returns 504 `chat_deadline_exceeded`, even after partial text. All model, tool, search and SQL work of the turn is cancelled at it. |
+| `CHAT_AGENT_TURN_DEADLINE_MS` | `100000` | Deadline for one search-agent chat turn, kept below the ~120 s edge proxy timeout. Near it, tools are disabled and the turn answers from the evidence it has (`stopReason: "deadline"`, HTTP 200); if a model/turn deadline expires it returns 424 `chat_deadline_exceeded`, even after partial text. All model, tool, search and SQL work of the turn is cancelled at it. |
 | `CHAT_AGENT_STEP_TIMEOUT_MS` | `45000` | Longest model call for a tool-calling agent step (capped to end before the final reserve). |
-| `CHAT_AGENT_TOOL_TIMEOUT_MS` | `30000` | Longest agent tool call (capped to end before the final reserve); a slower tool is cancelled and blocks the turn with 504 `chat_tool_failed`. |
+| `CHAT_AGENT_TOOL_TIMEOUT_MS` | `30000` | Longest agent tool call (capped to end before the final reserve); a slower tool is cancelled and blocks the turn with 424 `chat_tool_failed`. |
 | `CHAT_AGENT_FINAL_RESERVE_MS` | `20000` | Part of the turn deadline kept for the final answer, at most half of it. |
 | `SEARCH_LEXICAL_CANDIDATES` | `1000` | Keyword matches ranked per lexical statement. Broader queries rank the first N matches; only the top results fetch their text. |
 | `SEARCH_MAX_CONCURRENCY` | `max(2, DATABASE_POOL_MAX / 3)` (6) | Concurrent hybrid searches per process. Extra searches wait in the app instead of the pool. `0` disables the limit. Nested searches (decompose, stepback, multi-hop) share their parent's slot. |
@@ -205,3 +205,5 @@ deprecated. They are honored only when `STORAGE_URI` is unset and are no longer
 forwarded to the sandboxed vector-writer script. The superseded-purge variables
 (`DOCSLURP_SUPERSEDED_PURGE_*`, `DOCSLURP_PURGE_SUPERSEDED_SOURCES`) were removed;
 use `purgeSupersededSources=true` on `STORAGE_URI` instead.
+
+Application-level blocked chat turns and application deadlines use HTTP 424 with stable `chat_tool_failed` / `chat_deadline_exceeded` codes. They are distinct from actual origin/proxy failures, whose 5xx statuses remain unchanged. An already-started SSE response retains its HTTP status and emits its error event instead of a successful completion; retain the request ID header for correlation. This avoids labeling a valid application error envelope as an origin gateway failure; edge delivery must still be verified after rollout.

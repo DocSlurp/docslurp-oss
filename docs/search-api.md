@@ -80,7 +80,7 @@ Every error from the native JSON API (`/v1/*`, including authentication, rate li
 
 `code` is a closed set you can branch on:
 
-- Request and access: `invalid_request`, `unauthorized`, `forbidden`, `not_found`, `workspace_not_found`, `conflict`, `payload_too_large`, `session_required`, `invalid_search_scope`, `chat_disabled`, `model_not_allowed`, `chat_tool_failed` (HTTP 502, or 504 for a tool timeout: a required tool failed and the task is blocked), `chat_deadline_exceeded` (HTTP 504: a search-agent model/turn deadline was reached, even if partial text was streamed).
+- Request and access: `invalid_request`, `unauthorized`, `forbidden`, `not_found`, `workspace_not_found`, `conflict`, `payload_too_large`, `session_required`, `invalid_search_scope`, `chat_disabled`, `model_not_allowed`, `chat_tool_failed` (HTTP 424: a required tool failed and the task is blocked), `chat_deadline_exceeded` (HTTP 424: a search-agent model/turn deadline was reached, even if partial text was streamed).
 - Limits: `rate_limited`, `spend_limit_exceeded`, `daily_page_limit`, `ip_temporarily_blocked`.
 - Billing: `payment_required`, `credit_exhausted`, `workspace_budget_paused`, `org_budget_paused`, `minimum_credit_required`, `plan_not_entitled`.
 - Uploads: `unsupported_type`, `file_too_large`, `unreadable_source`.
@@ -138,7 +138,7 @@ A turn that fails on our side is not charged. When `/v1/chat` fails with an erro
 
 `stopReason` is chosen deterministically, without reading the answer's meaning. The first rule that matches wins:
 
-1. `timeout` (the turn or model step reached its deadline; HTTP 504 `chat_deadline_exceeded`) or `error` (any other failure). Both appear only in traces and metrics, because the HTTP response is then an error.
+1. `timeout` (the turn or model step reached its deadline; HTTP 424 `chat_deadline_exceeded`) or `error` (any other failure). Both appear only in traces and metrics, because the HTTP response is then an error.
 2. `deadline`: the turn's time budget ran low, so tools were disabled and the answer was forced from the evidence gathered so far, without any failed tool or model call. The response is HTTP 200 only if the forced answer completes before the deadline.
 3. `tool_call_limit`: historical successful-turn classification; refused calls now block the turn with `chat_tool_failed`.
 4. `step_limit`: the loop ended mid tool call, or the last step ran with tools disabled right after a tool-calling step. With `maxSteps: 1`, tools are disabled from the start, so that does not count as a limit hit.
@@ -154,7 +154,7 @@ An agent turn has a deadline below the ~120-second timeout of common edge proxie
 |---|---|---|
 | `CHAT_AGENT_TURN_DEADLINE_MS` | `100000` | Hard stop for the whole turn. Everything the turn started (model calls, tools, nested searches and their SQL, nested answers) is cancelled at it. |
 | `CHAT_AGENT_STEP_TIMEOUT_MS` | `45000` | Longest model call for a step that may still call tools, further capped to end before the final reserve. The final answer step may use all the time left. |
-| `CHAT_AGENT_TOOL_TIMEOUT_MS` | `30000` | Longest tool call, also capped to end before the final reserve. A tool over budget is cancelled and blocks the turn with HTTP 504 `chat_tool_failed`. |
+| `CHAT_AGENT_TOOL_TIMEOUT_MS` | `30000` | Longest tool call, also capped to end before the final reserve. A tool over budget is cancelled and blocks the turn with HTTP 424 `chat_tool_failed`. |
 | `CHAT_AGENT_FINAL_RESERVE_MS` | `20000` | Time kept for the answer (at most half the deadline). Inside it, tools are disabled; a late tool call is refused and blocks the turn without running. |
 
 Any failed tool (including an HTTP-200 batch with failed items), invalid tool call, exhausted tool budget, permission denial or timeout blocks the task. Concurrent tools are cancelled and no follow-up model answer or automatic retry runs. A successful zero-hit search is not a failure. Model/turn timeouts also block; streamed partial text is not a completed answer. Steps cancelled mid-flight still record their provider usage: from the stream's usage receipt when the model call had finished, from OpenRouter's generation receipt by id, or as an estimate from the prompt and streamed characters, marked `usageEstimated: true`. These usage events carry `turnOutcome: "aborted"` and `abortReason` (`deadline`, `step_timeout`, `client_disconnect` or `error`). When the client disconnects, the turn stops at once and returns nothing.
@@ -315,3 +315,5 @@ credit-blocked and outsider requests make no provider calls. No deployment or
 provider corpus evaluation follows from enabling the implementation in source.
 
 Workspaces that index on demand (page map or page images) add a `deferred` stats block to search results; see [Deferred indexing modes](deferred-indexing.md).
+
+Application-level blocked chat turns and application deadlines use HTTP 424 with stable `chat_tool_failed` / `chat_deadline_exceeded` codes. They are distinct from actual origin/proxy failures, whose 5xx statuses remain unchanged. An already-started SSE response retains its HTTP status and emits its error event instead of a successful completion; retain the request ID header for correlation. This avoids labeling a valid application error envelope as an origin gateway failure; edge delivery must still be verified after rollout.
