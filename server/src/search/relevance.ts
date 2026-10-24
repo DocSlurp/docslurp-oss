@@ -124,16 +124,12 @@ function contentTerms(query: string): string[] {
   return [...new Set(tokenize(query).filter((term) => !coverageStopWords.has(term)))];
 }
 
-/** A chunk's text tokenized once; phrase relevance checks many windows against the same chunk. */
-interface TextIndex { lower: string; words: Set<string> }
-
-function indexText(text: string): TextIndex {
-  const lower = text.toLowerCase();
-  return { lower, words: new Set(tokenize(lower)) };
-}
-
-function coverageOf(terms: string[], { lower, words }: TextIndex): number {
+/** Share of the query's distinct content terms present in the text (prefix match on stems). */
+export function termCoverage(query: string, text: string): number {
+  const terms = contentTerms(query);
   if (terms.length === 0) return 0;
+  const lower = text.toLowerCase();
+  const words = new Set(tokenize(lower));
   const matched = terms.filter((term) => {
     const root = stem(term);
     // Unsegmented scripts have no word boundaries to prefix-match on.
@@ -142,12 +138,6 @@ function coverageOf(terms: string[], { lower, words }: TextIndex): number {
     return false;
   });
   return matched.length / terms.length;
-}
-
-/** Share of the query's distinct content terms present in the text (prefix match on stems). */
-export function termCoverage(query: string, text: string): number {
-  const terms = contentTerms(query);
-  return terms.length === 0 ? 0 : coverageOf(terms, indexText(text));
 }
 
 /**
@@ -164,24 +154,18 @@ export function queryPhraseWindows(query: string): string[] {
  * Relevance of a row that matched a phrase window. A window with two or more
  * content terms found in the chunk is an exact multi-word match (1). Otherwise
  * the row only shared a single word and gets the strict-majority score.
- * The chunk is tokenized once for all windows (this ran per window before and dominated search CPU).
  */
 export function phraseRelevance(query: string, text: string): number {
-  const index = indexText(text);
   for (const window of queryPhraseWindows(query)) {
-    const terms = contentTerms(window);
-    if (terms.length >= 2 && coverageOf(terms, index) === 1) return 1;
+    if (contentTerms(window).length >= 2 && termCoverage(window, text) === 1) return 1;
   }
-  return lexicalFromCoverage(coverageOf(contentTerms(query), index));
-}
-
-function lexicalFromCoverage(coverage: number): number {
-  return coverage > LEXICAL_MIN_COVERAGE ? coverage : 0;
+  return lexicalRelevance(query, text);
 }
 
 /** Coverage counts as lexical evidence only for a majority of the query's terms. */
 export function lexicalRelevance(query: string, text: string): number {
-  return lexicalFromCoverage(termCoverage(query, text));
+  const coverage = termCoverage(query, text);
+  return coverage > LEXICAL_MIN_COVERAGE ? coverage : 0;
 }
 
 /**
