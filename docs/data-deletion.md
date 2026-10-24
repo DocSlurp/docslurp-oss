@@ -22,8 +22,17 @@ Because the triggers run inside Postgres, every delete path is covered: single
 and bulk document delete, workspace delete, run retention, discarded intake,
 org and account deletion, and a manual `delete` in psql.
 
-Organization deletion also queues `vector_table` entries, so the org's LanceDB
-tables are dropped whole instead of being deleted one document at a time.
+Every workspace has its own LanceDB database per embedding space
+(`<LANCEDB_URI>/<orgId>/<workspaceId>/vectors-<model>-<dimensions>`). Workspace
+deletion (`deleteWorkspaceData`, which organization deletion also runs for each
+workspace) queues `vector_table` entries for them first, so they are dropped
+whole instead of being deleted one document at a time. While documents are
+still in flight the drop waits out the same 15-minute grace as their cleanup.
+
+A dedup copy shares its source's LanceDB rows only inside the source's
+workspace. A copy in another workspace has its own rows, so deleting the source
+removes the source's rows even while that copy lives; the shared storage
+artifacts stay until the last copy is gone.
 
 ## The sweep
 
@@ -81,12 +90,12 @@ order:
 4. It deletes undelivered `webhook_outbox` rows about the org's runs.
    Webhooks are user-scoped, so the webhook endpoints themselves belong to
    their users.
-5. It queues `vector_table` drops for every LanceDB table the org wrote to.
-6. It deletes every workspace (`deleteWorkspaceData`), and the triggers
-   enqueue storage cleanup.
-7. It deletes org-scoped non-billing rows: AI operations, graph jobs, budget
+5. It deletes every workspace (`deleteWorkspaceData`): each queues
+   `vector_table` drops for its LanceDB databases, and the triggers enqueue
+   storage cleanup.
+6. It deletes org-scoped non-billing rows: AI operations, graph jobs, budget
    alerts, notification preferences and deliveries, and upload sessions.
-8. It anonymizes the tombstone: `name = 'Deleted organization'`, `slug`,
+7. It anonymizes the tombstone: `name = 'Deleted organization'`, `slug`,
    SSO config, budgets and auto top-up cleared, and `offboarded_at` set.
 
 The purge is idempotent. If it is interrupted after step 2 (`deleted_at` set,
