@@ -25,7 +25,7 @@ setup 15 | embed 160 (stub 150) | vector leg 75-115 (ANN ~22 CPU ms measured dir
 The commit log is the experiment log (`git log perf/search-2026-10-23`): every experiment is committed with its result in the message, rejected ones undone by a forward revert.
 Tests: `search-embedding-cache` (updated: the planner returns an in-flight embedding promise), `search-service`, `lancedb-prewarm`, `search-lancedb-native.db` and `relevance-floor` pass. `lancedb.test.ts` "preserves HNSW search breadth..." fails identically on the unmodified base (pre-existing). Server `tsc` reports no errors in touched files.
 
-## Production telemetry (SigNoz, 7 d, read-only; `prod-signoz-spans-7d-split.json`, split at 22:45Z deploy)
+## Production telemetry (SigNoz, 7 d, read-only; aggregate numbers only, raw exports not published)
 - Only spans are usable: `[search-timing]` and `[lancedb-s3]` log lines are not retained in SigNoz (0 matches in 7 d), so cache hit ratio and per-phase timings are unavailable from prod. This gap should be closed.
 - 2,238 of ~2,540 `GET /v1/search` traces are the 2026-10-17 load test; organic traffic is a handful per day. The percentiles are load-test percentiles (queueing on shared CPUs), not user experience.
 - `GET /v1/search` p50 2.29 s / p95 4.56 s / p99 9.3 s; `POST /v1/search` p50 1.54 s / p95 2.76 s. Inside, `api.search` p50 1.9 s on the same traces, so ~280-350 ms passes before search starts: Better Auth `get-session` (65 ms on those traces, two ~32 ms DB findOne calls) plus other pre-search work. Post-deploy `get-session` p50 is 15 ms (was 27).
