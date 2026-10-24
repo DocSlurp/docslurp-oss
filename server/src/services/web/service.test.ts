@@ -101,7 +101,7 @@ describe("runWebCapability", () => {
 
   it("keeps the shortened-page note intact for the chat model", async () => {
     const t = setup();
-    t.run.mockResolvedValueOnce({ data: { results: [{ url: "https://example.com/long", markdown: "word ".repeat(5_000) }] } as never, costUsd: 0.001, costSource: "reported" as const });
+    t.run.mockResolvedValueOnce({ data: { results: [{ url: "https://example.com/long", markdown: "word ".repeat(5_000) }] } as never, costUsd: 0.001, costSource: "reported" as const, units: { amount: 1, unit: "credits" } });
     const result = await runWebCapability("search", { ...search, query: "long page", includeContent: true }, { ...ctx, surface: "chat" });
     expect(result.results[0]!.markdown).toContain(CHAT_SHORTENED_NOTE);
     expect(result.results[0]!.markdown).not.toContain("suppressed");
