@@ -23,6 +23,7 @@ export function createExaAdapter(): WebProviderAdapter {
       : { data, costUsd: estimateUsd, costSource: "estimated" };
   };
   const headers = (apiKey: string) => ({ "x-api-key": apiKey });
+  // Snippet searches request highlights, which measured at no extra cost (2026-10-23); text adds per page.
   const searchEstimate = (deep: boolean, includeContent: boolean, limit: number) =>
     (deep ? SEARCH_AUTO : SEARCH_LITE) + (includeContent ? limit * CONTENT_PER_PAGE : 0);
 
@@ -40,7 +41,9 @@ export function createExaAdapter(): WebProviderAdapter {
               ...(input.includeDomains?.length ? { includeDomains: input.includeDomains } : {}),
               ...(input.excludeDomains?.length ? { excludeDomains: input.excludeDomains } : {}),
               ...(input.recency ? { startPublishedDate: since(input.recency) } : {}),
-              ...(input.includeContent ? { contents: { text: { maxCharacters: input.maxCharacters } } } : {}),
+              contents: input.includeContent
+                ? { text: { maxCharacters: input.maxCharacters } }
+                : { highlights: { numSentences: 2, highlightsPerUrl: 1 } },
             },
           });
           const results = (body.results ?? []).flatMap((item) => {

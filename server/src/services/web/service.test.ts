@@ -42,7 +42,9 @@ describe("runWebCapability", () => {
     expect(JSON.stringify(result)).not.toMatch(/\b(jina|tavily|exa|firecrawl|tokens)\b/i);
     expect(t.recordCost).toHaveBeenCalledWith(expect.objectContaining({
       scope: { orgId: "org-1", workspaceId: "ws-1" },
-      event: expect.objectContaining({ provider: "jina", model: "web-search", metric: "web-search", costCents: 0.07 }),
+      // Our cost, never customer spend: zero cost_cents, provider cost in metadata.
+      event: expect.objectContaining({ provider: "jina", model: "web-search", metric: "web-search", costCents: 0,
+        metadata: expect.objectContaining({ providerCostCents: 0.07, billable: false, costRole: "provider" }) }),
     }));
     expect(t.recordCharge).toHaveBeenCalledWith(expect.objectContaining({ charge: expect.objectContaining({ metric: "web-search", credits: 1 }) }));
   });
@@ -55,6 +57,14 @@ describe("runWebCapability", () => {
     expect(t.run).toHaveBeenCalledOnce();
     expect(t.recordCost).toHaveBeenCalledOnce();
     expect(t.recordCharge).toHaveBeenCalledTimes(2);
+  });
+
+  it("charges nothing when nothing comes back, but still records the provider cost", async () => {
+    const t = setup();
+    t.run.mockResolvedValueOnce({ data: { results: [] }, costUsd: 0.0005, costSource: "reported" as const, units: { amount: 10_000, unit: "tokens" } });
+    expect((await runWebCapability("search", { ...search, query: "nothing" }, ctx)).usage.credits).toBe(0);
+    expect(t.recordCharge).not.toHaveBeenCalled();
+    expect(t.recordCost).toHaveBeenCalledOnce();
   });
 
   it("charges deep or content-returning searches double", async () => {

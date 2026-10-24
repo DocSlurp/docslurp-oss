@@ -3,9 +3,10 @@ import { Hono, type Context } from "hono";
 
 import { apiStatusError, nativeApiErrors } from "../lib/api-error.js";
 import { requestIp, requestUserAgent } from "../lib/request-context.js";
-import { actorHasAnyApiKeyScope, getRequestActor, loadActorScopedWorkspace, resolveActorWorkspaceId, setRequestActor, type RequestActor } from "../lib/request-actor.js";
+import { actorHasAnyApiKeyScope, getRequestActor, loadActorScopedWorkspace, lookupActorWorkspace, resolveActorWorkspaceId, setRequestActor, type RequestActor } from "../lib/request-actor.js";
 import { acceptApiKeys } from "../lib/route-auth.js";
-import { spendAwareErrorHandler } from "../services/billing/spend-guard.js";
+import { assertCanSpend, spendAwareErrorHandler } from "../services/billing/spend-guard.js";
+import { WorkspaceIntakeError } from "../services/workspace-intake.js";
 import { validationHook } from "../lib/validation.js";
 import { createWebsiteWorkspaceIntake } from "../services/workspace-intake-actions.js";
 import { runCreationErrorResponse, workspaceIntakeErrorResponse } from "./uploads.js";
@@ -81,8 +82,19 @@ function createWebRoutes(surface: WebSurface) {
       return apiStatusError(c, 403, "Workspace-scoped API keys cannot create new workspaces", { code: "workspace_scope_forbidden" });
     }
     try {
-      // The crawl is billed to the target workspace, or the default one when this request creates a workspace.
-      const scope = await webCallWorkspace(actor, body.workspace).catch(() => webCallWorkspace(actor, undefined));
+      // Preflight before any paid crawl: the target must exist and be usable, or be a
+      // new name the actor may create; spend must allow the ingest run that follows.
+      const lookup = await lookupActorWorkspace(actor, body.workspace?.trim() || null);
+      let scopeRef: string | undefined;
+      if (lookup.ref.kind !== "default") {
+        const found = "workspace" in lookup ? lookup.workspace : null;
+        if (found) scopeRef = found.id;
+        else if (lookup.ref.kind === "id") throw new WorkspaceIntakeError("Workspace not found", 404);
+        else if (restricted) throw new WorkspaceIntakeError("This API key is limited to specific workspaces and cannot create new ones.", 403);
+        // A new workspace name: the crawl is billed in the default workspace's scope.
+      }
+      const scope = await webCallWorkspace(actor, scopeRef);
+      await assertCanSpend(scope.orgId, scope.id, { kind: "job" });
       const result = await createWebsiteWorkspaceIntake({
         userId: actor.userId,
         orgId: scope.orgId,

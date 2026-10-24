@@ -53,6 +53,9 @@ function emptyTraversal(capability: WebCapability, data: unknown): boolean {
   return false;
 }
 
+/** Margin between a crawl's soft deadline (stop polling, return pages) and its hard abort. */
+const CRAWL_DEADLINE_MARGIN_MS = 8_000;
+
 /** Per-attempt time limits; crawl uses the caller's remaining deadline. */
 const ATTEMPT_TIMEOUT_MS: Record<WebCapability, number> = { search: 20_000, fetch: 45_000, map: 45_000, crawl: Number.POSITIVE_INFINITY };
 
@@ -143,7 +146,9 @@ export class WebRouter {
       const started = this.now();
       const signal = AbortSignal.any([args.signal, AbortSignal.timeout(timeoutMs)]);
       try {
-        const result = await span.run(() => handler.run(input, { apiKey: this.options.keys[adapter.id]!, signal, fetch: this.fetchImpl, deadlineMs: timeoutMs }));
+        // Async jobs (crawl) get a soft deadline well before the hard abort, so they can stop and return what they have.
+        const softDeadlineMs = capability === "crawl" ? Math.max(5_000, timeoutMs - CRAWL_DEADLINE_MARGIN_MS) : timeoutMs;
+        const result = await span.run(() => handler.run(input, { apiKey: this.options.keys[adapter.id]!, signal, fetch: this.fetchImpl, deadlineMs: softDeadlineMs }));
         const runtimeMs = this.now() - started;
         const isEmpty = emptyTraversal(capability, result.data);
         attempts.push({ provider: adapter.id, outcome: isEmpty ? "empty" : "ok", runtimeMs });
@@ -158,9 +163,13 @@ export class WebRouter {
         continue;
       } catch (error) {
         const runtimeMs = this.now() - started;
+        // A provider job that started before failing reports what it spent (`costUsd` on the error).
+        const spentUsd = (error as { costUsd?: unknown } | null)?.costUsd;
+        if (typeof spentUsd === "number" && spentUsd > 0) paid.push({ provider: adapter.id, costUsd: spentUsd, costSource: "estimated" });
         if (args.signal.aborted) {
           attempts.push({ provider: adapter.id, outcome: "error", runtimeMs });
           span.end(error);
+          if (error && typeof error === "object") Object.assign(error, { attempts, paid });
           throw error;
         }
         const failure = error instanceof WebProviderError ? error
@@ -181,8 +190,8 @@ export class WebRouter {
     if (empty) return empty;
     const failure = lastError instanceof WebProviderError ? lastError : undefined;
     if (failure?.kind === "invalid_request") {
-      throw Object.assign(new WebToolError(400, "invalid_request", `The web ${capability} request was rejected. Check the query or URLs and try again.`), { attempts });
+      throw Object.assign(new WebToolError(400, "invalid_request", `The web ${capability} request was rejected. Check the query or URLs and try again.`), { attempts, paid });
     }
-    throw Object.assign(new WebToolError(502, "unavailable", `Web ${capability} failed. Try again shortly.`), { attempts });
+    throw Object.assign(new WebToolError(502, "unavailable", `Web ${capability} failed. Try again shortly.`), { attempts, paid });
   }
 }

@@ -57,7 +57,8 @@ export function createTavilyAdapter(options: { usdPerCredit: number }): WebProvi
             });
           const pages = (body.results ?? []).flatMap((item) => {
             const url = str(item.url);
-            return url ? [page({ url, title: str(item.title), markdown: clip(item.raw_content, input.maxCharacters) })] : [];
+            const markdown = clip(item.raw_content, input.maxCharacters);
+            return url && markdown ? [page({ url, title: str(item.title), markdown })] : [];
           });
           const failed = (body.failed_results ?? []).flatMap((item) => str(item.url) ? [{ url: str(item.url)!, reason: "unreadable" }] : []);
           return cost({ pages, failed }, body, extractCredits(pages.length, input.depth));
@@ -92,7 +93,8 @@ export function createTavilyAdapter(options: { usdPerCredit: number }): WebProvi
           });
           const pages = (body.results ?? []).flatMap((item) => {
             const url = str(item.url);
-            return url ? [page({ url, title: str(item.title), markdown: clip(item.raw_content, input.maxCharacters) })] : [];
+            const markdown = clip(item.raw_content, input.maxCharacters);
+            return url && markdown ? [page({ url, title: str(item.title), markdown })] : [];
           }).slice(0, input.limit);
           return cost({ pages }, body, Math.max(1, pages.length) * 0.3);
         },

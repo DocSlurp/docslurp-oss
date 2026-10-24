@@ -14,7 +14,7 @@ import { createExaAdapter } from "./providers/exa.js";
 import { createFirecrawlAdapter } from "./providers/firecrawl.js";
 import { createJinaAdapter } from "./providers/jina.js";
 import { createTavilyAdapter } from "./providers/tavily.js";
-import { WebRouter, type WebAttempt } from "./router.js";
+import { WebRouter, type WebAttempt, type WebRouteResult } from "./router.js";
 import {
   WEB_PROVIDER_IDS, WebToolError,
   type WebCapability, type WebInput, type WebOutput, type WebPage, type WebProviderId,
@@ -106,6 +106,7 @@ function deps(): WebServiceDeps {
 export function setWebServiceDeps(next: Partial<WebServiceDeps> | undefined): void {
   defaultDeps = next ? { ...deps(), ...next } : undefined;
   cache.clear();
+  cachedBytes = 0;
   orgCalls.clear();
 }
 
@@ -117,9 +118,18 @@ export function webCapabilityAvailable(capability: WebCapability): boolean {
 
 // --- Cache: identical public-web requests within the TTL reuse the result (no provider spend). ---
 
-const cache = new Map<string, { expiresAt: number; value: unknown }>();
-/** Results larger than this are not cached, bounding memory. */
-const MAX_CACHED_BYTES = 1_000_000;
+const cache = new Map<string, { expiresAt: number; value: unknown; bytes: number }>();
+/** Per-entry and total caps (JSON characters ≈ bytes), bounding heap use. */
+const MAX_ENTRY_BYTES = 512_000;
+const MAX_TOTAL_BYTES = 48_000_000;
+let cachedBytes = 0;
+
+function cacheDelete(key: string): void {
+  const entry = cache.get(key);
+  if (!entry) return;
+  cachedBytes -= entry.bytes;
+  cache.delete(key);
+}
 
 function cacheKey(capability: WebCapability, input: unknown): string {
   return createHash("sha256").update(`${capability}\0${JSON.stringify(input)}`).digest("hex");
@@ -128,16 +138,20 @@ function cacheKey(capability: WebCapability, input: unknown): string {
 function cacheGet<T>(key: string, now: number): T | undefined {
   const hit = cache.get(key);
   if (!hit) return undefined;
-  if (hit.expiresAt <= now) { cache.delete(key); return undefined; }
+  if (hit.expiresAt <= now) { cacheDelete(key); return undefined; }
   cache.delete(key);
   cache.set(key, hit); // LRU: most recent last
   return hit.value as T;
 }
 
 function cachePut(key: string, value: unknown, now: number, config: WebConfig): void {
-  if (!config.cacheTtlMs || !config.cacheMaxEntries || JSON.stringify(value).length > MAX_CACHED_BYTES) return;
-  cache.set(key, { expiresAt: now + config.cacheTtlMs, value });
-  while (cache.size > config.cacheMaxEntries) cache.delete(cache.keys().next().value!);
+  if (!config.cacheTtlMs || !config.cacheMaxEntries) return;
+  const bytes = JSON.stringify(value).length;
+  if (bytes > MAX_ENTRY_BYTES) return;
+  cacheDelete(key);
+  cache.set(key, { expiresAt: now + config.cacheTtlMs, value, bytes });
+  cachedBytes += bytes;
+  while (cache.size > config.cacheMaxEntries || cachedBytes > MAX_TOTAL_BYTES) cacheDelete(cache.keys().next().value!);
 }
 
 // --- Per-organization rate limit (sliding minute, per process). ---
@@ -154,6 +168,31 @@ function admitOrgCall(orgKey: string, now: number, perMinute: number): number | 
   orgCalls.set(orgKey, recent);
   if (orgCalls.size > 10_000) orgCalls.delete(orgCalls.keys().next().value!);
   return null;
+}
+
+type PaidAttempt = WebRouteResult<WebCapability>["paid"][number];
+
+/**
+ * Provider cost is our cost, never customer spend: written like priced AI
+ * receipts (`costCents: 0`, `providerCostCents`, `billable: false`), so usage
+ * totals, budgets and key limits only count the unit charge. One event per paid
+ * attempt; the model column names only the capability.
+ */
+async function recordProviderCosts(d: WebServiceDeps, ctx: WebCallContext, capability: WebCapability, callId: string,
+  paid: PaidAttempt[], attempts: WebAttempt[], served: WebProviderId | undefined): Promise<void> {
+  await Promise.all(paid.map((spent, index) => d.recordCost({
+    userId: ctx.userId,
+    scope: { orgId: ctx.orgId, workspaceId: ctx.workspaceId },
+    event: {
+      id: `web-cost:${callId}:${index}`, provider: spent.provider, model: `web-${capability}`, metric: `web-${capability}`,
+      amount: spent.units?.amount ?? 1, unit: spent.units?.unit ?? "request", costCents: 0,
+      metadata: {
+        providerCostCents: cents(spent.costUsd), billable: false, costRole: "provider",
+        capability, surface: ctx.surface, callId, costSource: spent.costSource, served: spent.provider === served,
+        attempts: attempts.map((attempt) => ({ provider: attempt.provider, outcome: attempt.outcome, runtimeMs: attempt.runtimeMs })),
+      },
+    },
+  }).catch((error) => console.error(`[web] cost record failed call=${callId}: ${error instanceof Error ? error.message : String(error)}`))));
 }
 
 function cents(usd: number): number {
@@ -177,6 +216,8 @@ function dedupe<C extends WebCapability>(capability: C, output: WebOutput<C>): W
 // --- Billing ---
 
 function chargeFor<C extends WebCapability>(capability: C, input: WebInput<C>, output: WebOutput<C>): { metric: string; amount: number; unit: string; credits: number } | null {
+  // Nothing returned, nothing charged (our provider cost is still recorded).
+  if (resultCount(capability, output) === 0) return null;
   if (capability === "search") {
     const search = input as WebInput<"search">;
     return { metric: BILLABLE_UNIT_METRICS.webSearch, amount: 1, unit: "search",
@@ -288,20 +329,16 @@ export async function runWebCapability<C extends WebCapability>(
           "docslurp.web.cost_source": routed.result.costSource, "docslurp.web.attempts": attempts.length });
         // Provider cost is our cost: internal, non-debiting events, one per paid attempt. The model
         // column names only the capability, since run cost breakdowns show models to customers.
-        await Promise.all(routed.paid.map((spent, index) => d.recordCost({
-          userId: ctx.userId,
-          scope: { orgId: ctx.orgId, workspaceId: ctx.workspaceId },
-          event: {
-            id: `web-cost:${callId}:${index}`, provider: spent.provider, model: `web-${capability}`, metric: `web-${capability}`,
-            amount: spent.units?.amount ?? 1, unit: spent.units?.unit ?? "request", costCents: cents(spent.costUsd),
-            metadata: { capability, surface: ctx.surface, callId, costSource: spent.costSource, served: spent.provider === provider,
-              attempts: attempts.map((attempt) => ({ provider: attempt.provider, outcome: attempt.outcome, runtimeMs: attempt.runtimeMs })) },
-          },
-        }).catch((error) => console.error(`[web] cost record failed call=${callId}: ${error instanceof Error ? error.message : String(error)}`))));
+        await recordProviderCosts(d, ctx, capability, callId, routed.paid, attempts, provider);
         if (cacheable) cachePut(key, output, d.now(), d.config);
       } catch (error) {
-        const failed = (error as { attempts?: WebAttempt[] }).attempts;
-        if (failed) Object.assign(fields, { "docslurp.web.attempts": failed.length });
+        // Attempts that did paid work before the call failed (or the caller left) are still our cost.
+        const failed = error as { attempts?: WebAttempt[]; paid?: PaidAttempt[] };
+        if (failed.attempts) Object.assign(fields, { "docslurp.web.attempts": failed.attempts.length });
+        if (failed.paid?.length) {
+          Object.assign(fields, { "docslurp.web.cost_cents": cents(failed.paid.reduce((sum, item) => sum + item.costUsd, 0)) });
+          await recordProviderCosts(d, ctx, capability, callId, failed.paid, failed.attempts ?? [], undefined);
+        }
         throw error;
       }
     }

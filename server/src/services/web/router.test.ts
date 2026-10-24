@@ -50,6 +50,14 @@ describe("WebRouter", () => {
     expect(exa.calls).not.toHaveBeenCalled();
   });
 
+  it("keeps the spend of a provider job that started and then failed", async () => {
+    const firecrawl = adapter("firecrawl", 0.002, async () => {
+      throw Object.assign(new WebProviderError("unavailable", "firecrawl crawl failed"), { costUsd: 0.003 });
+    });
+    const error = await router([firecrawl]).run().catch((caught: unknown) => caught) as { paid?: Array<{ costUsd: number }> };
+    expect(error.paid?.map((p) => p.costUsd)).toEqual([0.003]);
+  });
+
   it("returns a generic error that never names a provider", async () => {
     const tavily = adapter("tavily", 0.008, async () => { throw new WebProviderError("quota_exhausted", "tavily responded 432: plan limit", 432); });
     const error = await router([tavily]).run().catch((caught: unknown) => caught) as WebToolError;

@@ -116,6 +116,8 @@ export function createFirecrawlAdapter(options: { usdPerCredit: number }): WebPr
           type Status = Credits & { status?: unknown; data?: Array<Record<string, unknown>>; next?: unknown };
           let status: Status = {};
           let finished = false;
+          // A started crawl has spent credits even if we fail to collect it; report them on the error.
+          const spent = () => usd(num(status.creditsUsed) ?? (status.data?.length ?? 1));
           try {
             while (Date.now() - started < ctx.deadlineMs - POLL_MS) {
               await sleep(POLL_MS, ctx.signal);
@@ -123,6 +125,9 @@ export function createFirecrawlAdapter(options: { usdPerCredit: number }): WebPr
               if (status.status === "failed" || status.status === "cancelled") throw new WebProviderError("unavailable", `firecrawl crawl ${String(status.status)}`);
               if (status.status === "completed") { finished = true; break; }
             }
+          } catch (error) {
+            if (error && typeof error === "object") Object.assign(error, { costUsd: spent() });
+            throw error;
           } finally {
             // Stop a crawl we no longer wait for, so it stops spending credits.
             if (!finished) await ctx.fetch(`${BASE}/crawl/${encodeURIComponent(id)}`, { method: "DELETE", headers: auth(ctx.apiKey) }).catch(() => undefined);
