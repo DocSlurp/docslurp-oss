@@ -1,4 +1,5 @@
 import { workspaceSettingsProposalSchema } from "./workspace-settings-proposal.js";
+import { chatAgentModesSchema } from "./workspace.js";
 import type { UIMessage } from "ai";
 import { z } from "zod";
 import { citationLocatorSchema } from "./citation-locator.js";
@@ -136,6 +137,8 @@ export const workspaceChatMetaSchema = z.object({
   startedAt: z.string(),
   completedAt: z.string(),
   availability: workspaceChatAvailabilitySchema.nullable().optional(),
+  /** Search-agent turns: the web and suggestions modes the turn actually ran with. */
+  modes: chatAgentModesSchema.optional(),
 });
 export type WorkspaceChatMeta = z.infer<typeof workspaceChatMetaSchema>;
 

@@ -413,7 +413,7 @@ export type ChatInput = {
    * refused with HTTP 400 `model_not_allowed`, never replaced by the default.
    */
   model?: string;
-  /** Search-agent budgets for this turn; non-admin callers can only lower the defaults. */
+  /** Search-agent budgets and modes for this turn (`chat()` only; `chatStream` ignores them); non-admin callers can only lower the budgets. */
   agent?: {
     /** Model steps, 1-12 (default 8). The last step always answers. */
     maxSteps?: number;
@@ -423,6 +423,10 @@ export type ChatInput = {
     searchConcurrency?: number;
     /** false: a direct answer from one retrieval and one model call, without the agent's tools. */
     tools?: boolean;
+    /** false: no web tools this turn. Omitted or true: offered only when the deployment, workspace and key allow them. */
+    web?: boolean;
+    /** Suggestions mode (default false): flag ingest and search problems and propose settings changes for a person to apply. */
+    suggestions?: boolean;
   };
   /** Retrieval overrides for this request only; workspace defaults stay as they are. */
   retrieval?: {
@@ -447,6 +451,11 @@ export type ChatResponse = {
   availability: SearchAvailability | null;
   usage: { inputTokens: number; outputTokens: number; totalTokens: number; costCents?: number; costSource?: string };
   runtime: { startedAt: string; completedAt: string; totalMs: number };
+  /** Diagnostics. Search-agent turns report the modes they ran with; other fields may change between releases. */
+  debug?: {
+    modes?: { web: "on" | "off" | "unavailable"; suggestions: boolean };
+    [key: string]: unknown;
+  };
 };
 
 /** SSE events from {@link DocSlurpClient.chatStream}: retrieval status, the answer, then the done envelope. */

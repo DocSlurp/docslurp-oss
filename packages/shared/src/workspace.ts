@@ -322,6 +322,21 @@ export const chatAgentLimitsInputSchema = z.object({
    * agent decides which tools to call.
    */
   tools: z.boolean().optional(),
+  /**
+   * Web tools (webSearch, webFetch) for this turn. false: never offered.
+   * Omitted or true: offered when the deployment, the workspace's
+   * `pipeline.webTools` and its privacy mode allow them; a request cannot
+   * enable them past those policies.
+   */
+  web: z.boolean().optional(),
+  /**
+   * Suggestions mode: the agent watches for ingestion and search problems
+   * (zero or weak results, failed or still-processing files, degraded
+   * extraction) and proposes specific workspace-setting changes. A proposal
+   * never applies itself; the user confirms each one with Apply. Default off
+   * for API callers; the DocSlurp app turns it on unless the user switches it off.
+   */
+  suggestions: z.boolean().optional(),
 }).strict();
 export type ChatAgentLimitsInput = z.infer<typeof chatAgentLimitsInputSchema>;
 
@@ -385,6 +400,17 @@ export const chatAgentTimeBudgetDebugSchema = z.object({
 });
 export type ChatAgentTimeBudgetDebug = z.infer<typeof chatAgentTimeBudgetDebugSchema>;
 
+/**
+ * Agent modes a turn ran with. `web`: "on" (web tools offered), "off" (the
+ * request turned them off) or "unavailable" (requested, but the deployment,
+ * workspace setting, privacy mode or key scope does not allow them).
+ */
+export const chatAgentModesSchema = z.object({
+  web: z.enum(["on", "off", "unavailable"]),
+  suggestions: z.boolean(),
+});
+export type ChatAgentModes = z.infer<typeof chatAgentModesSchema>;
+
 export const workspaceChatDebugSchema = z.object({
   /** Search-agent turns only: the `model` the caller asked for (null when omitted). */
   requestedModel: z.string().nullable().optional(),
@@ -404,6 +430,7 @@ export const workspaceChatDebugSchema = z.object({
   stepUsage: z.array(chatAgentStepUsageSchema).optional(),
   limits: chatAgentLimitsSchema.optional(),
   timeBudget: chatAgentTimeBudgetDebugSchema.optional(),
+  modes: chatAgentModesSchema.optional(),
   toolCalls: z.array(z.object({
     id: z.string(), name: z.string(), status: z.enum(["loading", "success", "error"]),
     runtimeMs: z.number().nonnegative().optional(),

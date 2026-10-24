@@ -370,6 +370,9 @@ export const documents = pgTable(
     index("documents_workspace_in_flight_idx")
       .using("btree", table.workspaceId.asc().nullsLast().op("text_ops"))
       .where(sql`status NOT IN ('completed', 'failed', 'cancelled')`),
+    index("documents_workspace_failed_idx")
+      .using("btree", table.workspaceId.asc().nullsLast().op("text_ops"))
+      .where(sql`status = 'failed' AND superseded_at IS NULL AND archived_at IS NULL AND purged_at IS NULL`),
     index("documents_workspace_canonical_idx")
       .using(
         "btree",

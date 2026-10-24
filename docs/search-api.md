@@ -130,6 +130,21 @@ When the search agent answers (the default for `/v1/chat` with `DOCSLURP_PUBLIC_
 | `maxToolCalls` | 16 | 1–24 | Tool calls across the turn. Later calls get `{error, code: "tool_call_limit", limitReached: true}` instead of running. |
 | `searchConcurrency` | 6 | 1–8 | Upper bound on the search tool's parallel `queries`, and the value it uses when the model omits `concurrency`. |
 | `tools` | `true` | boolean | `false` skips the agent for a [direct answer](#direct-answers). |
+| `web` | workspace setting | boolean | `false` removes `webSearch` and `webFetch` from the turn. Omitted or `true` offers them only when the deployment (`WEB_TOOLS_ENABLED`, `WEB_TOOLS_CHAT_ENABLED`), the workspace's `pipeline.webTools`, its privacy mode and the key's scopes allow them; a request cannot turn them on past those. |
+| `suggestions` | `false` | boolean | Suggestions mode, described below. |
+
+#### Suggestions mode
+
+With `agent: {suggestions: true}` the agent watches the turn's own tool results for ingestion and search problems: a search with no results or only unrelated passages for something the workspace should contain, files reported as failed or still processing (current versions only), and passage text that is garbled, cut off or missing the table or page the question needs. When it sees one, it adds a short section after the answer that names the likely cause and the evidence, and can prepare up to two specific changes with `proposeWorkspaceSettings` (see [Workspace settings from chat](agent-workspace-settings.md)). A turn with no such signal gets no suggestions section. A proposal never changes anything by itself: a person applies it with **Apply** in the app, or the authenticated apply endpoint. A proposal that cannot be prepared never fails the turn; the answer stands and says so.
+
+Without suggestions mode the agent still prepares a proposal when the user asks to change a setting, but never volunteers one.
+
+Suggestions mode and `agent.web` are set per request on `POST /v1/chat` (and the SDK's `chat`). They are not available on `GET /v1/chat/stream`, the MCP `chat` tool or `/v1/chat/completions`, which always run with suggestions off and the workspace's web setting. The DocSlurp web app turns suggestions on by default and has **Web** (default off) and **Suggestions** toggles in the composer.
+
+```bash
+curl -sS -X POST "$DOCSLURP_URL/v1/chat" -H "Authorization: Bearer $DOCSLURP_API_KEY" -H "Content-Type: application/json" \
+  -d '{"q": "Why can'"'"'t I find the Q3 renewal terms?", "agent": {"suggestions": true, "web": false}}'
+```
 
 The defaults come from a 51-case production eval (2026-10-21): at 4 steps, 25–37% of turns ran out of steps or tool calls; at 8/16/6 correctness rose from about 0.79 to 0.86–0.92 across three models, and 12/24/8 added nothing. The [turn deadline](#turn-deadline) still bounds wall-clock time, so higher step limits cannot make a turn slower than the deadline.
 
@@ -149,6 +164,7 @@ Agent responses add these `debug` fields (other turns omit them):
 | `stepUsage` | Per step: `{step, model, finishReason, inputTokens, outputTokens, costCents?, toolCalls}` |
 | `toolCalls` | Per tool call, in order (refused calls included): `{id, name, status, runtimeMs, queries?, resultCount?, zeroHit?, evidencePages?, costCents?, errorCode?}`. `queries` are the search strings the model sent (never put on spans); `evidencePages` lists the distinct `{documentId, pageNumber}` of the evidence that call returned; `errorCode` is `tool_call_limit`, `deadline`, `tool_timeout`, `invalid_arguments`, `aborted`, `exception`, the tool's own error code or `http_<status>`. |
 | `limits` | `{maxSteps, maxToolCalls, searchConcurrency, clamped}` as applied |
+| `modes` | `{web, suggestions}` as applied. `web` is `on`, `off` (the request turned it off) or `unavailable` (policy blocked it); `suggestions` is `true` only when it was requested and the actor can use the settings tools |
 | `timeBudget` | `{turnDeadlineMs, stepTimeoutMs, toolTimeoutMs, finalReserveMs, elapsedMs, finalAnswer, stepTimeouts, toolTimeouts, toolCallsAfterDeadline}`. `finalAnswer` is `loop` (the agent answered on its own), `forced` (the final-answer reserve started, so the last step ran without tools), the historical values `from_evidence` and `partial` are no longer emitted: failures block the turn. See [Turn deadline](#turn-deadline). |
 | `stopReason` | See below |
 

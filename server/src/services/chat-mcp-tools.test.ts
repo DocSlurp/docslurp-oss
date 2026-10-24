@@ -8,7 +8,7 @@ import { searchInputSchema, batchSearchInputSchema, workspaceChatInputSchema } f
 import { currentSearchSignal } from "../search/query-bounds.js";
 import { currentChatAgentSignal } from "../lib/chat-agent-context.js";
 
-function setup(ids = ["search"], options: { toolBudgetMs?: () => number; webTools?: boolean; userText?: string[] } = {}) {
+function setup(ids = ["search"], options: { toolBudgetMs?: () => number; webTools?: boolean; userText?: string[]; maxToolCalls?: number; suggestions?: boolean } = {}) {
   const dispatch = vi.fn<McpDispatch>(async () => Response.json({ results: [] }));
   const onActivity = vi.fn();
   const controller = new AbortController();
@@ -364,6 +364,59 @@ describe("tool failure latch", () => {
     await expect(t.execute("search", { q: "follow-up" }, "second")).rejects.toMatchObject({ code: "chat_tool_failed" });
     expect(t.dispatch).toHaveBeenCalledTimes(failure === "invalid-input" ? 0 : 1);
     expect(t.citations).toEqual([]);
+  });
+
+  it.each([403, 500, "exception", "invalid-input"] as const)("never latches a failed settings proposal (%s): the answer stands", async failure => {
+    const t = setup(["search", "proposeWorkspaceSettings"]);
+    if (failure === "exception") t.dispatch.mockRejectedValueOnce(new Error("network failed"));
+    else if (typeof failure === "number") t.dispatch.mockResolvedValueOnce(Response.json({ error: { code: "no_change" } }, { status: failure }));
+    const result = await t.execute("proposeWorkspaceSettings", failure === "invalid-input" ? null : { changes: { retrieval: { resultCount: 8 } } });
+    expect(result).toMatchObject({ ok: false, blocked: false });
+    expect((result as { error: string }).error).toMatch(/could not be prepared/);
+    expect(t.failure).toBeUndefined();
+    expect(() => t.throwIfBlocked()).not.toThrow();
+    // Later tools still run.
+    await t.execute("search", { q: "follow-up" }, "second");
+    expect(t.dispatch).toHaveBeenCalledTimes(failure === "invalid-input" ? 1 : 2);
+  });
+
+  it("does not latch a settings proposal refused by the tool-call budget", async () => {
+    const t = setup(["search", "proposeWorkspaceSettings"], { maxToolCalls: 1 });
+    await t.execute("search", { q: "first" }, "a");
+    await expect(t.execute("proposeWorkspaceSettings", { changes: {} }, "b")).resolves.toMatchObject({ code: "tool_call_limit", blocked: false });
+    expect(t.failure).toBeUndefined();
+  });
+
+  it("does not count a refused optional call as a tool-call-limit stop", async () => {
+    const t = setup(["search", "proposeWorkspaceSettings"], { maxToolCalls: 1 });
+    await t.execute("search", { q: "first" }, "a");
+    await t.execute("proposeWorkspaceSettings", { changes: {} }, "b");
+    expect(t.counters).toMatchObject({ refused: 0, softRefused: 1 });
+  });
+
+  it("treats an unreadable proposal as not prepared, without leaking the raw result", async () => {
+    const t = setup(["proposeWorkspaceSettings"]);
+    t.dispatch.mockResolvedValueOnce(Response.json({ settingsProposal: { token: "raw-grant", malformed: true } }));
+    const result = await t.execute("proposeWorkspaceSettings", { changes: {} });
+    expect(result).toMatchObject({ ok: false, blocked: false, code: "invalid_proposal" });
+    expect(JSON.stringify(result)).not.toContain("raw-grant");
+    expect(t.details.get("call")).toMatchObject({ status: "error", errorCode: "invalid_proposal" });
+    expect(t.failure).toBeUndefined();
+  });
+
+  it("in suggestions mode, a budget refusal of a diagnostic read does not cost the answer", async () => {
+    const t = setup(["search", "getUploadStatus"], { maxToolCalls: 1, suggestions: true });
+    await t.execute("search", { q: "first" }, "a");
+    await expect(t.execute("getUploadStatus", {}, "b")).resolves.toMatchObject({ code: "tool_call_limit", blocked: false });
+    expect(t.failure).toBeUndefined();
+    // A real failure of the same read still blocks.
+    const real = setup(["getUploadStatus"], { suggestions: true });
+    real.dispatch.mockResolvedValueOnce(Response.json({ error: "failed" }, { status: 500 }));
+    await expect(real.execute("getUploadStatus", {})).resolves.toMatchObject({ blocked: true });
+    // Outside suggestions mode the refusal blocks as before.
+    const plain = setup(["search", "getUploadStatus"], { maxToolCalls: 1 });
+    await plain.execute("search", { q: "first" }, "a");
+    await expect(plain.execute("getUploadStatus", {}, "b")).resolves.toMatchObject({ blocked: true });
   });
 
   it("does not latch a successful search with no matching documents", async () => {

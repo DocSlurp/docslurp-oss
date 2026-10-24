@@ -6,7 +6,6 @@ import type { PrivacyMode } from "@docslurp/shared";
 import { env } from "../config.js";
 import type { RequestActor } from "../lib/request-actor.js";
 import type { ChatToolActivity } from "./chat-mcp-tools.js";
-import type { ChatWorkspaceInventory } from "./chat-mcp-agent.js";
 import {
   configureSearchFromChat,
   loadChatSessionSearchOverrides,
@@ -43,6 +42,7 @@ import { assertCanSpend, type SpendKind } from "./billing/spend-guard.js";
 import { beginChatTurn, chatTurnFailureReason } from "./billing/chat-turn-billing.js";
 import { claimChatTurnAnswerId, currentChatTurn } from "../lib/chat-turn-context.js";
 import { sql } from "../db.js";
+import { loadChatWorkspaceInventory } from "./chat-workspace-inventory.js";
 import { reviewUntrustedEvidenceText } from "./prompt-injection.js";
 import {
   hybridSearch,
@@ -1166,16 +1166,6 @@ async function answerIngestReportTurn(args: ChatWorkspaceArgs): Promise<Workspac
   };
 }
 
-/** Grounded corpus counts for the agent prompt; both reads use workspace indexes. */
-async function loadChatWorkspaceInventory(workspaceId: string): Promise<ChatWorkspaceInventory> {
-  const [counts] = await sql<{ searchable: number; processing: number }[]>`
-    select coalesce((select document_count from workspace_corpus_stats where workspace_id = ${workspaceId}), 0)::int as searchable,
-      (select count(*)::int from documents where workspace_id = ${workspaceId}
-        and status not in ('completed', 'failed', 'cancelled', 'pii_blocked')) as processing
-  `;
-  return { searchableDocuments: counts?.searchable ?? 0, processingDocuments: counts?.processing ?? 0 };
-}
-
 type ChatTurnPolicy = { model: string; failover: boolean; requestedModel: string | null; limits: ChatAgentLimits };
 
 async function chatWorkspaceTurn(
@@ -1224,7 +1214,7 @@ async function chatWorkspaceTurn(
     const [{ runChatMcpAgent }, workspaceInventory] = await Promise.all([
       import("./chat-mcp-agent.js"),
       // The inventory is a prompt hint: without it the agent still runs, just without counts.
-      loadChatWorkspaceInventory(args.workspaceId).catch((error: unknown) => {
+      loadChatWorkspaceInventory(args.workspaceId, args.agent?.suggestions === true).catch((error: unknown) => {
         console.warn("[chat-agent] workspace inventory unavailable:", error instanceof Error ? error.message : String(error));
         return undefined;
       }),
@@ -1233,6 +1223,7 @@ async function chatWorkspaceTurn(
       actor: args.actor, workspaceId: args.workspaceId, orgId: workspace.orgId, sessionId,
       query: args.query, history, apiKey: chatApiKey, privacyMode, model,
       workspaceWebTools: (workspace.pipeline as { webTools?: unknown } | null)?.webTools !== false,
+      web: args.agent?.web, suggestions: args.agent?.suggestions,
       retrievalDefaults: searchSettings.retrievalDefaults, workspaceInventory,
       workspaceInstructions: [
         workspace.systemPrompt ? `Workspace ingest instruction: ${workspace.systemPrompt}` : "",
