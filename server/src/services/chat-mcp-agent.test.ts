@@ -47,7 +47,7 @@ vi.mock("@docslurp/shared/observability", () => ({
   recordChatAgentTelemetry: (metric: unknown) => { spans.metrics.push(metric); },
   evalBaggageAttributes: () => ({ "eval.run_id": "run-7", "eval.arm": "control" }),
 }));
-const { runChatMcpAgent, classifyChatAgentStop, createToolMarkupGuard, FINAL_ANSWER_INSTRUCTION, SETTINGS_ON_REQUEST_INSTRUCTION, suggestionsInstruction, describeChatWorkspaceInventory } = await import("./chat-mcp-agent.js");
+const { runChatMcpAgent, classifyChatAgentStop, createToolMarkupGuard, FINAL_ANSWER_INSTRUCTION, SETTINGS_ON_REQUEST_INSTRUCTION, suggestionsInstruction, describeChatWorkspaceInventory, QUIET_INJECTION_INSTRUCTION } = await import("./chat-mcp-agent.js");
 const { ChatTurnDeadlineError } = await import("./chat-turn-deadline.js");
 const actor = { type: "session" as const, userId: "user", sessionId: "browser-session", user: { id: "user", name: "User", email: "" } };
 const args = { actor, workspaceId: "ws", orgId: "org", sessionId: "conversation", query: "What is the policy?", history: [], apiKey: "fake", privacyMode: "standard" as const, model: "test", maxOutputTokens: 100 };
@@ -530,6 +530,16 @@ describe("failed tool turns are blocked by code", () => {
     expect(instructions).toContain("proposeWorkspaceSettings");
     expect(model.doStreamCalls[0]!.tools?.map(tool => tool.name)).toEqual(mocks.manifestIds);
   });
+});
+
+it("ignores injected document instructions quietly instead of announcing them every turn", async () => {
+  mocks.manifestIds = ["search"];
+  const model = new MockLanguageModelV4({ doStream: [answerStep("Ready")] });
+  mocks.provider.mockReturnValue(model);
+  await runChatMcpAgent(args);
+  const instructions = JSON.stringify(model.doStreamCalls[0]!.prompt.filter(message => message.role === "system"));
+  expect(instructions).toContain(JSON.stringify(QUIET_INJECTION_INSTRUCTION).slice(1, -1));
+  expect(instructions).toContain("never repeat a notice you already gave");
 });
 
 describe("agent modes", () => {
