@@ -182,3 +182,27 @@ describe("request span attributes", () => {
     });
   });
 });
+
+describe("secret route params", () => {
+  it("never puts invite tokens in paths or attributes", async () => {
+    const { redactSecretRouteParams, requestSpanAttributes } = await import("./request-context.js");
+    const route = "/v1/organizations/invites/:token/accept";
+    const pathname = redactSecretRouteParams("/v1/organizations/invites/tok_SECRET123/accept", route);
+    expect(pathname).toBe("/v1/organizations/invites/:token/accept");
+    expect(redactSecretRouteParams("/v1/workspaces/ws-1", "/v1/workspaces/:workspaceId")).toBe("/v1/workspaces/ws-1");
+    const attributes = requestSpanAttributes({ requestId: "r", route, pathname, identity: undefined });
+    expect(JSON.stringify(attributes)).not.toContain("SECRET123");
+    expect(attributes["docslurp.token"]).toBeUndefined();
+  });
+});
+
+describe("workspace attribution", () => {
+  it("names the resolved workspace for slug and default references, and cleans param names", async () => {
+    const { requestSpanAttributes } = await import("./request-context.js");
+    const viaSlug = requestSpanAttributes({ requestId: "r", route: "/v1/workspaces/:workspaceId/state", pathname: "/v1/workspaces/default/state", identity: { userId: "u", workspaceId: "ws-uuid" } });
+    expect(viaSlug).toMatchObject({ "docslurp.workspaceId": "ws-uuid", "docslurp.workspaceRef": "default" });
+    const setting = requestSpanAttributes({ requestId: "r", route: "/v1/billing/:setting{auto-top-up|auto-recharge}", pathname: "/v1/billing/auto-top-up", identity: undefined });
+    expect(setting["docslurp.setting"]).toBe("auto-top-up");
+  });
+});
+

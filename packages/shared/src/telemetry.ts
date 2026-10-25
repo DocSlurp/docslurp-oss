@@ -59,27 +59,45 @@ function safeAttributes(attributes: Attributes): Attributes {
   return Object.fromEntries(Object.entries(attributes).filter(([key, value]) =>
     value !== undefined && !/(authorization|cookie|password|secret|api[._-]?key|access[._-]?token|refresh[._-]?token)/i.test(key)
       && !/^(langfuse\.observation\.(input|output)|gen_ai\.(input|output)\.messages|ai\.(prompt|response\.text))$/.test(key),
-  ).map(([key, value]) => [key, typeof value === "string"
-    ? value.replace(/Bearer\s+\S+/gi, "Bearer [redacted]").slice(0, 16000) : value]));
+  ).map(([key, value]) => [key, typeof value === "string" ? safeErrorText(value, 16000) : value]));
 }
 
-/** Error text for spans: credentials scrubbed, length capped. Messages and stacks are what support needs to act on a failure. */
+/** Credentials and secrets that can appear in error text, provider responses or attributes. */
+const SECRET_PATTERNS: Array<[RegExp, string]> = [
+  [/\b(Bearer|Basic)\s+[A-Za-z0-9._~+\/=-]+/gi, "$1 [redacted]"],
+  [/\b(dslp_(?:priv|pub)_|dslp_|sk_live_|sk_test_|rk_live_|rk_test_|whsec_|sk-or-v1-|sk-ant-[a-z0-9]*-?|sk-proj-|sk-|re_|fm[12]_|AKIA|ASIA)[A-Za-z0-9_-]{6,}/g, "$1[redacted]"],
+  [/\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/g, "[redacted-jwt]"],
+  [/(X-Amz-(?:Signature|Credential|Security-Token)=)[^&\s"']+/gi, "$1[redacted]"],
+  [/((?:password|passwd|secret|secret_access_key|api[._-]?key|access[._-]?token|refresh[._-]?token|session[._-]?token|token|cookie|set-cookie|authorization)["'\s]*[:=]\s*["']?)[^\s"',;&]+/gi, "$1[redacted]"],
+  [/(\b[a-z][a-z0-9+.-]*:\/\/[^:/@\s]*:)[^@\s/]+@/gi, "$1[redacted]@"],
+];
+
+/** Text for spans and logs: credentials scrubbed, length capped. Messages and stacks are what support needs to act on a failure. */
 function safeErrorText(value: unknown, max: number): string {
-  return String(value ?? "")
-    .replace(/Bearer\s+\S+/gi, "Bearer [redacted]")
-    .replace(/(dslp_(?:priv|pub)_|dslp_)[A-Za-z0-9_-]+/g, "$1[redacted]")
-    .replace(/((?:password|secret|api[._-]?key|access[._-]?token|refresh[._-]?token)["'\s:=]+)[^\s"',;&]+/gi, "$1[redacted]")
-    .replace(/(postgres(?:ql)?:\/\/[^:/@\s]+:)[^@\s]+@/gi, "$1[redacted]@")
-    .slice(0, max);
+  let text = String(value ?? "");
+  for (const [pattern, replacement] of SECRET_PATTERNS) text = text.replace(pattern, replacement);
+  return text.slice(0, max);
+}
+
+/** Postgres repeats offending input in messages (`invalid input syntax for type uuid: "…"`): keep the message, drop the literals. */
+function withoutQuotedLiterals(text: string): string {
+  return text.replace(/"[^"\n]*"/g, '"?"').replace(/'[^'\n]*'/g, "'?'");
+}
+
+function isPostgresError(error: unknown): boolean {
+  return Boolean(error && typeof error === "object" && typeof (error as { code?: unknown }).code === "string"
+    && /^[A-Z0-9]{5}$/.test((error as { code: string }).code) && "severity" in error);
 }
 
 /** Records an error on a span: type, message and stack (scrubbed on export too). */
 function recordSpanError(span: { recordException(exception: Exception): void; setStatus(status: { code: SpanStatusCode; message?: string }): void } | undefined, error: unknown): void {
   if (!span) return;
-  // Scrubbed here as well as on export, so no processor ever sees a credential.
-  const message = safeErrorText(error instanceof Error ? error.message : error, 2000);
+  // Scrubbed here as well as on export, so no processor ever sees a credential;
+  // Postgres errors also lose quoted literals, which can be user input.
+  const literal = isPostgresError(error) ? withoutQuotedLiterals : (text: string) => text;
+  const message = safeErrorText(literal(error instanceof Error ? error.message : String(error)), 2000);
   const exception: Exception = { name: error instanceof Error ? error.name : "Error", message,
-    ...(error instanceof Error && error.stack ? { stack: safeErrorText(error.stack, 8000) } : {}) };
+    ...(error instanceof Error && error.stack ? { stack: safeErrorText(literal(error.stack), 8000) } : {}) };
   span.recordException(exception);
   span.setStatus({ code: SpanStatusCode.ERROR, message: message.slice(0, 1000) });
 }
@@ -331,6 +349,8 @@ export async function withHttpSpan<T>(options: {
   status: () => number;
   /** Read when the request ends, once auth has resolved who made it: request, user, org, key and route ids. */
   attributes?: () => Attributes;
+  /** An error the framework turned into a response (Hono onError), so the span still records it. */
+  error?: () => unknown;
 }, run: () => Promise<T>): Promise<T> {
   if (!initializeObservability({ serviceName: "docslurp-api" })) return run();
   let outcome: { ok: true; value: T } | { ok: false; error: unknown } | undefined;
@@ -348,11 +368,14 @@ export async function withHttpSpan<T>(options: {
         bestEffort(() => {
           const status = outcome?.ok === false ? 500 : options.status();
           span.setAttribute("http.response.status_code", status);
-          if (options.attributes) span.setAttributes(safeAttributes(options.attributes()));
-          if (outcome?.ok === false) { recordSpanError(span, outcome.error); span.setAttribute("error.type", outcome.error instanceof Error ? outcome.error.name : "Error"); }
-          else if (status >= 500) { span.setStatus({ code: SpanStatusCode.ERROR, message: `HTTP ${status}` }); span.setAttribute("error.type", String(status)); }
+          const handled = outcome?.ok === false ? outcome.error : options.error?.();
+          if (handled && status >= 500) recordSpanError(span, handled);
+          else if (status >= 500) span.setStatus({ code: SpanStatusCode.ERROR, message: `HTTP ${status}` });
+          if (status >= 500) span.setAttribute("error.type", "Error");
           recordHttpTelemetry(options.method, options.route, status, (performance.now() - started) / 1000);
         });
+        // Separate, so a failing attributes hook never costs the span its status or metrics.
+        if (options.attributes) bestEffort(() => span.setAttributes(safeAttributes(options.attributes!())));
         bestEffort(() => span.end());
       }
     });

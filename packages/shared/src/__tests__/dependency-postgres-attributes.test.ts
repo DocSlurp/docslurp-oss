@@ -8,6 +8,11 @@ describe("postgres span attributes", () => {
     expect(querySummary("INSERT", "insert into document_exports (id) values ($1)")).toBe("INSERT document_exports");
     expect(querySummary("UPDATE", 'update "user" set name = $1')).toBe("UPDATE user");
     expect(querySummary("SELECT", "select 1")).toBe("SELECT");
+    // Function calls are not tables; schema-qualified names keep the table.
+    expect(querySummary("SELECT", "select extract(epoch from now()) from runs")).toBe("SELECT runs");
+    expect(querySummary("SELECT", "select * from unnest($1::text[]) as x")).toBe("SELECT");
+    expect(querySummary("INSERT", 'insert into "public"."user" (id) values ($1)')).toBe("INSERT user");
+    expect(querySummary("SELECT", "select * from analytics.events")).toBe("SELECT analytics.events");
   });
 
   it("finds the application frame that issued the query, skipping instrumentation and libraries", () => {

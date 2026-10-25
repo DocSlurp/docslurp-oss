@@ -13,8 +13,26 @@ import { clientIpFromHeaders, isInProcessEnv } from "./client-ip.js";
 import { redactFileTokenPath } from "./file-token-path.js";
 
 const REQUEST_ID_HEADER = "X-Request-ID";
+const REQUEST_ID_PATTERN = /^[A-Za-z0-9._:-]{1,128}$/;
+/** Route params that carry credentials: their values are replaced by the param name in paths and attributes. */
+const SECRET_ROUTE_PARAM = /token|secret|code|signature|key|password|credential/i;
+
+/** "/v1/invites/abc123" for route "/v1/invites/:token" → "/v1/invites/:token". */
+export function redactSecretRouteParams(pathname: string, route: string): string {
+  const template = route.split("/");
+  const actual = pathname.split("/");
+  if (!template.some((segment) => segment.startsWith(":") && SECRET_ROUTE_PARAM.test(segment))) return pathname;
+  return actual.map((segment, index) => {
+    const param = template[index];
+    return param?.startsWith(":") && SECRET_ROUTE_PARAM.test(param) ? param : segment;
+  }).join("/");
+}
 type RequestContextState = {
   requestId: string;
+  /** The error a framework handler turned into a response, for the request span. */
+  error?: unknown;
+  /** The workspace a slug or `default` route reference resolved to. */
+  workspaceId?: string | null;
   requestStartedAt: number;
   userId: string | null;
   apiKeyId?: string | null;
@@ -170,6 +188,18 @@ export function currentRequestOrgId(): string | null {
   return requestContextStorage.getStore()?.orgId ?? null;
 }
 
+/** Records an error a framework handler answered, so the request span still carries it. */
+export function setCurrentRequestError(error: unknown): void {
+  const store = requestContextStorage.getStore();
+  if (store) store.error = error;
+}
+
+/** Records the workspace a slug or `default` reference resolved to, for telemetry. */
+export function setCurrentRequestWorkspaceId(workspaceId: string): void {
+  const store = requestContextStorage.getStore();
+  if (store) store.workspaceId = workspaceId;
+}
+
 export function currentRequestUserId(): string | null {
   return requestContextStorage.getStore()?.userId ?? null;
 }
@@ -225,16 +255,18 @@ export function requestUserAgent(c: Context): string | null {
 const INFRA_PROBE_ROUTES = new Set(["/health", "/ready", "/metrics", "/fly-scaler-metrics"]);
 
 export const requestContextMiddleware: MiddlewareHandler = async (c, next) => {
-  const requestId = c.req.header(REQUEST_ID_HEADER)?.trim() || c.req.header("x-request-id")?.trim() || randomUUID();
+  // A client-sent id is kept only when it looks like one, so it cannot bloat or spoof telemetry.
+  const sentRequestId = c.req.header(REQUEST_ID_HEADER)?.trim();
+  const requestId = sentRequestId && REQUEST_ID_PATTERN.test(sentRequestId) ? sentRequestId : randomUUID();
   const startedAt = Date.now();
   const cpuStart = process.cpuUsage();
   const rssStart = process.memoryUsage().rss;
-  // File proxy tokens never reach logs or telemetry.
-  const pathname = redactFileTokenPath(new URL(c.req.url).pathname);
   // The current route is this middleware's wildcard; the final match is the
   // endpoint template, including prefixes from mounted routers.
   const matchedPath = routePath(c, -1);
   const route = matchedPath && matchedPath !== "*" && matchedPath !== "/*" ? matchedPath : "unmatched";
+  // File proxy tokens and secret route params (invite tokens, ...) never reach logs or telemetry.
+  const pathname = redactSecretRouteParams(redactFileTokenPath(new URL(c.req.url).pathname), route);
   // Status polling and SSE connection lifetimes are ordinary HTTP telemetry,
   // not AI work. Their duration must not pollute Langfuse latency observations.
   // Infrastructure probes (Fly checks, autoscaler scrapes) would otherwise flood it.
@@ -250,6 +282,7 @@ export const requestContextMiddleware: MiddlewareHandler = async (c, next) => {
     headers: { traceparent: c.req.header("traceparent") ?? "", tracestate: c.req.header("tracestate") ?? "", baggage: c.req.header("baggage") ?? "" },
     status: () => c.res.status,
     attributes: () => requestSpanAttributes({ requestId, route, pathname, identity, userAgent: c.req.header("User-Agent") }),
+    error: () => identity?.error,
   }, () => requestContextStorage.run({
     requestId, requestStartedAt: startedAt, userId: null, performanceEvents: [],
     capabilityHeader: c.req.header("X-DocSlurp-Capability")?.trim() || null,
@@ -370,7 +403,7 @@ export function requestSpanAttributes(args: {
   requestId: string;
   route: string;
   pathname: string;
-  identity: Pick<RequestContextState, "userId" | "orgId" | "apiKeyId"> | undefined;
+  identity: Pick<RequestContextState, "userId" | "orgId" | "apiKeyId" | "workspaceId"> | undefined;
   userAgent?: string | null;
 }): Record<string, string> {
   const attributes: Record<string, string> = { "docslurp.requestId": args.requestId, "url.path": args.pathname.slice(0, 500) };
@@ -381,13 +414,19 @@ export function requestSpanAttributes(args: {
   const template = args.route.split("/");
   const actual = args.pathname.split("/");
   template.forEach((segment, index) => {
-    if (!segment.startsWith(":") || actual[index] === undefined) return;
-    const name = segment.slice(1).replace(/[^A-Za-z0-9_]/g, "");
+    if (!segment.startsWith(":") || actual[index] === undefined || SECRET_ROUTE_PARAM.test(segment)) return;
+    // ":setting{auto-top-up|auto-recharge}" and ":id?" name the param "setting" / "id".
+    const name = segment.slice(1).replace(/\{.*\}$|\?$/g, "").replace(/[^A-Za-z0-9_]/g, "");
     try {
       attributes[`docslurp.${name}`] = decodeURIComponent(actual[index]!).slice(0, 200);
     } catch {
       attributes[`docslurp.${name}`] = actual[index]!.slice(0, 200);
     }
   });
+  // A slug or `default` in the path resolved to this workspace id (workspace-ref-path.ts).
+  if (args.identity?.workspaceId) {
+    if (attributes["docslurp.workspaceId"] && attributes["docslurp.workspaceId"] !== args.identity.workspaceId) attributes["docslurp.workspaceRef"] = attributes["docslurp.workspaceId"];
+    attributes["docslurp.workspaceId"] = args.identity.workspaceId;
+  }
   return attributes;
 }

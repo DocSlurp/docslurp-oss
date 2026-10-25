@@ -1,3 +1,5 @@
+import { trace } from "@opentelemetry/api";
+
 import { isTracingActive, startDependencySpan, withDependencySpan } from "./telemetry.js";
 
 export interface PostgresQueryHooks {
@@ -16,8 +18,8 @@ export interface PostgresQueryHooks {
   onStatement?: (fingerprint: string) => void;
 }
 
-/** Longest statement kept on a span. */
-const QUERY_TEXT_MAX = 4000;
+/** Longest statement kept on a span; long bulk statements are cut before any processing. */
+const QUERY_TEXT_MAX = 2000;
 /** Queries at least this slow (or failing) also record the code that issued them. */
 const SLOW_QUERY_MS = 50;
 /** Frames captured per query: enough to get past the instrumentation to the caller. */
@@ -27,25 +29,46 @@ const CALL_SITE_FRAMES = 8;
  * Captures the call stack cheaply where a query is written; V8 formats it only
  * if read, which happens for slow or failing queries (see querySite).
  */
-function captureCallSite(): { stack?: string } | null {
-  if (!isTracingActive()) return null;
+function captureCallSite(entry: Function): { stack?: string } | null {
+  // Queries in an unsampled trace skip the stack capture; root queries are sampled on their own.
+  const parent = trace.getActiveSpan();
+  if (!isTracingActive() || (parent && !parent.isRecording())) return null;
   const previous = Error.stackTraceLimit;
-  Error.stackTraceLimit = CALL_SITE_FRAMES;
   const holder: { stack?: string } = {};
-  Error.captureStackTrace(holder);
-  Error.stackTraceLimit = previous;
+  try {
+    Error.stackTraceLimit = CALL_SITE_FRAMES;
+    // Frames from `entry` (the instrumented sql function) up are dropped by function
+    // identity, so bundled builds (chunks/db_<hash>.mjs) still start at the caller.
+    Error.captureStackTrace(holder, entry);
+  } finally {
+    Error.stackTraceLimit = previous;
+  }
   return holder;
 }
 
 /** The statement as Postgres received it: placeholders ($1, $2…) only, never parameter values. */
 function queryText(value: unknown): string | undefined {
-  return typeof value === "string" && value.trim() ? value.replace(/\s+/g, " ").trim().slice(0, QUERY_TEXT_MAX) : undefined;
+  if (typeof value !== "string") return undefined;
+  const text = value.slice(0, QUERY_TEXT_MAX * 2).replace(/\s+/g, " ").trim().slice(0, QUERY_TEXT_MAX);
+  return text || undefined;
 }
 
-/** "SELECT search_sessions", "UPDATE document_exports": groups spans by statement without its text. */
+/**
+ * "SELECT search_sessions", "UPDATE document_exports": groups spans by statement
+ * without its text. Function calls (`from now()`, `from unnest($1)`) are not tables.
+ */
 export function querySummary(operation: string, text: string | undefined): string {
-  const table = text?.match(/\b(?:from|into|update|join)\s+("?[a-z_][\w.]*"?)/i)?.[1]?.replace(/"/g, "");
+  // The name must end at a non-word character (no backtracking into a shorter name),
+  // and a "(" right after it means a function call, not a table.
+  const match = text?.match(/\b(?:from|into|update|join)\s+((?:"[^"]+"|[a-z_][\w]*)(?:\.(?:"[^"]+"|[a-z_][\w]*))?)(?![\w"(])/i);
+  const table = match?.[1]?.replace(/"/g, "").replace(/^public\./, "");
   return table ? `${operation} ${table}` : operation;
+}
+
+/** A tagged template's statement with $n placeholders (fragments not expanded), for queries that never report one (cursors). */
+function templateText(input: unknown): string | undefined {
+  if (!Array.isArray(input)) return typeof input === "string" ? input : undefined;
+  return input.reduce((text: string, part: string, index: number) => (index === 0 ? part : `${text}$${index}${part}`), "");
 }
 
 /** The first application frame that issued a query (function, file, line), for finding slow or failing code. */
@@ -81,12 +104,10 @@ export function instrumentPostgres<T extends (...args: any[]) => any>(sql: T, da
     const text = Array.isArray(input) ? input.join("?") : typeof input === "string" ? input : "";
     return text.replace(/\s+/g, " ").trim().slice(0, 100);
   }
-  function query(value: any, operation: string, text = ""): any {
+  function query(value: any, operation: string, text = "", callSite: { stack?: string } | null = null, template?: unknown): any {
     if (!value || typeof value.then !== "function") return value;
     if (queries.has(value)) return queries.get(value);
     let completion: Promise<any> | undefined;
-    // The call site is captured where the query is written, not where it is awaited.
-    const callSite = captureCallSite();
     const attributes = { ...base, "db.operation.name": operation, "docslurp.dependency.operation": operation };
     const describe = (statement: string | undefined) => {
       const text = queryText(statement);
@@ -118,7 +139,8 @@ export function instrumentPostgres<T extends (...args: any[]) => any>(sql: T, da
         if (key === "cursor" && !args.some(arg => typeof arg === "function")) {
           const iterable = Reflect.apply(member, target, args) as AsyncIterable<unknown>;
           return { async *[Symbol.asyncIterator]() {
-            const span = startDependencySpan(`postgres.${operation}`, attributes);
+            // Cursors never report a final statement, so they carry the template's.
+            const span = startDependencySpan(`postgres.${operation}`, { ...attributes, ...describe(templateText(template)), ...(callSite ? querySite(callSite.stack) : {}) });
             const iterator = iterable[Symbol.asyncIterator]();
             try {
               while (true) { const next = await span.run(() => iterator.next()); if (next.done) break; yield next.value; }
@@ -140,8 +162,12 @@ export function instrumentPostgres<T extends (...args: any[]) => any>(sql: T, da
   }
   function client(target: T): T {
     const cached = clients.get(target); if (cached) return cached;
+    // The call site is captured where the query is written, not where it is awaited.
+    const applyQuery = function applyQuery(fn: T, thisArg: unknown, args: any[]) {
+      return query(Reflect.apply(fn, thisArg, args), operation(args[0]), hooks.onStatement ? fingerprint(args[0]) : "", captureCallSite(applyQuery), args[0]);
+    };
     const proxy = new Proxy(target, {
-      apply(fn, thisArg, args) { return query(Reflect.apply(fn, thisArg, args), operation(args[0]), hooks.onStatement ? fingerprint(args[0]) : ""); },
+      apply: applyQuery,
       get(fn, key) {
         const member = Reflect.get(fn, key, fn);
         if (typeof member !== "function") return member;
@@ -154,7 +180,10 @@ export function instrumentPostgres<T extends (...args: any[]) => any>(sql: T, da
           return withDependencySpan(`postgres.${String(key)}`, { ...base, "db.operation.name": "TRANSACTION", "docslurp.dependency.operation": "TRANSACTION" }, () => Reflect.apply(member, fn, wrapped));
         };
         if (key === "reserve") return async (...args: any[]) => client(await Reflect.apply(member, fn, args));
-        if (key === "unsafe") return (...args: any[]) => query(Reflect.apply(member, fn, args), operation(args[0]), hooks.onStatement ? fingerprint(args[0]) : "");
+        if (key === "unsafe") {
+          const unsafe = (...args: any[]) => query(Reflect.apply(member, fn, args), operation(args[0]), hooks.onStatement ? fingerprint(args[0]) : "", captureCallSite(unsafe), args[0]);
+          return unsafe;
+        }
         return member.bind(fn);
       },
     });

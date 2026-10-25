@@ -79,3 +79,36 @@ it("tags the active observation span, keeping raw error text for operators", asy
   expect(span.attributes["docslurp.native_pdf.reason"]).toBe(raw);
   expect(span.attributes["x.api_key"]).toBeUndefined();
 });
+
+it("records the error a framework answered (Hono onError) on the HTTP span", async () => {
+  const { withHttpSpan } = await import("../observability.js");
+  const handled = new Error("upstream timeout calling storage");
+  await withHttpSpan({ method: "POST", route: "/v1/handled", status: () => 500, headers: { traceparent: "", tracestate: "", baggage: "" },
+    error: () => handled, attributes: () => { throw new Error("attributes hook broke"); } }, async () => "answered");
+  const span = exporter.getFinishedSpans().find(item => item.name === "POST /v1/handled")!;
+  expect(span.status).toMatchObject({ code: 2, message: "upstream timeout calling storage" });
+  expect(span.attributes).toMatchObject({ "http.response.status_code": 500, "error.type": "Error" });
+  expect(span.events[0]?.attributes?.["exception.message"]).toBe("upstream timeout calling storage");
+});
+
+it("scrubs credentials and Postgres literals from recorded errors", async () => {
+  const leaked = [
+    "AKIAIOSFODNN7EXAMPLE", "sk_live_51HxYzAbCdEfGh", "sk-or-v1-0123456789abcdef", "sk-ant-api03-abcdefghij",
+    "re_123456789abc", "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U",
+    "X-Amz-Signature=abcdef0123456789", "redis://:hunter2pass@cache:6379", "https://bob:s3cretpw@example.com/x", "password=hunter3",
+  ];
+  const span = startTelemetrySpan("docslurp.test", "scrub", {});
+  span.end(new Error(`provider said: ${leaked.join(" ")}`));
+  const pg = Object.assign(new Error('invalid input syntax for type uuid: "my-secret-doc-name"'), { code: "22P02", severity: "ERROR" });
+  const pgSpan = startTelemetrySpan("docslurp.test", "pg", {});
+  pgSpan.end(pg);
+  const spans = exporter.getFinishedSpans();
+  const scrubbed = JSON.stringify(spans.find(item => item.name === "scrub")!.events);
+  for (const secret of ["IOSFODNN7EXAMPLE", "51HxYzAbCdEfGh", "0123456789abcdef", "abcdefghij", "123456789abc", "dozjgNry", "hunter2pass", "s3cretpw", "hunter3"]) {
+    expect(scrubbed).not.toContain(secret);
+  }
+  const pgEvent = spans.find(item => item.name === "pg")!.events[0]!;
+  expect(pgEvent.attributes?.["exception.message"]).toBe('invalid input syntax for type uuid: "?"');
+  expect(JSON.stringify(pgEvent)).not.toContain("my-secret-doc-name");
+});
+

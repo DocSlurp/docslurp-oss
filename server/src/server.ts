@@ -18,7 +18,7 @@ import { Hono } from "hono";
 import { env } from "./config.js";
 import { seedNonProductionUsers } from "./lib/seed-users.js";
 import { initializePrivateModelEndpoints } from "./lib/privacy.js";
-import { requestContextMiddleware } from "./lib/request-context.js";
+import { setCurrentRequestError, requestContextMiddleware } from "./lib/request-context.js";
 import { multipartBodyLimit } from "./lib/upload-policy.js";
 import { emitPostHogApiLog } from "./lib/posthog-ai-observability.js";
 import { apiActorRateLimit, apiIpRateLimit } from "./middleware/rate-limit.js";
@@ -108,9 +108,13 @@ export function createApiApp(): Hono {
   const app = new Hono();
   // Spend blocked by credits, budget caps or entitlement is a 402, not a 500.
   // Native paths answer thrown errors in the error envelope; protocol surfaces keep their shapes.
-  app.onError(nativeErrorHandler((error, c) => error instanceof UnreadableSourceError
-    ? c.json({ error: error.message, code: error.code }, error.statusCode)
-    : spendAwareErrorHandler(error, c)));
+  app.onError(nativeErrorHandler((error, c) => {
+    // The request span records it (message, stack) once the response is sent.
+    setCurrentRequestError(error);
+    return error instanceof UnreadableSourceError
+      ? c.json({ error: error.message, code: error.code }, error.statusCode)
+      : spendAwareErrorHandler(error, c);
+  }));
 
   // Authentication is served first, ahead of the global middleware below: these
   // paths never ran the API IP limit, request context or widget CORS.
