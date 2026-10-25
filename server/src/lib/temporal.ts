@@ -15,7 +15,11 @@ import {
 } from "@temporalio/common";
 import {
   DEFAULT_MATERIALIZE_TASK_QUEUE,
+  DEFAULT_DOCUMENT_EXPORT_TASK_QUEUE,
+  DEFAULT_LARGE_DOCUMENT_EXPORT_TASK_QUEUE,
   DEFAULT_PAGE_RENDER_TASK_QUEUE,
+  DOCUMENT_EXPORT_WORKFLOW,
+  documentExportWorkflowId,
   PAGE_RENDER_WORKFLOW,
   pageRenderWorkflowId,
   MATERIALIZE_WORKFLOW,
@@ -631,6 +635,27 @@ export async function startPageRenderWorkflow(input: import("@docslurp/shared").
       workflowId: pageRenderWorkflowId(input), args: [input],
       workflowExecutionTimeout: "5 minutes",
       workflowIdReusePolicy: WorkflowIdReusePolicy.ALLOW_DUPLICATE_FAILED_ONLY,
+    });
+  } catch (error) {
+    if (!(error instanceof WorkflowExecutionAlreadyStartedError)) throw error;
+  }
+}
+
+/**
+ * One workflow per export id; a duplicate start (double click, retry) is a no-op.
+ * Large (emailed) exports go to their own queue so they never delay small ones.
+ */
+export async function startDocumentExportWorkflow(input: import("@docslurp/shared").BuildDocumentExportInput, options: { large?: boolean } = {}): Promise<void> {
+  const client = await getClient();
+  const taskQueue = options.large
+    ? process.env.TEMPORAL_LARGE_DOCUMENT_EXPORT_TASK_QUEUE?.trim() || DEFAULT_LARGE_DOCUMENT_EXPORT_TASK_QUEUE
+    : process.env.TEMPORAL_DOCUMENT_EXPORT_TASK_QUEUE?.trim() || DEFAULT_DOCUMENT_EXPORT_TASK_QUEUE;
+  try {
+    await client.workflow.start(DOCUMENT_EXPORT_WORKFLOW, {
+      taskQueue,
+      workflowId: documentExportWorkflowId(input.exportId), args: [input],
+      // Four 2-hour attempts with backoff; the export sweep fails stalled exports after 10 hours.
+      workflowExecutionTimeout: "9 hours",
     });
   } catch (error) {
     if (!(error instanceof WorkflowExecutionAlreadyStartedError)) throw error;

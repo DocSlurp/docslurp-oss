@@ -196,6 +196,7 @@ curl -X PATCH "$api_url/v1/workspaces/amber-falcon-ridge" \
 | Grounded chat | `POST /v1/chat` | `chat` | `chat` |
 | Read a document | `GET /v1/documents/:id` | `getDocument` | Use SDK/HTTP |
 | List document versions | `GET /v1/documents/:id/versions` | `listDocumentVersions` | Use SDK/HTTP |
+| Export as a zip | `POST /v1/exports`, poll `GET /v1/exports/:id`, then `GET /v1/exports/:id/download` | Use HTTP | Use HTTP |
 | Retention | `PATCH /v1/organizations/:orgId` or `/v1/workspaces/:workspace` with `retainDocumentVersions` | `setRetention` | Use SDK/HTTP |
 | Estimate work before starting it | `POST …/estimate` twins of each work-creating route | `updateWorkspaceEstimate`, `reprocessEstimate`, `fullIndexEstimate`, `uploadEstimate`, … | `--estimate` on `upload`, `full-index`, `reprocess` |
 | Follow a background job | `GET /v1/jobs/:id`, `GET /v1/jobs/:id/events` (SSE) | `getJob` / `streamJob` | `jobs get` / `jobs watch` |
@@ -1002,6 +1003,42 @@ JSON upload and direct-session requests accept `tags: string[]`. Multipart `/v1/
 `GET /v1/workspaces/{workspaceId}/tags` returns `{ "tags": [{ "tag": "finance", "documentCount": 2 }] }`, sorted by tag. Counts cover current, non-superseded documents, including pending uploads. The workspace accepts a UUID, slug, former slug, or `default`. Session callers need workspace access; API keys additionally need one of `search`, `ingest`, `artifacts`, or `workspaces:manage`, and stay within their organization and workspace restrictions. An empty workspace returns `{"tags":[]}`.
 
 Document listing and search accept comma-separated `tags`; matching any supplied tag is sufficient. Chat accepts an array in `filters.tags`. `PUT /v1/documents/{docId}/tags` and `POST /v1/documents/bulk` (`apply-tags`/`remove-tags`) edit labels with workspace edit access, from a session or a server key with `ingest`. Tag changes take effect without re-ingestion.
+
+## Export documents as a zip
+
+Export one document or a workspace's current documents as an organized zip. The worker builds the archive in the background and stages it in object storage; the API never holds it in memory.
+
+```bash
+curl -X POST "$DOCSLURP_URL/v1/exports" -H "Authorization: Bearer $KEY" \
+  -H "content-type: application/json" -d '{"workspaceId":"default","content":"markdown"}'
+# 202 { "export": { "id": "exp_…", "status": "queued", "notifyEmail": false, "expiresAt": "…" } }
+curl "$DOCSLURP_URL/v1/exports/exp_…" -H "Authorization: Bearer $KEY"     # status: queued → running → ready
+curl -L -o export.zip "$DOCSLURP_URL/v1/exports/exp_…/download" -H "Authorization: Bearer $KEY"
+```
+
+Pass `documentId` for one document, or `workspaceId` (UUID, slug or `default`) for a workspace; omit both to export the organization's default workspace. `content` is `markdown` (default) or `all`:
+
+```text
+Finance/                      one folder per document (a document export is just its folder)
+  Q3 plan/
+    Q3 plan.md                extracted Markdown for the whole document
+    pages/page-0001.md        the same text page by page (documents with more than one page)
+    structured.json           schema fields, when the workspace has a schema
+    metadata.json             filename, type, status, page count, version, tags
+    original/Q3 plan.pdf      "all" only: the uploaded file
+    images/page-0001.png      "all" only: rendered page images
+    outputs/html.html         "all" only: readable pipeline outputs (HTML, canonical document, …)
+  README.md                   the layout, a document table, and any file that could not be included
+```
+
+Workspace exports hold current versions only (no superseded, archived or purged documents), up to 5,000 documents; a document still processing contributes its `metadata.json`. Files the PII policy withholds are never exported, and the README lists them. Deleting or purging a document in an export withdraws the export. Limits:
+
+- **Size:** exports estimated over **3 GB** are refused with `413 payload_too_large`; export Markdown only or one document at a time. The worker also stops adding files at that size and lists the rest in `README.md`.
+- **Email:** exports estimated over **250 MB** are emailed to the requester when ready (`notifyEmail: true`), so nobody has to keep a tab open.
+- **Lifetime:** every link works for **7 days** from when the export is ready (`expiresAt`). After that `download` answers `404` and the file is deleted. Each `download` call checks the export (requester, workspace access, expiry) and then redirects to a presigned storage link that lasts two minutes, so the zip downloads straight from storage. Call `download` again for a fresh link; resumable downloads (Range) work against the storage link.
+- **Limits:** three unfinished exports per user, and 20 exports or 20 GB (estimated) per user per day (`429 rate_limited`). Asking for the same export again within an hour returns the one already in flight or finished. A single document must have finished processing (`409` otherwise).
+
+Sessions and server keys with `artifacts` can export; keys stay within their organization and workspace restrictions. Objects live in the private bucket under `exports/<orgId>/<workspaceId>/<exportId>.zip` with an `Expires` header and `docslurp-expires-at` metadata; the API's maintenance sweep deletes them. A bucket lifecycle rule that expires `exports/` after 8 days is a useful backstop (see [operations](self-host/operations.md#export-cleanup)).
 
 ## Primary sponsor
 
