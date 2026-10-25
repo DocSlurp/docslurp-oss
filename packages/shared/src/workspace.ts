@@ -754,10 +754,24 @@ export const reprocessRunSchema = z
   });
 export type ReprocessRunInput = z.infer<typeof reprocessRunSchema>;
 
+/** The name a workspace carries until DocSlurp titles it from its files, summaries or first chat question. */
+export const UNTITLED_WORKSPACE_NAME = "Untitled workspace";
+
+/** An omitted or blank name, or the placeholder itself, asks DocSlurp to title the workspace. */
+export function isUntitledWorkspaceName(name: string | null | undefined): boolean {
+  const trimmed = name?.trim() ?? "";
+  return trimmed === "" || trimmed === UNTITLED_WORKSPACE_NAME;
+}
+
 export const createWorkspaceSchema = z.object({
   userId: z.string().default("demo-user"),
   orgId: z.string().optional(),
-  name: z.string().trim().min(1).max(120),
+  /**
+   * Optional. Omitted, blank or "Untitled workspace": the workspace is created as
+   * "Untitled workspace" and renamed automatically (first upload, then content,
+   * then the first chat question) until someone renames it.
+   */
+  name: z.string().trim().max(120).optional(),
   /** Preferred slug. Invalid or reserved: a generated one; taken by another workspace: suffixed. */
   slug: z.string().trim().min(1).max(63).optional(),
   templateKey: workspaceTemplateKeySchema.optional(),

@@ -160,6 +160,8 @@ So `client.search({ q: "question" })`, `client.getWorkspaceState()` and `docslur
 
 **New workspaces:** besides naming one that does not exist yet, an upload creates a workspace when it omits `workspace` and sends `newWorkspace: true` (multipart `newWorkspace=true`, CLI `--new-workspace`, SDK `newWorkspace`) or a `templateKey` (CLI `--template`); that workspace titles itself from the uploaded content. The SDK and CLI send no `workspace` in those cases, so a configured client workspace does not swallow the request. An explicit `workspace` (including `default`) wins over `newWorkspace`; a `templateKey` sent with a `workspace` applies only if the upload creates it. The upload response's `workspace` record includes `id` and `slug`.
 
+**Automatic titles:** `POST /v1/workspaces` takes an optional `name`. Omit it, send an empty string or send `"Untitled workspace"` and the workspace is created as "Untitled workspace" and named for you. Titles only move forward through stronger signals: the first upload's filenames (later uploads re-derive the title from all of the workspace's files while it is still filename-based), then content (a stored document summary, else the first heading), then the subject of the first chat question, which is final. Renaming the workspace yourself stops automatic naming. Titles update when the workspace is read, uploaded to or first chatted with; there is no background job.
+
 **Rename a slug** in the dashboard (the gear next to the workspace name, then Workspace) or over HTTP:
 
 - Slugs are 3 to 63 lowercase letters, digits and single hyphens.

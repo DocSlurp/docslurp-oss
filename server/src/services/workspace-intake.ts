@@ -14,13 +14,13 @@
  * Raw objects written by a failed intake are removed before the error surfaces.
  */
 import { randomUUID } from "node:crypto";
-import path from "node:path";
 import { Transform, type Readable } from "node:stream";
 
 import {
   applyWorkspacePipelineOverrides,
   defaultPipelineFeatures,
   getWorkspaceTemplate,
+  isUntitledWorkspaceName,
   normalizePipelineFeatures,
   parseWorkspaceInput,
   type WorkspaceInputRef,
@@ -40,7 +40,7 @@ import { explainRemoteIngestBlock, isComplexRemoteIngestFormat } from "./remote-
 import { runCreation, type CreatedRun } from "./run-creation.js";
 import { AllSourcesUnreadableError } from "./source-metadata.js";
 import { effectiveIndexingMode } from "./workspace-indexing-mode.js";
-import { markWorkspaceAutoNamed } from "./workspace-naming.js";
+import { inferWorkspaceTitleFromFilenames, inferWorkspaceTitleFromUrls, markWorkspaceAutoNamed, nameWorkspaceFromUpload } from "./workspace-naming.js";
 import { seedPipelineFromProcessingDefaults, seedSearchSettingsFromProcessingDefaults } from "./processing-defaults.js";
 import { updateWorkspaceSearchSettingsForUser } from "./search-controls.js";
 import { getUserSettings } from "./user-settings.js";
@@ -222,6 +222,11 @@ export interface WorkspaceIntakeRecords {
   }): Promise<CreatedRun>;
   /** Remove a workspace this request created when intake failed before any run existed. */
   discardWorkspace(workspaceId: string): Promise<void>;
+  /**
+   * Re-titles an automatically named existing workspace from an upload (see
+   * nameWorkspaceFromUpload). Returns the new name, or null when unchanged.
+   */
+  nameFromUpload?(args: { workspaceId: string; filenames: string[]; urls?: string[] }): Promise<string | null>;
   appendAudit(entry: Parameters<typeof appendAuditLog>[0]): Promise<void>;
 }
 
@@ -285,6 +290,7 @@ export const postgresIntakeRecords: WorkspaceIntakeRecords = {
   async discardWorkspace(workspaceId) {
     await deleteWorkspaceData(workspaceId);
   },
+  nameFromUpload: nameWorkspaceFromUpload,
   async appendAudit(entry) {
     await appendAuditLog(entry);
   },
@@ -371,41 +377,7 @@ export function rawSourceKey(userId: string, filename: string): string {
 // ---------------------------------------------------------------------------
 // Self-titling and audit redaction.
 
-function normalizeWorkspaceSeed(value: string): string | null {
-  const normalized = value
-    .replace(/\.[^.]+$/, "")
-    .replace(/[_-]+/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-  if (!normalized) return null;
-  return (normalized.charAt(0).toUpperCase() + normalized.slice(1)).slice(0, 120);
-}
-
-function formatAutoWorkspaceTitle(primary: string | null, additionalCount: number): string {
-  if (!primary) return `New workspace ${new Date().toISOString().slice(0, 10)}`;
-  const suffix = additionalCount > 0 ? ` + ${additionalCount} more` : "";
-  return `${primary}${suffix}`.slice(0, 120);
-}
-
-export function inferWorkspaceTitleFromFilenames(filenames: string[]): string {
-  return formatAutoWorkspaceTitle(
-    normalizeWorkspaceSeed(path.basename(filenames[0] ?? "")),
-    Math.max(0, filenames.length - 1),
-  );
-}
-
-export function inferWorkspaceTitleFromUrls(urls: string[]): string {
-  try {
-    const firstUrl = new URL(urls[0] ?? "");
-    return formatAutoWorkspaceTitle(
-      normalizeWorkspaceSeed(path.basename(firstUrl.pathname)) ??
-        normalizeWorkspaceSeed(firstUrl.hostname.replace(/^www\./, "")),
-      Math.max(0, urls.length - 1),
-    );
-  } catch {
-    return formatAutoWorkspaceTitle(null, 0);
-  }
-}
+export { inferWorkspaceTitleFromFilenames, inferWorkspaceTitleFromUrls };
 
 function auditUrlOrigins(urls: string[]): string[] {
   return Array.from(
@@ -574,6 +546,8 @@ export async function intakeIntoWorkspace(
     const target = await resolveIntakeTarget(request, records);
     const existing = "existing" in target ? target.existing : null;
     const toCreate = "create" in target ? target.create : {};
+    // "Untitled workspace" is the placeholder for "name it for me", not a chosen name.
+    const chosenName = toCreate.name && !isUntitledWorkspaceName(toCreate.name) ? toCreate.name : undefined;
 
     const files: StoredIntakeFile[] = [];
     for await (const item of request.items) {
@@ -598,14 +572,14 @@ export async function intakeIntoWorkspace(
         userId: request.userId,
         orgId: request.orgId ?? undefined,
         name:
-          toCreate.name ??
+          chosenName ??
           (request.urls?.length
             ? inferWorkspaceTitleFromUrls(request.urls)
             : inferWorkspaceTitleFromFilenames(files.map((file) => file.filename))),
         ...(toCreate.slug ? { slug: toCreate.slug } : {}),
         templateKey: request.templateKey,
         pipeline: request.indexingMode ? { ...request.pipeline, indexingMode: request.indexingMode } : request.pipeline,
-        autoNamed: !toCreate.name,
+        autoNamed: !chosenName,
       }));
     if (!existing) createdWorkspaceId = workspace.id;
     // A new workspace already carries the overrides; an existing one merges them.
@@ -656,6 +630,20 @@ export async function intakeIntoWorkspace(
   // The Run and its Documents are committed (and started or deferred) from
   // here on, so later steps degrade instead of throwing.
   const { run, documents, deferredReason } = created;
+
+  // A new workspace was already titled from this batch; an existing untitled or
+  // filename-titled one is re-titled from its files.
+  if (!createdWorkspaceId && records.nameFromUpload && documents.length > 0) {
+    const renamed = await records.nameFromUpload({
+      workspaceId: workspace.id,
+      filenames: documents.map((document) => document.filename),
+      ...(request.urls?.length ? { urls: request.urls } : {}),
+    }).catch((error: unknown) => {
+      console.error(`[intake] could not re-title workspace=${workspace.id}:`, error instanceof Error ? error.message : String(error));
+      return null;
+    });
+    if (renamed) workspace = { ...workspace, name: renamed };
+  }
 
   const audit = request.audit;
   await appendIntakeAudit(records, {
