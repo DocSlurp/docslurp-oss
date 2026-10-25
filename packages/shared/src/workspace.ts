@@ -191,6 +191,8 @@ export const organizationSchema = z.object({
   funded: z.boolean().default(false),
   /** Versions kept per document chain; null uses DEFAULT_RETAINED_VERSIONS. */
   retainDocumentVersions: z.number().int().min(1).max(100).nullable().default(null),
+  /** China-based model providers may serve the org's requests (DeepSeek, GLM and similar open models often cost about half there). */
+  allowChinaProviders: z.boolean().default(true),
   createdAt: z.string(),
   updatedAt: z.string(),
 });

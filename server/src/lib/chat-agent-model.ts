@@ -1,5 +1,5 @@
 import { createOpenRouter } from "@openrouter/ai-sdk-provider";
-import { createOpenRouterReasoningFetch } from "@docslurp/shared";
+import { createOpenRouterReasoningFetch, createOpenRouterRoutingFetch } from "@docslurp/shared";
 
 const OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1";
 
@@ -32,6 +32,6 @@ export function promptCacheBreakpoint(model: string) {
  */
 export function createChatAgentModel(args: { apiKey: string; model: string; fetch: typeof fetch }) {
   const provider = createOpenRouter({ apiKey: args.apiKey, baseURL: OPENROUTER_BASE_URL, compatibility: "strict",
-    fetch: createOpenRouterReasoningFetch(args.fetch) });
+    fetch: createOpenRouterReasoningFetch(createOpenRouterRoutingFetch(args.fetch)) });
   return provider.chat(args.model, { usage: { include: true } });
 }

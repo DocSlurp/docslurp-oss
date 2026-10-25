@@ -3,12 +3,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { visionConfigSchema } from "@docslurp/shared";
+import { CHINA_PROVIDER_SLUGS, visionConfigSchema } from "@docslurp/shared";
 
 import type { Config } from "../config.js";
 import { CommandRunner } from "../tools/runner.js";
 import { executeVisionRuntime } from "../tools/vision-runtime.js";
 import { alternateRouteBody } from "../tools/vision-stream.js";
+import { runWithProviderRateScope } from "../lib/provider-rate-limit.js";
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -24,6 +25,12 @@ describe("alternateRouteBody", () => {
   it("ignores the failing provider and keeps allow_fallbacks:true preferences intact", () => {
     const body = { provider: { order: ["relace", "deepinfra"], allow_fallbacks: true } };
     expect(alternateRouteBody(body, "Relace", "degenerate")).toEqual({ provider: { order: ["relace", "deepinfra"], allow_fallbacks: true, ignore: ["Relace"] } });
+  });
+
+  it("keeps an org's China-provider restriction when a refusal moves to the preferred retry route", () => {
+    const body = { provider: { order: ["relace"], allow_fallbacks: true, ignore: ["Wafer", "z-ai", "deepseek"] } };
+    expect(alternateRouteBody(body, "Relace", "refusal", { order: ["together"], allow_fallbacks: true })).toEqual({
+      provider: { order: ["together"], allow_fallbacks: true, ignore: ["z-ai", "deepseek"] } });
   });
 
   it("when fallbacks are forbidden, keeps only the remaining order entries", () => {
@@ -108,6 +115,24 @@ describe("per-model provider preferences survive the generic retry", () => {
       sse([{ id: "g", model: LUNA, provider: "Amazon Bedrock", choices: [{ delta: { content: "ok" }, finish_reason: "stop" }], usage: { prompt_tokens: 10, completion_tokens: 1 } }]),
     ]);
     expect(bodies[1]!.provider).toEqual({ order: ["amazon-bedrock/us-east-1", "azure/us"], allow_fallbacks: false });
+  });
+});
+
+describe("org China-provider restriction", () => {
+  it("keeps China-based providers out of a restricted org's vision requests, retries included", async () => {
+    const { bodies } = await runWithProviderRateScope({ orgId: "org", allowChinaProviders: false }, () => run(MIMO, [
+      filtered("Relace"),
+      sse([{ id: "g", model: MIMO, provider: "DeepInfra", choices: [{ delta: { content: "ok" }, finish_reason: "stop" }], usage: { prompt_tokens: 10, completion_tokens: 1 } }]),
+    ]));
+    expect(bodies[0]!.provider).toEqual({ order: ["relace", "deepinfra"], allow_fallbacks: true, ignore: [...CHINA_PROVIDER_SLUGS] });
+    expect(bodies[1]!.provider.ignore).toEqual([...CHINA_PROVIDER_SLUGS, "Relace"]);
+  });
+
+  it("leaves an unrestricted org's routing unchanged", async () => {
+    const { bodies } = await runWithProviderRateScope({ orgId: "org" }, () => run(MIMO, [
+      sse([{ id: "g", model: MIMO, provider: "Relace", choices: [{ delta: { content: "ok" }, finish_reason: "stop" }], usage: { prompt_tokens: 10, completion_tokens: 1 } }]),
+    ]));
+    expect(bodies[0]!.provider).toEqual({ order: ["relace", "deepinfra"], allow_fallbacks: true });
   });
 });
 

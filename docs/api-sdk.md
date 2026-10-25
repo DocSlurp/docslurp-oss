@@ -201,7 +201,7 @@ curl -X PATCH "$api_url/v1/workspaces/amber-falcon-ridge" \
 | Estimate work before starting it | `POST …/estimate` twins of each work-creating route | `updateWorkspaceEstimate`, `reprocessEstimate`, `fullIndexEstimate`, `uploadEstimate`, … | `--estimate` on `upload`, `full-index`, `reprocess` |
 | Follow a background job | `GET /v1/jobs/:id`, `GET /v1/jobs/:id/events` (SSE) | `getJob` / `streamJob` | `jobs get` / `jobs watch` |
 | List / create organizations | `GET` / `POST /v1/organizations` | `listOrganizations` / `createOrganization` | Use SDK/HTTP |
-| Read / update organization | `GET` / `PATCH /v1/organizations/:orgId` | `getOrganization` / `updateOrganization` | Use SDK/HTTP |
+| Read / update organization (name, slug, retention, `allowChinaProviders`) | `GET` / `PATCH /v1/organizations/:orgId` | `getOrganization` / `updateOrganization` | Use SDK/HTTP |
 | Organization details / access | `GET /v1/organizations/:orgId/details` / `access` | `getOrganizationDetails` / `getOrganizationAccess` | Use SDK/HTTP |
 | List members | `GET /v1/organizations/:orgId/members` | `listOrganizationMembers` | Use SDK/HTTP |
 | Invite / list / revoke invites | `POST` / `GET /v1/organizations/:orgId/invites`, `DELETE …/invites/:inviteId` | `inviteOrganizationMember` / `listOrganizationInvites` / `revokeOrganizationInvite` | Use SDK/HTTP |

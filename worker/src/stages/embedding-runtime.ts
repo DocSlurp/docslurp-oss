@@ -6,7 +6,7 @@ import { isUtf8 } from "node:buffer";
 import path from "node:path";
 
 import type { CanonicalDocument } from "@docslurp/shared";
-import { assertProviderAllowed, authorizePrivateModelCall, textModelCallDescriptor, canonicalDocumentSchema, DEEPINFRA_EMBEDDING_BASE_URL, validateDeepInfraEmbedding, fitEmbeddingDimensions, openRouterEmbeddingRoute, validateHostedEmbeddingVector, OPENROUTER_BASE_URL, PRIVATE_MODEL_PROVIDER, isProviderCallAllowed, resolvePipelineTextModel, type PrivacyMode, type TextGenerationConfig } from "@docslurp/shared";
+import { assertProviderAllowed, authorizePrivateModelCall, textModelCallDescriptor, canonicalDocumentSchema, DEEPINFRA_EMBEDDING_BASE_URL, validateDeepInfraEmbedding, fitEmbeddingDimensions, openRouterEmbeddingRoute, validateHostedEmbeddingVector, OPENROUTER_BASE_URL, PRIVATE_MODEL_PROVIDER, isProviderCallAllowed, resolvePipelineTextModel, createOpenRouterRoutingFetch, type PrivacyMode, type TextGenerationConfig } from "@docslurp/shared";
 import { embedMany } from "ai";
 import { embedPerplexity } from "@docslurp/shared";
 import { noteWorkProgress, withRequestTimeout } from "../lib/work-progress.js";
@@ -1215,7 +1215,7 @@ function createRemoteEmbeddingModel(profile: EmbeddingProfile, config: Config) {
     case "openrouter": {
       const route = openRouterEmbeddingRoute(profile.model);
       if (profile.dimensions !== route.dimensions) throw new Error("OpenRouter embedding dimensions do not match the registered model");
-      return createOpenAI({ apiKey: requiredKey(config.openRouterApiKey, "OPENROUTER_API_KEY"), baseURL: OPENROUTER_BASE_URL, fetch: instrumentFetch("openrouter", "embedding") }).embedding(profile.model) as any;
+      return createOpenAI({ apiKey: requiredKey(config.openRouterApiKey, "OPENROUTER_API_KEY"), baseURL: OPENROUTER_BASE_URL, fetch: instrumentFetch("openrouter", "embedding", createOpenRouterRoutingFetch()) }).embedding(profile.model) as any;
     }
     case "openai":
       return (

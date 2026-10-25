@@ -1,4 +1,4 @@
-import { resolveSupportedModelIdWithWarning } from "@docslurp/shared";
+import { CHINA_PROVIDER_SLUGS, currentOpenRouterProviderPolicy, resolveSupportedModelIdWithWarning } from "@docslurp/shared";
 import { withObservation } from "@docslurp/shared/observability";
 import { ProviderRetryableError, providerFromBaseUrl } from "../lib/provider-retry.js";
 import {
@@ -435,6 +435,13 @@ export async function runVisionRequest(args: {
         // Per-model routing restricted to providers measured to transcribe faithfully.
         ...(isOpenRouter ? openRouterProviderParams(args.model) : {}),
       };
+      // An org that turned off China-based providers keeps them out of every route, retries included.
+      const policy = isOpenRouter ? await currentOpenRouterProviderPolicy() : undefined;
+      if (policy && !policy.allowChinaProviders) {
+        const own = (body as { provider?: Record<string, unknown> }).provider ?? {};
+        const ignore = [...new Set([...(Array.isArray(own.ignore) ? own.ignore as string[] : []), ...CHINA_PROVIDER_SLUGS])];
+        Object.assign(body, { provider: { ...own, ignore } });
+      }
       const result = await runGuardedChatCompletion({
         url: resolveChatCompletionsUrl(args.baseUrl),
         headers: {

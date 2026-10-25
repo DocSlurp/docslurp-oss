@@ -8,7 +8,7 @@
  * `[ai-usage]` line) and summed into the returned totals, so a discarded attempt
  * is still billed honestly; the caller logs the single `[ai-usage]` total.
  */
-import { readProviderCharge } from "@docslurp/shared";
+import { CHINA_PROVIDER_SLUGS, readProviderCharge } from "@docslurp/shared";
 
 import { fetchWithProviderRetry } from "../lib/provider-retry.js";
 import type { ProviderRateLease } from "../lib/provider-rate-limit.js";
@@ -210,8 +210,10 @@ export function alternateRouteBody(
   if (kind === "refusal" && preferred) {
     const order = preferred.order.filter((p) => !sameProvider(p, failingProvider));
     if (order.length > 0) {
-      const { ignore: _ignore, ...rest } = existing;
-      return { ...body, provider: { ...rest, order, allow_fallbacks: preferred.allow_fallbacks } };
+      // The retry route replaces failure-based ignores, but an org's China-provider restriction stays.
+      const { ignore, ...rest } = existing;
+      const kept = Array.isArray(ignore) ? ignore.filter((p) => (CHINA_PROVIDER_SLUGS as readonly unknown[]).includes(p)) : [];
+      return { ...body, provider: { ...rest, order, allow_fallbacks: preferred.allow_fallbacks, ...(kept.length ? { ignore: kept } : {}) } };
     }
   }
   const ignored = withIgnoredProvider(body, failingProvider);

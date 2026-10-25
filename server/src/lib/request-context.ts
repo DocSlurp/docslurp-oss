@@ -23,6 +23,8 @@ const requestContextStorage = new AsyncLocalStorage<{
   origin?: string | null;
   /** The Better Auth session behind a cookie-authenticated request; file URLs bind to it. */
   sessionId?: string | null;
+  /** Organization the request acts in: the API key's, or the workspace it resolved. */
+  orgId?: string | null;
   /** The API key actor's workspace allowlist; null when unrestricted or not a key. */
   apiKeyWorkspaceIds?: readonly string[] | null;
   /** Aborts when the client disconnects before the response finished (search cancels its SQL). */
@@ -155,6 +157,16 @@ export function setCurrentRequestSessionId(sessionId: string | null | undefined)
 
 export function currentRequestSessionId(): string | null {
   return requestContextStorage.getStore()?.sessionId ?? null;
+}
+
+/** Records the organization the request acts in (an API key's org, or a resolved workspace's). */
+export function setCurrentRequestOrgId(orgId: string | null | undefined): void {
+  const store = requestContextStorage.getStore();
+  if (store && orgId) store.orgId = orgId;
+}
+
+export function currentRequestOrgId(): string | null {
+  return requestContextStorage.getStore()?.orgId ?? null;
 }
 
 export function currentRequestUserId(): string | null {

@@ -72,6 +72,7 @@ type WorkspaceRunRow = {
   org_id: string;
   /** Joined from organizations by loadRun; absent from other run queries. */
   org_funded?: boolean | null;
+  org_allow_china_providers?: boolean | null;
   workspace_id: string;
   user_id: string;
   kind: string;
@@ -369,7 +370,8 @@ function runRowQuery(client: Sql<Record<string, unknown>>, runId: string) {
   // The org's plan rides along (no extra round trip): it sets the AI credit
   // factor for bonus plans in the usage ledger.
   return client<WorkspaceRunRow[]>`
-    select r.*, (select o.funded_at is not null from organizations o where o.id = r.org_id) as org_funded
+    select r.*, (select o.funded_at is not null from organizations o where o.id = r.org_id) as org_funded,
+      (select o.allow_china_providers from organizations o where o.id = r.org_id) as org_allow_china_providers
     from workspace_runs r
     where r.id = ${runId}
     limit 1
@@ -3762,6 +3764,7 @@ function mapRun(row: WorkspaceRunRow): WorkspaceRun {
     id: row.id,
     orgId: row.org_id ?? null,
     ...(row.org_funded !== undefined && row.org_funded !== null ? { orgFunded: row.org_funded } : {}),
+    ...(row.org_allow_china_providers === false ? { orgAllowChinaProviders: false } : {}),
     userId: row.user_id,
     workspaceId: row.workspace_id,
     kind: row.kind,
