@@ -54,9 +54,13 @@ describe("chat MCP tools", () => {
     expect(Object.keys(t.tools)).toEqual(["search"]);
   });
 
-  it("never lets the model start a paid full index; it may only price one", () => {
-    const t = setup(["search", "fullIndex", "fullIndexEstimate"]);
-    expect(Object.keys(t.tools)).toEqual(["search", "fullIndexEstimate"]);
+  it("never lets the model start a paid full index", () => {
+    expect(Object.keys(setup(["search", "fullIndex"]).tools)).toEqual(["search"]);
+  });
+
+  it("leaves rarely used tools out of the per-step tool catalog", () => {
+    const t = setup(["search", "fullIndexEstimate", "uploadEstimate", "reprocessEstimate", "getJob", "suggestQueries", "getUploadStatus"]);
+    expect(Object.keys(t.tools)).toEqual(["search", "getUploadStatus"]);
   });
 
   it("offers only webSearch and webFetch to chat, and only when the turn allows web tools", () => {

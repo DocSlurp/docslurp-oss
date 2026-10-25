@@ -8,6 +8,7 @@ import { withSearchSignal } from "../search/query-bounds.js";
 import { raceAbort } from "./chat-turn-deadline.js";
 
 import { ChatToolBlockedError } from "./chat-tool-error.js";
+import { ESTIMATE_TOOL_NAMES } from "./mcp-estimate-catalog.js";
 export { ChatToolBlockedError } from "./chat-tool-error.js";
 
 /** Batch endpoints may return HTTP 200 with failed items. Never treat that as success. */
@@ -178,9 +179,13 @@ function webActivityResult(request: WebToolActivity, result: unknown): WebToolAc
  * Chat never exposes ingestion tools: upload fetches arbitrary URLs and starts
  * paid ingestion, and the model's arguments can be steered by document text (G-04).
  * fullIndex is excluded for the same reason: it spends credits on the model's say-so.
- * Chat may still price it (fullIndexEstimate) and the user starts it from the UI.
+ * The cost estimates, getJob and suggestQueries are left out because every tool
+ * definition is resent on every step: in production (30 days to 2026-10-25) they
+ * made 24 of ~9,000 chat tool calls. proposeWorkspaceSettings already reports a
+ * change's impact, and the app prices uploads and indexing itself.
  */
-const CHAT_EXCLUDED_TOOLS = new Set(["upload", "completeUpload", "listWorkspaces", "webMap", "webCrawl", "ingestWebsite", "fullIndex"]);
+const CHAT_EXCLUDED_TOOLS = new Set(["upload", "completeUpload", "listWorkspaces", "webMap", "webCrawl", "ingestWebsite", "fullIndex",
+  ...ESTIMATE_TOOL_NAMES, "getJob", "suggestQueries"]);
 /** Web tools chat may use when the turn allows them (`webTools`). */
 const CHAT_WEB_TOOLS = new Set(["webSearch", "webFetch"]);
 
