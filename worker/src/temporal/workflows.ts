@@ -590,3 +590,12 @@ const pageRenderActivities = proxyActivities<Activities>({
 export async function renderDocumentPage(input: import("@docslurp/shared").RenderDocumentPageInput): Promise<void> {
   await pageRenderActivities.renderDocumentPageActivity(input);
 }
+
+const documentExportActivities = proxyActivities<Activities>({
+  startToCloseTimeout: "2 hours", heartbeatTimeout: "2 minutes",
+  retry: { maximumAttempts: 2, initialInterval: "30s", maximumInterval: "2 minutes" },
+});
+/** Builds a queued zip export into object storage. Its own workflow type, off the pipeline history. */
+export async function buildDocumentExport(input: import("@docslurp/shared").BuildDocumentExportInput): Promise<void> {
+  await documentExportActivities.buildDocumentExportActivity(input);
+}

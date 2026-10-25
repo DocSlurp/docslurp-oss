@@ -41,7 +41,7 @@ import { resolveWorkerScalerConfig, resolveWorkerScalerQueryParams } from "@docs
 import { warmLocalEmbedding } from "../stages/embedding-runtime.js";
 import { closeSharedLocalEmbeddingPool } from "../stages/local-embedding-thread.js";
 import { resolveEmbeddingModel } from "../embeddings/resolver.js";
-import { DEFAULT_MATERIALIZE_TASK_QUEUE, defaultPipelineFeatures, deferredProfilesEnabled } from "@docslurp/shared";
+import { DEFAULT_DOCUMENT_EXPORT_TASK_QUEUE, DEFAULT_MATERIALIZE_TASK_QUEUE, defaultPipelineFeatures, deferredProfilesEnabled } from "@docslurp/shared";
 import { purgeConfig } from "../db/superseded-purge.js";
 import { prefetchVendorBundles } from "../tools/vendor-bundles.js";
 import { initializePrivateModelEndpoints } from "../lib/privacy-guard.js";
@@ -224,6 +224,14 @@ async function main(): Promise<void> {
         activities: { renderDocumentPageActivity: activities.renderDocumentPageActivity },
         maxConcurrentActivityTaskExecutions: 2, maxConcurrentActivityTaskPolls: 2,
         taskQueue: process.env.TEMPORAL_PAGE_RENDER_TASK_QUEUE?.trim() || "docslurp-page-render",
+      }));
+      // Zip exports stream for minutes on one slot per worker, away from ingest and page renders.
+      const exportQueue = process.env.TEMPORAL_DOCUMENT_EXPORT_TASK_QUEUE?.trim() || DEFAULT_DOCUMENT_EXPORT_TASK_QUEUE;
+      workers.push(await Worker.create({
+        ...common, ...workflowOptions,
+        activities: { buildDocumentExportActivity: activities.buildDocumentExportActivity },
+        maxConcurrentActivityTaskExecutions: 1, maxConcurrentActivityTaskPolls: 1,
+        taskQueue: exportQueue,
       }));
       const activityWorkers = activityTaskQueue ? workers.slice(1) : workers;
       return {

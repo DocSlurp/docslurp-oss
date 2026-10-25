@@ -15,7 +15,10 @@ import {
 } from "@temporalio/common";
 import {
   DEFAULT_MATERIALIZE_TASK_QUEUE,
+  DEFAULT_DOCUMENT_EXPORT_TASK_QUEUE,
   DEFAULT_PAGE_RENDER_TASK_QUEUE,
+  DOCUMENT_EXPORT_WORKFLOW,
+  documentExportWorkflowId,
   PAGE_RENDER_WORKFLOW,
   pageRenderWorkflowId,
   MATERIALIZE_WORKFLOW,
@@ -631,6 +634,20 @@ export async function startPageRenderWorkflow(input: import("@docslurp/shared").
       workflowId: pageRenderWorkflowId(input), args: [input],
       workflowExecutionTimeout: "5 minutes",
       workflowIdReusePolicy: WorkflowIdReusePolicy.ALLOW_DUPLICATE_FAILED_ONLY,
+    });
+  } catch (error) {
+    if (!(error instanceof WorkflowExecutionAlreadyStartedError)) throw error;
+  }
+}
+
+/** One workflow per export id; a duplicate start (double click, retry) is a no-op. */
+export async function startDocumentExportWorkflow(input: import("@docslurp/shared").BuildDocumentExportInput): Promise<void> {
+  const client = await getClient();
+  try {
+    await client.workflow.start(DOCUMENT_EXPORT_WORKFLOW, {
+      taskQueue: process.env.TEMPORAL_DOCUMENT_EXPORT_TASK_QUEUE?.trim() || DEFAULT_DOCUMENT_EXPORT_TASK_QUEUE,
+      workflowId: documentExportWorkflowId(input.exportId), args: [input],
+      workflowExecutionTimeout: "5 hours",
     });
   } catch (error) {
     if (!(error instanceof WorkflowExecutionAlreadyStartedError)) throw error;

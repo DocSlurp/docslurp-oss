@@ -313,3 +313,19 @@ This is scaling on a single host, not a multi-host design.
 | Full worker shows `[worker-start] installing deferred Python deps` for a long time | With no vendor bundle source, the full worker pip-installs several GB on first boot. | Wait, or set `DOCSLURP_VENDOR_BUNDLE_BASE_URL`. See [Worker image and vendor bundles](../worker-image.md). |
 | Storage errors after you edited `AWS_ACCESS_KEY_ID` or `AWS_SECRET_ACCESS_KEY` | MinIO, the server and the worker all read these as one credential. They disagree until every service is recreated. | Recreate them together with `up -d`. If errors continue, change the keys back. |
 | Postgres rejects the new password after you edited `POSTGRES_PASSWORD` | Postgres sets its password only when the volume is first created. | Change it inside Postgres with `ALTER USER docslurp PASSWORD '...'`, then update `POSTGRES_PASSWORD` and the `DATABASE_URL` password to match and run `up -d`. |
+
+## Export cleanup
+
+Zip exports (`POST /v1/exports`) are built by the worker on the `docslurp-document-export` task queue (override with `TEMPORAL_DOCUMENT_EXPORT_TASK_QUEUE` on both the API and the worker) and stored at `exports/<orgId>/<workspaceId>/<exportId>.zip`. Each link lives seven days. The API's maintenance sweep (`MAINTENANCE_SWEEP_INTERVAL_MS`) emails finished exports over 250 MB through Resend, deletes objects whose seven days have passed, and marks exports unfinished after six hours as failed. Look for `[document-export]` log lines.
+
+As a backstop, add a bucket lifecycle rule that expires objects under the `exports/` prefix after 8 days, so a stopped sweep never leaves exports behind:
+
+```json
+{ "Rules": [{ "ID": "expire-exports", "Status": "Enabled", "Filter": { "Prefix": "exports/" }, "Expiration": { "Days": 8 } }] }
+```
+
+```bash
+aws s3api put-bucket-lifecycle-configuration --bucket "$BUCKET" --endpoint-url "$S3_ENDPOINT" --lifecycle-configuration file://lifecycle.json
+```
+
+Merge this rule into any existing lifecycle configuration (such as incomplete-multipart expiry) rather than replacing it.

@@ -150,20 +150,29 @@ export class ArtifactStore {
   createMultipartUploadStream(
     key: string,
     contentType: string,
-    options?: { partSizeBytes?: number }
+    options?: { partSizeBytes?: number; object?: StorageObjectOptions }
   ): { writable: Writable; done: Promise<void> } {
     const writer = new MultipartUploadWriter({
       client: this.client,
       bucket: this.bucket,
       key,
       contentType,
-      partSizeBytes: options?.partSizeBytes
+      partSizeBytes: options?.partSizeBytes,
+      object: options?.object
     });
 
     return {
       writable: writer,
       done: writer.done
     };
+  }
+
+  /** Streams an object without buffering it; `size` is the stored length when known. */
+  async openStream(key: string, signal?: AbortSignal): Promise<{ stream: AsyncIterable<Uint8Array>; size: number | null }> {
+    validateStorageKey(key);
+    const response = await this.client.send(new GetObjectCommand({ Bucket: this.bucket, Key: key }), { abortSignal: signal });
+    if (!response.Body) throw new StorageReadError(new Error("empty storage object body"));
+    return { stream: response.Body as AsyncIterable<Uint8Array>, size: response.ContentLength ?? null };
   }
 
   async getBytes(key: string, options?: StorageReadOptions): Promise<Buffer> {
@@ -535,6 +544,12 @@ function assertObjectWithinReadLimit(key: string, sizeBytes: number, maxBytes?: 
   }
 }
 
+/** Headers stored with an object: an HTTP Expires date and user metadata (x-amz-meta-*). */
+export interface StorageObjectOptions {
+  expires?: Date;
+  metadata?: Record<string, string>;
+}
+
 class MultipartUploadWriter extends Writable {
   readonly done: Promise<void>;
 
@@ -543,6 +558,7 @@ class MultipartUploadWriter extends Writable {
   private readonly key: string;
   private readonly contentType: string;
   private readonly partSizeBytes: number;
+  private readonly object: StorageObjectOptions;
 
   private readonly completedParts: Array<{ ETag?: string; PartNumber: number }> = [];
   private readonly pendingChunks: Buffer[] = [];
@@ -561,8 +577,10 @@ class MultipartUploadWriter extends Writable {
     key: string;
     contentType: string;
     partSizeBytes?: number;
+    object?: StorageObjectOptions;
   }) {
     super();
+    this.object = args.object ?? {};
     this.client = args.client;
     this.bucket = args.bucket;
     this.key = args.key;
@@ -619,7 +637,9 @@ class MultipartUploadWriter extends Writable {
             Bucket: this.bucket,
             Key: this.key,
             Body: new Uint8Array(),
-            ContentType: this.contentType
+            ContentType: this.contentType,
+            Expires: this.object.expires,
+            Metadata: this.object.metadata
           })
         );
         this.settle();
@@ -699,7 +719,9 @@ class MultipartUploadWriter extends Writable {
       new CreateMultipartUploadCommand({
         Bucket: this.bucket,
         Key: this.key,
-        ContentType: this.contentType
+        ContentType: this.contentType,
+        Expires: this.object.expires,
+        Metadata: this.object.metadata
       })
     );
 

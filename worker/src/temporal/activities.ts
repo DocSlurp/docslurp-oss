@@ -1,4 +1,5 @@
 import { renderDocumentPage } from "../deferred/render-page.js";
+import { buildDocumentExport } from "../exports/build-document-export.js";
 import { runPageBundle } from "./page-bundle.js";
 import { VisionExtractStage } from "../stages/vision-extract.js";
 import type { VisionPageTask } from "./shared.js";
@@ -186,6 +187,19 @@ export function createActivities(deps: ActivityDependencies) {
       const timer = setInterval(() => context.heartbeat(), 10_000);
       try { await renderDocumentPage({ store, storage: deps.storage, runner: deps.runner }, input, context.cancellationSignal); }
       finally { clearInterval(timer); }
+    },
+    async buildDocumentExportActivity(input: import("@docslurp/shared").BuildDocumentExportInput): Promise<void> {
+      const context = Context.current();
+      const timer = setInterval(() => context.heartbeat(), 20_000);
+      try {
+        await buildDocumentExport({ sql: store.stageSql, storage: deps.storage }, input.exportId, {
+          signal: context.cancellationSignal,
+          heartbeat: () => context.heartbeat(),
+          final: context.info.attempt >= 2,
+        });
+      } finally {
+        clearInterval(timer);
+      }
     },
     /** One contiguous page range of a materializePages workflow. */
     async materializePageRangeActivity(input: MaterializePagesInput): Promise<MaterializeResult> {

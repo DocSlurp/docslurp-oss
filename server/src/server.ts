@@ -25,6 +25,7 @@ import { apiActorRateLimit, apiIpRateLimit } from "./middleware/rate-limit.js";
 import { sessionAuth } from "./middleware/session-auth.js";
 import { chatCompletionsRoutes } from "./routes/chat-completions.js";
 import { documentsRoutes } from "./routes/documents.js";
+import { exportsRoutes } from "./routes/exports.js";
 import { extractorRoutes } from "./routes/extractors.js";
 import { docsRoutes } from "./routes/docs.js";
 import { healthRoutes } from "./routes/health.js";
@@ -158,6 +159,7 @@ export function createApiApp(): Hono {
   app.route("/v1/jobs", jobsRoutes);
   app.route("/v1/workspaces", workspacesRoutes);
   app.route("/v1/documents", documentsRoutes);
+  app.route("/v1/exports", exportsRoutes);
   app.route("/v1/extractors", extractorRoutes);
   app.route("/v1/ingest", uploadsRoutes);
   app.route("/v1/uploads", uploadEstimateRoutes);
