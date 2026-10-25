@@ -177,8 +177,10 @@ function webActivityResult(request: WebToolActivity, result: unknown): WebToolAc
 /**
  * Chat never exposes ingestion tools: upload fetches arbitrary URLs and starts
  * paid ingestion, and the model's arguments can be steered by document text (G-04).
+ * fullIndex is excluded for the same reason: it spends credits on the model's say-so.
+ * Chat may still price it (fullIndexEstimate) and the user starts it from the UI.
  */
-const CHAT_EXCLUDED_TOOLS = new Set(["upload", "completeUpload", "listWorkspaces", "webMap", "webCrawl", "ingestWebsite"]);
+const CHAT_EXCLUDED_TOOLS = new Set(["upload", "completeUpload", "listWorkspaces", "webMap", "webCrawl", "ingestWebsite", "fullIndex"]);
 /** Web tools chat may use when the turn allows them (`webTools`). */
 const CHAT_WEB_TOOLS = new Set(["webSearch", "webFetch"]);
 

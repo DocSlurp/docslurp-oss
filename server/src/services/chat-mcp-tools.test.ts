@@ -54,6 +54,11 @@ describe("chat MCP tools", () => {
     expect(Object.keys(t.tools)).toEqual(["search"]);
   });
 
+  it("never lets the model start a paid full index; it may only price one", () => {
+    const t = setup(["search", "fullIndex", "fullIndexEstimate"]);
+    expect(Object.keys(t.tools)).toEqual(["search", "fullIndexEstimate"]);
+  });
+
   it("offers only webSearch and webFetch to chat, and only when the turn allows web tools", () => {
     const ids = ["search", "webSearch", "webFetch", "webMap", "webCrawl", "ingestWebsite"];
     expect(Object.keys(setup(ids).tools)).toEqual(["search"]);
