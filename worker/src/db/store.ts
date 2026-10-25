@@ -2173,11 +2173,27 @@ export class Store {
         .map((reference) => reference.key),
     );
     const checkedReferences = Array.from(expectedKeySet).slice(0, maxKeys);
-    // The listing already answers most existence checks: S3 lists keys in binary
-    // order, so a reference missing from it is missing unless it sorts after the
-    // last key of a truncated listing. Only those still need a HEAD each (this
-    // sweep sent up to 20,000 HEADs per run before).
-    const { existing: existingKeySet, unknown: needsHead } = classifyListedReferences(checkedReferences, listedKeys);
+    // Existence comes from listing each run's prefix (`<user>/<run>/`) completely:
+    // one LIST per run instead of a HEAD per artifact, with no reliance on listing
+    // order. Keys a complete listing lacks are confirmed with a HEAD before they
+    // count as missing; prefixes too large to list, and keys without one, are HEADed.
+    const existingKeySet = new Set<string>();
+    const { byPrefix, ungrouped } = groupReferencesByRunPrefix(checkedReferences);
+    const needsHead = [...ungrouped];
+    let listCalls = 0;
+    const prefixes = [...byPrefix.entries()];
+    for (let index = 0; index < prefixes.length; index += 8) {
+      await Promise.all(prefixes.slice(index, index + 8).map(async ([runPrefix, keys]) => {
+        const listing = await storage.listKeys({ prefix: runPrefix, maxKeys: 10_000 }).catch(() => null);
+        listCalls += 1;
+        if (!listing || listing.truncated) { needsHead.push(...keys); return; }
+        const listed = new Set(listing.keys);
+        for (const key of keys) {
+          if (listed.has(key)) existingKeySet.add(key);
+          else needsHead.push(key);
+        }
+      }));
+    }
 
     for (let index = 0; index < needsHead.length; index += 25) {
       const batch = needsHead.slice(index, index + 25);
@@ -2194,6 +2210,7 @@ export class Store {
         }
       }
     }
+    console.log(`[storage-integrity] references=${checkedReferences.length} run_prefixes=${byPrefix.size} list_calls=${listCalls} head_checks=${needsHead.length}`);
 
     const baseReport = buildStorageIntegrityReport({
       bucket: storage.bucket,
@@ -4057,22 +4074,20 @@ function toDate(value: string | Date): Date {
 }
 
 /**
- * Which referenced keys a bucket listing proves present, and which it cannot
- * answer. Listings are in UTF-8 binary key order, so a key absent from a
- * complete listing, or sorting at or before the last key of a truncated one,
- * does not exist; only keys after a truncated listing's end are unknown.
+ * Groups referenced keys by their run prefix (`<user>/<run>/`, the artifact
+ * layout), so each run can be listed once. Keys with fewer segments are left
+ * for a HEAD each.
  */
-export function classifyListedReferences(
-  references: string[],
-  listing: { keys: string[]; truncated: boolean },
-): { existing: Set<string>; unknown: string[] } {
-  const listed = new Set(listing.keys);
-  const last = listing.keys.length > 0 ? Buffer.from(listing.keys[listing.keys.length - 1]!) : null;
-  const existing = new Set<string>();
-  const unknown: string[] = [];
-  for (const key of references) {
-    if (listed.has(key)) existing.add(key);
-    else if (listing.truncated && (!last || Buffer.compare(Buffer.from(key), last) > 0)) unknown.push(key);
+export function groupReferencesByRunPrefix(keys: string[]): { byPrefix: Map<string, string[]>; ungrouped: string[] } {
+  const byPrefix = new Map<string, string[]>();
+  const ungrouped: string[] = [];
+  for (const key of keys) {
+    const parts = key.split("/");
+    if (parts.length < 3 || !parts[0] || !parts[1]) { ungrouped.push(key); continue; }
+    const prefix = `${parts[0]}/${parts[1]}/`;
+    const list = byPrefix.get(prefix);
+    if (list) list.push(key);
+    else byPrefix.set(prefix, [key]);
   }
-  return { existing, unknown };
+  return { byPrefix, ungrouped };
 }
