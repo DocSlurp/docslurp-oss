@@ -10,6 +10,12 @@ describe("embedding pooling routes", () => {
     expect(embeddingModelBaseUri("llm://transformers.js/Xenova/bge-m3?pooling=cls")).toBe("llm://transformers.js/Xenova/bge-m3");
   });
 
+  it("defaults the good-fast-local profile to CLS while stored plain routes keep mean", () => {
+    expect(resolveEmbeddingRoute(embeddingConfigSchema.parse({ profile: "good-fast-local" })).modelUri).toBe("llm://transformers.js/Xenova/bge-m3?pooling=cls");
+    const stored = embeddingConfigSchema.parse({ profile: "good-fast-local", modelUri: "llm://transformers.js/Xenova/bge-m3" });
+    expect(localEmbeddingPooling(resolveEmbeddingRoute(stored).modelUri)).toBe("mean");
+  });
+
   it("accepts only the pooling a hosted provider returns", () => {
     expect(embeddingPoolingProblem("llm://deepinfra/BAAI/bge-m3")).toBeNull();
     expect(embeddingPoolingProblem("llm://deepinfra/BAAI/bge-m3?pooling=cls")).toBeNull();

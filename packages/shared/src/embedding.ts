@@ -217,7 +217,7 @@ export const embeddingProfileCatalog: Record<
     config: {
       profile: "good-fast-local",
       target: "local",
-      modelUri: "llm://transformers.js/Xenova/bge-m3",
+      modelUri: "llm://transformers.js/Xenova/bge-m3?pooling=cls",
       task: "document",
       normalize: true,
     },
