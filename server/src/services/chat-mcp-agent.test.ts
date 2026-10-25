@@ -47,7 +47,7 @@ vi.mock("@docslurp/shared/observability", () => ({
   recordChatAgentTelemetry: (metric: unknown) => { spans.metrics.push(metric); },
   evalBaggageAttributes: () => ({ "eval.run_id": "run-7", "eval.arm": "control" }),
 }));
-const { runChatMcpAgent, classifyChatAgentStop, createToolMarkupGuard, FINAL_ANSWER_INSTRUCTION, SETTINGS_ON_REQUEST_INSTRUCTION } = await import("./chat-mcp-agent.js");
+const { runChatMcpAgent, classifyChatAgentStop, createToolMarkupGuard, FINAL_ANSWER_INSTRUCTION, SETTINGS_ON_REQUEST_INSTRUCTION, suggestionsInstruction, describeChatWorkspaceInventory } = await import("./chat-mcp-agent.js");
 const { ChatTurnDeadlineError } = await import("./chat-turn-deadline.js");
 const actor = { type: "session" as const, userId: "user", sessionId: "browser-session", user: { id: "user", name: "User", email: "" } };
 const args = { actor, workspaceId: "ws", orgId: "org", sessionId: "conversation", query: "What is the policy?", history: [], apiKey: "fake", privacyMode: "standard" as const, model: "test", maxOutputTokens: 100 };
@@ -577,6 +577,50 @@ describe("agent modes", () => {
     const result = await runChatMcpAgent({ ...args, suggestions: true });
     expect(systemText(model)).not.toContain("Suggestions mode is on");
     expect(result.debug.modes.suggestions).toBe(false);
+  });
+
+  it("only treats a failed or processing file as a signal when the question's evidence is missing, and never speculates about it", async () => {
+    mocks.manifestIds = ["search", "getUploadStatus", "getWorkspaceSettings", "proposeWorkspaceSettings"];
+    const model = new MockLanguageModelV4({ doStream: [answerStep("Ready")] });
+    mocks.provider.mockReturnValue(model);
+    await runChatMcpAgent({ ...args, suggestions: true, workspaceInventory: { searchableDocuments: 4, processingDocuments: 0, failedDocuments: 1 } });
+    const text = systemText(model);
+    expect(text).toContain("only when the question's evidence is missing from the results and that file could plausibly hold it");
+    expect(text).toContain("fully answer the question, say nothing about failed or still-processing files");
+    expect(text).toContain("Name a failed or processing file only after getUploadStatus shows it");
+    expect(text).toContain("Never guess a file's contents, type or topic");
+    // The count alone carries no content or type: the agent must not infer one from it.
+    expect(text).toContain("1 failed to ingest (which files and what they hold is unknown from this count)");
+  });
+
+  it("without getUploadStatus the suggestions instruction states only the count", () => {
+    const text = suggestionsInstruction({ getUploadStatus: false });
+    expect(text).toContain("You cannot see which files failed, so state only the count");
+    expect(text).not.toContain("getUploadStatus");
+    expect(describeChatWorkspaceInventory({ searchableDocuments: 2, processingDocuments: 1 })).toBe("Selected workspace inventory before this turn: 2 searchable documents, 1 still processing.");
+  });
+
+  it("keeps settings facts uncited and answers free of visible self-corrections", async () => {
+    mocks.manifestIds = ["search"];
+    const model = new MockLanguageModelV4({ doStream: [answerStep("Ready")] });
+    mocks.provider.mockReturnValue(model);
+    await runChatMcpAgent(args);
+    const text = systemText(model);
+    expect(text).toContain("Never attach a [n] citation marker to a statement about settings, configuration, inventory counts or tool status");
+    expect(text).toContain("citations are only for passages returned as document evidence");
+    expect(text).toContain("Work out every calculation, comparison and conclusion fully before you write the answer");
+    expect(text).toContain("Never leave self-corrections, retractions or asides");
+  });
+
+  it("separates thread-scoped from workspace-wide search settings and proposes workspace changes", async () => {
+    mocks.manifestIds = ["search", "getWorkspaceSettings", "proposeWorkspaceSettings"];
+    const model = new MockLanguageModelV4({ doStream: [answerStep("Ready")] });
+    mocks.provider.mockReturnValue(model);
+    await runChatMcpAgent(args);
+    const text = systemText(model);
+    expect(text).toContain("apply to that chat thread only and leave the workspace defaults unchanged");
+    expect(text).toContain("when the user wants the whole workspace to change, prepare a proposal for them to Apply");
+    expect(text).toContain("including a request to change it for the workspace");
   });
 
   it("turns web tools off for the turn when the request says web: false", async () => {

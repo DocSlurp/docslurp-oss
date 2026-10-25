@@ -1,4 +1,7 @@
 import { hasSharedLogProvider } from "./telemetry-state.js";
+import { isCancellation } from "./cancellation.js";
+
+export { isCancellation };
 // Server-only: exceptions belong in telemetry, never in response payloads.
 import { trace, SpanStatusCode } from "@opentelemetry/api";
 import { logs } from "@opentelemetry/api-logs";
@@ -54,9 +57,11 @@ export async function flushErrorReporting(): Promise<void> {
   try { await workerLoggerProvider?.forceFlush(); } catch { /* best effort */ }
 }
 
-export function reportException(error: unknown, attributes: Record<string, string | number | boolean> = {}): void {
+/** `signal` is the caller's request signal: an error that is its abort reason is a cancel, not a failure. */
+export function reportException(error: unknown, attributes: Record<string, string | number | boolean> = {}, signal?: AbortSignal): void {
   const details = exceptionDetails(error);
   const safeAttributes = Object.fromEntries(Object.entries(attributes).map(([key, value]) => [key, typeof value === "string" ? redactExceptionText(value) : value]));
+  if (isCancellation(error, signal)) return reportCancellation(safeAttributes);
   try { console.error("[public-error]", { ...safeAttributes, exception: details }); } catch { /* best effort */ }
   try {
     const span = trace.getActiveSpan();
@@ -73,4 +78,15 @@ export function reportException(error: unknown, attributes: Record<string, strin
       "exception.details": JSON.stringify(details).slice(0, 64000),
     } });
   } catch { /* telemetry must never replace the original failure */ }
+}
+
+/** The caller cancelled: an INFO outcome with its own span attribute, never an ERROR status or exception. */
+function reportCancellation(attributes: Record<string, string | number | boolean>): void {
+  try { console.info("[public-info] operation cancelled by caller", attributes); } catch { /* best effort */ }
+  try {
+    trace.getActiveSpan()?.setAttribute("docslurp.outcome", "cancelled");
+    const logger = hasSharedLogProvider() ? logs.getLogger("docslurp.errors")
+      : workerLoggerProvider?.getLogger("docslurp.errors") ?? logs.getLogger("docslurp.errors");
+    logger.emit({ severityNumber: 9, severityText: "INFO", body: "public_operation_cancelled", attributes: { ...attributes, "docslurp.outcome": "cancelled" } });
+  } catch { /* telemetry must never replace the original outcome */ }
 }

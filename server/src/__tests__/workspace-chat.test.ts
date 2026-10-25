@@ -147,7 +147,7 @@ describe("chatWorkspace", () => {
     generateAnthropicText.mockReset();
     generateAnthropicDocumentText.mockReset();
     configureSearchFromChat.mockReset();
-    configureSearchFromChat.mockResolvedValue(buildSearchSettings());
+    configureSearchFromChat.mockResolvedValue({ settings: buildSearchSettings(), changes: [], unchanged: [], workspaceScopeRequested: false });
     refineWorkspaceNames.mockReset();
     refineWorkspaceNames.mockResolvedValue(undefined);
     getWorkspaceSearchSettings.mockResolvedValue(buildSearchSettings());
@@ -225,6 +225,28 @@ describe("chatWorkspace", () => {
       expect(hybridSearch).toHaveBeenCalledOnce();
     },
   );
+
+  it("tells the agent exactly which search setting the message changed, and that it is thread-only", async () => {
+    sqlMock.mockResolvedValue([]);
+    getWorkspace.mockResolvedValue({ id: "ws-1", orgId: "org-1", systemPrompt: null });
+    const settings = buildSearchSettings();
+    configureSearchFromChat.mockResolvedValue({
+      settings: { ...settings, retrievalDefaults: { ...settings.retrievalDefaults, useRerank: true } },
+      changes: [{ field: "useRerank", before: false, after: true }], unchanged: [], workspaceScopeRequested: false,
+    });
+    runChatMcpAgent.mockResolvedValue({ answer: "I turned reranking on for this chat.", citations: [], toolCalls: [], finishReason: "stop", usage: { inputTokens: 10, outputTokens: 4, totalTokens: 14, costCents: 0.01 } });
+    const previous = process.env.OPENROUTER_API_KEY;
+    process.env.OPENROUTER_API_KEY = "fake";
+    try {
+      await chatWorkspace({ workspaceId: "ws-1", userId: "user-1", query: "Please turn on search reranking for this workspace", history: [],
+        actor: { type: "session", userId: "user-1", sessionId: "s", user: { id: "user-1", email: "", name: "User" } } });
+      const { workspaceInstructions } = runChatMcpAgent.mock.calls[0]![0] as { workspaceInstructions: string };
+      expect(workspaceInstructions).toContain("useRerank false→true (this thread only; workspace defaults unchanged)");
+      expect(workspaceInstructions).not.toContain("already been processed");
+    } finally {
+      if (previous === undefined) delete process.env.OPENROUTER_API_KEY; else process.env.OPENROUTER_API_KEY = previous;
+    }
+  });
 
   it.each([false, true])("honors the trusted agent entrypoint permission (%s) with a verified actor and key", async (allowAgentTools) => {
     sqlMock.mockResolvedValue([]);
