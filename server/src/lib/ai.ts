@@ -3,7 +3,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { withObservation, aiResultDetails, instrumentFetch } from "@docslurp/shared/observability";
 import { createOpenAI } from "@ai-sdk/openai";
-import { defaultEmbeddingConfig, defaultPipelineFeatures, DEEPINFRA_EMBEDDING_BASE_URL, validateDeepInfraEmbedding, fitEmbeddingDimensions, parseLlmModelUri, openRouterEmbeddingRoute, validateHostedEmbeddingVector } from "@docslurp/shared";
+import { defaultEmbeddingConfig, embeddingModelBaseUri, localEmbeddingPooling, defaultPipelineFeatures, DEEPINFRA_EMBEDDING_BASE_URL, validateDeepInfraEmbedding, fitEmbeddingDimensions, parseLlmModelUri, openRouterEmbeddingRoute, validateHostedEmbeddingVector } from "@docslurp/shared";
 import { embed, embedMany, generateText, streamText } from "ai";
 import { embedPerplexity } from "@docslurp/shared";
 
@@ -673,6 +673,8 @@ async function embedLocalText(args: {
   model?: string;
   dimensions?: number;
   normalize?: boolean;
+  /** The workspace route; its `?pooling=` must match how the documents were embedded. */
+  modelUri?: string;
 }): Promise<{ embedding: number[]; usage: EmbeddingUsage }> {
   return withObservation(
     {
@@ -689,8 +691,9 @@ async function embedLocalText(args: {
       const pipeline = await getLocalEmbeddingPipeline(
         args.model ?? SEARCH_EMBEDDING_MODEL,
       );
+      // Same pooling as the workspace's documents were embedded with (`?pooling=` on the route).
       const output = await pipeline(args.value, {
-        pooling: "mean",
+        pooling: localEmbeddingPooling(args.modelUri ?? ""),
         normalize: args.normalize ?? true,
       });
       const embedding = fitEmbeddingDimensions(
@@ -718,9 +721,9 @@ export async function warmDefaultLocalEmbedding(): Promise<string | null> {
   const prefix = "llm://transformers.js/";
   const uri = defaultPipelineFeatures.embedding.modelUri ?? "";
   if (!uri.startsWith(prefix) || process.env.LOCAL_EMBEDDING_WARMUP === "false") return null;
-  const model = uri.slice(prefix.length);
+  const model = embeddingModelBaseUri(uri).slice(prefix.length);
   const pipeline = await getLocalEmbeddingPipeline(model);
-  await pipeline("warm up", { pooling: "mean", normalize: true });
+  await pipeline("warm up", { pooling: localEmbeddingPooling(uri), normalize: true });
   return model;
 }
 

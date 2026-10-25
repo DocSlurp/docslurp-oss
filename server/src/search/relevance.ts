@@ -78,13 +78,16 @@ const NOISE_BASELINES: Readonly<Record<string, number>> = {
 export function embeddingPipelineId(route: {
   provider: string;
   model: string;
+  /** Local pooling; baselines were measured with mean pooling. */
+  pooling?: "mean" | "cls";
   requestedDimensions?: number;
   normalize?: boolean;
 } | null | undefined): string | null {
   if (!route) return null;
   if (route.requestedDimensions !== undefined) return null;
   if (route.normalize === false) return null;
-  return `${route.provider}/${route.model}`;
+  const id = `${route.provider}/${route.model}`;
+  return route.pooling === "cls" ? `${id}?pooling=cls` : id;
 }
 
 /** Measured noise baseline for the pipeline, or null when none was measured. */

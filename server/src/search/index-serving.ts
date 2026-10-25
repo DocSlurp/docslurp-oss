@@ -1,4 +1,5 @@
 import {
+  embeddingModelBaseUri,
   embeddingModelCatalogByUri,
   indexConfigHash,
   indexConfigOf,
@@ -55,7 +56,7 @@ export function parseIndexConfigs(value: unknown): IndexConfigMap {
 
 /** The embedding config that reproduces a stored index config's query vectors. */
 export function embeddingConfigFor(current: EmbeddingConfig, config: IndexConfig): EmbeddingConfig {
-  const native = embeddingModelCatalogByUri[config.embeddingModel]?.dimensions ?? null;
+  const native = embeddingModelCatalogByUri[embeddingModelBaseUri(config.embeddingModel)]?.dimensions ?? null;
   return {
     ...current,
     modelUri: config.embeddingModel,
@@ -122,7 +123,8 @@ export async function pruneDrainedIndexConfigs(sql: SqlClient = defaultSql, limi
 
 function spaceKey(embedding: EmbeddingConfig): string {
   const route = resolveEmbeddingRoute(embedding);
-  return `${route.model}\u0000${route.dimensions}`;
+  // modelUri, not model: two poolings of one model embed queries differently.
+  return `${route.modelUri}\u0000${route.dimensions}`;
 }
 
 /**

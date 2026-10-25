@@ -133,6 +133,23 @@ describe("servedVectorSearch", () => {
     expect(search).toHaveBeenCalledTimes(2);
   });
 
+  it("re-embeds the query for a config that differs only in pooling", async () => {
+    const Cls = withModel("llm://transformers.js/Xenova/bge-m3?pooling=cls");
+    expect(hash(Cls)).not.toBe(hash(C));
+    await seed([hash(C), hash(Cls)], { [hash(C)]: cfg(C), [hash(Cls)]: cfg(Cls) }, Cls);
+    const search = vi.fn(async (_vector: number[], _serve: Serve) => [chunk("x")]);
+    const embed = vi.fn(async (_text: string, _embedding: { modelUri?: string }) => [7]);
+    await serving.servedVectorSearch({
+      workspaceId: "w", pipeline: Cls, indexConfigs: { [hash(C)]: cfg(C), [hash(Cls)]: cfg(Cls) }, queryVector: [0], query: "q", deps: { search: search as never, embed },
+    });
+    // The mean-pooled documents are searched with a mean-pooled query, never the current CLS vector.
+    expect(embed).toHaveBeenCalledTimes(1);
+    expect(embed.mock.calls[0]![1]).toMatchObject({ modelUri: "llm://transformers.js/Xenova/bge-m3" });
+    const vectors = search.mock.calls.map(([vector, serve]) => ({ vector, value: serve?.hash?.value }));
+    expect(vectors).toContainEqual({ vector: [7], value: hash(C) });
+    expect(vectors).toContainEqual({ vector: [0], value: hash(Cls) });
+  });
+
   it("serves the three configs with the most documents and records a diagnostic when there are more", async () => {
     const E = withModel("llm://transformers.js/Xenova/gte-small");
     const F = { ...E, chunkOverlap: !E.chunkOverlap };

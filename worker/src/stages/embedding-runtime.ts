@@ -6,7 +6,7 @@ import { isUtf8 } from "node:buffer";
 import path from "node:path";
 
 import type { CanonicalDocument } from "@docslurp/shared";
-import { assertProviderAllowed, authorizePrivateModelCall, textModelCallDescriptor, canonicalDocumentSchema, DEEPINFRA_EMBEDDING_BASE_URL, validateDeepInfraEmbedding, fitEmbeddingDimensions, openRouterEmbeddingRoute, validateHostedEmbeddingVector, OPENROUTER_BASE_URL, PRIVATE_MODEL_PROVIDER, isProviderCallAllowed, resolvePipelineTextModel, createOpenRouterRoutingFetch, type PrivacyMode, type TextGenerationConfig } from "@docslurp/shared";
+import { localEmbeddingPooling, type EmbeddingPooling, assertProviderAllowed, authorizePrivateModelCall, textModelCallDescriptor, canonicalDocumentSchema, DEEPINFRA_EMBEDDING_BASE_URL, validateDeepInfraEmbedding, fitEmbeddingDimensions, openRouterEmbeddingRoute, validateHostedEmbeddingVector, OPENROUTER_BASE_URL, PRIVATE_MODEL_PROVIDER, isProviderCallAllowed, resolvePipelineTextModel, createOpenRouterRoutingFetch, type PrivacyMode, type TextGenerationConfig } from "@docslurp/shared";
 import { embedMany } from "ai";
 import { embedPerplexity } from "@docslurp/shared";
 import { noteWorkProgress, withRequestTimeout } from "../lib/work-progress.js";
@@ -816,7 +816,7 @@ async function embedLocalChunks(args: {
           : new Error("aborted");
       }
 
-      const runner = await localEmbeddingBatchRunner(args.profile.model, args.profile.normalize, args.signal);
+      const runner = await localEmbeddingBatchRunner(args.profile.model, args.profile.normalize, args.signal, localEmbeddingPooling(args.profile.modelUri));
       let runMsTotal = 0;
       const inferenceStartedAt = Date.now();
       const minBatchSize = Math.max(
@@ -990,6 +990,7 @@ async function localEmbeddingBatchRunner(
   model: string,
   normalize: boolean,
   signal?: AbortSignal,
+  pooling: EmbeddingPooling = "mean",
 ): Promise<LocalEmbeddingBatchRunner> {
   const thread = localEmbeddingThreadEnabled() ? sharedLocalEmbeddingPool() : null;
   if (thread && !thread.unusable) {
@@ -998,7 +999,7 @@ async function localEmbeddingBatchRunner(
     // (which drives batch-size tuning) and cache_hit is known up front.
     let loaded: { dtype: string; cacheHit: boolean; loadMs: number };
     try {
-      loaded = await thread.embed({ model, dtypes, cacheDir, texts: [], normalize }, signal);
+      loaded = await thread.embed({ model, dtypes, cacheDir, texts: [], normalize, pooling }, signal);
     } catch (error) {
       if (!thread.unusable) throw error;
       if (!localEmbeddingThreadFallbackLogged) {
@@ -1007,7 +1008,7 @@ async function localEmbeddingBatchRunner(
           `[embed] local embedding thread unavailable, running in-process: ${error instanceof Error ? error.message : String(error)}`,
         );
       }
-      return await inProcessBatchRunner(model, normalize);
+      return await inProcessBatchRunner(model, normalize, pooling);
     }
     const stats = { loadMs: loaded.loadMs };
     return {
@@ -1016,17 +1017,17 @@ async function localEmbeddingBatchRunner(
       dtype: () => loaded.dtype,
       stats,
       run: async (batch) => {
-        const result = await thread.embed({ model, dtypes, cacheDir, texts: batch, normalize }, signal);
+        const result = await thread.embed({ model, dtypes, cacheDir, texts: batch, normalize, pooling }, signal);
         // A batch routed to a thread without the model loads it there; count that as load, not inference.
         stats.loadMs += result.loadMs;
         return { data: result.data, dims: result.dims, runMs: result.runMs };
       },
     };
   }
-  return await inProcessBatchRunner(model, normalize);
+  return await inProcessBatchRunner(model, normalize, pooling);
 }
 
-async function inProcessBatchRunner(model: string, normalize: boolean): Promise<LocalEmbeddingBatchRunner> {
+async function inProcessBatchRunner(model: string, normalize: boolean, pooling: EmbeddingPooling): Promise<LocalEmbeddingBatchRunner> {
   const loadStartedAt = Date.now();
   const { pipeline, cacheHit, dtype } = await getLocalEmbeddingPipeline(model);
   return {
@@ -1036,7 +1037,7 @@ async function inProcessBatchRunner(model: string, normalize: boolean): Promise<
     stats: { loadMs: Date.now() - loadStartedAt },
     run: async (batch) => {
       const startedAt = Date.now();
-      const output = await pipeline(batch, { pooling: "mean", normalize });
+      const output = await pipeline(batch, { pooling, normalize });
       return Object.assign(output, { runMs: Date.now() - startedAt });
     },
   };
