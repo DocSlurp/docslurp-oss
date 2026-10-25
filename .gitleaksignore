@@ -1,0 +1,4 @@
+# Fake credentials in the span scrubber test (feat/trace-details, commit 3fa23a72); the test
+# now assembles them at runtime. History cannot be rewritten, so the two findings are listed.
+3fa23a720b3e3a64f2e87b920e48920ce568e11b:packages/shared/src/__tests__/telemetry-span.test.ts:stripe-access-token:96
+3fa23a720b3e3a64f2e87b920e48920ce568e11b:packages/shared/src/__tests__/telemetry-span.test.ts:jwt:97
