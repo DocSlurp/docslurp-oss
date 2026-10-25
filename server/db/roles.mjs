@@ -41,6 +41,7 @@ export const WORKER_TABLES = Object.freeze({
   credit_ledger: { privileges: ["insert"], evidence: "apply_pending_org_debits() -> debit_org_credits() -> append_credit_ledger() (usage-event-store.ts flush)" },
   document_chunks: { privileges: DML, evidence: "worker/src/db/store.ts chunk writes; superseded-purge.ts" },
   document_cleanup_queue: { privileges: DML, evidence: "worker/src/db/superseded-purge.ts drainDocumentCleanupQueue; documents delete trigger" },
+  document_exports: { privileges: ["select", "update"], evidence: "worker/src/exports/build-document-export.ts claims and finishes zip exports" },
   document_maps: { privileges: DML, evidence: "worker/src/deferred/backfill-adoption.ts; document map stage" },
   document_page_facts: { privileges: DML, evidence: "worker/src/db/store.ts page facts" },
   document_page_renders: { privileges: DML, evidence: "packages/shared/src/worker-autoscale.ts; page render stages" },

@@ -6,7 +6,7 @@ const mocks = vi.hoisted(() => ({
   getDocumentExport: vi.fn(),
   listDocumentExports: vi.fn(),
   requestDocumentExport: vi.fn(),
-  signDocumentExportDownload: vi.fn(),
+  documentExportFileUrl: vi.fn(),
   getWorkspace: vi.fn(),
   resolveActorWorkspaceId: vi.fn(),
 }));
@@ -88,14 +88,14 @@ describe("exportsRoutes", () => {
   it("reports status and redirects ready downloads to a signed link", async () => {
     const app = buildApp();
     mocks.getDocumentExport.mockResolvedValue(record);
-    mocks.signDocumentExportDownload.mockResolvedValue("https://storage.test/x.zip?sig");
+    mocks.documentExportFileUrl.mockResolvedValue("/v1/files/token/Plan.zip");
 
     const status = await app.request("/exports/exp_1");
     expect(await status.json()).toEqual({ export: { id: "exp_1", workspaceId: "ws-1", status: "ready", error: null } });
 
     const download = await app.request("/exports/exp_1/download");
     expect(download.status).toBe(302);
-    expect(download.headers.get("location")).toBe("https://storage.test/x.zip?sig");
+    expect(download.headers.get("location")).toBe("/v1/files/token/Plan.zip");
 
     mocks.getDocumentExport.mockResolvedValue({ ...record, status: "expired" });
     const expired = await app.request("/exports/exp_1/download");

@@ -5,7 +5,6 @@ import {
   CreateBucketCommand,
   CreateMultipartUploadCommand,
   DeleteObjectCommand,
-  GetObjectCommand,
   HeadBucketCommand,
   HeadObjectCommand,
   PutObjectCommand,
@@ -215,21 +214,6 @@ export async function signSingleUploadPut(args: {
       ContentType: args.contentType
     }),
     { expiresIn: args.expiresInSeconds ?? 900 }
-  );
-}
-
-/** A short-lived GET link that saves the object under `filename`. */
-export async function signDownloadGet(args: { key: string; filename: string; expiresInSeconds?: number }): Promise<string> {
-  const ascii = args.filename.replace(/[^\x20-\x7e]/g, "_").replace(/["\\]/g, "_");
-  return await getSignedUrl(
-    presignClient,
-    new GetObjectCommand({
-      Bucket: uploadTarget.bucket,
-      Key: args.key,
-      ResponseContentType: "application/zip",
-      ResponseContentDisposition: `attachment; filename="${ascii}"; filename*=UTF-8''${encodeURIComponent(args.filename)}`
-    }),
-    { expiresIn: args.expiresInSeconds ?? 300 }
   );
 }
 

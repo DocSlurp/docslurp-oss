@@ -660,6 +660,17 @@ export async function userCanAccessArtifactUri(uri: string, userId: string, orgI
           and (${orgId === undefined} or d.org_id = ${orgId ?? null})
           and stage_states.artifact_uri = ${uri}
       )
+      -- A finished zip export (document-exports.ts), only for the user who asked for it, until its link expires.
+      or exists(
+        select 1
+        from document_exports e
+        where e.object_key = ${parsed.key}
+          and e.user_id = ${userId}
+          and e.status = 'ready'
+          and e.expires_at > now()
+          and e.workspace_id = any(${sql.array(workspaceIds)})
+          and (${orgId === undefined} or e.org_id = ${orgId ?? null})
+      )
       or exists(
         select 1
         from workspace_runs runs

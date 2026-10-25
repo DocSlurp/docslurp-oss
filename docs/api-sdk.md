@@ -1035,10 +1035,10 @@ Workspace exports hold current versions only (no superseded, archived or purged 
 
 - **Size:** exports estimated over **3 GB** are refused with `413 payload_too_large`; export Markdown only or one document at a time. The worker also stops adding files at that size and lists the rest in `README.md`.
 - **Email:** exports estimated over **250 MB** are emailed to the requester when ready (`notifyEmail: true`), so nobody has to keep a tab open.
-- **Lifetime:** every link works for **7 days** (`expiresAt`). After that `download` answers `404` and the file is deleted. `download` redirects to a five-minute signed storage URL each time it is called.
+- **Lifetime:** every link works for **7 days** (`expiresAt`). After that `download` answers `404` and the file is deleted. `download` redirects to the authenticated file proxy (`/v1/files/…`, bound to your session or key, Range supported), which re-checks the export on every read; storage is never exposed.
 - **Concurrency:** three unfinished exports per user (`429 rate_limited` beyond that).
 
-Sessions and server keys with `artifacts` can export; keys stay within their organization and workspace restrictions. Objects live under `exports/<orgId>/<workspaceId>/<exportId>.zip` with an `Expires` header and `docslurp-expires-at` metadata; the API's maintenance sweep deletes them. A bucket lifecycle rule that expires `exports/` after 8 days is a useful backstop (see [operations](self-host/operations.md#export-cleanup)).
+Sessions and server keys with `artifacts` can export; keys stay within their organization and workspace restrictions. Objects live in private storage under `exports/<orgId>/<workspaceId>/<exportId>.zip` with an `Expires` header and `docslurp-expires-at` metadata; the API's maintenance sweep deletes them. A bucket lifecycle rule that expires `exports/` after 8 days is a useful backstop (see [operations](self-host/operations.md#export-cleanup)).
 
 ## Primary sponsor
 
