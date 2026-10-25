@@ -306,10 +306,20 @@ export type WorkspaceChatWholeCorpusDebug = z.infer<
 /** Search-agent budgets for one /v1/chat turn. Non-admin callers may only lower them. */
 export const CHAT_AGENT_LIMIT_DEFAULTS = { maxSteps: 8, maxToolCalls: 16, searchConcurrency: 6 } as const;
 export const CHAT_AGENT_LIMIT_MAXIMUMS = { maxSteps: 12, maxToolCalls: 24, searchConcurrency: 8 } as const;
+/**
+ * Dynamic step budget: a turn gets this many model steps (final answer
+ * included). It continues past them, up to maxSteps, only while each tool step
+ * adds new evidence and the turn's input tokens stay under
+ * CHAT_AGENT_EXTENSION_INPUT_TOKENS. Every step resends the whole history, so
+ * late steps cost the most (production 2026-10: 4-step turns averaged 142k
+ * input tokens, 8-step turns 545k).
+ */
+export const CHAT_AGENT_BASE_STEPS = 4;
+export const CHAT_AGENT_EXTENSION_INPUT_TOKENS = 150_000;
 export type ChatAgentLimitName = keyof typeof CHAT_AGENT_LIMIT_DEFAULTS;
 
 export const chatAgentLimitsInputSchema = z.object({
-  /** Model steps (calls), including the final answer step. Default 8. */
+  /** Model steps (calls), including the final answer step. Default: CHAT_AGENT_BASE_STEPS, extended up to 8 while searches add evidence; a set value is a fixed budget. */
   maxSteps: z.number().int().min(1).max(CHAT_AGENT_LIMIT_MAXIMUMS.maxSteps).optional(),
   /** Tool calls across the turn; further calls are refused with `code: "tool_call_limit"`. Default 16. */
   maxToolCalls: z.number().int().min(1).max(CHAT_AGENT_LIMIT_MAXIMUMS.maxToolCalls).optional(),
@@ -342,6 +352,8 @@ export type ChatAgentLimitsInput = z.infer<typeof chatAgentLimitsInputSchema>;
 
 export const chatAgentLimitsSchema = z.object({
   maxSteps: z.number().int().positive(),
+  /** Steps before the turn must show progress to continue; equals maxSteps when the caller set maxSteps. */
+  baseSteps: z.number().int().positive().optional(),
   maxToolCalls: z.number().int().positive(),
   searchConcurrency: z.number().int().positive(),
   /** Requested limits lowered to the defaults because the caller is not an admin. */

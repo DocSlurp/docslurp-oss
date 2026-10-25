@@ -1,4 +1,5 @@
 import {
+  CHAT_AGENT_BASE_STEPS,
   CHAT_AGENT_LIMIT_DEFAULTS,
   CHAT_AGENT_LIMIT_MAXIMUMS,
   CHAT_MODEL_PRICES_USD_PER_MTOK,
@@ -129,7 +130,10 @@ export function resolveChatAgentLimits(requested: ChatAgentLimitsInput | undefin
     if (!isAdmin && bounded > fallback) { clamped.push(name); return fallback; }
     return bounded;
   };
-  return { maxSteps: pick("maxSteps"), maxToolCalls: pick("maxToolCalls"), searchConcurrency: pick("searchConcurrency"), clamped };
+  const maxSteps = pick("maxSteps");
+  // An explicit maxSteps is a fixed budget; otherwise the turn earns steps past the base by finding new evidence.
+  const baseSteps = requested?.maxSteps !== undefined ? maxSteps : Math.min(CHAT_AGENT_BASE_STEPS, maxSteps);
+  return { maxSteps, baseSteps, maxToolCalls: pick("maxToolCalls"), searchConcurrency: pick("searchConcurrency"), clamped };
 }
 
 /** True when `model` would be refused for this actor and workspace; routes answer 400 before streaming. */
