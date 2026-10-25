@@ -905,34 +905,33 @@ X-DocSlurp-Spend: "key-spend-1d";q=500;r=212;w=86400;u=usd-cents
 
 Custom request and spend windows are set per key on the API keys page (under "Permissions and limits", then "Advanced rate limits") or with `rateLimits` on `POST`/`PATCH /v1/api-keys`, e.g. `[{ "metric": "requests", "limit": 1000, "windowSeconds": 3600 }, { "metric": "spend", "limit": 500, "windowSeconds": 86400 }]` (spend in US cents; at most five rules, one per metric and window, windows up to 31 days). Spend is recorded when the work it pays for finishes and is refreshed every few seconds, so a request already running can carry a key slightly past its spend limit.
 
-The table comes from the organization's billing state, never from the key: an organization that has only its starter credits is a *starter* organization and gets the `free` table; once it buys credits (a top-up, an auto top-up, or credits added by DocSlurp) it is *funded* and gets the `paid` table, for good. An API key gets its organization's table, and a signed-in user gets the paid table when any organization they belong to is funded. A key's `rateLimitRpm` is an optional cap: omitted or `null` (the default) means the table's limits apply, and a number lowers every category to at most that many requests a minute. It never raises the limits, so a high value on a starter organization does not unlock funded limits. Set it on create, change it with `PATCH /v1/api-keys/:id`, and send `"rateLimitRpm": null` to remove it. Funding takes effect within a minute. Default per-minute limits on docslurp.io:
+Every account gets the same table, whatever its billing state: buying credits does not change it. A key's `rateLimitRpm` is an optional cap: omitted or `null` (the default) means the table's limits apply, and a number lowers every category to at most that many requests a minute. It never raises the limits. Set it on create, change it with `PATCH /v1/api-keys/:id`, and send `"rateLimitRpm": null` to remove it. Default per-minute limits on docslurp.io:
 
-| Category | Starter (`free`) | Funded (`paid`) | Per client IP |
-| --- | ---: | ---: | ---: |
-| `upload` | 60 | 120 | 90 |
-| `search` | 240 | 600 | 240 |
-| `chat-ai` | 60 | 120 | 90 |
-| `read` | 600 | 1,500 | 1,200 |
-| `write` | 300 | 600 | 300 |
-| `webhook` | 120 | 600 | 600 |
+| Category | Per account | Per client IP |
+| --- | ---: | ---: |
+| `upload` | 120 | 90 |
+| `search` | 600 | 240 |
+| `chat-ai` | 120 | 90 |
+| `read` | 1,500 | 1,200 |
+| `write` | 600 | 300 |
+| `webhook` | 600 | 600 |
 
-These are abuse protection, not a spending control: credits and budgets bound what you spend. Only the request rate differs between the tables; no feature, model, media type or setting depends on whether an organization has bought credits. Self-hosted deployments use their own, higher table, and operators can set `API_RATE_LIMIT_<TABLE>_<CATEGORY>_MAX` (for example `API_RATE_LIMIT_FREE_SEARCH_MAX`) or `API_RATE_LIMIT_DEFAULT_PROFILE=paid` (every account gets the paid table).
+These are abuse protection, not a spending control: credits and budgets bound what you spend. No feature, model, media type, setting or rate limit depends on whether an organization has bought credits. Self-hosted deployments use their own, higher table, and operators can set `API_RATE_LIMIT_<TABLE>_<CATEGORY>_MAX` (for example `API_RATE_LIMIT_ACCOUNT_SEARCH_MAX`) or `API_RATE_LIMIT_<CATEGORY>_MAX`.
 
-Every 429 has `Retry-After` and the [error envelope](https://docslurp.io/docs/search-reference#errors) with `error.code` set to `rate_limited` (with `details.category`, `details.policy` and `details.account`: `starter`, `funded` or `ip`), `spend_limit_exceeded`, `daily_page_limit` or `ip_temporarily_blocked`. On docslurp.io the details also carry `links` and the response a `Link` header (`rel="payment"` for billing and buying credits, `rel="help"` for these docs), and the message says where to go. A starter organization's limit says that buying credits raises it:
+Every 429 has `Retry-After` and the [error envelope](https://docslurp.io/docs/search-reference#errors) with `error.code` set to `rate_limited` (with `details.category`, `details.policy` and `details.account`: `account`, `ip` or `self-hosted`), `spend_limit_exceeded`, `daily_page_limit` or `ip_temporarily_blocked`. On docslurp.io the details also carry `links` and the response a `Link` header (`rel="payment"` for billing, `rel="help"` for these docs), and the message says where to go:
 
 ```json
 {
   "error": {
     "code": "rate_limited",
-    "message": "Starter rate limit reached. Accounts that have bought credits get higher limits: buy credits at https://docslurp.io/app/billing#bl-topup, or wait for Retry-After and try again.",
+    "message": "Please wait a moment before trying again. Rate limits: https://docslurp.io/docs/http#rate-limits-and-headers",
     "details": {
       "category": "chat-ai",
-      "policy": "free-chat-ai",
-      "account": "starter",
+      "policy": "account-chat-ai",
+      "account": "account",
       "retryAfterSeconds": 12,
       "links": {
         "billing": "https://docslurp.io/app/billing",
-        "buyCredits": "https://docslurp.io/app/billing#bl-topup",
         "docs": "https://docslurp.io/docs/http#rate-limits-and-headers"
       }
     },
@@ -963,7 +962,7 @@ DocSlurp is prepaid: there are no plans or subscriptions. 1 credit = 1 US cent. 
 
 Optional features are charged once per document each time their stage actually runs (a reprocess that skips the stage pays nothing for it); an audio or video file counts its Rich pages (minutes) as pages: an audio minute is 1 Rich page, a video minute whose frames are read is 3, and a video read from its audio track alone (`mediaVideo.enabled: false`, which an upload can set for itself through its `pipeline` overrides) is billed as audio. `POST /v1/uploads/estimate` prices audio and video before any bytes are sent: pass each file's `durationSeconds` (and `type`), and read `media` for the credits, the cheaper audio-track-only option (`media.lighter.pipeline`) and whether durations were guessed from file sizes. Contextual chunk preambles are part of the page price. A file pays only for its pages and the features it uses: there is no per-file minimum. Reprocessing pays again only for the share of stages that run, and a re-index that only rebuilds indexes pays nothing per page. Searches inside a chat answer are part of the answer. An answer that never reaches you because of an error on our side is refunded. `GET /v1/billing/prices` returns the price card, packs, top-up limits and the tier of each chat model; it needs no authentication.
 
-Organizations that have bought credits (funded) run up to 250 workers at once and get the higher rate limits; starter organizations run up to 50. Larger ceilings and dedicated (private) machines are sold by sales.
+Organizations that have bought credits (funded) run up to 250 workers at once; starter organizations run up to 50. Rate limits are the same for both. Larger ceilings and dedicated (private) machines are sold by sales.
 
 Auto top-up is off by default. Turn it on from the billing page with a threshold in credits, a refill amount (a pack or a custom amount of at least $10) and a required monthly cap; every charge emails a receipt and appears in the credit ledger, and it pauses after two failed charges. `GET /v1/billing/overview` returns the balance, funding, worker ceiling, auto top-up settings, this month's spend by category and a monthly forecast built from what you store and the last 30 days of searches, chat answers and pages.
 
