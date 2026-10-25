@@ -111,9 +111,10 @@ describe("break-even math", () => {
 
 describe("staleness", () => {
   it("warns about observations older than 45 days", () => {
-    const observedAt = new Date(`${INFRA_COST_OBSERVATIONS[0]!.observedAt}T00:00:00Z`);
-    expect(staleObservations(INFRA_COST_OBSERVATIONS, new Date(observedAt.getTime() + 44 * 86_400_000))).toEqual([]);
-    expect(staleObservations(INFRA_COST_OBSERVATIONS, new Date(observedAt.getTime() + 46 * 86_400_000)).length).toBe(INFRA_COST_OBSERVATIONS.length);
+    const observations = [INFRA_COST_OBSERVATIONS[0]!];
+    const observedAt = new Date(`${observations[0]!.observedAt}T00:00:00Z`);
+    expect(staleObservations(observations, new Date(observedAt.getTime() + 44 * 86_400_000))).toEqual([]);
+    expect(staleObservations(observations, new Date(observedAt.getTime() + 46 * 86_400_000)).length).toBe(observations.length);
     expect(staleObservations([{ ...INFRA_COST_OBSERVATIONS[0]!, observedAt: "unknown" }]).length).toBe(1);
   });
 });

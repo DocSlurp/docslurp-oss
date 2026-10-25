@@ -60,15 +60,16 @@ export interface AiUsagePricingOptions {
   catalog?: AiUsagePricingCatalogEntry[];
 }
 
+// Qwen 3.5 Flash 02-23 via OpenRouter: $0.065/$0.26 per MTok, verified 2026-10-25.
 export const defaultAiUsagePricing: AiUsagePricing = {
-  costPer1kInputTokens: 0.01,
-  costPer1kOutputTokens: 0.03,
+  costPer1kInputTokens: 0.0065,
+  costPer1kOutputTokens: 0.026,
 };
 
 export const defaultAiUsagePricingCatalog: AiUsagePricingCatalogEntry[] = [
   {
     provider: "deepinfra", model: "BAAI/bge-m3",
-    // DeepInfra official route: $0.010/M input tokens, checked 2026-10-16.
+    // DeepInfra official route: $0.010/M input tokens, checked 2026-10-25.
     costPer1kInputTokens: 0.001, costPer1kOutputTokens: 0,
   },
   {
@@ -96,7 +97,7 @@ export const defaultAiUsagePricingCatalog: AiUsagePricingCatalogEntry[] = [
       { provider: "openrouter", model: model.openRouterId, ...pricing },
     ];
   }),
-  // Official OpenRouter embedding catalog, verified 2026-10-17: $0.004/$0.03 per million input tokens.
+  // Official OpenRouter embedding catalog, verified 2026-10-25: $0.004/$0.03 per million input tokens.
   { provider: "openrouter", model: "perplexity/pplx-embed-v1-0.6b", costPer1kInputTokens: 0.0004, costPer1kOutputTokens: 0 },
   { provider: "perplexity", model: "pplx-embed-v1-0.6b", costPer1kInputTokens: 0.0004, costPer1kOutputTokens: 0 },
   { provider: "perplexity", model: "pplx-embed-v1-4b", costPer1kInputTokens: 0.003, costPer1kOutputTokens: 0 },

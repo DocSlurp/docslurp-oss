@@ -5,7 +5,7 @@
 // — is deprecated and resolves to its family's 5.5 replacement at call time,
 // so stored settings, saved workspaces and API callers keep working. Fable and
 // Mythos map to Opus 5.5 (their $50/MTok output price is also outside the
-// internal cost policy). Prices verified 2026-10-09 against
+// internal cost policy). Prices verified 2026-10-25 against
 // platform.claude.com pricing and the OpenRouter models API.
 
 export type AnthropicModelFamily = "opus" | "sonnet" | "haiku";

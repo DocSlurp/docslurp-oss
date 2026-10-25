@@ -541,7 +541,7 @@ export const visionModelCatalog = [
     description:
       "OpenRouter multimodal model for low-latency, high-volume page extraction.",
     estimatedCostPerPageCents: 0.5,
-    tokenPricing: { inputUsdPerMillion: 0.25, outputUsdPerMillion: 1.5, checked: "2026-10-20" },
+    tokenPricing: { inputUsdPerMillion: 0.25, outputUsdPerMillion: 1.5, checked: "2026-10-25" },
   },
   {
     id: "google/gemini-2.5-flash-lite",
@@ -553,7 +553,7 @@ export const visionModelCatalog = [
     description:
       "Ultra-low-cost OpenRouter multimodal option for lightweight page rescue.",
     estimatedCostPerPageCents: 0.25,
-    tokenPricing: { inputUsdPerMillion: 0.1, outputUsdPerMillion: 0.4, checked: "2026-10-20" },
+    tokenPricing: { inputUsdPerMillion: 0.1, outputUsdPerMillion: 0.4, checked: "2026-10-25" },
   },
   {
     id: NEMOTRON_SUPER_VL_VISION_MODEL,
@@ -567,7 +567,7 @@ export const visionModelCatalog = [
     // Conservative like the Gemini entry. A 3-page smoke measured 0.02-0.07 cents per page (1.2k-3.2k input
     // tokens: images tile by resolution) against 0.09-0.16 for Gemini 3.1 Flash Lite; refine after the slice run.
     estimatedCostPerPageCents: 0.2,
-    tokenPricing: { inputUsdPerMillion: 0.15, outputUsdPerMillion: 0.5, checked: "2026-10-20" },
+    tokenPricing: { inputUsdPerMillion: 0.15, outputUsdPerMillion: 0.5, checked: "2026-10-25" },
   },
   // Opt-in tuned candidates (see worker/src/tools/vision-model-profiles.ts for their per-model prompt, routing and
   // reasoning settings). List prices from OpenRouter's /api/v1/models, checked 2026-10-22; per-page costs are measured.
@@ -581,7 +581,7 @@ export const visionModelCatalog = [
     description:
       "Open-weights (MIT) DeepSeek multimodal snapshot via US-hosted providers; Markdown/LaTeX page transcription.",
     estimatedCostPerPageCents: 0.103,
-    tokenPricing: { inputUsdPerMillion: 0.3, outputUsdPerMillion: 1.2, checked: "2026-10-22" },
+    tokenPricing: { inputUsdPerMillion: 0.15, outputUsdPerMillion: 0.6, checked: "2026-10-25" },
   },
   {
     id: "xiaomi/mimo-v2.6-flash",
@@ -593,7 +593,7 @@ export const visionModelCatalog = [
     description:
       "Open-weights (MIT) Xiaomi MiMo multimodal model on OpenRouter; opt-in low-cost page extraction with pinned fast routing.",
     estimatedCostPerPageCents: 0.056,
-    tokenPricing: { inputUsdPerMillion: 0.14, outputUsdPerMillion: 0.28, checked: "2026-10-22" },
+    tokenPricing: { inputUsdPerMillion: 0.14, outputUsdPerMillion: 0.28, checked: "2026-10-25" },
   },
   {
     id: "openai/gpt-6-luna",
@@ -605,7 +605,7 @@ export const visionModelCatalog = [
     description:
       "OpenAI GPT-6 Luna on OpenRouter; opt-in low-cost page extraction with high-detail images and a content-filter retry route.",
     estimatedCostPerPageCents: 0.061,
-    tokenPricing: { inputUsdPerMillion: 0.1, outputUsdPerMillion: 0.5, checked: "2026-10-22" },
+    tokenPricing: { inputUsdPerMillion: 0.1, outputUsdPerMillion: 0.5, checked: "2026-10-25" },
   },
   {
     id: "z-ai/glm-5.3-flash",
@@ -615,10 +615,10 @@ export const visionModelCatalog = [
     tags: ["hosted", "cost", "open-weights"],
     runtime: "openai-compatible",
     description:
-      "Open-weights (MIT) Z.ai GLM multimodal model on OpenRouter; opt-in lowest-list-price page extraction.",
-    // Computed, not measured: ~3,000 input + 560 output tokens at list price = 0.0123 cents, rounded up.
-    estimatedCostPerPageCents: 0.013,
-    tokenPricing: { inputUsdPerMillion: 0.0113, outputUsdPerMillion: 0.1589, checked: "2026-10-22" },
+      "Open-weights (MIT) Z.ai GLM multimodal model on OpenRouter; opt-in page extraction.",
+    // Computed, not measured: ~3,000 input + 560 output tokens at current list price = 0.073 cents.
+    estimatedCostPerPageCents: 0.073,
+    tokenPricing: { inputUsdPerMillion: 0.15, outputUsdPerMillion: 0.5, checked: "2026-10-25" },
   },
   {
     id: "gpt-4.1-mini",
@@ -630,7 +630,7 @@ export const visionModelCatalog = [
     description:
       "Hosted remote fallback for difficult pages when local models miss the quality bar.",
     estimatedCostPerPageCents: 3,
-    tokenPricing: { inputUsdPerMillion: 0.4, outputUsdPerMillion: 1.6, checked: "2026-10-20" },
+    tokenPricing: { inputUsdPerMillion: 0.4, outputUsdPerMillion: 1.6, checked: "2026-10-25" },
   },
 ] as const;
 
