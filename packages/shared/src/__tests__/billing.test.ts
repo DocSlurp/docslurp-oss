@@ -50,7 +50,7 @@ describe("price card", () => {
       videoMinuteRichPages: 3,
       storageGbMonth: 25,
       searchPer1k: 10,
-      chatAnswerTiers: { standard: 2.5, advanced: 7.5, premium: 50 },
+      chatAnswerTiers: { standard: 1.5, advanced: 7.5, premium: 50 },
       richIncludedOutputTokens: 1_000,
       richExtraPageOutputTokens: 1_000,
       llmSearchMultiplier: 10,
@@ -102,9 +102,9 @@ describe("price card", () => {
     expect(chatModelTier("openai/gpt-6.1-sol")).toBe("premium");
     expect(chatModelTier("some/new-model")).toBe("premium");
     expect(chatModelTier(null)).toBe("premium");
-    expect(chatAnswerCredits({ model: "z-ai/glm-5.3-flash" })).toBe(2.5);
-    expect(chatAnswerCredits({ model: "z-ai/glm-5.3-flash", totalTokens: 100_000 })).toBe(2.5);
-    expect(chatAnswerCredits({ model: "z-ai/glm-5.3-flash", totalTokens: 250_000 })).toBe(7.5);
+    expect(chatAnswerCredits({ model: "z-ai/glm-5.3-flash" })).toBe(1.5);
+    expect(chatAnswerCredits({ model: "z-ai/glm-5.3-flash", totalTokens: 100_000 })).toBe(1.5);
+    expect(chatAnswerCredits({ model: "z-ai/glm-5.3-flash", totalTokens: 250_000 })).toBe(4.5);
     expect(chatAnswerCredits({ model: "deepseek/deepseek-v4.1-flash" })).toBe(7.5);
     expect(chatAnswerCredits({ model: "qwen/qwen3.8-max-prime", totalTokens: 580_000 })).toBe(300);
     expect(Object.values(CHAT_MODEL_TIERS).every((tier) => tier in PRICE_CARD.chatAnswerTiers)).toBe(true);

@@ -53,6 +53,13 @@ export function dollarsToCredits(dollars: number): number {
  *   .0086/.023, minimax-m3.1-flash:free 0, deepseek-v4.1-flash .0177/.042,
  *   beam-1.0-501b .0349/.085, gpt-6.1-sol .067/.163, qwen3.8-max-prime .287/.602.
  *   p95 tokens per answer run 130k-580k, so the 100k token-block multiplier stays.
+ * - Standard answers 2.5 -> 1.5 credits (owner decision 2026-10-25), with chat
+ *   cost cuts shipped alongside: each evidence passage sent to the model once
+ *   (OSS #161), rarely used tools removed, a 4-step dynamic step budget and
+ *   prompt caching. Standard-model means above (.0037-.0095) leave 1.6-4x at
+ *   1.5 credits before those cuts; recheck per-model means after deploy.
+ *   mercury-3 and mimo-v2.6-flash (p90 .018/.023, above 1.5 credits; eval-only,
+ *   not in WORKSPACE_CHAT_MODELS) move to advanced.
  *
  * No per-file minimum (owner decision 2026-10-21): a file pays only for its
  * pages, fractional credits included. Our per-document overhead (queue,
@@ -73,7 +80,7 @@ export const PRICE_CARD = {
   storageGbMonth: 25,
   searchPer1k: 10,
   /** Credits per chat answer by model tier (CHAT_MODEL_TIERS). */
-  chatAnswerTiers: { standard: 2.5, advanced: 7.5, premium: 50 },
+  chatAnswerTiers: { standard: 1.5, advanced: 7.5, premium: 50 },
   /** Vision output tokens one Rich page includes. */
   richIncludedOutputTokens: 1_000,
   /** Each further block of this many output tokens counts as one more Rich page (rounded up). */
@@ -133,7 +140,7 @@ export function featureCredits(feature: DocumentFeature, pages: number): number 
 }
 
 /** Stamped on billable events so a receipt says which price card charged it. */
-export const PRICE_CARD_VERSION = "2026-10-23";
+export const PRICE_CARD_VERSION = "2026-10-25";
 
 /** Per dedicated machine, sold by sales, not self-serve. */
 export const PRIVATE_DEDICATED_MONTHLY_USD = 2_000;
@@ -238,10 +245,10 @@ export type ChatAnswerTier = keyof PriceCard["chatAnswerTiers"];
  */
 export const CHAT_MODEL_TIERS: Readonly<Record<string, ChatAnswerTier>> = {
   "glm-5.3-flash": "standard",
-  "mercury-3": "standard",
+  "mercury-3": "advanced",
   "lfm-2.5-24b-a2b": "standard",
   "claude-haiku-5.5": "standard",
-  "mimo-v2.6-flash": "standard",
+  "mimo-v2.6-flash": "advanced",
   "minimax-m3.1-flash:free": "standard",
   "deepseek-v4.1-flash*": "advanced",
   "beam-1.0-501b-a23b": "advanced",
