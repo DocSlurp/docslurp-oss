@@ -76,6 +76,8 @@ export const exportsRoutes = new Hono()
         : apiErrorResponse(c, 409, "conflict", record.status === "failed" ? (record.error ?? "This export failed. Try again.") : "This export is still being prepared.");
     }
     c.header("cache-control", "private, no-store");
+    // The signed link must not leak to the storage host's logs through a Referer.
+    c.header("referrer-policy", "no-referrer");
     return c.redirect(url, 302);
   });
 

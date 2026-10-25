@@ -17,7 +17,7 @@ import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import type { Readable } from "node:stream";
 
 import { env } from "../config.js";
-import { resolveS3ClientTuning, s3ClientConfig } from "@docslurp/shared";
+import { resolveS3ClientTuning, rfc5987Encode, s3ClientConfig } from "@docslurp/shared";
 import { uploadSigningTarget } from "./upload-signing-target.js";
 
 const s3Client = instrumentS3Client(new S3Client(s3ClientConfig(env.storage)), env.storage.endpoint);
@@ -235,7 +235,9 @@ export async function signDownloadGet(args: { key: string; filename: string; exp
       Bucket: uploadTarget.bucket,
       Key: args.key,
       ResponseContentType: "application/zip",
-      ResponseContentDisposition: `attachment; filename="${ascii}"; filename*=UTF-8''${encodeURIComponent(args.filename)}`
+      ResponseContentDisposition: `attachment; filename="${ascii}"; filename*=UTF-8''${rfc5987Encode(args.filename)}`,
+      // Never kept by browser or proxy caches once the link's minutes are up.
+      ResponseCacheControl: "private, no-store"
     }),
     { expiresIn: Math.min(args.expiresInSeconds ?? 120, DOWNLOAD_LINK_MAX_SECONDS) }
   );

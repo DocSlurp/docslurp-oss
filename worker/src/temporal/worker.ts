@@ -41,7 +41,7 @@ import { resolveWorkerScalerConfig, resolveWorkerScalerQueryParams } from "@docs
 import { warmLocalEmbedding } from "../stages/embedding-runtime.js";
 import { closeSharedLocalEmbeddingPool } from "../stages/local-embedding-thread.js";
 import { resolveEmbeddingModel } from "../embeddings/resolver.js";
-import { DEFAULT_DOCUMENT_EXPORT_TASK_QUEUE, DEFAULT_MATERIALIZE_TASK_QUEUE, defaultPipelineFeatures, deferredProfilesEnabled } from "@docslurp/shared";
+import { DEFAULT_DOCUMENT_EXPORT_TASK_QUEUE, DEFAULT_LARGE_DOCUMENT_EXPORT_TASK_QUEUE, DEFAULT_MATERIALIZE_TASK_QUEUE, defaultPipelineFeatures, deferredProfilesEnabled } from "@docslurp/shared";
 import { purgeConfig } from "../db/superseded-purge.js";
 import { prefetchVendorBundles } from "../tools/vendor-bundles.js";
 import { initializePrivateModelEndpoints } from "../lib/privacy-guard.js";
@@ -225,14 +225,25 @@ async function main(): Promise<void> {
         maxConcurrentActivityTaskExecutions: 2, maxConcurrentActivityTaskPolls: 2,
         taskQueue: process.env.TEMPORAL_PAGE_RENDER_TASK_QUEUE?.trim() || "docslurp-page-render",
       }));
-      // Zip exports stream for minutes on one slot per worker, away from ingest and page renders.
-      const exportQueue = process.env.TEMPORAL_DOCUMENT_EXPORT_TASK_QUEUE?.trim() || DEFAULT_DOCUMENT_EXPORT_TASK_QUEUE;
-      workers.push(await Worker.create({
-        ...common, ...workflowOptions,
-        activities: { buildDocumentExportActivity: activities.buildDocumentExportActivity },
-        maxConcurrentActivityTaskExecutions: 1, maxConcurrentActivityTaskPolls: 1,
-        taskQueue: exportQueue,
-      }));
+      // Zip exports stream for minutes, so they run only where WORKER_DOCUMENT_EXPORTS
+      // is on (default on; production keeps them on the always-on floor machine so
+      // scale-in never cancels one). Small and large exports have their own slot,
+      // so an emailed multi-GB export never holds up a download someone waits for.
+      if ((process.env.WORKER_DOCUMENT_EXPORTS ?? "on").trim().toLowerCase() !== "off") {
+        const exportActivities = { buildDocumentExportActivity: activities.buildDocumentExportActivity };
+        for (const queue of [
+          process.env.TEMPORAL_DOCUMENT_EXPORT_TASK_QUEUE?.trim() || DEFAULT_DOCUMENT_EXPORT_TASK_QUEUE,
+          process.env.TEMPORAL_LARGE_DOCUMENT_EXPORT_TASK_QUEUE?.trim() || DEFAULT_LARGE_DOCUMENT_EXPORT_TASK_QUEUE,
+        ]) {
+          workers.push(await Worker.create({
+            ...common, ...workflowOptions,
+            activities: exportActivities,
+            maxConcurrentActivityTaskExecutions: 1, maxConcurrentActivityTaskPolls: 1,
+            taskQueue: queue,
+          }));
+        }
+        console.log("[temporal-worker] document export queues on (1 small + 1 large slot)");
+      }
       const activityWorkers = activityTaskQueue ? workers.slice(1) : workers;
       return {
         workers,

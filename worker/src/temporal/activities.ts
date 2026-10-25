@@ -197,6 +197,7 @@ export function createActivities(deps: ActivityDependencies) {
       await buildDocumentExport({ sql: store.stageSql, storage: deps.storage }, input.exportId, {
         signal: context.cancellationSignal,
         heartbeat: () => context.heartbeat(),
+        attempt: context.info.attempt,
         final: context.info.attempt >= DOCUMENT_EXPORT_MAX_ATTEMPTS,
       });
     },

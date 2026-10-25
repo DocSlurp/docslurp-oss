@@ -6,7 +6,7 @@ import {
   DOCUMENT_EXPORT_MAX_DOCUMENTS,
   DOCUMENT_EXPORT_TTL_DAYS,
   documentExportFolderNames,
-  documentExportObjectKey,
+  documentExportObjectPrefix,
   safeExportName,
   type DocumentExport,
   type DocumentExportContent,
@@ -29,6 +29,9 @@ import { listAccessibleWorkspaceIds } from "./organizations.js";
 
 /** Unfinished exports one user may have at once. */
 const MAX_ACTIVE_EXPORTS_PER_USER = 3;
+/** Exports one user may start in 24 hours, by count and by estimated size. */
+const MAX_EXPORTS_PER_DAY = 20;
+const MAX_EXPORT_BYTES_PER_DAY = 20 * 1024 * 1024 * 1024;
 /** Rendered page images average about this much; only for the size estimate. */
 const ESTIMATED_PAGE_IMAGE_BYTES = 300 * 1024;
 /**
@@ -39,7 +42,7 @@ const ESTIMATED_PAGE_IMAGE_BYTES = 300 * 1024;
 const STALLED_EXPORT_HOURS = 10;
 
 export class DocumentExportError extends Error {
-  constructor(readonly status: 404 | 413 | 429, readonly code: "not_found" | "payload_too_large" | "rate_limited", message: string) {
+  constructor(readonly status: 404 | 409 | 413 | 429, readonly code: "not_found" | "conflict" | "payload_too_large" | "rate_limited", message: string) {
     super(message);
   }
 }
@@ -145,21 +148,23 @@ async function estimateExport(args: { workspaceId: string; documentId: string | 
 }
 
 /** A live document the user can read, with what an export needs to name and scope it. */
-export async function findExportableDocument(documentId: string, userId: string): Promise<{ id: string; filename: string; workspaceId: string; orgId: string } | null> {
+export async function findExportableDocument(documentId: string, userId: string): Promise<ExportableDocument | null> {
   const workspaceIds = await listAccessibleWorkspaceIds(userId);
   if (workspaceIds.length === 0) return null;
-  const [row] = await sql<{ id: string; filename: string; workspace_id: string; org_id: string }[]>`
-    select id, filename, workspace_id, org_id from documents
+  const [row] = await sql<{ id: string; filename: string; workspace_id: string; org_id: string; status: string }[]>`
+    select id, filename, workspace_id, org_id, status from documents
     where id = ${documentId} and workspace_id = any(${sql.array(workspaceIds)}) and purged_at is null
   `;
-  return row ? { id: row.id, filename: row.filename, workspaceId: row.workspace_id, orgId: row.org_id } : null;
+  return row ? { id: row.id, filename: row.filename, workspaceId: row.workspace_id, orgId: row.org_id, status: row.status } : null;
 }
+
+export type ExportableDocument = { id: string; filename: string; workspaceId: string; orgId: string; status?: string };
 
 export async function requestDocumentExport(args: {
   userId: string;
   content: DocumentExportContent;
   /** Exactly one of document or workspace, already authorized by the caller. */
-  document?: { id: string; filename: string; workspaceId: string; orgId: string } | null;
+  document?: ExportableDocument | null;
   workspace?: { id: string; name: string; orgId: string } | null;
 }): Promise<DocumentExport> {
   const target = args.document
@@ -168,6 +173,11 @@ export async function requestDocumentExport(args: {
       ? { workspaceId: args.workspace.id, orgId: args.workspace.orgId, documentId: null, name: safeExportName(args.workspace.name, "workspace") }
       : null;
   if (!target) throw new DocumentExportError(404, "not_found", "Document or workspace not found");
+  if (args.document?.status && args.document.status !== "completed") {
+    throw new DocumentExportError(409, "conflict", args.document.status === "failed"
+      ? "This document failed to process, so there is nothing to export. Reprocess it first."
+      : "This document is still processing. Export it once it finishes.");
+  }
 
   const { documents, estimatedBytes } = await estimateExport({ workspaceId: target.workspaceId, documentId: target.documentId, content: args.content });
   if (documents === 0) throw new DocumentExportError(404, "not_found", "There are no documents to export yet.");
@@ -179,34 +189,58 @@ export async function requestDocumentExport(args: {
     );
   }
 
-  const [active] = await sql<{ count: number }[]>`
-    select count(*)::int as count from document_exports
-    where user_id = ${args.userId} and status in ('queued', 'running') and created_at > now() - make_interval(hours => ${STALLED_EXPORT_HOURS})
-  `;
-  if ((active?.count ?? 0) >= MAX_ACTIVE_EXPORTS_PER_USER) {
-    throw new DocumentExportError(429, "rate_limited", "You already have exports in progress. Try again when one finishes.");
-  }
-
+  const notifyEmail = estimatedBytes > DOCUMENT_EXPORT_EMAIL_THRESHOLD_BYTES;
   const id = `exp_${randomUUID().replace(/-/g, "")}`;
-  const [row] = await sql<ExportRecordRow[]>`
-    insert into document_exports (
-      id, org_id, workspace_id, user_id, document_id, content, filename, object_key,
-      document_count, estimated_bytes, notify_email, expires_at
-    ) values (
-      ${id}, ${target.orgId}, ${target.workspaceId}, ${args.userId}, ${target.documentId}, ${args.content},
-      ${`${target.name}.zip`}, ${documentExportObjectKey({ orgId: target.orgId, workspaceId: target.workspaceId, exportId: id })},
-      ${documents}, ${estimatedBytes}, ${estimatedBytes > DOCUMENT_EXPORT_EMAIL_THRESHOLD_BYTES},
-      now() + make_interval(days => ${DOCUMENT_EXPORT_TTL_DAYS})
-    )
-    returning ${recordColumns}
-  `;
+  // One transaction per user (advisory lock), so parallel requests cannot all pass the limits.
+  const created = await sql.begin(async (tx) => {
+    await tx`select pg_advisory_xact_lock(hashtext(${`document-export:${args.userId}`}))`;
+    // The same export asked for again (double click, second tab) reuses the one in flight or just finished.
+    const [reuse] = await tx<ExportRecordRow[]>`
+      select ${recordColumns} from document_exports
+      where user_id = ${args.userId} and workspace_id = ${target.workspaceId}
+        and document_id is not distinct from ${target.documentId} and content = ${args.content}
+        and status in ('queued', 'running', 'ready') and expires_at > now()
+        and created_at > now() - interval '1 hour'
+      order by created_at desc limit 1
+    `;
+    if (reuse) return { row: reuse, reused: true };
+    const [usage] = await tx<{ active: number; recent: number; recent_bytes: string }[]>`
+      select
+        count(*) filter (where status in ('queued', 'running') and created_at > now() - make_interval(hours => ${STALLED_EXPORT_HOURS}))::int as active,
+        count(*) filter (where status <> 'failed')::int as recent,
+        coalesce(sum(estimated_bytes) filter (where status <> 'failed'), 0)::bigint as recent_bytes
+      from document_exports
+      where user_id = ${args.userId} and created_at > now() - interval '24 hours'
+    `;
+    if ((usage?.active ?? 0) >= MAX_ACTIVE_EXPORTS_PER_USER) {
+      throw new DocumentExportError(429, "rate_limited", "You already have exports in progress. Try again when one finishes.");
+    }
+    if ((usage?.recent ?? 0) >= MAX_EXPORTS_PER_DAY || Number(usage?.recent_bytes ?? 0) + estimatedBytes > MAX_EXPORT_BYTES_PER_DAY) {
+      throw new DocumentExportError(429, "rate_limited", `You've reached today's export limit (${MAX_EXPORTS_PER_DAY} exports or ${formatExportBytes(MAX_EXPORT_BYTES_PER_DAY)} a day). Download an earlier export, or try again tomorrow.`);
+    }
+    const [row] = await tx<ExportRecordRow[]>`
+      insert into document_exports (
+        id, org_id, workspace_id, user_id, document_id, content, filename, object_key,
+        document_count, estimated_bytes, notify_email, next_email_at, expires_at
+      ) values (
+        ${id}, ${target.orgId}, ${target.workspaceId}, ${args.userId}, ${target.documentId}, ${args.content},
+        ${`${target.name}.zip`}, ${documentExportObjectPrefix({ orgId: target.orgId, workspaceId: target.workspaceId, exportId: id })},
+        ${documents}, ${estimatedBytes}, ${notifyEmail}, ${notifyEmail ? tx`now()` : null},
+        -- An upper bound until the export is ready, when the 7 days start.
+        now() + make_interval(days => ${DOCUMENT_EXPORT_TTL_DAYS}, hours => ${STALLED_EXPORT_HOURS})
+      )
+      returning ${recordColumns}
+    `;
+    return { row: row!, reused: false };
+  });
+  if (created.reused) return toExport(created.row);
   try {
-    await startDocumentExportWorkflow({ exportId: id });
+    await startDocumentExportWorkflow({ exportId: id }, { large: notifyEmail });
   } catch (error) {
-    await sql`update document_exports set status = 'failed', completed_at = now(), error = 'The export could not be started. Try again in a moment.' where id = ${id}`;
+    await sql`update document_exports set status = 'failed', completed_at = now(), notify_email = false, error = 'The export could not be started. Try again in a moment.' where id = ${id}`;
     throw error;
   }
-  return toExport(row!);
+  return toExport(created.row);
 }
 
 /** An export the user requested, while they can still read its workspace. */
@@ -244,10 +278,15 @@ export async function listDocumentExports(
 export async function signDocumentExportDownload(id: string, userId: string): Promise<string | null> {
   const workspaceIds = await listAccessibleWorkspaceIds(userId);
   if (workspaceIds.length === 0) return null;
+  // Withdrawn as soon as any document in it is deleted or purged, before the sweep catches up.
   const [row] = await sql<Pick<ExportRecordRow, "object_key" | "filename">[]>`
-    select object_key, filename from document_exports
-    where id = ${id} and user_id = ${userId} and workspace_id = any(${sql.array(workspaceIds)})
-      and status = 'ready' and expires_at > now()
+    select e.object_key, e.filename from document_exports e
+    where e.id = ${id} and e.user_id = ${userId} and e.workspace_id = any(${sql.array(workspaceIds)})
+      and e.status = 'ready' and e.expires_at > now()
+      and not exists (
+        select 1 from unnest(e.document_ids) as exported(document_id)
+        where not exists (select 1 from documents d where d.id = exported.document_id and d.purged_at is null)
+      )
   `;
   return row ? await signDownloadGet({ key: row.object_key, filename: row.filename, expiresInSeconds: 120 }) : null;
 }
@@ -257,22 +296,91 @@ export function exportAppUrl(id: string): string {
   return `${env.appUrl.replace(/\/$/, "")}/app?export=${encodeURIComponent(id)}`;
 }
 
+/** Emails that keep failing are retried with backoff (1, 2, 4, 8 minutes), then given up. */
+const MAX_EMAIL_ATTEMPTS = 5;
+/** The orphan scan reads every unexpired export; once an hour is enough. */
+const ORPHAN_SCAN_INTERVAL_MS = 60 * 60 * 1000;
+let lastOrphanScan = 0;
+
 /**
- * Maintenance sweep: email finished large exports, delete expired objects, and
- * report exports that stalled. Each step claims rows with a conditional update,
- * so concurrent API instances never email or delete twice.
+ * Maintenance sweep: email finished large exports, fail stalled ones, delete
+ * expired objects, and (hourly) withdraw exports whose documents, workspace or
+ * requester are gone. Each step claims rows with a conditional update, so
+ * concurrent API instances never email or delete twice.
  */
-export async function sweepDocumentExports(): Promise<void> {
-  const due = await sql<(ExportRecordRow & { email: string | null })[]>`
-    update document_exports e set emailed_at = now()
+export async function sweepDocumentExports(now = Date.now()): Promise<void> {
+  await sendDueExportEmails();
+
+  await sql`
+    update document_exports
+    set status = 'failed', completed_at = now(), error = 'The export took too long and was stopped. Try again, or export fewer documents.'
+    where status in ('queued', 'running') and created_at < now() - make_interval(hours => ${STALLED_EXPORT_HOURS})
+  `;
+
+  // Expired: delete the object first, so a failed delete is retried next sweep
+  // rather than leaving an orphan (deleting a missing key succeeds).
+  const expired = await sql<{ id: string; object_key: string }[]>`
+    select id, object_key from document_exports
+    where status <> 'expired' and expires_at <= now()
+    order by expires_at limit 200
+  `;
+  for (const row of expired) {
+    await removeExport(row, "expire");
+  }
+  if (expired.length > 0) console.log(`[document-export] expired=${expired.length}`);
+
+  if (now - lastOrphanScan >= ORPHAN_SCAN_INTERVAL_MS) {
+    lastOrphanScan = now;
+    // A document in the export, its workspace or its requester is gone (deleted,
+    // purged, account deleted, organization offboarded): delete the zip, then the
+    // row, which names things that no longer exist.
+    const orphaned = await sql<{ id: string; object_key: string }[]>`
+      select e.id, e.object_key from document_exports e
+      where e.status <> 'expired' and (
+        not exists (select 1 from workspaces w where w.id = e.workspace_id)
+        or not exists (select 1 from "user" u where u.id = e.user_id and u.deleted_at is null)
+        or exists (
+          select 1 from unnest(case when e.document_id is null then e.document_ids else array_append(e.document_ids, e.document_id) end) as exported(document_id)
+          where not exists (select 1 from documents d where d.id = exported.document_id and d.purged_at is null)
+        )
+      )
+      limit 500
+    `;
+    for (const row of orphaned) await removeExport(row, "orphan");
+    if (orphaned.length > 0) console.log(`[document-export] withdrawn=${orphaned.length}`);
+  }
+
+  // Expired rows stay a month so the app can say a link expired, then go.
+  await sql`delete from document_exports where status = 'expired' and expires_at < now() - interval '30 days'`;
+}
+
+async function removeExport(row: { id: string; object_key: string }, kind: "expire" | "orphan"): Promise<void> {
+  try {
+    // A prefix key (export never finished) has no object; its worker attempt cleans up after itself.
+    if (!row.object_key.endsWith("/")) await deleteUploadedObject(row.object_key);
+    if (kind === "orphan") await sql`delete from document_exports where id = ${row.id}`;
+    else await sql`update document_exports set status = 'expired' where id = ${row.id} and status <> 'expired'`;
+  } catch (error) {
+    console.error(`[document-export] delete failed export=${row.id} key=${row.object_key}: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
+async function sendDueExportEmails(): Promise<void> {
+  const due = await sql<(ExportRecordRow & { email: string | null; email_attempts: number })[]>`
+    update document_exports e
+    set emailed_at = now(), email_attempts = e.email_attempts + 1
     from "user" u
-    where u.id = e.user_id and u.deleted_at is null and e.notify_email and e.emailed_at is null and e.status in ('ready', 'failed')
+    where u.id = e.user_id and u.deleted_at is null
+      and e.notify_email and e.emailed_at is null and e.status in ('ready', 'failed')
+      and e.email_attempts < ${MAX_EMAIL_ATTEMPTS} and (e.next_email_at is null or e.next_email_at <= now())
     returning ${sql`e.id, e.org_id, e.workspace_id, e.user_id, e.document_id, e.content, e.status, e.filename, e.object_key,
       e.document_count, e.estimated_bytes, e.size_bytes, e.skipped_count, e.notify_email, e.error,
-      e.created_at::text, e.completed_at::text, e.expires_at::text, u.email`}
+      e.created_at::text, e.completed_at::text, e.expires_at::text, u.email, e.email_attempts`}
   `;
   for (const row of due) {
-    if (!row.email) continue;
+    // Someone removed from the workspace since asking learns nothing more about it.
+    const access = await listAccessibleWorkspaceIds(row.user_id);
+    if (!row.email || !access.includes(row.workspace_id)) continue;
     await sendExportReadyEmail({
       userId: row.user_id,
       recipientEmail: row.email,
@@ -284,47 +392,14 @@ export async function sweepDocumentExports(): Promise<void> {
       expiresAt: new Date(row.expires_at),
       url: exportAppUrl(row.id),
     }).catch(async (error) => {
-      console.error(`[document-export] email failed export=${row.id}: ${error instanceof Error ? error.message : String(error)}`);
-      // Release the claim so the next sweep retries.
-      await sql`update document_exports set emailed_at = null where id = ${row.id}`.catch(() => undefined);
+      const giveUp = row.email_attempts >= MAX_EMAIL_ATTEMPTS;
+      console.error(`[document-export] email failed export=${row.id} attempt=${row.email_attempts}${giveUp ? " giving up" : ""}: ${error instanceof Error ? error.message : String(error)}`);
+      if (giveUp) return;
+      // Release the claim and back off: 1, 2, 4, 8 minutes.
+      await sql`
+        update document_exports set emailed_at = null, next_email_at = now() + make_interval(mins => ${2 ** (row.email_attempts - 1)})
+        where id = ${row.id}
+      `.catch(() => undefined);
     });
   }
-
-  await sql`
-    update document_exports
-    set status = 'failed', completed_at = now(), error = 'The export took too long and was stopped. Try again, or export fewer documents.'
-    where status in ('queued', 'running') and created_at < now() - make_interval(hours => ${STALLED_EXPORT_HOURS})
-  `;
-
-  // Expired exports, and exports whose document, workspace or requester is gone
-  // (deleted, purged, or the organization offboarded). The object is deleted
-  // first, so a failed delete is retried by the next sweep rather than leaving
-  // an orphan; deleting a missing key succeeds. An orphan's row is then removed,
-  // since it names a document or workspace that no longer exists.
-  const removable = await sql<{ id: string; object_key: string; status: string; orphaned: boolean }[]>`
-    select id, object_key, status, orphaned from (
-      select e.id, e.object_key, e.status, e.expires_at, (
-        not exists (select 1 from workspaces w where w.id = e.workspace_id)
-        or not exists (select 1 from "user" u where u.id = e.user_id and u.deleted_at is null)
-        or (e.document_id is not null and not exists (
-          select 1 from documents d where d.id = e.document_id and d.purged_at is null))
-      ) as orphaned
-      from document_exports e
-    ) candidates
-    where (status <> 'expired' and expires_at <= now()) or orphaned
-    order by expires_at
-    limit 200
-  `;
-  for (const row of removable) {
-    try {
-      if (row.status !== "expired") await deleteUploadedObject(row.object_key);
-      if (row.orphaned) await sql`delete from document_exports where id = ${row.id}`;
-      else await sql`update document_exports set status = 'expired' where id = ${row.id} and status <> 'expired'`;
-    } catch (error) {
-      console.error(`[document-export] delete failed export=${row.id} key=${row.object_key}: ${error instanceof Error ? error.message : String(error)}`);
-    }
-  }
-  if (removable.length > 0) console.log(`[document-export] expired=${removable.length}`);
-  // Expired rows stay a month so the app can say a link expired, then go.
-  await sql`delete from document_exports where status = 'expired' and expires_at < now() - interval '30 days'`;
 }

@@ -148,7 +148,16 @@ export async function* documentExportEntries(
           .sort((left, right) => left.name.localeCompare(right.name, "en", { numeric: true }))
       : [];
     const artifactKey = (name: string) => artifacts.find((entry) => entry.name === name)?.key ?? null;
+    if (completed && args.content === "all") {
+      for (const [slot, uri] of Object.entries(row.artifacts ?? {})) {
+        const target = slot.startsWith(prefix) && withheld.has(uri) ? artifactExportPath(slot.slice(prefix.length), uri) : null;
+        if (target) skipped.push({ path: `${folder}/${target.path}`, reason: "withheld by the workspace's privacy (PII) policy" });
+      }
+    }
     const pages = completed ? await source.pages(row.id) : [];
+    if (!completed) {
+      skipped.push({ path: `${folder}/`, reason: row.status === "failed" ? "processing failed, so only metadata.json is included" : "still processing, so only metadata.json is included; export again when it finishes" });
+    }
 
     const markdownKey = artifactKey("markdown");
     yield {
@@ -191,9 +200,12 @@ export async function* documentExportEntries(
     }
 
     if (args.content === "all") {
-      if (!withheld.has(`s3://${source.bucket}/${row.source_key}`)) {
+      const originalPath = `${folder}/original/${safeExportName(row.filename, "original", { keepExtension: true })}`;
+      if (withheld.has(`s3://${source.bucket}/${row.source_key}`)) {
+        skipped.push({ path: originalPath, reason: "withheld by the workspace's privacy (PII) policy" });
+      } else {
         yield {
-          path: `${folder}/original/${safeExportName(row.filename, "original")}`,
+          path: originalPath,
           compress: compressible(row.mime_type),
           modifiedAt,
           body: streamed(row.source_key),
@@ -318,7 +330,11 @@ export async function loadExportArtifacts(sql: Sql, documents: ExportDocumentRow
   for (const row of documents) row.artifacts = byDocument.get(row.id) ?? null;
 }
 
-/** The export's documents: the one document, or the workspace's current, live versions. */
+/**
+ * The export's documents: the one document, or the workspace's live versions.
+ * `superseded_at` is set only once a newer version completes, so a pending or
+ * failed re-upload never hides the version that is still searchable.
+ */
 export async function loadExportDocuments(sql: Sql, row: Pick<ExportRow, "workspace_id" | "document_id">): Promise<{ documents: ExportDocumentRow[]; truncated: boolean }> {
   if (row.document_id) {
     const documents = await sql<ExportDocumentRow[]>`
@@ -333,29 +349,45 @@ export async function loadExportDocuments(sql: Sql, row: Pick<ExportRow, "worksp
     from documents d
     where d.workspace_id = ${row.workspace_id}
       and d.superseded_at is null and d.archived_at is null and d.purged_at is null
-      and not exists (select 1 from documents newer where newer.previous_version_id = d.id)
-    order by lower(d.filename), d.created_at
+    order by lower(d.filename), d.created_at, d.id
     limit ${DOCUMENT_EXPORT_MAX_DOCUMENTS + 1}
   `;
   return { documents: documents.slice(0, DOCUMENT_EXPORT_MAX_DOCUMENTS), truncated: documents.length > DOCUMENT_EXPORT_MAX_DOCUMENTS };
 }
 
+/** Log progress at most once per this many bytes written. */
+const PROGRESS_LOG_BYTES = 256 * 1024 * 1024;
+
+/** Wakes the (auto-suspending) app so its sweep sends the export email promptly. */
+async function wakeApp(): Promise<void> {
+  const url = process.env.WORKER_APP_KEEPALIVE_URL?.trim();
+  if (!url) return;
+  await fetch(url, { signal: AbortSignal.timeout(10_000), headers: { "user-agent": "docslurp-worker-keepalive" } }).catch(() => undefined);
+}
+
 /**
- * Runs one export to completion. `final` marks the last attempt: only then is a
- * failure recorded, so a retried storage hiccup does not show the user an error.
+ * Runs one export attempt to completion. Each attempt writes its own key
+ * (`<prefix>a<attempt>.zip`), so a stale attempt can never overwrite or delete
+ * the zip another attempt finished. Only a running export becomes ready or
+ * failed, and `final` marks the last attempt: only then is a failure recorded,
+ * so a retried storage hiccup does not show the user an error.
  */
 export async function buildDocumentExport(
   deps: { sql: Sql; storage: ArtifactStore },
   exportId: string,
-  options: { signal?: AbortSignal; heartbeat?: () => void; final?: boolean; maxBytes?: number } = {},
+  options: { signal?: AbortSignal; heartbeat?: () => void; final?: boolean; attempt?: number; maxBytes?: number } = {},
 ): Promise<{ status: "ready" | "skipped"; sizeBytes?: number }> {
   const { sql, storage } = deps;
-  const [row] = await sql<ExportRow[]>`
-    update document_exports set status = 'running', started_at = coalesce(started_at, now())
+  const [row] = await sql<Array<ExportRow & { attempts: number; notify_email: boolean }>>`
+    update document_exports set status = 'running', started_at = coalesce(started_at, now()), attempts = attempts + 1
     where id = ${exportId} and status in ('queued', 'running') and expires_at > now()
-    returning id, org_id, workspace_id, document_id, content, filename, object_key, expires_at
+    returning id, org_id, workspace_id, document_id, content, filename, object_key, expires_at, attempts, notify_email
   `;
   if (!row) return { status: "skipped" };
+  const prefix = row.object_key.endsWith("/") ? row.object_key : `${row.object_key.slice(0, row.object_key.lastIndexOf("/") + 1)}`;
+  const key = `${prefix}a${options.attempt ?? row.attempts}.zip`;
+  const started = Date.now();
+  console.log(`[document-export] start export=${row.id} attempt=${options.attempt ?? row.attempts} content=${row.content} scope=${row.document_id ? "document" : "workspace"} workspace=${row.workspace_id}`);
 
   try {
     const { documents, truncated } = await loadExportDocuments(sql, row);
@@ -374,67 +406,77 @@ export async function buildDocumentExport(
     const skipped: Array<{ path: string; reason: string }> = [];
     let files = 0;
     let sizeBytes = 0;
+    let nextProgressLog = PROGRESS_LOG_BYTES;
     const source: ExportSource = {
       bucket: storage.bucket,
-      open: (key) => storage.openStream(key, options.signal),
+      open: (objectKey) => storage.openStream(objectKey, options.signal),
       pages: async (documentId) => await sql<Array<{ page_number: number; text: string }>>`
         select page_number, text from document_pages where document_id = ${documentId} order by page_number
       `,
     };
     const entries = documentExportEntries({ root, scope: row.document_id ? "document" : "workspace", content: row.content, documents, truncated, omitPageFiles }, source, skipped);
-    const counted = async function* (): AsyncGenerator<ZipStreamEntry> {
-      for await (const entry of entries) {
-        options.heartbeat?.();
-        yield entry;
-      }
-    };
     const chunks = async function* (): AsyncGenerator<Uint8Array> {
-      for await (const chunk of zipStream(counted(), {
+      for await (const chunk of zipStream(entries, {
         maxBytes: options.maxBytes ?? DOCUMENT_EXPORT_MAX_BYTES,
         onSkip: (path, reason) => skipped.push({ path, reason }),
         onAdd: () => { files += 1; },
         onProgress: options.heartbeat,
       })) {
         sizeBytes += chunk.byteLength;
+        if (sizeBytes >= nextProgressLog) {
+          nextProgressLog += PROGRESS_LOG_BYTES;
+          console.log(`[document-export] progress export=${row.id} files=${files} bytes=${sizeBytes} elapsed_ms=${Date.now() - started}`);
+        }
         yield chunk;
       }
     };
-    const upload = storage.createMultipartUploadStream(row.object_key, "application/zip", {
+    // No HTTP Expires header: storage would echo it on downloads and let caches keep the zip.
+    const upload = storage.createMultipartUploadStream(key, "application/zip", {
       object: {
-        expires: row.expires_at,
-        metadata: { "docslurp-expires-at": row.expires_at.toISOString(), "docslurp-export-id": row.id, "docslurp-ttl-days": String(DOCUMENT_EXPORT_TTL_DAYS) },
+        metadata: {
+          "docslurp-export-id": row.id,
+          "docslurp-expires-at": new Date(Date.now() + DOCUMENT_EXPORT_TTL_DAYS * 86_400_000).toISOString(),
+          "docslurp-ttl-days": String(DOCUMENT_EXPORT_TTL_DAYS),
+        },
       },
     });
     await Promise.all([pipeline(Readable.from(chunks()), upload.writable, { signal: options.signal }), upload.done]);
 
-    // Only a running export becomes ready: one the sweep already failed or expired stays so.
+    // Only a running export becomes ready: one the sweep already failed or
+    // removed, or another attempt already finished, stays as it is.
     const finished = await sql`
       update document_exports
-      set status = 'ready', completed_at = now(), size_bytes = ${sizeBytes}, file_count = ${files},
-        skipped_count = ${skipped.length}, document_count = ${documents.length}, error = null
+      set status = 'ready', completed_at = now(), object_key = ${key},
+        expires_at = now() + make_interval(days => ${DOCUMENT_EXPORT_TTL_DAYS}),
+        document_ids = ${sql.array(documents.map((document) => document.id))},
+        size_bytes = ${sizeBytes}, file_count = ${files}, skipped_count = ${skipped.length},
+        document_count = ${documents.length}, error = null
       where id = ${row.id} and status = 'running'
       returning id
     `;
     if (finished.length === 0) {
-      // Another attempt may already have finished (ready) with the same key: keep that zip.
-      // Otherwise the export was failed, expired or removed while building, so drop the upload.
-      const [current] = await sql<Array<{ status: string }>>`select status from document_exports where id = ${row.id}`;
-      if (current?.status !== "ready") {
-        console.warn(`[document-export] finished after it was ${current?.status ?? "removed"} export=${row.id}; deleting its object`);
-        await storage.deleteKeys([row.object_key]).catch(() => undefined);
-      }
+      console.warn(`[document-export] finished after it was failed, removed or completed by another attempt export=${row.id}; deleting this attempt's zip`);
+      await storage.deleteKeys([key]).catch(() => undefined);
       return { status: "skipped" };
     }
-    console.log(`[document-export] ready export=${row.id} documents=${documents.length} files=${files} skipped=${skipped.length} bytes=${sizeBytes}`);
+    // Drop other attempts' leftovers: finished zips, and parts of uploads that were cut off.
+    const leftovers = await storage.listKeys({ prefix }).catch(() => ({ keys: [] as string[] }));
+    await storage.deleteKeys(leftovers.keys.filter((other) => other !== key)).catch(() => undefined);
+    await storage.abortMultipartUploads(prefix).catch(() => undefined);
+
+    console.log(`[document-export] ready export=${row.id} documents=${documents.length} files=${files} skipped=${skipped.length} bytes=${sizeBytes} elapsed_ms=${Date.now() - started}`);
+    if (row.notify_email) await wakeApp();
     return { status: "ready", sizeBytes };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    console.error(`[document-export] failed export=${row.id} final=${options.final ?? true}: ${message}`);
+    console.error(`[document-export] failed export=${row.id} attempt=${options.attempt ?? row.attempts} final=${options.final ?? true} elapsed_ms=${Date.now() - started}: ${message}`);
+    await storage.deleteKeys([key]).catch(() => undefined);
     if (options.final ?? true) {
       await sql`
         update document_exports set status = 'failed', completed_at = now(), error = ${publicExportError(message)}
-        where id = ${row.id}
+        where id = ${row.id} and status = 'running'
       `;
+      if (row.notify_email) await wakeApp();
     }
     throw error;
   }

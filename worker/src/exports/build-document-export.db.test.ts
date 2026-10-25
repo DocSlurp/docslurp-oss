@@ -19,7 +19,9 @@ const text = (value: string) => new TextEncoder().encode(value);
 const deleted: string[] = [];
 const storage = {
   bucket: "bucket",
-  async deleteKeys(keys: string[]) { deleted.push(...keys); },
+  async deleteKeys(keys: string[]) { deleted.push(...keys); for (const key of keys) uploads.delete(key); },
+  async listKeys({ prefix }: { prefix: string }) { return { keys: [...uploads.keys()].filter((key) => key.startsWith(prefix)) }; },
+  async abortMultipartUploads() { return 0; },
   async openStream(key: string) {
     const bytes = objects.get(key);
     if (!bytes) throw new Error(`NoSuchKey ${key}`);
@@ -91,12 +93,12 @@ beforeEach(async () => {
 async function queue(id: string, args: { documentId?: string; content: "markdown" | "all"; filename: string }) {
   await sql`
     insert into document_exports (id, org_id, workspace_id, user_id, document_id, content, filename, object_key, expires_at)
-    values (${id}, 'o', 'w', 'u', ${args.documentId ?? null}, ${args.content}, ${args.filename}, ${`exports/o/w/${id}.zip`}, now() + interval '7 days')
+    values (${id}, 'o', 'w', 'u', ${args.documentId ?? null}, ${args.content}, ${args.filename}, ${`exports/o/w/${id}/`}, now() + interval '7 days')
   `;
 }
 
-function unzip(id: string) {
-  const upload = uploads.get(`exports/o/w/${id}.zip`);
+function unzip(id: string, attempt = 1) {
+  const upload = uploads.get(`exports/o/w/${id}/a${attempt}.zip`);
   expect(upload).toBeDefined();
   return { files: unzipSync(upload!.bytes), upload: upload! };
 }
@@ -125,10 +127,13 @@ describe("buildDocumentExport", () => {
     expect(strFromU8(files["Q3 plan/pages/page-0002.md"]!)).toBe("Page two");
     expect(JSON.parse(strFromU8(files["Q3 plan/structured.json"]!))).toEqual({ total: 3 });
     expect(JSON.parse(strFromU8(files["Q3 plan/metadata.json"]!))).toMatchObject({ id: "doc-1", tags: ["finance"], pageCount: 2 });
-    expect(upload.metadata?.["docslurp-expires-at"]).toBe(upload.expires?.toISOString());
-    const [row] = await sql<{ status: string; size_bytes: string; file_count: number; skipped_count: number }[]>`
-      select status, size_bytes, file_count, skipped_count from document_exports where id = 'exp-1'`;
-    expect(row).toMatchObject({ status: "ready", file_count: 6, skipped_count: 0 });
+    expect(upload.expires).toBeUndefined();
+    expect(upload.metadata?.["docslurp-export-id"]).toBe("exp-1");
+    const [row] = await sql<{ status: string; size_bytes: string; file_count: number; skipped_count: number; object_key: string; document_ids: string[]; ttl_days: number }[]>`
+      select status, size_bytes, file_count, skipped_count, object_key, document_ids,
+        round(extract(epoch from expires_at - completed_at) / 86400)::int as ttl_days
+      from document_exports where id = 'exp-1'`;
+    expect(row).toMatchObject({ status: "ready", file_count: 6, skipped_count: 0, object_key: "exports/o/w/exp-1/a1.zip", document_ids: ["doc-1"], ttl_days: 7 });
     expect(Number(row!.size_bytes)).toBe(upload.bytes.byteLength);
   });
 
@@ -151,6 +156,7 @@ describe("buildDocumentExport", () => {
     expect(names.some((name) => name.includes("Old") || name.includes("embeddings") || name.endsWith("q3 plan/q3 plan.md"))).toBe(false);
     const readme = strFromU8(files["Finance/README.md"]!);
     expect(readme).toContain("| q3 plan | q3 plan.docx | 1 | processing |");
+    expect(readme).toContain("`q3 plan/`: still processing, so only metadata.json is included");
     expect(readme).toContain("`Q3 plan (2)/outputs/canonical-document.json`: NoSuchKey");
   });
 
@@ -162,6 +168,7 @@ describe("buildDocumentExport", () => {
 
     const { files } = unzip("exp-3");
     expect(Object.keys(files).some((name) => name.includes("original/"))).toBe(false);
+    expect(strFromU8(files["Q3 plan/README.md"]!)).toContain("`original/Q3 plan.pdf`: withheld by the workspace's privacy (PII) policy");
     // The withheld Markdown falls back to the indexed (post-policy) page text.
     expect(strFromU8(files["Q3 plan/Q3 plan.md"]!)).toBe("Page one\n\nPage two");
     await sql`update documents set metadata = '{}' where id = 'doc-1'`;
@@ -186,26 +193,52 @@ describe("buildDocumentExport", () => {
     expect((await sql`select status, error from document_exports where id = 'exp-5'`)[0]).toMatchObject({ status: "failed" });
 
     // An export removed while it was building (its document was deleted) cleans up its own upload.
+    deleted.length = 0;
     await queue("exp-7", { documentId: "doc-1", content: "markdown", filename: "Q3 plan.zip" });
     const removing = { ...storage, openStream: async (key: string) => {
       await sql`delete from document_exports where id = 'exp-7'`;
       return storage.openStream(key);
     } };
     expect(await buildDocumentExport({ sql, storage: removing as never }, "exp-7")).toEqual({ status: "skipped" });
-    expect(deleted).toEqual(["exports/o/w/exp-7.zip"]);
+    expect(deleted).toEqual(["exports/o/w/exp-7/a1.zip"]);
 
-    // A stale attempt finishing after another attempt made the export ready keeps the shared zip.
+    // A stale attempt finishing after another attempt made the export ready drops only its own zip.
     await queue("exp-8", { documentId: "doc-1", content: "markdown", filename: "Q3 plan.zip" });
     const racing = { ...storage, openStream: async (key: string) => {
-      await sql`update document_exports set status = 'ready' where id = 'exp-8'`;
+      await sql`update document_exports set status = 'ready', object_key = 'exports/o/w/exp-8/a2.zip' where id = 'exp-8'`;
       return storage.openStream(key);
     } };
     deleted.length = 0;
-    expect(await buildDocumentExport({ sql, storage: racing as never }, "exp-8")).toEqual({ status: "skipped" });
-    expect(deleted).toEqual([]);
+    expect(await buildDocumentExport({ sql, storage: racing as never }, "exp-8", { attempt: 1 })).toEqual({ status: "skipped" });
+    expect(deleted).toEqual(["exports/o/w/exp-8/a1.zip"]);
+    expect((await sql`select status, object_key from document_exports where id = 'exp-8'`)[0]).toEqual({ status: "ready", object_key: "exports/o/w/exp-8/a2.zip" });
 
     await queue("exp-6", { documentId: "doc-1", content: "markdown", filename: "Q3 plan.zip" });
     await sql`update document_exports set expires_at = now() - interval '1 minute' where id = 'exp-6'`;
     expect(await buildDocumentExport({ sql, storage: storage as never }, "exp-6")).toEqual({ status: "skipped" });
+  });
+
+  it("keeps the live version while a newer upload of it is pending or failed", async () => {
+    await sql`insert into documents(id,org_id,user_id,workspace_id,run_id,filename,mime_type,source_key,status,page_count,previous_version_id)
+      values('doc-1-v2','o','u','w','run','Q3 plan.pdf','application/pdf','uploads/q3-v2.pdf','processing',0,'doc-1')`;
+    await queue("exp-9", { content: "markdown", filename: "Finance.zip" });
+
+    await buildDocumentExport({ sql, storage: storage as never }, "exp-9");
+
+    const { files } = unzip("exp-9");
+    // Both rows are live until the new version completes and supersedes doc-1.
+    expect(strFromU8(files["Finance/Q3 plan (2)/Q3 plan (2).md"]!)).toContain("# Q3 plan");
+    expect(Object.keys(files)).toContain("Finance/Q3 plan (3)/metadata.json");
+    await sql`delete from documents where id = 'doc-1-v2'`;
+  });
+
+  it("writes each attempt to its own key and clears other attempts' zips when ready", async () => {
+    await queue("exp-10", { documentId: "doc-1", content: "markdown", filename: "Q3 plan.zip" });
+    uploads.set("exports/o/w/exp-10/a1.zip", { bytes: new Uint8Array([1]) });
+
+    await buildDocumentExport({ sql, storage: storage as never }, "exp-10", { attempt: 2 });
+
+    expect([...uploads.keys()].filter((key) => key.startsWith("exports/o/w/exp-10/"))).toEqual(["exports/o/w/exp-10/a2.zip"]);
+    expect((await sql`select object_key from document_exports where id = 'exp-10'`)[0]).toEqual({ object_key: "exports/o/w/exp-10/a2.zip" });
   });
 });

@@ -526,7 +526,8 @@ export async function sendExportReadyEmail(args: {
 }): Promise<void> {
   const deliveryId = randomUUID();
   const until = args.expiresAt.toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric", year: "numeric", timeZone: "UTC" });
-  const subject = args.ready ? `Your export is ready: ${args.filename}` : `Your export didn't finish: ${args.filename}`;
+  // A fixed subject: the filename comes from user-named documents and workspaces, so it stays in the escaped body.
+  const subject = args.ready ? "Your DocSlurp export is ready" : "Your DocSlurp export didn't finish";
   const size = args.sizeLabel ? ` (${args.sizeLabel})` : "";
   const html = args.ready
     ? `<p>Your DocSlurp export <strong>${escapeHtml(args.filename)}</strong>${escapeHtml(size)} is ready.</p><p><a href="${escapeAttribute(args.url)}">Download the export</a></p><p>The link works for 7 days, until ${escapeHtml(until)} (UTC). After that the file is deleted; export again from DocSlurp if you need it later. Sign in with this email address to download.</p>`

@@ -1031,12 +1031,12 @@ Finance/                      one folder per document (a document export is just
   README.md                   the layout, a document table, and any file that could not be included
 ```
 
-Workspace exports hold current versions only (no superseded, archived or purged documents), up to 5,000 documents. Files the PII policy withholds are never exported. Limits:
+Workspace exports hold current versions only (no superseded, archived or purged documents), up to 5,000 documents; a document still processing contributes its `metadata.json`. Files the PII policy withholds are never exported, and the README lists them. Deleting or purging a document in an export withdraws the export. Limits:
 
 - **Size:** exports estimated over **3 GB** are refused with `413 payload_too_large`; export Markdown only or one document at a time. The worker also stops adding files at that size and lists the rest in `README.md`.
 - **Email:** exports estimated over **250 MB** are emailed to the requester when ready (`notifyEmail: true`), so nobody has to keep a tab open.
-- **Lifetime:** every link works for **7 days** (`expiresAt`). After that `download` answers `404` and the file is deleted. Each `download` call checks the export (requester, workspace access, expiry) and then redirects to a presigned storage link that lasts two minutes, so the zip downloads straight from storage. Call `download` again for a fresh link; resumable downloads (Range) work against the storage link.
-- **Concurrency:** three unfinished exports per user (`429 rate_limited` beyond that).
+- **Lifetime:** every link works for **7 days** from when the export is ready (`expiresAt`). After that `download` answers `404` and the file is deleted. Each `download` call checks the export (requester, workspace access, expiry) and then redirects to a presigned storage link that lasts two minutes, so the zip downloads straight from storage. Call `download` again for a fresh link; resumable downloads (Range) work against the storage link.
+- **Limits:** three unfinished exports per user, and 20 exports or 20 GB (estimated) per user per day (`429 rate_limited`). Asking for the same export again within an hour returns the one already in flight or finished. A single document must have finished processing (`409` otherwise).
 
 Sessions and server keys with `artifacts` can export; keys stay within their organization and workspace restrictions. Objects live in the private bucket under `exports/<orgId>/<workspaceId>/<exportId>.zip` with an `Expires` header and `docslurp-expires-at` metadata; the API's maintenance sweep deletes them. A bucket lifecycle rule that expires `exports/` after 8 days is a useful backstop (see [operations](self-host/operations.md#export-cleanup)).
 

@@ -316,12 +316,12 @@ This is scaling on a single host, not a multi-host design.
 
 ## Export cleanup
 
-Zip exports (`POST /v1/exports`) are built by the worker on the `docslurp-document-export` task queue (override with `TEMPORAL_DOCUMENT_EXPORT_TASK_QUEUE` on both the API and the worker) and stored at `exports/<orgId>/<workspaceId>/<exportId>.zip`. Each link lives seven days. The API's maintenance sweep (`MAINTENANCE_SWEEP_INTERVAL_MS`) emails finished exports over 250 MB through Resend, deletes objects whose seven days have passed or whose document, workspace or requester was deleted (including organization and account deletion), and marks exports unfinished after ten hours as failed. Exports hold at most 65,000 files (zip without ZIP64); past that, page-by-page Markdown is left out and the README says so. Look for `[document-export]` log lines.
+Zip exports (`POST /v1/exports`) are built by the worker: exports under 250 MB on the `docslurp-document-export` task queue and larger, emailed ones on `docslurp-document-export-large` (override with `TEMPORAL_DOCUMENT_EXPORT_TASK_QUEUE` and `TEMPORAL_LARGE_DOCUMENT_EXPORT_TASK_QUEUE` on both the API and the worker), one slot each per worker. Set `WORKER_DOCUMENT_EXPORTS=off` on workers that scale in or restart often, so exports run on long-lived machines; streaming a 2 GB export peaks around 185 MB of worker memory. Exports are stored under `exports/<orgId>/<workspaceId>/<exportId>/`, one zip per attempt. Each link lives seven days from when the export is ready. Downloads redirect to a two-minute presigned storage link, so the bucket's public endpoint (`DOCSLURP_STORAGE_PUBLIC_BUCKET_URL`, when set) must serve signed GETs; the link sets the download filename and `Cache-Control: private, no-store`. The API's maintenance sweep (`MAINTENANCE_SWEEP_INTERVAL_MS`) emails finished exports over 250 MB through Resend (five attempts with backoff), when the worker has woken the app via `WORKER_APP_KEEPALIVE_URL`, deletes objects whose seven days have passed or whose document, workspace or requester was deleted (including organization and account deletion), and marks exports unfinished after ten hours as failed. Exports hold at most 65,000 files (zip without ZIP64); past that, page-by-page Markdown is left out and the README says so. Look for `[document-export]` log lines.
 
 As a backstop, add a bucket lifecycle rule that expires objects under the `exports/` prefix after 8 days, so a stopped sweep never leaves exports behind:
 
 ```json
-{ "Rules": [{ "ID": "expire-exports", "Status": "Enabled", "Filter": { "Prefix": "exports/" }, "Expiration": { "Days": 8 } }] }
+{ "Rules": [{ "ID": "expire-exports", "Status": "Enabled", "Filter": { "Prefix": "exports/" }, "Expiration": { "Days": 8 }, "AbortIncompleteMultipartUpload": { "DaysAfterInitiation": 1 } }] }
 ```
 
 ```bash

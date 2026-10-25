@@ -1,6 +1,7 @@
 import { instrumentS3Client } from "@docslurp/shared/observability";
 import {
   AbortMultipartUploadCommand,
+  ListMultipartUploadsCommand,
   CompleteMultipartUploadCommand,
   CreateMultipartUploadCommand,
   DeleteObjectCommand,
@@ -356,6 +357,25 @@ export class ArtifactStore {
       truncated,
       nextContinuationToken: continuationToken ?? null
     };
+  }
+
+  /** Aborts every unfinished multipart upload under `prefix` (parts of uploads that will never complete). */
+  async abortMultipartUploads(prefix: string): Promise<number> {
+    validateStorageKey(prefix);
+    let aborted = 0;
+    let keyMarker: string | undefined;
+    let uploadIdMarker: string | undefined;
+    do {
+      const page = await this.client.send(new ListMultipartUploadsCommand({ Bucket: this.bucket, Prefix: prefix, KeyMarker: keyMarker, UploadIdMarker: uploadIdMarker }));
+      for (const upload of page.Uploads ?? []) {
+        if (!upload.Key || !upload.UploadId) continue;
+        await this.client.send(new AbortMultipartUploadCommand({ Bucket: this.bucket, Key: upload.Key, UploadId: upload.UploadId }));
+        aborted += 1;
+      }
+      keyMarker = page.IsTruncated ? page.NextKeyMarker : undefined;
+      uploadIdMarker = page.IsTruncated ? page.NextUploadIdMarker : undefined;
+    } while (keyMarker);
+    return aborted;
   }
 
   async deleteKeys(keys: string[]): Promise<void> {
