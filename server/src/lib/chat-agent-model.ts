@@ -9,6 +9,17 @@ export function chatAgentProviderOptions(model: string) {
 }
 
 /**
+ * Prompt-cache breakpoint for upstreams that cache only at explicit
+ * cache_control markers (Anthropic and Gemini through OpenRouter). Others
+ * (OpenAI, DeepSeek, GLM, Qwen and most open-weight hosts) cache a repeated
+ * prefix on their own, so they get no marker. Cached reads are billed at a
+ * discount, and OpenRouter's receipt cost already reflects it.
+ */
+export function promptCacheBreakpoint(model: string) {
+  return /^(anthropic|google)\//.test(model) ? { openrouter: { cacheControl: { type: "ephemeral" as const } } } : undefined;
+}
+
+/**
  * The agent's chat model. It uses OpenRouter's AI SDK provider rather than the
  * OpenAI adapter because the adapter drops `reasoning` / `reasoning_details`
  * from chat completions, so every follow-up step resent assistant turns

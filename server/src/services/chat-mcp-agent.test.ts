@@ -758,7 +758,7 @@ describe("final-step answers never leak tool-call markup", () => {
       onTextDelta: (delta) => { deltas.push(delta); } });
     const call = model.doStreamCalls[0]!;
     expect(call.tools ?? []).toEqual([]);
-    expect(JSON.stringify(call.prompt.filter(message => message.role === "system"))).toContain(FINAL_ANSWER_INSTRUCTION);
+    expect(JSON.stringify(call.prompt.at(-1))).toContain(FINAL_ANSWER_INSTRUCTION);
     expect(result.answer).toBe("Let me check the docs first.");
     expect(deltas.join("")).toBe(result.answer);
     expect(result.answer).not.toContain("tool_call");
@@ -771,8 +771,30 @@ describe("final-step answers never leak tool-call markup", () => {
     const result = await runChatMcpAgent({ ...args, limits: { maxSteps: 2, maxToolCalls: 12, searchConcurrency: 4, clamped: [] } });
     expect(seenToolChoice).toEqual(["auto", "none"]);
     expect(model.doStreamCalls[1]!.tools?.map(tool => tool.name)).toEqual(["search"]);
-    expect(JSON.stringify(model.doStreamCalls[1]!.prompt.filter(message => message.role === "system"))).toContain(FINAL_ANSWER_INSTRUCTION);
-    expect(JSON.stringify(model.doStreamCalls[0]!.prompt.filter(message => message.role === "system"))).not.toContain(FINAL_ANSWER_INSTRUCTION);
+    // The rule follows the history as a user turn; the instructions stay byte-identical so the cached prefix holds.
+    expect(model.doStreamCalls[1]!.prompt.at(-1)).toMatchObject({ role: "user" });
+    expect(JSON.stringify(model.doStreamCalls[1]!.prompt.at(-1))).toContain(FINAL_ANSWER_INSTRUCTION);
+    const system = (index: number) => JSON.stringify(model.doStreamCalls[index]!.prompt.filter(message => message.role === "system"));
+    expect(system(1)).toBe(system(0));
+    expect(system(0)).not.toContain(FINAL_ANSWER_INSTRUCTION);
     expect(result.answer).toBe("Supported [1].");
+  });
+
+  it("marks prompt-cache breakpoints on the instructions and the latest message for explicit-cache models only", async () => {
+    const run = async (modelId: string) => {
+      const { model } = scripted([{ tools: [{ id: "a", input: { q: "a" } }] }, { text: "Supported [1]." }]);
+      mocks.provider.mockReturnValue(model);
+      mocks.dispatch.mockImplementation(async () => Response.json({ results: [] }));
+      await runChatMcpAgent({ ...args, model: modelId, limits: { maxSteps: 4, maxToolCalls: 12, searchConcurrency: 4, clamped: [] } });
+      return model.doStreamCalls;
+    };
+    const marked = (message: { providerOptions?: unknown }) => JSON.stringify(message.providerOptions ?? {}).includes("ephemeral");
+    const claude = await run("anthropic/claude-haiku-5.5");
+    for (const call of claude) {
+      expect(marked(call.prompt[0]!)).toBe(true);
+      expect(marked(call.prompt.at(-1)!)).toBe(true);
+      expect(call.prompt.slice(1, -1).some(marked)).toBe(false);
+    }
+    for (const call of await run("z-ai/glm-5.3-flash")) expect(call.prompt.some(marked)).toBe(false);
   });
 });
