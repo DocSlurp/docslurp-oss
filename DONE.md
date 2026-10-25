@@ -100,3 +100,5 @@
 - Let workspace chat propose allowlisted pipeline, chat and retrieval settings with exact changes and cost/work disclosure; apply only through an actor-bound trusted UI action with fresh permissions, conflict checks, explicit reprocessing consent and atomic audit.
 
 - Harden the worker image supply chain: worker-images.yml pushes max-mode provenance and SBOMs, signs each digest with keyless cosign and a GitHub provenance attestation in a separate id-token job; worker Python locks carry sha256 hashes and every install path uses --require-hashes; Grype fails on critical findings (justified exceptions in .grype.yaml); the Modal provider can pin its image by digest (DOCSLURP_MODAL_IMAGE_DIGEST).
+
+- Refreshed model prices, image support, context windows and infrastructure observations from official live sources (2026-10-25); reconciled runtime estimates, excluded retired free eval route and uneconomic RTX 4090 cost-policy SKU; retained evidence and unverified historical dates.

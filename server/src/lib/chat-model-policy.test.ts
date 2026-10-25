@@ -15,12 +15,13 @@ const evalModels = new Set(["inception/mercury-3", "minimax/minimax-m3.1-flash:f
 afterEach(() => { vi.unstubAllEnvs(); vi.restoreAllMocks(); });
 
 describe("DOCSLURP_CHAT_EVAL_MODELS", () => {
-  it("admits priced OpenRouter ids (including :free) and rejects prohibited, unpriced and malformed ids", () => {
+  it("admits priced OpenRouter ids and rejects retired, prohibited, unpriced and malformed ids", () => {
     const { models, rejected } = parseChatEvalModels(
       " inception/mercury-3, minimax/minimax-m3.1-flash:free,inception/mercury-3, openai/gpt-6-sol-pro, acme/ultra-1, acme/unpriced-model, not a model, openai/gpt-6-astra",
     );
-    expect(models).toEqual(["inception/mercury-3", "minimax/minimax-m3.1-flash:free"]);
+    expect(models).toEqual(["inception/mercury-3"]);
     expect(rejected).toEqual([
+      { id: "minimax/minimax-m3.1-flash:free", reason: "missing-price" },
       { id: "openai/gpt-6-sol-pro", reason: "prohibited-model" },
       { id: "acme/ultra-1", reason: "prohibited-model" },
       { id: "acme/unpriced-model", reason: "missing-price" },

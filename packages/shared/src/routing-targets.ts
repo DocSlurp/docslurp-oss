@@ -451,7 +451,7 @@ function decisionModel(
     endpoint,
     modalities,
     maxQuestionsPerRequest,
-    pricing: { inputUsdPerMTok, outputUsdPerMTok: 0, checkedAt: "2026-10-12" },
+    pricing: { inputUsdPerMTok, outputUsdPerMTok: 0, checkedAt: "2026-10-25" },
     billingMode,
     roles,
     availability: { requiresEnv, privacyClass },
@@ -485,7 +485,7 @@ function seedDecisionModels(): DecisionModel[] {
       "openrouter-systemone",
       { text: true, image: false, maxImagesPerRequest: 0 },
       64,
-      0.04,
+      0.02,
       ["OPENROUTER_API_KEY"],
       ALL_ROLES,
     ),
@@ -494,7 +494,7 @@ function seedDecisionModels(): DecisionModel[] {
       "liquid-systemone",
       { text: true, image: true, maxImagesPerRequest: 8 },
       64,
-      0.04,
+      0.02,
       ["LIQUID_API_KEY"],
       ALL_ROLES,
     ),
@@ -510,6 +510,7 @@ function seedDecisionModels(): DecisionModel[] {
     ),
     // OpenRouter /api/v1/systemone routes. Verified 2026-10-12: Clef accepts at most 4 images and 64
     // questions per request and bills the state once per call, not once per question.
+    // Standard Cloudflare rate; do not budget against a temporary DeepInfra 50% promotion.
     decisionModel(
       "cloudflare/clef-flash",
       "openrouter-systemone",
