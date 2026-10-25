@@ -209,7 +209,7 @@ export const chatCompletionsRoutes = new Hono()
         if (isSpendBlockedError(error)) return c.json(spendBlockedBody(c, error), 402);
         if (error instanceof ChatToolBlockedError) return c.json(errorBody(error.message, "server_error", error.code), error.statusCode);
         if (isChatTurnDeadlineError(error)) return c.json(errorBody(error.message, "timeout_error", error.code), error.statusCode);
-        reportPublicError(error, { operation: "chat-completions" });
+        reportPublicError(error, { operation: "chat-completions" }, c.req.raw.signal);
         return c.json(errorBody("Workspace answer failed. Try again.", "server_error"), 500);
       }
     }
@@ -256,7 +256,7 @@ export const chatCompletionsRoutes = new Hono()
         }
         await stream.writeSSE({ data: "[DONE]" });
       } catch (error) {
-        reportPublicError(error, { operation: "chat-completions-stream" });
+        reportPublicError(error, { operation: "chat-completions-stream" }, c.req.raw.signal);
         if (!disconnected) await stream.writeSSE({ data: JSON.stringify(error instanceof ChatToolBlockedError
           ? errorBody(error.message, "server_error", error.code)
           : isChatTurnDeadlineError(error) ? errorBody(error.message, "timeout_error", error.code)

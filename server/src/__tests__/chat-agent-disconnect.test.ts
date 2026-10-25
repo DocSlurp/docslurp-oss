@@ -41,6 +41,7 @@ vi.mock("@docslurp/shared", async importOriginal => ({
 
 const { runChatMcpAgent } = await import("../services/chat-mcp-agent.js");
 const { forwardRequest } = await import("../lib/forward-request.js");
+const { isCancellation } = await import("@docslurp/shared/cancellation");
 const { currentSearchSignal } = await import("../search/query-bounds.js");
 
 setFlagsFromString("--expose-gc");
@@ -89,7 +90,10 @@ describe("chat agent client disconnect over HTTP", () => {
       for (let i = 0; i < 3; i++) { gc(); await new Promise(resolve => setTimeout(resolve, 10)); }
       const closedAt = Date.now();
       client.destroy();
-      await expect(turn).rejects.toBeDefined();
+      const failure = await turn.then(() => undefined, (error: unknown) => error);
+      expect(failure).toBeDefined();
+      // A Stop press is a cancelled outcome for telemetry, not a failed operation.
+      expect(isCancellation(failure)).toBe(true);
       expect(Date.now() - closedAt).toBeLessThan(2_000);
       expect(nested.signal?.aborted).toBe(true);
       expect(nested.searchSignal?.aborted).toBe(true);
