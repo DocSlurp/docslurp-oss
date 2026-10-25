@@ -269,6 +269,19 @@ export function webToolFailure(toolId: string, code: string, failed?: Array<{ ur
   } as const;
 }
 
+/** Rejected tool arguments the model may correct per turn before a rejection blocks the turn. */
+const ARGUMENT_RETRIES = 2;
+
+/** Validation issues from a 400 body (native envelope or plain), compact enough for the model. */
+function validationIssues(result: unknown): unknown {
+  const error = (result as { error?: unknown } | null)?.error;
+  if (!error || typeof error !== "object") return undefined;
+  const issues = (error as { details?: { issues?: unknown }; issues?: unknown }).details?.issues ?? (error as { issues?: unknown }).issues;
+  if (issues === undefined) return undefined;
+  const serialized = JSON.stringify(issues) ?? "";
+  return serialized.length <= 2_000 ? issues : serialized.slice(0, 2_000);
+}
+
 /** Comparable form of a URL: no fragment, no trailing slash, lowercase host. */
 function urlKey(raw: string): string | null {
   try {
@@ -369,6 +382,7 @@ export function createChatMcpTools(args: {
   const counters = { executed: 0, refused: 0, softRefused: 0, byTool: {} as Record<string, number>, toolCostCents: 0, timedOut: 0, deadlineRefused: 0 };
   const details = new Map<string, ChatToolCallDetail>();
   let calls = 0;
+  let argumentRetries = 0;
   const tools: ToolSet = {};
   const defaults = args.retrievalDefaults;
   const limit = defaults ? Math.min(defaults.resultCount, CHAT_MAX_RETRIEVED_PASSAGES) : undefined;
@@ -588,6 +602,15 @@ export function createChatMcpTools(args: {
           span.end(ok ? undefined : `http_${response.status}`);
           if (!ok) {
             const code = failureCode ?? (fetchFailed?.length ? fetchFailed[0]!.reason : responseErrorCode(result, response.status));
+            // Arguments the route rejected before doing any work: the model can fix them, so they need not cost the answer.
+            if (!webTool && response.status === 400 && ["invalid_request", "http_400"].includes(code) && argumentRetries < ARGUMENT_RETRIES) {
+              argumentRetries++;
+              const issues = validationIssues(result);
+              return { ok: false, blocked: false, code: "invalid_arguments", status: 400,
+                error: "The tool rejected these arguments before running. Nothing was searched or changed.",
+                ...(issues === undefined ? {} : { issues }),
+                instruction: "Call the tool again once with arguments that match its input schema, fixing the issues listed. Do not report this as a failure unless the corrected call also fails." };
+            }
             return { ...fail(code, fetchFailed), status: response.status };
           }
           // Another concurrent tool may have failed while this one was running.
