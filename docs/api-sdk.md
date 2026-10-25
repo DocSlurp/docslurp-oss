@@ -918,7 +918,7 @@ Every account gets the same table, whatever its billing state: buying credits do
 
 These are abuse protection, not a spending control: credits and budgets bound what you spend. No feature, model, media type, setting or rate limit depends on whether an organization has bought credits. Self-hosted deployments use their own, higher table, and operators can set `API_RATE_LIMIT_<TABLE>_<CATEGORY>_MAX` (for example `API_RATE_LIMIT_ACCOUNT_SEARCH_MAX`) or `API_RATE_LIMIT_<CATEGORY>_MAX`.
 
-Every 429 has `Retry-After` and the [error envelope](https://docslurp.io/docs/search-reference#errors) with `error.code` set to `rate_limited` (with `details.category`, `details.policy` and `details.account`: `account`, `ip` or `self-hosted`), `spend_limit_exceeded`, `daily_page_limit` or `ip_temporarily_blocked`. On docslurp.io the details also carry `links` and the response a `Link` header (`rel="payment"` for billing, `rel="help"` for these docs), and the message says where to go:
+Every 429 has `Retry-After` and the [error envelope](https://docslurp.io/docs/search-reference#errors) with `error.code` set to `rate_limited` (with `details.category` and `details.policy`, which names the table: `account-*`, `ip-*` or `self-hosted-*`), `spend_limit_exceeded`, `daily_page_limit` or `ip_temporarily_blocked`. On docslurp.io the details also carry `links` and the response a `Link` header (`rel="payment"` for billing, `rel="help"` for these docs), and the message says where to go:
 
 ```json
 {
@@ -928,7 +928,6 @@ Every 429 has `Retry-After` and the [error envelope](https://docslurp.io/docs/se
     "details": {
       "category": "chat-ai",
       "policy": "account-chat-ai",
-      "account": "account",
       "retryAfterSeconds": 12,
       "links": {
         "billing": "https://docslurp.io/app/billing",

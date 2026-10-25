@@ -654,16 +654,12 @@ async function consumeCounters(
     const penaltyMs = counters[result.denied]?.penaltyMs ?? 0;
     if (penaltyMs > 0) return blockedResponse(c, penaltyMs);
     return tooManyRequests(c, "rate_limited", "Too many requests", {
-      category: args.category, policy: state.name, account: rateLimitAccountLabel(args.profile), retryAfterSeconds: state.retryAfterSeconds,
+      category: args.category, policy: state.name, retryAfterSeconds: state.retryAfterSeconds,
     });
   }
   return null;
 }
 
-/** Public label for a limit table: every account shares one; the IP and self-hosted layers have their own. */
-export function rateLimitAccountLabel(profile: RateLimitProfile): string {
-  return profile;
-}
 
 function keyPrefixFor(options: RateLimitOptions): string {
   return options.keyPrefix ?? process.env.API_RATE_LIMIT_KEY_PREFIX ?? "api";

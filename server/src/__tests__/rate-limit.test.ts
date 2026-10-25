@@ -501,8 +501,9 @@ describe("api rate limit middleware", () => {
         expect(limited.headers.get("Link")).toBe('<https://docslurp.io/app/billing>; rel="payment", <https://docslurp.io/docs/http#rate-limits-and-headers>; rel="help"');
         const body = await limited.json() as { error: { message: string; details: Record<string, unknown> } };
         expect(body.error.message).toBe("Please wait a moment before trying again. Rate limits: https://docslurp.io/docs/http#rate-limits-and-headers");
+        expect(body.error.details.account).toBeUndefined();
         expect(body.error.details).toMatchObject({
-          account: "account", policy: "account-search",
+          policy: "account-search",
           links: { billing: "https://docslurp.io/app/billing", docs: "https://docslurp.io/docs/http#rate-limits-and-headers" },
         });
         expect((body.error.details.links as Record<string, string>).buyCredits).toBeUndefined();
@@ -542,7 +543,9 @@ describe("api rate limit middleware", () => {
       app.all("*", (c) => c.json({ ok: true }));
       await app.request("/v1/chat/completions", { method: "POST" });
       const limited = await app.request("/v1/chat/completions", { method: "POST" });
-      await expect(limited.json()).resolves.toMatchObject({ code: "rate_limited", account: "account", links: { billing: "https://docslurp.io/app/billing" } });
+      const flat = await limited.json() as Record<string, unknown>;
+      expect(flat).toMatchObject({ code: "rate_limited", policy: "account-chat-ai", links: { billing: "https://docslurp.io/app/billing" } });
+      expect(flat.account).toBeUndefined();
     });
 
     it("omits links on self-hosted deployments and on deployments without billing", async () => {

@@ -66,7 +66,7 @@ export function isApiErrorCode(value: unknown): value is ApiErrorCode {
 /**
  * Optional structured context. The boundary only forwards validation `issues`
  * (field paths), limit metadata (`retryAfterSeconds`, `category`, `policy`,
- * `account` (rate limits: `account` | `ip` | `self-hosted`; credit errors: `starter` | `funded`), ...), `links` and a failed chat turn's `usage`.
+ * `spendKind`, ...), `links` and a failed chat turn's `usage`.
  */
 export type ApiErrorDetails = Record<string, unknown>;
 
@@ -153,7 +153,7 @@ export function apiErrorCodeForStatus(status: number): ApiErrorCode {
 }
 
 const SAFE_DETAIL_NUMBERS = ["retryAfterSeconds", "limitCents", "spentCents", "maxBytes", "availableCredits", "heldCredits", "chatReserveCredits"] as const;
-const SAFE_DETAIL_LABELS = ["category", "policy", "account", "spendKind"] as const;
+const SAFE_DETAIL_LABELS = ["category", "policy", "spendKind"] as const;
 
 /**
  * Where a caller can lift a limit (`details.links` on 402 and 429 responses):

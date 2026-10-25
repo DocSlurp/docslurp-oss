@@ -56,10 +56,10 @@ const KEY_LIMIT_CODES = new Set<ApiErrorCode>(["spend_limit_exceeded", "daily_pa
 
 /**
  * Links for an error `code`, or undefined when the code has none or this
- * deployment has no billing. `details.account` is the rate-limit profile
- * (`account`, `self-hosted`, `ip`): an IP-level limit only links the docs,
- * since nothing is bought per IP. Account rate limits link billing and docs:
- * every account shares one table, so buying credits does not raise it.
+ * deployment has no billing. An IP-level limit (`details.policy` starts with
+ * `ip-`) only links the docs, since nothing is bought per IP. Account rate
+ * limits link billing and docs: every account shares one table, so buying
+ * credits does not raise it.
  */
 export function upgradeLinksFor(code: ApiErrorCode, details?: ApiErrorDetails, env: NodeJS.ProcessEnv = process.env): ApiErrorLinks | undefined {
   if (!upgradeLinksEnabled(env)) return undefined;
@@ -69,7 +69,7 @@ export function upgradeLinksFor(code: ApiErrorCode, details?: ApiErrorDetails, e
   const buyCredits = `${base}/app/billing#bl-topup`;
   const autoTopUp = details?.autoTopUpOn === true ? undefined : `${base}/app/billing#bl-auto-topup`;
   const apiKeys = `${base}/app/api-keys`;
-  if (code === "ip_temporarily_blocked" || (code === "rate_limited" && details?.account === "ip")) {
+  if (code === "ip_temporarily_blocked" || (code === "rate_limited" && typeof details?.policy === "string" && details.policy.startsWith("ip-"))) {
     return { docs: `${base}${RATE_LIMIT_DOCS_PATH}` };
   }
   // Every account shares one rate-limit table, so buying credits does not raise it.

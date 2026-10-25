@@ -84,7 +84,9 @@ describe("app-level error handler", () => {
       throw new SpendBlockedError("provider-private-text", "credit_exhausted", false, { account: "starter", spendKind: "job", availableCredits: 80, chatReserveCredits: 100, secret: "private" });
     });
     const body = await (await hono.request("/v1/reserve")).json();
-    expect(body.error.details).toMatchObject({ account: "starter", spendKind: "job", availableCredits: 80, chatReserveCredits: 100 });
+    expect(body.error.details).toMatchObject({ spendKind: "job", availableCredits: 80, chatReserveCredits: 100 });
+    // Plan labels never reach callers, even if a producer passes one.
+    expect(body.error.details.account).toBeUndefined();
     expect(JSON.stringify(body)).not.toContain("private");
   });
 

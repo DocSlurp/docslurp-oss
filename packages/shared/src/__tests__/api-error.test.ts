@@ -139,7 +139,8 @@ describe("limit links", () => {
   it("keeps only known keys with absolute http(s) URLs and never an upgrade link", () => {
     expect(publicApiErrorLinks({ ...links, upgrade: "https://docslurp.io/pricing", evil: "https://x", apiKeys: "javascript:alert(1)" })).toEqual(links);
     expect(publicApiErrorLinks({ billing: "https://a b" })).toBeUndefined();
-    expect(publicApiErrorDetails({ links, account: "starter", plan: "free", note: "dropped" })).toEqual({ links, account: "starter" });
+    // Plan labels (account, plan) are never public detail fields.
+    expect(publicApiErrorDetails({ links, account: "starter", plan: "free", note: "dropped" })).toEqual({ links });
   });
 
   it("never tells a rate-limited caller to buy credits; points credit errors at buying credits and auto top-up", () => {

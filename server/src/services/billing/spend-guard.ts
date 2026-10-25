@@ -300,7 +300,7 @@ async function spendDecision(
   const reason = spendBlockReason(status, kind, config)
     ?? (kind === "interactive" && status ? await admitInteractive(status, workspaceId, { client: options.client, hold: options.hold }, config) : null);
   return reason ? { ...reason, autoTopUpOn: status?.autoTopUpOn === true,
-    details: { account: status?.funded ? "funded" : "starter", spendKind: kind,
+    details: { spendKind: kind,
       availableCredits: status?.available ?? 0, heldCredits: status?.reserved ?? 0,
       chatReserveCredits: status ? chatCreditReserve(status.funded, config) : 0 } } : null;
 }
@@ -332,7 +332,7 @@ export async function admitRunSpend<T>(
         runReserveCredits: leases ? 0 : runAdmissionReserveCredits(),
       });
       const reason = spendBlockReason(status);
-      if (reason) throw new SpendBlockedError(reason.message, reason.code, status?.autoTopUpOn === true, { account: status?.funded ? "funded" : "starter", spendKind: "job",
+      if (reason) throw new SpendBlockedError(reason.message, reason.code, status?.autoTopUpOn === true, { spendKind: "job",
         availableCredits: status?.available ?? 0, heldCredits: status?.reserved ?? 0,
         chatReserveCredits: status ? chatCreditReserve(status.funded) : 0 });
     }
