@@ -602,5 +602,8 @@ main().catch(async (error) => {
   initializeWorkerErrorReporting();
   reportException(error, { operation: "worker-startup-or-shutdown" });
   await flushErrorReporting();
+  // Batched OTLP logs (e.g. docslurp.native_pdf.engine required=true) live on the shared provider, which
+  // flushErrorReporting does not drain; export them before the process exits.
+  await shutdownObservability().catch(() => undefined);
   process.exitCode = 1;
 });

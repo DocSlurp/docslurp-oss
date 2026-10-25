@@ -15,6 +15,7 @@ const baseStats = (overrides: Partial<NativePdfStageStats> = {}): NativePdfStage
   engineSource: "vendor:test",
   engineVersion: "0.13.0+abc",
   engineUnavailableReason: null,
+  extraction: { status: "not-planned", code: null, reason: null },
   shadow: { status: "ran", reason: null, agreement: 0.98, nativeMs: 12 },
   parserPayload: { status: "native", reason: null },
   ...overrides,
@@ -77,7 +78,7 @@ describe("reportExtractionDecision", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
     reportExtractionDecision({ ...decision, nativePdf: baseStats() });
     expect(warn).not.toHaveBeenCalled();
-    expect(log.mock.calls[0]![0]).toMatch(/extractor=kreuzberg .*nativePdf=loaded@0\.13\.0\+abc mode=shadow shadow=ran/);
+    expect(log.mock.calls[0]![0]).toMatch(/extractor=kreuzberg .*nativePdf=loaded@0\.13\.0\+abc mode=shadow nativeExtraction=not-planned shadow=ran/);
   });
 
   it("warns when native-pdf was expected but neither served nor shadowed the document", () => {
@@ -139,5 +140,53 @@ describe("untrusted error text", () => {
       documentId: "doc-1", format: "pdf", extractor: "kreuzberg", strategy: "kreuzberg-solo",
       extractorOrder: [], attempted: [], unavailable: [], nativePdf: baseStats(),
     })).not.toThrow();
+  });
+});
+
+describe("engine requirement with the poppler subset", () => {
+  it("a mode alone accepts the explicit poppler subset", async () => {
+    setNativePdfEngineForTesting("binding not found");
+    await expect(assertNativePdfEngineAtStartup({ DOCSLURP_PDF_ENGINE: "shadow", DOCSLURP_NATIVE_PDF_POPPLER: "1" })).resolves.toMatchObject({ ok: false });
+  });
+
+  it("an image that claims to ship the binding still fails without it", async () => {
+    setNativePdfEngineForTesting("binding not found");
+    await expect(assertNativePdfEngineAtStartup({ DOCSLURP_NATIVE_PDF_INSTALLED: "true", DOCSLURP_NATIVE_PDF_POPPLER: "1" })).rejects.toThrow(/required/);
+  });
+
+  it("reports the poppler subset as degraded, not missing", async () => {
+    const { nativePdfEngineState } = await import("./loader.js");
+    setNativePdfEngineForTesting("binding not found");
+    await expect(nativePdfEngineState({ DOCSLURP_NATIVE_PDF_POPPLER: "1" })).resolves.toMatchObject({ status: "degraded", source: "poppler" });
+    await expect(nativePdfEngineState({})).resolves.toMatchObject({ status: "unavailable", reason: "binding not found" });
+  });
+});
+
+describe("native-pdf participation", () => {
+  const decision = {
+    documentId: "doc-2", format: "pdf", extractor: "kreuzberg", strategy: "kreuzberg-solo",
+    extractorOrder: ["native-pdf", "kreuzberg"], attempted: ["native-pdf", "kreuzberg"], unavailable: [],
+  };
+
+  it("does not warn when native-pdf ran as a candidate and lost the vote", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    vi.spyOn(console, "log").mockImplementation(() => undefined);
+    reportExtractionDecision({ ...decision, nativePdf: baseStats({ mode: "native-pdf", extraction: { status: "lost-vote", code: null, reason: null }, shadow: { status: "not-applicable", reason: null, agreement: null, nativeMs: null } }) });
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  it("warns with the failure code when native-pdf was primary and failed", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    reportExtractionDecision({ ...decision, nativePdf: baseStats({ mode: "native-pdf", extraction: { status: "failed", code: "NATIVE_PDF_LIMIT", reason: "total_decompressed_size" }, shadow: { status: "not-applicable", reason: null, agreement: null, nativeMs: null } }) });
+    expect(String(warn.mock.calls[0]![0])).toMatch(/nativeExtraction=failed\(NATIVE_PDF_LIMIT\)/);
+  });
+
+  it("names the run and document on every report inside a document context", async () => {
+    const { runWithPerfContext } = await import("../lib/perf-context.js");
+    const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    await runWithPerfContext({ runId: "run-9", documentId: "doc-9", scope: "document", stageName: "extract-markdown", pushPerformance: () => undefined }, async () => {
+      logNativePdfFallback("parser-payload", new NativePdfError("NATIVE_PDF_EMPTY", "no text"));
+    });
+    expect(String(log.mock.calls.at(-1)![0])).toMatch(/^\[native-pdf\] run=run-9 document=doc-9 stage=extract-markdown parser-payload fell back/);
   });
 });

@@ -1,4 +1,3 @@
-import { reportNativePdfFallback } from "./telemetry.js";
 /**
  * Engine-neutral contract for the `native-pdf` document extractor.
  *
@@ -12,6 +11,8 @@ import { reportNativePdfFallback } from "./telemetry.js";
  * `NATIVE_PDF_UNSUPPORTED`; callers treat that as "fall back", never as a hard
  * failure. Coordinates are PDF points with a top-left origin.
  */
+
+import { reportNativePdfFallback } from "./telemetry.js";
 
 export type Bbox = [number, number, number, number];
 export type TableStrategy = "lines" | "text" | "none";

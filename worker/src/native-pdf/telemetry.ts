@@ -1,5 +1,6 @@
 import { emitTelemetryLog, setActiveSpanAttributes } from "@docslurp/shared/observability";
 
+import { currentPerfContext } from "../lib/perf-context.js";
 import type { PerformanceEvent } from "../models.js";
 import type { NativePdfMode } from "./mode.js";
 
@@ -31,7 +32,15 @@ function definedAttributes(attributes: Record<string, AttributeValue | null | un
 /** Telemetry never changes a document's or the process's outcome. */
 function report(severity: Severity, eventName: string, line: string, attributes: Record<string, AttributeValue | null | undefined>): void {
   try {
-    const safeLine = oneLine(line);
+    // Correlate with the run and document being processed, so a fallback can be joined to the file that caused it
+    // even though documents run concurrently.
+    const perf = currentPerfContext();
+    const scoped = perf ? `run=${perf.runId}${perf.documentId ? ` document=${perf.documentId}` : ""} stage=${perf.stageName} ` : "";
+    const safeLine = oneLine(scoped && !line.includes(`document=${perf?.documentId}`) ? line.replace(/^(\[[^\]]+\] )/, `$1${scoped}`) : line);
+    attributes = {
+      ...(perf ? { "docslurp.runId": perf.runId, "docslurp.documentId": perf.documentId, "docslurp.stageName": perf.stageName } : {}),
+      ...attributes,
+    };
     (severity === "error" ? console.error : severity === "warn" ? console.warn : console.log)(safeLine);
     emitTelemetryLog({ severityText: severity, eventName, body: safeLine.slice(0, 1000), attributes: definedAttributes(attributes) });
   } catch {
@@ -93,12 +102,17 @@ export function reportNativePdfFallback(args: {
 export type NativePdfShadowStatus = "ran" | "failed" | "skipped" | "not-applicable";
 
 /** Native-pdf participation for one document, persisted in the extract-markdown stage stats. */
+export type NativePdfExtractionStatus = "served" | "failed" | "lost-vote" | "unavailable" | "not-planned";
+
 export interface NativePdfStageStats {
   mode: NativePdfMode;
-  engine: "loaded" | "unavailable";
+  /** `degraded`: the binding is missing and DOCSLURP_NATIVE_PDF_POPPLER serves the poppler text subset instead. */
+  engine: "loaded" | "degraded" | "unavailable";
   engineSource: string | null;
   engineVersion: string | null;
   engineUnavailableReason: string | null;
+  /** native-pdf as an extraction candidate (primary or voting), across every retry attempt of the stage. */
+  extraction: { status: NativePdfExtractionStatus; code: string | null; reason: string | null };
   shadow: { status: NativePdfShadowStatus; reason: string | null; agreement: number | null; nativeMs: number | null };
   parserPayload: { status: "native" | "none"; reason: string | null };
 }
@@ -142,7 +156,8 @@ export function reportExtractionDecision(decision: ExtractionDecision): void {
 function reportExtractionDecisionUnsafe(decision: ExtractionDecision): void {
   const native = decision.nativePdf;
   // Native-pdf was expected (engine on, PDF) but did not serve or shadow the document: say so loudly.
-  const nativeMissed = native !== null && native.mode !== "off" && decision.extractor !== "native-pdf" && native.shadow.status !== "ran";
+  const nativeMissed = native !== null && native.mode !== "off" && native.shadow.status !== "ran"
+    && native.extraction.status !== "served" && native.extraction.status !== "lost-vote";
   const attributes: Record<string, AttributeValue | null | undefined> = {
     "docslurp.extraction.document_id": decision.documentId,
     "docslurp.extraction.format": decision.format,
@@ -155,6 +170,9 @@ function reportExtractionDecisionUnsafe(decision: ExtractionDecision): void {
     "docslurp.native_pdf.status": native?.engine,
     "docslurp.native_pdf.version": native?.engineVersion,
     "docslurp.native_pdf.unavailable_reason": native?.engineUnavailableReason,
+    "docslurp.native_pdf.extraction": native?.extraction.status,
+    "docslurp.native_pdf.extraction_code": native?.extraction.code,
+    "docslurp.native_pdf.extraction_reason": native?.extraction.reason,
     "docslurp.native_pdf.shadow": native?.shadow.status,
     "docslurp.native_pdf.shadow_reason": native?.shadow.reason,
     "docslurp.native_pdf.shadow_agreement": native?.shadow.agreement,
@@ -164,7 +182,8 @@ function reportExtractionDecisionUnsafe(decision: ExtractionDecision): void {
   const clean = definedAttributes(attributes);
   setActiveSpanAttributes(clean);
   const nativePart = native
-    ? ` nativePdf=${native.engine}${native.engineVersion ? `@${native.engineVersion}` : ""} mode=${native.mode} shadow=${native.shadow.status}` +
+    ? ` nativePdf=${native.engine}${native.engineVersion ? `@${native.engineVersion}` : ""} mode=${native.mode} ` +
+      `nativeExtraction=${native.extraction.status}${native.extraction.code ? `(${native.extraction.code})` : ""} shadow=${native.shadow.status}` +
       `${native.shadow.reason ? `(${native.shadow.reason})` : ""} parserPayload=${native.parserPayload.status}`
     : "";
   report(nativeMissed ? "warn" : "info", "docslurp.extraction.decision",

@@ -10,6 +10,7 @@ import type { ArtifactStore } from "../tools/storage.js";
 import { cleanupTempFile } from "../tools/storage.js";
 import { trustedTempDownloadPattern } from "../lib/temp-file-names.js";
 import { loadNativePdfEngine } from "../native-pdf/loader.js";
+import { logNativePdfFallback, NativePdfError } from "../native-pdf/types.js";
 import { renderClipNative, renderPagesNative } from "../native-pdf/render.js";
 import type { Bbox, NativePdfEngine } from "../native-pdf/types.js";
 import { boundedRasterDpi, boundedRasterEdge } from "../lib/raster-bounds.js";
@@ -34,6 +35,8 @@ export interface RasterCacheOptions {
   /** Max parallel native renders (one document handle per lane). */
   concurrency?: number;
 }
+
+let rasterEngineUnavailableReported = false;
 
 const defaultLoadEngine = async (): Promise<NativePdfEngine | null> => {
   const loaded = await loadNativePdfEngine();
@@ -166,8 +169,19 @@ export class PdfRasterCache {
 
   private async resolveEngine(): Promise<{ name: RasterEngineName; engine: NativePdfEngine | null }> {
     if (this.requestedEngine !== "native-pdf") return { name: "pdftoppm", engine: null };
-    const engine = await (this.options.loadEngine ?? defaultLoadEngine)().catch(() => null);
-    return engine ? { name: "native-pdf", engine } : { name: "pdftoppm", engine: null };
+    const engine = await (this.options.loadEngine ?? defaultLoadEngine)().catch((error: unknown) => {
+      logNativePdfFallback("raster-engine", error, "pdftoppm");
+      return null;
+    });
+    if (!engine) {
+      // Once per process: the requested engine is a process setting, so repeating it per page adds nothing.
+      if (!rasterEngineUnavailableReported) {
+        rasterEngineUnavailableReported = true;
+        logNativePdfFallback("raster-engine", new NativePdfError("NATIVE_PDF_UNAVAILABLE", "PDF_RASTER_ENGINE=native-pdf but the engine is unavailable"), "pdftoppm");
+      }
+      return { name: "pdftoppm", engine: null };
+    }
+    return { name: "native-pdf", engine };
   }
 
   /**
@@ -196,7 +210,9 @@ export class PdfRasterCache {
         signal: args.signal,
       });
       return { bytes: clip.bytes, widthPx: clip.widthPx, heightPx: clip.heightPx, mimeType: clip.mimeType, engine: name, dpi };
-    } catch {
+    } catch (error) {
+      if (args.signal?.aborted) throw error;
+      logNativePdfFallback(`raster-clip page=${args.pageNumber}`, error, "full-page render and crop");
       return null;
     }
   }
@@ -263,7 +279,7 @@ export class PdfRasterCache {
           }
         } catch (error) {
           if (args.signal?.aborted) throw error;
-          console.warn(`[raster] native-pdf render failed, falling back to pdftoppm: ${error instanceof Error ? error.message : String(error)}`);
+          logNativePdfFallback("raster-render", error, "pdftoppm");
         }
       }
       if (isPdf && !nativeDone && resolved.engine) {

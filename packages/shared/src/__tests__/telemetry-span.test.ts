@@ -48,3 +48,15 @@ it("copies only allowlisted eval.* baggage, capped at 128 characters, and expose
   expect(seen.baggage).toEqual({ "eval.run_id": "run-1", "eval.case_id": "x".repeat(128) });
   expect(seen.traceparent).toMatch(/^00-0af7651916cd43dd8448eb211c80319c-[0-9a-f]{16}-01$/);
 });
+
+it("tags the active observation span, keeping raw error text for operators", async () => {
+  const { setActiveSpanAttributes } = await import("../observability.js");
+  const raw = "PDF_ERROR bad xref\nat offset 1234";
+  await withObservation({ name: "worker.document.extract-markdown", metadata: { documentId: "doc-1" } }, async () => {
+    setActiveSpanAttributes({ "docslurp.extraction.extractor": "kreuzberg", "docslurp.native_pdf.reason": raw, "x.api_key": "secret" });
+  });
+  const span = exporter.getFinishedSpans().find(item => item.name === "worker.document.extract-markdown")!;
+  expect(span.attributes["docslurp.extraction.extractor"]).toBe("kreuzberg");
+  expect(span.attributes["docslurp.native_pdf.reason"]).toBe(raw);
+  expect(span.attributes["x.api_key"]).toBeUndefined();
+});

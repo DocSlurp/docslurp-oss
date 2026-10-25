@@ -23,6 +23,7 @@ import { cleanupTempFile, keyFromStorageUri, readJsonFile, type ArtifactStore } 
 import { trustedTempDownloadPattern } from "../../lib/temp-file-names.js";
 import { extractNativePdfDocument } from "../../native-pdf/extract.js";
 import { loadNativePdfEngine } from "../../native-pdf/loader.js";
+import { logNativePdfFallback } from "../../native-pdf/types.js";
 import type { NativePdfDocument } from "../../native-pdf/types.js";
 import { readRoutingFlags } from "../flags.js";
 import { visionConfigForModel } from "../routed-vision.js";
@@ -129,7 +130,10 @@ export function createProductionExecutorDeps(input: ProductionExecutorDepsInput)
       const loaded = await loadNativePdfEngine();
       if (!loaded.ok) return null;
       return await loaded.engine.openPath(await input.rasters.sourcePath(input.document));
-    })().catch(() => null);
+    })().catch((error: unknown) => {
+      logNativePdfFallback("router-open", error, "non-native page text");
+      return null;
+    });
     return nativePdfDoc;
   };
 
@@ -141,7 +145,10 @@ export function createProductionExecutorDeps(input: ProductionExecutorDepsInput)
       if (!doc || !loaded.ok) return null;
       const extraction = await extractNativePdfDocument(doc, loaded.engine.id, { signal });
       return extraction.pages.map((page) => page.markdown);
-    })().catch(() => null);
+    })().catch((error: unknown) => {
+      logNativePdfFallback("router-native-markdown", error, "non-native page text");
+      return null;
+    });
     return nativePdfMarkdownPages;
   };
 
@@ -159,7 +166,8 @@ export function createProductionExecutorDeps(input: ProductionExecutorDepsInput)
         if (!doc) return null;
         try {
           return await doc.page(pageNumber - 1).text();
-        } catch {
+        } catch (error) {
+          logNativePdfFallback(`router-native-text page=${pageNumber}`, error, "non-native page text");
           return null;
         }
       }

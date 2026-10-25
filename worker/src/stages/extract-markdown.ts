@@ -73,6 +73,7 @@ import { nativePdfEmphasisEnabled, resolveNativePdfMode } from "../native-pdf/mo
 import { runNativePdfShadow } from "../native-pdf/shadow.js";
 import { nativePdfEngineState } from "../native-pdf/loader.js";
 import { logNativePdfFallback } from "../native-pdf/types.js";
+import { isDocumentLevelFailure } from "../lib/document-failure.js";
 import { reportExtractionDecision, summarizeNativePdfShadow, type NativePdfStageStats } from "../native-pdf/telemetry.js";
 import { documentExtractorRegistry, serializeExtractorOptions, type CandidateExecutors, type ExtractedCandidate, type PreparedExtractor } from "../extractors/registry.js";
 import { ExtractorAttemptLedger } from "../extractors/attempt-ledger.js";
@@ -208,6 +209,8 @@ export class ExtractMarkdownStage implements Stage {
         );
 
         const attemptLedger = new ExtractorAttemptLedger();
+        // native-pdf as an extraction candidate, kept across the stage's retry attempts.
+        let nativeExtraction: NativePdfStageStats["extraction"] = { status: "not-planned", code: null, reason: null };
         let lastUsableResult: DocumentStageResult | null = null;
 
         // Page facts for the ingest report run beside extraction (poppler, no pixels) and never fail it.
@@ -262,9 +265,19 @@ export class ExtractMarkdownStage implements Stage {
                   console.log(
                     `[extract-debug] document=${document.id} deduplicated=true existingUri=${existingUri}`,
                   );
+                  reportExtractionDecision({
+                    documentId: document.id,
+                    format,
+                    extractor: "dedup",
+                    strategy: "deduplicated",
+                    extractorOrder: this.tryResolveExtractorOrder(format, extractionConfig.order),
+                    attempted: [],
+                    unavailable: [],
+                    nativePdf: null,
+                  });
                   return {
                     artifactUri: existingUri,
-                    stats: { deduplicated: true },
+                    stats: { deduplicated: true, extractor: "dedup" },
                   };
                 }
 
@@ -314,6 +327,19 @@ export class ExtractMarkdownStage implements Stage {
                   signal,
                 });
 
+                for (const [planned, result] of [
+                  [plannedExtractors.primary, resultA],
+                  [plannedExtractors.secondary, resultB],
+                ] as const) {
+                  if (planned?.label !== "native-pdf" || !result) continue;
+                  if (result.status === "fulfilled") {
+                    nativeExtraction = { status: "lost-vote", code: null, reason: null };
+                  } else {
+                    const reason = result.reason instanceof Error ? result.reason.message : String(result.reason);
+                    const code = (result.reason as { code?: unknown } | null)?.code;
+                    nativeExtraction = { status: "failed", code: typeof code === "string" ? code : null, reason: reason.slice(0, 4000) };
+                  }
+                }
                 let candidateA =
                   resultA.status === "fulfilled" ? resultA.value : null;
                 const candidateB =
@@ -490,12 +516,21 @@ export class ExtractMarkdownStage implements Stage {
                     ? {
                         mode: nativePdfMode,
                         engine: nativeEngineState.status,
-                        engineSource: nativeEngineState.status === "loaded" ? nativeEngineState.source : null,
-                        engineVersion: nativeEngineState.status === "loaded" ? nativeEngineState.version : null,
-                        engineUnavailableReason: nativeEngineState.status === "unavailable" ? nativeEngineState.reason.slice(0, 4000) : null,
+                        engineSource: nativeEngineState.status === "unavailable" ? null : nativeEngineState.source,
+                        engineVersion: nativeEngineState.status === "unavailable" ? null : nativeEngineState.version,
+                        engineUnavailableReason: nativeEngineState.status === "loaded" ? null : nativeEngineState.reason.slice(0, 4000),
+                        extraction: winningCandidate.label === "native-pdf"
+                          ? { status: "served", code: null, reason: null }
+                          : nativeExtraction.status === "not-planned" && attemptLedger.snapshot().unavailable.includes("native-pdf")
+                            ? { status: "unavailable", code: null, reason: "native-pdf planned but unavailable" }
+                            : nativeExtraction,
                         shadow: {
                           status: "not-applicable",
-                          reason: winningCandidate.label === "native-pdf" ? "native-pdf served the document" : nativePdfMode === "off" ? "DOCSLURP_PDF_ENGINE=off" : null,
+                          reason: winningCandidate.label === "native-pdf"
+                            ? "native-pdf served the document"
+                            : nativePdfMode === "off"
+                              ? "DOCSLURP_PDF_ENGINE=off (extraction role only; the parser payload can still use the engine)"
+                              : null,
                           agreement: null,
                           nativeMs: null,
                         },
@@ -924,6 +959,32 @@ export class ExtractMarkdownStage implements Stage {
                     `partialStats=${JSON.stringify(partialStats)}`,
                 );
                 // Rethrow interruptions untouched so they keep their AbortError/cancellation identity.
+                if (!partialArtifactUri && !signal?.aborted && isDocumentLevelFailure(error, signal)) {
+                  // Every extractor failed: keep what was planned and tried, and say so in telemetry.
+                  const attempts = attemptLedger.snapshot();
+                  reportExtractionDecision({
+                    documentId: document.id,
+                    format,
+                    extractor: "none",
+                    strategy: "failed",
+                    extractorOrder: this.tryResolveExtractorOrder(format, extractionConfig.order),
+                    attempted: attempts.attempted,
+                    unavailable: attempts.unavailable,
+                    nativePdf: null,
+                  });
+                  const stageError = new DocumentStageError(message, {
+                    stats: {
+                      failedAt: "extract-markdown",
+                      error: message,
+                      extractor: "none",
+                      extractorOrder: this.tryResolveExtractorOrder(format, extractionConfig.order),
+                      extractorAttempts: attempts,
+                      nativePdfExtraction: format === "pdf" ? nativeExtraction : null,
+                    },
+                  });
+                  (stageError as Error & { cause?: unknown }).cause = error;
+                  throw stageError;
+                }
                 if (partialArtifactUri && !signal?.aborted) {
                   throw new DocumentStageError(message, {
                     artifactUri: partialArtifactUri,
@@ -1700,6 +1761,7 @@ export class ExtractMarkdownStage implements Stage {
   > {
     const isPdf = this.isPdfDocument(document);
     if (!isPdf) {
+      if (options.nativePayloadOutcome) options.nativePayloadOutcome.reason = "filename and MIME type are not PDF";
       return [];
     }
 
