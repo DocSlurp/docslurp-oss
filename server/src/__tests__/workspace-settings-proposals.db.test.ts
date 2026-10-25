@@ -202,3 +202,45 @@ it.skipIf(!process.env.SETTINGS_LOCK_TEST_DATABASE_URL)("blocks an initial compa
   expect(saved?.retrievalDefaults.resultCount).toBe(6);
   expect(saved?.synonyms).toEqual({ handbook: ["manual"] });
 });
+
+async function seedIndexedDocument(f: Awaited<ReturnType<typeof fixture>>) {
+  const pipeline = await saved(f.id);
+  await sql`insert into workspace_runs(id,org_id,user_id,workspace_id,kind,status,stage,pipeline,artifacts)
+    values (${f.id},${f.id},${f.userId},${f.id},'upload','completed','index',${sql.json(JSON.parse(JSON.stringify(pipeline)))},${sql.json({ [`${f.id}:markdown`]: 's3://test/source.md' })})`;
+  await sql`insert into documents(id,org_id,user_id,workspace_id,run_id,filename,mime_type,source_key,status,page_count,canonical_id)
+    values (${f.id},${f.id},${f.userId},${f.id},${f.id},'scan.pdf','application/pdf','source','completed',3,'source')`;
+  await sql`insert into vector_indexes(id,document_id,backend,bucket,path,embedding_model,dimension)
+    values (${f.id},${f.id},'lancedb','test','path','model',1024)`;
+}
+
+it("proposes the vision page-selection change the ingest report recommends, with new-upload impact and an optional reprocess", async () => {
+  const f = await fixture();
+  await seedIndexedDocument(f);
+  const before = await saved(f.id);
+  const proposal = await service.proposeWorkspaceSettings({ ...f, changes: { pipeline: { visionFallback: true, vision: { forceAllPages: true, maxPagesPerDocument: 8 } } } });
+  expect(proposal.changes).toEqual(expect.arrayContaining([
+    { key: 'pipeline.vision.forceAllPages', label: 'Read every page with vision', before: false, after: true },
+    { key: 'pipeline.vision.maxPagesPerDocument', label: 'Vision pages per file', before: before.vision.maxPagesPerDocument, after: 8 },
+  ]));
+  expect(proposal.impact.kind).toBe('reindex-recommended');
+  expect(proposal.impact.reasons.find(r => r.field === 'vision')?.effect).toMatch(/New uploads.*reprocess/);
+  expect(proposal.reprocessAvailable).toBe(true);
+  expect(proposal.reprocessRequired).toBe(false);
+  expect(proposal.estimate).not.toBeNull();
+  expect(proposal.estimate?.pages).toBeGreaterThan(0);
+  // Optional reprocessing: saving without consent changes settings only, and keeps every other vision setting.
+  await expect(service.applySettingsProposal({ ...f, token: proposal.token, reprocessExisting: false })).resolves.toMatchObject({ applied: true, reprocess: { requested: false, status: 'not-requested' } });
+  expect(await saved(f.id)).toMatchObject({ vision: { ...before.vision, forceAllPages: true, maxPagesPerDocument: 8 }, preserveCode: false, parserPlaybook: 'fast' });
+  await expect(service.proposeWorkspaceSettings({ ...f, changes: { pipeline: { vision: { maxPagesPerDocument: 33 } } } })).rejects.toBeDefined();
+});
+
+it("words the impact of answer and retrieval changes differently from pipeline changes", async () => {
+  const f = await fixture();
+  const proposal = await service.proposeWorkspaceSettings({ ...f, changes: { chat: { answerStyle: 'detailed' }, retrieval: { resultCount: 6 } } });
+  expect(proposal.impact.kind).toBe('search-only');
+  const effects = Object.fromEntries(proposal.impact.reasons.map(r => [r.field, r.effect]));
+  expect(effects['chat.answerStyle']).toMatch(/how chat answers are written.*next chat message.*no documents are reprocessed/);
+  expect(effects['retrieval.resultCount']).toMatch(/how searches rank and return passages.*next search.*no documents are reprocessed/);
+  const mixed = await service.proposeWorkspaceSettings({ ...f, changes: { pipeline: { mediaVideo: { enabled: true } }, chat: { citations: false } } });
+  expect(mixed.impact.reasons.map(r => r.field)).toEqual(expect.arrayContaining(['mediaVideo', 'chat.citations']));
+});

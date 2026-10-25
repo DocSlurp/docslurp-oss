@@ -42,16 +42,34 @@ async function authorize(actor: RequestActor, workspaceId: string, sessionId: st
 function fingerprint(plan: WorkspaceChangePlan): string {
   return createHash("sha256").update(JSON.stringify({ impact: plan.impact, targets: reindexTargetSignature(plan.targets), estimate: plan.estimate })).digest("hex");
 }
+const PIPELINE_LABELS: Record<string, string> = {
+  "mediaVideo.enabled": "Video frame analysis",
+  "vision.forceAllPages": "Read every page with vision",
+  "vision.maxPagesPerDocument": "Vision pages per file",
+};
 function changedValues(before: PipelineFeatures, after: PipelineFeatures, patch: z.infer<typeof workspaceSettingsPipelinePatchSchema>) {
   return Object.entries(patch).flatMap(([key, value]) => {
     const old = before[key as keyof PipelineFeatures], next = after[key as keyof PipelineFeatures];
     if (value && typeof value === "object") return Object.keys(value).map(child => ({
-      key: `pipeline.${key}.${child}`, label: key === "mediaVideo" ? "Video frame analysis" : `${key}.${child}`,
+      key: `pipeline.${key}.${child}`, label: PIPELINE_LABELS[`${key}.${child}`] ?? `${key}.${child}`,
       before: (old as Record<string, unknown> | undefined)?.[child] ?? null, after: (next as Record<string, unknown>)[child],
     }));
     return [{ key: `pipeline.${key}`, label: key.replace(/([A-Z])/g, " $1"), before: old ?? null, after: next }];
   }).filter(change => JSON.stringify(change.before) !== JSON.stringify(change.after));
 }
+/** Answer and retrieval changes need different wording from pipeline changes: none of them touches stored documents. */
+export function searchSettingsReasons(changes: z.infer<typeof claimsSchema>["changes"]): Array<{ field: string; effect: string }> {
+  const chat = Object.keys(changes.chat ?? {}).map(key => ({ field: `chat.${key}`, effect: CHAT_EFFECTS[key] ?? CHAT_DEFAULT_EFFECT }));
+  const retrieval = Object.keys(changes.retrieval ?? {}).map(key => ({ field: `retrieval.${key}`, effect: RETRIEVAL_EFFECT }));
+  return [...chat, ...retrieval];
+}
+const CHAT_DEFAULT_EFFECT = "Changes how chat answers are written and cited. Applies from the next chat message; no documents are reprocessed.";
+const CHAT_EFFECTS: Record<string, string> = {
+  enabled: "Turns chat on or off for this workspace. Applies from the next chat message; no documents are reprocessed.",
+  mode: "Changes what context chat reads before answering. Applies from the next chat message; no documents are reprocessed.",
+  searchInstructions: "Changes the instructions chat follows when it searches and answers. Applies from the next chat message; no documents are reprocessed.",
+};
+const RETRIEVAL_EFFECT = "Changes how searches rank and return passages. Applies to the next search; no documents are reprocessed.";
 async function plan(actor: RequestActor, workspaceId: string, changes: z.infer<typeof claimsSchema>["changes"]) {
   // The planner versions and loads one base snapshot before merging the proposal.
   const config = await planWorkspaceChange({ workspaceId, userId: actor.userId, input: { apply: "reindex" }, pipelineOverrides: changes.pipeline });
@@ -61,7 +79,8 @@ async function plan(actor: RequestActor, workspaceId: string, changes: z.infer<t
     ...(changes.chat ? { chat: changes.chat } : {}), ...(changes.retrieval ? { retrievalDefaults: changes.retrieval } : {}),
   });
   const searchImpact = analyzeSearchSettingsChange(searchBefore, searchAfter);
-  const impact = config.impact.kind === "none" ? searchImpact : { ...config.impact, reasons: [...config.impact.reasons, ...searchImpact.reasons] };
+  const searchReasons = searchImpact.kind === "none" ? [] : searchSettingsReasons(changes);
+  const impact = config.impact.kind === "none" ? { ...searchImpact, reasons: searchReasons } : { ...config.impact, reasons: [...config.impact.reasons, ...searchReasons] };
   const digest = createHash("sha256").update(JSON.stringify({ config: fingerprint(config), searchBefore, searchAfter })).digest("hex");
   return { config, searchBefore, searchAfter, impact, digest };
 }
