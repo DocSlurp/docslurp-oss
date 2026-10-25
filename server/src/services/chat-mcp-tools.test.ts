@@ -101,12 +101,46 @@ describe("chat MCP tools", () => {
     ] });
   });
 
-  it("blocks partially failed web fetches instead of presenting the successful pages as completion", async () => {
+  it("answers from the pages a web fetch read and reports the unread ones without blocking the turn", async () => {
     const t = setup(["webFetch"], { webTools: true, userText: ["https://example.com/a https://example.com/b"] });
-    t.dispatch.mockResolvedValueOnce(Response.json({ pages: [{ url: "https://example.com/a", markdown: "Partial content" }], failed: [{ url: "https://example.com/b", reason: "timeout" }] }));
-    await expect(t.execute("webFetch", { urls: ["https://example.com/a", "https://example.com/b"] })).resolves.toMatchObject({ blocked: true, code: "partial_failure" });
-    expect(t.failure).toMatchObject({ code: "chat_tool_failed" });
-    expect(t.citations).toEqual([]);
+    t.dispatch.mockResolvedValueOnce(Response.json({ pages: [{ url: "https://example.com/a", markdown: "Partial content" }], failed: [{ url: "https://example.com/b", reason: "blocked" }] }));
+    const result = await t.execute("webFetch", { urls: ["https://example.com/a", "https://example.com/b"] });
+    expect(result).toMatchObject({ ok: true, result: { pages: [{ url: "https://example.com/a" }] },
+      unread: [{ url: "https://example.com/b", reason: expect.stringContaining("bot protection") }] });
+    expect(t.failure).toBeUndefined();
+  });
+
+  it.each([
+    ["webSearch", { query: "status" }, 502, { error: { code: "unavailable", message: "Web search failed. Try again shortly." } }, "unavailable", /may be down.*bot protection.*AI/],
+    ["webSearch", { query: "status" }, 429, { error: { code: "rate_limited", message: "Too many web tool calls." } }, "rate_limited", /try again/],
+    ["webFetch", { urls: ["https://example.com/a"] }, 400, { error: { code: "invalid_request", message: "The web fetch request was rejected." } }, "invalid_request", /rejected/],
+  ] as const)("turns a failed %s (HTTP %s) into an explained result instead of blocking", async (name, input, status, body, code, reason) => {
+    const t = setup(["search", "webSearch", "webFetch"], { webTools: true, userText: ["https://example.com/a"] });
+    t.dispatch.mockResolvedValueOnce(Response.json(body, { status }));
+    const result = await t.execute(name, input, "a") as { error: string; instruction: string };
+    expect(result).toMatchObject({ ok: false, blocked: false, code, status });
+    expect(result.error).toMatch(reason);
+    expect(result.instruction).toMatch(/plainly.*Still complete every other part/s);
+    expect(t.failure).toBeUndefined();
+    await expect(t.execute("search", { q: "next" }, "b")).resolves.toMatchObject({ ok: true });
+  });
+
+  it("explains a web fetch that read no pages with each page's reason", async () => {
+    const t = setup(["webFetch"], { webTools: true, userText: ["https://example.com/a"] });
+    t.dispatch.mockResolvedValueOnce(Response.json({ pages: [], failed: [{ url: "https://example.com/a", reason: "http_403" }] }));
+    const result = await t.execute("webFetch", { urls: ["https://example.com/a"] });
+    expect(result).toMatchObject({ ok: false, blocked: false, code: "http_403", error: expect.stringMatching(/web page.*403.*AI/),
+      failed: [{ url: "https://example.com/a", reason: expect.stringContaining("403") }] });
+    expect(t.failure).toBeUndefined();
+  });
+
+  it("does not block the turn when a web call throws or times out", async () => {
+    const t = setup(["webSearch"], { webTools: true, toolBudgetMs: () => 30 });
+    t.dispatch.mockImplementationOnce((_path, init) => new Promise((_resolve, reject) => init!.signal!.addEventListener("abort", () => reject(init!.signal!.reason))));
+    await expect(t.execute("webSearch", { query: "slow" }, "a")).resolves.toMatchObject({ ok: false, blocked: false, code: "tool_timeout" });
+    t.dispatch.mockRejectedValueOnce(new Error("socket hang up"));
+    await expect(t.execute("webSearch", { query: "broken" }, "b")).resolves.toMatchObject({ ok: false, blocked: false, code: "exception" });
+    expect(t.failure).toBeUndefined();
   });
 
   it("streams only short http(s) source URLs and still reports a partially failed fetch", async () => {
@@ -117,7 +151,7 @@ describe("chat MCP tools", () => {
     await t.execute("webFetch", { urls: ["https://example.com/a", "https://example.com/b", long] });
     const [loading, done] = t.onActivity.mock.calls.map(([event]) => event);
     expect(loading.web).toEqual({ kind: "fetch", urls: ["https://example.com/a", "https://example.com/b"], requestedCount: 3 });
-    expect(done.status).toBe("error");
+    expect(done.status).toBe("success");
     expect(done.web).toMatchObject({ failedCount: 1, credits: 0.25, results: [{ url: "https://example.com/a", domain: "example.com", title: "A" }] });
   });
 

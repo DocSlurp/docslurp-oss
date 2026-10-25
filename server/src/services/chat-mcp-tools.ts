@@ -19,6 +19,21 @@ function resultFailed(value: unknown): boolean {
     && body.results.some(item => item && typeof item === "object" && "ok" in item && resultFailed(item)));
 }
 
+/** Pages a webFetch result could not read (`failed`), or undefined when it reports none. */
+function fetchFailures(value: unknown): Array<{ url: string; reason: string }> | undefined {
+  const failed = (value as { failed?: unknown } | null)?.failed;
+  if (!Array.isArray(failed) || !failed.length) return undefined;
+  return failed.flatMap(item => {
+    const entry = item as { url?: unknown; reason?: unknown } | null;
+    return typeof entry?.url === "string" ? [{ url: entry.url, reason: typeof entry.reason === "string" ? entry.reason : "unreadable" }] : [];
+  });
+}
+
+function fetchPageCount(value: unknown): number {
+  const pages = (value as { pages?: unknown } | null)?.pages;
+  return Array.isArray(pages) ? pages.length : 0;
+}
+
 /** Tool result returned once the turn's tool-call budget is spent; `code` lets callers tell it apart. */
 export const TOOL_CALL_LIMIT_RESULT = {
   error: "Tool call limit reached. The task is blocked.",
@@ -216,6 +231,44 @@ export function nonBlockingToolFailure(code: string, toolId = "proposeWorkspaceS
   } as const;
 }
 
+/**
+ * Web reads are extras to a workspace answer: their failures go back to the
+ * model as an explanation it passes on, and the rest of the request is still
+ * answered. The exfiltration guard (`url_not_allowed`) is not one of these.
+ */
+const WEB_FAILURE_CAUSES: Record<string, string> = {
+  unavailable: "Every web provider we tried failed to reach it. The site or the web service may be down, or the site's bot protection or website filters may be blocking automated (AI) access.",
+  blocked: "The site refused automated access (bot protection, a login wall, a paywall or website filters that block AI tools).",
+  thin: "The page loaded without readable text (it probably needs a browser with JavaScript or a login).",
+  unreadable: "No readable content came back. The site may be down, or its bot protection or website filters may block automated (AI) access.",
+  invalid_request: "The web service rejected the request; the URL or query may be malformed or unsupported.",
+  url_blocked: "That address is not a public web URL, so it cannot be fetched.",
+  rate_limited: "Web lookups are rate limited right now; the user can try again in a minute.",
+  web_disabled: "Web tools are turned off for this workspace.",
+  privacy_mode_blocked: "This workspace's privacy mode does not allow web tools.",
+  tool_timeout: "The web lookup timed out. The site or the web service may be slow or down.",
+  tool_call_limit: "This turn has no tool calls left for a web lookup.",
+  deadline: "This turn has no time left for a web lookup.",
+};
+
+/** Plain-language cause of a web failure (an error code or a fetch `failed` reason). */
+export function webFailureCause(code: string): string {
+  if (/^http_4\d\d$/.test(code)) return `The site answered with an error (${code.slice(5)}); it may require a login or block automated (AI) access.`;
+  if (/^http_5\d\d$/.test(code)) return `The site answered with a server error (${code.slice(5)}); it may be down.`;
+  return WEB_FAILURE_CAUSES[code] ?? "The web lookup failed. The site or the web service may be down, or the site may block automated (AI) access.";
+}
+
+/** Result for a failed webSearch/webFetch: the turn continues and the model explains the gap. */
+export function webToolFailure(toolId: string, code: string, failed?: Array<{ url: string; reason: string }>) {
+  const what = toolId === "webFetch" ? "the requested web page" : "the web search";
+  return {
+    ok: false, code, blocked: false,
+    error: `Could not retrieve ${what}. ${webFailureCause(code)}`,
+    ...(failed?.length ? { failed: failed.slice(0, 10).map(item => ({ url: item.url, reason: webFailureCause(item.reason) })) } : {}),
+    instruction: "Tell the user plainly, near the start of your answer, that this part could not be completed and why, using the reason above. Do not guess or invent what the page or search would have said. Still complete every other part of the request as well as you can, from workspace evidence and other results, and say which parts are unverified. Do not repeat the same web call.",
+  } as const;
+}
+
 /** Comparable form of a URL: no fragment, no trailing slash, lowercase host. */
 function urlKey(raw: string): string | null {
   try {
@@ -386,9 +439,12 @@ export function createChatMcpTools(args: {
           "docslurp.workspaceId": args.workspaceId,
         }, { parent: args.traceParent });
         const started = Date.now();
-        const nonBlocking = (code: string) => NON_BLOCKING_TOOLS.has(definition.id)
+        const webTool = CHAT_WEB_TOOLS.has(definition.id);
+        const nonBlocking = (code: string) => NON_BLOCKING_TOOLS.has(definition.id) || webTool
           || (args.suggestions === true && SUGGESTIONS_DIAGNOSTIC_TOOLS.has(definition.id) && REFUSAL_CODES.has(code));
-        const fail = (code: string) => nonBlocking(code) ? nonBlockingToolFailure(code, definition.id) : block(definition.id, code);
+        const fail = (code: string, failed?: Array<{ url: string; reason: string }>) => webTool
+          ? webToolFailure(definition.id, code, failed)
+          : nonBlocking(code) ? nonBlockingToolFailure(code, definition.id) : block(definition.id, code);
         const detail = (fields: Omit<ChatToolCallDetail, "id" | "name" | "runtimeMs">) => {
           details.set(toolCallId, { id: toolCallId, name: definition.id, runtimeMs: Date.now() - started, ...fields });
         };
@@ -485,7 +541,9 @@ export function createChatMcpTools(args: {
           const response = await raceAbort(withSearchSignal(toolSignal, () => runInChatAgentContext(args.chatSessionId ?? null, dispatch, toolSignal)), toolSignal);
           const result: unknown = await raceAbort(response.json() as Promise<unknown>, toolSignal);
           throwIfBlocked();
-          let ok = response.ok && !resultFailed(result);
+          // A page read that returned some pages succeeded; the unread ones are reported beside them.
+          const fetchFailed = definition.id === "webFetch" && response.ok ? fetchFailures(result) : undefined;
+          let ok = response.ok && (fetchFailed ? fetchPageCount(result) > 0 : !resultFailed(result));
           let failureCode: string | undefined;
           const returned: SearchResult[] = [];
           if (ok) {
@@ -528,7 +586,10 @@ export function createChatMcpTools(args: {
           }
           span.set({ "docslurp.tool.status_code": response.status });
           span.end(ok ? undefined : `http_${response.status}`);
-          if (!ok) return { ...fail(failureCode ?? responseErrorCode(result, response.status)), status: response.status };
+          if (!ok) {
+            const code = failureCode ?? (fetchFailed?.length ? fetchFailed[0]!.reason : responseErrorCode(result, response.status));
+            return { ...fail(code, fetchFailed), status: response.status };
+          }
           // Another concurrent tool may have failed while this one was running.
           throwIfBlocked();
           // Passages reach the model once, as this call's numbered evidence. Every
@@ -539,6 +600,8 @@ export function createChatMcpTools(args: {
           const evidence = modelEvidence(returned);
           return {
             ok, status: response.status,
+            ...(fetchFailed?.length ? { unread: fetchFailed.slice(0, 10).map(item => ({ url: item.url, reason: webFailureCause(item.reason) })),
+              instruction: "Some pages could not be read. Answer from the pages that were read, and tell the user plainly which pages could not be retrieved and why." } : {}),
             ...(modelResult === undefined ? {} : { result: serialized.length <= MODEL_RESULT_MAX_CHARS ? modelResult : { truncated: true, preview: serialized.slice(0, MODEL_RESULT_MAX_CHARS) } }),
             // Local citation numbers in a nested answer must not overwrite the outer turn's numbering.
             ...(evidence.length ? { evidence } : {}),
