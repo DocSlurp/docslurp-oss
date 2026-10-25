@@ -2,7 +2,8 @@ import { z } from "zod";
 
 import { FIXED_OVERHEAD_SECONDS, estimateIngest, isBillingEnforced, type PipelineProfileId } from "./billing.js";
 import { sha256Hex } from "./hash.js";
-import { embeddingModelCatalogByUri, embeddingProfileCatalog } from "./embedding.js";
+import { embeddingModelBaseUri,
+  embeddingModelCatalogByUri, embeddingProfileCatalog } from "./embedding.js";
 import { costEstimateSchema, type CostEstimate } from "./jobs.js";
 import {
   affectedStages,
@@ -53,7 +54,7 @@ export function indexConfigOf(features: PipelineFeatures): IndexConfig {
   const modelUri = embedding.modelUri ?? embeddingProfileCatalog[embedding.profile].config.modelUri;
   return {
     embeddingModel: modelUri,
-    dims: embedding.dimensions ?? embeddingModelCatalogByUri[modelUri]?.dimensions ?? null,
+    dims: embedding.dimensions ?? embeddingModelCatalogByUri[embeddingModelBaseUri(modelUri)]?.dimensions ?? null,
     chunking: {
       chunkOverlap: features.chunkOverlap,
       contextualChunkPreambles: features.contextualChunkPreambles,

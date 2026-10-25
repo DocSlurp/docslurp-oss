@@ -38,6 +38,8 @@ export interface ThreadEmbeddingRequest {
   /** Empty: only load the model (reports dtype and cacheHit). */
   texts: string[];
   normalize: boolean;
+  /** Token pooling for the route (`?pooling=`); mean when absent. */
+  pooling?: "mean" | "cls";
 }
 
 export interface ThreadEmbeddingResult {
@@ -120,7 +122,7 @@ parentPort.on("message", async (message) => {
       return;
     }
     const runStartedAt = Date.now();
-    const output = await pipeline(message.texts, { pooling: "mean", normalize: message.normalize });
+    const output = await pipeline(message.texts, { pooling: message.pooling ?? "mean", normalize: message.normalize });
     const runMs = Date.now() - runStartedAt;
     const data = output.data instanceof Float32Array ? output.data : Float32Array.from(output.data ?? []);
     const copy = data.byteOffset === 0 && data.byteLength === data.buffer.byteLength ? data : data.slice();

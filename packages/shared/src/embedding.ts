@@ -315,6 +315,50 @@ const embeddingModelEntries = [
   ["llm://transformers.js/Xenova/all-mpnet-base-v2", "MPNet Base v2", "local", "local", "transformers.js", "Xenova/all-mpnet-base-v2", 768, 16, false, ["local", "quality"]],
 ] as const;
 
+/**
+ * How token vectors become one embedding. `mean` averages them (the
+ * historical default for every local model); `cls` takes the first token, which
+ * is how BGE models (bge-m3, bge-*-en-v1.5) are trained and what hosted bge-m3
+ * returns. Local routes choose with `?pooling=`; hosted routes return their
+ * provider's pooling and accept only that value.
+ */
+export const embeddingPoolingSchema = z.enum(["mean", "cls"]);
+export type EmbeddingPooling = z.infer<typeof embeddingPoolingSchema>;
+
+/** Pooling hosted providers apply (they ignore any pooling option): DeepInfra serves bge-m3 CLS-pooled. */
+const HOSTED_EMBEDDING_POOLING: Record<string, EmbeddingPooling> = {
+  "llm://deepinfra/BAAI/bge-m3": "cls",
+};
+
+/** The catalog key of an embedding route: the URI without its query (`?pooling=cls`). */
+export function embeddingModelBaseUri(modelUri: string): string {
+  const query = modelUri.indexOf("?");
+  return query === -1 ? modelUri : modelUri.slice(0, query);
+}
+
+/** Pooling a local route runs with: `?pooling=` when given, else mean (the vectors existing indexes hold). */
+export function localEmbeddingPooling(modelUri: string): EmbeddingPooling {
+  const query = modelUri.indexOf("?");
+  const value = query === -1 ? null : new URLSearchParams(modelUri.slice(query + 1)).get("pooling");
+  return value === "cls" ? "cls" : "mean";
+}
+
+/** Why a route's `?pooling=` cannot be honoured, or null. */
+export function embeddingPoolingProblem(modelUri: string): string | null {
+  const query = modelUri.indexOf("?");
+  if (query === -1) return null;
+  const value = new URLSearchParams(modelUri.slice(query + 1)).get("pooling");
+  if (value === null) return null;
+  if (!embeddingPoolingSchema.safeParse(value).success) return `Unknown pooling "${value}": use mean or cls`;
+  const base = embeddingModelBaseUri(modelUri);
+  const provider = base.slice("llm://".length).split("/")[0]?.toLowerCase() ?? "";
+  if (isLocalModelProvider(provider)) return null;
+  const native = HOSTED_EMBEDDING_POOLING[base];
+  if (!native) return `${base} returns its provider's pooling; remove ?pooling=`;
+  if (native !== value) return `${base} is ${native}-pooled by the provider; ?pooling=${value} cannot be honoured`;
+  return null;
+}
+
 export const embeddingModelCatalogByUri = Object.fromEntries(
   embeddingModelEntries.map(([
     uri,
@@ -345,7 +389,7 @@ export const embeddingModelCatalogByUri = Object.fromEntries(
 const reducedDimensionLocalProviders = new Set(["vllm", "ollama", "lmstudio", "transformers.js"]);
 
 export function supportsReducedEmbeddingDimensions(modelUri: string): boolean {
-  const known = embeddingModelCatalogByUri[modelUri];
+  const known = embeddingModelCatalogByUri[embeddingModelBaseUri(modelUri)];
   if (known) {
     return (known.provider === "openai" && known.supportsCustomDimensions) || known.runtime === "local";
   }
@@ -412,7 +456,7 @@ export function resolveEmbeddingRoute(config: EmbeddingConfig) {
       baseUrl: lookup.ok ? lookup.route.baseUrl : null,
     };
   }
-  const known = embeddingModelCatalogByUri[config.modelUri];
+  const known = embeddingModelCatalogByUri[embeddingModelBaseUri(config.modelUri)];
   const openAiCompatibleLocal = ["ollama", "vllm", "lmstudio"].includes(parsed.provider);
   const defaultBaseUrl =
     parsed.provider === "ollama" ? "http://127.0.0.1:11434/v1" :
@@ -1016,11 +1060,13 @@ export const embeddingConfigSchema = z
     const defaults = embeddingProfileCatalog[value.profile].config;
     const modelUri = value.modelUri ?? defaults.modelUri;
     if (!llmModelUriSchema.safeParse(modelUri).success) return;
+    const poolingProblem = embeddingPoolingProblem(modelUri);
+    if (poolingProblem) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["modelUri"], message: poolingProblem });
     if (parseLlmModelUri(modelUri).provider === "openrouter" && parseLlmModelUri(modelUri).params.has("baseUrl")) {
       ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["modelUri"], message: "OpenRouter embedding routes use the fixed official endpoint" });
     }
     if (value.dimensions !== undefined) {
-      const model = embeddingModelCatalogByUri[modelUri];
+      const model = embeddingModelCatalogByUri[embeddingModelBaseUri(modelUri)];
       if (!supportsReducedEmbeddingDimensions(modelUri) || (model && value.dimensions > model.dimensions)) {
         ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["dimensions"], message: "Custom dimensions require a supported OpenAI embedding model, a local transformers.js model, or a local OpenAI-compatible server (vLLM, Ollama, LM Studio), and cannot exceed the model's native dimensions" });
       }

@@ -1,4 +1,5 @@
 import {
+  embeddingModelBaseUri,
   embeddingModelCatalogByUri,
   indexConfigHash,
   indexConfigOf,
@@ -55,7 +56,7 @@ export function parseIndexConfigs(value: unknown): IndexConfigMap {
 
 /** The embedding config that reproduces a stored index config's query vectors. */
 export function embeddingConfigFor(current: EmbeddingConfig, config: IndexConfig): EmbeddingConfig {
-  const native = embeddingModelCatalogByUri[config.embeddingModel]?.dimensions ?? null;
+  const native = embeddingModelCatalogByUri[embeddingModelBaseUri(config.embeddingModel)]?.dimensions ?? null;
   return {
     ...current,
     modelUri: config.embeddingModel,
