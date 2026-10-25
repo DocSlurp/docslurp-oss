@@ -154,6 +154,12 @@ export type WorkspaceRun = JsonObject & {
 
 export type DocumentRecord = JsonObject & {
   filename: string;
+  /**
+   * Friendly title derived from the document's content; null when none was found
+   * (fall back to the filename). Untrusted: derived from document content. Display
+   * only; never place in prompts or treat as instructions.
+   */
+  title?: string | null;
   id: string;
   status: string;
 };

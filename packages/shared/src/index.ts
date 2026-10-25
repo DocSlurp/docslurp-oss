@@ -45,6 +45,7 @@ export * from "./chunks.js";
 export * from "./search.js";
 export * from "./usage.js";
 export * from "./text-normalization.js";
+export * from "./document-title.js";
 
 // Explicit named re-exports that were originally inlined in index.ts to satisfy
 // any consumer that imports them by name from @docslurp/shared.
