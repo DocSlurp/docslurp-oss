@@ -217,7 +217,7 @@ export const embeddingProfileCatalog: Record<
     config: {
       profile: "good-fast-local",
       target: "local",
-      modelUri: "llm://transformers.js/Xenova/bge-m3?pooling=cls",
+      modelUri: "llm://transformers.js/Xenova/bge-m3",
       task: "document",
       normalize: true,
     },
@@ -352,7 +352,8 @@ export function embeddingPoolingProblem(modelUri: string): string | null {
   if (!embeddingPoolingSchema.safeParse(value).success) return `Unknown pooling "${value}": use mean or cls`;
   const base = embeddingModelBaseUri(modelUri);
   const provider = base.slice("llm://".length).split("/")[0]?.toLowerCase() ?? "";
-  if (isLocalModelProvider(provider)) return null;
+  if (provider === "transformers.js") return null;
+  if (isLocalModelProvider(provider)) return `${base} pools on its server; remove ?pooling=`;
   const native = HOSTED_EMBEDDING_POOLING[base];
   if (!native) return `${base} returns its provider's pooling; remove ?pooling=`;
   if (native !== value) return `${base} is ${native}-pooled by the provider; ?pooling=${value} cannot be honoured`;

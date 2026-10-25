@@ -123,7 +123,8 @@ export async function pruneDrainedIndexConfigs(sql: SqlClient = defaultSql, limi
 
 function spaceKey(embedding: EmbeddingConfig): string {
   const route = resolveEmbeddingRoute(embedding);
-  return `${route.model}\u0000${route.dimensions}`;
+  // modelUri, not model: two poolings of one model embed queries differently.
+  return `${route.modelUri}\u0000${route.dimensions}`;
 }
 
 /**

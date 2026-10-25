@@ -3,7 +3,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { withObservation, aiResultDetails, instrumentFetch } from "@docslurp/shared/observability";
 import { createOpenAI } from "@ai-sdk/openai";
-import { defaultEmbeddingConfig, localEmbeddingPooling, defaultPipelineFeatures, DEEPINFRA_EMBEDDING_BASE_URL, validateDeepInfraEmbedding, fitEmbeddingDimensions, parseLlmModelUri, openRouterEmbeddingRoute, validateHostedEmbeddingVector } from "@docslurp/shared";
+import { defaultEmbeddingConfig, embeddingModelBaseUri, localEmbeddingPooling, defaultPipelineFeatures, DEEPINFRA_EMBEDDING_BASE_URL, validateDeepInfraEmbedding, fitEmbeddingDimensions, parseLlmModelUri, openRouterEmbeddingRoute, validateHostedEmbeddingVector } from "@docslurp/shared";
 import { embed, embedMany, generateText, streamText } from "ai";
 import { embedPerplexity } from "@docslurp/shared";
 
@@ -721,9 +721,9 @@ export async function warmDefaultLocalEmbedding(): Promise<string | null> {
   const prefix = "llm://transformers.js/";
   const uri = defaultPipelineFeatures.embedding.modelUri ?? "";
   if (!uri.startsWith(prefix) || process.env.LOCAL_EMBEDDING_WARMUP === "false") return null;
-  const model = uri.slice(prefix.length);
+  const model = embeddingModelBaseUri(uri).slice(prefix.length);
   const pipeline = await getLocalEmbeddingPipeline(model);
-  await pipeline("warm up", { pooling: "mean", normalize: true });
+  await pipeline("warm up", { pooling: localEmbeddingPooling(uri), normalize: true });
   return model;
 }
 

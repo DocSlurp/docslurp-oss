@@ -10,10 +10,9 @@ describe("embedding pooling routes", () => {
     expect(embeddingModelBaseUri("llm://transformers.js/Xenova/bge-m3?pooling=cls")).toBe("llm://transformers.js/Xenova/bge-m3");
   });
 
-  it("defaults the good-fast-local profile to CLS while stored plain routes keep mean", () => {
-    expect(resolveEmbeddingRoute(embeddingConfigSchema.parse({ profile: "good-fast-local" })).modelUri).toBe("llm://transformers.js/Xenova/bge-m3?pooling=cls");
-    const stored = embeddingConfigSchema.parse({ profile: "good-fast-local", modelUri: "llm://transformers.js/Xenova/bge-m3" });
-    expect(localEmbeddingPooling(resolveEmbeddingRoute(stored).modelUri)).toBe("mean");
+  it("keeps the good-fast-local profile on mean so profile-resolved configs never change vectors silently", () => {
+    expect(resolveEmbeddingRoute(embeddingConfigSchema.parse({ profile: "good-fast-local" })).modelUri).toBe("llm://transformers.js/Xenova/bge-m3");
+    expect(localEmbeddingPooling(resolveEmbeddingRoute(embeddingConfigSchema.parse({ profile: "good-fast-local" })).modelUri)).toBe("mean");
   });
 
   it("accepts only the pooling a hosted provider returns", () => {
@@ -22,6 +21,7 @@ describe("embedding pooling routes", () => {
     expect(embeddingPoolingProblem("llm://deepinfra/BAAI/bge-m3?pooling=mean")).toContain("cls-pooled by the provider");
     expect(embeddingPoolingProblem("llm://openai/text-embedding-3-small?pooling=cls")).toContain("remove ?pooling=");
     expect(embeddingPoolingProblem("llm://transformers.js/Xenova/bge-m3?pooling=max")).toContain("use mean or cls");
+    expect(embeddingPoolingProblem("llm://vllm/BAAI/bge-m3?pooling=cls")).toContain("pools on its server");
   });
 
   it("validates workspace config and keeps catalog facts for parameterized routes", () => {

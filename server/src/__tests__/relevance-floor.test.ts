@@ -97,6 +97,9 @@ describe("relevance signals", () => {
       expect(embeddingNoiseBaseline(embeddingPipelineId(route))).toBeNull();
     }
     expect(embeddingPipelineId(null)).toBeNull();
+    // The measured floor is for mean pooling; CLS cosines sit elsewhere, so CLS gets no floor until measured.
+    expect(embeddingNoiseBaseline(embeddingPipelineId({ provider: "transformers.js", model: "Xenova/bge-m3", pooling: "cls" }))).toBeNull();
+    expect(embeddingNoiseBaseline(embeddingPipelineId({ provider: "transformers.js", model: "Xenova/bge-m3", pooling: "mean" }))).toBe(0.65);
     expect(embeddingNoiseBaseline(undefined)).toBeNull();
     expect(embeddingNoiseBaseline("some-unknown-model")).toBeNull();
   });

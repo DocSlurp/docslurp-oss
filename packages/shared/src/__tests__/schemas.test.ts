@@ -339,7 +339,7 @@ describe("embeddingConfigSchema", () => {
       profile: "good-fast-local",
     }));
     expect(route).toMatchObject({
-      modelUri: "llm://transformers.js/Xenova/bge-m3?pooling=cls",
+      modelUri: "llm://transformers.js/Xenova/bge-m3",
       target: "local",
       dimensions: 1024,
       batchSize: 16,
