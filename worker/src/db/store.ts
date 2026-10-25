@@ -12,7 +12,7 @@ import { WorkerSlotStore, resolveWorkerSlotOptions, tryMaintenanceLease, type Wo
 import { randomUUID, createHmac } from "node:crypto";
 
 import postgres, { type JSONValue, type PendingQuery, type Sql } from "postgres";
-import { applyDefaultVisionOverride, defaultPipelineFeatures, PII_BLOCKED_DOCUMENT_STATUS, planRunFailure, type PrivacyAuditEntry } from "@docslurp/shared";
+import { applyDefaultVisionOverride, defaultPipelineFeatures, PII_BLOCKED_DOCUMENT_STATUS, planRunFailure, type DerivedDocumentTitle, type PrivacyAuditEntry } from "@docslurp/shared";
 
 import { mergePipelineFeatures } from "../models.js";
 import { adoptBackfillDocuments } from "../deferred/backfill-adoption.js";
@@ -2478,6 +2478,18 @@ export class Store {
             updated_at = now()
       `;
     }
+  }
+
+  async setDocumentTitleIfAbsent(documentId: string, title: DerivedDocumentTitle): Promise<boolean> {
+    const rows = await this.sql`
+      update documents
+      set metadata = coalesce(metadata, '{}'::jsonb)
+        || jsonb_build_object('title', ${title.title}::text, 'titleSource', ${title.source}::text)
+      where id = ${documentId}
+        and nullif(btrim(metadata ->> 'title'), '') is null
+      returning id
+    `;
+    return rows.length > 0;
   }
 
   async insertPages(

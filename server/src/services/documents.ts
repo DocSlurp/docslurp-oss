@@ -1,4 +1,4 @@
-import { mediaSummarySchema, publicDiagnostics, publicDocumentError, type MediaSummary } from "@docslurp/shared";
+import { cleanDocumentTitle, mediaSummarySchema, publicDiagnostics, publicDocumentError, type MediaSummary } from "@docslurp/shared";
 import path from "node:path";
 
 import {
@@ -546,6 +546,15 @@ function documentStatusReason(row: Pick<DocumentRow, "status" | "metadata">): st
   return typeof reason === "string" && reason ? reason : "Blocked from indexing by the workspace PII policy.";
 }
 
+/**
+ * The friendly title from ingestion (metadata.title), else the page map's title.
+ * Both are untrusted document content, so they are re-sanitized for display here.
+ */
+function documentTitle(row: Pick<DocumentRow, "filename" | "metadata">): string | null {
+  const options = { filename: row.filename };
+  return cleanDocumentTitle(row.metadata?.title, options) ?? cleanDocumentTitle(row.metadata?.mapTitle, options);
+}
+
 function mapDocument(row: DocumentRow): DocumentRecord {
   return documentSchema.parse({
     id: row.id,
@@ -554,6 +563,7 @@ function mapDocument(row: DocumentRow): DocumentRecord {
     workspaceId: row.workspace_id,
     runId: row.run_id,
     filename: row.filename,
+    title: documentTitle(row),
     mimeType: row.mime_type,
     sourceKey: row.source_key,
     status: row.status,

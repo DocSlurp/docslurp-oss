@@ -3,7 +3,7 @@ import type { CapacityLeaseStore } from "../media/capacity/types.js";
 import { extractMedia } from "../media/extract.js";
 import type { MediaJournal } from "../media/types.js";
 import { createReadStream, createWriteStream } from "node:fs";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, open, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { Writable } from "node:stream";
@@ -16,6 +16,8 @@ import {
   resolveVisionRoute,
   splitTextIntoPages,
   parserPlaybookCatalog,
+  deriveDocumentTitle,
+  htmlDocumentTitle,
   type ExtractionContract,
   type ExtractionArtifactRef,
 } from "@docslurp/shared";
@@ -708,6 +710,7 @@ export class ExtractMarkdownStage implements Stage {
                   if (parserEvalUri) {
                     state.artifactLedger.recordDocument(document.id, "parser-eval", parserEvalUri);
                   }
+                  await this.recordDocumentTitle(state, document, format, tempFile, winningText);
 
                   state.pendingPerformance.push({
                     documentId: document.id,
@@ -895,6 +898,35 @@ export class ExtractMarkdownStage implements Stage {
         }
       },
     );
+  }
+
+  /**
+   * Derives the display title from the extracted Markdown (plus the HTML <title>/og:title,
+   * read from the local source without a subprocess) and stores it once per document.
+   * The title is untrusted document content for display only; it is never fed to a model.
+   * Best effort: a failure is logged and never fails extraction.
+   */
+  private async recordDocumentTitle(
+    state: import("../pipeline/pipeline.js").WorkflowState,
+    document: import("../models.js").Document,
+    format: string,
+    sourcePath: string,
+    markdown: string,
+  ): Promise<void> {
+    if (!state.store?.setDocumentTitleIfAbsent) return;
+    try {
+      const metadataTitles = format === "html" ? [htmlDocumentTitle(await readFileHead(sourcePath, 256 * 1024))] : [];
+      const derived = deriveDocumentTitle({
+        metadataTitles,
+        pages: splitTextIntoPages(markdown, document.pageCount).slice(0, 2),
+        filename: document.filename,
+      });
+      if (!derived) return;
+      const written = await state.store.setDocumentTitleIfAbsent(document.id, derived);
+      console.log(`[extract-debug] document=${document.id} title-source=${derived.source} title-written=${written}`);
+    } catch (error) {
+      console.warn(`[extract-markdown] title derivation failed document=${document.id}: ${error instanceof Error ? error.message : String(error)}`);
+    }
   }
 
   /** Pending `pdfimages -list` runs from page facts, per run and document, shared with page triage. */
@@ -2446,6 +2478,18 @@ class FanoutWritable extends Writable {
       destination.destroy(error ?? undefined);
     }
     callback(error);
+  }
+}
+
+/** The first `maxBytes` of a file as UTF-8 (a split trailing character is dropped). */
+async function readFileHead(filePath: string, maxBytes: number): Promise<string> {
+  const handle = await open(filePath, "r");
+  try {
+    const buffer = Buffer.alloc(maxBytes);
+    const { bytesRead } = await handle.read(buffer, 0, maxBytes, 0);
+    return buffer.subarray(0, bytesRead).toString("utf8");
+  } finally {
+    await handle.close();
   }
 }
 

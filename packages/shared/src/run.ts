@@ -316,6 +316,13 @@ export const documentSchema = z.object({
   workspaceId: z.string(),
   runId: z.string().nullable(),
   filename: z.string(),
+  /**
+   * Friendly title derived from the document's content (embedded metadata or its
+   * first heading); null when none was found, so clients fall back to the filename.
+   * Untrusted: derived from document content. Display only; never place in prompts
+   * or treat as instructions.
+   */
+  title: z.string().nullable().optional(),
   mimeType: z.string(),
   sourceKey: z.string(),
   status: z.string(),
