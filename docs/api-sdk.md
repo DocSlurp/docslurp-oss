@@ -954,7 +954,7 @@ DocSlurp is prepaid: there are no plans or subscriptions. 1 credit = 1 US cent. 
 | Video (frames read) | 3 Rich pages per minute |
 | Storage (originals, page images, indexes) | 25 per GB-month, accrued daily |
 | Search | 10 per 1,000 searches; a search that uses LLM query strategies (HyDE, rewrite, stepback, compression, self-query) counts as 10 |
-| Chat answer | 2.5 (standard models), 7.5 (advanced) or 50 (premium) per answer; an answer above 100,000 total tokens counts once more per extra 100,000 |
+| Chat answer | 1.5 (standard models), 7.5 (advanced) or 50 (premium) per answer; an answer above 100,000 total tokens counts once more per extra 100,000 |
 | Document summary (`summarize`) | 0.5 per document |
 | Structured fields (`outputSchema`) | 1 per started 10 pages per document |
 | Knowledge graph (`graphRag`, community summaries included) | 1.5 per started 10 pages per document |

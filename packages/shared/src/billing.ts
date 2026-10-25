@@ -248,6 +248,7 @@ export const CHAT_MODEL_TIERS: Readonly<Record<string, ChatAnswerTier>> = {
   "mercury-3": "advanced",
   "lfm-2.5-24b-a2b": "standard",
   "claude-haiku-5.5": "standard",
+  "gpt-6-luna": "standard",
   "mimo-v2.6-flash": "advanced",
   "minimax-m3.1-flash:free": "standard",
   "deepseek-v4.1-flash*": "advanced",

@@ -134,6 +134,17 @@ describe("chat MCP tools", () => {
     expect(t.failure).toBeUndefined();
   });
 
+  it("returns rejected search arguments to the model to correct, then blocks after two rejections", async () => {
+    const t = setup(["search"]);
+    const rejected = () => Response.json({ error: { code: "invalid_request", message: "Invalid request", details: { issues: [{ path: ["limit"], message: "Expected number" }] } } }, { status: 400 });
+    t.dispatch.mockResolvedValueOnce(rejected()).mockResolvedValueOnce(rejected()).mockResolvedValueOnce(rejected());
+    await expect(t.execute("search", { q: "a", limit: "ten" }, "a")).resolves.toMatchObject({ ok: false, blocked: false, code: "invalid_arguments",
+      issues: [{ path: ["limit"], message: "Expected number" }], instruction: expect.stringContaining("again once") });
+    await expect(t.execute("search", { q: "a", limit: "ten" }, "b")).resolves.toMatchObject({ blocked: false, code: "invalid_arguments" });
+    await expect(t.execute("search", { q: "a", limit: "ten" }, "c")).resolves.toMatchObject({ blocked: true });
+    expect(t.failure).toMatchObject({ code: "chat_tool_failed" });
+  });
+
   it("does not block the turn when a web call throws or times out", async () => {
     const t = setup(["webSearch"], { webTools: true, toolBudgetMs: () => 30 });
     t.dispatch.mockImplementationOnce((_path, init) => new Promise((_resolve, reject) => init!.signal!.addEventListener("abort", () => reject(init!.signal!.reason))));
