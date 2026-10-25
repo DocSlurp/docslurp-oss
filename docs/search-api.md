@@ -126,7 +126,7 @@ When the search agent answers (the default for `/v1/chat` with `DOCSLURP_PUBLIC_
 
 | Field | Default | Range | Meaning |
 |---|---|---|---|
-| `maxSteps` | 8 | 1–12 | Model calls in the loop. The last one runs with tools disabled and is told to answer, so the agent always ends with an answer. When no earlier step called a tool (always with `maxSteps: 1`), that step is sent without tool definitions. Tool-call markup a model writes as text is never included in the answer. |
+| `maxSteps` | 8 | 1–12 | Model calls in the loop. Unless you set it, the agent gets 4 calls and continues past them, up to 8, only while each search adds new evidence and the turn has used under 150,000 input tokens; set `maxSteps` for a fixed budget. The last one runs with tools disabled and is told to answer, so the agent always ends with an answer. When no earlier step called a tool (always with `maxSteps: 1`), that step is sent without tool definitions. Tool-call markup a model writes as text is never included in the answer. |
 | `maxToolCalls` | 16 | 1–24 | Tool calls across the turn. Later calls get `{error, code: "tool_call_limit", limitReached: true}` instead of running. |
 | `searchConcurrency` | 6 | 1–8 | Upper bound on the search tool's parallel `queries`, and the value it uses when the model omits `concurrency`. |
 | `tools` | `true` | boolean | `false` skips the agent for a [direct answer](#direct-answers). |
@@ -169,7 +169,7 @@ Agent responses add these `debug` fields (other turns omit them):
 | `zeroHitSearchCount` | Search calls that returned no results |
 | `stepUsage` | Per step: `{step, model, finishReason, inputTokens, outputTokens, costCents?, toolCalls}` |
 | `toolCalls` | Per tool call, in order (refused calls included): `{id, name, status, runtimeMs, queries?, resultCount?, zeroHit?, evidencePages?, costCents?, errorCode?}`. `queries` are the search strings the model sent (never put on spans); `evidencePages` lists the distinct `{documentId, pageNumber}` of the evidence that call returned; `errorCode` is `tool_call_limit`, `deadline`, `tool_timeout`, `invalid_arguments`, `aborted`, `exception`, the tool's own error code or `http_<status>`. |
-| `limits` | `{maxSteps, maxToolCalls, searchConcurrency, clamped}` as applied |
+| `limits` | `{maxSteps, baseSteps, maxToolCalls, searchConcurrency, clamped}` as applied; `baseSteps` is the dynamic step budget |
 | `modes` | `{web, suggestions}` as applied. `web` is `on`, `off` (the request turned it off) or `unavailable` (policy blocked it); `suggestions` is `true` only when it was requested and the actor can use the settings tools |
 | `timeBudget` | `{turnDeadlineMs, stepTimeoutMs, toolTimeoutMs, finalReserveMs, elapsedMs, finalAnswer, stepTimeouts, toolTimeouts, toolCallsAfterDeadline}`. `finalAnswer` is `loop` (the agent answered on its own), `forced` (the final-answer reserve started, so the last step ran without tools), the historical values `from_evidence` and `partial` are no longer emitted: failures block the turn. See [Turn deadline](#turn-deadline). |
 | `stopReason` | See below |
@@ -221,7 +221,7 @@ curl -sS -X POST "$DOCSLURP_URL/v1/chat" -H "Authorization: Bearer $DOCSLURP_API
       {"step": 0, "model": "anthropic/claude-haiku-5.5", "finishReason": "tool-calls", "inputTokens": 1830, "outputTokens": 61, "costCents": 0.021, "toolCalls": ["search"]},
       {"step": 1, "model": "anthropic/claude-haiku-5.5", "finishReason": "stop", "inputTokens": 4120, "outputTokens": 92, "costCents": 0.046, "toolCalls": []}
     ],
-    "limits": {"maxSteps": 4, "maxToolCalls": 6, "searchConcurrency": 2, "clamped": []}
+    "limits": {"maxSteps": 4, "baseSteps": 4, "maxToolCalls": 6, "searchConcurrency": 2, "clamped": []}
   }
 }
 ```

@@ -4,7 +4,7 @@ import { resolveWorkspaceRef } from "./workspaces.js";
 import { chatAgentProviderOptions, createChatAgentModel } from "../lib/chat-agent-model.js";
 import { streamText, stepCountIs, wrapLanguageModel, type ModelMessage, type StopCondition, type ToolSet } from "ai";
 import { performance } from "node:perf_hooks";
-import { assertProviderAllowed, isProviderCallAllowed, CHAT_AGENT_LIMIT_DEFAULTS, createOpenRouterUsageCapture, resolveOpenRouterUsage, type ChatAgentLimits, type ChatAgentModes, type ChatAgentStepUsage, type ChatAgentStopReason, type ChatAgentTimeBudgetDebug, type PrivacyMode, type WorkspaceChatTurn } from "@docslurp/shared";
+import { assertProviderAllowed, isProviderCallAllowed, CHAT_AGENT_BASE_STEPS, CHAT_AGENT_EXTENSION_INPUT_TOKENS, CHAT_AGENT_LIMIT_DEFAULTS, createOpenRouterUsageCapture, resolveOpenRouterUsage, type ChatAgentLimits, type ChatAgentModes, type ChatAgentStepUsage, type ChatAgentStopReason, type ChatAgentTimeBudgetDebug, type PrivacyMode, type WorkspaceChatTurn } from "@docslurp/shared";
 import { evalBaggageAttributes, recordChatAgentTelemetry, startTelemetrySpan, type TelemetrySpan } from "@docslurp/shared/observability";
 import type { RequestActor } from "../lib/request-actor.js";
 import { recordUsageEvent } from "../lib/ai-usage.js";
@@ -17,7 +17,7 @@ import { ChatClientAbortError, ChatTurnDeadline, ChatTurnDeadlineError, chatTurn
 import type { SearchResult, WorkspaceSearchRetrievalDefaults } from "@docslurp/shared";
 
 const MAX_AGENT_OUTPUT_TOKENS = 4096;
-const DEFAULT_LIMITS: ChatAgentLimits = { ...CHAT_AGENT_LIMIT_DEFAULTS, clamped: [] };
+const DEFAULT_LIMITS: ChatAgentLimits = { ...CHAT_AGENT_LIMIT_DEFAULTS, baseSteps: CHAT_AGENT_BASE_STEPS, clamped: [] };
 /** OpenRouter publishes an aborted generation's receipt a moment after the stream ends. */
 const ABORTED_STEP_LOOKUP_DELAY_MS = 1_500;
 /** Rough characters per token, for the flagged estimate of an aborted step with no receipt. */
@@ -335,6 +335,10 @@ export async function runChatMcpAgent(args: {
   let lastStepTimedOut = false;
   /** Set when the time budget, not the step budget, ended tool use. */
   let deadlineForcedAt: number | undefined;
+  /** Step at which the dynamic step budget ended tool use (no new evidence, or the input-token budget was spent). */
+  let budgetForcedAt: number | undefined;
+  /** Evidence count when each step started; a tool step made progress if the next step starts with more. */
+  const evidenceAtStep: number[] = [];
   let finalAnswer: ChatAgentTimeBudgetDebug["finalAnswer"] = "loop";
 
   // Each model call gets its own budget (a child of the turn signal) and is
@@ -555,6 +559,13 @@ export async function runChatMcpAgent(args: {
   }
 
   const deadlineStop: StopCondition<ToolSet> = ({ steps }) => deadlineForcedAt !== undefined && steps.length > deadlineForcedAt;
+  const budgetStop: StopCondition<ToolSet> = ({ steps }) => budgetForcedAt !== undefined && steps.length > budgetForcedAt;
+  const baseSteps = Math.min(limits.baseSteps ?? limits.maxSteps, limits.maxSteps);
+  /** Past the base budget, another tool step is allowed only after a tool step that found new evidence, within the token budget. */
+  const mayExtend = (stepNumber: number, steps: ReadonlyArray<{ toolCalls: ReadonlyArray<unknown> }>) =>
+    (steps.at(-1)?.toolCalls.length ?? 0) > 0
+    && (evidenceAtStep[stepNumber] ?? 0) > (evidenceAtStep[stepNumber - 1] ?? 0)
+    && usage.inputTokens < CHAT_AGENT_EXTENSION_INPUT_TOKENS;
 
   let stopReason: ChatAgentStopReason = "error";
   let failure: unknown;
@@ -572,18 +583,20 @@ export async function runChatMcpAgent(args: {
         system,
         messages: conversation,
         tools: context.tools,
-        stopWhen: [stepCountIs(limits.maxSteps), deadlineStop, () => context.failure !== undefined],
+        stopWhen: [stepCountIs(limits.maxSteps), deadlineStop, budgetStop, () => context.failure !== undefined],
         // The last step must answer: tools are disabled once the step budget is
         // reached, or once the turn is inside its final-answer time reserve.
         prepareStep: ({ stepNumber, steps }) => {
           context.throwIfBlocked();
           openStepSpan(stepNumber);
+          evidenceAtStep[stepNumber] = context.citations.length;
           const lastByCount = stepNumber >= limits.maxSteps - 1;
+          if (!lastByCount && stepNumber >= baseSteps - 1 && budgetForcedAt === undefined && !mayExtend(stepNumber, steps)) budgetForcedAt = stepNumber;
           if (!lastByCount && deadline.inFinalReserve() && deadlineForcedAt === undefined) {
             deadlineForcedAt = stepNumber;
             finalAnswer = "forced";
           }
-          const final = lastByCount || deadlineForcedAt !== undefined;
+          const final = lastByCount || deadlineForcedAt !== undefined || budgetForcedAt !== undefined;
           nextStep = { number: stepNumber, final };
           if (!final) return {};
           // tool_choice "none" alone is advisory upstream: with tool definitions
@@ -663,7 +676,8 @@ export async function runChatMcpAgent(args: {
       "docslurp.chat.zero_hit_searches": context.searchCalls.filter(call => call.zeroHit).length,
       "docslurp.chat.stop_reason": telemetryStopReason, "docslurp.chat.cost_usd": usage.costCents / 100,
       "docslurp.chat.elapsed_ms": deadline.elapsedMs(), "docslurp.chat.final_answer": finalAnswer,
-      "docslurp.chat.step_timeouts": stepTimeouts, "docslurp.chat.tool_timeouts": context.counters.timedOut,
+      "docslurp.chat.step_timeouts": stepTimeouts, "docslurp.chat.base_steps": baseSteps,
+      ...(budgetForcedAt !== undefined ? { "docslurp.chat.step_budget_stop": budgetForcedAt + 1 } : {}), "docslurp.chat.tool_timeouts": context.counters.timedOut,
       "docslurp.chat.tool_markup_suppressed": markupGuard.suppressedSteps,
       ...(resolvedProvider ? { "docslurp.chat.upstream_provider": resolvedProvider } : {}),
     });

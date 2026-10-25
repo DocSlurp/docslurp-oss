@@ -282,6 +282,33 @@ describe("chat agent limits, debug and spans", () => {
     expect(result.debug).toMatchObject({ steps: 2, toolCallCount: 1, stopReason: "step_limit" });
   });
 
+  describe("dynamic step budget", () => {
+    const searching = () => scripted([{ tools: [{ id: "a", input: { q: "a" } }] }, { tools: [{ id: "b", input: { q: "b" } }] },
+      { tools: [{ id: "c", input: { q: "c" } }] }, { tools: [{ id: "d", input: { q: "d" } }] }, { tools: [{ id: "e", input: { q: "e" } }] }]);
+    const hit = (chunkIndex: number) => ({ text: `Passage ${chunkIndex}`, score: 1, citation: { filename: "a.pdf", documentId: "doc", chunkIndex, headingPath: [], pageNumber: 1 } });
+    const limits = { maxSteps: 6, baseSteps: 2, maxToolCalls: 12, searchConcurrency: 4, clamped: [] };
+
+    it("answers at the base budget when the last search found nothing new", async () => {
+      const { model, seenToolChoice } = searching();
+      mocks.provider.mockReturnValue(model);
+      mocks.dispatch.mockImplementation(async () => Response.json({ results: [hit(0)] }));
+      const result = await runChatMcpAgent({ ...args, limits });
+      expect(seenToolChoice).toEqual(["auto", "auto", "none"]);
+      expect(result.debug).toMatchObject({ steps: 3, toolCallCount: 2 });
+      expect(spans.list.find(span => span.name === "invoke_agent workspace-chat")!.attributes).toMatchObject({ "docslurp.chat.base_steps": 2, "docslurp.chat.step_budget_stop": 3 });
+    });
+
+    it("keeps searching past the base budget, up to maxSteps, while each search adds evidence", async () => {
+      const { model, seenToolChoice } = searching();
+      mocks.provider.mockReturnValue(model);
+      let calls = 0;
+      mocks.dispatch.mockImplementation(async () => Response.json({ results: [hit(calls++)] }));
+      const result = await runChatMcpAgent({ ...args, limits });
+      expect(seenToolChoice).toEqual(["auto", "auto", "auto", "auto", "auto", "none"]);
+      expect(result.debug).toMatchObject({ steps: 6, toolCallCount: 5, stopReason: "step_limit" });
+    });
+  });
+
   it("refuses tool calls over the budget with a distinguishable result and stop reason", async () => {
     const { model } = scripted([{ tools: [{ id: "a", input: { q: "a" } }, { id: "b", input: { q: "b" } }] }, { text: "Done [1]." }]);
     mocks.provider.mockReturnValue(model);
