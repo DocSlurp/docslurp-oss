@@ -2173,10 +2173,14 @@ export class Store {
         .map((reference) => reference.key),
     );
     const checkedReferences = Array.from(expectedKeySet).slice(0, maxKeys);
-    const existingKeySet = new Set<string>();
+    // The listing already answers most existence checks: S3 lists keys in binary
+    // order, so a reference missing from it is missing unless it sorts after the
+    // last key of a truncated listing. Only those still need a HEAD each (this
+    // sweep sent up to 20,000 HEADs per run before).
+    const { existing: existingKeySet, unknown: needsHead } = classifyListedReferences(checkedReferences, listedKeys);
 
-    for (let index = 0; index < checkedReferences.length; index += 25) {
-      const batch = checkedReferences.slice(index, index + 25);
+    for (let index = 0; index < needsHead.length; index += 25) {
+      const batch = needsHead.slice(index, index + 25);
       const results = await Promise.all(
         batch.map(async (key) => ({
           key,
@@ -4050,4 +4054,25 @@ function mapStageState(row: StageStateRow): StageState {
 
 function toDate(value: string | Date): Date {
   return value instanceof Date ? value : new Date(value);
+}
+
+/**
+ * Which referenced keys a bucket listing proves present, and which it cannot
+ * answer. Listings are in UTF-8 binary key order, so a key absent from a
+ * complete listing, or sorting at or before the last key of a truncated one,
+ * does not exist; only keys after a truncated listing's end are unknown.
+ */
+export function classifyListedReferences(
+  references: string[],
+  listing: { keys: string[]; truncated: boolean },
+): { existing: Set<string>; unknown: string[] } {
+  const listed = new Set(listing.keys);
+  const last = listing.keys.length > 0 ? Buffer.from(listing.keys[listing.keys.length - 1]!) : null;
+  const existing = new Set<string>();
+  const unknown: string[] = [];
+  for (const key of references) {
+    if (listed.has(key)) existing.add(key);
+    else if (listing.truncated && (!last || Buffer.compare(Buffer.from(key), last) > 0)) unknown.push(key);
+  }
+  return { existing, unknown };
 }

@@ -64,3 +64,20 @@ describe("buildStorageIntegrityReport", () => {
     ]);
   });
 });
+
+describe("classifyListedReferences", () => {
+  it("answers existence from the listing and leaves only keys past a truncated listing for HEAD", async () => {
+    const { classifyListedReferences } = await import("../db/store.js");
+    const complete = classifyListedReferences(["a/1", "a/2", "b/9"], { keys: ["a/1", "b/9", "c/0"], truncated: false });
+    expect([...complete.existing]).toEqual(["a/1", "b/9"]);
+    expect(complete.unknown).toEqual([]);
+
+    // Truncated at "m/5": "a/2" sorts before it and is missing; "z/1" is beyond and unknown.
+    const truncated = classifyListedReferences(["a/1", "a/2", "m/5", "z/1"], { keys: ["a/1", "m/5"], truncated: true });
+    expect([...truncated.existing]).toEqual(["a/1", "m/5"]);
+    expect(truncated.unknown).toEqual(["z/1"]);
+    // Binary order, not locale order: "B" (0x42) sorts before "a" (0x61).
+    expect(classifyListedReferences(["B/1"], { keys: ["a/1"], truncated: true }).unknown).toEqual([]);
+    expect(classifyListedReferences(["x"], { keys: [], truncated: true }).unknown).toEqual(["x"]);
+  });
+});

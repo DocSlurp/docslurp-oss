@@ -539,11 +539,11 @@ async function main(): Promise<void> {
       await store
         .runRetentionSweep(storage, cfg.retentionSweepBatchSize)
         .catch(() => {});
-      await store
+      await withBackgroundSpan("worker.storage-integrity-sweep", () => store
         .runStorageIntegritySweep(storage, {
           maxKeys: cfg.storageIntegritySweepMaxKeys,
           prefix: cfg.storageIntegritySweepPrefix,
-        })
+        }))
         .catch(() => {});
     }
 
