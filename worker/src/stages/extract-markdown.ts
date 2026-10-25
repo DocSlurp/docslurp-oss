@@ -10,7 +10,9 @@ import { Writable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { once } from "node:events";
 import {
+  DOCUMENT_FAILURE_MARKERS,
   defaultDocumentExtractionConfig,
+  isProviderCallAllowed,
   resolveVisionRoute,
   splitTextIntoPages,
   parserPlaybookCatalog,
@@ -67,7 +69,7 @@ import { buildNativeParserPayload } from "../native-pdf/parser-payload.js";
 import { buildNativePdfRegions } from "../native-pdf/regions.js";
 import { nativePdfEmphasisEnabled, resolveNativePdfMode } from "../native-pdf/mode.js";
 import { runNativePdfShadow } from "../native-pdf/shadow.js";
-import { documentExtractorRegistry, serializeExtractorOptions, type ExtractedCandidate, type PreparedExtractor } from "../extractors/registry.js";
+import { documentExtractorRegistry, serializeExtractorOptions, type CandidateExecutors, type ExtractedCandidate, type PreparedExtractor } from "../extractors/registry.js";
 import { ExtractorAttemptLedger } from "../extractors/attempt-ledger.js";
 import { runLocalPdfArtifactGraph } from "../extractors/local-graph-runner.js";
 import type { CommandRunner } from "../tools/runner.js";
@@ -261,7 +263,7 @@ export class ExtractMarkdownStage implements Stage {
                   };
                 }
 
-                const plannedExtractors = await this.planExtractors({
+                let plannedExtractors = await this.planExtractors({
                   tempFile,
                   multiStrategyVoting: extractionConfig.voting.enabled,
                   secondaryId: extractionConfig.voting.secondary,
@@ -270,9 +272,19 @@ export class ExtractMarkdownStage implements Stage {
                   options: extractionConfig.options,
                   attemptLedger,
                 });
+                // Why an image continues without extracted text (reported in the manifest and stats).
+                let textlessFallback: string | null = null;
                 if (!plannedExtractors) {
                   if (lastUsableResult) return lastUsableResult;
-                  throw new Error(`no untried extractor remains for ${format}: ${JSON.stringify(attemptLedger.snapshot())}`);
+                  const cause = `no untried extractor remains for ${format}: ${JSON.stringify(attemptLedger.snapshot())}`;
+                  if (format !== "image") throw new Error(cause);
+                  // OCR is unavailable here (e.g. the lean image has no Tesseract data): vision reads the pixels.
+                  textlessFallback = `OCR unavailable; ${cause}`;
+                  plannedExtractors = {
+                    primary: this.textlessImageExtractor(state, document, textlessFallback),
+                    secondary: null,
+                    tableAware: false,
+                  };
                 }
                 const tableAware = plannedExtractors.tableAware;
                 console.log(
@@ -297,7 +309,7 @@ export class ExtractMarkdownStage implements Stage {
                   signal,
                 });
 
-                const candidateA =
+                let candidateA =
                   resultA.status === "fulfilled" ? resultA.value : null;
                 const candidateB =
                   resultB.status === "fulfilled" ? resultB.value : null;
@@ -327,8 +339,22 @@ export class ExtractMarkdownStage implements Stage {
                       ? resultB.reason
                       : "unavailable"
                     : "skipped";
-                  throw new Error(
-                    `no extractor produced output: ${plannedExtractors.primary.label}=${errA}, ${secondaryLabel}=${errB}`,
+                  const failure = `${plannedExtractors.primary.label}=${errA}, ${secondaryLabel}=${errB}`;
+                  // A crashing OCR is the same as an absent one for an image, but only once every configured
+                  // extractor has had its turn (the stage's retry strategies run them one per attempt).
+                  const untried = this.tryResolveExtractorOrder(format, extractionConfig.order)
+                    .some((id) => attemptLedger.canAttempt(id));
+                  if (format !== "image" || untried) {
+                    throw new Error(`no extractor produced output: ${failure}`);
+                  }
+                  textlessFallback = `OCR failed; ${failure}`;
+                  const textless = this.textlessImageExtractor(state, document, textlessFallback);
+                  plannedExtractors = { primary: textless, secondary: null, tableAware: false };
+                  candidateA = await textless.execute(
+                    this.candidateExecutors(),
+                    candidateAKey,
+                    tempFile,
+                    signal,
                   );
                 }
 
@@ -361,7 +387,7 @@ export class ExtractMarkdownStage implements Stage {
                       : policyDecision.strategy
                   }`;
                   const similarity = policyDecision.similarity;
-                  const needsVision = policyDecision.needsEscalation;
+                  const needsVision = policyDecision.needsEscalation || textlessFallback !== null;
 
                   // Winning text is our first usable partial artifact
                   partialArtifactUri = winningCandidate.textUri;
@@ -553,6 +579,7 @@ export class ExtractMarkdownStage implements Stage {
                     strategy,
                     similarity,
                     needsVision,
+                    textlessFallback,
                     textArtifactUri: winningCandidate.textUri,
                     candidates: [
                       candidateA
@@ -810,6 +837,7 @@ export class ExtractMarkdownStage implements Stage {
                       strategy,
                       similarity,
                       needsVision,
+                      textlessFallback,
                       plausibilityScore,
                       manifestUri,
                       artifactGraphUri: graph?.manifestUri ?? null,
@@ -967,13 +995,65 @@ export class ExtractMarkdownStage implements Stage {
     signal?: AbortSignal,
     graphContext?: { sourceHash: string; pageCount: number; documentId: string },
   ): Promise<ExtractedCandidate> {
-    return extractor.execute({
+    return extractor.execute(this.candidateExecutors(graphContext), textKey, sourceTempFile, signal);
+  }
+
+  private candidateExecutors(
+    graphContext?: { sourceHash: string; pageCount: number; documentId: string },
+  ): CandidateExecutors {
+    return {
       stream: (plan, label, key, abort) => this.extractStreamCandidate(plan, label, key, abort),
       file: (plan, label, key, outputPath, abort) => this.extractFileCandidate(plan, label, key, outputPath, abort),
       liteparse: (candidate, key, source, abort) => this.extractLiteParseCandidate(candidate, key, source, abort),
       graph: (candidate, key, source, abort) => this.extractGraphCandidate(candidate, key, source, graphContext, abort),
       markdownFile: (candidate, key, outputPath) => this.uploadMarkdownFileCandidate(candidate, key, outputPath),
-    }, textKey, sourceTempFile, signal);
+    };
+  }
+
+  /**
+   * An image has no text layer, so when OCR cannot read it (no Tesseract data on the lean worker image, or
+   * Kreuzberg's bundled OCR crashing) vision is the only reader left. Returns a stand-in extractor whose empty
+   * Markdown lets page triage and the vision stage read the pixels. When the workspace cannot use vision
+   * (turned off, or privacy mode forbids the route) the image is unreadable: fail naming that cause. The raw
+   * diagnostic stays in the stored error and logs; `publicDocumentError` never shows it to users.
+   */
+  private textlessImageExtractor(
+    state: import("../pipeline/pipeline.js").WorkflowState,
+    document: import("../models.js").Document,
+    cause: string,
+  ): PreparedExtractor {
+    const pipeline = state.run.pipeline;
+    const visionAllowed =
+      pipeline.visionFallback &&
+      isProviderCallAllowed(pipeline.privacyMode, visionCall(resolveVisionRoute(pipeline.vision)));
+    if (!visionAllowed) {
+      console.error(
+        `[extract-error] stage=${this.name} document=${document.id} image-unreadable ` +
+          `visionFallback=${pipeline.visionFallback} privacyMode=${pipeline.privacyMode} cause=${cause}`,
+      );
+      throw new Error(`${DOCUMENT_FAILURE_MARKERS.imageNeedsVision} (${cause})`);
+    }
+    console.warn(
+      `[extract-debug] stage=${this.name} document=${document.id} textless-image-to-vision cause=${cause}`,
+    );
+    const plan: CommandPlan = { binary: "in-process:image-textless", args: [], available: true };
+    return {
+      label: "image-textless",
+      plan,
+      tableAware: false,
+      execute: async (_executors, textKey) => {
+        const scratchDir = await mkdtemp(path.join(tmpdir(), "docslurp-extract-"));
+        const tempTextPath = path.join(scratchDir, "image-textless.md");
+        try {
+          await writeFile(tempTextPath, "", "utf8");
+          await this.storage.putBytes(textKey, new Uint8Array(0), "text/markdown; charset=utf-8");
+        } catch (error) {
+          await rm(scratchDir, { recursive: true, force: true });
+          throw error;
+        }
+        return { label: "image-textless", plan, textKey, textUri: this.storage.uri(textKey), tempTextPath };
+      },
+    };
   }
 
   /** Upload Markdown an in-process extractor (e.g. JSON/JSONL) already wrote locally. */
@@ -2117,6 +2197,7 @@ export class ExtractMarkdownStage implements Stage {
           this.runner,
           args.tempFile,
           serializeExtractorOptions(args.options, id),
+          { format: args.format },
         ),
       ),
     );
@@ -2140,6 +2221,7 @@ export class ExtractMarkdownStage implements Stage {
           this.runner,
           args.tempFile,
           serializeExtractorOptions(args.options, args.secondaryId),
+          { format: args.format },
         );
         if (!explicit.plan.available) args.attemptLedger.markUnavailable(explicit.label);
         secondary = explicit.plan.available ? explicit : null;

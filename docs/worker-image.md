@@ -26,6 +26,18 @@ and from the deploy error text. The CI image budget (below) is set well under it
 | Native PDF engine | optional, `DOCSLURP_NATIVE_PDF=1`; PDFs otherwise use Kreuzberg and Poppler (PyMuPDF/pymupdf4llm and the MuPDF `mupdf-tools` apt package were removed 2026-10-15: AGPL) | same |
 | Runtime pip installs | off (`DOCSLURP_PYTHON_LAZY_INSTALL=false`) | on for the first-boot path only |
 
+### Images without Tesseract
+
+The lean image has no Tesseract language data, and Kreuzberg's bundled Tesseract otherwise looks for it at the
+path of the machine that built it. The extractor planner therefore checks for `<lang>.traineddata` in
+`TESSDATA_PREFIX` and Kreuzberg's system locations (`worker/src/extractors/ocr-capability.ts`) before offering
+Kreuzberg for an image, and `DOCSLURP_OCR=off` forces that answer. With no OCR, or when Kreuzberg's OCR still
+fails, an image continues with empty text so page triage and the vision stage read it (manifest and stage stats
+record `textlessFallback`). If the workspace has vision fallback off, or its privacy mode forbids the vision
+route, the document fails with the public message "This image can only be read with OCR or vision, and neither is
+available for this workspace." and the raw cause stays in the stored error and logs. PDFs are unaffected: Kreuzberg
+reads their text layer and does not OCR them by default; scanned pages reach vision through page triage.
+
 ### Measured sizes (local builds, 2026-10-14, linux/amd64)
 
 "Uncompressed" is `du -sxm /` inside the image (what Fly unpacks). "Compressed" is
