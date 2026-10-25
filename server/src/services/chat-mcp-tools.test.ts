@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { McpDispatch } from "../lib/mcp-http.js";
 import { CHAT_AGENT_LIMIT_DEFAULTS } from "@docslurp/shared";
 import { asSchema } from "ai";
-import { createChatMcpTools, evidencePages, TOOL_DEADLINE_RESULT } from "./chat-mcp-tools.js";
+import { createChatMcpTools, evidencePages, TOOL_DEADLINE_RESULT, withoutEvidence } from "./chat-mcp-tools.js";
 import { mcpManifest, uploadStatusInput, mediaEvidenceInput } from "./mcp-catalog.js";
 import { searchInputSchema, batchSearchInputSchema, workspaceChatInputSchema } from "../lib/search-input.js";
 import { currentSearchSignal } from "../search/query-bounds.js";
@@ -142,6 +142,27 @@ describe("chat MCP tools", () => {
     const result = await t.execute("search");
     expect(t.citations).toHaveLength(1);
     expect(result).toMatchObject({ evidence: [{ citationIndex: 1, text: "Supported fact" }] });
+  });
+
+  it("sends each passage once: only this call's evidence, with raw hits stripped from the result", async () => {
+    const t = setup();
+    const hit = (chunkIndex: number, text: string) => ({ text, score: 1, citation: { documentId: "doc", filename: "guide.pdf", pageNumber: chunkIndex + 1, chunkIndex, headingPath: [] } });
+    t.dispatch.mockResolvedValueOnce(Response.json({ results: [hit(0, "First")], searchSessionId: "s1" }));
+    t.dispatch.mockResolvedValueOnce(Response.json({ results: [hit(0, "First"), hit(1, "Second")], searchSessionId: "s2" }));
+    await t.execute("search");
+    const second = await t.execute("search");
+    expect(second).toEqual({ ok: true, status: 200, result: { searchSessionId: "s2" }, evidence: [
+      { citationIndex: 1, filename: "guide.pdf", documentId: "doc", pageNumber: 1, text: "First" },
+      { citationIndex: 2, filename: "guide.pdf", documentId: "doc", pageNumber: 2, text: "Second" },
+    ] });
+  });
+
+  it("keeps a zero-hit result and a nested answer visible to the model", async () => {
+    const t = setup();
+    t.dispatch.mockResolvedValueOnce(Response.json({ results: [] }));
+    await expect(t.execute("search")).resolves.toEqual({ ok: true, status: 200, result: { results: [] } });
+    expect(withoutEvidence({ answer: "Yes [1]", citations: [{ text: "x", score: 1, citation: { documentId: "d", filename: "f", pageNumber: 1, chunkIndex: 0, headingPath: [] } }] }))
+      .toEqual({ answer: "Yes [1]" });
   });
 });
 
