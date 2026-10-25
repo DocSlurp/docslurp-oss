@@ -4,7 +4,7 @@ import {
   DEFAULT_SERVER_MATERIALIZATION_POLICY,
   classifyTemperature,
   compilePipelinePlan,
-  defaultIndexingModeForOrg,
+  DEFAULT_INDEXING_MODE,
   estimatePageEmbedCredits,
   isBillingEnforced,
   workspaceTemplates,
@@ -56,9 +56,8 @@ describe("narrowMaterializationPolicy", () => {
 });
 
 describe("defaults and helpers", () => {
-  it("picks indexing mode from plan", () => {
-    expect(defaultIndexingModeForOrg({ funded: false })).toBe("map");
-    expect(defaultIndexingModeForOrg({ funded: true })).toBe("full");
+  it("indexes fully by default for every organization", () => {
+    expect(DEFAULT_INDEXING_MODE).toBe("full");
   });
   it("no workspace template opts into page-image embedding", () => {
     expect(workspaceTemplates.length).toBeGreaterThan(0);

@@ -1,7 +1,6 @@
 import { randomUUID } from "node:crypto";
 
 import {
-  defaultIndexingModeForOrg as defaultIndexingModeForFunding,
   pageCredits,
   deferredProfilesEnabled,
   effectiveIndexingMode,
@@ -19,7 +18,7 @@ import {
 import { sql } from "../db.js";
 import { nextVersionNumber } from "./version-number.js";
 import type { RequestActor } from "../lib/request-actor.js";
-import { admitRunSpend, canSpend, SpendBlockedError } from "./billing/spend-guard.js";
+import { admitRunSpend, SpendBlockedError } from "./billing/spend-guard.js";
 import { canEditWorkspace, getWorkspaceAccess } from "./organizations.js";
 import { enforceLiveBudgetCaps } from "./run-creation.js";
 import { assertBackfillReusableMany, isReprocessRejectedError } from "./runs.js";
@@ -34,7 +33,6 @@ export class IndexingModeError extends Error {
       | "too_many_documents"
       | "index_in_progress"
       | "visual_mode_privacy"
-      | "credits_required_for_full_index"
       | "full_index_not_allowed"
       | "document_not_found"
       | "nothing_to_index"
@@ -51,19 +49,6 @@ export { effectiveIndexingMode };
 export function fullIndexCreditsPerPage(): number {
   const parsed = Number.parseFloat(process.env.DOCSLURP_FULL_INDEX_CREDITS_PER_PAGE ?? "");
   return Number.isFinite(parsed) && parsed >= 0 ? parsed : pageCredits("fast", 1);
-}
-
-/**
- * Org default for new workspaces: starter orgs (only starter credits) defer
- * (`map`); funded orgs (any paid grant: top-up, auto top-up, adjustment,
- * promo; organizations.funded_at) index fully.
- */
-export async function defaultIndexingModeForOrg(orgId: string): Promise<IndexingMode> {
-  if (!deferredProfilesEnabled()) return "full";
-  const [row] = await sql<{ funded: boolean }[]>`
-    select o.funded_at is not null as funded from organizations o where o.id = ${orgId}
-  `;
-  return defaultIndexingModeForFunding({ funded: row?.funded === true });
 }
 
 export function hasPrivatePageEmbedder(): boolean {
@@ -343,8 +328,8 @@ export async function requestFullIndex(args: FullIndexArgs): Promise<{ runId: st
 export type ModeSwitchResult = { runIds: string[]; pipelines: Map<string, PipelineFeatures> };
 
 /**
- * Validates a requested mode before it is saved: visual needs privacy/PII
- * clearance; `full` in a starter org (which defaults to deferred) needs spendable credits.
+ * Validates a requested mode before it is saved: visual needs privacy/PII clearance. Every mode is open to every
+ * organization; credits are checked when the indexing work is admitted, not here.
  * `current` is null when creating a workspace.
  */
 export async function validateModeChoice(args: {
@@ -353,18 +338,7 @@ export async function validateModeChoice(args: {
   currentMode: IndexingMode | null;
   nextPipeline: Pick<PipelineFeatures, "indexingMode" | "privacyMode" | "piiPolicy">;
 }): Promise<void> {
-  const next = args.nextPipeline.indexingMode;
-  if (next === "visual") assertVisualModeAllowed(args.nextPipeline);
-  if (next === "full" && args.currentMode !== "full" && deferredProfilesEnabled()) {
-    const mode = await defaultIndexingModeForOrg(args.orgId);
-    if (mode === "map" && !(await canSpend(args.orgId, args.workspaceId))) {
-      throw new IndexingModeError(
-        "Full indexing needs credits. Buy credits to index everything up front.",
-        402,
-        "credits_required_for_full_index",
-      );
-    }
-  }
+  if (args.nextPipeline.indexingMode === "visual") assertVisualModeAllowed(args.nextPipeline);
 }
 
 export async function validateModeSwitch(args: { current: WorkspaceRecord; nextPipeline: PipelineFeatures }): Promise<void> {

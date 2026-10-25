@@ -18,12 +18,12 @@ describe("real bounded video decoder",()=>{
       await execute("ffmpeg",["-nostdin","-v","error","-f","lavfi","-i","testsrc2=size=160x90:rate=10","-t","2","-c:v","mpeg4","-threads","1",source],{timeout:10000});
       const runner=new CommandRunner();const probe=await inspectMedia(runner,source,mediaConfig({}));
       expect(probe).toEqual({duration:2,hasAudio:false,hasVideo:true});
-      const scan=await scanVideo(runner,source,videoPolicy(true,probe.duration));
+      const scan=await scanVideo(runner,source,videoPolicy(probe.duration));
       expect(scan.candidateCount).toBe(4);expect(scan.selectedCount).toBeGreaterThan(0);
       const frame=await prepareVideoFrame(runner,source,scan.batches[0][0].seconds);
       expect([...frame.bytes.slice(0,2)]).toEqual([255,216]);expect(frame.bytes.length).toBeLessThan(200000);
       expect(await readdir(dir)).toEqual(["source.mp4"]);
-      await expect(scanVideo(runner,source,videoPolicy(true,2),AbortSignal.abort())).rejects.toThrow();
+      await expect(scanVideo(runner,source,videoPolicy(2),AbortSignal.abort())).rejects.toThrow();
     } finally { await rm(dir,{recursive:true,force:true}); }
   },20000);
 });

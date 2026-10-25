@@ -16,7 +16,7 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-async function send(model: string, prompt?: string, funded?: boolean) {
+async function send(model: string, prompt?: string) {
   const bodies: Array<Record<string, any>> = [];
   vi.stubGlobal("fetch", vi.fn(async (_url: string, init: RequestInit) => {
     bodies.push(JSON.parse(String(init.body)));
@@ -35,7 +35,6 @@ async function send(model: string, prompt?: string, funded?: boolean) {
     cfg: { openRouterApiKey: "or-key", openAiApiKey: "", openAiBaseUrl: "https://api.openai.com/v1" } as Config,
     runner: new CommandRunner(),
     privacyMode: "standard",
-    funded,
   });
   const body = bodies[0]!;
   return { body, userText: body.messages[1].content[0].text as string };
@@ -52,19 +51,10 @@ describe("per-model vision profiles", () => {
     expect(body.provider).toEqual({ order: ["together", "fireworks", "parasail"], allow_fallbacks: false });
   });
 
-  it("routes unfunded orgs to DeepSeek's endpoint first, with the US hosts as fallbacks", async () => {
-    const { body } = await send(SNAPSHOT, undefined, false);
-    expect(body.provider).toEqual({ order: ["deepseek", "together", "fireworks", "parasail"], allow_fallbacks: false });
-  });
-
-  it.each([true, undefined])("keeps funded=%s on US-hosted providers only", async funded => {
-    const { body } = await send(SNAPSHOT, undefined, funded);
+  it("routes every organization to the same US-hosted providers", async () => {
+    const { body } = await send(SNAPSHOT);
     expect(body.provider).toEqual({ order: ["together", "fireworks", "parasail"], allow_fallbacks: false });
-  });
-
-  it("uses the shared route for models without an unfunded override", async () => {
-    const { body } = await send("xiaomi/mimo-v2.6-flash", undefined, false);
-    expect(body.provider).toEqual({ order: ["relace", "deepinfra"], allow_fallbacks: true });
+    expect(body.provider.order).not.toContain("deepseek");
   });
 
   it("keeps an explicit non-default template for the snapshot", async () => {

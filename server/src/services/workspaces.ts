@@ -25,12 +25,12 @@ import {
   type WorkspaceBoardRecord,
   type WorkspaceRun,
   type WorkspaceTemplateKey,
-  type WorkspaceRecord
+  type WorkspaceRecord,
+  DEFAULT_INDEXING_MODE
 } from "@docslurp/shared";
 
 import { sql } from "../db.js";
 import {
-  defaultIndexingModeForOrg,
   effectiveIndexingMode,
   validateModeChoice,
   validateModeSwitch,
@@ -374,10 +374,10 @@ export async function createWorkspace(input: CreateWorkspaceInput): Promise<Work
     throw new Error("Organization not found");
   }
 
-  // Plan default unless the caller chose a mode; coerced to full while the flag is off.
+  // The same default for every organization unless the caller chose a mode; coerced to full while the flag is off.
   const requestedMode = (input.pipeline as { indexingMode?: PipelineFeatures["indexingMode"] } | undefined)?.indexingMode;
-  pipeline.indexingMode = effectiveIndexingMode(requestedMode ?? (await defaultIndexingModeForOrg(organization.id)));
-  // An explicit choice goes through the same gates as a switch (visual privacy, full needs credits).
+  pipeline.indexingMode = effectiveIndexingMode(requestedMode ?? DEFAULT_INDEXING_MODE);
+  // An explicit choice goes through the same gate as a switch (visual privacy).
   if (requestedMode !== undefined && deferredProfilesEnabled()) {
     await validateModeChoice({ orgId: organization.id, workspaceId: null, currentMode: null, nextPipeline: pipeline });
   }

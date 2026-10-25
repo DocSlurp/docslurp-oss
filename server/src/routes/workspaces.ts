@@ -1010,7 +1010,7 @@ export const workspacesRoutes = new Hono()
       return apiErrorResponse(c, 400, "invalid_request", `Model "${prohibitedModel}" is not permitted in pipeline configuration`);
     }
     // The schema defaults a missing pipeline.indexingMode to "full"; only an explicit
-    // mode in the raw body may override the plan default.
+    // mode in the raw body may override the organization default.
     const raw = await c.req.json().catch(() => null) as { pipeline?: { indexingMode?: unknown } } | null;
     const explicit = indexingModeSchema.safeParse(raw?.pipeline?.indexingMode).success;
     const { indexingMode: _defaulted, ...pipelineWithoutMode } = valid.pipeline ?? ({} as NonNullable<typeof valid.pipeline>);
