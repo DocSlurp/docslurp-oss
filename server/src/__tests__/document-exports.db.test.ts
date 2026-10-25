@@ -137,4 +137,17 @@ describe("document exports", () => {
     expect((await sql`select status from document_exports where id = ${small.id}`)[0]).toEqual({ status: "expired" });
     expect((await sql`select status from document_exports where id = ${big.id}`)[0]).toEqual({ status: "ready" });
   });
+
+  it("removes the object and the row when the exported document or workspace is deleted", async () => {
+    await sql`insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status)
+      values ('gone', 'o', 'u', 'w', 'r', 'Gone.pdf', 'application/pdf', 'k-gone', 'completed')`;
+    const exported = await exportsService.requestDocumentExport({ userId: "u", content: "markdown", document: doc("gone", "Gone.pdf") });
+    await sql`update document_exports set status = 'ready' where id = ${exported.id}`;
+    await sql`delete from documents where id = 'gone'`;
+
+    await exportsService.sweepDocumentExports();
+
+    expect(mocks.deleteObject).toHaveBeenCalledWith(`exports/o/w/${exported.id}.zip`);
+    expect(await sql`select id from document_exports where id = ${exported.id}`).toEqual([]);
+  });
 });

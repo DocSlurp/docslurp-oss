@@ -12,7 +12,7 @@ import {
 import type { Sql } from "postgres";
 
 import { keyFromStorageUri, type ArtifactStore } from "../tools/storage.js";
-import { zipStream, type ZipStreamBody, type ZipStreamEntry } from "./zip-stream.js";
+import { ZIP_MAX_ENTRIES, zipStream, type ZipStreamBody, type ZipStreamEntry } from "./zip-stream.js";
 
 /**
  * Builds one queued document export: streams each document's files from
@@ -42,6 +42,9 @@ const READABLE_OUTPUTS = new Set([
 
 const PAGE_IMAGE_SLOT = /^page-(\d+)$/;
 
+/** Activity attempts (temporal/workflows.ts); only the last records a failure. */
+export const DOCUMENT_EXPORT_MAX_ATTEMPTS = 4;
+
 interface ExportRow {
   id: string;
   org_id: string;
@@ -68,8 +71,12 @@ export interface ExportDocumentRow {
   created_at: string;
   updated_at: string;
   tags: string[];
+  /** This document's run artifacts by slot, loaded once per export (loadExportArtifacts). */
   artifacts: Record<string, string> | null;
 }
+
+/** Structured outputs up to this size are pretty-printed; larger ones stream as stored. */
+const PRETTY_JSON_MAX_BYTES = 8 * 1024 * 1024;
 
 export interface ExportSource {
   /** Pages in order for one document. */
@@ -101,8 +108,7 @@ function compressible(mimeType: string): boolean {
   return !/^(image|audio|video)\//.test(mimeType) && !/zip|compressed|pdf|epub|officedocument|msword|ms-excel/.test(mimeType);
 }
 
-async function readText(source: ExportSource, key: string): Promise<string> {
-  const { stream } = await source.open(key);
+async function readText(stream: AsyncIterable<Uint8Array>): Promise<string> {
   const decoder = new TextDecoder();
   let text = "";
   for await (const chunk of stream) text += decoder.decode(chunk, { stream: true });
@@ -110,7 +116,15 @@ async function readText(source: ExportSource, key: string): Promise<string> {
 }
 
 export async function* documentExportEntries(
-  args: { root: string; scope: "document" | "workspace"; content: DocumentExportContent; documents: ExportDocumentRow[]; truncated: boolean },
+  args: {
+    root: string;
+    scope: "document" | "workspace";
+    content: DocumentExportContent;
+    documents: ExportDocumentRow[];
+    truncated: boolean;
+    /** Leave out pages/*.md so the archive stays under the zip file-count limit. */
+    omitPageFiles?: boolean;
+  },
   source: ExportSource,
   skipped: Array<{ path: string; reason: string }>,
 ): AsyncGenerator<ZipStreamEntry> {
@@ -141,15 +155,16 @@ export async function* documentExportEntries(
       path: `${folder}/${stem}.md`,
       compress: true,
       modifiedAt,
+      // Streamed as stored; the indexed page text stands in when there is no Markdown artifact.
       body: async () => {
-        const markdown = markdownKey ? await readText(source, markdownKey).catch(() => "") : "";
-        if (markdown.trim()) return markdown;
+        const markdown = markdownKey ? await source.open(markdownKey).catch(() => null) : null;
+        if (markdown && markdown.size !== 0) return markdown;
         const joined = pages.map((page) => page.text).filter((text) => text.trim()).join("\n\n");
         return joined || null;
       },
     };
 
-    if (pages.length > 1) {
+    if (pages.length > 1 && !args.omitPageFiles) {
       for (const page of pages) {
         yield { path: `${folder}/pages/${pageLabel(page.page_number)}.md`, compress: true, modifiedAt, body: async () => page.text };
       }
@@ -162,7 +177,9 @@ export async function* documentExportEntries(
         compress: true,
         modifiedAt,
         body: async () => {
-          const text = await readText(source, structuredKey);
+          const opened = await source.open(structuredKey);
+          if (opened.size === null || opened.size > PRETTY_JSON_MAX_BYTES) return opened;
+          const text = await readText(opened.stream);
           try {
             return `${JSON.stringify(JSON.parse(text), null, 2)}\n`;
           } catch {
@@ -223,7 +240,7 @@ function withheldUris(metadata: unknown): Set<string> {
 }
 
 function exportReadme(
-  args: { root: string; content: DocumentExportContent; documents: ExportDocumentRow[]; truncated: boolean },
+  args: { root: string; content: DocumentExportContent; documents: ExportDocumentRow[]; truncated: boolean; omitPageFiles?: boolean },
   folders: string[],
   skipped: Array<{ path: string; reason: string }>,
 ): string {
@@ -236,7 +253,9 @@ function exportReadme(
     "Each document folder holds:",
     "",
     "- `<name>.md`: the extracted Markdown for the whole document",
-    "- `pages/page-0001.md`: the same text page by page (documents with more than one page)",
+    args.omitPageFiles
+      ? "- page-by-page Markdown is left out: this export has more pages than one zip can hold as separate files. Export fewer documents to get it."
+      : "- `pages/page-0001.md`: the same text page by page (documents with more than one page)",
     "- `structured.json`: fields extracted against the workspace schema, when it has one",
     "- `metadata.json`: filename, type, status, page count, version and tags",
   ];
@@ -271,22 +290,46 @@ const documentColumns = (sql: Sql) => sql`
   d.id, d.workspace_id, d.run_id, d.filename, d.mime_type, d.source_key, d.status, d.extraction_mode,
   d.page_count, d.version_number, d.metadata, d.created_at::text, d.updated_at::text,
   coalesce((select array_agg(dt.tag order by dt.tag) from document_tags dt where dt.document_id = d.id), '{}') as tags,
-  r.artifacts
+  null::jsonb as artifacts
 `;
+
+/**
+ * Attaches each document's own run artifacts. A run's artifact map holds every
+ * document of the run, so it is read once per run and only these documents'
+ * slots come back, instead of the whole map once per document.
+ */
+export async function loadExportArtifacts(sql: Sql, documents: ExportDocumentRow[]): Promise<void> {
+  const runIds = [...new Set(documents.map((row) => row.run_id).filter((id): id is string => Boolean(id)))];
+  if (runIds.length === 0) return;
+  const slots = await sql<Array<{ document_id: string; slot: string; uri: string }>>`
+    select split_part(artifact.key, ':', 1) as document_id, artifact.key as slot, artifact.value as uri
+    from workspace_runs r
+    cross join lateral jsonb_each_text(coalesce(r.artifacts, '{}'::jsonb)) as artifact
+    where r.id = any(${sql.array(runIds)})
+      and split_part(artifact.key, ':', 1) = any(${sql.array(documents.map((row) => row.id))})
+  `;
+  const byDocument = new Map<string, Record<string, string>>();
+  for (const { document_id, slot, uri } of slots) {
+    const map = byDocument.get(document_id) ?? {};
+    map[slot] = uri;
+    byDocument.set(document_id, map);
+  }
+  for (const row of documents) row.artifacts = byDocument.get(row.id) ?? null;
+}
 
 /** The export's documents: the one document, or the workspace's current, live versions. */
 export async function loadExportDocuments(sql: Sql, row: Pick<ExportRow, "workspace_id" | "document_id">): Promise<{ documents: ExportDocumentRow[]; truncated: boolean }> {
   if (row.document_id) {
     const documents = await sql<ExportDocumentRow[]>`
       select ${documentColumns(sql)}
-      from documents d left join workspace_runs r on r.id = d.run_id
+      from documents d
       where d.id = ${row.document_id} and d.workspace_id = ${row.workspace_id} and d.purged_at is null
     `;
     return { documents, truncated: false };
   }
   const documents = await sql<ExportDocumentRow[]>`
     select ${documentColumns(sql)}
-    from documents d left join workspace_runs r on r.id = d.run_id
+    from documents d
     where d.workspace_id = ${row.workspace_id}
       and d.superseded_at is null and d.archived_at is null and d.purged_at is null
       and not exists (select 1 from documents newer where newer.previous_version_id = d.id)
@@ -316,6 +359,12 @@ export async function buildDocumentExport(
   try {
     const { documents, truncated } = await loadExportDocuments(sql, row);
     if (documents.length === 0) throw new Error("Nothing to export: the document or workspace has no documents left.");
+    await loadExportArtifacts(sql, documents);
+    // Zip without ZIP64 holds 65,535 files: drop page-by-page files rather than the documents.
+    const [pageCount] = await sql<Array<{ pages: number }>>`
+      select count(*)::int as pages from document_pages where document_id = any(${sql.array(documents.map((document) => document.id))})
+    `;
+    const omitPageFiles = documents.length * 12 + (pageCount?.pages ?? 0) > ZIP_MAX_ENTRIES;
     const root = row.filename.replace(/\.zip$/i, "");
     const skipped: Array<{ path: string; reason: string }> = [];
     let files = 0;
@@ -327,7 +376,7 @@ export async function buildDocumentExport(
         select page_number, text from document_pages where document_id = ${documentId} order by page_number
       `,
     };
-    const entries = documentExportEntries({ root, scope: row.document_id ? "document" : "workspace", content: row.content, documents, truncated }, source, skipped);
+    const entries = documentExportEntries({ root, scope: row.document_id ? "document" : "workspace", content: row.content, documents, truncated, omitPageFiles }, source, skipped);
     const counted = async function* (): AsyncGenerator<ZipStreamEntry> {
       for await (const entry of entries) {
         options.heartbeat?.();
@@ -339,6 +388,7 @@ export async function buildDocumentExport(
         maxBytes: options.maxBytes ?? DOCUMENT_EXPORT_MAX_BYTES,
         onSkip: (path, reason) => skipped.push({ path, reason }),
         onAdd: () => { files += 1; },
+        onProgress: options.heartbeat,
       })) {
         sizeBytes += chunk.byteLength;
         yield chunk;
@@ -352,12 +402,20 @@ export async function buildDocumentExport(
     });
     await Promise.all([pipeline(Readable.from(chunks()), upload.writable, { signal: options.signal }), upload.done]);
 
-    await sql`
+    // Only a running export becomes ready: one the sweep already failed or expired stays so.
+    const finished = await sql`
       update document_exports
       set status = 'ready', completed_at = now(), size_bytes = ${sizeBytes}, file_count = ${files},
         skipped_count = ${skipped.length}, document_count = ${documents.length}, error = null
-      where id = ${row.id}
+      where id = ${row.id} and status = 'running'
+      returning id
     `;
+    if (finished.length === 0) {
+      // Failed, expired or removed (its document or workspace was deleted) while building.
+      console.warn(`[document-export] finished after it was failed, expired or removed export=${row.id}; deleting its object`);
+      await storage.deleteKeys([row.object_key]).catch(() => undefined);
+      return { status: "skipped" };
+    }
     console.log(`[document-export] ready export=${row.id} documents=${documents.length} files=${files} skipped=${skipped.length} bytes=${sizeBytes}`);
     return { status: "ready", sizeBytes };
   } catch (error) {

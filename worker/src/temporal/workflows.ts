@@ -591,9 +591,11 @@ export async function renderDocumentPage(input: import("@docslurp/shared").Rende
   await pageRenderActivities.renderDocumentPageActivity(input);
 }
 
+// Worker restarts (deploys, scale-in) cost an attempt each, so allow a few;
+// keep in step with DOCUMENT_EXPORT_MAX_ATTEMPTS in exports/build-document-export.ts.
 const documentExportActivities = proxyActivities<Activities>({
   startToCloseTimeout: "2 hours", heartbeatTimeout: "2 minutes",
-  retry: { maximumAttempts: 2, initialInterval: "30s", maximumInterval: "2 minutes" },
+  retry: { maximumAttempts: 4, initialInterval: "30s", maximumInterval: "5 minutes" },
 });
 /** Builds a queued zip export into object storage. Its own workflow type, off the pipeline history. */
 export async function buildDocumentExport(input: import("@docslurp/shared").BuildDocumentExportInput): Promise<void> {

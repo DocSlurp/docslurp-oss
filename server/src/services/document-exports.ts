@@ -106,25 +106,35 @@ export function formatExportBytes(bytes: number): string {
  * per-page Markdown), plus originals and rendered page images for "all".
  */
 async function estimateExport(args: { workspaceId: string; documentId: string | null; content: DocumentExportContent }) {
+  // The same documents, in the same order and up to the same cap, as the worker exports.
   const [row] = await sql<{ documents: number; text_bytes: string; file_bytes: string; page_images: string }[]>`
+    with target as (
+      select d.id, d.run_id, d.stored_page_text_bytes, d.file_size
+      from documents d
+      where d.workspace_id = ${args.workspaceId}
+        and d.purged_at is null
+        and ${args.documentId
+          ? sql`d.id = ${args.documentId}`
+          : sql`d.superseded_at is null and d.archived_at is null
+              and not exists (select 1 from documents newer where newer.previous_version_id = d.id)`}
+      order by lower(d.filename), d.created_at
+      limit ${DOCUMENT_EXPORT_MAX_DOCUMENTS}
+    ),
+    -- Each run's artifact map is scanned once, however many of its documents are exported.
+    images as (
+      select count(*)::bigint as n
+      from (select distinct run_id from target where run_id is not null) runs
+      join workspace_runs r on r.id = runs.run_id
+      cross join lateral jsonb_object_keys(coalesce(r.artifacts, '{}'::jsonb)) as slot
+      where slot ~ '^[^:]+:page-[0-9]+$' and split_part(slot, ':', 1) in (select id from target)
+    )
     select
-      count(*)::int as documents,
-      coalesce(sum(d.stored_page_text_bytes), 0)::bigint as text_bytes,
-      coalesce(sum(d.file_size), 0)::bigint as file_bytes,
-      coalesce(sum((
-        select count(*) from jsonb_object_keys(coalesce(r.artifacts, '{}'::jsonb)) as slot
-        where slot like d.id || ':page-%'
-      )), 0)::bigint as page_images
-    from documents d
-    left join workspace_runs r on r.id = d.run_id
-    where d.workspace_id = ${args.workspaceId}
-      and d.purged_at is null
-      and ${args.documentId
-        ? sql`d.id = ${args.documentId}`
-        : sql`d.superseded_at is null and d.archived_at is null
-            and not exists (select 1 from documents newer where newer.previous_version_id = d.id)`}
+      (select count(*)::int from target) as documents,
+      (select coalesce(sum(stored_page_text_bytes), 0)::bigint from target) as text_bytes,
+      (select coalesce(sum(file_size), 0)::bigint from target) as file_bytes,
+      (select n from images) as page_images
   `;
-  const documents = Math.min(row?.documents ?? 0, DOCUMENT_EXPORT_MAX_DOCUMENTS);
+  const documents = row?.documents ?? 0;
   const text = Number(row?.text_bytes ?? 0);
   const estimated = 2 * text + 8 * 1024 * Math.max(documents, 1)
     + (args.content === "all" ? Number(row?.file_bytes ?? 0) + Number(row?.page_images ?? 0) * ESTIMATED_PAGE_IMAGE_BYTES + text : 0);
@@ -284,20 +294,35 @@ export async function sweepDocumentExports(): Promise<void> {
     where status in ('queued', 'running') and created_at < now() - make_interval(hours => ${STALLED_EXPORT_HOURS})
   `;
 
-  // Delete before marking expired, so a failed delete is retried by the next sweep
-  // rather than leaving an orphaned object. Deleting a missing key succeeds.
-  const expired = await sql<{ id: string; object_key: string }[]>`
-    select id, object_key from document_exports
-    where expires_at <= now() and status <> 'expired'
-    order by expires_at limit 200
+  // Expired exports, and exports whose document, workspace or requester is gone
+  // (deleted, purged, or the organization offboarded). The object is deleted
+  // first, so a failed delete is retried by the next sweep rather than leaving
+  // an orphan; deleting a missing key succeeds. An orphan's row is then removed,
+  // since it names a document or workspace that no longer exists.
+  const removable = await sql<{ id: string; object_key: string; status: string; orphaned: boolean }[]>`
+    select id, object_key, status, orphaned from (
+      select e.id, e.object_key, e.status, e.expires_at, (
+        not exists (select 1 from workspaces w where w.id = e.workspace_id)
+        or not exists (select 1 from "user" u where u.id = e.user_id)
+        or (e.document_id is not null and not exists (
+          select 1 from documents d where d.id = e.document_id and d.purged_at is null))
+      ) as orphaned
+      from document_exports e
+    ) candidates
+    where (status <> 'expired' and expires_at <= now()) or orphaned
+    order by expires_at
+    limit 200
   `;
-  for (const row of expired) {
+  for (const row of removable) {
     try {
-      await deleteUploadedObject(row.object_key);
-      await sql`update document_exports set status = 'expired' where id = ${row.id} and status <> 'expired'`;
+      if (row.status !== "expired") await deleteUploadedObject(row.object_key);
+      if (row.orphaned) await sql`delete from document_exports where id = ${row.id}`;
+      else await sql`update document_exports set status = 'expired' where id = ${row.id} and status <> 'expired'`;
     } catch (error) {
       console.error(`[document-export] delete failed export=${row.id} key=${row.object_key}: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
-  if (expired.length > 0) console.log(`[document-export] expired=${expired.length}`);
+  if (removable.length > 0) console.log(`[document-export] expired=${removable.length}`);
+  // Expired rows stay a month so the app can say a link expired, then go.
+  await sql`delete from document_exports where status = 'expired' and expires_at < now() - interval '30 days'`;
 }

@@ -61,4 +61,40 @@ describe("zipStream", () => {
     expect(Object.keys(files)).toEqual(["small.md"]);
     expect(skipped).toEqual(["big.bin"]);
   });
+
+  it("releases streams it skips at the size limit, and stops opening files once full", async () => {
+    let destroyed = 0;
+    let opened = 0;
+    const big = () => {
+      opened += 1;
+      const stream = Object.assign(streamOf("x".repeat(20)), { destroy: () => { destroyed += 1; } });
+      return { stream, size: 20 };
+    };
+    const entries: ZipStreamEntry[] = [
+      { path: "a.md", compress: true, body: async () => "123456789" },
+      { path: "big-1.bin", compress: false, body: async () => big() },
+      { path: "fill.md", compress: true, body: async () => "1" },
+      { path: "big-2.bin", compress: false, body: async () => big() },
+      { path: "README.md", compress: true, required: true, body: async () => "index" },
+    ];
+
+    const files = unzipSync(await collect(zipStream(entries, { maxBytes: 10 })));
+
+    expect(Object.keys(files)).toEqual(["a.md", "fill.md", "README.md"]);
+    expect(opened).toBe(1);
+    expect(destroyed).toBe(1);
+  });
+
+  it("keeps under the zip file-count limit but always adds required entries", async () => {
+    const skipped: string[] = [];
+    const entries: ZipStreamEntry[] = [
+      ...["1", "2", "3"].map((name) => ({ path: `${name}.md`, compress: true, body: async () => name })),
+      { path: "README.md", compress: true, required: true, body: async () => "index" },
+    ];
+
+    const files = unzipSync(await collect(zipStream(entries, { maxEntries: 2, onSkip: (path, reason) => skipped.push(`${path}: ${reason}`) })));
+
+    expect(Object.keys(files)).toEqual(["1.md", "2.md", "README.md"]);
+    expect(skipped).toEqual(["3.md: zip file-count limit reached"]);
+  });
 });

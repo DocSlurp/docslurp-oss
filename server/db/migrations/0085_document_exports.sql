@@ -1,12 +1,17 @@
 -- Zip exports of a document or a workspace, built by the worker and staged in
 -- object storage under exports/<org>/<workspace>/. Each export's link lives
 -- seven days (expires_at); the maintenance sweep deletes the object after that.
+--
+-- The owner columns are deliberately not foreign keys: a cascade would drop the
+-- row that names the zip's storage key and orphan the object. When a document,
+-- workspace, organization or user is deleted (or the document purged), the
+-- sweep deletes the object first and then the row (document-exports.ts).
 CREATE TABLE IF NOT EXISTS document_exports (
   id text PRIMARY KEY,
-  org_id text NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
-  workspace_id text NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
-  user_id text NOT NULL REFERENCES "user"(id) ON DELETE CASCADE,
-  document_id text REFERENCES documents(id) ON DELETE CASCADE,
+  org_id text NOT NULL,
+  workspace_id text NOT NULL,
+  user_id text NOT NULL,
+  document_id text,
   content text NOT NULL CHECK (content IN ('markdown', 'all')),
   status text NOT NULL DEFAULT 'queued' CHECK (status IN ('queued', 'running', 'ready', 'failed', 'expired')),
   filename text NOT NULL,

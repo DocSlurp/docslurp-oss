@@ -16,8 +16,10 @@ const objects = new Map<string, Uint8Array>();
 const uploads = new Map<string, { bytes: Uint8Array; expires?: Date; metadata?: Record<string, string> }>();
 const text = (value: string) => new TextEncoder().encode(value);
 
+const deleted: string[] = [];
 const storage = {
   bucket: "bucket",
+  async deleteKeys(keys: string[]) { deleted.push(...keys); },
   async openStream(key: string) {
     const bytes = objects.get(key);
     if (!bytes) throw new Error(`NoSuchKey ${key}`);
@@ -76,6 +78,7 @@ afterAll(async () => {
 beforeEach(async () => {
   objects.clear();
   uploads.clear();
+  deleted.length = 0;
   objects.set("md/doc-1.md", text("# Q3 plan\n\nPage one\n\nPage two\n"));
   objects.set("st/doc-1.json", text("{\"total\":3}"));
   objects.set("pages/doc-1-2.png", new Uint8Array([1, 2]));
@@ -181,6 +184,15 @@ describe("buildDocumentExport", () => {
     expect((await sql`select status from document_exports where id = 'exp-5'`)[0]).toEqual({ status: "running" });
     await expect(buildDocumentExport({ sql, storage: broken as never }, "exp-5", { final: true })).rejects.toThrow("storage down");
     expect((await sql`select status, error from document_exports where id = 'exp-5'`)[0]).toMatchObject({ status: "failed" });
+
+    // An export removed while it was building (its document was deleted) cleans up its own upload.
+    await queue("exp-7", { documentId: "doc-1", content: "markdown", filename: "Q3 plan.zip" });
+    const removing = { ...storage, openStream: async (key: string) => {
+      await sql`delete from document_exports where id = 'exp-7'`;
+      return storage.openStream(key);
+    } };
+    expect(await buildDocumentExport({ sql, storage: removing as never }, "exp-7")).toEqual({ status: "skipped" });
+    expect(deleted).toEqual(["exports/o/w/exp-7.zip"]);
 
     await queue("exp-6", { documentId: "doc-1", content: "markdown", filename: "Q3 plan.zip" });
     await sql`update document_exports set expires_at = now() - interval '1 minute' where id = 'exp-6'`;
