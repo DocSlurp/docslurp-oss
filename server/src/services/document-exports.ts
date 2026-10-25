@@ -32,8 +32,12 @@ import { listAccessibleWorkspaceIds } from "./organizations.js";
 const MAX_ACTIVE_EXPORTS_PER_USER = 3;
 /** Rendered page images average about this much; only for the size estimate. */
 const ESTIMATED_PAGE_IMAGE_BYTES = 300 * 1024;
-/** An export still unfinished this long after it was queued is reported failed. */
-const STALLED_EXPORT_HOURS = 6;
+/**
+ * An export still unfinished this long after it was queued is reported failed.
+ * Longer than the worker's whole retry budget (4 attempts of up to 2 hours,
+ * inside a 9-hour workflow), so a slow but healthy build is never failed early.
+ */
+const STALLED_EXPORT_HOURS = 10;
 
 export class DocumentExportError extends Error {
   constructor(readonly status: 404 | 413 | 429, readonly code: "not_found" | "payload_too_large" | "rate_limited", message: string) {
@@ -264,7 +268,7 @@ export async function sweepDocumentExports(): Promise<void> {
   const due = await sql<(ExportRecordRow & { email: string | null })[]>`
     update document_exports e set emailed_at = now()
     from "user" u
-    where u.id = e.user_id and e.notify_email and e.emailed_at is null and e.status in ('ready', 'failed')
+    where u.id = e.user_id and u.deleted_at is null and e.notify_email and e.emailed_at is null and e.status in ('ready', 'failed')
     returning ${sql`e.id, e.org_id, e.workspace_id, e.user_id, e.document_id, e.content, e.status, e.filename, e.object_key,
       e.document_count, e.estimated_bytes, e.size_bytes, e.skipped_count, e.notify_email, e.error,
       e.created_at::text, e.completed_at::text, e.expires_at::text, u.email`}
@@ -303,7 +307,7 @@ export async function sweepDocumentExports(): Promise<void> {
     select id, object_key, status, orphaned from (
       select e.id, e.object_key, e.status, e.expires_at, (
         not exists (select 1 from workspaces w where w.id = e.workspace_id)
-        or not exists (select 1 from "user" u where u.id = e.user_id)
+        or not exists (select 1 from "user" u where u.id = e.user_id and u.deleted_at is null)
         or (e.document_id is not null and not exists (
           select 1 from documents d where d.id = e.document_id and d.purged_at is null))
       ) as orphaned

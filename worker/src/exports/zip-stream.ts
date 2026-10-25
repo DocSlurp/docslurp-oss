@@ -22,7 +22,7 @@ export const ZIP_MAX_ENTRIES = 65_000;
 const encoder = new TextEncoder();
 
 /** Releases a stream that will not be read, so its storage connection returns to the pool. */
-async function discard(stream: AsyncIterable<Uint8Array>): Promise<void> {
+export async function discard(stream: AsyncIterable<Uint8Array>): Promise<void> {
   const destroyable = stream as AsyncIterable<Uint8Array> & { destroy?: () => void };
   if (typeof destroyable.destroy === "function") {
     destroyable.destroy();

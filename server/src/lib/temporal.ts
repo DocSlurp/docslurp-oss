@@ -647,7 +647,8 @@ export async function startDocumentExportWorkflow(input: import("@docslurp/share
     await client.workflow.start(DOCUMENT_EXPORT_WORKFLOW, {
       taskQueue: process.env.TEMPORAL_DOCUMENT_EXPORT_TASK_QUEUE?.trim() || DEFAULT_DOCUMENT_EXPORT_TASK_QUEUE,
       workflowId: documentExportWorkflowId(input.exportId), args: [input],
-      workflowExecutionTimeout: "5 hours",
+      // Four 2-hour attempts with backoff; the export sweep fails stalled exports after 10 hours.
+      workflowExecutionTimeout: "9 hours",
     });
   } catch (error) {
     if (!(error instanceof WorkflowExecutionAlreadyStartedError)) throw error;

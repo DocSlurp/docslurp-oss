@@ -150,4 +150,18 @@ describe("document exports", () => {
     expect(mocks.deleteObject).toHaveBeenCalledWith(`exports/o/w/${exported.id}.zip`);
     expect(await sql`select id from document_exports where id = ${exported.id}`).toEqual([]);
   });
+
+  it("treats a deleted (tombstoned) requester's exports as orphans and never emails them", async () => {
+    await sql`insert into "user" (id, name, email) values ('leaver', 'Leaver', 'leaver@example.test')`;
+    await sql`insert into org_memberships (org_id, user_id, role) values ('o', 'leaver', 'owner')`;
+    const exported = await exportsService.requestDocumentExport({ userId: "leaver", content: "all", document: doc("big", "Scan.pdf") });
+    await sql`update document_exports set status = 'ready' where id = ${exported.id}`;
+    await sql`update "user" set deleted_at = now(), email = 'deleted-leaver@deleted.invalid' where id = 'leaver'`;
+
+    await exportsService.sweepDocumentExports();
+
+    expect(mocks.email).not.toHaveBeenCalled();
+    expect(mocks.deleteObject).toHaveBeenCalledWith(`exports/o/w/${exported.id}.zip`);
+    expect(await sql`select id from document_exports where id = ${exported.id}`).toEqual([]);
+  });
 });

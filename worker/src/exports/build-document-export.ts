@@ -12,7 +12,7 @@ import {
 import type { Sql } from "postgres";
 
 import { keyFromStorageUri, type ArtifactStore } from "../tools/storage.js";
-import { ZIP_MAX_ENTRIES, zipStream, type ZipStreamBody, type ZipStreamEntry } from "./zip-stream.js";
+import { discard, ZIP_MAX_ENTRIES, zipStream, type ZipStreamBody, type ZipStreamEntry } from "./zip-stream.js";
 
 /**
  * Builds one queued document export: streams each document's files from
@@ -159,6 +159,7 @@ export async function* documentExportEntries(
       body: async () => {
         const markdown = markdownKey ? await source.open(markdownKey).catch(() => null) : null;
         if (markdown && markdown.size !== 0) return markdown;
+        if (markdown) await discard(markdown.stream);
         const joined = pages.map((page) => page.text).filter((text) => text.trim()).join("\n\n");
         return joined || null;
       },
@@ -364,7 +365,11 @@ export async function buildDocumentExport(
     const [pageCount] = await sql<Array<{ pages: number }>>`
       select count(*)::int as pages from document_pages where document_id = any(${sql.array(documents.map((document) => document.id))})
     `;
-    const omitPageFiles = documents.length * 12 + (pageCount?.pages ?? 0) > ZIP_MAX_ENTRIES;
+    // "all" also adds one images/ entry per rendered page.
+    const imageEntries = row.content === "all"
+      ? documents.reduce((sum, document) => sum + Object.keys(document.artifacts ?? {}).filter((slot) => /:page-\d+$/.test(slot)).length, 0)
+      : 0;
+    const omitPageFiles = documents.length * 12 + imageEntries + (pageCount?.pages ?? 0) > ZIP_MAX_ENTRIES;
     const root = row.filename.replace(/\.zip$/i, "");
     const skipped: Array<{ path: string; reason: string }> = [];
     let files = 0;
@@ -411,9 +416,13 @@ export async function buildDocumentExport(
       returning id
     `;
     if (finished.length === 0) {
-      // Failed, expired or removed (its document or workspace was deleted) while building.
-      console.warn(`[document-export] finished after it was failed, expired or removed export=${row.id}; deleting its object`);
-      await storage.deleteKeys([row.object_key]).catch(() => undefined);
+      // Another attempt may already have finished (ready) with the same key: keep that zip.
+      // Otherwise the export was failed, expired or removed while building, so drop the upload.
+      const [current] = await sql<Array<{ status: string }>>`select status from document_exports where id = ${row.id}`;
+      if (current?.status !== "ready") {
+        console.warn(`[document-export] finished after it was ${current?.status ?? "removed"} export=${row.id}; deleting its object`);
+        await storage.deleteKeys([row.object_key]).catch(() => undefined);
+      }
       return { status: "skipped" };
     }
     console.log(`[document-export] ready export=${row.id} documents=${documents.length} files=${files} skipped=${skipped.length} bytes=${sizeBytes}`);

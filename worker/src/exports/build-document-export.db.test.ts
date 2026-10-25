@@ -194,6 +194,16 @@ describe("buildDocumentExport", () => {
     expect(await buildDocumentExport({ sql, storage: removing as never }, "exp-7")).toEqual({ status: "skipped" });
     expect(deleted).toEqual(["exports/o/w/exp-7.zip"]);
 
+    // A stale attempt finishing after another attempt made the export ready keeps the shared zip.
+    await queue("exp-8", { documentId: "doc-1", content: "markdown", filename: "Q3 plan.zip" });
+    const racing = { ...storage, openStream: async (key: string) => {
+      await sql`update document_exports set status = 'ready' where id = 'exp-8'`;
+      return storage.openStream(key);
+    } };
+    deleted.length = 0;
+    expect(await buildDocumentExport({ sql, storage: racing as never }, "exp-8")).toEqual({ status: "skipped" });
+    expect(deleted).toEqual([]);
+
     await queue("exp-6", { documentId: "doc-1", content: "markdown", filename: "Q3 plan.zip" });
     await sql`update document_exports set expires_at = now() - interval '1 minute' where id = 'exp-6'`;
     expect(await buildDocumentExport({ sql, storage: storage as never }, "exp-6")).toEqual({ status: "skipped" });

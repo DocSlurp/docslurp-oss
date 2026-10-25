@@ -316,7 +316,7 @@ This is scaling on a single host, not a multi-host design.
 
 ## Export cleanup
 
-Zip exports (`POST /v1/exports`) are built by the worker on the `docslurp-document-export` task queue (override with `TEMPORAL_DOCUMENT_EXPORT_TASK_QUEUE` on both the API and the worker) and stored at `exports/<orgId>/<workspaceId>/<exportId>.zip`. Each link lives seven days. The API's maintenance sweep (`MAINTENANCE_SWEEP_INTERVAL_MS`) emails finished exports over 250 MB through Resend, deletes objects whose seven days have passed or whose document, workspace or requester was deleted (including organization offboarding), and marks exports unfinished after six hours as failed. Exports hold at most 65,000 files (zip without ZIP64); past that, page-by-page Markdown is left out and the README says so. Look for `[document-export]` log lines.
+Zip exports (`POST /v1/exports`) are built by the worker on the `docslurp-document-export` task queue (override with `TEMPORAL_DOCUMENT_EXPORT_TASK_QUEUE` on both the API and the worker) and stored at `exports/<orgId>/<workspaceId>/<exportId>.zip`. Each link lives seven days. The API's maintenance sweep (`MAINTENANCE_SWEEP_INTERVAL_MS`) emails finished exports over 250 MB through Resend, deletes objects whose seven days have passed or whose document, workspace or requester was deleted (including organization and account deletion), and marks exports unfinished after ten hours as failed. Exports hold at most 65,000 files (zip without ZIP64); past that, page-by-page Markdown is left out and the README says so. Look for `[document-export]` log lines.
 
 As a backstop, add a bucket lifecycle rule that expires objects under the `exports/` prefix after 8 days, so a stopped sweep never leaves exports behind:
 
