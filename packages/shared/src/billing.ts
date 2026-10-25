@@ -60,6 +60,12 @@ export function dollarsToCredits(dollars: number): number {
  *   1.5 credits before those cuts; recheck per-model means after deploy.
  *   mercury-3 and mimo-v2.6-flash (p90 .018/.023, above 1.5 credits; eval-only,
  *   not in WORKSPACE_CHAT_MODELS) move to advanced.
+ * - Standard answers 1.5 -> 1 credit (owner decision 2026-10-25), after the cuts.
+ *   Measured on production /v1/chat (88 turns per model, 2026-10-25), p50 / p90
+ *   USD per answer: glm-5.3-flash .0022/.0041, claude-haiku-5.5 .0024/.0039,
+ *   gpt-6-luna .0019/.0039 (deepseek-v4.1-flash .0065/.0139 stays advanced),
+ *   leaving ~60% margin at p90 for every standard catalog model. lfm-2.5-24b
+ *   (eval-only, pre-cut p90 .010, at the new price) moves to advanced.
  *
  * No per-file minimum (owner decision 2026-10-21): a file pays only for its
  * pages, fractional credits included. Our per-document overhead (queue,
@@ -80,7 +86,7 @@ export const PRICE_CARD = {
   storageGbMonth: 25,
   searchPer1k: 10,
   /** Credits per chat answer by model tier (CHAT_MODEL_TIERS). */
-  chatAnswerTiers: { standard: 1.5, advanced: 7.5, premium: 50 },
+  chatAnswerTiers: { standard: 1, advanced: 7.5, premium: 50 },
   /** Vision output tokens one Rich page includes. */
   richIncludedOutputTokens: 1_000,
   /** Each further block of this many output tokens counts as one more Rich page (rounded up). */
@@ -140,7 +146,7 @@ export function featureCredits(feature: DocumentFeature, pages: number): number 
 }
 
 /** Stamped on billable events so a receipt says which price card charged it. */
-export const PRICE_CARD_VERSION = "2026-10-25";
+export const PRICE_CARD_VERSION = "2026-10-25b";
 
 /** Per dedicated machine, sold by sales, not self-serve. */
 export const PRIVATE_DEDICATED_MONTHLY_USD = 2_000;
@@ -246,7 +252,7 @@ export type ChatAnswerTier = keyof PriceCard["chatAnswerTiers"];
 export const CHAT_MODEL_TIERS: Readonly<Record<string, ChatAnswerTier>> = {
   "glm-5.3-flash": "standard",
   "mercury-3": "advanced",
-  "lfm-2.5-24b-a2b": "standard",
+  "lfm-2.5-24b-a2b": "advanced",
   "claude-haiku-5.5": "standard",
   "gpt-6-luna": "standard",
   "mimo-v2.6-flash": "advanced",
