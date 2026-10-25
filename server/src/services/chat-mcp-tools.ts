@@ -238,6 +238,26 @@ export const WEB_FETCH_URL_REFUSED = {
   code: "url_not_allowed",
 } as const;
 
+/** Ceiling for the non-passage part of a tool result shown to the model. */
+const MODEL_RESULT_MAX_CHARS = 12_000;
+/** Ceiling for one evidence passage shown to the model. */
+const EVIDENCE_TEXT_MAX_CHARS = 4_000;
+
+/** The tool result without its search passages (they are sent once, as `evidence`); undefined when nothing else is left. */
+export function withoutEvidence(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    if (!value.length) return value;
+    const kept = value.filter(item => !searchResultSchema.safeParse(item).success).map(withoutEvidence).filter(item => item !== undefined);
+    return kept.length ? kept : undefined;
+  }
+  if (!value || typeof value !== "object") return value;
+  const entries = Object.entries(value as Record<string, unknown>).flatMap(([key, item]) => {
+    const kept = withoutEvidence(item);
+    return kept === undefined ? [] : [[key, kept] as const];
+  });
+  return entries.length ? Object.fromEntries(entries) : undefined;
+}
+
 /** A turn owns its tool budget and citation numbering; no global user state. */
 export function createChatMcpTools(args: {
   manifest: McpManifest;
@@ -326,6 +346,21 @@ export function createChatMcpTools(args: {
     }
     const object = value as Record<string, unknown>;
     for (const key of ["results", "citations", "data", "response"]) collectEvidence(object[key], returned);
+  }
+
+  /** This call's passages, deduplicated, numbered as the turn cites them. Passages past the citation cap are not citable, so they are left out. */
+  function modelEvidence(returned: SearchResult[]) {
+    const seen = new Set<number>();
+    const evidence = [];
+    for (const item of returned) {
+      const index = citations.findIndex(c => c.citation.documentId === item.citation.documentId
+        && c.citation.chunkIndex === item.citation.chunkIndex && c.text === item.text);
+      if (index < 0 || seen.has(index)) continue;
+      seen.add(index);
+      evidence.push({ citationIndex: index + 1, filename: item.citation.filename, documentId: item.citation.documentId,
+        pageNumber: item.citation.pageNumber, text: (item.parentText ?? item.text).slice(0, EVIDENCE_TEXT_MAX_CHARS) });
+    }
+    return evidence;
   }
 
   const offered = (id: string) => !CHAT_EXCLUDED_TOOLS.has(id) && (!id.startsWith("web") || (args.webTools === true && CHAT_WEB_TOOLS.has(id)));
@@ -491,15 +526,17 @@ export function createChatMcpTools(args: {
           if (!ok) return { ...fail(failureCode ?? responseErrorCode(result, response.status)), status: response.status };
           // Another concurrent tool may have failed while this one was running.
           throwIfBlocked();
-          const modelResult = settingsProposal ? { settingsProposal: { ...settingsProposal, token: undefined } } : result;
-          const serialized = JSON.stringify(modelResult);
+          // Passages reach the model once, as this call's numbered evidence. Every
+          // later step re-sends the whole history, so repeating the raw hits or the
+          // turn's earlier evidence here multiplied input tokens per answer.
+          const modelResult = settingsProposal ? { settingsProposal: { ...settingsProposal, token: undefined } } : withoutEvidence(result);
+          const serialized = JSON.stringify(modelResult) ?? "";
+          const evidence = modelEvidence(returned);
           return {
             ok, status: response.status,
-            result: serialized.length <= 40_000 ? modelResult : { truncated: true, preview: serialized.slice(0, 40_000) },
+            ...(modelResult === undefined ? {} : { result: serialized.length <= MODEL_RESULT_MAX_CHARS ? modelResult : { truncated: true, preview: serialized.slice(0, MODEL_RESULT_MAX_CHARS) } }),
             // Local citation numbers in a nested answer must not overwrite the outer turn's numbering.
-            evidence: citations.map((citation, index) => ({ citationIndex: index + 1,
-              filename: citation.citation.filename, documentId: citation.citation.documentId,
-              pageNumber: citation.citation.pageNumber, text: citation.text.slice(0, 1500) })),
+            ...(evidence.length ? { evidence } : {}),
           };
         } catch (error) {
           update("error");
