@@ -25,5 +25,11 @@ describe("postgres span attributes", () => {
     ].join("\n");
     expect(querySite(stack)).toEqual({ "code.function.name": "getWorkspace", "code.file.path": "server/dist/services/workspaces.js", "code.line.number": 612 });
     expect(querySite("Error\n    at node:internal/process/task_queues:95:5")).toEqual({});
+    // A wrapping proxy's trap (the API's resilient pool, bundled into a db chunk) is skipped.
+    expect(querySite([
+      "Error",
+      "    at Object.apply (file:///app/app/dist/server/chunks/db_DI25GAWu.mjs:24107:21)",
+      "    at listWorkerCapabilities (file:///app/app/dist/server/chunks/workers_Ab12.mjs:310:18)",
+    ].join("\n"))).toEqual({ "code.function.name": "listWorkerCapabilities", "code.file.path": "app/dist/server/chunks/workers_Ab12.mjs", "code.line.number": 310 });
   });
 });
