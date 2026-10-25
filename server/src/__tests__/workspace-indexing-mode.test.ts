@@ -69,7 +69,7 @@ async function seedDoc(id: string, workspaceId: string, orgId: string, pages: nu
   }
 }
 
-describe("plan defaults", () => {
+describe("workspace defaults", () => {
   it("defaults document summaries on, persists opt-outs, and preserves privacy locks", async () => {
     const enabled = await ws.createWorkspace({ userId: "u1", orgId: "gold", name: "Summaries" });
     expect(enabled.summaries).toBe(true);
@@ -88,12 +88,13 @@ describe("plan defaults", () => {
     expect(defaultWorkspace.summaries).toBe(true);
   });
 
-  it("defaults a free org without purchases to map, paid or funded orgs to full", async () => {
+  it("defaults every organization to full, whatever it has bought", async () => {
     const mk = (orgId: string) => ws.createWorkspace({ userId: "u1", orgId, name: "W" });
-    expect((await mk("free")).pipeline.indexingMode).toBe("map");
-    expect((await mk("free")).indexingMode).toBe("map");
-    expect((await mk("gold")).pipeline.indexingMode).toBe("full");
-    expect((await mk("funded")).pipeline.indexingMode).toBe("full");
+    for (const orgId of ["free", "gold", "funded"]) {
+      const created = await mk(orgId);
+      expect(created.pipeline.indexingMode, orgId).toBe("full");
+      expect(created.indexingMode, orgId).toBe("full");
+    }
   });
 
   it("honours an explicit mode and pins full while the flag is off", async () => {
@@ -131,9 +132,9 @@ describe("mode switching", () => {
     await expect(ws.updateWorkspace("t-priv", "u1", {}, { indexingMode: "visual" })).rejects.toMatchObject({ code: "visual_mode_privacy" });
   });
 
-  it("returns 402 for full on a free org without credits, allows it when funded", async () => {
+  it("lets any organization switch to full; credits are checked when the indexing work is admitted", async () => {
     await seedWorkspace("t-free", "free", "map");
-    await expect(ws.updateWorkspace("t-free", "u1", {}, { indexingMode: "full" })).rejects.toMatchObject({ status: 402, code: "credits_required_for_full_index" });
+    expect((await ws.updateWorkspace("t-free", "u1", {}, { indexingMode: "full" }))?.indexingMode).toBe("full");
     await seedWorkspace("t-funded", "funded", "map");
     expect((await ws.updateWorkspace("t-funded", "u1", {}, { indexingMode: "full" }))?.indexingMode).toBe("full");
   });

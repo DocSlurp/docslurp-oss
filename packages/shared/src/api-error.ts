@@ -66,7 +66,7 @@ export function isApiErrorCode(value: unknown): value is ApiErrorCode {
 /**
  * Optional structured context. The boundary only forwards validation `issues`
  * (field paths), limit metadata (`retryAfterSeconds`, `category`, `policy`,
- * `account` (`starter` | `funded`), ...), `links` and a failed chat turn's `usage`.
+ * `spendKind`, ...), `links` and a failed chat turn's `usage`.
  */
 export type ApiErrorDetails = Record<string, unknown>;
 
@@ -153,7 +153,7 @@ export function apiErrorCodeForStatus(status: number): ApiErrorCode {
 }
 
 const SAFE_DETAIL_NUMBERS = ["retryAfterSeconds", "limitCents", "spentCents", "maxBytes", "availableCredits", "heldCredits", "chatReserveCredits"] as const;
-const SAFE_DETAIL_LABELS = ["category", "policy", "account", "spendKind"] as const;
+const SAFE_DETAIL_LABELS = ["category", "policy", "spendKind"] as const;
 
 /**
  * Where a caller can lift a limit (`details.links` on 402 and 429 responses):
@@ -184,8 +184,8 @@ export function publicApiErrorLinks(value: unknown): ApiErrorLinks | undefined {
 
 /**
  * Public copy for `code`, plus where to go next when the details carry links:
- * a starter-account rate limit points at buying credits, credit errors at
- * buying credits and auto top-up, budget errors at billing, API key limits at the key settings. Without links (self-hosted, or
+ * a rate limit points at the docs (every account shares one table), credit
+ * errors at buying credits and auto top-up, budget errors at billing, API key limits at the key settings. Without links (self-hosted, or
  * no billing) it is the reviewed copy alone.
  */
 export function publicApiErrorMessage(code: ApiErrorCode, details?: ApiErrorDetails): string {
@@ -195,12 +195,9 @@ export function publicApiErrorMessage(code: ApiErrorCode, details?: ApiErrorDeta
   }
   const links = publicApiErrorLinks(details?.links);
   if (!links) return base;
-  const account = typeof details?.account === "string" ? details.account : undefined;
   switch (code) {
+    // Every account shares one rate-limit table, so the message never suggests buying credits to raise it.
     case "rate_limited":
-      if (account === "starter" && links.buyCredits) {
-        return `Starter rate limit reached. Accounts that have bought credits get higher limits: buy credits at ${links.buyCredits}, or wait for Retry-After and try again.`;
-      }
       return links.docs ? `${base} Rate limits: ${links.docs}` : base;
     case "ip_temporarily_blocked":
       return links.docs ? `${base} Rate limits: ${links.docs}` : base;

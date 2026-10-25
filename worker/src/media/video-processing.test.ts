@@ -19,7 +19,7 @@ function fixture(){
   const state=new WorkflowState({id:"r",userId:"u",orgId:"o",workspaceId:"w",stats:{},artifacts:{},spentCents: 0,pipeline:{}} as WorkspaceRun,[]);
   state.store={updateProgress:vi.fn(async()=>{})} as unknown as NonNullable<WorkflowState["store"]>;
   const storage={putJson:vi.fn(async(_key:string,r:VisionResult)=>{saved=r;}),getJson:vi.fn(async()=>saved)} as unknown as ArtifactStore;
-  return{state,journal,provider,storage,scope:{orgId:"o",workspaceId:"w",runId:"r",documentId:"d"},frames:[{seconds:0,bytes:new Uint8Array([1])}],policy:videoPolicy(true,30),config:mediaConfig({})};
+  return{state,journal,provider,storage,scope:{orgId:"o",workspaceId:"w",runId:"r",documentId:"d"},frames:[{seconds:0,bytes:new Uint8Array([1])}],policy:videoPolicy(30),config:mediaConfig({})};
 }
 it("replays a completed visual receipt without paying or charging twice",async()=>{
   const f=fixture();await describeVideoChunk(f);await describeVideoChunk(f);

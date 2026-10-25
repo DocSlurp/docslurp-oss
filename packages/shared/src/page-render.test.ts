@@ -10,14 +10,12 @@ describe("quality-specific render identities", () => {
   });
 });
 
-it("keeps all initial readers cheap and upgrades only explicit eligible exports", () => {
-  expect(pageRenderDpi("reader", false)).toBe(120);
-  expect(pageRenderDpi("reader", true)).toBe(120);
-  expect(pageRenderDpi("export", false)).toBe(120);
-  expect(pageRenderDpi("export", true)).toBe(250);
-  expect(pageRenderCapabilities(false)).toEqual({
-    sharperImage: false,
-    exportDpi: 120,
+it("keeps initial readers cheap and gives every organization the sharper export", () => {
+  expect(pageRenderDpi("reader")).toBe(120);
+  expect(pageRenderDpi("export")).toBe(250);
+  expect(pageRenderCapabilities()).toEqual({
+    sharperImage: true,
+    exportDpi: 250,
   });
   expect(
     pageRenderWorkflowId({

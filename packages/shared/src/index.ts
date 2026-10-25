@@ -31,6 +31,7 @@ export * from "./page-vectors.js";
 export * from "./pipeline.js";
 export * from "./document-versions.js";
 export * from "./jobs.js";
+export * from "./media-upload-estimate.js";
 export * from "./config-change.js";
 export * from "./privacy.js";
 export * from "./private-endpoints.js";

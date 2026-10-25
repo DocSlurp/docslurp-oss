@@ -16,8 +16,7 @@ Design: [deferred search profiles](superpowers/specs/2026-10-12-deferred-search-
 
 ## Defaults
 
-- **Starter organizations** (only the free starter credits): `map`. They can pick `visual` (never a default: no template or credit balance selects it for you). `full` is allowed while the organization can spend credits (including starter credits); otherwise the API returns 402 with `code: "credits_required_for_full_index"`.
-- **Funded organizations** (have bought credits): `full`. `map` and `visual` are always available.
+- **Every organization** starts with `full`. `map` and `visual` are explicit, cheaper choices open to everyone (`visual` is never a default: no template or credit balance selects it for you). The default does not depend on what an organization has bought. Indexing work is admitted against the credit balance like any other spend, so an organization with no credits gets the usual 402 (`credit_exhausted`) when the work starts.
 
 Pages are billed as they are indexed, at the same per-page prices as `full` (5 credits per 1,000 text pages, 250 per 1,000 pages read by OCR or embedded as images). A page is billed once, whether a query or a full index materializes it.
 

@@ -139,11 +139,13 @@ describe("limit links", () => {
   it("keeps only known keys with absolute http(s) URLs and never an upgrade link", () => {
     expect(publicApiErrorLinks({ ...links, upgrade: "https://docslurp.io/pricing", evil: "https://x", apiKeys: "javascript:alert(1)" })).toEqual(links);
     expect(publicApiErrorLinks({ billing: "https://a b" })).toBeUndefined();
-    expect(publicApiErrorDetails({ links, account: "starter", plan: "free", note: "dropped" })).toEqual({ links, account: "starter" });
+    // Plan labels (account, plan) are never public detail fields.
+    expect(publicApiErrorDetails({ links, account: "starter", plan: "free", note: "dropped" })).toEqual({ links });
   });
 
-  it("points starter rate limits at buying credits, credit errors at buying credits and auto top-up", () => {
-    expect(publicApiErrorMessage("rate_limited", { account: "starter", links })).toContain("buy credits at https://docslurp.io/app/billing#buy-credits");
+  it("never tells a rate-limited caller to buy credits; points credit errors at buying credits and auto top-up", () => {
+    expect(publicApiErrorMessage("rate_limited", { account: "account", links })).not.toContain("buy credits");
+    expect(publicApiErrorMessage("rate_limited", { account: "starter", links })).not.toContain("buy credits");
     expect(publicApiErrorMessage("credit_exhausted", { links })).toBe(
       "Your organization is out of credits. Buy credits at https://docslurp.io/app/billing#buy-credits, or turn on auto top-up at https://docslurp.io/app/billing#auto-top-up.",
     );

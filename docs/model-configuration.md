@@ -73,7 +73,7 @@ Per-model prompt, output cap, routing and reasoning settings live in
 
 | Model URI | List $/M in / out | Est. cost/page | Profile behaviour |
 | --- | --- | --- | --- |
-| `llm://openrouter/deepseek/deepseek-v4.1-flash-1017` (default) | 0.30 / 1.20 (US hosts) | 0.103 cents | Markdown + LaTeX prompt, 8,192 output cap, reasoning effort `none`. Funded orgs: Together, Fireworks, Parasail (US), no other fallbacks. Unfunded starter orgs: DeepSeek's own China-hosted endpoint first ($0.15 / $0.60, about 0.04 cents a page), then the US hosts |
+| `llm://openrouter/deepseek/deepseek-v4.1-flash-1017` (default) | 0.30 / 1.20 (US hosts) | 0.103 cents | Markdown + LaTeX prompt, 8,192 output cap, reasoning effort `none`. Together, Fireworks, Parasail (US), no other fallbacks, for every organization (DeepSeek's own China-hosted endpoint is cheaper but is not used: where page images go never depends on the account's balance) |
 | `llm://openrouter/xiaomi/mimo-v2.6-flash` | 0.14 / 0.28 | 0.056 cents | Markdown transcription prompt, output cap ceiling 8,192, reasoning `none`, routed to Relace then DeepInfra with fallbacks, math delimiters normalized |
 | `llm://openrouter/openai/gpt-6-luna` | 0.10 / 0.50 | 0.061 cents | Page Markdown + LaTeX prompt, image detail `high`, reasoning `none`, whole-page code fence removed, content-filter retry on Bedrock then Azure US |
 | `llm://openrouter/z-ai/glm-5.3-flash` | 0.0113 / 0.1589 | 0.013 cents (computed from about 3,000 input and 560 output tokens) | Markdown transcription prompt, output cap ceiling 8,192, reasoning `minimal`, routed to Wafer, Friendli then InferenceNet with no other fallbacks, missing table delimiter rows repaired |

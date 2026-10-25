@@ -10,7 +10,6 @@ import { isSelfHostedDeployment, withUpgradeLinks } from "../lib/upgrade-links.j
 import { requestIp } from "../lib/request-context.js";
 import { apiKeyPagesToday } from "../services/api-key-usage.js";
 import { apiKeySpendCents } from "../services/usage-attribution.js";
-import { orgRateLimitProfile, resetRateLimitPlanCache, userRateLimitProfile } from "../services/rate-limit-plan.js";
 
 /**
  * API rate limiting.
@@ -29,17 +28,15 @@ import { orgRateLimitProfile, resetRateLimitPlanCache, userRateLimitProfile } fr
  *     credentials put the IP in the penalty box.
  *  2. Per API key or user: the per-category limit of the org's table (capped by the key's
  *     requests-per-minute when one is set), the key's custom request windows, its daily page
- *     cap for uploads and its spend windows for cost-incurring requests. The
- *     table (free = starter orgs, paid = funded orgs) comes from the organization's billing state
- *     (services/rate-limit-plan.ts): the key's organization, or for a session
- *     any organization the user belongs to. A key's own settings only lower it.
+ *     cap for uploads and its spend windows for cost-incurring requests. Every
+ *     account shares one table whatever its billing state; a key's own settings
+ *     only lower it.
  *
  * Responses carry the IETF `RateLimit-Policy` / `RateLimit` fields
  * (draft-ietf-httpapi-ratelimit-headers) for every policy that applied, plus
  * the widely used `X-RateLimit-Limit/Remaining/Reset` for the tightest one.
- * Every 429 on a hosted deployment carries `details.links` (billing, docs, and
- * for starter orgs buyCredits) and a `Link` header; starter limits say that
- * buying credits raises them.
+ * Every 429 on a hosted deployment carries `details.links` (billing, docs) and
+ * a `Link` header.
  */
 
 // Infer the concrete RESP version selected by redis instead of the generic factory.
@@ -48,7 +45,7 @@ type RedisClient = ReturnType<typeof createRateLimitRedisClient>;
 
 type RateLimitIdentityMode = "ip" | "actor";
 export type RateLimitCategory = "upload" | "search" | "chat-ai" | "read" | "write" | "webhook";
-export type RateLimitProfile = "ip" | "free" | "paid" | "self-hosted";
+export type RateLimitProfile = "ip" | "account" | "self-hosted";
 
 export type RateLimitOptions = {
   windowMs?: number;
@@ -127,16 +124,10 @@ const defaultPolicies: Record<RateLimitProfile, RateLimitPolicy> = {
     write: { windowMs: DEFAULT_WINDOW_MS, maxRequests: 300 },
     webhook: { windowMs: DEFAULT_WINDOW_MS, maxRequests: 600 },
   },
-  // Abuse protection only: spend stays bounded by credits and budgets.
-  free: {
-    upload: { windowMs: DEFAULT_WINDOW_MS, maxRequests: 60 },
-    search: { windowMs: DEFAULT_WINDOW_MS, maxRequests: 240 },
-    "chat-ai": { windowMs: DEFAULT_WINDOW_MS, maxRequests: 60 },
-    read: { windowMs: DEFAULT_WINDOW_MS, maxRequests: 600 },
-    write: { windowMs: DEFAULT_WINDOW_MS, maxRequests: 300 },
-    webhook: { windowMs: DEFAULT_WINDOW_MS, maxRequests: 120 },
-  },
-  paid: {
+  // One table for every account, whatever its billing state: abuse protection
+  // only. Spend stays bounded by credits and budgets, and the IP layer and
+  // per-key caps still apply.
+  account: {
     upload: { windowMs: DEFAULT_WINDOW_MS, maxRequests: 120 },
     search: { windowMs: DEFAULT_WINDOW_MS, maxRequests: 600 },
     "chat-ai": { windowMs: DEFAULT_WINDOW_MS, maxRequests: 120 },
@@ -445,10 +436,6 @@ function rateLimitEnabled(): boolean {
 }
 
 /** API_RATE_LIMIT_DEFAULT_PROFILE=paid gives every account the paid table (internal or single-tenant hosts). */
-function everyoneIsPaid(): boolean {
-  return process.env.API_RATE_LIMIT_DEFAULT_PROFILE?.trim().toLowerCase() === "paid";
-}
-
 function getDefaultStore(): RateLimitStore {
   if (defaultStore) return defaultStore;
 
@@ -533,17 +520,13 @@ function envOverrideLimit(profile: RateLimitProfile, category: RateLimitCategory
 
 /**
  * The limit table for a request: the middleware's own profile (IP layer),
- * self-hosted, or the plan of the caller's organization. A key's
- * `rateLimitRpm` never picks the table; when set it only caps it (resolveLimit).
+ * self-hosted, or the one table every account shares. Billing state never
+ * picks the table. A key's `rateLimitRpm` only caps it (resolveLimit).
  */
-async function resolveProfile(c: Context, configuredProfile: RateLimitProfile | undefined, now: number): Promise<RateLimitProfile> {
+function resolveProfile(configuredProfile: RateLimitProfile | undefined): RateLimitProfile {
   if (configuredProfile) return configuredProfile;
   if (isSelfHostedDeployment()) return "self-hosted";
-  if (everyoneIsPaid()) return "paid";
-  const actor = c.get("requestActor");
-  if (actor?.type === "apiKey") return actor.apiKey.orgId ? await orgRateLimitProfile(actor.apiKey.orgId, now) : "free";
-  if (actor?.type === "session") return await userRateLimitProfile(actor.userId, now);
-  return "free";
+  return "account";
 }
 
 function resolveLimit(
@@ -559,7 +542,7 @@ function resolveLimit(
   const policy: CategoryLimit | undefined = defaultPolicies[profile]?.[category];
   const override = envOverrideLimit(profile, category);
   let maxRequests = options.maxRequests ?? override.maxRequests ?? policy?.maxRequests
-    ?? readPositiveOptionalInt(process.env.API_RATE_LIMIT_MAX_REQUESTS) ?? defaultPolicies.free.read.maxRequests;
+    ?? readPositiveOptionalInt(process.env.API_RATE_LIMIT_MAX_REQUESTS) ?? defaultPolicies.account.read.maxRequests;
   const windowMs = options.windowMs ?? override.windowMs ?? policy?.windowMs
     ?? readPositiveOptionalInt(process.env.API_RATE_LIMIT_WINDOW_MS) ?? DEFAULT_WINDOW_MS;
 
@@ -671,16 +654,12 @@ async function consumeCounters(
     const penaltyMs = counters[result.denied]?.penaltyMs ?? 0;
     if (penaltyMs > 0) return blockedResponse(c, penaltyMs);
     return tooManyRequests(c, "rate_limited", "Too many requests", {
-      category: args.category, policy: state.name, account: rateLimitAccountLabel(args.profile), retryAfterSeconds: state.retryAfterSeconds,
+      category: args.category, policy: state.name, retryAfterSeconds: state.retryAfterSeconds,
     });
   }
   return null;
 }
 
-/** Public label for a limit table: starter (never bought credits) or funded orgs, or the IP / self-hosted layers. */
-export function rateLimitAccountLabel(profile: RateLimitProfile): string {
-  return profile === "free" ? "starter" : profile === "paid" ? "funded" : profile;
-}
 
 function keyPrefixFor(options: RateLimitOptions): string {
   return options.keyPrefix ?? process.env.API_RATE_LIMIT_KEY_PREFIX ?? "api";
@@ -695,7 +674,7 @@ async function checkRateLimit(c: Context, options: RateLimitOptions): Promise<Re
 
   const now = (options.now ?? Date.now)();
   const category = classifyRateLimitCategory(c.req.method, c.req.path);
-  const profile = await resolveProfile(c, options.profile, now);
+  const profile = resolveProfile(options.profile);
   const limit = resolveLimit(c, category, profile, options);
   const store = options.store ?? getDefaultStore();
   const counters: NamedCounter[] = [{ name: `${profile}-${category}`, key: "", limit: limit.maxRequests, windowMs: limit.windowMs }];
@@ -833,7 +812,6 @@ export function resetApiRateLimitBuckets(): void {
   defaultStore = null;
   memoryFallbackWarningLogged = false;
   spendCache.clear();
-  resetRateLimitPlanCache();
 }
 
 export async function enforceAuthenticatedApiRateLimit(c: Context): Promise<Response | null> {

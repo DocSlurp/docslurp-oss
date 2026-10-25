@@ -104,8 +104,24 @@ export type ConfigChangeImpact = {
   pages: number;
 };
 
-/** Response of every `…/estimate` route. `impact` is present for configuration changes. */
-export type EstimateResponse = { estimate: CostEstimate; billing: "enforced" | "disabled"; impact?: ConfigChangeImpact };
+/** Audio and video among the files of an upload estimate, priced by duration (`POST /v1/uploads/estimate`). */
+export type UploadMediaEstimate = {
+  audioFiles: number;
+  videoFiles: number;
+  audioMinutes: number;
+  videoMinutes: number;
+  /** True when a duration was not supplied and was guessed from the file size. */
+  durationsAssumed: boolean;
+  /** Whether the workspace reads sampled video frames, which triples a video minute's price. */
+  videoFrames: boolean;
+  /** `low` reads video from its audio track only; `high` also reads frames. */
+  credits: { low: number; high: number };
+  /** The cheaper processing option, or null when the price is already the lowest. `pipeline` is the upload's pipeline override. */
+  lighter: { kind: "video-audio-track-only"; credits: number; savedCredits: number; pipeline: { mediaVideo: { enabled: false } } } | null;
+};
+
+/** Response of every `…/estimate` route. `impact` is present for configuration changes; `media` for upload estimates with audio or video. */
+export type EstimateResponse = { estimate: CostEstimate; billing: "enforced" | "disabled"; impact?: ConfigChangeImpact; media?: UploadMediaEstimate | null; orgId?: string; billingExempt?: boolean };
 
 /** Settings accepted by workspace PATCH; `apply` and `autoConfirmReindex` control re-index queuing. */
 export type UpdateWorkspaceInput = JsonObject & {
@@ -117,7 +133,7 @@ export type UpdateWorkspaceInput = JsonObject & {
 export type WorkspaceUpdateResponse = { workspace: WorkspaceRecord; impact?: ConfigChangeImpact; job?: JobStatus } & JsonObject;
 
 /** `workspace`: ID, slug or name (see {@link DocSlurpClientOptions.workspace}); omitted: the client workspace. */
-export type UploadEstimateInput = { files: Array<{ name: string; size: number; pages?: number }>; workspace?: string };
+export type UploadEstimateInput = { files: Array<{ name: string; size: number; pages?: number; type?: string; durationSeconds?: number }>; workspace?: string };
 
 /** Counts across a job's runs. */
 export type JobProgress = { documents: number; documentsTotal: number; pages: number; pagesTotal: number };

@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-const dbMock = vi.hoisted(() => ({ funded: false, capacity: null as { count: number; own: boolean } | null, calls: [] as Array<[TemplateStringsArray, ...unknown[]]> }));
-vi.mock("../db.js", () => { const sql = Object.assign(vi.fn(async (strings: TemplateStringsArray, ...values: unknown[]) => { dbMock.calls.push([strings, ...values]); if (strings.join("").includes("funded_at")) return [{funded:dbMock.funded}]; if (strings.join("").includes("insert into document_page_renders")) return [{generation:"2026-10-23 12:00:00+00"}]; return strings.join("").includes("count(*)") && dbMock.capacity ? [dbMock.capacity] : []; }), { begin: vi.fn(async (fn: (sql: unknown) => unknown) => fn(sql)) }); return { sql }; });
+const dbMock = vi.hoisted(() => ({ capacity: null as { count: number; own: boolean } | null, calls: [] as Array<[TemplateStringsArray, ...unknown[]]> }));
+vi.mock("../db.js", () => { const sql = Object.assign(vi.fn(async (strings: TemplateStringsArray, ...values: unknown[]) => { dbMock.calls.push([strings, ...values]); if (strings.join("").includes("insert into document_page_renders")) return [{generation:"2026-10-23 12:00:00+00"}]; return strings.join("").includes("count(*)") && dbMock.capacity ? [dbMock.capacity] : []; }), { begin: vi.fn(async (fn: (sql: unknown) => unknown) => fn(sql)) }); return { sql }; });
 vi.mock("../lib/temporal.js", () => ({ startPageRenderWorkflow: vi.fn() }));
 vi.mock("../services/documents.js", () => ({ getDocumentViewerPayload: vi.fn() }));
 vi.mock("../services/organizations.js", () => ({ getWorkspaceAccess: vi.fn(), canEditWorkspace: vi.fn() }));
@@ -10,7 +10,7 @@ import { getWorkspaceAccess, canEditWorkspace } from "../services/organizations.
 import { startPageRenderWorkflow } from "../lib/temporal.js";
 import { requestDocumentPageRender } from "../services/document-page-render.js";
 const viewer = { document: { id: "doc", runId: "run", orgId: "org", workspaceId: "workspace", mimeType: "application/pdf", status: "completed", pageCount: 3 }, artifacts: [], source: { url: "/source" } };
-beforeEach(() => { vi.clearAllMocks(); dbMock.capacity = null; dbMock.funded = false; dbMock.calls.length = 0; vi.mocked(getDocumentViewerPayload).mockResolvedValue(structuredClone(viewer) as never); vi.mocked(getWorkspaceAccess).mockResolvedValue({} as never); vi.mocked(canEditWorkspace).mockReturnValue(true); });
+beforeEach(() => { vi.clearAllMocks(); dbMock.capacity = null; dbMock.calls.length = 0; vi.mocked(getDocumentViewerPayload).mockResolvedValue(structuredClone(viewer) as never); vi.mocked(getWorkspaceAccess).mockResolvedValue({} as never); vi.mocked(canEditWorkspace).mockReturnValue(true); });
 describe("exact page image requests", () => {
   it("never queues reads, missing pages, withheld sources or read-only users", async () => {
     expect(await requestDocumentPageRender("doc", 3, "user", false, () => {})).toMatchObject({ status: "pending" });
@@ -56,88 +56,23 @@ describe("exact page image requests", () => {
   });
 });
 
-it("derives quality from the document's organization and isolates cache after funding", async () => {
+it("gives every organization the same reader resolution and the sharper export", async () => {
+  // A cached 120-DPI export is not the sharper image: the export still renders at 250.
   vi.mocked(getDocumentViewerPayload).mockResolvedValue({
     ...viewer,
-    artifacts: [
-      { slot: "doc:raster-v3-export-120dpi-page-3", url: "/free-export" },
-    ],
+    artifacts: [{ slot: "doc:raster-v3-export-120dpi-page-3", url: "/old-export" }],
   } as never);
-  expect(
-    await requestDocumentPageRender(
-      "doc",
-      3,
-      "user-with-another-paid-org",
-      false,
-      () => {},
-      "export",
-    ),
-  ).toMatchObject({
-    status: "ready",
-    dpi: 120,
-    capabilities: { sharperImage: false, exportDpi: 120 },
-  });
-  dbMock.funded = true;
-  expect(
-    await requestDocumentPageRender(
-      "doc",
-      3,
-      "user-with-another-paid-org",
-      false,
-      () => {},
-      "reader",
-    ),
-  ).toMatchObject({
+  expect(await requestDocumentPageRender("doc", 3, "user", false, () => {}, "reader")).toMatchObject({
     status: "pending",
     dpi: 120,
     capabilities: { sharperImage: true, exportDpi: 250 },
   });
-  expect(
-    await requestDocumentPageRender(
-      "doc",
-      3,
-      "user-with-another-paid-org",
-      false,
-      () => {},
-      "export",
-    ),
-  ).toMatchObject({ status: "pending", dpi: 250 });
-  const query = dbMock.calls.find((call) =>
-    call[0].join("").includes("funded_at"),
-  )!;
-  expect(query).toContain("org");
-  expect(query).not.toContain("user-with-another-paid-org");
-});
-
-it("grants house organizations explicit quality without changing initial reader resolution", async () => {
-  vi.stubEnv("BILLING_EXEMPT_ORG_IDS", "org");
-  try {
-    expect(
-      await requestDocumentPageRender(
-        "doc",
-        3,
-        "user",
-        false,
-        () => {},
-        "reader",
-      ),
-    ).toMatchObject({
-      dpi: 120,
-      capabilities: { sharperImage: true, exportDpi: 250 },
-    });
-    expect(
-      await requestDocumentPageRender(
-        "doc",
-        3,
-        "user",
-        false,
-        () => {},
-        "export",
-      ),
-    ).toMatchObject({ dpi: 250 });
-  } finally {
-    vi.unstubAllEnvs();
-  }
+  expect(await requestDocumentPageRender("doc", 3, "user", false, () => {}, "export")).toMatchObject({
+    status: "pending",
+    dpi: 250,
+  });
+  // Quality never depends on the organization's billing state: nothing reads it.
+  expect(dbMock.calls.some((call) => call[0].join("").includes("funded_at"))).toBe(false);
 });
 
 it("reuses authorized legacy reader pixels without claiming a DPI or queuing a downgrade", async () => {
@@ -154,7 +89,7 @@ it("reuses authorized legacy reader pixels without claiming a DPI or queuing a d
   );
   expect(result).toMatchObject({
     status: "ready",
-    capabilities: { sharperImage: false },
+    capabilities: { sharperImage: true },
   });
   expect(result).not.toHaveProperty("dpi");
   expect(startPageRenderWorkflow).not.toHaveBeenCalled();

@@ -57,9 +57,9 @@ export const estimateToolDefinitions: Array<{ name: EstimateToolName; title: str
     type: "object", properties: { workspace, mode: { type: "string", enum: ["full", "map", "visual"] } }, required: ["mode"] } },
   { name: "graphRebuildEstimate", title: "Estimate Graph Rebuild", description: "Cost of rebuilding the workspace knowledge graph. Read-only.", inputSchema: {
     type: "object", properties: { workspace } } },
-  { name: "uploadEstimate", title: "Estimate Upload", description: "Cost of ingesting files before any bytes are sent. Pass page counts when known; otherwise pages are estimated from size.", inputSchema: {
+  { name: "uploadEstimate", title: "Estimate Upload", description: "Cost of ingesting files before any bytes are sent. Pass page counts when known; otherwise pages are estimated from size. Audio and video are priced by duration: pass durationSeconds (or the MIME type) and read `media` for their credits and the cheaper audio-track-only option.", inputSchema: {
     type: "object", properties: { workspace, files: { type: "array", minItems: 1, maxItems: 500, items: {
-      type: "object", properties: { name: { type: "string", minLength: 1 }, size: { type: "integer", minimum: 0 }, pages: { type: "integer", minimum: 0 } }, required: ["name", "size"] } } }, required: ["files"] } },
+      type: "object", properties: { name: { type: "string", minLength: 1 }, size: { type: "integer", minimum: 0 }, pages: { type: "integer", minimum: 0 }, type: { type: "string" }, durationSeconds: { type: "number", exclusiveMinimum: 0 } }, required: ["name", "size"] } } }, required: ["files"] } },
 ];
 
 export const jobsGetToolDefinition = {
@@ -77,7 +77,7 @@ const inputSchemas: Record<EstimateToolName, z.ZodType<Record<string, unknown>>>
   "fullIndexEstimate": z.object({ ...common, documentId: z.string().min(1).optional(), documentIds: z.array(z.string().min(1)).max(500).optional() }),
   "indexingModeEstimate": z.object({ ...common, mode: z.enum(["full", "map", "visual"]) }),
   "graphRebuildEstimate": z.object({ ...common }),
-  "uploadEstimate": z.object({ ...common, files: z.array(z.object({ name: z.string().min(1), size: z.number().int().min(0), pages: z.number().int().min(0).optional() })).min(1).max(500) }),
+  "uploadEstimate": z.object({ ...common, files: z.array(z.object({ name: z.string().min(1), size: z.number().int().min(0), pages: z.number().int().min(0).optional(), type: z.string().max(255).optional(), durationSeconds: z.number().positive().max(24 * 3600).optional() })).min(1).max(500) }),
 };
 
 export function isEstimateToolName(name: string): name is EstimateToolName {
