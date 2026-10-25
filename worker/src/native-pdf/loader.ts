@@ -4,6 +4,8 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { BindingNativePdfEngine, isNativePdfBindingModule } from "./binding-engine.js";
+import { resolveNativePdfMode } from "./mode.js";
+import { reportNativePdfEngineLoad } from "./telemetry.js";
 import type { NativePdfEngine } from "./types.js";
 
 /**
@@ -105,7 +107,7 @@ export function loadNativePdfModule(env: NodeJS.ProcessEnv = process.env): Nativ
     }
   }
   const reason = tried.length > 0 ? tried.join("; ") : "no engine module configured (vendor-artifacts/native-pdf/manifest.json missing)";
-  console.error(`[native-pdf] engine unavailable reason=${reason}`);
+  reportNativePdfEngineLoad({ ok: false, reason }, nativePdfEngineRequired(env));
   return (moduleCache = { ok: false, reason });
 }
 
@@ -124,11 +126,45 @@ export async function loadNativePdfEngine(env: NodeJS.ProcessEnv = process.env):
   if (!loaded.ok) return (engineCache = loaded);
   const engine = new BindingNativePdfEngine(loaded.module as ConstructorParameters<typeof BindingNativePdfEngine>[0]);
   const info = engine.version();
-  console.error(
-    `[native-pdf] engine loaded source=${loaded.source} version=${info.version}+${info.gitSha.slice(0, 12)} ` +
-      `features=${info.features.join(",")}`,
+  reportNativePdfEngineLoad(
+    { ok: true, source: loaded.source, version: `${info.version}+${info.gitSha.slice(0, 12)}`, features: info.features },
+    nativePdfEngineRequired(env),
   );
   return (engineCache = { ok: true, engine, source: loaded.source });
+}
+
+/**
+ * The engine must load when the image says it ships it (DOCSLURP_NATIVE_PDF_INSTALLED=1, set by the
+ * Dockerfile when DOCSLURP_NATIVE_PDF=1) or a mode asks for it (DOCSLURP_PDF_ENGINE=shadow|native-pdf).
+ */
+export function nativePdfEngineRequired(env: NodeJS.ProcessEnv = process.env): boolean {
+  const installed = env.DOCSLURP_NATIVE_PDF_INSTALLED?.trim().toLowerCase();
+  return installed === "1" || installed === "true" || resolveNativePdfMode(env) !== "off";
+}
+
+/**
+ * Worker startup: load the engine eagerly so its state is logged before any document, and fail when it is
+ * required but missing instead of silently serving every PDF without it.
+ */
+export async function assertNativePdfEngineAtStartup(env: NodeJS.ProcessEnv = process.env): Promise<NativePdfEngineLoad> {
+  const loaded = await loadNativePdfEngine(env);
+  if (!loaded.ok && nativePdfEngineRequired(env)) {
+    throw new Error(
+      `native-pdf engine is required (DOCSLURP_NATIVE_PDF_INSTALLED=${env.DOCSLURP_NATIVE_PDF_INSTALLED ?? ""}, ` +
+        `DOCSLURP_PDF_ENGINE=${env.DOCSLURP_PDF_ENGINE ?? ""}) but did not load: ${loaded.reason}`,
+    );
+  }
+  return loaded;
+}
+
+/** Engine state for stage stats, from the process cache (loads on first call). */
+export async function nativePdfEngineState(): Promise<
+  { status: "loaded"; source: string; version: string } | { status: "unavailable"; reason: string }
+> {
+  const loaded = await loadNativePdfEngine();
+  if (!loaded.ok) return { status: "unavailable", reason: loaded.reason };
+  const info = loaded.engine.version();
+  return { status: "loaded", source: loaded.source, version: `${info.version}${info.gitSha ? `+${info.gitSha.slice(0, 12)}` : ""}` };
 }
 
 /**

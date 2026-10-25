@@ -15,6 +15,40 @@ This repository (`DocSlurp/docslurp-oss`) owns the server, worker, packages and 
 
 Keep new code in the package that owns it. `server/` must not import from outside the workspace packages it declares.
 
+## Security-Sensitive Boundaries (mandatory)
+
+These rules are mandatory and override speed and convenience. When in doubt, treat a change as security-sensitive.
+
+**Boundaries in scope:**
+
+- **Untrusted file processing:** anything that reads customer bytes. This covers parsers, converters, OCR, media tools, archive and Office handling, rasterizers, native bindings such as the private PDF engine, and the code that stages inputs and outputs for them.
+- **Tenant data boundaries:** organization, workspace, user and API-key scoping in queries, search and vector indexes, storage prefixes, caches, exports, webhooks, MCP tools and chat retrieval.
+- **Identity and access:** sessions, API keys and their scopes, OAuth and MCP consent, SSO, CSRF and origin checks.
+- **Secrets and egress:** credential storage and distribution, user-supplied URLs, connectors and any outbound fetch driven by user input.
+- **Billing and credits:** anything that can let one tenant spend, see or reset another tenant's balance.
+
+**Be extremely careful:**
+
+- Assume every input file and every request field is hostile.
+- Fail closed. Never fall back silently to weaker isolation, a broader scope or an unauthenticated path. A missing sandbox, engine or policy is a startup failure or a loud, logged refusal.
+- Never widen a default scope. A query, cache key or storage key without an explicit tenant scope is a bug.
+- Every boundary change ships with negative tests: cross-tenant access, a revoked or wrong-scope key, and a malicious or oversized file.
+
+**Isolation for untrusted files:**
+
+- Untrusted files must be processed behind a VM or microVM boundary, or something stronger. Firecracker, Cloud Hypervisor and a dedicated VM per job qualify.
+- Containers, namespaces, bubblewrap, landlock and seccomp are defense in depth inside that boundary. They are never the boundary on their own.
+- In-process parsing of customer bytes inside a process that holds secrets does not qualify, including native bindings loaded into the worker.
+- The sandbox host holds the minimum keys it needs, ideally none. It gets no database credentials, no model-provider keys, no auth or encryption secrets and no bucket-wide storage keys. Give it short-lived access scoped to its own input and output objects, no network beyond what the job requires, and no cloud metadata endpoint.
+
+**Council review before merge:**
+
+- Any change touching a boundary above needs a council review before it merges.
+- A council is at least two independent reviewers, run as separate agents or models. Give each one the diff, the threat model and the boundary rules, but not the author's conclusion.
+- At least one reviewer is adversarial and tries to break the change: escape the sandbox, read another tenant's data, reuse a credential.
+- Record each reviewer, their findings and how each was resolved in the pull request. An unresolved high-severity finding blocks the merge.
+- Use a draft pull request, never a direct push to `main`. A human owner approves the merge, and deploying the change remains a separate manual decision.
+
 ## Commands
 
 - `pnpm install`

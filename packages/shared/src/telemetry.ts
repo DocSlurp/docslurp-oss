@@ -257,6 +257,13 @@ export function emitTelemetryLog(args: { severityText: "info" | "warn" | "error"
   }));
 }
 
+/** Tag the span active in this context (for example the per-document worker span) so SigNoz can filter on it. */
+export function setActiveSpanAttributes(attributes: Attributes): void {
+  const active = trace.getSpan(context.active());
+  if (!active) return;
+  bestEffort(() => active.setAttributes(safeAttributes(attributes)));
+}
+
 export function observationTelemetry(name: string, type: string, durationSeconds: number, outcome: "ok" | "error" | "cancelled", metadata: Record<string, unknown>): void {
   const failed = outcome === "error";
   const runtime = getRuntime();

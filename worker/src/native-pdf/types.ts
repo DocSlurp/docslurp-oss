@@ -1,3 +1,4 @@
+import { reportNativePdfFallback } from "./telemetry.js";
 /**
  * Engine-neutral contract for the `native-pdf` document extractor.
  *
@@ -283,18 +284,17 @@ export function isUnsupported(error: unknown): boolean {
   return toNativePdfError(error).code === "NATIVE_PDF_UNSUPPORTED";
 }
 
-/** One log line per fallback: info for routine reasons, a warning for unexpected ones. Returns the normalised error. */
-export function logNativePdfFallback(context: string, error: unknown, next = "kreuzberg"): NativePdfError {
+/** One report per fallback (stdout, OTLP log, span): info for routine reasons, a warning for unexpected ones. Returns the normalised error. */
+export function logNativePdfFallback(context: string, error: unknown, next = "next-in-order"): NativePdfError {
   const failure = toNativePdfError(error);
-  const detail = [
-    `code=${failure.code}`,
-    failure.engineCode && failure.engineCode !== failure.code ? `engineCode=${failure.engineCode}` : "",
-    failure.limit ? `limit=${failure.limit}` : "",
-    `kind=${failure.kind}`,
-    `next=${next}`,
-  ].filter(Boolean).join(" ");
-  const line = `[native-pdf] ${context} fell back ${detail} reason=${failure.message.split("\n")[0]!.slice(0, 200)}`;
-  if (failure.kind === "unexpected") console.warn(line);
-  else console.error(line);
+  reportNativePdfFallback({
+    context,
+    code: failure.code,
+    kind: failure.kind,
+    next,
+    reason: failure.message,
+    ...(failure.engineCode ? { engineCode: failure.engineCode } : {}),
+    ...(failure.limit ? { limit: String(failure.limit) } : {}),
+  });
   return failure;
 }
