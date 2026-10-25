@@ -3,6 +3,7 @@ import { isDefaultWorkspaceAlias, isWorkspaceUuid, WORKSPACE_ROUTE_SEGMENTS } fr
 
 import { getRequestActor, resolveActorWorkspaceId, setRequestActor } from "../lib/request-actor.js";
 import { resolveWorkspaceRef } from "../services/workspaces.js";
+import { setCurrentRequestWorkspaceId } from "../lib/request-context.js";
 
 const WORKSPACE_PATH = /^(.*?\/v1\/workspaces\/)([^/]+)(\/.*)?$/;
 
@@ -34,6 +35,7 @@ export function workspaceRefPath(routers: Hono[]): MiddlewareHandler {
       workspaceId = resolved.id;
       renamedFrom = resolved.renamedFrom;
     }
+    setCurrentRequestWorkspaceId(workspaceId);
     url.pathname = `/v1/workspaces/${encodeURIComponent(workspaceId)}${match[3] ?? ""}`;
 
     const rateLimitChecked = c.get("rateLimitActorChecked");
