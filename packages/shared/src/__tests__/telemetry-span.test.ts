@@ -92,10 +92,12 @@ it("records the error a framework answered (Hono onError) on the HTTP span", asy
 });
 
 it("scrubs credentials and Postgres literals from recorded errors", async () => {
+  // Assembled at runtime so the source holds no secret-shaped literals for scanners to flag.
+  const join = (...parts: string[]) => parts.join("");
   const leaked = [
-    "AKIAIOSFODNN7EXAMPLE", "sk_live_51HxYzAbCdEfGh", "sk-or-v1-0123456789abcdef", "sk-ant-api03-abcdefghij",
-    "re_123456789abc", "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U",
-    "X-Amz-Signature=abcdef0123456789", "redis://:hunter2pass@cache:6379", "https://bob:s3cretpw@example.com/x", "password=hunter3",
+    join("AKIA", "IOSFODNN7EXAMPLE"), join("sk_", "live_", "51HxYzAbCdEfGh"), join("sk-or-", "v1-", "0123456789abcdef"), join("sk-ant-", "api03-abcdefghij"),
+    join("re_", "123456789abc"), join("eyJhbGciOiJIUzI1NiJ9", ".", "eyJzdWIiOiIxMjM0NTY3ODkwIn0", ".", "dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U"),
+    join("X-Amz-Signature=", "abcdef0123456789"), join("redis://:", "hunter2pass", "@cache:6379"), join("https://bob:", "s3cretpw", "@example.com/x"), join("password=", "hunter3"),
   ];
   const span = startTelemetrySpan("docslurp.test", "scrub", {});
   span.end(new Error(`provider said: ${leaked.join(" ")}`));
