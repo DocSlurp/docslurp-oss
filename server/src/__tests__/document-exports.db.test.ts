@@ -5,12 +5,11 @@ import { startMigratedPostgres } from "@docslurp/worker/testing";
 const mocks = vi.hoisted(() => ({
   startWorkflow: vi.fn(async () => undefined),
   deleteObject: vi.fn(async () => undefined),
-  fileUrl: vi.fn((uri: string, name: string) => ({ url: `/v1/files/token/${name}?uri=${uri}`, expiresAt: "" })),
+  sign: vi.fn(async ({ key, expiresInSeconds }: { key: string; expiresInSeconds?: number }) => `https://storage.test/${key}?X-Amz-Expires=${expiresInSeconds}`),
   email: vi.fn(async () => undefined),
 }));
 vi.mock("../lib/temporal.js", () => ({ startDocumentExportWorkflow: mocks.startWorkflow }));
-vi.mock("../lib/storage.js", () => ({ deleteUploadedObject: mocks.deleteObject }));
-vi.mock("../lib/file-urls.js", () => ({ fileUrlForArtifact: mocks.fileUrl }));
+vi.mock("../lib/storage.js", () => ({ deleteUploadedObject: mocks.deleteObject, signDownloadGet: mocks.sign }));
 vi.mock("../config.js", async (original) => ({ ...await original<typeof import("../config.js")>(), env: { ...(await original<typeof import("../config.js")>()).env, s3Bucket: "bucket" } }));
 vi.mock("../services/notifications.js", () => ({ sendExportReadyEmail: mocks.email }));
 
@@ -89,25 +88,23 @@ describe("document exports", () => {
     expect(await sql`select status from document_exports`).toEqual([{ status: "failed" }]);
   });
 
-  it("issues file-proxy links only for the requester's ready, unexpired exports, and the proxy re-checks them", async () => {
+  it("signs short storage links only for the requester's ready, unexpired exports", async () => {
     const exported = await exportsService.requestDocumentExport({ userId: "u", content: "markdown", document: doc("small", "Plan.pdf") });
-    const uri = `s3://bucket/exports/o/w/${exported.id}.zip`;
-    expect(await exportsService.documentExportFileUrl(exported.id, "u")).toBeNull();
-    expect(await documents.userCanAccessArtifactUri(uri, "u")).toBe(false);
+    const key = `exports/o/w/${exported.id}.zip`;
+    expect(await exportsService.signDocumentExportDownload(exported.id, "u")).toBeNull();
 
     await sql`update document_exports set status = 'ready', size_bytes = 1234 where id = ${exported.id}`;
     expect((await exportsService.getDocumentExport(exported.id, "u"))?.downloadUrl).toBe(`/v1/exports/${exported.id}/download`);
-    expect(await exportsService.documentExportFileUrl(exported.id, "u")).toBe(`/v1/files/token/Plan.zip?uri=${uri}`);
-    expect(await documents.userCanAccessArtifactUri(uri, "u")).toBe(true);
-    expect(await documents.userCanAccessArtifactUri(uri, "u", "other-org")).toBe(false);
+    expect(await exportsService.signDocumentExportDownload(exported.id, "u")).toBe(`https://storage.test/${key}?X-Amz-Expires=120`);
+    expect(mocks.sign).toHaveBeenCalledWith({ key, filename: "Plan.zip", expiresInSeconds: 120 });
     expect(await exportsService.getDocumentExport(exported.id, "stranger")).toBeNull();
-    expect(await exportsService.documentExportFileUrl(exported.id, "stranger")).toBeNull();
-    expect(await documents.userCanAccessArtifactUri(uri, "stranger")).toBe(false);
+    expect(await exportsService.signDocumentExportDownload(exported.id, "stranger")).toBeNull();
+    // Exports are never readable through the file proxy.
+    expect(await documents.userCanAccessArtifactUri(`s3://bucket/${key}`, "u")).toBe(false);
 
     await sql`update document_exports set expires_at = now() - interval '1 second' where id = ${exported.id}`;
     expect(await exportsService.getDocumentExport(exported.id, "u")).toMatchObject({ status: "expired", downloadUrl: null });
-    expect(await exportsService.documentExportFileUrl(exported.id, "u")).toBeNull();
-    expect(await documents.userCanAccessArtifactUri(uri, "u")).toBe(false);
+    expect(await exportsService.signDocumentExportDownload(exported.id, "u")).toBeNull();
   });
 
   it("sweeps: emails finished large exports once, retries failed emails, and deletes expired objects", async () => {

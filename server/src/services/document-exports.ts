@@ -15,8 +15,7 @@ import {
 
 import { env } from "../config.js";
 import { sql } from "../db.js";
-import { fileUrlForArtifact } from "../lib/file-urls.js";
-import { deleteUploadedObject } from "../lib/storage.js";
+import { deleteUploadedObject, signDownloadGet } from "../lib/storage.js";
 import { startDocumentExportWorkflow } from "../lib/temporal.js";
 import { sendExportReadyEmail } from "./notifications.js";
 import { listAccessibleWorkspaceIds } from "./organizations.js";
@@ -238,12 +237,11 @@ export async function listDocumentExports(
 }
 
 /**
- * A file-proxy URL (routes/files.ts) for a ready, unexpired export, bound to the
- * caller's session or key. The proxy re-checks the export on every read
- * (userCanAccessArtifactUri), so expiry and lost access apply to issued links.
- * Must run inside the authenticated request.
+ * A two-minute presigned link straight to storage for a ready, unexpired
+ * export, so the zip's bytes never pass through the API. Ownership, workspace
+ * access and expiry are checked here, in the same request, right before signing.
  */
-export async function documentExportFileUrl(id: string, userId: string): Promise<string | null> {
+export async function signDocumentExportDownload(id: string, userId: string): Promise<string | null> {
   const workspaceIds = await listAccessibleWorkspaceIds(userId);
   if (workspaceIds.length === 0) return null;
   const [row] = await sql<Pick<ExportRecordRow, "object_key" | "filename">[]>`
@@ -251,7 +249,7 @@ export async function documentExportFileUrl(id: string, userId: string): Promise
     where id = ${id} and user_id = ${userId} and workspace_id = any(${sql.array(workspaceIds)})
       and status = 'ready' and expires_at > now()
   `;
-  return row ? fileUrlForArtifact(`s3://${env.s3Bucket}/${row.object_key}`, row.filename).url : null;
+  return row ? await signDownloadGet({ key: row.object_key, filename: row.filename, expiresInSeconds: 120 }) : null;
 }
 
 /** The page in the app that downloads an export after sign-in. */

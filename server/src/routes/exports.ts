@@ -13,7 +13,7 @@ import {
   getDocumentExport,
   listDocumentExports,
   requestDocumentExport,
-  documentExportFileUrl
+  signDocumentExportDownload
 } from "../services/document-exports.js";
 
 /** Zip exports: queue, poll and download. The worker builds them (worker/src/exports). */
@@ -69,7 +69,7 @@ export const exportsRoutes = new Hono()
     if (!record || (actor.type === "apiKey" && !apiKeyCanUseWorkspace(actor.apiKey, { id: record.workspaceId, orgId: record.orgId }))) {
       return apiErrorResponse(c, 404, "not_found", "Export not found");
     }
-    const url = record.status === "ready" ? await documentExportFileUrl(record.id, actor.userId) : null;
+    const url = record.status === "ready" ? await signDocumentExportDownload(record.id, actor.userId) : null;
     if (!url) {
       return record.status === "expired"
         ? apiErrorResponse(c, 404, "not_found", "This export's 7-day link has expired and the file was deleted. Export again to get a new link.")
