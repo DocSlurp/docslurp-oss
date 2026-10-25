@@ -2173,10 +2173,30 @@ export class Store {
         .map((reference) => reference.key),
     );
     const checkedReferences = Array.from(expectedKeySet).slice(0, maxKeys);
+    // Existence comes from listing each run's prefix (`<user>/<run>/`) completely:
+    // one LIST per run instead of a HEAD per artifact, with no reliance on listing
+    // order. Keys a complete listing lacks are confirmed with a HEAD before they
+    // count as missing; prefixes too large to list, and keys without one, are HEADed.
     const existingKeySet = new Set<string>();
+    const { byPrefix, ungrouped } = groupReferencesByRunPrefix(checkedReferences);
+    const needsHead = [...ungrouped];
+    let listCalls = 0;
+    const prefixes = [...byPrefix.entries()];
+    for (let index = 0; index < prefixes.length; index += 8) {
+      await Promise.all(prefixes.slice(index, index + 8).map(async ([runPrefix, keys]) => {
+        const listing = await storage.listKeys({ prefix: runPrefix, maxKeys: 10_000 }).catch(() => null);
+        listCalls += 1;
+        if (!listing || listing.truncated) { needsHead.push(...keys); return; }
+        const listed = new Set(listing.keys);
+        for (const key of keys) {
+          if (listed.has(key)) existingKeySet.add(key);
+          else needsHead.push(key);
+        }
+      }));
+    }
 
-    for (let index = 0; index < checkedReferences.length; index += 25) {
-      const batch = checkedReferences.slice(index, index + 25);
+    for (let index = 0; index < needsHead.length; index += 25) {
+      const batch = needsHead.slice(index, index + 25);
       const results = await Promise.all(
         batch.map(async (key) => ({
           key,
@@ -2190,6 +2210,7 @@ export class Store {
         }
       }
     }
+    console.log(`[storage-integrity] references=${checkedReferences.length} run_prefixes=${byPrefix.size} list_calls=${listCalls} head_checks=${needsHead.length}`);
 
     const baseReport = buildStorageIntegrityReport({
       bucket: storage.bucket,
@@ -4050,4 +4071,23 @@ function mapStageState(row: StageStateRow): StageState {
 
 function toDate(value: string | Date): Date {
   return value instanceof Date ? value : new Date(value);
+}
+
+/**
+ * Groups referenced keys by their run prefix (`<user>/<run>/`, the artifact
+ * layout), so each run can be listed once. Keys with fewer segments are left
+ * for a HEAD each.
+ */
+export function groupReferencesByRunPrefix(keys: string[]): { byPrefix: Map<string, string[]>; ungrouped: string[] } {
+  const byPrefix = new Map<string, string[]>();
+  const ungrouped: string[] = [];
+  for (const key of keys) {
+    const parts = key.split("/");
+    if (parts.length < 3 || !parts[0] || !parts[1]) { ungrouped.push(key); continue; }
+    const prefix = `${parts[0]}/${parts[1]}/`;
+    const list = byPrefix.get(prefix);
+    if (list) list.push(key);
+    else byPrefix.set(prefix, [key]);
+  }
+  return { byPrefix, ungrouped };
 }
