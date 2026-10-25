@@ -99,3 +99,45 @@ describe("logNativePdfFallback", () => {
     expect(line).toMatch(/extract fell back code=NATIVE_PDF_EMPTY .*next=next-in-order/);
   });
 });
+
+describe("untrusted error text", () => {
+  const hostile = "PDF_ERROR bad object\n[extract] document=forged extractor=native-pdf\r\u001b[31m\u2028tail";
+
+  it("stdout stays one physical line", async () => {
+    const { oneLine } = await import("./telemetry.js");
+    expect(oneLine(hostile)).not.toMatch(/[\n\r\u001b\u2028]/);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    vi.spyOn(console, "log").mockImplementation(() => undefined);
+    reportExtractionDecision({
+      documentId: "doc-1", format: "pdf", extractor: "kreuzberg", strategy: "kreuzberg-solo",
+      extractorOrder: ["kreuzberg"], attempted: ["kreuzberg"], unavailable: [],
+      nativePdf: baseStats({ shadow: { status: "failed", reason: hostile, agreement: null, nativeMs: null } }),
+    });
+    expect(String(warn.mock.calls[0]![0])).not.toMatch(/[\n\r\u001b\u2028]/);
+  });
+
+  it("keeps the raw text for operators in stage stats", () => {
+    const summary = summarizeNativePdfShadow([
+      { scope: "document", stageName: "extract-markdown", metric: "native-pdf-shadow", value: 0, unit: "error", tags: [], metadata: { code: "NATIVE_PDF_FAILED", reason: hostile } },
+    ]);
+    expect(summary.reason).toBe(`NATIVE_PDF_FAILED: ${hostile}`);
+  });
+
+  it("never reaches end users through public diagnostics", async () => {
+    const { publicDiagnostics } = await import("@docslurp/shared");
+    const stats = {
+      strategy: "kreuzberg-solo",
+      error: hostile,
+      nativePdf: baseStats({ shadow: { status: "failed", reason: hostile, agreement: null, nativeMs: null } }),
+    };
+    expect(JSON.stringify(publicDiagnostics(stats))).not.toContain("bad object");
+  });
+
+  it("telemetry never throws into the pipeline", () => {
+    vi.spyOn(console, "log").mockImplementation(() => { throw new Error("stdout closed"); });
+    expect(() => reportExtractionDecision({
+      documentId: "doc-1", format: "pdf", extractor: "kreuzberg", strategy: "kreuzberg-solo",
+      extractorOrder: [], attempted: [], unavailable: [], nativePdf: baseStats(),
+    })).not.toThrow();
+  });
+});

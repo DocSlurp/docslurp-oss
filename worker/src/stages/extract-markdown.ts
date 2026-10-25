@@ -492,7 +492,7 @@ export class ExtractMarkdownStage implements Stage {
                         engine: nativeEngineState.status,
                         engineSource: nativeEngineState.status === "loaded" ? nativeEngineState.source : null,
                         engineVersion: nativeEngineState.status === "loaded" ? nativeEngineState.version : null,
-                        engineUnavailableReason: nativeEngineState.status === "unavailable" ? nativeEngineState.reason.slice(0, 300) : null,
+                        engineUnavailableReason: nativeEngineState.status === "unavailable" ? nativeEngineState.reason.slice(0, 4000) : null,
                         shadow: {
                           status: "not-applicable",
                           reason: winningCandidate.label === "native-pdf" ? "native-pdf served the document" : nativePdfMode === "off" ? "DOCSLURP_PDF_ENGINE=off" : null,
@@ -1857,7 +1857,7 @@ export class ExtractMarkdownStage implements Stage {
       }
     } catch (error) {
       const failure = logNativePdfFallback("parser-payload", error, "markdown-derived blocks");
-      return { payload: null, reason: `${failure.code}: ${failure.message.split("\n")[0]!.slice(0, 200)}` };
+      return { payload: null, reason: `${failure.code}: ${failure.message}`.slice(0, 4000) };
     }
   }
 

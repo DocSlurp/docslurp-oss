@@ -124,10 +124,20 @@ export async function loadNativePdfEngine(env: NodeJS.ProcessEnv = process.env):
   if (engineCache) return engineCache;
   const loaded = loadNativePdfModule(env);
   if (!loaded.ok) return (engineCache = loaded);
-  const engine = new BindingNativePdfEngine(loaded.module as ConstructorParameters<typeof BindingNativePdfEngine>[0]);
-  const info = engine.version();
+  let engine: BindingNativePdfEngine;
+  let info: ReturnType<BindingNativePdfEngine["version"]>;
+  try {
+    engine = new BindingNativePdfEngine(loaded.module as ConstructorParameters<typeof BindingNativePdfEngine>[0]);
+    info = engine.version();
+  } catch (error) {
+    // A binding that loads but cannot report its version is treated as unavailable, and cached as such.
+    const reason = `${loaded.source}: engine version() failed: ${error instanceof Error ? error.message : String(error)}`;
+    reportNativePdfEngineLoad({ ok: false, reason }, nativePdfEngineRequired(env));
+    return (engineCache = { ok: false, reason });
+  }
+  const sha = typeof info.gitSha === "string" ? info.gitSha.slice(0, 12) : "";
   reportNativePdfEngineLoad(
-    { ok: true, source: loaded.source, version: `${info.version}+${info.gitSha.slice(0, 12)}`, features: info.features },
+    { ok: true, source: loaded.source, version: `${info.version}${sha ? `+${sha}` : ""}`, features: Array.isArray(info.features) ? info.features : [] },
     nativePdfEngineRequired(env),
   );
   return (engineCache = { ok: true, engine, source: loaded.source });
@@ -161,10 +171,15 @@ export async function assertNativePdfEngineAtStartup(env: NodeJS.ProcessEnv = pr
 export async function nativePdfEngineState(): Promise<
   { status: "loaded"; source: string; version: string } | { status: "unavailable"; reason: string }
 > {
-  const loaded = await loadNativePdfEngine();
-  if (!loaded.ok) return { status: "unavailable", reason: loaded.reason };
-  const info = loaded.engine.version();
-  return { status: "loaded", source: loaded.source, version: `${info.version}${info.gitSha ? `+${info.gitSha.slice(0, 12)}` : ""}` };
+  try {
+    const loaded = await loadNativePdfEngine();
+    if (!loaded.ok) return { status: "unavailable", reason: loaded.reason };
+    const info = loaded.engine.version();
+    const sha = typeof info.gitSha === "string" ? info.gitSha.slice(0, 12) : "";
+    return { status: "loaded", source: loaded.source, version: `${info.version}${sha ? `+${sha}` : ""}` };
+  } catch (error) {
+    return { status: "unavailable", reason: `engine state failed: ${error instanceof Error ? error.message : String(error)}` };
+  }
 }
 
 /**

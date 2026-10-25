@@ -12,10 +12,31 @@ import type { NativePdfMode } from "./mode.js";
 type Severity = "info" | "warn" | "error";
 type AttributeValue = string | number | boolean;
 
+/** Raw error text is kept whole in structured attributes; this bound only stops runaway payloads. */
+const MAX_REASON_CHARS = 4000;
+
+/**
+ * One physical line for stdout: control characters (newline, carriage return, escapes, U+2028/9) become spaces,
+ * so text from a hostile file cannot forge a second log line or `key=value` pairs. Structured attributes keep
+ * the raw text.
+ */
+export function oneLine(text: string): string {
+  return text.replace(/[\u0000-\u001f\u007f\u2028\u2029]+/g, " ");
+}
+
+function definedAttributes(attributes: Record<string, AttributeValue | null | undefined>): Record<string, AttributeValue> {
+  return Object.fromEntries(Object.entries(attributes).filter((entry): entry is [string, AttributeValue] => entry[1] !== null && entry[1] !== undefined));
+}
+
+/** Telemetry never changes a document's or the process's outcome. */
 function report(severity: Severity, eventName: string, line: string, attributes: Record<string, AttributeValue | null | undefined>): void {
-  const clean = Object.fromEntries(Object.entries(attributes).filter((entry): entry is [string, AttributeValue] => entry[1] !== null && entry[1] !== undefined));
-  (severity === "error" ? console.error : severity === "warn" ? console.warn : console.log)(line);
-  emitTelemetryLog({ severityText: severity, eventName, body: line.slice(0, 1000), attributes: clean });
+  try {
+    const safeLine = oneLine(line);
+    (severity === "error" ? console.error : severity === "warn" ? console.warn : console.log)(safeLine);
+    emitTelemetryLog({ severityText: severity, eventName, body: safeLine.slice(0, 1000), attributes: definedAttributes(attributes) });
+  } catch {
+    /* best effort */
+  }
 }
 
 /** Process-level engine load result, reported once when the loader settles. */
@@ -36,7 +57,7 @@ export function reportNativePdfEngineLoad(
   report(required ? "error" : "warn", "docslurp.native_pdf.engine", `[native-pdf] engine unavailable required=${required} reason=${result.reason}`, {
     "docslurp.native_pdf.status": "unavailable",
     "docslurp.native_pdf.required": required,
-    "docslurp.native_pdf.reason": result.reason.slice(0, 500),
+    "docslurp.native_pdf.reason": result.reason.slice(0, MAX_REASON_CHARS),
   });
 }
 
@@ -65,7 +86,7 @@ export function reportNativePdfFallback(args: {
       "docslurp.native_pdf.next": args.next,
       "docslurp.native_pdf.engine_code": args.engineCode,
       "docslurp.native_pdf.limit": args.limit,
-      "docslurp.native_pdf.reason": args.reason.slice(0, 500),
+      "docslurp.native_pdf.reason": args.reason.slice(0, MAX_REASON_CHARS),
     });
 }
 
@@ -88,7 +109,7 @@ export function summarizeNativePdfShadow(rows: PerformanceEvent[]): NativePdfSta
   if (!documentRow) return { status: "failed", reason: "shadow returned no rows", agreement: null, nativeMs: null };
   const metadata = (documentRow.metadata ?? {}) as Record<string, unknown>;
   if (documentRow.unit === "error") {
-    return { status: "failed", reason: `${String(metadata.code ?? "error")}: ${String(metadata.reason ?? "")}`.slice(0, 300), agreement: null, nativeMs: null };
+    return { status: "failed", reason: `${String(metadata.code ?? "error")}: ${String(metadata.reason ?? "")}`.slice(0, MAX_REASON_CHARS), agreement: null, nativeMs: null };
   }
   return {
     status: "ran",
@@ -111,6 +132,14 @@ export interface ExtractionDecision {
 }
 
 export function reportExtractionDecision(decision: ExtractionDecision): void {
+  try {
+    reportExtractionDecisionUnsafe(decision);
+  } catch {
+    /* Telemetry never fails a document. */
+  }
+}
+
+function reportExtractionDecisionUnsafe(decision: ExtractionDecision): void {
   const native = decision.nativePdf;
   // Native-pdf was expected (engine on, PDF) but did not serve or shadow the document: say so loudly.
   const nativeMissed = native !== null && native.mode !== "off" && decision.extractor !== "native-pdf" && native.shadow.status !== "ran";
@@ -132,7 +161,7 @@ export function reportExtractionDecision(decision: ExtractionDecision): void {
     "docslurp.native_pdf.parser_payload": native?.parserPayload.status,
     "docslurp.native_pdf.parser_payload_reason": native?.parserPayload.reason,
   };
-  const clean = Object.fromEntries(Object.entries(attributes).filter((entry): entry is [string, AttributeValue] => entry[1] !== null && entry[1] !== undefined));
+  const clean = definedAttributes(attributes);
   setActiveSpanAttributes(clean);
   const nativePart = native
     ? ` nativePdf=${native.engine}${native.engineVersion ? `@${native.engineVersion}` : ""} mode=${native.mode} shadow=${native.shadow.status}` +
