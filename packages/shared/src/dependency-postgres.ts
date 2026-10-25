@@ -77,6 +77,9 @@ export function querySite(stack: string | undefined): Record<string, string | nu
     if (/dependency-postgres\.(?:ts|js|mjs)|node_modules|node:internal|pool-activity|\/db\.(?:ts|js|mjs)|\(native\)/.test(line)) continue;
     const match = line.match(/at (?:async )?(?:(.+?) \()?(?:file:\/\/)?(.+?):(\d+):\d+\)?$/);
     if (!match) continue;
+    // Proxy traps around sql (e.g. the API's resilient pool) sit between this
+    // instrumentation and the caller; the caller is the next frame.
+    if (match[1] && /^(?:(?:Object|Proxy|Function)\.)?(?:apply|get|construct)$|^Proxy\./.test(match[1])) continue;
     const site: Record<string, string | number> = {
       // Relative to the repository or container root (/app in the images).
       "code.file.path": match[2]!.replace(`${process.cwd()}/`, "").replace(/^\/app\//, ""),
