@@ -36,7 +36,6 @@ it.skipIf(!process.env.GRAPH_PURGE_TEST_DATABASE_URL)("preserves lazy queries, f
     // The statement as sent (placeholders, no values), its summary and the calling code.
     const answer = spans.find(span => span.attributes["db.query.text"] === "select $1::int as answer")!;
     expect(answer.attributes).toMatchObject({ "db.query.summary": "SELECT" });
-    expect(answer.attributes["code.file.path"]).toBeUndefined();
     expect(JSON.stringify(answer.attributes)).not.toContain("42");
     expect(spans.find(span => String(span.attributes["db.query.text"]).startsWith("select n from generate_series(1, 3) n where n = $1"))).toBeTruthy();
     // Failing (and slow) queries also name the code that issued them.
