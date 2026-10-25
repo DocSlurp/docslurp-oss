@@ -47,7 +47,7 @@ vi.mock("@docslurp/shared/observability", () => ({
   recordChatAgentTelemetry: (metric: unknown) => { spans.metrics.push(metric); },
   evalBaggageAttributes: () => ({ "eval.run_id": "run-7", "eval.arm": "control" }),
 }));
-const { runChatMcpAgent, classifyChatAgentStop, createToolMarkupGuard, FINAL_ANSWER_INSTRUCTION, SETTINGS_ON_REQUEST_INSTRUCTION, suggestionsInstruction, describeChatWorkspaceInventory, QUIET_INJECTION_INSTRUCTION } = await import("./chat-mcp-agent.js");
+const { runChatMcpAgent, classifyChatAgentStop, createToolMarkupGuard, FINAL_ANSWER_INSTRUCTION, SEARCH_BEFORE_ANSWER_INSTRUCTION, SETTINGS_ON_REQUEST_INSTRUCTION, suggestionsInstruction, describeChatWorkspaceInventory, QUIET_INJECTION_INSTRUCTION } = await import("./chat-mcp-agent.js");
 const { ChatTurnDeadlineError } = await import("./chat-turn-deadline.js");
 const actor = { type: "session" as const, userId: "user", sessionId: "browser-session", user: { id: "user", name: "User", email: "" } };
 const args = { actor, workspaceId: "ws", orgId: "org", sessionId: "conversation", query: "What is the policy?", history: [], apiKey: "fake", privacyMode: "standard" as const, model: "test", maxOutputTokens: 100 };
@@ -777,6 +777,7 @@ describe("final-step answers never leak tool-call markup", () => {
     const system = (index: number) => JSON.stringify(model.doStreamCalls[index]!.prompt.filter(message => message.role === "system"));
     expect(system(1)).toBe(system(0));
     expect(system(0)).not.toContain(FINAL_ANSWER_INSTRUCTION);
+    expect(system(0)).toContain(SEARCH_BEFORE_ANSWER_INSTRUCTION);
     expect(result.answer).toBe("Supported [1].");
   });
 
