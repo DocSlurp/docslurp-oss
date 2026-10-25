@@ -33,6 +33,13 @@ MCP or model tool that applies it. The authenticated UI posts the opaque token t
 proposals must be regenerated, rather than silently replanned or applied to a
 new configuration.
 
+Each proposal's `impact.reasons` is worded for the kind of change: answer
+settings (`chat.*`) say they change how answers are written from the next
+message, retrieval settings (`retrieval.*`) say they change how the next search
+ranks and returns passages, and pipeline settings say whether they apply to new
+uploads only or can also be applied to existing documents by reprocessing. None
+of the chat or retrieval changes reprocesses documents.
+
 Settings that affect existing indexed content show the affected work and cost
 estimate. Existing-document reprocessing is unchecked by default and requires
 separate explicit consent. If a change requires a reindex, Apply requires that
@@ -44,7 +51,15 @@ by credits, budgets or policy; saving settings does not imply the job finished.
 
 Supported pipeline toggles are video frames, chunk overlap, summaries, embeddings, vector
 indexing, table/code/image preservation, PDF region extraction and vision
-fallback. Chat supports enabled state, context mode, answer style, citations and
+fallback, plus vision page selection: `vision.forceAllPages` (read every page with
+vision, up to `vision.maxPagesPerDocument`, 1 to 32). Vision page selection is
+what the [ingest report](api-sdk.md#ingest-report) recommends for scanned pages
+that page triage skipped, so its `patch` can be proposed as
+`{"changes":{"pipeline":{"visionFallback":true,"vision":{"forceAllPages":true,"maxPagesPerDocument":8}}}}`.
+Its impact is `reindex-recommended`: it adds per-page vision cost and applies to
+new uploads, existing files keep their text until you reprocess them (optional,
+with the usual cost estimate and a separate consent), and reprocessing is never
+required. Chat supports enabled state, context mode, answer style, citations and
 instructions. Retrieval supports result count, reranking, diversification and
 its balance, candidate depth and result ordering. Other settings—including
 secrets, ownership, retention, budgets, privacy mode, model selection and

@@ -81,6 +81,32 @@ async function workspace(id: string, userId: string) {
 }
 
 describe("ingest report on a migrated database", () => {
+  it("shows why a file failed from the stored stage error, without paths or a vision misdiagnosis", async () => {
+    const json = (value: unknown) => sql.json(value as postgres.JSONValue);
+    const ocr = "no extractor produced output: kreuzberg=Error: Error opening data file /srv/app/node_modules/kreuzberg/tessdata/eng.traineddata";
+    await sql`insert into workspaces(id, org_id, user_id, name, pipeline) values ('w3', 'o1', 'owner', 'Failures', ${json(defaultPipelineFeatures)})`;
+    await sql`insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, pipeline, total_documents, pages_total, pages_processed)
+      values ('r3', 'o1', 'owner', 'w3', 'bulk-upload', 'failed', 'extract-markdown', ${json(defaultPipelineFeatures)}, 1, 1, 0)`;
+    await sql`insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status, page_count, file_size)
+      values ('shot', 'o1', 'owner', 'w3', 'r3', 'screenshot.png', 'image/png', 'k/shot', 'failed', 1, 40000)`;
+    await sql`insert into document_page_facts (document_id, page_number, run_id, text_bytes, word_count, image_count, facts_source, vision_status)
+      values ('shot', 1, 'r3', 0, 0, 1, 'image', 'not-selected')`;
+    await sql`insert into document_run_stage_states (run_id, document_id, stage_name, status, error, stats) values
+      ('r3', 'shot', 'extract-markdown', 'failed', ${ocr}, ${json({})}),
+      ('r3', 'shot', 'vision-extract', 'completed', null, ${json({ skipped: true, reason: "page-triage-skip", pages: 1, selectedPages: [] })})`;
+
+    const result = await report.loadIngestReport({ workspace: await workspace("w3", "owner"), canEdit: true });
+    expect(result.failures).toMatchObject({
+      total: 1,
+      byReason: [{ reason: "ocr_unavailable", documents: 1 }],
+      examples: [{ documentId: "shot", filename: "screenshot.png", stage: "extract-markdown", reason: "ocr_unavailable", retryable: false }],
+    });
+    expect(result.failures.examples[0]?.detail).toContain("Error opening data file <path>");
+    expect(JSON.stringify(result)).not.toMatch(/\/srv\/app|node_modules/);
+    expect(result.recommendations.map((rec) => rec.id)).toEqual(["retry-failed-files"]);
+    expect(report.summarizeIngestReport(result)).toMatch(/1 file failed\. screenshot\.png at extract-markdown: Text recognition \(OCR\)/);
+  });
+
   it("reports the workspace's own files page by page", async () => {
     const result = await report.loadIngestReport({ workspace: await workspace("w1", "owner"), canEdit: true });
     expect(result.files.total).toBe(4);
