@@ -91,6 +91,8 @@ export const workspaceRunEventTypeSchema = z.enum([
   "document.replaced",
   /** Superseded versions' derived data (chunks, pages, vectors, artifacts) was deleted. */
   "document.purged",
+  /** A document's extracted text scored below the plausibility threshold (worker store). */
+  "document.plausibility_warning",
 ]);
 export type WorkspaceRunEventType = z.infer<typeof workspaceRunEventTypeSchema>;
 

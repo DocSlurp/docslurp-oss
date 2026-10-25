@@ -801,7 +801,7 @@ export async function listRunEvents(args: {
   });
 }
 
-async function listRunEventsForRunId(args: {
+export async function listRunEventsForRunId(args: {
   runId: string;
   after?: string;
   limit?: number;
@@ -829,7 +829,16 @@ async function listRunEventsForRunId(args: {
     limit ${limit}
   `;
 
-  return rows.map(mapWorkspaceRunEvent);
+  // One event the schema can't read (an event type added on the worker side
+  // before the shared list learned it) must not turn the whole history into a 500.
+  return rows.flatMap((row) => {
+    try {
+      return [mapWorkspaceRunEvent(row)];
+    } catch (error) {
+      console.warn(`[runs] skipped unreadable run event ${row.id} (${row.event_type}):`, error instanceof Error ? error.message.slice(0, 200) : String(error));
+      return [];
+    }
+  });
 }
 
 type StageResourceRow = { stage_name: string; metric: string; total: number | string; peak: number | string };
