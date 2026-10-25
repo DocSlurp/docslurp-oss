@@ -62,6 +62,18 @@ export class ChatTurnDeadlineError extends HTTPException {
   }
 }
 
+/**
+ * The caller stopped the turn (Stop pressed, client disconnected). Named
+ * `AbortError` so telemetry records a cancelled outcome, not a failure; the
+ * transport's own abort reason (often a bare string) rides along as `cause`.
+ */
+export class ChatClientAbortError extends Error {
+  constructor(options?: { cause?: unknown }) {
+    super("Chat turn cancelled by the client", options);
+    this.name = "AbortError";
+  }
+}
+
 export function isChatTurnDeadlineError(error: unknown): error is ChatTurnDeadlineError {
   return error instanceof ChatTurnDeadlineError;
 }

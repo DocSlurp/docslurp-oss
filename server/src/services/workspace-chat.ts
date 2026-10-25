@@ -8,6 +8,8 @@ import type { RequestActor } from "../lib/request-actor.js";
 import type { ChatToolActivity } from "./chat-mcp-tools.js";
 import {
   configureSearchFromChat,
+  describeSearchSettingsForAgent,
+  type SearchConfigurationOutcome,
   loadChatSessionSearchOverrides,
   requestsSearchConfiguration,
   withThreadRetrieval,
@@ -1197,8 +1199,10 @@ async function chatWorkspaceTurn(
     threadOverrides,
     args.retrieval,
   );
+  let searchConfiguration: SearchConfigurationOutcome | undefined;
   if (workspace && args.allowConfiguration !== false && requestsSearchConfiguration(args.query)) {
-    searchSettings = await configureSearchFromChat({ ...args, orgId: workspace.orgId, sessionId, model, current: searchSettings, threadOverrides, apiKey: chatApiKey, privacyMode });
+    searchConfiguration = await configureSearchFromChat({ ...args, orgId: workspace.orgId, sessionId, model, current: searchSettings, threadOverrides, apiKey: chatApiKey, privacyMode });
+    searchSettings = searchConfiguration.settings;
   }
   const filterDocumentIds = args.filters?.documentIds?.length ? args.filters.documentIds : undefined;
   // Type, tag and date filters only exist in retrieval; whole-corpus and stored-summary paths can't honour them.
@@ -1229,7 +1233,7 @@ async function chatWorkspaceTurn(
         workspace.systemPrompt ? `Workspace ingest instruction: ${workspace.systemPrompt}` : "",
         searchSettings.chat.searchInstructions ? `Workspace search instruction: ${searchSettings.chat.searchInstructions}` : "",
         `Answer style: ${searchSettings.chat.answerStyle}. ${searchSettings.chat.citations ? "Use inline evidence citations." : "Do not force citation markers into every sentence."}`,
-        `Current search settings: ${JSON.stringify(searchSettings.retrievalDefaults)}. Explicit search configuration requests have already been processed; explain these current values rather than applying the change again.`,
+        describeSearchSettingsForAgent(searchSettings, searchConfiguration),
       ].filter(Boolean).join("\n"),
       maxOutputTokens: args.maxOutputTokens ?? 2048, signal: args.signal, startedAtMs,
       requestedModel: policy.requestedModel, limits: policy.limits, requestId: currentRequestId(),

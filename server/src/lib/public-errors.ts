@@ -7,8 +7,8 @@ import { errorContext } from "./error-context.js";
 
 export { exceptionDetails } from "@docslurp/shared/error-reporting";
 
-export function reportPublicError(error: unknown, context: Record<string, string | number | boolean> = {}): string {
-  reportException(error, { ...errorContext.getStore(), ...context });
+export function reportPublicError(error: unknown, context: Record<string, string | number | boolean> = {}, signal?: AbortSignal): string {
+  reportException(error, { ...errorContext.getStore(), ...context }, signal);
   return PUBLIC_ERROR_MESSAGES.unexpected;
 }
 

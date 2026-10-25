@@ -2,6 +2,7 @@ import { ChatToolBlockedError } from "../services/chat-tool-error.js";
 import { applyWorkspaceSettingsProposalSchema } from "@docslurp/shared";
 import { applySettingsProposal, SettingsProposalError } from "../services/workspace-settings-proposals.js";
 import { reportPublicError } from "../lib/public-errors.js";
+import { isCancellation } from "@docslurp/shared/cancellation";
 import type { ChatToolActivity } from "../services/chat-mcp-tools.js";
 import { Hono, type Context } from "hono";
 import { z } from "zod";
@@ -539,8 +540,10 @@ async function createWorkspaceAgentChatResponse(c: Context) {
         });
       },
       onError: (error) => {
-        console.error("Chat stream error:", error);
-        const message = reportPublicError(error);
+        // A Stop press or disconnect aborts the turn: log it as a cancel, not an error.
+        if (isCancellation(error, c.req.raw.signal)) console.info("Chat stream cancelled by caller");
+        else console.error("Chat stream error:", error);
+        const message = reportPublicError(error, {}, c.req.raw.signal);
         return error instanceof ChatToolBlockedError ? error.message : message;
       },
     }),
