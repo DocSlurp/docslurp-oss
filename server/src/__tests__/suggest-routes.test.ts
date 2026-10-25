@@ -64,6 +64,14 @@ describe("suggestRoutes", () => {
     expect(semanticQuery).toContain("d.superseded_at is null");
   });
 
+  it("only suggests filenames of current, searchable files (never failed or replaced ones)", async () => {
+    await app.request("/v1/suggest?workspaceId=ws-1&q=b");
+    const filenameQueries = sqlMock.mock.calls.map(call => (call[0] as TemplateStringsArray).join("?"))
+      .filter(text => /d\.filename/.test(text));
+    expect(filenameQueries.length).toBeGreaterThan(0);
+    for (const text of filenameQueries) expect(text).toMatch(/d\.status = 'completed' and d\.superseded_at is null/);
+  });
+
   it("returns suggestions array", async () => {
     const res = await app.request("/v1/suggest?workspaceId=ws-1&q=cont&limit=5");
     expect(res.status).toBe(200);
