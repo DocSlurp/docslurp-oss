@@ -160,3 +160,25 @@ describe("request observation names", () => {
   });
 
 });
+
+describe("request span attributes", () => {
+  it("names who made the request and every route id", async () => {
+    const { requestSpanAttributes } = await import("./request-context.js");
+    expect(requestSpanAttributes({
+      requestId: "req-1",
+      route: "/v1/workspaces/:workspaceId/runs/:runId",
+      pathname: "/v1/workspaces/ws%201/runs/run-2",
+      identity: { userId: "user-1", orgId: "org-1", apiKeyId: "key-1" },
+      userAgent: "docslurp-sdk/1.0",
+    })).toEqual({
+      "docslurp.requestId": "req-1",
+      "url.path": "/v1/workspaces/ws%201/runs/run-2",
+      "enduser.id": "user-1",
+      "docslurp.orgId": "org-1",
+      "docslurp.apiKeyId": "key-1",
+      "user_agent.original": "docslurp-sdk/1.0",
+      "docslurp.workspaceId": "ws 1",
+      "docslurp.runId": "run-2",
+    });
+  });
+});

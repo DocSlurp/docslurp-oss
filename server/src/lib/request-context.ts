@@ -13,7 +13,7 @@ import { clientIpFromHeaders, isInProcessEnv } from "./client-ip.js";
 import { redactFileTokenPath } from "./file-token-path.js";
 
 const REQUEST_ID_HEADER = "X-Request-ID";
-const requestContextStorage = new AsyncLocalStorage<{
+type RequestContextState = {
   requestId: string;
   requestStartedAt: number;
   userId: string | null;
@@ -38,7 +38,8 @@ const requestContextStorage = new AsyncLocalStorage<{
     tags: string[];
     metadata?: Record<string, unknown>;
   }>;
-}>();
+};
+const requestContextStorage = new AsyncLocalStorage<RequestContextState>();
 
 // Request diagnostics are best effort, unlike the durable AI usage ledger. Bound
 // both response delay and concurrent writes if the diagnostics database stalls.
@@ -243,15 +244,19 @@ export const requestContextMiddleware: MiddlewareHandler = async (c, next) => {
     || INFRA_PROBE_ROUTES.has(route)
   );
 
+  // Filled in by auth during the request; read when the span ends.
+  let identity: RequestContextState | undefined;
   await errorContext.run({ requestId }, () => withHttpSpan({ method: c.req.method, route,
     headers: { traceparent: c.req.header("traceparent") ?? "", tracestate: c.req.header("tracestate") ?? "", baggage: c.req.header("baggage") ?? "" },
     status: () => c.res.status,
+    attributes: () => requestSpanAttributes({ requestId, route, pathname, identity, userAgent: c.req.header("User-Agent") }),
   }, () => requestContextStorage.run({
     requestId, requestStartedAt: startedAt, userId: null, performanceEvents: [],
     capabilityHeader: c.req.header("X-DocSlurp-Capability")?.trim() || null,
     origin: c.req.header("Origin") ?? null,
     signal: c.req.raw.signal,
   }, async () => {
+    identity = requestContextStorage.getStore();
     c.set("requestId", requestId);
     c.set("requestStartedAt", startedAt);
     c.header(REQUEST_ID_HEADER, requestId);
@@ -337,6 +342,8 @@ export const requestContextMiddleware: MiddlewareHandler = async (c, next) => {
           eventName: "docslurp.api.request_completed",
           body: `${c.req.method} ${pathname} ${status} ${finalDurationMs}ms`,
           attributes: {
+            // Who made the request and the route's ids, so support can find a user's requests.
+            ...requestSpanAttributes({ requestId, route, pathname, identity: requestContextStorage.getStore(), userAgent: c.req.header("User-Agent") }),
             "http.request.method": c.req.method,
             "http.route": route,
             "http.response.status_code": status,
@@ -352,3 +359,35 @@ export const requestContextMiddleware: MiddlewareHandler = async (c, next) => {
     }
   })));
 };
+
+/**
+ * What a request span needs for servicing a user: who made the request (user,
+ * org, API key), the request id they can quote, the path, and every route
+ * parameter (`docslurp.workspaceId`, `docslurp.runId`, `docslurp.docId`, ...).
+ * File-proxy tokens are already redacted from `pathname`.
+ */
+export function requestSpanAttributes(args: {
+  requestId: string;
+  route: string;
+  pathname: string;
+  identity: Pick<RequestContextState, "userId" | "orgId" | "apiKeyId"> | undefined;
+  userAgent?: string | null;
+}): Record<string, string> {
+  const attributes: Record<string, string> = { "docslurp.requestId": args.requestId, "url.path": args.pathname.slice(0, 500) };
+  if (args.identity?.userId) attributes["enduser.id"] = args.identity.userId;
+  if (args.identity?.orgId) attributes["docslurp.orgId"] = args.identity.orgId;
+  if (args.identity?.apiKeyId) attributes["docslurp.apiKeyId"] = args.identity.apiKeyId;
+  if (args.userAgent) attributes["user_agent.original"] = args.userAgent.slice(0, 300);
+  const template = args.route.split("/");
+  const actual = args.pathname.split("/");
+  template.forEach((segment, index) => {
+    if (!segment.startsWith(":") || actual[index] === undefined) return;
+    const name = segment.slice(1).replace(/[^A-Za-z0-9_]/g, "");
+    try {
+      attributes[`docslurp.${name}`] = decodeURIComponent(actual[index]!).slice(0, 200);
+    } catch {
+      attributes[`docslurp.${name}`] = actual[index]!.slice(0, 200);
+    }
+  });
+  return attributes;
+}

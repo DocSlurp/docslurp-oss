@@ -4,7 +4,7 @@ import { logs as logsApi } from "@opentelemetry/api-logs";
 // Server-only runtime. One provider owns context; exporters never own app lifecycle.
 import { hostname } from "node:os";
 import { performance } from "node:perf_hooks";
-import { context, createContextKey, propagation, ROOT_CONTEXT, SpanKind, SpanStatusCode, trace, type Attributes, type Histogram } from "@opentelemetry/api";
+import { context, createContextKey, propagation, ROOT_CONTEXT, SpanKind, SpanStatusCode, trace, type Attributes, type Exception, type Histogram } from "@opentelemetry/api";
 import { AsyncLocalStorageContextManager } from "@opentelemetry/context-async-hooks";
 import { CompositePropagator, W3CBaggagePropagator, W3CTraceContextPropagator, type ExportResult } from "@opentelemetry/core";
 import { resourceFromAttributes, defaultResource } from "@opentelemetry/resources";
@@ -63,6 +63,33 @@ function safeAttributes(attributes: Attributes): Attributes {
     ? value.replace(/Bearer\s+\S+/gi, "Bearer [redacted]").slice(0, 16000) : value]));
 }
 
+/** Error text for spans: credentials scrubbed, length capped. Messages and stacks are what support needs to act on a failure. */
+function safeErrorText(value: unknown, max: number): string {
+  return String(value ?? "")
+    .replace(/Bearer\s+\S+/gi, "Bearer [redacted]")
+    .replace(/(dslp_(?:priv|pub)_|dslp_)[A-Za-z0-9_-]+/g, "$1[redacted]")
+    .replace(/((?:password|secret|api[._-]?key|access[._-]?token|refresh[._-]?token)["'\s:=]+)[^\s"',;&]+/gi, "$1[redacted]")
+    .replace(/(postgres(?:ql)?:\/\/[^:/@\s]+:)[^@\s]+@/gi, "$1[redacted]@")
+    .slice(0, max);
+}
+
+/** Records an error on a span: type, message and stack (scrubbed on export too). */
+function recordSpanError(span: { recordException(exception: Exception): void; setStatus(status: { code: SpanStatusCode; message?: string }): void } | undefined, error: unknown): void {
+  if (!span) return;
+  // Scrubbed here as well as on export, so no processor ever sees a credential.
+  const message = safeErrorText(error instanceof Error ? error.message : error, 2000);
+  const exception: Exception = { name: error instanceof Error ? error.name : "Error", message,
+    ...(error instanceof Error && error.stack ? { stack: safeErrorText(error.stack, 8000) } : {}) };
+  span.recordException(exception);
+  span.setStatus({ code: SpanStatusCode.ERROR, message: message.slice(0, 1000) });
+}
+
+/** True while traces are being recorded, so callers can skip work only spans need (call-site capture). */
+export function isTracingActive(): boolean {
+  const runtime = getRuntime();
+  return Boolean(runtime && !runtime.shutdown);
+}
+
 class PrivateTraceExporter implements SpanExporter {
   constructor(private readonly exporter: SpanExporter) {}
   export(spans: ReadableSpan[], done: (result: ExportResult) => void): void {
@@ -74,10 +101,15 @@ class PrivateTraceExporter implements SpanExporter {
       droppedAttributesCount: span.droppedAttributesCount,
       droppedEventsCount: span.droppedEventsCount, droppedLinksCount: span.droppedLinksCount,
       attributes: safeAttributes(span.attributes),
-      status: { code: span.status.code },
-      // Exception names are useful; messages/stacks can contain tenant content.
+      // Messages and stacks are kept (scrubbed and capped): without them a failed
+      // span cannot be traced back to its cause when servicing a user.
+      status: { code: span.status.code, ...(span.status.message ? { message: safeErrorText(span.status.message, 1000) } : {}) },
       events: span.events.filter(event => event.name === "exception").map(event => ({
-        ...event, attributes: { "exception.type": event.attributes?.["exception.type"] ?? "Error" },
+        ...event, attributes: {
+          "exception.type": event.attributes?.["exception.type"] ?? "Error",
+          ...(event.attributes?.["exception.message"] ? { "exception.message": safeErrorText(event.attributes["exception.message"], 2000) } : {}),
+          ...(event.attributes?.["exception.stacktrace"] ? { "exception.stacktrace": safeErrorText(event.attributes["exception.stacktrace"], 8000) } : {}),
+        },
       })),
       links: span.links.map(link => ({ ...link, attributes: safeAttributes(link.attributes ?? {}) })),
       spanContext: () => span.spanContext(),
@@ -285,7 +317,14 @@ export function recordHttpTelemetry(method: string, route: string, status: numbe
   bestEffort(() => runtime.httpDuration?.record(durationSeconds, attributes));
 }
 
-export async function withHttpSpan<T>(options: { method: string; route: string; headers: Record<string, string>; status: () => number }, run: () => Promise<T>): Promise<T> {
+export async function withHttpSpan<T>(options: {
+  method: string;
+  route: string;
+  headers: Record<string, string>;
+  status: () => number;
+  /** Read when the request ends, once auth has resolved who made it: request, user, org, key and route ids. */
+  attributes?: () => Attributes;
+}, run: () => Promise<T>): Promise<T> {
   if (!initializeObservability({ serviceName: "docslurp-api" })) return run();
   let outcome: { ok: true; value: T } | { ok: false; error: unknown } | undefined;
   let invoked = false;
@@ -302,7 +341,9 @@ export async function withHttpSpan<T>(options: { method: string; route: string; 
         bestEffort(() => {
           const status = outcome?.ok === false ? 500 : options.status();
           span.setAttribute("http.response.status_code", status);
-          if (status >= 500) { span.setStatus({ code: SpanStatusCode.ERROR }); span.setAttribute("error.type", "Error"); }
+          if (options.attributes) span.setAttributes(safeAttributes(options.attributes()));
+          if (outcome?.ok === false) { recordSpanError(span, outcome.error); span.setAttribute("error.type", outcome.error instanceof Error ? outcome.error.name : "Error"); }
+          else if (status >= 500) { span.setStatus({ code: SpanStatusCode.ERROR, message: `HTTP ${status}` }); span.setAttribute("error.type", String(status)); }
           recordHttpTelemetry(options.method, options.route, status, (performance.now() - started) / 1000);
         });
         bestEffort(() => span.end());
@@ -367,7 +408,12 @@ export function withDependencyScope<T>(scope: Record<string, unknown>, run: () =
   return context.with(context.active().setValue(dependencyScopeKey, scope), run);
 }
 
-/** Low-cardinality dependency timing; no URLs, SQL text, keys, bodies or headers. */
+/**
+ * Dependency timing span. Metrics stay low-cardinality (type, operation,
+ * provider, phase); spans carry what support needs: correlation ids from the
+ * dependency scope plus whatever the caller adds (parameterized SQL, call site).
+ * Never keys, request bodies or parameter values.
+ */
 export function startDependencySpan(name: string, attributes: Attributes) {
   const started = performance.now();
   const scope = context.active().getValue(dependencyScopeKey) as Record<string, unknown> | undefined;
@@ -389,7 +435,7 @@ export function startDependencySpan(name: string, attributes: Attributes) {
       ended = true;
       const errorType = error instanceof Error ? error.name : error ? "Error" : undefined;
       bestEffort(() => {
-        if (errorType) { span?.setStatus({ code: SpanStatusCode.ERROR }); span?.setAttribute("error.type", errorType); }
+        if (errorType) { recordSpanError(span, error); span?.setAttribute("error.type", errorType); }
         // IDs, server names and model names belong on spans, never metric labels.
         const labels = Object.fromEntries(Object.entries(attributes).filter(([key]) =>
           ["docslurp.dependency.type", "docslurp.dependency.operation", "docslurp.dependency.provider", "docslurp.dependency.phase"].includes(key)));
@@ -440,7 +486,7 @@ export function startTelemetrySpan(tracerName: string, name: string, attributes:
       // A caller giving up (Stop, disconnect) ends the span with its own outcome, not an ERROR status.
       if (error && isCancellation(error)) bestEffort(() => span?.setAttribute("docslurp.outcome", "cancelled"));
       else if (error) bestEffort(() => {
-        span?.setStatus({ code: SpanStatusCode.ERROR });
+        recordSpanError(span, error);
         span?.setAttribute("error.type", error instanceof Error ? error.name : String(error).slice(0, 64));
       });
       bestEffort(() => span?.end());
