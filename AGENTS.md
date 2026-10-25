@@ -41,6 +41,8 @@ Small, focused commits with imperative subjects and a "why" in the body. Run typ
 
 Never rewrite git history; always move forward with new commits. Do not use `git rebase`, `git commit --amend`, `git reset --hard`, `git push --force`/`--force-with-lease`, `git filter-branch` or similar. To catch a branch up, merge `main` into it and resolve conflicts in the merge commit. To fix a mistake, commit the corrected state on top. To undo a commit, `git revert` it.
 
+Keep every branch in sync with its remote. Fetch and merge `origin/main`, plus the current branch's upstream when it has one, before you start work, before you commit and before you push. Push each commit soon after making it, so unpushed commits never pile up locally and the remote never moves far ahead of you. Before you finish a task, `git status -sb` must show neither `ahead` nor `behind` on the branch you worked on (`main` included). If it does, merge and push at once, resolving conflicts in a merge commit. This applies in every worktree.
+
 Squash-merge pull requests into `main` (`gh pr merge --squash`) so each PR lands as one commit. For a PR stacked on a branch that was just squash-merged, merge the new `main` into it and retarget its base to `main`.
 
 ## Releases
