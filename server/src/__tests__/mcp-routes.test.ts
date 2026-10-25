@@ -250,7 +250,7 @@ describe("mcpRoutes", () => {
   it("discovers documented workspace tools and advertises only the implemented MCP transport", async () => {
     const response = await app.request("/mcp/tools", { headers: { Authorization: "Bearer dslp_test" } });
     expect(response.status).toBe(200);
-    expect((await response.json()).tools.map((tool: { id: string }) => tool.id)).toEqual(["getWorkspaceSettings", "listWorkspaces", "search", "chat", "getUploadStatus", "getMediaEvidence", "suggestQueries", "getJob"]);
+    expect((await response.json()).tools.map((tool: { id: string }) => tool.id)).toEqual(["listWorkspaces", "getUploadStatus", "search", "chat", "getMediaEvidence", "suggestQueries", "getWorkspaceSettings", "getJob"]);
     const manifest = await app.request("/mcp/manifest", { headers: { Authorization: "Bearer dslp_test" } });
     expect((await manifest.json()).server.transports).toEqual(["streamable-http", "stdio"]);
   });
@@ -309,9 +309,9 @@ describe("mcpRoutes", () => {
       return (await res.json()).tools.map((tool: { id: string }) => tool.id).filter((id: string) => id.endsWith("Estimate"));
     };
     expect(await listed({ scopes: ["search", "ingest", "workspaces:manage"], keyType: "server" })).toEqual([
-      "updateEstimate", "reprocessEstimate", "fullIndexEstimate", "indexingModeEstimate", "graphRebuildEstimate", "uploadEstimate",
+      "uploadEstimate", "fullIndexEstimate", "reprocessEstimate", "updateEstimate", "indexingModeEstimate", "graphRebuildEstimate",
     ]);
-    expect(await listed({ scopes: ["ingest"] })).toEqual(["reprocessEstimate", "fullIndexEstimate", "uploadEstimate"]);
+    expect(await listed({ scopes: ["ingest"] })).toEqual(["uploadEstimate", "fullIndexEstimate", "reprocessEstimate"]);
     expect(await listed({ scopes: ["search"] })).toEqual([]);
   });
 
@@ -448,7 +448,7 @@ describe("mcpRoutes", () => {
   it("does not discover or execute search/chat tools without search scope", async () => {
     validateApiKey.mockResolvedValue({ ...validatedKey, scopes: ["ingest"] });
     const listed = await app.request("/mcp/tools", { headers: { Authorization: "Bearer dslp_test" } });
-    expect((await listed.json()).tools.map((tool: { id: string }) => tool.id)).toEqual(["getWorkspaceSettings", "listWorkspaces", "upload", "completeUpload", "getUploadStatus", "reprocessEstimate", "fullIndexEstimate", "uploadEstimate", "getJob"]);
+    expect((await listed.json()).tools.map((tool: { id: string }) => tool.id)).toEqual(["listWorkspaces", "upload", "getUploadStatus", "getWorkspaceSettings", "uploadEstimate", "fullIndexEstimate", "reprocessEstimate", "getJob", "completeUpload"]);
     for (const name of ["search", "chat"]) {
       expect((await app.request(`/mcp/tools/${name}`, { method: "POST", headers: { Authorization: "Bearer dslp_test", "Content-Type": "application/json" }, body: "{}" })).status).toBe(403);
     }
@@ -542,7 +542,7 @@ describe("session MCP tools", () => {
     expect(tool.inputSchema.properties.files).toBeDefined();
     expect(tool.inputSchema.properties.inlineFiles.items.properties.contentBase64).toBeDefined();
     expect(tool.inputSchema.properties.userId).toBeUndefined();
-    expect(tools.map((tool: { id: string }) => tool.id)).toEqual(["getWorkspaceSettings", "proposeWorkspaceSettings", "listWorkspaces", "upload", "completeUpload", "search", "chat", "getUploadStatus", "getMediaEvidence", "suggestQueries", "updateEstimate", "searchSettingsEstimate", "reprocessEstimate", "fullIndexEstimate", "indexingModeEstimate", "graphRebuildEstimate", "uploadEstimate", "getJob"]);
+    expect(tools.map((tool: { id: string }) => tool.id)).toEqual(["listWorkspaces", "upload", "getUploadStatus", "search", "chat", "getMediaEvidence", "suggestQueries", "getWorkspaceSettings", "proposeWorkspaceSettings", "uploadEstimate", "fullIndexEstimate", "reprocessEstimate", "updateEstimate", "searchSettingsEstimate", "indexingModeEstimate", "graphRebuildEstimate", "getJob", "completeUpload"]);
     expect(response.headers.get("Cache-Control")).toBe("no-store");
   });
 });
