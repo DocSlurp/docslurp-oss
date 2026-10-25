@@ -30,6 +30,7 @@ import { createStages } from "../stages/index.js";
 import { createActivities } from "./activities.js";
 import { resolveWorkerVersioning } from "./worker-versioning.js";
 import { FatalWorkerError, installWorkerProcessGuards, logWorkerFatal, runWorkerGroup, superviseTemporalWorkers, type SupervisedSession } from "./worker-supervisor.js";
+import { assertNativePdfEngineAtStartup } from "../native-pdf/loader.js";
 import { evaluateWorkerHealth, resolveWorkerHealthPort, startWorkerHealthServer } from "./health-server.js";
 import { ScalerPublisher } from "./scaler-publisher.js";
 import { UtilizationMeter } from "./utilization.js";
@@ -110,6 +111,11 @@ async function main(): Promise<void> {
   // Fail before connecting if the parser sandbox is unavailable or violates the production policy.
   const sandbox = await initializeParserSandbox(process.env, process.platform).catch((error) => {
     throw new FatalWorkerError("startup", `parser sandbox unavailable: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
+  });
+  // Load the native PDF engine before taking work: its state is logged once, and an image that ships it
+  // (or a mode that needs it) refuses to start without it rather than serving every PDF without it.
+  await assertNativePdfEngineAtStartup(process.env).catch((error) => {
+    throw new FatalWorkerError("startup", error instanceof Error ? error.message : String(error), { cause: error });
   });
   // Every CommandRunner in this process (stages, local-artifact adapters) shares this provider.
   setDefaultParserSandbox(sandbox);
@@ -596,5 +602,8 @@ main().catch(async (error) => {
   initializeWorkerErrorReporting();
   reportException(error, { operation: "worker-startup-or-shutdown" });
   await flushErrorReporting();
+  // Batched OTLP logs (e.g. docslurp.native_pdf.engine required=true) live on the shared provider, which
+  // flushErrorReporting does not drain; export them before the process exits.
+  await shutdownObservability().catch(() => undefined);
   process.exitCode = 1;
 });

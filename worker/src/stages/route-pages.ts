@@ -23,6 +23,7 @@ import type { Config } from "../config.js";
 import type { Document } from "../models.js";
 import { readRasterEngine, type PdfSourceCache } from "../pipeline/pdf-asset-cache.js";
 import { loadNativePdfEngine } from "../native-pdf/loader.js";
+import { logNativePdfFallback } from "../native-pdf/types.js";
 import type { NativePdfDocument } from "../native-pdf/types.js";
 import { renderClipNative } from "../native-pdf/render.js";
 import type { Stage, WorkflowState } from "../pipeline/pipeline.js";
@@ -326,8 +327,14 @@ export class RoutePagesStage implements Stage {
         const region: [number, number, number, number] = [x, y, x + width, y + height];
         if (this.deps.renderClip) return this.deps.renderClip(pdfPath, pageNumber, region);
         const loaded = await loadNativePdfEngine();
-        if (!loaded.ok) return null;
-        return (await renderClipNative(loaded.engine, pdfPath, pageNumber, region, { dpi: 150, signal })).bytes;
+        if (!loaded.ok) return null; // Engine absence is reported once at load; the caller crops a full render.
+        try {
+          return (await renderClipNative(loaded.engine, pdfPath, pageNumber, region, { dpi: 150, signal })).bytes;
+        } catch (error) {
+          if (signal?.aborted) throw error;
+          logNativePdfFallback(`route-clip page=${pageNumber}`, error, "full-page render and crop");
+          return null;
+        }
       }
       : undefined;
     return {
@@ -390,9 +397,8 @@ export class RoutePagesStage implements Stage {
       };
     } catch (error) {
       if (signal?.aborted) throw error;
-      const message = (error instanceof Error ? error.message : String(error)).slice(0, 200);
-      console.warn(`[route-pages] document=${document.id} table gate shadow failed: ${message}`);
-      return { error: message };
+      const failure = logNativePdfFallback("table-gate-shadow", error, "no table gate estimate");
+      return { error: `${failure.code}: ${failure.message}`.slice(0, 4000) };
     } finally {
       await doc?.close().catch(() => undefined);
     }

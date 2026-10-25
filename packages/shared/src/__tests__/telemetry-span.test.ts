@@ -67,3 +67,15 @@ it("puts the request's identity and route ids on the HTTP span, and the failure'
   expect(span.status.message).toBe("database timeout while loading workspace");
   expect(span.events[0]?.attributes?.["exception.message"]).toBe("database timeout while loading workspace");
 });
+
+it("tags the active observation span, keeping raw error text for operators", async () => {
+  const { setActiveSpanAttributes } = await import("../observability.js");
+  const raw = "PDF_ERROR bad xref\nat offset 1234";
+  await withObservation({ name: "worker.document.extract-markdown", metadata: { documentId: "doc-1" } }, async () => {
+    setActiveSpanAttributes({ "docslurp.extraction.extractor": "kreuzberg", "docslurp.native_pdf.reason": raw, "x.api_key": "secret" });
+  });
+  const span = exporter.getFinishedSpans().find(item => item.name === "worker.document.extract-markdown")!;
+  expect(span.attributes["docslurp.extraction.extractor"]).toBe("kreuzberg");
+  expect(span.attributes["docslurp.native_pdf.reason"]).toBe(raw);
+  expect(span.attributes["x.api_key"]).toBeUndefined();
+});
