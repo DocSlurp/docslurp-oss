@@ -16,6 +16,13 @@ export const listWorkspacesInput = z.object({
   limit: z.number().int().min(1).max(100).default(50),
   offset: z.number().int().nonnegative().default(0),
 }).strict();
+/**
+ * Inline uploads carry file bytes in the tool call, for MCP clients whose
+ * sandbox cannot reach storage upload URLs. The total must fit the 1 MiB MCP
+ * request body after base64 expansion.
+ */
+export const INLINE_UPLOAD_MAX_BYTES = 512 * 1024;
+const INLINE_UPLOAD_MAX_BASE64_CHARS = Math.ceil(INLINE_UPLOAD_MAX_BYTES / 3) * 4 + 1024;
 export const uploadInput = z.object({
   workspace: z.string().min(1).max(256).optional().describe('Workspace ID, slug or name. A name that matches no workspace creates one with that name, so only pass a new name when the user asks for a new workspace. Omit for the organization default workspace.'),
   urls: z.array(z.url().refine(url => /^https?:\/\//i.test(url), "Use HTTP or HTTPS URLs")).min(1).max(20).optional(),
@@ -24,8 +31,15 @@ export const uploadInput = z.object({
     sizeBytes: z.number().int().positive().max(5 * 1024 ** 3),
     mimeType: z.string().min(1).max(256).describe("Content-Type to send with the signed PUT request."),
   }).strict()).min(1).max(10).optional(),
-  idempotencyKey: z.string().min(1).max(200).optional().describe("For URL ingestion only: reuse the same key when retrying this exact request to avoid duplicate ingestion."),
-}).strict().refine(value => Boolean(value.urls) !== Boolean(value.files), "Supply either urls or files, not both");
+  inlineFiles: z.array(z.object({
+    filename: z.string().min(1).max(512).describe("File name with extension; the extension sets the type when mimeType is omitted."),
+    mimeType: z.string().min(1).max(256).optional(),
+    contentBase64: z.string().min(1).max(INLINE_UPLOAD_MAX_BASE64_CHARS).optional().describe("File bytes as base64. Use for binary files such as PDFs and images."),
+    text: z.string().min(1).max(INLINE_UPLOAD_MAX_BYTES).optional().describe("UTF-8 file contents. Use instead of contentBase64 for Markdown, text, CSV, JSON or HTML."),
+  }).strict().refine(file => Boolean(file.contentBase64) !== Boolean(file.text), "Supply either contentBase64 or text for each inline file")).min(1).max(10).optional()
+    .describe(`Small files sent in this call (at most ${INLINE_UPLOAD_MAX_BYTES / 1024} KiB in total) when you cannot make HTTP requests to storage upload URLs.`),
+  idempotencyKey: z.string().min(1).max(200).optional().describe("For URL and inline uploads: reuse the same key when retrying this exact request to avoid duplicate ingestion."),
+}).strict().refine(value => [value.urls, value.files, value.inlineFiles].filter(Boolean).length === 1, "Supply exactly one of urls, files or inlineFiles");
 
 export const completeUploadInput = z.object({
   sessionId: z.string().uuid(),
@@ -118,8 +132,8 @@ export function mcpTools(baseUrl: string): McpTool[] {
       inputSchema: toolInputJsonSchema(listWorkspacesInput) },
     { id: "upload", title: "Upload documents", scopes: ["ingest"],
       annotations: { readOnly: false, destructive: false, idempotent: false, openWorld: true, consequential: true },
-      description: "Upload documents using either fetchable HTTP(S) urls or files metadata, never both. For files, return direct storage upload targets for up to 10 files (5 GiB each, subject to account limits). Small files use putUrl with the declared Content-Type; large files use multipart pendingParts URLs with byte slices determined by partNumber, partSize and sizeBytes. Upload every part. Storage notifications and background reconciliation automatically complete known-size uploads and start ingestion; no completeUpload call is needed. Follow getUploadStatus with sessionId. Never send file bytes or local paths as tool arguments. Omit workspace for the default workspace; a name that matches no workspace creates it. Ingestion can incur cost. idempotencyKey applies to URL ingestion retries.",
-      // Flat like every tool schema: uploadInput's refinement enforces urls XOR files.
+      description: `Upload documents using exactly one of urls, files or inlineFiles. urls: DocSlurp's server downloads each HTTP(S) file directly, so prefer it for a file that is already public; do not fetch it with web tools first. files: return direct storage upload targets for up to 10 files (5 GiB each, subject to account limits). Small files use putUrl with the declared Content-Type; large files use multipart pendingParts URLs with byte slices determined by partNumber, partSize and sizeBytes. Upload every part. Storage notifications and background reconciliation automatically complete known-size uploads and start ingestion; no completeUpload call is needed. Follow getUploadStatus with sessionId. inlineFiles: if you cannot make HTTP requests to the upload URLs (for example a sandbox firewall blocks them), send small files in this call as text or contentBase64, ${INLINE_UPLOAD_MAX_BYTES / 1024} KiB in total; ingestion starts immediately and the response has workspace and run IDs for getUploadStatus. Never send local paths. Omit workspace for the default workspace; a name that matches no workspace creates it. Ingestion can incur cost. idempotencyKey applies to URL and inline upload retries.`,
+      // Flat like every tool schema: uploadInput's refinement enforces exactly one of urls, files or inlineFiles.
       inputSchema: toolInputJsonSchema(uploadInput) },
     { id: "completeUpload", title: "Complete upload", scopes: ["ingest"],
       annotations: { readOnly: false, destructive: false, idempotent: false, openWorld: false, consequential: true },
