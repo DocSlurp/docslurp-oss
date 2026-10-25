@@ -16,6 +16,7 @@ export default defineConfig({
   },
   resolve: {
     alias: {
+      "@docslurp/shared/cancellation": shared("cancellation"),
       "@docslurp/shared/error-reporting": shared("error-reporting"),
       "@docslurp/shared/error-response": shared("error-response"),
       "@docslurp/shared/file-token-path": shared("file-token-path"),

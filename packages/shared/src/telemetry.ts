@@ -1,4 +1,5 @@
 import { observabilityRuntimeKey } from "./telemetry-state.js";
+import { isCancellation } from "./cancellation.js";
 import { logs as logsApi } from "@opentelemetry/api-logs";
 // Server-only runtime. One provider owns context; exporters never own app lifecycle.
 import { hostname } from "node:os";
@@ -256,10 +257,11 @@ export function emitTelemetryLog(args: { severityText: "info" | "warn" | "error"
   }));
 }
 
-export function observationTelemetry(name: string, type: string, durationSeconds: number, failed: boolean, metadata: Record<string, unknown>): void {
+export function observationTelemetry(name: string, type: string, durationSeconds: number, outcome: "ok" | "error" | "cancelled", metadata: Record<string, unknown>): void {
+  const failed = outcome === "error";
   const runtime = getRuntime();
   if (!runtime || runtime.shutdown) return;
-  const attributes = { "docslurp.operation.name": name.slice(0, 200), "docslurp.operation.type": type, "error.type": failed ? "Error" : "none" };
+  const attributes = { "docslurp.operation.name": name.slice(0, 200), "docslurp.operation.type": type, "error.type": failed ? "Error" : "none", "docslurp.outcome": outcome };
   bestEffort(() => runtime.operationDuration?.record(durationSeconds, attributes));
   const correlations = Object.fromEntries(Object.entries(metadata).filter(([key, value]) => correlationKeys.has(key) && typeof value === "string").map(([key, value]) => [`docslurp.${key}`, value as string]));
   const media = Object.fromEntries(Object.entries(metadata).filter(([key, value]) =>
@@ -269,9 +271,9 @@ export function observationTelemetry(name: string, type: string, durationSeconds
   // Retrieval run by the chat search agent links back to its conversation.
   const chat = typeof metadata.chatSessionId === "string" ? { "docslurp.chat.session_id": metadata.chatSessionId } : {};
   for (const [key, value] of Object.entries({ ...correlations, ...media, ...chat })) bestEffort(() => active?.setAttribute(key, value));
-  if (failed || name.startsWith("worker.stage.")) emitTelemetryLog({
+  if (outcome !== "ok" || name.startsWith("worker.stage.")) emitTelemetryLog({
     eventName: "docslurp.operation.completed", severityText: failed ? "error" : "info",
-    body: `${name.slice(0, 200)} ${failed ? "failed" : "completed"} in ${Math.round(durationSeconds * 1000)}ms`,
+    body: `${name.slice(0, 200)} ${failed ? "failed" : outcome === "cancelled" ? "cancelled" : "completed"} in ${Math.round(durationSeconds * 1000)}ms`,
     attributes: { ...attributes, ...correlations, duration_ms: Math.round(durationSeconds * 1000) },
   });
 }
@@ -435,7 +437,9 @@ export function startTelemetrySpan(tracerName: string, name: string, attributes:
     end(error?: unknown): void {
       if (ended) return;
       ended = true;
-      if (error) bestEffort(() => {
+      // A caller giving up (Stop, disconnect) ends the span with its own outcome, not an ERROR status.
+      if (error && isCancellation(error)) bestEffort(() => span?.setAttribute("docslurp.outcome", "cancelled"));
+      else if (error) bestEffort(() => {
         span?.setStatus({ code: SpanStatusCode.ERROR });
         span?.setAttribute("error.type", error instanceof Error ? error.name : String(error).slice(0, 64));
       });
