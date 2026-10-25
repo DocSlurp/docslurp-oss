@@ -554,9 +554,9 @@ export type HostedEquivalentReference = {
  * and the default hosted embedding model.
  */
 export const HOSTED_EQUIVALENT_REFERENCES: Record<HostedEquivalentCapability, HostedEquivalentReference> = {
-  text: { capability: "text", model: "z-ai/glm-5.3-flash", provider: "openrouter", inputUsdPerMTok: 0.0261, outputUsdPerMTok: 0.9, checkedAt: "2026-10-13" },
-  vision: { capability: "vision", model: "z-ai/glm-5.3-flash", provider: "openrouter", inputUsdPerMTok: 0.0261, outputUsdPerMTok: 0.9, checkedAt: "2026-10-13" },
-  embedding: { capability: "embedding", model: "openai/text-embedding-3-small", provider: "openai", inputUsdPerMTok: 0.02, outputUsdPerMTok: 0, checkedAt: "2026-10-13" },
+  text: { capability: "text", model: "z-ai/glm-5.3-flash", provider: "openrouter", inputUsdPerMTok: 0.15, outputUsdPerMTok: 0.5, checkedAt: "2026-10-25" },
+  vision: { capability: "vision", model: "z-ai/glm-5.3-flash", provider: "openrouter", inputUsdPerMTok: 0.15, outputUsdPerMTok: 0.5, checkedAt: "2026-10-25" },
+  embedding: { capability: "embedding", model: "openai/text-embedding-3-small", provider: "openai", inputUsdPerMTok: 0.02, outputUsdPerMTok: 0, checkedAt: "2026-10-25" },
 };
 
 /**
