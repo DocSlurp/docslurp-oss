@@ -187,6 +187,33 @@ defaults for actual extraction.
 the decision chain, executors and the Extract flat-tier OCR routes. It does not touch proprietary hosted APIs; those
 stay under the privacy modes below. Classes, sources and the full table are in `docs/page-router.md` ("Licence classes").
 
+## Hosted provider routing
+
+OpenRouter serves many open-weight models from several hosts, at different
+prices. DocSlurp adds routing preferences to each OpenRouter request:
+
+- **Cheapest host first for GLM and DeepSeek.** Requests for `z-ai/glm-*` and
+  `deepseek/deepseek-*` sort hosts by price (`provider.sort: "price"`) and only
+  use hosts that serve FP8 or better weights. Fallbacks stay on. Keeping the same
+  cheap host across chat steps also keeps prompt-cache reads working.
+- **China-based providers, per organization.** These are on by default. Owners
+  and admins can turn them off for the whole organization with
+  `PATCH /v1/organizations/:orgId { "allowChinaProviders": false }`, or with the
+  toggle in organization settings. When off, every OpenRouter request made for
+  the organization excludes the China-based hosts. This covers chat, search
+  helpers, ingestion text and vision, and embeddings. Hosted open models such as
+  DeepSeek and GLM often cost about half as much on these hosts as on US-hosted
+  ones, so turning them off can raise model costs. The setting picks hosts; it
+  does not block models built by Chinese labs, which also run on hosts elsewhere.
+  The current host list is `CHINA_PROVIDER_SLUGS` in
+  `packages/shared/src/openrouter-routing.ts`: Alibaba, Baidu, DeepSeek, MiniMax,
+  Moonshot AI, Nex AGI, SiliconFlow, StepFun, StreamLake, Tencent, Xiaomi and
+  Z.AI.
+
+A request knows its organization from its API key or from the workspace it
+uses. A signed-in request without either applies the restriction when any of
+the user's organizations has it on. Changes apply within 30 seconds.
+
 ## Privacy modes
 
 `pipeline.privacyMode` controls whether workspace content may reach a hosted AI

@@ -61,6 +61,7 @@ export type {
 } from "./layout.js";
 
 export * from "./openrouter-usage.js";
+export * from "./openrouter-routing.js";
 export * from "./chat-model-prices.js";
 
 export * from "./workspace-state.js";

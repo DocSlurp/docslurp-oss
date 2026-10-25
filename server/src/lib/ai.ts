@@ -1,4 +1,4 @@
-import { assertProviderAllowed, authorizePrivateModelCall, createOpenRouterReasoningFetch, createOpenRouterUsageCapture, isPrivateModelUri, PRIVATE_MODEL_PROVIDER, resolveOpenRouterUsage, resolveSupportedModelIdWithWarning, type PrivacyMode, type PrivateCallAuditScope, type ProviderTextUsage } from "@docslurp/shared";
+import { assertProviderAllowed, authorizePrivateModelCall, createOpenRouterReasoningFetch, createOpenRouterRoutingFetch, createOpenRouterUsageCapture, isPrivateModelUri, PRIVATE_MODEL_PROVIDER, resolveOpenRouterUsage, resolveSupportedModelIdWithWarning, type PrivacyMode, type PrivateCallAuditScope, type ProviderTextUsage } from "@docslurp/shared";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { withObservation, aiResultDetails, instrumentFetch } from "@docslurp/shared/observability";
@@ -188,7 +188,7 @@ export async function generateOpenRouterText(args: {
     async () => {
       const accounting = createOpenRouterUsageCapture();
       const provider = createOpenAI({
-        fetch: instrumentFetch("openrouter", "chat", createOpenRouterReasoningFetch(accounting.fetch)),
+        fetch: instrumentFetch("openrouter", "chat", createOpenRouterReasoningFetch(createOpenRouterRoutingFetch(accounting.fetch))),
         apiKey: args.apiKey,
         baseURL: OPENROUTER_BASE_URL,
       });
@@ -259,7 +259,7 @@ export async function generateOpenRouterDocumentText(args: {
   assertProviderAllowed(args.privacyMode, { provider: "openrouter", model: args.model ?? SEARCH_OPENROUTER_MODEL, operation: "api.text.openrouter-documents", target: "hosted" });
   const accounting = createOpenRouterUsageCapture();
   const provider = createOpenAI({
-    fetch: instrumentFetch("openrouter", "chat", createOpenRouterReasoningFetch(accounting.fetch)),
+    fetch: instrumentFetch("openrouter", "chat", createOpenRouterReasoningFetch(createOpenRouterRoutingFetch(accounting.fetch))),
     apiKey: args.apiKey,
     baseURL: OPENROUTER_BASE_URL,
   });
@@ -516,7 +516,7 @@ export async function embedConfiguredText(args: {
     const route = openRouterEmbeddingRoute(args.model ?? "");
     if (args.dimensions !== undefined && args.dimensions !== route.dimensions) throw new Error("OpenRouter embedding dimensions do not match the registered model");
     if (!args.apiKey) throw new Error("OPENROUTER_API_KEY is required for remote OpenRouter embeddings");
-    const provider = createOpenAI({ apiKey: args.apiKey, baseURL: OPENROUTER_BASE_URL, fetch: instrumentFetch("openrouter", "embedding") });
+    const provider = createOpenAI({ apiKey: args.apiKey, baseURL: OPENROUTER_BASE_URL, fetch: instrumentFetch("openrouter", "embedding", createOpenRouterRoutingFetch()) });
     const result = await withObservation({ name: "api.embedding.openrouter", type: "embedding", model: route.model, input: args.value, result: aiResultDetails }, () => embed({
       model: provider.embedding(route.model), value: args.value, abortSignal: args.signal, maxRetries: 0,
       ...posthogAiTelemetry({ functionId: "api.embedding.openrouter", provider: "openrouter", context: args.observability }),
@@ -594,7 +594,7 @@ export async function embedConfiguredTexts(args: Omit<Parameters<typeof embedCon
     const route = openRouterEmbeddingRoute(args.model ?? "");
     if (args.dimensions !== undefined && args.dimensions !== route.dimensions) throw new Error("OpenRouter embedding dimensions do not match the registered model");
     if (!args.apiKey) throw new Error("OPENROUTER_API_KEY is required for remote OpenRouter embeddings");
-    const provider = createOpenAI({ apiKey: args.apiKey, baseURL: OPENROUTER_BASE_URL, fetch: instrumentFetch("openrouter", "embedding") });
+    const provider = createOpenAI({ apiKey: args.apiKey, baseURL: OPENROUTER_BASE_URL, fetch: instrumentFetch("openrouter", "embedding", createOpenRouterRoutingFetch()) });
     const result = await many(provider, route.model, "api.embedding.openrouter.batch");
     const usage = await exactUsage(result.usage.tokens, "OpenRouter");
     return { embeddings: result.embeddings.map((vector) => validateHostedEmbeddingVector(vector, route.dimensions, args.normalize)), usage };

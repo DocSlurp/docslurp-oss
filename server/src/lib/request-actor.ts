@@ -10,7 +10,7 @@ import { isConfiguredAdminUser } from "./admin-emails.js";
 import { apiKeyAllowsWorkspace, apiKeyCanUseWorkspace } from "./api-key-workspace-scope.js";
 
 export { apiKeyAllowsWorkspace, apiKeyCanUseWorkspace };
-import { setCurrentRequestApiKeyId, setCurrentRequestApiKeyWorkspaceIds, setCurrentRequestSessionId, setCurrentRequestUserId } from "./request-context.js";
+import { setCurrentRequestApiKeyId, setCurrentRequestApiKeyWorkspaceIds, setCurrentRequestOrgId, setCurrentRequestSessionId, setCurrentRequestUserId } from "./request-context.js";
 import { validateApiKey, type ValidatedKey } from "../services/api-keys.js";
 import { ensureDefaultWorkspace, findWorkspaceForInput, getWorkspace, type WorkspaceInputScope } from "../services/workspaces.js";
 import { invalidWorkspaceInputError, WorkspaceAccessError, workspaceInputNotFoundError } from "../services/default-workspace.js";
@@ -94,6 +94,7 @@ export function setRequestActor(c: Context, actor: RequestActor): void {
   setCurrentRequestApiKeyId(actor.type === "apiKey" ? actor.apiKey.keyId : null);
   setCurrentRequestApiKeyWorkspaceIds(actor.type === "apiKey" ? actor.apiKey.workspaceIds : null);
   setCurrentRequestSessionId(actor.type === "session" ? actor.sessionId : null);
+  if (actor.type === "apiKey") setCurrentRequestOrgId(actor.apiKey.orgId);
 
   if (actor.type === "apiKey") {
     c.set("apiKey", actor.apiKey);
@@ -230,6 +231,7 @@ export async function loadActorScopedWorkspace(
   }
 
   addTraceMetadata({ workspaceId: workspace.id, orgId: workspace.orgId });
+  setCurrentRequestOrgId(workspace.orgId);
   return workspace;
 }
 

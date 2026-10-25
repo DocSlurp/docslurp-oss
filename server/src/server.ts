@@ -74,6 +74,10 @@ import { spendAwareErrorHandler } from "./services/billing/spend-guard.js";
 import { UnreadableSourceError } from "./services/source-metadata.js";
 import { warmDefaultLocalEmbedding } from "./lib/ai.js";
 import { rejectNulBytes } from "./lib/reject-nul.js";
+import { registerProviderPolicy } from "./lib/provider-policy.js";
+
+// OpenRouter requests made while serving a request follow its org's China-provider setting.
+registerProviderPolicy();
 
 const execFileAsync = promisify(execFile);
 

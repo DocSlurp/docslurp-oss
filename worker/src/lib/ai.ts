@@ -1,4 +1,4 @@
-import { assertProviderAllowed, authorizePrivateModelCall, isPrivateModelUri, type PrivacyMode, createOpenRouterUsageCapture, createOpenRouterReasoningFetch, resolveOpenRouterUsage, resolvePipelineTextGenerationOptions, resolveSupportedModelIdWithWarning, type TextGenerationConfig, type TextGenerationProfile, type ProviderTextUsage, type PipelineTextOperation } from "@docslurp/shared";
+import { assertProviderAllowed, authorizePrivateModelCall, isPrivateModelUri, type PrivacyMode, createOpenRouterUsageCapture, createOpenRouterReasoningFetch, createOpenRouterRoutingFetch, resolveOpenRouterUsage, resolvePipelineTextGenerationOptions, resolveSupportedModelIdWithWarning, type TextGenerationConfig, type TextGenerationProfile, type ProviderTextUsage, type PipelineTextOperation } from "@docslurp/shared";
 import { withObservation, aiResultDetails, instrumentFetch } from "@docslurp/shared/observability";
 import { createAnthropic } from "@ai-sdk/anthropic";
 import { createOpenAI } from "@ai-sdk/openai";
@@ -150,7 +150,7 @@ export async function generateOpenRouterText(args: {
     async () => {
       const accounting = createOpenRouterUsageCapture();
       const provider = createOpenAI({
-        fetch: instrumentFetch("openrouter", "chat", createOpenRouterReasoningFetch(accounting.fetch, settings.reasoningEffort)),
+        fetch: instrumentFetch("openrouter", "chat", createOpenRouterReasoningFetch(createOpenRouterRoutingFetch(accounting.fetch), settings.reasoningEffort)),
         apiKey: args.apiKey,
         baseURL: OPENROUTER_BASE_URL,
       });
