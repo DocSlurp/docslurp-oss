@@ -21,6 +21,7 @@ brew install \
   python \
   qpdf \
   tesseract \
+  tesseract-lang \
   unrtf \
   uv
 brew install --cask libreoffice

@@ -98,6 +98,10 @@ RUN apt-get update \
        clamav-daemon \
        clamdscan \
        ffmpeg \
+       fonts-droid-fallback \
+       fonts-liberation \
+       fonts-noto-core \
+       fonts-urw-base35 \
        pandoc \
        poppler-data \
        poppler-utils \

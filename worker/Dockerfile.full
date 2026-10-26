@@ -98,6 +98,10 @@ RUN apt-get update \
        clamav-freshclam \
        clamdscan \
        ffmpeg \
+       fonts-liberation \
+       fonts-noto-cjk \
+       fonts-noto-core \
+       fonts-urw-base35 \
        ghostscript \
        imagemagick \
        libtiff-tools \
@@ -116,6 +120,23 @@ RUN apt-get update \
        tesseract-ocr-fra \
        tesseract-ocr-deu \
        tesseract-ocr-spa \
+       tesseract-ocr-ara \
+       tesseract-ocr-chi-sim \
+       tesseract-ocr-chi-tra \
+       tesseract-ocr-ell \
+       tesseract-ocr-heb \
+       tesseract-ocr-hin \
+       tesseract-ocr-ita \
+       tesseract-ocr-jpn \
+       tesseract-ocr-kor \
+       tesseract-ocr-nld \
+       tesseract-ocr-pol \
+       tesseract-ocr-por \
+       tesseract-ocr-rus \
+       tesseract-ocr-tha \
+       tesseract-ocr-tur \
+       tesseract-ocr-ukr \
+       tesseract-ocr-vie \
        unrtf \
     && rm -rf /var/lib/apt/lists/* /usr/share/doc/* /usr/share/man/* /usr/share/info/* \
     && rm -rf /opt/yarn-* /usr/local/bin/yarn /usr/local/bin/yarnpkg

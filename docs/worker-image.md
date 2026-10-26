@@ -19,7 +19,7 @@ and from the deploy error text. The CI image budget (below) is set well under it
 | | `Dockerfile.lean` (production, `fly.worker.toml`) | `Dockerfile.full` (self-host `--profile full`) |
 | --- | --- | --- |
 | Node | worker-only production `node_modules` from `pnpm deploy`, pruned | same |
-| System tools | poppler-utils + poppler-data (CJK CMaps), pandoc, ffmpeg, ClamAV, bubblewrap | adds LibreOffice, Tesseract (eng/fra/deu/spa), ocrmypdf, ghostscript, ImageMagick, qpdf, catdoc, unrtf |
+| System tools | poppler-utils + poppler-data (CJK CMaps), pandoc, ffmpeg, ClamAV, bubblewrap; fonts for non-embedded PDF fonts: URW base-35 and Liberation (metric-compatible Times/Helvetica/Courier and Arial/Times New Roman/Courier New), Noto core (Arabic, Hebrew, Thai, Devanagari, Greek, Cyrillic), Droid Sans Fallback (CJK) | adds LibreOffice, Tesseract (eng, deu, fra, spa, ara, chi_sim, chi_tra, ell, heb, hin, ita, jpn, kor, nld, pol, por, rus, tha, tur, ukr, vie), ocrmypdf, ghostscript, ImageMagick, qpdf, catdoc, unrtf; Noto CJK instead of Droid Sans Fallback |
 | Python venv `/app/.venv` | base parsers: trafilatura, ebooklib, python-pptx, openpyxl, xlsx2csv, Pillow (wheel-only, read-only) | same, plus pip for the legacy first-boot install |
 | Unstructured | vendor bundles, fetched on first use | vendor bundles, or the legacy first-boot pip install when no bundle source is configured |
 | Kreuzberg, LiteParse, mammoth, LanceDB, transformers.js | in `node_modules` | same |

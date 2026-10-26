@@ -6,6 +6,10 @@ if command -v apk >/dev/null 2>&1; then
     bash \
     bubblewrap \
     ffmpeg \
+    font-liberation \
+    font-noto \
+    font-noto-cjk \
+    font-urw-base35 \
     ca-certificates \
     clamav \
     clamav-daemon \
@@ -23,6 +27,25 @@ if command -v apk >/dev/null 2>&1; then
     qpdf \
     tesseract-ocr \
     tesseract-ocr-data-eng \
+    tesseract-ocr-data-deu \
+    tesseract-ocr-data-fra \
+    tesseract-ocr-data-spa \
+    tesseract-ocr-data-ara \
+    tesseract-ocr-data-chi_sim \
+    tesseract-ocr-data-chi_tra \
+    tesseract-ocr-data-heb \
+    tesseract-ocr-data-hin \
+    tesseract-ocr-data-ita \
+    tesseract-ocr-data-jpn \
+    tesseract-ocr-data-kor \
+    tesseract-ocr-data-nld \
+    tesseract-ocr-data-pol \
+    tesseract-ocr-data-por \
+    tesseract-ocr-data-rus \
+    tesseract-ocr-data-tha \
+    tesseract-ocr-data-tur \
+    tesseract-ocr-data-ukr \
+    tesseract-ocr-data-vie \
     tiff-tools
 elif command -v apt-get >/dev/null 2>&1; then
   apt-get update
@@ -30,6 +53,10 @@ elif command -v apt-get >/dev/null 2>&1; then
     bash \
     bubblewrap \
     ffmpeg \
+    fonts-liberation \
+    fonts-noto-cjk \
+    fonts-noto-core \
+    fonts-urw-base35 \
     ca-certificates \
     catdoc \
     clamav \
@@ -51,6 +78,26 @@ elif command -v apt-get >/dev/null 2>&1; then
     qpdf \
     tesseract-ocr \
     tesseract-ocr-eng \
+    tesseract-ocr-deu \
+    tesseract-ocr-fra \
+    tesseract-ocr-spa \
+    tesseract-ocr-ara \
+    tesseract-ocr-chi-sim \
+    tesseract-ocr-chi-tra \
+    tesseract-ocr-ell \
+    tesseract-ocr-heb \
+    tesseract-ocr-hin \
+    tesseract-ocr-ita \
+    tesseract-ocr-jpn \
+    tesseract-ocr-kor \
+    tesseract-ocr-nld \
+    tesseract-ocr-pol \
+    tesseract-ocr-por \
+    tesseract-ocr-rus \
+    tesseract-ocr-tha \
+    tesseract-ocr-tur \
+    tesseract-ocr-ukr \
+    tesseract-ocr-vie \
     unrtf
   rm -rf /var/lib/apt/lists/*
 else
