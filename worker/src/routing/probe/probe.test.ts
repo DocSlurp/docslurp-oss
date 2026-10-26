@@ -21,6 +21,7 @@ interface FakePage {
   widgets?: Array<{ value?: string }>;
   annotations?: string[];
   rotation?: number;
+  size?: { widthPt: number; heightPt: number };
 }
 
 const PROSE = "The quick brown fox jumps over the lazy dog and the cat is on the mat with all of the other animals here. ";
@@ -42,7 +43,7 @@ function fakeBinding(pages: FakePage[], extra: { js?: boolean; fonts?: Array<{ t
           const p = pages[i]!;
           const spans = (p.spans ?? []).map((s) => ({ font: "Times", size: 11, renderMode: 0, invisible: false, unmapped: 0, ...s }));
           return {
-            size: () => ({ widthPt: 612, heightPt: 792, rotation: p.rotation ?? 0 }),
+            size: () => ({ widthPt: 612, heightPt: 792, ...p.size, rotation: p.rotation ?? 0 }),
             spans: () => spans,
             glyphStats: () => ({ glyphs: spans.reduce((n, s) => n + s.text.length, 0), invisible: 0, stroke: 0, unmapped: 0, fonts: 1, ...p.stats }),
             images: () => (p.images ?? []).map((im, index) => ({ index, widthPx: 1000, heightPx: 1000, effectiveDpi: 150, ...im })),
@@ -127,6 +128,20 @@ describe("native page probe", () => {
     } finally {
       process.env.PATH = savedPath;
     }
+  });
+
+  it("leaves an oversized OCR band unverified instead of OCRing it", async () => {
+    let calls = 0;
+    // A 100 x 100 inch page: its band is about 25 MP at the check's 100 dpi.
+    const page: FakePage = {
+      size: { widthPt: 7200, heightPt: 7200 },
+      spans: [{ text: PROSE.repeat(3), bbox: [40, 60, 7000, 7000], font: "GlyphLessFont" }],
+      images: [{ bbox: [0, 0, 7200, 7200] }],
+      stats: { glyphs: 100, invisible: 100 },
+    };
+    const row = (await collect(fakeBinding([page]), { verifyOcrLayer: true, recognise: async () => { calls += 1; return PROSE.repeat(3); } }))[0]!;
+    expect(calls).toBe(0);
+    expect(row.ocrLayerCheck?.agreement).toBeNull();
   });
 
   it("runs the OCR-layer recogniser through the command runner with a bounded, single-threaded plan", async () => {

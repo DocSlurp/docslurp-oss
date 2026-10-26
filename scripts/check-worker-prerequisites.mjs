@@ -20,6 +20,8 @@ if (!Object.hasOwn(profiles, profile) || args.some((arg) => arg !== `--profile=$
   console.error('Usage: node scripts/check-worker-prerequisites.mjs --profile=lean|full|test|routing [--sandbox]');
   process.exit(2);
 }
+// 360x70 1-bit PNG reading "OCR probe 731" (Liberation Sans 40 px), for the OCR smoke test.
+const OCR_PROBE_PNG = 'iVBORw0KGgoAAAANSUhEUgAAAWgAAABGCAMAAADW6v4VAAAABlBMVEX///8AAABVwtN+AAAChUlEQVR42u2Y23LDIAxE0f//dGc67cSxdiURAzbt7pNjcVkdsIzTmiRJkiRJkiRJkiRJkiRJkiRJkiRJ0i4ys7st/A/9QdD2qyQO+yR9L7m6kgtwRp1O8R9bK4ctymiUr6vZvNmiTidtlMxYMYxAjzU7GDR1OuuJhL6OP2ph3HKwtYGDvOyRDTPSOvThV7cUxpt/sLch+Xlz53oyv0aTelUJA2+D7Q4CDby9gx7vHPpAtCwOpzGQ6unx9PnB2gl6ksYJ5waH/r6izudyPt5E4dIiuFzRq9QVIkOLEby9cjq0BXpQHwY66ktBezKvu2d0qI1bgCJpGl8MmgwfVYePQIOV+4F4bOPGOC9EA4OEfKIN/STQ8exdoF0Lv0f9Nadb5FPmvBlo3B4TNc4LV65jzyIgFrS9QVsymsNlZKi4jXWBhozJ/SeDdkonYRBRB4jUXOOe7JjNzUCzduBXUGkx6PYJaG56Z9ClfIeArs7Lz3bb1uge0G7si6CLR+UwcYEugC7Nm2R+L+iew1N1Z42u0b25kehk0B99gpP/Om56GUapdST+ANDohBTiiTOGvSuga/WMTUvnyNyPUnLSicJVr7iWBxU+blNEkri7BbTxOzjMvY76Mkx6Hkcvgk5eKdNBOzzmDbnfpVTwiOR5wE/Rsacl+PtArz7evVAeUzMWfj9OeW/YrcHFqazfeeoGW9C0kA93uQ509oVHwx2gm++OHiQwQ0O+ArcB6AbTSLKfiLocBo1h/+976TLRlUTGClyIEzjJMtD8v5ZTOKMKh7DjF13Qm66ksZmSL5JSIotBz9TW5neSQC+SQC+SQC+SQC+SQC+SQC+SQEuSJEmSJEmSJEmSJG2uL03xCLqgM+RYAAAAAElFTkSuQmCC';
 // Tesseract languages the lean and full images must ship (Debian tesseract-ocr-<lang> packages).
 const FULL_TESSERACT_LANGS = ['eng', 'deu', 'fra', 'spa', 'ara', 'chi_sim', 'chi_tra', 'ell', 'heb', 'hin', 'ita', 'jpn', 'kor', 'nld', 'pol', 'por', 'rus', 'tha', 'tur', 'ukr', 'vie'];
 const failures = [];
@@ -99,6 +101,14 @@ if (profile === 'full' || profile === 'test' || profile === 'lean') {
       const alpine = existsSync('/etc/alpine-release');
       const missing = FULL_TESSERACT_LANGS.filter((lang) => !have.has(lang) && !(alpine && lang === 'ell'));
       if (missing.length) failures.push(`Tesseract language data unavailable: ${missing.join(', ')}`);
+    }
+    // Language data alone does not prove OCR works: OCR a tiny bundled image through Kreuzberg, the path images take.
+    if ((profile === 'full' || profile === 'lean') && result.status === 0) {
+      try {
+        const kreuzberg = await import(require.resolve('@kreuzberg/node'));
+        const ocr = await kreuzberg.extractBytes(Buffer.from(OCR_PROBE_PNG, 'base64'), 'image/png');
+        if (!/OCR probe 731/.test(ocr.content ?? '')) failures.push(`Kreuzberg OCR probe returned ${JSON.stringify((ocr.content ?? '').slice(0, 80))}`);
+      } catch (error) { failures.push(`Kreuzberg OCR probe failed: ${error.message}`); }
     }
   }
 }

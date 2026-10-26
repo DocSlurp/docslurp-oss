@@ -14,6 +14,11 @@ import { round, tokens } from "./features.js";
 export const OCR_CHECK_BAND = 0.25;
 export const OCR_CHECK_DPI = 100;
 export const OCR_CHECK_MIN_TOKENS = 10;
+/**
+ * Largest band OCR'd (pixels at OCR_CHECK_DPI). A Letter page's band is about 0.23 MP; a hostile page size makes a
+ * band tesseract spends a minute and about 1 GB on, so larger bands are left unverified.
+ */
+export const OCR_CHECK_MAX_PIXELS = 4_000_000;
 /** Chosen on development+calibration pages (TL1, tuned with tesseract); re-tune before changing the recogniser. */
 export const OCR_AGREEMENT_MIN = 0.4;
 
@@ -70,8 +75,10 @@ export async function ocrLayerAgreement(
     const clip: [number, number, number, number] = [
       0, Math.max(0, mid - (OCR_CHECK_BAND * size.heightPt) / 2), size.widthPt, Math.min(size.heightPt, mid + (OCR_CHECK_BAND * size.heightPt) / 2),
     ];
-    const png = await page.renderAsync({ dpi: OCR_CHECK_DPI, clip, gray: true, format: "png" });
-    const text = await recognise(png, signal);
+    const bandPixels = ((clip[2] - clip[0]) * OCR_CHECK_DPI / 72) * ((clip[3] - clip[1]) * OCR_CHECK_DPI / 72);
+    const text = Number.isFinite(bandPixels) && bandPixels <= OCR_CHECK_MAX_PIXELS
+      ? await recognise(await page.renderAsync({ dpi: OCR_CHECK_DPI, clip, gray: true, format: "png" }), signal)
+      : null;
     if (text !== null) {
       const got = tokens(text, 4);
       const vocab = new Set(tokens(words.map((w) => w.text).join(" "), 4));
