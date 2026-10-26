@@ -59,3 +59,20 @@ test('reports a pdftotext that cannot run instead of blaming poppler-data', () =
     assert.match(result.stderr, /CMap probe could not run pdftotext: exit 3/);
   } finally { rmSync(bin, { recursive: true, force: true }); }
 });
+test('fails the lean profile when tesseract or one of its languages is missing', () => {
+  const bin = mkdtempSync(path.join(os.tmpdir(), 'docslurp-prereq-'));
+  try {
+    let result = spawnSync(process.execPath, [script, '--profile=lean'], {
+      encoding: 'utf8', env: { ...process.env, PATH: bin, PYTHON_VENV: '/nonexistent-docslurp-venv' },
+    });
+    assert.match(result.stderr, /missing executable: tesseract/);
+    // English only: the lean image must ship every OCR language, not just eng.
+    writeFileSync(path.join(bin, 'tesseract'), '#!/bin/sh\nprintf "List of available languages (2):\\neng\\nosd\\n"\n');
+    chmodSync(path.join(bin, 'tesseract'), 0o755);
+    result = spawnSync(process.execPath, [script, '--profile=lean'], {
+      encoding: 'utf8', env: { ...process.env, PATH: bin, PYTHON_VENV: '/nonexistent-docslurp-venv' },
+    });
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /Tesseract language data unavailable: deu, fra, spa, ara, chi_sim/);
+  } finally { rmSync(bin, { recursive: true, force: true }); }
+});

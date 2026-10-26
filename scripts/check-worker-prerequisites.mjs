@@ -12,7 +12,7 @@ const args = process.argv.slice(2);
 const profile = args.find((arg) => arg.startsWith('--profile='))?.split('=')[1] ?? 'full';
 const profiles = {
   routing: ['node'],
-  lean: ['node', 'python3', 'pandoc', 'pdfinfo', 'pdftotext', 'pdftohtml', 'pdftoppm', 'pdfimages', 'clamscan', 'clamdscan'],
+  lean: ['node', 'python3', 'pandoc', 'pdfinfo', 'pdftotext', 'pdftohtml', 'pdftoppm', 'pdfimages', 'tesseract', 'clamscan', 'clamdscan'],
   test: ['node', 'pandoc', 'pdfinfo', 'pdftotext', 'pdftohtml', 'pdftoppm', 'pdfimages', 'tesseract'],
   full: ['node', 'pandoc', 'pdfinfo', 'pdftotext', 'pdftohtml', 'pdftoppm', 'pdfimages', 'tesseract', 'soffice', 'qpdf', 'gs', 'ocrmypdf', ...(process.platform === 'linux' ? ['catdoc'] : []), 'unrtf', 'tiffcp', 'xlsx2csv', 'clamscan', 'clamdscan'],
 };
@@ -20,7 +20,7 @@ if (!Object.hasOwn(profiles, profile) || args.some((arg) => arg !== `--profile=$
   console.error('Usage: node scripts/check-worker-prerequisites.mjs --profile=lean|full|test|routing [--sandbox]');
   process.exit(2);
 }
-// Tesseract languages the full image must ship (Debian tesseract-ocr-<lang> packages).
+// Tesseract languages the lean and full images must ship (Debian tesseract-ocr-<lang> packages).
 const FULL_TESSERACT_LANGS = ['eng', 'deu', 'fra', 'spa', 'ara', 'chi_sim', 'chi_tra', 'ell', 'heb', 'hin', 'ita', 'jpn', 'kor', 'nld', 'pol', 'por', 'rus', 'tha', 'tur', 'ukr', 'vie'];
 const failures = [];
 const paths = (process.env.PATH ?? '').split(path.delimiter);
@@ -92,8 +92,8 @@ if (profile === 'full' || profile === 'test' || profile === 'lean') {
   if (tesseract) {
     const result = spawnSync(tesseract, ['--list-langs'], { encoding: 'utf8', timeout: 10000 });
     if (result.status !== 0 || !/^eng\r?$/m.test(result.stdout)) failures.push('Tesseract English language data (eng) unavailable');
-    // The full image OCRs scripts whose PDF text layers are often unusable (Thai, Arabic, CJK, ...).
-    if (profile === 'full' && result.status === 0) {
+    // Both images OCR scripts whose PDF text layers are often unusable (Thai, Arabic, CJK, ...).
+    if ((profile === 'full' || profile === 'lean') && result.status === 0) {
       const have = new Set(result.stdout.split(/\r?\n/).map((line) => line.trim()));
       const missing = FULL_TESSERACT_LANGS.filter((lang) => !have.has(lang));
       if (missing.length) failures.push(`Tesseract language data unavailable: ${missing.join(', ')}`);
