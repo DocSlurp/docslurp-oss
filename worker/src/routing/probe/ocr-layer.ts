@@ -2,7 +2,11 @@
  * TL1 OCR-layer agreement: how well a hidden text layer agrees with a fresh OCR of one band of the page.
  * Same algorithm and thresholds as page_probe.py (`ocr_layer_agreement`); tesseract stays the recogniser.
  */
-import { spawn } from "node:child_process";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
+
+import type { CommandRunner } from "../../tools/runner.js";
 
 import type { ProbeBindingPage } from "./binding.js";
 import { round, tokens } from "./features.js";
@@ -20,29 +24,27 @@ export interface OcrLayerCheck {
   wallMs: number;
 }
 
-/** Recognise a PNG with the `tesseract` binary (stdin to stdout). Resolves null when tesseract is unavailable. */
-export function tesseractRecognise(png: Buffer, signal?: AbortSignal, timeoutMs = 60_000): Promise<string | null> {
-  return new Promise((resolve, reject) => {
-    const child = spawn("tesseract", ["stdin", "stdout", "--psm", "4", "-l", "eng"], {
-      env: { ...process.env, OMP_THREAD_LIMIT: "1" },
-      stdio: ["pipe", "pipe", "ignore"],
-      signal,
-    });
-    const chunks: Buffer[] = [];
-    const timer = setTimeout(() => child.kill("SIGKILL"), timeoutMs);
-    child.stdout.on("data", (c: Buffer) => chunks.push(c));
-    child.on("error", (error: NodeJS.ErrnoException) => {
-      clearTimeout(timer);
-      if (error.code === "ENOENT") resolve(null);
-      else reject(error);
-    });
-    child.on("close", () => {
-      clearTimeout(timer);
-      resolve(Buffer.concat(chunks).toString("utf8"));
-    });
-    child.stdin.on("error", () => undefined);
-    child.stdin.end(png);
-  });
+/**
+ * Recogniser that runs `tesseract` through the parser sandbox (allowlisted environment, bounded time and RSS). The
+ * band is rendered from a customer PDF, so it never runs as a bare child of the worker. Resolves null when tesseract
+ * is not installed.
+ */
+export function sandboxedTesseract(runner: Pick<CommandRunner, "plan" | "run">, timeoutMs = 60_000): Recogniser {
+  return async (png, signal) => {
+    const dir = await mkdtemp(path.join(tmpdir(), "docslurp-ocr-layer-"));
+    try {
+      const input = path.join(dir, "band.png");
+      const base = path.join(dir, "band");
+      await writeFile(input, png);
+      const plan = await runner.plan("tesseract", input, base, "--psm", "4", "-l", "eng");
+      if (!plan.available) return null;
+      // One thread, as the agreement threshold was tuned; bundleEnv is the plan's extra-environment channel.
+      await runner.run({ ...plan, timeoutMs, bundleEnv: { OMP_THREAD_LIMIT: "1" } }, signal);
+      return await readFile(`${base}.txt`, "utf8");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  };
 }
 
 export type Recogniser = (png: Buffer, signal?: AbortSignal) => Promise<string | null>;
@@ -50,7 +52,7 @@ export type Recogniser = (png: Buffer, signal?: AbortSignal) => Promise<string |
 export async function ocrLayerAgreement(
   page: ProbeBindingPage,
   size: { widthPt: number; heightPt: number },
-  recognise: Recogniser = tesseractRecognise,
+  recognise: Recogniser,
   signal?: AbortSignal,
 ): Promise<OcrLayerCheck> {
   const wall0 = performance.now();

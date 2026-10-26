@@ -7,6 +7,8 @@ import { afterEach, describe, expect, it } from "vitest";
 import { createProbeRunner, parseProbeOutput } from "../page-input.js";
 import { setProbeBindingForTesting, type Box, type ProbeBinding, type ProbeBindingPage } from "./binding.js";
 import { laplacianVariance, parsePages, percentiles, textLayerStatus } from "./features.js";
+import type { CommandPlan } from "../../tools/runner.js";
+import { sandboxedTesseract } from "./ocr-layer.js";
 import { probeNativePdf, type NativeProbeRow } from "./probe.js";
 
 const png = await sharp({ create: { width: 612, height: 792, channels: 3, background: { r: 255, g: 255, b: 255 } } }).png().toBuffer();
@@ -103,6 +105,45 @@ describe("native page probe", () => {
     const unverifiable = (await collect(fakeBinding([page]), { verifyOcrLayer: true, recognise: async () => null }))[0]!;
     expect(unverifiable.ocrLayerCheck?.agreement).toBeNull();
     expect(unverifiable.textLayerStatus).toBe("ocr-layer");
+  });
+
+  it("never runs tesseract itself: without a sandboxed recogniser the OCR layer stays unverified", async () => {
+    const page: FakePage = {
+      spans: [{ text: PROSE.repeat(3), bbox: [40, 60, 570, 700], font: "GlyphLessFont" }],
+      images: [{ bbox: [0, 0, 612, 792] }],
+      stats: { glyphs: 100, invisible: 100 },
+    };
+    // A tesseract on PATH that would be found by a bare spawn must not be used.
+    const bin = await mkdtemp(path.join(os.tmpdir(), "docslurp-probe-bin-"));
+    const marker = path.join(bin, "ran");
+    await writeFile(path.join(bin, "tesseract"), `#!/bin/sh\ntouch ${marker}\necho ${PROSE.repeat(3)}\n`, { mode: 0o755 });
+    const savedPath = process.env.PATH;
+    process.env.PATH = `${bin}${path.delimiter}${savedPath ?? ""}`;
+    try {
+      const row = (await collect(fakeBinding([page]), { verifyOcrLayer: true }))[0]!;
+      expect(row.ocrLayerCheck?.agreement).toBeNull();
+      expect(row.textLayerStatus).toBe("ocr-layer");
+      await expect(readFile(marker)).rejects.toThrow();
+    } finally {
+      process.env.PATH = savedPath;
+    }
+  });
+
+  it("runs the OCR-layer recogniser through the command runner with a bounded, single-threaded plan", async () => {
+    const plans: CommandPlan[] = [];
+    const runner = {
+      plan: async (binary: string, ...args: string[]) => ({ binary, args, available: true }),
+      run: async (plan: CommandPlan) => {
+        plans.push(plan);
+        await writeFile(`${plan.args[1]}.txt`, "recognised words");
+        return { stdout: "", stderr: "" } as never;
+      },
+    };
+    expect(await sandboxedTesseract(runner)(png)).toBe("recognised words");
+    expect(plans[0]).toMatchObject({ binary: "tesseract", timeoutMs: 60_000, bundleEnv: { OMP_THREAD_LIMIT: "1" } });
+    expect(plans[0]!.args.slice(2)).toEqual(["--psm", "4", "-l", "eng"]);
+    const missing = { plan: async (binary: string, ...args: string[]) => ({ binary, args, available: false }), run: runner.run };
+    expect(await sandboxedTesseract(missing)(png)).toBeNull();
   });
 
   it("flags unusual features per page and per document", async () => {

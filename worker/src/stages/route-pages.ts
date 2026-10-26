@@ -31,6 +31,7 @@ import { isCostCapExceeded, runDocumentStage, runDocuments, runSpentCents } from
 import { healthyDocuments } from "../pipeline/document-health.js";
 import { allowHostedCall } from "../lib/privacy-guard.js";
 import { buildPageInputs, createProbeRunner, parseProbeOutput, type ProbeRunner } from "../routing/page-input.js";
+import { sandboxedTesseract } from "../routing/probe/ocr-layer.js";
 import { readRoutingFlags, type TableGateMode } from "../routing/flags.js";
 import { PAGE_ROUTE_TABLE_GATE_METRIC, runTableGateShadow } from "../routing/gates/shadow.js";
 import { createInsetGate, type InsetGate } from "../routing/inset-gate.js";
@@ -218,6 +219,7 @@ export class RoutePagesStage implements Stage {
         documentFormat: "pdf",
         // TL1: OCR-layer pages are verified against a band re-OCR (about 1 s CPU, OCR-layer pages only).
         verifyOcrLayer: true,
+        recognise: this.runner ? sandboxedTesseract(this.runner) : undefined,
         probe: this.deps.probe ?? createProbeRunner(),
         signal,
       });

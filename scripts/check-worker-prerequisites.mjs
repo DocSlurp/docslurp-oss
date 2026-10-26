@@ -95,7 +95,9 @@ if (profile === 'full' || profile === 'test' || profile === 'lean') {
     // Both images OCR scripts whose PDF text layers are often unusable (Thai, Arabic, CJK, ...).
     if ((profile === 'full' || profile === 'lean') && result.status === 0) {
       const have = new Set(result.stdout.split(/\r?\n/).map((line) => line.trim()));
-      const missing = FULL_TESSERACT_LANGS.filter((lang) => !have.has(lang));
+      // Alpine packages no Greek (ell) language data; see scripts/setup-cli-docker.sh.
+      const alpine = existsSync('/etc/alpine-release');
+      const missing = FULL_TESSERACT_LANGS.filter((lang) => !have.has(lang) && !(alpine && lang === 'ell'));
       if (missing.length) failures.push(`Tesseract language data unavailable: ${missing.join(', ')}`);
     }
   }

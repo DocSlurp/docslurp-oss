@@ -26,11 +26,14 @@ and from the deploy error text. The CI image budget (below) is set well under it
 | Native PDF engine | optional, `DOCSLURP_NATIVE_PDF=1`; PDFs otherwise use Kreuzberg and Poppler (PyMuPDF/pymupdf4llm and the MuPDF `mupdf-tools` apt package were removed 2026-10-15: AGPL) | same |
 | Runtime pip installs | off (`DOCSLURP_PYTHON_LAZY_INSTALL=false`) | on for the first-boot path only |
 
-### Images without Tesseract
+### Images without Tesseract data
 
-Both images ship Tesseract and its 21 languages (about 107 MiB on the lean image, measured 2026-10-26), and the
-prerequisite check fails the build if any language is missing, so production OCRs images locally (in the parser
-sandbox) instead of sending them to vision. A self-built image or local setup without the language data falls back
+Both images ship Tesseract and its 21 languages. On the lean image they add 107 MiB (the apt delta for
+`tesseract-ocr` and the language packs, measured 2026-10-26; the image is 2,085 MiB uncompressed). The prerequisite
+check fails the build, and a `lean` or `full` worker's startup, if any language is missing. Production therefore OCRs
+images locally, in the parser sandbox, instead of sending them to vision. Image OCR uses English unless the
+extractor config sets `ocr.language`, so text in other scripts may come out poor; `DOCSLURP_OCR=off` restores
+vision-first routing. A self-built image or local setup without the language data falls back
 as follows. Kreuzberg's bundled Tesseract otherwise looks for that data at the path of the machine that built it. The extractor planner therefore checks for `<lang>.traineddata` in
 `TESSDATA_PREFIX` and Kreuzberg's system locations (`worker/src/extractors/ocr-capability.ts`) before offering
 Kreuzberg for an image, and `DOCSLURP_OCR=off` forces that answer. With no OCR, or when Kreuzberg's OCR still

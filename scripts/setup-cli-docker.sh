@@ -2,6 +2,7 @@
 set -eu
 
 if command -v apk >/dev/null 2>&1; then
+  # Alpine has no tesseract-ocr-data-ell (Greek); the prerequisite check skips ell on Alpine.
   apk add --no-cache \
     bash \
     bubblewrap \
