@@ -75,12 +75,16 @@ if (profile === 'full' || profile === 'test' || profile === 'lean') {
   // without a usable ToUnicode; without them pdftotext silently drops that text.
   const pdftotext = await binaryPath('pdftotext');
   if (pdftotext) {
-    const dir = mkdtempSync(path.join(os.tmpdir(), 'docslurp-cmap-probe-'));
+    let dir;
     try {
+      dir = mkdtempSync(path.join(os.tmpdir(), 'docslurp-cmap-probe-'));
       writeFileSync(path.join(dir, 'probe.pdf'), cmapProbePdf());
-      const result = spawnSync(pdftotext, ['-q', path.join(dir, 'probe.pdf'), '-'], { encoding: 'utf8', timeout: 10000 });
-      if (!result.stdout?.includes('\u4e2d\u6587')) failures.push('poppler CJK CMap data unavailable (install poppler-data): pdftotext lost UniGB-UCS2-H text');
-    } finally { rmSync(dir, { recursive: true, force: true }); }
+      const result = spawnSync(pdftotext, ['-q', path.join(dir, 'probe.pdf'), '-'], { encoding: 'utf8', timeout: 30000 });
+      if (result.error || result.status !== 0) failures.push(`poppler CJK CMap probe could not run pdftotext: ${result.error?.message || `exit ${result.status}`}`);
+      else if (!result.stdout.includes('\u4e2d\u6587')) failures.push('poppler CJK CMap data unavailable (install poppler-data): pdftotext lost UniGB-UCS2-H text');
+    } catch (error) {
+      failures.push(`poppler CJK CMap probe failed: ${error.message}`);
+    } finally { if (dir) rmSync(dir, { recursive: true, force: true }); }
   }
   const tesseract = await binaryPath('tesseract');
   if (tesseract) {

@@ -35,3 +35,27 @@ test('fails when pdftotext cannot map CJK text through the predefined CMaps (pop
     assert.match(result.stderr, /poppler CJK CMap data unavailable/);
   } finally { rmSync(bin, { recursive: true, force: true }); }
 });
+test('passes the CMap probe with a pdftotext that maps the predefined CMap', () => {
+  const bin = mkdtempSync(path.join(os.tmpdir(), 'docslurp-prereq-'));
+  try {
+    // A pdftotext that returns the probe text, as poppler with poppler-data does.
+    writeFileSync(path.join(bin, 'pdftotext'), '#!/bin/sh\nprintf "\\344\\270\\255\\346\\226\\207\\n\\f"\n');
+    chmodSync(path.join(bin, 'pdftotext'), 0o755);
+    const result = spawnSync(process.execPath, [script, '--profile=lean'], {
+      encoding: 'utf8', env: { ...process.env, PATH: bin, PYTHON_VENV: '/nonexistent-docslurp-venv' },
+    });
+    assert.doesNotMatch(result.stderr, /CMap/);
+  } finally { rmSync(bin, { recursive: true, force: true }); }
+});
+test('reports a pdftotext that cannot run instead of blaming poppler-data', () => {
+  const bin = mkdtempSync(path.join(os.tmpdir(), 'docslurp-prereq-'));
+  try {
+    writeFileSync(path.join(bin, 'pdftotext'), '#!/bin/sh\nexit 3\n');
+    chmodSync(path.join(bin, 'pdftotext'), 0o755);
+    const result = spawnSync(process.execPath, [script, '--profile=lean'], {
+      encoding: 'utf8', env: { ...process.env, PATH: bin, PYTHON_VENV: '/nonexistent-docslurp-venv' },
+    });
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /CMap probe could not run pdftotext: exit 3/);
+  } finally { rmSync(bin, { recursive: true, force: true }); }
+});
