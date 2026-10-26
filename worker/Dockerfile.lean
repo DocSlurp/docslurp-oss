@@ -1,7 +1,7 @@
 # Dockerfile.lean - Production worker image (fly.worker.toml)
 #
 # Contents: Node 24 + the worker's production node_modules (pnpm deploy, pruned),
-# poppler-utils, pandoc, ffmpeg, ClamAV, bubblewrap, and a wheel-only Python venv
+# poppler-utils (with poppler-data CMaps), pandoc, ffmpeg, ClamAV, bubblewrap, and a wheel-only Python venv
 # with the base parsers (trafilatura, ebooklib, python-pptx,
 # openpyxl, xlsx2csv, Pillow; PDFs use Kreuzberg, Poppler and the optional native-pdf engine). No LibreOffice, Tesseract or ML stacks: Docling and
 # Unstructured come from sha256-pinned vendor bundles fetched on demand
@@ -99,6 +99,7 @@ RUN apt-get update \
        clamdscan \
        ffmpeg \
        pandoc \
+       poppler-data \
        poppler-utils \
        python3 \
     && rm -rf /var/lib/apt/lists/* /usr/share/doc/* /usr/share/man/* /usr/share/info/* \

@@ -16,6 +16,7 @@ if command -v apk >/dev/null 2>&1; then
     npm \
     ocrmypdf \
     pandoc \
+    poppler-data \
     poppler-utils \
     py3-pip \
     python3 \
@@ -42,6 +43,7 @@ elif command -v apt-get >/dev/null 2>&1; then
     npm \
     ocrmypdf \
     pandoc \
+    poppler-data \
     poppler-utils \
     python3 \
     python3-pip \
