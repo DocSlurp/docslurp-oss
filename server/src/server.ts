@@ -45,6 +45,7 @@ import { inviteRoutes, metaRoutes, dashboardRoutes, waitlistRoutes } from "./rou
 import { filesRoutes } from "./routes/files.js";
 import { capabilitiesRoutes } from "./routes/capabilities.js";
 import { notificationsRoutes } from "./routes/notifications.js";
+import { feedbackRoutes } from "./routes/feedback.js";
 import { mcpRoutes } from "./routes/mcp.js";
 import { mcpOAuthRoutes, mcpOAuthMetadataRoutes } from "./routes/mcp-oauth.js";
 import { suggestRoutes } from "./routes/suggest.js";
@@ -186,6 +187,7 @@ export function createApiApp(): Hono {
   app.route("/v1/api-keys", apiKeysRoutes);
   app.route("/v1/capabilities", capabilitiesRoutes);
   app.route("/v1/notifications", notificationsRoutes);
+  app.route("/v1/feedback", feedbackRoutes);
   app.route("/v1/search", searchRoutes);
   app.route("/v1/web", webRoutes);
   app.route("/v1/searches", searchesRoutes);
