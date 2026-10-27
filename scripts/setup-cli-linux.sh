@@ -37,6 +37,7 @@ ${SUDO} apt-get install -y \
   ocrmypdf \
   pandoc \
   poppler-utils \
+  poppler-data \
   python3 \
   python3-venv \
   qpdf \
