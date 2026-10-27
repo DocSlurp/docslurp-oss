@@ -617,6 +617,13 @@
       "when": 1792792800250,
       "tag": "0087_search_sessions_workspace_idx",
       "breakpoints": true
+    },
+    {
+      "idx": 88,
+      "version": "7",
+      "when": 1792792800600,
+      "tag": "0091_passkey_two_factor",
+      "breakpoints": true
     }
   ]
 }

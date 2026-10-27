@@ -11,6 +11,7 @@ import { createAuthEmailOptions } from "./auth-email.js";
 import { developmentTrustedOrigins } from "./dev-auth-access.js";
 import { withTrustedAuthClientIp } from "./client-ip.js";
 import { beforeOAuthAccountCreate } from "./oauth-account-linking.js";
+import { createMfaPlugins, resolveMfaConfig, sessionAssuranceFields, sessionAssuranceFor } from "./auth-mfa.js";
 
 /**
  * pg's idle timer freezes with a suspended Fly Machine, leaving idle clients whose
@@ -167,6 +168,9 @@ export function getDevSeedAccountCredential(id: DevSeedAccountKey): DevSeedAccou
 }
 
 const securityOptions = createBetterAuthSecurityOptions(process.env);
+const emailOptions = createAuthEmailOptions(process.env);
+/** Passkey relying party and 2FA settings; invalid passkey origins fail startup. */
+export const mfaConfig = resolveMfaConfig(process.env, securityOptions.baseURL);
 export const auth = betterAuth({
   onAPIError: { onError: (error) => { reportPublicError(error, { surface: "auth" }); } },
   database: pool,
@@ -175,17 +179,22 @@ export const auth = betterAuth({
   ...securityOptions,
   trustedOrigins: (request) => developmentTrustedOrigins(securityOptions.trustedOrigins, request),
   baseURL: resolveBetterAuthBaseUrl(process.env),
-  ...createAuthEmailOptions(process.env),
+  ...emailOptions,
+  // Order matters: the MFA gate's after-hook must see every plugin's new session.
+  plugins: [...emailOptions.plugins, ...createMfaPlugins({ pool, config: mfaConfig })],
+  session: { ...securityOptions.session, additionalFields: sessionAssuranceFields },
   databaseHooks: {
     session: {
       create: {
-        before: async (session) => {
+        before: async (session, ctx) => {
           const result = await pool.query<{ name: string }>('select name from "user" where id = $1 and deleted_at is null', [session.userId]);
           if (result.rows[0]) {
             await ensureUserAndOrganization(pool, { id: session.userId, name: result.rows[0].name ?? "" });
           }
           await admitConfiguredAdminUser(pool, session.userId);
-          return { data: session };
+          // Whether this session passed a second factor, decided by the endpoint
+          // that created it (see sessionAssuranceFor), never by request input.
+          return { data: { ...session, ...sessionAssuranceFor(ctx, session.userId) } };
         }
       }
     },
