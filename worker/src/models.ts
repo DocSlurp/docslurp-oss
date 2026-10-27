@@ -40,6 +40,9 @@ export interface WorkspaceRun {
   stats: JsonMap;
   artifacts: Record<string, string>;
   claimId: string | null;
+  /** Extract runs (workspace_runs.extract_id) write every artifact under this prefix instead of <user>/<run>. */
+  storagePrefix?: string | null;
+  extractId?: string | null;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -56,6 +59,8 @@ export interface Document {
   pageCount: number;
   createdAt: Date;
   updatedAt: Date;
+  /** Set for documents of an extract run: the run's storage prefix (see runArtifactRoot). */
+  artifactRoot?: string | null;
 }
 
 export interface UsageEvent {

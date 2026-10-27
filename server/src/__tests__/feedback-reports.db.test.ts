@@ -18,7 +18,7 @@ vi.mock("../lib/better-auth.js", () => ({
     api: {
       getSession: async ({ headers }: { headers: Headers }) => {
         const user = users[headers.get("x-test-session") ?? ""];
-        return user ? { session: { id: `s-${user.id}`, userId: user.id }, user: { ...user } } : null;
+        return { headers: new Headers(), response: user ? { session: { id: `s-${user.id}`, userId: user.id }, user: { ...user } } : null };
       },
     },
   },

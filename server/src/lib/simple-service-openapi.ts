@@ -179,12 +179,6 @@ const canonicalServicePaths = {
     requestBody: request(z.toJSONSchema(workspaceChatInputSchema)),
     responses: { "200": response("Grounded answer, citations and actual usage", ref("WorkspaceChatResponse")), ...errors },
   } },
-  "/v1/search/chat": { post: {
-    deprecated: true,
-    tags: ["search"], summary: "Compatibility alias for POST /v1/chat", security: serviceSecurity,
-    requestBody: request(z.toJSONSchema(workspaceChatInputSchema)),
-    responses: { "200": response("Grounded answer, citations and actual usage", ref("WorkspaceChatResponse")), ...errors },
-  } },
   "/v1/models": { get: {
     tags: ["chat"], summary: "List accessible workspaces as chat models", security: keySecurity,
     responses: { "200": response("Workspace model list", { type: "object", required: ["object", "data"], properties: { object: { const: "list" }, data: { type: "array", items: ref("WorkspaceModel") } } }), ...openAiErrors },

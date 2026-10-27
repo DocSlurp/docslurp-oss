@@ -21,6 +21,14 @@ describe("session revocation", () => {
   it("checks the session row on every request instead of trusting a cached session cookie", () => {
     expect(createBetterAuthSecurityOptions({}).session.cookieCache).toEqual({ enabled: false });
   });
+
+  it("keeps active users signed in for 30 idle days while requiring a fresh session for sensitive changes", () => {
+    expect(createBetterAuthSecurityOptions({}).session).toMatchObject({
+      expiresIn: 60 * 60 * 24 * 30,
+      updateAge: 60 * 60 * 24,
+      freshAge: 60 * 60
+    });
+  });
 });
 
 describe("resolveBetterAuthBaseUrl", () => {

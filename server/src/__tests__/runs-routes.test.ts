@@ -40,7 +40,6 @@ class MockRunCreationBlockedError extends Error {
 
 vi.mock("../services/runs.js", () => ({
   controlRun: vi.fn(),
-  exportRun: vi.fn(),
   getRun: getRunMock,
   getRunProcessingPreview: getRunProcessingPreviewMock,
   getRunProgress: getRunProgressMock,
@@ -74,9 +73,6 @@ vi.mock("../services/audit-log.js", () => ({
   appendAuditLog: vi.fn()
 }));
 
-vi.mock("../services/run-forensics.js", () => ({
-  getRunForensics: vi.fn()
-}));
 
 vi.mock("../services/run-lifecycle.js", () => ({
   runLifecycle: { start: async (run: { id: string; pipeline: unknown }) => {
@@ -187,7 +183,7 @@ describe("runsRoutes validation", () => {
     });
 
     expect(response.status).toBe(409);
-    await expect(response.json()).resolves.toMatchObject({ error: { code: "conflict" } });
+    await expect(response.json()).resolves.toMatchObject({ error: { code: "missing_stage_artifacts" } });
     expect(reprocessRunMock).toHaveBeenCalledWith("run-1", "user-1", { stageFrom: "embed" });
   });
 

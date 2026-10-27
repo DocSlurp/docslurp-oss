@@ -166,6 +166,19 @@ await client.waitForRun(accepted.run.id);
 
 DocSlurp must be able to reach the URLs. URL ingestion is retried only when you supply an `idempotencyKey`. Use the same `upload()` method for local files or public URLs.
 
+### Extract and auto-delete
+
+`extract()` takes everything `upload()` takes, but the files and every output are deleted when the retention window ends: 48 hours free by default, or `retentionDays` (charged as storage, up to 30 days by default). The response adds `extract` with its `id`, `expiresAt` and download state, and the requester is emailed a sign-in download link when it finishes unless `notifyEmail: false`.
+
+```ts
+const { run, extract } = await client.extract([await openAsBlob("report.pdf")], { retentionDays: 7, download: "markdown" });
+await client.waitForRun(run.id);
+const status = await client.getExtract(extract.id); // DocSlurpApiError 410 once it has expired
+const zipUrl = await client.getExtractDownloadUrl(extract.id); // two-minute signed URL; server key with artifacts
+```
+
+See [Extract mode](https://docslurp.io/docs/extract) for retention, pricing and deletion.
+
 ### Search several questions in one request
 
 ```js

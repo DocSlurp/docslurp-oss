@@ -1,22 +1,7 @@
 import { appDbPool } from "./better-auth.js";
+import { findSsoOrgForEmail, ssoStartUrl } from "./sso-enforcement.js";
 
-interface SsoOrgRow {
-  id: string;
-  slug: string | null;
-  sso_config: {
-    providerType?: "saml" | "oidc" | null;
-    metadataUrl?: string | null;
-    clientId?: string | null;
-    enabled?: boolean;
-    enforceSso?: boolean;
-    emailDomain?: string | null;
-  } | null;
-}
-
-/** Base URL the browser is sent to for SSO initiation. */
-export function ssoBaseUrl(request: Request): string {
-  return process.env.INTERNAL_API_URL || new URL(request.url).origin;
-}
+export { ssoBaseUrl } from "./sso-enforcement.js";
 
 /**
  * Given an email address, find the org whose SSO covers its domain. Returns
@@ -34,45 +19,18 @@ export function ssoBaseUrl(request: Request): string {
  * the IdP are refused at the SSO callback, which then grants that browser an
  * unlinked pass (see sso-unlinked-pass.ts) so they can sign in normally and
  * link SSO.
+ *
+ * This is the sign-in page's redirect hint only and fails open on a database
+ * error. Enforcement itself lives in sso-enforcement.ts and fails closed.
  */
 export async function resolveSsoRedirect(email: string, apiUrl: string, requireEnforced = true): Promise<string | null> {
-  const domain = email.split("@")[1]?.trim().toLowerCase();
-  if (!domain) return null;
-
   try {
-    const rows = await appDbPool.query<SsoOrgRow>(
-      `
-        select o.id, o.slug, o.sso_config
-        from organizations o
-        join sso_domains d
-          on d.org_id = o.id
-          and d.domain = o.sso_config->>'emailDomain'
-          and d.verified_at is not null
-        where
-          d.domain = $1
-          and (o.sso_config->>'enabled')::boolean = true
-          and ($2::boolean = false or (o.sso_config->>'enforceSso')::boolean = true)
-        limit 1
-      `,
-      [domain, requireEnforced]
-    );
-
-    const org = rows.rows[0];
-    const config = org?.sso_config;
-    if (!org || !config) return null;
-
-    if (config.providerType === "saml") {
-      return `${apiUrl}/v1/auth/saml/${encodeURIComponent(org.slug ?? org.id)}/init`;
-    }
-
-    if (config.providerType === "oidc" && config.metadataUrl && config.clientId) {
-      return `${apiUrl}/v1/auth/oidc/${encodeURIComponent(org.id)}/init`;
-    }
+    const org = await findSsoOrgForEmail(appDbPool, email, requireEnforced);
+    return org ? ssoStartUrl(org, apiUrl) : null;
   } catch {
     // Non-fatal: fall through to normal login.
+    return null;
   }
-
-  return null;
 }
 
 export async function hasConfiguredSsoProvider(): Promise<boolean> {

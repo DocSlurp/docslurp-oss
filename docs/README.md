@@ -20,6 +20,7 @@ This index lists the documentation published in the public source tree. The file
 | Batch failure policy | batch-failure-policy.md |
 | Temporal workflow changes | temporal-workflow-changes.md |
 | Data deletion | data-deletion.md |
+| Extract mode: auto-deleted uploads, retention pricing | extract.md |
 | Evaluation integrity policy | evaluation-integrity.md |
 | Stripe catalog feed and environment selection | [stripe-catalog-feed.md](stripe-catalog-feed.md) |
 | Licensing | licensing.md |

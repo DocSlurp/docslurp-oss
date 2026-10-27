@@ -50,6 +50,8 @@ interface ExportRow {
   org_id: string;
   workspace_id: string;
   document_id: string | null;
+  /** Extract downloads: only this run's documents. */
+  run_id?: string | null;
   content: DocumentExportContent;
   filename: string;
   object_key: string;
@@ -335,7 +337,19 @@ export async function loadExportArtifacts(sql: Sql, documents: ExportDocumentRow
  * `superseded_at` is set only once a newer version completes, so a pending or
  * failed re-upload never hides the version that is still searchable.
  */
-export async function loadExportDocuments(sql: Sql, row: Pick<ExportRow, "workspace_id" | "document_id">): Promise<{ documents: ExportDocumentRow[]; truncated: boolean }> {
+export async function loadExportDocuments(sql: Sql, row: Pick<ExportRow, "workspace_id" | "document_id" | "run_id">): Promise<{ documents: ExportDocumentRow[]; truncated: boolean }> {
+  if (row.run_id) {
+    // An extract's download: its run's completed documents, still in the export's workspace.
+    const documents = await sql<ExportDocumentRow[]>`
+      select ${documentColumns(sql)}
+      from documents d
+      where d.run_id = ${row.run_id} and d.workspace_id = ${row.workspace_id}
+        and d.status = 'completed' and d.purged_at is null
+      order by lower(d.filename), d.created_at, d.id
+      limit ${DOCUMENT_EXPORT_MAX_DOCUMENTS + 1}
+    `;
+    return { documents: documents.slice(0, DOCUMENT_EXPORT_MAX_DOCUMENTS), truncated: documents.length > DOCUMENT_EXPORT_MAX_DOCUMENTS };
+  }
   if (row.document_id) {
     const documents = await sql<ExportDocumentRow[]>`
       select ${documentColumns(sql)}
@@ -381,7 +395,7 @@ export async function buildDocumentExport(
   const [row] = await sql<Array<ExportRow & { attempts: number; notify_email: boolean }>>`
     update document_exports set status = 'running', started_at = coalesce(started_at, now()), attempts = attempts + 1
     where id = ${exportId} and status in ('queued', 'running') and expires_at > now()
-    returning id, org_id, workspace_id, document_id, content, filename, object_key, expires_at, attempts, notify_email
+    returning id, org_id, workspace_id, document_id, run_id, content, filename, object_key, expires_at, attempts, notify_email
   `;
   if (!row) return { status: "skipped" };
   const prefix = row.object_key.endsWith("/") ? row.object_key : `${row.object_key.slice(0, row.object_key.lastIndexOf("/") + 1)}`;
@@ -447,7 +461,8 @@ export async function buildDocumentExport(
     const finished = await sql`
       update document_exports
       set status = 'ready', completed_at = now(), object_key = ${key},
-        expires_at = now() + make_interval(days => ${DOCUMENT_EXPORT_TTL_DAYS}),
+        -- An extract's download never outlives the extract (max_expires_at).
+        expires_at = least(now() + make_interval(days => ${DOCUMENT_EXPORT_TTL_DAYS}), coalesce(max_expires_at, 'infinity'::timestamptz)),
         document_ids = ${sql.array(documents.map((document) => document.id))},
         size_bytes = ${sizeBytes}, file_count = ${files}, skipped_count = ${skipped.length},
         document_count = ${documents.length}, error = null

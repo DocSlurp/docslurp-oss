@@ -39,7 +39,7 @@ describe("thrown errors inside a native router", () => {
       .get("/forbidden", () => { throw new WorkspaceAccessError(403, "workspace_forbidden", "Default workspace is not accessible"); });
     const app = guarded(router);
     expect((await (await app.request("/org")).json()).error.code).toBe("organization_not_found");
-    expect((await (await app.request("/forbidden")).json()).error.code).toBe("forbidden");
+    expect((await (await app.request("/forbidden")).json()).error.code).toBe("workspace_forbidden");
   });
 
   it("keeps the headers of the error response (Retry-After, WWW-Authenticate)", async () => {

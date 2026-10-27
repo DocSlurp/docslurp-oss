@@ -307,6 +307,8 @@ export const BILLABLE_UNIT_METRICS = {
   webSearch: "web-search",
   webPage: "web-page",
   webMap: "web-map",
+  /** Extended extract retention, prepaid as storage (extract-mode.ts). */
+  extractRetention: "storage-extract-retention",
 } as const;
 export type BillableUnitMetric = (typeof BILLABLE_UNIT_METRICS)[keyof typeof BILLABLE_UNIT_METRICS];
 

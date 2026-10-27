@@ -5,6 +5,7 @@ import { runStorageMeter } from "./billing/storage-meter.js";
 import { sweepInterruptedConnectorSyncs } from "./connector-sync-recovery.js";
 import { sweepDocumentExports } from "./document-exports.js";
 import { sweepFeedbackReports } from "./feedback-reports.js";
+import { sweepExtracts } from "./extracts.js";
 import { sweepSpendPausedRuns } from "./spend-paused-runs.js";
 import { sweepExpiredCreditLeases } from "./billing/credit-leases.js";
 import { sweepStaleQueuedRuns } from "./stale-queued-runs.js";
@@ -48,6 +49,8 @@ const sweeps: Array<[name: string, run: () => Promise<unknown>]> = [
   ["document-exports", () => sweepDocumentExports()],
   // Feedback reports past FEEDBACK_RETENTION_DAYS or over the per-org cap (hourly).
   ["feedback-retention", () => sweepFeedbackReports()],
+  // Extract mode: settle finished extracts (charge, download, email) and delete expired ones.
+  ["extracts", () => sweepExtracts()],
 ];
 
 let timer: ReturnType<typeof setInterval> | null = null;

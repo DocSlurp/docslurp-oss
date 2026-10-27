@@ -16,7 +16,6 @@ import { requestIp, requestUserAgent } from "../lib/request-context.js";
 import { appendAuditLog } from "../services/audit-log.js";
 import {
   getCorrectionWorkbench,
-  listLowConfidenceReviewQueue,
   reindexDocumentCorrection,
   saveDocumentCorrection
 } from "../services/document-review.js";
@@ -37,6 +36,7 @@ import {
 } from "../services/documents.js";
 import { acceptApiKeys } from "../lib/route-auth.js";
 import { apiErrorResponse, apiStatusError } from "../lib/api-error.js";
+import { isReprocessRejectedError } from "../services/reprocess-errors.js";
 import { reportPublicError } from "../lib/public-errors.js";
 import { indexingModeErrorResponse } from "../lib/indexing-mode-error.js";
 import { validationHook } from "../lib/validation.js";
@@ -264,21 +264,6 @@ export const documentsRoutes = new Hono()
       includeSuperseded: ["1", "true"].includes(c.req.query("includeSuperseded") ?? "")
     });
     return c.json(result);
-  })
-  .get("/review-queue", async (c) => {
-    const userId = c.get("sessionUser").id;
-    const sort = c.req.query("sort");
-    const queue = await listLowConfidenceReviewQueue({
-      userId,
-      orgId: c.get("apiKey")?.orgId ?? undefined,
-      runId: c.req.query("runId") ?? undefined,
-      workspaceId: await resolveActorWorkspaceFilter(getRequestActor(c), c.req.query("workspace"), c.req.query("orgId")),
-      sort:
-        sort === "cost" || sort === "org" || sort === "failure-mode" || sort === "severity"
-          ? sort
-          : undefined
-    });
-    return c.json({ queue });
   })
   .delete("/:docId", async (c) => {
     const userId = c.get("sessionUser").id;
@@ -546,7 +531,14 @@ export const documentsRoutes = new Hono()
       () => estimateDocumentReprocess({ documentIds: body.documentIds, userId, ...(bulkWorkspaceId ? { workspaceId: bulkWorkspaceId } : {}) }),
       `/v1/workspaces/${bulkWorkspaceId ?? "{workspaceId}"}/documents/bulk/estimate`,
     );
-    const { runs, failed, warnings } = await bulkReprocessDocuments(body.documentIds, userId);
+    let bulk: Awaited<ReturnType<typeof bulkReprocessDocuments>>;
+    try {
+      bulk = await bulkReprocessDocuments(body.documentIds, userId);
+    } catch (error) {
+      if (isReprocessRejectedError(error)) return apiStatusError(c, error.statusCode, error.message, { code: error.code, details: error.details });
+      throw error;
+    }
+    const { runs, failed, warnings } = bulk;
     await appendAuditLog({
       userId,
       apiKeyId,
@@ -580,7 +572,6 @@ acceptApiKeys(documentsRoutes, [
   "POST /:documentId/full-index/estimate",
   "GET /",
   "GET /index",
-  "GET /review-queue",
   "GET /:docId",
   "GET /:docId/structured",
   "GET /:docId/versions",

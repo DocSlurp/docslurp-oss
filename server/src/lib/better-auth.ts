@@ -11,6 +11,7 @@ import { createAuthEmailOptions } from "./auth-email.js";
 import { developmentTrustedOrigins } from "./dev-auth-access.js";
 import { withTrustedAuthClientIp } from "./client-ip.js";
 import { beforeOAuthAccountCreate } from "./oauth-account-linking.js";
+import { ssoEnforcementPlugin } from "./sso-enforcement.js";
 
 /**
  * pg's idle timer freezes with a suspended Fly Machine, leaving idle clients whose
@@ -167,6 +168,7 @@ export function getDevSeedAccountCredential(id: DevSeedAccountKey): DevSeedAccou
 }
 
 const securityOptions = createBetterAuthSecurityOptions(process.env);
+const emailOptions = createAuthEmailOptions(process.env);
 export const auth = betterAuth({
   onAPIError: { onError: (error) => { reportPublicError(error, { surface: "auth" }); } },
   database: pool,
@@ -175,7 +177,10 @@ export const auth = betterAuth({
   ...securityOptions,
   trustedOrigins: (request) => developmentTrustedOrigins(securityOptions.trustedOrigins, request),
   baseURL: resolveBetterAuthBaseUrl(process.env),
-  ...createAuthEmailOptions(process.env),
+  ...emailOptions,
+  // Company SSO enforcement refuses every other first factor server-side and
+  // revokes non-SSO sessions of enforced addresses (see sso-enforcement.ts).
+  plugins: [...emailOptions.plugins, ssoEnforcementPlugin({ pool })],
   databaseHooks: {
     session: {
       create: {

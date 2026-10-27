@@ -12,9 +12,8 @@
  * Only pages with sparse native text are inspected, so born-digital documents pay nothing.
  */
 
-import { splitTextIntoPages } from "@docslurp/shared";
-
 import type { CommandRunner } from "../tools/runner.js";
+import { embeddedImageBytesByPage } from "./page-yield-evidence.js";
 
 /** Pages with fewer native words than this are "sparse" and get raster evidence. */
 export const SPARSE_PAGE_WORDS = 30;
@@ -27,6 +26,10 @@ export const MAX_IMAGE_ROWS = 100_000;
 
 export interface PageImageEvidence {
   pageNumber: number;
+  /** Approximate embedded image/mask storage, deduplicated within this page; null if unknown.
+   * Not expected text bytes and not additive across pages (shared PDF objects).
+   */
+  embeddedImageBytes?: number | null;
   /** Words in the page's native text (as extracted). */
   wordCount: number;
   /** Significant images drawn on the page. */
@@ -148,7 +151,9 @@ export function pageAlignedTexts(text: string, pageCount: number): string[] | nu
   if (!text.trim()) return Array.from({ length: pages }, () => "");
   if (pages === 1) return [text];
   if (!text.includes("\f")) return null;
-  const split = splitTextIntoPages(text, pages);
+  // Do not use splitTextIntoPages here: its equal-length fallback invents boundaries.
+  const split = text.replace(/\r\n/g, "\n").split("\f").map((page) => page.trim());
+  while (split.length > pages && split[split.length - 1] === "") split.pop();
   return split.length === pages ? split : null;
 }
 
@@ -197,7 +202,9 @@ export async function collectPageImageEvidence(args: {
       pageAreas = parsePdfPageAreas((await args.runner.run(sizePlan, withTimeout())).stdout);
     }
   }
-  return buildPageImageEvidence({ sparsePages, images, pageAreas, defaultPageArea: US_LETTER_AREA });
+  const imageBytes = embeddedImageBytesByPage(listing);
+  return buildPageImageEvidence({ sparsePages, images, pageAreas, defaultPageArea: US_LETTER_AREA })
+    .map((page) => ({ ...page, embeddedImageBytes: imageBytes.get(page.pageNumber) ?? null }));
 }
 
 /** Fallback page area (US Letter, 612 x 792 pt) when page sizes are unavailable. */
