@@ -83,7 +83,8 @@ export const sessionAuth: MiddlewareHandler = async (c, next) => {
     return middlewareErrorResponse(c, 401, "unauthorized", "Unauthorized");
   }
 
-  const actor = await resolveBetterAuthSessionActor(c.req.raw.headers, { allowMfaPolicyBlocked: true });
+  const refreshedCookies = new Headers();
+  const actor = await resolveBetterAuthSessionActor(c.req.raw.headers, refreshedCookies, { allowMfaPolicyBlocked: true });
   if (!actor) {
     return middlewareErrorResponse(c, 401, "unauthorized", "Unauthorized");
   }
@@ -101,4 +102,24 @@ export const sessionAuth: MiddlewareHandler = async (c, next) => {
 
   setRequestActor(c, actor);
   await next();
+  forwardRefreshedSessionCookies(c, refreshedCookies);
 };
+
+/** Keeps an active browser signed in by passing Better Auth's refreshed session cookie through. */
+function forwardRefreshedSessionCookies(c: Context, refreshed: Headers): void {
+  // A route that set the cookie itself (sign-out, account deletion) wins.
+  const routeSet = new Set(c.res.headers.getSetCookie().map(cookieName));
+  const cookies = refreshed.getSetCookie().filter((cookie) => !routeSet.has(cookieName(cookie)));
+  if (cookies.length === 0) return;
+  try {
+    for (const cookie of cookies) c.res.headers.append("set-cookie", cookie);
+  } catch {
+    // Responses passed through from fetch() have immutable headers.
+    c.res = new Response(c.res.body, c.res);
+    for (const cookie of cookies) c.res.headers.append("set-cookie", cookie);
+  }
+}
+
+function cookieName(setCookie: string): string {
+  return setCookie.slice(0, setCookie.indexOf("=")).trim();
+}

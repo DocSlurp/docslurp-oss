@@ -74,16 +74,24 @@ export async function resolveApiKeyActor(
 }
 
 /**
- * The signed-in browser session, or null. A session blocked by an org's
- * "require MFA" policy resolves to null unless the caller opts in with
- * `allowMfaPolicyBlocked` (the API middleware does, to answer 403 mfa_required
- * instead of a sign-in loop), so every other session consumer fails closed.
+ * Resolves a session, forwarding refreshed cookies when headers are supplied.
+ * MFA policy fails closed unless the API middleware explicitly opts in.
  */
-export async function resolveBetterAuthSessionActor(headers: Headers, options: { allowMfaPolicyBlocked?: boolean } = {}): Promise<SessionRequestActor | null> {
-  const session = await auth.api.getSession({ headers }) as {
-    session: { id: string; userId: string; mfaVerified?: boolean | null };
-    user: SessionUser;
+export async function resolveBetterAuthSessionActor(
+  headers: Headers,
+  refreshedHeadersOrOptions?: Headers | { allowMfaPolicyBlocked?: boolean },
+  options: { allowMfaPolicyBlocked?: boolean } = {},
+): Promise<SessionRequestActor | null> {
+  const responseHeaders = refreshedHeadersOrOptions instanceof Headers ? refreshedHeadersOrOptions : undefined;
+  options = responseHeaders ? options : refreshedHeadersOrOptions ?? options;
+  const result = await auth.api.getSession({ headers, returnHeaders: true }) as {
+    headers: Headers | null;
+    response: { session: { id: string; userId: string; mfaVerified?: boolean | null }; user: SessionUser } | null;
   } | null;
+  const session = result?.response ?? null;
+  if (responseHeaders) {
+    for (const cookie of result?.headers?.getSetCookie() ?? []) responseHeaders.append("set-cookie", cookie);
+  }
 
   if (!session?.user) {
     return null;
