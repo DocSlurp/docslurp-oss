@@ -185,6 +185,16 @@ const canonicalServicePaths = {
     requestBody: request(z.toJSONSchema(workspaceChatInputSchema)),
     responses: { "200": response("Grounded answer, citations and actual usage", ref("WorkspaceChatResponse")), ...errors },
   } },
+  "/v1/whoami": { get: {
+    tags: ["account"], summary: "Identity behind the presented server key or CLI OAuth token", security: serviceSecurity,
+    description: "User, organization, default workspace, scopes and (for OAuth access tokens from docslurp login) granted scopes and expiry. Client (browser) keys get 403. Never returns the credential.",
+    responses: { "200": response("Credential identity", { type: "object", required: ["user", "organization", "defaultWorkspace", "credential"], properties: {
+      user: { type: "object", properties: { id: { type: "string" }, name: { type: ["string", "null"] }, email: { type: ["string", "null"] } } },
+      organization: { type: ["object", "null"], properties: { id: { type: "string" }, name: { type: "string" }, slug: { type: "string" } } },
+      defaultWorkspace: { type: ["object", "null"], properties: { id: { type: "string" }, name: { type: "string" }, slug: { type: ["string", "null"] } } },
+      credential: { type: "object", required: ["type", "scopes"], properties: { type: { enum: ["apiKey", "oauth", "session"] }, client: { type: "string" }, scopes: { type: "array", items: { type: "string" } }, apiKeyScopes: { type: "array", items: { type: "string" } }, expiresAt: { type: ["string", "null"], format: "date-time" } } },
+    } }), ...errors },
+  } },
   "/v1/models": { get: {
     tags: ["chat"], summary: "List accessible workspaces as chat models", security: keySecurity,
     responses: { "200": response("Workspace model list", { type: "object", required: ["object", "data"], properties: { object: { const: "list" }, data: { type: "array", items: ref("WorkspaceModel") } } }), ...openAiErrors },

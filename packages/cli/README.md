@@ -12,11 +12,11 @@ Start with [your first search](#your-first-search), see [shell workflows](#built
 
 ## Your first search
 
-You need **Node.js 20+** and a [server key](https://docslurp.io/app/api-keys) with the **ingest** and **search** scopes. These commands use Bash or zsh. In PowerShell, set the key with `$env:DOCSLURP_API_KEY = 'your-server-key'`.
+You need **Node.js 20+**. Sign in with your browser (or use a [server key](https://docslurp.io/app/api-keys), see [Sign in](#sign-in)). These commands use Bash or zsh.
 
 ```bash
 npm install --global @docslurp/cli
-export DOCSLURP_API_KEY='your-server-key'
+docslurp login --scopes "search read ingest"
 
 docslurp upload ./handbook.pdf --watch
 ```
@@ -171,20 +171,23 @@ Run `docslurp` with no arguments, or `docslurp --help`, for built-in usage.
 
 | Flag | Environment variable | Default |
 | --- | --- | --- |
-| `--api-key <key>` | `DOCSLURP_API_KEY` | Required for API commands |
+| `--api-key <key>` | `DOCSLURP_API_KEY` | Optional with `docslurp login`; see [which credential wins](#sign-in) |
+| None | `DOCSLURP_TOKEN` | A short-lived OAuth access token (`docslurp auth token`) |
+| `--profile <name>` | `DOCSLURP_PROFILE` | `default`; one stored login per profile and API URL |
 | `--api-url <origin>` | `DOCSLURP_URL` | `https://docslurp.io` (don't add `/v1`) |
 | `--workspace <id\|slug\|name>` | `DOCSLURP_WORKSPACE` | `default`, your organization's default workspace. On `upload`/`ingest-url` a name that matches no workspace creates it; `--new-workspace` or `--template` without `--workspace` creates a self-titled one. |
 | `--timeout <seconds>` | None | 30 seconds per API request; 300 seconds per watch |
 
 Flags override environment variables. With `upload --watch --timeout 600`, the upload request gets up to 600 seconds **and then** the watch gets up to 600 seconds. Watches poll every two seconds, and each progress read is capped at 30 seconds. `--timeout` applies to upload, status, runs, search and chat, not to `import-search-compat` or the long-lived MCP server. The CLI doesn't retry failed requests.
 
-Set the key in the environment rather than with `--api-key`, so it doesn't show up in your shell history or process list. For local development, set `DOCSLURP_URL=http://localhost:4321`; API commands still need a key.
+Set the key in the environment rather than with `--api-key`, so it doesn't show up in your shell history or process list. For local development, set `DOCSLURP_URL=http://localhost:4321` and run `docslurp login` against it.
 
 ### Agent and migration tools
 
 ```bash
-# Your MCP client starts this command. Give it DOCSLURP_API_KEY in its environment.
-docslurp mcp-server
+# Your MCP client starts this command. After docslurp login it needs no key and
+# refreshes its token while it runs; otherwise give it DOCSLURP_API_KEY.
+docslurp mcp
 
 # Convert synonyms without calling the API.
 docslurp migrate-algolia-synonyms synonyms.json --out glossary.json
@@ -200,12 +203,63 @@ docslurp import-search-compat export.json \
   --api-key '' --out normalized.json
 ```
 
+## Sign in
+
+`docslurp login` opens your browser, you approve the CLI on DocSlurp, and the CLI stores a login it refreshes on its own. No API key is needed.
+
+```bash
+docslurp login                         # browser sign-in; asks for search and read
+docslurp login --scopes "search read chat ingest"
+docslurp login --device                # headless or SSH: enter a code on any device
+docslurp whoami                        # user, organization, default workspace, scopes, expiry
+docslurp auth status                   # also shows which credential is in use and where it is stored
+docslurp logout                        # revokes the login on the server, then deletes it locally
+```
+
+- **Browser login** uses OAuth 2.1 authorization code with PKCE and a one-time listener on `127.0.0.1` on a random port. If the browser does not open, the CLI prints the URL; `--no-browser` only prints it.
+- **Device login** (`--device`, RFC 8628) prints a short code such as `WDJB-MJHT` and a page on your DocSlurp origin. Open it on any signed-in device, check the code matches, and approve. Never enter a code someone else sent you.
+- **Scopes** are least privilege by default: `search` and `read`. Add `chat` to ask questions (uses credits) and `ingest` to upload, ingest URLs or reprocess. A CLI login can never change workspace settings, manage an organization or mint API keys; use the dashboard or a server key with those scopes.
+
+| Login scope | Lets the CLI |
+| --- | --- |
+| `search` | Search and list workspaces |
+| `read` | Read document text, pages, files, runs and exports |
+| `chat` | Ask grounded questions (`docslurp chat`) |
+| `ingest` | Upload, ingest URLs, reprocess, retag or delete documents |
+
+**Where the login is stored.** The CLI uses the OS keychain when it can: macOS Keychain, the Secret Service on Linux (through `secret-tool` from libsecret), or Windows Credential Manager. Otherwise it writes `~/.config/docslurp/credentials.json` (`$XDG_CONFIG_HOME`, `%APPDATA%` on Windows) with mode `0600` in a `0700` directory, and refuses to read that file if its permissions are looser. `DOCSLURP_CREDENTIAL_STORE=keychain` requires the keychain; `file` forces the file. Each `--profile` (or `DOCSLURP_PROFILE`) keeps one login per API URL, so `docslurp login --profile work --api-url https://docs.example.com` does not replace your default login.
+
+**Which credential wins.** Every command, including `docslurp mcp`, uses the first of:
+
+1. `--api-key <key>`
+2. `DOCSLURP_API_KEY`
+3. `DOCSLURP_TOKEN`, a short-lived OAuth access token
+4. the stored `docslurp login`
+
+Access tokens last 15 minutes. The stored login refreshes shortly before expiry (refresh tokens rotate, last 30 days and are revoked if one is ever reused). If a refresh fails, the CLI asks you to run `docslurp login` again.
+
+### Pass a token to another program
+
+```bash
+# A fresh access token on stdout only, valid for at least 5 more minutes.
+export DOCSLURP_TOKEN="$(docslurp auth token)"
+
+# Or let the CLI hand one to a child process through its environment only:
+# never written to disk, never on the command line.
+docslurp exec -- npm run ingest-docs
+docslurp exec --workspace contracts -- python agent.py
+```
+
+`exec` sets `DOCSLURP_TOKEN`, `DOCSLURP_URL` and, when you choose one, `DOCSLURP_WORKSPACE`, and exits with the child's status. The SDK reads `DOCSLURP_TOKEN` when no API key is set. Env tokens are short-lived (at most 15 minutes, not refreshed) and carry only the scopes of your login, so use them for one job; for long-running CI, use a scoped server key. `auth token` and `exec` refuse to forward an API key.
+
 ## When something goes wrong
 
 | Symptom | What to do |
 | --- | --- |
-| Missing API key, or HTTP 401 | Set `DOCSLURP_API_KEY` to a valid server key for this deployment. |
-| HTTP 403 | Check your workspace access and the key's scopes: `ingest` for uploads, `search` for search and chat. |
+| Not signed in, or HTTP 401 | Run `docslurp login` (or `docslurp auth status` to see which credential is in use), or set `DOCSLURP_API_KEY` to a valid server key for this deployment. |
+| Login expired or revoked | Run `docslurp login` again. Logins refresh themselves for 30 days of use. |
+| `permissions ... are too open` | Run the `chmod` the message names, or `docslurp logout --force` and log in again. |
+| HTTP 403 | Check your workspace access and the scopes: `ingest` for uploads, `search` for search, `chat` for chat. For a login, add scopes with `docslurp login --scopes "search read chat ingest"`. |
 | Watch timed out | Run `docslurp status RUN_ID --watch`. The run may still be processing. |
 | Run failed, paused, cancelled or dead-lettered | Check its status and the workspace in the dashboard before uploading again. |
 | Search returns nothing or too little | Check `availability` in `search --json`, and confirm the workspace (`--workspace` or `DOCSLURP_WORKSPACE`, else `default`). |
