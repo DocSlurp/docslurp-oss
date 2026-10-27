@@ -15,6 +15,7 @@ import {
   runLanceDbMaintenance,
   type LanceDbCadencePolicy,
 } from "../stages/lancedb-maintenance.js";
+import * as connection from "../stages/lancedb-connection.js";
 import { deleteLanceDbDocumentRows } from "../db/superseded-purge.js";
 import {
   DirectMaintenanceCadence,
@@ -243,6 +244,37 @@ describe("LanceDB maintenance", () => {
     expect(coordinator.activeKeys()).toBe(0);
     await Promise.all([coordinator.request("a", task), coordinator.request("b", async () => { throw new Error("x"); })]);
     expect(runs).toBe(3);
+  });
+
+  it.each(["optimize failed", "history prune failed"])("propagates erasure failure (%s) and retries, while ordinary maintenance stays best effort", async (message) => {
+    const optimize = vi.fn().mockRejectedValueOnce(new Error(message)).mockResolvedValue({
+      compaction: { fragmentsRemoved: 1 }, prune: { oldVersionsRemoved: 1, bytesRemoved: 8 },
+    });
+    const table = { delete: vi.fn(), optimize, countRows: async () => 0, listIndices: async () => [], close: vi.fn() };
+    vi.spyOn(connection, "connectLanceDb").mockResolvedValue({
+      tableNames: async () => ["chunks"], openTable: async () => table, close: vi.fn(),
+    } as unknown as import("@lancedb/lancedb").Connection);
+    const args = { uri: dir, table: "chunks", documentIds: ["erased"], purgeHistory: true };
+    await expect(deleteLanceDbDocumentRows(args)).rejects.toThrow(message);
+    await expect(deleteLanceDbDocumentRows(args)).resolves.toBeUndefined();
+    expect(optimize).toHaveBeenCalledTimes(2);
+    expect(optimize.mock.calls[1]![0].cleanupOlderThan).toBeInstanceOf(Date);
+    optimize.mockRejectedValueOnce(new Error(message));
+    await expect(requestLanceDbMaintenance(dir, "chunks", { vectorIndexMinRows: 100 })).resolves.toBeUndefined();
+  });
+
+  it("does not coalesce strict maintenance with pending weaker retention", async () => {
+    const coordinator = createMaintenanceCoordinator();
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const runs: string[] = [];
+    const first = coordinator.request("t", async () => { await gate; });
+    const ordinary = coordinator.request("t", async () => { runs.push("ordinary"); });
+    const strict = coordinator.request("t", async () => { runs.push("strict"); }, false);
+    release();
+    await Promise.all([first, ordinary, strict]);
+    expect(runs).toEqual(["ordinary", "strict"]);
+    expect(coordinator.activeKeys()).toBe(0);
   });
 
   it("optimizes, builds the vector index past the threshold, and keeps search working", async () => {

@@ -7,6 +7,7 @@ import type { CommandRunner } from "../tools/runner.js";
 import type { ArtifactStore } from "../tools/storage.js";
 import { extractTextForEmbedding, estimateTokens } from "./embedding-runtime.js";
 import { indexableDocuments } from "../pipeline/pii-gate.js";
+import { runArtifactRoot } from "../lib/artifact-root.js";
 
 export function buildPageIndexSearchMetadata(pageCount: number): {
   mode: "page-index";
@@ -83,7 +84,7 @@ export class PageIndexStage implements Stage {
             await markPagesIngestedIfDeferred(this.sql(), document.id, pageRows.length, state.run.kind === "full-index" ? "full-index" : "ingest");
           }
 
-          const key = `${document.userId}/${state.run.id}/page-index/${document.id}.json`;
+          const key = `${runArtifactRoot(state.run, document.userId)}/page-index/${document.id}.json`;
           const search = buildPageIndexSearchMetadata(pageRows.length);
           await this.storage.putJson(key, {
             documentId: document.id,

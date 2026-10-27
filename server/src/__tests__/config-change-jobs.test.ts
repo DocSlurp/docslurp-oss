@@ -136,6 +136,35 @@ describe("config-change jobs", () => {
     expect(count!.n).toBe(2);
   });
 
+  it("never re-indexes an extract document into a kept run (council finding: extract content outliving its extract)", async () => {
+    await seed({ credits: 10_000 });
+    const extractId = "ext_" + "e".repeat(32);
+    const prefix = `extracts/o1/${extractId}`;
+    await sql`insert into extracts (id, org_id, workspace_id, user_id, storage_prefix, retention_hours, expires_at)
+      values (${extractId}, 'o1', 'w', 'u1', ${prefix}, 48, now() + interval '2 days')`;
+    await sql`insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, pipeline, total_documents, extract_id, storage_prefix)
+      values ('ext-run', 'o1', 'u1', 'w', 'bulk-upload', 'completed', 'index', ${sql.json(JSON.parse(JSON.stringify(pipeline())))}, 1, ${extractId}, ${prefix})`;
+    await sql`insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status, page_count, canonical_id)
+      values ('dx', 'o1', 'u1', 'w', 'ext-run', 'secret.pdf', 'application/pdf', ${`${prefix}/raw/secret.pdf`}, 'completed', 5, ${`docslurp:extract:${extractId}:dx`})`;
+
+    const { applied } = await patch(embeddingChange());
+    const copies = await sql<{ reindex_of: string; source_key: string }[]>`select reindex_of, source_key from documents where run_id = ${applied!.job!.id}`;
+    expect(copies.map((copy) => copy.reindex_of).sort()).toEqual(["d0", "d1"]);
+    expect(copies.some((copy) => copy.source_key.startsWith("extracts/"))).toBe(false);
+
+    // The database refuses an extract source outside its own extract run, whatever path tries it.
+    await expect(sql`insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status, page_count, previous_version_id, reindex_of)
+      values ('dx-copy', 'o1', 'u1', 'w', ${applied!.job!.id}, 'secret.pdf', 'application/pdf', ${`${prefix}/raw/secret.pdf`}, 'queued', 5, 'dx', 'dx')`).rejects.toThrow(/extract source outside its own extract run/);
+    await expect(sql`insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status, page_count)
+      values ('dx-other', 'o1', 'u1', 'w', 'src', 'x.pdf', 'application/pdf', ${`extracts/o1/ext_${"f".repeat(32)}/raw/x.pdf`}, 'queued', 1)`).rejects.toThrow(/extract source/);
+    await expect(sql`insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status, page_count)
+      values ('dx-wrong', 'o1', 'u1', 'w', 'ext-run', 'x.pdf', 'application/pdf', 'u1/raw/x.pdf', 'queued', 1)`).rejects.toThrow(/outside the extract prefix/);
+    // Nor may a kept document take an extract's version key.
+    await expect(sql`insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status, page_count, canonical_id)
+      values ('dx-key', 'o1', 'u1', 'w', 'src', 'x.pdf', 'application/pdf', 'u1/raw/k.pdf', 'queued', 1, ${`docslurp:extract:${extractId}:dx`})`).rejects.toThrow(/extract version key/);
+    await sql`delete from extracts`;
+  });
+
   it("creates no job for a search-only or new-uploads change", async () => {
     await seed({ credits: 10_000 });
     for (const body of [{ monthlyBudgetCents: 4000 }, { name: "x" }, { pipeline: pipeline({ webhooks: { enabled: false } as never }) }]) {

@@ -90,6 +90,8 @@ type WorkspaceRunRow = {
   run_id: string | null;
   created_at: string | Date;
   updated_at: string | Date;
+  extract_id?: string | null;
+  storage_prefix?: string | null;
 };
 
 type RunReleaseRow = {
@@ -110,6 +112,8 @@ type DocumentRow = {
   page_count: number;
   created_at: string | Date;
   updated_at: string | Date;
+  /** Joined by the run document loaders: the run's extract storage prefix. */
+  run_storage_prefix?: string | null;
 };
 
 type StageStateRow = {
@@ -380,11 +384,11 @@ function runRowQuery(client: Sql<Record<string, unknown>>, runId: string) {
 
 function runDocumentRowsQuery(client: Sql<Record<string, unknown>>, runId: string) {
   return client<DocumentRow[]>`
-    select *
-    from documents
-    where run_id = ${runId}
-      and superseded_at is null and status <> 'cancelled'
-    order by created_at asc
+    select d.*, (select r.storage_prefix from workspace_runs r where r.id = d.run_id) as run_storage_prefix
+    from documents d
+    where d.run_id = ${runId}
+      and d.superseded_at is null and d.status <> 'cancelled'
+    order by d.created_at asc
   `;
 }
 
@@ -538,7 +542,7 @@ export class Store {
   }
 
   async loadDocument(documentId: string): Promise<Document> {
-    const [row] = await this.sql<DocumentRow[]>`select * from documents where id = ${documentId} limit 1`;
+    const [row] = await this.sql<DocumentRow[]>`select d.*, (select r.storage_prefix from workspace_runs r where r.id = d.run_id) as run_storage_prefix from documents d where d.id = ${documentId} limit 1`;
     if (!row) throw new DocumentNotFoundError(documentId);
     return mapDocument(row);
   }
@@ -1941,7 +1945,8 @@ export class Store {
       join workspaces w on w.id = r.workspace_id
       join "user" u on u.id = r.user_id
       left join notification_prefs np on np.user_id = r.user_id
-      where r.id = $1
+      -- Extract runs send their own completion email with the download (server services/extracts.ts).
+      where r.id = $1 and r.extract_id is null
       limit 1
       `,
       [runId],
@@ -3804,6 +3809,7 @@ function mapRun(row: WorkspaceRunRow): WorkspaceRun {
     claimId: row.run_id,
     createdAt: toDate(row.created_at),
     updatedAt: toDate(row.updated_at),
+    ...(row.storage_prefix ? { storagePrefix: row.storage_prefix, extractId: row.extract_id ?? null } : {}),
   };
 }
 
@@ -4050,6 +4056,7 @@ function mapDocument(row: DocumentRow): Document {
     pageCount: row.page_count,
     createdAt: toDate(row.created_at),
     updatedAt: toDate(row.updated_at),
+    ...(row.run_storage_prefix ? { artifactRoot: row.run_storage_prefix } : {}),
   };
 }
 
