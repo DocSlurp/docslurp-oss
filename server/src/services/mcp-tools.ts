@@ -67,10 +67,10 @@ const mcpAdapterRoutes = new Hono()
   .use("*", publicErrorMiddleware)
   .onError(spendAwareErrorHandler)
   .get("/manifest", async (c) => {
-    return c.json(mcpManifest(routeBaseUrl(c.req.url), getApiKey(c)?.scopes, getApiKey(c)?.keyType));
+    return c.json(mcpManifest(routeBaseUrl(c.req.url), getApiKey(c)?.scopes, getApiKey(c)?.keyType, getApiKey(c)?.oauth));
   })
   .get("/tools", async (c) => {
-    const manifest = mcpManifest(routeBaseUrl(c.req.url), getApiKey(c)?.scopes, getApiKey(c)?.keyType);
+    const manifest = mcpManifest(routeBaseUrl(c.req.url), getApiKey(c)?.scopes, getApiKey(c)?.keyType, getApiKey(c)?.oauth);
     return c.json({ tools: manifest.capabilities.filter((capability) => capability.category === "tool") });
   })
   .post("/tools/:id", async (c) => {
@@ -329,7 +329,7 @@ const mcpAdapterRoutes = new Hono()
   })
   .get("/resources/:id", async (c) => {
     if (c.req.param("id") === "capabilities") {
-      return c.json(mcpManifest(routeBaseUrl(c.req.url), getApiKey(c)?.scopes, getApiKey(c)?.keyType));
+      return c.json(mcpManifest(routeBaseUrl(c.req.url), getApiKey(c)?.scopes, getApiKey(c)?.keyType, getApiKey(c)?.oauth));
     }
 
     return adapterError(c, 404, "Unknown MCP resource");

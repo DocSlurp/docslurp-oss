@@ -33,6 +33,11 @@ vi.mock("../middleware/rate-limit.js", async (importOriginal) => ({
   ...await importOriginal<typeof import("../middleware/rate-limit.js")>(),
   enforceAuthenticatedApiRateLimit: async () => null,
 }));
+// Pretend web providers are configured, so the MCP catalog includes web tools to filter.
+vi.mock("../services/web/service.js", async (importOriginal) => ({
+  ...await importOriginal<typeof import("../services/web/service.js")>(),
+  webCapabilityAvailable: () => true,
+}));
 vi.mock("../services/workspaces.js", async (importOriginal) => ({
   ...await importOriginal<typeof import("../services/workspaces.js")>(),
   findDefaultWorkspace: async ({ orgId }: { orgId: string }) => ({ id: `ws-${orgId}`, name: `Default ${orgId}`, slug: "default", orgId }),
@@ -305,6 +310,16 @@ describe("scope mapping on the REST API", () => {
     expect(apiKeyCanUseWebTools(withWeb!.apiKey)).toBe(true);
     expect(apiKeyCanUseWebTools(withWeb!.apiKey, true)).toBe(false);
     expect(apiKeyCanUseWebTools({ scopes: ["search"], keyType: "server", oauth: { audience: "mcp" } })).toBe(true);
+    // The MCP catalog (and so tools/call) hides web tools from a CLI token without `web`.
+    const listed = async (token: string) => ((await (await fetch(`${mcp}/tools`, { headers: { authorization: `Bearer ${token}` } })).json()) as { tools: Array<{ id: string }> }).tools.map((tool) => tool.id);
+    const plain = await login({ scope: "search" });
+    expect(await listed(plain.access_token)).not.toContain("webSearch");
+    expect((await fetch(`${mcp}/tools/webSearch`, { method: "POST", headers: { authorization: `Bearer ${plain.access_token}`, "content-type": "application/json" }, body: JSON.stringify({ query: "x" }) })).status).not.toBe(200);
+    expect(await listed((await login({ scope: "search web" })).access_token)).toContain("webSearch");
+    const metadata = await (await fetch(`${origin}/.well-known/oauth-protected-resource/v1`)).json() as { scopes_supported: string[] };
+    expect(metadata.scopes_supported).toContain("web");
+    const mcpMetadata = await (await fetch(`${origin}/.well-known/oauth-protected-resource/v1/mcp`)).json() as { scopes_supported: string[] };
+    expect(mcpMetadata.scopes_supported).not.toContain("web");
   });
 
   it("maps OAuth scopes to API-key scopes and never to settings or organization scopes", () => {
@@ -453,6 +468,27 @@ describe("device authorization grant", () => {
     expect(await poll(started.device_code)).toMatchObject({ status: 400, body: { error: "authorization_pending" } });
     // The lockout is per user: another account is unaffected.
     expect((await verify("other", { action: "lookup", user_code: started.user_code })).status).toBe(200);
+  });
+
+  it("global guessing pressure delays and alerts but never locks out an innocent user", async () => {
+    vi.stubEnv("MCP_DEVICE_GLOBAL_FRICTION_MS", "300");
+    const alerts = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const started = await startDevice();
+      // 500 misses spread across other accounts and IPs (per-user and per-IP budgets untouched for owner).
+      await q(`insert into mcp_oauth_device_attempts(user_id, ip) select 'other', '203.0.113.' || (g % 250) from generate_series(1, ${oauth.DEVICE_GLOBAL_MISS_ALERT_THRESHOLD}) g`);
+      const begin = Date.now();
+      const lookup = await verify("owner", { action: "lookup", user_code: started.user_code });
+      expect(lookup.status).toBe(200);
+      expect(Date.now() - begin).toBeGreaterThanOrEqual(280);
+      expect((await verify("owner", { action: "approve", user_code: started.user_code, orgId: "org-owner" })).status).toBe(200);
+      expect(alerts.mock.calls.some(([line]) => String(line).includes("alert=device_code_guessing"))).toBe(true);
+      // The hard per-user limit still applies under pressure.
+      for (let i = 0; i < 5; i++) await verify("owner", { action: "lookup", user_code: `CDFG-${"HJKMN"[i]}HJK` });
+      expect((await verify("owner", { action: "lookup", user_code: "CDFG-PHJK" })).status).toBe(429);
+    } finally {
+      alerts.mockRestore();
+    }
   });
 
   it("requires the canonical Origin on verification posts, explaining a null or missing Origin", async () => {

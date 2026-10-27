@@ -1,7 +1,7 @@
 import { Hono, type Context } from "hono";
 import { appDbPool } from "../lib/auth.js";
 import { resolveBetterAuthSessionActor } from "../lib/request-actor.js";
-import { getConsentRequest, MCP_SCOPES, mcpOrigin, mcpResource, apiResource, allowedResources, allowedScopes, createGrant, validRedirect, redirectMatches, parseScopes, transaction, oauthHash, pkceChallenge, issueTokens, secret, randomUUID, cleanupExpiredOAuthRequests, logTokenRejection, REFRESH_REUSE_LEEWAY_SECONDS, DEVICE_CODE_GRANT_TYPE, DEVICE_CODE_TTL_SECONDS, DEVICE_POLL_INTERVAL_SECONDS, generateUserCode, OAUTH_TOKEN_PREFIX } from "../services/mcp-oauth.js";
+import { getConsentRequest, MCP_SCOPES, FIRST_PARTY_SCOPES, mcpOrigin, mcpResource, apiResource, allowedResources, allowedScopes, createGrant, validRedirect, redirectMatches, parseScopes, transaction, oauthHash, pkceChallenge, issueTokens, secret, randomUUID, cleanupExpiredOAuthRequests, logTokenRejection, REFRESH_REUSE_LEEWAY_SECONDS, DEVICE_CODE_GRANT_TYPE, DEVICE_CODE_TTL_SECONDS, DEVICE_POLL_INTERVAL_SECONDS, generateUserCode, OAUTH_TOKEN_PREFIX } from "../services/mcp-oauth.js";
 import { deviceVerificationRoutes } from "./mcp-oauth-device.js";
 import { requestIp } from "../lib/request-context.js";
 export const mcpOAuthMetadataRoutes = new Hono();
@@ -9,7 +9,7 @@ const resourceMetadata = (url: string) => ({ resource: mcpResource(url), authori
 for (const path of ["/.well-known/oauth-protected-resource", "/.well-known/oauth-protected-resource/v1/mcp"])
   mcpOAuthMetadataRoutes.get(path, c => c.json(resourceMetadata(c.req.url)));
 // RFC 9728 metadata for the REST API audience (first-party clients only).
-mcpOAuthMetadataRoutes.get("/.well-known/oauth-protected-resource/v1", c => c.json({ resource: apiResource(c.req.url), authorization_servers: [mcpOrigin(c.req.url)], scopes_supported: MCP_SCOPES, bearer_methods_supported: ["header"], resource_name: "DocSlurp API" }));
+mcpOAuthMetadataRoutes.get("/.well-known/oauth-protected-resource/v1", c => c.json({ resource: apiResource(c.req.url), authorization_servers: [mcpOrigin(c.req.url)], scopes_supported: FIRST_PARTY_SCOPES, bearer_methods_supported: ["header"], resource_name: "DocSlurp API" }));
 mcpOAuthMetadataRoutes.get("/.well-known/oauth-authorization-server", c => {
   const origin = mcpOrigin(c.req.url);
   return c.json({ issuer: origin, authorization_endpoint: `${origin}/oauth/mcp/authorize`, token_endpoint: `${origin}/oauth/mcp/token`, registration_endpoint: `${origin}/oauth/mcp/register`, revocation_endpoint: `${origin}/oauth/mcp/revoke`, device_authorization_endpoint: `${origin}/oauth/mcp/device_authorization`, response_types_supported: ["code"], grant_types_supported: ["authorization_code", "refresh_token", DEVICE_CODE_GRANT_TYPE], code_challenge_methods_supported: ["S256"], token_endpoint_auth_methods_supported: ["none"], scopes_supported: MCP_SCOPES, authorization_response_iss_parameter_supported: true });
