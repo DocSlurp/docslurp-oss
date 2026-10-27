@@ -333,7 +333,9 @@ export function judgeIntegrityV2({ dataset, repo = process.cwd(), base = 'HEAD' 
       const binary = bytes.includes(0);
       // NUL-bearing files still expose literal IDs/answers; a binary marker must
       // not disable recognition. Invalid sequences become replacement characters.
-      const text = new TextDecoder('utf-8', { fatal: !binary }).decode(bytes);
+      // ignoreBOM preserves an initial U+FEFF as literal evidence instead of
+      // silently consuming it as an encoding marker, in both decoding modes.
+      const text = new TextDecoder('utf-8', { fatal: !binary, ignoreBOM: true }).decode(bytes);
       work += Math.max(text.length, 1) * terms.size; if (work > LIMITS.scanWork) fail('resource-limit');
       const lineStarts = [0];
       for (let i = 0; i < text.length; i++) if (text[i] === '\n') lineStarts.push(i + 1);

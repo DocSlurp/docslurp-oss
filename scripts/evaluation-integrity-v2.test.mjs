@@ -539,3 +539,70 @@ test('R2 malformed authored manifest recognition IDs cannot bypass field validat
     assert.equal(f.run().passed, true); f.write('Rotor-😀-821'); assert.ok(rules(f.run()).includes('fixture-identifier'));
   }
 });
+
+// ADV-R3-001: valid U+FEFF is part of the target, including at file start.
+// These are source-defined invented controls; review evidence stays untouched.
+test('R3 exact leading-U+FEFF standalone copy retains the initial scalar and offset', t => {
+  const f = setup(t), target = '\ufeffRotor-821';
+  f.contract = { schema: 'docslurp-integrity-projection@v2', document: target,
+    fields: [{ pointer: '', role: 'answer', match: 'standalone' }], units: [] }; f.save();
+  assert.equal(f.run().passed, true);
+  f.write(target); assert.equal(readFileSync(join(f.repo, 'worker.ts')).toString('hex'), 'efbbbf526f746f722d383231');
+  const report = f.run(); assert.ok(rules(report).includes('labeled-answer'));
+  const hit = report.observations.find(o => o.pointer === '' && o.evidenceHash === sha(target));
+  assert.ok(hit); assert.equal(hit.offset, 0); assert.equal(hit.end, target.length); assert.equal(hit.decoding, 'utf8');
+});
+
+test('R3 all six BOM-sensitive roles retain beginning/interior literals in strict and replacement modes', t => {
+  for (const role of ['answer', 'recognition', 'context-answer', 'context-content', 'manifest-id', 'manifest-original']) {
+    const f = setup(t), target = role === 'manifest-id' ? '\ufeffinvented-case-821' : '\ufeffRotor-821';
+    let tail = '', expectedRule = 'fixture-identifier';
+    switch (role) {
+      case 'answer':
+        f.contract = { schema: 'docslurp-integrity-projection@v2', document: target,
+          fields: [{ pointer: '', role: 'answer', match: 'standalone' }], units: [] };
+        expectedRule = 'labeled-answer'; break;
+      case 'recognition':
+        f.contract.document.extra = target; f.contract.fields.push({ pointer: '/extra', role: 'recognition' }); break;
+      case 'context-answer':
+        f.contract = adversarialR1Projection('Copper valve', target); tail = ' Copper valve'; expectedRule = 'contextual-answer'; break;
+      case 'context-content':
+        f.contract = adversarialR1Projection(target, 'Ready for shipment'); tail = ' Ready for shipment'; expectedRule = 'contextual-answer'; break;
+      case 'manifest-id': f.manifest.cases[0].id = target; break;
+      case 'manifest-original': f.manifest.cases[0].originalCaseId = target; break;
+    }
+    f.save(); assert.equal(f.run().passed, true, role);
+    for (const [position, prefix, suffix, offset, decoding] of [
+      ['start', '', '', 0, 'utf8'], ['interior', '\n', '', 1, 'utf8'],
+      ['nul-before', '\0', '', 1, 'utf8-replacement'], ['nul-after', '', '\0', 0, 'utf8-replacement'],
+    ]) {
+      f.write(prefix + target + tail + suffix); const report = f.run(), name = role + ':' + position;
+      assert.ok(rules(report).includes(expectedRule), name);
+      const index = report.observations.findIndex(o => o.evidenceHash === sha(target));
+      assert.notEqual(index, -1, name); const hit = report.observations[index];
+      assert.equal(hit.offset, offset, name); assert.equal(hit.end, offset + target.length, name); assert.equal(hit.decoding, decoding, name);
+      assert.equal(hit.line, position === 'interior' ? 2 : 1, name);
+      if (expectedRule === 'contextual-answer') assert.ok(report.findings.some(f => f.rule === expectedRule && f.observations.includes(index)), name);
+    }
+  }
+});
+
+test('R3 BOM preservation retains strict UTF8 refusal, replacement evidence and exact target identity', t => {
+  const f = setup(t), target = '\ufeffRotor-821';
+  f.contract = { schema: 'docslurp-integrity-projection@v2', document: target,
+    fields: [{ pointer: '', role: 'answer', match: 'standalone' }], units: [] }; f.save();
+  writeFileSync(join(f.repo, 'worker.ts'), Buffer.concat([Buffer.from(target), Buffer.from([0xff])]));
+  assert.deepEqual(rules(f.run()), ['unreadable-or-invalid-input'], 'strict decoder still refuses malformed UTF8');
+  writeFileSync(join(f.repo, 'worker.ts'), Buffer.concat([Buffer.from(target), Buffer.from([0, 0xff])]));
+  const replacement = f.run(); assert.ok(rules(replacement).includes('labeled-answer'));
+  assert.ok(replacement.observations.some(o => o.offset === 0 && o.evidenceHash === sha(target) && o.decoding === 'utf8-replacement'));
+  f.write('Rotor-821'); assert.equal(f.run().passed, true, 'the target BOM is never removed');
+  f.write('\ufffdRotor-821'); assert.equal(f.run().passed, true, 'U+FEFF is not replaced with U+FFFD');
+  f.write('\ufeff' + target);
+  assert.deepEqual(f.run().observations.filter(o => o.pointer === '').map(o => o.offset), [1], 'both leading scalars remain present');
+  f.contract.document = 'Rotor-821'; f.save(); f.write('\ufeffRotor-821');
+  assert.deepEqual(f.run().observations.filter(o => o.pointer === '').map(o => o.offset), [1], 'offsets include an initial scalar outside the target');
+  f.contract.document = String.raw`\ufeffRotor-821`; f.save();
+  assert.equal(f.run().passed, true, 'actual scalar is not reinterpreted as backslash-u text');
+  f.write(f.contract.document); assert.ok(rules(f.run()).includes('labeled-answer'));
+});

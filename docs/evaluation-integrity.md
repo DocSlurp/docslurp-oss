@@ -298,7 +298,11 @@ Fixed fail-closed limits (no per-run weakening) are exported as `LIMITS`:
   neither budget can be weakened per run.
 - Files must be regular files or symlinks resolving to regular files within their
   permitted root. Escaping/dangling repository symlinks block. Text files without
-  NUL bytes must decode as UTF-8. NUL-bearing files also receive literal checks
+  NUL bytes must decode as UTF-8. Repository decoding explicitly uses
+  `ignoreBOM: true` to preserve an initial U+FEFF in both strict and replacement
+  modes, including in occurrence offsets and evidence hashes. A valid initial
+  scalar is never removed from either the scanned text or a declared target.
+  JSON contract parsing is unchanged. NUL-bearing files also receive literal checks
   after UTF-8 decoding with invalid sequences replaced, explicitly recorded as
   `utf8-replacement`; adding a binary marker cannot disable ID/answer recognition. Invalid/unsupported inputs or a limit reached always block, never truncate
   evidence into a passing verdict.
