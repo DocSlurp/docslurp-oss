@@ -512,7 +512,7 @@ export class ExtractMarkdownStage implements Stage {
                     );
                   }
                   const nativePdfMode = resolveNativePdfMode();
-                  const nativeEngineState = isPdf ? await nativePdfEngineState() : null;
+                  const nativeEngineState = isPdf && winningCandidate.label !== "doppler" ? await nativePdfEngineState() : null;
                   const nativePdfStats: NativePdfStageStats | null = nativeEngineState
                     ? {
                         mode: nativePdfMode,
@@ -538,7 +538,7 @@ export class ExtractMarkdownStage implements Stage {
                         parserPayload: { status: "none", reason: null },
                       }
                     : null;
-                  if (isPdf && winningCandidate.label !== "native-pdf" && nativePdfMode === "shadow") {
+                  if (isPdf && winningCandidate.label !== "native-pdf" && winningCandidate.label !== "doppler" && nativePdfMode === "shadow") {
                     // Shadow mode records agreement and timing only; the primary output is untouched.
                     const nativeEngine = await resolveNativePdfEngine(this.runner).catch(() => null);
                     if (!nativeEngine) {
@@ -580,7 +580,8 @@ export class ExtractMarkdownStage implements Stage {
                         sourceArtifactUri,
                         extractor: winningCandidate.label,
                       });
-                  const parserArtifacts = winningCandidate.structuredResult
+                  // Doppler already reconstructs Markdown; do not silently parse it again on the host.
+                  const parserArtifacts = winningCandidate.structuredResult || winningCandidate.label === "doppler"
                     ? []
                     : await this.buildParserArtifacts(
                         document,

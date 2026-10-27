@@ -6,6 +6,8 @@ describe("public extractor catalog", () => {
     expect(builtInDocumentExtractorDescriptors.some((e) => e.id === "native-pdf")).toBe(true);
     expect(publicDocumentExtractorDescriptors({ nativePdfInstalled: false }).some((e) => e.id === "native-pdf")).toBe(false);
     expect(publicDocumentExtractorDescriptors({ nativePdfInstalled: true }).some((e) => e.id === "native-pdf")).toBe(true);
-    expect(publicDocumentExtractorDescriptors({ nativePdfInstalled: false }).length).toBe(builtInDocumentExtractorDescriptors.length - 1);
+    expect(publicDocumentExtractorDescriptors({ nativePdfInstalled: false }).length).toBe(builtInDocumentExtractorDescriptors.length - 2);
+    expect(publicDocumentExtractorDescriptors({ nativePdfInstalled: false }).some(e => e.id === "doppler")).toBe(false);
+    expect(publicDocumentExtractorDescriptors({ nativePdfInstalled: false, dopplerInstalled: true }).some(e => e.id === "doppler")).toBe(true);
   });
 });

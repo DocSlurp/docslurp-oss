@@ -1,3 +1,4 @@
+import { executeDopplerVm, type DopplerVmJob } from "../sandbox/providers/modal/doppler-vm.js";
 import { ensurePythonDistributions, parseMissingPythonDependency, parseMissingPythonModule } from "./python-deps.js";
 import {
   ensureVendorBundle,
@@ -40,6 +41,8 @@ import {
 } from "../pipeline/local-compute-cost.js";
 
 export interface CommandPlan {
+  /** Fixed dedicated-VM job; dispatched before any local provider or backend. */
+  dopplerVm?: DopplerVmJob;
   binary: string;
   args: string[];
   available: boolean;
@@ -486,6 +489,18 @@ export class CommandRunner {
       fileArgIndexes: [2],
       supportsDoubleDash: true,
     });
+  }
+
+  /** Private PDF tools execute only in a fresh, offline VM; never probe or load them on the host. */
+  async dopplerMarkdown(source: string, output: string): Promise<CommandPlan> {
+    if (!path.isAbsolute(source) || !path.isAbsolute(output) || source === output) {
+      throw new Error("Doppler requires distinct absolute input and output paths");
+    }
+    if (!/^[^@]+@sha256:[0-9a-f]{64}$/.test(process.env.DOCSLURP_DOPPLER_VM_IMAGE ?? "")) {
+      throw new Error("Doppler requires a digest-pinned DOCSLURP_DOPPLER_VM_IMAGE; refusing local fallback");
+    }
+    return { binary: "doppler-vm", args: [], available: true,
+      dopplerVm: { operation: "doppler-markdown", input: source, output } };
   }
 
   async extractText(source: string, preservePageBreaks = false): Promise<CommandPlan> {
@@ -1175,6 +1190,7 @@ export class CommandRunner {
    * backend credentials and run outside the sandbox. Callers must `release()` when done.
    */
   async launch(plan: CommandPlan, signal?: AbortSignal): Promise<LaunchedCommand> {
+    if (plan.dopplerVm) return { remote: executeDopplerVm(plan.dopplerVm, signal), timeoutMs: 60_000, release: async () => {} };
     if (isVectorBackendCommand(plan.args, this.scriptsDir)) {
       const env = buildCommandEnv({ plan, venvBin: this.venvBin, isVectorBackend: true });
       const child = spawn(plan.binary, plan.args, { env, stdio: ["ignore", "pipe", "pipe"], signal });

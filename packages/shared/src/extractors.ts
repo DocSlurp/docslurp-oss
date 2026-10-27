@@ -117,6 +117,12 @@ export const builtInDocumentExtractorDescriptors: ExtractorDescriptor[] = [
     capabilities: { formats: ["pdf"], produces: ["text"], costClass: "local-cpu" },
   },
   {
+    id: "doppler", kind: "document", label: "Doppler PDF",
+    description: "Layout-aware PDF Markdown and tables from private vendored tools in a dedicated offline VM.",
+    transforms: [{ accepts: ["source/pdf"], emits: ["document/markdown"], scope: "document" }],
+    capabilities: { formats: ["pdf"], produces: ["markdown", "pages"], costClass: "local-cpu" },
+  },
+  {
     id: "graph-local", kind: "document", label: "Local artifact graph",
     description: "Compose local PDF, page and assembly adapters into Markdown.",
     transforms: [{ accepts: ["source/pdf"], emits: ["document/markdown"], scope: "document" }],
@@ -163,8 +169,8 @@ export interface ExtractionArtifactRef {
  * hidden unless the deployment reports the engine as installed
  * (`DOCSLURP_NATIVE_PDF_INSTALLED=1`, or a configured module / vendored package).
  */
-export function publicDocumentExtractorDescriptors(options: { nativePdfInstalled: boolean }): ExtractorDescriptor[] {
+export function publicDocumentExtractorDescriptors(options: { nativePdfInstalled: boolean; dopplerInstalled?: boolean }): ExtractorDescriptor[] {
   return builtInDocumentExtractorDescriptors.filter(
-    (entry) => entry.id !== "native-pdf" || options.nativePdfInstalled,
+    (entry) => (entry.id !== "native-pdf" || options.nativePdfInstalled) && (entry.id !== "doppler" || options.dopplerInstalled === true),
   );
 }
