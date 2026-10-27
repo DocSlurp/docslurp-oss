@@ -152,6 +152,22 @@ copies input PDF bytes. Negative checks cover omitted whole families, changed
 class/split membership, duplicate cases, path traversal, altered evidence and using
 an audit decision as a judge decision. No view has been promoted or measured.
 
+The final independent visual judge reported no substantive misses after reviewing
+all 30 base-page layouts, all 30 hard-scan technical regions and the screenshot,
+outline and rotation classes. It confirmed all 1,317 protected artifacts unchanged.
+The script recorded the final judge stage as 100, pass. The three matched P
+prototypes therefore clear both required fixture gates at 100; this is fixture
+fidelity evidence, not extraction accuracy or a measured speed improvement.
+
+The corpus-bound prototype approval and separate training-only factorial-pilot
+authorization are retained externally. The Builder is extending semantic checks
+for E1–E5 before the 18-family / 108-PDF / 1,080-page pilot. Full generation remains
+gated on pilot acceptance. The accepted prototype's sealed evaluation view is
+`prototype-evaluation-view-v2`; the first integration view is superseded because its
+family namespace and raster-share metadata did not match the harness interface.
+No extraction result was produced from that superseded view. The corrected view
+retains class/layout/producer metadata and emits the independent integrity manifest.
+
 Before measuring the new corpus, the sealer must validate realized decoys against
 immutable authoring plans. Current sealing deliberately rejects the a2-r5 schema's
 plan/exclusion differences; no measurement has bypassed this check.

@@ -21,7 +21,7 @@ class V4SealTests(unittest.TestCase):
     def test_exact_stage_membership_and_paths(self):
         manifest, spec = self.manifest()
         validate_inventory(manifest, spec)
-        for kind in ['omit-family', 'duplicate', 'wrong-split', 'traversal', 'wrong-class']:
+        for kind in ['omit-family', 'duplicate', 'wrong-split', 'traversal', 'wrong-class', 'duplicate-path']:
             changed = copy.deepcopy(manifest)
             if kind == 'omit-family':
                 changed['cases'] = changed['cases'][:6]
@@ -29,6 +29,7 @@ class V4SealTests(unittest.TestCase):
             elif kind == 'duplicate': changed['cases'][1]['id'] = changed['cases'][0]['id']
             elif kind == 'wrong-split': changed['cases'][0]['split'] = 'heldout'
             elif kind == 'traversal': changed['cases'][0]['labels'] = '../other.json'
+            elif kind == 'duplicate-path': changed['cases'][1]['pdf'] = changed['cases'][0]['pdf']
             else: changed['cases'][0]['classId'] = 'E2'
             with self.assertRaises(ValueError):
                 validate_inventory(changed, spec)

@@ -5,6 +5,7 @@ The original generation tree remains intact. This script never runs extractors.
 """
 import argparse
 from collections import defaultdict
+from datetime import datetime, timezone
 import json
 from pathlib import Path
 import re
@@ -37,6 +38,7 @@ def validate_inventory(manifest, spec):
         raise ValueError('unknown-generation-stage')
     families = defaultdict(list)
     ids = set()
+    paths = set()
     for case in manifest.get('cases', []):
         ident = case['id']
         if not re.fullmatch(r'[A-Za-z0-9_-]+', ident) or ident in ids:
@@ -51,6 +53,9 @@ def validate_inventory(manifest, spec):
             raise ValueError('changed-family-contract')
         for field in ['pdf', 'labels']:
             safe_path(Path('.'), case[field])
+            if case[field] in paths:
+                raise ValueError('duplicate-artifact-path')
+            paths.add(case[field])
         families[family].append(case['hardPercent'])
     if set(families) != expected or any(sorted(v) != [0, 20, 40, 60, 80, 100] for v in families.values()):
         raise ValueError('incomplete-declared-stage')
@@ -108,6 +113,7 @@ def seal(root, out, approval_path):
     approval = json.loads(approval_path.read_text())
     validate_approval(approval, original, file_hash(original_path))
     compiled = []
+    integrity_cases = []
     out.mkdir(parents=True, exist_ok=False)
     # No case label or authoring record is opened before both guards above pass.
     for case in original['cases']:
@@ -137,7 +143,7 @@ def seal(root, out, approval_path):
                 if source[key] != page[key]:
                     raise ValueError('changed-delivered-gold')
             refs.append(page_reference(page))
-        family = f"source-{case['familyId']:04d}"
+        family = f"mixed-source-{case['familyId']:04d}"
         result = dict(schema='mixed-pdf-authored@v2', family=family, split=case['split'], pages=refs,
                       labels=[dict(name='visible_page_content', expected=[p['expectedMarkdown'] for p in refs])])
         bare = [{k: v for k, v in p.items() if k != 'pageId'} for p in refs]
@@ -147,7 +153,8 @@ def seal(root, out, approval_path):
                    pageIds=[p['pageId'] for p in refs], pageReferenceHashes=[identity_hash(p) for p in bare],
                    pageContentHashes=[page_content_hash(p) for p in bare], hardPercent=case['hardPercent'],
                    pages=[dict(pageId=p['pageId']) for p in refs], authoringHash=case['authoringHash'],
-                   worldHash=case['worldHash'], layout=case['layoutId'], classId=case['classId'])
+                   worldHash=case['worldHash'], layout=case['layoutId'], classId=case['classId'],
+                   baseRegionRasterShare=case['sectionRasterShare'], producerPath=case['producerPath'])
         target = out / row['pdf']; target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(pdf, target)
         if file_hash(target) != row['sha256']:
@@ -155,6 +162,11 @@ def seal(root, out, approval_path):
         immutable_json(out / row['labels'], result)
         row['labelHash'] = file_hash(out / row['labels'])
         compiled.append(row)
+        integrity_cases.append(dict(id=row['id'], source=dict(path=row['pdf'], sha256=row['sha256']),
+            labels=dict(path=row['labels'], sha256=row['labelHash']),
+            provenance=dict(kind='authored', author='DocSlurp clean-room corpus Builder',
+                createdAt=datetime.fromtimestamp((folder / 'authoring.json').stat().st_mtime, timezone.utc).isoformat(),
+                description='Immutable original authoring retained before rendering and transformations. Timestamp is the source authoring record filesystem write time; document metadata dates are invented.')))
     counts = original['counts']
     manifest = dict(schema='mixed-pdf-authored@v2', families=counts['families'], pageCount=counts['pages'],
                     cases=compiled, generationManifestHash=file_hash(original_path), generationRoot=str(root),
@@ -164,6 +176,7 @@ def seal(root, out, approval_path):
     immutable_json(out / 'manifest.json', manifest)
     immutable_json(out / 'generation-manifest.json', original)
     immutable_json(out / 'acceptance-receipt.json', approval)
+    immutable_json(out / 'integrity-manifest.json', dict(schema='docslurp-authored-eval@v1', cases=integrity_cases))
     print(json.dumps(dict(projectedCases=len(compiled), pages=counts['pages'])))
 
 

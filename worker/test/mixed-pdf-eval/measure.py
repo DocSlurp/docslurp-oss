@@ -264,6 +264,7 @@ def measure_case(args):
         for result in page["candidates"].values():
             result["score"]=content_score(reference,result["text"],tolerant_markdown)
     result={"id":case["id"],"family":case["family"],"split":case["split"],"hardPercent":case["hardPercent"],
+            **{k:case[k] for k in ['classId','layout','producerPath'] if k in case},
             "measureHash":MEASURE_HASH,"caseIdentity":case_identity,
             "baseRegionRasterShare":case["baseRegionRasterShare"],"sourceHash":case["sha256"],
             "pdfBytes":source.stat().st_size,"nativeSeconds":native_seconds,"imageListSeconds":list_seconds,
