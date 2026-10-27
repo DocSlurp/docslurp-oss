@@ -4,7 +4,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { startMigratedPostgres } from "@docslurp/worker/testing";
 
 /**
- * Per-key-type controls against a migrated database (migration 0091): browser
+ * Per-key-type controls against a migrated database (migration 0093): browser
  * keys hold only search/chat and default to a 1,000-token chat output cap;
  * server keys can expire, be limited to IP ranges, rotate with an overlap and
  * set their own output cap.
