@@ -12,6 +12,7 @@ import {
   resolveActorWorkspaceId,
 } from "../lib/request-actor.js";
 import { apiKeyAuth } from "../middleware/api-key-auth.js";
+import { createChatConcurrencyLimit } from "../middleware/chat-concurrency.js";
 import { assertCanSpend, isSpendBlockedError, type SpendBlockedError } from "../services/billing/spend-guard.js";
 import { upgradeLinkHeader, upgradeLinksFor } from "../lib/upgrade-links.js";
 import { chatWorkspace, workspaceChatDisabledBody } from "../services/workspace-chat.js";
@@ -41,8 +42,8 @@ const requestSchema = z.object({
   n: z.literal(1).optional(),
   user: z.string().max(256).optional(),
   /**
-   * "auto" (default): the workspace agent may call its own tools (search, web,
-   * settings) before answering. "none": answer directly from one retrieval and
+   * "auto" (default): the workspace agent may call its own tools (search, web)
+   * before answering; workspace settings tools are DocSlurp-app only. "none": answer directly from one retrieval and
    * one model call. Client-defined tools are not supported.
    */
   tool_choice: z.enum(["auto", "none"], { error: 'tool_choice must be "auto" or "none"; DocSlurp runs its own workspace tools and does not accept client-defined tools' }).optional(),
@@ -115,6 +116,10 @@ const compatibleChatAuth: MiddlewareHandler = async (c, next) => {
       if (retryAfter) c.header("Retry-After", retryAfter);
       return c.json(errorBody("Request rate limit exceeded. Retry later.", "rate_limit_error", "rate_limit_exceeded"), 429);
     }
+    // A browser key refused for a fixable reason (no workspace allowlist, a website it
+    // doesn't allow) is a permission error with its own code, not an unknown key.
+    const policy = c.get("apiKeyPolicyRefusal");
+    if (policy) return c.json(errorBody(policy.message, "permission_error", policy.code), 403);
     // A missing or unknown key is a 401 here (OpenAI clients raise AuthenticationError),
     // even though the native API answers an unknown key with 403.
     c.header("WWW-Authenticate", 'Bearer realm="docslurp"');
@@ -130,6 +135,7 @@ const compatibleChatAuth: MiddlewareHandler = async (c, next) => {
 export const chatCompletionsRoutes = new Hono()
   .use("/models", compatibleChatAuth)
   .use("/chat/completions", compatibleChatAuth)
+  .use("/chat/completions", createChatConcurrencyLimit((c) => c.json(errorBody("Too many chat requests in progress for this key. Retry later.", "rate_limit_error", "rate_limit_exceeded"), 429)))
   .get("/models", async (c) => {
     const actor = getRequestActor(c);
     const workspaces = await listWorkspaces(actor.userId);
@@ -178,10 +184,17 @@ export const chatCompletionsRoutes = new Hono()
     if (chatDisabled) {
       return c.json(errorBody(chatDisabled.error, "permission_error", chatDisabled.code, "model"), 403);
     }
-    const history: Array<Pick<WorkspaceChatTurn, "role" | "content">> = input.messages.slice(0, -1).map((message) => ({
-      role: message.role === "developer" ? "system" : message.role,
-      content: contentText(message.content),
-    }));
+    // A browser (client) key is public: anyone who reads the page can send any
+    // messages. Its callers' system/developer messages would sit beside the
+    // workspace instructions with system authority, so they are dropped; only
+    // server keys may set system instructions.
+    const systemAllowed = actor.type !== "apiKey" || actor.apiKey.keyType === "server";
+    const history: Array<Pick<WorkspaceChatTurn, "role" | "content">> = input.messages.slice(0, -1)
+      .filter((message) => systemAllowed || (message.role !== "system" && message.role !== "developer"))
+      .map((message) => ({
+        role: message.role === "developer" ? "system" : message.role,
+        content: contentText(message.content),
+      }));
     const args = {
       workspaceId,
       userId: actor.userId,

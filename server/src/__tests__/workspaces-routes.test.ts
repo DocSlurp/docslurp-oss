@@ -123,12 +123,11 @@ const { workspacesRoutes } = await import("../routes/workspaces.js");
 function buildApp(apiKey?: { orgId: string | null; scopes: string[]; keyType?: string; keyId?: string }) {
   const app = new Hono();
   app.use("/workspaces/*", async (c, next) => {
-    c.set("sessionUser", {
-      id: "demo-user",
-      email: "demo@example.com",
-      name: "Demo User",
-    });
+    const user = { id: "demo-user", email: "demo@example.com", name: "Demo User" };
+    c.set("sessionUser", user);
     if (apiKey) c.set("apiKey", { keyType: "server", ...apiKey } as never);
+    // A signed-in app session, as sessionAuth resolves it from the Better Auth cookie.
+    else c.set("requestActor", { type: "session", userId: user.id, sessionId: "app-session-1", user });
     await next();
   });
   app.route("/workspaces", workspacesRoutes);
@@ -687,17 +686,24 @@ describe("workspacesRoutes validation", () => {
     expect(chatWorkspaceMock).toHaveBeenLastCalledWith(expect.objectContaining({ agent: { web: false, suggestions: true } }));
   });
 
-  it("keeps suggestions opt-in for API keys calling the dashboard chat routes", async () => {
+  it.each([{ keyType: "server" }, { keyType: "client" }])("never gives API keys suggestions mode on the dashboard chat routes, even when they ask: %j", async ({ keyType }) => {
     getWorkspaceMock.mockResolvedValue({ id: "ws-1", orgId: "org-1" });
     chatWorkspaceMock.mockResolvedValue({ id: "answer", debug: { model: null, fallback: true }, citations: [] });
-    const keyApp = buildApp({ orgId: "org-1", scopes: ["search"] });
+    const keyApp = buildApp({ orgId: "org-1", scopes: ["search", "chat", "workspaces:manage"], keyType });
     const send = (body: Record<string, unknown>) => keyApp.request("/workspaces/ws-1/chat", { method: "POST",
       headers: { "Content-Type": "application/json" }, body: JSON.stringify({ q: "hi", ...body }) });
     chatWorkspaceMock.mockClear();
     await send({});
     expect(chatWorkspaceMock).toHaveBeenLastCalledWith(expect.objectContaining({ agent: { web: false, suggestions: false } }));
     await send({ suggestions: true });
-    expect(chatWorkspaceMock).toHaveBeenLastCalledWith(expect.objectContaining({ agent: { web: false, suggestions: true } }));
+    expect(chatWorkspaceMock).toHaveBeenLastCalledWith(expect.objectContaining({ agent: { web: false, suggestions: false } }));
+  });
+
+  it("refuses settings-proposal Apply for API keys before any change", async () => {
+    const keyApp = buildApp({ orgId: "org-1", scopes: ["search", "chat", "workspaces:manage"], keyType: "server" });
+    const response = await keyApp.request("/workspaces/ws-1/settings-proposals/apply", { method: "POST",
+      headers: { "Content-Type": "application/json" }, body: JSON.stringify({ token: "forged", reprocessExisting: false }) });
+    expect(response.status).toBe(403);
   });
 
   it("streams the turn's agent modes in workspace metadata", async () => {

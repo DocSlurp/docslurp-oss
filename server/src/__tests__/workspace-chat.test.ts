@@ -116,6 +116,12 @@ function buildSearchSettings(
   };
 }
 
+// Browser-key answers carry a sealed session grant, which needs the token root secret.
+process.env.BETTER_AUTH_SECRET ||= "workspace-chat-test-secret-with-enough-entropy";
+
+/** The first-party app's signed-in session, the only actor that may change settings from chat. */
+const appSessionActor = { type: "session", userId: "user-1", sessionId: "app-session-1", user: { id: "user-1", email: "u@example.test", name: "User" } } as never;
+
 describe("chatWorkspace", () => {
   it("fails closed when ownership of a caller-provided session cannot be checked", async () => {
     sqlMock.mockRejectedValueOnce(new Error("database unavailable"));
@@ -208,7 +214,7 @@ describe("chatWorkspace", () => {
 
       const response = await chatWorkspace({
         workspaceId: "ws-1", userId: "user-1", query,
-        history: [], allowConfiguration,
+        history: [], allowConfiguration, actor: appSessionActor,
       });
 
       expect(response.answer).toContain("No indexed passages matched");
@@ -225,6 +231,77 @@ describe("chatWorkspace", () => {
       expect(hybridSearch).toHaveBeenCalledOnce();
     },
   );
+
+  it.each([
+    { keyType: "server", renames: true },
+    { keyType: "client", renames: false },
+  ])("never changes thread settings from an API key's message ($keyType key)", async ({ keyType, renames }) => {
+    sqlMock.mockResolvedValue([]);
+    getWorkspace.mockResolvedValue({ id: "ws-1", systemPrompt: null });
+    loadWorkspaceWholeCorpusContext.mockResolvedValue({
+      eligible: false, reason: "empty-workspace", results: [],
+      stats: { documentCount: 0, chunkCount: 0, tokenEstimate: 0, charEstimate: 0, maxDocuments: 12, maxChunks: 24, maxTokens: 12000, maxChars: 60000 },
+    });
+    hybridSearch.mockResolvedValue({ sessionId: "search-1", results: [] });
+    const query = "Enable search reranking for this workspace";
+    const actor = { type: "apiKey", userId: "user-1", apiKey: { keyId: "key-1", userId: "user-1", orgId: "org-1", keyType, scopes: ["search", "chat", "workspaces:manage"], workspaceIds: [], allowedDomains: [], rateLimitRpm: null, rateLimitPpd: 0, rateLimits: [] } } as never;
+    await chatWorkspace({ workspaceId: "ws-1", userId: "user-1", query, history: [], actor, agent: { suggestions: true } as never });
+    expect(configureSearchFromChat).not.toHaveBeenCalled();
+    // Public (client) key visitors cannot rename the customer's workspace either.
+    if (renames) expect(refineWorkspaceNames).toHaveBeenCalledOnce();
+    else expect(refineWorkspaceNames).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { name: "app session", actor: appSessionActor, expected: true },
+    { name: "server key", actor: { type: "apiKey", userId: "user-1", apiKey: { keyId: "k", userId: "user-1", orgId: "org-1", keyType: "server", scopes: ["search", "chat", "workspaces:manage"], workspaceIds: [], allowedDomains: [], rateLimitRpm: null, rateLimitPpd: 0, rateLimits: [] } } as never, expected: false },
+    { name: "client key", actor: { type: "apiKey", userId: "user-1", apiKey: { keyId: "k", userId: "user-1", orgId: "org-1", keyType: "client", scopes: ["search", "chat"], workspaceIds: [], allowedDomains: ["example.com"], rateLimitRpm: null, rateLimitPpd: 0, rateLimits: [] } } as never, expected: false },
+  ])("runs suggestions mode only for the first-party app ($name), whatever agent.suggestions says", async ({ actor, expected }) => {
+    sqlMock.mockResolvedValue([]);
+    getWorkspace.mockResolvedValue({ id: "ws-1", orgId: "org-1", systemPrompt: null });
+    runChatMcpAgent.mockResolvedValue({ answer: "Answer.", citations: [], toolCalls: [], finishReason: "stop", usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2, costCents: 0 } });
+    const previous = process.env.OPENROUTER_API_KEY;
+    process.env.OPENROUTER_API_KEY = "fake";
+    try {
+      await chatWorkspace({ workspaceId: "ws-1", userId: "user-1", query: "Find evidence", history: [], actor, agent: { suggestions: true } as never });
+      expect((runChatMcpAgent.mock.calls.at(-1)![0] as { suggestions: boolean }).suggestions).toBe(expected);
+    } finally {
+      if (previous === undefined) delete process.env.OPENROUTER_API_KEY; else process.env.OPENROUTER_API_KEY = previous;
+    }
+  });
+
+  it("binds a browser key's chat session to a sealed grant: issued with the answer, required to continue", async () => {
+    {
+      sqlMock.mockResolvedValue([]);
+      getWorkspace.mockResolvedValue({ id: "ws-1", systemPrompt: null });
+      loadWorkspaceWholeCorpusContext.mockResolvedValue({
+        eligible: false, reason: "empty-workspace", results: [],
+        stats: { documentCount: 0, chunkCount: 0, tokenEstimate: 0, charEstimate: 0, maxDocuments: 12, maxChunks: 24, maxTokens: 12000, maxChars: 60000 },
+      });
+      hybridSearch.mockResolvedValue({ sessionId: "search-1", results: [] });
+      const visitor = { type: "apiKey", userId: "user-1", apiKey: { keyId: "pub-1", userId: "user-1", orgId: "org-1", keyType: "client", scopes: ["search", "chat"], workspaceIds: ["ws-1"], allowedDomains: ["docs.example.com"], rateLimitRpm: null, rateLimitPpd: 0, rateLimits: [] } } as never;
+      const first = await chatWorkspace({ workspaceId: "ws-1", userId: "user-1", query: "hello", history: [], actor: visitor });
+      expect(first.sessionToken).toEqual(expect.any(String));
+      sqlMock.mockClear();
+      // A session id with no grant (another visitor, or a pre-grant widget) starts a fresh
+      // session: the old one is never looked up or read, and the answer carries a new grant.
+      const fresh = await chatWorkspace({ workspaceId: "ws-1", userId: "user-1", query: "what did they ask?", actor: visitor, sessionId: first.sessionId });
+      expect(fresh.sessionId).not.toBe(first.sessionId);
+      expect(fresh.sessionToken).toEqual(expect.any(String));
+      // No query ever received the old session's id (no lookup, no history read).
+      expect(sqlMock.mock.calls.flat().includes(first.sessionId)).toBe(false);
+      sqlMock.mockClear();
+      // A tampered grant is refused before anything is read.
+      await expect(chatWorkspace({ workspaceId: "ws-1", userId: "user-1", query: "again", history: [], actor: visitor, sessionId: first.sessionId, sessionToken: `${first.sessionToken}x` }))
+        .rejects.toMatchObject({ code: "chat_session_forbidden" });
+      expect(sqlMock).not.toHaveBeenCalled();
+      // The visitor holding the grant continues it.
+      await expect(chatWorkspace({ workspaceId: "ws-1", userId: "user-1", query: "and then?", history: [], actor: visitor, sessionId: first.sessionId, sessionToken: first.sessionToken })).resolves.toBeDefined();
+      // Server keys and the app get no grant: their sessions stay scoped to their own user.
+      const server = await chatWorkspace({ workspaceId: "ws-1", userId: "user-1", query: "hello", history: [], actor: appSessionActor });
+      expect(server.sessionToken).toBeUndefined();
+    }
+  });
 
   it("tells the agent exactly which search setting the message changed, and that it is thread-only", async () => {
     sqlMock.mockResolvedValue([]);

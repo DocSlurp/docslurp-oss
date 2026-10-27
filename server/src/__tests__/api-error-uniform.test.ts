@@ -151,14 +151,17 @@ describe("one error shape for the native API (real middleware stack)", () => {
     expect(error.details).toMatchObject({ retryAfterSeconds: expect.any(Number) });
   });
 
-  it("answers a key whose spend window is exhausted with spend_limit_exceeded and the spend header", async () => {
+  it("refuses a spend-capped key with unavailable when its spend cannot be read (fails closed, no internals)", async () => {
+    // This suite's database is down, so the spend window cannot be read. The
+    // spend_limit_exceeded envelope itself is covered in rate-limit.test.ts.
     vi.stubEnv("API_RATE_LIMIT_ENABLED", "true");
     mocks.validateApiKey.mockResolvedValue(key({ rateLimits: [{ metric: "spend", limit: 0, windowSeconds: 3600 }] }));
-    const limited = await app.request("/v1/search?q=x&workspaceId=00000000-0000-4000-8000-000000000001", { headers: bearer });
-    expect(limited.status).toBe(429);
-    expect(limited.headers.get("X-DocSlurp-Spend")).toContain("u=usd-cents");
-    expect(limited.headers.get("Retry-After")).toMatch(/^\d+$/);
-    expect((await envelope(limited)).code).toBe("spend_limit_exceeded");
+    const refused = await app.request("/v1/search?q=x&workspaceId=00000000-0000-4000-8000-000000000001", { headers: bearer });
+    expect(refused.status).toBe(503);
+    expect(refused.headers.get("Retry-After")).toMatch(/^\d+$/);
+    const error = await envelope(refused);
+    expect(error.code).toBe("unavailable");
+    expect(JSON.stringify(error)).not.toContain("database disabled");
   });
 
   it("answers oversized uploads with payload_too_large", async () => {

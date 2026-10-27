@@ -172,3 +172,14 @@ Releases before v0.1.12 were GPL-2.0 and must not be used. URL and sha256 per
 architecture (amd64, arm64) are pinned in `worker/sandbox-tools.json` and
 verified at image build. The binary needs glibc 2.38 or newer (Debian trixie,
 not bookworm).
+
+## Public Suffix List (MPL-2.0)
+
+`server/src/lib/public-suffix-data.ts` is generated from the Public Suffix List
+(https://publicsuffix.org/list/public_suffix_list.dat, ICANN and private
+sections) by `server/scripts/update-public-suffix-list.mjs`. The list is
+licensed under the Mozilla Public License 2.0; the generated file keeps the MPL
+notice, and the list version and commit are recorded in its header. It is used
+only as data, to refuse browser-key allowed websites that are shared public
+suffixes. Refresh it monthly (and before a release that touches browser-key
+website checks) with `pnpm psl:update`, then commit the result.
