@@ -46,13 +46,22 @@ const freePort = () => new Promise((resolvePort, reject) => {
  * Open `ssh -N -L 127.0.0.1:<port>:<remoteHost>:<remotePort> <host>` and wait for Langfuse health.
  * Returns `{ baseUrl, pid, close }`. close() signals exactly this child process, never a pattern.
  */
-export async function openTunnel(tunnel, { spawnImpl = spawn, fetchImpl = fetch, waitMs = 20_000 } = {}) {
+export async function openTunnel(tunnel, { spawnImpl = spawn, fetchImpl = fetch, waitMs = 20_000, settleMs = 1500 } = {}) {
   if (!tunnel?.sshHost || !tunnel.remotePort) throw new Error("Tunnel requires sshHost and remotePort");
+  if (!/^[A-Za-z0-9_.-]+(@[A-Za-z0-9_.-]+)?$/.test(tunnel.sshHost) || tunnel.sshHost.startsWith("-")) throw new Error("Tunnel sshHost must be [user@]host");
+  if (!/^[A-Za-z0-9_.:-]+$/.test(tunnel.remoteHost ?? "127.0.0.1") || !Number.isInteger(tunnel.remotePort)) throw new Error("Tunnel remoteHost/remotePort invalid");
+  const options = tunnel.sshOptions ?? [];
+  for (let i = 0; i < options.length; i += 2) {
+    if (options[i] !== "-o" || !/^(HostKeyAlias|Port|User|IdentityFile|IdentitiesOnly|StrictHostKeyChecking|UserKnownHostsFile|ConnectTimeout)=[^\s]+$/.test(options[i + 1] ?? "")) throw new Error("Tunnel sshOptions must be -o pairs from the allow-list (HostKeyAlias, Port, User, IdentityFile, IdentitiesOnly, StrictHostKeyChecking, UserKnownHostsFile, ConnectTimeout)");
+  }
   const port = tunnel.localPort ?? await freePort();
   const args = ["-o", "BatchMode=yes", "-o", "ExitOnForwardFailure=yes", "-o", "ServerAliveInterval=15", ...(tunnel.sshOptions ?? []), "-N", "-L", `127.0.0.1:${port}:${tunnel.remoteHost ?? "127.0.0.1"}:${tunnel.remotePort}`, tunnel.sshHost];
   const child = spawnImpl("ssh", args, { stdio: ["ignore", "ignore", "pipe"] });
   let exited = null;
-  const exit = new Promise((resolveExit) => child.once("exit", (code, signal) => { exited = { code, signal }; resolveExit(exited); }));
+  const exit = new Promise((resolveExit) => {
+    child.once("exit", (code, signal) => { exited = { code, signal }; resolveExit(exited); });
+    child.once("error", (error) => { exited = { code: error.code ?? "spawn-error", signal: null }; resolveExit(exited); });
+  });
   let stderr = "";
   child.stderr?.on("data", (chunk) => { stderr = (stderr + chunk).slice(-2000); });
   const close = async () => {
@@ -67,8 +76,14 @@ export async function openTunnel(tunnel, { spawnImpl = spawn, fetchImpl = fetch,
     if (exited) throw new Error(`SSH tunnel exited (${exited.code ?? exited.signal}): ${stderr.trim().split("\n").at(-1) ?? ""}`);
     try {
       const response = await fetchImpl(`${baseUrl}/api/public/health`, { signal: AbortSignal.timeout(3000) });
-      if (response.ok) { const health = await response.json().catch(() => ({})); return { baseUrl, pid: child.pid, version: health.version ?? null, close }; }
-    } catch { /* not ready */ }
+      if (response.ok) {
+        // Another local listener could answer before ssh fails its forward; require ssh to still be alive after a settle.
+        await new Promise((r) => setTimeout(r, settleMs));
+        if (exited) throw new Error(`SSH tunnel exited (${exited.code ?? exited.signal}) after a health response from another listener`);
+        const health = await response.json().catch(() => ({}));
+        return { baseUrl, pid: child.pid, version: health.version ?? null, close };
+      }
+    } catch (error) { if (/after a health response/.test(error.message)) throw error; /* not ready */ }
     await new Promise((r) => setTimeout(r, 300));
   }
   await close();

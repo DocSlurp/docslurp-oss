@@ -225,7 +225,7 @@ test("tunnel: opened per target, health-checked, and closed by signalling exactl
   const { openTunnel } = await import("./targets.mjs");
   const signals = []; let spawned;
   const spawnImpl = (command, args) => { const child = new EventEmitter(); child.pid = 4242; child.stderr = new EventEmitter(); child.kill = (signal) => { signals.push([child.pid, signal]); queueMicrotask(() => child.emit("exit", null, signal)); }; spawned = { command, args }; return child; };
-  const tunnel = await openTunnel({ sshHost: "user@host", remotePort: 3000, localPort: 45678 }, { spawnImpl, fetchImpl: async () => ({ ok: true, json: async () => ({ version: "4.59.0" }) }) });
+  const tunnel = await openTunnel({ sshHost: "user@host", remotePort: 3000, localPort: 45678 }, { settleMs: 1, spawnImpl, fetchImpl: async () => ({ ok: true, json: async () => ({ version: "4.59.0" }) }) });
   assert.equal(spawned.command, "ssh");
   assert.ok(spawned.args.includes("127.0.0.1:45678:127.0.0.1:3000") && spawned.args.includes("BatchMode=yes"));
   assert.deepEqual([tunnel.baseUrl, tunnel.pid, tunnel.version], ["http://127.0.0.1:45678", 4242, "4.59.0"]);
@@ -248,4 +248,59 @@ test("strings with control characters Langfuse would strip are wrapped losslessl
   assert.equal(decodeUnsafe(item.expectedOutput).reference.content.pages[0].markdown, bad);
   const plain = datasets.find((d) => d.split === "calibration").items[0].expectedOutput.reference;
   assert.deepEqual(plain.content, { pages: [{ markdown: "# doc-2" }] });
+});
+
+test("council fixes: held-out mirrors, contained paths, split relabelling, policy metadata, run authorization, ssh options", async () => {
+  const { loadManifest } = await import("./adapters.mjs");
+  const { openTunnel } = await import("./targets.mjs");
+  const { encodeUnsafe, decodeUnsafe } = await import("./langfuse.mjs");
+  const { dir } = await fixtureManifest({ heldout: false });
+  const config = await targetConfig(dir);
+  const auth = { destinations: ["a", "b"], scope: "t" };
+  const man = async (name, datasets) => { const p = join(dir, name); await write(p, JSON.stringify({ sourceCommit: "c", authorization: auth, datasets })); return p; };
+
+  // A held-out mirror is refused for targets not named by --allow-heldout, and excluded with --exclude-heldout.
+  const mirror = await man("mirror.json", [{ kind: "mirror", name: "p/test-heldout", split: "test", fromTarget: "a", license: "x" }]);
+  const fakes = { a: fakeLangfuse(), b: fakeLangfuse() };
+  await fakes.a.api("/v2/datasets", { name: "p/test-heldout", metadata: { split: "test", heldout: true } });
+  await fakes.a.api("/dataset-items", { id: "i1", datasetName: "p/test-heldout", input: {}, metadata: { split: "test" } });
+  const refused = await runSync({ config, manifest: [mirror], run: [], write: true, targets: "b" }, { commit: "c", connectTarget: targetsFor(fakes) });
+  assert.equal(refused.ok, false); assert.equal(fakes.b.state.datasets.size, 0);
+  const excluded = await runSync({ config, manifest: [mirror], run: [], write: true, targets: "b", excludeHeldout: true }, { commit: "c", connectTarget: targetsFor(fakes) });
+  assert.equal(excluded.results[0].datasets[0].skipped, "heldout-excluded"); assert.equal(fakes.b.state.datasets.size, 0);
+  await assert.rejects(man("bad-mirror.json", [{ kind: "mirror", name: "p/test", split: "test", fromTarget: "a", license: "x" }]).then((p) => loadManifest(p)), /heldout/);
+
+  // Catalog paths must stay inside the corpus root.
+  await write(join(dir, "secret.txt"), "SECRET=1");
+  await write(join(dir, "evil-catalog.json"), JSON.stringify({ entries: [{ id: "e", split: "development", reference: { path: "../secret.txt" } }] }));
+  const { mkdir } = await import("node:fs/promises"); await mkdir(join(dir, "sub"), { recursive: true });
+  await write(join(dir, "sub/catalog.json"), JSON.stringify({ entries: [{ id: "e", split: "development", reference: { path: "../secret.txt" } }] }));
+  await assert.rejects(man("evil.json", [{ kind: "catalog", prefix: "e", catalog: "sub/catalog.json", license: "x" }]).then((p) => loadManifest(p)), /escapes the corpus root/);
+  await write(join(dir, "sub/catalog.json"), JSON.stringify({ entries: [{ id: "e", split: "development", reference: { path: join(dir, "secret.txt") } }] }));
+  await assert.rejects(loadManifest(join(dir, "evil.json")), /must be relative/);
+
+  // Held-out query rows cannot be relabelled as tuning data.
+  await write(join(dir, "q.jsonl"), JSON.stringify({ id: "q1", text: "?", split: "heldout", qrels: { d: 1 } }) + "\n" + JSON.stringify({ id: "q2", text: "?", split: "development", qrels: { d: 1 } }) + "\n");
+  await assert.rejects(man("q1.json", [{ kind: "queries", prefix: "q", queries: "q.jsonl", splitMap: { heldout: "development" }, license: "x" }]).then((p) => loadManifest(p)), /relabel/);
+  await assert.rejects(man("q2.json", [{ kind: "queries", prefix: "q", queries: "q.jsonl", split: "test", license: "x" }]).then((p) => loadManifest(p)), /contradicts held-out/);
+  await assert.rejects(man("m.json", [{ kind: "catalog", prefix: "f", catalog: "catalog.json", license: "x", metadata: { heldout: false } }]).then((p) => loadManifest(p)), /set by the sync/);
+
+  // Runs inherit their dataset's authorization.
+  const { api } = fakeLangfuse();
+  const items = buildRecordItems({ name: "f/development", split: "development", records: [{ id: "doc-1", split: "development", input: {}, metadata: {} }], commit: "c" });
+  await syncDataset(api, { name: "f/development", split: "development", items, sourceHashes: {}, commit: "c", datasetMetadata: { authorization: { destinations: ["a"] } } });
+  const run = prepareRun({ schema: "docslurp-eval-run@v1", experiment: { name: "x" }, dataset: { name: "f/development", split: "development" }, startedAt: "2026-10-26T10:00:00Z", endedAt: "2026-10-26T10:01:00Z", timing: "t", items: [{ caseId: "doc-1", scores: {} }] }, { manifestSha256: "m" });
+  await assert.rejects(syncRun(api, run, { targetName: "b" }), /not authorised for target b/);
+  assert.throws(() => prepareRun({ schema: "docslurp-eval-run@v1", experiment: { name: "x" }, dataset: { name: "f/development", split: "development" }, startedAt: "2026-10-26T10:00:00Z", endedAt: "2026-10-26T10:01:00Z", timing: "t", items: [{ caseId: "doc-1", startedAt: "2026-10-26T09:00:00Z" }] }, { manifestSha256: "m" }), /outside the run window/);
+
+  // ssh fields are allow-listed; a dead ssh behind a squatting listener is detected.
+  await assert.rejects(openTunnel({ sshHost: "h", remotePort: 3000, sshOptions: ["-o", "ProxyCommand=sh -c id"] }), /allow-list/);
+  await assert.rejects(openTunnel({ sshHost: "-oProxyCommand=x", remotePort: 3000 }), /\[user@\]host/);
+  const { EventEmitter } = await import("node:events");
+  const dying = () => { const c = new EventEmitter(); c.pid = 1; c.stderr = new EventEmitter(); c.kill = () => {}; setTimeout(() => c.emit("exit", 255, null), 5); return c; };
+  await assert.rejects(openTunnel({ sshHost: "h", remotePort: 3000, localPort: 1 }, { spawnImpl: dying, settleMs: 20, fetchImpl: async () => ({ ok: true, json: async () => ({}) }) }), /another listener|exited/);
+
+  // Source data shaped like a wrapper survives a round trip.
+  const tricky = { $asciiJson: "\"not a wrapper\"" };
+  assert.deepEqual(decodeUnsafe(encodeUnsafe(tricky)), tricky);
 });

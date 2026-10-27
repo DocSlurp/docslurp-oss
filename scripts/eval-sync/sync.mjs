@@ -63,13 +63,19 @@ export async function runSync(args, deps = {}) {
   try {
     // Resolve mirrors from their source target first.
     for (const dataset of datasets.filter((d) => d.mirror)) {
+      // Only read a mirror source when some selected target will actually receive the mirror.
+      if (!targets.some((target) => target.name !== dataset.mirror.fromTarget && !guard(target, dataset))) continue;
       try {
         const source = config.targets[dataset.mirror.fromTarget];
         if (!source) throw new Error(`Mirror source target ${dataset.mirror.fromTarget} is not configured`);
         const { api } = await getConnection(source);
         const remote = await api(`/v2/datasets/${encodeURIComponent(dataset.name)}`);
         if (!remote) throw new Error("Mirror source dataset missing");
-        dataset.items = [...(await listDatasetItems(api, dataset.name)).values()].map(({ id, input, expectedOutput, metadata, sourceTraceId, sourceObservationId }) => ({ id, datasetName: dataset.name, input, expectedOutput, metadata, ...(sourceTraceId ? { sourceTraceId } : {}), ...(sourceObservationId ? { sourceObservationId } : {}) }));
+        if (remote.metadata?.split !== undefined && remote.metadata.split !== dataset.split) throw new Error("Mirror source dataset split differs from the manifest split");
+        if (remote.metadata?.heldout !== undefined && Boolean(remote.metadata.heldout) !== dataset.heldout) throw new Error("Mirror source held-out flag differs from the manifest split");
+        const sourceItems = [...(await listDatasetItems(api, dataset.name)).values()];
+        if (sourceItems.some((item) => item.metadata?.split !== undefined && item.metadata.split !== dataset.split)) throw new Error("Mirror source items carry another split");
+        dataset.items = sourceItems.map(({ id, input, expectedOutput, metadata, sourceTraceId, sourceObservationId }) => ({ id, datasetName: dataset.name, input, expectedOutput, metadata, ...(sourceTraceId ? { sourceTraceId } : {}), ...(sourceObservationId ? { sourceObservationId } : {}) }));
         dataset.sourceHashes = remote.metadata?.sourceHashes ?? null;
         dataset.commit = remote.metadata?.sourceCommit ?? dataset.commit;
         dataset.datasetMetadata = { ...dataset.datasetMetadata, mirroredFrom: dataset.mirror.fromTarget, mirroredDescription: remote.description ?? null };
@@ -86,6 +92,7 @@ export async function runSync(args, deps = {}) {
         if (refusal === "excluded") { result.datasets.push({ name: dataset.name, skipped: "heldout-excluded" }); continue; }
         if (refusal) { result.ok = false; result.datasets.push({ name: dataset.name, error: refusal }); continue; }
         if (dataset.mirror && dataset.mirror.fromTarget === target.name) { result.datasets.push({ name: dataset.name, source: true, remoteItems: dataset.items?.length ?? null, ...(dataset.mirrorError ? { error: dataset.mirrorError } : {}) }); if (dataset.mirrorError) result.ok = false; continue; }
+        if (dataset.mirror && !dataset.items && !dataset.mirrorError) dataset.mirrorError = "mirror source not read";
         if (dataset.mirrorError) { result.ok = false; result.datasets.push({ name: dataset.name, error: `mirror: ${dataset.mirrorError}` }); continue; }
         try { result.datasets.push(await syncDataset(connection.api, { ...dataset, concurrency: config.defaults.concurrency ?? 6 })); }
         catch (error) { result.ok = false; result.datasets.push({ name: dataset.name, error: message(error) }); }
@@ -95,13 +102,13 @@ export async function runSync(args, deps = {}) {
         catch (error) { result.ok = false; result.scoreConfigs = { error: message(error), ...(error.partial ?? {}) }; }
       }
       if (!args.skipRuns) for (const run of runs) {
-        try { result.runs.push(await syncRun(connection.api, run, { allowHeldout: allowHeldout.has(target.name), ...(deps.runOptions ?? {}) })); }
+        try { result.runs.push(await syncRun(connection.api, run, { targetName: target.name, allowHeldout: allowHeldout.has(target.name), ...(deps.runOptions ?? {}) })); }
         catch (error) { result.ok = false; result.runs.push({ experiment: run.name, error: message(error) }); }
       }
     }
   } finally {
     for (const [name, connection] of connections) {
-      try { await connection.close(); } catch (error) { results.find((r) => r.target === name)?.errors.push(`close: ${message(error)}`); }
+      try { await connection.close(); } catch (error) { const r = results.find((x) => x.target === name); if (r) { r.ok = false; r.errors.push(`close: ${message(error)}`); } }
     }
   }
   for (const [name] of connectionErrors) if (!results.some((r) => r.target === name)) results.push({ target: name, ok: false, errors: [`connect (mirror source): ${message(connectionErrors.get(name))}`] });

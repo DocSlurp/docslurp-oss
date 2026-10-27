@@ -47,6 +47,8 @@ export const asciiJson = (value) => JSON.stringify(value).replace(/[^\u0020-\u00
 export function encodeUnsafe(value) {
   if (typeof value === "string") return UNSAFE_CHAR.test(value) ? { $asciiJson: asciiJson(value) } : value;
   if (Array.isArray(value)) return value.map(encodeUnsafe);
+  // A source object that already looks like a wrapper is wrapped whole, so decodeUnsafe() cannot misread it.
+  if (value && typeof value === "object" && Object.keys(value).length === 1 && "$asciiJson" in value) return { $asciiJson: asciiJson(value) };
   if (value && typeof value === "object") return Object.fromEntries(Object.entries(value).map(([key, inner]) => { if (UNSAFE_CHAR.test(key)) throw new Error("Object key contains control characters"); return [key, encodeUnsafe(inner)]; }));
   return value;
 }
@@ -166,7 +168,7 @@ const datasetMetadataMatches = (remote, metadata) => Object.entries(metadata).ev
 export async function syncDataset(api, { name, split, items, sourceHashes, commit, datasetMetadata = {}, description, concurrency = 6 }) {
   const path = `/v2/datasets/${encodeURIComponent(name)}`;
   const heldout = assertSplitName(name, split);
-  const metadata = { split, heldout, tuningReadable: !heldout, sourceHashes, sourceCommit: commit, ...datasetMetadata };
+  const metadata = { ...datasetMetadata, split, heldout, tuningReadable: !heldout, sourceHashes, sourceCommit: commit };
   let dataset = await api(path);
   let datasetAction = "unchanged";
   if (!dataset || !datasetMetadataMatches(dataset, metadata)) {

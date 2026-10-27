@@ -1,11 +1,20 @@
 // Turn a dataset manifest entry into split-pure dataset specs: `{ name, split, items, sourceHashes, datasetMetadata }`.
 // Every adapter is data-driven: files and label fields come from the manifest, never from benchmark-specific code.
-import { readFile } from "node:fs/promises";
-import { dirname, isAbsolute, resolve } from "node:path";
-import { buildItems, buildRecordItems, datasetNameFor, hash, isHeldoutSplit, itemId } from "./langfuse.mjs";
+import { readFile, realpath } from "node:fs/promises";
+import { dirname, isAbsolute, relative, resolve } from "node:path";
+import { assertSplitName, buildItems, buildRecordItems, datasetNameFor, hash, isHeldoutSplit, itemId } from "./langfuse.mjs";
 
 export const DEFAULT_INLINE_REFERENCE_MAX_BYTES = 256 * 1024;
 const at = (base, path) => (isAbsolute(path) ? path : resolve(base, path));
+/** Read a file named by catalog data. It must be relative and resolve (after symlinks) inside the corpus root. */
+async function readContained(root, path) {
+  if (typeof path !== "string" || !path || isAbsolute(path)) throw new Error(`Catalog path ${JSON.stringify(path)} must be relative to the corpus root`);
+  const [realRoot, real] = await Promise.all([realpath(root), realpath(resolve(root, path))]);
+  const rel = relative(realRoot, real);
+  if (!rel || rel.startsWith("..") || isAbsolute(rel)) throw new Error(`Catalog path ${JSON.stringify(path)} escapes the corpus root`);
+  return readFile(real);
+}
+const POLICY_KEYS = ["split", "heldout", "tuningReadable", "sourceHashes", "sourceCommit"];
 const readJson = async (path) => JSON.parse(await readFile(path, "utf8"));
 const readJsonl = async (path) => (await readFile(path, "utf8")).split(/\r?\n/).filter((line) => line.trim()).map((line) => JSON.parse(line));
 const groupBy = (values, key) => values.reduce((groups, value) => groups.set(key(value), [...(groups.get(key(value)) ?? []), value]), new Map());
@@ -18,7 +27,7 @@ function requireLicense(spec) {
 async function referenceFor(root, ref, maxBytes) {
   if (!ref) return null;
   const path = typeof ref === "string" ? ref : ref.path;
-  const raw = await readFile(at(root, path));
+  const raw = await readContained(root, path);
   const sha256 = hash(raw);
   if (ref.sha256 && ref.sha256 !== sha256) throw new Error(`Reference hash mismatch for ${path}`);
   const out = { path, sha256, bytes: raw.length };
@@ -77,7 +86,7 @@ const ADAPTERS = {
       const records = [];
       for (const { id, split: _split, image_path: imagePath, regions, metadata, ...rest } of entries) {
         let image = { path: imagePath, sha256: null, bytes: null };
-        if (spec.hashImages !== false) { const bytes = await readFile(at(root, imagePath)); image = { path: imagePath, sha256: hash(bytes), bytes: bytes.length }; }
+        if (spec.hashImages !== false) { const bytes = await readContained(root, imagePath); image = { path: imagePath, sha256: hash(bytes), bytes: bytes.length }; }
         records.push({ id, split, input: { caseId: id, corpus: spec.corpus ?? spec.prefix, image, ...rest }, expectedOutput: { regions }, metadata: { rowMetadata: metadata ?? null, licenseBasis: spec.license } });
       }
       const name = datasetNameFor(spec.prefix, split);
@@ -95,7 +104,13 @@ const ADAPTERS = {
     const qrels = qrelsRaw ? (JSON.parse(qrelsRaw).qrels ?? JSON.parse(qrelsRaw)) : null;
     const sourceHashes = { queries: hash(raw), ...(qrelsRaw ? { qrels: hash(qrelsRaw) } : {}), ...(spec.corpusManifest ? { corpusManifest: hash(await readFile(at(base, spec.corpusManifest))) } : {}) };
     const out = [];
-    for (const [split, entries] of groupBy(rows, (row) => spec.splitMap?.[row.split] ?? row.split ?? spec.split)) {
+    const splitOf = (row) => {
+      const mapped = spec.splitMap?.[row.split] ?? row.split ?? spec.split;
+      if (row.split && isHeldoutSplit(row.split) && !isHeldoutSplit(mapped)) throw new Error(`Dataset ${spec.prefix}: splitMap may not relabel held-out split ${row.split} as ${mapped}`);
+      if (spec.split && isHeldoutSplit(spec.split) && !isHeldoutSplit(mapped)) throw new Error(`Dataset ${spec.prefix}: row ${row.id} split ${mapped} contradicts held-out spec split ${spec.split}`);
+      return mapped;
+    };
+    for (const [split, entries] of groupBy(rows, splitOf)) {
       if (!split) throw new Error(`Dataset ${spec.prefix}: queries carry no split; set "split" with its provenance`);
       const records = entries.map(({ id, text, qrels: inline, split: _split, ...rest }) => {
         const judgements = inline ?? qrels?.[id];
@@ -141,10 +156,12 @@ export async function loadManifest(manifestPath, { commit, onlyDatasets } = {}) 
   for (const spec of manifest.datasets) {
     const kind = spec.kind ?? "cases";
     requireLicense(spec);
+    for (const key of POLICY_KEYS) if (spec.metadata && key in spec.metadata) throw new Error(`Dataset ${spec.name ?? spec.prefix}: metadata.${key} is set by the sync, not the manifest`);
     const datasetMetadata = { kind, license: spec.license, family: spec.family ?? null, authorization: auth, ...(spec.metadata ?? {}) };
     if (kind === "mirror") {
-      isHeldoutSplit(spec.split);
-      datasets.push({ name: spec.name, split: spec.split, mirror: { fromTarget: spec.fromTarget }, datasetMetadata, sourceHashes: null, commit: ctx.commit });
+      const heldout = assertSplitName(spec.name, spec.split);
+      if (onlyDatasets && !onlyDatasets.some((pattern) => spec.name.includes(pattern))) continue;
+      datasets.push({ name: spec.name, split: spec.split, heldout, mirror: { fromTarget: spec.fromTarget }, datasetMetadata, sourceHashes: null, commit: ctx.commit });
       continue;
     }
     const adapter = ADAPTERS[kind];

@@ -29,8 +29,10 @@ export function prepareRun(run, { manifestSha256 }) {
     seen.add(item.caseId);
     const itemStart = item.startedAt ? iso(item.startedAt, "item startedAt") : started;
     const itemEnd = item.endedAt ? iso(item.endedAt, "item endedAt") : ended;
+    if (itemStart < started || itemEnd > ended || itemEnd < itemStart) throw new Error(`Item ${item.caseId} timing falls outside the run window`);
     const traceHash = hash(`${experimentId}\0${item.caseId}`);
     const scores = Object.entries(item.scores ?? {}).filter(([, value]) => value !== null && value !== undefined);
+    if (scores.length > 50) throw new Error(`Item ${item.caseId} has more than 50 scores; readback is bounded to 50 per item`);
     for (const [name, value] of scores) if (typeof value !== "number" && typeof value !== "boolean") throw new Error(`Score ${name} for ${item.caseId} must be numeric or boolean`);
     return {
       caseId: item.caseId,
@@ -96,11 +98,12 @@ const remoteScoreNames = (row) => new Set((row?.scores ?? []).map((score) => sco
 export const scoreId = (item, name) => `docslurp-score-${hash(`${item.traceId}:${name}`).slice(0, 40)}`;
 
 /** Upload one prepared run to one target; idempotent and verified by readback. */
-export async function syncRun(api, prepared, { allowHeldout = false, pollMs = 2000, timeoutMs = 300_000, batch = 25, sleep = (ms) => new Promise((r) => setTimeout(r, ms)) } = {}) {
+export async function syncRun(api, prepared, { targetName = null, allowHeldout = false, maxBatchBytes = 2_000_000, pollMs = 2000, timeoutMs = 300_000, batch = 25, sleep = (ms) => new Promise((r) => setTimeout(r, ms)) } = {}) {
   if (prepared.heldout && !allowHeldout) throw new Error(`Run ${prepared.name} scores held-out dataset ${prepared.dataset.name}; this target is not named by --allow-heldout`);
   const dataset = await api(`/v2/datasets/${encodeURIComponent(prepared.dataset.name)}`);
   if (!dataset?.id) throw new Error(`Dataset ${prepared.dataset.name} is not synced to this target; sync datasets first`);
   if (Boolean(dataset.metadata?.heldout) !== prepared.heldout) throw new Error("Run and remote dataset disagree on held-out status");
+  if (targetName && !(dataset.metadata?.authorization?.destinations ?? []).includes(targetName)) throw new Error(`Dataset ${prepared.dataset.name} is not authorised for target ${targetName}; runs inherit their dataset's authorization`);
   const remoteItems = await listDatasetItems(api, prepared.dataset.name);
   const missing = prepared.items.filter((item) => !remoteItems.has(item.datasetItemId));
   if (missing.length) throw new Error(`${missing.length} run items have no dataset item (first: ${missing[0].caseId})`);
@@ -111,7 +114,16 @@ export async function syncRun(api, prepared, { allowHeldout = false, pollMs = 20
 
   let existing = await listExperimentItems(api, prepared);
   const stale = prepared.items.filter((item) => remoteOutputSha(existing.get(item.datasetItemId)) !== item.outputSha256);
-  for (let i = 0; i < stale.length; i += batch) await api("/otel/v1/traces", otlpPayload(prepared, dataset.id, stale.slice(i, i + batch)), { headers: { "x-langfuse-ingestion-version": "4" } });
+  // Batch by count and by serialised size so large inline outputs never exceed request body limits.
+  let chunk = [];
+  const flush = async () => { if (chunk.length) await api("/otel/v1/traces", otlpPayload(prepared, dataset.id, chunk), { headers: { "x-langfuse-ingestion-version": "4" } }); chunk = []; };
+  for (const item of stale) {
+    const size = JSON.stringify(otlpPayload(prepared, dataset.id, [item])).length;
+    if (size > maxBatchBytes) throw new Error(`Run item ${item.caseId} serialises to ${size} bytes, above the ${maxBatchBytes}-byte request bound`);
+    if (chunk.length >= batch || JSON.stringify(otlpPayload(prepared, dataset.id, [...chunk, item])).length > maxBatchBytes) await flush();
+    chunk.push(item);
+  }
+  await flush();
   const scoreWrites = [];
   for (const item of prepared.items) {
     const have = stale.includes(item) ? new Set() : remoteScoreNames(existing.get(item.datasetItemId));
