@@ -7,7 +7,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { createMigratedDatabase } from "../test/migrated-db.js";
 import { serveOnRandomPort } from "../test/migrated-postgres.js";
 
-import { drainDocumentCleanupQueue, purgeSupersededDocuments, type DeleteVectorRows } from "../db/superseded-purge.js";
+import { artifactOwner, drainDocumentCleanupQueue, purgeSupersededDocuments, type DeleteVectorRows } from "../db/superseded-purge.js";
 
 
 let db: PGlite;
@@ -398,6 +398,20 @@ describe("superseded version purge", () => {
     expect(await sql`select document_id from document_cleanup_queue`).toEqual([]);
   });
 
+  it("compacts LanceDB history away when an expired extract's vectors are deleted", async () => {
+    const ext = `ext_${"d".repeat(32)}`;
+    await sql`
+      insert into document_cleanup_queue (document_id, org_id, user_id, workspace_id, run_id, source_key,
+        delete_source, keep_shared_artifacts, vector_targets, artifact_uris, kg_node_ids)
+      values ('extract-doc', 'o1', 'u1', 'w', null, ${`extracts/o1/${ext}/raw/x.pdf`}, true, false,
+        '[{"backend":"lancedb","embeddingModel":"model/x","dimension":4}]'::jsonb, '{}', '{}')
+    `;
+    const vectorDeletes: Parameters<DeleteVectorRows>[0][] = [];
+    const { storage } = fakeStorage([`extracts/o1/${ext}/raw/x.pdf`]);
+    await drainDocumentCleanupQueue(sql, storage, options(async (args) => { vectorDeletes.push(args); }));
+    expect(vectorDeletes).toEqual([{ uri: "/tmp/lance/o1/w/vectors-model%2Fx-4", table: "chunks", documentIds: ["extract-doc"], purgeHistory: true }]);
+  });
+
   it("keeps queue entries for retry when external cleanup fails", async () => {
     await sql`
       insert into document_cleanup_queue (document_id, org_id, user_id, workspace_id, vector_targets)
@@ -407,5 +421,18 @@ describe("superseded version purge", () => {
     const failing = await drainDocumentCleanupQueue(sql, storage, options(async () => { throw new Error("lance down"); }));
     expect(failing.failed).toBeGreaterThan(0);
     expect(await sql`select attempts > 0 as retried, last_error from document_cleanup_queue`).toEqual([{ retried: true, last_error: "lance down" }]);
+  });
+});
+
+describe("artifactOwner", () => {
+  it("reads <user>/<run>/ and three-segment extract roots, never an org-wide extracts/<org>/ prefix", () => {
+    expect(artifactOwner("user-1/run-1/markdown/doc-1.md")).toEqual({ prefix: "user-1/run-1/", documentId: "doc-1" });
+    const ext = `ext_${"a".repeat(32)}`;
+    expect(artifactOwner(`extracts/org-1/${ext}/markdown/doc-1.md`)).toEqual({ prefix: `extracts/org-1/${ext}/`, documentId: "doc-1" });
+    expect(artifactOwner(`extracts/org-1/${ext}/images/doc-1/v2-150dpi/page-1.png`)).toEqual({ prefix: `extracts/org-1/${ext}/`, documentId: "doc-1" });
+    // Malformed extract keys are refused rather than widened.
+    expect(artifactOwner("extracts/org-1/markdown/doc-1.md")).toBeNull();
+    expect(artifactOwner("extracts/org-1/not-an-extract/markdown/doc-1.md")).toBeNull();
+    expect(artifactOwner(`extracts/../${ext}/markdown/doc-1.md`)).toBeNull();
   });
 });
