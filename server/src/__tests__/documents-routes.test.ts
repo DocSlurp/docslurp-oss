@@ -32,7 +32,6 @@ vi.mock("../services/documents.js", () => ({
 
 vi.mock("../services/document-review.js", () => ({
   getCorrectionWorkbench: vi.fn(),
-  listLowConfidenceReviewQueue: vi.fn(),
   reindexDocumentCorrection: vi.fn(),
   saveDocumentCorrection: vi.fn()
 }));

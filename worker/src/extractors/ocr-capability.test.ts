@@ -27,7 +27,7 @@ describe("OCR capability (tessdata discovery)", () => {
     expect(findTessdataDir({ env: {}, exists, language: "eng+deu" })).toBeNull();
   });
 
-  it("reports no OCR on a host without Tesseract data (the lean worker image)", () => {
+  it("reports no OCR on a host without Tesseract data (an image built without it)", () => {
     expect(findTessdataDir({ env: { TESSDATA_PREFIX: "/missing" }, exists: filesystem() })).toBeNull();
     expect(ocrAvailable({ env: {}, exists: filesystem() })).toBe(false);
   });

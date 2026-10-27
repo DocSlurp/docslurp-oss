@@ -19,7 +19,7 @@ test('uses canonical page identity, isolated workspace and public ingestion/prog
   const fetchMock = async (url, init) => {
     calls.push({ url, init });
     assert.equal(init.headers.Authorization, 'Bearer private-index-key');
-    if (url.endsWith('/v1/ingest/bulk')) {
+    if (url.endsWith('/v1/uploads/bulk')) {
       // The name goes to the server, which finds the workspace or creates it on the first build.
       assert.equal(init.body.get('workspace'), 'DocSlurp documentation');
       assert.equal(init.body.get('newWorkspace'), null);
@@ -39,7 +39,7 @@ test('targets a configured workspace ID, slug or name and reports upstream error
   await assert.rejects(indexDocs([], { apiUrl: 'https://docslurp.io', workspace: 'product-manuals' }, 'secret', async (url, init) => {
     sent.push(init.body.get('workspace'));
     return new Response('secret', { status: 401 });
-  }), /^Error: DocSlurp \/v1\/ingest\/bulk: HTTP 401$/);
+  }), /^Error: DocSlurp \/v1\/uploads\/bulk: HTTP 401$/);
   assert.deepEqual(sent, ['product-manuals']);
 });
 test('crawls only listed docs routes on the site origin and refuses redirects', async () => {
