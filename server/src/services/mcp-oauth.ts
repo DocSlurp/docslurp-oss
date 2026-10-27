@@ -19,7 +19,7 @@ import { mcpOrigin, mcpResource } from '../lib/mcp-origin.js';
  */
 export const apiResource = (url: string) => `${mcpOrigin(url)}/v1`;
 
-/** The DocSlurp CLI: a public native client (RFC 8252), seeded by migration 0088. */
+/** The DocSlurp CLI: a public native client (RFC 8252), seeded by migration 0089. */
 export const CLI_CLIENT_ID = "docslurp-cli";
 
 /** Access token prefix per audience; refresh and device codes add `r` / `d`. */

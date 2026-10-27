@@ -1,4 +1,4 @@
--- First-party CLI OAuth (docslurp login). The CLI is a public native client
+-- First-party CLI OAuth (docslurp login). Numbered 0089: 0088 is extract mode (PR #185). The CLI is a public native client
 -- (RFC 8252) with a fixed id, so it never registers dynamically. Only a
 -- first-party client may obtain a token for the REST API resource
 -- (<origin>/v1) or use the device authorization grant (RFC 8628); dynamically
