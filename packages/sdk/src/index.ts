@@ -501,6 +501,8 @@ export function formatSearchContext(response: SearchResponse): string {
 export type ChatInput = {
   q: string;
   sessionId?: string;
+  /** Browser (publishable) keys: the `sessionToken` from the previous answer, required to continue `sessionId`. */
+  sessionToken?: string;
   /** Workspace ID, slug or name; omitted: the client workspace. */
   workspace?: string;
   /**
@@ -520,7 +522,7 @@ export type ChatInput = {
     tools?: boolean;
     /** false: no web tools this turn. Omitted or true: offered only when the deployment, workspace and key allow them. */
     web?: boolean;
-    /** Suggestions mode (default false): flag ingest and search problems and propose settings changes for a person to apply. */
+    /** @deprecated Ignored: settings suggestions are a DocSlurp app feature and never run for API keys. */
     suggestions?: boolean;
   };
   /** Retrieval overrides for this request only; workspace defaults stay as they are. */
@@ -539,6 +541,8 @@ export type ChatInput = {
 export type ChatResponse = {
   id: string;
   sessionId: string;
+  /** Browser (publishable) keys only: send back as `sessionToken` with `sessionId` to continue this conversation (expires after 24 hours). */
+  sessionToken?: string;
   searchSessionId: string | null;
   answer: string;
   finishReason?: "stop" | "length" | "content-filter";
@@ -548,6 +552,7 @@ export type ChatResponse = {
   runtime: { startedAt: string; completedAt: string; totalMs: number };
   /** Diagnostics. Search-agent turns report the modes they ran with; other fields may change between releases. */
   debug?: {
+    /** `suggestions` is always false for API keys: settings suggestions are a DocSlurp app feature. */
     modes?: { web: "on" | "off" | "unavailable"; suggestions: boolean };
     [key: string]: unknown;
   };
@@ -557,7 +562,7 @@ export type ChatResponse = {
 export type ChatStreamEvent =
   | { event: "status"; data: { stage: string; message: string } }
   | { event: "message"; data: ChatResponse }
-  | { event: "done"; data: { id: string; sessionId: string; searchSessionId: string | null } };
+  | { event: "done"; data: { id: string; sessionId: string; sessionToken?: string; searchSessionId: string | null } };
 
 export type ListDocumentsInput = {
   /** Workspace ID, slug or name; omitted: the client workspace. */
@@ -1021,13 +1026,13 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
     }
   }
 
-  async function* streamEventsAt(path: string, streamOptions: RequestOptions = {}): AsyncGenerator<RunStreamEvent> {
+  async function* streamEventsAt(path: string, streamOptions: RequestOptions = {}, extraHeaders: Record<string, string> = {}): AsyncGenerator<RunStreamEvent> {
     const bound = deadline(positiveDuration(streamOptions.timeoutMs ?? 300_000, "timeoutMs"), streamOptions.signal);
     let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
     const onAbort = () => { void reader?.cancel().catch(() => {}); };
     try {
       bound.signal.throwIfAborted();
-      const headers = new Headers({ Accept: "text/event-stream" });
+      const headers = new Headers({ ...extraHeaders, Accept: "text/event-stream" });
       const credential = await bearer();
       if (credential) headers.set("Authorization", `Bearer ${credential}`);
       let response = await fetchImpl(`${apiUrl}${path}`, {
@@ -1763,7 +1768,9 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
       if (target.sessionId) params.set("sessionId", target.sessionId);
       if (target.model) params.set("model", target.model);
       let completed = false;
-      for await (const frame of streamEventsAt(`/v1/chat/stream?${params.toString()}`, requestOptions)) {
+      // The session grant goes in a header, never the URL.
+      const grant: Record<string, string> = target.sessionToken ? { "X-DocSlurp-Chat-Session-Token": target.sessionToken } : {};
+      for await (const frame of streamEventsAt(`/v1/chat/stream?${params.toString()}`, requestOptions, grant)) {
         if (frame.event === "status" || frame.event === "message" || frame.event === "done") {
           if (frame.event === "done") completed = true;
           yield { event: frame.event, data: frame.data } as ChatStreamEvent;

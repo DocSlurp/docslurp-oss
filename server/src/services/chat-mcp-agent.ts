@@ -7,6 +7,7 @@ import { performance } from "node:perf_hooks";
 import { assertProviderAllowed, isProviderCallAllowed, CHAT_AGENT_BASE_STEPS, CHAT_AGENT_EXTENSION_INPUT_TOKENS, CHAT_AGENT_LIMIT_DEFAULTS, createOpenRouterUsageCapture, resolveOpenRouterUsage, type ChatAgentLimits, type ChatAgentModes, type ChatAgentStepUsage, type ChatAgentStopReason, type ChatAgentTimeBudgetDebug, type PrivacyMode, type WorkspaceChatTurn } from "@docslurp/shared";
 import { evalBaggageAttributes, recordChatAgentTelemetry, startTelemetrySpan, type TelemetrySpan } from "@docslurp/shared/observability";
 import type { RequestActor } from "../lib/request-actor.js";
+import { isFirstPartyAppActor } from "../lib/first-party-app.js";
 import { recordUsageEvent } from "../lib/ai-usage.js";
 import { posthogAiTelemetry } from "../lib/posthog-ai-observability.js";
 import { createMcpDispatcher, mcpManifest } from "./mcp-tools.js";
@@ -265,7 +266,12 @@ export async function runChatMcpAgent(args: {
 }) {
   assertProviderAllowed(args.privacyMode, { provider: "openrouter", model: args.model, operation: "api.chat.mcp-agent", target: "hosted" });
   const limits = args.limits ?? DEFAULT_LIMITS;
-  const suggestions = args.suggestions === true;
+  // Settings tools (getWorkspaceSettings, proposeWorkspaceSettings) and
+  // suggestions mode are for the first-party DocSlurp app only, decided from
+  // authentication: an API key of any type never gets them, even when it sends
+  // `agent.suggestions`.
+  const firstPartyApp = isFirstPartyAppActor(args.actor);
+  const suggestions = firstPartyApp && args.suggestions === true;
   const budget = args.timeBudget ?? chatTurnTimeBudget();
   const maxOutputTokens = Math.min(args.maxOutputTokens, MAX_AGENT_OUTPUT_TOKENS);
   // One signal for the whole turn: deadline or client disconnect. Model calls,
@@ -287,7 +293,9 @@ export async function runChatMcpAgent(args: {
     ...evalBaggageAttributes(),
   });
   const context = createChatMcpTools({
-    manifest: mcpManifest("http://mcp.internal", args.actor.type === "apiKey" ? args.actor.apiKey.scopes : undefined, args.actor.type === "apiKey" ? args.actor.apiKey.keyType : undefined, args.actor.type === "apiKey" ? args.actor.apiKey.oauth : undefined),
+    manifest: mcpManifest("http://mcp.internal", args.actor.type === "apiKey" ? args.actor.apiKey.scopes : undefined, args.actor.type === "apiKey" ? args.actor.apiKey.keyType : undefined, { ...(args.actor.type === "apiKey" ? args.actor.apiKey.oauth : undefined), firstPartyApp }),
+    settingsTools: firstPartyApp,
+    publicClient: args.actor.type === "apiKey" && args.actor.apiKey.keyType !== "server",
     dispatch: createMcpDispatcher(args.actor), workspaceId: args.workspaceId, signal,
     retrievalDefaults: args.retrievalDefaults,
     maxToolCalls: limits.maxToolCalls, searchConcurrency: limits.searchConcurrency,

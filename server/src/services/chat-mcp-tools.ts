@@ -201,6 +201,19 @@ function webActivityResult(request: WebToolActivity, result: unknown): WebToolAc
  */
 const CHAT_EXCLUDED_TOOLS = new Set(["upload", "completeUpload", "listWorkspaces", "webMap", "webCrawl", "ingestWebsite", "fullIndex",
   ...ESTIMATE_TOOL_NAMES, "getJob", "suggestQueries"]);
+/**
+ * Workspace settings tools: offered to the chat agent only for the first-party
+ * DocSlurp app (`settingsTools`). The catalog already hides
+ * proposeWorkspaceSettings from every other caller; reading settings is held
+ * back too, so a customer's end users cannot read workspace configuration
+ * through its chat.
+ */
+const CHAT_SETTINGS_TOOLS = new Set(["getWorkspaceSettings", "proposeWorkspaceSettings"]);
+/**
+ * Withheld from browser (client) key chats, whose users are a customer's
+ * anonymous visitors: upload status reports runs, costs and failed files.
+ */
+const CHAT_PUBLIC_CLIENT_EXCLUDED_TOOLS = new Set(["getUploadStatus"]);
 /** Web tools chat may use when the turn allows them (`webTools`). */
 const CHAT_WEB_TOOLS = new Set(["webSearch", "webFetch"]);
 
@@ -363,6 +376,10 @@ export function createChatMcpTools(args: {
   userText?: string[];
   /** Suggestions mode: budget and deadline refusals of its diagnostic reads do not block the turn. */
   suggestions?: boolean;
+  /** First-party DocSlurp app only (isFirstPartyAppActor): offer the workspace settings tools. Default off. */
+  settingsTools?: boolean;
+  /** A browser (client) key's chat: withhold tools that report account internals. */
+  publicClient?: boolean;
 }) {
   let failure: ChatToolBlockedError | undefined;
   const blocked = new AbortController();
@@ -435,7 +452,9 @@ export function createChatMcpTools(args: {
     return evidence;
   }
 
-  const offered = (id: string) => !CHAT_EXCLUDED_TOOLS.has(id) && (!id.startsWith("web") || (args.webTools === true && CHAT_WEB_TOOLS.has(id)));
+  const offered = (id: string) => !CHAT_EXCLUDED_TOOLS.has(id)
+    && (args.settingsTools === true || !CHAT_SETTINGS_TOOLS.has(id))
+    && (args.publicClient !== true || !CHAT_PUBLIC_CLIENT_EXCLUDED_TOOLS.has(id)) && (!id.startsWith("web") || (args.webTools === true && CHAT_WEB_TOOLS.has(id)));
   for (const definition of args.manifest.capabilities.filter(item => item.category === "tool" && offered(item.id))) {
     // OpenAI-compatible providers restrict function names to letters, numbers, _ and -.
     const name = definition.id.replace(/[^a-zA-Z0-9_-]/g, "_");

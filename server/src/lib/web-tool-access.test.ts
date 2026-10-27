@@ -1,8 +1,16 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { apiKeyCanUseWebTools } from "./web-tool-access.js";
 import { mcpManifest } from "../services/mcp-catalog.js";
 
+vi.mock("../services/web/service.js", () => ({ webCapabilityAvailable: () => true }));
+
 describe("apiKeyCanUseWebTools", () => {
+  it("preserves explicit web scope for CLI OAuth catalogs alongside app-only filtering", () => {
+    const ids = (scopes: string[]) => mcpManifest("https://example.test", scopes, "server", { audience: "api", firstPartyApp: true }).capabilities.map(tool => tool.id);
+    expect(ids(["search"])).not.toContain("webSearch");
+    expect(ids(["search", "web"])).toContain("webSearch");
+    expect(ids(["search", "web", "workspaces:manage"])).not.toContain("getWorkspaceSettings");
+  });
   it("keeps web tools for server keys with search, and website ingestion with ingest", () => {
     expect(apiKeyCanUseWebTools({ keyType: "server", scopes: ["search"] })).toBe(true);
     expect(apiKeyCanUseWebTools({ scopes: ["search"] })).toBe(true);

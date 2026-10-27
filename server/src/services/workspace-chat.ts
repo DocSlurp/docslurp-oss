@@ -5,6 +5,8 @@ import { BILLABLE_UNIT_METRICS, chatAnswerCredits, chatAnswerUnits, chatModelTie
 import type { PrivacyMode } from "@docslurp/shared";
 import { env } from "../config.js";
 import type { RequestActor } from "../lib/request-actor.js";
+import { isFirstPartyAppActor } from "../lib/first-party-app.js";
+import { chatSessionForRequest, requiresChatSessionToken, sealChatSessionToken } from "../lib/chat-session-tokens.js";
 import type { ChatToolActivity } from "./chat-mcp-tools.js";
 import {
   configureSearchFromChat,
@@ -1038,6 +1040,8 @@ async function chatWorkspaceInTurn(args: {
    */
   spendKind?: SpendKind;
   sessionId?: string;
+  /** Browser keys: the sealed grant returned with the previous answer; required to continue `sessionId`. */
+  sessionToken?: string | null;
   model?: string | null;
   history?: Array<Pick<WorkspaceChatTurn, "role" | "content">>;
   maxOutputTokens?: number;
@@ -1066,6 +1070,8 @@ async function chatWorkspaceInTurn(args: {
   answerIngestReport?: boolean;
 }): Promise<WorkspaceChatResponse> {
   if (args.actor && args.actor.userId !== args.userId) throw new Error("Chat actor does not match user");
+  // Browser-key visitors share the key owner's identity: a session id alone never continues a conversation.
+  args = { ...args, sessionId: chatSessionForRequest(args.actor, { workspaceId: args.workspaceId, sessionId: args.sessionId, sessionToken: args.sessionToken }) };
   // Enforced here too so every caller (routes, MCP, automation) honours the switch.
   if (!(await isWorkspaceChatEnabled(args.workspaceId, args.userId))) throw new WorkspaceChatDisabledError();
   // An explicit model is honoured exactly or refused (400), never silently swapped for the default.
@@ -1099,6 +1105,9 @@ async function chatWorkspaceInTurn(args: {
     () => chatWorkspaceTurn(args, sessionId, policy),
   );
   await chargeChatAnswer(response, args, sessionId, policy);
+  if (requiresChatSessionToken(args.actor)) {
+    return { ...response, sessionToken: sealChatSessionToken({ keyId: args.actor.apiKey.keyId, workspaceId: args.workspaceId, sessionId: response.sessionId }) };
+  }
   return response;
 }
 
@@ -1200,7 +1209,14 @@ async function chatWorkspaceTurn(
     args.retrieval,
   );
   let searchConfiguration: SearchConfigurationOutcome | undefined;
-  if (workspace && args.allowConfiguration !== false && requestsSearchConfiguration(args.query)) {
+  // Settings changed from chat messages (this thread's retrieval) and settings
+  // proposals are first-party-app capabilities: API keys of any type, the
+  // OpenAI-compatible route and MCP never get them, whatever the request sends.
+  const firstPartyApp = isFirstPartyAppActor(args.actor);
+  // A browser (client) key's visitors are anonymous end users: their messages
+  // must not rename the customer's workspace either.
+  const publicClientKey = args.actor?.type === "apiKey" && args.actor.apiKey.keyType !== "server";
+  if (workspace && firstPartyApp && args.allowConfiguration !== false && requestsSearchConfiguration(args.query)) {
     searchConfiguration = await configureSearchFromChat({ ...args, orgId: workspace.orgId, sessionId, model, current: searchSettings, threadOverrides, apiKey: chatApiKey, privacyMode });
     searchSettings = searchConfiguration.settings;
   }
@@ -1210,7 +1226,7 @@ async function chatWorkspaceTurn(
     args.filters?.mimeTypes?.length || args.filters?.tags?.length || args.filters?.dateFrom || args.filters?.dateTo,
   );
   const history = args.history ?? await listRecentTurns(sessionId, 20);
-  if (workspace && args.allowConfiguration !== false && history.length === 0) await refineWorkspaceNames([args.workspaceId], args.query);
+  if (workspace && !publicClientKey && args.allowConfiguration !== false && history.length === 0) await refineWorkspaceNames([args.workspaceId], args.query);
   // Filtered questions take direct retrieval so the filters are guaranteed to apply.
   // `agent.tools: false` (or tool_choice "none" on /v1/chat/completions) asks for it too.
   if (args.allowAgentTools !== false && args.agent?.tools !== false && args.actor && env.chatMcpEnabled && chatApiKey && !filterDocumentIds && !narrowingFilters) {
@@ -1218,7 +1234,7 @@ async function chatWorkspaceTurn(
     const [{ runChatMcpAgent }, workspaceInventory] = await Promise.all([
       import("./chat-mcp-agent.js"),
       // The inventory is a prompt hint: without it the agent still runs, just without counts.
-      loadChatWorkspaceInventory(args.workspaceId, args.agent?.suggestions === true).catch((error: unknown) => {
+      loadChatWorkspaceInventory(args.workspaceId, firstPartyApp && args.agent?.suggestions === true).catch((error: unknown) => {
         console.warn("[chat-agent] workspace inventory unavailable:", error instanceof Error ? error.message : String(error));
         return undefined;
       }),
@@ -1227,7 +1243,7 @@ async function chatWorkspaceTurn(
       actor: args.actor, workspaceId: args.workspaceId, orgId: workspace.orgId, sessionId,
       query: args.query, history, apiKey: chatApiKey, privacyMode, model,
       workspaceWebTools: (workspace.pipeline as { webTools?: unknown } | null)?.webTools !== false,
-      web: args.agent?.web, suggestions: args.agent?.suggestions,
+      web: args.agent?.web, suggestions: firstPartyApp && args.agent?.suggestions === true,
       retrievalDefaults: searchSettings.retrievalDefaults, workspaceInventory,
       workspaceInstructions: [
         workspace.systemPrompt ? `Workspace ingest instruction: ${workspace.systemPrompt}` : "",
