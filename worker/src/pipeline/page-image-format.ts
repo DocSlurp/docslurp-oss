@@ -305,7 +305,7 @@ export async function reportPageImageEncoderAtStartup(
   }
   const plan = await runner.encodeLosslessWebp("/nonexistent/page.png", "/nonexistent/page.webp", readPageImageWebpEffort(env)).catch(() => null);
   if (plan?.available) {
-    console.log(`[page-image] format=webp encoder=cwebp default_effort=${readPageImageWebpEffort(env)} short_retention_hours=${readPageImageWebpShortRetentionHours(env)}`);
+    console.log(`[page-image] format=webp encoder=vm-cwebp runtime=unverified default_effort=${readPageImageWebpEffort(env)} short_retention_hours=${readPageImageWebpShortRetentionHours(env)}`);
     return true;
   }
   const line = "[page-image] ERROR DOCSLURP_PAGE_IMAGE_FORMAT=webp but cwebp is not installed; every page image will be stored as PNG";
