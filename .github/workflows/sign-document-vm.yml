@@ -1,0 +1,168 @@
+name: Sign reviewed document VM image
+
+on:
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: sign-reviewed-document-vm
+  cancel-in-progress: false
+
+jobs:
+  sign:
+    if: github.repository == 'DocSlurp/docslurp-oss' && github.ref == 'refs/heads/main' && github.event_name == 'workflow_dispatch' && github.event.repository.private == false
+    runs-on: ubuntu-24.04
+    timeout-minutes: 6
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    env:
+      IMAGE: ghcr.io/docslurp/worker-document-vm
+      IMAGE_DIGEST: sha256:66a14b948cd0eca3d8ac7869e90cf8dfd5a0987508dca0b65ac0cb269952cd21
+      INDEX_DIGEST: sha256:fbbdd7f307ff8ccf49c3fd74e7fc448b5c4eda8878bfb1accf0920669b39b3ee
+      IDENTITY: https://github.com/DocSlurp/docslurp-oss/.github/workflows/sign-document-vm.yml@refs/heads/main
+    steps:
+      # No checkout, build, image execution, layer extraction or new build provenance.
+      - name: Verify remote reviewed BuildKit evidence
+        timeout-minutes: 2
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_ACTOR: ${{ github.actor }}
+        run: |
+          python3 - <<'PY'
+          import base64
+          import hashlib
+          import json
+          import os
+          import urllib.error
+          import urllib.request
+          from urllib.parse import urlsplit
+
+          REPOSITORY = 'docslurp/worker-document-vm'
+          IMAGE = 'sha256:66a14b948cd0eca3d8ac7869e90cf8dfd5a0987508dca0b65ac0cb269952cd21'
+          INDEX = 'sha256:fbbdd7f307ff8ccf49c3fd74e7fc448b5c4eda8878bfb1accf0920669b39b3ee'
+          ATTESTATION = 'sha256:56ae2cbce81f13a687ea9eac9671c42e664c6f311caf6bf966407cedea9a4940'
+          LAYERS = [
+              ('sha256:1e0c700f7e1ae1c905962c3026f9d5cc9da07368e6c56ded0f538bad50bd511e', 2561186, 'https://spdx.dev/Document'),
+              ('sha256:c6e8969381e3820857b47dfe10f4553de5454a5a55420ff452d7bf689a434871', 23095, 'https://slsa.dev/provenance/v1'),
+          ]
+          MANIFEST_TYPE = 'application/vnd.oci.image.manifest.v1+json'
+          INDEX_TYPE = 'application/vnd.oci.image.index.v1+json'
+
+          def require(condition, message):
+              if not condition:
+                  raise ValueError(message)
+
+          class NoRedirect(urllib.request.HTTPRedirectHandler):
+              def redirect_request(self, *args, **kwargs):
+                  return None
+
+          def read_url(url, headers, limit, allow_blob_redirect=False):
+              opener = urllib.request.build_opener(NoRedirect())
+              request = urllib.request.Request(url, headers=headers)
+              try:
+                  response = opener.open(request, timeout=15)
+              except urllib.error.HTTPError as error:
+                  location = error.headers.get('Location', '')
+                  code = error.code
+                  error.close()
+                  require(allow_blob_redirect and code in (301, 302, 307, 308), 'Unexpected registry response')
+                  target = urlsplit(location)
+                  require(target.scheme == 'https' and target.hostname == 'pkg-containers.githubusercontent.com'
+                          and target.port in (None, 443) and not target.username and not target.password, 'Unsafe blob redirect')
+                  # Never forward registry Authorization to object storage.
+                  response = opener.open(urllib.request.Request(location), timeout=15)
+              with response:
+                  if response.headers.get('Content-Length'):
+                      require(int(response.headers['Content-Length']) <= limit, 'Oversized registry response')
+                  raw = response.read(limit + 1)
+                  require(len(raw) <= limit, 'Oversized registry response')
+                  return raw
+
+          def verified_json(raw, digest, size):
+              require(len(raw) == size and 'sha256:' + hashlib.sha256(raw).hexdigest() == digest, 'Evidence digest/size mismatch')
+              return json.loads(raw)
+
+          def verify(get):
+              index = get('manifests', INDEX, 857)
+              require(index['schemaVersion'] == 2 and index['mediaType'] == INDEX_TYPE, 'Invalid index')
+              descriptors = index['manifests']
+              require(len(descriptors) == 2, 'Unexpected index entries')
+              image, attestation = descriptors
+              require(image['digest'] == IMAGE and image['size'] == 2771 and image['mediaType'] == MANIFEST_TYPE
+                      and image['platform'] == {'architecture': 'amd64', 'os': 'linux'}, 'Wrong image binding')
+              require(attestation['digest'] == ATTESTATION and attestation['size'] == 1112
+                      and attestation['mediaType'] == MANIFEST_TYPE
+                      and attestation['platform'] == {'architecture': 'unknown', 'os': 'unknown'}
+                      and attestation['annotations']['vnd.docker.reference.digest'] == IMAGE
+                      and attestation['annotations']['vnd.docker.reference.type'] == 'attestation-manifest', 'Wrong BuildKit reference')
+              manifest = get('manifests', IMAGE, 2771)
+              require(manifest['schemaVersion'] == 2 and manifest['mediaType'] == MANIFEST_TYPE
+                      and manifest['config']['digest'] == 'sha256:8f703218281562eac36ba0cd6af513daf9f2f0728bb357424734aba477b1697f', 'Wrong image manifest')
+              binding = get('manifests', ATTESTATION, 1112)
+              require(binding['schemaVersion'] == 2 and binding['mediaType'] == MANIFEST_TYPE
+                      and binding['artifactType'] == 'application/vnd.docker.attestation.manifest.v1+json'
+                      and binding['subject'] == {'mediaType': MANIFEST_TYPE, 'digest': IMAGE, 'size': 2771}, 'Wrong OCI subject')
+              require(len(binding['layers']) == len(LAYERS), 'Unexpected attestation layers')
+              for layer, (digest, size, predicate) in zip(binding['layers'], LAYERS):
+                  require(layer['digest'] == digest and layer['size'] == size
+                          and layer['mediaType'] == 'application/vnd.in-toto+json'
+                          and layer['annotations']['in-toto.io/predicate-type'] == predicate, 'Wrong attestation layer')
+                  statement = get('blobs', digest, size)
+                  require(statement['_type'] == 'https://in-toto.io/Statement/v1'
+                          and statement['predicateType'] == predicate and statement['subject'] == [], 'Wrong BuildKit statement')
+                  if predicate == 'https://spdx.dev/Document':
+                      require(statement['predicate']['spdxVersion'].startswith('SPDX-'), 'Missing SPDX document')
+                  else:
+                      require(statement['predicate']['buildDefinition']['buildType'] ==
+                              'https://github.com/moby/buildkit/blob/master/docs/attestations/slsa-definitions.md', 'Wrong provenance builder')
+
+          def main():
+              basic = base64.b64encode((os.environ['GH_ACTOR'] + ':' + os.environ['GH_TOKEN']).encode()).decode()
+              token = json.loads(read_url('https://ghcr.io/token?service=ghcr.io&scope=repository:docslurp/worker-document-vm:pull',
+                                         {'Authorization': 'Basic ' + basic}, 16384))['token']
+              def get(kind, digest, size):
+                  raw = read_url(f'https://ghcr.io/v2/{REPOSITORY}/{kind}/{digest}',
+                                 {'Authorization': 'Bearer ' + token, 'Accept': INDEX_TYPE + ', ' + MANIFEST_TYPE},
+                                 size, allow_blob_redirect=(kind == 'blobs'))
+                  return verified_json(raw, digest, size)
+              verify(get)
+              print('Verified fixed index, image, OCI subject, BuildKit reference, SPDX and SLSA blobs; no image layers fetched.')
+
+          if __name__ == '__main__':
+              try:
+                  main()
+              except Exception:
+                  # URLs and HTTP exceptions can contain signed object-storage credentials.
+                  raise SystemExit('Remote reviewed evidence verification failed; signing refused') from None
+          PY
+
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        with:
+          cosign-release: v3.0.6
+
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Sign the existing reviewed image digest
+        timeout-minutes: 2
+        run: timeout 90s cosign sign --yes "${IMAGE}@${IMAGE_DIGEST}"
+
+      - name: Verify exact signing identity
+        timeout-minutes: 1
+        run: |
+          timeout 45s cosign verify "${IMAGE}@${IMAGE_DIGEST}" \
+            --certificate-identity "${IDENTITY}" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com
+          {
+            echo '### Reviewed document VM digest signed and verified'
+            echo "Image: ${IMAGE}@${IMAGE_DIGEST}"
+            echo "Reviewed BuildKit index: ${IMAGE}@${INDEX_DIGEST}"
+            echo "Certificate identity: ${IDENTITY}"
+            echo 'Original BuildKit SPDX/SLSA evidence retained; this workflow did not build the image.'
+          } >> "$GITHUB_STEP_SUMMARY"
