@@ -125,7 +125,16 @@ export interface McpTool {
   /** Replaces the `scopes` check for API keys (scope and key type): estimates mirror the access of the mutation they price. */
   keyAccess?: (key: { scopes: readonly string[]; keyType?: string; oauth?: { audience: string } }) => boolean;
   annotations: ToolAnnotations;
+  /**
+   * Offered only to the first-party DocSlurp app (a signed-in dashboard
+   * session; see isFirstPartyAppActor). Never listed or callable for API keys
+   * of any type, MCP OAuth tokens or capability tokens.
+   */
+  firstPartyAppOnly?: boolean;
 }
+
+/** Workspace settings tools: app-only, so a customer cannot expose them to its own end users. */
+export const FIRST_PARTY_APP_SETTINGS_TOOLS: ReadonlySet<string> = new Set(["getWorkspaceSettings", "proposeWorkspaceSettings"]);
 
 /**
  * Listing order for every surface that keeps server order (tools/list, manifest, chat tools): discover → upload →
@@ -150,11 +159,12 @@ export function mcpTools(baseUrl: string): McpTool[] {
     annotations: READ_ONLY,
   }));
   const tools: Omit<McpTool, "category" | "endpoint">[] = [
-    { id: "getWorkspaceSettings", title: "Read workspace settings", scopes: ["search", "ingest"], annotations: READ_ONLY,
+    { id: "getWorkspaceSettings", title: "Read workspace settings", scopes: ["search", "ingest"], keyAccess: () => false, firstPartyAppOnly: true, annotations: READ_ONLY,
       description: "Read current supported pipeline toggles, chat settings and retrieval defaults for the selected workspace. Use before proposing changes and to verify what is actually saved after the user applies a proposal. Does not expose secrets or change settings.",
       inputSchema: toolInputJsonSchema(z.object({ workspace: workspaceRef }).strict()) },
     { id: "proposeWorkspaceSettings", title: "Propose workspace settings", scopes: ["search", "ingest"],
-      keyAccess: key => key.keyType === "server" && key.scopes.includes("workspaces:manage"), annotations: READ_ONLY,
+      // No API key of any type may list or call it: the signed-in app only.
+      keyAccess: () => false, firstPartyAppOnly: true, annotations: READ_ONLY,
       description: "Prepare an exact workspace-settings change and impact for the signed-in chat's Apply card. Does not save settings or start work. Requires workspace editor access. Call proactively when configuration would help the user's goal, including enabling video frames. Safe chat changes (changes.chat): enabled, mode, answerStyle, citations, searchInstructions. Safe retrieval changes (changes.retrieval): resultCount, useRerank, useMmr, mmrLambda, candidateDepth, resultOrder. Allowed pipeline toggles: mediaVideo.enabled, chunkOverlap, summarize, embed, indexVectors, preserveTables, preserveCode, preserveImages, pdfRegionExtraction, visionFallback, and vision page selection (vision.forceAllPages reads every page with vision up to vision.maxPagesPerDocument, at most 32; it adds per-page cost and applies to new uploads, while existing files need reprocessing). Example: {changes:{pipeline:{mediaVideo:{enabled:true}}}}. An ingest report recommendation that has a patch can be proposed as {changes:{pipeline:<patch>}}. The user applies the structured card; never claim the proposal has been applied. Existing-document reprocessing requires separate explicit consent. Available inside a workspace chat session only.",
       inputSchema: toolInputJsonSchema(workspaceSettingsProposalInputSchema) },
     { id: "listWorkspaces", title: "List workspaces", scopes: ["search", "ingest"], annotations: READ_ONLY,
@@ -207,16 +217,22 @@ export function mcpTools(baseUrl: string): McpTool[] {
 }
 
 /**
- * The catalog visible to a caller: session callers see everything, API keys see tools their scopes allow.
- * `oauth` is the key's OAuth marker: a CLI (REST-audience) token sees web tools only with the `web` scope.
+ * The catalog visible to a caller: API keys see tools their scopes allow;
+ * omitted scopes (a session) see every scoped tool. First-party-app-only tools
+ * are listed only when `options.firstPartyApp` is set from the authenticated
+ * actor (isFirstPartyAppActor), never by default.
  */
-export function mcpManifest(baseUrl: string, scopes?: string[], keyType?: string, oauth?: { audience: string }) {
+export function mcpManifest(baseUrl: string, scopes?: string[], keyType?: string, options: { firstPartyApp?: boolean; audience?: string } = {}) {
+  const oauth = options.audience ? { audience: options.audience } : undefined;
+  const firstPartyApp = options.firstPartyApp === true && scopes === undefined;
   return {
     server: {
       id: env.mcpServerId, title: "DocSlurp MCP", version: "0.1.0",
       transports: ["streamable-http", "stdio"], endpoint: `${baseUrl}/v1/mcp`,
       auth: { type: "apiKey", scopes: ["search", "ingest"] },
     },
-    capabilities: mcpTools(baseUrl).filter(tool => !scopes || (tool.keyAccess ? tool.keyAccess({ scopes, keyType, oauth }) : tool.scopes.some(scope => scopes.includes(scope)))),
+    capabilities: mcpTools(baseUrl).filter(tool => tool.firstPartyAppOnly
+      ? firstPartyApp
+      : !scopes || (tool.keyAccess ? tool.keyAccess({ scopes, keyType, oauth }) : tool.scopes.some(scope => scopes.includes(scope)))),
   };
 }

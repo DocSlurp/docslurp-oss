@@ -25,7 +25,7 @@ export function serviceCors(trustedOrigins: string[]): MiddlewareHandler {
       origin: widget ? origin : trustedOrigins,
       credentials: trusted,
       allowMethods: widget ? ["GET", "POST", "OPTIONS"] : ["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
-      allowHeaders: ["Content-Type", "Authorization", "MCP-Protocol-Version", "MCP-Session-Id", "Last-Event-ID", "X-Algolia-API-Key", "X-Algolia-Application-Id", "X-TYPESENSE-API-KEY", "Idempotency-Key", "X-Request-ID", "X-POSTHOG-DISTINCT-ID", "X-POSTHOG-SESSION-ID"],
+      allowHeaders: ["Content-Type", "Authorization", "X-DocSlurp-Chat-Session-Token", "MCP-Protocol-Version", "MCP-Session-Id", "Last-Event-ID", "X-Algolia-API-Key", "X-Algolia-Application-Id", "X-TYPESENSE-API-KEY", "Idempotency-Key", "X-Request-ID", "X-POSTHOG-DISTINCT-ID", "X-POSTHOG-SESSION-ID"],
       exposeHeaders: ["WWW-Authenticate", "MCP-Protocol-Version", "MCP-Session-Id", "Idempotency-Replayed", "Retry-After", "X-Request-ID", "traceparent", "RateLimit", "RateLimit-Policy", "X-RateLimit-Limit", "X-RateLimit-Remaining", "X-RateLimit-Reset", "X-DocSlurp-Spend"],
       maxAge: 600,
     })(c, next);

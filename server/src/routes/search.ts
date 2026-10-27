@@ -1,4 +1,5 @@
 import { reportPublicError } from "../lib/public-errors.js";
+import { chatSessionForRequest, CHAT_SESSION_TOKEN_HEADER } from "../lib/chat-session-tokens.js";
 import { apiErrorResponse, nativeApiErrors, withApiErrorDetails } from "../lib/api-error.js";
 import { Hono, type Context } from "hono";
 import { batchSearchInputSchema, searchFormError, searchInputSchema, searchOptions, workspaceChatInputSchema, type SearchInput } from "../lib/search-input.js";
@@ -151,6 +152,23 @@ async function deferredRequestContext(
   return { context };
 }
 
+/**
+ * For cookie-authenticated GETs that do work: the browser says the request is
+ * same-origin (Fetch Metadata), or its Origin is the API's own origin or an
+ * allowed app origin. A request with neither header is refused.
+ */
+function sameOriginBrowserRequest(c: Context): boolean {
+  const origin = c.req.header("Origin");
+  const site = c.req.header("Sec-Fetch-Site");
+  let ownOrigin = "";
+  try { ownOrigin = new URL(c.req.url).origin; } catch { /* keep empty */ }
+  const trustedOrigin = (value: string) => value === ownOrigin || env.corsAllowedOrigins.includes(value);
+  if (origin) return trustedOrigin(origin) && (!site || site === "same-origin" || site === "same-site");
+  // Neither header: refused. Browsers that send no Fetch Metadata on same-origin
+  // GETs (Safari before 16.4) can't stream with a cookie session; POST /v1/chat works.
+  return site === "same-origin";
+}
+
 /** `grounded` is the nested MCP tool target: retrieval-only, never another agent or a settings change. */
 async function handleWorkspaceChat(c: Context, mode: "public" | "grounded") {
   // Lets clients join a turn to its trace (the trace id is the second field).
@@ -166,6 +184,9 @@ async function handleWorkspaceChat(c: Context, mode: "public" | "grounded") {
   if (forbidden) return forbidden;
   const chatDisabled = await workspaceChatDisabledBody(workspaceId, userId);
   if (chatDisabled) return apiErrorResponse(c, 403, "chat_disabled", chatDisabled.error);
+  // Before the turn starts: a browser key continues a session only with its grant
+  // (no grant: a fresh session; a bad grant: 403).
+  const sessionId = chatSessionForRequest(getRequestActor(c), { workspaceId, sessionId: body.sessionId, sessionToken: body.sessionToken });
   const deferred = await deferredRequestContext(c, workspaceId);
   if ("response" in deferred) return deferred.response;
   // This route knows whether the answer reached the client, so it owns the
@@ -175,7 +196,7 @@ async function handleWorkspaceChat(c: Context, mode: "public" | "grounded") {
   let response: Awaited<ReturnType<typeof chatWorkspace>>;
   try {
     response = await turn.run(() => withDeferredContext(deferred.context, () => chatWorkspace({ workspaceId, userId,
-      query: body.q, sessionId: body.sessionId, model: body.model,
+      query: body.q, sessionId, sessionToken: body.sessionToken, model: body.model,
       actor: getRequestActor(c), signal,
       ...(mode === "grounded"
         ? { allowAgentTools: false, allowConfiguration: false }
@@ -221,11 +242,17 @@ export const groundedWorkspaceChatRoutes = new Hono().use("*", nativeApiErrors).
  * chat settings and spend checks as `POST /v1/chat` apply.
  */
 async function workspaceChatStreamHandler(c: Context) {
+  // Paid GET turns from cookie sessions require same-origin browser evidence.
+  if (getRequestActor(c).type === "session" && !sameOriginBrowserRequest(c)) {
+    return apiErrorResponse(c, 403, "forbidden", "Cross-site request rejected");
+  }
   const parsed = workspaceChatInputSchema.safeParse({ q: c.req.query("q"),
     workspace: c.req.query("workspace") || undefined, orgId: c.req.query("orgId") || undefined,
-    sessionId: c.req.query("sessionId"), model: c.req.query("model") });
+    sessionId: c.req.query("sessionId"),
+    sessionToken: c.req.header(CHAT_SESSION_TOKEN_HEADER)?.trim() || undefined,
+    model: c.req.query("model") });
   if (!parsed.success) return apiErrorResponse(c, 400, "invalid_request", "Invalid chat input", { issues: parsed.error.issues });
-  const { q: query, sessionId, model } = parsed.data;
+  const { q: query, sessionToken, model } = parsed.data;
 
   const userId = c.get("sessionUser").id;
   const workspaceId = await resolveActorWorkspaceId(getRequestActor(c), parsed.data.workspace, parsed.data.orgId);
@@ -234,6 +261,7 @@ async function workspaceChatStreamHandler(c: Context) {
   const chatDisabled = await workspaceChatDisabledBody(workspaceId, userId);
   if (chatDisabled) return apiErrorResponse(c, 403, "chat_disabled", chatDisabled.error);
   if (await chatModelRefused(getRequestActor(c), model, workspaceId)) return modelNotAllowed(c);
+  const sessionId = chatSessionForRequest(getRequestActor(c), { workspaceId, sessionId: parsed.data.sessionId, sessionToken });
   // Refuse before the stream opens, so a blocked spend is a 402.
   // Pre-check only: chatWorkspace takes the interactive hold.
   await assertCanSpend(null, workspaceId, { kind: "interactive", hold: false });
@@ -272,7 +300,7 @@ async function workspaceChatStreamHandler(c: Context) {
         userId,
         query,
         actor: getRequestActor(c), allowAgentTools: env.publicChatAgentEnabled, signal: c.req.raw.signal,
-        sessionId,
+        sessionId, sessionToken,
         model
       }));
       await pendingEvents;
@@ -291,6 +319,7 @@ async function workspaceChatStreamHandler(c: Context) {
       data: JSON.stringify({
         id: response.id,
         sessionId: response.sessionId,
+        ...(response.sessionToken ? { sessionToken: response.sessionToken } : {}),
         searchSessionId: response.searchSessionId
       })
     });
