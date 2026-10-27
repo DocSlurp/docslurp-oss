@@ -10,6 +10,7 @@ import {
   check,
   boolean,
   integer,
+  bigserial,
   index,
   bigint,
   primaryKey,
@@ -3338,6 +3339,7 @@ export const workerMaintenanceLeases = pgTable("worker_maintenance_leases", {
 export const mcpOAuthClients = pgTable("mcp_oauth_clients", {
   id: text().primaryKey(), name: text().notNull(), redirectUris: jsonb("redirect_uris").notNull(),
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  firstParty: boolean("first_party").default(false).notNull(),
 });
 export const mcpOAuthRequests = pgTable("mcp_oauth_requests", {
   id: text().primaryKey(), clientId: text("client_id").notNull().references(() => mcpOAuthClients.id, { onDelete: "cascade" }),
@@ -3359,6 +3361,20 @@ export const mcpOAuthTokens = pgTable("mcp_oauth_tokens", {
   kind: text().notNull(), redirectUri: text("redirect_uri"), challenge: text(),
   expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(), consumedAt: timestamp("consumed_at", { withTimezone: true }),
 }, table => [index("mcp_oauth_tokens_grant_idx").on(table.grantId), check("mcp_oauth_tokens_kind_check", sql`${table.kind} in ('code','access','refresh')`)]);
+export const mcpOAuthDeviceCodes = pgTable("mcp_oauth_device_codes", {
+  deviceCodeHash: text("device_code_hash").primaryKey(), userCodeHash: text("user_code_hash").notNull().unique(),
+  clientId: text("client_id").notNull().references(() => mcpOAuthClients.id, { onDelete: "cascade" }),
+  resource: text().notNull(), scopes: jsonb().notNull(), intervalSeconds: integer("interval_seconds").default(5).notNull(),
+  lastPolledAt: timestamp("last_polled_at", { withTimezone: true }), expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+  userId: text("user_id").references(() => user.id, { onDelete: "cascade" }),
+  grantId: text("grant_id").references(() => mcpOAuthGrants.id, { onDelete: "cascade" }),
+  approvedAt: timestamp("approved_at", { withTimezone: true }), deniedAt: timestamp("denied_at", { withTimezone: true }),
+  consumedAt: timestamp("consumed_at", { withTimezone: true }), createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+}, table => [index("mcp_oauth_device_codes_expiry_idx").on(table.expiresAt)]);
+export const mcpOAuthDeviceAttempts = pgTable("mcp_oauth_device_attempts", {
+  id: bigserial({ mode: "number" }).primaryKey(), userId: text("user_id").notNull().references(() => user.id, { onDelete: "cascade" }),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+}, table => [index("mcp_oauth_device_attempts_user_idx").on(table.userId, table.createdAt)]);
 
 /**
  * Content-addressed embedding reuse pointers (server/db/migrations/0034_embedding_reuse_refs.sql):

@@ -12,6 +12,7 @@ import { apiKeyAllowsWorkspace, apiKeyCanUseWorkspace } from "./api-key-workspac
 export { apiKeyAllowsWorkspace, apiKeyCanUseWorkspace };
 import { setCurrentRequestApiKeyId, setCurrentRequestApiKeyWorkspaceIds, setCurrentRequestOrgId, setCurrentRequestSessionId, setCurrentRequestUserId } from "./request-context.js";
 import { validateApiKey, type ValidatedKey } from "../services/api-keys.js";
+import { validateOAuthApiToken } from "../services/mcp-oauth.js";
 import { ensureDefaultWorkspace, findWorkspaceForInput, getWorkspace, type WorkspaceInputScope } from "../services/workspaces.js";
 import { invalidWorkspaceInputError, WorkspaceAccessError, workspaceInputNotFoundError } from "../services/default-workspace.js";
 
@@ -64,7 +65,17 @@ export async function resolveApiKeyActor(
     return null;
   }
 
-  const apiKey = await validateApiKey(authorization.slice(7), requestContext);
+  const raw = authorization.slice(7).trim();
+  // OAuth access tokens never fall through to API-key lookup. REST-audience
+  // tokens (`dscli_`, the first-party CLI) resolve to their grant's mapped key
+  // identity; MCP-audience tokens (`dsmcp…`) are bound to /v1/mcp and are
+  // refused here (RFC 8707).
+  if (raw.startsWith("dsmcp")) return null;
+  if (raw.startsWith("dscli")) {
+    const oauthKey = await validateOAuthApiToken(raw);
+    return oauthKey ? { type: "apiKey", userId: oauthKey.userId, apiKey: oauthKey } : null;
+  }
+  const apiKey = await validateApiKey(raw, requestContext);
   return apiKey ? { type: "apiKey", userId: apiKey.userId, apiKey } : null;
 }
 
@@ -139,6 +150,8 @@ export async function isPlatformAdminActor(actor: RequestActor | undefined): Pro
   if (!actor) return false;
   if (actor.type === "session") return actor.user.isAdmin === true;
   if (actor.apiKey.keyType !== "server") return false;
+  // A delegated OAuth token never carries its owner's operator privileges.
+  if (actor.apiKey.oauth) return false;
   return await isConfiguredAdminUser(appDbPool, actor.apiKey.userId);
 }
 

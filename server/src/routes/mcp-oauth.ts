@@ -1,14 +1,17 @@
 import { Hono, type Context } from "hono";
 import { appDbPool } from "../lib/auth.js";
 import { resolveBetterAuthSessionActor } from "../lib/request-actor.js";
-import { getConsentRequest, MCP_SCOPES, mcpOrigin, mcpResource, validRedirect, redirectMatches, parseScopes, transaction, oauthHash, pkceChallenge, issueTokens, secret, randomUUID, cleanupExpiredOAuthRequests, logTokenRejection, REFRESH_REUSE_LEEWAY_SECONDS } from "../services/mcp-oauth.js";
+import { getConsentRequest, MCP_SCOPES, mcpOrigin, mcpResource, apiResource, allowedResources, createGrant, validRedirect, redirectMatches, parseScopes, transaction, oauthHash, pkceChallenge, issueTokens, secret, randomUUID, cleanupExpiredOAuthRequests, logTokenRejection, REFRESH_REUSE_LEEWAY_SECONDS, DEVICE_CODE_GRANT_TYPE, DEVICE_CODE_TTL_SECONDS, DEVICE_POLL_INTERVAL_SECONDS, generateUserCode, OAUTH_TOKEN_PREFIX } from "../services/mcp-oauth.js";
+import { deviceVerificationRoutes } from "./mcp-oauth-device.js";
 export const mcpOAuthMetadataRoutes = new Hono();
 const resourceMetadata = (url: string) => ({ resource: mcpResource(url), authorization_servers: [mcpOrigin(url)], scopes_supported: MCP_SCOPES, bearer_methods_supported: ["header"], resource_name: "DocSlurp MCP" });
 for (const path of ["/.well-known/oauth-protected-resource", "/.well-known/oauth-protected-resource/v1/mcp"])
   mcpOAuthMetadataRoutes.get(path, c => c.json(resourceMetadata(c.req.url)));
+// RFC 9728 metadata for the REST API audience (first-party clients only).
+mcpOAuthMetadataRoutes.get("/.well-known/oauth-protected-resource/v1", c => c.json({ resource: apiResource(c.req.url), authorization_servers: [mcpOrigin(c.req.url)], scopes_supported: MCP_SCOPES, bearer_methods_supported: ["header"], resource_name: "DocSlurp API" }));
 mcpOAuthMetadataRoutes.get("/.well-known/oauth-authorization-server", c => {
   const origin = mcpOrigin(c.req.url);
-  return c.json({ issuer: origin, authorization_endpoint: `${origin}/oauth/mcp/authorize`, token_endpoint: `${origin}/oauth/mcp/token`, registration_endpoint: `${origin}/oauth/mcp/register`, revocation_endpoint: `${origin}/oauth/mcp/revoke`, response_types_supported: ["code"], grant_types_supported: ["authorization_code", "refresh_token"], code_challenge_methods_supported: ["S256"], token_endpoint_auth_methods_supported: ["none"], scopes_supported: MCP_SCOPES, authorization_response_iss_parameter_supported: true });
+  return c.json({ issuer: origin, authorization_endpoint: `${origin}/oauth/mcp/authorize`, token_endpoint: `${origin}/oauth/mcp/token`, registration_endpoint: `${origin}/oauth/mcp/register`, revocation_endpoint: `${origin}/oauth/mcp/revoke`, device_authorization_endpoint: `${origin}/oauth/mcp/device_authorization`, response_types_supported: ["code"], grant_types_supported: ["authorization_code", "refresh_token", DEVICE_CODE_GRANT_TYPE], code_challenge_methods_supported: ["S256"], token_endpoint_auth_methods_supported: ["none"], scopes_supported: MCP_SCOPES, authorization_response_iss_parameter_supported: true });
 });
 export const mcpOAuthRoutes = new Hono();
 mcpOAuthRoutes.use("*", async (c, next) => { c.header("Cache-Control", "no-store"); c.header("Pragma", "no-cache"); await next(); });
@@ -47,10 +50,11 @@ mcpOAuthRoutes.get("/authorize", async (c) => {
     return authorizeError(c, "unsupported_response_type", "Only response_type=code is supported");
   if (params.get("code_challenge_method") !== "S256" || !challenge || !/^[A-Za-z0-9_-]{43}$/.test(challenge))
     return authorizeError(c, "invalid_request", "PKCE with code_challenge_method=S256 is required");
-  // RFC 8707: the token is always audience-bound to this MCP server. An omitted
-  // resource defaults to it; any other resource is refused.
+  // RFC 8707: the token is always audience-bound. An omitted resource means
+  // this MCP server. Only a first-party client (the DocSlurp CLI) may ask for
+  // the REST API; any other resource is refused.
   const resource = params.get("resource") ?? mcpResource(c.req.url);
-  if (resource !== mcpResource(c.req.url))
+  if (!allowedResources(c.req.url, client).includes(resource))
     return authorizeError(c, "invalid_target", `resource must be ${mcpResource(c.req.url)}`);
   if ((params.get("state")?.length ?? 0) > 2048)
     return authorizeError(c, "invalid_request", "state is too long");
@@ -78,7 +82,7 @@ mcpOAuthRoutes.get("/consent/:id", async (c) => {
   const request = await getConsentRequest(c.req.param("id"), actor.userId, actor.sessionId);
   if (!request)
     return c.json({ error: "Not found" }, 404);
-  return c.json({ id: request.id, client_name: request.client_name, redirect_uri: request.redirect_uri, scopes: request.scopes, expires_at: new Date(request.expires_at).toISOString() });
+  return c.json({ id: request.id, client_name: request.client_name, redirect_uri: request.redirect_uri, resource: request.resource, scopes: request.scopes, expires_at: new Date(request.expires_at).toISOString() });
 });
 mcpOAuthRoutes.post("/authorize", async (c) => {
   if (c.req.header("origin") !== mcpOrigin(c.req.url))
@@ -109,14 +113,8 @@ mcpOAuthRoutes.post("/authorize", async (c) => {
       redirect.searchParams.set("error", "access_denied");
       return { redirect: redirect.href };
     }
-    const grant = randomUUID(), code = secret("dsmcpc"), keyId = randomUUID();
-    // This unexported identity lets existing usage/operation foreign keys stay valid.
-    // No raw server key is returned or persisted; only a random unguessable hash.
-    const clientName = (await db.query("SELECT name FROM mcp_oauth_clients WHERE id=$1", [request.client_id])).rows[0]?.name ?? "MCP client";
-    await db.query(`INSERT INTO api_keys(id,user_id,org_id,key_hash,name,key_type,allowed_domains,scopes,rate_limit_rpm,rate_limit_ppd)
-      VALUES($1,$2,$3,$4,$5,'server',ARRAY[]::text[],$6::text[],NULL,10000)`,
-      [keyId, actor.userId, orgId, oauthHash(secret("internal")), `OAuth: ${clientName}`, request.scopes]);
-    await db.query(`INSERT INTO mcp_oauth_grants(id,client_id,user_id,org_id,resource,scopes,api_key_id) VALUES($1,$2,$3,$4,$5,$6::jsonb,$7)`, [grant, request.client_id, actor.userId, orgId, request.resource, JSON.stringify(request.scopes), keyId]);
+    const code = secret("dsmcpc");
+    const grant = await createGrant(db, { clientId: request.client_id, userId: actor.userId, orgId: orgId!, resource: request.resource, scopes: request.scopes, url: c.req.url });
     await db.query(`INSERT INTO mcp_oauth_tokens(hash,grant_id,kind,redirect_uri,challenge,expires_at) VALUES($1,$2,'code',$3,$4,now()+interval '2 minutes')`, [oauthHash(code), grant, request.redirect_uri, request.challenge]);
     redirect.searchParams.set("code", code);
     return { redirect: redirect.href };
@@ -125,7 +123,8 @@ mcpOAuthRoutes.post("/authorize", async (c) => {
     return consentPage();
   return result.redirect ? c.redirect(result.redirect, 303) : consentPage(`&error=${result.retry}`);
 });
-type TokenFailure = { error: "invalid_grant" | "invalid_scope"; description: string; reason: string; grantId?: string };
+type TokenFailure = { error: "invalid_grant" | "invalid_scope" | "authorization_pending" | "slow_down" | "expired_token" | "access_denied"; description: string; reason: string; grantId?: string };
+const audienceOf = (resource: string, url: string): keyof typeof OAUTH_TOKEN_PREFIX => resource === apiResource(url) ? "api" : "mcp";
 const tokenFailure = (reason: string, description: string, grantId?: string, error: TokenFailure["error"] = "invalid_grant"): TokenFailure => ({ error, description, reason, grantId });
 mcpOAuthRoutes.post("/token", async (c) => {
   const body = await c.req.parseBody();
@@ -133,15 +132,29 @@ mcpOAuthRoutes.post("/token", async (c) => {
     logTokenRejection(reason, { grantType: body.grant_type, clientId: body.client_id, grantId });
     return c.json({ error, error_description: description }, status);
   };
-  if (body.grant_type !== "authorization_code" && body.grant_type !== "refresh_token")
-    return reject(400, "unsupported_grant_type", "Supported grant types: authorization_code, refresh_token", "unsupported_grant_type");
+  if (body.grant_type !== "authorization_code" && body.grant_type !== "refresh_token" && body.grant_type !== DEVICE_CODE_GRANT_TYPE)
+    return reject(400, "unsupported_grant_type", `Supported grant types: authorization_code, refresh_token, ${DEVICE_CODE_GRANT_TYPE}`, "unsupported_grant_type");
   if (typeof body.client_id !== "string" || !body.client_id)
     return reject(400, "invalid_request", "client_id is required for public clients", "missing_client_id");
-  // RFC 8707: an omitted resource means this MCP server; a different one is refused
-  // before any lookup, so tokens are never minted for another audience.
+  // RFC 8707: an omitted resource means this MCP server; anything but a known
+  // audience is refused before any lookup, and each grant below must match the
+  // audience it was issued for, so tokens are never minted for another audience.
   const resource = body.resource === undefined ? mcpResource(c.req.url) : body.resource;
-  if (resource !== mcpResource(c.req.url))
+  if (resource !== mcpResource(c.req.url) && resource !== apiResource(c.req.url))
     return reject(400, "invalid_target", `resource must be ${mcpResource(c.req.url)}`, "invalid_target");
+  if (body.grant_type === DEVICE_CODE_GRANT_TYPE) {
+    const deviceCode = body.device_code;
+    if (typeof deviceCode !== "string" || !deviceCode || deviceCode.length > 200)
+      return reject(400, "invalid_request", "device_code is required", "missing_credential");
+    const result = await redeemDeviceCode(deviceCode, body.client_id, resource, c.req.url);
+    if ("reason" in result && typeof result.reason === "string") {
+      const failure = result as TokenFailure;
+      // Pending and slow_down are expected polling answers, not rejections worth a warning.
+      if (failure.error !== "authorization_pending") logTokenRejection(failure.reason, { grantType: body.grant_type, clientId: body.client_id, grantId: failure.grantId });
+      return c.json({ error: failure.error, error_description: failure.description }, 400);
+    }
+    return c.json(result);
+  }
   const raw = body.grant_type === "authorization_code" ? body.code : body.refresh_token;
   if (typeof raw !== "string" || !raw || raw.length > 200)
     return reject(400, "invalid_request", body.grant_type === "authorization_code" ? "code is required" : "refresh_token is required", "missing_credential");
@@ -177,7 +190,7 @@ mcpOAuthRoutes.post("/token", async (c) => {
     if (!(await db.query("SELECT 1 FROM org_memberships WHERE org_id=$1 AND user_id=$2", [token.org_id, token.user_id])).rowCount)
       return tokenFailure("membership_removed", "The user no longer belongs to the authorized organization.", token.grant_id);
     await db.query("UPDATE mcp_oauth_tokens SET consumed_at=now() WHERE hash=$1", [token.hash]);
-    return { ...await issueTokens(db, token.grant_id), scope: token.scopes.join(" ") };
+    return { ...await issueTokens(db, token.grant_id, audienceOf(token.resource, c.req.url)), scope: token.scopes.join(" ") };
   });
   if ("reason" in result && typeof result.reason === "string") {
     const failure = result as TokenFailure;
@@ -185,6 +198,92 @@ mcpOAuthRoutes.post("/token", async (c) => {
   }
   return c.json(result);
 });
+/**
+ * RFC 8628 §3.5 polling. The device code is single-use: once redeemed, any
+ * further presentation revokes the grant (as a replayed authorization code
+ * does). Polling faster than the interval answers slow_down and adds 5 s.
+ */
+async function redeemDeviceCode(deviceCode: string, clientId: string, resource: string, url: string): Promise<TokenFailure | Record<string, unknown>> {
+  return await transaction(async (db): Promise<TokenFailure | Record<string, unknown>> => {
+    const { rows } = await db.query(`SELECT d.*, (d.expires_at <= now()) AS expired,
+        (d.last_polled_at IS NOT NULL AND d.last_polled_at > now() - d.interval_seconds * interval '1 second') AS too_fast,
+        g.revoked_at AS grant_revoked_at, g.api_key_id, g.user_id AS grant_user_id, g.org_id, g.scopes AS grant_scopes
+      FROM mcp_oauth_device_codes d LEFT JOIN mcp_oauth_grants g ON g.id=d.grant_id
+      WHERE d.device_code_hash=$1 FOR UPDATE OF d`, [oauthHash(deviceCode)]);
+    const row = rows[0];
+    if (!row) return tokenFailure("unknown_token", "The device code is unknown or has expired. Start a new login.");
+    if (row.client_id !== clientId) return tokenFailure("client_mismatch", "The device code was issued to a different client.");
+    if (row.resource !== resource) return tokenFailure("resource_mismatch", "The device code was issued for a different resource. Start a new login.");
+    if (row.consumed_at) {
+      if (row.grant_id) {
+        await db.query("UPDATE mcp_oauth_grants SET revoked_at=now() WHERE id=$1", [row.grant_id]);
+        if (row.api_key_id) await db.query("UPDATE api_keys SET revoked_at=now() WHERE id=$1", [row.api_key_id]);
+      }
+      return tokenFailure("device_code_replayed", "The device code was already used; the grant has been revoked. Start a new login.", row.grant_id ?? undefined);
+    }
+    if (row.expired) return tokenFailure("expired", "The device code has expired. Start a new login.", undefined, "expired_token");
+    if (row.denied_at) {
+      await db.query("UPDATE mcp_oauth_device_codes SET consumed_at=now() WHERE device_code_hash=$1", [row.device_code_hash]);
+      return tokenFailure("access_denied", "The request was denied.", undefined, "access_denied");
+    }
+    if (row.too_fast) {
+      await db.query("UPDATE mcp_oauth_device_codes SET interval_seconds=least(interval_seconds+5, 60), last_polled_at=now() WHERE device_code_hash=$1", [row.device_code_hash]);
+      return tokenFailure("slow_down", "Polling too fast; wait the interval plus 5 seconds.", undefined, "slow_down");
+    }
+    await db.query("UPDATE mcp_oauth_device_codes SET last_polled_at=now() WHERE device_code_hash=$1", [row.device_code_hash]);
+    if (!row.approved_at || !row.grant_id) return tokenFailure("pending", "The user has not approved the request yet.", undefined, "authorization_pending");
+    if (row.grant_revoked_at) return tokenFailure("grant_revoked", "The grant was revoked. Start a new login.", row.grant_id);
+    if (!(await db.query("SELECT 1 FROM api_keys WHERE id=$1 AND user_id=$2 AND org_id=$3 AND revoked_at IS NULL AND key_type='server'", [row.api_key_id, row.grant_user_id, row.org_id])).rowCount)
+      return tokenFailure("key_revoked", "The grant was revoked. Start a new login.", row.grant_id);
+    if (!(await db.query("SELECT 1 FROM org_memberships WHERE org_id=$1 AND user_id=$2", [row.org_id, row.grant_user_id])).rowCount)
+      return tokenFailure("membership_removed", "The user no longer belongs to the authorized organization.", row.grant_id);
+    await db.query("UPDATE mcp_oauth_device_codes SET consumed_at=now() WHERE device_code_hash=$1", [row.device_code_hash]);
+    return { ...await issueTokens(db, row.grant_id, audienceOf(row.resource, url)), scope: (row.grant_scopes as string[]).join(" ") };
+  });
+}
+
+/**
+ * RFC 8628 §3.1 device authorization request. Only first-party clients (the
+ * DocSlurp CLI) may use it: a dynamically registered client names itself, and
+ * a device code shown on a page the attacker controls is a phishing lure.
+ */
+mcpOAuthRoutes.post("/device_authorization", async (c) => {
+  const body = await c.req.parseBody();
+  const clientId = typeof body.client_id === "string" ? body.client_id : "";
+  const client = clientId ? (await appDbPool.query("SELECT * FROM mcp_oauth_clients WHERE id=$1", [clientId])).rows[0] : null;
+  if (!client || client.first_party !== true)
+    return c.json({ error: "invalid_client", error_description: "Device authorization is limited to first-party clients" }, 401);
+  const resource = typeof body.resource === "string" ? body.resource : mcpResource(c.req.url);
+  if (!allowedResources(c.req.url, client).includes(resource))
+    return c.json({ error: "invalid_target", error_description: `resource must be ${apiResource(c.req.url)} or ${mcpResource(c.req.url)}` }, 400);
+  let scopes: string[];
+  try {
+    scopes = parseScopes(typeof body.scope === "string" ? body.scope : null);
+  } catch {
+    return c.json({ error: "invalid_scope", error_description: `Supported scopes: ${MCP_SCOPES.join(" ")}` }, 400);
+  }
+  await cleanupExpiredOAuthRequests();
+  const deviceCode = secret(`${OAUTH_TOKEN_PREFIX[audienceOf(resource, c.req.url)]}d`);
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const userCode = generateUserCode();
+    try {
+      await appDbPool.query(`INSERT INTO mcp_oauth_device_codes(device_code_hash,user_code_hash,client_id,resource,scopes,interval_seconds,expires_at)
+        VALUES($1,$2,$3,$4,$5::jsonb,$6,now()+$7::int*interval '1 second')`,
+        [oauthHash(deviceCode), oauthHash(userCode.replace("-", "")), client.id, resource, JSON.stringify(scopes), DEVICE_POLL_INTERVAL_SECONDS, DEVICE_CODE_TTL_SECONDS]);
+    } catch (error) {
+      if ((error as { code?: string }).code === "23505") continue; // user code collision: draw again
+      throw error;
+    }
+    const verification = `${mcpOrigin(c.req.url)}/oauth/mcp/device`;
+    return c.json({
+      device_code: deviceCode, user_code: userCode,
+      verification_uri: verification, verification_uri_complete: `${verification}?user_code=${encodeURIComponent(userCode)}`,
+      expires_in: DEVICE_CODE_TTL_SECONDS, interval: DEVICE_POLL_INTERVAL_SECONDS,
+    });
+  }
+  return c.json({ error: "temporarily_unavailable" }, 503);
+});
+mcpOAuthRoutes.route("/device", deviceVerificationRoutes);
 mcpOAuthRoutes.post("/revoke", async (c) => {
   const body = await c.req.parseBody();
   if (typeof body.token === "string" && typeof body.client_id === "string")

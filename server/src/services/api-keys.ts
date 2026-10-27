@@ -460,6 +460,19 @@ export interface ValidatedKey {
   workspaceIds: string[];
   /** Per-key materialization caps; absent or `{}` adds no restriction. */
   materializationPolicy?: Partial<MaterializationPolicy>;
+  /**
+   * Set only for a REST-audience OAuth access token (`dscli_`, the DocSlurp
+   * CLI). Such a key is never a first-party app session and never a platform
+   * admin; `scopes` are already mapped from `grantedScopes`.
+   */
+  oauth?: {
+    grantId: string;
+    clientId: string;
+    clientName: string;
+    resource: string;
+    grantedScopes: string[];
+    expiresAt: string;
+  };
 }
 
 export async function validateApiKey(

@@ -38,6 +38,10 @@ export const capabilitiesRoutes = new Hono().post("/", zValidator("json", bodySc
     if (actor.apiKey.keyType !== "server") {
       return apiErrorResponse(c, 403, "forbidden", "Client keys cannot mint search capabilities", { category: "capability_forbidden" });
     }
+    // A 15-minute delegated OAuth token must not mint a credential that outlives it.
+    if (actor.apiKey.oauth) {
+      return apiErrorResponse(c, 403, "forbidden", "OAuth access tokens cannot mint search capabilities; use a server API key", { category: "capability_forbidden" });
+    }
     if (!actorHasAnyApiKeyScope(actor, ["search"])) {
       return apiErrorResponse(c, 403, "forbidden", "API key needs the search scope", { category: "capability_forbidden" });
     }

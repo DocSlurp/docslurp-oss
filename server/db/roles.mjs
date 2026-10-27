@@ -115,6 +115,8 @@ export const WORKER_DENIED_TABLES = Object.freeze({
   idempotency_cache: "API request replay cache",
   interactive_spend_holds: "API interactive spend admission",
   mcp_oauth_clients: "MCP OAuth credentials",
+  mcp_oauth_device_attempts: "MCP OAuth credentials",
+  mcp_oauth_device_codes: "MCP OAuth credentials",
   mcp_oauth_grants: "MCP OAuth credentials",
   mcp_oauth_requests: "MCP OAuth credentials",
   mcp_oauth_tokens: "MCP OAuth credentials",
