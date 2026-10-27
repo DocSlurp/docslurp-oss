@@ -12,6 +12,7 @@ import {
   resolveActorWorkspaceId,
 } from "../lib/request-actor.js";
 import { apiKeyAuth } from "../middleware/api-key-auth.js";
+import { createChatConcurrencyLimit } from "../middleware/chat-concurrency.js";
 import { assertCanSpend, isSpendBlockedError, type SpendBlockedError } from "../services/billing/spend-guard.js";
 import { upgradeLinkHeader, upgradeLinksFor } from "../lib/upgrade-links.js";
 import { chatWorkspace, workspaceChatDisabledBody } from "../services/workspace-chat.js";
@@ -130,6 +131,7 @@ const compatibleChatAuth: MiddlewareHandler = async (c, next) => {
 export const chatCompletionsRoutes = new Hono()
   .use("/models", compatibleChatAuth)
   .use("/chat/completions", compatibleChatAuth)
+  .use("/chat/completions", createChatConcurrencyLimit((c) => c.json(errorBody("Too many chat requests in progress for this key. Retry later.", "rate_limit_error", "rate_limit_exceeded"), 429)))
   .get("/models", async (c) => {
     const actor = getRequestActor(c);
     const workspaces = await listWorkspaces(actor.userId);

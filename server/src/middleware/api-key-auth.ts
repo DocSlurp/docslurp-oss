@@ -23,6 +23,8 @@ export const apiKeyAuth: MiddlewareHandler = async (c, next) => {
     referer: c.req.header("referer") ?? c.req.header("referrer")
   });
   if (!actor) {
+    // Repeated refusals from one IP look like key guessing: the IP limiter jails it.
+    c.set("apiKeyRejected", true);
     return middlewareErrorResponse(c, 403, "forbidden", "Invalid API key or rate limit exceeded");
   }
 

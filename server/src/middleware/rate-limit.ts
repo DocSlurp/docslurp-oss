@@ -39,8 +39,18 @@ import { apiKeySpendCents } from "../services/usage-attribution.js";
  * a `Link` header.
  */
 
+/** A rate-limit decision must never wait on a slow or unreachable Redis: fall back instead. */
+const REDIS_TIMEOUT_MS = 2_000;
+/** How long the limiter stays on the in-process fallback after a Redis failure before trying Redis again. */
+const BACKEND_RETRY_MS = 5_000;
 // Infer the concrete RESP version selected by redis instead of the generic factory.
-const createRateLimitRedisClient = (url: string) => createClient({ url });
+// No offline queue: while disconnected, commands fail at once (and fall back to
+// the in-process limiter) instead of queueing behind a reconnect loop.
+const createRateLimitRedisClient = (url: string) => createClient({
+  url,
+  disableOfflineQueue: true,
+  socket: { connectTimeout: REDIS_TIMEOUT_MS, reconnectStrategy: (retries: number) => Math.min(1_000 * 2 ** retries, 30_000) },
+});
 type RedisClient = ReturnType<typeof createRateLimitRedisClient>;
 
 type RateLimitIdentityMode = "ip" | "actor";
@@ -110,6 +120,8 @@ type PolicyState = {
 declare module "hono" {
   interface ContextVariableMap {
     rateLimitPolicies: PolicyState[];
+    /** Set when a presented API key was refused with 403 (search-compat adapters): counts as an auth failure. */
+    apiKeyRejected: boolean;
   }
 }
 
@@ -224,9 +236,48 @@ function parseScriptResult(result: unknown, counterCount: number): RateLimitCons
   return { blockedMs: 0, denied: denied - 1, counted: counted === 1, windows };
 }
 
+/** Default cap on in-process limiter entries (~200 bytes each, so roughly 40 MB at the cap). */
+export const MEMORY_STORE_DEFAULT_MAX_ENTRIES = 200_000;
+
+/**
+ * The per-process limiter. It is bounded: when it holds `maxEntries`, expired
+ * entries are swept and then the oldest-written entries are evicted (Map
+ * insertion order; every write re-inserts its key). Eviction can forget an
+ * idle counter early, never disable limiting, and is logged.
+ */
 class InMemorySlidingWindowStore implements RateLimitStore {
   private values = new Map<string, { value: number; expiresAt: number }>();
   private lastSweepAt = 0;
+  private evictionLogged = false;
+  private lastCapSweepAt = 0;
+
+  constructor(private readonly maxEntries = memoryStoreMaxEntries()) {}
+
+  get size(): number {
+    return this.values.size;
+  }
+
+  private write(key: string, entry: { value: number; expiresAt: number }, now: number): void {
+    this.values.delete(key);
+    if (this.values.size >= this.maxEntries) {
+      // A full sweep is O(entries): at most once a second, so a flood at the cap stays cheap.
+      if (now - this.lastCapSweepAt >= 1_000) {
+        this.lastCapSweepAt = now;
+        for (const [existing, value] of this.values) if (value.expiresAt <= now) this.values.delete(existing);
+      }
+      let evicted = 0;
+      for (const existing of this.values.keys()) {
+        if (this.values.size < this.maxEntries) break;
+        this.values.delete(existing);
+        evicted++;
+      }
+      if (evicted > 0 && !this.evictionLogged) {
+        this.evictionLogged = true;
+        console.warn(`[rate-limit] in-memory limiter reached ${this.maxEntries} entries; evicting the oldest counters (set API_RATE_LIMIT_MEMORY_MAX_ENTRIES or configure Redis)`);
+      }
+    }
+    this.values.set(key, entry);
+  }
 
   async consume(input: RateLimitConsumeInput): Promise<RateLimitConsumeResult> {
     const { now } = input;
@@ -250,11 +301,11 @@ class InMemorySlidingWindowStore implements RateLimitStore {
     if (counted) {
       input.counters.forEach((counter, index) => {
         const key = keys[index]!;
-        this.values.set(key, { value: this.read(key, now) + 1, expiresAt: now + counter.windowMs * 2 });
+        this.write(key, { value: this.read(key, now) + 1, expiresAt: now + counter.windowMs * 2 }, now);
       });
     }
     const penaltyMs = denied >= 0 ? input.counters[denied]?.penaltyMs ?? 0 : 0;
-    if (penaltyMs > 0) this.values.set(input.blockKey, { value: 1, expiresAt: now + penaltyMs });
+    if (penaltyMs > 0) this.write(input.blockKey, { value: 1, expiresAt: now + penaltyMs }, now);
     return { blockedMs: 0, denied, counted, windows };
   }
 
@@ -277,7 +328,13 @@ class InMemorySlidingWindowStore implements RateLimitStore {
   reset(): void {
     this.values.clear();
     this.lastSweepAt = 0;
+    this.evictionLogged = false;
   }
+}
+
+function memoryStoreMaxEntries(): number {
+  const parsed = Number(process.env.API_RATE_LIMIT_MEMORY_MAX_ENTRIES?.trim());
+  return Number.isInteger(parsed) && parsed >= 1_000 ? parsed : MEMORY_STORE_DEFAULT_MAX_ENTRIES;
 }
 
 /** Falls back to the in-process store, logging once, when the backend fails. */
@@ -288,14 +345,26 @@ abstract class FallbackStore implements RateLimitStore {
 
   protected abstract evaluate(keys: string[], args: string[]): Promise<unknown>;
 
+  /** After a failure, skip the backend until this time so an outage costs one timeout, not one per request. */
+  private retryBackendAt = 0;
+
   async consume(input: RateLimitConsumeInput): Promise<RateLimitConsumeResult> {
+    if (Date.now() < this.retryBackendAt) return await this.fallback.consume(input);
     try {
       const { keys, args } = scriptArgs(input);
-      return parseScriptResult(await this.evaluate(keys, args), input.counters.length);
+      const result = parseScriptResult(await this.evaluate(keys, args), input.counters.length);
+      if (this.fallbackWarningLogged) {
+        this.fallbackWarningLogged = false;
+        console.warn("[rate-limit] Redis backend recovered; shared limits restored");
+      }
+      return result;
     } catch (error) {
+      // Never fail open: a Redis outage degrades to the per-process limiter,
+      // which still enforces every limit (per instance).
+      this.retryBackendAt = Date.now() + BACKEND_RETRY_MS;
       if (!this.fallbackWarningLogged) {
         this.fallbackWarningLogged = true;
-        console.error("[rate-limit] Redis backend failed; falling back to in-memory limiter:", error);
+        console.error("[rate-limit] Redis backend failed; falling back to the per-process in-memory limiter (limits now apply per instance):", error instanceof Error ? error.message : String(error));
       }
       return await this.fallback.consume(input);
     }
@@ -303,6 +372,15 @@ abstract class FallbackStore implements RateLimitStore {
 
   async reset(): Promise<void> {
     await this.fallback.reset?.();
+  }
+}
+
+async function withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([promise, new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error(message)), ms); })]);
+  } finally {
+    if (timer) clearTimeout(timer);
   }
 }
 
@@ -320,6 +398,10 @@ class RedisSlidingWindowStore extends FallbackStore {
   }
 
   protected async evaluate(keys: string[], args: string[]): Promise<unknown> {
+    return await withTimeout(this.evaluateOnce(keys, args), REDIS_TIMEOUT_MS, "Redis rate-limit call timed out");
+  }
+
+  private async evaluateOnce(keys: string[], args: string[]): Promise<unknown> {
     const client = await this.connect();
     const tail = [String(keys.length), ...keys, ...args];
     try {
@@ -382,8 +464,8 @@ class UpstashRedisSlidingWindowStore extends FallbackStore {
 }
 
 /** Standalone stores, for tests and tools; the middleware picks one from env. */
-export function createMemoryRateLimitStore(): RateLimitStore {
-  return new InMemorySlidingWindowStore();
+export function createMemoryRateLimitStore(options: { maxEntries?: number } = {}): RateLimitStore & { readonly size: number } {
+  return new InMemorySlidingWindowStore(options.maxEntries);
 }
 
 export function createRedisRateLimitStore(url: string, fallback: RateLimitStore = createMemoryRateLimitStore()): RateLimitStore {
@@ -463,8 +545,53 @@ function getDefaultStore(): RateLimitStore {
   return defaultStore;
 }
 
+export type RateLimitBackend = "upstash-rest" | "redis" | "memory" | "disabled";
+
+/** Which limiter backend this process uses, from env names only (never values). */
+export function rateLimitBackend(): RateLimitBackend {
+  if (!rateLimitEnabled()) return "disabled";
+  const restUrl = process.env.API_RATE_LIMIT_REDIS_REST_URL?.trim() || process.env.UPSTASH_REDIS_REST_URL?.trim();
+  const restToken = process.env.API_RATE_LIMIT_REDIS_REST_TOKEN?.trim() || process.env.UPSTASH_REDIS_REST_TOKEN?.trim();
+  if (restUrl && restToken) return "upstash-rest";
+  if (process.env.API_RATE_LIMIT_REDIS_URL?.trim() || process.env.REDIS_URL?.trim()) return "redis";
+  return "memory";
+}
+
+/**
+ * Startup log for the limiter backend. The in-memory fallback is loud: its
+ * limits apply per instance, so N instances allow N times each limit, and a
+ * deploy resets them. Disabled limiting is an error in production.
+ */
+export function logRateLimitBackendAtStartup(log: Pick<Console, "log" | "warn" | "error"> = console): RateLimitBackend {
+  const backend = rateLimitBackend();
+  if (backend === "disabled") {
+    (process.env.NODE_ENV === "production" ? log.error : log.warn)("[rate-limit] backend=disabled: API_RATE_LIMIT_ENABLED turns off every API rate limit");
+  } else if (backend === "memory") {
+    log.warn(`[rate-limit] backend=memory: Redis is not configured, so API rate limits are per-process (each instance enforces every limit on its own; N instances allow N times the limit, and restarts reset counters). Bounded at ${memoryStoreMaxEntries()} entries. Set API_RATE_LIMIT_REDIS_URL or API_RATE_LIMIT_REDIS_REST_URL/API_RATE_LIMIT_REDIS_REST_TOKEN for shared limits.`);
+  } else {
+    log.log(`[rate-limit] backend=${backend} (shared limits; falls back to the per-process limiter on Redis errors)`);
+  }
+  return backend;
+}
+
 function safeIdentityPart(value: string): string {
   return value.replace(/[^a-zA-Z0-9:._-]/g, "_");
+}
+
+/**
+ * The address a per-IP limit counts. IPv6 clients usually control a whole /64,
+ * so an IPv6 address counts as its /64 prefix; rotating addresses inside it
+ * does not escape the limit. IPv4 (and IPv4-mapped IPv6) count as the address.
+ */
+export function rateLimitAddress(ip: string): string {
+  const value = ip.trim().toLowerCase().replace(/^\[|\]$/g, "").replace(/%.*$/, "");
+  if (!value.includes(":") || value.includes(".")) return value;
+  const [head = "", tail] = value.split("::", 2);
+  const left = head ? head.split(":") : [];
+  const right = tail === undefined ? [] : tail ? tail.split(":") : [];
+  const groups = tail === undefined ? left : [...left, ...Array(Math.max(0, 8 - left.length - right.length)).fill("0"), ...right];
+  if (groups.length !== 8 || groups.some((group) => !/^[0-9a-f]{1,4}$/.test(group))) return value;
+  return `${groups.slice(0, 4).map((group) => group.replace(/^0+(?=.)/, "")).join(":")}::/64`;
 }
 
 function requestIdentity(c: Context, identity: RateLimitIdentityMode): string | null {
@@ -474,7 +601,22 @@ function requestIdentity(c: Context, identity: RateLimitIdentityMode): string | 
     if (actor?.type === "session") return `user:${actor.userId}`;
     return null;
   }
-  return `ip:${requestIp(c) ?? "unknown"}`;
+  const ip = requestIp(c);
+  return `ip:${ip ? rateLimitAddress(ip) : "unknown"}`;
+}
+
+/**
+ * Per-visitor limits inside one browser (client) key, keyed by key and IP: a
+ * publishable key is shared by every visitor of the customer's site, so one
+ * visitor must not be able to use up the whole key's budget. 0 disables a
+ * category (`API_RATE_LIMIT_CLIENT_VISITOR_<CATEGORY>_MAX`).
+ */
+const CLIENT_VISITOR_DEFAULTS: Record<RateLimitCategory, number> = {
+  "chat-ai": 20, search: 120, upload: 30, read: 300, write: 60, webhook: 60,
+};
+
+function clientVisitorLimit(category: RateLimitCategory): number {
+  return readGuardInt(`API_RATE_LIMIT_CLIENT_VISITOR_${envName(category)}_MAX`, CLIENT_VISITOR_DEFAULTS[category]);
 }
 
 export function classifyRateLimitCategory(method: string, path: string): RateLimitCategory {
@@ -495,7 +637,8 @@ export function classifyRateLimitCategory(method: string, path: string): RateLim
     normalizedPath.startsWith("/v1/search")
     || normalizedPath.startsWith("/v1/web/")
     || normalizedPath.startsWith("/v1/suggest")
-    || normalizedPath.startsWith("/compat/algolia")
+    // Every search-compat adapter (Algolia, Meilisearch, Typesense, Pagefind) is a search.
+    || normalizedPath === "/compat" || normalizedPath.startsWith("/compat/")
     || normalizedPath.startsWith("/v1/mcp")
     || /^\/v1\/workspaces\/[^/]+\/search(?:\/|$)/.test(normalizedPath)
   ) {
@@ -633,7 +776,8 @@ function blockedResponse(c: Context, blockedMs: number): Response {
   });
 }
 
-type NamedCounter = RateLimitCounter & { name: string };
+/** `scope` splits one policy into sub-buckets (for example per visitor IP) without putting it in the public policy name. */
+type NamedCounter = RateLimitCounter & { name: string; scope?: string };
 
 async function consumeCounters(
   c: Context,
@@ -641,7 +785,10 @@ async function consumeCounters(
 ): Promise<Response | null> {
   // The identity is a hash tag, so every key of one call lives on one Redis Cluster slot.
   const base = `${args.keyPrefix}:{${safeIdentityPart(args.identity)}}`;
-  const counters = args.counters.map((counter) => ({ ...counter, key: `${base}:${counter.name}:${counter.windowMs}` }));
+  const counters = args.counters.map((counter) => ({
+    ...counter,
+    key: `${base}:${counter.name}${counter.scope ? `:${safeIdentityPart(counter.scope)}` : ""}:${counter.windowMs}`,
+  }));
   const result = await args.store.consume({ blockKey: `${base}:block`, counters, now: args.now, countDenied: args.countDenied });
   if (result.blockedMs > 0) return blockedResponse(c, result.blockedMs);
 
@@ -701,6 +848,12 @@ async function checkRateLimit(c: Context, options: RateLimitOptions): Promise<Re
     for (const rule of apiKey.rateLimits ?? []) {
       if (rule.metric !== "requests") continue;
       counters.push({ name: apiKeyRateLimitPolicyName(rule), key: "", limit: rule.limit, windowMs: rule.windowSeconds * 1000 });
+    }
+    // Browser keys: one visitor (IP) gets only a share of the key's budget.
+    const ip = requestIp(c);
+    const visitorLimit = apiKey.keyType !== "server" ? clientVisitorLimit(category) : 0;
+    if (ip && visitorLimit > 0) {
+      counters.push({ name: `client-visitor-${category}`, scope: rateLimitAddress(ip), key: "", limit: visitorLimit, windowMs: DEFAULT_WINDOW_MS });
     }
     const quota = await checkApiKeyQuotas(c, apiKey, category, now);
     if (quota) return quota;
@@ -826,7 +979,8 @@ export function createApiRateLimit(options: RateLimitOptions = {}): MiddlewareHa
     if (limited) return limited;
     await next();
 
-    if ((options.identity ?? "ip") === "ip" && c.res.status === 401 && presentsApiCredential(c)
+    const authFailed = c.res.status === 401 || (c.res.status === 403 && c.get("apiKeyRejected") === true);
+    if ((options.identity ?? "ip") === "ip" && authFailed && presentsApiCredential(c)
       && options.enabled !== false && rateLimitEnabled()) {
       try {
         await recordAuthFailure(c, options);
