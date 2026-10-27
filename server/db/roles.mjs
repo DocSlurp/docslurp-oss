@@ -113,6 +113,7 @@ export const WORKER_DENIED_TABLES = Object.freeze({
   credit_grants: "billing: purchased and promotional credit",
   document_corrections: "API-managed review corrections",
   document_tags: "API-managed tags",
+  feedback_reports: "support reports filed by users (API only)",
   idempotency_cache: "API request replay cache",
   interactive_spend_holds: "API interactive spend admission",
   mcp_oauth_clients: "MCP OAuth credentials",

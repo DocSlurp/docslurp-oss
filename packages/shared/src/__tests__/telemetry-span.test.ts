@@ -56,6 +56,19 @@ it("copies only allowlisted eval.* baggage, capped at 128 characters, and expose
   expect(seen.traceparent).toMatch(/^00-0af7651916cd43dd8448eb211c80319c-[0-9a-f]{16}-01$/);
 });
 
+it("starts an untrusted caller's request as a new root that links to the inbound span and keeps baggage", async () => {
+  const { evalBaggageAttributes, activeTraceparent, withHttpSpan } = await import("../observability.js");
+  const inbound = "0af7651916cd43dd8448eb211c80319d";
+  const seen = await withHttpSpan({ method: "GET", route: "/v1/untrusted", status: () => 200, trustInboundParent: false, headers: {
+    traceparent: `00-${inbound}-b7ad6b7169203331-01`, tracestate: "", baggage: "eval.run_id=run-2",
+  } }, async () => ({ baggage: evalBaggageAttributes(), traceparent: activeTraceparent() }));
+  expect(seen.baggage).toEqual({ "eval.run_id": "run-2" });
+  expect(seen.traceparent).not.toContain(inbound);
+  const span = exporter.getFinishedSpans().find(item => item.name === "GET /v1/untrusted")!;
+  expect(span.parentSpanContext).toBeUndefined();
+  expect(span.links.map(link => link.context.traceId)).toEqual([inbound]);
+});
+
 it("puts the request's identity and route ids on the HTTP span, and the failure's message", async () => {
   const { withHttpSpan } = await import("../observability.js");
   await expect(withHttpSpan({ method: "GET", route: "/v1/workspaces/:workspaceId", status: () => 200, headers: { traceparent: "", tracestate: "", baggage: "" },
