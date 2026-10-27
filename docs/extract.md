@@ -62,7 +62,7 @@ Follow progress with the run (`GET /v1/runs/{runId}/progress`) or the extract:
 | `GET /v1/extracts` | `ingest` or `artifacts` | Recent extracts you can see |
 | `GET /v1/extracts/{id}` | `ingest` or `artifacts` | Status, retention and download state; `410 extract_expired` after expiry |
 | `GET /v1/extracts/{id}/download` | `artifacts`, server keys | `302` to a two-minute signed URL for the zip |
-| `DELETE /v1/extracts/{id}` | `ingest` | Expire now; the next sweep deletes everything |
+| `DELETE /v1/extracts/{id}` | `ingest` | Expire now (the requester only); the next sweep deletes everything |
 
 `status` moves from `pending` (no run yet) to `processing`, then `completed` or `failed`, then `expired`. `download.status` moves from `pending` to `preparing`, then `ready` (`download.url` set) or `failed`, then `expired`.
 

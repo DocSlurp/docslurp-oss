@@ -370,8 +370,11 @@ export const createExtractsRoutes = (ports: WorkspaceIntakePorts = workspaceInta
     }
   })
   .delete("/:extractId", async (c) => {
-    const row = await getExtractForActor(c.req.param("extractId"), getRequestActor(c));
+    const actor = getRequestActor(c);
+    const row = await getExtractForActor(c.req.param("extractId"), actor);
     if (!row) return apiErrorResponse(c, 404, "extract_not_found", "Extract not found");
+    // Readers of the workspace may see an extract; only its requester may delete it early.
+    if (row.user_id !== actor.userId) return apiErrorResponse(c, 403, "forbidden", "Only the requester can delete this extract");
     await expireExtractNow(row);
     return c.json({ extract: describeExtract({ ...row, expired: true }) }, 202);
   }));

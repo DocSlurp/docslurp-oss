@@ -218,6 +218,21 @@ describe("API key scope on /v1/extracts", () => {
   });
 });
 
+describe("deleting an extract", () => {
+  it("lets only the requester expire it early", async () => {
+    const { app } = setup();
+    mocks.extractRow = { id: "ext_1", org_id: "org-1", workspace_id: "ws-1", user_id: "someone-else", expired: false };
+    expect((await app.request("/extracts/ext_1", { method: "DELETE" })).status).toBe(403);
+    expect(mocks.expire).not.toHaveBeenCalled();
+    expect((await setup({ scopes: ["artifacts"] }).app.request("/extracts/ext_1", { method: "DELETE" })).status).toBe(403);
+    mocks.extractRow = { ...mocks.extractRow, user_id: "user-1", state: "active", retention_hours: 48, paid_retention: false, expires_at: new Date().toISOString(), created_at: new Date().toISOString(), notify_email: true, download_content: "markdown", run_id: null, pages: null, stored_bytes: null, retention_credits: null, completed_at: null, deleted_at: null, export_skipped: false };
+    const deleted = await app.request("/extracts/ext_1", { method: "DELETE" });
+    expect(deleted.status).toBe(202);
+    expect(mocks.expire).toHaveBeenCalledTimes(1);
+    expect((await deleted.json()).extract.status).toBe("expired");
+  });
+});
+
 describe("reading an extract", () => {
   it("is 404 for another tenant, 410 once expired, and redirects to a short-lived signed URL with no-store", async () => {
     const { app } = setup();
