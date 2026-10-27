@@ -69,6 +69,28 @@ measurement followed the rejection. The user extended the skill's attempt limit 
 on Sol after Terra failed at capacity before starting. Independent visual validation
 must precede any expansion; the first three attempts remain rejected.
 
+## Attempt 4 measured handoff
+
+The Sol Describer measured all 30 authorized development pages, including rendered
+outlined text and screenshot regions. The clean contract distinguishes the three
+matched prototypes from 15 enriched class/layout contracts, with block geometry,
+text budgets, table/formula semantics, complete producer paths, strict provenance
+schemas and all 90 family assignments. This is a design contract, not an earned
+quality score. Raw measurements and overlap history remain coordinator-only.
+
+The isolated Builder handoff is stored outside the repository at
+`mixed-pdf-fools-gold-handoffs/a4/`. Its exact file hashes are:
+
+- `spec-a4.md`: `dfa72c7c2afe2f6d3b8374d96c3153a9ef4a91ebd93f880a1036750c6f8a4c42`
+- `spec-a4.json`: `befb3b2dc772644da912dbe6ffd04e2757ce986eb7c13e7449d5e3cfcd2b0c6c`
+
+All six final skill overlap checks passed with zero matching eight-word sequences,
+maximum shared run three words and zero entity hits. Earlier ordinary-word flags
+were preserved, rephrased in the handoff and rechecked. The Describer reports 23
+schema behavior fixtures and 19 contract fixtures passing. A fresh source-blind
+Sol Builder is implementing the contract and may generate only the three training
+prototypes before independent review. No full expansion or measurements are accepted.
+
 Before measuring the new corpus, the sealer must validate realized decoys against
 immutable authoring plans. Current sealing deliberately rejects the a2-r5 schema's
 plan/exclusion differences; no measurement has bypassed this check.
