@@ -1,0 +1,16 @@
+# Packaging for a dedicated VM guest; a container is not the security boundary.
+# Build with a minimal context prepared by scripts/document-vm/prepare.py.
+FROM python:3.12-slim@sha256:a6e34c598f2467ed0e9a8d349809fcd8b5c603269512df273a0bb1784edc11b1
+ENV PYTHONDONTWRITEBYTECODE=1 PIP_DISABLE_PIP_VERSION_CHECK=1 TMPDIR=/job HOME=/job
+RUN mkdir -p /job && apt-get update && apt-get install -y --no-install-recommends webp \
+    && rm -rf /var/lib/apt/lists/*
+COPY requirements.lock /opt/docslurp/requirements.lock
+COPY wheels /wheels
+RUN python3 -m pip install --no-cache-dir --no-index --find-links=/wheels --require-hashes -r /opt/docslurp/requirements.lock \
+    && rm -rf /wheels
+COPY runtime /opt/docslurp/layout/runtime
+COPY assets /opt/docslurp/layout/assets
+COPY seal.py /opt/docslurp/seal.py
+RUN python3 /opt/docslurp/seal.py && rm /opt/docslurp/seal.py
+WORKDIR /job
+CMD ["python3", "-P", "/opt/docslurp/layout/runtime/vm_entry.py"]

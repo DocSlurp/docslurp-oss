@@ -1,0 +1,70 @@
+[
+    {
+        "Id": "sha256:283dc50fc21896aa674cd0d5d733e05aef93b711c3696d9677bf014611627af7",
+        "RepoTags": [
+            "docslurp-document-vm:local"
+        ],
+        "RepoDigests": [
+            "docslurp-document-vm@sha256:283dc50fc21896aa674cd0d5d733e05aef93b711c3696d9677bf014611627af7"
+        ],
+        "Comment": "buildkit.dockerfile.v0",
+        "Created": "2026-10-27T09:33:49.014289181-06:00",
+        "Config": {
+            "Env": [
+                "PATH=/usr/local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+                "LANG=C.UTF-8",
+                "GPG_KEY=7169605F62C751356D054A26A821E680E5FA6305",
+                "PYTHON_VERSION=3.12.15",
+                "PYTHON_SHA256=c2c4321961fab0fb999d66e0cecf521c2ab3994c7992873ea99e306c1094fd5a",
+                "PYTHONDONTWRITEBYTECODE=1",
+                "PIP_DISABLE_PIP_VERSION_CHECK=1",
+                "TMPDIR=/job",
+                "HOME=/job"
+            ],
+            "Cmd": [
+                "python3",
+                "-P",
+                "/opt/docslurp/layout/runtime/vm_entry.py"
+            ],
+            "WorkingDir": "/job",
+            "ArgsEscaped": true
+        },
+        "Architecture": "amd64",
+        "Os": "linux",
+        "Size": 350868988,
+        "RootFS": {
+            "Type": "layers",
+            "Layers": [
+                "sha256:15f1c8eb1ab18eae260c7fb6296434cbe1ff0e1e30fd814ae92a80dd54005e62",
+                "sha256:e1fa2746ad6d51e7de9171dfcbb1fe93d01d51c5d8d3623e0c3b223076dc5d23",
+                "sha256:b361fa3b97940ee89a1aab8fde1027e47ab2c2e700ca2f8d5988ad2c64386e5c",
+                "sha256:dca2a125b4903477bcb42084172cfc98865299810620ffd617bf6e12dd83d89f",
+                "sha256:bd22fc2ae0ec100e6d2f2a93791eaae4a06e633560f096734282b3f7130b6647",
+                "sha256:1f68aa31866617113b7c41506911e19bc554175f449f75e4508cc408c1abdb66",
+                "sha256:ca3ab3fbd58dae01fc8326790db5dcf69f606d5af48a4b50363be1c702173d15",
+                "sha256:6f8d6b2167ef47d6532a01bdb900a557f7df1372f31be5b1fd34b82fc90183a4",
+                "sha256:938ea26182015f2152c36563928290c926c1f433a4e652b10ab70022233c372b",
+                "sha256:930f056711cc4238c23fa0d5297aee512c22669893969010ee1c2c2c40d62998",
+                "sha256:3fb9f80412fbfe29409b594738b8fed9c869da83f5b4ad40f9f9ff2e86ea10bd",
+                "sha256:f1c49e31bd01824cd29f1800086b3281e2687a5403f0dbe7d9046d1316fcc8fe",
+                "sha256:5f70bf18a086007016e948b04aed3b82103a36bea41755b6cddfaf10ace3c6ef"
+            ]
+        },
+        "Metadata": {
+            "LastTagTime": "2026-10-27T15:33:49.597948104Z"
+        },
+        "Descriptor": {
+            "mediaType": "application/vnd.oci.image.index.v1+json",
+            "digest": "sha256:283dc50fc21896aa674cd0d5d733e05aef93b711c3696d9677bf014611627af7",
+            "size": 856
+        },
+        "Identity": {
+            "Build": [
+                {
+                    "Ref": "nfjyspu33784n0w9vmtrd4wde",
+                    "CreatedAt": "2026-10-27T09:33:49.802407714-06:00"
+                }
+            ]
+        }
+    }
+]

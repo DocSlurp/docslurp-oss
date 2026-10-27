@@ -1,0 +1,6 @@
+Traceback (most recent call last):
+  File "/opt/docslurp/layout/runtime/vm_entry.py", line 70, in <module>
+    main(json.loads(sys.argv[1]))
+  File "/opt/docslurp/layout/runtime/vm_entry.py", line 27, in main
+    raise ValueError('Missing required request identity: ' + key)
+ValueError: Missing required request identity: revision

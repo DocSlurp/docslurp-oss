@@ -1,0 +1,7 @@
+Traceback (most recent call last):
+  File "/opt/docslurp/layout/runtime/vm_entry.py", line 70, in <module>
+    main(json.loads(sys.argv[1]))
+  File "/opt/docslurp/layout/runtime/vm_entry.py", line 35, in main
+    if manifest.get(key) != request[key]: raise ValueError('Model manifest identity mismatch: ' + key)
+                                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+ValueError: Model manifest identity mismatch: artifactSha256

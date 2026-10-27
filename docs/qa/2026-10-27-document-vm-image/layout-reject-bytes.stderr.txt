@@ -1,0 +1,7 @@
+Traceback (most recent call last):
+  File "/opt/docslurp/layout/runtime/vm_entry.py", line 70, in <module>
+    main(json.loads(sys.argv[1]))
+  File "/opt/docslurp/layout/runtime/vm_entry.py", line 41, in main
+    if input_path.stat().st_size > 25 * 1024 * 1024: raise ValueError('Oversized layout input')
+                                                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+ValueError: Oversized layout input

@@ -1,0 +1,8 @@
+....../home/dan/.t3/worktrees/docslurp-app/t3-3b555ca8/core/worker/src/layout/runtime/adapters.py:166: ResourceWarning: unclosed file <_io.BufferedReader name='/home/dan/tmp/agents/layout-entry-contract-a7no4tdv/assets/weights.bin'>
+  'graph_sha256':hashlib.sha256(open(onnx_path,'rb').read()).hexdigest(),
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+..
+----------------------------------------------------------------------
+Ran 8 tests in 0.150s
+
+OK

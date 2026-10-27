@@ -13,16 +13,19 @@ import subprocess
 import shutil
 import sys
 import time
+import re
+import importlib.metadata
 
 
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--model-dir',type=Path,required=True)
     parser.add_argument('--output',type=Path,required=True)
-    parser.add_argument('--revision',default='main')
+    parser.add_argument('--revision',required=True,help='Immutable 40-character official HF commit')
     parser.add_argument('--download',action='store_true',help='Explicitly allow downloading official upstream weights')
     args=parser.parse_args()
     revision=args.revision
+    if not re.fullmatch('[0-9a-f]{40}', revision): raise ValueError('Immutable HF source revision required')
     if args.download:
         from huggingface_hub import HfApi,snapshot_download
         revision=HfApi().model_info('PaddlePaddle/PP-DocLayout-S',revision=revision).sha
@@ -36,11 +39,13 @@ def main():
     executable=shutil.which('paddle2onnx') or str(Path(sys.executable).parent/'paddle2onnx')
     command=[executable,'--model_dir',str(args.model_dir),'--model_filename',source.name,
              '--params_filename','inference.pdiparams','--save_file',str(args.output),'--opset_version','17',
-             '--enable_onnx_checker','True']
+             '--enable_onnx_checker','True','--enable_auto_update_opset','False','--optimize_tool','None']
     started=time.time(); subprocess.run(command,check=True)
-    hashes={p.name:hashlib.sha256(p.read_bytes()).hexdigest() for p in args.model_dir.glob('inference.*')}
+    hashes={p.name:hashlib.sha256(p.read_bytes()).hexdigest() for p in args.model_dir.iterdir() if p.is_file()}
     metadata={'source':'PaddlePaddle/PP-DocLayout-S','source_revision':revision,'license':'Apache-2.0',
               'source_files_sha256':hashes,'command':command,'export_seconds':time.time()-started,
+              'exporter_sha256':hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+              'python':sys.version,'export_packages':{d.metadata['Name']:d.version for d in importlib.metadata.distributions()},
               'graph_sha256':hashlib.sha256(args.output.read_bytes()).hexdigest()}
     args.output.with_suffix('.provenance.json').write_text(json.dumps(metadata,indent=2)+'\n')
     print(json.dumps(metadata))

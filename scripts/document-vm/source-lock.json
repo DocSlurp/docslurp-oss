@@ -1,0 +1,14 @@
+{
+  "graph_sha256": "33688dbee1c23e34b81777e97cb428eb40f24b242c02b5f623484959e830aec8",
+  "license": "Apache-2.0",
+  "license_text_sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+  "source": "PaddlePaddle/PP-DocLayout-S",
+  "source_files_sha256": {
+    "README.md": "d8d4f20e0d2c2e091f87adbf62b99ccbcd5230ef2239ee09dfc3056b0e0999f2",
+    "config.json": "45f5757daf01694c4adba0eba7ff2854caf011f02c91bdbd2ef6eb06d7a0f488",
+    "inference.json": "ac09e931895d4c442e5379ab3b7e9b583baf288e816ab7675ca519da9eb2a9d7",
+    "inference.pdiparams": "491c3382d84ca04d2033afbee0c105942ed82fea392bb4a19170646adebe088a",
+    "inference.yml": "6f690098c438214c67822239a568f0bc2bbe97a8f02fba93e492d4f2c47523c3"
+  },
+  "source_revision": "8ac289e66575bb9bba6e15c53719d8b15cc9b3b2"
+}

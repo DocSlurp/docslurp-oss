@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 2,
+  "mediaType": "application/vnd.oci.image.index.v1+json",
+  "manifests": [
+    {
+      "mediaType": "application/vnd.oci.image.index.v1+json",
+      "digest": "sha256:fbbdd7f307ff8ccf49c3fd74e7fc448b5c4eda8878bfb1accf0920669b39b3ee",
+      "size": 857,
+      "annotations": {
+        "org.opencontainers.image.created": "2026-10-27T15:34:11Z"
+      }
+    }
+  ]
+}
