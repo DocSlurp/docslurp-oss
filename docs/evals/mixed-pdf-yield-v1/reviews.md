@@ -632,3 +632,33 @@ Builder separately packages the gallery. All read unchanged frozen candidate
 artifacts and write separate reports. Packaging reverified protected round-1 and
 round-2 hashes without re-export or producer edits. No round 3 or bulk work is
 authorized by this checkpoint.
+
+### Parallel round-2 review and round-3 corrections
+
+Three independent lanes read all six round-2 previews. Visual QA confirmed the
+table fix and found only two cosmetic composition/illustration issues. Technical
+QA independently matched 142 cell readings and found one substantive omission:
+the E3 residual subtraction order was defined in JSON but absent from the page.
+Integrity QA verified frozen inputs, PDF receipt hashes, native tables/spans and
+glyph populations, while identifying missing export-time ODT binding and the
+unexplained raw Width value. E3 order changes reverse no intersecting ink on these
+previews; that limited result does not discharge full multipage controls.
+
+The visual report's pre-trim mean of 85.625 mK is a reviewer calculation error,
+not a candidate error. The frozen array sums to 690 mK; its mean is 86.25 mK, as
+the other two reviews and coordinator recomputation confirm. Original reports
+remain preserved with this reconciliation.
+
+Round 3 is limited to the six previews and explicitly fixes visible residual
+definition, ODT-to-PDF binding and the generic illustration. Separate parallel
+helpers delivered export-binding code (22 mocked tests), a text-free logger/probe
+illustration and Width instrumentation/controls (three tests). Version-matched
+upstream source now explains the Width reference representation; see writer-width.md.
+All raw mismatches remain retained and actual geometry still requires independent
+proof. No passing scalar persistence assertion is invented.
+
+Future scaling proposals are prepared separately: ten-page Writer interfaces have
+ten mock tests, and individual transforms have nine small control groups. Actual
+UNO multipage and successive-transform composition validation run in separate
+lanes, without candidate exports or bulk-corpus authorization. These mechanisms
+do not grant complete producer-pair, transform, fixture or routing acceptance.
