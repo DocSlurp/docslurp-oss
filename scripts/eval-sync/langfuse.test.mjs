@@ -52,7 +52,7 @@ import { join } from "node:path";
 import { assertTuningReadable, datasetNameFor, isHeldoutSplit } from "./langfuse.mjs";
 import { runSync } from "./sync.mjs";
 import { desiredScoreConfigs, syncScoreConfigs } from "./score-configs.mjs";
-import { otlpPayload, prepareRun, syncRun } from "./runs.mjs";
+import { otlpPayload, prepareRun, scoreId, syncRun } from "./runs.mjs";
 
 /** In-memory stand-in for the subset of the Langfuse public API the sync uses. */
 function fakeLangfuse({ failOn = null } = {}) {
@@ -76,9 +76,11 @@ function fakeLangfuse({ failOn = null } = {}) {
     if (route === "/experiment-items") {
       const attrs = (s) => Object.fromEntries(s.attributes.map((a) => [a.key, Object.values(a.value)[0]]));
       const rows = [...state.spans.values()].map(attrs).filter((a) => a["langfuse.experiment.id"] === params.get("experimentId")).map((a) => ({
+        id: a["langfuse.experiment.item.root_observation_id"],
+        traceId: state.spans.get(a["langfuse.experiment.item.root_observation_id"])?.traceId,
         experimentItemId: a["langfuse.experiment.item.id"],
         experimentItemMetadata: { outputSha256: a["langfuse.experiment.item.metadata.outputSha256"] },
-        scores: [...state.scores.values()].filter((s) => s.observationId === a["langfuse.experiment.item.root_observation_id"]).map((s) => ({ name: s.name })),
+        scores: [...state.scores.values()].filter((s) => s.observationId === a["langfuse.experiment.item.root_observation_id"]).map((s) => structuredClone(s)),
       }));
       return { data: rows, meta: {} };
     }
@@ -319,4 +321,58 @@ test("tolerant readback handles digit-boundary rounding", async () => {
   assert.ok(sameJson({ x: [40.671827588762554] }, { x: [40.67182758876255] }));
   assert.ok(!sameJson({ x: [40.67] }, { x: [40.68] }));
   assert.ok(!sameJson({ x: 1 }, { x: 1, y: 2 }));
+});
+
+async function scoredRunFixture() {
+  const { api, state } = fakeLangfuse();
+  const name = "scores/development";
+  const items = buildRecordItems({ name, split: "development", records: [{ id: "a", split: "development", input: {}, metadata: {} }], commit: "c" });
+  await syncDataset(api, { name, split: "development", items, sourceHashes: {}, commit: "c" });
+  await syncScoreConfigs(api, desiredScoreConfigs(registry()).configs);
+  const run = prepareRun({ schema: "docslurp-eval-run@v1", experiment: { name: "score-readback" }, dataset: { name, split: "development" },
+    startedAt: "2026-10-26T10:00:00Z", endedAt: "2026-10-26T10:01:00Z", timing: "scoring-window",
+    items: [{ caseId: "a", output: "answer", scores: { "judge-v3.5.contentTokenF1": 0.9, "judge-v3.5.pass": true } }] }, { manifestSha256: "m" });
+  await syncRun(api, run);
+  return { api, state, run };
+}
+
+for (const [field, wrong] of Object.entries({ value: 0.1, id: "unrelated-score", configId: "wrong-config", observationId: "wrong-observation", traceId: "wrong-trace" })) {
+  test(`score ${field} mismatch is repaired and never verifies if readback remains wrong`, async () => {
+    const { api, state, run } = await scoredRunFixture();
+    const original = [...state.scores.values()][0];
+    state.scores.delete(original.id);
+    state.scores.set(original.id, { ...original, [field]: wrong });
+    const repaired = await syncRun(api, run, { timeoutMs: -1 });
+    assert.equal(repaired.scoresWritten, 1);
+    assert.equal(repaired.readbackVerified, true);
+    const corrupt = async (path, body, opts) => {
+      const out = await api(path, body, opts);
+      if (path.startsWith("/experiment-items?")) {
+        // Keep the matching name present, even when its association is wrong.
+        out.data[0].scores = [{ ...original, [field]: wrong }, ...out.data[0].scores.filter(s => s.name !== original.name)];
+      }
+      return out;
+    };
+    await assert.rejects(syncRun(corrupt, run, { timeoutMs: -1 }), /readback incomplete/);
+  });
+}
+
+test("score readback accepts bounded rounding and V3 boolean/subject identities, with zero repeat writes", async () => {
+  const { api, state, run } = await scoredRunFixture();
+  const v3 = async (path, body, opts) => {
+    const out = await api(path, body, opts);
+    if (path.startsWith("/experiment-items?")) for (const row of out.data) row.scores = row.scores.map(s => ({
+      id: s.id, name: s.name, configId: s.configId,
+      value: s.name.endsWith(".pass") ? Boolean(s.value) : s.value + 1e-14,
+      dataType: s.name.endsWith(".pass") ? "BOOLEAN" : "NUMERIC",
+      subject: { kind: "observation", id: s.observationId, traceId: s.traceId },
+    }));
+    return out;
+  };
+  const writes = state.writes.length;
+  const again = await syncRun(v3, run);
+  assert.equal(again.scoresWritten, 0);
+  assert.equal(again.itemsWritten, 0);
+  assert.equal(state.writes.length, writes);
+  assert.equal([...state.scores.values()][0].id, scoreId(run.items[0], run.items[0].scores[0].name));
 });

@@ -6,7 +6,7 @@
 // https://langfuse.com/integrations/native/opentelemetry/experiments
 // https://langfuse.com/faq/all/deprecated-api-migration
 import { readFile } from "node:fs/promises";
-import { assertSplitName, encodeUnsafe, hash, itemId, listDatasetItems, stableJson } from "./langfuse.mjs";
+import { assertSplitName, encodeUnsafe, hash, itemId, listDatasetItems, sameJson, stableJson } from "./langfuse.mjs";
 
 export const RUN_SCHEMA = "docslurp-eval-run@v1";
 const iso = (value, label) => { const ms = Date.parse(value); if (!Number.isFinite(ms)) throw new Error(`Run ${label} must be an ISO timestamp from the actual run`); return ms; };
@@ -33,7 +33,7 @@ export function prepareRun(run, { manifestSha256 }) {
     const traceHash = hash(`${experimentId}\0${item.caseId}`);
     const scores = Object.entries(item.scores ?? {}).filter(([, value]) => value !== null && value !== undefined);
     if (scores.length > 50) throw new Error(`Item ${item.caseId} has more than 50 scores; readback is bounded to 50 per item`);
-    for (const [name, value] of scores) if (typeof value !== "number" && typeof value !== "boolean") throw new Error(`Score ${name} for ${item.caseId} must be numeric or boolean`);
+    for (const [name, value] of scores) if ((typeof value !== "number" && typeof value !== "boolean") || (typeof value === "number" && !Number.isFinite(value))) throw new Error(`Score ${name} for ${item.caseId} must be numeric or boolean`);
     return {
       caseId: item.caseId,
       datasetItemId: itemId(run.dataset.name, item.caseId),
@@ -94,7 +94,27 @@ async function listExperimentItems(api, prepared) {
   return out;
 }
 const remoteOutputSha = (row) => row?.experimentItemMetadata?.outputSha256 ?? null;
-const remoteScoreNames = (row) => new Set((row?.scores ?? []).map((score) => score.name));
+// API shapes: https://github.com/langfuse/langfuse/blob/main/fern/apis/server/definition/experiments.yml
+// and scores.yml (ExperimentItem + ScoreV3).
+// Both item readback and skip decisions require the exact observation identity.
+const matchesItem = (row, item) => row?.id === item.spanId && row?.traceId === item.traceId && remoteOutputSha(row) === item.outputSha256;
+
+function hasVerifiedScore(row, item, score, config) {
+  if (!matchesItem(row, item)) return false;
+  return (row.scores ?? []).some((remote) => {
+    // Experiment API v4 uses ScoreV3 subjects; older v4 previews used flat IDs.
+    // Missing identity/config fields fail closed, rather than proving a name alone.
+    const observationId = remote.subject ? (remote.subject.kind === "observation" ? remote.subject.id : null) : remote.observationId;
+    const traceId = remote.subject ? (remote.subject.traceId ?? row.traceId) : remote.traceId;
+    const value = config.dataType === "BOOLEAN" && typeof remote.value === "boolean" ? Number(remote.value) : remote.value;
+    // sameJson's documented relative 1e-12 tolerance handles JSON storage rounding;
+    // boolean scores must still be exactly 0 or 1 and numeric strings are refused.
+    return remote.id === scoreId(item, score.name) && remote.name === score.name
+      && remote.configId === config.id && observationId === item.spanId && traceId === item.traceId
+      && typeof value === "number" && Number.isFinite(value)
+      && (config.dataType === "BOOLEAN" ? value === score.value : sameJson(value, score.value));
+  });
+}
 export const scoreId = (item, name) => `docslurp-score-${hash(`${item.traceId}:${name}`).slice(0, 40)}`;
 
 /** Upload one prepared run to one target; idempotent and verified by readback. */
@@ -110,10 +130,10 @@ export async function syncRun(api, prepared, { targetName = null, allowHeldout =
   const configs = new Map();
   for (const config of await (await import("./score-configs.mjs")).listScoreConfigs(api)) if (!config.isArchived) configs.set(config.name, config);
   const scoreNames = new Set(prepared.items.flatMap((item) => item.scores.map((score) => score.name)));
-  for (const name of scoreNames) if (!configs.has(name)) throw new Error(`Score config ${name} is not registered on this target`);
+  for (const name of scoreNames) if (!configs.get(name)?.id) throw new Error(`Score config ${name} is not registered on this target`);
 
   let existing = await listExperimentItems(api, prepared);
-  const stale = prepared.items.filter((item) => remoteOutputSha(existing.get(item.datasetItemId)) !== item.outputSha256);
+  const stale = prepared.items.filter((item) => !matchesItem(existing.get(item.datasetItemId), item));
   // Batch by count and by serialised size so large inline outputs never exceed request body limits.
   let chunk = [];
   const flush = async () => { if (chunk.length) await api("/otel/v1/traces", otlpPayload(prepared, dataset.id, chunk), { headers: { "x-langfuse-ingestion-version": "4" } }); chunk = []; };
@@ -126,8 +146,7 @@ export async function syncRun(api, prepared, { targetName = null, allowHeldout =
   await flush();
   const scoreWrites = [];
   for (const item of prepared.items) {
-    const have = stale.includes(item) ? new Set() : remoteScoreNames(existing.get(item.datasetItemId));
-    for (const score of item.scores) if (!have.has(score.name)) scoreWrites.push({ item, score });
+    for (const score of item.scores) if (stale.includes(item) || !hasVerifiedScore(existing.get(item.datasetItemId), item, score, configs.get(score.name))) scoreWrites.push({ item, score });
   }
   for (const { item, score } of scoreWrites) {
     const config = configs.get(score.name);
@@ -136,8 +155,8 @@ export async function syncRun(api, prepared, { targetName = null, allowHeldout =
   const deadline = Date.now() + timeoutMs;
   for (;;) {
     if (stale.length || scoreWrites.length) existing = await listExperimentItems(api, prepared);
-    const pendingItems = prepared.items.filter((item) => remoteOutputSha(existing.get(item.datasetItemId)) !== item.outputSha256);
-    const pendingScores = prepared.items.filter((item) => item.scores.some((score) => !remoteScoreNames(existing.get(item.datasetItemId)).has(score.name)));
+    const pendingItems = prepared.items.filter((item) => !matchesItem(existing.get(item.datasetItemId), item));
+    const pendingScores = prepared.items.filter((item) => item.scores.some((score) => !hasVerifiedScore(existing.get(item.datasetItemId), item, score, configs.get(score.name))));
     if (!pendingItems.length && !pendingScores.length) break;
     if (Date.now() > deadline) throw new Error(`Experiment readback incomplete: ${pendingItems.length} items, ${pendingScores.length} items with missing scores`);
     await sleep(pollMs);

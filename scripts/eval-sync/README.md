@@ -86,3 +86,13 @@ Historical summaries are not runs. They stay as labelled evidence in dataset ite
 Contracts checked 2026-10-26 against the self-hosted v4.54 and v4.59 OpenAPI documents and the official docs: [experiments via OpenTelemetry](https://langfuse.com/integrations/native/opentelemetry/experiments), [deprecated API migration](https://langfuse.com/faq/all/deprecated-api-migration) (`POST /dataset-run-items` and trace events on `POST /ingestion` are deprecated and unused here), [OpenAPI](https://raw.githubusercontent.com/langfuse/langfuse/main/web/public/generated/api/openapi.yml) and [datasets](https://langfuse.com/docs/evaluation/experiments/datasets). Endpoints used: `/v2/datasets`, `/dataset-items`, `/score-configs`, `/otel/v1/traces`, `/scores`, `/experiment-items`.
 
 Run focused checks with `node --test scripts/eval-sync/langfuse.test.mjs`.
+
+Run readback verifies each item's root observation and trace, and each score's
+stable ID, name, value, config ID and observation association. Missing fields or
+mismatches trigger a repair write and remain unverified until a complete matching
+readback arrives. Numeric scores use the dataset readback helper's relative
+`1e-12 * max(1, abs(expected), abs(actual))` tolerance for JSON storage rounding;
+boolean scores remain exact. Both flat preview score IDs and ScoreV3 observation
+subjects are accepted; trace-level scores cannot stand in for observation scores.
+API contracts: [experiment items](https://github.com/langfuse/langfuse/blob/main/fern/apis/server/definition/experiments.yml),
+[ScoreV3](https://github.com/langfuse/langfuse/blob/main/fern/apis/server/definition/scores.yml).
