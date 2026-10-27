@@ -3,7 +3,13 @@ import type { PoolClient } from "pg";
 import { appDbPool } from "../lib/auth.js";
 import { parseApiKeyRateLimits, type ValidatedKey } from "./api-keys.js";
 
-export const MCP_SCOPES = ["search", "chat", "read", "ingest", "web"] as const;
+export const MCP_SCOPES = ["search", "chat", "read", "ingest"] as const;
+/**
+ * First-party clients (the DocSlurp CLI) may also ask for `web`, which a
+ * REST-audience token needs for paid web tools. MCP clients never see it:
+ * MCP metadata, challenges and default consent are unchanged.
+ */
+export const FIRST_PARTY_SCOPES = [...MCP_SCOPES, "web"] as const;
 export const oauthHash = (value: string) => createHash("sha256").update(value).digest("hex");
 export const pkceChallenge = (value: string) => createHash("sha256").update(value).digest("base64url");
 const secret = (prefix: string) => `${prefix}_${randomBytes(32).toString("base64url")}`;
@@ -38,7 +44,7 @@ export const OAUTH_TOKEN_PREFIX = { mcp: "dsmcp", api: "dscli" } as const;
  * - web    -> web (paid web search, fetch, map, crawl). REST-audience tokens
  *   need it explicitly; `search` alone does not unlock web tools for them.
  */
-export const OAUTH_TO_API_KEY_SCOPES: Readonly<Record<typeof MCP_SCOPES[number], readonly string[]>> = {
+export const OAUTH_TO_API_KEY_SCOPES: Readonly<Record<typeof FIRST_PARTY_SCOPES[number], readonly string[]>> = {
   search: ["search"],
   chat: ["chat"],
   read: ["artifacts"],
@@ -49,7 +55,7 @@ export const OAUTH_TO_API_KEY_SCOPES: Readonly<Record<typeof MCP_SCOPES[number],
 export function oauthScopesToApiKeyScopes(scopes: readonly string[]): string[] {
   const mapped = new Set<string>();
   for (const scope of scopes) {
-    const target = OAUTH_TO_API_KEY_SCOPES[scope as typeof MCP_SCOPES[number]];
+    const target = OAUTH_TO_API_KEY_SCOPES[scope as typeof FIRST_PARTY_SCOPES[number]];
     // An unknown scope maps to nothing (fail closed), never to a default set.
     if (target) for (const value of target) mapped.add(value);
   }
@@ -57,6 +63,11 @@ export function oauthScopesToApiKeyScopes(scopes: readonly string[]): string[] {
 }
 
 /** The audiences a client may request: every client gets MCP; only first-party clients get the REST API. */
+/** Scopes a client may request: MCP scopes for everyone, plus `web` for first-party clients. */
+export function allowedScopes(client: { first_party?: boolean | null }): readonly string[] {
+  return client.first_party === true ? FIRST_PARTY_SCOPES : MCP_SCOPES;
+}
+
 export function allowedResources(url: string, client: { first_party?: boolean | null }): string[] {
   return client.first_party === true ? [mcpResource(url), apiResource(url)] : [mcpResource(url)];
 }
@@ -111,9 +122,10 @@ export function logTokenRejection(reason: string, details: { grantType: unknown;
   console.warn(`[mcp-oauth] token_rejected reason=${reason} grant_type=${String(details.grantType).slice(0, 32)} client=${client}${details.grantId ? ` grant=${details.grantId}` : ""}`);
 }
 
-export function parseScopes(value: string | null): string[] {
+export function parseScopes(value: string | null, allowed: readonly string[] = MCP_SCOPES): string[] {
+  // An omitted scope means the MCP set, never first-party extras such as `web`.
   const scopes = [...new Set((value ?? MCP_SCOPES.join(" ")).split(/\s+/).filter(Boolean))];
-  if (!scopes.length || scopes.some(scope => !MCP_SCOPES.includes(scope as typeof MCP_SCOPES[number]))) {
+  if (!scopes.length || scopes.some(scope => !allowed.includes(scope))) {
     throw new Error("invalid_scope");
   }
   return scopes;
@@ -167,8 +179,9 @@ export async function validateMcpToken(raw: string, resource: string): Promise<V
     workspaceIds: Array.isArray(row.key_workspace_ids) ? row.key_workspace_ids : [],
     // Delegated tokens are never platform admins and never app sessions (see request-actor.ts).
     oauth: {
-      grantId: row.id, clientId: row.client_id, clientName: row.client_name, resource, audience: "mcp",
-      grantedScopes: Array.isArray(row.scopes) ? row.scopes : [], expiresAt: new Date(row.token_expires_at).toISOString(),
+      grantId: row.id, clientId: row.client_id, clientName: row.client_name ?? "MCP client", resource, audience: "mcp",
+      grantedScopes: Array.isArray(row.scopes) ? row.scopes : [],
+      expiresAt: Number.isFinite(Date.parse(row.token_expires_at)) ? new Date(row.token_expires_at).toISOString() : "",
     },
   };
 }

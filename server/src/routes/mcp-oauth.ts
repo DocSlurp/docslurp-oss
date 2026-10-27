@@ -1,7 +1,7 @@
 import { Hono, type Context } from "hono";
 import { appDbPool } from "../lib/auth.js";
 import { resolveBetterAuthSessionActor } from "../lib/request-actor.js";
-import { getConsentRequest, MCP_SCOPES, mcpOrigin, mcpResource, apiResource, allowedResources, createGrant, validRedirect, redirectMatches, parseScopes, transaction, oauthHash, pkceChallenge, issueTokens, secret, randomUUID, cleanupExpiredOAuthRequests, logTokenRejection, REFRESH_REUSE_LEEWAY_SECONDS, DEVICE_CODE_GRANT_TYPE, DEVICE_CODE_TTL_SECONDS, DEVICE_POLL_INTERVAL_SECONDS, generateUserCode, OAUTH_TOKEN_PREFIX } from "../services/mcp-oauth.js";
+import { getConsentRequest, MCP_SCOPES, mcpOrigin, mcpResource, apiResource, allowedResources, allowedScopes, createGrant, validRedirect, redirectMatches, parseScopes, transaction, oauthHash, pkceChallenge, issueTokens, secret, randomUUID, cleanupExpiredOAuthRequests, logTokenRejection, REFRESH_REUSE_LEEWAY_SECONDS, DEVICE_CODE_GRANT_TYPE, DEVICE_CODE_TTL_SECONDS, DEVICE_POLL_INTERVAL_SECONDS, generateUserCode, OAUTH_TOKEN_PREFIX } from "../services/mcp-oauth.js";
 import { deviceVerificationRoutes } from "./mcp-oauth-device.js";
 import { requestIp } from "../lib/request-context.js";
 export const mcpOAuthMetadataRoutes = new Hono();
@@ -61,7 +61,7 @@ mcpOAuthRoutes.get("/authorize", async (c) => {
     return authorizeError(c, "invalid_request", "state is too long");
   let scopes: string[];
   try {
-    scopes = parseScopes(params.get("scope"));
+    scopes = parseScopes(params.get("scope"), allowedScopes(client));
   }
   catch {
     return authorizeError(c, "invalid_scope", `Supported scopes: ${MCP_SCOPES.join(" ")}`);
@@ -259,7 +259,7 @@ mcpOAuthRoutes.post("/device_authorization", async (c) => {
     return c.json({ error: "invalid_target", error_description: `resource must be ${apiResource(c.req.url)} or ${mcpResource(c.req.url)}` }, 400);
   let scopes: string[];
   try {
-    scopes = parseScopes(typeof body.scope === "string" ? body.scope : null);
+    scopes = parseScopes(typeof body.scope === "string" ? body.scope : null, allowedScopes(client));
   } catch {
     return c.json({ error: "invalid_scope", error_description: `Supported scopes: ${MCP_SCOPES.join(" ")}` }, 400);
   }
