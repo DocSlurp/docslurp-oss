@@ -54,7 +54,9 @@ const createRateLimitRedisClient = (url: string) => createClient({
 type RedisClient = ReturnType<typeof createRateLimitRedisClient>;
 
 type RateLimitIdentityMode = "ip" | "actor";
-export type RateLimitCategory = "upload" | "search" | "chat-ai" | "read" | "write" | "webhook";
+import { classifyRateLimitCategory, rateLimitAddress, type RateLimitCategory } from "../lib/rate-limit-keys.js";
+
+export { classifyRateLimitCategory, rateLimitAddress, type RateLimitCategory };
 export type RateLimitProfile = "ip" | "account" | "self-hosted";
 
 export type RateLimitOptions = {
@@ -578,22 +580,6 @@ function safeIdentityPart(value: string): string {
   return value.replace(/[^a-zA-Z0-9:._-]/g, "_");
 }
 
-/**
- * The address a per-IP limit counts. IPv6 clients usually control a whole /64,
- * so an IPv6 address counts as its /64 prefix; rotating addresses inside it
- * does not escape the limit. IPv4 (and IPv4-mapped IPv6) count as the address.
- */
-export function rateLimitAddress(ip: string): string {
-  const value = ip.trim().toLowerCase().replace(/^\[|\]$/g, "").replace(/%.*$/, "");
-  if (!value.includes(":") || value.includes(".")) return value;
-  const [head = "", tail] = value.split("::", 2);
-  const left = head ? head.split(":") : [];
-  const right = tail === undefined ? [] : tail ? tail.split(":") : [];
-  const groups = tail === undefined ? left : [...left, ...Array(Math.max(0, 8 - left.length - right.length)).fill("0"), ...right];
-  if (groups.length !== 8 || groups.some((group) => !/^[0-9a-f]{1,4}$/.test(group))) return value;
-  return `${groups.slice(0, 4).map((group) => group.replace(/^0+(?=.)/, "")).join(":")}::/64`;
-}
-
 function requestIdentity(c: Context, identity: RateLimitIdentityMode): string | null {
   if (identity === "actor") {
     const actor = c.get("requestActor");
@@ -617,35 +603,6 @@ const CLIENT_VISITOR_DEFAULTS: Record<RateLimitCategory, number> = {
 
 function clientVisitorLimit(category: RateLimitCategory): number {
   return readGuardInt(`API_RATE_LIMIT_CLIENT_VISITOR_${envName(category)}_MAX`, CLIENT_VISITOR_DEFAULTS[category]);
-}
-
-export function classifyRateLimitCategory(method: string, path: string): RateLimitCategory {
-  const normalizedPath = path.replace(/\/+$/, "") || "/";
-  const normalizedMethod = method.toUpperCase();
-
-  if (normalizedPath.startsWith("/webhooks/")) return "webhook";
-  if ((normalizedPath.startsWith("/v1/ingest") || normalizedPath === "/v1/uploads" || normalizedPath.startsWith("/v1/uploads/"))) return "upload";
-  if (
-    normalizedPath.startsWith("/v1/search/chat")
-    || normalizedPath === "/v1/chat"
-    || normalizedPath === "/v1/chat/completions"
-    || /^\/v1\/workspaces\/[^/]+\/chat(?:\/|$)/.test(normalizedPath)
-  ) {
-    return "chat-ai";
-  }
-  if (
-    normalizedPath.startsWith("/v1/search")
-    || normalizedPath.startsWith("/v1/web/")
-    || normalizedPath.startsWith("/v1/suggest")
-    // Every search-compat adapter (Algolia, Meilisearch, Typesense, Pagefind) is a search.
-    || normalizedPath === "/compat" || normalizedPath.startsWith("/compat/")
-    || normalizedPath.startsWith("/v1/mcp")
-    || /^\/v1\/workspaces\/[^/]+\/search(?:\/|$)/.test(normalizedPath)
-  ) {
-    return "search";
-  }
-  if (normalizedMethod === "GET" || normalizedMethod === "HEAD" || normalizedMethod === "OPTIONS") return "read";
-  return "write";
 }
 
 function envOverrideLimit(profile: RateLimitProfile, category: RateLimitCategory): Partial<CategoryLimit> {

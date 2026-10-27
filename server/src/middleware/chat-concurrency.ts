@@ -2,7 +2,7 @@ import type { Context, MiddlewareHandler } from "hono";
 
 import { middlewareErrorResponse } from "../lib/api-error.js";
 import { requestIp } from "../lib/request-context.js";
-import { classifyRateLimitCategory, rateLimitAddress } from "./rate-limit.js";
+import { classifyRateLimitCategory, rateLimitAddress } from "../lib/rate-limit-keys.js";
 
 /**
  * In-flight cap on AI chat turns (`chat-ai` routes, streaming included) per
