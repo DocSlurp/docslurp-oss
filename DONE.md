@@ -125,3 +125,5 @@
 
 - Add passkeys (@better-auth/passkey) and TOTP two-factor with 10 single-use backup codes (Better Auth twoFactor), migration 0091: every first factor (password, email code, OAuth, email links, company SSO) is challenged, sessions record MFA assurance and unverified ones are revoked, user-verified passkeys satisfy MFA and respect enforced SSO, TOTP codes are single use, factor removal needs re-auth, and orgs can require MFA with a grace period (docs/passkeys-and-mfa.md).
 - Bound worker CI apt installation to two five-minute attempts, retrying once with signed official Ubuntu archive/security sources when the runner mirror stalls.
+
+- Add a manual, fixed-digest signing-only workflow for the reviewed document VM image, preserving original BuildKit evidence and requiring exact workflow certificate identity; dispatch and release verification remain separate manual gates.
