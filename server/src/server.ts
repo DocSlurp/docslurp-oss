@@ -21,7 +21,8 @@ import { initializePrivateModelEndpoints } from "./lib/privacy.js";
 import { setCurrentRequestError, requestContextMiddleware } from "./lib/request-context.js";
 import { multipartBodyLimit } from "./lib/upload-policy.js";
 import { emitPostHogApiLog } from "./lib/posthog-ai-observability.js";
-import { apiActorRateLimit, apiIpRateLimit } from "./middleware/rate-limit.js";
+import { apiActorRateLimit, apiIpRateLimit, logRateLimitBackendAtStartup, warnSelfHostedBrowserKeysWithoutTrustedProxy } from "./middleware/rate-limit.js";
+import { chatConcurrencyLimit } from "./middleware/chat-concurrency.js";
 import { sessionAuth } from "./middleware/session-auth.js";
 import { chatCompletionsRoutes } from "./routes/chat-completions.js";
 import { documentsRoutes } from "./routes/documents.js";
@@ -58,6 +59,7 @@ import { stripeWebhookRoutes } from "./routes/stripe-webhook.js";
 import { secretsRoutes } from "./routes/secrets.js";
 import { userSettingsRoutes } from "./routes/user-settings.js";
 import { accountRoutes } from "./routes/account.js";
+import { whoamiRoutes } from "./routes/whoami.js";
 import { extractsRoutes } from "./routes/extracts.js";
 import { startCreditDebitFlusher, stopCreditDebitFlusher } from "./services/billing/credit-debit-flusher.js";
 import { syncMeteringEnforcement } from "./services/billing/metering.js";
@@ -128,6 +130,8 @@ export function createApiApp(): Hono {
   app.use("/dashboard/*", sessionAuth);
   app.use("/v1/*", sessionAuth);
   app.use("/v1/*", apiActorRateLimit);
+  // In-flight AI chat turns per API key (and per visitor of a browser key), streams included.
+  app.use("/v1/*", chatConcurrencyLimit);
   app.use("/v1/mcp", nativeBodyLimit(1024 * 1024));
   app.use("/oauth/mcp/*", nativeBodyLimit(16 * 1024));
   // Bound actual bytes before NUL inspection or any route reader. Select the
@@ -148,6 +152,8 @@ export function createApiApp(): Hono {
     nativeBodyLimit(1024 * 1024)
   );
   app.use("/webhooks/tigris/uploads", nativeBodyLimit(1024 * 1024));
+  // The Algolia adapter reads JSON itself; bound it like the other compat adapters.
+  app.use("/compat/algolia/*", nativeBodyLimit(256 * 1024));
   app.use("*", rejectNulBytes);
   // `/v1/workspaces/:slug|default/...` → resolved workspace UUID routes.
   const workspaceRefs = workspaceRefPath([workspacesRoutes, connectorsRoutes, secretsRoutes, workspaceGraphRoutes]);
@@ -200,6 +206,7 @@ export function createApiApp(): Hono {
   app.route("/v1/workspaces", workspaceGraphRoutes);
   app.route("/v1/user-settings", userSettingsRoutes);
   app.route("/v1/account", accountRoutes);
+  app.route("/v1/whoami", whoamiRoutes);
   app.route("/webhooks", stripeWebhookRoutes);
   app.route("/webhooks", tigrisUploadWebhookRoutes);
 
@@ -301,6 +308,12 @@ export function ensureApiStartup(): Promise<void> {
       }
 
       console.log(`[api] cors_allowed_origins=${env.corsAllowedOrigins.join(",")}`);
+      // Loud when limits are per instance (no Redis) or disabled.
+      logRateLimitBackendAtStartup();
+      void warnSelfHostedBrowserKeysWithoutTrustedProxy(async () => {
+        const { sql } = await import("./db.js");
+        return (await sql`select 1 from api_keys where key_type = 'client' and revoked_at is null limit 1`).length > 0;
+      });
       emitPostHogApiLog({
         severityText: "info",
         eventName: "docslurp.api.startup_completed",

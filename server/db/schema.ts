@@ -10,6 +10,7 @@ import {
   check,
   boolean,
   integer,
+  bigserial,
   index,
   bigint,
   primaryKey,
@@ -78,6 +79,10 @@ export const organizations = pgTable(
     retainDocumentVersions: integer("retain_document_versions"),
     /** False keeps China-based model providers out of the org's OpenRouter requests (migration 0086). */
     allowChinaProviders: boolean("allow_china_providers").default(true).notNull(),
+    /** Members must use MFA after their grace period (migration 0091). */
+    requireMfa: boolean("require_mfa").default(false).notNull(),
+    requireMfaSince: timestamp("require_mfa_since", { withTimezone: true, mode: "string" }),
+    mfaGracePeriodDays: integer("mfa_grace_period_days").default(7).notNull(),
     retentionChangedAt: timestamp("retention_changed_at", { withTimezone: true }),
     retentionSweptAt: timestamp("retention_swept_at", { withTimezone: true }),
     name: text().notNull(),
@@ -607,6 +612,8 @@ export const user = pgTable(
     email: text().notNull(),
     emailVerified: boolean().default(false).notNull(),
     image: text(),
+    /** Better Auth twoFactor plugin (migration 0091). */
+    twoFactorEnabled: boolean().default(false).notNull(),
     createdAt: timestamp({ withTimezone: true, mode: "string" })
       .defaultNow()
       .notNull(),
@@ -632,6 +639,10 @@ export const session = pgTable(
     ipAddress: text(),
     userAgent: text(),
     userId: text().notNull(),
+    /** Passed TOTP, a backup code, a trusted device or a user-verified passkey (migration 0091). */
+    mfaVerified: boolean().default(false).notNull(),
+    /** Last proof of identity; copied across re-issues and used for the re-auth window. */
+    authenticatedAt: timestamp({ withTimezone: true, mode: "string" }),
   },
   (table) => [
     index("session_user_id_idx").using(
@@ -644,6 +655,63 @@ export const session = pgTable(
       name: "session_userId_fkey",
     }).onDelete("cascade"),
     unique("session_token_key").on(table.token),
+  ],
+);
+
+/** Better Auth twoFactor plugin: encrypted TOTP secret and backup codes (migration 0091). */
+export const twoFactor = pgTable(
+  "twoFactor",
+  {
+    id: text().primaryKey().notNull(),
+    secret: text().notNull(),
+    backupCodes: text().notNull(),
+    userId: text().notNull(),
+    verified: boolean().default(true),
+    failedVerificationCount: integer().default(0),
+    lockedUntil: timestamp({ withTimezone: true, mode: "string" }),
+  },
+  (table) => [
+    uniqueIndex("twoFactor_userId_key").using("btree", table.userId.asc().nullsLast().op("text_ops")),
+    foreignKey({ columns: [table.userId], foreignColumns: [user.id], name: "twoFactor_userId_fkey" }).onDelete("cascade"),
+  ],
+);
+
+/** @better-auth/passkey credentials (migration 0091). */
+export const passkey = pgTable(
+  "passkey",
+  {
+    id: text().primaryKey().notNull(),
+    name: text(),
+    publicKey: text().notNull(),
+    userId: text().notNull(),
+    credentialID: text().notNull(),
+    counter: integer().notNull(),
+    deviceType: text().notNull(),
+    backedUp: boolean().notNull(),
+    transports: text(),
+    createdAt: timestamp({ withTimezone: true, mode: "string" }).defaultNow(),
+    aaguid: text(),
+    lastUsedAt: timestamp({ withTimezone: true, mode: "string" }),
+  },
+  (table) => [
+    uniqueIndex("passkey_credentialID_key").using("btree", table.credentialID.asc().nullsLast().op("text_ops")),
+    index("passkey_userId_idx").using("btree", table.userId.asc().nullsLast().op("text_ops")),
+    foreignKey({ columns: [table.userId], foreignColumns: [user.id], name: "passkey_userId_fkey" }).onDelete("cascade"),
+  ],
+);
+
+/** TOTP codes already accepted, refused until they expire (migration 0091). */
+export const mfaTotpReplay = pgTable(
+  "mfa_totp_replay",
+  {
+    userId: text("user_id").notNull(),
+    codeDigest: text("code_digest").notNull(),
+    expiresAt: timestamp("expires_at", { withTimezone: true, mode: "string" }).notNull(),
+  },
+  (table) => [
+    primaryKey({ columns: [table.userId, table.codeDigest], name: "mfa_totp_replay_pkey" }),
+    index("mfa_totp_replay_expires_at_idx").using("btree", table.expiresAt.asc().nullsLast().op("timestamptz_ops")),
+    foreignKey({ columns: [table.userId], foreignColumns: [user.id], name: "mfa_totp_replay_user_id_fkey" }).onDelete("cascade"),
   ],
 );
 
@@ -3338,6 +3406,7 @@ export const workerMaintenanceLeases = pgTable("worker_maintenance_leases", {
 export const mcpOAuthClients = pgTable("mcp_oauth_clients", {
   id: text().primaryKey(), name: text().notNull(), redirectUris: jsonb("redirect_uris").notNull(),
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  firstParty: boolean("first_party").default(false).notNull(),
 });
 export const mcpOAuthRequests = pgTable("mcp_oauth_requests", {
   id: text().primaryKey(), clientId: text("client_id").notNull().references(() => mcpOAuthClients.id, { onDelete: "cascade" }),
@@ -3359,6 +3428,21 @@ export const mcpOAuthTokens = pgTable("mcp_oauth_tokens", {
   kind: text().notNull(), redirectUri: text("redirect_uri"), challenge: text(),
   expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(), consumedAt: timestamp("consumed_at", { withTimezone: true }),
 }, table => [index("mcp_oauth_tokens_grant_idx").on(table.grantId), check("mcp_oauth_tokens_kind_check", sql`${table.kind} in ('code','access','refresh')`)]);
+export const mcpOAuthDeviceCodes = pgTable("mcp_oauth_device_codes", {
+  deviceCodeHash: text("device_code_hash").primaryKey(), userCodeHash: text("user_code_hash").notNull().unique(),
+  clientId: text("client_id").notNull().references(() => mcpOAuthClients.id, { onDelete: "cascade" }),
+  resource: text().notNull(), scopes: jsonb().notNull(), intervalSeconds: integer("interval_seconds").default(5).notNull(),
+  lastPolledAt: timestamp("last_polled_at", { withTimezone: true }), expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+  userId: text("user_id").references(() => user.id, { onDelete: "cascade" }),
+  grantId: text("grant_id").references(() => mcpOAuthGrants.id, { onDelete: "cascade" }),
+  approvedAt: timestamp("approved_at", { withTimezone: true }), deniedAt: timestamp("denied_at", { withTimezone: true }),
+  consumedAt: timestamp("consumed_at", { withTimezone: true }), requesterIp: text("requester_ip"),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+}, table => [index("mcp_oauth_device_codes_expiry_idx").on(table.expiresAt)]);
+export const mcpOAuthDeviceAttempts = pgTable("mcp_oauth_device_attempts", {
+  id: bigserial({ mode: "number" }).primaryKey(), userId: text("user_id").notNull().references(() => user.id, { onDelete: "cascade" }),
+  ip: text(), createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+}, table => [index("mcp_oauth_device_attempts_user_idx").on(table.userId, table.createdAt), index("mcp_oauth_device_attempts_ip_idx").on(table.ip, table.createdAt), index("mcp_oauth_device_attempts_created_idx").on(table.createdAt)]);
 
 /**
  * Content-addressed embedding reuse pointers (server/db/migrations/0034_embedding_reuse_refs.sql):

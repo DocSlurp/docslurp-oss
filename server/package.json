@@ -11,6 +11,7 @@
     }
   },
   "scripts": {
+    "psl:update": "node scripts/update-public-suffix-list.mjs",
     "dev": "tsx watch src/main.ts",
     "start": "tsx src/main.ts",
     "typecheck": "pnpm --filter @docslurp/shared build && pnpm --filter @docslurp/sdk build && tsc -p tsconfig.json --noEmit",
@@ -26,6 +27,7 @@
     "@ai-sdk/otel": "^1.0.148",
     "@aws-sdk/client-s3": "^3.1154.0",
     "@aws-sdk/s3-request-presigner": "^3.1154.0",
+    "@better-auth/passkey": "1.7.12",
     "@docslurp/sdk": "workspace:*",
     "@docslurp/shared": "workspace:*",
     "@hono/node-server": "^2.1.5",

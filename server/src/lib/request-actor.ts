@@ -7,11 +7,16 @@ import { apiError, parseWorkspaceInput, type WorkspaceInputRef, type WorkspaceRe
 import { apiErrorResponse } from "./api-error.js";
 import { auth, appDbPool } from "./auth.js";
 import { isConfiguredAdminUser } from "./admin-emails.js";
+import { evaluateMfaPolicy } from "./auth-mfa.js";
 import { apiKeyAllowsWorkspace, apiKeyCanUseWorkspace } from "./api-key-workspace-scope.js";
 
 export { apiKeyAllowsWorkspace, apiKeyCanUseWorkspace };
+export { isFirstPartyAppActor } from "./first-party-app.js";
 import { setCurrentRequestApiKeyId, setCurrentRequestApiKeyWorkspaceIds, setCurrentRequestOrgId, setCurrentRequestSessionId, setCurrentRequestUserId } from "./request-context.js";
-import { validateApiKey, type ValidatedKey } from "../services/api-keys.js";
+import { ApiKeyPolicyError, ClientKeyWorkspacesRequiredError, validateApiKey, type ValidatedKey } from "../services/api-keys.js";
+
+export { ApiKeyPolicyError, ClientKeyWorkspacesRequiredError };
+import { validateOAuthApiToken } from "../services/mcp-oauth.js";
 import { ensureDefaultWorkspace, findWorkspaceForInput, getWorkspace, type WorkspaceInputScope } from "../services/workspaces.js";
 import { invalidWorkspaceInputError, WorkspaceAccessError, workspaceInputNotFoundError } from "../services/default-workspace.js";
 
@@ -28,6 +33,10 @@ export interface SessionRequestActor {
   userId: string;
   sessionId: string;
   user: SessionUser;
+  /** The session passed a second factor or a user-verified passkey (auth-mfa.ts). */
+  mfaVerified?: boolean;
+  /** An org this user belongs to requires MFA, the grace period is over, and this session hasn't passed it. */
+  mfaPolicyBlocked?: boolean;
 }
 
 export interface ApiKeyRequestActor {
@@ -64,24 +73,34 @@ export async function resolveApiKeyActor(
     return null;
   }
 
-  const apiKey = await validateApiKey(authorization.slice(7), requestContext);
+  const raw = authorization.slice(7).trim();
+  // OAuth access tokens never fall through to API-key lookup. REST-audience
+  // tokens (`dscli_`, the first-party CLI) resolve to their grant's mapped key
+  // identity; MCP-audience tokens (`dsmcp…`) are bound to /v1/mcp and are
+  // refused here (RFC 8707).
+  if (raw.startsWith("dsmcp")) return null;
+  if (raw.startsWith("dscli")) {
+    const oauthKey = await validateOAuthApiToken(raw);
+    return oauthKey ? { type: "apiKey", userId: oauthKey.userId, apiKey: oauthKey } : null;
+  }
+  const apiKey = await validateApiKey(raw, requestContext);
   return apiKey ? { type: "apiKey", userId: apiKey.userId, apiKey } : null;
 }
 
 /**
- * Resolves the Better Auth session for a request. Better Auth slides the
- * session's expiry forward once `updateAge` has passed and issues a refreshed
- * cookie; pass `responseHeaders` to receive those `Set-Cookie` values so the
- * caller can forward them. Without forwarding, the database row is extended
- * but the browser cookie still expires on its original date.
+ * Resolves a session, forwarding refreshed cookies when headers are supplied.
+ * MFA policy fails closed unless the API middleware explicitly opts in.
  */
 export async function resolveBetterAuthSessionActor(
   headers: Headers,
-  responseHeaders?: Headers
+  refreshedHeadersOrOptions?: Headers | { allowMfaPolicyBlocked?: boolean },
+  options: { allowMfaPolicyBlocked?: boolean } = {},
 ): Promise<SessionRequestActor | null> {
+  const responseHeaders = refreshedHeadersOrOptions instanceof Headers ? refreshedHeadersOrOptions : undefined;
+  if (!(refreshedHeadersOrOptions instanceof Headers)) options = refreshedHeadersOrOptions ?? options;
   const result = await auth.api.getSession({ headers, returnHeaders: true }) as {
     headers: Headers | null;
-    response: { session: { id: string; userId: string }; user: SessionUser } | null;
+    response: { session: { id: string; userId: string; mfaVerified?: boolean | null }; user: SessionUser } | null;
   } | null;
   const session = result?.response ?? null;
   if (responseHeaders) {
@@ -92,13 +111,25 @@ export async function resolveBetterAuthSessionActor(
     return null;
   }
 
+  const mfaVerified = session.session.mfaVerified === true;
+  // Defense in depth behind auth-mfa's strip hook: a 2FA user's session that
+  // never passed the second factor authorizes nothing here either.
+  if ((session.user as SessionUser & { twoFactorEnabled?: boolean | null }).twoFactorEnabled === true && !mfaVerified) {
+    console.warn(`[auth-mfa] refused an unverified session for a 2FA user user=${session.user.id} session=${session.session.id}`);
+    return null;
+  }
+  const mfaPolicyBlocked = mfaVerified ? false : (await evaluateMfaPolicy(appDbPool, session.user.id, false)).enforced;
+  if (mfaPolicyBlocked && !options.allowMfaPolicyBlocked) return null;
+
   session.user.isAdmin = await isConfiguredAdminUser(appDbPool, session.user.id);
 
   return {
     type: "session",
     userId: session.user.id,
     sessionId: session.session.id,
-    user: session.user
+    user: session.user,
+    mfaVerified,
+    mfaPolicyBlocked
   };
 }
 
@@ -153,6 +184,8 @@ export async function isPlatformAdminActor(actor: RequestActor | undefined): Pro
   if (!actor) return false;
   if (actor.type === "session") return actor.user.isAdmin === true;
   if (actor.apiKey.keyType !== "server") return false;
+  // A delegated OAuth token never carries its owner's operator privileges.
+  if (actor.apiKey.oauth) return false;
   return await isConfiguredAdminUser(appDbPool, actor.apiKey.userId);
 }
 

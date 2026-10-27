@@ -1,6 +1,7 @@
 import type { Context, MiddlewareHandler } from "hono";
 
 import {
+  ApiKeyPolicyError,
   resolveApiKeyActor,
   resolveBetterAuthSessionActor,
   setRequestActor
@@ -69,10 +70,17 @@ export const sessionAuth: MiddlewareHandler = async (c, next) => {
 
   const authorization = c.req.header("Authorization");
   if (mode === "apiKey" && authorization?.startsWith("Bearer ")) {
-    const actor = await resolveApiKeyActor(authorization, {
-      origin: c.req.header("origin"),
-      referer: c.req.header("referer") ?? c.req.header("referrer")
-    });
+    let actor;
+    try {
+      actor = await resolveApiKeyActor(authorization, {
+        origin: c.req.header("origin"),
+        referer: c.req.header("referer") ?? c.req.header("referrer")
+      });
+    } catch (error) {
+      // A browser key on a website it doesn't allow, or a legacy one without workspaces: say how to fix it, never widen it.
+      if (!(error instanceof ApiKeyPolicyError)) throw error;
+      return middlewareErrorResponse(c, 403, error.code, error.message);
+    }
     if (actor) {
       setRequestActor(c, actor);
       await next();
@@ -80,13 +88,23 @@ export const sessionAuth: MiddlewareHandler = async (c, next) => {
     }
     // A supplied bearer credential is authoritative. Never turn an invalid
     // token into a more privileged cookie-session request.
+    if (/^Bearer\s+ds(cli|mcp)/.test(authorization)) {
+      c.header("WWW-Authenticate", 'Bearer error="invalid_token", error_description="The access token is invalid, expired or revoked"');
+    }
     return middlewareErrorResponse(c, 401, "unauthorized", "Unauthorized");
   }
 
   const refreshedCookies = new Headers();
-  const actor = await resolveBetterAuthSessionActor(c.req.raw.headers, refreshedCookies);
+  const actor = await resolveBetterAuthSessionActor(c.req.raw.headers, refreshedCookies, { allowMfaPolicyBlocked: true });
   if (!actor) {
     return middlewareErrorResponse(c, 401, "unauthorized", "Unauthorized");
+  }
+
+  // Org "require MFA" policy past its grace period: the session may only read
+  // its own security status (to show enrolment); factor enrolment itself goes
+  // through Better Auth's /api/auth routes.
+  if (actor.mfaPolicyBlocked && !(c.req.method === "GET" && c.req.path === "/v1/account/security")) {
+    return middlewareErrorResponse(c, 403, "mfa_required", "Your organization requires two-factor authentication or a passkey");
   }
 
   if (!isCookieMutationFromTrustedOrigin(c)) {

@@ -39,7 +39,7 @@ vi.mock("../lib/request-actor.js", async (importOriginal) => ({
     ? { type: "session", userId: "owner", sessionId: "sess", user: { id: "owner" } }
     : null,
 }));
-vi.mock("../middleware/rate-limit.js", () => ({ enforceAuthenticatedApiRateLimit: async () => null }));
+vi.mock("../middleware/rate-limit.js", () => ({ enforceAuthenticatedApiRateLimit: async () => null, enforceActorCategoryRateLimit: async () => null }));
 vi.mock("../services/mcp-tools.js", async (importOriginal) => ({
   ...await importOriginal<typeof import("../services/mcp-tools.js")>(),
   // The document backend: record which identity reached it and answer like the adapters.

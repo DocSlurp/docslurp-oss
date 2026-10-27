@@ -106,6 +106,12 @@ export type SearchAvailability = z.infer<typeof searchAvailabilitySchema>;
 export const workspaceChatResponseSchema = z.object({
   id: z.string(),
   sessionId: z.string(),
+  /**
+   * Browser (client) keys only: the sealed grant to continue this session
+   * (bound to the key, workspace and session; expires after 24 hours). Send
+   * it back as `sessionToken` with `sessionId`; a session id alone is refused.
+   */
+  sessionToken: z.string().optional(),
   searchSessionId: z.string().nullable().default(null),
   answer: z.string(),
   finishReason: z.enum(["stop", "length", "content-filter"]).optional(),
