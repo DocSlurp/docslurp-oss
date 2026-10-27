@@ -16,11 +16,9 @@ import { requestIp, requestUserAgent } from "../lib/request-context.js";
 import { appendAuditLog } from "../services/audit-log.js";
 import { isApiKeyLive } from "../services/api-key-liveness.js";
 import { streamRunProgressSnapshots } from "../services/run-progress-stream.js";
-import { getRunForensics } from "../services/run-forensics.js";
 import { type RunStartOutcome } from "../services/run-lifecycle.js";
 import {
   controlRun,
-  exportRun,
   getRun,
   getRunProcessingPreview,
   getRunProgress,
@@ -202,26 +200,6 @@ export const runsRoutes = new Hono()
     // Hono applies its own no-cache header when creating an SSE response.
     response.headers.set("Cache-Control", "no-cache, no-transform");
     return response;
-  })
-  .get("/:runId/export", async (c) => {
-    const userId = c.get("sessionUser").id;
-    const manifest = await exportRun(c.req.param("runId"), userId);
-
-    if (!manifest) {
-      return apiStatusError(c, 404, "Run not found");
-    }
-
-    return c.json(manifest);
-  })
-  .get("/:runId/forensics", async (c) => {
-    const userId = c.get("sessionUser").id;
-    const forensics = await getRunForensics(c.req.param("runId"), userId);
-
-    if (!forensics) {
-      return apiStatusError(c, 404, "Run not found");
-    }
-
-    return c.json(forensics);
   })
   .get("/:runId/events", async (c) => {
     const userId = c.get("sessionUser").id;

@@ -39,7 +39,7 @@ vi.mock("@docslurp/shared/observability", async (importOriginal) => ({
   activeTraceparent: () => traceparent.value,
 }));
 
-const { searchRoutes, clearSearchResponseCacheForTests } = await import("../routes/search.js");
+const { searchRoutes, workspaceChatRoutes, clearSearchResponseCacheForTests } = await import("../routes/search.js");
 const { publicErrorMiddleware } = await import("../lib/public-errors.js");
 const { apiErrorEnvelopeSchema, PUBLIC_ERROR_MESSAGES } = await import("@docslurp/shared");
 
@@ -55,6 +55,7 @@ function buildApp(actor?: import("../lib/request-actor.js").RequestActor) {
     await next();
   });
   app.route("/search", searchRoutes);
+  app.route("/chat", workspaceChatRoutes);
   return app;
 }
 
@@ -307,7 +308,7 @@ describe("searchRoutes", () => {
     const actor = { type: "apiKey" as const, userId: "user-1", apiKey: { keyId: "key", userId: "user-1", orgId: "org", keyType: "server" as const, allowedDomains: [], scopes: ["search", "chat"], rateLimitRpm: 60, rateLimitPpd: 1000, rateLimits: [], workspaceIds: ["ws-chat"] } };
     getWorkspace.mockResolvedValue({ id: "ws-chat", orgId: "org" });
     chatWorkspace.mockResolvedValue({ answer: "Supported" });
-    const request = () => buildApp(actor).request("/search/chat", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ q: "Question", workspace: "ws-chat" }) });
+    const request = () => buildApp(actor).request("/chat", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ q: "Question", workspace: "ws-chat" }) });
     expect((await request()).status).toBe(200);
     expect(chatWorkspace).toHaveBeenCalledWith(expect.objectContaining({ actor, allowAgentTools: true }));
     chatWorkspace.mockClear();
@@ -323,13 +324,28 @@ describe("searchRoutes", () => {
     expect(chatWorkspace).not.toHaveBeenCalled();
   });
 
+  it("applies the same key scope and workspace denials to GET /chat/stream as to POST /chat", async () => {
+    const actor = { type: "apiKey" as const, userId: "user-1", apiKey: { keyId: "key", userId: "user-1", orgId: "org", keyType: "server" as const, allowedDomains: [], scopes: ["search", "chat"], rateLimitRpm: 60, rateLimitPpd: 1000, rateLimits: [], workspaceIds: ["ws-chat"] } };
+    getWorkspace.mockResolvedValue({ id: "ws-chat", orgId: "org" });
+    chatWorkspace.mockResolvedValue({ answer: "Supported", citations: [] });
+    const request = () => buildApp(actor).request("/chat/stream?q=Question&workspace=ws-chat");
+    // The allowed path is covered by the stream tests below; here only the denials, before any answer runs.
+    // A search-only key reads passages; it cannot spend on an answer.
+    actor.apiKey.scopes = ["search"];
+    expect((await request()).status).toBe(403);
+    actor.apiKey.scopes = ["search", "chat"];
+    actor.apiKey.workspaceIds = ["other"];
+    expect((await request()).status).toBe(404);
+    expect(chatWorkspace).not.toHaveBeenCalled();
+  });
+
   it("keeps public chat on grounded retrieval when DOCSLURP_PUBLIC_CHAT_AGENT_ENABLED is off", async () => {
     const { env } = await import("../config.js");
     const previous = env.publicChatAgentEnabled;
     env.publicChatAgentEnabled = false;
     try {
       chatWorkspace.mockResolvedValueOnce({ answer: "Supported" });
-      const response = await buildApp().request("/search/chat", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ q: "Question", workspace: "ws-chat" }) });
+      const response = await buildApp().request("/chat", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ q: "Question", workspace: "ws-chat" }) });
       expect(response.status).toBe(200);
       expect(chatWorkspace).toHaveBeenCalledWith(expect.objectContaining({ allowAgentTools: false }));
       expect(chatWorkspace.mock.calls.at(-1)?.[0]).not.toHaveProperty("allowConfiguration");
@@ -341,15 +357,15 @@ describe("searchRoutes", () => {
   it("accepts agent.tools and retrieval.parentRetrieval on chat and forwards them", async () => {
     chatWorkspace.mockResolvedValueOnce({ answer: "Supported" });
     const body = { q: "Question", workspace: "ws-chat", agent: { tools: false }, retrieval: { parentRetrieval: false } };
-    const response = await app.request("/search/chat", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    const response = await app.request("/chat", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
     expect(response.status).toBe(200);
     expect(chatWorkspace).toHaveBeenCalledWith(expect.objectContaining({ agent: { tools: false }, retrieval: { parentRetrieval: false } }));
-    const invalid = await app.request("/search/chat", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...body, agent: { tools: "off" } }) });
+    const invalid = await app.request("/chat", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...body, agent: { tools: "off" } }) });
     expect(invalid.status).toBe(400);
   });
 
   it("rejects public attempts to set the internal agent permission", async () => {
-    const response = await app.request("/search/chat", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ q: "Question", workspace: "ws-chat", allowAgentTools: true }) });
+    const response = await app.request("/chat", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ q: "Question", workspace: "ws-chat", allowAgentTools: true }) });
     expect(response.status).toBe(400);
     expect(chatWorkspace).not.toHaveBeenCalled();
   });
@@ -383,7 +399,7 @@ describe("searchRoutes", () => {
       },
     });
 
-    const response = await app.request("/search/chat", {
+    const response = await app.request("/chat", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -409,19 +425,19 @@ describe("searchRoutes", () => {
     traceparent.value = "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01";
     try {
       chatWorkspace.mockResolvedValueOnce({ answer: "Supported" });
-      const response = await app.request("/search/chat", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ q: "Question", workspace: "ws-chat" }) });
+      const response = await app.request("/chat", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ q: "Question", workspace: "ws-chat" }) });
       expect(response.headers.get("traceparent")).toBe(traceparent.value);
     } finally {
       traceparent.value = null;
     }
     chatWorkspace.mockResolvedValueOnce({ answer: "Supported" });
-    const untraced = await app.request("/search/chat", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ q: "Question", workspace: "ws-chat" }) });
+    const untraced = await app.request("/chat", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ q: "Question", workspace: "ws-chat" }) });
     expect(untraced.headers.get("traceparent")).toBeNull();
   });
 
   it("forwards per-request agent limits and rejects out-of-range ones", async () => {
     chatWorkspace.mockResolvedValueOnce({ answer: "Supported" });
-    const post = (body: unknown) => app.request("/search/chat", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    const post = (body: unknown) => app.request("/chat", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
     expect((await post({ q: "Question", workspace: "ws-chat", agent: { maxSteps: 3, maxToolCalls: 2, searchConcurrency: 1 } })).status).toBe(200);
     expect(chatWorkspace).toHaveBeenCalledWith(expect.objectContaining({ agent: { maxSteps: 3, maxToolCalls: 2, searchConcurrency: 1 } }));
     chatWorkspace.mockClear();
@@ -436,11 +452,11 @@ describe("searchRoutes", () => {
   it("answers 400 model_not_allowed for a refused model on chat POST and before the chat stream opens", async () => {
     const { ChatModelNotAllowedError } = await import("../lib/chat-model-policy.js");
     chatWorkspace.mockRejectedValueOnce(new ChatModelNotAllowedError());
-    const post = await app.request("/search/chat", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ q: "Question", workspace: "ws-chat", model: "unknown/model" }) });
+    const post = await app.request("/chat", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ q: "Question", workspace: "ws-chat", model: "unknown/model" }) });
     expect(post.status).toBe(400);
     expect(await post.json()).toMatchObject({ error: { code: "model_not_allowed" } });
     chatWorkspace.mockClear();
-    const stream = await app.request("/search/chat/stream?q=test&workspace=ws-chat&model=inception/mercury-3");
+    const stream = await app.request("/chat/stream?q=test&workspace=ws-chat&model=inception/mercury-3");
     expect(stream.status).toBe(400);
     expect(await stream.json()).toMatchObject({ error: { code: "model_not_allowed" } });
     expect(chatWorkspace).not.toHaveBeenCalled();
@@ -449,7 +465,7 @@ describe("searchRoutes", () => {
   it("rejects chat POST and chat stream with 403 when the workspace turned chat off", async () => {
     workspaceChatDisabledBody.mockResolvedValue({ error: "Chat is turned off for this workspace.", code: "chat_disabled" });
     try {
-      const post = await app.request("/search/chat", {
+      const post = await app.request("/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ q: "test", workspace: "ws-chat" }),
@@ -457,7 +473,7 @@ describe("searchRoutes", () => {
       expect(post.status).toBe(403);
       expect(await post.json()).toMatchObject({ error: { code: "chat_disabled", message: "Chat is turned off for this workspace." } });
 
-      const stream = await app.request("/search/chat/stream?q=test&workspace=ws-chat");
+      const stream = await app.request("/chat/stream?q=test&workspace=ws-chat");
       expect(stream.status).toBe(403);
       expect(await stream.json()).toMatchObject({ error: { code: "chat_disabled" } });
       expect(chatWorkspace).not.toHaveBeenCalled();
@@ -470,7 +486,7 @@ describe("searchRoutes", () => {
     const post = (path: string, body: unknown) => app.request(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
 
     it("answers invalid search and chat bodies with invalid_request and validation issues in details", async () => {
-      for (const [path, body] of [["/search", { q: "" }], ["/search", { queries: [] }], ["/search/chat", {}], ["/search/aggregate", {}]] as const) {
+      for (const [path, body] of [["/search", { q: "" }], ["/search", { queries: [] }], ["/chat", {}], ["/search/aggregate", {}]] as const) {
         const response = await post(path, body);
         expect(response.status, path).toBe(400);
         const json = await response.json();
@@ -535,7 +551,7 @@ describe("searchRoutes", () => {
       guarded.use("*", publicErrorMiddleware);
       guarded.route("/", app);
       workspaceChatDisabledBody.mockResolvedValueOnce({ error: "internal wording", code: "chat_disabled" });
-      const response = await guarded.request("/search/chat", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ q: "test", workspace: "ws-chat" }) });
+      const response = await guarded.request("/chat", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ q: "test", workspace: "ws-chat" }) });
       expect(response.status).toBe(403);
       const json = await response.json();
       expect(apiErrorEnvelopeSchema.parse(json)).toEqual({ error: { code: "chat_disabled", message: PUBLIC_ERROR_MESSAGES.chatDisabled, requestId: "req-env-1" } });

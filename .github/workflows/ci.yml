@@ -64,7 +64,7 @@ jobs:
         run: |
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends bubblewrap poppler-utils pandoc tesseract-ocr tesseract-ocr-eng ffmpeg
+          sudo apt-get install -y --no-install-recommends bubblewrap poppler-data poppler-utils pandoc tesseract-ocr tesseract-ocr-eng ffmpeg
       - name: Set up worker Python test dependencies
         if: matrix.worker-tools
         run: |
