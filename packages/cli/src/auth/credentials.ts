@@ -108,7 +108,9 @@ function checkPrivate(path: string, kind: "directory" | "file", info: Awaited<Re
   }
 }
 
-type CredentialFile = { version: 1; credentials: Record<string, StoredCredential> };
+// null is a durable signed-out tombstone: a recovering keychain must not
+// resurrect an older grant after the authoritative fallback was logged out.
+type CredentialFile = { version: 1; credentials: Record<string, StoredCredential | null> };
 
 async function readCredentialFile(): Promise<CredentialFile> {
   const dir = credentialsDirectory(), file = credentialsFile();
@@ -136,9 +138,10 @@ async function readCredentialFile(): Promise<CredentialFile> {
   } catch {
     throw new CredentialStoreError(`${file} is not valid JSON. Remove it and run \`docslurp logout --force\` or delete it, then \`docslurp login\`.`);
   }
-  const credentials: Record<string, StoredCredential> = {};
+  const credentials: CredentialFile["credentials"] = {};
   const entries = (parsed as { credentials?: Record<string, unknown> })?.credentials ?? {};
   for (const [account, value] of Object.entries(entries)) {
+    if (value === null) { credentials[account] = null; continue; }
     const credential = parseCredential(value);
     if (credential) credentials[account] = credential;
   }
@@ -285,8 +288,8 @@ export async function withCredentialLock<T>(fn: () => Promise<T>): Promise<T> {
 
 const fileStore = {
   label: () => `file ${credentialsFile()}`,
-  async get(account: string) { return (await readCredentialFile()).credentials[account] ?? null; },
-  async set(account: string, credential: StoredCredential) {
+  async get(account: string) { return (await readCredentialFile()).credentials[account]; },
+  async set(account: string, credential: StoredCredential | null) {
     await withCredentialLock(async () => {
       const data = await readCredentialFile();
       data.credentials[account] = credential;
@@ -297,7 +300,7 @@ const fileStore = {
     if (!existsSync(credentialsFile())) return false;
     return await withCredentialLock(async () => {
       const data = await readCredentialFile();
-      if (!data.credentials[account]) return false;
+      if (!Object.hasOwn(data.credentials, account)) return false;
       delete data.credentials[account];
       await writeCredentialFile(data);
       return true;
@@ -433,11 +436,13 @@ export type LoadedCredential = { credential: StoredCredential; source: string };
 
 export async function loadCredential(account: string): Promise<LoadedCredential | null> {
   const mode = storeMode();
+  const local = await fileStore.get(account);
+  // Honor logout even if the caller switches to explicit keychain mode.
+  if (local === null) return null;
   // A fallback is the active store until logout, including after the
   // keychain recovers. Timestamps cannot safely order refresh rotations.
   if (mode === "auto") {
-    const credential = await fileStore.get(account);
-    if (credential) return { credential, source: fileStore.label() };
+    if (local) return { credential: local, source: fileStore.label() };
   }
   if (mode !== "file") {
     const keychain = platformKeychain();
@@ -458,7 +463,7 @@ export async function saveCredential(account: string, credential: StoredCredenti
   const mode = storeMode();
   // Once auto mode falls back, keep rotating in that store. Returning to a
   // keychain while an old fallback cannot be removed could replay its token.
-  if (mode === "auto" && await fileStore.get(account)) {
+  if (mode === "auto" && await fileStore.get(account) !== undefined) {
     await fileStore.set(account, credential);
     return fileStore.label();
   }
@@ -468,7 +473,7 @@ export async function saveCredential(account: string, credential: StoredCredenti
       const secret = encode(credential);
       // Read back: some tools exit 0 without storing (a locked or absent collection).
       if (await keychain.write(account, secret) && (await keychain.read(account))?.trim() === secret) {
-        await fileStore.delete(account).catch(() => false);
+        await fileStore.delete(account);
         return `keychain (${keychain.name})`;
       }
       if (mode === "keychain") throw new CredentialStoreError(`Could not store the login in ${keychain.name}.`);
@@ -483,11 +488,12 @@ export async function saveCredential(account: string, credential: StoredCredenti
 
 export async function deleteCredential(account: string): Promise<boolean> {
   const mode = storeMode();
-  let removed = false;
+  // Persist first, without any live tokens. If this fails, logout must fail
+  // loudly; keychain availability/removal can never undo a persisted logout.
+  await fileStore.set(account, null);
   if (mode !== "file") {
     const keychain = platformKeychain();
-    if (keychain && await keychain.read(account)) removed = (await keychain.remove(account)) || removed;
+    if (keychain) await keychain.remove(account).catch(() => false);
   }
-  if (mode !== "keychain") removed = (await fileStore.delete(account)) || removed;
-  return removed;
+  return true;
 }

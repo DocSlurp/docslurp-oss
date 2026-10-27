@@ -401,7 +401,7 @@ test("logout revokes server-side, then deletes locally; a failed revocation keep
     assert.ok(JSON.parse(await readFile(file, "utf8")).credentials[`default@${failingUrl}`]);
     const forced = await cli(["logout", "--force"], { url: failingUrl, config: box.config });
     assert.equal(forced.code, 0, forced.stderr);
-    await assert.rejects(stat(file));
+    assert.equal(JSON.parse(await readFile(file, "utf8")).credentials[`default@${failingUrl}`], null);
   } finally { await failing.close(); await box.dispose(); }
   const fake = fakeServer(); const url = await fake.start(); const box2 = await sandbox();
   try {
@@ -409,7 +409,7 @@ test("logout revokes server-side, then deletes locally; a failed revocation keep
     const result = await cli(["logout"], { url, config: box2.config });
     assert.equal(result.code, 0, result.stderr);
     assert.deepEqual(fake.state.revoked, ["dsclir_refresh_1"]);
-    await assert.rejects(stat(file));
+    assert.equal(JSON.parse(await readFile(file, "utf8")).credentials[`default@${url}`], null);
   } finally { await fake.close(); await box2.dispose(); }
 });
 

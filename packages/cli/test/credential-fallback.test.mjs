@@ -5,12 +5,12 @@ import childProcess from "node:child_process";
 import { syncBuiltinESMExports } from "node:module";
 import { EventEmitter } from "node:events";
 import { PassThrough, Writable } from "node:stream";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { credentialAccount, loadCredential, saveCredential } from "../dist/auth/credentials.js";
+import { credentialAccount, credentialsFile, deleteCredential, loadCredential, saveCredential } from "../dist/auth/credentials.js";
 
-test("auto storage reads the rotated fallback when stale keychain reads succeed", async () => {
+test("fallback stays authoritative and logout blocks a surviving stale keychain grant", async () => {
   const directory = await mkdtemp(join(tmpdir(), "credential-fallback-"));
   const previous = { ...process.env };
   const originalExists = fs.existsSync;
@@ -28,7 +28,7 @@ test("auto storage reads the rotated fallback when stale keychain reads succeed"
     child.stdin.on("finish", () => {
       if (args[0] === "store" && writable) stored = input;
       if (args[0] === "lookup" && stored) child.stdout.write(stored);
-      queueMicrotask(() => child.emit("close", args[0] === "store" && !writable ? 1 : 0));
+      queueMicrotask(() => child.emit("close", args[0] === "clear" || (args[0] === "store" && !writable) ? 1 : 0));
     });
     return child;
   });
@@ -47,6 +47,26 @@ test("auto storage reads the rotated fallback when stale keychain reads succeed"
     writable = true;
     await saveCredential(account, { ...rotated, refreshToken: "third-refresh" });
     assert.equal((await loadCredential(account)).credential.refreshToken, "third-refresh");
+    // The keychain still holds grant A; the fallback is a distinct login B.
+    // A failed removal must never let recovery of A undo logout of B.
+    await deleteCredential(account);
+    assert.equal(JSON.parse(await readFile(credentialsFile(), "utf8")).credentials[account], null);
+    assert.equal(await loadCredential(account), null);
+    process.env.DOCSLURP_CREDENTIAL_STORE = "keychain";
+    assert.equal(await loadCredential(account), null);
+    process.env.DOCSLURP_CREDENTIAL_STORE = "auto";
+    await saveCredential(account, { ...rotated, refreshToken: "deliberate-new-login" });
+    assert.equal((await loadCredential(account)).credential.refreshToken, "deliberate-new-login");
+    // No available keychain at logout is the same hazard as failed removal.
+    delete process.env.DBUS_SESSION_BUS_ADDRESS;
+    delete process.env.XDG_RUNTIME_DIR;
+    await deleteCredential(account);
+    process.env.DBUS_SESSION_BUS_ADDRESS = "test";
+    assert.equal(await loadCredential(account), null);
+    // An explicit successful keychain login deliberately clears the marker.
+    process.env.DOCSLURP_CREDENTIAL_STORE = "keychain";
+    await saveCredential(account, { ...rotated, refreshToken: "keychain-new-login" });
+    assert.equal((await loadCredential(account)).credential.refreshToken, "keychain-new-login");
   } finally {
     mock.restoreAll(); syncBuiltinESMExports();
     process.env = previous;

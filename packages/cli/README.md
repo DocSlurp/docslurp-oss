@@ -230,6 +230,8 @@ docslurp logout                        # revokes the login on the server, then d
 
 **Where the login is stored.** The CLI uses the OS keychain when it can: macOS Keychain, the Secret Service on Linux (through `secret-tool` from libsecret), or Windows Credential Manager. Otherwise it writes `~/.config/docslurp/credentials.json` (`$XDG_CONFIG_HOME`, `%APPDATA%` on Windows) with mode `0600` in a `0700` directory, and refuses to read that file if its permissions are looser. The keychain helpers are run only from system directories (`/usr/bin`, `%SystemRoot%\System32`), never from `PATH`. Concurrent CLI processes take a lock file next to `credentials.json`, so they never spend the same refresh token twice. `DOCSLURP_CREDENTIAL_STORE=keychain` requires the keychain; `file` forces the file. Each `--profile` (or `DOCSLURP_PROFILE`) keeps one login per API URL, so `docslurp login --profile work --api-url https://docs.example.com` does not replace your default login.
 
+Logout keeps a token-free signed-out marker in the private credentials file, so an unavailable keychain cannot restore an older login when it recovers. Keep this marker until you deliberately log in again; it applies even in explicit keychain mode. If the marker cannot be written, logout reports an error.
+
 **Which credential wins.** Every command, including `docslurp mcp`, uses the first of:
 
 1. `--api-key <key>`
