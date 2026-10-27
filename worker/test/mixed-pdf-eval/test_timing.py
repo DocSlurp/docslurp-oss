@@ -21,5 +21,9 @@ class TimingTests(unittest.TestCase):
                 self.assertFalse(first['cacheHit']);self.assertFalse(second['cacheHit'])
                 self.assertTrue(ocr(b'identical-pixels',Path(tmp),150,6)['cacheHit'])
                 self.assertEqual(invoke.call_count,2)
+                with patch('measure.SPATIAL_HASH','changed-parser-identity'):
+                    changed=ocr(b'identical-pixels',Path(tmp),150,6)
+                    self.assertFalse(changed['cacheHit'])
+                    self.assertEqual(invoke.call_count,3)
 
 if __name__=='__main__':unittest.main()

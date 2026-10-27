@@ -30,6 +30,7 @@ from contract import (evaluation_identity,identity_hash,file_hash,immutable_json
 
 VERSION = "mixed-page-text-preservation@v4"
 MEASURE_HASH = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
+SPATIAL_HASH = hashlib.sha256(Path(__file__).with_name('spatial_evidence.py').read_bytes()).hexdigest()
 OCR_BINARY_HASH = hashlib.sha256(Path(shutil.which("tesseract")).read_bytes()).hexdigest()
 OCR_LANGUAGE_HASH = hashlib.sha256(Path(os.environ.get("TESSDATA_PREFIX","/usr/share/tessdata"),"eng.traineddata").read_bytes()).hexdigest()
 
@@ -251,7 +252,7 @@ def invoke(argv):
     return completed.stdout,elapsed
 
 def ocr(image, cache, dpi, psm, use_cache=True):
-    key=sha(image+f"{OCR_BINARY_HASH}-{OCR_LANGUAGE_HASH}-dpi{dpi}-psm{psm}-txt-tsv-geometry-v3".encode())
+    key=sha(image+f"{OCR_BINARY_HASH}-{OCR_LANGUAGE_HASH}-{MEASURE_HASH}-{SPATIAL_HASH}-dpi{dpi}-psm{psm}-txt-tsv-geometry-v3".encode())
     output=cache/f"{key}.json"
     if use_cache and output.exists():
         return {**json.loads(output.read_text()), "cacheHit":True}

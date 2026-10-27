@@ -444,3 +444,10 @@ capture/render/normalization helpers so their work remains comparable.
 All 58 evaluator tests pass, including retained raw coordinate observations and
 malformed geometry controls. No extraction policy, savings or corpus acceptance
 is established. Region matching and independent conformance approval remain next.
+
+Parsed OCR caches now include both measurement and spatial-helper code hashes in
+their identity, in addition to image/settings/binary/language hashes. A parser
+change therefore cannot reuse stale parsed word boxes under fresh provenance.
+The cache regression confirms re-extraction after changing that identity; all
+58 evaluator tests still pass. This is conservative invalidation, not a claim of
+improved cache efficiency.
