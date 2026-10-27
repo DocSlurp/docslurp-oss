@@ -28,6 +28,7 @@ import { authenticatedByRoute } from "../lib/route-auth.js";
 import { apiStatusError } from "../lib/api-error.js";
 import { validationHook } from "../lib/validation.js";
 import { safeRedirectPath } from "../lib/safe-redirect.js";
+import { issueSsoSession } from "../lib/sso-enforcement.js";
 import { createSsoUnlinkedPass, SSO_UNLINKED_PASS_COOKIE, SSO_UNLINKED_PASS_TTL_SECONDS } from "../lib/sso-unlinked-pass.js";
 
 const ssoConfigSchema = z.object({
@@ -649,7 +650,7 @@ async function orgHasVerifiedDomain(orgId: string, domain: string | null | undef
  * by an org admin, and the account may predate the SSO connection and belong
  * to other orgs. A session is only issued through a link the user created
  * while signed in (a flow started by POST /:orgId/sso/link). A link flow
- * records the link and issues no session; the user keeps their own.
+ * records the link and replaces any temporary session with a trusted one.
  */
 async function completeSsoAssertion(identity: SsoAssertedIdentity, requestRow: SsoRequestRow): Promise<SsoCompletion> {
   if (requestRow.link_user_id) {
@@ -726,6 +727,8 @@ async function finishSsoCallback(c: any, identity: SsoAssertedIdentity, requestR
     return apiStatusError(c, result.status, result.error);
   }
   if (result.kind === "linked") {
+    // Replace a temporary linking session after the IdP has proved the link.
+    await issueBetterAuthSession(c, result.userId, identity.orgId);
     return redirectToApp(c, requestRow.redirect_path ?? "/app/sso?linked=1");
   }
   // A user with 2FA on still needs it after company SSO: start the second-factor
@@ -737,7 +740,7 @@ async function finishSsoCallback(c: any, identity: SsoAssertedIdentity, requestR
     const target = new URLSearchParams({ mfa: "required", redirectTo: safeRedirectPath(requestRow.redirect_path ?? "/app", "/app") });
     return redirectToApp(c, `${MFA_CHALLENGE_PATH}?${target.toString()}`);
   }
-  await issueBetterAuthSession(c, result.userId);
+  await issueBetterAuthSession(c, result.userId, identity.orgId);
   return redirectToApp(c, requestRow.redirect_path ?? "/");
 }
 
@@ -757,7 +760,7 @@ async function setSsoUnlinkedPassCookie(c: any, email: string): Promise<void> {
   });
 }
 
-async function issueBetterAuthSession(c: any, userId: string): Promise<void> {
+async function issueBetterAuthSession(c: any, userId: string, orgId: string): Promise<void> {
   const authContext = (await auth.$context) as {
     secret: string;
     sessionConfig: { expiresIn: number };
@@ -781,7 +784,8 @@ async function issueBetterAuthSession(c: any, userId: string): Promise<void> {
     };
   };
 
-  const session = await authContext.internalAdapter.createSession(userId);
+  // Tagged as an SSO session: the only kind an enforce-SSO domain accepts.
+  const session = await issueSsoSession((id) => authContext.internalAdapter.createSession(id), userId, orgId);
   if (!session) {
     throw new Error("Unable to create auth session");
   }

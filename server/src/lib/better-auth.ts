@@ -12,6 +12,7 @@ import { developmentTrustedOrigins } from "./dev-auth-access.js";
 import { withTrustedAuthClientIp } from "./client-ip.js";
 import { beforeOAuthAccountCreate } from "./oauth-account-linking.js";
 import { createMfaPlugins, resolveMfaConfig, sessionAssuranceFields, sessionAssuranceFor } from "./auth-mfa.js";
+import { ssoEnforcementPlugin } from "./sso-enforcement.js";
 
 /**
  * pg's idle timer freezes with a suspended Fly Machine, leaving idle clients whose
@@ -180,8 +181,8 @@ export const auth = betterAuth({
   trustedOrigins: (request) => developmentTrustedOrigins(securityOptions.trustedOrigins, request),
   baseURL: resolveBetterAuthBaseUrl(process.env),
   ...emailOptions,
-  // Order matters: the MFA gate's after-hook must see every plugin's new session.
-  plugins: [...emailOptions.plugins, ...createMfaPlugins({ pool, config: mfaConfig })],
+  // SSO issuance policy and MFA assurance both apply to every new session.
+  plugins: [...emailOptions.plugins, ssoEnforcementPlugin({ pool }), ...createMfaPlugins({ pool, config: mfaConfig })],
   session: { ...securityOptions.session, additionalFields: sessionAssuranceFields },
   databaseHooks: {
     session: {

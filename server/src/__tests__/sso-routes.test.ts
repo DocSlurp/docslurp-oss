@@ -714,7 +714,9 @@ describe("SSO callback account binding", () => {
     const linked = await victimApp.request(`/v1/auth/oidc/org-1/callback?state=${state}&code=c`, { headers: { Cookie: started.headers.get("set-cookie")!.split(";")[0]! } });
     expect(linked.status).toBe(302);
     expect(linked.headers.get("location")).toContain("/app/sso?linked=1");
-    expect(createSessionMock).not.toHaveBeenCalled();
+    expect(createSessionMock).toHaveBeenCalledWith("victim-1");
+    expect(linked.headers.get("set-cookie")).toContain("session_token");
+    createSessionMock.mockClear();
     expect(db.links).toMatchObject([{ org_id: "org-1", user_id: "victim-1", issuer, subject: "idp-victim" }]);
 
     seedRequest("s5");
