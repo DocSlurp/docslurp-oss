@@ -87,7 +87,8 @@ describe("vision catalog route pricing", () => {
       const route = VISION_MODEL_PROFILES[entry.id]?.openRouterProvider;
       expect(route, entry.id).toBeDefined();
       expect(route!.allow_fallbacks, entry.id).toBe(false);
-      expect(route!.order, entry.id).toEqual((entry.tokenPricing as { providers: readonly string[] }).providers);
+      if (!entry.tokenPricing || !("providers" in entry.tokenPricing)) throw new Error(`Missing pinned providers: ${entry.id}`);
+      expect(route!.order, entry.id).toEqual(entry.tokenPricing.providers);
     }
   });
 });

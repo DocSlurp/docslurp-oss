@@ -30,7 +30,7 @@ import {
 //   This estimator lacks the run-level mode/tier and page-charge deduplication
 //   context needed to allocate that revenue exactly once across assignments,
 //   cascades and router calls. Keep billedUsd at zero as a conservative bound:
-//   positive margin floors can defer work until actual unit revenue is wired in.
+//   active routing refuses positive margin floors until actual unit revenue is wired in.
 //   Do not substitute hypothetical CPU/GPU list rates or AI markup to pass the
 //   guard. This is a routing cost bound, not a customer receipt or fleet margin.
 // ---------------------------------------------------------------------------
