@@ -1,7 +1,7 @@
-import os,tempfile,unittest
+import copy,json,os,tempfile,unittest
 from pathlib import Path
 from unittest.mock import patch
-from measure import ocr
+from measure import ocr,validate_ocr_record
 
 class TimingTests(unittest.TestCase):
     def test_repeated_pixels_reexecute_when_cache_disabled(self):
@@ -21,6 +21,27 @@ class TimingTests(unittest.TestCase):
                 self.assertFalse(first['cacheHit']);self.assertFalse(second['cacheHit'])
                 self.assertTrue(ocr(b'identical-pixels',Path(tmp),150,6)['cacheHit'])
                 self.assertEqual(invoke.call_count,2)
+                validate_ocr_record(first,first['ocrIdentity'])
+                mutations=[lambda r:r.update(rawWordTsvHash='0'*64),
+                           lambda r:r.update(text='changed candidate'),
+                           lambda r:r['wordEvidence']['words'][0].update(text='changed raw word'),
+                           lambda r:r.update(confidence=100),
+                           lambda r:r.update(lowConfidenceWordShare=1),
+                           lambda r:r['ocrIdentity'].update(psm=3),
+                           lambda r:r.update(imageHash='0'*64)]
+                for mutate in mutations:
+                    broken=copy.deepcopy(first);mutate(broken)
+                    with self.assertRaises(RuntimeError):validate_ocr_record(broken,first['ocrIdentity'])
+                # A real cache lookup rejects a corrupt record without invoking
+                # OCR or overwriting the retained failure.
+                record_path=next(Path(tmp).glob('*.json'))
+                original=record_path.read_bytes();broken=json.loads(original)
+                broken['rawWordTsvHash']='0'*64;record_path.write_text(json.dumps(broken))
+                with self.assertRaisesRegex(RuntimeError,'ocr-cache-raw-hash-mismatch'):
+                    ocr(b'identical-pixels',Path(tmp),150,6)
+                self.assertEqual(invoke.call_count,2)
+                self.assertEqual(json.loads(record_path.read_text())['rawWordTsvHash'],'0'*64)
+                record_path.write_bytes(original)
                 with patch('measure.SPATIAL_HASH','changed-parser-identity'):
                     changed=ocr(b'identical-pixels',Path(tmp),150,6)
                     self.assertFalse(changed['cacheHit'])

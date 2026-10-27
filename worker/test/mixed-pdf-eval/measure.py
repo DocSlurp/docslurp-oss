@@ -251,24 +251,49 @@ def invoke(argv):
         raise RuntimeError(f"command-failed:{argv[0]}:{completed.returncode}:{completed.stderr[-500:]!r}")
     return completed.stdout,elapsed
 
+def validate_ocr_record(record, identity):
+    """Reparse retained raw output before trusting derived cached evidence.
+
+    Hashes bind artifacts to the local frozen cache identity; they do not prove
+    visibility, or that TXT and TSV describe the same candidate expression.
+    """
+    if record.get('ocrIdentity')!=identity or record.get('imageHash')!=identity['imageHash']:
+        raise RuntimeError('ocr-cache-identity-mismatch')
+    for value,hash_field in [('text','textHash'),('rawWordTsv','rawWordTsvHash')]:
+        if not isinstance(record.get(value),str) or sha(record[value].encode())!=record.get(hash_field):
+            raise RuntimeError('ocr-cache-raw-hash-mismatch')
+    evidence=parse_tesseract_tsv(record['rawWordTsv'])
+    if evidence!=record.get('wordEvidence'):raise RuntimeError('ocr-cache-derived-words-mismatch')
+    words=evidence['words'];weight=sum(len(word['text']) for word in words)
+    confidence=sum(word['confidence']*len(word['text']) for word in words)/max(1,weight)
+    low_share=sum(word['confidence']<60 for word in words)/max(1,len(words))
+    if record.get('confidence')!=confidence or record.get('lowConfidenceWordShare')!=low_share:
+        raise RuntimeError('ocr-cache-derived-confidence-mismatch')
+
+
 def ocr(image, cache, dpi, psm, use_cache=True):
-    key=sha(image+f"{OCR_BINARY_HASH}-{OCR_LANGUAGE_HASH}-{MEASURE_HASH}-{SPATIAL_HASH}-dpi{dpi}-psm{psm}-txt-tsv-geometry-v3".encode())
+    identity=dict(schema='mixed-ocr-raw-record@1',imageHash=sha(image),binaryHash=OCR_BINARY_HASH,
+                  languageHash=OCR_LANGUAGE_HASH,language='eng',measureHash=MEASURE_HASH,
+                  spatialHash=SPATIAL_HASH,dpi=dpi,psm=psm,formats=['txt','tsv'])
+    key=identity_hash(identity)
     output=cache/f"{key}.json"
     if use_cache and output.exists():
-        return {**json.loads(output.read_text()), "cacheHit":True}
+        started=time.perf_counter();record=json.loads(output.read_text())
+        validate_ocr_record(record,identity)
+        return {**record,"cacheHit":True,"cacheValidationSeconds":time.perf_counter()-started}
     # Atomic replace supports concurrent identical pages without corrupting the cache.
     with tempfile.TemporaryDirectory(prefix="mixed-ocr-",dir=os.environ["TMPDIR"]) as tmp:
         path=Path(tmp)/"page.png"; path.write_bytes(image)
         base=Path(tmp)/"output"
         _,elapsed=invoke(["tesseract",str(path),str(base),"-l","eng","--psm",str(psm),"--dpi",str(dpi),"txt","tsv"])
         parse_started=time.perf_counter()
-        raw_tsv=base.with_suffix('.tsv').read_text()
+        raw_tsv=base.with_suffix('.tsv').read_bytes().decode('utf-8')
         evidence=parse_tesseract_tsv(raw_tsv)
-        words=evidence['words'];text=base.with_suffix('.txt').read_text()
+        words=evidence['words'];text=base.with_suffix('.txt').read_bytes().decode('utf-8')
         weight=sum(len(r['text']) for r in words)
         confidence=sum(r['confidence']*len(r['text']) for r in words)/max(1,weight)
         parse_seconds=time.perf_counter()-parse_started
-        result={"text":text,"seconds":elapsed+parse_seconds,"confidence":confidence,
+        result={"text":text,"textHash":sha(text.encode()),"ocrIdentity":identity,"seconds":elapsed+parse_seconds,"confidence":confidence,
                 "wordEvidence":evidence,"rawWordTsv":raw_tsv,"rawWordTsvHash":sha(raw_tsv.encode()),"evidenceParseSeconds":parse_seconds,
                 "lowConfidenceWordShare":sum(r['confidence']<60 for r in words)/max(1,len(words)),
                 "cacheHit":False,"imageHash":sha(image),"execution":{"capturedAt":datetime.now(timezone.utc).isoformat(),"host":socket.gethostname(),"workers":os.environ.get("MIXED_EVAL_WORKERS"),"attempt":os.environ.get("MIXED_EVAL_ATTEMPT")}}

@@ -539,3 +539,22 @@ A fresh source-visible Sol Describer is diagnosing build limitations versus actu
 contract contradictions for attempt 7. Its clean handoff must preserve difficulty
 targets and passed P ancestry, with no failed E content or source-visible witnesses
 sent to the next Builder. The user's total cap remains twenty attempts.
+
+### Independent grounding ownership audit
+
+The original-control ownership audit confirmed that regional literal matching
+cannot establish acceptance. Candidate TXT can disagree with TSV words; extra
+operators beyond tight regions, unvalidated reference membership, hidden native
+text and stale supplied evidence remain unsupported. Twelve focused reviewer
+tests passed; fresh native/OCR control checks reproduced their limited expected
+diagnostic distinction. Neither those checks nor the current diagnostic certify
+visibility, operative meaning or complete expression extent.
+
+One concrete cache gap is now corrected: each OCR record binds its exact image,
+settings and code/tool/language identities; cached TXT/TSV hashes are recomputed,
+TSV is reparsed and derived words/confidence must agree before reuse. Invalid
+records fail without overwrite or silent re-extraction. Seven mutation probes and
+an actual corrupt-cache lookup exercise this path; all 66 focused evaluator tests
+pass. Raw-artifact consistency still does not prove TXT-to-word expression ownership
+or visible support. Formula acceptance remains closed while those contracts are
+developed separately. The independent coordinate audit is still pending.
