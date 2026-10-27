@@ -1,16 +1,23 @@
 # Workspace settings from chat
 
-The chat assistant can read supported workspace settings and prepare an exact
+This is a feature of the DocSlurp app's signed-in chat only. The chat
+assistant there can read supported workspace settings and prepare an exact
 change when you ask for one. In suggestions mode it also offers a change on its
 own when the turn's results show an ingestion or search problem it could fix.
-Suggestions mode is on by default in the DocSlurp app (switch it off with the
-composer's **Suggestions** toggle) and off for `/v1/chat` callers unless they
-send `agent: {suggestions: true}` (see [Agent limits](search-api.md#agent-limits)).
-It governs only the chat assistant: an MCP client can call
-`proposeWorkspaceSettings` directly whenever its key allows it. A proposal does not save
-settings. Review its before/after values, impact and work estimate, then select
-**Apply** in the structured proposal card. Assistant prose and document content
-cannot approve a change.
+Suggestions mode is on by default in the app (switch it off with the composer's
+**Suggestions** toggle). A proposal does not save settings. Review its
+before/after values, impact and work estimate, then select **Apply** in the
+structured proposal card. Assistant prose and document content cannot approve a
+change.
+
+The settings tools are never available outside the app: not to API keys of any
+type (server or publishable), MCP clients, the OpenAI-compatible endpoint,
+capability tokens or the SDK, and `agent.suggestions` is ignored there (see
+[Settings suggestions are app-only](search-api.md#settings-suggestions-are-app-only)).
+The server decides this from authentication (a Better Auth session of the app),
+never from a request field, so a product built on DocSlurp cannot hand these
+tools to its own end users. To change settings from code, use
+`PATCH /v1/workspaces/:id` with a server key that has `workspaces:manage`.
 
 For example, ask “Turn on video frame analysis for this workspace.” The assistant
 can call:
@@ -27,8 +34,9 @@ Other supported proposals include:
 
 `getWorkspaceSettings` reads the current saved values. `proposeWorkspaceSettings`
 only prepares an actor-, conversation- and workspace-bound proposal. There is no
-MCP or model tool that applies it. The authenticated UI posts the opaque token to
-`POST /v1/workspaces/:workspaceId/settings-proposals/apply`, with a separate
+MCP or model tool that applies it. The app posts the opaque token to
+`POST /v1/workspaces/:workspaceId/settings-proposals/apply` (signed-in sessions
+only; API keys are refused), with a separate
 `reprocessExisting` boolean. Tokens expire after ten minutes; expired or stale
 proposals must be regenerated, rather than silently replanned or applied to a
 new configuration.
@@ -65,10 +73,9 @@ its balance, candidate depth and result ordering. Other settings—including
 secrets, ownership, retention, budgets, privacy mode, model selection and
 webhooks—are outside this tool's allowlist.
 
-Workspace editor access is required. Server API keys additionally need
-`workspaces:manage`, the correct organization and a matching workspace scope;
-client and read-only keys cannot apply changes. Proposals also belong to the
-current authenticated actor and conversation. The server checks permissions and
+Workspace editor access is required, from a signed-in app session; no API key
+can prepare or apply a proposal. Proposals also belong to the current
+authenticated user, session and conversation. The server checks permissions and
 state again under its configuration lock, preserves unrelated nested settings,
 and records the settings change and audit entry atomically. The next chat turn
 reads saved state afresh; the assistant should verify it instead of assuming a

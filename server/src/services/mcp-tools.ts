@@ -11,7 +11,7 @@ import { Hono, type Context } from "hono";
 import type { ApiErrorCode } from "@docslurp/shared";
 
 import { apiKeyHasAnyScope } from "../lib/api-key-authorization.js";
-import { getApiKey, getRequestActor, loadActorScopedWorkspace, resolveActorWorkspaceId, setRequestActor, type RequestActor } from "../lib/request-actor.js";
+import { getApiKey, getRequestActor, isFirstPartyAppActor, loadActorScopedWorkspace, resolveActorWorkspaceId, setRequestActor, type RequestActor } from "../lib/request-actor.js";
 import { listWorkspaces } from "./workspaces.js";
 import { apiKeyCanUseWorkspace } from "../lib/api-key-workspace-scope.js";
 import { completeUploadInput, INLINE_UPLOAD_MAX_BYTES, mediaEvidenceInput, fullIndexInput, listWorkspacesInput, mcpManifest, mcpTools, suggestQueriesInput, uploadInput, uploadStatusInput } from "./mcp-catalog.js";
@@ -67,10 +67,10 @@ const mcpAdapterRoutes = new Hono()
   .use("*", publicErrorMiddleware)
   .onError(spendAwareErrorHandler)
   .get("/manifest", async (c) => {
-    return c.json(mcpManifest(routeBaseUrl(c.req.url), getApiKey(c)?.scopes, getApiKey(c)?.keyType));
+    return c.json(mcpManifest(routeBaseUrl(c.req.url), getApiKey(c)?.scopes, getApiKey(c)?.keyType, { firstPartyApp: isFirstPartyAppActor(c.get("requestActor")) }));
   })
   .get("/tools", async (c) => {
-    const manifest = mcpManifest(routeBaseUrl(c.req.url), getApiKey(c)?.scopes, getApiKey(c)?.keyType);
+    const manifest = mcpManifest(routeBaseUrl(c.req.url), getApiKey(c)?.scopes, getApiKey(c)?.keyType, { firstPartyApp: isFirstPartyAppActor(c.get("requestActor")) });
     return c.json({ tools: manifest.capabilities.filter((capability) => capability.category === "tool") });
   })
   .post("/tools/:id", async (c) => {
@@ -79,6 +79,8 @@ const mcpAdapterRoutes = new Hono()
     const toolId = c.req.param("id");
     const tool = mcpTools(routeBaseUrl(c.req.url)).find(item => item.id === toolId);
     if (!tool) return adapterError(c, 404, "Unknown MCP tool");
+    // App-only settings tools answer like unknown tools to every other caller.
+    if (tool.firstPartyAppOnly && (apiKey || !isFirstPartyAppActor(actor))) return adapterError(c, 404, "Unknown MCP tool");
     if (apiKey && !(tool.keyAccess ? tool.keyAccess(apiKey) : apiKeyHasAnyScope(apiKey, tool.scopes))) return adapterError(c, 403, "Forbidden");
     let body: Record<string, unknown>;
     try {
@@ -329,7 +331,7 @@ const mcpAdapterRoutes = new Hono()
   })
   .get("/resources/:id", async (c) => {
     if (c.req.param("id") === "capabilities") {
-      return c.json(mcpManifest(routeBaseUrl(c.req.url), getApiKey(c)?.scopes, getApiKey(c)?.keyType));
+      return c.json(mcpManifest(routeBaseUrl(c.req.url), getApiKey(c)?.scopes, getApiKey(c)?.keyType, { firstPartyApp: isFirstPartyAppActor(c.get("requestActor")) }));
     }
 
     return adapterError(c, 404, "Unknown MCP resource");

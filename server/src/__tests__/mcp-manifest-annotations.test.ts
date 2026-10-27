@@ -24,9 +24,12 @@ describe("capability manifest annotations", () => {
       uploadEstimate: { readOnly: true, idempotent: true, consequential: false },
       getJob: { readOnly: true, idempotent: true, consequential: false },
     };
+    // Settings proposals are first-party-app only: no API key sees them, whatever its scopes.
     const managed = mcpManifest("https://example.test", ["search", "workspaces:manage"], "server");
-    expect(managed.capabilities.find(tool => tool.id === "proposeWorkspaceSettings")?.annotations).toMatchObject({ readOnly: true, idempotent: true, consequential: false });
-    expect(managed.capabilities.some(tool => tool.id === "applySettingsProposal")).toBe(false);
+    expect(managed.capabilities.some(tool => tool.id === "proposeWorkspaceSettings")).toBe(false);
+    const app = mcpManifest("https://example.test", undefined, undefined, { firstPartyApp: true });
+    expect(app.capabilities.find(tool => tool.id === "proposeWorkspaceSettings")?.annotations).toMatchObject({ readOnly: true, idempotent: true, consequential: false });
+    expect(app.capabilities.some(tool => tool.id === "applySettingsProposal")).toBe(false);
     const tools = manifest.capabilities.filter((capability) => capability.category === "tool");
     expect(new Set(tools.map((tool) => tool.id))).toEqual(new Set(Object.keys(expected)));
     for (const tool of tools) {

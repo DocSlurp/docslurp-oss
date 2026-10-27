@@ -447,8 +447,6 @@ export type ChatInput = {
     tools?: boolean;
     /** false: no web tools this turn. Omitted or true: offered only when the deployment, workspace and key allow them. */
     web?: boolean;
-    /** Suggestions mode (default false): flag ingest and search problems and propose settings changes for a person to apply. */
-    suggestions?: boolean;
   };
   /** Retrieval overrides for this request only; workspace defaults stay as they are. */
   retrieval?: {
@@ -475,6 +473,7 @@ export type ChatResponse = {
   runtime: { startedAt: string; completedAt: string; totalMs: number };
   /** Diagnostics. Search-agent turns report the modes they ran with; other fields may change between releases. */
   debug?: {
+    /** `suggestions` is always false for API keys: settings suggestions are a DocSlurp app feature. */
     modes?: { web: "on" | "off" | "unavailable"; suggestions: boolean };
     [key: string]: unknown;
   };

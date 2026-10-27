@@ -116,6 +116,9 @@ function buildSearchSettings(
   };
 }
 
+/** The first-party app's signed-in session, the only actor that may change settings from chat. */
+const appSessionActor = { type: "session", userId: "user-1", sessionId: "app-session-1", user: { id: "user-1", email: "u@example.test", name: "User" } } as never;
+
 describe("chatWorkspace", () => {
   it("fails closed when ownership of a caller-provided session cannot be checked", async () => {
     sqlMock.mockRejectedValueOnce(new Error("database unavailable"));
@@ -208,7 +211,7 @@ describe("chatWorkspace", () => {
 
       const response = await chatWorkspace({
         workspaceId: "ws-1", userId: "user-1", query,
-        history: [], allowConfiguration,
+        history: [], allowConfiguration, actor: appSessionActor,
       });
 
       expect(response.answer).toContain("No indexed passages matched");
@@ -225,6 +228,44 @@ describe("chatWorkspace", () => {
       expect(hybridSearch).toHaveBeenCalledOnce();
     },
   );
+
+  it.each([
+    { keyType: "server", renames: true },
+    { keyType: "client", renames: false },
+  ])("never changes thread settings from an API key's message ($keyType key)", async ({ keyType, renames }) => {
+    sqlMock.mockResolvedValue([]);
+    getWorkspace.mockResolvedValue({ id: "ws-1", systemPrompt: null });
+    loadWorkspaceWholeCorpusContext.mockResolvedValue({
+      eligible: false, reason: "empty-workspace", results: [],
+      stats: { documentCount: 0, chunkCount: 0, tokenEstimate: 0, charEstimate: 0, maxDocuments: 12, maxChunks: 24, maxTokens: 12000, maxChars: 60000 },
+    });
+    hybridSearch.mockResolvedValue({ sessionId: "search-1", results: [] });
+    const query = "Enable search reranking for this workspace";
+    const actor = { type: "apiKey", userId: "user-1", apiKey: { keyId: "key-1", userId: "user-1", orgId: "org-1", keyType, scopes: ["search", "chat", "workspaces:manage"], workspaceIds: [], allowedDomains: [], rateLimitRpm: null, rateLimitPpd: 0, rateLimits: [] } } as never;
+    await chatWorkspace({ workspaceId: "ws-1", userId: "user-1", query, history: [], actor, agent: { suggestions: true } as never });
+    expect(configureSearchFromChat).not.toHaveBeenCalled();
+    // Public (client) key visitors cannot rename the customer's workspace either.
+    if (renames) expect(refineWorkspaceNames).toHaveBeenCalledOnce();
+    else expect(refineWorkspaceNames).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { name: "app session", actor: appSessionActor, expected: true },
+    { name: "server key", actor: { type: "apiKey", userId: "user-1", apiKey: { keyId: "k", userId: "user-1", orgId: "org-1", keyType: "server", scopes: ["search", "chat", "workspaces:manage"], workspaceIds: [], allowedDomains: [], rateLimitRpm: null, rateLimitPpd: 0, rateLimits: [] } } as never, expected: false },
+    { name: "client key", actor: { type: "apiKey", userId: "user-1", apiKey: { keyId: "k", userId: "user-1", orgId: "org-1", keyType: "client", scopes: ["search", "chat"], workspaceIds: [], allowedDomains: ["example.com"], rateLimitRpm: null, rateLimitPpd: 0, rateLimits: [] } } as never, expected: false },
+  ])("runs suggestions mode only for the first-party app ($name), whatever agent.suggestions says", async ({ actor, expected }) => {
+    sqlMock.mockResolvedValue([]);
+    getWorkspace.mockResolvedValue({ id: "ws-1", orgId: "org-1", systemPrompt: null });
+    runChatMcpAgent.mockResolvedValue({ answer: "Answer.", citations: [], toolCalls: [], finishReason: "stop", usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2, costCents: 0 } });
+    const previous = process.env.OPENROUTER_API_KEY;
+    process.env.OPENROUTER_API_KEY = "fake";
+    try {
+      await chatWorkspace({ workspaceId: "ws-1", userId: "user-1", query: "Find evidence", history: [], actor, agent: { suggestions: true } as never });
+      expect((runChatMcpAgent.mock.calls.at(-1)![0] as { suggestions: boolean }).suggestions).toBe(expected);
+    } finally {
+      if (previous === undefined) delete process.env.OPENROUTER_API_KEY; else process.env.OPENROUTER_API_KEY = previous;
+    }
+  });
 
   it("tells the agent exactly which search setting the message changed, and that it is thread-only", async () => {
     sqlMock.mockResolvedValue([]);

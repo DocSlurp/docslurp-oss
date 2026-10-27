@@ -256,22 +256,28 @@ describe("mcpRoutes", () => {
   });
 
   it.each([
-    { keyType: "server" as const, scopes: ["search"], mayPropose: false },
-    { keyType: "server" as const, scopes: ["search", "workspaces:manage"], mayPropose: true },
-    { keyType: "client" as const, scopes: ["search", "workspaces:manage"], mayPropose: false },
-  ])("discovers proposals only for manage-scoped server keys: %j", async ({ keyType, scopes, mayPropose }) => {
+    { keyType: "server" as const, scopes: ["search"] },
+    { keyType: "server" as const, scopes: ["search", "ingest", "chat", "workspaces:manage"] },
+    { keyType: "client" as const, scopes: ["search", "workspaces:manage"] },
+  ])("never lists or runs proposeWorkspaceSettings for an API key, whatever its scopes: %j", async ({ keyType, scopes }) => {
     validateApiKey.mockResolvedValue({ ...validatedKey, keyType, scopes });
     const response = await app.request("/mcp/tools", { headers: { Authorization: "Bearer dslp_test" } });
+    const call = await app.request("/mcp/tools/proposeWorkspaceSettings", {
+      method: "POST", headers: { Authorization: "Bearer dslp_test", "Content-Type": "application/json" },
+      body: JSON.stringify({ changes: { retrieval: { useRerank: true } } }),
+    });
     if (keyType === "client") {
       expect(response.status).toBe(403);
+      expect(call.status).toBe(403);
       return;
     }
     expect(response.status).toBe(200);
     const ids = (await response.json()).tools.map((tool: { id: string }) => tool.id);
     expect(ids).toContain("getWorkspaceSettings");
-    expect(ids.includes("proposeWorkspaceSettings")).toBe(mayPropose);
+    expect(ids).not.toContain("proposeWorkspaceSettings");
     expect(ids).not.toContain("applyWorkspaceSettings");
     expect(ids).not.toContain("applySettingsProposal");
+    expect(call.status).toBe(404);
   });
 
   it.each(["null", "[]", "{", '"string"'])("rejects malformed tool bodies with HTTP 400: %s", async (body) => {

@@ -8,12 +8,13 @@ import { searchInputSchema, batchSearchInputSchema, workspaceChatInputSchema } f
 import { currentSearchSignal } from "../search/query-bounds.js";
 import { currentChatAgentSignal } from "../lib/chat-agent-context.js";
 
-function setup(ids = ["search"], options: { toolBudgetMs?: () => number; webTools?: boolean; userText?: string[]; maxToolCalls?: number; suggestions?: boolean } = {}) {
+function setup(ids = ["search"], options: { toolBudgetMs?: () => number; webTools?: boolean; userText?: string[]; maxToolCalls?: number; suggestions?: boolean; settingsTools?: boolean; publicClient?: boolean } = {}) {
   const dispatch = vi.fn<McpDispatch>(async () => Response.json({ results: [] }));
   const onActivity = vi.fn();
   const controller = new AbortController();
   const context = createChatMcpTools({ manifest: { capabilities: ids.map(id => ({ id, title: id, category: "tool", description: id, inputSchema: { type: "object" } })) },
-    dispatch, workspaceId: "selected", signal: controller.signal, onActivity, ...options });
+    // The first-party app's turn unless a test says otherwise (settings tools are app-only).
+    dispatch, workspaceId: "selected", signal: controller.signal, onActivity, settingsTools: true, ...options });
   const execute = (name: string, input: unknown = {}, id = "call") => context.tools[name]!.execute!(input, { toolCallId: id, messages: [], context: {} });
   return { ...context, get failure() { return context.failure; }, execute, dispatch, onActivity, controller };
 }
@@ -288,6 +289,32 @@ describe("chat MCP tool retrieval controls", () => {
   });
 });
 
+describe("first-party-app settings tools", () => {
+  const SETTINGS = ["getWorkspaceSettings", "proposeWorkspaceSettings"];
+
+  it("never offers settings tools unless the turn is the first-party app's, even when the catalog lists them", () => {
+    for (const settingsTools of [undefined, false]) {
+      const context = createChatMcpTools({ manifest: { capabilities: [...SETTINGS, "search"].map(id => ({ id, title: id, category: "tool", description: id, inputSchema: { type: "object" } })) },
+        dispatch: vi.fn<McpDispatch>(), workspaceId: "selected", signal: new AbortController().signal, settingsTools, suggestions: true });
+      expect(Object.keys(context.tools)).toEqual(["search"]);
+    }
+    expect(Object.keys(setup([...SETTINGS, "search"]).tools)).toEqual([...SETTINGS, "search"]);
+  });
+
+  it("withholds upload status from browser (client) key chats", () => {
+    expect(Object.keys(setup(["getUploadStatus", "search"], { publicClient: true }).tools)).toEqual(["search"]);
+    expect(Object.keys(setup(["getUploadStatus", "search"]).tools)).toEqual(["getUploadStatus", "search"]);
+  });
+
+  it("lists proposeWorkspaceSettings only for the first-party app, never for any API key or by default", () => {
+    const ids = (...args: Parameters<typeof mcpManifest>) => mcpManifest(...args).capabilities.map(item => item.id);
+    expect(ids("https://x.test")).not.toContain("proposeWorkspaceSettings");
+    expect(ids("https://x.test", ["search", "chat", "ingest", "workspaces:manage"], "server")).not.toContain("proposeWorkspaceSettings");
+    expect(ids("https://x.test", ["search", "chat", "workspaces:manage"], "client", { firstPartyApp: true })).not.toContain("proposeWorkspaceSettings");
+    expect(ids("https://x.test", undefined, undefined, { firstPartyApp: true })).toContain("proposeWorkspaceSettings");
+  });
+});
+
 describe("chat agent tool schemas", () => {
   // Anthropic (direct, Bedrock, Vertex) answers 400 "input_schema does not support oneOf,
   // allOf, or anyOf at the top level"; OpenAI rejects them (and `not`) at the top level too.
@@ -404,7 +431,7 @@ describe("trusted workspace settings proposals", () => {
     expect(t.onActivity.mock.calls.at(-1)?.[0]).toMatchObject({ status: "success", settingsProposal });
     expect(t.details.get("call")?.settingsProposal).toEqual(settingsProposal);
     expect(JSON.stringify(modelResult)).not.toContain(settingsProposal.token);
-    const ids = mcpManifest("https://example.test").capabilities.map(item => item.id);
+    const ids = mcpManifest("https://example.test", undefined, undefined, { firstPartyApp: true }).capabilities.map(item => item.id);
     expect(ids).toContain("proposeWorkspaceSettings");
     expect(ids.some(id => /apply.*settings|settings.*apply/i.test(id))).toBe(false);
   });
