@@ -1,6 +1,7 @@
 import { Hono } from "hono";
 
 import {
+  appDbPool,
   auth,
   getDevSeedAccountCredential,
   handleAuthRequest,
@@ -139,6 +140,10 @@ authRoutes.post("/api/dev-auth/seed-signin", async (c) => {
 
   const session = await authContext.internalAdapter.createSession(existingUser.user.id);
   if (!session) return fail("Unable to create auth session", 500);
+  // Seed users skip the second factor, in development only (this route 404s
+  // anywhere else): the quick login stays one click even after a developer
+  // enrols TOTP on a seed account. Use the password form to exercise MFA.
+  await appDbPool.query(`update session set "mfaVerified" = true where token = $1`, [session.token]);
 
   const cookie = signedSessionCookie(authContext, session.token);
   const response = isFormSubmission
