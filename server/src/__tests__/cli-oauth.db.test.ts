@@ -2,6 +2,7 @@ import { serve } from "@hono/node-server";
 import { createHash, randomBytes } from "node:crypto";
 import { Hono } from "hono";
 import type { AddressInfo } from "node:net";
+import type postgres from "postgres";
 import type { Pool } from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -14,8 +15,12 @@ import { startMigratedPostgres } from "@docslurp/worker/testing";
  * REST-audience tokens on /v1 with mapped scopes, and every negative case the
  * identity boundary requires. Only the browser session and the default
  * workspace lookup are stand-ins.
+ * CLI_OAUTH_TEST_DATABASE_URL enables real concurrent transactions and owner
+ * PATCH checks; point it only at a disposable, migrated Postgres database.
  */
 
+const sqlConnection = vi.hoisted(() => ({ current: null as ReturnType<typeof postgres> | null }));
+vi.mock("../db.js", () => ({ get sql() { return sqlConnection.current; } }));
 const pool = vi.hoisted(() => ({ current: null as Pool | null }));
 vi.mock("../lib/auth.js", () => ({
   auth: { api: { getSession: async () => null } },
@@ -57,15 +62,18 @@ const cookie = (user: string) => `docslurp-test-session=${user}`;
 const q = (sqlText: string, params: unknown[] = []) => pool.current!.query(sqlText, params);
 
 beforeAll(async () => {
-  const pg = await startMigratedPostgres();
+  const pg = process.env.CLI_OAUTH_TEST_DATABASE_URL
+    ? { url: process.env.CLI_OAUTH_TEST_DATABASE_URL, stop: async () => {} }
+    : await startMigratedPostgres();
   stopDb = pg.stop;
+  sqlConnection.current = (await import("postgres")).default(pg.url, { max: 1 });
   const { Pool } = await import("pg");
-  pool.current = new Pool({ connectionString: pg.url, max: 1 });
+  pool.current = new Pool({ connectionString: pg.url, max: process.env.CLI_OAUTH_TEST_DATABASE_URL ? 24 : 1 });
   for (const user of ["owner", "other"]) {
-    await q(`insert into "user"(id, name, email) values ($1, $1, $1 || '@example.test')`, [user]);
-    await q(`insert into "session"(id, "expiresAt", token, "userId") values ('sess-' || $1, now() + interval '1 day', 'tok-' || $1, $1)`, [user]);
-    await q(`insert into organizations(id, name, slug, created_by_user_id) values ('org-' || $1, 'Org ' || $1, 'org-' || $1, $1)`, [user]);
-    await q(`insert into org_memberships(org_id, user_id, role) values ('org-' || $1, $1, 'owner')`, [user]);
+    await q(`insert into "user"(id, name, email) values ($1, $1, $1 || '@example.test') on conflict do nothing`, [user]);
+    await q(`insert into "session"(id, "expiresAt", token, "userId") values ('sess-' || $1, now() + interval '1 day', 'tok-' || $1, $1) on conflict do nothing`, [user]);
+    await q(`insert into organizations(id, name, slug, created_by_user_id) values ('org-' || $1, 'Org ' || $1, 'org-' || $1, $1) on conflict do nothing`, [user]);
+    await q(`insert into org_memberships(org_id, user_id, role) values ('org-' || $1, $1, 'owner') on conflict do nothing`, [user]);
   }
 
   requestActor = await import("../lib/request-actor.js");
@@ -73,13 +81,14 @@ beforeAll(async () => {
   const { mcpOAuthMetadataRoutes, mcpOAuthRoutes } = await import("../routes/mcp-oauth.js");
   const { mcpRoutes } = await import("../routes/mcp.js");
   const { sessionAuth } = await import("../middleware/session-auth.js");
+  const { apiKeysRoutes } = await import("../routes/api-keys.js");
   const { whoamiRoutes } = await import("../routes/whoami.js");
   const { uploadsRoutes } = await import("../routes/uploads.js");
   const { workspacesRoutes } = await import("../routes/workspaces.js");
   const app = new Hono();
   app.use("/v1/*", sessionAuth);
   app.route("/", mcpOAuthMetadataRoutes).route("/oauth/mcp", mcpOAuthRoutes)
-    .route("/v1/whoami", whoamiRoutes).route("/v1/uploads", uploadsRoutes)
+    .route("/v1/api-keys", apiKeysRoutes).route("/v1/whoami", whoamiRoutes).route("/v1/uploads", uploadsRoutes)
     .route("/v1/workspaces", workspacesRoutes).route("/v1/mcp", mcpRoutes);
   server = serve({ fetch: app.fetch, hostname: "127.0.0.1", port: 0 });
   if (!server.listening) await new Promise<void>((resolve) => server.once("listening", resolve));
@@ -93,6 +102,7 @@ afterAll(async () => {
     if ("closeAllConnections" in server) server.closeAllConnections();
     await new Promise<void>((resolve) => server.close(() => resolve()));
   }
+  await sqlConnection.current?.end();
   await pool.current?.end();
   await stopDb?.();
 });
@@ -302,6 +312,24 @@ describe("delegated tokens are never platform admins", () => {
 });
 
 describe("scope mapping on the REST API", () => {
+  it.skipIf(!process.env.CLI_OAUTH_TEST_DATABASE_URL)("applies live owner key restrictions to current and refreshed tokens", async () => {
+    const issued = await login({ scope: "search read chat" });
+    const key = await oauth.validateOAuthApiToken(issued.access_token);
+    const patch = (user: string) => fetch(`${api}/api-keys/${key!.keyId}`, {
+      method: "PATCH", headers: { cookie: cookie(user), origin, "content-type": "application/json" },
+      body: JSON.stringify({ scopes: ["search"], rateLimitRpm: 7, rateLimitPpd: 23, materializationPolicy: { maxPagesPerQuery: 2 } }),
+    });
+    expect((await patch("other")).status).toBe(404);
+    expect((await patch("owner")).status).toBe(200);
+    const refreshed = await token({ grant_type: "refresh_token", refresh_token: issued.refresh_token });
+    expect(refreshed.status).toBe(200);
+    for (const access of [issued.access_token, refreshed.body.access_token]) {
+      const current = await oauth.validateOAuthApiToken(access);
+      expect(current).toMatchObject({ scopes: ["search"], rateLimitRpm: 7, rateLimitPpd: 23, materializationPolicy: { maxPagesPerQuery: 2 } });
+      expect(current!.scopes).not.toContain("artifacts");
+    }
+  });
+
   it("CLI tokens need the web scope for paid web tools; MCP tokens keep search", async () => {
     const { apiKeyCanUseWebTools } = await import("../lib/web-tool-access.js");
     const searchOnly = await requestActor.resolveApiKeyActor(`Bearer ${(await login({ scope: "search" })).access_token}`);
@@ -526,6 +554,30 @@ describe("device authorization grant", () => {
     expect(optedTokens.body.scope).toBe("search read chat");
     const me = await (await whoami(optedTokens.body.access_token)).json() as Record<string, any>;
     expect(me.credential.apiKeyScopes.sort()).toEqual(["artifacts", "chat", "search"]);
+  });
+
+  it.skipIf(!process.env.CLI_OAUTH_TEST_DATABASE_URL)("serializes different accounts sharing the last IP attempt", async () => {
+    const ip = "203.0.113.42";
+    await q("insert into mcp_oauth_device_attempts(user_id, ip) select 'owner', $1 from generate_series(1,19)", [ip]);
+    for (let i = 0; i < 16; i++) {
+      await q(`insert into "user"(id, name, email) values ($1, $1, $1 || '@example.test') on conflict do nothing`, [`account-${i}`]);
+    }
+    const admitted = await Promise.all(Array.from({ length: 16 }, async (_, i) => {
+      const db = await pool.current!.connect();
+      try {
+        await db.query("BEGIN");
+        await oauth.lockDeviceAttempts(db, `account-${i}`, i % 2 ? `::ffff:${ip}` : ip);
+        const allowed = !await oauth.deviceAttemptsExhausted(db, `account-${i}`, i % 2 ? `::ffff:${ip}` : ip);
+        if (allowed) await oauth.recordDeviceAttemptFailure(db, `account-${i}`, i % 2 ? `::ffff:${ip}` : ip);
+        await db.query("COMMIT");
+        return allowed;
+      } catch (error) {
+        await db.query("ROLLBACK");
+        throw error;
+      } finally { db.release(); }
+    }));
+    expect(admitted.filter(Boolean)).toHaveLength(1);
+    expect((await q("select count(*)::int n from mcp_oauth_device_attempts where ip=$1", [ip])).rows[0].n).toBe(20);
   });
 
   it("counts concurrent wrong codes atomically against the lockout", async () => {

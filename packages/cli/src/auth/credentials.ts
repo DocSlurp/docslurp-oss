@@ -433,6 +433,12 @@ export type LoadedCredential = { credential: StoredCredential; source: string };
 
 export async function loadCredential(account: string): Promise<LoadedCredential | null> {
   const mode = storeMode();
+  // A fallback is the active store until logout, including after the
+  // keychain recovers. Timestamps cannot safely order refresh rotations.
+  if (mode === "auto") {
+    const credential = await fileStore.get(account);
+    if (credential) return { credential, source: fileStore.label() };
+  }
   if (mode !== "file") {
     const keychain = platformKeychain();
     if (!keychain && mode === "keychain") throw new CredentialStoreError("DOCSLURP_CREDENTIAL_STORE=keychain, but no OS keychain is available.");
@@ -450,6 +456,12 @@ export async function loadCredential(account: string): Promise<LoadedCredential 
 /** Stores the credential and returns where it went. Auto mode falls back to the file, and says so. */
 export async function saveCredential(account: string, credential: StoredCredential, warn: (message: string) => void = () => {}): Promise<string> {
   const mode = storeMode();
+  // Once auto mode falls back, keep rotating in that store. Returning to a
+  // keychain while an old fallback cannot be removed could replay its token.
+  if (mode === "auto" && await fileStore.get(account)) {
+    await fileStore.set(account, credential);
+    return fileStore.label();
+  }
   if (mode !== "file") {
     const keychain = platformKeychain();
     if (keychain) {

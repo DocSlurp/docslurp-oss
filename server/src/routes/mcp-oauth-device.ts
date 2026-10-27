@@ -152,7 +152,7 @@ deviceVerificationRoutes.post("/", async (c) => {
   }
 
   const outcome = await transaction(async (db): Promise<Outcome> => {
-    await lockDeviceAttempts(db, actor.userId);
+    await lockDeviceAttempts(db, actor.userId, ip);
     if (await deviceAttemptsExhausted(db, actor.userId, ip)) return { kind: "locked" };
     const miss = async (kind: "invalid" | "missing"): Promise<Outcome> => {
       await recordDeviceAttemptFailure(db, actor.userId, ip);

@@ -1,7 +1,8 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { parseIp } from "@docslurp/shared/client-ip";
 import type { PoolClient } from "pg";
 import { appDbPool } from "../lib/auth.js";
-import { parseApiKeyRateLimits, type ValidatedKey } from "./api-keys.js";
+import { parseApiKeyRateLimits, parseKeyMaterializationPolicy, type ValidatedKey } from "./api-keys.js";
 
 export const MCP_SCOPES = ["search", "chat", "read", "ingest"] as const;
 /**
@@ -161,6 +162,7 @@ export async function issueTokens(db: PoolClient, grantId: string, audience: key
 export async function validateMcpToken(raw: string, resource: string): Promise<ValidatedKey | null> {
   const { rows } = await appDbPool.query(`
     SELECT g.*, t.expires_at AS token_expires_at, c.name AS client_name,
+           k.materialization_policy AS key_materialization_policy, k.scopes AS key_scopes, k.rate_limit_rpm AS key_rpm, k.rate_limit_ppd AS key_ppd,
            k.rate_limits AS key_rate_limits, k.workspace_ids AS key_workspace_ids FROM mcp_oauth_tokens t
     JOIN mcp_oauth_grants g ON g.id=t.grant_id
     JOIN mcp_oauth_clients c ON c.id=g.client_id
@@ -174,8 +176,9 @@ export async function validateMcpToken(raw: string, resource: string): Promise<V
   if (!row) return null;
   return {
     keyId: row.api_key_id, userId: row.user_id, orgId: row.org_id,
-    keyType: "server", allowedDomains: [], scopes: row.scopes,
-    rateLimitRpm: null, rateLimitPpd: 10000, rateLimits: parseApiKeyRateLimits(row.key_rate_limits),
+    keyType: "server", allowedDomains: [], scopes: (Array.isArray(row.scopes) ? row.scopes : []).filter((scope: string) => Array.isArray(row.key_scopes) && row.key_scopes.includes(scope)),
+    rateLimitRpm: row.key_rpm, rateLimitPpd: row.key_ppd, rateLimits: parseApiKeyRateLimits(row.key_rate_limits),
+    materializationPolicy: parseKeyMaterializationPolicy(row.key_materialization_policy),
     workspaceIds: Array.isArray(row.key_workspace_ids) ? row.key_workspace_ids : [],
     // Delegated tokens are never platform admins and never app sessions (see request-actor.ts).
     oauth: {
@@ -197,6 +200,7 @@ export async function validateOAuthApiToken(raw: string): Promise<ValidatedKey |
   const resource = apiResource("");
   const { rows } = await appDbPool.query(`
     SELECT g.*, t.expires_at AS token_expires_at, c.name AS client_name, c.first_party,
+           k.materialization_policy AS key_materialization_policy, k.scopes AS key_scopes, k.rate_limit_rpm AS key_rpm, k.rate_limit_ppd AS key_ppd,
            k.rate_limits AS key_rate_limits, k.workspace_ids AS key_workspace_ids
     FROM mcp_oauth_tokens t
     JOIN mcp_oauth_grants g ON g.id=t.grant_id
@@ -213,8 +217,9 @@ export async function validateOAuthApiToken(raw: string): Promise<ValidatedKey |
   const grantedScopes: string[] = Array.isArray(row.scopes) ? row.scopes : [];
   return {
     keyId: row.api_key_id, userId: row.user_id, orgId: row.org_id,
-    keyType: "server", allowedDomains: [], scopes: oauthScopesToApiKeyScopes(grantedScopes),
-    rateLimitRpm: null, rateLimitPpd: 10000, rateLimits: parseApiKeyRateLimits(row.key_rate_limits),
+    keyType: "server", allowedDomains: [], scopes: oauthScopesToApiKeyScopes(grantedScopes).filter((scope) => Array.isArray(row.key_scopes) && row.key_scopes.includes(scope)),
+    rateLimitRpm: row.key_rpm, rateLimitPpd: row.key_ppd, rateLimits: parseApiKeyRateLimits(row.key_rate_limits),
+    materializationPolicy: parseKeyMaterializationPolicy(row.key_materialization_policy),
     workspaceIds: Array.isArray(row.key_workspace_ids) ? row.key_workspace_ids : [],
     oauth: {
       grantId: row.id, clientId: row.client_id, clientName: row.client_name, resource, audience: "api",
@@ -302,6 +307,7 @@ let lastGlobalAlertAt = 0;
  * guesses by one user cannot all pass the check before any is counted.
  */
 export async function deviceAttemptBudget(db: Pick<PoolClient, "query">, userId: string, ip: string | null = null): Promise<DeviceAttemptBudget> {
+  ip = parseIp(ip)?.text ?? null;
   const { rows } = await db.query(`
     SELECT count(*) FILTER (WHERE user_id=$1)::int AS by_user,
            count(*) FILTER (WHERE $2::text IS NOT NULL AND ip=$2)::int AS by_ip,
@@ -322,12 +328,16 @@ export async function deviceAttemptsExhausted(db: Pick<PoolClient, "query">, use
   return (await deviceAttemptBudget(db, userId, ip)).locked;
 }
 
-/** Serializes one user's device-code checks (transaction-scoped advisory lock). */
-export async function lockDeviceAttempts(db: Pick<PoolClient, "query">, userId: string): Promise<void> {
-  await db.query("SELECT pg_advisory_xact_lock(hashtext('mcp_oauth_device_attempts:' || $1))", [userId]);
+/** Serializes both budgets; IPs are canonicalized consistently with the recorded budgets. Locks last until commit. */
+export async function lockDeviceAttempts(db: Pick<PoolClient, "query">, userId: string, ip: string | null = null): Promise<void> {
+  ip = parseIp(ip)?.text ?? null;
+  // Every caller takes IP before user, including callers sharing only one budget.
+  if (ip) await db.query("SELECT pg_advisory_xact_lock(18801, hashtext($1))", [ip]);
+  await db.query("SELECT pg_advisory_xact_lock(18802, hashtext($1))", [userId]);
 }
 
 export async function recordDeviceAttemptFailure(db: Pick<PoolClient, "query">, userId: string, ip: string | null = null): Promise<void> {
+  ip = parseIp(ip)?.text ?? null;
   await db.query("INSERT INTO mcp_oauth_device_attempts(user_id, ip) VALUES($1, $2)", [userId, ip]);
 }
 
