@@ -20,7 +20,7 @@ function harness(fail = false) {
   return { sdk, create, exec, terminate, writeBytes, close };
 }
 const dirs: string[] = [];
-afterEach(async () => { vi.unstubAllEnvs(); await Promise.all(dirs.splice(0).map(d => rm(d, { recursive: true, force: true }))); });
+afterEach(async () => { vi.useRealTimers(); vi.unstubAllEnvs(); await Promise.all(dirs.splice(0).map(d => rm(d, { recursive: true, force: true }))); });
 async function job() {
   const dir = await mkdtemp(path.join(tmpdir(), "vm-contract-")); dirs.push(dir);
   const input = path.join(dir, "input.png"); const output = path.join(dir, "output.webp");
@@ -94,6 +94,18 @@ describe("dedicated document VM contract (offline)", () => {
     h.create.mockRejectedValue(new Error("revoked secret-token"));
     await expect(executeDocumentVm(j, undefined, async () => h.sdk)).rejects.toThrow("Document VM execution failed");
     expect(h.exec).not.toHaveBeenCalled(); expect(h.close).toHaveBeenCalled();
+  });
+
+  it("destroys a running VM at the absolute deadline without committing output", async () => {
+    const j = await job(); const h = harness();
+    vi.useFakeTimers();
+    let started!: () => void; const running = new Promise<void>(resolve => { started = resolve; });
+    h.exec.mockImplementation(async () => { started(); await new Promise(() => {}); return undefined as never; });
+    const pending = executeDocumentVm(j, undefined, async () => h.sdk);
+    const rejected = expect(pending).rejects.toThrow("deadline exceeded");
+    await running; await vi.advanceTimersByTimeAsync(60_001); await rejected;
+    expect(h.terminate).toHaveBeenCalled();
+    await expect(readFile(j.output)).rejects.toThrow();
   });
 
 });
