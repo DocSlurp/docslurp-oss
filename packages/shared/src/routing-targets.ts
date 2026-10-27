@@ -21,6 +21,11 @@ export interface RoutingModelPrice {
   output: number;
   vision?: boolean;
   checked?: string;
+  /**
+   * Set on entries kept only as historical price evidence (`openai-pro`, `output-price>=50`). A prohibited entry is
+   * never admitted, whatever its id or price says.
+   */
+  prohibited?: string;
 }
 export interface RoutingModelPriceMap {
   asOf?: string;
@@ -355,6 +360,10 @@ export function buildRoutingTargetCatalog(
       };
     } else if (candidate.kind === "hosted-vlm") {
       const price = model ? lookupPrice(input.prices, model) : undefined;
+      if (price?.prohibited) {
+        reject(candidate.id, "prohibited-model", `Price entry is marked prohibited (${price.prohibited})`);
+        continue;
+      }
       if (
         !price ||
         !Number.isFinite(price.input) ||
