@@ -33,6 +33,26 @@ class MathScorerTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     score_request(request)
 
+    def test_review_regressions_never_receive_perfect_credit(self):
+        omml = ('<m:oMath xmlns:m="http://schemas.openxmlformats.org/'
+                'officeDocument/2006/math"><m:r><m:t>x^2</m:t></m:r></m:oMath>')
+        styled = ('<math xmlns="http://www.w3.org/1998/Math/MathML">'
+                  '<mstyle mathvariant="bold"><mtext>x</mtext></mstyle></math>')
+        nul_xml = ('<!DOCTYPE math SYSTEM "file:///nonexistent-control">'
+                   '<math><mi>x</mi></math>').encode('utf-16-le').decode('latin1')
+        for reference, candidate, encoding, wanted in [
+            ('(x^2)_i', 'x_i^2', 'auto', 0),
+            ('x^2', omml, 'omml', None),
+            (r'\mathbb{d}', 'ⅆ', 'unicode', None),
+            (r'\mathrm{x}', styled, 'mathml', 0),
+            ('x', nul_xml, 'mathml', None),
+        ]:
+            with self.subTest(reference=reference, candidate=candidate):
+                result = score_request({"reference": reference, "candidate": candidate,
+                                        "candidateEncoding": encoding})
+                self.assertEqual(result['score'], wanted)
+                self.assertFalse(result['acceptanceEvidenceComplete'])
+
 
 if __name__ == "__main__":
     unittest.main()

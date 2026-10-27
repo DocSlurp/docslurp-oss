@@ -411,6 +411,182 @@ class MathEncodingsTest(unittest.TestCase):
         self.unsupported('x+' * 100 + 'x')  # left-deep AST, even if parser recursion is shallow
         self.equivalent('('*8 + 'x' + ')'*8, 'x')
 
+    def test_nested_script_attachment_matrices(self):
+        siblings = [
+            'x_i^n', 'x^n_i', 'xᵢⁿ',
+            mathml('<msubsup><mi>x</mi><mi>i</mi><mi>n</mi></msubsup>'),
+            omml(script(run('x'), run('i'), run('n'))),
+        ]
+        sub_on_power = [
+            '(x^n)_i', '(xⁿ)ᵢ',
+            mathml('<msub><msup><mi>x</mi><mi>n</mi></msup><mi>i</mi></msub>'),
+            omml(script(script(run('x'), sup=run('n')), sub=run('i'))),
+        ]
+        power_on_sub = [
+            '(x_i)^n', '(xᵢ)ⁿ',
+            mathml('<msup><msub><mi>x</mi><mi>i</mi></msub><mi>n</mi></msup>'),
+            omml(script(script(run('x'), sub=run('i')), sup=run('n'))),
+        ]
+        for family in (siblings, sub_on_power, power_on_sub):
+            for left, right in itertools.product(family, repeat=2):
+                with self.subTest(equivalent=(left, right)):
+                    self.equivalent(left, right)
+        for first, second in itertools.combinations((siblings, sub_on_power, power_on_sub), 2):
+            for left, right in itertools.product(first, second):
+                with self.subTest(different=(left, right)):
+                    self.different(left, right)
+                    self.different(right, left)
+        self.equivalent('(x^2)^3', mathml(
+            '<msup><msup><mi>x</mi><mn>2</mn></msup><mn>3</mn></msup>'))
+        self.different('(x^2)^3', 'x^{2*3}')
+        self.different('x_{i^n}', 'x_i^n')
+        self.equivalent('(x_i^n)_j', omml(script(
+            script(run('x'), run('i'), run('n')), sub=run('j'))))
+
+    def test_xml_baseline_text_is_not_script_markup(self):
+        for value in ('x^2', 'x_1', 'x^{2}', 'xⁿ', 'xᵢ'):
+            for normal in (False, True):
+                for cut in range(len(value) + 1):
+                    with self.subTest(value=value, normal=normal, cut=cut):
+                        self.unsupported(omml(run(value[:cut], normal) + run(value[cut:], normal)))
+        for tag, value in itertools.product(('mi', 'mo', 'mtext', 'mn'), ('x^2', 'x_1', 'xⁿ', 'xᵢ', '^', '_')):
+            with self.subTest(tag=tag, value=value):
+                self.unsupported(mathml(f'<{tag}>{value}</{tag}>'))
+        self.unsupported(mathml('<mi>x</mi><mo>^</mo><mn>2</mn>'))
+        self.unsupported(mathml('<mi>x</mi><mtext>_</mtext><mn>1</mn>'))
+        self.unsupported(omml(script(run('x'), sub=run('i_j'))))
+        self.equivalent('x^2', omml(script(run('x'), sup=run('2'))))
+        self.equivalent('x_1', mathml('<msub><mi>x</mi><mn>1</mn></msub>'))
+
+    def test_omml_run_split_rejoin_metamorphic(self):
+        contexts = [
+            (lambda body: omml(body), lambda value: value),
+            (lambda body: omml(fraction(body, run('3'))), lambda value: r'\frac{' + value + '}{3}'),
+            (lambda body: omml(fraction(run('3'), body)), lambda value: r'\frac{3}{' + value + '}'),
+            (lambda body: omml(script(run('x'), sub=body)), lambda value: 'x_{' + value + '}'),
+            (lambda body: omml(script(run('x'), sup=body)), lambda value: 'x^{' + value + '}'),
+        ]
+        controls = [(value, normal, value) for value in ('12', '12.50', '.75', '0012.500')
+                    for normal in (False, True)]
+        controls.extend([('kg', True, r'\mathrm{kg}'), ('ref', True, r'\mathrm{ref}')])
+        for value, normal, reference in controls:
+            for context_index, (context, expected) in enumerate(contexts):
+                joined = context(run(value, normal))
+                for cut in range(len(value) + 1):
+                    split = context(run(value[:cut], normal) + run(value[cut:], normal))
+                    with self.subTest(value=value, normal=normal, context=context_index, cut=cut):
+                        self.equivalent(joined, split)
+                        self.equivalent(expected(reference), split)
+                with self.subTest(value=value, normal=normal, context=context_index, split='each-character'):
+                    self.equivalent(joined, context(''.join(run(char, normal) for char in value)))
+
+    def test_omml_run_coalescing_keeps_boundaries(self):
+        # Different normal-property spellings and xml:space are compatible.
+        normal_g = '<m:r><m:rPr><m:nor m:val="true"/></m:rPr><m:t xml:space="preserve">g</m:t></m:r>'
+        self.equivalent(omml(run('k', True) + normal_g), r'\mathrm{kg}')
+        self.equivalent(omml(run('1') + run('+') + run('2')), '1+2')
+        self.equivalent(omml(run('k', True) + run('*', True) + normal_g), r'\mathrm{k}*\mathrm{g}')
+        self.equivalent(omml(run('1') + fraction(run('2'), run('3'))), '1*(2/3)')
+        self.different(omml(run('1') + run('×') + run('2')), '12')
+        self.different(omml(run('k', True) + run('g')), r'\mathrm{kg}')
+        for value in ('xy', 'kg', 'ref'):
+            for cut in range(len(value) + 1):
+                with self.subTest(ambiguous=value, cut=cut):
+                    self.unsupported(omml(run(value[:cut]) + run(value[cut:])))
+        self.unsupported(omml(run('x', True) + run('x^', True) + run('2', True)))
+
+    def test_double_struck_italic_never_loses_italic_style(self):
+        # All five Unicode double-struck italic letterlike glyphs.
+        for glyph, base in zip('ⅅⅆⅇⅈⅉ', 'Ddeij'):
+            presentations = [
+                glyph, mathml(f'<mi>{glyph}</mi>'), mathml(f'<mtext>{glyph}</mtext>'),
+                omml(run(glyph)), omml(run(glyph, True)), r'\mathbb{' + glyph + '}',
+            ]
+            for text in presentations:
+                with self.subTest(glyph=glyph, presentation=text):
+                    self.unsupported(text)
+                    result = compare_math(r'\mathbb{' + base + '}', text)
+                    self.assertFalse(result['supported'], result)
+                    self.assertIsNone(result['equivalent'])
+                    self.assertIsNone(result['score'])
+        # Related ordinary letterlike alphabets retain their complete style.
+        for glyph, command, base in [
+                ('ℂ', 'mathbb', 'C'), ('ℍ', 'mathbb', 'H'), ('ℕ', 'mathbb', 'N'),
+                ('ℙ', 'mathbb', 'P'), ('ℚ', 'mathbb', 'Q'), ('ℝ', 'mathbb', 'R'),
+                ('ℤ', 'mathbb', 'Z'), ('𝔻', 'mathbb', 'D'), ('ℬ', 'mathcal', 'B'),
+                ('ℯ', 'mathcal', 'e'), ('ℭ', 'mathfrak', 'C'), ('ℜ', 'mathfrak', 'R')]:
+            with self.subTest(ordinary_glyph=glyph):
+                self.equivalent(glyph, '\\' + command + '{' + base + '}')
+        self.equivalent('ℼ', mathml('<mi mathvariant="double-struck">π</mi>'))
+        self.equivalent('ℾ', mathml('<mi mathvariant="double-struck">Γ</mi>'))
+
+    def test_mtext_style_inheritance_and_explicit_override(self):
+        for style, value in itertools.product(
+                ('normal', 'italic', 'bold', 'bold-italic', 'double-struck', 'script', 'fraktur'),
+                ('x', 'kg')):
+            inherited = mathml(f'<mstyle mathvariant="{style}"><mtext>{value}</mtext></mstyle>')
+            explicit = mathml(f'<mtext mathvariant="{style}">{value}</mtext>')
+            normal = mathml(f'<mtext>{value}</mtext>')
+            overridden = mathml(f'<mstyle mathvariant="{style}">'
+                                f'<mtext mathvariant="normal">{value}</mtext></mstyle>')
+            with self.subTest(style=style, value=value):
+                self.equivalent(inherited, explicit)
+                self.equivalent(inherited, mathml(f'<mi mathvariant="{style}">{value}</mi>'))
+                self.equivalent(overridden, normal)
+                self.equivalent(normal, r'\mathrm{' + value + '}')
+                if style != 'normal':
+                    self.different(inherited, normal)
+        self.equivalent(
+            mathml('<mstyle mathvariant="bold"><mstyle mathvariant="italic">'
+                   '<mtext>x</mtext></mstyle></mstyle>'),
+            mathml('<mtext mathvariant="italic">x</mtext>'))
+        self.different(mathml('<mstyle mathvariant="bold"><mtext>x</mtext></mstyle>'), r'\mathrm{x}')
+        self.different(mathml('<mstyle mathvariant="italic"><mtext>x</mtext></mstyle>'), r'\mathrm{x}')
+        self.unsupported(mathml('<mtext mathvariant="double-struck-italic">x</mtext>'))
+        self.unsupported(mathml('<mstyle mathvariant="bold"><mtext mathvariant="normal">𝐱</mtext></mstyle>'))
+
+    def test_nul_byte_shaped_xml_is_a_decoded_profile_refusal(self):
+        # Invented strings only. These resemble encoded bytes accidentally
+        # handed to a str API; no parser may auto-detect and decode them again.
+        for document in (mathml('<mi>x</mi>'), omml(run('x'))):
+            payloads = [
+                '<!DOCTYPE math SYSTEM "file:///invented-not-read">' + document,
+                '<!DOCTYPE math [<!ENTITY % remote SYSTEM "https://invalid.example/not-read">'
+                '%remote;]>' + document,
+                '<?unapproved ignored?>' + document,
+                '<?xml version="1.0" encoding="UTF-16"?>' + document,
+                '<?xml version="1.0" encoding="UTF-32"?>' + document,
+                '<?xml version="1.0"?><?unapproved ignored?>' + document,
+            ]
+            for payload, byte_encoding, mode in itertools.product(
+                    payloads, ('utf-16-le', 'utf-16-be', 'utf-32-le', 'utf-32-be'),
+                    ('auto', 'mathml', 'omml')):
+                text = payload.encode(byte_encoding).decode('latin-1')
+                with self.subTest(byte_encoding=byte_encoding, mode=mode, payload=payload):
+                    self.unsupported(text, mode)
+                    self.assertIn('decoded-string', normalize_math(text, mode)['issues'][0])
+        # Even a harmless root must not be re-decoded from NUL-shaped text.
+        for mode in ('auto', 'mathml', 'omml'):
+            with self.subTest(harmless_root_mode=mode):
+                self.unsupported(mathml('<mi>x</mi>').encode('utf-16-le').decode('latin-1'), mode)
+
+    def test_invalid_xml_codepoints_are_checked_before_stripping(self):
+        document = mathml('<mi>x</mi>')
+        invalid_codes = [0, 1, 8, 11, 12, 31, 0xD800, 0xDFFF, 0xFFFE, 0xFFFF]
+        for code, position, mode in itertools.product(invalid_codes, ('before', 'inside', 'after'),
+                                                       ('auto', 'mathml', 'omml')):
+            char = chr(code)
+            text = {'before': char + document,
+                    'inside': mathml('<mi>x</mi>' + char),
+                    'after': document + char}[position]
+            with self.subTest(code=hex(code), position=position, mode=mode):
+                self.unsupported(text, mode)
+                self.assertIn('decoded-string', normalize_math(text, mode)['issues'][0])
+        for declaration in ('', '<?xml version="1.0" encoding="UTF-8"?>',
+                            '<?xml version="1.0" encoding="UTF-16" standalone="no"?>'):
+            with self.subTest(valid_decoded_declaration=declaration):
+                self.equivalent(declaration + '\t\r\n' + mathml('<mi>𝑥</mi>'), 'x')
+
 
 if __name__ == '__main__':
     unittest.main()

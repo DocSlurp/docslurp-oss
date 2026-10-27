@@ -18,6 +18,13 @@ text are unsupported. XML supports presentation fractions/scripts/radicals and a
 small OMML run/fraction/script/delimiter subset; formatting properties outside
 this whitelist are unsupported. A single leading XML 1.0 declaration and OMML
 paragraph alignment (one jc property, one equation) are harmless envelopes.
+Nested XML/grouped script bases stay nested; only adjacent linear script slots
+share a base. Compatible adjacent OMML runs join before lexical analysis. OMML
+and MathML presentation text cannot stand in for structural script elements.
+MathML mtext defaults to normal, honoring inherited/explicit mathvariant.
+Unsupported combined alphabets (including double-struck italic) are refused.
+All inputs are decoded strings containing XML 1.0 Char code points; NUL-shaped
+UTF-16/32 byte strings are never re-decoded by the XML parser.
 Decimal scale is normalized without rounding;
 significant-figure/measurement precision is not assessed.
 
@@ -31,7 +38,7 @@ import re
 import unicodedata
 import xml.etree.ElementTree as ET
 
-VERSION = "1.0.1"
+VERSION = "1.0.3"
 MAX_LENGTH = 32768
 MAX_DEPTH = 48
 MAX_NODES = 2048
@@ -104,6 +111,11 @@ def _symbol(text, style=None):
         letterlike_style = next((style for prefix, style in (
             ("DOUBLE-STRUCK ", "double-struck"), ("SCRIPT ", "script"),
             ("BLACK-LETTER ", "fraktur")) if name.startswith(prefix)), None)
+        if letterlike_style and not re.match(
+                r"(?:DOUBLE-STRUCK|SCRIPT|BLACK-LETTER) (?:CAPITAL|SMALL) ", name):
+            # In particular U+2145..U+2149 are DOUBLE-STRUCK ITALIC. This
+            # combined style has no supported AST/MathML variant; never erase it.
+            _fail("unsupported combined mathematical alphabet style")
         if name.startswith("MATHEMATICAL ") or char == "ℎ" or letterlike_style:
 
             base = unicodedata.normalize("NFKD", char)
@@ -144,15 +156,12 @@ def _symbol(text, style=None):
 
 
 def _script(base, sub=None, sup=None):
-    if base[0] == "script":
-        _, base, old_sub, old_sup = base
-        if (sub is not None and old_sub is not None) or (sup is not None and old_sup is not None):
-            _fail("duplicate script requires explicit grouping")
-        sub, sup = sub or old_sub, sup or old_sup
+    # A structured/grouped base is already complete. Only the linear parser can
+    # accumulate sibling slots while it is reading the same unsplit base.
     return ("script", base, sub, sup)
 
 
-def _lex(text, tex=False):
+def _lex(text, tex=False, identifier_style=None):
     """Tokenize only explicit syntax; AST operands can also come from XML."""
     tokens = []
     sized_delimiters = []
@@ -227,9 +236,9 @@ def _lex(text, tex=False):
             j = i + 1
             while j < len(text) and text[j].isalpha() and text[j] not in _SUPER and text[j] not in _SUB:
                 j += 1
-            if j != i + 1:
+            if j != i + 1 and identifier_style is None:
                 _fail("ambiguous bare multi-letter identifier; use an explicit style envelope")
-            tokens.append(_symbol(char))
+            tokens.append(_symbol(text[i:j], identifier_style))
             i = j
             continue
         if char == "∞":
@@ -285,6 +294,7 @@ class _Parser:
             _fail("expression depth limit exceeded")
         try:
             left = self.atom()
+            script_base, script_sub, script_sup = left, None, None
             while True:
                 token = self.peek()
                 if token in ("_", "^"):
@@ -292,7 +302,15 @@ class _Parser:
                         break
                     self.take()
                     value = self.argument()
-                    left = _script(left, sub=value) if token == "_" else _script(left, sup=value)
+                    if token == "_":
+                        if script_sub is not None:
+                            _fail("duplicate subscript requires explicit grouping")
+                        script_sub = value
+                    else:
+                        if script_sup is not None:
+                            _fail("duplicate superscript requires explicit grouping")
+                        script_sup = value
+                    left = _script(script_base, script_sub, script_sup)
                     continue
                 if isinstance(token, str) and token in _RELATIONS:
                     precedence = 5
@@ -320,6 +338,7 @@ class _Parser:
                     self.take()
                 right = self.expression(precedence + 1)
                 left = ("binary", "*" if token == "implicit" else token, left, right)
+                script_base, script_sub, script_sup = left, None, None
             return left
         finally:
             self.depth -= 1
@@ -378,6 +397,18 @@ def _split_tag(tag):
         namespace, name = tag[1:].split("}", 1)
         return namespace, name
     return "", tag
+
+
+def _check_decoded_characters(text):
+    # XML 1.0 Char production. Validate before stripping whitespace or letting
+    # Expat inspect the string: NUL-interleaved byte-shaped strings must never be
+    # auto-detected/re-decoded as UTF-16/32. This is a decoded-string profile
+    # refusal; it is not a claim that an external resource was accessed.
+    for char in text:
+        code = ord(char)
+        if not (code in (0x9, 0xA, 0xD) or 0x20 <= code <= 0xD7FF or
+                0xE000 <= code <= 0xFFFD or 0x10000 <= code <= 0x10FFFF):
+            _fail("invalid XML 1.0 code point in decoded-string math/XML profile")
 
 
 def _xml_root(text):
@@ -470,6 +501,7 @@ class _XMLMath:
     def mathml(self, element, style=None):
         name = _split_tag(element.tag)[1]
         allowed = {"math": ("display",), "mi": ("mathvariant",), "mstyle": ("mathvariant",),
+                   "mtext": ("mathvariant",),
                    "mo": ("stretchy",), "annotation": ("encoding",)}.get(name, ())
         self.check(element, allowed)
         if "display" in element.attrib and element.attrib["display"] not in ("inline", "block"):
@@ -494,10 +526,12 @@ class _XMLMath:
         if name in ("mi", "mn", "mo", "mtext"):
             self.arity(element, 0)
             value = (element.text or "").strip()
+            if any(char in "^_" or char in _SUPER or char in _SUB for char in value):
+                _fail("baseline MathML text cannot attach a script")
             if name == "mi":
                 return [_symbol(value, style)]
             if name == "mtext":
-                return [_symbol(value, "normal")]
+                return [_symbol(value, style or "normal")]
             if name == "mn":
                 return [_number(value)]
             tokens = _lex(value)
@@ -522,6 +556,66 @@ class _XMLMath:
             return [("root", index, body)]
         _fail("unsupported MathML element: " + name)
 
+    @staticmethod
+    def _omml_text(text, style):
+        # These are presentation runs, not an Office linear-input language.
+        # Scripts must be attached by sSub/sSup/sSubSup elements only.
+        if any(char in "^_" or char in _SUPER or char in _SUB for char in text):
+            _fail("baseline OMML text cannot attach a script")
+        return _lex(text, identifier_style=style)
+
+    def _omml_run(self, element, style=None):
+        self.check(element)
+        children = list(element)
+        if children and _split_tag(children[0].tag)[1] == "rPr":
+            properties = children.pop(0)
+            self.check(properties)
+            self.arity(properties, 1)
+            normal = properties[0]
+            if self.check(normal, ("val",)) != "nor" or len(normal):
+                _fail("unsupported OMML run property")
+            value = normal.attrib.get("{" + OMML_NS + "}val", normal.attrib.get("val", "1"))
+            if value not in ("1", "true", "on"):
+                _fail("unsupported OMML normal setting")
+            style = "normal"
+        if not children or any(_split_tag(child.tag)[1] != "t" for child in children):
+            _fail("OMML run requires text only")
+        texts = []
+        for child in children:
+            # xml:space is presentation whitespace only.
+            if set(child.attrib) - {"{" + XML_NS + "}space"}:
+                _fail("unsupported OMML text attribute")
+            if child.attrib.get("{" + XML_NS + "}space", "default") not in ("preserve", "default"):
+                _fail("invalid xml:space")
+            if _split_tag(child.tag)[0] != OMML_NS or len(child):
+                _fail("invalid OMML text")
+            texts.append(child.text or "")
+        text = "".join(texts)
+        return text, style
+
+    def _omml_children(self, children, style=None):
+        tokens = []
+        pending = []
+        pending_style = None
+
+        def flush():
+            if pending:
+                tokens.extend(self._omml_text("".join(pending), pending_style))
+                pending.clear()
+
+        for child in children:
+            if _split_tag(child.tag)[1] == "r":
+                text, run_style = self._omml_run(child, style)
+                if pending and run_style != pending_style:
+                    flush()
+                pending_style = run_style
+                pending.append(text)
+            else:
+                flush()
+                tokens.extend(self.omml(child, style))
+        flush()
+        return tokens
+
     def omml(self, element, style=None):
         name = self.check(element)
         if name in ("oMath", "oMathPara", "num", "den", "e", "sub", "sup"):
@@ -542,39 +636,9 @@ class _XMLMath:
                     _fail("oMathPara must contain exactly one equation")
             if not list(element) and (element.text or "").strip():
                 _fail("unexpected OMML container text")
-            return [token for child in children for token in self.omml(child, style)]
+            return self._omml_children(children, style)
         if name == "r":
-            children = list(element)
-            if children and _split_tag(children[0].tag)[1] == "rPr":
-                properties = children.pop(0)
-                self.check(properties)
-                self.arity(properties, 1)
-                normal = properties[0]
-                if self.check(normal, ("val",)) != "nor" or len(normal):
-                    _fail("unsupported OMML run property")
-                value = normal.attrib.get("{" + OMML_NS + "}val", normal.attrib.get("val", "1"))
-                if value not in ("1", "true", "on"):
-                    _fail("unsupported OMML normal setting")
-                style = "normal"
-            if not children or any(_split_tag(child.tag)[1] != "t" for child in children):
-                _fail("OMML run requires text only")
-            texts = []
-            for child in children:
-                # xml:space is presentation whitespace only.
-                if set(child.attrib) - {"{" + XML_NS + "}space"}:
-                    _fail("unsupported OMML text attribute")
-                if child.attrib.get("{" + XML_NS + "}space", "default") not in ("preserve", "default"):
-                    _fail("invalid xml:space")
-                if _split_tag(child.tag)[0] != OMML_NS or len(child):
-                    _fail("invalid OMML text")
-                texts.append(child.text or "")
-            text = "".join(texts)
-            if style == "normal":
-                if _IDENTIFIER.fullmatch(text.strip()):
-                    return [_symbol(text.strip(), "normal")]
-                tokens = _lex(text)
-                return [_symbol(token[1], "normal") if isinstance(token, tuple) and token[0] == "symbol" else token for token in tokens]
-            return _lex(text)
+            return self._omml_text(*self._omml_run(element, style))
         if name in ("f", "sSub", "sSup", "sSubSup"):
             expected = {"f": ["num", "den"], "sSub": ["e", "sub"], "sSup": ["e", "sup"],
                         "sSubSup": ["e", "sub", "sup"]}[name]
@@ -638,6 +702,7 @@ def normalize_math(text, encoding="auto"):
             _fail("math input must be a string")
         if len(text) > MAX_LENGTH:
             _fail("input length limit exceeded")
+        _check_decoded_characters(text)
         if text.lstrip().startswith("<?xml") and not text.startswith("<?xml"):
             _fail("XML declaration must be at the beginning of the input")
         text = text.strip()

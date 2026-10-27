@@ -75,7 +75,10 @@ Tests use invented expressions and format fragments, with both equivalent
 cross-format pairs and changed signs, cases, grouping, relations and operands.
 No dataset contents or held-out predictions are part of the normalizer.
 
-The initial integrated verification passes 97 focused tests. The normalizer's
-26 methods cover 327 subcases, including 124 cross-format comparisons. Actual
-Mastra runs return one for equivalent LaTeX/MathML and zero for a changed
-denominator. Independent methods/adversarial review remains a separate gate.
+Normalizer version 1.0.3 passes 34 test methods covering 1,115 subcases. The
+integrated focused suite passes 106 tests, including CLI regressions for the
+independent reviewers' counterexamples. Review-driven changes preserve nested
+script bases, coalesce compatible Office Math runs, honor MathML text styles,
+and refuse baseline XML script markup, unsupported double-struck italic letters,
+and invalid XML characters. These corrections supersede the initial 97-test run;
+the independent re-review remains a separate gate.
