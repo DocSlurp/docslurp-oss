@@ -256,6 +256,9 @@ export async function runChatMcpAgent(args: {
   suggestions?: boolean;
   /** Correlation for the agent span. */
   requestId?: string | null;
+  /** Fixed core rules (services/chat-instructions.ts), composed before everything else. */
+  coreInstructions?: string;
+  /** Delimited workspace chat instructions, defaults and context, composed after the agent's rules. */
   workspaceInstructions?: string;
   /** Corpus facts read before the turn, so the agent knows which files already exist. */
   workspaceInventory?: ChatWorkspaceInventory;
@@ -522,6 +525,8 @@ export async function runChatMcpAgent(args: {
   }
 
   const system = [
+    // The fixed core rules come first, whatever the workspace instructions say.
+    ...(args.coreInstructions ? [args.coreInstructions] : []),
     "You are DocSlurp's signed-in assistant. Your only executable capabilities are the tools supplied in this turn. Product features, previous messages and general knowledge do not grant additional capabilities.",
     `Available tools for this actor and turn: ${Object.keys(context.tools).join(", ") || "none"}. If a tool mentioned below is absent, it is unavailable; never claim access to it.`,
     "When asked to find, search, inspect, compare or summarize workspace documents, call the appropriate available tool immediately. Do not merely offer to search, ask permission for an authorized read, or give instructions for the user to perform the search. Tool results are required before claiming you searched, found documents, read a page or verified a fact. A successful search with no matches means no evidence was found, not a tool error.",

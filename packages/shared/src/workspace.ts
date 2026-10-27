@@ -565,13 +565,43 @@ export const chatSearchFiltersSchema = z.object({
 }).strict();
 export type ChatSearchFilters = z.infer<typeof chatSearchFiltersSchema>;
 
+/**
+ * Longest workspace chat instructions, in characters (~1,000 tokens). The
+ * composed system message adds ~600 tokens of fixed rules and defaults, which
+ * stays small next to the chat's retrieved evidence (up to 32 passages).
+ */
+export const CHAT_INSTRUCTIONS_MAX_CHARS = 4000;
+
+/**
+ * Default scope-decline threshold (`chat.scopeDeclineThreshold`): the best
+ * passage must contain at least this share of the question's content terms.
+ * Measured in docs/evals/retrieval-quality/scope-decline-calibration.md.
+ */
+export const DEFAULT_SCOPE_DECLINE_THRESHOLD = 0.34;
+
 export const workspaceSearchChatSettingsSchema = z.object({
   /** Workspace chat on or off. Off rejects every chat surface (app, /v1/chat, chat/completions, MCP). */
   enabled: z.boolean().default(true),
   mode: workspaceChatModeSchema.default("retrieval"),
   answerStyle: z.enum(["concise", "balanced", "detailed"]).default("balanced"),
   citations: z.boolean().default(true),
-  searchInstructions: z.string().trim().max(2000).nullable().default(null),
+  /**
+   * Chat instructions: the workspace owner's text, added to the chat system
+   * message for every answer in this workspace (app, /v1/chat,
+   * /v1/chat/completions, MCP, SDK and embed). It may change citations,
+   * answer style, tone and scope wording; it can never weaken the fixed core
+   * rules, which are always composed first. Null or empty uses the default
+   * template built from the workspace name and its documents.
+   */
+  searchInstructions: z.string().trim().max(CHAT_INSTRUCTIONS_MAX_CHARS).nullable().default(null),
+  /**
+   * Scope decline: when the best evidence for a question scores below this
+   * relevance (share of the question's content terms found in the retrieved
+   * passages, 0..1), chat answers with a short polite decline and related
+   * questions instead of an answer. Null uses the measured default
+   * (DEFAULT_SCOPE_DECLINE_THRESHOLD); 0 turns the decline off.
+   */
+  scopeDeclineThreshold: z.number().min(0).max(1).nullable().default(null),
 });
 export type WorkspaceSearchChatSettings = z.infer<
   typeof workspaceSearchChatSettingsSchema
@@ -610,7 +640,8 @@ export const updateWorkspaceSearchChatSettingsSchema = z.object({
   mode: workspaceChatModeSchema.optional(),
   answerStyle: z.enum(["concise", "balanced", "detailed"]).optional(),
   citations: z.boolean().optional(),
-  searchInstructions: z.string().trim().max(2000).nullable().optional(),
+  searchInstructions: z.string().trim().max(CHAT_INSTRUCTIONS_MAX_CHARS).nullable().optional(),
+  scopeDeclineThreshold: z.number().min(0).max(1).nullable().optional(),
 });
 
 export const updateWorkspaceSearchBoostsSchema = z.object({
@@ -653,6 +684,7 @@ export const workspaceSearchSettingsSchema = z.object({
     answerStyle: "balanced",
     citations: true,
     searchInstructions: null,
+    scopeDeclineThreshold: null,
   }),
   compatSettings: z.record(z.string(), z.unknown()).default({}),
   rules: z.array(z.record(z.string(), z.unknown())).default([]),
