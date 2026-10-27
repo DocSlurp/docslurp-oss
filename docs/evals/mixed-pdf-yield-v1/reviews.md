@@ -234,3 +234,31 @@ negative tests, 28 evaluation tests and 13 integrity-screen contract tests. Runt
 image verification, deployment and measured production costs remain separate gates;
 no corpus acceptance, extraction-quality gain or dollar-saving claim follows from
 these checks.
+
+### Council round 2: evidence scope and expression boundaries
+
+Both source-only reviewers requested changes on `8c71a9fd`. One audit report
+could satisfy both stages; score decisions were not tied to their actual report.
+An approval could also point to a protected label and open it before failing
+schema validation. The preflight used separate native/delivered PDF namespaces,
+and formula substring matching credited meaning-changing extensions.
+
+The next revision requires a separately selected, isolated evidence index before
+any approval-controlled file access. The index pins copied evidence, original-path
+aliases, reviewer identities and stages. Resolved symlink escapes are rejected
+before hashing or reading. Audit and judge reports and reviewer IDs must differ;
+the binder recomputes the skill's arithmetic against those exact reports and
+records the scorer/report association. Native and delivered PDF digests share
+one identity namespace. Primary printed-formula preservation now checks adjacent
+expression context and prevents overlapping occurrence reuse.
+
+The index is trusted coordinator configuration, not a cryptographic defense
+against a malicious coordinator who rewrites both code and the index. Original
+reports and receipts stay byte unchanged. Earlier v2 approval envelopes and views
+are superseded for promotion. A new training-only proof bundle and projected view
+exercise the new contract; no heldout evidence, thresholds or savings are accepted.
+
+Focused validation: 41 invented-input tests pass, including unauthorized-path
+and symlink probes that assert no target hash/read occurs. The CLI now requires
+`seal_v4.py --evidence-index ...` in addition to the approval. A fresh independent
+council must review the fixed commit before promotion.

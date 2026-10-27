@@ -16,17 +16,16 @@ def require(condition, message):
         raise ValueError(message)
 
 
-def load_hashed(entry):
-    path = Path(entry['path'])
-    require(file_hash(path) == entry['sha256'], 'changed-approval-evidence')
-    return json.loads(path.read_text())
+def load_hashed(entry, evidence):
+    require(evidence is not None, 'explicit-evidence-scope-required')
+    return evidence.load(entry)
 
 
 def validator_identity(receipt):
     return identity_hash({k: receipt[k] for k in ['schema', 'validatorCodeSha256', 'validatorDependencySha256']})
 
 
-def check_semantic(receipt, manifest, manifest_sha, candidate, expected_validator):
+def check_semantic(receipt, manifest, manifest_sha, candidate, expected_validator, evidence):
     require(receipt.get('schema') == 'mixed-pdf-semantic-revalidation@1', 'unsupported-semantic-receipt')
     require(record_hash(receipt, 'receiptHash') == receipt.get('receiptHash'), 'semantic-receipt-self-hash')
     require(receipt.get('passed') is True and receipt.get('misses') == [], 'semantic-validation-failed')
@@ -39,20 +38,19 @@ def check_semantic(receipt, manifest, manifest_sha, candidate, expected_validato
     code, deps = receipt['validatorCodeSha256'], receipt['validatorDependencySha256']
     require({'fools_gold_v4_check.py', 'fools_gold_v4_semantic.py'} <= set(code)
             and bool(deps), 'missing-validator-dependencies')
-    folder = Path(receipt['validationSnapshot']).resolve()
+    folder = Path(receipt['validationSnapshot']).absolute()
     index_path = folder / 'snapshot-hashes.json'
-    require(file_hash(index_path) == receipt['snapshotHashesSha256'], 'changed-validator-snapshot')
-    index = json.loads(index_path.read_text())
+    index = load_hashed(dict(path=str(index_path), sha256=receipt['snapshotHashesSha256']), evidence)
     require(index.get('schema') == 'mixed-pdf-validator-snapshot@1'
             and record_hash(index, 'snapshotHash') == index.get('snapshotHash'), 'invalid-validator-snapshot')
     require(index['validatorCodeSha256'] == code and index['dependencySha256'] == deps,
             'validator-snapshot-identity-mismatch')
     for name, digest in {**index['files'], **code, **deps}.items():
-        path = (folder / name).resolve()
-        require(not Path(name).is_absolute() and path.is_relative_to(folder)
+        path = folder / name
+        require(not Path(name).is_absolute() and '..' not in Path(name).parts
                 and re.fullmatch('[0-9a-f]{64}', digest) is not None, 'unsafe-validator-snapshot-path')
-        require(index['files'].get(name) == digest and file_hash(path) == digest,
-                'stale-validator-or-dependency')
+        require(index['files'].get(name) == digest, 'stale-validator-or-dependency')
+        evidence.verify_file(path, digest)
     exit_code = receipt.get('tests', {}).get('exitCode')
     require(type(exit_code) is int and exit_code == 0, 'semantic-validator-tests-failed')
     expected_counts = dict(families=manifest['counts']['families'],
@@ -101,20 +99,31 @@ def report_receipt_binding(report, stage, receipt, receipt_sha, manifest_sha):
                 'judge-report-receipt-binding')
 
 
-def check_review(bound, stage, manifest, manifest_sha, candidate, expected_validator):
+def check_review(bound, stage, manifest, manifest_sha, candidate, expected_validator, evidence, audit_sha=None):
     require(bound.get('schema') == 'mixed-pdf-bound-review@1'
             and record_hash(bound, 'bindingHash') == bound.get('bindingHash'), 'invalid-bound-review')
     require(bound.get('stage') == stage and bound.get('corpusManifestSha256') == manifest_sha
             and bound.get('handoffHash') == manifest['handoffHash']
             and Path(bound['candidate']).resolve() == candidate.resolve(), 'review-corpus-binding')
-    semantic = load_hashed(bound['semanticValidation'])
-    check_semantic(semantic, manifest, manifest_sha, candidate, expected_validator)
-    report = load_hashed(bound['reviewReport'])
+    semantic = load_hashed(bound['semanticValidation'], evidence)
+    check_semantic(semantic, manifest, manifest_sha, candidate, expected_validator, evidence)
+    reviewer = evidence.reviewer(bound['reviewReport']['sha256'], stage)
+    require(bound.get('reviewerId') == reviewer, 'reviewer-identity-mismatch')
+    report = load_hashed(bound['reviewReport'], evidence)
+    require('stage' not in report or report['stage'] == stage, 'review-report-stage-mismatch')
+    require('reviewerId' not in report or report['reviewerId'] == reviewer, 'review-report-reviewer-mismatch')
     require(Path(report['candidate']).resolve() == candidate.resolve(), 'review-report-candidate-mismatch')
     require(isinstance(report.get('misses'), list)
             and all(m.get('severity') == 'low' for m in report['misses']), 'review-report-unresolved-misses')
     report_receipt_binding(report, stage, semantic, bound['semanticValidation']['sha256'], manifest_sha)
-    decision = load_hashed(bound['scoreDecision'])
+    decision = load_hashed(bound['scoreDecision'], evidence)
+    require(decision.get('schema') == 'mixed-pdf-score-proof@1'
+            and record_hash(decision, 'proofHash') == decision.get('proofHash')
+            and decision.get('reviewReportSha256') == bound['reviewReport']['sha256']
+            and decision.get('scoreScriptSha256') == evidence.score_hash,
+            'score-to-report-binding-mismatch')
+    if stage == 'judge':
+        require(decision.get('auditReportSha256') == audit_sha, 'judge-score-audit-binding-mismatch')
     require('candidate' not in decision or Path(decision['candidate']).resolve() == candidate.resolve(),
             'score-decision-candidate-mismatch')
     require('corpusManifestSha256' not in decision or decision['corpusManifestSha256'] == manifest_sha,
@@ -128,23 +137,25 @@ def check_review(bound, stage, manifest, manifest_sha, candidate, expected_valid
             and all(counts[k] == 0 for k in ['fatal', 'high', 'medium'])
             and len(report['misses']) <= decision.get('counts', {}).get('low', 100) <= 5,
             'quality-gate-not-cleared')
+    return dict(reportSha256=bound['reviewReport']['sha256'], reviewerId=reviewer)
 
 
-def validate_approval(approval, manifest, manifest_sha, candidate=None, spec=None):
-    require(approval.get('schema') == 'mixed-pdf-evaluation-approval@2'
+def validate_approval(approval, manifest, manifest_sha, candidate=None, spec=None, evidence=None):
+    require(evidence is not None, 'explicit-evidence-scope-required')
+    require(approval.get('schema') == 'mixed-pdf-evaluation-approval@3'
             and approval.get('coordinatorApproval') is True and approval.get('stage') == manifest['stage']
             and approval.get('datasetManifestSha256') == manifest_sha
             and approval.get('handoffHash') == manifest['handoffHash'], 'unbound-corpus-approval')
     root = Path(approval['candidate']).resolve()
     require(candidate is None or candidate.resolve() == root, 'approval-candidate-mismatch')
     identity = approval['semanticValidatorIdentityHash']
-    semantic = load_hashed(approval['semanticValidation'])
-    check_semantic(semantic, manifest, manifest_sha, root, identity)
+    semantic = load_hashed(approval['semanticValidation'], evidence)
+    check_semantic(semantic, manifest, manifest_sha, root, identity, evidence)
     reviewed, reviewed_sha, reviewed_root = manifest, manifest_sha, root
     if manifest['stage'] == 'full':
         require(approval.get('reviewScope') == 'generator-pilot'
                 and approval.get('balancedPilotApproved') is True and spec is not None, 'full-corpus-without-approved-pilot')
-        reviewed = load_hashed(approval['pilotManifest'])
+        reviewed = load_hashed(approval['pilotManifest'], evidence)
         reviewed_sha = approval['pilotManifest']['sha256']
         reviewed_root = Path(approval['pilotManifest']['path']).resolve().parent
         from seal_v4 import validate_inventory
@@ -154,5 +165,9 @@ def validate_approval(approval, manifest, manifest_sha, candidate=None, spec=Non
                 and reviewed['builderSourceHashes'] == manifest['builderSourceHashes'], 'full-generator-differs-from-reviewed-pilot')
     else:
         require(approval.get('reviewScope') == 'corpus', 'unsupported-review-scope')
-    check_review(load_hashed(approval['auditDecision']), 'audit', reviewed, reviewed_sha, reviewed_root, identity)
-    check_review(load_hashed(approval['judgeDecision']), 'judge', reviewed, reviewed_sha, reviewed_root, identity)
+    audit = check_review(load_hashed(approval['auditDecision'], evidence), 'audit', reviewed, reviewed_sha,
+                         reviewed_root, identity, evidence)
+    judge = check_review(load_hashed(approval['judgeDecision'], evidence), 'judge', reviewed, reviewed_sha,
+                         reviewed_root, identity, evidence, audit['reportSha256'])
+    require(audit['reportSha256'] != judge['reportSha256'] and audit['reviewerId'] != judge['reviewerId'],
+            'reviews-not-independent')

@@ -8,6 +8,8 @@ import unittest
 from contract import file_hash, identity_hash
 from fools_gold_v4_common import freeze
 from approval_v4 import validator_identity
+from evidence_v4 import EvidenceScope
+from unittest.mock import patch
 from seal_v4 import seal, validate_approval, validate_inventory
 
 
@@ -68,7 +70,7 @@ class V4SealTests(unittest.TestCase):
         return dict(path=str(path), sha256=file_hash(path))
 
     def approval(self, root, manifest):
-        candidate = root/'candidate'; snapshot = root/'snapshot'; snapshot.mkdir()
+        candidate = root.with_name(root.name+'-candidate'); snapshot = root/'snapshot'; snapshot.mkdir()
         files = {}
         for name in ['fools_gold_v4_check.py', 'fools_gold_v4_semantic.py', 'fools_gold_v4_common.py']:
             (snapshot/name).write_text('# invented validator fixture\n' + name)
@@ -94,27 +96,39 @@ class V4SealTests(unittest.TestCase):
             counts=dict(families=2, authoringPages=20, labelPages=120, pdfsHashed=12))
         semantic_entry = self.save(root/'semantic.json', semantic, 'receiptHash')
         identity = validator_identity(semantic)
-        approval = dict(schema='mixed-pdf-evaluation-approval@2', coordinatorApproval=True,
+        approval = dict(schema='mixed-pdf-evaluation-approval@3', coordinatorApproval=True,
             stage='prototypes', candidate=str(candidate), datasetManifestSha256='a'*64,
             handoffHash=manifest['handoffHash'], reviewScope='corpus',
             semanticValidatorIdentityHash=identity, semanticValidation=semantic_entry)
+        (root/'score-script.py').write_text('# invented scorer')
         for stage, key in [('audit', 'auditDecision'), ('judge', 'judgeDecision')]:
             decision = {'pass':True, 'decision':'pass', 'score':100, 'stage':stage,
                         'counts':dict(fatal=0, high=0, medium=0, low=0)}
-            report = dict(candidate=str(candidate), misses=[], corpusBinding=dict(corpusManifestSha256='a'*64,
+            report = dict(stage=stage, candidate=str(candidate), misses=[], corpusBinding=dict(corpusManifestSha256='a'*64,
                 semanticReceiptSha256=semantic_entry['sha256'], validatorIdentityHash=identity))
-            bound = dict(**decision, schema='mixed-pdf-bound-review@1', candidate=str(candidate),
+            report_entry = self.save(root/f'{stage}-report.json', report)
+            decision.update(schema='mixed-pdf-score-proof@1', reviewReportSha256=report_entry['sha256'],
+                            scoreScriptSha256=file_hash(root/'score-script.py'))
+            if stage == 'judge': decision['auditReportSha256'] = file_hash(root/'audit-report.json')
+            freeze(decision, 'proofHash')
+            bound = dict(**{k:decision[k] for k in ['stage','score','pass','decision','counts']}, reviewerId=stage+'-agent', schema='mixed-pdf-bound-review@1', candidate=str(candidate),
                 corpusManifestSha256='a'*64, handoffHash=manifest['handoffHash'], semanticValidation=semantic_entry,
                 reviewReport=self.save(root/f'{stage}-report.json', report),
                 scoreDecision=self.save(root/f'{stage}-score.json', decision))
             approval[key] = self.save(root/f'{stage}-bound.json', bound, 'bindingHash')
         return approval
 
+    def scope(self, root):
+        files = {str(p.relative_to(root)):file_hash(p) for p in root.rglob('*') if p.is_file() and p.name != 'evidence-index.json'}
+        stages = {file_hash(root/f'{stage}-report.json'):dict(stage=stage, reviewerId=stage+'-agent') for stage in ['audit','judge']}
+        self.save(root/'evidence-index.json', dict(schema='mixed-pdf-evidence-scope@1', files=files, reviewStages=stages))
+        return EvidenceScope(root/'evidence-index.json', protected_roots=[root.with_name(root.name+'-candidate')])
+
     def test_corpus_and_validator_bound_approval(self):
         manifest, _ = self.manifest()
         with tempfile.TemporaryDirectory(dir=os.environ['TMPDIR']) as tmp:
             root = Path(tmp); approval = self.approval(root, manifest)
-            validate_approval(approval, manifest, 'a'*64)
+            validate_approval(approval, manifest, 'a'*64, evidence=self.scope(root))
             for kind in ['wrong-corpus', 'audit-as-judge', 'changed-file', 'wrong-review-corpus']:
                 changed = copy.deepcopy(approval)
                 if kind == 'wrong-corpus': changed['datasetManifestSha256'] = 'other'
@@ -124,7 +138,7 @@ class V4SealTests(unittest.TestCase):
                     bound = json.loads(Path(changed['auditDecision']['path']).read_text())
                     bound['corpusManifestSha256'] = 'other'
                     changed['auditDecision'] = self.save(root/'other-bound.json', bound, 'bindingHash')
-                with self.assertRaises(ValueError): validate_approval(changed, manifest, 'a'*64)
+                with self.assertRaises(ValueError): validate_approval(changed, manifest, 'a'*64, evidence=self.scope(root))
 
     def test_semantic_summary_cannot_hide_case_failure_or_stale_code(self):
         manifest, _ = self.manifest()
@@ -139,9 +153,46 @@ class V4SealTests(unittest.TestCase):
                 elif kind == 'wrong-label': semantic['checkedCases'][0]['labelSha256'] = '0'*64
                 else: semantic['checkedFamilies'][0]['result']['passed'] = False
                 changed['semanticValidation'] = self.save(root/'changed-semantic.json', semantic, 'receiptHash')
-                with self.assertRaises(ValueError): validate_approval(changed, manifest, 'a'*64)
+                with self.assertRaises(ValueError): validate_approval(changed, manifest, 'a'*64, evidence=self.scope(root))
             (root/'snapshot/fools_gold_v4_common.py').write_text('# changed dependency')
-            with self.assertRaisesRegex(ValueError, 'stale-validator'): validate_approval(approval, manifest, 'a'*64)
+            with self.assertRaisesRegex(ValueError, 'stale-validator|changed-approval-evidence|evidence-path-or-digest'): validate_approval(approval, manifest, 'a'*64, evidence=self.scope(root))
+
+    def test_evidence_rejects_protected_path_and_symlink_before_read(self):
+        with tempfile.TemporaryDirectory(dir=os.environ['TMPDIR']) as tmp:
+            root = Path(tmp); bundle = root/'bundle'; bundle.mkdir()
+            (bundle/'score-script.py').write_text('# scorer')
+            private = root/'heldout-label.json'; private.write_text('{"secret":true}')
+            link = bundle/'link.json'; link.symlink_to(private)
+            index = dict(schema='mixed-pdf-evidence-scope@1', files={
+                'score-script.py':file_hash(bundle/'score-script.py'), 'link.json':file_hash(private)})
+            self.save(bundle/'evidence-index.json', index)
+            scope = EvidenceScope(bundle/'evidence-index.json')
+            for path in [private, link]:
+                with patch('evidence_v4.file_hash', side_effect=AssertionError('unauthorized hash')), \
+                     patch.object(Path, 'read_text', side_effect=AssertionError('unauthorized read')):
+                    with self.assertRaises(ValueError): scope.load(dict(path=str(path), sha256=index['files']['link.json']))
+
+    def test_native_and_delivered_pdf_share_identity_namespace(self):
+        manifest, spec = self.manifest(split=True)
+        for case in manifest['cases'][:6]: case['nativePdfHash'] = manifest['cases'][6]['sha256']
+        with self.assertRaisesRegex(ValueError, 'cross-split'): validate_inventory(manifest, spec)
+
+    def test_score_report_pairing_and_review_independence(self):
+        manifest, _ = self.manifest()
+        with tempfile.TemporaryDirectory(dir=os.environ['TMPDIR']) as tmp:
+            root = Path(tmp); approval = self.approval(root, manifest)
+            for kind in ['wrong-score-report', 'audit-report-as-judge', 'same-reviewer']:
+                changed = copy.deepcopy(approval)
+                bound = json.loads(Path(changed['judgeDecision']['path']).read_text())
+                if kind == 'wrong-score-report':
+                    score = json.loads(Path(bound['scoreDecision']['path']).read_text())
+                    score['reviewReportSha256'] = '0'*64
+                    bound['scoreDecision'] = self.save(root/'wrong-score.json', score, 'proofHash')
+                elif kind == 'audit-report-as-judge':
+                    bound['reviewReport'] = dict(path=str(root/'audit-report.json'), sha256=file_hash(root/'audit-report.json'))
+                else: bound['reviewerId'] = 'audit-agent'
+                changed['judgeDecision'] = self.save(root/'wrong-bound.json', bound, 'bindingHash')
+                with self.assertRaises(ValueError): validate_approval(changed, manifest, 'a'*64, evidence=self.scope(root))
 
 
 if __name__ == '__main__':

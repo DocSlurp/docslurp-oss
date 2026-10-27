@@ -15,6 +15,7 @@ from contract import file_hash, identity_hash, immutable_json, page_content_hash
 from fools_gold_v4_common import record_hash
 from v4_reference import page_reference
 from approval_v4 import validate_approval
+from evidence_v4 import EvidenceScope
 
 
 def safe_path(root, value):
@@ -64,7 +65,8 @@ def validate_inventory(manifest, spec):
                 continue
             if not isinstance(value, str) or not re.fullmatch('[0-9a-f]{64}', value):
                 raise ValueError('missing-source-identity')
-            owner = owners.setdefault((key, value), case['split'])
+            namespace = 'pdf' if key in ['sha256', 'nativePdfHash'] else key
+            owner = owners.setdefault((namespace, value), case['split'])
             if owner != case['split']:
                 raise ValueError('cross-split-source-identity')
             if key != 'sha256':
@@ -98,7 +100,7 @@ def validate_inventory(manifest, spec):
     return counts
 
 
-def seal(root, out, approval_path):
+def seal(root, out, approval_path, evidence_index=None):
     if out.exists():
         raise FileExistsError('evaluation output must be new')
     original_path = root / 'manifest.json'
@@ -110,8 +112,11 @@ def seal(root, out, approval_path):
     if file_hash(spec_path) != original['specHash']:
         raise ValueError('changed-frozen-specification')
     validate_inventory(original, spec)
-    approval = json.loads(approval_path.read_text())
-    validate_approval(approval, original, file_hash(original_path), candidate=root, spec=spec)
+    if evidence_index is None:
+        raise ValueError('explicit-evidence-scope-required')
+    evidence = EvidenceScope(evidence_index, protected_roots=[root])
+    approval = evidence.load_file(approval_path)
+    validate_approval(approval, original, file_hash(original_path), candidate=root, spec=spec, evidence=evidence)
     compiled = []
     integrity_cases = []
     out.mkdir(parents=True, exist_ok=False)
@@ -173,11 +178,12 @@ def seal(root, out, approval_path):
     counts = original['counts']
     manifest = dict(schema='mixed-pdf-authored@v2', families=counts['families'], pageCount=counts['pages'],
                     cases=compiled, generationManifestHash=file_hash(original_path), generationRoot=str(root),
-                    acceptanceReceiptHash=file_hash(approval_path), projectionCodeHash=file_hash(Path(__file__)),
+                    acceptanceReceiptHash=file_hash(evidence.authorized_path(approval_path)[0]),
+                    evidenceIndexHash=evidence.index_hash, projectionCodeHash=file_hash(Path(__file__)),
                     referenceAdapterHash=file_hash(Path(__file__).with_name('v4_reference.py')))
     manifest['approvalCodeHash'] = file_hash(Path(__file__).with_name('approval_v4.py'))
     manifest['projectionDependencyHashes'] = {name: file_hash(Path(__file__).with_name(name))
-        for name in ['approval_v4.py', 'contract.py', 'fools_gold_v4_common.py', 'v4_reference.py']}
+        for name in ['approval_v4.py', 'evidence_v4.py', 'contract.py', 'fools_gold_v4_common.py', 'v4_reference.py']}
     validate_manifest(manifest)
     immutable_json(out / 'manifest.json', manifest)
     immutable_json(out / 'generation-manifest.json', original)
@@ -191,5 +197,6 @@ if __name__ == '__main__':
     parser.add_argument('--dataset', type=Path, required=True)
     parser.add_argument('--out', type=Path, required=True)
     parser.add_argument('--approval', type=Path, required=True)
+    parser.add_argument('--evidence-index', type=Path, required=True)
     args = parser.parse_args()
-    seal(args.dataset.resolve(), args.out.resolve(), args.approval.resolve())
+    seal(args.dataset.resolve(), args.out.resolve(), args.approval.absolute(), args.evidence_index.absolute())

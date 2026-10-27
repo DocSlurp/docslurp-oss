@@ -42,6 +42,16 @@ class ScorerTests(unittest.TestCase):
             self.assertFalse(score['acceptable']);self.assertLess(score['quality'],.95)
     def test_empty(self):
         self.assertEqual(self.score("")["quality"],0)
+    def test_formula_extensions_and_overlapping_occurrences(self):
+        prefix='The valve has a pressure of 12 units. '*60
+        short='q = a / b';long=short+' + c'
+        ref={'expectedMarkdown':prefix+short,'sections':[prefix+short],
+             'paragraphs':[prefix+short],'tables':[],'formulas':[],
+             'printedFormulas':[short],'excludedText':[]}
+        for changed in [long, 'x + '+short]:
+            self.assertFalse(content_score(ref,prefix+changed,tolerant_markdown)['acceptable'])
+        ref['expectedMarkdown']=prefix+short+'\n'+long;ref['printedFormulas']=[short,long]
+        self.assertFalse(content_score(ref,prefix+long,tolerant_markdown)['acceptable'])
     def test_math_case_and_line_leading_operators_survive_normalization(self):
         for expected,wrong in [('q = a / b','q = A / b'),
                                ('Rule: a\n* b = c','Rule: a\nb = c'),
