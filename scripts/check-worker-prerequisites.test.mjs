@@ -15,6 +15,7 @@ test('reports all missing executables and exits nonzero before worker execution'
   assert.match(result.stderr, /missing executable: pdftotext/);
   assert.match(result.stderr, /missing executable: pandoc/);
   assert.match(result.stderr, /missing executable: clamdscan/);
+  assert.match(result.stderr, /missing executable: cwebp/);
   assert.match(result.stdout, /status=failed/);
 });
 test('rejects unknown profiles instead of silently checking a partial runtime', () => {

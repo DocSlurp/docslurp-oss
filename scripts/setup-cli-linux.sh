@@ -62,6 +62,7 @@ ${SUDO} apt-get install -y \
   tesseract-ocr-tur \
   tesseract-ocr-ukr \
   tesseract-ocr-vie \
+  webp \
   unrtf
 
 # Check kernel/container policy as the user who will run the worker.

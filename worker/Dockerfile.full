@@ -137,6 +137,7 @@ RUN apt-get update \
        tesseract-ocr-tur \
        tesseract-ocr-ukr \
        tesseract-ocr-vie \
+       webp \
        unrtf \
     && rm -rf /var/lib/apt/lists/* /usr/share/doc/* /usr/share/man/* /usr/share/info/* \
     && rm -rf /opt/yarn-* /usr/local/bin/yarn /usr/local/bin/yarnpkg
