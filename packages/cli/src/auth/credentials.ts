@@ -1,9 +1,10 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { existsSync } from "node:fs";
-import { lstat, mkdir, open, readFile, rename, unlink } from "node:fs/promises";
+import { constants, existsSync } from "node:fs";
+import { lstat, mkdir, open, rename, stat, unlink, type FileHandle } from "node:fs/promises";
 import { homedir } from "node:os";
-import { delimiter, join } from "node:path";
+import { join } from "node:path";
 
 /**
  * Where `docslurp login` keeps its OAuth credentials.
@@ -90,16 +91,20 @@ export const credentialsFile = () => join(credentialsDirectory(), "credentials.j
  * Windows has no POSIX modes; %APPDATA% is per-user by ACL.
  */
 async function assertPrivate(path: string, kind: "directory" | "file"): Promise<void> {
-  const info = await lstat(path);
+  checkPrivate(path, kind, await lstat(path));
+}
+
+function checkPrivate(path: string, kind: "directory" | "file", info: Awaited<ReturnType<typeof lstat>>): void {
   if (info.isSymbolicLink()) throw new CredentialStoreError(`Refusing to use ${path}: it is a symbolic link.`);
   if (kind === "directory" ? !info.isDirectory() : !info.isFile()) throw new CredentialStoreError(`Refusing to use ${path}: not a ${kind}.`);
   if (process.platform === "win32") return;
-  if (typeof process.getuid === "function" && info.uid !== process.getuid()) {
+  if (typeof process.getuid === "function" && Number(info.uid) !== process.getuid()) {
     throw new CredentialStoreError(`Refusing to use ${path}: it is owned by another user.`);
   }
-  if ((info.mode & 0o077) !== 0) {
+  const mode = Number(info.mode);
+  if ((mode & 0o077) !== 0) {
     const fix = kind === "directory" ? "chmod 700" : "chmod 600";
-    throw new CredentialStoreError(`Refusing to use ${path}: permissions ${(info.mode & 0o777).toString(8)} are too open. Run \`${fix} ${path}\` or \`docslurp logout\`.`);
+    throw new CredentialStoreError(`Refusing to use ${path}: permissions ${(mode & 0o777).toString(8)} are too open. Run \`${fix} ${path}\` or \`docslurp logout\`.`);
   }
 }
 
@@ -109,12 +114,27 @@ async function readCredentialFile(): Promise<CredentialFile> {
   const dir = credentialsDirectory(), file = credentialsFile();
   if (!existsSync(file)) return { version: 1, credentials: {} };
   await assertPrivate(dir, "directory");
-  await assertPrivate(file, "file");
+  // O_NOFOLLOW, then check the opened handle itself: a swap between the check
+  // and the read cannot make us read a symlink target or a looser file.
+  let handle: FileHandle;
+  try {
+    handle = await open(file, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ELOOP") throw new CredentialStoreError(`Refusing to use ${file}: it is a symbolic link.`);
+    throw error;
+  }
+  let text: string;
+  try {
+    checkPrivate(file, "file", await handle.stat() as Awaited<ReturnType<typeof lstat>>);
+    text = await handle.readFile("utf8");
+  } finally {
+    await handle.close();
+  }
   let parsed: unknown;
   try {
-    parsed = JSON.parse(await readFile(file, "utf8"));
+    parsed = JSON.parse(text);
   } catch {
-    throw new CredentialStoreError(`${file} is not valid JSON. Remove it and run \`docslurp login\` again.`);
+    throw new CredentialStoreError(`${file} is not valid JSON. Remove it and run \`docslurp logout --force\` or delete it, then \`docslurp login\`.`);
   }
   const credentials: Record<string, StoredCredential> = {};
   const entries = (parsed as { credentials?: Record<string, unknown> })?.credentials ?? {};
@@ -150,21 +170,67 @@ async function writeCredentialFile(data: CredentialFile): Promise<void> {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Cross-process lock for read-modify-write cycles (and refresh)
+
+const lockScope = new AsyncLocalStorage<boolean>();
+const LOCK_WAIT_MS = 15_000;
+const LOCK_STALE_MS = 60_000;
+
+/**
+ * Runs `fn` holding `credentials.lock` (created with O_EXCL in the private
+ * config directory), so two CLI processes cannot interleave a read-modify-write
+ * of the credentials file and drop each other's login, and a refresh cannot
+ * race another process's refresh of the same login. Re-entrant within one
+ * process. A lock older than a minute is from a crashed process and is broken.
+ */
+export async function withCredentialLock<T>(fn: () => Promise<T>): Promise<T> {
+  if (lockScope.getStore()) return await fn();
+  const dir = credentialsDirectory();
+  await mkdir(dir, { recursive: true, mode: 0o700 });
+  await assertPrivate(dir, "directory");
+  const lock = join(dir, "credentials.lock");
+  const deadline = Date.now() + LOCK_WAIT_MS;
+  for (let delay = 25; ; delay = Math.min(delay * 2, 250)) {
+    try {
+      const handle = await open(lock, "wx", 0o600);
+      await handle.writeFile(String(process.pid));
+      await handle.close();
+      break;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      const age = await stat(lock).then((info) => Date.now() - info.mtimeMs, () => 0);
+      if (age > LOCK_STALE_MS) { await unlink(lock).catch(() => {}); continue; }
+      if (Date.now() > deadline) throw new CredentialStoreError(`Another docslurp process holds ${lock}. If none is running, delete that file.`);
+      await new Promise((resolve) => setTimeout(resolve, delay));
+    }
+  }
+  try {
+    return await lockScope.run(true, fn);
+  } finally {
+    await unlink(lock).catch(() => {});
+  }
+}
+
 const fileStore = {
   label: () => `file ${credentialsFile()}`,
   async get(account: string) { return (await readCredentialFile()).credentials[account] ?? null; },
   async set(account: string, credential: StoredCredential) {
-    const data = await readCredentialFile();
-    data.credentials[account] = credential;
-    await writeCredentialFile(data);
+    await withCredentialLock(async () => {
+      const data = await readCredentialFile();
+      data.credentials[account] = credential;
+      await writeCredentialFile(data);
+    });
   },
   async delete(account: string) {
     if (!existsSync(credentialsFile())) return false;
-    const data = await readCredentialFile();
-    if (!data.credentials[account]) return false;
-    delete data.credentials[account];
-    await writeCredentialFile(data);
-    return true;
+    return await withCredentialLock(async () => {
+      const data = await readCredentialFile();
+      if (!data.credentials[account]) return false;
+      delete data.credentials[account];
+      await writeCredentialFile(data);
+      return true;
+    });
   },
 };
 
@@ -192,9 +258,25 @@ function runTool(command: string, args: string[], input?: string): Promise<ToolR
   });
 }
 
-function onPath(binary: string): boolean {
-  return (process.env.PATH ?? "").split(delimiter).some((dir) => dir && existsSync(join(dir, binary)));
+/**
+ * Helpers that receive secrets are taken only from system directories, never
+ * from PATH or the working directory: a `secret-tool` or `powershell.exe`
+ * planted in a cloned repository must not receive the refresh token.
+ */
+const TRUSTED_UNIX_DIRS = ["/usr/bin", "/bin", "/usr/local/bin", "/run/current-system/sw/bin"];
+export function trustedUnixBinary(name: string): string | null {
+  for (const dir of TRUSTED_UNIX_DIRS) {
+    const candidate = join(dir, name);
+    if (existsSync(candidate)) return candidate;
+  }
+  return null;
 }
+export function windowsSystemBinary(...parts: string[]): string {
+  const root = process.env.SystemRoot || process.env.windir || "C:\\Windows";
+  return [root.replace(/[\\/]+$/, ""), "System32", ...parts].join("\\");
+}
+const POWERSHELL = () => windowsSystemBinary("WindowsPowerShell", "v1.0", "powershell.exe");
+const secretTool = () => trustedUnixBinary("secret-tool");
 
 const encode = (credential: StoredCredential) => Buffer.from(JSON.stringify(credential), "utf8").toString("base64");
 function decode(secret: string): StoredCredential | null {
@@ -233,18 +315,18 @@ const macKeychain: Keychain = {
 
 const secretService: Keychain = {
   name: "Secret Service (libsecret)",
-  available: () => process.platform === "linux" && onPath("secret-tool")
+  available: () => process.platform === "linux" && secretTool() !== null
     && Boolean(process.env.DBUS_SESSION_BUS_ADDRESS || (process.env.XDG_RUNTIME_DIR && existsSync(join(process.env.XDG_RUNTIME_DIR, "bus")))),
   async read(account) {
-    const result = await runTool("secret-tool", ["lookup", "service", SERVICE, "account", account]);
+    const result = await runTool(secretTool()!, ["lookup", "service", SERVICE, "account", account]);
     return result.code === 0 && result.stdout ? result.stdout : null;
   },
   async write(account, secret) {
     // secret-tool reads the secret from stdin.
-    return (await runTool("secret-tool", ["store", "--label", `DocSlurp CLI (${account})`, "service", SERVICE, "account", account], secret)).code === 0;
+    return (await runTool(secretTool()!, ["store", "--label", `DocSlurp CLI (${account})`, "service", SERVICE, "account", account], secret)).code === 0;
   },
   async remove(account) {
-    return (await runTool("secret-tool", ["clear", "service", SERVICE, "account", account])).code === 0;
+    return (await runTool(secretTool()!, ["clear", "service", SERVICE, "account", account])).code === 0;
   },
 };
 
@@ -255,16 +337,16 @@ const windowsVault: Keychain = {
   // The script (and the base64 secret it carries) goes to Windows PowerShell on stdin.
   async read(account) {
     const script = `$ErrorActionPreference='Stop';${PASSWORD_VAULT}try{$c=$v.Retrieve('${SERVICE}','${account}');$c.RetrievePassword();[Console]::Out.Write($c.Password)}catch{exit 44}\n`;
-    const result = await runTool("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", "-"], script);
+    const result = await runTool(POWERSHELL(), ["-NoProfile", "-NonInteractive", "-Command", "-"], script);
     return result.code === 0 && result.stdout ? result.stdout : null;
   },
   async write(account, secret) {
     const script = `$ErrorActionPreference='Stop';${PASSWORD_VAULT}try{$v.Remove($v.Retrieve('${SERVICE}','${account}'))}catch{};$v.Add((New-Object Windows.Security.Credentials.PasswordCredential('${SERVICE}','${account}','${secret}')))\n`;
-    return (await runTool("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", "-"], script)).code === 0;
+    return (await runTool(POWERSHELL(), ["-NoProfile", "-NonInteractive", "-Command", "-"], script)).code === 0;
   },
   async remove(account) {
     const script = `$ErrorActionPreference='Stop';${PASSWORD_VAULT}try{$v.Remove($v.Retrieve('${SERVICE}','${account}'))}catch{exit 44}\n`;
-    return (await runTool("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", "-"], script)).code === 0;
+    return (await runTool(POWERSHELL(), ["-NoProfile", "-NonInteractive", "-Command", "-"], script)).code === 0;
   },
 };
 

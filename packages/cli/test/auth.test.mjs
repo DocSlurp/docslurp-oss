@@ -46,7 +46,13 @@ function fakeServer(options = {}) {
         return send(200, issue());
       }
       if (form.get("grant_type") === "refresh_token") {
+        state.refreshCalls = (state.refreshCalls ?? 0) + 1;
+        if (options.anyRefresh && String(form.get("refresh_token")).startsWith("dsclir_")) {
+          await new Promise((resolve) => setTimeout(resolve, 100));
+          return send(200, issue());
+        }
         if (options.refreshFails || form.get("refresh_token") !== state.refresh) return send(400, { error: "invalid_grant", error_description: "The grant was revoked." });
+        await new Promise((resolve) => setTimeout(resolve, 100));
         return send(200, issue());
       }
       if (form.get("grant_type") === "urn:ietf:params:oauth:grant-type:device_code") {
@@ -107,8 +113,8 @@ function cli(args, { url, config, env = {}, onStderr, input, timeoutMs = 20_000 
   });
 }
 
-/** Plays the browser: once the CLI prints its authorize URL, call the loopback callback. */
-function browser(fake, url, callback) {
+/** Plays the browser: once the CLI prints its authorize URL, call the loopback callback (once per callback given, in order). */
+function browser(fake, url, ...callbacks) {
   let done = false;
   return (stderr) => {
     const match = stderr.match(/(http:\/\/127\.0\.0\.1:\d+\/oauth\/mcp\/authorize\?\S+)/);
@@ -116,10 +122,15 @@ function browser(fake, url, callback) {
     done = true;
     const authorize = new URL(match[1]);
     fake.state.authorize = authorize.searchParams;
-    const redirect = new URL(authorize.searchParams.get("redirect_uri"));
-    const params = callback(authorize.searchParams, url);
-    for (const [key, value] of Object.entries(params)) redirect.searchParams.set(key, value);
-    fetch(redirect).catch(() => {});
+    fake.state.callbackStatuses = [];
+    (async () => {
+      for (const callback of callbacks) {
+        const redirect = new URL(authorize.searchParams.get("redirect_uri"));
+        for (const [key, value] of Object.entries(callback(authorize.searchParams, url))) redirect.searchParams.set(key, value);
+        const response = await fetch(redirect).catch(() => null);
+        fake.state.callbackStatuses.push(response?.status ?? 0);
+      }
+    })();
   };
 }
 
@@ -172,13 +183,18 @@ test("login: --scopes is validated and forwarded", async () => {
   } finally { await fake.close(); await box.dispose(); }
 });
 
-test("login: a state mismatch is refused and the code is never exchanged", async () => {
+test("login: a callback with the wrong state is refused, its code never exchanged, and the login keeps waiting", async () => {
   const fake = fakeServer(); const url = await fake.start(); const box = await sandbox();
   try {
-    const result = await cli(["login"], { url, config: box.config, onStderr: browser(fake, url, (_params, origin) => ({ code: "good-code", state: "attacker-state", iss: origin })) });
-    assert.equal(result.code, 1);
-    assert.match(result.stderr, /state did not match/);
-    assert.equal(fake.state.requests.filter((r) => r.path === "/oauth/mcp/token").length, 0);
+    const result = await cli(["login"], { url, config: box.config, onStderr: browser(fake, url,
+      (_params, origin) => ({ code: "attacker-code", state: "attacker-state", iss: origin }),
+      (params, origin) => ({ code: "good-code", state: params.get("state"), iss: origin })) });
+    assert.equal(result.code, 0, result.stderr);
+    assert.deepEqual(fake.state.callbackStatuses, [400, 200]);
+    assert.match(result.stderr, /wrong state/);
+    const exchanges = fake.state.requests.filter((r) => r.path === "/oauth/mcp/token");
+    assert.equal(exchanges.length, 1);
+    assert.equal(new URLSearchParams(exchanges[0].body).get("code"), "good-code");
   } finally { await fake.close(); await box.dispose(); }
 });
 
@@ -239,6 +255,48 @@ test("stored credentials with insecure permissions are refused before any reques
       assert.equal(fake.state.requests.length, 0);
     } finally { await fake.close(); await box.dispose(); }
   }
+});
+
+test("a symlinked credentials file is refused", async () => {
+  const { symlink } = await import("node:fs/promises");
+  const fake = fakeServer(); const url = await fake.start(); const box = await sandbox();
+  try {
+    const file = await writeStored(box.config, url, {});
+    const real = join(box.root, "elsewhere.json");
+    await writeFile(real, await readFile(file, "utf8"), { mode: 0o600 });
+    await rm(file);
+    await symlink(real, file);
+    const result = await cli(["search", "q"], { url, config: box.config });
+    assert.equal(result.code, 1);
+    assert.match(result.stderr, /symbolic link/);
+    assert.equal(fake.state.requests.length, 0);
+  } finally { await fake.close(); await box.dispose(); }
+});
+
+test("concurrent refreshes neither lose another profile's login nor spend one refresh token twice", async () => {
+  const many = fakeServer({ anyRefresh: true }); const url = await many.start(); const box = await sandbox();
+  try {
+    const file = await writeStored(box.config, url, { accessTokenExpiresAt: new Date(Date.now() - 1000).toISOString() });
+    const data = JSON.parse(await readFile(file, "utf8"));
+    data.credentials[`work@${url}`] = { ...data.credentials[`default@${url}`], profile: "work", refreshToken: "dsclir_work" };
+    await writeFile(file, JSON.stringify(data));
+    const results = await Promise.all([
+      cli(["search", "q"], { url, config: box.config }),
+      cli(["search", "q", "--profile", "work"], { url, config: box.config }),
+    ]);
+    for (const result of results) assert.equal(result.code, 0, result.stderr);
+    const stored = JSON.parse(await readFile(file, "utf8")).credentials;
+    assert.notEqual(stored[`default@${url}`].refreshToken, "dsclir_refresh_1");
+    assert.notEqual(stored[`work@${url}`].refreshToken, "dsclir_work");
+    assert.notEqual(stored[`default@${url}`].refreshToken, stored[`work@${url}`].refreshToken);
+  } finally { await many.close(); await box.dispose(); }
+  const strict = fakeServer(); const strictUrl = await strict.start(); const box2 = await sandbox();
+  try {
+    await writeStored(box2.config, strictUrl, { accessTokenExpiresAt: new Date(Date.now() - 1000).toISOString() });
+    const results = await Promise.all([1, 2, 3].map(() => cli(["search", "q"], { url: strictUrl, config: box2.config })));
+    for (const result of results) assert.equal(result.code, 0, result.stderr);
+    assert.equal(strict.state.refreshCalls, 1, "only one process may spend the refresh token");
+  } finally { await strict.close(); await box2.dispose(); }
 });
 
 test("precedence: --api-key > DOCSLURP_API_KEY > DOCSLURP_TOKEN > stored login", async () => {
@@ -302,6 +360,9 @@ test("auth token prints only the access token; whoami and auth status describe t
     assert.equal(parsed.credentialSource, "env DOCSLURP_TOKEN");
     assert.equal(parsed.shadowedStoredLogin, true);
     assert.ok(!status.stdout.includes("env-token"));
+    const echoed = await cli(["auth", "token"], { url, config: box.config, env: { DOCSLURP_TOKEN: "env-token" } });
+    assert.equal(echoed.stdout, "env-token\n");
+    assert.match(echoed.stderr, /not freshly issued/);
     const refused = await cli(["auth", "token"], { url, config: box.config, env: { DOCSLURP_API_KEY: "key-env" } });
     assert.equal(refused.code, 1);
     assert.equal(refused.stdout, "");
@@ -380,4 +441,44 @@ test("mcp server mode uses the stored login without an API key", async () => {
     assert.deepEqual(responses[1].result, { tools: [] });
     assert.equal(fake.state.requests.find((r) => r.path === "/v1/mcp/tools").authorization, "Bearer dscli_access_1");
   } finally { await fake.close(); await box.dispose(); }
+});
+
+test("secret-receiving helpers come only from system directories, never PATH or the working directory", async () => {
+  const { trustedUnixBinary, windowsSystemBinary } = await import("../dist/auth/credentials.js");
+  const box = await sandbox();
+  const previous = { PATH: process.env.PATH, cwd: process.cwd(), SystemRoot: process.env.SystemRoot };
+  try {
+    await mkdir(box.root, { recursive: true });
+    const planted = join(box.root, "docslurp-planted-helper");
+    await writeFile(planted, "#!/bin/sh\n", { mode: 0o755 });
+    process.env.PATH = `${box.root}:${process.env.PATH}`;
+    process.chdir(box.root);
+    assert.equal(trustedUnixBinary("docslurp-planted-helper"), null);
+    process.env.SystemRoot = "C:\\Windows";
+    assert.equal(windowsSystemBinary("WindowsPowerShell", "v1.0", "powershell.exe"), "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe");
+  } finally {
+    process.chdir(previous.cwd);
+    process.env.PATH = previous.PATH;
+    if (previous.SystemRoot === undefined) delete process.env.SystemRoot; else process.env.SystemRoot = previous.SystemRoot;
+    await box.dispose();
+  }
+});
+
+test("exec on Windows resolves PATHEXT and runs batch shims through cmd.exe with escaped arguments", async () => {
+  const { resolveWindowsCommand, windowsSpawn, escapeCmdArgument } = await import("../dist/auth/windows-exec.js");
+  const files = new Set(["C:\\node\\npm.cmd", "C:\\tools\\git.exe", ".\\npm.cmd"]);
+  const exists = (path) => files.has(path);
+  const env = { PATH: "C:\\node;C:\\tools", PATHEXT: ".COM;.EXE;.BAT;.CMD", ComSpec: "C:\\Windows\\System32\\cmd.exe" };
+  assert.equal(resolveWindowsCommand("npm", env, exists), "C:\\node\\npm.cmd");
+  assert.equal(resolveWindowsCommand("git", env, exists), "C:\\tools\\git.exe");
+  assert.equal(resolveWindowsCommand("missing", env, exists), null);
+  // A planted shim in the working directory is never chosen for a bare name.
+  assert.equal(resolveWindowsCommand("npm", { ...env, PATH: "" }, exists), null);
+  assert.deepEqual(windowsSpawn("git", ["status"], env, exists), { file: "C:\\tools\\git.exe", args: ["status"], verbatim: false });
+  const shim = windowsSpawn("npm", ["run", "build & calc", 'say "hi"'], env, exists);
+  assert.equal(shim.file, "C:\\Windows\\System32\\cmd.exe");
+  assert.equal(shim.verbatim, true);
+  assert.deepEqual(shim.args.slice(0, 3), ["/d", "/s", "/c"]);
+  assert.ok(!/[^^]&/.test(shim.args[3]), "an unescaped & would start a second command");
+  assert.equal(escapeCmdArgument("a&b"), '^^^"a^^^&b^^^"');
 });

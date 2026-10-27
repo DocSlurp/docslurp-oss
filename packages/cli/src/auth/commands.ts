@@ -4,6 +4,7 @@ import { constants } from "node:os";
 import { credentialAccount, deleteCredential, loadCredential, saveCredential, type StoredCredential } from "./credentials.js";
 import { CLI_CLIENT_ID, deviceLogin, discover, loopbackLogin, parseScopes, revokeToken, type TokenSet } from "./oauth.js";
 import { resolveAuth, resolveProfile, type ResolvedAuth } from "./resolve.js";
+import { windowsSpawn } from "./windows-exec.js";
 
 type Flags = Record<string, string | boolean>;
 const err = (line: string) => process.stderr.write(`${line}\n`);
@@ -136,6 +137,9 @@ async function requireOAuth(flags: Flags, apiUrl: string, command: string): Prom
 /** Prints only the access token on stdout, for `export DOCSLURP_TOKEN=$(docslurp auth token)`. */
 export async function authTokenCommand(flags: Flags, apiUrl: string): Promise<void> {
   const auth = await requireOAuth(flags, apiUrl, "docslurp auth token");
+  if (auth.source === "env DOCSLURP_TOKEN") {
+    err("Note: printing DOCSLURP_TOKEN from the environment unchanged; it was not freshly issued and is not refreshed. Unset it to print a token from your stored login.");
+  }
   process.stdout.write(`${await auth.token({ minValiditySeconds: 300 })}\n`);
 }
 
@@ -151,9 +155,14 @@ export async function execCommand(flags: Flags, apiUrl: string, workspace: strin
   if (workspace) env.DOCSLURP_WORKSPACE = workspace;
   delete env.DOCSLURP_API_KEY;
   const [command, ...args] = argv as [string, ...string[]];
-  const child = spawn(command, args, { stdio: "inherit", env, shell: false });
+  // Windows: resolve PATHEXT ourselves; only .cmd/.bat go through cmd.exe, with every argument escaped.
+  const target = process.platform === "win32" ? windowsSpawn(command, args, env) : { file: command, args, verbatim: false };
+  const child = spawn(target.file, target.args, { stdio: "inherit", env, shell: false, windowsVerbatimArguments: target.verbatim });
+  // Ctrl-C reaches the child directly from the terminal (same process group):
+  // ignore it here so we stay alive to report the child's status. Forward the
+  // signals a terminal does not deliver to the child itself.
   const forward = (signal: NodeJS.Signals) => () => { child.kill(signal); };
-  const handlers = (["SIGINT", "SIGTERM", "SIGHUP"] as const).map((signal) => [signal, forward(signal)] as const);
+  const handlers = [["SIGINT", () => {}], ...(["SIGTERM", "SIGHUP"] as const).map((signal) => [signal, forward(signal)] as const)] as Array<readonly [NodeJS.Signals, () => void]>;
   for (const [signal, handler] of handlers) process.on(signal, handler);
   const status = await new Promise<number>((resolve, reject) => {
     child.once("error", (error) => reject(new Error(`Could not run ${command}: ${(error as NodeJS.ErrnoException).code ?? error.message}`)));

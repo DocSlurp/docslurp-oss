@@ -3,6 +3,8 @@ import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 
+import { trustedUnixBinary, windowsSystemBinary } from "./credentials.js";
+
 /**
  * OAuth 2.1 public-client flows for `docslurp login` against DocSlurp's
  * authorization server: authorization code with PKCE (S256) and a loopback
@@ -13,7 +15,7 @@ import type { AddressInfo } from "node:net";
  */
 
 export const CLI_CLIENT_ID = "docslurp-cli";
-export const SUPPORTED_SCOPES = ["search", "chat", "read", "ingest"] as const;
+export const SUPPORTED_SCOPES = ["search", "chat", "read", "ingest", "web"] as const;
 /** Least privilege: search and read document text. Add chat or ingest with --scopes. */
 export const DEFAULT_SCOPES = ["search", "read"] as const;
 const DEVICE_GRANT = "urn:ietf:params:oauth:grant-type:device_code";
@@ -110,9 +112,11 @@ async function tokenRequest(server: AuthorizationServer, values: Record<string, 
 
 export function openBrowser(url: string): void {
   if (process.env.DOCSLURP_NO_BROWSER === "1") return;
-  const [command, args] = process.platform === "darwin" ? ["open", [url]]
-    : process.platform === "win32" ? ["rundll32", ["url.dll,FileProtocolHandler", url]]
-    : ["xdg-open", [url]];
+  // Absolute system paths only: never an `xdg-open` or `rundll32.exe` found through PATH or the working directory.
+  const [command, args] = process.platform === "darwin" ? ["/usr/bin/open", [url]]
+    : process.platform === "win32" ? [windowsSystemBinary("rundll32.exe"), ["url.dll,FileProtocolHandler", url]]
+    : [trustedUnixBinary("xdg-open"), [url]];
+  if (!command) return; // The printed URL is the fallback.
   try {
     const child = spawn(command as string, args as string[], { stdio: "ignore", detached: true, windowsHide: true });
     child.on("error", () => {});
@@ -158,7 +162,11 @@ export async function loopbackLogin(server: AuthorizationServer, scopes: string[
         };
         const returnedState = url.searchParams.get("state") ?? "";
         if (!sameSecret(returnedState, state)) {
-          finish(400, "Sign-in refused", "This response did not match the sign-in started by your terminal.", new OAuthError("Sign-in refused: the OAuth state did not match. Run `docslurp login` again.", "state_mismatch"));
+          // A stray or forged callback (another tab, a local process): refuse it
+          // and keep waiting for the one carrying our state. Its code is never used.
+          response.writeHead(400, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store", "referrer-policy": "no-referrer" });
+          response.end(CALLBACK_PAGE("Sign-in refused", "This response did not match the sign-in started by your terminal."));
+          options.print("Ignored a sign-in response that did not match this login (wrong state); still waiting.");
           return;
         }
         const issuer = url.searchParams.get("iss");
