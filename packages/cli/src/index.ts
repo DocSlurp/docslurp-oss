@@ -6,6 +6,9 @@ import { basename } from "node:path";
 import { openAsBlob } from "node:fs";
 import { createInterface } from "node:readline";
 
+import { authTokenCommand, execCommand, loginCommand, logoutCommand, whoamiCommand } from "./auth/commands.js";
+import { resolveAuth, type ResolvedAuth } from "./auth/resolve.js";
+
 const DEFAULT_API_URL = "https://docslurp.io";
 
 function resolveApiUrl(flags: Record<string, string | boolean>): string {
@@ -53,12 +56,24 @@ function usage(): void {
   docslurp search <query> [--workspace <id|slug|name>] [--min-score <0..1>] [--json | --context]
   docslurp search --queries-file <queries.json> [--workspace <id|slug|name>] [--concurrency <1..4>] [--json | --context]
   docslurp chat <question> [--workspace <id|slug|name>] [--session <id>] [--json]
-  docslurp mcp-server [--api-url <url>] [--api-key <key>]
+  docslurp mcp-server [--api-url <url>] [--api-key <key>]   (alias: docslurp mcp)
+  docslurp login [--device] [--scopes "search read chat ingest"] [--no-browser] [--profile <name>] [--api-url <url>]
+  docslurp logout [--profile <name>] [--force]
+  docslurp whoami [--json]
+  docslurp auth status [--json]
+  docslurp auth token
+  docslurp exec [--profile <name>] [--workspace <ws>] -- <command> [args...]
   docslurp --license
   docslurp migrate-algolia-synonyms <export.json> [--out <glossary.json>]
   docslurp import-search-compat <export.json> --workspace <id|slug|name> [--source <algolia|elastic|legacy-parser>] [--api-url <url>] [--api-key <key>] [--out <normalized.json>]
 
-API commands require DOCSLURP_API_KEY or --api-key <key>.
+API commands authenticate with, in order: --api-key <key>, DOCSLURP_API_KEY,
+DOCSLURP_TOKEN (a short-lived OAuth access token), then the stored login from
+docslurp login (refreshed automatically). docslurp login asks for search and read;
+add chat or ingest with --scopes. Use --device on headless or SSH machines.
+docslurp auth token prints a fresh access token (valid at most 15 minutes);
+docslurp exec passes one to a child process as DOCSLURP_TOKEN without writing it to disk.
+--profile (or DOCSLURP_PROFILE) keeps separate logins; each profile has one per API URL.
 DOCSLURP_URL overrides the hosted service. Without --workspace or DOCSLURP_WORKSPACE,
 commands use the "default" workspace: your organization's default workspace.
 --workspace takes a workspace ID, slug or name: "Legal Contracts" and legal-contracts are
@@ -124,18 +139,18 @@ async function importSearchCompatCommand(inputPath: string, flags: Record<string
     console.log(`Wrote normalized import payload to ${String(flags.out)}`);
   }
 
-  const apiKey = String(flags.apiKey ?? process.env.DOCSLURP_API_KEY ?? "");
-  if (!apiKey) {
+  const apiUrl = resolveApiUrl(flags);
+  const auth = await resolveAuth(flags, apiUrl, { allowEmpty: true });
+  if (!auth) {
     console.log(JSON.stringify(normalized, null, 2));
-    console.log("Skipped API import because no --api-key or DOCSLURP_API_KEY was provided.");
+    console.log("Skipped API import because no credential was provided (--api-key, DOCSLURP_API_KEY, DOCSLURP_TOKEN or docslurp login).");
     return;
   }
 
-  const apiUrl = resolveApiUrl(flags);
   const response = await fetch(`${apiUrl}/compat/algolia/1/import`, {
     method: "POST",
     headers: {
-      Authorization: `Bearer ${apiKey}`,
+      Authorization: `Bearer ${await auth.token()}`,
       "Content-Type": "application/json"
     },
     body: JSON.stringify(normalized)
@@ -230,8 +245,11 @@ function parseCliArgs(argv: string[]) {
   let i = 1;
   while (i < argv.length) {
     const arg = argv[i];
-    if (arg === "--watch" || arg === "--json" || arg === "--context" || arg === "--estimate") {
+    if (arg === "--watch" || arg === "--json" || arg === "--context" || arg === "--estimate" || arg === "--device" || arg === "--force") {
       flags[arg.slice(2)] = true;
+      i++;
+    } else if (arg === "--no-browser") {
+      flags.noBrowser = true;
       i++;
     } else if (arg === "--new-workspace") {
       flags.newWorkspace = true;
@@ -263,12 +281,25 @@ async function apiFetch(
 ): Promise<Response> {
   const requestTimeoutMs = timeoutMs ?? Number(flags.timeout ?? 30) * 1000;
   if (!Number.isFinite(requestTimeoutMs) || requestTimeoutMs <= 0) throw new Error("--timeout must be a positive number of seconds.");
-  const apiKey = String(flags.apiKey ?? process.env.DOCSLURP_API_KEY ?? "");
-  if (!apiKey) throw new Error("Set DOCSLURP_API_KEY or pass --api-key <key>.");
   const apiUrl = resolveApiUrl(flags);
-  const headers = new Headers(init.headers);
-  headers.set("Authorization", `Bearer ${apiKey}`);
-  return fetch(`${apiUrl}${pathname}`, { ...init, headers, signal: AbortSignal.timeout(Math.max(1, Math.ceil(requestTimeoutMs))) });
+  const auth = await requestAuth(flags, apiUrl);
+  const send = async (forceRefresh: boolean) => {
+    const headers = new Headers(init.headers);
+    headers.set("Authorization", `Bearer ${await auth.token({ forceRefresh })}`);
+    return fetch(`${apiUrl}${pathname}`, { ...init, headers, signal: AbortSignal.timeout(Math.max(1, Math.ceil(requestTimeoutMs))) });
+  };
+  const response = await send(false);
+  // A stored login refreshes once if the server refused its access token (for example after a clock skew).
+  if (response.status !== 401 || auth.source !== "stored login" || init.body instanceof ReadableStream) return response;
+  await response.body?.cancel();
+  return send(true);
+}
+
+let cachedAuth: Promise<ResolvedAuth> | null = null;
+/** One credential resolution per process (see auth/resolve.ts for precedence). */
+function requestAuth(flags: Record<string, string | boolean>, apiUrl: string): Promise<ResolvedAuth> {
+  cachedAuth ??= resolveAuth(flags, apiUrl) as Promise<ResolvedAuth>;
+  return cachedAuth;
 }
 
 /** Same threshold as the SDK's DIRECT_UPLOAD_THRESHOLD_BYTES. */
@@ -816,33 +847,39 @@ const MCP_CAPABILITIES_URI = "docslurp://capabilities";
 
 async function mcpFetch(args: {
   apiUrl: string;
-  apiKey: string;
+  auth: ResolvedAuth;
   pathname: string;
   method?: string;
   body?: unknown;
 }): Promise<any> {
-  const response = await fetch(`${args.apiUrl}${args.pathname}`, {
+  const send = async (forceRefresh: boolean) => fetch(`${args.apiUrl}${args.pathname}`, {
     method: args.method ?? "GET",
     signal: AbortSignal.timeout(30_000),
     headers: {
-      Authorization: `Bearer ${args.apiKey}`,
+      // Long-running: a stored login refreshes shortly before each expiry.
+      Authorization: `Bearer ${await args.auth.token({ forceRefresh })}`,
       ...(args.body ? { "Content-Type": "application/json" } : {})
     },
     ...(args.body ? { body: JSON.stringify(args.body) } : {})
   });
+  let response = await send(false);
+  if (response.status === 401 && args.auth.source === "stored login") {
+    await response.body?.cancel();
+    response = await send(true);
+  }
   if (!response.ok) throw new Error(publicHttpError(response.status));
   return await response.json();
 }
 
 async function mcpServerCommand(flags: Record<string, string | boolean>): Promise<void> {
   const apiUrl = resolveApiUrl(flags);
-  const apiKey = String(flags.apiKey ?? process.env.DOCSLURP_API_KEY ?? "");
-  if (!apiKey) throw new Error("MCP server mode requires --api-key or DOCSLURP_API_KEY.");
+  // Same resolution as every command: a logged-in user needs no API key.
+  const auth = await resolveAuth(flags, apiUrl) as ResolvedAuth;
   const { version } = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8")) as { version: string };
   const input = createInterface({ input: process.stdin, crlfDelay: Number.POSITIVE_INFINITY });
   let initialized = false;
   let ready = false;
-  const get = (pathname: string) => mcpFetch({ apiUrl, apiKey, pathname });
+  const get = (pathname: string) => mcpFetch({ apiUrl, auth, pathname });
 
   for await (const line of input) {
     if (!line.trim()) continue;
@@ -904,7 +941,7 @@ async function mcpServerCommand(flags: Record<string, string | boolean>): Promis
             invalid("A tool name and object arguments are required"); break;
           }
           try {
-            const result = await mcpFetch({ apiUrl, apiKey, pathname: `/v1/mcp/tools/${encodeURIComponent(name)}`, method: "POST", body: args });
+            const result = await mcpFetch({ apiUrl, auth, pathname: `/v1/mcp/tools/${encodeURIComponent(name)}`, method: "POST", body: args });
             respond({ content: [{ type: "text", text: JSON.stringify(result) }], isError: false });
           } catch (error) {
             respond({ content: [{ type: "text", text: "We couldn’t complete this tool request. Please try again." }], isError: true });
@@ -959,12 +996,15 @@ async function main(): Promise<void> {
     return;
   }
 
-  if (args.length === 0 || args.includes("--help") || args.includes("-h")) {
+  // `exec` hands everything after `--` to the child untouched (including --help).
+  const separator = args[0] === "exec" ? args.indexOf("--") : -1;
+  const own = separator >= 0 ? args.slice(0, separator) : args;
+  if (args.length === 0 || own.includes("--help") || own.includes("-h")) {
     usage();
     return;
   }
 
-  const { command, positional, flags } = parseCliArgs(args);
+  const { command, positional, flags } = parseCliArgs(own);
 
   switch (command) {
     case "upload":
@@ -1009,8 +1049,33 @@ async function main(): Promise<void> {
       await chatCommand(positional.join(" "), flags);
       break;
     case "mcp-server":
+    case "mcp":
       await mcpServerCommand(flags);
       break;
+    case "login":
+      await loginCommand(flags, resolveApiUrl(flags));
+      break;
+    case "logout":
+      await logoutCommand(flags, resolveApiUrl(flags));
+      break;
+    case "whoami":
+      await whoamiCommand(flags, resolveApiUrl(flags), false);
+      break;
+    case "auth": {
+      const apiUrl = resolveApiUrl(flags);
+      if (positional[0] === "status") await whoamiCommand(flags, apiUrl, true);
+      else if (positional[0] === "token") await authTokenCommand(flags, apiUrl);
+      else if (positional[0] === "login") await loginCommand(flags, apiUrl);
+      else if (positional[0] === "logout") await logoutCommand(flags, apiUrl);
+      else throw new Error("Usage: docslurp auth <status|token|login|logout>");
+      break;
+    }
+    case "exec": {
+      if (separator < 0) throw new Error("Usage: docslurp exec [--profile <name>] -- <command> [args...]");
+      const workspace = typeof flags.workspace === "string" && flags.workspace.trim() ? flags.workspace.trim() : process.env.DOCSLURP_WORKSPACE?.trim() || null;
+      await execCommand(flags, resolveApiUrl(flags), workspace, args.slice(separator + 1));
+      break;
+    }
     case "migrate-algolia-synonyms": {
       const inputPath = positional[0];
       if (!inputPath) {
