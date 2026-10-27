@@ -599,3 +599,21 @@ that rounded float constants was omitted. It may produce formal-round-one previe
 only: dense E1-B prose, E2-C merged-table/weighted analysis and E3-A plotted comparison,
 through both native production paths. Editorial/visual review precedes bulk exports;
 no candidate, full-family, fixture, policy or savings acceptance is implied by launch.
+
+### A7 round 1 and explicit table presentation correction
+
+Round 1 produced six original native previews and three editable ODTs. The
+ReportLab previews have real cells, but the resolver appended literal pipe
+characters to non-E2 cells and omitted their rules, producing the code-like
+appearance the user rejected. Writer additionally has duplicated header paints,
+white frame fills interrupting fraction rules/panels and unresolved readbacks.
+E1 contains unsupported causal inferences. These are retained substantive misses,
+not accepted previews.
+
+The user explicitly requested real tabular layout. The coordinator authorized
+round 2 only, with no visible Markdown separators, aligned/padded columns,
+meaningful headers, native spans and restrained rules in both producers. New
+physical expectations must be frozen before export; old pipe glyph counts are
+obsolete under this explicit user override. Reference Markdown remains separate.
+Round 2 also repairs the reported Writer and E1 reasoning defects and must stop
+for review before further builds or bulk generation. Round 1 remains immutable.

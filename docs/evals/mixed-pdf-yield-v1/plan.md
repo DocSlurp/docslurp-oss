@@ -124,3 +124,18 @@ Within the existing four-round cap, the next fresh Builder must first provide a
 small representative native document preview for editorial and visual inspection.
 This stage consumes formal build work; it does not create unlimited free preview
 rounds, weaken the final full-document checks, or authorize corpus expansion.
+
+## Render real tables
+
+The user's later presentation instruction supersedes inherited printed pipe
+separators. Newly generated corpus pages must use real tabular layout: native
+editable Writer cells/spans and ReportLab table cells, consistent padding,
+aligned numeric columns, meaningful unit-bearing headers and restrained vector
+rules. Markdown pipes and separator rows belong only in reference serialization;
+they must never be appended to visible cell text or treated as expected ink.
+
+Freeze revised physical cell literals, geometry and glyph inventories before
+export. Keep logical Markdown/reference formatting separate from physical content
+counts. Record intentional presentation changes explicitly. Historical fidelity
+acceptance does not establish compliance with this newer requirement; regenerated
+baseline and enriched variants need their actual revised table renders reviewed.
