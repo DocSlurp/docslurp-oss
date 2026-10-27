@@ -1,70 +1,73 @@
 import { DEFAULT_SCOPE_DECLINE_THRESHOLD } from "@docslurp/shared";
 
-import { contentTerms, termCoverage } from "./relevance.js";
+import { contentTerms, cosineFromVectorScore, embeddingNoiseBaseline, vectorRelevance } from "./relevance.js";
+import type { EvidenceRetrievalResult } from "./retrieval-adapters.js";
 
 /**
- * Scope relevance: does the retrieved evidence look like it is about the
- * question at all? Drives the chat scope decline.
+ * Server-side scope decline: a conservative UX shortcut, not a safety control.
  *
- * Search's own `relevance` cannot answer this in production: a vector hit
- * from an embedding pipeline without a measured noise baseline counts as a
- * full match (1), so the best hit is 1 for nearly every query (see
- * search/relevance.ts). Lexical coverage is pipeline-independent: the share of
- * the question's distinct content terms (stemmed prefix match) found in a
- * passage's text, heading path or filename. The best passage decides.
+ * When a first-turn question is clearly unrelated to the workspace, chat can
+ * answer with a templated polite decline and related questions instead of a
+ * model turn. It fires only when every condition holds (decideScopeDecline):
+ * a calibrated vector signal below the threshold, no conversation history, no
+ * settings change from the message, no web tools, no request filters, a script
+ * the scorer can segment, and a question that is not about the workspace
+ * itself. In every other case the turn proceeds and the model applies the fixed
+ * core rule (decline unrelated requests politely and suggest related ones).
+ * Anyone can phrase a question to avoid the shortcut; that is fine, because it
+ * only saves a model call.
  *
- * Calibrated by scripts/retrieval-quality/scope-decline-calibrate.mts; see
- * docs/evals/retrieval-quality/scope-decline-calibration.md.
+ * The signal is the best vector-branch cosine for the turn, rescaled above the
+ * embedding pipeline's measured noise baseline (search/relevance.ts), the same
+ * 0..1 relevance the relevance floor uses. Pipelines without a measured baseline
+ * produce no calibrated signal, so the shortcut never fires for them. Rerank
+ * scores are not used: the local reranker is BM25 relative to its candidate
+ * pool, and hosted rerank scores are not exposed or calibrated.
+ *
+ * Calibration: docs/evals/retrieval-quality/scope-decline-calibration.md.
  */
 
-/** Questions with fewer content terms than this are never declined (greetings, "thanks", short follow-ups). */
-export const SCOPE_MIN_CONTENT_TERMS = 2;
-
-export interface ScopeEvidence {
-  text: string;
-  headingPath?: readonly string[] | null;
-  filename?: string | null;
+/** A calibrated relevance signal for one search turn. */
+export interface ScopeSignal {
+  name: "vector";
+  /** Embedding pipeline id (search/relevance.ts embeddingPipelineId), or null when unknown. */
+  pipeline: string | null;
+  /** Best cosine among the vector branch's candidates. */
+  topCosine: number;
+  /** The best cosine rescaled above the pipeline's noise baseline (0..1); null without a measured baseline. */
+  relevance: number | null;
 }
 
-export interface ScopeRelevance {
-  /** Best coverage across passages, 0..1; null when the question is too short to judge. */
-  score: number | null;
-  contentTerms: number;
-  passages: number;
+/** The turn's vector signal from the retrieval branches before fusion, or null when no vector branch ran. */
+export function vectorScopeSignal(results: readonly EvidenceRetrievalResult[], pipeline: string | null): ScopeSignal | null {
+  const vector = results.filter(result => result.adapter === "vector").flatMap(result => result.chunks);
+  if (vector.length === 0) return null;
+  const best = Math.max(...vector.map(chunk => chunk.score));
+  const baseline = embeddingNoiseBaseline(pipeline);
+  return { name: "vector", pipeline, topCosine: cosineFromVectorScore(best), relevance: baseline === null ? null : vectorRelevance(best, baseline) };
 }
 
 /**
- * Request verbs and generic qualifiers that say how to answer, not what about
- * ("write", "explain", "best", "today"). They appear in almost any corpus, so
- * counting them makes an unrelated question look half-covered.
+ * Questions with fewer content terms than this are never declined: greetings,
+ * "thanks", and short questions whose embeddings are too unreliable to judge
+ * ("Where is the Yuma location?" scored below the noise baseline in calibration).
  */
-const SCOPE_GENERIC_TERMS = new Set(
-  "write draft explain describe summarize summarise tell give show suggest recommend help find need want know make let please best good better great nice simple simply quick quickly easy easily today tonight tomorrow yesterday now currently thing things way ways something anything everything someone anyone".split(" "),
-);
+export const SCOPE_MIN_CONTENT_TERMS = 3;
 
-/** The question's subject terms: content terms without generic request words. */
-export function scopeSubjectTerms(query: string): string[] {
-  return contentTerms(query).filter(term => !SCOPE_GENERIC_TERMS.has(term));
+/** Scripts written without spaces between words; the term counting cannot segment them yet. */
+const UNSEGMENTED_SCRIPT = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Thai}\p{Script=Lao}\p{Script=Khmer}\p{Script=Myanmar}\p{Script=Tibetan}]/u;
+
+/**
+ * Questions about the workspace itself (its files, uploads, processing, search
+ * or settings) are in scope even though the documents rarely discuss them.
+ */
+const WORKSPACE_META_TERMS = /^(?:workspaces?|uploads?|uploaded|uploading|files?|documents?|docs?|settings?|search(?:es|ed|ing)?|index(?:ed|ing|es)?|ingest(?:ed|ing|ion)?|process(?:ed|ing)?|pars(?:e|ed|ing|er)|extract(?:ed|ing|ion)?|ocr|pages?|pdfs?|videos?|audio|chat|citations?|cite[sd]?|corpus|folders?|sources?|attachments?)$/;
+
+function isWorkspaceMetaQuestion(query: string): boolean {
+  return contentTerms(query).some(term => WORKSPACE_META_TERMS.test(term));
 }
 
-function scopeQuery(query: string): string {
-  return scopeSubjectTerms(query).join(" ");
-}
-
-export function scopeRelevance(query: string, evidence: readonly ScopeEvidence[]): ScopeRelevance {
-  const subject = scopeQuery(query);
-  const terms = contentTerms(subject).length;
-  if (terms < SCOPE_MIN_CONTENT_TERMS) return { score: null, contentTerms: terms, passages: evidence.length };
-  let best = 0;
-  for (const passage of evidence) {
-    const haystack = [passage.text, (passage.headingPath ?? []).join(" "), passage.filename ?? ""].join("\n");
-    best = Math.max(best, termCoverage(subject, haystack));
-    if (best >= 1) break;
-  }
-  return { score: best, contentTerms: terms, passages: evidence.length };
-}
-
-/** The workspace threshold, else the measured default; always within 0..1 (0 turns the decline off). */
+/** The workspace threshold, else CHAT_SCOPE_DECLINE_THRESHOLD, else the measured default; always within 0..1 (0 turns the shortcut off). */
 export function resolveScopeDeclineThreshold(workspaceThreshold: number | null | undefined, env: NodeJS.ProcessEnv = process.env): number {
   if (typeof workspaceThreshold === "number" && Number.isFinite(workspaceThreshold)) return Math.max(0, Math.min(1, workspaceThreshold));
   const raw = env.CHAT_SCOPE_DECLINE_THRESHOLD?.trim();
@@ -75,44 +78,51 @@ export function resolveScopeDeclineThreshold(workspaceThreshold: number | null |
   return DEFAULT_SCOPE_DECLINE_THRESHOLD;
 }
 
-/**
- * Questions about the workspace itself (its files, uploads, processing, search
- * or settings) are always in scope, even though the documents rarely contain
- * those words.
- */
-const WORKSPACE_META_TERMS = /^(?:workspaces?|uploads?|uploaded|uploading|files?|documents?|docs?|settings?|search(?:es|ed|ing)?|index(?:ed|ing|es)?|ingest(?:ed|ing|ion)?|process(?:ed|ing)?|pars(?:e|ed|ing|er)|extract(?:ed|ing|ion)?|ocr|pages?|pdfs?|videos?|audio|chat|citations?|cite[sd]?|corpus|folders?|sources?|attachments?)$/;
-
-function isWorkspaceMetaQuestion(query: string): boolean {
-  return contentTerms(query).some(term => WORKSPACE_META_TERMS.test(term));
-}
+export type ScopeDeclineSkip =
+  | "disabled" | "history" | "search-configuration" | "web-tools" | "filters"
+  | "unsegmented-script" | "short-question" | "workspace-meta" | "no-evidence" | "uncalibrated";
 
 export interface ScopeDeclineDecision {
   decline: boolean;
-  relevance: ScopeRelevance;
   threshold: number;
-  /** Why the check did not apply, when it did not. */
-  skipped?: "disabled" | "short-question" | "follow-up" | "no-evidence" | "workspace-meta";
+  /** The calibrated relevance compared with the threshold, when there was one. */
+  relevance: number | null;
+  signal: ScopeSignal | null;
+  /** Why the shortcut did not apply, when it did not. */
+  skipped?: ScopeDeclineSkip;
+}
+
+export interface ScopeDeclineInput {
+  query: string;
+  signal: ScopeSignal | null;
+  /** Passages the turn retrieved; none means the existing no-match answer applies. */
+  evidenceCount: number;
+  threshold: number;
+  historyTurns: number;
+  /** A settings change from this message ran (configureSearchFromChat). */
+  searchConfigured: boolean;
+  webTools: boolean;
+  /** The request narrowed the search (documents, types, tags or dates). */
+  filtered: boolean;
 }
 
 /**
- * Whether this turn should be declined as out of scope. Never declines a
- * question too short to judge, or a short follow-up in a conversation (its
- * subject is in the history, not the question). Workspace instructions do not
- * take part: an "answer anything" instruction cannot turn the decline off.
- * Only the workspace threshold setting (0) can.
+ * Whether this turn takes the templated decline. Workspace instructions take no
+ * part: an "answer anything" instruction cannot turn it off; only the threshold
+ * setting (0) can.
  */
-export function decideScopeDecline(args: {
-  query: string;
-  evidence: readonly ScopeEvidence[];
-  threshold: number;
-  historyTurns: number;
-}): ScopeDeclineDecision {
-  const relevance = scopeRelevance(args.query, args.evidence);
-  const base = { relevance, threshold: args.threshold };
-  if (args.threshold <= 0) return { ...base, decline: false, skipped: "disabled" };
-  if (relevance.score === null) return { ...base, decline: false, skipped: "short-question" };
-  if (args.historyTurns > 0 && relevance.contentTerms <= 3) return { ...base, decline: false, skipped: "follow-up" };
-  if (isWorkspaceMetaQuestion(args.query)) return { ...base, decline: false, skipped: "workspace-meta" };
-  if (args.evidence.length === 0) return { ...base, decline: false, skipped: "no-evidence" };
-  return { ...base, decline: relevance.score < args.threshold };
+export function decideScopeDecline(input: ScopeDeclineInput): ScopeDeclineDecision {
+  const base = { threshold: input.threshold, signal: input.signal, relevance: input.signal?.relevance ?? null };
+  const skip = (skipped: ScopeDeclineSkip): ScopeDeclineDecision => ({ ...base, decline: false, skipped });
+  if (input.threshold <= 0) return skip("disabled");
+  if (input.historyTurns > 0) return skip("history");
+  if (input.searchConfigured) return skip("search-configuration");
+  if (input.webTools) return skip("web-tools");
+  if (input.filtered) return skip("filters");
+  if (UNSEGMENTED_SCRIPT.test(input.query)) return skip("unsegmented-script");
+  if (contentTerms(input.query).length < SCOPE_MIN_CONTENT_TERMS) return skip("short-question");
+  if (isWorkspaceMetaQuestion(input.query)) return skip("workspace-meta");
+  if (input.evidenceCount === 0) return skip("no-evidence");
+  if (input.signal?.relevance === null || input.signal?.relevance === undefined) return skip("uncalibrated");
+  return { ...base, decline: input.signal.relevance < input.threshold };
 }

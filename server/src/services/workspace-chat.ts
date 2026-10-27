@@ -6,7 +6,8 @@ import type { PrivacyMode } from "@docslurp/shared";
 import { env } from "../config.js";
 import type { RequestActor } from "../lib/request-actor.js";
 import { isFirstPartyAppActor } from "../lib/first-party-app.js";
-import { buildScopeDeclineAnswer, loadChatScope, loadScopeSuggestions, logScopeDecline, probeScopeEvidence } from "./chat-scope.js";
+import { configuredOutputModerator, moderateChatAnswer, moderationAppliesTo } from "./chat-output-moderation.js";
+import { buildScopeDeclineAnswer, chatScopeFor, loadScopeSuggestions, logScopeDecline } from "./chat-scope.js";
 import { decideScopeDecline, resolveScopeDeclineThreshold, type ScopeDeclineDecision } from "../search/scope-relevance.js";
 import { composeAgentWorkspaceInstructions, composeSystemMessage, type ChatScope, type ComposeSystemMessageArgs } from "./chat-instructions.js";
 import { assertChatSessionGrant, requiresChatSessionToken, sealChatSessionToken } from "../lib/chat-session-tokens.js";
@@ -237,7 +238,7 @@ function reviewEvidenceText(text: string) {
 }
 
 /** System-generated note on the search settings in effect (never workspace text). */
-function describeCurrentSearchSettings(searchSettings: WorkspaceSearchSettings): string {
+export function describeCurrentSearchSettings(searchSettings: WorkspaceSearchSettings): string {
   return `Current document search settings: ${JSON.stringify({ resultCount: searchSettings.retrievalDefaults.resultCount, rerank: searchSettings.retrievalDefaults.useRerank, diversify: searchSettings.retrievalDefaults.useMmr })}. Configuration requests have already been processed; explain only these current values.`;
 }
 
@@ -1064,7 +1065,7 @@ async function chatWorkspaceInTurn(args: {
     sessionId: args.sessionId,
   });
 
-  const response = await runWithAiObservability(
+  let response = await runWithAiObservability(
     {
       distinctId: args.userId,
       sessionId,
@@ -1072,6 +1073,13 @@ async function chatWorkspaceInTurn(args: {
     },
     () => chatWorkspaceTurn(args, sessionId, policy),
   );
+  // Optional output moderation for public (browser-key) answers; off unless CHAT_OUTPUT_MODERATION is set.
+  if (moderationAppliesTo(args.actor) && configuredOutputModerator()) {
+    response = await moderateChatAnswer(response, {
+      actor: args.actor, question: args.query, userId: args.userId, workspaceId: args.workspaceId,
+      privacyMode: await loadWorkspacePrivacyMode(args.workspaceId), signal: args.signal,
+    });
+  }
   await chargeChatAnswer(response, args, sessionId, policy);
   if (requiresChatSessionToken(args.actor)) {
     return { ...response, sessionToken: sealChatSessionToken({ keyId: args.actor.apiKey.keyId, workspaceId: args.workspaceId, sessionId: response.sessionId }) };
@@ -1079,14 +1087,6 @@ async function chatWorkspaceInTurn(args: {
   return response;
 }
 
-/**
- * Bill one chat answer at its model tier (PRICE_CARD.chatAnswerTiers), counted
- * once more per started 100k total tokens. Only the turn's own answer is
- * billed (a nested grounded answer inside the agent's tools is part of it), and
- * it is written inside the chat turn, so an answer that never reaches the
- * client is refunded with the turn (chat-turn-billing.ts). Model tokens and
- * tool searches are our cost, recorded non-billable.
- */
 /** A turn declined as out of scope: templated answer, no citations, related questions. */
 async function answerScopeDecline(input: {
   args: ChatWorkspaceArgs;
@@ -1098,13 +1098,11 @@ async function answerScopeDecline(input: {
   historyTurns: number;
   chatScope: ChatScope;
   decision: ScopeDeclineDecision;
-  path: "retrieval" | "agent";
   wholeCorpus?: ReturnType<typeof buildWholeCorpusDebug>;
-  usage?: WorkspaceChatResponse["usage"];
-  model?: string | null;
 }): Promise<WorkspaceChatResponse> {
-  logScopeDecline({ workspaceId: input.args.workspaceId, path: input.path, decision: input.decision });
-  const suggestions = await loadScopeSuggestions(input.args.workspaceId, input.chatScope);
+  logScopeDecline({ workspaceId: input.args.workspaceId, path: "retrieval", decision: input.decision,
+    requestId: currentRequestId(), sessionId: input.sessionId, searchSessionId: input.searchSessionId });
+  const suggestions = await loadScopeSuggestions(input.args.workspaceId);
   const { answer, scope } = buildScopeDeclineAnswer(input.chatScope, suggestions);
   await input.args.onTextDelta?.(answer);
   await appendTurn(input.sessionId, "user", input.args.query);
@@ -1117,18 +1115,18 @@ async function answerScopeDecline(input: {
     citations: [],
     evidenceSpans: [],
     availability: input.availability,
-    usage: input.usage ?? buildUsageSummary(),
+    usage: buildUsageSummary(),
     runtime: buildRuntimeSummary(input.startedAtMs),
     debug: {
       citations: 0,
-      model: input.model ?? null,
+      model: null,
       fallback: true,
       historyTurns: input.historyTurns,
       mode: "retrieval",
       wholeCorpus: input.wholeCorpus ?? buildWholeCorpusDebug(),
     },
     scopeDecline: {
-      relevance: input.decision.relevance.score ?? 0,
+      relevance: input.decision.relevance ?? 0,
       threshold: input.decision.threshold,
       scope,
       suggestions,
@@ -1136,6 +1134,14 @@ async function answerScopeDecline(input: {
   };
 }
 
+/**
+ * Bill one chat answer at its model tier (PRICE_CARD.chatAnswerTiers), counted
+ * once more per started 100k total tokens. Only the turn's own answer is
+ * billed (a nested grounded answer inside the agent's tools is part of it), and
+ * it is written inside the chat turn, so an answer that never reaches the
+ * client is refunded with the turn (chat-turn-billing.ts). Model tokens and
+ * tool searches are our cost, recorded non-billable.
+ */
 async function chargeChatAnswer(
   response: WorkspaceChatResponse,
   args: ChatWorkspaceArgs,
@@ -1227,8 +1233,8 @@ async function chatWorkspaceTurn(
     threadOverrides,
     args.retrieval,
   );
-  // The default instructions template and the scope decline describe the workspace from its name and documents.
-  const chatScope: ChatScope = await loadChatScope(args.workspaceId, workspace?.name ?? null);
+  // The default instructions template and the scope decline describe the workspace by its name only.
+  const chatScope: ChatScope = chatScopeFor(workspace);
   let searchConfiguration: SearchConfigurationOutcome | undefined;
   // Settings changed from chat messages (this thread's retrieval) and settings
   // proposals are first-party-app capabilities: API keys of any type, the
@@ -1252,21 +1258,9 @@ async function chatWorkspaceTurn(
   // `agent.tools: false` (or tool_choice "none" on /v1/chat/completions) asks for it too.
   if (args.allowAgentTools !== false && args.agent?.tools !== false && args.actor && env.chatMcpEnabled && chatApiKey && !filterDocumentIds && !narrowingFilters) {
     if (!workspace) throw new Error("Workspace not found");
-    // Scope decline before any model call: a bounded lexical probe of the
-    // workspace. Web turns are exempt (the user asked to look beyond the documents).
-    const scopeThreshold = resolveScopeDeclineThreshold(searchSettings.chat.scopeDeclineThreshold);
-    if (args.agent?.web !== true && scopeThreshold > 0) {
-      const scopeDecision = decideScopeDecline({
-        query: args.query,
-        evidence: await probeScopeEvidence(args.workspaceId, args.query),
-        threshold: scopeThreshold,
-        historyTurns: history.length,
-      });
-      if (scopeDecision.decline) {
-        return await answerScopeDecline({ args, responseId, sessionId, searchSessionId: null, availability: null,
-          startedAtMs, historyTurns: history.length, chatScope, decision: scopeDecision, path: "agent" });
-      }
-    }
+    // No server-side scope decline on the agent path: the agent's own searches
+    // decide relevance, and the model applies the fixed core rule (decline
+    // unrelated requests politely and suggest related ones).
     const [{ runChatMcpAgent }, workspaceInventory] = await Promise.all([
       import("./chat-mcp-agent.js"),
       // The inventory is a prompt hint: without it the agent still runs, just without counts.
@@ -1281,17 +1275,15 @@ async function chatWorkspaceTurn(
       workspaceWebTools: (workspace.pipeline as { webTools?: unknown } | null)?.webTools !== false,
       web: args.agent?.web, suggestions: firstPartyApp && args.agent?.suggestions === true,
       retrievalDefaults: searchSettings.retrievalDefaults, workspaceInventory,
-      ...(() => {
-        const composed = composeAgentWorkspaceInstructions({
-          ingestInstructions: workspace.systemPrompt,
-          searchInstructions: searchSettings.chat.searchInstructions,
-          answerStyle: searchSettings.chat.answerStyle,
-          citations: searchSettings.chat.citations,
-          contextNote: describeSearchSettingsForAgent(searchSettings, searchConfiguration),
-          scope: chatScope,
-        });
-        return { coreInstructions: composed.core, workspaceInstructions: composed.workspace };
-      })(),
+      instructionsFor: ({ webTools }) => composeAgentWorkspaceInstructions({
+        ingestInstructions: workspace.systemPrompt,
+        searchInstructions: searchSettings.chat.searchInstructions,
+        answerStyle: searchSettings.chat.answerStyle,
+        citations: searchSettings.chat.citations,
+        contextNote: describeSearchSettingsForAgent(searchSettings, searchConfiguration),
+        scope: chatScope,
+        webTools,
+      }),
       maxOutputTokens: args.maxOutputTokens ?? 2048, signal: args.signal, startedAtMs,
       requestedModel: policy.requestedModel, limits: policy.limits, requestId: currentRequestId(),
       onTextDelta: args.onTextDelta, onToolActivity: args.onToolActivity, onEvidence: args.onEvidence,
@@ -1689,19 +1681,24 @@ async function chatWorkspaceTurn(
     };
   }
 
-  // Scope decline: evidence that barely mentions the question's terms means the
-  // question is not about this workspace. Answer with a templated decline and
-  // related questions, without a model call. Workspace instructions cannot
-  // turn this off; only chat.scopeDeclineThreshold = 0 can.
+  // Scope decline (UX shortcut, not a safety control): a first-turn question
+  // whose best vector match is below the calibrated threshold gets a templated
+  // polite decline and related questions, without a model call. Every other
+  // turn proceeds and the model applies the fixed core rule. Workspace
+  // instructions cannot turn it off; only chat.scopeDeclineThreshold = 0 can.
   const scopeDecision = decideScopeDecline({
     query: args.query,
-    evidence: citations.map(result => ({ text: result.text, headingPath: result.citation.headingPath, filename: result.citation.filename })),
+    signal: retrieved.scopeSignal ?? null,
+    evidenceCount: citations.length,
     threshold: resolveScopeDeclineThreshold(searchSettings.chat.scopeDeclineThreshold),
     historyTurns: history.length,
+    searchConfigured: Boolean(searchConfiguration),
+    webTools: false,
+    filtered: Boolean(documentIds?.length || narrowingFilters),
   });
   if (scopeDecision.decline) {
     return await answerScopeDecline({ args, responseId, sessionId, searchSessionId: retrieved.sessionId, availability,
-      startedAtMs, historyTurns: history.length, chatScope, decision: scopeDecision, path: "retrieval", wholeCorpus: wholeCorpusDebug });
+      startedAtMs, historyTurns: history.length, chatScope, decision: scopeDecision, wholeCorpus: wholeCorpusDebug });
   }
 
   if (!openRouterApiKey) {

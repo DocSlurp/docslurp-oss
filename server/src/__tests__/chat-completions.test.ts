@@ -143,6 +143,22 @@ describe("OpenAI-compatible workspace chat", () => {
       resetChatConcurrency();
     }
   });
+  it("returns a scope decline as the assistant message, JSON and streamed", async () => {
+    const decline = { ...answer, answer: "That question doesn't look related to this workspace, which covers Contracts.\n\nYou could ask, for example:\n- What does “Master agreement” cover?", citations: [],
+      scopeDecline: { relevance: 0.02, threshold: 0.2, scope: "Contracts", suggestions: ["What does “Master agreement” cover?"] } };
+    chatWorkspace.mockImplementation(async (args: { onTextDelta?: (delta: string) => Promise<void> | void }) => {
+      await args.onTextDelta?.(decline.answer);
+      return decline;
+    });
+    const json = await request(input({ messages: [{ role: "user", content: "Best pizza in Naples?" }] }));
+    expect(json.status).toBe(200);
+    expect((await json.json() as { choices: Array<{ message: { content: string } }> }).choices[0]!.message.content).toBe(decline.answer);
+    const streamed = await request(input({ stream: true, messages: [{ role: "user", content: "Best pizza in Naples?" }] }));
+    expect(streamed.status).toBe(200);
+    const text = await streamed.text();
+    expect(text).toContain("doesn't look related to this workspace");
+    expect(text).toContain("data: [DONE]");
+  });
   it("refuses workspaces that turned chat off with an OpenAI-shaped 403", async () => {
     workspaceChatDisabledBody.mockResolvedValueOnce({ error: "Chat is turned off for this workspace.", code: "chat_disabled" });
     const response = await request(input({ stream: true }));

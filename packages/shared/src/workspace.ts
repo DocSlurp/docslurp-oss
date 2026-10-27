@@ -573,11 +573,13 @@ export type ChatSearchFilters = z.infer<typeof chatSearchFiltersSchema>;
 export const CHAT_INSTRUCTIONS_MAX_CHARS = 4000;
 
 /**
- * Default scope-decline threshold (`chat.scopeDeclineThreshold`): the best
- * passage must contain at least this share of the question's content terms.
+ * Default threshold for the chat quick decline (`chat.scopeDeclineThreshold`):
+ * the turn's best vector match, rescaled above the embedding pipeline's noise
+ * baseline (0..1), must reach this for a first question to skip the model.
+ * Conservative on purpose: the model declines unrelated questions itself.
  * Measured in docs/evals/retrieval-quality/scope-decline-calibration.md.
  */
-export const DEFAULT_SCOPE_DECLINE_THRESHOLD = 0.34;
+export const DEFAULT_SCOPE_DECLINE_THRESHOLD = 0.05;
 
 export const workspaceSearchChatSettingsSchema = z.object({
   /** Workspace chat on or off. Off rejects every chat surface (app, /v1/chat, chat/completions, MCP). */
@@ -595,11 +597,11 @@ export const workspaceSearchChatSettingsSchema = z.object({
    */
   searchInstructions: z.string().trim().max(CHAT_INSTRUCTIONS_MAX_CHARS).nullable().default(null),
   /**
-   * Scope decline: when the best evidence for a question scores below this
-   * relevance (share of the question's content terms found in the retrieved
-   * passages, 0..1), chat answers with a short polite decline and related
-   * questions instead of an answer. Null uses the measured default
-   * (DEFAULT_SCOPE_DECLINE_THRESHOLD); 0 turns the decline off.
+   * Quick decline (a UX shortcut, not a safety control): on a first, unfiltered,
+   * non-web direct-answer turn whose best vector match (rescaled above the
+   * embedding pipeline's noise baseline, 0..1) is below this, chat answers with
+   * a templated polite decline and related questions instead of a model call.
+   * Null uses DEFAULT_SCOPE_DECLINE_THRESHOLD; 0 turns it off.
    */
   scopeDeclineThreshold: z.number().min(0).max(1).nullable().default(null),
 });

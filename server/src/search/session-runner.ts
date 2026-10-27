@@ -9,6 +9,7 @@ import {
   retrieveEvidence,
 } from "./retrieval-adapters.js";
 import { annotateEvidenceRelevance, embeddingPipelineId, resolveMinScore } from "./relevance.js";
+import { vectorScopeSignal, type ScopeSignal } from "./scope-relevance.js";
 import type { SearchSetup } from "./session-setup.js";
 import {
   executeSearchSessionRetrieval,
@@ -234,6 +235,7 @@ async function executeSearchSession(args: Parameters<typeof runSearchSession>[0]
       }));
 
       let deferred: { stats: DeferredSearchStats; documentIds: string[] } | null = null;
+      let scopeSignal: ScopeSignal | null = null;
       const response = await executeSearchSessionRetrieval({
         query,
         retrievalQuery,
@@ -277,9 +279,11 @@ async function executeSearchSession(args: Parameters<typeof runSearchSession>[0]
           const boundedResults = effectiveOptions.candidateDepth === undefined
             ? evidenceResults
             : evidenceResults.map((result) => ({ ...result, chunks: result.chunks.slice(0, effectiveOptions.candidateDepth) }));
+          const pipeline = embeddingPipelineOf(setup);
+          scopeSignal = vectorScopeSignal(evidenceResults, pipeline);
           const lists = annotateEvidenceRelevance(boundedResults, {
             query: retrievalQuery,
-            embeddingPipeline: embeddingPipelineOf(setup),
+            embeddingPipeline: pipeline,
           });
           const deferredResult = await deferredPromise;
           deferred = deferredResult ? { stats: deferredResult.stats, documentIds: deferredResult.documentIds } : null;
@@ -299,7 +303,8 @@ async function executeSearchSession(args: Parameters<typeof runSearchSession>[0]
         rerankScope: normalizedScope,
         privacyMode,
       });
-      return deferred ? withDeferredStats(response, deferred as { stats: DeferredSearchStats; documentIds: string[] }) : response;
+      const withSignal = scopeSignal ? { ...response, scopeSignal } : response;
+      return deferred ? withDeferredStats(withSignal, deferred as { stats: DeferredSearchStats; documentIds: string[] }) : withSignal;
     },
   );
 }
