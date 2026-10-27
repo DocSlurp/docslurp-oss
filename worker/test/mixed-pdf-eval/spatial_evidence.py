@@ -7,6 +7,8 @@ checks before normalization; no function here opens the acceptance gate.
 import csv
 import io
 import math
+import re
+import unicodedata
 import xml.etree.ElementTree as ET
 
 SCHEMA='mixed-pdf-word-evidence@1'
@@ -139,3 +141,59 @@ def normalize_word_evidence(evidence):
     result['normalizationContract']='zero-origin-media-and-crop@1'
     result['normalizationVerified']=False
     return result
+
+
+def formula_region_diagnostics(regions, evidence):
+    """Compare literal formula text using words from its declared display region.
+
+    This is an exploratory diagnostic, not an acceptance certificate. In
+    particular extractor coordinates, visible ink and reference declarations
+    still need independently validated provenance. A matching quotation outside
+    the declared region cannot supply words to this comparison.
+    """
+    if evidence.get('schema')!=SCHEMA or evidence.get('normalizedBasis')!='final-display-fractions':
+        raise ValueError('missing-normalized-region-evidence')
+    if regions is None:raise ValueError('missing-reference-formula-regions')
+    region_boxes=[];identifiers=set()
+    for region in regions:
+        identifier=region['blockId'];bounds=box(region['bboxNormalized'])
+        if not isinstance(identifier,str) or not identifier or identifier in identifiers:
+            raise ValueError('invalid-formula-region-identity')
+        if any(v<0 or v>1 for v in bounds) or not isinstance(region['text'],str) or not region['text'].strip():
+            raise ValueError('invalid-formula-region')
+        identifiers.add(identifier);region_boxes.append(bounds)
+    assigned=[[] for _ in regions];issues=[[] for _ in regions];orders=set()
+    for word in evidence['words']:
+        order=word['order'];bounds=box(word['bboxNormalized'])
+        if type(order) is not int or order<0 or order in orders or not isinstance(word['text'],str):
+            raise ValueError('invalid-region-word')
+        orders.add(order)
+        area=(bounds[2]-bounds[0])*(bounds[3]-bounds[1]);hits=[]
+        for index,target in enumerate(region_boxes):
+            overlap=max(0,min(bounds[2],target[2])-max(bounds[0],target[0]))*max(0,min(bounds[3],target[3])-max(bounds[1],target[1]))
+            if overlap>0:hits.append((index,overlap/area))
+        if not hits:continue
+        if len(hits)>1:
+            for index,_ in hits:issues[index].append(dict(kind='competing-regions',wordOrder=order))
+            continue
+        index,fraction=hits[0];target=region_boxes[index]
+        center=[(bounds[0]+bounds[2])/2,(bounds[1]+bounds[3])/2]
+        if (word.get('clippedByDisplay') is not False or fraction<.5
+                or not (target[0]<=center[0]<=target[2] and target[1]<=center[1]<=target[3])):
+            issues[index].append(dict(kind='boundary-word',wordOrder=order))
+            continue
+        assigned[index].append(word)
+    # Preserve mathematical case, grouping, operators and identifier boundaries;
+    # accept only whitespace and extractor word segmentation differences.
+    lex=lambda text:re.findall(r'[^\W\d]\w*|\d+(?:\.\d+)?|[^\s]',unicodedata.normalize('NFC',text),re.UNICODE)
+    results=[]
+    for index,region in enumerate(regions):
+        words=sorted(assigned[index],key=lambda word:word['order'])
+        actual=' '.join(word['text'] for word in words)
+        results.append(dict(blockId=region['blockId'],expectedText=region['text'],extractedText=actual,
+                            wordOrders=[word['order'] for word in words],issues=issues[index],
+                            literalMatch=not issues[index] and lex(actual)==lex(region['text'])))
+    return dict(schema='mixed-pdf-formula-region-diagnostic@1',regions=results,
+                literalRegionRecall=sum(row['literalMatch'] for row in results)/len(results) if results else None,
+                acceptanceEvidenceComplete=False,blockingEvidence=['unverified-region-grounding'],
+                scope='literal-text-in-declared-regions-diagnostic')

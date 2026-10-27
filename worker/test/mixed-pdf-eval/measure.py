@@ -24,7 +24,7 @@ import time
 import unicodedata
 
 import fitz
-from spatial_evidence import parse_poppler_bbox,parse_tesseract_tsv,normalize_word_evidence
+from spatial_evidence import parse_poppler_bbox,parse_tesseract_tsv,normalize_word_evidence,formula_region_diagnostics
 from contract import (evaluation_identity,identity_hash,file_hash,immutable_json,validate_manifest,
                       validate_policy_receipt,validate_labels,validate_complete_inventory,validate_panel_binding,validate_panel_manifest)
 
@@ -428,6 +428,8 @@ def measure_case(args):
     for page,reference in zip(outputs,labels["pages"]):
         for result in page["candidates"].values():
             result["score"]=content_score(reference,result["text"],tolerant_markdown)
+            if reference.get('formulaRegions') is not None:
+                result['formulaRegionDiagnostic']=formula_region_diagnostics(reference['formulaRegions'],result['wordEvidence'])
     result={"id":case["id"],"family":case["family"],"split":case["split"],"hardPercent":case["hardPercent"],
             **{k:case[k] for k in ['classId','layout','producerPath'] if k in case},
             "measureHash":MEASURE_HASH,"caseIdentity":case_identity,

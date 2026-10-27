@@ -482,3 +482,26 @@ passed; failed drafts/checks, checker/denylist, protected P bytes and numeric
 constraints remain unchanged. A fresh Sol Builder received a ten-file vetted
 spec/mechanism bundle, excluding prior E writing and producer finalization. P
 remains coordinator-owned. No expanded corpus acceptance is implied.
+
+### Council round 10 and actual consumer validation
+
+The independent methods and adversarial reviewers inspected `852f498b` against
+`2300c414` and found no remaining blocker within the stated scope. Both confirmed
+complete per-case reference hashing and layout-only split comparisons; neither
+executed the reported tests or granted corpus/merge acceptance. Source-only review
+does not replace the held-out, quality or spatial conformance gates.
+
+The coordinator then sealed the unchanged accepted P training prototypes into
+evaluation view v6. The actual consumer validated all 18 cases / 180 pages,
+including 360 formula reference regions. The separate integrity gate passed with
+zero findings across 1,112 production files. Exact receipts are retained externally
+as consumer-validation-a4-view-v6.json and integrity-a4-prototypes-v6.json. This
+establishes the reference round trip, not extraction quality or formula grounding.
+
+An exploratory region diagnostic now assigns captured words to each authored
+formula's final display rectangle. Text outside that rectangle cannot repair a
+damaged expression. Competing regions and crossing/clipped words are uncredited;
+literal comparison preserves case, grouping, operators and identifier boundaries.
+It remains explicitly incomplete evidence and does not change primary acceptance.
+Its independent invented controls include corrupt-operative/correct-quotation,
+deletion, added terms, grouping changes, overlapping regions and malformed boxes.
