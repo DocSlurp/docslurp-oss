@@ -257,7 +257,7 @@ describe("page image evidence parsing", () => {
     const shared = await collectPageImageEvidence({
       runner, sourcePath: "/x.pdf", pageTexts, sharedImagesList: { lastPage: 2, stdout: Promise.resolve(listing) },
     });
-    expect(shared).toEqual([{ pageNumber: 2, wordCount: 0, imageCount: 1, imageCoverage: 1, largestImageCoverage: 1 }]);
+    expect(shared).toEqual([{ pageNumber: 2, wordCount: 0, imageCount: 1, imageCoverage: 1, largestImageCoverage: 1, embeddedImageBytes: 32358 }]);
     expect(calls).toEqual(["pdfinfo:"]);
 
     calls.length = 0;
