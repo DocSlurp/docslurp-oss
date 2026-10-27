@@ -1,0 +1,16 @@
+{
+  "runnerBundleSha256": "7391159d0ba2b8f885d3d373aa5ef4b31a019baf19f79382f5cdff105a658ef1",
+  "imageDigest": "sha256:66a14b948cd0eca3d8ac7869e90cf8dfd5a0987508dca0b65ac0cb269952cd21",
+  "reviewers": [
+    {
+      "id": "REPLACE_WITH_FIRST_INDEPENDENT_REVIEWER",
+      "decision": "pending",
+      "adversarial": true
+    },
+    {
+      "id": "REPLACE_WITH_SECOND_INDEPENDENT_REVIEWER",
+      "decision": "pending",
+      "adversarial": false
+    }
+  ]
+}

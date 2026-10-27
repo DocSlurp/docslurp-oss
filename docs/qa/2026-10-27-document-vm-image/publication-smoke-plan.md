@@ -127,3 +127,11 @@ consent and registry publication are complete; keyless signing/policy review and
 the parent architect's revised aggregate cost-bound assessment remain
 outstanding. Successful publication does not clear the separate VM
 cost-admission blocker.
+
+Latest coordinator smoke authorization supersedes the earlier 60-second QA plan:
+**one VM up to 1,800 seconds, $20 aggregate, no retries, no deployment**. The user
+accepted the account limit and waived shared-spend-limit investigation; unknown
+workspace-budget enforcement is no longer a stop condition. The [prepared runner](modal-smoke-runner.md)
+requires two independent reviews, uses the exact published image, and has only
+been validated with local mocks. No VM has launched from this child. Production
+executor limits remain unchanged.

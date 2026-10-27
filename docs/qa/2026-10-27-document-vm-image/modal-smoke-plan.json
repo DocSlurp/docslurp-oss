@@ -1,0 +1,40 @@
+{
+  "mode": "plan-only-no-sdk-import",
+  "runnerBundleSha256": "7391159d0ba2b8f885d3d373aa5ef4b31a019baf19f79382f5cdff105a658ef1",
+  "image": "ghcr.io/docslurp/worker-document-vm@sha256:66a14b948cd0eca3d8ac7869e90cf8dfd5a0987508dca0b65ac0cb269952cd21",
+  "indexDigest": "sha256:fbbdd7f307ff8ccf49c3fd74e7fc448b5c4eda8878bfb1accf0920669b39b3ee",
+  "request": {
+    "model": "pp-small-onnx",
+    "device": "cpu",
+    "modelId": "PaddlePaddle/PP-DocLayout-S",
+    "revision": "8ac289e66575bb9bba6e15c53719d8b15cc9b3b2",
+    "artifactSha256": "ccfa68bc3ae28999c172ed232b036dfc283801225c97949bf1f30186ea929e9d",
+    "inferenceProfileSha256": "402045d01939270ce7a497120f2c569d8bc42764d567b0b66ff311e66e485182"
+  },
+  "limits": {
+    "runtime": "vm",
+    "cpu": [
+      2,
+      2
+    ],
+    "memory": [
+      1024,
+      1024
+    ],
+    "timeout": 1800,
+    "block_network": true,
+    "include_oidc_identity_token": false,
+    "env": {},
+    "secrets": [],
+    "volumes": {},
+    "network_file_systems": {},
+    "gpu": null
+  },
+  "hostWorkDeadlineSeconds": 1800,
+  "cleanupReserveSeconds": 30,
+  "aggregateAuthorizationUsd": 20,
+  "retries": 0,
+  "requiredReviews": 2,
+  "productionExecutorSecondsUnchanged": 60,
+  "providerUsage": "Per-sandbox billed usage unavailable in public SDK1.6.2; reconcile by captured ID/time, not shared account spend"
+}

@@ -19,3 +19,11 @@ $0.05 failure remains in `publication-attempt.json` and
 [operational-attempt.md](operational-attempt.md). The successful image publication,
 verified hashes, private package visibility and pending keyless signing remain
 in [publication-success.md](publication-success.md).
+
+Latest authorization supersedes the earlier QA expiry: **one VM up to 1,800
+seconds**, $20 aggregate, no retries and no deployment. The user accepts the
+account limit and waives shared-spend-limit investigation; unknown workspace
+budget enforcement is no longer an admission stop. The coordinator will launch
+only after two independent runner reviews and registry/signing readiness. This
+child prepares and mock-tests [the one-shot runner](modal-smoke-runner.md), with
+no credential access or execution authority. Production expiry remains 60 seconds.

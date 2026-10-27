@@ -36,3 +36,9 @@ See [the local evidence and operational blockers](../../docs/qa/2026-10-27-docum
 Container success does not establish a production VM isolation boundary. A live
 VM smoke, registry publication, deployment, council review and human merge
 approval remain separate actions.
+
+The coordinator-only [one-shot Modal QA runner](../../docs/qa/2026-10-27-document-vm-image/modal-smoke-runner.md)
+uses the exact published image in one CPU VM with the explicitly authorized
+1,800-second QA expiry. Its default mode is offline plan generation; two
+independent approvals are required for execution. The implementation child only
+mock-tests it. Production's 60-second executor remains unchanged.

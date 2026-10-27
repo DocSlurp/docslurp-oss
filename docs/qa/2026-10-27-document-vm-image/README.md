@@ -88,3 +88,11 @@ The concrete [publication and one-VM smoke proposal](publication-smoke-plan.md) 
 The independent-review [repair delta](review-repairs.md) adds attestation binding, tested rootfs/config equality, source admission before native conversion and unique-name timeout cleanup. The existing OCI passed the strengthened inspector without rebuild; see `image-integrity-tests.log`. `cleanup-receipt.json` records task cleanup, including any old unprivileged guest-cache directories blocked by host permissions.
 
 The original denied attempt remains in [operational-attempt.md](operational-attempt.md) and `publication-attempt.json`. Subsequent authorized publication succeeded; [publication-success.md](publication-success.md) and `publication-success.json` record the verified remote hashes and private visibility. No VM launched, keyless signing is pending, and the parent is reassessing a defensible bound under the new $20 aggregate authorization. See [budget-authorization.md](budget-authorization.md); the historical $0.05 failure remains preserved.
+
+Latest coordinator smoke authorization supersedes the earlier 60-second QA plan:
+**one VM up to 1,800 seconds, $20 aggregate, no retries, no deployment**. The user
+accepted the account limit and waived shared-spend-limit investigation; unknown
+workspace-budget enforcement is no longer a stop condition. The [prepared runner](modal-smoke-runner.md)
+requires two independent reviews, uses the exact published image, and has only
+been validated with local mocks. No VM has launched from this child. Production
+executor limits remain unchanged.
