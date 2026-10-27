@@ -198,6 +198,9 @@ describe("validateApiKey", () => {
     // A stored public suffix never matches (it names no single owner).
     [["github.io"], "https://victim.github.io", false],
     [["*.github.io"], "https://anyone.github.io", false],
+    // A stored wildcard above a public suffix never matches either.
+    [["*.amazonaws.com"], "https://victim.s3.us-east-1.amazonaws.com", false],
+    [["*.windows.net"], "https://victim.blob.core.windows.net", false],
     // Case and IDN: both sides go through URL parsing.
     [["DocSlurp.IO"], "https://docslurp.io", true],
     [["bücher.example"], "https://xn--bcher-kva.example", true],
@@ -295,13 +298,15 @@ describe("client key scopes and workspace allowlists (G-03)", () => {
 
   it.each(["github.io", "*.github.io", "vercel.app", "https://netlify.app", "co.uk", "com", "*.com", "pages.dev:443",
     // Private-section PSL entries a curated list missed.
-    "*.s3.us-east-1.amazonaws.com", "*.blob.core.windows.net", "*.gitbook.io", "*.eu.org", "foo.ck"])("refuses public-suffix-only allowed domain %s at key creation", async (domain) => {
+    "*.s3.us-east-1.amazonaws.com", "*.blob.core.windows.net", "*.gitbook.io", "*.eu.org", "foo.ck",
+    // Wildcards that sit above public suffixes, so they would cover other tenants' hosts.
+    "*.amazonaws.com", "*.compute.amazonaws.com", "*.windows.net", "*.core.windows.net", "https://*.amazonaws.com:443"])("refuses public-suffix-only allowed domain %s at key creation", async (domain) => {
     txMock.mockImplementation(async (strings: TemplateStringsArray) => strings.join("?").includes("from workspaces w") ? [{ id: "ws-1" }] : []);
     await expect(createApiKey("user-1", "Widget", { orgId: "org-1", keyType: "client", allowedDomains: [domain], workspaceIds: ["ws-1"] }))
       .rejects.toMatchObject({ status: 400, code: "invalid_allowed_domain" });
   });
 
-  it.each(["myname.github.io", "*.example.co.uk", "localhost:4321", "127.0.0.1:3000", "docs.example.com", "mybucket.s3.us-east-1.amazonaws.com", "www.ck"])("accepts an owned domain %s", async (domain) => {
+  it.each(["myname.github.io", "*.example.co.uk", "localhost:4321", "127.0.0.1:3000", "docs.example.com", "mybucket.s3.us-east-1.amazonaws.com", "www.ck", "*.mybucket.s3.us-east-1.amazonaws.com", "*.docs.example.com", "amazonaws.com"])("accepts an owned domain %s", async (domain) => {
     txMock.mockImplementation(async (strings: TemplateStringsArray, ...values: unknown[]) => {
       const text = strings.join("?");
       if (text.includes("insert into api_keys")) return [buildKeyRow("x", { key_type: "client", allowed_domains: values[6], scopes: values[7], workspace_ids: values[11] })];
