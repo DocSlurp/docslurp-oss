@@ -5,8 +5,9 @@
 -- `request_id` join the report to SigNoz telemetry instead.
 --
 -- `alert_status` records what happened to the live team alert: high-severity
--- reports page the team unless a per-user/per-org hourly cap or a duplicate of
--- the same text suppressed the page (the report is stored either way).
+-- reports page the team unless a per-user, per-org or deployment-wide hourly
+-- cap or a duplicate of the same text suppressed the page (the report is stored
+-- either way).
 CREATE TABLE IF NOT EXISTS feedback_reports (
   id text PRIMARY KEY,
   reference text NOT NULL UNIQUE,
@@ -28,10 +29,19 @@ CREATE TABLE IF NOT EXISTS feedback_reports (
   app_version text,
   alert_status text NOT NULL DEFAULT 'not_applicable'
     CHECK (alert_status IN ('not_applicable', 'pending', 'sent', 'suppressed', 'failed', 'unconfigured')),
-  alert_suppressed_reason text,
+  alert_suppressed_reason text
+    CHECK (alert_suppressed_reason IS NULL OR alert_suppressed_reason IN ('duplicate', 'user_hourly_cap', 'org_hourly_cap', 'global_hourly_cap')),
+  -- The deployment-wide hourly page cap tripped on this report, and it sent the one
+  -- summary page for the hour instead of a page of its own.
+  summary_paged boolean NOT NULL DEFAULT false,
   created_at timestamp with time zone NOT NULL DEFAULT now()
 );
 --> statement-breakpoint
 CREATE INDEX IF NOT EXISTS feedback_reports_user_created_idx ON feedback_reports (user_id, created_at DESC);
 --> statement-breakpoint
 CREATE INDEX IF NOT EXISTS feedback_reports_org_created_idx ON feedback_reports (org_id, created_at DESC);
+--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS feedback_reports_workspace_idx ON feedback_reports (workspace_id) WHERE workspace_id IS NOT NULL;
+--> statement-breakpoint
+-- Deployment-wide page cap and the hourly summary page.
+CREATE INDEX IF NOT EXISTS feedback_reports_high_created_idx ON feedback_reports (created_at DESC) WHERE severity = 'high';

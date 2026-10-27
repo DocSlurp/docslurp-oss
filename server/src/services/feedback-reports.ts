@@ -29,6 +29,8 @@ export const FEEDBACK_LIMITS = Object.freeze({
   /** Live pages per user and per org, rolling hour. Over this, reports are stored without paging. */
   highUserPerHour: 3,
   highOrgPerHour: 10,
+  /** Live pages per deployment, rolling hour (FEEDBACK_PAGES_PER_HOUR). Over this, one summary page per hour. */
+  highGlobalPerHour: 20,
   /** The same user filing the same high-severity text inside this window does not page again. */
   duplicateWindowHours: 24,
   alertExcerptChars: 280,
@@ -64,8 +66,10 @@ export interface FeedbackReportRecord {
   createdAt: string;
 }
 
+export type FeedbackSuppressedReason = "duplicate" | "user_hourly_cap" | "org_hourly_cap" | "global_hourly_cap";
+
 export type SubmitFeedbackResult =
-  | { kind: "stored"; report: FeedbackReportRecord; suppressedReason: "user_hourly_cap" | "org_hourly_cap" | "duplicate" | null }
+  | { kind: "stored"; report: FeedbackReportRecord; suppressedReason: FeedbackSuppressedReason | null }
   | { kind: "rate_limited"; scope: "user" | "org"; retryAfterSeconds: number };
 
 export interface FeedbackAlert {
@@ -85,11 +89,29 @@ export interface FeedbackAlert {
 
 export type FeedbackAlertSender = (alert: FeedbackAlert) => Promise<"sent" | "failed" | "unconfigured">;
 
+/** The one page sent when the deployment-wide hourly cap trips. */
+export interface FeedbackSummaryAlert {
+  reference: string;
+  /** High-severity reports stored without a page in the last hour, this one included. */
+  suppressedThisHour: number;
+  capPerHour: number;
+}
+
+export type FeedbackSummarySender = (summary: FeedbackSummaryAlert) => Promise<"sent" | "failed" | "unconfigured">;
+
 type Sql = typeof defaultSql;
 
 export interface FeedbackDeps {
   sql?: Sql;
   sendAlert?: FeedbackAlertSender;
+  sendSummary?: FeedbackSummarySender;
+  env?: NodeJS.ProcessEnv;
+}
+
+/** FEEDBACK_PAGES_PER_HOUR: a positive integer, else the default. */
+export function globalPageCap(env: NodeJS.ProcessEnv = process.env): number {
+  const value = Number(env.FEEDBACK_PAGES_PER_HOUR?.trim());
+  return Number.isInteger(value) && value > 0 ? value : FEEDBACK_LIMITS.highGlobalPerHour;
 }
 
 /** Normalized text hash for duplicate detection (case, whitespace and the prefilled When/Trace ID/Request ID lines ignored). */
@@ -134,6 +156,8 @@ interface CountRow {
 export async function submitFeedbackReport(input: FeedbackReportInput, deps: FeedbackDeps = {}): Promise<SubmitFeedbackResult> {
   const sql = deps.sql ?? defaultSql;
   const sendAlert = deps.sendAlert ?? deliverFeedbackAlert;
+  const sendSummary = deps.sendSummary ?? deliverFeedbackSummaryAlert;
+  const globalCap = globalPageCap(deps.env);
   const messageHash = feedbackMessageHash(input.message);
   const now = Date.now();
 
@@ -162,18 +186,36 @@ export async function submitFeedbackReport(input: FeedbackReportInput, deps: Fee
       return { kind: "rate_limited" as const, scope: "org" as const, retryAfterSeconds: retryAfter(org!.oldest, now) };
     }
 
-    let suppressedReason: "user_hourly_cap" | "org_hourly_cap" | "duplicate" | null = null;
+    let suppressedReason: FeedbackSuppressedReason | null = null;
+    let summary: { suppressedThisHour: number } | null = null;
     if (input.severity === "high") {
+      // A page that failed does not count as delivered: the same text may page again (within the caps).
       const [duplicate] = await tx<{ id: string }[]>`
         select id from feedback_reports
         where user_id = ${input.userId} and severity = 'high' and message_hash = ${messageHash}
-          and alert_status in ('pending', 'sent', 'failed')
+          and alert_status in ('pending', 'sent')
           and created_at > now() - make_interval(hours => ${FEEDBACK_LIMITS.duplicateWindowHours})
         limit 1
       `;
       if (duplicate) suppressedReason = "duplicate";
       else if ((user?.pages ?? 0) >= FEEDBACK_LIMITS.highUserPerHour) suppressedReason = "user_hourly_cap";
       else if ((org?.pages ?? 0) >= FEEDBACK_LIMITS.highOrgPerHour) suppressedReason = "org_hourly_cap";
+      else {
+        // Deployment-wide cap, so many users or orgs together cannot flood the team's phones.
+        await tx`select pg_advisory_xact_lock(hashtextextended('feedback-reports:global', 0))`;
+        const [global] = await tx<{ pages: number; summarized: number; suppressed: number }[]>`
+          select count(*) filter (where alert_status in ('pending', 'sent', 'failed'))::int as pages,
+            count(*) filter (where summary_paged)::int as summarized,
+            count(*) filter (where alert_suppressed_reason = 'global_hourly_cap')::int as suppressed
+          from feedback_reports
+          where severity = 'high' and created_at > now() - interval '1 hour'
+        `;
+        if ((global?.pages ?? 0) >= globalCap) {
+          suppressedReason = "global_hourly_cap";
+          // The first capped report of the hour sends one summary page instead of going silent.
+          if ((global?.summarized ?? 0) === 0) summary = { suppressedThisHour: (global?.suppressed ?? 0) + 1 };
+        }
+      }
     }
     const alertStatus: FeedbackAlertStatus = input.severity !== "high" ? "not_applicable" : suppressedReason ? "suppressed" : "pending";
 
@@ -183,12 +225,12 @@ export async function submitFeedbackReport(input: FeedbackReportInput, deps: Fee
       insert into feedback_reports (
         id, reference, org_id, workspace_id, user_id, category, severity, message, message_hash,
         route, screen, trace_id, request_id, error_code, occurred_at, client_timezone,
-        user_agent, app_version, alert_status, alert_suppressed_reason
+        user_agent, app_version, alert_status, alert_suppressed_reason, summary_paged
       ) values (
         ${id}, ${reference}, ${input.orgId}, ${input.workspaceId}, ${input.userId}, ${input.category},
         ${input.severity}, ${input.message}, ${messageHash}, ${input.route}, ${input.screen},
         ${input.traceId}, ${input.requestId}, ${input.errorCode}, ${input.occurredAt},
-        ${input.clientTimezone}, ${input.userAgent}, ${input.appVersion}, ${alertStatus}, ${suppressedReason}
+        ${input.clientTimezone}, ${input.userAgent}, ${input.appVersion}, ${alertStatus}, ${suppressedReason}, ${summary !== null}
       )
       returning created_at
     `;
@@ -196,6 +238,7 @@ export async function submitFeedbackReport(input: FeedbackReportInput, deps: Fee
     return {
       kind: "stored" as const,
       suppressedReason,
+      summary,
       orgName: org_?.name ?? null,
       report: { id, reference, category: input.category, severity: input.severity, alertStatus, createdAt: new Date(row!.created_at).toISOString() } as FeedbackReportRecord,
     };
@@ -224,6 +267,10 @@ export async function submitFeedbackReport(input: FeedbackReportInput, deps: Fee
     await sql`update feedback_reports set alert_status = ${status} where id = ${report.id}`;
     report.alertStatus = status;
     if (status === "unconfigured") console.error(`[feedback] high-severity report ${report.reference} stored but no alert channel is configured (TELEGRAM_BOT_TOKEN + ALERT_TELEGRAM_CHAT_ID or ALERT_WEBHOOK_URL)`);
+  }
+  if (outcome.summary) {
+    const status = await sendSummary({ reference: report.reference, suppressedThisHour: outcome.summary.suppressedThisHour, capPerHour: globalCap }).catch(() => "failed" as const);
+    console.error(`[feedback] deployment-wide page cap reached (${globalCap}/hour); summary page ${status} reference=${report.reference}`);
   }
 
   logFeedback(input.severity === "high" ? "warn" : "info",
@@ -396,6 +443,39 @@ async function postJson(fetchImpl: typeof fetch, url: string, body: unknown, tim
 }
 
 export const deliverFeedbackAlert: FeedbackAlertSender = (alert) => createFeedbackAlertSender()(alert);
+
+/** The summary page text: server-made numbers and the reference only, no user-controlled fields. */
+export function formatFeedbackSummaryLines(summary: FeedbackSummaryAlert, environment: string): string[] {
+  const more = summary.suppressedThisHour;
+  return [
+    `HIGH-PRIORITY REPORTS: PAGE CAP REACHED (${sanitizeAlertField(environment, 60, { defang: false }) || "\u{2014}"})`,
+    `${summary.capPerHour} reports paged in the last hour. ${more} more high-severity report${more === 1 ? "" : "s"} suppressed this hour (latest ${summary.reference}).`,
+    "Further ones this hour are stored in the support queue without paging. Review feedback_reports where alert_suppressed_reason = 'global_hourly_cap'.",
+  ];
+}
+
+export function createFeedbackSummarySender(config: FeedbackAlertConfig = resolveFeedbackAlertConfig(), fetchImpl: typeof fetch = fetch): FeedbackSummarySender {
+  return async (summary) => {
+    if (config.disabled || (!config.telegram && !config.webhookUrl)) return "unconfigured";
+    const lines = formatFeedbackSummaryLines(summary, config.environment);
+    const attempts: Promise<boolean>[] = [];
+    if (config.telegram) {
+      attempts.push(postJson(fetchImpl, `https://api.telegram.org/bot${config.telegram.token}/sendMessage`, {
+        chat_id: config.telegram.chatId, text: lines.join("\n"), disable_web_page_preview: true,
+      }, config.timeoutMs, "telegram", summary.reference, true));
+    }
+    if (config.webhookUrl) {
+      const payload = config.format === "json"
+        ? { source: "docslurp", kind: "feedback_page_cap", environment: config.environment, reference: summary.reference,
+            suppressedThisHour: summary.suppressedThisHour, capPerHour: summary.capPerHour }
+        : { text: lines.map(escapeSlackText).join("\n") };
+      attempts.push(postJson(fetchImpl, config.webhookUrl, payload, config.timeoutMs, "webhook", summary.reference, false));
+    }
+    return (await Promise.all(attempts)).some(Boolean) ? "sent" : "failed";
+  };
+}
+
+export const deliverFeedbackSummaryAlert: FeedbackSummarySender = (summary) => createFeedbackSummarySender()(summary);
 
 /** Build identity recorded with each report: the deployed commit or image, never client-supplied. */
 export function serverAppVersion(env: NodeJS.ProcessEnv = process.env): string | null {

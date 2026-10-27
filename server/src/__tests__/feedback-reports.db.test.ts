@@ -2,7 +2,7 @@ import postgres from "postgres";
 import { Hono } from "hono";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { startMigratedPostgres } from "@docslurp/worker/testing";
-import type { FeedbackAlertSender } from "../services/feedback-reports.js";
+import type { FeedbackAlertSender, FeedbackSummarySender } from "../services/feedback-reports.js";
 
 /**
  * POST/GET /v1/feedback against a migrated database, behind the real
@@ -34,6 +34,7 @@ let sql: postgres.Sql;
 let stop: () => Promise<void>;
 let app: Hono;
 const sendAlert = vi.fn<FeedbackAlertSender>(async () => "sent");
+const sendSummary = vi.fn<FeedbackSummarySender>(async () => "sent");
 
 beforeAll(async () => {
   const database = await startMigratedPostgres();
@@ -51,12 +52,14 @@ beforeAll(async () => {
   app = new Hono();
   app.onError((error, c) => { console.error("[feedback test] unhandled", error); return c.text("Internal Server Error", 500); });
   app.use("/v1/*", sessionAuth);
-  app.route("/v1/feedback", createFeedbackRoutes({ sql: sql as never, sendAlert }));
+  app.route("/v1/feedback", createFeedbackRoutes({ sql: sql as never, sendAlert, sendSummary, env: { FEEDBACK_PAGES_PER_HOUR: "5" } }));
 }, 180_000);
 afterAll(async () => { await sql?.end(); await stop?.(); });
 beforeEach(async () => {
   sendAlert.mockReset();
   sendAlert.mockResolvedValue("sent");
+  sendSummary.mockReset();
+  sendSummary.mockResolvedValue("sent");
   await sql`delete from feedback_reports`;
 });
 
@@ -161,12 +164,34 @@ describe("POST /v1/feedback", () => {
     await post({ ...base, severity: "high", message: "three" });
     expect(sendAlert).toHaveBeenCalledTimes(3);
     const capped = await post({ ...base, severity: "high", message: "four" });
-    expect(await capped.json()).toMatchObject({ alert: "already_reported" });
+    expect(await capped.json()).toMatchObject({ alert: "capped", message: "Saved to the support queue; no new live alert because several were sent this hour." });
     expect(sendAlert).toHaveBeenCalledTimes(3);
     const rows = await sql`select alert_status, alert_suppressed_reason from feedback_reports order by created_at`;
     expect(rows.map((row) => [row.alert_status, row.alert_suppressed_reason])).toEqual([
       ["sent", null], ["suppressed", "duplicate"], ["sent", null], ["sent", null], ["suppressed", "user_hourly_cap"],
     ]);
+  });
+
+  it("lets the same text page again after a failed page", async () => {
+    sendAlert.mockResolvedValueOnce("failed");
+    expect(await (await post({ ...base, severity: "high", message: "Uploads hang" })).json()).toMatchObject({ alert: "queued" });
+    expect(await (await post({ ...base, severity: "high", message: "Uploads hang" })).json()).toMatchObject({ alert: "sent" });
+    expect(sendAlert).toHaveBeenCalledTimes(2);
+  });
+
+  it("caps pages deployment-wide and sends one summary page instead of going silent", async () => {
+    // Five pages in the last hour from another tenant fill the (test) cap of 5.
+    await sql`insert into feedback_reports (id, reference, org_id, user_id, category, severity, message, message_hash, alert_status)
+      select 'g-' || n, 'FB-GLOB-' || n, 'ob', 'ub', 'bug', 'high', 'm' || n, 'h' || n, 'sent' from generate_series(1, 5) as n`;
+    const first = await post({ ...base, severity: "high", message: "Everything is down" });
+    expect(await first.json()).toMatchObject({ alert: "capped" });
+    const second = await post({ ...base, severity: "high", message: "Still down" }, "sess-a");
+    expect(await second.json()).toMatchObject({ alert: "capped" });
+    expect(sendAlert).not.toHaveBeenCalled();
+    expect(sendSummary).toHaveBeenCalledTimes(1);
+    expect(sendSummary.mock.calls[0]![0]).toMatchObject({ suppressedThisHour: 1, capPerHour: 5 });
+    const rows = await sql`select alert_suppressed_reason, summary_paged from feedback_reports where user_id = 'ua' order by created_at`;
+    expect(rows.map((row) => [row.alert_suppressed_reason, row.summary_paged])).toEqual([["global_hourly_cap", true], ["global_hourly_cap", false]]);
   });
 
   it("tells the user honestly when the live alert could not be delivered", async () => {

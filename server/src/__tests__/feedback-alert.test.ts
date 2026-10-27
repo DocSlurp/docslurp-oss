@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 vi.mock("../db.js", () => ({ sql: Object.assign(() => { throw new Error("no database in this test"); }, { json: (value: unknown) => value }) }));
 
 const {
-  createFeedbackAlertSender, escapeSlackText, feedbackMessageHash, formatFeedbackAlertLines,
+  createFeedbackAlertSender, createFeedbackSummarySender, escapeSlackText, formatFeedbackSummaryLines, globalPageCap, feedbackMessageHash, formatFeedbackAlertLines,
   resolveFeedbackAlertConfig, sanitizeAlertField, signozTraceUrl,
 } = await import("../services/feedback-reports.js");
 
@@ -127,6 +127,17 @@ describe("feedback alert text", () => {
     const lines = formatFeedbackAlertLines({ ...hostile, requestId: "signoz-docslurp.io" }, "production", {});
     const trace = lines.find((line) => line.startsWith("Trace (client-reported): "))!;
     expect(trace).toContain("Request (client-reported): signoz-docslurp[.]io");
+  });
+
+  it("summarizes the deployment-wide cap with server-made numbers only", async () => {
+    const lines = formatFeedbackSummaryLines({ reference: "FB-ABCD-EFGH", suppressedThisHour: 3, capPerHour: 20 }, "production");
+    expect(lines.join("\n")).toContain("3 more high-severity reports suppressed this hour");
+    const fetchImpl = vi.fn(async () => new Response(JSON.stringify({ ok: true })));
+    const send = createFeedbackSummarySender({ webhookUrl: null, telegram: { token: "t", chatId: "c" }, format: "slack", environment: "production", instance: "feedback", timeoutMs: 1000, disabled: false }, fetchImpl as never);
+    expect(await send({ reference: "FB-ABCD-EFGH", suppressedThisHour: 1, capPerHour: 20 })).toBe("sent");
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(globalPageCap({ FEEDBACK_PAGES_PER_HOUR: "7" })).toBe(7);
+    expect(globalPageCap({ FEEDBACK_PAGES_PER_HOUR: "-1" })).toBe(20);
   });
 
   it("caps field length and strips control characters", () => {

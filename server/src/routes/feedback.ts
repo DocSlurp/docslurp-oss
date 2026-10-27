@@ -50,6 +50,15 @@ export const feedbackReportSchema = z.object({
   timezone: optionalPattern(/^[A-Za-z0-9_+\-/]{1,64}$/),
 });
 
+/** What each alert outcome tells the reporter. */
+export const FEEDBACK_ALERT_COPY = Object.freeze({
+  none: "Thanks. Your report went straight to the support team.",
+  sent: "The team has been alerted and will look at this now.",
+  already_reported: "The team already has your high-priority report. This one is attached to it.",
+  capped: "Saved to the support queue; no new live alert because several were sent this hour.",
+  queued: "Your report is with the support team. The live alert didn't go through, so they'll pick it up from the support queue.",
+});
+
 /**
  * `/v1/feedback`: signed-in app sessions only (the default route auth mode).
  * API keys cannot file reports, so a leaked or automated key cannot page the team.
@@ -93,18 +102,17 @@ export function createFeedbackRoutes(deps: FeedbackDeps = {}) {
         c.header("Retry-After", String(result.retryAfterSeconds));
         return apiErrorResponse(c, 429, "rate_limited", "Too many reports", { retryAfterSeconds: result.retryAfterSeconds, category: "feedback" });
       }
-      const { report } = result;
+      const { report, suppressedReason } = result;
+      // Honest copy: "already reported" only for a duplicate of this user's own page.
       const alert = report.severity !== "high" ? "none"
         : report.alertStatus === "sent" ? "sent"
-          : report.alertStatus === "suppressed" ? "already_reported"
-            : "queued";
+          : suppressedReason === "duplicate" ? "already_reported"
+            : suppressedReason ? "capped"
+              : "queued";
       return c.json({
         report: { id: report.id, reference: report.reference, category: report.category, severity: report.severity, createdAt: report.createdAt },
         alert,
-        message: alert === "sent" ? "The team has been alerted and will look at this now."
-          : alert === "already_reported" ? "The team already has your high-priority report. This one is attached to it."
-            : alert === "queued" ? "Your report is with the support team. The live alert didn't go through, so they'll pick it up from the support queue."
-              : "Thanks. Your report went straight to the support team.",
+        message: FEEDBACK_ALERT_COPY[alert],
       }, 201);
     })
     .get("/", async (c) => {
