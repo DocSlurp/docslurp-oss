@@ -242,6 +242,8 @@ With a browser (publishable) key, every visitor shares the key, so a `sessionId`
 
 Keep the token in the visitor's own page state, not in shared storage. Server keys and the app don't need it.
 
+`GET /v1/search/chat/stream` with a signed-in cookie session (not an API key) must be same-origin. The browser has to send `Sec-Fetch-Site: same-origin`, or an `Origin` of the app itself. A request with neither header is refused with 403, which stops a link or `<img>` on another site from starting a paid turn. Safari before 16.4 sends no Fetch Metadata on these requests, so it can't use the stream with a cookie session; use `POST /v1/chat`, or an API key from your server.
+
 Independent conversations can run concurrently. Await each reply before reusing its `sessionId` for the next turn. Simultaneous turns in the same conversation have no ordering guarantee. Session ownership must be verified before a caller-provided session can be reused; a database failure fails closed.
 
 All routes use the existing authenticated request actor. API keys remain scoped to their organization and require `search` permission. Batch execution uses direct service calls, without internal HTTP calls or forwarding credentials.
