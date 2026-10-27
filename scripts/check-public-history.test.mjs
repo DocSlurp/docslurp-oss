@@ -65,3 +65,15 @@ test("private file introduced only in merge resolution is detected", (t) => {
   assert.equal(f.git("rev-list", "--parents", "-n", "1", "HEAD").split(" ").length, 3);
   assert.equal(f.run("HEAD").status, 1);
 });
+
+test("private second-parent history cannot be hidden by a clean merge tree", (t) => {
+  const f = fixture(t);
+  f.git("checkout", "-b", "side");
+  f.add("app/private.txt");
+  f.git("checkout", "main");
+  f.add("main.txt");
+  f.git("merge", "--no-commit", "--no-ff", "side");
+  f.git("rm", "app/private.txt");
+  f.git("commit", "-m", "merge with clean tree");
+  assert.equal(f.run("HEAD").status, 1);
+});

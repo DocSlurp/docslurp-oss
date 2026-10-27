@@ -25,7 +25,7 @@ while IFS= read -r root; do
 done <<< "$roots"
 # Git pathspecs avoid quoted/newline filename ambiguity. Separate merge diffs
 # expose files added by conflict resolution, even when absent from both parents.
-paths=$(git log --format= --name-only --diff-merges=separate "$sha" -- \
+paths=$(git log --full-history --format= --name-only --diff-merges=separate "$sha" -- \
   app api db research models mockups infographics infra integrations cli \
   .design-overhaul .tmp-screenshots test-results docs/business docs/reports \
   ':(glob)**/.env' ':(glob)**/.env.production') || fail "cannot inspect paths"
