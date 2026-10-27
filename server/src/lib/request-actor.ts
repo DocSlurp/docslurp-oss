@@ -83,7 +83,7 @@ export async function resolveBetterAuthSessionActor(
   options: { allowMfaPolicyBlocked?: boolean } = {},
 ): Promise<SessionRequestActor | null> {
   const responseHeaders = refreshedHeadersOrOptions instanceof Headers ? refreshedHeadersOrOptions : undefined;
-  options = responseHeaders ? options : refreshedHeadersOrOptions ?? options;
+  if (!(refreshedHeadersOrOptions instanceof Headers)) options = refreshedHeadersOrOptions ?? options;
   const result = await auth.api.getSession({ headers, returnHeaders: true }) as {
     headers: Headers | null;
     response: { session: { id: string; userId: string; mfaVerified?: boolean | null }; user: SessionUser } | null;

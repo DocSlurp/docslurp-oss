@@ -635,7 +635,8 @@ describe("passkeys", () => {
     expect(result.body.code).toBe("SSO_REQUIRED");
     expect(await signIn.session()).toBeNull();
     const register = await browser.json<{ code?: string }>("/passkey/generate-register-options");
-    expect(register.body.code).toBe("SSO_REQUIRED");
+    expect(register.status).toBe(401);
+    expect(register.body.code).toBe("UNAUTHORIZED");
   });
 });
 
@@ -753,4 +754,96 @@ describe("separate credentials", () => {
     const actor = await resolveApiKeyActor(`Bearer ${raw}`);
     expect(actor?.userId).toBe(user.id);
   });
+});
+
+describe("SSO second-factor issuance provenance", () => {
+  async function setup() {
+    const enrolled = await enrolledUser();
+    // Give each case its own verified domain so enforced policy is unambiguous.
+    const email = `${enrolled.user.id}@${enrolled.user.id}.sso.test`;
+    await pool.query(`update "user" set email = $1 where id = $2`, [email, enrolled.user.id]);
+    const orgId = `sso-${enrolled.user.id}`;
+    const verifiedDomain = email.split("@")[1]!;
+    await pool.query(`insert into organizations(id, name, slug, created_by_user_id, sso_config) values ($1, 'SSO MFA', $1, $2, $3)`,
+      [orgId, enrolled.user.id, JSON.stringify({ enabled: true, enforceSso: true, emailDomain: verifiedDomain, providerType: "oidc" })]);
+    await pool.query(`insert into sso_domains(org_id, domain, verification_token, verified_at) values ($1, $2, 'proof', now())`, [orgId, verifiedDomain]);
+    return { ...enrolled, orgId };
+  }
+  async function challenge(userId: string, orgId?: string, maxAge = 600) {
+    const { beginTwoFactorChallengeCookie } = await import("../lib/auth-mfa.js");
+    const context = await auth.$context;
+    const cookie = await beginTwoFactorChallengeCookie(context, userId, maxAge, orgId);
+    const browser = new Browser();
+    browser.store(new Response(null, { headers: { "set-cookie": cookie } }));
+    return browser;
+  }
+  for (const method of ["totp", "backup-code"] as const) {
+    it(`finishes enforced SSO via ${method} with org provenance and MFA assurance`, async () => {
+      const { user, orgId, secret, backupCodes } = await setup();
+      const browser = await challenge(user.id, orgId);
+      const replay = new Browser(); replay.cookies = new Map(browser.cookies);
+      const body = method === "totp" ? { code: totp(secret) } : { code: backupCodes[0] };
+      expect((await browser.json(`/two-factor/verify-${method}`, body)).status).toBe(200);
+      const session = await browser.session();
+      expect(session?.session.mfaVerified).toBe(true);
+      const row = (await pool.query(`select token from session where id = $1`, [session!.session.id])).rows[0];
+      expect(row.token).toMatch(new RegExp(`^sso_${Buffer.from(orgId).toString("hex")}_`));
+      expect((await replay.json(`/two-factor/verify-${method}`, body)).status).not.toBe(200);
+    });
+  }
+  it("atomically consumes SSO provenance across concurrent valid backup codes", async () => {
+    const { user, orgId, backupCodes } = await setup();
+    const a = await challenge(user.id, orgId);
+    const b = new Browser(); b.cookies = new Map(a.cookies);
+    const responses = await Promise.all([
+      a.json("/two-factor/verify-backup-code", { code: backupCodes[0] }),
+      b.json("/two-factor/verify-backup-code", { code: backupCodes[1] }),
+    ]);
+    expect(responses.filter(result => result.status === 200)).toHaveLength(1);
+  });
+  it("refuses provenance belonging to another user", async () => {
+    const { user, orgId, backupCodes } = await setup();
+    const browser = await challenge(user.id, orgId);
+    await pool.query(`update verification set value = $1 where identifier like 'sso-mfa-%' and value = $2`,
+      [JSON.stringify({ userId: "another-user", orgId }), JSON.stringify({ userId: user.id, orgId })]);
+    expect((await browser.json("/two-factor/verify-backup-code", { code: backupCodes[0] })).status).not.toBe(200);
+    expect(await browser.session()).toBeNull();
+  });
+  it("refuses expired provenance even when the stock challenge is still valid", async () => {
+    const { user, orgId, backupCodes } = await setup();
+    const browser = await challenge(user.id, orgId);
+    await pool.query(`update verification set "expiresAt" = now() - interval '1 second' where identifier like 'sso-mfa-%' and value = $1`, [JSON.stringify({ userId: user.id, orgId })]);
+    expect((await browser.json("/two-factor/verify-backup-code", { code: backupCodes[0] })).status).not.toBe(200);
+    expect(await browser.session()).toBeNull();
+  });
+  for (const kind of ["wrong-org", "expired", "nonSSO"] as const) {
+    it(`refuses ${kind} challenge even with request-body org`, async () => {
+      const { user, orgId, backupCodes } = await setup();
+      const browser = await challenge(user.id, kind === "nonSSO" ? undefined : kind === "wrong-org" ? "other-org" : orgId, kind === "expired" ? -1 : 600);
+      expect((await browser.json("/two-factor/verify-backup-code", { code: backupCodes[0], orgId })).status).not.toBe(200);
+      expect(await browser.session()).toBeNull();
+    });
+  }
+});
+
+it("consumes a trusted device at most once during concurrent sign-ins", async () => {
+  const { user, secret } = await enrolledUser();
+  const browser = new Browser();
+  await signInPassword(browser, user.email);
+  expect((await browser.json("/two-factor/verify-totp", { code: totp(secret), trustDevice: true })).status).toBe(200);
+  const a = new Browser(); const b = new Browser();
+  a.cookies = new Map(browser.cookies); b.cookies = new Map(browser.cookies);
+  a.cookies.delete("better-auth.session_token"); b.cookies.delete("better-auth.session_token");
+  const results = await Promise.all([signInPassword(a, user.email), signInPassword(b, user.email)]);
+  expect(results.filter(result => result.status === 200 && !result.body.twoFactorRedirect)).toHaveLength(1);
+});
+
+it("forwards refreshed cookies while applying MFA session policy options", async () => {
+  const { browser } = await enrolledUser();
+  const session = await browser.session();
+  await pool.query(`update session set "updatedAt" = now() - interval '10 days', "expiresAt" = now() + interval '20 days' where id = $1`, [session!.session.id]);
+  const refreshedHeaders = new Headers();
+  const actor = await resolveBetterAuthSessionActor(browser.headers(), refreshedHeaders, { allowMfaPolicyBlocked: true });
+  expect(actor?.sessionId).toBe(session!.session.id);
+  expect(refreshedHeaders.getSetCookie().some(cookie => cookie.startsWith("better-auth.session_token="))).toBe(true);
 });

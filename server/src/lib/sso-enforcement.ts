@@ -137,8 +137,10 @@ interface EndpointLike {
   headers?: Headers;
   request?: Request;
   body?: unknown;
+  getSignedCookie?: (name: string, secret: string) => Promise<string | null | false>;
   context?: {
     baseURL?: string;
+    createAuthCookie?: (name: string) => { name: string };
     internalAdapter?: { findUserById: (id: string) => Promise<{ email: string } | null> };
     session?: { session?: { token?: string } | null; user?: { id?: string } | null } | null;
   } | null;
@@ -201,6 +203,26 @@ export async function ssoSessionCreatePolicy(
   if (issuingOrg) {
     if (org && org.id !== issuingOrg) throw ssoRequired(org, ctx);
     return { data: { token: `${orgTokenPrefix(issuingOrg)}${session.token}` } };
+  }
+  // The stock second-factor endpoint creates the session only after checking
+  // TOTP/backup code. Consume server-issued provenance here, atomically: two
+  // simultaneous completions can never mint two SSO sessions from one proof.
+  if (ctx?.path === "/two-factor/verify-totp" || ctx?.path === "/two-factor/verify-backup-code") {
+    const cookie = ctx.context?.createAuthCookie?.("two_factor");
+    const challenge = cookie ? await ctx.getSignedCookie?.(cookie.name, secret) : null;
+    if (challenge) {
+      const { rows } = await pool.query<{ value: string }>(
+        `delete from verification where identifier = $1 and "expiresAt" > now()
+         and value::jsonb->>'userId' = $2
+         and ($3::text is null or value::jsonb->>'orgId' = $3)
+         returning value`,
+        [`sso-mfa-${challenge}`, session.userId, org?.id ?? null],
+      );
+      if (rows.length === 1) {
+        const proof = JSON.parse(rows[0]!.value) as { orgId: string };
+        return { data: { token: `${orgTokenPrefix(proof.orgId)}${session.token}` } };
+      }
+    }
   }
   if (!org) return undefined;
 

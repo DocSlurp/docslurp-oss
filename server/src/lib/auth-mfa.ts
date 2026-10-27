@@ -359,15 +359,17 @@ async function beginChallenge(ctx: HookContext, userId: string, maxAge: number):
 }
 
 /** A valid trusted-device cookie for `userId` is rotated (single use) and accepted. */
-async function consumeTrustedDevice(ctx: HookContext, userId: string, maxAge: number): Promise<boolean> {
+async function consumeTrustedDevice(ctx: HookContext, userId: string, maxAge: number, pool: Pick<Pool, "query">): Promise<boolean> {
   const cookie = ctx.context.createAuthCookie(TRUST_DEVICE_COOKIE, { maxAge });
   const value = await ctx.getSignedCookie(cookie.name, ctx.context.secret);
   if (!value) return false;
   const [token, identifier] = value.split("!");
   if (token && identifier && token === hmacTrustToken(ctx.context.secret, userId, identifier)) {
-    const record = await ctx.context.internalAdapter.findVerificationValue(identifier);
-    if (record && record.value === userId && new Date(record.expiresAt).getTime() > Date.now()) {
-      await ctx.context.internalAdapter.deleteVerificationByIdentifier(identifier);
+    const consumed = await pool.query(
+      `delete from verification where identifier = $1 and value = $2 and "expiresAt" > now() returning id`,
+      [identifier, userId],
+    );
+    if (consumed.rowCount === 1) {
       const next = `trust-device-${generateRandomString(32)}`;
       await ctx.context.internalAdapter.createVerificationValue({ value: userId, identifier: next, expiresAt: new Date(Date.now() + maxAge * 1000) });
       await ctx.setSignedCookie(cookie.name, `${hmacTrustToken(ctx.context.secret, userId, next)}!${next}`, ctx.context.secret, cookie.attributes);
@@ -596,7 +598,7 @@ export function docslurpMfaGatePlugin(options: MfaPluginOptions): BetterAuthPlug
     const { rows } = await pool.query<{ two_factor_enabled: boolean }>(`select "twoFactorEnabled" as two_factor_enabled from "user" where id = $1`, [issued.user.id]);
     if (!rows[0]?.two_factor_enabled) return;
 
-    if (await consumeTrustedDevice(ctx, issued.user.id, config.trustDeviceMaxAgeSeconds)) {
+    if (await consumeTrustedDevice(ctx, issued.user.id, config.trustDeviceMaxAgeSeconds, pool)) {
       await pool.query(`update session set "mfaVerified" = true where token = $1`, [issued.session.token]);
       return;
     }
@@ -655,11 +657,17 @@ interface ChallengeAuthContext {
  * session, start the plugin's second-factor challenge and return its
  * `Set-Cookie`. Better Auth signs cookies as `value.base64(hmac-sha256)`.
  */
-export async function beginTwoFactorChallengeCookie(authContext: ChallengeAuthContext, userId: string, maxAge = 600): Promise<string> {
+export async function beginTwoFactorChallengeCookie(authContext: ChallengeAuthContext, userId: string, maxAge = 600, ssoOrgId?: string): Promise<string> {
   const identifier = `2fa-${generateRandomString(20)}`;
   const expiresAt = new Date(Date.now() + maxAge * 1000);
   await authContext.internalAdapter.createVerificationValue({ value: userId, identifier, expiresAt });
   await authContext.internalAdapter.createVerificationValue({ value: "0", identifier: `2fa-attempts-${identifier}`, expiresAt });
+  // Only the server's validated IdP callback supplies this org. Never read it
+  // from the MFA request. Keep it separate from the stock plugin's user record.
+  if (ssoOrgId) await authContext.internalAdapter.createVerificationValue({
+    value: JSON.stringify({ userId, orgId: ssoOrgId }),
+    identifier: `sso-mfa-${identifier}`, expiresAt,
+  });
   const { name, attributes } = authContext.createAuthCookie(TWO_FACTOR_COOKIE, { maxAge });
   const signature = createHmac("sha256", authContext.secret).update(identifier).digest("base64");
   const sameSite = (attributes.sameSite ?? "lax").toLowerCase();

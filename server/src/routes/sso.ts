@@ -726,22 +726,19 @@ async function finishSsoCallback(c: any, identity: SsoAssertedIdentity, requestR
     }
     return apiStatusError(c, result.status, result.error);
   }
-  if (result.kind === "linked") {
-    // Replace a temporary linking session after the IdP has proved the link.
-    await issueBetterAuthSession(c, result.userId, identity.orgId);
-    return redirectToApp(c, requestRow.redirect_path ?? "/app/sso?linked=1");
-  }
+  // Linking an account also proves only the first factor: enrolled users
+  // must finish MFA before receiving the replacement SSO session.
   // A user with 2FA on still needs it after company SSO: start the second-factor
   // challenge instead of issuing a session (the app's sign-in page finishes it).
   const [twoFactor] = await sql<{ enabled: boolean }[]>`select "twoFactorEnabled" as enabled from "user" where id = ${result.userId}`;
   if (twoFactor?.enabled) {
     const authContext = (await auth.$context) as unknown as Parameters<typeof beginTwoFactorChallengeCookie>[0];
-    c.header("set-cookie", await beginTwoFactorChallengeCookie(authContext, result.userId, MFA_CHALLENGE_MAX_AGE_SECONDS), { append: true });
+    c.header("set-cookie", await beginTwoFactorChallengeCookie(authContext, result.userId, MFA_CHALLENGE_MAX_AGE_SECONDS, identity.orgId), { append: true });
     const target = new URLSearchParams({ mfa: "required", redirectTo: safeRedirectPath(requestRow.redirect_path ?? "/app", "/app") });
     return redirectToApp(c, `${MFA_CHALLENGE_PATH}?${target.toString()}`);
   }
   await issueBetterAuthSession(c, result.userId, identity.orgId);
-  return redirectToApp(c, requestRow.redirect_path ?? "/");
+  return redirectToApp(c, requestRow.redirect_path ?? (result.kind === "linked" ? "/app/sso?linked=1" : "/"));
 }
 
 async function setSsoUnlinkedPassCookie(c: any, email: string): Promise<void> {
