@@ -27,7 +27,7 @@ import fitz
 from contract import (evaluation_identity,identity_hash,file_hash,immutable_json,validate_manifest,
                       validate_policy_receipt,validate_labels,validate_complete_inventory,validate_panel_binding,validate_panel_manifest)
 
-VERSION = "mixed-page-preservation@v3"
+VERSION = "mixed-page-text-preservation@v4"
 MEASURE_HASH = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
 OCR_BINARY_HASH = hashlib.sha256(Path(shutil.which("tesseract")).read_bytes()).hexdigest()
 OCR_LANGUAGE_HASH = hashlib.sha256(Path(os.environ.get("TESSDATA_PREFIX","/usr/share/tessdata"),"eng.traineddata").read_bytes()).hexdigest()
@@ -57,7 +57,7 @@ def formula_tokens(text):
     text=unicodedata.normalize('NFC',text).translate(str.maketrans({'−':'-','–':'-','—':'-','―':'-'}))
     return re.findall(r'\d+(?:\.\d+)?|[^\W\d_]+|[^\w\s]|_',text)
 
-def formula_page_tokens(text, patterns):
+def formula_page_tokens(text, patterns, with_mapping=False):
     """Ignore heading envelopes outside matching printed expressions only.
 
     List markers remain untouched: a line-leading minus or multiplication sign
@@ -77,7 +77,9 @@ def formula_page_tokens(text, patterns):
         for position,length in ranges:
             start=len(formula_tokens(text[:position]))
             ignored.update(i for i in range(start,start+length) if i not in protected)
-    return [token for i,token in enumerate(raw) if i not in ignored]
+    kept=[i for i in range(len(raw)) if i not in ignored]
+    values=[raw[i] for i in kept]
+    return (values,{raw_index:i for i,raw_index in enumerate(kept)}) if with_mapping else values
 
 
 def forced_token_matches(gold, actual, protected):
@@ -122,7 +124,7 @@ def printed_formula_recall(reference,text):
     expected=Counter(tuple(formula_tokens(f)) for f in reference.get('printedFormulas',[]) if formula_tokens(f))
     if not expected:return None
     source=reference['expectedMarkdown']
-    gold=formula_page_tokens(source,expected);actual=formula_page_tokens(text,expected)
+    gold,gold_mapping=formula_page_tokens(source,expected,with_mapping=True);actual=formula_page_tokens(text,expected)
     def mentions(sequence):
         return sorted((i,i+len(pattern),pattern) for pattern in expected
                       for i in range(len(sequence)-len(pattern)+1)
@@ -135,7 +137,9 @@ def printed_formula_recall(reference,text):
             start,end=row['start'],row['end'];literal=row['text']
             if type(start) is not int or type(end) is not int or not 0<=start<end<=len(source) or source[start:end]!=literal:
                 raise ValueError('invalid-printed-formula-occurrence')
-            pattern=tuple(formula_tokens(literal));i=len(formula_page_tokens(source[:start],expected));j=i+len(pattern)
+            pattern=tuple(formula_tokens(literal));raw_start=len(formula_tokens(source[:start]));i=gold_mapping.get(raw_start)
+            if i is None:raise ValueError('invalid-printed-formula-occurrence')
+            j=i+len(pattern)
             if tuple(gold[i:j])!=pattern or any(i<v and u<j for u,v in spans):
                 raise ValueError('overlapping-or-invalid-formula-occurrence')
             spans.append((i,j));seen[pattern]+=1
@@ -171,6 +175,11 @@ def printed_formula_recall(reference,text):
     return matched/len(wanted)
 
 def content_score(reference, text, legacy):
+    """Text diagnostics; formula ownership needs independent region evidence.
+
+    Correct text remains visible in quality/textualAcceptable, while incomplete
+    ownership evidence cannot authorize accepted routing measurements.
+    """
     expected, actual = Counter(tokens(reference["expectedMarkdown"])), Counter(tokens(text))
     matched = sum((expected & actual).values())
     recall = matched/sum(expected.values()) if expected else 1.0
@@ -216,13 +225,19 @@ def content_score(reference, text, legacy):
     ref = {"prose":reference["expectedMarkdown"], "paragraphs":reference["paragraphs"],
            "tables":reference["tables"], "formulas":reference["formulas"], "groundTruth":{"prosePresent":True,"kind":"authored"}}
     modern = legacy.compact(legacy.score(ref,text))
+    textual_acceptable=recall>=.95 and precision>=.95 and minimum_section>=.90 and all(v is None or v>=.95 for v in [numeric,numeric_order,table_row_recall,contextual,statement_recall]) and (formula_recall is None or formula_recall==1) and ordered>=.9 and not excluded
+    evidence_complete=not bool(reference.get('printedFormulas') or reference.get('formulas'))
     return {"version":VERSION, "recall":recall,"precision":precision,
             "f1":2*recall*precision/max(1e-9,recall+precision),"sectionRecall":sections,
             "minimumSectionRecall":minimum_section,"numericRecall":numeric,"numericOrderRecall":numeric_order,"numericStatementRecall":statement_recall,"contextualValueRecall":contextual,"hiddenTextLeak":excluded,
             "tableRowRecall":table_row_recall,"orderedSimilarity":ordered,
             "printedFormulaRecall":formula_recall,
             "quality": min(applicable),
-            "acceptable":recall>=.95 and precision>=.95 and minimum_section>=.90 and all(v is None or v>=.95 for v in [numeric,numeric_order,table_row_recall,contextual,statement_recall]) and (formula_recall is None or formula_recall==1) and ordered>=.9 and not excluded,
+            "qualityScope":"textual-preservation",
+            "textualAcceptable":textual_acceptable,
+            "acceptanceEvidenceComplete":evidence_complete,
+            "blockingEvidence":[] if evidence_complete else ["formula-region-grounding"],
+            "acceptable":textual_acceptable and evidence_complete,
             "modern":modern}
 
 def invoke(argv):

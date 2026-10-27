@@ -17,7 +17,7 @@ Limitations: synthetic English templates, no handwriting or multilingual evidenc
 
 Native: Poppler `pdftotext -layout`. Cheap: Tesseract English at 150 DPI/PSM 6. Stronger local comparator: Tesseract at 300 DPI/PSM 3; this is a configuration name, not a claim that it always wins. Both OCR settings record confidence, raw text, wall time, rasterization time and cache reuse. No hosted model calls or uploads are planned in this local phase; hosted dollar savings cannot be inferred as measured outcomes.
 
-`mixed-page-preservation@v3` measures visible token precision/recall, minimum section recall, atomic and ordered numeric recall, authored numeric-statement preservation and contextual value/operator/grouping recall, complete ordered table-row recall and hidden-text leakage. The minimum content dimension is the main diagnostic score. Acceptance: precision/recall at least .95, every section at least .90, numeric/contextual-value/row recall at least .95, global token-order similarity at least .90, no excluded hidden text. Non-applicable numeric/table dimensions are null and excluded from gates. Exact references plus deletion, cell-swap, padding, whitespace and hidden-text mutations validate the deterministic scorer before tuning. The local Mastra scorer executes this same scoring function.
+`mixed-page-text-preservation@v4` measures visible token precision/recall, minimum section recall, atomic and ordered numeric recall, authored numeric-statement preservation and contextual value/operator/grouping recall, complete ordered table-row recall and hidden-text leakage. The minimum content dimension is the main diagnostic score. Acceptance: precision/recall at least .95, every section at least .90, numeric/contextual-value/row recall at least .95, global token-order similarity at least .90, no excluded hidden text. Non-applicable numeric/table dimensions are null and excluded from gates. Exact references plus deletion, cell-swap, padding, whitespace and hidden-text mutations validate the deterministic scorer before tuning. The local Mastra scorer executes this same scoring function.
 
 V4 references additionally retain literal printed formulas separately from their
 typed semantics and LaTeX diagnostics. Every printed formula and its required
@@ -77,3 +77,14 @@ An accepted local improvement additionally requires heldout mean quality ≥ .95
 - [QPDF page splitting](https://qpdf.readthedocs.io/en/stable/cli.html): split outputs differ in document-level data and shared-resource allocation.
 - [QPDF JSON object map](https://qpdf.readthedocs.io/en/11.8/json.html): page resources, stream dictionaries and indirect-object identities can support accounting, but do not imply readable text quantity.
 - [Mastra scorers](https://mastra.ai/reference/evals/create-scorer): local function-based scoring through the installed Mastra package.
+
+
+Formula-bearing pages currently produce textual diagnostics only. Unique string
+alignment cannot establish that a relation remains in its operative source region
+rather than a quotation. `acceptanceEvidenceComplete=false` and
+`blockingEvidence=["formula-region-grounding"]` make these pages unaccepted; the
+optimizer refuses panels with incomplete evidence. Missing grounding is not a
+zero labeled-value score: `quality` and `textualAcceptable` retain the diagnostic
+result. Region-grounded extraction evidence is a required next capability before
+these pages can support accepted thresholds or savings. Earlier v3 textual scores
+do not establish formula ownership and are not promotion evidence.

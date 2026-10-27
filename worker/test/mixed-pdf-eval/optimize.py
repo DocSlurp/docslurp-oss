@@ -103,6 +103,14 @@ def split_report(cases):
             "changedNativeTokens":sum(not c["splits"][size]["nativeTokensEqual"] for c in cases),"documents":len(cases)}
     return result
 
+def require_quality_evidence(case):
+    """Text diagnostics alone cannot authorize formula-bearing routing claims."""
+    for page in case['pages']:
+        for candidate in page['candidates'].values():
+            if candidate['score'].get('acceptanceEvidenceComplete') is not True:
+                raise RuntimeError('incomplete-quality-evidence-no-policy-promotion')
+
+
 def load_panel(run,split,identity):
     path=run/f'{split}-complete.json'
     inventory=json.loads(path.read_text());validate_complete_inventory(inventory,split)
@@ -121,6 +129,7 @@ def load_panel(run,split,identity):
         if any(case[k]!=expected[k] for k in ['id','family','split','hardPercent']) or len(case['pages'])!=10:raise RuntimeError('result-inventory-mismatch')
         wanted={'sourceHash':expected['sha256'],'labelHash':expected['labelHash'],'evaluationIdentityHash':identity_hash(identity),'policyHash':inventory['policyHash']}
         if case['caseIdentity']!=wanted:raise RuntimeError('result-provenance-mismatch')
+        require_quality_evidence(case)
         cases.append(case)
     return cases,inventory
 

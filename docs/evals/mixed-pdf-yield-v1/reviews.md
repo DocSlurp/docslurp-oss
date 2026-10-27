@@ -373,3 +373,29 @@ prior regressions pass. The Mastra wrapper and measurement version now identify
 `mixed-page-preservation@v3`. Scoring is conservative when ownership is ambiguous;
 its quadratic alignment work is evaluation overhead, not ingestion latency, and
 has not been performance-benchmarked. No corpus measurement is promoted yet.
+
+### Council round 7: restrict claims and gate missing region evidence
+
+The adversarial reviewer independently confirmed the forced-match algorithm on
+961 tiny sequence pairs, but found a nearby quotation plus recased operative rule
+still false-passed. A uniquely aligned string is not proof of semantic ownership.
+This remains a limitation of the text metric, explicitly acknowledged rather than
+claimed fixed by another matching heuristic.
+
+The v4 metric is now named `mixed-page-text-preservation`, including its Mastra
+wrapper. It retains quality and textualAcceptable as diagnostics. Every
+formula-bearing reference reports acceptanceEvidenceComplete=false and missing
+formula-region-grounding; acceptable is false. The optimizer refuses incomplete
+panels before searching or issuing policy claims, including old results lacking
+this evidence field. No boolean supplied by the extracted text can bypass this
+missing capability. Grounded region extraction is required before formula pages
+can become accepted evidence. This preserves correct labeled-text diagnostics
+without treating them as proof of where or how a relation is used.
+
+The reviewer also found truncating a Markdown prefix changed token offsets.
+Declared spans now use the complete source's raw-to-normalized token mapping.
+The exact `### Heading # q = a / b tail` regression passes. All 53 evaluator tests
+pass when run explicitly outside the active builder's separate a5 test package.
+A broad discovery also encountered that package's missing jsonschema dependency;
+this is retained as an invocation failure, not a passing builder test claim.
+Fresh council review must assess the fail-closed promotion gate and claim limits.
