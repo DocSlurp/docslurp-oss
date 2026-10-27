@@ -21,6 +21,7 @@ import {
   type UpdateWorkspaceGraphInput,
   type WorkspaceGraphStatus,
   type WorkspaceRecord,
+  PUBLIC_ERROR_MESSAGES,
 } from "@docslurp/shared";
 
 import { sql } from "../db.js";
@@ -114,13 +115,28 @@ export function mapGraphJob(row: GraphJobRow, now = Date.now()): GraphJob {
     outputTokens: row.output_tokens,
     costCents: Number(row.cost_cents),
     etaSeconds,
-    error: row.error,
+    error: graphJobPublicError(row.status, row.error),
     cancelRequested: row.cancel_requested_at !== null,
     createdAt: row.created_at.toISOString(),
     startedAt: row.started_at?.toISOString() ?? null,
     finishedAt: row.finished_at?.toISOString() ?? null,
     updatedAt: row.updated_at.toISOString(),
   };
+}
+
+/** The worker writes two fixed cancellation notes; anything else it stored is internal error text. */
+const GRAPH_CANCEL_NOTE = /^(?:Cancelled by request|Stopped at the \$\d[\d,]*(?:\.\d{2})? cost cap)$/;
+
+/**
+ * A graph job's `error` for API callers. Failure text from the worker stays in
+ * graph_jobs and the worker log (raw errors go to telemetry, never to users);
+ * callers get closed copy. The worker's own cancellation notes pass through.
+ */
+export function graphJobPublicError(status: string, stored: string | null): string | null {
+  if (!stored) return null;
+  if (status === "cancelled") return GRAPH_CANCEL_NOTE.test(stored) ? stored : null;
+  if (status === "failed") return PUBLIC_ERROR_MESSAGES.graphRebuildFailed;
+  return null;
 }
 
 async function requireWorkspace(workspaceRef: string, userId: string, edit: boolean): Promise<WorkspaceRecord> {

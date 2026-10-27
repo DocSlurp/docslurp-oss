@@ -2,13 +2,13 @@ import { randomUUID } from "node:crypto";
 import type postgres from "postgres";
 import { HTTPException } from "hono/http-exception";
 
-import { apiError, apiErrorCodeForStatus, defaultPipelineFeatures, isApiErrorCode, normalizePipelineFeatures, type ApiErrorDetails } from "@docslurp/shared";
+import { apiError, apiErrorCodeForStatus, defaultPipelineFeatures, isApiErrorCode, normalizePipelineFeatures, type ApiErrorCode, type ApiErrorDetails } from "@docslurp/shared";
 
 import { withApiErrorDetails } from "../lib/api-error.js";
 
 export const DEFAULT_WORKSPACE_NAME = "Default";
 
-export type WorkspaceAccessErrorCode = "organization_not_found" | "workspace_not_found" | "workspace_forbidden" | "invalid_request" | "forbidden";
+export type WorkspaceAccessErrorCode = Extract<ApiErrorCode, "organization_not_found" | "workspace_not_found" | "workspace_forbidden" | "invalid_request" | "forbidden">;
 
 /**
  * A workspace reference that cannot be served to the caller. Extends Hono's

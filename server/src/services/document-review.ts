@@ -6,7 +6,6 @@ import { notifySearchEligibilityChanged } from "../search/eligibility-hint.js";
 import { getArtifactJson, getArtifactText } from "../lib/artifacts.js";
 import { listAccessibleWorkspaceIds } from "./organizations.js";
 import { getDocumentViewerPayload, setDocumentTags } from "./documents.js";
-import { runUsageCostSummaries } from "./usage-attribution.js";
 
 type ReviewDocumentRow = {
   id: string;
@@ -33,11 +32,6 @@ type ReviewSignalRow = {
   failed_stages: number;
   schema_errors: number;
   failed_stage_names: string[] | null;
-};
-
-type RunCostRow = {
-  id: string;
-  total_documents: number;
 };
 
 type CorrectionRow = {
@@ -98,30 +92,6 @@ type PageInsertRow = {
   text: string;
   token_estimate: number;
 };
-
-export interface ReviewQueueEntry {
-  document: {
-    id: string;
-    orgId: string;
-    workspaceId: string;
-    runId: string | null;
-    filename: string;
-    mimeType: string;
-    status: string;
-    pageCount: number;
-    createdAt: string;
-    updatedAt: string;
-  };
-  severityScore: number;
-  estimatedCostCents: number;
-  plausibilityScore: number | null;
-  retries: number;
-  failedStages: number;
-  schemaErrors: number;
-  failureModes: string[];
-  correctionState: "open" | "corrected" | "reindexed";
-  correctionUpdatedAt: string | null;
-}
 
 export interface CorrectionWorkbenchPayload {
   documentId: string;
@@ -756,184 +726,6 @@ export function buildCorrectionProfileSummary(args: CorrectionProfileSummaryInpu
     currentDocumentSignals,
     examples: visibleExamples
   };
-}
-
-export async function listLowConfidenceReviewQueue(args: {
-  userId: string;
-  orgId?: string;
-  runId?: string;
-  workspaceId?: string;
-  sort?: "severity" | "cost" | "org" | "failure-mode";
-}): Promise<ReviewQueueEntry[]> {
-  const workspaceIds = await listAccessibleWorkspaceIds(args.userId);
-  if (workspaceIds.length === 0) {
-    return [];
-  }
-
-  const scopedIds = args.workspaceId ? [args.workspaceId] : workspaceIds;
-  const documents = await sql<ReviewDocumentRow[]>`
-    select
-      id,
-      org_id,
-      user_id,
-      workspace_id,
-      run_id,
-      filename,
-      mime_type,
-      source_key,
-      status,
-      extraction_mode,
-      page_count,
-      version_number,
-      previous_version_id,
-      created_at::text,
-      updated_at::text
-    from documents
-    where workspace_id = any(${sql.array(scopedIds)})
-      and (${args.orgId ?? null}::text is null or org_id = ${args.orgId ?? null})
-      and (${args.runId ?? null}::text is null or run_id = ${args.runId ?? null})
-    order by created_at desc
-  `;
-
-  if (documents.length === 0) {
-    return [];
-  }
-
-  const documentIds = documents.map((document) => document.id);
-  const runIds = Array.from(new Set(documents.map((document) => document.run_id).filter((value): value is string => Boolean(value))));
-
-  const [signals, runs, corrections, runCosts] = await Promise.all([
-    sql<ReviewSignalRow[]>`
-      select
-        d.id as document_id,
-        (
-          select max(value)
-          from performance_log
-          where document_id = d.id and metric = 'extraction-plausibility'
-        ) as plausibility_score,
-        (
-          select coalesce(sum(greatest(attempts - 1, 0)), 0)::int
-          from document_run_stage_states
-          where document_id = d.id
-        ) as retries,
-        (
-          select coalesce(sum(case when status = 'failed' then 1 else 0 end), 0)::int
-          from document_run_stage_states
-          where document_id = d.id
-        ) as failed_stages,
-        (
-          select coalesce(sum(case when stage_name = 'structured-extract' and error is not null then 1 else 0 end), 0)::int
-          from document_run_stage_states
-          where document_id = d.id
-        ) as schema_errors,
-        (
-          select coalesce(array_agg(distinct stage_name) filter (where status = 'failed'), '{}')
-          from document_run_stage_states
-          where document_id = d.id
-        ) as failed_stage_names
-      from documents d
-      where d.id = any(${sql.array(documentIds)})
-    `,
-    runIds.length > 0
-      ? sql<RunCostRow[]>`
-          select id, total_documents
-          from workspace_runs
-          where id = any(${sql.array(runIds)})
-        `
-      : Promise.resolve([] as RunCostRow[]),
-    sql<CorrectionRow[]>`
-      select
-        id,
-        document_id,
-        run_id,
-        user_id,
-        corrected_markdown,
-        corrected_structured_data,
-        notes,
-        reindex_requested_at::text,
-        reindex_completed_at::text,
-        created_at::text,
-        updated_at::text
-      from document_corrections
-      where document_id = any(${sql.array(documentIds)})
-    `,
-    // The run cost every surface reports (usage ledger), spread per document.
-    runUsageCostSummaries(runIds),
-  ]);
-
-  const signalLookup = new Map(signals.map((row) => [row.document_id, row]));
-  const runLookup = new Map(runs.map((row) => [row.id, row]));
-  const correctionLookup = new Map(corrections.map((row) => [row.document_id, row]));
-
-  const queue = documents
-    .map((document) => {
-      const signal = signalLookup.get(document.id);
-      const run = document.run_id ? runLookup.get(document.run_id) ?? null : null;
-      const estimatedCostCents = run ? (runCosts.get(run.id)?.costCents ?? 0) / Math.max(1, run.total_documents) : 0;
-      const correction = correctionLookup.get(document.id) ?? null;
-      const plausibilityScore = signal?.plausibility_score ?? null;
-      const failureModes = buildReviewFailureModes(
-        {
-          plausibilityScore,
-          retries: signal?.retries ?? 0,
-          failedStages: signal?.failed_stages ?? 0,
-          schemaErrors: signal?.schema_errors ?? 0,
-          failedStageNames: signal?.failed_stage_names ?? []
-        },
-        { includeStageNames: false }
-      );
-
-      return {
-        document: {
-          id: document.id,
-          orgId: document.org_id,
-          workspaceId: document.workspace_id,
-          runId: document.run_id,
-          filename: document.filename,
-          mimeType: document.mime_type,
-          status: document.status,
-          pageCount: document.page_count,
-          createdAt: document.created_at,
-          updatedAt: document.updated_at
-        },
-        severityScore: calculateReviewSeverity({
-          plausibilityScore,
-          retries: signal?.retries ?? 0,
-          failedStages: signal?.failed_stages ?? 0,
-          schemaErrors: signal?.schema_errors ?? 0,
-          estimatedCostCents
-        }),
-        estimatedCostCents,
-        plausibilityScore,
-        retries: signal?.retries ?? 0,
-        failedStages: signal?.failed_stages ?? 0,
-        schemaErrors: signal?.schema_errors ?? 0,
-        failureModes,
-        correctionState: correction?.reindex_completed_at
-          ? "reindexed"
-          : correction
-            ? "corrected"
-            : "open",
-        correctionUpdatedAt: correction?.updated_at ?? null
-      } satisfies ReviewQueueEntry;
-    })
-    .filter((entry) => entry.failureModes.length > 0);
-
-  const sort = args.sort ?? "severity";
-  queue.sort((left, right) => {
-    if (sort === "cost") {
-      return right.estimatedCostCents - left.estimatedCostCents;
-    }
-    if (sort === "org") {
-      return left.document.orgId.localeCompare(right.document.orgId) || right.severityScore - left.severityScore;
-    }
-    if (sort === "failure-mode") {
-      return left.failureModes.join(",").localeCompare(right.failureModes.join(",")) || right.severityScore - left.severityScore;
-    }
-    return right.severityScore - left.severityScore;
-  });
-
-  return queue;
 }
 
 export async function getCorrectionWorkbench(docId: string, userId: string): Promise<CorrectionWorkbenchPayload | null> {
