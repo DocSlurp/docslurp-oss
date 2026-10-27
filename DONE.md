@@ -132,3 +132,4 @@
 - Bound worker CI apt installation to two five-minute attempts, retrying once with signed official Ubuntu archive/security sources when the runner mirror stalls.
 
 - Add a manual, fixed-digest signing-only workflow for the reviewed document VM image, preserving original BuildKit evidence and requiring exact workflow certificate identity; dispatch and release verification remain separate manual gates.
+- Add opt-in evaluation-integrity v2 with complete role/provenance accounting, bounded row/header/equation/graph evidence, retained candidate observations, labels byte-copy checks and fail-closed resource limits; preserve v1. Validated with invented controls only; independent reviews remain required before corpus use.
