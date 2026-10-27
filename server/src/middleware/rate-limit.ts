@@ -112,6 +112,8 @@ export type RateLimitConsumeResult = {
   counted: boolean;
   /** Global or prefix capacity prevents admitting this operation: denied without counting. */
   full?: boolean;
+  /** True when a shared (Redis) store answered; absent or false for the per-process limiter, including a Redis fallback. */
+  shared?: boolean;
 };
 
 export interface RateLimitStore {
@@ -402,7 +404,7 @@ abstract class FallbackStore implements RateLimitStore {
   private retryBackendAt = 0;
 
   async consume(input: RateLimitConsumeInput): Promise<RateLimitConsumeResult> {
-    if (Date.now() < this.retryBackendAt) return await this.fallback.consume(input);
+    if (Date.now() < this.retryBackendAt) return { ...(await this.fallback.consume(input)), shared: false };
     try {
       const { keys, args } = scriptArgs(input);
       const result = parseScriptResult(await this.evaluate(keys, args), input.counters.length);
@@ -410,7 +412,7 @@ abstract class FallbackStore implements RateLimitStore {
         this.fallbackWarningLogged = false;
         console.warn("[rate-limit] Redis backend recovered; shared limits restored");
       }
-      return result;
+      return { ...result, shared: true };
     } catch (error) {
       // Never fail open: a Redis outage degrades to the per-process limiter,
       // which still enforces every limit (per instance).
@@ -419,7 +421,7 @@ abstract class FallbackStore implements RateLimitStore {
         this.fallbackWarningLogged = true;
         console.error("[rate-limit] Redis backend failed; falling back to the per-process in-memory limiter (limits now apply per instance):", error instanceof Error ? error.message : String(error));
       }
-      return await this.fallback.consume(input);
+      return { ...(await this.fallback.consume(input)), shared: false };
     }
   }
 
@@ -1056,3 +1058,55 @@ export const apiActorRateLimit: MiddlewareHandler = async (c, next) => {
 };
 
 export const apiRateLimit = apiIpRateLimit;
+
+/**
+ * A fixed-window limit for one feature and subject (for example
+ * `chat-instructions-improve`, `user:<id>`), outside the per-request category
+ * limits. Returns the seconds to wait when refused, else null.
+ *
+ * Fails closed on a limit of 0 and on store errors. With `requireShared`, a
+ * configured Redis that is unavailable (the per-process fallback answered)
+ * refuses. With no Redis configured at all, per-process limits are the
+ * accepted stopgap (N instances allow N times the limit; the startup log warns).
+ */
+export async function consumeFeatureRateLimit(args: {
+  feature: string;
+  subject: string;
+  limit: number;
+  windowMs: number;
+  requireShared?: boolean;
+  store?: RateLimitStore;
+  now?: number;
+}): Promise<number | null> {
+  const now = args.now ?? Date.now();
+  const retry = Math.max(1, Math.ceil((args.windowMs - (now % args.windowMs)) / 1000));
+  if (args.limit <= 0) return retry;
+  // API_RATE_LIMIT_ENABLED=false turns off request limits, not this floor:
+  // feature limits guard paid calls, so they fall back to the per-process store.
+  const store = args.store ?? getDefaultStore();
+  const base = `${process.env.API_RATE_LIMIT_KEY_PREFIX ?? "api"}:feature:${safeIdentityPart(args.feature)}:{${safeIdentityPart(args.subject)}}`;
+  try {
+    const result = await store.consume({
+      blockKey: `${base}:block`,
+      counters: [{ key: `${base}:${args.windowMs}`, limit: args.limit, windowMs: args.windowMs }],
+      now,
+      countDenied: false,
+    });
+    if (args.requireShared && sharedStoreConfigured() && result.shared !== true) {
+      console.error(`[rate-limit] feature=${args.feature} refused: Redis is configured but unavailable (per-process fallback answered)`);
+      return retry;
+    }
+    if (result.blockedMs > 0) return Math.max(1, Math.ceil(result.blockedMs / 1000));
+    if (result.denied < 0) return null;
+  } catch (error) {
+    console.error("[rate-limit] feature limit unavailable:", error instanceof Error ? error.message : String(error));
+  }
+  return retry;
+}
+
+/** Whether a shared (Redis or Upstash) limiter is configured; without one, per-process limits are expected. */
+function sharedStoreConfigured(): boolean {
+  const restUrl = process.env.API_RATE_LIMIT_REDIS_REST_URL?.trim() || process.env.UPSTASH_REDIS_REST_URL?.trim();
+  const restToken = process.env.API_RATE_LIMIT_REDIS_REST_TOKEN?.trim() || process.env.UPSTASH_REDIS_REST_TOKEN?.trim();
+  return Boolean((restUrl && restToken) || process.env.API_RATE_LIMIT_REDIS_URL?.trim() || process.env.REDIS_URL?.trim());
+}

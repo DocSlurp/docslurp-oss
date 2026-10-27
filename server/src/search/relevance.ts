@@ -123,7 +123,8 @@ function stem(term: string): string {
   return stripped.length >= 3 ? stripped : term;
 }
 
-function contentTerms(query: string): string[] {
+/** Distinct content terms of a query (stop words removed). */
+export function contentTerms(query: string): string[] {
   return [...new Set(tokenize(query).filter((term) => !coverageStopWords.has(term)))];
 }
 
