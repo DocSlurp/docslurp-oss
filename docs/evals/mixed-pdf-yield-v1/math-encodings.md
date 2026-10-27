@@ -75,10 +75,15 @@ Tests use invented expressions and format fragments, with both equivalent
 cross-format pairs and changed signs, cases, grouping, relations and operands.
 No dataset contents or held-out predictions are part of the normalizer.
 
-Normalizer version 1.0.3 passes 34 test methods covering 1,115 subcases. The
-integrated focused suite passes 106 tests, including CLI regressions for the
+Normalizer version 1.0.4 passes 41 test methods covering 1,633 subcases. The
+integrated focused suite passes 114 tests, including CLI regressions for the
 independent reviewers' counterexamples. Review-driven changes preserve nested
-script bases, coalesce compatible Office Math runs, honor MathML text styles,
-and refuse baseline XML script markup, unsupported double-struck italic letters,
-and invalid XML characters. These corrections supersede the initial 97-test run;
-the independent re-review remains a separate gate.
+script bases and small-capital distinctions, coalesce compatible Office Math
+runs across validated empty runs, and honor supported MathML text styles.
+Non-normal numeric/operator styles, relation chains, relation-valued comparison
+operands, baseline XML script markup, unsupported double-struck italic letters,
+and invalid XML characters are explicitly unscorable. XML tree-builder callbacks
+enforce node/depth limits before node allocation, including events deferred
+until parser close. Padded-root controls cover this behavior on Python 3.14.8
+with Expat 2.9.0. These corrections supersede the earlier test counts;
+independent re-review remains a separate gate.

@@ -2,9 +2,10 @@
 
 import itertools
 import unittest
+import unicodedata
 
 from math_encodings import (
-    MAX_DEPTH, MAX_LENGTH, MAX_NODES, MAX_TOKENS, VERSION,
+    MAX_DEPTH, MAX_LENGTH, MAX_NODES, MAX_TOKENS, VERSION, _SUB, _SUPER,
     compare_math, normalize_math,
 )
 
@@ -586,6 +587,127 @@ class MathEncodingsTest(unittest.TestCase):
                             '<?xml version="1.0" encoding="UTF-16" standalone="no"?>'):
             with self.subTest(valid_decoded_declaration=declaration):
                 self.equivalent(declaration + '\t\r\n' + mathml('<mi>𝑥</mi>'), 'x')
+
+    def test_mathml_numeric_and_operator_styles_fail_closed(self):
+        for style in ('italic', 'bold', 'bold-italic', 'double-struck', 'sans-serif'):
+            for number in ('0', '7', '23.750'):
+                styled = f'<mstyle mathvariant="{style}"><mn>{number}</mn></mstyle>'
+                direct = f'<mn mathvariant="{style}">{number}</mn>'
+                for body in (styled, direct,
+                             '<msup><mi>q</mi>' + styled + '</msup>',
+                             '<msub><mi>q</mi>' + direct + '</msub>',
+                             '<mfrac>' + styled + '<mn>2</mn></mfrac>',
+                             '<mfrac><mn>2</mn>' + direct + '</mfrac>'):
+                    with self.subTest(style=style, number=number, body=body):
+                        self.unsupported(mathml(body))
+                with self.subTest(normal_override=style, number=number):
+                    self.equivalent(number, mathml(f'<mstyle mathvariant="{style}">'
+                                    f'<mn mathvariant="normal">{number}</mn></mstyle>'))
+                    self.equivalent(number, mathml(f'<mstyle mathvariant="{style}">'
+                                    f'<mstyle mathvariant="normal"><mn>{number}</mn></mstyle></mstyle>'))
+            for operator in ('=', '≈', '+', '×', '≤'):
+                for middle in (f'<mo mathvariant="{style}">{operator}</mo>',
+                               f'<mstyle mathvariant="{style}"><mo>{operator}</mo></mstyle>'):
+                    with self.subTest(operator=operator, style=style, middle=middle):
+                        self.unsupported(mathml('<mi>p</mi>' + middle + '<mi>q</mi>'))
+                with self.subTest(operator_normal_override=operator, style=style):
+                    self.equivalent('p' + operator + 'q', mathml('<mi>p</mi>' +
+                        f'<mstyle mathvariant="{style}"><mo mathvariant="normal">{operator}</mo></mstyle>' +
+                        '<mi>q</mi>'))
+        self.equivalent('7', mathml('<mn mathvariant="normal">007.0</mn>'))
+        self.equivalent('q^7', mathml('<msup><mi>q</mi><mn mathvariant="normal">7</mn></msup>'))
+
+    def test_superscript_small_capital_i_keeps_identity(self):
+        forms = ['qᶦ', 'q^{ɪ}', mathml('<msup><mi>q</mi><mi>ɪ</mi></msup>'),
+                 omml(script(run('q'), sup=run('ɪ')))]
+        for left, right in itertools.product(forms, repeat=2):
+            with self.subTest(small_capital=(left, right)):
+                self.equivalent(left, right)
+        for expression in forms:
+            for other in ('q^i', 'qⁱ', 'q^I', 'qᴵ'):
+                with self.subTest(distinct=(expression, other)):
+                    self.different(expression, other)
+        self.equivalent('qⁱ', 'q^i')
+        self.equivalent('qᴵ', 'q^I')
+
+    def test_script_map_character_identity_audit(self):
+        # Unicode's character identity is independent of our positional maps.
+        # The only operator spelling change here is mathematical minus to '-'.
+        for mapping in (_SUPER, _SUB):
+            for glyph, base in mapping.items():
+                with self.subTest(glyph=glyph, name=unicodedata.name(glyph)):
+                    self.assertEqual(unicodedata.normalize('NFKD', glyph).replace('−', '-'), base)
+
+    def test_empty_omml_runs_do_not_introduce_style_boundaries(self):
+        for value in ('mol', 'kg', 'ref'):
+            for cut, empty_normal in itertools.product(range(len(value) + 1), (False, True)):
+                with self.subTest(value=value, cut=cut, empty_normal=empty_normal):
+                    body = run(value[:cut], True) + run('', empty_normal) + run(value[cut:], True)
+                    self.equivalent(r'\mathrm{' + value + '}', omml(body))
+        self.equivalent(r'\mathrm{mol}', omml(run('m', True) + run('') + run('ol', True)))
+        self.unsupported(omml(run('m', True) + '<m:r><m:rPr><m:sty m:val="b"/></m:rPr><m:t/></m:r>' + run('ol', True)))
+        self.unsupported(omml(run('m', True) + run('ol')))
+        self.different(r'\mathrm{mol}', omml(run('m', True) + run('o') + run('l', True)))
+
+    def test_omml_numeric_default_normal_transition_matrix(self):
+        contexts = [lambda body: omml(body),
+                    lambda body: omml(fraction(body, run('3'))),
+                    lambda body: omml(fraction(run('3'), body)),
+                    lambda body: omml(script(run('q'), sub=body)),
+                    lambda body: omml(script(run('q'), sup=body))]
+        for value in ('23.75', '12', '001.250', '.75'):
+            for index, context in enumerate(contexts):
+                for cut, normal in itertools.product(range(1, len(value)), (False, True)):
+                    with self.subTest(value=value, context=index, cut=cut, normal=normal):
+                        mixed = run(value[:cut], normal) + run('', not normal) + run(value[cut:], not normal)
+                        self.equivalent(context(run(value)), context(mixed))
+                with self.subTest(alternating=value, context=index):
+                    mixed = ''.join(run(char, bool(index % 2)) for index, char in enumerate(value))
+                    self.equivalent(context(run(value)), context(mixed))
+        self.equivalent('23.75', omml(run('23.') + run('75', True)))
+        self.equivalent(r'\mathrm{q}+23.75', omml(run('q+23.', True) + run('75')))
+        self.different('23.75', omml(run('23') + run('×', True) + run('75')))
+        self.unsupported(omml(run('23.') + run(' 75', True)))
+
+    def test_relation_chains_and_grouped_relation_operands_are_unscorable(self):
+        for first, second in (('<', '<'), ('>', '>'), ('≤', '≤'), ('<', '≤'), ('=', '≈')):
+            for expression in ('p' + first + 'q' + second + 'r',
+                               '(p' + first + 'q)' + second + 'r',
+                               'p' + first + '(q' + second + 'r)'):
+                with self.subTest(expression=expression):
+                    self.unsupported(expression)
+        for first, second in (('>', '>'), ('≤', '≤'), ('≥', '≤'), ('=', '≈')):
+            for grouped in (False, True):
+                opening, closing = ('<mo>(</mo>', '<mo>)</mo>') if grouped else ('', '')
+                presentation = opening + '<mi>p</mi><mo>' + first + '</mo><mi>q</mi>' + closing
+                presentation += '<mo>' + second + '</mo><mi>r</mi>'
+                linear = ('(p' + first + 'q)' if grouped else 'p' + first + 'q') + second + 'r'
+                for expression in (mathml(presentation), omml(run(linear))):
+                    with self.subTest(xml_chain=expression):
+                        self.unsupported(expression)
+        self.equivalent('p<q', '(p<q)')
+        self.equivalent('p+q<r', '(p+q)<r')
+        self.equivalent('p≤q', mathml('<mi>p</mi><mo>≤</mo><mi>q</mi>'))
+
+    def test_xml_deferred_close_obeys_limits_and_establishes_root(self):
+        padded_depth = ('<math><mrow' + ' ' * 17000 + '>' + '<mrow>' * 64 +
+                        '<mi>v</mi>' + '</mrow>' * 65 + '</math>')
+        padded_nodes = '<math><mrow' + ' ' * 17000 + '/>' + '<mrow/>' * 2050 + '<mi>v</mi></math>'
+        valid_padded_root = '<math' + ' ' * 17000 + '><mi>v</mi></math>'
+        for mode in ('auto', 'mathml'):
+            for text in (padded_depth, padded_nodes):
+                with self.subTest(overflow=mode, length=len(text)):
+                    self.assertLess(len(text), MAX_LENGTH)
+                    self.unsupported(text, mode)
+                    self.assertIn('XML node/depth limit', normalize_math(text, mode)['issues'][0])
+            with self.subTest(valid_padded_root=mode):
+                self.equivalent('v', valid_padded_root, actual_encoding=mode)
+        at_depth_limit = '<math><mrow' + ' ' * 17000 + '>' + '<mrow>' * (MAX_DEPTH - 3)
+        at_depth_limit += '<mi>v</mi>' + '</mrow>' * (MAX_DEPTH - 2) + '</math>'
+        at_node_limit = '<math' + ' ' * 17000 + '>' + '<mrow/>' * (MAX_NODES - 2) + '<mi>v</mi></math>'
+        self.equivalent('v', at_depth_limit)
+        self.equivalent('v', at_node_limit)
+        self.equivalent('v', '<m:oMath xmlns:m="' + O + '"' + ' ' * 17000 + '>' + run('v') + '</m:oMath>')
 
 
 if __name__ == '__main__':

@@ -22,6 +22,8 @@ Nested XML/grouped script bases stay nested; only adjacent linear script slots
 share a base. Compatible adjacent OMML runs join before lexical analysis. OMML
 and MathML presentation text cannot stand in for structural script elements.
 MathML mtext defaults to normal, honoring inherited/explicit mathvariant.
+Non-normal MathML numeric/operator variants and relation chains are unscorable.
+Empty OMML runs are inert; default/normal ASCII decimal spans are compatible.
 Unsupported combined alphabets (including double-struck italic) are refused.
 All inputs are decoded strings containing XML 1.0 Char code points; NUL-shaped
 UTF-16/32 byte strings are never re-decoded by the XML parser.
@@ -38,7 +40,7 @@ import re
 import unicodedata
 import xml.etree.ElementTree as ET
 
-VERSION = "1.0.3"
+VERSION = "1.0.4"
 MAX_LENGTH = 32768
 MAX_DEPTH = 48
 MAX_NODES = 2048
@@ -72,6 +74,9 @@ _SUPER = dict(zip("⁰¹²³⁴⁵⁶⁷⁸⁹⁺⁻⁼⁽⁾ⁿⁱ", "012345678
 _SUPER.update(dict(zip("ᵃᵇᶜᵈᵉᶠᵍʰᶦʲᵏˡᵐᵒᵖʳˢᵗᵘᵛʷˣʸᶻ", "abcdefghijklmoprstuvwxyz")))
 _SUPER.update(dict(zip("ᴬᴮᴰᴱᴳᴴᴵᴶᴷᴸᴹᴺᴼᴾᴿᵀᵁⱽᵂ", "ABDEGHIJKLMNOPRTUVW")))
 _SUPER.update(dict(zip("ᵝᵞᵟᵠᵡ", "βγδφχ")))
+# U+1DA6 MODIFIER LETTER SMALL CAPITAL I retains U+026A, not lowercase i.
+# U+2071 SUPERSCRIPT LATIN SMALL LETTER I above remains ordinary lowercase i.
+_SUPER["ᶦ"] = "ɪ"
 _SUB = dict(zip("₀₁₂₃₄₅₆₇₈₉₊₋₌₍₎ₐₑₒₓₕₖₗₘₙₚₛₜᵢⱼᵣᵤᵥ", "0123456789+-=()aeoxhklmnpstijruv"))
 _NUMBER = re.compile(r"(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)\Z")
 _IDENTIFIER = re.compile(r"[^\W\d_]+\Z", re.UNICODE)
@@ -337,6 +342,9 @@ class _Parser:
                 if token != "implicit":
                     self.take()
                 right = self.expression(precedence + 1)
+                if token in _RELATIONS and any(
+                        node[0] == "binary" and node[1] in _RELATIONS for node in (left, right)):
+                    _fail("relation chains and relation-valued comparison operands are unsupported")
                 left = ("binary", "*" if token == "implicit" else token, left, right)
                 script_base, script_sub, script_sup = left, None, None
             return left
@@ -411,6 +419,27 @@ def _check_decoded_characters(text):
             _fail("invalid XML 1.0 code point in decoded-string math/XML profile")
 
 
+class _BoundedTreeBuilder(ET.TreeBuilder):
+    """Apply the same pre-allocation limits during feed and deferred close."""
+
+    def __init__(self):
+        super().__init__()
+        self.depth = 0
+        self.nodes = 0
+
+    def start(self, tag, attrs):
+        if self.nodes >= MAX_NODES or self.depth >= MAX_DEPTH:
+            _fail("XML node/depth limit exceeded")
+        self.nodes += 1
+        self.depth += 1
+        return super().start(tag, attrs)
+
+    def end(self, tag):
+        element = super().end(tag)
+        self.depth -= 1
+        return element
+
+
 def _xml_root(text):
     # Validate and remove at most one leading declaration. The API accepts an
     # already decoded string, so UTF-8/UTF-16 describe the export, not a decoding
@@ -424,22 +453,12 @@ def _xml_root(text):
     # references) remain forbidden. Literal Unicode needs no entity expansion.
     if "<!" in text or "&" in text or "<?" in text:
         _fail("DTDs, entities and additional processing instructions are forbidden")
-    depth = count = 0
-    parser = ET.XMLPullParser(events=("start", "end"))
-    root = None
-    # Drain bounded chunks so deep trees are rejected before fully constructing.
+    # Expat may defer long tags until close. Target callbacks account for every
+    # node in either phase, checking limits before TreeBuilder allocates it.
+    parser = ET.XMLParser(target=_BoundedTreeBuilder())
     for offset in range(0, len(text), 256):
         parser.feed(text[offset:offset + 256])
-        for event, element in parser.read_events():
-            if event == "start":
-                root = root if root is not None else element
-                count += 1
-                depth += 1
-                if count > MAX_NODES or depth > MAX_DEPTH:
-                    _fail("XML node/depth limit exceeded")
-            else:
-                depth -= 1
-    parser.close()
+    root = parser.close()
     if root is None:
         _fail("empty XML")
     return root
@@ -501,8 +520,8 @@ class _XMLMath:
     def mathml(self, element, style=None):
         name = _split_tag(element.tag)[1]
         allowed = {"math": ("display",), "mi": ("mathvariant",), "mstyle": ("mathvariant",),
-                   "mtext": ("mathvariant",),
-                   "mo": ("stretchy",), "annotation": ("encoding",)}.get(name, ())
+                   "mtext": ("mathvariant",), "mn": ("mathvariant",),
+                   "mo": ("stretchy", "mathvariant"), "annotation": ("encoding",)}.get(name, ())
         self.check(element, allowed)
         if "display" in element.attrib and element.attrib["display"] not in ("inline", "block"):
             _fail("unsupported MathML display")
@@ -533,7 +552,11 @@ class _XMLMath:
             if name == "mtext":
                 return [_symbol(value, style or "normal")]
             if name == "mn":
+                if style not in (None, "normal"):
+                    _fail("unsupported numeric mathvariant")
                 return [_number(value)]
+            if style not in (None, "normal"):
+                _fail("unsupported operator mathvariant")
             tokens = _lex(value)
             if len(tokens) != 1 or not isinstance(tokens[0], str) or tokens[0] not in _RELATIONS | {"+", "-", "*", "/", "(", ")", "[", "]", "±", "∓"}:
                 _fail("unsupported MathML operator")
@@ -606,10 +629,19 @@ class _XMLMath:
         for child in children:
             if _split_tag(child.tag)[1] == "r":
                 text, run_style = self._omml_run(child, style)
-                if pending and run_style != pending_style:
-                    flush()
-                pending_style = run_style
-                pending.append(text)
+                # Empty, already-validated runs carry no visible style change.
+                if not text:
+                    continue
+                for piece in re.findall(r"[0-9.]+|[^0-9.]+", text):
+                    # Ordinary ASCII decimal glyphs have the same supported
+                    # numeric semantics in default and normal OMML runs. Only
+                    # these spans may cross that nonempty style transition.
+                    piece_style = None if (run_style in (None, "normal") and
+                                           re.fullmatch(r"[0-9.]+", piece)) else run_style
+                    if pending and piece_style != pending_style:
+                        flush()
+                    pending_style = piece_style
+                    pending.append(piece)
             else:
                 flush()
                 tokens.extend(self.omml(child, style))

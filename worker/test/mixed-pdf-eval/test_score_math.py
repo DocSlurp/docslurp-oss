@@ -53,6 +53,25 @@ class MathScorerTests(unittest.TestCase):
                 self.assertEqual(result['score'], wanted)
                 self.assertFalse(result['acceptanceEvidenceComplete'])
 
+    def test_second_review_style_and_empty_run_regressions(self):
+        for reference, candidate in [
+            ('7', '<math><mstyle mathvariant="bold"><mn>7</mn></mstyle></math>'),
+            ('q^i', 'qᶦ'),
+        ]:
+            with self.subTest(candidate=candidate):
+                result = score_request({"reference": reference, "candidate": candidate})
+                self.assertNotEqual(result['score'], 1)
+                self.assertFalse(result['acceptanceEvidenceComplete'])
+        normal = '<m:rPr><m:nor/></m:rPr>'
+        candidate = (
+            '<m:oMath xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math">'
+            f'<m:r>{normal}<m:t>m</m:t></m:r><m:r><m:t></m:t></m:r>'
+            f'<m:r>{normal}<m:t>ol</m:t></m:r></m:oMath>'
+        )
+        result = score_request({"reference": r'\mathrm{mol}', "candidate": candidate})
+        self.assertEqual(result['score'], 1)
+        self.assertFalse(result['acceptanceEvidenceComplete'])
+
 
 if __name__ == "__main__":
     unittest.main()
