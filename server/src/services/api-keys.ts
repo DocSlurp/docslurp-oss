@@ -461,11 +461,14 @@ export interface ValidatedKey {
   /** Per-key materialization caps; absent or `{}` adds no restriction. */
   materializationPolicy?: Partial<MaterializationPolicy>;
   /**
-   * Set only for a REST-audience OAuth access token (`dscli_`, the DocSlurp
-   * CLI). Such a key is never a first-party app session and never a platform
-   * admin; `scopes` are already mapped from `grantedScopes`.
+   * Set for every OAuth access token: REST-audience (`dscli_`, the DocSlurp
+   * CLI, scopes mapped from `grantedScopes`) and MCP-audience (`dsmcp_`, raw
+   * scopes). Such a key is never a first-party app session and never a
+   * platform admin.
    */
   oauth?: {
+    /** `api`: a REST-audience CLI token; `mcp`: an MCP-audience token, usable only on /v1/mcp. */
+    audience: "api" | "mcp";
     grantId: string;
     clientId: string;
     clientName: string;

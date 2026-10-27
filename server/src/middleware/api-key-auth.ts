@@ -23,6 +23,13 @@ export const apiKeyAuth: MiddlewareHandler = async (c, next) => {
     referer: c.req.header("referer") ?? c.req.header("referrer")
   });
   if (!actor) {
+    // An OAuth access token that no longer validates (expired, revoked) is a
+    // 401 invalid_token (RFC 6750 §3.1), so a client refreshes it instead of
+    // treating it as a permission error.
+    if (/^Bearer\s+ds(cli|mcp)/.test(header)) {
+      c.header("WWW-Authenticate", 'Bearer error="invalid_token", error_description="The access token is invalid, expired or revoked"');
+      return middlewareErrorResponse(c, 401, "unauthorized", "Invalid or expired access token");
+    }
     return middlewareErrorResponse(c, 403, "forbidden", "Invalid API key or rate limit exceeded");
   }
 
