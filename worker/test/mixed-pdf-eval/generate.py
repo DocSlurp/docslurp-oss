@@ -8,16 +8,24 @@ import hashlib
 import io
 import json
 import random
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
 
 import fitz
 from PIL import Image, ImageEnhance, ImageFilter
 
-VERSION = "mixed-pdf-authored@v1"
+VERSION = "mixed-pdf-authored@v2"
 W, H = 612, 792
 BOXES = [(32, 24, 580, 103), (32, 112, 580, 279), (32, 290, 580, 457), (32, 469, 580, 701), (32, 714, 580, 770)]
 DOMAINS = ["laboratory report", "equipment manual", "financial review", "incident analysis", "research note", "procurement memo", "engineering specification", "clinical simulation", "legal exhibit"]
+
+def layout_for(family): return (family//6)%3
+
+def genre_for(family):
+    genres=list(range(9))*2
+    random.Random(4741+family//18).shuffle(genres)
+    return genres[family%18]
 
 def digest(data):
     return hashlib.sha256(data).hexdigest()
@@ -28,7 +36,7 @@ def write_json(path, value):
 
 def author(family, pno):
     rng = random.Random(81017 + family * 101 + pno)
-    domain = DOMAINS[family % len(DOMAINS)]
+    domain = DOMAINS[genre_for(family)]
     unit = rng.choice(["sensor", "valve", "pump", "relay", "filter", "actuator"])
     site = rng.choice(["north", "coastal", "western", "central", "upland", "southern"])
     batch, low, high = rng.randrange(10000, 99999), rng.randrange(10, 35), rng.randrange(65, 95)
@@ -54,9 +62,9 @@ def author(family, pno):
     sections = [title, body, technical, embedded, footer]
     # References saved before any rasterization. Layout source is authoring data, not parsed text.
     boxes = list(BOXES)
-    if family % 3 == 1:
+    if layout_for(family) == 1:
         boxes[1:4] = [(32,112,303,435),(313,112,580,435),(32,447,580,701)]
-    elif family % 3 == 2:
+    elif layout_for(family) == 2:
         boxes[1:4] = [(32,112,580,279),(32,290,580,457),(32,469,580,701)]
         # Same content with a sidebar-sized quoted document; no implied prose in picture area.
         boxes[3] = (32,469,400,701)
@@ -74,7 +82,7 @@ def clean_page(ref, family):
         if i == 3:
             page.draw_rect(rect, color=(.35, .4, .45), fill=(.96, .97, .98), width=1)
         font = "cour" if i == 2 else "helv"
-        size = 13 if i == 0 else 9 if i == 4 or (i == 2 and family % 3 == 1) else 10
+        size = 13 if i == 0 else 9 if i == 4 or (i == 2 and layout_for(family) == 1) else 10
         # Different wrapping profiles, all at readable sizes; fail rather than silently clip labels.
         inner = rect + (7, 7, -7, -7)
         remaining = page.insert_textbox(inner, text, fontsize=size, fontname=font, color=(.08,.1,.12))
@@ -83,7 +91,7 @@ def clean_page(ref, family):
     # Vector graph: a meaningful geometric image, with text labels in the technical region.
     for i in range(9):
         page.draw_line((60+i*45, 775-(i%3)*2), (90+i*45, 770-(i%3)*2), color=(.2,.4,.5))
-    if family % 3 == 2:
+    if layout_for(family) == 2:
         # A deliberately text-free, textured illustration: image bytes must not imply missing prose.
         rng = random.Random(876+family)
         image = Image.new("RGB",(160,120))
@@ -105,6 +113,11 @@ def raster(page, clip=None, dpi=150, hard=False, seed=0):
     image.save(out, format="JPEG", quality=rng.choice([35, 48, 65]))
     return out.getvalue()
 
+def degradation(seed):
+    rng=random.Random(seed)
+    return {"contrast":rng.choice([.42,.6,.8]),"blurRadius":rng.choice([.35,.65,.9]),
+            "skewDegrees":rng.choice([-1.5,-.7,.7,1.5]),"jpegQuality":rng.choice([35,48,65])}
+
 def make_page(output, source, ref, family, pno, hard, cache):
     page = output.new_page(width=W, height=H)
     # Full-page hard scan is a visual transformation with identical semantic gold.
@@ -113,7 +126,8 @@ def make_page(output, source, ref, family, pno, hard, cache):
         key=(pno,"hard")
         if key not in cache: cache[key]=raster(source[0],dpi=dpi,hard=True,seed=family*100+pno)
         page.insert_image(page.rect, stream=cache[key])
-        return {"hard": True, "dpi": dpi, "regionRasterShare": 1, "outline": False, "hiddenLayer": False}
+        return {"hard": True, "dpi": dpi, "regionRasterShare": 1, "rasterSections":list(range(5)),
+                "outline": False, "outlinedSections":[], "hiddenLayer": False,"degradation":degradation(family*100+pno)}
     share = [0, .2, .4, .6, .8, 1][family % 6]
     rng = random.Random(family * 100 + pno + 121)
     selected = set(rng.sample(range(5), round(5*share)))
@@ -127,7 +141,7 @@ def make_page(output, source, ref, family, pno, hard, cache):
         # An occluded text stream is another false-positive source for naive byte math.
         page.insert_text((35, 95), ref["excludedText"][0], fontsize=9)
         page.draw_rect(page.rect, fill=(1,1,1), color=None)
-    outline = pno % 5 == 3
+    outline = pno % 5 == 3 and 1 not in selected
     vectors = None
     if outline:
         svg = source[0].get_svg_image(text_as_path=True)
@@ -142,54 +156,64 @@ def make_page(output, source, ref, family, pno, hard, cache):
             page.insert_image(rect, stream=cache[key])
         else:
             page.show_pdf_page(rect, vectors if vectors is not None and i == 1 else source, 0, clip=rect)
-    if family % 3 == 2:
+    if layout_for(family) == 2:
         rect=fitz.Rect(410,480,580,680)
         page.show_pdf_page(rect,source,0,clip=rect)
     if vectors is not None:
         vectors.close()
-    if pno == 8 and family % 3 == 0:
+    if pno == 8 and layout_for(family) == 0:
         page.set_rotation(90)
-    return {"hard": False, "dpi": 150, "regionRasterShare": len(selected)/5, "outline": outline, "hiddenLayer": hidden}
+    return {"hard": False, "dpi": 150, "regionRasterShare": len(selected)/5, "rasterSections":sorted(selected),
+            "outline": outline,"outlinedSections":[1] if outline else [], "hiddenLayer": hidden,"degradation":None}
 
-def generate(root, families, pilot=False):
+def generate_family(args):
+    root,family,families,pilot=args
+    cases,integrity=[],[]
+    split = "train" if pilot or family < families*.6 else "tune" if family < families*.8 else "heldout"
+    source_id = f"mixed-source-{family:04d}"
+    refs = [author(family, pno) for pno in range(10)]
+    source_path = root / "sources" / f"{source_id}.json"
+    write_json(source_path, {"family": source_id, "split": split, "pages": refs, "generator": VERSION})
+    sources = [clean_page(ref, family) for ref in refs]
+    cache={}
+    hard_order = list(range(10)); random.Random(711+family).shuffle(hard_order)
+    for percent in [0,20,40,60,80,100]:
+        case_id = f"{source_id}-hard-{percent:03d}"
+        path = root / "inputs" / split / f"{case_id}.pdf"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        output = fitz.open()
+        features = [make_page(output, sources[p], refs[p], family, p, p in hard_order[:percent//10],cache) for p in range(10)]
+        output.set_metadata({"title": "Controlled mixed document", "producer": VERSION})
+        output.save(path, garbage=4, deflate=True, no_new_id=True)
+        output.close()
+        label_path = root / "labels" / split / f"{case_id}.json"
+        write_json(label_path, {"family": source_id, "split": split, "pages": refs,
+            "labels": [{"name": "visible_page_content", "expected": [r["expectedMarkdown"] for r in refs]}]})
+        cases.append({"id": case_id, "family": source_id, "split": split, "pdf": str(path.relative_to(root)),
+            "labels": str(label_path.relative_to(root)), "labelHash":digest(label_path.read_bytes()), "sourceLayoutHash":digest(source_path.read_bytes()), "layout":layout_for(family), "genre":genre_for(family), "sha256": digest(path.read_bytes()),
+            "hardPercent": percent, "baseRegionRasterShare": [0,.2,.4,.6,.8,1][family%6], "pages": features})
+        integrity.append({"id": case_id, "source": {"path": str(path.relative_to(root)), "sha256": digest(path.read_bytes())},
+            "labels": {"path": str(label_path.relative_to(root)), "sha256": digest(label_path.read_bytes())},
+            "provenance": {"kind": "authored", "author": "DocSlurp mixed PDF generator", "createdAt": datetime.now(timezone.utc).isoformat(),
+                "description": "Synthetic authoring references saved before layout and rasterization; visible sections include discussed document screenshots."}})
+    for source in sources:
+        source.close()
+    return cases,integrity
+
+def generate(root, families, pilot=False, workers=3):
     root.mkdir(parents=True, exist_ok=True)
     if (root / "manifest.json").exists():
         raise RuntimeError("refuse-to-overwrite-frozen-dataset")
     cases, integrity = [], []
     split_counts = {"train": 0, "tune": 0, "heldout": 0}
-    for family in range(families):
-        split = "train" if pilot or family < families*.6 else "tune" if family < families*.8 else "heldout"
-        source_id = f"mixed-source-{family:04d}"
-        refs = [author(family, pno) for pno in range(10)]
-        source_path = root / "sources" / f"{source_id}.json"
-        write_json(source_path, {"family": source_id, "split": split, "pages": refs, "generator": VERSION})
-        sources = [clean_page(ref, family) for ref in refs]
-        cache={}
-        hard_order = list(range(10)); random.Random(711+family).shuffle(hard_order)
-        for percent in [0,20,40,60,80,100]:
-            case_id = f"{source_id}-hard-{percent:03d}"
-            path = root / "inputs" / split / f"{case_id}.pdf"
-            path.parent.mkdir(parents=True, exist_ok=True)
-            output = fitz.open()
-            features = [make_page(output, sources[p], refs[p], family, p, p in hard_order[:percent//10],cache) for p in range(10)]
-            output.set_metadata({"title": "Controlled mixed document", "producer": VERSION})
-            output.save(path, garbage=4, deflate=True)
-            output.close()
-            label_path = root / "labels" / split / f"{case_id}.json"
-            write_json(label_path, {"family": source_id, "split": split, "pages": refs,
-                "labels": [{"name": "visible_page_content", "expected": [r["expectedMarkdown"] for r in refs]}]})
-            cases.append({"id": case_id, "family": source_id, "split": split, "pdf": str(path.relative_to(root)),
-                "labels": str(label_path.relative_to(root)), "sha256": digest(path.read_bytes()),
-                "hardPercent": percent, "baseRegionRasterShare": [0,.2,.4,.6,.8,1][family%6], "pages": features})
-            integrity.append({"id": case_id, "source": {"path": str(path.relative_to(root)), "sha256": digest(path.read_bytes())},
-                "labels": {"path": str(label_path.relative_to(root)), "sha256": digest(label_path.read_bytes())},
-                "provenance": {"kind": "authored", "author": "DocSlurp mixed PDF generator", "createdAt": datetime.now(timezone.utc).isoformat(),
-                    "description": "Synthetic authoring references saved before layout and rasterization; visible sections include discussed document screenshots."}})
-            split_counts[split] += 1
-        for source in sources:
-            source.close()
-        if family % 5 == 0:
-            print(json.dumps({"generatedFamilies": family+1, "documents": len(cases)}), flush=True)
+    with ProcessPoolExecutor(max_workers=workers) as pool:
+        futures=[pool.submit(generate_family,(root,f,families,pilot)) for f in range(families)]
+        for count,future in enumerate(as_completed(futures),1):
+            family_cases,family_integrity=future.result()
+            cases.extend(family_cases);integrity.extend(family_integrity)
+            for case in family_cases: split_counts[case['split']]+=1
+            print(json.dumps({"generatedFamilies":count,"documents":len(cases)}),flush=True)
+    cases.sort(key=lambda c:c['id']);integrity.sort(key=lambda c:c['id'])
     manifest = {"schema": VERSION, "generatorHash": digest(Path(__file__).read_bytes()), "families": families,
                 "splitCounts": split_counts, "pageCount": len(cases)*10, "cases": cases,
                 "limitations": ["Synthetic authored content, not real-world distribution", "No handwriting or multilingual coverage", "Family-disjoint content; shared layout templates across splits"]}
@@ -202,5 +226,6 @@ if __name__ == "__main__":
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--families", type=int, default=90)
     parser.add_argument("--pilot", action="store_true")
+    parser.add_argument("--workers",type=int,default=3)
     args = parser.parse_args()
-    generate(args.out, args.families, args.pilot)
+    generate(args.out, args.families, args.pilot,args.workers)

@@ -3,10 +3,10 @@ import { createRequire } from 'node:module';
 import { readFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-const require = createRequire(new URL('../../../../server/package.json', import.meta.url));
+const require = createRequire(new URL('../../../server/package.json', import.meta.url));
 const { createScorer } = await import(pathToFileURL(require.resolve('@mastra/core/evals')).href);
 export const mixedPageScorer = createScorer({
-  id: 'mixed-page-preservation-v1',
+  id: 'mixed-page-preservation-v2',
   description: 'Visible content, numeric table rows, missing inset sections and hidden-text leakage; structural Markdown scores retained separately.',
 }).preprocess(({ run }) => {
   const child = spawnSync(process.env.MIXED_PDF_PYTHON, [fileURLToPath(new URL('./score_one.py', import.meta.url)), '--scorers', process.env.MIXED_PDF_SCORERS], {
