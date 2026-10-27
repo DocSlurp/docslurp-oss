@@ -32,6 +32,7 @@ import {
 } from "@docslurp/shared";
 
 import { env } from "../config.js";
+import { isReservedCanonicalId } from "../lib/canonical-id.js";
 import { sanitizeUploadFilename } from "../lib/filenames.js";
 import { deleteUploadedObject, uploadFile, uploadFileStream } from "../lib/storage.js";
 import { isSupportedUploadMimeType, resolveUploadMimeType } from "../lib/upload-policy.js";
@@ -477,6 +478,10 @@ async function storeItem(
   written: string[],
 ): Promise<StoredIntakeFile> {
   if ("rejected" in item.content) throw item.content.rejected;
+  // Server-minted identities only (lib/canonical-id.ts); a source adapter that passes one through is refused per file.
+  if (item.canonicalId && isReservedCanonicalId(item.canonicalId)) {
+    throw new WorkspaceIntakeError(`${sanitizeUploadFilename(item.filename)}: canonicalId must not start with docslurp: (reserved)`, 400);
+  }
   const admitted = admitIntakeFile(
     { filename: item.filename, mimeType: item.mimeType, sizeBytes: declaredSize(item) },
     request.kind,

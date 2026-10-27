@@ -17,6 +17,7 @@ import {
   normalizeUploadPath,
   sourcePathsForFiles,
   InvalidCanonicalIdError,
+  isReservedCanonicalId,
   MAX_CANONICAL_ID_LENGTH,
 } from "../lib/canonical-id.js";
 import { actorHasAnyApiKeyScope, apiKeyCanUseWorkspace, getRequestActor, lookupActorWorkspace, requireActorWorkspace, type RequestActor } from "../lib/request-actor.js";
@@ -51,11 +52,13 @@ import { apiErrorResponse, apiStatusError } from "../lib/api-error.js";
 import { findDefaultWorkspace, getWorkspace } from "../services/workspaces.js";
 import { workspaceInputNotFoundError } from "../services/default-workspace.js";
 import { estimateUpload } from "../services/work-estimates.js";
+import { ExtractError } from "../services/extracts.js";
 import { billingState } from "../services/config-change.js";
 
 type Uploadable = File | string | Array<File | string> | undefined;
 
-export const canonicalIdSchema = z.string().trim().min(1).max(MAX_CANONICAL_ID_LENGTH);
+export const canonicalIdSchema = z.string().trim().min(1).max(MAX_CANONICAL_ID_LENGTH)
+  .refine((value) => !isReservedCanonicalId(value), "canonicalId must not start with docslurp: (reserved)");
 
 /** The public `workspace` field: a workspace UUID, slug, former slug or name; created when no workspace matches. */
 export const workspaceInputSchema = z.string().max(WORKSPACE_INPUT_MAX_LENGTH);
@@ -188,6 +191,8 @@ export function workspaceIntakeErrorResponse(
   if (error instanceof WorkspaceAccessError) {
     return apiStatusError(c, error.status, error.message, { code: error.code, details: error.details });
   }
+  // A direct extract session confirmed after its extract expired (run-creation.ts).
+  if (error instanceof ExtractError) return apiErrorResponse(c, error.status, error.code, error.message);
   if (error instanceof UnreadableSourceError) {
     return apiStatusError(c, error.statusCode, error.message, { code: error.code });
   }

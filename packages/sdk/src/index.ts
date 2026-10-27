@@ -265,7 +265,8 @@ export type UploadFileInput = {
   /**
    * Logical identity of this source, e.g. a URL or site path like "/products".
    * When a newer upload with the same canonicalId finishes processing in the
-   * workspace, older versions drop out of search.
+   * workspace, older versions drop out of search. Must not start with
+   * `docslurp:` (reserved; refused with a RangeError and by the API).
    */
   canonicalId?: string;
   /**
@@ -277,6 +278,25 @@ export type UploadFileInput = {
 };
 
 /** Structural Node ReadStream/async iterable support, without Node runtime imports. */
+/** `docslurp:` canonical IDs are minted by the server; the API refuses them from callers (400). */
+function assertClientCanonicalIds(ids: Array<string | null | undefined>): void {
+  for (const id of ids) {
+    if (typeof id === "string" && /^docslurp:/i.test(id.trim())) throw new RangeError("canonicalId must not start with docslurp: (reserved for DocSlurp)");
+  }
+}
+
+function canonicalIdsOf(input: unknown, options: { canonicalId?: string } | undefined): Array<string | undefined> {
+  const ids: Array<string | undefined> = [options?.canonicalId];
+  if (input && typeof input === "object") {
+    const value = input as { canonicalId?: string; files?: Array<{ canonicalId?: string }>; urls?: Array<string | { canonicalId?: string }> };
+    ids.push(value.canonicalId);
+    if (Array.isArray(value.files)) ids.push(...value.files.map((file) => file?.canonicalId));
+    if (Array.isArray(value.urls)) ids.push(...value.urls.map((url) => (typeof url === "string" ? undefined : url?.canonicalId)));
+    if (Array.isArray(input)) ids.push(...(input as Array<{ canonicalId?: string }>).map((file) => file?.canonicalId));
+  }
+  return ids;
+}
+
 /** Marks the options of an extract() call so the shared upload transports target /v1/extracts. */
 const EXTRACT_MODE: unique symbol = Symbol("docslurp.extract");
 
@@ -1219,6 +1239,7 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
   }
 
   function uploadUrls(input: UploadUrlsInput, options?: RequestOptions): Promise<UploadResponse> {
+    assertClientCanonicalIds(canonicalIdsOf(input, undefined));
     const { idempotencyKey, urls, orgId, templateKey } = input;
     const body = { urls, orgId, templateKey, tags: input.tags, ...intakeTarget(input), ...extractFields(input) };
     return request(`${intakeBase(input)}/url`, {
@@ -1245,6 +1266,7 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
   function upload(input: UploadInput, options?: UploadOptions): Promise<UploadResponse>;
   function upload(input: Blob | UploadFileInput | UploadByteStream, options?: UploadOptions): Promise<UploadResponse>;
   async function upload(input: UploadUrlsInput | UploadInput | Blob | UploadFileInput | UploadByteStream | Array<Blob | File | UploadFileInput>, options: UploadOptions = {}): Promise<UploadResponse> {
+    assertClientCanonicalIds(canonicalIdsOf(input, options));
     if ("urls" in input) return uploadUrls({ ...input, ...options }, options);
     if (Array.isArray(input)) input = { files: input };
     const metadata = "files" in input ? { ...input, ...options } : options;
@@ -1736,6 +1758,7 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
       return request(`/v1/workspaces/${encodeURIComponent(id)}`, {}, options, true);
     },
     createUploadSession(input: UploadSessionInput, options?: RequestOptions): Promise<UploadSession> {
+      assertClientCanonicalIds(canonicalIdsOf(input, undefined));
       return request("/v1/uploads/direct/sessions", jsonRequest("POST", { ...input, ...intakeTarget(input) }), options);
     },
     getUploadSession(sessionId: string, options?: RequestOptions): Promise<UploadSession> {

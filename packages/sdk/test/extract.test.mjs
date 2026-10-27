@@ -63,3 +63,12 @@ test("reads an extract, surfaces 410 for expired ones and returns the signed dow
   assert.equal(download.auth, "Bearer key");
   assert.ok(!api.calls.some((call) => call.url.startsWith("https://storage.invalid/zip")));
 });
+
+test("refuses reserved docslurp: canonical IDs before any request", async () => {
+  const api = fakeApi();
+  const client = createDocSlurpClient({ apiUrl: "https://api.invalid", apiKey: "key", fetch: api.fetch });
+  await assert.rejects(client.upload([{ data: new Blob(["x"]), filename: "a.txt", canonicalId: "docslurp:extract:ext_1:doc" }]), RangeError);
+  await assert.rejects(client.extract({ urls: [{ url: "https://example.com/a.pdf", canonicalId: "DOCSLURP:document:x" }] }), RangeError);
+  await assert.rejects(client.upload(new Blob(["x"]), { canonicalId: "docslurp:document:y" }), RangeError);
+  assert.equal(api.calls.length, 0);
+});
