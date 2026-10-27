@@ -25,22 +25,67 @@ export const CAPABILITY_HEADER = "X-DocSlurp-Capability";
 export const CAPABILITY_MAX_TTL_SECONDS = 3600;
 
 let cachedKey: Buffer | null = null;
+const derivedKeys = new Map<string, Buffer>();
+
+function rootSecret(): Buffer {
+  if (process.env.FILE_TOKEN_SECRET?.trim()) return getRequiredEncryptionKey("FILE_TOKEN_SECRET");
+  if (process.env.SECRETS_ENCRYPTION_KEY?.trim()) return getRequiredEncryptionKey("SECRETS_ENCRYPTION_KEY");
+  if (process.env.BETTER_AUTH_SECRET?.trim()) return Buffer.from(process.env.BETTER_AUTH_SECRET.trim(), "utf8");
+  throw new Error("Search capabilities need FILE_TOKEN_SECRET, SECRETS_ENCRYPTION_KEY or BETTER_AUTH_SECRET");
+}
 
 /** Same root-secret chain as file tokens, domain-separated by HKDF info. */
 function capabilityKey(): Buffer {
   if (cachedKey) return cachedKey;
-  let root: Buffer;
-  if (process.env.FILE_TOKEN_SECRET?.trim()) root = getRequiredEncryptionKey("FILE_TOKEN_SECRET");
-  else if (process.env.SECRETS_ENCRYPTION_KEY?.trim()) root = getRequiredEncryptionKey("SECRETS_ENCRYPTION_KEY");
-  else if (process.env.BETTER_AUTH_SECRET?.trim()) root = Buffer.from(process.env.BETTER_AUTH_SECRET.trim(), "utf8");
-  else throw new Error("Search capabilities need FILE_TOKEN_SECRET, SECRETS_ENCRYPTION_KEY or BETTER_AUTH_SECRET");
-  cachedKey = Buffer.from(hkdfSync("sha256", root, "docslurp-search-capability", "search-capability", 32));
+  cachedKey = Buffer.from(hkdfSync("sha256", rootSecret(), "docslurp-search-capability", "search-capability", 32));
   return cachedKey;
+}
+
+/**
+ * A sealed (AES-256-GCM) token family on the capability root secret, separated
+ * by its own HKDF info and AAD so one family's tokens never open as another's.
+ */
+export function sealedTokenFamily(label: string) {
+  const aad = Buffer.from(`docslurp:${label}`);
+  const key = () => {
+    let derived = derivedKeys.get(label);
+    if (!derived) {
+      derived = Buffer.from(hkdfSync("sha256", rootSecret(), "docslurp-sealed-token", label, 32));
+      derivedKeys.set(label, derived);
+    }
+    return derived;
+  };
+  return {
+    seal(claims: Record<string, unknown>): string {
+      const iv = randomBytes(IV_BYTES);
+      const cipher = createCipheriv("aes-256-gcm", key(), iv);
+      cipher.setAAD(aad);
+      const ciphertext = Buffer.concat([cipher.update(Buffer.from(JSON.stringify(claims), "utf8")), cipher.final()]);
+      return Buffer.concat([iv, ciphertext, cipher.getAuthTag()]).toString("base64url");
+    },
+    /** The claims of a genuine token, or null (tampered, wrong family, malformed). Never throws. */
+    open(token: string): Record<string, unknown> | null {
+      if (!token || token.length > CAPABILITY_MAX_TOKEN_CHARS || !/^[A-Za-z0-9_-]+$/.test(token)) return null;
+      const raw = Buffer.from(token, "base64url");
+      if (raw.length <= IV_BYTES + TAG_BYTES) return null;
+      try {
+        const decipher = createDecipheriv("aes-256-gcm", key(), raw.subarray(0, IV_BYTES));
+        decipher.setAAD(aad);
+        decipher.setAuthTag(raw.subarray(raw.length - TAG_BYTES));
+        const plain = Buffer.concat([decipher.update(raw.subarray(IV_BYTES, raw.length - TAG_BYTES)), decipher.final()]);
+        const value = JSON.parse(plain.toString("utf8")) as unknown;
+        return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
+      } catch {
+        return null;
+      }
+    },
+  };
 }
 
 /** Test seam: forget the derived key after changing env. */
 export function resetCapabilityKeyForTests(): void {
   cachedKey = null;
+  derivedKeys.clear();
 }
 
 export function sealCapabilityToken(claims: CapabilityClaims): string {
