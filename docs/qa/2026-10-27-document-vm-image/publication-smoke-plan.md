@@ -1,4 +1,13 @@
-# Proposed publication and one-VM smoke — not authorized or executed
+# Publication and one-VM smoke — authorized, operationally blocked
+
+Current status: the user authorized publication of the exact reviewed image and
+one synthetic Modal VM with 60-second expiry, no retries and a **$0.05 TOTAL cap**,
+conditional on bounded import/startup/storage costs. The parent's ORAS copy was
+denied by GHCR for insufficient token scopes; no image publication succeeded.
+No VM or paid workload was started. Parent requested GitHub OAuth `write:packages`
+device consent; no result of that consent is recorded here. Independently of
+registry access, the aggregate Modal cost ceiling is unproven, so VM admission
+remains blocked. See [the operational attempt and cost blocker](operational-attempt.md).
 
 Supporting draft: https://github.com/DocSlurp/docslurp-oss/pull/202. Image implementation
 commit: `543ce1a333c7828662171ae25fc060b14be29aaf`. The document-only follow-up does not
@@ -43,7 +52,7 @@ raw env contents or credential-bearing API output are retained.
 
 ## One bounded CPU VM smoke proposal
 
-After separate explicit approval for publication and smoke, use exactly one
+The authorized scope, once all admission blockers are resolved, is exactly one
 dedicated `runtime:"vm"` sandbox for one synthetic layout request: CPU 2 hard cap,
 memory 1024 MiB hard cap, no GPU, provider-enforced `timeoutMs:60000`, blocked
 network, empty secrets/env/volumes/bucket mounts, no OIDC identity. Use only
@@ -63,7 +72,9 @@ path in the campaign executor. Record confirmed termination/expiry using a
 separate read-only reconciliation after the deadline; a missing controller is
 not a cleanup receipt. No scheduler, warm replica, persistent volume, reusable
 VM, service deployment or recreate-capable application is part of this smoke.
-If provider expiry cannot be verified, do not create the VM.
+If provider expiry cannot be verified, do not create the VM. This guest-lifetime
+backstop does not prove a limit on lazy image import, provisioning/startup, image
+cache retention, storage or network charges; it cannot establish the total cap.
 
 ## Forecast and cap
 
@@ -71,10 +82,12 @@ Official [Modal Sandbox pricing](https://modal.com/pricing), checked 2026-10-27:
 CPU $0.00003942/core-second + memory $0.00000667/GiB-second. At 2 cores + 1 GiB,
 burn is $0.00008551/second or **$0.307836/hour**. A 30–60 second attempt is
 **$0.002565–$0.005131 compute**, up to $0.00898 at a 1.75× regional factor.
-Proposed future aggregate cap: **$0.05, one VM, no retries**, contingent on
-preflight verifying image-import/startup charges fit that cap. This is a proposal,
-not spending authorization. If unverified import charges cannot be bounded, stop
-before creation and return the concrete unknown.
+Authorized aggregate cap: **$0.05 TOTAL, one VM, no retries**, conditional on
+all costs fitting that ceiling. Compute alone at 2 CPU + 1 GiB for 60 seconds is
+**$0.0051306**. The parent cost review could not bound image import, provisioning/
+startup or retained-cache storage; environment budgets exclude storage/network.
+The total-cost admission gate therefore fails. Stop before any `Image.build` or
+sandbox `create`; neither may be used as a workaround or speculative import probe.
 
 Unchanged allocation exposure, before regional factors: extra 1 hour $0.307836;
 extra 5 hours $1.53918; 24 hours $7.388064. These are overrun scenarios, not a plan
@@ -96,4 +109,6 @@ to keep a VM alive; the enforced deadline must prevent them.
   costs are not metered here. Account-wide charges were not queried or attributed
   to this task.
 
-Do not push an image or create the smoke VM until explicit approval arrives.
+This documentation update performs no publication or VM action. OAuth package
+consent and a proven aggregate cost bound remain outstanding. Successful registry
+authentication would not clear the separate VM cost-admission blocker.

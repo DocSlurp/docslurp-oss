@@ -1,0 +1,3 @@
+Copying 8f7032182815 application/vnd.oci.image.config.v1+json
+
+Error from destination registry for "ghcr.io/docslurp/worker-document-vm:543ce1a333c7828662171ae25fc060b14be29aaf": denied: permission_denied: The token provided does not match expected scopes.
