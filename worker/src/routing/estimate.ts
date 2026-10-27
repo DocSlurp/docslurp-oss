@@ -1,7 +1,4 @@
 import {
-  CREDIT_RATE_CARD,
-  creditsToDollars,
-  slotCreditsPerHour,
   slotInfraUsdPerHour,
   type Assignment,
   type AssignmentRole,
@@ -27,16 +24,15 @@ import {
 //   Decision models bill input tokens only: thumbnail tiles (~1 token per 1000 px,
 //   i.e. ~1000 tok/MP) + facts text + per-call question overhead amortised over pages.
 //
-// MARGIN MODEL (billing.ts)
-//   DocSlurp bills credits at list rate (CREDIT_RATE_CARD): AI provider cost is billed
-//   at cost * (1 + aiMarkupPercent/100); CPU/memory/GPU compute is billed per second
-//   at the card rate (a worker slot = slotCreditsPerHour). So for every priced unit we
-//   know both the *cost* we incur and the *billed* amount (`billedUsd`). The margin of
-//   a chunk is 1 - totalCost / totalBilled; budget.marginFloor is the minimum allowed.
-//   Hosted AI is only marked up 20% (16.7% margin), so a high floor pushes the
-//   guard toward local compute; the router's own decision-model calls count as AI
-//   spend at the same markup. Storage/egress and the per-document baseline pipeline
-//   fee are outside the routing decision and excluded.
+// MARGIN MODEL
+//   Provider AI and local compute receipts are cost-only (bill 0 credits).
+//   Customers pay PRICE_CARD page/minute units, not resource list rates.
+//   This estimator lacks the run-level mode/tier and page-charge deduplication
+//   context needed to allocate that revenue exactly once across assignments,
+//   cascades and router calls. Keep billedUsd at zero as a conservative bound:
+//   active routing refuses positive margin floors until actual unit revenue is wired in.
+//   Do not substitute hypothetical CPU/GPU list rates or AI markup to pass the
+//   guard. This is a routing cost bound, not a customer receipt or fleet margin.
 // ---------------------------------------------------------------------------
 
 export const ESTIMATE_ASSUMPTIONS = {
@@ -84,11 +80,7 @@ export const ESTIMATE_ASSUMPTIONS = {
   questionTokens: 18,
 } as const;
 
-const AI_MULTIPLIER = 1 + CREDIT_RATE_CARD.aiMarkupPercent / 100;
 const slotCostUsdPerSec = () => slotInfraUsdPerHour() / 3600;
-const slotBilledUsdPerSec = () => creditsToDollars(slotCreditsPerHour()) / 3600;
-const gpuBilledUsdPerSec = () =>
-  creditsToDollars(CREDIT_RATE_CARD.gpuStandardHour) / 3600;
 
 export interface CostBreakdown {
   costUsd: number;
@@ -137,7 +129,7 @@ export function estimateTargetCost(
 ): CostBreakdown {
   const A = ESTIMATE_ASSUMPTIONS;
   let costUsd = 0;
-  let billedUsd = 0;
+  const billedUsd = 0;
   let priced = true;
   const pr = target.pricing;
   let seconds = 0;
@@ -150,7 +142,6 @@ export function estimateTargetCost(
     const outTok = pageOutputTokens(role, page);
     if (pr.inputUsdPerMTok === undefined || pr.outputUsdPerMTok === undefined) priced = false;
     costUsd = (inTok * (pr.inputUsdPerMTok ?? 0) + outTok * (pr.outputUsdPerMTok ?? 0)) / 1e6;
-    billedUsd = costUsd * AI_MULTIPLIER;
   } else {
     const ppm = pr.pagesPerMinuteObserved;
     seconds =
@@ -169,10 +160,6 @@ export function estimateTargetCost(
       priced = target.kind === "native" || target.kind === "local-ocr" || target.kind === "local-labeler";
       costUsd = seconds * slotCostUsdPerSec();
     }
-    billedUsd =
-      target.kind === "private-vlm"
-        ? seconds * gpuBilledUsdPerSec()
-        : seconds * slotBilledUsdPerSec();
   }
 
   const measured = target.latency.n > 0;
@@ -183,7 +170,6 @@ export function estimateTargetCost(
   const corr = corrections?.[target.id];
   if (corr?.cost) {
     costUsd *= corr.cost;
-    billedUsd = Math.max(billedUsd, 0); // billing is list-rate; unaffected by cost error
   }
   if (corr?.latency) {
     p50 *= corr.latency;
@@ -230,10 +216,11 @@ export function estimateRouterCost(input: RouterCostInput): {
     pages * (perPage * stateRepeats + input.questionsPerPage * A.questionTokens) + calls * 60,
   );
   const costUsd = (inputTokens * input.model.pricing.inputUsdPerMTok) / 1e6;
-  return { inputTokens, calls, costUsd, billedUsd: costUsd * AI_MULTIPLIER };
+  return { inputTokens, calls, costUsd, billedUsd: 0 };
 }
 
-export const aiBilledUsd = (costUsd: number): number => costUsd * AI_MULTIPLIER;
+/** AI receipts are cost-only; page-unit revenue is not allocated here. */
+export const aiBilledUsd = (_costUsd: number): number => 0;
 
 // ---- Chunk estimate -------------------------------------------------------
 
