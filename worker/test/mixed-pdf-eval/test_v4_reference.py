@@ -38,6 +38,21 @@ class V4ReferenceTests(unittest.TestCase):
         self.assertEqual(ref['expectedMarkdown'][row['start']:row['end']],formula)
         self.assertEqual(row['start'],ref['expectedMarkdown'].rindex(formula))
 
+    def test_sealed_fingerprints_round_trip_full_reference_validation(self):
+        from contract import validate_labels
+        from seal_v4 import reference_fingerprints
+        refs=[dict(page_reference(self.page()),pageId=f'invented-{i}') for i in range(10)]
+        fingerprints=reference_fingerprints(refs)
+        case=dict(family='invented',split='train',pageIds=[p['pageId'] for p in refs],**fingerprints)
+        labels=dict(family='invented',split='train',pages=refs)
+        validate_labels(labels,case,10)
+        changed=copy.deepcopy(refs);changed[0]['formulaRegions']=[dict(blockId='invented',bboxNormalized=[0,0,.1,.1])]
+        altered=reference_fingerprints(changed)
+        self.assertEqual(altered['sourceContentHash'],fingerprints['sourceContentHash'])
+        self.assertNotEqual(altered['pageReferenceHashes'],fingerprints['pageReferenceHashes'])
+        with self.assertRaisesRegex(RuntimeError,'label-source-reference-mismatch'):
+            validate_labels(dict(labels,pages=changed),case,10)
+
     def test_gold_disagreement_fails_closed(self):
         for field, value in [('sections', ['Other']), ('readingOrder', []),
                              ('expectedMarkdown', 'Extra'),

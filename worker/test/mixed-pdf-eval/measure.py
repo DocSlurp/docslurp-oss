@@ -378,6 +378,7 @@ def measure_case(args):
     # Capture real per-document Poppler work too, including its startup cost.
     listing,list_seconds=invoke(["pdfimages","-list",str(source)])
     native,native_seconds=invoke(["pdftotext","-layout",str(source),"-"])
+    native_layout_seconds=native_seconds
     native_pages=native.decode().split("\f")
     if len(native_pages)==len(doc)+1 and not native_pages[-1].strip(): native_pages.pop()
     if len(native_pages)!=len(doc): raise RuntimeError("poppler-page-alignment-mismatch")
@@ -431,7 +432,7 @@ def measure_case(args):
             **{k:case[k] for k in ['classId','layout','producerPath'] if k in case},
             "measureHash":MEASURE_HASH,"caseIdentity":case_identity,
             "baseRegionRasterShare":case["baseRegionRasterShare"],"sourceHash":case["sha256"],
-            "pdfBytes":source.stat().st_size,"nativeSeconds":native_seconds,"nativeBboxSeconds":native_bbox_seconds,"imageListSeconds":list_seconds,
+            "pdfBytes":source.stat().st_size,"nativeSeconds":native_seconds,"nativeLayoutSeconds":native_layout_seconds,"nativeBboxSeconds":native_bbox_seconds,"imageListSeconds":list_seconds,
             "pdfimages":listing.decode(),"nativeBboxXml":native_bbox.decode(),"nativeBboxHash":sha(native_bbox),"splits":splits,"pages":outputs}
     destination.write_text(json.dumps(result))
     return {"id":case["id"],"pages":len(outputs)}

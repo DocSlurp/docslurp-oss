@@ -100,6 +100,14 @@ def validate_inventory(manifest, spec):
     return counts
 
 
+def reference_fingerprints(refs):
+    """Bind full per-case references separately from semantic source ancestry."""
+    complete=[{k:v for k,v in page.items() if k!='pageId'} for page in refs]
+    return dict(sourceContentHash=identity_hash([page['expectedMarkdown'] for page in refs]),
+                pageReferenceHashes=[identity_hash(page) for page in complete],
+                pageContentHashes=[page_content_hash(page) for page in complete])
+
+
 def seal(root, out, approval_path, evidence_index=None):
     if out.exists():
         raise FileExistsError('evaluation output must be new')
@@ -151,17 +159,14 @@ def seal(root, out, approval_path, evidence_index=None):
         family = f"mixed-source-{case['familyId']:04d}"
         result = dict(schema='mixed-pdf-authored@v2', family=family, split=case['split'], pages=refs,
                       labels=[dict(name='visible_page_content', expected=[p['expectedMarkdown'] for p in refs])])
-        # Display geometry varies by derivative; semantic ancestry does not.
-        # Full per-case reference hashes still bind the transformed regions.
-        bare = [{k: v for k, v in p.items() if k not in ['pageId','formulaRegions']} for p in refs]
-        content_hashes = [page_content_hash(p) for p in bare]
+        fingerprints=reference_fingerprints(refs)
+        content_hashes=fingerprints['pageContentHashes']
         if case.get('pageContentHashes') is not None and case['pageContentHashes'] != content_hashes:
             raise ValueError('predeclared-page-content-mismatch')
         row = dict(id=case['id'], family=family, split=case['split'], pdf=case['pdf'],
                    labels=f"labels/{case['split']}/{case['id']}.json", sha256=case['sha256'],
-                   sourceLayoutHash=case['sourceLayoutHash'], sourceContentHash=identity_hash([p['expectedMarkdown'] for p in refs]),
-                   pageIds=[p['pageId'] for p in refs], pageReferenceHashes=[identity_hash(p) for p in bare],
-                   pageContentHashes=content_hashes, hardPercent=case['hardPercent'],
+                   sourceLayoutHash=case['sourceLayoutHash'], **fingerprints,
+                   pageIds=[p['pageId'] for p in refs], hardPercent=case['hardPercent'],
                    pages=[dict(pageId=p['pageId']) for p in refs], authoringHash=case['authoringHash'],
                    worldHash=case['worldHash'], layout=case['layoutId'], classId=case['classId'],
                    baseRegionRasterShare=case['sectionRasterShare'], producerPath=case['producerPath'])

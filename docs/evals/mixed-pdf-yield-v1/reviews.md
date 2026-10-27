@@ -451,3 +451,34 @@ change therefore cannot reuse stale parsed word boxes under fresh provenance.
 The cache regression confirms re-extraction after changing that identity; all
 58 evaluator tests still pass. This is conservative invalidation, not a claim of
 improved cache efficiency.
+
+### Council round 9: complete hashes and matching split workloads
+
+Both reviewers found the same two regressions in `2300c414`. The sealer excluded
+formulaRegions from hashes that the consumer validates against the full reference;
+new views therefore failed validation. The split report also compared layout-only
+chunk extraction with original native work that now included spatial capture.
+No affected results were accepted.
+
+A shared reference_fingerprints helper now keeps these contracts separate:
+pageReferenceHashes include every field except the separately checked pageId;
+semantic source ancestry uses the ordered expected Markdown. A ten-page invented
+adapter/sealer/validator round trip passes, and changing only a region changes the
+complete hash while retaining semantic ancestry and fails the old case hash.
+
+Measurements retain nativeLayoutSeconds separately from total nativeSeconds and
+nativeBboxSeconds. Split reports compare layout-only work, identify that basis,
+and show spatial capture and splitting/accounting overhead separately. Old runs
+without the component refuse this comparison instead of receiving a new label.
+The regression deliberately uses a split slower than original layout but faster
+than original-plus-spatial work. All 60 evaluator tests pass. Fresh independent
+re-review remains required; formula acceptance is still closed.
+
+Attempt 6's first overlap draft failed on two inferred generic entities. Automatic
+review initially rejected a wording-only revision. A bounded re-review with the
+skill's explicit failed-spec revision rule and exact diff allowed a separate
+revision using empirical range/calibration parameter. All six unchanged checks
+passed; failed drafts/checks, checker/denylist, protected P bytes and numeric
+constraints remain unchanged. A fresh Sol Builder received a ten-file vetted
+spec/mechanism bundle, excluding prior E writing and producer finalization. P
+remains coordinator-owned. No expanded corpus acceptance is implied.

@@ -95,11 +95,16 @@ def bootstrap(candidate,baseline):
     return {"serviceWorkSaving95CI":ci(draws),'qualityDifference95CI':ci(quality),'acceptanceDifference95CI':ci(acceptance),"resamplingUnit":"source-family","draws":1000}
 
 def split_report(cases):
+    if any('nativeLayoutSeconds' not in case for case in cases):
+        raise RuntimeError('missing-layout-only-timing-use-new-run')
     result={}
     for size in ["1","4"]:
         original=sum(c["pdfBytes"] for c in cases);split=sum(c["splits"][size]["bytes"] for c in cases)
         result[size]={"storageMultiplier":split/max(1,original),"splitSeconds":sum(c["splits"][size]["splitSeconds"] for c in cases),
-            "extractSeconds":sum(c["splits"][size]["extractSeconds"] for c in cases),"originalExtractSeconds":sum(c["nativeSeconds"] for c in cases),
+            "extractSeconds":sum(c["splits"][size]["extractSeconds"] for c in cases),"originalExtractSeconds":sum(c["nativeLayoutSeconds"] for c in cases),
+            "originalSpatialCaptureSeconds":sum(c["nativeBboxSeconds"] for c in cases),
+            "accountingSeconds":sum(c["splits"][size]["accountingSeconds"] for c in cases),
+            "timingBasis":"pdftotext-layout-only",
             "changedNativeTokens":sum(not c["splits"][size]["nativeTokensEqual"] for c in cases),"documents":len(cases)}
     return result
 
