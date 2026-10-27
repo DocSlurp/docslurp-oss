@@ -1601,8 +1601,8 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
      * Streamed grounded answer, as a streaming companion to chat(). Yields a
      * retrieval `status`, the `message` (a full ChatResponse) and a final `done`
      * envelope. Throws if the stream ends before `done`, so a truncated answer
-     * is never mistaken for success. This targets the legacy SSE endpoint; for
-     * the canonical stream use POST /v1/chat/completions with stream: true.
+     * is never mistaken for success. Reads GET /v1/chat/stream; for OpenAI-style
+     * token streaming use POST /v1/chat/completions with stream: true.
      */
     async *chatStream(input: ChatInput, requestOptions: RequestOptions = {}): AsyncGenerator<ChatStreamEvent> {
       const target = inWorkspace(input);
@@ -1612,7 +1612,7 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
       let completed = false;
       // The session grant goes in a header, never the URL.
       const grant: Record<string, string> = target.sessionToken ? { "X-DocSlurp-Chat-Session-Token": target.sessionToken } : {};
-      for await (const frame of streamEventsAt(`/v1/search/chat/stream?${params.toString()}`, requestOptions, grant)) {
+      for await (const frame of streamEventsAt(`/v1/chat/stream?${params.toString()}`, requestOptions, grant)) {
         if (frame.event === "status" || frame.event === "message" || frame.event === "done") {
           if (frame.event === "done") completed = true;
           yield { event: frame.event, data: frame.data } as ChatStreamEvent;
