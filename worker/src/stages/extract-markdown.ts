@@ -22,6 +22,7 @@ import {
   type ExtractionArtifactRef,
 } from "@docslurp/shared";
 import { readJsonFile } from "../tools/storage.js";
+import { documentArtifactRoot, runArtifactRoot } from "../lib/artifact-root.js";
 import { pushPerfMetric } from "../lib/perf-context.js";
 import { buildExtractionContract } from "../lib/extraction-contract.js";
 
@@ -176,7 +177,7 @@ export class ExtractMarkdownStage implements Stage {
       healthyDocuments(state),
       state.docConcurrency,
       async (document) => {
-        const manifestKey = `${document.userId}/${state.run.id}/markdown/${document.id}.json`;
+        const manifestKey = `${runArtifactRoot(state.run, document.userId)}/markdown/${document.id}.json`;
         const artifactSlot = `${document.id}:markdown`;
         const playbook =
           (state.artifactLedger.readDocument(document.id, "parser-playbook") as
@@ -296,7 +297,7 @@ export class ExtractMarkdownStage implements Stage {
                   if (lastUsableResult) return lastUsableResult;
                   const cause = `no untried extractor remains for ${format}: ${JSON.stringify(attemptLedger.snapshot())}`;
                   if (format !== "image") throw new Error(cause);
-                  // OCR is unavailable here (e.g. the lean image has no Tesseract data): vision reads the pixels.
+                  // OCR is unavailable here (e.g. an image built without Tesseract data): vision reads the pixels.
                   textlessFallback = `OCR unavailable; ${cause}`;
                   plannedExtractors = {
                     primary: this.textlessImageExtractor(state, document, textlessFallback),
@@ -310,9 +311,9 @@ export class ExtractMarkdownStage implements Stage {
                     `secondary=${plannedExtractors.secondary?.label ?? "none"} tableAware=${tableAware}`,
                 );
 
-                const candidateAKey = `${document.userId}/${state.run.id}/markdown/${document.id}.${plannedExtractors.primary.label}.md`;
+                const candidateAKey = `${runArtifactRoot(state.run, document.userId)}/markdown/${document.id}.${plannedExtractors.primary.label}.md`;
                 const candidateBKey = plannedExtractors.secondary
-                  ? `${document.userId}/${state.run.id}/markdown/${document.id}.${plannedExtractors.secondary.label}.md`
+                  ? `${runArtifactRoot(state.run, document.userId)}/markdown/${document.id}.${plannedExtractors.secondary.label}.md`
                   : null;
 
                 attemptLedger.reserve(plannedExtractors.primary.label);
@@ -446,7 +447,7 @@ export class ExtractMarkdownStage implements Stage {
                     document.pageCount,
                     strategy,
                   );
-                  const heatmapKey = `${document.userId}/${state.run.id}/heatmap/${document.id}.json`;
+                  const heatmapKey = `${runArtifactRoot(state.run, document.userId)}/heatmap/${document.id}.json`;
                   const critique = await this.runSelfCritique({
                     state,
                     document,
@@ -632,8 +633,8 @@ export class ExtractMarkdownStage implements Stage {
                         signal,
                       })
                     : null;
-                  const canonicalKey = `${document.userId}/${state.run.id}/canonical/${document.id}.json`;
-                  const parserEvalKey = `${document.userId}/${state.run.id}/parser-eval/${document.id}.json`;
+                  const canonicalKey = `${runArtifactRoot(state.run, document.userId)}/canonical/${document.id}.json`;
+                  const parserEvalKey = `${runArtifactRoot(state.run, document.userId)}/parser-eval/${document.id}.json`;
 
                   await this.storage.putJson(manifestKey, {
                     documentId: document.id,
@@ -717,13 +718,13 @@ export class ExtractMarkdownStage implements Stage {
                     pageCount: document.pageCount,
                     canonicalDocument: parserAwareCanonicalDocument,
                   });
-                  const contractKey = `${document.userId}/${state.run.id}/extraction/${document.id}.contract.json`;
+                  const contractKey = `${runArtifactRoot(state.run, document.userId)}/extraction/${document.id}.contract.json`;
                   await this.storage.putJson(contractKey, contract);
 
                   const artifactUri =
                     critique?.correctedTextUri ?? winningCandidate.textUri;
                   if (state.run.pipeline.summarize) {
-                    const evidenceKey = `${document.userId}/${state.run.id}/summary-evidence/${document.id}.json`;
+                    const evidenceKey = `${runArtifactRoot(state.run, document.userId)}/summary-evidence/${document.id}.json`;
                     await this.storage.putJson(evidenceKey, buildSummaryEvidence({
                       text: winningText, pageCount: document.pageCount,
                       documentId: document.id, sourceUri: artifactUri,
@@ -1081,7 +1082,7 @@ export class ExtractMarkdownStage implements Stage {
         sparsePageWords: SPARSE_PAGE_WORDS,
         pages,
       };
-      const key = `${document.userId}/${state.run.id}/page-image-evidence/${document.id}.json`;
+      const key = `${runArtifactRoot(state.run, document.userId)}/page-image-evidence/${document.id}.json`;
       await this.storage.putJson(key, artifact);
       console.log(
         `[extract-debug] document=${document.id} pageImageEvidence sparsePages=${pages.length} ` +
@@ -1156,7 +1157,7 @@ export class ExtractMarkdownStage implements Stage {
   }
 
   /**
-   * An image has no text layer, so when OCR cannot read it (no Tesseract data on the lean worker image, or
+   * An image has no text layer, so when OCR cannot read it (no Tesseract data on this worker, or
    * Kreuzberg's bundled OCR crashing) vision is the only reader left. Returns a stand-in extractor whose empty
    * Markdown lets page triage and the vision stage read the pixels. When the workspace cannot use vision
    * (turned off, or privacy mode forbids the route) the image is unreadable: fail naming that cause. The raw
@@ -1482,8 +1483,8 @@ export class ExtractMarkdownStage implements Stage {
       Math.max(1, args.document.pageCount),
     );
     const scratchDir = await mkdtemp(path.join(tmpdir(), "docslurp-critique-"));
-    const critiqueArtifactKey = `${args.document.userId}/${args.state.run.id}/critique/${args.document.id}.json`;
-    const correctedTextKey = `${args.document.userId}/${args.state.run.id}/markdown/${args.document.id}.critique.md`;
+    const critiqueArtifactKey = `${runArtifactRoot(args.state.run, args.document.userId)}/critique/${args.document.id}.json`;
+    const correctedTextKey = `${runArtifactRoot(args.state.run, args.document.userId)}/markdown/${args.document.id}.critique.md`;
     const renderManifestUri =
       args.state.artifactLedger.readDocument(args.document.id, "images") ?? null;
 
@@ -1789,7 +1790,7 @@ export class ExtractMarkdownStage implements Stage {
       options.nativePayloadOutcome.reason = nativeOutcome.reason;
     }
     if (nativePayload) {
-      const key = `${document.userId}/${document.runId}/parser/${document.id}.native-pdf.json`;
+      const key = `${documentArtifactRoot(document)}/parser/${document.id}.native-pdf.json`;
       await this.storage.putJson(key, nativePayload);
       artifacts.push({ parser: "native-pdf", uri: this.storage.uri(key), payload: nativePayload });
     }
@@ -1827,7 +1828,7 @@ export class ExtractMarkdownStage implements Stage {
         if (!payload) {
           continue;
         }
-        const key = `${document.userId}/${document.runId}/parser/${document.id}.${job.parser}.json`;
+        const key = `${documentArtifactRoot(document)}/parser/${document.id}.${job.parser}.json`;
         await this.storage.putJson(key, payload);
         artifacts.push({
           parser: job.parser,
@@ -1852,7 +1853,7 @@ export class ExtractMarkdownStage implements Stage {
           withTimeoutSignal(signal, Math.min(this.cfg.parserArtifactTimeoutMs, 20_000)),
         );
         if (regionsPayload) {
-          const regionsKey = `${document.userId}/${document.runId}/parser/${document.id}.regions.json`;
+          const regionsKey = `${documentArtifactRoot(document)}/parser/${document.id}.regions.json`;
           await this.storage.putJson(regionsKey, regionsPayload);
           state.artifactLedger.recordDocument(document.id, "pdf-regions", this.storage.uri(regionsKey));
           const totalRegions = regionsPayload.pages.reduce((sum, p) => sum + p.regionCount, 0);
@@ -2262,7 +2263,7 @@ export class ExtractMarkdownStage implements Stage {
       if (!source || source.kind !== "source/pdf") {
         throw new Error("local PDF graph returned no source artifact");
       }
-      const baseKey = `${args.document.userId}/${args.runId}/artifact-graph/${args.document.id}`;
+      const baseKey = `${documentArtifactRoot(args.document, args.runId)}/artifact-graph/${args.document.id}`;
       const persisted: ExtractionArtifactRef[] = [
         { ...source, uri: this.storage.uri(args.document.sourceKey) },
       ];

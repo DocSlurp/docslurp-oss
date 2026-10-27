@@ -28,7 +28,8 @@ describe("storage reads go only through the file proxy", () => {
   });
 
   it("signs download links only for zip exports", () => {
+    // An extract's download is its run-scoped zip export, signed after the extract is authorized.
     const callers = sources(root).filter((file) => !file.endsWith(join("lib", "storage.ts")) && readFileSync(file, "utf8").includes("signDownloadGet"));
-    expect(callers.map((file) => file.slice(root.length + 1))).toEqual([join("services", "document-exports.ts")]);
+    expect(callers.map((file) => file.slice(root.length + 1)).sort()).toEqual([join("services", "document-exports.ts"), join("services", "extracts.ts")]);
   });
 });

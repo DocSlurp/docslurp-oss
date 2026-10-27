@@ -31,6 +31,7 @@ import { isCostCapExceeded, runDocumentStage, runDocuments, runSpentCents } from
 import { healthyDocuments } from "../pipeline/document-health.js";
 import { allowHostedCall } from "../lib/privacy-guard.js";
 import { buildPageInputs, createProbeRunner, parseProbeOutput, type ProbeRunner } from "../routing/page-input.js";
+import { sandboxedTesseract } from "../routing/probe/ocr-layer.js";
 import { readRoutingFlags, type TableGateMode } from "../routing/flags.js";
 import { PAGE_ROUTE_TABLE_GATE_METRIC, runTableGateShadow } from "../routing/gates/shadow.js";
 import { createInsetGate, type InsetGate } from "../routing/inset-gate.js";
@@ -66,6 +67,7 @@ import {
 } from "../routing/runtime.js";
 import type { CommandRunner } from "../tools/runner.js";
 import { type ArtifactStore, keyFromStorageUri } from "../tools/storage.js";
+import { runArtifactRoot } from "../lib/artifact-root.js";
 
 export const PAGE_ROUTE_DECISION_METRIC = "page-route-decision";
 export const PAGE_ROUTE_CHUNK_ESTIMATE_METRIC = "page-route-chunk-estimate";
@@ -154,7 +156,7 @@ export class RoutePagesStage implements Stage {
     if (mode === "off") return;
 
     await runDocuments(healthyDocuments(state), state.docConcurrency, async (document) => {
-      const key = `${document.userId}/${state.run.id}/page-route/${document.id}.json`;
+      const key = `${runArtifactRoot(state.run, document.userId)}/page-route/${document.id}.json`;
       await runDocumentStage(
         state,
         document,
@@ -218,6 +220,7 @@ export class RoutePagesStage implements Stage {
         documentFormat: "pdf",
         // TL1: OCR-layer pages are verified against a band re-OCR (about 1 s CPU, OCR-layer pages only).
         verifyOcrLayer: true,
+        recognise: this.runner ? sandboxedTesseract(this.runner) : undefined,
         probe: this.deps.probe ?? createProbeRunner(),
         signal,
       });

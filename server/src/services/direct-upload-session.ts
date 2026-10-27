@@ -19,6 +19,7 @@ import {
   admitIntakeFile,
   rawSourceKey,
   WorkspaceIntakeError,
+  type IntakeExtract,
   type WorkspaceIntakeItem,
 } from "./workspace-intake.js";
 
@@ -49,6 +50,8 @@ export interface CreateDirectUploadSessionInput {
   /** Upload overrides, merged onto the target workspace pipeline at confirm. */
   pipeline: PipelineFeatureOverrides;
   files: DirectUploadSessionFileInput[];
+  /** Extract mode: sources are stored under the extract's prefix and confirm creates the extract's run. */
+  extract?: IntakeExtract | null;
 }
 
 export interface CompleteDirectUploadFileInput {
@@ -66,6 +69,7 @@ export type UploadSessionRow = {
   api_key_id?: string | null;
   allowed_workspace_ids?: string[] | null;
   tags?: string[];
+  extract_id?: string | null;
   id: string;
   user_id: string;
   org_id: string | null;
@@ -115,7 +119,7 @@ export async function loadDirectUploadSession(
   userId: string,
 ): Promise<LoadedDirectUploadSession | null> {
   const [session] = await sql<UploadSessionRow[]>`
-    select id, user_id, org_id, workspace_id, workspace_name, template_key, pipeline, tags, status, result, last_error, api_key_id, allowed_workspace_ids
+    select id, user_id, org_id, workspace_id, workspace_name, template_key, pipeline, tags, status, result, last_error, api_key_id, allowed_workspace_ids, extract_id
     from upload_sessions
     where id = ${sessionId} and user_id = ${userId}
     limit 1
@@ -256,6 +260,7 @@ export async function createDirectUploadSession(input: CreateDirectUploadSession
       tags,
       api_key_id,
       allowed_workspace_ids,
+      extract_id,
       status
     )
     values (
@@ -269,12 +274,13 @@ export async function createDirectUploadSession(input: CreateDirectUploadSession
       ${sql.array(input.tags ?? [])},
       ${input.apiKeyId ?? null},
       ${input.allowedWorkspaceIds ? sql.array([...input.allowedWorkspaceIds]) : null},
+      ${input.extract?.id ?? null},
       'initializing'
     )
   `;
 
   for (const file of files) {
-    const sourceKey = rawSourceKey(input.userId, file.filename);
+    const sourceKey = rawSourceKey(input.userId, file.filename, input.extract);
     const isMultipart = file.unknownSize || (!file.singlePart && file.sizeBytes >= MULTIPART_THRESHOLD_BYTES);
     const partSize = isMultipart ? MULTIPART_PART_SIZE_BYTES : null;
     const uploadId = isMultipart
@@ -450,6 +456,11 @@ async function abortDirectUploadSessionUnlocked(
   `;
 
   await queueAbandonedDirectUploadCleanup(sessionId);
+  // An aborted extract session has nothing to keep: its prefix is emptied on the next sweep.
+  if (loaded.session.extract_id) {
+    await sql`update extracts set expires_at = least(expires_at, now()), updated_at = now()
+      where id = ${loaded.session.extract_id} and run_id is null and state = 'active'`;
+  }
   return true;
 }
 

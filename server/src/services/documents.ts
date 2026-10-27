@@ -30,6 +30,7 @@ import {
   summarizeRunUsageCost,
   type UsageAggregate,
 } from "./usage-attribution.js";
+import { extractNotReprocessable } from "./reprocess-errors.js";
 
 type DocumentRow = {
   id: string;
@@ -1495,9 +1496,10 @@ export async function bulkReprocessDocuments(
     return result;
   }
 
-  const rows = await sql<(DocumentRow & { pipeline: PipelineFeatures | null })[]>`
+  const selected = await sql<(DocumentRow & { pipeline: PipelineFeatures | null; is_extract: boolean })[]>`
     select
       d.*,
+      exists (select 1 from workspace_runs xr where xr.id = d.run_id and xr.extract_id is not null) as is_extract,
       case when ${options.useWorkspacePipeline === true}
         then (select w.pipeline from workspaces w where w.id = d.workspace_id)
         else coalesce(
@@ -1509,6 +1511,18 @@ export async function bulkReprocessDocuments(
     where d.workspace_id = any(${sql.array(workspaceIds)}) and d.id = any(${sql.array(documentIds)})
     order by d.workspace_id, d.created_at
   `;
+  // Extract documents are deleted with their extract and are never reprocessed (409 when nothing else is left).
+  const rows = selected.filter((row) => !row.is_extract);
+  const extractRows = selected.filter((row) => row.is_extract);
+  if (extractRows.length > 0) {
+    const rejected = extractNotReprocessable();
+    for (const workspaceId of new Set(extractRows.map((row) => row.workspace_id))) {
+      const ids = extractRows.filter((row) => row.workspace_id === workspaceId).map((row) => row.id);
+      result.failed.push({ workspaceId, documentIds: ids, message: rejected.message, code: rejected.code });
+      result.warnings.push(`${ids.length} extract ${ids.length === 1 ? "document was" : "documents were"} not reprocessed: ${rejected.message}`);
+    }
+    if (rows.length === 0) throw rejected;
+  }
 
   const groups = new Map<string, Array<DocumentRow & { pipeline: PipelineFeatures | null }>>();
   for (const row of rows) {
