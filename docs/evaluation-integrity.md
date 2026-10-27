@@ -177,6 +177,17 @@ The four roles are:
 - `recognition`: a literal input-recognition token of at least eight characters;
   always blocking on a match. It cannot carry `match` or participate in units.
 
+Before accepting any `content`, `answer` or `recognition` target, validation
+requires well-formed UTF-16: lone high/low surrogates, including embedded or reversed
+pairs, refuse as `ill-formed-unicode-target` before scanning. Authored manifest
+recognition IDs use the same check. UTF-8 scanner text cannot contain isolated
+surrogates, so these targets cannot protect evidence. Valid surrogate pairs and
+literal U+FFFD remain supported unchanged. No replacement, normalization or extra
+escape decoding occurs: JSON `"\ud800"` is rejected as an isolated surrogate, but
+JSON `"\\ud800"` is supported literal backslash-u text and matches only that text.
+Metadata remains an inventoried authoring role, not an answer target; trusted role
+and source-completeness limitations still apply.
+
 `match` is exactly `contextual` or `standalone`. Standalone values must be at least
 8 UTF-16 code units and satisfy a mechanical identifier test (letter/number
 separated by `_ . : / @ -`, mixed letters/digits, camel case, or at least eight

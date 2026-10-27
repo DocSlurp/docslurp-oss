@@ -13,6 +13,11 @@ export const LIMITS = Object.freeze({ jsonBytes: 2 * 1024 * 1024, artifactBytes:
 const hash = value => createHash('sha256').update(value).digest('hex');
 const fail = reason => { throw new Error(reason); };
 const nonempty = value => typeof value === 'string' && value.trim().length > 0;
+const assertLiteralTarget = value => {
+  // UTF-8 decoding cannot emit isolated UTF-16 surrogates. Refuse an
+  // unobservable target; never repair it into a different declared literal.
+  if (!value.isWellFormed()) fail('ill-formed-unicode-target');
+};
 const within = (root, path) => { const rel = relative(root, path); return rel === '' || (!rel.startsWith(`..${sep}`) && rel !== '..' && !isAbsolute(rel)); };
 const exact = (object, keys, optional = []) => {
   if (!object || Array.isArray(object) || typeof object !== 'object'
@@ -138,6 +143,7 @@ export function projectLabels(contract) {
     if (typeof field.pointer !== 'string' || !leaves.has(field.pointer) || fields.has(field.pointer)) fail('invalid-field-provenance');
     if (!['content', 'answer', 'metadata', 'recognition'].includes(field.role)) fail('unclassified-role');
     const leaf = leaves.get(field.pointer);
+    if (field.role !== 'metadata') assertLiteralTarget(leaf.text);
     if (['content', 'answer'].includes(field.role)) {
       if (!['standalone', 'contextual'].includes(field.match) || !leaf.text.trim()) fail('unclassified-evidence');
       if (field.match === 'standalone' && !standaloneEligible(leaf.text)) fail('unsupported-standalone-target');
@@ -258,6 +264,7 @@ export function judgeIntegrityV2({ dataset, repo = process.cwd(), base = 'HEAD' 
     let artifactBytes = 0, detailCount = 0;
     const term = (value, detail) => {
       if (value.length > LIMITS.valueChars) fail('resource-limit');
+      if (detail.rule) assertLiteralTarget(value); // Includes authored manifest recognition IDs.
       if (!value.trim()) return;
       if (!terms.has(value)) terms.set(value, []);
       if (++detailCount > LIMITS.nodes) fail('resource-limit');

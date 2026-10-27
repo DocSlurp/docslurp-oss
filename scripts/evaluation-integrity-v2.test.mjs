@@ -426,3 +426,116 @@ test('R1 methods P2 repeated-row validation has a fail-closed comparison budget'
     units: rows.map((_, i) => ({ kind: 'row', anchor: `/rows/${i}/item`, values: [`/rows/${i}/status`] })) };
   assert.throws(() => projectLabels(p), /resource-limit/);
 });
+
+// Exact invented encoding controls supplied by the two authorized R2 reviewers.
+// They remain source-defined: no test reads review artifacts or a real corpus.
+test('R2 methods exact lone high/low surrogate and escaped-writer targets refuse before scanning', t => {
+  for (const [status, text] of [
+    ['\ud800', 'Birch valve: ' + String.fromCharCode(0xd800)],
+    ['\udc00', 'Birch valve: ' + String.fromCharCode(0xdc00)],
+    ['\ud800', 'Birch valve: ' + String.raw`\ud800`],
+  ]) {
+    const f = setup(t); f.contract = methodsR1Projection('Birch valve', status); f.save();
+    for (const source of ['export const generic = true;', text]) {
+      f.write(source); const report = f.run();
+      assert.deepEqual(rules(report), ['ill-formed-unicode-target']);
+      assert.equal(report.scannedFiles, 0); assert.equal(report.observations.length, 0);
+    }
+    if (text.endsWith(status)) assert.equal(readFileSync(join(f.repo, 'worker.ts')).toString('hex'), '42697263682076616c76653a20efbfbd');
+  }
+});
+
+test('R2 adversarial exact malformed contextual answers and anchor refuse before scanning', t => {
+  for (const [item, value] of [
+    ['Copper valve', '\ud800'], ['Copper valve', '\udfff'],
+    ['Copper valve', 'abc\ud800def'], ['Copper valve', '\udc00\ud800'],
+    ['Copper\ud800valve', 'Ready'],
+  ]) {
+    const f = setup(t); f.contract = adversarialR1Projection(item, value); f.save();
+    assert.throws(() => projectLabels(f.contract), /ill-formed-unicode-target/);
+    for (const text of ['export const generic = true;', item + ' ' + value]) {
+      f.write(text); const report = f.run();
+      assert.deepEqual(rules(report), ['ill-formed-unicode-target']); assert.equal(report.scannedFiles, 0);
+    }
+  }
+  const f = setup(t); f.contract = adversarialR1Projection('Copper valve', '\ud800'); f.save();
+  for (const prefix of [Buffer.from('Copper valve '), Buffer.from('\0Copper valve ')]) {
+    writeFileSync(join(f.repo, 'worker.ts'), Buffer.concat([prefix, Buffer.from([0xed, 0xa0, 0x80])]));
+    assert.deepEqual(rules(f.run()), ['ill-formed-unicode-target'], 'invalid UTF8 cannot make the declared surrogate observable');
+  }
+});
+
+test('R2 exact standalone and recognition surrogate controls, including sole-answer root, refuse before scanning', t => {
+  for (const value of ['Surrogate-9462-\ud800', 'Rotor-\ud800-821']) {
+    for (const role of ['answer', 'recognition']) {
+      const f = setup(t);
+      f.contract = value.startsWith('Surrogate') ? methodsR1Projection() : adversarialR1Projection();
+      f.contract.document.extra = value;
+      f.contract.fields.push({ pointer: '/extra', role, ...(role === 'answer' ? { match: 'standalone' } : {}) }); f.save();
+      for (const text of ['export const generic = true;', value]) {
+        f.write(text); const report = f.run();
+        assert.deepEqual(rules(report), ['ill-formed-unicode-target']); assert.equal(report.scannedFiles, 0);
+      }
+    }
+  }
+  for (const value of ['Rotor-\ud800-821', 'Rotor-\udfff-821']) {
+    const f = setup(t);
+    f.contract = { schema: 'docslurp-integrity-projection@v2', document: value,
+      fields: [{ pointer: '', role: 'answer', match: 'standalone' }], units: [] }; f.save();
+    for (const text of ['export const generic = true;', value]) {
+      f.write(text); assert.deepEqual(rules(f.run()), ['ill-formed-unicode-target']);
+    }
+  }
+});
+
+test('R2 valid surrogate pairs and literal U+FFFD remain exact supported contextual targets', t => {
+  for (const value of ['\ud83d\ude00', '\ufffd', '\ud800\udc00', '\udbff\udfff']) {
+    for (const p of [methodsR1Projection('Birch valve', value), adversarialR1Projection('Copper valve', value)]) {
+      const f = setup(t); f.contract = p; f.save(); assert.equal(f.run().passed, true);
+      f.write(p.document.item + ': ' + value); const report = f.run();
+      assert.ok(rules(report).includes('contextual-answer'));
+      const pointer = Object.hasOwn(p.document, 'status') ? '/status' : '/value';
+      assert.ok(report.observations.some(o => o.pointer === pointer && o.evidenceHash === sha(value)));
+      assert.equal(projectLabels(p).fields.find(field => field.pointer === pointer).text, value);
+    }
+  }
+});
+
+test('R2 valid astral and replacement-scalar standalone/recognition counterparts retain blocking matches', t => {
+  for (const value of ['Rotor-\ud83d\ude00-821', 'Rotor-\ufffd-821']) {
+    const f = setup(t);
+    f.contract = { schema: 'docslurp-integrity-projection@v2', document: value,
+      fields: [{ pointer: '', role: 'answer', match: 'standalone' }], units: [] }; f.save();
+    assert.equal(f.run().passed, true); f.write(value); assert.ok(rules(f.run()).includes('labeled-answer'));
+    f.contract = adversarialR1Projection(); f.contract.document.extra = value;
+    f.contract.fields.push({ pointer: '/extra', role: 'recognition' }); f.save();
+    f.write('export const generic = true;'); assert.equal(f.run().passed, true);
+    f.write(value); assert.ok(rules(f.run()).includes('fixture-identifier'));
+  }
+});
+
+test('R2 JSON escapes preserve pairs while literal backslash-u text is never reinterpreted or normalized', t => {
+  const f = setup(t); f.contract = adversarialR1Projection('Copper valve', '\ud83d\ude00'); f.save();
+  const escapedPair = JSON.stringify(f.contract).replace('😀', String.raw`\ud83d\ude00`);
+  writeFileSync(join(f.dataset, 'labels.json'), escapedPair);
+  f.manifest.cases[0].labels.sha256 = sha(escapedPair); f.saveManifest();
+  assert.equal(f.run().passed, true); f.write('Copper valve 😀'); assert.ok(rules(f.run()).includes('contextual-answer'));
+  const literal = String.raw`\ud800`;
+  f.contract = methodsR1Projection('Birch valve', literal); f.save(); f.write('export const generic = true;');
+  assert.equal(f.run().passed, true);
+  assert.equal(projectLabels(parseContract(readFileSync(join(f.dataset, 'labels.json')))).fields.find(field => field.pointer === '/status').text, literal);
+  f.write('Birch valve: ' + literal); assert.ok(rules(f.run()).includes('contextual-answer'));
+  f.write('Birch valve: \ufffd'); assert.equal(f.run().passed, true, 'literal backslash-u is not U+FFFD');
+  f.contract = methodsR1Projection('Birch valve', 'e\u0301'); f.save();
+  f.write('Birch valve: é'); assert.equal(f.run().passed, true, 'valid text is not canonically normalized');
+  f.write('Birch valve: e\u0301'); assert.ok(rules(f.run()).includes('contextual-answer'));
+});
+
+test('R2 malformed authored manifest recognition IDs cannot bypass field validation', t => {
+  for (const key of ['id', 'originalCaseId']) {
+    const f = setup(t); f.manifest.cases[0][key] = key === 'id' ? 'Surrogate-9462-\ud800' : 'Rotor-\ud800-821'; f.saveManifest();
+    const report = f.run(); assert.deepEqual(rules(report), ['ill-formed-unicode-target']); assert.equal(report.scannedFiles, 0);
+    f.manifest.cases[0][key] = 'Rotor-😀-821'; f.saveManifest();
+    assert.equal(f.run().passed, true); f.write('Rotor-😀-821'); assert.ok(rules(f.run()).includes('fixture-identifier'));
+  }
+});
