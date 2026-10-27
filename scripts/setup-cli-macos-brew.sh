@@ -18,9 +18,11 @@ brew install \
   ocrmypdf \
   pandoc \
   poppler \
+  webp \
   python \
   qpdf \
   tesseract \
+  tesseract-lang \
   unrtf \
   uv
 brew install --cask libreoffice
