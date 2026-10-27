@@ -204,13 +204,10 @@ export const INFRA_COST_OBSERVATIONS: readonly InfraCostObservation[] = [
   },
   // Vast.ai, verified on-demand single-GPU medians.
   vastGpu("rtx-4090", 0.53777778, 24, 42, "2026-10-26"),
-  { ...vastGpu("l4", 0.33, 24, 4), observedAt: "2026-10-09", notes: "Historical median (n=4, 2026-10-09); live samples on 2026-10-25 and 2026-10-26 (n=2 each) are insufficient to refresh." },
+  { ...vastGpu("l4", 0.33, 24, 4), observedAt: "2026-10-09", notes: "Historical median (n=4, 2026-10-09). 2026-10-25 and early 2026-10-26 had n=2; a later 2026-10-26 run had n=3 at a $0.6741 median (min $0.3356), which would break the gpu-standard policy at the current rate. Left for the owner: refresh it together with a rate or policy decision." },
   vastGpu("rtx-3090", 0.29014815, 24, 34, "2026-10-26"),
   vastGpu("a100-80gb", 1.13614815, 80, 9, "2026-10-26"),
-  {
-    ...vastGpu("h100-sxm", 3.9084, 80, 0, "2026-10-26"),
-    notes: "Median from the 2026-10-26 margin audit's pricing:validate run (performance/doppler-2026-10-26 in DocSlurp/app), +62.7% on 2026-10-25's $2.4027. A re-run the same day found only n=2 offers (median $7.73), below the 3-offer minimum, so this figure is unverified; the SKU is disallowed either way.",
-  },
+  vastGpu("h100-sxm", 3.99, 80, 4, "2026-10-26"),
   // Modal, per-second list prices.
   modalGpu("l4", 0.000222, 24),
   modalGpu("a10", 0.000306, 24),
@@ -355,7 +352,7 @@ export const RESOURCE_CLASS_POLICY: readonly ResourceClassPolicy[] = [
     rationale: "Same as standard GPU. The large lane is restricted to A100 80 GB; H100 would need a separate rate.",
     skus: [
       { observationId: "vast:a100-80gb", bundle: { gpuLargeHour: 1 } },
-      { observationId: "vast:h100-sxm", bundle: { gpuLargeHour: 1 }, disallowedReason: "H100 costs more than list ($3.91/h median on 2026-10-26, unverified); the large lane is A100-only at this rate." },
+      { observationId: "vast:h100-sxm", bundle: { gpuLargeHour: 1 }, disallowedReason: "H100 costs more than list ($3.99/h median on 2026-10-26, +66% in a day); the large lane is A100-only at this rate." },
       { observationId: "modal:a100-80gb", bundle: { gpuLargeHour: 1 }, disallowedReason: "Modal A100 80 GB breaks even at ~83%." },
       { observationId: "modal:h100", bundle: { gpuLargeHour: 1 }, disallowedReason: "Modal H100 costs more than list." },
     ],
