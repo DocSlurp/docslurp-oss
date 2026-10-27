@@ -12,6 +12,7 @@ import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
 import { basename, dirname, isAbsolute, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import ts from 'typescript';
 
 const hash = (value) => createHash('sha256').update(value).digest('hex');
 const within = (root, path) => { const rel = relative(root, path); return rel === '' || (!rel.startsWith(`..${sep}`) && rel !== '..' && !isAbsolute(rel)); };
@@ -29,6 +30,24 @@ function distinctiveAnswer(value) {
     || /\p{L}.*\p{N}|\p{N}.*\p{L}/u.test(value)
     || /\p{Ll}\p{Lu}/u.test(value)
     || /^\d{8,}$/.test(value);
+}
+
+// Only proven executable statements may explain an API-shaped answer match.
+// Strings, templates, comments, unsupported languages and parse errors stay strong.
+function executableCallOffsets(file, text) {
+  const offsets = new Set();
+  if (!/\.(?:[cm]?js|jsx|[cm]?ts|tsx)$/.test(file)) return offsets;
+  const source = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true);
+  if (source.parseDiagnostics.length) return offsets;
+  const visit = (node) => {
+    if (ts.isCallExpression(node) && node.arguments.length === 0
+      && ts.isPropertyAccessExpression(node.expression) && ts.isExpressionStatement(node.parent)) {
+      offsets.add(node.getStart(source));
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(source);
+  return offsets;
 }
 
 export function judgeIntegrity({ dataset, repo = process.cwd(), base = 'HEAD' }) {
@@ -111,12 +130,27 @@ export function judgeIntegrity({ dataset, repo = process.cwd(), base = 'HEAD' })
     for (const value of sourceHashes) terms.push({ rule: 'source-recognition-hash', value });
     for (const value of expected) terms.push({ rule: 'labeled-answer', value });
     const seen = new Set();
+    const executableAnswers = new Set();
     const match = (file, text, origin) => {
+      let callOffsets;
       for (const { rule, value } of terms) {
-        const found = pattern(value).exec(text);
-        if (!found) continue;
         const key = `${file}:${rule}:${hash(value)}`;
         if (seen.has(key)) continue;
+        let found = pattern(value).exec(text);
+        if (!found) continue;
+        if (rule === 'labeled-answer' && /^[a-z_$][a-z0-9_$]*\.[a-z_$][a-z0-9_$]*\(\)$/i.test(value)) {
+          if (origin === 'working-tree') {
+            callOffsets ??= executableCallOffsets(file, text);
+            const expression = pattern(value);
+            found = [...text.matchAll(new RegExp(expression.source, expression.flags + 'g'))]
+              .find((occurrence) => !callOffsets.has(occurrence.index));
+            if (!found) { executableAnswers.add(key); continue; }
+          } else if (executableAnswers.has(key)) {
+            // The complete current file was already checked, including every
+            // occurrence. Diff fragments need not form valid standalone code.
+            continue;
+          }
+        }
         seen.add(key);
         add(rule, { file, origin, line: text.slice(0, found.index).split('\n').length, evidenceHash: hash(value) });
       }

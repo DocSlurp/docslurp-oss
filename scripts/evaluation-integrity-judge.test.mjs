@@ -108,6 +108,29 @@ test('structured identifiers and proper multiword answers remain individual leak
   }
 });
 
+test('only executable API call statements explain technical-answer matches', (t) => {
+  const f = fixture(t);
+  const labels = JSON.stringify({ labels: [{ name: 'document_markdown', expected: 'transport.disconnect()' }] });
+  writeFileSync(join(f.dataset, 'labels.json'), labels);
+  f.manifest.cases[0].labels.sha256 = sha(labels); f.save();
+  writeFileSync(join(f.repo, 'worker.ts'), 'try { run(); } finally { transport.disconnect(); }');
+  assert.equal(f.run().passed, true, 'ordinary lifecycle statement, including its diff');
+  for (const source of [
+    'const answer = "transport.disconnect()";',
+    'const document_markdown = "transport.disconnect()";',
+    'transport.disconnect(); const answer = "transport.disconnect()";',
+    'const answer = `transport.disconnect()`;',
+    '// transport.disconnect()',
+    'function broken( { transport.disconnect();',
+  ]) {
+    writeFileSync(join(f.repo, 'worker.ts'), source);
+    assert.ok(rules(f.run()).includes('labeled-answer'), source);
+  }
+  writeFileSync(join(f.repo, 'worker.ts'), 'export const generic = true;');
+  writeFileSync(join(f.repo, 'unknown.txt'), 'transport.disconnect();');
+  assert.ok(rules(f.run()).includes('labeled-answer'), 'unknown syntax stays strong');
+});
+
 function sourceDerivedFixture(t) {
   const f = fixture(t);
   f.manifest.schema = 'docslurp-source-derived-eval@v1';
