@@ -116,6 +116,9 @@ function buildSearchSettings(
   };
 }
 
+// Browser-key answers carry a sealed session grant, which needs the token root secret.
+process.env.BETTER_AUTH_SECRET ||= "workspace-chat-test-secret-with-enough-entropy";
+
 /** The first-party app's signed-in session, the only actor that may change settings from chat. */
 const appSessionActor = { type: "session", userId: "user-1", sessionId: "app-session-1", user: { id: "user-1", email: "u@example.test", name: "User" } } as never;
 
@@ -264,6 +267,33 @@ describe("chatWorkspace", () => {
       expect((runChatMcpAgent.mock.calls.at(-1)![0] as { suggestions: boolean }).suggestions).toBe(expected);
     } finally {
       if (previous === undefined) delete process.env.OPENROUTER_API_KEY; else process.env.OPENROUTER_API_KEY = previous;
+    }
+  });
+
+  it("binds a browser key's chat session to a sealed grant: issued with the answer, required to continue", async () => {
+    {
+      sqlMock.mockResolvedValue([]);
+      getWorkspace.mockResolvedValue({ id: "ws-1", systemPrompt: null });
+      loadWorkspaceWholeCorpusContext.mockResolvedValue({
+        eligible: false, reason: "empty-workspace", results: [],
+        stats: { documentCount: 0, chunkCount: 0, tokenEstimate: 0, charEstimate: 0, maxDocuments: 12, maxChunks: 24, maxTokens: 12000, maxChars: 60000 },
+      });
+      hybridSearch.mockResolvedValue({ sessionId: "search-1", results: [] });
+      const visitor = { type: "apiKey", userId: "user-1", apiKey: { keyId: "pub-1", userId: "user-1", orgId: "org-1", keyType: "client", scopes: ["search", "chat"], workspaceIds: ["ws-1"], allowedDomains: ["docs.example.com"], rateLimitRpm: null, rateLimitPpd: 0, rateLimits: [] } } as never;
+      const first = await chatWorkspace({ workspaceId: "ws-1", userId: "user-1", query: "hello", history: [], actor: visitor });
+      expect(first.sessionToken).toEqual(expect.any(String));
+      sqlMock.mockClear();
+      // Another visitor who learned the session id cannot continue (or read) it.
+      await expect(chatWorkspace({ workspaceId: "ws-1", userId: "user-1", query: "what did they ask?", history: [], actor: visitor, sessionId: first.sessionId }))
+        .rejects.toMatchObject({ status: 403, code: "chat_session_forbidden" });
+      await expect(chatWorkspace({ workspaceId: "ws-1", userId: "user-1", query: "again", history: [], actor: visitor, sessionId: first.sessionId, sessionToken: `${first.sessionToken}x` }))
+        .rejects.toMatchObject({ code: "chat_session_forbidden" });
+      expect(sqlMock).not.toHaveBeenCalled();
+      // The visitor holding the grant continues it.
+      await expect(chatWorkspace({ workspaceId: "ws-1", userId: "user-1", query: "and then?", history: [], actor: visitor, sessionId: first.sessionId, sessionToken: first.sessionToken })).resolves.toBeDefined();
+      // Server keys and the app get no grant: their sessions stay scoped to their own user.
+      const server = await chatWorkspace({ workspaceId: "ws-1", userId: "user-1", query: "hello", history: [], actor: appSessionActor });
+      expect(server.sessionToken).toBeUndefined();
     }
   });
 

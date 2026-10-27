@@ -93,7 +93,7 @@ Protocol surfaces keep the shapes their clients already parse: the OpenAI-compat
 
 ## Grounded chat
 
-`POST /v1/chat` is the canonical workspace chat endpoint. Send `{q, workspace?, sessionId?, model?, retrieval?, filters?, agent?}`; an omitted `workspace` means your organization's default workspace (`workspace` takes an ID, slug or name). `sessionId` and `model` are nonempty strings of at most 256 characters; all fields are checked before model calls. The response includes an answer, citations, and the chat session ID. For streaming, use `/v1/chat/completions` with `stream: true`; omit it for the JSON fallback.
+`POST /v1/chat` is the canonical workspace chat endpoint. Send `{q, workspace?, sessionId?, sessionToken?, model?, retrieval?, filters?, agent?}` (`sessionToken`: browser keys only, see [conversations](#conversations)); an omitted `workspace` means your organization's default workspace (`workspace` takes an ID, slug or name). `sessionId` and `model` are nonempty strings of at most 256 characters; all fields are checked before model calls. The response includes an answer, citations, and the chat session ID. For streaming, use `/v1/chat/completions` with `stream: true`; omit it for the JSON fallback.
 
 ### Model
 
@@ -232,6 +232,10 @@ With OpenTelemetry export on, each agent turn emits spans on the `docslurp.chat`
 The agent span also copies the W3C baggage keys `eval.run_id`, `eval.case_id`, `eval.model` and `eval.arm` from the request's `baggage` header (other keys are ignored; values are capped at 128 characters). `/v1/chat` responses carry a `traceparent` header for the request's trace when tracing is on, so clients can join a turn to its trace.
 
 The `api.search` retrieval spans those calls create carry `docslurp.chat.session_id`, and their `search_sessions.metadata` and search usage events record `chatSessionId`. Metrics: the `docslurp.chat.agent.duration` histogram (seconds, by `gen_ai.request.model` and `docslurp.chat.stop_reason`) and the `docslurp.chat.agent.tool_calls` counter (by `gen_ai.request.model` and `gen_ai.tool.name`).
+
+### Conversations
+
+With a browser (publishable) key, every visitor shares the key, so a `sessionId` alone can't continue a conversation. Each answer also returns a `sessionToken`: a sealed grant for that key, workspace and session, valid for 24 hours. Send it back with `sessionId` (`sessionToken` in the body, or the query on `GET /v1/search/chat/stream`). A `sessionId` without its token, or with a token that is tampered with, expired or issued for another session, gets 403 `chat_session_forbidden` before any history is read. Keep the token in the visitor's own page state, not in shared storage. Server keys and the app don't need it.
 
 Independent conversations can run concurrently. Await each reply before reusing its `sessionId` for the next turn. Simultaneous turns in the same conversation have no ordering guarantee. Session ownership must be verified before a caller-provided session can be reused; a database failure fails closed.
 

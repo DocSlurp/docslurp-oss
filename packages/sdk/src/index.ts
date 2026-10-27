@@ -428,6 +428,8 @@ export function formatSearchContext(response: SearchResponse): string {
 export type ChatInput = {
   q: string;
   sessionId?: string;
+  /** Browser (publishable) keys: the `sessionToken` from the previous answer, required to continue `sessionId`. */
+  sessionToken?: string;
   /** Workspace ID, slug or name; omitted: the client workspace. */
   workspace?: string;
   /**
@@ -464,6 +466,8 @@ export type ChatInput = {
 export type ChatResponse = {
   id: string;
   sessionId: string;
+  /** Browser (publishable) keys only: send back as `sessionToken` with `sessionId` to continue this conversation (expires after 24 hours). */
+  sessionToken?: string;
   searchSessionId: string | null;
   answer: string;
   finishReason?: "stop" | "length" | "content-filter";
@@ -483,7 +487,7 @@ export type ChatResponse = {
 export type ChatStreamEvent =
   | { event: "status"; data: { stage: string; message: string } }
   | { event: "message"; data: ChatResponse }
-  | { event: "done"; data: { id: string; sessionId: string; searchSessionId: string | null } };
+  | { event: "done"; data: { id: string; sessionId: string; sessionToken?: string; searchSessionId: string | null } };
 
 export type ListDocumentsInput = {
   /** Workspace ID, slug or name; omitted: the client workspace. */
@@ -1602,6 +1606,7 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
       const target = inWorkspace(input);
       const params = new URLSearchParams({ q: target.q, workspace: target.workspace ?? clientWorkspace });
       if (target.sessionId) params.set("sessionId", target.sessionId);
+      if (target.sessionToken) params.set("sessionToken", target.sessionToken);
       if (target.model) params.set("model", target.model);
       let completed = false;
       for await (const frame of streamEventsAt(`/v1/search/chat/stream?${params.toString()}`, requestOptions)) {

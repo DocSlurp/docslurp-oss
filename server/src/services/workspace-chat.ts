@@ -6,6 +6,7 @@ import type { PrivacyMode } from "@docslurp/shared";
 import { env } from "../config.js";
 import type { RequestActor } from "../lib/request-actor.js";
 import { isFirstPartyAppActor } from "../lib/first-party-app.js";
+import { assertChatSessionGrant, requiresChatSessionToken, sealChatSessionToken } from "../lib/chat-session-tokens.js";
 import type { ChatToolActivity } from "./chat-mcp-tools.js";
 import {
   configureSearchFromChat,
@@ -1039,6 +1040,8 @@ async function chatWorkspaceInTurn(args: {
    */
   spendKind?: SpendKind;
   sessionId?: string;
+  /** Browser keys: the sealed grant returned with the previous answer; required to continue `sessionId`. */
+  sessionToken?: string | null;
   model?: string | null;
   history?: Array<Pick<WorkspaceChatTurn, "role" | "content">>;
   maxOutputTokens?: number;
@@ -1067,6 +1070,8 @@ async function chatWorkspaceInTurn(args: {
   answerIngestReport?: boolean;
 }): Promise<WorkspaceChatResponse> {
   if (args.actor && args.actor.userId !== args.userId) throw new Error("Chat actor does not match user");
+  // Browser-key visitors share the key owner's identity: a session id alone never continues a conversation.
+  assertChatSessionGrant(args.actor, { workspaceId: args.workspaceId, sessionId: args.sessionId, sessionToken: args.sessionToken });
   // Enforced here too so every caller (routes, MCP, automation) honours the switch.
   if (!(await isWorkspaceChatEnabled(args.workspaceId, args.userId))) throw new WorkspaceChatDisabledError();
   // An explicit model is honoured exactly or refused (400), never silently swapped for the default.
@@ -1100,6 +1105,9 @@ async function chatWorkspaceInTurn(args: {
     () => chatWorkspaceTurn(args, sessionId, policy),
   );
   await chargeChatAnswer(response, args, sessionId, policy);
+  if (requiresChatSessionToken(args.actor)) {
+    return { ...response, sessionToken: sealChatSessionToken({ keyId: args.actor.apiKey.keyId, workspaceId: args.workspaceId, sessionId: response.sessionId }) };
+  }
   return response;
 }
 
