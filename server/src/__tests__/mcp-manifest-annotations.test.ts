@@ -13,6 +13,7 @@ describe("capability manifest annotations", () => {
       getWorkspaceSettings: { readOnly: true, idempotent: true, consequential: false },
       listWorkspaces: { readOnly: true, idempotent: true, consequential: false },
       upload: { readOnly: false, idempotent: false, consequential: true },
+      extract: { readOnly: false, idempotent: false, consequential: true },
       completeUpload: { readOnly: false, idempotent: false, consequential: true },
       search: { readOnly: true, idempotent: true, consequential: false },
       chat: { readOnly: false, idempotent: false, consequential: false },

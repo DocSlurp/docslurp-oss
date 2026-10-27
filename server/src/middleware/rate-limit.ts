@@ -679,6 +679,7 @@ const CLIENT_VISITOR_DEFAULTS: Record<RateLimitCategory, number> = {
 
 function clientVisitorLimit(category: RateLimitCategory): number {
   return readGuardInt(`API_RATE_LIMIT_CLIENT_VISITOR_${envName(category)}_MAX`, CLIENT_VISITOR_DEFAULTS[category]);
+
 }
 
 function envOverrideLimit(profile: RateLimitProfile, category: RateLimitCategory): Partial<CategoryLimit> {

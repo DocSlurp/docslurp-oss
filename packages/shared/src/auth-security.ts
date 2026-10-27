@@ -91,6 +91,11 @@ export function isEmailAuthConfigured(env: NodeJS.ProcessEnv): boolean {
   return Boolean(env.RESEND_API_KEY?.trim() && env.EMAIL_FROM?.trim());
 }
 
+/** Signed-in sessions expire after this long without an authenticated request. */
+export const SESSION_IDLE_TIMEOUT_SECONDS = 60 * 60 * 24 * 30;
+/** How often an active session's expiry (and cookie) is extended. */
+export const SESSION_REFRESH_AGE_SECONDS = 60 * 60 * 24;
+
 export function createBetterAuthSecurityOptions(env: NodeJS.ProcessEnv) {
   const baseURL = resolveBetterAuthBaseUrl(env);
 
@@ -114,8 +119,13 @@ export function createBetterAuthSecurityOptions(env: NodeJS.ProcessEnv) {
     baseURL,
     trustedOrigins: resolveBetterAuthTrustedOrigins(env, baseURL),
     session: {
-      expiresIn: 60 * 60 * 24 * 7,
-      updateAge: 60 * 60 * 24,
+      // Sliding 30-day idle timeout: any authenticated request more than a day
+      // after the last refresh pushes expiry out again (server middleware
+      // forwards the refreshed cookie). Revocation stays immediate because the
+      // session row is checked on every request (see cookieCache below), and
+      // sensitive account changes still require a session under an hour old.
+      expiresIn: SESSION_IDLE_TIMEOUT_SECONDS,
+      updateAge: SESSION_REFRESH_AGE_SECONDS,
       freshAge: 60 * 60,
       // A cached `session_data` cookie authorizes on its own until it expires, so
       // a revoked or signed-out session would keep working on another device for

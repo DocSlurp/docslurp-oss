@@ -140,6 +140,31 @@ describe("native resource bearer authentication boundary", () => {
     expect(mocks.session).not.toHaveBeenCalled();
   });
 
+  it("forwards a refreshed session cookie so active browsers stay signed in", async () => {
+    mocks.session.mockImplementation(async (_headers: Headers, responseHeaders?: Headers) => {
+      responseHeaders?.append("set-cookie", "better-auth.session_token=renewed; Max-Age=2592000; Path=/; HttpOnly");
+      return { type: "session" };
+    });
+    const response = await app().request("/v1/workspaces/board");
+    expect(response.status).toBe(200);
+    expect(response.headers.getSetCookie()).toEqual(["better-auth.session_token=renewed; Max-Age=2592000; Path=/; HttpOnly"]);
+  });
+
+  it("lets a route's own session cookie win over the refresh", async () => {
+    mocks.session.mockImplementation(async (_headers: Headers, responseHeaders?: Headers) => {
+      responseHeaders?.append("set-cookie", "better-auth.session_token=renewed; Path=/");
+      return { type: "session" };
+    });
+    const server = new Hono();
+    server.use("/v1/*", sessionAuth);
+    server.post("/v1/sign-out-everywhere", (c) => {
+      c.header("set-cookie", "better-auth.session_token=; Max-Age=0; Path=/");
+      return c.json({ ok: true });
+    });
+    const response = await server.request("/v1/sign-out-everywhere", { method: "POST" });
+    expect(response.headers.getSetCookie()).toEqual(["better-auth.session_token=; Max-Age=0; Path=/"]);
+  });
+
   it("refuses a declaration that names no route", () => {
     expect(() => acceptApiKeys(new Hono().get("/", (c) => c.text("ok")), ["GET /missing"])).toThrow(/does not match a route/);
   });

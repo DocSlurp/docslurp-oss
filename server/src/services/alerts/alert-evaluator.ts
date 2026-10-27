@@ -70,6 +70,17 @@ export function loadMigrationJournal(starts: string[] = [process.cwd(), dirname(
   return null;
 }
 
+/** Expired extracts not yet deleted; extract-deletion-stuck fires on errors or long overdue rows. */
+async function readExtractDeletionSnapshot(): Promise<QueueSnapshot["extractDeletion"]> {
+  const [row] = await sql<{ failing: number; overdue: number; oldest: number | null }[]>`
+    select count(*) filter (where last_error is not null)::int as failing, count(*)::int as overdue,
+      extract(epoch from now() - min(expires_at))::double precision as oldest
+    from extracts where state <> 'deleted' and expires_at <= now()
+  `.catch(() => [] as never[]);
+  if (!row) return undefined;
+  return { failing: Number(row.failing ?? 0), overdue: Number(row.overdue ?? 0), oldestOverdueSeconds: row.oldest === null ? null : Number(row.oldest) };
+}
+
 async function readQueueSnapshot(): Promise<QueueSnapshot> {
   const [row] = await sql<{
     queue_depth: number;
@@ -99,6 +110,7 @@ async function readQueueSnapshot(): Promise<QueueSnapshot> {
     oldestQueuedRunAgeSeconds: row?.oldest_queued_run_age_seconds === null || row?.oldest_queued_run_age_seconds === undefined
       ? null
       : Number(row.oldest_queued_run_age_seconds),
+    extractDeletion: await readExtractDeletionSnapshot(),
   };
 }
 
