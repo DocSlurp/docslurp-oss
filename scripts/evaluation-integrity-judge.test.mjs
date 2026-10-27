@@ -168,3 +168,107 @@ test('original case IDs are recognized when source-derived cases receive namespa
   writeFileSync(join(f.repo, 'worker.ts'), 'const known = "sample-01";');
   assert.ok(rules(f.run()).includes('fixture-identifier'));
 });
+
+test('reused manifest patterns preserve findings across files, lines and Unicode boundaries', (t) => {
+  const f = fixture(t);
+  const labels = JSON.stringify({ labels: [{ name: 'layout_regions', expected: ['mind_map', 'ordinaryword'] }] });
+  writeFileSync(join(f.dataset, 'labels.json'), labels);
+  f.manifest.cases[0].labels.sha256 = sha(labels); f.save();
+  writeFileSync(join(f.repo, 'worker.ts'), '// First line\nconst layout = "mind_map";');
+  writeFileSync(join(f.repo, 'second-worker.ts'), '// One\n// Two\nconst layout = "mind_map";');
+  writeFileSync(join(f.repo, 'boundary-worker.ts'), 'const unrelated = "préfixmind_mapSuffix";');
+  const report = f.run();
+  const answers = report.findings.filter((finding) => finding.rule === 'labeled-answer');
+  assert.deepEqual(answers.map(({ file, line, evidenceHash }) => ({ file, line, evidenceHash })), [
+    { file: 'second-worker.ts', line: 3, evidenceHash: sha('mind_map') },
+    { file: 'worker.ts', line: 2, evidenceHash: sha('mind_map') },
+  ]);
+  assert.equal(report.passed, false, 'caching does not exempt a generic-looking ontology value');
+});
+
+test('numeric literal screening preserves boundaries, scientific notation and Unicode case folding', (t) => {
+  for (const { expected, text, matches } of [
+    { expected: '12345.6789', text: 'const coordinate = "12345.6789";', matches: true },
+    { expected: '12345.6789', text: 'const coordinate = "prefix12345.6789Suffix";', matches: false },
+    { expected: '12345.6789', text: 'const coordinate = "12345.6780";', matches: false },
+    { expected: '-12345.6789', text: 'const coordinate = "(-12345.6789)";', matches: true },
+    { expected: '1.2345678e+10', text: 'const coordinate = "1.2345678E+10";', matches: true },
+    { expected: 'Kelvin Example', text: 'const answer = "Kelvin Example";', matches: true },
+  ]) {
+    const f = fixture(t), labels = JSON.stringify({ labels: [{ name: 'measured_value', expected }] });
+    writeFileSync(join(f.dataset, 'labels.json'), labels);
+    f.manifest.cases[0].labels.sha256 = sha(labels); f.save();
+    writeFileSync(join(f.repo, 'worker.ts'), text);
+    assert.equal(rules(f.run()).includes('labeled-answer'), matches, expected + ': ' + text);
+  }
+});
+
+function categoricalFixture(t) {
+  const f = fixture(t);
+  const contract = 'export const categories = ["mind_map", "other_category", "paragraph"] as const;\n';
+  writeFileSync(join(f.repo, 'contract.ts'), contract);
+  f.git('add', '.'); f.git('commit', '-qm', 'Declare general task vocabulary before evaluation');
+  const ontology = { schema: 'docslurp-categorical-ontology@v1', values: ['mind_map', 'other_category', 'paragraph'],
+    contract: { path: 'contract.ts', gitCommit: f.git('rev-parse', 'HEAD').toString().trim(), sha256: sha(contract), exportName: 'categories' },
+    provenance: { author: 'Independent contract author', description: 'General task vocabulary from baseline API contract.', createdAt: '2026-10-16' } };
+  const label = { name: 'region_geometry', expected: [{ label: 'mind_map', bbox: [0.123456789, 0.234567891, 0.765432198, 0.876543219] }],
+    categoricalFields: [{ pointer: '/*/label', ontology: { path: 'ontology.json', sha256: '' } }] };
+  const saveTyped = () => {
+    const bytes = JSON.stringify(ontology);
+    writeFileSync(join(f.dataset, 'ontology.json'), bytes);
+    label.categoricalFields[0].ontology.sha256 = sha(bytes);
+    const labels = JSON.stringify({ labels: [label] });
+    writeFileSync(join(f.dataset, 'labels.json'), labels);
+    f.manifest.cases[0].labels.sha256 = sha(labels); f.save();
+  };
+  saveTyped();
+  return { ...f, ontology, label, saveTyped };
+}
+test('typed categories accept full pinned vocabulary at declared paths without global exemptions', t => {
+  const f = categoricalFixture(t);
+  f.label.expected.push({ label: 'other_category', bbox: [0.1, 0.2, 0.3, 0.4] }); f.saveTyped();
+  const report = f.run();
+  assert.equal(report.passed, true, JSON.stringify(report.findings));
+  assert.equal(report.ontologies.length, 1);
+  assert.equal(report.ontologies[0].contract.gitCommit, f.ontology.contract.gitCommit);
+});
+test('undeclared categorical-looking identifiers retain standalone screening', t => {
+  const f = categoricalFixture(t);
+  delete f.label.categoricalFields;
+  const labels = JSON.stringify({ labels: [f.label] });
+  writeFileSync(join(f.dataset, 'labels.json'), labels); f.manifest.cases[0].labels.sha256 = sha(labels); f.save();
+  assert.ok(rules(f.run()).includes('labeled-answer'));
+});
+test('same category string in free text still counts as an instance answer', t => {
+  const f = categoricalFixture(t);
+  f.label.expected[0].text = 'mind_map'; f.saveTyped();
+  assert.ok(rules(f.run()).includes('labeled-answer'));
+});
+test('categorical metadata fails closed for unknown/missing values and altered pins', t => {
+  for (const mutate of [
+    f => { f.label.expected[0].label = 'unlisted_category'; f.saveTyped(); },
+    f => { delete f.label.expected[0].label; f.saveTyped(); },
+    f => { f.ontology.values.push('answer_specific'); f.saveTyped(); },
+    f => { f.ontology.contract.sha256 = 'a'.repeat(64); f.saveTyped(); },
+    f => { f.ontology.contract.gitCommit = 'a'.repeat(40); f.saveTyped(); },
+    f => { writeFileSync(join(f.dataset, 'ontology.json'), '{}'); },
+    f => { rmSync(join(f.dataset, 'ontology.json')); },
+  ]) { const f = categoricalFixture(t); mutate(f); assert.equal(f.run().passed, false); }
+});
+test('typed records retain geometry, fixture ID, source hash and copied-source screening', t => {
+  const f = categoricalFixture(t);
+  writeFileSync(join(f.repo, 'worker.ts'), `const box = 0.123456789; const known = "held-out-fixture-001"; const digest = "${sha(f.source)}";`);
+  writeFileSync(join(f.repo, 'copied.bin'), f.source);
+  const found = rules(f.run());
+  for (const rule of ['labeled-answer', 'fixture-identifier', 'source-recognition-hash', 'copied-source-artifact']) assert.ok(found.includes(rule), rule);
+});
+test('typed declarations reject arbitrary exemptions, overlapping paths and unpinned contracts', t => {
+  for (const mutate of [
+    f => { f.label.ignoreValues = ['mind_map']; },
+    f => { f.label.categoricalFields[0].ignoreValues = ['mind_map']; },
+    f => { f.label.categoricalFields.push(structuredClone(f.label.categoricalFields[0])); },
+    f => { f.ontology.ignoreValues = ['answer_specific']; },
+    f => { delete f.ontology.contract; },
+    f => { f.label.categoricalFields[0].pointer = '/*/bbox'; },
+  ]) { const f = categoricalFixture(t); mutate(f); f.saveTyped(); assert.equal(f.run().passed, false); }
+});

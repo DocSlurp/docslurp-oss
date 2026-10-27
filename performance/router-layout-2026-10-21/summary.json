@@ -1,0 +1,131 @@
+{
+  "scope": "local components and actual route-stage with local artifact adapter; not production or full ingestion",
+  "sourceCommit": "cb3b744c20e3819a874b2c02651be0a5e59b514a",
+  "stage": [
+    {
+      "scenario": "kreuzberg-formulas-math",
+      "router": "heuristic",
+      "arms": {
+        "off": {
+          "blocks": 5,
+          "medianMs": 24.793601000000308,
+          "rangeMs": [
+            23.783400999999913,
+            29.855015000000094
+          ],
+          "httpRequests": 0,
+          "rasterPuts": 0,
+          "rasterGets": 0,
+          "observed": 0,
+          "errors": 0
+        },
+        "shadow": {
+          "blocks": 5,
+          "medianMs": 26.27728100000013,
+          "rangeMs": [
+            24.692571999999927,
+            32.78423499999985
+          ],
+          "httpRequests": 0,
+          "rasterPuts": 0,
+          "rasterGets": 0,
+          "observed": 0,
+          "errors": 0
+        }
+      }
+    },
+    {
+      "scenario": "kreuzberg-tables-invoice",
+      "router": "heuristic",
+      "arms": {
+        "off": {
+          "blocks": 5,
+          "medianMs": 22.005529999999908,
+          "rangeMs": [
+            20.462649000000056,
+            23.9975129999998
+          ],
+          "httpRequests": 0,
+          "rasterPuts": 0,
+          "rasterGets": 0,
+          "observed": 0,
+          "errors": 0
+        },
+        "shadow": {
+          "blocks": 5,
+          "medianMs": 23.707442000000356,
+          "rangeMs": [
+            21.568764999999985,
+            27.420957000000044
+          ],
+          "httpRequests": 0,
+          "rasterPuts": 0,
+          "rasterGets": 0,
+          "observed": 0,
+          "errors": 0
+        }
+      }
+    },
+    {
+      "scenario": "menu-scan",
+      "router": "baseline",
+      "arms": {
+        "off": {
+          "blocks": 5,
+          "medianMs": 28.373307000000295,
+          "rangeMs": [
+            26.37754999999993,
+            34.80385700000011
+          ],
+          "httpRequests": 0,
+          "rasterPuts": 0,
+          "rasterGets": 0,
+          "observed": 0,
+          "errors": 0
+        },
+        "shadow": {
+          "blocks": 5,
+          "medianMs": 193.79976299999998,
+          "rangeMs": [
+            185.15690199999995,
+            199.38307000000032
+          ],
+          "httpRequests": 5,
+          "rasterPuts": 5,
+          "rasterGets": 0,
+          "observed": 5,
+          "errors": 0
+        }
+      }
+    }
+  ],
+  "observer": {
+    "direct": {
+      "blocks": 5,
+      "requests": 60,
+      "completed": 60,
+      "medianBlockMs": 1018.2413379999998,
+      "rangeBlockMs": [
+        1013.4624029999995,
+        1039.854045
+      ]
+    },
+    "cached": {
+      "blocks": 5,
+      "requests": 20,
+      "completed": 60,
+      "medianBlockMs": 355.5935710000001,
+      "rangeBlockMs": [
+        339.351173,
+        385.77068599999984
+      ]
+    }
+  },
+  "rawRoot": "/home/dan/data/docslurp-evals/runs/router-layout-20261021",
+  "inputs": "See hash-pinned raw receipts outside source tree",
+  "productionRollout": false,
+  "rawHashes": {
+    "stage-scenario-confirmation/stage-results.json": "a6a2427ebb7db4ad1e5f579e43fb8a2017feac1ad56f28453978a1d4b942c3f0",
+    "final-observer-raw/observer-results.json": "9ecad2ffe381f44751853ae07aaea4b5b4327f15e20c2e115edea1e1902d288f"
+  }
+}

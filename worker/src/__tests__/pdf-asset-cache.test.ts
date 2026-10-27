@@ -1,7 +1,7 @@
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { Document } from "../models.js";
 import {
@@ -126,11 +126,21 @@ describe("PdfRasterCache", () => {
       pageCount: 1,
     };
 
+    const onRenderedPage = vi.fn(async (page) => {
+      expect(artifacts.get(page.artifactKey)?.bytes).toBe(page.bytes);
+      expect(page.bytes.toString()).toBe("jpeg bytes");
+      expect(page.engine).toBeUndefined();
+      expect(page.dpi).toBeUndefined();
+    });
     const [page] = await cache.renderSelectedPages({
       document,
       runId: "run-1",
       pageNumbers: [1],
+      onRenderedPage,
     });
+    expect(onRenderedPage).toHaveBeenCalledOnce();
+    await cache.renderSelectedPages({ document, runId: "run-1", pageNumbers: [1], onRenderedPage });
+    expect(onRenderedPage).toHaveBeenCalledOnce();
 
     expect(page.mimeType).toBe("image/jpeg");
     expect(page.artifactKey).toMatch(/page-1\.jpg$/);
@@ -174,16 +184,24 @@ describe("PdfRasterCache", () => {
     const sourceCache = new PdfSourceCache(sourceStorage as any);
     const cache = new PdfRasterCache(runner as any, storage as any, sourceCache);
 
+    const onRenderedPage = vi.fn(async (page) => {
+      expect(artifacts.get(page.artifactKey)).toBe(page.bytes);
+      expect(page.bytes.toString()).toBe(`page ${page.pageNumber}`);
+      expect(page).toMatchObject({ mimeType: "image/png", engine: "pdftoppm", dpi: 150 });
+    });
     const first = await cache.renderSelectedPages({
       document: makeDocument(),
       runId: "run-1",
       pageNumbers: [5, 2, 3, 3, 99],
+      onRenderedPage,
     });
     const second = await cache.renderSelectedPages({
       document: makeDocument(),
       runId: "run-1",
       pageNumbers: [2, 3, 5],
+      onRenderedPage,
     });
+    expect(onRenderedPage.mock.calls.map(([page]) => page.pageNumber)).toEqual([2, 3, 5]);
 
     expect(ranges).toEqual([[2, 2], [3, 3], [5, 5]]);
     expect(first.map((page) => page.pageNumber)).toEqual([2, 3, 5]);

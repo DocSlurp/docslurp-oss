@@ -42,7 +42,10 @@ export async function renderDocumentPage(deps: { store: Store; storage: Artifact
   }
   const started = Date.now();
   const sources = new PdfSourceCache(deps.storage);
-  const cache = new PdfRasterCache(deps.runner, deps.storage, sources);
+  // Export renders back the browser's "Download PNG" (it validates the PNG signature), so they stay
+  // PNG; reader renders follow the stored page-image format (lossless WebP by default).
+  // Reader renders are interactive (someone is waiting on the page): effort 1 keeps encode latency low.
+  const cache = new PdfRasterCache(deps.runner, deps.storage, sources, quality === "export" ? { format: "png" } : { webpEffort: 1 });
   const [page] = await cache.renderSelectedPages({ document, runId: input.runId, pageNumbers: [input.pageNumber], dpi, signal }).finally(() => sources.clear());
   if (!page) throw new Error("Requested page was not rendered");
   const ledger = new PipelineUsageEventLedger();

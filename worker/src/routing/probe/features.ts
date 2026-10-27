@@ -72,7 +72,11 @@ export function laplacianVariance(gray: Uint8Array, width: number, height: numbe
 /** numpy.percentile (linear) of a uint8 image through its histogram. */
 export function percentiles(gray: Uint8Array, qs: number[]): number[] {
   const hist = new Uint32Array(256);
-  for (const v of gray) hist[v]!++;
+  for (let i = 0; i < gray.length; i++) hist[gray[i]!]!++;
+  return histogramPercentiles(hist, gray.length, qs);
+}
+
+function histogramPercentiles(hist: Uint32Array, length: number, qs: number[]): number[] {
   const at = (rank: number): number => {
     let seen = 0;
     for (let v = 0; v < 256; v++) {
@@ -82,12 +86,28 @@ export function percentiles(gray: Uint8Array, qs: number[]): number[] {
     return 255;
   };
   return qs.map((q) => {
-    const pos = ((gray.length - 1) * q) / 100;
+    const pos = ((length - 1) * q) / 100;
     const lo = Math.floor(pos);
     const frac = pos - lo;
     const a = at(lo);
-    return frac === 0 ? a : a + (at(Math.min(lo + 1, gray.length - 1)) - a) * frac;
+    return frac === 0 ? a : a + (at(Math.min(lo + 1, length - 1)) - a) * frac;
   });
+}
+
+/** Exact image diagnostics, sharing the histogram for contrast and brightness. */
+export function grayImageStatistics(gray: Uint8Array, width: number, height: number): {
+  blur: number; contrast: number; brightness: number;
+} {
+  const hist = new Uint32Array(256);
+  for (let i = 0; i < gray.length; i++) hist[gray[i]!]!++;
+  let sum = 0;
+  for (let value = 0; value < hist.length; value++) sum += value * hist[value]!;
+  const [p1, p99] = histogramPercentiles(hist, gray.length, [1, 99]) as [number, number];
+  return {
+    blur: laplacianVariance(gray, width, height),
+    contrast: (p99 - p1) / 255,
+    brightness: gray.length ? sum / gray.length / 255 : 0,
+  };
 }
 
 export type TextLayerStatusValue = "ok" | "suspect" | "absent" | "unknown" | "ocr-layer";

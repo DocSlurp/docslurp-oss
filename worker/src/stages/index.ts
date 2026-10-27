@@ -3,6 +3,7 @@ import type { CapacityLeaseStore } from "../media/capacity/types.js";
 import type { MediaJournal } from "../media/types.js";
 import { pipelineStageOrder, type PipelineRunStage } from "@docslurp/shared";
 
+import { readLayoutObserverConfig, RoutingLayoutObserver } from "../layout/routing-observer.js";
 import type { Config } from "../config.js";
 import type { Stage } from "../pipeline/pipeline.js";
 import type { CommandRunner } from "../tools/runner.js";
@@ -45,6 +46,13 @@ export function createStages(args: {
 }): Stage[] {
   const sourceCache = new PdfSourceCache(args.storage);
   const rasterCache = new PdfRasterCache(args.runner, args.storage, sourceCache);
+  let layoutObserver: RoutingLayoutObserver | undefined;
+  try {
+    const layoutConfig = readLayoutObserverConfig();
+    if (layoutConfig) layoutObserver = new RoutingLayoutObserver(layoutConfig);
+  } catch (error) {
+    console.warn(`[route-pages] layout shadow disabled: ${error instanceof Error ? error.message : String(error)}`);
+  }
   const stages: Record<PipelineRunStage, () => Stage> = {
     quarantine: () => new QuarantineStage(args.runner, args.storage, args.config),
     "format-detect": () => new FormatDetectStage(args.storage),
@@ -61,7 +69,7 @@ export function createStages(args: {
     "render-images": () => new RenderImagesStage(rasterCache, args.storage, args.config),
     // Classify after initial canonical/format prep so downstream stages can honor playbook overrides.
     "classify-route": () => new ClassifyRouteStage(args.storage),
-    "route-pages": () => new RoutePagesStage(args.storage, args.config, sourceCache, args.runner),
+    "route-pages": () => new RoutePagesStage(args.storage, args.config, sourceCache, args.runner, { layoutObserver, rasterCache }),
     "extract-markdown": () => new ExtractMarkdownStage(args.runner, args.storage, args.config, sourceCache, args.mediaJournal, args.capacityStore),
     "extract-html": () => new ExtractHtmlStage(args.runner, args.storage, sourceCache),
     "pii-detect": () => new PiiDetectStage(args.runner, args.storage, args.config),

@@ -1,0 +1,23 @@
+{
+  "schema": "docslurp-evaluation-integrity@v1",
+  "passed": true,
+  "datasetHash": "51dee63a4983d54ac1d91fb9d0eb7aac90bef84a88ee1296c57ca0584cee7c05",
+  "productionHash": "27320e24c4e7044ba9c6c0633117f75f8e1820bbef20358030a2498ad691ebf8",
+  "gitHead": "423d0411d121116dae092359bf676e0a855441ca",
+  "base": "5fe9ac4e",
+  "scannedFiles": 1737,
+  "scannedProductionFiles": 1062,
+  "cases": 32,
+  "findings": [],
+  "ontologies": [
+    {
+      "artifactSha256": "76659b3fb4dcfafed31408082f65a42994638343eba9ebe1f2425b94c421f0ad",
+      "contract": {
+        "path": "worker/src/layout/image-layout.ts",
+        "gitCommit": "375851348afb5bdec606487e7276b664d35c62d8",
+        "sha256": "03739c772b47e9ce45a05f7a7a75db3b9f5c6a9604cc1ec7016624070443d033",
+        "exportName": "imageLayoutLabels"
+      }
+    }
+  ]
+}

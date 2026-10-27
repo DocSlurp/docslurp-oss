@@ -1,0 +1,12 @@
+
+ RUN  v5.0.4 /home/dan/worktrees/docslurp-oss/layout-image-campaign/worker
+
+
+ Test Files  40 passed (40)
+      Tests  392 passed | 1 skipped (393)
+   Start at  14:05:33
+   Duration  4.63s (import 66%, tests 27%, transform 5%, setup 1%, worker 1%)
+
+    Isolate  40 workers spawned · ~141ms startup each (spawn + environment, per file)
+             at least ~663ms faster with isolate: false — reuses workers across files instead of one per file
+

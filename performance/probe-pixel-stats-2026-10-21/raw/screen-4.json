@@ -1,0 +1,96 @@
+{
+  "phase": "screen",
+  "block": 4,
+  "observedAt": "2026-10-21T19:58:41.381Z",
+  "baselineRef": "5fe9ac4e1ea4ddaf61319a271a729c0365bb1758",
+  "candidateSha256": {
+    "probe": "6c2859318ec0d18b927fd4c535afb06ccebcad2fcc83214017ebe38689609a34",
+    "features": "537574aa0f9c6412ab374890f23886b4846fd8764241d7aaaee45029e5b880f3"
+  },
+  "node": "v26.8.2",
+  "cpu": "Intel(R) Core(TM) i7-7700K CPU @ 4.20GHz",
+  "native": {
+    "version": "0.13.0",
+    "gitSha": "8709e8c20c5c27fd11ec51f72e6fc8e055e2c714",
+    "features": [
+      "text",
+      "markdown",
+      "spans",
+      "images",
+      "drawings",
+      "widgets",
+      "annotations",
+      "links",
+      "tables",
+      "render:png",
+      "render:jpeg",
+      "render:webp",
+      "scan",
+      "fonts",
+      "inspect",
+      "ocr-fill"
+    ]
+  },
+  "names": [
+    "kreuzberg-tables-invoice.pdf",
+    "multicolumn-figures-report.pdf"
+  ],
+  "cases": [
+    {
+      "file": "kreuzberg-tables-invoice.pdf",
+      "inputSha256": "3da04fecc8a7f8ae6d0eecaa0be3a6b0c70aa97e2062e875f965caa6423b4b45",
+      "pageCount": 1,
+      "semanticSha256": "278d6883781fad506cf9e8719f9eee1231fdb2241449924f68309da613ba3ab9",
+      "exactRows": true,
+      "exactPixels": true,
+      "runs": [
+        {
+          "arm": "baseline",
+          "elapsedMs": 103.247883,
+          "cpuMs": 108.558,
+          "pages": 3,
+          "statsElapsedMs": 1536.7095330000002,
+          "statsCpuMs": 1544.737,
+          "statsIterations": 100
+        },
+        {
+          "arm": "candidate",
+          "elapsedMs": 64.02142300000014,
+          "cpuMs": 71.692,
+          "pages": 3,
+          "statsElapsedMs": 270.4276869999999,
+          "statsCpuMs": 270.305,
+          "statsIterations": 100
+        }
+      ]
+    },
+    {
+      "file": "multicolumn-figures-report.pdf",
+      "inputSha256": "2c63d63f9e9249e458ab5e922ba08d07016f6ff7d5e74207c55c42a49ebd63cd",
+      "pageCount": 1,
+      "semanticSha256": "c69daa3a8635b880a98fe35e130f48a60c30b1fdd597c825040a826f3df5101a",
+      "exactRows": true,
+      "exactPixels": true,
+      "runs": [
+        {
+          "arm": "baseline",
+          "elapsedMs": 130.20319000000018,
+          "cpuMs": 150.654,
+          "pages": 3,
+          "statsElapsedMs": 1591.232791,
+          "statsCpuMs": 1584.242,
+          "statsIterations": 100
+        },
+        {
+          "arm": "candidate",
+          "elapsedMs": 92.31828899999982,
+          "cpuMs": 106.304,
+          "pages": 3,
+          "statsElapsedMs": 293.74456400000054,
+          "statsCpuMs": 299.08,
+          "statsIterations": 100
+        }
+      ]
+    }
+  ]
+}

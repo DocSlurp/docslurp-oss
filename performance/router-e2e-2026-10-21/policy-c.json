@@ -1,0 +1,26 @@
+{
+  "schema": "router-e2e-counterfactual-policy@v1",
+  "id": "C-layout-text-only-gate",
+  "declaredAt": "2026-10-21T22:55:00Z",
+  "declaredBefore": "Any arm A or arm B benchmark run of this experiment. Thresholds are fixed here and must not be tuned on these results.",
+  "evaluation": "Offline counterfactual from arm B layout-shadow evidence, compared with arm A actual extraction. No product code implements this policy.",
+  "scope": "Pages that arm A actually sent to an extraction call beyond the native text layer: hosted VLM page calls (vision-extract) and local OCR calls, as recorded in arm A usage_events and performance_log.",
+  "rule": {
+    "skipExtractionCallWhenAllTrue": [
+      "Arm B has a successful layout observation for the same document page (selection routed or audit; errors, admission rejections, deadline skips and pages never observed do not qualify).",
+      "Every detected region with confidence >= 0.30 (the service threshold) has a text-like label: paragraph, title, header, footer, footnote, caption or number.",
+      "At least one paragraph region has confidence >= 0.50.",
+      "Detected text-like regions cover at least 5% of the image area (sum of region imageCoverage), so an empty or nearly empty detection never qualifies.",
+      "The page's native text layer is healthy: the arm B route-plan probe reports textLayerStatus == 'ok' for the page when available, and the page's native (pre-vision) Markdown has at least 50 words. Missing probe facts mean not healthy."
+    ],
+    "whenSkipped": "The page output becomes the native text-layer Markdown (the extract-markdown output for that page), and the avoided call's actual arm A tokens, USD and latency are counted as avoided.",
+    "otherwise": "Arm A behavior unchanged."
+  },
+  "qualityMeasure": {
+    "tokenization": "Lowercase, Unicode NFKC, split on non-alphanumeric characters, drop empty tokens.",
+    "metric": "Bag-of-tokens F1 between a candidate page output and the gold/silver reference page Markdown.",
+    "loss": "Per skipped page: F1(arm A actual final page output, reference) - F1(native page Markdown, reference). Report the distribution, mean, and count of pages with loss > 0.05 (material loss).",
+    "noReference": "Pages without a reference report F1(native, arm A actual) only as agreement with A, not as quality."
+  },
+  "auditFindingRule": "An audit-selected (router-bypassed, accepted-text) page is a candidate wrong native acceptance when layout reports a table, figure, chart, formula, formula_number, code or seal region with confidence >= 0.50. Each candidate is then checked against its reference by native F1; candidates below 0.90 F1 are reported as confirmed-incomplete native acceptances."
+}

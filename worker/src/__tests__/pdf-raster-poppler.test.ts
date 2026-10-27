@@ -3,6 +3,7 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
+import sharp from "sharp";
 import { describe, expect, it, vi } from "vitest";
 import { PdfRasterCache, PdfSourceCache } from "../pipeline/pdf-asset-cache.js";
 import { CommandRunner } from "../tools/runner.js";
@@ -63,10 +64,32 @@ describe.skipIf(!available)("real Poppler allocation geometry", () => {
       expect(result!.widthPx! * result!.heightPx!).toBeLessThanOrEqual(16_000_000);
       expect(Math.max(result!.widthPx!, result!.heightPx!)).toBeLessThanOrEqual(4000);
       if (expected) expect([result!.widthPx, result!.heightPx]).toEqual(expected);
-      // Prove actual PNG bytes, rather than trusting only the planned command.
-      expect(image!.readUInt32BE(16)).toBe(result!.widthPx);
-      expect(image!.readUInt32BE(20)).toBe(result!.heightPx);
+      // Prove the stored bytes (WebP when cwebp is installed, else PNG), not only the planned command.
+      const stored = await sharp(image!).metadata();
+      expect(stored.format).toBe(result!.mimeType === "image/webp" ? "webp" : "png");
+      expect([stored.width, stored.height]).toEqual([result!.widthPx, result!.heightPx]);
       expect((await readFile(source)).subarray(0, 8).toString()).toBe("%PDF-1.7");
+    } finally {
+      vi.restoreAllMocks();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("reports the effective DPI of an oversized page (11x17 in at 300 dpi renders at ~235)", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "poppler-dpi-"));
+    try {
+      const source = path.join(root, "tabloid.pdf");
+      await writeFile(source, pdf(0, 1, [792, 1224]));
+      const runner = new CommandRunner();
+      vi.spyOn(runner, "run").mockImplementation(async plan => execute(plan.binary, plan.args, { timeout: 30_000 }));
+      const storage = { objectSize: async () => null, putBytes: async () => {}, uri: (key: string) => key };
+      const sources = { get: async () => ({ path: source }) } as unknown as PdfSourceCache;
+      const cache = new PdfRasterCache(runner, storage, sources, { engine: "pdftoppm" });
+      const document = { id: "doc", userId: "user", mimeType: "application/pdf", pageCount: 1 } as Document;
+      const [result] = await cache.renderSelectedPages({ document, runId: "run", pageNumbers: [1], dpi: 300 });
+      expect(result!.dpi).toBe(300);
+      expect(result!.effectiveDpi).toBe(235);
+      expect(Math.max(result!.widthPx!, result!.heightPx!)).toBe(4000);
     } finally {
       vi.restoreAllMocks();
       await rm(root, { recursive: true, force: true });

@@ -1,0 +1,3897 @@
+{
+  "schema": "router-e2e-combined@v1",
+  "observedAt": "2026-10-21",
+  "host": "local workstation, 8 vCPU visible to otelcol, 64 GB; Node v26.8.2; Postgres pgvector pg17, MinIO, Temporal 1.29.7 (isolated compose project router-e2e-20261021)",
+  "builds": {
+    "main": "e15996da (branch HEAD before this benchmark's fixes)",
+    "postfix": "755c9d51 (with budget-guard, metadata-encoding and dedup-retry fixes)"
+  },
+  "productionPolicy": "PAGE_ROUTER_MODE=shadow, DOCSLURP_PDF_ENGINE=shadow, workspace pipeline defaults ('{}'): router decision-model (openai/gpt-6-luna-decisions first), vision google/gemini-3.1-flash-lite (good-fast-hosted, max 4 pages/doc), embeddings perplexity/pplx-embed-v1-0.6b, contextual preambles qwen/qwen3.5-flash-02-23",
+  "layout": {
+    "model": "PaddlePaddle/PP-DocLayout-S",
+    "revision": "8ac289e66575bb9bba6e15c53719d8b15cc9b3b2",
+    "artifactSha256": "e3f62a17e6d5a3e8334e979001a69bdc3c79bc45a55c0d6a98f33e657903b327",
+    "inferenceProfileSha256": "d82a86f5f1f2172cf1a760b85ece8c67f8ea60fc599b99b0f7283926c1336a66",
+    "runtime": "onnxruntime 1.31.0 CPU, 4 threads, resident loopback service",
+    "auditPages": 1,
+    "maxPages": 4,
+    "timeoutMs": 2000
+  },
+  "spend": {
+    "providerUsd": 0.4267,
+    "customerPricedUsd": 0.5121,
+    "paidCalls": 1687,
+    "scope": "every paid call in the isolated database: smoke, pilots, warmups, main and postfix runs",
+    "openRouterBalanceBeforeUsd": 92.77,
+    "openRouterBalanceAfterUsd": 92.34,
+    "capUsd": 5
+  },
+  "aiUsageLogCheck": {
+    "result": "[ai-usage] log lines equal persisted usage_events rows for every paid metric",
+    "perMetric": {
+      "contextual-chunk-preamble": 512,
+      "embedding-tokens": 532,
+      "page-analysis": 231,
+      "page-route-decision": 393,
+      "page-route-decision-canary": 19
+    }
+  },
+  "telemetry": "No local SigNoz. Worker/API OTLP exported to a local OpenTelemetry Collector file exporter; S3 operation counts come from those spans. Production SigNoz was not used.",
+  "runs": {
+    "main": {
+      "schema": "router-e2e-summary@v1",
+      "tag": "main",
+      "generatedAt": "2026-10-21T23:25:04.068Z",
+      "corpus": {
+        "documents": 123,
+        "pages": 145,
+        "byKind": {
+          "tier-1": {
+            "documents": 11,
+            "pages": 22
+          },
+          "tier-3": {
+            "documents": 3,
+            "pages": 3
+          },
+          "tier-2": {
+            "documents": 7,
+            "pages": 7
+          },
+          "scan": {
+            "documents": 17,
+            "pages": 18
+          },
+          "tier-5": {
+            "documents": 13,
+            "pages": 13
+          },
+          "raster-only": {
+            "documents": 29,
+            "pages": 29
+          },
+          "native-math": {
+            "documents": 12,
+            "pages": 12
+          },
+          "repo-fixture": {
+            "documents": 11,
+            "pages": 15
+          },
+          "native-business": {
+            "documents": 9,
+            "pages": 13
+          },
+          "quirk": {
+            "documents": 5,
+            "pages": 7
+          },
+          "image": {
+            "documents": 6,
+            "pages": 6
+          }
+        },
+        "rule": "development splits only; deterministic sorted selection; no held-out or test items"
+      },
+      "arms": {
+        "A": {
+          "documents": 123,
+          "pages": 145,
+          "completed": 122,
+          "failed": 1,
+          "timedOut": 0,
+          "uploadErrors": 0,
+          "extractionCalls": {
+            "nativeAcceptedPages": 88,
+            "vlmPageCalls": 57,
+            "localOcrCommands": 0,
+            "decisionModelCalls": 97,
+            "layoutRequests": 0,
+            "layoutFailedObservations": 0
+          },
+          "paid": {
+            "calls": 403,
+            "inputTokens": 482377,
+            "outputTokens": 60615,
+            "providerUsd": 0.10462293499999996,
+            "customerUsd": 0.12554752199999997
+          },
+          "usageByModel": {
+            "openrouter/openai/gpt-6-luna-decisions/page-route-decision:inset-triage": {
+              "calls": 19,
+              "input": 4972,
+              "output": 0,
+              "customerCents": 0.059664,
+              "providerCents": 0.04971999999999999,
+              "costSources": [
+                "catalog-input-price"
+              ]
+            },
+            "docslurp/page-base-fee/page-base-fee": {
+              "calls": 122,
+              "input": 0,
+              "output": 0,
+              "customerCents": 0,
+              "providerCents": 0,
+              "costSources": [
+                "configured"
+              ]
+            },
+            "openrouter/qwen/qwen3.5-flash-02-23/contextual-chunk-preamble": {
+              "calls": 122,
+              "input": 94085,
+              "output": 11712,
+              "customerCents": 1.0992773999999996,
+              "providerCents": 0.9160645000000003,
+              "costSources": [
+                "provider"
+              ]
+            },
+            "openrouter/perplexity/pplx-embed-v1-0.6b/embedding-tokens": {
+              "calls": 127,
+              "input": 268710,
+              "output": 0,
+              "customerCents": 0.1289808,
+              "providerCents": 0.107484,
+              "costSources": [
+                "estimate"
+              ]
+            },
+            "openrouter/openai/gpt-6-luna-decisions/page-route-decision:triage": {
+              "calls": 53,
+              "input": 36743,
+              "output": 0,
+              "customerCents": 0.440916,
+              "providerCents": 0.3674300000000002,
+              "costSources": [
+                "catalog-input-price"
+              ]
+            },
+            "openrouter/google/gemini-3.1-flash-lite/page-analysis": {
+              "calls": 57,
+              "input": 65293,
+              "output": 48903,
+              "customerCents": 10.76133,
+              "providerCents": 8.967774999999998,
+              "costSources": [
+                "provider"
+              ]
+            },
+            "openrouter/openai/gpt-6-luna-decisions/page-route-decision-canary:canary": {
+              "calls": 2,
+              "input": 974,
+              "output": 0,
+              "customerCents": 0.011688,
+              "providerCents": 0.00974,
+              "costSources": [
+                "catalog-input-price"
+              ]
+            },
+            "openrouter/cloudflare/clef-flash/page-route-decision:triage": {
+              "calls": 16,
+              "input": 8996,
+              "output": 0,
+              "customerCents": 0.04102176000000001,
+              "providerCents": 0.0341848,
+              "costSources": [
+                "catalog-input-price"
+              ]
+            },
+            "openrouter/cloudflare/clef-flash/page-route-decision-canary:canary": {
+              "calls": 1,
+              "input": 380,
+              "output": 0,
+              "customerCents": 0.0017328,
+              "providerCents": 0.001444,
+              "costSources": [
+                "catalog-input-price"
+              ]
+            },
+            "openrouter/cloudflare/clef-flash/page-route-decision:inset-triage": {
+              "calls": 6,
+              "input": 2224,
+              "output": 0,
+              "customerCents": 0.01014144,
+              "providerCents": 0.008451199999999999,
+              "costSources": [
+                "catalog-input-price"
+              ]
+            }
+          },
+          "latency": {
+            "endToEndWallMs": {
+              "n": 123,
+              "mean": 5500.3983739837395,
+              "p50": 4092,
+              "p95": 11531.699999999993,
+              "max": 42980,
+              "min": 2076,
+              "sum": 676549
+            },
+            "serverRunMs": {
+              "n": 123,
+              "mean": 5343.073170731707,
+              "p50": 3982,
+              "p95": 11435.899999999992,
+              "max": 42955,
+              "min": 1995,
+              "sum": 657198
+            },
+            "stageMs": {
+              "quarantine": {
+                "n": 123,
+                "mean": 13.983739837398375,
+                "p50": 13,
+                "p95": 18.89999999999999,
+                "max": 25,
+                "min": 11,
+                "sum": 1720
+              },
+              "format-detect": {
+                "n": 123,
+                "mean": 8.422764227642276,
+                "p50": 8,
+                "p95": 11,
+                "max": 21,
+                "min": 6,
+                "sum": 1036
+              },
+              "to-canonical": {
+                "n": 123,
+                "mean": 8.463414634146341,
+                "p50": 8,
+                "p95": 10,
+                "max": 58,
+                "min": 7,
+                "sum": 1041
+              },
+              "format-tooling": {
+                "n": 123,
+                "mean": 9.78048780487805,
+                "p50": 9,
+                "p95": 12.899999999999991,
+                "max": 21,
+                "min": 7,
+                "sum": 1203
+              },
+              "normalize": {
+                "n": 123,
+                "mean": 5.609756097560975,
+                "p50": 5,
+                "p95": 7,
+                "max": 13,
+                "min": 4,
+                "sum": 690
+              },
+              "split-pages": {
+                "n": 123,
+                "mean": 15.520325203252032,
+                "p50": 15,
+                "p95": 23,
+                "max": 40,
+                "min": 12,
+                "sum": 1909
+              },
+              "pdf-tooling": {
+                "n": 123,
+                "mean": 12.626016260162602,
+                "p50": 12,
+                "p95": 15,
+                "max": 21,
+                "min": 10,
+                "sum": 1553
+              },
+              "classify-route": {
+                "n": 123,
+                "mean": 14.065040650406504,
+                "p50": 13,
+                "p95": 21,
+                "max": 35,
+                "min": 9,
+                "sum": 1730
+              },
+              "extract-markdown": {
+                "n": 123,
+                "mean": 490.2439024390244,
+                "p50": 242,
+                "p95": 1200.2999999999995,
+                "max": 6079,
+                "min": 194,
+                "sum": 60300
+              },
+              "render-images": {
+                "n": 123,
+                "mean": 261.0406504065041,
+                "p50": 14,
+                "p95": 994.299999999999,
+                "max": 2091,
+                "min": 11,
+                "sum": 32108
+              },
+              "route-pages": {
+                "n": 123,
+                "mean": 517.7479674796748,
+                "p50": 456,
+                "p95": 1272.2999999999993,
+                "max": 5612,
+                "min": 4,
+                "sum": 63683
+              },
+              "vision-extract": {
+                "n": 123,
+                "mean": 1697,
+                "p50": 13,
+                "p95": 5899.299999999998,
+                "max": 38953,
+                "min": 10,
+                "sum": 208731
+              },
+              "embed": {
+                "n": 123,
+                "mean": 1764.739837398374,
+                "p50": 1666,
+                "p95": 2533.4999999999995,
+                "max": 3471,
+                "min": 248,
+                "sum": 217063
+              },
+              "index": {
+                "n": 123,
+                "mean": 89.22764227642277,
+                "p50": 53,
+                "p95": 255.7999999999998,
+                "max": 784,
+                "min": 1,
+                "sum": 10975
+              }
+            },
+            "routePagesLayoutShadowMs": {
+              "n": 117,
+              "mean": 0,
+              "p50": 0,
+              "p95": 0,
+              "max": 0,
+              "min": 0,
+              "sum": 0
+            }
+          },
+          "throughput": {
+            "pagesPerMinuteSequential": 12.859378995460785,
+            "timeToIngest100PagesMin": 7.776425287356322,
+            "pagesPerUsdProvider": 1385.9293853685147,
+            "pagesPerUsdCustomer": 1154.941154473762,
+            "basis": "Sequential single-document submissions on one local worker (docConcurrency 4 available, 1 document in flight); runtime = client wall time upload->completed; cost = paid provider calls only (local CPU and storage not priced)."
+          },
+          "storage": {
+            "tracedS3Ops": {
+              "GetObject": 1718,
+              "PutObject": 2670,
+              "CreateMultipartUpload": 83,
+              "UploadPart": 83,
+              "CompleteMultipartUpload": 83,
+              "HeadObject": 116
+            },
+            "tracedGetBytes": 232026224,
+            "storedObjects": 2753,
+            "storedBytes": 107441119,
+            "storedRasterObjects": 62,
+            "storedRasterBytes": 27211139,
+            "note": "Ops counted from worker/API OTLP spans tagged with docslurp.runId (instrumented S3 client). LanceDB's native S3 traffic is not instrumented and is excluded. Stored = objects under the run prefix at the end (overwrites counted once)."
+          },
+          "rasters": {
+            "pdftoppmRenders": 55,
+            "renderImagesRendered": 59,
+            "renderImagesReused": 0
+          },
+          "resources": {
+            "workerCpuSecPerDoc": {
+              "n": 123,
+              "mean": 1.0530894308943088,
+              "p50": 0.9499999999999993,
+              "p95": 1.9259999999999995,
+              "max": 2.259999999999998,
+              "min": 0.490000000000002,
+              "sum": 129.53
+            },
+            "layoutCpuSecPerDoc": {
+              "n": 123,
+              "mean": 0.00024390243902441754,
+              "p50": 0,
+              "p95": 0,
+              "max": 0.010000000000001563,
+              "min": 0,
+              "sum": 0.030000000000003357
+            },
+            "workerCpuSecTotal": 129.53,
+            "layoutCpuSecTotal": 0.030000000000003357,
+            "peakWorkerRssMb": 607.9140625,
+            "peakLayoutRssMb": 130.34375
+          },
+          "histograms": {
+            "endToEndWallMs": [
+              {
+                "lo": 0,
+                "hi": 2000,
+                "n": 0
+              },
+              {
+                "lo": 2000,
+                "hi": 4000,
+                "n": 55
+              },
+              {
+                "lo": 4000,
+                "hi": 6000,
+                "n": 32
+              },
+              {
+                "lo": 6000,
+                "hi": 8000,
+                "n": 17
+              },
+              {
+                "lo": 8000,
+                "hi": 10000,
+                "n": 10
+              },
+              {
+                "lo": 10000,
+                "hi": 15000,
+                "n": 7
+              },
+              {
+                "lo": 15000,
+                "hi": 20000,
+                "n": 0
+              },
+              {
+                "lo": 20000,
+                "hi": 40000,
+                "n": 1
+              },
+              {
+                "lo": 40000,
+                "hi": 1000000000,
+                "n": 1
+              }
+            ],
+            "providerCentsPerDoc": [
+              {
+                "lo": 0,
+                "hi": 0.01,
+                "n": 45
+              },
+              {
+                "lo": 0.01,
+                "hi": 0.05,
+                "n": 39
+              },
+              {
+                "lo": 0.05,
+                "hi": 0.1,
+                "n": 6
+              },
+              {
+                "lo": 0.1,
+                "hi": 0.25,
+                "n": 23
+              },
+              {
+                "lo": 0.25,
+                "hi": 0.5,
+                "n": 9
+              },
+              {
+                "lo": 0.5,
+                "hi": 1,
+                "n": 0
+              },
+              {
+                "lo": 1,
+                "hi": 2,
+                "n": 0
+              },
+              {
+                "lo": 2,
+                "hi": 1000000000,
+                "n": 1
+              }
+            ]
+          },
+          "byKind": {
+            "tier-3": {
+              "documents": 3,
+              "pages": 3,
+              "vlmPageCalls": 0,
+              "providerUsd": 0.000244311,
+              "wallMsP50": 3089,
+              "wallMsP95": 3531.8
+            },
+            "tier-5": {
+              "documents": 13,
+              "pages": 13,
+              "vlmPageCalls": 2,
+              "providerUsd": 0.001326305,
+              "wallMsP50": 2572,
+              "wallMsP95": 3785.399999999999
+            },
+            "tier-2": {
+              "documents": 7,
+              "pages": 7,
+              "vlmPageCalls": 2,
+              "providerUsd": 0.0021275770000000003,
+              "wallMsP50": 3331,
+              "wallMsP95": 6438.099999999999
+            },
+            "raster-only": {
+              "documents": 29,
+              "pages": 29,
+              "vlmPageCalls": 29,
+              "providerUsd": 0.042867507000000006,
+              "wallMsP50": 7090,
+              "wallMsP95": 12915.599999999999
+            },
+            "native-math": {
+              "documents": 12,
+              "pages": 12,
+              "vlmPageCalls": 1,
+              "providerUsd": 0.0022370510000000003,
+              "wallMsP50": 3585.5,
+              "wallMsP95": 5661.249999999999
+            },
+            "scan": {
+              "documents": 17,
+              "pages": 18,
+              "vlmPageCalls": 10,
+              "providerUsd": 0.013354689,
+              "wallMsP50": 4832,
+              "wallMsP95": 7141
+            },
+            "image": {
+              "documents": 6,
+              "pages": 6,
+              "vlmPageCalls": 0,
+              "providerUsd": 0.000482662,
+              "wallMsP50": 6736.5,
+              "wallMsP95": 8405.25
+            },
+            "repo-fixture": {
+              "documents": 11,
+              "pages": 15,
+              "vlmPageCalls": 8,
+              "providerUsd": 0.031559874,
+              "wallMsP50": 3069,
+              "wallMsP95": 25786
+            },
+            "tier-1": {
+              "documents": 11,
+              "pages": 22,
+              "vlmPageCalls": 0,
+              "providerUsd": 0.0011442750000000002,
+              "wallMsP50": 2825,
+              "wallMsP95": 3835.5
+            },
+            "native-business": {
+              "documents": 9,
+              "pages": 13,
+              "vlmPageCalls": 4,
+              "providerUsd": 0.0067689399999999985,
+              "wallMsP50": 4348,
+              "wallMsP95": 10633
+            },
+            "quirk": {
+              "documents": 5,
+              "pages": 7,
+              "vlmPageCalls": 1,
+              "providerUsd": 0.0025097440000000004,
+              "wallMsP50": 4087,
+              "wallMsP95": 6638.4
+            }
+          }
+        },
+        "B": {
+          "documents": 123,
+          "pages": 145,
+          "completed": 122,
+          "failed": 1,
+          "timedOut": 0,
+          "uploadErrors": 0,
+          "extractionCalls": {
+            "nativeAcceptedPages": 88,
+            "vlmPageCalls": 57,
+            "localOcrCommands": 0,
+            "decisionModelCalls": 97,
+            "layoutRequests": 117,
+            "layoutFailedObservations": 0
+          },
+          "paid": {
+            "calls": 403,
+            "inputTokens": 483934,
+            "outputTokens": 60615,
+            "providerUsd": 0.10549783499999998,
+            "customerUsd": 0.126597402
+          },
+          "usageByModel": {
+            "openrouter/openai/gpt-6-luna-decisions/page-route-decision-canary:canary": {
+              "calls": 3,
+              "input": 1461,
+              "output": 0,
+              "customerCents": 0.017532,
+              "providerCents": 0.014610000000000001,
+              "costSources": [
+                "catalog-input-price"
+              ]
+            },
+            "openrouter/openai/gpt-6-luna-decisions/page-route-decision:inset-triage": {
+              "calls": 25,
+              "input": 6580,
+              "output": 0,
+              "customerCents": 0.07896000000000002,
+              "providerCents": 0.0658,
+              "costSources": [
+                "catalog-input-price"
+              ]
+            },
+            "docslurp/page-base-fee/page-base-fee": {
+              "calls": 122,
+              "input": 0,
+              "output": 0,
+              "customerCents": 0,
+              "providerCents": 0,
+              "costSources": [
+                "configured"
+              ]
+            },
+            "local/PaddlePaddle/PP-DocLayout-S/layout-shadow": {
+              "calls": 117,
+              "input": 0,
+              "output": 0,
+              "customerCents": 0,
+              "providerCents": 0,
+              "costSources": []
+            },
+            "openrouter/qwen/qwen3.5-flash-02-23/contextual-chunk-preamble": {
+              "calls": 122,
+              "input": 94085,
+              "output": 11712,
+              "customerCents": 1.0992773999999996,
+              "providerCents": 0.9160645000000003,
+              "costSources": [
+                "provider"
+              ]
+            },
+            "openrouter/perplexity/pplx-embed-v1-0.6b/embedding-tokens": {
+              "calls": 127,
+              "input": 268710,
+              "output": 0,
+              "customerCents": 0.1289808,
+              "providerCents": 0.107484,
+              "costSources": [
+                "estimate"
+              ]
+            },
+            "openrouter/openai/gpt-6-luna-decisions/page-route-decision:triage": {
+              "calls": 69,
+              "input": 47805,
+              "output": 0,
+              "customerCents": 0.5736600000000001,
+              "providerCents": 0.47805000000000025,
+              "costSources": [
+                "catalog-input-price"
+              ]
+            },
+            "openrouter/google/gemini-3.1-flash-lite/page-analysis": {
+              "calls": 57,
+              "input": 65293,
+              "output": 48903,
+              "customerCents": 10.76133,
+              "providerCents": 8.967774999999998,
+              "costSources": [
+                "provider"
+              ]
+            }
+          },
+          "latency": {
+            "endToEndWallMs": {
+              "n": 123,
+              "mean": 5685.3983739837395,
+              "p50": 4348,
+              "p95": 11055.899999999994,
+              "max": 45464,
+              "min": 2076,
+              "sum": 699304
+            },
+            "serverRunMs": {
+              "n": 123,
+              "mean": 5551.878048780488,
+              "p50": 4215,
+              "p95": 10849.999999999995,
+              "max": 45260,
+              "min": 1913,
+              "sum": 682881
+            },
+            "stageMs": {
+              "quarantine": {
+                "n": 123,
+                "mean": 14.43089430894309,
+                "p50": 14,
+                "p95": 20,
+                "max": 32,
+                "min": 11,
+                "sum": 1775
+              },
+              "format-detect": {
+                "n": 123,
+                "mean": 8.097560975609756,
+                "p50": 8,
+                "p95": 10,
+                "max": 18,
+                "min": 6,
+                "sum": 996
+              },
+              "to-canonical": {
+                "n": 123,
+                "mean": 8.227642276422765,
+                "p50": 8,
+                "p95": 12,
+                "max": 16,
+                "min": 7,
+                "sum": 1012
+              },
+              "format-tooling": {
+                "n": 123,
+                "mean": 10.170731707317072,
+                "p50": 9,
+                "p95": 15.899999999999991,
+                "max": 39,
+                "min": 8,
+                "sum": 1251
+              },
+              "normalize": {
+                "n": 123,
+                "mean": 5.772357723577236,
+                "p50": 6,
+                "p95": 7,
+                "max": 15,
+                "min": 4,
+                "sum": 710
+              },
+              "pdf-tooling": {
+                "n": 123,
+                "mean": 12.8130081300813,
+                "p50": 12,
+                "p95": 17,
+                "max": 27,
+                "min": 10,
+                "sum": 1576
+              },
+              "split-pages": {
+                "n": 123,
+                "mean": 15.463414634146341,
+                "p50": 14,
+                "p95": 21,
+                "max": 49,
+                "min": 12,
+                "sum": 1902
+              },
+              "classify-route": {
+                "n": 123,
+                "mean": 14.1869918699187,
+                "p50": 12,
+                "p95": 22,
+                "max": 33,
+                "min": 9,
+                "sum": 1745
+              },
+              "extract-markdown": {
+                "n": 123,
+                "mean": 487.8780487804878,
+                "p50": 246,
+                "p95": 1164.3,
+                "max": 5799,
+                "min": 193,
+                "sum": 60009
+              },
+              "render-images": {
+                "n": 123,
+                "mean": 64.40650406504065,
+                "p50": 13,
+                "p95": 212.89999999999822,
+                "max": 2208,
+                "min": 10,
+                "sum": 7922
+              },
+              "route-pages": {
+                "n": 123,
+                "mean": 1069.7154471544716,
+                "p50": 901,
+                "p95": 2531.7999999999997,
+                "max": 3808,
+                "min": 4,
+                "sum": 131575
+              },
+              "vision-extract": {
+                "n": 123,
+                "mean": 1577.8861788617887,
+                "p50": 13,
+                "p95": 6379.7,
+                "max": 41324,
+                "min": 10,
+                "sum": 194080
+              },
+              "embed": {
+                "n": 123,
+                "mean": 1748.3739837398373,
+                "p50": 1637,
+                "p95": 2662.8999999999965,
+                "max": 5693,
+                "min": 170,
+                "sum": 215050
+              },
+              "index": {
+                "n": 123,
+                "mean": 85.34959349593495,
+                "p50": 56,
+                "p95": 254.19999999999993,
+                "max": 676,
+                "min": 0,
+                "sum": 10498
+              }
+            },
+            "routePagesLayoutShadowMs": {
+              "n": 117,
+              "mean": 592.4174697777805,
+              "p50": 439.16123399999924,
+              "p95": 1680.9244905999874,
+              "max": 2008.2219990000012,
+              "min": 132.8129439999757,
+              "sum": 69312.84396400032
+            }
+          },
+          "throughput": {
+            "pagesPerMinuteSequential": 12.440941278757164,
+            "timeToIngest100PagesMin": 8.037977011494254,
+            "pagesPerUsdProvider": 1374.4357881846581,
+            "pagesPerUsdCustomer": 1145.3631568205483,
+            "basis": "Sequential single-document submissions on one local worker (docConcurrency 4 available, 1 document in flight); runtime = client wall time upload->completed; cost = paid provider calls only (local CPU and storage not priced)."
+          },
+          "storage": {
+            "tracedS3Ops": {
+              "GetObject": 1718,
+              "PutObject": 2850,
+              "CreateMultipartUpload": 83,
+              "UploadPart": 83,
+              "CompleteMultipartUpload": 83,
+              "HeadObject": 239
+            },
+            "tracedGetBytes": 232026222,
+            "storedObjects": 2933,
+            "storedBytes": 126264923,
+            "storedRasterObjects": 125,
+            "storedRasterBytes": 44338432,
+            "note": "Ops counted from worker/API OTLP spans tagged with docslurp.runId (instrumented S3 client). LanceDB's native S3 traffic is not instrumented and is excluded. Stored = objects under the run prefix at the end (overwrites counted once)."
+          },
+          "rasters": {
+            "pdftoppmRenders": 130,
+            "renderImagesRendered": 8,
+            "renderImagesReused": 51
+          },
+          "resources": {
+            "workerCpuSecPerDoc": {
+              "n": 123,
+              "mean": 1.130975609756098,
+              "p50": 1.0100000000000016,
+              "p95": 1.9269999999999936,
+              "max": 2.240000000000002,
+              "min": 0.5799999999999983,
+              "sum": 139.11000000000004
+            },
+            "layoutCpuSecPerDoc": {
+              "n": 123,
+              "mean": 0.27504065040650405,
+              "p50": 0.28999999999999915,
+              "p95": 0.42699999999999955,
+              "max": 0.5899999999999999,
+              "min": 0,
+              "sum": 33.83
+            },
+            "workerCpuSecTotal": 139.11000000000004,
+            "layoutCpuSecTotal": 33.83,
+            "peakWorkerRssMb": 593.25,
+            "peakLayoutRssMb": 151.875
+          },
+          "histograms": {
+            "endToEndWallMs": [
+              {
+                "lo": 0,
+                "hi": 2000,
+                "n": 0
+              },
+              {
+                "lo": 2000,
+                "hi": 4000,
+                "n": 49
+              },
+              {
+                "lo": 4000,
+                "hi": 6000,
+                "n": 34
+              },
+              {
+                "lo": 6000,
+                "hi": 8000,
+                "n": 20
+              },
+              {
+                "lo": 8000,
+                "hi": 10000,
+                "n": 11
+              },
+              {
+                "lo": 10000,
+                "hi": 15000,
+                "n": 8
+              },
+              {
+                "lo": 15000,
+                "hi": 20000,
+                "n": 0
+              },
+              {
+                "lo": 20000,
+                "hi": 40000,
+                "n": 0
+              },
+              {
+                "lo": 40000,
+                "hi": 1000000000,
+                "n": 1
+              }
+            ],
+            "providerCentsPerDoc": [
+              {
+                "lo": 0,
+                "hi": 0.01,
+                "n": 44
+              },
+              {
+                "lo": 0.01,
+                "hi": 0.05,
+                "n": 40
+              },
+              {
+                "lo": 0.05,
+                "hi": 0.1,
+                "n": 6
+              },
+              {
+                "lo": 0.1,
+                "hi": 0.25,
+                "n": 23
+              },
+              {
+                "lo": 0.25,
+                "hi": 0.5,
+                "n": 9
+              },
+              {
+                "lo": 0.5,
+                "hi": 1,
+                "n": 0
+              },
+              {
+                "lo": 1,
+                "hi": 2,
+                "n": 0
+              },
+              {
+                "lo": 2,
+                "hi": 1000000000,
+                "n": 1
+              }
+            ]
+          },
+          "byKind": {
+            "tier-3": {
+              "documents": 3,
+              "pages": 3,
+              "vlmPageCalls": 0,
+              "providerUsd": 0.000293011,
+              "wallMsP50": 3577,
+              "wallMsP95": 6507.4
+            },
+            "tier-5": {
+              "documents": 13,
+              "pages": 13,
+              "vlmPageCalls": 2,
+              "providerUsd": 0.001326305,
+              "wallMsP50": 2829,
+              "wallMsP95": 5035.199999999995
+            },
+            "tier-2": {
+              "documents": 7,
+              "pages": 7,
+              "vlmPageCalls": 2,
+              "providerUsd": 0.002139497,
+              "wallMsP50": 4084,
+              "wallMsP95": 6007.8
+            },
+            "raster-only": {
+              "documents": 29,
+              "pages": 29,
+              "vlmPageCalls": 29,
+              "providerUsd": 0.04326234900000001,
+              "wallMsP50": 7361,
+              "wallMsP95": 12611.2
+            },
+            "native-math": {
+              "documents": 12,
+              "pages": 12,
+              "vlmPageCalls": 1,
+              "providerUsd": 0.0021883510000000003,
+              "wallMsP50": 3967.5,
+              "wallMsP95": 6059.9
+            },
+            "scan": {
+              "documents": 17,
+              "pages": 18,
+              "vlmPageCalls": 10,
+              "providerUsd": 0.013488441,
+              "wallMsP50": 5833,
+              "wallMsP95": 8693.4
+            },
+            "image": {
+              "documents": 6,
+              "pages": 6,
+              "vlmPageCalls": 0,
+              "providerUsd": 0.000482662,
+              "wallMsP50": 6868.5,
+              "wallMsP95": 7961.5
+            },
+            "repo-fixture": {
+              "documents": 11,
+              "pages": 15,
+              "vlmPageCalls": 8,
+              "providerUsd": 0.031559874,
+              "wallMsP50": 3075,
+              "wallMsP95": 27402
+            },
+            "tier-1": {
+              "documents": 11,
+              "pages": 22,
+              "vlmPageCalls": 0,
+              "providerUsd": 0.0011442750000000002,
+              "wallMsP50": 3574,
+              "wallMsP95": 3955
+            },
+            "native-business": {
+              "documents": 9,
+              "pages": 13,
+              "vlmPageCalls": 4,
+              "providerUsd": 0.007054626,
+              "wallMsP50": 4833,
+              "wallMsP95": 8326.199999999999
+            },
+            "quirk": {
+              "documents": 5,
+              "pages": 7,
+              "vlmPageCalls": 1,
+              "providerUsd": 0.0025584440000000004,
+              "wallMsP50": 4092,
+              "wallMsP95": 7224.2
+            }
+          }
+        }
+      },
+      "shadowOverhead": {
+        "pairs": 122,
+        "wallMsDelta": {
+          "n": 122,
+          "mean": 188.827868852459,
+          "p50": 263.5,
+          "p95": 1998.3499999999972,
+          "max": 4271,
+          "min": -27845,
+          "sum": 23037
+        },
+        "routePagesStageMsDelta": {
+          "n": 122,
+          "mean": 556.0901639344262,
+          "p50": 458.5,
+          "p95": 1562.299999999998,
+          "max": 2528,
+          "min": -2750,
+          "sum": 67843
+        },
+        "renderImagesStageMsDelta": {
+          "n": 122,
+          "mean": -198.2377049180328,
+          "p50": -1.5,
+          "p95": 3,
+          "max": 117,
+          "min": -1550,
+          "sum": -24185
+        },
+        "workerCpuSecDelta": {
+          "n": 122,
+          "mean": 0.07852459016393439,
+          "p50": 0.06500000000000128,
+          "p95": 0.4984999999999975,
+          "max": 0.7599999999999998,
+          "min": -0.5500000000000025,
+          "sum": 9.579999999999995
+        },
+        "pdftoppmRendersDelta": 74,
+        "storedRasterObjectsDelta": 62,
+        "storedBytesDelta": 18605408,
+        "s3PutDelta": 178,
+        "s3GetDelta": 0,
+        "vlmCallsDelta": 0,
+        "layoutServiceMs": {
+          "n": 116,
+          "mean": 62.50839953206415,
+          "p50": 60.099137015640736,
+          "p95": 93.68415499920957,
+          "max": 210.21312300581485,
+          "min": 28.38885097298771,
+          "sum": 7250.974345719442
+        },
+        "layoutObserverElapsedMs": {
+          "n": 116,
+          "mean": 69.87520860344607,
+          "p50": 67.40041350000683,
+          "p95": 103.43785324999772,
+          "max": 221.94572399999015,
+          "min": 31.209584000025643,
+          "sum": 8105.5241979997445
+        },
+        "layoutPageRowElapsedMs": {
+          "n": 122,
+          "mean": 560.839687336066,
+          "p50": 420.94473200001084,
+          "p95": 1579.5526932499733,
+          "max": 2002.036242000002,
+          "min": 129.605527000007,
+          "sum": 68422.44185500006
+        },
+        "histogramWallMsDelta": [
+          {
+            "lo": -1000000000,
+            "hi": -2000,
+            "n": 3
+          },
+          {
+            "lo": -2000,
+            "hi": -1000,
+            "n": 4
+          },
+          {
+            "lo": -1000,
+            "hi": -500,
+            "n": 10
+          },
+          {
+            "lo": -500,
+            "hi": 0,
+            "n": 16
+          },
+          {
+            "lo": 0,
+            "hi": 500,
+            "n": 37
+          },
+          {
+            "lo": 500,
+            "hi": 1000,
+            "n": 28
+          },
+          {
+            "lo": 1000,
+            "hi": 2000,
+            "n": 17
+          },
+          {
+            "lo": 2000,
+            "hi": 4000,
+            "n": 5
+          },
+          {
+            "lo": 4000,
+            "hi": 1000000000,
+            "n": 2
+          }
+        ]
+      },
+      "layout": {
+        "rows": 122,
+        "routed": 9,
+        "audit": 113,
+        "succeeded": 116,
+        "errors": 6,
+        "errorReasons": {
+          "The operation was aborted due to timeout": 6
+        },
+        "documentsWithRows": 116,
+        "eligibleTotal": 9,
+        "auditPoolTotal": 129,
+        "budgetExhausted": 6,
+        "admissionRejected": 0,
+        "planZeroAssignmentDocs": 54
+      },
+      "auditFindings": [
+        {
+          "kind": "tier-3",
+          "page": 1,
+          "healthyTextLayer": false,
+          "routedRoles": [],
+          "nonTextLabels": [
+            "figure"
+          ],
+          "armAVlmCall": false,
+          "nativeF1": 1,
+          "confirmedIncomplete": false
+        },
+        {
+          "kind": "tier-5",
+          "page": 1,
+          "healthyTextLayer": true,
+          "routedRoles": [
+            "accept-text"
+          ],
+          "nonTextLabels": [
+            "table"
+          ],
+          "armAVlmCall": false,
+          "nativeF1": 1,
+          "confirmedIncomplete": false
+        },
+        {
+          "kind": "tier-2",
+          "page": 1,
+          "healthyTextLayer": false,
+          "routedRoles": [
+            "skip"
+          ],
+          "nonTextLabels": [
+            "chart"
+          ],
+          "armAVlmCall": false,
+          "nativeF1": 0.9782178217821783,
+          "confirmedIncomplete": false
+        },
+        {
+          "kind": "raster-only",
+          "page": 1,
+          "healthyTextLayer": false,
+          "routedRoles": [],
+          "nonTextLabels": [
+            "table"
+          ],
+          "armAVlmCall": true,
+          "nativeF1": 0,
+          "confirmedIncomplete": true
+        },
+        {
+          "kind": "native-math",
+          "page": 1,
+          "healthyTextLayer": false,
+          "routedRoles": [],
+          "nonTextLabels": [
+            "formula",
+            "chart",
+            "formula_number"
+          ],
+          "armAVlmCall": false,
+          "nativeF1": 0.046376811594202906,
+          "confirmedIncomplete": true
+        },
+        {
+          "kind": "raster-only",
+          "page": 1,
+          "healthyTextLayer": false,
+          "routedRoles": [],
+          "nonTextLabels": [
+            "figure"
+          ],
+          "armAVlmCall": true,
+          "nativeF1": 0,
+          "confirmedIncomplete": true
+        },
+        {
+          "kind": "tier-2",
+          "page": 1,
+          "healthyTextLayer": false,
+          "routedRoles": [
+            "skip"
+          ],
+          "nonTextLabels": [
+            "figure"
+          ],
+          "armAVlmCall": true,
+          "nativeF1": 1,
+          "confirmedIncomplete": false
+        },
+        {
+          "kind": "tier-5",
+          "page": 1,
+          "healthyTextLayer": false,
+          "routedRoles": [
+            "accept-text"
+          ],
+          "nonTextLabels": [
+            "table"
+          ],
+          "armAVlmCall": false,
+          "nativeF1": 0.9610389610389611,
+          "confirmedIncomplete": false
+        },
+        {
+          "kind": "native-math",
+          "page": 1,
+          "healthyTextLayer": false,
+          "routedRoles": [],
+          "nonTextLabels": [
+            "formula",
+            "chart",
+            "formula_number"
+          ],
+          "armAVlmCall": false,
+          "nativeF1": 0.8216432865731463,
+          "confirmedIncomplete": true
+        },
+        {
+          "kind": "native-math",
+          "page": 1,
+          "healthyTextLayer": false,
+          "routedRoles": [],
+          "nonTextLabels": [
+            "chart"
+          ],
+          "armAVlmCall": false,
+          "nativeF1": 0.8297455968688844,
+          "confirmedIncomplete": true
+        },
+        {
+          "kind": "native-math",
+          "page": 1,
+          "healthyTextLayer": false,
+          "routedRoles": [
+            "skip"
+          ],
+          "nonTextLabels": [
+            "formula",
+            "chart"
+          ],
+          "armAVlmCall": false,
+          "nativeF1": 0.8216432865731463,
+          "confirmedIncomplete": true
+        },
+        {
+          "kind": "native-math",
+          "page": 1,
+          "healthyTextLayer": false,
+          "routedRoles": [],
+          "nonTextLabels": [
+            "formula",
+            "chart",
+            "formula_number"
+          ],
+          "armAVlmCall": false,
+          "nativeF1": 0.8216432865731463,
+          "confirmedIncomplete": true
+        },
+        {
+          "kind": "native-math",
+          "page": 1,
+          "healthyTextLayer": false,
+          "routedRoles": [
+            "accept-text"
+          ],
+          "nonTextLabels": [
+            "chart",
+            "formula_number"
+          ],
+          "armAVlmCall": false,
+          "nativeF1": 0.8289738430583501,
+          "confirmedIncomplete": true
+        },
+        {
+          "kind": "raster-only",
+          "page": 1,
+          "healthyTextLayer": false,
+          "routedRoles": [],
+          "nonTextLabels": [
+            "formula"
+          ],
+          "armAVlmCall": true,
+          "nativeF1": 0,
+          "confirmedIncomplete": true
+        },
+        {
+          "kind": "tier-2",
+          "page": 1,
+          "healthyTextLayer": false,
+          "routedRoles": [
+            "skip"
+          ],
+          "nonTextLabels": [
+            "figure"
+          ],
+          "armAVlmCall": true,
+          "nativeF1": 1,
+          "confirmedIncomplete": false
+        },
+        {
+          "kind": "raster-only",
+          "page": 1,
+          "healthyTextLayer": false,
+          "routedRoles": [],
+          "nonTextLabels": [
+            "formula"
+          ],
+          "armAVlmCall": true,
+          "nativeF1": 0,
+          "confirmedIncomplete": true
+        },
+        {
+          "kind": "native-business",
+          "page": 2,
+          "healthyTextLayer": false,
+          "routedRoles": [
+            "skip",
+            "skip"
+          ],
+          "nonTextLabels": [
+            "figure",
+            "chart"
+          ],
+          "armAVlmCall": true,
+          "nativeF1": 0.4193548387096774,
+          "confirmedIncomplete": true
+        },
+        {
+          "kind": "native-business",
+          "page": 1,
+          "healthyTextLayer": false,
+          "routedRoles": [
+            "skip"
+          ],
+          "nonTextLabels": [
+            "figure",
+            "table"
+          ],
+          "armAVlmCall": false,
+          "nativeF1": 0.9117647058823529,
+          "confirmedIncomplete": false
+        },
+        {
+          "kind": "native-math",
+          "page": 1,
+          "healthyTextLayer": true,
+          "routedRoles": [
+            "accept-text"
+          ],
+          "nonTextLabels": [
+            "formula",
+            "chart"
+          ],
+          "armAVlmCall": false,
+          "nativeF1": 0.8099173553719008,
+          "confirmedIncomplete": true
+        },
+        {
+          "kind": "native-math",
+          "page": 1,
+          "healthyTextLayer": true,
+          "routedRoles": [
+            "accept-text"
+          ],
+          "nonTextLabels": [
+            "formula",
+            "chart"
+          ],
+          "armAVlmCall": false,
+          "nativeF1": 0.8099173553719008,
+          "confirmedIncomplete": true
+        },
+        {
+          "kind": "scan",
+          "page": 1,
+          "healthyTextLayer": false,
+          "routedRoles": [],
+          "nonTextLabels": [
+            "figure",
+            "table"
+          ],
+          "armAVlmCall": true,
+          "nativeF1": 0,
+          "confirmedIncomplete": true
+        },
+        {
+          "kind": "raster-only",
+          "page": 1,
+          "healthyTextLayer": false,
+          "routedRoles": [],
+          "nonTextLabels": [
+            "figure"
+          ],
+          "armAVlmCall": true,
+          "nativeF1": 0,
+          "confirmedIncomplete": true
+        },
+        {
+          "kind": "tier-2",
+          "page": 1,
+          "healthyTextLayer": true,
+          "routedRoles": [],
+          "nonTextLabels": [
+            "formula"
+          ],
+          "armAVlmCall": false,
+          "nativeF1": 0.9683143219264893,
+          "confirmedIncomplete": false
+        },
+        {
+          "kind": "raster-only",
+          "page": 1,
+          "healthyTextLayer": false,
+          "routedRoles": [],
+          "nonTextLabels": [
+            "chart"
+          ],
+          "armAVlmCall": true,
+          "nativeF1": 0,
+          "confirmedIncomplete": true
+        },
+        {
+          "kind": "raster-only",
+          "page": 1,
+          "healthyTextLayer": false,
+          "routedRoles": [],
+          "nonTextLabels": [
+            "figure"
+          ],
+          "armAVlmCall": true,
+          "nativeF1": 0,
+          "confirmedIncomplete": true
+        },
+        {
+          "kind": "native-math",
+          "page": 1,
+          "healthyTextLayer": false,
+          "routedRoles": [],
+          "nonTextLabels": [
+            "formula",
+            "chart",
+            "formula_number"
+          ],
+          "armAVlmCall": false,
+          "nativeF1": 0.8099173553719008,
+          "confirmedIncomplete": true
+        },
+        {
+          "kind": "native-business",
+          "page": 1,
+          "healthyTextLayer": false,
+          "routedRoles": [
+            "skip"
+          ],
+          "nonTextLabels": [
+            "table",
+            "chart"
+          ],
+          "armAVlmCall": false,
+          "nativeF1": 0.8932291666666666,
+          "confirmedIncomplete": true
+        },
+        {
+          "kind": "native-business",
+          "page": 1,
+          "healthyTextLayer": false,
+          "routedRoles": [
+            "skip"
+          ],
+          "nonTextLabels": [
+            "figure",
+            "table"
+          ],
+          "armAVlmCall": false,
+          "nativeF1": 0.7927272727272727,
+          "confirmedIncomplete": true
+        },
+        {
+          "kind": "tier-3",
+          "page": 1,
+          "healthyTextLayer": false,
+          "routedRoles": [],
+          "nonTextLabels": [
+            "figure"
+          ],
+          "armAVlmCall": false,
+          "nativeF1": 1,
+          "confirmedIncomplete": false
+        },
+        {
+          "kind": "tier-2",
+          "page": 1,
+          "healthyTextLayer": true,
+          "routedRoles": [],
+          "nonTextLabels": [
+            "formula"
+          ],
+          "armAVlmCall": false,
+          "nativeF1": 0.9657794676806083,
+          "confirmedIncomplete": false
+        },
+        {
+          "kind": "raster-only",
+          "page": 1,
+          "healthyTextLayer": false,
+          "routedRoles": [],
+          "nonTextLabels": [
+            "formula",
+            "formula_number"
+          ],
+          "armAVlmCall": true,
+          "nativeF1": 0,
+          "confirmedIncomplete": true
+        },
+        {
+          "kind": "scan",
+          "page": 1,
+          "healthyTextLayer": false,
+          "routedRoles": [],
+          "nonTextLabels": [
+            "table"
+          ],
+          "armAVlmCall": true,
+          "nativeF1": 0,
+          "confirmedIncomplete": true
+        },
+        {
+          "kind": "raster-only",
+          "page": 1,
+          "healthyTextLayer": false,
+          "routedRoles": [],
+          "nonTextLabels": [
+            "formula",
+            "chart"
+          ],
+          "armAVlmCall": true,
+          "nativeF1": 0,
+          "confirmedIncomplete": true
+        },
+        {
+          "kind": "raster-only",
+          "page": 1,
+          "healthyTextLayer": false,
+          "routedRoles": [],
+          "nonTextLabels": [
+            "formula"
+          ],
+          "armAVlmCall": true,
+          "nativeF1": 0,
+          "confirmedIncomplete": true
+        },
+        {
+          "kind": "repo-fixture",
+          "page": 1,
+          "healthyTextLayer": false,
+          "routedRoles": [],
+          "nonTextLabels": [
+            "formula"
+          ],
+          "armAVlmCall": false,
+          "nativeF1": null,
+          "confirmedIncomplete": false
+        },
+        {
+          "kind": "quirk",
+          "page": 1,
+          "healthyTextLayer": false,
+          "routedRoles": [
+            "skip"
+          ],
+          "nonTextLabels": [
+            "figure",
+            "table"
+          ],
+          "armAVlmCall": false,
+          "nativeF1": 0.9117647058823529,
+          "confirmedIncomplete": false
+        },
+        {
+          "kind": "native-business",
+          "page": 1,
+          "healthyTextLayer": false,
+          "routedRoles": [
+            "skip",
+            "skip"
+          ],
+          "nonTextLabels": [
+            "figure"
+          ],
+          "armAVlmCall": true,
+          "nativeF1": 0.7331288343558283,
+          "confirmedIncomplete": true
+        },
+        {
+          "kind": "repo-fixture",
+          "page": 1,
+          "healthyTextLayer": false,
+          "routedRoles": [
+            "skip"
+          ],
+          "nonTextLabels": [
+            "chart"
+          ],
+          "armAVlmCall": true,
+          "nativeF1": null,
+          "confirmedIncomplete": false
+        },
+        {
+          "kind": "raster-only",
+          "page": 1,
+          "healthyTextLayer": false,
+          "routedRoles": [],
+          "nonTextLabels": [
+            "table"
+          ],
+          "armAVlmCall": true,
+          "nativeF1": 0,
+          "confirmedIncomplete": true
+        },
+        {
+          "kind": "native-math",
+          "page": 1,
+          "healthyTextLayer": false,
+          "routedRoles": [],
+          "nonTextLabels": [
+            "formula"
+          ],
+          "armAVlmCall": true,
+          "nativeF1": 0,
+          "confirmedIncomplete": true
+        },
+        {
+          "kind": "raster-only",
+          "page": 1,
+          "healthyTextLayer": false,
+          "routedRoles": [],
+          "nonTextLabels": [
+            "formula"
+          ],
+          "armAVlmCall": true,
+          "nativeF1": 0,
+          "confirmedIncomplete": true
+        },
+        {
+          "kind": "tier-2",
+          "page": 1,
+          "healthyTextLayer": true,
+          "routedRoles": [
+            "accept-text"
+          ],
+          "nonTextLabels": [
+            "formula"
+          ],
+          "armAVlmCall": false,
+          "nativeF1": 0.9690210656753406,
+          "confirmedIncomplete": false
+        },
+        {
+          "kind": "quirk",
+          "page": 1,
+          "healthyTextLayer": false,
+          "routedRoles": [
+            "skip"
+          ],
+          "nonTextLabels": [
+            "figure",
+            "table"
+          ],
+          "armAVlmCall": false,
+          "nativeF1": 0.7927272727272727,
+          "confirmedIncomplete": true
+        },
+        {
+          "kind": "repo-fixture",
+          "page": 1,
+          "healthyTextLayer": false,
+          "routedRoles": [
+            "accept-text"
+          ],
+          "nonTextLabels": [
+            "table"
+          ],
+          "armAVlmCall": false,
+          "nativeF1": null,
+          "confirmedIncomplete": false
+        },
+        {
+          "kind": "tier-5",
+          "page": 1,
+          "healthyTextLayer": true,
+          "routedRoles": [
+            "accept-text"
+          ],
+          "nonTextLabels": [
+            "table"
+          ],
+          "armAVlmCall": false,
+          "nativeF1": 1,
+          "confirmedIncomplete": false
+        },
+        {
+          "kind": "tier-2",
+          "page": 1,
+          "healthyTextLayer": false,
+          "routedRoles": [
+            "skip"
+          ],
+          "nonTextLabels": [
+            "chart"
+          ],
+          "armAVlmCall": false,
+          "nativeF1": 0.9750479846449136,
+          "confirmedIncomplete": false
+        },
+        {
+          "kind": "native-math",
+          "page": 1,
+          "healthyTextLayer": false,
+          "routedRoles": [],
+          "nonTextLabels": [
+            "chart"
+          ],
+          "armAVlmCall": false,
+          "nativeF1": 0.8099173553719008,
+          "confirmedIncomplete": true
+        },
+        {
+          "kind": "scan",
+          "page": 2,
+          "healthyTextLayer": false,
+          "routedRoles": [],
+          "nonTextLabels": [
+            "chart"
+          ],
+          "armAVlmCall": true,
+          "nativeF1": null,
+          "confirmedIncomplete": false
+        },
+        {
+          "kind": "tier-3",
+          "page": 1,
+          "healthyTextLayer": false,
+          "routedRoles": [],
+          "nonTextLabels": [
+            "figure"
+          ],
+          "armAVlmCall": false,
+          "nativeF1": 1,
+          "confirmedIncomplete": false
+        },
+        {
+          "kind": "raster-only",
+          "page": 1,
+          "healthyTextLayer": false,
+          "routedRoles": [],
+          "nonTextLabels": [
+            "figure"
+          ],
+          "armAVlmCall": true,
+          "nativeF1": 0,
+          "confirmedIncomplete": true
+        },
+        {
+          "kind": "raster-only",
+          "page": 1,
+          "healthyTextLayer": false,
+          "routedRoles": [],
+          "nonTextLabels": [
+            "formula"
+          ],
+          "armAVlmCall": true,
+          "nativeF1": 0,
+          "confirmedIncomplete": true
+        },
+        {
+          "kind": "repo-fixture",
+          "page": 1,
+          "healthyTextLayer": true,
+          "routedRoles": [
+            "accept-text"
+          ],
+          "nonTextLabels": [
+            "table"
+          ],
+          "armAVlmCall": false,
+          "nativeF1": null,
+          "confirmedIncomplete": false
+        },
+        {
+          "kind": "raster-only",
+          "page": 1,
+          "healthyTextLayer": false,
+          "routedRoles": [],
+          "nonTextLabels": [
+            "formula"
+          ],
+          "armAVlmCall": true,
+          "nativeF1": 0,
+          "confirmedIncomplete": true
+        }
+      ],
+      "policyC": {
+        "policy": "C-layout-text-only-gate",
+        "declaredAt": "2026-10-21T22:55:00Z",
+        "armAVlmPageCalls": 57,
+        "armAVlmProviderUsd": 0.08967774999999997,
+        "armAVlmLatencyMs": {
+          "n": 57,
+          "mean": 3731.9473684210525,
+          "p50": 2005,
+          "p95": 7333.199999999999,
+          "max": 38903,
+          "min": 715,
+          "sum": 212721
+        },
+        "vlmPagesWithLayoutEvidence": 50,
+        "vlmPagesWithoutLayoutEvidence": 7,
+        "conditionCounts": {
+          "allTextRegions": 16,
+          "strongParagraph": 35,
+          "coverageAtLeast5pct": 40,
+          "healthyTextLayer": 0,
+          "nativeAtLeast50Words": 9,
+          "textOnlyLayoutIgnoringTextLayer": 13
+        },
+        "skippedCalls": 0,
+        "avoidedProviderUsd": 0,
+        "avoidedShareOfVlmUsd": 0,
+        "avoidedInputTokens": 0,
+        "avoidedOutputTokens": 0,
+        "avoidedVlmLatencyMs": 0,
+        "quality": {
+          "skippedWithReference": 0,
+          "meanLoss": null,
+          "materialLossPages": 0,
+          "lossDistribution": {
+            "n": 0,
+            "mean": null,
+            "p50": null,
+            "p95": null,
+            "max": null,
+            "min": null,
+            "sum": 0
+          }
+        },
+        "diagnosticTextOnlyLayoutGate": {
+          "pages": 13,
+          "withReference": 11,
+          "meanLoss": 0.7623996072653902,
+          "materialLossPages": 9,
+          "rows": [
+            {
+              "page": 1,
+              "selection": "audit",
+              "nativeWords": 0,
+              "f1Vlm": 0.9369475545079552,
+              "f1Native": 0,
+              "loss": 0.9369475545079552
+            },
+            {
+              "page": 1,
+              "selection": "audit",
+              "nativeWords": 0,
+              "f1Vlm": 0.9345172031076582,
+              "f1Native": 0,
+              "loss": 0.9345172031076582
+            },
+            {
+              "page": 1,
+              "selection": "audit",
+              "nativeWords": 0,
+              "f1Vlm": 0.9524940617577197,
+              "f1Native": 0,
+              "loss": 0.9524940617577197
+            },
+            {
+              "page": 1,
+              "selection": "audit",
+              "nativeWords": 0,
+              "f1Vlm": 0.9947169811320754,
+              "f1Native": 0,
+              "loss": 0.9947169811320754
+            },
+            {
+              "page": 1,
+              "selection": "routed",
+              "nativeWords": 52,
+              "f1Vlm": 0.9911504424778761,
+              "f1Native": 0.9541284403669724,
+              "loss": 0.03702200211090367
+            },
+            {
+              "page": 1,
+              "selection": "audit",
+              "nativeWords": 0,
+              "f1Vlm": 0.9360613810741688,
+              "f1Native": 0,
+              "loss": 0.9360613810741688
+            },
+            {
+              "page": 1,
+              "selection": "audit",
+              "nativeWords": 0,
+              "f1Vlm": 0.7952127659574468,
+              "f1Native": 0,
+              "loss": 0.7952127659574468
+            },
+            {
+              "page": 1,
+              "selection": "audit",
+              "nativeWords": 0,
+              "f1Vlm": 0.9492753623188407,
+              "f1Native": 0,
+              "loss": 0.9492753623188407
+            },
+            {
+              "page": 1,
+              "selection": "audit",
+              "nativeWords": 0,
+              "f1Vlm": 0.8501483679525222,
+              "f1Native": 0,
+              "loss": 0.8501483679525222
+            },
+            {
+              "page": 1,
+              "selection": "audit",
+              "nativeWords": 59,
+              "f1Vlm": null,
+              "f1Native": null,
+              "loss": null
+            },
+            {
+              "page": 1,
+              "selection": "audit",
+              "nativeWords": 0,
+              "f1Vlm": 1,
+              "f1Native": 0,
+              "loss": 1
+            },
+            {
+              "page": 1,
+              "selection": "audit",
+              "nativeWords": 36,
+              "f1Vlm": null,
+              "f1Native": null,
+              "loss": null
+            },
+            {
+              "page": 1,
+              "selection": "audit",
+              "nativeWords": 45,
+              "f1Vlm": 1,
+              "f1Native": 1,
+              "loss": 0
+            }
+          ]
+        }
+      },
+      "benchLedgerAllOrgs": [
+        {
+          "provider": "openrouter",
+          "model": "cloudflare/clef-flash",
+          "metric": "page-route-decision",
+          "calls": 22,
+          "input": 11220,
+          "output": 0,
+          "customer_cents": 0.0511632,
+          "provider_cents": 0.042636
+        },
+        {
+          "provider": "openrouter",
+          "model": "cloudflare/clef-flash",
+          "metric": "page-route-decision-canary",
+          "calls": 1,
+          "input": 380,
+          "output": 0,
+          "customer_cents": 0.0017328,
+          "provider_cents": 0.001444
+        },
+        {
+          "provider": "openrouter",
+          "model": "google/gemini-3.1-flash-lite",
+          "metric": "page-analysis",
+          "calls": 117,
+          "input": 134023,
+          "output": 99025,
+          "customer_cents": 21.84519,
+          "provider_cents": 18.204325000000004
+        },
+        {
+          "provider": "openrouter",
+          "model": "openai/gpt-6-luna-decisions",
+          "metric": "page-route-decision",
+          "calls": 182,
+          "input": 105701,
+          "output": 0,
+          "customer_cents": 1.268412,
+          "provider_cents": 1.0570100000000002
+        },
+        {
+          "provider": "openrouter",
+          "model": "openai/gpt-6-luna-decisions",
+          "metric": "page-route-decision-canary",
+          "calls": 12,
+          "input": 5844,
+          "output": 0,
+          "customer_cents": 0.070128,
+          "provider_cents": 0.05844
+        },
+        {
+          "provider": "openrouter",
+          "model": "perplexity/pplx-embed-v1-0.6b",
+          "metric": "embedding-tokens",
+          "calls": 274,
+          "input": 557848,
+          "output": 0,
+          "customer_cents": 0.26776704,
+          "provider_cents": 0.22313919999999995
+        },
+        {
+          "provider": "openrouter",
+          "model": "qwen/qwen3.5-flash-02-23",
+          "metric": "contextual-chunk-preamble",
+          "calls": 264,
+          "input": 201083,
+          "output": 25344,
+          "customer_cents": 2.3591802,
+          "provider_cents": 1.9659835
+        }
+      ],
+      "rawAnalysis": "/home/dan/data/docslurp-evals/runs/router-e2e-20261021/raw-main/analysis.json"
+    },
+    "postfix": {
+      "schema": "router-e2e-summary@v1",
+      "tag": "postfix",
+      "generatedAt": "2026-10-21T23:58:05.946Z",
+      "corpus": {
+        "documents": 123,
+        "pages": 145,
+        "byKind": {
+          "tier-1": {
+            "documents": 11,
+            "pages": 22
+          },
+          "tier-3": {
+            "documents": 3,
+            "pages": 3
+          },
+          "tier-2": {
+            "documents": 7,
+            "pages": 7
+          },
+          "scan": {
+            "documents": 17,
+            "pages": 18
+          },
+          "tier-5": {
+            "documents": 13,
+            "pages": 13
+          },
+          "raster-only": {
+            "documents": 29,
+            "pages": 29
+          },
+          "native-math": {
+            "documents": 12,
+            "pages": 12
+          },
+          "repo-fixture": {
+            "documents": 11,
+            "pages": 15
+          },
+          "native-business": {
+            "documents": 9,
+            "pages": 13
+          },
+          "quirk": {
+            "documents": 5,
+            "pages": 7
+          },
+          "image": {
+            "documents": 6,
+            "pages": 6
+          }
+        },
+        "rule": "development splits only; deterministic sorted selection; no held-out or test items"
+      },
+      "arms": {
+        "A": {
+          "documents": 123,
+          "pages": 145,
+          "completed": 123,
+          "failed": 0,
+          "timedOut": 0,
+          "uploadErrors": 0,
+          "extractionCalls": {
+            "nativeAcceptedPages": 88,
+            "vlmPageCalls": 57,
+            "localOcrCommands": 0,
+            "decisionModelCalls": 96,
+            "layoutRequests": 0,
+            "layoutFailedObservations": 0
+          },
+          "paid": {
+            "calls": 404,
+            "inputTokens": 483566,
+            "outputTokens": 60696,
+            "providerUsd": 0.10546048900000002,
+            "customerUsd": 0.12655258679999998
+          },
+          "usageByModel": {
+            "openrouter/google/gemini-3.1-flash-lite/page-analysis": {
+              "calls": 57,
+              "input": 65293,
+              "output": 48888,
+              "customerCents": 10.758629999999995,
+              "providerCents": 8.965525000000001,
+              "costSources": [
+                "provider"
+              ]
+            },
+            "openrouter/qwen/qwen3.5-flash-02-23/contextual-chunk-preamble": {
+              "calls": 123,
+              "input": 94223,
+              "output": 11808,
+              "customerCents": 1.1033490000000006,
+              "providerCents": 0.9194575,
+              "costSources": [
+                "provider"
+              ]
+            },
+            "openrouter/perplexity/pplx-embed-v1-0.6b/embedding-tokens": {
+              "calls": 128,
+              "input": 268691,
+              "output": 0,
+              "customerCents": 0.12897168,
+              "providerCents": 0.10747640000000006,
+              "costSources": [
+                "estimate"
+              ]
+            },
+            "docslurp/page-base-fee/page-base-fee": {
+              "calls": 123,
+              "input": 0,
+              "output": 0,
+              "customerCents": 0,
+              "providerCents": 0,
+              "costSources": [
+                "configured"
+              ]
+            },
+            "openrouter/openai/gpt-6-luna-decisions/page-route-decision:inset-triage": {
+              "calls": 25,
+              "input": 6580,
+              "output": 0,
+              "customerCents": 0.07896,
+              "providerCents": 0.0658,
+              "costSources": [
+                "catalog-input-price"
+              ]
+            },
+            "openrouter/openai/gpt-6-luna-decisions/page-route-decision:triage": {
+              "calls": 69,
+              "input": 47805,
+              "output": 0,
+              "customerCents": 0.5736599999999998,
+              "providerCents": 0.4780500000000003,
+              "costSources": [
+                "catalog-input-price"
+              ]
+            },
+            "openrouter/openai/gpt-6-luna-decisions/page-route-decision-canary:canary": {
+              "calls": 2,
+              "input": 974,
+              "output": 0,
+              "customerCents": 0.011688,
+              "providerCents": 0.00974,
+              "costSources": [
+                "catalog-input-price"
+              ]
+            }
+          },
+          "latency": {
+            "endToEndWallMs": {
+              "n": 123,
+              "mean": 5284.926829268293,
+              "p50": 4067,
+              "p95": 11065.599999999995,
+              "max": 45216,
+              "min": 2318,
+              "sum": 650046
+            },
+            "serverRunMs": {
+              "n": 123,
+              "mean": 5133.658536585366,
+              "p50": 3881,
+              "p95": 10827.099999999995,
+              "max": 44992,
+              "min": 2099,
+              "sum": 631440
+            },
+            "stageMs": {
+              "quarantine": {
+                "n": 123,
+                "mean": 13.910569105691057,
+                "p50": 13,
+                "p95": 18,
+                "max": 25,
+                "min": 11,
+                "sum": 1711
+              },
+              "format-detect": {
+                "n": 123,
+                "mean": 8.008130081300813,
+                "p50": 8,
+                "p95": 10,
+                "max": 15,
+                "min": 6,
+                "sum": 985
+              },
+              "to-canonical": {
+                "n": 123,
+                "mean": 8.016260162601625,
+                "p50": 8,
+                "p95": 10,
+                "max": 11,
+                "min": 7,
+                "sum": 986
+              },
+              "format-tooling": {
+                "n": 123,
+                "mean": 9.804878048780488,
+                "p50": 9,
+                "p95": 13,
+                "max": 23,
+                "min": 8,
+                "sum": 1206
+              },
+              "normalize": {
+                "n": 123,
+                "mean": 5.528455284552845,
+                "p50": 5,
+                "p95": 7,
+                "max": 15,
+                "min": 4,
+                "sum": 680
+              },
+              "pdf-tooling": {
+                "n": 123,
+                "mean": 12.284552845528456,
+                "p50": 12,
+                "p95": 15,
+                "max": 19,
+                "min": 9,
+                "sum": 1511
+              },
+              "split-pages": {
+                "n": 123,
+                "mean": 14.520325203252032,
+                "p50": 14,
+                "p95": 19.89999999999999,
+                "max": 25,
+                "min": 12,
+                "sum": 1786
+              },
+              "extract-markdown": {
+                "n": 123,
+                "mean": 525.0650406504066,
+                "p50": 334,
+                "p95": 1105.1999999999998,
+                "max": 5923,
+                "min": 189,
+                "sum": 64583
+              },
+              "render-images": {
+                "n": 123,
+                "mean": 254.66666666666666,
+                "p50": 14,
+                "p95": 992.1999999999991,
+                "max": 2075,
+                "min": 10,
+                "sum": 31324
+              },
+              "classify-route": {
+                "n": 123,
+                "mean": 13.487804878048781,
+                "p50": 11,
+                "p95": 21,
+                "max": 28,
+                "min": 9,
+                "sum": 1659
+              },
+              "route-pages": {
+                "n": 123,
+                "mean": 607.3089430894308,
+                "p50": 483,
+                "p95": 1917.2999999999995,
+                "max": 3957,
+                "min": 4,
+                "sum": 74699
+              },
+              "vision-extract": {
+                "n": 123,
+                "mean": 1502.3577235772357,
+                "p50": 14,
+                "p95": 6078.699999999999,
+                "max": 39531,
+                "min": 10,
+                "sum": 184790
+              },
+              "embed": {
+                "n": 123,
+                "mean": 1631.5691056910568,
+                "p50": 1544,
+                "p95": 2250.8999999999987,
+                "max": 3665,
+                "min": 1181,
+                "sum": 200683
+              },
+              "index": {
+                "n": 123,
+                "mean": 83.07317073170732,
+                "p50": 50,
+                "p95": 234.99999999999991,
+                "max": 749,
+                "min": 33,
+                "sum": 10218
+              }
+            },
+            "routePagesLayoutShadowMs": {
+              "n": 117,
+              "mean": 0,
+              "p50": 0,
+              "p95": 0,
+              "max": 0,
+              "min": 0,
+              "sum": 0
+            }
+          },
+          "throughput": {
+            "pagesPerMinuteSequential": 13.383668232709686,
+            "timeToIngest100PagesMin": 7.471793103448276,
+            "pagesPerUsdProvider": 1374.9225077080762,
+            "pagesPerUsdCustomer": 1145.7687564233972,
+            "basis": "Sequential single-document submissions on one local worker (docConcurrency 4 available, 1 document in flight); runtime = client wall time upload->completed; cost = paid provider calls only (local CPU and storage not priced)."
+          },
+          "storage": {
+            "tracedS3Ops": {
+              "GetObject": 1718,
+              "PutObject": 2953,
+              "CreateMultipartUpload": 123,
+              "UploadPart": 123,
+              "CompleteMultipartUpload": 123,
+              "HeadObject": 116
+            },
+            "tracedGetBytes": 231309467,
+            "storedObjects": 2796,
+            "storedBytes": 107473279,
+            "storedRasterObjects": 62,
+            "storedRasterBytes": 27211139,
+            "note": "Ops counted from worker/API OTLP spans tagged with docslurp.runId (instrumented S3 client). LanceDB's native S3 traffic is not instrumented and is excluded. Stored = objects under the run prefix at the end (overwrites counted once)."
+          },
+          "rasters": {
+            "pdftoppmRenders": 55,
+            "renderImagesRendered": 59,
+            "renderImagesReused": 0
+          },
+          "resources": {
+            "workerCpuSecPerDoc": {
+              "n": 123,
+              "mean": 1.0563414634146342,
+              "p50": 0.9600000000000009,
+              "p95": 1.776000000000001,
+              "max": 2.1099999999999994,
+              "min": 0.46999999999999886,
+              "sum": 129.93
+            },
+            "layoutCpuSecPerDoc": {
+              "n": 123,
+              "mean": 0.0003252032520325712,
+              "p50": 0,
+              "p95": 0,
+              "max": 0.010000000000005116,
+              "min": 0,
+              "sum": 0.04000000000000625
+            },
+            "workerCpuSecTotal": 129.93,
+            "layoutCpuSecTotal": 0.04000000000000625,
+            "peakWorkerRssMb": 601.484375,
+            "peakLayoutRssMb": 127.109375
+          },
+          "histograms": {
+            "endToEndWallMs": [
+              {
+                "lo": 0,
+                "hi": 2000,
+                "n": 0
+              },
+              {
+                "lo": 2000,
+                "hi": 4000,
+                "n": 60
+              },
+              {
+                "lo": 4000,
+                "hi": 6000,
+                "n": 28
+              },
+              {
+                "lo": 6000,
+                "hi": 8000,
+                "n": 19
+              },
+              {
+                "lo": 8000,
+                "hi": 10000,
+                "n": 7
+              },
+              {
+                "lo": 10000,
+                "hi": 15000,
+                "n": 8
+              },
+              {
+                "lo": 15000,
+                "hi": 20000,
+                "n": 0
+              },
+              {
+                "lo": 20000,
+                "hi": 40000,
+                "n": 0
+              },
+              {
+                "lo": 40000,
+                "hi": 1000000000,
+                "n": 1
+              }
+            ],
+            "providerCentsPerDoc": [
+              {
+                "lo": 0,
+                "hi": 0.01,
+                "n": 45
+              },
+              {
+                "lo": 0.01,
+                "hi": 0.05,
+                "n": 39
+              },
+              {
+                "lo": 0.05,
+                "hi": 0.1,
+                "n": 6
+              },
+              {
+                "lo": 0.1,
+                "hi": 0.25,
+                "n": 23
+              },
+              {
+                "lo": 0.25,
+                "hi": 0.5,
+                "n": 9
+              },
+              {
+                "lo": 0.5,
+                "hi": 1,
+                "n": 0
+              },
+              {
+                "lo": 1,
+                "hi": 2,
+                "n": 0
+              },
+              {
+                "lo": 2,
+                "hi": 1000000000,
+                "n": 1
+              }
+            ]
+          },
+          "byKind": {
+            "tier-5": {
+              "documents": 13,
+              "pages": 13,
+              "vlmPageCalls": 2,
+              "providerUsd": 0.0013263050000000005,
+              "wallMsP50": 2569,
+              "wallMsP95": 5293.199999999999
+            },
+            "native-business": {
+              "documents": 9,
+              "pages": 13,
+              "vlmPageCalls": 4,
+              "providerUsd": 0.0070546260000000005,
+              "wallMsP50": 4344,
+              "wallMsP95": 10377.199999999999
+            },
+            "repo-fixture": {
+              "documents": 11,
+              "pages": 15,
+              "vlmPageCalls": 8,
+              "providerUsd": 0.031559873999999995,
+              "wallMsP50": 3323,
+              "wallMsP95": 26778.5
+            },
+            "quirk": {
+              "documents": 5,
+              "pages": 7,
+              "vlmPageCalls": 1,
+              "providerUsd": 0.0025097440000000004,
+              "wallMsP50": 4581,
+              "wallMsP95": 7448.6
+            },
+            "tier-2": {
+              "documents": 7,
+              "pages": 7,
+              "vlmPageCalls": 2,
+              "providerUsd": 0.0021394969999999998,
+              "wallMsP50": 3829,
+              "wallMsP95": 5681.7
+            },
+            "raster-only": {
+              "documents": 29,
+              "pages": 29,
+              "vlmPageCalls": 29,
+              "providerUsd": 0.04319080900000001,
+              "wallMsP50": 7343,
+              "wallMsP95": 12134.4
+            },
+            "scan": {
+              "documents": 17,
+              "pages": 18,
+              "vlmPageCalls": 10,
+              "providerUsd": 0.013537140999999997,
+              "wallMsP50": 5335,
+              "wallMsP95": 8039.999999999999
+            },
+            "tier-3": {
+              "documents": 3,
+              "pages": 3,
+              "vlmPageCalls": 0,
+              "providerUsd": 0.000244311,
+              "wallMsP50": 2822,
+              "wallMsP95": 3723.8
+            },
+            "native-math": {
+              "documents": 12,
+              "pages": 12,
+              "vlmPageCalls": 1,
+              "providerUsd": 0.0022712450000000003,
+              "wallMsP50": 3580.5,
+              "wallMsP95": 5783.699999999999
+            },
+            "tier-1": {
+              "documents": 11,
+              "pages": 22,
+              "vlmPageCalls": 0,
+              "providerUsd": 0.0011442750000000002,
+              "wallMsP50": 2827,
+              "wallMsP95": 3201.5
+            },
+            "image": {
+              "documents": 6,
+              "pages": 6,
+              "vlmPageCalls": 0,
+              "providerUsd": 0.00048266199999999997,
+              "wallMsP50": 6707,
+              "wallMsP95": 7726.5
+            }
+          }
+        },
+        "B": {
+          "documents": 123,
+          "pages": 145,
+          "completed": 123,
+          "failed": 0,
+          "timedOut": 0,
+          "uploadErrors": 0,
+          "extractionCalls": {
+            "nativeAcceptedPages": 88,
+            "vlmPageCalls": 57,
+            "localOcrCommands": 0,
+            "decisionModelCalls": 97,
+            "layoutRequests": 121,
+            "layoutFailedObservations": 0
+          },
+          "paid": {
+            "calls": 405,
+            "inputTokens": 484053,
+            "outputTokens": 60696,
+            "providerUsd": 0.10550918900000004,
+            "customerUsd": 0.12661102679999997
+          },
+          "usageByModel": {
+            "local/PaddlePaddle/PP-DocLayout-S/layout-shadow": {
+              "calls": 121,
+              "input": 0,
+              "output": 0,
+              "customerCents": 0,
+              "providerCents": 0,
+              "costSources": []
+            },
+            "openrouter/google/gemini-3.1-flash-lite/page-analysis": {
+              "calls": 57,
+              "input": 65293,
+              "output": 48888,
+              "customerCents": 10.758629999999995,
+              "providerCents": 8.965525000000001,
+              "costSources": [
+                "provider"
+              ]
+            },
+            "docslurp/page-base-fee/page-base-fee": {
+              "calls": 123,
+              "input": 0,
+              "output": 0,
+              "customerCents": 0,
+              "providerCents": 0,
+              "costSources": [
+                "configured"
+              ]
+            },
+            "openrouter/qwen/qwen3.5-flash-02-23/contextual-chunk-preamble": {
+              "calls": 123,
+              "input": 94223,
+              "output": 11808,
+              "customerCents": 1.1033490000000006,
+              "providerCents": 0.9194575,
+              "costSources": [
+                "provider"
+              ]
+            },
+            "openrouter/perplexity/pplx-embed-v1-0.6b/embedding-tokens": {
+              "calls": 128,
+              "input": 268691,
+              "output": 0,
+              "customerCents": 0.12897168,
+              "providerCents": 0.10747640000000006,
+              "costSources": [
+                "estimate"
+              ]
+            },
+            "openrouter/openai/gpt-6-luna-decisions/page-route-decision-canary:canary": {
+              "calls": 3,
+              "input": 1461,
+              "output": 0,
+              "customerCents": 0.017532,
+              "providerCents": 0.014610000000000001,
+              "costSources": [
+                "catalog-input-price"
+              ]
+            },
+            "openrouter/openai/gpt-6-luna-decisions/page-route-decision:inset-triage": {
+              "calls": 25,
+              "input": 6580,
+              "output": 0,
+              "customerCents": 0.07896,
+              "providerCents": 0.0658,
+              "costSources": [
+                "catalog-input-price"
+              ]
+            },
+            "openrouter/openai/gpt-6-luna-decisions/page-route-decision:triage": {
+              "calls": 69,
+              "input": 47805,
+              "output": 0,
+              "customerCents": 0.5736599999999998,
+              "providerCents": 0.4780500000000003,
+              "costSources": [
+                "catalog-input-price"
+              ]
+            }
+          },
+          "latency": {
+            "endToEndWallMs": {
+              "n": 123,
+              "mean": 5675.292682926829,
+              "p50": 4585,
+              "p95": 10827.799999999997,
+              "max": 43708,
+              "min": 2570,
+              "sum": 698061
+            },
+            "serverRunMs": {
+              "n": 123,
+              "mean": 5523.691056910569,
+              "p50": 4349,
+              "p95": 10622.399999999998,
+              "max": 43446,
+              "min": 2308,
+              "sum": 679414
+            },
+            "stageMs": {
+              "quarantine": {
+                "n": 123,
+                "mean": 14.016260162601625,
+                "p50": 13,
+                "p95": 18.89999999999999,
+                "max": 30,
+                "min": 10,
+                "sum": 1724
+              },
+              "to-canonical": {
+                "n": 123,
+                "mean": 8.276422764227643,
+                "p50": 8,
+                "p95": 10.899999999999991,
+                "max": 45,
+                "min": 6,
+                "sum": 1018
+              },
+              "format-detect": {
+                "n": 123,
+                "mean": 7.845528455284553,
+                "p50": 8,
+                "p95": 10,
+                "max": 15,
+                "min": 6,
+                "sum": 965
+              },
+              "normalize": {
+                "n": 123,
+                "mean": 5.626016260162602,
+                "p50": 5,
+                "p95": 7,
+                "max": 13,
+                "min": 4,
+                "sum": 692
+              },
+              "format-tooling": {
+                "n": 123,
+                "mean": 9.926829268292684,
+                "p50": 9,
+                "p95": 14.899999999999991,
+                "max": 22,
+                "min": 7,
+                "sum": 1221
+              },
+              "split-pages": {
+                "n": 123,
+                "mean": 14.609756097560975,
+                "p50": 14,
+                "p95": 19.89999999999999,
+                "max": 24,
+                "min": 12,
+                "sum": 1797
+              },
+              "pdf-tooling": {
+                "n": 123,
+                "mean": 12.382113821138212,
+                "p50": 12,
+                "p95": 17,
+                "max": 22,
+                "min": 10,
+                "sum": 1523
+              },
+              "extract-markdown": {
+                "n": 123,
+                "mean": 527.2845528455284,
+                "p50": 332,
+                "p95": 1202.9999999999995,
+                "max": 5773,
+                "min": 188,
+                "sum": 64856
+              },
+              "route-pages": {
+                "n": 123,
+                "mean": 1112.2520325203252,
+                "p50": 960,
+                "p95": 2847.499999999998,
+                "max": 3630,
+                "min": 4,
+                "sum": 136807
+              },
+              "classify-route": {
+                "n": 123,
+                "mean": 13.617886178861788,
+                "p50": 12,
+                "p95": 19,
+                "max": 30,
+                "min": 9,
+                "sum": 1675
+              },
+              "render-images": {
+                "n": 123,
+                "mean": 50.73170731707317,
+                "p50": 13,
+                "p95": 17,
+                "max": 2154,
+                "min": 10,
+                "sum": 6240
+              },
+              "vision-extract": {
+                "n": 123,
+                "mean": 1465.39837398374,
+                "p50": 13,
+                "p95": 5935.4999999999945,
+                "max": 39784,
+                "min": 10,
+                "sum": 180244
+              },
+              "embed": {
+                "n": 123,
+                "mean": 1784.1138211382113,
+                "p50": 1612,
+                "p95": 3046.6999999999994,
+                "max": 4914,
+                "min": 1242,
+                "sum": 219446
+              },
+              "index": {
+                "n": 123,
+                "mean": 84.5040650406504,
+                "p50": 51,
+                "p95": 227.49999999999977,
+                "max": 736,
+                "min": 35,
+                "sum": 10394
+              }
+            },
+            "routePagesLayoutShadowMs": {
+              "n": 117,
+              "mean": 591.7703603162374,
+              "p50": 442.41893100000743,
+              "p95": 1673.5181787999882,
+              "max": 2006.9996830000018,
+              "min": 137.230905000004,
+              "sum": 69237.13215699978
+            }
+          },
+          "throughput": {
+            "pagesPerMinuteSequential": 12.463094199504056,
+            "timeToIngest100PagesMin": 8.023689655172413,
+            "pagesPerUsdProvider": 1374.28788311509,
+            "pagesPerUsdCustomer": 1145.2399025959091,
+            "basis": "Sequential single-document submissions on one local worker (docConcurrency 4 available, 1 document in flight); runtime = client wall time upload->completed; cost = paid provider calls only (local CPU and storage not priced)."
+          },
+          "storage": {
+            "tracedS3Ops": {
+              "GetObject": 1718,
+              "PutObject": 3133,
+              "CreateMultipartUpload": 123,
+              "UploadPart": 123,
+              "CompleteMultipartUpload": 123,
+              "HeadObject": 243
+            },
+            "tracedGetBytes": 231309459,
+            "storedObjects": 2976,
+            "storedBytes": 126328846,
+            "storedRasterObjects": 125,
+            "storedRasterBytes": 44305097,
+            "note": "Ops counted from worker/API OTLP spans tagged with docslurp.runId (instrumented S3 client). LanceDB's native S3 traffic is not instrumented and is excluded. Stored = objects under the run prefix at the end (overwrites counted once)."
+          },
+          "rasters": {
+            "pdftoppmRenders": 130,
+            "renderImagesRendered": 4,
+            "renderImagesReused": 55
+          },
+          "resources": {
+            "workerCpuSecPerDoc": {
+              "n": 123,
+              "mean": 1.122439024390244,
+              "p50": 1.009999999999998,
+              "p95": 1.9390000000000003,
+              "max": 2.7,
+              "min": 0.5799999999999983,
+              "sum": 138.06
+            },
+            "layoutCpuSecPerDoc": {
+              "n": 123,
+              "mean": 0.2812195121951219,
+              "p50": 0.28999999999999204,
+              "p95": 0.5600000000000023,
+              "max": 0.6199999999999974,
+              "min": 0,
+              "sum": 34.589999999999996
+            },
+            "workerCpuSecTotal": 138.06,
+            "layoutCpuSecTotal": 34.589999999999996,
+            "peakWorkerRssMb": 590.78125,
+            "peakLayoutRssMb": 153.71875
+          },
+          "histograms": {
+            "endToEndWallMs": [
+              {
+                "lo": 0,
+                "hi": 2000,
+                "n": 0
+              },
+              {
+                "lo": 2000,
+                "hi": 4000,
+                "n": 49
+              },
+              {
+                "lo": 4000,
+                "hi": 6000,
+                "n": 36
+              },
+              {
+                "lo": 6000,
+                "hi": 8000,
+                "n": 17
+              },
+              {
+                "lo": 8000,
+                "hi": 10000,
+                "n": 12
+              },
+              {
+                "lo": 10000,
+                "hi": 15000,
+                "n": 8
+              },
+              {
+                "lo": 15000,
+                "hi": 20000,
+                "n": 0
+              },
+              {
+                "lo": 20000,
+                "hi": 40000,
+                "n": 0
+              },
+              {
+                "lo": 40000,
+                "hi": 1000000000,
+                "n": 1
+              }
+            ],
+            "providerCentsPerDoc": [
+              {
+                "lo": 0,
+                "hi": 0.01,
+                "n": 45
+              },
+              {
+                "lo": 0.01,
+                "hi": 0.05,
+                "n": 39
+              },
+              {
+                "lo": 0.05,
+                "hi": 0.1,
+                "n": 6
+              },
+              {
+                "lo": 0.1,
+                "hi": 0.25,
+                "n": 23
+              },
+              {
+                "lo": 0.25,
+                "hi": 0.5,
+                "n": 9
+              },
+              {
+                "lo": 0.5,
+                "hi": 1,
+                "n": 0
+              },
+              {
+                "lo": 1,
+                "hi": 2,
+                "n": 0
+              },
+              {
+                "lo": 2,
+                "hi": 1000000000,
+                "n": 1
+              }
+            ]
+          },
+          "byKind": {
+            "tier-5": {
+              "documents": 13,
+              "pages": 13,
+              "vlmPageCalls": 2,
+              "providerUsd": 0.0013263050000000005,
+              "wallMsP50": 3081,
+              "wallMsP95": 5385.199999999999
+            },
+            "native-business": {
+              "documents": 9,
+              "pages": 13,
+              "vlmPageCalls": 4,
+              "providerUsd": 0.0070546260000000005,
+              "wallMsP50": 4585,
+              "wallMsP95": 8805.4
+            },
+            "repo-fixture": {
+              "documents": 11,
+              "pages": 15,
+              "vlmPageCalls": 8,
+              "providerUsd": 0.031608574,
+              "wallMsP50": 3087,
+              "wallMsP95": 26778
+            },
+            "quirk": {
+              "documents": 5,
+              "pages": 7,
+              "vlmPageCalls": 1,
+              "providerUsd": 0.0025584440000000004,
+              "wallMsP50": 6587,
+              "wallMsP95": 7950.6
+            },
+            "tier-2": {
+              "documents": 7,
+              "pages": 7,
+              "vlmPageCalls": 2,
+              "providerUsd": 0.0021394969999999998,
+              "wallMsP50": 3823,
+              "wallMsP95": 5937.5
+            },
+            "raster-only": {
+              "documents": 29,
+              "pages": 29,
+              "vlmPageCalls": 29,
+              "providerUsd": 0.043190809000000004,
+              "wallMsP50": 7355,
+              "wallMsP95": 12571.599999999999
+            },
+            "scan": {
+              "documents": 17,
+              "pages": 18,
+              "vlmPageCalls": 10,
+              "providerUsd": 0.013488440999999997,
+              "wallMsP50": 5581,
+              "wallMsP95": 9061.8
+            },
+            "tier-3": {
+              "documents": 3,
+              "pages": 3,
+              "vlmPageCalls": 0,
+              "providerUsd": 0.000244311,
+              "wallMsP50": 3323,
+              "wallMsP95": 3325.7
+            },
+            "native-math": {
+              "documents": 12,
+              "pages": 12,
+              "vlmPageCalls": 1,
+              "providerUsd": 0.0022712450000000003,
+              "wallMsP50": 3834,
+              "wallMsP95": 5454.299999999999
+            },
+            "tier-1": {
+              "documents": 11,
+              "pages": 22,
+              "vlmPageCalls": 0,
+              "providerUsd": 0.0011442750000000002,
+              "wallMsP50": 3573,
+              "wallMsP95": 4454
+            },
+            "image": {
+              "documents": 6,
+              "pages": 6,
+              "vlmPageCalls": 0,
+              "providerUsd": 0.00048266199999999997,
+              "wallMsP50": 6978,
+              "wallMsP95": 7928.25
+            }
+          }
+        }
+      },
+      "shadowOverhead": {
+        "pairs": 123,
+        "wallMsDelta": {
+          "n": 123,
+          "mean": 390.3658536585366,
+          "p50": 267,
+          "p95": 2007.9,
+          "max": 3768,
+          "min": -3994,
+          "sum": 48015
+        },
+        "routePagesStageMsDelta": {
+          "n": 123,
+          "mean": 504.9430894308943,
+          "p50": 403,
+          "p95": 1763.5999999999997,
+          "max": 2409,
+          "min": -2568,
+          "sum": 62108
+        },
+        "renderImagesStageMsDelta": {
+          "n": 123,
+          "mean": -203.9349593495935,
+          "p50": -2,
+          "p95": 3,
+          "max": 101,
+          "min": -1541,
+          "sum": -25084
+        },
+        "workerCpuSecDelta": {
+          "n": 123,
+          "mean": 0.06609756097560969,
+          "p50": 0.05000000000000426,
+          "p95": 0.42800000000000404,
+          "max": 1.0200000000000005,
+          "min": -0.5200000000000031,
+          "sum": 8.129999999999992
+        },
+        "pdftoppmRendersDelta": 75,
+        "storedRasterObjectsDelta": 63,
+        "storedBytesDelta": 18855567,
+        "s3PutDelta": 180,
+        "s3GetDelta": 0,
+        "vlmCallsDelta": 0,
+        "layoutServiceMs": {
+          "n": 121,
+          "mean": 60.28374530517396,
+          "p50": 59.226902085356414,
+          "p95": 90.59797995723784,
+          "max": 128.6684030201286,
+          "min": 23.312119068577886,
+          "sum": 7294.333181926049
+        },
+        "layoutObserverElapsedMs": {
+          "n": 121,
+          "mean": 67.51088100826667,
+          "p50": 66.55103100000997,
+          "p95": 98.0141490000533,
+          "max": 141.5024429999903,
+          "min": 26.638420999981463,
+          "sum": 8168.816602000266
+        },
+        "layoutPageRowElapsedMs": {
+          "n": 127,
+          "mean": 541.3667049763786,
+          "p50": 400.99687099999574,
+          "p95": 1473.1721886999906,
+          "max": 2001.6147200000123,
+          "min": 133.87200400000438,
+          "sum": 68753.57153200009
+        },
+        "histogramWallMsDelta": [
+          {
+            "lo": -1000000000,
+            "hi": -2000,
+            "n": 2
+          },
+          {
+            "lo": -2000,
+            "hi": -1000,
+            "n": 8
+          },
+          {
+            "lo": -1000,
+            "hi": -500,
+            "n": 8
+          },
+          {
+            "lo": -500,
+            "hi": 0,
+            "n": 15
+          },
+          {
+            "lo": 0,
+            "hi": 500,
+            "n": 34
+          },
+          {
+            "lo": 500,
+            "hi": 1000,
+            "n": 29
+          },
+          {
+            "lo": 1000,
+            "hi": 2000,
+            "n": 17
+          },
+          {
+            "lo": 2000,
+            "hi": 4000,
+            "n": 10
+          },
+          {
+            "lo": 4000,
+            "hi": 1000000000,
+            "n": 0
+          }
+        ]
+      },
+      "layout": {
+        "rows": 127,
+        "routed": 75,
+        "audit": 52,
+        "succeeded": 121,
+        "errors": 6,
+        "errorReasons": {
+          "The operation was aborted due to timeout": 6
+        },
+        "documentsWithRows": 117,
+        "eligibleTotal": 75,
+        "auditPoolTotal": 64,
+        "budgetExhausted": 6,
+        "admissionRejected": 0,
+        "planZeroAssignmentDocs": 4
+      },
+      "auditFindings": [
+        {
+          "kind": "repo-fixture",
+          "page": 1,
+          "healthyTextLayer": false,
+          "routedRoles": [
+            "accept-text",
+            "skip"
+          ],
+          "nonTextLabels": [
+            "chart"
+          ],
+          "armAVlmCall": true,
+          "nativeF1": null,
+          "confirmedIncomplete": false
+        },
+        {
+          "kind": "tier-5",
+          "page": 1,
+          "healthyTextLayer": true,
+          "routedRoles": [
+            "accept-text"
+          ],
+          "nonTextLabels": [
+            "table"
+          ],
+          "armAVlmCall": false,
+          "nativeF1": 1,
+          "confirmedIncomplete": false
+        },
+        {
+          "kind": "tier-2",
+          "page": 1,
+          "healthyTextLayer": true,
+          "routedRoles": [
+            "accept-text"
+          ],
+          "nonTextLabels": [
+            "formula"
+          ],
+          "armAVlmCall": false,
+          "nativeF1": 0.9690210656753406,
+          "confirmedIncomplete": false
+        },
+        {
+          "kind": "tier-3",
+          "page": 1,
+          "healthyTextLayer": false,
+          "routedRoles": [
+            "accept-text"
+          ],
+          "nonTextLabels": [
+            "figure"
+          ],
+          "armAVlmCall": false,
+          "nativeF1": 1,
+          "confirmedIncomplete": false
+        },
+        {
+          "kind": "tier-2",
+          "page": 1,
+          "healthyTextLayer": false,
+          "routedRoles": [
+            "accept-text",
+            "skip"
+          ],
+          "nonTextLabels": [
+            "figure"
+          ],
+          "armAVlmCall": true,
+          "nativeF1": 1,
+          "confirmedIncomplete": false
+        },
+        {
+          "kind": "native-math",
+          "page": 1,
+          "healthyTextLayer": true,
+          "routedRoles": [
+            "accept-text"
+          ],
+          "nonTextLabels": [
+            "formula",
+            "chart"
+          ],
+          "armAVlmCall": false,
+          "nativeF1": 0.8099173553719008,
+          "confirmedIncomplete": true
+        },
+        {
+          "kind": "tier-2",
+          "page": 1,
+          "healthyTextLayer": false,
+          "routedRoles": [
+            "accept-text",
+            "skip"
+          ],
+          "nonTextLabels": [
+            "figure"
+          ],
+          "armAVlmCall": true,
+          "nativeF1": 1,
+          "confirmedIncomplete": false
+        },
+        {
+          "kind": "tier-3",
+          "page": 1,
+          "healthyTextLayer": false,
+          "routedRoles": [
+            "accept-text"
+          ],
+          "nonTextLabels": [
+            "figure"
+          ],
+          "armAVlmCall": false,
+          "nativeF1": 1,
+          "confirmedIncomplete": false
+        },
+        {
+          "kind": "native-math",
+          "page": 1,
+          "healthyTextLayer": true,
+          "routedRoles": [
+            "accept-text"
+          ],
+          "nonTextLabels": [
+            "formula",
+            "chart"
+          ],
+          "armAVlmCall": false,
+          "nativeF1": 0.8099173553719008,
+          "confirmedIncomplete": true
+        },
+        {
+          "kind": "repo-fixture",
+          "page": 1,
+          "healthyTextLayer": true,
+          "routedRoles": [
+            "accept-text"
+          ],
+          "nonTextLabels": [
+            "table"
+          ],
+          "armAVlmCall": false,
+          "nativeF1": null,
+          "confirmedIncomplete": false
+        },
+        {
+          "kind": "tier-2",
+          "page": 1,
+          "healthyTextLayer": true,
+          "routedRoles": [],
+          "nonTextLabels": [
+            "formula"
+          ],
+          "armAVlmCall": false,
+          "nativeF1": 0.9683143219264893,
+          "confirmedIncomplete": false
+        },
+        {
+          "kind": "native-math",
+          "page": 1,
+          "healthyTextLayer": false,
+          "routedRoles": [],
+          "nonTextLabels": [
+            "chart"
+          ],
+          "armAVlmCall": false,
+          "nativeF1": 0.8297455968688844,
+          "confirmedIncomplete": true
+        },
+        {
+          "kind": "tier-5",
+          "page": 1,
+          "healthyTextLayer": true,
+          "routedRoles": [
+            "accept-text"
+          ],
+          "nonTextLabels": [
+            "table"
+          ],
+          "armAVlmCall": false,
+          "nativeF1": 1,
+          "confirmedIncomplete": false
+        },
+        {
+          "kind": "tier-5",
+          "page": 1,
+          "healthyTextLayer": false,
+          "routedRoles": [
+            "accept-text"
+          ],
+          "nonTextLabels": [
+            "table"
+          ],
+          "armAVlmCall": false,
+          "nativeF1": 0.9610389610389611,
+          "confirmedIncomplete": false
+        },
+        {
+          "kind": "repo-fixture",
+          "page": 1,
+          "healthyTextLayer": false,
+          "routedRoles": [
+            "accept-text"
+          ],
+          "nonTextLabels": [
+            "table"
+          ],
+          "armAVlmCall": false,
+          "nativeF1": null,
+          "confirmedIncomplete": false
+        },
+        {
+          "kind": "tier-3",
+          "page": 1,
+          "healthyTextLayer": false,
+          "routedRoles": [
+            "accept-text"
+          ],
+          "nonTextLabels": [
+            "figure"
+          ],
+          "armAVlmCall": false,
+          "nativeF1": 1,
+          "confirmedIncomplete": false
+        },
+        {
+          "kind": "native-business",
+          "page": 2,
+          "healthyTextLayer": false,
+          "routedRoles": [
+            "accept-text",
+            "skip",
+            "skip"
+          ],
+          "nonTextLabels": [
+            "figure",
+            "chart"
+          ],
+          "armAVlmCall": true,
+          "nativeF1": 0.4193548387096774,
+          "confirmedIncomplete": true
+        },
+        {
+          "kind": "repo-fixture",
+          "page": 2,
+          "healthyTextLayer": false,
+          "routedRoles": [],
+          "nonTextLabels": [
+            "formula"
+          ],
+          "armAVlmCall": false,
+          "nativeF1": null,
+          "confirmedIncomplete": false
+        },
+        {
+          "kind": "tier-2",
+          "page": 1,
+          "healthyTextLayer": true,
+          "routedRoles": [],
+          "nonTextLabels": [
+            "formula"
+          ],
+          "armAVlmCall": false,
+          "nativeF1": 0.9657794676806083,
+          "confirmedIncomplete": false
+        },
+        {
+          "kind": "native-math",
+          "page": 1,
+          "healthyTextLayer": false,
+          "routedRoles": [
+            "accept-text"
+          ],
+          "nonTextLabels": [
+            "chart",
+            "formula_number"
+          ],
+          "armAVlmCall": false,
+          "nativeF1": 0.8289738430583501,
+          "confirmedIncomplete": true
+        }
+      ],
+      "policyC": {
+        "policy": "C-layout-text-only-gate",
+        "declaredAt": "2026-10-21T22:55:00Z",
+        "armAVlmPageCalls": 57,
+        "armAVlmProviderUsd": 0.08965525000000002,
+        "armAVlmLatencyMs": {
+          "n": 57,
+          "mean": 3326.7719298245615,
+          "p50": 1985,
+          "p95": 7033.199999999996,
+          "max": 39480,
+          "min": 686,
+          "sum": 189626
+        },
+        "vlmPagesWithLayoutEvidence": 53,
+        "vlmPagesWithoutLayoutEvidence": 4,
+        "conditionCounts": {
+          "allTextRegions": 17,
+          "strongParagraph": 38,
+          "coverageAtLeast5pct": 43,
+          "healthyTextLayer": 0,
+          "nativeAtLeast50Words": 10,
+          "textOnlyLayoutIgnoringTextLayer": 14
+        },
+        "skippedCalls": 0,
+        "avoidedProviderUsd": 0,
+        "avoidedShareOfVlmUsd": 0,
+        "avoidedInputTokens": 0,
+        "avoidedOutputTokens": 0,
+        "avoidedVlmLatencyMs": 0,
+        "quality": {
+          "skippedWithReference": 0,
+          "meanLoss": null,
+          "materialLossPages": 0,
+          "lossDistribution": {
+            "n": 0,
+            "mean": null,
+            "p50": null,
+            "p95": null,
+            "max": null,
+            "min": null,
+            "sum": 0
+          }
+        },
+        "diagnosticTextOnlyLayoutGate": {
+          "pages": 14,
+          "withReference": 11,
+          "meanLoss": 0.7623996072653901,
+          "materialLossPages": 9,
+          "rows": [
+            {
+              "page": 1,
+              "selection": "routed",
+              "nativeWords": 52,
+              "f1Vlm": 0.9911504424778761,
+              "f1Native": 0.9541284403669724,
+              "loss": 0.03702200211090367
+            },
+            {
+              "page": 1,
+              "selection": "routed",
+              "nativeWords": 36,
+              "f1Vlm": null,
+              "f1Native": null,
+              "loss": null
+            },
+            {
+              "page": 1,
+              "selection": "routed",
+              "nativeWords": 0,
+              "f1Vlm": 1,
+              "f1Native": 0,
+              "loss": 1
+            },
+            {
+              "page": 1,
+              "selection": "routed",
+              "nativeWords": 59,
+              "f1Vlm": null,
+              "f1Native": null,
+              "loss": null
+            },
+            {
+              "page": 1,
+              "selection": "routed",
+              "nativeWords": 0,
+              "f1Vlm": 0.9524940617577197,
+              "f1Native": 0,
+              "loss": 0.9524940617577197
+            },
+            {
+              "page": 1,
+              "selection": "routed",
+              "nativeWords": 0,
+              "f1Vlm": 0.9360613810741688,
+              "f1Native": 0,
+              "loss": 0.9360613810741688
+            },
+            {
+              "page": 2,
+              "selection": "routed",
+              "nativeWords": 5,
+              "f1Vlm": null,
+              "f1Native": null,
+              "loss": null
+            },
+            {
+              "page": 1,
+              "selection": "routed",
+              "nativeWords": 0,
+              "f1Vlm": 0.9369475545079552,
+              "f1Native": 0,
+              "loss": 0.9369475545079552
+            },
+            {
+              "page": 1,
+              "selection": "routed",
+              "nativeWords": 0,
+              "f1Vlm": 0.9492753623188407,
+              "f1Native": 0,
+              "loss": 0.9492753623188407
+            },
+            {
+              "page": 1,
+              "selection": "routed",
+              "nativeWords": 0,
+              "f1Vlm": 0.9947169811320754,
+              "f1Native": 0,
+              "loss": 0.9947169811320754
+            },
+            {
+              "page": 1,
+              "selection": "audit",
+              "nativeWords": 45,
+              "f1Vlm": 1,
+              "f1Native": 1,
+              "loss": 0
+            },
+            {
+              "page": 1,
+              "selection": "routed",
+              "nativeWords": 0,
+              "f1Vlm": 0.8501483679525222,
+              "f1Native": 0,
+              "loss": 0.8501483679525222
+            },
+            {
+              "page": 1,
+              "selection": "routed",
+              "nativeWords": 0,
+              "f1Vlm": 0.9345172031076582,
+              "f1Native": 0,
+              "loss": 0.9345172031076582
+            },
+            {
+              "page": 1,
+              "selection": "routed",
+              "nativeWords": 0,
+              "f1Vlm": 0.7952127659574468,
+              "f1Native": 0,
+              "loss": 0.7952127659574468
+            }
+          ]
+        }
+      },
+      "benchLedgerAllOrgs": [
+        {
+          "provider": "openrouter",
+          "model": "cloudflare/clef-flash",
+          "metric": "page-route-decision",
+          "calls": 22,
+          "input": 11220,
+          "output": 0,
+          "customer_cents": 0.0511632,
+          "provider_cents": 0.042636
+        },
+        {
+          "provider": "openrouter",
+          "model": "cloudflare/clef-flash",
+          "metric": "page-route-decision-canary",
+          "calls": 1,
+          "input": 380,
+          "output": 0,
+          "customer_cents": 0.0017328,
+          "provider_cents": 0.001444
+        },
+        {
+          "provider": "openrouter",
+          "model": "google/gemini-3.1-flash-lite",
+          "metric": "page-analysis",
+          "calls": 231,
+          "input": 264609,
+          "output": 196801,
+          "customer_cents": 43.36245,
+          "provider_cents": 36.135375000000025
+        },
+        {
+          "provider": "openrouter",
+          "model": "openai/gpt-6-luna-decisions",
+          "metric": "page-route-decision",
+          "calls": 371,
+          "input": 215206,
+          "output": 0,
+          "customer_cents": 2.582472,
+          "provider_cents": 2.152059999999995
+        },
+        {
+          "provider": "openrouter",
+          "model": "openai/gpt-6-luna-decisions",
+          "metric": "page-route-decision-canary",
+          "calls": 18,
+          "input": 8766,
+          "output": 0,
+          "customer_cents": 0.105192,
+          "provider_cents": 0.08766
+        },
+        {
+          "provider": "openrouter",
+          "model": "perplexity/pplx-embed-v1-0.6b",
+          "metric": "embedding-tokens",
+          "calls": 532,
+          "input": 1097599,
+          "output": 0,
+          "customer_cents": 0.52684752,
+          "provider_cents": 0.4390395999999997
+        },
+        {
+          "provider": "openrouter",
+          "model": "qwen/qwen3.5-flash-02-23",
+          "metric": "contextual-chunk-preamble",
+          "calls": 512,
+          "input": 390368,
+          "output": 49152,
+          "customer_cents": 4.5784128,
+          "provider_cents": 3.815343999999997
+        }
+      ],
+      "rawAnalysis": "/home/dan/data/docslurp-evals/runs/router-e2e-20261021/raw-postfix/analysis.json"
+    }
+  },
+  "routedPagesLeftNativeByShadowExtraction": {
+    "main": {
+      "routedRows": 9,
+      "armASentToVlm": 3,
+      "armALeftNative": 6,
+      "armALeftNativeByKind": {
+        "tier-1": 2,
+        "tier-5": 2,
+        "quirk": 1,
+        "native-business": 1
+      }
+    },
+    "postfix": {
+      "routedRows": 75,
+      "armASentToVlm": 49,
+      "armALeftNative": 26,
+      "armALeftNativeByKind": {
+        "native-business": 6,
+        "quirk": 3,
+        "tier-5": 2,
+        "native-math": 7,
+        "tier-2": 2,
+        "scan": 4,
+        "tier-1": 2
+      }
+    }
+  }
+}

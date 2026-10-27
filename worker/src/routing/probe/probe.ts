@@ -12,7 +12,7 @@ import { NATIVE_PDF_OPEN_LIMITS } from "../../native-pdf/binding-engine.js";
 import type { ProbeBinding, ProbeBindingDoc, ProbeBindingPage } from "./binding.js";
 import {
   IMAGE_HOST_COVERAGE, Mask, OCR_FONT_RE, OCR_PRODUCER_RE, PROBE_DPI, commonWordRatio, isMath, isOcrLayer,
-  isPrintable, isUnmapped, laplacianVariance, parsePages, percentiles, round, textLayerStatus,
+  isPrintable, isUnmapped, grayImageStatistics, parsePages, round, textLayerStatus,
 } from "./features.js";
 import { OCR_AGREEMENT_MIN, ocrLayerAgreement, type OcrLayerCheck, type Recogniser } from "./ocr-layer.js";
 import { ATTENTION_FEATURES, documentFeatures, pageUnusualFeatures } from "./unusual.js";
@@ -220,12 +220,7 @@ export async function probePage(
   const raw = await sharp(png).toColourspace("b-w").raw().toBuffer({ resolveWithObject: true });
   const gray = new Uint8Array(raw.data.buffer, raw.data.byteOffset, raw.info.width * raw.info.height * raw.info.channels);
   const px = raw.info.channels === 1 ? gray : gray.filter((_, i) => i % raw.info.channels === 0);
-  const blur = laplacianVariance(px, raw.info.width, raw.info.height);
-  const [p1, p99] = percentiles(px, [1, 99]) as [number, number];
-  const contrast = (p99 - p1) / 255;
-  let sum = 0;
-  for (const v of px) sum += v;
-  const brightness = px.length ? sum / px.length / 255 : 0;
+  const { blur, contrast, brightness } = grayImageStatistics(px, raw.info.width, raw.info.height);
 
   // ---- hidden / OCR text-layer signals ----
   images.sort((a, b) => b.coverage - a.coverage);

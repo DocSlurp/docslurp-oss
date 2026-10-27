@@ -1,0 +1,3 @@
+# Reproducible synthetic corpus renderer; model runtime requirements are separate.
+pillow==13.0.0
+numpy==2.5.4

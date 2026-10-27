@@ -1,0 +1,5 @@
+# Separate minimal CPU environment. For CUDA replace onnxruntime with onnxruntime-gpu.
+Pillow>=11.0,<13
+numpy>=1.26,<3
+onnxruntime>=1.22,<2
+opencv-python-headless>=4.11,<6

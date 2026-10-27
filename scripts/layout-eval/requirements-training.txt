@@ -1,0 +1,6 @@
+# Install into the existing Heron inference environment; choose CPU/CUDA torch
+# wheels first. This keeps training on the exact baseline Transformers API.
+-r requirements.txt
+transformers==4.57.6
+# RT-DETR training uses SciPy's Hungarian assignment; inference does not.
+scipy>=1.17.1,<1.18

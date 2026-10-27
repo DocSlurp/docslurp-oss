@@ -112,7 +112,8 @@ type DocumentRow = {
   page_count: number;
   created_at: string | Date;
   updated_at: string | Date;
-  /** Joined by the run document loaders: the run's extract storage prefix. */
+  /** Joined from the workspace (documentRetentionHoursSql); absent in rows selected without it. */
+  artifact_retention_hours?: number | string | null;
   run_storage_prefix?: string | null;
 };
 
@@ -382,13 +383,22 @@ function runRowQuery(client: Sql<Record<string, unknown>>, runId: string) {
   `;
 }
 
+/**
+ * Hours until the workspace's run retention deletes a document with its run, page images
+ * included; null when runs are kept indefinitely. Artifact retention is not used: its purge
+ * deletes the URIs recorded on the run, not raster-cache keys, so page images can outlive it.
+ */
+function documentRetentionHoursSql(client: Sql<Record<string, unknown>>) {
+  return client`(select w.run_retention_days * 24 from workspaces w where w.id = documents.workspace_id) as artifact_retention_hours`;
+}
+
 function runDocumentRowsQuery(client: Sql<Record<string, unknown>>, runId: string) {
   return client<DocumentRow[]>`
-    select d.*, (select r.storage_prefix from workspace_runs r where r.id = d.run_id) as run_storage_prefix
-    from documents d
-    where d.run_id = ${runId}
-      and d.superseded_at is null and d.status <> 'cancelled'
-    order by d.created_at asc
+    select documents.*, ${documentRetentionHoursSql(client)}, (select r.storage_prefix from workspace_runs r where r.id = documents.run_id) as run_storage_prefix
+    from documents
+    where run_id = ${runId}
+      and superseded_at is null and status <> 'cancelled'
+    order by created_at asc
   `;
 }
 
@@ -542,7 +552,7 @@ export class Store {
   }
 
   async loadDocument(documentId: string): Promise<Document> {
-    const [row] = await this.sql<DocumentRow[]>`select d.*, (select r.storage_prefix from workspace_runs r where r.id = d.run_id) as run_storage_prefix from documents d where d.id = ${documentId} limit 1`;
+    const [row] = await this.sql<DocumentRow[]>`select documents.*, ${documentRetentionHoursSql(this.sql)}, (select r.storage_prefix from workspace_runs r where r.id = documents.run_id) as run_storage_prefix from documents where id = ${documentId} limit 1`;
     if (!row) throw new DocumentNotFoundError(documentId);
     return mapDocument(row);
   }
@@ -963,7 +973,7 @@ export class Store {
       value: perf.value,
       unit: perf.unit,
       tags: perf.tags,
-      metadata: this.toJsonText(perf.metadata ?? {}),
+      metadata: this.toJsonValue(perf.metadata ?? {}),
     }));
 
     return batchedRows(rows).map((batch) => client`
@@ -1012,7 +1022,7 @@ export class Store {
       page_ratio: parserEval.pageRatio,
       selected: parserEval.selected,
       artifact_uri: parserEval.artifactUri ?? null,
-      metadata: this.toJsonText(parserEval.metadata ?? {}),
+      metadata: this.toJsonValue(parserEval.metadata ?? {}),
     }));
 
     return batchedRows(rows).map((batch) => client`
@@ -2960,8 +2970,9 @@ export class Store {
     return this.sql.json(JSON.parse(JSON.stringify(value ?? {})) as JSONValue);
   }
 
-  private toJsonText(value: unknown) {
-    return JSON.stringify(JSON.parse(JSON.stringify(value ?? {})));
+  /** A plain JSON value for jsonb columns: the driver serializes it once (a string here would be stored as a JSON string). */
+  private toJsonValue(value: unknown) {
+    return JSON.parse(JSON.stringify(value ?? {})) as Record<string, unknown>;
   }
 
   /** Whether the app has enforced billing (Stripe configured); false before migration 0026. */
@@ -4057,6 +4068,7 @@ function mapDocument(row: DocumentRow): Document {
     createdAt: toDate(row.created_at),
     updatedAt: toDate(row.updated_at),
     ...(row.run_storage_prefix ? { artifactRoot: row.run_storage_prefix } : {}),
+    ...(row.artifact_retention_hours === undefined ? {} : { artifactRetentionHours: row.artifact_retention_hours === null ? null : Number(row.artifact_retention_hours) }),
   };
 }
 

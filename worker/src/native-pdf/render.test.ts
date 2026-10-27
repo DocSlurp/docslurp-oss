@@ -1,7 +1,7 @@
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { Document } from "../models.js";
 import { PdfRasterCache, PdfSourceCache, readRasterEngine } from "../pipeline/pdf-asset-cache.js";
@@ -123,7 +123,7 @@ describe("PdfRasterCache with PDF_RASTER_ENGINE=native-pdf", () => {
       loadEngine: async () => engine,
       concurrency: 2,
     });
-    return { cache, store, calls: () => pdftoppmCalls, sources };
+    return { cache, store, storage, calls: () => pdftoppmCalls, sources };
   }
 
   it("renders with the engine, tags engine+dpi, uses a separate key space and reuses it", async () => {
@@ -152,6 +152,68 @@ describe("PdfRasterCache with PDF_RASTER_ENGINE=native-pdf", () => {
     expect(b.map((p) => p.engine)).toEqual(["pdftoppm", "pdftoppm"]);
     expect(failing.calls()).toBe(2);
     await failing.sources.clear();
+  });
+
+  it("delivers durable native bytes in sequence and excludes cache hits", async () => {
+    const { cache, store, sources } = await setup(fakeEngine().engine);
+    let active = 0;
+    const onRenderedPage = vi.fn(async (page) => {
+      active += 1;
+      expect(active).toBe(1);
+      expect(store.get(page.artifactKey)).toBe(page.bytes);
+      expect(page).toMatchObject({ engine: "native-pdf", dpi: 150, mimeType: "image/png" });
+      await new Promise((resolve) => setImmediate(resolve));
+      active -= 1;
+    });
+    const args = { document, runId: "r", pageNumbers: [1, 2], onRenderedPage };
+    const fresh = await cache.renderSelectedPages(args);
+    const cached = await cache.renderSelectedPages(args);
+    expect(onRenderedPage.mock.calls.map(([page]) => page.artifactKey)).toEqual(fresh.map((page) => page.artifactKey));
+    expect(cached.every((page) => page.cacheHit)).toBe(true);
+    await sources.clear();
+  });
+
+  it("delivers only fresh fallback bytes with the actual pdftoppm key", async () => {
+    const { cache, store, sources, calls } = await setup(fakeEngine({ fail: true }).engine);
+    const cachedKey = "u/r/images/d/150dpi/page-1.png";
+    store.set(cachedKey, png(9, 7));
+    const onRenderedPage = vi.fn(async (page) => {
+      expect(store.get(page.artifactKey)).toBe(page.bytes);
+      expect(page).toMatchObject({ pageNumber: 2, engine: "pdftoppm", artifactKey: "u/r/images/d/150dpi/page-2.png" });
+    });
+    const pages = await cache.renderSelectedPages({ document, runId: "r", pageNumbers: [1, 2], onRenderedPage });
+    expect(calls()).toBe(1);
+    expect(onRenderedPage).toHaveBeenCalledOnce();
+    expect(pages[0]).toMatchObject({ artifactKey: cachedKey, cacheHit: true, sizeBytes: 33 });
+    expect(pages[1]).toMatchObject({ engine: "pdftoppm", cacheHit: false });
+    await sources.clear();
+  });
+
+  it("propagates callback failures after persistence without rerendering", async () => {
+    const { engine, stats } = fakeEngine();
+    const { cache, store, sources, calls } = await setup(engine);
+    const failure = new Error("consumer failed");
+    const onRenderedPage = vi.fn(async () => { throw failure; });
+    await expect(cache.renderSelectedPages({ document, runId: "r", pageNumbers: [1], onRenderedPage })).rejects.toBe(failure);
+    expect(calls()).toBe(0);
+    expect(onRenderedPage).toHaveBeenCalledOnce();
+    expect(store.has("u/r/images/d/150dpi-native-pdf/page-1.png")).toBe(true);
+    const retried = await cache.renderSelectedPages({ document, runId: "r", pageNumbers: [1], onRenderedPage });
+    expect(retried[0].cacheHit).toBe(true);
+    expect(stats.renders).toHaveLength(1);
+    expect(onRenderedPage).toHaveBeenCalledOnce();
+    await sources.clear();
+  });
+
+  it("propagates persistence failures without callback or renderer fallback", async () => {
+    const { cache, storage, sources, calls } = await setup(fakeEngine().engine);
+    const failure = new Error("storage unavailable");
+    storage.putBytes = async () => { throw failure; };
+    const onRenderedPage = vi.fn(async () => {});
+    await expect(cache.renderSelectedPages({ document, runId: "r", pageNumbers: [1], onRenderedPage })).rejects.toBe(failure);
+    expect(calls()).toBe(0);
+    expect(onRenderedPage).not.toHaveBeenCalled();
+    await sources.clear();
   });
 
   it("renderClip uses the engine and returns null when pdftoppm is active", async () => {

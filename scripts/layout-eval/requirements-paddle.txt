@@ -1,0 +1,5 @@
+# Install separately; GPU Paddle wheels depend on host CUDA version.
+Pillow>=11.0,<13
+numpy>=1.26,<3
+paddlepaddle>=3.2,<4
+paddleocr>=3.3,<4

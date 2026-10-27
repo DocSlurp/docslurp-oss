@@ -5,7 +5,9 @@
  * author, derivation time and publisher/HTTPS URL/PDF hash/extraction/page hashes.
  * Each case has id, source:{path,sha256}, labels:{path,sha256}, and
  * provenance:{kind:"authored",author,description,createdAt}. Label files contain
- * {labels:[{name:string,expected:JSON}]}. Unsupported catalogs fail closed.
+ * {labels:[{name:string,expected:JSON}]}. Optional categoricalFields bind specific
+ * expected-value paths to a hash-pinned, baseline Git enum contract; see
+ * docs/evaluation-integrity-categorical-contracts.md. Unsupported catalogs fail closed.
  */
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
@@ -31,6 +33,45 @@ function distinctiveAnswer(value) {
     || /^\d{8,}$/.test(value);
 }
 
+// Typed category declarations are scoped paths, never global value exemptions.
+// JSON Pointer uses an array-only * extension; missing fields fail closed.
+function categoricalValues(label, ontology) {
+  if (!Object.hasOwn(label, 'categoricalFields')) return strings(label.expected);
+  if (!Array.isArray(label.categoricalFields) || !label.categoricalFields.length
+      || Object.keys(label).some(key => !['name', 'expected', 'categoricalFields'].includes(key))) throw new Error('invalid-categorical-fields');
+  const excluded = new Set();
+  for (const field of label.categoricalFields) {
+    if (!field || Object.keys(field).some(key => !['pointer', 'ontology'].includes(key))
+        || typeof field.pointer !== 'string' || !field.pointer.startsWith('/')
+        || /~(?![01])/u.test(field.pointer)) throw new Error('invalid-categorical-fields');
+    const parts = field.pointer.slice(1).split('/').map(part => part.replace(/~1/g, '/').replace(/~0/g, '~'));
+    const values = ontology(field.ontology);
+    const visit = (value, depth, path) => {
+      if (depth === parts.length) {
+        if (typeof value !== 'string' || !values.has(value)) throw new Error('unknown-categorical-value');
+        const key = JSON.stringify(path);
+        if (excluded.has(key)) throw new Error('overlapping-categorical-fields');
+        excluded.add(key); return;
+      }
+      const part = parts[depth];
+      if (part === '*') {
+        if (!Array.isArray(value) || !value.length) throw new Error('missing-categorical-field');
+        value.forEach((child, index) => visit(child, depth + 1, [...path, String(index)]));
+      } else {
+        if (!value || typeof value !== 'object' || !Object.hasOwn(value, part)) throw new Error('missing-categorical-field');
+        visit(value[part], depth + 1, [...path, part]);
+      }
+    };
+    visit(label.expected, 0, []);
+  }
+  const collect = (value, path) => {
+    if (excluded.has(JSON.stringify(path))) return [];
+    if (value && typeof value === 'object') return Object.entries(value).flatMap(([key, child]) => collect(child, [...path, key]));
+    return strings(value);
+  };
+  return collect(label.expected, []);
+}
+
 export function judgeIntegrity({ dataset, repo = process.cwd(), base = 'HEAD' }) {
   const findings = [];
   const add = (rule, detail = {}) => findings.push({ rule, ...detail });
@@ -46,6 +87,8 @@ export function judgeIntegrity({ dataset, repo = process.cwd(), base = 'HEAD' })
     result.datasetHash = hash(manifestBytes);
     const manifest = JSON.parse(manifestBytes);
     if (!['docslurp-authored-eval@v1', 'docslurp-source-derived-eval@v1'].includes(manifest.schema) || !Array.isArray(manifest.cases) || !manifest.cases.length) throw new Error('unsupported-or-empty-manifest');
+    const git = (...args) => execFileSync('git', ['-C', repo, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: 64 * 1024 * 1024 });
+    git('rev-parse', '--verify', `${base}^{commit}`);
     const identifiers = new Set(), labelNames = new Set(), expected = new Set(), weakAnswers = new Set(), sourceHashes = new Set();
     const load = (entry) => {
       if (!entry || !nonempty(entry.path) || isAbsolute(entry.path) || !/^[a-f0-9]{64}$/.test(entry.sha256 ?? '')) throw new Error('missing-artifact-provenance');
@@ -54,6 +97,42 @@ export function judgeIntegrity({ dataset, repo = process.cwd(), base = 'HEAD' })
       const bytes = readFileSync(path);
       if (!bytes.length || hash(bytes) !== entry.sha256) throw new Error('artifact-hash-mismatch');
       return bytes;
+    };
+    const ontologyCache = new Map();
+    const ontology = (reference) => {
+      if (!reference || Object.keys(reference).some(key => !['path', 'sha256'].includes(key))) throw new Error('invalid-ontology-reference');
+      const key = JSON.stringify(reference);
+      if (ontologyCache.has(key)) return ontologyCache.get(key);
+      const declaration = JSON.parse(load(reference));
+      const { contract, values, provenance } = declaration;
+      if (declaration.schema !== 'docslurp-categorical-ontology@v1'
+          || Object.keys(declaration).some(key => !['schema', 'values', 'contract', 'provenance'].includes(key))
+          || !Array.isArray(values) || values.length < 2 || !values.every(nonempty) || new Set(values).size !== values.length
+          || !nonempty(provenance?.author) || !nonempty(provenance?.description)
+          || !Number.isFinite(Date.parse(provenance?.createdAt))) throw new Error('invalid-ontology-declaration');
+      if (!contract || !/^[a-f0-9]{40}$/.test(contract.gitCommit ?? '') || !/^[a-f0-9]{64}$/.test(contract.sha256 ?? '')
+          || !/^[A-Za-z_$][\w$]*$/.test(contract.exportName ?? '') || !nonempty(contract.path)
+          || isAbsolute(contract.path) || contract.path.split('/').some(part => part === '..' || !part)) throw new Error('invalid-ontology-contract');
+      // The reviewer chooses the pre-evaluation baseline. A future or unrelated
+      // commit cannot authorize an ontology, and all contract bytes are pinned.
+      try { git('merge-base', '--is-ancestor', contract.gitCommit, base); }
+      catch { throw new Error('ontology-contract-not-in-baseline'); }
+      const content = git('show', `${contract.gitCommit}:${contract.path}`);
+      if (hash(content) !== contract.sha256) throw new Error('ontology-contract-hash-mismatch');
+      // Deliberately narrow, non-executable contract syntax: exported JSON string
+      // array, optionally `as const`. Do not eval arbitrary repository code.
+      const escaped = contract.exportName.replace(/[$]/g, '\\$');
+      const matches = [...content.matchAll(new RegExp(`export\\s+const\\s+${escaped}\\s*=\\s*(\\[[^;]*?\\])\\s*(?:as\\s+const\\s*)?;`, 'g'))];
+      if (matches.length !== 1) throw new Error('unsupported-ontology-contract');
+      let declared;
+      try { declared = JSON.parse(matches[0][1]); } catch { throw new Error('unsupported-ontology-contract'); }
+      if (!Array.isArray(declared) || declared.length !== values.length
+          || !declared.every(value => typeof value === 'string' && values.includes(value))
+          || new Set(declared).size !== declared.length) throw new Error('ontology-contract-values-mismatch');
+      const allowed = new Set(values);
+      ontologyCache.set(key, allowed);
+      (result.ontologies ??= []).push({ artifactSha256: reference.sha256, contract });
+      return allowed;
     };
     for (const entry of manifest.cases) {
       if (!nonempty(entry.id) || entry.id.length < 12 || identifiers.has(entry.id)) throw new Error('invalid-or-duplicate-case-id');
@@ -91,8 +170,8 @@ export function judgeIntegrity({ dataset, repo = process.cwd(), base = 'HEAD' })
       const localNames = new Set();
       for (const label of labels.labels) {
         if (!nonempty(label.name) || localNames.has(label.name) || !Object.hasOwn(label, 'expected')) throw new Error('missing-or-duplicate-label');
-        const values = strings(label.expected).map((value) => value.trim()).filter(Boolean);
-        if (!values.length) throw new Error('missing-expected-values');
+        if (!strings(label.expected).map(value => value.trim()).filter(Boolean).length) throw new Error('missing-expected-values');
+        const values = categoricalValues(label, ontology).map(value => value.trim()).filter(Boolean);
         localNames.add(label.name); labelNames.add(label.name);
         for (const value of values) {
           if (distinctiveAnswer(value)) expected.add(value);
@@ -101,8 +180,6 @@ export function judgeIntegrity({ dataset, repo = process.cwd(), base = 'HEAD' })
       }
       result.cases++;
     }
-    const git = (...args) => execFileSync('git', ['-C', repo, ...args], { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
-    git('rev-parse', '--verify', `${base}^{commit}`);
     result.gitHead = git('rev-parse', 'HEAD').trim();
     const productionDigest = createHash('sha256');
     const files = [...new Set(git('ls-files', '-z', '--cached', '--others', '--exclude-standard').split('\0').filter(Boolean))].sort();
@@ -110,18 +187,34 @@ export function judgeIntegrity({ dataset, repo = process.cwd(), base = 'HEAD' })
     const terms = [...identifiers].map((value) => ({ rule: 'fixture-identifier', value }));
     for (const value of sourceHashes) terms.push({ rule: 'source-recognition-hash', value });
     for (const value of expected) terms.push({ rule: 'labeled-answer', value });
+    // Patterns depend only on the frozen manifest, not on the file being scanned.
+    // None has g/y flags, so reusing exec/test preserves matching and line numbers.
+    const patternCache = new Map();
+    const cachedPattern = (value) => {
+      if (!patternCache.has(value)) patternCache.set(value, pattern(value));
+      return patternCache.get(value);
+    };
+    const compiledTerms = terms.map((term) => ({
+      ...term, expression: /^[0-9.+-]+$/.test(term.value) ? null : cachedPattern(term.value),
+      // Numeric literals have no Unicode case folds. Absence is a strict miss;
+      // presence still uses the original expression for boundaries and evidence.
+      numericLiteral: /^[0-9.+-]+$/.test(term.value),
+    }));
+    const compiledLabels = [...labelNames].map((value) => ({ value, expression: cachedPattern(value) }));
+    const compiledWeakAnswers = [...weakAnswers].map((value) => ({ value, expression: cachedPattern(value) }));
     const seen = new Set();
     const match = (file, text, origin) => {
-      for (const { rule, value } of terms) {
-        const found = pattern(value).exec(text);
+      for (const { rule, value, expression, numericLiteral } of compiledTerms) {
+        if (numericLiteral && !text.includes(value)) continue;
+        const found = (expression ?? cachedPattern(value)).exec(text);
         if (!found) continue;
         const key = `${file}:${rule}:${hash(value)}`;
         if (seen.has(key)) continue;
         seen.add(key);
         add(rule, { file, origin, line: text.slice(0, found.index).split('\n').length, evidenceHash: hash(value) });
       }
-      const labels = [...labelNames].filter((value) => pattern(value).test(text));
-      const weakMatches = labels.length >= 2 ? [...weakAnswers].filter((value) => pattern(value).test(text)) : [];
+      const labels = compiledLabels.filter(({ expression }) => expression.test(text)).map(({ value }) => value);
+      const weakMatches = labels.length >= 2 ? compiledWeakAnswers.filter(({ expression }) => expression.test(text)).map(({ value }) => value) : [];
       if (weakMatches.length && !seen.has(`${file}:weak-answers`)) {
         seen.add(`${file}:weak-answers`);
         add('answer-label-combination', { file, origin, labelCount: labels.length, answerCount: weakMatches.length, evidenceHash: hash([...labels, ...weakMatches].sort().join('\0')) });

@@ -1,4 +1,5 @@
 import { CHINA_PROVIDER_SLUGS, currentOpenRouterProviderPolicy, resolveSupportedModelIdWithWarning } from "@docslurp/shared";
+import { visionImageForModel } from "./vision-image-formats.js";
 import { withObservation } from "@docslurp/shared/observability";
 import { ProviderRetryableError, providerFromBaseUrl } from "../lib/provider-retry.js";
 import {
@@ -401,7 +402,15 @@ export async function runVisionRequest(args: {
       }
 
       const startedAt = Date.now();
-      const image = await readFile(args.imagePath);
+      // The bytes decide the media type (stored page images are WebP or PNG, uploads may be
+      // JPEG/GIF), and a route not verified for WebP gets a sandbox-transcoded PNG.
+      const { bytes: image, mimeType: imageMimeType } = await visionImageForModel({
+        model: args.model,
+        imagePath: args.imagePath,
+        fallbackMimeType: args.mimeType,
+        runner: args.runner,
+        signal: args.signal,
+      });
       // 429/5xx back off honouring Retry-After; exhausted retries throw
       // ProviderRetryableError so the activity retries instead of skipping the page.
       // Streaming, degeneration abort and the single alternate-route retry live in vision-stream.ts.
@@ -421,7 +430,7 @@ export async function runVisionRequest(args: {
               {
                 type: "image_url",
                 image_url: {
-                  url: `data:${args.mimeType};base64,${image.toString("base64")}`,
+                  url: `data:${imageMimeType};base64,${image.toString("base64")}`,
                   ...visionImageUrlOptions(args.model),
                 },
               },

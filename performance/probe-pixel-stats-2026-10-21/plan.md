@@ -1,0 +1,9 @@
+# Probe pixel-statistics experiment
+
+Contract: identical native probe rows (excluding probeMs) and exact blur/contrast/brightness; preserve both native render profiles, thumbnails, OCR verification, and unusual-feature checks. No remote calls or production rollout. Budget: <=70 minutes within parent two-hour effort.
+
+Hypothesis: derive brightness from the existing uint8 histogram, avoiding a full image traversal; indexed histogram iteration may reduce iterator overhead. Required pixel diagnostics cannot safely be skipped with existing consumers. This is the minimal faithful arm; a full renderer replacement would change pixels and needs separate validation.
+
+Baseline: commit 5fe9ac4e1ea4ddaf61319a271a729c0365bb1758. Candidate modifies only probe feature calculation. Screen on original synthetic invoice and multicolumn PDFs; confirm frozen implementation on synthetic multipage tables and math PDFs. Exact per-page semantic equality is mandatory. Acceptance: >=5% median paired pixel-stat runtime improvement; full probe median candidate/baseline <=1.05 on each slice. Timing is local warm execution, not production latency or full ingestion. Five balanced paired process blocks per phase, three passes per document/arm/block after warmup. Retain all samples and process CPU time; no tail-latency claims from this sample size.
+
+Run harness with local native binding via DOCSLURP_NATIVE_PDF_MODULE. Binding extracted from existing authorized local tarball to disposable agent scratch. Benchmark generates baseline modules from the recorded Git revision with imports rewritten to the checkout, never changes production runtime flags. Full probe includes native open, document/page facts, rendering, decoding and diagnostics; no OCR verification or paid models in this experiment. Pixel microbenchmark uses the same actual PDF renders, runs both algorithms on identical decoded buffers, and is explicitly scoped separately.

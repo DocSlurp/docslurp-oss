@@ -10,13 +10,15 @@ import {
 import { WorkflowState } from "../pipeline/pipeline.js";
 import type { Config } from "../config.js";
 import type { Document, WorkspaceRun } from "../models.js";
+import type { RoutingLayoutObserver } from "../layout/routing-observer.js";
+import type { PdfRasterCache } from "../pipeline/pdf-asset-cache.js";
 import type { PdfSourceCache } from "../pipeline/pdf-asset-cache.js";
 import type { ArtifactStore } from "../tools/storage.js";
 import { DecisionRequestError, type DecisionAnswer, type DecisionClient, type DecisionQuestion } from "../routing/decision-client.js";
 import { DecisionModelHealthHistory, DecisionModelHealthRegistry } from "../routing/health/index.js";
 import { loadRuntimePolicyPack } from "../routing/runtime.js";
 import { testCatalog } from "../routing/testing.js";
-import { RoutePagesStage } from "./route-pages.js";
+import { RoutePagesStage, spreadSample } from "./route-pages.js";
 
 vi.mock("../pipeline/checkpoints.js", () => ({
   runDocuments: async (documents: unknown[], _concurrency: number, run: (doc: unknown) => Promise<void>) => {
@@ -147,7 +149,7 @@ describe("RoutePagesStage", () => {
     });
     const run = async (tableGate?: "off" | "shadow") => {
       const storage = makeStorage();
-      const state = makeState({ mode: "shadow", pageRouter: { router: "baseline" } });
+      const state = makeState({ mode: "shadow", pageRouter: { router: "baseline", marginFloor: 0 } });
       await new RoutePagesStage(storage, envCfg("shadow"), sources, undefined, {
         probe: tableProbe, catalog, openNativePdf, ...(tableGate ? { tableGate } : {}),
       }).run(state);
@@ -167,7 +169,7 @@ describe("RoutePagesStage", () => {
 
   it("table gate shadow fails open when the native engine is unavailable", async () => {
     const storage = makeStorage();
-    const state = makeState({ mode: "shadow", pageRouter: { router: "baseline" } });
+    const state = makeState({ mode: "shadow", pageRouter: { router: "baseline", marginFloor: 0 } });
     await new RoutePagesStage(storage, envCfg("shadow"), sources, undefined, {
       probe: vi.fn(async () => JSON.stringify(row(1, { tableRuleScore: 3 }))), catalog, tableGate: "shadow", openNativePdf: async () => null,
     }).run(state);
@@ -376,6 +378,207 @@ describe("RoutePagesStage", () => {
   });
 });
 
+
+describe("spreadSample", () => {
+  it("covers every position band deterministically per seed", () => {
+    const pool = Array.from({ length: 100 }, (_, i) => i);
+    const picked = spreadSample(pool, 4, "doc-a");
+    expect(picked.map((i) => Math.floor(i / 25))).toEqual([0, 1, 2, 3]);
+    expect(spreadSample(pool, 4, "doc-a")).toEqual(picked);
+    expect(spreadSample(pool, 0, "doc-a")).toEqual([]);
+    expect(spreadSample([7], 3, "doc-a")).toEqual([7]);
+  });
+});
+
+describe("layout shadow integration", () => {
+  type Observer = Pick<RoutingLayoutObserver, "config" | "observe" | "hasCapacity">;
+  const result = {
+    schemaVersion: 1 as const, inferenceProfileSha256: "b".repeat(64), model: { id: "tiny", revision: "pinned" }, device: "cpu" as const,
+    image: { width: 100, height: 200 }, coordinateSpace: "normalized-source" as const,
+    supportedLabels: [], regions: [],
+  };
+  function fixtures(options: { hit?: boolean; maxPages?: number; timeoutMs?: number; healthy?: boolean; hourlyCostUsd?: number; auditPages?: number } = {}) {
+    const storage = Object.assign(makeStorage(), { getBytes: vi.fn(async () => Buffer.from("raster")) });
+    const observer: Observer = {
+      config: { endpoint: "modal-vm://layout", expectedModelId: "tiny", expectedRevision: "pinned",
+        expectedArtifactSha256: "a".repeat(64), expectedInferenceProfileSha256: "b".repeat(64), device: "cpu", maxPages: options.maxPages ?? 1,
+        timeoutMs: options.timeoutMs ?? 2000, maxBytes: 1024, concurrency: 1, queueCapacity: 8, queueMaxBytes: 1 << 20,
+        auditPages: options.auditPages ?? 0, hourlyCostUsd: options.hourlyCostUsd ?? null },
+      hasCapacity: vi.fn(() => true),
+      observe: vi.fn(async ({ onRequest, payload }) => {
+        onRequest?.({ inferenceKey: "request-1", inputBytes: payload.length });
+        return { result, cacheHit: false, elapsedMs: 1, inputBytes: payload.length, inferencePerformed: true, inferenceKey: "request-1" };
+      }),
+    };
+    const renderSelectedPages = vi.fn<PdfRasterCache["renderSelectedPages"]>(async (args) => {
+      const pageNumber = args.pageNumbers[0]!;
+      if (!options.hit) await args.onRenderedPage?.({ pageNumber, artifactKey: `raster-${pageNumber}`, bytes: Buffer.from("raster"), mimeType: "image/png", dpi: 150, engine: "pdftoppm" });
+      return [{ pageNumber, artifactKey: `raster-${pageNumber}`, artifactUri: `s3://bucket/raster-${pageNumber}`,
+        widthPx: null, heightPx: null, sizeBytes: 6, cacheHit: !!options.hit, mimeType: "image/png", dpi: 150, engine: "pdftoppm" }];
+    });
+    const rows = options.healthy ? [row(1), row(2), row(3)] : [row(1), ...[2, 3].map((n) => row(n, {
+      charCount: 0, wordCount: 0, textCoverage: 0, imageCount: 1, imageCoverage: 1, largestImageCoverage: 1,
+      fullPageImage: true, textLayerStatus: "absent", textFacts: { wordCount: 0, imageCount: 1, imageCoverage: 1, textLayerStatus: "absent" },
+      images: [{ bbox: [0, 0, 612, 792], coverage: 1 }],
+    }))];
+    const localProbe = vi.fn(async () => rows.map((r) => JSON.stringify(r)).join("\n"));
+    const state = makeState({ mode: "shadow", pageRouter: { router: "baseline", marginFloor: 0 } });
+    const run = (enabled = true, signal?: AbortSignal) => new RoutePagesStage(storage, envCfg("shadow"), sources, undefined,
+      { probe: localProbe, catalog, ...(enabled ? { layoutObserver: observer, rasterCache: { renderSelectedPages } } : {}) }).run(state, signal);
+    return { state, storage, observer, renderSelectedPages, run };
+  }
+  it("does no layout work by default and bypasses healthy native prose", async () => {
+    for (const setup of [fixtures(), fixtures({ healthy: true })]) {
+      await setup.run(false);
+      expect(setup.renderSelectedPages).not.toHaveBeenCalled();
+      expect(setup.observer.observe).not.toHaveBeenCalled();
+    }
+    const healthy = fixtures({ healthy: true });
+    await healthy.run();
+    expect(healthy.renderSelectedPages).not.toHaveBeenCalled();
+    expect(healthy.state.usageLedger.pendingCount).toBe(0);
+    expect(healthy.storage.putJson).toHaveBeenCalledTimes(1);
+  });
+  it("bounds selection, reuses fresh bytes, records scoped usage and preserves the plan", async () => {
+    const off = fixtures();
+    const shadow = fixtures();
+    await off.run(false);
+    await shadow.run();
+    expect(shadow.storage.putJson.mock.calls[0]![1]).toEqual(off.storage.putJson.mock.calls[0]![1]);
+    expect(shadow.renderSelectedPages).toHaveBeenCalledTimes(1);
+    expect(shadow.renderSelectedPages.mock.calls[0]![0].pageNumbers).toEqual([2]);
+    expect(shadow.storage.getBytes).not.toHaveBeenCalled();
+    expect(shadow.state.artifactLedger.readDocument("doc", "page-route-layout-shadow")).toContain("page-route-layout-shadow/doc.json");
+    expect(shadow.state.usageLedger.snapshot()).toEqual([expect.objectContaining({ metric: "layout-shadow", costCents: 0,
+      amount: 1, unit: "request", metadata: expect.objectContaining({ documentId: "doc", pageNumber: 2, billable: false, costStatus: "unknown" }) })]);
+    const evidence = shadow.storage.putJson.mock.calls[1]![1] as Record<string, unknown>;
+    expect(evidence).toMatchObject({ sourceSha256: "x", pdfPointTransform: null, summary: { selected: 1, observed: 1, errors: 0 } });
+    expect(shadow.state.pendingPerformance.find((p) => p.metric === "page-route-timing")?.metadata).toHaveProperty("layoutShadowMs");
+  });
+  it("keeps layout shadow artifacts under the extract retention prefix", async () => {
+    const setup = fixtures();
+    setup.state.run.storagePrefix = "extracts/org/extract-id";
+    await setup.run();
+    const shadowKey = setup.storage.putJson.mock.calls.find(([key]) => String(key).includes("layout-shadow"))?.[0];
+    expect(shadowKey).toBe("extracts/org/extract-id/page-route-layout-shadow/doc.json");
+  });
+  it("loads a durable raster hit with a byte bound and does not charge observation cache hits", async () => {
+    const setup = fixtures({ hit: true });
+    setup.observer.observe = vi.fn(async ({ payload }) => ({ result, cacheHit: true, elapsedMs: 1, inputBytes: payload.length, inferencePerformed: false, inferenceKey: "prior" }));
+    await setup.run();
+    expect(setup.storage.getBytes).toHaveBeenCalledWith("raster-2", { maxBytes: 1024 });
+    expect(setup.state.usageLedger.pendingCount).toBe(0);
+  });
+  it("fails open on service validation and artifact persistence errors", async () => {
+    for (const failure of ["service", "persistence"]) {
+      const setup = fixtures();
+      if (failure === "service") setup.observer.observe = vi.fn(async () => { throw new Error("invalid model identity"); });
+      else setup.storage.putJson.mockImplementation(async (key: string) => { if (key.includes("layout-shadow")) throw new Error("storage unavailable"); });
+      await setup.run();
+      expect(setup.state.artifactLedger.readDocument("doc", "page-route-plan")).toBeTruthy();
+      expect(setup.state.pendingPerformance.some((p) => p.metric === "page-route-error")).toBe(false);
+      expect(setup.state.pendingPerformance.some((p) => p.metric === "page-route-layout")).toBe(true);
+    }
+  });
+  it("bounds a hung storage read and retains the baseline plan", async () => {
+    const setup = fixtures({ hit: true, timeoutMs: 10 });
+    setup.storage.getBytes.mockImplementation(() => new Promise(() => {}));
+    await setup.run();
+    expect(setup.observer.observe).not.toHaveBeenCalled();
+    expect(setup.state.pendingPerformance.find((p) => p.metric === "page-route-layout" && p.scope === "document")?.metadata).toMatchObject({ budgetExhausted: true, errors: 1 });
+  });
+  it("retains failed dispatched usage without asserting service cost", async () => {
+    const setup = fixtures();
+    setup.observer.observe = vi.fn(async ({ onRequest }) => {
+      onRequest?.({ inferenceKey: "failed", inputBytes: 6 });
+      throw new Error("service timed out");
+    });
+    await setup.run();
+    expect(setup.state.usageLedger.snapshot().find((e) => e.metric === "layout-shadow")).toMatchObject({
+      amount: 1, costCents: 0, metadata: { status: "failed-or-cancelled", billable: false, costStatus: "unknown" },
+    });
+  });
+  it("estimates only known service wall time and keeps it nonbillable", async () => {
+    const setup = fixtures({ hourlyCostUsd: 1 });
+    setup.observer.observe = vi.fn(async ({ onRequest, payload }) => {
+      onRequest?.({ inferenceKey: "measured", inputBytes: payload.length });
+      return { result: { ...result, diagnostics: { elapsedMs: 3600 } }, cacheHit: false, elapsedMs: 9000,
+        inputBytes: payload.length, inferencePerformed: true, inferenceKey: "measured" };
+    });
+    await setup.run();
+    expect(setup.state.usageLedger.snapshot()[0]).toMatchObject({ costCents: 0,
+      metadata: { estimatedComputeCostCents: 0.1, billable: false, costStatus: "estimated-service-wall-time" } });
+  });
+  it("bounds accumulated result evidence without silently truncating regions", async () => {
+    const setup = fixtures({ maxPages: 3 });
+    setup.observer.observe = vi.fn(async () => ({ result: { ...result, diagnostics: { padding: "x".repeat(9 * 1024 * 1024) } },
+      cacheHit: true, elapsedMs: 1, inputBytes: 6, inferencePerformed: false, inferenceKey: "cached" }));
+    await setup.run();
+    const artifact = setup.storage.putJson.mock.calls[1]![1] as { summary: Record<string, unknown>; pages: Record<string, unknown>[] };
+    expect(artifact.summary.artifactBudgetExhausted).toBe(true);
+    expect(artifact.pages[1]).toMatchObject({ resultOmitted: true, reason: "document-artifact-byte-budget" });
+    expect(artifact.pages[1]).not.toHaveProperty("result");
+    expect(Buffer.byteLength(JSON.stringify(artifact))).toBeLessThan(16 * 1024 * 1024);
+  });
+  it("persists earlier page evidence when a later page exhausts the document deadline", async () => {
+    const setup = fixtures({ maxPages: 2, timeoutMs: 20 });
+    setup.observer.observe = vi.fn(async ({ payload, signal }) => {
+      if ((setup.observer.observe as ReturnType<typeof vi.fn>).mock.calls.length > 1) {
+        await new Promise((_, reject) => signal?.addEventListener("abort", () => reject(signal.reason), { once: true }));
+      }
+      return { result, cacheHit: false, elapsedMs: 1, inputBytes: payload.length, inferencePerformed: true, inferenceKey: "first" };
+    });
+    await setup.run();
+    const call = setup.storage.putJson.mock.calls.find(([key]) => String(key).includes("layout-shadow"));
+    const artifact = call?.[1] as { summary: Record<string, unknown>; pages: Record<string, unknown>[] };
+    expect(artifact.summary).toMatchObject({ observed: 1, budgetExhausted: true });
+    expect(artifact.summary).not.toHaveProperty("persistenceError");
+    expect(artifact.pages[0]).toMatchObject({ pageNumber: 2, result });
+  });
+  it("audits pages the router accepted, independently of the routing decision", async () => {
+    const off = fixtures({ healthy: true });
+    const setup = fixtures({ healthy: true, auditPages: 2 });
+    await off.run(false);
+    await setup.run();
+    expect(setup.storage.putJson.mock.calls[0]![1]).toEqual(off.storage.putJson.mock.calls[0]![1]);
+    const audited = setup.renderSelectedPages.mock.calls.map(([args]) => args.pageNumbers[0]);
+    expect(audited).toHaveLength(2);
+    expect(new Set(audited).size).toBe(2);
+    const artifact = setup.storage.putJson.mock.calls[1]![1] as { summary: Record<string, unknown>; pages: Record<string, unknown>[] };
+    expect(artifact.summary).toMatchObject({ selected: 0, auditSelected: 2, auditPool: 3 });
+    expect(artifact.pages.every((p) => p.selection === "audit" && p.healthyTextLayer === true)).toBe(true);
+  });
+  it("runs audits on their own deadline after routed pages exhaust theirs", async () => {
+    const setup = fixtures({ maxPages: 1, timeoutMs: 20, auditPages: 1 });
+    setup.observer.observe = vi.fn(async ({ payload, signal }) => {
+      if ((setup.observer.observe as ReturnType<typeof vi.fn>).mock.calls.length === 1) {
+        await new Promise((_, reject) => signal?.addEventListener("abort", () => reject(signal.reason), { once: true }));
+      }
+      return { result, cacheHit: false, elapsedMs: 1, inputBytes: payload.length, inferencePerformed: true, inferenceKey: "audit" };
+    });
+    await setup.run();
+    const artifact = setup.storage.putJson.mock.calls.find(([key]) => String(key).includes("layout-shadow"))![1] as
+      { summary: Record<string, unknown>; pages: Record<string, unknown>[] };
+    expect(artifact.summary).toMatchObject({ budgetExhausted: true, auditBudgetExhausted: false, auditObserved: 1 });
+    expect(artifact.pages.map((p) => p.selection)).toEqual(["routed", "audit"]);
+  });
+  it("checks admission before rendering so saturation wastes no preprocessing", async () => {
+    const setup = fixtures();
+    setup.observer.hasCapacity = vi.fn(() => false);
+    await setup.run();
+    expect(setup.observer.hasCapacity).toHaveBeenCalledWith(1024);
+    expect(setup.renderSelectedPages).not.toHaveBeenCalled();
+    expect(setup.observer.observe).not.toHaveBeenCalled();
+    expect(setup.state.pendingPerformance.find((p) => p.metric === "page-route-layout" && p.scope === "document")?.metadata)
+      .toMatchObject({ admissionRejected: 1, errors: 1 });
+  });
+  it("propagates cancellation instead of turning it into successful routing", async () => {
+    const setup = fixtures();
+    const controller = new AbortController();
+    setup.observer.observe = vi.fn(async () => { controller.abort(new Error("cancelled")); throw controller.signal.reason; });
+    await expect(setup.run(true, controller.signal)).rejects.toThrow("cancelled");
+  });
+});
 
 it("refuses the active default .5 floor before probing, model calls or receipts", async () => {
   const storage = makeStorage();

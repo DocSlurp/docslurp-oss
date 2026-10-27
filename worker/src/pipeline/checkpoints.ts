@@ -438,8 +438,12 @@ export function hashContent(content: string | Buffer): string {
 export function checkDedup(
   state: WorkflowState,
   contentHash: string,
-  artifactSlot: string
+  artifactSlot: string,
+  retryStrategy?: string
 ): string | undefined {
+  // A retry strategy asks for a different result (for example escalation after low plausibility);
+  // reusing the artifact the failed attempt registered would silently skip it.
+  if (retryStrategy) return undefined;
   const existing = state.contentHashes.get(contentHash);
   if (existing) {
     state.artifactLedger.record(artifactSlot, existing);

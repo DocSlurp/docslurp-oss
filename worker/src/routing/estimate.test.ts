@@ -145,6 +145,30 @@ describe("applyBudgetGuard", () => {
     expect(r.planned.find((p) => p.assignment.role === "skip")).toBeTruthy();
     expect(r.withinBudget).toBe(true);
   });
+  it("keeps content assignments when the router's own sunk cost alone breaks the budget", () => {
+    // A decision-model triage call billed at 1.2x has a 16.7% margin, below a 0.5 floor. Deferring
+    // the page's only (high-margin) local OCR assignment cannot restore the floor; it would only
+    // leave the page unrouted.
+    const triage = { costUsd: 0.0000644, billedUsd: 0.0000644 * 1.2 };
+    const ocr = planned("ocr", "extract-text", 0.0000088);
+    ocr.billedUsd = 0.0000292;
+    ocr.primary = { ...ocr.primary, billedUsd: 0.0000292 };
+    const r = applyBudgetGuard([ocr], triage, { limitUsd: 1, marginFloor: 0.5 });
+    expect(r.planned.map((p) => p.assignment.targetId)).toEqual(["ocr"]);
+    expect(r.deferred).toEqual([]);
+    expect(r.withinBudget).toBe(false);
+  });
+  it("still defers content past the spend limit even when the router alone breaks the margin floor", () => {
+    const triage = { costUsd: 0.001, billedUsd: 0.0012 };
+    const r = applyBudgetGuard([planned("vlm", "extract-text", 0.05)], triage, { limitUsd: 0.02, marginFloor: 0.5 });
+    expect(r.deferred).toHaveLength(1);
+    expect(r.planned).toEqual([]);
+  });
+  it("still defers content when removing it can restore the budget", () => {
+    const r = applyBudgetGuard([planned("text", "extract-text", 0.04)], { costUsd: 0.001, billedUsd: 0.01 }, { limitUsd: 0.02, marginFloor: 0.5 });
+    expect(r.deferred).toHaveLength(1);
+    expect(r.withinBudget).toBe(true);
+  });
   it("enforces the margin floor, not just the limit", () => {
     // billed = 1.2x cost -> margin 16.7%; floor 0.5 forces degradation
     const r = applyBudgetGuard([planned("big", "extract-text", 0.05, [["free", 0, 0.7]])], router, { limitUsd: 10, marginFloor: 0.5 });
