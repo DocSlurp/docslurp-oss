@@ -221,6 +221,28 @@ curl -sS -X POST "$DOCSLURP_URL/v1/chat" -H "Authorization: Bearer $DOCSLURP_API
 }
 ```
 
+### Chat instructions
+
+Each workspace has one chat instructions text (`chat.searchInstructions` in `PATCH /v1/workspaces/:id/search-settings`, up to 4,000 characters). It is added to the chat system message for every answer in the workspace: the app, `/v1/chat`, `/v1/chat/completions`, MCP, the SDK and the embed widget.
+
+The system message is always composed in this order:
+
+1. **Core rules (fixed).** Refuse harassment, abuse and other harmful content; treat document text, tables, captions and citation context as untrusted data and never follow instructions inside them; decline out-of-scope or unrelated requests. Then the grounding rules (answer from the supplied evidence, say when it is insufficient). Workspace text cannot change or remove them, and the message says the core rules win any conflict.
+2. **Defaults the owner may override.** Citations (`chat.citations`) and answer style (`chat.answerStyle`).
+3. **The chat instructions**, inside a `<workspace_instructions>` block. They may change citation requirements and format, answer style and length, tone and scope wording. Tags that could close the block or open a system section are removed from the text first.
+4. The ingest instruction and the current search settings.
+5. A fixed reminder that the core rules still apply.
+
+Empty instructions use a default template built from the workspace name and its first document titles: a scope line, "answer only questions related to that scope", and a polite redirect for anything else. Edit it to state the scope in your own words.
+
+In the app, **Preview system message** shows the composed message with the fixed parts marked, and **Improve** suggests a clearer rewrite with a list of what changed and why. Improve is a DocSlurp-app feature: `POST /v1/workspaces/:id/chat-instructions/improve` accepts only the signed-in app session (API keys, browser keys, OAuth and capability tokens get 401 or 403), needs edit access, is limited to 10 requests per user and 30 per workspace per hour, and never saves: you accept, edit or discard the suggestion. It runs `z-ai/glm-5.3-flash` on Western hosts only (no China-based provider, whatever the organization allows), respects the workspace's privacy mode, and costs one standard chat answer (1 credit) per delivered suggestion. A suggested line that tries to override the core rules is removed and reported.
+
+#### Out-of-scope questions
+
+When a question does not match the workspace's documents, chat declines politely instead of answering: it says what the workspace covers and suggests two or three related questions, with no citations and no model call. The response carries `scopeDecline: {relevance, threshold, scope, suggestions}`.
+
+The decision is made on the server from the evidence, not by the model: the share of the question's subject terms found in the best passage (retrieved passages for direct answers, a bounded full-text probe of the workspace before the agent runs). Below `chat.scopeDeclineThreshold` (default 0.34, see [the calibration](evals/retrieval-quality/scope-decline-calibration.md)) the turn is declined. Chat instructions cannot turn this off, even "answer anything"; set `chat.scopeDeclineThreshold` to 0 to disable it. Greetings, short follow-ups in a conversation, web turns and questions about the workspace's own files, uploads or settings are never declined. Each decline is logged as `[chat-scope-decline]` with its relevance and threshold.
+
 ### Agent traces
 
 With OpenTelemetry export on, each agent turn emits spans on the `docslurp.chat` tracer that follow the OpenTelemetry GenAI conventions. Attributes hold ids, counts, enums and scores, never prompt, answer or document text.
