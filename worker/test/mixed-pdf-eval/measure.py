@@ -58,29 +58,46 @@ def formula_tokens(text):
     return re.findall(r'\d+(?:\.\d+)?|[^\W\d_]+|[^\w\s]|_',text)
 
 def printed_formula_recall(reference,text):
-    """Match complete, context-anchored occurrences without overlapping reuse."""
+    """Check declared gold occurrences through one monotonic page alignment.
+
+    All prose participates in the alignment, so a prose mention cannot be reused
+    to repair a later formula. Legacy references without spans must have exactly
+    the declared number of unambiguous, nonoverlapping formula occurrences.
+    """
     expected=Counter(tuple(formula_tokens(f)) for f in reference.get('printedFormulas',[]) if formula_tokens(f))
     if not expected:return None
-    gold=formula_tokens(reference['expectedMarkdown']);actual=formula_tokens(text)
-    occupied=[];recalls=[]
-    for pattern,required in sorted(expected.items(),key=lambda item:-len(item[0])):
-        n=len(pattern);anchors=[]
-        for i in range(len(gold)-n+1):
-            if tuple(gold[i:i+n])==pattern:anchors.append((gold[max(0,i-3):i],gold[i+n:i+n+3]))
-        found=0
-        for i in range(len(actual)-n+1):
-            end=i+n
-            if tuple(actual[i:end])!=pattern or any(i<b and a<end for a,b in occupied):continue
-            # Neighboring reference text anchors the expression boundary even when
-            # OCR flattens line breaks. BOF/EOF allow separately scored omissions.
-            valid=any((i==0 or (left and actual[max(0,i-len(left)):i]==left))
-                      and (end==len(actual) or (right and actual[end:end+len(right)]==right))
-                      for left,right in anchors)
-            if valid:
-                found+=1;occupied.append((i,end))
-                if found==required:break
-        recalls.append(found/required)
-    return min(recalls)
+    source=reference['expectedMarkdown'];gold=formula_tokens(source);actual=formula_tokens(text)
+    mapping={m.a+k:m.b+k for m in SequenceMatcher(None,gold,actual,autojunk=False).get_matching_blocks()
+             for k in range(m.size)}
+    declared=reference.get('printedFormulaOccurrences')
+    spans=[]
+    if declared is not None:
+        seen=Counter()
+        for row in declared:
+            start,end=row['start'],row['end'];literal=row['text']
+            if type(start) is not int or type(end) is not int or not 0<=start<end<=len(source) or source[start:end]!=literal:
+                raise ValueError('invalid-printed-formula-occurrence')
+            pattern=tuple(formula_tokens(literal));i=len(formula_tokens(source[:start]));j=i+len(pattern)
+            if tuple(gold[i:j])!=pattern or any(i<v and u<j for u,v in spans):
+                raise ValueError('overlapping-or-invalid-formula-occurrence')
+            spans.append((i,j));seen[pattern]+=1
+        if seen!=expected:raise ValueError('incomplete-printed-formula-occurrences')
+    else:
+        for pattern,required in sorted(expected.items(),key=lambda item:-len(item[0])):
+            n=len(pattern)
+            candidates=[(i,i+n) for i in range(len(gold)-n+1) if tuple(gold[i:i+n])==pattern
+                        and not any(i<v and u<i+n for u,v in spans)]
+            if len(candidates)!=required:return 0.0
+            spans.extend(candidates)
+    found=0
+    for i,j in spans:
+        begin=mapping.get(i)
+        if begin is None or any(mapping.get(k)!=begin+k-i for k in range(i,j)):continue
+        end=begin+j-i
+        left=gold[max(0,i-3):i];right=gold[j:j+3]
+        if (begin==0 or (left and actual[max(0,begin-len(left)):begin]==left)) and (end==len(actual) or (right and actual[end:end+len(right)]==right)):
+            found+=1
+    return found/len(spans)
 
 def content_score(reference, text, legacy):
     expected, actual = Counter(tokens(reference["expectedMarkdown"])), Counter(tokens(text))

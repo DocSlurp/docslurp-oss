@@ -278,3 +278,20 @@ source-blind builder receives a hashed clean bundle: the corrected specification
 generic mechanisms and the passed P factory; previous enriched writing and
 fixture-reading selftests/preflight scripts are excluded. New attempt 5 work is
 isolated under `worker/test/mixed-pdf-eval/a5/` until reviewed.
+
+### Council round 3: bind the authored formula occurrence
+
+The adversarial reviewer reproduced a remaining formula false positive on
+`8ebd43f0`: prose containing a longer alternative expression supplied an anchor
+for a corrupted standalone formula. Swapping case-sensitive formulas in repeated
+contexts also passed. Seven evidence-scope probes found no additional bypass.
+
+The format adapter now projects explicit character spans from each declared
+formula block. The scorer verifies those spans and checks them through one
+case-sensitive, monotonic page alignment including surrounding prose. A prose
+mention cannot consume the same output occurrence again for a formula. Legacy
+references without explicit spans require unambiguous occurrence counts and
+fail closed otherwise. Expression boundary checks and nonoverlapping use remain.
+The two new mutations and authored-block projection control are covered by the
+44 passing focused tests. Scores from earlier scorer revisions remain provisional
+and must be recomputed under a new immutable identity before promotion.

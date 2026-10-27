@@ -42,7 +42,18 @@ def page_reference(page):
     if page['expectedMarkdown'] != '\n\n'.join(sections):
         raise ValueError('inconsistent-visible-markdown')
     formulas = [b['formula'] for b in ordered if b['formula'] is not None]
+    occurrences=[];offset=0
+    for block in ordered:
+        literal=block['displayText']
+        if block['formula'] is not None:
+            printed=block['formula']['display']
+            if literal.count(printed)!=1:
+                raise ValueError('ambiguous-authored-formula-occurrence')
+            start=offset+literal.index(printed)
+            occurrences.append(dict(blockId=block['id'],start=start,end=start+len(printed),text=printed))
+        offset+=len(literal)+2
     return {
+        'printedFormulaOccurrences': occurrences,
         'pageId': page.get('pageId', page.get('id')),
         'expectedMarkdown': page['expectedMarkdown'],
         'sections': sections,

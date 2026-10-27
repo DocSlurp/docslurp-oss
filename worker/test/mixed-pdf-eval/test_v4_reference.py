@@ -25,6 +25,19 @@ class V4ReferenceTests(unittest.TestCase):
         ref['blocks'][0]['displayText'] = 'Changed'
         self.assertEqual(page, before)
 
+    def test_formula_occurrence_is_bound_to_its_authored_block(self):
+        page=self.page();formula='q = a / b'
+        page['blocks'][0]['displayText']='An alternative is q = a / b + c.'
+        page['blocks'].append(dict(id='rule',visible=True,displayText=formula,cells=[],
+                                   formula=dict(display=formula,latex='q=a/b')))
+        page['readingOrder']=['body','rule']
+        page['sections']=page['paragraphs']=[page['blocks'][0]['displayText'],formula]
+        page['expectedMarkdown']='\n\n'.join(page['sections'])
+        ref=page_reference(page);row=ref['printedFormulaOccurrences'][0]
+        self.assertEqual(row['blockId'],'rule')
+        self.assertEqual(ref['expectedMarkdown'][row['start']:row['end']],formula)
+        self.assertEqual(row['start'],ref['expectedMarkdown'].rindex(formula))
+
     def test_gold_disagreement_fails_closed(self):
         for field, value in [('sections', ['Other']), ('readingOrder', []),
                              ('expectedMarkdown', 'Extra'),

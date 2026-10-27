@@ -52,6 +52,29 @@ class ScorerTests(unittest.TestCase):
             self.assertFalse(content_score(ref,prefix+changed,tolerant_markdown)['acceptable'])
         ref['expectedMarkdown']=prefix+short+'\n'+long;ref['printedFormulas']=[short,long]
         self.assertFalse(content_score(ref,prefix+long,tolerant_markdown)['acceptable'])
+    def test_prose_mentions_cannot_repair_corrupt_declared_formula(self):
+        formula='q = a / b'
+        prose='padding '*300+'The implementation evaluates q = a / b + c as an alternative.'
+        text=prose+'\n\n'+formula
+        ref=dict(expectedMarkdown=text,sections=[prose,formula],paragraphs=[prose,formula],
+                 tables=[],formulas=[],printedFormulas=[formula],excludedText=[],
+                 printedFormulaOccurrences=[dict(start=len(prose)+2,end=len(text),text=formula)])
+        self.assertTrue(content_score(ref,text,tolerant_markdown)['acceptable'])
+        bad=content_score(ref,prose+'\n\nq = A / b',tolerant_markdown)
+        self.assertFalse(bad['acceptable']);self.assertEqual(bad['printedFormulaRecall'],0)
+
+    def test_case_sensitive_formulas_cannot_swap_identical_contexts(self):
+        first='q = a / b';second='q = A / b'
+        text='padding '*300+'Rule '+first+' end. Rule '+second+' end.'
+        ref=dict(expectedMarkdown=text,sections=[text],paragraphs=[text],tables=[],formulas=[],
+                 printedFormulas=[first,second],excludedText=[],printedFormulaOccurrences=[])
+        for literal in [first,second]:
+            start=text.index(literal)
+            ref['printedFormulaOccurrences'].append(dict(start=start,end=start+len(literal),text=literal))
+        self.assertTrue(content_score(ref,text,tolerant_markdown)['acceptable'])
+        bad=text.replace(first,'TEMP').replace(second,first).replace('TEMP',second)
+        self.assertFalse(content_score(ref,bad,tolerant_markdown)['acceptable'])
+
     def test_math_case_and_line_leading_operators_survive_normalization(self):
         for expected,wrong in [('q = a / b','q = A / b'),
                                ('Rule: a\n* b = c','Rule: a\nb = c'),
