@@ -141,6 +141,18 @@ export interface WorkspaceIntakeRequest {
   /** Sources that skip files themselves (connectors) may legitimately yield nothing. */
   mayBeEmpty?: boolean;
   audit?: WorkspaceIntakeAudit;
+  /**
+   * Extract mode: sources and every derived asset go under the extract's
+   * storage prefix and are deleted when its retention ends (services/extracts.ts).
+   */
+  extract?: IntakeExtract;
+}
+
+/** The extract a request belongs to; server-created, never read from HTTP input. */
+export interface IntakeExtract {
+  id: string;
+  /** extracts/<org>/<extract>, without a trailing slash. */
+  storagePrefix: string;
 }
 
 export interface StoredIntakeFile {
@@ -219,6 +231,7 @@ export interface WorkspaceIntakeRecords {
     runId?: string;
   apiKeyId?: string | null;
     files: StoredIntakeFile[];
+    extract?: IntakeExtract;
   }): Promise<CreatedRun>;
   /** Remove a workspace this request created when intake failed before any run existed. */
   discardWorkspace(workspaceId: string): Promise<void>;
@@ -362,9 +375,14 @@ export function admitIntakeFile(
   return verdict;
 }
 
-/** The one raw-object key layout. The filename is sanitized here so a caller that forgets cannot inject `..` segments. */
-export function rawSourceKey(userId: string, filename: string): string {
+/**
+ * The one raw-object key layout. The filename is sanitized here so a caller
+ * that forgets cannot inject `..` segments. Extract sources live under the
+ * extract's prefix so its sweep removes them with everything else.
+ */
+export function rawSourceKey(userId: string, filename: string, extract?: IntakeExtract | null): string {
   const safe = sanitizeUploadFilename(filename, "upload.bin");
+  if (extract) return `${extract.storagePrefix}/raw/${randomUUID()}-${safe}`;
   return `${userId}/${randomUUID()}/raw/${randomUUID()}-${safe}`;
 }
 
@@ -473,9 +491,15 @@ async function storeItem(
     ...(item.path ? { path: item.path } : {}),
   });
   const { content } = item;
-  if ("storedKey" in content) return stored(content.storedKey, content.verifiedSizeBytes);
+  if ("storedKey" in content) {
+    // An extract only takes sources already inside its own prefix; anything else would outlive it.
+    if (request.extract && !content.storedKey.startsWith(`${request.extract.storagePrefix}/`)) {
+      throw new WorkspaceIntakeError(`${admitted.filename} was not uploaded for this extract`, 400);
+    }
+    return stored(content.storedKey, content.verifiedSizeBytes);
+  }
 
-  const key = rawSourceKey(request.userId, admitted.filename);
+  const key = rawSourceKey(request.userId, admitted.filename, request.extract);
   written.push(key);
   if ("bytes" in content) {
     await storage.put(key, content, admitted.mimeType);
@@ -628,6 +652,7 @@ export async function intakeIntoWorkspace(
         apiKeyId: request.apiKeyId,
         runId: request.runId,
         files,
+        ...(request.extract ? { extract: request.extract } : {}),
       });
     } catch (error) {
       if (!(error instanceof AllSourcesUnreadableError)) throw error;
@@ -671,6 +696,7 @@ export async function intakeIntoWorkspace(
     metadata: {
       count: documents.length,
       mode: request.kind,
+      ...(request.extract ? { extractId: request.extract.id } : {}),
       ...(request.urls
         ? { urlCount: request.urls.length, urlOrigins: auditUrlOrigins(request.urls) }
         : {}),

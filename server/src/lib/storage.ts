@@ -5,9 +5,12 @@ import {
   CreateBucketCommand,
   CreateMultipartUploadCommand,
   DeleteObjectCommand,
+  DeleteObjectsCommand,
   GetObjectCommand,
   HeadBucketCommand,
   HeadObjectCommand,
+  ListMultipartUploadsCommand,
+  ListObjectsV2Command,
   PutObjectCommand,
   paginateListParts,
   S3Client,
@@ -326,4 +329,38 @@ export async function listMultipartUploadParts(args: { key: string; uploadId: st
     }
   }
   return parts;
+}
+
+/**
+ * Deletes one page (at most 1,000 keys) of objects under `prefix` and reports
+ * what it removed, for sweeps that must empty a prefix across several passes.
+ * The prefix must be a non-empty directory path ending in "/": a bare or
+ * partial prefix is refused rather than risk deleting a neighbour's objects.
+ * Also aborts unfinished multipart uploads there once the prefix lists empty.
+ */
+export async function deleteObjectsUnderPrefix(prefix: string): Promise<{ objects: number; bytes: number; done: boolean }> {
+  if (!/^[A-Za-z0-9_-]+(?:\/[A-Za-z0-9_-]+)+\/$/.test(prefix)) throw new Error("Refusing unsafe storage prefix");
+  await ensureBucketExists();
+  const page = await s3Client.send(new ListObjectsV2Command({ Bucket: env.s3Bucket, Prefix: prefix, MaxKeys: 1000 }));
+  const listed = (page.Contents ?? []).filter((item): item is typeof item & { Key: string } => typeof item.Key === "string" && item.Key.startsWith(prefix));
+  if (listed.length > 0) {
+    const response = await s3Client.send(new DeleteObjectsCommand({
+      Bucket: env.s3Bucket,
+      Delete: { Objects: listed.map((item) => ({ Key: item.Key })), Quiet: true },
+    }));
+    const failed = response.Errors ?? [];
+    if (failed.length > 0) throw new Error(`storage refused to delete ${failed.length} of ${listed.length} objects (${failed[0]?.Code ?? "unknown"})`);
+    const bytes = listed.reduce((sum, item) => sum + (typeof item.Size === "number" ? item.Size : 0), 0);
+    return { objects: listed.length, bytes, done: false };
+  }
+  // Nothing left to list: drop unfinished multipart uploads (parts are not listed as objects).
+  for (;;) {
+    const uploads = await s3Client.send(new ListMultipartUploadsCommand({ Bucket: env.s3Bucket, Prefix: prefix, MaxUploads: 1000 }));
+    const open = (uploads.Uploads ?? []).filter((upload) => upload.Key?.startsWith(prefix) && upload.UploadId);
+    for (const upload of open) {
+      await s3Client.send(new AbortMultipartUploadCommand({ Bucket: env.s3Bucket, Key: upload.Key!, UploadId: upload.UploadId! }));
+    }
+    if (!uploads.IsTruncated || open.length === 0) break;
+  }
+  return { objects: 0, bytes: 0, done: true };
 }

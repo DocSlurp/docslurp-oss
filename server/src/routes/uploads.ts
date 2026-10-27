@@ -55,17 +55,17 @@ import { billingState } from "../services/config-change.js";
 
 type Uploadable = File | string | Array<File | string> | undefined;
 
-const canonicalIdSchema = z.string().trim().min(1).max(MAX_CANONICAL_ID_LENGTH);
+export const canonicalIdSchema = z.string().trim().min(1).max(MAX_CANONICAL_ID_LENGTH);
 
 /** The public `workspace` field: a workspace UUID, slug, former slug or name; created when no workspace matches. */
-const workspaceInputSchema = z.string().max(WORKSPACE_INPUT_MAX_LENGTH);
+export const workspaceInputSchema = z.string().max(WORKSPACE_INPUT_MAX_LENGTH);
 
 /** A restricted API key's workspace allowlist (null for sessions and unrestricted keys). */
-function actorAllowedWorkspaceIds(actor: RequestActor): readonly string[] | null {
+export function actorAllowedWorkspaceIds(actor: RequestActor): readonly string[] | null {
   return actor.type === "apiKey" && actor.apiKey.workspaceIds?.length ? actor.apiKey.workspaceIds : null;
 }
 
-const sourcePathSchema = z.string().max(1024).superRefine((value, ctx) => {
+export const sourcePathSchema = z.string().max(1024).superRefine((value, ctx) => {
   try {
     normalizeUploadPath(value);
   } catch (error) {
@@ -88,7 +88,7 @@ const ingestUrlSchema = z.object({
   pipeline: pipelineFeatureOverridesSchema.optional(),
 });
 
-const directUploadFileSchema = z.object({
+export const directUploadFileSchema = z.object({
   singlePart: z.boolean().optional(),
   filename: z.string().min(1).max(512),
   mimeType: z.string().min(1).max(256),
@@ -124,7 +124,7 @@ const completeDirectFileSchema = z.object({
     .optional(),
 });
 
-const uploadValidationHook = (
+export const uploadValidationHook = (
   result: { success: boolean; error?: ValidationErrorSource },
   c: Context,
 ) => {
@@ -139,7 +139,7 @@ const uploadValidationHook = (
   );
 };
 
-function parseCanonicalIds(
+export function parseCanonicalIds(
   files: File[],
   body: Record<string, unknown>,
 ): Array<string | null> {
@@ -154,7 +154,7 @@ function parseCanonicalIds(
   }
 }
 
-function parseSourcePaths(files: File[], body: Record<string, unknown>): string[] {
+export function parseSourcePaths(files: File[], body: Record<string, unknown>): string[] {
   try {
     return sourcePathsForFiles(files.length, { path: body.path, paths: body.paths });
   } catch (error) {
@@ -163,7 +163,7 @@ function parseSourcePaths(files: File[], body: Record<string, unknown>): string[
   }
 }
 
-function normalizeFiles(entry: Uploadable): File[] {
+export function normalizeFiles(entry: Uploadable): File[] {
   if (!entry) {
     return [];
   }
@@ -203,7 +203,7 @@ export function workspaceIntakeErrorResponse(
  * create a new one (which would land outside the allowlist). Session users are
  * unrestricted. Security finding SEC-2026-10-07.
  */
-function apiKeyMayCreateWorkspace(c: Context): boolean {
+export function apiKeyMayCreateWorkspace(c: Context): boolean {
   const apiKey = c.get("apiKey");
   return !apiKey || (apiKey.workspaceIds ?? []).length === 0;
 }
@@ -470,7 +470,7 @@ export const uploadsRoutes = createUploadsRoutes();
  * existing workspace's ID, or the name of the workspace to create at confirm
  * (neither: a self-titled one). Same rules as intakeIntoWorkspace.
  */
-async function directUploadTarget(
+export async function directUploadTarget(
   actor: RequestActor,
   input: { workspace?: string; newWorkspace?: boolean; templateKey?: string },
   orgId: string | null,

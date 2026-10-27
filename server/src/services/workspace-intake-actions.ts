@@ -10,6 +10,7 @@ import {
   documentTagsSchema,
   pipelineFeatureOverridesSchema,
   workspaceTemplateKeySchema,
+  type ExtractRecord,
   type PipelineFeatureOverrides,
   type PipelineFeatures,
   type WorkspaceTemplateKey,
@@ -32,6 +33,7 @@ import {
   withDirectUploadLock,
 } from "./direct-upload-session.js";
 import { canonicalIdForUrl } from "../lib/canonical-id.js";
+import { abandonExtract, attachExtractRun, describeExtractById, loadIntakeExtract } from "./extracts.js";
 import { remoteUrlIntakeItems } from "./remote-ingest.js";
 import {
   intakeIntoWorkspace,
@@ -54,6 +56,8 @@ export type WorkspaceIntakePayload = {
   ingested?: Array<{ filename: string; mimeType: string }>;
   /** Website ingestion: pages read by the crawl and the credits it was charged (ingest is billed separately). */
   crawl?: { startUrl: string; pages: number; credits: number };
+  /** Extract mode: the extract this intake belongs to, with its retention and download state. */
+  extract?: ExtractRecord;
 };
 
 export type WorkspaceIntakeActionResult = {
@@ -67,20 +71,35 @@ export type BulkWorkspaceIntakeFile = Pick<File, "arrayBuffer" | "name" | "size"
 
 type IntakeTargetArgs = Pick<
   WorkspaceIntakeRequest,
-  "userId" | "orgId" | "workspace" | "newWorkspace" | "templateKey" | "allowedWorkspaceIds" | "pipeline" | "tags" | "indexingMode"
+  "userId" | "orgId" | "workspace" | "newWorkspace" | "templateKey" | "allowedWorkspaceIds" | "pipeline" | "tags" | "indexingMode" | "extract" | "apiKeyId"
 >;
 
+/**
+ * Intake, plus extract bookkeeping: the run is linked to its extract on
+ * success, and an extract whose intake created nothing expires at once so the
+ * sweep empties its prefix.
+ */
 async function requiredIntake(
   request: WorkspaceIntakeRequest,
   ports: WorkspaceIntakePorts,
-): Promise<WorkspaceIntakeResult> {
-  const intake = await intakeIntoWorkspace(request, ports);
-  if (!intake) throw new WorkspaceIntakeError("Attach at least one file.", 400);
-  return intake;
+): Promise<WorkspaceIntakeResult & { extract?: ExtractRecord }> {
+  let intake: WorkspaceIntakeResult | null;
+  try {
+    intake = await intakeIntoWorkspace(request, ports);
+    if (!intake) throw new WorkspaceIntakeError("Attach at least one file.", 400);
+  } catch (error) {
+    // A direct upload session may retry its confirm; its extract expires on its own schedule.
+    if (request.extract && request.kind !== "direct-upload") await abandonExtract(request.extract.id).catch(() => undefined);
+    throw error;
+  }
+  if (!request.extract) return intake;
+  await attachExtractRun(request.extract.id, intake.run.id);
+  const extract = await describeExtractById(request.extract.id);
+  return extract ? { ...intake, extract } : intake;
 }
 
 function actionResult(
-  intake: WorkspaceIntakeResult,
+  intake: WorkspaceIntakeResult & { extract?: ExtractRecord },
   extra: Partial<WorkspaceIntakePayload> = {},
 ): WorkspaceIntakeActionResult {
   return {
@@ -95,6 +114,7 @@ function actionResult(
           : []),
       ],
       ...(intake.rejected.length > 0 ? { rejected: intake.rejected } : {}),
+      ...(intake.extract ? { extract: intake.extract } : {}),
       ...extra,
     },
     status: 201,
@@ -192,12 +212,17 @@ export async function confirmDirectUploadWorkspaceIntake(
       const workspace = await getWorkspace(existing.workspace_id, args.userId);
       if (!workspace) throw new WorkspaceIntakeError("Upload workspace is no longer accessible", 403);
       const documents = await sql<DocumentRow[]>`select * from documents where run_id = ${args.sessionId} order by created_at, id`;
-      const result = actionResult({ workspace, run: mapWorkspaceRun(existing), documents: documents.map(mapDocument), pipeline: existing.pipeline, deferredReason: null, rejected: [] });
+      if (loaded.session.extract_id) await attachExtractRun(loaded.session.extract_id, args.sessionId);
+      const extract = loaded.session.extract_id ? await describeExtractById(loaded.session.extract_id) : null;
+      const result = actionResult({ workspace, run: mapWorkspaceRun(existing), documents: documents.map(mapDocument), pipeline: existing.pipeline, deferredReason: null, rejected: [], ...(extract ? { extract } : {}) });
       await persistDirectUploadResult(args.sessionId, result);
       return result;
     }
     if (existing) await discardUnstartedRun(args.sessionId);
     const { session, items } = await prepareDirectUploadWorkspaceIntake(args.sessionId, args.userId);
+    // An extract session lands only while its extract is live; its sources are already under the extract prefix.
+    const extract = session.extract_id ? await loadIntakeExtract(session.extract_id, args.userId) : null;
+    if (session.extract_id && !extract) throw new WorkspaceIntakeError("This extract expired before its files were confirmed.", 409);
     await sql`update upload_sessions set status = 'ingesting' where id = ${args.sessionId}`;
     const intakePorts: WorkspaceIntakePorts = { ...ports, records: {
       ...ports.records,
@@ -225,6 +250,7 @@ export async function confirmDirectUploadWorkspaceIntake(
       kind: "direct-upload",
       items,
       audit: args.audit,
+      ...(extract ? { extract } : {}),
     }, intakePorts);
     const result = actionResult(intake);
     await persistDirectUploadResult(args.sessionId, result);
@@ -270,8 +296,10 @@ export async function createBulkWorkspaceIntake(
     })),
   );
   const { files: _files, canonicalIds: _canonicalIds, paths: _paths, idempotencyKey, contentLength: _length, audit, ...target } = args;
+  // The extract is created per request, so it is not part of the request's identity.
+  const { extract: _extract, ...hashedTarget } = target;
   const requestHash = hashIdempotencyPayload({
-    ...target,
+    ...hashedTarget,
     templateKey: target.templateKey ?? null,
     files: files.map((file) => ({
       filename: file.filename,
@@ -284,7 +312,7 @@ export async function createBulkWorkspaceIntake(
   });
 
   return await idempotently(
-    { idempotencyKey, routeKey: "uploads.bulk", requestHash, userId: args.userId },
+    { idempotencyKey, routeKey: target.extract ? "extracts.bulk" : "uploads.bulk", requestHash, userId: args.userId },
     async () =>
       actionResult(
         await requiredIntake(
@@ -311,11 +339,12 @@ export async function createRemoteUrlWorkspaceIntake(
   ports: WorkspaceIntakePorts = workspaceIntakePorts,
 ): Promise<WorkspaceIntakeActionResult> {
   const { idempotencyKey, audit, canonicalIds, ...target } = args;
+  const { extract: _extract, ...hashedTarget } = target;
   return await idempotently(
     {
       idempotencyKey,
-      routeKey: "uploads.url",
-      requestHash: hashIdempotencyPayload({ ...target, canonicalIds: canonicalIds ?? null, idempotencyKey }),
+      routeKey: target.extract ? "extracts.url" : "uploads.url",
+      requestHash: hashIdempotencyPayload({ ...hashedTarget, canonicalIds: canonicalIds ?? null, idempotencyKey }),
       userId: args.userId,
     },
     async () => {
