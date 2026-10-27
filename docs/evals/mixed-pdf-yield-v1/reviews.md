@@ -44,8 +44,21 @@ quality floors before marking an improvement accepted.
   revise-build. Tell and overlap checks passed; chart text references and layer/rotation
   coverage require corrections. Three training families, 18 PDFs / 180 pages, passed
   structural checks. This is provisional evidence only.
-- Attempt 2, revision 3: builder active. Independent final visual judge and full
-  corpus expansion remain pending.
+- Attempt 2, audit round 3 (artifact revision a2-r5): score 75, rewrite-spec.
+  Structural checks passed all 180 pages and native-document tell/overlap checks
+  passed, but the independent Terra audit found missing monospaced technical rules
+  and formulas (high, spec), generic producer metadata (medium, build), and chart
+  section order inconsistent with readingOrder (medium, build). Earlier chart gold,
+  outline, occlusion and rotation gaps improved. These prototypes remain unaccepted.
+- Attempt 3: strengthened source-free spec explicitly requires technical formulas,
+  software metadata and aligned gold ordering. Spec overlap checks passed for all
+  three authorized sources (zero shared eight-word sequences). A fresh Terra Builder
+  is active; prior code and artifacts are excluded from its inputs. Independent final
+  visual judge and full corpus expansion remain pending.
+
+Before measuring the new corpus, the sealer must validate realized decoys against
+immutable authoring plans. Current sealing deliberately rejects the a2-r5 schema's
+plan/exclusion differences; no measurement has bypassed this check.
 
 Exact machine-readable audits, score decisions, overlap reports and original rejected
 artifacts remain in external evaluation storage under `mixed-pdf-fools-gold-audit`.

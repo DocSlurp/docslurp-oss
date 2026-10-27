@@ -24,7 +24,15 @@ Every page has stable block IDs and authored bounding boxes in PDF top-left poin
 3. Technical block: a genuine ReportLab Table or HTML table with 4–7 rows and
    3–5 columns, explicit cell strings and header row. Some pages instead contain
    prose only, or a properly plotted vector chart with data and legend. Preserve
-   table cells, chart data and applicable formulas in gold separately.
+   table cells, chart data and applicable formulas in gold separately. Across each
+   ten-page family, at least four pages also include a compact monospaced technical
+   rule and aligned numeric matrix. These coexist with the table/chart, not replace
+   them. Use invented, internally consistent equations with operators, parentheses,
+   subscripts or exponents and a stated interval or constraint. Author the literal
+   printed expression and its semantic representation before rendering. Include
+   these blocks in native, section-raster and hard-scan variants; never leave all
+   formula arrays empty. Provide close-up previews of native and scanned technical
+   blocks and validate that all symbols survive rendering without clipping.
 4. Discussed-document inset: independently authored document excerpt, visually
    distinguished border/header, 40–80 words plus 25–45 words of surrounding
    commentary. On selected pages it is an embedded screenshot, never selectable text.
@@ -33,6 +41,10 @@ Every page has stable block IDs and authored bounding boxes in PDF top-left poin
 ## Difficulty features
 
 Keep coherent reading order in gold. For each source family derive six ten-page
+documents. All gold representations must agree on block order: section strings,
+expected Markdown and readingOrder place chart labels at the chart position before
+its caption. Chart blocks explicitly reference their literal title, axes, ticks and
+legend; plotted values remain separate data, not invented printed words. Then create
 documents with exactly 0,2,4,6,8,10 hard-scanned pages. Independently cross three
 layouts with section raster fractions 0,.2,.4,.6,.8,1 in every 18-family block.
 Hard scans: controlled 85–125 DPI, mild skew, blur, contrast and JPEG degradation;
@@ -59,6 +71,11 @@ section strings, cell rows, expected reading order, geometry and source layout.
 
 Vary actual production paths: ReportLab native PDF and an HTML/LibreOffice export
 path where available; record actual producer rather than merely changing its label.
+PDF Producer must identify the actual production software and version, not a generic
+department export string. Preserve its original software identity when later tools
+rewrite the file and record compositor/rewrite history separately. Realistic title
+and author fields may describe the invented organization. Documented software
+metadata is intentional producer diversity, not a placeholder to disguise.
 Use QPDF to cross classic xref/object streams and linearized/unlinearized storage
 without changing visuals. At least versions 1.4, 1.7; object streams only >=1.5.
 No encryption. Embed fonts. Keep image masks where authored. Record file profiles.
@@ -79,6 +96,10 @@ hash. Preserve native build sources and gold before rasterization. Each case man
 includes id,family,split,pdf,labels,sha256,labelHash,sourceLayoutHash,hardPercent,
 baseRegionRasterShare,pages (realized transformation metadata), layout,genre,producer.
 Case names use mixed-source-NNNN-hard-NNN; these are external paths only, never content.
+Save immutable difficulty plans alongside source content. Case exclusions must bind
+exactly to authored decoys and realized transformations; they may not introduce new
+reference content. Keep page identities stable and describe coordinate transforms
+explicitly. The coordinator validates these bindings before sealing labels.
 Emit source references under sources/, PDFs under inputs/SPLIT/, labels under
 labels/SPLIT/. Corpus schema mixed-pdf-authored@v2. Never write customer files or
 call model APIs from generator code. Do never open heldout outputs for manual inspection.
