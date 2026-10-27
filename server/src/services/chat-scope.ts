@@ -43,6 +43,7 @@ export async function loadScopeSuggestions(workspaceId: string): Promise<string[
         select coalesce(nullif(btrim(d.metadata ->> 'title'), ''), d.filename) as title
         from documents d
         where d.workspace_id = ${workspaceId} and d.status = 'completed' and d.superseded_at is null
+          and d.archived_at is null and d.purged_at is null
         order by d.created_at
         limit 4
       `,
@@ -51,6 +52,7 @@ export async function loadScopeSuggestions(workspaceId: string): Promise<string[
         from document_chunks c
         join documents d on d.id = c.document_id
         where d.workspace_id = ${workspaceId} and d.status = 'completed' and d.superseded_at is null
+          and d.archived_at is null and d.purged_at is null
           and array_length(c.heading_path, 1) > 0
         order by lower(c.heading_path[1]), c.chunk_index
         limit 6

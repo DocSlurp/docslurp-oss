@@ -571,6 +571,7 @@ describe("api rate limit middleware", () => {
   it("classifies upload, search, chat/AI, read-only, write, and webhook endpoints", () => {
     expect(classifyRateLimitCategory("POST", "/v1/ingest/bulk")).toBe("upload");
     expect(classifyRateLimitCategory("POST", "/v1/uploads/bulk")).toBe("upload");
+    expect(classifyRateLimitCategory("POST", "/v1/extracts/bulk")).toBe("upload");
     expect(classifyRateLimitCategory("POST", "/v1/uploads/direct/sessions")).toBe("upload");
     expect(classifyRateLimitCategory("GET", "/v1/search")).toBe("search");
     // The stream answers with a model too: it must not fall into the cheaper search bucket.
