@@ -116,6 +116,10 @@ const compatibleChatAuth: MiddlewareHandler = async (c, next) => {
       if (retryAfter) c.header("Retry-After", retryAfter);
       return c.json(errorBody("Request rate limit exceeded. Retry later.", "rate_limit_error", "rate_limit_exceeded"), 429);
     }
+    // A browser key refused for a fixable reason (no workspace allowlist, a website it
+    // doesn't allow) is a permission error with its own code, not an unknown key.
+    const policy = c.get("apiKeyPolicyRefusal");
+    if (policy) return c.json(errorBody(policy.message, "permission_error", policy.code), 403);
     // A missing or unknown key is a 401 here (OpenAI clients raise AuthenticationError),
     // even though the native API answers an unknown key with 403.
     c.header("WWW-Authenticate", 'Bearer realm="docslurp"');

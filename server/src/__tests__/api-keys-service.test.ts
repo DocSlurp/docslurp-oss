@@ -20,7 +20,7 @@ vi.mock("../services/organizations.js", () => ({
   OrganizationError: class extends Error { constructor(readonly status: number, readonly code: string, message: string) { super(message); } }
 }));
 
-const { apiKeyTypeFromPrefix, ApiKeyTypeChangeError, assertClientKeySensitiveScopes, ClientKeyWorkspacesRequiredError, createApiKey, rotateApiKey, updateApiKey, validateApiKey } = await import("../services/api-keys.js");
+const { apiKeyTypeFromPrefix, ApiKeyTypeChangeError, assertClientKeySensitiveScopes, ClientKeyOriginNotAllowedError, ClientKeyWorkspacesRequiredError, createApiKey, rotateApiKey, updateApiKey, validateApiKey } = await import("../services/api-keys.js");
 const organizations = await import("../services/organizations.js");
 
 function buildKeyRow(rawKey: string, overrides: Record<string, unknown> = {}) {
@@ -42,6 +42,16 @@ function buildKeyRow(rawKey: string, overrides: Record<string, unknown> = {}) {
   };
 }
 
+/** True when the key authenticates; false only for the browser-key website refusal (anything else fails the test). */
+async function originAccepted(rawKey: string, context: { origin?: string | null; referer?: string | null }): Promise<boolean> {
+  try {
+    return Boolean(await validateApiKey(rawKey, context));
+  } catch (error) {
+    if (error instanceof ClientKeyOriginNotAllowedError) return false;
+    throw error;
+  }
+}
+
 function hashKey(rawKey: string) {
   return createHash("sha256").update(rawKey).digest("hex");
 }
@@ -61,7 +71,7 @@ describe("validateApiKey", () => {
   it.each(["null", "invalid-origin"])("does not replace explicit opaque/invalid origin %s with an allowed referer", async (origin) => {
     const rawKey = "dslp_client";
     sqlMock.mockResolvedValue([buildKeyRow(rawKey, { key_type: "client", allowed_domains: ["app.docslurp.dev"], workspace_ids: ["ws-1"] })]);
-    expect(await validateApiKey(rawKey, { origin, referer: "https://app.docslurp.dev/page" })).toBeNull();
+    await expect(validateApiKey(rawKey, { origin, referer: "https://app.docslurp.dev/page" })).rejects.toMatchObject({ status: 403, code: "client_key_origin_not_allowed" });
     expect(sqlMock).toHaveBeenCalledTimes(1);
   });
 
@@ -104,11 +114,8 @@ describe("validateApiKey", () => {
       return [];
     });
 
-    const validated = await validateApiKey(rawKey, {
-      origin: "https://evil.example"
-    });
-
-    expect(validated).toBeNull();
+    // A distinct, actionable refusal rather than the generic invalid-key answer.
+    await expect(validateApiKey(rawKey, { origin: "https://evil.example" })).rejects.toBeInstanceOf(ClientKeyOriginNotAllowedError);
     expect(sqlMock).toHaveBeenCalledTimes(1);
   });
 
@@ -165,7 +172,7 @@ describe("validateApiKey", () => {
       if (text.includes("coalesce(sum")) return [{ request_count: 0, page_count: 0 }];
       return [];
     });
-    expect(Boolean(await validateApiKey(rawKey, context))).toBe(accepted);
+    expect(await originAccepted(rawKey, context)).toBe(accepted);
   });
 
   it.each([
@@ -197,7 +204,7 @@ describe("validateApiKey", () => {
   ])("matches allowlist %j against Origin %s → %s", async (allowed, origin, accepted) => {
     const rawKey = "dslp_pub_origin_matrix";
     sqlMock.mockResolvedValue([buildKeyRow(rawKey, { key_type: "client", allowed_domains: allowed, scopes: ["search"], workspace_ids: ["ws-1"] })]);
-    expect(Boolean(await validateApiKey(rawKey, { origin }))).toBe(accepted);
+    expect(await originAccepted(rawKey, { origin })).toBe(accepted);
   });
 
 });
@@ -273,15 +280,28 @@ describe("client key scopes and workspace allowlists (G-03)", () => {
     await expect(updateApiKey("key-1", "user-1", { name: "Renamed" })).rejects.toMatchObject({ code: "client_key_workspaces_required" });
     txMock.mockResolvedValueOnce([buildKeyRow("dslp_pub_bound", { key_type: "client", allowed_domains: ["docslurp.dev"], scopes: ["search"], workspace_ids: ["ws-1"] })]);
     await expect(updateApiKey("key-1", "user-1", { workspaceIds: [] })).rejects.toMatchObject({ code: "client_key_workspaces_required" });
+    // The fix: a save that adds workspaces to the legacy key (here with new websites too) succeeds.
+    txMock.mockReset();
+    Object.assign(txMock, { array: (value: unknown) => value, json: (value: unknown) => value });
+    txMock.mockImplementation(async (strings: TemplateStringsArray, ...values: unknown[]) => {
+      const text = strings.join("?");
+      if (text.includes("for update")) return [buildKeyRow("dslp_pub_legacy", { key_type: "client", allowed_domains: ["docslurp.dev"], scopes: ["search"], workspace_ids: [] })];
+      if (text.includes("from workspaces w")) return [{ id: "ws-1" }];
+      if (text.includes("update api_keys set")) return [buildKeyRow("dslp_pub_legacy", { key_type: "client", allowed_domains: values[1], scopes: ["search"], workspace_ids: ["ws-1"] })];
+      return [];
+    });
+    await expect(updateApiKey("key-1", "user-1", { workspaceIds: ["ws-1"], allowedDomains: ["*.docslurp.dev"] })).resolves.toMatchObject({ workspaceIds: ["ws-1"] });
   });
 
-  it.each(["github.io", "*.github.io", "vercel.app", "https://netlify.app", "co.uk", "com", "*.com", "pages.dev:443"])("refuses public-suffix-only allowed domain %s at key creation", async (domain) => {
+  it.each(["github.io", "*.github.io", "vercel.app", "https://netlify.app", "co.uk", "com", "*.com", "pages.dev:443",
+    // Private-section PSL entries a curated list missed.
+    "*.s3.us-east-1.amazonaws.com", "*.blob.core.windows.net", "*.gitbook.io", "*.eu.org", "foo.ck"])("refuses public-suffix-only allowed domain %s at key creation", async (domain) => {
     txMock.mockImplementation(async (strings: TemplateStringsArray) => strings.join("?").includes("from workspaces w") ? [{ id: "ws-1" }] : []);
     await expect(createApiKey("user-1", "Widget", { orgId: "org-1", keyType: "client", allowedDomains: [domain], workspaceIds: ["ws-1"] }))
       .rejects.toMatchObject({ status: 400, code: "invalid_allowed_domain" });
   });
 
-  it.each(["myname.github.io", "*.example.co.uk", "localhost:4321", "127.0.0.1:3000", "docs.example.com"])("accepts an owned domain %s", async (domain) => {
+  it.each(["myname.github.io", "*.example.co.uk", "localhost:4321", "127.0.0.1:3000", "docs.example.com", "mybucket.s3.us-east-1.amazonaws.com", "www.ck"])("accepts an owned domain %s", async (domain) => {
     txMock.mockImplementation(async (strings: TemplateStringsArray, ...values: unknown[]) => {
       const text = strings.join("?");
       if (text.includes("insert into api_keys")) return [buildKeyRow("x", { key_type: "client", allowed_domains: values[6], scopes: values[7], workspace_ids: values[11] })];
@@ -320,8 +340,8 @@ describe("client key scopes and workspace allowlists (G-03)", () => {
     const refused = validateApiKey(rawKey, { origin: "https://docslurp.dev" });
     await expect(refused).rejects.toBeInstanceOf(ClientKeyWorkspacesRequiredError);
     await expect(validateApiKey(rawKey, { origin: "https://docslurp.dev" })).rejects.toThrow(/workspaceIds/);
-    // A wrong origin is still just an invalid key (no hint that the key exists).
-    expect(await validateApiKey(rawKey, { origin: "https://evil.example" })).toBeNull();
+    // The website check comes first.
+    await expect(validateApiKey(rawKey, { origin: "https://evil.example" })).rejects.toBeInstanceOf(ClientKeyOriginNotAllowedError);
     sqlMock.mockResolvedValue([buildKeyRow(rawKey, { key_type: "client", allowed_domains: ["docslurp.dev"], scopes: ["ingest", "search"], workspace_ids: ["ws-1"] })]);
     expect(await validateApiKey(rawKey, { origin: "https://docslurp.dev" })).toMatchObject({ scopes: ["ingest", "search"], workspaceIds: ["ws-1"] });
   });

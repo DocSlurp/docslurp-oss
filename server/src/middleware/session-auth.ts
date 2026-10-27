@@ -1,7 +1,7 @@
 import type { Context, MiddlewareHandler } from "hono";
 
 import {
-  ClientKeyWorkspacesRequiredError,
+  ApiKeyPolicyError,
   resolveApiKeyActor,
   resolveBetterAuthSessionActor,
   setRequestActor
@@ -77,9 +77,9 @@ export const sessionAuth: MiddlewareHandler = async (c, next) => {
         referer: c.req.header("referer") ?? c.req.header("referrer")
       });
     } catch (error) {
-      // A legacy browser key without a workspace allowlist: say how to fix it, never widen it.
-      if (!(error instanceof ClientKeyWorkspacesRequiredError)) throw error;
-      return middlewareErrorResponse(c, 403, "client_key_workspaces_required", error.message);
+      // A browser key on a website it doesn't allow, or a legacy one without workspaces: say how to fix it, never widen it.
+      if (!(error instanceof ApiKeyPolicyError)) throw error;
+      return middlewareErrorResponse(c, 403, error.code, error.message);
     }
     if (actor) {
       setRequestActor(c, actor);

@@ -1,5 +1,5 @@
 import type { MiddlewareHandler } from "hono";
-import { ClientKeyWorkspacesRequiredError, resolveApiKeyActor, setRequestActor } from "../lib/request-actor.js";
+import { ApiKeyPolicyError, resolveApiKeyActor, setRequestActor } from "../lib/request-actor.js";
 import { MCP_SCOPES, mcpOrigin, mcpResource, validateMcpToken } from "../services/mcp-oauth.js";
 import { enforceAuthenticatedApiRateLimit } from "./rate-limit.js";
 
@@ -32,7 +32,7 @@ export const mcpAuth: MiddlewareHandler = async (c, next) => {
     actor = key ? { type: "apiKey" as const, userId: key.userId, apiKey: key } : token && !token.startsWith("dsmcp") ? await resolveApiKeyActor(`Bearer ${token}`, { origin: c.req.header("origin"), referer: c.req.header("referer") }) : null;
   } catch (error) {
     // Browser keys never reach MCP; a legacy one without workspaces is refused like any browser key.
-    if (!(error instanceof ClientKeyWorkspacesRequiredError)) throw error;
+    if (!(error instanceof ApiKeyPolicyError)) throw error;
     return c.json({ error: "A server API key is required" }, 403);
   }
   if (!actor) {
