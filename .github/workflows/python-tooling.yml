@@ -45,3 +45,6 @@ jobs:
         run: uv pip install --require-hashes -r worker/requirements.lock.txt
       - name: Exercise PDF and HTML adapters without downloading models
         run: uv run --no-project scripts/check-python-dependencies.py --optional
+
+      - name: Verify bounded Doppler chunk planning and merge
+        run: uv run --no-project python worker/scripts/test_doppler_vm.py
