@@ -46,6 +46,7 @@ import { DEFAULT_DOCUMENT_EXPORT_TASK_QUEUE, DEFAULT_LARGE_DOCUMENT_EXPORT_TASK_
 import { purgeConfig } from "../db/superseded-purge.js";
 import { prefetchVendorBundles } from "../tools/vendor-bundles.js";
 import { initializePrivateModelEndpoints } from "../lib/privacy-guard.js";
+import { reportPageImageEncoderAtStartup } from "../pipeline/page-image-format.js";
 
 function readOptionalEnv(name: string): string | undefined {
   const value = process.env[name]?.trim();
@@ -121,6 +122,8 @@ async function main(): Promise<void> {
   setDefaultParserSandbox(sandbox);
   const openSession = (activityId: string) => sandbox.provider.openSession(sandbox.config, { activityId });
   const runner = new CommandRunner({ openSession });
+  // Logged once: a missing cwebp stores PNG (the previous format) rather than failing startup.
+  await reportPageImageEncoderAtStartup(runner);
   const storage = new ArtifactStore(cfg);
   const stages = createStages({ runner, storage, config: cfg, mediaJournal: store.mediaJournal, capacityStore: store.capacityLeaseStore([]), sql: store.stageSql });
 

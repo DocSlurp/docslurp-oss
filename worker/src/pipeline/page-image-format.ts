@@ -62,8 +62,9 @@ export function readPageImageWebpShortRetentionHours(env: Env = process.env): nu
  * Encode effort for a page image kept `retentionHours`. Unknown or unlimited retention
  * (null, undefined, non-finite or non-positive) is long-term and gets the default effort.
  *
- * This is the hook for any retention signal: workspace artifact/run retention today
- * (`Document.artifactRetentionHours`), an extract's `retentionHours` once extract mode lands.
+ * This is the hook for any retention signal. Today that is the workspace's run retention
+ * (`Document.artifactRetentionHours`, loaded by the worker store). Nothing sets an extract's
+ * `retentionHours` yet; extract mode should set the same field when it lands.
  */
 export function pageImageWebpEffort(args: { retentionHours?: number | null }, env: Env = process.env): number {
   const defaultEffort = readPageImageWebpEffort(env);
@@ -72,6 +73,30 @@ export function pageImageWebpEffort(args: { retentionHours?: number | null }, en
   return hours < readPageImageWebpShortRetentionHours(env)
     ? Math.min(SHORT_RETENTION_PAGE_IMAGE_WEBP_EFFORT, defaultEffort)
     : defaultEffort;
+}
+
+/**
+ * Pages where effort 6 buys too little. Measured 2026-10-26 on 27 rasters (150 dpi PDF pages,
+ * scans and synthetic noise): above 0.5 PNG bytes per pixel (dense scans, photos), effort 6
+ * saved at most 12% over effort 1 for 2-2.5x the CPU, which repays only after about 7 months of
+ * storage; incompressible noise saved 0% (a 16 MP noise page took 5.7 s at effort 6 vs 2.4 s at
+ * effort 1). Large rasters are capped for the same reason: encode time grows with pixels.
+ */
+export const INCOMPRESSIBLE_PNG_BYTES_PER_PIXEL = 0.5;
+export const LARGE_PAGE_IMAGE_PIXELS = 8_000_000;
+
+/**
+ * Effort for one page: the retention-chosen effort, lowered to the short-retention effort
+ * when the page is over 8 MP or its PNG is incompressible, so a hostile or noisy page cannot
+ * buy expensive encodes that do not shrink it.
+ */
+export function pageImageEncodeEffort(args: { effort: number; widthPx: number; heightPx: number; pngBytes: number }): number {
+  const pixels = args.widthPx * args.heightPx;
+  if (args.effort <= SHORT_RETENTION_PAGE_IMAGE_WEBP_EFFORT || pixels <= 0) return args.effort;
+  if (pixels > LARGE_PAGE_IMAGE_PIXELS || args.pngBytes / pixels > INCOMPRESSIBLE_PNG_BYTES_PER_PIXEL) {
+    return SHORT_RETENTION_PAGE_IMAGE_WEBP_EFFORT;
+  }
+  return args.effort;
 }
 
 /**
@@ -188,16 +213,20 @@ export async function encodeLosslessWebp(args: {
   signal?: AbortSignal;
 }): Promise<WebpEncodeResult> {
   if (!args.runner.encodeLosslessWebp) return { status: "unavailable", reason: "runner cannot plan cwebp" };
-  const plan: CommandPlan = await args.runner.encodeLosslessWebp(args.pngPath, args.webpPath, args.effort);
-  if (!plan.available) return { status: "unavailable", reason: "cwebp is not installed" };
   // The renderers already bound the raster; check the bytes again before the encoder sees them.
   const expected = assertEncodablePageRaster(readPngDimensions(args.png), args.png.byteLength);
+  const effort = pageImageEncodeEffort({ effort: args.effort, ...expected, pngBytes: args.png.byteLength });
+  const plan: CommandPlan = await args.runner.encodeLosslessWebp(args.pngPath, args.webpPath, effort);
+  if (!plan.available) return { status: "unavailable", reason: "cwebp is not installed" };
   const started = Date.now();
   try {
     await args.runner.run(plan, args.signal);
   } catch (error) {
-    if (args.signal?.aborted || error instanceof SandboxRunError) throw error;
-    return { status: "failed", reason: error instanceof Error ? error.message : String(error) };
+    if (args.signal?.aborted) throw error;
+    // The PNG was rendered inside the sandbox; storing it runs nothing outside it, so any encode
+    // failure (a remote image without cwebp, a sandbox refusal, a crash) keeps the PNG.
+    const reason = `${error instanceof SandboxRunError ? "sandbox: " : ""}${error instanceof Error ? error.message : String(error)}`;
+    return { status: missingBinary(reason) ? "unavailable" : "failed", reason };
   }
   const encodeMs = Date.now() - started;
   let size: number;
@@ -212,7 +241,12 @@ export async function encodeLosslessWebp(args: {
   if (!dimensions || dimensions.widthPx !== expected.widthPx || dimensions.heightPx !== expected.heightPx) {
     return { status: "failed", reason: "cwebp output is not a lossless WebP of the rendered page size" };
   }
-  return { status: "encoded", bytes, ...dimensions, effort: args.effort, encodeMs };
+  return { status: "encoded", bytes, ...dimensions, effort, encodeMs };
+}
+
+/** A remote image without cwebp reports it as a failed command (exit 127, ENOENT, "not found"). */
+function missingBinary(reason: string): boolean {
+  return /\bENOENT\b|\(127\)|exit(?:ed)? 127|cwebp: (?:command )?not found|no such file or directory/i.test(reason);
 }
 
 let unavailableWarned = false;
@@ -253,4 +287,34 @@ export function reportPageImageFormatFallback(args: { status: "unavailable" | "f
 /** Test hook: forget that the once-per-process warning was printed. */
 export function resetPageImageFormatFallbackWarning(): void {
   unavailableWarned = false;
+}
+
+/**
+ * Startup check, logged once and loudly rather than failing startup. A worker without cwebp
+ * still renders and stores every page (as PNG, the previous behaviour), and the images already
+ * require cwebp at build time (scripts/check-worker-prerequisites.mjs). Refusing to start would
+ * turn a storage-cost regression into an ingestion outage. Returns whether cwebp is planned.
+ */
+export async function reportPageImageEncoderAtStartup(
+  runner: Pick<CommandRunner, "encodeLosslessWebp">,
+  env: Env = process.env,
+): Promise<boolean> {
+  if (readPageImageFormat(env) !== "webp") {
+    console.log("[page-image] format=png (DOCSLURP_PAGE_IMAGE_FORMAT); page images are stored as PNG");
+    return false;
+  }
+  const plan = await runner.encodeLosslessWebp("/nonexistent/page.png", "/nonexistent/page.webp", readPageImageWebpEffort(env)).catch(() => null);
+  if (plan?.available) {
+    console.log(`[page-image] format=webp encoder=cwebp default_effort=${readPageImageWebpEffort(env)} short_retention_hours=${readPageImageWebpShortRetentionHours(env)}`);
+    return true;
+  }
+  const line = "[page-image] ERROR DOCSLURP_PAGE_IMAGE_FORMAT=webp but cwebp is not installed; every page image will be stored as PNG";
+  console.error(line);
+  try {
+    emitTelemetryLog({ severityText: "error", eventName: "docslurp.page_image.encoder", body: line, attributes: { "docslurp.page_image.encoder": "missing" } });
+  } catch {
+    /* telemetry is best effort */
+  }
+  unavailableWarned = true;
+  return false;
 }

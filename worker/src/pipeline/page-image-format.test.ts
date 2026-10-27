@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import { effectiveRasterDpi } from "../lib/raster-bounds.js";
+
 import {
   assertEncodablePageRaster,
   DEFAULT_PAGE_IMAGE_WEBP_EFFORT,
@@ -7,7 +9,9 @@ import {
   OversizedPageImageError,
   pageImageKey,
   pageImageVariantDir,
+  pageImageEncodeEffort,
   pageImageWebpEffort,
+  reportPageImageEncoderAtStartup,
   rasterFileExtension,
   readPageImageFormat,
   readPageImageWebpEffort,
@@ -132,5 +136,43 @@ describe("encode guard", () => {
     });
     expect(result.status).toBe("unavailable");
     expect(run).not.toHaveBeenCalled();
+  });
+});
+
+describe("per-page effort and density", () => {
+  it("drops to effort 1 for pages over 8 MP or with incompressible PNGs", () => {
+    const page = { widthPx: 1275, heightPx: 1650 };
+    expect(pageImageEncodeEffort({ effort: 6, ...page, pngBytes: 0.1 * 1275 * 1650 })).toBe(6);
+    expect(pageImageEncodeEffort({ effort: 6, ...page, pngBytes: 0.6 * 1275 * 1650 })).toBe(1);
+    expect(pageImageEncodeEffort({ effort: 6, widthPx: 4000, heightPx: 4000, pngBytes: 1000 })).toBe(1);
+    expect(pageImageEncodeEffort({ effort: 0, widthPx: 4000, heightPx: 4000, pngBytes: 1e9 })).toBe(0);
+  });
+
+  it("computes the density a bounded page actually renders at", () => {
+    expect(effectiveRasterDpi(612, 792, 150)).toBe(150);
+    expect(Math.round(effectiveRasterDpi(792, 1224, 300))).toBe(235);
+  });
+
+  it("reports a missing cwebp loudly at startup instead of failing", async () => {
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const missing = { encodeLosslessWebp: async () => ({ binary: "cwebp", args: [], available: false }) };
+    expect(await reportPageImageEncoderAtStartup(missing as never, {})).toBe(false);
+    expect(error).toHaveBeenCalledWith(expect.stringContaining("cwebp is not installed"));
+    const present = { encodeLosslessWebp: async () => ({ binary: "cwebp", args: [], available: true }) };
+    expect(await reportPageImageEncoderAtStartup(present as never, {})).toBe(true);
+    expect(await reportPageImageEncoderAtStartup(missing as never, { DOCSLURP_PAGE_IMAGE_FORMAT: "png" })).toBe(false);
+    expect(error).toHaveBeenCalledTimes(1);
+    expect(log).toHaveBeenCalled();
+  });
+
+  it("treats a remote 'not found' as unavailable and other encode errors as failed", async () => {
+    const png = pngHeader(10, 10);
+    const encode = (message: string) => encodeLosslessWebp({
+      runner: { run: async () => { throw new Error(message); }, encodeLosslessWebp: async () => ({ binary: "cwebp", args: [], available: true }) } as never,
+      pngPath: "/tmp/docslurp-x/p.png", webpPath: "/tmp/docslurp-x/p.webp", png, effort: 6,
+    });
+    expect((await encode("cwebp (127): sh: 1: cwebp: not found")).status).toBe("unavailable");
+    expect((await encode("cwebp (1): Error! Cannot read input picture")).status).toBe("failed");
   });
 });

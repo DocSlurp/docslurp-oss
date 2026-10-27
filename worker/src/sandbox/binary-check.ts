@@ -12,6 +12,8 @@ export const PARSER_BINARY_CHECKS: ReadonlyArray<readonly [name: string, flag: s
   ["ffmpeg", "-version"],
   ["pdftoppm", "-v"],
   ["pandoc", "--version"],
+  // Lossless WebP page images (pipeline/page-image-format.ts); libwebp is a shared library too.
+  ["cwebp", "-version"],
 ];
 
 export interface ParserBinaryCheckResult {
