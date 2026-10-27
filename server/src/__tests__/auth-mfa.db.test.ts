@@ -1,7 +1,7 @@
 import { createHash, createHmac, generateKeyPairSync, randomBytes, sign as signData, type KeyObject } from "node:crypto";
 
 import type { Pool } from "pg";
-import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { createMigratedDatabase, serveOnRandomPort } from "@docslurp/worker/testing";
 
@@ -61,6 +61,7 @@ afterAll(async () => {
 });
 
 beforeEach(() => { sentEmails.length = 0; });
+afterEach(() => { vi.useRealTimers(); });
 
 // ---------------------------------------------------------------------------
 // Browser stand-in
@@ -360,8 +361,16 @@ describe("sign-in challenge", () => {
     expect((await second.json("/two-factor/verify-backup-code", { code: backupCodes[1] })).status).toBe(200);
   });
 
-  it("ends a challenge after 5 wrong codes and locks the account after 10", async () => {
+  it.each([0, 1_000])("ends a challenge after 5 wrong codes and locks the account after 10 (clock advances %i ms)", async (advanceMs) => {
+    // Fake only Date: database/network timers must continue running.
+    const start = Math.floor(Date.now() / 30_000) * 30_000 + 29_000;
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(start);
     const { user, secret } = await enrolledUser();
+    // Enrollment consumed the next step. Preserve this unconsumed current code;
+    // it remains valid as the previous step after crossing the boundary.
+    const unconsumedCode = totp(secret);
+    vi.setSystemTime(start + advanceMs);
     const browser = new Browser();
     await signInPassword(browser, user.email);
     const statuses: number[] = [];
@@ -374,8 +383,16 @@ describe("sign-in challenge", () => {
     for (let attempt = 0; attempt < 5; attempt += 1) await next.json("/two-factor/verify-totp", { code: wrongCode(secret) });
     const third = new Browser();
     await signInPassword(third, user.email);
-    // Ten failures across challenges: even the right code is refused while locked.
-    const locked = await third.json<{ code?: string }>("/two-factor/verify-totp", { code: totp(secret) });
+    if (advanceMs > 0) {
+      // The now-current code was consumed by enrollment: replay rejection runs
+      // before account lockout, which caused the original wall-clock flake.
+      const replay = await third.json<{ code?: string }>("/two-factor/verify-totp", { code: totp(secret) });
+      expect(replay.status).toBe(401);
+      expect(replay.body.code).toBe("INVALID_CODE");
+      expect(await third.session()).toBeNull();
+    }
+    // Ten failures across challenges: an unconsumed valid code reaches lockout.
+    const locked = await third.json<{ code?: string }>("/two-factor/verify-totp", { code: unconsumedCode });
     expect(locked.status).toBe(429);
     expect(locked.body.code).toBe("ACCOUNT_TEMPORARILY_LOCKED");
     expect(await third.session()).toBeNull();
