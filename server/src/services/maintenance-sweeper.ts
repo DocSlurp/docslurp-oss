@@ -4,6 +4,7 @@ import { syncMeteringEnforcement } from "./billing/metering.js";
 import { runStorageMeter } from "./billing/storage-meter.js";
 import { sweepInterruptedConnectorSyncs } from "./connector-sync-recovery.js";
 import { sweepDocumentExports } from "./document-exports.js";
+import { sweepExtracts } from "./extracts.js";
 import { sweepSpendPausedRuns } from "./spend-paused-runs.js";
 import { sweepExpiredCreditLeases } from "./billing/credit-leases.js";
 import { sweepStaleQueuedRuns } from "./stale-queued-runs.js";
@@ -45,6 +46,8 @@ const sweeps: Array<[name: string, run: () => Promise<unknown>]> = [
   ["tenant-offboarding", () => resumeOrganizationDeletions()],
   // Zip exports: email finished large ones, delete objects past their 7-day link.
   ["document-exports", () => sweepDocumentExports()],
+  // Extract mode: settle finished extracts (charge, download, email) and delete expired ones.
+  ["extracts", () => sweepExtracts()],
 ];
 
 let timer: ReturnType<typeof setInterval> | null = null;

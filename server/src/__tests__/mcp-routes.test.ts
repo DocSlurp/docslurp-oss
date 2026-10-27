@@ -376,10 +376,10 @@ describe("mcpRoutes", () => {
     const client = new Client({ name: "catalog-contract", version: "1" });
     await client.connect(new StreamableHTTPClientTransport(new URL("http://localhost:4321/mcp"), { requestInit: { headers: { Authorization: "Bearer key" } }, fetch: async (url, init) => app.request(new Request(url, init)) }));
     const tools = (await client.listTools()).tools;
-    expect(tools).toHaveLength(13);
-    expect(new Set(tools.map(tool => tool.name)).size).toBe(13);
+    expect(tools).toHaveLength(14);
+    expect(new Set(tools.map(tool => tool.name)).size).toBe(14);
     expect(tools.every(tool => /^[A-Za-z0-9_.-]{1,128}$/.test(tool.name))).toBe(true);
-    for (const name of ["upload", "completeUpload", "chat"]) {
+    for (const name of ["upload", "extract", "completeUpload", "chat"]) {
       expect(tools.find(tool => tool.name === name)?.annotations).toMatchObject({ readOnlyHint: false, idempotentHint: false });
     }
     for (const name of ["listWorkspaces", "search", "getUploadStatus", "getMediaEvidence", "suggestQueries"]) {
@@ -448,7 +448,7 @@ describe("mcpRoutes", () => {
   it("does not discover or execute search/chat tools without search scope", async () => {
     validateApiKey.mockResolvedValue({ ...validatedKey, scopes: ["ingest"] });
     const listed = await app.request("/mcp/tools", { headers: { Authorization: "Bearer dslp_test" } });
-    expect((await listed.json()).tools.map((tool: { id: string }) => tool.id)).toEqual(["listWorkspaces", "upload", "getUploadStatus", "getWorkspaceSettings", "uploadEstimate", "fullIndexEstimate", "reprocessEstimate", "getJob", "completeUpload"]);
+    expect((await listed.json()).tools.map((tool: { id: string }) => tool.id)).toEqual(["listWorkspaces", "upload", "getUploadStatus", "extract", "getWorkspaceSettings", "uploadEstimate", "fullIndexEstimate", "reprocessEstimate", "getJob", "completeUpload"]);
     for (const name of ["search", "chat"]) {
       expect((await app.request(`/mcp/tools/${name}`, { method: "POST", headers: { Authorization: "Bearer dslp_test", "Content-Type": "application/json" }, body: "{}" })).status).toBe(403);
     }
@@ -542,7 +542,7 @@ describe("session MCP tools", () => {
     expect(tool.inputSchema.properties.files).toBeDefined();
     expect(tool.inputSchema.properties.inlineFiles.items.properties.contentBase64).toBeDefined();
     expect(tool.inputSchema.properties.userId).toBeUndefined();
-    expect(tools.map((tool: { id: string }) => tool.id)).toEqual(["listWorkspaces", "upload", "getUploadStatus", "search", "chat", "getMediaEvidence", "suggestQueries", "getWorkspaceSettings", "proposeWorkspaceSettings", "uploadEstimate", "fullIndexEstimate", "reprocessEstimate", "updateEstimate", "searchSettingsEstimate", "indexingModeEstimate", "graphRebuildEstimate", "getJob", "completeUpload"]);
+    expect(tools.map((tool: { id: string }) => tool.id)).toEqual(["listWorkspaces", "upload", "getUploadStatus", "search", "chat", "extract", "getMediaEvidence", "suggestQueries", "getWorkspaceSettings", "proposeWorkspaceSettings", "uploadEstimate", "fullIndexEstimate", "reprocessEstimate", "updateEstimate", "searchSettingsEstimate", "indexingModeEstimate", "graphRebuildEstimate", "getJob", "completeUpload"]);
     expect(response.headers.get("Cache-Control")).toBe("no-store");
   });
 });
