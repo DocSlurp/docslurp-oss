@@ -342,11 +342,12 @@ export const chatAgentLimitsInputSchema = z.object({
    */
   web: z.boolean().optional(),
   /**
-   * Suggestions mode: the agent watches for ingestion and search problems
-   * (zero or weak results, failed or still-processing files, degraded
-   * extraction) and proposes specific workspace-setting changes. A proposal
-   * never applies itself; the user confirms each one with Apply. Default off
-   * for API callers; the DocSlurp app turns it on unless the user switches it off.
+   * Suggestions mode (the agent flags ingestion and search problems and
+   * proposes workspace-setting changes for a person to Apply) is a DocSlurp
+   * app feature. The server honours it only for the first-party app's signed-in
+   * session (isFirstPartyAppActor); for API keys, MCP and the OpenAI-compatible
+   * route it is accepted and ignored, so existing callers keep working. Not part
+   * of the public SDK.
    */
   suggestions: z.boolean().optional(),
 }).strict();

@@ -1,7 +1,14 @@
 import type { MiddlewareHandler } from "hono";
 import { middlewareErrorResponse } from "../lib/api-error.js";
 
-import { resolveApiKeyActor, setRequestActor } from "../lib/request-actor.js";
+import { ApiKeyPolicyError, resolveApiKeyActor, setRequestActor } from "../lib/request-actor.js";
+
+declare module "hono" {
+  interface ContextVariableMap {
+    /** A browser key refused for a fixable reason (workspace allowlist, website); protocol surfaces re-shape it. */
+    apiKeyPolicyRefusal: ApiKeyPolicyError;
+  }
+}
 import { enforceAuthenticatedApiRateLimit } from "./rate-limit.js";
 
 export const apiKeyAuth: MiddlewareHandler = async (c, next) => {
@@ -18,11 +25,20 @@ export const apiKeyAuth: MiddlewareHandler = async (c, next) => {
     return middlewareErrorResponse(c, 401, "unauthorized", "Missing or invalid Authorization header");
   }
 
-  const actor = await resolveApiKeyActor(header, {
-    origin: c.req.header("origin"),
-    referer: c.req.header("referer") ?? c.req.header("referrer")
-  });
+  let actor;
+  try {
+    actor = await resolveApiKeyActor(header, {
+      origin: c.req.header("origin"),
+      referer: c.req.header("referer") ?? c.req.header("referrer")
+    });
+  } catch (error) {
+    if (!(error instanceof ApiKeyPolicyError)) throw error;
+    c.set("apiKeyPolicyRefusal", error);
+    return middlewareErrorResponse(c, 403, error.code, error.message);
+  }
   if (!actor) {
+    // Repeated refusals from one IP look like key guessing: the IP limiter jails it.
+    c.set("apiKeyRejected", true);
     // An OAuth access token that no longer validates (expired, revoked) is a
     // 401 invalid_token (RFC 6750 §3.1), so a client refreshes it instead of
     // treating it as a permission error.

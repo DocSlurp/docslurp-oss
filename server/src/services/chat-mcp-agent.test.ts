@@ -607,6 +607,22 @@ describe("agent modes", () => {
     expect(systemText(model)).not.toContain("getUploadStatus");
   });
 
+  it.each(["server", "client"] as const)("never gives a %s API key the settings tools or suggestions mode, even when the catalog lists them and it asks", async (keyType) => {
+    mocks.manifestIds = ["search", "getUploadStatus", "getWorkspaceSettings", "proposeWorkspaceSettings"];
+    const model = new MockLanguageModelV4({ doStream: [answerStep("Ready")] });
+    mocks.provider.mockReturnValue(model);
+    const keyActor = { type: "apiKey" as const, userId: "user", apiKey: { keyId: "key", userId: "user", orgId: "org", keyType, scopes: ["search", "chat", "ingest", "workspaces:manage"], workspaceIds: [], allowedDomains: [], rateLimitRpm: null, rateLimitPpd: 0, rateLimits: [] } };
+    const result = await runChatMcpAgent({ ...args, actor: keyActor as never, suggestions: true });
+    const names = model.doStreamCalls[0]!.tools?.map(tool => tool.name) ?? [];
+    expect(names).not.toContain("getWorkspaceSettings");
+    expect(names).not.toContain("proposeWorkspaceSettings");
+    // Browser key visitors do not get account internals such as upload status either.
+    expect(names.includes("getUploadStatus")).toBe(keyType === "server");
+    expect(systemText(model)).not.toContain("Suggestions mode is on");
+    expect(systemText(model)).not.toContain(SETTINGS_ON_REQUEST_INSTRUCTION);
+    expect(result.debug.modes.suggestions).toBe(false);
+  });
+
   it("reports suggestions off when the actor cannot see the settings tools", async () => {
     mocks.manifestIds = ["search"];
     const model = new MockLanguageModelV4({ doStream: [answerStep("Ready")] });

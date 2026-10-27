@@ -76,6 +76,8 @@ export const workspaceChatInputSchema = z.object({
   workspace: workspaceRef,
   orgId: id.optional(),
   sessionId: id.optional(),
+  /** Browser (client) keys: the `sessionToken` returned with the previous answer, required to continue `sessionId`. */
+  sessionToken: z.string().min(1).max(4096).optional(),
   model: id.optional(),
   /** Retrieval overrides for this request only. */
   retrieval: chatRetrievalOverridesSchema.optional(),
