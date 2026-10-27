@@ -47,6 +47,7 @@ async function harness(args: {
     streamText: async (key: string, text: string) => { objects.set(key, Buffer.from(text)); },
   };
   const runner = {
+    dopplerMarkdown: async () => ({ binary: "doppler-vm", args: [], available: true }),
     kreuzbergMarkdown: async () => ({ binary: "node", args: [], available: true }),
     extractText: async () => ({ binary: "pdftotext", args: [], available: true }),
   } as unknown as CommandRunner;
@@ -82,6 +83,25 @@ async function harness(args: {
 
 describe("image documents whose OCR cannot run", () => {
   afterEach(() => vi.unstubAllEnvs());
+
+  it("keeps an empty Doppler scan healthy and skips implicit native enrichment", async () => {
+    vi.stubEnv("DOCSLURP_PDF_EXTRACTOR", "doppler");
+    vi.stubEnv("DOCSLURP_PDF_ENGINE", "shadow");
+    const h = await harness({ format: "pdf", extract: async () => ({ text: "" }) });
+    const internals = h.stage as any;
+    const payload = vi.fn(async () => { throw new Error("must not parse on host"); });
+    internals.buildParserArtifacts = payload;
+    internals.recordPageImageEvidence = async () => null;
+    try {
+      await h.stage.run(h.state);
+      expect(h.attempted).toEqual(["doppler"]);
+      expect(h.checkpoint()?.status).toBe("completed");
+      expect(h.state.documents[0]?.status).not.toBe("failed");
+      expect(payload).not.toHaveBeenCalled();
+      const manifest = [...h.manifests.values()].find(v => v?.needsVision !== undefined);
+      expect(manifest).toBeDefined();
+    } finally { await h.cleanup(); }
+  });
 
   it("continues to vision when Tesseract data is missing, without attempting Kreuzberg OCR", async () => {
     vi.stubEnv("DOCSLURP_OCR", "off");

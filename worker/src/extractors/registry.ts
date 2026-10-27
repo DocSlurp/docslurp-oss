@@ -124,6 +124,8 @@ function definition(args: {
 }
 
 const registered = [
+  definition({ id: "doppler", outputSuffix: ".doppler.md", tableAware: true, execute: file,
+    prepare: (runner, source) => runner.dopplerMarkdown(source, `${source}.doppler.md`) }),
   definition({ id: "kreuzberg", outputSuffix: ".kreuzberg.md", tableAware: true, execute: file,
     prepare: async (runner, source, config, context) => {
       const plan = await runner.kreuzbergMarkdown(source, `${source}.kreuzberg.md`, config);
@@ -209,7 +211,9 @@ export class ExtractorRegistry {
   resolve(format: string, configured?: string[]): string[] {
     const base = defaultDocumentExtractorOrder[format] ?? defaultDocumentExtractorOrder.default;
     // DOCSLURP_PDF_ENGINE=native-pdf puts the native engine first; kreuzberg stays next as its fallback.
-    const defaults = format === "pdf" && resolveNativePdfMode() === "native-pdf" ? ["native-pdf", ...base] : base;
+    const defaults = format === "pdf" && process.env.DOCSLURP_PDF_EXTRACTOR === "doppler"
+      ? ["doppler"]
+      : format === "pdf" && resolveNativePdfMode() === "native-pdf" ? ["native-pdf", ...base] : base;
     const ids = configured ?? defaults.filter((id) =>
       this.entries.get(id)?.descriptor.capabilities.formats.includes(format),
     );

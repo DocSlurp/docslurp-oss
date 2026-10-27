@@ -11,8 +11,8 @@ import {
   HeadObjectCommand,
   ListMultipartUploadsCommand,
   ListObjectsV2Command,
+  ListPartsCommand,
   PutObjectCommand,
-  paginateListParts,
   S3Client,
   UploadPartCommand
 } from "@aws-sdk/client-s3";
@@ -330,17 +330,33 @@ export async function headStorageBucket(signal?: AbortSignal): Promise<void> {
 /** Consume every provider page; multipart sessions can contain up to 10,000 parts. */
 export async function listMultipartUploadParts(args: { key: string; uploadId: string }) {
   const parts: Array<{ partNumber: number; etag: string; sizeBytes: number }> = [];
-  for await (const page of paginateListParts({ client: s3Client }, {
-    Bucket: env.s3Bucket, Key: args.key, UploadId: args.uploadId,
-  })) {
+  const abortSignal = AbortSignal.timeout(30_000);
+  let marker: string | undefined;
+  // Some S3-compatible providers return a terminal marker even when IsTruncated
+  // is false. The SDK paginator follows that marker indefinitely while intake
+  // holds its session lock. Honor the completion flag and bound malformed pages.
+  for (let pageNumber = 0; pageNumber < 10_000; pageNumber += 1) {
+    const page = await s3Client.send(new ListPartsCommand({
+      Bucket: env.s3Bucket, Key: args.key, UploadId: args.uploadId,
+      PartNumberMarker: marker, MaxParts: 1000,
+    }), { abortSignal });
     for (const part of page.Parts ?? []) {
-      if (part.PartNumber === undefined || !part.ETag || part.Size === undefined) {
+      if (part.PartNumber === undefined || !Number.isInteger(part.PartNumber) || part.PartNumber < 1 || part.PartNumber > 10_000
+        || part.PartNumber <= (parts.at(-1)?.partNumber ?? 0)
+        || !part.ETag || part.Size === undefined || !Number.isSafeInteger(part.Size) || part.Size < 0) {
         throw new Error("Storage returned incomplete multipart metadata");
       }
       parts.push({ partNumber: part.PartNumber, etag: part.ETag, sizeBytes: part.Size });
     }
+    if (page.IsTruncated === false) return parts;
+    const next = page.NextPartNumberMarker;
+    if (page.IsTruncated !== true || !next || !/^\d+$/.test(next)
+      || Number(next) <= Number(marker ?? 0) || Number(next) !== parts.at(-1)?.partNumber) {
+      throw new Error("Storage returned invalid multipart pagination");
+    }
+    marker = next;
   }
-  return parts;
+  throw new Error("Storage returned too many multipart pages");
 }
 
 /**
