@@ -23,6 +23,7 @@ export const PUBLIC_ERROR_MESSAGES = {
   unsupportedType: "This file type isn’t supported.",
   unreadableSource: "This file couldn’t be read. It may be corrupt, truncated or password-protected.",
   processing: "We couldn’t finish processing this document. Please try again.",
+  graphRebuildFailed: "The knowledge graph rebuild failed. Start it again; if it keeps failing, contact support.",
   silentVideo: "This video has no audio track, and video frame reading is disabled for this workspace or server.",
   imageNeedsVision: "This image can only be read with OCR or vision, and neither is available for this workspace. Check the workspace's vision and privacy settings.",
   paused: "Processing is paused. Your workspace administrator can help you resume it.",

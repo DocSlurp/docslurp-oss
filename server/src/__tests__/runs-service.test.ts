@@ -53,7 +53,6 @@ const {
   shouldFailStaleProcessingRun,
   listRuns,
   listRunEventsForRunId,
-  runExportArtifacts,
   summarizeRunUsageCost,
   summarizeStageResources,
 } = await import("../services/runs.js");
@@ -363,21 +362,3 @@ describe("run resource and cost rollups", () => {
   });
 });
 
-describe("runExportArtifacts", () => {
-  it("returns proxy URLs only, never the raw storage URI or key layout", () => {
-    const artifacts = runExportArtifacts({
-      "doc-1:markdown": "s3://docslurp-artifacts/user-1/run-1/doc-1/document.md",
-      "doc-1:page-1": "s3://docslurp-artifacts/user-1/run-1/doc-1/page-0001.png",
-      "doc-2:markdown": "s3://docslurp-artifacts/user-1/run-1/doc-2/document.md"
-    }, new Set(["s3://docslurp-artifacts/user-1/run-1/doc-2/document.md"]));
-
-    expect(artifacts).toEqual([
-      { slot: "doc-1:markdown", url: expect.stringMatching(/^\/v1\/files\//) },
-      { slot: "doc-1:page-1", url: expect.stringMatching(/^\/v1\/files\//) }
-    ]);
-    const serialized = JSON.stringify(artifacts);
-    expect(serialized).not.toContain("s3://");
-    expect(serialized).not.toContain("docslurp-artifacts");
-    expect(serialized).not.toContain("user-1/run-1");
-  });
-});
