@@ -104,7 +104,7 @@ function modalGpu(sku: string, usdPerSecond: number, gpuMemoryGb: number, notes 
   };
 }
 
-function vastGpu(sku: string, usd: number, gpuMemoryGb: number, samples: number): InfraCostObservation {
+function vastGpu(sku: string, usd: number, gpuMemoryGb: number, samples: number, observedAt = OBSERVED_AT): InfraCostObservation {
   return {
     id: `vast:${sku}`,
     provider: "vast",
@@ -113,9 +113,9 @@ function vastGpu(sku: string, usd: number, gpuMemoryGb: number, samples: number)
     usd,
     capacity: { gpus: 1, gpuMemoryGb },
     sourceUrl: VAST_BUNDLES,
-    observedAt: OBSERVED_AT,
+    observedAt,
     method: "api-median",
-    notes: `${VAST_NOTE} n=${samples} on ${OBSERVED_AT}. Spot-market price; expect ±20% day to day.`,
+    notes: `${VAST_NOTE} n=${samples} on ${observedAt}. Spot-market price; expect ±20% day to day.`,
   };
 }
 
@@ -164,9 +164,9 @@ export const INFRA_COST_OBSERVATIONS: readonly InfraCostObservation[] = [
     method: "derived",
     notes: "$6/GB-month above the preset allowance. RAM, not CPU, dominates Fly worker cost.",
   },
-  flyShared(8, 16, "lax", "Production worker host: 8 slots of 1 vCPU + 2 GB."),
+  flyShared(8, 16, "lax", "Production worker host (fly.worker.toml [[vm]] worker): DOCSLURP_WORKER_SLOTS_PER_MACHINE=2, so one slot is half a machine."),
   flyShared(8, 16, "iad", "Same host in the cheapest region, for comparison."),
-  flyShared(2, 3, "lax", "Current docslurp-worker fleet size (one task host per machine)."),
+  flyShared(2, 4, "lax", "Always-on floor machine (fly.worker.toml [[vm]] floor: shared-cpu-2x, 4 GB; confirmed in the live docslurp-worker inventory 2026-10-26)."),
   {
     id: "fly:performance-1x-2gb:lax",
     provider: "fly",
@@ -203,11 +203,11 @@ export const INFRA_COST_OBSERVATIONS: readonly InfraCostObservation[] = [
     notes: "Billed by the sending region; app machines run in North America. APAC $0.04, Africa/India $0.12.",
   },
   // Vast.ai, verified on-demand single-GPU medians.
-  vastGpu("rtx-4090", 0.58962963, 24, 45),
-  { ...vastGpu("l4", 0.33, 24, 4), observedAt: "2026-10-09", notes: "Historical median (n=4, 2026-10-09); live 2026-10-25 sample n=2 is insufficient to refresh." },
-  vastGpu("rtx-3090", 0.25111111, 24, 27),
-  vastGpu("a100-80gb", 1.00222222, 80, 7),
-  vastGpu("h100-sxm", 2.40266667, 80, 3),
+  vastGpu("rtx-4090", 0.53777778, 24, 42, "2026-10-26"),
+  { ...vastGpu("l4", 0.33, 24, 4), observedAt: "2026-10-09", notes: "Historical median (n=4, 2026-10-09). 2026-10-25 and early 2026-10-26 had n=2; a later 2026-10-26 run had n=3 at a $0.6741 median (min $0.3356), which would break the gpu-standard policy at the current rate. Left for the owner: refresh it together with a rate or policy decision." },
+  vastGpu("rtx-3090", 0.29014815, 24, 34, "2026-10-26"),
+  vastGpu("a100-80gb", 1.13614815, 80, 9, "2026-10-26"),
+  vastGpu("h100-sxm", 3.99, 80, 4, "2026-10-26"),
   // Modal, per-second list prices.
   modalGpu("l4", 0.000222, 24),
   modalGpu("a10", 0.000306, 24),
@@ -303,11 +303,11 @@ export const RESOURCE_CLASS_POLICY: readonly ResourceClassPolicy[] = [
     skus: [
       { observationId: "fly:shared-cpu-8x-16gb:lax", bundle: { cpuVcpuHour: 8, memoryGbHour: 16 } },
       { observationId: "fly:shared-cpu-8x-16gb:iad", bundle: { cpuVcpuHour: 8, memoryGbHour: 16 } },
-      { observationId: "fly:shared-cpu-2x-3gb:lax", bundle: { cpuVcpuHour: 2, memoryGbHour: 3 } },
+      { observationId: "fly:shared-cpu-2x-4gb:lax", bundle: { cpuVcpuHour: 2, memoryGbHour: 4 } },
       {
         observationId: "fly:performance-1x-2gb:lax",
         bundle: { cpuVcpuHour: 1, memoryGbHour: 2 },
-        disallowedReason: "Dedicated vCPUs cost ~30× a shared vCPU (net of RAM); a performance lane needs its own CPU rate.",
+        disallowedReason: "List price per vCPU is ~30× a shared vCPU (net of RAM), so it fails the shared-lane rate. Per sustained CPU-second it is ~6× cheaper than a shared vCPU throttled to its 6.25% baseline, so a CPU-bound performance lane needs its own CPU rate.",
       },
       {
         observationId: "modal:cpu-core",
@@ -337,7 +337,7 @@ export const RESOURCE_CLASS_POLICY: readonly ResourceClassPolicy[] = [
     rationale:
       "GPU hosts start only for queued GPU work and are billed per GPU-second of task time; the loss is boot and model-load time plus Vast's ±20% spot volatility. A tighter target would price OCR out of reach, so 60% leaves headroom for a 1.5× price swing at full utilization.",
     skus: [
-      { observationId: "vast:rtx-4090", bundle: { gpuStandardHour: 1 }, disallowedReason: "2026-10-25 live median $0.5896/h exceeds the $0.54/h cost ceiling at the current standard GPU rate." },
+      { observationId: "vast:rtx-4090", bundle: { gpuStandardHour: 1 }, disallowedReason: "2026-10-26 median $0.5378/h sits at the $0.54/h cost ceiling (60% break-even), with no headroom for the ±20% spot swing; it was $0.5896/h a day earlier." },
       { observationId: "vast:l4", bundle: { gpuStandardHour: 1 } },
       { observationId: "vast:rtx-3090", bundle: { gpuStandardHour: 1 } },
       { observationId: "modal:l4", bundle: { gpuStandardHour: 1 }, disallowedReason: "Modal L4 base price breaks even at ~89%." },
@@ -352,7 +352,7 @@ export const RESOURCE_CLASS_POLICY: readonly ResourceClassPolicy[] = [
     rationale: "Same as standard GPU. The large lane is restricted to A100 80 GB; H100 would need a separate rate.",
     skus: [
       { observationId: "vast:a100-80gb", bundle: { gpuLargeHour: 1 } },
-      { observationId: "vast:h100-sxm", bundle: { gpuLargeHour: 1 }, disallowedReason: "H100 breaks even at ~74%; the large lane is A100-only at this rate." },
+      { observationId: "vast:h100-sxm", bundle: { gpuLargeHour: 1 }, disallowedReason: "H100 costs more than list ($3.99/h median on 2026-10-26, +66% in a day); the large lane is A100-only at this rate." },
       { observationId: "modal:a100-80gb", bundle: { gpuLargeHour: 1 }, disallowedReason: "Modal A100 80 GB breaks even at ~83%." },
       { observationId: "modal:h100", bundle: { gpuLargeHour: 1 }, disallowedReason: "Modal H100 costs more than list." },
     ],
@@ -497,17 +497,40 @@ export function staleObservations(
 // Worker slots and burn
 // ---------------------------------------------------------------------------
 
-/** One billable worker slot on the production host: 1 vCPU + 2 GB, 8 per shared-cpu-8x 16 GB machine. */
+/**
+ * One worker slot on the production host. `vcpu` and `memoryGb` are the slot the rate card prices
+ * (slotCreditsPerHour: 1 vCPU + 2 GB); `slotsPerHost` is how production packs them, which sets what a slot costs.
+ * Production runs 2 per shared-cpu-8x 16 GB machine (fly.worker.toml DOCSLURP_WORKER_SLOTS_PER_MACHINE=2, for
+ * large-document memory headroom), so a provisioned slot holds half a machine: $0.0846/h in lax, not the $0.0211/h
+ * an 8-slot packing gives. Changing the priced slot shape or the rate card is an owner decision.
+ */
 export const WORKER_SLOT = {
   vcpu: 1,
   memoryGb: 2,
   hostObservationId: "fly:shared-cpu-8x-16gb:lax",
-  slotsPerHost: 8,
+  slotsPerHost: 2,
 } as const;
 
 /** List credits for one fully busy worker slot-hour. */
 export function slotCreditsPerHour(card: CreditRateCard = CREDIT_RATE_CARD): number {
   return WORKER_SLOT.vcpu * card.cpuVcpuHour + WORKER_SLOT.memoryGb * card.memoryGbHour;
+}
+
+/**
+ * List USD for one provisioned slot-hour: the card rate for the share of the production host one slot holds
+ * (host capacity / slotsPerHost; 4 vCPU + 8 GB at 2 per shared-cpu-8x 16 GB). Cost and list then describe the same
+ * resources, so a slot's margin is the host's (cpu-worker-host policy) whatever the packing.
+ */
+export function slotProvisionedListUsdPerHour(
+  observations: readonly InfraCostObservation[] = INFRA_COST_OBSERVATIONS,
+  card: CreditRateCard = CREDIT_RATE_CARD,
+): number {
+  const host = observations.find((observation) => observation.id === WORKER_SLOT.hostObservationId);
+  if (!host?.capacity?.vcpu || !host.capacity.memoryGb) throw new Error(`Missing capacity for infra observation ${WORKER_SLOT.hostObservationId}`);
+  return listUsdForBundle({
+    cpuVcpuHour: host.capacity.vcpu / WORKER_SLOT.slotsPerHost,
+    memoryGbHour: host.capacity.memoryGb / WORKER_SLOT.slotsPerHost,
+  }, card);
 }
 
 /** Infra USD for one provisioned worker slot-hour on the production host. */
