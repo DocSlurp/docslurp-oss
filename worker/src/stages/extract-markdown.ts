@@ -84,6 +84,7 @@ import { PdfRasterCache, PdfSourceCache } from "../pipeline/pdf-asset-cache.js";
 import { pageFactsEnabled, probePdfPageFacts, recordPageFacts } from "../pipeline/page-facts.js";
 import { executeVisionRuntime, visionCall } from "../tools/vision-runtime.js";
 import { allowHostedCall } from "../lib/privacy-guard.js";
+import { rasterFileExtension } from "../pipeline/page-image-format.js";
 
 interface PageHeatmapEntry {
   pageNumber: number;
@@ -1495,11 +1496,15 @@ export class ExtractMarkdownStage implements Stage {
         dpi: 150,
         signal: args.signal,
       });
+      const critiqueImageNames = new Map(rasterPages.map((raster) => [
+        raster.pageNumber,
+        `critique-page-${raster.pageNumber}${rasterFileExtension(raster.mimeType)}`,
+      ]));
       await Promise.all(
         rasterPages.map(async (raster) => {
           const bytes = await this.storage.getBytes(raster.artifactKey);
           await writeFile(
-            path.join(scratchDir, `critique-page-${raster.pageNumber}.png`),
+            path.join(scratchDir, critiqueImageNames.get(raster.pageNumber)!),
             bytes,
           );
         }),
@@ -1509,7 +1514,7 @@ export class ExtractMarkdownStage implements Stage {
         critiquePages.map(async (pageNumber): Promise<SelfCritiqueCorrection> => {
         const imagePath = path.join(
           scratchDir,
-          `critique-page-${pageNumber}.png`,
+          critiqueImageNames.get(pageNumber) ?? `critique-page-${pageNumber}.png`,
         );
         try {
           const originalText = pageTexts[pageNumber - 1] ?? "";

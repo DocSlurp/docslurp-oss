@@ -204,7 +204,7 @@ export function createProductionExecutorDeps(input: ProductionExecutorDepsInput)
         trustedTempDownloadPattern("docslurp-router-raster-", input.document),
       );
       try {
-        return await fn({ path: imagePath, mimeType: page.mimeType, pageNumber });
+        return await fn({ path: imagePath, mimeType: page.mimeType, pageNumber, ...(page.mimeType === "image/webp" && page.dpi ? { dpi: page.dpi } : {}) });
       } finally {
         await cleanupTempFile(imagePath);
       }
@@ -229,7 +229,8 @@ export function createProductionExecutorDeps(input: ProductionExecutorDepsInput)
       const cropPath = `${raster.path}.crop-${left}-${top}.png`;
       await image.extract({ left, top, width: cropWidth, height: cropHeight }).png().toFile(cropPath);
       try {
-        return await fn({ path: cropPath, mimeType: "image/png" } satisfies RasterRef);
+        // sharp writes no density for a crop of a WebP page, so the crop keeps the page's.
+        return await fn({ path: cropPath, mimeType: "image/png", ...(raster.dpi ? { dpi: raster.dpi } : {}) } satisfies RasterRef);
       } finally {
         await rm(cropPath, { force: true });
       }
@@ -238,7 +239,7 @@ export function createProductionExecutorDeps(input: ProductionExecutorDepsInput)
     async ocr(raster, { pageNumber, signal }) {
       const started = Date.now();
       const base = `${raster.path}.ocr`;
-      const plan = await input.runner.tesseractOcr(raster.path, base);
+      const plan = await input.runner.tesseractOcr(raster.path, base, undefined, raster.dpi);
       if (!plan.available) throw new Error("tesseract unavailable");
       try {
         await input.runner.run(plan, signal);

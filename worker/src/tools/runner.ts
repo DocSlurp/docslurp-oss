@@ -849,12 +849,16 @@ export class CommandRunner {
     source: string,
     outputBase: string,
     langs?: string,
+    /** Image density for formats that carry none (WebP); PNG renders carry it in pHYs. */
+    dpi?: number,
   ): Promise<CommandPlan> {
     const langArg = langs ?? "eng";
+    if (dpi !== undefined && (!Number.isInteger(dpi) || dpi < 1 || dpi > 2400)) throw new Error("Invalid OCR density");
     return await this.plan(
       "tesseract",
       source,
       outputBase,
+      ...(dpi !== undefined ? ["--dpi", String(dpi)] : []),
       "-l",
       langArg,
       "txt",
