@@ -148,6 +148,38 @@ describe("Workspace Intake", () => {
     expect(fakes.createdWorkspaces).toEqual([expect.objectContaining({ name: "Legal Contracts", slug: "legal-contracts", autoNamed: false })]);
   });
 
+  it("self-titles a new workspace when the upload names it with the untitled placeholder", async () => {
+    const fakes = createWorkspaceIntakeFakes();
+    await intakeIntoWorkspace(request({ workspace: "Untitled workspace", items: [bytesItem("lease_2026.txt")] }), fakes.ports);
+    expect(fakes.createdWorkspaces).toEqual([expect.objectContaining({ name: "Lease 2026", autoNamed: true })]);
+  });
+
+  it("re-titles an existing workspace from the upload batch but not one it just created", async () => {
+    const fakes = createWorkspaceIntakeFakes({ workspaces: [fakeWorkspace({ id: "ws-untitled", name: "Untitled workspace", slug: "untitled-workspace" })] });
+    const nameFromUpload = vi.fn(async () => "Lease 2026 + 1 more");
+    fakes.ports.records.nameFromUpload = nameFromUpload;
+    const appended = await intakeIntoWorkspace(
+      request({ workspace: "untitled-workspace", newWorkspace: undefined, items: [bytesItem("lease_2026.txt"), bytesItem("rider.txt")] }),
+      fakes.ports,
+    );
+    expect(nameFromUpload).toHaveBeenCalledExactlyOnceWith({ workspaceId: "ws-untitled", filenames: ["lease_2026.txt", "rider.txt"] });
+    expect(appended?.workspace.name).toBe("Lease 2026 + 1 more");
+
+    nameFromUpload.mockClear();
+    await intakeIntoWorkspace(request(), fakes.ports);
+    expect(nameFromUpload).not.toHaveBeenCalled();
+  });
+
+  it("keeps a committed upload when re-titling fails", async () => {
+    const fakes = createWorkspaceIntakeFakes({ workspaces: [fakeWorkspace({ id: "ws-untitled", name: "Untitled workspace", slug: "untitled-workspace" })] });
+    fakes.ports.records.nameFromUpload = vi.fn(async () => { throw new Error("db down"); });
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    const result = await intakeIntoWorkspace(request({ workspace: "untitled-workspace", newWorkspace: undefined }), fakes.ports);
+    expect(result?.workspace.name).toBe("Untitled workspace");
+    expect(result?.run).toBeTruthy();
+    errors.mockRestore();
+  });
+
   it("appends to the workspace a name, slug or differently formatted name matches instead of creating another", async () => {
     const fakes = createWorkspaceIntakeFakes();
     const created = await intakeIntoWorkspace(request({ workspace: "Legal Contracts" }), fakes.ports);
