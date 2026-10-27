@@ -38,7 +38,7 @@ node scripts/multisearch-quality/score.mjs \
 
 The runner makes one request per case, does not reuse sessions or retry, records explicit execution provenance, stops after a transport/HTTP failure, and returns nonzero for failure or an incomplete batch. The scorer evaluates **all planned gold cases**, counts missing records as failures, rejects duplicate/unplanned records, separates execution kinds, refuses output overwrites and returns nonzero if any case fails. Both commands are gates; do not ignore a failed runner because some answers looked useful. Preserve original failures and costs; retries are new observations.
 
-Before promotion, run the separate integrity judge against an external authored/source-derived dataset manifest with hashed source/labels and provenance, as specified in `docs/evaluation-integrity.md`. Keep development and confirmation splits separate. Optional Langfuse sync is `scripts/eval-sync/langfuse.mjs`; it stores datasets, not model experiments or quality scores.
+Before promotion, run the separate integrity judge against an external authored/source-derived dataset manifest with hashed source/labels and provenance, as specified in `docs/evaluation-integrity.md`. Keep development and confirmation splits separate. Optional Langfuse sync is `scripts/eval-sync/langfuse.mjs` (see `docs/evals/langfuse-sync.md`). It stores these datasets and the `agentcap-v1.*` score configs. Scored runs are uploaded only from a real run manifest; no experiment or score is created from these authored cases alone.
 
 ## Controlled fault cases are a separate suite
 
