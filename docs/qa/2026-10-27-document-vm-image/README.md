@@ -2,6 +2,13 @@
 
 This image packages the actual WebP program and layout guest from campaign `03aa2c4` (including `cfd32f3`). **Containers validate packaging only; no production VM, isolation proof, registry publication, deployment or paid resource was used.** The campaign remains subject to council review and human merge approval.
 
+Current publication status: the parent successfully copied the exact reviewed
+OCI archive to GHCR after user-completed OAuth consent. Raw remote image/index
+bytes match the original archive. The package is **private**; no visibility change
+occurred. Keyless signing is pending, and no VM was launched. The initial $0.05 TOTAL
+admission failed; the user has since raised the aggregate cap to $20. The parent
+architect is reassessing a defensible bound before VM admission. See [the publication success receipt](publication-success.md).
+
 ## Reproduce
 
 From the OSS repository, with Docker, Buildx, Python 3 and a configured `uv` executable:
@@ -64,13 +71,14 @@ Source weights/config/README and generated graph are Apache-2.0 under the upstre
 
 Official [Modal pricing](https://modal.com/pricing), checked 2026-10-27, lists **Sandbox non-preemptible** CPU $0.00003942 per physical core-second and memory $0.00000667 per GiB-second (3× standard rates). At 2 cores + 1 GiB, the allocation is $0.00008551/s = $0.307836/hour. One 30–60 s attempt is $0.002565–$0.005131 compute; the 60 s ceiling is about $0.00898 with a 1.75× regional factor. Treat actual availability/quota, chosen region, image import/startup billing, VM-runtime applicability and provider billing minimums as unverified until an authorized preflight. No credits are assumed.
 
-The user subsequently authorized **$0.05 TOTAL for exact-image publication and one synthetic VM, no retries**, with 60 s guest expiry and a stop condition for unbounded import/startup/storage costs. The parent publication attempt was denied, and the total-cost admission gate remains blocked; see [the operational attempt](operational-attempt.md). Guest expiry does not prove an import/provisioning or retained-storage charge ceiling. Unchanged allocation exposure: +1 hour $0.307836; +5 hours $1.53918; 24 hours $7.388064, before regional multipliers. No persistent volume is planned. Public dependency downloads incurred no API/model/cloud compute charge; registry storage/import and transfer charges remain unverified. Listed egress is $0.04/GiB before included allowance: 10 MiB output would be approximately $0.000391. Uploading/publishing the image is a separate unauthorized action.
+The user subsequently authorized **$0.05 TOTAL for exact-image publication and one synthetic VM, no retries**, with 60 s guest expiry and a stop condition for unbounded import/startup/storage costs. The first parent publication attempt was denied; the authorized retry succeeded after OAuth consent. The historical $0.05 admission failed. The subsequent $20 aggregate authorization
+is recorded separately, with parent cost-bound reassessment pending; see [the success receipt](publication-success.md) and [the original operational attempt](operational-attempt.md). Guest expiry does not prove an import/provisioning or retained-storage charge ceiling. Unchanged allocation exposure: +1 hour $0.307836; +5 hours $1.53918; 24 hours $7.388064, before regional multipliers. No persistent volume is planned. Public dependency downloads incurred no API/model/cloud compute charge; registry storage/import and transfer charges remain unverified. Listed egress is $0.04/GiB before included allowance: 10 MiB output would be approximately $0.000391. Uploading/publishing the image is a separate unauthorized action.
 
 ## Pending external actions
 
 1. Council/provenance/license review and human owner merge approval for this supporting PR and the campaign.
-2. Exact-image publication is authorized, but the parent ORAS attempt was denied for insufficient GHCR scopes; OAuth package consent is pending. After access is resolved, verify the approved destination, manifest digest and signatures/attestations without rebuilding the image.
-3. One synthetic real `runtime:"vm"` smoke is authorized only within the $0.05 TOTAL cap. Admission remains blocked because import/provisioning/startup/cache storage bounds are unavailable and environment budgets exclude storage/network. Do not use `Image.build` or `create` as a workaround. Containers do not establish the VM boundary.
+2. Exact-image publication succeeded after OAuth consent. Remote image/index bytes match the reviewed archive and preserve its attestation index; the GHCR package remains private. Keyless registry signing/policy review is pending; no rebuild or visibility change occurred.
+3. The user replaced the $0.05 cap with $20 aggregate for publication/import/startup/storage and one synthetic `runtime:"vm"` smoke, still one VM, 60-second expiry, no retries and no deployment. The parent architect is reassessing a defensible cost bound; no VM has launched or admission clearance been reported. This evidence task has no execution authority. Containers do not establish the VM boundary.
 4. After publication/approval, configure `DOCSLURP_DOCUMENT_VM_IMAGE=<approved-repository>@sha256:66a14b948cd0eca3d8ac7869e90cf8dfd5a0987508dca0b65ac0cb269952cd21` plus explicit CPU model/revision/bundle/profile pins from `manifest.json`. Keep routing off until then; no deployment/environment was changed.
 
 The first exploratory export emitted an optimizer missing-dependency warning and attempted an implicit pip installation that failed because pip was absent (`initial-export-warning.txt`). The final exporter explicitly disables optional optimization/automatic opset changes, uses the complete hash lock, and makes no such implicit installation. Both exports produced the same graph hash; the final scripted run and checked eight-file bundle reproduced successfully.
@@ -79,4 +87,4 @@ The concrete [publication and one-VM smoke proposal](publication-smoke-plan.md) 
 
 The independent-review [repair delta](review-repairs.md) adds attestation binding, tested rootfs/config equality, source admission before native conversion and unique-name timeout cleanup. The existing OCI passed the strengthened inspector without rebuild; see `image-integrity-tests.log`. `cleanup-receipt.json` records task cleanup, including any old unprivileged guest-cache directories blocked by host permissions.
 
-Current operational status is recorded in [operational-attempt.md](operational-attempt.md) and `publication-attempt.json`: exact-image publication and one synthetic VM were authorized conditionally, GHCR denied the attempted copy, and the aggregate VM cost bound remains unproven. No image publication or VM launch succeeded.
+The original denied attempt remains in [operational-attempt.md](operational-attempt.md) and `publication-attempt.json`. Subsequent authorized publication succeeded; [publication-success.md](publication-success.md) and `publication-success.json` record the verified remote hashes and private visibility. No VM launched, keyless signing is pending, and the parent is reassessing a defensible bound under the new $20 aggregate authorization. See [budget-authorization.md](budget-authorization.md); the historical $0.05 failure remains preserved.

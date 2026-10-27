@@ -1,0 +1,33 @@
+{
+  "recordedAtUtc": "2026-10-27T16:57:19.300587+00:00",
+  "source": "User latest authorization relayed in this thread: allow $20",
+  "previousTotalCapUsd": 0.05,
+  "currentAggregateTotalCapUsd": 20,
+  "scope": [
+    "exact reviewed image publication",
+    "image import",
+    "provisioning/startup",
+    "storage",
+    "one synthetic Modal VM smoke",
+    "associated network costs"
+  ],
+  "constraints": {
+    "maximumVmCount": 1,
+    "sandboxExpirySeconds": 60,
+    "retries": 0,
+    "deploymentAuthorized": false,
+    "imageRebuildAuthorized": false
+  },
+  "admission": {
+    "status": "parent architect reassessing a defensible aggregate upper bound",
+    "revisedBoundEstablished": false,
+    "vmLaunched": false,
+    "historical005AdmissionFailurePreserved": true
+  },
+  "delegation": {
+    "thisImplementationAgent": "documentation evidence only",
+    "credentialAccessAuthorized": false,
+    "publicationExecutionAuthorized": false,
+    "vmExecutionAuthorized": false
+  }
+}

@@ -1,5 +1,9 @@
 # Authorized publication attempt and blocked VM admission
 
+Historical first attempt: subsequently superseded for registry publication by
+[the successful authorized copy](publication-success.md). The denial below is
+preserved as history; its separate VM cost-admission blocker remains unresolved.
+
 Recorded 2026-10-27 from the parent's operational report and supplied sanitized
 log. This update performed documentation work only: no credential access,
 publication attempt, image build, VM launch or model call.
@@ -25,7 +29,8 @@ No image/tag publication succeeded. The log prints an attempted config-copy line
 but does not confirm an uploaded blob; no completed partial upload is claimed.
 The parent reports removing the temporary auth JSON and requesting GitHub OAuth
 `write:packages` device consent. No consent result or new credential inspection
-is recorded in this update. Registry access remains a blocker.
+is recorded in this first-attempt update. Registry access was the blocker at
+this attempt; the later success receipt records its resolution.
 
 The supplied log at
 `/home/dan/tmp/agents/council-image-publish.8_gz59o4/publication.log` is preserved
