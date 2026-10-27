@@ -1,6 +1,6 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import type postgres from "postgres";
-import { updateOrganizationSchema, type InvitePreview, type OrganizationAccess, type OrganizationDetails, type OrganizationMember, type UpdateOrganizationInput } from "@docslurp/shared";
+import { updateOrganizationMfaPolicySchema, updateOrganizationSchema, type UpdateOrganizationMfaPolicyInput, type InvitePreview, type OrganizationAccess, type OrganizationDetails, type OrganizationMember, type UpdateOrganizationInput } from "@docslurp/shared";
 
 import {
   createOrganizationInviteSchema,
@@ -1106,4 +1106,50 @@ export async function acceptWorkspaceInvite(token: string, userId: string): Prom
   `;
 
   return mapWorkspaceMember(row);
+}
+
+export interface OrganizationMfaPolicy {
+  orgId: string;
+  requireMfa: boolean;
+  gracePeriodDays: number;
+  /** When the requirement was turned on; members' grace periods start here (or when they join). */
+  requireMfaSince: string | null;
+  members: number;
+  /** Members with TOTP 2FA on or at least one passkey. */
+  membersWithMfa: number;
+}
+
+/** The org's "require MFA for members" policy, readable by any member. */
+export async function getOrganizationMfaPolicy(orgId: string, userId: string): Promise<OrganizationMfaPolicy> {
+  await getOrganizationAccess(orgId, userId);
+  const [row] = await sql<{ require_mfa: boolean; mfa_grace_period_days: number; require_mfa_since: string | null; members: number; members_with_mfa: number }[]>`
+    select o.require_mfa, o.mfa_grace_period_days, o.require_mfa_since::text,
+      (select count(*)::int from org_memberships m where m.org_id = o.id) as members,
+      (select count(*)::int from org_memberships m join "user" u on u.id = m.user_id
+        where m.org_id = o.id and (u."twoFactorEnabled" or exists (select 1 from passkey p where p."userId" = u.id))) as members_with_mfa
+    from organizations o where o.id = ${orgId}`;
+  if (!row) throw new OrganizationError(404, "organization_not_found", "Organization not found");
+  return { orgId, requireMfa: row.require_mfa, gracePeriodDays: row.mfa_grace_period_days, requireMfaSince: row.require_mfa_since, members: row.members, membersWithMfa: row.members_with_mfa };
+}
+
+/**
+ * Turns the policy on or off (owners and admins). The admin must themselves be
+ * on an MFA-verified session, so nobody can impose a requirement they could
+ * not meet, and personal organizations have no members to require it of.
+ */
+export async function updateOrganizationMfaPolicy(orgId: string, userId: string, input: UpdateOrganizationMfaPolicyInput, session: { mfaVerified: boolean }): Promise<OrganizationMfaPolicy> {
+  const parsed = updateOrganizationMfaPolicySchema.parse(input);
+  await withOrganizationLock(orgId, userId, async (tx, actor, personal) => {
+    if (!organizationCapabilities(actor.role).update) throw new OrganizationError(403, "organization_forbidden", "Organization admin access required");
+    if (personal) throw new OrganizationError(409, "personal_organization", "Personal organizations have no members to require MFA of");
+    if (!session.mfaVerified) throw new OrganizationError(403, "mfa_required", "Turn on two-factor authentication (or sign in with a passkey) before requiring it for members");
+    await tx`update organizations set
+        require_mfa = ${parsed.requireMfa},
+        require_mfa_since = case when ${parsed.requireMfa} then coalesce(require_mfa_since, now()) else null end,
+        mfa_grace_period_days = coalesce(${parsed.gracePeriodDays ?? null}::integer, mfa_grace_period_days),
+        updated_at = now()
+      where id = ${orgId}`;
+    await auditOrganization(tx, orgId, userId, "organization.mfa_policy_updated", parsed);
+  });
+  return await getOrganizationMfaPolicy(orgId, userId);
 }
