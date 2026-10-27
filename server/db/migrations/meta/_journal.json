@@ -628,6 +628,20 @@
     {
       "idx": 89,
       "version": "7",
+      "when": 1792792800400,
+      "tag": "0089_cli_oauth_device",
+      "breakpoints": true
+    },
+    {
+      "idx": 90,
+      "version": "7",
+      "when": 1792792800500,
+      "tag": "0090_client_key_wildcard_domains",
+      "breakpoints": true
+    },
+    {
+      "idx": 91,
+      "version": "7",
       "when": 1792792800600,
       "tag": "0091_passkey_two_factor",
       "breakpoints": true

@@ -1,5 +1,5 @@
 import type { MiddlewareHandler } from "hono";
-import { resolveApiKeyActor, setRequestActor } from "../lib/request-actor.js";
+import { ApiKeyPolicyError, resolveApiKeyActor, setRequestActor } from "../lib/request-actor.js";
 import { MCP_SCOPES, mcpOrigin, mcpResource, validateMcpToken } from "../services/mcp-oauth.js";
 import { enforceAuthenticatedApiRateLimit } from "./rate-limit.js";
 
@@ -27,7 +27,14 @@ export const mcpAuth: MiddlewareHandler = async (c, next) => {
   const header = c.req.header("Authorization");
   const token = bearerToken(header);
   const key = token.startsWith("dsmcp_") ? await validateMcpToken(token, mcpResource(c.req.url)) : null;
-  const actor = key ? { type: "apiKey" as const, userId: key.userId, apiKey: key } : token && !token.startsWith("dsmcp") ? await resolveApiKeyActor(`Bearer ${token}`, { origin: c.req.header("origin"), referer: c.req.header("referer") }) : null;
+  let actor;
+  try {
+    actor = key ? { type: "apiKey" as const, userId: key.userId, apiKey: key } : token && !token.startsWith("dsmcp") ? await resolveApiKeyActor(`Bearer ${token}`, { origin: c.req.header("origin"), referer: c.req.header("referer") }) : null;
+  } catch (error) {
+    // Browser keys never reach MCP; a legacy one without workspaces is refused like any browser key.
+    if (!(error instanceof ApiKeyPolicyError)) throw error;
+    return c.json({ error: "A server API key is required" }, 403);
+  }
   if (!actor) {
     c.header("WWW-Authenticate", mcpBearerChallenge(c.req.url, Boolean(header)));
     return c.json({ error: "Unauthorized" }, 401);

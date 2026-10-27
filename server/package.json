@@ -11,6 +11,7 @@
     }
   },
   "scripts": {
+    "psl:update": "node scripts/update-public-suffix-list.mjs",
     "dev": "tsx watch src/main.ts",
     "start": "tsx src/main.ts",
     "typecheck": "pnpm --filter @docslurp/shared build && pnpm --filter @docslurp/sdk build && tsc -p tsconfig.json --noEmit",

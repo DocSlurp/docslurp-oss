@@ -625,8 +625,19 @@ export const visionModelCatalog = [
     runtime: "openai-compatible",
     description:
       "Open-weights (MIT) DeepSeek multimodal snapshot via US-hosted providers; Markdown/LaTeX page transcription.",
+    // Measured 0.103 cents per page (2026-10-22 select split, docs/model-configuration.md). The token prices are the
+    // pinned US route's (Together, Fireworks, Parasail: $0.30/$1.20 per 1M, OpenRouter endpoints checked 2026-10-26),
+    // not the $0.15/$0.60 model list price, which is DeepSeek's own China-hosted endpoint and is never used. At list
+    // price the SELF_HOSTED_PAGE_TOKENS formula gave 0.0705 cents, 32% under the measurement (the 2026-10-26 margin
+    // audit); at the route price it gives 0.141 cents, a conservative bound for flat-tier eligibility.
     estimatedCostPerPageCents: 0.103,
-    tokenPricing: { inputUsdPerMillion: 0.15, outputUsdPerMillion: 0.6, checked: "2026-10-25" },
+    tokenPricing: {
+      inputUsdPerMillion: 0.3,
+      outputUsdPerMillion: 1.2,
+      checked: "2026-10-26",
+      basis: "pinned-route",
+      providers: ["together", "fireworks", "parasail"],
+    },
   },
   {
     id: "xiaomi/mimo-v2.6-flash",
@@ -709,7 +720,17 @@ export const visionModelCatalogByUri = Object.fromEntries(
   visionModelCatalog.map((entry) => [entry.uri, entry]),
 ) as Record<string, VisionModelPreset>;
 
-export type VisionTokenPricing = { inputUsdPerMillion: number; outputUsdPerMillion: number; checked: string };
+export type VisionTokenPricing = {
+  inputUsdPerMillion: number;
+  outputUsdPerMillion: number;
+  checked: string;
+  /**
+   * `pinned-route`: the highest price among the OpenRouter providers the model's vision profile pins with fallbacks off
+   * (`providers`), used when that route costs more than the model's list price. Absent: the OpenRouter list price.
+   */
+  basis?: "pinned-route";
+  providers?: readonly string[];
+};
 
 /** List token price of a cataloged hosted vision model (by id or `llm://` URI); null for local or unknown models. */
 export function visionModelTokenPricing(idOrUri: string): VisionTokenPricing | null {

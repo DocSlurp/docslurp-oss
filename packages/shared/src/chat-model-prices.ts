@@ -8,12 +8,12 @@
  * always wins. These prices only estimate a call whose receipt is missing, and
  * gate eval models: an eval model without a verified price here is refused.
  */
-export const CHAT_MODEL_PRICES_CHECKED = "2026-10-25";
+export const CHAT_MODEL_PRICES_CHECKED = "2026-10-26";
 
 export const CHAT_MODEL_PRICES_USD_PER_MTOK: Readonly<Record<string, { input: number; output: number }>> = {
   "z-ai/glm-5.3-flash": { input: 0.15, output: 0.5 },
   "anthropic/claude-haiku-5.5": { input: 0.1, output: 0.5 },
-  "deepseek/deepseek-v4.1-flash": { input: 0.02, output: 1 },
+  "deepseek/deepseek-v4.1-flash": { input: 0.14, output: 0.42 },
   "deepseek/deepseek-v4.1-flash-1017": { input: 0.15, output: 0.6 },
   "openai/gpt-6.1-sol": { input: 2, output: 10 },
   "openai/gpt-6-luna": { input: 0.1, output: 0.5 },

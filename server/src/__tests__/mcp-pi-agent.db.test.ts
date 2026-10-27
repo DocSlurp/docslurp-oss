@@ -42,7 +42,7 @@ vi.mock("../lib/request-actor.js", async (importOriginal) => ({
     ? { type: "session", userId: "owner", sessionId: "sess", user: { id: "owner" } }
     : null,
 }));
-vi.mock("../middleware/rate-limit.js", () => ({ enforceAuthenticatedApiRateLimit: async () => null }));
+vi.mock("../middleware/rate-limit.js", () => ({ enforceAuthenticatedApiRateLimit: async () => null, enforceActorCategoryRateLimit: async () => null }));
 vi.mock("../services/mcp-tools.js", async (importOriginal) => ({
   ...await importOriginal<typeof import("../services/mcp-tools.js")>(),
   createMcpDispatcher: (actor: { apiKey: { keyId: string } }) => async (path: string, init?: RequestInit) => {

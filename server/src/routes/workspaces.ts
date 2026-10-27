@@ -35,7 +35,7 @@ import {
 } from "@docslurp/shared";
 
 import { chatModelRefused, ChatModelNotAllowedError } from "../lib/chat-model-policy.js";
-import { actorHasAnyApiKeyScope, getRequestActor, apiKeyCanUseWorkspace, loadActorScopedWorkspace, type RequestActor } from "../lib/request-actor.js";
+import { actorHasAnyApiKeyScope, getRequestActor, apiKeyCanUseWorkspace, isFirstPartyAppActor, loadActorScopedWorkspace, type RequestActor } from "../lib/request-actor.js";
 import { requestIp, requestUserAgent } from "../lib/request-context.js";
 import { isWorkspaceChatAgent } from "../lib/mastra.js";
 import { chatVoiceRoutes } from "./chat-voice.js";
@@ -164,19 +164,20 @@ type WorkspaceChatPostBody = {
   filters?: unknown;
   /** Composer web toggle: web tools for this turn. Default off. */
   webTools?: unknown;
-  /** Composer suggestions toggle. Default on for the signed-in app, off for API keys. */
+  /** Composer suggestions toggle. Default on for the signed-in app; API keys never get it. */
   suggestions?: unknown;
 };
 
 /**
  * Agent modes from the composer toggles. Web tools are off unless the user
  * turns them on. Suggestions mode is on for the signed-in app unless switched
- * off, and opt-in for API keys calling these routes, matching /v1/chat.
+ * off; it is a first-party-app capability, so API keys calling these routes
+ * never get it, whatever they send.
  */
 function composerAgentModes(body: { webTools?: unknown; suggestions?: unknown }, actor: RequestActor) {
   return {
     web: body.webTools === true,
-    suggestions: actor.type === "session" ? body.suggestions !== false : body.suggestions === true,
+    suggestions: isFirstPartyAppActor(actor) && body.suggestions !== false,
   };
 }
 
@@ -1719,4 +1720,4 @@ export const workspacesRoutes = new Hono()
   );
 
 // Workspace reads and rename/settings updates (the PATCH requires workspaces:manage).
-acceptApiKeys(workspacesRoutes, ["POST /:workspaceId/settings-proposals/apply", "GET /", "GET /:workspaceId", "GET /:workspaceId/tags", "GET /:workspaceId/state", "GET /:workspaceId/ingest-report", "POST /:workspaceId/ingest-report/apply", "POST /:workspaceId/ingest-report/reprocess", "POST /:workspaceId/documents/bulk/estimate", "PATCH /:workspaceId", "POST /:workspaceId/estimate", "POST /:workspaceId/full-index", "POST /:workspaceId/full-index/estimate", "POST /:workspaceId/indexing-mode/estimate"]);
+acceptApiKeys(workspacesRoutes, ["GET /", "GET /:workspaceId", "GET /:workspaceId/tags", "GET /:workspaceId/state", "GET /:workspaceId/ingest-report", "POST /:workspaceId/ingest-report/apply", "POST /:workspaceId/ingest-report/reprocess", "POST /:workspaceId/documents/bulk/estimate", "PATCH /:workspaceId", "POST /:workspaceId/estimate", "POST /:workspaceId/full-index", "POST /:workspaceId/full-index/estimate", "POST /:workspaceId/indexing-mode/estimate"]);
