@@ -283,9 +283,15 @@ describe("chatWorkspace", () => {
       const first = await chatWorkspace({ workspaceId: "ws-1", userId: "user-1", query: "hello", history: [], actor: visitor });
       expect(first.sessionToken).toEqual(expect.any(String));
       sqlMock.mockClear();
-      // Another visitor who learned the session id cannot continue (or read) it.
-      await expect(chatWorkspace({ workspaceId: "ws-1", userId: "user-1", query: "what did they ask?", history: [], actor: visitor, sessionId: first.sessionId }))
-        .rejects.toMatchObject({ status: 403, code: "chat_session_forbidden" });
+      // A session id with no grant (another visitor, or a pre-grant widget) starts a fresh
+      // session: the old one is never looked up or read, and the answer carries a new grant.
+      const fresh = await chatWorkspace({ workspaceId: "ws-1", userId: "user-1", query: "what did they ask?", actor: visitor, sessionId: first.sessionId });
+      expect(fresh.sessionId).not.toBe(first.sessionId);
+      expect(fresh.sessionToken).toEqual(expect.any(String));
+      // No query ever received the old session's id (no lookup, no history read).
+      expect(sqlMock.mock.calls.flat().includes(first.sessionId)).toBe(false);
+      sqlMock.mockClear();
+      // A tampered grant is refused before anything is read.
       await expect(chatWorkspace({ workspaceId: "ws-1", userId: "user-1", query: "again", history: [], actor: visitor, sessionId: first.sessionId, sessionToken: `${first.sessionToken}x` }))
         .rejects.toMatchObject({ code: "chat_session_forbidden" });
       expect(sqlMock).not.toHaveBeenCalled();

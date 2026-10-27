@@ -6,7 +6,7 @@ import type { PrivacyMode } from "@docslurp/shared";
 import { env } from "../config.js";
 import type { RequestActor } from "../lib/request-actor.js";
 import { isFirstPartyAppActor } from "../lib/first-party-app.js";
-import { assertChatSessionGrant, requiresChatSessionToken, sealChatSessionToken } from "../lib/chat-session-tokens.js";
+import { chatSessionForRequest, requiresChatSessionToken, sealChatSessionToken } from "../lib/chat-session-tokens.js";
 import type { ChatToolActivity } from "./chat-mcp-tools.js";
 import {
   configureSearchFromChat,
@@ -1088,7 +1088,7 @@ async function chatWorkspaceInTurn(args: {
   // The key's chat output cap (browser keys default to 1000) bounds the model's max output, whatever the request asks.
   args = { ...args, maxOutputTokens: capOutputTokens(args.maxOutputTokens, apiKeyOutputCap(args.actor)) };
   // Browser-key visitors share the key owner's identity: a session id alone never continues a conversation.
-  assertChatSessionGrant(args.actor, { workspaceId: args.workspaceId, sessionId: args.sessionId, sessionToken: args.sessionToken });
+  args = { ...args, sessionId: chatSessionForRequest(args.actor, { workspaceId: args.workspaceId, sessionId: args.sessionId, sessionToken: args.sessionToken }) };
   // Enforced here too so every caller (routes, MCP, automation) honours the switch.
   if (!(await isWorkspaceChatEnabled(args.workspaceId, args.userId))) throw new WorkspaceChatDisabledError();
   // An explicit model is honoured exactly or refused (400), never silently swapped for the default.

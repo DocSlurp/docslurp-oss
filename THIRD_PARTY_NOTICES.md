@@ -181,4 +181,5 @@ sections) by `server/scripts/update-public-suffix-list.mjs`. The list is
 licensed under the Mozilla Public License 2.0; the generated file keeps the MPL
 notice, and the list version and commit are recorded in its header. It is used
 only as data, to refuse browser-key allowed websites that are shared public
-suffixes. Refresh it by running the script and committing the result.
+suffixes. Refresh it monthly (and before a release that touches browser-key
+website checks) with `pnpm psl:update`, then commit the result.
