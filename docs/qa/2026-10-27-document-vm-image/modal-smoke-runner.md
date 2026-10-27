@@ -15,10 +15,10 @@ imported an image or created a VM. Production's 60-second executor is unchanged.
 - `scripts/document-vm/guest_smoke.py`: trusted synthetic helper staged only in
   `/job`; it copies assets into `/job/tampered` for refusal tests and never writes
   canonical assets.
-- `scripts/document-vm/test_modal_smoke.py`: seven mock-only test methods.
+- `scripts/document-vm/test_modal_smoke.py`: ten mock-only test methods.
 - `modal-smoke-plan.json`: actual default-plan output, including runner bundle
   fingerprint for two independent reviews.
-- `modal-smoke-dry-validation.log`: all 13 preparation/integrity/mock tests pass.
+- `modal-smoke-dry-validation.log`: all 16 preparation/integrity/mock tests pass.
 
 The Python adapter follows the reviewed campaign's fixed image, `env -i`, hard
 CPU/memory limits, mandatory identity, bounded streams, absolute control deadline,
@@ -48,12 +48,21 @@ Before coordinator execution, obtain two independent approvals for the exact
 runner fingerprint and image, including an adversarial reviewer. Fill a separate
 review JSON from `modal-smoke-reviews.template.json`; its pending decisions
 intentionally fail the execution gate. Source changes invalidate the fingerprint.
-The parent also owns package/public pull and signing-policy readiness; pending
-GHCR browser/Actions access is not bypassed with registry credentials or a rebuild.
+The coordinator may privately supply process variable `GH_CONTAINER_REGISTRY_TOKEN`
+for private image pull: it becomes an ephemeral `modal.Secret.from_dict` attached
+only to `Image.from_registry(secret=...)`, username `justsml`. No browser/public
+visibility change is needed. The parent verified the exact remote digest; VM QA
+may proceed on that digest after delta review. Signing remains a release gate,
+not a VM QA gate; no signing action or image rebuild is performed by this runner.
 
 Use the same Python interpreter/environment that owns the coordinator's
 authenticated Modal CLI **1.6.2**, optionally selecting its existing profile via
-`MODAL_PROFILE`. Credentials stay on the coordinator; no `.env` is parsed or copied.
+`MODAL_PROFILE`. Profile credentials stay on the coordinator. The separately authorized GHCR PAT
+may be sent only to Modal image-import authentication, never to the guest. The
+runner consumes/removes that process variable and never parses or copies `.env`.
+Sandbox/exec secrets and env remain empty; no persistent named Secret is created.
+SDK pull/create diagnostics are discarded and exceptions use fixed safe text,
+so token-bearing provider errors do not enter logs or receipts.
 After reviews and parent readiness, the coordinator's concrete invocation is:
 
 ```sh

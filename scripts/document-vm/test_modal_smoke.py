@@ -1,12 +1,16 @@
 """Mock-only smoke orchestration: no SDK import, credentials, Docker or network."""
 import asyncio
 import copy
+import contextlib
+import io
 import json
+import logging
 from pathlib import Path
 import sys
 import tempfile
 import unittest
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock, patch
 
 sys.path.insert(0, str(Path(__file__).parent))
 import modal_smoke as smoke
@@ -115,6 +119,71 @@ class OneShotTests(unittest.IsolatedAsyncioTestCase):
             raise AssertionError('Should stop before reading more')
         with self.assertRaisesRegex(ValueError, 'stream limit'):
             await smoke.bounded_stream(stream(), 10)
+
+
+class RegistryCredentialTests(unittest.IsolatedAsyncioTestCase):
+    def setup_backend(self, create_error=None):
+        async def empty():
+            if False: yield b''
+        child = SimpleNamespace(stdout=empty(), stderr=empty(), wait=SimpleNamespace(aio=AsyncMock(return_value=0)))
+        vm = SimpleNamespace(object_id='sb-registry-mock-only', exec=SimpleNamespace(aio=AsyncMock(return_value=child)),
+            filesystem=SimpleNamespace(make_directory=SimpleNamespace(aio=AsyncMock()), write_bytes=SimpleNamespace(aio=AsyncMock())))
+        sdk = SimpleNamespace(Secret=SimpleNamespace(from_dict=Mock(return_value=object())),
+            Image=SimpleNamespace(from_registry=Mock(return_value=object())),
+            Sandbox=SimpleNamespace(create=SimpleNamespace(aio=AsyncMock(return_value=vm))))
+        if create_error is not None: sdk.Sandbox.create.aio.side_effect = create_error
+        backend = smoke.ModalBackend(); backend.modal = sdk; backend.app = object(); backend.client = object()
+        return backend, sdk, vm
+
+    async def test_pat_reaches_only_ephemeral_image_pull_secret_not_guest(self):
+        dummy = 'synthetic-registry-password-not-a-real-token'
+        backend, sdk, vm = self.setup_backend()
+        environment = {'GH_CONTAINER_REGISTRY_TOKEN': dummy}
+        with patch.object(smoke.os, 'environ', environment):
+            await backend.create('mock')
+        sdk.Secret.from_dict.assert_called_once_with({'REGISTRY_USERNAME': 'justsml', 'REGISTRY_PASSWORD': dummy})
+        sdk.Image.from_registry.assert_called_once_with(smoke.IMAGE, secret=sdk.Secret.from_dict.return_value)
+        kwargs = sdk.Sandbox.create.aio.call_args.kwargs
+        self.assertIs(kwargs['image'], sdk.Image.from_registry.return_value)
+        self.assertEqual(kwargs['secrets'], []); self.assertEqual(kwargs['env'], {})
+        self.assertEqual(kwargs['volumes'], {}); self.assertFalse(kwargs['include_oidc_identity_token'])
+        self.assertNotIn('GH_CONTAINER_REGISTRY_TOKEN', environment)
+        await backend.write(b'only synthetic bytes', '/job/input')
+        await backend.execute(['python3', '-I', '-c', 'pass'], 1, 16384)
+        self.assertEqual(vm.exec.aio.call_args.kwargs['secrets'], [])
+        self.assertEqual(vm.exec.aio.call_args.kwargs['env'], {})
+        self.assertNotIn(dummy, repr(vm.exec.aio.call_args))
+        self.assertNotIn(dummy, repr(vm.filesystem.write_bytes.aio.call_args))
+        self.assertNotIn(dummy, json.dumps(smoke.LIMITS))
+
+    async def test_absent_token_anonymous_and_empty_token_refuses_without_fallback(self):
+        backend, sdk, _ = self.setup_backend()
+        with patch.object(smoke.os, 'environ', {}): await backend.create('mock')
+        sdk.Secret.from_dict.assert_not_called(); sdk.Image.from_registry.assert_called_once_with(smoke.IMAGE)
+        backend, sdk, _ = self.setup_backend()
+        with patch.object(smoke.os, 'environ', {'GH_CONTAINER_REGISTRY_TOKEN': ''}):
+            with self.assertRaises(RuntimeError): await backend.create('mock')
+        sdk.Image.from_registry.assert_not_called(); sdk.Sandbox.create.aio.assert_not_called()
+
+    async def test_provider_token_diagnostics_and_error_never_reach_logs_or_receipts(self):
+        dummy = 'synthetic-secret-diagnostic-not-real'
+        async def denied(*args, **kwargs):
+            print(dummy); print(dummy, file=sys.stderr); logging.warning(dummy)
+            raise RuntimeError(dummy)
+        backend, sdk, _ = self.setup_backend(denied)
+        async def initialize(app): pass
+        backend.initialize = initialize
+        console, errors = io.StringIO(), io.StringIO()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with patch.object(smoke.os, 'environ', {'GH_CONTAINER_REGISTRY_TOKEN': dummy}), contextlib.redirect_stdout(console), contextlib.redirect_stderr(errors):
+                state = await smoke.run_smoke(backend, root / 'output', root / 'attempt.lock', 'mock', cleanup_seconds=.02)
+            self.assertEqual(state['errorClass'], 'RuntimeError')
+            self.assertEqual(sdk.Sandbox.create.aio.call_count, 1)
+            self.assertEqual(sdk.Image.from_registry.call_count, 1)
+            for path in root.rglob('*'):
+                if path.is_file(): self.assertNotIn(dummy.encode(), path.read_bytes())
+        self.assertNotIn(dummy, console.getvalue()); self.assertNotIn(dummy, errors.getvalue())
 
 
 class PreflightTests(unittest.TestCase):

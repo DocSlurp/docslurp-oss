@@ -11,8 +11,11 @@ test_lost_create_and_stuck_cleanup_are_not_claimed_complete (test_modal_smoke.On
 test_work_failure_and_deadline_never_recreate (test_modal_smoke.OneShotTests.test_work_failure_and_deadline_never_recreate) ... ok
 test_plan_never_imports_sdk_and_profile_auth_is_lazily_selected (test_modal_smoke.PreflightTests.test_plan_never_imports_sdk_and_profile_auth_is_lazily_selected) ... ok
 test_two_reviews_bind_exact_runner_and_image (test_modal_smoke.PreflightTests.test_two_reviews_bind_exact_runner_and_image) ... ok
+test_absent_token_anonymous_and_empty_token_refuses_without_fallback (test_modal_smoke.RegistryCredentialTests.test_absent_token_anonymous_and_empty_token_refuses_without_fallback) ... ok
+test_pat_reaches_only_ephemeral_image_pull_secret_not_guest (test_modal_smoke.RegistryCredentialTests.test_pat_reaches_only_ephemeral_image_pull_secret_not_guest) ... ok
+test_provider_token_diagnostics_and_error_never_reach_logs_or_receipts (test_modal_smoke.RegistryCredentialTests.test_provider_token_diagnostics_and_error_never_reach_logs_or_receipts) ... ok
 
 ----------------------------------------------------------------------
-Ran 13 tests in 0.842s
+Ran 16 tests in 0.847s
 
 OK

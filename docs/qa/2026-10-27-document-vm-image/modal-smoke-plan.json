@@ -1,6 +1,6 @@
 {
   "mode": "plan-only-no-sdk-import",
-  "runnerBundleSha256": "7391159d0ba2b8f885d3d373aa5ef4b31a019baf19f79382f5cdff105a658ef1",
+  "runnerBundleSha256": "81bc95247725bf547c67bb2060bc9ace01d499de622d06d2245594cd57e09ff4",
   "image": "ghcr.io/docslurp/worker-document-vm@sha256:66a14b948cd0eca3d8ac7869e90cf8dfd5a0987508dca0b65ac0cb269952cd21",
   "indexDigest": "sha256:fbbdd7f307ff8ccf49c3fd74e7fc448b5c4eda8878bfb1accf0920669b39b3ee",
   "request": {
@@ -36,5 +36,6 @@
   "retries": 0,
   "requiredReviews": 2,
   "productionExecutorSecondsUnchanged": 60,
+  "optionalRegistryCredential": "coordinator GH_CONTAINER_REGISTRY_TOKEN -> ephemeral Image.from_registry secret only; username justsml; never guest env/secrets",
   "providerUsage": "Per-sandbox billed usage unavailable in public SDK1.6.2; reconcile by captured ID/time, not shared account spend"
 }

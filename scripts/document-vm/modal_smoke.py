@@ -2,9 +2,11 @@
 """One authorized QA VM; default plan mode never imports Modal or authenticates."""
 import argparse
 import asyncio
+import contextlib
 import hashlib
 import importlib.metadata
 import json
+import logging
 import math
 import os
 from pathlib import Path
@@ -98,11 +100,36 @@ class ModalBackend:
         self.app = await modal.App.lookup.aio(app, client=self.client, create_if_missing=False)
 
     async def create(self, run_id):
-        self.vm = await self.modal.Sandbox.create.aio(
-            *ENV, 'python3', '-I', '-c', 'import time; time.sleep(1800)',
-            app=self.app, image=self.modal.Image.from_registry(IMAGE),
-            name='document-vm-smoke-' + run_id, tags={'docslurp-qa-run': run_id},
-            client=self.client, **LIMITS)
+        # Consume only this process variable. Never parse .env or put registry
+        # credentials in sandbox/exec env, secrets, mounts or evidence.
+        token = os.environ.pop('GH_CONTAINER_REGISTRY_TOKEN', None)
+        previous_logging = logging.root.manager.disable
+        try:
+            # SDK import/provisioning diagnostics can contain auth details.
+            # Discard them at source rather than retain raw logs for redaction.
+            logging.disable(logging.CRITICAL)
+            with open(os.devnull, 'w') as sink, contextlib.redirect_stdout(sink), contextlib.redirect_stderr(sink):
+                if token is not None:
+                    if not token or '\n' in token or '\r' in token:
+                        raise ValueError('Invalid registry credential')
+                    secret = self.modal.Secret.from_dict({'REGISTRY_USERNAME': 'justsml', 'REGISTRY_PASSWORD': token})
+                    image = self.modal.Image.from_registry(IMAGE, secret=secret)
+                    self.registry_auth_mode = 'ephemeral image-pull secret only'
+                else:
+                    image = self.modal.Image.from_registry(IMAGE)
+                    self.registry_auth_mode = 'anonymous registry pull'
+                self.vm = await self.modal.Sandbox.create.aio(
+                    *ENV, 'python3', '-I', '-c', 'import time; time.sleep(1800)',
+                    app=self.app, image=image,
+                    name='document-vm-smoke-' + run_id, tags={'docslurp-qa-run': run_id},
+                    client=self.client, **LIMITS)
+        except asyncio.CancelledError:
+            raise asyncio.CancelledError() from None
+        except Exception:
+            raise RuntimeError('Image pull or VM creation failed; provider diagnostics suppressed') from None
+        finally:
+            token = None
+            logging.disable(previous_logging)
         return self.vm.object_id
 
     async def write(self, data, path):
@@ -177,6 +204,7 @@ async def run_smoke(backend, output, attempt_lock, app, *, work_seconds=HOST_SEC
             if time.monotonic() >= deadline: raise TimeoutError('Host deadline before create')
             state['createInvocations'] = 1; state['createRequestedAt'] = now(); save()
             identifier = await backend.create(run_id)
+            state['registryAuthMode'] = getattr(backend, 'registry_auth_mode', 'mock or not reported')
             state['sandboxId'] = identifier; state['createReturnedAt'] = now(); save()
             return identifier
         creation = asyncio.create_task(create())
@@ -266,6 +294,7 @@ def plan():
             'request': REQUEST, 'limits': LIMITS, 'hostWorkDeadlineSeconds': HOST_SECONDS,
             'cleanupReserveSeconds': CLEANUP_SECONDS, 'aggregateAuthorizationUsd': 20, 'retries': 0,
             'requiredReviews': 2, 'productionExecutorSecondsUnchanged': 60,
+            'optionalRegistryCredential': 'coordinator GH_CONTAINER_REGISTRY_TOKEN -> ephemeral Image.from_registry secret only; username justsml; never guest env/secrets',
             'providerUsage': 'Per-sandbox billed usage unavailable in public SDK1.6.2; reconcile by captured ID/time, not shared account spend'}
 
 
