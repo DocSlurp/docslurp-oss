@@ -39,7 +39,8 @@ describe("hosted vision catalog", () => {
 
   it("catalogs the tuned opt-in models with list prices and never a Pro/Ultra or :free variant", () => {
     const tuned = {
-      "deepseek/deepseek-v4.1-flash-1017": { input: 0.15, output: 0.6, perPage: 0.103 },
+      // Priced at the pinned US route (Together, Fireworks, Parasail), not DeepSeek's own list price.
+      "deepseek/deepseek-v4.1-flash-1017": { input: 0.3, output: 1.2, perPage: 0.103, checked: "2026-10-26", route: ["together", "fireworks", "parasail"] },
       "xiaomi/mimo-v2.6-flash": { input: 0.14, output: 0.28, perPage: 0.056 },
       "openai/gpt-6-luna": { input: 0.1, output: 0.5, perPage: 0.061 },
       "z-ai/glm-5.3-flash": { input: 0.15, output: 0.5, perPage: 0.073 },
@@ -51,10 +52,12 @@ describe("hosted vision catalog", () => {
         target: "hosted",
         estimatedCostPerPageCents: expected.perPage,
       });
+      const route = "route" in expected ? expected.route : undefined;
       expect(visionModelTokenPricing(uri), id).toEqual({
         inputUsdPerMillion: expected.input,
         outputUsdPerMillion: expected.output,
-        checked: "2026-10-25",
+        checked: "checked" in expected ? expected.checked : "2026-10-25",
+        ...(route ? { basis: "pinned-route", providers: route } : {}),
       });
       expect(visionConfigSchema.parse({ modelUri: uri }).modelUri).toBe(uri);
     }
