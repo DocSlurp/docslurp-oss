@@ -12,6 +12,7 @@ import { healthyDocuments } from "../pipeline/document-health.js";
 import { isPiiBlockedDocument } from "../pipeline/pii-gate.js";
 import type { CommandRunner } from "../tools/runner.js";
 import { type ArtifactStore, keyFromStorageUri } from "../tools/storage.js";
+import { runArtifactRoot } from "../lib/artifact-root.js";
 import {
   PII_BLOCKED_DOCUMENT_STATUS,
   type PiiMatch,
@@ -189,7 +190,7 @@ export class PiiDetectStage implements Stage {
 
     await runDocuments(healthyDocuments(state), state.docConcurrency, async (document) => {
       const artifactSlot = `${document.id}:pii-detect`;
-      const artifactKey = `${document.userId}/${state.run.id}/pii/${document.id}.json`;
+      const artifactKey = `${runArtifactRoot(state.run, document.userId)}/pii/${document.id}.json`;
 
       await runDocumentStage(
         state,
@@ -326,7 +327,7 @@ export class PiiDetectStage implements Stage {
       }
       if (fallbackResult && fallbackResult.matches.length > 0) {
         // Embed, summary and page index read the markdown slot before the source file.
-        const key = `${document.userId}/${state.run.id}/pii/${document.id}.redacted.md`;
+        const key = `${runArtifactRoot(state.run, document.userId)}/pii/${document.id}.redacted.md`;
         await this.storage.streamText(key, fallbackResult.redacted, "text/markdown");
         ledger.recordDocument(document.id, "markdown", this.storage.uri(key));
         redactedArtifacts.push("markdown");

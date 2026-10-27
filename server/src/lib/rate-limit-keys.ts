@@ -52,6 +52,7 @@ export function classifyRateLimitCategory(method: string, path: string): RateLim
 
   if (normalizedPath.startsWith("/webhooks/")) return "webhook";
   if ((normalizedPath.startsWith("/v1/ingest") || normalizedPath === "/v1/uploads" || normalizedPath.startsWith("/v1/uploads/"))) return "upload";
+  if (normalizedPath === "/v1/extracts" || normalizedPath.startsWith("/v1/extracts/")) return "upload";
   if (
     normalizedPath.startsWith("/v1/search/chat")
     || normalizedPath === "/v1/chat"

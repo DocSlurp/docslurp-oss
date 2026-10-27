@@ -7,6 +7,7 @@ import type { WorkflowState } from "../pipeline/pipeline.js";
 import type { MediaConfig } from "./config.js";
 import { BilledResponseError } from "./providers.js";
 import type { AudioInput, MediaJournal, MediaProvider, MediaScope, Transcription } from "./types.js";
+import { runArtifactRoot } from "../lib/artifact-root.js";
 
 /**
  * Receipt key. For plain 16 kHz WAV chunks it is byte-for-byte the key written before chunk overlap, word timestamps and
@@ -37,7 +38,7 @@ export async function transcribeChunk(args: {
     emitTelemetryLog({ severityText: "error", body: "media.request.reconciliation_required", attributes: { ...scope, provider: provider.id, mediaJobId: id } });
     throw new Error(`Remote media request ${id} requires reconciliation before retry`);
   }
-  const resultKey = admission.receipt.resultKey ?? `${state.run.userId}/${scope.runId}/media/receipts/${id}.json`;
+  const resultKey = admission.receipt.resultKey ?? `${scope.runId === state.run.id ? runArtifactRoot(state.run, state.run.userId) : `${state.run.userId}/${scope.runId}`}/media/receipts/${id}.json`;
   const recordUsage = async (result: Transcription) => {
     if (state.artifactLedger.read(`media-usage:${id}`)) {
       if (!state.store) throw new Error("Media requires durable pipeline checkpoints");

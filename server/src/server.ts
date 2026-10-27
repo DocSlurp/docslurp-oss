@@ -58,6 +58,7 @@ import { stripeWebhookRoutes } from "./routes/stripe-webhook.js";
 import { secretsRoutes } from "./routes/secrets.js";
 import { userSettingsRoutes } from "./routes/user-settings.js";
 import { accountRoutes } from "./routes/account.js";
+import { extractsRoutes } from "./routes/extracts.js";
 import { startCreditDebitFlusher, stopCreditDebitFlusher } from "./services/billing/credit-debit-flusher.js";
 import { syncMeteringEnforcement } from "./services/billing/metering.js";
 import { startMaintenanceSweeper, stopMaintenanceSweeper } from "./services/maintenance-sweeper.js";
@@ -135,7 +136,7 @@ export function createApiApp(): Hono {
   // smallest applicable cap first, so JSON uploads cannot buffer the file cap.
   app.use("/v1/*", async (c, next) => {
     if (c.req.path === "/v1/mcp") return next(); // protocol-specific cap above
-    const upload = /^\/v1\/(?:uploads|ingest)(?:\/|$)/.test(c.req.path);
+    const upload = /^\/v1\/(?:uploads|ingest|extracts)(?:\/|$)/.test(c.req.path);
     const json = /\bjson\b/i.test(c.req.header("content-type") ?? "");
     if (upload && !json) {
       if (/\/bulk\/?$/.test(c.req.path)) return multipartBodyLimit(env.maxMultipartUploadBytes)(c, next);
@@ -177,6 +178,7 @@ export function createApiApp(): Hono {
   app.route("/v1/ingest", uploadsRoutes);
   app.route("/v1/uploads", uploadEstimateRoutes);
   app.route("/v1/uploads", uploadsRoutes);
+  app.route("/v1/extracts", extractsRoutes);
   app.route("/v1/webhooks", webhooksRoutes);
   app.route("/v1/artifacts", artifactsRoutes);
   app.route("/v1/files", filesRoutes);

@@ -23,7 +23,7 @@ export const listWorkspacesInput = z.object({
  */
 export const INLINE_UPLOAD_MAX_BYTES = 512 * 1024;
 const INLINE_UPLOAD_MAX_BASE64_CHARS = Math.ceil(INLINE_UPLOAD_MAX_BYTES / 3) * 4 + 1024;
-export const uploadInput = z.object({
+const uploadInputShape = {
   workspace: z.string().min(1).max(256).optional().describe('Workspace ID, slug or name. A name that matches no workspace creates one with that name, so only pass a new name when the user asks for a new workspace. Omit for the organization default workspace.'),
   urls: z.array(z.url().refine(url => /^https?:\/\//i.test(url), "Use HTTP or HTTPS URLs")).min(1).max(20).optional(),
   files: z.array(z.object({
@@ -39,7 +39,16 @@ export const uploadInput = z.object({
   }).strict().refine(file => Boolean(file.contentBase64) !== Boolean(file.text), "Supply either contentBase64 or text for each inline file")).min(1).max(10).optional()
     .describe(`Small files sent in this call (at most ${INLINE_UPLOAD_MAX_BYTES / 1024} KiB in total) when you cannot make HTTP requests to storage upload URLs.`),
   idempotencyKey: z.string().min(1).max(200).optional().describe("For URL and inline uploads: reuse the same key when retrying this exact request to avoid duplicate ingestion."),
-}).strict().refine(value => [value.urls, value.files, value.inlineFiles].filter(Boolean).length === 1, "Supply exactly one of urls, files or inlineFiles");
+};
+const exactlyOneSource = (value: { urls?: unknown; files?: unknown; inlineFiles?: unknown }) => [value.urls, value.files, value.inlineFiles].filter(Boolean).length === 1;
+export const uploadInput = z.object(uploadInputShape).strict().refine(exactlyOneSource, "Supply exactly one of urls, files or inlineFiles");
+/** Extract: upload's inputs plus the retention window and completion email. */
+export const extractInput = z.object({
+  ...uploadInputShape,
+  retentionDays: z.number().int().min(1).max(3650).optional().describe("Days to keep the files and results before they are deleted. Omit for the free window (48 hours by default); longer windows are charged as storage, up to the deployment's cap (30 days by default)."),
+  notifyEmail: z.boolean().optional().describe("Email the user a sign-in download link when the extract finishes (default true)."),
+  download: z.enum(["markdown", "all"]).optional().describe("What the download zip holds: markdown (default) or all (adds originals and page images)."),
+}).strict().refine(exactlyOneSource, "Supply exactly one of urls, files or inlineFiles");
 
 export const completeUploadInput = z.object({
   sessionId: z.string().uuid(),
@@ -128,7 +137,7 @@ export const FIRST_PARTY_APP_SETTINGS_TOOLS: ReadonlySet<string> = new Set(["pro
  * verb first, and the same verb for the same kind of tool (List, Upload, Check, Search, Read, Estimate … cost).
  */
 const TOOL_ORDER = [
-  "listWorkspaces", "upload", "getUploadStatus", "search", "chat", "getMediaEvidence", "suggestQueries",
+  "listWorkspaces", "upload", "getUploadStatus", "search", "chat", "extract", "getMediaEvidence", "suggestQueries",
   "getWorkspaceSettings", "proposeWorkspaceSettings", "fullIndex",
   "webSearch", "webFetch", "webMap", "webCrawl", "ingestWebsite",
   "uploadEstimate", "fullIndexEstimate", "reprocessEstimate", "updateEstimate", "searchSettingsEstimate", "indexingModeEstimate", "graphRebuildEstimate",
@@ -160,6 +169,10 @@ export function mcpTools(baseUrl: string): McpTool[] {
       description: `Upload documents using exactly one of urls, files or inlineFiles. urls: DocSlurp's server downloads each HTTP(S) file directly, so prefer it for a file that is already public; do not fetch it with web tools first. files: return direct storage upload targets for up to 10 files (5 GiB each, subject to account limits). Small files use putUrl with the declared Content-Type; large files use multipart pendingParts URLs with byte slices determined by partNumber, partSize and sizeBytes. Upload every part. Storage notifications and background reconciliation automatically complete known-size uploads and start ingestion; no completeUpload call is needed. Follow getUploadStatus with sessionId. inlineFiles: if you cannot make HTTP requests to the upload URLs (for example a sandbox firewall blocks them), send small files in this call as text or contentBase64, ${INLINE_UPLOAD_MAX_BYTES / 1024} KiB in total; ingestion starts immediately and the response has workspace and run IDs for getUploadStatus. Never send local paths. Omit workspace for the default workspace; a name that matches no workspace creates it. Ingestion can incur cost. idempotencyKey applies to URL and inline upload retries.`,
       // Flat like every tool schema: uploadInput's refinement enforces exactly one of urls, files or inlineFiles.
       inputSchema: toolInputJsonSchema(uploadInput) },
+    { id: "extract", title: "Extract documents (auto-deleted)", scopes: ["ingest"],
+      annotations: { readOnly: false, destructive: false, idempotent: false, openWorld: true, consequential: true },
+      description: `Like upload (exactly one of urls, files or inlineFiles, the same workspace rules and follow-up with getUploadStatus), but the files and every output (Markdown, page images, chunks, search index) are deleted automatically when the retention window ends. Omit retentionDays for the free window (48 hours by default); a longer window is charged as storage. The response's extract has id, expiresAt and download state; the user is emailed a sign-in download link when it finishes unless notifyEmail is false. Use for one-off conversions the user does not want kept. Ingestion can incur cost.`,
+      inputSchema: toolInputJsonSchema(extractInput) },
     { id: "completeUpload", title: "Complete upload (legacy)", scopes: ["ingest"],
       annotations: { readOnly: false, destructive: false, idempotent: false, openWorld: false, consequential: true },
       description: "Legacy fallback for single-PUT sessions: verify uploaded files and start ingestion after every PUT succeeds. Normal uploads complete automatically; use getUploadStatus with sessionId instead. Pass sessionId and fileIds from upload. Do not use for multipart uploads.",

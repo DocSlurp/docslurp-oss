@@ -137,6 +137,29 @@ describe("buildDocumentExport", () => {
     expect(Number(row!.size_bytes)).toBe(upload.bytes.byteLength);
   });
 
+  it("builds an extract download from its run only, under the extract prefix, never outliving the extract", async () => {
+    await sql`insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, total_documents, pipeline, artifacts, extract_id, storage_prefix)
+      values ('ext-run', 'o', 'u', 'w', 'bulk-upload', 'completed', 'completed', 2, '{}', '{"doc-x:markdown":"s3://bucket/extracts/o/ext_1/markdown/doc-x.md"}', 'ext_1', 'extracts/o/ext_1')
+      on conflict (id) do nothing`;
+    await sql`insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status, page_count)
+      values ('doc-x', 'o', 'u', 'w', 'ext-run', 'Scan.pdf', 'application/pdf', 'extracts/o/ext_1/raw/scan.pdf', 'completed', 1),
+             ('doc-y', 'o', 'u', 'w', 'ext-run', 'Broken.pdf', 'application/pdf', 'extracts/o/ext_1/raw/broken.pdf', 'failed', 0)
+      on conflict (id) do nothing`;
+    objects.set("extracts/o/ext_1/markdown/doc-x.md", text("# Scan"));
+    await sql`insert into document_exports (id, org_id, workspace_id, user_id, run_id, content, filename, object_key, expires_at, max_expires_at)
+      values ('exp-x', 'o', 'w', 'u', 'ext-run', 'markdown', 'Scan.zip', 'extracts/o/ext_1/exports/exp-x/', now() + interval '2 days', now() + interval '2 days')`;
+
+    await buildDocumentExport({ sql, storage: storage as never }, "exp-x");
+
+    const upload = uploads.get("extracts/o/ext_1/exports/exp-x/a1.zip");
+    expect(upload).toBeDefined();
+    // Only the run's completed document: nothing else in the workspace, not its failed one.
+    expect(Object.keys(unzipSync(upload!.bytes)).some((name) => name.includes("Q3 plan") || name.includes("Broken"))).toBe(false);
+    const [row] = await sql<{ document_ids: string[]; hours: number }[]>`
+      select document_ids, round(extract(epoch from expires_at - now()) / 3600)::int as hours from document_exports where id = 'exp-x'`;
+    expect(row).toEqual({ document_ids: ["doc-x"], hours: 48 });
+  });
+
   it("adds originals, page images and outputs for a full workspace export, and lists what it could not read", async () => {
     await queue("exp-2", { content: "all", filename: "Finance.zip" });
 

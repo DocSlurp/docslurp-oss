@@ -5,6 +5,16 @@ export const MAX_CANONICAL_ID_LENGTH = 2048;
 export class InvalidCanonicalIdError extends Error {}
 
 /**
+ * `docslurp:` canonical IDs are minted by the server (`docslurp:document:<id>`,
+ * `docslurp:extract:<extract>:<doc>`). A caller-chosen one could join another
+ * document's version chain (an extract's, whose expiry would then delete the
+ * caller's kept document), so callers may never send one.
+ */
+export function isReservedCanonicalId(value: string): boolean {
+  return /^docslurp:/i.test(value.trim());
+}
+
+/**
  * Canonical IDs name the logical source a document represents, such as a URL,
  * a site path like `/products`, or any caller-chosen key. They are compared
  * exactly (after trimming) within a workspace.
@@ -14,6 +24,7 @@ export function normalizeCanonicalId(value: unknown): string | null {
   if (typeof value !== "string") throw new InvalidCanonicalIdError("canonicalId must be a string");
   const trimmed = value.trim();
   if (!trimmed) return null;
+  if (isReservedCanonicalId(trimmed)) throw new InvalidCanonicalIdError("canonicalId must not start with docslurp: (reserved)");
   if (trimmed.length > MAX_CANONICAL_ID_LENGTH) {
     throw new InvalidCanonicalIdError(`canonicalId must be at most ${MAX_CANONICAL_ID_LENGTH} characters`);
   }
