@@ -98,6 +98,73 @@ Not trimmed yet (candidates):
 - onnxruntime-web ships about 85 MB of WASM variants that the Node runtime never
   loads. transformers.js imports the package statically, so pruning it needs care.
 
+## Page images: lossless WebP
+
+Stored page images (the raster cache in `worker/src/pipeline/pdf-asset-cache.ts`: render-images, vision,
+document map, critique, page embeddings, routed executors, deferred materialization and the
+`docslurp-page-render` reader queue) are lossless WebP. Lossless keeps every pixel of the PNG render, so OCR
+and vision input do not change. Uploaded images are stored as uploaded, export-quality renders
+(`quality=export`, the browser's "Download PNG") stay PNG, and scratch rasters that are never stored
+(crops, contact sheets, the local artifact graph's Tesseract input) stay PNG.
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `DOCSLURP_PAGE_IMAGE_FORMAT` | `webp` | `png` stores PNG as before. |
+| `DOCSLURP_PAGE_IMAGE_WEBP_EFFORT` | `6` | `cwebp -z` effort (0-9) for long-retention images. |
+| `DOCSLURP_PAGE_IMAGE_WEBP_SHORT_RETENTION_HOURS` | `3000` | Retention below this (about 4 months) uses effort 1. |
+
+**Effort by retention.** `pageImageWebpEffort({ retentionHours })` in `worker/src/pipeline/page-image-format.ts`
+returns 1 below the threshold and the default otherwise; unknown or unlimited retention is long-term.
+`Document.artifactRetentionHours` carries the shortest of the workspace's `artifact_retention_days` and
+`run_retention_days` (in hours). An extract run with a 48-hour lifetime sets it from the extract's
+`retentionHours`. The 2026-10-26 basis (127 pages, one vCPU at the $0.0846/h production slot rate, Tigris at
+$0.02/GB-month): PNG level 6 ran at 77 pages/min and 1,599 KB/page, WebP effort 1 at 49 pages/min and 937 KB/page,
+and effort 6 at 31 pages/min and 750 KB/page. Effort 1 is cheapest when an image is kept less than about
+4.5 months, effort 6 beyond that. Efforts 3-7 are within 1% of each other over 12 months, and efforts 8-9 never
+pay for themselves. Note that the default workspace `run_retention_days` is 30, so most workspaces encode at effort 1.
+
+**Measured in the worker base image** (`node:24-trixie-slim`, Debian `webp` 1.5.0, `--cpus=1`, 150 dpi,
+pdftoppm then cwebp per page, 2026-10-26). Sample: 23 pages (10 from a 10-K, 10 from a scanned book and two
+fixtures). Render plus encode:
+
+| Stored as | Pages/min per vCPU | KB/page | Bytes vs PNG |
+| --- | --- | --- | --- |
+| PNG | 60.9 | 497 | 100% |
+| WebP effort 1 | 50.6 | 316 | 64% |
+| WebP effort 6 | 41.9 | 263 | 53% |
+
+Encode-only throughput: on the text-heavy 10-K, effort 1 ran at 667 pages/min and effort 6 at 277; on the
+scanned book, effort 1 ran at 189 and effort 6 at 80. Scans compress least (784 to 521 KB/page at effort 6), and
+text pages compress most (360 to 90 KB/page).
+
+**Isolation.** The pixels come from customer PDFs, so `cwebp` runs through the parser sandbox
+(`CommandRunner.encodeLosslessWebp`): it is a declared sandbox command, its PNG input is a declared input path and
+its scratch directory a declared writable path. A native-engine render is written to that scratch directory first,
+and the worker never encodes the bytes in-process. A sandbox refusal fails the render, and nothing is stored. Before
+encoding, the PNG header is checked against the bounded-raster limits (at most 4,096 px a side and 16 MP).
+The output must be a WebP of the same size, and no larger than 64 MB.
+
+**Fallback.** If `cwebp` is missing, the worker keeps storing PNG. It prints one `[page-image] WARNING` line per
+process and, for each page, an OTLP log record (`docslurp.page_image.format_fallback`), span attributes and a
+`page-image-webp-fallback` performance metric. An encode that runs but fails falls back the same way, with a
+warning per page. This is a format fallback, not an isolation fallback. Encode time is reported as
+`page-image-webp-encode-ms`.
+
+**Keys and reads.** WebP objects live under `images/<doc>/v2-<dpi>dpi[-native-pdf]-webp/page-N.webp`. PNG keeps
+`v2-<dpi>dpi[-native-pdf]/page-N.png`, so the two never collide. The cache checks the WebP key first, then the PNG
+key, so existing PNG pages are served without re-rendering. Objects are stored with their own content type, which
+`/v1/files` serves inline.
+
+**Consumers.** Sharp (orientation, verifier, inset triage, contact sheets, page input, probe, page embeddings and
+executor crops) decodes WebP. Vision data URLs take their media type from the image bytes. Every hosted vision
+route in the catalog accepted a lossless WebP page on 2026-10-26 (see the PR for the table). Debian's Leptonica 1.84
+reads WebP, but WebP has no density chunk. Without one, Tesseract guessed a resolution, and its text changed. The
+executors therefore pass `--dpi` for WebP rasters and keep it on crops and rotations; with it, Tesseract's output
+was byte-identical to its PNG output.
+
+The `cwebp` binary ships in both images (Debian `webp`, Alpine `libwebp-tools`, Homebrew `webp`), and
+`scripts/check-worker-prerequisites.mjs` requires it.
+
 ## Vendor bundles
 
 Docling was retired on 2026-10-21 because its Pillow <13 constraint prevented

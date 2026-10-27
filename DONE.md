@@ -102,3 +102,5 @@
 - Harden the worker image supply chain: worker-images.yml pushes max-mode provenance and SBOMs, signs each digest with keyless cosign and a GitHub provenance attestation in a separate id-token job; worker Python locks carry sha256 hashes and every install path uses --require-hashes; Grype fails on critical findings (justified exceptions in .grype.yaml); the Modal provider can pin its image by digest (DOCSLURP_MODAL_IMAGE_DIGEST).
 
 - Refreshed model prices, image support, context windows and infrastructure observations from official live sources (2026-10-25); reconciled runtime estimates, excluded retired free eval route and uneconomic RTX 4090 cost-policy SKU; retained evidence and unverified historical dates.
+
+- Store page images as lossless WebP (same pixels, roughly half the bytes), encoded by `cwebp` through the parser sandbox with effort 1 for short retention and 6 otherwise (`DOCSLURP_PAGE_IMAGE_FORMAT`, `DOCSLURP_PAGE_IMAGE_WEBP_EFFORT`, `DOCSLURP_PAGE_IMAGE_WEBP_SHORT_RETENTION_HOURS`); a separate key space keeps existing PNG pages readable, and a missing `cwebp` stores PNG with a warning and metric.
