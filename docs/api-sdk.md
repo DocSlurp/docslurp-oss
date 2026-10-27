@@ -44,7 +44,7 @@ There are two kinds of API key. The prefix tells you, and secret scanners, where
 
 `search` returns passages. `chat` generates answers on your credits: `/v1/chat`, `/v1/chat/stream`, `/v1/chat/completions` (and its `/v1/models` list) and the MCP `chat` tool need it. Keys created before `chat` existed kept chat access wherever they had `search`.
 
-Web tools (`/v1/web/*` and the MCP and chat-agent web tools) make paid calls to the open web. Server keys use them with `search` (`ingest` for website ingestion). Browser keys never get them, nor `ingest` or `artifacts`: anyone can copy a browser key from your page source. A browser key saved earlier with those scopes keeps only `search` and `chat`.
+Web tools (`/v1/web/*` and the MCP and chat-agent web tools) make paid calls to the open web. Server keys use them with `search` (`ingest` for website ingestion). Browser keys never get them, nor `ingest` or `artifacts`: anyone can copy a browser key from your page source. A browser key saved earlier with those scopes retains only the `search` or `chat` permissions it already held. If none remain, it has no permissions: saving or rotating it never adds `search`. Edit its scopes explicitly to enable search or chat; default scopes apply only when creating a key.
 
 Controls per key type:
 
@@ -57,7 +57,7 @@ Controls per key type:
 | Expiry (`expiresAt`) | Optional | Optional, up to 365 days ahead |
 | Limits | Per-key limits, plus per-visitor limits and concurrency | Per-key request, spend and `concurrent` rules; no default concurrency cap |
 
-The chat output cap bounds the model's maximum output tokens for every chat answer the key gets (`/v1/chat`, `/v1/chat/completions`, the MCP `chat` tool). A request asking for more (`max_tokens`, `max_completion_tokens`) is lowered to the cap. An expired key stops authenticating, and so does a key used from outside its IP allowlist (403 `api_key_ip_not_allowed`; an address we can't determine is refused too). Each key reports `lastUsedAt` and `lastUsedIp`.
+The chat output cap bounds the model's maximum output tokens for every chat answer the key gets (`/v1/chat`, `/v1/chat/completions`, the MCP `chat` tool). A request asking for more (`max_tokens`, `max_completion_tokens`) is lowered to the cap. An expired key stops authenticating, and so does a key used from outside its IP allowlist (403 `api_key_ip_not_allowed`; an address we can't determine is refused too). Each key reports `lastUsedAt` and `lastUsedIp`. MCP OAuth access tokens also honor their linked server key’s current expiry, IP allowlist and chat output cap; an expired key or a disallowed/unknown address makes the token unauthorized.
 
 Rotate a key with `POST /v1/api-keys/:id/rotate`. With no body the secret is replaced at once. With `{"overlapSeconds": 86400}` (up to 7 days) you get a new key with the same settings (`rotatedFromKeyId` names the old one), and the old key keeps working until the overlap ends (`previous.expiresAt` in the response). Deploy the new secret within that window.
 

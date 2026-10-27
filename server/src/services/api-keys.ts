@@ -261,7 +261,7 @@ function mapApiKey(row: ApiKeyRow): ApiKey {
     name: row.name,
     keyType: parseApiKeyType(row.key_type),
     allowedDomains: row.allowed_domains ?? [],
-    scopes: row.scopes ?? [...defaultApiKeyScopes],
+    scopes: effectiveKeyScopes(parseApiKeyType(row.key_type), row.scopes ?? [], row.workspace_ids ?? []),
     rateLimitRpm: row.rate_limit_rpm,
     rateLimitPpd: row.rate_limit_ppd,
     rateLimits: parseApiKeyRateLimits(row.rate_limits),
@@ -441,8 +441,9 @@ type KeyTransaction = postgres.TransactionSql<Record<string, postgres.PostgresTy
 /** Runtime guard for rows written before the rule: a browser key keeps only search and chat. */
 export function effectiveKeyScopes(keyType: ApiKeyType, scopes: string[], _workspaceIds: string[]): string[] {
   if (keyType !== "client") return scopes;
-  const narrowed = scopes.filter(scope => (clientApiKeyScopes as readonly string[]).includes(scope));
-  return narrowed.length > 0 ? narrowed : [...defaultClientApiKeyScopes];
+  // Narrowing an old row can remove every scope. Defaults belong to creation:
+  // adding search here would grant a permission the owner never selected.
+  return scopes.filter(scope => (clientApiKeyScopes as readonly string[]).includes(scope));
 }
 
 /** Every allowlisted workspace must be in the key's org and reachable by its owner. */
@@ -643,7 +644,7 @@ export async function validateApiKey(
     orgId: row.org_id,
     keyType,
     allowedDomains,
-    scopes: effectiveKeyScopes(keyType, row.scopes ?? [...defaultApiKeyScopes], row.workspace_ids ?? []),
+    scopes: effectiveKeyScopes(keyType, row.scopes ?? [], row.workspace_ids ?? []),
     rateLimitRpm: row.rate_limit_rpm,
     rateLimitPpd: row.rate_limit_ppd,
     rateLimits: parseApiKeyRateLimits(row.rate_limits),
@@ -669,5 +670,5 @@ export async function getLiveApiKeyById(keyId: string): Promise<{ keyType: ApiKe
       )
   `;
   const keyType = row ? parseApiKeyType(row.key_type) : null;
-  return row && keyType ? { keyType, scopes: effectiveKeyScopes(keyType, row.scopes ?? [...defaultApiKeyScopes], row.workspace_ids ?? []), workspaceIds: row.workspace_ids ?? [], materializationPolicy: parseKeyMaterializationPolicy(row.materialization_policy) } : null;
+  return row && keyType ? { keyType, scopes: effectiveKeyScopes(keyType, row.scopes ?? [], row.workspace_ids ?? []), workspaceIds: row.workspace_ids ?? [], materializationPolicy: parseKeyMaterializationPolicy(row.materialization_policy) } : null;
 }

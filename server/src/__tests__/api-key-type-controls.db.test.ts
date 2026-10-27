@@ -57,6 +57,24 @@ describe("browser keys", () => {
     await expect(browser({ ipAllowlist: ["203.0.113.0/24"] })).rejects.toMatchObject({ code: "invalid_ip_allowlist" });
   });
 
+  it.each(["ingest", "artifacts", "web", "empty"])("never grants search to a narrowed legacy key (%j), even on save or rotation", async (stored) => {
+    const scopes = stored === "empty" ? [] : [stored];
+    const { rawKey, key } = await browser();
+    await sql`update api_keys set scopes = ${sql.array(scopes)} where id = ${key.id}`;
+    const context = { origin: "https://docs.example.com" };
+    expect((await keys.validateApiKey(rawKey, context))?.scopes).toEqual([]);
+    expect((await keys.getLiveApiKeyById(key.id))?.scopes).toEqual([]);
+    expect((await keys.updateApiKey(key.id, "u1", { name: "Same permissions" }))?.scopes).toEqual([]);
+    expect((await keys.validateApiKey(rawKey, context))?.scopes).toEqual([]);
+    const rotated = await keys.rotateApiKey(key.id, "u1");
+    expect(rotated?.key.scopes).toEqual([]);
+    expect((await keys.validateApiKey(rotated!.rawKey, context))?.scopes).toEqual([]);
+    const overlap = await keys.rotateApiKey(key.id, "u1", { overlapSeconds: 3600 });
+    expect(overlap?.key.scopes).toEqual([]);
+    expect(overlap?.previous?.scopes).toEqual([]);
+    expect((await keys.validateApiKey(overlap!.rawKey, context))?.scopes).toEqual([]);
+  });
+
   it("drops legacy server scopes from a stored browser key at request time", async () => {
     const { rawKey, key } = await browser();
     await sql`update api_keys set scopes = ${sql.array(["search", "ingest", "artifacts"])} where id = ${key.id}`;

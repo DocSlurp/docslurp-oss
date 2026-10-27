@@ -27,7 +27,7 @@ export function mcpBearerChallenge(requestUrl: string, presented: boolean): stri
 export const mcpAuth: MiddlewareHandler = async (c, next) => {
   const header = c.req.header("Authorization");
   const token = bearerToken(header);
-  const key = token.startsWith("dsmcp_") ? await validateMcpToken(token, mcpResource(c.req.url)) : null;
+  const key = token.startsWith("dsmcp_") ? await validateMcpToken(token, mcpResource(c.req.url), { ip: requestIp(c) }) : null;
   let actor;
   try {
     actor = key ? { type: "apiKey" as const, userId: key.userId, apiKey: key } : token && !token.startsWith("dsmcp") ? await resolveApiKeyActor(`Bearer ${token}`, { origin: c.req.header("origin"), referer: c.req.header("referer"), ip: requestIp(c) }) : null;

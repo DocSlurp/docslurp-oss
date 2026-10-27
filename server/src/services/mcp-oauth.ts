@@ -1,7 +1,7 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import type { PoolClient } from "pg";
 import { appDbPool } from "../lib/auth.js";
-import { parseApiKeyRateLimits, type ValidatedKey } from "./api-keys.js";
+import { effectiveMaxOutputTokens, ipAllowed, parseApiKeyRateLimits, type ValidatedKey } from "./api-keys.js";
 
 export const MCP_SCOPES = ["search", "chat", "read", "ingest"] as const;
 export const oauthHash = (value: string) => createHash("sha256").update(value).digest("hex");
@@ -89,23 +89,28 @@ export async function issueTokens(db: PoolClient, grantId: string) {
   return { access_token: access, refresh_token: refresh, token_type: "Bearer", expires_in: 900 };
 }
 
-export async function validateMcpToken(raw: string, resource: string): Promise<ValidatedKey | null> {
+export async function validateMcpToken(raw: string, resource: string, requestContext?: { ip?: string | null }): Promise<ValidatedKey | null> {
   const { rows } = await appDbPool.query(`
-    SELECT g.*, k.rate_limits AS key_rate_limits, k.workspace_ids AS key_workspace_ids FROM mcp_oauth_tokens t
+    SELECT g.*, k.ip_allowlist AS key_ip_allowlist, k.max_output_tokens AS key_max_output_tokens,
+           k.rate_limits AS key_rate_limits, k.workspace_ids AS key_workspace_ids FROM mcp_oauth_tokens t
     JOIN mcp_oauth_grants g ON g.id=t.grant_id
     JOIN org_memberships m ON m.org_id=g.org_id AND m.user_id=g.user_id
     JOIN api_keys k ON k.id=g.api_key_id AND k.user_id=g.user_id AND k.org_id=g.org_id
     WHERE t.hash=$1 AND t.kind='access' AND t.expires_at>now()
       AND t.consumed_at IS NULL AND g.revoked_at IS NULL AND g.resource=$2
       AND k.revoked_at IS NULL AND k.key_type='server'
+      AND (k.expires_at IS NULL OR k.expires_at > now())
   `, [oauthHash(raw), resource]);
   const row = rows[0];
   if (!row) return null;
+  const allowlist: string[] = row.key_ip_allowlist ?? [];
+  if (allowlist.length && !ipAllowed(requestContext?.ip, allowlist)) return null;
   return {
     keyId: row.api_key_id, userId: row.user_id, orgId: row.org_id,
     keyType: "server", allowedDomains: [], scopes: row.scopes,
     rateLimitRpm: null, rateLimitPpd: 10000, rateLimits: parseApiKeyRateLimits(row.key_rate_limits),
     workspaceIds: Array.isArray(row.key_workspace_ids) ? row.key_workspace_ids : [],
+    maxOutputTokens: effectiveMaxOutputTokens("server", row.key_max_output_tokens),
   };
 }
 

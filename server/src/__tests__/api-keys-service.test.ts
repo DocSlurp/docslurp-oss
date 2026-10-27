@@ -20,7 +20,7 @@ vi.mock("../services/organizations.js", () => ({
   OrganizationError: class extends Error { constructor(readonly status: number, readonly code: string, message: string) { super(message); } }
 }));
 
-const { apiKeyTypeFromPrefix, ApiKeyTypeChangeError, ClientKeyOriginNotAllowedError, ClientKeyWorkspacesRequiredError, createApiKey, rotateApiKey, updateApiKey, validateApiKey } = await import("../services/api-keys.js");
+const { apiKeyTypeFromPrefix, ApiKeyTypeChangeError, ClientKeyOriginNotAllowedError, ClientKeyWorkspacesRequiredError, createApiKey, getLiveApiKeyById, rotateApiKey, updateApiKey, validateApiKey } = await import("../services/api-keys.js");
 const organizations = await import("../services/organizations.js");
 
 function buildKeyRow(rawKey: string, overrides: Record<string, unknown> = {}) {
@@ -345,4 +345,12 @@ describe("client key scopes and workspace allowlists (G-03)", () => {
     // Bound to workspaces, but a browser key still never gets server scopes: legacy ingest is dropped.
     expect(await validateApiKey(rawKey, { origin: "https://docslurp.dev" })).toMatchObject({ scopes: ["search"], workspaceIds: ["ws-1"] });
   });
+});
+
+it.each(["client", "server"])("missing stored scopes on a %s key never use creation defaults", async (keyType) => {
+  sqlMock.mockReset();
+  const rawKey = keyType === "client" ? "dslp_pub_missing" : "dslp_priv_missing";
+  sqlMock.mockResolvedValue([buildKeyRow(rawKey, { key_type: keyType, scopes: null, allowed_domains: ["docs.example.com"], workspace_ids: ["w"] })]);
+  expect((await validateApiKey(rawKey, { origin: "https://docs.example.com" }))?.scopes).toEqual([]);
+  expect((await getLiveApiKeyById("key-1"))?.scopes).toEqual([]);
 });
