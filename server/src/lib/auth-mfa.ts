@@ -43,6 +43,10 @@ export const REAUTH_REQUIRED_CODE = "REAUTH_REQUIRED";
 export const SSO_REQUIRED_CODE = "SSO_REQUIRED";
 export const USER_VERIFICATION_REQUIRED_CODE = "PASSKEY_USER_VERIFICATION_REQUIRED";
 
+/** App page that renders the second-factor step for redirect-based sign-ins. */
+export const MFA_CHALLENGE_PATH = "/app/sign-in";
+export const MFA_CHALLENGE_MAX_AGE_SECONDS = 600;
+
 /** Better Auth's own names: the challenge must interoperate with the plugin's verify endpoints. */
 const TWO_FACTOR_COOKIE = "two_factor";
 const TRUST_DEVICE_COOKIE = "trust_device";
@@ -138,9 +142,9 @@ export function resolveMfaConfig(env: NodeJS.ProcessEnv, baseURL: string): MfaCo
     origins,
     issuer: env.TWO_FACTOR_ISSUER?.trim() || "DocSlurp",
     trustDeviceMaxAgeSeconds: boundedInteger(env.MFA_TRUST_DEVICE_DAYS, 14, 1, 30, "MFA_TRUST_DEVICE_DAYS") * 86_400,
-    challengeMaxAgeSeconds: 600,
+    challengeMaxAgeSeconds: MFA_CHALLENGE_MAX_AGE_SECONDS,
     reauthMaxAgeSeconds: boundedInteger(env.MFA_REAUTH_MAX_AGE_SECONDS, 600, 60, 3600, "MFA_REAUTH_MAX_AGE_SECONDS"),
-    challengePath: "/app/sign-in",
+    challengePath: MFA_CHALLENGE_PATH,
     lockout: { maxFailedAttempts: 10, durationSeconds: 900 },
   };
 }
@@ -601,8 +605,3 @@ export async function beginTwoFactorChallengeCookie(authContext: ChallengeAuthCo
   } as CookieOptions);
 }
 
-/** Whether a user has 2FA switched on (SSO and other custom sign-in paths). */
-export async function userHasTwoFactor(pool: Pick<Pool, "query">, userId: string): Promise<boolean> {
-  const { rows } = await pool.query<{ enabled: boolean }>(`select "twoFactorEnabled" as enabled from "user" where id = $1`, [userId]);
-  return rows[0]?.enabled === true;
-}

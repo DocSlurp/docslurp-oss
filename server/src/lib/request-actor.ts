@@ -7,6 +7,7 @@ import { apiError, parseWorkspaceInput, type WorkspaceInputRef, type WorkspaceRe
 import { apiErrorResponse } from "./api-error.js";
 import { auth, appDbPool } from "./auth.js";
 import { isConfiguredAdminUser } from "./admin-emails.js";
+import { evaluateMfaPolicy } from "./auth-mfa.js";
 import { apiKeyAllowsWorkspace, apiKeyCanUseWorkspace } from "./api-key-workspace-scope.js";
 
 export { apiKeyAllowsWorkspace, apiKeyCanUseWorkspace };
@@ -28,6 +29,10 @@ export interface SessionRequestActor {
   userId: string;
   sessionId: string;
   user: SessionUser;
+  /** The session passed a second factor or a user-verified passkey (auth-mfa.ts). */
+  mfaVerified?: boolean;
+  /** An org this user belongs to requires MFA, the grace period is over, and this session hasn't passed it. */
+  mfaPolicyBlocked?: boolean;
 }
 
 export interface ApiKeyRequestActor {
@@ -68,9 +73,15 @@ export async function resolveApiKeyActor(
   return apiKey ? { type: "apiKey", userId: apiKey.userId, apiKey } : null;
 }
 
-export async function resolveBetterAuthSessionActor(headers: Headers): Promise<SessionRequestActor | null> {
+/**
+ * The signed-in browser session, or null. A session blocked by an org's
+ * "require MFA" policy resolves to null unless the caller opts in with
+ * `allowMfaPolicyBlocked` (the API middleware does, to answer 403 mfa_required
+ * instead of a sign-in loop), so every other session consumer fails closed.
+ */
+export async function resolveBetterAuthSessionActor(headers: Headers, options: { allowMfaPolicyBlocked?: boolean } = {}): Promise<SessionRequestActor | null> {
   const session = await auth.api.getSession({ headers }) as {
-    session: { id: string; userId: string };
+    session: { id: string; userId: string; mfaVerified?: boolean | null };
     user: SessionUser;
   } | null;
 
@@ -78,13 +89,19 @@ export async function resolveBetterAuthSessionActor(headers: Headers): Promise<S
     return null;
   }
 
+  const mfaVerified = session.session.mfaVerified === true;
+  const mfaPolicyBlocked = mfaVerified ? false : (await evaluateMfaPolicy(appDbPool, session.user.id, false)).enforced;
+  if (mfaPolicyBlocked && !options.allowMfaPolicyBlocked) return null;
+
   session.user.isAdmin = await isConfiguredAdminUser(appDbPool, session.user.id);
 
   return {
     type: "session",
     userId: session.user.id,
     sessionId: session.session.id,
-    user: session.user
+    user: session.user,
+    mfaVerified,
+    mfaPolicyBlocked
   };
 }
 

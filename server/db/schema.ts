@@ -78,6 +78,10 @@ export const organizations = pgTable(
     retainDocumentVersions: integer("retain_document_versions"),
     /** False keeps China-based model providers out of the org's OpenRouter requests (migration 0086). */
     allowChinaProviders: boolean("allow_china_providers").default(true).notNull(),
+    /** Members must use MFA after their grace period (migration 0091). */
+    requireMfa: boolean("require_mfa").default(false).notNull(),
+    requireMfaSince: timestamp("require_mfa_since", { withTimezone: true, mode: "string" }),
+    mfaGracePeriodDays: integer("mfa_grace_period_days").default(7).notNull(),
     retentionChangedAt: timestamp("retention_changed_at", { withTimezone: true }),
     retentionSweptAt: timestamp("retention_swept_at", { withTimezone: true }),
     name: text().notNull(),
@@ -607,6 +611,8 @@ export const user = pgTable(
     email: text().notNull(),
     emailVerified: boolean().default(false).notNull(),
     image: text(),
+    /** Better Auth twoFactor plugin (migration 0091). */
+    twoFactorEnabled: boolean().default(false).notNull(),
     createdAt: timestamp({ withTimezone: true, mode: "string" })
       .defaultNow()
       .notNull(),
@@ -632,6 +638,10 @@ export const session = pgTable(
     ipAddress: text(),
     userAgent: text(),
     userId: text().notNull(),
+    /** Passed TOTP, a backup code, a trusted device or a user-verified passkey (migration 0091). */
+    mfaVerified: boolean().default(false).notNull(),
+    /** Last proof of identity; copied across re-issues and used for the re-auth window. */
+    authenticatedAt: timestamp({ withTimezone: true, mode: "string" }),
   },
   (table) => [
     index("session_user_id_idx").using(
@@ -644,6 +654,63 @@ export const session = pgTable(
       name: "session_userId_fkey",
     }).onDelete("cascade"),
     unique("session_token_key").on(table.token),
+  ],
+);
+
+/** Better Auth twoFactor plugin: encrypted TOTP secret and backup codes (migration 0091). */
+export const twoFactor = pgTable(
+  "twoFactor",
+  {
+    id: text().primaryKey().notNull(),
+    secret: text().notNull(),
+    backupCodes: text().notNull(),
+    userId: text().notNull(),
+    verified: boolean().default(true),
+    failedVerificationCount: integer().default(0),
+    lockedUntil: timestamp({ withTimezone: true, mode: "string" }),
+  },
+  (table) => [
+    uniqueIndex("twoFactor_userId_key").using("btree", table.userId.asc().nullsLast().op("text_ops")),
+    foreignKey({ columns: [table.userId], foreignColumns: [user.id], name: "twoFactor_userId_fkey" }).onDelete("cascade"),
+  ],
+);
+
+/** @better-auth/passkey credentials (migration 0091). */
+export const passkey = pgTable(
+  "passkey",
+  {
+    id: text().primaryKey().notNull(),
+    name: text(),
+    publicKey: text().notNull(),
+    userId: text().notNull(),
+    credentialID: text().notNull(),
+    counter: integer().notNull(),
+    deviceType: text().notNull(),
+    backedUp: boolean().notNull(),
+    transports: text(),
+    createdAt: timestamp({ withTimezone: true, mode: "string" }).defaultNow(),
+    aaguid: text(),
+    lastUsedAt: timestamp({ withTimezone: true, mode: "string" }),
+  },
+  (table) => [
+    uniqueIndex("passkey_credentialID_key").using("btree", table.credentialID.asc().nullsLast().op("text_ops")),
+    index("passkey_userId_idx").using("btree", table.userId.asc().nullsLast().op("text_ops")),
+    foreignKey({ columns: [table.userId], foreignColumns: [user.id], name: "passkey_userId_fkey" }).onDelete("cascade"),
+  ],
+);
+
+/** TOTP codes already accepted, refused until they expire (migration 0091). */
+export const mfaTotpReplay = pgTable(
+  "mfa_totp_replay",
+  {
+    userId: text("user_id").notNull(),
+    codeDigest: text("code_digest").notNull(),
+    expiresAt: timestamp("expires_at", { withTimezone: true, mode: "string" }).notNull(),
+  },
+  (table) => [
+    primaryKey({ columns: [table.userId, table.codeDigest], name: "mfa_totp_replay_pkey" }),
+    index("mfa_totp_replay_expires_at_idx").using("btree", table.expiresAt.asc().nullsLast().op("timestamptz_ops")),
+    foreignKey({ columns: [table.userId], foreignColumns: [user.id], name: "mfa_totp_replay_user_id_fkey" }).onDelete("cascade"),
   ],
 );
 

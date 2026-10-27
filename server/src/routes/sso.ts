@@ -11,6 +11,7 @@ import { z } from "zod";
 
 import { sql } from "../db.js";
 import { auth } from "../lib/auth.js";
+import { beginTwoFactorChallengeCookie, MFA_CHALLENGE_MAX_AGE_SECONDS, MFA_CHALLENGE_PATH } from "../lib/auth-mfa.js";
 import { openSecret, sealSecret } from "../lib/encryption.js";
 import { requestIp } from "../lib/request-context.js";
 import { assertSafeExternalUrl, safeExternalFetch, UnsafeExternalUrlError } from "../lib/network-security.js";
@@ -726,6 +727,15 @@ async function finishSsoCallback(c: any, identity: SsoAssertedIdentity, requestR
   }
   if (result.kind === "linked") {
     return redirectToApp(c, requestRow.redirect_path ?? "/app/sso?linked=1");
+  }
+  // A user with 2FA on still needs it after company SSO: start the second-factor
+  // challenge instead of issuing a session (the app's sign-in page finishes it).
+  const [twoFactor] = await sql<{ enabled: boolean }[]>`select "twoFactorEnabled" as enabled from "user" where id = ${result.userId}`;
+  if (twoFactor?.enabled) {
+    const authContext = (await auth.$context) as unknown as Parameters<typeof beginTwoFactorChallengeCookie>[0];
+    c.header("set-cookie", await beginTwoFactorChallengeCookie(authContext, result.userId, MFA_CHALLENGE_MAX_AGE_SECONDS), { append: true });
+    const target = new URLSearchParams({ mfa: "required", redirectTo: safeRedirectPath(requestRow.redirect_path ?? "/app", "/app") });
+    return redirectToApp(c, `${MFA_CHALLENGE_PATH}?${target.toString()}`);
   }
   await issueBetterAuthSession(c, result.userId);
   return redirectToApp(c, requestRow.redirect_path ?? "/");

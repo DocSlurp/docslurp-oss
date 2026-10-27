@@ -3,7 +3,7 @@ import type { WorkspaceRecord } from "@docslurp/shared";
 import type { ValidatedKey } from "../services/api-keys.js";
 
 vi.mock("../lib/auth.js", () => ({
-  appDbPool: { query: vi.fn() },
+  appDbPool: { query: vi.fn(async () => ({ rows: [] })) },
   auth: {
     api: {
       getSession: vi.fn()
@@ -71,7 +71,9 @@ describe("request actor helpers", () => {
       type: "session",
       userId: "user-1",
       sessionId: "session-1",
-      user: { id: "user-1", email: "user@example.com", name: "User One", isAdmin: false }
+      user: { id: "user-1", email: "user@example.com", name: "User One", isAdmin: false },
+      mfaVerified: false,
+      mfaPolicyBlocked: false
     });
   });
 
