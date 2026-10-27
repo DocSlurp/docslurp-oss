@@ -28,6 +28,13 @@ def size(values):
     return values
 
 
+def pixel_size(values):
+    if any(isinstance(v,bool) for v in values):raise ValueError('invalid-raster-dimensions')
+    values=size(values)
+    if any(not v.is_integer() for v in values):raise ValueError('invalid-raster-dimensions')
+    return values
+
+
 def parse_poppler_bbox(data):
     # This local harness processes original synthetic inputs only. Entity-bearing
     # XML is unnecessary and rejected even though ElementTree does not fetch DTDs.
@@ -51,17 +58,33 @@ def parse_poppler_bbox(data):
 
 
 def parse_tesseract_tsv(text):
-    rows=list(csv.DictReader(io.StringIO(text),delimiter='\t',quoting=csv.QUOTE_NONE))
+    fields=['level','page_num','block_num','par_num','line_num','word_num','left','top','width','height','conf','text']
+    reader=csv.DictReader(io.StringIO(text),delimiter='\t',quoting=csv.QUOTE_NONE)
+    if reader.fieldnames!=fields:raise ValueError('invalid-ocr-tsv-header')
+    rows=list(reader)
+    if any(set(row)!=set(fields) or any(value is None for value in row.values()) for row in rows):
+        raise ValueError('invalid-ocr-tsv-row-shape')
+    if any(row['level'] not in ['1','2','3','4','5'] for row in rows):
+        raise ValueError('invalid-ocr-tsv-level')
     page_rows=[r for r in rows if r['level']=='1']
     if len(page_rows)!=1:raise ValueError('ocr-word-evidence-page-count')
-    dimensions=size([page_rows[0]['width'],page_rows[0]['height']]);words=[]
+    if any(r['page_num']!='1' for r in rows):raise ValueError('ocr-word-evidence-page-identity')
+    def pixel_integer(value):
+        if not re.fullmatch(r'[0-9]+',value):raise ValueError('invalid-raster-pixel-field')
+        return int(value)
+    dimensions=pixel_size([pixel_integer(page_rows[0][k]) for k in ['width','height']]);words=[]
     for row in rows:
+        level=int(row['level'])
+        hierarchy=[pixel_integer(row[k]) for k in ['block_num','par_num','line_num','word_num']]
+        if any(value<1 if index<level-1 else value!=0 for index,value in enumerate(hierarchy)):
+            raise ValueError('invalid-ocr-tsv-hierarchy')
+        for field in ['left','top','width','height']:pixel_integer(row[field])
         if row['level']!='5' or not row['text'].strip():continue
         confidence=float(row['conf'])
         if not math.isfinite(confidence):raise ValueError('invalid-word-confidence')
         if confidence<0:continue
         if confidence>100:raise ValueError('invalid-word-confidence')
-        x,y,w,h=[float(row[k]) for k in ['left','top','width','height']]
+        x,y,w,h=[pixel_integer(row[k]) for k in ['left','top','width','height']]
         bounds=box([x,y,x+w,y+h])
         if bounds[0]<0 or bounds[1]<0 or bounds[2]>dimensions[0] or bounds[3]>dimensions[1]:
             raise ValueError('ocr-word-evidence-outside-image')
@@ -125,7 +148,8 @@ def normalize_word_evidence(evidence):
         origin={0:[x0,y0],90:[height-y1,x0],180:[width-x1,height-y1],270:[y0,width-x1]}[rotation]
         scale=[1,1]
     elif basis=='tesseract-raster-pixels':
-        render=size(evidence['renderSizePixels']);dpi=float(evidence['renderDpi'])
+        pixel_size(evidence['size'])
+        render=pixel_size(evidence['renderSizePixels']);dpi=float(evidence['renderDpi'])
         if not math.isfinite(dpi) or dpi<=0 or render!=dimensions:
             raise ValueError('inconsistent-render-geometry')
         if any(abs(p-math.ceil(pt*dpi/72))>1 for p,pt in zip(render,display)):

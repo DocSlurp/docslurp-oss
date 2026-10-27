@@ -558,3 +558,17 @@ an actual corrupt-cache lookup exercise this path; all 66 focused evaluator test
 pass. Raw-artifact consistency still does not prove TXT-to-word expression ownership
 or visible support. Formula acceptance remains closed while those contracts are
 developed separately. The independent coordinate audit is still pending.
+
+The completed coordinate audit independently confirmed the bounded rotation/crop
+observations, but found fractional raster dimensions and wrong TSV page numbers
+were accepted. Raster dimensions/pixel fields now require integers; TSV headers,
+row shapes, levels, encoded hierarchy IDs and single-image page ownership are
+validated before evidence derivation. The audit's up-to-0.4-point raster edge
+rounding discrepancy remains unresolved as a verified coordinate contract.
+
+Both round-12 source-only reviewers additionally found cached durations and
+execution metadata unchecked. Cache validation now rejects nonnumeric, boolean,
+nonfinite, negative or inconsistent component/total durations, missing execution
+metadata, unzoned timestamps and invalid worker counts. All 68 focused tests pass,
+including the retained cache, malformed TSV and coordinate negatives. No
+normalization certificate, formula acceptance or savings follows from these fixes.

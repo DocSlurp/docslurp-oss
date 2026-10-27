@@ -108,3 +108,19 @@ controls cover intact/corrupt expressions with a correct quotation elsewhere,
 four native rotations and local OCR. These controls do not certify visibility,
 complete reference declarations or coordinate provenance. Diagnostic matches do
 not change acceptance or permit policy optimization.
+
+## Artifact quality before expansion
+
+The user's quality correction requires a document-centered review before expanding
+the E corpus. Each family needs a clear purpose and audience, coherent development
+across pages, varied original prose, plausible quantities and units, meaningful
+variable definitions, and formulas actually used in the analysis. Tables, figures
+and discussed screenshot insets must support the claims. Sentence-pool substitution
+and semantically empty technical decoration are substantive build misses even when
+geometry and schema checks pass. Arbitrary identifier controls remain regression
+evidence and are excluded from candidate-quality demonstrations.
+
+Within the existing four-round cap, the next fresh Builder must first provide a
+small representative native document preview for editorial and visual inspection.
+This stage consumes formal build work; it does not create unlimited free preview
+rounds, weaken the final full-document checks, or authorize corpus expansion.

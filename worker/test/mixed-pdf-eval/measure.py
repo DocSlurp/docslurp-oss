@@ -10,6 +10,7 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 from difflib import SequenceMatcher
 import hashlib
 import json
+import math
 import os
 import socket
 import uuid
@@ -269,6 +270,22 @@ def validate_ocr_record(record, identity):
     low_share=sum(word['confidence']<60 for word in words)/max(1,len(words))
     if record.get('confidence')!=confidence or record.get('lowConfidenceWordShare')!=low_share:
         raise RuntimeError('ocr-cache-derived-confidence-mismatch')
+    for field in ['seconds','evidenceParseSeconds']:
+        value=record.get(field)
+        if type(value) not in [int,float] or not math.isfinite(value) or value<0:
+            raise RuntimeError('ocr-cache-invalid-duration')
+    if record['evidenceParseSeconds']>record['seconds']:raise RuntimeError('ocr-cache-inconsistent-duration')
+    execution=record.get('execution')
+    if (not isinstance(execution,dict) or set(execution)!={'capturedAt','host','workers','attempt'}
+            or not isinstance(execution['host'],str) or not execution['host'].strip()
+            or (execution['workers'] is not None and (not isinstance(execution['workers'],str)
+                or not re.fullmatch(r'[1-9][0-9]*',execution['workers'])))
+            or (execution['attempt'] is not None and (not isinstance(execution['attempt'],str) or not execution['attempt'].strip()))):
+        raise RuntimeError('ocr-cache-invalid-execution')
+    try:
+        stamp=datetime.fromisoformat(execution['capturedAt'])
+        if stamp.utcoffset() is None:raise ValueError('missing-time-zone')
+    except (TypeError,ValueError):raise RuntimeError('ocr-cache-invalid-execution-time')
 
 
 def ocr(image, cache, dpi, psm, use_cache=True):

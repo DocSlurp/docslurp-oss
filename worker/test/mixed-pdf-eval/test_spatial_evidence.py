@@ -27,6 +27,21 @@ class SpatialEvidenceTests(unittest.TestCase):
         for bad in [self.tsv().replace('\t80\t30\t','\t1800\t30\t'),self.tsv().replace('\t95\t','\tnan\t'),self.tsv()+self.tsv().splitlines()[1]+'\n']:
             with self.assertRaises(ValueError):parse_tesseract_tsv(bad)
 
+    def test_ocr_requires_integer_pixels_and_single_image_page_identity(self):
+        for bad in [self.tsv().replace('\t80\t30\t','\t80.5\t30\t'),
+                    self.tsv().replace('\t1200\t1600\t','\t1200.25\t1600\t'),
+                    self.tsv().replace('5\t1\t2\t','5\t99\t2\t'),
+                    self.tsv().replace('1\t1\t0\t','1\t99\t0\t')]:
+            with self.assertRaises(ValueError):parse_tesseract_tsv(bad)
+
+    def test_ocr_rejects_malformed_rows_levels_and_hierarchy(self):
+        for bad in [self.tsv()+'bogus\tgarbage\n',
+                    self.tsv().rstrip()+'\textra\n',
+                    self.tsv().replace('5\t1\t2\t','6\t1\t2\t'),
+                    self.tsv().replace('5\t1\t2\t','5\t1\t0\t'),
+                    self.tsv().replace('level\tpage_num','level\tother')]:
+            with self.assertRaises(ValueError):parse_tesseract_tsv(bad)
+
     def page(self):
         return dict(sizePt=[792,612],blocks=[dict(id='rule',visible=True,formula=dict(display='q'),
                     bboxPt=[1,2,3,4],glyphs=[dict(id='g',visible=True,text='q')])],
@@ -74,3 +89,5 @@ class SpatialEvidenceTests(unittest.TestCase):
         for field,value in [('renderSizePixels',[200,100]),('renderDpi',72)]:
             changed=copy.deepcopy(data);changed[field]=value
             with self.assertRaises(ValueError):normalize_word_evidence(changed)
+        changed=copy.deepcopy(data);changed['size']=[100.25,200];changed['renderSizePixels']=[100.25,200]
+        with self.assertRaisesRegex(ValueError,'invalid-raster-dimensions'):normalize_word_evidence(changed)

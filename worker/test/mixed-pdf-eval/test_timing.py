@@ -32,6 +32,15 @@ class TimingTests(unittest.TestCase):
                 for mutate in mutations:
                     broken=copy.deepcopy(first);mutate(broken)
                     with self.assertRaises(RuntimeError):validate_ocr_record(broken,first['ocrIdentity'])
+                for field in ['seconds','evidenceParseSeconds']:
+                    for bad in [-9,float('nan'),float('inf'),None,'bad',True]:
+                        broken=copy.deepcopy(first);broken[field]=bad
+                        with self.assertRaises(RuntimeError):validate_ocr_record(broken,first['ocrIdentity'])
+                for change in [dict(evidenceParseSeconds=first['seconds']+1),dict(execution=None),
+                               dict(execution={**first['execution'],'capturedAt':'2026-10-27T00:00:00'}),
+                               dict(execution={**first['execution'],'workers':'0'})]:
+                    broken=copy.deepcopy(first);broken.update(change)
+                    with self.assertRaises(RuntimeError):validate_ocr_record(broken,first['ocrIdentity'])
                 # A real cache lookup rejects a corrupt record without invoking
                 # OCR or overwriting the retained failure.
                 record_path=next(Path(tmp).glob('*.json'))
