@@ -11,6 +11,7 @@ import {
   cleanupTempFile,
   sourceStorageKey
 } from "../tools/storage.js";
+import { runArtifactRoot } from "../lib/artifact-root.js";
 import type { CommandRunner } from "../tools/runner.js";
 import { trustedTempDownloadPattern } from "../lib/temp-file-names.js";
 
@@ -29,7 +30,7 @@ export class QuarantineStage implements Stage {
     }
 
     await runDocuments(healthyDocuments(state), state.docConcurrency, async (document) => {
-      const key = buildArtifactStorageKey(document.userId, state.run.id, "quarantine", `${document.id}.json`);
+      const key = buildArtifactStorageKey(...runArtifactRoot(state.run, document.userId).split("/"), "quarantine", `${document.id}.json`);
       const artifactSlot = `${document.id}:quarantine`;
 
       await runDocumentStage(

@@ -4,6 +4,7 @@ import { healthyDocuments } from "../pipeline/document-health.js";
 import { PdfSourceCache } from "../pipeline/pdf-asset-cache.js";
 import type { ArtifactStore } from "../tools/storage.js";
 import { maxInt } from "./utils.js";
+import { runArtifactRoot } from "../lib/artifact-root.js";
 
 /**
  * Builds a reusable virtual-page index without eagerly writing N single-page
@@ -23,7 +24,7 @@ export class SplitPagesStage implements Stage {
     await runDocuments(healthyDocuments(state), state.docConcurrency, async (document) => {
       const pageCount = maxInt(1, document.pageCount);
       pagesTotal += pageCount;
-      const key = `${document.userId}/${state.run.id}/pages/${document.id}/manifest.json`;
+      const key = `${runArtifactRoot(state.run, document.userId)}/pages/${document.id}/manifest.json`;
       const artifactSlot = `${document.id}:pages`;
 
       await runDocumentStage(

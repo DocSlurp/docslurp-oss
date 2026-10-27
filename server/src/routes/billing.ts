@@ -36,6 +36,7 @@ import { requestIp, requestUserAgent } from "../lib/request-context.js";
 import { apiStatusError } from "../lib/api-error.js";
 import { validationHook } from "../lib/validation.js";
 import { authenticatedByRoute } from "../lib/route-auth.js";
+import { extractUsageTotals } from "../services/usage-attribution.js";
 
 const orgOnlySchema = z.object({ orgId: z.string().optional() });
 
@@ -232,6 +233,16 @@ export const billingRoutes = new Hono()
       return apiStatusError(c, 404, "No organization found");
     }
     return c.json(await getUsageBreakdown(org.id));
+  })
+  // Extract mode on its own: extracts, pages, credits charged (retention included) and pages per $1.
+  .get("/usage/extracts", async (c) => {
+    const userId = c.get("sessionUser").id;
+    const org = await resolveBillingOrganization(userId, c.req.query("orgId"));
+    if (!org) {
+      return apiStatusError(c, 404, "No organization found");
+    }
+    const since = c.req.query("window") === "all" ? null : "month";
+    return c.json({ window: since ?? "all", ...(await extractUsageTotals(org.id, since)) });
   })
   .get("/usage/jobs", async (c) => {
     const userId = c.get("sessionUser").id;

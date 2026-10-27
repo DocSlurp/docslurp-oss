@@ -80,5 +80,6 @@ export { documentTagsSchema } from "./document-tags.js";
 
 export * from "./page-render.js";
 export * from "./document-export.js";
+export * from "./extract-mode.js";
 
 export * from "./workspace-settings-proposal.js";
