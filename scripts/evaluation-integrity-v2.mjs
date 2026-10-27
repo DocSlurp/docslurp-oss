@@ -25,7 +25,27 @@ const list = (value, max, empty = false) => {
 };
 const digest = value => /^[a-f0-9]{64}$/.test(value ?? '');
 const pointerPart = value => value.replace(/~/g, '~0').replace(/\//g, '~1');
-const pattern = value => new RegExp(`(?<![\\p{L}\\p{N}_])${value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![\\p{L}\\p{N}_])`, 'giu');
+const literalSource = value => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+const pattern = value => new RegExp(`(?<![\\p{L}\\p{N}_])${literalSource(value)}(?![\\p{L}\\p{N}_])`, 'giu');
+
+// At most three members: enumerate the <=6 literal layouts, including the
+// separators required by the same word boundaries used during scanning. This
+// proves only a representable literal window, never a semantic association.
+function feasibleUnit(texts) {
+  const width = texts.reduce((sum, text) => sum + text.length, 0);
+  if (width > LIMITS.spanChars) return false;
+  const newlines = texts.reduce((sum, text) => sum + text.split('\n').length - 1, 0);
+  const fits = (order, remaining) => {
+    if (remaining.length) return remaining.some((text, i) => fits([...order, text], remaining.filter((_, j) => i !== j)));
+    const separators = order.slice(1).reduce((sum, text, i) => sum
+      + Number(/[\p{L}\p{N}_]$/iu.test(order[i]) || /^[\p{L}\p{N}_]/iu.test(text)), 0);
+    // The runtime counts lines through the last included code unit (end - 1).
+    // A final LF therefore does not add another occupied physical line.
+    const lines = newlines + 1 - Number(order.at(-1).endsWith('\n'));
+    return width + separators <= LIMITS.spanChars && lines <= LIMITS.spanLines;
+  };
+  return fits([], texts);
+}
 
 // JSON.parse alone discards duplicate keys. Parse with a bounded grammar first;
 // duplicate, oversized and deeply nested contracts must not lose provenance.
@@ -127,14 +147,25 @@ export function projectLabels(contract) {
   }
   if (fields.size !== leaves.size) fail('incomplete-field-accounting');
   if (![...fields.values()].some(field => field.role === 'answer')) fail('missing-answer-target');
-  const units = [], covered = new Set(), signatures = new Set();
+  const units = [], covered = new Set(), signatures = new Set(), rowAnchors = new Map();
+  let validationWork = 0;
+  const equivalent = (left, right, whole = false) => {
+    validationWork += left.length + right.length;
+    if (validationWork > LIMITS.contextWork) fail('resource-limit');
+    // Use /iu literal equivalence, exactly as the scanner does, without its
+    // boundaries for conservative substring rejection. Locale lowercasing is
+    // not equivalent (e.g. long s and ASCII s). Whole matches identify rows.
+    const source = whole ? `^(?:${literalSource(left)})(?![\\s\\S])` : literalSource(left);
+    return new RegExp(source, 'iu').test(right);
+  };
   const add = (kind, pointers) => {
     if (new Set(pointers).size !== pointers.length || pointers.some(p => !fields.has(p))) fail('invalid-unit-provenance');
     const parts = pointers.map(p => fields.get(p));
     if (parts.some(p => !['content', 'answer'].includes(p.role)) || !parts.some(p => p.role === 'answer')) fail('invalid-unit-roles');
     // Repeated or substring-equivalent members cannot prove an association.
-    const texts = parts.map(p => p.text.toLocaleLowerCase('en-US'));
-    if (texts.some((text, i) => texts.some((other, j) => i !== j && other.includes(text)))) fail('ambiguous-unit-members');
+    const texts = parts.map(p => p.text);
+    if (texts.some((text, i) => texts.some((other, j) => i !== j && equivalent(text, other)))) fail('ambiguous-unit-members');
+    if (!feasibleUnit(texts)) fail('infeasible-evidence-unit');
     const signature = JSON.stringify([kind, ...pointers]);
     if (signatures.has(signature)) fail('duplicate-evidence-unit');
     signatures.add(signature); pointers.forEach(p => covered.add(p));
@@ -145,6 +176,12 @@ export function projectLabels(contract) {
     switch (unit.kind) {
       case 'row':
         exact(unit, ['kind', 'anchor', 'values']); list(unit.values, 16);
+        if (!fields.has(unit.anchor)) fail('invalid-unit-provenance');
+        if (!rowAnchors.has(unit.anchor)) {
+          const text = fields.get(unit.anchor).text;
+          if ([...rowAnchors.values()].some(other => equivalent(text, other, true))) fail('ambiguous-row-identity');
+          rowAnchors.set(unit.anchor, text);
+        }
         for (const pointer of unit.values) add('row', [unit.anchor, pointer]);
         break;
       case 'header-value':
@@ -300,7 +337,12 @@ export function judgeIntegrityV2({ dataset, repo = process.cwd(), base = 'HEAD' 
       };
       const occurrences = new Map();
       for (const [value, details] of terms) {
-        for (const found of text.matchAll(pattern(value))) {
+        const expression = pattern(value);
+        for (let found; (found = expression.exec(text));) {
+          // Resume beyond the previous start, not its end: every boundary-valid
+          // self-overlap remains evidence. Advance a full code point under /u.
+          expression.lastIndex = found.index + (text.codePointAt(found.index) > 0xffff ? 2 : 1);
+          work += found[0].length; if (work > LIMITS.scanWork) fail('resource-limit');
           const position = { offset: found.index, end: found.index + found[0].length,
             line: lineAt(found.index), evidenceHash: hash(found[0]) };
           for (const detail of details) {

@@ -255,3 +255,174 @@ test('NUL-bearing files cannot disable distinctive answer or ID recognition', t 
   assert.ok(rules(report).includes('fixture-identifier'));
   assert.ok(report.observations.some(o => o.decoding === 'utf8-replacement'));
 });
+
+// R1 evidence below is copied from the two explicitly authorized, invented-only
+// council reviews. No test reads those reports or any external evaluation input.
+const methodsR1Projection = (item = 'Birch valve', status = 'Ready For Dispatch') => ({
+  schema: 'docslurp-integrity-projection@v2', document: { author: 'Methods Draft Group', item, status },
+  fields: [{ pointer: '/author', role: 'metadata' }, { pointer: '/item', role: 'content', match: 'contextual' },
+    { pointer: '/status', role: 'answer', match: 'contextual' }],
+  units: [{ kind: 'row', anchor: '/item', values: ['/status'] }],
+});
+const adversarialR1Projection = (item = 'Copper valve', value = 'Ready for shipment') => ({
+  schema: 'docslurp-integrity-projection@v2', document: { item, value },
+  fields: [{ pointer: '/item', role: 'content', match: 'contextual' }, { pointer: '/value', role: 'answer', match: 'contextual' }],
+  units: [{ kind: 'header-value', header: '/item', value: '/value' }],
+});
+
+test('R1 P1 exact supplied impossible units refuse before scanning clean or copied text', t => {
+  const cases = [
+    ['methods single width', methodsR1Projection('Scope', 'calibrated '.repeat(28).trim()), p => 'Scope: ' + p.document.status],
+    ['methods combined width', methodsR1Projection('a'.repeat(140), 'b'.repeat(140)), p => p.document.item + ' ' + p.document.status],
+    ['methods single lines', methodsR1Projection('Scope', 'first\nsecond\nthird\nfourth'), p => 'Scope: ' + p.document.status],
+    ['methods combined lines', methodsR1Projection('first\nsecond', 'third\nfourth\nfifth'), p => p.document.item + ' ' + p.document.status],
+    ['adversarial single width', adversarialR1Projection('Copper valve', 'copper '.repeat(45).trim()), p => '// ' + p.document.item + ': ' + p.document.value],
+    ['adversarial combined width', adversarialR1Projection('a'.repeat(130), 'b'.repeat(130)), p => '// ' + p.document.item + ' ' + p.document.value],
+    ['adversarial single lines', adversarialR1Projection('Copper valve', 'one\ntwo\nthree\nfour'), p => p.document.item + '\n' + p.document.value],
+  ];
+  for (const [name, projection, copy] of cases) {
+    const f = setup(t); f.contract = projection; f.save();
+    for (const text of ['export const generic = true;', copy(projection)]) {
+      f.write(text); const report = f.run();
+      assert.deepEqual(rules(report), ['infeasible-evidence-unit'], name);
+      assert.equal(report.scannedFiles, 0, name); assert.equal(report.observations.length, 0, name);
+    }
+  }
+});
+
+test('R1 P1 feasibility includes required boundary separators and UTF16 widths', t => {
+  for (const [item, value] of [
+    ['a'.repeat(128), 'b'.repeat(128)], // Width 256 still needs a separating code unit.
+    ['😀'.repeat(65), 'b'.repeat(130)], // 260 UTF16 units, not 195 code points.
+    ['\u0345' + '!'.repeat(126) + '\u0345', '?'.repeat(128)], // /iu requires a gap in either order.
+  ]) {
+    const f = setup(t); f.contract = adversarialR1Projection(item, value); f.save();
+    assert.deepEqual(rules(f.run()), ['infeasible-evidence-unit']);
+  }
+  for (const [item, value, separator] of [
+    ['a'.repeat(128), 'b'.repeat(127), ' '], // Exactly 256 with the necessary gap.
+    ['.'.repeat(128), ','.repeat(128), ''], // Nonword boundaries can touch at 256.
+    ['?'.repeat(128), '!'.repeat(127) + '\u0345', ''], // Only this ordering fits without a gap.
+    ['😀'.repeat(64), 'b'.repeat(127), ' '],
+    ['first\nsecond', 'third\nfourth', ' '], // Combined exactly three occupied lines.
+    ['Copper valve', 'one\ntwo\nthree\n', ' '], // Terminal LF occupies the preceding line.
+    ['first\nsecond', 'third\nfourth\n', ' '],
+  ]) {
+    const f = setup(t); f.contract = adversarialR1Projection(item, value); f.save();
+    assert.equal(f.run().passed, true, JSON.stringify([item, value]));
+    f.write(item + separator + value);
+    assert.ok(rules(f.run()).includes('contextual-answer'), JSON.stringify([item, value]));
+  }
+  const f = setup(t);
+  f.contract = methodsR1Projection('Scope', 'This sentence contains a deliberately distinctive complete invented semantic answer for review.'); f.save();
+  assert.equal(f.run().passed, true);
+  f.write('Scope: ' + f.contract.document.status); assert.ok(rules(f.run()).includes('contextual-answer'));
+});
+
+test('R1 P1 all unit kinds validate feasibility even when other units already cover their fields', () => {
+  const p = adversarialR1Projection('a'.repeat(130), 'b'.repeat(130));
+  for (const unit of [
+    { kind: 'row', anchor: '/item', values: ['/value'] },
+    { kind: 'header-value', header: '/item', value: '/value' },
+    { kind: 'equation', label: '/item', expression: '/value' },
+  ]) {
+    p.units = [unit]; assert.throws(() => projectLabels(p), /infeasible-evidence-unit/);
+  }
+  const graph = { schema: 'docslurp-integrity-projection@v2', document: { from: 'a'.repeat(90), relation: 'b'.repeat(90), to: 'c'.repeat(90) },
+    fields: ['from', 'relation', 'to'].map(key => ({ pointer: '/' + key, role: key === 'relation' ? 'answer' : 'content', match: 'contextual' })),
+    units: [{ kind: 'graph', from: '/from', relation: '/relation', to: '/to' }] };
+  assert.throws(() => projectLabels(graph), /infeasible-evidence-unit/);
+  graph.document = { from: 'first\nsecond', relation: 'third\nfourth', to: 'fifth\nsixth' };
+  assert.throws(() => projectLabels(graph), /infeasible-evidence-unit/);
+  p.document.extra = 'scope'; p.fields.push({ pointer: '/extra', role: 'content', match: 'contextual' });
+  p.units = [{ kind: 'header-value', header: '/extra', value: '/value' }, { kind: 'header-value', header: '/item', value: '/value' }];
+  assert.throws(() => projectLabels(p), /infeasible-evidence-unit/, 'one feasible unit cannot excuse an impossible declaration');
+});
+
+test('R1 P2 exact go go self-overlaps remain observations near and at the window edge', t => {
+  const f = setup(t); f.contract = adversarialR1Projection('go go', 'Ready'); f.save();
+  for (const text of ['go go go Ready', 'go go go' + '.'.repeat(246) + 'Ready']) {
+    f.write(text); const report = f.run();
+    assert.deepEqual(report.observations.filter(o => o.pointer === '/item').map(o => o.offset), [0, 3]);
+    assert.ok(rules(report).includes('contextual-answer'));
+    if (text.includes('.')) {
+      const finding = report.findings.find(f => f.rule === 'contextual-answer');
+      assert.equal(report.observations[finding.observations[0]].offset, 3);
+    }
+  }
+  for (const text of ['go go go', 'go go go' + '.'.repeat(247) + 'Ready']) {
+    f.write(text); const report = f.run(); assert.equal(report.passed, true);
+    assert.deepEqual(report.observations.filter(o => o.pointer === '/item').map(o => o.offset), [0, 3]);
+  }
+});
+
+test('R1 P2 exact aba aba overlap bypass and shifted positive block; distant counterpart stays observable', t => {
+  const f = setup(t); f.contract = methodsR1Projection('aba aba', 'z'); f.save();
+  f.write('aba aba aba' + ' '.repeat(245) + 'z');
+  const report = f.run();
+  assert.deepEqual(report.observations.filter(o => o.pointer === '/item').map(o => o.offset), [0, 4]);
+  const finding = report.findings.find(f => f.rule === 'contextual-answer'); assert.ok(finding);
+  assert.equal(report.observations[finding.observations[0]].offset, 4);
+  assert.equal(report.observations[finding.observations[1]].offset, 256);
+  f.write('aba aba' + ' '.repeat(249 - 7) + 'z'); assert.ok(rules(f.run()).includes('contextual-answer'));
+  f.write('aba aba aba' + ' '.repeat(249) + 'z');
+  const distant = f.run(); assert.equal(distant.passed, true);
+  assert.deepEqual(distant.observations.filter(o => o.pointer === '/item').map(o => o.offset), [0, 4]);
+});
+
+test('R1 P2 overlapping enumeration respects Unicode starts, literal boundaries and the observation budget', t => {
+  const f = setup(t); f.contract = adversarialR1Projection('😀 😀', 'Ready'); f.save();
+  f.write('😀 😀 😀 Ready'); const report = f.run();
+  assert.ok(rules(report).includes('contextual-answer'));
+  assert.deepEqual(report.observations.filter(o => o.pointer === '/item').map(o => o.offset), [0, 3]);
+  f.contract = adversarialR1Projection('go go', 'Ready'); f.save();
+  f.write('xgo go gox');
+  assert.equal(f.run().observations.filter(o => o.pointer === '/item').length, 0);
+  f.write('go '.repeat(LIMITS.observations + 2) + 'go'); const limited = f.run();
+  assert.ok(rules(limited).includes('resource-limit')); assert.equal(limited.observations.length, LIMITS.observations);
+});
+
+function repeatedR1Rows(item = 'Birch valve', secondItem = item, firstStatus = 'Ready For Dispatch') {
+  return { schema: 'docslurp-integrity-projection@v2', document: { rows: [{ item, status: firstStatus }, { item: secondItem, status: 'Blocked' }] },
+    fields: [0, 1].flatMap(i => [{ pointer: `/rows/${i}/item`, role: 'content', match: 'contextual' }, { pointer: `/rows/${i}/status`, role: 'answer', match: 'contextual' }]),
+    units: [0, 1].map(i => ({ kind: 'row', anchor: `/rows/${i}/item`, values: [`/rows/${i}/status`] })) };
+}
+
+test('R1 methods P2 indistinguishable row identities fail before clean or contaminated scans', t => {
+  for (const p of [repeatedR1Rows(), repeatedR1Rows('Copper valve', 'Copper valve', 'Ready'),
+    repeatedR1Rows('Birch valve', 'BIRCH VALVE'), repeatedR1Rows('soup valve', 'ſoup valve')]) {
+    const f = setup(t); f.contract = p; f.save();
+    for (const text of ['export const generic = true;', p.document.rows[0].item + ': ' + p.document.rows[0].status]) {
+      f.write(text); const report = f.run(); assert.deepEqual(rules(report), ['ambiguous-row-identity']);
+      assert.equal(report.scannedFiles, 0); assert.equal(report.observations.length, 0);
+    }
+  }
+  for (const p of [repeatedR1Rows('Birch valve east', 'Birch valve west'), repeatedR1Rows('soup valve east', 'ſoup valve west')]) {
+    const f = setup(t); f.contract = p; f.save(); assert.equal(f.run().passed, true);
+    f.write(p.document.rows[0].item + ': ' + p.document.rows[0].status); assert.ok(rules(f.run()).includes('contextual-answer'));
+  }
+});
+
+test('R1 methods P2 ambiguity uses the literal matcher Unicode equivalence, not locale lowercasing', t => {
+  for (const [item, status] of [['soup', 'ſoup'], ['ſoup', 'soup'], ['Kelp', 'kelp'], ['σoup', 'ςoup']]) {
+    const f = setup(t); f.contract = methodsR1Projection(item, status); f.save();
+    for (const text of ['export const generic = true;', item]) {
+      f.write(text); const report = f.run(); assert.deepEqual(rules(report), ['ambiguous-unit-members']); assert.equal(report.scannedFiles, 0);
+    }
+  }
+  for (const [item, status] of [['soup', 'ſalad'], ['soup.', 'soup?'], ['İoup', 'ioup']]) {
+    const f = setup(t); f.contract = methodsR1Projection(item, status); f.save();
+    assert.equal(f.run().passed, true);
+    f.write(item + ' ' + status); assert.ok(rules(f.run()).includes('contextual-answer'));
+  }
+  const f = setup(t); f.contract = methodsR1Projection('ſalad', 'ready'); f.save();
+  f.write('SALAD: READY'); assert.ok(rules(f.run()).includes('contextual-answer'), 'Unicode literal case folding remains active');
+});
+
+test('R1 methods P2 repeated-row validation has a fail-closed comparison budget', () => {
+  const rows = Array.from({ length: 400 }, (_, i) => ({ item: `Unique row ${i}`, status: 'Ready' }));
+  const p = { schema: 'docslurp-integrity-projection@v2', document: { rows },
+    fields: rows.flatMap((_, i) => [{ pointer: `/rows/${i}/item`, role: 'content', match: 'contextual' }, { pointer: `/rows/${i}/status`, role: 'answer', match: 'contextual' }]),
+    units: rows.map((_, i) => ({ kind: 'row', anchor: `/rows/${i}/item`, values: [`/rows/${i}/status`] })) };
+  assert.throws(() => projectLabels(p), /resource-limit/);
+});

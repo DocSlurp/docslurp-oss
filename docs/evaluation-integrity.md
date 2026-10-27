@@ -191,7 +191,22 @@ them in v2.
 Every contextual field must participate in at least one supported unit. Each
 expanded unit has distinct existing pointers, only content/answer roles, and at
 least one answer. Repeated or substring-equivalent member values are rejected as
-ambiguous. There are exactly four unit shapes (no extra keys):
+`ambiguous-unit-members`, using the same `/iu` Unicode literal equivalence as the
+scanner, conservatively without word boundaries. Locale lowercasing is not an
+equivalent test: `soup` and `ſoup`, for example, are indistinguishable to `/iu`.
+
+Before a unit counts toward contextual coverage, validation enumerates its at most
+six literal orderings. At least one must fit the unchanged 256 UTF-16 code-unit /
+three-line window with **disjoint** members. The width includes the members plus
+any single-space gaps required by the matcher's Unicode word boundaries. The line
+lower bound counts embedded LF characters; if the last member ends with LF, that
+terminal LF occupies the preceding line, matching the scanner's `end - 1`
+convention. No source text is inspected to make this decision. An unsupported
+layout refuses with `infeasible-evidence-unit`, even if other feasible units cover
+its fields. Passing this check establishes only that a literal arrangement could
+fit the window; it does not establish semantic relevance.
+
+There are exactly four unit shapes (no extra keys):
 
 ```json
 [
@@ -208,12 +223,21 @@ pointer must be present and classified. A row expands into **one pair per cell**
 its association; an equation counter alone does not implicate unrelated code.
 A graph requires all three members. Define separate units for independently
 meaningful partial associations instead of assuming graph inference. If a row
-identity repeats across rows, author enough explicit context as visible values to
-separate the associations, or reject that representation pending a new contract.
+identity repeats across rows, the representation must supply distinguishing
+visible identity text. Within a projection, distinct anchor pointers with `/iu`-
+equivalent complete values refuse as `ambiguous-row-identity` before repository
+scanning, even on clean code. The same anchor pointer may protect multiple cells
+of one row. Extra fields elsewhere do not disambiguate an identity automatically;
+this contract has no implicit multi-field identity or inferred row semantics.
 
 Matching is case-insensitive literal matching with Unicode letter/number/underscore
 boundaries. All members must have nonoverlapping occurrences within **256 UTF-16
-code units and three physical lines**, in any order. The scan uses anchored windows,
+code units and three occupied LF-delimited lines**, in any order. Every boundary-
+valid occurrence start is enumerated, including self-overlaps (`go go` in `go go go`
+has starts 0 and 3). Iteration advances by one Unicode code point from the previous
+start, rather than past the previous match. Every occurrence is recorded under
+the observation/work limits; exhausting a limit refuses instead of omitting
+candidates from a passing report. The scan uses anchored windows,
 not Cartesian products or whole-file cooccurrence. It does not normalize equation
 syntax, infer table geometry, understand graph direction, decode escaped strings,
 or infer synonyms. A contextual finding means literal proximity under an authored
@@ -256,13 +280,25 @@ Fixed fail-closed limits (no per-run weakening) are exported as `LIMITS`:
 - 50,000 aggregate term/provenance associations, 20,000 repository files,
   50,000 candidate observations, and 2 billion scan-work units (text code units
   multiplied by distinct literal count, summed across files; empty files count as
-  one code unit), plus 2 million contextual search steps/comparisons.
+  one code unit, plus matched code units including overlaps). Projection validation
+  independently has a 2 million code-unit comparison budget (the sum of source
+  and target literal widths for each ambiguity comparison); runtime contextual
+  search has a separate 2 million step/comparison budget. Both use `contextWork`;
+  neither budget can be weakened per run.
 - Files must be regular files or symlinks resolving to regular files within their
   permitted root. Escaping/dangling repository symlinks block. Text files without
   NUL bytes must decode as UTF-8. NUL-bearing files also receive literal checks
   after UTF-8 decoding with invalid sequences replaced, explicitly recorded as
   `utf8-replacement`; adding a binary marker cannot disable ID/answer recognition. Invalid/unsupported inputs or a limit reached always block, never truncate
   evidence into a passing verdict.
+
+R1 regressions use only the reviewers' explicitly supplied invented controls:
+impossible individual/combined widths and line counts; `go go` and `aba aba`
+overlap window edges; repeated row identities; and Unicode literal-equivalence
+collisions. Benign counterparts retain distant occurrences, distinct row
+identities, feasible boundary layouts and metadata observations. These checks do
+not make proximity proof of a semantic dependency: unrelated nearby literals can
+still refuse, while semantic copies beyond the literal window can pass.
 
 Authored eval artifacts are trusted source inputs. This validation cannot prove
 that an author faithfully included every visible source value or correctly marked
