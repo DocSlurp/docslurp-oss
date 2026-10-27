@@ -472,3 +472,53 @@ describe("ingest report: summary escaping", () => {
     expect(escapeMarkdown("inspection-2025.pdf")).toBe("inspection-2025.pdf");
   });
 });
+
+describe("ingest report: run-scoped file items", () => {
+  const base = (runId: string | null, documents: Input["documents"], extra: Partial<Input> = {}) => {
+    const report = buildIngestReport({
+      workspace: { id: "ws-1", name: "Contracts", pipeline: pipeline() },
+      scope: { runId, documentIds: null, matchedDocuments: documents.length },
+      documents,
+      pageDetailDocumentIds: documents.map((entry) => entry.id),
+      pages: [], stages: [],
+      runs: [{ id: "run-1", status: "completed", pagesProcessed: 4, durationMs: 61_234.6 }],
+      costCents: 1, canEdit: true, now: new Date("2026-10-14T12:00:00.000Z"),
+      ...extra,
+    });
+    expect(ingestReportSchema.parse(report)).toEqual(report);
+    return report;
+  };
+
+  it("omits items and run without a runId", () => {
+    const report = base(null, [doc("a")]);
+    expect(report.files.items).toBeUndefined();
+    expect(report.run).toBeUndefined();
+  });
+
+  it("lists per-file status, pages, searchable pages and a safe failure summary", () => {
+    const report = base("run-1", [
+      doc("ok"),
+      doc("queued", { status: "queued", pageCount: 0 }),
+      doc("busy", { status: "processing" }),
+      doc("bad", { status: "failed", pageCount: 0 }),
+    ], {
+      pages: pages("ok", [{ text: 2000, images: 0, chunks: 1 }, { text: 2000, images: 0, chunks: 1 }]),
+      stages: [{ documentId: "bad", stage: "parse", status: "failed", skipped: false, reason: "s3://bucket/secret-key", selectedPages: null, pages: null, costCents: null, tablePages: null, durationSeconds: null }],
+    });
+    const byId = Object.fromEntries(report.files.items!.map((item) => [item.documentId, item]));
+    expect(byId.ok).toMatchObject({ status: "completed", pages: 4, searchablePages: 2, error: null, filename: "ok.pdf" });
+    expect(byId.queued).toMatchObject({ status: "queued", pages: null });
+    expect(byId.busy.status).toBe("processing");
+    expect(byId.bad).toMatchObject({ status: "failed", error: "Failed during parse" });
+    expect(JSON.stringify(report.files.items)).not.toContain("secret-key");
+    expect(report.run).toEqual({ id: "run-1", status: "completed", durationMs: 61_235 });
+  });
+
+  it("bounds items to 50 and reports a null run when not found or still running", () => {
+    const many = Array.from({ length: 60 }, (_, i) => doc(`d${i}`));
+    expect(base("run-1", many).files.items).toHaveLength(50);
+    expect(base("run-x", [doc("a")]).run).toBeNull();
+    const running = base("run-1", [doc("a")], { runs: [{ id: "run-1", status: "processing", pagesProcessed: 0, durationMs: 5000 }] });
+    expect(running.run).toEqual({ id: "run-1", status: "processing", durationMs: null });
+  });
+});

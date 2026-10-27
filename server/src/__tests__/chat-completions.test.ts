@@ -107,6 +107,7 @@ describe("OpenAI-compatible workspace chat", () => {
   it.each([
     ["ClientKeyWorkspacesRequiredError", "client_key_workspaces_required"],
     ["ClientKeyOriginNotAllowedError", "client_key_origin_not_allowed"],
+    ["ApiKeyIpNotAllowedError", "api_key_ip_not_allowed"],
   ] as const)("answers a browser key refused by %s with an OpenAI-shaped 403 permission_error, not invalid_api_key", async (errorName, code) => {
     const keys = await import("../services/api-keys.js");
     validateApiKey.mockRejectedValueOnce(new keys[errorName]());
@@ -114,7 +115,7 @@ describe("OpenAI-compatible workspace chat", () => {
     expect(response.status).toBe(403);
     const body = await response.json() as { error: { type: string; code: string; message: string } };
     expect(body.error).toMatchObject({ type: "permission_error", code });
-    expect(body.error.message).toMatch(code === "client_key_workspaces_required" ? /workspaces/ : /allowed websites/);
+    expect(body.error.message).toMatch(code === "client_key_workspaces_required" ? /workspaces/ : code === "api_key_ip_not_allowed" ? /IP allowlist/ : /allowed websites/);
     expect(chatWorkspace).not.toHaveBeenCalled();
   });
   it("answers a full chat-concurrency cap with an OpenAI-shaped 429 and frees the slot after the stream", async () => {

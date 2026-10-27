@@ -303,6 +303,27 @@ describe("chatWorkspace", () => {
     }
   });
 
+  it.each([
+    { name: "browser key, default cap", keyType: "client", cap: undefined, requested: 4000, expected: 1000 },
+    { name: "browser key, 500 cap", keyType: "client", cap: 500, requested: undefined, expected: 500 },
+    { name: "server key, 2000 cap", keyType: "server", cap: 2000, requested: 4000, expected: 2000 },
+    { name: "server key, below its cap", keyType: "server", cap: 2000, requested: 300, expected: 300 },
+    { name: "server key, no cap", keyType: "server", cap: null, requested: 4000, expected: 4000 },
+  ])("never lets the model write more output than the key allows ($name)", async ({ keyType, cap, requested, expected }) => {
+    sqlMock.mockResolvedValue([]);
+    getWorkspace.mockResolvedValue({ id: "ws-1", orgId: "org-1", systemPrompt: null });
+    runChatMcpAgent.mockResolvedValue({ answer: "Answer.", citations: [], toolCalls: [], finishReason: "stop", usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2, costCents: 0 } });
+    const previous = process.env.OPENROUTER_API_KEY;
+    process.env.OPENROUTER_API_KEY = "fake";
+    try {
+      const actor = { type: "apiKey", userId: "user-1", apiKey: { keyId: "k", userId: "user-1", orgId: "org-1", keyType, scopes: ["search", "chat"], workspaceIds: ["ws-1"], allowedDomains: [], rateLimitRpm: null, rateLimitPpd: 0, rateLimits: [], ...(cap === undefined ? {} : { maxOutputTokens: cap }) } } as never;
+      await chatWorkspace({ workspaceId: "ws-1", userId: "user-1", query: "Find evidence", history: [], actor, ...(requested ? { maxOutputTokens: requested } : {}) });
+      expect((runChatMcpAgent.mock.calls.at(-1)![0] as { maxOutputTokens: number }).maxOutputTokens).toBe(expected);
+    } finally {
+      if (previous === undefined) delete process.env.OPENROUTER_API_KEY; else process.env.OPENROUTER_API_KEY = previous;
+    }
+  });
+
   it("tells the agent exactly which search setting the message changed, and that it is thread-only", async () => {
     sqlMock.mockResolvedValue([]);
     getWorkspace.mockResolvedValue({ id: "ws-1", orgId: "org-1", systemPrompt: null });
