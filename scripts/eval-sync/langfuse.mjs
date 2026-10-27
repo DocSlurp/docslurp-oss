@@ -38,6 +38,34 @@ export function assertTuningReadable(dataset) {
   return dataset;
 }
 
+// Langfuse drops C0/C1 control characters (other than tab, newline, carriage return and form feed) from stored JSON,
+// so strings carrying them cannot round-trip. buildRecordItems wraps such strings losslessly with encodeUnsafe().
+const UNSAFE_CHAR = /[\u0000-\u0008\u000b\u000e-\u001f\u007f-\u009f\ufffe\uffff]|[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/;
+/** JSON text with every character outside printable ASCII escaped; always round-trips through Langfuse. */
+export const asciiJson = (value) => JSON.stringify(value).replace(/[^\u0020-\u007e]/g, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, "0")}`);
+/** Wrap each string Langfuse cannot store as `{ "$asciiJson": "<JSON string literal>" }`; decodeUnsafe() reverses it. */
+export function encodeUnsafe(value) {
+  if (typeof value === "string") return UNSAFE_CHAR.test(value) ? { $asciiJson: asciiJson(value) } : value;
+  if (Array.isArray(value)) return value.map(encodeUnsafe);
+  if (value && typeof value === "object") return Object.fromEntries(Object.entries(value).map(([key, inner]) => { if (UNSAFE_CHAR.test(key)) throw new Error("Object key contains control characters"); return [key, encodeUnsafe(inner)]; }));
+  return value;
+}
+export function decodeUnsafe(value) {
+  if (Array.isArray(value)) return value.map(decodeUnsafe);
+  if (value && typeof value === "object") {
+    const keys = Object.keys(value);
+    if (keys.length === 1 && keys[0] === "$asciiJson" && typeof value.$asciiJson === "string") return JSON.parse(value.$asciiJson);
+    return Object.fromEntries(Object.entries(value).map(([key, inner]) => [key, decodeUnsafe(inner)]));
+  }
+  return value;
+}
+export function hasUnsafeControlChars(value) {
+  if (typeof value === "string") return UNSAFE_CHAR.test(value);
+  if (Array.isArray(value)) return value.some(hasUnsafeControlChars);
+  if (value && typeof value === "object") return Object.entries(value).some(([key, inner]) => UNSAFE_CHAR.test(key) || hasUnsafeControlChars(inner));
+  return false;
+}
+
 export const itemId = (datasetName, caseId) => `docslurp-${hash(`${datasetName}\0${caseId}`).slice(0, 48)}`;
 
 /** Question/answer cases (retrieval, multisearch, agent capability). Payload shape is frozen so existing remote items stay identical. */
@@ -80,9 +108,9 @@ export function buildRecordItems({ name, split, records, commit, config = {} }) 
     const payload = {
       id: itemId(name, record.id),
       datasetName: name,
-      input: record.input,
-      expectedOutput: record.expectedOutput ?? null,
-      metadata: { ...record.metadata, caseId: record.id, split, heldout, tuningReadable: !heldout, sourceCommit: commit, config },
+      input: encodeUnsafe(record.input),
+      expectedOutput: encodeUnsafe(record.expectedOutput ?? null),
+      metadata: encodeUnsafe({ ...record.metadata, caseId: record.id, split, heldout, tuningReadable: !heldout, sourceCommit: commit, config }),
     };
     payload.metadata.syncContentSha256 = hash(stableJson(payload));
     return payload;
@@ -108,9 +136,12 @@ export function createClient({ baseUrl, publicKey, secretKey, fetchImpl = fetch,
 
 export async function pool(values, limit, fn) {
   const results = new Array(values.length);
-  let next = 0;
+  let next = 0, failed = false;
   await Promise.all(Array.from({ length: Math.max(1, Math.min(limit, values.length)) }, async () => {
-    while (next < values.length) { const index = next++; results[index] = await fn(values[index], index); }
+    while (next < values.length && !failed) {
+      const index = next++;
+      try { results[index] = await fn(values[index], index); } catch (error) { failed = true; throw error; }
+    }
   }));
   return results;
 }

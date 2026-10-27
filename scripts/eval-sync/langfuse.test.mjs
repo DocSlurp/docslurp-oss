@@ -232,3 +232,20 @@ test("tunnel: opened per target, health-checked, and closed by signalling exactl
   await tunnel.close();
   assert.deepEqual(signals, [[4242, "SIGTERM"]]);
 });
+
+test("strings with control characters Langfuse would strip are wrapped losslessly", async () => {
+  const { dir, manifest } = await fixtureManifest({ heldout: false });
+  const bad = "broken\u0003tounicode \\begin{x}\u007f\u0097\ud83d\ude00";
+  await write(join(dir, "references/doc-1.json"), JSON.stringify({ pages: [{ markdown: bad, ok: "fine \\u0003 text" }] }));
+  const { loadManifest } = await import("./adapters.mjs");
+  const { decodeUnsafe, hasUnsafeControlChars } = await import("./langfuse.mjs");
+  const { datasets } = await loadManifest(manifest);
+  const item = datasets.find((d) => d.split === "development").items[0];
+  const page = item.expectedOutput.reference.content.pages[0];
+  assert.ok(/^[\x20-\x7e]*$/.test(page.markdown.$asciiJson));
+  assert.equal(page.ok, "fine \\u0003 text");
+  assert.equal(hasUnsafeControlChars(item), false);
+  assert.equal(decodeUnsafe(item.expectedOutput).reference.content.pages[0].markdown, bad);
+  const plain = datasets.find((d) => d.split === "calibration").items[0].expectedOutput.reference;
+  assert.deepEqual(plain.content, { pages: [{ markdown: "# doc-2" }] });
+});

@@ -6,7 +6,7 @@
 // https://langfuse.com/integrations/native/opentelemetry/experiments
 // https://langfuse.com/faq/all/deprecated-api-migration
 import { readFile } from "node:fs/promises";
-import { assertSplitName, hash, itemId, listDatasetItems, stableJson } from "./langfuse.mjs";
+import { assertSplitName, encodeUnsafe, hash, itemId, listDatasetItems, stableJson } from "./langfuse.mjs";
 
 export const RUN_SCHEMA = "docslurp-eval-run@v1";
 const iso = (value, label) => { const ms = Date.parse(value); if (!Number.isFinite(ms)) throw new Error(`Run ${label} must be an ISO timestamp from the actual run`); return ms; };
@@ -38,10 +38,10 @@ export function prepareRun(run, { manifestSha256 }) {
       traceId: traceHash.slice(0, 32),
       spanId: traceHash.slice(32, 48),
       start: itemStart, end: itemEnd,
-      input: item.input ?? { caseId: item.caseId },
-      output: item.output ?? null,
+      input: encodeUnsafe(item.input ?? { caseId: item.caseId }),
+      output: encodeUnsafe(item.output ?? null),
       outputSha256: hash(stableJson(item.output ?? null)),
-      metadata: { ...(item.metadata ?? {}), caseId: item.caseId, notApplicableScores: Object.entries(item.scores ?? {}).filter(([, value]) => value === null || value === undefined).map(([name]) => name) },
+      metadata: { ...encodeUnsafe(item.metadata ?? {}), caseId: item.caseId, notApplicableScores: Object.entries(item.scores ?? {}).filter(([, value]) => value === null || value === undefined).map(([name]) => name) },
       scores: scores.map(([name, value]) => ({ name, value: typeof value === "boolean" ? Number(value) : value })),
     };
   });

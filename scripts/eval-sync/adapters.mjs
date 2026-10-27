@@ -24,8 +24,7 @@ async function referenceFor(root, ref, maxBytes) {
   const out = { path, sha256, bytes: raw.length };
   if (raw.length > maxBytes) return { ...out, inline: false, reason: `exceeds inline limit ${maxBytes} bytes; resolve by path and sha256` };
   const text = raw.toString("utf8");
-  let content = text;
-  if (/\.json$/i.test(path)) content = JSON.parse(text);
+  const content = /\.json$/i.test(path) ? JSON.parse(text) : text;
   return { ...out, inline: true, content };
 }
 
