@@ -275,6 +275,61 @@ describe("sign-in challenge", () => {
     expect((await pool.query(`select 1 from session where token = $1`, [rogue.token])).rowCount).toBe(0);
   });
 
+  it("ignores duplicate session cookies in either order (council H1)", async () => {
+    const { user, browser: victim } = await enrolledUser();
+    const context = await auth.$context;
+    const rogue = await context.internalAdapter.createSession(user.id);
+    await pool.query(`update session set "mfaVerified" = false where token = $1`, [rogue.token]);
+    const signed = (token: string) => encodeURIComponent(`${token}.${createHmac("sha256", SECRET).update(token).digest("base64")}`);
+    const other = await createUser();
+    const decoyBrowser = new Browser();
+    await signInPassword(decoyBrowser, other.email);
+    const decoy = decoyBrowser.cookies.get("better-auth.session_token")!;
+    for (const header of [
+      `better-auth.session_token=${signed(rogue.token)}; better-auth.session_token=decoy.decoy`,
+      `better-auth.session_token=decoy.decoy; better-auth.session_token=${signed(rogue.token)}`,
+      `better-auth.session_token=${signed(rogue.token)}; better-auth.session_token=${decoy}`,
+    ]) {
+      const headers = new Headers({ cookie: header, origin: ORIGIN });
+      expect(await resolveBetterAuthSessionActor(headers)).toBeNull();
+      expect(await auth.api.getSession({ headers })).toBeNull();
+    }
+    // The victim's real MFA session can't borrow a fresh decoy session to dodge re-auth.
+    await pool.query(`update session set "authenticatedAt" = now() - interval '1 hour' where "userId" = $1`, [user.id]);
+    victim.cookies.set("better-auth.session_token", `${victim.cookies.get("better-auth.session_token")}; better-auth.session_token=${decoy}`);
+    const regenerate = await victim.json("/two-factor/generate-backup-codes", { password: PASSWORD });
+    expect(regenerate.status).not.toBe(200);
+  });
+
+  it("refuses an unverified 2FA session in the actor even if the strip hook missed it", async () => {
+    const { user } = await enrolledUser();
+    const original = auth.api.getSession;
+    (auth.api as { getSession: unknown }).getSession = async () => ({ session: { id: "s", userId: user.id, mfaVerified: false }, user: { id: user.id, email: user.email, name: "x", twoFactorEnabled: true } });
+    try {
+      expect(await resolveBetterAuthSessionActor(new Headers())).toBeNull();
+    } finally {
+      (auth.api as { getSession: unknown }).getSession = original;
+    }
+  });
+
+  it("can't replay a code by adding an unsigned session cookie for another account (council H2)", async () => {
+    const { user, secret } = await enrolledUser();
+    const victimBrowser = new Browser();
+    await signInPassword(victimBrowser, user.email);
+    const code = totp(secret);
+    expect((await victimBrowser.json("/two-factor/verify-totp", { code })).status).toBe(200);
+
+    const attackerAccount = await createUser();
+    const own = new Browser();
+    await signInPassword(own, attackerAccount.email);
+    const rawToken = decodeURIComponent(own.cookies.get("better-auth.session_token")!).split(".")[0]!;
+    const attacker = new Browser();
+    await signInPassword(attacker, user.email);
+    attacker.cookies.set("better-auth.session_token", rawToken);
+    expect((await attacker.json("/two-factor/verify-totp", { code })).status).not.toBe(200);
+    expect(await sessionsFor(user.id).then((rows) => rows.filter((row) => row.mfaVerified).length)).toBe(2);
+  });
+
   it("rejects a wrong code and a replayed code", async () => {
     const { user, secret } = await enrolledUser();
     const first = new Browser();
@@ -360,6 +415,17 @@ describe("removing factors", () => {
     await pool.query(`update session set "authenticatedAt" = now() where "userId" = $1`, [user.id]);
     expect((await browser.json("/two-factor/disable", { password: PASSWORD })).status).toBe(200);
     expect((await pool.query(`select "twoFactorEnabled" from "user" where id = $1`, [user.id])).rows[0].twoFactorEnabled).toBe(false);
+  });
+
+  it("forgets every trusted device when 2FA is turned off (council L3)", async () => {
+    const { user, secret, browser } = await enrolledUser();
+    const laptop = new Browser();
+    await signInPassword(laptop, user.email);
+    await laptop.json("/two-factor/verify-totp", { code: totp(secret, -1), trustDevice: true });
+    expect((await pool.query(`select 1 from verification where identifier like 'trust-device-%' and value = $1`, [user.id])).rowCount).toBe(1);
+    await pool.query(`update session set "authenticatedAt" = now() where "userId" = $1`, [user.id]);
+    expect((await browser.json("/two-factor/disable", { password: PASSWORD })).status).toBe(200);
+    expect((await pool.query(`select 1 from verification where identifier like 'trust-device-%' and value = $1`, [user.id])).rowCount).toBe(0);
   });
 
   it("also needs the password for accounts that have one", async () => {
@@ -623,6 +689,27 @@ describe("org MFA policy", () => {
     const attempt = await attacker.json<{ code?: string }>("/passkey/generate-register-options");
     expect(attempt.status).toBe(403);
     expect(attempt.body.code).toBe("MFA_REQUIRED");
+  });
+
+  it("keeps a blocked session away from account changes on /api/auth (council M1)", async () => {
+    const { member } = await orgWithMember(0);
+    const browser = new Browser();
+    await signInPassword(browser, member.email);
+    for (const [path, body] of [["/update-user", { name: "x" }], ["/change-email", { newEmail: "new@example.test" }], ["/change-password", { currentPassword: PASSWORD, newPassword: "another long password" }]] as const) {
+      const result = await browser.json<{ code?: string }>(path, body);
+      expect(result.status).toBe(403);
+      expect(result.body.code).toBe("MFA_REQUIRED");
+    }
+    expect((await browser.json("/two-factor/enable", { password: PASSWORD })).status).toBe(200);
+    expect(await browser.session()).not.toBeNull();
+  });
+
+  it("applies one org's policy only to that org's members", async () => {
+    await orgWithMember(0);
+    const outsider = await createUser();
+    const browser = new Browser();
+    await signInPassword(browser, outsider.email);
+    expect((await resolveBetterAuthSessionActor(browser.headers()))?.mfaPolicyBlocked).toBe(false);
   });
 
   it("answers 403 mfa_required on API routes except the security status", async () => {

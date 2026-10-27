@@ -4,7 +4,7 @@ import { isIP } from "node:net";
 import { passkey } from "@better-auth/passkey";
 import type { BetterAuthPlugin } from "better-auth";
 import { APIError, createAuthMiddleware, isAPIError } from "better-auth/api";
-import { deleteSessionCookie, expireCookie, parseCookies } from "better-auth/cookies";
+import { deleteSessionCookie, expireCookie } from "better-auth/cookies";
 import { generateRandomString } from "better-auth/crypto";
 import { twoFactor } from "better-auth/plugins";
 import { serialize, type CookieOptions } from "hono/utils/cookie";
@@ -72,6 +72,7 @@ const FACTOR_MANAGEMENT_PATHS = new Set([
 ]);
 /** Factor removal or replacement: also needs a recent sign-in (re-auth). */
 const FACTOR_REMOVAL_PATHS = new Set(["/two-factor/disable", "/two-factor/generate-backup-codes", "/passkey/delete-passkey"]);
+const TRUST_REVOKING_PATHS = new Set(["/two-factor/disable", "/change-password", "/revoke-sessions", "/revoke-other-sessions"]);
 const PASSKEY_REGISTRATION_PATHS = new Set(["/passkey/generate-register-options", "/passkey/verify-registration"]);
 
 export interface MfaConfig {
@@ -271,14 +272,39 @@ interface SessionRow {
   passkeys: number;
 }
 
-function sessionTokenFromCookies(cookieHeader: string | null | undefined, cookieName: string): string | null {
-  if (!cookieHeader) return null;
-  const raw = parseCookies(cookieHeader).get(cookieName);
-  if (!raw) return null;
-  let value = raw;
-  try { value = decodeURIComponent(raw); } catch { /* keep raw */ }
-  const token = value.split(".")[0];
-  return token ? token : null;
+/** Cookie pairs named `name` (or a chunk of it, `name.0`) in a raw Cookie header. */
+function countCookies(cookieHeader: string | null, name: string): number {
+  if (!cookieHeader) return 0;
+  return cookieHeader.split(";").filter((part) => {
+    const key = part.split("=")[0]?.trim() ?? "";
+    return key === name || key.startsWith(`${name}.`);
+  }).length;
+}
+
+interface RequestSession {
+  /** More than one session cookie: the request is treated as unauthenticated. */
+  ambiguous: boolean;
+  /** The session Better Auth itself would use: the signed session cookie, verified. */
+  row: SessionRow | null;
+}
+
+/**
+ * Resolves the caller's session exactly as Better Auth's endpoints do
+ * (better-call's `getSignedCookie`: signature checked, never a raw value), so
+ * the gate and the endpoint always judge the same session. A request with
+ * several session cookies is ambiguous: the strip hook removes all of them.
+ */
+async function requestSession(ctx: HookContext, pool: Pick<Pool, "query">): Promise<RequestSession> {
+  const name = sessionCookieName(ctx);
+  if (countCookies(requestCookieHeader(ctx), name) > 1) return { ambiguous: true, row: null };
+  const token = await ctx.getSignedCookie(name, ctx.context.secret);
+  return { ambiguous: false, row: token ? await loadSessionRow(pool, token) : null };
+}
+
+/** Better Auth paths a session blocked by an org MFA policy may still use: sign-in, sign-out and enrolment. */
+function allowedWhilePolicyBlocked(path: string): boolean {
+  return path === "/get-session" || path === "/sign-out" || path === "/verify-email"
+    || ["/sign-in/", "/two-factor/", "/passkey/", "/callback/", "/email-otp/"].some((prefix) => path.startsWith(prefix));
 }
 
 async function loadSessionRow(pool: Pick<Pool, "query">, token: string): Promise<SessionRow | null> {
@@ -446,12 +472,23 @@ export function docslurpMfaGatePlugin(options: MfaPluginOptions): BetterAuthPlug
    */
   const stripUnverifiedSessions = createAuthMiddleware(async (ctx) => {
     const cookieHeader = requestCookieHeader(ctx);
-    const token = sessionTokenFromCookies(cookieHeader, sessionCookieName(ctx));
-    if (!token || !cookieHeader) return;
-    const row = await loadSessionRow(pool, token);
-    if (!row || !row.two_factor_enabled || row.mfa_verified) return;
-    await pool.query(`delete from session where token = $1`, [token]);
-    console.warn(`[auth-mfa] revoked a session that never passed 2FA user=${row.user_id} session=${row.session_id}`);
+    if (!cookieHeader) return;
+    const { ambiguous, row } = await requestSession(ctx, pool);
+    if (ambiguous) {
+      console.warn(`[auth-mfa] ignored a request carrying several session cookies path=${ctx.path}`);
+    } else {
+      if (!row || row.mfa_verified) return;
+      if (!row.two_factor_enabled) {
+        // Org "require MFA" past its grace period: only sign-in, sign-out and
+        // enrolment, never account changes (email, password, linked accounts).
+        if (!allowedWhilePolicyBlocked(ctx.path ?? "") && (await evaluateMfaPolicy(pool, row.user_id, false)).enforced) {
+          throw forbidden(MFA_REQUIRED_CODE, "Your organization requires two-factor authentication or a passkey");
+        }
+        return;
+      }
+      await pool.query(`delete from session where token = $1`, [row.token]);
+      console.warn(`[auth-mfa] revoked a session that never passed 2FA user=${row.user_id} session=${row.session_id}`);
+    }
     const names = new Set([sessionCookieName(ctx), ctx.context.authCookies.sessionData.name]);
     const kept = cookieHeader.split(";").map((part) => part.trim()).filter((part) => {
       const name = part.split("=")[0]?.trim() ?? "";
@@ -463,9 +500,8 @@ export function docslurpMfaGatePlugin(options: MfaPluginOptions): BetterAuthPlug
   });
 
   const guardFactorManagement = createAuthMiddleware(async (ctx) => {
-    const token = sessionTokenFromCookies(requestCookieHeader(ctx), sessionCookieName(ctx));
-    if (!token) return; // The endpoint itself answers 401.
-    const row = await loadSessionRow(pool, token);
+    // No session, or an ambiguous one (stripped before the endpoint runs): the endpoint answers 401.
+    const { row } = await requestSession(ctx, pool);
     if (!row) return;
     const policy = await evaluateMfaPolicy(pool, row.user_id, row.mfa_verified);
     const enrolled = row.two_factor_enabled || row.passkeys > 0;
@@ -487,31 +523,53 @@ export function docslurpMfaGatePlugin(options: MfaPluginOptions): BetterAuthPlug
   const claimTotpCode = createAuthMiddleware(async (ctx) => {
     const code = typeof ctx.body?.code === "string" ? ctx.body.code.trim() : "";
     if (!code) return;
-    let userId: string | null = null;
-    const token = sessionTokenFromCookies(requestCookieHeader(ctx), sessionCookieName(ctx));
-    if (token) userId = (await loadSessionRow(pool, token))?.user_id ?? null;
-    if (!userId) {
-      const challenge = await ctx.getSignedCookie(ctx.context.createAuthCookie(TWO_FACTOR_COOKIE).name, ctx.context.secret);
-      if (challenge) userId = (await ctx.context.internalAdapter.findVerificationValue(challenge))?.value ?? null;
+    // Claim the code for every user the plugin could verify it against: the
+    // signed session's user and the signed challenge's user. Whichever one the
+    // plugin picks, the code is then spent for that user.
+    const candidates = new Set<string>();
+    const { row } = await requestSession(ctx, pool);
+    if (row) candidates.add(row.user_id);
+    const challenge = await ctx.getSignedCookie(ctx.context.createAuthCookie(TWO_FACTOR_COOKIE).name, ctx.context.secret);
+    if (challenge) {
+      const owner = (await ctx.context.internalAdapter.findVerificationValue(challenge))?.value;
+      if (owner) candidates.add(owner);
     }
-    if (!userId) return; // The endpoint rejects the missing challenge.
-    const digest = createHash("sha256").update(`${userId}:${code}`).digest("hex");
+    if (candidates.size === 0) return; // The endpoint rejects the missing session or challenge.
     await pool.query(`delete from mfa_totp_replay where expires_at < now()`);
-    // A code is accepted one period either side of now (90 s); keep the claim a little longer.
-    const claimed = await pool.query(
-      `insert into mfa_totp_replay (user_id, code_digest, expires_at) values ($1, $2, now() + interval '120 seconds')
-       on conflict do nothing returning user_id`,
-      [userId, digest],
-    );
-    if (claimed.rowCount === 0) throw new APIError("UNAUTHORIZED", { code: "INVALID_CODE", message: "Invalid code" });
-    (ctx.context as { docslurpTotpClaim?: { userId: string; digest: string } }).docslurpTotpClaim = { userId, digest };
+    const claims: Array<{ userId: string; digest: string }> = [];
+    let replayed = false;
+    for (const userId of candidates) {
+      const digest = createHash("sha256").update(`${userId}:${code}`).digest("hex");
+      // A code is accepted one period either side of now (90 s); keep the claim a little longer.
+      const claimed = await pool.query(
+        `insert into mfa_totp_replay (user_id, code_digest, expires_at) values ($1, $2, now() + interval '120 seconds')
+         on conflict do nothing returning user_id`,
+        [userId, digest],
+      );
+      if (claimed.rowCount === 0) replayed = true; else claims.push({ userId, digest });
+    }
+    if (replayed) {
+      for (const claim of claims) await pool.query(`delete from mfa_totp_replay where user_id = $1 and code_digest = $2`, [claim.userId, claim.digest]);
+      throw new APIError("UNAUTHORIZED", { code: "INVALID_CODE", message: "Invalid code" });
+    }
+    (ctx.context as { docslurpTotpClaims?: Array<{ userId: string; digest: string }> }).docslurpTotpClaims = claims;
   });
 
   /** A rejected code is released, so a typo or a lockout doesn't burn the user's next valid code. */
   const releaseTotpClaim = createAuthMiddleware(async (ctx) => {
-    const claim = (ctx.context as { docslurpTotpClaim?: { userId: string; digest: string } }).docslurpTotpClaim;
-    if (!claim || !isAPIError(ctx.context.returned)) return;
-    await pool.query(`delete from mfa_totp_replay where user_id = $1 and code_digest = $2`, [claim.userId, claim.digest]);
+    const claims = (ctx.context as { docslurpTotpClaims?: Array<{ userId: string; digest: string }> }).docslurpTotpClaims;
+    if (!claims?.length || !isAPIError(ctx.context.returned)) return;
+    for (const claim of claims) await pool.query(`delete from mfa_totp_replay where user_id = $1 and code_digest = $2`, [claim.userId, claim.digest]);
+  });
+
+  /**
+   * Turning 2FA off, changing the password or revoking sessions also forgets
+   * every trusted device of the user, not just this browser's.
+   */
+  const forgetTrustedDevices = createAuthMiddleware(async (ctx) => {
+    const userId = ctx.context.session?.user?.id;
+    if (!userId || isAPIError(ctx.context.returned)) return;
+    await pool.query(`delete from verification where identifier like 'trust-device-%' and value = $1`, [userId]);
   });
 
   /**
@@ -555,6 +613,7 @@ export function docslurpMfaGatePlugin(options: MfaPluginOptions): BetterAuthPlug
       ],
       after: [
         { matcher: (ctx) => ctx.path === "/two-factor/verify-totp", handler: releaseTotpClaim },
+        { matcher: (ctx) => TRUST_REVOKING_PATHS.has(ctx.path ?? ""), handler: forgetTrustedDevices },
         { matcher: () => true, handler: challengeFirstFactor },
       ],
     },

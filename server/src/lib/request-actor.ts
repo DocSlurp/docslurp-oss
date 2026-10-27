@@ -90,6 +90,12 @@ export async function resolveBetterAuthSessionActor(headers: Headers, options: {
   }
 
   const mfaVerified = session.session.mfaVerified === true;
+  // Defense in depth behind auth-mfa's strip hook: a 2FA user's session that
+  // never passed the second factor authorizes nothing here either.
+  if ((session.user as SessionUser & { twoFactorEnabled?: boolean | null }).twoFactorEnabled === true && !mfaVerified) {
+    console.warn(`[auth-mfa] refused an unverified session for a 2FA user user=${session.user.id} session=${session.session.id}`);
+    return null;
+  }
   const mfaPolicyBlocked = mfaVerified ? false : (await evaluateMfaPolicy(appDbPool, session.user.id, false)).enforced;
   if (mfaPolicyBlocked && !options.allowMfaPolicyBlocked) return null;
 
