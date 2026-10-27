@@ -17,6 +17,21 @@ import {
   type FeedbackDeps,
 } from "../services/feedback-reports.js";
 
+/**
+ * The route as a template: query and fragment dropped, invite tokens, UUIDs and
+ * long opaque segments replaced, so a pasted invite link never stores its token.
+ */
+export function feedbackRouteTemplate(value: string): string | null {
+  const path = value.split(/[?#]/, 1)[0]!;
+  const segments = path.split("/").map((segment, index, all) => {
+    if (index > 0 && all[index - 1] === "invites" && segment) return ":token";
+    if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(segment)) return ":id";
+    if (/^[A-Za-z0-9_-]{20,}$/.test(segment)) return ":token";
+    return segment;
+  });
+  return segments.join("/").slice(0, 300) || null;
+}
+
 /** Optional single-line metadata: trimmed, empty becomes null. */
 const optionalLine = (max: number) => z.string().max(max * 4).optional().nullable()
   .transform((value) => {
@@ -33,7 +48,7 @@ export const feedbackReportSchema = z.object({
   message: z.string().transform((value) => value.replace(/\r\n?/g, "\n").replace(/\u0000/g, "").trim())
     .pipe(z.string().min(1).max(FEEDBACK_LIMITS.messageMaxChars)),
   /** Path only; query strings and fragments are dropped (they can carry tokens). */
-  route: optionalLine(300).transform((value) => (value ? value.split(/[?#]/, 1)[0]!.slice(0, 300) || null : null)),
+  route: optionalLine(300).transform((value) => (value ? feedbackRouteTemplate(value) : null)),
   screen: optionalLine(120),
   workspaceId: optionalLine(256),
   orgId: optionalLine(128),

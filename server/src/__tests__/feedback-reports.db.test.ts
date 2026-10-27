@@ -118,6 +118,13 @@ describe("POST /v1/feedback", () => {
     expect(reports.map((report) => report.messageExcerpt)).toEqual(["from b"]);
   });
 
+  it("stores route templates, never invite tokens", async () => {
+    await post({ ...base, route: "/app/invites/inv_abcdefghijklmnopqrstuvwxyz/accept?x=1" });
+    await post({ ...base, message: "two", route: "/app/workspaces/3bd4b650-4442-4e00-8c84-a6ce1f2156f8" });
+    const rows = await sql`select route from feedback_reports order by created_at`;
+    expect(rows.map((row) => row.route)).toEqual(["/app/invites/:token/accept", "/app/workspaces/:id"]);
+  });
+
   it("validates input and caps the message length", async () => {
     expect((await post({ ...base, category: "nonsense" })).status).toBe(400);
     expect((await post({ ...base, message: "   " })).status).toBe(400);
