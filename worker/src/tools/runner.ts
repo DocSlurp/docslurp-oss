@@ -479,6 +479,23 @@ export class CommandRunner {
     });
   }
 
+  /**
+   * Lossless `cwebp` of a bounded page PNG, run through the parser sandbox like every other
+   * tool that reads customer-derived bytes. `-exact` keeps RGB under transparent pixels, so
+   * the decode is pixel-identical; one thread matches the per-vCPU throughput measurements.
+   */
+  async encodeLosslessWebp(source: string, output: string, effort: number): Promise<CommandPlan> {
+    if (!Number.isInteger(effort) || effort < 0 || effort > 9) throw new Error("Invalid lossless WebP effort");
+    if (!path.isAbsolute(source) || !path.isAbsolute(output)) throw new Error("cwebp paths must be absolute");
+    const plan = await this.planDocumentTool({
+      binary: "cwebp",
+      args: ["-quiet", "-lossless", "-exact", "-z", String(effort), "-metadata", "none", "-o", output, source],
+      fileArgIndexes: [9],
+      supportsDoubleDash: true,
+    });
+    return { ...plan, pages: 1 };
+  }
+
   async extractMarkdown(source: string): Promise<CommandPlan> {
     return await this.planDocumentTool({
       binary: "pandoc",

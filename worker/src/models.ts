@@ -56,6 +56,12 @@ export interface Document {
   pageCount: number;
   createdAt: Date;
   updatedAt: Date;
+  /**
+   * Hours this document's artifacts are kept before deletion; null or absent means indefinitely
+   * or unknown. Chooses the page-image encode effort (pageImageWebpEffort). Loaded from the
+   * workspace's artifact/run retention; an extract run sets it from the extract's retentionHours.
+   */
+  artifactRetentionHours?: number | null;
 }
 
 export interface UsageEvent {

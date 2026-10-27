@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
-import { mkdtemp, readFile, readdir, rm, stat } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -14,6 +14,19 @@ import { logNativePdfFallback, NativePdfError } from "../native-pdf/types.js";
 import { renderClipNative, renderPagesNative } from "../native-pdf/render.js";
 import type { Bbox, NativePdfEngine } from "../native-pdf/types.js";
 import { boundedRasterDpi, boundedRasterEdge } from "../lib/raster-bounds.js";
+import { pushPerfMetric } from "../lib/perf-context.js";
+import { SandboxRunError } from "../sandbox/types.js";
+import {
+  encodeLosslessWebp,
+  OversizedPageImageError,
+  PAGE_IMAGE_MIME_TYPES,
+  pageImageKey,
+  pageImageWebpEffort,
+  readPageImageFormat,
+  readPngDimensions,
+  reportPageImageFormatFallback,
+  type PageImageFormat,
+} from "./page-image-format.js";
 
 export type RasterEngineName = "pdftoppm" | "native-pdf";
 
@@ -34,6 +47,8 @@ export interface RasterCacheOptions {
   loadEngine?: () => Promise<NativePdfEngine | null>;
   /** Max parallel native renders (one document handle per lane). */
   concurrency?: number;
+  /** Stored page-image format; defaults to DOCSLURP_PAGE_IMAGE_FORMAT (webp). */
+  format?: PageImageFormat;
 }
 
 let rasterEngineUnavailableReported = false;
@@ -147,7 +162,8 @@ export interface RasterPageArtifact {
 }
 
 type RasterStorage = Pick<ArtifactStore, "objectSize" | "putBytes" | "uri">;
-type RasterRunner = Pick<CommandRunner, "renderPdfPageRange" | "pdfPageSizes" | "run">;
+/** `encodeLosslessWebp` is optional so a runner without it stores PNG (a logged format fallback). */
+type RasterRunner = Pick<CommandRunner, "renderPdfPageRange" | "pdfPageSizes" | "run"> & Partial<Pick<CommandRunner, "encodeLosslessWebp">>;
 
 /**
  * Durable selected-page raster Module. Callers provide page numbers and get
@@ -237,66 +253,101 @@ export class PdfRasterCache {
     if (!isPdf && pageNumbers.some((pageNumber) => pageNumber !== 1)) {
       throw new Error(`Native image documents only support page 1, received ${pageNumbers.join(",")}`);
     }
-    const outputMimeType = isPdf ? "image/png" : args.document.mimeType;
-    const extension = isPdf ? "png" : extensionForImageMimeType(outputMimeType);
+    const root = `${args.document.userId}/${args.runId}`;
+    if (!isPdf) return await this.storeNativeImage(args.document, root, dpi, pageNumbers);
 
-    // Engines get separate key spaces so an A/B run never mixes their pixels.
-    const resolved = isPdf ? await this.resolveEngine() : { name: "pdftoppm" as RasterEngineName, engine: null };
-    const dpiDir = resolved.name === "native-pdf" ? `v2-${dpi}dpi-native-pdf` : `v2-${dpi}dpi`;
-    const keys = new Map(pageNumbers.map((pageNumber) => [
-      pageNumber,
-      `${args.document.userId}/${args.runId}/images/${args.document.id}/${dpiDir}/page-${pageNumber}.${extension}`,
-    ]));
+    const format = this.options.format ?? readPageImageFormat();
+    const effort = pageImageWebpEffort({ retentionHours: args.document.artifactRetentionHours });
+    // Engines and formats get separate key spaces so an A/B run never mixes their pixels and a
+    // WebP object never overwrites (or is mistaken for) an existing PNG one.
+    const resolved = await this.resolveEngine();
     let engineName: RasterEngineName = resolved.name;
-    const existing = new Map<number, number | null>();
-    await Promise.all(pageNumbers.map(async (pageNumber) => {
-      existing.set(pageNumber, await this.storage.objectSize(keys.get(pageNumber)!));
-    }));
-    const missing = pageNumbers.filter((pageNumber) => existing.get(pageNumber) === null);
-    const generated = new Map<number, { sizeBytes: number; widthPx: number | null; heightPx: number | null }>();
+    const keyFor = (pageNumber: number, pageFormat: PageImageFormat, engine: RasterEngineName = engineName) =>
+      pageImageKey({ root, documentId: args.document.id, dpi, engine, format: pageFormat, pageNumber });
 
-    if (missing.length > 0) {
-      const source = await this.sources.get(args.document);
-      if (!isPdf) {
-        const bytes = await readFile(source.path);
-        await this.storage.putBytes(keys.get(1)!, bytes, outputMimeType);
-        generated.set(1, { sizeBytes: bytes.byteLength, widthPx: null, heightPx: null });
-      }
-      let nativeDone = false;
-      if (isPdf && resolved.engine) {
-        try {
-          const rendered = await renderPagesNative(resolved.engine, source.path, missing, {
-            dpi,
-            concurrency: this.options.concurrency,
-            signal: args.signal,
-          });
-          if (missing.every((pageNumber) => rendered.has(pageNumber))) {
-            for (const [pageNumber, page] of rendered) {
-              await this.storage.putBytes(keys.get(pageNumber)!, page.bytes, "image/png");
-              generated.set(pageNumber, { sizeBytes: page.bytes.byteLength, widthPx: page.widthPx, heightPx: page.heightPx });
-            }
-            nativeDone = true;
+    const stored = new Map<number, StoredPage>();
+    const lookupExisting = async () => {
+      stored.clear();
+      await Promise.all(pageNumbers.map(async (pageNumber) => {
+        // Preferred format first, then the PNG variant: PNG objects written before the switch
+        // (or during a cwebp outage) are served as they are rather than re-rendered.
+        for (const pageFormat of format === "webp" ? ["webp", "png"] as const : ["png"] as const) {
+          const key = keyFor(pageNumber, pageFormat);
+          const size = await this.storage.objectSize(key);
+          if (size !== null) {
+            stored.set(pageNumber, { key, mimeType: PAGE_IMAGE_MIME_TYPES[pageFormat], sizeBytes: size, widthPx: null, heightPx: null, cacheHit: true });
+            return;
           }
-        } catch (error) {
-          if (args.signal?.aborted) throw error;
-          logNativePdfFallback("raster-render", error, "pdftoppm");
         }
-      }
-      if (isPdf && !nativeDone && resolved.engine) {
-        // Keys are engine-scoped, so a fallback render must land under the pdftoppm key space.
-        engineName = "pdftoppm";
-        for (const pageNumber of pageNumbers) {
-          keys.set(pageNumber, `${args.document.userId}/${args.runId}/images/${args.document.id}/v2-${dpi}dpi/page-${pageNumber}.${extension}`);
-        }
-        await Promise.all(pageNumbers.map(async (pageNumber) => {
-          existing.set(pageNumber, await this.storage.objectSize(keys.get(pageNumber)!));
-        }));
-      }
-      const pdftoppmPages = isPdf && !nativeDone
-        ? pageNumbers.filter((pageNumber) => existing.get(pageNumber) === null)
-        : [];
+      }));
+    };
+    await lookupExisting();
+
+    if (pageNumbers.some((pageNumber) => !stored.has(pageNumber))) {
+      const source = await this.sources.get(args.document);
       const scratch = await mkdtemp(path.join(tmpdir(), "docslurp-raster-"));
       try {
+        const persist = async (pageNumber: number, png: Buffer, pngPath: string) => {
+          const dimensions = readPngDimensions(png);
+          if (format === "webp") {
+            const encoded = await encodeLosslessWebp({
+              runner: this.runner,
+              pngPath,
+              webpPath: path.join(scratch, `page-${pageNumber}.webp`),
+              png,
+              effort,
+              signal: args.signal,
+            });
+            if (encoded.status === "encoded") {
+              const key = keyFor(pageNumber, "webp");
+              await this.storage.putBytes(key, encoded.bytes, "image/webp");
+              pushPerfMetric({
+                metric: "page-image-webp-encode-ms",
+                value: encoded.encodeMs,
+                unit: "ms",
+                tags: ["page-image", `effort:${encoded.effort}`],
+                metadata: { pageNumber, pngBytes: png.byteLength, webpBytes: encoded.bytes.byteLength, effort: encoded.effort },
+              });
+              stored.set(pageNumber, { key, mimeType: "image/webp", sizeBytes: encoded.bytes.byteLength, widthPx: encoded.widthPx, heightPx: encoded.heightPx, cacheHit: false });
+              return;
+            }
+            reportPageImageFormatFallback({ status: encoded.status, reason: encoded.reason, pageNumber, documentId: args.document.id });
+          }
+          const key = keyFor(pageNumber, "png");
+          await this.storage.putBytes(key, png, "image/png");
+          stored.set(pageNumber, { key, mimeType: "image/png", sizeBytes: png.byteLength, ...dimensions, cacheHit: false });
+        };
+
+        let nativeDone = false;
+        if (resolved.engine) {
+          const missing = pageNumbers.filter((pageNumber) => !stored.has(pageNumber));
+          try {
+            const rendered = await renderPagesNative(resolved.engine, source.path, missing, {
+              dpi,
+              concurrency: this.options.concurrency,
+              signal: args.signal,
+            });
+            if (missing.every((pageNumber) => rendered.has(pageNumber))) {
+              for (const [pageNumber, page] of rendered) {
+                if (page.mimeType !== "image/png") throw new Error(`native raster returned ${page.mimeType}`);
+                // The encoder reads a file in the sandbox's temp workspace, never in-process bytes.
+                const pngPath = path.join(scratch, `native-page-${pageNumber}.png`);
+                await writeFile(pngPath, page.bytes);
+                await persist(pageNumber, page.bytes, pngPath);
+              }
+              nativeDone = true;
+            }
+          } catch (error) {
+            if (args.signal?.aborted || error instanceof SandboxRunError || error instanceof OversizedPageImageError) throw error;
+            logNativePdfFallback("raster-render", error, "pdftoppm");
+          }
+          if (!nativeDone) {
+            // Keys are engine-scoped, so a fallback render must land under the pdftoppm key space.
+            engineName = "pdftoppm";
+            await lookupExisting();
+          }
+        }
+        const pdftoppmPages = nativeDone ? [] : pageNumbers.filter((pageNumber) => !stored.has(pageNumber));
         for (const selectedPage of pdftoppmPages) {
           const range = { first: selectedPage, last: selectedPage };
           const sizePlan = await this.runner.pdfPageSizes(source.path, selectedPage, selectedPage);
@@ -326,9 +377,8 @@ export class PdfRasterCache {
               return suffix !== null && Number(suffix[1]) === pageNumber;
             });
             if (!filename) throw new Error(`pdftoppm did not produce page ${pageNumber}`);
-            const bytes = await readFile(path.join(scratch, filename));
-            await this.storage.putBytes(keys.get(pageNumber)!, bytes, "image/png");
-            generated.set(pageNumber, { sizeBytes: bytes.byteLength, ...readPngDimensions(bytes) });
+            const pngPath = path.join(scratch, filename);
+            await persist(pageNumber, await readFile(pngPath), pngPath);
           }
         }
       } finally {
@@ -336,23 +386,56 @@ export class PdfRasterCache {
       }
     }
 
-    return await Promise.all(pageNumbers.map(async (pageNumber) => {
-      const key = keys.get(pageNumber)!;
-      const generatedPage = generated.get(pageNumber);
+    return pageNumbers.map((pageNumber) => {
+      const page = stored.get(pageNumber);
+      if (!page) throw new Error(`page ${pageNumber} was not rendered`);
       return {
         pageNumber,
-        artifactKey: key,
-        artifactUri: this.storage.uri(key),
-        widthPx: generatedPage?.widthPx ?? null,
-        heightPx: generatedPage?.heightPx ?? null,
-        sizeBytes: generatedPage?.sizeBytes ?? existing.get(pageNumber) ?? 0,
-        cacheHit: existing.get(pageNumber) !== null,
-        mimeType: outputMimeType,
-        engine: isPdf ? engineName : undefined,
-        dpi: isPdf ? dpi : undefined,
+        artifactKey: page.key,
+        artifactUri: this.storage.uri(page.key),
+        widthPx: page.widthPx,
+        heightPx: page.heightPx,
+        sizeBytes: page.sizeBytes,
+        cacheHit: page.cacheHit,
+        mimeType: page.mimeType,
+        engine: engineName,
+        dpi,
       };
+    });
+  }
+
+  /** An uploaded image is its own page 1: stored as uploaded, never re-encoded. */
+  private async storeNativeImage(document: Document, root: string, dpi: number, pageNumbers: number[]): Promise<RasterPageArtifact[]> {
+    const mimeType = document.mimeType;
+    const key = `${root}/images/${document.id}/v2-${dpi}dpi/page-1.${extensionForImageMimeType(mimeType)}`;
+    const existing = await this.storage.objectSize(key);
+    let sizeBytes = existing ?? 0;
+    if (existing === null) {
+      const source = await this.sources.get(document);
+      const bytes = await readFile(source.path);
+      await this.storage.putBytes(key, bytes, mimeType);
+      sizeBytes = bytes.byteLength;
+    }
+    return pageNumbers.map((pageNumber) => ({
+      pageNumber,
+      artifactKey: key,
+      artifactUri: this.storage.uri(key),
+      widthPx: null,
+      heightPx: null,
+      sizeBytes,
+      cacheHit: existing !== null,
+      mimeType,
     }));
   }
+}
+
+interface StoredPage {
+  key: string;
+  mimeType: string;
+  sizeBytes: number;
+  widthPx: number | null;
+  heightPx: number | null;
+  cacheHit: boolean;
 }
 
 function clampDpi(dpi: number | undefined): number {
@@ -388,14 +471,4 @@ async function hashFile(filePath: string): Promise<string> {
   const hash = createHash("sha256");
   for await (const chunk of createReadStream(filePath)) hash.update(chunk);
   return hash.digest("hex");
-}
-
-function readPngDimensions(bytes: Buffer): { widthPx: number | null; heightPx: number | null } {
-  if (bytes.length < 24 || bytes.toString("ascii", 1, 4) !== "PNG") {
-    return { widthPx: null, heightPx: null };
-  }
-  return {
-    widthPx: bytes.readUInt32BE(16),
-    heightPx: bytes.readUInt32BE(20),
-  };
 }

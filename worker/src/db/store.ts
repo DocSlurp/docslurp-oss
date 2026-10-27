@@ -110,6 +110,8 @@ type DocumentRow = {
   page_count: number;
   created_at: string | Date;
   updated_at: string | Date;
+  /** Joined from the workspace (documentRetentionHoursSql); absent in rows selected without it. */
+  artifact_retention_hours?: number | string | null;
 };
 
 type StageStateRow = {
@@ -378,9 +380,17 @@ function runRowQuery(client: Sql<Record<string, unknown>>, runId: string) {
   `;
 }
 
+/**
+ * Shortest workspace retention that deletes a document's artifacts: artifact retention or run
+ * retention, in hours. `least` ignores nulls, so null means both keep the data indefinitely.
+ */
+function documentRetentionHoursSql(client: Sql<Record<string, unknown>>) {
+  return client`(select least(w.artifact_retention_days, w.run_retention_days) * 24 from workspaces w where w.id = documents.workspace_id) as artifact_retention_hours`;
+}
+
 function runDocumentRowsQuery(client: Sql<Record<string, unknown>>, runId: string) {
   return client<DocumentRow[]>`
-    select *
+    select documents.*, ${documentRetentionHoursSql(client)}
     from documents
     where run_id = ${runId}
       and superseded_at is null and status <> 'cancelled'
@@ -538,7 +548,7 @@ export class Store {
   }
 
   async loadDocument(documentId: string): Promise<Document> {
-    const [row] = await this.sql<DocumentRow[]>`select * from documents where id = ${documentId} limit 1`;
+    const [row] = await this.sql<DocumentRow[]>`select documents.*, ${documentRetentionHoursSql(this.sql)} from documents where id = ${documentId} limit 1`;
     if (!row) throw new DocumentNotFoundError(documentId);
     return mapDocument(row);
   }
@@ -4050,6 +4060,7 @@ function mapDocument(row: DocumentRow): Document {
     pageCount: row.page_count,
     createdAt: toDate(row.created_at),
     updatedAt: toDate(row.updated_at),
+    ...(row.artifact_retention_hours === undefined ? {} : { artifactRetentionHours: row.artifact_retention_hours === null ? null : Number(row.artifact_retention_hours) }),
   };
 }
 
