@@ -72,7 +72,7 @@ const FACTOR_MANAGEMENT_PATHS = new Set([
 ]);
 /** Factor removal or replacement: also needs a recent sign-in (re-auth). */
 const FACTOR_REMOVAL_PATHS = new Set(["/two-factor/disable", "/two-factor/generate-backup-codes", "/passkey/delete-passkey"]);
-const TRUST_REVOKING_PATHS = new Set(["/two-factor/disable", "/change-password", "/revoke-sessions", "/revoke-other-sessions"]);
+const TRUST_REVOKING_PATHS = new Set(["/two-factor/disable", "/change-password", "/revoke-sessions", "/revoke-other-sessions", "/email-otp/reset-password"]);
 const PASSKEY_REGISTRATION_PATHS = new Set(["/passkey/generate-register-options", "/passkey/verify-registration"]);
 
 export interface MfaConfig {
@@ -302,9 +302,16 @@ async function requestSession(ctx: HookContext, pool: Pick<Pool, "query">): Prom
 }
 
 /** Better Auth paths a session blocked by an org MFA policy may still use: sign-in, sign-out and enrolment. */
+const POLICY_BLOCKED_ALLOWED_PATHS = new Set([
+  "/get-session", "/sign-out", "/verify-email", "/email-otp/send-verification-otp", "/email-otp/verify-email",
+  "/two-factor/enable", "/two-factor/verify-totp", "/two-factor/verify-backup-code", "/two-factor/get-totp-uri",
+  "/passkey/generate-register-options", "/passkey/verify-registration", "/passkey/list-user-passkeys",
+  "/passkey/generate-authenticate-options", "/passkey/verify-authentication",
+]);
 function allowedWhilePolicyBlocked(path: string): boolean {
-  return path === "/get-session" || path === "/sign-out" || path === "/verify-email"
-    || ["/sign-in/", "/two-factor/", "/passkey/", "/callback/", "/email-otp/"].some((prefix) => path.startsWith(prefix));
+  // Exact paths (plus sign-in and OAuth callbacks), so a newly enabled account
+  // endpoint such as an email change stays blocked by default.
+  return POLICY_BLOCKED_ALLOWED_PATHS.has(path) || path.startsWith("/sign-in/") || path.startsWith("/callback/");
 }
 
 async function loadSessionRow(pool: Pick<Pool, "query">, token: string): Promise<SessionRow | null> {
@@ -567,7 +574,10 @@ export function docslurpMfaGatePlugin(options: MfaPluginOptions): BetterAuthPlug
    * every trusted device of the user, not just this browser's.
    */
   const forgetTrustedDevices = createAuthMiddleware(async (ctx) => {
-    const userId = ctx.context.session?.user?.id;
+    let userId = ctx.context.session?.user?.id ?? null;
+    if (!userId && ctx.path === "/email-otp/reset-password" && typeof ctx.body?.email === "string") {
+      userId = (await pool.query<{ id: string }>(`select id from "user" where lower(email) = lower($1)`, [ctx.body.email])).rows[0]?.id ?? null;
+    }
     if (!userId || isAPIError(ctx.context.returned)) return;
     await pool.query(`delete from verification where identifier like 'trust-device-%' and value = $1`, [userId]);
   });
