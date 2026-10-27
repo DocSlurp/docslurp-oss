@@ -252,6 +252,9 @@ export function requestUserAgent(c: Context): string | null {
   return c.req.header("user-agent") ?? null;
 }
 
+/** TRUST_INBOUND_TRACEPARENT=true: callers sit behind a trusted gateway whose traces we join. */
+const TRUST_INBOUND_TRACEPARENT = ["1", "true", "on", "yes"].includes(process.env.TRUST_INBOUND_TRACEPARENT?.trim().toLowerCase() ?? "");
+
 const INFRA_PROBE_ROUTES = new Set(["/health", "/ready", "/metrics", "/fly-scaler-metrics"]);
 
 export const requestContextMiddleware: MiddlewareHandler = async (c, next) => {
@@ -283,6 +286,8 @@ export const requestContextMiddleware: MiddlewareHandler = async (c, next) => {
     status: () => c.res.status,
     attributes: () => requestSpanAttributes({ requestId, route, pathname, identity, userAgent: c.req.header("User-Agent") }),
     error: () => identity?.error,
+    // A browser or API client's traceparent must not pick our trace id or force sampling.
+    trustInboundParent: TRUST_INBOUND_TRACEPARENT,
   }, () => requestContextStorage.run({
     requestId, requestStartedAt: startedAt, userId: null, performanceEvents: [],
     capabilityHeader: c.req.header("X-DocSlurp-Capability")?.trim() || null,

@@ -2,10 +2,11 @@ import { Hono } from "hono";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { requestContextMiddleware, setCurrentRequestUserId } from "./request-context.js";
 
+const httpSpanOptions: unknown[] = [];
 const { observe, posthogLog, database, otlpLogs, traceparentMock } = vi.hoisted(() => ({ observe: vi.fn(), posthogLog: vi.fn(), database: vi.fn(), otlpLogs: vi.fn(() => false), traceparentMock: vi.fn((): string | null => null) }));
 vi.mock("@docslurp/shared/observability", () => ({
   withObservation: observe,
-  withHttpSpan: async (_options: unknown, run: () => Promise<unknown>) => run(),
+  withHttpSpan: async (options: unknown, run: () => Promise<unknown>) => { httpSpanOptions.push(options); return run(); },
   addTraceMetadata: vi.fn(),
   exportsOtlpLogs: otlpLogs,
   activeTraceparent: traceparentMock,
@@ -22,6 +23,14 @@ beforeEach(() => {
 });
 
 describe("trace header", () => {
+  it("does not join an inbound trace by default", async () => {
+    const app = new Hono();
+    app.use("*", requestContextMiddleware);
+    app.get("/v1/ok", c => c.text("ok"));
+    await app.request("/v1/ok", { headers: { traceparent: "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01" } });
+    expect(httpSpanOptions.at(-1)).toMatchObject({ trustInboundParent: false });
+  });
+
   it("names the request's trace on every response, error responses included", async () => {
     const traceparent = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
     traceparentMock.mockReturnValue(traceparent);

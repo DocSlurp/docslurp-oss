@@ -342,6 +342,18 @@ export function recordHttpTelemetry(method: string, route: string, status: numbe
   bestEffort(() => runtime.httpDuration?.record(durationSeconds, attributes));
 }
 
+/**
+ * The context an HTTP server span starts in. Trusted: the inbound trace.
+ * Untrusted: the inbound baggage without its span (a new root), plus a link
+ * to the inbound span when it is valid.
+ */
+export function httpSpanParent(headers: Record<string, string>, trusted: boolean): { parent: ReturnType<typeof propagation.extract>; links: Array<{ context: NonNullable<ReturnType<typeof trace.getSpanContext>> }> } {
+  const extracted = propagation.extract(ROOT_CONTEXT, headers);
+  if (trusted) return { parent: extracted, links: [] };
+  const inbound = trace.getSpanContext(extracted);
+  return { parent: trace.deleteSpan(extracted), links: inbound && trace.isSpanContextValid(inbound) ? [{ context: inbound }] : [] };
+}
+
 export async function withHttpSpan<T>(options: {
   method: string;
   route: string;
@@ -351,14 +363,20 @@ export async function withHttpSpan<T>(options: {
   attributes?: () => Attributes;
   /** An error the framework turned into a response (Hono onError), so the span still records it. */
   error?: () => unknown;
+  /**
+   * Join the caller's trace (and adopt its sampled flag). Off for untrusted
+   * callers: the request starts a new root span, sampled by our own sampler,
+   * that links to the inbound span. Baggage is kept either way.
+   */
+  trustInboundParent?: boolean;
 }, run: () => Promise<T>): Promise<T> {
   if (!initializeObservability({ serviceName: "docslurp-api" })) return run();
   let outcome: { ok: true; value: T } | { ok: false; error: unknown } | undefined;
   let invoked = false;
   try {
-    const parent = propagation.extract(ROOT_CONTEXT, options.headers);
+    const { parent, links } = httpSpanParent(options.headers, options.trustInboundParent !== false);
     await getRuntime()!.traces.getTracer("docslurp.http").startActiveSpan(`${options.method} ${options.route}`, {
-      kind: SpanKind.SERVER, attributes: { "http.request.method": options.method, "http.route": options.route },
+      kind: SpanKind.SERVER, attributes: { "http.request.method": options.method, "http.route": options.route }, links,
     }, parent, async span => {
       const started = performance.now();
       invoked = true;
