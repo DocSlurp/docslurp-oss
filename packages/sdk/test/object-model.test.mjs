@@ -40,7 +40,7 @@ test("deleteDocument sends DELETE and returns the removed identities", async () 
   assert.equal(deleted.filename, "a.pdf");
 });
 
-test("chatStream streams status, the answer, then done from the legacy SSE route", async () => {
+test("chatStream streams status, the answer, then done from GET /v1/chat/stream", async () => {
   let url, accept;
   const client = createDocSlurpClient({ apiUrl: "https://example.test", workspace: "manuals", fetch: async (requestUrl, init) => {
     url = requestUrl;
@@ -56,7 +56,7 @@ test("chatStream streams status, the answer, then done from the legacy SSE route
   assert.deepEqual(events.map(event => event.event), ["status", "message", "done"]);
   assert.equal(events[1].data.answer, "Hi");
   assert.equal(events[2].data.sessionId, "s1");
-  assert.equal(url, "https://example.test/v1/search/chat/stream?q=hi&workspace=manuals&sessionId=s1&model=workspace%3Amanuals");
+  assert.equal(url, "https://example.test/v1/chat/stream?q=hi&workspace=manuals&sessionId=s1&model=workspace%3Amanuals");
   assert.equal(accept, "text/event-stream");
 });
 

@@ -5,24 +5,15 @@ import { zValidator } from "@hono/zod-validator";
 
 import { actorHasAnyApiKeyScope, getRequestActor } from "../lib/request-actor.js";
 import { parseArtifactUri } from "../lib/artifacts.js";
-import { fileUrlForArtifact } from "../lib/file-urls.js";
 import { buildArtifactPreview } from "../services/artifact-security.js";
 import { userCanAccessArtifactUri } from "../services/documents.js";
 import { acceptApiKeys } from "../lib/route-auth.js";
 import { apiStatusError } from "../lib/api-error.js";
 import { validationHook } from "../lib/validation.js";
 
-const resolveArtifactSchema = z.object({
-  uri: z.string().min(1)
-});
-
 const previewArtifactSchema = z.object({
   uri: z.string().min(1),
   kind: z.enum(["text", "markdown", "html", "json"]).default("text")
-});
-
-const resolveArtifactsSchema = z.object({
-  uris: z.array(z.string().min(1)).min(1)
 });
 
 export const artifactsRoutes = new Hono()
@@ -50,32 +41,6 @@ export const artifactsRoutes = new Hono()
       const message = reportPublicError(error);
       return apiStatusError(c, 400, message);
     }
-  })
-  .get("/resolve", zValidator("query", resolveArtifactSchema, validationHook), async (c) => {
-    const userId = c.get("sessionUser").id;
-    const { uri } = c.req.valid("query");
-    if (!parseArtifactUri(uri)) {
-      return apiStatusError(c, 400, "Unsupported artifact URI");
-    }
-    if (!(await userCanAccessArtifactUri(uri, userId, c.get("apiKey")?.orgId))) {
-      return apiStatusError(c, 404, "Artifact not found");
-    }
-    // A session/key-bound proxy URL, never a storage URL (lib/file-urls.ts).
-    return c.json({ uri, ...fileUrlForArtifact(uri) });
-  })
-  .post("/resolve", zValidator("json", resolveArtifactsSchema, validationHook), async (c) => {
-    const userId = c.get("sessionUser").id;
-    const { uris } = c.req.valid("json");
-    if (uris.some((uri) => !parseArtifactUri(uri))) {
-      return apiStatusError(c, 400, "Unsupported artifact URI");
-    }
-    const authorized = await Promise.all(uris.map(async (uri) => await userCanAccessArtifactUri(uri, userId, c.get("apiKey")?.orgId)));
-    if (authorized.some((allowed) => !allowed)) {
-      return apiStatusError(c, 404, "Artifact not found");
-    }
-    const resolved = uris.map((uri) => ({ uri, ...fileUrlForArtifact(uri) }));
-
-    return c.json({ artifacts: resolved });
   });
 
 acceptApiKeys(artifactsRoutes);
