@@ -70,10 +70,10 @@ const mcpAdapterRoutes = new Hono()
   .use("*", publicErrorMiddleware)
   .onError(spendAwareErrorHandler)
   .get("/manifest", async (c) => {
-    return c.json(mcpManifest(routeBaseUrl(c.req.url), getApiKey(c)?.scopes, getApiKey(c)?.keyType, { firstPartyApp: isFirstPartyAppActor(c.get("requestActor")) }));
+    return c.json(mcpManifest(routeBaseUrl(c.req.url), getApiKey(c)?.scopes, getApiKey(c)?.keyType, { ...getApiKey(c)?.oauth, firstPartyApp: isFirstPartyAppActor(c.get("requestActor")) }));
   })
   .get("/tools", async (c) => {
-    const manifest = mcpManifest(routeBaseUrl(c.req.url), getApiKey(c)?.scopes, getApiKey(c)?.keyType, { firstPartyApp: isFirstPartyAppActor(c.get("requestActor")) });
+    const manifest = mcpManifest(routeBaseUrl(c.req.url), getApiKey(c)?.scopes, getApiKey(c)?.keyType, { ...getApiKey(c)?.oauth, firstPartyApp: isFirstPartyAppActor(c.get("requestActor")) });
     return c.json({ tools: manifest.capabilities.filter((capability) => capability.category === "tool") });
   })
   .post("/tools/:id", async (c) => {
@@ -359,7 +359,7 @@ const mcpAdapterRoutes = new Hono()
   })
   .get("/resources/:id", async (c) => {
     if (c.req.param("id") === "capabilities") {
-      return c.json(mcpManifest(routeBaseUrl(c.req.url), getApiKey(c)?.scopes, getApiKey(c)?.keyType, { firstPartyApp: isFirstPartyAppActor(c.get("requestActor")) }));
+      return c.json(mcpManifest(routeBaseUrl(c.req.url), getApiKey(c)?.scopes, getApiKey(c)?.keyType, { ...getApiKey(c)?.oauth, firstPartyApp: isFirstPartyAppActor(c.get("requestActor")) }));
     }
 
     return adapterError(c, 404, "Unknown MCP resource");

@@ -117,7 +117,7 @@ export interface McpTool {
   /** An API key needs at least one of these scopes to see or call the tool. */
   scopes: McpScope[];
   /** Replaces the `scopes` check for API keys (scope and key type): estimates mirror the access of the mutation they price. */
-  keyAccess?: (key: { scopes: readonly string[]; keyType?: string }) => boolean;
+  keyAccess?: (key: { scopes: readonly string[]; keyType?: string; oauth?: { audience: string } }) => boolean;
   annotations: ToolAnnotations;
   /**
    * Offered only to the first-party DocSlurp app (a signed-in dashboard
@@ -213,7 +213,8 @@ export function mcpTools(baseUrl: string): McpTool[] {
  * are listed only when `options.firstPartyApp` is set from the authenticated
  * actor (isFirstPartyAppActor), never by default.
  */
-export function mcpManifest(baseUrl: string, scopes?: string[], keyType?: string, options: { firstPartyApp?: boolean } = {}) {
+export function mcpManifest(baseUrl: string, scopes?: string[], keyType?: string, options: { firstPartyApp?: boolean; audience?: string } = {}) {
+  const oauth = options.audience ? { audience: options.audience } : undefined;
   const firstPartyApp = options.firstPartyApp === true && scopes === undefined;
   return {
     server: {
@@ -223,6 +224,6 @@ export function mcpManifest(baseUrl: string, scopes?: string[], keyType?: string
     },
     capabilities: mcpTools(baseUrl).filter(tool => tool.firstPartyAppOnly
       ? firstPartyApp
-      : !scopes || (tool.keyAccess ? tool.keyAccess({ scopes, keyType }) : tool.scopes.some(scope => scopes.includes(scope)))),
+      : !scopes || (tool.keyAccess ? tool.keyAccess({ scopes, keyType, oauth }) : tool.scopes.some(scope => scopes.includes(scope)))),
   };
 }

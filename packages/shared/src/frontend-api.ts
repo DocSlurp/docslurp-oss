@@ -30,7 +30,8 @@ export type InvitePreview = {
 };
 
 /** GET /oauth/mcp/consent/:id */
-export type McpConsentRequest = { id: string; client_name: string; redirect_uri: string; scopes: string[]; expires_at: string };
+/** `resource`: the audience (RFC 8707), `<origin>/v1/mcp` for MCP clients or `<origin>/v1` for the first-party CLI. */
+export type McpConsentRequest = { id: string; client_name: string; redirect_uri: string; resource?: string; scopes: string[]; expires_at: string };
 
 /** POST /v1/waitlist */
 export type WaitlistResponse = { ok: true; already_registered: boolean };
