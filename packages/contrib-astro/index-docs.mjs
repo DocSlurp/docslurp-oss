@@ -81,7 +81,7 @@ export async function indexDocs(corpus, { apiUrl, workspace = 'DocSlurp document
   if (pipeline) form.set('pipeline', JSON.stringify(pipeline));
   form.set('workspace', workspace);
   const hash = createHash('sha256').update(JSON.stringify({ target: workspace, corpus, pipeline: pipeline ?? null })).digest('hex');
-  const result = await request('/v1/ingest/bulk', { method: 'POST', headers: { 'Idempotency-Key': `docs-${hash}` }, body: form });
+  const result = await request('/v1/uploads/bulk', { method: 'POST', headers: { 'Idempotency-Key': `docs-${hash}` }, body: form });
   const deadline = Date.now() + 10 * 60_000;
   while (Date.now() < deadline) {
     const { run } = await request(`/v1/runs/${encodeURIComponent(result.run.id)}/progress`);

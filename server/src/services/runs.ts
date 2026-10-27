@@ -1,4 +1,4 @@
-import { publicDiagnostics, publicDocumentError, publicProcessingMessage } from "@docslurp/shared";
+import { publicDiagnostics, publicDocumentError, publicProcessingMessage, type ApiErrorCode } from "@docslurp/shared";
 import {
   planRunControlUpdate,
   runLifecycle,
@@ -22,7 +22,6 @@ import {
   type WorkspaceRunStageState,
 } from "@docslurp/shared";
 
-import { fileUrlForArtifact } from "../lib/file-urls.js";
 import { runCreation } from "./run-creation.js";
 import {
   jsonRecord,
@@ -58,7 +57,6 @@ import {
   runUsageCostTotals,
   summarizeRunUsageCost,
 } from "./usage-attribution.js";
-import { loadWithheldArtifactUrisForRun } from "./pii-artifact-guard.js";
 import { processSingleton } from "../lib/process-singleton.js";
 import { extractNotReprocessable, ReprocessRejectedError } from "./reprocess-errors.js";
 
@@ -952,44 +950,6 @@ export async function getRunProgress(
   }
 
   return await buildRunProgressSnapshot(run, options);
-}
-
-export interface RunExportManifest {
-  runId: string;
-  exportedAt: string;
-  /**
-   * Each artifact as its slot and a session/key-bound `/v1/files/…` proxy URL.
-   * The raw storage URI (bucket and `<userId>/<runId>/…` key layout) is
-   * deliberately not part of the manifest.
-   */
-  artifacts: Array<{ slot: string; url: string }>;
-}
-
-/** Export entries for a run's artifacts, minus withheld ones, as proxy URLs only. */
-export function runExportArtifacts(
-  artifacts: Record<string, string>,
-  withheld: ReadonlySet<string>,
-): RunExportManifest["artifacts"] {
-  return Object.entries(artifacts)
-    .filter(([, uri]) => !withheld.has(uri))
-    // Session/key-bound proxy URL; the bucket is never exposed (lib/file-urls.ts).
-    .map(([slot, uri]) => ({ slot, url: fileUrlForArtifact(uri).url }));
-}
-
-export async function exportRun(
-  runId: string,
-  userId: string,
-): Promise<RunExportManifest | null> {
-  const run = await getRun(runId, userId);
-  if (!run) return null;
-
-  const withheld = await loadWithheldArtifactUrisForRun(run.id);
-
-  return {
-    runId,
-    exportedAt: new Date().toISOString(),
-    artifacts: runExportArtifacts(run.artifacts, withheld),
-  };
 }
 
 /**
