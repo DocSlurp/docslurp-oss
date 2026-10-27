@@ -327,3 +327,26 @@ A real subprocess control replaces the path with raising code during execution,
 restores it afterward, and confirms that only the verified buffer executes.
 Persistent snapshot changes still reject. All 48 focused tests pass. Earlier
 proof bundles are retained; any new promotion must use fresh execution provenance.
+
+### Council round 5: joint formula-mention attribution
+
+Both reviewers showed deletion plus a compensating tail mention could repair the
+global count while greedy alignment credited a surviving prose copy. The methods
+review also found a false rejection caused by Markdown heading markers following
+an intact formula. Verified-byte scorer execution passed its controls.
+
+Formula preservation now jointly checks every mention of each required expression,
+including prose mentions, in order. Reference-only context widths expand until
+repetitions are distinguished. Each mention must have exactly one matching output
+context; missing, extra, reordered or ambiguously attributed mentions reject.
+Counts and declared spans no longer receive independent credit from a greedy
+alignment. Heading envelopes are excluded from surrounding context outside known
+printed expressions; mathematical line-leading minus/multiplication tokens stay.
+The diagnostic recall now covers all formula mentions, so a corrupt declared copy
+plus an intact prose copy reports .5 rather than zero, and still fails acceptance.
+
+All 49 focused tests pass, including deletion plus literal/extended-expression
+compensation, the recasing-plus-compensation variant, intact heading syntax and
+exact/whitespace controls. This is strict textual preservation with conservative
+context attribution; it does not establish spatial formula layout. Prior scorer
+results remain provisional, and fresh council review remains required.

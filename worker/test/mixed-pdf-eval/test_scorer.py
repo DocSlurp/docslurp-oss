@@ -61,7 +61,7 @@ class ScorerTests(unittest.TestCase):
                  printedFormulaOccurrences=[dict(start=len(prose)+2,end=len(text),text=formula)])
         self.assertTrue(content_score(ref,text,tolerant_markdown)['acceptable'])
         bad=content_score(ref,prose+'\n\nq = A / b',tolerant_markdown)
-        self.assertFalse(bad['acceptable']);self.assertEqual(bad['printedFormulaRecall'],0)
+        self.assertFalse(bad['acceptable']);self.assertEqual(bad['printedFormulaRecall'],.5)
 
     def test_repeated_prose_copy_cannot_repair_deleted_formula_block(self):
         from v4_reference import page_reference
@@ -80,6 +80,24 @@ class ScorerTests(unittest.TestCase):
         self.assertFalse(bad['acceptable']);self.assertEqual(bad['printedFormulaRecall'],.5)
         self.assertFalse(content_score(ref,ref['expectedMarkdown'].replace(formula,'q = A / b'),tolerant_markdown)['acceptable'])
 
+    def test_compensating_duplicates_do_not_repair_deleted_formula(self):
+        from v4_reference import page_reference
+        pad='The valve has a pressure of 12 units. '*60
+        formula='q = a / b';following='End of rule. Continue discussion.'
+        prose=formula+'\n\n'+following+' This is an explanatory repetition.'
+        sections=[pad,formula,following,prose]
+        blocks=[dict(id=str(i),visible=True,displayText=value,cells=[],
+                     formula=dict(display=formula,latex='q=a/b') if i==1 else None)
+                for i,value in enumerate(sections)]
+        ref=page_reference(dict(id='invented',sizePt=[612,792],blocks=blocks,
+            readingOrder=[str(i) for i in range(4)],sections=sections,paragraphs=sections,
+            expectedMarkdown='\n\n'.join(sections)))
+        for tail in [formula,'An alternative is '+formula+' + c.']:
+            score=content_score(ref,'\n\n'.join([pad,prose,tail]),tolerant_markdown)
+            self.assertFalse(score['acceptable']);self.assertLess(score['printedFormulaRecall'],1)
+        for text in [ref['expectedMarkdown'],ref['expectedMarkdown'].replace(following,'### '+following,1)]:
+            self.assertTrue(content_score(ref,text,tolerant_markdown)['acceptable'])
+
     def test_recased_prose_cannot_mask_corrupt_formula_occurrence(self):
         from v4_reference import page_reference
         formula='q = a / b'
@@ -96,6 +114,7 @@ class ScorerTests(unittest.TestCase):
                          sections[3].upper(),'For this Rule q = a / b End. Common detail belongs here.'])
         score=content_score(ref,bad,tolerant_markdown)
         self.assertFalse(score['acceptable']);self.assertLess(score['printedFormulaRecall'],1)
+        self.assertFalse(content_score(ref,bad+'\n\n'+formula,tolerant_markdown)['acceptable'])
 
     def test_case_sensitive_formulas_cannot_swap_identical_contexts(self):
         first='q = a / b';second='q = A / b'

@@ -57,54 +57,77 @@ def formula_tokens(text):
     text=unicodedata.normalize('NFC',text).translate(str.maketrans({'−':'-','–':'-','—':'-','―':'-'}))
     return re.findall(r'\d+(?:\.\d+)?|[^\W\d_]+|[^\w\s]|_',text)
 
-def printed_formula_recall(reference,text):
-    """Check declared gold occurrences through one monotonic page alignment.
+def formula_page_tokens(text, patterns):
+    """Ignore heading envelopes outside matching printed expressions only.
 
-    Count every mention as well as checking the declared span: a surviving prose
-    copy cannot repair a missing authored copy. Legacy references must have exactly
-    the declared number of unambiguous, nonoverlapping formula occurrences.
+    List markers remain untouched: a line-leading minus or multiplication sign
+    may belong to the printed mathematics. Candidate expressions protect their
+    own tokens even when they resemble a heading.
+    """
+    raw=formula_tokens(text);protected=set()
+    for pattern in patterns:
+        n=len(pattern)
+        for i in range(len(raw)-n+1):
+            if tuple(raw[i:i+n])==pattern:protected.update(range(i,i+n))
+    ignored=set()
+    for match in re.finditer(r'(?m)^[ \t]{0,3}(#{1,6})[ \t]+',text):
+        start=len(formula_tokens(text[:match.start(1)]))
+        ignored.update(i for i in range(start,start+len(match.group(1))) if i not in protected)
+    return [token for i,token in enumerate(raw) if i not in ignored]
+
+
+def printed_formula_recall(reference,text):
+    """Jointly attribute every formula mention with unambiguous gold contexts.
+
+    Context widths are frozen from reference text, expanding until repetitions
+    are distinguished. All mentions, including prose, must survive in order;
+    compensating duplicates cannot separately repair counts and attribution.
     """
     expected=Counter(tuple(formula_tokens(f)) for f in reference.get('printedFormulas',[]) if formula_tokens(f))
     if not expected:return None
-    source=reference['expectedMarkdown'];gold=formula_tokens(source);actual=formula_tokens(text)
-    occurrence_recall=1.0
-    for pattern in expected:
-        n=len(pattern)
-        count=lambda sequence:sum(tuple(sequence[i:i+n])==pattern for i in range(len(sequence)-n+1))
-        wanted=count(gold)
-        if not wanted:raise ValueError('missing-reference-formula')
-        occurrence_recall=min(occurrence_recall,count(actual)/wanted)
-    mapping={m.a+k:m.b+k for m in SequenceMatcher(None,gold,actual,autojunk=False).get_matching_blocks()
-             for k in range(m.size)}
-    declared=reference.get('printedFormulaOccurrences')
-    spans=[]
+    source=reference['expectedMarkdown']
+    gold=formula_page_tokens(source,expected);actual=formula_page_tokens(text,expected)
+    def mentions(sequence):
+        return sorted((i,i+len(pattern),pattern) for pattern in expected
+                      for i in range(len(sequence)-len(pattern)+1)
+                      if tuple(sequence[i:i+len(pattern)])==pattern)
+    wanted=mentions(gold);received=mentions(actual)
+    declared=reference.get('printedFormulaOccurrences');spans=[]
     if declared is not None:
         seen=Counter()
         for row in declared:
             start,end=row['start'],row['end'];literal=row['text']
             if type(start) is not int or type(end) is not int or not 0<=start<end<=len(source) or source[start:end]!=literal:
                 raise ValueError('invalid-printed-formula-occurrence')
-            pattern=tuple(formula_tokens(literal));i=len(formula_tokens(source[:start]));j=i+len(pattern)
+            pattern=tuple(formula_tokens(literal));i=len(formula_page_tokens(source[:start],expected));j=i+len(pattern)
             if tuple(gold[i:j])!=pattern or any(i<v and u<j for u,v in spans):
                 raise ValueError('overlapping-or-invalid-formula-occurrence')
             spans.append((i,j));seen[pattern]+=1
         if seen!=expected:raise ValueError('incomplete-printed-formula-occurrences')
     else:
         for pattern,required in sorted(expected.items(),key=lambda item:-len(item[0])):
-            n=len(pattern)
-            candidates=[(i,i+n) for i in range(len(gold)-n+1) if tuple(gold[i:i+n])==pattern
-                        and not any(i<v and u<i+n for u,v in spans)]
+            candidates=[(i,j) for i,j,p in wanted if p==pattern and not any(i<v and u<j for u,v in spans)]
             if len(candidates)!=required:return 0.0
             spans.extend(candidates)
-    found=0
-    for i,j in spans:
-        begin=mapping.get(i)
-        if begin is None or any(mapping.get(k)!=begin+k-i for k in range(i,j)):continue
-        end=begin+j-i
-        left=gold[max(0,i-3):i];right=gold[j:j+3]
-        if (begin==0 or (left and actual[max(0,begin-len(left)):begin]==left)) and (end==len(actual) or (right and actual[end:end+len(right)]==right)):
-            found+=1
-    return min(found/len(spans),occurrence_recall)
+    counts=Counter(p for i,j,p in wanted);actual_counts=Counter(p for i,j,p in received)
+    if any(not counts[p] for p in expected):raise ValueError('missing-reference-formula')
+    if counts!=actual_counts:
+        return min(min(counts[p],actual_counts[p])/max(counts[p],actual_counts[p]) for p in expected)
+    if [p for i,j,p in wanted]!=[p for i,j,p in received]:return 0.0
+    def context(sequence,i,j,width):
+        return (tuple(sequence[max(0,i-width):i]),tuple(sequence[j:j+width]),i<width,j+width>len(sequence))
+    matched=0
+    for (i,j,pattern),(x,y,_) in zip(wanted,received):
+        width=3
+        while True:
+            signature=context(gold,i,j,width)
+            competitors=[(u,v) for u,v,p in wanted if p==pattern and context(gold,u,v,width)==signature]
+            if len(competitors)==1:break
+            if width>=len(gold):raise ValueError('ambiguous-reference-formula-context')
+            width=min(len(gold),width*2)
+        candidates=[(u,v) for u,v,p in received if p==pattern and context(actual,u,v,width)==signature]
+        if candidates==[(x,y)]:matched+=1
+    return matched/len(wanted)
 
 def content_score(reference, text, legacy):
     expected, actual = Counter(tokens(reference["expectedMarkdown"])), Counter(tokens(text))
