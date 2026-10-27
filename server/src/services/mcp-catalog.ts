@@ -128,7 +128,7 @@ export interface McpTool {
 }
 
 /** Workspace settings tools: app-only, so a customer cannot expose them to its own end users. */
-export const FIRST_PARTY_APP_SETTINGS_TOOLS: ReadonlySet<string> = new Set(["proposeWorkspaceSettings"]);
+export const FIRST_PARTY_APP_SETTINGS_TOOLS: ReadonlySet<string> = new Set(["getWorkspaceSettings", "proposeWorkspaceSettings"]);
 
 /**
  * Listing order for every surface that keeps server order (tools/list, manifest, chat tools): discover → upload →
@@ -153,7 +153,7 @@ export function mcpTools(baseUrl: string): McpTool[] {
     annotations: READ_ONLY,
   }));
   const tools: Omit<McpTool, "category" | "endpoint">[] = [
-    { id: "getWorkspaceSettings", title: "Read workspace settings", scopes: ["search", "ingest"], annotations: READ_ONLY,
+    { id: "getWorkspaceSettings", title: "Read workspace settings", scopes: ["search", "ingest"], keyAccess: () => false, firstPartyAppOnly: true, annotations: READ_ONLY,
       description: "Read current supported pipeline toggles, chat settings and retrieval defaults for the selected workspace. Use before proposing changes and to verify what is actually saved after the user applies a proposal. Does not expose secrets or change settings.",
       inputSchema: toolInputJsonSchema(z.object({ workspace: workspaceRef }).strict()) },
     { id: "proposeWorkspaceSettings", title: "Propose workspace settings", scopes: ["search", "ingest"],

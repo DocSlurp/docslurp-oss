@@ -110,7 +110,7 @@ export type RateLimitConsumeResult = {
   windows: Array<{ previous: number; current: number }>;
   /** Whether this request was added to the counters. */
   counted: boolean;
-  /** The request's address prefix holds its share of the in-memory store and this is a new identity: denied without counting. */
+  /** Global or prefix capacity prevents admitting this operation: denied without counting. */
   full?: boolean;
 };
 
@@ -252,23 +252,17 @@ function parseScriptResult(result: unknown, counterCount: number): RateLimitCons
 export const MEMORY_STORE_DEFAULT_MAX_ENTRIES = 200_000;
 
 /**
- * The per-process limiter, bounded without letting one attacker lock others out:
- * - one entry per counter (identity + policy) holding its current and previous
- *   fixed-window counts; every write moves it to the back, so at the cap the
- *   least recently used counter is evicted (an idle one, not a live attacker's);
- * - each counter may name address prefixes (an IPv6 /48 and /56). A prefix
- *   holds at most a small share of the store; past it, new identities from
- *   that prefix are refused (429), so one network can't flush everyone else;
- * - penalty-box blocks live in their own, separately capped map. Counter
- *   eviction never lifts a jail; at the block cap the soonest-expiring blocks
- *   go first.
+ * Bounded fallback: live counters and jails are never evicted. At capacity,
+ * refuse admission of new identities until expiry frees space. This deliberately
+ * trades availability under a distributed flood for preserving enforcement;
+ * configure Redis for shared capacity across instances.
  */
 class InMemorySlidingWindowStore implements RateLimitStore {
   private counters = new Map<string, { bucket: number; current: number; previous: number; expiresAt: number; prefixes?: string[] }>();
   private prefixCounts = new Map<string, number>();
   private blocks = new Map<string, number>();
   private lastSweepAt = 0;
-  private evictionLogged = false;
+  private capacityLogged = false;
   private prefixLogged = false;
   private readonly maxBlocks: number;
   private readonly prefixCaps: Record<string, number>;
@@ -293,16 +287,32 @@ class InMemorySlidingWindowStore implements RateLimitStore {
     const blockedUntil = this.blocks.get(input.blockKey) ?? 0;
     if (blockedUntil > now) return { blockedMs: blockedUntil - now, denied: -1, counted: false, windows: [] };
 
-    // A prefix at its share may not add identities; known identities keep counting.
-    for (const counter of input.counters) {
-      if (this.counters.has(counter.key)) continue;
-      const over = (counter.prefixes ?? []).find((prefix) => (this.prefixCounts.get(prefix) ?? 0) >= (this.prefixCaps[prefix.split(":", 1)[0]!] ?? Infinity));
-      if (over) {
-        if (!this.prefixLogged) {
-          this.prefixLogged = true;
-          console.warn(`[rate-limit] one address prefix holds its share of the in-memory limiter; refusing its new identities (prefix /${over.split(":", 1)[0]})`);
+    const full = (): RateLimitConsumeResult => {
+      if (!this.capacityLogged) {
+        this.capacityLogged = true;
+        console.warn(`[rate-limit] in-memory limiter at capacity; refusing new identities without evicting live limits (configure Redis or increase API_RATE_LIMIT_MEMORY_MAX_ENTRIES)`);
+      }
+      return { blockedMs: 0, denied: 0, counted: false, windows: input.counters.map(() => ({ previous: 0, current: 0 })), full: true };
+    };
+    // Reserve the whole operation before writing any counters. A request with
+    // multiple new policy keys cannot exceed capacity or partially consume it.
+    const additions = new Map(input.counters.filter(counter => !this.counters.has(counter.key)).map(counter => [counter.key, counter]));
+    if (this.counters.size + additions.size > this.maxEntries) return full();
+    // Reserve jail capacity before admitting an unblocked identity. Once full,
+    // it must wait; existing live jails cannot be dropped to accommodate it.
+    if (!this.blocks.has(input.blockKey) && this.blocks.size >= this.maxBlocks) return full();
+    const reservedPrefixes = new Map<string, number>();
+    for (const counter of additions.values()) {
+      for (const prefix of counter.prefixes ?? []) {
+        const count = (reservedPrefixes.get(prefix) ?? this.prefixCounts.get(prefix) ?? 0) + 1;
+        if (count > (this.prefixCaps[prefix.split(":", 1)[0]!] ?? Infinity)) {
+          if (!this.prefixLogged) {
+            this.prefixLogged = true;
+            console.warn(`[rate-limit] one address prefix holds its share of the in-memory limiter; refusing its new identities (prefix /${prefix.split(":", 1)[0]})`);
+          }
+          return { blockedMs: 0, denied: 0, counted: false, windows: input.counters.map(() => ({ previous: 0, current: 0 })), full: true };
         }
-        return { blockedMs: 0, denied: 0, counted: false, windows: input.counters.map(() => ({ previous: 0, current: 0 })), full: true };
+        reservedPrefixes.set(prefix, count);
       }
     }
 
@@ -324,7 +334,7 @@ class InMemorySlidingWindowStore implements RateLimitStore {
       });
     }
     const penaltyMs = denied >= 0 ? input.counters[denied]?.penaltyMs ?? 0 : 0;
-    if (penaltyMs > 0) this.block(input.blockKey, now + penaltyMs, now);
+    if (penaltyMs > 0) this.block(input.blockKey, now + penaltyMs);
     return { blockedMs: 0, denied, counted, windows };
   }
 
@@ -332,15 +342,6 @@ class InMemorySlidingWindowStore implements RateLimitStore {
     const existing = this.counters.get(key);
     if (existing) this.counters.delete(key);
     else for (const prefix of entry.prefixes ?? []) this.prefixCounts.set(prefix, (this.prefixCounts.get(prefix) ?? 0) + 1);
-    while (this.counters.size >= this.maxEntries) {
-      const oldest = this.counters.keys().next().value as string | undefined;
-      if (oldest === undefined) break;
-      this.remove(oldest);
-      if (!this.evictionLogged) {
-        this.evictionLogged = true;
-        console.warn(`[rate-limit] in-memory limiter reached ${this.maxEntries} counters; evicting the least recently used (set API_RATE_LIMIT_MEMORY_MAX_ENTRIES or configure Redis)`);
-      }
-    }
     this.counters.set(key, { ...entry, prefixes: existing?.prefixes ?? entry.prefixes });
   }
 
@@ -354,15 +355,7 @@ class InMemorySlidingWindowStore implements RateLimitStore {
     }
   }
 
-  private block(key: string, until: number, now: number): void {
-    if (!this.blocks.has(key) && this.blocks.size >= this.maxBlocks) {
-      for (const [blocked, expiry] of this.blocks) if (expiry <= now) this.blocks.delete(blocked);
-      if (this.blocks.size >= this.maxBlocks) {
-        // Drop the soonest-expiring tenth in one pass, so a flood of jails stays cheap.
-        const soonest = [...this.blocks].sort((x, y) => x[1] - y[1]).slice(0, Math.max(1, Math.ceil(this.maxBlocks / 10)));
-        for (const [blocked] of soonest) this.blocks.delete(blocked);
-      }
-    }
+  private block(key: string, until: number): void {
     this.blocks.set(key, Math.max(this.blocks.get(key) ?? 0, until));
   }
 
@@ -387,7 +380,7 @@ class InMemorySlidingWindowStore implements RateLimitStore {
     this.prefixCounts.clear();
     this.blocks.clear();
     this.lastSweepAt = 0;
-    this.evictionLogged = false;
+    this.capacityLogged = false;
     this.prefixLogged = false;
   }
 }
@@ -822,7 +815,7 @@ async function consumeCounters(
   }));
   const result = await args.store.consume({ blockKey: `${base}:block`, counters, now: args.now, countDenied: args.countDenied });
   if (result.blockedMs > 0) return blockedResponse(c, result.blockedMs);
-  // This address prefix already holds its share of the per-process store: its new identities wait.
+  // Global or prefix capacity is exhausted; admission waits without clearing live enforcement.
   if (result.full) return tooManyRequests(c, "rate_limited", "Too many requests", { category: args.category, policy: "limiter-capacity", retryAfterSeconds: 60 });
 
   const states = counters.map((counter, index) =>
