@@ -37,8 +37,12 @@ export interface NativeProbeOptions {
   thumbPx?: number;
   verifyOcrLayer?: boolean;
   signal?: AbortSignal;
+  /** OCR for the layer check; must run sandboxed (`sandboxedTesseract`). Absent: the layer stays unverified. */
   recognise?: Recogniser;
 }
+
+/** Without a sandboxed recogniser the OCR layer stays unverified, as when tesseract is not installed. */
+const noRecogniser: Recogniser = async () => null;
 
 /** The document could not be opened by the binding (damaged, unsupported encryption); callers may fall back. */
 export class NativeProbeOpenError extends Error {
@@ -374,7 +378,7 @@ export async function* probeNativePdf(binding: ProbeBinding, options: NativeProb
         const probed = await probePage(doc, pno - 1, count, docFeatures, producer, { thumbDir: options.thumbDir, thumbPx: options.thumbPx, stem });
         row = probed.row;
         if (options.verifyOcrLayer && row.textLayerStatus === "ocr-layer") {
-          applyOcrCheck(row, await ocrLayerAgreement(probed.page, probed.size, options.recognise, options.signal));
+          applyOcrCheck(row, await ocrLayerAgreement(probed.page, probed.size, options.recognise ?? noRecogniser, options.signal));
         }
       } catch (error) {
         if ((error as { name?: string } | null)?.name === "AbortError") throw error;

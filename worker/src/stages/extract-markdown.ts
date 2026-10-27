@@ -296,7 +296,7 @@ export class ExtractMarkdownStage implements Stage {
                   if (lastUsableResult) return lastUsableResult;
                   const cause = `no untried extractor remains for ${format}: ${JSON.stringify(attemptLedger.snapshot())}`;
                   if (format !== "image") throw new Error(cause);
-                  // OCR is unavailable here (e.g. the lean image has no Tesseract data): vision reads the pixels.
+                  // OCR is unavailable here (e.g. an image built without Tesseract data): vision reads the pixels.
                   textlessFallback = `OCR unavailable; ${cause}`;
                   plannedExtractors = {
                     primary: this.textlessImageExtractor(state, document, textlessFallback),
@@ -1156,7 +1156,7 @@ export class ExtractMarkdownStage implements Stage {
   }
 
   /**
-   * An image has no text layer, so when OCR cannot read it (no Tesseract data on the lean worker image, or
+   * An image has no text layer, so when OCR cannot read it (no Tesseract data on this worker, or
    * Kreuzberg's bundled OCR crashing) vision is the only reader left. Returns a stand-in extractor whose empty
    * Markdown lets page triage and the vision stage read the pixels. When the workspace cannot use vision
    * (turned off, or privacy mode forbids the route) the image is unreadable: fail naming that cause. The raw
