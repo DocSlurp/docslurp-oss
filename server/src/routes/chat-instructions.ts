@@ -30,6 +30,12 @@ const draftSchema = z.object({
   instructions: z.string().max(CHAT_INSTRUCTIONS_MAX_CHARS * 2).nullable().optional(),
 }).strict();
 
+const previewSchema = draftSchema.extend({
+  /** The draft's unsaved answer style and citations; omitted uses the saved settings. */
+  answerStyle: z.enum(["concise", "balanced", "detailed"]).optional(),
+  citations: z.boolean().optional(),
+}).strict();
+
 function envInt(name: string, fallback: number): number {
   const value = Number(process.env[name]);
   return Number.isFinite(value) && value >= 0 ? Math.floor(value) : fallback;
@@ -46,7 +52,7 @@ function refuseNonAppActor(c: Parameters<typeof getRequestActor>[0]): Response |
 export const chatInstructionsRoutes = new Hono()
   .post(
     "/:workspaceId/chat-instructions/preview",
-    zValidator("json", draftSchema),
+    zValidator("json", previewSchema),
     async (c) => {
       const refused = refuseNonAppActor(c);
       if (refused) return refused;
@@ -62,8 +68,8 @@ export const chatInstructionsRoutes = new Hono()
       const args = {
         ingestInstructions: workspace.systemPrompt,
         searchInstructions: instructions,
-        answerStyle: settings.chat.answerStyle,
-        citations: settings.chat.citations,
+        answerStyle: body.answerStyle ?? settings.chat.answerStyle,
+        citations: body.citations ?? settings.chat.citations,
         scope,
       };
       return c.json({
