@@ -48,6 +48,15 @@ def value_contexts(text):
     return Counter(tuple(sequence[max(0,i-2):i+3]) for i,t in enumerate(sequence)
                    if re.fullmatch(r'[-+]?\d+(?:\.\d+)?|[=+*/<>^%−×÷±≤≥≠(){}\[\]-]',t))
 
+def formula_tokens(text):
+    """Keep mathematical case, subscripts and operators; never strip list syntax.
+
+    NFC preserves superscript/subscript distinctions that compatibility folding
+    would erase. Common minus glyph variants share an operator token.
+    """
+    text=unicodedata.normalize('NFC',text).translate(str.maketrans({'−':'-','–':'-','—':'-','―':'-'}))
+    return re.findall(r'\d+(?:\.\d+)?|[^\W\d_]+|[^\w\s]|_',text)
+
 def content_score(reference, text, legacy):
     expected, actual = Counter(tokens(reference["expectedMarkdown"])), Counter(tokens(text))
     matched = sum((expected & actual).values())
@@ -75,12 +84,13 @@ def content_score(reference, text, legacy):
     statement_recall=sum((' '+' '.join(s)+' ') in actual_stream for s in statements)/len(statements) if statements else None
     # Formula errors must not disappear into a long page's token average. These
     # are literal printed references, separate from LaTeX diagnostic references.
-    printed_formulas=Counter(tuple(tokens(f)) for f in reference.get('printedFormulas',[]) if tokens(f))
+    formula_stream=' '+' '.join(formula_tokens(text))+' '
+    printed_formulas=Counter(tuple(formula_tokens(f)) for f in reference.get('printedFormulas',[]) if formula_tokens(f))
     formula_counts=[]
     for expression,required in printed_formulas.items():
         pattern=' '+' '.join(expression)+' ';cursor=0;found=0
         for _ in range(required):
-            start=actual_stream.find(pattern,cursor)
+            start=formula_stream.find(pattern,cursor)
             if start<0:break
             found+=1;cursor=start+len(pattern)-1
         formula_counts.append(found/required)

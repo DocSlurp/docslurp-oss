@@ -42,6 +42,20 @@ class ScorerTests(unittest.TestCase):
             self.assertFalse(score['acceptable']);self.assertLess(score['quality'],.95)
     def test_empty(self):
         self.assertEqual(self.score("")["quality"],0)
+    def test_math_case_and_line_leading_operators_survive_normalization(self):
+        for expected,wrong in [('q = a / b','q = A / b'),
+                               ('Rule: a\n* b = c','Rule: a\nb = c'),
+                               ('Rule: a\n- b = c','Rule: a\nb = c'),
+                               ('q = a ― b','q = a b'),('q = a²','q = a2'),
+                               ('q = a_1','q = a1')]:
+            prefix='padding '*400
+            ref={'expectedMarkdown':prefix+expected,'sections':[prefix+expected],
+                 'paragraphs':[prefix+expected],'tables':[],'formulas':[],
+                 'printedFormulas':[expected],'excludedText':[]}
+            good=content_score(ref,prefix+expected,tolerant_markdown)
+            self.assertTrue(good['acceptable'])
+            bad=content_score(ref,prefix+wrong,tolerant_markdown)
+            self.assertFalse(bad['acceptable']);self.assertEqual(bad['printedFormulaRecall'],0)
     def test_formula_error_cannot_hide_in_long_prose(self):
         formula='Result: (a + b) * c = d.'
         text='padding '*400+formula

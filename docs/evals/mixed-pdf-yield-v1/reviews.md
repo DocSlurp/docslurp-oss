@@ -168,6 +168,44 @@ family namespace and raster-share metadata did not match the harness interface.
 No extraction result was produced from that superseded view. The corrected view
 retains class/layout/producer metadata and emits the independent integrity manifest.
 
+## V4 source-only council, round 1
+
+Independent adversarial and methods Sol reviews of fixed commit `2919d7d8` found
+three remaining tooling issues: review decisions lacked corpus binding, semantic
+receipts were checked only at summary level, and cross-split source checks ran after
+protected reads. Both also reproduced mathematical distinctions lost through prose
+normalization (case and line-leading or horizontal-bar operators). Neither accessed
+datasets or found production leakage. These findings block tooling promotion; they
+do not establish corruption of the independently observed prototype values.
+
+The correction introduces corpus-bound review envelopes with original report/score
+hashes, checked semantic-validator snapshots/dependencies and every case/family
+outcome. Available PDF/layout/world/authoring/native identities now reject cross-split
+reuse in inventory preflight. Multi-split inputs additionally require predeclared
+canonical page identities, including reordered-page rejection, before label access.
+Mathematical matching now uses a separate case/operator-preserving tokenizer.
+37 focused harness tests pass; fresh independent council review remains pending.
+Older approval envelopes/views are superseded for promotion. Their raw calibration
+predictions remain retained, with scores provisional under the earlier normalization.
+
+Full corpora intentionally reuse explicitly identified, code-identical training-pilot
+reviews, plus their own complete automatic semantic receipt. This scope is distinct
+from claiming a manual judge read heldout content. Pilot/template and generated corpus
+hashes, code identities and review scope must agree before the view can be sealed.
+
+## Enriched derivative preflight
+
+The 1,080-page pilot has not been delivered. Strict preflight found incompatible
+formula support targets: a short 9-point monospaced expression cannot fill the
+specified occupied width at IoU 0.70, and another constraint's maximum character
+count similarly bounds its support below the target. Failed diagnostics, natives,
+previews and all 132 negative semantic probes are retained; the original accepted
+prototype artifacts remain unchanged. Attempt 5 is correcting enriched geometry
+contracts constructively while preserving the accepted P contract. Source-blind
+generic production/validation runtime may be reused as project tooling; dirty
+reports, original source material and failed candidate outputs remain excluded from
+the fresh Builder handoff.
+
 Before measuring the new corpus, the sealer must validate realized decoys against
 immutable authoring plans. Current sealing deliberately rejects the a2-r5 schema's
 plan/exclusion differences; no measurement has bypassed this check.

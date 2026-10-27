@@ -14,6 +14,7 @@ import shutil
 from contract import file_hash, identity_hash, immutable_json, page_content_hash, validate_manifest
 from fools_gold_v4_common import record_hash
 from v4_reference import page_reference
+from approval_v4 import validate_approval
 
 
 def safe_path(root, value):
@@ -36,9 +37,14 @@ def validate_inventory(manifest, spec):
         expected = set(plan)
     else:
         raise ValueError('unknown-generation-stage')
+    if stage != 'full' and any(plan[f]['split'] != 'train' for f in expected):
+        raise ValueError('protected-split-in-development-stage')
     families = defaultdict(list)
     ids = set()
     paths = set()
+    owners = {}
+    ancestry = {}
+    multiple_splits = len({c['split'] for c in manifest.get('cases', [])}) > 1
     for case in manifest.get('cases', []):
         ident = case['id']
         if not re.fullmatch(r'[A-Za-z0-9_-]+', ident) or ident in ids:
@@ -51,6 +57,33 @@ def validate_inventory(manifest, spec):
             raise ValueError('unexpected-case-membership')
         if any(case[k] != plan[family][k] for k in ['classId', 'layoutId']):
             raise ValueError('changed-family-contract')
+        identity = []
+        for key in ['sha256', 'sourceLayoutHash', 'authoringHash', 'worldHash', 'nativePdfHash']:
+            value = case.get(key)
+            if key == 'nativePdfHash' and value is None:
+                continue
+            if not isinstance(value, str) or not re.fullmatch('[0-9a-f]{64}', value):
+                raise ValueError('missing-source-identity')
+            owner = owners.setdefault((key, value), case['split'])
+            if owner != case['split']:
+                raise ValueError('cross-split-source-identity')
+            if key != 'sha256':
+                identity.append((key, value))
+        hashes = case.get('pageContentHashes')
+        if multiple_splits and hashes is None:
+            raise ValueError('missing-predeclared-page-identities')
+        if hashes is not None:
+            if not isinstance(hashes, list) or len(hashes) != 10:
+                raise ValueError('invalid-predeclared-page-identities')
+            for digest in hashes:
+                if not isinstance(digest, str) or not re.fullmatch('[0-9a-f]{64}', digest):
+                    raise ValueError('invalid-predeclared-page-identity')
+                owner = owners.setdefault(('page', digest), case['split'])
+                if owner != case['split']:
+                    raise ValueError('cross-split-page-content')
+            identity.append(('pages', tuple(hashes)))
+        if ancestry.setdefault(family, identity) != identity:
+            raise ValueError('inconsistent-family-ancestry')
         for field in ['pdf', 'labels']:
             safe_path(Path('.'), case[field])
             if case[field] in paths:
@@ -63,39 +96,6 @@ def validate_inventory(manifest, spec):
     if manifest['counts'] != counts:
         raise ValueError('generation-count-mismatch')
     return counts
-
-
-def validate_approval(approval, manifest, manifest_sha):
-    if (approval.get('schema') != 'mixed-pdf-evaluation-approval@1'
-            or approval.get('coordinatorApproval') is not True
-            or approval.get('stage') != manifest['stage']
-            or approval.get('datasetManifestSha256') != manifest_sha
-            or approval.get('handoffHash') != manifest['handoffHash']):
-        raise ValueError('unbound-corpus-approval')
-    if manifest['stage'] == 'full' and approval.get('balancedPilotApproved') is not True:
-        raise ValueError('full-corpus-without-approved-pilot')
-    for name in ['auditDecision', 'judgeDecision', 'semanticValidation']:
-        record = approval[name]
-        path = Path(record['path'])
-        if file_hash(path) != record['sha256']:
-            raise ValueError('changed-approval-evidence')
-        data = json.loads(path.read_text())
-        if name == 'semanticValidation':
-            expected = dict(authoringPages=manifest['counts']['families'] * 10,
-                            labelPages=manifest['counts']['pages'], pdfsHashed=manifest['counts']['pdfs'])
-            if (data.get('passed') is not True or data.get('originalCorpusUnchanged') is not True
-                    or data.get('corpusManifestSha256') != manifest_sha
-                    or data.get('handoffHash') != manifest['handoffHash']
-                    or any(data.get('counts', {}).get(k) != v for k, v in expected.items())):
-                raise ValueError('invalid-semantic-validation-receipt')
-            if sorted(c['id'] for c in data.get('checkedCases', [])) != sorted(c['id'] for c in manifest['cases']):
-                raise ValueError('semantic-case-inventory-mismatch')
-        elif (data.get('pass') is not True or data.get('decision') != 'pass'
-              or data.get('stage') != ('audit' if name == 'auditDecision' else 'judge')
-              or data.get('score', 0) < 95
-              or any(data.get('counts', {}).get(k) != 0 for k in ['fatal', 'high', 'medium'])
-              or data.get('counts', {}).get('low', 100) > 5):
-            raise ValueError('quality-gate-not-cleared')
 
 
 def seal(root, out, approval_path):
@@ -111,7 +111,7 @@ def seal(root, out, approval_path):
         raise ValueError('changed-frozen-specification')
     validate_inventory(original, spec)
     approval = json.loads(approval_path.read_text())
-    validate_approval(approval, original, file_hash(original_path))
+    validate_approval(approval, original, file_hash(original_path), candidate=root, spec=spec)
     compiled = []
     integrity_cases = []
     out.mkdir(parents=True, exist_ok=False)
@@ -147,11 +147,14 @@ def seal(root, out, approval_path):
         result = dict(schema='mixed-pdf-authored@v2', family=family, split=case['split'], pages=refs,
                       labels=[dict(name='visible_page_content', expected=[p['expectedMarkdown'] for p in refs])])
         bare = [{k: v for k, v in p.items() if k != 'pageId'} for p in refs]
+        content_hashes = [page_content_hash(p) for p in bare]
+        if case.get('pageContentHashes') is not None and case['pageContentHashes'] != content_hashes:
+            raise ValueError('predeclared-page-content-mismatch')
         row = dict(id=case['id'], family=family, split=case['split'], pdf=case['pdf'],
                    labels=f"labels/{case['split']}/{case['id']}.json", sha256=case['sha256'],
                    sourceLayoutHash=case['sourceLayoutHash'], sourceContentHash=identity_hash([p['expectedMarkdown'] for p in refs]),
                    pageIds=[p['pageId'] for p in refs], pageReferenceHashes=[identity_hash(p) for p in bare],
-                   pageContentHashes=[page_content_hash(p) for p in bare], hardPercent=case['hardPercent'],
+                   pageContentHashes=content_hashes, hardPercent=case['hardPercent'],
                    pages=[dict(pageId=p['pageId']) for p in refs], authoringHash=case['authoringHash'],
                    worldHash=case['worldHash'], layout=case['layoutId'], classId=case['classId'],
                    baseRegionRasterShare=case['sectionRasterShare'], producerPath=case['producerPath'])
@@ -172,6 +175,9 @@ def seal(root, out, approval_path):
                     cases=compiled, generationManifestHash=file_hash(original_path), generationRoot=str(root),
                     acceptanceReceiptHash=file_hash(approval_path), projectionCodeHash=file_hash(Path(__file__)),
                     referenceAdapterHash=file_hash(Path(__file__).with_name('v4_reference.py')))
+    manifest['approvalCodeHash'] = file_hash(Path(__file__).with_name('approval_v4.py'))
+    manifest['projectionDependencyHashes'] = {name: file_hash(Path(__file__).with_name(name))
+        for name in ['approval_v4.py', 'contract.py', 'fools_gold_v4_common.py', 'v4_reference.py']}
     validate_manifest(manifest)
     immutable_json(out / 'manifest.json', manifest)
     immutable_json(out / 'generation-manifest.json', original)
