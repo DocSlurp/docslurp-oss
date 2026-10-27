@@ -29,6 +29,7 @@ import { embedPageImages, withinCostCap, type PageEmbedDeps } from "./page-embed
 import type { CommandRunner } from "../tools/runner.js";
 import type { ArtifactStore } from "../tools/storage.js";
 import { executeVisionRuntime } from "../tools/vision-runtime.js";
+import { rasterFileExtension } from "../pipeline/page-image-format.js";
 
 export const MAP_BLOCK_PAGES = 15;
 export const COVERAGE_THRESHOLD = 0.85;
@@ -424,7 +425,7 @@ export class DocumentMapStage implements Stage {
     for (const pageNumber of pageNumbers) {
       const artifact = byPage.get(pageNumber);
       if (!artifact) { pageTexts.push(""); continue; }
-      const imagePath = await this.storage.downloadToTempFile(artifact.artifactKey, `map-${pageNumber}-*.png`);
+      const imagePath = await this.storage.downloadToTempFile(artifact.artifactKey, `map-${pageNumber}-*${rasterFileExtension(artifact.mimeType)}`);
       try {
         const result = await executeVisionRuntime({
           imagePath, mimeType: artifact.mimeType, outputPath: `${imagePath}.vision.json`, vision: state.run.pipeline.vision,

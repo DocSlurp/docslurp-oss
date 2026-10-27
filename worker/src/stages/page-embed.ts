@@ -94,6 +94,8 @@ export async function embedPageImages(
       pageNumbers: windowPages,
       dpi: RENDER_DPI,
       signal,
+      // Read once as JPEG input, then deleted: a WebP encode here would be thrown away.
+      transient: true,
     });
     const transient = rasters.filter((r) => !r.cacheHit).map((r) => r.artifactKey);
     try {

@@ -243,5 +243,5 @@ export async function normalizeOrientation(raster: RasterRef): Promise<Normalize
   if (result.rotation === 0) return { ...result, raster, rotated: false };
   const target = `${raster.path}.upright.png`;
   await sharp(raster.path).rotate(result.rotation, { background: "#ffffff" }).png().toFile(target);
-  return { ...result, raster: { path: target, mimeType: "image/png" }, rotated: true };
+  return { ...result, raster: { path: target, mimeType: "image/png", ...(raster.dpi ? { dpi: raster.dpi } : {}) }, rotated: true };
 }

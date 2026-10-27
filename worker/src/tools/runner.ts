@@ -1,3 +1,4 @@
+import { executeDocumentVm, type DocumentVmJob } from "../sandbox/providers/modal/document-vm.js";
 import { ensurePythonDistributions, parseMissingPythonDependency, parseMissingPythonModule } from "./python-deps.js";
 import {
   ensureVendorBundle,
@@ -40,6 +41,8 @@ import {
 } from "../pipeline/local-compute-cost.js";
 
 export interface CommandPlan {
+  /** Mandatory dedicated VM dispatch, before any scope or backend shortcuts. */
+  documentVm?: DocumentVmJob;
   binary: string;
   args: string[];
   available: boolean;
@@ -169,6 +172,7 @@ export class CommandRunner {
   }
 
   async run(plan: CommandPlan, signal?: AbortSignal): Promise<CommandResult> {
+    if (plan.documentVm) return this.runOnce(plan, signal);
     if (plan.vendorBundle) {
       // Throws VendorBundleUnavailableError (a clear, per-candidate failure) when it cannot be fetched.
       const bundle = await ensureVendorBundle(plan.vendorBundle, { signal });
@@ -477,6 +481,22 @@ export class CommandRunner {
       fileArgIndexes: [10, 11],
       supportsDoubleDash: true,
     });
+  }
+
+  /**
+   * Lossless `cwebp` of a bounded page PNG, run through the parser sandbox like every other
+   * tool that reads customer-derived bytes. `-exact` keeps RGB under transparent pixels, so
+   * the decode is pixel-identical; one thread matches the per-vCPU throughput measurements.
+   */
+  async encodeLosslessWebp(source: string, output: string, effort: number): Promise<CommandPlan> {
+    if (!Number.isInteger(effort) || effort < 0 || effort > 9) throw new Error("Invalid lossless WebP effort");
+    if (!path.isAbsolute(source) || !path.isAbsolute(output)) throw new Error("cwebp paths must be absolute");
+    return { binary: "cwebp", args: [], available: true, pages: 1, documentVm: { operation: "encode-webp", input: source, output, effort } };
+  }
+
+  async decodeWebpToPng(source: string, output: string): Promise<CommandPlan> {
+    if (!path.isAbsolute(source) || !path.isAbsolute(output)) throw new Error("WebP paths must be absolute");
+    return { binary: "dwebp", args: [], available: true, pages: 1, documentVm: { operation: "decode-webp", input: source, output } };
   }
 
   async extractMarkdown(source: string): Promise<CommandPlan> {
@@ -832,12 +852,16 @@ export class CommandRunner {
     source: string,
     outputBase: string,
     langs?: string,
+    /** Image density for formats that carry none (WebP); PNG renders carry it in pHYs. */
+    dpi?: number,
   ): Promise<CommandPlan> {
     const langArg = langs ?? "eng";
+    if (dpi !== undefined && (!Number.isInteger(dpi) || dpi < 1 || dpi > 2400)) throw new Error("Invalid OCR density");
     return await this.plan(
       "tesseract",
       source,
       outputBase,
+      ...(dpi !== undefined ? ["--dpi", String(dpi)] : []),
       "-l",
       langArg,
       "txt",
@@ -1175,6 +1199,7 @@ export class CommandRunner {
    * backend credentials and run outside the sandbox. Callers must `release()` when done.
    */
   async launch(plan: CommandPlan, signal?: AbortSignal): Promise<LaunchedCommand> {
+    if (plan.documentVm) return { remote: executeDocumentVm(plan.documentVm, signal), timeoutMs: 60_000, release: async () => {} };
     if (isVectorBackendCommand(plan.args, this.scriptsDir)) {
       const env = buildCommandEnv({ plan, venvBin: this.venvBin, isVectorBackend: true });
       const child = spawn(plan.binary, plan.args, { env, stdio: ["ignore", "pipe", "pipe"], signal });
