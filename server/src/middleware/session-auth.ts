@@ -1,3 +1,4 @@
+import { requestIp } from "../lib/request-context.js";
 import type { Context, MiddlewareHandler } from "hono";
 
 import {
@@ -74,7 +75,8 @@ export const sessionAuth: MiddlewareHandler = async (c, next) => {
     try {
       actor = await resolveApiKeyActor(authorization, {
         origin: c.req.header("origin"),
-        referer: c.req.header("referer") ?? c.req.header("referrer")
+        referer: c.req.header("referer") ?? c.req.header("referrer"),
+      ip: requestIp(c),
       });
     } catch (error) {
       // A browser key on a website it doesn't allow, or a legacy one without workspaces: say how to fix it, never widen it.
@@ -95,9 +97,16 @@ export const sessionAuth: MiddlewareHandler = async (c, next) => {
   }
 
   const refreshedCookies = new Headers();
-  const actor = await resolveBetterAuthSessionActor(c.req.raw.headers, refreshedCookies);
+  const actor = await resolveBetterAuthSessionActor(c.req.raw.headers, refreshedCookies, { allowMfaPolicyBlocked: true });
   if (!actor) {
     return middlewareErrorResponse(c, 401, "unauthorized", "Unauthorized");
+  }
+
+  // Org "require MFA" policy past its grace period: the session may only read
+  // its own security status (to show enrolment); factor enrolment itself goes
+  // through Better Auth's /api/auth routes.
+  if (actor.mfaPolicyBlocked && !(c.req.method === "GET" && c.req.path === "/v1/account/security")) {
+    return middlewareErrorResponse(c, 403, "mfa_required", "Your organization requires two-factor authentication or a passkey");
   }
 
   if (!isCookieMutationFromTrustedOrigin(c)) {

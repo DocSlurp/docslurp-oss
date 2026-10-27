@@ -199,7 +199,7 @@ function webActivityResult(request: WebToolActivity, result: unknown): WebToolAc
  * made 24 of ~9,000 chat tool calls. proposeWorkspaceSettings already reports a
  * change's impact, and the app prices uploads and indexing itself.
  */
-const CHAT_EXCLUDED_TOOLS = new Set(["upload", "completeUpload", "listWorkspaces", "webMap", "webCrawl", "ingestWebsite", "fullIndex",
+const CHAT_EXCLUDED_TOOLS = new Set(["openUploader", "upload", "completeUpload", "listWorkspaces", "webMap", "webCrawl", "ingestWebsite", "fullIndex",
   ...ESTIMATE_TOOL_NAMES, "getJob", "suggestQueries"]);
 /**
  * Workspace settings tools: offered to the chat agent only for the first-party

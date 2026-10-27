@@ -158,6 +158,20 @@ export function createBetterAuthSecurityOptions(env: NodeJS.ProcessEnv) {
         "/reset-password": {
           window: 60,
           max: 5
+        },
+        // Second-factor codes: per-IP limits on top of the twoFactor plugin's
+        // per-challenge (5) and per-account (10, then a 15-minute lock) budgets.
+        "/two-factor/verify-totp": {
+          window: 60,
+          max: 10
+        },
+        "/two-factor/verify-backup-code": {
+          window: 60,
+          max: 10
+        },
+        "/passkey/verify-authentication": {
+          window: 60,
+          max: 20
         }
       }
     },

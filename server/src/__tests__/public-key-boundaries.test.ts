@@ -11,7 +11,7 @@ vi.mock("../services/api-keys.js", async (importOriginal) => ({ ...(await import
 vi.mock("../middleware/rate-limit.js", () => ({ enforceAuthenticatedApiRateLimit }));
 vi.mock("../lib/auth.js", () => ({ auth: { api: { getSession: vi.fn(async () => null) } }, appDbPool: {} }));
 
-const { ClientKeyOriginNotAllowedError, ClientKeyWorkspacesRequiredError } = await import("../services/api-keys.js");
+const { ApiKeyIpNotAllowedError, ClientKeyOriginNotAllowedError, ClientKeyWorkspacesRequiredError } = await import("../services/api-keys.js");
 const { apiKeyAuth } = await import("../middleware/api-key-auth.js");
 const { mcpAuth } = await import("../middleware/mcp-auth.js");
 const { apiKeyAllowsWorkspace, apiKeyCanUseWorkspace } = await import("../lib/api-key-workspace-scope.js");
@@ -47,6 +47,20 @@ describe("browser keys need a workspace allowlist", () => {
     const body = await response.json() as { code: string; error: string };
     expect(body.code).toBe("client_key_origin_not_allowed");
     expect(body.error).toMatch(/allowed websites/);
+  });
+
+  it("refuses a server key used from outside its IP allowlist, on the API and on MCP, passing the client address", async () => {
+    validateApiKey.mockRejectedValueOnce(new ApiKeyIpNotAllowedError());
+    const api = new Hono().use("*", apiKeyAuth).get("/compat/x", (c) => c.json({ ok: true }));
+    const refused = await api.request("/compat/x", { headers: { Authorization: "Bearer dslp_priv_office", "x-forwarded-for": "198.51.100.1" } });
+    expect(refused.status).toBe(403);
+    expect(((await refused.json()) as { code: string }).code).toBe("api_key_ip_not_allowed");
+    expect(validateApiKey).toHaveBeenLastCalledWith("dslp_priv_office", expect.objectContaining({ ip: expect.any(String) }));
+    validateApiKey.mockRejectedValueOnce(new ApiKeyIpNotAllowedError());
+    const mcp = new Hono().use("*", mcpAuth).post("/v1/mcp", (c) => c.json({ ok: true }));
+    const mcpRefused = await mcp.request("/v1/mcp", { method: "POST", headers: { Authorization: "Bearer dslp_priv_office" } });
+    expect(mcpRefused.status).toBe(403);
+    expect(await mcpRefused.json()).toMatchObject({ code: "api_key_ip_not_allowed" });
   });
 
   it.each([ClientKeyWorkspacesRequiredError, ClientKeyOriginNotAllowedError])("refuses a legacy or wrong-site browser key on MCP like any browser key (%o)", async (ErrorType) => {

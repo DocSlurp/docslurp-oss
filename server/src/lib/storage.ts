@@ -20,12 +20,24 @@ import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import type { Readable } from "node:stream";
 
 import { env } from "../config.js";
-import { resolveS3ClientTuning, rfc5987Encode, s3ClientConfig } from "@docslurp/shared";
+import { resolveS3ClientTuning, rfc5987Encode, s3ClientConfig, type ObjectStorageConfig } from "@docslurp/shared";
 import { uploadSigningTarget } from "./upload-signing-target.js";
 
 const s3Client = instrumentS3Client(new S3Client(s3ClientConfig(env.storage)), env.storage.endpoint);
-const uploadTarget = uploadSigningTarget(env.storage, process.env.DOCSLURP_STORAGE_PUBLIC_BUCKET_URL);
-const presignClient = process.env.DOCSLURP_STORAGE_PUBLIC_BUCKET_URL ? new S3Client(uploadTarget.config) : s3Client;
+
+/** Storage config for signing browser-facing URLs: STORAGE_PUBLIC_ENDPOINT replaces the endpoint when set. */
+export function presignStorageConfig(storage: ObjectStorageConfig, publicEndpoint: string | null): ObjectStorageConfig {
+  return publicEndpoint ? { ...storage, endpoint: publicEndpoint } : storage;
+}
+
+// Signing is local; the bucket alias takes precedence over the public endpoint.
+const uploadTarget = uploadSigningTarget(
+  presignStorageConfig(env.storage, env.storagePublicEndpoint),
+  process.env.DOCSLURP_STORAGE_PUBLIC_BUCKET_URL,
+);
+const presignClient = env.storagePublicEndpoint || process.env.DOCSLURP_STORAGE_PUBLIC_BUCKET_URL
+  ? new S3Client(uploadTarget.config)
+  : s3Client;
 
 let bucketReadyPromise: Promise<void> | null = null;
 

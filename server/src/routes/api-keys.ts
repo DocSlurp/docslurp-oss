@@ -26,12 +26,18 @@ const createApiKeySchema = z.object({
   rateLimitRpm: z.number().int().positive().nullable().optional(),
   rateLimitPpd: z.number().int().positive().optional(),
   rateLimits: apiKeyRateLimitRulesSchema.optional(),
-  /** Limit the key to these workspaces (IDs in the key's org). Omitted/empty: all of them. */
+  /** Limit the key to these workspaces (IDs in the key's org). Required for browser keys; omitted/empty on a server key: all of them. */
   workspaceIds: workspaceIdsSchema.optional(),
-  /** Client keys only: acknowledge granting ingest/artifacts to a public key (needs workspaceIds). */
+  /** Deprecated, ignored: browser keys can only search and chat. */
   allowClientSensitiveScopes: z.boolean().optional(),
   /** Caps on query-time page parsing for this key; narrower than workspace/server defaults only. */
   materializationPolicy: materializationPolicyOverridesSchema.optional(),
+  /** ISO date-time the key stops working (at most 365 days ahead); null for no expiry. */
+  expiresAt: z.string().datetime({ offset: true }).nullable().optional(),
+  /** Server keys only: IP addresses or CIDR ranges the key may be used from. */
+  ipAllowlist: z.array(z.string().min(1).max(64)).max(50).optional(),
+  /** Chat answer output cap: browser keys 500/1000/2000 (default 1000); server keys 500/1000/2000/4000 or null for none. */
+  maxOutputTokens: z.union([z.literal(500), z.literal(1000), z.literal(2000), z.literal(4000)]).nullable().optional(),
 });
 
 const updateApiKeySchema = z.object({
@@ -47,7 +53,22 @@ const updateApiKeySchema = z.object({
   allowClientSensitiveScopes: z.boolean().optional(),
   /** Caps on query-time page parsing for this key; narrower than workspace/server defaults only. */
   materializationPolicy: materializationPolicyOverridesSchema.optional(),
+  /** ISO date-time the key stops working (at most 365 days ahead); null for no expiry. */
+  expiresAt: z.string().datetime({ offset: true }).nullable().optional(),
+  /** Server keys only: IP addresses or CIDR ranges the key may be used from. */
+  ipAllowlist: z.array(z.string().min(1).max(64)).max(50).optional(),
+  /** Chat answer output cap: browser keys 500/1000/2000 (default 1000); server keys 500/1000/2000/4000 or null for none. */
+  maxOutputTokens: z.union([z.literal(500), z.literal(1000), z.literal(2000), z.literal(4000)]).nullable().optional(),
 });
+
+/**
+ * Rotation. `overlapSeconds` (up to 7 days) creates a new key and keeps the old
+ * one working until the overlap ends; omitted or 0 replaces the secret at once.
+ * An empty body is allowed.
+ */
+const rotateApiKeySchema = z.object({
+  overlapSeconds: z.number().int().min(0).max(7 * 24 * 60 * 60).optional(),
+}).strict().default({});
 
 export const apiKeysRoutes = new Hono()
   .post("/", zValidator("json", createApiKeySchema, validationHook), async (c) => {
@@ -66,6 +87,9 @@ export const apiKeysRoutes = new Hono()
         workspaceIds: body.workspaceIds,
         allowClientSensitiveScopes: body.allowClientSensitiveScopes,
         materializationPolicy: body.materializationPolicy,
+        expiresAt: body.expiresAt,
+        ipAllowlist: body.ipAllowlist,
+        maxOutputTokens: body.maxOutputTokens,
       });
     } catch (error) {
       if (error instanceof OrganizationError) return apiStatusError(c, error.status, error.message, { code: error.code });
@@ -114,6 +138,9 @@ export const apiKeysRoutes = new Hono()
         workspaceIds: body.workspaceIds,
         allowClientSensitiveScopes: body.allowClientSensitiveScopes,
         materializationPolicy: body.materializationPolicy,
+        expiresAt: body.expiresAt,
+        ipAllowlist: body.ipAllowlist,
+        maxOutputTokens: body.maxOutputTokens,
       });
     } catch (error) {
       if (error instanceof OrganizationError) return apiStatusError(c, error.status, error.message, { code: error.code });
@@ -149,7 +176,17 @@ export const apiKeysRoutes = new Hono()
   })
   .post("/:id/rotate", async (c) => {
     const userId = c.get("sessionUser").id;
-    const result = await rotateApiKey(c.req.param("id"), userId);
+    // An empty body (older clients) rotates in place.
+    const raw = c.req.header("content-length") === "0" ? {} : await c.req.json().catch(() => ({}));
+    const parsed = rotateApiKeySchema.safeParse(raw ?? {});
+    if (!parsed.success) return apiStatusError(c, 400, "Invalid rotation request", { code: "invalid_request" });
+    let result;
+    try {
+      result = await rotateApiKey(c.req.param("id"), userId, { overlapSeconds: parsed.data.overlapSeconds });
+    } catch (error) {
+      if (error instanceof OrganizationError) return apiStatusError(c, error.status, error.message, { code: error.code });
+      throw error;
+    }
 
     if (!result) {
       return apiStatusError(c, 404, "API key not found or already revoked");
@@ -163,12 +200,14 @@ export const apiKeysRoutes = new Hono()
       resourceId: result.key.id,
       ipAddress: requestIp(c),
       metadata: {
+        overlapSeconds: parsed.data.overlapSeconds ?? 0,
+        ...(result.previous ? { previousKeyId: result.previous.id, previousExpiresAt: result.previous.expiresAt } : {}),
         name: result.key.name,
         userAgent: requestUserAgent(c)
       }
     });
 
-    return c.json({ key: result.key, rawKey: result.rawKey });
+    return c.json({ key: result.key, rawKey: result.rawKey, ...(result.previous ? { previous: result.previous } : {}) });
   })
   .delete("/:id", async (c) => {
     const userId = c.get("sessionUser").id;
