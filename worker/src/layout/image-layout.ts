@@ -185,7 +185,7 @@ export async function detectImageLayoutAtEndpoint(input: Buffer, options: ImageL
   const models = { "docling-project/docling-layout-heron": "heron", "docslurp/heron-custom": "heron-custom", "PaddlePaddle/PP-DocLayoutV3_safetensors": "ppv3", "PaddlePaddle/PP-DocLayout-S": "pp-small-onnx" } as const;
   const model = models[options.expectedModelId as keyof typeof models];
   if (!model) throw new Error("Unsupported offline layout model");
-  if (!options.expectedRevision || !/^[0-9a-f]{64}$/.test(options.expectedArtifactSha256 ?? "") || !/^[0-9a-f]{64}$/.test(options.expectedInferenceProfileSha256 ?? "")) throw new Error("VM layout requires pinned model, artifact and profile identity");
+  if (!options.expectedRevision || options.expectedRevision === "unknown" || !options.expectedArtifactSha256 || !options.expectedInferenceProfileSha256 || !/^[0-9a-f]{64}$/.test(options.expectedArtifactSha256) || !/^[0-9a-f]{64}$/.test(options.expectedInferenceProfileSha256)) throw new Error("VM layout requires pinned model, artifact and profile identity");
   if (input.length === 0 || input.length > 25 * 1024 * 1024) throw new Error("Layout image payload must be between 1 byte and 25 MiB");
   const timeoutMs = options.timeoutMs ?? 60_000;
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 60_000) throw new Error("Invalid layout timeout");

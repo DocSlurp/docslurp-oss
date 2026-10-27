@@ -9,3 +9,7 @@ Set `DOCSLURP_DOCUMENT_VM_IMAGE` to a verified `repository@sha256:...` image con
 The legacy generic Modal provider remains distinct; its activity-wide sessions and recursive staging are not the new document executor. These repairs do not claim to close the separately tracked legacy parser isolation gap.
 
 Before merge, the coordinator must obtain two independent council reviews, including an adversarial reviewer, and human owner approval. Offline SDK contract tests do not prove operational VM readiness or a hostile-code escape boundary.
+
+## Control-plane cancellation
+
+The host deadline covers SDK loading, app lookup, VM creation, staging, exec, streams and output commit. Each operation checks cancellation before dispatch and after settlement; no subsequent operation starts after cancellation. Termination has a separate five-second cleanup budget, including after a successful job. A timed-out cleanup fails loudly rather than hanging the caller. Late creation is observed with rejection handlers and triggers bounded best-effort termination using a fresh control client if the original client has already closed. A lost creation response can still prevent the host from obtaining a VM ID; the guest's provider-enforced 60-second lifetime remains mandatory. These SDK-fake tests establish the host contract, not live provider behavior.

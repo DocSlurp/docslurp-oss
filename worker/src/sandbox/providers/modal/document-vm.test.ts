@@ -3,7 +3,7 @@ import { mkdtemp, open, writeFile, rm, readFile } from "node:fs/promises";
 import path from "node:path";
 import { tmpdir } from "node:os";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { boundedStream, executeDocumentVm, MAX_IMAGE_BYTES, IMAGE_PROGRAM } from "./document-vm.js";
+import { boundedStream, executeDocumentVm, MAX_IMAGE_BYTES, IMAGE_PROGRAM, VM_TIMEOUT_MS, VM_CLEANUP_TIMEOUT_MS } from "./document-vm.js";
 import type { ModalSdk } from "./index.js";
 
 function stream(bytes: string) {
@@ -13,11 +13,15 @@ function harness(fail = false) {
   const terminate = vi.fn(async () => {});
   const exec = vi.fn(async () => ({ stdout: stream("result"), stderr: stream(""), wait: async () => fail ? 1 : 0 }));
   const writeBytes = vi.fn(async () => {});
-  const create = vi.fn(async (..._args: unknown[]) => ({ terminate, exec, filesystem: { makeDirectory: vi.fn(), writeBytes } }));
+  const makeDirectory = vi.fn(async () => {});
+  const vm = { sandboxId: "sb-test", terminate, exec, filesystem: { makeDirectory, writeBytes } };
+  const create = vi.fn(async (..._args: unknown[]) => vm);
+  const fromName = vi.fn(async () => "app");
+  const reconnect = vi.fn();
   const fromRegistry = vi.fn();
   const close = vi.fn();
-  const sdk = { ModalClient: class { apps = { fromName: vi.fn() }; images = { fromRegistry }; sandboxes = { create }; close = close; } } as unknown as ModalSdk;
-  return { sdk, create, exec, terminate, writeBytes, close };
+  const sdk = { ModalClient: class { apps = { fromName }; images = { fromRegistry }; sandboxes = { create }; close = close; }, Sandbox: class { terminate = terminate; constructor(...args: unknown[]) { reconnect(...args); } } } as unknown as ModalSdk;
+  return { sdk, create, exec, terminate, writeBytes, close, fromName, makeDirectory, vm, reconnect };
 }
 const dirs: string[] = [];
 afterEach(async () => { vi.useRealTimers(); vi.unstubAllEnvs(); await Promise.all(dirs.splice(0).map(d => rm(d, { recursive: true, force: true }))); });
@@ -106,6 +110,66 @@ describe("dedicated document VM contract (offline)", () => {
     await running; await vi.advanceTimersByTimeAsync(60_001); await rejected;
     expect(h.terminate).toHaveBeenCalled();
     await expect(readFile(j.output)).rejects.toThrow();
+  });
+
+  it.each(["abort", "deadline"])("bounds hung lookup on %s and never creates after lookup resolves late", async (mode) => {
+    const j = await job(); const h = harness(); const controller = new AbortController();
+    vi.useFakeTimers();
+    let started!: () => void, resolveLookup!: (value: string) => void;
+    const running = new Promise<void>(resolve => { started = resolve; });
+    h.fromName.mockImplementation(() => { started(); return new Promise(resolve => { resolveLookup = resolve; }); });
+    const pending = executeDocumentVm(j, controller.signal, async () => h.sdk);
+    const rejected = expect(pending).rejects.toThrow(mode === "abort" ? "aborted" : "deadline exceeded");
+    await running;
+    if (mode === "abort") controller.abort(); else await vi.advanceTimersByTimeAsync(VM_TIMEOUT_MS);
+    await rejected; expect(h.close).toHaveBeenCalledOnce(); expect(h.create).not.toHaveBeenCalled();
+    resolveLookup("late app"); await vi.advanceTimersByTimeAsync(0);
+    expect(h.create).not.toHaveBeenCalled(); expect(h.exec).not.toHaveBeenCalled();
+  });
+  it.each(["abort", "deadline"])("bounds hung create on %s and terminates a late VM without staging", async (mode) => {
+    const j = await job(); const h = harness(); const controller = new AbortController();
+    vi.useFakeTimers();
+    let started!: () => void, resolveCreate!: (value: typeof h.vm) => void;
+    const running = new Promise<void>(resolve => { started = resolve; });
+    h.create.mockImplementation(() => { started(); return new Promise(resolve => { resolveCreate = resolve; }); });
+    const pending = executeDocumentVm(j, controller.signal, async () => h.sdk);
+    const rejected = expect(pending).rejects.toThrow(mode === "abort" ? "aborted" : "deadline exceeded");
+    await running;
+    if (mode === "abort") controller.abort(); else await vi.advanceTimersByTimeAsync(VM_TIMEOUT_MS);
+    await rejected; expect(h.close).toHaveBeenCalledOnce();
+    resolveCreate(h.vm); await vi.advanceTimersByTimeAsync(0);
+    expect(h.reconnect).toHaveBeenCalledOnce(); expect(h.terminate).toHaveBeenCalledOnce();
+    expect(h.close).toHaveBeenCalledTimes(2);
+    expect(h.makeDirectory).not.toHaveBeenCalled(); expect(h.writeBytes).not.toHaveBeenCalled(); expect(h.exec).not.toHaveBeenCalled();
+  });
+  it("bounds hung termination and closes its control client", async () => {
+    const j = await job(); const h = harness(); vi.useFakeTimers();
+    let started!: () => void; const running = new Promise<void>(resolve => { started = resolve; });
+    h.terminate.mockImplementation(() => { started(); return new Promise(() => {}); });
+    const pending = executeDocumentVm(j, undefined, async () => h.sdk);
+    const rejected = expect(pending).rejects.toThrow("cleanup deadline");
+    await running; await vi.advanceTimersByTimeAsync(VM_CLEANUP_TIMEOUT_MS); await rejected;
+    expect(h.close).toHaveBeenCalledOnce(); expect(h.terminate).toHaveBeenCalledOnce();
+  });
+  it("does not continue staging when an in-flight write resolves after abort", async () => {
+    const j = await job(); const h = harness(); const controller = new AbortController();
+    let started!: () => void, resolveWrite!: () => void;
+    const running = new Promise<void>(resolve => { started = resolve; });
+    h.writeBytes.mockImplementation(() => { started(); return new Promise(resolve => { resolveWrite = resolve; }); });
+    const pending = executeDocumentVm(j, controller.signal, async () => h.sdk);
+    await running; controller.abort(); await expect(pending).rejects.toThrow("aborted");
+    resolveWrite(); await Promise.resolve(); await Promise.resolve();
+    expect(h.exec).not.toHaveBeenCalled(); expect(h.terminate).toHaveBeenCalledOnce();
+  });
+  it("consumes a late creation rejection after cancellation", async () => {
+    const j = await job(); const h = harness(); const controller = new AbortController();
+    let started!: () => void, rejectCreate!: (reason: Error) => void;
+    const running = new Promise<void>(resolve => { started = resolve; });
+    h.create.mockImplementation(() => { started(); return new Promise((_, reject) => { rejectCreate = reject; }); });
+    const pending = executeDocumentVm(j, controller.signal, async () => h.sdk);
+    await running; controller.abort(); await expect(pending).rejects.toThrow("aborted");
+    rejectCreate(new Error("late SDK rejection")); await new Promise(resolve => setImmediate(resolve));
+    expect(h.exec).not.toHaveBeenCalled();
   });
 
 });
