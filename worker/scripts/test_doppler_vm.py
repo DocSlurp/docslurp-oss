@@ -1,5 +1,6 @@
 """Pure range/merge regressions; no PDF parser or provider is executed."""
 import importlib.util
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -9,6 +10,16 @@ guest = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(guest)
 
 class ChunkMergeTest(unittest.TestCase):
+    def test_short_tail_cannot_lower_furniture_repetition_threshold(self):
+        for document_pages in (1, 32, 33, 67, 10000):
+            for first, last in guest.page_ranges(document_pages):
+                count = last - first + 1
+                params = json.loads(guest.chunk_settings('{"tables":true}', document_pages, count))
+                self.assertAlmostEqual(params['furniture_min_share'] * count, 0.4 * document_pages)
+                self.assertTrue(params['tables'])
+        params = json.loads(guest.chunk_settings('{"furniture_min_share":0.6}', 67, 3))
+        self.assertAlmostEqual(params['furniture_min_share'] * 3, 40.2)
+
     def test_ranges_cover_every_page_once(self):
         for pages in (1, 31, 32, 33, 64, 65, 10000):
             ranges = guest.page_ranges(pages)

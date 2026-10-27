@@ -29,6 +29,16 @@ def page_ranges(pages):
     return [(first, min(first + CHUNK_PAGES - 1, pages)) for first in range(1, pages + 1, CHUNK_PAGES)]
 
 
+def chunk_settings(settings, document_pages, chunk_pages):
+    # A short tail must not turn a section label into repeated page furniture.
+    # Require the same absolute repetition count as whole-document conversion.
+    # Counts from other chunks are unavailable, so retaining extra furniture is
+    # intentional; losing meaningful text is worse than retaining a header.
+    params = json.loads(settings)
+    params['furniture_min_share'] = params.get('furniture_min_share', 0.4) * document_pages / chunk_pages
+    return json.dumps(params)
+
+
 def append_chunk(output, chunk_path, expected_pages, first, total_bytes):
     # Binary form feeds retain exact page slots, including blank first/last pages.
     size = chunk_path.stat().st_size
@@ -88,7 +98,8 @@ def main():
             if Path('/job/raw.xhtml').stat().st_size > MAX_RAW:
                 raise ValueError('PDF chunk text layer exceeds limit')
             with open('/job/chunk.md', 'wb') as chunk, open('/job/converter-report.json', 'wb') as report:
-                run(['/opt/doppler/bin/doppler-md', '--report', '--params', settings, '/job/raw.xhtml'], chunk, report)
+                params = chunk_settings(settings, ranges[-1][1], last - first + 1)
+                run(['/opt/doppler/bin/doppler-md', '--report', '--params', params, '/job/raw.xhtml'], chunk, report)
             with open('/job/converter-report.json', 'rb') as report:
                 diagnostics = json.loads(report.read(16385))
             if type(diagnostics.get('pages')) is not int or diagnostics['pages'] != last - first + 1:
