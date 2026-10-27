@@ -324,6 +324,21 @@ describe("searchRoutes", () => {
     expect(chatWorkspace).not.toHaveBeenCalled();
   });
 
+  it("applies the same key scope and workspace denials to GET /chat/stream as to POST /chat", async () => {
+    const actor = { type: "apiKey" as const, userId: "user-1", apiKey: { keyId: "key", userId: "user-1", orgId: "org", keyType: "server" as const, allowedDomains: [], scopes: ["search", "chat"], rateLimitRpm: 60, rateLimitPpd: 1000, rateLimits: [], workspaceIds: ["ws-chat"] } };
+    getWorkspace.mockResolvedValue({ id: "ws-chat", orgId: "org" });
+    chatWorkspace.mockResolvedValue({ answer: "Supported", citations: [] });
+    const request = () => buildApp(actor).request("/chat/stream?q=Question&workspace=ws-chat");
+    // The allowed path is covered by the stream tests below; here only the denials, before any answer runs.
+    // A search-only key reads passages; it cannot spend on an answer.
+    actor.apiKey.scopes = ["search"];
+    expect((await request()).status).toBe(403);
+    actor.apiKey.scopes = ["search", "chat"];
+    actor.apiKey.workspaceIds = ["other"];
+    expect((await request()).status).toBe(404);
+    expect(chatWorkspace).not.toHaveBeenCalled();
+  });
+
   it("keeps public chat on grounded retrieval when DOCSLURP_PUBLIC_CHAT_AGENT_ENABLED is off", async () => {
     const { env } = await import("../config.js");
     const previous = env.publicChatAgentEnabled;
