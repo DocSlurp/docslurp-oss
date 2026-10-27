@@ -1,14 +1,81 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { parseIp } from "@docslurp/shared/client-ip";
 import type { PoolClient } from "pg";
 import { appDbPool } from "../lib/auth.js";
-import { effectiveMaxOutputTokens, ipAllowed, parseApiKeyRateLimits, type ValidatedKey } from "./api-keys.js";
-
+import { effectiveMaxOutputTokens, ipAllowed, parseApiKeyRateLimits, parseKeyMaterializationPolicy, type ValidatedKey } from "./api-keys.js";
 export const MCP_SCOPES = ["search", "chat", "read", "ingest"] as const;
+/**
+ * First-party clients (the DocSlurp CLI) may also ask for `web`, which a
+ * REST-audience token needs for paid web tools. MCP clients never see it:
+ * MCP metadata, challenges and default consent are unchanged.
+ */
+export const FIRST_PARTY_SCOPES = [...MCP_SCOPES, "web"] as const;
 export const oauthHash = (value: string) => createHash("sha256").update(value).digest("hex");
 export const pkceChallenge = (value: string) => createHash("sha256").update(value).digest("base64url");
 const secret = (prefix: string) => `${prefix}_${randomBytes(32).toString("base64url")}`;
 
 export { mcpOrigin, mcpResource } from '../lib/mcp-origin.js';
+import { mcpOrigin, mcpResource } from '../lib/mcp-origin.js';
+
+/**
+ * The REST API resource (RFC 8707) for first-party clients such as the
+ * DocSlurp CLI. A token for it is accepted on /v1/* (including /v1/mcp, a
+ * sub-resource) with scopes mapped by {@link oauthScopesToApiKeyScopes}. MCP
+ * tokens (resource /v1/mcp) are never accepted on the REST API.
+ */
+export const apiResource = (url: string) => `${mcpOrigin(url)}/v1`;
+
+/** The DocSlurp CLI: a public native client (RFC 8252), seeded by migration 0089. */
+export const CLI_CLIENT_ID = "docslurp-cli";
+
+/** Access token prefix per audience; refresh and device codes add `r` / `d`. */
+export const OAUTH_TOKEN_PREFIX = { mcp: "dsmcp", api: "dscli" } as const;
+
+/**
+ * OAuth scope -> API-key scopes for REST-audience tokens. Never maps to
+ * `workspaces:manage`, `organizations:*` or `web`, so an OAuth token cannot
+ * change workspace settings, manage an organization or hold client-key web
+ * access, whatever it was granted.
+ *
+ * - search -> search (passages, suggestions, read-only workspace listing)
+ * - chat   -> chat (generated answers on the owner's credits)
+ * - read   -> artifacts (document text, pages, files, runs and exports)
+ * - ingest -> ingest (uploads, URL ingest, reprocess, document retag/delete)
+ * - web    -> web (paid web search, fetch, map, crawl). REST-audience tokens
+ *   need it explicitly; `search` alone does not unlock web tools for them.
+ */
+export const OAUTH_TO_API_KEY_SCOPES: Readonly<Record<typeof FIRST_PARTY_SCOPES[number], readonly string[]>> = {
+  search: ["search"],
+  chat: ["chat"],
+  read: ["artifacts"],
+  ingest: ["ingest"],
+  web: ["web"],
+};
+
+export function oauthScopesToApiKeyScopes(scopes: readonly string[]): string[] {
+  const mapped = new Set<string>();
+  for (const scope of scopes) {
+    const target = OAUTH_TO_API_KEY_SCOPES[scope as typeof FIRST_PARTY_SCOPES[number]];
+    // An unknown scope maps to nothing (fail closed), never to a default set.
+    if (target) for (const value of target) mapped.add(value);
+  }
+  return [...mapped];
+}
+
+/** The audiences a client may request: every client gets MCP; only first-party clients get the REST API. */
+/** Scopes a client may request: MCP scopes for everyone, plus `web` for first-party clients. */
+export function allowedScopes(client: { first_party?: boolean | null }): readonly string[] {
+  return client.first_party === true ? FIRST_PARTY_SCOPES : MCP_SCOPES;
+}
+
+export function allowedResources(url: string, client: { first_party?: boolean | null }): string[] {
+  return client.first_party === true ? [mcpResource(url), apiResource(url)] : [mcpResource(url)];
+}
+
+/** The key scopes stored on a grant's internal key: raw scopes for MCP (unchanged), mapped scopes for the REST API. */
+export function grantKeyScopes(resource: string, scopes: readonly string[], url: string): string[] {
+  return resource === apiResource(url) ? oauthScopesToApiKeyScopes(scopes) : [...scopes];
+}
 
 export function validRedirect(value: unknown): value is string {
   if (typeof value !== "string" || value.length > 2048) return false;
@@ -55,9 +122,10 @@ export function logTokenRejection(reason: string, details: { grantType: unknown;
   console.warn(`[mcp-oauth] token_rejected reason=${reason} grant_type=${String(details.grantType).slice(0, 32)} client=${client}${details.grantId ? ` grant=${details.grantId}` : ""}`);
 }
 
-export function parseScopes(value: string | null): string[] {
+export function parseScopes(value: string | null, allowed: readonly string[] = MCP_SCOPES): string[] {
+  // An omitted scope means the MCP set, never first-party extras such as `web`.
   const scopes = [...new Set((value ?? MCP_SCOPES.join(" ")).split(/\s+/).filter(Boolean))];
-  if (!scopes.length || scopes.some(scope => !MCP_SCOPES.includes(scope as typeof MCP_SCOPES[number]))) {
+  if (!scopes.length || scopes.some(scope => !allowed.includes(scope))) {
     throw new Error("invalid_scope");
   }
   return scopes;
@@ -78,9 +146,10 @@ export async function transaction<T>(fn: (db: PoolClient) => Promise<T>): Promis
   }
 }
 
-export async function issueTokens(db: PoolClient, grantId: string) {
-  const access = secret("dsmcp");
-  const refresh = secret("dsmcpr");
+export async function issueTokens(db: PoolClient, grantId: string, audience: keyof typeof OAUTH_TOKEN_PREFIX = "mcp") {
+  const prefix = OAUTH_TOKEN_PREFIX[audience];
+  const access = secret(prefix);
+  const refresh = secret(`${prefix}r`);
   await db.query(`
     INSERT INTO mcp_oauth_tokens(hash,grant_id,kind,expires_at)
     VALUES ($1,$3,'access',now()+interval '15 minutes'),
@@ -91,9 +160,11 @@ export async function issueTokens(db: PoolClient, grantId: string) {
 
 export async function validateMcpToken(raw: string, resource: string, requestContext?: { ip?: string | null }): Promise<ValidatedKey | null> {
   const { rows } = await appDbPool.query(`
-    SELECT g.*, k.ip_allowlist AS key_ip_allowlist, k.max_output_tokens AS key_max_output_tokens,
+    SELECT g.*, k.ip_allowlist AS key_ip_allowlist, k.max_output_tokens AS key_max_output_tokens, t.expires_at AS token_expires_at, c.name AS client_name,
+           k.materialization_policy AS key_materialization_policy, k.scopes AS key_scopes, k.rate_limit_rpm AS key_rpm, k.rate_limit_ppd AS key_ppd,
            k.rate_limits AS key_rate_limits, k.workspace_ids AS key_workspace_ids FROM mcp_oauth_tokens t
     JOIN mcp_oauth_grants g ON g.id=t.grant_id
+    JOIN mcp_oauth_clients c ON c.id=g.client_id
     JOIN org_memberships m ON m.org_id=g.org_id AND m.user_id=g.user_id
     JOIN api_keys k ON k.id=g.api_key_id AND k.user_id=g.user_id AND k.org_id=g.org_id
     WHERE t.hash=$1 AND t.kind='access' AND t.expires_at>now()
@@ -107,11 +178,198 @@ export async function validateMcpToken(raw: string, resource: string, requestCon
   if (allowlist.length && !ipAllowed(requestContext?.ip, allowlist)) return null;
   return {
     keyId: row.api_key_id, userId: row.user_id, orgId: row.org_id,
-    keyType: "server", allowedDomains: [], scopes: row.scopes,
-    rateLimitRpm: null, rateLimitPpd: 10000, rateLimits: parseApiKeyRateLimits(row.key_rate_limits),
+    keyType: "server", allowedDomains: [], scopes: (Array.isArray(row.scopes) ? row.scopes : []).filter((scope: string) => Array.isArray(row.key_scopes) && row.key_scopes.includes(scope)),
+    rateLimitRpm: row.key_rpm, rateLimitPpd: row.key_ppd, rateLimits: parseApiKeyRateLimits(row.key_rate_limits),
+    materializationPolicy: parseKeyMaterializationPolicy(row.key_materialization_policy),
     workspaceIds: Array.isArray(row.key_workspace_ids) ? row.key_workspace_ids : [],
     maxOutputTokens: effectiveMaxOutputTokens("server", row.key_max_output_tokens),
+    // Delegated tokens are never platform admins and never app sessions (see request-actor.ts).
+    oauth: {
+      grantId: row.id, clientId: row.client_id, clientName: row.client_name ?? "MCP client", resource, audience: "mcp",
+      grantedScopes: Array.isArray(row.scopes) ? row.scopes : [],
+      expiresAt: Number.isFinite(Date.parse(row.token_expires_at)) ? new Date(row.token_expires_at).toISOString() : "",
+    },
   };
+}
+
+/**
+ * A REST-audience (`dscli_`) access token as an API-key identity. The grant's
+ * user must still belong to its organization, the grant and its internal key
+ * must be live, and the token must be unexpired. Scopes are the mapped key
+ * scopes, so every existing API-key scope check applies unchanged.
+ */
+export async function validateOAuthApiToken(raw: string, requestContext?: { ip?: string | null }): Promise<ValidatedKey | null> {
+  if (!raw.startsWith(`${OAUTH_TOKEN_PREFIX.api}_`) || raw.length > 200) return null;
+  const resource = apiResource("");
+  const { rows } = await appDbPool.query(`
+    SELECT g.*, k.ip_allowlist AS key_ip_allowlist, k.max_output_tokens AS key_max_output_tokens, t.expires_at AS token_expires_at, c.name AS client_name, c.first_party,
+           k.materialization_policy AS key_materialization_policy, k.scopes AS key_scopes, k.rate_limit_rpm AS key_rpm, k.rate_limit_ppd AS key_ppd,
+           k.rate_limits AS key_rate_limits, k.workspace_ids AS key_workspace_ids
+    FROM mcp_oauth_tokens t
+    JOIN mcp_oauth_grants g ON g.id=t.grant_id
+    JOIN mcp_oauth_clients c ON c.id=g.client_id
+    JOIN org_memberships m ON m.org_id=g.org_id AND m.user_id=g.user_id
+    JOIN api_keys k ON k.id=g.api_key_id AND k.user_id=g.user_id AND k.org_id=g.org_id
+    WHERE t.hash=$1 AND t.kind='access' AND t.expires_at>now()
+      AND t.consumed_at IS NULL AND g.revoked_at IS NULL AND g.resource=$2
+      AND k.revoked_at IS NULL AND k.key_type='server'
+      AND (k.expires_at IS NULL OR k.expires_at > now())
+  `, [oauthHash(raw), resource]);
+  const row = rows[0];
+  // Defense in depth: only a first-party client can hold the REST audience.
+  if (!row || row.first_party !== true) return null;
+  const allowlist: string[] = row.key_ip_allowlist ?? [];
+  if (allowlist.length && !ipAllowed(requestContext?.ip, allowlist)) return null;
+  const grantedScopes: string[] = Array.isArray(row.scopes) ? row.scopes : [];
+  return {
+    keyId: row.api_key_id, userId: row.user_id, orgId: row.org_id,
+    keyType: "server", allowedDomains: [], scopes: oauthScopesToApiKeyScopes(grantedScopes).filter((scope) => Array.isArray(row.key_scopes) && row.key_scopes.includes(scope)),
+    rateLimitRpm: row.key_rpm, rateLimitPpd: row.key_ppd, rateLimits: parseApiKeyRateLimits(row.key_rate_limits),
+    materializationPolicy: parseKeyMaterializationPolicy(row.key_materialization_policy),
+    workspaceIds: Array.isArray(row.key_workspace_ids) ? row.key_workspace_ids : [],
+    maxOutputTokens: effectiveMaxOutputTokens("server", row.key_max_output_tokens),
+    oauth: {
+      grantId: row.id, clientId: row.client_id, clientName: row.client_name, resource, audience: "api",
+      grantedScopes, expiresAt: new Date(row.token_expires_at).toISOString(),
+    },
+  };
+}
+
+/**
+ * Creates a grant and its unexported internal key identity (so usage and
+ * operation foreign keys stay valid). No raw server key is returned or
+ * persisted; only a random unguessable hash.
+ */
+export async function createGrant(db: PoolClient, args: { clientId: string; userId: string; orgId: string; resource: string; scopes: string[]; url: string }): Promise<string> {
+  const grant = randomUUID(), keyId = randomUUID();
+  const clientName = (await db.query("SELECT name FROM mcp_oauth_clients WHERE id=$1", [args.clientId])).rows[0]?.name ?? "MCP client";
+  await db.query(`INSERT INTO api_keys(id,user_id,org_id,key_hash,name,key_type,allowed_domains,scopes,rate_limit_rpm,rate_limit_ppd)
+    VALUES($1,$2,$3,$4,$5,'server',ARRAY[]::text[],$6::text[],NULL,10000)`,
+    [keyId, args.userId, args.orgId, oauthHash(secret("internal")), `OAuth: ${clientName}`, grantKeyScopes(args.resource, args.scopes, args.url)]);
+  await db.query(`INSERT INTO mcp_oauth_grants(id,client_id,user_id,org_id,resource,scopes,api_key_id) VALUES($1,$2,$3,$4,$5,$6::jsonb,$7)`,
+    [grant, args.clientId, args.userId, args.orgId, args.resource, JSON.stringify(args.scopes), keyId]);
+  return grant;
+}
+
+// ---------------------------------------------------------------------------
+// Device authorization grant (RFC 8628)
+
+export const DEVICE_CODE_GRANT_TYPE = "urn:ietf:params:oauth:grant-type:device_code";
+export const DEVICE_CODE_TTL_SECONDS = 600;
+export const DEVICE_POLL_INTERVAL_SECONDS = 5;
+/** Failed user-code entries a signed-in user may make per window before lockout. */
+export const DEVICE_MAX_FAILED_ATTEMPTS = 5;
+export const DEVICE_ATTEMPT_WINDOW_MINUTES = 15;
+/**
+ * RFC 8628 §6.1: base-20 consonants, no vowels (no accidental words) and no
+ * look-alikes (0/O/Q, 1/I/L, 5/S, 2/Z, 8/B, 6/G-adjacent digits are absent). 8 characters is
+ * 20^8 ≈ 2.6e10 codes; with the lockout below a user gets 5 guesses per 15 minutes.
+ */
+export const USER_CODE_ALPHABET = "CDFGHJKMNPRTVWXY3479";
+export const USER_CODE_LENGTH = 8;
+
+export function generateUserCode(): string {
+  const bytes = randomBytes(USER_CODE_LENGTH * 2);
+  let code = "";
+  // Rejection sampling keeps the distribution uniform (256 is not a multiple of 20).
+  for (let i = 0; code.length < USER_CODE_LENGTH; i++) {
+    const byte = i < bytes.length ? bytes[i]! : randomBytes(1)[0]!;
+    if (byte < 240) code += USER_CODE_ALPHABET[byte % USER_CODE_ALPHABET.length];
+  }
+  return `${code.slice(0, 4)}-${code.slice(4)}`;
+}
+
+/** Uppercases and strips separators; anything outside the alphabet makes the code invalid. */
+export function normalizeUserCode(value: unknown): string | null {
+  if (typeof value !== "string" || value.length > 32) return null;
+  const compact = value.toUpperCase().replace(/[\s-]/g, "");
+  if (compact.length !== USER_CODE_LENGTH) return null;
+  for (const char of compact) if (!USER_CODE_ALPHABET.includes(char)) return null;
+  return compact;
+}
+
+export const formatUserCode = (normalized: string) => `${normalized.slice(0, 4)}-${normalized.slice(4)}`;
+
+/**
+ * Wrong-code budgets per window. The per-user and per-IP budgets are hard
+ * limits. The deployment-wide one is not: a hard global limit would let a
+ * few free accounts lock device login for everyone. Past it, every device
+ * page request is delayed by {@link deviceGlobalFrictionMs} and an alert is
+ * logged, which slows a distributed guesser without refusing anyone.
+ */
+export const DEVICE_MAX_FAILED_ATTEMPTS_PER_IP = 20;
+export const DEVICE_GLOBAL_MISS_ALERT_THRESHOLD = 500;
+export const deviceGlobalFrictionMs = () => {
+  const configured = Number.parseInt(process.env.MCP_DEVICE_GLOBAL_FRICTION_MS ?? "", 10);
+  return Number.isFinite(configured) && configured >= 0 ? Math.min(configured, 30_000) : 2_000;
+};
+
+export type DeviceAttemptBudget = { locked: boolean; globalPressure: boolean };
+
+let lastGlobalAlertAt = 0;
+
+/**
+ * The wrong-code budget for this user and IP. Call inside the transaction
+ * that also records a miss, after {@link lockDeviceAttempts}, so concurrent
+ * guesses by one user cannot all pass the check before any is counted.
+ */
+export async function deviceAttemptBudget(db: Pick<PoolClient, "query">, userId: string, ip: string | null = null): Promise<DeviceAttemptBudget> {
+  ip = parseIp(ip)?.text ?? null;
+  const { rows } = await db.query(`
+    SELECT count(*) FILTER (WHERE user_id=$1)::int AS by_user,
+           count(*) FILTER (WHERE $2::text IS NOT NULL AND ip=$2)::int AS by_ip,
+           count(*)::int AS total
+    FROM mcp_oauth_device_attempts WHERE created_at > now() - $3::int * interval '1 minute'
+  `, [userId, ip, DEVICE_ATTEMPT_WINDOW_MINUTES]);
+  const row = rows[0] ?? { by_user: 0, by_ip: 0, total: 0 };
+  const globalPressure = row.total >= DEVICE_GLOBAL_MISS_ALERT_THRESHOLD;
+  if (globalPressure && Date.now() - lastGlobalAlertAt > 60_000) {
+    lastGlobalAlertAt = Date.now();
+    console.error(`[mcp-oauth] alert=device_code_guessing misses_${DEVICE_ATTEMPT_WINDOW_MINUTES}m=${row.total} threshold=${DEVICE_GLOBAL_MISS_ALERT_THRESHOLD} friction_ms=${deviceGlobalFrictionMs()}`);
+  }
+  return { locked: row.by_user >= DEVICE_MAX_FAILED_ATTEMPTS || row.by_ip >= DEVICE_MAX_FAILED_ATTEMPTS_PER_IP, globalPressure };
+}
+
+/** True when this user or IP has used up its wrong-code budget (hard limits only). */
+export async function deviceAttemptsExhausted(db: Pick<PoolClient, "query">, userId: string, ip: string | null = null): Promise<boolean> {
+  return (await deviceAttemptBudget(db, userId, ip)).locked;
+}
+
+/** Serializes both budgets; IPs are canonicalized consistently with the recorded budgets. Locks last until commit. */
+export async function lockDeviceAttempts(db: Pick<PoolClient, "query">, userId: string, ip: string | null = null): Promise<void> {
+  ip = parseIp(ip)?.text ?? null;
+  // Every caller takes IP before user, including callers sharing only one budget.
+  if (ip) await db.query("SELECT pg_advisory_xact_lock(18801, hashtext($1))", [ip]);
+  await db.query("SELECT pg_advisory_xact_lock(18802, hashtext($1))", [userId]);
+}
+
+export async function recordDeviceAttemptFailure(db: Pick<PoolClient, "query">, userId: string, ip: string | null = null): Promise<void> {
+  ip = parseIp(ip)?.text ?? null;
+  await db.query("INSERT INTO mcp_oauth_device_attempts(user_id, ip) VALUES($1, $2)", [userId, ip]);
+}
+
+/**
+ * Scopes a device approval grants without an explicit opt-in on the page.
+ * A device request is started by whoever holds the terminal, not by the
+ * approving user, so `chat` and `ingest` (credits, uploads, deletes) are
+ * granted only when the user ticks them.
+ */
+export const DEVICE_BASE_SCOPES = ["search", "read"] as const;
+
+export function deviceGrantScopes(requested: readonly string[], optedIn: readonly string[]): string[] {
+  return requested.filter((scope) => (DEVICE_BASE_SCOPES as readonly string[]).includes(scope) || optedIn.includes(scope));
+}
+
+/** A pending device request by user code: unexpired, undecided and unconsumed. */
+export async function findPendingDeviceRequest(db: Pick<PoolClient, "query">, normalizedUserCode: string, forUpdate = false) {
+  const { rows } = await db.query(`
+    SELECT d.*, c.name AS client_name, c.first_party FROM mcp_oauth_device_codes d
+    JOIN mcp_oauth_clients c ON c.id=d.client_id
+    WHERE d.user_code_hash=$1 AND d.expires_at>now()
+      AND d.approved_at IS NULL AND d.denied_at IS NULL AND d.consumed_at IS NULL
+    ${forUpdate ? "FOR UPDATE OF d" : ""}
+  `, [oauthHash(normalizedUserCode)]);
+  return rows[0] ?? null;
 }
 
 export async function getConsentRequest(id: string, userId: string, sessionId: string) {
@@ -127,13 +385,19 @@ export async function getConsentRequest(id: string, userId: string, sessionId: s
 // Bounded opportunistic cleanup. Retain token replay markers through expiry.
 export async function cleanupExpiredOAuthRequests() {
   await appDbPool.query(`DELETE FROM mcp_oauth_clients WHERE id IN (
-    SELECT c.id FROM mcp_oauth_clients c WHERE c.created_at < now()-interval '30 days'
+    SELECT c.id FROM mcp_oauth_clients c WHERE c.created_at < now()-interval '30 days' AND NOT c.first_party
     AND NOT EXISTS (SELECT 1 FROM mcp_oauth_grants g WHERE g.client_id=c.id)
     AND NOT EXISTS (SELECT 1 FROM mcp_oauth_requests r WHERE r.client_id=c.id AND r.expires_at>now())
     LIMIT 100
   )`);
   await appDbPool.query(`DELETE FROM mcp_oauth_requests WHERE id IN (
     SELECT id FROM mcp_oauth_requests WHERE expires_at < now() ORDER BY expires_at LIMIT 100
+  )`);
+  await appDbPool.query(`DELETE FROM mcp_oauth_device_codes WHERE device_code_hash IN (
+    SELECT device_code_hash FROM mcp_oauth_device_codes WHERE expires_at < now()-interval '1 day' ORDER BY expires_at LIMIT 100
+  )`);
+  await appDbPool.query(`DELETE FROM mcp_oauth_device_attempts WHERE id IN (
+    SELECT id FROM mcp_oauth_device_attempts WHERE created_at < now()-interval '1 day' ORDER BY created_at LIMIT 100
   )`);
   await appDbPool.query(`DELETE FROM mcp_oauth_tokens WHERE hash IN (
     SELECT hash FROM mcp_oauth_tokens WHERE expires_at < now()-interval '30 days' ORDER BY expires_at LIMIT 100

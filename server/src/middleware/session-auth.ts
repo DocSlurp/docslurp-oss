@@ -90,6 +90,9 @@ export const sessionAuth: MiddlewareHandler = async (c, next) => {
     }
     // A supplied bearer credential is authoritative. Never turn an invalid
     // token into a more privileged cookie-session request.
+    if (/^Bearer\s+ds(cli|mcp)/.test(authorization)) {
+      c.header("WWW-Authenticate", 'Bearer error="invalid_token", error_description="The access token is invalid, expired or revoked"');
+    }
     return middlewareErrorResponse(c, 401, "unauthorized", "Unauthorized");
   }
 

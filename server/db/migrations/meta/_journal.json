@@ -628,12 +628,19 @@
     {
       "idx": 89,
       "version": "7",
+      "when": 1792792800400,
+      "tag": "0089_cli_oauth_device",
+      "breakpoints": true
+    },
+    {
+      "idx": 90,
+      "version": "7",
       "when": 1792792800500,
       "tag": "0090_client_key_wildcard_domains",
       "breakpoints": true
     },
     {
-      "idx": 90,
+      "idx": 91,
       "version": "7",
       "when": 1792792800800,
       "tag": "0093_api_key_type_controls",

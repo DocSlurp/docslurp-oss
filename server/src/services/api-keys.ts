@@ -590,6 +590,22 @@ export interface ValidatedKey {
   materializationPolicy?: Partial<MaterializationPolicy>;
   /** Cap on a chat answer's model output tokens for this key (browser keys default to 1000); null means no key cap. */
   maxOutputTokens?: number | null;
+  /**
+   * Set for every OAuth access token: REST-audience (`dscli_`, the DocSlurp
+   * CLI, scopes mapped from `grantedScopes`) and MCP-audience (`dsmcp_`, raw
+   * scopes). Such a key is never a first-party app session and never a
+   * platform admin.
+   */
+  oauth?: {
+    /** `api`: a REST-audience CLI token; `mcp`: an MCP-audience token, usable only on /v1/mcp. */
+    audience: "api" | "mcp";
+    grantId: string;
+    clientId: string;
+    clientName: string;
+    resource: string;
+    grantedScopes: string[];
+    expiresAt: string;
+  };
 }
 
 export async function validateApiKey(

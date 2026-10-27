@@ -57,7 +57,7 @@ Controls per key type:
 | Expiry (`expiresAt`) | Optional | Optional, up to 365 days ahead |
 | Limits | Per-key limits, plus per-visitor limits and concurrency | Per-key request, spend and `concurrent` rules; no default concurrency cap |
 
-The chat output cap bounds the model's maximum output tokens for every chat answer the key gets (`/v1/chat`, `/v1/chat/completions`, the MCP `chat` tool). A request asking for more (`max_tokens`, `max_completion_tokens`) is lowered to the cap. An expired key stops authenticating, and so does a key used from outside its IP allowlist (403 `api_key_ip_not_allowed`; an address we can't determine is refused too). Each key reports `lastUsedAt` and `lastUsedIp`. MCP OAuth access tokens also honor their linked server key’s current expiry, IP allowlist and chat output cap; an expired key or a disallowed/unknown address makes the token unauthorized.
+The chat output cap bounds the model's maximum output tokens for every chat answer the key gets (`/v1/chat`, `/v1/chat/completions`, the MCP `chat` tool). A request asking for more (`max_tokens`, `max_completion_tokens`) is lowered to the cap. An expired key stops authenticating, and so does a key used from outside its IP allowlist (403 `api_key_ip_not_allowed`; an address we can't determine is refused too). Each key reports `lastUsedAt` and `lastUsedIp`. MCP and first-party CLI OAuth access tokens also honor their linked server key’s current expiry, IP allowlist and chat output cap; an expired key or a disallowed/unknown address makes the token unauthorized.
 
 Rotate a key with `POST /v1/api-keys/:id/rotate`. With no body the secret is replaced at once. With `{"overlapSeconds": 86400}` (up to 7 days) you get a new key with the same settings (`rotatedFromKeyId` names the old one), and the old key keeps working until the overlap ends (`previous.expiresAt` in the response). Deploy the new secret within that window.
 
@@ -75,6 +75,24 @@ Allowed websites for a browser key are matched like this:
 Entries saved before exact matching (which then covered every subdomain) were migrated to keep that meaning: `example.com` became `example.com` plus `*.example.com`. A shared public suffix from the [Public Suffix List](https://publicsuffix.org/) (private section included), such as `github.io`, `vercel.app`, `pages.dev`, `s3.us-east-1.amazonaws.com`, `co.uk` or `com`, is refused, because every site on it would be allowed: enter your own site, such as `yourname.github.io`. The check uses the browser's `Origin` (or `Referer` when there is no `Origin`), which only a browser enforces. A script outside a browser can send any `Origin`, so keep the key's scopes, workspaces and spend limits narrow.
 
 A key's type is fixed when you create it; to switch, create a new key. Keys issued before typed prefixes (`dslp_<hex>`) keep working. Create and rotate keys on the [API keys](https://docslurp.io/app/api-keys) page.
+
+### OAuth access tokens (CLI login)
+
+`docslurp login` gets an OAuth access token instead of a key. The first-party CLI client (`docslurp-cli`) is the only client that may request the REST API audience (`resource=<origin>/v1`, RFC 8707): through the browser (authorization code with PKCE and a loopback redirect) or, on headless machines, the device authorization grant (RFC 8628, `POST /oauth/mcp/device_authorization`, verification page `/oauth/mcp/device`). Dynamically registered MCP clients stay bound to `<origin>/v1/mcp`, and their tokens are refused on the REST API.
+
+Access tokens start with `dscli_` and last 15 minutes; refresh tokens (`dsclir_`) rotate on every use, last 30 days, and revoke the whole grant if one is replayed. Send an access token like a key, as `Authorization: Bearer`. It acts as a server key bound to the approving user and organization (removing the membership or revoking the grant stops it at once), and its scopes map onto key scopes:
+
+| OAuth scope | Key scope it grants |
+| --- | --- |
+| `search` | `search` |
+| `chat` | `chat` |
+| `read` | `artifacts` |
+| `ingest` | `ingest` |
+| `web` | `web` |
+
+A CLI token needs `web` for the paid web tools; `search` alone does not unlock them (MCP-audience grants keep the older rule, where a server identity with `search` may use them). No OAuth scope grants `workspaces:manage`, `organizations:read` or `organizations:manage`, so a token cannot change workspace settings or manage an organization. Device approvals grant only `search` and `read` unless the approving user ticks the other requested scopes, and the device flow has no `verification_uri_complete`: the user always types the code. OAuth tokens, MCP-audience ones included, are never platform admins. An expired or revoked OAuth token gets `401` with `WWW-Authenticate: Bearer error="invalid_token"`, on compat routes too. OAuth tokens are never a dashboard session, so they never reach the app-only settings tools, and they cannot mint API keys or `/v1/capabilities` tokens that would outlive them. `GET /v1/whoami` returns the token's user, organization, default workspace, granted scopes and expiry.
+
+In the SDK, pass `accessToken` as a string or as a provider `({ forceRefresh }) => token`; the client calls it per request and once more with `forceRefresh: true` after a 401. Without `apiKey`, `DOCSLURP_API_KEY` or `accessToken`, the SDK reads `DOCSLURP_TOKEN`. Revoke a login with `docslurp logout` (RFC 7009 `POST /oauth/mcp/revoke`) or from the connected apps list in your account.
 
 The SDK, search adapters and search widget refuse to send a `dslp_priv_` key from a browser. This check is in SDK builds after 0.2.0; the published 0.2.0 does not include it.
 
