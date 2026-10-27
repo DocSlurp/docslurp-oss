@@ -7,9 +7,8 @@ from datetime import datetime,timezone
 from pathlib import Path
 import fitz
 from contract import file_hash,identity_hash,immutable_json,validate_policy_receipt,validate_manifest,evaluation_identity
-from measure import invoke,features,ocr,OCR_BINARY_HASH,OCR_LANGUAGE_HASH
+from measure import invoke,features,ocr_page,native_word_pages,OCR_BINARY_HASH,OCR_LANGUAGE_HASH
 from optimize import choose
-from spatial_evidence import parse_poppler_bbox
 
 def extract(path,policy,cache):
     doc=fitz.open(path);mode=policy['mode'];texts=[]
@@ -20,7 +19,7 @@ def extract(path,policy,cache):
         if len(native)==len(doc)+1 and not native[-1].strip():native.pop()
         if len(native)!=len(doc):raise RuntimeError('timing-page-alignment')
         boxes,_=invoke(['pdftotext','-bbox-layout',str(path),'-'])
-        if len(parse_poppler_bbox(boxes))!=len(doc):raise RuntimeError('timing-word-page-alignment')
+        native_word_pages(doc,boxes)
     if mode=='ladder':invoke(['pdfimages','-list',str(path)])
     residual={}
     if mode=='ladder' and policy.get('byteThreshold',0)>0 and policy['byteBasis']!='contentDecodedBytes':
@@ -43,10 +42,10 @@ def extract(path,policy,cache):
             selected,_=choose(probe,policy)
         if selected=='native':texts.append(native[index]);continue
         if selected=='ocr-fast' or mode=='ladder':
-            fast=ocr(page.get_pixmap(dpi=150,alpha=False).tobytes('png'),cache,150,6,use_cache=False)
+            fast=ocr_page(page,cache,150,6,use_cache=False)
             selected='ocr-strong' if mode=='ladder' and fast['confidence']<policy['confidenceThreshold'] else 'ocr-fast'
         if selected=='ocr-strong':
-            result=ocr(page.get_pixmap(dpi=300,alpha=False).tobytes('png'),cache,300,3,use_cache=False)
+            result=ocr_page(page,cache,300,3,use_cache=False)
         else:result=fast
         texts.append(result['text'])
     doc.close()

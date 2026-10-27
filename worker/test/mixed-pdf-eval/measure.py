@@ -24,7 +24,7 @@ import time
 import unicodedata
 
 import fitz
-from spatial_evidence import parse_poppler_bbox,parse_tesseract_tsv
+from spatial_evidence import parse_poppler_bbox,parse_tesseract_tsv,normalize_word_evidence
 from contract import (evaluation_identity,identity_hash,file_hash,immutable_json,validate_manifest,
                       validate_policy_receipt,validate_labels,validate_complete_inventory,validate_panel_binding,validate_panel_manifest)
 
@@ -275,6 +275,35 @@ def ocr(image, cache, dpi, psm, use_cache=True):
         temp.write_text(json.dumps(result)); temp.replace(output)
         return result
 
+def page_geometry(page):
+    return dict(rotationDegrees=page.rotation,displaySizePt=[page.rect.width,page.rect.height],
+                cropBoxPt=list(page.cropbox),mediaBoxPt=list(page.mediabox))
+
+
+def native_word_pages(doc,raw):
+    pages=parse_poppler_bbox(raw)
+    if len(pages)!=len(doc):raise RuntimeError('native-word-page-alignment-mismatch')
+    for index,page in enumerate(doc):
+        pages[index]['pdfGeometry']=page_geometry(page)
+        pages[index]['pageBox']='media'
+        pages[index]=normalize_word_evidence(pages[index])
+    return pages
+
+
+def ocr_page(page,cache,dpi,psm,use_cache=True):
+    render_started=time.perf_counter();pixmap=page.get_pixmap(dpi=dpi,alpha=False)
+    image=pixmap.tobytes('png');render_seconds=time.perf_counter()-render_started
+    result=ocr(image,cache,dpi,psm,use_cache=use_cache)
+    normalization_started=time.perf_counter()
+    result['wordEvidence']['pdfGeometry']=page_geometry(page)
+    result['wordEvidence']['renderSizePixels']=[pixmap.width,pixmap.height]
+    result['wordEvidence']['renderDpi']=dpi
+    result['wordEvidence']=normalize_word_evidence(result['wordEvidence'])
+    result['seconds']+=time.perf_counter()-normalization_started
+    result['renderSeconds']=render_seconds
+    return result
+
+
 def stream_bytes(doc, refs, raw):
     total=0
     for ref in set(refs):
@@ -352,7 +381,7 @@ def measure_case(args):
     if len(native_pages)==len(doc)+1 and not native_pages[-1].strip(): native_pages.pop()
     if len(native_pages)!=len(doc): raise RuntimeError("poppler-page-alignment-mismatch")
     native_bbox,native_bbox_seconds=invoke(['pdftotext','-bbox-layout',str(source),'-'])
-    bbox_parse_started=time.perf_counter();native_evidence=parse_poppler_bbox(native_bbox)
+    bbox_parse_started=time.perf_counter();native_evidence=native_word_pages(doc,native_bbox)
     native_bbox_seconds+=time.perf_counter()-bbox_parse_started
     if len(native_evidence)!=len(doc):raise RuntimeError('native-word-page-alignment-mismatch')
     native_seconds+=native_bbox_seconds
@@ -360,18 +389,9 @@ def measure_case(args):
         started=time.perf_counter()
         feat=features(doc,page,native_pages[index])
         probe_seconds=time.perf_counter()-started
-        pdf_geometry=dict(rotationDegrees=page.rotation,displaySizePt=[page.rect.width,page.rect.height],
-                          cropBoxPt=list(page.cropbox),mediaBoxPt=list(page.mediabox))
-        native_evidence[index]['pdfGeometry']=pdf_geometry
         candidates={"native":{"text":native_pages[index],"seconds":native_seconds/len(doc),"cacheHit":False,"wordEvidence":native_evidence[index]}}
         for name,dpi,psm in [("ocr-fast",150,6),("ocr-strong",300,3)]:
-            start=time.perf_counter()
-            image=page.get_pixmap(dpi=dpi,alpha=False).tobytes("png")
-            render_seconds=time.perf_counter()-start
-            result=ocr(image,out/"cache",dpi,psm)
-            result["renderSeconds"]=render_seconds
-            result["wordEvidence"]["pdfGeometry"]=pdf_geometry
-            candidates[name]=result
+            candidates[name]=ocr_page(page,out/'cache',dpi,psm)
         outputs.append({"page":index+1,"features":feat,"probeSeconds":probe_seconds,"candidates":candidates})
     # Splitting experiments use exact object lengths and preserve shared-resource identities
     # within each output; no file-size/character conversion is assumed.

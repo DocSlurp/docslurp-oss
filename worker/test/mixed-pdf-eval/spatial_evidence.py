@@ -93,3 +93,49 @@ def formula_regions(page):
                             bboxNormalized=[union[0]/dimensions[0],union[1]/dimensions[1],union[2]/dimensions[0],union[3]/dimensions[1]],
                             glyphIds=ids,basis='final-display-visible-glyphs'))
     return regions
+
+
+def normalize_word_evidence(evidence):
+    """Normalize supported coordinates; independent grounding remains unverified.
+
+    Poppler's default bbox mode rotates MediaBox coordinates but reports its
+    unrotated dimensions. Raster coordinates already follow the rendered view.
+    Unknown box origins/modes are refused rather than guessed.
+    """
+    import copy
+    result=copy.deepcopy(evidence)
+    if evidence.get('schema')!=SCHEMA:raise ValueError('unsupported-word-evidence')
+    geometry=evidence['pdfGeometry'];display=size(geometry['displaySizePt'])
+    rotation=geometry['rotationDegrees']
+    if type(rotation) is not int or rotation not in [0,90,180,270]:raise ValueError('unsupported-page-rotation')
+    media=box(geometry['mediaBoxPt']);crop=box(geometry['cropBoxPt'])
+    if media[:2]!=[0,0]:raise ValueError('unsupported-media-origin')
+    width,height=media[2:]
+    if crop[0]<0 or crop[1]<0 or crop[2]>width or crop[3]>height:raise ValueError('crop-outside-media')
+    cw,ch=crop[2]-crop[0],crop[3]-crop[1]
+    expected=[ch,cw] if rotation in [90,270] else [cw,ch]
+    if any(abs(a-b)>1e-6 for a,b in zip(display,expected)):raise ValueError('inconsistent-display-geometry')
+    dimensions=size(evidence['size']);basis=evidence['basis']
+    if basis=='poppler-page-points':
+        if evidence.get('pageBox')!='media' or any(abs(a-b)>1e-6 for a,b in zip(dimensions,[width,height])):
+            raise ValueError('unsupported-poppler-coordinate-contract')
+        x0,y0,x1,y1=crop
+        origin={0:[x0,y0],90:[height-y1,x0],180:[width-x1,height-y1],270:[y0,width-x1]}[rotation]
+        scale=[1,1]
+    elif basis=='tesseract-raster-pixels':
+        render=size(evidence['renderSizePixels']);dpi=float(evidence['renderDpi'])
+        if not math.isfinite(dpi) or dpi<=0 or render!=dimensions:
+            raise ValueError('inconsistent-render-geometry')
+        if any(abs(p-math.ceil(pt*dpi/72))>1 for p,pt in zip(render,display)):
+            raise ValueError('inconsistent-render-scale')
+        origin=[0,0];scale=[display[0]/render[0],display[1]/render[1]]
+    else:raise ValueError('unsupported-word-coordinate-basis')
+    for word in result['words']:
+        rect=box(word['bbox'])
+        projected=[(rect[i]-origin[i%2])*scale[i%2] for i in range(4)]
+        word['bboxNormalized']=[projected[i]/display[i%2] for i in range(4)]
+        word['clippedByDisplay']=projected[0]<0 or projected[1]<0 or projected[2]>display[0] or projected[3]>display[1]
+    result['normalizedBasis']='final-display-fractions'
+    result['normalizationContract']='zero-origin-media-and-crop@1'
+    result['normalizationVerified']=False
+    return result

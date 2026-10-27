@@ -41,3 +41,36 @@ class SpatialEvidenceTests(unittest.TestCase):
         for mutate in [lambda p:p['glyphTransforms'].clear(),lambda p:p['glyphTransforms'].append(p['glyphTransforms'][0]),lambda p:p['glyphTransforms'][0].update(displayBboxPt=[700,100,800,115])]:
             changed=copy.deepcopy(page);mutate(changed)
             with self.assertRaises(ValueError):formula_regions(changed)
+
+    def test_normalization_matches_independent_rotation_crop_controls(self):
+        from spatial_evidence import normalize_word_evidence
+        # Retained Poppler observations from independently authored controls.
+        cases=[(0,[70,101.384,103.348,112.484],[40,61.384,73.348,72.484],[550,710]),
+               (90,[679.516,70,690.616,103.348],[637.516,40,648.616,73.348],[710,550]),
+               (180,[508.652,679.516,542,690.616],[476.652,637.516,510,648.616],[550,710]),
+               (270,[101.384,508.652,112.484,542],[61.384,476.652,72.484,510],[710,550])]
+        for rotation,raw,expected,display in cases:
+            data=dict(schema='mixed-pdf-word-evidence@1',basis='poppler-page-points',pageBox='media',
+                      size=[612,792],words=[dict(text='quartz',bbox=raw)],pdfGeometry=dict(
+                          rotationDegrees=rotation,displaySizePt=display,cropBoxPt=[30,40,580,750],mediaBoxPt=[0,0,612,792]))
+            before=copy.deepcopy(data);result=normalize_word_evidence(data)
+            self.assertEqual(data,before)
+            for actual,target in zip(result['words'][0]['bboxNormalized'],[expected[i]/display[i%2] for i in range(4)]):
+                self.assertAlmostEqual(actual,target,places=8)
+            self.assertFalse(result['normalizationVerified'])
+        for field,value in [('pageBox','crop'),('size',[792,612])]:
+            changed=copy.deepcopy(data);changed[field]=value
+            with self.assertRaises(ValueError):normalize_word_evidence(changed)
+
+    def test_raster_normalization_requires_matching_render_metadata(self):
+        from spatial_evidence import normalize_word_evidence
+        data=dict(schema='mixed-pdf-word-evidence@1',basis='tesseract-raster-pixels',size=[100,200],
+                  renderSizePixels=[100,200],renderDpi=144,words=[dict(text='q',bbox=[40,20,80,40])],
+                  pdfGeometry=dict(rotationDegrees=0,displaySizePt=[50,100],cropBoxPt=[0,0,50,100],mediaBoxPt=[0,0,50,100]))
+        result=normalize_word_evidence(data)
+        self.assertEqual(result['words'][0]['bboxNormalized'],[.4,.1,.8,.2])
+        self.assertFalse(result['words'][0]['clippedByDisplay'])
+        self.assertFalse(result['normalizationVerified'])
+        for field,value in [('renderSizePixels',[200,100]),('renderDpi',72)]:
+            changed=copy.deepcopy(data);changed[field]=value
+            with self.assertRaises(ValueError):normalize_word_evidence(changed)

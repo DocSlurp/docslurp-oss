@@ -422,3 +422,25 @@ showed Poppler returns unrotated page dimensions but rotated word coordinates at
 preparatory capture DOES NOT implement accepted region grounding or reopen formula
 acceptance. Crop-box conventions and region matching still require independent
 validation. Original corpus inputs and prior measurement results are unchanged.
+
+### Bounded attempt 5 outcome and attempt 6
+
+Attempt 5 stopped after its fourth build round, unaccepted. Thirteen native family
+gates passed; E4-A/B page 2 each lost 454 meaningful glyphs under opaque panels in
+the original complete Writer exports. E2 observation counts and thirty interval
+cases also remain inconsistent. The passed P parent is unchanged. No balanced
+pilot/full corpus or heldout extraction ran. A fresh Sol Describer is preparing
+attempt 6; the user-authorized limit remains twenty spec attempts. No fifth build
+round is authorized under attempt 5.
+
+Coordinate groundwork now handles the explicitly bounded zero-origin MediaBox /
+CropBox contract for 0/90/180/270-degree pages. Independent native controls cover
+all four rotations with a nonzero crop offset; a real local OCR control also
+captures five words. Unsupported origins/modes or inconsistent render metadata
+refuse normalization. All normalized outputs still say normalizationVerified=false
+and do not open formula acceptance. Measurement and paired timing share the same
+capture/render/normalization helpers so their work remains comparable.
+
+All 58 evaluator tests pass, including retained raw coordinate observations and
+malformed geometry controls. No extraction policy, savings or corpus acceptance
+is established. Region matching and independent conformance approval remain next.
