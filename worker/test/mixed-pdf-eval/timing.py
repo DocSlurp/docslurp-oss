@@ -6,8 +6,8 @@ import argparse,json,os,random,resource,socket,tempfile,time
 from datetime import datetime,timezone
 from pathlib import Path
 import fitz
-from contract import file_hash,identity_hash,immutable_json,validate_policy_receipt,validate_manifest
-from measure import invoke,features,ocr
+from contract import file_hash,identity_hash,immutable_json,validate_policy_receipt,validate_manifest,evaluation_identity
+from measure import invoke,features,ocr,OCR_BINARY_HASH,OCR_LANGUAGE_HASH
 from optimize import choose
 
 def extract(path,policy,cache):
@@ -40,10 +40,10 @@ def extract(path,policy,cache):
             selected,_=choose(probe,policy)
         if selected=='native':texts.append(native[index]);continue
         if selected=='ocr-fast' or mode=='ladder':
-            fast=ocr(page.get_pixmap(dpi=150,alpha=False).tobytes('png'),cache,150,6)
+            fast=ocr(page.get_pixmap(dpi=150,alpha=False).tobytes('png'),cache,150,6,use_cache=False)
             selected='ocr-strong' if mode=='ladder' and fast['confidence']<policy['confidenceThreshold'] else 'ocr-fast'
         if selected=='ocr-strong':
-            result=ocr(page.get_pixmap(dpi=300,alpha=False).tobytes('png'),cache,300,3)
+            result=ocr(page.get_pixmap(dpi=300,alpha=False).tobytes('png'),cache,300,3,use_cache=False)
         else:result=fast
         texts.append(result['text'])
     doc.close()
@@ -51,10 +51,13 @@ def extract(path,policy,cache):
 
 if __name__=='__main__':
     p=argparse.ArgumentParser();p.add_argument('--dataset',type=Path,required=True);p.add_argument('--run',type=Path,required=True)
+    p.add_argument('--scorers',type=Path,required=True)
     p.add_argument('--policy',type=Path,required=True);p.add_argument('--out',type=Path,required=True);a=p.parse_args()
     os.environ.setdefault('TMPDIR','/home/dan/tmp/agents');os.environ['MIXED_EVAL_WORKERS']='1'
     identity=json.loads((a.run/'evaluation-identity.json').read_text());receipt=json.loads(a.policy.read_text())
-    validate_policy_receipt(receipt,identity,file_hash(Path(__file__).with_name('optimize.py')),file_hash(a.run/'tune-complete.json'))
+    live=evaluation_identity(a.dataset,a.scorers,Path(__file__).with_name('measure.py'),OCR_BINARY_HASH,OCR_LANGUAGE_HASH,fitz.VersionBind)
+    if live!=identity:raise RuntimeError('timing-live-identity-mismatch')
+    validate_policy_receipt(receipt,live,file_hash(Path(__file__).with_name('optimize.py')),file_hash(a.run/'tune-complete.json'))
     manifest=json.loads((a.dataset/'manifest.json').read_text())
     if identity_hash(manifest)!=identity['datasetCanonicalHash']:raise RuntimeError('timing-manifest-mismatch')
     cases=validate_manifest(manifest)

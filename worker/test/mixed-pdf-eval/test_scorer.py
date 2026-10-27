@@ -27,6 +27,11 @@ class ScorerTests(unittest.TestCase):
         text='alpha '*100+'123'
         ref={'expectedMarkdown':text,'sections':[text],'paragraphs':[text],'tables':[],'formulas':[],'excludedText':[]}
         self.assertEqual(content_score(ref,text.replace('123','999'),tolerant_markdown)['quality'],0)
+    def test_contextual_swaps_and_operators(self):
+        for expected,actual in [('alpha '*100+'dose 12 interval 34','alpha '*100+'dose 34 interval 12'),('Result: a + b = c.','Result: a - b = c.')]:
+            ref={'expectedMarkdown':expected,'sections':[expected],'paragraphs':[expected],'tables':[],'formulas':[],'excludedText':[]}
+            score=content_score(ref,actual,tolerant_markdown)
+            self.assertFalse(score['acceptable']);self.assertLess(score['quality'],.95)
     def test_empty(self):
         self.assertEqual(self.score("")["quality"],0)
     def test_swapped_table_cells(self):

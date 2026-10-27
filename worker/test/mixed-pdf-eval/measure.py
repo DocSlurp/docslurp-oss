@@ -36,7 +36,17 @@ def sha(data):
     return hashlib.sha256(data).hexdigest()
 
 def tokens(text):
-    return re.findall(r"[-+]?\d+(?:\.\d+)?|[^\W\d_]+", unicodedata.normalize("NFKC", text).casefold())
+    # Markdown table separators and list markers are envelopes, not printed operators.
+    text='\n'.join(line for line in text.splitlines()
+                   if not ('-' in line and set(line.strip())<=set('|:- \t') and line.count('-')>=3))
+    text=re.sub(r'(?m)^\s*[-*]\s+','',text)
+    return re.findall(r"[-+]?\d+(?:\.\d+)?|[^\W\d_]+|[=+*/<>^%−×÷±≤≥≠-]", unicodedata.normalize("NFKC", text).casefold())
+
+def value_contexts(text):
+    """Bind numeric values and mathematical operators to adjacent semantic tokens."""
+    sequence=tokens(text)
+    return Counter(tuple(sequence[max(0,i-2):i+3]) for i,t in enumerate(sequence)
+                   if re.fullmatch(r'[-+]?\d+(?:\.\d+)?|[=+*/<>^%−×÷±≤≥≠-]',t))
 
 def content_score(reference, text, legacy):
     expected, actual = Counter(tokens(reference["expectedMarkdown"])), Counter(tokens(text))
@@ -52,6 +62,8 @@ def content_score(reference, text, legacy):
     numbers = lambda c: Counter({k:v for k,v in c.items() if re.fullmatch(r"[-+]?\d+(?:\.\d+)?",k)})
     a,b = numbers(expected), numbers(actual)
     numeric = sum((a&b).values())/sum(a.values()) if a else None
+    wanted_contexts=value_contexts(reference['expectedMarkdown']);actual_contexts=value_contexts(text)
+    contextual=sum((wanted_contexts&actual_contexts).values())/sum(wanted_contexts.values()) if wanted_contexts else None
     compact=lambda s:re.sub(r'[^\w]','',unicodedata.normalize('NFKC',s).casefold())
     excluded = any(compact(x) and compact(x) in compact(text) for x in reference["excludedText"])
     ordered=SequenceMatcher(None,tokens(reference['expectedMarkdown']),tokens(text),autojunk=False).ratio()
@@ -64,16 +76,16 @@ def content_score(reference, text, legacy):
         if found>=0:row_matches+=1;cursor=found+len(wanted)-1
     table_row_recall=row_matches/len(table_rows) if table_rows else None
     minimum_section=min(sections,default=1.0)
-    applicable=[recall,precision,minimum_section,ordered]+([table_row_recall] if table_rows else [])+([numeric] if numeric is not None else [])
+    applicable=[recall,precision,minimum_section,ordered]+[v for v in [table_row_recall,numeric,contextual] if v is not None]
     ref = {"prose":reference["expectedMarkdown"], "paragraphs":reference["paragraphs"],
            "tables":reference["tables"], "formulas":reference["formulas"], "groundTruth":{"prosePresent":True,"kind":"authored"}}
     modern = legacy.compact(legacy.score(ref,text))
     return {"version":VERSION, "recall":recall,"precision":precision,
             "f1":2*recall*precision/max(1e-9,recall+precision),"sectionRecall":sections,
-            "minimumSectionRecall":minimum_section,"numericRecall":numeric,"hiddenTextLeak":excluded,
+            "minimumSectionRecall":minimum_section,"numericRecall":numeric,"contextualValueRecall":contextual,"hiddenTextLeak":excluded,
             "tableRowRecall":table_row_recall,"orderedSimilarity":ordered,
             "quality": min(applicable),
-            "acceptable":recall>=.95 and precision>=.95 and minimum_section>=.90 and (numeric is None or numeric>=.95) and (table_row_recall is None or table_row_recall>=.95) and ordered>=.9 and not excluded,
+            "acceptable":recall>=.95 and precision>=.95 and minimum_section>=.90 and all(v is None or v>=.95 for v in [numeric,table_row_recall,contextual]) and ordered>=.9 and not excluded,
             "modern":modern}
 
 def invoke(argv):
@@ -85,10 +97,10 @@ def invoke(argv):
         raise RuntimeError(f"command-failed:{argv[0]}:{completed.returncode}:{completed.stderr[-500:]!r}")
     return completed.stdout,elapsed
 
-def ocr(image, cache, dpi, psm):
+def ocr(image, cache, dpi, psm, use_cache=True):
     key=sha(image+f"{OCR_BINARY_HASH}-{OCR_LANGUAGE_HASH}-dpi{dpi}-psm{psm}-txt-tsv-v2".encode())
     output=cache/f"{key}.json"
-    if output.exists():
+    if use_cache and output.exists():
         return {**json.loads(output.read_text()), "cacheHit":True}
     # Atomic replace supports concurrent identical pages without corrupting the cache.
     with tempfile.TemporaryDirectory(prefix="mixed-ocr-",dir=os.environ["TMPDIR"]) as tmp:

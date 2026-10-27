@@ -1,14 +1,14 @@
 # Mixed document reconstruction spec
 
 Mode: synthetic. Format: PDF; ten US-letter pages per source family.
-Content: invented operational reports, equipment guidance, engineering notes,
+Content: invented operational reports, equipment guidance, engineering briefs,
 inspection records, procurement summaries and research-style discussions.
 No real organization/person names or invented claims about real entities.
-This is a source-free structural specification. Do not inspect earlier fixtures.
+This is a source-free structural specification. Do never inspect earlier fixtures.
 
 ## Global look
 
-Three independent geometries: single-column report; two-column technical note;
+Three independent geometries: single-column report; two-column technical briefs;
 report with side panel and chart. Noto Sans / Noto Serif embedded fonts, 10–11 pt
 body, 14–18 pt headings, 40–48 pt margins. Use realistic restrained accent colors,
 running page numbers and footer. Body should fill roughly 60–80% of usable height.
@@ -27,7 +27,7 @@ Every page has stable block IDs and authored bounding boxes in PDF top-left poin
    table cells, chart data and applicable formulas in gold separately.
 4. Discussed-document inset: independently authored document excerpt, visually
    distinguished border/header, 40–80 words plus 25–45 words of surrounding
-   commentary. On selected pages it is an embedded screenshot, not selectable text.
+   commentary. On selected pages it is an embedded screenshot, never selectable text.
 5. Caption/footer: concise and relevant. Decorative text-free figures may be present.
 
 ## Difficulty features
@@ -39,7 +39,19 @@ Hard scans: controlled 85–125 DPI, mild skew, blur, contrast and JPEG degradat
 log realized parameters and selected page IDs. Other pages can rasterize individual
 sections, outline one text section as vectors, include optional hidden/occluded decoy
 text, overlapping images, and 90-degree rotation. Excluded decoys belong in gold.
-Gold describes visible material only. No lost text from textbox overflow or clipping.
+Gold describes rendered material only. No lost text from textbox overflow or clipping.
+Full rasterization must start with a blank page containing only the scan pixels;
+painting a scan over a still-extractable native page fails this requirement. Section
+rasterization must remove underlying text for that section while preserving the rest.
+Check native extraction on the resulting scan is empty (except separately declared
+OCR text layers, which are a different test class). Gold includes every meaningful
+printed header, footer, caption, axis/legend label and inset title; never infer gold
+from extractor output. Build the complete authoring model before rendering; persist
+it before raster conversion. Gold sections and paragraphs are strings; retain their
+geometry separately as blocks. PDF hard suffixes are percentages, never page counts.
+Full generation must route all families to the declared splits and emit a complete
+hashed corpus manifest. Hash actual file bytes, never a JSON object containing its
+own hash. Vary native producer and PDF storage profile independently of hard share.
 Apply transformations only after saving authored reference Markdown, paragraphs,
 section strings, cell rows, expected reading order, geometry and source layout.
 
@@ -66,7 +78,7 @@ including header), formulas, excludedText, bbox, stable pageId and canonical con
 hash. Preserve native build sources and gold before rasterization. Each case manifest
 includes id,family,split,pdf,labels,sha256,labelHash,sourceLayoutHash,hardPercent,
 baseRegionRasterShare,pages (realized transformation metadata), layout,genre,producer.
-Case names use mixed-source-NNNN-hard-NNN; these are external paths only, not content.
+Case names use mixed-source-NNNN-hard-NNN; these are external paths only, never content.
 Emit source references under sources/, PDFs under inputs/SPLIT/, labels under
 labels/SPLIT/. Corpus schema mixed-pdf-authored@v2. Never write customer files or
-call model APIs from generator code. Do not open heldout outputs for manual inspection.
+call model APIs from generator code. Do never open heldout outputs for manual inspection.
