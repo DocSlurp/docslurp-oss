@@ -1,5 +1,5 @@
 import { deferredProfilesEnabled, isBillingEnforced, PUBLIC_ERROR_MESSAGES, publicDiagnostics, publicDocumentError } from "@docslurp/shared";
-import { refineWorkspaceNames } from "./workspace-naming.js";
+import { markWorkspaceAutoNamed, refineWorkspaceNames } from "./workspace-naming.js";
 import { jsonRecord } from "../lib/json-record.js";
 import { randomBytes, randomUUID } from "node:crypto";
 
@@ -8,6 +8,7 @@ import {
   createWorkspaceSchema,
   defaultPipelineFeatures,
   getWorkspaceTemplate,
+  isUntitledWorkspaceName,
   isWorkspaceUuid,
   normalizePipelineFeatures,
   slugifyWorkspaceName,
@@ -26,6 +27,7 @@ import {
   type WorkspaceRun,
   type WorkspaceTemplateKey,
   type WorkspaceRecord,
+  UNTITLED_WORKSPACE_NAME,
   DEFAULT_INDEXING_MODE
 } from "@docslurp/shared";
 
@@ -352,6 +354,9 @@ async function assertWorkspaceAccess(workspaceId: string, userId: string) {
 
 export async function createWorkspace(input: CreateWorkspaceInput): Promise<WorkspaceRecord> {
   const parsed = createWorkspaceSchema.parse(input);
+  // No chosen name: start as the placeholder and let automatic naming take over.
+  const untitled = isUntitledWorkspaceName(parsed.name);
+  const name = untitled ? UNTITLED_WORKSPACE_NAME : parsed.name!;
   const id = randomUUID();
   const template = getWorkspaceTemplate(parsed.templateKey ?? null);
   const pipeline = applyWorkspaceTemplateLocks(
@@ -388,7 +393,7 @@ export async function createWorkspace(input: CreateWorkspaceInput): Promise<Work
       ${id},
       ${organization.id},
       ${parsed.userId},
-      ${parsed.name},
+      ${name},
       ${parsed.templateKey ?? null},
       ${parsed.systemPrompt ?? null},
       ${sql.json(JSON.parse(JSON.stringify(withoutStageSelection(pipeline))))},
@@ -433,6 +438,8 @@ export async function createWorkspace(input: CreateWorkspaceInput): Promise<Work
     }
   }
 
+  // The lowest automatic-naming phase: the first upload, content or chat question names it.
+  if (untitled) await markWorkspaceAutoNamed(row!.id, parsed.userId, name, "empty");
   return mapWorkspace(row!);
 }
 

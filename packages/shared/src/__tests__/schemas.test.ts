@@ -4,6 +4,8 @@ import {
   applyWorkspaceTemplateLocks,
   canonicalDocumentSchema,
   createWorkspaceSchema,
+  isUntitledWorkspaceName,
+  UNTITLED_WORKSPACE_NAME,
   defaultDocumentExtractionConfig,
   defaultEmbeddingConfig,
   defaultPipelineFeatures,
@@ -705,14 +707,15 @@ describe("createWorkspaceSchema", () => {
     }
   });
 
-  it("rejects an empty name", () => {
-    const result = createWorkspaceSchema.safeParse({ name: "" });
-    expect(result.success).toBe(false);
-  });
-
-  it("rejects a whitespace-only name (trimmed to empty)", () => {
-    const result = createWorkspaceSchema.safeParse({ name: "   " });
-    expect(result.success).toBe(false);
+  it("accepts an omitted, empty or whitespace-only name as untitled", () => {
+    for (const input of [{}, { name: "" }, { name: "   " }]) {
+      const result = createWorkspaceSchema.safeParse(input);
+      expect(result.success).toBe(true);
+      if (result.success) expect(isUntitledWorkspaceName(result.data.name)).toBe(true);
+    }
+    expect(isUntitledWorkspaceName(UNTITLED_WORKSPACE_NAME)).toBe(true);
+    expect(isUntitledWorkspaceName("Untitled workspaces")).toBe(false);
+    expect(isUntitledWorkspaceName("Contracts")).toBe(false);
   });
 
   it("rejects a name exceeding 120 characters", () => {
