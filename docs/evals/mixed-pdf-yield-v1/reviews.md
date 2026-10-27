@@ -97,3 +97,25 @@ plan/exclusion differences; no measurement has bypassed this check.
 
 Exact machine-readable audits, score decisions, overlap reports and original rejected
 artifacts remain in external evaluation storage under `mixed-pdf-fools-gold-audit`.
+
+## Production verification council, 2026-10-27
+
+Independent GPT-6.1 Sol reviewers `/root/stack_adversarial_review` (adversarial)
+and `/root/stack_correctness_review` reviewed integrated stack `f014a95a` and
+Poppler head `f41d3db2`, without external corpus inputs or labels. Both blocked
+reconciliation that combined one policy's quality with another policy's timing.
+The adversarial reviewer also blocked promotion using partial heldout panels.
+
+Fix `579c2799` binds reports to policy, evaluation identity and completed inventory,
+revalidates hash-bound case results and recomputes the quality gates. Promotion
+requires every manifest heldout family and exactly 18 families. Negative tests
+reject wrong policies, splits, identity/inventory hashes, changed summaries and
+omitted families. Both independent reviewers approved round two with no unresolved
+high or medium findings. They did not certify the existing parser isolation gap.
+
+The correctness reviewer also requested explicit Linux `poppler-data` installation;
+this is fixed in `41c72912`. Local checks passed 52 routing tests, six prerequisite
+negative tests, 28 evaluation tests and 13 integrity-screen contract tests. Runtime
+image verification, deployment and measured production costs remain separate gates;
+no corpus acceptance, extraction-quality gain or dollar-saving claim follows from
+these checks.
