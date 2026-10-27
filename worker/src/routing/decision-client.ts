@@ -35,6 +35,7 @@ import type { UsageEvent } from "../models.js";
 import { fetchWithProviderRetry, type ProviderRetryOptions } from "../lib/provider-retry.js";
 import type { PipelineUsageEventLedger } from "../pipeline/usage-ledger.js";
 import { readRoutingFlags } from "./flags.js";
+import { sniffImageMimeType } from "../pipeline/page-image-format.js";
 
 export const PAGE_ROUTE_DECISION_METRIC = "page-route-decision";
 /** Health-canary probes of a decision model (see health/canary.ts). */
@@ -105,10 +106,11 @@ export function decisionCostCents(model: DecisionModel, inputTokens: number): nu
   return (inputTokens / 1_000_000) * model.pricing.inputUsdPerMTok * 100;
 }
 
-export function imageDataUrlPart(png: Buffer | Uint8Array, mime = "image/png"): DecisionImagePart {
+/** Data-URL image part; the media type is sniffed from the bytes, `mime` only labels unknown ones. */
+export function imageDataUrlPart(image: Buffer | Uint8Array, mime = "image/png"): DecisionImagePart {
   return {
     type: "image_url",
-    image_url: { url: `data:${mime};base64,${Buffer.from(png).toString("base64")}` },
+    image_url: { url: `data:${sniffImageMimeType(image) ?? mime};base64,${Buffer.from(image).toString("base64")}` },
   };
 }
 

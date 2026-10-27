@@ -37,6 +37,7 @@ import { executeVisionRuntime, rejectedVisionUsageInput } from "../tools/vision-
 import { findVisionOutputRejected } from "../tools/vision-stream.js";
 import { isMissingDocumentError } from "../db/missing-document.js";
 import { markPages } from "./page-ledger.js";
+import { rasterFileExtension } from "../pipeline/page-image-format.js";
 
 /** Pages with fewer non-space characters than this have no usable text layer. */
 export const MIN_TEXT_LAYER_CHARS = 40;
@@ -132,7 +133,7 @@ function defaultOps(deps: PageMaterializerDeps): PageMaterializerOps {
         document, runId: ctx.runId, pageNumbers: [page], dpi: OCR_DPI, signal: ctx.signal,
       });
       if (!artifact) throw new Error(`could not render page ${page}`);
-      const imagePath = await deps.storage.downloadToTempFile(artifact.artifactKey, `page-${page}-*.png`);
+      const imagePath = await deps.storage.downloadToTempFile(artifact.artifactKey, `page-${page}-*${rasterFileExtension(artifact.mimeType)}`);
       try {
         const result = await executeVisionRuntime({
           imagePath,

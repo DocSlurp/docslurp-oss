@@ -1,0 +1,248 @@
+import { spawn, spawnSync } from "node:child_process";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import sharp from "sharp";
+import { afterEach, describe, expect, it, vi } from "vitest";
+
+import type { Document } from "../models.js";
+import { resetPageImageFormatFallbackWarning } from "../pipeline/page-image-format.js";
+import { PdfRasterCache, type PdfSourceCache } from "../pipeline/pdf-asset-cache.js";
+import { SandboxRunError, type SandboxCommand, type SandboxSession } from "../sandbox/types.js";
+import { CommandRunner } from "../tools/runner.js";
+
+const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
+const fixture = path.join(root, "worker/testdata/pdf-fixtures/multicolumn-figures-report.pdf");
+const available = ["pdfinfo", "pdftoppm", "cwebp"].every((binary) => spawnSync(binary, ["-h"]).error === undefined);
+
+type Stored = { bytes: Buffer; mimeType: string };
+
+function memoryStorage() {
+  const objects = new Map<string, Stored>();
+  return {
+    objects,
+    async objectSize(key: string) { return objects.get(key)?.bytes.byteLength ?? null; },
+    async putBytes(key: string, bytes: Uint8Array, mimeType: string) { objects.set(key, { bytes: Buffer.from(bytes), mimeType }); },
+    uri(key: string) { return `s3://test/${key}`; },
+  };
+}
+
+/**
+ * A sandbox session that records every command it is asked to run, then runs it like the
+ * development `none` provider. `refuse` makes the session reject a binary as a sandbox failure.
+ */
+function recordingRunner(options: { refuse?: string } = {}) {
+  const commands: SandboxCommand[] = [];
+  const session: SandboxSession = {
+    providerId: "recording",
+    isolation: { filesystem: false, network: "none", processes: false, location: "local" },
+    spawn(command, signal) {
+      commands.push(command);
+      if (options.refuse && path.basename(command.binary) === options.refuse) {
+        throw new SandboxRunError(`sandbox refused ${options.refuse}`);
+      }
+      return spawn(command.binary, command.args, { env: command.env, stdio: ["ignore", "pipe", "pipe"], signal });
+    },
+    async close() {},
+  };
+  const runner = new CommandRunner({ openSession: async () => session });
+  return { runner, commands };
+}
+
+function document(overrides: Partial<Document> = {}): Document {
+  return {
+    id: "doc", userId: "user", runId: "run", filename: "report.pdf", mimeType: "application/pdf",
+    sourceKey: "sources/report.pdf", status: "processing", extractionMode: "auto", pageCount: 1,
+    createdAt: new Date(), updatedAt: new Date(), ...overrides,
+  };
+}
+
+const sources = { get: async () => ({ path: fixture, sha256: "x", sizeBytes: 1, cacheHit: true }) } as unknown as PdfSourceCache;
+
+async function rawPixels(bytes: Buffer) {
+  // cwebp drops an all-opaque alpha channel, so compare RGBA with opaque alpha filled in.
+  const { data, info } = await sharp(bytes).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
+  return { data, width: info.width, height: info.height, channels: info.channels };
+}
+
+describe.skipIf(!available)("lossless WebP page images", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    resetPageImageFormatFallbackWarning();
+  });
+
+  it("renders a real PDF page, stores WebP and decodes it pixel-identically to the PNG", async () => {
+    const storage = memoryStorage();
+    const { runner, commands } = recordingRunner();
+    const webpCache = new PdfRasterCache(runner, storage, sources, { engine: "pdftoppm", format: "webp" });
+    const pngCache = new PdfRasterCache(runner, storage, sources, { engine: "pdftoppm", format: "png" });
+
+    const [webp] = await webpCache.renderSelectedPages({ document: document(), runId: "run", pageNumbers: [1] });
+    const [png] = await pngCache.renderSelectedPages({ document: document(), runId: "run", pageNumbers: [1] });
+
+    expect(webp!.mimeType).toBe("image/webp");
+    expect(webp!.artifactKey).toBe("user/run/images/doc/v2-150dpi-webp/page-1.webp");
+    expect(storage.objects.get(webp!.artifactKey)!.mimeType).toBe("image/webp");
+    expect(png!.artifactKey).toBe("user/run/images/doc/v2-150dpi/page-1.png");
+    expect(webp!.sizeBytes).toBeLessThan(png!.sizeBytes);
+    expect([webp!.widthPx, webp!.heightPx]).toEqual([png!.widthPx, png!.heightPx]);
+
+    const stored = storage.objects.get(webp!.artifactKey)!.bytes;
+    expect((await sharp(stored).metadata()).format).toBe("webp");
+    const fromWebp = await rawPixels(stored);
+    const fromPng = await rawPixels(storage.objects.get(png!.artifactKey)!.bytes);
+    expect([fromWebp.width, fromWebp.height, fromWebp.channels]).toEqual([fromPng.width, fromPng.height, fromPng.channels]);
+    expect(fromWebp.data.equals(fromPng.data)).toBe(true);
+
+    // Read back: the stored WebP is a cache hit, nothing renders again.
+    const before = commands.length;
+    const [again] = await webpCache.renderSelectedPages({ document: document(), runId: "run", pageNumbers: [1] });
+    expect(again).toMatchObject({ cacheHit: true, mimeType: "image/webp", artifactKey: webp!.artifactKey });
+    expect(commands.length).toBe(before);
+  });
+
+  it("encodes through the sandbox session with the effort chosen by retention", async () => {
+    const storage = memoryStorage();
+    const { runner, commands } = recordingRunner();
+    const cache = new PdfRasterCache(runner, storage, sources, { engine: "pdftoppm", format: "webp" });
+
+    await cache.renderSelectedPages({ document: document({ artifactRetentionHours: 48 }), runId: "short", pageNumbers: [1] });
+    await cache.renderSelectedPages({ document: document({ artifactRetentionHours: null }), runId: "kept", pageNumbers: [1] });
+
+    const encodes = commands.filter((command) => path.basename(command.binary) === "cwebp");
+    expect(encodes).toHaveLength(2);
+    expect(encodes.map((command) => command.args[command.args.indexOf("-z") + 1])).toEqual(["1", "6"]);
+    for (const command of encodes) {
+      expect(command.args).toEqual(expect.arrayContaining(["-lossless", "-exact", "--"]));
+      // The PNG is a declared input and the output directory a declared writable path, so a
+      // remote provider uploads and copies back exactly these.
+      const input = command.args.at(-1)!;
+      expect(command.inputPaths).toContain(input);
+      expect(command.writablePaths.some((dir) => input.startsWith(`${dir}${path.sep}`))).toBe(true);
+      expect(command.env.AWS_SECRET_ACCESS_KEY).toBeUndefined();
+    }
+  });
+
+  it("never encodes outside the sandbox: a refused encoder keeps the sandbox-rendered PNG", async () => {
+    const storage = memoryStorage();
+    const { runner, commands } = recordingRunner({ refuse: "cwebp" });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const cache = new PdfRasterCache(runner, storage, sources, { engine: "pdftoppm", format: "webp" });
+
+    const [page] = await cache.renderSelectedPages({ document: document(), runId: "run", pageNumbers: [1] });
+
+    // The only cwebp attempt went to the session, which refused it; nothing was spawned around it.
+    expect(commands.filter((command) => path.basename(command.binary) === "cwebp")).toHaveLength(1);
+    expect(page).toMatchObject({ mimeType: "image/png", artifactKey: "user/run/images/doc/v2-150dpi/page-1.png" });
+    expect([...storage.objects.keys()]).toEqual([page!.artifactKey]);
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining("status=failed"));
+  });
+
+  it("falls back to PNG when a remote sandbox image has no cwebp", async () => {
+    const storage = memoryStorage();
+    const local = recordingRunner();
+    const remoteSession: SandboxSession = {
+      providerId: "remote",
+      isolation: { filesystem: true, network: "none", processes: true, location: "remote" },
+      async run(command) {
+        if (path.basename(command.binary) === "cwebp") return { exitCode: 127, stdout: "", stderr: "sh: 1: cwebp: not found" };
+        // Everything else runs locally, standing in for a remote image that has Poppler.
+        const child = spawnSync(command.binary, command.args, { env: command.env, encoding: "utf8" });
+        return { exitCode: child.status, stdout: child.stdout, stderr: child.stderr };
+      },
+      async close() {},
+    };
+    const runner = new CommandRunner({ openSession: async () => remoteSession });
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const cache = new PdfRasterCache(runner, storage, sources, { engine: "pdftoppm", format: "webp" });
+
+    const [page] = await cache.renderSelectedPages({ document: document(), runId: "run", pageNumbers: [1] });
+
+    expect(page).toMatchObject({ mimeType: "image/png", cacheHit: false });
+    expect(local.commands).toHaveLength(0);
+  });
+
+  it("skips the WebP encode for transient renders and uses a fixed effort when configured", async () => {
+    const storage = memoryStorage();
+    const { runner, commands } = recordingRunner();
+    const [transient] = await new PdfRasterCache(runner, storage, sources, { engine: "pdftoppm", format: "webp" })
+      .renderSelectedPages({ document: document(), runId: "transient", pageNumbers: [1], transient: true });
+    expect(transient).toMatchObject({ mimeType: "image/png" });
+    expect(commands.some((command) => path.basename(command.binary) === "cwebp")).toBe(false);
+
+    await new PdfRasterCache(runner, storage, sources, { engine: "pdftoppm", format: "webp", webpEffort: 1 })
+      .renderSelectedPages({ document: document({ artifactRetentionHours: null }), runId: "reader", pageNumbers: [1] });
+    const encode = commands.find((command) => path.basename(command.binary) === "cwebp")!;
+    expect(encode.args[encode.args.indexOf("-z") + 1]).toBe("1");
+
+    // A transient render still reuses a stored WebP.
+    const [reused] = await new PdfRasterCache(runner, storage, sources, { engine: "pdftoppm", format: "webp" })
+      .renderSelectedPages({ document: document(), runId: "reader", pageNumbers: [1], transient: true });
+    expect(reused).toMatchObject({ cacheHit: true, mimeType: "image/webp" });
+  });
+
+  it("reports the effective DPI of fresh renders", async () => {
+    const storage = memoryStorage();
+    const { runner } = recordingRunner();
+    const [page] = await new PdfRasterCache(runner, storage, sources, { engine: "pdftoppm", format: "webp" })
+      .renderSelectedPages({ document: document(), runId: "run", pageNumbers: [1], dpi: 150 });
+    expect(page).toMatchObject({ dpi: 150, effectiveDpi: 150 });
+  });
+
+  it("stores PNG with a loud warning when cwebp is missing", async () => {
+    const storage = memoryStorage();
+    const { runner, commands } = recordingRunner();
+    vi.spyOn(runner, "encodeLosslessWebp").mockImplementation(async () => ({ binary: "cwebp", args: [], available: false }));
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const cache = new PdfRasterCache(runner, storage, sources, { engine: "pdftoppm", format: "webp" });
+
+    const [page] = await cache.renderSelectedPages({ document: document(), runId: "run", pageNumbers: [1] });
+
+    expect(page).toMatchObject({ mimeType: "image/png", artifactKey: "user/run/images/doc/v2-150dpi/page-1.png", cacheHit: false });
+    expect(storage.objects.get(page!.artifactKey)!.mimeType).toBe("image/png");
+    expect(commands.some((command) => path.basename(command.binary) === "cwebp")).toBe(false);
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining("[page-image] WARNING storing PNG instead of WebP status=unavailable"));
+  });
+
+  it("encodes native-engine renders from a scratch file through the sandbox", async () => {
+    const pagePng = await sharp({ create: { width: 640, height: 480, channels: 3, background: "#f4f1ea" } })
+      .composite([{ input: Buffer.from('<svg width="640" height="480"><text x="40" y="200" font-size="48">Native page</text></svg>') }])
+      .png().toBuffer();
+    const engine = {
+      id: "fake",
+      version: () => ({ engine: "native-pdf", version: "0", gitSha: "x", features: [] }),
+      async openPath() {
+        return {
+          pageCount: async () => 1,
+          metadata: async () => ({ encrypted: false }),
+          close: async () => {},
+          page: () => ({ size: async () => ({ widthPt: 612, heightPt: 792, rotation: 0 }), render: async () => pagePng }),
+        };
+      },
+    };
+    const storage = memoryStorage();
+    const { runner, commands } = recordingRunner();
+    const cache = new PdfRasterCache(runner, storage, sources, { engine: "native-pdf", loadEngine: async () => engine as never, format: "webp" });
+
+    const [page] = await cache.renderSelectedPages({ document: document(), runId: "run", pageNumbers: [1] });
+
+    expect(page).toMatchObject({ engine: "native-pdf", mimeType: "image/webp", artifactKey: "user/run/images/doc/v2-150dpi-native-pdf-webp/page-1.webp" });
+    const encode = commands.find((command) => path.basename(command.binary) === "cwebp")!;
+    expect(encode.inputPaths).toEqual([encode.args.at(-1)]);
+    const decoded = await rawPixels(storage.objects.get(page!.artifactKey)!.bytes);
+    expect(decoded.data.equals((await rawPixels(pagePng)).data)).toBe(true);
+  });
+
+  it("serves an existing PNG object instead of re-rendering it as WebP", async () => {
+    const storage = memoryStorage();
+    const { runner, commands } = recordingRunner();
+    const [legacy] = await new PdfRasterCache(runner, storage, sources, { engine: "pdftoppm", format: "png" })
+      .renderSelectedPages({ document: document(), runId: "run", pageNumbers: [1] });
+    const before = commands.length;
+
+    const [page] = await new PdfRasterCache(runner, storage, sources, { engine: "pdftoppm", format: "webp" })
+      .renderSelectedPages({ document: document(), runId: "run", pageNumbers: [1] });
+
+    expect(page).toMatchObject({ cacheHit: true, mimeType: "image/png", artifactKey: legacy!.artifactKey });
+    expect(commands.length).toBe(before);
+  });
+});

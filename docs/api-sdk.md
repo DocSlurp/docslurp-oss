@@ -1027,7 +1027,7 @@ Finance/                      one folder per document (a document export is just
     structured.json           schema fields, when the workspace has a schema
     metadata.json             filename, type, status, page count, version, tags
     original/Q3 plan.pdf      "all" only: the uploaded file
-    images/page-0001.png      "all" only: rendered page images
+    images/page-0001.webp     "all" only: rendered page images (lossless WebP; pages stored before the switch stay .png)
     outputs/html.html         "all" only: readable pipeline outputs (HTML, canonical document, …)
   README.md                   the layout, a document table, and any file that could not be included
 ```

@@ -29,7 +29,7 @@ const resolveAll = (name: string) => `/usr/bin/${name}`;
 const ok: SandboxResult = { exitCode: 0, stdout: "", stderr: "" };
 
 describe("checkParserBinaries", () => {
-  it("checks the four parser binaries with their version flags", async () => {
+  it("checks the five parser binaries with their version flags", async () => {
     const seen: string[] = [];
     const session = fakeSession("local", async (command) => {
       seen.push(`${command.binary} ${command.args.join(" ")}`);
@@ -42,8 +42,9 @@ describe("checkParserBinaries", () => {
       "/usr/bin/ffmpeg -version",
       "/usr/bin/pdftoppm -v",
       "/usr/bin/pandoc --version",
+      "/usr/bin/cwebp -version",
     ]);
-    expect(PARSER_BINARY_CHECKS).toHaveLength(4);
+    expect(PARSER_BINARY_CHECKS).toHaveLength(5);
     expect(session.close).toHaveBeenCalledOnce();
   });
 
@@ -67,7 +68,7 @@ describe("checkParserBinaries", () => {
       resolveBinary: (name) => (name === "pandoc" ? "/usr/bin/pandoc" : undefined),
       buildCommand,
     });
-    expect(result.skipped).toEqual(["ffprobe", "ffmpeg", "pdftoppm"]);
+    expect(result.skipped).toEqual(["ffprobe", "ffmpeg", "pdftoppm", "cwebp"]);
     expect(run).toHaveBeenCalledOnce();
   });
 
@@ -108,7 +109,7 @@ describe("checkParserBinaries", () => {
     const run = vi.fn(async () => ok);
     const session = fakeSession("remote", run);
     const result = await checkParserBinaries({ session, resolveBinary: resolveAll, buildCommand });
-    expect(result).toEqual({ failures: [], skipped: ["ffprobe", "ffmpeg", "pdftoppm", "pandoc"], remote: true });
+    expect(result).toEqual({ failures: [], skipped: ["ffprobe", "ffmpeg", "pdftoppm", "pandoc", "cwebp"], remote: true });
     expect(run).not.toHaveBeenCalled();
     expect(session.close).toHaveBeenCalledOnce();
   });

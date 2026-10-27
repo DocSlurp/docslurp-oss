@@ -90,4 +90,40 @@ describe("production executor deps", () => {
     expect(label.text).toBe("a red bridge");
     expect(recordLocalUsage).toHaveBeenCalledWith(expect.objectContaining({ pageNumber: 3, metric: "image-label", model: "microsoft/Florence-2-small-ft" }));
   });
+
+  it("tells Tesseract the render DPI of a WebP page, which carries none, and keeps it on crops", async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "docslurp-router-deps-"));
+    const webp = path.join(dir, "page.webp");
+    await sharp({ create: { width: 300, height: 200, channels: 3, background: "#ffffff" } }).webp({ lossless: true }).toFile(webp);
+    const tesseractOcr = vi.fn(async (src: string, base: string) => ({ binary: "tesseract", args: [src, base], available: true }));
+    const run = vi.fn(async (plan: { binary: string; args: string[] }) => {
+      if (plan.binary === "pdfinfo") return { stdout: "Page    1 size: 792 x 1224 pts", stderr: "" };
+      await writeFile(`${plan.args[1]}.txt`, "words");
+      return { stdout: "", stderr: "" };
+    });
+    const pdfPageSizes = vi.fn(async () => ({ binary: "pdfinfo", args: [], available: true }));
+    const { deps } = make({
+      document: { id: "d", mimeType: "application/pdf", userId: "u", sourceKey: "k", pageCount: 1 } as never,
+      storage: { bucket: "b", getJson: vi.fn(), downloadToTempFile: vi.fn(async () => webp) } as never,
+      rasters: {
+        renderSelectedPages: vi.fn(async () => [{ pageNumber: 1, artifactKey: "k/page-1.webp", artifactUri: "s3://b/k", widthPx: 300, heightPx: 200, sizeBytes: 1, cacheHit: true, mimeType: "image/webp", dpi: 300 }]),
+        sourcePath: vi.fn(async () => "/tmp/x.pdf"),
+      },
+      runner: { run, tesseractOcr, florence2: vi.fn(), pdfPageSizes },
+    });
+    // PNG rasters keep their own pHYs density; nothing is passed.
+    await deps.ocr({ path: webp, mimeType: "image/png" }, { pageNumber: 1 });
+    expect((tesseractOcr.mock.calls[0] as unknown[])[3]).toBeUndefined();
+    tesseractOcr.mockClear();
+    await deps.withRaster(1, async (raster) => {
+      // A cached 11x17 in page requested at 300 dpi was rendered at ~235 (raster bounds).
+      expect(raster).toMatchObject({ mimeType: "image/webp", dpi: 235 });
+      await deps.ocr(raster, { pageNumber: 1 });
+      await deps.withCrop({ ...raster, pageNumber: undefined }, { x: 0, y: 0, width: 50, height: 50 }, async (crop) => {
+        expect(crop).toMatchObject({ mimeType: "image/png", dpi: 235 });
+        await deps.ocr(crop, { pageNumber: 1 });
+      });
+    });
+    expect(tesseractOcr.mock.calls.map((call) => (call as unknown[])[3])).toEqual([235, 235]);
+  });
 });

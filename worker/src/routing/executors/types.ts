@@ -9,6 +9,11 @@ export interface RasterRef {
   mimeType: string;
   /** 1-based page this raster shows, when known; lets crops be rendered straight from the source (PDF_RASTER_ENGINE). */
   pageNumber?: number;
+  /**
+   * Render density, set for formats that do not carry one (WebP has no pHYs chunk). Tesseract
+   * reads a PNG's density from the file; for WebP it is told, so OCR output is unchanged.
+   */
+  dpi?: number;
 }
 
 /**

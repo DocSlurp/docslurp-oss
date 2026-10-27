@@ -44,6 +44,16 @@ const retry = { maxRetries: 0 };
 
 afterEach(() => vi.restoreAllMocks());
 
+describe("imageDataUrlPart", () => {
+  it("labels the data URL with the sniffed media type", () => {
+    const webp = Buffer.from("RIFF\0\0\0\0WEBPVP8L", "latin1");
+    expect(imageDataUrlPart(webp).image_url.url.startsWith("data:image/webp;base64,")).toBe(true);
+    const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+    expect(imageDataUrlPart(png, "image/jpeg").image_url.url.startsWith("data:image/png;base64,")).toBe(true);
+    expect(imageDataUrlPart(Buffer.from("??"), "image/jpeg").image_url.url.startsWith("data:image/jpeg;base64,")).toBe(true);
+  });
+});
+
 describe("decision client request shapes", () => {
   it("perplexity: bare model id, bearer key, image_url parts in a state array", async () => {
     const fetchImpl = mockFetch();

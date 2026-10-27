@@ -179,6 +179,9 @@ Keep `DOCSLURP_PDF_ENGINE=off` (or `shadow`) until the gate passes.
 | `NATIVE_PDF_OCR` | `scripts` | off, scripts, prefer | When page OCR may come from the native engine (tesseract otherwise). |
 | `PDF_RASTER_ENGINE` | `pdftoppm` | pdftoppm, native-pdf | Page and crop raster engine (native falls back to pdftoppm/sharp). Stays pdftoppm: native renders add 670-810 MB per 8-slot worker process, over the 512 MB off-heap budget, for ~2.4x throughput. |
 | `PDF_RASTER_CONCURRENCY` | min(4, cores) | 1-32 | Native render lanes per document render. |
+| `DOCSLURP_PAGE_IMAGE_FORMAT` | `webp` | webp, png | Stored page-image format. WebP is lossless (same pixels) and encoded by `cwebp` in the parser sandbox; see [worker image](worker-image.md#page-images-lossless-webp). |
+| `DOCSLURP_PAGE_IMAGE_WEBP_EFFORT` | `6` | 0-9 | `cwebp -z` effort for images kept long-term. |
+| `DOCSLURP_PAGE_IMAGE_WEBP_SHORT_RETENTION_HOURS` | `3000` | hours | Retention below this uses effort 1. |
 | image build args | off | `DOCSLURP_NATIVE_PDF`, `DOCSLURP_NATIVE_PDF_OCR_MODELS`, `DOCSLURP_NATIVE_PDF_CJK_FONTS` | Ship the binding, OCR models (~30 MB) and CJK fonts (~54 MB); see `vendor-artifacts/native-pdf/README.md` and `fly.worker.toml`. |
 
 `.env.example` lists every flag above with its default.
