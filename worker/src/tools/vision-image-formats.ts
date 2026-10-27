@@ -63,6 +63,9 @@ export async function visionImageForModel(args: {
     const png = await readFile(output);
     if (sniffImageMimeType(png) !== "image/png") throw new Error("dwebp produced no PNG");
     return { bytes: png, mimeType: "image/png", transcoded: true };
+  } catch (error) {
+    if (args.signal?.aborted) throw error;
+    throw new Error(`Unsupported image for model ${args.model}: dedicated VM WebP validation or decoding failed`, { cause: error });
   } finally {
     await rm(output, { force: true });
   }
