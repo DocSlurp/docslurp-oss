@@ -338,7 +338,7 @@ export async function listMultipartUploadParts(args: { key: string; uploadId: st
  * partial prefix is refused rather than risk deleting a neighbour's objects.
  * Also aborts unfinished multipart uploads there once the prefix lists empty.
  */
-export async function deleteObjectsUnderPrefix(prefix: string): Promise<{ objects: number; bytes: number; done: boolean }> {
+export async function deleteObjectsUnderPrefix(prefix: string): Promise<{ objects: number; bytes: number; failed: number; done: boolean }> {
   if (!/^[A-Za-z0-9_-]+(?:\/[A-Za-z0-9_-]+)+\/$/.test(prefix)) throw new Error("Refusing unsafe storage prefix");
   await ensureBucketExists();
   const page = await s3Client.send(new ListObjectsV2Command({ Bucket: env.s3Bucket, Prefix: prefix, MaxKeys: 1000 }));
@@ -348,10 +348,12 @@ export async function deleteObjectsUnderPrefix(prefix: string): Promise<{ object
       Bucket: env.s3Bucket,
       Delete: { Objects: listed.map((item) => ({ Key: item.Key })), Quiet: true },
     }));
-    const failed = response.Errors ?? [];
-    if (failed.length > 0) throw new Error(`storage refused to delete ${failed.length} of ${listed.length} objects (${failed[0]?.Code ?? "unknown"})`);
-    const bytes = listed.reduce((sum, item) => sum + (typeof item.Size === "number" ? item.Size : 0), 0);
-    return { objects: listed.length, bytes, done: false };
+    // Report what was and was not deleted; the caller persists both and retries the rest.
+    const refused = new Set((response.Errors ?? []).map((error) => error.Key).filter((key): key is string => typeof key === "string"));
+    const failed = Math.max(refused.size, response.Errors?.length ?? 0);
+    const removed = listed.filter((item) => !refused.has(item.Key));
+    const bytes = removed.reduce((sum, item) => sum + (typeof item.Size === "number" ? item.Size : 0), 0);
+    return { objects: listed.length - failed, bytes, failed, done: false };
   }
   // Nothing left to list: drop unfinished multipart uploads (parts are not listed as objects).
   for (;;) {
@@ -362,5 +364,5 @@ export async function deleteObjectsUnderPrefix(prefix: string): Promise<{ object
     }
     if (!uploads.IsTruncated || open.length === 0) break;
   }
-  return { objects: 0, bytes: 0, done: true };
+  return { objects: 0, bytes: 0, failed: 0, done: true };
 }

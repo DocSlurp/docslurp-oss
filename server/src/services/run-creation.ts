@@ -632,7 +632,8 @@ export function createRunCreation(deps: RunCreationDeps) {
   }): Promise<WorkspaceRunRow> {
     const { input } = args;
     const requestId = currentRequestId();
-    const [row] = await admitRunSpend(args.orgId, input.workspaceId, (tx) => tx<WorkspaceRunRow[]>`
+    const [row] = await admitRunSpend(args.orgId, input.workspaceId, async (tx) => {
+      const rows = await tx<WorkspaceRunRow[]>`
       with inserted as (
         insert into workspace_runs (
           id, org_id, user_id, workspace_id, kind, status, priority, control_state,
@@ -670,7 +671,11 @@ export function createRunCreation(deps: RunCreationDeps) {
       select inserted.*, workspaces.name as workspace_name
       from inserted
       join workspaces on workspaces.id = inserted.workspace_id
-    `, { leaseRunId: args.id });
+    `;
+      // The extract learns its run in the same transaction, so a failure after commit never orphans the run.
+      if (input.extract) await tx`update extracts set run_id = ${args.id}, updated_at = now() where id = ${input.extract.id} and (run_id is null or run_id = ${args.id})`;
+      return rows;
+    }, { leaseRunId: args.id });
     return row!;
   }
 

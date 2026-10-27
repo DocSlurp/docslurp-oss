@@ -43,8 +43,11 @@ export async function getOrgStorage(
   // retention, so the daily meter leaves them out.
   const extracts = options.excludeExtracts
     ? db`(select coalesce(sum(d.file_size), 0) as bytes, coalesce(sum(d.page_count), 0) as pages
-        from documents d join workspace_runs r on r.id = d.run_id
-        where d.org_id = ${orgId} and r.extract_id is not null
+        from documents d
+        join workspace_runs r on r.id = d.run_id
+        -- Same org rule as workspace_corpus_stats above: the document's workspace's org.
+        join workspaces w on w.id = d.workspace_id
+        where w.org_id = ${orgId} and r.extract_id is not null
           and d.status = 'completed' and d.superseded_at is null)`
     : db`(select 0 as bytes, 0 as pages)`;
   const [row] = await db<{ source_bytes: string | number; pages: string | number }[]>`

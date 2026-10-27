@@ -33,7 +33,7 @@ import {
   withDirectUploadLock,
 } from "./direct-upload-session.js";
 import { canonicalIdForUrl } from "../lib/canonical-id.js";
-import { attachExtractRun, describeExtractById, loadIntakeExtract } from "./extracts.js";
+import { attachExtractRun, chargeExtractRetention, describeExtractById, loadIntakeExtract } from "./extracts.js";
 import { remoteUrlIntakeItems } from "./remote-ingest.js";
 import {
   intakeIntoWorkspace,
@@ -86,8 +86,12 @@ async function requiredIntake(
   const intake = await intakeIntoWorkspace(request, ports);
   if (!intake) throw new WorkspaceIntakeError("Attach at least one file.", 400);
   if (!request.extract) return intake;
-  await attachExtractRun(request.extract.id, intake.run.id);
-  const extract = await describeExtractById(request.extract.id);
+  // The run is committed (and linked to its extract in its own transaction): nothing below may fail the request.
+  const extractId = request.extract.id;
+  await chargeExtractRetention(extractId, "admission").catch((error: unknown) => {
+    console.error(`[extract] admission charge failed extract=${extractId}; the sweep charges at settle: ${error instanceof Error ? error.message : String(error)}`);
+  });
+  const extract = await describeExtractById(extractId).catch(() => null);
   return extract ? { ...intake, extract } : intake;
 }
 

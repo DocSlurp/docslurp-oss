@@ -577,7 +577,7 @@ export async function extractUsageTotals(orgId: string, since: UsageWindow, clie
   const window = since === null ? client`true` : since === "month" ? client`e.created_at >= date_trunc('month', now())` : client`e.created_at >= ${since}`;
   const [row] = await client<{ extracts: number; pages: number; cost_cents: number; retention_cents: number; compute_cents: number }[]>`
     with scoped as (
-      select e.id, e.run_id, e.pages from extracts e where e.org_id = ${orgId} and ${window}
+      select e.id, e.run_id, e.pages, e.created_at from extracts e where e.org_id = ${orgId} and ${window}
     ),
     usage as (
       select
@@ -587,7 +587,10 @@ export async function extractUsageTotals(orgId: string, since: UsageWindow, clie
           where au.provider = 'local-compute' and coalesce(au.metadata ->> 'billable', 'false') <> 'true'
         ), 0)::double precision as compute_cents
       from usage_attribution au
-      where au.org_id = ${orgId} and au.source_run_id in (select run_id from scoped where run_id is not null)
+      join scoped on scoped.run_id = au.source_run_id
+      -- Bounded by org and time (no usage predates its extract) instead of scanning the view's
+      -- run expression across the org's whole history.
+      where au.org_id = ${orgId} and au.created_at >= (select min(created_at) from scoped)
     )
     select (select count(*)::int from scoped) as extracts,
       (select coalesce(sum(pages), 0)::int from scoped) as pages,

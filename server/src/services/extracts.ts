@@ -1,7 +1,9 @@
 /**
- * Extract mode: an upload whose source files and every derived asset (page
- * images, Markdown, chunks, vectors, exports) live under
- * `extracts/<org>/<extract>/` and are deleted when the retention window ends.
+ * Extract mode: an upload whose source files and stored artifacts (page
+ * images, Markdown, stage outputs, exports) live under
+ * `extracts/<org>/<extract>/`. Its Postgres rows (documents, chunks, pages)
+ * and its LanceDB rows (in the workspace's vector tables) are deleted with it
+ * when the retention window ends; the worker compacts those tables at once.
  *
  * - `createExtract` records the durable expiry row before any byte is stored,
  *   after checking the retention cap and, for a paid window, spend.
@@ -288,9 +290,19 @@ export async function describeExtractById(id: string): Promise<ExtractRecord | n
   return row ? describeExtract(row) : null;
 }
 
-/** Intake failed before any run existed: expire now, so the sweep empties whatever reached the prefix. */
+/** Whether any run of this extract exists (run creation links it in the run's own transaction). */
+export async function extractHasRun(extractId: string): Promise<boolean> {
+  const [row] = await sql<{ present: boolean }[]>`select exists (select 1 from workspace_runs where extract_id = ${extractId}) as present`;
+  return row?.present === true;
+}
+
+/**
+ * Intake failed before any run existed: expire now, so the sweep empties
+ * whatever reached the prefix. Never touches an extract that has a run.
+ */
 export async function abandonExtract(extractId: string): Promise<void> {
-  await sql`update extracts set expires_at = least(expires_at, now()), updated_at = now() where id = ${extractId} and run_id is null`;
+  await sql`update extracts set expires_at = least(expires_at, now()), updated_at = now()
+    where id = ${extractId} and not exists (select 1 from workspace_runs r where r.extract_id = ${extractId})`;
 }
 
 /** The extract a direct upload session was created for, while it may still take files. */
@@ -367,9 +379,24 @@ export async function signExtractDownload(row: ExtractRow): Promise<string> {
   return await signDownloadGet({ key: target.object_key, filename: target.filename, expiresInSeconds: 120 });
 }
 
-/** Delete now: the extract expires immediately and the next sweep removes everything. */
+/** Delete now: the extract and its download link expire immediately and the next sweep removes everything. */
 export async function expireExtractNow(row: ExtractRow): Promise<void> {
   await sql`update extracts set expires_at = least(expires_at, now()), updated_at = now() where id = ${row.id} and org_id = ${row.org_id}`;
+  await sql`update document_exports set expires_at = least(expires_at, now()), max_expires_at = least(coalesce(max_expires_at, now()), now())
+    where org_id = ${row.org_id} and run_id is not null and run_id in (select id from workspace_runs where extract_id = ${row.id})`;
+}
+
+/**
+ * The download is for the requester, or an owner or admin of the extract's
+ * organization (as other members cannot read other people's exports). Other
+ * readers of the workspace can see the extract's status but not mint its link.
+ */
+export async function actorMayDownload(actor: RequestActor, row: Pick<ExtractRow, "user_id" | "org_id">): Promise<boolean> {
+  if (row.user_id === actor.userId) return true;
+  const [membership] = await sql<{ role: string }[]>`
+    select role from org_memberships where org_id = ${row.org_id} and user_id = ${actor.userId}
+  `;
+  return membership?.role === "owner" || membership?.role === "admin";
 }
 
 // ---------------------------------------------------------------------------
@@ -441,62 +468,83 @@ async function settleFinishedExtracts(result: ExtractSweepResult): Promise<void>
 }
 
 /**
- * Extended retention is charged once, on the measured stored size, as a
- * billable unit event (idempotent by its ID) plus the matching credit debit.
+ * Extended retention, charged on what the extract stores, as a billable unit
+ * event plus the matching credit debit. "admission" charges as soon as intake
+ * created the run (sizes are known then), so parallel extracts cannot all pass
+ * the pre-check and overdraw; "settle" (run finished) and "expiry" (run never
+ * finished) charge any rise in the measured size and close the charge. Each
+ * phase has its own event ID, so a retry never charges twice; no phase refunds.
  */
+export async function chargeExtractRetention(extractId: string, phase: "admission" | "settle" | "expiry"): Promise<number> {
+  const policy = extractRetentionPolicy();
+  return await sql.begin(async (tx) => {
+    const client = tx as unknown as typeof sql;
+    const [row] = await client<Array<Pick<ExtractRow, "id" | "org_id" | "workspace_id" | "user_id" | "api_key_id" | "run_id" | "retention_hours" | "paid_retention" | "retention_credits" | "charged_at">>>`
+      select id, org_id, workspace_id, user_id, api_key_id, run_id, retention_hours, paid_retention, retention_credits, charged_at::text
+      from extracts where id = ${extractId} for update
+    `;
+    if (!row || !row.paid_retention || row.charged_at) return 0;
+    const [measured] = await client<{ pages: number; source_bytes: string }[]>`
+      select coalesce(sum(d.page_count), 0)::int as pages, coalesce(sum(d.file_size), 0)::bigint::text as source_bytes
+      from documents d join workspace_runs r on r.id = d.run_id
+      where r.extract_id = ${row.id} and d.org_id = ${row.org_id} and d.purged_at is null
+    `;
+    const pages = measured?.pages ?? 0;
+    const bytes = estimatedExtractStoredBytes({ sourceBytes: Number(measured?.source_bytes ?? 0), pages });
+    const total = isStorageBillingEnabled() ? extractRetentionCredits({ bytes, retentionHours: row.retention_hours, freeHours: policy.freeHours }) : 0;
+    const already = Number(row.retention_credits ?? 0);
+    const delta = total - already;
+    if (delta > 1e-9) {
+      const eventId = phase === "admission" ? `extract-retention:${row.id}` : `extract-retention:${row.id}:${phase}`;
+      const recorded = await recordCostEvent({
+        userId: row.user_id,
+        scope: { orgId: row.org_id, workspaceId: row.workspace_id, runId: row.run_id ?? undefined, apiKeyId: row.api_key_id },
+        client,
+        event: {
+          id: eventId,
+          provider: UNIT_CHARGE_PROVIDER,
+          model: "extract-retention",
+          metric: EXTRACT_RETENTION_METRIC,
+          amount: bytes / 1024 ** 3,
+          unit: "gb-retention",
+          costCents: delta,
+          metadata: unitChargeMetadata({
+            product: EXTRACT_PRODUCT,
+            extractId: row.id,
+            phase,
+            retentionHours: row.retention_hours,
+            freeHours: policy.freeHours,
+            storageGbMonth: PRICE_CARD.storageGbMonth,
+            multiplier: EXTRACT_RETENTION_STORAGE_MULTIPLIER,
+            storedBytes: bytes,
+            pages,
+            // Artifact and index bytes are estimated from page counts, as in the daily meter.
+            estimate: true,
+          }),
+        },
+      });
+      if (recorded) {
+        await debitOrgCredits(client, { orgId: row.org_id, credits: delta, userId: row.user_id, reason: "storage", metadata: { extractId: row.id, usageEventId: eventId } });
+      }
+    }
+    await client`
+      update extracts set retention_credits = ${Math.max(already, total)},
+        charged_at = ${phase === "admission" ? null : sql`now()`}, updated_at = now()
+      where id = ${row.id}
+    `;
+    return Math.max(0, delta);
+  }) as number;
+}
+
 async function chargeExtendedRetention(result: ExtractSweepResult): Promise<void> {
-  const due = await sql<Array<Pick<ExtractRow, "id" | "org_id" | "workspace_id" | "user_id" | "api_key_id" | "run_id" | "retention_hours" | "stored_bytes" | "pages">>>`
-    select id, org_id, workspace_id, user_id, api_key_id, run_id, retention_hours, stored_bytes, pages from extracts
+  const due = await sql<{ id: string }[]>`
+    select id from extracts
     where state = 'active' and paid_retention and completed_at is not null and charged_at is null
     order by completed_at limit ${SETTLE_BATCH}
   `;
-  const policy = extractRetentionPolicy();
   for (const row of due) {
-    const bytes = Number(row.stored_bytes ?? 0);
-    const credits = isStorageBillingEnabled() ? extractRetentionCredits({ bytes, retentionHours: row.retention_hours, freeHours: policy.freeHours }) : 0;
     try {
-      await sql.begin(async (tx) => {
-        const client = tx as unknown as typeof sql;
-        if (credits > 0) {
-          const eventId = `extract-retention:${row.id}`;
-          const recorded = await recordCostEvent({
-            userId: row.user_id,
-            scope: { orgId: row.org_id, workspaceId: row.workspace_id, runId: row.run_id ?? undefined, apiKeyId: row.api_key_id },
-            client,
-            event: {
-              id: eventId,
-              provider: UNIT_CHARGE_PROVIDER,
-              model: "extract-retention",
-              metric: EXTRACT_RETENTION_METRIC,
-              amount: bytes / 1024 ** 3,
-              unit: "gb-retention",
-              costCents: credits,
-              metadata: unitChargeMetadata({
-                product: EXTRACT_PRODUCT,
-                extractId: row.id,
-                retentionHours: row.retention_hours,
-                freeHours: policy.freeHours,
-                storageGbMonth: PRICE_CARD.storageGbMonth,
-                multiplier: EXTRACT_RETENTION_STORAGE_MULTIPLIER,
-                storedBytes: bytes,
-                pages: row.pages ?? 0,
-                // Artifact and index bytes are estimated from page counts, as in the daily meter.
-                estimate: true,
-              }),
-            },
-          });
-          if (recorded) {
-            await debitOrgCredits(client, {
-              orgId: row.org_id,
-              credits,
-              userId: row.user_id,
-              reason: "storage",
-              metadata: { extractId: row.id, usageEventId: eventId },
-            });
-          }
-        }
-        await client`update extracts set retention_credits = ${credits}, charged_at = now(), updated_at = now() where id = ${row.id} and charged_at is null`;
-      });
+      await chargeExtractRetention(row.id, "settle");
       result.charged += 1;
     } catch (error) {
       result.failed += 1;
@@ -628,12 +676,21 @@ interface DeletionClaim {
   workspace_id: string;
   storage_prefix: string;
   expires_at: string;
-  purge_after: string | null;
-  deleted_objects: string | number;
-  deleted_bytes: string | number;
+  paid_retention: boolean;
+  charged_at: string | null;
+  rows_deleted_at: string | null;
+  deletion_attempts: number;
 }
 
+/** Upper bound on a presigned direct-upload PUT (direct-upload-session.ts SIGNED_UPLOAD_TTL_SECONDS) plus a margin. */
+const LATE_WRITE_GRACE_MINUTES = 30;
+/** A deleted extract's prefix is listed once more this long after deletion, for writes that landed after the purge. */
+const RELIST_AFTER_HOURS = 6;
+/** Failed passes back off 2^attempts minutes, up to this. */
+const MAX_BACKOFF_MINUTES = 360;
+
 async function deleteExpiredExtracts(result: ExtractSweepResult): Promise<void> {
+  // Rows that keep failing sort last and back off, so a poisoned extract never holds up the others.
   const claimed = await sql<DeletionClaim[]>`
     update extracts e
     set state = 'deleting', deletion_started_at = coalesce(e.deletion_started_at, now()),
@@ -644,11 +701,14 @@ async function deleteExpiredExtracts(result: ExtractSweepResult): Promise<void> 
       where state <> 'deleted' and expires_at <= now()
         and (lease_expires_at is null or lease_expires_at <= now())
         and (purge_after is null or purge_after <= now() or state = 'active')
-      order by expires_at limit ${DELETE_BATCH}
+      order by deletion_attempts, expires_at limit ${DELETE_BATCH}
       for update skip locked
     )
-    returning e.id, e.org_id, e.workspace_id, e.storage_prefix, e.expires_at::text, e.purge_after::text, e.deleted_objects, e.deleted_bytes
+    returning e.id, e.org_id, e.workspace_id, e.storage_prefix, e.expires_at::text, e.paid_retention, e.charged_at::text,
+      e.rows_deleted_at::text, e.deletion_attempts
   `;
+  // UPDATE ... RETURNING has no order: work the claimed rows least-failed, longest-expired first.
+  claimed.sort((a, b) => a.deletion_attempts - b.deletion_attempts || a.expires_at.localeCompare(b.expires_at));
   for (const row of claimed) {
     try {
       const outcome = await deleteExtract(row);
@@ -661,111 +721,209 @@ async function deleteExpiredExtracts(result: ExtractSweepResult): Promise<void> 
     } catch (error) {
       result.failed += 1;
       const message = error instanceof Error ? error.message : String(error);
-      console.error(`[extract-retention] delete failed extract=${row.id}: ${message}`);
-      // Raw detail stays internal (telemetry and this column); public reads never return it.
-      await sql`update extracts set last_error = ${message.slice(0, 1000)}, lease_expires_at = now() + interval '1 minute', updated_at = now() where id = ${row.id}`.catch(() => undefined);
+      // An alert (extract-deletion-stuck) fires on any expired extract with last_error; raw detail stays internal.
+      console.error(`[extract-retention] ALERT delete failed extract=${row.id} attempt=${row.deletion_attempts}: ${message}`);
+      const backoff = Math.min(MAX_BACKOFF_MINUTES, 2 ** Math.min(row.deletion_attempts, 9));
+      await sql`update extracts set last_error = ${message.slice(0, 1000)}, lease_expires_at = now() + make_interval(mins => ${backoff}), updated_at = now() where id = ${row.id}`.catch(() => undefined);
     }
   }
+  await relistDeletedExtracts(result);
 }
 
 /**
- * One deletion pass for an expired extract. Rows go first (the triggers queue
- * the vector, graph and artifact cleanup the worker drains), then the prefix
- * is emptied a bounded number of pages at a time. Done once the prefix lists
- * empty and no run of the extract is left.
+ * Every document that holds extract content: the extract's runs' documents,
+ * anything whose source sits under its prefix, and every copy made from them
+ * (versions, re-indexes, reused or deduplicated copies), scoped to the org.
+ */
+async function extractDocumentIds(row: Pick<DeletionClaim, "id" | "org_id" | "storage_prefix">): Promise<string[]> {
+  const prefix = `${row.storage_prefix}/`;
+  const ids = await sql<{ id: string }[]>`
+    with recursive tainted(id) as (
+      select d.id from documents d
+      where d.org_id = ${row.org_id}
+        and (d.run_id in (select r.id from workspace_runs r where r.extract_id = ${row.id})
+          or left(d.source_key, ${prefix.length}) = ${prefix})
+      union
+      select c.id from documents c join tainted t
+        on c.previous_version_id = t.id or c.reindex_of = t.id or c.reused_from_document_id = t.id or c.deduped_from_document_id = t.id
+      where c.org_id = ${row.org_id}
+    )
+    select id from tainted
+  `;
+  return ids.map((item) => item.id);
+}
+
+/**
+ * One deletion pass for an expired extract, in this order:
+ *
+ * 1. In-flight runs are cancelled and the pass stops: rows and objects wait out
+ *    the grace period, so late writes are not orphaned and the delete triggers
+ *    queue cleanup for settled rows.
+ * 2. An unsettled paid window is charged on what is stored (a paused run pays too).
+ * 3. Zips holding its documents are withdrawn; its documents (and any copies)
+ *    and runs are deleted, which queues vector, graph and artifact cleanup.
+ *    Media receipts detach (migration 0088: ON DELETE SET NULL).
+ * 4. The prefix is emptied a bounded number of pages at a time, after the
+ *    direct-upload late-write grace. A failure in step 3 does not stop it.
+ * 5. Done once the prefix lists empty and no document or run is left; the
+ *    prefix is listed once more RELIST_AFTER_HOURS later.
  */
 export async function deleteExtract(row: DeletionClaim): Promise<{ objects: number; bytes: number; done: boolean; lagSeconds: number }> {
-  // Every run of this extract (normally one; also one a racing confirm created).
   const runs = await sql<{ id: string; status: string }[]>`
     select id, status from workspace_runs where extract_id = ${row.id} and org_id = ${row.org_id}
   `;
-  let inFlight = false;
-  for (const run of runs.filter((candidate) => ACTIVE_RUN_STATUSES.includes(candidate.status))) {
-    inFlight = true;
-    await signalPipelineCancel(run.id).catch((error: unknown) => {
-      const message = error instanceof Error ? error.message : String(error);
-      if (!/not found/i.test(message)) console.warn(`[extract-retention] could not cancel workflow run=${run.id}: ${message}`);
-    });
-    await sql`
-      update workspace_runs
-      set status = 'failed', control_state = 'cancelled', control_requested_at = now(),
-          error = 'The extract expired.', lease_expires_at = now(), updated_at = now()
-      where id = ${run.id} and status = any(${sql.array(ACTIVE_RUN_STATUSES)})
-    `;
-  }
-  if (inFlight) {
-    await sql`update extracts set purge_after = greatest(coalesce(purge_after, now()), now() + make_interval(mins => ${IN_FLIGHT_GRACE_MINUTES})) where id = ${row.id}`;
+  const active = runs.filter((candidate) => ACTIVE_RUN_STATUSES.includes(candidate.status));
+  if (active.length > 0) {
+    for (const run of active) {
+      await signalPipelineCancel(run.id).catch((error: unknown) => {
+        const message = error instanceof Error ? error.message : String(error);
+        if (!/not found/i.test(message)) console.warn(`[extract-retention] could not cancel workflow run=${run.id}: ${message}`);
+      });
+      await sql`
+        update workspace_runs
+        set status = 'failed', control_state = 'cancelled', control_requested_at = now(),
+            error = 'The extract expired.', lease_expires_at = now(), updated_at = now()
+        where id = ${run.id} and status = any(${sql.array(ACTIVE_RUN_STATUSES)})
+      `;
+    }
+    // Zips still being built for the extract stop too; their attempts clean up after themselves.
+    await sql`update document_exports set status = 'failed', completed_at = now(), error = 'The extract expired.'
+      where org_id = ${row.org_id} and run_id = any(${sql.array(runs.map((run) => run.id))}) and status in ('queued', 'running')`;
+    await sql`update extracts set purge_after = now() + make_interval(mins => ${IN_FLIGHT_GRACE_MINUTES}), lease_expires_at = null, updated_at = now() where id = ${row.id}`;
+    return { objects: 0, bytes: 0, done: false, lagSeconds: 0 };
   }
   await sql`
     update upload_sessions set status = 'aborted', updated_at = now()
     where extract_id = ${row.id} and status in ('initializing', 'pending', 'uploading')
   `;
 
-  const runIds = runs.map((run) => run.id);
-  if (runIds.length > 0) {
-    // Withdraw any zip holding the extract's documents (its own download, and
-    // workspace exports that included them) before the documents go.
-    const exported = await sql<{ id: string; object_key: string }[]>`
-      select x.id, x.object_key from document_exports x
-      where x.org_id = ${row.org_id} and (
-        x.run_id = any(${sql.array(runIds)})
-        or x.document_ids && array(select d.id from documents d where d.run_id = any(${sql.array(runIds)}))
-        or x.document_id in (select d.id from documents d where d.run_id = any(${sql.array(runIds)}))
-      )
-    `;
-    for (const item of exported) {
-      if (!item.object_key.endsWith("/") && !item.object_key.startsWith(`${row.storage_prefix}/`)) await deleteUploadedObject(item.object_key);
-      await sql`delete from document_exports where id = ${item.id}`;
-    }
-    for (;;) {
-      const deleted = await sql<{ id: string }[]>`
-        delete from documents where id in (
-          select id from documents where run_id = any(${sql.array(runIds)}) and org_id = ${row.org_id}
-          order by id limit ${DOCUMENT_DELETE_BATCH}
-        ) returning id
-      `;
-      if (deleted.length < DOCUMENT_DELETE_BATCH) break;
-    }
-    await sql`delete from workspace_runs where id = any(${sql.array(runIds)}) and extract_id = ${row.id}`;
-    await notifySearchEligibilityChanged(sql, [row.workspace_id]).catch(() => undefined);
+  if (row.paid_retention && !row.charged_at) {
+    await chargeExtractRetention(row.id, "expiry").catch((error: unknown) => {
+      console.error(`[extract-retention] expiry charge failed extract=${row.id}: ${error instanceof Error ? error.message : String(error)}`);
+    });
   }
 
-  const [timing] = await sql<{ purge_due: boolean }[]>`
-    select (purge_after is null or purge_after <= now()) as purge_due from extracts where id = ${row.id}
+  // Rows first; a failure here is recorded but the objects are still purged.
+  let rowError: unknown = null;
+  try {
+    await deleteExtractRows(row, runs.map((run) => run.id));
+  } catch (error) {
+    rowError = error;
+  }
+
+  const [timing] = await sql<{ purge_due: boolean; first_pass: boolean }[]>`
+    select (purge_after is not null and purge_after <= now()) as purge_due, purge_after is null as first_pass from extracts where id = ${row.id}
   `;
-  if (!timing?.purge_due) {
-    // Late writes of the cancelled run are still possible; list the prefix after the grace period.
+  if (timing?.first_pass) {
+    // Presigned direct-upload PUTs may still land; list the prefix after they cannot.
+    const hasSessions = (await sql`select 1 from upload_sessions where extract_id = ${row.id} limit 1`).length > 0;
+    await sql`update extracts set purge_after = now() + make_interval(mins => ${hasSessions ? LATE_WRITE_GRACE_MINUTES : 0}) where id = ${row.id}`;
+    if (hasSessions) {
+      if (rowError) throw rowError;
+      await sql`update extracts set lease_expires_at = null, last_error = null, updated_at = now() where id = ${row.id}`;
+      return { objects: 0, bytes: 0, done: false, lagSeconds: 0 };
+    }
+  } else if (!timing?.purge_due) {
+    if (rowError) throw rowError;
     await sql`update extracts set lease_expires_at = null, updated_at = now() where id = ${row.id}`;
     return { objects: 0, bytes: 0, done: false, lagSeconds: 0 };
   }
 
-  let objects = 0;
-  let bytes = 0;
-  let done = false;
-  for (let page = 0; page < OBJECT_PAGES_PER_PASS; page += 1) {
-    const pass = await deleteObjectsUnderPrefix(`${row.storage_prefix}/`);
-    objects += pass.objects;
-    bytes += pass.bytes;
-    if (pass.done) { done = true; break; }
-  }
-  if (!done) {
-    await sql`update extracts set deleted_objects = deleted_objects + ${objects}, deleted_bytes = deleted_bytes + ${bytes},
-      lease_expires_at = null, updated_at = now() where id = ${row.id}`;
-    return { objects, bytes, done: false, lagSeconds: 0 };
-  }
+  const purge = await purgeExtractPrefix(row);
+  if (rowError) throw rowError;
+  if (!purge.done) return { objects: purge.objects, bytes: purge.bytes, done: false, lagSeconds: 0 };
   const [finished] = await sql<{ lag_seconds: number; total_objects: string; total_bytes: string }[]>`
     update extracts
-    set state = 'deleted', deleted_at = now(), deleted_objects = deleted_objects + ${objects},
-      deleted_bytes = deleted_bytes + ${bytes}, lease_expires_at = null, last_error = null, updated_at = now()
+    set state = 'deleted', deleted_at = now(), relist_after = now() + make_interval(hours => ${RELIST_AFTER_HOURS}),
+      lease_expires_at = null, last_error = null, updated_at = now()
     where id = ${row.id}
       and not exists (select 1 from workspace_runs r where r.extract_id = ${row.id})
     returning extract(epoch from now() - expires_at)::int as lag_seconds, deleted_objects::text as total_objects, deleted_bytes::text as total_bytes
   `;
   if (!finished) {
     // A run appeared meanwhile (a confirm raced the expiry): the next pass deletes it too.
-    await sql`update extracts set deleted_objects = deleted_objects + ${objects}, deleted_bytes = deleted_bytes + ${bytes}, lease_expires_at = null where id = ${row.id}`;
-    return { objects, bytes, done: false, lagSeconds: 0 };
+    await sql`update extracts set lease_expires_at = null where id = ${row.id}`;
+    return { objects: purge.objects, bytes: purge.bytes, done: false, lagSeconds: 0 };
   }
   console.log(`[extract-retention] deleted extract=${row.id} org=${row.org_id} objects=${finished.total_objects} bytes=${finished.total_bytes} lag_s=${finished.lag_seconds} size=${formatExportBytes(Number(finished.total_bytes))}`);
-  return { objects, bytes, done: true, lagSeconds: finished.lag_seconds };
+  return { objects: purge.objects, bytes: purge.bytes, done: true, lagSeconds: finished.lag_seconds };
+}
+
+async function deleteExtractRows(row: DeletionClaim, runIds: string[]): Promise<void> {
+  const documentIds = await extractDocumentIds(row);
+  if (documentIds.length > 0 || runIds.length > 0) {
+    // Withdraw any zip holding the extract's documents (its own download, and
+    // workspace exports that included them, queued ones too) before they go.
+    const exported = await sql<{ id: string; object_key: string }[]>`
+      select x.id, x.object_key from document_exports x
+      where x.org_id = ${row.org_id} and (
+        x.run_id = any(${sql.array(runIds)})
+        or x.document_ids && ${sql.array(documentIds)}::text[]
+        or x.document_id = any(${sql.array(documentIds)})
+      )
+    `;
+    // A workspace export still being built has no document_ids yet and may be zipping these
+    // documents right now: stop it (only a running export can become ready). The user can export again.
+    await sql`update document_exports set status = 'failed', completed_at = now(),
+        error = 'Some documents were deleted while this export was being built. Export again.'
+      where org_id = ${row.org_id} and workspace_id = ${row.workspace_id} and run_id is null
+        and status in ('queued', 'running') and document_ids = '{}'::text[]`;
+    for (const item of exported) {
+      if (!item.object_key.endsWith("/") && !item.object_key.startsWith(`${row.storage_prefix}/`)) await deleteUploadedObject(item.object_key);
+      await sql`delete from document_exports where id = ${item.id}`;
+    }
+    for (let index = 0; index < documentIds.length; index += DOCUMENT_DELETE_BATCH) {
+      await sql`delete from documents where id = any(${sql.array(documentIds.slice(index, index + DOCUMENT_DELETE_BATCH))}) and org_id = ${row.org_id}`;
+    }
+    if (runIds.length > 0) await sql`delete from workspace_runs where id = any(${sql.array(runIds)}) and extract_id = ${row.id}`;
+    await notifySearchEligibilityChanged(sql, [row.workspace_id]).catch(() => undefined);
+  }
+  await sql`update extracts set rows_deleted_at = coalesce(rows_deleted_at, now()) where id = ${row.id}`;
+}
+
+/** Empties the prefix a bounded number of pages per pass, persisting deleted and failed counts as it goes. */
+async function purgeExtractPrefix(row: Pick<DeletionClaim, "id" | "storage_prefix">): Promise<{ objects: number; bytes: number; done: boolean }> {
+  let objects = 0;
+  let bytes = 0;
+  let failed = 0;
+  let done = false;
+  try {
+    for (let page = 0; page < OBJECT_PAGES_PER_PASS; page += 1) {
+      const pass = await deleteObjectsUnderPrefix(`${row.storage_prefix}/`);
+      objects += pass.objects;
+      bytes += pass.bytes;
+      failed += pass.failed;
+      if (pass.failed > 0) throw new Error(`storage refused to delete ${pass.failed} object(s) under the extract prefix`);
+      if (pass.done) { done = true; break; }
+    }
+  } finally {
+    await sql`update extracts set deleted_objects = deleted_objects + ${objects}, deleted_bytes = deleted_bytes + ${bytes},
+      failed_objects = failed_objects + ${failed}, ${done ? sql`` : sql`lease_expires_at = null,`} updated_at = now() where id = ${row.id}`;
+  }
+  return { objects, bytes, done };
+}
+
+/** One more listing of each deleted extract's prefix, hours later, for writes that arrived after the purge. */
+async function relistDeletedExtracts(result: ExtractSweepResult): Promise<void> {
+  const due = await sql<{ id: string; storage_prefix: string }[]>`
+    update extracts set relist_after = null
+    where id in (
+      select id from extracts where state = 'deleted' and relist_after is not null and relist_after <= now()
+      order by relist_after limit ${DELETE_BATCH} for update skip locked
+    )
+    returning id, storage_prefix
+  `;
+  for (const row of due) {
+    try {
+      const purge = await purgeExtractPrefix(row);
+      result.deletedObjects += purge.objects;
+      result.deletedBytes += purge.bytes;
+      if (purge.objects > 0) console.warn(`[extract-retention] late objects deleted extract=${row.id} objects=${purge.objects}`);
+      if (!purge.done) await sql`update extracts set relist_after = now() where id = ${row.id}`;
+    } catch (error) {
+      result.failed += 1;
+      console.error(`[extract-retention] ALERT relist failed extract=${row.id}: ${error instanceof Error ? error.message : String(error)}`);
+      await sql`update extracts set relist_after = now() + interval '1 hour', last_error = ${(error instanceof Error ? error.message : String(error)).slice(0, 1000)} where id = ${row.id}`.catch(() => undefined);
+    }
+  }
 }

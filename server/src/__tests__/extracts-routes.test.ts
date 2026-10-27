@@ -18,6 +18,8 @@ const mocks = vi.hoisted(() => ({
   expire: vi.fn(async () => undefined),
   workspaces: new Map<string, { id: string; orgId: string; name: string }>(),
   validateApiKey: vi.fn(),
+  orgAdmin: false,
+  hasRun: false,
 }));
 
 vi.mock("../services/extracts.js", async (importOriginal) => {
@@ -46,6 +48,9 @@ vi.mock("../services/extracts.js", async (importOriginal) => {
       return await mocks.sign();
     }),
     expireExtractNow: mocks.expire,
+    actorMayDownload: vi.fn(async (actor: { userId: string }, row: { user_id?: string }) => row.user_id === actor.userId || mocks.orgAdmin),
+    extractHasRun: vi.fn(async () => mocks.hasRun),
+    chargeExtractRetention: vi.fn(async () => 0),
   };
 });
 vi.mock("../services/workspaces.js", async (importOriginal) => ({
@@ -118,6 +123,8 @@ beforeEach(() => {
   mocks.sign.mockClear();
   mocks.expire.mockClear();
   mocks.validateApiKey.mockReset();
+  mocks.orgAdmin = false;
+  mocks.hasRun = false;
 });
 
 describe("POST /v1/extracts/bulk", () => {
@@ -132,7 +139,7 @@ describe("POST /v1/extracts/bulk", () => {
     expect(keys).toHaveLength(1);
     expect(keys[0]).toMatch(/^extracts\/org-1\/ext_0{31}1\/raw\/[0-9a-f-]{36}-notes\.txt$/);
     expect(runs[0]).toMatchObject({ extract: { id: "ext_00000000000000000000000000000001", storagePrefix: "extracts/org-1/ext_00000000000000000000000000000001" } });
-    expect(mocks.attached).toEqual([["ext_00000000000000000000000000000001", "run-1"]]);
+    // The run links to its extract inside run creation (run-creation.ts), not afterwards.
   });
 
   it("accepts the good files, reports the bad ones, and fails only when nothing was created", async () => {
@@ -200,7 +207,7 @@ describe("API key scope on /v1/extracts", () => {
   });
 
   it("downloads only with a server key holding artifacts", async () => {
-    mocks.extractRow = { id: "ext_1", org_id: "org-1", workspace_id: "ws-1", expired: false };
+    mocks.extractRow = { id: "ext_1", org_id: "org-1", workspace_id: "ws-1", user_id: "user-1", expired: false };
     expect((await setup({ scopes: ["ingest"] }).app.request("/extracts/ext_1/download")).status).toBe(403);
     expect((await setup({ scopes: ["artifacts"], keyType: "publishable" }).app.request("/extracts/ext_1/download")).status).toBe(403);
     const allowed = await setup({ scopes: ["artifacts"] }).app.request("/extracts/ext_1/download");
@@ -215,6 +222,31 @@ describe("API key scope on /v1/extracts", () => {
     expect(response.status).toBe(403);
     expect(mocks.created).toHaveLength(0);
     expect(fakes.objects.size).toBe(0);
+  });
+});
+
+describe("download authorization and failures after the run exists", () => {
+  it("lets the requester or an org owner/admin download, not other workspace readers", async () => {
+    const { app } = setup();
+    mocks.extractRow = { id: "ext_1", org_id: "org-1", workspace_id: "ws-1", user_id: "someone-else", expired: false };
+    expect((await app.request("/extracts/ext_1/download")).status).toBe(403);
+    expect(mocks.sign).not.toHaveBeenCalled();
+    mocks.orgAdmin = true;
+    expect((await app.request("/extracts/ext_1/download")).status).toBe(302);
+  });
+
+  it("never expires an extract or removes its workspace once its run exists", async () => {
+    const { app, fakes } = setup();
+    mocks.hasRun = true;
+    fakes.state.startError = null;
+    // Fail after intake committed the run (the response payload cannot be built).
+    const actions = await import("../services/workspace-intake-actions.js");
+    const spy = vi.spyOn(actions, "createBulkWorkspaceIntake").mockRejectedValueOnce(new Error("lost connection after commit"));
+    const response = await app.request("/extracts/bulk", bulk([text("a.txt")], { newWorkspace: "true" }));
+    expect(response.status).toBe(500);
+    expect(mocks.abandoned).toEqual([]);
+    expect(fakes.discardedWorkspaces).toEqual([]);
+    spy.mockRestore();
   });
 });
 
@@ -236,7 +268,7 @@ describe("deleting an extract", () => {
 describe("reading an extract", () => {
   it("is 404 for another tenant, 410 once expired, and redirects to a short-lived signed URL with no-store", async () => {
     const { app } = setup();
-    mocks.extractRow = { id: "ext_1", org_id: "org-1", workspace_id: "ws-1", expired: false };
+    mocks.extractRow = { id: "ext_1", org_id: "org-1", workspace_id: "ws-1", user_id: "user-1", expired: false };
     // Another org's key sees nothing, for the record and for the download.
     const other = setup({ scopes: ["artifacts"], orgId: "org-2" }).app;
     expect((await other.request("/extracts/ext_1")).status).toBe(404);

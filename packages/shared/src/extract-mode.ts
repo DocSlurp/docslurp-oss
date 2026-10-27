@@ -4,11 +4,13 @@ import { BILLABLE_UNIT_METRICS, PRICE_CARD } from "./billing.js";
 import { documentExportContentSchema } from "./document-export.js";
 
 /**
- * Extract mode: an upload whose source files and every derived asset (page
- * images, Markdown, chunks, vectors, exports) live under their own storage
- * prefix and are deleted when the retention window ends. The first
- * EXTRACT_FREE_RETENTION_HOURS are free; a longer window is prepaid as
- * storage at EXTRACT_RETENTION_STORAGE_MULTIPLIER times the storage price.
+ * Extract mode: an upload whose source files and stored artifacts (page
+ * images, Markdown, stage outputs, exports) live under their own storage
+ * prefix, and are deleted with their Postgres rows (chunks, pages) and
+ * LanceDB vector rows (in the workspace's tables, compacted out at deletion)
+ * when the retention window ends. The first EXTRACT_FREE_RETENTION_HOURS are
+ * free; a longer window is charged as storage for the whole window at
+ * EXTRACT_RETENTION_STORAGE_MULTIPLIER times the storage price.
  * See docs/extract.md.
  */
 

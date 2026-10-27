@@ -26,10 +26,10 @@ vi.mock("../lib/storage.js", () => ({
   deleteObjectsUnderPrefix: vi.fn(async (prefix: string) => {
     mocks.purged.push(prefix);
     const keys = [...mocks.objects.keys()].filter((key) => key.startsWith(prefix)).slice(0, 2);
-    if (keys.length === 0) return { objects: 0, bytes: 0, done: true };
+    if (keys.length === 0) return { objects: 0, bytes: 0, failed: 0, done: true };
     let bytes = 0;
     for (const key of keys) { bytes += mocks.objects.get(key)!; mocks.objects.delete(key); }
-    return { objects: keys.length, bytes, done: false };
+    return { objects: keys.length, bytes, failed: 0, done: false };
   }),
 }));
 vi.mock("../lib/temporal.js", () => ({ startDocumentExportWorkflow: mocks.startExport, signalPipelineCancel: mocks.cancel }));
@@ -235,9 +235,9 @@ describe("extract sweep", () => {
     const bytes = 2 * MB + 10 * (96 + 28) * 1024;
     const expected = (bytes / 1024 ** 3) * 25 * 2;
     expect(events).toHaveLength(1);
-    expect(events[0]).toMatchObject({ id: `extract-retention:${id}`, run_id: runId, org_id: "o", workspace_id: "w" });
+    expect(events[0]).toMatchObject({ id: `extract-retention:${id}:settle`, run_id: runId, org_id: "o", workspace_id: "w" });
     expect(events[0]!.cost_cents).toBeCloseTo(expected, 6);
-    expect(events[0]!.metadata).toMatchObject({ product: "extract", extractId: id, multiplier: 2, billable: true });
+    expect(events[0]!.metadata).toMatchObject({ product: "extract", extractId: id, phase: "settle", multiplier: 2, billable: true });
     const [row] = await sql<{ retention_credits: number }[]>`select retention_credits::float8 as retention_credits from extracts where id = ${id}`;
     expect(row!.retention_credits).toBeCloseTo(expected, 6);
 
@@ -249,46 +249,135 @@ describe("extract sweep", () => {
     expect(usage.pagesPerDollar).toBeCloseTo(10 / (expected / 100), 3);
   });
 
-  it("deletes an expired extract: run cancelled, rows deleted with their cleanup queued, prefix emptied, idempotently", async () => {
+  it("deletes an expired extract: in-flight run cancelled first, rows deleted after the grace, prefix emptied, idempotently", async () => {
     const extract = await newExtract();
     const runId = await seedRun(extract, "processing");
-    // A workspace export that included the extract's document is withdrawn too.
+    // A workspace export that included the extract's document is withdrawn too, and one still being built is stopped.
     await sql`insert into document_exports (id, org_id, workspace_id, user_id, content, filename, object_key, status, document_ids, expires_at)
-      values ('exp_ws', 'o', 'w', 'u', 'markdown', 'Inbox.zip', 'exports/o/w/exp_ws/a1.zip', 'ready', ${sql.array([`${runId}-d1`])}, now() + interval '7 days')`;
+      values ('exp_ws', 'o', 'w', 'u', 'markdown', 'Inbox.zip', 'exports/o/w/exp_ws/a1.zip', 'ready', ${sql.array([`${runId}-d1`])}, now() + interval '7 days'),
+             ('exp_building', 'o', 'w', 'u', 'markdown', 'Inbox.zip', 'exports/o/w/exp_building/', 'running', '{}', now() + interval '7 days')`;
     // Another tenant's objects next door are never touched.
     mocks.objects.set("extracts/o2/ext_other/raw/x.pdf", 10);
     await sql`update extracts set expires_at = now() - interval '5 minutes' where id = ${extract.id}`;
 
+    // Pass 1: the run is in flight. Cancel it and wait; nothing is deleted yet, so late writes are not orphaned.
     await extracts.sweepExtracts();
     expect(mocks.cancel).toHaveBeenCalledWith(runId);
-    expect((await sql`select id from documents where run_id = ${runId}`).length).toBe(0);
-    expect((await sql`select id from workspace_runs where id = ${runId}`).length).toBe(0);
-    expect((await sql`select id from document_exports`).length).toBe(0);
-    expect(mocks.deleted).toEqual(["exports/o/w/exp_ws/a1.zip"]);
-    // The delete triggers queued vector/artifact/source cleanup for the worker.
-    expect((await sql`select document_id from document_cleanup_queue`).map((row) => row.document_id)).toEqual([`${runId}-d1`]);
-    expect((await sql`select target from storage_cleanup_queue where kind = 'storage_prefix'`).map((row) => row.target)).toEqual([`u/${runId}/`]);
-    // The run was in flight: objects wait out the grace period for late writes.
+    expect((await sql`select id from documents where run_id = ${runId}`).length).toBe(1);
+    expect(mocks.purged).toEqual([]);
     const [waiting] = await sql<{ state: string; due: boolean }[]>`select state, purge_after <= now() as due from extracts where id = ${extract.id}`;
     expect(waiting).toEqual({ state: "deleting", due: false });
-    expect(mocks.purged).toEqual([]);
 
+    // Pass 2, after the grace: rows go (their triggers queue cleanup), then the prefix.
     await sql`update extracts set purge_after = now() - interval '1 second' where id = ${extract.id}`;
     const result = await extracts.sweepExtracts();
+    expect((await sql`select id from documents where run_id = ${runId}`).length).toBe(0);
+    expect((await sql`select id from workspace_runs where id = ${runId}`).length).toBe(0);
+    expect((await sql`select id, status from document_exports order by id`)).toEqual([{ id: "exp_building", status: "failed" }]);
+    expect(mocks.deleted).toEqual(["exports/o/w/exp_ws/a1.zip"]);
+    expect((await sql`select document_id from document_cleanup_queue`).map((row) => row.document_id)).toEqual([`${runId}-d1`]);
+    expect((await sql`select target from storage_cleanup_queue where kind = 'storage_prefix'`).map((row) => row.target)).toEqual([`u/${runId}/`]);
     expect(mocks.purged.every((prefix) => prefix === `${extract.storagePrefix}/`)).toBe(true);
     expect([...mocks.objects.keys()]).toEqual(["extracts/o2/ext_other/raw/x.pdf"]);
     expect(result).toMatchObject({ deleted: 1, deletedObjects: 4, deletedBytes: 2 * MB + 1700 });
     expect(result.maxLagSeconds).toBeGreaterThanOrEqual(300);
-    const [done] = await sql<{ state: string; deleted_objects: string; deleted_bytes: string; deleted_at: Date | null }[]>`
-      select state, deleted_objects::text, deleted_bytes::text, deleted_at from extracts where id = ${extract.id}`;
-    expect(done).toMatchObject({ state: "deleted", deleted_objects: "4", deleted_bytes: String(2 * MB + 1700) });
-    expect(done!.deleted_at).not.toBeNull();
+    const [done] = await sql<{ state: string; deleted_objects: string; deleted_bytes: string; deleted_at: Date | null; relist: boolean }[]>`
+      select state, deleted_objects::text, deleted_bytes::text, deleted_at, relist_after > now() as relist from extracts where id = ${extract.id}`;
+    expect(done).toMatchObject({ state: "deleted", deleted_objects: "4", deleted_bytes: String(2 * MB + 1700), relist: true });
 
     // Idempotent: nothing more to do, and the record stays as a tombstone that reads as expired.
     mocks.purged.length = 0;
     expect(await extracts.sweepExtracts()).toMatchObject({ deleted: 0, deletedObjects: 0 });
     expect(mocks.purged).toEqual([]);
     expect(extracts.describeExtract((await extracts.getExtractForActor(extract.id, owner))!).status).toBe("expired");
+
+    // Hours later the prefix is listed once more and a late write is removed.
+    mocks.objects.set(`${extract.storagePrefix}/raw/late.pdf`, 7);
+    await sql`update extracts set relist_after = now() - interval '1 second' where id = ${extract.id}`;
+    expect(await extracts.sweepExtracts()).toMatchObject({ deletedObjects: 1 });
+    expect(mocks.objects.has(`${extract.storagePrefix}/raw/late.pdf`)).toBe(false);
+    expect((await sql`select relist_after from extracts where id = ${extract.id}`)[0]!.relist_after).toBeNull();
+  });
+
+  it("deletes copies made from extract documents and audio receipts without stalling other extracts", async () => {
+    const audio = await newExtract();
+    const runId = await seedRun(audio);
+    // An audio extract's media receipts and admissions point at its run and document (migrations 0048/0050).
+    await sql`insert into remote_media_jobs (id, request_key, org_id, workspace_id, run_id, document_id, provider, model, status, reserve_cents)
+      values ('rmj-1', 'rk-1', 'o', 'w', ${runId}, ${`${runId}-d1`}, 'provider', 'model', 'completed', 1)`;
+    await sql`insert into media_video_admissions (document_id, org_id, run_id, duration_seconds, reserved_frames) values (${`${runId}-d1`}, 'o', ${runId}, 60, 10)`;
+    // A copy outside the extract run (a re-index from before the guard), chained by reindex_of.
+    await sql`insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, pipeline) values ('kept-run', 'o', 'u', 'w', 'reindex', 'completed', 'completed', '{}')`;
+    await sql`insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status, page_count, previous_version_id, reindex_of)
+      values ('copy-1', 'o', 'u', 'w', 'kept-run', 'Report.pdf', 'application/pdf', 'u/kept-run/raw/r.pdf', 'completed', 10, ${`${runId}-d1`}, ${`${runId}-d1`})`;
+    const second = await newExtract();
+    await seedRun(second);
+    await sql`update extracts set expires_at = now() - interval '1 minute'`;
+
+    const result = await extracts.sweepExtracts();
+    expect(result).toMatchObject({ deleted: 2, failed: 0 });
+    expect((await sql`select id from documents`).length).toBe(0);
+    // The receipt survives as an accounting record, detached from the deleted run and document.
+    expect(await sql`select run_id, document_id from remote_media_jobs where id = 'rmj-1'`).toEqual([{ run_id: null, document_id: null }]);
+    expect((await sql`select 1 from media_video_admissions`).length).toBe(0);
+  });
+
+  it("backs off a failing extract and still deletes the others", async () => {
+    const poisoned = await newExtract();
+    await seedRun(poisoned);
+    const healthy = await newExtract();
+    await seedRun(healthy);
+    await sql`update extracts set expires_at = now() - interval '1 minute'`;
+    await sql`update extracts set expires_at = now() - interval '2 minutes' where id = ${poisoned.id}`;
+    const storage = await import("../lib/storage.js");
+    vi.mocked(storage.deleteObjectsUnderPrefix).mockImplementationOnce(async () => ({ objects: 0, bytes: 0, failed: 2, done: false }));
+    const first = await extracts.sweepExtracts();
+    expect(first).toMatchObject({ deleted: 1, failed: 1 });
+    const [state] = await sql<{ state: string; last_error: string; backoff: boolean; failed_objects: string }[]>`
+      select state, last_error, lease_expires_at > now() + interval '1 minute' as backoff, failed_objects::text from extracts where id = ${poisoned.id}`;
+    expect(state).toMatchObject({ state: "deleting", backoff: true, failed_objects: "2" });
+    expect(state!.last_error).toMatch(/refused to delete 2/);
+    expect((await sql<{ state: string }[]>`select state from extracts where id = ${healthy.id}`)[0]!.state).toBe("deleted");
+  });
+
+  it("charges a paid window at admission, tops it up at settle, and charges an unsettled one at expiry", async () => {
+    process.env.DOCSLURP_BILL_STORAGE = "true";
+    const paid = "ext_" + "b".repeat(32);
+    await sql`insert into extracts (id, org_id, workspace_id, user_id, storage_prefix, retention_hours, paid_retention, expires_at)
+      values (${paid}, 'o', 'w', 'u', ${`extracts/o/${paid}`}, 720, true, now() + interval '30 days')`;
+    const runId = await seedRun({ id: paid, storagePrefix: `extracts/o/${paid}` });
+    const perPage = (96 + 28) * 1024;
+    const credits = (bytes: number) => (bytes / 1024 ** 3) * 25 * 2;
+    expect(await extracts.chargeExtractRetention(paid, "admission")).toBeCloseTo(credits(2 * MB + 10 * perPage), 6);
+    // More pages turned up while processing: settle charges only the difference, once.
+    await sql`update documents set page_count = 20 where run_id = ${runId}`;
+    await extracts.sweepExtracts();
+    await extracts.sweepExtracts();
+    const events = await sql<{ id: string; cost_cents: number }[]>`select id, cost_cents::float8 as cost_cents from usage_events where metric = 'storage-extract-retention' and id like ${`extract-retention:${paid}%`} order by id`;
+    expect(events.map((event) => event.id)).toEqual([`extract-retention:${paid}`, `extract-retention:${paid}:settle`]);
+    expect(events[1]!.cost_cents).toBeCloseTo(credits(10 * perPage), 6);
+
+    // A paid extract whose run never finished pays at expiry, before its rows go.
+    const paused = "ext_" + "c".repeat(32);
+    await sql`insert into extracts (id, org_id, workspace_id, user_id, storage_prefix, retention_hours, paid_retention, expires_at)
+      values (${paused}, 'o', 'w', 'u', ${`extracts/o/${paused}`}, 720, true, now() - interval '1 minute')`;
+    const pausedRun = await seedRun({ id: paused, storagePrefix: `extracts/o/${paused}` }, "completed");
+    await sql`update workspace_runs set status = 'failed', stage = 'failed' where id = ${pausedRun}`;
+    await extracts.sweepExtracts();
+    expect((await sql`select id from usage_events where id = ${`extract-retention:${paused}:expiry`}`).length).toBe(1);
+  });
+
+  it("leaves live extract documents off the daily storage meter, by the workspace's org", async () => {
+    const extract = await newExtract();
+    await seedRun(extract);
+    await sql`insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, pipeline) values ('kept', 'o', 'u', 'w', 'bulk-upload', 'completed', 'completed', '{}')`;
+    await sql`insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status, file_size, page_count)
+      values ('kept-1', 'o', 'u', 'w', 'kept', 'Kept.pdf', 'application/pdf', 'u/kept/raw/k.pdf', 'completed', ${3 * MB}, 4)`;
+    const { getOrgStorage } = await import("../services/billing/overview.js");
+    expect(await getOrgStorage("o", sql as never)).toMatchObject({ sourceBytes: 5 * MB, pages: 14 });
+    expect(await getOrgStorage("o", sql as never, { excludeExtracts: true })).toMatchObject({ sourceBytes: 3 * MB, pages: 4 });
+    // Another org's meter never subtracts this org's extracts.
+    expect(await getOrgStorage("o2", sql as never, { excludeExtracts: true })).toMatchObject({ sourceBytes: 0, pages: 0 });
   });
 
   it("resumes a deletion that failed part-way", async () => {
@@ -300,6 +389,8 @@ describe("extract sweep", () => {
     expect(await extracts.sweepExtracts()).toMatchObject({ failed: 1, deleted: 0 });
     const [failed] = await sql<{ state: string; last_error: string }[]>`select state, last_error from extracts where id = ${extract.id}`;
     expect(failed).toEqual({ state: "deleting", last_error: "storage unavailable" });
+    // The rows still went even though the objects could not.
+    expect((await sql`select 1 from documents where source_key like ${`${extract.storagePrefix}/%`}`).length).toBe(0);
     await sql`update extracts set lease_expires_at = null where id = ${extract.id}`;
     expect(await extracts.sweepExtracts()).toMatchObject({ deleted: 1, failed: 0 });
     expect([...mocks.objects.keys()].filter((name) => name.startsWith(extract.storagePrefix))).toEqual([]);

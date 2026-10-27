@@ -20,7 +20,9 @@ import { acceptApiKeys } from "../lib/route-auth.js";
 import { createDirectUploadSession } from "../services/direct-upload-session.js";
 import {
   abandonExtract,
+  actorMayDownload,
   createExtract,
+  extractHasRun,
   describeExtract,
   describeExtractById,
   ExtractError,
@@ -159,6 +161,21 @@ async function discardCreated(target: { workspace: WorkspaceRecord; created: boo
   });
 }
 
+/**
+ * A request failed: expire its extract and remove a workspace made for it,
+ * unless a run exists (run creation commits the link in its own transaction):
+ * then the extract is live and keeps its schedule.
+ */
+async function releaseFailedExtract(
+  extractId: string | null,
+  target: { workspace: WorkspaceRecord; created: boolean } | null,
+  ports: WorkspaceIntakePorts,
+): Promise<void> {
+  if (extractId && await extractHasRun(extractId).catch(() => true)) return;
+  if (extractId) await abandonExtract(extractId).catch(() => undefined);
+  await discardCreated(target, ports);
+}
+
 function extractErrorResponse(c: Context, error: unknown): Response | null {
   if (!(error instanceof ExtractError)) return null;
   return apiErrorResponse(c, error.status, error.code, error.message, error.details);
@@ -258,8 +275,7 @@ export const createExtractsRoutes = (ports: WorkspaceIntakePorts = workspaceInta
       if (result.temporalDeferred) c.header("X-Temporal-Deferred", "true");
       return c.json(result.payload, result.status);
     } catch (error) {
-      if (extractId) await abandonExtract(extractId).catch(() => undefined);
-      await discardCreated(target, ports);
+      await releaseFailedExtract(extractId, target, ports);
       return intakeFailure(c, error);
     }
   })
@@ -302,8 +318,7 @@ export const createExtractsRoutes = (ports: WorkspaceIntakePorts = workspaceInta
       if (result.temporalDeferred) c.header("X-Temporal-Deferred", "true");
       return c.json(result.payload, result.status);
     } catch (error) {
-      if (extractId) await abandonExtract(extractId).catch(() => undefined);
-      await discardCreated(target, ports);
+      await releaseFailedExtract(extractId, target, ports);
       return intakeFailure(c, error);
     }
   })
@@ -340,8 +355,7 @@ export const createExtractsRoutes = (ports: WorkspaceIntakePorts = workspaceInta
       const described = await describeExtractById(extract.id);
       return c.json({ ...session, ...(described ? { extract: described } : {}) }, 201);
     } catch (error) {
-      if (extractId) await abandonExtract(extractId).catch(() => undefined);
-      await discardCreated(target, ports);
+      await releaseFailedExtract(extractId, target, ports);
       return intakeFailure(c, error);
     }
   })
@@ -357,8 +371,11 @@ export const createExtractsRoutes = (ports: WorkspaceIntakePorts = workspaceInta
     return c.json({ extract });
   })
   .get("/:extractId/download", async (c) => {
-    const row = await getExtractForActor(c.req.param("extractId"), getRequestActor(c));
+    const actor = getRequestActor(c);
+    const row = await getExtractForActor(c.req.param("extractId"), actor);
     if (!row) return apiErrorResponse(c, 404, "extract_not_found", "Extract not found");
+    // The results are the requester's (or an org owner's or admin's), as with exports.
+    if (!await actorMayDownload(actor, row)) return apiErrorResponse(c, 403, "forbidden", "Only the requester can download this extract");
     try {
       const url = await signExtractDownload(row);
       c.header("cache-control", "private, no-store");
