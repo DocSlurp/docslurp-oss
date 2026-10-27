@@ -33,7 +33,7 @@ import {
   withDirectUploadLock,
 } from "./direct-upload-session.js";
 import { canonicalIdForUrl } from "../lib/canonical-id.js";
-import { abandonExtract, attachExtractRun, describeExtractById, loadIntakeExtract } from "./extracts.js";
+import { attachExtractRun, describeExtractById, loadIntakeExtract } from "./extracts.js";
 import { remoteUrlIntakeItems } from "./remote-ingest.js";
 import {
   intakeIntoWorkspace,
@@ -76,22 +76,15 @@ type IntakeTargetArgs = Pick<
 
 /**
  * Intake, plus extract bookkeeping: the run is linked to its extract on
- * success, and an extract whose intake created nothing expires at once so the
- * sweep empties its prefix.
+ * success. (A failed extract request is expired by its route, routes/extracts.ts;
+ * a direct upload session may retry its confirm, so its extract keeps its schedule.)
  */
 async function requiredIntake(
   request: WorkspaceIntakeRequest,
   ports: WorkspaceIntakePorts,
 ): Promise<WorkspaceIntakeResult & { extract?: ExtractRecord }> {
-  let intake: WorkspaceIntakeResult | null;
-  try {
-    intake = await intakeIntoWorkspace(request, ports);
-    if (!intake) throw new WorkspaceIntakeError("Attach at least one file.", 400);
-  } catch (error) {
-    // A direct upload session may retry its confirm; its extract expires on its own schedule.
-    if (request.extract && request.kind !== "direct-upload") await abandonExtract(request.extract.id).catch(() => undefined);
-    throw error;
-  }
+  const intake = await intakeIntoWorkspace(request, ports);
+  if (!intake) throw new WorkspaceIntakeError("Attach at least one file.", 400);
   if (!request.extract) return intake;
   await attachExtractRun(request.extract.id, intake.run.id);
   const extract = await describeExtractById(request.extract.id);

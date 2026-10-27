@@ -1,0 +1,316 @@
+import postgres from "postgres";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { startMigratedPostgres } from "@docslurp/worker/testing";
+
+/**
+ * Extract mode against a migrated database: retention policy and spend
+ * gates, tenant-scoped reads, the download signer, and the sweep (settle,
+ * extended-retention charge, download export, email, and deletion of rows and
+ * the storage prefix). Storage, Temporal and email are fakes.
+ */
+const mocks = vi.hoisted(() => ({
+  objects: new Map<string, number>(),
+  purged: [] as string[],
+  deleted: [] as string[],
+  sign: vi.fn(async ({ key, expiresInSeconds }: { key: string; expiresInSeconds?: number }) => `https://storage.test/${key}?X-Amz-Expires=${expiresInSeconds}`),
+  startExport: vi.fn(async () => undefined),
+  cancel: vi.fn(async () => undefined),
+  email: vi.fn(async () => undefined),
+  notificationEnabled: vi.fn(async () => true),
+}));
+
+vi.mock("../lib/storage.js", () => ({
+  signDownloadGet: mocks.sign,
+  deleteUploadedObject: vi.fn(async (key: string) => { mocks.deleted.push(key); mocks.objects.delete(key); }),
+  // One page of up to 2 keys per call, so the multi-pass path is exercised.
+  deleteObjectsUnderPrefix: vi.fn(async (prefix: string) => {
+    mocks.purged.push(prefix);
+    const keys = [...mocks.objects.keys()].filter((key) => key.startsWith(prefix)).slice(0, 2);
+    if (keys.length === 0) return { objects: 0, bytes: 0, done: true };
+    let bytes = 0;
+    for (const key of keys) { bytes += mocks.objects.get(key)!; mocks.objects.delete(key); }
+    return { objects: keys.length, bytes, done: false };
+  }),
+}));
+vi.mock("../lib/temporal.js", () => ({ startDocumentExportWorkflow: mocks.startExport, signalPipelineCancel: mocks.cancel }));
+vi.mock("../services/notifications.js", () => ({
+  sendExtractReadyEmail: mocks.email,
+  sendExportReadyEmail: vi.fn(async () => undefined),
+  isNotificationEnabled: mocks.notificationEnabled,
+}));
+vi.mock("../search/eligibility-hint.js", () => ({ notifySearchEligibilityChanged: vi.fn(async () => undefined) }));
+
+let sql: postgres.Sql;
+let stop: () => Promise<void>;
+let extracts: typeof import("../services/extracts.js");
+
+const MB = 1024 * 1024;
+const owner = { type: "session", userId: "u", sessionId: "s", user: { id: "u", email: "u@example.test", name: "U" } } as const;
+const stranger = { type: "session", userId: "stranger", sessionId: "s2", user: { id: "stranger", email: "s@example.test", name: "S" } } as const;
+const key = (overrides: Record<string, unknown> = {}) => ({
+  type: "apiKey", userId: "u",
+  apiKey: { keyId: "k", userId: "u", orgId: "o", keyType: "server", scopes: ["ingest", "artifacts"], workspaceIds: [], allowedDomains: [], rateLimitRpm: 60, rateLimitPpd: 1000, rateLimits: [], ...overrides },
+}) as never;
+
+beforeAll(async () => {
+  const database = await startMigratedPostgres();
+  stop = database.stop;
+  sql = postgres(database.url, { max: 1, prepare: false, onnotice: () => {} });
+  vi.doMock("../db.js", () => ({ sql }));
+  await sql`insert into "user" (id, name, email) values ('u', 'User', 'u@example.test'), ('stranger', 'S', 's@example.test')`;
+  await sql`insert into organizations (id, name, slug, created_by_user_id) values ('o', 'Org', 'extract-org', 'u'), ('o2', 'Other', 'other-org', 'stranger')`;
+  await sql`insert into org_memberships (org_id, user_id, role) values ('o', 'u', 'owner'), ('o2', 'stranger', 'owner')`;
+  await sql`insert into workspaces (id, org_id, user_id, name) values ('w', 'o', 'u', 'Inbox'), ('w-other', 'o2', 'stranger', 'Theirs')`;
+  extracts = await import("../services/extracts.js");
+}, 120_000);
+afterAll(async () => { await sql?.end(); await stop?.(); });
+beforeEach(async () => {
+  vi.clearAllMocks();
+  mocks.objects.clear();
+  mocks.purged.length = 0;
+  mocks.deleted.length = 0;
+  delete process.env.DOCSLURP_BILL_STORAGE;
+  delete process.env.DOCSLURP_EXTRACT_FREE_RETENTION_HOURS;
+  delete process.env.DOCSLURP_EXTRACT_MAX_RETENTION_DAYS;
+  await sql`delete from document_exports`;
+  await sql`delete from documents`;
+  await sql`delete from workspace_runs`;
+  await sql`delete from extracts`;
+  await sql`delete from storage_cleanup_queue`;
+  await sql`delete from document_cleanup_queue`;
+});
+
+async function newExtract(options: { retentionDays?: number } = {}) {
+  return await extracts.createExtract({ userId: "u", orgId: "o", workspaceId: "w", options });
+}
+
+/** What intake and the worker leave behind: an extract run with documents and objects under the prefix. */
+async function seedRun(extract: { id: string; storagePrefix: string }, status = "completed") {
+  const runId = `run-${extract.id.slice(4, 12)}`;
+  await sql`insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, pipeline, extract_id, storage_prefix)
+    values (${runId}, 'o', 'u', 'w', 'bulk-upload', ${status}, ${status}, '{}', ${extract.id}, ${extract.storagePrefix})`;
+  await sql`insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status, file_size, page_count, canonical_id)
+    values (${`${runId}-d1`}, 'o', 'u', 'w', ${runId}, 'Report.pdf', 'application/pdf', ${`${extract.storagePrefix}/raw/r.pdf`}, ${status === "completed" ? "completed" : "processing"}, ${2 * MB}, 10, ${`docslurp:extract:${extract.id}:d1`})`;
+  await extracts.attachExtractRun(extract.id, runId);
+  for (const [name, size] of [["raw/r.pdf", 2 * MB], ["images/d1/page-1.png", 1000], ["parser/d1.json", 500], ["markdown/d1.md", 200]] as const) {
+    mocks.objects.set(`${extract.storagePrefix}/${name}`, size);
+  }
+  return runId;
+}
+
+describe("extract retention policy", () => {
+  it("defaults to the free 48 hours, takes env overrides and refuses retention past the cap", async () => {
+    expect(extracts.resolveExtractRetention({})).toEqual({ retentionHours: 48, paid: false });
+    expect(extracts.resolveExtractRetention({ retentionDays: 2 })).toEqual({ retentionHours: 48, paid: false });
+    expect(extracts.resolveExtractRetention({ retentionDays: 30 })).toEqual({ retentionHours: 720, paid: true });
+    expect(() => extracts.resolveExtractRetention({ retentionDays: 31 })).toThrow(expect.objectContaining({ status: 400, code: "retention_exceeds_cap", details: { maxRetentionDays: 30 } }));
+    expect(extracts.extractRetentionPolicy({ DOCSLURP_EXTRACT_FREE_RETENTION_HOURS: "24", DOCSLURP_EXTRACT_MAX_RETENTION_DAYS: "90" })).toEqual({ freeHours: 24, maxDays: 90 });
+    // Invalid values fall back to the defaults instead of opening the cap.
+    expect(extracts.extractRetentionPolicy({ DOCSLURP_EXTRACT_MAX_RETENTION_DAYS: "-1", DOCSLURP_EXTRACT_FREE_RETENTION_HOURS: "lots" })).toEqual({ freeHours: 48, maxDays: 30 });
+  });
+
+  it("records the expiry row with the tenant prefix; a paid window without credits is refused before anything is stored", async () => {
+    const free = await newExtract();
+    expect(free.storagePrefix).toBe(`extracts/o/${free.id}`);
+    const [row] = await sql<{ hours: number; paid: boolean; state: string }[]>`
+      select round(extract(epoch from expires_at - created_at) / 3600)::int as hours, paid_retention as paid, state from extracts where id = ${free.id}`;
+    expect(row).toEqual({ hours: 48, paid: false, state: "active" });
+
+    process.env.DOCSLURP_BILL_STORAGE = "true";
+    await expect(newExtract({ retentionDays: 30 })).rejects.toMatchObject({ name: "SpendBlockedError", statusCode: 402 });
+    await expect(newExtract({ retentionDays: 45 })).rejects.toMatchObject({ code: "retention_exceeds_cap" });
+    expect((await sql`select id from extracts`).length).toBe(1);
+  });
+});
+
+describe("extract reads are tenant-scoped", () => {
+  it("shows an extract to a reader of its workspace and to a key of its org, and to nobody else", async () => {
+    const extract = await newExtract();
+    expect(await extracts.getExtractForActor(extract.id, owner)).toMatchObject({ id: extract.id });
+    expect(await extracts.getExtractForActor(extract.id, key())).toMatchObject({ id: extract.id });
+    // Another tenant, a key of another org, a key restricted to other workspaces, and a guessed ID all see nothing.
+    expect(await extracts.getExtractForActor(extract.id, stranger)).toBeNull();
+    expect(await extracts.getExtractForActor(extract.id, key({ orgId: "o2" }))).toBeNull();
+    expect(await extracts.getExtractForActor(extract.id, key({ workspaceIds: ["w-elsewhere"] }))).toBeNull();
+    expect(await extracts.getExtractForActor("ext_00000000000000000000000000000000", owner)).toBeNull();
+    expect(await extracts.getExtractForActor("../ext", owner)).toBeNull();
+    expect((await extracts.listExtractsForActor(stranger)).map((item) => item.id)).toEqual([]);
+    expect((await extracts.listExtractsForActor(owner)).map((item) => item.id)).toEqual([extract.id]);
+  });
+
+  it("reports pending, processing and expired, with the 410 message for expired extracts", async () => {
+    const extract = await newExtract();
+    expect(extracts.describeExtract((await extracts.getExtractForActor(extract.id, owner))!).status).toBe("pending");
+    await seedRun(extract, "processing");
+    expect(extracts.describeExtract((await extracts.getExtractForActor(extract.id, owner))!)).toMatchObject({ status: "processing", download: { status: "pending", url: null } });
+    await sql`update extracts set expires_at = now() - interval '1 minute' where id = ${extract.id}`;
+    const expired = (await extracts.getExtractForActor(extract.id, owner))!;
+    expect(extracts.describeExtract(expired)).toMatchObject({ status: "expired", download: { status: "expired", url: null } });
+    await expect(extracts.signExtractDownload(expired)).rejects.toMatchObject({ status: 410, code: "extract_expired" });
+  });
+});
+
+describe("extract sweep", () => {
+  it("settles a finished extract, queues a run-scoped download under its prefix and emails once it is ready", async () => {
+    const extract = await newExtract();
+    const runId = await seedRun(extract);
+    await extracts.sweepExtracts();
+
+    const [settled] = await sql<{ pages: number; stored_bytes: string; export_id: string; retention_credits: string | null }[]>`
+      select pages, stored_bytes::text, export_id, retention_credits::text from extracts where id = ${extract.id}`;
+    expect(settled!.pages).toBe(10);
+    expect(Number(settled!.stored_bytes)).toBe(2 * MB + 10 * (96 + 28) * 1024);
+    expect(settled!.retention_credits).toBeNull();
+    const [download] = await sql<{ run_id: string; object_key: string; notify_email: boolean; max_expires_at: Date; expires_at: Date; filename: string }[]>`
+      select run_id, object_key, notify_email, max_expires_at, expires_at, filename from document_exports where id = ${settled!.export_id}`;
+    expect(download).toMatchObject({ run_id: runId, object_key: `${extract.storagePrefix}/exports/${settled!.export_id}/`, notify_email: false, filename: "Report.zip" });
+    expect(mocks.startExport).toHaveBeenCalledWith({ exportId: settled!.export_id }, { large: false });
+    // Not ready yet: no email, no signed link.
+    expect(mocks.email).not.toHaveBeenCalled();
+    await expect(extracts.signExtractDownload((await extracts.getExtractForActor(extract.id, owner))!)).rejects.toMatchObject({ code: "download_not_ready" });
+
+    // The worker finishes the zip under the prefix.
+    const zip = `${extract.storagePrefix}/exports/${settled!.export_id}/a1.zip`;
+    await sql`update document_exports set status = 'ready', object_key = ${zip}, completed_at = now() where id = ${settled!.export_id}`;
+    await extracts.sweepExtracts();
+    expect(mocks.email).toHaveBeenCalledTimes(1);
+    const [emailArgs] = mocks.email.mock.calls[0] as unknown as [{ url: string; ready: boolean; recipientEmail: string }];
+    expect(emailArgs).toMatchObject({ ready: true, recipientEmail: "u@example.test" });
+    // The emailed link names the export for the signed-in app page; it is not a signed storage URL.
+    expect(emailArgs.url).toMatch(/\/app\?export=exp_[0-9a-f]{32}$/);
+    expect(emailArgs.url).not.toContain("X-Amz");
+
+    const ready = (await extracts.getExtractForActor(extract.id, owner))!;
+    expect(extracts.describeExtract(ready)).toMatchObject({ status: "completed", download: { status: "ready", url: `/v1/extracts/${extract.id}/download` } });
+    expect(await extracts.signExtractDownload(ready)).toBe(`https://storage.test/${zip}?X-Amz-Expires=120`);
+
+    // A second sweep neither emails nor queues again.
+    await extracts.sweepExtracts();
+    expect(mocks.email).toHaveBeenCalledTimes(1);
+    expect(mocks.startExport).toHaveBeenCalledTimes(1);
+  });
+
+  it("skips the email when the request opted out or the user turned run emails off", async () => {
+    const quiet = await extracts.createExtract({ userId: "u", orgId: "o", workspaceId: "w", options: { notifyEmail: false } });
+    await seedRun(quiet);
+    const muted = await newExtract();
+    await seedRun(muted);
+    mocks.notificationEnabled.mockResolvedValue(false);
+    await extracts.sweepExtracts();
+    await sql`update document_exports set status = 'ready', object_key = object_key || 'a1.zip'`;
+    await extracts.sweepExtracts();
+    expect(mocks.email).not.toHaveBeenCalled();
+    mocks.notificationEnabled.mockResolvedValue(true);
+  });
+
+  it("refuses to sign a download that is not this extract's own object inside its prefix", async () => {
+    const extract = await newExtract();
+    await seedRun(extract);
+    await extracts.sweepExtracts();
+    const [{ export_id: exportId }] = await sql<{ export_id: string }[]>`select export_id from extracts where id = ${extract.id}`;
+    // Tampered: the export row points outside the extract prefix.
+    await sql`update document_exports set status = 'ready', object_key = 'exports/o/w/other/a1.zip' where id = ${exportId}`;
+    await expect(extracts.signExtractDownload((await extracts.getExtractForActor(extract.id, owner))!)).rejects.toMatchObject({ code: "download_failed" });
+    // Replayed onto another extract: a second extract cannot borrow the first one's export.
+    const other = await newExtract();
+    await seedRun(other);
+    await sql`update extracts set export_id = ${exportId}, completed_at = now() where id = ${other.id}`;
+    await sql`update document_exports set object_key = ${`${extract.storagePrefix}/exports/${exportId}/a1.zip`} where id = ${exportId}`;
+    await expect(extracts.signExtractDownload((await extracts.getExtractForActor(other.id, owner))!)).rejects.toMatchObject({ code: "download_not_ready" });
+    expect(mocks.sign).not.toHaveBeenCalled();
+  });
+
+  it("charges extended retention once on the measured size, through the usage ledger and a credit debit", async () => {
+    process.env.DOCSLURP_BILL_STORAGE = "true";
+    // Inserted directly: the spend pre-check is covered above.
+    const id = "ext_" + "a".repeat(32);
+    await sql`insert into extracts (id, org_id, workspace_id, user_id, storage_prefix, retention_hours, paid_retention, expires_at)
+      values (${id}, 'o', 'w', 'u', ${`extracts/o/${id}`}, 720, true, now() + interval '30 days')`;
+    const runId = await seedRun({ id, storagePrefix: `extracts/o/${id}` });
+    await extracts.sweepExtracts();
+    await extracts.sweepExtracts();
+
+    const events = await sql<{ id: string; metric: string; cost_cents: number; run_id: string; org_id: string; workspace_id: string; metadata: Record<string, unknown> }[]>`
+      select id, metric, cost_cents::float8 as cost_cents, run_id, org_id, workspace_id, metadata from usage_events where metric = 'storage-extract-retention'`;
+    const bytes = 2 * MB + 10 * (96 + 28) * 1024;
+    const expected = (bytes / 1024 ** 3) * 25 * 2;
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({ id: `extract-retention:${id}`, run_id: runId, org_id: "o", workspace_id: "w" });
+    expect(events[0]!.cost_cents).toBeCloseTo(expected, 6);
+    expect(events[0]!.metadata).toMatchObject({ product: "extract", extractId: id, multiplier: 2, billable: true });
+    const [row] = await sql<{ retention_credits: number }[]>`select retention_credits::float8 as retention_credits from extracts where id = ${id}`;
+    expect(row!.retention_credits).toBeCloseTo(expected, 6);
+
+    // The extract's spend is reported on its own.
+    const { extractUsageTotals } = await import("../services/usage-attribution.js");
+    const usage = await extractUsageTotals("o", null, sql as never);
+    expect(usage).toMatchObject({ extracts: 1, pages: 10 });
+    expect(usage.retentionCents).toBeCloseTo(expected, 6);
+    expect(usage.pagesPerDollar).toBeCloseTo(10 / (expected / 100), 3);
+  });
+
+  it("deletes an expired extract: run cancelled, rows deleted with their cleanup queued, prefix emptied, idempotently", async () => {
+    const extract = await newExtract();
+    const runId = await seedRun(extract, "processing");
+    // A workspace export that included the extract's document is withdrawn too.
+    await sql`insert into document_exports (id, org_id, workspace_id, user_id, content, filename, object_key, status, document_ids, expires_at)
+      values ('exp_ws', 'o', 'w', 'u', 'markdown', 'Inbox.zip', 'exports/o/w/exp_ws/a1.zip', 'ready', ${sql.array([`${runId}-d1`])}, now() + interval '7 days')`;
+    // Another tenant's objects next door are never touched.
+    mocks.objects.set("extracts/o2/ext_other/raw/x.pdf", 10);
+    await sql`update extracts set expires_at = now() - interval '5 minutes' where id = ${extract.id}`;
+
+    await extracts.sweepExtracts();
+    expect(mocks.cancel).toHaveBeenCalledWith(runId);
+    expect((await sql`select id from documents where run_id = ${runId}`).length).toBe(0);
+    expect((await sql`select id from workspace_runs where id = ${runId}`).length).toBe(0);
+    expect((await sql`select id from document_exports`).length).toBe(0);
+    expect(mocks.deleted).toEqual(["exports/o/w/exp_ws/a1.zip"]);
+    // The delete triggers queued vector/artifact/source cleanup for the worker.
+    expect((await sql`select document_id from document_cleanup_queue`).map((row) => row.document_id)).toEqual([`${runId}-d1`]);
+    expect((await sql`select target from storage_cleanup_queue where kind = 'storage_prefix'`).map((row) => row.target)).toEqual([`u/${runId}/`]);
+    // The run was in flight: objects wait out the grace period for late writes.
+    const [waiting] = await sql<{ state: string; due: boolean }[]>`select state, purge_after <= now() as due from extracts where id = ${extract.id}`;
+    expect(waiting).toEqual({ state: "deleting", due: false });
+    expect(mocks.purged).toEqual([]);
+
+    await sql`update extracts set purge_after = now() - interval '1 second' where id = ${extract.id}`;
+    const result = await extracts.sweepExtracts();
+    expect(mocks.purged.every((prefix) => prefix === `${extract.storagePrefix}/`)).toBe(true);
+    expect([...mocks.objects.keys()]).toEqual(["extracts/o2/ext_other/raw/x.pdf"]);
+    expect(result).toMatchObject({ deleted: 1, deletedObjects: 4, deletedBytes: 2 * MB + 1700 });
+    expect(result.maxLagSeconds).toBeGreaterThanOrEqual(300);
+    const [done] = await sql<{ state: string; deleted_objects: string; deleted_bytes: string; deleted_at: Date | null }[]>`
+      select state, deleted_objects::text, deleted_bytes::text, deleted_at from extracts where id = ${extract.id}`;
+    expect(done).toMatchObject({ state: "deleted", deleted_objects: "4", deleted_bytes: String(2 * MB + 1700) });
+    expect(done!.deleted_at).not.toBeNull();
+
+    // Idempotent: nothing more to do, and the record stays as a tombstone that reads as expired.
+    mocks.purged.length = 0;
+    expect(await extracts.sweepExtracts()).toMatchObject({ deleted: 0, deletedObjects: 0 });
+    expect(mocks.purged).toEqual([]);
+    expect(extracts.describeExtract((await extracts.getExtractForActor(extract.id, owner))!).status).toBe("expired");
+  });
+
+  it("resumes a deletion that failed part-way", async () => {
+    const extract = await newExtract();
+    await seedRun(extract);
+    await sql`update extracts set expires_at = now() - interval '1 minute' where id = ${extract.id}`;
+    const storage = await import("../lib/storage.js");
+    vi.mocked(storage.deleteObjectsUnderPrefix).mockRejectedValueOnce(new Error("storage unavailable"));
+    expect(await extracts.sweepExtracts()).toMatchObject({ failed: 1, deleted: 0 });
+    const [failed] = await sql<{ state: string; last_error: string }[]>`select state, last_error from extracts where id = ${extract.id}`;
+    expect(failed).toEqual({ state: "deleting", last_error: "storage unavailable" });
+    await sql`update extracts set lease_expires_at = null where id = ${extract.id}`;
+    expect(await extracts.sweepExtracts()).toMatchObject({ deleted: 1, failed: 0 });
+    expect([...mocks.objects.keys()].filter((name) => name.startsWith(extract.storagePrefix))).toEqual([]);
+  });
+
+  it("expires an extract whose intake created nothing, so its prefix is emptied", async () => {
+    const extract = await newExtract();
+    mocks.objects.set(`${extract.storagePrefix}/raw/half-written.pdf`, 5);
+    await extracts.abandonExtract(extract.id);
+    await extracts.sweepExtracts();
+    expect(mocks.objects.size).toBe(0);
+    expect((await sql<{ state: string }[]>`select state from extracts where id = ${extract.id}`)[0]!.state).toBe("deleted");
+  });
+});
