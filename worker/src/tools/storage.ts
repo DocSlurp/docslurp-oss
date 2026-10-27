@@ -491,6 +491,8 @@ export function artifactStorageKey(key: string): ArtifactStorageKey {
   return key as ArtifactStorageKey;
 }
 
+export { documentArtifactRoot, runArtifactRoot } from "../lib/artifact-root.js";
+
 export function buildArtifactStorageKey(...segments: string[]): ArtifactStorageKey {
   if (segments.length === 0) {
     throw new Error("artifact storage key requires at least one segment");

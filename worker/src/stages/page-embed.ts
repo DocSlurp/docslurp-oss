@@ -13,6 +13,7 @@ import type { PdfRasterCache } from "../pipeline/pdf-asset-cache.js";
 import type { Stage, WorkflowState } from "../pipeline/pipeline.js";
 import type { PipelineUsageEventLedger } from "../pipeline/usage-ledger.js";
 import type { ArtifactStore } from "../tools/storage.js";
+import { runArtifactRoot } from "../lib/artifact-root.js";
 
 type Sql = postgres.Sql<Record<string, unknown>>;
 
@@ -242,7 +243,7 @@ export class PageEmbedStage implements Stage {
             console.warn(`[page-embed] document=${document.id} stopped by ${outcome.stoppedBy} after ${outcome.embeddedPages.length}/${todo.length} pages`);
           }
           await completeDocumentPages(state, document, this.name, outcome.embeddedPages, pageCount, false);
-          const key = `${document.userId}/${state.run.id}/page-embed/${document.id}/manifest.json`;
+          const key = `${runArtifactRoot(state.run, document.userId)}/page-embed/${document.id}/manifest.json`;
           await this.storage.putJson(key, {
             documentId: document.id,
             model: embedder.model,

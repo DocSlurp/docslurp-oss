@@ -67,6 +67,9 @@ import {
 } from "../routing/runtime.js";
 import type { CommandRunner } from "../tools/runner.js";
 import { type ArtifactStore, keyFromStorageUri } from "../tools/storage.js";
+import { runArtifactRoot } from "../lib/artifact-root.js";
+
+import { assertCompleteActivePlan, assertSupportedActiveMargin } from "../routing/active-plan.js";
 
 export const PAGE_ROUTE_DECISION_METRIC = "page-route-decision";
 export const PAGE_ROUTE_CHUNK_ESTIMATE_METRIC = "page-route-chunk-estimate";
@@ -137,7 +140,8 @@ const INSET_RENDER_PX = 1600;
  * chart extractor, a caption, ...) with cost estimates and a chunk budget. `shadow` records the
  * plan and one performance_log row per page without touching extraction; `active` lets
  * render-images and vision-extract execute it. Decisions come from decision models plus free
- * features, never from a generative LLM. Fail open: any routing error leaves the legacy path.
+ * features, never from a generative LLM. Ordinary routing errors leave the legacy path;
+ * unsupported margin floors and budget-stripped active plans fail closed.
  */
 export class RoutePagesStage implements Stage {
   readonly name = "route-pages";
@@ -153,9 +157,10 @@ export class RoutePagesStage implements Stage {
   async run(state: WorkflowState, signal?: AbortSignal): Promise<void> {
     const mode = effectivePageRouterMode(state, this.cfg);
     if (mode === "off") return;
+    if (mode === "active") assertSupportedActiveMargin((state.run.pipeline.pageRouter ?? defaultPageRouterConfig).marginFloor);
 
     await runDocuments(healthyDocuments(state), state.docConcurrency, async (document) => {
-      const key = `${document.userId}/${state.run.id}/page-route/${document.id}.json`;
+      const key = `${runArtifactRoot(state.run, document.userId)}/page-route/${document.id}.json`;
       await runDocumentStage(
         state,
         document,
@@ -169,7 +174,7 @@ export class RoutePagesStage implements Stage {
           try {
             return await this.routeDocument(state, document, mode, key, signal);
           } catch (error) {
-            if (signal?.aborted) throw error;
+            if (signal?.aborted || (error instanceof Error && error.message.startsWith("page-router-incomplete:"))) throw error;
             const message = error instanceof Error ? error.message : String(error);
             console.warn(`[route-pages] document=${document.id} routing failed open: ${message}`);
             state.pendingPerformance.push({
@@ -279,6 +284,7 @@ export class RoutePagesStage implements Stage {
         mode,
       });
 
+      if (mode === "active") assertCompleteActivePlan(plan);
       await this.storage.putJson(key, plan);
       const artifactUri = this.storage.uri(key);
       this.recordDecisions(state, document, plan, pages, routerNote, timing, chainReport);

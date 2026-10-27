@@ -8,6 +8,7 @@ import type { Document } from "../models.js";
 import type { CommandRunner } from "../tools/runner.js";
 import type { ArtifactStore } from "../tools/storage.js";
 import { cleanupTempFile } from "../tools/storage.js";
+import { documentArtifactRoot } from "../lib/artifact-root.js";
 import { trustedTempDownloadPattern } from "../lib/temp-file-names.js";
 import { loadNativePdfEngine } from "../native-pdf/loader.js";
 import { logNativePdfFallback, NativePdfError } from "../native-pdf/types.js";
@@ -265,7 +266,7 @@ export class PdfRasterCache {
     if (!isPdf && pageNumbers.some((pageNumber) => pageNumber !== 1)) {
       throw new Error(`Native image documents only support page 1, received ${pageNumbers.join(",")}`);
     }
-    const root = `${args.document.userId}/${args.runId}`;
+    const root = documentArtifactRoot(args.document, args.runId);
     if (!isPdf) return await this.storeNativeImage(args.document, root, dpi, pageNumbers);
 
     const preferredFormat = this.options.format ?? readPageImageFormat();
