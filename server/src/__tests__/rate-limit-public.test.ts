@@ -14,7 +14,7 @@ vi.mock("../lib/public-errors.js", () => ({ reportPublicError }));
 
 const {
   classifyRateLimitCategory, createApiRateLimit, createMemoryRateLimitStore, createRedisRateLimitStore,
-  logRateLimitBackendAtStartup, rateLimitAddress, resetApiRateLimitBuckets,
+  logRateLimitBackendAtStartup, rateLimitAddress, rateLimitPrefixes, resetApiRateLimitBuckets,
 } = await import("../middleware/rate-limit.js");
 const { chatConcurrencyLimit, chatTurnsInFlight, resetChatConcurrency } = await import("../middleware/chat-concurrency.js");
 
@@ -135,47 +135,51 @@ describe("key spend windows", () => {
 });
 
 describe("in-memory limiter fallback", () => {
-  it("stays bounded under a flood of identities by denying new ones, never evicting live counters", async () => {
+  const v6 = (prefix48: string, i: number) => `${prefix48}:${(i >> 16).toString(16)}:${(i & 0xffff).toString(16)}::1`;
+  const ipConsume = (store: ReturnType<typeof createMemoryRateLimitStore>, ip: string, now = 1_000, limit = 5, penaltyMs = 0) =>
+    store.consume({ blockKey: `b:${ip}`, counters: [{ key: `k:${ip}`, limit, windowMs: 60_000, penaltyMs, prefixes: rateLimitPrefixes(ip) }], now, countDenied: true });
+
+  it("stays bounded under a flood of identities by evicting the least recently used counters", async () => {
     const store = createMemoryRateLimitStore({ maxEntries: 1_000 });
     const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
-    const consume = (id: string, now = 1_000, limit = 5) => store.consume({ blockKey: `b:${id}`, counters: [{ key: `k:${id}`, limit, windowMs: 60_000 }], now, countDenied: false });
-    // A hot identity that is already at its limit.
-    expect((await consume("hot", 1_000, 2)).denied).toBe(-1);
-    expect((await consume("hot", 1_000, 2)).denied).toBe(-1);
-    let refused = 0;
-    for (let i = 0; i < 3_000; i++) if ((await consume(`flood-${i}`)).full) refused++;
+    for (let i = 0; i < 3_000; i++) expect((await ipConsume(store, `198.51.${i >> 8}.${i & 255}`)).full).toBeUndefined();
     expect(store.size).toBeLessThanOrEqual(1_000);
-    expect(refused).toBe(2_001);
-    expect(warn).toHaveBeenCalledWith(expect.stringContaining("denying new identities"));
-    // The hot identity's counter survived the flood: it is still limited.
-    expect((await consume("hot", 1_000, 2)).denied).toBe(0);
-    // Rolling into the next window reuses its entry, so a known identity keeps working when full.
-    expect((await consume("hot", 61_000, 100)).full).toBeUndefined();
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining("evicting the least recently used"));
     warn.mockRestore();
   });
 
-  it("never un-jails an identity because others filled the store (reviewer repro)", async () => {
-    const store = createMemoryRateLimitStore({ maxEntries: 1_000 });
+  it("caps one IPv6 /48's share, so its flood can't lock out new visitors from elsewhere", async () => {
+    const store = createMemoryRateLimitStore({ maxEntries: 10_000 });
     const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
-    const jail = { blockKey: "b:abuser", counters: [{ key: "k:abuser", limit: 1, windowMs: 60_000, penaltyMs: 900_000 }], now: 1_000, countDenied: true };
-    await store.consume(jail);
-    expect((await store.consume(jail)).denied).toBe(0);
-    for (let i = 0; i < 1_200; i++) await store.consume({ blockKey: `b:${i}`, counters: [{ key: `k:${i}`, limit: 5, windowMs: 60_000 }], now: 2_000, countDenied: true });
-    const after = await store.consume({ ...jail, now: 3_000 });
-    expect(after.blockedMs).toBeGreaterThan(0);
-    expect(store.blockCount).toBe(1);
+    let refused = 0;
+    // 20,000 /64s inside one /48 (and many /56s): twice the whole store.
+    for (let i = 0; i < 20_000; i++) if ((await ipConsume(store, v6("2001:db8:aaaa", i))).full) refused++;
+    expect(refused).toBeGreaterThan(19_000);
+    expect(store.size).toBeLessThanOrEqual(200);
+    // Visitors from other networks still get new counters and are limited normally.
+    for (let i = 0; i < 50; i++) expect((await ipConsume(store, v6(`2001:db8:${(i + 1).toString(16)}`, 1))).full).toBeUndefined();
+    expect((await ipConsume(store, "203.0.113.50")).denied).toBe(-1);
     warn.mockRestore();
   });
 
-  it("answers a new identity at capacity with a 429, never letting it through uncounted", async () => {
+  it("never un-jails an identity under a /48 flood or a counter flood (reviewer repros)", async () => {
     const store = createMemoryRateLimitStore({ maxEntries: 1_000 });
     const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
-    for (let i = 0; i < 1_000; i++) await store.consume({ blockKey: `b:${i}`, counters: [{ key: `k:${i}`, limit: 5, windowMs: 60_000 }], now: 1_000, countDenied: true });
-    const app = actorApp(keyActor("server", "newcomer"), store);
-    const refused = await app.request("/v1/chat", from("203.0.113.99"));
-    expect(refused.status).toBe(429);
-    await expect(refused.json()).resolves.toMatchObject({ error: { code: "rate_limited", details: { policy: "limiter-capacity" } } });
+    await ipConsume(store, "198.51.100.66", 1_000, 1, 900_000);
+    expect((await ipConsume(store, "198.51.100.66", 1_000, 1, 900_000)).denied).toBe(0);
+    for (let i = 0; i < 5_000; i++) await ipConsume(store, v6("2001:db8:bbbb", i), 2_000);
+    for (let i = 0; i < 1_200; i++) await ipConsume(store, `192.0.${i >> 8}.${i & 255}`, 2_000);
+    expect((await ipConsume(store, "198.51.100.66", 3_000)).blockedMs).toBeGreaterThan(0);
     warn.mockRestore();
+  });
+
+  it("caps the jail map, dropping the soonest-expiring blocks first", async () => {
+    const store = createMemoryRateLimitStore({ maxEntries: 4_000 });
+    const jail = (id: string, penaltyMs: number) => store.consume({ blockKey: `b:${id}`, counters: [{ key: `k:${id}`, limit: 1, windowMs: 60_000, penaltyMs }], now: 1_000, countDenied: true });
+    await jail("long", 3_600_000); await jail("long", 3_600_000);
+    for (let i = 0; i < 1_500; i++) { await jail(`short-${i}`, 1_000 + i); await jail(`short-${i}`, 1_000 + i); }
+    expect(store.blockCount).toBeLessThanOrEqual(1_000);
+    expect((await jail("long", 3_600_000)).blockedMs).toBeGreaterThan(0);
   });
 
   it("falls back to the per-process limiter when Redis is unreachable, and still denies over-limit bursts", async () => {

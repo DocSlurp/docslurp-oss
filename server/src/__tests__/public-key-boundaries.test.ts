@@ -16,7 +16,7 @@ const { apiKeyAuth } = await import("../middleware/api-key-auth.js");
 const { mcpAuth } = await import("../middleware/mcp-auth.js");
 const { apiKeyAllowsWorkspace, apiKeyCanUseWorkspace } = await import("../lib/api-key-workspace-scope.js");
 const { resetCapabilityKeyForTests, sealCapabilityToken } = await import("../lib/capability-tokens.js");
-const { assertChatSessionGrant, ChatSessionForbiddenError, chatSessionTokenRefusal, sealChatSessionToken } = await import("../lib/chat-session-tokens.js");
+const { chatSessionForRequest, ChatSessionForbiddenError, chatSessionTokenRefusal, sealChatSessionToken } = await import("../lib/chat-session-tokens.js");
 
 function clientActor(keyId = "pub-1"): Extract<RequestActor, { type: "apiKey" }> {
   return { type: "apiKey", userId: "owner", apiKey: { keyId, userId: "owner", orgId: "org-1", keyType: "client", allowedDomains: ["docs.example.com"], scopes: ["search", "chat"], rateLimitRpm: null, rateLimitPpd: 0, rateLimits: [], workspaceIds: ["ws-1"] } };
@@ -74,16 +74,19 @@ describe("browser-key chat sessions are bound to a sealed grant", () => {
     sealChatSessionToken({ keyId: "pub-1", ...scope, ...overrides });
 
   it("continues a session only with the grant issued for it", () => {
-    expect(() => assertChatSessionGrant(actor, { ...scope, sessionToken: grant() })).not.toThrow();
+    expect(chatSessionForRequest(actor, { ...scope, sessionToken: grant() })).toBe(scope.sessionId);
     // A new conversation needs no grant.
-    expect(() => assertChatSessionGrant(actor, { workspaceId: "ws-1" })).not.toThrow();
+    expect(chatSessionForRequest(actor, { workspaceId: "ws-1" })).toBeUndefined();
   });
 
-  it("refuses another visitor's session id presented alone or with this visitor's own grant", () => {
-    expect(() => assertChatSessionGrant(actor, scope)).toThrow(ChatSessionForbiddenError);
+  it("starts a fresh session (never the old one) for a session id with no grant, as pre-grant widgets send", () => {
+    expect(chatSessionForRequest(actor, scope)).toBeUndefined();
+  });
+
+  it("refuses another visitor's session id presented with this visitor's own grant", () => {
     const mine = grant({ sessionId: "22222222-2222-4222-8222-222222222222" });
     expect(chatSessionTokenRefusal(mine, { keyId: "pub-1", ...scope })).toBe("scope");
-    expect(() => assertChatSessionGrant(actor, { ...scope, sessionToken: mine })).toThrow(ChatSessionForbiddenError);
+    expect(() => chatSessionForRequest(actor, { ...scope, sessionToken: mine })).toThrow(ChatSessionForbiddenError);
   });
 
   it("refuses a grant for another key or workspace", () => {
@@ -91,7 +94,7 @@ describe("browser-key chat sessions are bound to a sealed grant", () => {
     expect(chatSessionTokenRefusal(grant({ workspaceId: "ws-2" }), { keyId: "pub-1", ...scope })).toBe("scope");
   });
 
-  it("refuses tampered, foreign-family and expired grants", () => {
+  it("refuses tampered and foreign-family grants; treats expired ones as no grant", () => {
     const token = grant();
     const flipped = token.slice(0, 20) + (token[20] === "A" ? "B" : "A") + token.slice(21);
     expect(chatSessionTokenRefusal(flipped, { keyId: "pub-1", ...scope })).toBe("invalid");
@@ -101,7 +104,9 @@ describe("browser-key chat sessions are bound to a sealed grant", () => {
     expect(chatSessionTokenRefusal(capability, { keyId: "pub-1", ...scope })).toBe("invalid");
     const old = grant({ nowMs: Date.now() - 25 * 60 * 60 * 1000 });
     expect(chatSessionTokenRefusal(old, { keyId: "pub-1", ...scope })).toBe("expired");
-    expect(() => assertChatSessionGrant(actor, { ...scope, sessionToken: old })).toThrow(ChatSessionForbiddenError);
+    // An expired grant starts a fresh session; a tampered one is refused.
+    expect(chatSessionForRequest(actor, { ...scope, sessionToken: old })).toBeUndefined();
+    expect(() => chatSessionForRequest(actor, { ...scope, sessionToken: flipped })).toThrow(ChatSessionForbiddenError);
   });
 
   it("answers a refusal as 403 chat_session_forbidden", async () => {
@@ -112,7 +117,7 @@ describe("browser-key chat sessions are bound to a sealed grant", () => {
 
   it("leaves server keys and app sessions on their own user-scoped sessions", () => {
     const server = { ...actor, apiKey: { ...actor.apiKey, keyType: "server" as const } };
-    expect(() => assertChatSessionGrant(server, scope)).not.toThrow();
-    expect(() => assertChatSessionGrant({ type: "session", userId: "owner", sessionId: "s", user: { id: "owner", email: "", name: "" } }, scope)).not.toThrow();
+    expect(chatSessionForRequest(server, scope)).toBe(scope.sessionId);
+    expect(chatSessionForRequest({ type: "session", userId: "owner", sessionId: "s", user: { id: "owner", email: "", name: "" } }, scope)).toBe(scope.sessionId);
   });
 });

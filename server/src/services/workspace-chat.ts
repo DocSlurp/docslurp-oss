@@ -10,7 +10,7 @@ import { configuredOutputModerator, moderateChatAnswer, moderationAppliesTo } fr
 import { buildScopeDeclineAnswer, chatScopeFor, loadScopeSuggestions, logScopeDecline } from "./chat-scope.js";
 import { decideScopeDecline, resolveScopeDeclineThreshold, type ScopeDeclineDecision } from "../search/scope-relevance.js";
 import { composeAgentWorkspaceInstructions, composeSystemMessage, type ChatScope, type ComposeSystemMessageArgs } from "./chat-instructions.js";
-import { assertChatSessionGrant, requiresChatSessionToken, sealChatSessionToken } from "../lib/chat-session-tokens.js";
+import { chatSessionForRequest, requiresChatSessionToken, sealChatSessionToken } from "../lib/chat-session-tokens.js";
 import type { ChatToolActivity } from "./chat-mcp-tools.js";
 import {
   configureSearchFromChat,
@@ -1040,7 +1040,7 @@ async function chatWorkspaceInTurn(args: {
 }): Promise<WorkspaceChatResponse> {
   if (args.actor && args.actor.userId !== args.userId) throw new Error("Chat actor does not match user");
   // Browser-key visitors share the key owner's identity: a session id alone never continues a conversation.
-  assertChatSessionGrant(args.actor, { workspaceId: args.workspaceId, sessionId: args.sessionId, sessionToken: args.sessionToken });
+  args = { ...args, sessionId: chatSessionForRequest(args.actor, { workspaceId: args.workspaceId, sessionId: args.sessionId, sessionToken: args.sessionToken }) };
   // Enforced here too so every caller (routes, MCP, automation) honours the switch.
   if (!(await isWorkspaceChatEnabled(args.workspaceId, args.userId))) throw new WorkspaceChatDisabledError();
   // An explicit model is honoured exactly or refused (400), never silently swapped for the default.

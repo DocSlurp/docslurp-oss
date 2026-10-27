@@ -32,16 +32,22 @@ function isIpLiteral(host: string): boolean {
   return /^\d{1,3}(?:\.\d{1,3}){3}$/.test(host) || host.startsWith("[");
 }
 
-let rules: { normal: Set<string>; wildcard: Set<string>; exception: Set<string> } | null = null;
+let rules: { normal: Set<string>; wildcard: Set<string>; exception: Set<string>; ancestors: Set<string> } | null = null;
 
 /** The vendored Public Suffix List (lib/public-suffix-data.ts, refreshed by scripts/update-public-suffix-list.mjs). */
 function suffixRules() {
   if (rules) return rules;
-  const parsed = { normal: new Set<string>(), wildcard: new Set<string>(), exception: new Set<string>() };
+  const parsed = { normal: new Set<string>(), wildcard: new Set<string>(), exception: new Set<string>(), ancestors: new Set<string>() };
   for (const rule of PUBLIC_SUFFIX_RULES.split("\n")) {
     if (rule.startsWith("!")) parsed.exception.add(rule.slice(1));
     else if (rule.startsWith("*.")) parsed.wildcard.add(rule.slice(2));
     else parsed.normal.add(rule);
+    // Every proper parent of a rule's domain sits above a public suffix
+    // (amazonaws.com above s3.us-east-1.amazonaws.com, windows.net above blob.core.windows.net).
+    const labels = rule.replace(/^[!*]\.?/, "").split(".");
+    for (let i = 1; i < labels.length; i++) parsed.ancestors.add(labels.slice(i).join("."));
+    // A wildcard rule (*.compute.amazonaws.com) makes every child of its base a suffix.
+    if (rule.startsWith("*.")) parsed.ancestors.add(labels.join("."));
   }
   rules = parsed;
   return parsed;
@@ -64,6 +70,19 @@ export function publicSuffixOf(host: string): string {
     if (i < labels.length - 1 && wildcard.has(parent)) best = candidate;
   }
   return best;
+}
+
+/**
+ * True when a `*.host` wildcard would cover sites run by unrelated parties: the
+ * host is itself a public suffix, or sits above one (any PSL rule, ICANN or
+ * private, lies beneath it). `*.amazonaws.com`, `*.compute.amazonaws.com`,
+ * `*.windows.net` and `*.co.uk` all qualify; `*.example.com` does not.
+ */
+export function wildcardCoversPublicSuffix(host: string): boolean {
+  const value = host.toLowerCase().replace(/\.$/, "");
+  if (isPublicSuffixHost(value)) return true;
+  if (LOCAL_HOSTS.has(value) || isIpLiteral(value)) return false;
+  return suffixRules().ancestors.has(value);
 }
 
 /** True when the host is a public suffix (or a single label), so it names no single owner. */
@@ -116,11 +135,14 @@ export function formatAllowedOriginEntry(entry: AllowedOriginEntry): string {
   return `${entry.scheme ? `${entry.scheme}://` : ""}${entry.wildcard ? "*." : ""}${entry.host}${entry.port ? `:${entry.port}` : ""}`;
 }
 
-/** Validates and canonicalizes an entry for storage; refuses public suffixes. */
+/** Validates and canonicalizes an entry for storage; refuses public suffixes and wildcards over them. */
 export function normalizeAllowedOriginEntry(value: string): string {
   const entry = parseAllowedOriginEntry(value);
   if (isPublicSuffixHost(entry.host)) {
     throw new AllowedOriginError(`"${value}" is a shared public suffix: every site on it would be allowed. Enter your own domain (for example docs.${entry.host === "com" ? "example.com" : `yourname.${entry.host}`}).`);
+  }
+  if (entry.wildcard && wildcardCoversPublicSuffix(entry.host)) {
+    throw new AllowedOriginError(`"${value}" would cover sites run by other people (shared hosting under ${entry.host}). Enter your own subdomain instead, for example yourapp.${entry.host} without "*.".`);
   }
   return formatAllowedOriginEntry(entry);
 }
@@ -156,6 +178,7 @@ export function originMatchesAllowlist(requestValue: string | null | undefined, 
       return false;
     }
     if (isPublicSuffixHost(entry.host)) return false;
+    if (entry.wildcard && wildcardCoversPublicSuffix(entry.host)) return false;
     if (entry.scheme && entry.scheme !== scheme) return false;
     if (entry.port && entry.port !== port) return false;
     return entry.wildcard ? host.endsWith(`.${entry.host}`) : host === entry.host;

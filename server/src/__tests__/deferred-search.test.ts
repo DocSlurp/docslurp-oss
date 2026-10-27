@@ -487,7 +487,7 @@ describe("GET /chat/stream deferred events", () => {
       sink?.({ type: "page-ready", documentId: "d1", pages: [4, 5] });
       return { id: "m1", sessionId: "chat-1", searchSessionId: "s-1", answer: "ok" };
     });
-    const response = await buildApp().request("/search/chat/stream?q=hello&workspace=ws-1");
+    const response = await buildApp().request("/search/chat/stream?q=hello&workspace=ws-1", { headers: { "Sec-Fetch-Site": "same-origin" } });
     expect(response.status).toBe(200);
     const text = await response.text();
     const events = [...text.matchAll(/^event: (.+)$/gm)].map((m) => m[1]);
