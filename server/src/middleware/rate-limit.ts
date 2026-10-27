@@ -975,3 +975,35 @@ export const apiActorRateLimit: MiddlewareHandler = async (c, next) => {
 };
 
 export const apiRateLimit = apiIpRateLimit;
+
+/**
+ * A fixed-window limit for one feature and subject (for example
+ * `chat-instructions-improve`, `user:<id>`), outside the per-request category
+ * limits. Returns the seconds to wait when the limit is reached, else null.
+ * A store failure refuses (fails closed): these limits guard paid calls.
+ */
+export async function consumeFeatureRateLimit(args: {
+  feature: string;
+  subject: string;
+  limit: number;
+  windowMs: number;
+  store?: RateLimitStore;
+  now?: number;
+}): Promise<number | null> {
+  if (!rateLimitEnabled() || args.limit <= 0) return null;
+  const now = args.now ?? Date.now();
+  const base = `${process.env.API_RATE_LIMIT_KEY_PREFIX ?? "api"}:feature:${safeIdentityPart(args.feature)}:{${safeIdentityPart(args.subject)}}`;
+  try {
+    const result = await (args.store ?? getDefaultStore()).consume({
+      blockKey: `${base}:block`,
+      counters: [{ key: `${base}:${args.windowMs}`, limit: args.limit, windowMs: args.windowMs }],
+      now,
+      countDenied: false,
+    });
+    if (result.blockedMs > 0) return Math.max(1, Math.ceil(result.blockedMs / 1000));
+    if (result.denied < 0) return null;
+  } catch (error) {
+    console.error("[rate-limit] feature limit unavailable:", error instanceof Error ? error.message : String(error));
+  }
+  return Math.max(1, Math.ceil((args.windowMs - (now % args.windowMs)) / 1000));
+}

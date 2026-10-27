@@ -29,6 +29,8 @@ export function classifyRateLimitCategory(method: string, path: string): RateLim
     || normalizedPath === "/v1/chat"
     || normalizedPath === "/v1/chat/completions"
     || /^\/v1\/workspaces\/[^/]+\/chat(?:\/|$)/.test(normalizedPath)
+    // Improve calls a model: it shares the AI chat budget.
+    || /^\/v1\/workspaces\/[^/]+\/chat-instructions\/improve$/.test(normalizedPath)
   ) {
     return "chat-ai";
   }

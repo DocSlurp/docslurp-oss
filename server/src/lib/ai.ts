@@ -153,6 +153,19 @@ function resolveOpenRouterProviderOptions(model: string) {
     : undefined;
 }
 
+/** Sets the request body's `provider` preferences before routing merges its own (the caller's win). */
+export function withProviderPreferences(baseFetch: typeof fetch, preferences: Record<string, unknown> | undefined): typeof fetch {
+  if (!preferences) return baseFetch;
+  return async (input, init) => {
+    if (typeof init?.body !== "string") return baseFetch(input, init);
+    let body: Record<string, unknown>;
+    try { body = JSON.parse(init.body) as Record<string, unknown>; } catch { return baseFetch(input, init); }
+    if (!body || typeof body !== "object" || Array.isArray(body)) return baseFetch(input, init);
+    const own = body.provider && typeof body.provider === "object" ? body.provider as Record<string, unknown> : {};
+    return baseFetch(input, { ...init, body: JSON.stringify({ ...body, provider: { ...own, ...preferences } }) });
+  };
+}
+
 export async function generateOpenRouterText(args: {
   apiKey: string;
   operation?: string;
@@ -165,6 +178,12 @@ export async function generateOpenRouterText(args: {
   observability?: AiObservabilityContext;
   /** Workspace attribution for strict-privacy audit rows on private endpoint calls. */
   auditScope?: PrivateCallAuditScope;
+  /**
+   * OpenRouter `provider` preferences for this call (for example an `only`
+   * allowlist of hosts). They win over the default routing, and the
+   * organization's China-provider restriction is still added on top.
+   */
+  providerPreferences?: Record<string, unknown>;
 }): Promise<{ text: string; usage: TextGenerationUsage }> {
   // `llm://private/<alias>/<model>` routes go to the operator-registered endpoint.
   if (isPrivateModelUri(args.model)) {
@@ -188,7 +207,7 @@ export async function generateOpenRouterText(args: {
     async () => {
       const accounting = createOpenRouterUsageCapture();
       const provider = createOpenAI({
-        fetch: instrumentFetch("openrouter", "chat", createOpenRouterReasoningFetch(createOpenRouterRoutingFetch(accounting.fetch))),
+        fetch: instrumentFetch("openrouter", "chat", createOpenRouterReasoningFetch(withProviderPreferences(createOpenRouterRoutingFetch(accounting.fetch), args.providerPreferences))),
         apiKey: args.apiKey,
         baseURL: OPENROUTER_BASE_URL,
       });
