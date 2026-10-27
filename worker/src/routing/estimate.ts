@@ -1,8 +1,8 @@
 import {
   CREDIT_RATE_CARD,
   creditsToDollars,
-  slotCreditsPerHour,
   slotInfraUsdPerHour,
+  slotProvisionedListUsdPerHour,
   type Assignment,
   type AssignmentRole,
   type AssignmentScope,
@@ -30,7 +30,8 @@ import {
 // MARGIN MODEL (billing.ts)
 //   DocSlurp bills credits at list rate (CREDIT_RATE_CARD): AI provider cost is billed
 //   at cost * (1 + aiMarkupPercent/100); CPU/memory/GPU compute is billed per second
-//   at the card rate (a worker slot = slotCreditsPerHour). So for every priced unit we
+//   at the card rate (a worker slot = slotProvisionedListUsdPerHour, the card rate for the share of the host
+//   one slot holds, so cost and billed price the same resources). So for every priced unit we
 //   know both the *cost* we incur and the *billed* amount (`billedUsd`). The margin of
 //   a chunk is 1 - totalCost / totalBilled; budget.marginFloor is the minimum allowed.
 //   Hosted AI is only marked up 20% (16.7% margin), so a high floor pushes the
@@ -86,7 +87,7 @@ export const ESTIMATE_ASSUMPTIONS = {
 
 const AI_MULTIPLIER = 1 + CREDIT_RATE_CARD.aiMarkupPercent / 100;
 const slotCostUsdPerSec = () => slotInfraUsdPerHour() / 3600;
-const slotBilledUsdPerSec = () => creditsToDollars(slotCreditsPerHour()) / 3600;
+const slotBilledUsdPerSec = () => slotProvisionedListUsdPerHour() / 3600;
 const gpuBilledUsdPerSec = () =>
   creditsToDollars(CREDIT_RATE_CARD.gpuStandardHour) / 3600;
 
