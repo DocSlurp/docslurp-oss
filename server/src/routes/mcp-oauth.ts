@@ -3,6 +3,7 @@ import { appDbPool } from "../lib/auth.js";
 import { resolveBetterAuthSessionActor } from "../lib/request-actor.js";
 import { getConsentRequest, MCP_SCOPES, mcpOrigin, mcpResource, apiResource, allowedResources, createGrant, validRedirect, redirectMatches, parseScopes, transaction, oauthHash, pkceChallenge, issueTokens, secret, randomUUID, cleanupExpiredOAuthRequests, logTokenRejection, REFRESH_REUSE_LEEWAY_SECONDS, DEVICE_CODE_GRANT_TYPE, DEVICE_CODE_TTL_SECONDS, DEVICE_POLL_INTERVAL_SECONDS, generateUserCode, OAUTH_TOKEN_PREFIX } from "../services/mcp-oauth.js";
 import { deviceVerificationRoutes } from "./mcp-oauth-device.js";
+import { requestIp } from "../lib/request-context.js";
 export const mcpOAuthMetadataRoutes = new Hono();
 const resourceMetadata = (url: string) => ({ resource: mcpResource(url), authorization_servers: [mcpOrigin(url)], scopes_supported: MCP_SCOPES, bearer_methods_supported: ["header"], resource_name: "DocSlurp MCP" });
 for (const path of ["/.well-known/oauth-protected-resource", "/.well-known/oauth-protected-resource/v1/mcp"])
@@ -267,17 +268,19 @@ mcpOAuthRoutes.post("/device_authorization", async (c) => {
   for (let attempt = 0; attempt < 5; attempt++) {
     const userCode = generateUserCode();
     try {
-      await appDbPool.query(`INSERT INTO mcp_oauth_device_codes(device_code_hash,user_code_hash,client_id,resource,scopes,interval_seconds,expires_at)
-        VALUES($1,$2,$3,$4,$5::jsonb,$6,now()+$7::int*interval '1 second')`,
-        [oauthHash(deviceCode), oauthHash(userCode.replace("-", "")), client.id, resource, JSON.stringify(scopes), DEVICE_POLL_INTERVAL_SECONDS, DEVICE_CODE_TTL_SECONDS]);
+      await appDbPool.query(`INSERT INTO mcp_oauth_device_codes(device_code_hash,user_code_hash,client_id,resource,scopes,interval_seconds,expires_at,requester_ip)
+        VALUES($1,$2,$3,$4,$5::jsonb,$6,now()+$7::int*interval '1 second',$8)`,
+        [oauthHash(deviceCode), oauthHash(userCode.replace("-", "")), client.id, resource, JSON.stringify(scopes), DEVICE_POLL_INTERVAL_SECONDS, DEVICE_CODE_TTL_SECONDS, requestIp(c)]);
     } catch (error) {
       if ((error as { code?: string }).code === "23505") continue; // user code collision: draw again
       throw error;
     }
-    const verification = `${mcpOrigin(c.req.url)}/oauth/mcp/device`;
+    // No verification_uri_complete (RFC 8628 §3.3.1 makes it optional): a link
+    // with the code filled in is exactly what a phisher would send a victim.
+    // The user must type the code their own terminal shows.
     return c.json({
       device_code: deviceCode, user_code: userCode,
-      verification_uri: verification, verification_uri_complete: `${verification}?user_code=${encodeURIComponent(userCode)}`,
+      verification_uri: `${mcpOrigin(c.req.url)}/oauth/mcp/device`,
       expires_in: DEVICE_CODE_TTL_SECONDS, interval: DEVICE_POLL_INTERVAL_SECONDS,
     });
   }

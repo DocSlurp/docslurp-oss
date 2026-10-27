@@ -3,7 +3,7 @@ import type { PoolClient } from "pg";
 import { appDbPool } from "../lib/auth.js";
 import { parseApiKeyRateLimits, type ValidatedKey } from "./api-keys.js";
 
-export const MCP_SCOPES = ["search", "chat", "read", "ingest"] as const;
+export const MCP_SCOPES = ["search", "chat", "read", "ingest", "web"] as const;
 export const oauthHash = (value: string) => createHash("sha256").update(value).digest("hex");
 export const pkceChallenge = (value: string) => createHash("sha256").update(value).digest("base64url");
 const secret = (prefix: string) => `${prefix}_${randomBytes(32).toString("base64url")}`;
@@ -35,12 +35,15 @@ export const OAUTH_TOKEN_PREFIX = { mcp: "dsmcp", api: "dscli" } as const;
  * - chat   -> chat (generated answers on the owner's credits)
  * - read   -> artifacts (document text, pages, files, runs and exports)
  * - ingest -> ingest (uploads, URL ingest, reprocess, document retag/delete)
+ * - web    -> web (paid web search, fetch, map, crawl). REST-audience tokens
+ *   need it explicitly; `search` alone does not unlock web tools for them.
  */
 export const OAUTH_TO_API_KEY_SCOPES: Readonly<Record<typeof MCP_SCOPES[number], readonly string[]>> = {
   search: ["search"],
   chat: ["chat"],
   read: ["artifacts"],
   ingest: ["ingest"],
+  web: ["web"],
 };
 
 export function oauthScopesToApiKeyScopes(scopes: readonly string[]): string[] {
@@ -145,8 +148,10 @@ export async function issueTokens(db: PoolClient, grantId: string, audience: key
 
 export async function validateMcpToken(raw: string, resource: string): Promise<ValidatedKey | null> {
   const { rows } = await appDbPool.query(`
-    SELECT g.*, k.rate_limits AS key_rate_limits, k.workspace_ids AS key_workspace_ids FROM mcp_oauth_tokens t
+    SELECT g.*, t.expires_at AS token_expires_at, c.name AS client_name,
+           k.rate_limits AS key_rate_limits, k.workspace_ids AS key_workspace_ids FROM mcp_oauth_tokens t
     JOIN mcp_oauth_grants g ON g.id=t.grant_id
+    JOIN mcp_oauth_clients c ON c.id=g.client_id
     JOIN org_memberships m ON m.org_id=g.org_id AND m.user_id=g.user_id
     JOIN api_keys k ON k.id=g.api_key_id AND k.user_id=g.user_id AND k.org_id=g.org_id
     WHERE t.hash=$1 AND t.kind='access' AND t.expires_at>now()
@@ -160,6 +165,11 @@ export async function validateMcpToken(raw: string, resource: string): Promise<V
     keyType: "server", allowedDomains: [], scopes: row.scopes,
     rateLimitRpm: null, rateLimitPpd: 10000, rateLimits: parseApiKeyRateLimits(row.key_rate_limits),
     workspaceIds: Array.isArray(row.key_workspace_ids) ? row.key_workspace_ids : [],
+    // Delegated tokens are never platform admins and never app sessions (see request-actor.ts).
+    oauth: {
+      grantId: row.id, clientId: row.client_id, clientName: row.client_name, resource, audience: "mcp",
+      grantedScopes: Array.isArray(row.scopes) ? row.scopes : [], expiresAt: new Date(row.token_expires_at).toISOString(),
+    },
   };
 }
 
@@ -194,7 +204,7 @@ export async function validateOAuthApiToken(raw: string): Promise<ValidatedKey |
     rateLimitRpm: null, rateLimitPpd: 10000, rateLimits: parseApiKeyRateLimits(row.key_rate_limits),
     workspaceIds: Array.isArray(row.key_workspace_ids) ? row.key_workspace_ids : [],
     oauth: {
-      grantId: row.id, clientId: row.client_id, clientName: row.client_name, resource,
+      grantId: row.id, clientId: row.client_id, clientName: row.client_name, resource, audience: "api",
       grantedScopes, expiresAt: new Date(row.token_expires_at).toISOString(),
     },
   };
@@ -255,17 +265,46 @@ export function normalizeUserCode(value: unknown): string | null {
 
 export const formatUserCode = (normalized: string) => `${normalized.slice(0, 4)}-${normalized.slice(4)}`;
 
-/** True when the user has used up their failed user-code entries for the window. */
-export async function deviceAttemptsExhausted(db: Pick<PoolClient, "query">, userId: string): Promise<boolean> {
-  const { rows } = await db.query(
-    `SELECT count(*)::int AS n FROM mcp_oauth_device_attempts WHERE user_id=$1 AND created_at > now() - $2::int * interval '1 minute'`,
-    [userId, DEVICE_ATTEMPT_WINDOW_MINUTES],
-  );
-  return (rows[0]?.n ?? 0) >= DEVICE_MAX_FAILED_ATTEMPTS;
+/** Wrong-code budgets per window. Any one exhausted refuses every lookup, approval and denial. */
+export const DEVICE_MAX_FAILED_ATTEMPTS_PER_IP = 20;
+export const DEVICE_MAX_FAILED_ATTEMPTS_GLOBAL = 500;
+
+/**
+ * True when this user, this IP or the deployment as a whole has used up its
+ * failed user-code entries for the window. Call inside the transaction that
+ * also records a miss, after {@link lockDeviceAttempts}, so concurrent guesses
+ * by one user cannot all pass the check before any is counted.
+ */
+export async function deviceAttemptsExhausted(db: Pick<PoolClient, "query">, userId: string, ip: string | null = null): Promise<boolean> {
+  const { rows } = await db.query(`
+    SELECT count(*) FILTER (WHERE user_id=$1)::int AS by_user,
+           count(*) FILTER (WHERE $2::text IS NOT NULL AND ip=$2)::int AS by_ip,
+           count(*)::int AS total
+    FROM mcp_oauth_device_attempts WHERE created_at > now() - $3::int * interval '1 minute'
+  `, [userId, ip, DEVICE_ATTEMPT_WINDOW_MINUTES]);
+  const row = rows[0] ?? { by_user: 0, by_ip: 0, total: 0 };
+  return row.by_user >= DEVICE_MAX_FAILED_ATTEMPTS || row.by_ip >= DEVICE_MAX_FAILED_ATTEMPTS_PER_IP || row.total >= DEVICE_MAX_FAILED_ATTEMPTS_GLOBAL;
 }
 
-export async function recordDeviceAttemptFailure(db: Pick<PoolClient, "query">, userId: string): Promise<void> {
-  await db.query("INSERT INTO mcp_oauth_device_attempts(user_id) VALUES($1)", [userId]);
+/** Serializes one user's device-code checks (transaction-scoped advisory lock). */
+export async function lockDeviceAttempts(db: Pick<PoolClient, "query">, userId: string): Promise<void> {
+  await db.query("SELECT pg_advisory_xact_lock(hashtext('mcp_oauth_device_attempts:' || $1))", [userId]);
+}
+
+export async function recordDeviceAttemptFailure(db: Pick<PoolClient, "query">, userId: string, ip: string | null = null): Promise<void> {
+  await db.query("INSERT INTO mcp_oauth_device_attempts(user_id, ip) VALUES($1, $2)", [userId, ip]);
+}
+
+/**
+ * Scopes a device approval grants without an explicit opt-in on the page.
+ * A device request is started by whoever holds the terminal, not by the
+ * approving user, so `chat` and `ingest` (credits, uploads, deletes) are
+ * granted only when the user ticks them.
+ */
+export const DEVICE_BASE_SCOPES = ["search", "read"] as const;
+
+export function deviceGrantScopes(requested: readonly string[], optedIn: readonly string[]): string[] {
+  return requested.filter((scope) => (DEVICE_BASE_SCOPES as readonly string[]).includes(scope) || optedIn.includes(scope));
 }
 
 /** A pending device request by user code: unexpired, undecided and unconsumed. */

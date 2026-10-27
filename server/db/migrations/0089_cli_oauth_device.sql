@@ -25,16 +25,23 @@ CREATE TABLE IF NOT EXISTS mcp_oauth_device_codes (
   approved_at timestamptz,
   denied_at timestamptz,
   consumed_at timestamptz,
+  -- Edge-derived address of the device that started the request, shown on the approval page.
+  requester_ip text,
   created_at timestamptz NOT NULL DEFAULT now()
 );
 --> statement-breakpoint
 CREATE INDEX IF NOT EXISTS mcp_oauth_device_codes_expiry_idx ON mcp_oauth_device_codes(expires_at);
 --> statement-breakpoint
--- Failed user-code entries per signed-in user, for brute-force lockout.
+-- Failed user-code entries, for brute-force lockout per user, per IP and overall.
 CREATE TABLE IF NOT EXISTS mcp_oauth_device_attempts (
   id bigserial PRIMARY KEY,
   user_id text NOT NULL REFERENCES "user"(id) ON DELETE CASCADE,
+  ip text,
   created_at timestamptz NOT NULL DEFAULT now()
 );
 --> statement-breakpoint
 CREATE INDEX IF NOT EXISTS mcp_oauth_device_attempts_user_idx ON mcp_oauth_device_attempts(user_id, created_at);
+--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS mcp_oauth_device_attempts_ip_idx ON mcp_oauth_device_attempts(ip, created_at);
+--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS mcp_oauth_device_attempts_created_idx ON mcp_oauth_device_attempts(created_at);
