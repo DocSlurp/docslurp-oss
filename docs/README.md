@@ -9,6 +9,7 @@ This index lists the documentation published in the public source tree. The file
 | HTTP API and SDK reference | api-sdk.md |
 | Search API and drop-in compatibility clients | search-api.md |
 | MCP server | mcp.md |
+| Passkeys, two-factor authentication and the org MFA policy | passkeys-and-mfa.md |
 | Chat voice input | chat-voice.md |
 | Model configuration and private endpoints | model-configuration.md |
 | Document and workspace summaries, costs and limits | document-summaries.md |
