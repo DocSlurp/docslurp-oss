@@ -1,5 +1,5 @@
 import { errorContext } from "./error-context.js";
-import { withObservation, addTraceMetadata, withHttpSpan, exportsOtlpLogs } from "@docslurp/shared/observability";
+import { withObservation, addTraceMetadata, withHttpSpan, exportsOtlpLogs, activeTraceparent } from "@docslurp/shared/observability";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { randomUUID } from "node:crypto";
 import { routePath } from "hono/route";
@@ -293,6 +293,11 @@ export const requestContextMiddleware: MiddlewareHandler = async (c, next) => {
     c.set("requestId", requestId);
     c.set("requestStartedAt", startedAt);
     c.header(REQUEST_ID_HEADER, requestId);
+    // Every response names its trace (W3C traceparent; the trace id is the
+    // second field), so a client can quote it in a bug report and support can
+    // open the trace. Already listed in the CORS expose-headers.
+    const traceparent = activeTraceparent();
+    if (traceparent) c.header("traceparent", traceparent);
 
     let thrownError: unknown = null;
 
