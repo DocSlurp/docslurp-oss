@@ -21,7 +21,7 @@ import {
   resolveEmbeddingModel,
 } from "../embeddings/resolver.js";
 import { indexableDocuments } from "../pipeline/pii-gate.js";
-import { runArtifactRoot } from "../tools/storage.js";
+import { runArtifactRoot } from "../lib/artifact-root.js";
 
 export class PropositionIndexStage implements Stage {
   readonly name = "proposition-index";

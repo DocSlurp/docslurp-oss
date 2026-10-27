@@ -28,7 +28,8 @@ import {
 } from "../pipeline/checkpoints.js";
 import { healthyDocuments } from "../pipeline/document-health.js";
 import type { CommandRunner } from "../tools/runner.js";
-import { type ArtifactStore, cleanupTempFile, keyFromStorageUri, runArtifactRoot } from "../tools/storage.js";
+import { type ArtifactStore, cleanupTempFile, keyFromStorageUri } from "../tools/storage.js";
+import { runArtifactRoot } from "../lib/artifact-root.js";
 import { executeVisionRuntime, rejectedVisionUsageInput, visionCall } from "../tools/vision-runtime.js";
 import { findVisionOutputRejected } from "../tools/vision-stream.js";
 import { allowHostedCall } from "../lib/privacy-guard.js";

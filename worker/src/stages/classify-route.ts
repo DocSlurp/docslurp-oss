@@ -16,7 +16,8 @@ import {
 import type { Stage } from "../pipeline/pipeline.js";
 import { runDocumentStage, runDocuments, } from "../pipeline/checkpoints.js";
 import { healthyDocuments } from "../pipeline/document-health.js";
-import { type ArtifactStore, keyFromStorageUri, runArtifactRoot } from "../tools/storage.js";
+import { type ArtifactStore, keyFromStorageUri } from "../tools/storage.js";
+import { runArtifactRoot } from "../lib/artifact-root.js";
 import { SPARSE_PAGE_WORDS, type PageImageEvidence } from "../lib/page-image-evidence.js";
 
 // Lightweight document-type classification using filename + extracted/canonical text heuristics.

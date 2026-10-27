@@ -7,7 +7,8 @@ import {
 } from "../pipeline/checkpoints.js";
 import { healthyDocuments } from "../pipeline/document-health.js";
 import type { CommandRunner } from "../tools/runner.js";
-import { type ArtifactStore, runArtifactRoot } from "../tools/storage.js";
+import { type ArtifactStore } from "../tools/storage.js";
+import { runArtifactRoot } from "../lib/artifact-root.js";
 import { PdfSourceCache } from "../pipeline/pdf-asset-cache.js";
 import { readFile } from "node:fs/promises";
 import { detectHtmlEmbeds } from "../routing/html-embeds.js";

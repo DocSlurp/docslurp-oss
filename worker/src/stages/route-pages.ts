@@ -65,7 +65,8 @@ import {
   type RuntimeCatalog,
 } from "../routing/runtime.js";
 import type { CommandRunner } from "../tools/runner.js";
-import { type ArtifactStore, keyFromStorageUri, runArtifactRoot } from "../tools/storage.js";
+import { type ArtifactStore, keyFromStorageUri } from "../tools/storage.js";
+import { runArtifactRoot } from "../lib/artifact-root.js";
 
 export const PAGE_ROUTE_DECISION_METRIC = "page-route-decision";
 export const PAGE_ROUTE_CHUNK_ESTIMATE_METRIC = "page-route-chunk-estimate";

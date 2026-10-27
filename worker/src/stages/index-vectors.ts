@@ -17,7 +17,8 @@ import { backendRuntime, resolveVectorBackends } from "../embeddings/resolver.js
 import type { EmbeddingArtifact, VectorBackendRecord } from "./embedding-runtime.js";
 import { maxInt } from "./utils.js";
 import { workspaceVectorLocation } from "./lancedb-location.js";
-import { keyFromStorageUri, runArtifactRoot } from "../tools/storage.js";
+import { keyFromStorageUri } from "../tools/storage.js";
+import { runArtifactRoot } from "../lib/artifact-root.js";
 import { chunkFirstPage, deleteLanceDbRecords, planPageWindows, writeLanceDbDocumentInWindows } from "./lancedb-writer.js";
 import { lanceDbMaintenanceSettings, type LanceDbMaintenanceSettings } from "./lancedb-maintenance.js";
 import { LanceDbWriteQueue, type VectorWriteOutcome } from "./lancedb-write-queue.js";

@@ -11,7 +11,7 @@ import type { MediaConfig } from "./config.js";
 import type { MediaVisionProvider, VideoFrame, VisionResult } from "./vision.js";
 import { selectVideoFrames, packVideoFrames, type VideoCandidate, type VideoPolicy } from "./video-policy.js";
 import { emitTelemetryLog } from "./telemetry.js";
-import { runArtifactRoot } from "../tools/storage.js";
+import { runArtifactRoot } from "../lib/artifact-root.js";
 
 export async function describeVideoChunk(args: { state: WorkflowState; scope: MediaScope; storage: ArtifactStore; journal: MediaJournal;
   provider: MediaVisionProvider; frames: VideoFrame[]; policy: VideoPolicy; config: MediaConfig; signal?: AbortSignal }): Promise<VisionResult> {

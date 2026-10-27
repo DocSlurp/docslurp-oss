@@ -7,7 +7,7 @@ import type { CommandRunner } from "../tools/runner.js";
 import type { ArtifactStore } from "../tools/storage.js";
 import { extractTextForEmbedding, estimateTokens } from "./embedding-runtime.js";
 import { indexableDocuments } from "../pipeline/pii-gate.js";
-import { runArtifactRoot } from "../tools/storage.js";
+import { runArtifactRoot } from "../lib/artifact-root.js";
 
 export function buildPageIndexSearchMetadata(pageCount: number): {
   mode: "page-index";

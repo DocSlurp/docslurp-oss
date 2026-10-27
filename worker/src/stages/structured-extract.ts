@@ -24,7 +24,7 @@ import {
   validateStructuredResult,
 } from "@docslurp/shared";
 import { indexableDocuments } from "../pipeline/pii-gate.js";
-import { runArtifactRoot } from "../tools/storage.js";
+import { runArtifactRoot } from "../lib/artifact-root.js";
 
 function toError(error: unknown): Error {
   return error instanceof Error ? error : new Error(String(error));

@@ -9,7 +9,8 @@ import { adaptiveEmbeddingBatchSizeForStage } from "../pipeline/adaptive-tuning.
 import { checkDedup, completeDocumentPages, emitDocumentPageProgress, hashContent, isCostCapExceeded, registerHash, runDocumentStage, runDocuments, runSpentCents } from "../pipeline/checkpoints.js";
 import type { CommandRunner } from "../tools/runner.js";
 import type { ArtifactStore } from "../tools/storage.js";
-import { keyFromStorageUri, runArtifactRoot } from "../tools/storage.js";
+import { keyFromStorageUri } from "../tools/storage.js";
+import { runArtifactRoot } from "../lib/artifact-root.js";
 import { deleteLanceDbRecords } from "./lancedb-writer.js";
 import { workspaceVectorLocation } from "./lancedb-location.js";
 import { detectLanguage, resolveEmbeddingModel, resolveVectorBackends } from "../embeddings/resolver.js";

@@ -21,7 +21,8 @@ import {
   type ExtractionContract,
   type ExtractionArtifactRef,
 } from "@docslurp/shared";
-import { readJsonFile, documentArtifactRoot, runArtifactRoot } from "../tools/storage.js";
+import { readJsonFile } from "../tools/storage.js";
+import { documentArtifactRoot, runArtifactRoot } from "../lib/artifact-root.js";
 import { pushPerfMetric } from "../lib/perf-context.js";
 import { buildExtractionContract } from "../lib/extraction-contract.js";
 

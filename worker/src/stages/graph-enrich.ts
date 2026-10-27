@@ -8,7 +8,8 @@ import {
 import type { Config } from "../config.js";
 import type { Stage, WorkflowState } from "../pipeline/pipeline.js";
 import type { CommandRunner } from "../tools/runner.js";
-import { type ArtifactStore, keyFromStorageUri, runArtifactRoot } from "../tools/storage.js";
+import { type ArtifactStore, keyFromStorageUri } from "../tools/storage.js";
+import { runArtifactRoot } from "../lib/artifact-root.js";
 import type { CommunityRefreshResult, CommunitySummaryContext } from "../graph/communities.js";
 import { extractDocumentGraph, type GraphChunk } from "../graph/extract.js";
 import type { ReplaceDocumentGraphInput } from "../graph/graph-store.js";

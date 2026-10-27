@@ -3,7 +3,7 @@ import type { Stage } from "../pipeline/pipeline.js";
 import { runDocumentStage } from "../pipeline/checkpoints.js";
 import { healthyDocuments } from "../pipeline/document-health.js";
 import type { ArtifactStore } from "../tools/storage.js";
-import { runArtifactRoot } from "../tools/storage.js";
+import { runArtifactRoot } from "../lib/artifact-root.js";
 
 type NormalizedFormat =
   | "pdf"

@@ -6,7 +6,7 @@ import { resolveNativePdfEngine } from "../native-pdf/engine.js";
 import type { CommandRunner, CommandPlan } from "../tools/runner.js";
 import type { ArtifactStore } from "../tools/storage.js";
 import { maxInt } from "./utils.js";
-import { runArtifactRoot } from "../tools/storage.js";
+import { runArtifactRoot } from "../lib/artifact-root.js";
 
 export class PdfToolingStage implements Stage {
   readonly name = "pdf-tooling";

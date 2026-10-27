@@ -11,7 +11,8 @@ import { runDocumentStage, runDocuments, } from "../pipeline/checkpoints.js";
 import { healthyDocuments } from "../pipeline/document-health.js";
 import { isPiiBlockedDocument } from "../pipeline/pii-gate.js";
 import type { CommandRunner } from "../tools/runner.js";
-import { type ArtifactStore, keyFromStorageUri, runArtifactRoot } from "../tools/storage.js";
+import { type ArtifactStore, keyFromStorageUri } from "../tools/storage.js";
+import { runArtifactRoot } from "../lib/artifact-root.js";
 import {
   PII_BLOCKED_DOCUMENT_STATUS,
   type PiiMatch,

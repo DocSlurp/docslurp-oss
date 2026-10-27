@@ -7,10 +7,11 @@ import { runDocumentStage, runDocuments, } from "../pipeline/checkpoints.js";
 import { healthyDocuments } from "../pipeline/document-health.js";
 import {
   type ArtifactStore,
-  buildArtifactStorageKey, runArtifactRoot,
+  buildArtifactStorageKey,
   cleanupTempFile,
   sourceStorageKey
 } from "../tools/storage.js";
+import { runArtifactRoot } from "../lib/artifact-root.js";
 import type { CommandRunner } from "../tools/runner.js";
 import { trustedTempDownloadPattern } from "../lib/temp-file-names.js";
 

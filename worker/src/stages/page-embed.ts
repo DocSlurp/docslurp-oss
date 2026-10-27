@@ -13,7 +13,7 @@ import type { PdfRasterCache } from "../pipeline/pdf-asset-cache.js";
 import type { Stage, WorkflowState } from "../pipeline/pipeline.js";
 import type { PipelineUsageEventLedger } from "../pipeline/usage-ledger.js";
 import type { ArtifactStore } from "../tools/storage.js";
-import { runArtifactRoot } from "../tools/storage.js";
+import { runArtifactRoot } from "../lib/artifact-root.js";
 
 type Sql = postgres.Sql<Record<string, unknown>>;
 

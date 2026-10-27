@@ -23,7 +23,7 @@ import {
 import { indexableDocuments } from "../pipeline/pii-gate.js";
 import { selectSummaryInput } from "./summary-input.js";
 import { readSummarySource } from "./summary-source.js";
-import { runArtifactRoot } from "../tools/storage.js";
+import { runArtifactRoot } from "../lib/artifact-root.js";
 
 export const SUMMARY_MAX_CONCURRENCY = 4;
 const SUMMARY_DEADLINE_MS = 120_000;

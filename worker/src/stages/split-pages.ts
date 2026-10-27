@@ -4,7 +4,7 @@ import { healthyDocuments } from "../pipeline/document-health.js";
 import { PdfSourceCache } from "../pipeline/pdf-asset-cache.js";
 import type { ArtifactStore } from "../tools/storage.js";
 import { maxInt } from "./utils.js";
-import { runArtifactRoot } from "../tools/storage.js";
+import { runArtifactRoot } from "../lib/artifact-root.js";
 
 /**
  * Builds a reusable virtual-page index without eagerly writing N single-page

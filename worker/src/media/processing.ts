@@ -7,7 +7,7 @@ import type { WorkflowState } from "../pipeline/pipeline.js";
 import type { MediaConfig } from "./config.js";
 import { BilledResponseError } from "./providers.js";
 import type { AudioInput, MediaJournal, MediaProvider, MediaScope, Transcription } from "./types.js";
-import { runArtifactRoot } from "../tools/storage.js";
+import { runArtifactRoot } from "../lib/artifact-root.js";
 
 /**
  * Receipt key. For plain 16 kHz WAV chunks it is byte-for-byte the key written before chunk overlap, word timestamps and
