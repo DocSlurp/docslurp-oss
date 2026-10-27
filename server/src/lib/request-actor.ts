@@ -79,11 +79,25 @@ export async function resolveApiKeyActor(
   return apiKey ? { type: "apiKey", userId: apiKey.userId, apiKey } : null;
 }
 
-export async function resolveBetterAuthSessionActor(headers: Headers): Promise<SessionRequestActor | null> {
-  const session = await auth.api.getSession({ headers }) as {
-    session: { id: string; userId: string };
-    user: SessionUser;
+/**
+ * Resolves the Better Auth session for a request. Better Auth slides the
+ * session's expiry forward once `updateAge` has passed and issues a refreshed
+ * cookie; pass `responseHeaders` to receive those `Set-Cookie` values so the
+ * caller can forward them. Without forwarding, the database row is extended
+ * but the browser cookie still expires on its original date.
+ */
+export async function resolveBetterAuthSessionActor(
+  headers: Headers,
+  responseHeaders?: Headers
+): Promise<SessionRequestActor | null> {
+  const result = await auth.api.getSession({ headers, returnHeaders: true }) as {
+    headers: Headers | null;
+    response: { session: { id: string; userId: string }; user: SessionUser } | null;
   } | null;
+  const session = result?.response ?? null;
+  if (responseHeaders) {
+    for (const cookie of result?.headers?.getSetCookie() ?? []) responseHeaders.append("set-cookie", cookie);
+  }
 
   if (!session?.user) {
     return null;
