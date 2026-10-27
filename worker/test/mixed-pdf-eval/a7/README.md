@@ -40,6 +40,17 @@ The coordinator compiled all 24 round-3 modules and reran 22 mocked binding test
 using disposable scratch, without modifying the frozen candidate evidence.
 Mock checks do not establish native rendering or fixture acceptance.
 
+The `r4/` modules preserve the final preview round, frozen on 2026-10-27 at
+16:22:59 UTC. Its external `round4/` output contains six PDFs and three ODTs.
+The revision reserves font-derived ink overhang clearance in native cells and
+keeps E1's unit with its tolerance. It retains all nominal fonts, values and
+table/block envelopes. Writer numeric paragraphs now use explicit per-cell
+indents rather than `ParaAdjust=RIGHT`; actual right/decimal alignment requires
+verification independently of that changed property. The new bounded checker
+compares embedded glyph outlines against active rectangular PDF clips, refusing
+unsupported observed mechanisms. Its results are not visibility or semantic
+grounding for extracted candidate text. Fresh independent reviews are pending.
+
 No bulk generation, pilot, full ten-page producer-pair evidence, heldout work,
-extraction threshold, speedup or savings is established. Four formal build rounds
-remain the cap for this attempt; three have been used.
+extraction threshold, speedup or savings is established. All four formal build
+rounds for attempt 7 have now been used; another preview export is not authorized.
