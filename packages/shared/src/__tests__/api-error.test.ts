@@ -162,7 +162,7 @@ describe("domain error codes", () => {
   it("every code a route can surface has reviewed public copy", async () => {
     const { API_ERROR_CODES, API_ERROR_PUBLIC_MESSAGES } = await import("../api-error.js");
     for (const code of API_ERROR_CODES) expect(API_ERROR_PUBLIC_MESSAGES[code], code).toMatch(/\S/);
-    for (const code of ["workspace_scope_forbidden", "no_stages_to_run", "index_in_progress", "workspace_forbidden"]) {
+    for (const code of ["workspace_scope_forbidden", "no_stages_to_run", "source_not_reusable", "missing_stage_artifacts", "workspace_forbidden"]) {
       expect(API_ERROR_CODES).toContain(code);
     }
   });

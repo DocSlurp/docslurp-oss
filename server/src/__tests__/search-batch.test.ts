@@ -109,8 +109,10 @@ describe("batch retrieval and canonical chat", () => {
     expect(mocks.search).toHaveBeenCalledOnce();
     expect(await result.json()).toMatchObject({ results: [{ ok: true }, ...queries.slice(1).map(() => ({ ok: false, error: { code: "REQUEST_ABORTED", status: 499 } }))] });
   });
-  it("removes the old /v1/search/chat alias", async () => {
+  it("removes the old /v1/search/chat and /v1/search/chat/stream aliases", async () => {
     expect((await app().request("/v1/search/chat", json({ q: "hello", workspace: "workspace" }))).status).toBe(404);
+    expect((await app().request("/v1/search/chat/stream?q=hello&workspace=workspace")).status).toBe(404);
+    expect(mocks.chat).not.toHaveBeenCalled();
   });
   it.each(["/v1/chat"])("shares validated native chat at %s", async path => {
     mocks.chat.mockResolvedValue({ answer: "answer", citations: [] });

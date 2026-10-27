@@ -40,7 +40,7 @@ test("deleteDocument sends DELETE and returns the removed identities", async () 
   assert.equal(deleted.filename, "a.pdf");
 });
 
-test("chatStream streams status, the answer, then done from the legacy SSE route", async () => {
+test("chatStream streams status, the answer, then done from GET /v1/chat/stream", async () => {
   let url, accept;
   const client = createDocSlurpClient({ apiUrl: "https://example.test", workspace: "manuals", fetch: async (requestUrl, init) => {
     url = requestUrl;

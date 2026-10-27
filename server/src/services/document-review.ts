@@ -6,7 +6,6 @@ import { notifySearchEligibilityChanged } from "../search/eligibility-hint.js";
 import { getArtifactJson, getArtifactText } from "../lib/artifacts.js";
 import { listAccessibleWorkspaceIds } from "./organizations.js";
 import { getDocumentViewerPayload, setDocumentTags } from "./documents.js";
-import { runUsageCostSummaries } from "./usage-attribution.js";
 
 type ReviewDocumentRow = {
   id: string;
@@ -33,11 +32,6 @@ type ReviewSignalRow = {
   failed_stages: number;
   schema_errors: number;
   failed_stage_names: string[] | null;
-};
-
-type RunCostRow = {
-  id: string;
-  total_documents: number;
 };
 
 type CorrectionRow = {
@@ -98,30 +92,6 @@ type PageInsertRow = {
   text: string;
   token_estimate: number;
 };
-
-export interface ReviewQueueEntry {
-  document: {
-    id: string;
-    orgId: string;
-    workspaceId: string;
-    runId: string | null;
-    filename: string;
-    mimeType: string;
-    status: string;
-    pageCount: number;
-    createdAt: string;
-    updatedAt: string;
-  };
-  severityScore: number;
-  estimatedCostCents: number;
-  plausibilityScore: number | null;
-  retries: number;
-  failedStages: number;
-  schemaErrors: number;
-  failureModes: string[];
-  correctionState: "open" | "corrected" | "reindexed";
-  correctionUpdatedAt: string | null;
-}
 
 export interface CorrectionWorkbenchPayload {
   documentId: string;

@@ -72,7 +72,7 @@ const entries: Array<[path: string, method: Method, tag: string, summary: string
   ["/v1/uploads/direct/sessions/{sessionId}/abort", "post", "ingest", "Abort a direct upload session", "ingest", "Session aborted"],
   ["/v1/uploads/direct/sessions/{sessionId}/confirm", "post", "ingest", "Confirm a direct upload session and start its run", "ingest", "Run started"],
   ["/v1/artifacts/preview", "get", "artifacts", "Preview an artifact's content", "artifacts", "Artifact preview"],
-  ["/v1/chat/stream", "get", "chat", "Stream a cited chat answer as server-sent events (for EventSource clients); POST /v1/chat takes the full request body", "chat", "Server-sent event stream"],
+  ["/v1/chat/stream", "get", "chat", "Stream a cited chat answer as server-sent events from a GET (question in the query string); POST /v1/chat takes the full request body", "chat", "Server-sent event stream"],
   ["/v1/search/aggregate", "post", "search", "Search several workspaces and merge the results", "search", "Aggregated results", jsonBody],
   ["/v1/search/{sessionId}/feedback", "post", "search", "Record click or relevance feedback for a search session", "search", "Feedback recorded", jsonBody],
   ["/v1/searches/{sessionId}/materialization", "get", "search", "Poll on-demand page materialization for a deferred-index search session", "search", "Candidate pages and their ledger state"],

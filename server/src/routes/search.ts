@@ -216,8 +216,8 @@ export const workspaceChatRoutes = new Hono()
 export const groundedWorkspaceChatRoutes = new Hono().use("*", nativeApiErrors).post("/", (c: Context) => handleWorkspaceChat(c, "grounded"));
 
 /**
- * `GET /v1/chat/stream`: the cited chat answer as server-sent events, for
- * clients that cannot POST a streaming body (EventSource). The same scoping,
+ * `GET /v1/chat/stream`: the cited chat answer as server-sent events from a
+ * GET, with the question in the query string. The same scoping,
  * chat settings and spend checks as `POST /v1/chat` apply.
  */
 async function workspaceChatStreamHandler(c: Context) {
