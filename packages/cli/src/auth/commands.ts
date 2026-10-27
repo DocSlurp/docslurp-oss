@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import { constants } from "node:os";
 
-import { credentialAccount, deleteCredential, loadCredential, saveCredential, type StoredCredential } from "./credentials.js";
+import { credentialAccount, deleteCredential, loadCredential, saveCredential, withCredentialLock, type StoredCredential } from "./credentials.js";
 import { CLI_CLIENT_ID, deviceLogin, discover, loopbackLogin, parseScopes, revokeToken, type TokenSet } from "./oauth.js";
 import { resolveAuth, resolveProfile, type ResolvedAuth } from "./resolve.js";
 import { windowsSpawn } from "./windows-exec.js";
@@ -66,22 +66,31 @@ export async function loginCommand(flags: Flags, apiUrl: string): Promise<void> 
 export async function logoutCommand(flags: Flags, apiUrl: string): Promise<void> {
   const profile = resolveProfile(flags);
   const account = credentialAccount(profile, apiUrl);
-  const loaded = await loadCredential(account);
-  if (!loaded) {
-    console.log(`Not signed in to ${new URL(apiUrl).origin}${profile === "default" ? "" : ` (profile ${profile})`}.`);
-    return;
-  }
-  try {
-    await revokeToken(await discover(apiUrl), loaded.credential.refreshToken);
-  } catch (error) {
-    if (flags.force !== true) {
-      throw new Error(`${error instanceof Error ? error.message : "Revocation failed."} The login was kept so you can retry; pass --force to delete it locally anyway (it stays valid on the server until it expires or you revoke it in DocSlurp).`);
+  await withCredentialLock(async () => {
+    let loaded;
+    try {
+      loaded = await loadCredential(account);
+    } catch (error) {
+      if (flags.force !== true) throw error;
     }
-    err("Warning: the server did not confirm revocation; deleting the local login anyway (--force).");
-  }
-  await deleteCredential(account);
-  console.log(`Signed out of ${new URL(apiUrl).origin}${profile === "default" ? "" : ` (profile ${profile})`}.`);
-  if (process.env.DOCSLURP_TOKEN?.trim()) err("Note: DOCSLURP_TOKEN is still set in this shell; it stays valid until it expires (at most 15 minutes).");
+    if (!loaded) {
+      await deleteCredential(account);
+      err("No readable local login; server revocation could not be confirmed. Local sign-out has been persisted.");
+      console.log(`Not signed in to ${new URL(apiUrl).origin}${profile === "default" ? "" : ` (profile ${profile})`}.`);
+      return;
+    }
+    try {
+      await revokeToken(await discover(apiUrl), loaded.credential.refreshToken);
+    } catch (error) {
+      if (flags.force !== true) {
+        throw new Error(`${error instanceof Error ? error.message : "Revocation failed."} The login was kept so you can retry; pass --force to delete it locally anyway (it stays valid on the server until it expires or you revoke it in DocSlurp).`);
+      }
+      err("Warning: the server did not confirm revocation; deleting the local login anyway (--force).");
+    }
+    await deleteCredential(account);
+    console.log(`Signed out of ${new URL(apiUrl).origin}${profile === "default" ? "" : ` (profile ${profile})`}.`);
+    if (process.env.DOCSLURP_TOKEN?.trim()) err("Note: DOCSLURP_TOKEN is still set in this shell; it stays valid until it expires (at most 15 minutes).");
+  });
 }
 
 /** `whoami` (concise) and `auth status` (adds local credential details). */

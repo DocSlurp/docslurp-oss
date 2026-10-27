@@ -1,6 +1,6 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { spawn } from "node:child_process";
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { constants, existsSync } from "node:fs";
 import { link, lstat, mkdir, open, readFile, rename, stat, unlink, utimes, type FileHandle } from "node:fs/promises";
 import { homedir, hostname } from "node:os";
@@ -25,6 +25,8 @@ import { join } from "node:path";
 
 export type StoredCredential = {
   version: 1;
+  /** Stable across rotations; a new explicit login gets a new identity. */
+  loginId?: string;
   apiUrl: string;
   profile: string;
   clientId: string;
@@ -44,6 +46,7 @@ const PROFILE_PATTERN = /^[A-Za-z0-9._-]{1,64}$/;
 const TOOL_TIMEOUT_MS = 15_000;
 
 export class CredentialStoreError extends Error {}
+export class CredentialChangedError extends CredentialStoreError {}
 
 export function validateProfile(profile: string): string {
   if (!PROFILE_PATTERN.test(profile)) throw new CredentialStoreError("--profile must be 1-64 letters, digits, dots, dashes or underscores.");
@@ -458,8 +461,26 @@ export async function loadCredential(account: string): Promise<LoadedCredential 
   return credential ? { credential, source: fileStore.label() } : null;
 }
 
-/** Stores the credential and returns where it went. Auto mode falls back to the file, and says so. */
+/** Explicit login: starts a new identity and may replace a signed-out marker. */
 export async function saveCredential(account: string, credential: StoredCredential, warn: (message: string) => void = () => {}): Promise<string> {
+  return await withCredentialLock(() => writeCredential(account, { ...credential, loginId: randomBytes(24).toString("hex") }, warn));
+}
+
+export const credentialLoginId = (credential: StoredCredential): string => credential.loginId
+  ?? createHash("sha256").update(credential.refreshToken).digest("hex");
+
+/** Refresh may only update the login it was admitted for, never create a login. */
+export async function saveRefreshedCredential(account: string, credential: StoredCredential, expected: StoredCredential, warn: (message: string) => void = () => {}): Promise<string> {
+  return await withCredentialLock(async () => {
+    const latest = (await loadCredential(account))?.credential;
+    if (!latest || credentialLoginId(latest) !== credentialLoginId(expected) || latest.refreshToken !== expected.refreshToken) {
+      throw new CredentialChangedError("The stored login changed or was signed out; run `docslurp login` again.");
+    }
+    return await writeCredential(account, { ...credential, loginId: credentialLoginId(expected) }, warn);
+  });
+}
+
+async function writeCredential(account: string, credential: StoredCredential, warn: (message: string) => void): Promise<string> {
   const mode = storeMode();
   // Once auto mode falls back, keep rotating in that store. Returning to a
   // keychain while an old fallback cannot be removed could replay its token.
@@ -487,6 +508,10 @@ export async function saveCredential(account: string, credential: StoredCredenti
 }
 
 export async function deleteCredential(account: string): Promise<boolean> {
+  return await withCredentialLock(() => deleteCredentialLocked(account));
+}
+
+async function deleteCredentialLocked(account: string): Promise<boolean> {
   const mode = storeMode();
   // Persist first, without any live tokens. If this fails, logout must fail
   // loudly; keychain availability/removal can never undo a persisted logout.

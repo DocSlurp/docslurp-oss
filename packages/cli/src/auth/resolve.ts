@@ -1,4 +1,4 @@
-import { credentialAccount, loadCredential, saveCredential, validateProfile, withCredentialLock, type StoredCredential } from "./credentials.js";
+import { CredentialChangedError, credentialAccount, loadCredential, credentialLoginId, saveRefreshedCredential, validateProfile, withCredentialLock, type StoredCredential } from "./credentials.js";
 import { discover, refreshTokens, type AuthorizationServer } from "./oauth.js";
 
 /**
@@ -54,6 +54,7 @@ export async function resolveAuth(flags: Record<string, string | boolean>, apiUr
     throw new NotSignedInError(`Not signed in to ${new URL(apiUrl).origin}${profile === "default" ? "" : ` (profile ${profile})`}. Run \`docslurp login\`, or set DOCSLURP_API_KEY.`);
   }
   let current = loaded.credential;
+  const loginId = credentialLoginId(current);
   let store = loaded.source;
   let server: AuthorizationServer | null = null;
   let inFlight: Promise<string> | null = null;
@@ -66,7 +67,10 @@ export async function resolveAuth(flags: Record<string, string | boolean>, apiUr
     return await withCredentialLock(async () => {
       // Another process may have rotated the tokens already: prefer its result.
       const latest = (await loadCredential(account))?.credential;
-      if (latest && latest.refreshToken !== current.refreshToken) {
+      if (!latest || credentialLoginId(latest) !== loginId) {
+        throw new LoginExpiredError(`Your stored login changed or was signed out. ${RELOGIN(profile)}`);
+      }
+      if (latest.refreshToken !== current.refreshToken) {
         current = latest;
         if (!force && validFor(current) > minValiditySeconds) return current.accessToken;
       }
@@ -78,7 +82,8 @@ export async function resolveAuth(flags: Record<string, string | boolean>, apiUr
         for (let waited = 0; waited < 10_000; waited += 500) {
           await new Promise((resolve) => setTimeout(resolve, 500));
           const rotated = (await loadCredential(account))?.credential;
-          if (rotated && rotated.refreshToken !== current.refreshToken) {
+          if (!rotated || credentialLoginId(rotated) !== loginId) throw new LoginExpiredError(`Your stored login changed or was signed out. ${RELOGIN(profile)}`);
+          if (rotated.refreshToken !== current.refreshToken) {
             current = rotated;
             return current.accessToken;
           }
@@ -88,8 +93,10 @@ export async function resolveAuth(flags: Record<string, string | boolean>, apiUr
         if (result.error === "network_error") throw new LoginExpiredError(`Could not refresh the DocSlurp login: ${result.description}`);
         throw new LoginExpiredError(`Your DocSlurp login has expired or was revoked. ${RELOGIN(profile)}`);
       }
+      const expected = current;
       current = {
         ...current,
+        loginId,
         accessToken: result.tokens.accessToken,
         refreshToken: result.tokens.refreshToken,
         accessTokenExpiresAt: result.tokens.expiresAt,
@@ -98,8 +105,9 @@ export async function resolveAuth(flags: Record<string, string | boolean>, apiUr
       };
       // The old refresh token is now spent: persist the new one before using the access token.
       try {
-        store = await saveCredential(account, current, (message) => process.stderr.write(`${message}\n`));
+        store = await saveRefreshedCredential(account, current, expected, (message) => process.stderr.write(`${message}\n`));
       } catch (error) {
+        if (error instanceof CredentialChangedError) throw new LoginExpiredError(`Your stored login changed or was signed out. ${RELOGIN(profile)}`);
         // This process can keep using the new access token, but the stored
         // refresh token is spent; presenting it later revokes the login.
         process.stderr.write(`Warning: the DocSlurp login was refreshed but could not be saved (${error instanceof Error ? error.message : "unknown error"}). The stored login is now unusable; ${RELOGIN(profile).replace(/^Run/, "run")}\n`);
