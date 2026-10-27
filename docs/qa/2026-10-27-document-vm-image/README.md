@@ -74,3 +74,5 @@ A suggested future reserve is **$0.05 for one attempt, no automatic retry**, wit
 4. After publication/approval, configure `DOCSLURP_DOCUMENT_VM_IMAGE=<approved-repository>@sha256:66a14b948cd0eca3d8ac7869e90cf8dfd5a0987508dca0b65ac0cb269952cd21` plus explicit CPU model/revision/bundle/profile pins from `manifest.json`. Keep routing off until then; no deployment/environment was changed.
 
 The first exploratory export emitted an optimizer missing-dependency warning and attempted an implicit pip installation that failed because pip was absent (`initial-export-warning.txt`). The final exporter explicitly disables optional optimization/automatic opset changes, uses the complete hash lock, and makes no such implicit installation. Both exports produced the same graph hash; the final scripted run and checked eight-file bundle reproduced successfully.
+
+The concrete [publication and one-VM smoke proposal](publication-smoke-plan.md) includes the GHCR destination, separate import/storage/egress forecast, proposed cap, independent cleanup and read-only credential result. No publication or VM smoke is authorized.

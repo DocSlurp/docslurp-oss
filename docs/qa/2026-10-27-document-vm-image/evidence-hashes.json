@@ -1,8 +1,9 @@
 {
-  "README.md": "d4d3a755f0e08f4f9b40859d7b6b54c63cf360a6c75adf2f64cccf849ffd0602",
+  "README.md": "4cffa7b330dc27637ba97a5f208127737f44b019e30dd56f373ba837d6fcb2ee",
   "build-metadata.json": "7152cf10e8bf794fc2239a1d738837207d89171602778be18ef91c2efc0d7559",
   "build.log": "188331ead0c0b6f36face8a6da773481da21aa85aa66751906184195043f13c4",
   "container-limits.json": "9922e34afc0a67b885b4a33c448b778aaee128d17eb3e05a3dae43ba126da7e8",
+  "credential-readonly-check.json": "c509cb306d0feed6bd7457c845ed798fcee542ed300bdccd22e175759b90f937",
   "decode-webp.stderr.txt": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
   "encode-webp.stderr.txt": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
   "export-provenance.json": "87e724ac3d51145e3c6b5ca386f0158f526985c7dec1e81a4b5e7e2bbbb12c73",
@@ -30,6 +31,7 @@
   "oci-index.json": "1100ba73bb1b338dc23b97b999ee1f05cf438b191f73163fedeedc5ef5382e30",
   "oci-record.json": "b0a16acb881be2b576a2bc180712b267fa7dbd3feadbc56eb555b87dbd560b1d",
   "provenance.json": "f1a58c07df7ebafaee7f9079d80e11ccd75cdc8c94e9351f8d75d8572d177801",
+  "publication-smoke-plan.md": "60f2bd7f042e61e944cb2170231378f12fa2010fa3c69b00a1142422e59b14ad",
   "python-contract-tests.log": "8dd7a5a1c6db4d03b9491ad7d8184547636699800b841ffce3f87a80cb2e33b3",
   "readonly.stderr.txt": "295bfd7c1bf30d03081d4fbf6568c2f6cf2f413e09301e6e1483444a45666d45",
   "reproducible-assets.json": "8ced241d4c863158de0e4da8e0ca22cf18be325d240cd74fb44deb735b2728e2",
