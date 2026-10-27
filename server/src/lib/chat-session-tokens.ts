@@ -12,8 +12,7 @@ import type { RequestActor } from "./request-actor.js";
  * chat `sessionId` alone would let anyone who learns it read or continue that
  * conversation. For these keys the server returns a sealed `sessionToken` with
  * each answer, bound to the key, the workspace and the session, with an
- * expiry; continuing a session requires it. Tampered, expired, other-key,
- * other-workspace and other-session tokens are refused. Server keys and app
+ * expiry; continuing a session requires it (see chatSessionForRequest). Server keys and app
  * sessions are unchanged: the session id is checked against their own user.
  */
 const family = sealedTokenFamily("chat-session-grant:v1");
@@ -54,11 +53,19 @@ export class ChatSessionForbiddenError extends HTTPException {
 }
 
 /**
- * The continuation check for one request: a browser key that names a
- * sessionId must hold a matching grant. Throws ChatSessionForbiddenError.
+ * The session a browser-key request may continue. A `sessionId` with a valid
+ * grant continues it. A `sessionId` with no grant (widgets deployed before
+ * grants existed) or an expired one starts a fresh session instead: its
+ * history is never read, and the answer carries a new grant. A tampered grant,
+ * or one for another key, workspace or session, is refused (403
+ * `chat_session_forbidden`). Server keys and app sessions keep the session id
+ * as sent; it is checked against their own user.
  */
-export function assertChatSessionGrant(actor: RequestActor | null | undefined, args: { workspaceId: string; sessionId?: string | null; sessionToken?: string | null }): void {
-  if (!requiresChatSessionToken(actor) || !args.sessionId) return;
-  const refusal = chatSessionTokenRefusal(args.sessionToken, { keyId: actor.apiKey.keyId, workspaceId: args.workspaceId, sessionId: args.sessionId });
-  if (refusal) throw new ChatSessionForbiddenError(refusal);
+export function chatSessionForRequest(actor: RequestActor | null | undefined, args: { workspaceId: string; sessionId?: string | null; sessionToken?: string | null }): string | undefined {
+  const sessionId = args.sessionId ?? undefined;
+  if (!requiresChatSessionToken(actor) || !sessionId) return sessionId;
+  const refusal = chatSessionTokenRefusal(args.sessionToken, { keyId: actor.apiKey.keyId, workspaceId: args.workspaceId, sessionId });
+  if (refusal === null) return sessionId;
+  if (refusal === "missing" || refusal === "expired") return undefined;
+  throw new ChatSessionForbiddenError(refusal);
 }

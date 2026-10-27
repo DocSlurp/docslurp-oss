@@ -1,5 +1,5 @@
 import { reportPublicError } from "../lib/public-errors.js";
-import { assertChatSessionGrant, CHAT_SESSION_TOKEN_HEADER } from "../lib/chat-session-tokens.js";
+import { chatSessionForRequest, CHAT_SESSION_TOKEN_HEADER } from "../lib/chat-session-tokens.js";
 import { apiErrorResponse, nativeApiErrors, withApiErrorDetails } from "../lib/api-error.js";
 import { Hono, type Context } from "hono";
 import { batchSearchInputSchema, searchFormError, searchInputSchema, searchOptions, workspaceChatInputSchema, type SearchInput } from "../lib/search-input.js";
@@ -183,8 +183,9 @@ async function handleWorkspaceChat(c: Context, mode: "public" | "grounded") {
   if (forbidden) return forbidden;
   const chatDisabled = await workspaceChatDisabledBody(workspaceId, userId);
   if (chatDisabled) return apiErrorResponse(c, 403, "chat_disabled", chatDisabled.error);
-  // Before the turn starts: a browser key needs the session's grant to continue it.
-  assertChatSessionGrant(getRequestActor(c), { workspaceId, sessionId: body.sessionId, sessionToken: body.sessionToken });
+  // Before the turn starts: a browser key continues a session only with its grant
+  // (no grant: a fresh session; a bad grant: 403).
+  const sessionId = chatSessionForRequest(getRequestActor(c), { workspaceId, sessionId: body.sessionId, sessionToken: body.sessionToken });
   const deferred = await deferredRequestContext(c, workspaceId);
   if ("response" in deferred) return deferred.response;
   // This route knows whether the answer reached the client, so it owns the
@@ -194,7 +195,7 @@ async function handleWorkspaceChat(c: Context, mode: "public" | "grounded") {
   let response: Awaited<ReturnType<typeof chatWorkspace>>;
   try {
     response = await turn.run(() => withDeferredContext(deferred.context, () => chatWorkspace({ workspaceId, userId,
-      query: body.q, sessionId: body.sessionId, sessionToken: body.sessionToken, model: body.model,
+      query: body.q, sessionId, sessionToken: body.sessionToken, model: body.model,
       actor: getRequestActor(c), signal,
       ...(mode === "grounded"
         ? { allowAgentTools: false, allowConfiguration: false }
@@ -314,12 +315,11 @@ export const searchRoutes = new Hono()
     const parsed = workspaceChatInputSchema.safeParse({ q: c.req.query("q"),
       workspace: c.req.query("workspace") || undefined, orgId: c.req.query("orgId") || undefined,
       sessionId: c.req.query("sessionId"),
-      // The header keeps the grant out of URLs (proxy and browser history logs). The
-      // query form is accepted for older clients; request telemetry records only the path.
-      sessionToken: c.req.header(CHAT_SESSION_TOKEN_HEADER)?.trim() || c.req.query("sessionToken") || undefined,
+      // Only the header carries the grant, so it never sits in a URL (proxy and browser history logs).
+      sessionToken: c.req.header(CHAT_SESSION_TOKEN_HEADER)?.trim() || undefined,
       model: c.req.query("model") });
     if (!parsed.success) return apiErrorResponse(c, 400, "invalid_request", "Invalid chat input", { issues: parsed.error.issues });
-    const { q: query, sessionId, sessionToken, model } = parsed.data;
+    const { q: query, sessionToken, model } = parsed.data;
 
     const userId = c.get("sessionUser").id;
     const workspaceId = await resolveActorWorkspaceId(getRequestActor(c), parsed.data.workspace, parsed.data.orgId);
@@ -328,8 +328,8 @@ export const searchRoutes = new Hono()
     const chatDisabled = await workspaceChatDisabledBody(workspaceId, userId);
     if (chatDisabled) return apiErrorResponse(c, 403, "chat_disabled", chatDisabled.error);
     if (await chatModelRefused(getRequestActor(c), model, workspaceId)) return modelNotAllowed(c);
-    // Refused before the stream opens, so another visitor's session is a real 403.
-    assertChatSessionGrant(getRequestActor(c), { workspaceId, sessionId, sessionToken });
+    // Checked before the stream opens, so a bad grant is a real 403 (no grant: a fresh session).
+    const sessionId = chatSessionForRequest(getRequestActor(c), { workspaceId, sessionId: parsed.data.sessionId, sessionToken });
     // Refuse before the stream opens, so a blocked spend is a 402.
     // Pre-check only: chatWorkspace takes the interactive hold.
     await assertCanSpend(null, workspaceId, { kind: "interactive", hold: false });
