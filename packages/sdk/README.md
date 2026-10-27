@@ -395,6 +395,7 @@ const client = createDocSlurpClient({
 | Setting | Where it comes from, in order |
 | --- | --- |
 | API key | `apiKey`, then `DOCSLURP_API_KEY` on the server |
+| OAuth access token | `accessToken` (a string, or a provider `({ forceRefresh }) => token` called per request and refreshed once after a 401), then `DOCSLURP_TOKEN` on the server. Used only when no API key is set; see [`docslurp login`](https://docslurp.io/docs/packages/cli) |
 | Service origin | `apiUrl`, then `DOCSLURP_URL`, then `https://docslurp.io` |
 | Workspace | Per-call `workspace`, then the client option, then `DOCSLURP_WORKSPACE`, then `"default"` (the organization's default workspace). Accepts IDs, slugs, former slugs, names (matched by slug) and `default`. |
 | Request deadline | Per-call `timeoutMs`, then the client option, then 30 seconds |

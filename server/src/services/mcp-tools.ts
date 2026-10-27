@@ -2,7 +2,9 @@ import type { z } from "zod";
 import { getWorkspaceSearchSettings } from "./search-controls.js";
 import { workspaceSettingsPipelinePatchSchema } from "./workspace-settings-proposal-input.js";
 import { workspaceSettingsProposalInputSchema } from "./workspace-settings-proposal-input.js";
-import { currentChatSessionId } from "../lib/chat-agent-context.js";
+import { currentChatSessionId, inChatAgentContext } from "../lib/chat-agent-context.js";
+import { enforceActorCategoryRateLimit } from "../middleware/rate-limit.js";
+import { acquireChatSlot } from "../middleware/chat-concurrency.js";
 import { proposeWorkspaceSettings, SettingsProposalError } from "./workspace-settings-proposals.js";
 import { publicErrorMiddleware } from "../lib/public-errors.js";
 import { apiErrorResponse, apiStatusError, usesNativeErrorEnvelope } from "../lib/api-error.js";
@@ -12,7 +14,7 @@ import { Hono, type Context } from "hono";
 import type { ApiErrorCode } from "@docslurp/shared";
 
 import { apiKeyHasAnyScope } from "../lib/api-key-authorization.js";
-import { getApiKey, getRequestActor, loadActorScopedWorkspace, resolveActorWorkspaceId, setRequestActor, type RequestActor } from "../lib/request-actor.js";
+import { getApiKey, getRequestActor, isFirstPartyAppActor, loadActorScopedWorkspace, resolveActorWorkspaceId, setRequestActor, type RequestActor } from "../lib/request-actor.js";
 import { listWorkspaces } from "./workspaces.js";
 import { apiKeyCanUseWorkspace } from "../lib/api-key-workspace-scope.js";
 import { completeUploadInput, extractInput, INLINE_UPLOAD_MAX_BYTES, mediaEvidenceInput, fullIndexInput, listWorkspacesInput, mcpManifest, mcpTools, suggestQueriesInput, uploadInput, uploadStatusInput } from "./mcp-catalog.js";
@@ -68,10 +70,10 @@ const mcpAdapterRoutes = new Hono()
   .use("*", publicErrorMiddleware)
   .onError(spendAwareErrorHandler)
   .get("/manifest", async (c) => {
-    return c.json(mcpManifest(routeBaseUrl(c.req.url), getApiKey(c)?.scopes, getApiKey(c)?.keyType));
+    return c.json(mcpManifest(routeBaseUrl(c.req.url), getApiKey(c)?.scopes, getApiKey(c)?.keyType, { ...getApiKey(c)?.oauth, firstPartyApp: isFirstPartyAppActor(c.get("requestActor")) }));
   })
   .get("/tools", async (c) => {
-    const manifest = mcpManifest(routeBaseUrl(c.req.url), getApiKey(c)?.scopes, getApiKey(c)?.keyType);
+    const manifest = mcpManifest(routeBaseUrl(c.req.url), getApiKey(c)?.scopes, getApiKey(c)?.keyType, { ...getApiKey(c)?.oauth, firstPartyApp: isFirstPartyAppActor(c.get("requestActor")) });
     return c.json({ tools: manifest.capabilities.filter((capability) => capability.category === "tool") });
   })
   .post("/tools/:id", async (c) => {
@@ -80,6 +82,8 @@ const mcpAdapterRoutes = new Hono()
     const toolId = c.req.param("id");
     const tool = mcpTools(routeBaseUrl(c.req.url)).find(item => item.id === toolId);
     if (!tool) return adapterError(c, 404, "Unknown MCP tool");
+    // App-only settings tools answer like unknown tools to every other caller.
+    if (tool.firstPartyAppOnly && (apiKey || !isFirstPartyAppActor(actor))) return adapterError(c, 404, "Unknown MCP tool");
     if (apiKey && !(tool.keyAccess ? tool.keyAccess(apiKey) : apiKeyHasAnyScope(apiKey, tool.scopes))) return adapterError(c, 403, "Forbidden");
     let body: Record<string, unknown>;
     try {
@@ -206,6 +210,18 @@ const mcpAdapterRoutes = new Hono()
 
     if (toolId === "search" || toolId === "chat") {
       const actor = c.get("requestActor");
+      // A direct MCP chat call runs a model turn: it counts as chat-ai and takes
+      // a chat slot. A nested call from the chat agent is already inside its turn.
+      let slot: { release: () => void } | null | "uncapped" = "uncapped";
+      if (toolId === "chat" && !inChatAgentContext()) {
+        const limited = await enforceActorCategoryRateLimit(c, "chat-ai");
+        if (limited) return limited;
+        slot = acquireChatSlot(c);
+        if (!slot) {
+          c.header("Retry-After", "5");
+          return adapterError(c, 429, "Too many chat requests in progress for this key; wait for one to finish", "rate_limited");
+        }
+      }
       // The MCP chat tool is grounded retrieval only: it never starts another
       // agent (which would refresh the outer tool budget) or changes settings.
       const native = new Hono().use("*", publicErrorMiddleware).use("*", async (inner, next) => {
@@ -213,10 +229,16 @@ const mcpAdapterRoutes = new Hono()
         await next();
       }).route("/", toolId === "chat" ? groundedWorkspaceChatRoutes : searchRoutes);
       native.onError(spendAwareErrorHandler);
-      return native.request("http://mcp.internal/", {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body), signal: c.req.raw.signal,
-      });
+      try {
+        const response = await native.request("http://mcp.internal/", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body), signal: c.req.raw.signal,
+        });
+        // Hold the slot until the answer body is read (the grounded route answers in one JSON body).
+        return slot && slot !== "uncapped" ? new Response(await response.arrayBuffer(), response) : response;
+      } finally {
+        if (slot && slot !== "uncapped") slot.release();
+      }
     }
 
     if (toolId === "getMediaEvidence") {
@@ -337,7 +359,7 @@ const mcpAdapterRoutes = new Hono()
   })
   .get("/resources/:id", async (c) => {
     if (c.req.param("id") === "capabilities") {
-      return c.json(mcpManifest(routeBaseUrl(c.req.url), getApiKey(c)?.scopes, getApiKey(c)?.keyType));
+      return c.json(mcpManifest(routeBaseUrl(c.req.url), getApiKey(c)?.scopes, getApiKey(c)?.keyType, { ...getApiKey(c)?.oauth, firstPartyApp: isFirstPartyAppActor(c.get("requestActor")) }));
     }
 
     return adapterError(c, 404, "Unknown MCP resource");
