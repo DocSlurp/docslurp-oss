@@ -11,7 +11,7 @@ export function serviceCors(trustedOrigins: string[]): MiddlewareHandler {
     const trusted = !origin || trustedOrigins.includes(origin) || isSameOrigin(origin, c.req.url);
     const compatKeyRoute = /^\/compat\/algolia\/1\/indexes\//.test(c.req.path);
     const searchCompatRoute = /^\/compat\/(?:meilisearch\/indexes\/[^/]+\/search|typesense\/(?:collections\/[^/]+\/documents\/search|multi_search)|pagefind\/[^/]+\/search)$/.test(c.req.path);
-    const publicKeyRoute = /^\/v1\/chat\/?$/.test(c.req.path) || compatKeyRoute || searchCompatRoute || /^\/v1\/(?:search(?:\/|$)|ingest(?:\/|$)|documents(?:\/|$)|models$|chat\/completions$|runs\/[^/]+\/progress$)/.test(c.req.path);
+    const publicKeyRoute = /^\/v1\/chat\/?$/.test(c.req.path) || compatKeyRoute || searchCompatRoute || /^\/v1\/(?:search(?:\/|$)|ingest(?:\/|$)|documents(?:\/|$)|models$|chat\/(?:completions|stream)$|runs\/[^/]+\/progress$)/.test(c.req.path);
     let validOrigin = false;
     try {
       validOrigin = Boolean(origin && /^https?:\/\/[^/]+$/.test(origin) && new URL(origin).origin === origin);
