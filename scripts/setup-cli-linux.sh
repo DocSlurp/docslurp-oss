@@ -23,6 +23,10 @@ ${SUDO} apt-get install -y \
   clamav-freshclam \
   clamdscan \
   curl \
+  fonts-liberation \
+  fonts-noto-cjk \
+  fonts-noto-core \
+  fonts-urw-base35 \
   git \
   ghostscript \
   imagemagick \
@@ -38,6 +42,27 @@ ${SUDO} apt-get install -y \
   qpdf \
   tesseract-ocr \
   tesseract-ocr-eng \
+  tesseract-ocr-deu \
+  tesseract-ocr-fra \
+  tesseract-ocr-spa \
+  tesseract-ocr-ara \
+  tesseract-ocr-chi-sim \
+  tesseract-ocr-chi-tra \
+  tesseract-ocr-ell \
+  tesseract-ocr-heb \
+  tesseract-ocr-hin \
+  tesseract-ocr-ita \
+  tesseract-ocr-jpn \
+  tesseract-ocr-kor \
+  tesseract-ocr-nld \
+  tesseract-ocr-pol \
+  tesseract-ocr-por \
+  tesseract-ocr-rus \
+  tesseract-ocr-tha \
+  tesseract-ocr-tur \
+  tesseract-ocr-ukr \
+  tesseract-ocr-vie \
+  webp \
   unrtf
 
 # Check kernel/container policy as the user who will run the worker.
