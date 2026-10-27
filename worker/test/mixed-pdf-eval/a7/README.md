@@ -27,6 +27,19 @@ reviews remain separate. Writer table Width readbacks and E3 layer/Z-order chang
 are retained as flags. Neither these checks nor historical prototype fidelity
 constitutes acceptance under the current quality requirements.
 
-No round 3, bulk generation, pilot, full ten-page producer-pair evidence, heldout
-work, extraction threshold, speedup or savings is established. Four formal build
-rounds remain the cap for this attempt; two have been used.
+The `r3/` modules preserve round 3, frozen on 2026-10-27 at 15:55:44 UTC.
+Its six PDFs and three editable ODTs are stored externally under the sibling
+`round3/` directory. This revision visibly defines the residual subtraction
+convention, draws the logger/probe as native primitives, and binds each Writer
+export to the saved ODT, plan, readbacks, tools and execution. Independent
+technical, visual and integrity reviews remain pending. Raw width and separator
+observations are retained; see `docs/evals/mixed-pdf-yield-v1/writer-width.md` for
+the bounded explanation of Writer's stored-width representation.
+
+The coordinator compiled all 24 round-3 modules and reran 22 mocked binding tests
+using disposable scratch, without modifying the frozen candidate evidence.
+Mock checks do not establish native rendering or fixture acceptance.
+
+No bulk generation, pilot, full ten-page producer-pair evidence, heldout work,
+extraction threshold, speedup or savings is established. Four formal build rounds
+remain the cap for this attempt; three have been used.
