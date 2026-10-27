@@ -135,6 +135,11 @@ class OnnxSmallDetector:
     def __init__(self,onnx_path=None,device='cpu',threads=4,precision='fp32',revision=None,**_):
         import hashlib
         import onnxruntime as ort
+        # Resize/normalization affect inference. Import them before load_detector
+        # snapshots runtime_versions and before the final-image profile is pinned.
+        import cv2
+        import numpy as np
+        self.cv2, self.np = cv2, np
         if not onnx_path: raise ValueError('--onnx-path required')
         if precision!='fp32': raise ValueError('ONNX precision encoded in graph; keep --precision fp32')
         options=ort.SessionOptions(); options.intra_op_num_threads=threads
@@ -164,8 +169,7 @@ class OnnxSmallDetector:
             'cuda_cpu_node_fallback_possible':device.startswith('cuda'),'batch_execution':'serial-fixed-1','resize':'opencv-INTER_CUBIC','color':'RGB'}
 
     def predict(self,images,threshold=.3):
-        import numpy as np
-        import cv2
+        np, cv2 = self.np, self.cv2
         output=[]; timing={'preprocess_ms':0.,'inference_ms':0.,'postprocess_ms':0.}
         for image in images:
             start=time.perf_counter()

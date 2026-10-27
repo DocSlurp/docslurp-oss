@@ -81,6 +81,42 @@ class EntryIdentityTests(unittest.TestCase):
                 self.assertEqual(result['diagnostics']['detectorMetadata']['artifact_sha256'], self.bundle)
                 self.assertEqual(result['device'], 'cpu')
 
+    def test_onnx_profile_captures_preprocessing_versions_before_first_prediction(self):
+        import builtins
+        import adapters
+        original_import = builtins.__import__
+        cv = SimpleNamespace(__version__='fixture-opencv-v1')
+        numpy = SimpleNamespace(__version__='fixture-numpy-v1')
+        class Session:
+            def __init__(self, *args, **kwargs): pass
+            def get_inputs(self): return []
+            def get_providers(self): return ['CPUExecutionProvider']
+            def get_provider_options(self): return {}
+            def run(self, *args): raise AssertionError('No inference is authorized by this test')
+        ort = SimpleNamespace(__version__='fixture-ort', SessionOptions=SimpleNamespace,
+            GraphOptimizationLevel=SimpleNamespace(ORT_ENABLE_ALL=1),
+            get_available_providers=lambda: ['CPUExecutionProvider'], InferenceSession=Session)
+        def import_runtime(name, *args, **kwargs):
+            if name in ('cv2', 'numpy'):
+                module = cv if name == 'cv2' else numpy
+                sys.modules[name] = module
+                return module
+            return original_import(name, *args, **kwargs)
+        with patch.dict(sys.modules, onnxruntime=ort):
+            sys.modules.pop('cv2', None)
+            sys.modules.pop('numpy', None)
+            with patch.object(builtins, '__import__', side_effect=import_runtime):
+                detector = adapters.load_detector('pp-small-onnx', device='cpu', onnx_path=str(self.assets / 'weights.bin'))
+                versions = detector.metadata['runtime_versions']
+                self.assertEqual(versions['cv2'], 'fixture-opencv-v1')
+                self.assertEqual(versions['numpy'], 'fixture-numpy-v1')
+                self.assertEqual(versions['onnxruntime'], 'fixture-ort')
+                self.assertIs(detector.cv2, cv)
+                before = infer.inference_profile_sha256(detector, 'cpu')
+                cv.__version__ = 'fixture-opencv-v2'
+                changed = adapters.load_detector('pp-small-onnx', device='cpu', onnx_path=str(self.assets / 'weights.bin'))
+                self.assertNotEqual(before, infer.inference_profile_sha256(changed, 'cpu'))
+
     def test_bundle_hash_is_canonical_and_covers_names_and_bytes(self):
         self.assertEqual(self.bundle, canonical_bundle_sha256(list(reversed(self.files))))
         encoded = json.dumps(sorted(self.files, key=lambda f: f['path']), sort_keys=True, separators=(',', ':')).encode()
