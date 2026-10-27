@@ -13,7 +13,7 @@ import { loadNativePdfEngine } from "../native-pdf/loader.js";
 import { logNativePdfFallback, NativePdfError } from "../native-pdf/types.js";
 import { renderClipNative, renderPagesNative } from "../native-pdf/render.js";
 import type { Bbox, NativePdfEngine } from "../native-pdf/types.js";
-import { boundedRasterDpi, boundedRasterEdge } from "../lib/raster-bounds.js";
+import { boundedRasterDpi, boundedRasterEdge, effectiveRasterDpi } from "../lib/raster-bounds.js";
 import { pushPerfMetric } from "../lib/perf-context.js";
 import { SandboxRunError } from "../sandbox/types.js";
 import {
@@ -49,6 +49,8 @@ export interface RasterCacheOptions {
   concurrency?: number;
   /** Stored page-image format; defaults to DOCSLURP_PAGE_IMAGE_FORMAT (webp). */
   format?: PageImageFormat;
+  /** Fixed WebP effort instead of the retention-chosen one (interactive reader renders use 1). */
+  webpEffort?: number;
 }
 
 let rasterEngineUnavailableReported = false;
@@ -157,8 +159,13 @@ export interface RasterPageArtifact {
   mimeType: string;
   /** Engine that produced (or, on a cache hit, would have produced) this raster. */
   engine?: RasterEngineName;
-  /** Requested density; oversized pages are bounded before allocation. */
+  /** Requested density (also the key's `<dpi>dpi`); oversized pages are bounded before allocation. */
   dpi?: number;
+  /**
+   * Density the pixels were actually rendered at, after the raster bounds (an 11x17 in page
+   * requested at 300 dpi renders at about 235). Known for fresh renders only; cache hits omit it.
+   */
+  effectiveDpi?: number;
 }
 
 type RasterStorage = Pick<ArtifactStore, "objectSize" | "putBytes" | "uri">;
@@ -244,6 +251,11 @@ export class PdfRasterCache {
     pageNumbers: number[];
     dpi?: number;
     signal?: AbortSignal;
+    /**
+     * The caller reads the raster once and deletes what it rendered (page-embed): store PNG and
+     * skip the WebP encode, which would be thrown away.
+     */
+    transient?: boolean;
   }): Promise<RasterPageArtifact[]> {
     const dpi = clampDpi(args.dpi);
     const pageNumbers = normalizePageNumbers(args.pageNumbers, args.document.pageCount);
@@ -256,8 +268,10 @@ export class PdfRasterCache {
     const root = `${args.document.userId}/${args.runId}`;
     if (!isPdf) return await this.storeNativeImage(args.document, root, dpi, pageNumbers);
 
-    const format = this.options.format ?? readPageImageFormat();
-    const effort = pageImageWebpEffort({ retentionHours: args.document.artifactRetentionHours });
+    const preferredFormat = this.options.format ?? readPageImageFormat();
+    // Transient renders still reuse a stored WebP; they only skip encoding a new one.
+    const format: PageImageFormat = args.transient ? "png" : preferredFormat;
+    const effort = this.options.webpEffort ?? pageImageWebpEffort({ retentionHours: args.document.artifactRetentionHours });
     // Engines and formats get separate key spaces so an A/B run never mixes their pixels and a
     // WebP object never overwrites (or is mistaken for) an existing PNG one.
     const resolved = await this.resolveEngine();
@@ -271,7 +285,7 @@ export class PdfRasterCache {
       await Promise.all(pageNumbers.map(async (pageNumber) => {
         // Preferred format first, then the PNG variant: PNG objects written before the switch
         // (or during a cwebp outage) are served as they are rather than re-rendered.
-        for (const pageFormat of format === "webp" ? ["webp", "png"] as const : ["png"] as const) {
+        for (const pageFormat of preferredFormat === "webp" ? ["webp", "png"] as const : ["png"] as const) {
           const key = keyFor(pageNumber, pageFormat);
           const size = await this.storage.objectSize(key);
           if (size !== null) {
@@ -291,8 +305,10 @@ export class PdfRasterCache {
           pageNumber: number,
           png: Buffer,
           pngPath: string,
+          effectiveDpi: number | undefined,
           dimensions: { widthPx: number | null; heightPx: number | null } = readPngDimensions(png),
         ) => {
+          const density = effectiveDpi === undefined ? {} : { effectiveDpi: Math.round(effectiveDpi) };
           if (format === "webp") {
             const encoded = await encodeLosslessWebp({
               runner: this.runner,
@@ -312,14 +328,14 @@ export class PdfRasterCache {
                 tags: ["page-image", `effort:${encoded.effort}`],
                 metadata: { pageNumber, pngBytes: png.byteLength, webpBytes: encoded.bytes.byteLength, effort: encoded.effort },
               });
-              stored.set(pageNumber, { key, mimeType: "image/webp", sizeBytes: encoded.bytes.byteLength, widthPx: encoded.widthPx, heightPx: encoded.heightPx, cacheHit: false });
+              stored.set(pageNumber, { key, mimeType: "image/webp", sizeBytes: encoded.bytes.byteLength, widthPx: encoded.widthPx, heightPx: encoded.heightPx, cacheHit: false, ...density });
               return;
             }
             reportPageImageFormatFallback({ status: encoded.status, reason: encoded.reason, pageNumber, documentId: args.document.id });
           }
           const key = keyFor(pageNumber, "png");
           await this.storage.putBytes(key, png, "image/png");
-          stored.set(pageNumber, { key, mimeType: "image/png", sizeBytes: png.byteLength, ...dimensions, cacheHit: false });
+          stored.set(pageNumber, { key, mimeType: "image/png", sizeBytes: png.byteLength, ...dimensions, cacheHit: false, ...density });
         };
 
         let nativeDone = false;
@@ -337,7 +353,7 @@ export class PdfRasterCache {
                 // The encoder reads a file in the sandbox's temp workspace, never in-process bytes.
                 const pngPath = path.join(scratch, `native-page-${pageNumber}.png`);
                 await writeFile(pngPath, page.bytes);
-                await persist(pageNumber, page.bytes, pngPath, { widthPx: page.widthPx, heightPx: page.heightPx });
+                await persist(pageNumber, page.bytes, pngPath, page.dpi, { widthPx: page.widthPx, heightPx: page.heightPx });
               }
               nativeDone = true;
             }
@@ -352,6 +368,9 @@ export class PdfRasterCache {
           }
         }
         const pdftoppmPages = nativeDone ? [] : pageNumbers.filter((pageNumber) => !stored.has(pageNumber));
+        // Encode page N while page N+1 renders: at most one encode in flight beside one render.
+        let encoding: Promise<void> | null = null;
+        try {
         for (const selectedPage of pdftoppmPages) {
           const range = { first: selectedPage, last: selectedPage };
           const sizePlan = await this.runner.pdfPageSizes(source.path, selectedPage, selectedPage);
@@ -382,8 +401,20 @@ export class PdfRasterCache {
             });
             if (!filename) throw new Error(`pdftoppm did not produce page ${pageNumber}`);
             const pngPath = path.join(scratch, filename);
-            await persist(pageNumber, await readFile(pngPath), pngPath);
+            const png = await readFile(pngPath);
+            const rendered = readPngDimensions(png);
+            const longEdgePt = Math.max(Number(size[1]), Number(size[2]));
+            const effectiveDpi = rendered.widthPx && rendered.heightPx
+              ? Math.max(rendered.widthPx, rendered.heightPx) * 72 / longEdgePt
+              : effectiveRasterDpi(Number(size[1]), Number(size[2]), dpi);
+            if (encoding) await encoding;
+            encoding = persist(pageNumber, png, pngPath, effectiveDpi, rendered);
           }
+        }
+        if (encoding) await encoding;
+        } finally {
+          // Never remove scratch under a running encode; its failure is already being thrown.
+          await (encoding as Promise<void> | null)?.catch(() => undefined);
         }
       } finally {
         await rm(scratch, { recursive: true, force: true });
@@ -404,6 +435,7 @@ export class PdfRasterCache {
         mimeType: page.mimeType,
         engine: engineName,
         dpi,
+        ...(page.effectiveDpi === undefined ? {} : { effectiveDpi: page.effectiveDpi }),
       };
     });
   }
@@ -440,6 +472,7 @@ interface StoredPage {
   widthPx: number | null;
   heightPx: number | null;
   cacheHit: boolean;
+  effectiveDpi?: number;
 }
 
 function clampDpi(dpi: number | undefined): number {

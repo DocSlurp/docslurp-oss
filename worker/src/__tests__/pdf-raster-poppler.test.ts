@@ -74,4 +74,25 @@ describe.skipIf(!available)("real Poppler allocation geometry", () => {
       await rm(root, { recursive: true, force: true });
     }
   });
+
+  it("reports the effective DPI of an oversized page (11x17 in at 300 dpi renders at ~235)", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "poppler-dpi-"));
+    try {
+      const source = path.join(root, "tabloid.pdf");
+      await writeFile(source, pdf(0, 1, [792, 1224]));
+      const runner = new CommandRunner();
+      vi.spyOn(runner, "run").mockImplementation(async plan => execute(plan.binary, plan.args, { timeout: 30_000 }));
+      const storage = { objectSize: async () => null, putBytes: async () => {}, uri: (key: string) => key };
+      const sources = { get: async () => ({ path: source }) } as unknown as PdfSourceCache;
+      const cache = new PdfRasterCache(runner, storage, sources, { engine: "pdftoppm" });
+      const document = { id: "doc", userId: "user", mimeType: "application/pdf", pageCount: 1 } as Document;
+      const [result] = await cache.renderSelectedPages({ document, runId: "run", pageNumbers: [1], dpi: 300 });
+      expect(result!.dpi).toBe(300);
+      expect(result!.effectiveDpi).toBe(235);
+      expect(Math.max(result!.widthPx!, result!.heightPx!)).toBe(4000);
+    } finally {
+      vi.restoreAllMocks();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
 });

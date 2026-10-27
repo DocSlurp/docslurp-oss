@@ -122,12 +122,70 @@ describe.skipIf(!available)("lossless WebP page images", () => {
     }
   });
 
-  it("fails closed when the sandbox refuses the encoder, storing nothing", async () => {
+  it("never encodes outside the sandbox: a refused encoder keeps the sandbox-rendered PNG", async () => {
     const storage = memoryStorage();
-    const { runner } = recordingRunner({ refuse: "cwebp" });
+    const { runner, commands } = recordingRunner({ refuse: "cwebp" });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const cache = new PdfRasterCache(runner, storage, sources, { engine: "pdftoppm", format: "webp" });
-    await expect(cache.renderSelectedPages({ document: document(), runId: "run", pageNumbers: [1] })).rejects.toThrow("sandbox refused cwebp");
-    expect(storage.objects.size).toBe(0);
+
+    const [page] = await cache.renderSelectedPages({ document: document(), runId: "run", pageNumbers: [1] });
+
+    // The only cwebp attempt went to the session, which refused it; nothing was spawned around it.
+    expect(commands.filter((command) => path.basename(command.binary) === "cwebp")).toHaveLength(1);
+    expect(page).toMatchObject({ mimeType: "image/png", artifactKey: "user/run/images/doc/v2-150dpi/page-1.png" });
+    expect([...storage.objects.keys()]).toEqual([page!.artifactKey]);
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining("status=failed"));
+  });
+
+  it("falls back to PNG when a remote sandbox image has no cwebp", async () => {
+    const storage = memoryStorage();
+    const local = recordingRunner();
+    const remoteSession: SandboxSession = {
+      providerId: "remote",
+      isolation: { filesystem: true, network: "none", processes: true, location: "remote" },
+      async run(command) {
+        if (path.basename(command.binary) === "cwebp") return { exitCode: 127, stdout: "", stderr: "sh: 1: cwebp: not found" };
+        // Everything else runs locally, standing in for a remote image that has Poppler.
+        const child = spawnSync(command.binary, command.args, { env: command.env, encoding: "utf8" });
+        return { exitCode: child.status, stdout: child.stdout, stderr: child.stderr };
+      },
+      async close() {},
+    };
+    const runner = new CommandRunner({ openSession: async () => remoteSession });
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const cache = new PdfRasterCache(runner, storage, sources, { engine: "pdftoppm", format: "webp" });
+
+    const [page] = await cache.renderSelectedPages({ document: document(), runId: "run", pageNumbers: [1] });
+
+    expect(page).toMatchObject({ mimeType: "image/png", cacheHit: false });
+    expect(local.commands).toHaveLength(0);
+  });
+
+  it("skips the WebP encode for transient renders and uses a fixed effort when configured", async () => {
+    const storage = memoryStorage();
+    const { runner, commands } = recordingRunner();
+    const [transient] = await new PdfRasterCache(runner, storage, sources, { engine: "pdftoppm", format: "webp" })
+      .renderSelectedPages({ document: document(), runId: "transient", pageNumbers: [1], transient: true });
+    expect(transient).toMatchObject({ mimeType: "image/png" });
+    expect(commands.some((command) => path.basename(command.binary) === "cwebp")).toBe(false);
+
+    await new PdfRasterCache(runner, storage, sources, { engine: "pdftoppm", format: "webp", webpEffort: 1 })
+      .renderSelectedPages({ document: document({ artifactRetentionHours: null }), runId: "reader", pageNumbers: [1] });
+    const encode = commands.find((command) => path.basename(command.binary) === "cwebp")!;
+    expect(encode.args[encode.args.indexOf("-z") + 1]).toBe("1");
+
+    // A transient render still reuses a stored WebP.
+    const [reused] = await new PdfRasterCache(runner, storage, sources, { engine: "pdftoppm", format: "webp" })
+      .renderSelectedPages({ document: document(), runId: "reader", pageNumbers: [1], transient: true });
+    expect(reused).toMatchObject({ cacheHit: true, mimeType: "image/webp" });
+  });
+
+  it("reports the effective DPI of fresh renders", async () => {
+    const storage = memoryStorage();
+    const { runner } = recordingRunner();
+    const [page] = await new PdfRasterCache(runner, storage, sources, { engine: "pdftoppm", format: "webp" })
+      .renderSelectedPages({ document: document(), runId: "run", pageNumbers: [1], dpi: 150 });
+    expect(page).toMatchObject({ dpi: 150, effectiveDpi: 150 });
   });
 
   it("stores PNG with a loud warning when cwebp is missing", async () => {

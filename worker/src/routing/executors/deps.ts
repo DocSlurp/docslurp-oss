@@ -30,13 +30,14 @@ import { visionConfigForModel } from "../routed-vision.js";
 import { RASTER_PX_PER_POINT } from "./merge.js";
 import { NATIVE_PDF_MARKDOWN_EXTRACTOR, NATIVE_PDF_TEXT_EXTRACTOR } from "./native-pdf.js";
 import type { ExecutorDeps, NativePdfOcrResult, RasterRef } from "./types.js";
+import { effectiveRasterDpi } from "../../lib/raster-bounds.js";
 
 export interface ProductionExecutorDepsInput {
   runId: string;
   document: Document;
   storage: Pick<ArtifactStore, "bucket" | "getJson" | "downloadToTempFile">;
   rasters: Pick<PdfRasterCache, "renderSelectedPages" | "sourcePath"> & Partial<Pick<PdfRasterCache, "renderClip">>;
-  runner: Pick<CommandRunner, "tesseractOcr" | "florence2" | "run">;
+  runner: Pick<CommandRunner, "tesseractOcr" | "florence2" | "run"> & Partial<Pick<CommandRunner, "pdfPageSizes">>;
   /** Ledger lookup for the document's canonical-document artifact uri. */
   canonicalUri: () => string | null;
   selection: VisionConfig;
@@ -196,6 +197,21 @@ export function createProductionExecutorDeps(input: ProductionExecutorDepsInput)
     },
 
     async withRaster(pageNumber, fn) {
+      /**
+       * A cached WebP page carries no density and the cache does not know the bounded DPI it was
+       * rendered at, so measure the page (sandboxed pdfinfo) and apply the same bounds.
+       */
+      const effectiveDpiFor = async (pageNumber: number, requestedDpi: number | undefined): Promise<number | undefined> => {
+        if (!requestedDpi || !input.runner.pdfPageSizes || input.document.mimeType !== "application/pdf") return requestedDpi;
+        try {
+          const plan = await input.runner.pdfPageSizes(await input.rasters.sourcePath(input.document), pageNumber, pageNumber);
+          if (!plan.available) return requestedDpi;
+          const size = (await input.runner.run(plan)).stdout.match(/(?:Page\s+\d+\s+size|Page size):\s+([\d.]+)\s+x\s+([\d.]+)\s+pts/);
+          return size ? Math.round(effectiveRasterDpi(Number(size[1]), Number(size[2]), requestedDpi)) : requestedDpi;
+        } catch {
+          return requestedDpi;
+        }
+      };
       const [page] = await input.rasters.renderSelectedPages({ document: input.document, runId: input.runId, pageNumbers: [pageNumber] });
       if (!page) return null;
       if (page.heightPx) heights.set(pageNumber, page.heightPx / RASTER_PX_PER_POINT);
@@ -204,7 +220,8 @@ export function createProductionExecutorDeps(input: ProductionExecutorDepsInput)
         trustedTempDownloadPattern("docslurp-router-raster-", input.document),
       );
       try {
-        return await fn({ path: imagePath, mimeType: page.mimeType, pageNumber, ...(page.mimeType === "image/webp" && page.dpi ? { dpi: page.dpi } : {}) });
+        const dpi = page.mimeType === "image/webp" ? page.effectiveDpi ?? await effectiveDpiFor(pageNumber, page.dpi) : undefined;
+        return await fn({ path: imagePath, mimeType: page.mimeType, pageNumber, ...(dpi ? { dpi } : {}) });
       } finally {
         await cleanupTempFile(imagePath);
       }

@@ -2,7 +2,7 @@ import { availableParallelism } from "node:os";
 
 import type { NativePdfDocument, NativePdfEngine, Bbox } from "./types.js";
 import { NativePdfError } from "./types.js";
-import { boundedRasterDpi, boundedRasterEdge } from "../lib/raster-bounds.js";
+import { boundedRasterDpi, boundedRasterEdge, effectiveRasterDpi } from "../lib/raster-bounds.js";
 
 /**
  * Raster helper for the `native-pdf` engine: renders selected pages (and clipped
@@ -18,6 +18,8 @@ export interface NativeRenderedPage {
   widthPx: number | null;
   heightPx: number | null;
   mimeType: "image/png" | "image/jpeg";
+  /** Effective pixel density after the raster bounds (full-page renders only). */
+  dpi?: number;
 }
 
 export interface NativeRenderOptions {
@@ -71,7 +73,7 @@ export async function renderPagesNative(
           format,
           ...(options.gray ? { gray: true } : {}),
         });
-        out.set(pageNumber, { pageNumber, bytes, ...imageDimensions(bytes), mimeType });
+        out.set(pageNumber, { pageNumber, bytes, ...imageDimensions(bytes), mimeType, dpi: effectiveRasterDpi(size.widthPt, size.heightPt, options.dpi) });
       }
     }));
   } finally {
