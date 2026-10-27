@@ -139,12 +139,39 @@ describe("in-memory limiter fallback", () => {
   const ipConsume = (store: ReturnType<typeof createMemoryRateLimitStore>, ip: string, now = 1_000, limit = 5, penaltyMs = 0) =>
     store.consume({ blockKey: `b:${ip}`, counters: [{ key: `k:${ip}`, limit, windowMs: 60_000, penaltyMs, prefixes: rateLimitPrefixes(ip) }], now, countDenied: true });
 
-  it("stays bounded under a flood of identities by evicting the least recently used counters", async () => {
+  it("refuses new identities at capacity without resetting a live exhausted budget", async () => {
     const store = createMemoryRateLimitStore({ maxEntries: 1_000 });
     const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
-    for (let i = 0; i < 3_000; i++) expect((await ipConsume(store, `198.51.${i >> 8}.${i & 255}`)).full).toBeUndefined();
-    expect(store.size).toBeLessThanOrEqual(1_000);
-    expect(warn).toHaveBeenCalledWith(expect.stringContaining("evicting the least recently used"));
+    await ipConsume(store, "203.0.113.9", 1_000, 1);
+    for (let i = 0; i < 3_000; i++) await ipConsume(store, `198.51.${i >> 8}.${i & 255}`);
+    expect(store.size).toBe(1_000);
+    expect((await ipConsume(store, "203.0.113.9", 2_000, 1)).denied).toBe(0);
+    expect((await ipConsume(store, "203.0.113.10", 2_000)).full).toBe(true);
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining("without evicting live limits"));
+    expect((await ipConsume(store, "203.0.113.10", 180_000)).full).toBeUndefined();
+    warn.mockRestore();
+  });
+
+  it("reserves all new counters atomically and preserves existing counters", async () => {
+    const store = createMemoryRateLimitStore({ maxEntries: 1_000 });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    for (let i = 0; i < 999; i++) await ipConsume(store, `198.51.${i >> 8}.${i & 255}`);
+    const result = await store.consume({ blockKey: "new", now: 1_000, countDenied: true,
+      counters: ["one", "two"].map(key => ({ key, limit: 1, windowMs: 60_000 })) });
+    expect(result).toMatchObject({ full: true, counted: false });
+    expect(store.size).toBe(999);
+    warn.mockRestore();
+  });
+
+  it("reserves prefix capacity for every new counter before changing any state", async () => {
+    const store = createMemoryRateLimitStore({ maxEntries: 1_000 });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    for (let i = 0; i < 99; i++) await ipConsume(store, v6("2001:db8:aaaa", i));
+    const result = await store.consume({ blockKey: "new", now: 1_000, countDenied: true,
+      counters: ["prefix-one", "prefix-two"].map(key => ({ key, limit: 1, windowMs: 60_000, prefixes: rateLimitPrefixes(v6("2001:db8:aaaa", 100)) })) });
+    expect(result).toMatchObject({ full: true, counted: false });
+    expect(store.size).toBe(99);
+    expect((await ipConsume(store, v6("2001:db8:aaaa", 0), 1_000, 1)).denied).toBe(0);
     warn.mockRestore();
   });
 
@@ -173,13 +200,17 @@ describe("in-memory limiter fallback", () => {
     warn.mockRestore();
   });
 
-  it("caps the jail map, dropping the soonest-expiring blocks first", async () => {
+  it("preserves even the soonest-expiring live jail when the block map fills", async () => {
     const store = createMemoryRateLimitStore({ maxEntries: 4_000 });
-    const jail = (id: string, penaltyMs: number) => store.consume({ blockKey: `b:${id}`, counters: [{ key: `k:${id}`, limit: 1, windowMs: 60_000, penaltyMs }], now: 1_000, countDenied: true });
-    await jail("long", 3_600_000); await jail("long", 3_600_000);
-    for (let i = 0; i < 1_500; i++) { await jail(`short-${i}`, 1_000 + i); await jail(`short-${i}`, 1_000 + i); }
-    expect(store.blockCount).toBeLessThanOrEqual(1_000);
-    expect((await jail("long", 3_600_000)).blockedMs).toBeGreaterThan(0);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const jail = (id: string, penaltyMs: number, now = 1_000) => store.consume({ blockKey: `b:${id}`, counters: [{ key: `k:${id}`, limit: 1, windowMs: 60_000, penaltyMs }], now, countDenied: true });
+    await jail("victim", 600_000); await jail("victim", 600_000);
+    for (let i = 0; i < 1_500; i++) { await jail(`attacker-${i}`, 900_000); await jail(`attacker-${i}`, 900_000); }
+    expect(store.blockCount).toBe(1_000);
+    expect((await jail("victim", 600_000, 2_000)).blockedMs).toBe(599_000);
+    expect((await jail("new", 900_000, 2_000)).full).toBe(true);
+    expect((await jail("new", 900_000, 1_000_000)).full).toBeUndefined();
+    warn.mockRestore();
   });
 
   it("falls back to the per-process limiter when Redis is unreachable, and still denies over-limit bursts", async () => {
