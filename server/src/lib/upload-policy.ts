@@ -123,26 +123,26 @@ export function enforceRequestContentLength(rawContentLength: string | null | un
   }
 }
 
-/** Envelope message and details for a multipart (/v1/ingest/bulk) request over MAX_MULTIPART_UPLOAD_BYTES. */
+/** Envelope message and details for a multipart (/v1/uploads/bulk) request over MAX_MULTIPART_UPLOAD_BYTES. */
 export function multipartTooLarge(maxBytes: number) {
   const mb = Math.round((maxBytes / (1024 * 1024)) * 10) / 10;
   return {
     message:
-      `Multipart uploads to /v1/ingest/bulk are limited to ${mb} MB per request. ` +
-      "Upload larger files with a direct upload session: POST /v1/ingest/direct/sessions, " +
-      "PUT each file to the returned URLs, then POST /v1/ingest/direct/sessions/{sessionId}/confirm. " +
+      `Multipart uploads to /v1/uploads/bulk are limited to ${mb} MB per request. ` +
+      "Upload larger files with a direct upload session: POST /v1/uploads/direct/sessions, " +
+      "PUT each file to the returned URLs, then POST /v1/uploads/direct/sessions/{sessionId}/confirm. " +
       "The SDK (client.upload) and CLI (docslurp upload) do this automatically.",
     details: {
       maxBytes,
       directUpload: {
-        createSession: "/v1/ingest/direct/sessions",
+        createSession: "/v1/uploads/direct/sessions",
         maxFileBytes: env.maxUploadBytes,
       },
     },
   };
 }
 
-/** Body limit for /v1/ingest/bulk that answers 413 with the direct-upload hint. */
+/** Body limit for /v1/uploads/bulk that answers 413 with the direct-upload hint. */
 export function multipartBodyLimit(maxBytes: number) {
   return bodyLimit({
     maxSize: maxBytes,

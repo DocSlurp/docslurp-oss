@@ -8,8 +8,8 @@ const { multipartBodyLimit, multipartTooLarge } = await import("../lib/upload-po
 function app(maxBytes: number) {
   const reached = vi.fn();
   const hono = new Hono();
-  hono.use("/v1/ingest/bulk", multipartBodyLimit(maxBytes));
-  hono.post("/v1/ingest/bulk", async (c) => {
+  hono.use("/v1/uploads/bulk", multipartBodyLimit(maxBytes));
+  hono.post("/v1/uploads/bulk", async (c) => {
     await c.req.parseBody({ all: true });
     reached();
     return c.json({ ok: true });
@@ -26,18 +26,18 @@ function form(bytes: number): FormData {
 describe("multipart upload cap", () => {
   it("accepts a small multipart upload", async () => {
     const { hono, reached } = app(1024 * 1024);
-    const response = await hono.request("/v1/ingest/bulk", { method: "POST", body: form(10_000) });
+    const response = await hono.request("/v1/uploads/bulk", { method: "POST", body: form(10_000) });
     expect(response.status).toBe(200);
     expect(reached).toHaveBeenCalled();
   });
 
   it("rejects an oversized body with 413 and points at direct upload sessions, before the handler buffers it", async () => {
     const { hono, reached } = app(64 * 1024);
-    const response = await hono.request("/v1/ingest/bulk", { method: "POST", body: form(200 * 1024) });
+    const response = await hono.request("/v1/uploads/bulk", { method: "POST", body: form(200 * 1024) });
     expect(response.status).toBe(413);
     const body = await response.json();
-    expect(body).toMatchObject({ error: { code: "payload_too_large", details: { maxBytes: 64 * 1024, directUpload: { createSession: "/v1/ingest/direct/sessions" } } } });
-    expect(body.error.message).toContain("/v1/ingest/direct/sessions");
+    expect(body).toMatchObject({ error: { code: "payload_too_large", details: { maxBytes: 64 * 1024, directUpload: { createSession: "/v1/uploads/direct/sessions" } } } });
+    expect(body.error.message).toContain("/v1/uploads/direct/sessions");
     expect(reached).not.toHaveBeenCalled();
   });
 
@@ -52,7 +52,7 @@ describe("multipart upload cap", () => {
       controller.enqueue(bytes.slice(offset, next));
       offset = next;
     } });
-    const request = new Request("http://localhost/v1/ingest/bulk", {
+    const request = new Request("http://localhost/v1/uploads/bulk", {
       method: "POST", headers: { "content-type": encoded.headers.get("content-type")! }, body, duplex: "half",
     } as RequestInit);
     expect(request.headers.has("content-length")).toBe(false);
