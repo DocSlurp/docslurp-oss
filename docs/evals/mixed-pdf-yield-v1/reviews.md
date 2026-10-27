@@ -316,3 +316,14 @@ Exact repeated output remains valid. The reported four-block projection is a
 regression control: the deletion receives formula recall .5 and fails acceptance;
 exact output passes. All 46 focused tests pass. No extraction measurements are
 promoted by this change; the revised scorer needs a fresh identity when run.
+
+The round-4 methods reviewer supplied another ownership counterexample involving
+recased prose, already rejected by the subsequent repeated-mention accounting.
+That exact projection now has a dedicated regression. The reviewer also identified
+a replace-and-restore race between snapshot path hashing and execution. The binder
+now reads one byte buffer, hashes that buffer and executes those same bytes via
+the isolated Python subprocess's stdin; it does not reopen the path for code.
+A real subprocess control replaces the path with raising code during execution,
+restores it afterward, and confirms that only the verified buffer executes.
+Persistent snapshot changes still reject. All 48 focused tests pass. Earlier
+proof bundles are retained; any new promotion must use fresh execution provenance.

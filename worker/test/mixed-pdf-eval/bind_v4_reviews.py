@@ -5,6 +5,7 @@ PDFs are never opened here. The separately supplied evidence index is trusted
 coordinator configuration, not an authorization field inside an approval.
 """
 import argparse
+import hashlib
 import json
 from pathlib import Path
 import shutil
@@ -22,10 +23,14 @@ def entry(path):
 
 
 def run_score_snapshot(snapshot, expected_hash, arguments):
-    """Execute the attested copy, rejecting mutations around the invocation."""
-    if file_hash(snapshot)!=expected_hash:raise ValueError('changed-score-snapshot')
-    result=subprocess.run([sys.executable,'-I',str(snapshot),*arguments],
-                          capture_output=True,text=True,check=True)
+    """Execute one verified byte buffer, never reopen its mutable source path."""
+    payload=snapshot.read_bytes()
+    if hashlib.sha256(payload).hexdigest()!=expected_hash:raise ValueError('changed-score-snapshot')
+    bootstrap=("import sys; source=sys.stdin.buffer.read(); sys.argv=sys.argv[1:]; "
+               "exec(compile(source,sys.argv[0],'exec'),"
+               "{'__name__':'__main__','__file__':sys.argv[0]})")
+    result=subprocess.run([sys.executable,'-I','-c',bootstrap,str(snapshot),*arguments],
+                          input=payload,capture_output=True,check=True)
     if file_hash(snapshot)!=expected_hash:raise ValueError('changed-score-snapshot')
     return json.loads(result.stdout)
 

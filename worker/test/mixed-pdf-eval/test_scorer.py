@@ -80,6 +80,23 @@ class ScorerTests(unittest.TestCase):
         self.assertFalse(bad['acceptable']);self.assertEqual(bad['printedFormulaRecall'],.5)
         self.assertFalse(content_score(ref,ref['expectedMarkdown'].replace(formula,'q = A / b'),tolerant_markdown)['acceptable'])
 
+    def test_recased_prose_cannot_mask_corrupt_formula_occurrence(self):
+        from v4_reference import page_reference
+        formula='q = a / b'
+        sections=['padding '*300,'For this Rule',formula,'End. Common detail belongs here.',
+                  'FOR THIS RULE q = a / b END. COMMON DETAIL BELONGS HERE.']
+        blocks=[dict(id=str(i),visible=True,displayText=text,cells=[],
+                     formula=dict(display=formula,latex='q=a/b') if i==2 else None)
+                for i,text in enumerate(sections)]
+        ref=page_reference(dict(id='invented',sizePt=[612,792],blocks=blocks,
+            readingOrder=[str(i) for i in range(len(blocks))],sections=sections,paragraphs=sections,
+            expectedMarkdown='\n\n'.join(sections)))
+        self.assertTrue(content_score(ref,ref['expectedMarkdown'],tolerant_markdown)['acceptable'])
+        bad='\n\n'.join([sections[0],'FOR THIS RULE','q = A / b',
+                         sections[3].upper(),'For this Rule q = a / b End. Common detail belongs here.'])
+        score=content_score(ref,bad,tolerant_markdown)
+        self.assertFalse(score['acceptable']);self.assertLess(score['printedFormulaRecall'],1)
+
     def test_case_sensitive_formulas_cannot_swap_identical_contexts(self):
         first='q = a / b';second='q = A / b'
         text='padding '*300+'Rule '+first+' end. Rule '+second+' end.'

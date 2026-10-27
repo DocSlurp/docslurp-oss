@@ -180,7 +180,9 @@ class V4SealTests(unittest.TestCase):
             snapshot.write_text('# frozen');original.write_text('# current')
             digest=file_hash(snapshot)
             def invoke(command,**kwargs):
-                self.assertEqual(command[2],str(snapshot))
+                self.assertEqual(command[2],'-c')
+                self.assertEqual(command[4],str(snapshot))
+                self.assertEqual(kwargs['input'],b'# frozen')
                 original.write_text('# concurrent source edit')
                 return SimpleNamespace(stdout='{"pass":true}')
             with patch('bind_v4_reviews.subprocess.run',side_effect=invoke):
@@ -191,6 +193,22 @@ class V4SealTests(unittest.TestCase):
             with patch('bind_v4_reviews.subprocess.run',side_effect=mutate):
                 with self.assertRaisesRegex(ValueError,'changed-score-snapshot'):
                     run_score_snapshot(snapshot,digest,[])
+
+    def test_replace_restore_cannot_change_executed_scorer_bytes(self):
+        import subprocess
+        from bind_v4_reviews import run_score_snapshot
+        with tempfile.TemporaryDirectory(dir=os.environ['TMPDIR']) as tmp:
+            snapshot=Path(tmp)/'score.py'
+            source=b'import json; print(json.dumps({"executed":"verified"}))'
+            snapshot.write_bytes(source);digest=file_hash(snapshot)
+            invoke=subprocess.run
+            def replace_restore(command,**kwargs):
+                snapshot.write_text('raise RuntimeError("unattested code executed")')
+                try:return invoke(command,**kwargs)
+                finally:snapshot.write_bytes(source)
+            with patch('bind_v4_reviews.subprocess.run',side_effect=replace_restore):
+                result=run_score_snapshot(snapshot,digest,[])
+            self.assertEqual(result,dict(executed='verified'))
 
     def test_native_and_delivered_pdf_share_identity_namespace(self):
         manifest, spec = self.manifest(split=True)
