@@ -39,7 +39,7 @@ test('targets a configured workspace ID, slug or name and reports upstream error
   await assert.rejects(indexDocs([], { apiUrl: 'https://docslurp.io', workspace: 'product-manuals' }, 'secret', async (url, init) => {
     sent.push(init.body.get('workspace'));
     return new Response('secret', { status: 401 });
-  }), /^Error: DocSlurp \/v1\/ingest\/bulk: HTTP 401$/);
+  }), /^Error: DocSlurp \/v1\/uploads\/bulk: HTTP 401$/);
   assert.deepEqual(sent, ['product-manuals']);
 });
 test('crawls only listed docs routes on the site origin and refuses redirects', async () => {
