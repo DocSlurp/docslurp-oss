@@ -9,6 +9,7 @@ import fitz
 from contract import file_hash,identity_hash,immutable_json,validate_policy_receipt,validate_manifest,evaluation_identity
 from measure import invoke,features,ocr,OCR_BINARY_HASH,OCR_LANGUAGE_HASH
 from optimize import choose
+from spatial_evidence import parse_poppler_bbox
 
 def extract(path,policy,cache):
     doc=fitz.open(path);mode=policy['mode'];texts=[]
@@ -18,6 +19,8 @@ def extract(path,policy,cache):
         native=output.decode().split('\f')
         if len(native)==len(doc)+1 and not native[-1].strip():native.pop()
         if len(native)!=len(doc):raise RuntimeError('timing-page-alignment')
+        boxes,_=invoke(['pdftotext','-bbox-layout',str(path),'-'])
+        if len(parse_poppler_bbox(boxes))!=len(doc):raise RuntimeError('timing-word-page-alignment')
     if mode=='ladder':invoke(['pdfimages','-list',str(path)])
     residual={}
     if mode=='ladder' and policy.get('byteThreshold',0)>0 and policy['byteBasis']!='contentDecodedBytes':

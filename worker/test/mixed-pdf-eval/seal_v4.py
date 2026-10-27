@@ -151,7 +151,9 @@ def seal(root, out, approval_path, evidence_index=None):
         family = f"mixed-source-{case['familyId']:04d}"
         result = dict(schema='mixed-pdf-authored@v2', family=family, split=case['split'], pages=refs,
                       labels=[dict(name='visible_page_content', expected=[p['expectedMarkdown'] for p in refs])])
-        bare = [{k: v for k, v in p.items() if k != 'pageId'} for p in refs]
+        # Display geometry varies by derivative; semantic ancestry does not.
+        # Full per-case reference hashes still bind the transformed regions.
+        bare = [{k: v for k, v in p.items() if k not in ['pageId','formulaRegions']} for p in refs]
         content_hashes = [page_content_hash(p) for p in bare]
         if case.get('pageContentHashes') is not None and case['pageContentHashes'] != content_hashes:
             raise ValueError('predeclared-page-content-mismatch')
@@ -183,7 +185,7 @@ def seal(root, out, approval_path, evidence_index=None):
                     referenceAdapterHash=file_hash(Path(__file__).with_name('v4_reference.py')))
     manifest['approvalCodeHash'] = file_hash(Path(__file__).with_name('approval_v4.py'))
     manifest['projectionDependencyHashes'] = {name: file_hash(Path(__file__).with_name(name))
-        for name in ['approval_v4.py', 'evidence_v4.py', 'contract.py', 'fools_gold_v4_common.py', 'v4_reference.py']}
+        for name in ['approval_v4.py', 'evidence_v4.py','spatial_evidence.py', 'contract.py', 'fools_gold_v4_common.py', 'v4_reference.py']}
     validate_manifest(manifest)
     immutable_json(out / 'manifest.json', manifest)
     immutable_json(out / 'generation-manifest.json', original)

@@ -88,3 +88,12 @@ zero labeled-value score: `quality` and `textualAcceptable` retain the diagnosti
 result. Region-grounded extraction evidence is a required next capability before
 these pages can support accepted thresholds or savings. Earlier v3 textual scores
 do not establish formula ownership and are not promotion evidence.
+
+Coordinate preparation now retains raw Poppler XHTML and Tesseract TSV alongside
+word boxes, PDF rotation/crop/media/display metadata and source hashes. Native
+capture costs a second Poppler invocation, included in native and paired timing
+work. OCR already requests TSV; parsing is included. All raw word evidence remains
+unnormalized/unverified: independent controls exposed differing Poppler page-size
+and word-coordinate conventions on rotated pages. Final reference formula regions
+come from transformed visible glyph geometry. These fields prepare a grounded
+scorer; they do not yet make formula acceptance evidence complete.

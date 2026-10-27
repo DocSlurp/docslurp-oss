@@ -24,6 +24,7 @@ import time
 import unicodedata
 
 import fitz
+from spatial_evidence import parse_poppler_bbox,parse_tesseract_tsv
 from contract import (evaluation_identity,identity_hash,file_hash,immutable_json,validate_manifest,
                       validate_policy_receipt,validate_labels,validate_complete_inventory,validate_panel_binding,validate_panel_manifest)
 
@@ -250,7 +251,7 @@ def invoke(argv):
     return completed.stdout,elapsed
 
 def ocr(image, cache, dpi, psm, use_cache=True):
-    key=sha(image+f"{OCR_BINARY_HASH}-{OCR_LANGUAGE_HASH}-dpi{dpi}-psm{psm}-txt-tsv-v2".encode())
+    key=sha(image+f"{OCR_BINARY_HASH}-{OCR_LANGUAGE_HASH}-dpi{dpi}-psm{psm}-txt-tsv-geometry-v3".encode())
     output=cache/f"{key}.json"
     if use_cache and output.exists():
         return {**json.loads(output.read_text()), "cacheHit":True}
@@ -259,11 +260,16 @@ def ocr(image, cache, dpi, psm, use_cache=True):
         path=Path(tmp)/"page.png"; path.write_bytes(image)
         base=Path(tmp)/"output"
         _,elapsed=invoke(["tesseract",str(path),str(base),"-l","eng","--psm",str(psm),"--dpi",str(dpi),"txt","tsv"])
-        words=[r for r in csv.DictReader(base.with_suffix(".tsv").read_text().splitlines(),delimiter="\t") if float(r['conf'])>=0 and r['text'].strip()]
+        parse_started=time.perf_counter()
+        raw_tsv=base.with_suffix('.tsv').read_text()
+        evidence=parse_tesseract_tsv(raw_tsv)
+        words=evidence['words'];text=base.with_suffix('.txt').read_text()
         weight=sum(len(r['text']) for r in words)
-        confidence=sum(float(r['conf'])*len(r['text']) for r in words)/max(1,weight)
-        result={"text":base.with_suffix(".txt").read_text(),"seconds":elapsed,"confidence":confidence,
-                "lowConfidenceWordShare":sum(float(r['conf'])<60 for r in words)/max(1,len(words)),
+        confidence=sum(r['confidence']*len(r['text']) for r in words)/max(1,weight)
+        parse_seconds=time.perf_counter()-parse_started
+        result={"text":text,"seconds":elapsed+parse_seconds,"confidence":confidence,
+                "wordEvidence":evidence,"rawWordTsv":raw_tsv,"rawWordTsvHash":sha(raw_tsv.encode()),"evidenceParseSeconds":parse_seconds,
+                "lowConfidenceWordShare":sum(r['confidence']<60 for r in words)/max(1,len(words)),
                 "cacheHit":False,"imageHash":sha(image),"execution":{"capturedAt":datetime.now(timezone.utc).isoformat(),"host":socket.gethostname(),"workers":os.environ.get("MIXED_EVAL_WORKERS"),"attempt":os.environ.get("MIXED_EVAL_ATTEMPT")}}
         temp=cache/f"{key}.{os.getpid()}.new"
         temp.write_text(json.dumps(result)); temp.replace(output)
@@ -345,17 +351,26 @@ def measure_case(args):
     native_pages=native.decode().split("\f")
     if len(native_pages)==len(doc)+1 and not native_pages[-1].strip(): native_pages.pop()
     if len(native_pages)!=len(doc): raise RuntimeError("poppler-page-alignment-mismatch")
+    native_bbox,native_bbox_seconds=invoke(['pdftotext','-bbox-layout',str(source),'-'])
+    bbox_parse_started=time.perf_counter();native_evidence=parse_poppler_bbox(native_bbox)
+    native_bbox_seconds+=time.perf_counter()-bbox_parse_started
+    if len(native_evidence)!=len(doc):raise RuntimeError('native-word-page-alignment-mismatch')
+    native_seconds+=native_bbox_seconds
     for index,page in enumerate(doc):
         started=time.perf_counter()
         feat=features(doc,page,native_pages[index])
         probe_seconds=time.perf_counter()-started
-        candidates={"native":{"text":native_pages[index],"seconds":native_seconds/len(doc),"cacheHit":False}}
+        pdf_geometry=dict(rotationDegrees=page.rotation,displaySizePt=[page.rect.width,page.rect.height],
+                          cropBoxPt=list(page.cropbox),mediaBoxPt=list(page.mediabox))
+        native_evidence[index]['pdfGeometry']=pdf_geometry
+        candidates={"native":{"text":native_pages[index],"seconds":native_seconds/len(doc),"cacheHit":False,"wordEvidence":native_evidence[index]}}
         for name,dpi,psm in [("ocr-fast",150,6),("ocr-strong",300,3)]:
             start=time.perf_counter()
             image=page.get_pixmap(dpi=dpi,alpha=False).tobytes("png")
             render_seconds=time.perf_counter()-start
             result=ocr(image,out/"cache",dpi,psm)
             result["renderSeconds"]=render_seconds
+            result["wordEvidence"]["pdfGeometry"]=pdf_geometry
             candidates[name]=result
         outputs.append({"page":index+1,"features":feat,"probeSeconds":probe_seconds,"candidates":candidates})
     # Splitting experiments use exact object lengths and preserve shared-resource identities
@@ -395,8 +410,8 @@ def measure_case(args):
             **{k:case[k] for k in ['classId','layout','producerPath'] if k in case},
             "measureHash":MEASURE_HASH,"caseIdentity":case_identity,
             "baseRegionRasterShare":case["baseRegionRasterShare"],"sourceHash":case["sha256"],
-            "pdfBytes":source.stat().st_size,"nativeSeconds":native_seconds,"imageListSeconds":list_seconds,
-            "pdfimages":listing.decode(),"splits":splits,"pages":outputs}
+            "pdfBytes":source.stat().st_size,"nativeSeconds":native_seconds,"nativeBboxSeconds":native_bbox_seconds,"imageListSeconds":list_seconds,
+            "pdfimages":listing.decode(),"nativeBboxXml":native_bbox.decode(),"nativeBboxHash":sha(native_bbox),"splits":splits,"pages":outputs}
     destination.write_text(json.dumps(result))
     return {"id":case["id"],"pages":len(outputs)}
 

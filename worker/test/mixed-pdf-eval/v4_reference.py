@@ -4,6 +4,7 @@ This is a format adapter, not an acceptance gate. Callers must first validate th
 immutable authoring/transform records and the independent corpus approval receipt.
 """
 import copy
+from spatial_evidence import formula_regions
 
 
 def table_rows(cells):
@@ -54,6 +55,7 @@ def page_reference(page):
         offset+=len(literal)+2
     return {
         'printedFormulaOccurrences': occurrences,
+        'formulaRegions': formula_regions(page),
         'pageId': page.get('pageId', page.get('id')),
         'expectedMarkdown': page['expectedMarkdown'],
         'sections': sections,

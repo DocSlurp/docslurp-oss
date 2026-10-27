@@ -399,3 +399,26 @@ pass when run explicitly outside the active builder's separate a5 test package.
 A broad discovery also encountered that package's missing jsonschema dependency;
 this is retained as an invocation failure, not a passing builder test claim.
 Fresh council review must assess the fail-closed promotion gate and claim limits.
+
+### Council round 8 and coordinate-evidence preparation
+
+Both independent source-only reviewers found no blocking promotion bypass in
+`ed72f8d5`. They confirmed formula evidence remains incomplete regardless of text,
+optimizer and final reporting refuse incomplete/missing flags, and the heading
+mapping correction addresses the regression. Both noted the same low docstring
+assurance; `b1a58598` now explicitly calls the output a textual diagnostic rather
+than semantic ownership. Neither reviewer ran corpus checks or authorized merge.
+
+Fresh capture retains Poppler word boxes/raw XHTML and Tesseract word boxes/raw
+TSV with hashes. It runs without label access, changes cache/run identities, and
+includes capture/parsing work in the corresponding extraction/timing paths. The
+reference adapter derives formula regions from final transformed visible glyphs,
+including rotation/scan transforms, rather than original authoring boxes. Per-case
+hashes bind geometry; semantic family ancestry excludes derivative-only regions.
+
+All 56 evaluator tests pass. Independent, originally authored rotation controls
+showed Poppler returns unrotated page dimensions but rotated word coordinates at
+90/270 degrees. Raw evidence therefore remains normalizationVerified=false. This
+preparatory capture DOES NOT implement accepted region grounding or reopen formula
+acceptance. Crop-box conventions and region matching still require independent
+validation. Original corpus inputs and prior measurement results are unchanged.
