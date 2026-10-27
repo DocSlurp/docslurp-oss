@@ -15,6 +15,7 @@ const {
   apiActorRateLimit,
   classifyRateLimitCategory,
   createApiRateLimit,
+  consumeFeatureRateLimit,
   enforceAuthenticatedApiRateLimit,
   resetApiRateLimitBuckets,
 } = await import("../middleware/rate-limit.js");
@@ -570,6 +571,7 @@ describe("api rate limit middleware", () => {
   it("classifies upload, search, chat/AI, read-only, write, and webhook endpoints", () => {
     expect(classifyRateLimitCategory("POST", "/v1/ingest/bulk")).toBe("upload");
     expect(classifyRateLimitCategory("POST", "/v1/uploads/bulk")).toBe("upload");
+    expect(classifyRateLimitCategory("POST", "/v1/extracts/bulk")).toBe("upload");
     expect(classifyRateLimitCategory("POST", "/v1/uploads/direct/sessions")).toBe("upload");
     expect(classifyRateLimitCategory("GET", "/v1/search")).toBe("search");
     // The stream answers with a model too: it must not fall into the cheaper search bucket.
@@ -628,4 +630,15 @@ describe("IP limiter behind Cloudflare on Fly", () => {
     expect((await app.request("/v1/ok", { headers: direct("1.1.1.2") })).status).toBe(200);
     expect((await app.request("/v1/ok", { headers: direct("1.1.1.3") })).status).toBe(429);
   });
+});
+
+
+it("refuses an unavailable shared feature limit even when request limits are disabled", async () => {
+  vi.stubEnv("API_RATE_LIMIT_ENABLED", "false");
+  vi.stubEnv("API_RATE_LIMIT_REDIS_URL", "redis://unavailable.test:6379");
+  try {
+    const consume = vi.fn(async () => ({ shared: false, blockedMs: 0, denied: -1 }));
+    const wait = await consumeFeatureRateLimit({ feature: "improve", subject: "user:test", limit: 10, windowMs: 60_000, requireShared: true, store: { consume } as unknown as RateLimitStore });
+    expect(wait).toBeGreaterThan(0);
+  } finally { vi.unstubAllEnvs(); }
 });

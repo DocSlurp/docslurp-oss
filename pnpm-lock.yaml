@@ -333,6 +333,9 @@ importers:
       '@types/xml2js':
         specifier: ^0.4.14
         version: 0.4.14
+      jsdom:
+        specifier: 30.1.2
+        version: 30.1.2(@noble/hashes@2.4.0)
       openai:
         specifier: 6.49.0
         version: 6.49.0(@aws-sdk/credential-provider-node@3.972.87)(@smithy/signature-v4@5.7.4)(ws@8.22.0)(zod@4.6.7)
@@ -5759,7 +5762,6 @@ snapshots:
       '@csstools/css-parser-algorithms': 4.0.2(@csstools/css-tokenizer@4.0.2)
       '@csstools/css-tokenizer': 4.0.2
       lru-cache: 11.5.3
-    optional: true
 
   '@asamuzakjp/dom-selector@9.2.4':
     dependencies:
@@ -5767,7 +5769,6 @@ snapshots:
       css-tree: 3.2.1
       is-potential-custom-element-name: 1.0.1
       lru-cache: 11.5.3
-    optional: true
 
   '@aws-sdk/checksums@3.1001.4':
     dependencies:
@@ -6074,7 +6075,6 @@ snapshots:
   '@bramus/specificity@2.4.3':
     dependencies:
       css-tree: 3.2.1
-    optional: true
 
   '@cbor-extract/cbor-extract-darwin-arm64@2.2.2':
     optional: true
@@ -6115,14 +6115,12 @@ snapshots:
   '@chevrotain/utils@10.5.0':
     optional: true
 
-  '@csstools/color-helpers@6.1.2':
-    optional: true
+  '@csstools/color-helpers@6.1.2': {}
 
   '@csstools/css-calc@3.4.3(@csstools/css-parser-algorithms@4.0.2(@csstools/css-tokenizer@4.0.2))(@csstools/css-tokenizer@4.0.2)':
     dependencies:
       '@csstools/css-parser-algorithms': 4.0.2(@csstools/css-tokenizer@4.0.2)
       '@csstools/css-tokenizer': 4.0.2
-    optional: true
 
   '@csstools/css-color-parser@4.2.6(@csstools/css-parser-algorithms@4.0.2(@csstools/css-tokenizer@4.0.2))(@csstools/css-tokenizer@4.0.2)':
     dependencies:
@@ -6130,20 +6128,16 @@ snapshots:
       '@csstools/css-calc': 3.4.3(@csstools/css-parser-algorithms@4.0.2(@csstools/css-tokenizer@4.0.2))(@csstools/css-tokenizer@4.0.2)
       '@csstools/css-parser-algorithms': 4.0.2(@csstools/css-tokenizer@4.0.2)
       '@csstools/css-tokenizer': 4.0.2
-    optional: true
 
   '@csstools/css-parser-algorithms@4.0.2(@csstools/css-tokenizer@4.0.2)':
     dependencies:
       '@csstools/css-tokenizer': 4.0.2
-    optional: true
 
   '@csstools/css-syntax-patches-for-csstree@1.1.15(css-tree@3.2.1)':
     optionalDependencies:
       css-tree: 3.2.1
-    optional: true
 
-  '@csstools/css-tokenizer@4.0.2':
-    optional: true
+  '@csstools/css-tokenizer@4.0.2': {}
 
   '@drizzle-team/brocli@0.10.2': {}
 
@@ -6514,7 +6508,6 @@ snapshots:
   '@exodus/bytes@1.16.0(@noble/hashes@2.4.0)':
     optionalDependencies:
       '@noble/hashes': 2.4.0
-    optional: true
 
   '@google/genai@2.21.0(@modelcontextprotocol/sdk@1.32.1(zod@4.6.7))':
     dependencies:
@@ -8329,7 +8322,6 @@ snapshots:
   bidi-js@1.1.0:
     dependencies:
       require-from-string: 2.0.2
-    optional: true
 
   bignumber.js@9.3.1: {}
 
@@ -8571,7 +8563,6 @@ snapshots:
     dependencies:
       mdn-data: 2.27.1
       source-map-js: 1.2.2
-    optional: true
 
   csstype@3.2.3: {}
 
@@ -8583,14 +8574,12 @@ snapshots:
       whatwg-url: 17.3.0(@noble/hashes@2.4.0)
     transitivePeerDependencies:
       - '@noble/hashes'
-    optional: true
 
   debug@4.4.3:
     dependencies:
       ms: 2.1.3
 
-  decimal.js@10.6.0:
-    optional: true
+  decimal.js@10.6.0: {}
 
   decode-named-character-reference@1.3.0:
     dependencies:
@@ -8718,8 +8707,7 @@ snapshots:
       graceful-fs: 4.2.11
       tapable: 2.3.3
 
-  entities@8.1.0:
-    optional: true
+  entities@8.1.0: {}
 
   es-define-property@1.0.1: {}
 
@@ -9169,7 +9157,6 @@ snapshots:
       '@exodus/bytes': 1.16.0(@noble/hashes@2.4.0)
     transitivePeerDependencies:
       - '@noble/hashes'
-    optional: true
 
   http-errors@2.0.1:
     dependencies:
@@ -9252,8 +9239,7 @@ snapshots:
 
   is-plain-obj@4.1.0: {}
 
-  is-potential-custom-element-name@1.0.1:
-    optional: true
+  is-potential-custom-element-name@1.0.1: {}
 
   is-promise@4.0.0:
     optional: true
@@ -9307,7 +9293,6 @@ snapshots:
       xml-name-validator: 5.0.0
     transitivePeerDependencies:
       - '@noble/hashes'
-    optional: true
 
   json-bigint@1.0.0:
     dependencies:
@@ -9562,8 +9547,7 @@ snapshots:
     dependencies:
       '@types/mdast': 4.0.4
 
-  mdn-data@2.27.1:
-    optional: true
+  mdn-data@2.27.1: {}
 
   media-typer@1.1.1:
     optional: true
@@ -10115,7 +10099,6 @@ snapshots:
   parse5@8.0.1:
     dependencies:
       entities: 8.1.0
-    optional: true
 
   parseurl@1.3.3:
     optional: true
@@ -10276,8 +10259,7 @@ snapshots:
 
   proxy-agent-negotiate@1.1.0: {}
 
-  punycode@2.3.1:
-    optional: true
+  punycode@2.3.1: {}
 
   pure-rand@6.1.0:
     optional: true
@@ -10448,7 +10430,6 @@ snapshots:
   saxes@6.0.0:
     dependencies:
       xmlchars: 2.2.0
-    optional: true
 
   scheduler@0.28.0: {}
 
@@ -10712,13 +10693,11 @@ snapshots:
       fdir: 6.5.0(picomatch@4.0.7)
       picomatch: 4.0.7
 
-  tldts-core@7.4.19:
-    optional: true
+  tldts-core@7.4.19: {}
 
   tldts@7.4.19:
     dependencies:
       tldts-core: 7.4.19
-    optional: true
 
   toidentifier@1.0.1:
     optional: true
@@ -10726,7 +10705,6 @@ snapshots:
   tough-cookie@6.0.2:
     dependencies:
       tldts: 7.4.19
-    optional: true
 
   tr46@0.0.3:
     optional: true
@@ -10739,7 +10717,6 @@ snapshots:
   tr46@7.0.0:
     dependencies:
       punycode: 2.3.1
-    optional: true
 
   tree-dump@1.1.0(tslib@2.8.1):
     dependencies:
@@ -10969,7 +10946,6 @@ snapshots:
   w3c-xmlserializer@6.0.0:
     dependencies:
       xml-name-validator: 5.0.0
-    optional: true
 
   watchpack@2.6.3:
     dependencies:
@@ -10986,8 +10962,7 @@ snapshots:
   webidl-conversions@7.0.0:
     optional: true
 
-  webidl-conversions@8.0.1:
-    optional: true
+  webidl-conversions@8.0.1: {}
 
   webpack-sources@3.6.0: {}
 
@@ -11028,8 +11003,7 @@ snapshots:
       - svgo
       - uglify-js
 
-  whatwg-mimetype@5.0.0:
-    optional: true
+  whatwg-mimetype@5.0.0: {}
 
   whatwg-url@14.2.0:
     dependencies:
@@ -11044,7 +11018,6 @@ snapshots:
       webidl-conversions: 8.0.1
     transitivePeerDependencies:
       - '@noble/hashes'
-    optional: true
 
   whatwg-url@5.0.0:
     dependencies:
@@ -11087,8 +11060,7 @@ snapshots:
       escape-html: 1.0.3
       xpath: 0.0.32
 
-  xml-name-validator@5.0.0:
-    optional: true
+  xml-name-validator@5.0.0: {}
 
   xml2js@0.6.2:
     dependencies:
@@ -11101,8 +11073,7 @@ snapshots:
 
   xmlbuilder@15.1.1: {}
 
-  xmlchars@2.2.0:
-    optional: true
+  xmlchars@2.2.0: {}
 
   xpath@0.0.32: {}
 

@@ -5,6 +5,7 @@ import {
   INGEST_REPORT_FACTS_SINCE,
   INGEST_REPORT_FILE_BYTE_EDGES,
   INGEST_REPORT_MAX_DOCUMENTS,
+  INGEST_REPORT_MAX_FILE_ITEMS,
   INGEST_REPORT_MAX_PAGES,
   INGEST_REPORT_NEAR_ZERO_TEXT_BYTES,
   INGEST_REPORT_TEXT_BYTE_EDGES,
@@ -14,6 +15,7 @@ import {
   visionModelCatalogByUri,
   visionProfileCatalog,
   type IngestReport,
+  type IngestReportFileItem,
   type IngestReportConfigItem,
   type IngestReportFailure,
   type IngestReportFailureReason,
@@ -134,6 +136,36 @@ function statusBucket(status: string): "completed" | "processing" | "queued" | "
   if (QUEUED.has(status)) return "queued";
   if (FAILED.has(status)) return "failed";
   return "processing";
+}
+
+function buildFileItems(
+  docs: IngestReportDocumentRow[],
+  pageViews: Array<{ documentId: string; searchable: boolean | null }>,
+  stagesByDoc: Map<string, IngestReportStageRow[]>,
+  detailIds: Set<string>,
+): IngestReportFileItem[] {
+  const searchableByDoc = new Map<string, number>();
+  for (const page of pageViews) if (page.searchable === true) searchableByDoc.set(page.documentId, (searchableByDoc.get(page.documentId) ?? 0) + 1);
+  return docs.slice(0, INGEST_REPORT_MAX_FILE_ITEMS).map((doc) => {
+    const status = statusBucket(doc.status);
+    const failedStage = status === "failed" ? (stagesByDoc.get(doc.id) ?? []).find((stage) => stage.status === "failed") : undefined;
+    return {
+      documentId: doc.id,
+      filename: doc.filename,
+      mimeType: doc.mimeType,
+      status,
+      pages: doc.pageCount > 0 ? doc.pageCount : null,
+      searchablePages: detailIds.has(doc.id) ? searchableByDoc.get(doc.id) ?? 0 : null,
+      error: status === "failed" ? (failedStage ? `Failed during ${failedStage.stage}` : "Processing failed") : null,
+    };
+  });
+}
+
+function buildRunSummary(runId: string, runs: IngestReportRunRow[]): IngestReport["run"] {
+  const run = runs.find((row) => row.id === runId);
+  if (!run) return null;
+  const terminal = run.status === "completed" || FAILED.has(run.status);
+  return { id: run.id, status: run.status, durationMs: terminal && run.durationMs > 0 ? Math.round(run.durationMs) : null };
 }
 
 function avg(total: number, n: number): number | null {
@@ -400,7 +432,9 @@ export function buildIngestReport(input: IngestReportInput): IngestReport {
       total: docs.length,
       byType: KIND_ORDER.filter((kind) => byType.has(kind)).map((kind) => ({ type: kind, ...byType.get(kind)! })),
       byStatus,
+      ...(input.scope.runId ? { items: buildFileItems(docs, pageViews, stagesByDoc, new Set(input.pageDetailDocumentIds)) } : {}),
     },
+    ...(input.scope.runId ? { run: buildRunSummary(input.scope.runId, input.runs) } : {}),
     pages: { total: totalPages, avgPerFile: round(avg(totalPages, docs.length), 1) },
     bytes: {
       total: totalBytes,

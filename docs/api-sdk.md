@@ -40,11 +40,26 @@ There are two kinds of API key. The prefix tells you, and secret scanners, where
 | Prefix | Type | Where it may live | Can do |
 | --- | --- | --- | --- |
 | `dslp_priv_` | Server key | Backend secrets, CI, agent configuration | The scopes you grant: `ingest`, `search`, `chat`, `artifacts`, and opt-in organization/workspace management |
-| `dslp_pub_` | Browser key | Page HTML and browser bundles | `search` by default, and only from your allowed websites. Add `chat` for an answer widget; `web`, `ingest` and `artifacts` need an explicit opt-in and a workspace allowlist |
+| `dslp_pub_` | Browser key | Page HTML and browser bundles | `search`, plus `chat` for an answer widget. Nothing else, ever: only on your allowed websites, and only in the workspaces you name |
 
 `search` returns passages. `chat` generates answers on your credits: `/v1/chat`, `/v1/chat/stream`, `/v1/chat/completions` (and its `/v1/models` list) and the MCP `chat` tool need it. Keys created before `chat` existed kept chat access wherever they had `search`.
 
-Web tools (`/v1/web/*` and the MCP and chat-agent web tools) make paid calls to the open web. Server keys use them with `search` (`ingest` for website ingestion). Browser keys never get them by default: grant the `web` scope only to a key limited to specific workspaces, because anyone can copy a browser key from your page source.
+Web tools (`/v1/web/*` and the MCP and chat-agent web tools) make paid calls to the open web. Server keys use them with `search` (`ingest` for website ingestion). Browser keys never get them, nor `ingest` or `artifacts`: anyone can copy a browser key from your page source. A browser key saved earlier with those scopes retains only the `search` or `chat` permissions it already held. If none remain, it has no permissions: saving or rotating it never adds `search`. Edit its scopes explicitly to enable search or chat; default scopes apply only when creating a key.
+
+Controls per key type:
+
+| | Browser key | Server key |
+| --- | --- | --- |
+| Scopes | `search`, `chat` | Any, including opt-in organization and workspace management |
+| Workspaces | Required (`workspaceIds`) | Optional; empty means every workspace you can reach in the organization |
+| Where it works | Allowed websites (`allowedDomains`) | Anywhere, or only from an IP allowlist (`ipAllowlist`: addresses or CIDR ranges, up to 50) |
+| Chat output cap (`maxOutputTokens`) | 500, 1,000 (default) or 2,000 | 500, 1,000, 2,000, 4,000 or none (`null`, the default) |
+| Expiry (`expiresAt`) | Optional | Optional, up to 365 days ahead |
+| Limits | Per-key limits, plus per-visitor limits and concurrency | Per-key request, spend and `concurrent` rules; no default concurrency cap |
+
+The chat output cap bounds the model's maximum output tokens for every chat answer the key gets (`/v1/chat`, `/v1/chat/completions`, the MCP `chat` tool). A request asking for more (`max_tokens`, `max_completion_tokens`) is lowered to the cap. An expired key stops authenticating, and so does a key used from outside its IP allowlist (403 `api_key_ip_not_allowed`; an address we can't determine is refused too). Each key reports `lastUsedAt` and `lastUsedIp`. MCP and first-party CLI OAuth access tokens also honor their linked server key’s current expiry, IP allowlist and chat output cap; an expired key or a disallowed/unknown address makes the token unauthorized.
+
+Rotate a key with `POST /v1/api-keys/:id/rotate`. With no body the secret is replaced at once. With `{"overlapSeconds": 86400}` (up to 7 days) you get a new key with the same settings (`rotatedFromKeyId` names the old one), and the old key keeps working until the overlap ends (`previous.expiresAt` in the response). Deploy the new secret within that window.
 
 A browser key must name the workspaces it may use (`workspaceIds`), because anyone can copy it from your page source. A browser key created before this rule, with no workspaces, is refused with `client_key_workspaces_required` until you edit it and choose its workspaces; it is never widened to every workspace in the organization. A request from a website the key doesn't allow is refused with `client_key_origin_not_allowed` (on `/v1/chat/completions`, a 403 `permission_error` with that code).
 
@@ -190,6 +205,8 @@ Values are matched by slug: the value is lowercased, accents are stripped, every
 So `client.search({ q: "question" })`, `client.getWorkspaceState()` and `docslurp search` work with no workspace configuration.
 
 **New workspaces:** besides naming one that does not exist yet, an upload creates a workspace when it omits `workspace` and sends `newWorkspace: true` (multipart `newWorkspace=true`, CLI `--new-workspace`, SDK `newWorkspace`) or a `templateKey` (CLI `--template`); that workspace titles itself from the uploaded content. The SDK and CLI send no `workspace` in those cases, so a configured client workspace does not swallow the request. An explicit `workspace` (including `default`) wins over `newWorkspace`; a `templateKey` sent with a `workspace` applies only if the upload creates it. The upload response's `workspace` record includes `id` and `slug`.
+
+**Automatic titles:** `POST /v1/workspaces` takes an optional `name`. Omit it, send an empty string or send `"Untitled workspace"` and the workspace is created as "Untitled workspace" and named for you. Titles only move forward through stronger signals: the first upload's filenames (later uploads re-derive the title from all of the workspace's files while it is still filename-based), then content (a stored document summary, else the first heading), then the subject of the first chat question, which is final. Renaming the workspace yourself stops automatic naming. Titles update when the workspace is read, uploaded to or first chatted with; there is no background job.
 
 **Rename a slug** in the dashboard (the gear next to the workspace name, then Workspace) or over HTTP:
 

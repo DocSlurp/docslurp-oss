@@ -107,6 +107,7 @@ describe("OpenAI-compatible workspace chat", () => {
   it.each([
     ["ClientKeyWorkspacesRequiredError", "client_key_workspaces_required"],
     ["ClientKeyOriginNotAllowedError", "client_key_origin_not_allowed"],
+    ["ApiKeyIpNotAllowedError", "api_key_ip_not_allowed"],
   ] as const)("answers a browser key refused by %s with an OpenAI-shaped 403 permission_error, not invalid_api_key", async (errorName, code) => {
     const keys = await import("../services/api-keys.js");
     validateApiKey.mockRejectedValueOnce(new keys[errorName]());
@@ -114,7 +115,7 @@ describe("OpenAI-compatible workspace chat", () => {
     expect(response.status).toBe(403);
     const body = await response.json() as { error: { type: string; code: string; message: string } };
     expect(body.error).toMatchObject({ type: "permission_error", code });
-    expect(body.error.message).toMatch(code === "client_key_workspaces_required" ? /workspaces/ : /allowed websites/);
+    expect(body.error.message).toMatch(code === "client_key_workspaces_required" ? /workspaces/ : code === "api_key_ip_not_allowed" ? /IP allowlist/ : /allowed websites/);
     expect(chatWorkspace).not.toHaveBeenCalled();
   });
   it("answers a full chat-concurrency cap with an OpenAI-shaped 429 and frees the slot after the stream", async () => {
@@ -142,6 +143,22 @@ describe("OpenAI-compatible workspace chat", () => {
       vi.unstubAllEnvs();
       resetChatConcurrency();
     }
+  });
+  it("returns a scope decline as the assistant message, JSON and streamed", async () => {
+    const decline = { ...answer, answer: "That question doesn't look related to this workspace, which covers Contracts.\n\nYou could ask, for example:\n- What does “Master agreement” cover?", citations: [],
+      scopeDecline: { relevance: 0.02, threshold: 0.2, scope: "Contracts", suggestions: ["What does “Master agreement” cover?"] } };
+    chatWorkspace.mockImplementation(async (args: { onTextDelta?: (delta: string) => Promise<void> | void }) => {
+      await args.onTextDelta?.(decline.answer);
+      return decline;
+    });
+    const json = await request(input({ messages: [{ role: "user", content: "Best pizza in Naples?" }] }));
+    expect(json.status).toBe(200);
+    expect((await json.json() as { choices: Array<{ message: { content: string } }> }).choices[0]!.message.content).toBe(decline.answer);
+    const streamed = await request(input({ stream: true, messages: [{ role: "user", content: "Best pizza in Naples?" }] }));
+    expect(streamed.status).toBe(200);
+    const text = await streamed.text();
+    expect(text).toContain("doesn't look related to this workspace");
+    expect(text).toContain("data: [DONE]");
   });
   it("refuses workspaces that turned chat off with an OpenAI-shaped 403", async () => {
     workspaceChatDisabledBody.mockResolvedValueOnce({ error: "Chat is turned off for this workspace.", code: "chat_disabled" });
