@@ -80,6 +80,16 @@ describe("widget CORS", () => {
     const response = await app().request("/v1/search", { method: "POST", headers: { Origin: "https://customer.example", Cookie: "session=secret" } });
     expect(response.status).toBe(403);
   });
+  it("guards the chat stream like the rest of chat: keyed widgets get CORS, cross-site cookies get 403", async () => {
+    const stream = new Hono().use("*", serviceCors([trusted]));
+    stream.get("/v1/chat/stream", (c) => c.text("data: {}\n\n"));
+    const cookie = await stream.request("/v1/chat/stream?q=hi", { headers: { Origin: "https://sibling.docslurp.io", Cookie: "session=fixture" } });
+    expect(cookie.status).toBe(403);
+    const keyed = await stream.request("/v1/chat/stream?q=hi", { headers: { Origin: "https://customer.example", Authorization: "Bearer dslp_pub_widget" } });
+    expect(keyed.status).toBe(200);
+    expect(keyed.headers.get("Access-Control-Allow-Origin")).toBe("https://customer.example");
+    expect(keyed.headers.get("Access-Control-Allow-Credentials")).toBeNull();
+  });
   it("keeps credential management restricted to trusted origins", async () => {
     const response = await app().request("/v1/api-keys", { headers: { Origin: "https://customer.example" } });
     expect(response.headers.get("Access-Control-Allow-Origin")).toBeNull();

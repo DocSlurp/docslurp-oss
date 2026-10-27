@@ -33,6 +33,8 @@ import {
   resolveSourceMetadata,
   UnreadableSourceError,
 } from "./source-metadata.js";
+import { extractNotReprocessable } from "./reprocess-errors.js";
+import { EXTRACT_EXPIRED_MESSAGE, ExtractError } from "./extracts.js";
 
 // Long source preparation renews this lease. Expiry only authorizes cleanup;
 // it never authorizes processing. Every document write and publication locks
@@ -76,6 +78,12 @@ export interface CreateRunInput {
   apiKeyId?: string | null;
   priority?: number;
   sources: RunSources;
+  /**
+   * Extract mode (services/extracts.ts): the run writes every artifact under
+   * the extract's storage prefix, its documents never version or deduplicate
+   * against other documents, and it is deleted when the extract expires.
+   */
+  extract?: { id: string; storagePrefix: string };
 }
 
 export interface UnreadableSource {
@@ -285,6 +293,8 @@ async function findDedupCandidate(
       and d.superseded_at is null
       and d.purged_at is null
       and runs.status = 'completed'
+      -- Extract documents are deleted when their retention ends; nothing may borrow their artifacts.
+      and runs.extract_id is null
       -- Partial-run documents carry full output; compare features, not stage selection.
       and (runs.pipeline - ${client.array([...stageSelectionKeys])}::text[])
         = (target_run.pipeline - ${client.array([...stageSelectionKeys])}::text[])
@@ -624,12 +634,19 @@ export function createRunCreation(deps: RunCreationDeps) {
   }): Promise<WorkspaceRunRow> {
     const { input } = args;
     const requestId = currentRequestId();
-    const [row] = await admitRunSpend(args.orgId, input.workspaceId, (tx) => tx<WorkspaceRunRow[]>`
+    const [row] = await admitRunSpend(args.orgId, input.workspaceId, async (tx) => {
+      if (input.extract) {
+        // Never a run for an extract that expired or was deleted meanwhile (a confirm racing the sweep).
+        const [live] = await tx`select id from extracts where id = ${input.extract.id} and state = 'active' and expires_at > now() for update`;
+        if (!live) throw new ExtractError(410, "extract_expired", EXTRACT_EXPIRED_MESSAGE);
+      }
+      const rows = await tx<WorkspaceRunRow[]>`
       with inserted as (
         insert into workspace_runs (
           id, org_id, user_id, workspace_id, kind, status, priority, control_state,
           control_requested_at, stage, total_documents, processed_documents,
-          pages_total, pages_processed, stats, creation_source_keys, pipeline
+          pages_total, pages_processed, stats, creation_source_keys, pipeline,
+          extract_id, storage_prefix
         )
         values (
           ${args.id},
@@ -649,16 +666,23 @@ export function createRunCreation(deps: RunCreationDeps) {
           ${sql.json({
             ...(requestId ? { requestId } : {}),
             ...(input.apiKeyId ? { apiKeyId: input.apiKeyId } : {}),
+            ...(input.extract ? { product: "extract", extractId: input.extract.id } : {}),
           })},
           ${sql.array(args.sourceKeys)}::text[],
-          ${sql.json(JSON.parse(JSON.stringify(args.pipeline)))}
+          ${sql.json(JSON.parse(JSON.stringify(args.pipeline)))},
+          ${input.extract?.id ?? null},
+          ${input.extract?.storagePrefix ?? null}
         )
         returning *
       )
       select inserted.*, workspaces.name as workspace_name
       from inserted
       join workspaces on workspaces.id = inserted.workspace_id
-    `, { leaseRunId: args.id });
+    `;
+      // The extract learns its run in the same transaction, so a failure after commit never orphans the run.
+      if (input.extract) await tx`update extracts set run_id = ${args.id}, updated_at = now() where id = ${input.extract.id} and (run_id is null or run_id = ${args.id})`;
+      return rows;
+    }, { leaseRunId: args.id });
     return row!;
   }
 
@@ -693,21 +717,26 @@ export function createRunCreation(deps: RunCreationDeps) {
         await lockRunCreation(runId, client);
         // Every upload has a version key: the caller's canonicalId, else workspace + folder path + filename.
         // Versions chain per (workspace_id, canonical_id) (documents_workspace_canonical_idx).
-        const canonicalId = documentVersionKey({
-          workspaceId: input.workspaceId,
-          path: sourcePath,
-          filename,
-          canonicalId: file.canonicalId,
-        });
+        // An extract document has its own key: it must never supersede (or be
+        // superseded by) a kept document, which its expiry would then delete.
+        const canonicalId = input.extract
+          ? `docslurp:extract:${input.extract.id}:${documentId}`
+          : documentVersionKey({
+            workspaceId: input.workspaceId,
+            path: sourcePath,
+            filename,
+            canonicalId: file.canonicalId,
+          });
         await client`select pg_advisory_xact_lock(hashtextextended(${`${input.workspaceId}:${canonicalId}`}, 0))`;
-        const [existing] = await client<{ id: string; version_number: number }[]>`
+        const [existing] = input.extract ? [] : await client<{ id: string; version_number: number }[]>`
           select id, version_number from documents
           where workspace_id = ${input.workspaceId} and canonical_id = ${canonicalId}
           order by version_number desc, created_at desc
           limit 1
         `;
 
-        const dedupCandidate = await findDedupCandidate(client, {
+        // Extract documents keep their own artifacts under the extract prefix, so they never reuse another document's.
+        const dedupCandidate = input.extract ? null : await findDedupCandidate(client, {
           orgId,
           workspaceId: input.workspaceId,
           sourceSha256: metadata.sourceSha256,
@@ -880,10 +909,18 @@ export function createRunCreation(deps: RunCreationDeps) {
     let sourceDocuments: SourceDocumentRow[] = [];
     if (sources.kind === "versionsOf") {
       sourceDocuments = await sql<SourceDocumentRow[]>`
-        select * from documents
-        where workspace_id = ${input.workspaceId} and id = any(${sql.array(sources.documentIds)})
-        order by created_at, id
+        select d.* from documents d
+        where d.workspace_id = ${input.workspaceId} and d.id = any(${sql.array(sources.documentIds)})
+        order by d.created_at, d.id
       `;
+      // Extract documents are never run again: a new version would outlive the
+      // extract while pointing at sources and artifacts its expiry deletes.
+      const [extractSource] = await sql<{ id: string }[]>`
+        select d.id from documents d join workspace_runs r on r.id = d.run_id
+        where d.id = any(${sql.array(sourceDocuments.map((doc) => doc.id))}) and r.extract_id is not null
+        limit 1
+      `;
+      if (extractSource) throw extractNotReprocessable();
       if (sourceDocuments.length === 0) throw new Error("No documents to create new versions of");
     }
 

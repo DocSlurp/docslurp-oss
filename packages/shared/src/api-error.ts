@@ -18,6 +18,11 @@ export const API_ERROR_CODES = [
   "web_scope_required",
   "not_found",
   "workspace_not_found",
+  "workspace_forbidden",
+  "workspace_scope_forbidden",
+  "no_stages_to_run",
+  "source_not_reusable",
+  "missing_stage_artifacts",
   "organization_not_found",
   "organization_forbidden",
   "organization_conflict",
@@ -57,6 +62,11 @@ export const API_ERROR_CODES = [
   "web_disabled",
   "url_blocked",
   "privacy_mode_blocked",
+  "extract_not_found",
+  "extract_expired",
+  "retention_exceeds_cap",
+  "download_not_ready",
+  "download_failed",
   "unavailable",
   "internal",
 ] as const;
@@ -101,6 +111,11 @@ export const API_ERROR_PUBLIC_MESSAGES: Record<ApiErrorCode, string> = {
   forbidden: PUBLIC_ERROR_MESSAGES.forbidden,
   not_found: PUBLIC_ERROR_MESSAGES.missing,
   workspace_not_found: PUBLIC_ERROR_MESSAGES.workspaceMissing,
+  workspace_forbidden: PUBLIC_ERROR_MESSAGES.forbidden,
+  workspace_scope_forbidden: "This API key is limited to specific workspaces, so it can't create a new one. Name a workspace the key can use.",
+  no_stages_to_run: "None of the requested stages runs in this pipeline. Choose stages the workspace has turned on.",
+  source_not_reusable: "This run's earlier output can't be reused for a partial reprocess. Reprocess every stage instead.",
+  missing_stage_artifacts: "This run is missing the earlier stage output needed to reprocess from there. Reprocess from an earlier stage or upload again.",
   organization_not_found: PUBLIC_ERROR_MESSAGES.organizationMissing,
   organization_forbidden: PUBLIC_ERROR_MESSAGES.forbidden,
   web_scope_required: PUBLIC_ERROR_MESSAGES.forbidden,
@@ -141,6 +156,11 @@ export const API_ERROR_PUBLIC_MESSAGES: Record<ApiErrorCode, string> = {
   web_disabled: "Web tools are turned off for this server or workspace.",
   url_blocked: "This URL can't be fetched. Use a public HTTP or HTTPS address.",
   privacy_mode_blocked: "This workspace's privacy mode doesn't allow web tools.",
+  extract_not_found: "Extract not found.",
+  extract_expired: "This extract has expired and its files and outputs were deleted. Run the extract again to get new results.",
+  retention_exceeds_cap: "retentionDays is longer than this deployment keeps extracts. Ask for fewer days; details.maxRetentionDays is the limit.",
+  download_not_ready: "This extract's download isn't ready yet. Try again once the extract completes.",
+  download_failed: "This extract's download couldn't be built. Contact support if this keeps happening.",
   unavailable: PUBLIC_ERROR_MESSAGES.unavailable,
   internal: PUBLIC_ERROR_MESSAGES.unexpected,
 };
@@ -160,7 +180,7 @@ export function apiErrorCodeForStatus(status: number): ApiErrorCode {
   return "internal";
 }
 
-const SAFE_DETAIL_NUMBERS = ["retryAfterSeconds", "limitCents", "spentCents", "maxBytes", "availableCredits", "heldCredits", "chatReserveCredits"] as const;
+const SAFE_DETAIL_NUMBERS = ["retryAfterSeconds", "limitCents", "spentCents", "maxBytes", "availableCredits", "heldCredits", "chatReserveCredits", "maxRetentionDays", "requiredCredits"] as const;
 const SAFE_DETAIL_LABELS = ["category", "policy", "spendKind"] as const;
 
 /**

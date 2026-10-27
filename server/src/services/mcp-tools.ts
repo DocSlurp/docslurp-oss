@@ -1,3 +1,4 @@
+import type { z } from "zod";
 import { getWorkspaceSearchSettings } from "./search-controls.js";
 import { workspaceSettingsPipelinePatchSchema } from "./workspace-settings-proposal-input.js";
 import { workspaceSettingsProposalInputSchema } from "./workspace-settings-proposal-input.js";
@@ -16,7 +17,7 @@ import { apiKeyHasAnyScope } from "../lib/api-key-authorization.js";
 import { getApiKey, getRequestActor, isFirstPartyAppActor, loadActorScopedWorkspace, resolveActorWorkspaceId, setRequestActor, type RequestActor } from "../lib/request-actor.js";
 import { listWorkspaces } from "./workspaces.js";
 import { apiKeyCanUseWorkspace } from "../lib/api-key-workspace-scope.js";
-import { completeUploadInput, INLINE_UPLOAD_MAX_BYTES, mediaEvidenceInput, fullIndexInput, listWorkspacesInput, mcpManifest, mcpTools, suggestQueriesInput, uploadInput, uploadStatusInput } from "./mcp-catalog.js";
+import { completeUploadInput, extractInput, INLINE_UPLOAD_MAX_BYTES, mediaEvidenceInput, fullIndexInput, listWorkspacesInput, mcpManifest, mcpTools, suggestQueriesInput, uploadInput, uploadStatusInput } from "./mcp-catalog.js";
 import { mcpOrigin } from "../lib/mcp-origin.js";
 import { groundedWorkspaceChatRoutes, searchRoutes } from "../routes/search.js";
 import { sql } from "../db.js";
@@ -134,21 +135,26 @@ const mcpAdapterRoutes = new Hono()
       })), total: accessible.length, nextOffset: offset + limit < accessible.length ? offset + limit : null });
     }
 
-    if (toolId === "upload") {
-      const parsed = uploadInput.safeParse(body);
+    if (toolId === "upload" || toolId === "extract") {
+      const parsed = (toolId === "extract" ? extractInput : uploadInput).safeParse(body);
       if (!parsed.success) return invalidInput(c, parsed.error);
-      const input = parsed.data;
-      // Reuse upload authorization, workspace resolution (find or create; a
+      const input = parsed.data as z.infer<typeof extractInput>;
+      // Reuse upload (or extract) authorization, workspace resolution (find or create; a
       // restricted key can do neither outside its allowlist), URL validation,
       // admission, spend checks and idempotency.
-      const { uploadsRoutes } = await import("../routes/uploads.js");
+      const routes = toolId === "extract"
+        ? (await import("../routes/extracts.js")).extractsRoutes
+        : (await import("../routes/uploads.js")).uploadsRoutes;
       const native = new Hono().use("*", publicErrorMiddleware).use("*", async (inner, next) => {
         setRequestActor(inner, actor);
         await next();
-      }).route("/", uploadsRoutes);
+      }).route("/", routes);
       native.onError(spendAwareErrorHandler);
       const headers = new Headers();
       if (input.idempotencyKey) headers.set("Idempotency-Key", input.idempotencyKey);
+      const extractFields = toolId === "extract"
+        ? { ...(input.retentionDays !== undefined ? { retentionDays: input.retentionDays } : {}), ...(input.notifyEmail !== undefined ? { notifyEmail: input.notifyEmail } : {}), ...(input.download ? { download: input.download } : {}) }
+        : {};
       if (input.inlineFiles) {
         // Clients without network egress cannot PUT to storage, so the bytes
         // arrive in the tool call and go through the multipart bulk intake.
@@ -160,6 +166,7 @@ const mcpAdapterRoutes = new Hono()
         }
         const form = new FormData();
         if (input.workspace) form.set("workspace", input.workspace);
+        for (const [name, value] of Object.entries(extractFields)) form.set(name, String(value));
         for (const file of decoded) form.append("files", new File([new Uint8Array(file.bytes!)], file.filename, { type: file.mimeType ?? "" }));
         return native.request("http://mcp.internal/bulk", { method: "POST", headers, body: form, signal: c.req.raw.signal });
       }
@@ -167,6 +174,7 @@ const mcpAdapterRoutes = new Hono()
       return native.request(`http://mcp.internal/${input.urls ? "url" : "direct/sessions"}`, {
         method: "POST", headers, body: JSON.stringify({ workspace: input.workspace,
           ...(input.urls ? { urls: input.urls } : { files: input.files }),
+          ...extractFields,
         }), signal: c.req.raw.signal,
       });
     }

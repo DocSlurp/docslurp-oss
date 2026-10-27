@@ -265,7 +265,8 @@ export type UploadFileInput = {
   /**
    * Logical identity of this source, e.g. a URL or site path like "/products".
    * When a newer upload with the same canonicalId finishes processing in the
-   * workspace, older versions drop out of search.
+   * workspace, older versions drop out of search. Must not start with
+   * `docslurp:` (reserved; refused with a RangeError and by the API).
    */
   canonicalId?: string;
   /**
@@ -277,6 +278,28 @@ export type UploadFileInput = {
 };
 
 /** Structural Node ReadStream/async iterable support, without Node runtime imports. */
+/** `docslurp:` canonical IDs are minted by the server; the API refuses them from callers (400). */
+function assertClientCanonicalIds(ids: Array<string | null | undefined>): void {
+  for (const id of ids) {
+    if (typeof id === "string" && /^docslurp:/i.test(id.trim())) throw new RangeError("canonicalId must not start with docslurp: (reserved for DocSlurp)");
+  }
+}
+
+function canonicalIdsOf(input: unknown, options: { canonicalId?: string } | undefined): Array<string | undefined> {
+  const ids: Array<string | undefined> = [options?.canonicalId];
+  if (input && typeof input === "object") {
+    const value = input as { canonicalId?: string; files?: Array<{ canonicalId?: string }>; urls?: Array<string | { canonicalId?: string }> };
+    ids.push(value.canonicalId);
+    if (Array.isArray(value.files)) ids.push(...value.files.map((file) => file?.canonicalId));
+    if (Array.isArray(value.urls)) ids.push(...value.urls.map((url) => (typeof url === "string" ? undefined : url?.canonicalId)));
+    if (Array.isArray(input)) ids.push(...(input as Array<{ canonicalId?: string }>).map((file) => file?.canonicalId));
+  }
+  return ids;
+}
+
+/** Marks the options of an extract() call so the shared upload transports target /v1/extracts. */
+const EXTRACT_MODE: unique symbol = Symbol("docslurp.extract");
+
 export type UploadByteStream = AsyncIterable<Uint8Array | string> & {
   path?: string | Uint8Array | URL;
   destroy?: (error?: Error) => unknown;
@@ -340,6 +363,39 @@ export type UploadResponse = {
   /** Set when the upload queued background work (for example a config-change re-index). */
   job?: JobStatus;
 };
+
+/** Extract mode options, on top of every upload option (see extract()). */
+export type ExtractOptions = {
+  /** Days to keep the files and results. Omit for the free window (48 hours by default); longer windows are charged as storage, up to the deployment's cap (30 days by default). */
+  retentionDays?: number;
+  /** Email a sign-in download link when the extract finishes (default true). */
+  notifyEmail?: boolean;
+  /** What the download zip holds: "markdown" (default) or "all" (adds originals and page images). */
+  download?: "markdown" | "all";
+};
+
+export type ExtractStatus = "pending" | "processing" | "completed" | "failed" | "expired";
+
+/** An extract: an upload whose files and outputs are deleted at expiresAt. */
+export type ExtractRecord = {
+  id: string;
+  status: ExtractStatus;
+  workspaceId: string;
+  runId: string | null;
+  retentionHours: number;
+  paidRetention: boolean;
+  expiresAt: string;
+  retentionCredits: number | null;
+  notifyEmail: boolean;
+  download: { content: "markdown" | "all"; status: "pending" | "preparing" | "ready" | "failed" | "expired"; url: string | null };
+  pages: number | null;
+  storedBytes: number | null;
+  createdAt: string;
+  completedAt: string | null;
+  deletedAt: string | null;
+};
+
+export type ExtractResponse = UploadResponse & { extract: ExtractRecord };
 
 export type UploadUrlsInput = {
   /** Labels applied to every accepted document in this upload. */
@@ -1171,10 +1227,27 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
     return { ...input, workspace: input.workspace?.trim() || clientWorkspace };
   }
 
+  /** "/v1/extracts" for extract() calls (marked with EXTRACT_MODE on the options), else "/v1/uploads". */
+  function intakeBase(options: object | undefined): string {
+    return options && (options as { [EXTRACT_MODE]?: ExtractOptions })[EXTRACT_MODE] ? "/v1/extracts" : "/v1/uploads";
+  }
+
+  /** The extract options an extract() call adds to the intake request. */
+  function extractFields(options: object | undefined): Record<string, string | number | boolean> {
+    const extract = options ? (options as { [EXTRACT_MODE]?: ExtractOptions })[EXTRACT_MODE] : undefined;
+    if (!extract) return {};
+    return {
+      ...(extract.retentionDays !== undefined ? { retentionDays: extract.retentionDays } : {}),
+      ...(extract.notifyEmail !== undefined ? { notifyEmail: extract.notifyEmail } : {}),
+      ...(extract.download ? { download: extract.download } : {}),
+    };
+  }
+
   function uploadUrls(input: UploadUrlsInput, options?: RequestOptions): Promise<UploadResponse> {
+    assertClientCanonicalIds(canonicalIdsOf(input, undefined));
     const { idempotencyKey, urls, orgId, templateKey } = input;
-    const body = { urls, orgId, templateKey, tags: input.tags, ...intakeTarget(input) };
-    return request("/v1/uploads/url", {
+    const body = { urls, orgId, templateKey, tags: input.tags, ...intakeTarget(input), ...extractFields(input) };
+    return request(`${intakeBase(input)}/url`, {
       ...jsonRequest("POST", body),
       headers: { "Content-Type": "application/json", ...(idempotencyKey ? { "Idempotency-Key": idempotencyKey } : {}) },
     }, options, Boolean(idempotencyKey));
@@ -1198,6 +1271,7 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
   function upload(input: UploadInput, options?: UploadOptions): Promise<UploadResponse>;
   function upload(input: Blob | UploadFileInput | UploadByteStream, options?: UploadOptions): Promise<UploadResponse>;
   async function upload(input: UploadUrlsInput | UploadInput | Blob | UploadFileInput | UploadByteStream | Array<Blob | File | UploadFileInput>, options: UploadOptions = {}): Promise<UploadResponse> {
+    assertClientCanonicalIds(canonicalIdsOf(input, options));
     if ("urls" in input) return uploadUrls({ ...input, ...options }, options);
     if (Array.isArray(input)) input = { files: input };
     const metadata = "files" in input ? { ...input, ...options } : options;
@@ -1222,6 +1296,7 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
     if (options.path) fields.path = options.path;
     if (metadata.templateKey) fields.templateKey = metadata.templateKey;
     if (metadata.indexingMode) fields.indexingMode = metadata.indexingMode;
+    for (const [name, value] of Object.entries(extractFields(options))) fields[name] = String(value);
     const headers = new Headers();
     if (metadata.idempotencyKey) headers.set("Idempotency-Key", metadata.idempotencyKey);
     if (Symbol.asyncIterator in input && options.directUpload !== false) {
@@ -1233,7 +1308,7 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
         headers.set("Content-Type", `multipart/form-data; boundary=${stream.boundary}`);
         const init: RequestInit & { duplex: "half" } = { body: stream.body, headers, method: "POST", duplex: "half" };
         // A consumed source cannot be replayed, even with an idempotency key.
-        return await request<UploadResponse>("/v1/uploads/bulk", init, options, false, stream.dispose);
+        return await request<UploadResponse>(`${intakeBase(options)}/bulk`, init, options, false, stream.dispose);
       } finally { stream.dispose(); }
     }
     const files = "files" in input ? input.files : [input];
@@ -1257,7 +1332,24 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
     if (paths.some(Boolean)) fields.paths = JSON.stringify(paths);
     if (!fields.canonicalId && canonicalIds.some(Boolean)) fields.canonicalIds = JSON.stringify(canonicalIds);
     for (const [name, value] of Object.entries(fields)) form.set(name, value);
-    return request<UploadResponse>("/v1/uploads/bulk", { body: form, headers, method: "POST" }, options, Boolean(metadata.idempotencyKey));
+    return request<UploadResponse>(`${intakeBase(options)}/bulk`, { body: form, headers, method: "POST" }, options, Boolean(metadata.idempotencyKey));
+  }
+
+  /**
+   * Extract: exactly like upload (files, streams, URLs, direct storage
+   * transfer; the same workspace rules and partial success), except the files
+   * and every output are deleted when the retention window ends. The response
+   * adds `extract` (id, expiresAt, download state).
+   */
+  function extract(input: Array<Blob | File | UploadFileInput>, options?: UploadOptions & ExtractOptions): Promise<ExtractResponse>;
+  function extract(input: UploadUrlsInput, options?: UploadOptions & ExtractOptions): Promise<ExtractResponse>;
+  function extract(input: UploadInput, options?: UploadOptions & ExtractOptions): Promise<ExtractResponse>;
+  function extract(input: Blob | UploadFileInput | UploadByteStream, options?: UploadOptions & ExtractOptions): Promise<ExtractResponse>;
+  async function extract(input: UploadUrlsInput | UploadInput | Blob | UploadFileInput | UploadByteStream | Array<Blob | File | UploadFileInput>, options: UploadOptions & ExtractOptions = {}): Promise<ExtractResponse> {
+    const { retentionDays, notifyEmail, download, ...rest } = options;
+    if (retentionDays !== undefined && (!Number.isInteger(retentionDays) || retentionDays < 1)) throw new RangeError("retentionDays must be a positive whole number of days.");
+    const marked = { ...rest, [EXTRACT_MODE]: { retentionDays, notifyEmail, download } } as UploadOptions;
+    return await upload(input as UploadInput, marked) as ExtractResponse;
   }
 
   async function waitUploadSession(path: string, options: UploadOptions): Promise<UploadResponse> {
@@ -1288,8 +1380,8 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
     let failure: unknown;
     try {
       signal.throwIfAborted();
-      const session = await request<UploadSession>("/v1/uploads/direct/sessions", jsonRequest("POST", {
-        ...intakeTarget(metadata), orgId: metadata.orgId, tags: metadata.tags,
+      const session = await request<UploadSession>(`${intakeBase(options)}/direct/sessions`, jsonRequest("POST", {
+        ...intakeTarget(metadata), ...extractFields(options), orgId: metadata.orgId, tags: metadata.tags,
         templateKey: metadata.templateKey, indexingMode: metadata.indexingMode,
         files: [{ filename: options.filename ?? streamFilename(source), mimeType: "application/octet-stream",
           canonicalId: options.canonicalId, path: options.path }],
@@ -1397,7 +1489,8 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
     target: { newWorkspace: boolean; workspace?: string };
   }, options: UploadOptions): Promise<UploadResponse> {
     const { metadata } = args;
-    const session = await request<{ sessionId: string; files: DirectUploadDescriptor[] }>("/v1/uploads/direct/sessions", jsonRequest("POST", {
+    const session = await request<{ sessionId: string; files: DirectUploadDescriptor[] }>(`${intakeBase(options)}/direct/sessions`, jsonRequest("POST", {
+      ...extractFields(options),
       ...(metadata.orgId ? { orgId: metadata.orgId } : {}),
       ...(metadata.tags ? { tags: metadata.tags } : {}),
       ...(metadata.indexingMode ? { indexingMode: metadata.indexingMode } : {}),
@@ -1601,8 +1694,8 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
      * Streamed grounded answer, as a streaming companion to chat(). Yields a
      * retrieval `status`, the `message` (a full ChatResponse) and a final `done`
      * envelope. Throws if the stream ends before `done`, so a truncated answer
-     * is never mistaken for success. This targets the legacy SSE endpoint; for
-     * the canonical stream use POST /v1/chat/completions with stream: true.
+     * is never mistaken for success. Reads GET /v1/chat/stream; for OpenAI-style
+     * token streaming use POST /v1/chat/completions with stream: true.
      */
     async *chatStream(input: ChatInput, requestOptions: RequestOptions = {}): AsyncGenerator<ChatStreamEvent> {
       const target = inWorkspace(input);
@@ -1612,7 +1705,7 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
       let completed = false;
       // The session grant goes in a header, never the URL.
       const grant: Record<string, string> = target.sessionToken ? { "X-DocSlurp-Chat-Session-Token": target.sessionToken } : {};
-      for await (const frame of streamEventsAt(`/v1/search/chat/stream?${params.toString()}`, requestOptions, grant)) {
+      for await (const frame of streamEventsAt(`/v1/chat/stream?${params.toString()}`, requestOptions, grant)) {
         if (frame.event === "status" || frame.event === "message" || frame.event === "done") {
           if (frame.event === "done") completed = true;
           yield { event: frame.event, data: frame.data } as ChatStreamEvent;
@@ -1672,6 +1765,7 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
       return request(`/v1/workspaces/${encodeURIComponent(id)}`, {}, options, true);
     },
     createUploadSession(input: UploadSessionInput, options?: RequestOptions): Promise<UploadSession> {
+      assertClientCanonicalIds(canonicalIdsOf(input, undefined));
       return request("/v1/uploads/direct/sessions", jsonRequest("POST", { ...input, ...intakeTarget(input) }), options);
     },
     getUploadSession(sessionId: string, options?: RequestOptions): Promise<UploadSession> {
@@ -1693,6 +1787,38 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
     search,
 
     upload,
+
+    extract,
+    /** An extract's status, retention and download state. Throws DocSlurpApiError 410 (extract_expired) once it was deleted. */
+    getExtract(extractId: string, options?: RequestOptions): Promise<ExtractRecord> {
+      return request<{ extract: ExtractRecord }>(`/v1/extracts/${encodeURIComponent(extractId)}`, {}, options, true).then((body) => body.extract);
+    },
+    async listExtracts(options?: RequestOptions & { limit?: number }): Promise<ExtractRecord[]> {
+      const query = options?.limit ? `?limit=${encodeURIComponent(String(options.limit))}` : "";
+      return (await request<{ extracts: ExtractRecord[] }>(`/v1/extracts${query}`, {}, options, true)).extracts;
+    },
+    /** Delete an extract now: it expires immediately and its files and outputs are removed shortly after. */
+    deleteExtract(extractId: string, options?: RequestOptions): Promise<{ extract: ExtractRecord }> {
+      return request(`/v1/extracts/${encodeURIComponent(extractId)}`, { method: "DELETE" }, options);
+    },
+    /**
+     * A two-minute signed URL for the extract's zip (server keys with `artifacts`). Fetch it without
+     * DocSlurp credentials; ask again once it expires.
+     */
+    async getExtractDownloadUrl(extractId: string, options: RequestOptions = {}): Promise<string> {
+      const headers = new Headers();
+      if (apiKey) headers.set("Authorization", `Bearer ${apiKey}`);
+      const bound = deadline(positiveDuration(options.timeoutMs ?? defaultTimeoutMs, "timeoutMs"), options.signal);
+      try {
+        const response = await fetchImpl(`${apiUrl}/v1/extracts/${encodeURIComponent(extractId)}/download`, {
+          headers, redirect: "manual", credentials: apiKey ? "omit" : "include", signal: bound.signal,
+        });
+        const location = response.headers.get("location");
+        await response.body?.cancel().catch(() => {});
+        if (response.status >= 300 && response.status < 400 && location) return location;
+        throw new DocSlurpApiError(publicHttpError(response.status), response.status, null);
+      } finally { bound.dispose(); }
+    },
 
     /** Mints a sealed `X-DocSlurp-Capability` token a browser can use; needs a server key. */
     createCapability(input: CreateCapabilityInput = {}, requestOptions?: RequestOptions): Promise<{ token: string; expiresAt: string } & JsonObject> {

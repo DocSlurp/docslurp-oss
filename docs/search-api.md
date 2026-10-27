@@ -84,6 +84,7 @@ Every error from the native JSON API (`/v1/*`, including authentication, rate li
 - Limits: `rate_limited`, `spend_limit_exceeded`, `daily_page_limit`, `ip_temporarily_blocked`.
 - Billing: `payment_required`, `credit_exhausted`, `workspace_budget_paused`, `org_budget_paused`, `minimum_credit_required`, `plan_not_entitled`.
 - Uploads: `unsupported_type`, `file_too_large`, `unreadable_source`.
+- Workspaces and runs: `workspace_forbidden`, `workspace_scope_forbidden` (a key limited to specific workspaces tried to create one), `no_stages_to_run`, `source_not_reusable` and `missing_stage_artifacts` (a reprocess the source run can't satisfy).
 - Organizations: `organization_not_found`, `organization_forbidden`, `organization_conflict`, `personal_organization`, `membership_exists`, `membership_forbidden`, `membership_not_found`, `last_owner`, `ownership_transfer_required`, `user_not_found`.
 - Anything else: `unavailable` and `internal`.
 

@@ -226,28 +226,6 @@ export function buildOpenApiDocument(baseUrl: string) {
           }
         }
       },
-      "/v1/artifacts/resolve": {
-        get: {
-          tags: ["artifacts"],
-          summary: "Resolve a storage URI into a signed download URL",
-          security: keyOrSessionSecurity,
-          parameters: [
-            { in: "query", name: "uri", required: true, schema: { type: "string" } }
-          ],
-          responses: {
-            "200": { description: "Signed artifact URL" },
-            "400": apiErrorOpenApiResponse("Missing artifact URI")
-          }
-        },
-        post: {
-          tags: ["artifacts"],
-          summary: "Resolve multiple storage URIs in one request",
-          security: keyOrSessionSecurity,
-          responses: {
-            "200": { description: "Signed artifact URLs" }
-          }
-        }
-      },
       ...apiKeySurfacePaths,
       ...simpleServicePaths,
       ...stateManagementPaths,

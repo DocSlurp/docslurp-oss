@@ -67,7 +67,7 @@ function buildActorLimitedApp(actor: RequestActor, now: () => number) {
   }));
   app.get("/v1/search", (c) => c.json({ ok: true }));
   app.get("/v1/documents", (c) => c.json({ ok: true }));
-  app.post("/v1/ingest", (c) => c.json({ ok: true }));
+  app.post("/v1/uploads", (c) => c.json({ ok: true }));
   return app;
 }
 
@@ -279,11 +279,11 @@ describe("api rate limit middleware", () => {
     const searchApp = buildActorLimitedApp(actorForApiKey("legacy-search-key", 1_000, { orgId: "org-funded" }), () => currentTime);
     const ipApp = new Hono();
     ipApp.use("*", createApiRateLimit({ profile: "ip", keyPrefix: "legacy-ip", now: () => currentTime }));
-    ipApp.post("/v1/ingest", (c) => c.json({ ok: true }));
+    ipApp.post("/v1/uploads", (c) => c.json({ ok: true }));
 
-    const upload = await uploadApp.request("/v1/ingest", { method: "POST" });
+    const upload = await uploadApp.request("/v1/uploads", { method: "POST" });
     const search = await searchApp.request("/v1/search");
-    const ip = await ipApp.request("/v1/ingest", { method: "POST", headers: { "x-forwarded-for": "203.0.113.40" } });
+    const ip = await ipApp.request("/v1/uploads", { method: "POST", headers: { "x-forwarded-for": "203.0.113.40" } });
 
     expect(upload.headers.get("RateLimit-Policy")).toContain('"account-upload";q=120;w=60');
     expect(search.headers.get("RateLimit-Policy")).toContain('"account-search";q=600;w=60');
@@ -429,7 +429,7 @@ describe("api rate limit middleware", () => {
     apiKeyPagesToday.mockResolvedValue(10);
     const app = buildActorLimitedApp(actorForApiKey("pages-key", 60, { rateLimitPpd: 10 }), () => currentTime);
 
-    const upload = await app.request("/v1/ingest", { method: "POST" });
+    const upload = await app.request("/v1/uploads", { method: "POST" });
     expect(upload.status).toBe(429);
     await expect(upload.json()).resolves.toMatchObject({ error: { code: "daily_page_limit", details: { category: "upload" } } });
     expect((await app.request("/v1/search")).status).toBe(200);
@@ -452,7 +452,7 @@ describe("api rate limit middleware", () => {
       app.post("/v1/chat", (c) => c.json({ ok: true }));
       expect((await app.request("/v1/search")).headers.get("RateLimit-Policy")).toBe('"account-search";q=600;w=60');
       expect((await app.request("/v1/chat", { method: "POST" })).headers.get("RateLimit-Policy")).toBe('"account-chat-ai";q=120;w=60');
-      expect((await app.request("/v1/ingest", { method: "POST" })).headers.get("RateLimit-Policy")).toContain('"account-upload";q=120;w=60');
+      expect((await app.request("/v1/uploads", { method: "POST" })).headers.get("RateLimit-Policy")).toContain('"account-upload";q=120;w=60');
     });
 
     it("gives a signed-in session the same table", async () => {
@@ -519,7 +519,7 @@ describe("api rate limit middleware", () => {
 
       apiKeyPagesToday.mockResolvedValue(10);
       const pages = buildActorLimitedApp(actorForApiKey("pages-links", 60, { rateLimitPpd: 10 }), () => currentTime);
-      const capped = await (await pages.request("/v1/ingest", { method: "POST" })).json() as { error: { code: string; details: { links: Record<string, string> } } };
+      const capped = await (await pages.request("/v1/uploads", { method: "POST" })).json() as { error: { code: string; details: { links: Record<string, string> } } };
       expect(capped.error).toMatchObject({ code: "daily_page_limit", details: { links: { apiKeys: "https://docslurp.io/app/api-keys", buyCredits: "https://docslurp.io/app/billing#bl-topup" } } });
     });
 
@@ -572,7 +572,9 @@ describe("api rate limit middleware", () => {
     expect(classifyRateLimitCategory("POST", "/v1/uploads/bulk")).toBe("upload");
     expect(classifyRateLimitCategory("POST", "/v1/uploads/direct/sessions")).toBe("upload");
     expect(classifyRateLimitCategory("GET", "/v1/search")).toBe("search");
-    expect(classifyRateLimitCategory("POST", "/v1/search/chat")).toBe("chat-ai");
+    // The stream answers with a model too: it must not fall into the cheaper search bucket.
+    expect(classifyRateLimitCategory("GET", "/v1/chat/stream")).toBe("chat-ai");
+    expect(classifyRateLimitCategory("POST", "/v1/search/chat")).toBe("search");
     expect(classifyRateLimitCategory("POST", "/v1/chat")).toBe("chat-ai");
     expect(classifyRateLimitCategory("POST", "/v1/chat/completions")).toBe("chat-ai");
     expect(classifyRateLimitCategory("POST", "/v1/workspaces/ws-1/chat")).toBe("chat-ai");

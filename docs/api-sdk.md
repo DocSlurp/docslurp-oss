@@ -209,6 +209,7 @@ curl -X PATCH "$api_url/v1/workspaces/amber-falcon-ridge" \
 | --- | --- | --- | --- |
 | Upload files | `POST /v1/uploads/direct/sessions`, storage PUTs, then poll the session; `POST /v1/uploads/bulk` is the size-limited HTTP fallback | `upload` (direct storage by default) | `upload` (uses the SDK) |
 | Ingest URLs | `POST /v1/uploads/url` | `upload({ urls })` | Use SDK/HTTP |
+| Extract (upload, auto-deleted after retention) | `POST /v1/extracts/{bulk,url,direct/sessions}`; `GET`/`DELETE /v1/extracts/:id`, `GET /v1/extracts/:id/download` ([extract.md](extract.md)) | `extract`, `getExtract`, `getExtractDownloadUrl` | `extract`, `extract-status`, `extract-download` |
 | Full run progress | `GET /v1/runs/:runId/progress` | `getRunProgress`; `getRun` returns only `run` | `status`, `status --watch` |
 | Live progress snapshots | `GET /v1/runs/:runId/progress/stream` | `streamProgress` | Watch uses polling |
 | Raw run/stage/document events | `GET /v1/runs/:runId/events/stream` | `streamRun` | Use SDK/HTTP |
