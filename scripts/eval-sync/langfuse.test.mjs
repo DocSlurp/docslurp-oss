@@ -314,3 +314,9 @@ test("readback tolerates Langfuse's 16-significant-digit number storage but not 
   state.items.get(items[0].id).expectedOutput = { bbox: [318.77, 1314.6] };
   assert.equal((await syncDataset(api, { name: "n/development", split: "development", items, sourceHashes: {}, commit: "c" })).updated, 1);
 });
+test("tolerant readback handles digit-boundary rounding", async () => {
+  const { sameJson } = await import("./langfuse.mjs");
+  assert.ok(sameJson({ x: [40.671827588762554] }, { x: [40.67182758876255] }));
+  assert.ok(!sameJson({ x: [40.67] }, { x: [40.68] }));
+  assert.ok(!sameJson({ x: 1 }, { x: 1, y: 2 }));
+});

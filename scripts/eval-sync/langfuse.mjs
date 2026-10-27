@@ -162,14 +162,17 @@ export async function listDatasetItems(api, name) {
   return items;
 }
 // Langfuse stores JSON numbers at about 16 significant digits (318.76800537109375 reads back as 318.7680053710938),
-// so readback compares non-integers at 15 significant digits. Exact values stay in the hash-referenced source files.
-export function normalizeNumbers(value) {
-  if (typeof value === "number") return Number.isFinite(value) && !Number.isInteger(value) ? Number(value.toPrecision(15)) : value;
-  if (Array.isArray(value)) return value.map(normalizeNumbers);
-  if (value && typeof value === "object") return Object.fromEntries(Object.entries(value).map(([key, inner]) => [key, normalizeNumbers(inner)]));
-  return value;
+// so readback treats numbers within a relative 1e-12 as equal. Exact values stay in the hash-referenced source files.
+export function sameJson(a, b) {
+  a ??= null; b ??= null;
+  if (typeof a === "number" && typeof b === "number") return a === b || (Number.isFinite(a) && Number.isFinite(b) && Math.abs(a - b) <= 1e-12 * Math.max(1, Math.abs(a), Math.abs(b)));
+  if (Array.isArray(a) || Array.isArray(b)) return Array.isArray(a) && Array.isArray(b) && a.length === b.length && a.every((value, i) => sameJson(value, b[i]));
+  if (a && b && typeof a === "object" && typeof b === "object") {
+    const keys = Object.keys(a);
+    return keys.length === Object.keys(b).length && keys.every((key) => Object.hasOwn(b, key) && sameJson(a[key], b[key]));
+  }
+  return a === b;
 }
-const sameJson = (a, b) => stableJson(normalizeNumbers(a ?? null)) === stableJson(normalizeNumbers(b ?? null));
 const sameItem = (remote, item) => remote?.metadata?.syncContentSha256 === item.metadata.syncContentSha256 && sameJson(remote.input, item.input) && sameJson(remote.expectedOutput, item.expectedOutput);
 const datasetMetadataMatches = (remote, metadata) => Object.entries(metadata).every(([key, value]) => stableJson(remote?.metadata?.[key] ?? null) === stableJson(value ?? null));
 
