@@ -6,7 +6,7 @@ severity, alerts the team live.
 
 ## Where reports go
 
-- **Database:** every report lands in `feedback_reports` (migration 0088) with
+- **Database:** every report lands in `feedback_reports` (migration 0092) with
   its organization, workspace (when the reporter can reach it), user, category,
   severity, message, route, screen name, trace ID, request ID, public error
   code, client timestamp and timezone, user agent and server build
