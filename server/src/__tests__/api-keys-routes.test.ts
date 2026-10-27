@@ -61,7 +61,7 @@ describe("apiKeysRoutes", () => {
         createdAt: new Date().toISOString(),
         revokedAt: null,
         requestsLastMinute: 0,
-        pagesToday: 0
+        pagesToday: 0, lastUsedIp: null, expiresAt: null, ipAllowlist: [], maxOutputTokens: null, rotatedFromKeyId: null
       },
       rawKey: "dslp_secret"
     });
@@ -143,7 +143,7 @@ describe("apiKeysRoutes", () => {
         createdAt: "2026-03-06T12:00:00.000Z",
         revokedAt: null,
         requestsLastMinute: 3,
-        pagesToday: 140
+        pagesToday: 140, lastUsedIp: null, expiresAt: null, ipAllowlist: [], maxOutputTokens: null, rotatedFromKeyId: null
       }
     ]);
 
@@ -172,7 +172,7 @@ describe("apiKeysRoutes", () => {
         createdAt: "2026-03-06T12:00:00.000Z",
         revokedAt: null,
         requestsLastMinute: 0,
-        pagesToday: 0
+        pagesToday: 0, lastUsedIp: null, expiresAt: null, ipAllowlist: [], maxOutputTokens: null, rotatedFromKeyId: null
       },
       rawKey: "dslp_rotated"
     });
@@ -184,7 +184,7 @@ describe("apiKeysRoutes", () => {
     expect(response.status).toBe(200);
     const body = await response.json();
     expect(body.rawKey).toBe("dslp_rotated");
-    expect(rotateApiKey).toHaveBeenCalledWith("key-1", "demo-user");
+    expect(rotateApiKey).toHaveBeenCalledWith("key-1", "demo-user", { overlapSeconds: undefined });
   });
 
   it("passes client-key domain updates through to the service", async () => {
@@ -203,7 +203,7 @@ describe("apiKeysRoutes", () => {
       createdAt: "2026-03-06T12:00:00.000Z",
       revokedAt: null,
       requestsLastMinute: 0,
-      pagesToday: 0
+      pagesToday: 0, lastUsedIp: null, expiresAt: null, ipAllowlist: [], maxOutputTokens: null, rotatedFromKeyId: null
     });
 
     const response = await app.request("/api-keys/key-1", {

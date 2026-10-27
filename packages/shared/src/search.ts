@@ -123,6 +123,21 @@ export const workspaceChatResponseSchema = z.object({
   debug: workspaceChatDebugSchema,
   /** Present when the turn was answered with the ingest report ("/status"); no model was called. */
   ingestReport: ingestReportSchema.optional(),
+  /**
+   * Present when the turn took the quick decline (a UX shortcut, not a safety
+   * control): a first, unfiltered, non-web direct-answer question whose best
+   * vector match was below `chat.scopeDeclineThreshold` and that no keyword or
+   * graph evidence supported. The answer is a short polite decline with no
+   * citations, plus related questions to ask instead. No model was called.
+   */
+  scopeDecline: z.object({
+    /** Best vector match, rescaled above the embedding pipeline's noise baseline, 0..1. */
+    relevance: z.number().min(0).max(1),
+    threshold: z.number().min(0).max(1),
+    /** The workspace's scope as shown in the decline. */
+    scope: z.string(),
+    suggestions: z.array(z.string()).max(3),
+  }).optional(),
 });
 export type WorkspaceChatResponse = z.infer<typeof workspaceChatResponseSchema>;
 

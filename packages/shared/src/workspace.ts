@@ -565,13 +565,45 @@ export const chatSearchFiltersSchema = z.object({
 }).strict();
 export type ChatSearchFilters = z.infer<typeof chatSearchFiltersSchema>;
 
+/**
+ * Longest workspace chat instructions, in characters (~1,000 tokens). The
+ * composed system message adds ~600 tokens of fixed rules and defaults, which
+ * stays small next to the chat's retrieved evidence (up to 32 passages).
+ */
+export const CHAT_INSTRUCTIONS_MAX_CHARS = 4000;
+
+/**
+ * Default threshold for the chat quick decline (`chat.scopeDeclineThreshold`):
+ * the turn's best vector match, rescaled above the embedding pipeline's noise
+ * baseline (0..1), must reach this for a first question to skip the model.
+ * Conservative on purpose: the model declines unrelated questions itself.
+ * Disabled until calibration exercises the real search session pipeline.
+ */
+export const DEFAULT_SCOPE_DECLINE_THRESHOLD = 0;
+
 export const workspaceSearchChatSettingsSchema = z.object({
   /** Workspace chat on or off. Off rejects every chat surface (app, /v1/chat, chat/completions, MCP). */
   enabled: z.boolean().default(true),
   mode: workspaceChatModeSchema.default("retrieval"),
   answerStyle: z.enum(["concise", "balanced", "detailed"]).default("balanced"),
   citations: z.boolean().default(true),
-  searchInstructions: z.string().trim().max(2000).nullable().default(null),
+  /**
+   * Chat instructions: the workspace owner's text, added to the chat system
+   * message for every answer in this workspace (app, /v1/chat,
+   * /v1/chat/completions, MCP, SDK and embed). It may change citations,
+   * answer style, tone and scope wording. The fixed core rules are always
+   * composed first and the model is told they win. Null or empty uses the default
+   * template built from the workspace name (never document content).
+   */
+  searchInstructions: z.string().trim().max(CHAT_INSTRUCTIONS_MAX_CHARS).nullable().default(null),
+  /**
+   * Quick decline (a UX shortcut, not a safety control): on a first, unfiltered,
+   * non-web direct-answer turn whose best vector match (rescaled above the
+   * embedding pipeline's noise baseline, 0..1) is below this, chat answers with
+   * a templated polite decline and related questions instead of a model call.
+   * Null uses DEFAULT_SCOPE_DECLINE_THRESHOLD; 0 turns it off.
+   */
+  scopeDeclineThreshold: z.number().min(0).max(1).nullable().default(null),
 });
 export type WorkspaceSearchChatSettings = z.infer<
   typeof workspaceSearchChatSettingsSchema
@@ -610,7 +642,8 @@ export const updateWorkspaceSearchChatSettingsSchema = z.object({
   mode: workspaceChatModeSchema.optional(),
   answerStyle: z.enum(["concise", "balanced", "detailed"]).optional(),
   citations: z.boolean().optional(),
-  searchInstructions: z.string().trim().max(2000).nullable().optional(),
+  searchInstructions: z.string().trim().max(CHAT_INSTRUCTIONS_MAX_CHARS).nullable().optional(),
+  scopeDeclineThreshold: z.number().min(0).max(1).nullable().optional(),
 });
 
 export const updateWorkspaceSearchBoostsSchema = z.object({
@@ -653,6 +686,7 @@ export const workspaceSearchSettingsSchema = z.object({
     answerStyle: "balanced",
     citations: true,
     searchInstructions: null,
+    scopeDeclineThreshold: null,
   }),
   compatSettings: z.record(z.string(), z.unknown()).default({}),
   rules: z.array(z.record(z.string(), z.unknown())).default([]),
@@ -769,10 +803,24 @@ export const reprocessRunSchema = z
   });
 export type ReprocessRunInput = z.infer<typeof reprocessRunSchema>;
 
+/** The name a workspace carries until DocSlurp titles it from its files, summaries or first chat question. */
+export const UNTITLED_WORKSPACE_NAME = "Untitled workspace";
+
+/** An omitted or blank name, or the placeholder itself, asks DocSlurp to title the workspace. */
+export function isUntitledWorkspaceName(name: string | null | undefined): boolean {
+  const trimmed = name?.trim() ?? "";
+  return trimmed === "" || trimmed === UNTITLED_WORKSPACE_NAME;
+}
+
 export const createWorkspaceSchema = z.object({
   userId: z.string().default("demo-user"),
   orgId: z.string().optional(),
-  name: z.string().trim().min(1).max(120),
+  /**
+   * Optional. Omitted, blank or "Untitled workspace": the workspace is created as
+   * "Untitled workspace" and renamed automatically (first upload, then content,
+   * then the first chat question) until someone renames it.
+   */
+  name: z.string().trim().max(120).optional(),
   /** Preferred slug. Invalid or reserved: a generated one; taken by another workspace: suffixed. */
   slug: z.string().trim().min(1).max(63).optional(),
   templateKey: workspaceTemplateKeySchema.optional(),

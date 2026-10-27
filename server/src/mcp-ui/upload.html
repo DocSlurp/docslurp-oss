@@ -1,0 +1,1428 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<!--
+  Defence in depth only: the MCP Apps host enforces the real policy from the
+  resource's _meta.ui.csp (connectDomains = storage origins) and may only narrow
+  this further. Static HTML cannot know the storage origin, so the server
+  substitutes the placeholder in connect-src with the exact storage origins when
+  it serves this resource ('none' when there are none); the host CSP is the floor. There are no
+  external scripts, fonts or images, and no way to call the DocSlurp API directly:
+  every DocSlurp call goes through the host's tools/call bridge.
+-->
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:; font-src data:; connect-src __DOCSLURP_CONNECT_SRC__; base-uri 'none'; form-action 'none'">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>DocSlurp uploader</title>
+<style>
+/*
+  Theme. The host supplies --color-*, --font-*, --border-radius-* through
+  ui/initialize and host-context-changed (applied to :root by the script). Every
+  widget colour reads a host variable first and falls back to --f-* below, which
+  follows the host's theme flag, then prefers-color-scheme. The three accents are
+  widget-owned (hosts do not provide brand colours), one meaning each:
+  teal = ready and the primary action, orange = in progress, violet = AI hand-off,
+  red = failure.
+*/
+:root {
+  --f-bg: #ffffff; --f-bg2: #f5f5f4; --f-t1: #1c1917; --f-t2: #57534e; --f-t3: #78716c;
+  --f-line: #e7e5e4; --f-line2: #d6d3d1; --f-bad: #b91c1c; --f-bad-bg: #fef2f2; --f-ring: #1c1917;
+  --ready: #0f766e; --work: #b45309; --ai: #6d28d9; --on-ready: #ffffff; --on-ai: #ffffff;
+  color-scheme: light;
+}
+:root[data-theme="dark"] {
+  --f-bg: #1f1f1e; --f-bg2: #2a2a28; --f-t1: #f5f5f4; --f-t2: #c4c0bb; --f-t3: #a29d97;
+  --f-line: #363432; --f-line2: #4a4845; --f-bad: #f87171; --f-bad-bg: #3a1d1d; --f-ring: #f5f5f4;
+  --ready: #2dd4bf; --work: #fb923c; --ai: #a78bfa; --on-ready: #04201c; --on-ai: #150a33;
+  color-scheme: dark;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme]) {
+    --f-bg: #1f1f1e; --f-bg2: #2a2a28; --f-t1: #f5f5f4; --f-t2: #c4c0bb; --f-t3: #a29d97;
+    --f-line: #363432; --f-line2: #4a4845; --f-bad: #f87171; --f-bad-bg: #3a1d1d; --f-ring: #f5f5f4;
+    --ready: #2dd4bf; --work: #fb923c; --ai: #a78bfa; --on-ready: #04201c; --on-ai: #150a33;
+    color-scheme: dark;
+  }
+}
+:root {
+  --bg: var(--color-background-primary, var(--f-bg));
+  --bg2: var(--color-background-secondary, var(--f-bg2));
+  --t1: var(--color-text-primary, var(--f-t1));
+  --t2: var(--color-text-secondary, var(--f-t2));
+  --t3: var(--color-text-tertiary, var(--f-t3));
+  --line: var(--color-border-secondary, var(--f-line));
+  --line2: var(--color-border-primary, var(--f-line2));
+  --bad: var(--color-text-danger, var(--f-bad));
+  --bad-bg: var(--color-background-danger, var(--f-bad-bg));
+  --ring: var(--color-ring-primary, var(--f-ring));
+  --r: var(--border-radius-md, 8px);
+  --sans: var(--font-sans, system-ui, -apple-system, "Segoe UI", sans-serif);
+  --inset-t: 0px; --inset-r: 0px; --inset-b: 0px; --inset-l: 0px;
+}
+
+* { box-sizing: border-box; }
+:root { --fs: var(--font-text-sm-size, 13px); --fs-s: max(12px, calc(var(--fs) * 0.92)); }
+html, body { margin: 0; background: var(--bg); }
+body {
+  font: 400 var(--fs)/1.4 var(--sans);
+  color: var(--t1);
+  padding: calc(12px + var(--inset-t)) calc(16px + var(--inset-r)) calc(16px + var(--inset-b)) calc(16px + var(--inset-l));
+  position: relative;
+}
+.w { max-width: 440px; }
+.num { font-variant-numeric: tabular-nums; font-feature-settings: "tnum"; }
+
+.head { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; color: var(--t2); font-size: var(--fs-s); min-height: 20px; }
+.head .dest { color: var(--t1); font-weight: 500; }
+.head .right { white-space: nowrap; }
+.dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; margin-right: 6px; vertical-align: 1px; background: var(--t3); }
+.dot.work { background: var(--work); }
+.dot.ready { background: var(--ready); }
+.dot.bad { background: var(--bad); }
+select.dest-select {
+  font: inherit; font-weight: 500; color: var(--t1); background: var(--bg); max-width: 220px; min-height: 24px;
+  border: 1px solid var(--line2); border-radius: var(--r); padding: 2px 4px; text-overflow: ellipsis;
+}
+
+/* one primary number per state */
+.big { display: flex; align-items: baseline; gap: 8px; margin: 12px 0 8px; }
+.big b { font-size: calc(var(--fs) * 2.6); line-height: 1; font-weight: 650; letter-spacing: -0.02em; }
+.big span { color: var(--t2); font-size: calc(var(--fs) * 1.08); }
+.big .of { color: var(--t3); }
+.big b.dim { color: var(--t3); }
+
+/* flat partition of pages: searchable / not searchable / pending (the remainder) */
+.meter { display: flex; height: 6px; border-radius: 2px; background: var(--bg2); outline: 1px solid var(--line); overflow: hidden; }
+.meter i { display: block; height: 100%; transition: width 0.4s linear; }
+.meter i + i { border-left: 2px solid var(--bg); }
+.meter .ok { background: var(--ready); }
+.meter .work { background: var(--work); }
+.meter .fail { background: var(--bad); }
+.legend { display: flex; flex-wrap: wrap; gap: 4px 14px; margin-top: 8px; color: var(--t2); font-size: var(--fs-s); }
+.legend .sw { display: inline-block; width: 8px; height: 8px; margin-right: 5px; border-radius: 1px; vertical-align: -0.5px; }
+
+.stats { margin: 8px 0 0; color: var(--t2); font-size: var(--fs-s); }
+.stats .metric { white-space: nowrap; }
+.note { margin: 8px 0 0; color: var(--t2); font-size: var(--fs-s); overflow-wrap: anywhere; }
+.note.bad { color: var(--bad); }
+
+ul.files { list-style: none; margin: 8px 0 0; padding: 0; border-top: 1px solid var(--line); }
+ul.files li { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 2px 12px; padding: 8px 0; border-bottom: 1px solid var(--line); align-items: baseline; }
+ul.files .n { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+ul.files .m { color: var(--t2); font-size: var(--fs-s); text-align: right; white-space: nowrap; }
+ul.files .m.bad { color: var(--bad); }
+ul.files .m.ok { color: var(--ready); }
+ul.files .sub { grid-column: 1 / -1; color: var(--t2); font-size: var(--fs-s); overflow-wrap: anywhere; }
+ul.files .sub.bad { color: var(--bad); }
+ul.files .bar { grid-column: 1 / -1; height: 3px; margin-top: 4px; background: var(--bg2); border-radius: 1px; overflow: hidden; }
+ul.files .bar i { display: block; height: 100%; background: var(--work); }
+.note + ul.files { border-top: 0; }
+
+.drop { margin: 8px 0 0; border: 1px dashed var(--t3); border-radius: var(--r); padding: 18px 12px; text-align: center; color: var(--t2); }
+.drop strong { display: block; color: var(--t1); font-size: calc(var(--fs) * 1.08); font-weight: 600; margin-bottom: 8px; }
+.drop.over { border-style: solid; border-color: var(--ready); background: var(--bg2); }
+.drop.off { opacity: 0.55; }
+
+.actions { display: flex; gap: 8px; margin-top: 16px; flex-wrap: wrap; }
+button {
+  font: 600 var(--fs)/1.2 var(--sans); min-height: 32px; padding: 7px 12px; max-width: 100%;
+  border-radius: var(--r); border: 1px solid var(--line2); background: transparent; color: var(--t1);
+  cursor: pointer; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.actions button { flex: 0 0 auto; }
+@media (max-width: 380px) { .actions button { flex: 1 1 100%; } }
+button:hover:not(:disabled) { background: var(--bg2); }
+button:disabled { opacity: 0.5; cursor: default; }
+button.p { background: var(--ready); border-color: var(--ready); color: var(--on-ready); }
+button.p:hover:not(:disabled) { background: var(--ready); filter: brightness(1.08); }
+button.ai { background: var(--ai); border-color: var(--ai); color: var(--on-ai); }
+button.ai:hover:not(:disabled) { background: var(--ai); filter: brightness(1.08); }
+button.lnk { border-color: transparent; color: var(--t2); text-decoration: underline; padding: 0 6px; min-height: 24px; font-weight: 500; font-size: var(--fs-s); }
+button.lnk:hover:not(:disabled) { background: transparent; color: var(--t1); }
+button:focus-visible, select:focus-visible, summary:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
+
+.alert { margin-top: 8px; padding: 8px 10px; border-radius: var(--r); background: var(--bad-bg); color: var(--bad); border: 1px solid var(--line2); }
+.alert b { display: block; color: var(--t1); font-weight: 600; margin-bottom: 2px; }
+.alert span { color: var(--t1); font-size: var(--fs-s); overflow-wrap: anywhere; }
+details { margin-top: 8px; color: var(--t2); font-size: var(--fs-s); }
+summary { cursor: pointer; width: max-content; min-height: 24px; }
+details p { margin: 4px 0 0; overflow-wrap: anywhere; }
+.plain { margin: 0; color: var(--t2); }
+
+.sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+@media (prefers-reduced-motion: reduce) { .meter i { transition: none; } }
+</style>
+</head>
+<body>
+<div class="w" id="app"></div>
+<div class="sr" id="live" role="status" aria-live="polite"></div>
+<input type="file" id="picker" multiple hidden>
+<script>
+(function () {
+  'use strict';
+
+  /*
+    DocSlurp MCP Apps uploader.
+
+    A hand-written MCP Apps view speaking raw JSON-RPC over postMessage
+    (spec 2026-01-26, github.com/modelcontextprotocol/ext-apps). It never touches
+    the DocSlurp API directly. Flow: ui/initialize -> tool-result (openUploader:
+    workspace, workspaces, limits) -> pick files -> uploadEstimate -> upload ->
+    XHR PUT each file to its presigned URL -> completeUpload -> poll
+    getUploadStatus -> ui/update-model-context and ui/message.
+
+    Every string that came from outside (file names, workspace names, tool and
+    error text) reaches the DOM through textContent / text nodes only.
+  */
+
+  var PROTOCOL_VERSION = '2026-01-26';
+  var WIDGET_VERSION = '2';
+  var CALL_META = { 'docslurp/origin': 'mcp-app-upload', 'docslurp/widgetVersion': WIDGET_VERSION };
+  var DEFAULT_LIMITS = { maxFiles: 10, maxFileBytes: 5 * 1024 * 1024 * 1024 };
+  var INIT_TIMEOUT_MS = 5000;
+  var TOOL_TIMEOUT_MS = 120000;
+  var MESSAGE_TIMEOUT_MS = 30000;
+  var POLL_MAX_MS = 30 * 60 * 1000;
+  var POLL_BLOCKED_MS = 30000;
+  var POLL_RATE_LIMITED_MS = 30000;
+  var TERMINAL_RUN = { completed: 1, failed: 1, cancelled: 1, canceled: 1, partial: 1, completed_with_errors: 1 };
+  // Rejections that retrying the same bytes cannot fix.
+  var PERMANENT_REJECT = { unsupported_type: 1, file_too_large: 1, remote_format_disabled: 1 };
+  var VAR_PREFIXES = /^--(color|font|border|shadow)-/;
+  var BAD_CSS_VALUE = new RegExp('url\\(|image-set\\(|@' + 'import|expression|[;{}\\\\]', 'i');
+  var STAGE_NOUN = {
+    transcribe: 'Transcription failed', parse: 'Reading the file failed', ocr: 'Text recognition failed',
+    embed: 'Embedding failed', chunk: 'Chunking failed', index: 'Indexing failed', vision: 'Page analysis failed'
+  };
+  var MIME_BY_EXT = {
+    md: 'text/markdown', markdown: 'text/markdown', txt: 'text/plain', csv: 'text/csv', html: 'text/html', htm: 'text/html',
+    json: 'application/json', pdf: 'application/pdf', epub: 'application/epub+zip',
+    docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    pptx: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+    png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', webp: 'image/webp', gif: 'image/gif',
+    mp3: 'audio/mpeg', wav: 'audio/wav', m4a: 'audio/mp4', mp4: 'video/mp4', mov: 'video/quicktime', webm: 'video/webm'
+  };
+
+  // ---------------------------------------------------------------- state
+
+  var S = {
+    // connecting | nohost | cancelled | idle | confirm | uploading | finalizing | processing | error
+    phase: 'connecting',
+    hostContext: {},
+    hostCaps: null,     // null until ui/initialize answers
+    nohostMsg: null,
+    limits: { maxFiles: DEFAULT_LIMITS.maxFiles, maxFileBytes: DEFAULT_LIMITS.maxFileBytes, accept: null },
+    workspaces: [],
+    workspaceId: null,
+    workspaceName: null,
+    bootError: null,
+    bootFatal: false,   // openUploader failed: uploading is disabled (never fall back to the default workspace)
+    files: [],          // { key, file, name, size, mime, problem, sent, state, descId }
+    notice: null,
+    estimate: null,
+    estimating: false,
+    estimateSeq: 0,
+    session: null,
+    pendingComplete: null, // { files, plan, sessionId } kept so completeUpload can be re-checked
+    sentFiles: [],
+    run: null,          // { id, workspaceId, workspaceName, startedAt, expectedDocs, fileCount, rejected: [] }
+    status: null,
+    statusStale: false,
+    statusError: null,
+    statusFatal: false,
+    rateLimited: false,
+    asked: null,
+    error: null,        // { kind, title, detail, technical }
+    dragging: false
+  };
+
+  var nextId = 1;
+  var pending = {};
+  var xhrs = [];
+  var uploadRunId = 0;
+  var poll = { timer: null, count: 0, startedAt: 0, failures: 0, running: false };
+  var renderTimer = null;
+  var lastLive = '';
+  var lastPct = -1;
+  var lastSig = null;
+  var meterWidths = {};
+  var fileKeySeq = 1;
+
+  var $app = document.getElementById('app');
+  var $live = document.getElementById('live');
+  var $picker = document.getElementById('picker');
+
+  // ---------------------------------------------------------------- helpers
+
+  function h(tag, attrs) {
+    var el = document.createElement(tag);
+    if (attrs) {
+      Object.keys(attrs).forEach(function (name) {
+        var value = attrs[name];
+        if (value === null || value === undefined || value === false) return;
+        if (name === 'class') el.className = value;
+        else if (name.slice(0, 2) === 'on' && typeof value === 'function') el.addEventListener(name.slice(2), value);
+        else el.setAttribute(name, value === true ? '' : String(value));
+      });
+    }
+    for (var i = 2; i < arguments.length; i += 1) append(el, arguments[i]);
+    return el;
+  }
+
+  function append(el, child) {
+    if (child === null || child === undefined || child === false) return;
+    if (Array.isArray(child)) { child.forEach(function (c) { append(el, c); }); return; }
+    el.appendChild(typeof child === 'object' ? child : document.createTextNode(String(child)));
+  }
+
+  function isObject(v) { return v !== null && typeof v === 'object' && !Array.isArray(v); }
+  function num(v) { return typeof v === 'number' && isFinite(v) ? v : 0; }
+  function numOrNull(v) { return typeof v === 'number' && isFinite(v) ? v : null; }
+  function str(v, max) { return typeof v === 'string' ? v.slice(0, max || 500) : ''; }
+  function plural(n, one, many) { return n.toLocaleString('en-US') + ' ' + (n === 1 ? one : (many || one + 's')); }
+  function cap(name) { return S.hostCaps ? Boolean(S.hostCaps[name]) : true; }
+
+  /** User-controlled text that goes into model-visible messages: no control characters, bounded, shown as quoted data. */
+  function clean(v, max) {
+    var t = typeof v === 'string' ? v : '';
+    t = t.replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]+/g, ' ').replace(/\s+/g, ' ').trim();
+    return t.slice(0, max || 120);
+  }
+  function quoted(v) { return JSON.stringify(clean(v)); }
+
+  function fmtBytes(n) {
+    if (n < 1000) return n + ' B';
+    if (n < 1e6) return (n / 1e3).toFixed(n < 1e4 ? 1 : 0) + ' kB';
+    if (n < 1e9) return (n / 1e6).toFixed(1) + ' MB';
+    return (n / 1e9).toFixed(2) + ' GB';
+  }
+  function byteUnit(n) { return n < 1e3 ? 'B' : n < 1e6 ? 'kB' : n < 1e9 ? 'MB' : 'GB'; }
+  function scaleBytes(n, unit) {
+    var div = unit === 'GB' ? 1e9 : unit === 'MB' ? 1e6 : unit === 'kB' ? 1e3 : 1;
+    return unit === 'B' ? String(Math.round(n)) : (n / div).toFixed(unit === 'GB' ? 2 : 1);
+  }
+  /** Decimal units everywhere, rounded down so the stated limit is never above the real one. */
+  function fmtLimit(bytes) {
+    if (bytes >= 1e9) return Math.floor(bytes / 1e9) + ' GB';
+    return Math.floor(bytes / 1e6) + ' MB';
+  }
+  function fmtDuration(ms) {
+    var s = Math.max(0, Math.round(ms / 1000));
+    if (s < 60) return s + 's';
+    var m = Math.floor(s / 60);
+    return m < 60 ? m + 'm ' + (s % 60) + 's' : Math.floor(m / 60) + 'h ' + (m % 60) + 'm';
+  }
+  function fmtRangeSeconds(range) {
+    var lo = Math.max(1, Math.round(range.low / 60));
+    var hi = Math.max(1, Math.round(range.high / 60));
+    if (range.high < 60) return Math.round(range.low) + (range.high > range.low ? '–' + Math.round(range.high) : '') + ' sec';
+    return (lo === hi ? String(lo) : lo + '–' + hi) + ' min';
+  }
+  function fmtCents(cents) {
+    if (cents > 0 && cents < 1) return '<$0.01';
+    return '$' + (cents / 100).toFixed(2);
+  }
+  function sum(list, key) { return list.reduce(function (a, f) { return a + f[key]; }, 0); }
+  function validFiles() { return S.files.filter(function (f) { return !f.problem; }); }
+  function destName() { return S.workspaceName || 'Default workspace'; }
+
+  // ---------------------------------------------------------------- JSON-RPC over postMessage
+
+  function post(message) {
+    try { window.parent.postMessage(message, '*'); } catch (e) { /* host went away */ }
+  }
+
+  function request(method, params, timeoutMs) {
+    return new Promise(function (resolve, reject) {
+      var id = nextId++;
+      var timer = setTimeout(function () {
+        delete pending[id];
+        var err = new Error('The host did not answer (' + method + ').');
+        err.timeout = true;
+        reject(err);
+      }, timeoutMs || TOOL_TIMEOUT_MS);
+      pending[id] = { resolve: resolve, reject: reject, timer: timer };
+      post({ jsonrpc: '2.0', id: id, method: method, params: params });
+    });
+  }
+
+  function notify(method, params) {
+    post({ jsonrpc: '2.0', method: method, params: params || {} });
+  }
+
+  function respond(id, result) { post({ jsonrpc: '2.0', id: id, result: result }); }
+  function respondError(id, code, message) { post({ jsonrpc: '2.0', id: id, error: { code: code, message: message } }); }
+
+  function onResponse(m) {
+    var entry = pending[m.id];
+    if (!entry) return;
+    delete pending[m.id];
+    if (entry.timer) clearTimeout(entry.timer);
+    if (m.error) entry.reject(new Error(str(isObject(m.error) ? m.error.message : m.error, 300) || 'Host error'));
+    else entry.resolve(m.result);
+  }
+
+  /** Tool result -> { data, error }. data = structuredContent, else the first text block parsed as JSON. */
+  function unwrapToolResult(result) {
+    if (!isObject(result)) return { data: null, error: 'The tool returned no result.' };
+    var data = isObject(result.structuredContent) ? result.structuredContent : null;
+    var text = '';
+    if (Array.isArray(result.content)) {
+      for (var i = 0; i < result.content.length; i += 1) {
+        var block = result.content[i];
+        if (isObject(block) && block.type === 'text' && typeof block.text === 'string') { text = block.text; break; }
+      }
+    }
+    if (!data && text) { try { var parsed = JSON.parse(text); if (isObject(parsed)) data = parsed; } catch (e) { /* plain text */ } }
+    if (result.isError) {
+      var message = '';
+      if (data) {
+        if (typeof data.error === 'string') message = data.error;
+        else if (isObject(data.error) && typeof data.error.message === 'string') message = data.error.message;
+        else if (typeof data.message === 'string') message = data.message;
+      }
+      return { data: data, error: str(message || (data ? '' : text) || 'The tool call failed.', 300) };
+    }
+    return { data: data, error: null };
+  }
+
+  function callTool(name, args) {
+    return request('tools/call', { name: name, arguments: args, _meta: CALL_META }, TOOL_TIMEOUT_MS).then(function (result) {
+      var out = unwrapToolResult(result);
+      if (out.error) { var e = new Error(out.error); e.toolError = true; throw e; }
+      return out.data || {};
+    });
+  }
+
+  /** 'rate' (429, retry later), 'permanent' (4xx, retrying cannot help) or 'transient'. */
+  function classifyError(err) {
+    var msg = (err && err.message) || '';
+    if (!err || !err.toolError) return 'transient';
+    if (/rate.?limit|too many requests|\b429\b/i.test(msg)) return 'rate';
+    if (/\b40[0-4]\b|forbidden|not found|unauthori[sz]ed|not allowed|invalid|permission/i.test(msg)) return 'permanent';
+    return 'transient';
+  }
+
+  // ---------------------------------------------------------------- host context / theme
+
+  function safeVariable(name, value) {
+    return typeof name === 'string' && /^--[a-z0-9-]+$/.test(name) && VAR_PREFIXES.test(name) &&
+      typeof value === 'string' && value.length > 0 && value.length <= 200 && !BAD_CSS_VALUE.test(value);
+  }
+
+  function applyHostContext(ctx) {
+    if (!isObject(ctx)) return;
+    S.hostContext = Object.assign({}, S.hostContext, ctx);
+    var root = document.documentElement;
+    if (ctx.theme === 'light' || ctx.theme === 'dark') root.setAttribute('data-theme', ctx.theme);
+    if (isObject(ctx.styles) && isObject(ctx.styles.variables)) {
+      Object.keys(ctx.styles.variables).forEach(function (name) {
+        var value = ctx.styles.variables[name];
+        if (safeVariable(name, value)) root.style.setProperty(name, value);
+      });
+    }
+    // styles.css.fonts is deliberately ignored: font CSS cannot be made safe without a parser, and the widget uses the system stack.
+    if (isObject(ctx.safeAreaInsets)) {
+      ['top', 'right', 'bottom', 'left'].forEach(function (side) {
+        var v = ctx.safeAreaInsets[side];
+        if (typeof v === 'number' && isFinite(v) && v >= 0) root.style.setProperty('--inset-' + side[0], Math.min(v, 100) + 'px');
+      });
+    }
+  }
+
+  var sizeTimer = null;
+  var lastHeight = 0;
+  function reportSize() {
+    var height = Math.ceil(document.documentElement.getBoundingClientRect().height || document.body.scrollHeight || 0);
+    if (!height || Math.abs(height - lastHeight) < 1) return;
+    lastHeight = height;
+    notify('ui/notifications/size-changed', { height: height });
+  }
+  function scheduleSize() {
+    if (sizeTimer) return;
+    sizeTimer = setTimeout(function () { sizeTimer = null; reportSize(); }, 50);
+  }
+
+  // ---------------------------------------------------------------- inbound messages
+
+  function onNotification(m) {
+    var p = isObject(m.params) ? m.params : {};
+    switch (m.method) {
+      case 'ui/notifications/tool-result': onToolResult(p); break;
+      case 'ui/notifications/host-context-changed': applyHostContext(p); render(); break;
+      case 'ui/notifications/tool-cancelled':
+        if (S.phase === 'connecting' || S.phase === 'idle') { S.phase = 'cancelled'; render(); }
+        break;
+      default: break; // tool-input, tool-input-partial and unknown notifications are ignored
+    }
+  }
+
+  function onRequest(m) {
+    if (m.method === 'ping') return respond(m.id, {});
+    if (m.method === 'ui/resource-teardown') { teardown(); return respond(m.id, {}); }
+    return respondError(m.id, -32601, 'Method not found');
+  }
+
+  function teardown() {
+    uploadRunId += 1;
+    xhrs.slice().forEach(function (x) { try { x.abort(); } catch (e) { /* already done */ } });
+    xhrs = [];
+    stopPolling();
+  }
+
+  window.addEventListener('message', function (event) {
+    if (event.source !== window.parent) return;
+    var m = event.data;
+    if (!isObject(m) || m.jsonrpc !== '2.0') return;
+    if (typeof m.method === 'string') {
+      if (m.id !== undefined && m.id !== null) onRequest(m); else onNotification(m);
+    } else if (m.id !== undefined) onResponse(m);
+  });
+
+  function onToolResult(result) {
+    var out = unwrapToolResult(result);
+    if (out.error) {
+      // openUploader failed (unknown workspace, no access): never fall back to the default workspace.
+      S.bootError = out.error;
+      S.bootFatal = true;
+      if (S.phase === 'idle' || S.phase === 'connecting' || S.phase === 'confirm') render();
+      return;
+    }
+    var d = out.data || {};
+    S.bootError = null;
+    S.bootFatal = false;
+    if (isObject(d.limits)) {
+      var maxFiles = d.limits.maxFiles, maxBytes = d.limits.maxFileBytes;
+      if (typeof maxFiles === 'number' && maxFiles >= 1 && maxFiles <= 100) S.limits.maxFiles = Math.floor(maxFiles);
+      if (typeof maxBytes === 'number' && maxBytes >= 1) S.limits.maxFileBytes = maxBytes;
+      if (Array.isArray(d.limits.accept)) {
+        var accept = d.limits.accept.filter(function (x) { return typeof x === 'string' && /^[a-z0-9]{1,12}$/i.test(x); }).slice(0, 200)
+          .map(function (x) { return x.toLowerCase(); });
+        S.limits.accept = accept.length ? accept : null;
+      }
+    }
+    if (Array.isArray(d.workspaces)) {
+      S.workspaces = d.workspaces.filter(function (w) { return isObject(w) && typeof w.id === 'string' && typeof w.name === 'string'; })
+        .slice(0, 50).map(function (w) { return { id: str(w.id, 128), name: str(w.name, 200), isDefault: w.isDefault === true }; });
+    }
+    var chosen = isObject(d.workspace) && typeof d.workspace.id === 'string' ? d.workspace : null;
+    if (chosen && (S.phase === 'idle' || S.phase === 'connecting' || S.phase === 'confirm' || S.phase === 'nohost')) {
+      S.workspaceId = str(chosen.id, 128);
+      S.workspaceName = str(chosen.name, 200) || null;
+      // The picker lists at most 50; make sure the chosen workspace is always selectable.
+      if (!S.workspaces.some(function (w) { return w.id === S.workspaceId; })) {
+        S.workspaces.unshift({ id: S.workspaceId, name: S.workspaceName || S.workspaceId, isDefault: chosen.isDefault === true });
+      }
+      if (S.phase === 'confirm') requestEstimate();
+    } else if (!S.workspaceId) {
+      var def = S.workspaces.filter(function (w) { return w.isDefault; })[0];
+      if (def) { S.workspaceId = def.id; S.workspaceName = def.name; }
+    }
+    render();
+  }
+
+  // ---------------------------------------------------------------- init handshake
+
+  function start() {
+    window.addEventListener('resize', scheduleSize);
+    if (typeof ResizeObserver === 'function') new ResizeObserver(scheduleSize).observe(document.body);
+    if (window.parent === window) { S.phase = 'nohost'; render(); return; }
+    render();
+    var id = nextId++;
+    pending[id] = {
+      timer: null,
+      reject: function (err) {
+        // The host answered with an error (for example a protocol version it does not support): say so.
+        if (S.phase === 'connecting') {
+          S.nohostMsg = 'Your chat app rejected the uploader handshake' + (err && err.message ? ' (' + err.message + ')' : '') + '. Ask the assistant to upload by link with the upload tool.';
+          S.phase = 'nohost';
+          render();
+        }
+      },
+      resolve: function (result) {
+        // A late answer (after the timeout message was shown) still recovers the widget.
+        if (!isObject(result)) return;
+        S.protocolVersion = typeof result.protocolVersion === 'string' ? result.protocolVersion : null;
+        S.hostCaps = isObject(result.hostCapabilities) ? result.hostCapabilities : {};
+        applyHostContext(result.hostContext);
+        notify('ui/notifications/initialized', {});
+        if (S.phase === 'connecting' || S.phase === 'nohost') {
+          if (!S.hostCaps.serverTools) {
+            S.nohostMsg = 'This chat app does not let the uploader call DocSlurp tools, so it cannot upload files from here. Ask the assistant to upload by link with the upload tool.';
+            S.phase = 'nohost';
+          } else {
+            S.nohostMsg = null;
+            S.phase = S.files.length ? 'confirm' : 'idle';
+          }
+        }
+        render();
+        scheduleSize();
+      }
+    };
+    post({
+      jsonrpc: '2.0', id: id, method: 'ui/initialize',
+      params: {
+        appInfo: { name: 'docslurp-uploader', version: WIDGET_VERSION },
+        appCapabilities: {},
+        protocolVersion: PROTOCOL_VERSION
+      }
+    });
+    setTimeout(function () {
+      if (S.phase === 'connecting') { S.phase = 'nohost'; render(); }
+    }, INIT_TIMEOUT_MS);
+  }
+
+  // ---------------------------------------------------------------- picking files
+
+  function guessMime(file) {
+    if (file.type) return file.type;
+    var ext = (file.name.split('.').pop() || '').toLowerCase();
+    return MIME_BY_EXT[ext] || 'application/octet-stream';
+  }
+
+  function canPick() { return !S.bootFatal && (S.phase === 'idle' || S.phase === 'confirm'); }
+
+  function addFiles(list) {
+    if (!canPick()) return;
+    var incoming = Array.prototype.slice.call(list || []);
+    if (!incoming.length) return;
+    var skipped = 0;
+    incoming.forEach(function (file) {
+      var dup = S.files.some(function (f) { return f.name === file.name && f.size === file.size && f.file.lastModified === file.lastModified; });
+      if (dup) return;
+      if (S.files.length >= S.limits.maxFiles) { skipped += 1; return; }
+      var problem = null;
+      var ext = (file.name.split('.').pop() || '').toLowerCase();
+      if (!file.size) problem = 'Empty file';
+      else if (file.size > S.limits.maxFileBytes) problem = 'Over the ' + fmtLimit(S.limits.maxFileBytes) + ' limit';
+      else if (file.name.length > 512) problem = 'File name too long';
+      else if (S.limits.accept && S.limits.accept.indexOf(ext) < 0) problem = 'Unsupported file type';
+      S.files.push({ key: 'f' + (fileKeySeq++), file: file, name: file.name, size: file.size, mime: guessMime(file), problem: problem, sent: 0, state: 'queued', descId: null });
+    });
+    S.notice = skipped ? 'Up to ' + S.limits.maxFiles + ' files per upload. ' + plural(skipped, 'file') + ' not added.' : null;
+    if (!S.files.length) { render(); return; }
+    S.phase = 'confirm';
+    S.error = null;
+    requestEstimate();
+    render();
+  }
+
+  function removeFile(key) {
+    S.files = S.files.filter(function (f) { return f.key !== key; });
+    S.notice = null;
+    if (!S.files.length) { S.phase = 'idle'; S.estimate = null; render(); return; }
+    requestEstimate();
+    render();
+  }
+
+  function clearFiles() {
+    S.files = []; S.estimate = null; S.notice = null; S.estimating = false; S.estimateSeq += 1;
+    S.phase = 'idle'; S.error = null;
+    render();
+  }
+
+  function requestEstimate() {
+    var files = validFiles();
+    var seq = ++S.estimateSeq;
+    S.estimate = null;
+    if (!files.length) { S.estimating = false; return; }
+    S.estimating = true;
+    var args = { files: files.map(function (f) { return { name: f.name, size: f.size }; }) };
+    if (S.workspaceId) args.workspace = S.workspaceId;
+    callTool('uploadEstimate', args).then(function (data) {
+      if (seq !== S.estimateSeq) return;
+      var e = isObject(data.estimate) ? data.estimate : null;
+      S.estimate = e ? {
+        pages: numOrNull(e.pages),
+        seconds: isObject(e.seconds) && numOrNull(e.seconds.low) !== null && numOrNull(e.seconds.high) !== null ? e.seconds : null,
+        credits: isObject(e.credits) && numOrNull(e.credits.low) !== null && numOrNull(e.credits.high) !== null ? e.credits : null,
+        basis: str(e.basis, 300)
+      } : null;
+    }).catch(function () {
+      if (seq === S.estimateSeq) S.estimate = null; // an estimate is optional
+    }).then(function () {
+      if (seq !== S.estimateSeq) return;
+      S.estimating = false;
+      render();
+    });
+  }
+
+  // ---------------------------------------------------------------- upload
+
+  function setError(kind, title, detail, technical) {
+    S.phase = 'error';
+    S.error = { kind: kind, title: title, detail: detail, technical: technical || '' };
+    render();
+  }
+
+  function startUpload() {
+    var files = validFiles();
+    if (!files.length || S.phase !== 'confirm' || S.bootFatal) return;
+    var run = ++uploadRunId;
+    files.forEach(function (f) { f.sent = 0; f.state = 'queued'; f.descId = null; });
+    S.phase = 'uploading';
+    S.error = null; S.status = null; S.asked = null; S.pendingComplete = null; S.session = null;
+    render();
+    var args = { files: files.map(function (f) { return { filename: f.name, mimeType: f.mime, sizeBytes: f.size, singlePart: true }; }) };
+    if (S.workspaceId) args.workspace = S.workspaceId;
+
+    callTool('upload', args).then(function (data) {
+      if (run !== uploadRunId) {
+        var cancelledSession = str(data.sessionId, 64);
+        if (cancelledSession && S.pendingComplete && S.pendingComplete.cancelled) {
+          S.pendingComplete.sessionId = cancelledSession;
+          checkSession(S.pendingComplete, uploadRunId);
+        }
+        return;
+      }
+      var descs = Array.isArray(data.files) ? data.files.filter(isObject) : [];
+      var sessionId = str(data.sessionId, 64);
+      var plan = matchDescriptors(files, descs);
+      if (!sessionId || !plan) {
+        return setError('start', 'Upload could not start', 'The server did not return an upload target for every file. Nothing was sent.', 'Missing sessionId or single-part putUrl');
+      }
+      S.session = { sessionId: sessionId };
+      plan.forEach(function (p) { p.file.descId = p.id; });
+      return putAll(plan, run).then(function () {
+        if (run !== uploadRunId) return;
+        return finishUpload(files, plan, sessionId, run, true);
+      });
+    }).catch(function (err) {
+      if (run !== uploadRunId) return;
+      if (err && err.putError) return setError(err.kind || 'put', err.title, err.detail, err.technical);
+      setError('start', 'Upload stopped', (err && err.message) || 'The upload failed.', err && err.toolError ? 'Tool error' : 'Host error');
+    });
+  }
+
+  /** Pair each local file with the server's descriptor: same name and size, in order. No loose fallback. */
+  function matchDescriptors(files, descs) {
+    if (descs.length !== files.length) return null;
+    var used = {};
+    var plan = [];
+    for (var i = 0; i < files.length; i += 1) {
+      var f = files[i];
+      var idx = -1;
+      for (var j = 0; j < descs.length; j += 1) {
+        if (!used[j] && descs[j].filename === f.name && descs[j].sizeBytes === f.size) { idx = j; break; }
+      }
+      if (idx < 0) return null;
+      used[idx] = true;
+      var d = descs[idx];
+      if (typeof d.id !== 'string' || typeof d.putUrl !== 'string' || (d.mode && d.mode !== 'single')) return null;
+      if (!/^https?:\/\//i.test(d.putUrl)) return null;
+      plan.push({ file: f, id: d.id, putUrl: d.putUrl, headers: isObject(d.headers) ? d.headers : { 'Content-Type': f.mime } });
+    }
+    return plan;
+  }
+
+  /*
+    All PUTs start at once. Presigned links last 15 minutes from the upload call,
+    so a PUT that starts immediately can never find its link expired; a queue
+    that started later files after earlier ones finished could.
+  */
+  function putAll(plan, run) {
+    return new Promise(function (resolve, reject) {
+      var remaining = plan.length, failed = false;
+      if (!remaining) return resolve();
+      plan.forEach(function (item) {
+        putOne(item, run).then(function () {
+          remaining -= 1;
+          if (remaining === 0 && !failed && run === uploadRunId) resolve();
+        }, function (err) {
+          if (failed) return;
+          failed = true;
+          teardownXhrs();
+          reject(err);
+        });
+      });
+    });
+  }
+
+  function teardownXhrs() {
+    xhrs.slice().forEach(function (x) { try { x.abort(); } catch (e) { /* done */ } });
+    xhrs = [];
+  }
+
+  function putOne(item, run) {
+    return new Promise(function (resolve, reject) {
+      var f = item.file;
+      var xhr = new XMLHttpRequest();
+      xhrs.push(xhr);
+      function done() { xhrs = xhrs.filter(function (x) { return x !== xhr; }); }
+      function fail(kind, title, detail, technical) {
+        done(); f.state = 'failed';
+        reject({ putError: true, kind: kind, title: title, detail: detail, technical: technical });
+      }
+      f.state = 'sending';
+      xhr.open('PUT', item.putUrl, true);
+      Object.keys(item.headers).forEach(function (name) {
+        if (typeof item.headers[name] === 'string') xhr.setRequestHeader(name, item.headers[name]);
+      });
+      xhr.upload.onprogress = function (ev) {
+        if (run !== uploadRunId) return;
+        f.sent = Math.min(f.size, ev.lengthComputable ? ev.loaded : f.sent);
+        renderSoon();
+      };
+      xhr.onload = function () {
+        if (run !== uploadRunId) return;
+        if (xhr.status >= 200 && xhr.status < 300) {
+          done(); f.state = 'sent'; f.sent = f.size; renderSoon(); resolve();
+        } else if (xhr.status === 403) {
+          fail('put', 'The upload link expired or was refused',
+            'Storage refused ' + clean(f.name) + '. Upload links expire after 15 minutes. Other files may already be stored or ingesting. Check the workspace before retrying.',
+            'PUT returned HTTP 403 (signed link expired, or the bucket policy refused it).');
+        } else {
+          fail('put', 'Upload stopped', 'Storage rejected ' + clean(f.name) + ' (HTTP ' + xhr.status + '). Other files may already be stored or ingesting.',
+            'PUT ' + clean(f.name) + ' returned HTTP ' + xhr.status + '.');
+        }
+      };
+      xhr.onerror = function () {
+        if (run !== uploadRunId) return;
+        fail('blocked', 'The app blocked the direct upload',
+          'No storage response was received. Files may already be stored or ingesting; check the workspace before retrying.',
+          'PUT to the storage origin failed before any response (network, CORS or CSP). The storage address may not be on this app’s allowed list, or the bucket does not allow uploads from here.');
+      };
+      xhr.ontimeout = xhr.onerror;
+      xhr.onabort = function () { done(); };
+      xhr.send(f.file);
+    });
+  }
+
+  /**
+   * Confirm the session. From here the server may already be starting a billable
+   * run, so there is no Cancel, and a timeout re-checks the same session
+   * and reads its persisted result instead of re-uploading.
+   */
+  function finishUpload(files, plan, sessionId, run, mayRetry) {
+    S.phase = 'finalizing';
+    S.pendingComplete = { files: files, plan: plan, sessionId: sessionId };
+    render();
+    return callTool('completeUpload', { sessionId: sessionId, fileIds: plan.map(function (p) { return p.id; }) }).then(function (data) {
+      if (run !== uploadRunId) return;
+      return onCompleted(files, data);
+    }, function (err) {
+      if (run !== uploadRunId) return;
+      if (mayRetry && err && !err.toolError) return finishUpload(files, plan, sessionId, run, false);
+      return checkSession(S.pendingComplete, run);
+    });
+  }
+
+  // Status is read through the host's existing tenant-scoped tool. A stopped
+  // browser request cannot prove that storage or ingestion was cancelled.
+  function checkSession(pc, run) {
+    S.phase = 'finalizing'; render();
+    return callTool('getUploadStatus', { sessionId: pc.sessionId }).then(function (data) {
+      if (run !== uploadRunId) return;
+      if (isObject(data.result) && isObject(data.result.run) && data.result.run.id) return onCompleted(pc.files, data.result);
+      if (data.status === 'aborted') {
+        S.pendingComplete = null; S.phase = 'confirm';
+        S.notice = 'The server confirmed this upload was aborted.'; render(); return;
+      }
+      setError('complete', pc.cancelled ? 'Upload stopped locally' : 'Ingestion may already be running',
+        'Stored files may still be ingested automatically. Check again before uploading anything twice.', 'Session status: ' + str(data.status, 40));
+    }, function (err) {
+      if (run !== uploadRunId) return;
+      setError('complete', pc.cancelled ? 'Upload state unknown' : 'Upload sent, but not confirmed',
+        'The server could not confirm the session state. Files may already be stored or ingesting. Check again before uploading anything twice, or ask the assistant to check the workspace.',
+        (err && err.message) || 'getUploadStatus failed');
+    });
+  }
+
+  function onCompleted(files, data) {
+    var ws = isObject(data.workspace) ? data.workspace : {};
+    var runInfo = isObject(data.run) ? data.run : {};
+    var runId = str(runInfo.id, 128);
+    var documents = Array.isArray(data.documents) ? data.documents : [];
+    var rejected = (Array.isArray(data.rejected) ? data.rejected : []).filter(isObject).slice(0, 20).map(function (r) {
+      return { filename: str(r.filename, 512), code: str(r.code, 40), message: str(r.message, 300) || 'Not accepted' };
+    });
+    if (!runId) {
+      return setError('complete', 'Upload finished without a run', 'The files were stored but no ingestion run was reported. Ask the assistant to check the workspace.', 'completeUpload returned no run id');
+    }
+    S.run = {
+      id: runId,
+      workspaceId: str(ws.id, 128) || S.workspaceId,
+      workspaceName: str(ws.name, 200) || destName(),
+      startedAt: Date.now(),
+      expectedDocs: documents.length || Math.max(1, files.length - rejected.length),
+      fileCount: files.length,
+      rejected: rejected
+    };
+    S.sentFiles = files.slice();
+    S.pendingComplete = null;
+    S.status = null; S.statusStale = false; S.statusError = null; S.statusFatal = false; S.rateLimited = false;
+    S.phase = 'processing';
+    S.files = [];
+    render();
+    sendModelContext();
+    startPolling();
+  }
+
+  function cancelUpload() {
+    if (S.phase !== 'uploading') return; // not once completeUpload is in flight
+    var run = ++uploadRunId;
+    teardownXhrs();
+    S.pendingComplete = { files: validFiles().slice(), sessionId: S.session && S.session.sessionId, cancelled: true };
+    if (S.pendingComplete.sessionId) return checkSession(S.pendingComplete, run);
+    setError('complete', 'Upload stopped locally', 'The server may still be preparing this upload. Its state is not yet known; check again before retrying.', 'Awaiting upload session');
+  }
+
+  function checkAgain() {
+    var pc = S.pendingComplete;
+    if (!pc) return;
+    var run = ++uploadRunId;
+    if (!pc.sessionId) return setError('complete', 'Upload state unknown', 'Ask the assistant to check the workspace before retrying.', 'No session response received');
+    if (pc.cancelled) return checkSession(pc, run);
+    finishUpload(pc.files, pc.plan, pc.sessionId, run, false);
+  }
+
+  // ---------------------------------------------------------------- status polling
+
+  function startPolling() {
+    stopPolling();
+    poll.count = 0; poll.failures = 0; poll.startedAt = Date.now(); poll.running = true;
+    S.statusStale = false; S.statusError = null; S.statusFatal = false; S.rateLimited = false;
+    pollOnce();
+  }
+
+  function stopPolling() {
+    poll.running = false;
+    if (poll.timer) { clearTimeout(poll.timer); poll.timer = null; }
+  }
+
+  function nextDelay() {
+    var base = Math.min(5000, 2000 + Math.max(0, poll.count - 3) * 500);
+    var delay = poll.failures ? Math.min(15000, base * (1 + poll.failures)) : base;
+    if (S.status && S.status.runStatus === 'blocked') delay = Math.max(delay, POLL_BLOCKED_MS);
+    if (S.rateLimited) delay = Math.max(delay, POLL_RATE_LIMITED_MS);
+    return delay;
+  }
+
+  function schedulePoll() {
+    if (!poll.running) return;
+    if (Date.now() - poll.startedAt > POLL_MAX_MS) {
+      poll.running = false; S.statusStale = true; render(); return;
+    }
+    poll.timer = setTimeout(pollOnce, nextDelay());
+  }
+
+  function pollOnce() {
+    poll.timer = null;
+    if (!poll.running || !S.run) return;
+    if (document.hidden) return; // resumes from visibilitychange
+    var runId = S.run.id;
+    callTool('getUploadStatus', { workspace: S.run.workspaceId || undefined, runId: runId }).then(function (data) {
+      if (!poll.running || !S.run || S.run.id !== runId) return;
+      poll.count += 1; poll.failures = 0; S.statusError = null; S.rateLimited = false;
+      applyStatus(data);
+      if (S.status && S.status.terminal) { stopPolling(); render(); sendModelContext(); return; }
+      render();
+      schedulePoll();
+    }).catch(function (err) {
+      if (!poll.running) return;
+      var kind = classifyError(err);
+      if (kind === 'permanent') {
+        stopPolling();
+        S.statusFatal = true;
+        S.statusError = (err && err.message) || 'Status is unavailable.';
+        render();
+        return;
+      }
+      poll.failures += 1;
+      S.rateLimited = kind === 'rate';
+      S.statusError = kind === 'rate' ? 'Too many requests. Retrying in about 30 seconds.' : (poll.failures >= 3 ? ((err && err.message) || 'Status is unavailable.') : null);
+      render();
+      schedulePoll();
+    });
+  }
+
+  document.addEventListener('visibilitychange', function () {
+    if (!document.hidden && poll.running && !poll.timer) pollOnce();
+  });
+
+  function applyStatus(data) {
+    var report = isObject(data.report) ? data.report : null;
+    if (!report) return;
+    var files = isObject(report.files) ? report.files : {};
+    var by = isObject(files.byStatus) ? files.byStatus : {};
+    var pages = isObject(report.pages) ? report.pages : {};
+    var sr = isObject(report.searchability) ? report.searchability : {};
+    var perf = isObject(report.performance) ? report.performance : {};
+    var runInfo = isObject(report.run) ? report.run : null;
+    var counts = { completed: num(by.completed), processing: num(by.processing), queued: num(by.queued), failed: num(by.failed), other: num(by.other) };
+    var active = counts.processing + counts.queued + counts.other;
+    var total = num(files.total);
+    var items = null;
+    if (Array.isArray(files.items)) {
+      items = files.items.filter(isObject).slice(0, 50).map(function (it) {
+        return {
+          documentId: str(it.documentId, 128), filename: str(it.filename, 512),
+          status: str(it.status, 20), pages: numOrNull(it.pages), searchablePages: numOrNull(it.searchablePages), error: str(it.error, 300) || null
+        };
+      });
+    }
+    var runStatus = runInfo && typeof runInfo.status === 'string' ? runInfo.status : null;
+    // The run's own status is authoritative; the document-count heuristic is only for reports without a run.
+    var terminal = runInfo ? TERMINAL_RUN[runStatus] === 1 : (total > 0 && total >= S.run.expectedDocs && active === 0);
+    S.status = {
+      total: num(pages.total),
+      searchable: num(sr.searchablePages),
+      unsearchable: num(sr.unsearchablePages),
+      pending: num(sr.pendingPages),
+      files: counts,
+      fileTotal: total,
+      items: items,
+      speed: numOrNull(perf.pagesPerMinute),
+      per100: numOrNull(perf.minutesPer100Pages),
+      pagesPerDollar: numOrNull(perf.pagesPerDollar),
+      costCents: numOrNull(perf.costCents),
+      computeEstimated: perf.computeEstimated === true,
+      durationMs: runInfo ? numOrNull(runInfo.durationMs) : null,
+      runStatus: runStatus,
+      terminal: Boolean(terminal)
+    };
+  }
+
+  // ---------------------------------------------------------------- failures and retry
+
+  function humanizeError(error) {
+    if (!error) return 'Processing failed';
+    var m = /^Failed during (.+)$/i.exec(error);
+    if (!m) return error;
+    var stage = m[1].trim().toLowerCase();
+    if (STAGE_NOUN[stage]) return STAGE_NOUN[stage];
+    var words = stage.replace(/[_-]+/g, ' ');
+    return words.charAt(0).toUpperCase() + words.slice(1) + ' failed';
+  }
+
+  /** Failed and rejected files. Each row carries the exact sent file it maps to (consumed in order, so duplicate names stay distinct). */
+  function failedRows() {
+    var rows = [];
+    var st = S.status;
+    var used = {};
+    function sentFor(name) {
+      for (var i = 0; i < S.sentFiles.length; i += 1) {
+        if (!used[i] && S.sentFiles[i].name === name) { used[i] = true; return S.sentFiles[i]; }
+      }
+      return null;
+    }
+    if (st && st.items) {
+      st.items.forEach(function (it) {
+        if (it.status === 'failed') rows.push({ name: it.filename, detail: humanizeError(it.error), file: sentFor(it.filename), retryable: true });
+      });
+    } else if (st && st.files.failed > 0) {
+      rows.push({ name: plural(st.files.failed, 'file') + ' failed', detail: null, file: null, retryable: false });
+    }
+    if (S.run) {
+      S.run.rejected.forEach(function (r) {
+        rows.push({ name: r.filename, detail: r.message, file: sentFor(r.filename), retryable: !PERMANENT_REJECT[r.code] });
+      });
+    }
+    return rows;
+  }
+
+  function retryFiles() {
+    var out = [];
+    failedRows().forEach(function (row) { if (row.retryable && row.file && out.indexOf(row.file) < 0) out.push(row.file); });
+    return out;
+  }
+
+  // ---------------------------------------------------------------- hand-off to the model
+
+  function sendModelContext() {
+    if (!S.run || !cap('updateModelContext')) return;
+    var st = S.status;
+    var files = st && st.items ? st.items.map(function (it) { return { filename: clean(it.filename), status: it.status }; })
+      : S.sentFiles.map(function (f) { return { filename: clean(f.name), status: st ? 'unknown' : 'queued' }; });
+    var searchable = st ? st.searchable : 0, total = st ? st.total : null;
+    var text = 'DocSlurp uploader: ' + plural(S.run.fileCount, 'file') + ' sent to workspace ' + quoted(S.run.workspaceName) + ' (run ' + clean(S.run.id, 64) + '). ' +
+      (st ? searchable + ' of ' + total + ' pages searchable' + (st.terminal ? ', processing finished.' : ', still processing.') : 'Processing started.');
+    request('ui/update-model-context', {
+      content: [{ type: 'text', text: text }],
+      structuredContent: {
+        workspace: { id: clean(S.run.workspaceId, 128), name: clean(S.run.workspaceName) },
+        runId: clean(S.run.id, 64), files: files, pagesSearchable: searchable, pagesTotal: total
+      }
+    }, MESSAGE_TIMEOUT_MS).catch(function () { /* context is best effort */ });
+  }
+
+  function askAboutFiles() {
+    if (!S.run || S.asked === 'sending' || !cap('message')) return;
+    var st = S.status;
+    var names = (st && st.items ? st.items.filter(function (it) { return it.status === 'completed'; }).map(function (it) { return it.filename; })
+      : S.sentFiles.map(function (f) { return f.name; })).slice(0, 5).map(quoted);
+    var text = 'I just uploaded ' + (names.length ? names.join(', ') : 'files') + ' to the DocSlurp workspace ' + quoted(S.run.workspaceName) +
+      '. Search them and tell me what they contain, with page citations.';
+    S.asked = 'sending'; render();
+    request('ui/message', { role: 'user', content: [{ type: 'text', text: text }] }, MESSAGE_TIMEOUT_MS).then(function (result) {
+      S.asked = isObject(result) && result.isError ? 'failed' : 'sent'; render();
+    }).catch(function () { S.asked = 'failed'; render(); });
+  }
+
+  function askForLinkFallback() {
+    request('ui/message', { role: 'user', content: [{ type: 'text', text:
+      'The DocSlurp file uploader was blocked in this app, so my local files were not uploaded. I will share links to the files instead; please ingest them with the upload tool using urls.' }] },
+      MESSAGE_TIMEOUT_MS).then(function () { S.notice = 'Message sent.'; render(); }).catch(function () { S.notice = 'The app did not accept the message.'; render(); });
+  }
+
+  // ---------------------------------------------------------------- views
+
+  function dot(kind) { return h('span', { class: 'dot ' + kind }); }
+
+  function destEl(editable) {
+    if (editable && S.workspaces.length > 1 && !S.bootFatal) {
+      return h('select', {
+        class: 'dest-select', 'data-k': 'dest', 'aria-label': 'Destination workspace',
+        onchange: function (ev) {
+          var chosen = S.workspaces.filter(function (w) { return w.id === ev.target.value; })[0];
+          if (!chosen) return;
+          S.workspaceId = chosen.id; S.workspaceName = chosen.name;
+          if (S.phase === 'confirm') requestEstimate();
+          render();
+        }
+      }, S.workspaces.map(function (w) {
+        return h('option', { value: w.id, selected: w.id === S.workspaceId }, w.name + (w.isDefault ? ' (default)' : ''));
+      }));
+    }
+    return h('span', { class: 'dest' }, S.bootFatal ? 'unavailable' : destName());
+  }
+
+  function head(left, right) {
+    return h('div', { class: 'head' }, h('span', null, left), right ? h('span', { class: 'right num' }, right) : null);
+  }
+
+  function meter(label, now, max, valueText, segments) {
+    var bar = h('div', {
+      class: 'meter', role: 'progressbar', 'aria-label': label, 'aria-valuemin': 0, 'aria-valuemax': Math.max(1, Math.round(max)),
+      'aria-valuenow': Math.round(Math.min(now, max)), 'aria-valuetext': valueText
+    });
+    segments.forEach(function (seg) {
+      var pct = max > 0 ? Math.max(0, Math.min(100, (seg.value / max) * 100)) : 0;
+      var el = h('i', { class: seg.cls });
+      var previous = meterWidths[seg.key];
+      el.style.width = (previous === undefined ? pct : previous) + '%';
+      if (previous !== pct) {
+        (window.requestAnimationFrame || setTimeout)(function () { el.style.width = pct + '%'; });
+      }
+      meterWidths[seg.key] = pct;
+      bar.appendChild(el);
+    });
+    return bar;
+  }
+
+  function viewNoHost(message) {
+    return h('p', { class: 'plain' }, message);
+  }
+
+  function viewIdle() {
+    var off = S.bootFatal;
+    var limitNote = 'Up to ' + S.limits.maxFiles + ' files per upload, ' + fmtLimit(S.limits.maxFileBytes) + ' each. PDF, Office, EPUB, HTML, images, audio, video.';
+    return [
+      head(['Upload to ', destEl(true)]),
+      S.bootError ? h('div', { class: 'alert', role: 'alert' }, h('b', null, 'Uploading is unavailable'),
+        h('span', null, S.bootError + ' Ask the assistant to open the uploader again with a workspace you can use.')) : null,
+      h('div', { class: 'drop' + (S.dragging ? ' over' : '') + (off ? ' off' : ''), 'data-k': 'drop' },
+        h('strong', null, 'Drop files here'),
+        h('button', { class: 'p', 'data-k': 'choose', disabled: off, onclick: openPicker }, 'Choose files')),
+      h('p', { class: 'note' }, limitNote),
+      S.notice ? h('p', { class: 'note bad' }, S.notice) : null
+    ];
+  }
+
+  function fileRow(f, mode) {
+    var meta;
+    var extra = null;
+    if (mode === 'confirm') {
+      var rm = h('button', { class: 'lnk', 'data-k': 'rm-' + f.key, 'aria-label': 'Remove ' + f.name, onclick: function () { removeFile(f.key); } }, 'Remove');
+      meta = f.problem ? h('span', { class: 'm bad' }, f.problem, ' ', rm) : h('span', { class: 'm num' }, fmtBytes(f.size), ' ', rm);
+    } else if (f.state === 'sent') {
+      meta = h('span', { class: 'm ok num' }, 'Sent');
+    } else if (f.state === 'sending') {
+      meta = h('span', { class: 'm num' }, fmtBytes(f.sent), ' of ', fmtBytes(f.size));
+      extra = h('span', { class: 'bar' }, meterBar(f));
+    } else if (f.state === 'failed') {
+      meta = h('span', { class: 'm bad' }, 'Failed');
+    } else {
+      meta = h('span', { class: 'm num' }, 'Waiting');
+    }
+    return h('li', null, h('span', { class: 'n', title: f.name }, f.name), meta, extra);
+  }
+
+  function meterBar(f) {
+    var i = h('i');
+    i.style.width = (f.size ? Math.min(100, (f.sent / f.size) * 100) : 0) + '%';
+    return i;
+  }
+
+  function estimateBasisText(est) {
+    if (!est || !est.basis) return '';
+    return /estimated from file size/i.test(est.basis) ? 'Page counts are estimated from file size.' : est.basis;
+  }
+
+  function viewConfirm() {
+    var files = validFiles();
+    var bytes = sum(files, 'size');
+    var est = S.estimate;
+    var n = files.length;
+    var big;
+    if (est && est.pages !== null) {
+      big = h('div', { class: 'big' }, h('b', { class: 'num' }, '≈ ' + Math.round(est.pages).toLocaleString('en-US')), h('span', null, 'pages to index'));
+    } else if (S.estimating) {
+      big = h('div', { class: 'big' }, h('b', { class: 'num dim' }, '—'), h('span', null, 'estimating pages'));
+    } else {
+      big = h('div', { class: 'big' }, h('b', { class: 'num' }, fmtBytes(bytes)), h('span', null, 'to upload'));
+    }
+    var bits = [];
+    if (est && est.seconds) bits.push('Est. processing time ' + fmtRangeSeconds(est.seconds));
+    if (est && est.credits) {
+      var lo = Math.round(est.credits.low), hi = Math.round(est.credits.high);
+      bits.push('Est. ' + (lo === hi ? lo.toLocaleString('en-US') : lo.toLocaleString('en-US') + '–' + hi.toLocaleString('en-US')) + ' credits');
+    }
+    var basis = estimateBasisText(est);
+    return [
+      head(['Upload to ', destEl(true)], plural(S.files.length, 'file') + ' · ' + fmtBytes(sum(S.files, 'size'))),
+      big,
+      bits.length ? h('p', { class: 'stats num' }, bits.join(' · ')) : null,
+      basis ? h('p', { class: 'note' }, basis) : null,
+      h('p', { class: 'note' }, 'Nothing is sent until you upload.'),
+      S.notice ? h('p', { class: 'note bad' }, S.notice) : null,
+      h('ul', { class: 'files' }, S.files.map(function (f) { return fileRow(f, 'confirm'); })),
+      h('div', { class: 'actions' },
+        h('button', { class: 'p', 'data-k': 'upload', disabled: n === 0, onclick: startUpload }, n === 0 ? 'Upload' : 'Upload ' + plural(n, 'file')),
+        h('button', { 'data-k': 'clear', onclick: clearFiles }, 'Clear'))
+    ];
+  }
+
+  function viewUploading() {
+    var files = validFiles();
+    var total = sum(files, 'size');
+    var sent = Math.min(total, sum(files, 'sent'));
+    var unit = byteUnit(total);
+    var finalizing = S.phase === 'finalizing';
+    return [
+      head([dot('work'), 'Uploading to ', h('span', { class: 'dest' }, destName())], plural(files.length, 'file')),
+      h('div', { class: 'big' }, h('b', { class: 'num' }, scaleBytes(sent, unit)), h('span', null, unit + ' of ' + fmtBytes(total))),
+      meter('Upload progress', sent, total, fmtBytes(sent) + ' of ' + fmtBytes(total), [{ key: 'up', cls: 'work', value: sent }]),
+      finalizing ? h('p', { class: 'note' }, 'Starting ingestion…') : null,
+      h('ul', { class: 'files' }, files.map(function (f) { return fileRow(f, 'upload'); })),
+      finalizing ? null : h('div', { class: 'actions' }, h('button', { 'data-k': 'cancel', onclick: cancelUpload }, 'Cancel'))
+    ];
+  }
+
+  function viewError() {
+    var e = S.error || { kind: 'start', title: 'Upload stopped', detail: '', technical: '' };
+    var primary;
+    if (e.kind === 'complete' && S.pendingComplete) primary = h('button', { class: 'p', 'data-k': 'retry', onclick: checkAgain }, 'Check again');
+    else primary = h('button', { class: 'p', 'data-k': 'retry', onclick: function () { S.phase = S.files.length ? 'confirm' : 'idle'; S.error = null; S.notice = null; render(); } }, 'Try again');
+    return [
+      head(['Upload to ', h('span', { class: 'dest' }, destName())]),
+      h('div', { class: 'alert', role: 'alert' }, h('b', null, e.title), h('span', null, e.detail)),
+      S.notice ? h('p', { class: 'note' }, S.notice) : null,
+      h('div', { class: 'actions' }, primary,
+        e.kind === 'blocked' && cap('message') ? h('button', { 'data-k': 'link', onclick: askForLinkFallback }, 'Share links instead') : null),
+      e.technical ? h('details', null, h('summary', { 'data-k': 'details' }, 'Details'), h('p', { class: 'num' }, e.technical)) : null
+    ];
+  }
+
+  function statsLine(st, finished, hasFailures) {
+    var parts = [];
+    var fileTotal = st.fileTotal || (S.run ? S.run.fileCount : 0);
+    if (finished) parts.push(hasFailures ? 'Indexed ' + st.files.completed + ' of ' + fileTotal + ' files' : plural(fileTotal, 'file'));
+    else parts.push(st.files.completed + ' of ' + plural(fileTotal, 'file') + ' indexed');
+    if (st.speed !== null) parts.push(Math.round(st.speed).toLocaleString('en-US') + ' pages/min');
+    if (st.per100 !== null) parts.push(fmtDuration(st.per100 * 60000) + ' per 100 pages');
+    if (st.costCents !== null) parts.push(fmtCents(st.costCents) + (st.computeEstimated ? ' (compute estimated)' : ''));
+    if (st.pagesPerDollar !== null) parts.push(Math.round(st.pagesPerDollar).toLocaleString('en-US') + ' pages/$1');
+    // Each metric stays on one line; only the separators may wrap.
+    return parts.map(function (part, i) { return [i ? ' · ' : null, h('span', { class: 'metric' }, part)]; });
+  }
+
+  function viewProcessing() {
+    var st = S.status;
+    var run = S.run;
+    var finished = Boolean(st && st.terminal);
+    var blocked = Boolean(st && !finished && st.runStatus === 'blocked');
+    var failed = failedRows();
+    var okFiles = st ? st.files.completed : 0;
+    var hasFailures = failed.length > 0 || Boolean(st && st.unsearchable > 0);
+    var total = st ? st.total : 0;
+    var searchable = st ? st.searchable : 0;
+    var elapsed = st && st.durationMs ? st.durationMs : (finished ? Date.now() - run.startedAt : null);
+
+    var title, kind;
+    if (blocked) { title = 'Paused in '; kind = 'work'; }
+    else if (!finished) { title = 'Processing in '; kind = 'work'; }
+    else if (okFiles === 0 && failed.length) { title = 'Processing failed in '; kind = 'bad'; }
+    else if (hasFailures) { title = 'Finished with errors in '; kind = 'bad'; }
+    else { title = 'Indexed in '; kind = 'ready'; }
+
+    var parts = [
+      head([dot(kind), title, h('span', { class: 'dest' }, run.workspaceName)], finished && elapsed ? fmtDuration(elapsed) + ' elapsed' : plural(run.fileCount, 'file'))
+    ];
+
+    if (!st) {
+      parts.push(h('div', { class: 'big' }, h('b', { class: 'num dim' }, '—'), h('span', null, 'waiting for the first status')));
+    } else {
+      var ofText = (total > searchable || hasFailures) ? h('span', { class: 'of num' }, 'of ' + total.toLocaleString('en-US')) : null;
+      parts.push(h('div', { class: 'big' }, h('b', { class: 'num' }, searchable.toLocaleString('en-US')),
+        h('span', null, ofText, ofText ? ' ' : null, 'pages searchable')));
+      var valueText = searchable + ' of ' + total + ' pages searchable' + (st.unsearchable ? ', ' + st.unsearchable + ' not searchable' : '');
+      parts.push(meter('Pages searchable', searchable, total, valueText, [
+        { key: 'ok', cls: 'ok', value: searchable }, { key: 'fail', cls: 'fail', value: st.unsearchable }
+      ]));
+      // The headline already states the searchable count; the legend names only the other segments.
+      var legend = [];
+      if (st.unsearchable) legend.push(h('span', null, h('i', { class: 'sw', style: 'background:var(--bad)' }), st.unsearchable.toLocaleString('en-US') + ' not searchable'));
+      if (st.pending) legend.push(h('span', null, h('i', { class: 'sw', style: 'background:var(--line2)' }), st.pending.toLocaleString('en-US') + ' pending'));
+      if (legend.length) parts.push(h('div', { class: 'legend num' }, legend));
+      parts.push(h('p', { class: 'stats num' }, statsLine(st, finished, hasFailures)));
+      if (blocked) parts.push(h('p', { class: 'note' }, 'Paused: waiting for credits or budget. Processing resumes by itself once they are available.'));
+    }
+
+    var retryable = retryFiles();
+    if (failed.length) {
+      parts.push(h('ul', { class: 'files' }, failed.map(function (row, i) {
+        var canRetry = finished && row.retryable && row.file;
+        return h('li', null, h('span', { class: 'n', title: row.name }, row.name),
+          canRetry ? h('button', { class: 'lnk', 'data-k': 'retry-' + i, 'aria-label': 'Retry ' + row.name, onclick: function () { reuploadFailed([row.file]); } }, 'Retry') : h('span'),
+          row.detail ? h('span', { class: 'sub bad' }, row.detail) : null);
+      })));
+    }
+    if (S.statusError) parts.push(h('p', { class: 'note bad' }, (S.statusFatal ? 'Status is unavailable: ' : 'Status updates are failing: ') + S.statusError));
+    if (S.statusStale) parts.push(h('p', { class: 'note' }, 'Still processing after 30 minutes. Updates have stopped.'));
+    if (S.asked === 'failed') parts.push(h('p', { class: 'note bad' }, 'The app did not accept the message.'));
+    if (S.asked === 'sent') parts.push(h('p', { class: 'note' }, 'Message sent to the chat.'));
+
+    var actions = [];
+    var canAsk = st && searchable > 0 && cap('message');
+    if (canAsk) {
+      var label = finished && failed.length && okFiles > 0 ? 'Ask about the ' + plural(okFiles, 'indexed file') : 'Ask about these files';
+      actions.push(h('button', { class: 'ai', 'data-k': 'ask', disabled: S.asked === 'sending', onclick: askAboutFiles }, label));
+    }
+    if (S.statusStale || S.statusFatal) actions.push(h('button', { 'data-k': 'check', onclick: startPolling }, 'Check again'));
+    if (finished) {
+      if (retryable.length > 1) actions.push(h('button', { 'data-k': 'reupload', onclick: function () { reuploadFailed(retryable); } }, 'Retry ' + retryable.length + ' files'));
+      actions.push(h('button', { 'data-k': 'more', onclick: addMore }, 'Add more'));
+    }
+    if (actions.length) parts.push(h('div', { class: 'actions' }, actions));
+    return parts;
+  }
+
+  function resetForNewBatch() {
+    stopPolling();
+    S.run = null; S.status = null; S.files = []; S.estimate = null; S.notice = null; S.asked = null; S.error = null;
+    S.statusStale = false; S.statusError = null; S.statusFatal = false; S.rateLimited = false; S.pendingComplete = null; meterWidths = {};
+  }
+
+  function addMore() { resetForNewBatch(); S.phase = 'idle'; render(); }
+
+  function reuploadFailed(retry) {
+    if (!retry || !retry.length) return;
+    resetForNewBatch();
+    retry.forEach(function (f) { f.sent = 0; f.state = 'queued'; f.problem = null; f.descId = null; });
+    S.files = retry.slice();
+    S.phase = 'confirm';
+    requestEstimate();
+    render();
+  }
+
+  // ---------------------------------------------------------------- render
+
+  function liveText() {
+    switch (S.phase) {
+      case 'nohost': return 'This uploader needs an app that supports MCP Apps.';
+      case 'idle': return S.bootFatal ? 'Uploading is unavailable.' : 'Ready to upload.';
+      case 'confirm': return plural(validFiles().length, 'file') + ' ready to upload.';
+      case 'uploading': return 'Uploading.';
+      case 'finalizing': return 'Starting ingestion.';
+      case 'error': return S.error ? S.error.title : 'Upload stopped.';
+      case 'processing':
+        if (!S.status) return 'Processing started.';
+        if (S.status.terminal) return 'Finished. ' + S.status.searchable + ' of ' + S.status.total + ' pages searchable.';
+        if (S.status.runStatus === 'blocked') return 'Paused. Waiting for credits or budget.';
+        return 'Processing.';
+      default: return '';
+    }
+  }
+
+  function render() {
+    if (renderTimer) { clearTimeout(renderTimer); renderTimer = null; }
+    var tree;
+    switch (S.phase) {
+      case 'connecting': tree = [h('p', { class: 'plain' }, 'Connecting to your chat app…')]; break;
+      case 'nohost': tree = [viewNoHost(S.nohostMsg || 'This uploader runs inside a chat app that supports MCP Apps, and no app answered. Ask the assistant to upload by link with the upload tool, or try a different app.')]; break;
+      case 'cancelled': tree = [viewNoHost('The uploader was cancelled by the app.')]; break;
+      case 'idle': tree = viewIdle(); break;
+      case 'confirm': tree = viewConfirm(); break;
+      case 'uploading': case 'finalizing': tree = viewUploading(); break;
+      case 'error': tree = viewError(); break;
+      case 'processing': tree = viewProcessing(); break;
+      default: tree = [];
+    }
+    var next = document.createElement('div');
+    append(next, tree);
+    // A poll that changed nothing leaves the live DOM alone, so focus, an open <details> and
+    // screen-reader state (the progressbar) are not disturbed.
+    var sig = next.innerHTML;
+    if (sig !== lastSig) {
+      lastSig = sig;
+      var active = document.activeElement;
+      var focusKey = active && active.getAttribute ? active.getAttribute('data-k') : null;
+      var opened = {};
+      Array.prototype.forEach.call($app.querySelectorAll('details'), function (d) {
+        var s = d.querySelector('summary');
+        if (d.open && s) opened[s.getAttribute('data-k')] = true;
+      });
+      while ($app.firstChild) $app.removeChild($app.firstChild);
+      while (next.firstChild) $app.appendChild(next.firstChild);
+      Array.prototype.forEach.call($app.querySelectorAll('details'), function (d) {
+        var s = d.querySelector('summary');
+        if (s && opened[s.getAttribute('data-k')]) d.open = true;
+      });
+      if (focusKey) {
+        var again = $app.querySelector('[data-k="' + focusKey + '"]');
+        if (again && again.focus) again.focus();
+      }
+    }
+    // Live region: on phase change, and in 10% steps while processing.
+    var live = liveText();
+    if (S.phase === 'processing' && S.status && !S.status.terminal && S.status.total > 0) {
+      var pct = Math.floor((S.status.searchable / S.status.total) * 10) * 10;
+      if (pct !== lastPct) { lastPct = pct; live = pct + '% of pages searchable.'; }
+    }
+    if (live !== lastLive && live) { lastLive = live; $live.textContent = live; }
+    scheduleSize();
+  }
+
+  function renderSoon() {
+    if (renderTimer) return;
+    renderTimer = setTimeout(render, 120);
+  }
+
+  // ---------------------------------------------------------------- wiring
+
+  function openPicker() { if (S.bootFatal) return; $picker.value = ''; $picker.click(); }
+  $picker.addEventListener('change', function () { addFiles($picker.files); });
+
+  function setDragging(on) {
+    if (S.dragging === on) return;
+    S.dragging = on;
+    var zone = $app.querySelector('.drop');
+    if (zone) zone.className = 'drop' + (on ? ' over' : '') + (S.bootFatal ? ' off' : '');
+    lastSig = null;
+  }
+  document.addEventListener('dragover', function (ev) { if (!canPick()) return; ev.preventDefault(); setDragging(true); });
+  document.addEventListener('dragleave', function (ev) { if (!ev.relatedTarget) setDragging(false); });
+  document.addEventListener('drop', function (ev) {
+    ev.preventDefault();
+    setDragging(false);
+    if (canPick() && ev.dataTransfer) addFiles(ev.dataTransfer.files);
+  });
+
+  start();
+})();
+</script>
+</body>
+</html>

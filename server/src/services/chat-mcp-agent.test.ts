@@ -685,6 +685,26 @@ describe("agent modes", () => {
     expect(result.debug.modes.web).toBe("off");
   });
 
+  it("composes the core rules from the turn's actual web tools, first in the system prompt", async () => {
+    mocks.manifestIds = ["search", "webSearch", "webFetch"];
+    const instructionsFor = vi.fn((turn: { webTools: boolean }) => ({ core: `CORE web=${turn.webTools}`, workspace: "WORKSPACE PART" }));
+    for (const [web, expected] of [[true, true], [false, false]] as const) {
+      const model = new MockLanguageModelV4({ doStream: [answerStep("Ready")] });
+      mocks.provider.mockReturnValue(model);
+      await runChatMcpAgent({ ...args, web, instructionsFor });
+      expect(instructionsFor).toHaveBeenLastCalledWith({ webTools: expected });
+      const system = JSON.stringify(model.doStreamCalls[0]!.prompt);
+      expect(system.indexOf(`CORE web=${expected}`)).toBeGreaterThanOrEqual(0);
+      expect(system.indexOf(`CORE web=${expected}`)).toBeLessThan(system.indexOf("signed-in assistant"));
+      expect(system.indexOf("WORKSPACE PART")).toBeGreaterThan(system.indexOf("signed-in assistant"));
+    }
+    // A workspace opt-out removes the web tools, so the rule is composed without the web.
+    const model = new MockLanguageModelV4({ doStream: [answerStep("Ready")] });
+    mocks.provider.mockReturnValue(model);
+    await runChatMcpAgent({ ...args, web: true, workspaceWebTools: false, instructionsFor });
+    expect(instructionsFor).toHaveBeenLastCalledWith({ webTools: false });
+  });
+
   it("offers web tools on request, but never past the workspace opt-out", async () => {
     mocks.manifestIds = ["search", "webSearch", "webFetch"];
     const on = new MockLanguageModelV4({ doStream: [answerStep("Ready")] });

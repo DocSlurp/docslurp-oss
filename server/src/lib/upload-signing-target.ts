@@ -7,12 +7,18 @@ export function uploadSigningTarget(storage: ObjectStorageConfig, publicBucketUr
 } {
   const config = s3ClientConfig(storage);
   if (!publicBucketUrl) return { config, bucket: storage.bucket };
+  const bucket = publicUploadBucketOrigin(publicBucketUrl);
+  return {
+    config: { ...config, endpoint: undefined, bucketEndpoint: true, forcePathStyle: false },
+    bucket,
+  };
+}
+
+/** The validated origin shared by upload signing and browser CSP construction. */
+export function publicUploadBucketOrigin(publicBucketUrl: string): string {
   const url = new URL(publicBucketUrl);
   if (url.protocol !== "https:" || url.username || url.password || url.search || url.hash || url.pathname !== "/") {
     throw new Error("DOCSLURP_STORAGE_PUBLIC_BUCKET_URL must be an HTTPS bucket origin without credentials, path or query");
   }
-  return {
-    config: { ...config, endpoint: undefined, bucketEndpoint: true, forcePathStyle: false },
-    bucket: url.origin,
-  };
+  return url.origin;
 }

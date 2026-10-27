@@ -36,6 +36,8 @@ import { jobsRoutes } from "./routes/jobs.js";
 import { uploadEstimateRoutes, uploadsRoutes } from "./routes/uploads.js";
 import { webhooksRoutes } from "./routes/webhooks.js";
 import { workspacesRoutes } from "./routes/workspaces.js";
+import { chatInstructionsRoutes } from "./routes/chat-instructions.js";
+import { assertOutputModerationConfig } from "./services/chat-output-moderation.js";
 import { apiKeysRoutes } from "./routes/api-keys.js";
 import { searchRoutes, searchesRoutes, workspaceChatRoutes } from "./routes/search.js";
 import { webRoutes } from "./routes/web.js";
@@ -156,7 +158,7 @@ export function createApiApp(): Hono {
   app.use("/compat/algolia/*", nativeBodyLimit(256 * 1024));
   app.use("*", rejectNulBytes);
   // `/v1/workspaces/:slug|default/...` → resolved workspace UUID routes.
-  const workspaceRefs = workspaceRefPath([workspacesRoutes, connectorsRoutes, secretsRoutes, workspaceGraphRoutes]);
+  const workspaceRefs = workspaceRefPath([workspacesRoutes, chatInstructionsRoutes, connectorsRoutes, secretsRoutes, workspaceGraphRoutes]);
   app.use("/v1/workspaces/:workspaceRef", workspaceRefs);
   app.use("/v1/workspaces/:workspaceRef/*", workspaceRefs);
 
@@ -173,6 +175,7 @@ export function createApiApp(): Hono {
   app.route("/v1/runs", runsRoutes);
   app.route("/v1/jobs", jobsRoutes);
   app.route("/v1/workspaces", workspacesRoutes);
+  app.route("/v1/workspaces", chatInstructionsRoutes);
   app.route("/v1/documents", documentsRoutes);
   app.route("/v1/exports", exportsRoutes);
   app.route("/v1/extractors", extractorRoutes);
@@ -310,6 +313,8 @@ export function ensureApiStartup(): Promise<void> {
       console.log(`[api] cors_allowed_origins=${env.corsAllowedOrigins.join(",")}`);
       // Loud when limits are per instance (no Redis) or disabled.
       logRateLimitBackendAtStartup();
+      // A bad CHAT_OUTPUT_MODERATION value fails the boot, not a chat turn.
+      assertOutputModerationConfig();
       void warnSelfHostedBrowserKeysWithoutTrustedProxy(async () => {
         const { sql } = await import("./db.js");
         return (await sql`select 1 from api_keys where key_type = 'client' and revoked_at is null limit 1`).length > 0;

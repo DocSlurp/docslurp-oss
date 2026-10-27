@@ -199,6 +199,23 @@ export const ingestReportRecommendationSchema = z.object({
 });
 export type IngestReportRecommendation = z.infer<typeof ingestReportRecommendationSchema>;
 
+export const INGEST_REPORT_MAX_FILE_ITEMS = 50;
+
+/** Per-file status row; present only on run-scoped reports (at most 50, newest first). Never carries storage keys or URLs. */
+export const ingestReportFileItemSchema = z.object({
+  documentId: z.string(),
+  filename: z.string(),
+  mimeType: z.string(),
+  status: z.enum(["queued", "processing", "completed", "failed"]),
+  /** Null until the page count is known. */
+  pages: count.nullable(),
+  /** Null until page-level facts are read for this file. */
+  searchablePages: count.nullable(),
+  /** Short, non-sensitive failure summary (names the failed stage); null unless failed. */
+  error: z.string().nullable(),
+});
+export type IngestReportFileItem = z.infer<typeof ingestReportFileItemSchema>;
+
 export const ingestReportSchema = z.object({
   workspaceId: z.string(),
   workspaceName: z.string(),
@@ -218,7 +235,15 @@ export const ingestReportSchema = z.object({
     total: count,
     byType: z.array(z.object({ type: z.string(), files: count, pages: count, bytes: count })),
     byStatus: z.object({ completed: count, processing: count, queued: count, failed: count, other: count }),
+    /** Run-scoped reports only. */
+    items: z.array(ingestReportFileItemSchema).max(INGEST_REPORT_MAX_FILE_ITEMS).optional(),
   }),
+  /** Run-scoped reports only: the run the report is scoped to (null when it is not found). */
+  run: z.object({
+    id: z.string(),
+    status: z.string(),
+    durationMs: nullableCount,
+  }).nullable().optional(),
   pages: z.object({ total: count, avgPerFile: nullableCount }),
   bytes: z.object({
     total: count,
