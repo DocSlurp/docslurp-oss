@@ -73,7 +73,7 @@ test("private second-parent history cannot be hidden by a clean merge tree", (t)
   f.git("checkout", "main");
   f.add("main.txt");
   f.git("merge", "--no-commit", "--no-ff", "side");
-  f.git("rm", "app/private.txt");
+  f.git("rm", "-f", "app/private.txt");
   f.git("commit", "-m", "merge with clean tree");
   assert.equal(f.run("HEAD").status, 1);
 });
