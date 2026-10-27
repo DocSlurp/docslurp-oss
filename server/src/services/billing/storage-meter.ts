@@ -74,7 +74,8 @@ export async function runStorageMeter(options: { now?: Date } = {}): Promise<{ m
 }
 
 async function meterOrgDay(org: { id: string; created_by_user_id: string }, day: string): Promise<boolean> {
-  const storage = await getOrgStorage(org.id);
+  // Extract documents are billed by their own retention window (services/extracts.ts), never daily.
+  const storage = await getOrgStorage(org.id, sql, { excludeExtracts: true });
   const bytes = storage.objectBytes + storage.indexBytes;
   const daysInMonth = daysInUtcMonth(day);
   const credits = dailyStorageCredits(bytes, daysInMonth);

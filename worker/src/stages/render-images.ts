@@ -7,6 +7,7 @@ import { runDocumentStage, runDocuments, skipCompletedPages, completeDocumentPag
 import { healthyDocuments } from "../pipeline/document-health.js";
 import { PdfRasterCache, type RasterPageArtifact } from "../pipeline/pdf-asset-cache.js";
 import { type ArtifactStore, keyFromStorageUri } from "../tools/storage.js";
+import { runArtifactRoot } from "../lib/artifact-root.js";
 import type { Config } from "../config.js";
 import { loadActiveRoutePlan } from "../routing/active-plan.js";
 import { pagesNeedingPixels } from "../routing/runtime.js";
@@ -24,7 +25,7 @@ export class RenderImagesStage implements Stage {
 
   async run(state: import("../pipeline/pipeline.js").WorkflowState, signal?: AbortSignal): Promise<void> {
     await runDocuments(healthyDocuments(state), state.docConcurrency, async (document) => {
-      const key = `${document.userId}/${state.run.id}/images/${document.id}/manifest.json`;
+      const key = `${runArtifactRoot(state.run, document.userId)}/images/${document.id}/manifest.json`;
       const artifactSlot = `${document.id}:images`;
 
       await runDocumentStage(
