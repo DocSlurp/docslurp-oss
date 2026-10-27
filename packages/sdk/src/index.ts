@@ -836,13 +836,22 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
   if (typeof tokenSource === "string") assertBrowserSafeApiKey(tokenSource);
   const hasBearer = Boolean(apiKey || tokenSource);
   /** The Authorization value for one request; never logged or included in errors. */
+  // Concurrent 401s share one forced refresh, so a provider never rotates twice at once.
+  let forcedRefresh: Promise<string> | null = null;
   async function bearer(forceRefresh = false): Promise<string | null> {
     if (apiKey) return apiKey;
     if (!tokenSource) return null;
-    const value = typeof tokenSource === "string" ? tokenSource : await tokenSource({ forceRefresh });
-    if (typeof value !== "string" || !value) throw new Error("DocSlurp access token provider returned no token");
-    assertBrowserSafeApiKey(value);
-    return value;
+    if (typeof tokenSource === "string") return tokenSource;
+    const provider = tokenSource;
+    const fetchToken = async (force: boolean) => {
+      const value = await provider({ forceRefresh: force });
+      if (typeof value !== "string" || !value) throw new Error("DocSlurp access token provider returned no token");
+      assertBrowserSafeApiKey(value);
+      return value;
+    };
+    if (!forceRefresh) return await fetchToken(false);
+    forcedRefresh ??= fetchToken(true).finally(() => { forcedRefresh = null; });
+    return await forcedRefresh;
   }
   assertSecureApiOrigin(apiUrl);
   const clientWorkspace = options.workspace?.trim() || env?.DOCSLURP_WORKSPACE?.trim() || DEFAULT_WORKSPACE;
@@ -964,9 +973,15 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
       const headers = new Headers({ Accept: "text/event-stream" });
       const credential = await bearer();
       if (credential) headers.set("Authorization", `Bearer ${credential}`);
-      const response = await fetchImpl(`${apiUrl}${path}`, {
+      let response = await fetchImpl(`${apiUrl}${path}`, {
         headers, credentials: hasBearer ? "omit" : "include", signal: bound.signal,
       });
+      // A refused token before the stream opens: refresh once and reconnect (GET, nothing to replay).
+      if (response.status === 401 && typeof tokenSource === "function") {
+        await response.body?.cancel();
+        headers.set("Authorization", `Bearer ${await bearer(true)}`);
+        response = await fetchImpl(`${apiUrl}${path}`, { headers, credentials: "omit", signal: bound.signal });
+      }
       if (!response.ok) {
         const body = await readErrorBody(response);
         const message = publicHttpError(response.status);
