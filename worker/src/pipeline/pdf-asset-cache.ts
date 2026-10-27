@@ -287,8 +287,12 @@ export class PdfRasterCache {
       const source = await this.sources.get(args.document);
       const scratch = await mkdtemp(path.join(tmpdir(), "docslurp-raster-"));
       try {
-        const persist = async (pageNumber: number, png: Buffer, pngPath: string) => {
-          const dimensions = readPngDimensions(png);
+        const persist = async (
+          pageNumber: number,
+          png: Buffer,
+          pngPath: string,
+          dimensions: { widthPx: number | null; heightPx: number | null } = readPngDimensions(png),
+        ) => {
           if (format === "webp") {
             const encoded = await encodeLosslessWebp({
               runner: this.runner,
@@ -333,7 +337,7 @@ export class PdfRasterCache {
                 // The encoder reads a file in the sandbox's temp workspace, never in-process bytes.
                 const pngPath = path.join(scratch, `native-page-${pageNumber}.png`);
                 await writeFile(pngPath, page.bytes);
-                await persist(pageNumber, page.bytes, pngPath);
+                await persist(pageNumber, page.bytes, pngPath, { widthPx: page.widthPx, heightPx: page.heightPx });
               }
               nativeDone = true;
             }

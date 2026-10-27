@@ -59,7 +59,8 @@ function document(overrides: Partial<Document> = {}): Document {
 const sources = { get: async () => ({ path: fixture, sha256: "x", sizeBytes: 1, cacheHit: true }) } as unknown as PdfSourceCache;
 
 async function rawPixels(bytes: Buffer) {
-  const { data, info } = await sharp(bytes).raw().toBuffer({ resolveWithObject: true });
+  // cwebp drops an all-opaque alpha channel, so compare RGBA with opaque alpha filled in.
+  const { data, info } = await sharp(bytes).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
   return { data, width: info.width, height: info.height, channels: info.channels };
 }
 
@@ -142,6 +143,35 @@ describe.skipIf(!available)("lossless WebP page images", () => {
     expect(storage.objects.get(page!.artifactKey)!.mimeType).toBe("image/png");
     expect(commands.some((command) => path.basename(command.binary) === "cwebp")).toBe(false);
     expect(warn).toHaveBeenCalledWith(expect.stringContaining("[page-image] WARNING storing PNG instead of WebP status=unavailable"));
+  });
+
+  it("encodes native-engine renders from a scratch file through the sandbox", async () => {
+    const pagePng = await sharp({ create: { width: 640, height: 480, channels: 3, background: "#f4f1ea" } })
+      .composite([{ input: Buffer.from('<svg width="640" height="480"><text x="40" y="200" font-size="48">Native page</text></svg>') }])
+      .png().toBuffer();
+    const engine = {
+      id: "fake",
+      version: () => ({ engine: "native-pdf", version: "0", gitSha: "x", features: [] }),
+      async openPath() {
+        return {
+          pageCount: async () => 1,
+          metadata: async () => ({ encrypted: false }),
+          close: async () => {},
+          page: () => ({ size: async () => ({ widthPt: 612, heightPt: 792, rotation: 0 }), render: async () => pagePng }),
+        };
+      },
+    };
+    const storage = memoryStorage();
+    const { runner, commands } = recordingRunner();
+    const cache = new PdfRasterCache(runner, storage, sources, { engine: "native-pdf", loadEngine: async () => engine as never, format: "webp" });
+
+    const [page] = await cache.renderSelectedPages({ document: document(), runId: "run", pageNumbers: [1] });
+
+    expect(page).toMatchObject({ engine: "native-pdf", mimeType: "image/webp", artifactKey: "user/run/images/doc/v2-150dpi-native-pdf-webp/page-1.webp" });
+    const encode = commands.find((command) => path.basename(command.binary) === "cwebp")!;
+    expect(encode.inputPaths).toEqual([encode.args.at(-1)]);
+    const decoded = await rawPixels(storage.objects.get(page!.artifactKey)!.bytes);
+    expect(decoded.data.equals((await rawPixels(pagePng)).data)).toBe(true);
   });
 
   it("serves an existing PNG object instead of re-rendering it as WebP", async () => {
