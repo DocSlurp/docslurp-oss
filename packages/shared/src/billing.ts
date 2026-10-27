@@ -689,8 +689,8 @@ const KB = 1024;
  * worker slot is held by a page task. Every field is a named parameter with its
  * provenance; none is baked into a profile constant, so a fleet change means
  * editing this object (and re-measuring), not hunting through the profiles.
- * The rate-card slot model (`WORKER_SLOT`, 8 per host) is a separate, billing-side
- * unit and is not changed here.
+ * `WORKER_SLOT` (infra-costs.ts) uses the same packing for slot cost; its priced
+ * slot shape (1 vCPU + 2 GB) is a separate, billing-side unit.
  */
 export const PIPELINE_PROFILE_BASIS = {
   /** Worker slots per machine. Source: fly.worker.toml DOCSLURP_WORKER_SLOTS_PER_MACHINE (shared-cpu-8x / 16 GB), 2026-10-24. */

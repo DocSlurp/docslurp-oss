@@ -1,0 +1,1244 @@
+{
+  "generatedAt": "2026-10-27T14:35:52.267Z",
+  "offline": false,
+  "rateCard": {
+    "version": "2026-10.3",
+    "effectiveDate": "2027-02-28",
+    "cpuVcpuHour": 1,
+    "memoryGbHour": 3,
+    "gpuStandardHour": 90,
+    "gpuLargeHour": 300,
+    "objectStorageGbMonth": 5,
+    "indexStorageGbMonth": 75,
+    "egressGb": 5,
+    "aiMarkupPercent": 20
+  },
+  "tokensPerPage": {
+    "vision": {
+      "promptTokens": 400,
+      "imageTokens": 1100,
+      "outputTokens": 800
+    },
+    "visionImageTokensByModel": {
+      "openai/gpt-4.1-mini": 2200
+    },
+    "text": {
+      "operations": 4,
+      "inputTokens": 700,
+      "outputTokens": 250
+    },
+    "embedding": {
+      "inputTokens": 600
+    }
+  },
+  "driftLimit": 0.15,
+  "sources": [
+    {
+      "name": "fly-pricing",
+      "status": "ok",
+      "error": null,
+      "data": {
+        "sharedCpu1x256MbMonthly": 2.19,
+        "sharedCpu2x2GbMonthly": 13.39,
+        "performance1x2GbMonthly": 33,
+        "extraRamGbMonthly": 6,
+        "stoppedRootfsGbMonthly": 0.15,
+        "egressNaEuGb": 0.02,
+        "regionMarkup": {
+          "ams": 1.038461538,
+          "iad": 1,
+          "ord": 1.25,
+          "dfw": 1.25,
+          "fra": 1.153846154,
+          "jnb": 1.302884615,
+          "lhr": 1.134615385,
+          "lax": 1.199519231,
+          "cdg": 1.134615385,
+          "sjc": 1.192307692,
+          "gru": 1.615384615,
+          "ewr": 1,
+          "sin": 1.269230769,
+          "arn": 1.038461538,
+          "syd": 1.269230769,
+          "nrt": 1.307692308,
+          "yyz": 1.115384615
+        }
+      }
+    },
+    {
+      "name": "modal-pricing",
+      "status": "ok",
+      "error": null,
+      "data": {
+        "l4PerSecond": 0.000222,
+        "a10PerSecond": 0.000306,
+        "a100_80PerSecond": 0.000694,
+        "h100PerSecond": 0.001097,
+        "cpuCorePerSecond": 1.31e-05,
+        "memoryGibPerSecond": 2.22e-06,
+        "nonPreemptibleMultiplier": 3
+      }
+    },
+    {
+      "name": "tigris-pricing",
+      "status": "ok",
+      "error": null,
+      "data": {
+        "standardGbMonth": 0.02
+      }
+    },
+    {
+      "name": "neon-pricing",
+      "status": "ok",
+      "error": null,
+      "data": {
+        "storageGbMonth": 0.35
+      }
+    },
+    {
+      "name": "vast-offers",
+      "status": "ok",
+      "error": null,
+      "data": {
+        "offerCount": 506,
+        "skus": {
+          "rtx-4090": {
+            "samples": 44,
+            "median": 0.5349037037037037,
+            "p25": 0.48537037037037045,
+            "p75": 0.6703703703703703,
+            "min": 0.4016592592592592,
+            "verified": true
+          },
+          "l4": {
+            "samples": 1,
+            "median": 0.674074074074074,
+            "p25": 0.674074074074074,
+            "p75": 0.674074074074074,
+            "min": 0.674074074074074,
+            "verified": false
+          },
+          "rtx-3090": {
+            "samples": 31,
+            "median": 0.27185185185185184,
+            "p25": 0.1962962962962963,
+            "p75": 0.39185185185185184,
+            "min": 0.1622222222222222,
+            "verified": true
+          },
+          "a100-80gb": {
+            "samples": 6,
+            "median": 1.2016296296296296,
+            "p25": 1.0357037037037036,
+            "p75": 1.298111111111111,
+            "min": 1.0022222222222221,
+            "verified": true
+          },
+          "h100-sxm": {
+            "samples": 2,
+            "median": 9.21,
+            "p25": 6.940555555555556,
+            "p75": 11.479444444444447,
+            "min": 4.671111111111111,
+            "verified": false
+          }
+        }
+      }
+    },
+    {
+      "name": "openrouter-models",
+      "status": "ok",
+      "error": null
+    }
+  ],
+  "observationChecks": [
+    {
+      "id": "fly:shared-cpu-1x-256mb:iad",
+      "unit": "hour",
+      "allowed": false,
+      "encodedUsd": 0.0030416666666666665,
+      "liveUsd": 0.0030416666666666665,
+      "drift": 0,
+      "status": "verified",
+      "observedAt": "2026-10-25"
+    },
+    {
+      "id": "fly:shared-vcpu:lax",
+      "unit": "hour",
+      "allowed": true,
+      "encodedUsd": 0.0011495392630416666,
+      "liveUsd": 0.0011495392630416666,
+      "drift": 0,
+      "status": "verified",
+      "observedAt": "2026-10-25"
+    },
+    {
+      "id": "fly:extra-ram:lax",
+      "unit": "hour",
+      "allowed": true,
+      "encodedUsd": 0.009995993591666667,
+      "liveUsd": 0.009995993591666667,
+      "drift": 0,
+      "status": "verified",
+      "observedAt": "2026-10-25"
+    },
+    {
+      "id": "fly:shared-cpu-8x-16gb:lax",
+      "unit": "hour",
+      "allowed": true,
+      "encodedUsd": 0.16913221157099997,
+      "liveUsd": 0.16913221157099997,
+      "drift": 0,
+      "status": "verified",
+      "observedAt": "2026-10-25"
+    },
+    {
+      "id": "fly:shared-cpu-8x-16gb:iad",
+      "unit": "hour",
+      "allowed": true,
+      "encodedUsd": 0.141,
+      "liveUsd": 0.141,
+      "drift": 0,
+      "status": "verified",
+      "observedAt": "2026-10-25"
+    },
+    {
+      "id": "fly:shared-cpu-2x-4gb:lax",
+      "unit": "hour",
+      "allowed": true,
+      "encodedUsd": 0.042283052892749994,
+      "liveUsd": 0.042283052892749994,
+      "drift": 0,
+      "status": "verified",
+      "observedAt": "2026-10-25"
+    },
+    {
+      "id": "fly:performance-1x-2gb:lax",
+      "unit": "hour",
+      "allowed": false,
+      "encodedUsd": 0.054977964754166664,
+      "liveUsd": 0.054977964754166664,
+      "drift": 0,
+      "status": "verified",
+      "observedAt": "2026-10-25"
+    },
+    {
+      "id": "fly:stopped-rootfs",
+      "unit": "gb-month",
+      "allowed": false,
+      "encodedUsd": 0.15,
+      "liveUsd": 0.15,
+      "drift": 0,
+      "status": "verified",
+      "observedAt": "2026-10-25"
+    },
+    {
+      "id": "fly:egress:na-eu",
+      "unit": "gb",
+      "allowed": true,
+      "encodedUsd": 0.02,
+      "liveUsd": 0.02,
+      "drift": 0,
+      "status": "verified",
+      "observedAt": "2026-10-25"
+    },
+    {
+      "id": "vast:rtx-4090",
+      "unit": "hour",
+      "allowed": false,
+      "encodedUsd": 0.53777778,
+      "liveUsd": 0.5349037037037037,
+      "drift": -0.005344356727227228,
+      "status": "verified",
+      "observedAt": "2026-10-26"
+    },
+    {
+      "id": "vast:l4",
+      "unit": "hour",
+      "allowed": true,
+      "encodedUsd": 0.33,
+      "liveUsd": null,
+      "drift": null,
+      "status": "unverified",
+      "observedAt": "2026-10-09"
+    },
+    {
+      "id": "vast:rtx-3090",
+      "unit": "hour",
+      "allowed": true,
+      "encodedUsd": 0.29014815,
+      "liveUsd": 0.27185185185185184,
+      "drift": -0.06305846908949152,
+      "status": "verified",
+      "observedAt": "2026-10-26"
+    },
+    {
+      "id": "vast:a100-80gb",
+      "unit": "hour",
+      "allowed": true,
+      "encodedUsd": 1.13614815,
+      "liveUsd": 1.2016296296296296,
+      "drift": 0.05763463121392197,
+      "status": "verified",
+      "observedAt": "2026-10-26"
+    },
+    {
+      "id": "vast:h100-sxm",
+      "unit": "hour",
+      "allowed": false,
+      "encodedUsd": 3.99,
+      "liveUsd": null,
+      "drift": null,
+      "status": "unverified",
+      "observedAt": "2026-10-26"
+    },
+    {
+      "id": "modal:l4",
+      "unit": "hour",
+      "allowed": false,
+      "encodedUsd": 0.7992,
+      "liveUsd": 0.7992,
+      "drift": 0,
+      "status": "verified",
+      "observedAt": "2026-10-25"
+    },
+    {
+      "id": "modal:a10",
+      "unit": "hour",
+      "allowed": false,
+      "encodedUsd": 1.1016000000000001,
+      "liveUsd": 1.1016000000000001,
+      "drift": 0,
+      "status": "verified",
+      "observedAt": "2026-10-25"
+    },
+    {
+      "id": "modal:a100-80gb",
+      "unit": "hour",
+      "allowed": false,
+      "encodedUsd": 2.4983999999999997,
+      "liveUsd": 2.4983999999999997,
+      "drift": 0,
+      "status": "verified",
+      "observedAt": "2026-10-25"
+    },
+    {
+      "id": "modal:h100",
+      "unit": "hour",
+      "allowed": false,
+      "encodedUsd": 3.9492000000000003,
+      "liveUsd": 3.9492000000000003,
+      "drift": 0,
+      "status": "verified",
+      "observedAt": "2026-10-25"
+    },
+    {
+      "id": "modal:l4-nonpreemptible",
+      "unit": "hour",
+      "allowed": false,
+      "encodedUsd": 2.3976,
+      "liveUsd": 2.3976,
+      "drift": 0,
+      "status": "verified",
+      "observedAt": "2026-10-25"
+    },
+    {
+      "id": "modal:cpu-core",
+      "unit": "hour",
+      "allowed": false,
+      "encodedUsd": 0.04716,
+      "liveUsd": 0.04716,
+      "drift": 0,
+      "status": "verified",
+      "observedAt": "2026-10-25"
+    },
+    {
+      "id": "tigris:standard",
+      "unit": "gb-month",
+      "allowed": true,
+      "encodedUsd": 0.02,
+      "liveUsd": 0.02,
+      "drift": 0,
+      "status": "verified",
+      "observedAt": "2026-10-25"
+    },
+    {
+      "id": "neon:storage",
+      "unit": "gb-month",
+      "allowed": true,
+      "encodedUsd": 0.35,
+      "liveUsd": 0.35,
+      "drift": 0,
+      "status": "verified",
+      "observedAt": "2026-10-25"
+    },
+    {
+      "id": "openrouter:pass-through",
+      "unit": "usd",
+      "allowed": true,
+      "encodedUsd": 1.055,
+      "liveUsd": null,
+      "drift": null,
+      "status": "unverified",
+      "observedAt": "2026-10-25"
+    }
+  ],
+  "findings": [
+    {
+      "policyId": "cpu-worker-host",
+      "observationId": "fly:shared-cpu-8x-16gb:lax",
+      "severity": "ok",
+      "infraUsd": 0.16913221157099997,
+      "listUsd": 0.56,
+      "breakEven": 0.30202180637678566,
+      "maxBreakEven": 0.4,
+      "typicalMargin": 0.5685402766045919,
+      "message": "CPU worker hosts (vCPU + memory): break-even 30% vs \u2264 40%"
+    },
+    {
+      "policyId": "cpu-worker-host",
+      "observationId": "fly:shared-cpu-8x-16gb:iad",
+      "severity": "ok",
+      "infraUsd": 0.141,
+      "listUsd": 0.56,
+      "breakEven": 0.2517857142857142,
+      "maxBreakEven": 0.4,
+      "typicalMargin": 0.6403061224489797,
+      "message": "CPU worker hosts (vCPU + memory): break-even 25% vs \u2264 40%"
+    },
+    {
+      "policyId": "cpu-worker-host",
+      "observationId": "fly:shared-cpu-2x-4gb:lax",
+      "severity": "ok",
+      "infraUsd": 0.042283052892749994,
+      "listUsd": 0.14,
+      "breakEven": 0.30202180637678566,
+      "maxBreakEven": 0.4,
+      "typicalMargin": 0.5685402766045919,
+      "message": "CPU worker hosts (vCPU + memory): break-even 30% vs \u2264 40%"
+    },
+    {
+      "policyId": "cpu-worker-host",
+      "observationId": "fly:performance-1x-2gb:lax",
+      "severity": "disallowed",
+      "infraUsd": 0.054977964754166664,
+      "listUsd": 0.07,
+      "breakEven": 0.7853994964880952,
+      "maxBreakEven": 0.4,
+      "typicalMargin": -0.12199928069727894,
+      "message": "Not allowed for billable lanes: List price per vCPU is ~30\u00d7 a shared vCPU (net of RAM), so it fails the shared-lane rate. Per sustained CPU-second it is ~6\u00d7 cheaper than a shared vCPU throttled to its 6.25% baseline, so a CPU-bound performance lane needs its own CPU rate. (break-even 79%)"
+    },
+    {
+      "policyId": "cpu-worker-host",
+      "observationId": "modal:cpu-core",
+      "severity": "disallowed",
+      "infraUsd": 0.04716,
+      "listUsd": 0.02,
+      "breakEven": 2.358,
+      "maxBreakEven": 0.4,
+      "typicalMargin": -2.3685714285714288,
+      "message": "Not allowed for billable lanes: Modal CPU is ~20\u00d7 Fly's shared vCPU price; not used for billable CPU work. (break-even 236%)"
+    },
+    {
+      "policyId": "cpu",
+      "observationId": "fly:shared-vcpu:lax",
+      "severity": "ok",
+      "infraUsd": 0.0011495392630416666,
+      "listUsd": 0.01,
+      "breakEven": 0.11495392630416665,
+      "maxBreakEven": 0.4,
+      "typicalMargin": 0.835780105279762,
+      "message": "CPU line, alone: break-even 11% vs \u2264 40%"
+    },
+    {
+      "policyId": "memory",
+      "observationId": "fly:extra-ram:lax",
+      "severity": "ok",
+      "infraUsd": 0.009995993591666667,
+      "listUsd": 0.03,
+      "breakEven": 0.3331997863888889,
+      "maxBreakEven": 0.4,
+      "typicalMargin": 0.5240003051587301,
+      "message": "Memory line, alone: break-even 33% vs \u2264 40%"
+    },
+    {
+      "policyId": "gpu-standard",
+      "observationId": "vast:rtx-4090",
+      "severity": "disallowed",
+      "infraUsd": 0.5349037037037037,
+      "listUsd": 0.9,
+      "breakEven": 0.5943374485596707,
+      "maxBreakEven": 0.6,
+      "typicalMargin": 0.15094650205761317,
+      "message": "Not allowed for billable lanes: 2026-10-26 median $0.5378/h sits at the $0.54/h cost ceiling (60% break-even), with no headroom for the \u00b120% spot swing; it was $0.5896/h a day earlier. (break-even 59%)"
+    },
+    {
+      "policyId": "gpu-standard",
+      "observationId": "vast:l4",
+      "severity": "ok",
+      "infraUsd": 0.33,
+      "listUsd": 0.9,
+      "breakEven": 0.3666666666666667,
+      "maxBreakEven": 0.6,
+      "typicalMargin": 0.47619047619047616,
+      "message": "GPU \u00b7 standard (24 GB class): break-even 37% vs \u2264 60%"
+    },
+    {
+      "policyId": "gpu-standard",
+      "observationId": "vast:rtx-3090",
+      "severity": "ok",
+      "infraUsd": 0.27185185185185184,
+      "listUsd": 0.9,
+      "breakEven": 0.30205761316872426,
+      "maxBreakEven": 0.6,
+      "typicalMargin": 0.5684891240446797,
+      "message": "GPU \u00b7 standard (24 GB class): break-even 30% vs \u2264 60%"
+    },
+    {
+      "policyId": "gpu-standard",
+      "observationId": "modal:l4",
+      "severity": "disallowed",
+      "infraUsd": 0.7992,
+      "listUsd": 0.9,
+      "breakEven": 0.888,
+      "maxBreakEven": 0.6,
+      "typicalMargin": -0.2685714285714287,
+      "message": "Not allowed for billable lanes: Modal L4 base price breaks even at ~89%. (break-even 89%)"
+    },
+    {
+      "policyId": "gpu-standard",
+      "observationId": "modal:a10",
+      "severity": "disallowed",
+      "infraUsd": 1.1016000000000001,
+      "listUsd": 0.9,
+      "breakEven": 1.2240000000000002,
+      "maxBreakEven": 0.6,
+      "typicalMargin": -0.7485714285714289,
+      "message": "Not allowed for billable lanes: Modal A10 costs more than list. (break-even 122%)"
+    },
+    {
+      "policyId": "gpu-standard",
+      "observationId": "modal:l4-nonpreemptible",
+      "severity": "disallowed",
+      "infraUsd": 2.3976,
+      "listUsd": 0.9,
+      "breakEven": 2.664,
+      "maxBreakEven": 0.6,
+      "typicalMargin": -2.805714285714286,
+      "message": "Not allowed for billable lanes: Non-preemptible Modal runs at a loss (3\u00d7 base). (break-even 266%)"
+    },
+    {
+      "policyId": "gpu-large",
+      "observationId": "vast:a100-80gb",
+      "severity": "ok",
+      "infraUsd": 1.2016296296296296,
+      "listUsd": 3,
+      "breakEven": 0.4005432098765432,
+      "maxBreakEven": 0.6,
+      "typicalMargin": 0.42779541446208114,
+      "message": "GPU \u00b7 large (80 GB class): break-even 40% vs \u2264 60%"
+    },
+    {
+      "policyId": "gpu-large",
+      "observationId": "vast:h100-sxm",
+      "severity": "disallowed",
+      "infraUsd": 3.99,
+      "listUsd": 3,
+      "breakEven": 1.33,
+      "maxBreakEven": 0.6,
+      "typicalMargin": -0.9000000000000001,
+      "message": "Not allowed for billable lanes: H100 costs more than list ($3.99/h median on 2026-10-26, +66% in a day); the large lane is A100-only at this rate. (break-even 133%)"
+    },
+    {
+      "policyId": "gpu-large",
+      "observationId": "modal:a100-80gb",
+      "severity": "disallowed",
+      "infraUsd": 2.4983999999999997,
+      "listUsd": 3,
+      "breakEven": 0.8327999999999999,
+      "maxBreakEven": 0.6,
+      "typicalMargin": -0.1897142857142855,
+      "message": "Not allowed for billable lanes: Modal A100 80 GB breaks even at ~83%. (break-even 83%)"
+    },
+    {
+      "policyId": "gpu-large",
+      "observationId": "modal:h100",
+      "severity": "disallowed",
+      "infraUsd": 3.9492000000000003,
+      "listUsd": 3,
+      "breakEven": 1.3164,
+      "maxBreakEven": 0.6,
+      "typicalMargin": -0.8805714285714288,
+      "message": "Not allowed for billable lanes: Modal H100 costs more than list. (break-even 132%)"
+    },
+    {
+      "policyId": "object-storage",
+      "observationId": "tigris:standard",
+      "severity": "ok",
+      "infraUsd": 0.02,
+      "listUsd": 0.05,
+      "breakEven": 0.39999999999999997,
+      "maxBreakEven": 0.5,
+      "typicalMargin": 0.6000000000000001,
+      "message": "Object storage: break-even 40% vs \u2264 50%"
+    },
+    {
+      "policyId": "index-storage",
+      "observationId": "neon:storage",
+      "severity": "ok",
+      "infraUsd": 0.35,
+      "listUsd": 0.75,
+      "breakEven": 0.4666666666666666,
+      "maxBreakEven": 0.5,
+      "typicalMargin": 0.5333333333333334,
+      "message": "Index storage: break-even 47% vs \u2264 50%"
+    },
+    {
+      "policyId": "egress",
+      "observationId": "fly:egress:na-eu",
+      "severity": "ok",
+      "infraUsd": 0.02,
+      "listUsd": 0.05,
+      "breakEven": 0.39999999999999997,
+      "maxBreakEven": 0.5,
+      "typicalMargin": 0.6000000000000001,
+      "message": "Egress: break-even 40% vs \u2264 50%"
+    },
+    {
+      "policyId": "ai",
+      "observationId": "openrouter:pass-through",
+      "severity": "ok",
+      "infraUsd": 1.055,
+      "listUsd": 1.2,
+      "breakEven": 0.8791666666666667,
+      "maxBreakEven": 0.9,
+      "typicalMargin": 0.12083333333333335,
+      "message": "AI models: break-even 88% vs \u2264 90%"
+    }
+  ],
+  "policyViolations": [],
+  "stale": [],
+  "aiChecks": [
+    {
+      "role": "vision",
+      "model": "google/gemini-3.1-flash-lite",
+      "estimatedCentsPerPage": 0.5,
+      "inputPerMillion": 0.25,
+      "outputPerMillion": 1.5,
+      "liveCentsPerPage": 0.1575,
+      "drift": -0.685,
+      "status": "verified",
+      "notes": [
+        "catalog estimate is conservative (>2\u00d7 live)"
+      ]
+    },
+    {
+      "role": "vision",
+      "model": "google/gemini-2.5-flash-lite",
+      "estimatedCentsPerPage": 0.25,
+      "inputPerMillion": 0.09999999999999999,
+      "outputPerMillion": 0.39999999999999997,
+      "liveCentsPerPage": 0.04699999999999999,
+      "drift": -0.812,
+      "status": "verified",
+      "notes": [
+        "catalog estimate is conservative (>2\u00d7 live)"
+      ]
+    },
+    {
+      "role": "vision",
+      "model": "nvidia/nemotron-3.5-super-vl",
+      "estimatedCentsPerPage": 0.2,
+      "inputPerMillion": 0.15,
+      "outputPerMillion": 0.5,
+      "liveCentsPerPage": 0.06249999999999999,
+      "drift": -0.6875,
+      "status": "verified",
+      "notes": [
+        "catalog estimate is conservative (>2\u00d7 live)"
+      ]
+    },
+    {
+      "role": "vision",
+      "model": "deepseek/deepseek-v4.1-flash-1017",
+      "estimatedCentsPerPage": 0.103,
+      "inputPerMillion": 0.15,
+      "outputPerMillion": 0.6,
+      "liveCentsPerPage": 0.0705,
+      "drift": -0.3155339805825243,
+      "status": "verified",
+      "notes": []
+    },
+    {
+      "role": "vision",
+      "model": "xiaomi/mimo-v2.6-flash",
+      "estimatedCentsPerPage": 0.056,
+      "inputPerMillion": 0.14,
+      "outputPerMillion": 0.28,
+      "liveCentsPerPage": 0.0434,
+      "drift": -0.225,
+      "status": "verified",
+      "notes": []
+    },
+    {
+      "role": "vision",
+      "model": "openai/gpt-6-luna",
+      "estimatedCentsPerPage": 0.061,
+      "inputPerMillion": 0.09999999999999999,
+      "outputPerMillion": 0.5,
+      "liveCentsPerPage": 0.05499999999999999,
+      "drift": -0.09836065573770501,
+      "status": "verified",
+      "notes": []
+    },
+    {
+      "role": "vision",
+      "model": "z-ai/glm-5.3-flash",
+      "estimatedCentsPerPage": 0.073,
+      "inputPerMillion": 0.15,
+      "outputPerMillion": 0.5,
+      "liveCentsPerPage": 0.06249999999999999,
+      "drift": -0.1438356164383562,
+      "status": "verified",
+      "notes": []
+    },
+    {
+      "role": "vision",
+      "model": "openai/gpt-4.1-mini",
+      "estimatedCentsPerPage": 3,
+      "inputPerMillion": 0.39999999999999997,
+      "outputPerMillion": 1.5999999999999999,
+      "liveCentsPerPage": 0.232,
+      "drift": -0.9226666666666666,
+      "status": "verified",
+      "notes": [
+        "catalog estimate is conservative (>2\u00d7 live)"
+      ]
+    },
+    {
+      "role": "text (default)",
+      "model": "qwen/qwen3.5-flash-02-23",
+      "inputPerMillion": 0.065,
+      "outputPerMillion": 0.26,
+      "liveCentsPerPage": 0.0442,
+      "drift": null,
+      "status": "verified",
+      "notes": []
+    },
+    {
+      "role": "embedding (default)",
+      "model": "openai/text-embedding-3-small",
+      "inputPerMillion": 0.02,
+      "outputPerMillion": 0,
+      "liveCentsPerPage": 0.0012000000000000001,
+      "drift": null,
+      "status": "verified",
+      "notes": []
+    },
+    {
+      "role": "chat option",
+      "model": "z-ai/glm-5.3-flash",
+      "inputPerMillion": 0.15,
+      "outputPerMillion": 0.5,
+      "liveCentsPerPage": null,
+      "drift": null,
+      "status": "verified",
+      "notes": []
+    },
+    {
+      "role": "chat option",
+      "model": "anthropic/claude-haiku-5.5",
+      "inputPerMillion": 0.09999999999999999,
+      "outputPerMillion": 0.5,
+      "liveCentsPerPage": null,
+      "drift": null,
+      "status": "verified",
+      "notes": []
+    },
+    {
+      "role": "chat option",
+      "model": "deepseek/deepseek-v4.1-flash",
+      "inputPerMillion": 0.14,
+      "outputPerMillion": 0.42,
+      "liveCentsPerPage": null,
+      "drift": null,
+      "status": "verified",
+      "notes": []
+    },
+    {
+      "role": "chat option",
+      "model": "openai/gpt-6.1-sol",
+      "inputPerMillion": 2,
+      "outputPerMillion": 10,
+      "liveCentsPerPage": null,
+      "drift": null,
+      "status": "verified",
+      "notes": []
+    },
+    {
+      "role": "chat option",
+      "model": "openai/gpt-6-luna",
+      "inputPerMillion": 0.09999999999999999,
+      "outputPerMillion": 0.5,
+      "liveCentsPerPage": null,
+      "drift": null,
+      "status": "verified",
+      "notes": []
+    },
+    {
+      "role": "fallback pricing",
+      "model": "deepinfra/BAAI/bge-m3",
+      "catalogInputPerToken": 1e-08,
+      "catalogOutputPerToken": 0,
+      "inputPerMillion": null,
+      "outputPerMillion": null,
+      "liveCentsPerPage": null,
+      "drift": null,
+      "status": "unverified",
+      "notes": []
+    },
+    {
+      "role": "fallback pricing",
+      "model": "qwen/qwen3.5-flash-02-23",
+      "catalogInputPerToken": 6.5e-08,
+      "catalogOutputPerToken": 2.6e-07,
+      "inputPerMillion": 0.065,
+      "outputPerMillion": 0.26,
+      "liveCentsPerPage": null,
+      "drift": 0,
+      "status": "verified",
+      "notes": []
+    },
+    {
+      "role": "fallback pricing",
+      "model": "anthropic/claude-opus-5.5",
+      "catalogInputPerToken": 4e-06,
+      "catalogOutputPerToken": 2e-05,
+      "inputPerMillion": 4,
+      "outputPerMillion": 20,
+      "liveCentsPerPage": null,
+      "drift": 0,
+      "status": "verified",
+      "notes": []
+    },
+    {
+      "role": "fallback pricing",
+      "model": "anthropic/claude-opus-5.5",
+      "catalogInputPerToken": 4e-06,
+      "catalogOutputPerToken": 2e-05,
+      "inputPerMillion": 4,
+      "outputPerMillion": 20,
+      "liveCentsPerPage": null,
+      "drift": 0,
+      "status": "verified",
+      "notes": []
+    },
+    {
+      "role": "fallback pricing",
+      "model": "anthropic/claude-sonnet-5.5",
+      "catalogInputPerToken": 2e-06,
+      "catalogOutputPerToken": 1e-05,
+      "inputPerMillion": 2,
+      "outputPerMillion": 10,
+      "liveCentsPerPage": null,
+      "drift": 0,
+      "status": "verified",
+      "notes": []
+    },
+    {
+      "role": "fallback pricing",
+      "model": "anthropic/claude-sonnet-5.5",
+      "catalogInputPerToken": 2e-06,
+      "catalogOutputPerToken": 1e-05,
+      "inputPerMillion": 2,
+      "outputPerMillion": 10,
+      "liveCentsPerPage": null,
+      "drift": 0,
+      "status": "verified",
+      "notes": []
+    },
+    {
+      "role": "fallback pricing",
+      "model": "anthropic/claude-haiku-5.5",
+      "catalogInputPerToken": 1.0000000000000001e-07,
+      "catalogOutputPerToken": 5e-07,
+      "inputPerMillion": 0.09999999999999999,
+      "outputPerMillion": 0.5,
+      "liveCentsPerPage": null,
+      "drift": 0,
+      "status": "verified",
+      "notes": []
+    },
+    {
+      "role": "fallback pricing",
+      "model": "anthropic/claude-haiku-5.5",
+      "catalogInputPerToken": 1.0000000000000001e-07,
+      "catalogOutputPerToken": 5e-07,
+      "inputPerMillion": 0.09999999999999999,
+      "outputPerMillion": 0.5,
+      "liveCentsPerPage": null,
+      "drift": 0,
+      "status": "verified",
+      "notes": []
+    },
+    {
+      "role": "fallback pricing",
+      "model": "perplexity/pplx-embed-v1-0.6b",
+      "catalogInputPerToken": 4e-09,
+      "catalogOutputPerToken": 0,
+      "inputPerMillion": 0.004,
+      "outputPerMillion": 0,
+      "liveCentsPerPage": null,
+      "drift": 0,
+      "status": "verified",
+      "notes": []
+    },
+    {
+      "role": "fallback pricing",
+      "model": "perplexity/pplx-embed-v1-0.6b",
+      "catalogInputPerToken": 4e-09,
+      "catalogOutputPerToken": 0,
+      "inputPerMillion": 0.004,
+      "outputPerMillion": 0,
+      "liveCentsPerPage": null,
+      "drift": 0,
+      "status": "verified",
+      "notes": []
+    },
+    {
+      "role": "fallback pricing",
+      "model": "perplexity/pplx-embed-v1-4b",
+      "catalogInputPerToken": 3.0000000000000004e-08,
+      "catalogOutputPerToken": 0,
+      "inputPerMillion": 0.03,
+      "outputPerMillion": 0,
+      "liveCentsPerPage": null,
+      "drift": 0,
+      "status": "verified",
+      "notes": []
+    },
+    {
+      "role": "fallback pricing",
+      "model": "perplexity/pplx-embed-v1-4b",
+      "catalogInputPerToken": 3.0000000000000004e-08,
+      "catalogOutputPerToken": 0,
+      "inputPerMillion": 0.03,
+      "outputPerMillion": 0,
+      "liveCentsPerPage": null,
+      "drift": 0,
+      "status": "verified",
+      "notes": []
+    },
+    {
+      "role": "fallback pricing",
+      "model": "anthropic/claude-haiku-4.5",
+      "catalogInputPerToken": 1e-06,
+      "catalogOutputPerToken": 5e-06,
+      "inputPerMillion": 1,
+      "outputPerMillion": 5,
+      "liveCentsPerPage": null,
+      "drift": 0,
+      "status": "verified",
+      "notes": [
+        "deprecated model (historical repricing only)"
+      ]
+    },
+    {
+      "role": "fallback pricing",
+      "model": "anthropic/claude-sonnet-4",
+      "catalogInputPerToken": 2.9999999999999997e-06,
+      "catalogOutputPerToken": 1.5e-05,
+      "inputPerMillion": null,
+      "outputPerMillion": null,
+      "liveCentsPerPage": null,
+      "drift": null,
+      "status": "unverified",
+      "notes": [
+        "deprecated model (historical repricing only)"
+      ]
+    },
+    {
+      "role": "fallback pricing",
+      "model": "openai/text-embedding-3-small",
+      "catalogInputPerToken": 2e-08,
+      "catalogOutputPerToken": 0,
+      "inputPerMillion": 0.02,
+      "outputPerMillion": 0,
+      "liveCentsPerPage": null,
+      "drift": 0,
+      "status": "verified",
+      "notes": []
+    }
+  ],
+  "profileChecks": [
+    {
+      "profile": "fast",
+      "pageClass": "text",
+      "mode": "fast",
+      "workerSeconds": 0.2,
+      "priceUsdPer1k": 0.05,
+      "workerUsdPer1k": 0.0070121149075870635,
+      "workerUsdPer1kAt8Slots": 0.0070121149075870635,
+      "workerShareOfPrice": 0.14024229815174127
+    },
+    {
+      "profile": "fast",
+      "pageClass": "complex",
+      "mode": "fast",
+      "workerSeconds": 0.8,
+      "priceUsdPer1k": 0.05,
+      "workerUsdPer1k": 0.028048459630348254,
+      "workerUsdPer1kAt8Slots": 0.028048459630348254,
+      "workerShareOfPrice": 0.5609691926069651
+    },
+    {
+      "profile": "fast",
+      "pageClass": "scanned",
+      "mode": "rich",
+      "workerSeconds": 3,
+      "priceUsdPer1k": 2.5,
+      "workerUsdPer1k": 0.10518172361380596,
+      "workerUsdPer1kAt8Slots": 0.10518172361380596,
+      "workerShareOfPrice": 0.04207268944552238
+    },
+    {
+      "profile": "standard",
+      "pageClass": "text",
+      "mode": "fast",
+      "workerSeconds": 0.3,
+      "priceUsdPer1k": 0.05,
+      "workerUsdPer1k": 0.010518172361380595,
+      "workerUsdPer1kAt8Slots": 0.010518172361380595,
+      "workerShareOfPrice": 0.21036344722761188
+    },
+    {
+      "profile": "standard",
+      "pageClass": "complex",
+      "mode": "fast",
+      "workerSeconds": 4,
+      "priceUsdPer1k": 0.05,
+      "workerUsdPer1k": 0.14024229815174127,
+      "workerUsdPer1kAt8Slots": 0.14024229815174127,
+      "workerShareOfPrice": 2.8048459630348255
+    },
+    {
+      "profile": "standard",
+      "pageClass": "scanned",
+      "mode": "rich",
+      "workerSeconds": 4.2,
+      "priceUsdPer1k": 2.5,
+      "workerUsdPer1k": 0.14725441305932835,
+      "workerUsdPer1kAt8Slots": 0.14725441305932835,
+      "workerShareOfPrice": 0.05890176522373134
+    },
+    {
+      "profile": "deep",
+      "pageClass": "text",
+      "mode": "fast",
+      "workerSeconds": 0.8,
+      "priceUsdPer1k": 0.05,
+      "workerUsdPer1k": 0.028048459630348254,
+      "workerUsdPer1kAt8Slots": 0.028048459630348254,
+      "workerShareOfPrice": 0.5609691926069651
+    },
+    {
+      "profile": "deep",
+      "pageClass": "complex",
+      "mode": "rich",
+      "workerSeconds": 6,
+      "priceUsdPer1k": 2.5,
+      "workerUsdPer1k": 0.2103634472276119,
+      "workerUsdPer1kAt8Slots": 0.2103634472276119,
+      "workerShareOfPrice": 0.08414537889104476
+    },
+    {
+      "profile": "deep",
+      "pageClass": "scanned",
+      "mode": "rich",
+      "workerSeconds": 6,
+      "priceUsdPer1k": 2.5,
+      "workerUsdPer1k": 0.2103634472276119,
+      "workerUsdPer1kAt8Slots": 0.2103634472276119,
+      "workerShareOfPrice": 0.08414537889104476
+    }
+  ],
+  "burn": [],
+  "slot": {
+    "vcpu": 1,
+    "memoryGb": 2,
+    "hostObservationId": "fly:shared-cpu-8x-16gb:lax",
+    "slotsPerHost": 2,
+    "creditsPerHour": 7,
+    "infraUsdPerHour": 0.08456610578549999,
+    "breakEven": 1.2080872255071426
+  },
+  "freeExposure": {
+    "starterCredits": 250,
+    "computeOnlyUsd": 3.0202180637678566,
+    "aiOnlyUsd": 2.1979166666666665
+  },
+  "storageExposure": [],
+  "inference": {
+    "references": [
+      {
+        "capability": "text",
+        "model": "z-ai/glm-5.3-flash",
+        "encodedInput": 0.15,
+        "encodedOutput": 0.5,
+        "liveInput": 0.15,
+        "liveOutput": 0.5,
+        "encodedCentsPerPage": 0.0625,
+        "liveCentsPerPage": 0.06249999999999999,
+        "drift": -1.1102230246251565e-16,
+        "status": "verified"
+      },
+      {
+        "capability": "vision",
+        "model": "z-ai/glm-5.3-flash",
+        "encodedInput": 0.15,
+        "encodedOutput": 0.5,
+        "liveInput": 0.15,
+        "liveOutput": 0.5,
+        "encodedCentsPerPage": 0.0625,
+        "liveCentsPerPage": 0.06249999999999999,
+        "drift": -1.1102230246251565e-16,
+        "status": "verified"
+      },
+      {
+        "capability": "embedding",
+        "model": "openai/text-embedding-3-small",
+        "encodedInput": 0.02,
+        "encodedOutput": 0,
+        "liveInput": 0.02,
+        "liveOutput": 0,
+        "encodedCentsPerPage": 0.003,
+        "liveCentsPerPage": 0.003,
+        "drift": 0,
+        "status": "verified"
+      }
+    ],
+    "selfHosted": {
+      "discountPercent": 50,
+      "listUsdPer1kPages": 0.75,
+      "billedUsdPer1kPages": 0.375,
+      "ownGpuUsdPer1kPages": 0.07959876543209876,
+      "margin": 0.7877366255144033,
+      "gpuUsdPerHour": 0.5349037037037037,
+      "pagesPerMinute": 160,
+      "utilization": 0.7,
+      "status": "verified"
+    },
+    "planMargins": [],
+    "flatTierRoutes": [
+      {
+        "model": "qwen/qwen3.5-flash-02-23",
+        "costPer1k": 0.30550000000000005,
+        "ocrEligible": true
+      },
+      {
+        "model": "xiaomi/mimo-v2.6-flash",
+        "costPer1k": 0.43400000000000005,
+        "ocrEligible": true
+      },
+      {
+        "model": "google/gemini-2.5-flash-lite",
+        "costPer1k": 0.4699999999999999,
+        "ocrEligible": true
+      },
+      {
+        "model": "deepseek/deepseek-v4.1-flash",
+        "costPer1k": 0.546,
+        "ocrEligible": false
+      },
+      {
+        "model": "openai/gpt-6-luna",
+        "costPer1k": 0.55,
+        "ocrEligible": false
+      },
+      {
+        "model": "anthropic/claude-haiku-5.5",
+        "costPer1k": 0.55,
+        "ocrEligible": false
+      },
+      {
+        "model": "nvidia/nemotron-3.5-super-vl",
+        "costPer1k": 0.625,
+        "ocrEligible": false
+      },
+      {
+        "model": "z-ai/glm-5.3-flash",
+        "costPer1k": 0.625,
+        "ocrEligible": false
+      },
+      {
+        "model": "deepseek/deepseek-v4.1-flash-1017",
+        "costPer1k": 0.705,
+        "ocrEligible": false
+      },
+      {
+        "model": "google/gemini-3.1-flash-lite",
+        "costPer1k": 1.575,
+        "ocrEligible": false
+      },
+      {
+        "model": "openai/gpt-4.1-mini",
+        "costPer1k": 1.8799999999999997,
+        "ocrEligible": false
+      },
+      {
+        "model": "anthropic/claude-haiku-4.5",
+        "costPer1k": 5.5,
+        "ocrEligible": false
+      },
+      {
+        "model": "openai/gpt-6.1-sol",
+        "costPer1k": 11,
+        "ocrEligible": false
+      },
+      {
+        "model": "anthropic/claude-sonnet-5.5",
+        "costPer1k": 11,
+        "ocrEligible": false
+      },
+      {
+        "model": "anthropic/claude-opus-5.5",
+        "costPer1k": 22,
+        "ocrEligible": false
+      }
+    ],
+    "dedicated": {
+      "gpuUsdPerHour": 2.75,
+      "monthlyCostUsd": 2507.5,
+      "priceUsd": 4400,
+      "floorUsd": 4400,
+      "marginAfterFees": 0.40011363636363634,
+      "status": "verified"
+    },
+    "violations": []
+  },
+  "idle": [
+    {
+      "app": "docslurp-worker",
+      "machines": 8,
+      "counts": {
+        "stopped shared-8x-16384MB lax": 6,
+        "started shared-2x-4096MB lax": 1,
+        "stopped shared-2x-4096MB lax": 1
+      },
+      "compressedImageGb": 0.7101067546755075,
+      "rootfsGbEstimate": 1.7752668866887689,
+      "idle24h": {
+        "started": 1.0147932694259998,
+        "stopped": 0.06213434103410691,
+        "total": 1.0769276104601067
+      }
+    }
+  ],
+  "productionIdle": {
+    "hosts": 125,
+    "stoppedUsd24h": 1.1095418041804805,
+    "oneWarmHostUsd24h": 4.059173077703999
+  },
+  "rootfsExpansionAssumption": 2.5,
+  "failed": false
+}
