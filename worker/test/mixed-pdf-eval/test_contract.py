@@ -41,6 +41,16 @@ class ContractTests(unittest.TestCase):
         panel={'schema':'mixed-pdf-panel@v2','split':'train','cases':[{'id':'a'},{'id':'b'}]}
         completed={**panel,'schema':'mixed-pdf-complete@v2','panelHash':identity_hash(panel),'cases':[{'id':'a'}]}
         with self.assertRaises(RuntimeError):validate_panel_binding(completed,panel,identity_hash(panel))
+    def test_sealing_allows_geometry_but_never_content_or_page_order(self):
+        from seal import semantic_reference
+        refs=[{'pageId':'a','expectedMarkdown':'Value 17','blocks':[{'text':'Value 17','bbox':[0,0,20,20]}]},
+              {'pageId':'b','expectedMarkdown':'Value 28','blocks':[{'text':'Value 28','bbox':[0,20,20,40]}]}]
+        moved=copy.deepcopy(refs);moved[0]['blocks'][0]['bbox']=[1,2,21,22]
+        moved[0]['geometryTransform']={'skewDegrees':.5}
+        self.assertEqual(semantic_reference(refs),semantic_reference(moved))
+        moved[0]['blocks'][0]['text']='Value 28'
+        self.assertNotEqual(semantic_reference(refs),semantic_reference(moved))
+        self.assertNotEqual(semantic_reference(refs),semantic_reference(list(reversed(refs))))
     def test_hash_covers_every_dependency(self):
         identity={'labels':'a','scorer':'b','ocr':'c','language':'d','renderer':'e','toolVersions':{'qpdf':'f'}}
         for key in identity:
