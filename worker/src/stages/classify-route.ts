@@ -17,6 +17,7 @@ import type { Stage } from "../pipeline/pipeline.js";
 import { runDocumentStage, runDocuments, } from "../pipeline/checkpoints.js";
 import { healthyDocuments } from "../pipeline/document-health.js";
 import { type ArtifactStore, keyFromStorageUri } from "../tools/storage.js";
+import { runArtifactRoot } from "../lib/artifact-root.js";
 import { SPARSE_PAGE_WORDS, pageAlignedTexts, type PageImageEvidence } from "../lib/page-image-evidence.js";
 import { pageTextYield } from "../lib/page-yield-evidence.js";
 
@@ -30,7 +31,7 @@ export class ClassifyRouteStage implements Stage {
 
   async run(state: import("../pipeline/pipeline.js").WorkflowState, signal?: AbortSignal): Promise<void> {
     await runDocuments(healthyDocuments(state), state.docConcurrency, async (document) => {
-      const key = `${document.userId}/${state.run.id}/classify/${document.id}.json`;
+      const key = `${runArtifactRoot(state.run, document.userId)}/classify/${document.id}.json`;
       const artifactSlot = `${document.id}:classification`;
 
       await runDocumentStage(

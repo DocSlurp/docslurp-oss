@@ -327,3 +327,41 @@ test("jobs get prints the job and watch polls to completion", async () => {
   assert.deepEqual(watched.requests.map((r) => r.url), ["/v1/jobs/j1/events", "/v1/jobs/j1"]);
   assert.match(watched.stdout, /reindex completed/);
 });
+
+test("extract sends URLs to /v1/extracts/url with the retention options and prints the extract", async () => {
+  const result = await invoke(["extract", "https://example.com/a.pdf", "--retention-days", "7", "--no-email", "--download", "all"], () => ({ status: 201, body: {
+    workspace: { id: "w", name: "Inbox" }, run: { id: "run" }, documents: [{}],
+    extract: { id: "ext_1", expiresAt: "2026-11-02T00:00:00.000Z", paidRetention: true, notifyEmail: false },
+  } }));
+  assert.equal(result.code, 0, result.stderr);
+  assert.equal(result.requests[0].url, "/v1/extracts/url");
+  assert.deepEqual(JSON.parse(result.requests[0].body), { urls: ["https://example.com/a.pdf"], newWorkspace: false, workspace: "default", retentionDays: 7, notifyEmail: false, download: "all" });
+  assert.match(result.stdout, /Extract:\s+ext_1/);
+  assert.match(result.stdout, /extended retention/);
+});
+
+test("extract refuses a bad retention and a mix of files and URLs before any request", async () => {
+  const bad = await invoke(["extract", "https://example.com/a.pdf", "--retention-days", "1.5"], () => ({ body: {} }));
+  assert.notEqual(bad.code, 0);
+  assert.deepEqual(bad.requests, []);
+  const mixed = await invoke(["extract", "https://example.com/a.pdf", "notes.txt"], () => ({ body: {} }));
+  assert.notEqual(mixed.code, 0);
+  assert.deepEqual(mixed.requests, []);
+});
+
+test("extract files go through /v1/extracts/bulk and extract-status reports an expired extract", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "docslurp-extract-"));
+  try {
+    const file = join(dir, "notes.txt");
+    await writeFile(file, "hello");
+    const uploaded = await invoke(["extract", file], () => ({ status: 201, body: { workspace: { id: "w", name: "Inbox" }, run: { id: "run" }, documents: [{}], extract: { id: "ext_1", expiresAt: "2026-10-29T00:00:00.000Z", paidRetention: false, notifyEmail: true } } }));
+    assert.equal(uploaded.code, 0, uploaded.stderr);
+    assert.equal(uploaded.requests[0].url, "/v1/extracts/bulk");
+    assert.match(uploaded.stdout, /email with a download link/);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+  const gone = await invoke(["extract-status", "ext_1"], () => ({ status: 410, body: { error: { code: "extract_expired" } } }));
+  assert.equal(gone.code, 1);
+  assert.match(gone.stderr, /expired/);
+});

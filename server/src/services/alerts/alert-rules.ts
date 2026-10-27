@@ -17,6 +17,7 @@ export type AlertId =
   | "database-unreachable"
   | "queued-run-age"
   | "stale-leases"
+  | "extract-deletion-stuck"
   | "worker-pollers-missing"
   | "worker-crash-loop"
   | "migrations-not-at-head"
@@ -54,6 +55,8 @@ export interface QueueSnapshot {
   processingRuns: number;
   staleLeases: number;
   oldestQueuedRunAgeSeconds: number | null;
+  /** Expired extracts the sweep has not finished deleting (services/extracts.ts). */
+  extractDeletion?: { failing: number; overdue: number; oldestOverdueSeconds: number | null };
 }
 
 export interface AlertObservation {
@@ -207,6 +210,21 @@ export function evaluateAlertRules(
       `${queue.staleLeases} processing run(s) have expired worker leases (threshold ${thresholds.staleLeases})`,
       { staleLeases: queue.staleLeases, processingRuns: queue.processingRuns, threshold: thresholds.staleLeases },
     ));
+
+    if (queue.extractDeletion) {
+      const { failing, overdue, oldestOverdueSeconds } = queue.extractDeletion;
+      // Customer data past its retention window is still stored: an error, or an hour past expiry.
+      const stuck = failing > 0 || (oldestOverdueSeconds ?? 0) > 3_600;
+      checks.push(check(
+        "extract-deletion-stuck",
+        stuck,
+        "critical",
+        stuck
+          ? `${failing} expired extract(s) failing to delete, ${overdue} overdue (oldest ${Math.round(oldestOverdueSeconds ?? 0)}s past expiry)`
+          : "Expired extracts are being deleted",
+        { failing, overdue, oldestOverdueSeconds: oldestOverdueSeconds === null ? null : Math.round(oldestOverdueSeconds) },
+      ));
+    }
 
     if (db.migrations) {
       const { journal, latestAppliedWhen, appliedCount } = db.migrations;

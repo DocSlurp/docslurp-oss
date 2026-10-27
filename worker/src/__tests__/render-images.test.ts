@@ -60,3 +60,16 @@ it("never asks the raster cache for pages of documents without a raster form (HT
   await stage.run(state);
   expect(renderSelectedPages).toHaveBeenCalledWith(expect.objectContaining({ pageNumbers: [] }));
 });
+
+it("writes an extract run's page manifest under the extract prefix, not <user>/<run>", async () => {
+  const artifactLedger = DocumentArtifactLedger.create({});
+  const state = { artifactLedger, documents: [{ id: "doc", userId: "user", runId: "run", pageCount: 1, artifactRoot: "extracts/org/ext_1" }],
+    docConcurrency: 1, run: { id: "run", storagePrefix: "extracts/org/ext_1", pipeline: { preserveImages: true, visionFallback: false } } } as unknown as WorkflowState;
+  const rasters = { renderSelectedPages: async () => [{ pageNumber: 1, artifactUri: "s3://bucket/extracts/org/ext_1/images/doc/page-1.png", cacheHit: false }] } as unknown as PdfRasterCache;
+  const putJson = vi.fn();
+  await new RenderImagesStage(rasters, { putJson, uri: (key: string) => `s3://bucket/${key}` } as unknown as ArtifactStore).run(state);
+  const keys = putJson.mock.calls.map((call) => call[0] as string);
+  expect(keys.length).toBeGreaterThan(0);
+  expect(keys.every((key) => key.startsWith("extracts/org/ext_1/"))).toBe(true);
+  expect(keys.some((key) => key.startsWith("user/"))).toBe(false);
+});

@@ -33,15 +33,34 @@ export type OrgStorage = { objectBytes: number; indexBytes: number; sourceBytes:
  * (archived rows are superseded), so nothing is double-counted. Purged rows
  * are excluded.
  */
-export async function getOrgStorage(orgId: string, db: typeof sql = sql): Promise<OrgStorage> {
+export async function getOrgStorage(
+  orgId: string,
+  db: typeof sql = sql,
+  options: { excludeExtracts?: boolean } = {},
+): Promise<OrgStorage> {
+  // Live extract documents (counted in workspace_corpus_stats as completed,
+  // non-superseded rows) are free in their window or prepaid as extended
+  // retention, so the daily meter leaves them out.
+  const extracts = options.excludeExtracts
+    ? db`(select coalesce(sum(d.file_size), 0) as bytes, coalesce(sum(d.page_count), 0) as pages
+        from documents d
+        join workspace_runs r on r.id = d.run_id
+        -- Same org rule as workspace_corpus_stats above: the document's workspace's org.
+        join workspaces w on w.id = d.workspace_id
+        where w.org_id = ${orgId} and r.extract_id is not null
+          and d.status = 'completed' and d.superseded_at is null)`
+    : db`(select 0 as bytes, 0 as pages)`;
   const [row] = await db<{ source_bytes: string | number; pages: string | number }[]>`
+    with extract_docs as ${extracts}
     select
-      (coalesce((select sum(s.source_bytes) from workspace_corpus_stats s
+      greatest(0, coalesce((select sum(s.source_bytes) from workspace_corpus_stats s
         join workspaces w on w.id = s.workspace_id where w.org_id = ${orgId}), 0)
+       - (select bytes from extract_docs)
        + coalesce((select sum(d.file_size) from documents d
         where d.org_id = ${orgId} and d.archived_at is not null and d.purged_at is null), 0))::text as source_bytes,
-      (coalesce((select sum(s.page_count) from workspace_corpus_stats s
+      greatest(0, coalesce((select sum(s.page_count) from workspace_corpus_stats s
         join workspaces w on w.id = s.workspace_id where w.org_id = ${orgId}), 0)
+       - (select pages from extract_docs)
        + coalesce((select sum(d.page_count) from documents d
         where d.org_id = ${orgId} and d.archived_at is not null and d.purged_at is null), 0))::text as pages
   `;
