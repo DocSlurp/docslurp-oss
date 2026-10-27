@@ -17,6 +17,8 @@ import type { RequestActor } from "./request-actor.js";
  * sessions are unchanged: the session id is checked against their own user.
  */
 const family = sealedTokenFamily("chat-session-grant:v1");
+/** Request header for the grant on GET /v1/search/chat/stream, so it never sits in a URL. */
+export const CHAT_SESSION_TOKEN_HEADER = "X-DocSlurp-Chat-Session-Token";
 export const CHAT_SESSION_TOKEN_TTL_SECONDS = 24 * 60 * 60;
 
 export function requiresChatSessionToken(actor: RequestActor | null | undefined): actor is Extract<RequestActor, { type: "apiKey" }> {
