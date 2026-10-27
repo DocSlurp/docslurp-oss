@@ -9,6 +9,7 @@ import re
 import subprocess
 import time
 import uuid
+from container_case import run_container
 
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--image', required=True)
@@ -35,9 +36,10 @@ def stage(data):
 
 def run(name, command, success=True):
     started = time.monotonic()
-    p = subprocess.run(base + command, capture_output=True, timeout=65)
+    p, container_name = run_container(base, command)
     record = {'name': name, 'exitCode': p.returncode, 'seconds': time.monotonic() - started,
-              'stdoutBytes': len(p.stdout), 'stderrBytes': len(p.stderr), 'expectedSuccess': success}
+              'stdoutBytes': len(p.stdout), 'stderrBytes': len(p.stderr), 'expectedSuccess': success,
+              'containerName': container_name, 'daemonContainerCleanupConfirmed': True}
     (args.evidence / (name + '.stderr.txt')).write_bytes(p.stderr)
     records.append(record)
     if (p.returncode == 0) != success:

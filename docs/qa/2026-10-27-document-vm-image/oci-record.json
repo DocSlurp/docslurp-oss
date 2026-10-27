@@ -3,6 +3,7 @@
   "archiveBytes": 353474048,
   "archiveSha256": "46733e0df89522d13a14a295e9cd0749b1f692c0240a1e3d6cccd3169599b842",
   "imageManifestDigest": "sha256:66a14b948cd0eca3d8ac7869e90cf8dfd5a0987508dca0b65ac0cb269952cd21",
+  "exportedIndexDigest": "sha256:fbbdd7f307ff8ccf49c3fd74e7fc448b5c4eda8878bfb1accf0920669b39b3ee",
   "image": {
     "digest": "sha256:66a14b948cd0eca3d8ac7869e90cf8dfd5a0987508dca0b65ac0cb269952cd21",
     "configDigest": "sha256:8f703218281562eac36ba0cd6af513daf9f2f0728bb357424734aba477b1697f",
@@ -61,21 +62,31 @@
       }
     ]
   },
-  "attestations": [
+  "attestationBindings": [
     {
-      "digest": "sha256:56ae2cbce81f13a687ea9eac9671c42e664c6f311caf6bf966407cedea9a4940",
-      "configDigest": "sha256:44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
-      "layers": [
-        {
-          "digest": "sha256:1e0c700f7e1ae1c905962c3026f9d5cc9da07368e6c56ded0f538bad50bd511e",
-          "bytes": 2561186
-        },
-        {
-          "digest": "sha256:c6e8969381e3820857b47dfe10f4553de5454a5a55420ff452d7bf689a434871",
-          "bytes": 23095
-        }
-      ]
+      "kind": "sbom",
+      "statementSubjectEmpty": true,
+      "imageManifestDigest": "sha256:66a14b948cd0eca3d8ac7869e90cf8dfd5a0987508dca0b65ac0cb269952cd21",
+      "attestationManifestDigest": "sha256:56ae2cbce81f13a687ea9eac9671c42e664c6f311caf6bf966407cedea9a4940",
+      "layerDigest": "sha256:1e0c700f7e1ae1c905962c3026f9d5cc9da07368e6c56ded0f538bad50bd511e",
+      "binding": "verified OCI subject and BuildKit index reference"
+    },
+    {
+      "kind": "provenance",
+      "statementSubjectEmpty": true,
+      "imageManifestDigest": "sha256:66a14b948cd0eca3d8ac7869e90cf8dfd5a0987508dca0b65ac0cb269952cd21",
+      "attestationManifestDigest": "sha256:56ae2cbce81f13a687ea9eac9671c42e664c6f311caf6bf966407cedea9a4940",
+      "layerDigest": "sha256:c6e8969381e3820857b47dfe10f4553de5454a5a55420ff452d7bf689a434871",
+      "binding": "verified OCI subject and BuildKit index reference"
     }
   ],
-  "verifiedBlobCount": 20
+  "verifiedBlobCount": 20,
+  "testedImageEquality": {
+    "rootfsDiffIdsEqual": true,
+    "runtimeConfigEqual": true,
+    "platformEqual": true,
+    "layerDiffIdsVerified": true,
+    "localImageId": "sha256:283dc50fc21896aa674cd0d5d733e05aef93b711c3696d9677bf014611627af7",
+    "ociConfigDigest": "sha256:8f703218281562eac36ba0cd6af513daf9f2f0728bb357424734aba477b1697f"
+  }
 }
