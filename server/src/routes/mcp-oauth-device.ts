@@ -8,7 +8,9 @@ import {
   createGrant,
   DEVICE_ATTEMPT_WINDOW_MINUTES,
   DEVICE_BASE_SCOPES,
+  deviceAttemptBudget,
   deviceAttemptsExhausted,
+  deviceGlobalFrictionMs,
   deviceGrantScopes,
   findPendingDeviceRequest,
   formatUserCode,
@@ -28,8 +30,9 @@ import {
  *   types the code their own terminal shows, so a phisher cannot hand a
  *   victim a one-click approval link (RFC 8628 §5.4).
  * - Every lookup, approval and denial runs in one transaction that takes a
- *   per-user advisory lock, checks the wrong-code budgets (per user, per IP and
- *   overall) and records a miss, so concurrent guesses cannot race the lockout.
+ *   per-user advisory lock, checks the hard wrong-code budgets (per user and
+ *   per IP) and records a miss, so concurrent guesses cannot race the lockout.
+ *   Deployment-wide pressure only adds a delay and an alert, never a refusal.
  * - The confirmation shows the client, the audience, the signed-in account,
  *   the code, when the request was made and from which IP (next to the
  *   approver's own), and asks the user to match the code with their terminal.
@@ -142,6 +145,11 @@ deviceVerificationRoutes.post("/", async (c) => {
   const orgId = typeof orgIdField === "string" && orgIdField.length <= 200 ? orgIdField : null;
   const code = normalizeUserCode(field("user_code"));
   const ip = requestIp(c);
+  // Deployment-wide guessing pressure adds a delay before any lookup (outside
+  // the transaction, so no lock is held while waiting). It never refuses.
+  if ((await deviceAttemptBudget(appDbPool, actor.userId, ip)).globalPressure) {
+    await new Promise((resolve) => setTimeout(resolve, deviceGlobalFrictionMs()));
+  }
 
   const outcome = await transaction(async (db): Promise<Outcome> => {
     await lockDeviceAttempts(db, actor.userId);

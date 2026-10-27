@@ -278,17 +278,30 @@ export function normalizeUserCode(value: unknown): string | null {
 
 export const formatUserCode = (normalized: string) => `${normalized.slice(0, 4)}-${normalized.slice(4)}`;
 
-/** Wrong-code budgets per window. Any one exhausted refuses every lookup, approval and denial. */
+/**
+ * Wrong-code budgets per window. The per-user and per-IP budgets are hard
+ * limits. The deployment-wide one is not: a hard global limit would let a
+ * few free accounts lock device login for everyone. Past it, every device
+ * page request is delayed by {@link deviceGlobalFrictionMs} and an alert is
+ * logged, which slows a distributed guesser without refusing anyone.
+ */
 export const DEVICE_MAX_FAILED_ATTEMPTS_PER_IP = 20;
-export const DEVICE_MAX_FAILED_ATTEMPTS_GLOBAL = 500;
+export const DEVICE_GLOBAL_MISS_ALERT_THRESHOLD = 500;
+export const deviceGlobalFrictionMs = () => {
+  const configured = Number.parseInt(process.env.MCP_DEVICE_GLOBAL_FRICTION_MS ?? "", 10);
+  return Number.isFinite(configured) && configured >= 0 ? Math.min(configured, 30_000) : 2_000;
+};
+
+export type DeviceAttemptBudget = { locked: boolean; globalPressure: boolean };
+
+let lastGlobalAlertAt = 0;
 
 /**
- * True when this user, this IP or the deployment as a whole has used up its
- * failed user-code entries for the window. Call inside the transaction that
- * also records a miss, after {@link lockDeviceAttempts}, so concurrent guesses
- * by one user cannot all pass the check before any is counted.
+ * The wrong-code budget for this user and IP. Call inside the transaction
+ * that also records a miss, after {@link lockDeviceAttempts}, so concurrent
+ * guesses by one user cannot all pass the check before any is counted.
  */
-export async function deviceAttemptsExhausted(db: Pick<PoolClient, "query">, userId: string, ip: string | null = null): Promise<boolean> {
+export async function deviceAttemptBudget(db: Pick<PoolClient, "query">, userId: string, ip: string | null = null): Promise<DeviceAttemptBudget> {
   const { rows } = await db.query(`
     SELECT count(*) FILTER (WHERE user_id=$1)::int AS by_user,
            count(*) FILTER (WHERE $2::text IS NOT NULL AND ip=$2)::int AS by_ip,
@@ -296,7 +309,17 @@ export async function deviceAttemptsExhausted(db: Pick<PoolClient, "query">, use
     FROM mcp_oauth_device_attempts WHERE created_at > now() - $3::int * interval '1 minute'
   `, [userId, ip, DEVICE_ATTEMPT_WINDOW_MINUTES]);
   const row = rows[0] ?? { by_user: 0, by_ip: 0, total: 0 };
-  return row.by_user >= DEVICE_MAX_FAILED_ATTEMPTS || row.by_ip >= DEVICE_MAX_FAILED_ATTEMPTS_PER_IP || row.total >= DEVICE_MAX_FAILED_ATTEMPTS_GLOBAL;
+  const globalPressure = row.total >= DEVICE_GLOBAL_MISS_ALERT_THRESHOLD;
+  if (globalPressure && Date.now() - lastGlobalAlertAt > 60_000) {
+    lastGlobalAlertAt = Date.now();
+    console.error(`[mcp-oauth] alert=device_code_guessing misses_${DEVICE_ATTEMPT_WINDOW_MINUTES}m=${row.total} threshold=${DEVICE_GLOBAL_MISS_ALERT_THRESHOLD} friction_ms=${deviceGlobalFrictionMs()}`);
+  }
+  return { locked: row.by_user >= DEVICE_MAX_FAILED_ATTEMPTS || row.by_ip >= DEVICE_MAX_FAILED_ATTEMPTS_PER_IP, globalPressure };
+}
+
+/** True when this user or IP has used up its wrong-code budget (hard limits only). */
+export async function deviceAttemptsExhausted(db: Pick<PoolClient, "query">, userId: string, ip: string | null = null): Promise<boolean> {
+  return (await deviceAttemptBudget(db, userId, ip)).locked;
 }
 
 /** Serializes one user's device-code checks (transaction-scoped advisory lock). */
