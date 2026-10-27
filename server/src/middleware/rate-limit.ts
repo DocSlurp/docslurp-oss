@@ -5,6 +5,7 @@ import { apiKeyRateLimitPolicyName, publicApiErrorMessage, type ApiErrorCode, ty
 import type { Context, MiddlewareHandler } from "hono";
 import { createClient } from "redis";
 import { middlewareErrorResponse } from "../lib/api-error.js";
+import { reportPublicError } from "../lib/public-errors.js";
 import { isSelfHostedDeployment, withUpgradeLinks } from "../lib/upgrade-links.js";
 
 import { requestIp } from "../lib/request-context.js";
@@ -172,6 +173,8 @@ const IP_GUARD_DEFAULTS = {
 /** Categories that can incur spend; reads keep working after a spend limit. */
 const SPEND_LIMITED_CATEGORIES = new Set<RateLimitCategory>(["upload", "search", "chat-ai"]);
 const SPEND_CACHE_TTL_MS = 10_000;
+/** Retry-After when a key's spend window could not be read (the request is refused, never let through). */
+const SPEND_LOOKUP_RETRY_SECONDS = 5;
 
 // KEYS[1] = penalty-box key (holds the block's expiry in ms), KEYS[2..] = counter bases.
 // ARGV = now, countDenied, then (limit, windowMs, penaltyMs) per counter.
@@ -840,10 +843,22 @@ async function checkApiKeyQuotas(c: Context, apiKey: ApiKeyQuotaSubject, categor
 
   const spendRules = (apiKey.rateLimits ?? []).filter((rule) => rule.metric === "spend");
   if (spendRules.length === 0) return null;
-  const spends = await Promise.all(spendRules.map(async (rule) => ({
-    rule,
-    cents: await cachedSpendCents(apiKey.keyId, rule.windowSeconds, now),
-  })));
+  let spends: Array<{ rule: ApiKeyRateLimitRule; cents: number }>;
+  try {
+    spends = await Promise.all(spendRules.map(async (rule) => ({
+      rule,
+      cents: await cachedSpendCents(apiKey.keyId, rule.windowSeconds, now),
+    })));
+  } catch (error) {
+    // Fail closed: a key's spend cap that cannot be read must not be skipped.
+    // The raw cause goes to telemetry; the caller gets reviewed copy only.
+    if (!SPEND_LIMITED_CATEGORIES.has(category)) return null;
+    reportPublicError(error, { operation: "rate-limit.spend-lookup", category });
+    c.header("Retry-After", String(SPEND_LOOKUP_RETRY_SECONDS));
+    return middlewareErrorResponse(c, 503, "unavailable", "Spend limits could not be checked; try again shortly", {
+      category, retryAfterSeconds: SPEND_LOOKUP_RETRY_SECONDS,
+    });
+  }
   const tightest = spends.reduce((best, spend) =>
     spend.rule.limit - spend.cents < best.rule.limit - best.cents ? spend : best);
   const remaining = Math.max(0, tightest.rule.limit - tightest.cents);
@@ -881,8 +896,7 @@ async function cachedSpendCents(keyId: string, windowSeconds: number, now: numbe
     return cents;
   } catch (error) {
     spendCache.delete(cacheKey);
-    console.error("[rate-limit] spend lookup failed; allowing request:", error instanceof Error ? error.message : String(error));
-    return 0;
+    throw error;
   }
 }
 

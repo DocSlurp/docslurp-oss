@@ -9,6 +9,8 @@ const { apiKeySpendCents, apiKeyPagesToday } = vi.hoisted(() => ({
 }));
 vi.mock("../services/usage-attribution.js", () => ({ apiKeySpendCents }));
 vi.mock("../services/api-key-usage.js", () => ({ apiKeyPagesToday }));
+const { reportPublicError } = vi.hoisted(() => ({ reportPublicError: vi.fn(() => "We couldn’t complete that request.") }));
+vi.mock("../lib/public-errors.js", () => ({ reportPublicError }));
 
 const {
   classifyRateLimitCategory, createApiRateLimit, createMemoryRateLimitStore, createRedisRateLimitStore,
@@ -95,6 +97,38 @@ describe("public (browser) key limits", () => {
     const headers = { "x-forwarded-for": "198.51.100.44", authorization: "Bearer dslp_pub_guess" };
     for (let i = 0; i < 3; i++) expect((await app.request("/compat/meilisearch/indexes/ws/search", { headers })).status).toBe(403);
     expect((await app.request("/compat/meilisearch/indexes/ws/search", { headers })).status).toBe(429);
+  });
+});
+
+describe("key spend windows", () => {
+  it("fails closed when the spend lookup errors: a reviewed 503, the raw cause to telemetry only", async () => {
+    const actor = keyActor("client");
+    if (actor.type === "apiKey") actor.apiKey.rateLimits = [{ metric: "spend", limit: 500, windowSeconds: 86_400 }];
+    const cause = new Error("connection to 10.0.0.5:5432 refused (password authentication failed for docslurp_app)");
+    apiKeySpendCents.mockRejectedValue(cause);
+    const app = actorApp(actor);
+    const refused = await app.request("/v1/chat", from("203.0.113.90"));
+    expect(refused.status).toBe(503);
+    expect(refused.headers.get("Retry-After")).toBe("5");
+    const body = await refused.text();
+    expect(JSON.parse(body)).toMatchObject({ error: { code: "unavailable" } });
+    expect(body).not.toContain("10.0.0.5");
+    expect(body).not.toContain("docslurp_app");
+    expect(reportPublicError).toHaveBeenCalledWith(cause, expect.objectContaining({ operation: "rate-limit.spend-lookup" }));
+    // Not cached as zero: the next request looks again, and passes once the lookup works.
+    apiKeySpendCents.mockResolvedValue(10);
+    expect((await app.request("/v1/chat", from("203.0.113.90"))).status).toBe(200);
+  });
+
+  it("lets reads through when the spend lookup errors (reads never spend)", async () => {
+    const actor = keyActor("server");
+    if (actor.type === "apiKey") actor.apiKey.rateLimits = [{ metric: "spend", limit: 500, windowSeconds: 86_400 }];
+    apiKeySpendCents.mockRejectedValue(new Error("db down"));
+    const app = new Hono();
+    app.use("*", async (c, next) => { c.set("requestActor", actor); await next(); });
+    app.use("*", createApiRateLimit({ identity: "actor", keyPrefix: "spend-read", now: () => 1_000 }));
+    app.get("/v1/documents", (c) => c.json({ ok: true }));
+    expect((await app.request("/v1/documents")).status).toBe(200);
   });
 });
 
