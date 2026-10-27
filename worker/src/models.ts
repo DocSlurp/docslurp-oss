@@ -57,9 +57,10 @@ export interface Document {
   createdAt: Date;
   updatedAt: Date;
   /**
-   * Hours this document's artifacts are kept before deletion; null or absent means indefinitely
-   * or unknown. Chooses the page-image encode effort (pageImageWebpEffort). Loaded from the
-   * workspace's artifact/run retention; an extract run sets it from the extract's retentionHours.
+   * Hours until this document's page images are deleted; null or absent means indefinitely or
+   * unknown. Chooses the page-image encode effort (pageImageWebpEffort). The worker store loads
+   * it from the workspace's run retention. Nothing else sets it yet; extract runs should set it
+   * from the extract's retentionHours when extract mode lands.
    */
   artifactRetentionHours?: number | null;
 }

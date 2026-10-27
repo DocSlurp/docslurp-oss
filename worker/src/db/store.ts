@@ -381,11 +381,12 @@ function runRowQuery(client: Sql<Record<string, unknown>>, runId: string) {
 }
 
 /**
- * Shortest workspace retention that deletes a document's artifacts: artifact retention or run
- * retention, in hours. `least` ignores nulls, so null means both keep the data indefinitely.
+ * Hours until the workspace's run retention deletes a document with its run, page images
+ * included; null when runs are kept indefinitely. Artifact retention is not used: its purge
+ * deletes the URIs recorded on the run, not raster-cache keys, so page images can outlive it.
  */
 function documentRetentionHoursSql(client: Sql<Record<string, unknown>>) {
-  return client`(select least(w.artifact_retention_days, w.run_retention_days) * 24 from workspaces w where w.id = documents.workspace_id) as artifact_retention_hours`;
+  return client`(select w.run_retention_days * 24 from workspaces w where w.id = documents.workspace_id) as artifact_retention_hours`;
 }
 
 function runDocumentRowsQuery(client: Sql<Record<string, unknown>>, runId: string) {
