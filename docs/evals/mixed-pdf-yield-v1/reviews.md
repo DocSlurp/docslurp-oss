@@ -127,6 +127,17 @@ instead of being mistaken for a Markdown list marker. The focused evaluation sui
 passes 32 tests. These scorer changes precede accepted measurements; all code and
 label identities must be frozen again before tuning.
 
+The validator-only revision now binds prototype interval endpoints, tolerances,
+printed symbols and table/formula units to frozen worlds and source-layout records.
+Unit comparisons retain exact conversion scales as well as dimensions. Unsupported
+enriched binding contracts fail closed; this revision is scoped to P prototypes.
+The new external `semantic-revalidation-r1.json` receipt binds validator/dependency
+hashes, the original manifest, all checked worlds/authoring records and label files.
+The coordinator confirmed changed-code hashes match the receipt. It reports all
+30 authoring and 180 label pages passing, 1,317 protected artifacts unchanged, and
+11 tests with six valid controls and 62 rehashed/schema-valid negative probes.
+A fresh independent review is pending; this receipt does not grant acceptance.
+
 Before measuring the new corpus, the sealer must validate realized decoys against
 immutable authoring plans. Current sealing deliberately rejects the a2-r5 schema's
 plan/exclusion differences; no measurement has bypassed this check.

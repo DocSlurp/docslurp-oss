@@ -43,7 +43,7 @@ def evaluate_ast(ast,variables):
     raise ValueError(op)
 
 
-def authoring_checks(spec,family,record,world):
+def authoring_checks(spec,family,record,world,printed_reference=None,expected_world_hash=None):
     misses=[];layout=layout_for(spec,family);templates={t['id']:t for t in layout['blocks']};seen=set();glyphids=set()
     if record_hash(record,'authoringHash')!=record['authoringHash']:misses.append(issue('hash','authoring','self hash differs'))
     if record_hash(world,'worldHash')!=world['worldHash'] or record['worldHash']!=world['worldHash']:misses.append(issue('hash','world','self/reference hash differs'))
@@ -124,7 +124,13 @@ def authoring_checks(spec,family,record,world):
             if iou(actual,target)<.7:misses.append(issue('parent-IoU',page['id']+'.'+gid,iou(actual,target)))
     diversity=diversity_report(record)
     if not diversity['passed']:misses.append(issue('content-diversity',record['familyId'],diversity))
-    return dict(passed=not misses,misses=misses,diversity=diversity,checkedPages=len(record['pages']),selfScore=None)
+    from fools_gold_v4_semantic import semantic_checks
+    constraint=templates['math.constraint']['math_shape']
+    semantics=semantic_checks(record,world,family,printed_reference,expected_world_hash,
+                              templates['math.rule']['math_shape'].get('evaluation_precision_decimal_places',6),
+                              constraint.get('tolerance_range'))
+    misses.extend(semantics['misses'])
+    return dict(passed=not misses,misses=misses,diversity=diversity,checkedPages=len(record['pages']),semantics=semantics,selfScore=None)
 
 
 def actual_glyphs(doc,page):
@@ -271,8 +277,22 @@ def operator_scan(pdf,page_number):
         return dict(operators=dict(counts),textShowOperators=sum(counts[x] for x in ['Tj','TJ',"'",'"']),formCount=counts['Form'],imagePaintCount=len(images),annotations=len(page.get('/Annots',[])))
 
 
+def label_authoring(authoring,label):
+    """Validate the delivered label's own semantic blocks, not a stand-in."""
+    import copy
+    if label['authoringHash']!=authoring['authoringHash']:raise ValueError('label authoring reference differs')
+    if len(label['pages'])!=len(authoring['pages']):raise ValueError('label page count differs')
+    projected=copy.deepcopy(authoring)
+    for page,delivered in zip(projected['pages'],label['pages']):
+        if page['id']!=delivered['pageId']:raise ValueError('label page ID/order differs')
+        for key in ['blocks','readingOrder','expectedMarkdown','sections','paragraphs','blockIdsForSections','blockIdsForParagraphs']:
+            page[key]=copy.deepcopy(delivered[key])
+        page['visibleGlyphCount']=sum(1 for b in page['blocks'] for g in b['glyphs'] if g['visible'] and not g['text'].isspace())
+    return freeze(projected,'authoringHash')
+
+
 def check_corpus(root,spec):
-    root=Path(root);manifest=load(root/'manifest.json');misses=[];counts=Counter();cases=[]
+    root=Path(root);manifest=load(root/'manifest.json');misses=[];counts=Counter();cases=[];semantic_families={}
     for case in manifest['cases']:
         counts['pdfs']+=1
         for path,key in [(case['pdf'],'sha256'),(case['labels'],'labelHash')]:
@@ -282,6 +302,17 @@ def check_corpus(root,spec):
         if profile['pdfVersion']!=str(expected['version']) or profile['linearized']!=expected['linearized'] or bool(profile['objectStreamCount'])!=expected['object_streams'] or bool(profile['xrefStreamCount'])!=(expected['xref']=='stream'):misses.append(issue('storage-profile',case['id'],dict(expected=expected,actual={k:profile[k] for k in ['pdfVersion','linearized','objectStreamCount','xrefStreamCount']})))
         if profile['encrypted'] or profile['unembeddedFontXrefs']:misses.append(issue('font-or-encryption',case['id'],dict(encrypted=profile['encrypted'],unembedded=profile['unembeddedFontXrefs'])))
         family=f'{case["familyId"]:04d}';a=load(root/f'sources/{family}/authoring.json');plan=load(root/f'plans/{family}/{case["hardPercent"]}.json');execution=load(root/f'executions/{family}/{case["hardPercent"]}.json');ep=load(root/f'plans/{family}/{case["hardPercent"]}-exclusions.json');ee=load(root/f'executions/{family}/{case["hardPercent"]}-exclusions.json');label=load(root/case['labels'])
+        from fools_gold_v4_semantic import semantic_checks
+        world=load(root/f'sources/{family}/world.json');reference=load(root/f'sources/{family}/source-layout.json');contract=spec['dataset']['family_plan'][case['familyId']]
+        if file_hash(root/f'sources/{family}/source-layout.json')!=case['sourceLayoutHash']:misses.append(issue('printed-reference-hash',case['id'],'source-layout byte hash differs'))
+        if family not in semantic_families:
+            semantic_families[family]=authoring_checks(spec,contract,a,world,reference,case['worldHash'])
+            misses.extend(semantic_families[family]['misses'])
+        try:
+            projection=label_authoring(a,label)
+            semantic_label=semantic_checks(projection,world,contract,reference,case['worldHash'],tolerance_range=[.1,.9])
+            misses.extend(semantic_label['misses'])
+        except (KeyError,ValueError) as error:misses.append(issue('label-semantic-binding',case['id'],str(error)))
         for name,record,selfkey in [('authoring',a,'authoringHash'),('transform_plan',plan,'planHash'),('transform',execution,'executionHash'),('exclusion_plan',ep,'exclusionPlanHash'),('exclusions',ee,'exclusionsHash')]:
             try:validate_schema(record,spec['immutable_records']['schemas'][name])
             except Exception as exc:misses.append(issue('schema',case['id']+'/'+name,str(exc)))
@@ -336,9 +367,100 @@ def check_corpus(root,spec):
     return dict(passed=not misses,misses=misses,counts=dict(counts),cases=cases,acceptance='not-scored; requires coordinator audit and independent final judge',selfScore=None)
 
 
+def semantic_revalidation_receipt(root,spec_path,spec_md,notes_path,receipt_path):
+    """Read-only semantic revalidation with a new, separate immutable receipt.
+
+    Hashes every original inventoried artifact before and after validation. No
+    PDF is opened by a renderer or rewritten; PDF bytes are only SHA256 inputs.
+    """
+    import copy
+    import datetime
+    import importlib.metadata
+    import platform
+    import subprocess
+    from fools_gold_v4_semantic import semantic_checks
+    root=Path(root).resolve();receipt_path=Path(receipt_path).resolve()
+    snapshot=receipt_path.parent/(receipt_path.stem+'-snapshot')
+    if receipt_path.is_relative_to(root) or snapshot.is_relative_to(root):raise ValueError('validation evidence must be outside the original candidate')
+    if receipt_path.exists() or snapshot.exists():raise FileExistsError('new receipt and snapshot paths are required')
+    started=datetime.datetime.now(datetime.timezone.utc).isoformat()
+    manifest_path=root/'manifest.json';manifest_sha=file_hash(manifest_path);manifest=load(manifest_path)
+    spec=load(spec_path);notes_sha=file_hash(notes_path)
+    expected_handoff=sha(canonical({'spec-a4.md':file_hash(spec_md),'spec-a4.json':file_hash(spec_path)}))
+    if manifest['handoffHash']!=expected_handoff:raise ValueError('clean handoff differs from corpus manifest')
+    if record_hash(manifest,'manifestHash')!=manifest['manifestHash']:raise ValueError('manifest self hash differs')
+    inventory=load(root/'artifact-hashes.json');protected={}
+    for relative,declared in inventory['files'].items():
+        path=(root/relative).resolve()
+        if not path.is_relative_to(root):raise ValueError('inventory path escapes candidate')
+        actual=file_hash(path)
+        if actual!=declared['sha256']:raise ValueError('pre-validation artifact byte hash differs: '+relative)
+        protected[relative]=actual
+    protected['artifact-hashes.json']=file_hash(root/'artifact-hashes.json')
+    # The coordinator may have placed other review material in this directory.
+    # The clean-room allowlist is the original Builder inventory, not a recursive
+    # directory walk. Never enumerate or read un-inventoried review material.
+    code_dir=Path(__file__).parent
+    changed_names=['fools_gold_v4_check.py','fools_gold_v4_semantic.py','fools_gold_v4_selftest.py']
+    dependency_names=['fools_gold_v4_common.py','fools_gold_build_v4.py']
+    code_hashes={name:file_hash(code_dir/name) for name in changed_names}
+    dependencies={name:file_hash(code_dir/name) for name in dependency_names}
+    snapshot.mkdir(parents=True)
+    for name in changed_names+dependency_names:save(snapshot/name,(code_dir/name).read_bytes())
+    save(snapshot/'validation-notes.md',Path(notes_path).read_bytes())
+    save(snapshot/'spec-a4.json',Path(spec_path).read_bytes());save(snapshot/'spec-a4.md',Path(spec_md).read_bytes())
+    # Tests execute the frozen validator files; no import of native renderers.
+    test_command=[sys.executable,str(snapshot/'fools_gold_v4_selftest.py'),'--probe-report',str(snapshot/'probe-results.json')]
+    tests=subprocess.run(test_command,capture_output=True,text=True)
+    save(snapshot/'tests.stdout.txt',tests.stdout);save(snapshot/'tests.stderr.txt',tests.stderr)
+    probes=load(snapshot/'probe-results.json') if (snapshot/'probe-results.json').exists() else None
+    family_reports=[];case_reports=[];misses=[];cache={}
+    ids={case['familyId'] for case in manifest['cases']}
+    if ids!={0,6,12}:raise ValueError('validator-only receipt is restricted to the three delivered prototypes')
+    for fid in sorted(ids):
+        family=spec['dataset']['family_plan'][fid];relative=f'sources/{fid:04d}'
+        a=load(root/relative/'authoring.json');world=load(root/relative/'world.json');reference=load(root/relative/'source-layout.json')
+        cases=[case for case in manifest['cases'] if case['familyId']==fid]
+        for case in cases:
+            if case['authoringHash']!=a['authoringHash'] or case['worldHash']!=world['worldHash']:raise ValueError('family hashes disagree across manifest cases')
+            if file_hash(root/relative/'source-layout.json')!=case['sourceLayoutHash']:raise ValueError('printed reference is not manifest-bound')
+        if reference['authoringHash']!=a['authoringHash']:raise ValueError('source-layout authoring reference differs')
+        validate_schema(a,spec['immutable_records']['schemas']['authoring'])
+        result=authoring_checks(spec,family,a,world,reference,cases[0]['worldHash'])
+        misses.extend(result['misses']);cache[fid]=(family,a,world,reference)
+        family_reports.append(dict(familyId=fid,authoringHash=a['authoringHash'],authoringByteSha256=file_hash(root/relative/'authoring.json'),worldHash=world['worldHash'],worldByteSha256=file_hash(root/relative/'world.json'),sourceLayoutByteSha256=file_hash(root/relative/'source-layout.json'),schemaPassed=True,result=result))
+    for case in manifest['cases']:
+        family,a,world,reference=cache[case['familyId']];label=load(root/case['labels'])
+        if file_hash(root/case['pdf'])!=case['sha256'] or file_hash(root/case['labels'])!=case['labelHash']:raise ValueError('delivered PDF/label hash differs')
+        if record_hash(label,'labelsHash')!=label['labelsHash']:raise ValueError('label self hash differs')
+        projection=label_authoring(a,label);validate_schema(projection,spec['immutable_records']['schemas']['authoring'])
+        result=semantic_checks(projection,world,family,reference,case['worldHash'],tolerance_range=[.1,.9])
+        if any(delivered['blocks']!=original['blocks'] for delivered,original in zip(label['pages'],a['pages'])):
+            result['misses'].append(issue('label-authoring-projection',case['id'],'delivered blocks differ from frozen authoring'));result['passed']=False
+        misses.extend(result['misses'])
+        case_reports.append(dict(id=case['id'],familyId=case['familyId'],pdfSha256=case['sha256'],labelSha256=case['labelHash'],authoringHash=a['authoringHash'],worldHash=world['worldHash'],schemaPassed=True,result=result))
+    unchanged=all(file_hash(root/relative)==digest for relative,digest in protected.items())
+    code_unchanged=all(file_hash(code_dir/name)==digest and file_hash(snapshot/name)==digest for name,digest in {**code_hashes,**dependencies}.items())
+    inputs_unchanged=(file_hash(manifest_path)==manifest_sha and file_hash(notes_path)==notes_sha and expected_handoff==sha(canonical({'spec-a4.md':file_hash(spec_md),'spec-a4.json':file_hash(spec_path)})))
+    if not unchanged:misses.append(issue('immutability','candidate','original files changed during validation'))
+    if not code_unchanged or not inputs_unchanged:misses.append(issue('immutability','validator','code or clean inputs changed during validation'))
+    schema_version=subprocess.run(['/usr/bin/python','-c','from importlib.metadata import version;print(version("jsonschema"))'],capture_output=True,text=True,check=True).stdout.strip()
+    result=freeze(dict(schema='mixed-pdf-semantic-revalidation@1',specAttempt=4,revision='semantic-r1',kind='validator-only; no generation invocation',startedAt=started,completedAt=datetime.datetime.now(datetime.timezone.utc).isoformat(),candidate=str(root),corpusManifestSha256=manifest_sha,corpusManifestHash=manifest['manifestHash'],handoffHash=expected_handoff,validationNotesSha256=notes_sha,validatorCodeSha256=code_hashes,validatorDependencySha256=dependencies,validationSnapshot=str(snapshot),runtime=dict(python=platform.python_version(),decimal='stdlib Decimal and exact Fraction unit scales',jsonschema=schema_version),checkedFamilies=family_reports,checkedCases=case_reports,counts=dict(families=len(family_reports),authoringPages=sum(r['result']['checkedPages'] for r in family_reports),pdfsHashed=len(case_reports),labelPages=sum(r['result']['checkedPages'] for r in case_reports)),tests=dict(command=test_command,exitCode=tests.returncode,stdoutSha256=file_hash(snapshot/'tests.stdout.txt'),stderrSha256=file_hash(snapshot/'tests.stderr.txt'),probeReportSha256=file_hash(snapshot/'probe-results.json') if probes else None,probes=probes),originalCorpusUnchanged=unchanged,protectedArtifactCount=len(protected),protectedInventoryBeforeAfterSha256=sha(canonical(protected)),protectedScope='All original Builder-inventoried artifacts plus the inventory itself; un-inventoried review material is neither enumerated nor opened.',cleanInputsUnchanged=inputs_unchanged,validatorCodeUnchangedDuringRun=code_unchanged,passed=not misses and tests.returncode==0,misses=misses,scope='P world/literal/AST/unit bindings on the three frozen prototypes and all 18 delivered label projections. Legacy world tolerance is anchored to immutable printed source-layout; no values added to old records.',acceptance='not assessed; no audit/judge score, promotion or generation approval'), 'receiptHash')
+    save(snapshot/'snapshot-hashes.json',freeze(dict(schema='mixed-pdf-validator-snapshot@1',validatorCodeSha256=code_hashes,dependencySha256=dependencies,files={str(p.relative_to(snapshot)):file_hash(p) for p in sorted(snapshot.rglob('*')) if p.is_file()}),'snapshotHash'))
+    result['snapshotHashesSha256']=file_hash(snapshot/'snapshot-hashes.json');freeze(result,'receiptHash')
+    save(receipt_path,result)
+    return result
+
+
 def main():
-    p=argparse.ArgumentParser(description=__doc__);p.add_argument('--root',type=Path,required=True);p.add_argument('--spec',type=Path,required=True);p.add_argument('--report',type=Path,required=True);args=p.parse_args()
-    result=check_corpus(args.root,load(args.spec));save(args.report,result);print(json.dumps(dict(passed=result['passed'],counts=result['counts'],misses=len(result['misses']))));return 0 if result['passed'] else 1
+    p=argparse.ArgumentParser(description=__doc__);p.add_argument('--root',type=Path,required=True);p.add_argument('--spec',type=Path,required=True);p.add_argument('--report',type=Path,required=True)
+    p.add_argument('--semantic-only',action='store_true');p.add_argument('--spec-md',type=Path);p.add_argument('--validation-notes',type=Path);args=p.parse_args()
+    if args.semantic_only:
+        if not args.spec_md or not args.validation_notes:p.error('--semantic-only requires --spec-md and --validation-notes')
+        result=semantic_revalidation_receipt(args.root,args.spec,args.spec_md,args.validation_notes,args.report)
+    else:
+        result=check_corpus(args.root,load(args.spec));save(args.report,result)
+    print(json.dumps(dict(passed=result['passed'],counts=result['counts'],misses=len(result['misses']))));return 0 if result['passed'] else 1
 
 
 if __name__=='__main__':raise SystemExit(main())
