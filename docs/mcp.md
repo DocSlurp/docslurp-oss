@@ -51,7 +51,7 @@ Read-only estimate tools (`updateEstimate`, `searchSettingsEstimate`, `reprocess
 
 The remote endpoint supports modern per-request MCP and stateless legacy Streamable HTTP clients. Stdio-only clients can use `docslurp mcp-server` from `@docslurp/cli`; its native REST adapters expose the same tools. Transport and adapter calls share the same authorization and search/chat implementation, without an internal network hop or forwarding credentials.
 
-## MCP Apps uploader (`openUploader`)
+## MCP Apps uploader (openUploader)
 
 `openUploader` shows a file-upload widget inside hosts that render MCP Apps. The user drops local files into it, the widget uploads them straight to your object storage and shows processing progress. Use it when the user has files the model cannot read, such as attachments on their own machine.
 
