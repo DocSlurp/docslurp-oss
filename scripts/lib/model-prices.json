@@ -1,15 +1,15 @@
 {
-  "asOf": "2026-10-25",
+  "asOf": "2026-10-26",
   "currency": "usd",
   "unit": "per-million-tokens",
-  "note": "List prices used to estimate evaluation cost from measured token counts. Provider-reported cost, when a gateway returns it, always wins over these numbers. Re-check before quoting a cost in any report.",
+  "note": "List prices used to estimate evaluation cost from measured token counts. Provider-reported cost, when a gateway returns it, always wins over these numbers. Re-check before quoting a cost in any report (pnpm pricing:watch in DocSlurp/app). Entries with `prohibited` are kept only as historical evidence for old traces and tests: never select them for evals, app options, presets or defaults (openai-pro: OpenAI Pro/Ultra model; output-price>=50: output at or above $50 per 1M tokens).",
   "models": {
     "openai/gpt-5.6-luna": {
       "input": 0.2,
       "output": 1.2,
       "vision": true,
       "source": "https://openrouter.ai/api/v1/models",
-      "checked": "2026-10-25",
+      "checked": "2026-10-26",
       "contextWindow": 1050000
     },
     "openai/gpt-4.1-mini": {
@@ -17,7 +17,7 @@
       "output": 1.6,
       "vision": true,
       "source": "https://openrouter.ai/api/v1/models",
-      "checked": "2026-10-25",
+      "checked": "2026-10-26",
       "contextWindow": 1047576
     },
     "google/gemini-3.1-flash-lite": {
@@ -25,7 +25,7 @@
       "output": 1.5,
       "vision": true,
       "source": "https://openrouter.ai/api/v1/models",
-      "checked": "2026-10-25",
+      "checked": "2026-10-26",
       "contextWindow": 1048576
     },
     "google/gemini-3.7-flash": {
@@ -33,7 +33,7 @@
       "output": 3.75,
       "vision": true,
       "source": "https://openrouter.ai/api/v1/models",
-      "checked": "2026-10-25",
+      "checked": "2026-10-26",
       "contextWindow": 1048576
     },
     "openai/gpt-5.6-luna:batch": {
@@ -42,7 +42,7 @@
       "vision": true,
       "contextWindow": 1050000,
       "source": "https://openrouter.ai/api/v1/models",
-      "checked": "2026-10-25",
+      "checked": "2026-10-26",
       "note": "Latency-insensitive work such as eval runs and backfills can use this lane."
     },
     "openai/gpt-5.6-luna-pro": {
@@ -51,14 +51,15 @@
       "vision": true,
       "contextWindow": 1050000,
       "source": "https://openrouter.ai/api/v1/models",
-      "checked": "2026-10-25"
+      "checked": "2026-10-26",
+      "prohibited": "openai-pro"
     },
     "openai/gpt-6-luna": {
       "input": 0.1,
       "output": 0.5,
       "vision": true,
       "source": "https://openrouter.ai/api/v1/models",
-      "checked": "2026-10-25",
+      "checked": "2026-10-26",
       "contextWindow": 1050000
     },
     "z-ai/glm-5.3-flashx": {
@@ -66,15 +67,15 @@
       "output": 1.25,
       "vision": true,
       "source": "https://openrouter.ai/api/v1/models",
-      "checked": "2026-10-25",
+      "checked": "2026-10-26",
       "contextWindow": 1048576
     },
     "deepseek/deepseek-v4.1-flash": {
-      "input": 0.02,
-      "output": 1,
+      "input": 0.14,
+      "output": 0.42,
       "vision": true,
       "source": "https://openrouter.ai/api/v1/models",
-      "checked": "2026-10-25",
+      "checked": "2026-10-26",
       "contextWindow": 1048576
     },
     "google/gemini-3.8-flash": {
@@ -82,7 +83,7 @@
       "output": 4.125,
       "vision": true,
       "source": "https://openrouter.ai/api/v1/models",
-      "checked": "2026-10-25",
+      "checked": "2026-10-26",
       "contextWindow": 1048576
     },
     "z-ai/glm-5.3-flash": {
@@ -90,7 +91,7 @@
       "output": 0.5,
       "vision": true,
       "source": "https://openrouter.ai/api/v1/models",
-      "checked": "2026-10-25",
+      "checked": "2026-10-26",
       "contextWindow": 1048576
     },
     "google/gemini-3.5-flash-lite": {
@@ -98,7 +99,7 @@
       "output": 2.5,
       "vision": true,
       "source": "https://openrouter.ai/api/v1/models",
-      "checked": "2026-10-25",
+      "checked": "2026-10-26",
       "contextWindow": 1048576
     },
     "openai/gpt-6-luna-pro": {
@@ -106,23 +107,25 @@
       "output": 0.5,
       "vision": true,
       "source": "https://openrouter.ai/api/v1/models",
-      "checked": "2026-10-25",
-      "contextWindow": 1050000
+      "checked": "2026-10-26",
+      "contextWindow": 1050000,
+      "prohibited": "openai-pro"
     },
     "openai/gpt-6-sol-pro": {
       "input": 2,
       "output": 10,
       "vision": true,
       "source": "https://openrouter.ai/api/v1/models",
-      "checked": "2026-10-25",
-      "contextWindow": 1050000
+      "checked": "2026-10-26",
+      "contextWindow": 1050000,
+      "prohibited": "openai-pro"
     },
     "openai/gpt-6-sol": {
       "input": 2,
       "output": 10,
       "vision": true,
       "source": "https://openrouter.ai/api/v1/models",
-      "checked": "2026-10-25",
+      "checked": "2026-10-26",
       "contextWindow": 1050000
     },
     "openai/gpt-6-astra": {
@@ -130,23 +133,25 @@
       "output": 50,
       "vision": true,
       "source": "https://openrouter.ai/api/v1/models",
-      "checked": "2026-10-25",
-      "contextWindow": 1050000
+      "checked": "2026-10-26",
+      "contextWindow": 1050000,
+      "prohibited": "output-price>=50"
     },
     "openai/gpt-6-astra-pro": {
       "input": 10,
       "output": 50,
       "vision": true,
       "source": "https://openrouter.ai/api/v1/models",
-      "checked": "2026-10-25",
-      "contextWindow": 1050000
+      "checked": "2026-10-26",
+      "contextWindow": 1050000,
+      "prohibited": "openai-pro, output-price>=50"
     },
     "anthropic/claude-opus-5.5": {
       "input": 4,
       "output": 20,
       "vision": true,
       "source": "https://openrouter.ai/api/v1/models",
-      "checked": "2026-10-25",
+      "checked": "2026-10-26",
       "contextWindow": 1000000
     },
     "anthropic/claude-fable-5.1": {
@@ -154,16 +159,17 @@
       "output": 50,
       "vision": true,
       "source": "https://openrouter.ai/api/v1/models",
-      "checked": "2026-10-25",
+      "checked": "2026-10-26",
       "deprecated": "Anthropic models below 5.5 are deprecated (2026-10-09); output price is also >= $50/MTok",
-      "contextWindow": 1000000
+      "contextWindow": 1000000,
+      "prohibited": "output-price>=50"
     },
     "anthropic/claude-sonnet-5.5": {
       "input": 2,
       "output": 10,
       "vision": true,
       "source": "https://openrouter.ai/api/v1/models",
-      "checked": "2026-10-25",
+      "checked": "2026-10-26",
       "contextWindow": 1000000
     },
     "anthropic/claude-haiku-5.5": {
@@ -171,7 +177,7 @@
       "output": 0.5,
       "vision": true,
       "source": "https://openrouter.ai/api/v1/models",
-      "checked": "2026-10-25",
+      "checked": "2026-10-26",
       "note": "$0.50/$2.50 above 100K prompt tokens",
       "contextWindow": 1000000
     },
@@ -179,7 +185,7 @@
       "input": 0.1,
       "output": 0.35,
       "source": "https://openrouter.ai/api/v1/models",
-      "checked": "2026-10-25",
+      "checked": "2026-10-26",
       "vision": false,
       "contextWindow": 1000000
     },
@@ -195,15 +201,16 @@
       "input": 0.15,
       "output": 0.6,
       "source": "https://openrouter.ai/api/v1/models",
-      "checked": "2026-10-25",
+      "checked": "2026-10-26",
       "vision": true,
-      "contextWindow": 1048576
+      "contextWindow": 1048576,
+      "note": "List price is DeepSeek's own China-hosted endpoint. DocSlurp pins page transcription to US hosts (Together, Fireworks, Parasail) at $0.30/$1.20 per 1M tokens (endpoints checked 2026-10-26); the vision catalog prices that route."
     },
     "reflection/beam-1.0-501b-a23b": {
       "input": 0.25,
       "output": 1,
       "source": "https://openrouter.ai/api/v1/models",
-      "checked": "2026-10-25",
+      "checked": "2026-10-26",
       "vision": false,
       "contextWindow": 1048576
     },
@@ -211,7 +218,7 @@
       "input": 0.05,
       "output": 0.7,
       "source": "https://openrouter.ai/api/v1/models",
-      "checked": "2026-10-25",
+      "checked": "2026-10-26",
       "vision": false,
       "contextWindow": 128000
     },
@@ -219,7 +226,7 @@
       "input": 2,
       "output": 10,
       "source": "https://openrouter.ai/api/v1/models",
-      "checked": "2026-10-25",
+      "checked": "2026-10-26",
       "vision": true,
       "contextWindow": 1050000
     },
@@ -227,7 +234,7 @@
       "input": 0.14,
       "output": 0.28,
       "source": "https://openrouter.ai/api/v1/models",
-      "checked": "2026-10-25",
+      "checked": "2026-10-26",
       "vision": true,
       "contextWindow": 1050000
     },
@@ -235,7 +242,7 @@
       "input": 4,
       "output": 12,
       "source": "https://openrouter.ai/api/v1/models",
-      "checked": "2026-10-25",
+      "checked": "2026-10-26",
       "vision": true,
       "contextWindow": 1000000
     },
@@ -243,7 +250,7 @@
       "input": 0.15,
       "output": 0.5,
       "source": "https://openrouter.ai/api/v1/models",
-      "checked": "2026-10-25",
+      "checked": "2026-10-26",
       "vision": true,
       "contextWindow": 1048576
     }
