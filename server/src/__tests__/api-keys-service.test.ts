@@ -20,7 +20,7 @@ vi.mock("../services/organizations.js", () => ({
   OrganizationError: class extends Error { constructor(readonly status: number, readonly code: string, message: string) { super(message); } }
 }));
 
-const { apiKeyTypeFromPrefix, ApiKeyTypeChangeError, assertClientKeySensitiveScopes, ClientKeyOriginNotAllowedError, ClientKeyWorkspacesRequiredError, createApiKey, rotateApiKey, updateApiKey, validateApiKey } = await import("../services/api-keys.js");
+const { apiKeyTypeFromPrefix, ApiKeyTypeChangeError, ClientKeyOriginNotAllowedError, ClientKeyWorkspacesRequiredError, createApiKey, getLiveApiKeyById, rotateApiKey, updateApiKey, validateApiKey } = await import("../services/api-keys.js");
 const organizations = await import("../services/organizations.js");
 
 function buildKeyRow(rawKey: string, overrides: Record<string, unknown> = {}) {
@@ -85,7 +85,7 @@ describe("validateApiKey", () => {
     // Daily page caps and other limits are enforced by the rate-limit middleware.
     expect(validated).toMatchObject({ keyId: "key-1", rateLimits: [rule] });
     expect(sqlMock).toHaveBeenCalledTimes(1);
-    expect(recordApiKeyRequest).toHaveBeenCalledWith("key-1");
+    expect(recordApiKeyRequest).toHaveBeenCalledWith("key-1", expect.any(Number), null);
   });
 
   it("ignores malformed stored limits instead of failing authentication", async () => {
@@ -239,6 +239,7 @@ describe("typed key prefixes", () => {
   });
 
   it.each([["client", "dslp_pub_"], ["server", "dslp_priv_"]])("rotates a %s key under its own prefix", async (keyType, prefix) => {
+    Object.assign(txMock, { array: (value: unknown) => value, json: (value: unknown) => value });
     const existing = buildKeyRow("old", { key_type: keyType, allowed_domains: keyType === "client" ? ["docslurp.dev"] : [], scopes: ["search"] });
     sqlMock.mockResolvedValue([{ org_id: "org-1" }]);
     txMock.mockResolvedValueOnce([existing]).mockResolvedValueOnce([existing]);
@@ -321,17 +322,10 @@ describe("client key scopes and workspace allowlists (G-03)", () => {
       .rejects.toMatchObject({ code: "invalid_allowed_domain" });
   });
 
-  it("requires an opt-in and a workspace allowlist for ingest or artifacts on client keys", () => {
-    expect(() => assertClientKeySensitiveScopes("client", ["search", "ingest"], ["ws-1"], false)).toThrow(/search-only by default/);
-    expect(() => assertClientKeySensitiveScopes("client", ["artifacts"], [], true)).toThrow(/limited to specific workspaces/);
-    expect(() => assertClientKeySensitiveScopes("client", ["ingest", "artifacts"], ["ws-1"], true)).not.toThrow();
-    expect(() => assertClientKeySensitiveScopes("server", ["ingest", "artifacts"], [], false)).not.toThrow();
-    // Web tools spend credits on the open web: opt-in and workspace-bound, like ingest.
-    expect(() => assertClientKeySensitiveScopes("client", ["search", "web"], ["ws-1"], false)).toThrow(/search-only by default/);
-    expect(() => assertClientKeySensitiveScopes("client", ["search", "web"], [], true)).toThrow(/limited to specific workspaces/);
-    expect(() => assertClientKeySensitiveScopes("client", ["search", "web"], ["ws-1"], true)).not.toThrow();
-    // Chat is a plain opt-in scope for answer widgets, not a sensitive one.
-    expect(() => assertClientKeySensitiveScopes("client", ["search", "chat"], [], false)).not.toThrow();
+  it.each([["ingest"], ["artifacts"], ["web"], ["workspaces:manage"], ["organizations:read"], ["search", "ingest"]])("refuses a browser key asking for server scope %j, even with the old opt-in", async (...scopes) => {
+    txMock.mockImplementation(async (strings: TemplateStringsArray) => strings.join("?").includes("from workspaces w") ? [{ id: "ws-1" }] : []);
+    await expect(createApiKey("user-1", "Widget", { orgId: "org-1", keyType: "client", allowedDomains: ["docs.example.com"], workspaceIds: ["ws-1"], scopes, allowClientSensitiveScopes: true }))
+      .rejects.toMatchObject({ status: 400, code: "invalid_key_scope" });
   });
 
   it("rejects allowlisted workspaces outside the key's org", async () => {
@@ -348,6 +342,15 @@ describe("client key scopes and workspace allowlists (G-03)", () => {
     // The website check comes first.
     await expect(validateApiKey(rawKey, { origin: "https://evil.example" })).rejects.toBeInstanceOf(ClientKeyOriginNotAllowedError);
     sqlMock.mockResolvedValue([buildKeyRow(rawKey, { key_type: "client", allowed_domains: ["docslurp.dev"], scopes: ["ingest", "search"], workspace_ids: ["ws-1"] })]);
-    expect(await validateApiKey(rawKey, { origin: "https://docslurp.dev" })).toMatchObject({ scopes: ["ingest", "search"], workspaceIds: ["ws-1"] });
+    // Bound to workspaces, but a browser key still never gets server scopes: legacy ingest is dropped.
+    expect(await validateApiKey(rawKey, { origin: "https://docslurp.dev" })).toMatchObject({ scopes: ["search"], workspaceIds: ["ws-1"] });
   });
+});
+
+it.each(["client", "server"])("missing stored scopes on a %s key never use creation defaults", async (keyType) => {
+  sqlMock.mockReset();
+  const rawKey = keyType === "client" ? "dslp_pub_missing" : "dslp_priv_missing";
+  sqlMock.mockResolvedValue([buildKeyRow(rawKey, { key_type: keyType, scopes: null, allowed_domains: ["docs.example.com"], workspace_ids: ["w"] })]);
+  expect((await validateApiKey(rawKey, { origin: "https://docs.example.com" }))?.scopes).toEqual([]);
+  expect((await getLiveApiKeyById("key-1"))?.scopes).toEqual([]);
 });

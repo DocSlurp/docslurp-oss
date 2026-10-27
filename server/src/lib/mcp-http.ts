@@ -1,4 +1,6 @@
+import { UPLOADER_TOOL_ID, uploadUiResource, uploaderToolMeta, type UploadUiOptions } from "./mcp-ui-resources.js";
 import { reportPublicError } from "./public-errors.js";
+import { addTraceMetadata } from "@docslurp/shared/observability";
 import { createMcpHandler, ProtocolError, ProtocolErrorCode, Server } from "@modelcontextprotocol/server";
 
 interface Capability {
@@ -32,26 +34,46 @@ const SERVER_INFO = {
 /** A capability that declares no hints. Assume it may write, so agents confirm first. */
 const UNKNOWN_ANNOTATIONS = { readOnly: false, destructive: false, idempotent: false, openWorld: false };
 
-function createServer(manifest: McpManifest, adapterDispatch: McpDispatch, signal: AbortSignal): Server {
+const WIDGET_ORIGINS = new Set(["mcp-app-upload"]);
+const WIDGET_VERSION = /^[0-9A-Za-z._-]{1,16}$/;
+
+/**
+ * Tags calls the bundled widget makes (params._meta, never the arguments) so operators can tell widget
+ * polling from model traffic in logs and traces. Only whitelisted values are recorded.
+ */
+function logWidgetOrigin(tool: string, meta: unknown): void {
+  if (!meta || typeof meta !== "object") return;
+  const { "docslurp/origin": origin, "docslurp/widgetVersion": version } = meta as Record<string, unknown>;
+  if (typeof origin !== "string" || !WIDGET_ORIGINS.has(origin)) return;
+  const widgetVersion = typeof version === "string" && WIDGET_VERSION.test(version) ? version : "unknown";
+  addTraceMetadata({ widgetOrigin: origin, widgetVersion });
+  console.info(`[mcp] widget tool call tool=${tool} origin=${origin} widget_version=${widgetVersion}`);
+}
+
+function createServer(manifest: McpManifest, adapterDispatch: McpDispatch, signal: AbortSignal, ui: UploadUiOptions): Server {
   const dispatch: McpDispatch = async (path, init) => {
     try { return await adapterDispatch(path, init); }
     catch { throw new ProtocolError(ProtocolErrorCode.InternalError, "DocSlurp request failed"); }
   };
   const server = new Server(SERVER_INFO, {
     capabilities: { tools: {}, resources: {}, prompts: {} },
-    instructions: "Use listWorkspaces to discover authorized workspaces. Use upload for URLs or up to 10 files with direct storage targets. Upload the bytes to the returned single PUT or multipart part URLs; completion and ingestion are automatic. If you cannot reach those URLs, send small files as upload inlineFiles. For a public file, pass its URL so DocSlurp downloads it directly. Follow getUploadStatus with the returned sessionId, then workspace and run IDs. Workspace selection is optional: omitted workspace uses the organization default. Use search with q for one query or queries for a batch of cited passages to answer with your own model, or chat for a generated grounded answer that incurs AI usage. Respect workspace and cost constraints.",
+    instructions: "In hosts that render MCP Apps, call openUploader when the user wants to upload local files you cannot read. Use listWorkspaces to discover authorized workspaces. Use upload for URLs or up to 10 files with direct storage targets. Upload the bytes to the returned single PUT or multipart part URLs; completion and ingestion are automatic. If you cannot reach those URLs, send small files as upload inlineFiles. For a public file, pass its URL so DocSlurp downloads it directly. Follow getUploadStatus with the returned sessionId, then workspace and run IDs. Workspace selection is optional: omitted workspace uses the organization default. Use search with q for one query or queries for a batch of cited passages to answer with your own model, or chat for a generated grounded answer that incurs AI usage. Respect workspace and cost constraints.",
   });
-  const tools = manifest.capabilities.filter((item) => item.category === "tool");
+  // The uploader exists only when the manifest offers it and the widget bundle is built.
+  const uploader = manifest.capabilities.some((item) => item.id === UPLOADER_TOOL_ID) ? uploadUiResource(ui) : null;
+  const tools = manifest.capabilities.filter((item) => item.category === "tool" && (uploader || item.id !== UPLOADER_TOOL_ID));
   server.setRequestHandler("tools/list", () => ({ tools: tools.map((item) => {
     const a = item.annotations ?? UNKNOWN_ANNOTATIONS;
     return {
       name: item.id, title: item.title, description: item.description,
       inputSchema: item.inputSchema as { type: "object"; [key: string]: unknown },
       annotations: { title: item.title, readOnlyHint: a.readOnly, destructiveHint: a.destructive, idempotentHint: a.idempotent, openWorldHint: a.openWorld },
+      ...(item.id === UPLOADER_TOOL_ID && uploader && { _meta: uploaderToolMeta(uploader.uri) }),
     };
   }) }));
   server.setRequestHandler("tools/call", async (request, ctx) => {
     if (!tools.some((item) => item.id === request.params.name)) throw new ProtocolError(ProtocolErrorCode.InvalidParams, "Unknown tool");
+    logWidgetOrigin(request.params.name, request.params._meta);
     const response = await dispatch(`/tools/${encodeURIComponent(request.params.name)}`, {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify(request.params.arguments ?? {}),
@@ -66,9 +88,10 @@ function createServer(manifest: McpManifest, adapterDispatch: McpDispatch, signa
   server.setRequestHandler("resources/list", () => ({ resources: [{
     uri: CAPABILITIES_URI, name: "capabilities", title: "DocSlurp capabilities",
     description: "Available tools, schemas and authorization scopes.", mimeType: "application/json",
-  }] }));
+  }, ...(uploader ? [uploader.listing] : [])] }));
   server.setRequestHandler("resources/templates/list", () => ({ resourceTemplates: [] }));
   server.setRequestHandler("resources/read", async (request, ctx) => {
+    if (uploader && request.params.uri === uploader.uri) return { contents: [uploader.content] };
     if (request.params.uri !== CAPABILITIES_URI) throw new ProtocolError(ProtocolErrorCode.InvalidParams, "Unknown resource URI");
     const response = await dispatch("/resources/capabilities", { signal: AbortSignal.any([signal, ctx.mcpReq.signal]) });
     if (!response.ok) throw new ProtocolError(ProtocolErrorCode.InvalidParams, "Resource unavailable");
@@ -87,10 +110,13 @@ function createServer(manifest: McpManifest, adapterDispatch: McpDispatch, signa
 }
 
 /** One request, one scoped server; no sessions, network hop or credential forwarding. */
-export async function handleMcpHttp(request: Request, manifest: McpManifest, dispatch: McpDispatch): Promise<Response> {
+export async function handleMcpHttp(request: Request, manifest: McpManifest, dispatch: McpDispatch, ui: UploadUiOptions = {}): Promise<Response> {
   if (request.method !== "POST") return new Response("Method not allowed", { status: 405, headers: { Allow: "POST" } });
   const controller = new AbortController();
-  const signal = AbortSignal.any([request.signal, controller.signal]);
+  const signal = controller.signal;
+  const onRequestAbort = () => controller.abort(request.signal.reason);
+  if (request.signal.aborted) onRequestAbort();
+  else request.signal.addEventListener("abort", onRequestAbort, { once: true });
   const timeout = setTimeout(() => controller.abort(new Error("MCP request timeout")), REQUEST_TIMEOUT_MS);
   let handler: ReturnType<typeof createMcpHandler> | undefined;
   let responseReader: ReadableStreamDefaultReader<Uint8Array> | undefined;
@@ -100,6 +126,7 @@ export async function handleMcpHttp(request: Request, manifest: McpManifest, dis
     closed = true;
     clearTimeout(timeout);
     signal.removeEventListener("abort", onAbort);
+    request.signal.removeEventListener("abort", onRequestAbort);
     controller.abort();
     await responseReader?.cancel().catch(() => {});
     await handler?.close();
@@ -136,7 +163,7 @@ export async function handleMcpHttp(request: Request, manifest: McpManifest, dis
     let body: unknown;
     try { body = JSON.parse(new TextDecoder().decode(bytes)); }
     catch { await close(); return Response.json({ jsonrpc: "2.0", id: null, error: { code: -32700, message: "Parse error" } }, { status: 400 }); }
-    handler = createMcpHandler(() => createServer(manifest, dispatch, signal), { legacy: "stateless", responseMode: "auto", maxSubscriptions: 0 });
+    handler = createMcpHandler(() => createServer(manifest, dispatch, signal, ui), { legacy: "stateless", responseMode: "auto", maxSubscriptions: 0 });
     const boundedRequest = new Request(request.url, { method: request.method, headers: request.headers, signal });
     const response = await handler.fetch(boundedRequest, { parsedBody: body });
     const headers = new Headers(response.headers);

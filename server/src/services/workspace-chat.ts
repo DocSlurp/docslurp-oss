@@ -1016,6 +1016,21 @@ type ChatWorkspaceArgs = Parameters<typeof chatWorkspaceInTurn>[0];
  * joins it. Any other caller gets a turn owned here: a turn that throws was
  * never delivered, so its credits are refunded (chat-turn-billing.ts).
  */
+/** The API key's chat output cap, or null (sessions and uncapped server keys). */
+export function apiKeyOutputCap(actor: RequestActor | null | undefined): number | null {
+  if (actor?.type !== "apiKey") return null;
+  const cap = actor.apiKey.maxOutputTokens;
+  if (typeof cap === "number" && cap > 0) return cap;
+  // Fail closed for a browser key whose cap is missing (older validators): the default applies.
+  return actor.apiKey.keyType === "server" ? null : 1000;
+}
+
+/** The request's max output tokens, never above the key's cap. */
+export function capOutputTokens(requested: number | undefined, cap: number | null): number | undefined {
+  if (cap === null) return requested;
+  return Math.min(requested ?? cap, cap);
+}
+
 export async function chatWorkspace(args: ChatWorkspaceArgs): Promise<WorkspaceChatResponse> {
   const turn = beginChatTurn();
   try {
@@ -1070,6 +1085,8 @@ async function chatWorkspaceInTurn(args: {
   answerIngestReport?: boolean;
 }): Promise<WorkspaceChatResponse> {
   if (args.actor && args.actor.userId !== args.userId) throw new Error("Chat actor does not match user");
+  // The key's chat output cap (browser keys default to 1000) bounds the model's max output, whatever the request asks.
+  args = { ...args, maxOutputTokens: capOutputTokens(args.maxOutputTokens, apiKeyOutputCap(args.actor)) };
   // Browser-key visitors share the key owner's identity: a session id alone never continues a conversation.
   args = { ...args, sessionId: chatSessionForRequest(args.actor, { workspaceId: args.workspaceId, sessionId: args.sessionId, sessionToken: args.sessionToken }) };
   // Enforced here too so every caller (routes, MCP, automation) honours the switch.
