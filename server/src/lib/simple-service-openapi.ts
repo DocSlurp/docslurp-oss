@@ -179,12 +179,6 @@ const canonicalServicePaths = {
     requestBody: request(z.toJSONSchema(workspaceChatInputSchema)),
     responses: { "200": response("Grounded answer, citations and actual usage", ref("WorkspaceChatResponse")), ...errors },
   } },
-  "/v1/search/chat": { post: {
-    deprecated: true,
-    tags: ["search"], summary: "Compatibility alias for POST /v1/chat", security: serviceSecurity,
-    requestBody: request(z.toJSONSchema(workspaceChatInputSchema)),
-    responses: { "200": response("Grounded answer, citations and actual usage", ref("WorkspaceChatResponse")), ...errors },
-  } },
   "/v1/whoami": { get: {
     tags: ["account"], summary: "Identity behind the presented server key or CLI OAuth token", security: serviceSecurity,
     description: "User, organization, default workspace, scopes and (for OAuth access tokens from docslurp login) granted scopes and expiry. Client (browser) keys get 403. Never returns the credential.",

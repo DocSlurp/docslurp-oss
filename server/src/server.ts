@@ -38,7 +38,6 @@ import { workspacesRoutes } from "./routes/workspaces.js";
 import { apiKeysRoutes } from "./routes/api-keys.js";
 import { searchRoutes, searchesRoutes, workspaceChatRoutes } from "./routes/search.js";
 import { webRoutes } from "./routes/web.js";
-import { indexStalenessRoutes } from "./routes/index-staleness.js";
 import { workspaceGraphRoutes } from "./routes/workspace-graph.js";
 import { artifactsRoutes } from "./routes/artifacts.js";
 import { inviteRoutes, metaRoutes, dashboardRoutes, waitlistRoutes } from "./routes/frontend.js";
@@ -170,6 +169,7 @@ export function createApiApp(): Hono {
   app.route("/v1/documents", documentsRoutes);
   app.route("/v1/exports", exportsRoutes);
   app.route("/v1/extractors", extractorRoutes);
+  // Deprecated alias of /v1/uploads, kept while browser-key uploads depend on its widget CORS policy (middleware/widget-cors.ts).
   app.route("/v1/ingest", uploadsRoutes);
   app.route("/v1/uploads", uploadEstimateRoutes);
   app.route("/v1/uploads", uploadsRoutes);
@@ -185,7 +185,6 @@ export function createApiApp(): Hono {
   app.route("/v1/chat", workspaceChatRoutes);
   app.route("/v1", chatCompletionsRoutes);
   app.route("/v1", suggestRoutes);
-  app.route("/v1/runs", indexStalenessRoutes);
   app.route("/v1/mcp", mcpRoutes);
   app.route("/v1/session-tools", sessionToolRoutes);
   app.route("/compat/algolia", algoliaCompatRoutes);
