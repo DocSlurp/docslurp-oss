@@ -9,15 +9,17 @@ import { proposeWorkspaceSettings, SettingsProposalError } from "./workspace-set
 import { publicErrorMiddleware } from "../lib/public-errors.js";
 import { apiErrorResponse, apiStatusError, usesNativeErrorEnvelope } from "../lib/api-error.js";
 import { mapValidationIssues, type ValidationErrorSource } from "../lib/validation.js";
-import { Hono, type Context } from "hono";
+import { Hono, type Context, type MiddlewareHandler } from "hono";
 
 import type { ApiErrorCode } from "@docslurp/shared";
 
 import { apiKeyHasAnyScope } from "../lib/api-key-authorization.js";
 import { getApiKey, getRequestActor, isFirstPartyAppActor, loadActorScopedWorkspace, resolveActorWorkspaceId, setRequestActor, type RequestActor } from "../lib/request-actor.js";
 import { listWorkspaces } from "./workspaces.js";
+import { listEditableWorkspaceIds } from "./organizations.js";
 import { apiKeyCanUseWorkspace } from "../lib/api-key-workspace-scope.js";
-import { completeUploadInput, extractInput, INLINE_UPLOAD_MAX_BYTES, mediaEvidenceInput, fullIndexInput, listWorkspacesInput, mcpManifest, mcpTools, suggestQueriesInput, uploadInput, uploadStatusInput } from "./mcp-catalog.js";
+import { completeUploadInput, extractInput, INLINE_UPLOAD_MAX_BYTES, mediaEvidenceInput, fullIndexInput, listWorkspacesInput, mcpManifest, mcpTools, openUploaderInput, suggestQueriesInput, uploadInput, uploadStatusInput } from "./mcp-catalog.js";
+import { UPLOAD_UI_URI } from "../lib/mcp-ui-resources.js";
 import { mcpOrigin } from "../lib/mcp-origin.js";
 import { groundedWorkspaceChatRoutes, searchRoutes } from "../routes/search.js";
 import { sql } from "../db.js";
@@ -48,6 +50,25 @@ function routeBaseUrl(_url: string): string {
   return mcpOrigin(_url);
 }
 
+declare module "hono" {
+  interface ContextVariableMap {
+    /** Set by the cookie-authenticated WebMCP mount; absent on the bearer `/v1/mcp` surface. */
+    mcpSurface?: "session-tools";
+  }
+}
+
+/** Mount-time marker: WebMCP (`/v1/session-tools`) never offers the uploader, which renders in MCP Apps hosts only. */
+export const markSessionToolsSurface: MiddlewareHandler = async (c, next) => {
+  c.set("mcpSurface", "session-tools");
+  await next();
+};
+
+const uploaderHidden = (c: Context) => c.get("mcpSurface") === "session-tools";
+
+function withoutUploader<T extends { capabilities: { id: string }[] }>(c: Context, manifest: T): T {
+  return uploaderHidden(c) ? { ...manifest, capabilities: manifest.capabilities.filter(item => item.id !== "openUploader") } : manifest;
+}
+
 // The protocol and compatibility REST adapters share authorization and handlers.
 /**
  * These adapter routes serve `/v1/mcp` (legacy `{ error }` bodies) and
@@ -70,10 +91,10 @@ const mcpAdapterRoutes = new Hono()
   .use("*", publicErrorMiddleware)
   .onError(spendAwareErrorHandler)
   .get("/manifest", async (c) => {
-    return c.json(mcpManifest(routeBaseUrl(c.req.url), getApiKey(c)?.scopes, getApiKey(c)?.keyType, { ...getApiKey(c)?.oauth, firstPartyApp: isFirstPartyAppActor(c.get("requestActor")) }));
+    return c.json(withoutUploader(c, mcpManifest(routeBaseUrl(c.req.url), getApiKey(c)?.scopes, getApiKey(c)?.keyType, { ...getApiKey(c)?.oauth, firstPartyApp: isFirstPartyAppActor(c.get("requestActor")) })));
   })
   .get("/tools", async (c) => {
-    const manifest = mcpManifest(routeBaseUrl(c.req.url), getApiKey(c)?.scopes, getApiKey(c)?.keyType, { ...getApiKey(c)?.oauth, firstPartyApp: isFirstPartyAppActor(c.get("requestActor")) });
+    const manifest = withoutUploader(c, mcpManifest(routeBaseUrl(c.req.url), getApiKey(c)?.scopes, getApiKey(c)?.keyType, { ...getApiKey(c)?.oauth, firstPartyApp: isFirstPartyAppActor(c.get("requestActor")) }));
     return c.json({ tools: manifest.capabilities.filter((capability) => capability.category === "tool") });
   })
   .post("/tools/:id", async (c) => {
@@ -81,7 +102,7 @@ const mcpAdapterRoutes = new Hono()
     const apiKey = getApiKey(c);
     const toolId = c.req.param("id");
     const tool = mcpTools(routeBaseUrl(c.req.url)).find(item => item.id === toolId);
-    if (!tool) return adapterError(c, 404, "Unknown MCP tool");
+    if (!tool || (toolId === "openUploader" && uploaderHidden(c))) return adapterError(c, 404, "Unknown MCP tool");
     // App-only settings tools answer like unknown tools to every other caller.
     if (tool.firstPartyAppOnly && (apiKey || !isFirstPartyAppActor(actor))) return adapterError(c, 404, "Unknown MCP tool");
     if (apiKey && !(tool.keyAccess ? tool.keyAccess(apiKey) : apiKeyHasAnyScope(apiKey, tool.scopes))) return adapterError(c, 403, "Forbidden");
@@ -133,6 +154,28 @@ const mcpAdapterRoutes = new Hono()
         pendingDocumentCount: workspace.pendingDocumentCount, latestRunId: workspace.latestRunId,
         latestRunStatus: workspace.latestRunStatus,
       })), total: accessible.length, nextOffset: offset + limit < accessible.length ? offset + limit : null });
+    }
+
+    if (toolId === "openUploader") {
+      const parsed = openUploaderInput.safeParse(body);
+      if (!parsed.success) return invalidInput(c, parsed.error);
+      // Read-only: resolves a target for the widget and never creates a workspace or returns upload URLs.
+      const workspace = await loadActorScopedWorkspace(await resolveActorWorkspaceId(actor, parsed.data.workspace), actor);
+      if (!workspace) return adapterError(c, 404, "Workspace not found", "workspace_not_found");
+      // Same rule as the upload route's run creation (canContributeToWorkspace): editors and admins of a
+      // workspace, plus any org member for the default workspace. Read-only shares are not offered.
+      const editable = new Set(await listEditableWorkspaceIds(actor.userId));
+      if (!editable.has(workspace.id)) return adapterError(c, 403, "You do not have permission to upload to this workspace", "forbidden");
+      const accessible = (await listWorkspaces(actor.userId, { refineNames: false }))
+        .filter(item => editable.has(item.id) && (!apiKey || apiKeyCanUseWorkspace(apiKey, item)));
+      const summary = (item: { id: string; slug: string; name: string; isDefault: boolean }) => ({ id: item.id, slug: item.slug, name: item.name, isDefault: item.isDefault });
+      return c.json({
+        workspace: summary(accessible.find(item => item.id === workspace.id) ?? { ...workspace, isDefault: false }),
+        workspaces: accessible.slice(0, 50).map(summary),
+        limits: { maxFiles: 10, maxFileBytes: 5 * 1024 ** 3 },
+        uploader: { resourceUri: UPLOAD_UI_URI },
+        hint: "Ask the user to drop files into the uploader. Hosts without MCP Apps: use upload with urls.",
+      });
     }
 
     if (toolId === "upload" || toolId === "extract") {
@@ -359,7 +402,7 @@ const mcpAdapterRoutes = new Hono()
   })
   .get("/resources/:id", async (c) => {
     if (c.req.param("id") === "capabilities") {
-      return c.json(mcpManifest(routeBaseUrl(c.req.url), getApiKey(c)?.scopes, getApiKey(c)?.keyType, { ...getApiKey(c)?.oauth, firstPartyApp: isFirstPartyAppActor(c.get("requestActor")) }));
+      return c.json(withoutUploader(c, mcpManifest(routeBaseUrl(c.req.url), getApiKey(c)?.scopes, getApiKey(c)?.keyType, { ...getApiKey(c)?.oauth, firstPartyApp: isFirstPartyAppActor(c.get("requestActor")) })));
     }
 
     return adapterError(c, 404, "Unknown MCP resource");

@@ -1,6 +1,7 @@
 import { workspaceSettingsProposalInputSchema } from "./workspace-settings-proposal-input.js";
 import { z } from "zod";
 
+import { uploadBundleAvailable } from "../lib/mcp-ui-resources.js";
 import { deferredProfilesEnabled } from "@docslurp/shared";
 
 import { env } from "../config.js";
@@ -27,6 +28,7 @@ const uploadInputShape = {
   workspace: z.string().min(1).max(256).optional().describe('Workspace ID, slug or name. A name that matches no workspace creates one with that name, so only pass a new name when the user asks for a new workspace. Omit for the organization default workspace.'),
   urls: z.array(z.url().refine(url => /^https?:\/\//i.test(url), "Use HTTP or HTTPS URLs")).min(1).max(20).optional(),
   files: z.array(z.object({
+    singlePart: z.boolean().optional().describe("Request one PUT instead of multipart parts (used by the upload widget)."),
     filename: z.string().min(1).max(512),
     sizeBytes: z.number().int().positive().max(5 * 1024 ** 3),
     mimeType: z.string().min(1).max(256).describe("Content-Type to send with the signed PUT request."),
@@ -49,6 +51,10 @@ export const extractInput = z.object({
   notifyEmail: z.boolean().optional().describe("Email the user a sign-in download link when the extract finishes (default true)."),
   download: z.enum(["markdown", "all"]).optional().describe("What the download zip holds: markdown (default) or all (adds originals and page images)."),
 }).strict().refine(exactlyOneSource, "Supply exactly one of urls, files or inlineFiles");
+
+export const openUploaderInput = z.object({
+  workspace: workspaceRef,
+}).strict();
 
 export const completeUploadInput = z.object({
   sessionId: z.string().uuid(),
@@ -137,7 +143,7 @@ export const FIRST_PARTY_APP_SETTINGS_TOOLS: ReadonlySet<string> = new Set(["get
  * verb first, and the same verb for the same kind of tool (List, Upload, Check, Search, Read, Estimate … cost).
  */
 const TOOL_ORDER = [
-  "listWorkspaces", "upload", "getUploadStatus", "search", "chat", "extract", "getMediaEvidence", "suggestQueries",
+  "listWorkspaces", "upload", "getUploadStatus", "search", "chat", "openUploader", "extract", "getMediaEvidence", "suggestQueries",
   "getWorkspaceSettings", "proposeWorkspaceSettings", "fullIndex",
   "webSearch", "webFetch", "webMap", "webCrawl", "ingestWebsite",
   "uploadEstimate", "fullIndexEstimate", "reprocessEstimate", "updateEstimate", "searchSettingsEstimate", "indexingModeEstimate", "graphRebuildEstimate",
@@ -169,6 +175,9 @@ export function mcpTools(baseUrl: string): McpTool[] {
       description: `Upload documents using exactly one of urls, files or inlineFiles. urls: DocSlurp's server downloads each HTTP(S) file directly, so prefer it for a file that is already public; do not fetch it with web tools first. files: return direct storage upload targets for up to 10 files (5 GiB each, subject to account limits). Small files use putUrl with the declared Content-Type; large files use multipart pendingParts URLs with byte slices determined by partNumber, partSize and sizeBytes. Upload every part. Storage notifications and background reconciliation automatically complete known-size uploads and start ingestion; no completeUpload call is needed. Follow getUploadStatus with sessionId. inlineFiles: if you cannot make HTTP requests to the upload URLs (for example a sandbox firewall blocks them), send small files in this call as text or contentBase64, ${INLINE_UPLOAD_MAX_BYTES / 1024} KiB in total; ingestion starts immediately and the response has workspace and run IDs for getUploadStatus. Never send local paths. Omit workspace for the default workspace; a name that matches no workspace creates it. Ingestion can incur cost. idempotencyKey applies to URL and inline upload retries.`,
       // Flat like every tool schema: uploadInput's refinement enforces exactly one of urls, files or inlineFiles.
       inputSchema: toolInputJsonSchema(uploadInput) },
+    ...(env.mcpAppsUiEnabled && uploadBundleAvailable() ? [{ id: "openUploader", title: "Open uploader", scopes: ["ingest" as const], annotations: READ_ONLY,
+      description: "Show an upload widget so the user can drop local files you cannot read. Returns the target workspace and limits only; the widget uploads and reports progress itself. Never creates a workspace: omit workspace for the default. Hosts without MCP Apps support: use upload with urls instead.",
+      inputSchema: toolInputJsonSchema(openUploaderInput) }] : []),
     { id: "extract", title: "Extract documents (auto-deleted)", scopes: ["ingest"],
       annotations: { readOnly: false, destructive: false, idempotent: false, openWorld: true, consequential: true },
       description: `Like upload (exactly one of urls, files or inlineFiles, the same workspace rules and follow-up with getUploadStatus), but the files and every output (Markdown, page images, chunks, search index) are deleted automatically when the retention window ends. Omit retentionDays for the free window (48 hours by default); a longer window is charged as storage. The response's extract has id, expiresAt and download state; the user is emailed a sign-in download link when it finishes unless notifyEmail is false. Use for one-off conversions the user does not want kept. Ingestion can incur cost.`,
